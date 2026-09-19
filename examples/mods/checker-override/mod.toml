@@ -1,0 +1,5 @@
+[mod]
+id = "checker-override"
+name = "Dev-road checker override"
+version = "0.1.0"
+description = "Replaces the synthetic dev-world road texture with a magenta checkerboard. Mount with --mods examples/mods."
