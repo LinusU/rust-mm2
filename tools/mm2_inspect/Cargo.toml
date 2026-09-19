@@ -1,0 +1,16 @@
+[package]
+name = "mm2_inspect"
+description = "Command line inspector for MM2 archives and assets"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mm2-inspect"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+mm2_assets.workspace = true
+mm2_formats.workspace = true
+tracing-subscriber.workspace = true

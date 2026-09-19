@@ -1,0 +1,11 @@
+[package]
+name = "mm2_formats"
+description = "Pure-Rust parsers for Midtown Madness 2 file formats"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+flate2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

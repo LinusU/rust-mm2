@@ -1,0 +1,17 @@
+[package]
+name = "mm2_assets"
+description = "Virtual filesystem and logical asset resolution for MM2 content"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+flate2.workspace = true
+mm2_formats.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

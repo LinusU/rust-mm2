@@ -1,0 +1,11 @@
+[package]
+name = "mm2_game"
+description = "Game-domain state for the MM2-inspired engine"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+bevy.workspace = true
+mm2_assets.workspace = true
+tracing.workspace = true
