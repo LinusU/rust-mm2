@@ -34,10 +34,13 @@ description = "..."
 
 ```sh
 cargo run -- --mm2-path "/path/to/MM2" --mods ./mods
+# mods also work in the dev world without an installation:
+cargo run -- --dev-world --mods examples/mods
 ```
 
 Every subdirectory of the mods dir that contains a `mod.toml` is mounted, in
 sorted directory order. Mods listed later win over earlier ones on conflict.
+Restart-based loading only — hot reload is not implemented.
 
 ## Resolution rules
 
@@ -76,9 +79,12 @@ You never need to know which archive or physical file shipped the original.
 
 ## What can be replaced today
 
-- **Textures**: TEX originals can be overridden by `png`/`ktx2` where the
-  caller uses `resolve_preferred` (the city importer does). A TEX file can
-  also be supplied directly if you want byte-identical replacement.
+- **Textures**: TEX originals can be overridden by `png`, `tga` or `ktx2`
+  where the caller uses `resolve_preferred` (the city importer and the dev
+  world do). KTX2 support is limited to the compressed formats compiled
+  into the build and supported by the GPU — an unrecognized encoding is a
+  decode failure, not silent success. A TEX file can also be supplied
+  directly for byte-identical replacement.
 - **Geometry/props**: PKG overrides by same logical path; modern formats
   (`.glb`) are resolved by the preference list — glTF importing is a planned
   importer, not yet implemented.
@@ -91,7 +97,10 @@ the VFS — the limitation is on the import side, not resolution.
 ## Debugging
 
 - Mount logs print each source, its entry count and priority at startup.
-- `mm2-inspect resolve` (via the VFS) reports which physical source wins a
-  logical path, including archive offsets.
+- `mm2-inspect resolve` reports which physical source wins a logical path,
+  including archive offsets and the mod label when applicable.
+- `mm2-inspect lookup <stem>` explains a texture lookup: every extension
+  tried, where each was found, and the winning source with its priority —
+  the fastest way to see whether an override is live.
 - Conflicts are silent by design (deterministic last-wins); use
-  `mm2-inspect list` + resolve to verify which file is live.
+  `mm2-inspect list` + `lookup` to verify which file is live.

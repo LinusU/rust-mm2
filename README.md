@@ -24,14 +24,21 @@ Long-term goals:
 
 Vertical-slice stage. What works today:
 
-- DAVE archive mounting + priority-aware VFS with mod overrides.
-- Parsers: DAVE, TEX, PKG2/PKG3, PSD0 (PSDL), INST.
-- `mm2-inspect` CLI for scanning/installation diagnostics.
+- DAVE archive mounting + priority-aware VFS with mod overrides, provenance
+  and pinned resolutions; one shared mount policy for the game and
+  `mm2-inspect`.
+- Parsers: DAVE, TEX (all mip levels), PKG2/PKG3, PSD0 (PSDL), INST.
+- `mm2-inspect` CLI for scanning, lookup explanation and parse diagnostics
+  (`scan`/`list`/`resolve`/`lookup`/`tex`/`pkg`/`psdl`, `--mods`, strict
+  mode).
 - Synthetic dev world with a fully simulated four-wheel Avian vehicle,
-  chase/free cameras, reset and physics debug gizmos.
-- City loading: PSDL room geometry, TEX textures, PKG props and INST
-  placements render through Bevy PBR (importer is early — see
-  [docs/architecture.md](docs/architecture.md)).
+  chase/free cameras, reset, physics debug gizmos and a HUD
+  (speed / gear / RPM / grounded wheels). Vehicle tuning loads from an
+  optional TOML file (`examples/vehicles/dev-car.toml`).
+- London: all 1341 rooms import with zero rejected/malformed attributes —
+  per-room textured meshes, per-room static colliders, facade-bound walls,
+  ~2000 INST/PKG props with collision, and a spawn on verified road
+  geometry. San Francisco parses and emits identically.
 
 ## Build & run
 
@@ -68,20 +75,36 @@ left trigger brakes.
 ```sh
 cargo run -- --mm2-path "/path/to/Midtown Madness 2"
 # optionally:
-#   --city london|sf      (default: london)
+#   --city london|sf                 (default: london)
 #   --mods <mods dir>
+#   --vehicle-config <toml>          (e.g. examples/vehicles/dev-car.toml)
+#   --frames N --screenshot out.png  (smoke test: run N frames, capture, exit)
 ```
 
 The app mounts every `.ar` archive found in the install directory plus loose
 files, then loads `city/<name>.psdl` through the VFS.
 
+### Texture override demo
+
+```sh
+cargo run -- --dev-world                        # base texture
+cargo run -- --dev-world --mods examples/mods   # checker override visible
+```
+
+`examples/mods/checker-override` replaces the dev world's ground texture
+through the same VFS path the city uses.
+
 ### Inspection tool
 
 ```sh
-cargo run -p mm2_inspect -- scan  "/path/to/MM2"
-cargo run -p mm2_inspect -- list  "/path/to/MM2" [prefix]
-cargo run -p mm2_inspect -- tex   "/path/to/MM2" texture/foo.tex
-cargo run -p mm2_inspect -- pkg   "/path/to/MM2" geometry/vp4x4.pkg
+cargo run -p mm2_inspect -- scan    "/path/to/MM2" [--strict]
+cargo run -p mm2_inspect -- list    "/path/to/MM2" [prefix]
+cargo run -p mm2_inspect -- resolve "/path/to/MM2" texture/foo.tex
+cargo run -p mm2_inspect -- lookup  "/path/to/MM2" texture/foo   # extension/source explanation
+cargo run -p mm2_inspect -- tex     "/path/to/MM2" texture/foo.tex
+cargo run -p mm2_inspect -- pkg     "/path/to/MM2" geometry/vp4x4.pkg
+cargo run -p mm2_inspect -- psdl    "/path/to/MM2" city/london.psdl
+# all commands accept --mods <dir>, mounted exactly as in the game
 ```
 
 ## Workspace layout
