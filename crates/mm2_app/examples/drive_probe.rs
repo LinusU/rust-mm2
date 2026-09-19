@@ -289,20 +289,35 @@ fn probe_yaw_rate(cfg: &VehicleConfig, speed: f32) -> f32 {
         &mut app,
         car,
         VehicleInput {
-            throttle: 0.35,
             steering: 1.0,
             ..default()
         },
     );
     for _ in 0..HZ * 2 {
-        app.update();
+        step_at_speed(&mut app, car, speed);
     }
     let mut samples = Vec::new();
     for _ in 0..HZ {
-        app.update();
+        step_at_speed(&mut app, car, speed);
         samples.push(app.world().get::<AngularVelocity>(car).unwrap().0.y.abs());
     }
     (samples.iter().sum::<f32>() / samples.len() as f32).to_degrees()
+}
+
+/// Advance one frame, holding the car at `speed` along whatever direction
+/// it is now travelling.
+///
+/// Driving up to the target instead would measure the engine as much as
+/// the steering: a quick car is well past the speed it was meant to be
+/// tested at by the time the yaw rate settles.
+fn step_at_speed(app: &mut App, car: Entity, speed: f32) {
+    app.update();
+    let world = app.world_mut();
+    let lv = world.get::<LinearVelocity>(car).unwrap().0;
+    let flat = Vec3::new(lv.x, 0.0, lv.z);
+    if flat.length() > 0.1 {
+        world.get_mut::<LinearVelocity>(car).unwrap().0 = flat.normalize() * speed + Vec3::Y * lv.y;
+    }
 }
 
 fn base_app() -> App {
