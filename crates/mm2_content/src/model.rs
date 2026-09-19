@@ -8,10 +8,13 @@
 //!
 //! ## Coordinate convention
 //!
-//! MM2 vehicle space is used verbatim (identity map): `-Z` forward, `+Y` up.
-//! The triangle winding authored for Direct3D left-handed rasterisation is
-//! reversed when meshes are built — the [`PartMesh::indices`] emitted here
-//! are already in renderable order.
+//! MM2 vehicle space is used verbatim (identity map): `-Z` forward, `+Y` up,
+//! and the authored triangle winding is kept as-is — MM2 geometry renders
+//! correctly in Bevy space without a mirror (see the city importer, where a
+//! Z reflection rendered the whole world backwards).
+//!
+//! TEX textures decode top-down while PKG UVs are authored against the
+//! bottom-up file order, so `v` is complemented when meshes are built.
 
 use mm2_formats::mtx::Mtx;
 use mm2_formats::pkg::{Pkg, PkgChunk, PkgGeometry, PkgShader, PkgShaders, PRIMTYPE_TRIANGLES};
@@ -232,14 +235,18 @@ fn geometry_mesh(geo: &PkgGeometry, warnings: &mut Vec<String>, part: &str) -> V
             for v in &strip.vertices {
                 g.positions.push(v.position);
                 g.normals.push(v.normal.unwrap_or([0.0, 1.0, 0.0]));
-                g.uvs.push(v.tex_coords.first().copied().unwrap_or([0.0, 0.0]));
+                // PKG UVs are authored against TEX's bottom-up row order,
+                // which the decoder normalises to top-down, so v is
+                // complemented (same as the city importer's strip path).
+                g.uvs.push(
+                    v.tex_coords
+                        .first()
+                        .map(|&[u, v]| [u, 1.0 - v])
+                        .unwrap_or([0.0, 0.0]),
+                );
             }
             for t in strip.indices.chunks_exact(3) {
-                // Reverse winding: authored for D3D left-handed, Bevy
-                // expects CCW front faces in right-handed space.
-                g.indices.push(base + t[2] as u32);
-                g.indices.push(base + t[1] as u32);
-                g.indices.push(base + t[0] as u32);
+                g.indices.extend(t.iter().map(|&i| base + i as u32));
             }
         }
     }
