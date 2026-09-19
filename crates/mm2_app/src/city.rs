@@ -1874,6 +1874,38 @@ impl<'a> MaterialCache<'a> {
         self.by_key.insert(key, mat.clone());
         mat
     }
+
+    /// Material for one PKG shader record: resolves its texture through the
+    /// VFS (mods included), then applies the shader's tint/alpha. Distinct
+    /// shader records get distinct material handles even when they share a
+    /// texture, which is what makes paint-job selection work.
+    pub fn shader_material(&mut self, s: &mm2_formats::pkg::PkgShader) -> Handle<StandardMaterial> {
+        let base = self.get(&s.texture);
+        adjust_material(s, &base, self.materials).unwrap_or(base)
+    }
+
+    /// Texture stems that could not be resolved while building materials.
+    pub fn missing_textures(&self) -> &BTreeSet<String> {
+        &self.missing
+    }
+
+    /// The plain untextured fallback material.
+    pub fn fallback(&self) -> Handle<StandardMaterial> {
+        self.fallback.clone()
+    }
+
+    /// Clone the material behind `base`, apply `f`, and register the result
+    /// as a new material. Used for per-part adjustments (glow parts, tints)
+    /// without disturbing the shared cache entry.
+    pub fn adjusted(
+        &mut self,
+        base: &Handle<StandardMaterial>,
+        f: impl FnOnce(&mut StandardMaterial),
+    ) -> Handle<StandardMaterial> {
+        let mut mat = self.materials.get(base).cloned().unwrap_or_default();
+        f(&mut mat);
+        self.materials.add(mat)
+    }
 }
 
 // ---------------------------------------------------------------------------

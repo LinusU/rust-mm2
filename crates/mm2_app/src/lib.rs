@@ -3,10 +3,10 @@
 //! uses.
 
 pub mod camera;
+pub mod car_visual;
 pub mod city;
 pub mod dev_world;
 pub mod input;
-pub mod vehicle_visual;
 
 /// Whether the world finished loading. Vehicle input is ignored until the
 /// world is `Ready`; a `Failed` load shows the reason instead of spawning

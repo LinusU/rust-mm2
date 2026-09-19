@@ -12,14 +12,15 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use clap::Parser;
-use mm2_app::{WorldState, camera, city, dev_world, input, vehicle_visual};
+use mm2_app::{WorldState, camera, car_visual, city, dev_world, input};
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
+use mm2_content::{VehicleCatalog, VehicleDef};
 use mm2_game::{ActiveWorld, Mm2Vfs, PlayerVehicle, WorldMode};
 use mm2_vehicle::{ResetVehicle, VehicleConfig, VehicleDebugEnabled, VehiclePlugin};
 use tracing::{error, info, warn};
 
 use camera::{CameraMode, ChaseCamera, FreeCamera};
-use vehicle_visual::WheelVisual;
+use car_visual::{WheelMount, WheelSpin};
 
 #[derive(Parser, Debug)]
 #[command(name = "mm2", about = "MM2-inspired open engine — development build")]
@@ -41,9 +42,27 @@ struct Cli {
     #[arg(long, default_value = "london")]
     city: String,
 
-    /// Optional TOML vehicle tuning file. Without it the built-in arcade
-    /// default is used; a requested file that fails to load or validate is
-    /// an error, never a silent fallback.
+    /// Stock/modded vehicle id or unique display-name alias to load
+    /// (`--list-cars` shows the roster). Requires `--mm2-path` or mods
+    /// providing vehicle data.
+    #[arg(long)]
+    car: Option<String>,
+
+    /// Paint variant for the selected vehicle (zero-based index).
+    #[arg(long, default_value_t = 0)]
+    paint: usize,
+
+    /// Print the discovered vehicle roster and exit without opening a
+    /// window.
+    #[arg(long)]
+    list_cars: bool,
+
+    /// Optional TOML vehicle tuning file. With `--car` it is a full
+    /// handling override applied *after* the import (wheel positions and
+    /// radii stay pinned to the imported rig; a wheel-count mismatch is
+    /// rejected). Without `--car` it configures the synthetic dev car.
+    /// A requested file that fails to load or validate is an error, never
+    /// a silent fallback.
     #[arg(long)]
     vehicle_config: Option<PathBuf>,
 
@@ -62,11 +81,22 @@ struct Cli {
     cam: Option<String>,
 }
 
-/// Where the player vehicle (re)spawns.
+/// Where the player vehicle (re)spawns. `trailers` holds each spawned
+/// trailer's entity plus its car-space rest offset so a reset can place it
+/// back behind the car instead of on top of it.
 #[derive(Resource)]
 struct SpawnPoint {
     position: Vec3,
     yaw: f32,
+    trailers: Vec<(Entity, Vec3)>,
+}
+
+/// The imported stock vehicle selected by `--car` or the deterministic
+/// stock default (`vpbug`). `None` = synthetic dev car.
+#[derive(Resource)]
+struct SelectedCar {
+    def: Option<VehicleDef>,
+    paint: usize,
 }
 
 /// The validated vehicle configuration the player car was built from.
@@ -106,19 +136,6 @@ fn main() {
         .init();
 
     let cli = Cli::parse();
-
-    // Vehicle config: explicit file (must load+validate) or the built-in
-    // arcade default.
-    let vehicle = match &cli.vehicle_config {
-        Some(path) => match VehicleConfig::load(path) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                error!(error = %e, "invalid --vehicle-config");
-                std::process::exit(2);
-            }
-        },
-        None => VehicleConfig::default(),
-    };
 
     // `--cam x,y,z[,yaw,pitch]` starts the free camera at a fixed pose
     // (angles in degrees) — a diagnostic/screenshot aid.
@@ -186,6 +203,78 @@ fn main() {
         }
     }
 
+    // `--list-cars` needs the VFS only — no window, no GPU.
+    if cli.list_cars {
+        let catalog = VehicleCatalog::scan(&vfs);
+        print_roster(&catalog);
+        return;
+    }
+
+    // Vehicle selection: explicit `--car`, else the documented stock
+    // default when an installation is mounted, else the synthetic dev car.
+    let selected: Option<VehicleDef> = if let Some(query) = &cli.car {
+        match mm2_content::load_by_id(&vfs, query, cli.paint) {
+            Ok(def) => {
+                info!(car = %def.id, name = %def.display_name, paint = cli.paint, "vehicle loaded");
+                Some(def)
+            }
+            Err(e) => {
+                error!(car = %query, error = %e, "vehicle failed to load");
+                std::process::exit(2);
+            }
+        }
+    } else if has_mm2 {
+        match default_stock_car(&vfs, cli.paint) {
+            Some(def) => {
+                info!(car = %def.id, name = %def.display_name, "default stock vehicle loaded");
+                Some(def)
+            }
+            None => {
+                warn!("no usable stock vehicle found; using the synthetic dev car");
+                None
+            }
+        }
+    } else {
+        if cli.car.is_none() && cli.paint != 0 {
+            warn!("--paint has no effect without --car / an MM2 installation");
+        }
+        None
+    };
+
+    // Handling config: `--vehicle-config` is a full override applied after
+    // the import when a car was selected; otherwise it tunes the dev car.
+    let vehicle = match &cli.vehicle_config {
+        Some(path) => match VehicleConfig::load(path) {
+            Ok(cfg) => match &selected {
+                Some(def) => match mm2_content::assemble::apply_handling_override(&def.config, cfg)
+                {
+                    Ok(cfg) => cfg,
+                    Err(e) => {
+                        error!(error = %e, "incompatible --vehicle-config override");
+                        std::process::exit(2);
+                    }
+                },
+                None => cfg,
+            },
+            Err(e) => {
+                error!(error = %e, "invalid --vehicle-config");
+                std::process::exit(2);
+            }
+        },
+        None => selected
+            .as_ref()
+            .map(|d| d.config.clone())
+            .unwrap_or_default(),
+    };
+    for w in selected
+        .as_ref()
+        .map(|d| d.report.warnings.iter().chain(d.model.warnings.iter()))
+        .into_iter()
+        .flatten()
+    {
+        warn!(car = ?selected.as_ref().map(|d| d.id.as_str()), "{w}");
+    }
+
     let mode = if cli.dev_world || !has_mm2 {
         if !cli.dev_world && !has_mm2 && cli.mm2_path.is_none() {
             warn!("no --mm2-path and no --dev-world; starting the dev world");
@@ -218,10 +307,16 @@ fn main() {
     .insert_resource(SpawnPoint {
         position: Vec3::new(0.0, 1.5, 0.0),
         yaw: 0.0,
+        trailers: Vec::new(),
     })
     .insert_resource(WorldState::Loading)
     .insert_resource(Mm2Vfs(vfs))
     .insert_resource(TunedVehicle(vehicle))
+    .insert_resource(SelectedCar {
+        def: selected,
+        paint: cli.paint,
+    })
+    .init_resource::<car_visual::HeadlightsOn>()
     .insert_resource(if cam_start.is_some() {
         CameraMode::Free
     } else {
@@ -240,7 +335,10 @@ fn main() {
             debug_toggle,
             screenshot_input,
             retarget_hud,
-            vehicle_visual::update_wheel_visuals,
+            car_visual::update_wheel_visuals,
+            car_visual::update_glows,
+            car_visual::toggle_headlights,
+            car_visual::trailer_input,
             city::animate_textures,
             update_hud,
         ),
@@ -291,6 +389,7 @@ fn setup(
     mode: Res<ActiveWorld>,
     vfs: Res<Mm2Vfs>,
     vehicle_config: Res<TunedVehicle>,
+    selected: Res<SelectedCar>,
     cam_start: Option<Res<CamStart>>,
     cam_mode: Res<CameraMode>,
     mut spawn: ResMut<SpawnPoint>,
@@ -384,14 +483,27 @@ fn setup(
         },
     ));
 
-    // Cameras.
+    // Cameras. The chase boom is sized to the selected vehicle so a city
+    // bus and a roadster are both framed sensibly.
+    let chase = match &selected.def {
+        Some(def) => {
+            let [_w, h, d] = def.config.chassis_size;
+            ChaseCamera {
+                distance: d * 0.85 + 3.5,
+                height: h * 0.55 + 1.4,
+                look_height: h * 0.45,
+                ..default()
+            }
+        }
+        None => ChaseCamera::default(),
+    };
     commands.spawn((
         Camera3d::default(),
         Camera {
             is_active: *cam_mode == CameraMode::Chase,
             ..default()
         },
-        ChaseCamera::default(),
+        chase,
         Transform::from_translation(spawn.position + Vec3::new(0.0, 4.0, 9.0)),
     ));
     let (free_xf, free_cam) = match cam_start.as_ref() {
@@ -430,40 +542,115 @@ fn setup(
         return;
     }
     let config = &vehicle_config.0;
-    let body_mesh = assets
-        .meshes
-        .add(Cuboid::from_size(Vec3::from(config.chassis_size)));
-    let body_mat = assets.materials.add(StandardMaterial {
-        base_color: Color::srgb(0.85, 0.15, 0.1),
-        metallic: 0.3,
-        perceptual_roughness: 0.5,
-        ..default()
-    });
+
+    // Spawn clearance: keep the collider hull's lowest point off the
+    // ground plus a settle margin.
+    if let Some(def) = &selected.def {
+        let hull_min_y = def
+            .config
+            .collider_points
+            .as_ref()
+            .and_then(|pts| pts.iter().map(|p| p[1]).reduce(f32::min))
+            .unwrap_or(-def.config.chassis_size[1] * 0.5);
+        spawn.position.y += (0.25 - hull_min_y).max(0.35);
+    }
     let vehicle = commands
         .spawn((
             PlayerVehicle,
             mm2_vehicle::vehicle_bundle(config),
-            Mesh3d(body_mesh),
-            MeshMaterial3d(body_mat),
             Transform::from_translation(spawn.position)
                 .with_rotation(Quat::from_rotation_y(spawn.yaw)),
             TransformInterpolation,
+            // Parents of renderable children need the visibility chain.
+            Visibility::Visible,
         ))
         .id();
 
-    // Wheel visuals (non-physical; follow suspension state).
-    let wheel_mesh = assets.meshes.add(Cylinder::new(0.34, 0.25));
-    let wheel_mat = assets.materials.add(StandardMaterial {
-        base_color: Color::srgb(0.1, 0.1, 0.1),
-        perceptual_roughness: 0.9,
-        ..default()
-    });
-    for i in 0..config.wheels.len() {
-        commands.spawn((
-            WheelVisual { vehicle, index: i },
-            Mesh3d(wheel_mesh.clone()),
-            MeshMaterial3d(wheel_mat.clone()),
-        ));
+    match &selected.def {
+        // Imported stock vehicle: the model carries the visuals.
+        Some(def) => {
+            let missing = car_visual::spawn_vehicle_model(
+                &mut commands,
+                &vfs.0,
+                &def.model,
+                selected.paint,
+                &mut assets.meshes,
+                &mut assets.images,
+                &mut assets.materials,
+                vehicle,
+            );
+            if !missing.is_empty() {
+                warn!(car = %def.id, "missing textures: {}", missing.join(", "));
+            }
+            if let Some(trailer) = &def.trailer {
+                let car_xf = Transform::from_translation(spawn.position)
+                    .with_rotation(Quat::from_rotation_y(spawn.yaw));
+                let (te, tmissing) = car_visual::spawn_trailer(
+                    &mut commands,
+                    &vfs.0,
+                    trailer,
+                    selected.paint,
+                    &mut assets.meshes,
+                    &mut assets.images,
+                    &mut assets.materials,
+                    vehicle,
+                    car_xf,
+                );
+                if !tmissing.is_empty() {
+                    warn!(car = %def.id, "trailer missing textures: {}", tmissing.join(", "));
+                }
+                spawn.trailers.push((
+                    te,
+                    Vec3::from(trailer.car_hitch) - Vec3::from(trailer.trailer_hitch),
+                ));
+            }
+        }
+        // Synthetic dev car: cuboid body + cylinder wheels, same
+        // mount/spin rig as imported wheels.
+        None => {
+            let body_mesh = assets
+                .meshes
+                .add(Cuboid::from_size(Vec3::from(config.chassis_size)));
+            let body_mat = assets.materials.add(StandardMaterial {
+                base_color: Color::srgb(0.85, 0.15, 0.1),
+                metallic: 0.3,
+                perceptual_roughness: 0.5,
+                ..default()
+            });
+            commands
+                .entity(vehicle)
+                .insert((Mesh3d(body_mesh), MeshMaterial3d(body_mat)));
+            let wheel_mesh = assets.meshes.add(Cylinder::new(0.34, 0.25));
+            let wheel_mat = assets.materials.add(StandardMaterial {
+                base_color: Color::srgb(0.1, 0.1, 0.1),
+                perceptual_roughness: 0.9,
+                ..default()
+            });
+            for (i, w) in config.wheels.iter().enumerate() {
+                let mount = commands
+                    .spawn((
+                        WheelMount {
+                            vehicle,
+                            index: i,
+                        },
+                        Transform::from_translation(Vec3::from(w.position)),
+                    ))
+                    .id();
+                commands.entity(vehicle).add_child(mount);
+                let spin = commands.spawn((WheelSpin, Transform::IDENTITY)).id();
+                commands.entity(mount).add_child(spin);
+                commands.entity(spin).with_child((
+                    Mesh3d(wheel_mesh.clone()),
+                    MeshMaterial3d(wheel_mat.clone()),
+                    // Cylinder is Y-aligned: rotate onto the axle (X) and
+                    // scale to the configured radius.
+                    Transform::from_rotation(Quat::from_rotation_z(
+                        std::f32::consts::FRAC_PI_2,
+                    ))
+                    .with_scale(Vec3::new(w.radius / 0.34, 1.0, w.radius / 0.34)),
+                ));
+            }
+        }
     }
 }
 
@@ -578,16 +765,26 @@ fn screenshot_input(
         .observe(save_to_disk(path));
 }
 
-/// `R` resets the player vehicle to its spawn point.
+/// `R` resets the player vehicle (and any trailer) to the spawn point.
 fn reset_input(
     keys: Res<ButtonInput<KeyCode>>,
     spawn: Res<SpawnPoint>,
+    player: Query<Entity, With<PlayerVehicle>>,
     mut writer: MessageWriter<ResetVehicle>,
 ) {
-    if keys.just_pressed(KeyCode::KeyR) {
+    if !keys.just_pressed(KeyCode::KeyR) {
+        return;
+    }
+    let rot = Quat::from_rotation_y(spawn.yaw);
+    writer.write(ResetVehicle {
+        entity: player.iter().next(),
+        position: spawn.position,
+        yaw: spawn.yaw,
+    });
+    for (entity, offset) in &spawn.trailers {
         writer.write(ResetVehicle {
-            entity: None,
-            position: spawn.position,
+            entity: Some(*entity),
+            position: spawn.position + rot * *offset,
             yaw: spawn.yaw,
         });
     }
@@ -597,5 +794,73 @@ fn reset_input(
 fn debug_toggle(keys: Res<ButtonInput<KeyCode>>, mut dbg: ResMut<VehicleDebugEnabled>) {
     if keys.just_pressed(KeyCode::F1) {
         dbg.0 = !dbg.0;
+    }
+}
+
+/// Documented stock default when an installation is present and no `--car`
+/// was requested: MM2's own menu default, the New Beetle.
+const DEFAULT_CAR: &str = "vpbug";
+
+/// Resolve the default vehicle: `vpbug`, falling back to the first
+/// loadable expected-stock entry when a partial install lacks it.
+fn default_stock_car(vfs: &Vfs, paint: usize) -> Option<VehicleDef> {
+    let catalog = VehicleCatalog::scan(vfs);
+    let mut candidates = vec![DEFAULT_CAR];
+    candidates.extend(mm2_content::EXPECTED_STOCK_ROSTER.iter().copied());
+    for id in candidates {
+        let Some(entry) = catalog.entries.iter().find(|e| e.id == id) else {
+            continue;
+        };
+        if !entry.is_ready() {
+            continue;
+        }
+        match mm2_content::load_vehicle(vfs, id, paint) {
+            Ok(def) => return Some(def),
+            Err(e) => warn!(car = %id, error = %e, "stock candidate failed to load"),
+        }
+    }
+    None
+}
+
+/// `--list-cars` output: id, name, class, lock status, paints, deps.
+fn print_roster(catalog: &VehicleCatalog) {
+    if catalog.entries.is_empty() {
+        eprintln!(
+            "no vehicles discovered — mount an MM2 install with --mm2-path (or mods with --mods)"
+        );
+        std::process::exit(2);
+    }
+    println!(
+        "{:<14} {:<30} {:<8} {:<5} {:<6} status",
+        "id", "name", "class", "lock", "paints"
+    );
+    for e in &catalog.entries {
+        let class = match e.class {
+            mm2_content::VehicleClass::Stock => "stock",
+            mm2_content::VehicleClass::Mod => "mod",
+            mm2_content::VehicleClass::ModOnly => "mod-only",
+        };
+        let status = match &e.status {
+            mm2_content::EntryStatus::Ready => "ready".to_string(),
+            mm2_content::EntryStatus::Incomplete { missing } => {
+                format!("incomplete: {}", missing.join(", "))
+            }
+        };
+        println!(
+            "{:<14} {:<30} {:<8} {:<5} {:<6} {}",
+            e.id,
+            e.display_name,
+            class,
+            if e.locked { "yes" } else { "-" },
+            e.paints.len(),
+            status
+        );
+    }
+    let failures = catalog.stock_audit_failures();
+    if !failures.is_empty() {
+        eprintln!("\nexpected-stock audit failures:");
+        for f in &failures {
+            eprintln!("  {f}");
+        }
     }
 }
