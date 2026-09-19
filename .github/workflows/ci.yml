@@ -15,6 +15,15 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        # System dependencies required by the enabled Bevy features
+        # (bevy_winit on X11 + Wayland, bevy_audio/ALSA, udev for gamepads).
+        # https://github.com/bevyengine/bevy/blob/main/docs/linux_dependencies.md
+      - name: install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            g++ pkg-config libx11-dev libasound2-dev libudev-dev \
+            libxkbcommon-dev libwayland-dev libxkbcommon-x11-dev
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy

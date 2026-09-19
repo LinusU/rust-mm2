@@ -15,11 +15,13 @@
 
 mod error;
 mod manifest;
+mod mount;
 mod source;
 mod vfs;
 
 pub use error::AssetsError;
 pub use manifest::ModManifest;
+pub use mount::{InstallMount, MountReport, mount_install, mount_mods};
 pub use source::{ResolvedSource, SourceKind};
 pub use vfs::{Resolved, Vfs};
 

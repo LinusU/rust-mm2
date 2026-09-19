@@ -1,5 +1,8 @@
 [workspace]
 resolver = "3"
+# `cargo run`/`cargo build` at the root build the game by default; other
+# members are still selected explicitly with `-p` / `--workspace`.
+default-members = ["crates/mm2_app"]
 members = [
     "crates/mm2_app",
     "crates/mm2_assets",

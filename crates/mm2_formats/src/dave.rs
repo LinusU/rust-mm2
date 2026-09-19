@@ -62,6 +62,66 @@ impl DaveEntry {
     }
 }
 
+/// Upper bound for a single decompressed archive member. Retail entries are
+/// at most a few tens of megabytes; this leaves generous headroom while
+/// keeping hostile size fields from triggering huge allocations or reads.
+pub const MAX_ENTRY_SIZE: usize = 256 * 1024 * 1024;
+
+/// Extract the stored bytes of `entry` from `data`, validating the range.
+///
+/// `entry` may come from a [`DaveArchive`] parsed over `data` or be built by
+/// a caller; either way the recorded range is checked instead of sliced
+/// blindly, so malformed external input produces a structured error.
+pub fn entry_data<'a>(data: &'a [u8], entry: &DaveEntry) -> Result<&'a [u8], FormatError> {
+    let end =
+        entry
+            .data_offset
+            .checked_add(entry.stored_size)
+            .ok_or(FormatError::InvalidValue {
+                offset: entry.data_offset,
+                field: "stored_size",
+                value: entry.stored_size as u64,
+                reason: "entry range overflows",
+            })?;
+    check_range(data.len(), entry.data_offset..end)?;
+    Ok(&data[entry.data_offset..end])
+}
+
+/// Read and decompress `entry` from `data`.
+///
+/// The decompressed size is bounded two ways: the declared `entry.size` is
+/// checked against [`MAX_ENTRY_SIZE`] before allocating, and the inflater is
+/// capped at `size + 1` output bytes so a stream that produces more than
+/// declared fails early instead of growing unbounded.
+pub fn inflate_entry(data: &[u8], entry: &DaveEntry) -> Result<Vec<u8>, FormatError> {
+    let raw = entry_data(data, entry)?;
+    if !entry.is_compressed() {
+        return Ok(raw.to_vec());
+    }
+    if entry.size > MAX_ENTRY_SIZE {
+        return Err(FormatError::InvalidValue {
+            offset: entry.data_offset,
+            field: "size",
+            value: entry.size as u64,
+            reason: "declared size exceeds decompression limit",
+        });
+    }
+    let mut out = Vec::with_capacity(entry.size);
+    let mut capped = flate2::read::DeflateDecoder::new(raw).take(entry.size as u64 + 1);
+    capped
+        .read_to_end(&mut out)
+        .map_err(|e| FormatError::Decompression(e.to_string()))?;
+    if out.len() != entry.size {
+        return Err(FormatError::Decompression(format!(
+            "entry {} decompressed to {} bytes, expected {}",
+            entry.name,
+            out.len(),
+            entry.size
+        )));
+    }
+    Ok(out)
+}
+
 /// A parsed DAVE archive borrowing the archive bytes.
 #[derive(Debug)]
 pub struct DaveArchive<'a> {
@@ -172,31 +232,17 @@ impl<'a> DaveArchive<'a> {
     }
 
     /// The stored bytes of an entry (still compressed if the entry is).
-    pub fn raw_data(&self, entry: &DaveEntry) -> &'a [u8] {
-        // Ranges were validated during parse.
-        &self.data[entry.data_offset..entry.data_offset + entry.stored_size]
+    ///
+    /// The entry's range is validated even though entries produced by
+    /// [`parse`](Self::parse) were already checked — this accessor is public
+    /// and callers may hand it foreign or constructed entries.
+    pub fn raw_data(&self, entry: &DaveEntry) -> Result<&'a [u8], FormatError> {
+        entry_data(self.data, entry)
     }
 
     /// Return the decompressed contents of an entry.
     pub fn read(&self, entry: &DaveEntry) -> Result<Vec<u8>, FormatError> {
-        let raw = self.raw_data(entry);
-        if !entry.is_compressed() {
-            return Ok(raw.to_vec());
-        }
-        let mut out = Vec::with_capacity(entry.size);
-        let mut decoder = flate2::read::DeflateDecoder::new(raw);
-        decoder
-            .read_to_end(&mut out)
-            .map_err(|e| FormatError::Decompression(e.to_string()))?;
-        if out.len() != entry.size {
-            return Err(FormatError::Decompression(format!(
-                "entry {} decompressed to {} bytes, expected {}",
-                entry.name,
-                out.len(),
-                entry.size
-            )));
-        }
-        Ok(out)
+        inflate_entry(self.data, entry)
     }
 }
 
@@ -312,5 +358,67 @@ mod tests {
         let archive = make_archive(&[("a", &[1, 2, 3])]);
         let parsed = DaveArchive::parse(&archive).unwrap();
         assert!(!parsed.entries()[0].is_compressed());
+    }
+
+    #[test]
+    fn foreign_entry_range_is_validated() {
+        // A caller-constructed entry pointing outside the archive must fail
+        // with a structured error, not panic on an unchecked slice.
+        let archive = make_archive(&[("a", &[1, 2, 3])]);
+        let parsed = DaveArchive::parse(&archive).unwrap();
+        let foreign = DaveEntry {
+            name: "evil".to_string(),
+            data_offset: archive.len() - 1,
+            size: 100,
+            stored_size: 100,
+        };
+        assert!(matches!(
+            parsed.raw_data(&foreign),
+            Err(FormatError::InvalidValue { .. })
+        ));
+        assert!(parsed.read(&foreign).is_err());
+        let overflowing = DaveEntry {
+            name: "evil2".to_string(),
+            data_offset: usize::MAX - 4,
+            size: 10,
+            stored_size: 10,
+        };
+        assert!(parsed.read(&overflowing).is_err());
+    }
+
+    #[test]
+    fn inflate_is_bounded() {
+        // Declared sizes above the limit fail before any inflate work.
+        let huge = DaveEntry {
+            name: "huge".to_string(),
+            data_offset: 0,
+            size: MAX_ENTRY_SIZE + 1,
+            stored_size: 0,
+        };
+        assert!(matches!(
+            inflate_entry(&[], &huge),
+            Err(FormatError::InvalidValue { .. })
+        ));
+
+        // A compressed entry whose stream yields more than declared fails
+        // rather than returning the extra bytes.
+        let mut compressed = Vec::new();
+        {
+            use std::io::Write;
+            let mut e =
+                flate2::write::DeflateEncoder::new(&mut compressed, flate2::Compression::fast());
+            e.write_all(&[0xAB; 64]).unwrap();
+            e.finish().unwrap();
+        }
+        let lying = DaveEntry {
+            name: "lying".to_string(),
+            data_offset: 0,
+            size: 4, // stream actually produces 64 bytes
+            stored_size: compressed.len(),
+        };
+        assert!(matches!(
+            inflate_entry(&compressed, &lying),
+            Err(FormatError::Decompression(_))
+        ));
     }
 }

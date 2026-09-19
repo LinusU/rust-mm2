@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use mm2_formats::dave::{DaveArchive, DaveEntry};
+use mm2_formats::dave::{DaveArchive, DaveEntry, inflate_entry};
 
 use crate::{AssetsError, normalize_path};
 
@@ -55,18 +55,42 @@ impl ArchiveSource {
             path: path.to_path_buf(),
             source: e,
         })?;
-        let mut index = HashMap::with_capacity(archive.entries().len());
-        for entry in archive.entries() {
-            if let Some(logical) = normalize_path(&entry.name) {
-                index.insert(logical, entry.clone());
-            }
-        }
+        let index = deterministic_index(archive.entries().iter().map(|entry| {
+            (
+                normalize_path(&entry.name),
+                entry.name.clone(),
+                entry.clone(),
+            )
+        }));
         Ok(Self {
             data,
             index,
             path: path.to_path_buf(),
         })
     }
+}
+
+/// Build a logical-path index where the winner of a normalized collision is
+/// deterministic: entries are sorted by `(logical, original name)` and the
+/// first wins. Collisions are reported, never resolved by enumeration order.
+fn deterministic_index<T>(
+    entries: impl Iterator<Item = (Option<String>, String, T)>,
+) -> HashMap<String, T> {
+    let mut rows: Vec<(String, String, T)> = entries
+        .filter_map(|(logical, original, value)| logical.map(|l| (l, original, value)))
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    let mut index = HashMap::with_capacity(rows.len());
+    for (logical, original, value) in rows {
+        if index.insert(logical.clone(), value).is_some() {
+            tracing::warn!(
+                logical = %logical,
+                loser = %original,
+                "normalized path collision inside one source; deterministic winner kept"
+            );
+        }
+    }
+    index
 }
 
 impl Source for ArchiveSource {
@@ -79,15 +103,10 @@ impl Source for ArchiveSource {
             .index
             .get(logical)
             .ok_or_else(|| AssetsError::NotFound(logical.to_string()))?;
-        if entry.is_compressed() {
-            inflate(
-                &self.data[entry.data_offset..entry.data_offset + entry.stored_size],
-                entry.size,
-                logical,
-            )
-        } else {
-            Ok(self.data[entry.data_offset..entry.data_offset + entry.stored_size].to_vec())
-        }
+        inflate_entry(&self.data, entry).map_err(|e| AssetsError::Decompression {
+            logical: logical.to_string(),
+            reason: e.to_string(),
+        })
     }
 
     fn provenance(&self, logical: &str) -> ResolvedSource {
@@ -112,6 +131,10 @@ impl DirSource {
     /// Mount `root`, walking it eagerly. `skip` is called with each
     /// normalized relative path; entries returning `true` are not indexed
     /// (used to hide `mod.toml` manifests).
+    ///
+    /// Containment policy: **symlinks are never followed** — neither file
+    /// links nor directory links — so a mounted tree cannot expose files
+    /// outside `root` or recurse through link cycles.
     pub fn mount(
         root: &Path,
         label: Option<String>,
@@ -120,8 +143,9 @@ impl DirSource {
         if !root.is_dir() {
             return Err(AssetsError::MissingDirectory(root.to_path_buf()));
         }
-        let mut index = HashMap::new();
-        walk(root, root, &mut index, skip)?;
+        let mut rows: Vec<(Option<String>, String, PathBuf)> = Vec::new();
+        walk(root, root, &mut rows, skip)?;
+        let index = deterministic_index(rows.into_iter());
         Ok(Self {
             root: root.to_path_buf(),
             index,
@@ -133,25 +157,30 @@ impl DirSource {
 fn walk(
     root: &Path,
     dir: &Path,
-    index: &mut HashMap<String, PathBuf>,
+    rows: &mut Vec<(Option<String>, String, PathBuf)>,
     skip: &dyn Fn(&str) -> bool,
 ) -> Result<(), AssetsError> {
     let entries = std::fs::read_dir(dir).map_err(AssetsError::io(dir))?;
     for entry in entries {
         let entry = entry.map_err(AssetsError::io(dir))?;
+        // `file_type` does not traverse links: symlinks are skipped outright
+        // so mounts stay contained in `root` and cannot cycle.
+        let file_type = entry.file_type().map_err(AssetsError::io(dir))?;
         let path = entry.path();
-        if path.is_dir() {
-            walk(root, &path, index, skip)?;
-        } else if path.is_file() {
+        if file_type.is_symlink() {
+            tracing::warn!(path = %path.display(), "skipping symlink in mounted directory");
+            continue;
+        }
+        if file_type.is_dir() {
+            walk(root, &path, rows, skip)?;
+        } else if file_type.is_file() {
             let rel = path.strip_prefix(root).unwrap_or(&path);
             let rel_str = rel.to_string_lossy();
-            let Some(logical) = normalize_path(&rel_str) else {
-                continue;
-            };
-            if skip(&logical) {
+            let logical = normalize_path(&rel_str);
+            if logical.as_deref().is_some_and(skip) {
                 continue;
             }
-            index.insert(logical, rel.to_path_buf());
+            rows.push((logical, rel_str.into_owned(), rel.to_path_buf()));
         }
     }
     Ok(())
@@ -170,6 +199,12 @@ impl Source for DirSource {
         // The index was built from actual walk results, so `rel` is always
         // inside `root`. Never join an attacker-controlled path directly.
         let full = self.root.join(rel);
+        // Re-check at read time: a real file swapped for a symlink after
+        // mount must not escape the mount root.
+        let meta = std::fs::symlink_metadata(&full).map_err(AssetsError::io(&full))?;
+        if !meta.is_file() {
+            return Err(AssetsError::NotFound(logical.to_string()));
+        }
         std::fs::read(&full).map_err(AssetsError::io(&full))
     }
 
@@ -185,23 +220,4 @@ impl Source for DirSource {
             label: self.label.clone(),
         }
     }
-}
-
-/// Inflate raw DEFLATE data, verifying the expected size.
-fn inflate(raw: &[u8], expected: usize, logical: &str) -> Result<Vec<u8>, AssetsError> {
-    use std::io::Read;
-    let mut out = Vec::with_capacity(expected);
-    flate2::read::DeflateDecoder::new(raw)
-        .read_to_end(&mut out)
-        .map_err(|e| AssetsError::Decompression {
-            logical: logical.to_string(),
-            reason: e.to_string(),
-        })?;
-    if out.len() != expected {
-        return Err(AssetsError::Decompression {
-            logical: logical.to_string(),
-            reason: format!("decompressed {} bytes, expected {expected}", out.len()),
-        });
-    }
-    Ok(out)
 }
