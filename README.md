@@ -65,10 +65,12 @@ Controls:
 | R            | reset vehicle to spawn        |
 | C            | toggle chase / free camera    |
 | F1           | toggle physics debug gizmos   |
+| Cmd/Ctrl+P   | save a screenshot to `screenshots/` |
 | WASD+mouse   | fly (in free-camera mode)     |
 
 The HUD ends with the active camera's pose as `cam x,y,z,yaw,pitch` — the
-value `--cam` accepts — so any view can be reproduced exactly.
+value `--cam` accepts — and screenshots carry it in their file name, so any
+view can be reproduced exactly.
 
 A connected gamepad works too: left stick steers, right trigger throttles,
 left trigger brakes.

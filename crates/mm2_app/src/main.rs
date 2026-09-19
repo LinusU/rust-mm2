@@ -238,6 +238,7 @@ fn main() {
             camera::free_fly,
             reset_input,
             debug_toggle,
+            screenshot_input,
             retarget_hud,
             vehicle_visual::update_wheel_visuals,
             city::animate_textures,
@@ -541,6 +542,40 @@ fn active_cam_pose(cameras: &Query<(&Camera, &Transform)>) -> Option<String> {
         yaw.to_degrees().round() + 0.0,
         pitch.to_degrees().round() + 0.0
     ))
+}
+
+/// Directory (relative to the working directory, gitignored) that
+/// Cmd/Ctrl+P screenshots are saved to.
+const SCREENSHOT_DIR: &str = "screenshots";
+
+/// `Cmd+P` (or `Ctrl+P`) saves a screenshot to [`SCREENSHOT_DIR`], named
+/// after the time and the camera pose it was taken from.
+fn screenshot_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    cameras: Query<(&Camera, &Transform)>,
+    mut commands: Commands,
+) {
+    let modifier = keys.any_pressed([
+        KeyCode::SuperLeft,
+        KeyCode::SuperRight,
+        KeyCode::ControlLeft,
+        KeyCode::ControlRight,
+    ]);
+    if !(modifier && keys.just_pressed(KeyCode::KeyP)) {
+        return;
+    }
+    if let Err(e) = std::fs::create_dir_all(SCREENSHOT_DIR) {
+        error!(dir = SCREENSHOT_DIR, error = %e, "cannot create screenshot directory");
+        return;
+    }
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    let cam = active_cam_pose(&cameras).unwrap_or_default();
+    let path = PathBuf::from(SCREENSHOT_DIR).join(format!("{secs}_cam_{cam}.png"));
+    commands
+        .spawn(Screenshot::primary_window())
+        .observe(save_to_disk(path));
 }
 
 /// `R` resets the player vehicle to its spawn point.
