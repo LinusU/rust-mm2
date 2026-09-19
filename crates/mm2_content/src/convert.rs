@@ -44,6 +44,9 @@ const TORQUE_PEAK_RPM_FRAC: f32 = 0.72;
 const TORQUE_PEAK_FACTOR: f32 = 1.15;
 /// Driveline efficiency applied to every imported car (adapted constant).
 const DRIVELINE_EFFICIENCY: f32 = 0.85;
+/// Share of the lateral-force roll moment cancelled on imported cars
+/// (adapted arcade policy — see `AssistConfig::roll_resistance`).
+const ROLL_RESISTANCE: f32 = 0.85;
 
 /// How each emitted value was obtained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -533,6 +536,11 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
     );
 
     let assists = AssistConfig {
+        // Every stock MM2 car carries its mass about as high as its track
+        // is wide while running tires good for 1.65 g — geometry that puts
+        // the car on its roof in any committed corner. See
+        // `AssistConfig::roll_resistance`.
+        roll_resistance: ROLL_RESISTANCE,
         yaw_stability: 2.0,
         traction_control: 0.85,
         countersteer: 0.3,
@@ -541,6 +549,13 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
     report.defaulted(
         "assists",
         "fixed modern arcade policy (yaw stability, TC, countersteer, air control)",
+    );
+    report.adapted(
+        "vehCarSim.CenterOfGravity + track width",
+        "assists.roll_resistance",
+        format!(
+            "{ROLL_RESISTANCE} of the lateral-force roll moment cancelled; stock geometry tips below its grip limit without it"
+        ),
     );
     report.unsupported(
         "vehCarSim.SSS*/CarFrictionHandling/Aero.Ang*",

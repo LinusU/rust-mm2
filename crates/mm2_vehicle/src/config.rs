@@ -54,6 +54,10 @@ fn default_collider_friction() -> f32 {
     0.5
 }
 
+fn default_roll_resistance() -> f32 {
+    0.8
+}
+
 /// Spring/damper suspension parameters.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct SuspensionConfig {
@@ -188,6 +192,20 @@ pub struct AeroConfig {
 /// Arcade driving assists — intentional design, all tunable.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct AssistConfig {
+    /// How much of the roll moment from lateral tire force is cancelled,
+    /// `0.0`–`1.0`.
+    ///
+    /// A tire's grip acts at the contact patch, so it pushes on the car a
+    /// full centre-of-mass height below the mass it is turning — that lever
+    /// is what stands a car on its door. Real suspension resists it
+    /// geometrically through the roll centre; this is the arcade version of
+    /// the same idea, raising the point at which lateral force is applied
+    /// toward the centre of mass. `0.0` applies force at the patch (honest,
+    /// and tips), `1.0` applies it level with the centre of mass (no roll
+    /// moment at all). Around `0.8` keeps visible body roll while making a
+    /// hard corner slide instead of trip.
+    #[serde(default = "default_roll_resistance")]
+    pub roll_resistance: f32,
     /// Yaw damping strength: bleeds angular velocity toward the velocity
     /// heading (0 = off).
     pub yaw_stability: f32,
@@ -344,6 +362,7 @@ impl Default for VehicleConfig {
                 downforce_coefficient: 0.35,
             },
             assists: AssistConfig {
+                roll_resistance: default_roll_resistance(),
                 yaw_stability: 2.5,
                 traction_control: 0.9,
                 countersteer: 0.35,
@@ -682,6 +701,10 @@ impl VehicleConfig {
         );
 
         let asst = &self.assists;
+        check!(
+            "assists.roll_resistance",
+            finite(asst.roll_resistance) && (0.0..=1.0).contains(&asst.roll_resistance),
+        );
         check!(
             "assists.yaw_stability",
             finite(asst.yaw_stability) && asst.yaw_stability >= 0.0,

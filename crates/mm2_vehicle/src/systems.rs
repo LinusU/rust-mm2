@@ -328,10 +328,23 @@ pub fn vehicle_simulation(
             let sus_point =
                 ws.contact_point + ws.contact_normal * suspension.force_apply_offset * wheel.radius;
             forces.apply_force_at_point(ws.contact_normal * ws.suspension_force, sus_point);
-            forces.apply_force_at_point(
-                tire_right * lateral + tire_fwd * longitudinal,
-                ws.contact_point,
-            );
+
+            // Lateral force is raised toward the centre of mass by the
+            // roll-resistance assist, shortening the lever that tips the
+            // car (see `AssistConfig::roll_resistance`). Raising it along
+            // the contact normal leaves the yaw moment untouched, so the
+            // car still turns exactly as hard — it just stops rolling over
+            // to do it. Measuring the height against the *contact normal*
+            // rather than world up keeps this correct on banked road.
+            let com_above_patch = (com_world - ws.contact_point)
+                .dot(ws.contact_normal)
+                .max(0.0);
+            let lateral_point = ws.contact_point
+                + ws.contact_normal * com_above_patch * cfg.assists.roll_resistance;
+            forces.apply_force_at_point(tire_right * lateral, lateral_point);
+            // Longitudinal force stays at the patch: squat and dive under
+            // power and braking are wanted, and they do not tip the car.
+            forces.apply_force_at_point(tire_fwd * longitudinal, ws.contact_point);
 
             let ws = &mut state.wheels[i];
             ws.vel_long = vel_long;

@@ -59,13 +59,21 @@ pub struct HandlingMetrics {
     pub com_height: f32,
     /// Half the track width, metres — the tipping lever arm.
     pub half_track: f32,
-    /// Lateral acceleration at which the inside wheels lift, in g. This is
-    /// the static rollover threshold `half_track / com_height`.
+    /// Lateral acceleration at which the inside wheels lift, in g, from
+    /// geometry alone: the static rollover threshold `half_track /
+    /// com_height`.
     pub tip_threshold_g: f32,
+    /// The same threshold once [`AssistConfig::roll_resistance`] has
+    /// shortened the lever that lateral tire force pulls on. This is what
+    /// the car actually does.
+    ///
+    /// [`AssistConfig::roll_resistance`]: crate::config::AssistConfig::roll_resistance
+    pub assisted_tip_threshold_g: f32,
     /// Lateral acceleration the tires can actually generate, in g.
     pub peak_lateral_g: f32,
-    /// `tip_threshold_g / peak_lateral_g`. Below `1.0` the car tips before
-    /// it slides; a playable arcade car wants comfortably above `1.0`.
+    /// `assisted_tip_threshold_g / peak_lateral_g`. Below `1.0` the car
+    /// tips before it slides; a playable arcade car wants comfortably
+    /// above `1.0`.
     pub rollover_margin: f32,
     /// Lowest point of the chassis collider above the ground plane, metres.
     pub belly_clearance: f32,
@@ -188,6 +196,11 @@ impl HandlingMetrics {
         let com_height = (config.center_of_mass[1] - ground_y).max(1e-3);
         let half_track = (config.track_width * 0.5).max(1e-3);
         let tip_threshold_g = half_track / com_height;
+        // The assist raises where lateral force is applied, so the lever
+        // that tips the car is only the part of the centre-of-mass height
+        // it does not cancel.
+        let roll_arm = com_height * (1.0 - config.assists.roll_resistance.clamp(0.0, 1.0));
+        let assisted_tip_threshold_g = half_track / roll_arm.max(1e-3);
 
         // Grip is load-weighted: a wheel carrying more weight contributes
         // proportionally more of the car's cornering force.
@@ -216,8 +229,9 @@ impl HandlingMetrics {
             com_height,
             half_track,
             tip_threshold_g,
+            assisted_tip_threshold_g,
             peak_lateral_g,
-            rollover_margin: tip_threshold_g / peak_lateral_g.max(1e-3),
+            rollover_margin: assisted_tip_threshold_g / peak_lateral_g.max(1e-3),
             belly_clearance,
             approach_angle,
             departure_angle,
@@ -314,6 +328,7 @@ impl HandlingMetrics {
             com_height: 0.0,
             half_track: 0.0,
             tip_threshold_g: 0.0,
+            assisted_tip_threshold_g: 0.0,
             peak_lateral_g: 0.0,
             rollover_margin: 0.0,
             belly_clearance: 0.0,
@@ -334,7 +349,7 @@ impl HandlingMetrics {
         if self.rollover_margin < 1.25 {
             out.push(format!(
                 "tips before it slides: rollover margin {:.2} (tips at {:.2} g, grips to {:.2} g)",
-                self.rollover_margin, self.tip_threshold_g, self.peak_lateral_g
+                self.rollover_margin, self.assisted_tip_threshold_g, self.peak_lateral_g
             ));
         }
         if self.belly_clearance < 0.15 {
@@ -383,10 +398,42 @@ mod tests {
     }
 
     #[test]
+    fn roll_resistance_is_what_keeps_the_default_car_on_its_wheels() {
+        let mut cfg = VehicleConfig::default();
+
+        // Without the assist the default car reaches its tipping point at
+        // the very moment its tires reach their limit — every hard corner
+        // is a coin flip between sliding and rolling.
+        cfg.assists.roll_resistance = 0.0;
+        let bare = HandlingMetrics::of(&cfg);
+        assert!(
+            bare.rollover_margin < 1.1,
+            "margin without the assist {:.2}",
+            bare.rollover_margin
+        );
+
+        cfg.assists.roll_resistance = default_assists().roll_resistance;
+        let assisted = HandlingMetrics::of(&cfg);
+        assert!(
+            assisted.rollover_margin > 2.0,
+            "margin with the assist {:.2}",
+            assisted.rollover_margin
+        );
+        // The assist changes only the lever arm, never the grip.
+        assert_eq!(bare.peak_lateral_g, assisted.peak_lateral_g);
+        assert_eq!(bare.tip_threshold_g, assisted.tip_threshold_g);
+    }
+
+    fn default_assists() -> crate::config::AssistConfig {
+        VehicleConfig::default().assists
+    }
+
+    #[test]
     fn a_tall_narrow_car_is_reported_as_tippy() {
         let mut cfg = VehicleConfig::default();
         cfg.center_of_mass[1] += 1.0;
         cfg.track_width = 1.2;
+        cfg.assists.roll_resistance = 0.0;
         let m = HandlingMetrics::of(&cfg);
         assert!(m.tip_threshold_g < m.peak_lateral_g);
         assert!(m.rollover_margin < 1.0);

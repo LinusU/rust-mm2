@@ -12,6 +12,9 @@ chassis_size = [
     0.55,
     4.4,
 ]
+collider_friction = 0.5
+collider_restitution = 0.0
+trailer = false
 
 [[wheels]]
 position = [
@@ -22,6 +25,7 @@ position = [
 radius = 0.34
 driven = false
 steered = true
+steer_scale = 1.0
 brake_bias = 0.25
 handbrake = false
 
@@ -34,6 +38,7 @@ position = [
 radius = 0.34
 driven = false
 steered = true
+steer_scale = 1.0
 brake_bias = 0.25
 handbrake = false
 
@@ -46,6 +51,7 @@ position = [
 radius = 0.34
 driven = true
 steered = false
+steer_scale = 1.0
 brake_bias = 0.25
 handbrake = true
 
@@ -58,6 +64,7 @@ position = [
 radius = 0.34
 driven = true
 steered = false
+steer_scale = 1.0
 brake_bias = 0.25
 handbrake = true
 
@@ -118,6 +125,7 @@ drag_coefficient = 0.42
 downforce_coefficient = 0.35
 
 [assists]
+roll_resistance = 0.8
 yaw_stability = 2.5
 traction_control = 0.9
 countersteer = 0.35

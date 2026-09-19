@@ -18,6 +18,10 @@ use mm2_vehicle::{ResetVehicle, VehicleConfig, VehiclePlugin, vehicle_bundle};
 const FRAMES_PER_SECOND: usize = 60;
 
 fn test_app() -> (App, Entity) {
+    test_app_with(VehicleConfig::default())
+}
+
+fn test_app_with(cfg: VehicleConfig) -> (App, Entity) {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
         // Avian's collider systems need the mesh asset store + events, which
@@ -46,7 +50,6 @@ fn test_app() -> (App, Entity) {
         Transform::from_xyz(0.0, -0.5, 0.0),
     ));
 
-    let cfg = VehicleConfig::default();
     let car = app
         .world_mut()
         .spawn((
@@ -197,6 +200,72 @@ fn car_brakes_to_a_stop() {
     }
     assert!(stopped, "car never slowed below 1 m/s while braking");
     assert_finite(&app, car);
+}
+
+/// A car shaped like the stock MM2 imports: centre of mass nearly as high
+/// as the track is wide, on tires that make far more grip than that
+/// geometry can take. Every retail vehicle audits like this.
+fn tippy_config() -> VehicleConfig {
+    let mut cfg = VehicleConfig {
+        track_width: 1.6,
+        ..Default::default()
+    };
+    for w in &mut cfg.wheels {
+        w.position[0] = w.position[0].signum() * cfg.track_width / 2.0;
+    }
+    // Sits 0.8 m up on a 0.8 m half-track: tips at ~1 g while the tires
+    // pull 1.65 g.
+    let metrics = mm2_vehicle::HandlingMetrics::of(&cfg);
+    cfg.center_of_mass[1] = metrics.ground_y + 0.8;
+    cfg.tires.lateral_grip = 1.65;
+    cfg
+}
+
+#[test]
+fn a_hard_turn_slides_instead_of_rolling_the_car_over() {
+    // The assist off: honest physics, and the car goes over. This half of
+    // the test is what proves the other half is actually being tested.
+    let mut bare = tippy_config();
+    bare.assists.roll_resistance = 0.0;
+    let bare_up = up_after_hard_turn(bare);
+    assert!(
+        bare_up < 0.5,
+        "unassisted tippy car should roll over, up.y was {bare_up}"
+    );
+
+    // The assist on: same grip, same turn, still on its wheels.
+    let assisted_up = up_after_hard_turn(tippy_config());
+    assert!(
+        assisted_up > 0.85,
+        "assisted car should stay upright, up.y was {assisted_up}"
+    );
+}
+
+/// Accelerate to speed, then hold full lock; return the vertical component
+/// of the car's up axis (1.0 = level, <0 = on its roof).
+fn up_after_hard_turn(cfg: VehicleConfig) -> f32 {
+    let (mut app, car) = test_app_with(cfg);
+    drive(
+        &mut app,
+        car,
+        FRAMES_PER_SECOND * 5,
+        VehicleInput {
+            throttle: 1.0,
+            ..default()
+        },
+    );
+    drive(
+        &mut app,
+        car,
+        FRAMES_PER_SECOND * 4,
+        VehicleInput {
+            throttle: 1.0,
+            steering: 1.0,
+            ..default()
+        },
+    );
+    assert_finite(&app, car);
+    (app.world().get::<Rotation>(car).unwrap().0 * Vec3::Y).y
 }
 
 #[test]
