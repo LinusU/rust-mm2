@@ -44,6 +44,11 @@ const TORQUE_PEAK_RPM_FRAC: f32 = 0.72;
 const TORQUE_PEAK_FACTOR: f32 = 1.15;
 /// Driveline efficiency applied to every imported car (adapted constant).
 const DRIVELINE_EFFICIENCY: f32 = 0.85;
+/// Suspension damping ratio band imported cars are mapped into: below
+/// ~0.3 a car pogos off road seams, above ~1.0 the springs stop moving and
+/// the chassis takes every impact instead.
+const DAMPING_RATIO_MIN: f32 = 0.40;
+const DAMPING_RATIO_MAX: f32 = 0.90;
 /// Share of the lateral-force roll moment cancelled on imported cars
 /// (adapted arcade policy — see `AssistConfig::roll_resistance`).
 const ROLL_RESISTANCE: f32 = 0.85;
@@ -144,6 +149,24 @@ pub struct ConvertInput<'a> {
 pub struct Converted {
     pub config: VehicleConfig,
     pub report: ConversionReport,
+}
+
+/// Rebound damping rate (N·s/m) for one corner.
+///
+/// Damping is set as a fraction of critical, and critical damping depends
+/// on the corner's *mass*: `wheel_load` is a weight in newtons, so the
+/// gravity has to come back out before the geometric mean.
+///
+/// MM2 authors `SuspensionDampCoef` between about 0.01 (London Cab) and
+/// 0.1 (most cars). Mapped straight through, the low end lands near
+/// ζ = 0.1 and the car pogos off every road seam. The authored value still
+/// orders the roster; the band keeps every car on it drivable.
+fn suspension_damping(spring_rate: f32, wheel_load: f32, damp_coef: f32) -> f32 {
+    let corner_mass = (wheel_load / G).max(1e-3);
+    let critical = 2.0 * (spring_rate * corner_mass).sqrt();
+    let t = (damp_coef / 0.1).clamp(0.0, 1.0);
+    let zeta = DAMPING_RATIO_MIN + (DAMPING_RATIO_MAX - DAMPING_RATIO_MIN) * t;
+    zeta * critical
 }
 
 fn aabb_min_max(
@@ -309,9 +332,7 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
         let travel = (wt.suspension_extent + wt.suspension_limit).max(0.05);
         let sag = (SAG_FRACTION * travel).max(0.01);
         let spring_rate = wheel_load / sag * wt.suspension_factor.max(0.05);
-        // Damping: ζ ≈ 0.45 at SuspensionDampCoef 0.1, scaled by the coef.
-        let damp_scale = (wt.suspension_damp_coef / 0.1).clamp(0.25, 4.0);
-        let damping_base = 2.0 * 0.45 * (spring_rate * wheel_load).sqrt() * damp_scale;
+        let damping_base = suspension_damping(spring_rate, wheel_load, wt.suspension_damp_coef);
         let suspension = SuspensionConfig {
             spring_rate,
             damping_compression: damping_base * 0.8,
@@ -659,8 +680,7 @@ pub fn convert_trailer(
         let travel = (wt.suspension_extent + wt.suspension_limit).max(0.05);
         let spring_rate =
             wheel_load / (SAG_FRACTION * travel).max(0.01) * wt.suspension_factor.max(0.05);
-        let damp_scale = (wt.suspension_damp_coef / 0.1).clamp(0.25, 4.0);
-        let damping_base = 2.0 * 0.45 * (spring_rate * wheel_load).sqrt() * damp_scale;
+        let damping_base = suspension_damping(spring_rate, wheel_load, wt.suspension_damp_coef);
         let raise = (travel * (1.0 - SAG_FRACTION) + wg.radius - wg.origin[1]).max(0.0);
         ws.push(WheelConfig {
             position: [wg.origin[0], wg.origin[1] + raise, wg.origin[2]],
@@ -718,4 +738,55 @@ pub fn convert_trailer(
         format!("{mass} kg"),
     );
     Ok(Converted { config, report })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Damping ratio implied by a rate, as the physics crate measures it.
+    fn zeta(damping: f32, spring_rate: f32, wheel_load: f32) -> f32 {
+        let corner_mass = wheel_load / G;
+        damping / (2.0 * (spring_rate * corner_mass).sqrt())
+    }
+
+    #[test]
+    fn suspension_damping_lands_in_the_playable_band() {
+        // A 300 kg corner on a spring that settles it a hand's width down.
+        let wheel_load = 300.0 * G;
+        let spring_rate = wheel_load / 0.09;
+
+        // The London Cab's authored coefficient is the roster's lowest and
+        // used to map to ζ ≈ 0.1 — a car that pogos off every road seam.
+        let soft = suspension_damping(spring_rate, wheel_load, 0.01);
+        // Most cars author 0.1.
+        let firm = suspension_damping(spring_rate, wheel_load, 0.1);
+
+        for (label, d) in [("soft", soft), ("firm", firm)] {
+            let z = zeta(d, spring_rate, wheel_load);
+            assert!(
+                (DAMPING_RATIO_MIN..=DAMPING_RATIO_MAX).contains(&z),
+                "{label} damping ratio {z} outside the band"
+            );
+        }
+        // The authored value still orders the roster.
+        assert!(firm > soft);
+        // And an absurd coefficient saturates rather than locking solid.
+        let wild = suspension_damping(spring_rate, wheel_load, 100.0);
+        assert!(zeta(wild, spring_rate, wheel_load) <= DAMPING_RATIO_MAX + 1e-5);
+    }
+
+    #[test]
+    fn suspension_damping_scales_with_the_corner_it_carries() {
+        // Critical damping goes as sqrt(k·m): four times the mass on the
+        // same spring needs twice the damping for the same ratio.
+        let spring_rate = 30_000.0;
+        let light = suspension_damping(spring_rate, 250.0 * G, 0.1);
+        let heavy = suspension_damping(spring_rate, 1000.0 * G, 0.1);
+        assert!(
+            (heavy / light - 2.0).abs() < 1e-3,
+            "expected 2x damping, got {}",
+            heavy / light
+        );
+    }
 }
