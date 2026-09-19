@@ -75,6 +75,10 @@ const INVISIBLE_DIVIDER_HEIGHT: f32 = 0.8;
 /// Clearance above the road surface for the player spawn point.
 const SPAWN_CLEARANCE: f32 = 1.5;
 
+/// Playback rate of animated texture sequences (`<stem>-0001`, `-0002`, …).
+/// The rate is not stored in the data; this is an approximation.
+const TEXTURE_ANIM_FPS: f32 = 10.0;
+
 /// MM2 texture lookup order for a logical stem: lossless formats first so a
 /// mod can ship a `.png` next to the original `.tex`.
 const TEXTURE_EXTS: &[&str] = &["png", "ktx2", "tga", "tex"];
@@ -1612,6 +1616,43 @@ pub fn load_image(vfs: &Vfs, stem: &str) -> Option<(Image, bool)> {
     }
 }
 
+/// Load the frames of an animated texture sequence: MM2 stores animated
+/// surfaces (water: `s_thames`, `s_pond`, `s_ocean`) as numbered frames
+/// `<stem>-0001`, `<stem>-0002`, … with no plain `<stem>` texture.
+pub fn load_image_sequence(vfs: &Vfs, stem: &str) -> Vec<(Image, bool)> {
+    (1..)
+        .map_while(|i| load_image(vfs, &format!("{stem}-{i:04}")))
+        .collect()
+}
+
+/// Cycles a material's base colour texture through a frame sequence.
+#[derive(Component)]
+pub struct AnimatedTexture {
+    material: Handle<StandardMaterial>,
+    frames: Vec<Handle<Image>>,
+}
+
+/// Advance every [`AnimatedTexture`] to the frame for the current time.
+pub fn animate_textures(
+    time: Res<Time>,
+    animated: Query<&AnimatedTexture>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let tick = (time.elapsed_secs() * TEXTURE_ANIM_FPS) as usize;
+    for anim in &animated {
+        let frame = &anim.frames[tick % anim.frames.len()];
+        // Only touch the asset on a frame change: mutable access marks it
+        // modified and re-prepares the material.
+        if materials
+            .get(&anim.material)
+            .is_some_and(|m| m.base_color_texture.as_ref() != Some(frame))
+            && let Some(mut mat) = materials.get_mut(&anim.material)
+        {
+            mat.base_color_texture = Some(frame.clone());
+        }
+    }
+}
+
 /// Cache of name → material, keyed by the normalized logical stem —
 /// resolution is deterministic per mount set, so a stem always maps to the
 /// same selected source.
@@ -1623,6 +1664,8 @@ pub struct MaterialCache<'a> {
     fallback: Handle<StandardMaterial>,
     /// Texture stems that failed to resolve (for the import report).
     missing: BTreeSet<String>,
+    /// Materials backed by a frame sequence, to be animated once spawned.
+    animated: Vec<AnimatedTexture>,
 }
 
 impl<'a> MaterialCache<'a> {
@@ -1643,6 +1686,7 @@ impl<'a> MaterialCache<'a> {
             by_key: HashMap::new(),
             fallback,
             missing: BTreeSet::new(),
+            animated: Vec::new(),
         }
     }
 
@@ -1656,15 +1700,20 @@ impl<'a> MaterialCache<'a> {
         if let Some(m) = self.by_key.get(&key) {
             return m.clone();
         }
-        let mat = match load_image(self.vfs, &key) {
-            Some((image, has_alpha)) => {
-                let tex = self.images.add(image);
+        let mut frames = match load_image(self.vfs, &key) {
+            Some(single) => vec![single],
+            None => load_image_sequence(self.vfs, &key),
+        };
+        let mat = match frames.first().map(|f| f.1) {
+            Some(has_alpha) => {
+                let frames: Vec<Handle<Image>> =
+                    frames.drain(..).map(|f| self.images.add(f.0)).collect();
                 // Alpha follows the decoded pixels: textures carrying real
                 // transparency (trees, fences) become alpha-cutout — the
                 // conservative choice that avoids blend sorting — and
                 // everything else stays opaque.
-                self.materials.add(StandardMaterial {
-                    base_color_texture: Some(tex),
+                let material = self.materials.add(StandardMaterial {
+                    base_color_texture: Some(frames[0].clone()),
                     alpha_mode: if has_alpha {
                         AlphaMode::Mask(0.5)
                     } else {
@@ -1672,7 +1721,14 @@ impl<'a> MaterialCache<'a> {
                     },
                     perceptual_roughness: 0.95,
                     ..default()
-                })
+                });
+                if frames.len() > 1 {
+                    self.animated.push(AnimatedTexture {
+                        material: material.clone(),
+                        frames,
+                    });
+                }
+                material
             }
             None => {
                 debug!(texture = %key, "texture not found; using fallback");
@@ -1993,6 +2049,7 @@ pub fn load_city(
     // INST placements → PKG props, each with an explicit collision policy:
     // a convex hull over the best-LOD vertices (documented approximation —
     // good enough for lamps, signs and rails in a driving slice).
+    let animated;
     let inst_path = psdl_path.replace(".psdl", ".inst");
     match vfs.read_path(&inst_path) {
         Ok((inst_bytes, inst_res)) => match inst::parse(&inst_bytes) {
@@ -2035,17 +2092,23 @@ pub fn load_city(
                         .insert("pkg-non-triangle-strips".into(), cache.missing_prims);
                 }
                 report.missing_textures = std::mem::take(&mut cache.mats.missing);
+                animated = std::mem::take(&mut cache.mats.animated);
                 info!(path = %inst_res.logical, props = report.props_spawned, "inst props spawned");
             }
             Err(e) => {
                 warn!(path = %inst_res.logical, error = %e, "INST parse failed");
                 report.missing_textures = std::mem::take(&mut mats.missing);
+                animated = std::mem::take(&mut mats.animated);
             }
         },
         Err(_) => {
             debug!(path = %inst_path, "no INST file; skipping props");
             report.missing_textures = std::mem::take(&mut mats.missing);
+            animated = std::mem::take(&mut mats.animated);
         }
+    }
+    for anim in animated {
+        commands.spawn((CityEntity, anim));
     }
     info!(report = %report, "city import");
 

@@ -34,6 +34,14 @@ All integers little-endian:
 | 18   | RGBA8888                   |
 | other| preserved as `Unknown(n)`  |
 
+## Animated sequences
+
+Animated surfaces have no plain `<stem>.tex`; they ship as numbered frames
+`<stem>-0001.tex` … `<stem>-0030.tex` (retail: `s_thames`, `s_pond`,
+`s_ocean`, `s_water`, `mt2ow01a`, 30 frames each, 64×64 P8). The PSDL refers
+to the bare stem. The playback rate is not stored in the data; the importer
+cycles frames at an approximated 10 fps.
+
 ## Confidence
 
 - Header fields + type numbers: **documented** (angel-file-formats TEX spec)

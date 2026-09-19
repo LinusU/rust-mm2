@@ -7,7 +7,7 @@ use bevy::ecs::world::{CommandQueue, World};
 use bevy::image::Image;
 use bevy::mesh::Mesh;
 use bevy::pbr::StandardMaterial;
-use mm2_app::city::{emit_psdl, load_city, load_image};
+use mm2_app::city::{emit_psdl, load_city, load_image, load_image_sequence};
 use mm2_assets::Vfs;
 use mm2_formats::psdl::Psdl;
 use mm2_game::CityEntity;
@@ -299,6 +299,25 @@ fn texture_override_prefers_later_mount_through_shared_path() {
     );
     let (mod_img, _) = load_image(&vfs, "dev_road").expect("override decodes");
     assert_ne!(base_img.data, mod_img.data);
+}
+
+#[test]
+fn numbered_frames_load_as_a_texture_sequence() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("texture")).unwrap();
+    // Frames 1–2 and 4: the sequence stops at the first gap.
+    for i in [1, 2, 4] {
+        std::fs::write(
+            dir.path().join(format!("texture/s_water-{i:04}.png")),
+            include_bytes!("../../../assets/texture/dev_road.png"),
+        )
+        .unwrap();
+    }
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(dir.path(), 0).unwrap();
+    assert!(load_image(&vfs, "s_water").is_none());
+    assert_eq!(load_image_sequence(&vfs, "s_water").len(), 2);
+    assert!(load_image_sequence(&vfs, "s_missing").is_empty());
 }
 
 /// Real-content validation: runs only when the gitignored `retail/` tree is

@@ -239,6 +239,7 @@ fn main() {
             reset_input,
             debug_toggle,
             vehicle_visual::update_wheel_visuals,
+            city::animate_textures,
             update_hud,
         ),
     );
