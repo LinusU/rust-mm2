@@ -447,7 +447,53 @@ mod tests {
         ];
         let (attrs, rest) = decode_attributes(&raw);
         assert!(rest.is_empty());
-        assert_eq!(attrs[0].data.len(), 5);
+        assert_eq!(attrs[0].kind, AttributeType::Fan);
+        assert_eq!(attrs[0].subtype, 0);
+        assert_eq!(attrs[0].data, vec![2, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn fan_with_inline_count() {
+        // type 0x06 subtype 3 → 3 triangles, subtype+2 = 5 vertex refs,
+        // no count word.
+        let raw = [
+            0x33, 0x00, // attr: type 6, subtype 3
+            1, 0, 2, 0, 3, 0, 4, 0, 5, 0,
+        ];
+        let (attrs, rest) = decode_attributes(&raw);
+        assert!(rest.is_empty());
+        assert_eq!(attrs[0].kind, AttributeType::Fan);
+        assert_eq!(attrs[0].subtype, 3);
+        assert_eq!(attrs[0].data, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn road_with_explicit_count() {
+        // type 0x00 subtype 0 → count word = nSections, then nSections*4 refs
+        let raw = [
+            0x00, 0x00, // attr: type 0, subtype 0
+            0x02, 0x00, // 2 sections
+            1, 0, 2, 0, 3, 0, 4, 0, // section 1
+            5, 0, 6, 0, 7, 0, 8, 0, // section 2
+        ];
+        let (attrs, rest) = decode_attributes(&raw);
+        assert!(rest.is_empty());
+        assert_eq!(attrs[0].kind, AttributeType::RoadWithSidewalks);
+        assert_eq!(attrs[0].subtype, 0);
+        assert_eq!(attrs[0].data, vec![2, 1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn road_with_inline_count() {
+        // type 0x02 subtype 2 → 2 sections of 2 refs, no count word.
+        let raw = [
+            0x12, 0x00, // attr: type 2, subtype 2
+            10, 0, 11, 0, 12, 0, 13, 0,
+        ];
+        let (attrs, rest) = decode_attributes(&raw);
+        assert!(rest.is_empty());
+        assert_eq!(attrs[0].kind, AttributeType::RoadNoSidewalks);
+        assert_eq!(attrs[0].data, vec![10, 11, 12, 13]);
     }
 
     #[test]
