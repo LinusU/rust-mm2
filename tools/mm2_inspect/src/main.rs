@@ -95,6 +95,38 @@ enum Command {
         /// Logical path, e.g. `tune/vpbug.info`.
         logical: String,
     },
+    /// List the discovered vehicle roster with audit status.
+    Cars {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+    },
+    /// Load and describe one vehicle: metadata, converted handling, wheel
+    /// rig, model parts, paint validation and source provenance.
+    Car {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Vehicle id (e.g. `vpbug`) or unique display-name alias.
+        id: String,
+        /// Paint-job index to validate (zero-based).
+        #[arg(long, default_value_t = 0)]
+        paint: usize,
+        /// Emit the full report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Validate vehicles end to end: metadata, tuning, model, wheel rig,
+    /// collider and every declared paint variant.
+    ValidateCars {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Validate every discovered entry, not just the expected stock
+        /// roster.
+        #[arg(long)]
+        all: bool,
+        /// Exit nonzero on any warning as well as failures.
+        #[arg(long)]
+        strict: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -123,6 +155,11 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Pkg { dir, logical } => pkg(dir, cli.mods.as_deref(), logical),
         Command::Psdl { dir, logical } => psdl(dir, cli.mods.as_deref(), logical),
         Command::Dump { dir, logical } => dump(dir, cli.mods.as_deref(), logical),
+        Command::Cars { dir } => cars(dir, cli.mods.as_deref()),
+        Command::Car { dir, id, paint, json } => car(dir, cli.mods.as_deref(), id, *paint, *json),
+        Command::ValidateCars { dir, all, strict } => {
+            validate_cars(dir, cli.mods.as_deref(), *all, *strict)
+        }
     }
 }
 
@@ -448,6 +485,347 @@ fn dump(dir: &Path, mods: Option<&Path>, logical: &str) -> Result<(), Box<dyn st
     let (bytes, _r) = vfs.read_path(logical)?;
     use std::io::Write;
     std::io::stdout().write_all(&bytes)?;
+    Ok(())
+}
+
+fn cars(dir: &Path, mods: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
+    let vfs = build_vfs(dir, mods)?;
+    let catalog = mm2_content::VehicleCatalog::scan(&vfs);
+    if catalog.entries.is_empty() {
+        return Err("vehicle catalog is empty — no tune/geometry data discovered".into());
+    }
+    println!("== vehicle roster ({} entries) ==", catalog.entries.len());
+    println!(
+        "{:<14} {:<30} {:<8} {:<5} {:<6} status",
+        "id", "name", "class", "lock", "paints"
+    );
+    for e in &catalog.entries {
+        let class = match e.class {
+            mm2_content::VehicleClass::Stock => "stock",
+            mm2_content::VehicleClass::Mod => "mod",
+            mm2_content::VehicleClass::ModOnly => "mod-only",
+        };
+        let status = match &e.status {
+            mm2_content::EntryStatus::Ready => "ready".to_string(),
+            mm2_content::EntryStatus::Incomplete { missing } => {
+                format!("incomplete: {}", missing.join(", "))
+            }
+        };
+        println!(
+            "{:<14} {:<30} {:<8} {:<5} {:<6} {}",
+            e.id,
+            e.display_name,
+            class,
+            if e.locked { "yes" } else { "-" },
+            e.paints.len(),
+            status
+        );
+    }
+    let failures = catalog.stock_audit_failures();
+    if !failures.is_empty() {
+        println!("\nexpected-stock audit failures:");
+        for f in &failures {
+            println!("  {f}");
+        }
+    }
+    Ok(())
+}
+
+/// Paint-variant validation: every shader offset referenced by any mesh
+/// group must land inside the shader table for that paint job.
+fn paint_coverage(def: &mm2_content::VehicleDef) -> Vec<String> {
+    let mut offsets = std::collections::BTreeSet::new();
+    for part in &def.model.parts {
+        for (_, groups) in &part.lods {
+            for g in groups {
+                offsets.insert(g.shader_offset);
+            }
+        }
+    }
+    let mut problems = Vec::new();
+    let declared = def.paints.len().max(def.model.paint_jobs);
+    for paint in 0..declared {
+        if paint >= def.model.paint_jobs {
+            problems.push(format!(
+                "paint {paint}: declared but model only has {} paint job(s)",
+                def.model.paint_jobs
+            ));
+            continue;
+        }
+        for off in &offsets {
+            let idx = paint * def.model.shaders_per_paint_job + off;
+            if idx >= def.model.shaders.len() {
+                problems.push(format!(
+                    "paint {paint}: shader offset {off} → index {idx} beyond {} shaders",
+                    def.model.shaders.len()
+                ));
+            }
+        }
+    }
+    problems
+}
+
+fn car(
+    dir: &Path,
+    mods: Option<&Path>,
+    id: &str,
+    paint: usize,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let vfs = build_vfs(dir, mods)?;
+    let def = mm2_content::load_by_id(&vfs, id, paint)?;
+    let paint_problems = paint_coverage(&def);
+
+    if json {
+        let c = &def.config;
+        let out = serde_json::json!({
+            "id": def.id,
+            "display_name": def.display_name,
+            "paints": def.paints,
+            "paint_jobs": def.model.paint_jobs,
+            "handling": {
+                "mass_kg": c.mass,
+                "center_of_mass": c.center_of_mass,
+                "inertia_kgm2": c.inertia,
+                "wheelbase_m": c.wheelbase,
+                "track_width_m": c.track_width,
+                "chassis_size_m": c.chassis_size,
+                "engine": {
+                    "max_power_w": c.engine.max_power_w,
+                    "idle_rpm": c.engine.idle_rpm,
+                    "redline_rpm": c.engine.redline_rpm,
+                    "peak_torque_nm": c.engine.peak_torque_nm,
+                    "peak_torque_rpm": c.engine.peak_torque_rpm,
+                },
+                "transmission": {
+                    "gear_ratios": c.transmission.gear_ratios,
+                    "reverse_ratio": c.transmission.reverse_ratio,
+                    "shift_time_s": c.transmission.shift_time,
+                },
+                "wheels": c.wheels.iter().map(|w| serde_json::json!({
+                    "position": w.position,
+                    "radius": w.radius,
+                    "driven": w.driven,
+                    "steered": w.steered,
+                    "steer_scale": w.steer_scale,
+                    "brake_bias": w.brake_bias,
+                    "drive_share": w.drive_share,
+                })).collect::<Vec<_>>(),
+                "collider_points": c.collider_points.as_ref().map(|p| p.len()),
+                "trailer": def.trailer.is_some(),
+            },
+            "model": {
+                "parts": def.model.parts.iter().map(|p| {
+                    let bbox = p.best_nonempty_lod().and_then(|groups| {
+                        let mut mn = [f32::MAX; 3];
+                        let mut mx = [f32::MIN; 3];
+                        for g in groups {
+                            for v in &g.positions {
+                                for i in 0..3 {
+                                    mn[i] = mn[i].min(v[i]);
+                                    mx[i] = mx[i].max(v[i]);
+                                }
+                            }
+                        }
+                        (mn[0] != f32::MAX).then_some([mn, mx])
+                    });
+                    serde_json::json!({
+                        "name": p.name,
+                        "role": format!("{:?}", p.role),
+                        "lods": p.lods.iter().map(|(l, _)| format!("{l:?}")).collect::<Vec<_>>(),
+                        "origin": p.origin,
+                        "recenter": p.recenter,
+                        "geom_bbox": bbox,
+                    })
+                }).collect::<Vec<_>>(),
+                "wheel_visuals": def.model.wheels.iter().map(|w| serde_json::json!({
+                    "index": w.index,
+                    "trailer": w.trailer,
+                    "origin": w.origin,
+                    "radius": w.radius,
+                    "width": w.width,
+                })).collect::<Vec<_>>(),
+            },
+            "sources": def.sources,
+            "conversion": def.report.entries.iter().map(|e| serde_json::json!({
+                "source": e.source,
+                "dest": e.dest,
+                "provenance": format!("{:?}", e.provenance),
+                "note": e.note,
+            })).collect::<Vec<_>>(),
+            "warnings": def.report.warnings,
+            "model_warnings": def.model.warnings,
+            "paint_problems": paint_problems,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        let c = &def.config;
+        println!("== {} — {} ==", def.id, def.display_name);
+        println!("paints ({} declared, {} jobs): {}", def.paints.len(), def.model.paint_jobs, def.paints.join(", "));
+        println!(
+            "mass {:.0} kg, com {:?}, size {:?}, wheelbase {:.2} m, track {:.2} m",
+            c.mass, c.center_of_mass, c.chassis_size, c.wheelbase, c.track_width
+        );
+        if let Some(w) = c.engine.max_power_w {
+            println!(
+                "engine {:.0} kW at {:?} rpm, {:.0} N·m at {:.0} rpm, redline {:.0}",
+                w / 1000.0, c.engine.peak_power_rpm, c.engine.peak_torque_nm,
+                c.engine.peak_torque_rpm, c.engine.redline_rpm
+            );
+        }
+        println!(
+            "gears {:?} reverse {:.2}, shift {:.2} s",
+            c.transmission
+                .gear_ratios
+                .iter()
+                .map(|r| format!("{r:.2}"))
+                .collect::<Vec<_>>(),
+            c.transmission.reverse_ratio,
+            c.transmission.shift_time
+        );
+        println!("wheels ({} physics):", c.wheels.len());
+        for (i, w) in c.wheels.iter().enumerate() {
+            println!(
+                "  [{i}] pos {:?} r {:.3} driven={} steered={} steer×{:.2} brake {:.2} drive {:?}",
+                w.position, w.radius, w.driven, w.steered, w.steer_scale, w.brake_bias, w.drive_share
+            );
+        }
+        println!("model parts ({}):", def.model.parts.len());
+        for p in &def.model.parts {
+            let lods: Vec<String> = p.lods.iter().map(|(l, _)| format!("{l:?}")).collect();
+            println!(
+                "  {:<16} {:?} lods={:?} origin={:?}{}",
+                p.name,
+                p.role,
+                lods,
+                p.origin,
+                if p.recenter.is_some() { " (recentred)" } else { "" }
+            );
+        }
+        for w in &def.model.wheels {
+            println!(
+                "  wheel visual {} trailer={} origin {:?} r {:.3} w {:.3} parts {:?}",
+                w.index, w.trailer, w.origin, w.radius, w.width, w.parts
+            );
+        }
+        if let Some(t) = &def.trailer {
+            println!(
+                "trailer: {:.0} kg, {} wheels, hitch car {:?} trailer {:?}",
+                t.config.mass,
+                t.wheels.len(),
+                t.car_hitch,
+                t.trailer_hitch
+            );
+        }
+        if !paint_problems.is_empty() {
+            println!("paint problems:");
+            for p in &paint_problems {
+                println!("  {p}");
+            }
+        }
+        if !def.report.warnings.is_empty() || !def.model.warnings.is_empty() {
+            println!("warnings:");
+            for w in def.report.warnings.iter().chain(&def.model.warnings) {
+                println!("  {w}");
+            }
+        }
+        println!("sources:");
+        for s in &def.sources {
+            println!("  {s}");
+        }
+    }
+    if !paint_problems.is_empty() {
+        return Err(format!("{} paint variant problem(s)", paint_problems.len()).into());
+    }
+    Ok(())
+}
+
+fn validate_cars(
+    dir: &Path,
+    mods: Option<&Path>,
+    all: bool,
+    strict: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let vfs = build_vfs(dir, mods)?;
+    let catalog = mm2_content::VehicleCatalog::scan(&vfs);
+    if catalog.entries.is_empty() {
+        return Err("vehicle catalog is empty — cannot validate".into());
+    }
+
+    let ids: Vec<String> = if all {
+        catalog.entries.iter().map(|e| e.id.clone()).collect()
+    } else {
+        mm2_content::EXPECTED_STOCK_ROSTER
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    };
+
+    let mut ok = 0usize;
+    let mut failed: Vec<(String, String)> = Vec::new();
+    let mut warned: Vec<String> = Vec::new();
+    println!(
+        "{:<14} {:<6} {:<7} {:<6} {:<5} result",
+        "id", "wheels", "paints", "parts", "mass"
+    );
+    for id in &ids {
+        match catalog.entries.iter().find(|e| &e.id == id) {
+            None => {
+                failed.push((id.clone(), "not discovered in catalog".into()));
+                println!("{id:<14} {:<6} {:<7} {:<6} {:<5} FAIL not discovered", "-", "-", "-", "-");
+            }
+            Some(entry) => {
+                let paints_declared = entry.paints.len();
+                match mm2_content::load_vehicle(&vfs, id, 0) {
+                    Ok(def) => {
+                        let mut problems = paint_coverage(&def);
+                        problems.extend(def.report.warnings.iter().cloned());
+                        problems.extend(def.model.warnings.iter().cloned());
+                        let wheel_vis = def.model.wheels.iter().filter(|w| !w.trailer).count();
+                        let status = if problems.is_empty() {
+                            "ok".to_string()
+                        } else {
+                            warned.push(id.clone());
+                            format!("ok (+{} warnings)", problems.len())
+                        };
+                        ok += 1;
+                        println!(
+                            "{:<14} {:<6} {:<7} {:<6} {:<5.0} {}",
+                            id,
+                            wheel_vis,
+                            format!("{}/{}", paints_declared, def.model.paint_jobs),
+                            def.model.parts.len(),
+                            def.config.mass,
+                            status
+                        );
+                        for p in &problems {
+                            println!("    warn: {p}");
+                        }
+                    }
+                    Err(e) => {
+                        failed.push((id.clone(), e.to_string()));
+                        println!("{id:<14} {:<6} {:<7} {:<6} {:<5} FAIL {e}", "-", "-", "-", "-");
+                    }
+                }
+            }
+        }
+    }
+
+    let expected = mm2_content::EXPECTED_STOCK_ROSTER.len();
+    println!(
+        "\nexpected stock: {expected}, validated: {ok}, failed: {}, warnings on: {}",
+        failed.len(),
+        warned.len()
+    );
+    for f in catalog.stock_audit_failures() {
+        println!("  audit: {f}");
+    }
+    if !failed.is_empty() {
+        return Err(format!("{} vehicle(s) failed validation", failed.len()).into());
+    }
+    if strict && !warned.is_empty() {
+        return Err(format!("strict: {} vehicle(s) carry warnings", warned.len()).into());
+    }
     Ok(())
 }
 

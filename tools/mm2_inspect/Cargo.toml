@@ -12,5 +12,9 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 mm2_assets.workspace = true
+mm2_content.workspace = true
+mm2_vehicle.workspace = true
 mm2_formats.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tracing-subscriber.workspace = true

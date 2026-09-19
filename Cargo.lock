@@ -3851,7 +3851,11 @@ version = "0.0.0"
 dependencies = [
  "clap",
  "mm2_assets",
+ "mm2_content",
  "mm2_formats",
+ "mm2_vehicle",
+ "serde",
+ "serde_json",
  "tracing-subscriber",
 ]
 
