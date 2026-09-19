@@ -615,6 +615,14 @@ fn car(
                 "trailer": def.trailer.is_some(),
             },
             "model": {
+                "paint_jobs": def.model.paint_jobs,
+                "shaders_per_paint_job": def.model.shaders_per_paint_job,
+                "shaders": def.model.shaders.iter().enumerate().map(|(i, s)| serde_json::json!({
+                    "index": i,
+                    "texture": s.texture,
+                    "diffuse": s.diffuse,
+                    "emissive": s.emissive,
+                })).collect::<Vec<_>>(),
                 "parts": def.model.parts.iter().map(|p| {
                     let bbox = p.best_nonempty_lod().and_then(|groups| {
                         let mut mn = [f32::MAX; 3];

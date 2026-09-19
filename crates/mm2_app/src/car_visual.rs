@@ -256,6 +256,9 @@ pub fn spawn_vehicle_model(
             role => {
                 let glow = match role {
                     PartRole::HeadlightGlow => Some(GlowKind::Headlight),
+                    // HEADLIGHTn are flat lit-lens quads shown only when
+                    // the headlights are on — the housing lives in BODY.
+                    PartRole::Headlight(_) => Some(GlowKind::Headlight),
                     PartRole::TaillightGlow => Some(GlowKind::Taillight),
                     PartRole::BrakeGlow => Some(GlowKind::Brake),
                     PartRole::ReverseGlow => Some(GlowKind::Reverse),
