@@ -472,6 +472,7 @@ fn update_hud(
     mut hud: Query<&mut Text, (With<Hud>, Without<ErrorText>)>,
     mut err: Query<&mut Text, (With<ErrorText>, Without<Hud>)>,
     vehicles: Query<(&mm2_vehicle::vehicle::VehicleState, &LinearVelocity), With<PlayerVehicle>>,
+    cameras: Query<(&Camera, &Transform)>,
 ) {
     for mut text in &mut err {
         *text = match &*state {
@@ -495,9 +496,10 @@ fn update_hud(
         mm2_vehicle::vehicle::DriveDirection::Reverse => "R".to_string(),
     };
     let grounded = veh.wheels.iter().filter(|w| w.grounded).count();
+    let cam = active_cam_pose(&cameras).unwrap_or_default();
     for mut text in &mut hud {
         *text = Text::new(format!(
-            "{speed:5.1} km/h  {dir}  {rpm:4.0} rpm  wheels {grounded}/{total}",
+            "{speed:5.1} km/h  {dir}  {rpm:4.0} rpm  wheels {grounded}/{total}  cam {cam}",
             rpm = veh.rpm,
             total = veh.wheels.len(),
         ));
@@ -522,6 +524,23 @@ fn retarget_hud(
             commands.entity(node).insert(UiTargetCamera(active));
         }
     }
+}
+
+/// The active camera's pose as `x,y,z,yaw,pitch` (angles in degrees) — the
+/// exact value `--cam` accepts, so a screenshot's view can be reproduced.
+fn active_cam_pose(cameras: &Query<(&Camera, &Transform)>) -> Option<String> {
+    let (_, xf) = cameras.iter().find(|(c, _)| c.is_active)?;
+    let (yaw, pitch, _) = xf.rotation.to_euler(EulerRot::YXZ);
+    let p = xf.translation;
+    Some(format!(
+        "{:.1},{:.1},{:.1},{:.0},{:.0}",
+        p.x,
+        p.y,
+        p.z,
+        // `+ 0.0` turns a rounded −0 into 0.
+        yaw.to_degrees().round() + 0.0,
+        pitch.to_degrees().round() + 0.0
+    ))
 }
 
 /// `R` resets the player vehicle to its spawn point.

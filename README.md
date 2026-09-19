@@ -67,6 +67,9 @@ Controls:
 | F1           | toggle physics debug gizmos   |
 | WASD+mouse   | fly (in free-camera mode)     |
 
+The HUD ends with the active camera's pose as `cam x,y,z,yaw,pitch` — the
+value `--cam` accepts — so any view can be reproduced exactly.
+
 A connected gamepad works too: left stick steers, right trigger throttles,
 left trigger brakes.
 
