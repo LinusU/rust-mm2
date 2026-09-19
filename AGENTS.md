@@ -56,6 +56,11 @@ the build artefacts and the git stash stack are shared:
   `mm2_assets` on `mm2_formats` alone, and `mm2_app` is the only crate
   where everything may meet. Converting a parsed format into a Bevy asset
   belongs in `mm2_app`, never in a parser crate.
+- [docs/vehicle-handling.md](docs/vehicle-handling.md) — how MM2 tuning
+  becomes a drivable car, and which departures from the retail numbers
+  are deliberate. Read it before changing `mm2_content::convert` or the
+  assists; `mm2-inspect handling <install>` audits the whole roster and
+  is how claims about handling get checked.
 - [docs/research/](docs/research/) — notes on the MM2 binary formats. When
   a format's meaning is inferred rather than documented, say so there and
   in the code, and prefer measuring against the retail data over guessing.

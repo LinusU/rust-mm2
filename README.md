@@ -126,8 +126,10 @@ tools/
 ```
 
 See [docs/architecture.md](docs/architecture.md) for the dependency rules and
-the logical-asset pipeline, [docs/modding.md](docs/modding.md) for mod
-authoring, and [docs/research/](docs/research/) for format notes.
+the logical-asset pipeline, [docs/vehicle-handling.md](docs/vehicle-handling.md)
+for how MM2 tuning becomes a drivable car,
+[docs/modding.md](docs/modding.md) for mod authoring, and
+[docs/research/](docs/research/) for format notes.
 
 ## Mods (summary)
 
