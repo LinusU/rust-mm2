@@ -2027,7 +2027,15 @@ fn emit_strip(b: &mut MeshBuilder, strip: &PkgStrip, col: &mut PropCollision) {
     let col_base = col.positions.len() as u32;
     for v in &strip.vertices {
         let p = v3(v.position);
-        let uv = v.tex_coords.first().copied().unwrap_or([0.0, 0.0]);
+        // PKG UVs are authored against TEX's bottom-up row order, which
+        // `decode_rgba` now normalises to top-down, so v is complemented.
+        // Unlike the city's walls, whose UVs this crate generates, these
+        // come from the file and cannot simply adopt the new convention.
+        let uv = v
+            .tex_coords
+            .first()
+            .map(|&[u, v]| [u, 1.0 - v])
+            .unwrap_or([0.0, 0.0]);
         match v.normal {
             Some(n) => {
                 b.vert_n(p, uv, v3(n));
