@@ -34,7 +34,8 @@ fn push_f32s(out: &mut Vec<u8>, v: &[f32]) {
 /// - a counted generic fan (ground patch),
 /// - a facade, a facade collision bound and a sliver on one wall edge,
 /// - a roof fan with a height override,
-/// - a tunnel attribute (decoded, reported as unsupported).
+/// - a road-tunnel attribute (decoded, applies to following roads — it is
+///   last, so it contributes no wall geometry but is still emitted).
 fn synthetic_psdl() -> Vec<u8> {
     let mut d = Vec::new();
     d.extend_from_slice(b"PSD0");
@@ -179,11 +180,10 @@ fn emits_counted_attributes_meshes_colliders_and_report() {
 
     let import = emit_psdl(&psdl);
 
-    // The tunnel attribute is deliberately unsupported; everything else
-    // produces geometry or collision.
+    // Every attribute produces geometry, collision or tunnel state.
     assert_eq!(import.report.attributes, 8);
-    assert_eq!(import.report.emitted, 6);
-    assert_eq!(import.report.unsupported.get("tunnel"), Some(&1));
+    assert_eq!(import.report.emitted, 7);
+    assert!(import.report.unsupported.is_empty());
     assert_eq!(import.report.rejected, 0);
     assert_eq!(import.report.suppressed, 0);
 
@@ -330,10 +330,13 @@ fn retail_london_imports_driveable_geometry() {
         // signals are rejected/malformed refs and unparsed words.
         assert_eq!(import.report.rejected, 0, "malformed references in {city}");
         assert_eq!(import.report.unparsed_words, 0);
-        // Only tunnels are deliberately unhandled.
-        assert_eq!(
-            import.report.unsupported.keys().collect::<Vec<_>>(),
-            ["tunnel"]
+        // All known attribute families emit; nothing is unhandled.
+        assert!(import.report.unsupported.is_empty());
+        // Tunnel walls land on the following road attributes' outer
+        // chains — London's underpass railings exercise this path.
+        assert!(
+            import.report.approximated > 0,
+            "tunnel detail flags in {city}"
         );
         assert!(import.colliders.len() > 500, "colliders per room in {city}");
         assert!(import.spawn.is_finite());

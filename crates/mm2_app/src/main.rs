@@ -55,6 +55,11 @@ struct Cli {
     /// Frames to run before taking the screenshot / exiting in smoke mode.
     #[arg(long)]
     frames: Option<u32>,
+
+    /// Start with the free camera active at `x,y,z[,yaw-deg,pitch-deg]`
+    /// (screenshot/diagnostic aid).
+    #[arg(long, value_name = "x,y,z[,yaw,pitch]")]
+    cam: Option<String>,
 }
 
 /// Where the player vehicle (re)spawns.
@@ -83,6 +88,15 @@ struct SmokeTest {
     frames_left: u32,
 }
 
+/// `--cam` starting pose for the free camera (position + yaw/pitch in
+/// radians).
+#[derive(Resource)]
+struct CamStart {
+    position: Vec3,
+    yaw: f32,
+    pitch: f32,
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -104,6 +118,28 @@ fn main() {
             }
         },
         None => VehicleConfig::default(),
+    };
+
+    // `--cam x,y,z[,yaw,pitch]` starts the free camera at a fixed pose
+    // (angles in degrees) — a diagnostic/screenshot aid.
+    let cam_start = cli.cam.as_deref().map(|s| {
+        let parts: Result<Vec<f32>, _> = s.split(',').map(|p| p.trim().parse::<f32>()).collect();
+        match parts {
+            Ok(f) if f.len() == 3 || f.len() == 5 => Ok(CamStart {
+                position: Vec3::new(f[0], f[1], f[2]),
+                yaw: f.get(3).copied().unwrap_or(0.0).to_radians(),
+                pitch: f.get(4).copied().unwrap_or(0.0).to_radians(),
+            }),
+            _ => Err(()),
+        }
+    });
+    let cam_start = match cam_start {
+        Some(Ok(c)) => Some(c),
+        Some(Err(())) => {
+            error!("invalid --cam: expected x,y,z[,yaw,pitch]");
+            std::process::exit(2);
+        }
+        None => None,
     };
 
     // One mounting policy shared with mm2-inspect: mods > loose install
@@ -186,7 +222,11 @@ fn main() {
     .insert_resource(WorldState::Loading)
     .insert_resource(Mm2Vfs(vfs))
     .insert_resource(TunedVehicle(vehicle))
-    .init_resource::<CameraMode>()
+    .insert_resource(if cam_start.is_some() {
+        CameraMode::Free
+    } else {
+        CameraMode::Chase
+    })
     .add_plugins(VehiclePlugin)
     .add_systems(Startup, setup)
     .add_systems(
@@ -202,6 +242,9 @@ fn main() {
             update_hud,
         ),
     );
+    if let Some(c) = cam_start {
+        app.insert_resource(c);
+    }
     if cli.screenshot.is_some() || cli.frames.is_some() {
         app.insert_resource(SmokeTest {
             screenshot: cli.screenshot.clone(),
@@ -238,12 +281,15 @@ struct AssetStores<'w> {
 }
 
 /// Spawn the world, vehicle, cameras, HUD and lights per `ActiveWorld`.
+#[allow(clippy::too_many_arguments)]
 fn setup(
     mut commands: Commands,
     mut assets: AssetStores,
     mode: Res<ActiveWorld>,
     vfs: Res<Mm2Vfs>,
     vehicle_config: Res<TunedVehicle>,
+    cam_start: Option<Res<CamStart>>,
+    cam_mode: Res<CameraMode>,
     mut spawn: ResMut<SpawnPoint>,
     mut state: ResMut<WorldState>,
 ) {
@@ -335,18 +381,40 @@ fn setup(
     // Cameras.
     commands.spawn((
         Camera3d::default(),
-        Camera { ..default() },
+        Camera {
+            is_active: *cam_mode == CameraMode::Chase,
+            ..default()
+        },
         ChaseCamera::default(),
         Transform::from_translation(spawn.position + Vec3::new(0.0, 4.0, 9.0)),
     ));
+    let (free_xf, free_cam) = match cam_start.as_ref() {
+        Some(c) => (
+            Transform::from_translation(c.position).with_rotation(Quat::from_euler(
+                EulerRot::YXZ,
+                c.yaw,
+                c.pitch,
+                0.0,
+            )),
+            FreeCamera {
+                yaw: c.yaw,
+                pitch: c.pitch,
+                ..default()
+            },
+        ),
+        None => (
+            Transform::from_translation(spawn.position + Vec3::new(0.0, 8.0, 12.0)),
+            FreeCamera::default(),
+        ),
+    };
     commands.spawn((
         Camera3d::default(),
         Camera {
-            is_active: false,
+            is_active: *cam_mode == CameraMode::Free,
             ..default()
         },
-        FreeCamera::default(),
-        Transform::from_translation(spawn.position + Vec3::new(0.0, 8.0, 12.0)),
+        free_cam,
+        free_xf,
     ));
 
     // The dynamic player spawns only once the world is `Ready` — after the

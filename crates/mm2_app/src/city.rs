@@ -52,6 +52,10 @@ const PLANAR_UV_SCALE: f32 = 8.0;
 /// the sidewalk vertices").
 const SIDEWALK_LIFT: f32 = 0.15;
 
+/// Extra depth added below curb bottom edges to seal hairline seams
+/// against neighbouring surfaces.
+const CURB_SINK: f32 = 0.1;
+
 /// Height used for invisible (type-0) divider collision bounds. The bound
 /// height is not stored in the attribute; this documented approximation is
 /// enough to keep the car out of the median.
@@ -109,6 +113,23 @@ impl MeshBuilder {
         self.indices.extend_from_slice(&[a, c, b]);
     }
 
+    /// Push a triangle with whichever winding produces an upward-facing
+    /// normal. Ground surfaces are ~98% authored clockwise, but a small
+    /// minority are not — a down-facing ground triangle is never
+    /// intentional, so each emitted triangle is oriented by its
+    /// geometric normal.
+    fn tri_up(&mut self, a: u32, b: u32, c: u32) {
+        let pa = Vec3::from_array(self.positions[a as usize]);
+        let pb = Vec3::from_array(self.positions[b as usize]);
+        let pc = Vec3::from_array(self.positions[c as usize]);
+        // tri(a,b,c) emits (a, c, b): its normal is (c−a)×(b−a).
+        if (pc - pa).cross(pb - pa).y >= 0.0 {
+            self.tri(a, b, c);
+        } else {
+            self.tri_keep(a, b, c);
+        }
+    }
+
     /// Push a triangle with the indices exactly as given — for emitters
     /// whose winding is already correct in Bevy space (walls, authored
     /// quads).
@@ -132,40 +153,30 @@ impl MeshBuilder {
             .map(|&p| self.vert(p, Self::planar_uv(p)))
             .collect();
         for i in 1..base.len() - 1 {
-            self.tri(base[0], base[i], base[i + 1]);
+            self.tri_up(base[0], base[i], base[i + 1]);
         }
     }
 
-    /// Flat strip between left/right vertex chains. Verified to emit
-    /// +Y-facing quads for ~97% of retail London road sections.
+    /// Flat strip between left/right vertex chains. Each triangle is
+    /// oriented by its geometric normal — the authored clockwise order is
+    /// ~97% consistent, and the remainder must not render face-down.
     fn strip(&mut self, left: &[Vec3], right: &[Vec3]) {
         for i in 0..left.len().saturating_sub(1) {
             let l0 = self.vert(left[i], Self::planar_uv(left[i]));
             let l1 = self.vert(left[i + 1], Self::planar_uv(left[i + 1]));
             let r0 = self.vert(right[i], Self::planar_uv(right[i]));
             let r1 = self.vert(right[i + 1], Self::planar_uv(right[i + 1]));
-            self.tri(l0, r0, l1);
-            self.tri(l1, r0, r1);
+            self.tri_up(l0, r0, l1);
+            self.tri_up(l1, r0, r1);
         }
     }
 
-    /// Strip for chains that may bend around corners (sidewalk strips):
-    /// each quad's winding is chosen so its normal points up.
+    /// Strip for chains that may bend around corners (sidewalk strips).
+    /// Identical winding logic to [`strip`](Self::strip) — kept as a
+    /// named variant since the semantic distinction (bending chains)
+    /// matters at call sites.
     fn strip_up(&mut self, left: &[Vec3], right: &[Vec3]) {
-        for i in 0..left.len().saturating_sub(1) {
-            let down = (left[i + 1] - left[i]).cross(right[i] - left[i]).y < 0.0;
-            let l0 = self.vert(left[i], Self::planar_uv(left[i]));
-            let l1 = self.vert(left[i + 1], Self::planar_uv(left[i + 1]));
-            let r0 = self.vert(right[i], Self::planar_uv(right[i]));
-            let r1 = self.vert(right[i + 1], Self::planar_uv(right[i + 1]));
-            if down {
-                self.tri(r0, l0, r1);
-                self.tri(r1, l0, l1);
-            } else {
-                self.tri(l0, r0, l1);
-                self.tri(l1, r0, r1);
-            }
-        }
+        self.strip(left, right);
     }
 
     /// Arbitrary quad emitted so its front normal points toward `facing`
@@ -194,31 +205,78 @@ impl MeshBuilder {
         }
     }
 
-    /// Vertical wall quad with literal winding — the authored left→right
-    /// bottom edge produces the outward face in Bevy space (verified
-    /// against the dominant authored order on retail London). `v` runs from
-    /// `v_rep` at the bottom edge to 0 at the top so textures sit upright
-    /// (D3D v=0 at the image top).
-    fn wall_quad(&mut self, l: Vec3, r: Vec3, bottom: f32, top: f32, u_rep: f32, v_rep: f32) {
-        let bl = self.vert(Vec3::new(l.x, bottom, l.z), [0.0, v_rep]);
-        let br = self.vert(Vec3::new(r.x, bottom, r.z), [u_rep, v_rep]);
-        let tr = self.vert(Vec3::new(r.x, top, r.z), [u_rep, 0.0]);
-        let tl = self.vert(Vec3::new(l.x, top, l.z), [0.0, 0.0]);
-        self.tri_keep(bl, br, tr);
-        self.tri_keep(bl, tr, tl);
+    /// Vertical wall quad facing `facing` (horizontal). The authored
+    /// left→right bottom edge runs along the (clockwise) block perimeter,
+    /// so the street-facing side is conventionally to the *left* of the
+    /// edge — the caller's `facing` refines that per quad via the room
+    /// polygon (see [`EmitCtx::wall_facing`]). `v` runs from `v_rep` at
+    /// the bottom edge to 0 at the top so textures sit upright (D3D v=0
+    /// at the image top).
+    fn wall_quad(&mut self, l: Vec3, r: Vec3, bottom: f32, top: f32, reps: [f32; 2], facing: Vec3) {
+        let [u_rep, v_rep] = reps;
+        self.quad_facing(
+            Vec3::new(l.x, bottom, l.z),
+            Vec3::new(r.x, bottom, r.z),
+            Vec3::new(r.x, top, r.z),
+            Vec3::new(l.x, top, l.z),
+            [[0.0, v_rep], [u_rep, v_rep], [u_rep, 0.0], [0.0, 0.0]],
+            facing,
+        );
     }
 
     /// Slanted-bottom wall (sliver): the bottom edge follows the authored
     /// vertex heights, the top is horizontal at `top`. `v_scale` converts
     /// height above the lowest bottom corner to texture v.
-    fn sliver_quad(&mut self, l: Vec3, r: Vec3, top: f32, v_scale: f32) {
+    fn sliver_quad(&mut self, l: Vec3, r: Vec3, top: f32, v_scale: f32, facing: Vec3) {
         let min = l.y.min(r.y);
-        let bl = self.vert(l, [0.0, (l.y - min) * v_scale]);
-        let br = self.vert(r, [1.0, (r.y - min) * v_scale]);
-        let tr = self.vert(Vec3::new(r.x, top, r.z), [1.0, (top - min) * v_scale]);
-        let tl = self.vert(Vec3::new(l.x, top, l.z), [0.0, (top - min) * v_scale]);
-        self.tri_keep(bl, br, tr);
-        self.tri_keep(bl, tr, tl);
+        self.quad_facing(
+            l,
+            r,
+            Vec3::new(r.x, top, r.z),
+            Vec3::new(l.x, top, l.z),
+            [
+                [0.0, (l.y - min) * v_scale],
+                [1.0, (r.y - min) * v_scale],
+                [1.0, (top - min) * v_scale],
+                [0.0, (top - min) * v_scale],
+            ],
+            facing,
+        );
+    }
+
+    /// Triangle fan whose front faces `facing` — picks whichever winding
+    /// produces a geometric normal pointing along `facing` (for wall-like
+    /// vertical fans whose authored winding is inconsistent).
+    fn fan_facing(&mut self, pts: &[Vec3], facing: Vec3) {
+        if pts.len() < 3 {
+            return;
+        }
+        // UVs on the vertical plane spanned by the fan's horizontal tangent
+        // and +Y, so the texture isn't collapsed to a texel row.
+        let t = facing.cross(Vec3::Y).normalize_or_zero();
+        let uv = |p: Vec3| {
+            [
+                (p.x * t.x + p.z * t.z) / PLANAR_UV_SCALE,
+                p.y / PLANAR_UV_SCALE,
+            ]
+        };
+        let base: Vec<u32> = pts.iter().map(|&p| self.vert(p, uv(p))).collect();
+        // tri() emits (a, c, b): its geometric normal is (c−a)×(b−a).
+        let mut keep = false;
+        for i in 1..pts.len() - 1 {
+            let n = (pts[i + 1] - pts[0]).cross(pts[i] - pts[0]);
+            if n.length_squared() > 1e-6 {
+                keep = n.dot(facing) < 0.0;
+                break;
+            }
+        }
+        for i in 1..base.len() - 1 {
+            if keep {
+                self.tri_keep(base[0], base[i], base[i + 1]);
+            } else {
+                self.tri(base[0], base[i], base[i + 1]);
+            }
+        }
     }
 
     fn is_empty(&self) -> bool {
@@ -487,11 +545,35 @@ pub fn emit_psdl(psdl: &Psdl) -> CityImport {
 
     for (room_idx, room) in psdl.rooms.iter().enumerate() {
         report.unparsed_words += room.unparsed_attributes.len();
+        // The room perimeter (authored x, z) drives the facing test for
+        // walls; street rooms are the ones carrying drivable geometry.
+        let poly: Vec<(f32, f32)> = room
+            .perimeter
+            .iter()
+            .filter_map(|p| psdl.vertices.get(p.vertex as usize).map(|v| (v[0], v[2])))
+            .collect();
+        let perim: Vec<Vec3> = room
+            .perimeter
+            .iter()
+            .filter_map(|p| psdl.vertices.get(p.vertex as usize).map(|&v| v3(v)))
+            .collect();
+        let room_is_street = room.attributes.iter().any(|a| {
+            matches!(
+                a.kind,
+                AttributeType::RoadWithSidewalks
+                    | AttributeType::RoadNoSidewalks
+                    | AttributeType::SidewalkStrip
+                    | AttributeType::DividedRoad
+                    | AttributeType::RoadFan
+                    | AttributeType::Crosswalk
+            )
+        });
         let mut groups: BTreeMap<i64, MeshBuilder> = BTreeMap::new();
         let mut collider = ColliderBuilder::default();
         let mut road_acc = Vec3::ZERO;
         let mut road_n = 0usize;
         let mut road_max_y = f32::MIN;
+        let mut road_tunnel: Option<RoadTunnel> = None;
 
         for attr in &room.attributes {
             report.attributes += 1;
@@ -513,9 +595,13 @@ pub fn emit_psdl(psdl: &Psdl) -> CityImport {
             let mut ctx = EmitCtx {
                 verts: &verts,
                 heights,
+                perim: &perim,
+                poly: &poly,
+                room_is_street,
                 groups: &mut groups,
                 collider: &mut collider,
                 tex_key,
+                road_tunnel: &mut road_tunnel,
                 road_acc: &mut road_acc,
                 road_n: &mut road_n,
                 road_max_y: &mut road_max_y,
@@ -595,12 +681,53 @@ fn choose_spawn(psdl: &Psdl, roads: &[(Vec3, f32)]) -> Vec3 {
     }
 }
 
+/// Decoded road tunnel/railing parameters (attribute 0x09 subtype 3):
+/// walls are rendered along the road attributes that *follow* it in the
+/// same room's attribute stream. `tex_key` is the texture reference in
+/// effect when the tunnel attribute is read — the tunnel's six texture
+/// slots (left/right wall, ceiling, right/left outside, ground) are
+/// relative to it.
+#[derive(Clone, Copy)]
+struct RoadTunnel {
+    flags: u16,
+    /// Wall height above each road-edge vertex (metres).
+    height: f32,
+    /// Second height value — used for the ceiling apex on curved
+    /// ceilings; ignored for flat/railing geometry.
+    #[allow(dead_code)]
+    height2: f32,
+    tex_key: i64,
+}
+
+impl RoadTunnel {
+    const LEFT: u16 = 1 << 0;
+    const RIGHT: u16 = 1 << 1;
+    /// 0 = railing, 1 = wall (a wall implies a ceiling between its tops).
+    const STYLE_WALL: u16 = 1 << 2;
+    /// Bits 4–7 close/chamfer wall ends; bits 9–12 chamfer corners; not
+    /// modelled — counted as approximated.
+    const DETAIL_MASK: u16 = 0x1ff0;
+}
+
 struct EmitCtx<'a> {
     verts: &'a [Vec3],
     heights: &'a [f32],
+    /// Perimeter entry vertices (Bevy space) — junction-tunnel walls run
+    /// along enabled perimeter edges.
+    perim: &'a [Vec3],
+    /// The room's perimeter polygon in authored (x, z) space — used to
+    /// pick the visible side of wall-like geometry.
+    poly: &'a [(f32, f32)],
+    /// Whether the room contains drivable geometry: walls in street rooms
+    /// face the polygon interior; walls in facade-only building blocks
+    /// face outward.
+    room_is_street: bool,
     groups: &'a mut BTreeMap<i64, MeshBuilder>,
     collider: &'a mut ColliderBuilder,
     tex_key: i64,
+    /// Pending road-tunnel spec shared across the room's attributes:
+    /// subtype-3 tunnel attributes set it, road attributes read it.
+    road_tunnel: &'a mut Option<RoadTunnel>,
     road_acc: &'a mut Vec3,
     road_n: &'a mut usize,
     road_max_y: &'a mut f32,
@@ -636,6 +763,92 @@ impl EmitCtx<'_> {
     fn resolve(&self, refs: &[u16]) -> Result<Vec<Vec3>, AttrError> {
         refs.iter().map(|&i| vertex(i, self.verts)).collect()
     }
+
+    /// The direction the visible face of a wall on edge `l→r` should
+    /// point (Bevy space, horizontal). Convention: the visible face is on
+    /// the left of the authored edge — verified on retail London, where
+    /// perimeter-aligned facade edges always follow the clockwise
+    /// perimeter traversal and facades live in road-less building blocks.
+    /// The room polygon refines the choice: offsetting the edge midpoint
+    /// along each candidate normal, the street side is inside the polygon
+    /// for street rooms and outside it for building blocks. Ambiguous
+    /// cases (courtyard chords, missing perimeters) keep the authored
+    /// left-of-edge convention.
+    fn wall_facing(&self, l: Vec3, r: Vec3) -> Vec3 {
+        // Authored coordinates undo the Z mirror: (x, z) → (x, -z).
+        let (ax, az) = (l.x, -l.z);
+        let (bx, bz) = (r.x, -r.z);
+        let (dx, dz) = (bx - ax, bz - az);
+        let len = (dx * dx + dz * dz).sqrt();
+        if len < 1e-3 || self.poly.len() < 3 {
+            let (nx, nz) = (-dz, dx);
+            return Vec3::new(nx, 0.0, -nz).normalize_or_zero();
+        }
+        // Authored left-of-edge normal.
+        let (nx, nz) = (-dz / len, dx / len);
+        let mid = ((ax + bx) * 0.5, (az + bz) * 0.5);
+        let eps = (len * 0.25).clamp(0.05, 0.6);
+        let inside_l = point_in_poly((mid.0 + nx * eps, mid.1 + nz * eps), self.poly);
+        let inside_r = point_in_poly((mid.0 - nx * eps, mid.1 - nz * eps), self.poly);
+        let face_left = match (inside_l, inside_r) {
+            (true, false) => self.room_is_street,
+            (false, true) => !self.room_is_street,
+            _ => true,
+        };
+        let (fx, fz) = if face_left { (nx, nz) } else { (-nx, -nz) };
+        Vec3::new(fx, 0.0, -fz)
+    }
+
+    /// For mostly-vertical fans (gables, embankment walls — unlike ground
+    /// fans their authored winding isn't reliable): the Bevy-space
+    /// direction the fan should face, or `None` for horizontal/degenerate
+    /// fans and ambiguous sides (which keep the authored winding).
+    fn vertical_facing(&self, pts: &[Vec3]) -> Option<Vec3> {
+        let mut n = Vec3::ZERO;
+        for i in 1..pts.len().saturating_sub(1) {
+            let c = (pts[i] - pts[0]).cross(pts[i + 1] - pts[0]);
+            if c.length_squared() > 1e-6 {
+                n = c.normalize();
+                break;
+            }
+        }
+        if n.length_squared() < 0.5 || n.y.abs() >= 0.3 || self.poly.len() < 3 {
+            return None;
+        }
+        let mut mid = Vec3::ZERO;
+        for p in pts {
+            mid += *p;
+        }
+        mid /= pts.len() as f32;
+        // Authored (x, z) space again.
+        let (mx, mz) = (mid.x, -mid.z);
+        let (nx, nz) = (n.x, -n.z);
+        let nl = (nx * nx + nz * nz).sqrt().max(1e-6);
+        let (nx, nz) = (nx / nl, nz / nl);
+        let inside_p = point_in_poly((mx + nx * 0.5, mz + nz * 0.5), self.poly);
+        let inside_m = point_in_poly((mx - nx * 0.5, mz - nz * 0.5), self.poly);
+        if inside_p == inside_m {
+            return None;
+        }
+        // Face the street side: polygon interior for street rooms,
+        // exterior for building blocks.
+        let face_with_n = inside_p == self.room_is_street;
+        Some(if face_with_n { n } else { -n })
+    }
+}
+
+/// Ray-cast point-in-polygon over the authored (x, z) perimeter.
+fn point_in_poly(p: (f32, f32), poly: &[(f32, f32)]) -> bool {
+    let mut inside = false;
+    let n = poly.len();
+    for i in 0..n {
+        let (xi, zi) = poly[i];
+        let (xj, zj) = poly[(i + 1) % n];
+        if (zi > p.1) != (zj > p.1) && p.0 < (xj - xi) * (p.1 - zi) / (zj - zi) + xi {
+            inside = !inside;
+        }
+    }
+    inside
 }
 
 /// What became of one attribute.
@@ -670,7 +883,11 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
             if matches!(attr.kind, AttributeType::RoadFan) {
                 ctx.note_road(&pts);
             }
-            ctx.builder(0).fan(&pts);
+            match ctx.vertical_facing(&pts) {
+                // Wall-like fan: face the street side of the room.
+                Some(facing) => ctx.builder(0).fan_facing(&pts, facing),
+                None => ctx.builder(0).fan(&pts),
+            }
             ctx.collider.fan(&pts);
             Outcome::Emitted
         }
@@ -723,6 +940,7 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
             ctx.note_road(&rr);
             emit_sidewalk(ctx, &sw_l, &rl, true);
             emit_sidewalk(ctx, &sw_r, &rr, false);
+            emit_road_tunnel(ctx, &sw_l, &sw_r);
             Outcome::Emitted
         }
         AttributeType::SidewalkStrip => {
@@ -734,25 +952,34 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
                 let a = vertex(refs[2], ctx.verts)?;
                 let b = vertex(refs[3], ctx.verts)?;
                 let apex = a + Vec3::Y * SIDEWALK_LIFT;
+                // The cap is a slanted ramp whose authored winding varies;
+                // emit both windings so it never back-face-culls away.
                 ctx.builder(0).fan(&[b, a, apex]);
+                ctx.builder(0).fan(&[a, b, apex]);
                 ctx.collider.tri(a, b, apex);
                 return Ok(Outcome::Emitted);
             }
-            // Pairs (outer, inner): the top runs outer → inner+0.15, plus
-            // the vertical curb face on the inner edge. Strips may bend
-            // around corners, so winding is fixed per quad.
-            let mut outer = Vec::new();
-            let mut inner = Vec::new();
+            // Pairs (a, b): `a` is authored at ground level and lifted
+            // SIDEWALK_LIFT to form the top's inner edge (verified: b.y −
+            // a.y == 0.15 for every pair in retail London); `b` is authored
+            // at sidewalk-top height. The top spans lifted-a → b, and the
+            // vertical curb face sits on the `a` edge facing away from b.
+            let mut ground = Vec::new();
+            let mut top = Vec::new();
             for s in refs.chunks_exact(2) {
-                outer.push(vertex(s[0], ctx.verts)?);
-                inner.push(vertex(s[1], ctx.verts)?);
+                ground.push(vertex(s[0], ctx.verts)?);
+                top.push(vertex(s[1], ctx.verts)?);
             }
-            let lifted: Vec<Vec3> = inner.iter().map(|v| *v + Vec3::Y * SIDEWALK_LIFT).collect();
-            ctx.builder(0).strip_up(&outer, &lifted);
-            ctx.builder(0).strip_up(&inner, &lifted);
-            ctx.collider.strip(&outer, &lifted);
-            ctx.collider.strip(&inner, &lifted);
+            let lifted: Vec<Vec3> = ground
+                .iter()
+                .map(|v| *v + Vec3::Y * SIDEWALK_LIFT)
+                .collect();
+            ctx.builder(0).strip_up(&lifted, &top);
+            emit_curb(ctx, &ground, &lifted, &top);
+            ctx.collider.strip(&lifted, &top);
+            ctx.collider.strip(&ground, &lifted);
             ctx.note_road(&lifted);
+            ctx.note_road(&top);
             Outcome::Emitted
         }
         AttributeType::RoadNoSidewalks => {
@@ -768,6 +995,7 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
             ctx.collider.strip(&l, &r);
             ctx.note_road(&l);
             ctx.note_road(&r);
+            emit_road_tunnel(ctx, &l, &r);
             Outcome::Emitted
         }
         AttributeType::DividedRoad => {
@@ -823,6 +1051,7 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
             emit_sidewalk(ctx, &sw_l, &rl_out, true);
             emit_sidewalk(ctx, &sw_r, &rr_out, false);
             emit_divider(ctx, div_type, div_tex, value, &rl_in, &rr_in);
+            emit_road_tunnel(ctx, &sw_l, &sw_r);
             Outcome::Emitted
         }
         AttributeType::Crosswalk => {
@@ -845,7 +1074,8 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
             let scale = height(attr.data[1], ctx.heights)?;
             let l = vertex(attr.data[2], ctx.verts)?;
             let r = vertex(attr.data[3], ctx.verts)?;
-            ctx.builder(0).sliver_quad(l, r, top, scale);
+            let facing = ctx.wall_facing(l, r);
+            ctx.builder(0).sliver_quad(l, r, top, scale, facing);
             Outcome::Emitted
         }
         AttributeType::FacadeBound => {
@@ -872,19 +1102,65 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
             let ht = height(attr.data[1], ctx.heights)?;
             let l = vertex(attr.data[4], ctx.verts)?;
             let r = vertex(attr.data[5], ctx.verts)?;
+            let facing = ctx.wall_facing(l, r);
             ctx.builder(0).wall_quad(
                 l,
                 r,
                 hb,
                 ht,
-                attr.data[2].max(1) as f32,
-                attr.data[3].max(1) as f32,
+                [attr.data[2].max(1) as f32, attr.data[3].max(1) as f32],
+                facing,
             );
             Outcome::Emitted
         }
-        // Railing/tunnel parameters: layout partially known, no
-        // geometry emitted yet.
-        AttributeType::Tunnel => Outcome::Unsupported("tunnel".into()),
+        AttributeType::Tunnel => {
+            if attr.subtype == 0 {
+                // Junction tunnel/railing: [nSize, flags, h1w, h2w,
+                // unk3, enabledWalls…]. Bit i of the wall array draws a
+                // wall on the perimeter edge from entry i−1 to entry i
+                // (wrapping); entries may repeat a vertex when a point
+                // links several rooms — such edges are degenerate and
+                // skipped. Junction walls use texture n+0 for the face
+                // toward the room interior and n+4 outside.
+                if attr.data.len() < 5 {
+                    return Err(AttrError::Malformed("junction"));
+                }
+                let height = (attr.data[2] >> 8) as f32;
+                let walls = &attr.data[5..];
+                let n = ctx.perim.len();
+                for i in 0..n {
+                    let set = walls.get(i / 16).map_or(0, |w| (w >> (i % 16)) & 1);
+                    if set == 0 {
+                        continue;
+                    }
+                    let a = ctx.perim[(i + n - 1) % n];
+                    let b = ctx.perim[i];
+                    if (b - a).length_squared() < 1e-4 {
+                        continue;
+                    }
+                    let facing = ctx.wall_facing(a, b);
+                    emit_wall(ctx, a, b, height, ctx.tex_key, ctx.tex_key + 4, facing);
+                }
+                Outcome::Emitted
+            } else {
+                // Road tunnel/railing: [flags, h1w, h2w]; heights sit in
+                // the high byte of each word (metres). Applies to the
+                // room's following road attributes.
+                if attr.data.len() < 3 {
+                    return Err(AttrError::Malformed("tunnel"));
+                }
+                *ctx.road_tunnel = Some(RoadTunnel {
+                    flags: attr.data[0],
+                    height: (attr.data[1] >> 8) as f32,
+                    height2: (attr.data[2] >> 8) as f32,
+                    tex_key: ctx.tex_key,
+                });
+                if attr.data[0] & RoadTunnel::DETAIL_MASK != 0 {
+                    ctx.report.approximated += 1;
+                }
+                Outcome::Emitted
+            }
+        }
         AttributeType::TextureRef => Outcome::Emitted, // handled by the caller
         AttributeType::Unknown(raw) => {
             Outcome::Unsupported(format!("unknown-attribute-type-{raw:#04x}"))
@@ -900,14 +1176,133 @@ fn emit_sidewalk(ctx: &mut EmitCtx<'_>, outer: &[Vec3], road: &[Vec3], left_side
     let inner: Vec<Vec3> = road.iter().map(|v| *v + Vec3::Y * SIDEWALK_LIFT).collect();
     if left_side {
         ctx.builder(1).strip(outer, &inner); // top
-        ctx.builder(1).strip(road, &inner); // curb face, toward the road
     } else {
         ctx.builder(1).strip(&inner, outer);
-        ctx.builder(1).strip(&inner, road);
     }
+    emit_curb(ctx, road, &inner, outer);
     ctx.collider.strip(outer, &inner);
     ctx.collider.strip(road, &inner);
     ctx.note_road(&inner);
+}
+
+/// Vertical curb face on the `low` chain rising to `high`, each quad
+/// emitted facing horizontally away from the `far` chain (toward the
+/// surface the curb drops onto). UVs run along the edge and up by height
+/// so the vertical face isn't collapsed onto one texel row. The bottom
+/// edge is sunk slightly below the authored vertex — the adjacent
+/// surface's edge often sits a few centimetres lower, and a hairline
+/// crack would otherwise show sky through the seam.
+fn emit_curb(ctx: &mut EmitCtx<'_>, low: &[Vec3], high: &[Vec3], far: &[Vec3]) {
+    for i in 0..low.len().saturating_sub(1) {
+        let dir = {
+            let d = low[i + 1] - low[i];
+            Vec3::new(d.x, 0.0, d.z).normalize_or_zero()
+        };
+        let facing = {
+            let d = (low[i] - far[i]) + (low[i + 1] - far[i + 1]);
+            Vec3::new(d.x, 0.0, d.z).normalize_or_zero()
+        };
+        let uv = |p: Vec3| {
+            [
+                (p.x * dir.x + p.z * dir.z) / PLANAR_UV_SCALE,
+                p.y / PLANAR_UV_SCALE,
+            ]
+        };
+        let b0 = low[i] - Vec3::Y * CURB_SINK;
+        let b1 = low[i + 1] - Vec3::Y * CURB_SINK;
+        ctx.builder(1).quad_facing(
+            b0,
+            b1,
+            high[i + 1],
+            high[i],
+            [uv(b0), uv(b1), uv(high[i + 1]), uv(high[i])],
+            facing,
+        );
+    }
+}
+
+/// Wall quad on edge `a`–`b` rising `height` above each endpoint (sloped
+/// walls follow the ground). The `tex_in`/`tex_out` texture keys select
+/// the mesh group for the face pointing along `facing` and its backface
+/// (always emitted — railings are alpha-cutout and must render from both
+/// sides, and underpass walls are visible from above ground). UVs repeat
+/// horizontally every `height` metres, v = 1 at the base.
+fn emit_wall(
+    ctx: &mut EmitCtx<'_>,
+    a: Vec3,
+    b: Vec3,
+    height: f32,
+    tex_in: i64,
+    tex_out: i64,
+    facing: Vec3,
+) {
+    let s = ((b - a).length() / height.max(0.1)).round().max(1.0);
+    let uvs = [[0.0, 1.0], [s, 1.0], [s, 0.0], [0.0, 0.0]];
+    let at = a + Vec3::Y * height;
+    let bt = b + Vec3::Y * height;
+    ctx.builder_at(tex_in)
+        .quad_facing(a, b, bt, at, uvs, facing);
+    ctx.builder_at(tex_out)
+        .quad_facing(a, b, bt, at, uvs, -facing);
+    ctx.collider.quad(a, b, bt, at);
+}
+
+/// Walls (and, for the wall style, a flat ceiling) along the outermost
+/// chains of a road covered by a pending road-tunnel attribute. Faces
+/// toward the opposite chain are the tunnel interior; texture slots are
+/// relative to the tunnel attribute's own texture ref (n+0/n+1 inner
+/// walls, n+3/n+4 outer faces, n+2 ceiling).
+fn emit_road_tunnel(ctx: &mut EmitCtx<'_>, left: &[Vec3], right: &[Vec3]) {
+    let Some(t) = *ctx.road_tunnel else {
+        return;
+    };
+    for (chain, other, tex_in, tex_out, enabled) in [
+        (left, right, 0i64, 4i64, t.flags & RoadTunnel::LEFT != 0),
+        (right, left, 1, 3, t.flags & RoadTunnel::RIGHT != 0),
+    ] {
+        if !enabled {
+            continue;
+        }
+        for i in 0..chain.len().saturating_sub(1) {
+            let mid = (chain[i] + chain[i + 1]) * 0.5;
+            let inward = {
+                let d = (other[i] + other[i + 1]) * 0.5 - mid;
+                Vec3::new(d.x, 0.0, d.z).normalize_or_zero()
+            };
+            emit_wall(
+                ctx,
+                chain[i],
+                chain[i + 1],
+                t.height,
+                t.tex_key + tex_in,
+                t.tex_key + tex_out,
+                inward,
+            );
+        }
+    }
+    if t.flags & RoadTunnel::STYLE_WALL != 0
+        && t.flags & RoadTunnel::LEFT != 0
+        && t.flags & RoadTunnel::RIGHT != 0
+    {
+        // Flat ceiling between the wall tops (curved ceilings are
+        // approximated as flat — the DETAIL_MASK count covers that).
+        let n = left.len().min(right.len());
+        for i in 0..n.saturating_sub(1) {
+            let lt0 = left[i] + Vec3::Y * t.height;
+            let lt1 = left[i + 1] + Vec3::Y * t.height;
+            let rt0 = right[i] + Vec3::Y * t.height;
+            let rt1 = right[i + 1] + Vec3::Y * t.height;
+            ctx.builder_at(t.tex_key + 2).quad_facing(
+                lt0,
+                lt1,
+                rt1,
+                rt0,
+                [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                Vec3::NEG_Y,
+            );
+            ctx.collider.quad(lt0, lt1, rt1, rt0);
+        }
+    }
 }
 
 /// Divider geometry for a divided road. `div_tex` is the resolved texture
@@ -1066,19 +1461,21 @@ fn decode_tex(bytes: &[u8], logical: &str) -> Option<(Image, bool)> {
     // TEX flags: ClampU = 0x01, ClampV = 0x10000 (per TEX.md); the default
     // is repeat — tiled roads rely on it.
     let bits = tex.header.bits;
-    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-        address_mode_u: if bits & 0x01 != 0 {
-            ImageAddressMode::ClampToEdge
-        } else {
-            ImageAddressMode::Repeat
-        },
-        address_mode_v: if bits & 0x1_0000 != 0 {
-            ImageAddressMode::ClampToEdge
-        } else {
-            ImageAddressMode::Repeat
-        },
-        ..Default::default()
-    });
+    // Glancing-angle surfaces (roads) smear badly without anisotropy; it
+    // requires all-Linear filters.
+    let mut sampler = ImageSamplerDescriptor::linear();
+    sampler.anisotropy_clamp = 16;
+    sampler.address_mode_u = if bits & 0x01 != 0 {
+        ImageAddressMode::ClampToEdge
+    } else {
+        ImageAddressMode::Repeat
+    };
+    sampler.address_mode_v = if bits & 0x1_0000 != 0 {
+        ImageAddressMode::ClampToEdge
+    } else {
+        ImageAddressMode::Repeat
+    };
+    image.sampler = ImageSampler::Descriptor(sampler);
     // Alpha is decided from the decoded pixels: only formats that actually
     // carry an alpha channel can produce transparency.
     let has_alpha = tex
@@ -1109,12 +1506,12 @@ fn decode_buffer_image(bytes: &[u8], ext: &str, logical: &str) -> Option<(Image,
             return None;
         }
     };
-    // City surfaces tile; repeat is the pipeline default.
-    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-        address_mode_u: ImageAddressMode::Repeat,
-        address_mode_v: ImageAddressMode::Repeat,
-        ..Default::default()
-    });
+    // City surfaces tile; repeat + anisotropy is the pipeline default.
+    let mut sampler = ImageSamplerDescriptor::linear();
+    sampler.anisotropy_clamp = 16;
+    sampler.address_mode_u = ImageAddressMode::Repeat;
+    sampler.address_mode_v = ImageAddressMode::Repeat;
+    image.sampler = ImageSampler::Descriptor(sampler);
     let format = image.texture_descriptor.format;
     let has_alpha = match format {
         TextureFormat::Rgba8UnormSrgb
