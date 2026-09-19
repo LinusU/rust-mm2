@@ -223,21 +223,21 @@ impl BndFile {
             }
         }
 
-        if let Some(n) = declared_verts {
-            if file.verts.len() != n as usize {
-                return Err(BndError {
-                    line: 0,
-                    message: format!("declared {n} verts but parsed {}", file.verts.len()),
-                });
-            }
+        if let Some(n) = declared_verts
+            && file.verts.len() != n as usize
+        {
+            return Err(BndError {
+                line: 0,
+                message: format!("declared {n} verts but parsed {}", file.verts.len()),
+            });
         }
-        if let Some(n) = declared_polys {
-            if file.polys.len() != n as usize {
-                return Err(BndError {
-                    line: 0,
-                    message: format!("declared {n} polys but parsed {}", file.polys.len()),
-                });
-            }
+        if let Some(n) = declared_polys
+            && file.polys.len() != n as usize
+        {
+            return Err(BndError {
+                line: 0,
+                message: format!("declared {n} polys but parsed {}", file.polys.len()),
+            });
         }
         Ok(file)
     }

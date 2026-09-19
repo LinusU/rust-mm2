@@ -147,10 +147,10 @@ fn aabb_min_max(
     bound: Option<&BndFile>,
     body: ([f32; 3], [f32; 3]),
 ) -> ([f32; 3], [f32; 3], &'static str) {
-    if let Some(b) = bound {
-        if let Some((min, max)) = b.aabb() {
-            return (min, max, "bound");
-        }
+    if let Some(b) = bound
+        && let Some((min, max)) = b.aabb()
+    {
+        return (min, max, "bound");
     }
     (body.0, body.1, "model")
 }

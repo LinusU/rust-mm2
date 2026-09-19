@@ -403,10 +403,10 @@ pub fn build_model(pkg: &Pkg, mut mtx_for: impl FnMut(&str) -> Option<Mtx>) -> V
 
     // Link fenders to wheel indices.
     for (i, part) in model.parts.iter().enumerate() {
-        if let PartRole::Fender(n) = part.role {
-            if let Some(w) = model.wheels.iter_mut().find(|w| !w.trailer && w.index == n) {
-                w.parts.push(i);
-            }
+        if let PartRole::Fender(n) = part.role
+            && let Some(w) = model.wheels.iter_mut().find(|w| !w.trailer && w.index == n)
+        {
+            w.parts.push(i);
         }
     }
 
@@ -461,11 +461,7 @@ pub fn build_model(pkg: &Pkg, mut mtx_for: impl FnMut(&str) -> Option<Mtx>) -> V
 }
 
 /// The `shaders` chunk accessor with bounds checking for paint selection.
-pub fn shader_for_paint<'a>(
-    shaders: &'a PkgShaders,
-    paint: usize,
-    offset: i32,
-) -> Option<&'a PkgShader> {
+pub fn shader_for_paint(shaders: &PkgShaders, paint: usize, offset: i32) -> Option<&PkgShader> {
     if paint >= shaders.paint_jobs as usize || offset < 0 {
         return None;
     }

@@ -231,8 +231,7 @@ impl TuneFile {
         let root = parse_block(&toks, &mut pos, &mut depth)?;
 
         // Trailing tokens after the root block are only tolerated if empty.
-        while pos < toks.len() {
-            let t = &toks[pos];
+        if let Some(t) = toks.get(pos) {
             return Err(TuneError {
                 line: t.line,
                 col: t.col,

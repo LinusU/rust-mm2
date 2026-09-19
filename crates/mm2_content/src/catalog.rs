@@ -154,31 +154,29 @@ impl VehicleCatalog {
         for path in vfs.list() {
             let lower = path.to_ascii_lowercase();
             // tune/<id>.{info,inf,vinfo} and tune/<id>.info.bak
-            if let Some(rest) = lower.strip_prefix("tune/") {
-                if let Some(base) = rest
+            if let Some(rest) = lower.strip_prefix("tune/")
+                && let Some(base) = rest
                     .strip_suffix(".info")
                     .or_else(|| rest.strip_suffix(".inf"))
                     .or_else(|| rest.strip_suffix(".vinfo"))
                     .or_else(|| rest.strip_suffix(".info.bak"))
-                {
-                    if !base.contains('/') {
-                        ids.insert(base.to_string());
-                    }
-                }
+                && !base.contains('/')
+            {
+                ids.insert(base.to_string());
             }
-            if let Some(rest) = lower.strip_prefix("tune/vehicle/") {
-                if let Some(base) = rest.strip_suffix(".vehcarsim") {
-                    ids.insert(base.to_string());
-                }
+            if let Some(rest) = lower.strip_prefix("tune/vehicle/")
+                && let Some(base) = rest.strip_suffix(".vehcarsim")
+            {
+                ids.insert(base.to_string());
             }
             // Player-car geometry uses the `vp` prefix; traffic (`va`),
             // props and scenery are excluded.
-            if let Some(rest) = lower.strip_prefix("geometry/") {
-                if let Some(base) = rest.strip_suffix(".pkg") {
-                    if base.starts_with("vp") && !base.contains('/') {
-                        ids.insert(base.to_string());
-                    }
-                }
+            if let Some(rest) = lower.strip_prefix("geometry/")
+                && let Some(base) = rest.strip_suffix(".pkg")
+                && base.starts_with("vp")
+                && !base.contains('/')
+            {
+                ids.insert(base.to_string());
             }
         }
 
@@ -220,35 +218,30 @@ impl VehicleCatalog {
         let mut locked = false;
         let mut saw_info = false;
 
-        match &info_res {
-            Some(r) => {
-                note_src(r, &mut any_mod, &mut all_mod);
-                deps.info = Some(describe(r));
-                saw_info = true;
-                match vfs.read(r) {
-                    Ok(bytes) => {
-                        let info = InfoFile::parse(&String::from_utf8_lossy(&bytes));
-                        for d in &info.diagnostics {
-                            notes.push(format!("metadata: {d}"));
-                        }
-                        if let Some(d) = info.get("Description") {
-                            display_name = d.to_string();
-                        }
-                        paints = info.list("Colors");
-                        locked = info.u32("UnlockScore").unwrap_or(0) > 0
-                            || info.u32("UnlockFlags").unwrap_or(0) != 0;
-                        if let Some(base) = info.get("BaseName") {
-                            if !base.eq_ignore_ascii_case(id) {
-                                notes.push(format!(
-                                    "BaseName {base:?} differs from catalog id {id:?}"
-                                ));
-                            }
-                        }
+        if let Some(r) = &info_res {
+            note_src(r, &mut any_mod, &mut all_mod);
+            deps.info = Some(describe(r));
+            saw_info = true;
+            match vfs.read(r) {
+                Ok(bytes) => {
+                    let info = InfoFile::parse(&String::from_utf8_lossy(&bytes));
+                    for d in &info.diagnostics {
+                        notes.push(format!("metadata: {d}"));
                     }
-                    Err(e) => notes.push(format!("metadata read failed: {e}")),
+                    if let Some(d) = info.get("Description") {
+                        display_name = d.to_string();
+                    }
+                    paints = info.list("Colors");
+                    locked = info.u32("UnlockScore").unwrap_or(0) > 0
+                        || info.u32("UnlockFlags").unwrap_or(0) != 0;
+                    if let Some(base) = info.get("BaseName")
+                        && !base.eq_ignore_ascii_case(id)
+                    {
+                        notes.push(format!("BaseName {base:?} differs from catalog id {id:?}"));
+                    }
                 }
+                Err(e) => notes.push(format!("metadata read failed: {e}")),
             }
-            None => {}
         }
 
         if let Some(r) = vfs.resolve(&format!("tune/vehicle/{id}.vehcarsim")) {
