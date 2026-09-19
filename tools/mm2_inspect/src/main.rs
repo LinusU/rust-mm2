@@ -88,6 +88,13 @@ enum Command {
         /// Logical path of the city file.
         logical: String,
     },
+    /// Write the raw (decompressed) bytes of a logical path to stdout.
+    Dump {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Logical path, e.g. `tune/vpbug.info`.
+        logical: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -115,6 +122,7 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Tex { dir, logical } => tex(dir, cli.mods.as_deref(), logical),
         Command::Pkg { dir, logical } => pkg(dir, cli.mods.as_deref(), logical),
         Command::Psdl { dir, logical } => psdl(dir, cli.mods.as_deref(), logical),
+        Command::Dump { dir, logical } => dump(dir, cli.mods.as_deref(), logical),
     }
 }
 
@@ -432,6 +440,14 @@ fn psdl(dir: &Path, mods: Option<&Path>, logical: &str) -> Result<(), Box<dyn st
         psdl.bounds_min, psdl.bounds_max, psdl.bounds_radius
     );
     println!("unparsed attribute words remaining: {unparsed}");
+    Ok(())
+}
+
+fn dump(dir: &Path, mods: Option<&Path>, logical: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let vfs = build_vfs(dir, mods)?;
+    let (bytes, _r) = vfs.read_path(logical)?;
+    use std::io::Write;
+    std::io::stdout().write_all(&bytes)?;
     Ok(())
 }
 

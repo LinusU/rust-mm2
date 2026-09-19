@@ -5,12 +5,17 @@
 //! Malformed input produces structured [`FormatError`] values rather than
 //! panicking.
 
+pub mod bnd;
 pub mod dave;
+pub mod info;
 pub mod inst;
+pub mod mtx;
 pub mod pkg;
 pub mod psdl;
 pub mod reader;
 pub mod tex;
+pub mod tune;
+pub mod veh;
 
 pub use reader::Reader;
 
