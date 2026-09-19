@@ -1894,14 +1894,34 @@ fn lod_rank(name: &str) -> u8 {
     }
 }
 
+/// Collision triangles accumulated over a whole prop (all best-LOD
+/// geometries, every section). Props are static, so their collision is the
+/// authored triangle mesh: a convex hull would seal the openings of the
+/// concave props the city is full of — archways, bridge trusses, tunnel
+/// mouths — turning them into invisible walls and floors.
+#[derive(Default)]
+struct PropCollision {
+    positions: Vec<Vec3>,
+    tris: Vec<[u32; 3]>,
+}
+
+impl PropCollision {
+    fn into_collider(self) -> Option<Collider> {
+        if self.positions.is_empty() || self.tris.is_empty() {
+            return None;
+        }
+        Some(Collider::trimesh(self.positions, self.tris))
+    }
+}
+
 /// Build renderable parts (best-LOD mesh per stem, grouped by shader) plus
-/// a convex-hull point set for collision from a parsed PKG.
+/// one triangle-mesh collider covering the whole prop.
 fn pkg_to_parts(
     pkg: &Pkg,
     mats: &mut MaterialCache<'_>,
     meshes: &mut Assets<Mesh>,
     missing_prims: &mut usize,
-) -> Vec<(Handle<Mesh>, Handle<StandardMaterial>, Vec<Vec3>)> {
+) -> PropModel {
     let mut best: HashMap<String, (u8, &str)> = HashMap::new();
     for (name, _geo) in pkg.geometries() {
         let lower = name.to_ascii_lowercase();
@@ -1926,6 +1946,7 @@ fn pkg_to_parts(
     };
 
     let mut out = Vec::new();
+    let mut collision = PropCollision::default();
     for (stem, (_, name)) in best {
         // Shadow/damage stand-ins are not rendered props.
         if stem.contains("shadow") || stem.contains("dmg") {
@@ -1935,7 +1956,6 @@ fn pkg_to_parts(
             continue;
         };
         let mut by_shader: HashMap<i32, MeshBuilder> = HashMap::new();
-        let mut hull_points: Vec<Vec3> = Vec::new();
         for section in &geo.sections {
             let b = by_shader.entry(section.shader_offset).or_default();
             for strip in &section.strips {
@@ -1945,7 +1965,7 @@ fn pkg_to_parts(
                     *missing_prims += 1;
                     continue;
                 }
-                emit_strip(b, strip, &mut hull_points);
+                emit_strip(b, strip, &mut collision);
             }
         }
         for (shader_off, builder) in by_shader {
@@ -1959,15 +1979,21 @@ fn pkg_to_parts(
                 }
                 None => mats.fallback.clone(),
             };
-            out.push((meshes.add(builder.build()), mat, hull_points.clone()));
+            out.push((meshes.add(builder.build()), mat));
         }
     }
-    out
+    PropModel {
+        parts: out,
+        collider: collision.into_collider(),
+    }
 }
 
 /// Emit one PKG strip into a builder; authored normals and UVs preserved.
-fn emit_strip(b: &mut MeshBuilder, strip: &PkgStrip, hull: &mut Vec<Vec3>) {
+/// The same triangles are accumulated into `col` for collision (winding is
+/// irrelevant to the physics backend).
+fn emit_strip(b: &mut MeshBuilder, strip: &PkgStrip, col: &mut PropCollision) {
     let base = b.positions.len() as u32;
+    let col_base = col.positions.len() as u32;
     for v in &strip.vertices {
         let p = v3(v.position);
         let uv = v.tex_coords.first().copied().unwrap_or([0.0, 0.0]);
@@ -1979,10 +2005,15 @@ fn emit_strip(b: &mut MeshBuilder, strip: &PkgStrip, hull: &mut Vec<Vec3>) {
                 b.vert(p, uv);
             }
         }
-        hull.push(p);
+        col.positions.push(p);
     }
     for t in strip.indices.chunks_exact(3) {
         b.tri(base + t[0] as u32, base + t[1] as u32, base + t[2] as u32);
+        col.tris.push([
+            col_base + t[0] as u32,
+            col_base + t[1] as u32,
+            col_base + t[2] as u32,
+        ]);
     }
 }
 
@@ -2010,21 +2041,25 @@ fn adjust_material(
     Some(materials.add(mat))
 }
 
-/// Mesh + material + hull pairs prepared from one PKG.
-type PropParts = Vec<(Handle<Mesh>, Handle<StandardMaterial>, Vec<Vec3>)>;
+/// Everything prepared from one PKG: the renderable parts and the single
+/// collider shared by every placement of that prop.
+struct PropModel {
+    parts: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
+    collider: Option<Collider>,
+}
 
 /// Cache of PKG name → prepared meshes+materials handles.
 struct PropCache<'a> {
     vfs: &'a Vfs,
     meshes: &'a mut Assets<Mesh>,
     mats: MaterialCache<'a>,
-    cache: HashMap<String, Option<PropParts>>,
+    cache: HashMap<String, Option<PropModel>>,
     /// Strips with unsupported primitive types encountered while building.
     missing_prims: usize,
 }
 
 impl<'a> PropCache<'a> {
-    fn get(&mut self, name: &str) -> Option<&PropParts> {
+    fn get(&mut self, name: &str) -> Option<&PropModel> {
         let key = name.to_ascii_lowercase();
         if !self.cache.contains_key(&key) {
             let built = self.build(&key);
@@ -2033,7 +2068,7 @@ impl<'a> PropCache<'a> {
         self.cache.get(&key).and_then(|o| o.as_ref())
     }
 
-    fn build(&mut self, name: &str) -> Option<PropParts> {
+    fn build(&mut self, name: &str) -> Option<PropModel> {
         let resolved = self
             .vfs
             .resolve_preferred(&format!("geometry/{name}"), &["pkg"])
@@ -2046,11 +2081,11 @@ impl<'a> PropCache<'a> {
                 return None;
             }
         };
-        let parts = pkg_to_parts(&pkg, &mut self.mats, self.meshes, &mut self.missing_prims);
-        if parts.is_empty() {
+        let model = pkg_to_parts(&pkg, &mut self.mats, self.meshes, &mut self.missing_prims);
+        if model.parts.is_empty() {
             return None;
         }
-        Some(parts)
+        Some(model)
     }
 }
 
@@ -2183,9 +2218,8 @@ pub fn load_city(
         ));
     }
 
-    // INST placements → PKG props, each with an explicit collision policy:
-    // a convex hull over the best-LOD vertices (documented approximation —
-    // good enough for lamps, signs and rails in a driving slice).
+    // INST placements → PKG props. Collision is the prop's own triangle
+    // mesh, spawned once per placement beside its visual parts.
     let animated;
     let inst_path = psdl_path.replace(".psdl", ".inst");
     match vfs.read_path(&inst_path) {
@@ -2199,7 +2233,7 @@ pub fn load_city(
                     missing_prims: 0,
                 };
                 for comp in &comps {
-                    let Some(parts) = cache.get(&comp.package_name) else {
+                    let Some(model) = cache.get(&comp.package_name) else {
                         report.props_failed += 1;
                         continue;
                     };
@@ -2208,18 +2242,25 @@ pub fn load_city(
                         InstPlacement::Simple(s) => simple_transform(s),
                     };
                     let transform = Transform::from_matrix(mat4);
-                    for (mesh, material, hull) in parts {
-                        let mut e = commands.spawn((
+                    for (mesh, material) in &model.parts {
+                        commands.spawn((
                             CityEntity,
                             Mesh3d(mesh.clone()),
                             MeshMaterial3d(material.clone()),
                             transform,
-                            RigidBody::Static,
                             Name::new(format!("prop-{}", comp.package_name)),
                         ));
-                        if let Some(c) = Collider::convex_hull(hull.clone()) {
-                            e.insert(c);
-                        }
+                    }
+                    // One static body per placement — not one per shader
+                    // group, which used to stack duplicate colliders.
+                    if let Some(collider) = &model.collider {
+                        commands.spawn((
+                            CityEntity,
+                            RigidBody::Static,
+                            collider.clone(),
+                            transform,
+                            Name::new(format!("prop-{}-collider", comp.package_name)),
+                        ));
                     }
                     report.props_spawned += 1;
                 }
