@@ -119,6 +119,10 @@ fn group_material(
 
 /// Spawn one mesh entity per `MeshGroup` of the part's best LOD under
 /// `parent`, baking `recenter` into the geometry.
+// Bevy spawn helpers thread `Commands` plus the several `Assets<T>`
+// stores the meshes, images and materials live in; bundling them behind
+// a context struct would only move the same borrows one level down.
+#[allow(clippy::too_many_arguments)]
 fn spawn_groups(
     commands: &mut Commands,
     parent: Entity,
@@ -147,6 +151,10 @@ fn spawn_groups(
 
 /// Spawn all renderable parts of `model` under `root` (the physics body).
 /// Returns texture stems that failed to resolve.
+// Bevy spawn helpers thread `Commands` plus the several `Assets<T>`
+// stores the meshes, images and materials live in; bundling them behind
+// a context struct would only move the same borrows one level down.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_vehicle_model(
     commands: &mut Commands,
     vfs: &Vfs,
@@ -292,6 +300,10 @@ pub fn spawn_vehicle_model(
 /// Spawn a trailer body joined to `car` at the authored hitch anchors and
 /// build its model under it. Returns the trailer entity and any missing
 /// texture stems.
+// Bevy spawn helpers thread `Commands` plus the several `Assets<T>`
+// stores the meshes, images and materials live in; bundling them behind
+// a context struct would only move the same borrows one level down.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_trailer(
     commands: &mut Commands,
     vfs: &Vfs,
