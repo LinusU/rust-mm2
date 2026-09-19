@@ -4,14 +4,15 @@ description = "Bevy application shell for the MM2-inspired engine"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+default-run = "mm2"
 
 [[bin]]
 name = "mm2"
 path = "src/main.rs"
 
 [dependencies]
-avian3d = { workspace = true, features = ["parry-f32", "debug-plugin"] }
-bevy = "0.19"
+avian3d.workspace = true
+bevy = { version = "0.19", features = ["tga"] }
 clap.workspace = true
 mm2_assets.workspace = true
 mm2_formats.workspace = true
