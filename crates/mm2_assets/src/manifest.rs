@@ -73,10 +73,7 @@ impl ModManifest {
         }
         Ok(Self {
             name: file.section.name.unwrap_or_else(|| id.clone()),
-            version: file
-                .section
-                .version
-                .unwrap_or_else(|| "0.0.0".to_string()),
+            version: file.section.version.unwrap_or_else(|| "0.0.0".to_string()),
             description: file.section.description,
             authors: file.section.authors,
             id,

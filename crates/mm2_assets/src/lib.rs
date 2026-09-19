@@ -72,7 +72,10 @@ mod tests {
             normalize_path("Texture\\London\\Foo.TEX"),
             Some("texture/london/foo.tex".to_string())
         );
-        assert_eq!(normalize_path("./texture//foo.tex").as_deref(), Some("texture/foo.tex"));
+        assert_eq!(
+            normalize_path("./texture//foo.tex").as_deref(),
+            Some("texture/foo.tex")
+        );
     }
 
     #[test]

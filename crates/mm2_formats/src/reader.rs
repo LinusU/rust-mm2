@@ -161,12 +161,11 @@ impl<'a> Reader<'a> {
                 offset,
                 reason: "unterminated string",
             })?;
-        let s = String::from_utf8(window[..end].to_vec()).map_err(|_| {
-            FormatError::InvalidString {
+        let s =
+            String::from_utf8(window[..end].to_vec()).map_err(|_| FormatError::InvalidString {
                 offset,
                 reason: "string is not valid UTF-8/ASCII",
-            }
-        })?;
+            })?;
         self.pos = offset + end + 1;
         Ok(s)
     }
@@ -191,10 +190,7 @@ mod tests {
         let data = [1u8, 2];
         let mut r = Reader::new(&data);
         r.u8().unwrap();
-        assert!(matches!(
-            r.u32(),
-            Err(FormatError::UnexpectedEof { .. })
-        ));
+        assert!(matches!(r.u32(), Err(FormatError::UnexpectedEof { .. })));
     }
 
     #[test]

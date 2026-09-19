@@ -20,7 +20,9 @@ use std::ops::Range;
 #[derive(Debug, thiserror::Error)]
 pub enum FormatError {
     /// The input ended before a complete structure could be read.
-    #[error("unexpected end of data at offset {offset:#x}, needed {needed} bytes, have {remaining}")]
+    #[error(
+        "unexpected end of data at offset {offset:#x}, needed {needed} bytes, have {remaining}"
+    )]
     UnexpectedEof {
         /// Byte offset where the read started.
         offset: usize,

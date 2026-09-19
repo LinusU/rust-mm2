@@ -162,18 +162,21 @@ impl TexFile {
             bits,
         };
 
-        let palette = format.palette_entries().map(|n| {
-            let mut pal = Vec::with_capacity(n);
-            for _ in 0..n {
-                // Palette order is blue, green, red, alpha.
-                let b = r.u8()?;
-                let g = r.u8()?;
-                let red = r.u8()?;
-                let a = r.u8()?;
-                pal.push([red, g, b, a]);
-            }
-            Ok::<_, FormatError>(pal)
-        }).transpose()?;
+        let palette = format
+            .palette_entries()
+            .map(|n| {
+                let mut pal = Vec::with_capacity(n);
+                for _ in 0..n {
+                    // Palette order is blue, green, red, alpha.
+                    let b = r.u8()?;
+                    let g = r.u8()?;
+                    let red = r.u8()?;
+                    let a = r.u8()?;
+                    pal.push([red, g, b, a]);
+                }
+                Ok::<_, FormatError>(pal)
+            })
+            .transpose()?;
 
         // MM2 textures store `mips` additional levels; treat the value as the
         // total level count including base (observed values are >= 1).

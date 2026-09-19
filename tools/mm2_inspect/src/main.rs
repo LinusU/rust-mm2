@@ -72,8 +72,7 @@ enum Command {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
     let cli = Cli::parse();
@@ -191,15 +190,22 @@ fn tex(dir: &Path, logical: &str) -> Result<(), Box<dyn std::error::Error>> {
     let vfs = build_vfs(dir)?;
     let (bytes, r) = vfs.read_path(logical)?;
     let tex = TexFile::parse(&bytes).map_err(|e| attach(&r, e))?;
-    println!("{}: {}x{} format={:?} mips={} bits={:#x}",
+    println!(
+        "{}: {}x{} format={:?} mips={} bits={:#x}",
         r.logical,
         tex.header.width,
         tex.header.height,
         tex.header.format,
         tex.header.mips,
-        tex.header.bits);
+        tex.header.bits
+    );
     for (i, level) in tex.levels.iter().enumerate() {
-        println!("  level {i}: {}x{} ({} bytes)", level.width, level.height, level.data.len());
+        println!(
+            "  level {i}: {}x{} ({} bytes)",
+            level.width,
+            level.height,
+            level.data.len()
+        );
     }
     Ok(())
 }
@@ -264,7 +270,10 @@ fn psdl(dir: &Path, logical: &str) -> Result<(), Box<dyn std::error::Error>> {
         psdl.rooms.len(),
         psdl.paths.len()
     );
-    println!("bounds: {:?} .. {:?}, radius {}", psdl.bounds_min, psdl.bounds_max, psdl.bounds_radius);
+    println!(
+        "bounds: {:?} .. {:?}, radius {}",
+        psdl.bounds_min, psdl.bounds_max, psdl.bounds_radius
+    );
     println!("unparsed attribute words remaining: {unparsed}");
     Ok(())
 }

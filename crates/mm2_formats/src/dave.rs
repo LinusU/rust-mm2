@@ -89,19 +89,17 @@ impl<'a> DaveArchive<'a> {
         let names_size = r.u32()? as usize;
 
         let entries_base = HEADER_SIZE;
-        let names_base = HEADER_SIZE
-            .checked_add(names_offset)
-            .ok_or(FormatError::InvalidValue {
-                offset: 8,
-                field: "names_offset",
-                value: names_offset as u64,
-                reason: "names offset overflows",
-            })?;
+        let names_base =
+            HEADER_SIZE
+                .checked_add(names_offset)
+                .ok_or(FormatError::InvalidValue {
+                    offset: 8,
+                    field: "names_offset",
+                    value: names_offset as u64,
+                    reason: "names offset overflows",
+                })?;
         check_range(data.len(), names_base..names_base + names_size)?;
-        check_range(
-            data.len(),
-            entries_base..entries_base + count * ENTRY_SIZE,
-        )?;
+        check_range(data.len(), entries_base..entries_base + count * ENTRY_SIZE)?;
 
         let mut entries = Vec::with_capacity(count);
         for i in 0..count {
@@ -113,14 +111,15 @@ impl<'a> DaveArchive<'a> {
             let stored_size = er.u32()? as usize;
 
             // Resolve the name inside the filename blob.
-            let name_start = names_base.checked_add(name_offset).ok_or(
-                FormatError::InvalidValue {
-                    offset: entry_offset,
-                    field: "name_offset",
-                    value: name_offset as u64,
-                    reason: "name offset overflows",
-                },
-            )?;
+            let name_start =
+                names_base
+                    .checked_add(name_offset)
+                    .ok_or(FormatError::InvalidValue {
+                        offset: entry_offset,
+                        field: "name_offset",
+                        value: name_offset as u64,
+                        reason: "name offset overflows",
+                    })?;
             if name_offset >= names_size {
                 return Err(FormatError::InvalidValue {
                     offset: entry_offset,
@@ -138,13 +137,12 @@ impl<'a> DaveArchive<'a> {
                     offset: name_start,
                     reason: "entry name is not NUL terminated",
                 })?;
-            let name =
-                String::from_utf8(data[name_start..name_end].to_vec()).map_err(|_| {
-                    FormatError::InvalidString {
-                        offset: name_start,
-                        reason: "entry name is not valid UTF-8/ASCII",
-                    }
-                })?;
+            let name = String::from_utf8(data[name_start..name_end].to_vec()).map_err(|_| {
+                FormatError::InvalidString {
+                    offset: name_start,
+                    reason: "entry name is not valid UTF-8/ASCII",
+                }
+            })?;
 
             check_range(data.len(), data_offset..data_offset + stored_size)?;
 
