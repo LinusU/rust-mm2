@@ -960,8 +960,8 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
                 let apex = a + Vec3::Y * SIDEWALK_LIFT;
                 // The cap is a slanted ramp whose authored winding varies;
                 // emit both windings so it never back-face-culls away.
-                ctx.builder(0).fan(&[b, a, apex]);
-                ctx.builder(0).fan(&[a, b, apex]);
+                ctx.builder(1).fan(&[b, a, apex]);
+                ctx.builder(1).fan(&[a, b, apex]);
                 ctx.collider.tri(a, b, apex);
                 return Ok(Outcome::Emitted);
             }
@@ -980,9 +980,10 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
                 .iter()
                 .map(|v| *v + Vec3::Y * SIDEWALK_LIFT)
                 .collect();
-            // Sidewalk textures have the kerb stones at v = 0.
+            // Intersection textures: n = road, n+1 = sidewalk, n+2 =
+            // crosswalk. Sidewalk textures have the kerb stones at v = 0.
             let us = chain_u(&lifted, &top, SIDEWALK_TILE_LENGTH);
-            ctx.builder(0).strip_uv(&lifted, &top, &us, 0.0, 1.0);
+            ctx.builder(1).strip_uv(&lifted, &top, &us, 0.0, 1.0);
             emit_curb(ctx, &ground, &lifted, &top);
             ctx.collider.strip(&lifted, &top);
             ctx.collider.strip(&ground, &lifted);

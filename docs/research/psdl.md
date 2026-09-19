@@ -73,6 +73,8 @@ Notes:
   mirror the texture about their midline. Walkway (`0x02`) textures span the
   full width (e.g. `r_sub_l` rails). Sidewalk textures have the kerb stones
   at `v = 0`. Fans are planar-mapped.
+- **Intersection texture slots**: `n` = road fans, `n+1` = sidewalk strips
+  (`0x01`).
 - **Facade** (`0x0b`): the two height indices are *indices into the height
   pool* (absolute Y), not raw metres. The wall is Y-aligned between the two
   base verts; `u`/`v` are texture repeat counts.
