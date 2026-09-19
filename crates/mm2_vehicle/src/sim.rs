@@ -36,7 +36,11 @@ fn power_peak_torque(cfg: &EngineConfig) -> f32 {
     match (cfg.peak_power_rpm, cfg.max_power_w) {
         (Some(pp), Some(pw)) => {
             let omega = pp * std::f32::consts::TAU / 60.0;
-            if omega > 0.0 { pw / omega } else { cfg.peak_torque_nm }
+            if omega > 0.0 {
+                pw / omega
+            } else {
+                cfg.peak_torque_nm
+            }
         }
         _ => cfg.peak_torque_nm,
     }

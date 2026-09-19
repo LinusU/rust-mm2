@@ -156,7 +156,12 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Psdl { dir, logical } => psdl(dir, cli.mods.as_deref(), logical),
         Command::Dump { dir, logical } => dump(dir, cli.mods.as_deref(), logical),
         Command::Cars { dir } => cars(dir, cli.mods.as_deref()),
-        Command::Car { dir, id, paint, json } => car(dir, cli.mods.as_deref(), id, *paint, *json),
+        Command::Car {
+            dir,
+            id,
+            paint,
+            json,
+        } => car(dir, cli.mods.as_deref(), id, *paint, *json),
         Command::ValidateCars { dir, all, strict } => {
             validate_cars(dir, cli.mods.as_deref(), *all, *strict)
         }
@@ -669,7 +674,12 @@ fn car(
     } else {
         let c = &def.config;
         println!("== {} — {} ==", def.id, def.display_name);
-        println!("paints ({} declared, {} jobs): {}", def.paints.len(), def.model.paint_jobs, def.paints.join(", "));
+        println!(
+            "paints ({} declared, {} jobs): {}",
+            def.paints.len(),
+            def.model.paint_jobs,
+            def.paints.join(", ")
+        );
         println!(
             "mass {:.0} kg, com {:?}, size {:?}, wheelbase {:.2} m, track {:.2} m",
             c.mass, c.center_of_mass, c.chassis_size, c.wheelbase, c.track_width
@@ -677,8 +687,11 @@ fn car(
         if let Some(w) = c.engine.max_power_w {
             println!(
                 "engine {:.0} kW at {:?} rpm, {:.0} N·m at {:.0} rpm, redline {:.0}",
-                w / 1000.0, c.engine.peak_power_rpm, c.engine.peak_torque_nm,
-                c.engine.peak_torque_rpm, c.engine.redline_rpm
+                w / 1000.0,
+                c.engine.peak_power_rpm,
+                c.engine.peak_torque_nm,
+                c.engine.peak_torque_rpm,
+                c.engine.redline_rpm
             );
         }
         println!(
@@ -695,7 +708,13 @@ fn car(
         for (i, w) in c.wheels.iter().enumerate() {
             println!(
                 "  [{i}] pos {:?} r {:.3} driven={} steered={} steer×{:.2} brake {:.2} drive {:?}",
-                w.position, w.radius, w.driven, w.steered, w.steer_scale, w.brake_bias, w.drive_share
+                w.position,
+                w.radius,
+                w.driven,
+                w.steered,
+                w.steer_scale,
+                w.brake_bias,
+                w.drive_share
             );
         }
         println!("model parts ({}):", def.model.parts.len());
@@ -707,7 +726,11 @@ fn car(
                 p.role,
                 lods,
                 p.origin,
-                if p.recenter.is_some() { " (recentred)" } else { "" }
+                if p.recenter.is_some() {
+                    " (recentred)"
+                } else {
+                    ""
+                }
             );
         }
         for w in &def.model.wheels {
@@ -780,7 +803,10 @@ fn validate_cars(
         match catalog.entries.iter().find(|e| &e.id == id) {
             None => {
                 failed.push((id.clone(), "not discovered in catalog".into()));
-                println!("{id:<14} {:<6} {:<7} {:<6} {:<5} FAIL not discovered", "-", "-", "-", "-");
+                println!(
+                    "{id:<14} {:<6} {:<7} {:<6} {:<5} FAIL not discovered",
+                    "-", "-", "-", "-"
+                );
             }
             Some(entry) => {
                 let paints_declared = entry.paints.len();
@@ -812,7 +838,10 @@ fn validate_cars(
                     }
                     Err(e) => {
                         failed.push((id.clone(), e.to_string()));
-                        println!("{id:<14} {:<6} {:<7} {:<6} {:<5} FAIL {e}", "-", "-", "-", "-");
+                        println!(
+                            "{id:<14} {:<6} {:<7} {:<6} {:<5} FAIL {e}",
+                            "-", "-", "-", "-"
+                        );
                     }
                 }
             }

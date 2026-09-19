@@ -11,8 +11,8 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use mm2_assets::Vfs;
-use mm2_content::model::{MeshGroup, ModelPart, PartRole, VehicleModel};
 use mm2_content::TrailerDef;
+use mm2_content::model::{MeshGroup, ModelPart, PartRole, VehicleModel};
 use mm2_vehicle::vehicle::{DriveDirection, Vehicle, VehicleInput, VehicleState};
 
 use crate::city::MaterialCache;
@@ -78,7 +78,10 @@ fn group_mesh(g: &MeshGroup, recenter: Option<Vec3>) -> Mesh {
             p[2] -= c.z;
         }
     }
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     if g.normals.len() == g.positions.len() {
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, g.normals.clone());
@@ -238,18 +241,14 @@ pub fn spawn_vehicle_model(
                             ))
                             .id();
                         commands.entity(mount).add_child(node);
-                        spawn_groups(
-                            commands, node, model, paint, part, &mut mats, meshes, false,
-                        );
+                        spawn_groups(commands, node, model, paint, part, &mut mats, meshes, false);
                     }
                     None => {
                         let node = commands
                             .spawn((Transform::from_translation(attach), Visibility::Visible))
                             .id();
                         commands.entity(root).add_child(node);
-                        spawn_groups(
-                            commands, node, model, paint, part, &mut mats, meshes, false,
-                        );
+                        spawn_groups(commands, node, model, paint, part, &mut mats, meshes, false);
                     }
                 }
             }
@@ -273,7 +272,16 @@ pub fn spawn_vehicle_model(
                         .entity(node)
                         .insert((GlowPart(kind), Visibility::Hidden));
                 }
-                spawn_groups(commands, node, model, paint, part, &mut mats, meshes, glow.is_some());
+                spawn_groups(
+                    commands,
+                    node,
+                    model,
+                    paint,
+                    part,
+                    &mut mats,
+                    meshes,
+                    glow.is_some(),
+                );
             }
         }
     }
@@ -345,8 +353,7 @@ pub fn update_wheel_visuals(
             continue;
         };
         let cfg = &veh.config;
-        let (Some(wheel), Some(ws)) =
-            (cfg.wheels.get(mount.index), state.wheels.get(mount.index))
+        let (Some(wheel), Some(ws)) = (cfg.wheels.get(mount.index), state.wheels.get(mount.index))
         else {
             continue;
         };

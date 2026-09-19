@@ -640,10 +640,7 @@ fn setup(
             for (i, w) in config.wheels.iter().enumerate() {
                 let mount = commands
                     .spawn((
-                        WheelMount {
-                            vehicle,
-                            index: i,
-                        },
+                        WheelMount { vehicle, index: i },
                         Transform::from_translation(Vec3::from(w.position)),
                     ))
                     .id();
@@ -655,10 +652,8 @@ fn setup(
                     MeshMaterial3d(wheel_mat.clone()),
                     // Cylinder is Y-aligned: rotate onto the axle (X) and
                     // scale to the configured radius.
-                    Transform::from_rotation(Quat::from_rotation_z(
-                        std::f32::consts::FRAC_PI_2,
-                    ))
-                    .with_scale(Vec3::new(w.radius / 0.34, 1.0, w.radius / 0.34)),
+                    Transform::from_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2))
+                        .with_scale(Vec3::new(w.radius / 0.34, 1.0, w.radius / 0.34)),
                 ));
             }
         }

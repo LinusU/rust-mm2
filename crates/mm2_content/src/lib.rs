@@ -12,7 +12,7 @@ pub mod model;
 
 pub use assemble::{LoadError, TrailerDef, VehicleDef, load_by_id, load_vehicle};
 pub use catalog::{
-    CatalogEntry, DepSet, EntryStatus, EXPECTED_STOCK_ROSTER, VehicleCatalog, VehicleClass,
+    CatalogEntry, DepSet, EXPECTED_STOCK_ROSTER, EntryStatus, VehicleCatalog, VehicleClass,
 };
 pub use convert::{
     ConversionReport, ConvertInput, Converted, Provenance, ReportEntry, WheelGeom, convert,

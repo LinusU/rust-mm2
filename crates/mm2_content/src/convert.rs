@@ -247,7 +247,11 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
         DrivetrainType::Fwd => (1.0, 0.0),
         DrivetrainType::Rwd => (0.0, 1.0),
         DrivetrainType::Awd => {
-            let f = sim.axle_front.as_ref().map(|a| a.torque_coef).unwrap_or(0.0);
+            let f = sim
+                .axle_front
+                .as_ref()
+                .map(|a| a.torque_coef)
+                .unwrap_or(0.0);
             let b = sim.axle_back.as_ref().map(|a| a.torque_coef).unwrap_or(0.0);
             if f + b > 0.0 {
                 (f / (f + b), b / (f + b))
@@ -275,7 +279,9 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
         + n_back as f32 * sim.wheel_back.brake_coef)
         .max(1e-3);
 
-    let total_brake_force = mass * G * (0.55 * (sim.wheel_front.static_fric + sim.wheel_back.static_fric) * 0.5 * 1.2).max(0.8);
+    let total_brake_force = mass
+        * G
+        * (0.55 * (sim.wheel_front.static_fric + sim.wheel_back.static_fric) * 0.5 * 1.2).max(0.8);
     report.derived(
         "vehCarSim.Mass+Wheel*.StaticFric",
         "brakes.max_brake_force",
@@ -285,7 +291,11 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
     let mut wheels = Vec::with_capacity(input.wheels.len());
     for wg in input.wheels {
         let front = wg.origin[2] < z_mid;
-        let wt: &VehWheel = if front { &sim.wheel_front } else { &sim.wheel_back };
+        let wt: &VehWheel = if front {
+            &sim.wheel_front
+        } else {
+            &sim.wheel_back
+        };
         let axle_wheels = (if front { n_front } else { n_back }).max(1) as f32;
         let axle_share = if front { front_share } else { back_share };
         let wheel_load = mass * G * axle_share / axle_wheels;
@@ -365,7 +375,11 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
     let power_w = sim.engine.max_horsepower * HP_TO_W;
     let opt_rpm = sim.engine.opt_rpm;
     let omega_opt = opt_rpm * std::f32::consts::TAU / 60.0;
-    let torque_at_opt = if omega_opt > 0.0 { power_w / omega_opt } else { 0.0 };
+    let torque_at_opt = if omega_opt > 0.0 {
+        power_w / omega_opt
+    } else {
+        0.0
+    };
     let peak_torque_nm = torque_at_opt * TORQUE_PEAK_FACTOR;
     let peak_torque_rpm = (opt_rpm * TORQUE_PEAK_RPM_FRAC).max(sim.engine.idle_rpm * 1.2);
     let engine = EngineConfig {
@@ -382,14 +396,21 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
     report.derived(
         "vehCarSim.Engine.MaxHorsePower/OptRPM",
         "engine.max_power_w/peak_power_rpm",
-        format!("{:.0} hp → {power_w:.0} W at {opt_rpm:.0} rpm", sim.engine.max_horsepower),
+        format!(
+            "{:.0} hp → {power_w:.0} W at {opt_rpm:.0} rpm",
+            sim.engine.max_horsepower
+        ),
     );
     report.adapted(
         "vehCarSim.Engine (curve shape)",
         "engine.peak_torque_nm/peak_torque_rpm",
         format!("torque peak {peak_torque_nm:.0} N·m at {peak_torque_rpm:.0} rpm"),
     );
-    report.imported("vehCarSim.Engine.IdleRPM/MaxRPM", "engine.idle_rpm/redline_rpm", "");
+    report.imported(
+        "vehCarSim.Engine.IdleRPM/MaxRPM",
+        "engine.idle_rpm/redline_rpm",
+        "",
+    );
 
     // --- transmission ---------------------------------------------------------
     let n_gears = sim.trans.auto_num_gears.max(1) as usize;
@@ -419,8 +440,8 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
         gear_ratios.push((opt_rpm / 60.0 / wheel_rps).max(0.5));
     }
     let rev_ms = (sim.trans.reverse_mph * MPH_TO_MPS).max(1.0);
-    let reverse_ratio = (opt_rpm / 60.0 / (rev_ms / (std::f32::consts::TAU * driven_radius)))
-        .max(0.5);
+    let reverse_ratio =
+        (opt_rpm / 60.0 / (rev_ms / (std::f32::consts::TAU * driven_radius))).max(0.5);
     let transmission = TransmissionConfig {
         gear_ratios,
         reverse_ratio,
@@ -457,8 +478,8 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
 
     // --- steering ----------------------------------------------------------
     let low_angle = sim.wheel_front.steering_limit.clamp(0.05, 0.7);
-    let high_angle = (low_angle * (1.0 - sim.wheel_front.steering_offset * 0.8))
-        .clamp(0.04, low_angle);
+    let high_angle =
+        (low_angle * (1.0 - sim.wheel_front.steering_offset * 0.8)).clamp(0.04, low_angle);
     let high_speed = input
         .asnode
         .and_then(|a| a.speed_base_hi)
@@ -497,7 +518,10 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
 
     // --- collider --------------------------------------------------------------
     let collider_points = input.bound.map(|b| {
-        b.verts.iter().map(|v| [v[0], v[1], v[2]]).collect::<Vec<_>>()
+        b.verts
+            .iter()
+            .map(|v| [v[0], v[1], v[2]])
+            .collect::<Vec<_>>()
     });
     report.imported(
         "bound/<id>_bound.bnd",
@@ -618,7 +642,8 @@ pub fn convert_trailer(
         let wt = if front { &t.wheel_front } else { &t.wheel_back };
         let wheel_load = mass * G / wheels.len() as f32;
         let travel = (wt.suspension_extent + wt.suspension_limit).max(0.05);
-        let spring_rate = wheel_load / (SAG_FRACTION * travel).max(0.01) * wt.suspension_factor.max(0.05);
+        let spring_rate =
+            wheel_load / (SAG_FRACTION * travel).max(0.01) * wt.suspension_factor.max(0.05);
         let damp_scale = (wt.suspension_damp_coef / 0.1).clamp(0.25, 4.0);
         let damping_base = 2.0 * 0.45 * (spring_rate * wheel_load).sqrt() * damp_scale;
         let raise = (travel * (1.0 - SAG_FRACTION) + wg.radius - wg.origin[1]).max(0.0);
@@ -661,7 +686,10 @@ pub fn convert_trailer(
         chassis_size: size,
         inertia: Some(inertia),
         collider_points: bound.map(|b| {
-            b.verts.iter().map(|v| [v[0], v[1], v[2]]).collect::<Vec<_>>()
+            b.verts
+                .iter()
+                .map(|v| [v[0], v[1], v[2]])
+                .collect::<Vec<_>>()
         }),
         collider_friction: 0.5,
         collider_restitution: 0.05,
@@ -669,6 +697,10 @@ pub fn convert_trailer(
         trailer: true,
         ..VehicleConfig::default()
     };
-    report.imported("vehTrailer.Mass/InertiaBox", "mass/inertia", format!("{mass} kg"));
+    report.imported(
+        "vehTrailer.Mass/InertiaBox",
+        "mass/inertia",
+        format!("{mass} kg"),
+    );
     Ok(Converted { config, report })
 }

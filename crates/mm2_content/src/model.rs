@@ -17,7 +17,7 @@
 //! bottom-up file order, so `v` is complemented when meshes are built.
 
 use mm2_formats::mtx::Mtx;
-use mm2_formats::pkg::{Pkg, PkgChunk, PkgGeometry, PkgShader, PkgShaders, PRIMTYPE_TRIANGLES};
+use mm2_formats::pkg::{PRIMTYPE_TRIANGLES, Pkg, PkgChunk, PkgGeometry, PkgShader, PkgShaders};
 
 /// Semantic role of a named part.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,10 +273,7 @@ fn mesh_aabb(groups: &[MeshGroup]) -> Option<([f32; 3], [f32; 3])> {
 ///
 /// `mtx_for` resolves a part stem (`whl0`, `headlight0`, ...) to the parsed
 /// `geometry/<pkg>_<part>.mtx` when present.
-pub fn build_model(
-    pkg: &Pkg,
-    mut mtx_for: impl FnMut(&str) -> Option<Mtx>,
-) -> VehicleModel {
+pub fn build_model(pkg: &Pkg, mut mtx_for: impl FnMut(&str) -> Option<Mtx>) -> VehicleModel {
     let mut model = VehicleModel::default();
     let mut warnings = Vec::new();
 
@@ -295,8 +292,7 @@ pub fn build_model(
 
     // Group geometry chunks by part stem.
     let mut order: Vec<String> = Vec::new();
-    let mut parts: std::collections::HashMap<String, ModelPart> =
-        std::collections::HashMap::new();
+    let mut parts: std::collections::HashMap<String, ModelPart> = std::collections::HashMap::new();
     for (name, geo) in pkg.geometries() {
         let (stem, lod) = split_lod(name);
         let entry = parts.entry(stem.clone()).or_insert_with(|| {
@@ -310,7 +306,9 @@ pub fn build_model(
                 recenter: None,
             }
         });
-        entry.lods.push((lod, geometry_mesh(geo, &mut warnings, name)));
+        entry
+            .lods
+            .push((lod, geometry_mesh(geo, &mut warnings, name)));
     }
     for stem in order {
         let mut part = parts.remove(&stem).unwrap();
@@ -367,7 +365,8 @@ pub fn build_model(
             let r = (mx[1] - mn[1]) * 0.5;
             // In-place authored wheel meshes (stock trailer wheels) are
             // recentred onto their own centroid so the mtx origin applies.
-            let off = (centre[0] * centre[0] + centre[1] * centre[1] + centre[2] * centre[2]).sqrt();
+            let off =
+                (centre[0] * centre[0] + centre[1] * centre[1] + centre[2] * centre[2]).sqrt();
             if r > 0.05 && off > r * 0.75 && mtx.is_some() {
                 recentres.push((i, centre, part.name.clone()));
             }
@@ -405,11 +404,7 @@ pub fn build_model(
     // Link fenders to wheel indices.
     for (i, part) in model.parts.iter().enumerate() {
         if let PartRole::Fender(n) = part.role {
-            if let Some(w) = model
-                .wheels
-                .iter_mut()
-                .find(|w| !w.trailer && w.index == n)
-            {
+            if let Some(w) = model.wheels.iter_mut().find(|w| !w.trailer && w.index == n) {
                 w.parts.push(i);
             }
         }
@@ -439,7 +434,12 @@ pub fn build_model(
         let rest: Vec<_> = model
             .parts
             .iter()
-            .filter(|p| !matches!(p.role, PartRole::Shadow | PartRole::Wheel(_) | PartRole::TrailerWheel(_)))
+            .filter(|p| {
+                !matches!(
+                    p.role,
+                    PartRole::Shadow | PartRole::Wheel(_) | PartRole::TrailerWheel(_)
+                )
+            })
             .filter_map(|p| {
                 let aabb = p.best_lod().and_then(|g| mesh_aabb(g))?;
                 // Parts authored around a local origin move to their attach

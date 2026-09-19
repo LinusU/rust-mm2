@@ -12,7 +12,9 @@ use mm2_formats::veh::{AsNode, VehCarSim, VehTrailer};
 use mm2_vehicle::config::VehicleConfig;
 
 use crate::catalog::VehicleCatalog;
-use crate::convert::{ConversionReport, ConvertInput, Converted, WheelGeom, convert, convert_trailer};
+use crate::convert::{
+    ConversionReport, ConvertInput, Converted, WheelGeom, convert, convert_trailer,
+};
 use crate::model::{VehicleModel, build_model};
 
 /// Everything needed to spawn a stock/modded vehicle.
@@ -130,22 +132,22 @@ pub fn load_vehicle(vfs: &Vfs, id: &str, paint: usize) -> Result<VehicleDef, Loa
     let (bytes, src) = read(vfs, &logical, id, "tuning")?;
     sources.push(src);
     let tune = parse_tune(&bytes, id, &logical)?;
-    let sim = VehCarSim::from_tune(&tune).map_err(|e| LoadError::Parse(id.into(), e.to_string()))?;
+    let sim =
+        VehCarSim::from_tune(&tune).map_err(|e| LoadError::Parse(id.into(), e.to_string()))?;
 
     // Optional steering-assist data.
-    let asnode = read_opt(vfs, &format!("tune/{id}.asnode"))
-        .and_then(|(bytes, src)| {
-            sources.push(src);
-            let tune = parse_tune(&bytes, id, "asnode").ok()?;
-            Some(AsNode::from_tune(tune))
-        });
+    let asnode = read_opt(vfs, &format!("tune/{id}.asnode")).and_then(|(bytes, src)| {
+        sources.push(src);
+        let tune = parse_tune(&bytes, id, "asnode").ok()?;
+        Some(AsNode::from_tune(tune))
+    });
 
     // Geometry — required.
     let logical = format!("geometry/{id}.pkg");
     let (bytes, src) = read(vfs, &logical, id, "model")?;
     sources.push(src);
-    let pkg = Pkg::parse(&bytes)
-        .map_err(|e| LoadError::Parse(id.into(), format!("{logical}: {e}")))?;
+    let pkg =
+        Pkg::parse(&bytes).map_err(|e| LoadError::Parse(id.into(), format!("{logical}: {e}")))?;
     let model = build_model(&pkg, |stem| load_mtx(vfs, id, stem));
     for stem in model.parts.iter().map(|p| p.name.clone()) {
         let logical = format!("geometry/{id}_{stem}.mtx");
@@ -155,11 +157,10 @@ pub fn load_vehicle(vfs: &Vfs, id: &str, paint: usize) -> Result<VehicleDef, Loa
     }
 
     // Bounds — optional but expected for stock.
-    let bound = read_opt(vfs, &format!("bound/{id}_bound.bnd"))
-        .and_then(|(bytes, src)| {
-            sources.push(src);
-            BndFile::parse(&String::from_utf8_lossy(&bytes)).ok()
-        });
+    let bound = read_opt(vfs, &format!("bound/{id}_bound.bnd")).and_then(|(bytes, src)| {
+        sources.push(src);
+        BndFile::parse(&String::from_utf8_lossy(&bytes)).ok()
+    });
 
     let body_aabb = model.body_aabb.unwrap_or(([0.0; 3], [1.0, 1.0, 2.0]));
 
@@ -250,15 +251,14 @@ fn load_trailer(
     let logical = format!("geometry/{pkg_id}.pkg");
     let (bytes, src) = read(vfs, &logical, id, "trailer model")?;
     sources.push(src);
-    let pkg = Pkg::parse(&bytes)
-        .map_err(|e| LoadError::Parse(id.into(), format!("{logical}: {e}")))?;
+    let pkg =
+        Pkg::parse(&bytes).map_err(|e| LoadError::Parse(id.into(), format!("{logical}: {e}")))?;
     let model = build_model(&pkg, |stem| load_mtx(vfs, &pkg_id, stem));
 
-    let bound = read_opt(vfs, &format!("bound/{pkg_id}_bound.bnd"))
-        .and_then(|(bytes, src)| {
-            sources.push(src);
-            BndFile::parse(&String::from_utf8_lossy(&bytes)).ok()
-        });
+    let bound = read_opt(vfs, &format!("bound/{pkg_id}_bound.bnd")).and_then(|(bytes, src)| {
+        sources.push(src);
+        BndFile::parse(&String::from_utf8_lossy(&bytes)).ok()
+    });
     let body_aabb = model.body_aabb.unwrap_or(([0.0; 3], [1.0, 1.0, 2.0]));
 
     let wheel_geoms: Vec<WheelGeom> = model
@@ -277,7 +277,9 @@ fn load_trailer(
 
     // Hitch anchors: authored offsets when present; fall back to the car's
     // rear bound edge and the trailer's front bound edge.
-    let car_hitch = t.car_hitch_offset.unwrap_or([0.0, 0.45, car_body_aabb.1[2] - 0.4]);
+    let car_hitch = t
+        .car_hitch_offset
+        .unwrap_or([0.0, 0.45, car_body_aabb.1[2] - 0.4]);
     let trailer_hitch = t
         .trailer_hitch_offset
         .unwrap_or([0.0, 0.55, body_aabb.0[2] + 0.4]);

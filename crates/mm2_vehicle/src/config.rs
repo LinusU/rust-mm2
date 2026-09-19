@@ -475,10 +475,7 @@ impl VehicleConfig {
                 &format!("wheels[{i}].brake_bias"),
                 finite(w.brake_bias) && w.brake_bias >= 0.0,
             );
-            check!(
-                &format!("wheels[{i}].steer_scale"),
-                finite(w.steer_scale),
-            );
+            check!(&format!("wheels[{i}].steer_scale"), finite(w.steer_scale),);
             if let Some(ds) = w.drive_share {
                 check!(&format!("wheels[{i}].drive_share"), finite(ds) && ds >= 0.0);
             }

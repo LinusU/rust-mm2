@@ -96,13 +96,12 @@ pub fn vehicle_simulation(
         // Drive-torque shares: explicit per-wheel fractions when configured,
         // otherwise an even split across driven wheels.
         let wheel_count_cfg = cfg.wheels.len();
-        let share_sum: f32 = cfg
-            .wheels
-            .iter()
-            .filter_map(|w| w.drive_share)
-            .sum();
+        let share_sum: f32 = cfg.wheels.iter().filter_map(|w| w.drive_share).sum();
         let use_explicit_shares = share_sum > 0.0
-            && cfg.wheels.iter().all(|w| !w.driven || w.drive_share.is_some());
+            && cfg
+                .wheels
+                .iter()
+                .all(|w| !w.driven || w.drive_share.is_some());
         let n_driven_cfg = cfg.wheels.iter().filter(|w| w.driven).count().max(1) as f32;
 
         // First pass: probes + suspension, collecting per-wheel data.
@@ -303,8 +302,7 @@ pub fn vehicle_simulation(
             let hb_strength = wheel
                 .handbrake_coef
                 .unwrap_or(cfg.brakes.handbrake_strength);
-            longitudinal +=
-                -vel_long.signum() * hb * cfg.brakes.max_brake_force * hb_strength;
+            longitudinal += -vel_long.signum() * hb * cfg.brakes.max_brake_force * hb_strength;
 
             // Combined force is limited by the tire's traction curve (see
             // `sim::longitudinal_force`); over-demand slides rather than
@@ -327,8 +325,8 @@ pub fn vehicle_simulation(
             // Suspension force is applied slightly above the contact patch
             // (fraction of the wheel radius) so roll stays plausible.
             let suspension = wheel.suspension.as_ref().unwrap_or(&cfg.suspension);
-            let sus_point = ws.contact_point
-                + ws.contact_normal * suspension.force_apply_offset * wheel.radius;
+            let sus_point =
+                ws.contact_point + ws.contact_normal * suspension.force_apply_offset * wheel.radius;
             forces.apply_force_at_point(ws.contact_normal * ws.suspension_force, sus_point);
             forces.apply_force_at_point(
                 tire_right * lateral + tire_fwd * longitudinal,

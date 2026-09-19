@@ -128,9 +128,7 @@ pub struct VehicleCatalog {
 }
 
 fn is_variant(id: &str) -> bool {
-    VARIANT_SUFFIXES
-        .iter()
-        .any(|s| id.ends_with(s))
+    VARIANT_SUFFIXES.iter().any(|s| id.ends_with(s))
         || id.starts_with("copy of ")
         || id.ends_with(".vehcarsimold")
 }
@@ -266,10 +264,7 @@ impl VehicleCatalog {
             deps.bound = Some(describe(&r));
         }
         for n in 0..16u32 {
-            if vfs
-                .resolve(&format!("geometry/{id}_whl{n}.mtx"))
-                .is_some()
-            {
+            if vfs.resolve(&format!("geometry/{id}_whl{n}.mtx")).is_some() {
                 deps.wheel_mtx += 1;
             } else {
                 break;
