@@ -30,8 +30,24 @@ pub fn step_steer_angle(current: f32, target: f32, cfg: &SteeringConfig, dt: f32
     current + delta
 }
 
-/// Engine torque (N·m) at `rpm`: idle→peak is a rising ramp, peak→redline
-/// falls off toward `redline_torque_fraction`.
+/// Torque (N·m) at the rated power peak (`peak_power_rpm`), accounting for
+/// the optional power anchor.
+fn power_peak_torque(cfg: &EngineConfig) -> f32 {
+    match (cfg.peak_power_rpm, cfg.max_power_w) {
+        (Some(pp), Some(pw)) => {
+            let omega = pp * std::f32::consts::TAU / 60.0;
+            if omega > 0.0 { pw / omega } else { cfg.peak_torque_nm }
+        }
+        _ => cfg.peak_torque_nm,
+    }
+}
+
+/// Engine torque (N·m) at `rpm`.
+///
+/// Curve anchors: 80% of peak torque at idle, `peak_torque_nm` at
+/// `peak_torque_rpm`, the torque implied by `max_power_w` at
+/// `peak_power_rpm` (falling back to `peak_torque_nm` when no power anchor
+/// is set), then a decay to `redline_torque_fraction` at the redline.
 pub fn engine_torque(rpm: f32, cfg: &EngineConfig) -> f32 {
     if rpm <= cfg.idle_rpm {
         return cfg.peak_torque_nm * 0.8;
@@ -40,14 +56,28 @@ pub fn engine_torque(rpm: f32, cfg: &EngineConfig) -> f32 {
         let t = (rpm - cfg.idle_rpm) / (cfg.peak_torque_rpm - cfg.idle_rpm).max(1.0);
         return cfg.peak_torque_nm * (0.8 + 0.2 * t);
     }
+    let pp_rpm = cfg.peak_power_rpm.unwrap_or(cfg.peak_torque_rpm);
+    let t_opt = power_peak_torque(cfg);
+    if rpm <= pp_rpm {
+        let t = (rpm - cfg.peak_torque_rpm) / (pp_rpm - cfg.peak_torque_rpm).max(1.0);
+        return cfg.peak_torque_nm + (t_opt - cfg.peak_torque_nm) * t;
+    }
     if rpm <= cfg.redline_rpm {
-        let t = (rpm - cfg.peak_torque_rpm) / (cfg.redline_rpm - cfg.peak_torque_rpm).max(1.0);
-        return cfg.peak_torque_nm * (1.0 - (1.0 - cfg.redline_torque_fraction) * t);
+        let t = (rpm - pp_rpm) / (cfg.redline_rpm - pp_rpm).max(1.0);
+        return t_opt * (1.0 - (1.0 - cfg.redline_torque_fraction) * t);
     }
     0.0
 }
 
+/// Power (watts) the engine delivers at `rpm`.
+pub fn engine_power(rpm: f32, cfg: &EngineConfig) -> f32 {
+    engine_torque(rpm, cfg) * rpm * std::f32::consts::TAU / 60.0
+}
+
 /// Pick the gear for the current wheel speed, using RPM hysteresis.
+///
+/// Upshift at `upshift_rpm` (default 92% of redline), downshift at
+/// `downshift_rpm` (default 35% of redline).
 pub fn select_gear(
     current_gear: usize,
     wheel_rps: f32,
@@ -56,12 +86,13 @@ pub fn select_gear(
 ) -> usize {
     let n = cfg.gear_ratios.len().max(1);
     let mut gear = current_gear.min(n - 1);
-    // Upshift if RPM exceeds ~92% of redline, downshift below ~35%.
+    let upshift = cfg.upshift_rpm.unwrap_or(engine.redline_rpm * 0.92);
+    let downshift = cfg.downshift_rpm.unwrap_or(engine.redline_rpm * 0.35);
     for _ in 0..n {
         let rpm = wheel_rps * cfg.gear_ratios[gear] * cfg.final_drive * 60.0;
-        if rpm > engine.redline_rpm * 0.92 && gear + 1 < n {
+        if rpm > upshift && gear + 1 < n {
             gear += 1;
-        } else if rpm < engine.redline_rpm * 0.35 && gear > 0 {
+        } else if rpm < downshift && gear > 0 {
             gear -= 1;
         } else {
             break;
@@ -212,6 +243,8 @@ mod tests {
             redline_rpm: 7000.0,
             peak_torque_rpm: 4000.0,
             peak_torque_nm: 300.0,
+            peak_power_rpm: None,
+            max_power_w: None,
             redline_torque_fraction: 0.7,
             rpm_response: 8.0,
             engine_brake_nm: 60.0,
@@ -230,12 +263,16 @@ mod tests {
             final_drive: 3.0,
             shift_time: 0.2,
             efficiency: 0.85,
+            upshift_rpm: None,
+            downshift_rpm: None,
         };
         let eng = EngineConfig {
             idle_rpm: 900.0,
             redline_rpm: 6000.0,
             peak_torque_rpm: 4000.0,
             peak_torque_nm: 300.0,
+            peak_power_rpm: None,
+            max_power_w: None,
             redline_torque_fraction: 0.7,
             rpm_response: 8.0,
             engine_brake_nm: 60.0,

@@ -19,10 +19,39 @@ pub struct WheelConfig {
     pub driven: bool,
     /// Whether the steering input turns this wheel.
     pub steered: bool,
+    /// Steering angle scale for a steered wheel relative to the front-axle
+    /// maximum (`1.0` = full lock). Used for rear axles with reduced lock
+    /// and axles with deliberate rear steer.
+    #[serde(default = "default_steer_scale")]
+    pub steer_scale: f32,
     /// Fraction of braking force this wheel gets for the foot brake.
     pub brake_bias: f32,
     /// Whether the handbrake locks this wheel.
     pub handbrake: bool,
+    /// Per-wheel handbrake force coefficient: when set, handbrake force is
+    /// `input · max_brake_force · handbrake_coef` for this wheel. When absent
+    /// the global `brakes.handbrake_strength` multiplier applies.
+    #[serde(default)]
+    pub handbrake_coef: Option<f32>,
+    /// Fraction of total drive torque delivered to this wheel when driven.
+    /// When `None` on every wheel, torque splits evenly across driven
+    /// wheels. When set on any wheel, the shares are normalised to sum to 1.
+    #[serde(default)]
+    pub drive_share: Option<f32>,
+    /// Per-wheel suspension override (front/rear or per-axle tuning).
+    #[serde(default)]
+    pub suspension: Option<SuspensionConfig>,
+    /// Per-wheel tire override.
+    #[serde(default)]
+    pub tires: Option<TireConfig>,
+}
+
+fn default_steer_scale() -> f32 {
+    1.0
+}
+
+fn default_collider_friction() -> f32 {
+    0.5
 }
 
 /// Spring/damper suspension parameters.
@@ -45,6 +74,14 @@ pub struct SuspensionConfig {
 }
 
 /// Engine model: a simple RPM/torque curve.
+///
+/// The curve is anchored on both a torque peak and a power peak. Between
+/// `peak_torque_rpm` and `peak_power_rpm` torque interpolates from
+/// `peak_torque_nm` toward the value that yields `max_power_w` at
+/// `peak_power_rpm` (`torque = power / angular velocity`); past the power
+/// peak it decays toward `redline_torque_fraction` at the redline. When the
+/// optional power fields are absent the torque peak doubles as the power
+/// peak (legacy shape).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineConfig {
     /// Idle RPM.
@@ -55,7 +92,15 @@ pub struct EngineConfig {
     pub peak_torque_rpm: f32,
     /// Peak torque in N·m.
     pub peak_torque_nm: f32,
-    /// Torque at redline as a fraction of peak torque (curve falloff).
+    /// RPM where rated (peak) power occurs.
+    #[serde(default)]
+    pub peak_power_rpm: Option<f32>,
+    /// Rated power in watts at `peak_power_rpm`.
+    #[serde(default)]
+    pub max_power_w: Option<f32>,
+    /// Torque at redline as a fraction of the power-peak torque (curve
+    /// falloff). With `max_power_w` set the falloff is relative to the
+    /// torque at `peak_power_rpm`.
     pub redline_torque_fraction: f32,
     /// How fast RPM follows the load demand (1/s smoothing).
     pub rpm_response: f32,
@@ -66,16 +111,24 @@ pub struct EngineConfig {
 /// Gearing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransmissionConfig {
-    /// Forward gear ratios, low to high.
+    /// Forward gear ratios, low to high. Ratios are engine-speed to
+    /// wheel-speed (`gear_ratio · final_drive` combined when `final_drive`
+    /// is not 1).
     pub gear_ratios: Vec<f32>,
     /// Reverse gear ratio (positive number).
     pub reverse_ratio: f32,
-    /// Final drive ratio.
+    /// Final drive ratio. `1.0` when `gear_ratios` already include it.
     pub final_drive: f32,
     /// Time between gears, seconds.
     pub shift_time: f32,
     /// Overall driveline efficiency (0..1).
     pub efficiency: f32,
+    /// RPM at which the automatic upshifts. Defaults to 92% of redline.
+    #[serde(default)]
+    pub upshift_rpm: Option<f32>,
+    /// RPM at which the automatic downshifts. Defaults to 35% of redline.
+    #[serde(default)]
+    pub downshift_rpm: Option<f32>,
 }
 
 /// Tire behaviour.
@@ -161,8 +214,23 @@ pub struct VehicleConfig {
     pub wheelbase: f32,
     /// Distance left↔right wheels, metres.
     pub track_width: f32,
-    /// Chassis collider full extents (x, y, z), metres.
+    /// Chassis collider full extents (x, y, z), metres — used for the
+    /// fallback cuboid collider and camera framing.
     pub chassis_size: [f32; 3],
+    /// Principal angular inertia (kg·m²) about the chassis axes, overriding
+    /// the inertia Avian derives from the collider when present.
+    #[serde(default)]
+    pub inertia: Option<[f32; 3]>,
+    /// Convex-hull points for the chassis collider (metres, chassis space).
+    /// When absent a cuboid of `chassis_size` is used.
+    #[serde(default)]
+    pub collider_points: Option<Vec<[f32; 3]>>,
+    /// Chassis collider friction coefficient (panel friction, not tires).
+    #[serde(default = "default_collider_friction")]
+    pub collider_friction: f32,
+    /// Chassis collider restitution (bounciness).
+    #[serde(default)]
+    pub collider_restitution: f32,
     /// Wheels (typically four).
     pub wheels: Vec<WheelConfig>,
     /// Suspension.
@@ -181,6 +249,9 @@ pub struct VehicleConfig {
     pub aero: AeroConfig,
     /// Assists.
     pub assists: AssistConfig,
+    /// Whether this body is a towed trailer (no drivetrain expected).
+    #[serde(default)]
+    pub trailer: bool,
 }
 
 impl Default for VehicleConfig {
@@ -194,8 +265,13 @@ impl Default for VehicleConfig {
             radius,
             driven,
             steered,
+            steer_scale: 1.0,
             brake_bias: 0.25,
             handbrake,
+            handbrake_coef: None,
+            drive_share: None,
+            suspension: None,
+            tires: None,
         };
         Self {
             name: "Dev Car".to_string(),
@@ -204,6 +280,10 @@ impl Default for VehicleConfig {
             wheelbase,
             track_width: track,
             chassis_size: [1.85, 0.55, 4.4],
+            inertia: None,
+            collider_points: None,
+            collider_friction: default_collider_friction(),
+            collider_restitution: 0.0,
             wheels: vec![
                 wheel(-track / 2.0, -wheelbase / 2.0, false, true, false), // FL
                 wheel(track / 2.0, -wheelbase / 2.0, false, true, false),  // FR
@@ -223,6 +303,8 @@ impl Default for VehicleConfig {
                 redline_rpm: 7_200.0,
                 peak_torque_rpm: 4_200.0,
                 peak_torque_nm: 320.0,
+                peak_power_rpm: None,
+                max_power_w: None,
                 redline_torque_fraction: 0.75,
                 rpm_response: 8.0,
                 engine_brake_nm: 60.0,
@@ -233,6 +315,8 @@ impl Default for VehicleConfig {
                 final_drive: 3.9,
                 shift_time: 0.25,
                 efficiency: 0.85,
+                upshift_rpm: None,
+                downshift_rpm: None,
             },
             tires: TireConfig {
                 lateral_grip: 1.6,
@@ -265,6 +349,7 @@ impl Default for VehicleConfig {
                 countersteer: 0.35,
                 air_control: 4.0,
             },
+            trailer: false,
         }
     }
 }
@@ -351,6 +436,29 @@ impl VehicleConfig {
         for (i, v) in self.chassis_size.iter().enumerate() {
             check!(&format!("chassis_size[{i}]"), finite(*v) && *v > 0.0);
         }
+        if let Some(i) = self.inertia {
+            for (j, v) in i.iter().enumerate() {
+                check!(&format!("inertia[{j}]"), finite(*v) && *v > 0.0);
+            }
+        }
+        if let Some(pts) = &self.collider_points {
+            if pts.len() < 4 {
+                problems.push("collider_points needs at least 4 points".to_string());
+            }
+            for (i, p) in pts.iter().enumerate() {
+                for (j, v) in p.iter().enumerate() {
+                    check!(&format!("collider_points[{i}][{j}]"), finite(*v));
+                }
+            }
+        }
+        check!(
+            "collider_friction",
+            finite(self.collider_friction) && self.collider_friction >= 0.0,
+        );
+        check!(
+            "collider_restitution",
+            finite(self.collider_restitution) && self.collider_restitution >= 0.0,
+        );
 
         if self.wheels.is_empty() {
             problems.push("wheels must not be empty".to_string());
@@ -365,10 +473,39 @@ impl VehicleConfig {
             }
             check!(
                 &format!("wheels[{i}].brake_bias"),
-                finite(w.brake_bias) && (0.0..=1.0).contains(&w.brake_bias),
+                finite(w.brake_bias) && w.brake_bias >= 0.0,
             );
+            check!(
+                &format!("wheels[{i}].steer_scale"),
+                finite(w.steer_scale),
+            );
+            if let Some(ds) = w.drive_share {
+                check!(&format!("wheels[{i}].drive_share"), finite(ds) && ds >= 0.0);
+            }
+            if let Some(hb) = w.handbrake_coef {
+                check!(
+                    &format!("wheels[{i}].handbrake_coef"),
+                    finite(hb) && hb >= 0.0
+                );
+            }
+            if let Some(s) = &w.suspension {
+                check!(
+                    &format!("wheels[{i}].suspension.spring_rate"),
+                    finite(s.spring_rate) && s.spring_rate > 0.0
+                );
+                check!(
+                    &format!("wheels[{i}].suspension.travel"),
+                    finite(s.travel) && s.travel > 0.0
+                );
+            }
+            if let Some(t) = &w.tires {
+                check!(
+                    &format!("wheels[{i}].tires.lateral_grip"),
+                    finite(t.lateral_grip) && t.lateral_grip > 0.0
+                );
+            }
         }
-        if !self.wheels.iter().any(|w| w.driven) {
+        if !self.trailer && !self.wheels.iter().any(|w| w.driven) {
             problems.push("at least one wheel must be driven".to_string());
         }
 
@@ -424,6 +561,19 @@ impl VehicleConfig {
             "engine.engine_brake_nm",
             finite(e.engine_brake_nm) && e.engine_brake_nm >= 0.0,
         );
+        match (e.peak_power_rpm, e.max_power_w) {
+            (Some(pp), Some(pw)) => {
+                check!(
+                    "engine.peak_power_rpm",
+                    finite(pp) && pp >= e.peak_torque_rpm && pp <= e.redline_rpm,
+                );
+                check!("engine.max_power_w", finite(pw) && pw > 0.0);
+            }
+            (None, None) => {}
+            _ => problems.push(
+                "engine.peak_power_rpm and engine.max_power_w must be set together".to_string(),
+            ),
+        }
 
         let t = &self.transmission;
         if t.gear_ratios.is_empty() {
@@ -451,6 +601,12 @@ impl VehicleConfig {
             "transmission.efficiency",
             finite(t.efficiency) && (0.0..=1.0).contains(&t.efficiency),
         );
+        if let Some(u) = t.upshift_rpm {
+            check!("transmission.upshift_rpm", finite(u) && u > 0.0);
+        }
+        if let Some(d) = t.downshift_rpm {
+            check!("transmission.downshift_rpm", finite(d) && d > 0.0);
+        }
 
         let tr = &self.tires;
         check!(

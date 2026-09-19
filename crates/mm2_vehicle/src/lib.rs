@@ -44,24 +44,60 @@ impl Plugin for VehiclePlugin {
 }
 
 /// Bundle for spawning a vehicle. Add `Transform`/`Position` to place it.
+///
+/// Uses `collider_points` for a convex-hull collider when configured,
+/// otherwise a cuboid of `chassis_size`. `inertia` overrides the principal
+/// angular inertia Avian would derive from the collider.
 pub fn vehicle_bundle(config: &VehicleConfig) -> impl Bundle {
-    let chassis = Vec3::from(config.chassis_size);
+    let collider = config
+        .collider_points
+        .as_ref()
+        .and_then(|pts| {
+            Collider::convex_hull(pts.iter().map(|p| Vec3::from(*p)).collect::<Vec<_>>())
+        })
+        .unwrap_or_else(|| {
+            let chassis = Vec3::from(config.chassis_size);
+            Collider::cuboid(chassis.x, chassis.y, chassis.z)
+        });
+    // Inertia: authored principal tensor when present, otherwise the solid
+    // cuboid estimate so `AngularInertia` is always explicit.
+    let inertia = config.inertia.unwrap_or_else(|| {
+        let [w, h, d] = config.chassis_size;
+        let m = config.mass;
+        [
+            m * (h * h + d * d) / 12.0,
+            m * (w * w + d * d) / 12.0,
+            m * (w * w + h * h) / 12.0,
+        ]
+    });
     (
-        Vehicle {
-            config: config.clone(),
-        },
-        VehicleState::new(config),
-        VehicleInput::default(),
-        RigidBody::Dynamic,
-        Collider::cuboid(chassis.x, chassis.y, chassis.z),
-        Mass(config.mass),
-        CenterOfMass(Vec3::from(config.center_of_mass)),
+        (
+            Vehicle {
+                config: config.clone(),
+            },
+            VehicleState::new(config),
+            VehicleInput::default(),
+            Name::new(config.name.clone()),
+        ),
+        (
+            RigidBody::Dynamic,
+            collider,
+            Mass(config.mass),
+            AngularInertia {
+                principal: Vec3::from(inertia),
+                local_frame: Quat::IDENTITY,
+            },
+            CenterOfMass(Vec3::from(config.center_of_mass)),
+            Friction::new(config.collider_friction),
+            Restitution::new(config.collider_restitution),
+        ),
         // We apply our own drag; keep Avian's damping out of the way.
-        LinearDamping(0.0),
-        AngularDamping(0.02),
-        LinearVelocity::ZERO,
-        AngularVelocity::ZERO,
-        SleepingDisabled,
-        Name::new(config.name.clone()),
+        (
+            LinearDamping(0.0),
+            AngularDamping(0.02),
+            LinearVelocity::ZERO,
+            AngularVelocity::ZERO,
+            SleepingDisabled,
+        ),
     )
 }
