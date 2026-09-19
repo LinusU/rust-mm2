@@ -17,7 +17,7 @@ repository = "https://github.com/linus/rust-mm2"
 
 [workspace.dependencies]
 bevy = { version = "0.19", default-features = false }
-avian3d = { version = "0.7", default-features = false }
+avian3d = "0.7"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

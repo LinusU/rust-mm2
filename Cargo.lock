@@ -442,6 +442,7 @@ dependencies = [
  "itertools 0.15.0",
  "obvhs",
  "parry3d",
+ "parry3d-f64",
  "smallvec",
  "thiserror 2.0.20",
  "thread_local",
@@ -2650,9 +2651,9 @@ dependencies = [
 
 [[package]]
 name = "encase"
-version = "0.12.2"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65f68eb0b99ee6b831fc4d4ab662cb364cdd16dee21349beeeed2f9d62b4ca18"
+checksum = "b1acbc46b960480c4959213714511e22f9a2e0d361520693bcf5057b5924f53e"
 dependencies = [
  "const_panic",
  "encase_derive",
@@ -2661,22 +2662,22 @@ dependencies = [
 
 [[package]]
 name = "encase_derive"
-version = "0.12.2"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94cc8c76cfe0a0fefd1522f79ae62946c159290fbe816b3a0a7662bcce187587"
+checksum = "1e30d38c47336a0afbdfde297b442944041cf6dccbb1a79eceea16abfb27a92a"
 dependencies = [
  "encase_derive_impl",
 ]
 
 [[package]]
 name = "encase_derive_impl"
-version = "0.12.2"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "642108852530056c9efda5198caad6f25d28ae731c9653e8d9144ba097a4fec9"
+checksum = "495d24abe406f090f2ba8fc362ecaa8a001e192522aa75eae7b144163c3235ff"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.6",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -4595,12 +4596,41 @@ dependencies = [
  "num-derive",
  "num-traits",
  "ordered-float",
+ "rayon",
  "rstar",
  "simba",
  "slab",
  "smallvec",
  "spade",
  "static_assertions",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "parry3d-f64"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1f331c2ecfa5c34dfe379eff7efb824e5e8cfcc933d9624d74e7f867ea696dd"
+dependencies = [
+ "approx",
+ "arrayvec",
+ "bitflags 2.13.2",
+ "downcast-rs 2.0.2",
+ "either",
+ "ena",
+ "foldhash 0.2.0",
+ "glamx",
+ "hashbrown 0.16.1",
+ "log",
+ "num-derive",
+ "num-traits",
+ "ordered-float",
+ "rayon",
+ "rstar",
+ "simba",
+ "slab",
+ "smallvec",
+ "spade",
  "thiserror 2.0.20",
 ]
 
