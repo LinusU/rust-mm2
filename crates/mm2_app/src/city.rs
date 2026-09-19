@@ -1067,13 +1067,20 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
             Outcome::Emitted
         }
         AttributeType::Crosswalk => {
-            // Four corner refs → one textured quad.
+            // Four corner refs in strip order — (0, 1) is one short end,
+            // (2, 3) the other — textured with n+2. Crosswalk textures
+            // carry their border lines at u = 0 and u = 1, so u spans the
+            // short side and v repeats along the crossing, one tile per
+            // crossing depth.
             if attr.data.len() != 4 {
                 return Err(AttrError::Malformed("crosswalk"));
             }
             let pts = ctx.resolve(&attr.data[..4])?;
-            ctx.builder(0).fan(&pts);
-            ctx.collider.fan(&pts);
+            let depth = (pts[1] - pts[0]).length().max(0.1);
+            let reps = ((pts[2] - pts[0]).length() / depth).round().max(1.0);
+            let (a, b) = ([pts[0], pts[1]], [pts[2], pts[3]]);
+            ctx.builder(2).strip_uv(&a, &b, &[0.0, 1.0], 0.0, reps);
+            ctx.collider.strip(&a, &b);
             Outcome::Emitted
         }
         AttributeType::Sliver => {

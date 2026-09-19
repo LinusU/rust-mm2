@@ -74,7 +74,10 @@ Notes:
   full width (e.g. `r_sub_l` rails). Sidewalk textures have the kerb stones
   at `v = 0`. Fans are planar-mapped.
 - **Intersection texture slots**: `n` = road fans, `n+1` = sidewalk strips
-  (`0x01`).
+  (`0x01`), `n+2` = crosswalks (`0x04`).
+- **Crosswalk** (`0x04`) verts are in strip order — `(0, 1)` one short end,
+  `(2, 3)` the other — not a fan ring. Crosswalk textures have their border
+  lines at `u = 0/1`: `u` spans the short side, `v` repeats along it.
 - **Facade** (`0x0b`): the two height indices are *indices into the height
   pool* (absolute Y), not raw metres. The wall is Y-aligned between the two
   base verts; `u`/`v` are texture repeat counts.
