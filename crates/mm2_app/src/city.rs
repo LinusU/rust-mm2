@@ -1427,8 +1427,8 @@ fn emit_road_tunnel(ctx: &mut EmitCtx<'_>, left: &[Vec3], right: &[Vec3]) {
 /// Divider geometry for a divided road. `div_tex` is the resolved texture
 /// index (−1 when the packed byte was 0). Types per the format docs:
 /// 0 invisible (collision bound only), 1 flat, 2 elevated, 3 wedged.
-/// Elevated/wedged geometry is approximated as a raised median strip and
-/// counted in the report; end caps (flags bits 7–8) are not emitted.
+/// Elevated/wedged geometry is approximated and counted in the report;
+/// both ends are always closed (the cap flags are not interpreted).
 /// `value` is 8.8 fixed point (verified on retail data: 38 → the 0.15 m
 /// kerb height, 256 → the 1 m jersey barrier, 1280 → 5 repeats).
 fn emit_divider(
@@ -1482,15 +1482,59 @@ fn emit_divider(
             }
             ctx.collider.strip(rl_in, rr_in);
         }
+        3 => {
+            // Wedge (jersey barrier): two faces sloping from the inner
+            // road edges up to a ridge `value` metres above the midline,
+            // texture n+1 with u along the barrier. (Real wedges have a
+            // flat 0.5 m-inset top; the ridge is an approximation.)
+            let h = value.max(0.05);
+            let ridge: Vec<Vec3> = rl_in
+                .iter()
+                .zip(rr_in)
+                .map(|(l, r)| (*l + *r) * 0.5 + Vec3::Y * h)
+                .collect();
+            let us = chain_u(rl_in, rr_in, SIDEWALK_TILE_LENGTH);
+            for (base, sign) in [(rl_in, 1.0), (rr_in, -1.0)] {
+                for i in 0..n - 1 {
+                    let out = (rl_in[i] - rr_in[i]).normalize_or_zero() * sign;
+                    ctx.builder_at(dt(1)).quad_facing(
+                        base[i],
+                        base[i + 1],
+                        ridge[i + 1],
+                        ridge[i],
+                        [
+                            [us[i], 1.0],
+                            [us[i + 1], 1.0],
+                            [us[i + 1], 0.0],
+                            [us[i], 0.0],
+                        ],
+                        out + Vec3::Y,
+                    );
+                }
+                ctx.collider.strip(base, &ridge);
+            }
+            // Close both ends: the road surface does not continue under
+            // the divider, so an open end shows the void beneath.
+            for (e, along) in [
+                (0, rl_in[0] - rl_in[1]),
+                (n - 1, rl_in[n - 1] - rl_in[n - 2]),
+            ] {
+                ctx.builder_at(dt(1)).tri_facing(
+                    [rl_in[e], rr_in[e], ridge[e]],
+                    [[0.0, 1.0], [1.0, 1.0], [0.5, 0.0]],
+                    along,
+                );
+                ctx.collider.tri(rl_in[e], rr_in[e], ridge[e]);
+            }
+            ctx.report.approximated += 1;
+        }
         _ => {
-            // 2 elevated / 3 wedged, approximated as a raised median strip:
-            // vertical sides + flat top, `value` metres high. (Real wedges
-            // slope 0.5 m inward; the approximation is counted in the
-            // report.)
+            // Elevated: a raised median strip `value` metres high — vertical
+            // kerb sides (texture n), flat top (n+2), closed ends.
             let h = value.max(0.05);
             let top_l: Vec<Vec3> = rl_in.iter().map(|v| *v + Vec3::Y * h).collect();
             let top_r: Vec<Vec3> = rr_in.iter().map(|v| *v + Vec3::Y * h).collect();
-            let side_tex = if div_type == 2 { dt(0) } else { dt(1) };
+            let side_tex = dt(0);
             for i in 0..n - 1 {
                 let quad_uvs = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
                 let mid0 = (rl_in[i] + rr_in[i]) * 0.5;
@@ -1522,6 +1566,20 @@ fn emit_divider(
                     top.map(MeshBuilder::planar_uv),
                     Vec3::Y,
                 );
+            }
+            for (e, along) in [
+                (0, rl_in[0] - rl_in[1]),
+                (n - 1, rl_in[n - 1] - rl_in[n - 2]),
+            ] {
+                ctx.builder_at(side_tex).quad_facing(
+                    rl_in[e],
+                    rr_in[e],
+                    top_r[e],
+                    top_l[e],
+                    [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
+                    along,
+                );
+                ctx.collider.quad(rl_in[e], rr_in[e], top_r[e], top_l[e]);
             }
             ctx.collider.strip(&top_l, &top_r);
             ctx.collider.strip(rl_in, &top_l);
