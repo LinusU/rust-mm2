@@ -66,6 +66,13 @@ Notes:
 - **TextureRef** (`0x0a`): `index = data + 256×subtype − 1` into the texture
   table; `0` suppresses rendering *and* collision for following attributes.
   Relative texture slots: `n` = road surface, `n+1` = sidewalks.
+- **Ground UVs** are not stored; they follow from how the textures are
+  authored (verified by dumping retail TEX files). Road textures hold *half*
+  a road: `u` runs along the road, `v = 0` is the centre line and `v = 1`
+  the kerb (clamped in `v`), so roads and each carriageway of a divided road
+  mirror the texture about their midline. Walkway (`0x02`) textures span the
+  full width (e.g. `r_sub_l` rails). Sidewalk textures have the kerb stones
+  at `v = 0`. Fans are planar-mapped.
 - **Facade** (`0x0b`): the two height indices are *indices into the height
   pool* (absolute Y), not raw metres. The wall is Y-aligned between the two
   base verts; `u`/`v` are texture repeat counts.

@@ -47,6 +47,17 @@ const MIRROR_Z: bool = true;
 /// documented approximation.
 const PLANAR_UV_SCALE: f32 = 8.0;
 
+/// Metres of road per repeat of a road texture along its length. Road
+/// textures are authored with `u` along the road (dashes ≈ 4 m at this
+/// scale); the format stores no UVs, so the length is an approximation.
+const ROAD_TILE_LENGTH: f32 = 10.0;
+
+/// Metres of sidewalk per texture repeat along its length.
+const SIDEWALK_TILE_LENGTH: f32 = 4.0;
+
+/// Portion of a sidewalk texture (from v = 0) holding the kerb stones.
+const CURB_V: f32 = 0.07;
+
 /// Sidewalks sit this far above road vertices (per `Room_attributes`:
 /// "the road surface vertices are expected to be located 0.15 units below
 /// the sidewalk vertices").
@@ -157,26 +168,21 @@ impl MeshBuilder {
         }
     }
 
-    /// Flat strip between left/right vertex chains. Each triangle is
-    /// oriented by its geometric normal — the authored clockwise order is
-    /// ~97% consistent, and the remainder must not render face-down.
-    fn strip(&mut self, left: &[Vec3], right: &[Vec3]) {
-        for i in 0..left.len().saturating_sub(1) {
-            let l0 = self.vert(left[i], Self::planar_uv(left[i]));
-            let l1 = self.vert(left[i + 1], Self::planar_uv(left[i + 1]));
-            let r0 = self.vert(right[i], Self::planar_uv(right[i]));
-            let r1 = self.vert(right[i + 1], Self::planar_uv(right[i + 1]));
-            self.tri_up(l0, r0, l1);
-            self.tri_up(l1, r0, r1);
+    /// Strip between chains `a` and `b` with lengthwise UVs: `us[i]` is
+    /// the texture u of cross-section `i`, `va`/`vb` the v on each chain.
+    /// Road and sidewalk textures are authored this way (u along the
+    /// surface, v across it). Each triangle is oriented by its geometric
+    /// normal — the authored clockwise order is ~97% consistent, and the
+    /// remainder must not render face-down.
+    fn strip_uv(&mut self, a: &[Vec3], b: &[Vec3], us: &[f32], va: f32, vb: f32) {
+        for i in 0..a.len().min(b.len()).saturating_sub(1) {
+            let a0 = self.vert(a[i], [us[i], va]);
+            let a1 = self.vert(a[i + 1], [us[i + 1], va]);
+            let b0 = self.vert(b[i], [us[i], vb]);
+            let b1 = self.vert(b[i + 1], [us[i + 1], vb]);
+            self.tri_up(a0, b0, a1);
+            self.tri_up(a1, b0, b1);
         }
-    }
-
-    /// Strip for chains that may bend around corners (sidewalk strips).
-    /// Identical winding logic to [`strip`](Self::strip) — kept as a
-    /// named variant since the semantic distinction (bending chains)
-    /// matters at call sites.
-    fn strip_up(&mut self, left: &[Vec3], right: &[Vec3]) {
-        self.strip(left, right);
     }
 
     /// Arbitrary quad emitted so its front normal points toward `facing`
@@ -934,12 +940,12 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
                 rr.push(vertex(s[2], ctx.verts)?);
                 sw_r.push(vertex(s[3], ctx.verts)?);
             }
-            ctx.builder(0).strip(&rl, &rr);
+            emit_road_surface(ctx, &rl, &rr);
             ctx.collider.strip(&rl, &rr);
             ctx.note_road(&rl);
             ctx.note_road(&rr);
-            emit_sidewalk(ctx, &sw_l, &rl, true);
-            emit_sidewalk(ctx, &sw_r, &rr, false);
+            emit_sidewalk(ctx, &sw_l, &rl);
+            emit_sidewalk(ctx, &sw_r, &rr);
             emit_road_tunnel(ctx, &sw_l, &sw_r);
             Outcome::Emitted
         }
@@ -974,7 +980,9 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
                 .iter()
                 .map(|v| *v + Vec3::Y * SIDEWALK_LIFT)
                 .collect();
-            ctx.builder(0).strip_up(&lifted, &top);
+            // Sidewalk textures have the kerb stones at v = 0.
+            let us = chain_u(&lifted, &top, SIDEWALK_TILE_LENGTH);
+            ctx.builder(0).strip_uv(&lifted, &top, &us, 0.0, 1.0);
             emit_curb(ctx, &ground, &lifted, &top);
             ctx.collider.strip(&lifted, &top);
             ctx.collider.strip(&ground, &lifted);
@@ -991,7 +999,9 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
                 l.push(vertex(s[0], ctx.verts)?);
                 r.push(vertex(s[1], ctx.verts)?);
             }
-            ctx.builder(0).strip(&l, &r);
+            // Walkway textures span the full width (e.g. subway rails).
+            let us = chain_u(&l, &r, ROAD_TILE_LENGTH);
+            ctx.builder(0).strip_uv(&l, &r, &us, 0.0, 1.0);
             ctx.collider.strip(&l, &r);
             ctx.note_road(&l);
             ctx.note_road(&r);
@@ -1040,16 +1050,17 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
                 sw_r.push(vertex(s[5], ctx.verts)?);
             }
             // Two road surfaces: outer→inner on each side (texture n).
-            ctx.builder(0).strip(&rl_out, &rl_in);
-            ctx.builder(0).strip(&rr_in, &rr_out);
+            let us = chain_u(&rl_out, &rr_out, ROAD_TILE_LENGTH);
+            ctx.builder(0).strip_uv(&rl_out, &rl_in, &us, 1.0, 0.0);
+            ctx.builder(0).strip_uv(&rr_in, &rr_out, &us, 0.0, 1.0);
             ctx.collider.strip(&rl_out, &rl_in);
             ctx.collider.strip(&rr_in, &rr_out);
             ctx.note_road(&rl_out);
             ctx.note_road(&rl_in);
             ctx.note_road(&rr_in);
             ctx.note_road(&rr_out);
-            emit_sidewalk(ctx, &sw_l, &rl_out, true);
-            emit_sidewalk(ctx, &sw_r, &rr_out, false);
+            emit_sidewalk(ctx, &sw_l, &rl_out);
+            emit_sidewalk(ctx, &sw_r, &rr_out);
             emit_divider(ctx, div_type, div_tex, value, &rl_in, &rr_in);
             emit_road_tunnel(ctx, &sw_l, &sw_r);
             Outcome::Emitted
@@ -1168,17 +1179,40 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
     })
 }
 
+/// Texture u per cross-section: distance along the midline between the
+/// two chains, in repeats of `tile` metres.
+fn chain_u(a: &[Vec3], b: &[Vec3], tile: f32) -> Vec<f32> {
+    let mut us = Vec::with_capacity(a.len());
+    let mut dist = 0.0;
+    let mut prev: Option<Vec3> = None;
+    for (pa, pb) in a.iter().zip(b) {
+        let mid = (*pa + *pb) * 0.5;
+        if let Some(p) = prev {
+            dist += (mid - p).length();
+        }
+        prev = Some(mid);
+        us.push(dist / tile);
+    }
+    us
+}
+
+/// Two-way road surface between edge chains `l` and `r`. Road textures
+/// hold half a road — centre line at v = 0, kerb at v = 1, clamped in v —
+/// so the surface is split along its midline and the texture mirrored.
+fn emit_road_surface(ctx: &mut EmitCtx<'_>, l: &[Vec3], r: &[Vec3]) {
+    let mid: Vec<Vec3> = l.iter().zip(r).map(|(a, b)| (*a + *b) * 0.5).collect();
+    let us = chain_u(l, r, ROAD_TILE_LENGTH);
+    ctx.builder(0).strip_uv(l, &mid, &us, 1.0, 0.0);
+    ctx.builder(0).strip_uv(&mid, r, &us, 0.0, 1.0);
+}
+
 /// Sidewalk top + vertical curb face on one side of a road. `outer` is the
 /// outer sidewalk edge (authored height), `road` the adjacent road edge;
 /// the inner sidewalk edge sits SIDEWALK_LIFT above the road vertex.
-/// `left_side` selects the chain order that faces the road.
-fn emit_sidewalk(ctx: &mut EmitCtx<'_>, outer: &[Vec3], road: &[Vec3], left_side: bool) {
+fn emit_sidewalk(ctx: &mut EmitCtx<'_>, outer: &[Vec3], road: &[Vec3]) {
     let inner: Vec<Vec3> = road.iter().map(|v| *v + Vec3::Y * SIDEWALK_LIFT).collect();
-    if left_side {
-        ctx.builder(1).strip(outer, &inner); // top
-    } else {
-        ctx.builder(1).strip(&inner, outer);
-    }
+    let us = chain_u(&inner, outer, SIDEWALK_TILE_LENGTH);
+    ctx.builder(1).strip_uv(&inner, outer, &us, 0.0, 1.0); // top
     emit_curb(ctx, road, &inner, outer);
     ctx.collider.strip(outer, &inner);
     ctx.collider.strip(road, &inner);
@@ -1187,26 +1221,17 @@ fn emit_sidewalk(ctx: &mut EmitCtx<'_>, outer: &[Vec3], road: &[Vec3], left_side
 
 /// Vertical curb face on the `low` chain rising to `high`, each quad
 /// emitted facing horizontally away from the `far` chain (toward the
-/// surface the curb drops onto). UVs run along the edge and up by height
-/// so the vertical face isn't collapsed onto one texel row. The bottom
+/// surface the curb drops onto). The face takes the kerb-stone rows at
+/// the top of the sidewalk texture (v = 0 at the sidewalk edge). The bottom
 /// edge is sunk slightly below the authored vertex — the adjacent
 /// surface's edge often sits a few centimetres lower, and a hairline
 /// crack would otherwise show sky through the seam.
 fn emit_curb(ctx: &mut EmitCtx<'_>, low: &[Vec3], high: &[Vec3], far: &[Vec3]) {
+    let us = chain_u(low, high, SIDEWALK_TILE_LENGTH);
     for i in 0..low.len().saturating_sub(1) {
-        let dir = {
-            let d = low[i + 1] - low[i];
-            Vec3::new(d.x, 0.0, d.z).normalize_or_zero()
-        };
         let facing = {
             let d = (low[i] - far[i]) + (low[i + 1] - far[i + 1]);
             Vec3::new(d.x, 0.0, d.z).normalize_or_zero()
-        };
-        let uv = |p: Vec3| {
-            [
-                (p.x * dir.x + p.z * dir.z) / PLANAR_UV_SCALE,
-                p.y / PLANAR_UV_SCALE,
-            ]
         };
         let b0 = low[i] - Vec3::Y * CURB_SINK;
         let b1 = low[i + 1] - Vec3::Y * CURB_SINK;
@@ -1215,7 +1240,12 @@ fn emit_curb(ctx: &mut EmitCtx<'_>, low: &[Vec3], high: &[Vec3], far: &[Vec3]) {
             b1,
             high[i + 1],
             high[i],
-            [uv(b0), uv(b1), uv(high[i + 1]), uv(high[i])],
+            [
+                [us[i], CURB_V],
+                [us[i + 1], CURB_V],
+                [us[i + 1], 0.0],
+                [us[i], 0.0],
+            ],
             facing,
         );
     }
@@ -2043,5 +2073,21 @@ mod tests {
         // Local +X maps onto authored +Z, scaled by the heading length.
         let p = m.transform_point3(v3([1.0, 1.0, 0.0]));
         assert!((p - v3([0.0, 2.0, 2.0])).length() < 1e-5);
+    }
+
+    #[test]
+    fn road_surface_mirrors_texture_about_the_centre_line() {
+        let l = [Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, -20.0)];
+        let r = [Vec3::new(8.0, 0.0, 0.0), Vec3::new(8.0, 0.0, -20.0)];
+        let mut b = MeshBuilder::default();
+        let mid: Vec<Vec3> = l.iter().zip(&r).map(|(a, b)| (*a + *b) * 0.5).collect();
+        let us = chain_u(&l, &r, ROAD_TILE_LENGTH);
+        b.strip_uv(&l, &mid, &us, 1.0, 0.0);
+        b.strip_uv(&mid, &r, &us, 0.0, 1.0);
+        assert_eq!(us, vec![0.0, 2.0]);
+        for (p, uv) in b.positions.iter().zip(&b.uvs) {
+            // v = 1 on both kerbs, 0 on the centre line.
+            assert!((uv[1] - (p[0] - 4.0).abs() / 4.0).abs() < 1e-6);
+        }
     }
 }
