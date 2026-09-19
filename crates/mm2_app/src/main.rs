@@ -238,6 +238,7 @@ fn main() {
             camera::free_fly,
             reset_input,
             debug_toggle,
+            retarget_hud,
             vehicle_visual::update_wheel_visuals,
             city::animate_textures,
             update_hud,
@@ -497,6 +498,26 @@ fn update_hud(
             rpm = veh.rpm,
             total = veh.wheels.len(),
         ));
+    }
+}
+
+/// The root UI nodes of the HUD.
+type HudNodes = Or<(With<Hud>, With<ErrorText>)>;
+
+/// Keep the HUD on whichever camera is active — UI otherwise stays on the
+/// first camera and disappears in free-camera mode.
+fn retarget_hud(
+    mut commands: Commands,
+    cameras: Query<(Entity, &Camera)>,
+    ui: Query<(Entity, Option<&UiTargetCamera>), HudNodes>,
+) {
+    let Some((active, _)) = cameras.iter().find(|(_, c)| c.is_active) else {
+        return;
+    };
+    for (node, target) in &ui {
+        if target.is_none_or(|t| t.0 != active) {
+            commands.entity(node).insert(UiTargetCamera(active));
+        }
     }
 }
 
