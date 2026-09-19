@@ -56,6 +56,11 @@ const MIN_GROUND_CLEARANCE: f32 = 0.25;
 const APPROACH_ANGLE: f32 = 25.0 * std::f32::consts::PI / 180.0;
 const DEPARTURE_ANGLE: f32 = 25.0 * std::f32::consts::PI / 180.0;
 const BREAKOVER_ANGLE: f32 = 15.0 * std::f32::consts::PI / 180.0;
+/// Ceiling on chassis panel friction. Scraping a wall is how an arcade
+/// racer takes a corner too fast; at the authored values (up to 0.8 on the
+/// London Cab) the body grabs the wall instead of sliding down it and the
+/// car spins. Tires still do all the gripping.
+const MAX_COLLIDER_FRICTION: f32 = 0.3;
 /// Ceiling on chassis restitution. MM2's `BoundElasticity` (0.3-0.5 on
 /// stock cars) feeds its own car-versus-car impulse solver, not a
 /// coefficient of restitution against road geometry; used as one, a car
@@ -622,6 +627,11 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
         ),
     );
     report.adapted(
+        "vehCarSim.BoundFriction",
+        "collider_friction",
+        format!("capped at {MAX_COLLIDER_FRICTION} so a body scrape slides along a wall rather than grabbing it"),
+    );
+    report.adapted(
         "vehCarSim.BoundElasticity",
         "collider_restitution",
         format!("scaled into 0..{MAX_RESTITUTION}; MM2's value drives its own impact solver, not road bounce"),
@@ -676,7 +686,7 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
         chassis_size: size,
         inertia: Some(inertia),
         collider_points,
-        collider_friction: sim.bound_friction.unwrap_or(0.5),
+        collider_friction: sim.bound_friction.unwrap_or(0.5).min(MAX_COLLIDER_FRICTION),
         collider_restitution: (sim.bound_elasticity.unwrap_or(0.1) * MAX_RESTITUTION)
             .clamp(0.0, MAX_RESTITUTION),
         wheels,
