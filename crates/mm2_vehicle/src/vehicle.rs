@@ -44,14 +44,35 @@ pub struct WheelState {
     pub vel_lat: f32,
     /// Slip angle, radians.
     pub slip_angle: f32,
-    /// Slip ratio estimate (0..1.5).
-    pub slip_ratio: f32,
+    /// Traction utilization: the fraction of the tire's longitudinal force
+    /// limit the controller demanded this step (signed, roughly -1.5..1.5).
+    ///
+    /// This is **not** a measured wheel slip ratio — the arcade tire model
+    /// has no wheel-speed state. Values beyond ±1 mean the demand exceeded
+    /// what the tire could deliver.
+    pub traction_demand: f32,
     /// Applied lateral force, N.
     pub lateral_force: f32,
     /// Applied longitudinal force, N.
     pub longitudinal_force: f32,
     /// Accumulated spin for visuals, radians.
     pub spin: f32,
+}
+
+/// Which direction the drivetrain is engaged for.
+///
+/// Brake-to-reverse is a deliberate state transition, not a threshold
+/// comparison each step: `Reverse` engages only when the car is nearly
+/// stopped with the brake held and no throttle, and disengages on throttle
+/// or when the brake is released. This keeps behaviour around a standstill
+/// stable (no oscillation between brake and reverse force).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DriveDirection {
+    /// Forward gears; brake pedal brakes.
+    #[default]
+    Forward,
+    /// Reverse gear; brake pedal is the reverse throttle.
+    Reverse,
 }
 
 /// Mutable simulation state of a vehicle.
@@ -61,6 +82,8 @@ pub struct VehicleState {
     pub wheels: Vec<WheelState>,
     /// Current actual steering angle at the front wheels, radians.
     pub steer_angle: f32,
+    /// Engaged drivetrain direction (see [`DriveDirection`]).
+    pub direction: DriveDirection,
     /// Current gear (index into `gear_ratios`).
     pub gear: usize,
     /// Estimated engine RPM.
@@ -79,6 +102,7 @@ impl VehicleState {
         Self {
             wheels: vec![WheelState::default(); config.wheels.len()],
             steer_angle: 0.0,
+            direction: DriveDirection::Forward,
             gear: 0,
             rpm: config.engine.idle_rpm,
             grounded: false,

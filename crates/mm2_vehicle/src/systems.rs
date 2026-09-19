@@ -4,7 +4,9 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 use crate::sim;
-use crate::vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState, WheelState};
+use crate::vehicle::{
+    DriveDirection, ResetVehicle, Vehicle, VehicleInput, VehicleState, WheelState,
+};
 
 /// Vehicle raycasts exclude the vehicle's own collider.
 fn wheel_filter(vehicle: Entity) -> SpatialQueryFilter {
@@ -63,6 +65,25 @@ pub fn vehicle_simulation(
         }
         state.steer_angle = sim::step_steer_angle(state.steer_angle, target, &cfg.steering, dt);
 
+        // --- drivetrain direction --------------------------------------------
+        // Deliberate, hysteretic policy (see `DriveDirection`): the brake
+        // pedal only becomes "reverse throttle" once the car is essentially
+        // stopped; throttle or releasing the brake selects forward again.
+        // Speed is *not* part of the exit condition, so holding the pedal
+        // through a standstill cannot oscillate between brake and reverse.
+        match state.direction {
+            DriveDirection::Forward
+                if fwd_speed <= 0.25 && input.brake > 0.05 && input.throttle < 0.05 =>
+            {
+                state.direction = DriveDirection::Reverse;
+            }
+            DriveDirection::Reverse if input.throttle > 0.05 || input.brake < 0.05 => {
+                state.direction = DriveDirection::Forward;
+            }
+            _ => {}
+        }
+        let reversing = state.direction == DriveDirection::Reverse;
+
         // --- drivetrain bookkeeping ------------------------------------------
         let mut driven_ground_speed = 0.0f32;
         let mut driven_count = 0usize;
@@ -78,10 +99,12 @@ pub fn vehicle_simulation(
             let cast_len = cfg.suspension.travel + wheel.radius;
             let dir = Dir3::new_unchecked((rot * Vec3::NEG_Y).normalize_or_zero());
 
+            // A probe that loses contact must not keep reporting last step's
+            // compression/forces/velocities — only the visual spin persists.
             *ws = WheelState {
-                grounded: false,
                 contact_normal: Vec3::Y,
-                ..*ws
+                spin: ws.spin,
+                ..Default::default()
             };
 
             let Some(hit) = spatial_query.cast_ray(hardpoint, dir, cast_len, true, &filter) else {
@@ -126,14 +149,26 @@ pub fn vehicle_simulation(
         } else {
             fwd_speed
         };
-        let wheel_rps = mean_wheel_speed / (std::f32::consts::TAU * cfg.wheels[0].radius.max(0.01));
+        let wheel_radius = cfg
+            .wheels
+            .iter()
+            .find(|w| w.driven)
+            .or_else(|| cfg.wheels.first())
+            .map(|w| w.radius)
+            .unwrap_or(0.34)
+            .max(0.01);
+        let wheel_rps = mean_wheel_speed / (std::f32::consts::TAU * wheel_radius);
         let new_gear =
             sim::select_gear(state.gear, wheel_rps.abs(), &cfg.transmission, &cfg.engine);
         if new_gear != state.gear {
             state.shifting = cfg.transmission.shift_time;
         }
         state.gear = new_gear;
-        state.rpm = sim::engine_rpm(wheel_rps.abs(), state.gear, &cfg.transmission, &cfg.engine);
+        // RPM follows the wheel-implied value at `rpm_response` (1/s)
+        // rather than snapping — smooths shift blips and load changes.
+        let target_rpm =
+            sim::engine_rpm(wheel_rps.abs(), state.gear, &cfg.transmission, &cfg.engine);
+        state.rpm += (target_rpm - state.rpm) * (1.0 - (-cfg.engine.rpm_response * dt).exp());
         state.shifting = (state.shifting - dt).max(0.0);
 
         // --- second pass: tire forces -----------------------------------------
@@ -164,6 +199,7 @@ pub fn vehicle_simulation(
             let slip = sim::slip_angle(vel_long, vel_lat);
 
             let load = sim::load_adjusted_grip(ws.suspension_force, reference_load, &cfg.tires);
+            let traction_limit = cfg.tires.longitudinal_grip * load;
 
             // Handbrake reduces lateral bite on locked wheels — that's what
             // makes the back step out.
@@ -174,10 +210,12 @@ pub fn vehicle_simulation(
             };
             let lateral = sim::lateral_force(slip, load, &cfg.tires) * (1.0 - 0.6 * hb);
 
-            // Longitudinal: engine / brake / reverse / rolling resistance.
+            // Longitudinal: engine / reverse / engine-brake / brakes /
+            // rolling resistance. The drive request is computed separately
+            // so traction control can cap just the power side.
             let mut longitudinal = sim::rolling_resistance(vel_long, load, &cfg.tires);
-            let reversing = fwd_speed < 0.5 && input.brake > 0.0 && input.throttle < 0.1;
-            if wheel.driven && input.throttle > 0.0 && state.shifting <= 0.0 {
+            let mut drive_request = 0.0f32;
+            if wheel.driven && input.throttle > 0.0 && !reversing && state.shifting <= 0.0 {
                 let torque = sim::engine_torque(state.rpm, &cfg.engine);
                 let ratio = cfg
                     .transmission
@@ -187,9 +225,8 @@ pub fn vehicle_simulation(
                     .unwrap_or(1.0);
                 let wheel_torque =
                     torque * ratio * cfg.transmission.final_drive * cfg.transmission.efficiency;
-                let drive_force =
+                drive_request +=
                     wheel_torque / wheel.radius / driven_count.max(1) as f32 * input.throttle;
-                longitudinal += drive_force;
             }
             if wheel.driven && reversing {
                 let torque = sim::engine_torque(state.rpm.max(cfg.engine.idle_rpm), &cfg.engine);
@@ -197,32 +234,57 @@ pub fn vehicle_simulation(
                     * cfg.transmission.reverse_ratio
                     * cfg.transmission.final_drive
                     * cfg.transmission.efficiency;
-                longitudinal -=
+                drive_request -=
                     wheel_torque / wheel.radius / driven_count.max(1) as f32 * input.brake;
             }
-            // Foot brake.
-            longitudinal += -vel_long.signum()
-                * input.brake
-                * cfg.brakes.max_brake_force
-                * wheel.brake_bias
-                * if reversing { 0.0 } else { 1.0 };
+            // Engine braking through the driven wheels at closed throttle.
+            if wheel.driven
+                && !reversing
+                && input.throttle <= 0.0
+                && vel_long.abs() > 0.5
+                && cfg.engine.engine_brake_nm > 0.0
+            {
+                let ratio = cfg
+                    .transmission
+                    .gear_ratios
+                    .get(state.gear)
+                    .copied()
+                    .unwrap_or(1.0);
+                let wheel_torque = cfg.engine.engine_brake_nm
+                    * ratio
+                    * cfg.transmission.final_drive
+                    * cfg.transmission.efficiency;
+                longitudinal +=
+                    -vel_long.signum() * wheel_torque / wheel.radius / driven_count.max(1) as f32;
+            }
+
+            // Traction control caps the drive request to a fraction of the
+            // tire's limit (0 = off). It only governs the power side.
+            if cfg.assists.traction_control > 0.0 {
+                let cap = traction_limit * cfg.assists.traction_control;
+                drive_request = drive_request.clamp(-cap, cap);
+            }
+            longitudinal += drive_request;
+
+            // Foot brake only in forward direction — in reverse the pedal is
+            // the throttle, not a brake.
+            if !reversing {
+                longitudinal += -vel_long.signum()
+                    * input.brake
+                    * cfg.brakes.max_brake_force
+                    * wheel.brake_bias;
+            }
             // Handbrake locks the wheel hard.
             longitudinal += -vel_long.signum()
                 * hb
                 * cfg.brakes.max_brake_force
                 * cfg.brakes.handbrake_strength;
 
-            // Traction control: cap the allowed slip.
-            let tc_limit = if cfg.assists.traction_control > 0.0 {
-                1.0 / (1.0 + cfg.assists.traction_control * 0.5)
-            } else {
-                1.0
-            };
-            let (mut longitudinal_clamped, slip_ratio) =
-                sim::longitudinal_force(longitudinal, load, &cfg.tires, tc_limit);
-            if cfg.assists.traction_control > 0.0 && slip_ratio > cfg.assists.traction_control {
-                longitudinal_clamped *= cfg.assists.traction_control / slip_ratio;
-            }
+            // Combined force is limited by the tire's traction curve (see
+            // `sim::longitudinal_force`); over-demand slides rather than
+            // hard-clamping.
+            let (longitudinal_clamped, demand_ratio) =
+                sim::longitudinal_force(longitudinal, load, &cfg.tires, 1.0);
 
             // Friction ellipse: combined force can't exceed μ·load.
             let total = (lateral * lateral + longitudinal_clamped * longitudinal_clamped).sqrt();
@@ -236,16 +298,21 @@ pub fn vehicle_simulation(
                 (lateral, longitudinal_clamped)
             };
 
-            let force = ws.contact_normal * ws.suspension_force
-                + tire_right * lateral
-                + tire_fwd * longitudinal;
-            forces.apply_force_at_point(force, ws.contact_point);
+            // Suspension force is applied slightly above the contact patch
+            // (fraction of the wheel radius) so roll stays plausible.
+            let sus_point = ws.contact_point
+                + ws.contact_normal * cfg.suspension.force_apply_offset * wheel.radius;
+            forces.apply_force_at_point(ws.contact_normal * ws.suspension_force, sus_point);
+            forces.apply_force_at_point(
+                tire_right * lateral + tire_fwd * longitudinal,
+                ws.contact_point,
+            );
 
             let ws = &mut state.wheels[i];
             ws.vel_long = vel_long;
             ws.vel_lat = vel_lat;
             ws.slip_angle = slip;
-            ws.slip_ratio = slip_ratio;
+            ws.traction_demand = demand_ratio;
             ws.lateral_force = lateral;
             ws.longitudinal_force = longitudinal;
             ws.spin += (vel_long / wheel.radius.max(0.01)) * dt;

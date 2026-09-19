@@ -108,8 +108,19 @@ pub fn lateral_force(slip_angle: f32, normal_load: f32, cfg: &TireConfig) -> f32
     -slip_angle.signum() * peak * shape
 }
 
-/// Clamp a requested longitudinal force to the tire's traction limit and
-/// report the achieved slip ratio.
+/// Arcade longitudinal traction model.
+///
+/// `requested` is the force the controller (engine, brakes, resistance)
+/// demands; `normal_load * longitudinal_grip * traction_limit` is the most
+/// the tire can deliver. Inside the limit the demand is delivered verbatim.
+/// Demand beyond the limit behaves like over-driving the tire: delivered
+/// force falls from the peak toward `slide_fraction` of it across an extra
+/// `peak_slip_ratio` of over-demand — a deliberately simple stand-in for a
+/// slip curve, not a measured wheel-speed model.
+///
+/// Returns `(applied_force, demand_ratio)` where `demand_ratio` is
+/// `requested / limit` — a force-utilization figure (clamped to ±1.5 for
+/// reporting), **not** measured slip.
 pub fn longitudinal_force(
     requested: f32,
     normal_load: f32,
@@ -117,13 +128,14 @@ pub fn longitudinal_force(
     traction_limit: f32,
 ) -> (f32, f32) {
     let max_f = cfg.longitudinal_grip * normal_load * traction_limit;
-    let clamped = requested.clamp(-max_f, max_f);
-    let slip = if max_f > 1e-3 {
-        (requested / max_f).clamp(-1.5, 1.5)
-    } else {
-        0.0
-    };
-    (clamped, slip)
+    if max_f <= 1e-3 {
+        return (0.0, 0.0);
+    }
+    let demand = requested / max_f;
+    let over = (demand.abs() - 1.0).max(0.0);
+    let falloff = ((over / cfg.peak_slip_ratio.max(1e-3)).min(1.0)) * (1.0 - cfg.slide_fraction);
+    let applied = demand.signum() * max_f * (demand.abs().min(1.0) - falloff);
+    (applied, demand.clamp(-1.5, 1.5))
 }
 
 /// Grip available for one wheel accounting for load sensitivity: grip per
@@ -255,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn longitudinal_force_clamps_to_traction() {
+    fn longitudinal_force_limits_and_falls_off() {
         let cfg = TireConfig {
             lateral_grip: 1.5,
             longitudinal_grip: 1.5,
@@ -265,9 +277,25 @@ mod tests {
             rolling_resistance: 0.01,
             load_sensitivity: 0.3,
         };
-        let (f, slip) = longitudinal_force(100_000.0, 3000.0, &cfg, 1.0);
-        assert_eq!(f, 4500.0);
-        assert!(slip > 1.0);
+        // Inside the limit, demand is delivered verbatim, in both directions.
+        let (f, d) = longitudinal_force(2000.0, 3000.0, &cfg, 1.0);
+        assert_eq!(f, 2000.0);
+        assert!(d < 1.0);
+        let (f, _) = longitudinal_force(-2000.0, 3000.0, &cfg, 1.0);
+        assert_eq!(f, -2000.0);
+        // Slightly past the limit the force is near the peak and falling:
+        // demand 1.1 → 1 - (0.1/0.2)*(1-0.7) = 0.85 of the limit.
+        let (f, d) = longitudinal_force(4950.0, 3000.0, &cfg, 1.0);
+        assert!((f - 4500.0 * 0.85).abs() < 1.0);
+        assert!(d > 1.0);
+        // Extreme over-demand slides toward slide_fraction of the limit.
+        let (f, _) = longitudinal_force(100_000.0, 3000.0, &cfg, 1.0);
+        assert!((f - 4500.0 * 0.7).abs() < 1.0);
+        // And symmetric in reverse.
+        let (f, _) = longitudinal_force(-100_000.0, 3000.0, &cfg, 1.0);
+        assert!((f + 4500.0 * 0.7).abs() < 1.0);
+        // No load, no force.
+        assert_eq!(longitudinal_force(10_000.0, 0.0, &cfg, 1.0), (0.0, 0.0));
     }
 
     #[test]
