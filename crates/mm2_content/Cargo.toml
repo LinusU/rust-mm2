@@ -1,0 +1,14 @@
+[package]
+name = "mm2_content"
+description = "MM2 vehicle catalog and tuning-to-runtime conversion"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+mm2_assets.workspace = true
+mm2_formats.workspace = true
+mm2_vehicle.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

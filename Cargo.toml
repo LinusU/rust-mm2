@@ -6,6 +6,7 @@ default-members = ["crates/mm2_app"]
 members = [
     "crates/mm2_app",
     "crates/mm2_assets",
+    "crates/mm2_content",
     "crates/mm2_formats",
     "crates/mm2_game",
     "crates/mm2_vehicle",
@@ -25,12 +26,14 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.9"
 clap = { version = "4", features = ["derive"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 miniz_oxide = "0.8"
 mm2_formats = { path = "crates/mm2_formats" }
 mm2_assets = { path = "crates/mm2_assets" }
+mm2_content = { path = "crates/mm2_content" }
 mm2_game = { path = "crates/mm2_game" }
 mm2_vehicle = { path = "crates/mm2_vehicle" }
 

@@ -3815,6 +3815,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mm2_content"
+version = "0.0.0"
+dependencies = [
+ "mm2_assets",
+ "mm2_formats",
+ "mm2_vehicle",
+ "serde",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
 name = "mm2_formats"
 version = "0.0.0"
 dependencies = [
