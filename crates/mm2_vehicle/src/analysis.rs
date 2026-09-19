@@ -93,6 +93,28 @@ pub struct HandlingMetrics {
     pub high_speed_steer_demand_g: f32,
 }
 
+/// Chassis-space points of the collision hull, falling back to the corners
+/// of the `chassis_size` cuboid when the config carries no hull.
+pub fn hull_points(config: &VehicleConfig) -> Vec<[f32; 3]> {
+    if let Some(p) = &config.collider_points
+        && !p.is_empty()
+    {
+        return p.clone();
+    }
+    let [w, h, d] = config.chassis_size;
+    let (hw, hh, hd) = (w * 0.5, h * 0.5, d * 0.5);
+    vec![
+        [-hw, -hh, -hd],
+        [hw, -hh, -hd],
+        [-hw, -hh, hd],
+        [hw, -hh, hd],
+        [-hw, hh, -hd],
+        [hw, hh, -hd],
+        [-hw, hh, hd],
+        [hw, hh, hd],
+    ]
+}
+
 /// Lower convex envelope of `points` projected onto the side view, as
 /// `(z, y)` vertices ordered by `z`. This is the underside of the chassis
 /// as a crest or kerb meets it.
@@ -248,32 +270,14 @@ impl HandlingMetrics {
         front_z: f32,
         rear_z: f32,
     ) -> (f32, f32, f32, f32) {
-        let cuboid;
-        let points: &[[f32; 3]] = match &config.collider_points {
-            Some(p) if !p.is_empty() => p,
-            _ => {
-                let [w, h, d] = config.chassis_size;
-                let (hw, hh, hd) = (w * 0.5, h * 0.5, d * 0.5);
-                cuboid = [
-                    [-hw, -hh, -hd],
-                    [hw, -hh, -hd],
-                    [-hw, -hh, hd],
-                    [hw, -hh, hd],
-                    [-hw, hh, -hd],
-                    [hw, hh, -hd],
-                    [-hw, hh, hd],
-                    [hw, hh, hd],
-                ];
-                &cuboid
-            }
-        };
+        let points = hull_points(config);
 
         // The belly is the hull's *lower surface*, not its vertex set: a
         // box-shaped hull has no vertex between the axles, yet its floor
         // still spans them. Projecting to the side view (z, y) and taking
         // the lower convex envelope recovers that floor exactly, because
         // the hull's underside is convex in that projection.
-        let belly = lower_envelope(points);
+        let belly = lower_envelope(&points);
 
         let quarter = std::f32::consts::FRAC_PI_2;
         let mut clearance = f32::MAX;

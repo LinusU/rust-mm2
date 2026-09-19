@@ -58,6 +58,10 @@ fn default_roll_resistance() -> f32 {
     0.8
 }
 
+fn default_self_right_delay() -> f32 {
+    2.0
+}
+
 /// Spring/damper suspension parameters.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct SuspensionConfig {
@@ -217,6 +221,11 @@ pub struct AssistConfig {
     /// Air control: torque authority to level the car while airborne
     /// (0 = off).
     pub air_control: f32,
+    /// Seconds a car must lie on its side or roof, near stationary, before
+    /// it flops back onto its wheels. `0` disables recovery, which strands
+    /// the player.
+    #[serde(default = "default_self_right_delay")]
+    pub self_right_delay: f32,
 }
 
 /// The complete vehicle definition.
@@ -367,6 +376,7 @@ impl Default for VehicleConfig {
                 traction_control: 0.9,
                 countersteer: 0.35,
                 air_control: 4.0,
+                self_right_delay: default_self_right_delay(),
             },
             trailer: false,
         }
@@ -720,6 +730,10 @@ impl VehicleConfig {
         check!(
             "assists.air_control",
             finite(asst.air_control) && asst.air_control >= 0.0,
+        );
+        check!(
+            "assists.self_right_delay",
+            finite(asst.self_right_delay) && asst.self_right_delay >= 0.0,
         );
 
         if problems.is_empty() {

@@ -20,7 +20,7 @@ pub mod sim;
 pub mod systems;
 pub mod vehicle;
 
-pub use analysis::{HandlingMetrics, WheelMetrics};
+pub use analysis::{HandlingMetrics, WheelMetrics, hull_points};
 pub use config::VehicleConfig;
 pub use debug::VehicleDebugEnabled;
 pub use vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState, WheelState};
@@ -42,6 +42,7 @@ impl Plugin for VehiclePlugin {
                     .ambiguous_with(PhysicsStepSystems::First),
             )
             .add_systems(Update, systems::vehicle_reset)
+            .add_systems(Update, systems::vehicle_self_right)
             .add_systems(Update, debug::debug_draw);
     }
 }

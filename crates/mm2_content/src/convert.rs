@@ -69,6 +69,8 @@ const DAMPING_RATIO_MAX: f32 = 0.90;
 /// Share of the lateral-force roll moment cancelled on imported cars
 /// (adapted arcade policy — see `AssistConfig::roll_resistance`).
 const ROLL_RESISTANCE: f32 = 0.85;
+/// Seconds an upended car waits before flopping back onto its wheels.
+const SELF_RIGHT_DELAY: f32 = 2.0;
 
 /// How each emitted value was obtained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -639,6 +641,7 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
         traction_control: 0.85,
         countersteer: 0.3,
         air_control: 3.0,
+        self_right_delay: SELF_RIGHT_DELAY,
     };
     report.defaulted(
         "assists",

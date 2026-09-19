@@ -382,6 +382,89 @@ pub fn vehicle_simulation(
     }
 }
 
+/// Cosine of the tilt past which a car counts as upended: an up axis
+/// leaning more than ~70 degrees off vertical is on its side or roof, not
+/// merely cresting a steep bank.
+const UPENDED_TILT: f32 = 0.35;
+/// A car still sliding is still in play; recovery waits for it to stop.
+const UPENDED_MAX_SPEED: f32 = 2.0;
+
+type SelfRightQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Vehicle,
+        &'static mut VehicleState,
+        &'static mut Position,
+        &'static mut Rotation,
+        &'static mut LinearVelocity,
+        &'static mut AngularVelocity,
+        &'static mut Transform,
+    ),
+>;
+
+/// Flop an upended car back onto its wheels once it has come to rest.
+///
+/// Without this a roll is the end of the drive: a car on its roof has no
+/// wheel in contact, so nothing in the simulation can push it back over
+/// and the player is stranded. Recovery keeps the car's heading and drops
+/// it upright on whatever surface is below it.
+pub fn vehicle_self_right(time: Res<Time>, mut vehicles: SelfRightQuery) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    for (vehicle, mut state, mut pos, mut rot, mut lv, mut av, mut transform) in &mut vehicles {
+        let delay = vehicle.config.assists.self_right_delay;
+        if delay <= 0.0 {
+            state.upended_for = 0.0;
+            continue;
+        }
+        let upright = (rot.0 * Vec3::Y).y;
+        if upright > UPENDED_TILT || lv.0.length() > UPENDED_MAX_SPEED {
+            state.upended_for = 0.0;
+            continue;
+        }
+        state.upended_for += dt;
+        if state.upended_for < delay {
+            continue;
+        }
+
+        // Keep the heading, discard every other rotation.
+        let yaw = {
+            let f = rot.0 * Vec3::NEG_Z;
+            // On its roof the forward axis can point steeply up or down;
+            // its horizontal part still says which way the car faces.
+            let flat = Vec3::new(f.x, 0.0, f.z);
+            if flat.length_squared() > 1e-6 {
+                (-flat.x).atan2(-flat.z)
+            } else {
+                0.0
+            }
+        };
+        let level = Quat::from_rotation_y(yaw);
+
+        // Drop it onto whatever is underneath rather than guessing a
+        // height: the car may be on a bridge, a kerb or a hillside. The
+        // resting hull is already touching that surface, so its lowest
+        // corner says where the surface is — no raycast needed, which also
+        // keeps this system's mutable `Position` clear of `SpatialQuery`.
+        let surface_y = crate::analysis::hull_points(&vehicle.config)
+            .iter()
+            .map(|p| (pos.0 + rot.0 * Vec3::from(*p)).y)
+            .fold(f32::MAX, f32::min);
+        let ground_y = crate::analysis::HandlingMetrics::of(&vehicle.config).ground_y;
+
+        pos.0.y = surface_y - ground_y + 0.05;
+        rot.0 = level;
+        lv.0 = Vec3::ZERO;
+        av.0 = Vec3::ZERO;
+        transform.translation = pos.0;
+        transform.rotation = level;
+        state.upended_for = 0.0;
+    }
+}
+
 type ResetQuery<'w, 's> = Query<
     'w,
     's,

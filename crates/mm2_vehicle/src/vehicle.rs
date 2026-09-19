@@ -94,6 +94,9 @@ pub struct VehicleState {
     pub forward_speed: f32,
     /// Whether a gear change is in progress.
     pub shifting: f32,
+    /// How long the car has been lying on its side or roof and nearly
+    /// still, seconds. Drives the self-righting assist.
+    pub upended_for: f32,
 }
 
 impl VehicleState {
@@ -108,6 +111,7 @@ impl VehicleState {
             grounded: false,
             forward_speed: 0.0,
             shifting: 0.0,
+            upended_for: 0.0,
         }
     }
 }

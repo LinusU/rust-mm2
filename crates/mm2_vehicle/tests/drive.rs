@@ -269,6 +269,66 @@ fn up_after_hard_turn(cfg: VehicleConfig) -> f32 {
 }
 
 #[test]
+fn an_upended_car_flops_back_onto_its_wheels() {
+    let (mut app, car) = test_app();
+    let delay = VehicleConfig::default().assists.self_right_delay;
+
+    // Put it on its roof, where nothing in the simulation can reach it:
+    // no wheel touches the ground, so no tire or spring force applies.
+    {
+        let flipped = Quat::from_rotation_z(std::f32::consts::PI);
+        let world = app.world_mut();
+        world.get_mut::<Rotation>(car).unwrap().0 = flipped;
+        world.get_mut::<Transform>(car).unwrap().rotation = flipped;
+    }
+    drive(
+        &mut app,
+        car,
+        FRAMES_PER_SECOND / 2,
+        VehicleInput::default(),
+    );
+    let upright = (app.world().get::<Rotation>(car).unwrap().0 * Vec3::Y).y;
+    assert!(
+        upright < 0.0,
+        "car should still be inverted, up.y {upright}"
+    );
+
+    // Wait out the recovery delay with room to spare.
+    drive(
+        &mut app,
+        car,
+        (FRAMES_PER_SECOND as f32 * (delay + 1.5)) as usize,
+        VehicleInput::default(),
+    );
+
+    let upright = (app.world().get::<Rotation>(car).unwrap().0 * Vec3::Y).y;
+    assert!(
+        upright > 0.9,
+        "car should have recovered onto its wheels, up.y {upright}"
+    );
+    let state = app.world().get::<VehicleState>(car).unwrap();
+    assert!(state.grounded, "recovered car should be back on the road");
+    assert_finite(&app, car);
+}
+
+#[test]
+fn a_car_on_its_wheels_is_never_self_righted() {
+    let (mut app, car) = test_app();
+    let delay = VehicleConfig::default().assists.self_right_delay;
+    drive(
+        &mut app,
+        car,
+        (FRAMES_PER_SECOND as f32 * (delay + 2.0)) as usize,
+        VehicleInput::default(),
+    );
+    let state = app.world().get::<VehicleState>(car).unwrap();
+    assert_eq!(
+        state.upended_for, 0.0,
+        "a settled car must never accumulate recovery time"
+    );
+}
+
+#[test]
 fn car_turns_left_and_right() {
     for (steering, expected_sign) in [(1.0f32, 1.0f32), (-1.0, -1.0)] {
         let (mut app, car) = test_app();

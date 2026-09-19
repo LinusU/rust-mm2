@@ -130,3 +130,4 @@ yaw_stability = 2.5
 traction_control = 0.9
 countersteer = 0.35
 air_control = 4.0
+self_right_delay = 2.0
