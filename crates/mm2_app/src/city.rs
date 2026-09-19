@@ -40,7 +40,12 @@ use mm2_game::CityEntity;
 use tracing::{debug, info, warn};
 
 /// Whether to mirror Z when converting MM2 coordinates to Bevy space.
-const MIRROR_Z: bool = true;
+///
+/// Off: PSDL coordinates are used as authored. Mirroring Z reflects the
+/// whole city — verified on retail San Francisco, where it put the city on
+/// the wrong side of the Golden Gate bridge and rendered facade signage
+/// back to front (a shopfront reading `PASTA` came out as `ATSAP`).
+const MIRROR_Z: bool = false;
 
 /// World scale (metres) per texture repeat for planar-mapped city surfaces.
 /// The PSDL format does not store UVs for most ground attributes; this is a
@@ -92,6 +97,14 @@ fn v3(p: [f32; 3]) -> Vec3 {
     }
 }
 
+/// Map a Bevy-space z back to the authored (x, z) plane the room polygons
+/// and facing tests work in. The Z mirror is its own inverse, so this is
+/// also the way in.
+#[inline]
+fn authored_z(z: f32) -> f32 {
+    if MIRROR_Z { -z } else { z }
+}
+
 // ---------------------------------------------------------------------------
 // Mesh accumulation
 // ---------------------------------------------------------------------------
@@ -121,10 +134,20 @@ impl MeshBuilder {
         i
     }
 
-    /// Push a triangle with reversed winding — positions are already
-    /// mirrored and ground attributes are authored clockwise, so reversing
-    /// yields +Y-facing front faces.
+    /// Push a triangle with the authored winding resolved to a +Y-facing
+    /// front face. Ground attributes are authored clockwise in the (x, z)
+    /// plane, which already gives +Y in Bevy space; mirroring Z flips the
+    /// winding, so it is reversed only when [`MIRROR_Z`] is set.
     fn tri(&mut self, a: u32, b: u32, c: u32) {
+        if MIRROR_Z {
+            self.tri_rev(a, b, c);
+        } else {
+            self.tri_keep(a, b, c);
+        }
+    }
+
+    /// Push a triangle with the winding reversed from the indices given.
+    fn tri_rev(&mut self, a: u32, b: u32, c: u32) {
         self.indices.extend_from_slice(&[a, c, b]);
     }
 
@@ -137,9 +160,9 @@ impl MeshBuilder {
         let pa = Vec3::from_array(self.positions[a as usize]);
         let pb = Vec3::from_array(self.positions[b as usize]);
         let pc = Vec3::from_array(self.positions[c as usize]);
-        // tri(a,b,c) emits (a, c, b): its normal is (c−a)×(b−a).
+        // tri_rev(a,b,c) emits (a, c, b): its normal is (c−a)×(b−a).
         if (pc - pa).cross(pb - pa).y >= 0.0 {
-            self.tri(a, b, c);
+            self.tri_rev(a, b, c);
         } else {
             self.tri_keep(a, b, c);
         }
@@ -282,7 +305,7 @@ impl MeshBuilder {
             ]
         };
         let base: Vec<u32> = pts.iter().map(|&p| self.vert(p, uv(p))).collect();
-        // tri() emits (a, c, b): its geometric normal is (c−a)×(b−a).
+        // tri_rev() emits (a, c, b): its geometric normal is (c−a)×(b−a).
         let mut keep = false;
         for i in 1..pts.len() - 1 {
             let n = (pts[i + 1] - pts[0]).cross(pts[i] - pts[0]);
@@ -295,7 +318,7 @@ impl MeshBuilder {
             if keep {
                 self.tri_keep(base[0], base[i], base[i + 1]);
             } else {
-                self.tri(base[0], base[i], base[i + 1]);
+                self.tri_rev(base[0], base[i], base[i + 1]);
             }
         }
     }
@@ -834,14 +857,14 @@ impl EmitCtx<'_> {
     /// cases (courtyard chords, missing perimeters) keep the authored
     /// left-of-edge convention.
     fn wall_facing(&self, l: Vec3, r: Vec3) -> Vec3 {
-        // Authored coordinates undo the Z mirror: (x, z) → (x, -z).
-        let (ax, az) = (l.x, -l.z);
-        let (bx, bz) = (r.x, -r.z);
+        // Authored coordinates undo the Z mirror.
+        let (ax, az) = (l.x, authored_z(l.z));
+        let (bx, bz) = (r.x, authored_z(r.z));
         let (dx, dz) = (bx - ax, bz - az);
         let len = (dx * dx + dz * dz).sqrt();
         if len < 1e-3 || self.poly.len() < 3 {
             let (nx, nz) = (-dz, dx);
-            return Vec3::new(nx, 0.0, -nz).normalize_or_zero();
+            return Vec3::new(nx, 0.0, authored_z(nz)).normalize_or_zero();
         }
         // Authored left-of-edge normal.
         let (nx, nz) = (-dz / len, dx / len);
@@ -855,7 +878,7 @@ impl EmitCtx<'_> {
             _ => true,
         };
         let (fx, fz) = if face_left { (nx, nz) } else { (-nx, -nz) };
-        Vec3::new(fx, 0.0, -fz)
+        Vec3::new(fx, 0.0, authored_z(fz))
     }
 
     /// For mostly-vertical fans (gables, embankment walls — unlike ground
@@ -880,8 +903,8 @@ impl EmitCtx<'_> {
         }
         mid /= pts.len() as f32;
         // Authored (x, z) space again.
-        let (mx, mz) = (mid.x, -mid.z);
-        let (nx, nz) = (n.x, -n.z);
+        let (mx, mz) = (mid.x, authored_z(mid.z));
+        let (nx, nz) = (n.x, authored_z(n.z));
         let nl = (nx * nx + nz * nz).sqrt().max(1e-6);
         let (nx, nz) = (nx / nl, nz / nl);
         let inside_p = point_in_poly((mx + nx * 0.5, mz + nz * 0.5), self.poly);
@@ -2091,11 +2114,17 @@ impl<'a> PropCache<'a> {
 
 /// Convert an INST coordinate placement to a Bevy `Mat4` in mirrored space.
 fn inst_transform(c: &inst::InstCoordinate) -> Mat4 {
-    // M' = S·M·S with S = diag(1,1,-1): mirror each column's z, then negate
-    // the whole z column, and mirror the origin.
+    // When mirroring, the placement is re-expressed in the mirrored frame
+    // as M' = S·M·S with S = diag(1,1,-1): mirror each column's z, then
+    // negate the whole z column, and mirror the origin. Without the mirror
+    // the authored basis is used as-is.
     let x = v3(c.x_axis);
     let y = v3(c.y_axis);
-    let z = -v3(c.z_axis);
+    let z = if MIRROR_Z {
+        -v3(c.z_axis)
+    } else {
+        v3(c.z_axis)
+    };
     let o = v3(c.origin);
     Mat4::from_cols(x.extend(0.0), y.extend(0.0), z.extend(0.0), o.extend(1.0))
 }
