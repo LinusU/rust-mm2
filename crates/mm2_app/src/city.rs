@@ -278,19 +278,19 @@ impl MeshBuilder {
 
     /// Slanted-bottom wall (sliver): the bottom edge follows the authored
     /// vertex heights, the top is horizontal at `top`. `v_scale` converts
-    /// height above the lowest bottom corner to texture v.
+    /// depth below the top edge to texture v, so — as in [`wall_quad`] —
+    /// v is 0 along the top edge and grows downwards.
     fn sliver_quad(&mut self, l: Vec3, r: Vec3, top: f32, v_scale: f32, facing: Vec3) {
-        let min = l.y.min(r.y);
         self.quad_facing(
             l,
             r,
             Vec3::new(r.x, top, r.z),
             Vec3::new(l.x, top, l.z),
             [
-                [0.0, (l.y - min) * v_scale],
-                [1.0, (r.y - min) * v_scale],
-                [1.0, (top - min) * v_scale],
-                [0.0, (top - min) * v_scale],
+                [0.0, (top - l.y) * v_scale],
+                [1.0, (top - r.y) * v_scale],
+                [1.0, 0.0],
+                [0.0, 0.0],
             ],
             facing,
         );

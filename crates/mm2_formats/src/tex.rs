@@ -223,12 +223,17 @@ impl TexFile {
         })
     }
 
-    /// Decode one mip level to 8-bit RGBA. Returns `None` for formats that
-    /// cannot be decoded (unknown types).
+    /// Decode one mip level to 8-bit RGBA, top row first. Returns `None`
+    /// for formats that cannot be decoded (unknown types).
+    ///
+    /// TEX stores its rows bottom-up, so they are reversed here: decoding
+    /// in file order hands back an upside-down image, which is how retail
+    /// San Francisco ended up with arched windows arching downwards and a
+    /// shopfront whose `SHIRTS` sign read upside down.
     pub fn decode_rgba(&self, level: usize) -> Option<Vec<u8>> {
         let mip = self.levels.get(level)?;
         let count = (mip.width * mip.height) as usize;
-        let mut out = Vec::with_capacity(count * 4);
+        let mut out: Vec<u8> = Vec::with_capacity(count * 4);
         let fmt = self.header.format;
         match fmt {
             PixelFormat::P8 | PixelFormat::Pa8 | PixelFormat::P4 | PixelFormat::Pa4 => {
@@ -284,6 +289,17 @@ impl TexFile {
             }
             PixelFormat::Unknown(_) => return None,
         }
+        // Bottom-up → top-down. A level whose payload did not decode to a
+        // full rectangle is handed back untouched rather than sliced on a
+        // stride it does not have.
+        let stride = mip.width as usize * 4;
+        if stride > 0 && out.len() == stride * mip.height as usize {
+            let mut flipped = Vec::with_capacity(out.len());
+            for row in out.chunks_exact(stride).rev() {
+                flipped.extend_from_slice(row);
+            }
+            out = flipped;
+        }
         Some(out)
     }
 }
@@ -315,8 +331,10 @@ mod tests {
         let tex = TexFile::parse(&d).unwrap();
         assert_eq!(tex.header.width, 2);
         assert_eq!(tex.levels.len(), 1);
+        // Rows come back top-down, so the file's *last* row leads.
         let rgba = tex.decode_rgba(0).unwrap();
-        assert_eq!(&rgba[..8], &[255, 0, 0, 255, 0, 255, 0, 255]);
+        assert_eq!(&rgba[..8], &[0, 0, 255, 255, 1, 2, 3, 4]);
+        assert_eq!(&rgba[8..], &[255, 0, 0, 255, 0, 255, 0, 255]);
     }
 
     #[test]
@@ -330,10 +348,13 @@ mod tests {
                 d.extend_from_slice(&[0, 0, 0, 0]);
             }
         }
+        // File rows are [0, 1] then [1, 0]; top-down output leads with the
+        // file's last row, so pixel 0 is palette index 1.
         d.extend_from_slice(&[0, 1, 1, 0]);
         let tex = TexFile::parse(&d).unwrap();
         let rgba = tex.decode_rgba(0).unwrap();
-        assert_eq!(&rgba[4..8], &[255, 0, 0, 0xff]);
+        assert_eq!(&rgba[..4], &[255, 0, 0, 0xff]);
+        assert_eq!(&rgba[12..16], &[255, 0, 0, 0xff]);
     }
 
     #[test]
