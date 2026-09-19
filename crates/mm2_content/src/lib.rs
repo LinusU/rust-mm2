@@ -8,6 +8,7 @@
 pub mod assemble;
 pub mod catalog;
 pub mod convert;
+pub mod expect;
 pub mod model;
 
 pub use assemble::{LoadError, TrailerDef, VehicleDef, load_by_id, load_vehicle};
@@ -17,6 +18,10 @@ pub use catalog::{
 pub use convert::{
     ConversionReport, ConvertInput, Converted, Provenance, ReportEntry, WheelGeom, convert,
     convert_trailer,
+};
+pub use expect::{
+    EXPECTED_AUDIO_FAMILIES, EXPECTED_CITIES, EXPECTED_PEDS, EXPECTED_RACE_CITIES, ExpectedEvent,
+    PED_REQUIRED_EXTS, PrimaryRecord, expected_events,
 };
 pub use model::{
     Lod, MeshGroup, ModelPart, PartRole, VehicleModel, WheelVisual, build_model, classify_stem,

@@ -11,11 +11,13 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use mm2_assets::{AssetsError, InstallMount, Vfs, mount_install, mount_mods};
+use mm2_assets::{AssetsError, InstallMount, MountReport, Vfs, mount_install, mount_mods};
 use mm2_formats::pkg::{Pkg, PkgChunk};
 use mm2_formats::psdl::Psdl;
 use mm2_formats::tex::TexFile;
 use mm2_formats::{FormatError, inst};
+
+mod inventory;
 
 /// Extensions the texture pipeline tries, in preference order — the same
 /// order `mm2_app` uses.
@@ -138,6 +140,19 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Versioned content inventory: expected/discovered/accepted/
+    /// rejected/unverified counts per content family, fingerprinted by
+    /// engine commit and resolved-path provenance.
+    Inventory {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Emit the full report as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Exit nonzero on any rejected entry or an empty expected family.
+        #[arg(long)]
+        strict: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -179,14 +194,17 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::ValidateCars { dir, all, strict } => {
             validate_cars(dir, cli.mods.as_deref(), *all, *strict)
         }
+        Command::Inventory { dir, json, strict } => {
+            inventory_cmd(dir, cli.mods.as_deref(), *json, *strict)
+        }
     }
 }
 
 /// Build the VFS exactly like the game does: install (archives + loose
-/// files) then mods.
-fn build_vfs(dir: &Path, mods: Option<&Path>) -> Result<Vfs, AssetsError> {
+/// files) then mods. Returns the mount diagnostics alongside.
+fn build_vfs_report(dir: &Path, mods: Option<&Path>) -> Result<(Vfs, MountReport), AssetsError> {
     let mut vfs = Vfs::new();
-    let report = mount_install(&mut vfs, dir, &InstallMount::default())?;
+    let mut report = mount_install(&mut vfs, dir, &InstallMount::default())?;
     for (path, err) in &report.skipped {
         eprintln!("skipped archive {}: {err}", path.display());
     }
@@ -195,8 +213,15 @@ fn build_vfs(dir: &Path, mods: Option<&Path>) -> Result<Vfs, AssetsError> {
         for m in &manifests {
             eprintln!("mounted mod {}", m.id);
         }
+        report.mods = manifests;
     }
-    Ok(vfs)
+    Ok((vfs, report))
+}
+
+/// Build the VFS exactly like the game does: install (archives + loose
+/// files) then mods.
+fn build_vfs(dir: &Path, mods: Option<&Path>) -> Result<Vfs, AssetsError> {
+    build_vfs_report(dir, mods).map(|(vfs, _)| vfs)
 }
 
 /// Per-file scan categories.
@@ -980,6 +1005,29 @@ fn validate_cars(
     }
     if strict && !warned.is_empty() {
         return Err(format!("strict: {} vehicle(s) carry warnings", warned.len()).into());
+    }
+    Ok(())
+}
+
+fn inventory_cmd(
+    dir: &Path,
+    mods: Option<&Path>,
+    json: bool,
+    strict: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (vfs, mount) = build_vfs_report(dir, mods)?;
+    let report = inventory::build(&vfs, &mount, dir)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&inventory::to_json(&report))?
+        );
+    } else {
+        inventory::print(&report);
+    }
+    let failures = inventory::strict_failures(&report);
+    if strict && !failures.is_empty() {
+        return Err(format!("strict inventory: {} finding(s)", failures.len()).into());
     }
     Ok(())
 }

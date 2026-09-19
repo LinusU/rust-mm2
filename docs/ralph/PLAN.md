@@ -38,13 +38,11 @@
 
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
-**Next selected slice: F00-B.1** — content inventory report (see task
-table). F00-A's audit was produced by this planning pass; F00-B.1 turns
-the VFS enumeration already exercised tonight into the versioned
-expected/discovered/accepted/rejected/unverified inventory F00-AC02
-requires, using `mm2-inspect` and `VehicleCatalog` rather than a second
-loader. F00-B.2 (original-rules ledger) follows once the inventory names
-what needs rules.
+**Next selected slice: F00-B.2** — original-rules ledger (see task
+table). F00-B.1's inventory now names the authored denominator per
+family; the ledger marks each original rule verified_original /
+documented / inferred / designed / unknown from MM2HELP.HLP, Readme.rtf
+and authored data.
 
 ## Baseline gate results (this checkout, 2026-09-20)
 
@@ -52,17 +50,18 @@ what needs rules.
 |---|---|
 | `cargo fmt --all -- --check` | PASS |
 | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | PASS |
-| `cargo test --locked --workspace` | PASS — 17 test binaries/doc-test groups, ~104 tests, 0 failures |
+| `cargo test --locked --workspace` | PASS — 17 test binaries/doc-test groups, ~108 tests, 0 failures |
 | `mm2-inspect cars <retail>` | 29 catalog entries; all 21 `EXPECTED_STOCK_ROSTER` cars `ready`; 8 extra ids kept with explicit incompleteness reasons |
 | `mm2-inspect list <retail>` | 13,389 logical paths; families: texture 3977, aud 3293, geometry 1867, tune 1356, race 1080, bound 1034, city 247, anim 95 |
+| `mm2-inspect inventory <retail>` | 12 families: cities 2/5 exp/disc all parsed; vehicles 21/21 ready + 8 rejected; races 80 exp, 78 accepted, 2 partial (circuit11), 31 extras; lessons 42/42; placement 13 inst parsed; audio 7/7 families (3293 files unverified); peds 4/4 + wolf partial; MP/breakables/traffic/profile/interface discovered-only. `--strict` exits 2 (33 findings) — honest: partial/junk records exist on retail. |
 
 ## Task table
 
 | Task | Status | Dependencies | Evidence / reason / next action |
 |---|---|---|---|
 | F00-A | implemented | - | Audit done in this planning pass: gates pass, env/install/toolchain recorded above. Candidate pending external check/review. |
-| F00-B | active | F00-A | Split into F00-B.1 (inventory) and F00-B.2 (rules ledger). Path-level enumeration done tonight; typed counts + ledger still owed. |
-| F00-B.1 | active | F00-A | Child of F00-B. Write versioned content inventory (cities, vehicles+paints, race/event catalog, lessons, placement sources, audio families, ped archetypes, MP variants) with expected/discovered/accepted/rejected/unverified counts via existing VFS+inspect. Preserves parent F00-B acceptance. |
+| F00-B | active | F00-A | Split into F00-B.1 (inventory) and F00-B.2 (rules ledger). B.1 implemented (candidate); rules ledger still owed. |
+| F00-B.1 | implemented | F00-A | `mm2-inspect inventory` landed: versioned report (engine commit + fnv1a64 catalog fingerprint) with expected/discovered/accepted/rejected/unverified counts across 12 families; `--strict` exits 2 with 33 findings on retail (8 incomplete vehicles, 2 partial circuit11, junk/partial records). Candidate pending external check. |
 | F00-B.2 | queued | F00-A | Child of F00-B. Original-rules ledger from MM2HELP.HLP/Readme.rtf/authored data, each fact marked verified_original/documented/inferred/designed/unknown. |
 | F00-C | queued | F00-B | Partial infra exists: `--frames N --screenshot`, `--dev-world` without data, `mm2-inspect --strict`. Owed: unified evidence commands with explicit missing-capability outcomes. |
 | F01-A | queued | F00-A | `mm2_game` is a 40-line stub (`WorldMode`, `Mm2Vfs`, markers). No SessionConfig/lifecycle yet. |
@@ -104,7 +103,7 @@ what needs rules.
 | F13-A | queued | F02-B, F11-B | London race0–13, SF race0–11 (+r0) authored data present. |
 | F13-B | queued | F13-A | — |
 | F13-C | queued | F13-B, F15-B | — |
-| F14-A | queued | F02-B, F11-B | London circuit0–11, SF cir1–9/circuit8–9 authored data present. |
+| F14-A | queued | F02-B, F11-B | London circuit0–11, SF circuit0–11 authored data present (circuit11 partial: opp/pathset only, no .aimap). SF `cir1–9` are only `_strtpnts` files, not circuit events. |
 | F14-B | queued | F14-A | — |
 | F14-C | queued | F14-B, F15-B | — |
 | F15-A | queued | F02-B, F09-B, F11-B | 612 `.opp` files present; no opponent AI. |
@@ -190,11 +189,15 @@ what needs rules.
 - Race families on the retail install (`race/{london,sf}`): london has
   `blitz0–12`, `race0–13`, `circuit0–11`, `crash0–12`, `exam1–2`,
   `final1–2`, `reverse180`; sf has `blitz0–13`, `race0–11` + `r0`,
-  `cir1–9`/`circuit8–9`, `crash0–12`, `accel0`, `collide0`, `corner0`,
-  `evade0`, `frogger0`, `jump0–2`, `stunt0`, `exam1–2`, `reverse180`,
-  `dbugps2`. File kinds: `.aimap` (108), `.aimap_p` (99), `.opp` (612),
+  `circuit0–11`, `crash0–12`, `accel0`, `collide0`, `corner0`, `evade0`,
+  `frogger0`, `jump0–2`, `ramp`, `stunt0`, `exam1–2`, `reverse180`,
+  `dbugps2`. Both cities' `circuit11` are partial (opp/pathset only, no
+  `.aimap`); SF `cir1–9` are `_strtpnts` records, not circuit events.
+  File kinds: `.aimap` (108), `.aimap_p` (99), `.opp` (612),
   `.pathset` (57), `*waypoints.csv`/`*_strtpnts` (175 csv), plus
   oddities (`bak`, `old`, `ps2`, `.1`/`.4`/`.5` suffixes, `csvs` dir).
+  `mm{race,blitz,circuit,crash}data.csv` per city are the authored event
+  metadata tables.
 - City files: `city/{city,london,sf,sfai,variant}.psdl`,
   `{london,sf}{,_sup,_bak}.bai`, `sfai.bai`, 44 `.pathset`, 42 `.csv`,
   35 `.ldef`, 25 `.cpvs`, 13 `.inst`, 3 `.sky`, 3 `.txt`,
@@ -210,5 +213,4 @@ what needs rules.
 - `mm2-inspect` commands: `scan` (`--strict`), `list`, `resolve`,
   `lookup`, `tex`, `pkg`, `psdl`, `dump`, `cars`, `car` (`--paint`,
   `--json`), `handling` (`--strict`), `validate-cars` (`--all`,
-  `--strict`) — the F00-B.1 inventory should compose these, not add a
-  parallel enumerator.
+  `--strict`), `inventory` (`--json`, `--strict`).
