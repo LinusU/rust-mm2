@@ -258,7 +258,12 @@ impl HandlingMetrics {
                 config.steering.grip_limit,
                 front.slip_allowance,
             ));
-        let high_speed_steer_demand_g = v * v * lock / config.wheelbase.max(1e-3) / G;
+        // Only the part of the lock beyond the slip the front tires need
+        // bends the car's path; the rest is spent getting those tires to
+        // make force at all. Charging the slip term as cornering demand
+        // would report a car as over-steered for being set up to work.
+        let geometric_lock = (lock - front.slip_allowance).max(0.0);
+        let high_speed_steer_demand_g = v * v * geometric_lock / config.wheelbase.max(1e-3) / G;
 
         Self {
             wheels,
