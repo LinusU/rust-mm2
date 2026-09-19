@@ -327,10 +327,10 @@ fn main() {
     .add_systems(
         Update,
         (
-            input::vehicle_input,
-            camera::toggle_camera,
+            input::vehicle_input.run_if(not(capturing)),
+            camera::toggle_camera.run_if(not(capturing)),
             camera::chase_follow,
-            camera::free_fly,
+            camera::free_fly.run_if(not(capturing)),
             reset_input,
             debug_toggle,
             screenshot_input,
@@ -354,6 +354,17 @@ fn main() {
         app.add_systems(Update, smoke_test);
     }
     app.run();
+}
+
+/// Whether a `--frames` capture is running.
+///
+/// Live input must not reach the camera or the vehicle while one is: the
+/// capture opens a window that can take focus from whatever else is on
+/// screen, and stray keystrokes fly the free camera away from the `--cam`
+/// pose the capture exists to reproduce. Physics keeps running, so the
+/// vehicle still settles — it just is not driven.
+fn capturing(smoke: Option<Res<SmokeTest>>) -> bool {
+    smoke.is_some()
 }
 
 /// After N frames, take the screenshot (if requested) and exit.

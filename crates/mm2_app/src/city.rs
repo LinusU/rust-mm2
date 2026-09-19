@@ -40,7 +40,12 @@ use mm2_game::CityEntity;
 use tracing::{debug, info, warn};
 
 /// Whether to mirror Z when converting MM2 coordinates to Bevy space.
-const MIRROR_Z: bool = true;
+///
+/// Off: PSDL coordinates are used as authored. Mirroring Z reflects the
+/// whole city — verified on retail San Francisco, where it put the city on
+/// the wrong side of the Golden Gate bridge and rendered facade signage
+/// back to front (a shopfront reading `PASTA` came out as `ATSAP`).
+const MIRROR_Z: bool = false;
 
 /// World scale (metres) per texture repeat for planar-mapped city surfaces.
 /// The PSDL format does not store UVs for most ground attributes; this is a
@@ -92,6 +97,14 @@ fn v3(p: [f32; 3]) -> Vec3 {
     }
 }
 
+/// Map a Bevy-space z back to the authored (x, z) plane the room polygons
+/// and facing tests work in. The Z mirror is its own inverse, so this is
+/// also the way in.
+#[inline]
+fn authored_z(z: f32) -> f32 {
+    if MIRROR_Z { -z } else { z }
+}
+
 // ---------------------------------------------------------------------------
 // Mesh accumulation
 // ---------------------------------------------------------------------------
@@ -121,10 +134,20 @@ impl MeshBuilder {
         i
     }
 
-    /// Push a triangle with reversed winding — positions are already
-    /// mirrored and ground attributes are authored clockwise, so reversing
-    /// yields +Y-facing front faces.
+    /// Push a triangle with the authored winding resolved to a +Y-facing
+    /// front face. Ground attributes are authored clockwise in the (x, z)
+    /// plane, which already gives +Y in Bevy space; mirroring Z flips the
+    /// winding, so it is reversed only when [`MIRROR_Z`] is set.
     fn tri(&mut self, a: u32, b: u32, c: u32) {
+        if MIRROR_Z {
+            self.tri_rev(a, b, c);
+        } else {
+            self.tri_keep(a, b, c);
+        }
+    }
+
+    /// Push a triangle with the winding reversed from the indices given.
+    fn tri_rev(&mut self, a: u32, b: u32, c: u32) {
         self.indices.extend_from_slice(&[a, c, b]);
     }
 
@@ -137,9 +160,9 @@ impl MeshBuilder {
         let pa = Vec3::from_array(self.positions[a as usize]);
         let pb = Vec3::from_array(self.positions[b as usize]);
         let pc = Vec3::from_array(self.positions[c as usize]);
-        // tri(a,b,c) emits (a, c, b): its normal is (c−a)×(b−a).
+        // tri_rev(a,b,c) emits (a, c, b): its normal is (c−a)×(b−a).
         if (pc - pa).cross(pb - pa).y >= 0.0 {
-            self.tri(a, b, c);
+            self.tri_rev(a, b, c);
         } else {
             self.tri_keep(a, b, c);
         }
@@ -235,11 +258,19 @@ impl MeshBuilder {
     /// at the image top).
     fn wall_quad(&mut self, l: Vec3, r: Vec3, bottom: f32, top: f32, reps: [f32; 2], facing: Vec3) {
         let [u_rep, v_rep] = reps;
+        // The two height refs are not ordered: ~8% of retail facades name
+        // the higher one first, which would put the image's bottom along
+        // the quad's upper edge.
+        let (lo, hi) = if bottom <= top {
+            (bottom, top)
+        } else {
+            (top, bottom)
+        };
         self.quad_facing(
-            Vec3::new(l.x, bottom, l.z),
-            Vec3::new(r.x, bottom, r.z),
-            Vec3::new(r.x, top, r.z),
-            Vec3::new(l.x, top, l.z),
+            Vec3::new(l.x, lo, l.z),
+            Vec3::new(r.x, lo, r.z),
+            Vec3::new(r.x, hi, r.z),
+            Vec3::new(l.x, hi, l.z),
             [[0.0, v_rep], [u_rep, v_rep], [u_rep, 0.0], [0.0, 0.0]],
             facing,
         );
@@ -247,19 +278,19 @@ impl MeshBuilder {
 
     /// Slanted-bottom wall (sliver): the bottom edge follows the authored
     /// vertex heights, the top is horizontal at `top`. `v_scale` converts
-    /// height above the lowest bottom corner to texture v.
+    /// depth below the top edge to texture v, so — as in [`wall_quad`] —
+    /// v is 0 along the top edge and grows downwards.
     fn sliver_quad(&mut self, l: Vec3, r: Vec3, top: f32, v_scale: f32, facing: Vec3) {
-        let min = l.y.min(r.y);
         self.quad_facing(
             l,
             r,
             Vec3::new(r.x, top, r.z),
             Vec3::new(l.x, top, l.z),
             [
-                [0.0, (l.y - min) * v_scale],
-                [1.0, (r.y - min) * v_scale],
-                [1.0, (top - min) * v_scale],
-                [0.0, (top - min) * v_scale],
+                [0.0, (top - l.y) * v_scale],
+                [1.0, (top - r.y) * v_scale],
+                [1.0, 0.0],
+                [0.0, 0.0],
             ],
             facing,
         );
@@ -282,7 +313,7 @@ impl MeshBuilder {
             ]
         };
         let base: Vec<u32> = pts.iter().map(|&p| self.vert(p, uv(p))).collect();
-        // tri() emits (a, c, b): its geometric normal is (c−a)×(b−a).
+        // tri_rev() emits (a, c, b): its geometric normal is (c−a)×(b−a).
         let mut keep = false;
         for i in 1..pts.len() - 1 {
             let n = (pts[i + 1] - pts[0]).cross(pts[i] - pts[0]);
@@ -295,7 +326,7 @@ impl MeshBuilder {
             if keep {
                 self.tri_keep(base[0], base[i], base[i + 1]);
             } else {
-                self.tri(base[0], base[i], base[i + 1]);
+                self.tri_rev(base[0], base[i], base[i + 1]);
             }
         }
     }
@@ -834,14 +865,14 @@ impl EmitCtx<'_> {
     /// cases (courtyard chords, missing perimeters) keep the authored
     /// left-of-edge convention.
     fn wall_facing(&self, l: Vec3, r: Vec3) -> Vec3 {
-        // Authored coordinates undo the Z mirror: (x, z) → (x, -z).
-        let (ax, az) = (l.x, -l.z);
-        let (bx, bz) = (r.x, -r.z);
+        // Authored coordinates undo the Z mirror.
+        let (ax, az) = (l.x, authored_z(l.z));
+        let (bx, bz) = (r.x, authored_z(r.z));
         let (dx, dz) = (bx - ax, bz - az);
         let len = (dx * dx + dz * dz).sqrt();
         if len < 1e-3 || self.poly.len() < 3 {
             let (nx, nz) = (-dz, dx);
-            return Vec3::new(nx, 0.0, -nz).normalize_or_zero();
+            return Vec3::new(nx, 0.0, authored_z(nz)).normalize_or_zero();
         }
         // Authored left-of-edge normal.
         let (nx, nz) = (-dz / len, dx / len);
@@ -855,7 +886,7 @@ impl EmitCtx<'_> {
             _ => true,
         };
         let (fx, fz) = if face_left { (nx, nz) } else { (-nx, -nz) };
-        Vec3::new(fx, 0.0, -fz)
+        Vec3::new(fx, 0.0, authored_z(fz))
     }
 
     /// For mostly-vertical fans (gables, embankment walls — unlike ground
@@ -880,8 +911,8 @@ impl EmitCtx<'_> {
         }
         mid /= pts.len() as f32;
         // Authored (x, z) space again.
-        let (mx, mz) = (mid.x, -mid.z);
-        let (nx, nz) = (n.x, -n.z);
+        let (mx, mz) = (mid.x, authored_z(mid.z));
+        let (nx, nz) = (n.x, authored_z(n.z));
         let nl = (nx * nx + nz * nz).sqrt().max(1e-6);
         let (nx, nz) = (nx / nl, nz / nl);
         let inside_p = point_in_poly((mx + nx * 0.5, mz + nz * 0.5), self.poly);
@@ -1926,14 +1957,34 @@ fn lod_rank(name: &str) -> u8 {
     }
 }
 
+/// Collision triangles accumulated over a whole prop (all best-LOD
+/// geometries, every section). Props are static, so their collision is the
+/// authored triangle mesh: a convex hull would seal the openings of the
+/// concave props the city is full of — archways, bridge trusses, tunnel
+/// mouths — turning them into invisible walls and floors.
+#[derive(Default)]
+struct PropCollision {
+    positions: Vec<Vec3>,
+    tris: Vec<[u32; 3]>,
+}
+
+impl PropCollision {
+    fn into_collider(self) -> Option<Collider> {
+        if self.positions.is_empty() || self.tris.is_empty() {
+            return None;
+        }
+        Some(Collider::trimesh(self.positions, self.tris))
+    }
+}
+
 /// Build renderable parts (best-LOD mesh per stem, grouped by shader) plus
-/// a convex-hull point set for collision from a parsed PKG.
+/// one triangle-mesh collider covering the whole prop.
 fn pkg_to_parts(
     pkg: &Pkg,
     mats: &mut MaterialCache<'_>,
     meshes: &mut Assets<Mesh>,
     missing_prims: &mut usize,
-) -> Vec<(Handle<Mesh>, Handle<StandardMaterial>, Vec<Vec3>)> {
+) -> PropModel {
     let mut best: HashMap<String, (u8, &str)> = HashMap::new();
     for (name, _geo) in pkg.geometries() {
         let lower = name.to_ascii_lowercase();
@@ -1958,6 +2009,7 @@ fn pkg_to_parts(
     };
 
     let mut out = Vec::new();
+    let mut collision = PropCollision::default();
     for (stem, (_, name)) in best {
         // Shadow/damage stand-ins are not rendered props.
         if stem.contains("shadow") || stem.contains("dmg") {
@@ -1967,7 +2019,6 @@ fn pkg_to_parts(
             continue;
         };
         let mut by_shader: HashMap<i32, MeshBuilder> = HashMap::new();
-        let mut hull_points: Vec<Vec3> = Vec::new();
         for section in &geo.sections {
             let b = by_shader.entry(section.shader_offset).or_default();
             for strip in &section.strips {
@@ -1977,7 +2028,7 @@ fn pkg_to_parts(
                     *missing_prims += 1;
                     continue;
                 }
-                emit_strip(b, strip, &mut hull_points);
+                emit_strip(b, strip, &mut collision);
             }
         }
         for (shader_off, builder) in by_shader {
@@ -1991,18 +2042,32 @@ fn pkg_to_parts(
                 }
                 None => mats.fallback.clone(),
             };
-            out.push((meshes.add(builder.build()), mat, hull_points.clone()));
+            out.push((meshes.add(builder.build()), mat));
         }
     }
-    out
+    PropModel {
+        parts: out,
+        collider: collision.into_collider(),
+    }
 }
 
 /// Emit one PKG strip into a builder; authored normals and UVs preserved.
-fn emit_strip(b: &mut MeshBuilder, strip: &PkgStrip, hull: &mut Vec<Vec3>) {
+/// The same triangles are accumulated into `col` for collision (winding is
+/// irrelevant to the physics backend).
+fn emit_strip(b: &mut MeshBuilder, strip: &PkgStrip, col: &mut PropCollision) {
     let base = b.positions.len() as u32;
+    let col_base = col.positions.len() as u32;
     for v in &strip.vertices {
         let p = v3(v.position);
-        let uv = v.tex_coords.first().copied().unwrap_or([0.0, 0.0]);
+        // PKG UVs are authored against TEX's bottom-up row order, which
+        // `decode_rgba` now normalises to top-down, so v is complemented.
+        // Unlike the city's walls, whose UVs this crate generates, these
+        // come from the file and cannot simply adopt the new convention.
+        let uv = v
+            .tex_coords
+            .first()
+            .map(|&[u, v]| [u, 1.0 - v])
+            .unwrap_or([0.0, 0.0]);
         match v.normal {
             Some(n) => {
                 b.vert_n(p, uv, v3(n));
@@ -2011,10 +2076,15 @@ fn emit_strip(b: &mut MeshBuilder, strip: &PkgStrip, hull: &mut Vec<Vec3>) {
                 b.vert(p, uv);
             }
         }
-        hull.push(p);
+        col.positions.push(p);
     }
     for t in strip.indices.chunks_exact(3) {
         b.tri(base + t[0] as u32, base + t[1] as u32, base + t[2] as u32);
+        col.tris.push([
+            col_base + t[0] as u32,
+            col_base + t[1] as u32,
+            col_base + t[2] as u32,
+        ]);
     }
 }
 
@@ -2042,21 +2112,25 @@ fn adjust_material(
     Some(materials.add(mat))
 }
 
-/// Mesh + material + hull pairs prepared from one PKG.
-type PropParts = Vec<(Handle<Mesh>, Handle<StandardMaterial>, Vec<Vec3>)>;
+/// Everything prepared from one PKG: the renderable parts and the single
+/// collider shared by every placement of that prop.
+struct PropModel {
+    parts: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
+    collider: Option<Collider>,
+}
 
 /// Cache of PKG name → prepared meshes+materials handles.
 struct PropCache<'a> {
     vfs: &'a Vfs,
     meshes: &'a mut Assets<Mesh>,
     mats: MaterialCache<'a>,
-    cache: HashMap<String, Option<PropParts>>,
+    cache: HashMap<String, Option<PropModel>>,
     /// Strips with unsupported primitive types encountered while building.
     missing_prims: usize,
 }
 
 impl<'a> PropCache<'a> {
-    fn get(&mut self, name: &str) -> Option<&PropParts> {
+    fn get(&mut self, name: &str) -> Option<&PropModel> {
         let key = name.to_ascii_lowercase();
         if !self.cache.contains_key(&key) {
             let built = self.build(&key);
@@ -2065,7 +2139,7 @@ impl<'a> PropCache<'a> {
         self.cache.get(&key).and_then(|o| o.as_ref())
     }
 
-    fn build(&mut self, name: &str) -> Option<PropParts> {
+    fn build(&mut self, name: &str) -> Option<PropModel> {
         let resolved = self
             .vfs
             .resolve_preferred(&format!("geometry/{name}"), &["pkg"])
@@ -2078,21 +2152,27 @@ impl<'a> PropCache<'a> {
                 return None;
             }
         };
-        let parts = pkg_to_parts(&pkg, &mut self.mats, self.meshes, &mut self.missing_prims);
-        if parts.is_empty() {
+        let model = pkg_to_parts(&pkg, &mut self.mats, self.meshes, &mut self.missing_prims);
+        if model.parts.is_empty() {
             return None;
         }
-        Some(parts)
+        Some(model)
     }
 }
 
 /// Convert an INST coordinate placement to a Bevy `Mat4` in mirrored space.
 fn inst_transform(c: &inst::InstCoordinate) -> Mat4 {
-    // M' = S·M·S with S = diag(1,1,-1): mirror each column's z, then negate
-    // the whole z column, and mirror the origin.
+    // When mirroring, the placement is re-expressed in the mirrored frame
+    // as M' = S·M·S with S = diag(1,1,-1): mirror each column's z, then
+    // negate the whole z column, and mirror the origin. Without the mirror
+    // the authored basis is used as-is.
     let x = v3(c.x_axis);
     let y = v3(c.y_axis);
-    let z = -v3(c.z_axis);
+    let z = if MIRROR_Z {
+        -v3(c.z_axis)
+    } else {
+        v3(c.z_axis)
+    };
     let o = v3(c.origin);
     Mat4::from_cols(x.extend(0.0), y.extend(0.0), z.extend(0.0), o.extend(1.0))
 }
@@ -2215,9 +2295,8 @@ pub fn load_city(
         ));
     }
 
-    // INST placements → PKG props, each with an explicit collision policy:
-    // a convex hull over the best-LOD vertices (documented approximation —
-    // good enough for lamps, signs and rails in a driving slice).
+    // INST placements → PKG props. Collision is the prop's own triangle
+    // mesh, spawned once per placement beside its visual parts.
     let animated;
     let inst_path = psdl_path.replace(".psdl", ".inst");
     match vfs.read_path(&inst_path) {
@@ -2231,7 +2310,7 @@ pub fn load_city(
                     missing_prims: 0,
                 };
                 for comp in &comps {
-                    let Some(parts) = cache.get(&comp.package_name) else {
+                    let Some(model) = cache.get(&comp.package_name) else {
                         report.props_failed += 1;
                         continue;
                     };
@@ -2240,18 +2319,25 @@ pub fn load_city(
                         InstPlacement::Simple(s) => simple_transform(s),
                     };
                     let transform = Transform::from_matrix(mat4);
-                    for (mesh, material, hull) in parts {
-                        let mut e = commands.spawn((
+                    for (mesh, material) in &model.parts {
+                        commands.spawn((
                             CityEntity,
                             Mesh3d(mesh.clone()),
                             MeshMaterial3d(material.clone()),
                             transform,
-                            RigidBody::Static,
                             Name::new(format!("prop-{}", comp.package_name)),
                         ));
-                        if let Some(c) = Collider::convex_hull(hull.clone()) {
-                            e.insert(c);
-                        }
+                    }
+                    // One static body per placement — not one per shader
+                    // group, which used to stack duplicate colliders.
+                    if let Some(collider) = &model.collider {
+                        commands.spawn((
+                            CityEntity,
+                            RigidBody::Static,
+                            collider.clone(),
+                            transform,
+                            Name::new(format!("prop-{}-collider", comp.package_name)),
+                        ));
                     }
                     report.props_spawned += 1;
                 }

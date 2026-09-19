@@ -201,9 +201,11 @@ fn emits_counted_attributes_meshes_colliders_and_report() {
     assert!(collider.tris.len() >= 10, "collider has all surfaces");
 
     // Spawn sits on the road's midline (y = 0) with the configured
-    // clearance, heading along the road.
+    // clearance, heading along the road. The synthetic road runs from
+    // z = 0 to z = 20 and coordinates are used as authored, so the
+    // midpoint keeps its +z.
     assert!(
-        (import.spawn - bevy::math::Vec3::new(0.0, 1.5, -10.0)).length() < 0.01,
+        (import.spawn - bevy::math::Vec3::new(0.0, 1.5, 10.0)).length() < 0.01,
         "spawn {:?}",
         import.spawn
     );
@@ -253,9 +255,10 @@ fn vfs_to_city_spawns_meshes_colliders_and_props() {
     };
     queue.apply(&mut world);
 
-    // 2 mesh groups + 1 room collider + 1 prop = 4 city entities.
+    // 2 mesh groups + 1 room collider + 1 prop part + 1 prop collider
+    // = 5 city entities.
     let city_entities = world.query::<&CityEntity>().iter(&world).count();
-    assert_eq!(city_entities, 4);
+    assert_eq!(city_entities, 5);
     assert_eq!(loaded.report.props_spawned, 1);
     assert_eq!(loaded.report.props_failed, 0);
     assert!(loaded.report.missing_textures.is_empty());
