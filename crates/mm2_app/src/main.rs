@@ -318,7 +318,7 @@ fn setup(
             ) {
                 Ok(loaded) => {
                     spawn.position = loaded.spawn;
-                    spawn.yaw = 0.0;
+                    spawn.yaw = loaded.spawn_yaw;
                     info!(report = %loaded.report, "city ready");
                 }
                 Err(e) => {

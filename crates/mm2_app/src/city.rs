@@ -529,6 +529,8 @@ pub struct CityImport {
     pub colliders: Vec<RoomCollider>,
     /// Suggested player spawn: on road geometry near the city centre.
     pub spawn: Vec3,
+    /// Heading (rotation about +Y) that points the vehicle along the road.
+    pub spawn_yaw: f32,
     /// What was emitted, approximated, skipped or unsupported.
     pub report: CityReport,
 }
@@ -546,6 +548,8 @@ pub fn emit_psdl(psdl: &Psdl) -> CityImport {
     let mut colliders = Vec::new();
     // Road-attribute rooms → (surface centroid, highest road y).
     let mut road_surfaces: Vec<(Vec3, f32)> = Vec::new();
+    // Points on a road's midline, with the road direction there.
+    let mut road_midpoints: Vec<(Vec3, Vec3)> = Vec::new();
 
     // Texture state persists across rooms (rooms normally open with their
     // own refs); attributes emitted before the first ref get the fallback
@@ -612,6 +616,7 @@ pub fn emit_psdl(psdl: &Psdl) -> CityImport {
                 collider: &mut collider,
                 tex_key,
                 road_tunnel: &mut road_tunnel,
+                road_midpoints: &mut road_midpoints,
                 road_acc: &mut road_acc,
                 road_n: &mut road_n,
                 road_max_y: &mut road_max_y,
@@ -666,28 +671,39 @@ pub fn emit_psdl(psdl: &Psdl) -> CityImport {
             .insert("emitted-before-first-texture-ref".into(), unset_emits);
     }
 
-    let spawn = choose_spawn(psdl, &road_surfaces);
+    let (spawn, spawn_yaw) = choose_spawn(psdl, &road_midpoints, &road_surfaces);
     CityImport {
         meshes,
         colliders,
         spawn,
+        spawn_yaw,
         report,
     }
 }
 
-/// Pick a spawn on verified road geometry: the road-attribute room nearest
-/// the city centre, a vehicle height above its highest road vertex.
-fn choose_spawn(psdl: &Psdl, roads: &[(Vec3, f32)]) -> Vec3 {
+/// Pick a spawn on verified road geometry: the road midline point nearest
+/// the city centre, heading along the road. A midline point lies on the
+/// emitted surface by construction — a room's vertex centroid does not
+/// (curved or hilly roads put it beside or under the road). Cities without
+/// road strips fall back to the nearest road room's centroid, a vehicle
+/// height above its highest road vertex.
+fn choose_spawn(psdl: &Psdl, midpoints: &[(Vec3, Vec3)], roads: &[(Vec3, f32)]) -> (Vec3, f32) {
     let center = v3(psdl.bounds_center);
-    let best = roads.iter().min_by(|a, b| {
-        let da = (a.0.xz() - center.xz()).length_squared();
-        let db = (b.0.xz() - center.xz()).length_squared();
-        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    match best {
-        Some((centroid, max_y)) => Vec3::new(centroid.x, max_y + SPAWN_CLEARANCE, centroid.z),
+    let dist = |p: Vec3| (p.xz() - center.xz()).length_squared();
+    if let Some((pos, dir)) = midpoints
+        .iter()
+        .min_by(|a, b| dist(a.0).total_cmp(&dist(b.0)))
+    {
+        // Vehicle forward is local −Z.
+        return (*pos + Vec3::Y * SPAWN_CLEARANCE, (-dir.x).atan2(-dir.z));
+    }
+    match roads.iter().min_by(|a, b| dist(a.0).total_cmp(&dist(b.0))) {
+        Some((centroid, max_y)) => (
+            Vec3::new(centroid.x, max_y + SPAWN_CLEARANCE, centroid.z),
+            0.0,
+        ),
         // No road attributes at all: above the bounds centre.
-        None => Vec3::new(center.x, center.y + 10.0, center.z),
+        None => (Vec3::new(center.x, center.y + 10.0, center.z), 0.0),
     }
 }
 
@@ -738,6 +754,7 @@ struct EmitCtx<'a> {
     /// Pending road-tunnel spec shared across the room's attributes:
     /// subtype-3 tunnel attributes set it, road attributes read it.
     road_tunnel: &'a mut Option<RoadTunnel>,
+    road_midpoints: &'a mut Vec<(Vec3, Vec3)>,
     road_acc: &'a mut Vec3,
     road_n: &'a mut usize,
     road_max_y: &'a mut f32,
@@ -760,6 +777,19 @@ impl EmitCtx<'_> {
     /// The mesh group for an absolute texture index (−1 = fallback).
     fn builder_at(&mut self, abs: i64) -> &mut MeshBuilder {
         self.groups.entry(abs.max(-1)).or_default()
+    }
+
+    /// Record spawn candidates: the midpoint of each segment of a
+    /// drivable strip between chains `l` and `r`, with its direction.
+    fn note_midline(&mut self, l: &[Vec3], r: &[Vec3]) {
+        for i in 0..l.len().min(r.len()).saturating_sub(1) {
+            let a = (l[i] + r[i]) * 0.5;
+            let b = (l[i + 1] + r[i + 1]) * 0.5;
+            let dir = (b - a).normalize_or_zero();
+            if dir != Vec3::ZERO {
+                self.road_midpoints.push(((a + b) * 0.5, dir));
+            }
+        }
     }
 
     fn note_road(&mut self, pts: &[Vec3]) {
@@ -948,6 +978,7 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
             ctx.collider.strip(&rl, &rr);
             ctx.note_road(&rl);
             ctx.note_road(&rr);
+            ctx.note_midline(&rl, &rr);
             emit_sidewalk(ctx, &sw_l, &rl);
             emit_sidewalk(ctx, &sw_r, &rr);
             emit_road_tunnel(ctx, &sw_l, &sw_r);
@@ -1064,6 +1095,7 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
             ctx.note_road(&rl_in);
             ctx.note_road(&rr_in);
             ctx.note_road(&rr_out);
+            ctx.note_midline(&rr_in, &rr_out);
             emit_sidewalk(ctx, &sw_l, &rl_out);
             emit_sidewalk(ctx, &sw_r, &rr_out);
             emit_divider(ctx, div_type, div_tex, value, &rl_in, &rr_in);
@@ -1954,6 +1986,8 @@ fn simple_transform(s: &inst::InstSimple) -> Mat4 {
 pub struct LoadedCity {
     /// Validated spawn point on road geometry.
     pub spawn: Vec3,
+    /// Heading along the road at the spawn point.
+    pub spawn_yaw: f32,
     /// Import statistics.
     pub report: CityReport,
 }
@@ -2114,6 +2148,7 @@ pub fn load_city(
 
     Ok(LoadedCity {
         spawn: import.spawn,
+        spawn_yaw: import.spawn_yaw,
         report,
     })
 }

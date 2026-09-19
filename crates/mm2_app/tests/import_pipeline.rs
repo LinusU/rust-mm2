@@ -200,12 +200,17 @@ fn emits_counted_attributes_meshes_colliders_and_report() {
     let collider = &import.colliders[0];
     assert!(collider.tris.len() >= 10, "collider has all surfaces");
 
-    // Spawn sits on the road surface (sidewalk lift = 0.15) with the
-    // configured clearance.
+    // Spawn sits on the road's midline (y = 0) with the configured
+    // clearance, heading along the road.
     assert!(
-        (import.spawn.y - 1.65).abs() < 0.01,
+        (import.spawn - bevy::math::Vec3::new(0.0, 1.5, -10.0)).length() < 0.01,
         "spawn {:?}",
         import.spawn
+    );
+    let forward = bevy::math::Quat::from_rotation_y(import.spawn_yaw) * bevy::math::Vec3::NEG_Z;
+    assert!(
+        forward.x.abs() < 1e-4 && forward.z.abs() > 0.99,
+        "{forward:?}"
     );
 }
 
