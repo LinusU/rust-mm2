@@ -3796,6 +3796,7 @@ dependencies = [
  "mm2_formats",
  "mm2_game",
  "mm2_vehicle",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
 ]
@@ -3848,6 +3849,8 @@ dependencies = [
  "avian3d",
  "bevy",
  "serde",
+ "thiserror 2.0.20",
+ "toml",
  "tracing",
 ]
 

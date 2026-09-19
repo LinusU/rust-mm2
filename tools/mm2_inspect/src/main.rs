@@ -1,25 +1,34 @@
 //! `mm2-inspect`: command line inspector for MM2 archives and assets.
 //!
-//! Uses the same `mm2_assets`/`mm2_formats` crates as the game.
+//! Uses the same `mm2_assets` mounting policy as the game: same archive
+//! discovery, source order, path normalization and mod handling.
+//!
+//! Exit codes: 0 = success; 2 = a requested lookup failed, a parse failed,
+//! or `--strict` found failures.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use mm2_assets::{AssetsError, Vfs, priority};
+use mm2_assets::{AssetsError, InstallMount, Vfs, mount_install, mount_mods};
 use mm2_formats::pkg::{Pkg, PkgChunk};
 use mm2_formats::psdl::Psdl;
 use mm2_formats::tex::TexFile;
 use mm2_formats::{FormatError, inst};
 
-/// Original archive names, in mounting order. The exact precedence the
-/// original engine used is still an open question (`docs/research/dave.md`),
-/// so the list is a default, not an assumption baked into the VFS.
-const DEFAULT_ARCHIVES: &[&str] = &["mm2aud.ar", "mm2audex.ar", "mm2tex.ar", "mm2core.ar"];
+/// Extensions the texture pipeline tries, in preference order — the same
+/// order `mm2_app` uses.
+const TEXTURE_EXTS: &[&str] = &["png", "ktx2", "tga", "tex"];
 
 #[derive(Parser)]
 #[command(name = "mm2-inspect", about = "Inspect MM2 installations and assets")]
 struct Cli {
+    /// Directory containing mod folders (each with a mod.toml). Mounted
+    /// above install content, exactly as in the game.
+    #[arg(long, global = true)]
+    mods: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -30,6 +39,10 @@ enum Command {
     Scan {
         /// Path to the MM2 installation directory.
         dir: PathBuf,
+        /// Strict validation: exit nonzero if any recognized file fails to
+        /// parse or carries unparsed remnants.
+        #[arg(long)]
+        strict: bool,
     },
     /// List all logical paths known to the VFS.
     List {
@@ -45,6 +58,14 @@ enum Command {
         dir: PathBuf,
         /// Logical path, e.g. `texture/vpcaddieblue_bk.tex`.
         logical: String,
+    },
+    /// Explain a logical texture lookup: every extension tried, the winning
+    /// source and why it won.
+    Lookup {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Logical stem without extension, e.g. `texture/vpcaddieblue_bk`.
+        stem: String,
     },
     /// Parse and describe a TEX texture.
     Tex {
@@ -69,96 +90,184 @@ enum Command {
     },
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .init();
     let cli = Cli::parse();
-    match cli.command {
-        Command::Scan { dir } => scan(&dir),
-        Command::List { dir, prefix } => list(&dir, prefix.as_deref()),
-        Command::Resolve { dir, logical } => resolve(&dir, &logical),
-        Command::Tex { dir, logical } => tex(&dir, &logical),
-        Command::Pkg { dir, logical } => pkg(&dir, &logical),
-        Command::Psdl { dir, logical } => psdl(&dir, &logical),
+    match run(&cli) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(2)
+        }
     }
 }
 
-/// Build a VFS over an MM2 install: archives lowest, loose files above.
-fn build_vfs(dir: &Path) -> Result<Vfs, AssetsError> {
+fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    match &cli.command {
+        Command::Scan { dir, strict } => scan(dir, cli.mods.as_deref(), *strict),
+        Command::List { dir, prefix } => list(dir, cli.mods.as_deref(), prefix.as_deref()),
+        Command::Resolve { dir, logical } => resolve(dir, cli.mods.as_deref(), logical),
+        Command::Lookup { dir, stem } => lookup(dir, cli.mods.as_deref(), stem),
+        Command::Tex { dir, logical } => tex(dir, cli.mods.as_deref(), logical),
+        Command::Pkg { dir, logical } => pkg(dir, cli.mods.as_deref(), logical),
+        Command::Psdl { dir, logical } => psdl(dir, cli.mods.as_deref(), logical),
+    }
+}
+
+/// Build the VFS exactly like the game does: install (archives + loose
+/// files) then mods.
+fn build_vfs(dir: &Path, mods: Option<&Path>) -> Result<Vfs, AssetsError> {
     let mut vfs = Vfs::new();
-    vfs.mount_archives(dir, DEFAULT_ARCHIVES, priority::ARCHIVE)?;
-    vfs.mount_dir(dir, priority::LOOSE)?;
+    let report = mount_install(&mut vfs, dir, &InstallMount::default())?;
+    for (path, err) in &report.skipped {
+        eprintln!("skipped archive {}: {err}", path.display());
+    }
+    if let Some(mods) = mods {
+        let manifests = mount_mods(&mut vfs, mods)?;
+        for m in &manifests {
+            eprintln!("mounted mod {}", m.id);
+        }
+    }
     Ok(vfs)
 }
 
-fn scan(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let vfs = build_vfs(dir)?;
+/// Per-file scan categories.
+#[derive(Default)]
+struct ScanStats {
+    parsed_ok: usize,
+    /// Parsed but carrying preserved unknown content (PKG raw chunks,
+    /// PSDL unparsed attribute words, unknown pixel formats).
+    partial: Vec<(String, String)>,
+    /// Extensions we do not interpret at all.
+    unsupported: BTreeMap<String, usize>,
+    failures: Vec<(String, String)>,
+}
+
+fn scan(dir: &Path, mods: Option<&Path>, strict: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let vfs = build_vfs(dir, mods)?;
     let paths = vfs.list();
     let mut by_ext: BTreeMap<String, usize> = BTreeMap::new();
-    let mut recognized = 0usize;
-    let mut failures: Vec<(String, String)> = Vec::new();
+    let mut stats = ScanStats::default();
     for logical in &paths {
         let ext = logical.rsplit('.').next().unwrap_or("").to_string();
         *by_ext.entry(ext.clone()).or_default() += 1;
-        if matches!(
-            vfs.read_logical(logical),
-            Ok(b) if b.is_empty()
-        ) {
+        // Read each recognized asset once and reuse the bytes.
+        let bytes = match vfs.read_logical(logical) {
+            Ok(b) => b,
+            Err(e) => {
+                stats.failures.push((logical.clone(), e.to_string()));
+                continue;
+            }
+        };
+        if bytes.is_empty() {
             continue; // zero-length entries occur in retail archives
         }
-        let parsed: Option<Result<(), String>> = match ext.as_str() {
+        match ext.as_str() {
             // .tga is a different format entirely; only .tex is TEX.
-            "tex" => Some(
-                vfs.read_logical(logical)
-                    .map_err(|e| e.to_string())
-                    .and_then(|b| TexFile::parse(&b).map(|_| ()).map_err(|e| e.to_string())),
-            ),
-            "pkg" => Some(
-                vfs.read_logical(logical)
-                    .map_err(|e| e.to_string())
-                    .and_then(|b| Pkg::parse(&b).map(|_| ()).map_err(|e| e.to_string())),
-            ),
-            "psdl" => Some(
-                vfs.read_logical(logical)
-                    .map_err(|e| e.to_string())
-                    .and_then(|b| Psdl::parse(&b).map(|_| ()).map_err(|e| e.to_string())),
-            ),
-            "inst" => Some(
-                vfs.read_logical(logical)
-                    .map_err(|e| e.to_string())
-                    .and_then(|b| inst::parse(&b).map(|_| ()).map_err(|e| e.to_string())),
-            ),
-            _ => None,
-        };
-        if let Some(res) = parsed {
-            match res {
-                Ok(()) => recognized += 1,
-                Err(e) => failures.push((logical.clone(), e)),
-            }
+            "tex" => match TexFile::parse(&bytes) {
+                Ok(t) => {
+                    if matches!(t.header.format, mm2_formats::tex::PixelFormat::Unknown(_)) {
+                        stats.partial.push((
+                            logical.clone(),
+                            format!("unknown pixel type {}", t.header.format.raw()),
+                        ));
+                    } else {
+                        stats.parsed_ok += 1;
+                    }
+                }
+                Err(e) => stats.failures.push((logical.clone(), e.to_string())),
+            },
+            "pkg" => match Pkg::parse(&bytes) {
+                Ok(p) => {
+                    let raw = p
+                        .files
+                        .iter()
+                        .filter(|f| matches!(f.data, PkgChunk::Raw(_)))
+                        .count();
+                    if raw > 0 {
+                        stats
+                            .partial
+                            .push((logical.clone(), format!("{raw} preserved raw chunk(s)")));
+                    } else {
+                        stats.parsed_ok += 1;
+                    }
+                }
+                Err(e) => stats.failures.push((logical.clone(), e.to_string())),
+            },
+            "psdl" => match Psdl::parse(&bytes) {
+                Ok(p) => {
+                    let unparsed: usize = p.rooms.iter().map(|r| r.unparsed_attributes.len()).sum();
+                    if unparsed > 0 {
+                        stats.partial.push((
+                            logical.clone(),
+                            format!("{unparsed} unparsed attribute words"),
+                        ));
+                    } else {
+                        stats.parsed_ok += 1;
+                    }
+                }
+                Err(e) => stats.failures.push((logical.clone(), e.to_string())),
+            },
+            "inst" => match inst::parse(&bytes) {
+                Ok(_) => stats.parsed_ok += 1,
+                Err(e) => stats.failures.push((logical.clone(), e.to_string())),
+            },
+            _ => *stats.unsupported.entry(ext).or_insert(0) += 1,
         }
     }
     println!("== scan of {}", dir.display());
     println!("total logical files: {}", paths.len());
-    println!("recognized & parsed OK: {recognized}");
-    println!("parse failures: {}", failures.len());
+    println!("parsed & validated:    {}", stats.parsed_ok);
+    println!("partially preserved:   {}", stats.partial.len());
+    println!("parse failures:        {}", stats.failures.len());
     println!("\nby extension:");
     for (ext, count) in &by_ext {
-        println!("  {ext:12} {count}");
+        let tag = if stats.unsupported.contains_key(ext) {
+            " (unsupported)"
+        } else {
+            ""
+        };
+        println!("  {ext:12} {count}{tag}");
     }
-    if !failures.is_empty() {
-        println!("\nfirst failures:");
-        for (path, err) in failures.iter().take(20) {
+    if !stats.partial.is_empty() {
+        println!("\npartial (parsed with preserved unknown content):");
+        for (path, note) in stats.partial.iter().take(20) {
+            println!("  {path}: {note}");
+        }
+        if stats.partial.len() > 20 {
+            println!("  … and {} more", stats.partial.len() - 20);
+        }
+    }
+    if !stats.failures.is_empty() {
+        println!("\nfailures:");
+        for (path, err) in stats.failures.iter().take(20) {
             println!("  {path}: {err}");
         }
+        if stats.failures.len() > 20 {
+            println!("  … and {} more", stats.failures.len() - 20);
+        }
+    }
+    if strict && (!stats.failures.is_empty() || !stats.partial.is_empty()) {
+        return Err(format!(
+            "strict scan: {} failures, {} partial files",
+            stats.failures.len(),
+            stats.partial.len()
+        )
+        .into());
     }
     Ok(())
 }
 
-fn list(dir: &Path, prefix: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-    let vfs = build_vfs(dir)?;
+fn list(
+    dir: &Path,
+    mods: Option<&Path>,
+    prefix: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let vfs = build_vfs(dir, mods)?;
     let prefix = prefix.map(|p| p.to_ascii_lowercase());
     for p in vfs.list() {
         if prefix.as_ref().is_none_or(|pre| p.starts_with(pre)) {
@@ -168,26 +277,74 @@ fn list(dir: &Path, prefix: Option<&str>) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-fn resolve(dir: &Path, logical: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let vfs = build_vfs(dir)?;
+fn resolve(
+    dir: &Path,
+    mods: Option<&Path>,
+    logical: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let vfs = build_vfs(dir, mods)?;
     match vfs.resolve(logical) {
         Some(r) => {
             println!("logical : {}", r.logical);
             println!("kind    : {:?}", r.source.kind);
             println!("source  : {}", r.source.path.display());
+            if let Some(label) = &r.source.label {
+                println!("label   : {label}");
+            }
             if let Some(off) = r.source.archive_offset {
                 println!("offset  : {off:#x}");
             }
             let bytes = vfs.read(&r)?;
             println!("size    : {} bytes", bytes.len());
+            Ok(())
         }
-        None => println!("not found: {logical}"),
+        None => Err(format!("not found: {logical}").into()),
     }
-    Ok(())
 }
 
-fn tex(dir: &Path, logical: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let vfs = build_vfs(dir)?;
+/// Explain which file wins a logical texture lookup and why.
+fn lookup(dir: &Path, mods: Option<&Path>, stem: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let vfs = build_vfs(dir, mods)?;
+    println!(
+        "lookup  : {stem} (preference order: {})",
+        TEXTURE_EXTS.join(", ")
+    );
+    for ext in TEXTURE_EXTS {
+        let logical = format!("{stem}.{ext}");
+        match vfs.resolve(&logical) {
+            Some(r) => {
+                println!(
+                    "  {ext:5} → {:50} [{} {}]",
+                    r.logical,
+                    match r.source.kind {
+                        mm2_assets::SourceKind::Archive => "archive",
+                        mm2_assets::SourceKind::Directory => "dir",
+                    },
+                    r.source.path.display(),
+                );
+            }
+            None => println!("  {ext:5} → (absent)"),
+        }
+    }
+    match vfs.resolve_preferred(stem, TEXTURE_EXTS) {
+        Some(r) => {
+            println!("winner  : {}", r.logical);
+            println!("kind    : {:?}", r.source.kind);
+            println!("source  : {}", r.source.path.display());
+            if let Some(label) = &r.source.label {
+                println!("label   : {label}");
+            }
+            println!(
+                "reason  : highest-priority source wins first; extension preference applies only within the winning source"
+            );
+            Ok(())
+        }
+        None => Err(format!("no candidate found for stem {stem}").into()),
+    }
+}
+
+fn tex(dir: &Path, mods: Option<&Path>, logical: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let vfs = build_vfs(dir, mods)?;
     let (bytes, r) = vfs.read_path(logical)?;
     let tex = TexFile::parse(&bytes).map_err(|e| attach(&r, e))?;
     println!(
@@ -210,8 +367,8 @@ fn tex(dir: &Path, logical: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn pkg(dir: &Path, logical: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let vfs = build_vfs(dir)?;
+fn pkg(dir: &Path, mods: Option<&Path>, logical: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let vfs = build_vfs(dir, mods)?;
     let (bytes, r) = vfs.read_path(logical)?;
     let pkg = Pkg::parse(&bytes).map_err(|e| attach(&r, e))?;
     println!(
@@ -250,14 +407,14 @@ fn pkg(dir: &Path, logical: &str) -> Result<(), Box<dyn std::error::Error>> {
             ),
             PkgChunk::Offset(o) => println!("  {:20} offset: {o:?}", file.name),
             PkgChunk::Xref(x) => println!("  {:20} xref: {} refs", file.name, x.len()),
-            PkgChunk::Raw(b) => println!("  {:20} raw: {} bytes", file.name, b.len()),
+            PkgChunk::Raw(b) => println!("  {:20} raw (preserved): {} bytes", file.name, b.len()),
         }
     }
     Ok(())
 }
 
-fn psdl(dir: &Path, logical: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let vfs = build_vfs(dir)?;
+fn psdl(dir: &Path, mods: Option<&Path>, logical: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let vfs = build_vfs(dir, mods)?;
     let (bytes, r) = vfs.read_path(logical)?;
     let psdl = Psdl::parse(&bytes).map_err(|e| attach(&r, e))?;
     let unparsed: usize = psdl.rooms.iter().map(|r| r.unparsed_attributes.len()).sum();
