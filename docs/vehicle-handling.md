@@ -38,7 +38,7 @@ behind the adaptations.
 | `Engine.MaxHorsePower` / `OptRPM` | `engine.max_power_w` / `peak_power_rpm` | 745.7 W/hp |
 | `Engine.IdleRPM` / `MaxRPM` | `engine.idle_rpm` / `redline_rpm` | verbatim |
 | `Trans.Low`/`High`/`Reverse`/`GearBias` | `transmission.gear_ratios` | per-band top speeds → ratios at `OptRPM` |
-| `Trans.GearChangeTime` | `transmission.shift_time` | seconds |
+| `Trans.GearChangeTime` | `transmission.shift_time` | seconds, capped — see below |
 | `DrivetrainType`, `Axle*.TorqueCoef` | `wheels[].driven`, `drive_share` | |
 | `Wheel*.BrakeCoef` / `HandbrakeCoef` | `wheels[].brake_bias` / `handbrake_coef` | normalised against the axle sum |
 | `Wheel*.SteeringLimit` | `steering.low_speed_max_angle`, `steer_scale` | |
@@ -55,14 +55,29 @@ engine with raycast suspension, several of them describe a car that cannot
 be driven. Each adaptation below is a deliberate departure, not an
 approximation of something we failed to decode.
 
-The claims here are measurements. `mm2-inspect handling` audits the whole
-roster against them:
+The claims here are measurements, from two instruments. `mm2-inspect
+handling` solves what a config *implies* — rollover margin, ride height,
+suspension frequency and damping:
 
 ```sh
 cargo run -p mm2_inspect -- handling <install>          # every ready car
 cargo run -p mm2_inspect -- handling <install> vpbug    # one car
 cargo run -p mm2_inspect -- handling <install> --strict # nonzero on problems
 ```
+
+`drive_probe` runs the simulation and reports what the car *does* — how
+evenly it accelerates through its gears, how hard it can actually corner
+at a given speed, and, over real city geometry, every point where its body
+touched the world:
+
+```sh
+cargo run -p mm2_app --example drive_probe -- <install>
+cargo run -p mm2_app --example drive_probe -- <install> vppanoz --city sf
+```
+
+Use the second whenever a handling claim depends on what the solver does
+rather than on what the numbers say. Two of the adaptations below were
+found only by running it.
 
 ### Roll resistance
 
@@ -99,11 +114,52 @@ real speed-sensitive steering has — derived per car from its own wheelbase
 and grip rather than authored. A floor (`MIN_STEER_LOCK`) keeps some
 authority at any speed.
 
+That cap must include **the slip the front tires need**, not just the
+geometric angle. A tire makes force by slipping, so the front wheels have
+to be turned past the path the car is taking before they pull at all;
+capping them at the geometric angle leaves a car whose fronts want more
+slip than its rears turning the wheel for nothing. Sorting the roster by
+front minus rear `OptimumSlipPercent` sorts it exactly by how badly it
+steered: the London Cab (0.40 against 0.14) managed 3 deg/s of yaw at
+30 m/s and the DB7 (0.20/0.08) 8, while the Mini and Panoz, whose axles
+want the same slip, were unaffected. With the understeer term added the
+Cab reaches 22 and the DB7 27, and the cars that were already fine do not
+move.
+
 The countersteer assist is applied *after* this cap on purpose: a car
 already sideways is not the steady-state corner the cap models, and
 catching it needs more lock than that corner would.
 
 Imported cars get `1.3` — enough over the limit to provoke a slide.
+
+### Gear changes
+
+`GearChangeTime` is authored at 0.8-1.0 s. Cutting drive for that long is
+what a real clutch does, but five of them between rest and top speed turn
+acceleration into a staircase — the probe measured the F-350 *losing*
+speed during its worst half-second and spending 7.5 s of a run gaining
+nothing.
+
+Drive torque now dips to `SHIFT_TORQUE_FLOOR` and ramps back across the
+change rather than switching off, and the authored time is capped at
+`MAX_SHIFT_TIME`. The shift is still there to feel; the car never stops
+pulling.
+
+### Levelling in the air
+
+Not an import either, and the fix for a symptom that looks like something
+else entirely. A car cresting a rise at speed leaves it pitched nose-down
+and holds that attitude all the way to the ground, so the front of the
+hull arrives ahead of the wheels, digs into the road and stops the car
+dead. It reads as catching on a seam, and no amount of ground clearance
+helps, because the nose is pointed at the road.
+
+`assists.air_control` is the natural frequency in rad/s of a critically
+damped return of the car's up axis to vertical — `8.0` means level in
+about half a second. It scales by each car's own pitch and roll inertia,
+so that figure means the same thing on a Mini and on a fire truck, and its
+torque axis is horizontal by construction, so a deliberate spin is left
+alone.
 
 ### Suspension damping
 
