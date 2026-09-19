@@ -1,8 +1,16 @@
 //! Keyboard/gamepad → [`VehicleInput`] mapping.
+//!
+//! Controls are routed by mode: free-camera navigation must not drive the
+//! car, and driving input is cleared while the world is not `Ready` or the
+//! window has lost focus (so alt-tabbing away doesn't keep the throttle
+//! pinned).
 
 use bevy::prelude::*;
 use mm2_game::PlayerVehicle;
 use mm2_vehicle::VehicleInput;
+
+use crate::WorldState;
+use crate::camera::CameraMode;
 
 /// Fill `VehicleInput` on the player vehicle from keyboard and the first
 /// connected gamepad (gamepad axes take precedence when non-neutral).
@@ -10,7 +18,22 @@ pub fn vehicle_input(
     keys: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,
     mut vehicles: Query<&mut VehicleInput, With<PlayerVehicle>>,
+    cam_mode: Res<CameraMode>,
+    state: Res<WorldState>,
+    windows: Query<&Window>,
 ) {
+    // Driving controls are active only in chase-cam driving mode, with a
+    // ready world and a focused window. Anything else writes a zeroed
+    // input so the car rolls to a stop instead of holding stale controls.
+    let focused = windows.iter().all(|w| w.focused);
+    let driving = *cam_mode == CameraMode::Chase && matches!(*state, WorldState::Ready) && focused;
+    if !driving {
+        for mut vi in &mut vehicles {
+            *vi = VehicleInput::default();
+        }
+        return;
+    }
+
     let mut input = VehicleInput::default();
     if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
         input.throttle = 1.0;

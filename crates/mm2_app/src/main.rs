@@ -1,28 +1,25 @@
 //! `mm2` — executable shell for the MM2-inspired engine.
 //!
 //! Usage:
-//!   cargo run -- --dev-world
-//!   cargo run -- --mm2-path "/path/to/Midtown Madness 2" [--city london]
-//!   cargo run -- --mm2-path <dir> --mods <dir>
-
-mod camera;
-mod city;
-mod dev_world;
-mod input;
-mod vehicle_visual;
+//!   cargo run -p mm2_app --bin mm2 -- --dev-world
+//!   cargo run -p mm2_app --bin mm2 -- --dev-world --mods examples/mods
+//!   cargo run -p mm2_app --bin mm2 -- --mm2-path "/path/to/Midtown Madness 2" [--city london]
+//!   cargo run -p mm2_app --bin mm2 -- --mm2-path <dir> --mods <dir> --vehicle-config <toml>
 
 use std::path::PathBuf;
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
+use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use clap::Parser;
-use mm2_assets::Vfs;
+use mm2_app::{WorldState, camera, city, dev_world, input, vehicle_visual};
+use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_game::{ActiveWorld, Mm2Vfs, PlayerVehicle, WorldMode};
 use mm2_vehicle::{ResetVehicle, VehicleConfig, VehicleDebugEnabled, VehiclePlugin};
 use tracing::{error, info, warn};
 
-use crate::camera::{CameraMode, ChaseCamera, FreeCamera};
-use crate::vehicle_visual::WheelVisual;
+use camera::{CameraMode, ChaseCamera, FreeCamera};
+use vehicle_visual::WheelVisual;
 
 #[derive(Parser, Debug)]
 #[command(name = "mm2", about = "MM2-inspired open engine — development build")]
@@ -43,6 +40,21 @@ struct Cli {
     /// City to load when --mm2-path is given (without --dev-world).
     #[arg(long, default_value = "london")]
     city: String,
+
+    /// Optional TOML vehicle tuning file. Without it the built-in arcade
+    /// default is used; a requested file that fails to load or validate is
+    /// an error, never a silent fallback.
+    #[arg(long)]
+    vehicle_config: Option<PathBuf>,
+
+    /// Save a screenshot of the primary window after `--frames` frames and
+    /// exit (headless smoke testing).
+    #[arg(long, requires = "frames")]
+    screenshot: Option<PathBuf>,
+
+    /// Frames to run before taking the screenshot / exiting in smoke mode.
+    #[arg(long)]
+    frames: Option<u32>,
 }
 
 /// Where the player vehicle (re)spawns.
@@ -50,6 +62,25 @@ struct Cli {
 struct SpawnPoint {
     position: Vec3,
     yaw: f32,
+}
+
+/// The validated vehicle configuration the player car was built from.
+#[derive(Resource)]
+struct TunedVehicle(VehicleConfig);
+
+/// Marker for the on-screen HUD text.
+#[derive(Component)]
+struct Hud;
+
+/// Marker for the big error line shown when the world fails to load.
+#[derive(Component)]
+struct ErrorText;
+
+/// Smoke-test capture: take a screenshot after N frames, then exit.
+#[derive(Resource)]
+struct SmokeTest {
+    screenshot: Option<PathBuf>,
+    frames_left: u32,
 }
 
 fn main() {
@@ -62,24 +93,67 @@ fn main() {
 
     let cli = Cli::parse();
 
-    // Build the VFS: mods > loose install files > archives.
+    // Vehicle config: explicit file (must load+validate) or the built-in
+    // arcade default.
+    let vehicle = match &cli.vehicle_config {
+        Some(path) => match VehicleConfig::load(path) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                error!(error = %e, "invalid --vehicle-config");
+                std::process::exit(2);
+            }
+        },
+        None => VehicleConfig::default(),
+    };
+
+    // One mounting policy shared with mm2-inspect: mods > loose install
+    // files > archives. The VFS is always built — mods work in the dev
+    // world without an MM2 installation.
     let mut vfs = Vfs::new();
     let mut has_mm2 = false;
     if let Some(dir) = &cli.mm2_path {
-        if let Err(e) = mount_install(&mut vfs, dir) {
-            error!(path = %dir.display(), error = %e, "failed to mount MM2 installation");
-            std::process::exit(2);
+        match mount_install(&mut vfs, dir, &InstallMount::default()) {
+            Ok(report) => {
+                info!(
+                    archives = report.archives.len(),
+                    skipped = report.skipped.len(),
+                    loose = report.loose_files,
+                    "mounted MM2 installation"
+                );
+                for (path, err) in &report.skipped {
+                    warn!(archive = %path.display(), error = %err, "skipped archive");
+                }
+                has_mm2 = true;
+            }
+            Err(e) => {
+                error!(path = %dir.display(), error = %e, "failed to mount MM2 installation");
+                std::process::exit(2);
+            }
         }
-        has_mm2 = true;
+    }
+    // The app's own synthetic assets (dev-world textures) sit above the
+    // install content but below mods, so a mod can replace them.
+    let app_assets = PathBuf::from("assets");
+    if app_assets.is_dir()
+        && let Err(e) = vfs.mount_dir(&app_assets, mm2_assets::priority::OVERRIDE)
+    {
+        warn!(dir = %app_assets.display(), error = %e, "failed to mount app assets");
     }
     if let Some(mods) = &cli.mods {
-        match vfs.mount_mods_dir(mods, 100) {
-            Ok(manifests) => info!(mods = manifests.len(), "mods mounted"),
+        match mount_mods(&mut vfs, mods) {
+            Ok(manifests) => {
+                for m in &manifests {
+                    info!(mod_id = %m.id, dir = %mods.display(), "mounted mod");
+                }
+            }
             Err(e) => warn!(dir = %mods.display(), error = %e, "failed to mount mods"),
         }
     }
 
     let mode = if cli.dev_world || !has_mm2 {
+        if !cli.dev_world && !has_mm2 && cli.mm2_path.is_none() {
+            warn!("no --mm2-path and no --dev-world; starting the dev world");
+        }
         WorldMode::DevWorld
     } else {
         WorldMode::City {
@@ -109,6 +183,9 @@ fn main() {
         position: Vec3::new(0.0, 1.5, 0.0),
         yaw: 0.0,
     })
+    .insert_resource(WorldState::Loading)
+    .insert_resource(Mm2Vfs(vfs))
+    .insert_resource(TunedVehicle(vehicle))
     .init_resource::<CameraMode>()
     .add_plugins(VehiclePlugin)
     .add_systems(Startup, setup)
@@ -122,70 +199,86 @@ fn main() {
             reset_input,
             debug_toggle,
             vehicle_visual::update_wheel_visuals,
+            update_hud,
         ),
     );
-    if has_mm2 {
-        app.insert_resource(Mm2Vfs(vfs));
+    if cli.screenshot.is_some() || cli.frames.is_some() {
+        app.insert_resource(SmokeTest {
+            screenshot: cli.screenshot.clone(),
+            frames_left: cli.frames.unwrap_or(600),
+        });
+        app.add_systems(Update, smoke_test);
     }
     app.run();
 }
 
-/// Mount loose files + all `*.ar` archives of an MM2 installation.
-fn mount_install(vfs: &mut Vfs, dir: &std::path::Path) -> Result<(), mm2_assets::AssetsError> {
-    vfs.mount_dir(dir, 10)?;
-    let mut archives: Vec<PathBuf> = std::fs::read_dir(dir)
-        .map_err(|source| mm2_assets::AssetsError::Io {
-            path: dir.to_path_buf(),
-            source,
-        })?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.extension()
-                .map(|e| e.eq_ignore_ascii_case("ar"))
-                .unwrap_or(false)
-        })
-        .collect();
-    archives.sort();
-    for ar in &archives {
-        // Non-DAVE files (and future archive formats) are skipped, not fatal.
-        if let Err(e) = vfs.mount_archive(ar, 0) {
-            warn!(archive = %ar.display(), error = %e, "skipped archive");
-        }
+/// After N frames, take the screenshot (if requested) and exit.
+fn smoke_test(mut commands: Commands, mut st: ResMut<SmokeTest>, mut exit: MessageWriter<AppExit>) {
+    if st.frames_left > 0 {
+        st.frames_left -= 1;
+        return;
     }
-    Ok(())
+    if let Some(path) = st.screenshot.take() {
+        commands
+            .spawn(Screenshot::primary_window())
+            .observe(save_to_disk(path));
+        // Give the capture a couple of frames to complete.
+        st.frames_left = 5;
+        return;
+    }
+    exit.write(AppExit::Success);
 }
 
-/// Spawn the world, vehicle, cameras, and lights according to `ActiveWorld`.
+/// The asset collections world spawning writes into.
+#[derive(bevy::ecs::system::SystemParam)]
+struct AssetStores<'w> {
+    meshes: ResMut<'w, Assets<Mesh>>,
+    images: ResMut<'w, Assets<Image>>,
+    materials: ResMut<'w, Assets<StandardMaterial>>,
+}
+
+/// Spawn the world, vehicle, cameras, HUD and lights per `ActiveWorld`.
 fn setup(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut images: ResMut<Assets<Image>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut assets: AssetStores,
     mode: Res<ActiveWorld>,
-    vfs: Option<Res<Mm2Vfs>>,
+    vfs: Res<Mm2Vfs>,
+    vehicle_config: Res<TunedVehicle>,
     mut spawn: ResMut<SpawnPoint>,
+    mut state: ResMut<WorldState>,
 ) {
+    let mut world_ok = true;
     match &mode.0 {
         WorldMode::DevWorld => {
-            dev_world::spawn_dev_world(&mut commands, &mut meshes, &mut materials);
+            dev_world::spawn_dev_world(
+                &mut commands,
+                &mut assets.meshes,
+                &mut assets.images,
+                &mut assets.materials,
+                &vfs.0,
+            );
             spawn.position = Vec3::new(0.0, 1.5, 0.0);
             spawn.yaw = 0.0;
         }
         WorldMode::City { psdl } => {
-            if let Some(vfs) = vfs {
-                let loaded = city::load_city(
-                    &mut commands,
-                    &vfs.0,
-                    psdl,
-                    &mut meshes,
-                    &mut images,
-                    &mut materials,
-                );
-                spawn.position = loaded.spawn;
-                spawn.yaw = 0.0;
-            } else {
-                warn!("--mm2-path required for city mode; falling back to dev world");
-                dev_world::spawn_dev_world(&mut commands, &mut meshes, &mut materials);
+            match city::load_city(
+                &mut commands,
+                &vfs.0,
+                psdl,
+                &mut assets.meshes,
+                &mut assets.images,
+                &mut assets.materials,
+            ) {
+                Ok(loaded) => {
+                    spawn.position = loaded.spawn;
+                    spawn.yaw = 0.0;
+                    info!(report = %loaded.report, "city ready");
+                }
+                Err(e) => {
+                    error!(error = %e, "city failed to load");
+                    *state = WorldState::Failed(format!("{e}"));
+                    world_ok = false;
+                }
             }
             // City lighting.
             commands.spawn((
@@ -203,42 +296,41 @@ fn setup(
             });
         }
     }
-
-    // Player vehicle.
-    let config = VehicleConfig::default();
-    let body_mesh = meshes.add(Cuboid::from_size(Vec3::from(config.chassis_size)));
-    let body_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.85, 0.15, 0.1),
-        metallic: 0.3,
-        perceptual_roughness: 0.5,
-        ..default()
-    });
-    let vehicle = commands
-        .spawn((
-            PlayerVehicle,
-            mm2_vehicle::vehicle_bundle(&config),
-            Mesh3d(body_mesh),
-            MeshMaterial3d(body_mat),
-            Transform::from_translation(spawn.position)
-                .with_rotation(Quat::from_rotation_y(spawn.yaw)),
-            TransformInterpolation,
-        ))
-        .id();
-
-    // Wheel visuals (non-physical; follow suspension state).
-    let wheel_mesh = meshes.add(Cylinder::new(0.34, 0.25));
-    let wheel_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.1, 0.1, 0.1),
-        perceptual_roughness: 0.9,
-        ..default()
-    });
-    for i in 0..config.wheels.len() {
-        commands.spawn((
-            WheelVisual { vehicle, index: i },
-            Mesh3d(wheel_mesh.clone()),
-            MeshMaterial3d(wheel_mat.clone()),
-        ));
+    if world_ok {
+        *state = WorldState::Ready;
     }
+
+    // HUD + error text.
+    commands.spawn((
+        Hud,
+        Text::new(""),
+        TextFont {
+            font_size: bevy::text::FontSize::Px(16.0),
+            ..default()
+        },
+        TextColor(Color::srgb(0.95, 0.95, 0.95)),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(8.0),
+            left: Val::Px(10.0),
+            ..default()
+        },
+    ));
+    commands.spawn((
+        ErrorText,
+        Text::new(""),
+        TextFont {
+            font_size: bevy::text::FontSize::Px(22.0),
+            ..default()
+        },
+        TextColor(Color::srgb(1.0, 0.4, 0.35)),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(120.0),
+            left: Val::Px(40.0),
+            ..default()
+        },
+    ));
 
     // Cameras.
     commands.spawn((
@@ -256,6 +348,87 @@ fn setup(
         FreeCamera::default(),
         Transform::from_translation(spawn.position + Vec3::new(0.0, 8.0, 12.0)),
     ));
+
+    // The dynamic player spawns only once the world is `Ready` — after the
+    // static colliders above exist, so it can't fall through a half-built
+    // city.
+    if !world_ok {
+        return;
+    }
+    let config = &vehicle_config.0;
+    let body_mesh = assets
+        .meshes
+        .add(Cuboid::from_size(Vec3::from(config.chassis_size)));
+    let body_mat = assets.materials.add(StandardMaterial {
+        base_color: Color::srgb(0.85, 0.15, 0.1),
+        metallic: 0.3,
+        perceptual_roughness: 0.5,
+        ..default()
+    });
+    let vehicle = commands
+        .spawn((
+            PlayerVehicle,
+            mm2_vehicle::vehicle_bundle(config),
+            Mesh3d(body_mesh),
+            MeshMaterial3d(body_mat),
+            Transform::from_translation(spawn.position)
+                .with_rotation(Quat::from_rotation_y(spawn.yaw)),
+            TransformInterpolation,
+        ))
+        .id();
+
+    // Wheel visuals (non-physical; follow suspension state).
+    let wheel_mesh = assets.meshes.add(Cylinder::new(0.34, 0.25));
+    let wheel_mat = assets.materials.add(StandardMaterial {
+        base_color: Color::srgb(0.1, 0.1, 0.1),
+        perceptual_roughness: 0.9,
+        ..default()
+    });
+    for i in 0..config.wheels.len() {
+        commands.spawn((
+            WheelVisual { vehicle, index: i },
+            Mesh3d(wheel_mesh.clone()),
+            MeshMaterial3d(wheel_mat.clone()),
+        ));
+    }
+}
+
+/// HUD line: speed, gear/direction, RPM, grounded wheels.
+fn update_hud(
+    state: Res<WorldState>,
+    mut hud: Query<&mut Text, (With<Hud>, Without<ErrorText>)>,
+    mut err: Query<&mut Text, (With<ErrorText>, Without<Hud>)>,
+    vehicles: Query<(&mm2_vehicle::vehicle::VehicleState, &LinearVelocity), With<PlayerVehicle>>,
+) {
+    for mut text in &mut err {
+        *text = match &*state {
+            WorldState::Failed(m) => Text::new(format!("world failed to load:\n{m}")),
+            _ => Text::new(""),
+        };
+    }
+    let Ok((veh, vel)) = vehicles.single() else {
+        for mut text in &mut hud {
+            *text = Text::new(match &*state {
+                WorldState::Loading => "loading…".to_string(),
+                WorldState::Failed(_) => String::new(),
+                WorldState::Ready => "no vehicle".to_string(),
+            });
+        }
+        return;
+    };
+    let speed = vel.0.length() * 3.6;
+    let dir = match veh.direction {
+        mm2_vehicle::vehicle::DriveDirection::Forward => format!("D{}", veh.gear + 1),
+        mm2_vehicle::vehicle::DriveDirection::Reverse => "R".to_string(),
+    };
+    let grounded = veh.wheels.iter().filter(|w| w.grounded).count();
+    for mut text in &mut hud {
+        *text = Text::new(format!(
+            "{speed:5.1} km/h  {dir}  {rpm:4.0} rpm  wheels {grounded}/{total}",
+            rpm = veh.rpm,
+            total = veh.wheels.len(),
+        ));
+    }
 }
 
 /// `R` resets the player vehicle to its spawn point.
