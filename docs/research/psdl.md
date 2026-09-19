@@ -89,6 +89,15 @@ Notes:
   (collision bound), 1 flat, 2 elevated, 3 wedge. `value` is 8.8 fixed
   point: texture repeats for flat (1280 → 5), height in metres otherwise
   (38 → the 0.15 m kerb, 256 → the 1 m jersey barrier).
+- **Tunnel / railing** (`0x09`): road form `[flags, h1, h2]` applies to the
+  room's following road attributes; junction form `[nSize, flags, h1, h2,
+  unk, wall bits…]` enables walls per perimeter edge. `h1` (wall height)
+  and `h2` (curved-ceiling apex) are 8.8 fixed-point metres (`0x0580` =
+  5.5 m). Flags, verified on retail data by texture set: bit 0 left, bit 1
+  right, bit 2 thick-wall style (SF's open-air freeway retaining walls —
+  *not* a ceiling), bit 3 flat ceiling, bit 8 curved ceiling, bit 14 set on
+  all plain railings. Texture slots: `n`/`n+1` inner walls, `n+2` ceiling,
+  `n+3`/`n+4` outer faces, `n+5` underside.
 - **Sliver** (`0x03`): slanted-bottom facade piece; `top_h` and `scale_h`
   index the height pool (scale values are small, e.g. 0.25).
 - **Sidewalk strip** (`0x01`) end caps: a leading pair of equal refs

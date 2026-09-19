@@ -215,6 +215,17 @@ impl MeshBuilder {
         }
     }
 
+    /// Single triangle emitted so its front normal points toward `facing`.
+    fn tri_facing(&mut self, p: [Vec3; 3], uvs: [[f32; 2]; 3], facing: Vec3) {
+        let n = (p[1] - p[0]).cross(p[2] - p[0]);
+        let i = [0, 1, 2].map(|k| self.vert(p[k], uvs[k]));
+        if n.dot(facing) >= 0.0 {
+            self.tri_keep(i[0], i[1], i[2]);
+        } else {
+            self.tri_keep(i[0], i[2], i[1]);
+        }
+    }
+
     /// Vertical wall quad facing `facing` (horizontal). The authored
     /// left→right bottom edge runs along the (clockwise) block perimeter,
     /// so the street-facing side is conventionally to the *left* of the
@@ -718,9 +729,8 @@ struct RoadTunnel {
     flags: u16,
     /// Wall height above each road-edge vertex (metres).
     height: f32,
-    /// Second height value — used for the ceiling apex on curved
-    /// ceilings; ignored for flat/railing geometry.
-    #[allow(dead_code)]
+    /// Second height value — the ceiling apex on curved ceilings;
+    /// ignored for flat/railing geometry.
     height2: f32,
     tex_key: i64,
 }
@@ -728,11 +738,20 @@ struct RoadTunnel {
 impl RoadTunnel {
     const LEFT: u16 = 1 << 0;
     const RIGHT: u16 = 1 << 1;
-    /// 0 = railing, 1 = wall (a wall implies a ceiling between its tops).
-    const STYLE_WALL: u16 = 1 << 2;
+    /// Flat ceiling between the wall tops. (Bit 2 only selects the thick
+    /// wall style — SF's open-air freeway retaining walls set it, real
+    /// tunnels do not — verified on retail data by texture set.)
+    const FLAT_CEILING: u16 = 1 << 3;
+    /// Curved ceiling rising to `height2` above the road's midline.
+    const CURVED_CEILING: u16 = 1 << 8;
     /// Bits 4–7 close/chamfer wall ends; bits 9–12 chamfer corners; not
     /// modelled — counted as approximated.
-    const DETAIL_MASK: u16 = 0x1ff0;
+    const DETAIL_MASK: u16 = 0x1ef0;
+
+    /// Tunnel heights are 8.8 fixed-point metres (0x0580 = 5.5 m).
+    fn metres(word: u16) -> f32 {
+        word as f32 / 256.0
+    }
 }
 
 struct EmitCtx<'a> {
@@ -1180,7 +1199,8 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
                 if attr.data.len() < 5 {
                     return Err(AttrError::Malformed("junction"));
                 }
-                let height = (attr.data[2] >> 8) as f32;
+                let flags = attr.data[1];
+                let height = RoadTunnel::metres(attr.data[2]);
                 let walls = &attr.data[5..];
                 let n = ctx.perim.len();
                 for i in 0..n {
@@ -1196,18 +1216,35 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
                     let facing = ctx.wall_facing(a, b);
                     emit_wall(ctx, a, b, height, ctx.tex_key, ctx.tex_key + 4, facing);
                 }
+                if flags & (RoadTunnel::FLAT_CEILING | RoadTunnel::CURVED_CEILING) != 0 && n >= 3 {
+                    // Ceiling over the whole junction at wall height,
+                    // fanned from the centroid (perimeters may be concave).
+                    let lift = Vec3::Y * height;
+                    let centre = ctx.perim.iter().sum::<Vec3>() / n as f32 + lift;
+                    for i in 0..n {
+                        let a = ctx.perim[i] + lift;
+                        let b = ctx.perim[(i + 1) % n] + lift;
+                        let tri = [centre, a, b];
+                        ctx.builder(2).tri_facing(
+                            tri,
+                            tri.map(MeshBuilder::planar_uv),
+                            Vec3::NEG_Y,
+                        );
+                        ctx.collider.tri(centre, a, b);
+                    }
+                }
                 Outcome::Emitted
             } else {
-                // Road tunnel/railing: [flags, h1w, h2w]; heights sit in
-                // the high byte of each word (metres). Applies to the
-                // room's following road attributes.
+                // Road tunnel/railing: [flags, h1w, h2w]; heights are 8.8
+                // fixed-point metres. Applies to the room's following
+                // road attributes.
                 if attr.data.len() < 3 {
                     return Err(AttrError::Malformed("tunnel"));
                 }
                 *ctx.road_tunnel = Some(RoadTunnel {
                     flags: attr.data[0],
-                    height: (attr.data[1] >> 8) as f32,
-                    height2: (attr.data[2] >> 8) as f32,
+                    height: RoadTunnel::metres(attr.data[1]),
+                    height2: RoadTunnel::metres(attr.data[2]),
                     tex_key: ctx.tex_key,
                 });
                 if attr.data[0] & RoadTunnel::DETAIL_MASK != 0 {
@@ -1354,27 +1391,35 @@ fn emit_road_tunnel(ctx: &mut EmitCtx<'_>, left: &[Vec3], right: &[Vec3]) {
             );
         }
     }
-    if t.flags & RoadTunnel::STYLE_WALL != 0
-        && t.flags & RoadTunnel::LEFT != 0
-        && t.flags & RoadTunnel::RIGHT != 0
-    {
-        // Flat ceiling between the wall tops (curved ceilings are
-        // approximated as flat — the DETAIL_MASK count covers that).
-        let n = left.len().min(right.len());
-        for i in 0..n.saturating_sub(1) {
-            let lt0 = left[i] + Vec3::Y * t.height;
-            let lt1 = left[i + 1] + Vec3::Y * t.height;
-            let rt0 = right[i] + Vec3::Y * t.height;
-            let rt1 = right[i + 1] + Vec3::Y * t.height;
-            ctx.builder_at(t.tex_key + 2).quad_facing(
-                lt0,
-                lt1,
-                rt1,
-                rt0,
-                [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
-                Vec3::NEG_Y,
-            );
-            ctx.collider.quad(lt0, lt1, rt1, rt0);
+    let ceiling = t.flags & (RoadTunnel::FLAT_CEILING | RoadTunnel::CURVED_CEILING);
+    if ceiling != 0 {
+        // Flat: one span between the wall tops. Curved: approximated as a
+        // ridge rising to `height2` over the midline.
+        let top = |c: &[Vec3]| -> Vec<Vec3> { c.iter().map(|p| *p + Vec3::Y * t.height).collect() };
+        let (lt, rt) = (top(left), top(right));
+        let spans: Vec<(Vec<Vec3>, Vec<Vec3>)> = if ceiling & RoadTunnel::CURVED_CEILING != 0 {
+            let ridge: Vec<Vec3> = left
+                .iter()
+                .zip(right)
+                .map(|(l, r)| (*l + *r) * 0.5 + Vec3::Y * t.height2.max(t.height))
+                .collect();
+            vec![(lt, ridge.clone()), (ridge, rt)]
+        } else {
+            vec![(lt, rt)]
+        };
+        for (a, b) in &spans {
+            for i in 0..a.len().min(b.len()).saturating_sub(1) {
+                let quad = [a[i], a[i + 1], b[i + 1], b[i]];
+                ctx.builder_at(t.tex_key + 2).quad_facing(
+                    quad[0],
+                    quad[1],
+                    quad[2],
+                    quad[3],
+                    quad.map(MeshBuilder::planar_uv),
+                    Vec3::NEG_Y,
+                );
+                ctx.collider.quad(quad[0], quad[1], quad[2], quad[3]);
+            }
         }
     }
 }
