@@ -44,6 +44,11 @@ const TORQUE_PEAK_RPM_FRAC: f32 = 0.72;
 const TORQUE_PEAK_FACTOR: f32 = 1.15;
 /// Driveline efficiency applied to every imported car (adapted constant).
 const DRIVELINE_EFFICIENCY: f32 = 0.85;
+/// Ceiling on chassis restitution. MM2's `BoundElasticity` (0.3-0.5 on
+/// stock cars) feeds its own car-versus-car impulse solver, not a
+/// coefficient of restitution against road geometry; used as one, a car
+/// body trampolines off every kerb it touches. A car should thud.
+const MAX_RESTITUTION: f32 = 0.1;
 /// Suspension damping ratio band imported cars are mapped into: below
 /// ~0.3 a car pogos off road seams, above ~1.0 the springs stop moving and
 /// the chassis takes every impact instead.
@@ -547,6 +552,11 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
             .map(|v| [v[0], v[1], v[2]])
             .collect::<Vec<_>>()
     });
+    report.adapted(
+        "vehCarSim.BoundElasticity",
+        "collider_restitution",
+        format!("scaled into 0..{MAX_RESTITUTION}; MM2's value drives its own impact solver, not road bounce"),
+    );
     report.imported(
         "bound/<id>_bound.bnd",
         "collider_points/chassis_size",
@@ -597,7 +607,8 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
         inertia: Some(inertia),
         collider_points,
         collider_friction: sim.bound_friction.unwrap_or(0.5),
-        collider_restitution: sim.bound_elasticity.unwrap_or(0.1).clamp(0.0, 0.4),
+        collider_restitution: (sim.bound_elasticity.unwrap_or(0.1) * MAX_RESTITUTION)
+            .clamp(0.0, MAX_RESTITUTION),
         wheels,
         suspension: SuspensionConfig {
             // Global fallback; every imported wheel carries its own.
