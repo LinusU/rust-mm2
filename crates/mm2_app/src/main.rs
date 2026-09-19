@@ -357,10 +357,13 @@ fn setup(
             ..default()
         },
         TextColor(Color::srgb(0.95, 0.95, 0.95)),
+        // Keeps the line legible over bright facades and sky.
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
         Node {
             position_type: PositionType::Absolute,
             top: Val::Px(8.0),
             left: Val::Px(10.0),
+            padding: UiRect::axes(Val::Px(6.0), Val::Px(2.0)),
             ..default()
         },
     ));
