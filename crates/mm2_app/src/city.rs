@@ -1352,6 +1352,8 @@ fn emit_road_tunnel(ctx: &mut EmitCtx<'_>, left: &[Vec3], right: &[Vec3]) {
 /// 0 invisible (collision bound only), 1 flat, 2 elevated, 3 wedged.
 /// Elevated/wedged geometry is approximated as a raised median strip and
 /// counted in the report; end caps (flags bits 7–8) are not emitted.
+/// `value` is 8.8 fixed point (verified on retail data: 38 → the 0.15 m
+/// kerb height, 256 → the 1 m jersey barrier, 1280 → 5 repeats).
 fn emit_divider(
     ctx: &mut EmitCtx<'_>,
     div_type: u8,
@@ -1364,6 +1366,7 @@ fn emit_divider(
     if n < 2 {
         return;
     }
+    let value = value as f32 / 256.0;
     // Divider textures are relative to the packed divider texture index
     // (stored +1); −1 = no divider texture → fallback material.
     let dt = |rel: i64| if div_tex < 0 { -1 } else { div_tex + rel };
@@ -1393,8 +1396,8 @@ fn emit_divider(
                     rl_in[i + 1],
                     [
                         [0.0, 0.0],
-                        [value.max(1) as f32, 0.0],
-                        [value.max(1) as f32, 1.0],
+                        [value.max(1.0), 0.0],
+                        [value.max(1.0), 1.0],
                         [0.0, 1.0],
                     ],
                     Vec3::Y,
@@ -1404,14 +1407,10 @@ fn emit_divider(
         }
         _ => {
             // 2 elevated / 3 wedged, approximated as a raised median strip:
-            // vertical sides + flat top. Elevated uses `value` as height;
-            // wedge is documented as 1 m. (Real wedges slope 0.5 m inward;
-            // the approximation is counted in the report.)
-            let h = if div_type == 3 {
-                1.0
-            } else {
-                (value as f32).max(0.05)
-            };
+            // vertical sides + flat top, `value` metres high. (Real wedges
+            // slope 0.5 m inward; the approximation is counted in the
+            // report.)
+            let h = value.max(0.05);
             let top_l: Vec<Vec3> = rl_in.iter().map(|v| *v + Vec3::Y * h).collect();
             let top_r: Vec<Vec3> = rr_in.iter().map(|v| *v + Vec3::Y * h).collect();
             let side_tex = if div_type == 2 { dt(0) } else { dt(1) };
@@ -1436,13 +1435,14 @@ fn emit_divider(
                     quad_uvs,
                     (rr_in[i] - mid0).normalize_or_zero(),
                 );
-                // Top strip.
+                // Top strip, planar-mapped like other ground (grass).
+                let top = [top_l[i], top_r[i], top_r[i + 1], top_l[i + 1]];
                 ctx.builder_at(dt(2)).quad_facing(
-                    top_l[i],
-                    top_r[i],
-                    top_r[i + 1],
-                    top_l[i + 1],
-                    quad_uvs,
+                    top[0],
+                    top[1],
+                    top[2],
+                    top[3],
+                    top.map(MeshBuilder::planar_uv),
                     Vec3::Y,
                 );
             }

@@ -86,7 +86,9 @@ Notes:
 - **Divided road** (`0x08`): `packed` low byte = `flags<<3 | divider_type`,
   high byte = divider texture index + 1; sections carry 6 verts
   `[sw_l, rl_out, rl_in, rr_in, rr_out, sw_r]`. Divider types: 0 invisible
-  (collision bound), 1 flat, 2 elevated (`value` = height), 3 wedge.
+  (collision bound), 1 flat, 2 elevated, 3 wedge. `value` is 8.8 fixed
+  point: texture repeats for flat (1280 → 5), height in metres otherwise
+  (38 → the 0.15 m kerb, 256 → the 1 m jersey barrier).
 - **Sliver** (`0x03`): slanted-bottom facade piece; `top_h` and `scale_h`
   index the height pool (scale values are small, e.g. 0.25).
 - **Sidewalk strip** (`0x01`) end caps: a leading pair of equal refs
