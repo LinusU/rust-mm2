@@ -3,6 +3,8 @@
 //!
 //! Units: metres, kilograms, seconds, radians, newtons, metres/second.
 
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
 /// Where a wheel sits and what it does.
@@ -264,5 +266,334 @@ impl Default for VehicleConfig {
                 air_control: 4.0,
             },
         }
+    }
+}
+
+/// Failure to load or validate a [`VehicleConfig`].
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    /// The file could not be read.
+    #[error("failed to read {path}: {source}")]
+    Io {
+        /// File path.
+        path: std::path::PathBuf,
+        /// I/O error.
+        source: std::io::Error,
+    },
+    /// The file is not valid TOML for a `VehicleConfig`.
+    #[error("failed to parse {path}: {reason}")]
+    Parse {
+        /// File path.
+        path: std::path::PathBuf,
+        /// Parse error.
+        reason: String,
+    },
+    /// The parsed values are not a usable vehicle.
+    #[error("invalid vehicle config in {path}:\n{}", problems.join("\n"))]
+    Invalid {
+        /// File path (or a description such as `<default>`).
+        path: String,
+        /// Every problem found.
+        problems: Vec<String>,
+    },
+}
+
+impl VehicleConfig {
+    /// Load and validate a config from a TOML file.
+    ///
+    /// An explicit path that fails to read, parse or validate is an error —
+    /// callers must not silently fall back to defaults for a file the user
+    /// asked for.
+    pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        let text = std::fs::read_to_string(path).map_err(|e| ConfigError::Io {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
+        let cfg: Self = toml::from_str(&text).map_err(|e| ConfigError::Parse {
+            path: path.to_path_buf(),
+            reason: e.to_string(),
+        })?;
+        cfg.validate().map_err(|problems| ConfigError::Invalid {
+            path: path.display().to_string(),
+            problems,
+        })?;
+        Ok(cfg)
+    }
+
+    /// Serialize to TOML (used for shipped examples and debugging).
+    pub fn to_toml(&self) -> String {
+        toml::to_string_pretty(self).unwrap_or_default()
+    }
+
+    /// Check that the config describes a usable vehicle. Returns every
+    /// problem found so a bad file fails with context, not an indexing
+    /// panic at spawn time.
+    pub fn validate(&self) -> Result<(), Vec<String>> {
+        let mut problems = Vec::new();
+        macro_rules! check {
+            ($name:expr, $ok:expr $(,)?) => {
+                if !$ok {
+                    problems.push(format!("{} has an invalid value", $name))
+                }
+            };
+        }
+        let finite = |v: f32| v.is_finite();
+
+        check!("mass", finite(self.mass) && self.mass > 0.0);
+        check!("wheelbase", finite(self.wheelbase) && self.wheelbase > 0.0);
+        check!(
+            "track_width",
+            finite(self.track_width) && self.track_width > 0.0,
+        );
+        for (i, v) in self.center_of_mass.iter().enumerate() {
+            check!(&format!("center_of_mass[{i}]"), finite(*v));
+        }
+        for (i, v) in self.chassis_size.iter().enumerate() {
+            check!(&format!("chassis_size[{i}]"), finite(*v) && *v > 0.0);
+        }
+
+        if self.wheels.is_empty() {
+            problems.push("wheels must not be empty".to_string());
+        }
+        for (i, w) in self.wheels.iter().enumerate() {
+            check!(
+                &format!("wheels[{i}].radius"),
+                finite(w.radius) && w.radius > 0.0,
+            );
+            for (j, v) in w.position.iter().enumerate() {
+                check!(&format!("wheels[{i}].position[{j}]"), finite(*v));
+            }
+            check!(
+                &format!("wheels[{i}].brake_bias"),
+                finite(w.brake_bias) && (0.0..=1.0).contains(&w.brake_bias),
+            );
+        }
+        if !self.wheels.iter().any(|w| w.driven) {
+            problems.push("at least one wheel must be driven".to_string());
+        }
+
+        let s = &self.suspension;
+        check!(
+            "suspension.spring_rate",
+            finite(s.spring_rate) && s.spring_rate > 0.0
+        );
+        check!(
+            "suspension.damping_compression",
+            finite(s.damping_compression) && s.damping_compression >= 0.0,
+        );
+        check!(
+            "suspension.damping_rebound",
+            finite(s.damping_rebound) && s.damping_rebound >= 0.0,
+        );
+        check!("suspension.travel", finite(s.travel) && s.travel > 0.0);
+        check!(
+            "suspension.max_force",
+            finite(s.max_force) && s.max_force > 0.0
+        );
+        check!(
+            "suspension.force_apply_offset",
+            finite(s.force_apply_offset) && s.force_apply_offset >= 0.0,
+        );
+
+        let e = &self.engine;
+        check!(
+            "engine.idle_rpm",
+            finite(e.idle_rpm) && e.idle_rpm > 0.0 && e.idle_rpm < e.redline_rpm,
+        );
+        check!(
+            "engine.redline_rpm",
+            finite(e.redline_rpm) && e.redline_rpm > e.peak_torque_rpm,
+        );
+        check!(
+            "engine.peak_torque_rpm",
+            finite(e.peak_torque_rpm) && e.peak_torque_rpm >= e.idle_rpm,
+        );
+        check!(
+            "engine.peak_torque_nm",
+            finite(e.peak_torque_nm) && e.peak_torque_nm > 0.0,
+        );
+        check!(
+            "engine.redline_torque_fraction",
+            finite(e.redline_torque_fraction) && (0.0..=1.0).contains(&e.redline_torque_fraction),
+        );
+        check!(
+            "engine.rpm_response",
+            finite(e.rpm_response) && e.rpm_response > 0.0,
+        );
+        check!(
+            "engine.engine_brake_nm",
+            finite(e.engine_brake_nm) && e.engine_brake_nm >= 0.0,
+        );
+
+        let t = &self.transmission;
+        if t.gear_ratios.is_empty() {
+            problems.push("transmission.gear_ratios must not be empty".to_string());
+        }
+        for (i, g) in t.gear_ratios.iter().enumerate() {
+            check!(
+                &format!("transmission.gear_ratios[{i}]"),
+                finite(*g) && *g > 0.0,
+            );
+        }
+        check!(
+            "transmission.reverse_ratio",
+            finite(t.reverse_ratio) && t.reverse_ratio > 0.0,
+        );
+        check!(
+            "transmission.final_drive",
+            finite(t.final_drive) && t.final_drive > 0.0,
+        );
+        check!(
+            "transmission.shift_time",
+            finite(t.shift_time) && t.shift_time >= 0.0,
+        );
+        check!(
+            "transmission.efficiency",
+            finite(t.efficiency) && (0.0..=1.0).contains(&t.efficiency),
+        );
+
+        let tr = &self.tires;
+        check!(
+            "tires.lateral_grip",
+            finite(tr.lateral_grip) && tr.lateral_grip > 0.0
+        );
+        check!(
+            "tires.longitudinal_grip",
+            finite(tr.longitudinal_grip) && tr.longitudinal_grip > 0.0,
+        );
+        check!(
+            "tires.peak_slip_angle",
+            finite(tr.peak_slip_angle) && tr.peak_slip_angle > 0.0,
+        );
+        check!(
+            "tires.peak_slip_ratio",
+            finite(tr.peak_slip_ratio) && tr.peak_slip_ratio > 0.0,
+        );
+        check!(
+            "tires.slide_fraction",
+            finite(tr.slide_fraction) && (0.0..=1.0).contains(&tr.slide_fraction),
+        );
+        check!(
+            "tires.rolling_resistance",
+            finite(tr.rolling_resistance) && tr.rolling_resistance >= 0.0,
+        );
+        check!(
+            "tires.load_sensitivity",
+            finite(tr.load_sensitivity) && (0.0..=1.0).contains(&tr.load_sensitivity),
+        );
+
+        let st = &self.steering;
+        check!(
+            "steering.low_speed_max_angle",
+            finite(st.low_speed_max_angle) && st.low_speed_max_angle > 0.0,
+        );
+        check!(
+            "steering.high_speed_max_angle",
+            finite(st.high_speed_max_angle) && st.high_speed_max_angle >= 0.0,
+        );
+        check!(
+            "steering.high_speed",
+            finite(st.high_speed) && st.high_speed > 0.0
+        );
+        check!(
+            "steering.input_rate",
+            finite(st.input_rate) && st.input_rate > 0.0
+        );
+        check!(
+            "steering.return_rate",
+            finite(st.return_rate) && st.return_rate > 0.0,
+        );
+        check!(
+            "steering.response_curve",
+            finite(st.response_curve) && st.response_curve > 0.0,
+        );
+
+        let b = &self.brakes;
+        check!(
+            "brakes.max_brake_force",
+            finite(b.max_brake_force) && b.max_brake_force >= 0.0,
+        );
+        check!(
+            "brakes.handbrake_strength",
+            finite(b.handbrake_strength) && b.handbrake_strength >= 0.0,
+        );
+
+        let a = &self.aero;
+        check!(
+            "aero.drag_coefficient",
+            finite(a.drag_coefficient) && a.drag_coefficient >= 0.0,
+        );
+        check!(
+            "aero.downforce_coefficient",
+            finite(a.downforce_coefficient) && a.downforce_coefficient >= 0.0,
+        );
+
+        let asst = &self.assists;
+        check!(
+            "assists.yaw_stability",
+            finite(asst.yaw_stability) && asst.yaw_stability >= 0.0,
+        );
+        check!(
+            "assists.traction_control",
+            finite(asst.traction_control) && (0.0..=1.0).contains(&asst.traction_control),
+        );
+        check!(
+            "assists.countersteer",
+            finite(asst.countersteer) && asst.countersteer >= 0.0,
+        );
+        check!(
+            "assists.air_control",
+            finite(asst.air_control) && asst.air_control >= 0.0,
+        );
+
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(problems)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_is_valid() {
+        VehicleConfig::default().validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_empty_wheels_and_gears() {
+        let mut cfg = VehicleConfig::default();
+        cfg.wheels.clear();
+        cfg.transmission.gear_ratios.clear();
+        let problems = cfg.validate().unwrap_err();
+        assert!(problems.iter().any(|p| p.contains("wheels")));
+        assert!(problems.iter().any(|p| p.contains("gear_ratios")));
+    }
+
+    #[test]
+    fn rejects_bad_numbers() {
+        let mut cfg = VehicleConfig {
+            mass: f32::NAN,
+            ..Default::default()
+        };
+        cfg.wheels[0].radius = -1.0;
+        cfg.engine.idle_rpm = 9000.0; // above redline
+        let problems = cfg.validate().unwrap_err();
+        assert!(problems.iter().any(|p| p.contains("mass")));
+        assert!(problems.iter().any(|p| p.contains("radius")));
+        assert!(problems.iter().any(|p| p.contains("idle_rpm")));
+    }
+
+    #[test]
+    fn toml_round_trip() {
+        let cfg = VehicleConfig::default();
+        let text = cfg.to_toml();
+        let parsed: VehicleConfig = toml::from_str(&text).unwrap();
+        parsed.validate().unwrap();
+        assert_eq!(parsed.name, cfg.name);
+        assert_eq!(parsed.wheels.len(), cfg.wheels.len());
     }
 }
