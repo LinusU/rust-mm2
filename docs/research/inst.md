@@ -15,7 +15,9 @@ Each record:
   - **coordinate** (type bit 7 clear): full basis — images of the unit axes
     plus origin, i.e. `city = origin + M * pkg`
   - **simple** (type bit 7 set): location + a horizontal heading vector
-    whose magnitude is the scale
+    whose magnitude is the scale. The vector is the image of the PKG's
+    local X axis: `(1, 0)` means unrotated (verified: `wl_buckpalace_l`'s
+    fence only matches its room perimeter with this reading)
 
 ## Confidence
 

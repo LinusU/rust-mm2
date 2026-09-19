@@ -1836,6 +1836,21 @@ fn inst_transform(c: &inst::InstCoordinate) -> Mat4 {
     Mat4::from_cols(x.extend(0.0), y.extend(0.0), z.extend(0.0), o.extend(1.0))
 }
 
+/// Convert an INST simple placement to a Bevy `Mat4`. The heading vector
+/// is the image of the PKG's X axis — an unrotated object has `(1, 0)`
+/// (verified on retail London: `wl_buckpalace_l`'s fence matches its room
+/// perimeter only with this reading) — and its length the uniform scale.
+fn simple_transform(s: &inst::InstSimple) -> Mat4 {
+    let (dx, dz) = (s.x_delta, s.z_delta);
+    let scale = (dx * dx + dz * dz).sqrt().max(0.001);
+    inst_transform(&inst::InstCoordinate {
+        x_axis: [dx, 0.0, dz],
+        y_axis: [0.0, scale, 0.0],
+        z_axis: [-dz, 0.0, dx],
+        origin: s.location,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Orchestration
 // ---------------------------------------------------------------------------
@@ -1958,18 +1973,7 @@ pub fn load_city(
                     };
                     let mat4 = match &comp.placement {
                         InstPlacement::Coordinate(c) => inst_transform(c),
-                        InstPlacement::Simple(s) => {
-                            let pos = v3(s.location);
-                            let dir = v3([s.x_delta, 0.0, s.z_delta]);
-                            let scale = dir.length().max(0.001);
-                            let yaw = if MIRROR_Z {
-                                dir.x.atan2(-dir.z)
-                            } else {
-                                dir.x.atan2(dir.z)
-                            };
-                            Mat4::from_rotation_translation(Quat::from_rotation_y(yaw), pos)
-                                * Mat4::from_scale(Vec3::splat(scale))
-                        }
+                        InstPlacement::Simple(s) => simple_transform(s),
                     };
                     let transform = Transform::from_matrix(mat4);
                     for (mesh, material, hull) in parts {
@@ -2011,4 +2015,33 @@ pub fn load_city(
         spawn: import.spawn,
         report,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simple_placement_with_unit_heading_is_unrotated() {
+        let m = simple_transform(&inst::InstSimple {
+            x_delta: 1.0,
+            z_delta: 0.0,
+            location: [10.0, 2.0, 5.0],
+        });
+        // PKG-local points are mirrored like everything else: (x, y, -z).
+        let p = m.transform_point3(v3([3.0, 0.0, 4.0]));
+        assert!((p - v3([13.0, 2.0, 9.0])).length() < 1e-5);
+    }
+
+    #[test]
+    fn simple_placement_heading_rotates_and_scales() {
+        let m = simple_transform(&inst::InstSimple {
+            x_delta: 0.0,
+            z_delta: 2.0,
+            location: [0.0, 0.0, 0.0],
+        });
+        // Local +X maps onto authored +Z, scaled by the heading length.
+        let p = m.transform_point3(v3([1.0, 1.0, 0.0]));
+        assert!((p - v3([0.0, 2.0, 2.0])).length() < 1e-5);
+    }
 }
