@@ -114,6 +114,17 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Audit vehicle handling: rollover margin, ride height, suspension
+    /// and steering, for one car or the whole roster.
+    Handling {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Vehicle id or alias. Omitted, every ready vehicle is audited.
+        id: Option<String>,
+        /// Exit nonzero when any audited vehicle reports a problem.
+        #[arg(long)]
+        strict: bool,
+    },
     /// Validate vehicles end to end: metadata, tuning, model, wheel rig,
     /// collider and every declared paint variant.
     ValidateCars {
@@ -162,6 +173,9 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             paint,
             json,
         } => car(dir, cli.mods.as_deref(), id, *paint, *json),
+        Command::Handling { dir, id, strict } => {
+            handling(dir, cli.mods.as_deref(), id.as_deref(), *strict)
+        }
         Command::ValidateCars { dir, all, strict } => {
             validate_cars(dir, cli.mods.as_deref(), *all, *strict)
         }
@@ -769,6 +783,108 @@ fn car(
         return Err(format!("{} paint variant problem(s)", paint_problems.len()).into());
     }
     Ok(())
+}
+
+/// Audit handling for one vehicle or the whole ready roster.
+///
+/// Every column comes from [`mm2_vehicle::HandlingMetrics`], which solves
+/// the car's resting state in closed form — no physics is run, so the whole
+/// roster audits instantly and the numbers are reproducible.
+fn handling(
+    dir: &Path,
+    mods: Option<&Path>,
+    id: Option<&str>,
+    strict: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let vfs = build_vfs(dir, mods)?;
+
+    let ids: Vec<String> = match id {
+        Some(query) => {
+            let catalog = mm2_content::VehicleCatalog::scan(&vfs);
+            vec![catalog.find(query)?.id.clone()]
+        }
+        None => mm2_content::VehicleCatalog::scan(&vfs)
+            .entries
+            .iter()
+            .filter(|e| e.is_ready())
+            .map(|e| e.id.clone())
+            .collect(),
+    };
+    if ids.is_empty() {
+        return Err("no ready vehicles to audit".into());
+    }
+
+    println!(
+        "{:<14} {:<30} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}",
+        "id",
+        "name",
+        "mass",
+        "com_h",
+        "tip_g",
+        "grip_g",
+        "margin",
+        "ride",
+        "appr",
+        "dep",
+        "brkovr",
+        "hz",
+    );
+    let mut flagged: Vec<(String, Vec<String>)> = Vec::new();
+    for id in &ids {
+        let def = match mm2_content::load_vehicle(&vfs, id, 0) {
+            Ok(def) => def,
+            Err(e) => {
+                println!("{id:<14} {:<30} load failed: {e}", "-");
+                flagged.push((id.clone(), vec![format!("load failed: {e}")]));
+                continue;
+            }
+        };
+        let m = mm2_vehicle::HandlingMetrics::of(&def.config);
+        let hz = m.wheels.first().map(|w| w.natural_frequency).unwrap_or(0.0);
+        println!(
+            "{:<14} {:<30} {:>6.0} {:>6.2} {:>6.2} {:>6.2} {:>6.2} {:>6.2} {:>6.0} {:>6.0} {:>6.0} {:>6.2}",
+            def.id,
+            truncate(&def.display_name, 30),
+            def.config.mass,
+            m.com_height,
+            m.tip_threshold_g,
+            m.peak_lateral_g,
+            m.rollover_margin,
+            m.belly_clearance,
+            m.approach_angle.to_degrees(),
+            m.departure_angle.to_degrees(),
+            m.breakover_angle.to_degrees(),
+            hz,
+        );
+        let problems = m.problems();
+        if !problems.is_empty() {
+            flagged.push((def.id.clone(), problems));
+        }
+    }
+
+    if flagged.is_empty() {
+        println!("\nall {} vehicle(s) within the arcade envelope", ids.len());
+        return Ok(());
+    }
+    println!("\n== problems ==");
+    for (id, problems) in &flagged {
+        for p in problems {
+            println!("{id}: {p}");
+        }
+    }
+    println!("\n{} of {} vehicle(s) flagged", flagged.len(), ids.len());
+    if strict {
+        return Err("handling audit found problems".into());
+    }
+    Ok(())
+}
+
+/// Clip `s` to `max` characters for table output.
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    s.chars().take(max.saturating_sub(1)).collect::<String>() + "\u{2026}"
 }
 
 fn validate_cars(

@@ -1,6 +1,7 @@
 //! Configurable arcade vehicle simulation built on Avian physics.
 //!
 //! Layout:
+//! - [`analysis`]: closed-form handling diagnostics (rollover, ride, clearance)
 //! - [`config`]: the fully serializable handling definition
 //! - [`vehicle`]: ECS components (`Vehicle`, `VehicleInput`, `VehicleState`)
 //! - [`sim`]: pure math (steering curves, torque, slip, grip) — unit tested
@@ -12,12 +13,14 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
+pub mod analysis;
 pub mod config;
 pub mod debug;
 pub mod sim;
 pub mod systems;
 pub mod vehicle;
 
+pub use analysis::{HandlingMetrics, WheelMetrics};
 pub use config::VehicleConfig;
 pub use debug::VehicleDebugEnabled;
 pub use vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState, WheelState};
