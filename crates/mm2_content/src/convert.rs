@@ -74,6 +74,9 @@ const DAMPING_RATIO_MAX: f32 = 0.90;
 /// Share of the lateral-force roll moment cancelled on imported cars
 /// (adapted arcade policy — see `AssistConfig::roll_resistance`).
 const ROLL_RESISTANCE: f32 = 0.85;
+/// How briskly an imported car levels itself in the air, rad/s — roughly
+/// half a second to flat, so a jump lands on its wheels and not its nose.
+const AIR_LEVELLING_RATE: f32 = 8.0;
 /// Seconds an upended car waits before flopping back onto its wheels.
 const SELF_RIGHT_DELAY: f32 = 2.0;
 /// Ceiling on gear change time. MM2 authors 0.8-1.0 s, which is most of a
@@ -661,7 +664,7 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
         yaw_stability: 2.0,
         traction_control: 0.85,
         countersteer: 0.3,
-        air_control: 3.0,
+        air_control: AIR_LEVELLING_RATE,
         self_right_delay: SELF_RIGHT_DELAY,
     };
     report.defaulted(

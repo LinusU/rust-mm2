@@ -47,6 +47,22 @@ impl FrontAxle {
     }
 }
 
+/// Angular inertia about a horizontal axis, kg·m² — the mean of the
+/// pitch and roll principal moments, which is what levelling the car in
+/// the air works against.
+fn leveling_inertia(cfg: &crate::config::VehicleConfig) -> f32 {
+    let [ix, _, iz] = cfg.inertia.unwrap_or_else(|| {
+        let [w, h, d] = cfg.chassis_size;
+        let m = cfg.mass;
+        [
+            m * (h * h + d * d) / 12.0,
+            m * (w * w + d * d) / 12.0,
+            m * (w * w + h * h) / 12.0,
+        ]
+    });
+    (ix + iz) * 0.5
+}
+
 /// Vehicle raycasts exclude the vehicle's own collider.
 fn wheel_filter(vehicle: Entity) -> SpatialQueryFilter {
     SpatialQueryFilter::default().with_excluded_entities([vehicle])
@@ -440,12 +456,27 @@ pub fn vehicle_simulation(
         let yaw_torque = -angvel.y * cfg.assists.yaw_stability * inertia_y * drift_factor;
         forces.apply_torque(Vec3::Y * yaw_torque);
 
-        // Air control: gently level the car while airborne.
+        // Air control: level the car before it lands.
+        //
+        // A car that crests a rise at speed leaves it nose-down and keeps
+        // that attitude all the way to the ground, so the front of the
+        // hull arrives ahead of the wheels, digs into the road and stops
+        // the car dead instead of landing it. Levelling is what makes a
+        // jump survivable.
+        //
+        // `air_control` is the natural frequency (rad/s) of a critically
+        // damped rotation of the car's up axis back to vertical: it
+        // settles in roughly `4 / air_control` seconds. Scaling by the
+        // car's own pitch/roll inertia is what makes that figure mean the
+        // same thing on a Mini and on a fire truck.
         if !grounded_any && cfg.assists.air_control > 0.0 {
-            let axis = up.cross(Vec3::Y);
-            let torque = axis * cfg.assists.air_control * inertia_y
-                - angvel * cfg.assists.air_control * 0.4 * inertia_y;
-            forces.apply_torque(torque.clamp_length_max(inertia_y * 20.0));
+            let w = cfg.assists.air_control;
+            // `up × Y` is horizontal and vanishes when the car is level,
+            // so this rights pitch and roll without ever fighting a
+            // deliberate spin.
+            let tilt = up.cross(Vec3::Y);
+            let level_rate = angvel - Vec3::Y * angvel.y;
+            forces.apply_torque(leveling_inertia(cfg) * (tilt * w * w - level_rate * 2.0 * w));
         }
     }
 }

@@ -284,6 +284,56 @@ fn up_after_hard_turn(cfg: VehicleConfig) -> f32 {
 }
 
 #[test]
+fn a_car_thrown_nose_down_lands_level() {
+    // Cresting a rise at speed leaves a car nose-down, and it keeps that
+    // attitude all the way to the ground unless something levels it —
+    // arriving front-first, digging the hull into the road ahead of the
+    // wheels and stopping dead instead of landing.
+    let pitch_at_landing = |air_control: f32| {
+        let mut cfg = VehicleConfig::default();
+        cfg.assists.air_control = air_control;
+        let (mut app, car) = test_app_with(cfg);
+
+        // Launch it: well clear of the ground, nose down, moving forward.
+        let nose_down = Quat::from_rotation_x(-0.35);
+        {
+            let world = app.world_mut();
+            world.get_mut::<Position>(car).unwrap().0 = Vec3::new(0.0, 6.0, 0.0);
+            world.get_mut::<Transform>(car).unwrap().translation = Vec3::new(0.0, 6.0, 0.0);
+            world.get_mut::<Rotation>(car).unwrap().0 = nose_down;
+            world.get_mut::<Transform>(car).unwrap().rotation = nose_down;
+            world.get_mut::<LinearVelocity>(car).unwrap().0 = Vec3::new(0.0, 0.0, -25.0);
+        }
+
+        // Fly until the wheels find the ground, then read the attitude.
+        let mut pitch = f32::NAN;
+        for _ in 0..FRAMES_PER_SECOND * 3 {
+            app.update();
+            if app.world().get::<VehicleState>(car).unwrap().grounded {
+                let forward = app.world().get::<Rotation>(car).unwrap().0 * Vec3::NEG_Z;
+                pitch = forward.y.asin().to_degrees();
+                break;
+            }
+        }
+        assert_finite(&app, car);
+        pitch
+    };
+
+    // Without the assist the nose is still down when the car arrives.
+    let unassisted = pitch_at_landing(0.0);
+    assert!(
+        unassisted < -10.0,
+        "unassisted car should land nose-down, pitch was {unassisted}"
+    );
+
+    let assisted = pitch_at_landing(VehicleConfig::default().assists.air_control);
+    assert!(
+        assisted.abs() < 4.0,
+        "assisted car should land level, pitch was {assisted}"
+    );
+}
+
+#[test]
 fn an_upended_car_flops_back_onto_its_wheels() {
     let (mut app, car) = test_app();
     let delay = VehicleConfig::default().assists.self_right_delay;

@@ -251,8 +251,11 @@ pub struct AssistConfig {
     /// Countersteer assistance: extra steering authority correcting yaw
     /// error during slides (0 = off).
     pub countersteer: f32,
-    /// Air control: torque authority to level the car while airborne
-    /// (0 = off).
+    /// How briskly the car levels itself while airborne, as the natural
+    /// frequency in rad/s of a critically damped return to level
+    /// (`0` = off). The car settles in roughly `4 / air_control` seconds,
+    /// so `8.0` is about half a second — quick enough to land a jump on
+    /// its wheels rather than its nose. Yaw is left alone.
     pub air_control: f32,
     /// Seconds a car must lie on its side or roof, near stationary, before
     /// it flops back onto its wheels. `0` disables recovery, which strands
@@ -409,7 +412,7 @@ impl Default for VehicleConfig {
                 yaw_stability: 2.5,
                 traction_control: 0.9,
                 countersteer: 0.35,
-                air_control: 4.0,
+                air_control: 8.0,
                 self_right_delay: default_self_right_delay(),
             },
             trailer: false,

@@ -130,5 +130,5 @@ roll_resistance = 0.8
 yaw_stability = 2.5
 traction_control = 0.9
 countersteer = 0.35
-air_control = 4.0
+air_control = 8.0
 self_right_delay = 2.0
