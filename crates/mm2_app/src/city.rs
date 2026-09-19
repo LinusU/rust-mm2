@@ -258,11 +258,19 @@ impl MeshBuilder {
     /// at the image top).
     fn wall_quad(&mut self, l: Vec3, r: Vec3, bottom: f32, top: f32, reps: [f32; 2], facing: Vec3) {
         let [u_rep, v_rep] = reps;
+        // The two height refs are not ordered: ~8% of retail facades name
+        // the higher one first, which would put the image's bottom along
+        // the quad's upper edge.
+        let (lo, hi) = if bottom <= top {
+            (bottom, top)
+        } else {
+            (top, bottom)
+        };
         self.quad_facing(
-            Vec3::new(l.x, bottom, l.z),
-            Vec3::new(r.x, bottom, r.z),
-            Vec3::new(r.x, top, r.z),
-            Vec3::new(l.x, top, l.z),
+            Vec3::new(l.x, lo, l.z),
+            Vec3::new(r.x, lo, r.z),
+            Vec3::new(r.x, hi, r.z),
+            Vec3::new(l.x, hi, l.z),
             [[0.0, v_rep], [u_rep, v_rep], [u_rep, 0.0], [0.0, 0.0]],
             facing,
         );
