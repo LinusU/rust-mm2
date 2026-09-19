@@ -18,14 +18,24 @@ pub fn max_steer_angle(speed: f32, cfg: &SteeringConfig) -> f32 {
     cfg.low_speed_max_angle + (cfg.high_speed_max_angle - cfg.low_speed_max_angle) * t
 }
 
-/// Largest steer angle whose steady-state cornering demand stays inside
-/// `grip_limit` times what the tires can deliver, radians.
+/// Largest steer angle worth commanding at `speed`, radians.
 ///
-/// From the bicycle model a steer angle `d` at speed `v` turns a radius
-/// `wheelbase / d`, so it demands `v² · d / wheelbase` of lateral
-/// acceleration. Inverting that for the tires' limit gives a lock that
-/// falls off as `1/v²` — the shape real speed-sensitive steering has, and
-/// derived per car rather than authored.
+/// Two terms, straight out of the steady-state bicycle model:
+///
+/// * **Geometry.** A steer angle `d` turns a radius `wheelbase / d`, so it
+///   demands `v² · d / wheelbase` of lateral acceleration. Inverting that
+///   for `grip_limit` times the tires' limit gives a lock falling off as
+///   `1/v²` — the shape real speed-sensitive steering has, derived per car
+///   rather than authored.
+/// * **Slip.** A tire makes force by slipping, so the front wheels must be
+///   turned *past* the path the car is taking before they pull at all.
+///   `slip_allowance` is how much further — the understeer term, the slip
+///   the front tires need beyond what the rears are already giving.
+///
+/// Leaving the slip term out caps the wheels at the geometric angle, where
+/// tires that need a lot of slip make almost none of their grip: MM2's
+/// London Cab asks 0.40 rad of its fronts and 0.14 of its rears, and
+/// without the allowance it will not turn at all above walking pace.
 ///
 /// Returns [`MIN_STEER_LOCK`] at the very least, so the driver always has
 /// something to steer with, and `f32::INFINITY` when the cap is disabled.
@@ -34,6 +44,7 @@ pub fn grip_limited_steer_angle(
     wheelbase: f32,
     lateral_grip: f32,
     grip_limit: f32,
+    slip_allowance: f32,
 ) -> f32 {
     if grip_limit <= 0.0 {
         return f32::INFINITY;
@@ -43,7 +54,8 @@ pub fn grip_limited_steer_angle(
         return f32::INFINITY;
     }
     let max_accel = lateral_grip * 9.81 * grip_limit;
-    (max_accel * wheelbase.max(1e-3) / v_sq).max(MIN_STEER_LOCK)
+    let geometric = max_accel * wheelbase.max(1e-3) / v_sq;
+    (geometric + slip_allowance.max(0.0)).max(MIN_STEER_LOCK)
 }
 
 /// Advance the actual steering angle toward `target` at the configured rates.
@@ -255,8 +267,9 @@ mod tests {
 
     #[test]
     fn grip_limited_lock_falls_off_with_the_square_of_speed() {
-        // A car on 1.6 g tires, allowed to ask for 1.25x that.
-        let lock = |v| grip_limited_steer_angle(v, 2.6, 1.6, 1.25);
+        // A car on 1.6 g tires, allowed to ask for 1.25x that, whose front
+        // and rear tires want the same slip (no understeer term).
+        let lock = |v| grip_limited_steer_angle(v, 2.6, 1.6, 1.25, 0.0);
 
         // Doubling the speed quarters the angle.
         let slow = lock(15.0);
@@ -280,14 +293,38 @@ mod tests {
         // ...and at a standstill there is nothing to cap.
         assert!(lock(0.0).is_infinite());
         // Disabled means disabled.
-        assert!(grip_limited_steer_angle(30.0, 2.6, 1.6, 0.0).is_infinite());
+        assert!(grip_limited_steer_angle(30.0, 2.6, 1.6, 0.0, 0.0).is_infinite());
     }
 
     #[test]
     fn a_grippier_car_is_allowed_more_lock() {
-        let slippery = grip_limited_steer_angle(25.0, 2.6, 0.8, 1.25);
-        let grippy = grip_limited_steer_angle(25.0, 2.6, 1.6, 1.25);
+        let slippery = grip_limited_steer_angle(25.0, 2.6, 0.8, 1.25, 0.0);
+        let grippy = grip_limited_steer_angle(25.0, 2.6, 1.6, 1.25, 0.0);
         assert!(grippy > slippery);
+    }
+
+    #[test]
+    fn lazy_front_tires_are_allowed_the_slip_they_need() {
+        // The London Cab's shape: fronts wanting 0.40 rad of slip against
+        // rears wanting 0.14. Without the allowance the geometric cap
+        // alone leaves the fronts far short of making any force.
+        let allowance = 0.40 - 0.14;
+        let geometric = grip_limited_steer_angle(25.0, 2.6, 1.4, 1.25, 0.0);
+        let with_slip = grip_limited_steer_angle(25.0, 2.6, 1.4, 1.25, allowance);
+        assert!(
+            (with_slip - geometric - allowance).abs() < 1e-5,
+            "allowance should add on top of the geometric angle"
+        );
+        // A car whose axles want the same slip is unaffected.
+        assert_eq!(
+            grip_limited_steer_angle(25.0, 2.6, 1.4, 1.25, 0.0),
+            geometric
+        );
+        // An oversteering balance never *removes* authority.
+        assert_eq!(
+            grip_limited_steer_angle(25.0, 2.6, 1.4, 1.25, -0.2),
+            geometric
+        );
     }
 
     #[test]

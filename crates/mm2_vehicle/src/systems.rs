@@ -8,19 +8,43 @@ use crate::vehicle::{
     DriveDirection, ResetVehicle, Vehicle, VehicleInput, VehicleState, WheelState,
 };
 
-/// Mean lateral grip of the steered tires — what sets how much steering
-/// lock the front axle can actually use.
-fn steered_lateral_grip(cfg: &crate::config::VehicleConfig) -> f32 {
-    let grips: Vec<f32> = cfg
-        .wheels
-        .iter()
-        .filter(|w| w.steered)
-        .map(|w| w.tires.as_ref().unwrap_or(&cfg.tires).lateral_grip)
-        .collect();
-    if grips.is_empty() {
-        return cfg.tires.lateral_grip;
+/// What the steered axle can do with steering lock: how much grip it makes
+/// and how much slip it needs to make it.
+pub(crate) struct FrontAxle {
+    /// Mean lateral grip coefficient of the steered tires.
+    pub lateral_grip: f32,
+    /// Slip the steered tires need beyond what the unsteered ones are
+    /// already giving — the understeer term of the bicycle model.
+    pub slip_allowance: f32,
+}
+
+impl FrontAxle {
+    pub(crate) fn of(cfg: &crate::config::VehicleConfig) -> Self {
+        let mut grip = (0.0f32, 0usize);
+        let mut steered_slip = (0.0f32, 0usize);
+        let mut fixed_slip = (0.0f32, 0usize);
+        for w in &cfg.wheels {
+            let t = w.tires.as_ref().unwrap_or(&cfg.tires);
+            if w.steered {
+                grip.0 += t.lateral_grip;
+                grip.1 += 1;
+                steered_slip.0 += t.peak_slip_angle;
+                steered_slip.1 += 1;
+            } else {
+                fixed_slip.0 += t.peak_slip_angle;
+                fixed_slip.1 += 1;
+            }
+        }
+        let mean = |(sum, n): (f32, usize), fallback: f32| {
+            if n == 0 { fallback } else { sum / n as f32 }
+        };
+        let front_slip = mean(steered_slip, cfg.tires.peak_slip_angle);
+        let rear_slip = mean(fixed_slip, front_slip);
+        Self {
+            lateral_grip: mean(grip, cfg.tires.lateral_grip),
+            slip_allowance: (front_slip - rear_slip).max(0.0),
+        }
     }
-    grips.iter().sum::<f32>() / grips.len() as f32
 }
 
 /// Vehicle raycasts exclude the vehicle's own collider.
@@ -74,12 +98,13 @@ pub fn vehicle_simulation(
         // than the tires can make does not turn harder, it just ploughs.
         // Capping by what the tires can deliver gives a speed-sensitive
         // lock derived from the car rather than authored.
-        let front_grip = steered_lateral_grip(cfg);
+        let front = FrontAxle::of(cfg);
         let grip_cap = sim::grip_limited_steer_angle(
             fwd_speed.abs(),
             cfg.wheelbase,
-            front_grip,
+            front.lateral_grip,
             cfg.steering.grip_limit,
+            front.slip_allowance,
         );
         target = target.clamp(-grip_cap, grip_cap);
 

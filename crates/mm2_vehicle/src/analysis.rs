@@ -247,27 +247,16 @@ impl HandlingMetrics {
         // What the driver can actually ask for at speed: the authored lock,
         // then the grip cap on top of it.
         let v = config.steering.high_speed.max(1.0);
-        let front_grip = {
-            let steered: Vec<f32> = config
-                .wheels
-                .iter()
-                .filter(|w| w.steered)
-                .map(|w| w.tires.as_ref().unwrap_or(&config.tires).lateral_grip)
-                .collect();
-            if steered.is_empty() {
-                config.tires.lateral_grip
-            } else {
-                steered.iter().sum::<f32>() / steered.len() as f32
-            }
-        };
+        let front = crate::systems::FrontAxle::of(config);
         let lock = config
             .steering
             .high_speed_max_angle
             .min(crate::sim::grip_limited_steer_angle(
                 v,
                 config.wheelbase,
-                front_grip,
+                front.lateral_grip,
                 config.steering.grip_limit,
+                front.slip_allowance,
             ));
         let high_speed_steer_demand_g = v * v * lock / config.wheelbase.max(1e-3) / G;
 
