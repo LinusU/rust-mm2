@@ -44,6 +44,18 @@ const TORQUE_PEAK_RPM_FRAC: f32 = 0.72;
 const TORQUE_PEAK_FACTOR: f32 = 1.15;
 /// Driveline efficiency applied to every imported car (adapted constant).
 const DRIVELINE_EFFICIENCY: f32 = 0.85;
+/// Shape imposed on the underside of an imported collision hull.
+///
+/// MM2 car bounds are the real body shell: a flat floor slung between
+/// axles that sit well inside it, 0.13-0.25 m off the road on most of the
+/// roster. That geometry catches on the crown of every intersection and
+/// on road seams the wheels ride over without noticing — the Mustang
+/// clears an 8° crest, and the F-350 is only bearable because its big
+/// wheels and long travel give it 17°.
+const MIN_GROUND_CLEARANCE: f32 = 0.25;
+const APPROACH_ANGLE: f32 = 25.0 * std::f32::consts::PI / 180.0;
+const DEPARTURE_ANGLE: f32 = 25.0 * std::f32::consts::PI / 180.0;
+const BREAKOVER_ANGLE: f32 = 15.0 * std::f32::consts::PI / 180.0;
 /// Ceiling on chassis restitution. MM2's `BoundElasticity` (0.3-0.5 on
 /// stock cars) feeds its own car-versus-car impulse solver, not a
 /// coefficient of restitution against road geometry; used as one, a car
@@ -154,6 +166,32 @@ pub struct ConvertInput<'a> {
 pub struct Converted {
     pub config: VehicleConfig,
     pub report: ConversionReport,
+}
+
+/// Raise the underside of a collision hull so the body clears road seams
+/// and crests instead of snagging on them.
+///
+/// Each vertex is lifted to whatever height its position demands: beyond
+/// an axle that is the ramp the overhang has to clear, between the axles
+/// it is the crest rising from the nearer axle, and everywhere it is at
+/// least [`MIN_GROUND_CLEARANCE`]. The visual body is untouched, so a car
+/// still *looks* slammed — it just stops tripping over the road.
+fn clear_underside(points: &mut [[f32; 3]], ground_y: f32, front_z: f32, rear_z: f32) {
+    let top = points.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
+    for p in points.iter_mut() {
+        let ahead = front_z - p[2];
+        let behind = p[2] - rear_z;
+        let ramp = if ahead > 0.0 {
+            ahead * APPROACH_ANGLE.tan()
+        } else if behind > 0.0 {
+            behind * DEPARTURE_ANGLE.tan()
+        } else {
+            (p[2] - front_z).min(rear_z - p[2]) * BREAKOVER_ANGLE.tan()
+        };
+        let floor = ground_y + ramp.max(MIN_GROUND_CLEARANCE);
+        // Never lift the floor through the roof of a very low body.
+        p[1] = p[1].max(floor.min(top - 0.05));
+    }
 }
 
 /// Rebound damping rate (N·s/m) for one corner.
@@ -320,6 +358,7 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
     );
 
     let mut wheels = Vec::with_capacity(input.wheels.len());
+    let mut contact_ys: Vec<f32> = Vec::with_capacity(input.wheels.len());
     for wg in input.wheels {
         let front = wg.origin[2] < z_mid;
         let wt: &VehWheel = if front {
@@ -350,6 +389,12 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
         // Hardpoint raised so the wheel rests at `origin` under sag.
         let raise = (travel * (1.0 - SAG_FRACTION) + wg.radius - wg.origin[1]).max(0.0);
         let position = [wg.origin[0], wg.origin[1] + raise, wg.origin[2]];
+
+        // Where this wheel's contact patch ends up once the spring has
+        // settled under its share of the weight. `SuspensionFactor` moves
+        // it off the design sag, so solve it rather than assume it.
+        let rest_compression = (wheel_load / spring_rate).min(travel);
+        contact_ys.push(position[1] - (travel - rest_compression) - wg.radius);
 
         let steer_scale = if front {
             1.0
@@ -546,12 +591,30 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
     );
 
     // --- collider --------------------------------------------------------------
+    let ground_y = if contact_ys.is_empty() {
+        0.0
+    } else {
+        contact_ys.iter().sum::<f32>() / contact_ys.len() as f32
+    };
     let collider_points = input.bound.map(|b| {
-        b.verts
+        let mut pts = b
+            .verts
             .iter()
             .map(|v| [v[0], v[1], v[2]])
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        clear_underside(&mut pts, ground_y, front_z, rear_z);
+        pts
     });
+    report.adapted(
+        "bound/<id>_bound.bnd (underside)",
+        "collider_points",
+        format!(
+            "floor raised to {MIN_GROUND_CLEARANCE} m with {:.0}°/{:.0}° approach/departure and {:.0}° breakover",
+            APPROACH_ANGLE.to_degrees(),
+            DEPARTURE_ANGLE.to_degrees(),
+            BREAKOVER_ANGLE.to_degrees(),
+        ),
+    );
     report.adapted(
         "vehCarSim.BoundElasticity",
         "collider_restitution",
@@ -785,6 +848,59 @@ mod tests {
         // And an absurd coefficient saturates rather than locking solid.
         let wild = suspension_damping(spring_rate, wheel_load, 100.0);
         assert!(zeta(wild, spring_rate, wheel_load) <= DAMPING_RATIO_MAX + 1e-5);
+    }
+
+    #[test]
+    fn clear_underside_opens_up_a_slammed_floor() {
+        // A body pan 5 cm off the road, overhanging both axles — the shape
+        // every stock MM2 bound has.
+        let (front_z, rear_z) = (-1.2, 1.4);
+        let mut pts = vec![
+            [-0.9, 0.05, -2.0],
+            [0.9, 0.05, -2.0],
+            [-0.9, 0.05, 2.0],
+            [0.9, 0.05, 2.0],
+            [-0.9, 1.4, -1.0],
+            [0.9, 1.4, -1.0],
+            [-0.9, 1.4, 1.0],
+            [0.9, 1.4, 1.0],
+        ];
+        let roof: Vec<[f32; 3]> = pts[4..].to_vec();
+        clear_underside(&mut pts, 0.0, front_z, rear_z);
+
+        // The roof is left alone; only the floor comes up.
+        assert_eq!(&pts[4..], &roof[..]);
+        for p in &pts[..4] {
+            let overhang = (front_z - p[2]).max(p[2] - rear_z);
+            let wanted = (overhang * APPROACH_ANGLE.tan()).max(MIN_GROUND_CLEARANCE);
+            assert!(
+                p[1] >= wanted - 1e-4,
+                "vertex at z={} lifted to {}, wanted {wanted}",
+                p[2],
+                p[1]
+            );
+        }
+    }
+
+    #[test]
+    fn clear_underside_leaves_a_very_low_body_a_hull_to_be() {
+        // A pancake thinner than the clearance we would like: raising its
+        // floor to the target would push it through its own roof.
+        let mut pts = vec![
+            [-0.9, 0.02, -1.0],
+            [0.9, 0.02, -1.0],
+            [-0.9, 0.02, 1.0],
+            [0.9, 0.02, 1.0],
+            [-0.9, 0.10, 0.0],
+            [0.9, 0.10, 0.0],
+        ];
+        clear_underside(&mut pts, 0.0, -1.0, 1.0);
+        let top = pts.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
+        let bottom = pts.iter().map(|p| p[1]).fold(f32::MAX, f32::min);
+        assert!(
+            bottom < top,
+            "hull collapsed to a plane: bottom {bottom}, top {top}"
+        );
     }
 
     #[test]

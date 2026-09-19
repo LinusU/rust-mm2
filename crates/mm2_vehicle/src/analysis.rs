@@ -358,6 +358,18 @@ impl HandlingMetrics {
                 self.belly_clearance
             ));
         }
+        if self.breakover_angle.to_degrees() < 10.0 {
+            out.push(format!(
+                "breakover {:.0}° — the belly catches on intersection crowns",
+                self.breakover_angle.to_degrees()
+            ));
+        }
+        let ends = self.approach_angle.min(self.departure_angle).to_degrees();
+        if ends < 15.0 {
+            out.push(format!(
+                "approach/departure {ends:.0}° — the overhangs catch on incline changes"
+            ));
+        }
         for (i, w) in self.wheels.iter().enumerate() {
             if w.bottoms_out {
                 out.push(format!("wheel {i} rests on the bump stops"));
