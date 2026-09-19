@@ -1947,14 +1947,36 @@ impl<'a> MaterialCache<'a> {
 /// higher rank = higher detail. Names without a recognized LOD suffix rank
 /// as `*_h`; only the last `_`-separated component is interpreted so real
 /// part names are preserved.
-fn lod_rank(name: &str) -> u8 {
-    let lower = name.to_ascii_lowercase();
-    match lower.rsplit('_').next().unwrap_or("") {
-        "vl" => 0,
-        "l" => 1,
-        "m" => 2,
-        _ => 3,
+/// Split a PKG geometry name into the stem its LOD variants share and the
+/// rank of this variant (higher is more detailed).
+///
+/// MM2 writes the variants either as `<stem>_<tag>` or as a bare tag —
+/// `el_unionsquare_f` names its four geometries exactly `H`, `M`, `L` and
+/// `VL`. Splitting on `_` alone leaves a bare tag as its own stem, so the
+/// four variants stop competing and every one of them is drawn: at Union
+/// Square the coarse 26-vertex shell has no cut for the garage entrance
+/// and buries it under grass, and elsewhere the stacked shells z-fight.
+fn lod_split(name: &str) -> (String, u8) {
+    fn rank(tag: &str) -> Option<u8> {
+        match tag {
+            "vl" => Some(0),
+            "l" => Some(1),
+            "m" => Some(2),
+            "h" => Some(3),
+            _ => None,
+        }
     }
+    let lower = name.to_ascii_lowercase();
+    if let Some(r) = rank(&lower) {
+        return (String::new(), r);
+    }
+    if let Some((stem, tag)) = lower.rsplit_once('_')
+        && let Some(r) = rank(tag)
+    {
+        return (stem.to_string(), r);
+    }
+    // Not an LOD variant: its own stem, ranked as full detail.
+    (lower, 3)
 }
 
 /// Collision triangles accumulated over a whole prop (all best-LOD
@@ -1987,12 +2009,7 @@ fn pkg_to_parts(
 ) -> PropModel {
     let mut best: HashMap<String, (u8, &str)> = HashMap::new();
     for (name, _geo) in pkg.geometries() {
-        let lower = name.to_ascii_lowercase();
-        let stem = lower
-            .rsplit_once('_')
-            .map(|(s, _)| s.to_string())
-            .unwrap_or(lower.clone());
-        let rank = lod_rank(name);
+        let (stem, rank) = lod_split(name);
         let entry = best.entry(stem).or_insert((rank, name));
         if rank > entry.0 {
             *entry = (rank, name);
