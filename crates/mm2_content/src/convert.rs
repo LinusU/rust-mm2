@@ -71,6 +71,9 @@ const DAMPING_RATIO_MAX: f32 = 0.90;
 const ROLL_RESISTANCE: f32 = 0.85;
 /// Seconds an upended car waits before flopping back onto its wheels.
 const SELF_RIGHT_DELAY: f32 = 2.0;
+/// Multiple of tire grip the steering lock may demand (adapted arcade
+/// policy — stock locks ask for 8-64 g at their high-speed limit).
+const STEERING_GRIP_LIMIT: f32 = 1.3;
 
 /// How each emitted value was obtained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -568,6 +571,7 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
         input_rate: 4.0,
         return_rate: 7.0,
         response_curve: 1.4,
+        grip_limit: STEERING_GRIP_LIMIT,
     };
     report.imported(
         "vehCarSim.WheelFront.SteeringLimit",

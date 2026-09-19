@@ -815,7 +815,7 @@ fn handling(
     }
 
     println!(
-        "{:<14} {:<30} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}",
+        "{:<14} {:<30} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>7}",
         "id",
         "name",
         "mass",
@@ -828,6 +828,7 @@ fn handling(
         "dep",
         "brkovr",
         "hz",
+        "steer_g",
     );
     let mut flagged: Vec<(String, Vec<String>)> = Vec::new();
     for id in &ids {
@@ -842,7 +843,7 @@ fn handling(
         let m = mm2_vehicle::HandlingMetrics::of(&def.config);
         let hz = m.wheels.first().map(|w| w.natural_frequency).unwrap_or(0.0);
         println!(
-            "{:<14} {:<30} {:>6.0} {:>6.2} {:>6.2} {:>6.2} {:>6.2} {:>6.2} {:>6.0} {:>6.0} {:>6.0} {:>6.2}",
+            "{:<14} {:<30} {:>6.0} {:>6.2} {:>6.2} {:>6.2} {:>6.2} {:>6.2} {:>6.0} {:>6.0} {:>6.0} {:>6.2} {:>7.1}",
             def.id,
             truncate(&def.display_name, 30),
             def.config.mass,
@@ -855,6 +856,7 @@ fn handling(
             m.departure_angle.to_degrees(),
             m.breakover_angle.to_degrees(),
             hz,
+            m.high_speed_steer_demand_g,
         );
         let problems = m.problems();
         if !problems.is_empty() {

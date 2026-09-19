@@ -3,7 +3,7 @@
 //! Chassis-space convention: +x right, +y up, **-z forward** (Bevy).
 //! All SI units.
 
-use crate::config::{EngineConfig, SteeringConfig, TireConfig, TransmissionConfig};
+use crate::config::{EngineConfig, MIN_STEER_LOCK, SteeringConfig, TireConfig, TransmissionConfig};
 
 /// Shape a steering input symmetrically: `sign(x)·|x|^curve`.
 /// `curve > 1` softens response around the centre.
@@ -16,6 +16,34 @@ pub fn steering_response(input: f32, curve: f32) -> f32 {
 pub fn max_steer_angle(speed: f32, cfg: &SteeringConfig) -> f32 {
     let t = (speed / cfg.high_speed.max(1.0)).clamp(0.0, 1.0);
     cfg.low_speed_max_angle + (cfg.high_speed_max_angle - cfg.low_speed_max_angle) * t
+}
+
+/// Largest steer angle whose steady-state cornering demand stays inside
+/// `grip_limit` times what the tires can deliver, radians.
+///
+/// From the bicycle model a steer angle `d` at speed `v` turns a radius
+/// `wheelbase / d`, so it demands `v² · d / wheelbase` of lateral
+/// acceleration. Inverting that for the tires' limit gives a lock that
+/// falls off as `1/v²` — the shape real speed-sensitive steering has, and
+/// derived per car rather than authored.
+///
+/// Returns [`MIN_STEER_LOCK`] at the very least, so the driver always has
+/// something to steer with, and `f32::INFINITY` when the cap is disabled.
+pub fn grip_limited_steer_angle(
+    speed: f32,
+    wheelbase: f32,
+    lateral_grip: f32,
+    grip_limit: f32,
+) -> f32 {
+    if grip_limit <= 0.0 {
+        return f32::INFINITY;
+    }
+    let v_sq = speed * speed;
+    if v_sq < 1e-3 {
+        return f32::INFINITY;
+    }
+    let max_accel = lateral_grip * 9.81 * grip_limit;
+    (max_accel * wheelbase.max(1e-3) / v_sq).max(MIN_STEER_LOCK)
 }
 
 /// Advance the actual steering angle toward `target` at the configured rates.
@@ -217,11 +245,49 @@ mod tests {
             input_rate: 3.0,
             return_rate: 6.0,
             response_curve: 1.0,
+            grip_limit: 0.0,
         };
         assert_eq!(max_steer_angle(0.0, &cfg), 0.6);
         assert!((max_steer_angle(30.0, &cfg) - 0.1).abs() < 1e-6);
         assert!((max_steer_angle(15.0, &cfg) - 0.35).abs() < 1e-6);
         assert!((max_steer_angle(90.0, &cfg) - 0.1).abs() < 1e-6); // clamped
+    }
+
+    #[test]
+    fn grip_limited_lock_falls_off_with_the_square_of_speed() {
+        // A car on 1.6 g tires, allowed to ask for 1.25x that.
+        let lock = |v| grip_limited_steer_angle(v, 2.6, 1.6, 1.25);
+
+        // Doubling the speed quarters the angle.
+        let slow = lock(15.0);
+        let fast = lock(30.0);
+        assert!(
+            (slow / fast - 4.0).abs() < 1e-3,
+            "expected a 4x drop, got {}",
+            slow / fast
+        );
+
+        // The cap is what it claims: at that angle the bicycle model
+        // demands exactly the allowed multiple of the tires' limit.
+        let demand = 15.0 * 15.0 * slow / 2.6 / 9.81;
+        assert!(
+            (demand - 1.6 * 1.25).abs() < 1e-3,
+            "demand at the cap was {demand} g"
+        );
+
+        // Authority is never taken away entirely...
+        assert!(lock(200.0) >= MIN_STEER_LOCK);
+        // ...and at a standstill there is nothing to cap.
+        assert!(lock(0.0).is_infinite());
+        // Disabled means disabled.
+        assert!(grip_limited_steer_angle(30.0, 2.6, 1.6, 0.0).is_infinite());
+    }
+
+    #[test]
+    fn a_grippier_car_is_allowed_more_lock() {
+        let slippery = grip_limited_steer_angle(25.0, 2.6, 0.8, 1.25);
+        let grippy = grip_limited_steer_angle(25.0, 2.6, 1.6, 1.25);
+        assert!(grippy > slippery);
     }
 
     #[test]
@@ -233,6 +299,7 @@ mod tests {
             input_rate: 2.0,
             return_rate: 4.0,
             response_curve: 1.0,
+            grip_limit: 0.0,
         };
         let a = step_steer_angle(0.0, 0.5, &cfg, 0.1);
         assert!((a - 0.2).abs() < 1e-6); // rate-limited

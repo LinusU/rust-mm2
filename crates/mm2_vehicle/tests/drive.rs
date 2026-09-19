@@ -218,6 +218,9 @@ fn tippy_config() -> VehicleConfig {
     let metrics = mm2_vehicle::HandlingMetrics::of(&cfg);
     cfg.center_of_mass[1] = metrics.ground_y + 0.8;
     cfg.tires.lateral_grip = 1.65;
+    // Grip-limited steering is the *other* thing standing between this
+    // geometry and a roll; switch it off so each test isolates one.
+    cfg.steering.grip_limit = 0.0;
     cfg
 }
 
@@ -239,6 +242,18 @@ fn a_hard_turn_slides_instead_of_rolling_the_car_over() {
         assisted_up > 0.85,
         "assisted car should stay upright, up.y was {assisted_up}"
     );
+}
+
+#[test]
+fn grip_limited_steering_also_keeps_a_tippy_car_down() {
+    // Same geometry, roll assist off, but the driver can no longer command
+    // a corner the tires cannot hold — which is also a corner that would
+    // tip the car. The two protections are independent on purpose.
+    let mut cfg = tippy_config();
+    cfg.assists.roll_resistance = 0.0;
+    cfg.steering.grip_limit = VehicleConfig::default().steering.grip_limit;
+    let up = up_after_hard_turn(cfg);
+    assert!(up > 0.85, "car should stay upright, up.y was {up}");
 }
 
 /// Accelerate to speed, then hold full lock; return the vertical component

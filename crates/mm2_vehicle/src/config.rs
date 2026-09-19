@@ -62,6 +62,14 @@ fn default_self_right_delay() -> f32 {
     2.0
 }
 
+fn default_steering_grip_limit() -> f32 {
+    1.3
+}
+
+/// Steering authority never caps below this angle (radians): a driver must
+/// keep something to steer with, however fast the car is going.
+pub const MIN_STEER_LOCK: f32 = 0.04;
+
 /// Spring/damper suspension parameters.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct SuspensionConfig {
@@ -173,6 +181,19 @@ pub struct SteeringConfig {
     pub return_rate: f32,
     /// Exponent shaping input response (>1 = softer centre feel).
     pub response_curve: f32,
+    /// Multiple of the tires' lateral limit the steering lock may ask for
+    /// (`0` = no cap).
+    ///
+    /// A steer angle that demands far more cornering force than the tires
+    /// can make does not corner harder — it just ploughs. Stock MM2 locks
+    /// ask for 8-64 g at their high-speed limit on tires good for 1.7, so
+    /// at any real speed full lock is pure understeer with no feedback.
+    /// Capping the angle by what the tires can deliver gives a
+    /// speed-sensitive lock that is derived per car rather than authored,
+    /// and leaves the front tires with grip to spare for a correction.
+    /// Slightly above `1.0` still lets the player provoke a slide.
+    #[serde(default = "default_steering_grip_limit")]
+    pub grip_limit: f32,
 }
 
 /// Brakes.
@@ -361,6 +382,7 @@ impl Default for VehicleConfig {
                 input_rate: 3.5,
                 return_rate: 6.0,
                 response_curve: 1.6,
+                grip_limit: default_steering_grip_limit(),
             },
             brakes: BrakeConfig {
                 max_brake_force: 9_000.0,
@@ -688,6 +710,10 @@ impl VehicleConfig {
         check!(
             "steering.response_curve",
             finite(st.response_curve) && st.response_curve > 0.0,
+        );
+        check!(
+            "steering.grip_limit",
+            finite(st.grip_limit) && st.grip_limit >= 0.0,
         );
 
         let b = &self.brakes;

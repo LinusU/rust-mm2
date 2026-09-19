@@ -8,6 +8,21 @@ use crate::vehicle::{
     DriveDirection, ResetVehicle, Vehicle, VehicleInput, VehicleState, WheelState,
 };
 
+/// Mean lateral grip of the steered tires — what sets how much steering
+/// lock the front axle can actually use.
+fn steered_lateral_grip(cfg: &crate::config::VehicleConfig) -> f32 {
+    let grips: Vec<f32> = cfg
+        .wheels
+        .iter()
+        .filter(|w| w.steered)
+        .map(|w| w.tires.as_ref().unwrap_or(&cfg.tires).lateral_grip)
+        .collect();
+    if grips.is_empty() {
+        return cfg.tires.lateral_grip;
+    }
+    grips.iter().sum::<f32>() / grips.len() as f32
+}
+
 /// Vehicle raycasts exclude the vehicle's own collider.
 fn wheel_filter(vehicle: Entity) -> SpatialQueryFilter {
     SpatialQueryFilter::default().with_excluded_entities([vehicle])
@@ -55,8 +70,24 @@ pub fn vehicle_simulation(
         let max_angle = sim::max_steer_angle(fwd_speed.abs(), &cfg.steering);
         let mut target = shaped * max_angle;
 
+        // Grip-limited lock: an angle demanding far more cornering force
+        // than the tires can make does not turn harder, it just ploughs.
+        // Capping by what the tires can deliver gives a speed-sensitive
+        // lock derived from the car rather than authored.
+        let front_grip = steered_lateral_grip(cfg);
+        let grip_cap = sim::grip_limited_steer_angle(
+            fwd_speed.abs(),
+            cfg.wheelbase,
+            front_grip,
+            cfg.steering.grip_limit,
+        );
+        target = target.clamp(-grip_cap, grip_cap);
+
         // Countersteer assist: during a slide, steer toward the velocity
-        // direction by a fraction of the body slip angle.
+        // direction by a fraction of the body slip angle. It is added
+        // after the grip cap on purpose — a car already sideways is not
+        // the steady-state corner the cap models, and catching it needs
+        // more lock than that corner would.
         let lat_speed = vel.dot(right);
         let body_slip = sim::slip_angle(fwd_speed.abs().max(0.5), lat_speed);
         if fwd_speed.abs() > 5.0 && body_slip.abs() > 0.1 {

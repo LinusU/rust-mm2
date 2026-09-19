@@ -85,12 +85,15 @@ pub struct HandlingMetrics {
     /// Crest angle the belly clears between the axles, radians. A car that
     /// catches on intersection crowns has a small one.
     pub breakover_angle: f32,
-    /// Lateral acceleration the high-speed steering lock asks for at
-    /// [`SteeringConfig::high_speed`], in g — compare against
-    /// `peak_lateral_g`.
+    /// Lateral acceleration the steering lock can ask for at
+    /// [`SteeringConfig::high_speed`], in g, after
+    /// [`SteeringConfig::grip_limit`] caps it — compare against
+    /// `peak_lateral_g`. Far above it, full lock is pure understeer.
     ///
     /// [`SteeringConfig::high_speed`]: crate::config::SteeringConfig::high_speed
     pub high_speed_steer_demand_g: f32,
+    /// The steering lock that demand comes from, radians.
+    pub high_speed_steer_lock: f32,
 }
 
 /// Chassis-space points of the collision hull, falling back to the corners
@@ -241,9 +244,32 @@ impl HandlingMetrics {
         let (belly_clearance, approach_angle, departure_angle, breakover_angle) =
             Self::hull_clearances(config, ground_y, front_z, rear_z);
 
+        // What the driver can actually ask for at speed: the authored lock,
+        // then the grip cap on top of it.
         let v = config.steering.high_speed.max(1.0);
-        let high_speed_steer_demand_g =
-            v * v * config.steering.high_speed_max_angle / config.wheelbase.max(1e-3) / G;
+        let front_grip = {
+            let steered: Vec<f32> = config
+                .wheels
+                .iter()
+                .filter(|w| w.steered)
+                .map(|w| w.tires.as_ref().unwrap_or(&config.tires).lateral_grip)
+                .collect();
+            if steered.is_empty() {
+                config.tires.lateral_grip
+            } else {
+                steered.iter().sum::<f32>() / steered.len() as f32
+            }
+        };
+        let lock = config
+            .steering
+            .high_speed_max_angle
+            .min(crate::sim::grip_limited_steer_angle(
+                v,
+                config.wheelbase,
+                front_grip,
+                config.steering.grip_limit,
+            ));
+        let high_speed_steer_demand_g = v * v * lock / config.wheelbase.max(1e-3) / G;
 
         Self {
             wheels,
@@ -259,6 +285,7 @@ impl HandlingMetrics {
             departure_angle,
             breakover_angle,
             high_speed_steer_demand_g,
+            high_speed_steer_lock: lock,
         }
     }
 
@@ -340,6 +367,7 @@ impl HandlingMetrics {
             departure_angle: 0.0,
             breakover_angle: 0.0,
             high_speed_steer_demand_g: 0.0,
+            high_speed_steer_lock: 0.0,
         }
     }
 
@@ -366,6 +394,17 @@ impl HandlingMetrics {
             out.push(format!(
                 "breakover {:.0}° — the belly catches on intersection crowns",
                 self.breakover_angle.to_degrees()
+            ));
+        }
+        // The floor under the grip cap is deliberate authority — a driver
+        // must keep something to steer with — so a car only flags here
+        // when its lock is genuinely unconstrained, not when the floor is
+        // being evaluated at a top speed it will never see.
+        let floored = self.high_speed_steer_lock <= crate::config::MIN_STEER_LOCK * 1.01;
+        if !floored && self.high_speed_steer_demand_g > self.peak_lateral_g * 2.0 {
+            out.push(format!(
+                "steering lock asks for {:.0} g at speed on {:.1} g tires — full lock just ploughs",
+                self.high_speed_steer_demand_g, self.peak_lateral_g
             ));
         }
         let ends = self.approach_angle.min(self.departure_angle).to_degrees();
