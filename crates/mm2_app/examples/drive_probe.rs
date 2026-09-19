@@ -64,7 +64,7 @@ fn main() {
     };
 
     println!(
-        "{:<14} {:>7} {:>7} {:>7} {:>8} {:>6}   yaw rate (deg/s) by speed (m/s)",
+        "{:<14} {:>7} {:>7} {:>7} {:>8} {:>6}   cornering (g) by speed (m/s)",
         "id", "0-100", "top", "worst", "stall", "drift",
     );
     for id in &ids {
@@ -76,9 +76,9 @@ fn main() {
             }
         };
         let accel = probe_acceleration(&def.config);
-        let yaw: Vec<String> = [10.0f32, 20.0, 30.0, 40.0]
+        let corner: Vec<String> = [10.0f32, 20.0, 30.0, 40.0]
             .iter()
-            .map(|v| format!("{:.0}@{:.0}", probe_yaw_rate(&def.config, *v), v))
+            .map(|v| format!("{:.2}@{:.0}", probe_corner_g(&def.config, *v), v))
             .collect();
         println!(
             "{:<14} {:>6.1}s {:>6.1} {:>6.2} {:>7.2}s {:>5.0}°   {}",
@@ -88,7 +88,7 @@ fn main() {
             accel.worst_interval_ratio,
             accel.longest_stall,
             accel.heading_drift,
-            yaw.join("  "),
+            corner.join("  "),
         );
     }
 }
@@ -272,52 +272,71 @@ fn probe_acceleration(cfg: &VehicleConfig) -> AccelProbe {
     }
 }
 
-/// Steady-state yaw rate (deg/s) at `speed` under full steering lock.
-fn probe_yaw_rate(cfg: &VehicleConfig, speed: f32) -> f32 {
+/// Steady-state cornering at `speed` under full lock, in g.
+///
+/// Measured from how fast the *path* bends, not from the body's yaw rate:
+/// a car that has broken away spins faster than it corners, so yaw would
+/// report a turn the tires are not producing. Compare the result against
+/// the car's `grip_g` from `mm2-inspect handling` — that is the ceiling.
+fn probe_corner_g(cfg: &VehicleConfig, speed: f32) -> f32 {
     let (mut app, car) = headless(cfg.clone());
     settle(&mut app, car);
 
-    // Launch at the target speed rather than driving up to it, so the
-    // measurement is about steering and not about power.
+    // Launch at the target speed and coast. Driving up to it would measure
+    // the engine as much as the steering, and pinning the speed there
+    // artificially just feeds a spin — the car pirouettes on the spot and
+    // reports cornering no tire could deliver.
     {
         let world = app.world_mut();
         let rot = world.get::<Rotation>(car).unwrap().0;
         world.get_mut::<LinearVelocity>(car).unwrap().0 = rot * Vec3::NEG_Z * speed;
     }
-    // Hold lock long enough for the yaw rate to settle.
-    set_input(
-        &mut app,
-        car,
-        VehicleInput {
-            steering: 1.0,
-            ..default()
-        },
-    );
+    // Hold the speed with the pedals rather than by rewriting the
+    // velocity: the force still goes through the tires, so it competes
+    // for grip the way it would under a driver, and nothing injects the
+    // energy that lets a broken-away car spin on the spot.
+    let hold = |app: &mut App| {
+        let speed_now = app.world().get::<VehicleState>(car).unwrap().forward_speed;
+        let error = speed - speed_now;
+        set_input(
+            app,
+            car,
+            VehicleInput {
+                throttle: (error * 0.5).clamp(0.0, 1.0),
+                brake: (-error * 0.5).clamp(0.0, 1.0),
+                steering: 1.0,
+                ..default()
+            },
+        );
+        app.update();
+    };
     for _ in 0..HZ * 2 {
-        step_at_speed(&mut app, car, speed);
+        hold(&mut app);
     }
-    let mut samples = Vec::new();
-    for _ in 0..HZ {
-        step_at_speed(&mut app, car, speed);
-        samples.push(app.world().get::<AngularVelocity>(car).unwrap().0.y.abs());
-    }
-    (samples.iter().sum::<f32>() / samples.len() as f32).to_degrees()
-}
 
-/// Advance one frame, holding the car at `speed` along whatever direction
-/// it is now travelling.
-///
-/// Driving up to the target instead would measure the engine as much as
-/// the steering: a quick car is well past the speed it was meant to be
-/// tested at by the time the yaw rate settles.
-fn step_at_speed(app: &mut App, car: Entity, speed: f32) {
-    app.update();
-    let world = app.world_mut();
-    let lv = world.get::<LinearVelocity>(car).unwrap().0;
-    let flat = Vec3::new(lv.x, 0.0, lv.z);
-    if flat.length() > 0.1 {
-        world.get_mut::<LinearVelocity>(car).unwrap().0 = flat.normalize() * speed + Vec3::Y * lv.y;
+    let sample = |app: &App| {
+        let v = app.world().get::<LinearVelocity>(car).unwrap().0;
+        (v.x.atan2(v.z), Vec3::new(v.x, 0.0, v.z).length())
+    };
+    let (mut prev_heading, _) = sample(&app);
+    let (mut swept, mut speed_sum) = (0.0f32, 0.0f32);
+    let frames = HZ / 2;
+    for _ in 0..frames {
+        hold(&mut app);
+        let (heading, v) = sample(&app);
+        let mut d = heading - prev_heading;
+        while d > std::f32::consts::PI {
+            d -= std::f32::consts::TAU;
+        }
+        while d < -std::f32::consts::PI {
+            d += std::f32::consts::TAU;
+        }
+        swept += d.abs();
+        speed_sum += v;
+        prev_heading = heading;
     }
+    let turn_rate = swept / (frames as f32 / HZ as f32);
+    turn_rate * (speed_sum / frames as f32) / 9.81
 }
 
 fn base_app() -> App {
