@@ -232,7 +232,10 @@ impl Pkg {
                 // treat the remainder as one raw chunk on unknown names.
                 parse_chunk_stream(&name, &mut r)?
             };
-            files.push(PkgFile { name, data: chunk_data });
+            files.push(PkgFile {
+                name,
+                data: chunk_data,
+            });
         }
 
         Ok(Self {
@@ -632,10 +635,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_truncated_chunk() {
+    fn tolerates_truncated_chunk() {
+        // Corrupt retail PKGs exist (bogus length fields); the remainder is
+        // preserved as a raw chunk instead of failing the whole package.
         let mut data = pkg3(&[("BODY_H", geometry_chunk(FVF_XYZ))]);
         data.truncate(data.len() - 10);
-        assert!(Pkg::parse(&data).is_err());
+        let pkg = Pkg::parse(&data).unwrap();
+        assert!(matches!(pkg.files[0].data, PkgChunk::Raw(_)));
     }
 
     #[test]
