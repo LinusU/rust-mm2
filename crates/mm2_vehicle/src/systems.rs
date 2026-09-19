@@ -243,6 +243,17 @@ pub fn vehicle_simulation(
         state.rpm += (target_rpm - state.rpm) * (1.0 - (-cfg.engine.rpm_response * dt).exp());
         state.shifting = (state.shifting - dt).max(0.0);
 
+        // A gear change interrupts drive rather than switching it off; see
+        // `SHIFT_TORQUE_FLOOR`. `shifting` counts down from `shift_time`,
+        // so this ramps from the floor back to full as the gear engages.
+        let shift_torque = if state.shifting > 0.0 && cfg.transmission.shift_time > 0.0 {
+            let remaining = (state.shifting / cfg.transmission.shift_time).clamp(0.0, 1.0);
+            crate::config::SHIFT_TORQUE_FLOOR
+                + (1.0 - crate::config::SHIFT_TORQUE_FLOOR) * (1.0 - remaining)
+        } else {
+            1.0
+        };
+
         // --- second pass: tire forces -----------------------------------------
         let reference_load = cfg.mass * 9.81 / wheel_count.max(1) as f32;
         for i in 0..wheel_count {
@@ -298,7 +309,7 @@ pub fn vehicle_simulation(
             // so traction control can cap just the power side.
             let mut longitudinal = sim::rolling_resistance(vel_long, load, tires);
             let mut drive_request = 0.0f32;
-            if wheel.driven && input.throttle > 0.0 && !reversing && state.shifting <= 0.0 {
+            if wheel.driven && input.throttle > 0.0 && !reversing {
                 let torque = sim::engine_torque(state.rpm, &cfg.engine);
                 let ratio = cfg
                     .transmission
@@ -308,7 +319,8 @@ pub fn vehicle_simulation(
                     .unwrap_or(1.0);
                 let wheel_torque =
                     torque * ratio * cfg.transmission.final_drive * cfg.transmission.efficiency;
-                drive_request += wheel_torque / wheel.radius * drive_share * input.throttle;
+                drive_request +=
+                    wheel_torque / wheel.radius * drive_share * input.throttle * shift_torque;
             }
             if wheel.driven && reversing {
                 let torque = sim::engine_torque(state.rpm.max(cfg.engine.idle_rpm), &cfg.engine);

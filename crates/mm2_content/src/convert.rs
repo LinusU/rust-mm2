@@ -76,6 +76,10 @@ const DAMPING_RATIO_MAX: f32 = 0.90;
 const ROLL_RESISTANCE: f32 = 0.85;
 /// Seconds an upended car waits before flopping back onto its wheels.
 const SELF_RIGHT_DELAY: f32 = 2.0;
+/// Ceiling on gear change time. MM2 authors 0.8-1.0 s, which is most of a
+/// second of interrupted drive on every upshift; five of them between rest
+/// and top speed make acceleration arrive in steps.
+const MAX_SHIFT_TIME: f32 = 0.35;
 /// Multiple of tire grip the steering lock may demand (adapted arcade
 /// policy — stock locks ask for 8-64 g at their high-speed limit).
 const STEERING_GRIP_LIMIT: f32 = 1.3;
@@ -530,7 +534,7 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
         gear_ratios,
         reverse_ratio,
         final_drive: 1.0,
-        shift_time: sim.trans.gear_change_time,
+        shift_time: sim.trans.gear_change_time.min(MAX_SHIFT_TIME),
         efficiency: DRIVELINE_EFFICIENCY,
         upshift_rpm: Some(opt_rpm),
         downshift_rpm: Some(opt_rpm * 0.5),
@@ -549,10 +553,13 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
                 .collect::<Vec<_>>()
         ),
     );
-    report.imported(
+    report.adapted(
         "vehCarSim.Trans.GearChangeTime",
         "transmission.shift_time",
-        format!("{:.2} s", sim.trans.gear_change_time),
+        format!(
+            "{:.2} s authored, capped at {MAX_SHIFT_TIME} s",
+            sim.trans.gear_change_time
+        ),
     );
     report.adapted(
         "-",

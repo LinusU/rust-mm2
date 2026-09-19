@@ -70,6 +70,16 @@ fn default_steering_grip_limit() -> f32 {
 /// keep something to steer with, however fast the car is going.
 pub const MIN_STEER_LOCK: f32 = 0.04;
 
+/// Fraction of drive torque still delivered at the start of a gear change.
+///
+/// Cutting drive entirely for `shift_time` is what a real clutch does, but
+/// MM2 authors change times of 0.8-0.9 s, and five of those on the way to
+/// top speed turn acceleration into a staircase — the car stops pulling,
+/// pitches forward on its springs and loses speed before the next gear
+/// bites. Torque dips to this fraction and ramps back instead: the shift
+/// is still felt, and the car never stops accelerating.
+pub const SHIFT_TORQUE_FLOOR: f32 = 0.25;
+
 /// Spring/damper suspension parameters.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct SuspensionConfig {
@@ -135,7 +145,9 @@ pub struct TransmissionConfig {
     pub reverse_ratio: f32,
     /// Final drive ratio. `1.0` when `gear_ratios` already include it.
     pub final_drive: f32,
-    /// Time between gears, seconds.
+    /// Time between gears, seconds. Drive torque dips to
+    /// [`SHIFT_TORQUE_FLOOR`] and ramps back over this long, rather than
+    /// switching off — see the comment on that constant.
     pub shift_time: f32,
     /// Overall driveline efficiency (0..1).
     pub efficiency: f32,
