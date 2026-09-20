@@ -254,6 +254,56 @@ centred mesh, now the `PropOffset` contract.
 Expected next iteration: return to the queued feature work (F13-A
 remainder / F14-A / F11-C per the selection policy).
 
+## Operator report 2 (2026-09-21, human play-test — PRIORITY)
+
+Source: the repository owner drove retail London in a windowed build at
+`561b8b7` (`--city london --spawn 0.4,5.5,-720,0`). Direct observation of
+rendered gameplay; outranks inference.
+
+1. **Height defect is CONFIRMED FIXED.** Operator: "All objects seems to
+   be placed at correct height now". Phone boxes, litter bins, lamp posts
+   and trees rest on the pavement, and `decals.pathset` ribbons render on
+   the carriageway. `3ac8a5a` is validated by observation, not only by
+   the re-taken `bng_ev` counters.
+
+2. **Horizontal placement is still wrong — this is the new priority.**
+   Operator: "things might be placed a bit wrong though, because the
+   things in the screenshot are *in* the road. And where I spawned there
+   is some trees in the middle of the road." Roadside furniture is
+   landing in the carriageway. Vertical placement being right makes this
+   a separate defect in the XZ mapping, not a leftover of the height bug.
+
+   Lead, not a diagnosis: every placement channel routes through
+   `inst_transform`, which carries the `MIRROR_Z` convention. If prop
+   placements are Z-mirrored relative to PSDL road geometry (or the
+   mirror is applied at the wrong stage for pathset / prop-rule stamps
+   but not INST), kerbside objects land across the road. Other
+   candidates: a handedness mismatch between authored pathset space and
+   room space, or a per-room origin not being applied. Establish the
+   truth against authored data and retail screenshots; do not apply a
+   lateral fudge that merely looks better, and check all three channels
+   (INST, `*.pathset`, PSDL `prop_rule`) independently — they may not
+   share the defect.
+
+   Until this is settled, the same caution as report 1 applies: do not
+   roll `F03` or `F04` up to `checked` on placement evidence, and treat
+   strike/settle evidence as provisional, since what a vehicle can reach
+   depends on where props actually sit.
+
+3. **Known long-standing vehicle texture defect (lower priority than 2).**
+   On `vpbug` the rear windscreen renders correct dark interior on its
+   left half and garbage pixels on the right, split by a hard vertical
+   seam, and the rear-right quarter panel is smeared and crumpled. The
+   operator states this has been present "since we first started
+   rendering the cars", and it appears identically in screenshots taken
+   at different commits, different map positions and different sessions
+   — so it is neither collision damage nor a regression from the recent
+   TEX decode work (`0300b21` palette-alpha variant, `cbdf026` mip
+   clamp). Do not spend an iteration bisecting recent commits for it.
+   Evidence: `/Users/linus/coding/rust-mm2-play/screenshots/` —
+   `1789920955999_cam_-340.4,2.0,-104.2,-136,-12.png` (earlier commit)
+   and `1789942678043_cam_828.2,7.0,-1038.7,51,-13.png` (at `561b8b7`).
+
 ## Task table
 
 | Task | Status | Dependencies | Evidence / reason / next action |
