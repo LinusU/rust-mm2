@@ -129,6 +129,73 @@ fn synthetic_inst() -> Vec<u8> {
     d
 }
 
+/// One quad road room (road x 2–28, building lines x 0/30, z 0–20)
+/// carrying `prop_rule` byte 1 and one single-room prop path — the
+/// minimum PSDL that exercises the prop-rule walk end to end.
+fn proprule_psdl() -> Vec<u8> {
+    let mut d = Vec::new();
+    d.extend_from_slice(b"PSD0");
+    d.extend_from_slice(&2u32.to_le_bytes()); // target_size
+    let verts: &[[f32; 3]] = &[
+        [0., 0., 0.],
+        [2., 0., 0.],
+        [28., 0., 0.],
+        [30., 0., 0.], // entry run (z = 0): outer, curb, curb, outer
+        [30., 0., 20.],
+        [28., 0., 20.],
+        [2., 0., 20.],
+        [0., 0., 20.], // exit run (z = 20)
+    ];
+    d.extend_from_slice(&(verts.len() as u32).to_le_bytes());
+    for v in verts {
+        push_f32s(&mut d, v);
+    }
+    d.extend_from_slice(&1u32.to_le_bytes()); // heights
+    push_f32s(&mut d, &[0.15]);
+    d.extend_from_slice(&2u32.to_le_bytes()); // textures (count + 1)
+    push_lp(&mut d, "test_road");
+    d.extend_from_slice(&2u32.to_le_bytes()); // nRooms
+    d.extend_from_slice(&0u32.to_le_bytes()); // junctions
+    let mut attr_words: Vec<u16> = Vec::new();
+    attr_words.push(0x0a << 3); // texture ref → textures[0]
+    attr_words.push(1);
+    attr_words.push(0x00); // counted road, 2 sections × 4 refs
+    attr_words.extend_from_slice(&[2, 0, 1, 2, 3, 7, 6, 5, 4]);
+    let mut room = Vec::new();
+    room.extend_from_slice(&8u32.to_le_bytes()); // nPerimeter
+    room.extend_from_slice(&(attr_words.len() as u32).to_le_bytes());
+    for v in 0u16..8 {
+        room.extend_from_slice(&v.to_le_bytes());
+        room.extend_from_slice(&0u16.to_le_bytes()); // no neighbours
+    }
+    for w in &attr_words {
+        room.extend_from_slice(&w.to_le_bytes());
+    }
+    d.extend_from_slice(&room);
+    d.extend_from_slice(&[0u8; 2]); // room flags
+    d.extend_from_slice(&[0u8, 1]); // prop rules: room 1 → n01
+    push_f32s(&mut d, &[0., 0., 0.]);
+    push_f32s(&mut d, &[30., 1., 20.]);
+    push_f32s(&mut d, &[15., 0., 10.]);
+    push_f32s(&mut d, &[25.]);
+    // One prop path: curb pairs (v1,v2) entry / (v5,v6) exit, room 1.
+    d.extend_from_slice(&1u32.to_le_bytes()); // nPaths
+    d.extend_from_slice(&0u16.to_le_bytes()); // unknown4
+    d.extend_from_slice(&0u16.to_le_bytes()); // unknown5
+    d.push(0); // n_f
+    d.push(0); // n_b
+    d.extend_from_slice(&0u16.to_le_bytes()); // unknown6
+    for v in [1u16, 2, 0, 0] {
+        d.extend_from_slice(&v.to_le_bytes());
+    }
+    for v in [5u16, 6, 0, 0] {
+        d.extend_from_slice(&v.to_le_bytes());
+    }
+    d.push(1); // n_rooms
+    d.extend_from_slice(&1u16.to_le_bytes()); // room 1
+    d
+}
+
 /// PKG3 with one tetrahedron geometry chunk (`testprop_h`), no shaders.
 fn synthetic_pkg() -> Vec<u8> {
     // Geometry payload.
@@ -273,6 +340,80 @@ fn vfs_to_city_spawns_meshes_colliders_and_props() {
             .iter()
             .any(|(_, m)| m.base_color_texture.is_some())
     );
+}
+
+/// The prop-rule channel end to end: `prop_rule` byte →
+/// `proprules.csv` rows → `propdefs.csv` spacing → stamped props,
+/// all through the real `load_city` path and the VFS.
+#[test]
+fn vfs_to_city_stamps_prop_rule_props() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("city/test")).unwrap();
+    std::fs::create_dir_all(root.join("geometry")).unwrap();
+    std::fs::create_dir_all(root.join("texture")).unwrap();
+    std::fs::write(root.join("city/test.psdl"), proprule_psdl()).unwrap();
+    std::fs::write(root.join("geometry/testprop.pkg"), synthetic_pkg()).unwrap();
+    std::fs::write(
+        root.join("city/test/propdefs.csv"),
+        "name,start,distance,maxUse,minLerp,maxLerp,file1,file2,file3,file4\n\
+         meter,5,10,99,0.5,0.5,testprop\n\
+         lamp,2,6,2,0.5,0.5,testprop\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("city/test/proprules.csv"),
+        "rulename,prop1,prop2,prop3,prop4,prop5,prop6,prop7,prop8\n\
+         n01left,meter\n\
+         n01right,lamp\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("texture/test_road.png"),
+        include_bytes!("../../../assets/texture/dev_road.png"),
+    )
+    .unwrap();
+
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(root, 0).unwrap();
+
+    let mut world = World::new();
+    let mut queue = CommandQueue::default();
+    let mut meshes: Assets<Mesh> = Assets::default();
+    let mut images: Assets<Image> = Assets::default();
+    let mut materials: Assets<StandardMaterial> = Assets::default();
+
+    let loaded = {
+        let mut commands = Commands::new(&mut queue, &world);
+        let mut session = mm2_game::Session::new();
+        load_city(
+            &mut commands,
+            &vfs,
+            "city/test.psdl",
+            &mut meshes,
+            &mut images,
+            &mut materials,
+            SessionEntity(1),
+            &mut session,
+        )
+        .expect("city loads")
+    };
+    queue.apply(&mut world);
+
+    // lamp on the right side (start 2, dist 6, maxUse 2 → s = 2, 8);
+    // meter on the left walked exit→entry (start 5, dist 10 → 5 m and
+    // 15 m back from z = 20) — four stamps, all unbound static props.
+    assert_eq!(loaded.report.proprule_rooms, 1);
+    assert_eq!(loaded.report.proprule_stamps, 4);
+    assert_eq!(loaded.report.proprule_bangers, 0);
+    assert_eq!(loaded.report.proprule_unresolved, 0);
+    assert_eq!(loaded.report.proprule_issues, 0);
+    let stamped = world
+        .query::<&bevy::prelude::Name>()
+        .iter(&world)
+        .filter(|n| n.as_str().starts_with("proprule-"))
+        .count();
+    assert_eq!(stamped, 8, "4 render parts + 4 colliders");
 }
 
 #[test]

@@ -34,10 +34,13 @@ use mm2_formats::{
     inst::{self, InstPlacement},
     pathset::{self, PathKind},
     pkg::{Pkg, PkgStrip},
+    proprules::{self, PropRuleSide},
     psdl::{AttributeType, Psdl, RoomAttribute},
     tex::TexFile,
 };
-use mm2_game::{Banger, BangerDefinition, CityEntity, Session, SessionEntity};
+use mm2_game::{
+    Banger, BangerDefinition, CityEntity, PropWalk, Session, SessionEntity, walk_prop_rules,
+};
 use tracing::{debug, info, warn};
 
 use crate::banger::{BangerDefs, BangerPieces, FragmentPiece, banger_bundle};
@@ -531,6 +534,21 @@ pub struct CityReport {
     pub pathset_pieces: usize,
     /// Prop names whose bound banger record failed to decode.
     pub pathset_banger_failed: usize,
+    /// Rooms stamped by the PSDL prop-rule walk (F03-B.3).
+    pub proprule_rooms: usize,
+    /// Prop-rule placements spawned.
+    pub proprule_stamps: usize,
+    /// Prop-rule stamps that spawned as dormant banger entities.
+    pub proprule_bangers: usize,
+    /// Collidable `BREAK<NN>` pieces the prop-rule bangers carry.
+    pub proprule_pieces: usize,
+    /// Prop-rule stamps whose PKG resolved to nothing in the VFS.
+    pub proprule_unresolved: usize,
+    /// Table diagnostics plus walk anomalies (`PropWalkStats::issues`,
+    /// unresolvable crossings, unreferenced rule bytes, …).
+    pub proprule_issues: usize,
+    /// Prop-rule prop names whose bound banger record failed to decode.
+    pub proprule_banger_failed: usize,
 }
 
 impl std::fmt::Display for CityReport {
@@ -551,7 +569,7 @@ impl std::fmt::Display for CityReport {
         }
         write!(
             f,
-            "; {} mesh groups, {} collider rooms, {} props ({} failed), {} pathset props ({} bangers, {} pieces, {} decal paths, {} failed, {} capped, {} issues, {} banger-decode-failed), {} missing textures",
+            "; {} mesh groups, {} collider rooms, {} props ({} failed), {} pathset props ({} bangers, {} pieces, {} decal paths, {} failed, {} capped, {} issues, {} banger-decode-failed)",
             self.mesh_groups,
             self.collider_rooms,
             self.props_spawned,
@@ -564,6 +582,17 @@ impl std::fmt::Display for CityReport {
             self.pathset_props_capped,
             self.pathset_issues,
             self.pathset_banger_failed,
+        )?;
+        write!(
+            f,
+            ", {} proprule props ({} rooms, {} bangers, {} pieces, {} unresolved, {} issues, {} banger-decode-failed), {} missing textures",
+            self.proprule_stamps,
+            self.proprule_rooms,
+            self.proprule_bangers,
+            self.proprule_pieces,
+            self.proprule_unresolved,
+            self.proprule_issues,
+            self.proprule_banger_failed,
             self.missing_textures.len(),
         )
     }
@@ -2654,6 +2683,42 @@ impl std::ops::AddAssign for PathsetStampReport {
     }
 }
 
+/// Resolve one stamped prop name to its bound `tune/banger` record
+/// and its authored `BREAK<NN>` pieces — shared by pathset and
+/// prop-rule stamping so both placement channels classify identical
+/// names identically (F04-A/F04-B). A bound prop's pieces resolve
+/// their own `<name>_break<NN>` records when authored and fall back
+/// to the parent def otherwise.
+fn resolve_prop(
+    bangers: &mut BangerDefs,
+    name: &str,
+    model: &PropModel,
+) -> (Option<BangerDefinition>, Vec<FragmentPiece>) {
+    let bound = bangers.get(name).cloned();
+    let pieces: Vec<FragmentPiece> = match &bound {
+        Some(def) => model
+            .fragments
+            .iter()
+            .map(|f| {
+                let stem = format!("{name}_break{}", f.index);
+                let fdef = bangers.get(&stem).cloned().unwrap_or_else(|| {
+                    let mut d = def.clone();
+                    d.name = stem;
+                    d
+                });
+                FragmentPiece {
+                    index: f.index.clone(),
+                    def: fdef,
+                    parts: f.parts.clone(),
+                    collider: f.collider.clone(),
+                }
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    (bound, pieces)
+}
+
 /// Stamp every prop path of a parsed pathset through `cache` (F03-B):
 /// each stamped transform becomes a [`spawn_prop`] placement owned by
 /// the session — or a [`spawn_banger_prop`] entity when `bangers`
@@ -2723,31 +2788,7 @@ fn stamp_pathset(
         // A bound name with collision stamps as a dormant banger
         // entity; unbound names (or bound props with no collider —
         // they can never be struck) stay ordinary static props.
-        let bound = bangers.get(name).cloned();
-        // A bound prop's `BREAK<NN>` chunks become its break pieces:
-        // each resolves its own `<name>_break<NN>` record when authored
-        // and falls back to the parent def otherwise.
-        let pieces: Vec<FragmentPiece> = match &bound {
-            Some(def) => model
-                .fragments
-                .iter()
-                .map(|f| {
-                    let stem = format!("{name}_break{}", f.index);
-                    let fdef = bangers.get(&stem).cloned().unwrap_or_else(|| {
-                        let mut d = def.clone();
-                        d.name = stem;
-                        d
-                    });
-                    FragmentPiece {
-                        index: f.index.clone(),
-                        def: fdef,
-                        parts: f.parts.clone(),
-                        collider: f.collider.clone(),
-                    }
-                })
-                .collect(),
-            None => Vec::new(),
-        };
+        let (bound, pieces) = resolve_prop(bangers, name, model);
         for (ii, mat4) in stamped.transforms.iter().enumerate() {
             let pname = format!("{name_prefix}-{name}-{pi}-{ii}");
             match (&bound, &model.collider) {
@@ -2775,6 +2816,72 @@ fn stamp_pathset(
             }
             report.spawned += 1;
         }
+    }
+    report.banger_failed = bangers.failed - banger_failed_before;
+    report
+}
+
+/// What the prop-rule walk's stamps produced (F03-B.3).
+#[derive(Debug, Default)]
+pub struct PropRuleStampReport {
+    /// Prop placements spawned.
+    pub spawned: usize,
+    /// Stamps spawned as dormant banger entities (bound names with
+    /// collision — F04-A/WLD-16 through the second verified channel).
+    pub bangers: usize,
+    /// Collidable `BREAK<NN>` pieces the stamped bangers carry.
+    pub pieces: usize,
+    /// Stamps whose `file1`–`file4` variant resolved to no
+    /// `geometry/*.pkg` — counted, not silently dropped.
+    pub unresolved: usize,
+    /// Bound names whose record failed to decode.
+    pub banger_failed: usize,
+}
+
+/// Spawn a [`PropWalk`]'s stamps (F03-B.3): each stamp becomes a
+/// session-owned placement through the same bound/unbound
+/// classification as [`stamp_pathset`] — a name that binds a
+/// `tune/banger` record and carries collision becomes a dormant
+/// banger entity, anything else an ordinary static prop. Stamps are
+/// yawed so the prop's +X axis follows the side's walk direction,
+/// matching the directed-pathset convention.
+fn stamp_prop_rules(
+    commands: &mut Commands,
+    cache: &mut PropCache,
+    bangers: &mut BangerDefs,
+    session: &mut Session,
+    walk: &PropWalk,
+    owner: SessionEntity,
+) -> PropRuleStampReport {
+    let mut report = PropRuleStampReport::default();
+    let banger_failed_before = bangers.failed;
+    for stamp in &walk.stamps {
+        let Some(model) = cache.get(&stamp.pkg) else {
+            report.unresolved += 1;
+            continue;
+        };
+        let (bound, pieces) = resolve_prop(bangers, &stamp.pkg, model);
+        let side = match stamp.side {
+            PropRuleSide::Left => 'L',
+            PropRuleSide::Right => 'R',
+        };
+        let pname = format!(
+            "proprule-{}-r{}{}-{}",
+            stamp.def, stamp.room, side, stamp.index
+        );
+        let transform =
+            Transform::from_matrix(yawed_transform(stamp.position, Vec3::from(stamp.forward)));
+        match (&bound, &model.collider) {
+            (Some(def), Some(_)) => {
+                report.pieces += pieces.iter().filter(|p| p.collider.is_some()).count();
+                spawn_banger_prop(
+                    commands, model, transform, owner, &pname, def, session, pieces,
+                );
+                report.bangers += 1;
+            }
+            _ => spawn_prop(commands, model, transform, owner, &pname),
+        }
+        report.spawned += 1;
     }
     report.banger_failed = bangers.failed - banger_failed_before;
     report
@@ -3073,6 +3180,73 @@ pub fn load_city(
         },
         Err(_) => {
             debug!(path = %pathset_path, "no props.pathset; skipping stamped props");
+        }
+    }
+
+    // PSDL prop-rule stamping (F03-B.3): each room's `prop_rule` byte
+    // selects the `n{NN}left`/`n{NN}right` rows whose propdefs line
+    // the room's sidewalk edges between its path's crossings — the
+    // lamps, trees, meters and mailboxes on every street block. The
+    // walk's geometry is measured on the retail PSDLs; its placement
+    // policies (side walk direction, variant pick, lerp direction)
+    // are inferred — docs/research/proprules.md, UNK-21.
+    let defs_path = psdl_path.replace(".psdl", "/propdefs.csv");
+    let rules_path = psdl_path.replace(".psdl", "/proprules.csv");
+    match (vfs.read_path(&defs_path), vfs.read_path(&rules_path)) {
+        (Ok((defs_bytes, defs_res)), Ok((rules_bytes, rules_res))) => {
+            let defs_text = String::from_utf8_lossy(&defs_bytes);
+            let rules_text = String::from_utf8_lossy(&rules_bytes);
+            match (
+                proprules::PropDefs::parse(&defs_text),
+                proprules::PropRules::parse(&rules_text),
+            ) {
+                (Ok(defs), Ok(rules)) => {
+                    for d in defs.diagnostics.iter().chain(&rules.diagnostics) {
+                        warn!(path = %rules_res.logical, line = d.line, issue = %d.message, "prop-rule table issue");
+                        report.proprule_issues += 1;
+                    }
+                    let walk = walk_prop_rules(&psdl, &defs, &rules);
+                    for issue in &walk.stats.issues {
+                        warn!(path = %defs_res.logical, %issue, "prop-rule walk issue");
+                    }
+                    report.proprule_issues += walk.stats.issues.len();
+                    report.proprule_rooms += walk.stats.rooms_stamped;
+                    let mut bangers = BangerDefs::new(vfs);
+                    let stamped =
+                        stamp_prop_rules(commands, &mut cache, &mut bangers, session, &walk, owner);
+                    report.proprule_stamps += stamped.spawned;
+                    report.proprule_bangers += stamped.bangers;
+                    report.proprule_pieces += stamped.pieces;
+                    report.proprule_unresolved += stamped.unresolved;
+                    report.proprule_banger_failed += stamped.banger_failed;
+                    info!(
+                        path = %rules_res.logical,
+                        rooms = walk.stats.rooms_stamped,
+                        stamps = stamped.spawned,
+                        bangers = stamped.bangers,
+                        unresolved = stamped.unresolved,
+                        no_rule = walk.stats.rooms_no_rule,
+                        no_crossing = walk.stats.rooms_no_crossing,
+                        bad_refs = walk.stats.rooms_bad_ref,
+                        rules_missing = walk.stats.rules_missing,
+                        defs_missing = walk.stats.defs_missing,
+                        unreached = walk.stats.rule_rooms_unreached,
+                        capped = walk.stats.stamps_capped,
+                        "prop-rule props stamped"
+                    );
+                }
+                (defs_parsed, rules_parsed) => {
+                    warn!(
+                        path = %defs_res.logical,
+                        defs_err = %defs_parsed.err().map(|e| e.to_string()).unwrap_or_default(),
+                        rules_err = %rules_parsed.err().map(|e| e.to_string()).unwrap_or_default(),
+                        "prop-rule table parse failed; skipping stamped props"
+                    );
+                }
+            }
+        }
+        _ => {
+            debug!(path = %defs_path, "no prop-rule tables; skipping stamped props");
         }
     }
 

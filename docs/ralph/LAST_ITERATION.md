@@ -1,96 +1,108 @@
 # Last implementation iteration
 
-- Task ID and title: F04-C.2 — flat-ground retail break/fragment-settle
-  evidence, repeated-collision and pool-reclaim retail runs.
+- Task ID and title: F03-B.3 — prop-rule stamping channel
+  (PSDL `prop_rule` → `proprules.csv` → `propdefs.csv` → PKG/banger).
 - Starting commit and resulting commits: started at
-  `8907c54424656176424a237b10264d0cb61c98cb` (clean tree, branch
-  `ralph/night`; F04-C.1 passed external gates + review).
+  `405a671a808fab23300da589739f75d95861e48c` (clean tree, branch
+  `ralph/night`; F04-C.2 passed external gates + review).
+- Why this slice: highest-value ready item on the plan — the second
+  verified banger placement channel, blocked on UNK-21. Public sources
+  (mm2hook, Open1560) only stub the prop-rule walk, so the semantics
+  were recovered by measuring retail PSDL geometry with a temporary
+  probe, then implemented as an inferred policy with the verified
+  parts promoted to WLD-17. The probe was removed before commit.
 - What landed (code):
-  - `DevOverrides::banger_pool` + `--banger-pool <n>` — quarantined dev
-    bound on simultaneously active bangers, applied session-scoped in
-    `load_session_world` (re-stamped every generation, like `--spawn`).
-  - Smoke record: `bng_pool=<n>` emitted when the bound is overridden;
-    `bng_rec=<n>` counts `BangerStateChanged` transitions whose cause is
-    `Reclaimed` — a pool settle is otherwise indistinguishable from an
-    Avian-sleep settle in `bng_ev=`. Default records are bit-identical
-    (both fields only appear when meaningful).
-  - Test `dev_banger_pool_override_bounds_the_active_pool`: the override
-    lands on the session resource through the real load path; an
-    unconfigured session keeps the recovered ×32.
+  - `mm2_game::props` — pure `walk_prop_rules` over PSDL rooms/paths
+    + rule tables. Per `RoomPath`: resolve `road_rooms` (non-room
+    encoded values counted as bad refs), find the entry/exit
+    crossings — `start/end_crossroads` curb pairs at path ends,
+    widest neighbour-marked perimeter pair at interior room-to-road
+    boundaries — then walk the two arcs between them as the sidewalk
+    building lines. Side labels measured against travel direction;
+    each side walked with the road on the walker's left;
+    `start`/`distance`/`maxUse` scoped per def per side per room;
+    placement = `lerp(curb, outer, (minLerp+maxLerp)/2)`; variant by
+    deterministic hash; `PropStamp` carries room/side/def/variant/
+    position/direction/ordinal. Output bounded at
+    `MAX_PROP_RULE_STAMPS`; `PropWalkStats` + issue strings count
+    no-rule rooms, missing rules/defs, bad refs, missing crossings,
+    unreached rule rooms and cap hits — nothing dropped silently.
+  - `mm2_app::city` — `stamp_prop_rules` resolves each stamp's PKG
+    through the shared `PropCache`: bound names → `spawn_banger_prop`
+    dormant bangers (identical to pathset stamps), unbound →
+    `spawn_prop` statics; `CityReport` gains `proprule_*` counters
+    and Display fields; walk issues logged with the sibling CSV path.
+  - `decode_tex` clamps declared mip count to the size-supported
+    maximum (`p_parkmeter_f.tex` declares 7 mips on 32×32 — a hard
+    wgpu validation error once prop-rule props pulled the texture;
+    now warned + clamped).
+  - Tests: 4 `mm2_game::props` unit tests on a synthetic PSDL
+    (single/multi-room sides + labels, start/distance/maxUse
+    bounds, bad refs/undefined byte/unreached counting,
+    interior-boundary marks) + one app test through `load_city` on
+    a synthetic install (rule-bearing room → stamped prop entity +
+    report counts).
 - Retail evidence gathered (install
   `/Users/linus/coding/rust-mm2/retail`, fnv1a64:e91e6cd4b2ae30d9,
-  headless `hold` driver via `target/debug/mm2`):
-  - Flat-ground break + fragment settle (SF):
-    `--city sf --car vpddbus --spawn=-170,1.5,-565,30 --headless`
-    strikes the `sp_barricadewood_f` row (limit 51888, NumParts 4)
-    stamped diagonally across the y≈0 lot at (−177…−188, −578…−601).
-    `--frames 1200` → `bng=924d/3a/1s/1b bng_ev=0a/1s/1b`;
-    `--frames 2500` → `2a/2s` (`impacts=104`);
-    `--frames 5000` → `1a/3s` (`impacts=105`). Fragments reach Avian
-    sleep one by one on flat ground — answers F04-C.1's open
-    slope-settle observation: the settle path works on real fragments;
-    sloped ground keeps them tumbling.
-  - Repeated collisions within budget (same run): 104–105 deduplicated
-    impacts of continued pen battering, all poses finite, dormant count
-    stable — no duplicate bodies, no extra transitions (later hits are
-    below the 51 888 limit or land on already-broken pieces).
-  - Pool bound enforced (dev-bound runs, same spawn):
-    `--banger-pool 2 --frames 1200` → `bng=924d/2a/0s/1b bng_pool=2`
-    (2 of the authored 4 fragments spawn, the rest skipped at the cap);
-    `--banger-pool 1` → `bng=924d/1a/0s/1b bng_pool=1`.
-  - Repeated activations + pool reclaim (London):
-    `--city london --car vpbug --spawn=802,6,-905,180 --headless
-    --frames 800` drives ~50 m through the `sp_bollard_stone_l` ring
-    stamped around the plaza at (786…827, −814…−857). Default bound →
-    `bng=1185d/3a/0s/0b bng_ev=3a/0s/0b` (three distinct activations on
-    successive ticks). `--banger-pool 2` → `bng_ev=3a/3s/0b
-    bng_pool=2 bng_rec=1` — the third hit reclaimed the oldest active.
-    `--banger-pool 1` → `bng_rec=2`. Re-ran bit-identical.
-  - Hull-clearance corollary: `vpddbus` (~4 915 kg) drives clean over
-    `sp_cone_f` clusters (zero contacts where `vpbug` activates) —
-    striker choice must match prop height to hull floor; the fidelity
-    question stays open.
+  `target/debug/mm2`):
+  - `--city sf --headless` → `prop-rule props stamped rooms=345
+    stamps=5002 bangers=5002 unresolved=0 no_crossing=0 bad_refs=109
+    unreached=52 capped=0`.
+  - `--city london --headless` → `rooms=410 stamps=5083 bangers=5083
+    unresolved=0 no_crossing=0 bad_refs=0 unreached=5`.
+  - `bad_refs` = encoded non-room `road_rooms` values (65 0xx range)
+    on sf only; `unreached` = rule-bearing rooms no path traverses —
+    both counted, not hidden.
+  - Every prop-rule PKG resolves to a bound banger record on retail
+    (consistent with WLD-16), so all stamps are dormant bangers.
+  - Screenshots (local only): `/tmp/proprule_sf.png` — lamps line
+    both sidewalks at authored ~29 m staggered spacing, banner arms
+    over the road; `/tmp/proprule_sf2.png` — multi-room freeway
+    parapet lamps (interior boundaries work);
+    `/tmp/proprule_london2.png` — plaza phone booths, trees,
+    bollards at curb edges.
 - What this proves / does not prove:
-  - Proves: fragment settling on real flat-ground placements
-    (Active→Settled via Avian sleep); repeated collisions stay within
-    the configured bound with finite transforms on retail; the pool cap
-    is enforced on real placements; pool reclaim (oldest-first
-    `Reclaimed` settle) fires on real placements under a configured
-    bound.
-  - Does not prove: reclaim at the natural ×32 cap — no surveyed retail
-    site produces >32 simultaneous actives (breaks yield 2–5 pieces,
-    hits must land on separate ticks); recorded as an honest gap, the
-    dev bound exercises the same claim/reclaim path. Original
-    threshold/break-timing semantics stay UNK-22. No GPU/audio/network
-    evidence — all runs are headless physics through the VFS.
+  - Proves: the stamping *geometry* (WLD-17) — every rule-bearing
+    room reached by a sane path resolves its crossings on both cities
+    (`no_crossing=0`), multi-room interior boundaries resolve via
+    neighbour marks, and retail-visual sanity holds. The channel is
+    live end-to-end through `load_city` with honest counters.
+  - Does not prove: the original's field semantics — UNK-21 stays
+    open, narrowed to `start`/`distance`/`maxUse` scope (implemented
+    per room-side), the `file1`–`file4` pick (deterministic hash,
+    original seed unrecovered), `minLerp`/`maxLerp` meaning (midpoint
+    lerp implemented), the left/right label convention and prop yaw
+    axis, the 65 0xx `road_rooms` record kind, and the `props.csv`
+    `Races` consumer. No comparison against an original-executable
+    frame.
 - Commands actually run and results:
-  - Targeted test: `cargo test -p mm2_app --test session
-    dev_banger_pool` — pass.
-  - All retail probe runs above; screenshots `/tmp/sf_barr*.png`,
-    `/tmp/sf_fwy.png`, `/tmp/lon_r7*.png` (local only, not committed).
-  - Gates at the candidate commit: `cargo fmt --all -- --check` pass
-    (import-order fixes applied first); `cargo clippy --workspace
-    --all-targets --all-features -- -D warnings` pass, exit 0;
-    `cargo test --workspace` pass — 32 suites, 0 failures.
+  - `cargo test -p mm2_game --lib props::` — 4 pass; `cargo test -p
+    mm2_app --test import_pipeline` — pass.
+  - `mm2 --mm2-path <retail> --city {sf,london} --headless` — counts
+    above; screenshots above.
+  - Gates at the candidate commit: `cargo fmt --all -- --check`
+    pass; `cargo clippy --workspace --all-targets --all-features
+    -- -D warnings` pass, exit 0; `cargo test --workspace` pass —
+    all suites, 0 failures.
 - Acceptance IDs satisfied / still open:
-  - F04-AC04 (repeated collisions + budgets): now has retail evidence —
-    repeated hits within a configured bound, cap enforced, reclaim
-    observed. Natural-×32 reclaim remains a stated gap; AC stays open
-    pending review.
-  - F04-AC02: retail support — three sequential activations with no
-    duplicate bodies; synthetic dedup coverage unchanged. Open.
-  - F04-AC01/AC03/AC05: unchanged from F04-C.1 evidence. AC06 open
-    (awaits F26).
-- Deferred deliberately: `BirthRule` particles, `AudioId`/`Flash`/
-  `TexNumber` effects, decals, prop-rule stamping (UNK-21), `Timer`
-  despawn, replication (F26), GPU capture of a break, hull-vs-low-prop
-  fidelity review, natural-pool reclaim staging.
-- Stock data/GPU/audio/network limitations: all evidence is headless
-  physics through the VFS on the real install (read-only).
+  - F03-AC01/AC02 (all placement sources instantiated): the third
+    verified ambient source now stamps; `props.csv` `Races` group +
+    decal pathsets remain unconsumed. Open.
+  - F04 (bangers): the prop-rule channel leg of the parent note is
+    now covered — 5 002/5 083 retail placements bind as dormant
+    bangers through the same path as pathset stamps. UNK-22
+    thresholds unchanged. Open.
+- Deferred deliberately: decal stamping research, `props.csv` group
+  consumers, original variant-pick/lerp semantics (UNK-21),
+  hull-clearance fidelity, `BirthRule`/audio/flash/decal banger
+  effects, `Timer` despawn, replication (F26).
+- Stock data/GPU/audio/network limitations: retail evidence is
+  headless loads + local screenshots through the VFS; no
+  original-executable comparison exists.
 - Unresolved blockers or discovered regressions: none known.
-- Next smallest useful action: prop-rule stamping research (UNK-21 —
-  the second verified banger channel), decal stamping research, the
-  hull-clearance fidelity question, F13-A or F09-C.
+- Next smallest useful action: decal stamping research (same
+  measure-first approach), the hull-clearance fidelity question,
+  F13-A or F09-C.
 
 This is a candidate handoff. External code-gate and separate review
 results live in the runner state directory and are not implied by

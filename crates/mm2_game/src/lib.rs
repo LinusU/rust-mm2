@@ -14,6 +14,7 @@ pub mod config;
 pub mod ids;
 pub mod impact;
 pub mod nav;
+pub mod props;
 pub mod race;
 pub mod result;
 pub mod session;
@@ -36,6 +37,7 @@ pub use nav::{
     NavGraph, NavIntersection, NavIssue, NavLane, NavOverrides, NavRng, NavRoad, NavStats, Route,
     RouteCursor, RouteError, RouteOptions, TravelDir, TurnKind,
 };
+pub use props::{MAX_PROP_RULE_STAMPS, PropStamp, PropWalk, PropWalkStats, walk_prop_rules};
 pub use race::{
     Checkpoint, CheckpointRule, DEFAULT_CHECKPOINT_HEIGHT, DEFAULT_COUNTDOWN_TICKS, EventParams,
     NavTarget, ParticipantState, ProgressOutcome, RACE_TICK_HZ, RaceDefinition, RaceError,
