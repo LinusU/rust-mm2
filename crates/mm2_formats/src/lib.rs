@@ -14,6 +14,7 @@ pub mod info;
 pub mod inst;
 pub mod mtx;
 pub mod opp;
+pub mod pathset;
 pub mod pkg;
 pub mod psdl;
 pub mod racedata;

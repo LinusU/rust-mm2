@@ -13,6 +13,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use mm2_assets::{AssetsError, InstallMount, MountReport, Vfs, mount_install, mount_mods};
 use mm2_formats::bai::Bai;
+use mm2_formats::pathset::Pathset;
 use mm2_formats::pkg::{Pkg, PkgChunk};
 use mm2_formats::psdl::Psdl;
 use mm2_formats::tex::TexFile;
@@ -233,6 +234,24 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Audit prop/decal placement pathsets (`*.pathset`, binary PTH1):
+    /// parse every discovered file, validate authored consistency, and
+    /// resolve each path's asset name against `geometry/` and
+    /// `texture/`.
+    Pathset {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Restrict to one city stem: `city/<stem>/` and
+        /// `race/<stem>/` files only (unaffiliated top-level files like
+        /// `city/phys/` and `city/race0.pathset` belong to the full
+        /// audit).
+        #[arg(long)]
+        city: Option<String>,
+        /// Exit nonzero when any discovered file fails to parse or any
+        /// issue is reported.
+        #[arg(long)]
+        strict: bool,
+    },
     /// Versioned content inventory: expected/discovered/accepted/
     /// rejected/unverified counts per content family, fingerprinted by
     /// engine commit and resolved-path provenance.
@@ -322,6 +341,9 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             *turns,
             *strict,
         ),
+        Command::Pathset { dir, city, strict } => {
+            pathset(dir, cli.mods.as_deref(), city.as_deref(), *strict)
+        }
         Command::Inventory { dir, json, strict } => {
             inventory_cmd(dir, cli.mods.as_deref(), *json, *strict)
         }
@@ -434,6 +456,10 @@ fn scan(dir: &Path, mods: Option<&Path>, strict: bool) -> Result<(), Box<dyn std
                 Err(e) => stats.failures.push((logical.clone(), e.to_string())),
             },
             "bai" => match Bai::parse(&bytes) {
+                Ok(_) => stats.parsed_ok += 1,
+                Err(e) => stats.failures.push((logical.clone(), e.to_string())),
+            },
+            "pathset" => match Pathset::parse(&bytes) {
                 Ok(_) => stats.parsed_ok += 1,
                 Err(e) => stats.failures.push((logical.clone(), e.to_string())),
             },
@@ -1440,6 +1466,141 @@ fn bai_road_ids<'a>(
         cache.insert(city.to_string(), ids);
     }
     cache.get(city).and_then(|o| o.as_ref())
+}
+
+/// Whether a pathset path name resolves to a placeable asset:
+/// `geometry/<name>.pkg` (props) or `texture/<name>.*` (decals).
+/// Event-state decorations (`OPEN:`, `inactive:` — see
+/// `docs/research/pathset.md`) are stripped for the lookup; the raw
+/// name is tried first.
+fn pathset_name_resolves(vfs: &Vfs, name: &str) -> bool {
+    let tail = name.rsplit(':').next().unwrap_or(name);
+    for cand in std::iter::once(name).chain((tail != name).then_some(tail)) {
+        if vfs.resolve(&format!("geometry/{cand}.pkg")).is_some() {
+            return true;
+        }
+        if TEXTURE_EXTS
+            .iter()
+            .any(|ext| vfs.resolve(&format!("texture/{cand}.{ext}")).is_some())
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// `PATHnn` names are internal route labels (ambient-sound paths,
+/// parked-car/ferry/train routes), not asset references.
+fn pathset_name_is_label(name: &str) -> bool {
+    name.len() > 4 && name.starts_with("PATH") && name[4..].chars().all(|c| c.is_ascii_digit())
+}
+
+/// Placement-pathset audit (F03-A): the expected denominator is every
+/// discovered `*.pathset` — city prop/decal sets, `audio_pathsets/`
+/// sound paths, `city/phys/` test sets, `bak/` snapshots and per-event
+/// `race/<city>/` records are all authored content, so a parse failure
+/// anywhere is a real failure (three truncated london files prove the
+/// point). Parsed files get `Pathset::validate` issues plus a name
+/// cross-check: non-`PATHnn` names must resolve to a PKG or texture.
+/// `--city` restricts to `city/<stem>/` + `race/<stem>/`; `--strict`
+/// exits nonzero on any failure or issue.
+fn pathset(
+    dir: &Path,
+    mods: Option<&Path>,
+    city: Option<&str>,
+    strict: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let vfs = build_vfs(dir, mods)?;
+    let stem = city.map(|c| c.to_ascii_lowercase());
+    let mut logicals: Vec<String> = vfs
+        .list()
+        .into_iter()
+        .filter(|p| p.ends_with(".pathset"))
+        .filter(|p| {
+            stem.as_ref().is_none_or(|c| {
+                p.starts_with(&format!("city/{c}/")) || p.starts_with(&format!("race/{c}/"))
+            })
+        })
+        .collect();
+    logicals.sort();
+    if logicals.is_empty() {
+        return Err("pathset audit: no .pathset files discovered".into());
+    }
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut issues_total = 0usize;
+    let mut parsed = 0usize;
+
+    println!("== placement pathsets (PTH1) ==");
+    for logical in &logicals {
+        let res = vfs.resolve(logical).expect("listed path resolves");
+        let bytes = vfs.read(&res)?;
+        let ps = match Pathset::parse(&bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                println!("  {logical:<52} failed: {e}");
+                failures.push(format!("{logical}: {e}"));
+                continue;
+            }
+        };
+        parsed += 1;
+        let mut file_issues: Vec<String> = ps.validate().iter().map(|i| i.to_string()).collect();
+
+        let points: usize = ps.paths.iter().map(|p| p.points.len()).sum();
+        let mut kinds = [0usize; 3];
+        let mut unknown_kinds = 0usize;
+        for p in &ps.paths {
+            match p.kind() {
+                Some(mm2_formats::pathset::PathKind::Points) => kinds[0] += 1,
+                Some(mm2_formats::pathset::PathKind::Directed) => kinds[1] += 1,
+                Some(mm2_formats::pathset::PathKind::LineStrip) => kinds[2] += 1,
+                None => unknown_kinds += 1,
+            }
+        }
+
+        let mut checked = std::collections::BTreeSet::new();
+        for name in ps.paths.iter().map(|p| p.name.as_str()) {
+            if pathset_name_is_label(name) || !checked.insert(name) {
+                continue;
+            }
+            if !pathset_name_resolves(&vfs, name) {
+                file_issues.push(format!(
+                    "path \"{name}\": resolves to no geometry/<n>.pkg or texture/<n>.*"
+                ));
+            }
+        }
+
+        issues_total += file_issues.len();
+        println!(
+            "  {logical:<52} ok — {} paths, {} points, kinds pts:{} dir:{} strip:{}{}",
+            ps.paths.len(),
+            points,
+            kinds[0],
+            kinds[1],
+            kinds[2],
+            if unknown_kinds > 0 {
+                format!(" unknown:{unknown_kinds}")
+            } else {
+                String::new()
+            },
+        );
+        for issue in &file_issues {
+            println!("    issue: {issue}");
+        }
+    }
+    println!(
+        "  {parsed}/{} parsed, {} failures, {issues_total} issue(s)",
+        logicals.len(),
+        failures.len(),
+    );
+    if strict && (issues_total > 0 || !failures.is_empty()) {
+        return Err(format!(
+            "strict pathset audit: {} failures, {issues_total} issues",
+            failures.len()
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Paint-variant validation: every shader offset referenced by any mesh

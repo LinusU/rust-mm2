@@ -111,8 +111,8 @@ Measured on `city/sf.bai` and `city/london.bai` (2026-09-21):
   carries that `ccw_delta` and classifies turns geometrically
   (heading change). `mm2-inspect nav --turns` reconciles the two on
   retail (2026-09-20): at 4-ways Δccw=1→right / Δccw=2→straight /
-  Δccw=3→left holds for 471/486 London exits (96.9%) and 963/968 SF
-  exits (99.5%) — the index scheme and measured geometry agree, so
+  Δccw=3→left holds for 471/492 London exits (95.7%) and 963/971 SF
+  exits (99.2%) — the index scheme and measured geometry agree, so
   the documented convention is consistent with the authored data.
   Other arities show no clean mapping (3-way deltas mix all three
   kinds), matching the note that the scheme is only documented for
