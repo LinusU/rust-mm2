@@ -41,18 +41,26 @@ Choose the highest-value ready small slice; repair current regressions before un
 **Next selected slice: F04-C.2 (flat-ground fragment settle +
 repeated-collision/pool-reclaim retail runs), prop-rule stamping
 research (UNK-21 — the second verified banger channel), decal
-stamping (same research-first caveat), F13-A or F09-C** — this
-iteration landed F04-C.1: original-content banger strike evidence.
-New dev tooling: `--spawn x,y,z[,yaw]` (quarantined
-`DevOverrides::spawn`, applied after world/event spawn selection)
-and `bng_ev=` emitted-transition counters in the headless record.
-Retail: a London `sp_bollard_black_l` activated and settled on a
-real impact (`bng_ev=1a/1s/0b`); an SF `sp_wrongwayfw` freeway sign
-went `Broken` into exactly its authored 3 BREAK fragments
-(`bng=924d/3a/0s/1b bng_ev=0a/0s/1b`); a ~3 m/s graze of the same
-prop produced nothing — AC01's both sides on real content. AC05
-restart coverage moved to session level: a synthetic-city break +
-`SessionControl.restart` restamps the dormant placement, removes
+stamping (same research-first caveat), F13-A or F09-C** — iteration
+33 repaired F04-C.1's evidence record: the first recorded London
+activation command was not reproducible (spawn dead-ended before the
+prop, and a 1000 kg vpbug could never reach the required speed
+there). Corrected, re-run evidence: `vpbug --spawn 0.4,5.5,-720,0`
+and `--spawn 112.3,5.5,-745,0` each activate + settle an authored
+`sp_bollard_black_l` row on flat London roads (deterministic
+`bng_ev=1a/1s/0b`); an SF `sp_cone_f` also activates but does not
+settle on the slopes. New finding documented in banger.md: the
+vehicle hull's raised underside + raycast wheels let tall vehicles
+pass over kerb-height props untouched — targeting must match prop
+height to hull floor. F04-C.1's earlier landing added dev tooling:
+`--spawn x,y,z[,yaw]` (quarantined `DevOverrides::spawn`, applied
+after world/event spawn selection) and `bng_ev=` emitted-transition
+counters in the headless record. Retail: an SF `sp_wrongwayfw`
+freeway sign went `Broken` into exactly its authored 3 BREAK
+fragments (`bng=924d/3a/0s/1b bng_ev=0a/0s/1b`); a ~3 m/s graze of
+the same prop produced nothing — AC01's both sides on real content.
+AC05 restart coverage moved to session level: a synthetic-city break
++ `SessionControl.restart` restamps the dormant placement, removes
 husk + fragments, no generation leaks. Observation: sign fragments
 stayed `Active` 3000 ticks on the sloped freeway — plausible
 slope-tumbling, not proven a defect. UNK-22 (break timing/threshold
@@ -133,7 +141,7 @@ checked.
 | F04-B | implemented | F04-A | Split: B.1 (BREAK<NN> fragment spawning on activation — implemented below). Fragment timing vs a later break threshold, `NumParts` runtime role, `BirthRule`/audio/flash/decal effects and original-content activation remain open (UNK-22); parent stays non-checked until F04-C + AC evidence land. |
 | F04-B.1 | implemented | F04-A.3 | `BangerPhase::Broken`; `pkg_to_parts` splits `BREAK<NN>` chunks into `FragmentModel`s (authored file order); `stamp_pathset` stamps `BangerPieces` (each piece resolves `tune/banger/<name>_break<NN>`, parent-def fallback). `break_banger` on a qualifying edge: parent → `Broken` (collider + mesh children removed, one `BangerStateChanged`, never also `Active`), one dynamic fragment body per collidable piece — own `ObjectId`, session-owned, convex collider, impact velocity + CG-lever spin, pool-bounded via `claim_slot` (pending same-tick spawns counted; `max_active = 0` spawns nothing). Pieces without colliders → ordinary activation. Fragments spawn `Active` and settle through `settle_bangers`. 4 new integration tests (shatter/pool-bound/no-collider-fallback/stamp pieces) + teardown coverage; retail sf `bng=925d/0a/0s/0b` pieces=3092, london 1188/2710, overlay barricades 0 pieces (authored). DSN-10 + UNK-22 updated. F04-A.3 review nits fixed (INST-doc wording, zero-cap). Deferred: `BirthRule` particles, audio/flash/decal effects, prop-rule channel, Timer despawn, replication, original-content activation. AC01–AC06 stay open. Candidate pending external check. |
 | F04-C | implemented | F04-B | Split: C.1 (original-content strike evidence + dev spawn/tooling — implemented below). Remaining legs: C.2 fragment settle on flat ground + repeated-collision/pool-reclaim on retail; break timing vs a separate original break threshold and `NumParts` runtime role stay UNK-22; parent stays non-checked. |
-| F04-C.1 | implemented | F04-B.1 | `DevOverrides::spawn` + `--spawn x,y,z[,yaw]` (quarantined dev pose applied after world/event spawn selection); `bng_ev=<a>a/<s>s/<b>b` emitted-transition counters in the headless smoke record (distinct from `bng=` end-state buckets; fragment spawns are silent by contract). New tests: `dev_spawn_override_pins_the_player_pose`; `restart_restores_stamped_placements_after_a_break` — synthetic city, real `load_session_world` + `drive_session` restart, husk+fragments removed, dormant restamp under gen-2, zero generation leaks. Retail evidence: London `sp_bollard_black_l` activation+settle (`bng_ev=1a/1s/0b`); SF `sp_wrongwayfw` break into its authored 3 fragments (`bng_ev=0a/0s/1b`, `bng=924d/3a/0s/1b`); below-threshold graze → no transition (AC01 both sides, real content); `circuit:7` overlay stamps 899 bangers incl. `sp_sawhrslt_f` walls. Gap: fragments stayed Active on sloped freeway (slope-tumbling suspected, unproven); no GPU break capture; UNK-22 semantics unverified. Candidate pending external check. |
+| F04-C.1 | implemented | F04-B.1 | `DevOverrides::spawn` + `--spawn x,y,z[,yaw]` (quarantined dev pose applied after world/event spawn selection); `bng_ev=<a>a/<s>s/<b>b` emitted-transition counters in the headless smoke record (distinct from `bng=` end-state buckets; fragment spawns are silent by contract). New tests: `dev_spawn_override_pins_the_player_pose`; `restart_restores_stamped_placements_after_a_break` — synthetic city, real `load_session_world` + `drive_session` restart, husk+fragments removed, dormant restamp under gen-2, zero generation leaks. Retail evidence (iteration-33 correction — first recorded London command was irreproducible, retracted): `vpbug --spawn 0.4,5.5,-720,0` and `--spawn 112.3,5.5,-745,0` → deterministic `sp_bollard_black_l` activation+settle `bng_ev=1a/1s/0b` on flat London road rows (verified ×2, bit-identical); SF `sp_wrongwayfw` break into its authored 3 fragments (`bng_ev=0a/0s/1b`, `bng=924d/3a/0s/1b`); below-threshold graze + sub-threshold cone block → no transition (AC01 both sides, real content); SF `sp_cone_f` activates (`bng_ev=1a`) but does not settle on slopes; `circuit:7` overlay stamps 899 bangers incl. `sp_sawhrslt_f` walls. Gaps: fragments/knocked props stay `Active` on slopes (slope-tumbling suspected, unproven); hull underside clearance means tall vehicles cannot contact <~1 m props (raycast wheels) — open fidelity question; no GPU break capture; UNK-22 semantics unverified. Candidate pending external check. |
 | F05-A | queued | F01-B, F02-B | `.vehcardamage` readable via generic tune parser; no typed rules or runtime. |
 | F05-B | queued | F05-A | — |
 | F05-C | queued | F05-B | — |

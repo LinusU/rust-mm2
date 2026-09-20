@@ -288,15 +288,19 @@ verified original behaviour — every provisional point is still UNK-22.
 
 Headless `hold`-driver strikes on the retail install, targeted with
 `--spawn x,y,z[,yaw]` (dev pose) and read off the `bng=`/`bng_ev=`
-counters in the `smoke=headless-physics` record. BAI road
-centre-lines (`mm2-inspect dump city/<city>.bai`) were used to place
-the car on real streets near stamped placements.
+counters in the `smoke=headless-physics` record. Targets were chosen
+by expanding `props.pathset` stamps per `stamped_transforms` and
+cross-referencing BAI road centre-lines (`mm2-inspect dump
+city/<city>.bai`) for placements lying on a road.
 
-- **Activation + settle (London roam):** `vpbug` at
-  `--spawn 762,0.5,-424,0` struck a stamped `sp_bollard_black_l`
-  near (757, −425) on road494 → `bng=1187d/0a/1s/0b
-  bng_ev=1a/1s/0b`. One activation event, one settle, prop left
-  dormant count −1.
+- **Activation + settle (London roam, verified ×2):** `vpbug` at
+  `--spawn 0.4,5.5,-720,0 --frames 1500` drove road454 into the
+  `sp_bollard_black_l` row stamped across it at (−8.3…4.9, 5.0,
+  −742…−744) → `bng=1187d/0a/1s/0b bng_ev=1a/1s/0b`. Re-run
+  bit-identical. The sibling row across road467 gives the same
+  record: `--spawn 112.3,5.5,-745,0 --frames 1500` →
+  `bng=1187d/0a/1s/0b bng_ev=1a/1s/0b`. One activation event, one
+  settle, dormant count −1, on flat ground.
 - **Break (SF roam):** `vpsemi` at `--spawn=-169,35.5,744,172`
   struck the `sp_wrongwayfw` freeway sign stamped at
   (−178.9, 34.9, 784.8) beside road4 → `bng=924d/3a/0s/1b
@@ -306,6 +310,16 @@ the car on real streets near stamped placements.
 - **Below threshold (SF roam):** `vpsemi` at
   `--spawn=-180,35.5,776,187` grazed the same sign at ~3 m/s →
   `impacts=1`, `bng_ev=0a/0s/0b`. Contact registered, no transition.
+  Independently: `vpbug` at `--spawn=-1641.6,36.7,389,0` reached an
+  `sp_cone_f` at 7.7 m/s — `impacts=1`, no transition, and the
+  dormant cone stopped the car dead (`moved=7m`), the static-collider
+  side of the threshold.
+- **Activation without settle (SF roam):** `vpbug` at
+  `--spawn=-1641.6,36.7,410,0` hit an `sp_cone_f` (limit 8500) at
+  ~32 m/s → `bng=924d/1a/0s/0b bng_ev=1a/0s/0b` at 800 frames and
+  still `1a/0s` at 5000 ticks — the punted cone never reached Avian
+  sleep on the sloped streets, matching the fragment observation
+  below.
 - **Unbroken attempt (London `circuit:7`):** the `sp_sawhrslt_f`
   wall (ImpulseLimit2 34982) on road216 near (−695, 235) was
   reachable at only ~8 m/s semi — below threshold, no transition.
@@ -314,6 +328,26 @@ the car on real streets near stamped placements.
   slope tumbling suspected, a flat-ground retail break would settle
   whether this is a settle-path issue. The London bollard settled
   normally on flat ground.
+- **Hull clearance governs what can be struck (F04-C.1 repair):**
+  the vehicle collider's underside is deliberately raised
+  (`clear_underside`: ≥0.25 m floor plus ~25° approach / ~15°
+  breakover ramps) and wheels are raycast, not colliders — a prop
+  shorter than the local hull floor passes underneath without any
+  contact. `vpbus` (nose floor ≈1 m) drove straight through
+  `sp_bollard_black_l` rows and `sp_cone_l` clusters registering no
+  contact at all; the same rows stop or activate under `vpbug`,
+  whose hull sits lower. `ImpulseLimit2` is irrelevant when no
+  contact occurs. Whether the original lets wheels/low bumpers
+  strike kerb-height props (cones 0.85–1.14 m) is an open fidelity
+  question — with the current hull a tall vehicle can never touch
+  them.
+- **Retracted claim:** an earlier record cited `vpbug
+  --spawn 762,0.5,-424,0` activating the `sp_bollard_black_l` at
+  (759.7, −427). It is not reproducible and was physically
+  impossible: that spawn drives −Z ~7 m into static geometry, and a
+  1000 kg vpbug cannot reach the required >10.86 m/s in that
+  distance. The two road-row commands above are the corrected
+  evidence.
 - **Targeting notes:** `hold` waits ~2 s then drives straight at
   full throttle — no steering, and vehicles drift on cambered roads.
   Spawns that are not on collision geometry fail `never grounded`.
