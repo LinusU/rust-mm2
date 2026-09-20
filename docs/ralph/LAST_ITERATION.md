@@ -5,8 +5,9 @@
   lamps, barricades) through the shared `PropCache`.
 - Starting commit and resulting commits: started at
   `9ef2534df59241926a144899a0a29146836ac05d` (clean tree, branch
-  `ralph/night`, F03-A.1 externally checked); result = the commit on
-  top of it.
+  `ralph/night`, F03-A.1 externally checked); result =
+  `2ff2582` "Stamp ambient props from city props.pathset files
+  (F03-B)" plus this handoff note.
 - Why this slice: PLAN named F13-A / F03-A.2 / F09-C, but the checked
   F03-A.1 parser was written explicitly for this consumer and the
   previous report teed it up ("F03-B prop instantiation can now
