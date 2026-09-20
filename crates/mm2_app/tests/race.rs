@@ -14,7 +14,7 @@ use mm2_game::{
     Checkpoint, CheckpointRule, EventRef, EventTableKind, ParticipantState, Player, PlayerControl,
     PlayerId, ProgressOutcome, RaceDefinition, RacePhase, RaceProgress, RaceStart, RaceStarted,
     RaceState, ResultLedger, Session, SessionAuthority, SessionConfig, SessionEntity, SessionMode,
-    SessionPhase, advance_session_tick, despawn_session_entities,
+    SessionOutcome, SessionPhase, advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::{ResetVehicle, Teleported, Vehicle, VehicleConfig, VehicleState};
 
@@ -45,6 +45,8 @@ fn any_order_def(countdown: u32) -> RaceDefinition {
         finish: None,
         rule: CheckpointRule::AnyOrder,
         laps: 1,
+        time_limit_ticks: None,
+        params: mm2_game::EventParams::default(),
         countdown_ticks: countdown,
         start_slots: vec![RaceStart {
             position: Vec3::new(-50.0, 0.0, 0.0),
@@ -302,6 +304,8 @@ fn teleport_breaks_the_swept_segment() {
         finish: None,
         rule: CheckpointRule::Ordered,
         laps: 1,
+        time_limit_ticks: None,
+        params: mm2_game::EventParams::default(),
         countdown_ticks: 0,
         start_slots: Vec::new(),
     };
@@ -338,6 +342,8 @@ fn vehicle_reset_breaks_the_swept_segment() {
         finish: None,
         rule: CheckpointRule::Ordered,
         laps: 1,
+        time_limit_ticks: None,
+        params: mm2_game::EventParams::default(),
         countdown_ticks: 0,
         start_slots: Vec::new(),
     };
@@ -596,4 +602,106 @@ fn progress_advance_is_the_shared_step() {
         p.advance(&def, Vec3::new(200.0, 0.0, 0.0)),
         ProgressOutcome::Finished
     );
+}
+
+/// A definition with a Blitz-style deadline (`time_limit_ticks`, F12-A).
+fn timed_def(countdown: u32, limit: u32) -> RaceDefinition {
+    let mut def = any_order_def(countdown);
+    def.time_limit_ticks = Some(limit);
+    def
+}
+
+/// F12-AC03/AC04: the deadline expires a race that never finished —
+/// one `TimedOut` result on the authoritative race clock, recorded
+/// once, then the race completes and nothing refires.
+#[test]
+fn timeout_records_one_timed_out_result_and_completes() {
+    let def = timed_def(0, 40);
+    let mut app = race_app(event_config(), def.clone());
+    let (car, pid) = spawn_participant(&mut app, &def, Vec3::new(-50.0, 0.0, 0.0));
+    assert_eq!(race(&app).time_remaining(), Some(40));
+    run(&mut app, 30); // clock: 2 ticks per update → 40 hit at update 21
+
+    let ParticipantState::TimedOut { race_ticks, result } = &progress(&app, car).state else {
+        panic!("expected TimedOut, got {:?}", progress(&app, car).state)
+    };
+    assert_eq!(*race_ticks, 40, "expiry lands on the limit's tick");
+    assert_eq!(result.participant, pid);
+    let ledger = app.world().resource::<ResultLedger>();
+    let rec = ledger.get(result).expect("the result is retained");
+    assert!(
+        matches!(rec.outcome, SessionOutcome::TimedOut { race_ticks: 40 }),
+        "the ledger records the outcome, not just the id: {:?}",
+        rec.outcome
+    );
+    assert_eq!(race(&app).phase, RacePhase::Complete);
+    assert_eq!(race(&app).time_remaining(), Some(0));
+
+    run(&mut app, 6);
+    assert_eq!(
+        app.world().resource::<ResultLedger>().len(),
+        1,
+        "expiry records once and does not refire"
+    );
+}
+
+/// F12-AC03 boundary rule (DSN-7): the deadline is inclusive — a
+/// crossing that lands on the tick the clock reaches the limit wins,
+/// because segments evaluate before the timeout check.
+#[test]
+fn finish_on_the_expiry_tick_still_counts() {
+    let def = timed_def(0, 20);
+    let mut app = race_app(event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(-200.0, 0.0, 0.0));
+    run(&mut app, 3); // released, racing and anchored
+    assert_eq!(progress(&app, car).state, ParticipantState::Racing);
+    // Stand the clock one tick short of the deadline, then drive the
+    // finish segment on the tick the clock reaches it.
+    app.world_mut().resource_mut::<RaceState>().clock = 19;
+    set_position(&mut app, car, Vec3::new(200.0, 0.0, 0.0));
+    run(&mut app, 1); // the next step is clock 20 — exactly the limit
+
+    let ParticipantState::Finished { race_ticks, .. } = &progress(&app, car).state else {
+        panic!(
+            "a finish on the deadline tick must count, got {:?}",
+            progress(&app, car).state
+        )
+    };
+    assert_eq!(*race_ticks, 20);
+    let ledger = app.world().resource::<ResultLedger>();
+    assert_eq!(ledger.len(), 1);
+    assert!(
+        matches!(
+            ledger.iter().next().unwrap().outcome,
+            SessionOutcome::Finished { race_ticks: 20 }
+        ),
+        "the one result is the finish, not a timeout"
+    );
+}
+
+/// A participant still `AwaitingStart` while the race runs (a joiner
+/// that bypassed `join`) cannot hold the race open past the deadline —
+/// it times out like everyone racing.
+#[test]
+fn timeout_resolves_an_unreleased_participant() {
+    let def = timed_def(0, 10);
+    let mut app = race_app(event_config(), def.clone());
+    spawn_participant(&mut app, &def, Vec3::new(-50.0, 0.0, 0.0));
+    run(&mut app, 2); // released; clock 3
+    // A second entity joins after release with a fresh progress — it
+    // sits AwaitingStart inside a Running race.
+    let (late, _) = spawn_participant(&mut app, &def, Vec3::new(-50.0, 0.0, 0.0));
+    assert_eq!(progress(&app, late).state, ParticipantState::AwaitingStart);
+    run(&mut app, 5); // clock 3 → 13, past the limit
+
+    assert!(
+        matches!(
+            progress(&app, late).state,
+            ParticipantState::TimedOut { race_ticks: 10, .. }
+        ),
+        "the unreleased participant timed out on the deadline tick: {:?}",
+        progress(&app, late).state
+    );
+    assert_eq!(app.world().resource::<ResultLedger>().len(), 2);
+    assert_eq!(race(&app).phase, RacePhase::Complete);
 }

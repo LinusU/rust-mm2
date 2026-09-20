@@ -271,6 +271,134 @@ fn crash_course_is_explicitly_unsupported() {
     ));
 }
 
+/// A one-row `race/<city>/` blitz install from a table row.
+fn blitz_install(table_row: &str) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(
+        d,
+        "race/london/mmblitzdata.csv",
+        &format!("{MM_HEADER}\n{table_row}\n"),
+    );
+    write(d, "race/london/blitz0.aimap", "#\n");
+    write(
+        d,
+        "race/london/blitz0waypoints.csv",
+        &format!(
+            "{WAYPOINTS}{}{}{}",
+            row(0.0, 0.0, 15.0),
+            row(30.0, 0.0, 8.0),
+            row(60.0, 0.0, 10.0)
+        ),
+    );
+    tmp
+}
+
+#[test]
+fn blitz_binds_the_authored_time_limit_and_event_params() {
+    // Amateur 25 s / Professional 18 s like retail london blitz0, with
+    // distinct conditions and densities per difficulty.
+    let tmp = blitz_install("none,0,2,1,0,0,0.3,0.1,3,25,1,0,3,2,0,0,0.4,0.2,4,18,1");
+    let vfs = vfs_of(tmp.path());
+    let catalog = EventCatalog::scan(&vfs, "london");
+    let ev = event(&catalog, EventTableKind::Blitz, 0);
+
+    let am = race_definition(ev, Difficulty::Amateur).unwrap();
+    assert_eq!(
+        am.time_limit_ticks,
+        Some(25 * mm2_game::RACE_TICK_HZ),
+        "authored seconds convert to fixed ticks"
+    );
+    assert_eq!(am.params.densities.traffic, 0.3);
+    assert_eq!(am.params.densities.pedestrians, 0.1);
+    assert_eq!(am.params.conditions.time_of_day.get(), 2);
+    assert_eq!(am.params.conditions.weather.get(), 1);
+    assert_eq!(am.params.opponents, 0);
+    assert_eq!(am.params.cops, 0);
+    assert_eq!(am.laps, 0, "the Blitz NumLaps column is template junk");
+
+    let pro = race_definition(ev, Difficulty::Professional).unwrap();
+    assert_eq!(pro.time_limit_ticks, Some(18 * mm2_game::RACE_TICK_HZ));
+    assert_eq!(pro.params.conditions.time_of_day.get(), 3);
+    assert_eq!(pro.params.conditions.weather.get(), 2);
+    assert_eq!(pro.params.densities.traffic, 0.4);
+    assert_eq!(pro.params.densities.pedestrians, 0.2);
+}
+
+#[test]
+fn non_blitz_events_stay_untimed() {
+    // Checkpoint and Circuit rows carry the constant 50/40 TimeLimit
+    // template value (UNK-4) — binding it would enforce an unverified
+    // rule, so the producer leaves those definitions untimed.
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    for (table, stem) in [("mmracedata", "race0"), ("mmcircuitdata", "circuit0")] {
+        write(
+            d,
+            &format!("race/london/{table}.csv"),
+            &format!("{MM_HEADER}\n{ROW}\n"),
+        );
+        write(d, &format!("race/london/{stem}.aimap"), "#\n");
+        write(
+            d,
+            &format!("race/london/{stem}waypoints.csv"),
+            &format!(
+                "{WAYPOINTS}{}{}{}{}",
+                row(0.0, 0.0, 15.0),
+                row(30.0, 0.0, 8.0),
+                row(60.0, 0.0, 9.0),
+                row(90.0, 0.0, 10.0)
+            ),
+        );
+    }
+    let vfs = vfs_of(d);
+    let catalog = EventCatalog::scan(&vfs, "london");
+    for table in [EventTableKind::Checkpoint, EventTableKind::Circuit] {
+        let def = race_definition(event(&catalog, table, 0), Difficulty::Amateur).unwrap();
+        assert_eq!(
+            def.time_limit_ticks, None,
+            "{table:?}'s template TimeLimit must not become a deadline"
+        );
+    }
+}
+
+#[test]
+fn unusable_params_fail_the_build_explicitly() {
+    // Every out-of-range authored value is a named build error, never
+    // a silent clamp: zero/negative TimeLimit, a selector past the
+    // authored 0-3, a density past 1.0, a negative actor count.
+    let cases = [
+        (
+            "none,0,0,0,0,0,0.3,0.1,3,0,1,0,0,0,0,0,0.3,0.1,4,18,1",
+            "TimeLimit",
+        ),
+        (
+            "none,0,9,0,0,0,0.3,0.1,3,25,1,0,0,0,0,0,0.4,0.1,4,18,1",
+            "TimeofDay",
+        ),
+        (
+            "none,0,0,0,0,0,1.5,0.1,3,25,1,0,0,0,0,0,0.4,0.1,4,18,1",
+            "Ambient/Peds",
+        ),
+        (
+            "none,0,0,0,-1,0,0.3,0.1,3,25,1,0,0,0,0,0,0.4,0.1,4,18,1",
+            "Opponents",
+        ),
+    ];
+    for (table_row, field) in cases {
+        let tmp = blitz_install(table_row);
+        let vfs = vfs_of(tmp.path());
+        let catalog = EventCatalog::scan(&vfs, "london");
+        let ev = event(&catalog, EventTableKind::Blitz, 0);
+        match race_definition(ev, Difficulty::Amateur) {
+            Err(RaceBuildError::BadParam { field: f, .. }) => {
+                assert_eq!(f, field, "wrong column named");
+            }
+            other => panic!("{field}: expected BadParam, got {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn too_few_rows_is_an_explicit_error() {
     let tmp = tempfile::tempdir().unwrap();

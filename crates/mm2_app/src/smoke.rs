@@ -274,12 +274,24 @@ pub fn headless_smoke(
             let cleared = world_ecs
                 .get::<RaceProgress>(car)
                 .map_or(0, |p| p.cleared_count());
+            let ledger = world_ecs.resource::<mm2_game::ResultLedger>();
+            let limit = r
+                .time_remaining()
+                .map(|t| format!(" tl={:.1}s", t as f32 / mm2_game::RACE_TICK_HZ as f32))
+                .unwrap_or_default();
+            let outcome = ledger
+                .iter()
+                .next()
+                .map(|s| format!(" outcome={}", s.outcome.name()))
+                .unwrap_or_default();
             format!(
-                " race={:?} cp={}/{} results={}",
+                " race={:?} cp={}/{} results={}{}{}",
                 r.phase,
                 cleared,
                 r.definition.checkpoints.len(),
-                world_ecs.resource::<mm2_game::ResultLedger>().len(),
+                ledger.len(),
+                limit,
+                outcome,
             )
         });
     let detail = |extra: &str| {

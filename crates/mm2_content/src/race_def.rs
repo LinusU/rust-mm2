@@ -23,9 +23,11 @@
 //! path anchors, not player grid slots (`UNK-17`).
 
 use bevy::prelude::Vec3;
+use mm2_formats::racedata::RaceParams;
 use mm2_formats::racefiles::RaceFileKind;
 use mm2_game::{
-    Checkpoint, CheckpointRule, Difficulty, EventTableKind, RaceDefinition, RaceError, RaceStart,
+    Checkpoint, CheckpointRule, Densities, Difficulty, EventParams, EventTableKind, RACE_TICK_HZ,
+    RaceDefinition, RaceError, RaceStart, SessionConditions, TimeOfDay, Weather,
 };
 use thiserror::Error;
 
@@ -65,6 +67,17 @@ pub enum RaceBuildError {
         /// Rows the record actually has.
         found: usize,
     },
+    /// An authored parameter-block value is outside its legal range —
+    /// a selector above the authored 0-3, a density outside 0..=1, a
+    /// negative actor count or an unusable `TimeLimit`. Rejected, never
+    /// clamped silently.
+    #[error("event parameter {field} is out of range: {value}")]
+    BadParam {
+        /// The `mm*data.csv` column.
+        field: &'static str,
+        /// The rejected authored value.
+        value: String,
+    },
     /// The assembled definition failed the shared contract's own
     /// validation (e.g. a non-positive authored extent).
     #[error("invalid race definition: {0}")]
@@ -76,10 +89,13 @@ pub enum RaceBuildError {
 /// [`EventCatalog::resolve`](crate::EventCatalog::resolve) first for
 /// the detailed reason when it is not.
 ///
-/// The returned definition is player-only: authored opponent/cop
-/// counts live on [`CatalogEvent::race_params`] for the opponent slice
-/// (F15/F20), and the authored time limit stays on the params until
-/// its unit is verified (`UNK-4`, F12).
+/// The returned definition is player-only: the authored opponent/cop
+/// counts ride along in [`RaceDefinition::params`] for the systems
+/// that spawn them (F15/F20) — nobody consumes them yet. Blitz rows
+/// bind their authored `TimeLimit` as `time_limit_ticks` (seconds →
+/// fixed ticks, `BLZ-3`/`DSN-7`); the constant `50`/`40` on
+/// Checkpoint/Circuit rows is a likely-unused template value
+/// (`UNK-4`), so those definitions stay untimed.
 pub fn race_definition(
     event: &CatalogEvent,
     difficulty: Difficulty,
@@ -122,11 +138,70 @@ pub fn race_definition(
         } else {
             0
         },
+        time_limit_ticks: match event.event_ref.table {
+            EventTableKind::Blitz => Some(time_limit_ticks(params.time_limit)?),
+            _ => None,
+        },
+        params: event_params(params)?,
         countdown_ticks: mm2_game::DEFAULT_COUNTDOWN_TICKS,
         start_slots: start_slots(event, rows),
     };
     definition.validate()?;
     Ok(definition)
+}
+
+/// Authored `TimeLimit` → fixed ticks. The unit is seconds by strong
+/// inference (`BLZ-3`): London `blitz0` is ~450 m of gates against an
+/// authored `25`/`18` — only seconds lands in MM2 driving speeds;
+/// minutes and frames are absurd at every row. A non-positive,
+/// non-finite or unrepresentable authored value is a build error,
+/// never a clamp.
+fn time_limit_ticks(seconds: f32) -> Result<u32, RaceBuildError> {
+    let bad = || RaceBuildError::BadParam {
+        field: "TimeLimit",
+        value: seconds.to_string(),
+    };
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return Err(bad());
+    }
+    let ticks = f64::from(seconds) * f64::from(RACE_TICK_HZ);
+    if ticks > f64::from(u32::MAX) {
+        return Err(bad());
+    }
+    Ok(ticks.round() as u32)
+}
+
+/// Distill one authored parameter block into the runtime's typed
+/// [`EventParams`]. Selectors are validated against their authored
+/// ranges (0-3, WLD-4), densities against 0..=1 (WLD-1) and actor
+/// counts must be non-negative; an out-of-range value fails the event
+/// build explicitly rather than being clamped (`RaceBuildError::BadParam`).
+fn event_params(p: &RaceParams) -> Result<EventParams, RaceBuildError> {
+    let bad = |field: &'static str, value: String| RaceBuildError::BadParam { field, value };
+    let selector = |field: &'static str, value: i64| -> Result<u8, RaceBuildError> {
+        u8::try_from(value).map_err(|_| bad(field, value.to_string()))
+    };
+    let conditions = SessionConditions {
+        time_of_day: TimeOfDay::new(selector("TimeofDay", p.time_of_day)?)
+            .map_err(|e| bad("TimeofDay", e.to_string()))?,
+        weather: Weather::new(selector("Weather", p.weather)?)
+            .map_err(|e| bad("Weather", e.to_string()))?,
+    };
+    let densities = Densities {
+        traffic: p.ambient,
+        pedestrians: p.peds,
+    };
+    densities
+        .validate()
+        .map_err(|e| bad("Ambient/Peds", e.to_string()))?;
+    Ok(EventParams {
+        conditions,
+        densities,
+        opponents: u32::try_from(p.opponents)
+            .map_err(|_| bad("Opponents", p.opponents.to_string()))?,
+        cops: u32::try_from(p.cops).map_err(|_| bad("Cops", p.cops.to_string()))?,
+        car_type: p.car_type,
+    })
 }
 
 fn checkpoint(w: &mm2_formats::waypoints::Waypoint) -> Checkpoint {

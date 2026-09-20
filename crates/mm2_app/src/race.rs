@@ -18,8 +18,12 @@
 //! - session `Playing` + race `Running`: advance the race clock and
 //!   every `Racing` participant's swept segment; a `Finished` outcome
 //!   mints and records exactly one [`SessionResult`] per participant
-//!   per generation into [`ResultLedger`] (AC04); all-finished marks
-//!   the race `Complete`.
+//!   per generation into [`ResultLedger`] (AC04). When the definition
+//!   carries a `time_limit_ticks` (Blitz, F12-A) the deadline is
+//!   inclusive — segments evaluate first, so a finish landing on the
+//!   expiry tick itself still counts — then every participant still
+//!   unresolved records one [`SessionOutcome::TimedOut`] (DSN-7).
+//!   All-resolved marks the race `Complete`.
 //! - anything else (`Paused`, `Unloading`, …): frozen — the race clock
 //!   and every swept segment hold still, so pause/resume is
 //!   deterministic and no timer runs during teardown.
@@ -271,6 +275,40 @@ pub fn advance_race(
                 } else {
                     pending = true;
                 }
+            }
+            // The deadline is inclusive (DSN-7): the finish check above
+            // already ran on this tick, so a crossing landing exactly
+            // when the clock reaches the limit counts — only
+            // participants still unresolved after it record `TimedOut`,
+            // once each (BLZ-1/BLZ-5).
+            if race
+                .definition
+                .time_limit_ticks
+                .is_some_and(|limit| race.clock >= u64::from(limit))
+            {
+                for (player, _, mut progress) in &mut participants {
+                    if matches!(
+                        progress.state,
+                        ParticipantState::Racing | ParticipantState::AwaitingStart
+                    ) {
+                        let id = session.mint_result_id(player.id);
+                        let result = SessionResult {
+                            id: id.clone(),
+                            tick: session.tick(),
+                            outcome: SessionOutcome::TimedOut {
+                                race_ticks: race.clock,
+                            },
+                        };
+                        if let Err(dup) = ledger.record(result) {
+                            warn!(duplicate = %dup, "race result rejected");
+                        }
+                        progress.state = ParticipantState::TimedOut {
+                            race_ticks: race.clock,
+                            result: id,
+                        };
+                    }
+                }
+                pending = false;
             }
             if !pending && !participants.is_empty() {
                 race.phase = RacePhase::Complete;

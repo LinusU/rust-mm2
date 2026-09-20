@@ -30,13 +30,20 @@
 
 use bevy::prelude::*;
 
+use crate::config::{Densities, SessionConditions};
 use crate::result::ResultId;
+
+/// The fixed-step rate the shared race clock counts at — the
+/// `Time::<Fixed>` the app and the headless smoke both install
+/// (120 Hz). Authored time values (`TimeLimit`, seconds — BLZ-3)
+/// convert through it.
+pub const RACE_TICK_HZ: u32 = 120;
 
 /// Designed default countdown: 3 s at the 120 Hz fixed step. No
 /// authored value exists — the start countdown is not described in the
 /// shipped documentation, so this is a tunable default, not an
 /// original-rules claim.
-pub const DEFAULT_COUNTDOWN_TICKS: u32 = 360;
+pub const DEFAULT_COUNTDOWN_TICKS: u32 = 3 * RACE_TICK_HZ;
 
 /// Designed default for a checkpoint's vertical half-extent. Authored
 /// records carry a horizontal radius but no height; 8 m sits between
@@ -139,6 +146,54 @@ pub enum CheckpointRule {
     Ordered,
 }
 
+/// The authored per-event settings a resolved event binds into the
+/// runtime (F12-A): the `mm*data.csv` parameter block for the selected
+/// difficulty, distilled into typed session-legal values. Their world
+/// effects land with their own systems — weather/time-of-day F18,
+/// traffic/pedestrians F10, opponents F15, cops F20 — and consumers
+/// read them here rather than re-reading the table; a session's own
+/// `SessionConfig.conditions`/`densities` stays the cruise/dev
+/// fallback, the event-authored values take precedence while an event
+/// runs.
+///
+/// Column accounting: `CarType` is carried verbatim (`UNK-1` — its
+/// enum map is unverified), `NumLaps` binds as [`RaceDefinition::laps`]
+/// where it is meaningful (its constant `3`/`4` on Blitz/Checkpoint
+/// rows is a template artifact, unbound), `TimeLimit` binds as
+/// [`RaceDefinition::time_limit_ticks`] where it is meaningful, and
+/// the `Difficulty` column (constant `1` on every retail row) stays on
+/// `CatalogEvent`'s raw `RaceParams` — it has no verified meaning.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EventParams {
+    /// Authored weather + time-of-day selectors (WLD-4; index→name
+    /// unverified, UNK-1).
+    pub conditions: SessionConditions,
+    /// Authored ambient-traffic / pedestrian densities (WLD-1).
+    pub densities: Densities,
+    /// Authored computer-opponent count (RACE-8); Blitz rows ship 0
+    /// (BLZ-2).
+    pub opponents: u32,
+    /// Authored police count; Blitz and Circuit rows ship 0 (BLZ-2).
+    pub cops: u32,
+    /// Authored `CarType` column verbatim — carried, not interpreted
+    /// (UNK-1).
+    pub car_type: i64,
+}
+
+impl Default for EventParams {
+    /// Neutral parameters for synthetic definitions: default
+    /// conditions, designed-default densities, no authored actors.
+    fn default() -> Self {
+        Self {
+            conditions: SessionConditions::default(),
+            densities: Densities::DEFAULT,
+            opponents: 0,
+            cops: 0,
+            car_type: 0,
+        }
+    }
+}
+
 /// Everything the shared runtime needs to run one authored event.
 /// Produced by `mm2_content` from a catalog event's parsed records
 /// (F11-B.2); the fields here are the runtime contract, not the file
@@ -155,6 +210,17 @@ pub struct RaceDefinition {
     pub rule: CheckpointRule,
     /// Laps under [`CheckpointRule::Ordered`]; ignored otherwise.
     pub laps: u32,
+    /// Race budget in fixed steps for timed events — the authored
+    /// `TimeLimit` converted at [`RACE_TICK_HZ`] (BLZ-3; the seconds
+    /// unit is inferred). `None` = untimed: Checkpoint/Circuit rows
+    /// carry a constant `50`/`40` template value (UNK-4), so the
+    /// producer leaves them untimed rather than enforce an unverified
+    /// rule. The deadline is inclusive — a finish landing on the tick
+    /// the clock reaches the limit still counts (DSN-7); everyone
+    /// still unresolved after it records [`SessionOutcome::TimedOut`].
+    pub time_limit_ticks: Option<u32>,
+    /// The authored per-event settings this event binds (F12-A).
+    pub params: EventParams,
     /// Countdown length in fixed steps before control releases
     /// ([`DEFAULT_COUNTDOWN_TICKS`] when nothing else asks).
     pub countdown_ticks: u32,
@@ -171,6 +237,9 @@ pub enum RaceError {
     BadExtent,
     /// [`CheckpointRule::Ordered`] with `laps == 0`.
     NoLaps,
+    /// `time_limit_ticks` of `Some(0)` — a race no one could ever run;
+    /// a zero authored limit is rejected at the producer, not clamped.
+    BadTimeLimit,
 }
 
 impl std::fmt::Display for RaceError {
@@ -179,6 +248,7 @@ impl std::fmt::Display for RaceError {
             Self::NoCheckpoints => write!(f, "race definition has no checkpoints"),
             Self::BadExtent => write!(f, "checkpoint with non-positive or non-finite extent"),
             Self::NoLaps => write!(f, "ordered race with zero laps"),
+            Self::BadTimeLimit => write!(f, "time limit of zero fixed steps"),
         }
     }
 }
@@ -194,6 +264,9 @@ impl RaceDefinition {
         }
         if self.rule == CheckpointRule::Ordered && self.laps == 0 {
             return Err(RaceError::NoLaps);
+        }
+        if self.time_limit_ticks == Some(0) {
+            return Err(RaceError::BadTimeLimit);
         }
         let extent_ok = |c: &Checkpoint| {
             c.radius.is_finite() && c.height.is_finite() && c.radius > 0.0 && c.height > 0.0
@@ -267,6 +340,15 @@ impl RaceState {
     pub fn is_stale(&self, generation: u64) -> bool {
         self.generation != generation
     }
+
+    /// Fixed steps left on the time limit — `None` for untimed
+    /// definitions, `Some(0)` once the deadline has been reached (the
+    /// clock does not stop counting on its own).
+    pub fn time_remaining(&self) -> Option<u32> {
+        self.definition
+            .time_limit_ticks
+            .map(|limit| limit.saturating_sub(self.clock.min(u64::from(limit)) as u32))
+    }
 }
 
 /// Written exactly once, when the countdown releases control (AC03).
@@ -287,6 +369,18 @@ pub enum ParticipantState {
     /// (AC04).
     Finished {
         /// [`RaceState::clock`] value at the finishing step.
+        race_ticks: u64,
+        /// The recorded [`SessionResult`](crate::SessionResult)'s id.
+        result: ResultId,
+    },
+    /// The time limit expired with the event's objectives still open
+    /// (BLZ-1: the finish must come before time runs out). Recorded
+    /// once like a finish — the deadline is inclusive, so a finish
+    /// landing on the expiry tick itself wins (DSN-7).
+    TimedOut {
+        /// [`RaceState::clock`] value at the expiring step — always
+        /// the limit's tick: expiry flips every unresolved participant
+        /// and completes the race on that step.
         race_ticks: u64,
         /// The recorded [`SessionResult`](crate::SessionResult)'s id.
         result: ResultId,

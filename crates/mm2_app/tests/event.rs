@@ -362,6 +362,81 @@ fn incomplete_event_fails_the_session() {
     }
 }
 
+/// F12-A end to end: an authored Blitz `TimeLimit` becomes the runtime
+/// deadline — the session loads `Ready → Countdown → Playing`, the
+/// bound params ride the definition, and a race that never finishes
+/// expires into a `TimedOut` result through `advance_race`.
+#[test]
+fn authored_blitz_limit_times_out_the_race() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    // 0.5 s amateur limit → 60 fixed ticks = 30 updates of racing.
+    write(
+        d,
+        "race/testcity/mmblitzdata.csv",
+        &format!("{MM_HEADER}\nnone,0,2,1,0,0,0.3,0.2,3,0.5,1,0,0,0,0,0,0.4,0.1,4,0.5,1\n"),
+    );
+    write(d, "race/testcity/blitz0.aimap", "#\n");
+    write(
+        d,
+        "race/testcity/blitz0waypoints.csv",
+        &format!(
+            "{WAYPOINTS}{}{}{}{}",
+            waypoint_row(COURSE[0], COURSE_Z),
+            waypoint_row(COURSE[1], COURSE_Z),
+            waypoint_row(COURSE[2], COURSE_Z),
+            waypoint_row(COURSE[4], COURSE_Z),
+        ),
+    );
+    let mut config = event_config();
+    config.mode = SessionMode::Event(EventRef {
+        city: "testcity".into(),
+        table: EventTableKind::Blitz,
+        index: 0,
+    });
+    let mut app = event_app(config, vfs_of(d));
+    app.update();
+
+    let race = app.world().resource::<RaceState>();
+    assert_eq!(
+        race.definition.time_limit_ticks,
+        Some(60),
+        "the authored 0.5 s limit bound to fixed ticks"
+    );
+    assert_eq!(race.definition.params.densities.traffic, 0.3);
+    assert_eq!(race.definition.params.densities.pedestrians, 0.2);
+    assert_eq!(race.definition.params.conditions.time_of_day.get(), 2);
+    assert_eq!(race.definition.params.conditions.weather.get(), 1);
+    assert_eq!(race.definition.params.opponents, 0);
+    assert_eq!(race.time_remaining(), Some(60));
+
+    let car = car(&mut app);
+    run(&mut app, 260); // countdown (≈180) + 60-tick limit (30) + slack
+
+    let progress = app.world().get::<RaceProgress>(car).unwrap();
+    assert!(
+        matches!(
+            progress.state,
+            ParticipantState::TimedOut { race_ticks: 60, .. }
+        ),
+        "the authored deadline expired the race: {:?}",
+        progress.state
+    );
+    assert_eq!(
+        app.world().resource::<RaceState>().phase,
+        RacePhase::Complete
+    );
+    let ledger = app.world().resource::<ResultLedger>();
+    assert_eq!(ledger.len(), 1);
+    assert!(
+        matches!(
+            ledger.iter().next().unwrap().outcome,
+            mm2_game::SessionOutcome::TimedOut { race_ticks: 60 }
+        ),
+        "the one retained result is the timeout"
+    );
+}
+
 /// Restart tears the race down with the session and rebuilds it: a
 /// fresh `RaceState` for generation 2, fresh markers, back in
 /// `Countdown`.

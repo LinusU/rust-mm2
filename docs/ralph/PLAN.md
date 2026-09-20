@@ -38,21 +38,20 @@
 
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
-**Next selected slice: F11-B.2 is now a candidate** — the
-`mm2_content::race_def` producer (parsed `CatalogEvent` records →
-`RaceDefinition`), `load_session_world` event wiring (`Ready →
-Countdown`, `RaceState`/`RaceProgress`, session-owned checkpoint
-markers, `--event` CLI, real-path headless smoke) landed with retail
-evidence (London Blitz 3/3 gates swept; SF Circuit authored
-`cir<N>_strtpnts` grid spawn). Event-prop/traffic-override session
-scoping (AC05) stayed out of this slice — no traffic/prop-override
-systems exist to scope yet; it travels with F09/F10 or a dedicated
-follow-up. F11-B.1 landed, failed review on the unwired
-reset/teleport segment break, and was repaired last iteration.
-F11-A/F11-B.1 are externally checked. Independent ready alternates if
-the runner prefers: F03-A (prop audit) or F09-A (BAI parser), both
-with all deps checked; natural F11 continuations are F11-C (audit/CLI
-polish) or F12-A (Blitz timer).
+**Next selected slice: F12-A is now a candidate** — authored Blitz
+rules bind into the shared race runtime: per-difficulty `TimeLimit`
+seconds → 120 Hz ticks (provisional unit, UNK-4/DSN-7), validated
+`EventParams` on every `RaceDefinition`, inclusive-deadline timeout
+enforcement with exactly one authoritative `TimedOut` result per
+participant, retained `SessionResult` records, HUD `m:ss`/`OUT OF
+TIME`, smoke `tl=`/`outcome=`. Retail evidence: London `blitz:0`
+expires `timed-out` after the bot clears all gates without crossing
+the finish (RACE-7 holds on real data); SF `blitz:0` reports the
+authored 30 s limit ticking down. Open on F12: full-roster binding
+matrix, objective/navigation HUD + warning cues (F12-B), both-cities
+rendered playthrough matrix (F12-C), stronger TimeLimit-unit evidence
+(UNK-4). F11-B.2 is externally checked. Independent ready alternates:
+F03-A (prop audit) or F09-A (BAI parser).
 
 ## Baseline gate results (this checkout, 2026-09-20)
 
@@ -120,7 +119,7 @@ polish) or F12-A (Blitz timer).
 | F11-B.1 | implemented | F11-A | `mm2_game::race`: `Checkpoint` swept cylinder test (XZ radius + ±height band + opt-in direction flag), `CheckpointRule` (`AnyOrder` documented BLZ-1/CHK-1 / `Ordered` documented CIR-1 — carried on the definition, not imposed), `RaceDefinition` (checkpoints/finish/start slots/laps/countdown + `validate`), `RaceState` (generation-stamped countdown→running→complete, `input_locked`, `is_stale`), `RaceProgress` (per-checkpoint cleared flags, ordered `next`/lap wrap, `break_segment` for teleport/reset, one segment consumes every checkpoint it crosses), `RaceStarted` message, `SessionOutcome::Finished{race_ticks}` on `SessionResult`. `mm2_app::race::advance_race` in `FixedLast` (post-solver `Position` segments): countdown→one `RaceStarted`+`Countdown→Playing`, clock+advance while `Playing`, `Finished` → mint+record `SessionResult` once into `ResultLedger`, all-finished → `Complete`; authority-gated (Remote never steps). Teardown: `drive_session` removes `RaceState`; `vehicle_input` honours `input_locked` (stale-gated); `Countdown` quittable/restartable. First candidate failed review on a real defect — `break_segment` had no production caller, so an R-key `ResetVehicle` teleport swept (and could finish) every checkpoint between the two poses; repaired with `mm2_vehicle::Teleported` stamped by `vehicle_reset` atomically with the `Position` write (chosen over draining `ResetVehicle` in the race system, which has message-lifetime and Update-ordering holes) plus `reanchor_teleported_participants` chained before `advance_race`; regression tests `vehicle_reset_breaks_the_swept_segment` + `reset_while_paused_cannot_sweep_checkpoints` fail on the old wiring. Tests: 11 contract + 15 production-path (AC02 high-speed/wrong-height/repeated/teleport + reset-via-message + paused-reset, AC03 countdown-once/pause-freeze/restart-removes-timer, AC04 once-only results with provenance, ties, remote-authority no-op, quit during countdown). Candidate pending external re-check. |
 | F11-B.2 | implemented | F11-B.1 | `RecordContent` retains parsed payloads (`Waypoints`/`StartPoints`/`Opp`/`CrashData`). `mm2_content::race_def::race_definition` builds a `RaceDefinition` from a resolved `CatalogEvent`: Blitz/Checkpoint → `AnyOrder` (row 0 = start line, last row = finish trigger), Circuit → `Ordered` (rows 1.. + lifted line copy closes the lap, authored `NumLaps`); authored `w` radii; authored `_strtpnts` grids or a derived tangent start; Crash Course rejected explicitly. Catalog attributes SF's `cir<N>_strtpnts` siblings to `circuit<N>` (inferred alias, WPT-3). `load_session_world` event mode: catalog resolve → `Ready → Countdown`, spawn on the authored/derived slot, `RaceState`/`RaceProgress`/`ResultLedger` inserted (the ledger was unregistered — latent panic once any race ran), session-owned orange/green checkpoint/finish markers + `update_checkpoint_markers` (cleared gates hidden, finish revealed after all gates). `--event <table>:<index>` CLI; `headless_smoke` rewired onto the real session systems so `--event --headless` is production-path evidence. Retail: London `Blitz[0]` 3/3 gates swept (`race=Running` — finish not crossed in-window), SF `Circuit[1]` authored-grid spawn, `checkpoint:12` → clean `Failed` exit 3; screenshot shows gate column + `GET READY` countdown. 7 producer + 7 app event tests incl. a full synthetic course finish → one ledger result. AC05 event-prop/traffic scoping deferred (no such systems exist to scope yet). Candidate pending external check. |
 | F11-C | queued | F11-B | — |
-| F12-A | queued | F02-B, F11-B | London blitz0–12, SF blitz0–13 authored data present. |
+| F12-A | implemented | F02-B, F11-B | Authored Blitz `TimeLimit` binds per difficulty → 120 Hz ticks (seconds, provisional UNK-4); distilled `EventParams` (conditions/densities/actor counts) validated at build — out-of-range authored values are explicit `BadParam` errors. `advance_race` enforces an inclusive deadline (finish on the expiry tick counts, DSN-7), mints exactly one `TimedOut` result per unresolved participant into the retained ledger; `SessionOutcome::TimedOut` added. HUD shows `m:ss` remaining / `OUT OF TIME`; smoke records `tl=`/`outcome=`. Retail: london blitz:0 `cp=3/3 → timed-out` (bot cleared all gates, never crossed the finish — RACE-7 holds), sf blitz:0 `tl=23.0s` running. Tests: +3 producer, +1 contract, +3 race-driver, +1 end-to-end authored-limit expiry. AC03 candidate-level; AC01/02/04–06 partially open (full-roster matrix, objective/nav HUD, warning cues → F12-B/C). Candidate pending external check. |
 | F12-B | queued | F12-A | — |
 | F12-C | queued | F12-B | — |
 | F13-A | queued | F02-B, F11-B | London race0–13, SF race0–11 (+r0) authored data present. |

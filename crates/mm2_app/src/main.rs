@@ -647,31 +647,37 @@ fn update_hud(
             _ => Text::new(""),
         };
     }
+    let hz = mm2_game::RACE_TICK_HZ as f32;
     let race_text = race
         .filter(|r| !r.is_stale(session.generation()))
         .map(|r| match r.phase {
             mm2_game::RacePhase::Countdown { remaining } => {
-                format!("  GET READY {:.0}", (remaining as f32 / 120.0).ceil())
+                format!("  GET READY {:.0}", (remaining as f32 / hz).ceil())
             }
             mm2_game::RacePhase::Running => {
                 let cleared = progress.iter().next().map_or(0, |p| p.cleared_count());
                 let lap = progress.iter().next().map_or(0, |p| p.lap + 1);
+                // A timed event counts down the same authoritative race
+                // clock the deadline is judged on (AC04); untimed races
+                // show elapsed.
+                let clock = match r.time_remaining() {
+                    Some(t) => format!("  time {:.1}s", t as f32 / hz),
+                    None => format!("  {:.1}s", r.clock as f32 / hz),
+                };
                 if r.definition.rule == mm2_game::CheckpointRule::Ordered {
                     format!(
-                        "  lap {lap}/{}  cp {cleared}/{}  {:.1}s",
+                        "  lap {lap}/{}  cp {cleared}/{}{clock}",
                         r.definition.laps,
                         r.definition.checkpoints.len(),
-                        r.clock as f32 / 120.0
                     )
                 } else {
-                    format!(
-                        "  cp {cleared}/{}  {:.1}s",
-                        r.definition.checkpoints.len(),
-                        r.clock as f32 / 120.0
-                    )
+                    format!("  cp {cleared}/{}{clock}", r.definition.checkpoints.len())
                 }
             }
-            mm2_game::RacePhase::Complete => "  FINISHED".to_string(),
+            mm2_game::RacePhase::Complete => match progress.iter().next().map(|p| &p.state) {
+                Some(mm2_game::ParticipantState::TimedOut { .. }) => "  OUT OF TIME".to_string(),
+                _ => "  FINISHED".to_string(),
+            },
         })
         .unwrap_or_default();
     let Ok(veh) = vehicles.single() else {

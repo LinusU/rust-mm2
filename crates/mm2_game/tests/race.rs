@@ -21,6 +21,8 @@ fn any_order(cps: Vec<Checkpoint>, finish: Option<Checkpoint>) -> RaceDefinition
         finish,
         rule: CheckpointRule::AnyOrder,
         laps: 1,
+        time_limit_ticks: None,
+        params: EventParams::default(),
         countdown_ticks: DEFAULT_COUNTDOWN_TICKS,
         start_slots: Vec::new(),
     }
@@ -32,6 +34,8 @@ fn ordered(cps: Vec<Checkpoint>, laps: u32) -> RaceDefinition {
         finish: None,
         rule: CheckpointRule::Ordered,
         laps,
+        time_limit_ticks: None,
+        params: EventParams::default(),
         countdown_ticks: DEFAULT_COUNTDOWN_TICKS,
         start_slots: Vec::new(),
     }
@@ -257,6 +261,24 @@ fn late_join_starts_racing() {
     assert_eq!(joined.state, ParticipantState::Racing);
 }
 
+/// The time limit counts down on the race clock — `None` for untimed
+/// definitions, saturating at zero past the deadline.
+#[test]
+fn time_remaining_counts_down_and_saturates() {
+    let mut def = any_order(vec![checkpoint(0.0, 0.0)], None);
+    def.time_limit_ticks = Some(100);
+    let mut race = RaceState::new(def, 1);
+    assert_eq!(race.time_remaining(), Some(100));
+    race.clock = 40;
+    assert_eq!(race.time_remaining(), Some(60));
+    race.clock = 100;
+    assert_eq!(race.time_remaining(), Some(0));
+    race.clock = 150;
+    assert_eq!(race.time_remaining(), Some(0), "past expiry stays 0");
+    let untimed = RaceState::new(any_order(vec![checkpoint(0.0, 0.0)], None), 1);
+    assert_eq!(untimed.time_remaining(), None);
+}
+
 /// Validation rejects definitions that would misbehave at runtime.
 #[test]
 fn definition_validation_rejects_unusable_shapes() {
@@ -274,4 +296,7 @@ fn definition_validation_rejects_unusable_shapes() {
         any_order(vec![flat], None).validate(),
         Err(RaceError::BadExtent)
     );
+    let mut instant = any_order(vec![checkpoint(0.0, 0.0)], None);
+    instant.time_limit_ticks = Some(0);
+    assert_eq!(instant.validate(), Err(RaceError::BadTimeLimit));
 }

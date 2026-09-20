@@ -73,6 +73,7 @@ Retail install: `/Users/linus/coding/rust-mm2/retail`, enumerated
 | BLZ-2 | No opponents and no police in Blitz events. | verified_original | data:`mmblitzdata.csv` — Opponents=0, Cops=0 in all 40 rows |
 | BLZ-3 | Per-event time limits are authored (25-120 amateur, 18-103 professional on retail). Unit unverified (UNK-4). | verified_original | data:`mmblitzdata.csv` TimeLimit |
 | BLZ-4 | Blitz has ambient traffic and pedestrians; per-event densities are authored (am 0.0-0.7/0.1-0.4; pro 0.2-0.9/0.1-0.5). | verified_original | data:`mmblitzdata.csv` Ambient/Peds |
+| BLZ-5 | Running out of time before finishing fails the run; the run can be restarted. | inferred | follows from BLZ-1's "before time runs out"; help:Blitz Race — exact fail screen unverified |
 
 ## Checkpoint
 
@@ -232,6 +233,7 @@ Retail install: `/Users/linus/coding/rust-mm2/retail`, enumerated
 | DSN-4 | VFS reads installs read-only with deterministic mod overrides. | PROJECT.md, docs/modding.md |
 | DSN-5 | Shared race runtime defaults not pinned by authored data: checkpoint vertical band ±8 m, direction-check flag off, 3 s start countdown at 120 Hz. Provisional until real event evidence exists. | `mm2_game::race` constants + docs |
 | DSN-6 | Event start without authored `_strtpnts`: the player spawns 10 m behind the start line facing the row0→row1 tangent (the only start every event's data supports). Checkpoint markers are translucent orange columns, finish a green column — dev-rig visuals, not the original gate rendering. | `mm2_content::race_def`, `mm2_app::race` |
+| DSN-7 | Runtime deadline semantics: `TimeLimit` binds as seconds → 120 Hz ticks on Blitz rows only (provisional, UNK-4); the constant values on Checkpoint/Circuit rows stay unbound. The deadline is inclusive — a finish crossing on the expiry tick counts because segments evaluate before the timeout check; expiry records one authoritative `TimedOut` result per unresolved participant. Remaining time displays `m:ss` from the same race clock. | `mm2_content::race_def`, `mm2_game::race`, `mm2_app::race` |
 
 ## Open questions (unknown until evidenced)
 
@@ -240,7 +242,7 @@ Retail install: `/Users/linus/coding/rust-mm2/retail`, enumerated
 | UNK-1 | Exact enum maps for `CarType`, `TimeofDay`, `Weather`, `Difficulty` columns (0-3 seen; no key shipped). |
 | UNK-2 | Whether `.aimap` files beyond the `mm*data.csv` rosters (e.g. london race12-13, blitz10-12, circuit10-11, sf r0) are selectable events, variants or leftovers. Both cities' `circuit11` lack `.aimap` entirely. |
 | UNK-3 | How `vpmoonrover` is unlocked/selected in the original (undocumented; likely cheat code — no verified source). |
-| UNK-4 | Blitz `TimeLimit` unit (seconds assumed, unverified); the constant 50/40 `TimeLimit` on checkpoint/circuit rows is likely unused — unconfirmed. |
+| UNK-4 | Blitz `TimeLimit` unit — the runtime binds it as seconds provisionally (DSN-7); the constant 50/40 `TimeLimit` on checkpoint/circuit rows is likely unused — unconfirmed. |
 | UNK-5 | `NumLaps` nonzero on non-circuit tables — likely an unused shared column; unconfirmed. |
 | UNK-6 | `.info` `Flags`/`UnlockFlags` bit meanings and whether `UnlockScore` gates via Pro points. |
 | UNK-7 | Whether race names live in `mmlang.dll` string tables (`.info` descriptions exist for cars; race Description fields are `none`/lesson ids). |

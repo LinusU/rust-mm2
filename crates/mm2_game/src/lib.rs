@@ -26,9 +26,9 @@ pub use config::{
 pub use ids::{AuthorityRole, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerId};
 pub use impact::{ImpactDedup, ImpactEvent, ImpactId, ImpactPolicy};
 pub use race::{
-    Checkpoint, CheckpointRule, DEFAULT_CHECKPOINT_HEIGHT, DEFAULT_COUNTDOWN_TICKS,
-    ParticipantState, ProgressOutcome, RaceDefinition, RaceError, RacePhase, RaceProgress,
-    RaceStart, RaceStarted, RaceState,
+    Checkpoint, CheckpointRule, DEFAULT_CHECKPOINT_HEIGHT, DEFAULT_COUNTDOWN_TICKS, EventParams,
+    ParticipantState, ProgressOutcome, RACE_TICK_HZ, RaceDefinition, RaceError, RacePhase,
+    RaceProgress, RaceStart, RaceStarted, RaceState,
 };
 pub use result::{DuplicateResult, ResultId, ResultLedger, SessionOutcome, SessionResult};
 pub use session::{

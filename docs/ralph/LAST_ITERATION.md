@@ -1,112 +1,118 @@
 # Last implementation iteration
 
-- Task ID and title: F11-B.2 — authored events load and run through the
-  shared race runtime: `mm2_content::race_def` producer
-  (`CatalogEvent` → `RaceDefinition`), `load_session_world` event
-  wiring, checkpoint markers, `--event` CLI, real-path headless smoke.
+- Task ID and title: F12-A — Blitz-specific authored rules bound into
+  the shared race runtime: authored `TimeLimit` → fixed ticks,
+  distilled event params, inclusive-deadline timeout enforcement,
+  authoritative `TimedOut` results, HUD/smoke remaining-time output.
 - Starting commit and resulting commit: started at
-  `cd7f007edcdb72aa3c8dc86fa117a4b272c5d6a0` (clean tree, branch
-  `ralph/night`); result = this commit.
-- Why this slice: highest-value ready task; F11-B.1's review left
-  "no authored event has driven a `RaceDefinition`" as the gap, and
-  the producer + session wiring is exactly the missing leg. AC05
-  (event-prop/traffic-override session scope) was deliberately split
-  out — no traffic/prop-override systems exist to scope yet, so it
-  stays open on the parent rather than being faked.
+  `8f8ae4a8c927c6666821707ef71f0ebd59217fb4` (clean tree, branch
+  `ralph/night`, F11-B.2 externally checked); result = this commit.
+- Why this slice: F11-B.2's review left the Blitz timer as the named
+  scope gap ("blitz time limit ... remain open by design on parent/
+  other tasks"). With the `CatalogEvent → RaceDefinition` producer
+  checked, the Blitz timer is the highest-value ready leg: every
+  authored Blitz row carries a per-difficulty `TimeLimit` the runtime
+  previously ignored entirely.
 - Production code changed:
-  - `crates/mm2_content/src/events.rs`: `RecordContent` now retains
-    parsed payloads (`Waypoints`, `StartPoints`, `Opp`, `CrashData`)
-    instead of row counts, so producers never re-read the VFS. Circuit
-    events also pick up sibling records under the short `cir<N>` stem
-    — retail SF ships `cir1_strtpnts`…`cir9_strtpnts` for
-    `circuit1`…`circuit9` (inferred alias, ledger WPT-3).
-  - `crates/mm2_content/src/race_def.rs` (new): `race_definition(&CatalogEvent,
-    difficulty)` → `RaceDefinition`. Blitz/Checkpoint → `AnyOrder`
-    (waypoint row 0 = start line, middle rows = checkpoints, last row
-    = finish trigger); Circuit → `Ordered` (rows 1.. + a lifted copy of
-    the start line closes the lap, authored `NumLaps` ≥ 1). Radii come
-    from the authored `w` column; start slots from `_strtpnts` or a
-    derived pose 10 m behind the line facing the course tangent.
-    Incomplete/unknown/Crash Course/too-short events are explicit
-    errors. Row roles and the `a`/`w` conventions are inferred
-    (ledger WPT-1/2/4, UNK-16); the 10 m offset and marker visuals
-    are designed (DSN-6).
-  - `crates/mm2_app/src/session.rs`: `SessionMode::Event` resolves the
-    catalog → `race_definition` → session goes `Ready → Countdown`
-    (cruise still goes straight to `Playing`), spawns the player on
-    the event's start slot, inserts `RaceState` + `RaceProgress` +
-    `ResultLedger`, and spawns session-owned checkpoint/finish marker
-    entities. An unresolvable/unbuildable event is a `Failed` session,
-    never a silent cruise.
-  - `crates/mm2_app/src/race.rs`: `event_race_setup` (the content-crate
-    call site), `spawn_checkpoint_markers` (translucent orange columns
-    per gate, green finish column spawned hidden),
-    `update_checkpoint_markers` (`Update` — hides cleared gates,
-    reveals the finish once all gates clear, matching RACE-7).
-  - `crates/mm2_app/src/main.rs`: `--event <table>:<index>` CLI,
-    `ResultLedger` registration (it was never registered — a latent
-    panic the first time any race ran), marker system in `Update`,
-    HUD countdown/checkpoint/finish text.
-  - `crates/mm2_app/src/smoke.rs`: `headless_smoke` now drives the real
-    session systems (`load_session_world` + the production
-    `FixedLast` chain) instead of a synthetic shortcut, so
-    `--event --headless` is production-path evidence; smoke records
-    carry `race=<phase> cp=<n>/<total> results=<n>`.
-  - `tools/mm2_inspect` + `mm2_game/src/session.rs`: minor touch-ups
-    for retained payloads / event mode plumbing.
+  - `crates/mm2_game/src/race.rs`: `RaceDefinition` gained
+    `time_limit_ticks` + `params: EventParams`; `EventParams` distills
+    the authored parameter block (`SessionConditions`,
+    `Densities`, opponent/cop counts, car type) so the producer stops
+    dropping authored settings on the floor. `RaceState::time_remaining`
+    reports `limit − clock` saturating at 0 on the one authoritative
+    race clock; `validate()` rejects `Some(0)` (`RaceError::BadTimeLimit`).
+    `ParticipantState::TimedOut { race_ticks, result }` is the new
+    terminal state — the driver only advances `Racing` participants,
+    so a timed-out participant freezes like a finished one.
+  - `crates/mm2_game/src/result.rs`: `SessionOutcome::TimedOut {
+    race_ticks }` alongside `Finished`; the ledger now retains
+    `SessionResult` records (was: ids only) so the timeout outcome —
+    and the finish tick — are queryable (`get`, `iter`).
+  - `crates/mm2_content/src/race_def.rs`: the producer binds the
+    authored parameter block (`event.race_params(difficulty)`) into
+    `EventParams` with range validation — selectors 0–3, densities
+    0..=1, non-negative actor counts; out-of-range authored values
+    fail with `RaceBuildError::BadParam`, never clamp. Blitz rows
+    convert `TimeLimit` seconds → 120 Hz ticks; non-finite/
+    non-positive/unrepresentable values fail explicitly. Checkpoint/
+    Circuit rows stay untimed — their constant 50/40 `TimeLimit` is a
+    likely-unused template column (UNK-4).
+  - `crates/mm2_app/src/race.rs`: `advance_race` enforces the deadline
+    while `Playing` — participant segments evaluate first, then any
+    unresolved participant (Racing *or* unreleased AwaitingStart) with
+    `clock >= limit` mints exactly one `TimedOut` result into the
+    ledger. Finish-on-the-expiry-tick wins (DSN-7: inclusive boundary).
+    `Complete` still requires every participant terminal.
+  - `crates/mm2_app/src/main.rs`: HUD shows `m:ss` remaining while a
+    timed race runs (same `RaceState` clock — AC04), `OUT OF TIME` on
+    a timeout-completed race, elapsed time for untimed races.
+  - `crates/mm2_app/src/smoke.rs`: headless smoke records carry
+    `tl=<remaining>s` and `outcome=<name>` from the retained ledger.
 - Tests added/changed and why:
-  - `crates/mm2_content/tests/race_def.rs` (7): AnyOrder layout,
-    Ordered lap closure + laps, authored widths/strtpnts, derived
-    start, incomplete/unsupported/short events error explicitly.
-  - `crates/mm2_content/tests/events.rs`: updated for retained
-    payloads + `cir<N>` alias attribution.
-  - `crates/mm2_app/tests/event.rs` (7): event load → `Countdown` →
-    `Playing`, `RaceState`/`RaceProgress` present, markers spawned
-    with correct visibility (finish hidden → revealed), restart
-    cleans up and rebuilds markers, a full synthetic course
-    drive-through finishes the race with exactly one ledger result,
-    and a bad event ref fails the session.
+  - `crates/mm2_content/tests/race_def.rs` (+3): authored Blitz binds
+    per-difficulty limits (25 s → 3000 ticks amateur / 18 s → 2160 pro)
+    plus conditions/densities/car type; Checkpoint/Circuit rows stay
+    untimed; bad selectors/densities/actor counts/limits fail with
+    `BadParam` naming the field.
+  - `crates/mm2_game/tests/race.rs` (+1): `time_remaining` counts down
+    and saturates; `validate` rejects a zero limit.
+  - `crates/mm2_app/tests/race.rs` (+3, 18 total): timeout records one
+    `TimedOut` result and completes without refiring; a finish on the
+    exact expiry tick counts (inclusive boundary); an unreleased
+    `AwaitingStart` participant can't hold the race open past the
+    deadline; pause already freezes the clock (existing test) so no
+    deadline accrues while paused.
+  - `crates/mm2_app/tests/event.rs` (+1): end-to-end authored Blitz
+    fixture — `mmblitzdata.csv` 0.5 s limit → `time_limit_ticks=60`,
+    params on the definition, `Ready → Countdown → Playing`, race
+    expires into `TimedOut { race_ticks: 60 }` through the real
+    `advance_race`.
 - Commands actually run and results (this machine, macOS arm64):
-  - `cargo test -p mm2_content` — 12/12 ok (7 producer + 5 events).
-  - `cargo test -p mm2_app` — all groups ok incl. 7/7 event tests.
+  - `cargo test -p mm2_game -p mm2_content -p mm2_app` — all groups ok
+    (incl. 10 race_def, 18 race, 8 event tests).
   - Retail `--event blitz:0 --city london --headless` — `status=pass`,
-    `event race loaded event=Blitz[0] gates=3`, `cp=3/3`,
-    `race=Running` (finish trigger not crossed in-window — expected).
-  - Retail `--event circuit:1 --city sf --headless` — `status=pass`,
-    `Circuit[1] gates=10`, car spawned on the authored
-    `cir1_strtpnts` grid slot.
-  - Retail `--event checkpoint:0 --city london --headless` —
-    `status=pass`, `cp=2/5` swept.
-  - Retail `--event checkpoint:12 --headless` — `status=fail`,
-    exit 3 (explicit `Failed` session, no panic).
-  - Retail `--event blitz:0 --frames 90 --screenshot` — 4.3 MB PNG:
-    car on the authored start, orange gate column ahead,
-    `GET READY 2` countdown on the HUD.
+    `cp=1/3 tl=18.0s` (25 s amateur limit − ~7 s raced).
+  - Retail `--event blitz:0 --city sf --headless` — `status=pass`,
+    `cp=1/4 tl=23.0s` (30 s amateur limit).
+  - Retail `--event blitz:0 --frames 2200 --headless` — `status=pass`,
+    `race=Complete cp=3/3 results=1 tl=0.0s outcome=timed-out`: the bot
+    cleared all three authored gates but never crossed the finish
+    trigger inside the authored 25 s, so the deadline expired it —
+    the inclusive-boundary/finish-arms-after-gates semantics on real
+    data.
   - `cargo fmt --all -- --check` — PASS.
   - `cargo clippy --workspace --all-targets --all-features --
     -D warnings` — PASS.
   - `cargo test --workspace` — PASS, all groups, 0 failures.
-- Acceptance IDs satisfied / still open: F11-AC02/03/04 promoted from
-  synthetic-only to authored-data-backed at candidate level (a real
-  retail event drives `RaceDefinition` → countdown → swept gates →
-  marker updates). AC05 stays open — event props and per-event
-  traffic/density overrides need the F09/F10 systems that don't exist
-  yet. Opponents/cops (F15/F20), Blitz time limit (F12) and Crash
-  Course runtime (F21) remain their own tasks.
-- Evidence files: `/tmp/mm2_blitz0_start.png`,
-  `/tmp/mm2_blitz0_cd.png` — local only, not committed (original
-  content).
-- Stock data/GPU/audio/network limitations: GPU exercised (one
-  screenshot). Audio/network unchanged — no such code exists. Only a
-  handful of retail events sampled; no full-roster execution matrix.
-- Unresolved blockers or discovered regressions: none. Provisional
-  interpretations recorded as inferred/unknown in the ledger:
-  waypoint row roles (WPT-2), `w` = radius (WPT-1), `a` angle
-  convention (WPT-4/UNK-16), `cir<N>` alias (WPT-3). `results=0` in
-  the retail smoke lines is expected — the driver didn't reach the
-  finish in the window.
-- Next smallest useful action: F11-C (event audit/CLI polish) or
-  F12-A (Blitz timer on the authored `TimeLimit`); independent
-  ready alternates: F03-A (prop audit), F09-A (BAI parser).
+- Acceptance IDs satisfied / still open:
+  - F12-AC01 partial: Blitz events bind their authored limit +
+    conditions/densities/actor counts at load (structural coverage of
+    the full 40-row Blitz roster not yet exercised — the catalog
+    already resolves all of them ready, but per-row limit binding is
+    only sampled, not matrixed).
+  - F12-AC03 satisfied at candidate level: timeout and
+    finish-on-boundary are deterministic, tested both ways.
+  - F12-AC04 partial: timer/countdown/results all run on `race.clock`;
+    HUD text uses the same clock — but no audio cues exist (no audio
+    system at all), and the objective/navigation HUD (RACE-6 compass)
+    is F12-B/F22.
+  - F12-AC02/AC05/AC06 open: invalid/repeated objectives and restart
+    dedup were already covered under F11-B but Blitz-specific restart/
+    reward flow isn't separately exercised; full-roster playthrough
+    matrix and both-cities rendered evidence are owed by F12-C.
+  - UNK-4 stays open: seconds is the bound unit by strong inference
+    (course length vs MM2 speeds), documented provisional in DSN-7.
+- Stock data/GPU/audio/network limitations: retail headless runs
+  exercised the real VFS/authored data; no GPU screenshot this
+  iteration (timer is HUD text — the windowed capture path is
+  unchanged); audio/network nonexistent by design so far.
+- Unresolved blockers or discovered regressions: none. The timeout
+  smoke shows the scripted driver clears all gates then wanders — the
+  finish trigger still requires an actual crossing (RACE-7 semantics
+  hold on real data).
+- Next smallest useful action: F12-B (timer/objective/navigation HUD,
+  warning cues, Blitz restart flow through the shared runtime) or
+  F11-C; independent ready alternates: F03-A (prop audit), F09-A
+  (BAI parser).
 
 This is a candidate handoff. External code-gate and separate review results live in the runner state directory and are not implied by this report.
