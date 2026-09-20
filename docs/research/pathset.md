@@ -95,6 +95,38 @@ per path: char[32] name (NUL-padded, may fill all 32 bytes)
 | `.cpvs`, `.ldef` | block culling / lights — F18 scope, still unparsed | — |
 | `race/*.opp`, `*waypoints.csv`, `*_strtpnts` | opponent paths, gates, start grids | F11-A parsers |
 
-Runtime consumption — which pathsets the original loads per session
-and how `kind`/`spacing`/attributes drive stamping — stays unverified
-(UNK-12); this doc covers file-level structure only.
+## Runtime consumption (implemented for props, 2026-09-20)
+
+`mm2_app::city::load_city` now consumes the `props.pathset` beside the
+loaded PSDL (`<dir>/<stem>.psdl` → `<dir>/<stem>/props.pathset`) and
+stamps each path's prop PKG through the same `PropCache` INST uses —
+shared meshes, materials and one static trimesh collider per instance.
+Measured on retail: london 1188 instances / 87 paths, sf 925 / 113
+paths — the 31 remaining sf paths are `r4i_rails_f` *decal* names
+living inside `props.pathset`, reported as `decal paths`, not
+failures. Rendered check: sf's `sp_lightstreet_rt_f` lamp row draws
+evenly spaced along its authored strip.
+
+Stamping rules implemented (R3-documented kinds; the micro-semantics
+are inferred and tracked under UNK-20):
+
+- `Points`: one unrotated prop per vertex.
+- `Directed`: one prop per pair at the first point, yawed about Y so
+  local +X runs toward the second (the INST heading convention — R3
+  does not name the axis).
+- `LineStrip`: each segment fills at `spacing` intervals from its
+  start (t = 0, s, 2s, … < len — the shared vertex is stamped by the
+  following segment's t = 0), the final vertex caps the row, stamps
+  yaw along their segment. Whether the original restarts spacing per
+  segment or runs it continuously is unverified.
+- Zero spacing on a strip → one unrotated prop per vertex; a lone
+  vertex stamps once. Undocumented kinds and odd `Directed` tails
+  stamp nothing (`validate()` reports them).
+
+Still unconsumed: `decals*.pathset` (texture stamping — strip width
+and orientation semantics unknown), `audio_pathsets/` (`PATHnn` sound
+routes, F07/F08), `race/<city>/*.pathset` (event-scoped overlays —
+barricades, parked cars, animated `giz_*` object paths; F03-AC04),
+and `city/phys/`, `bak/` dev sets. Which pathsets the original loads
+per session and whether the stamping micro-rules match its output
+remain unverified (UNK-12/UNK-20).

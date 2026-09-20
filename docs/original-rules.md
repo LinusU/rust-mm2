@@ -229,6 +229,7 @@ Retail install: `/Users/linus/coding/rust-mm2/retail`, enumerated
 | WLD-10 | Ambient turn rules: innermost lane turns toward centre or straight, outermost kerb-side or straight, middle lanes straight; one-way roads may take any outgoing road; freeway ramps may force a right; U-turns never. Intersection road lists are authored counterclockwise. London's left-hand driving is baked into authored BAI data (lane swap + reversed vertex/lane order), not a runtime flag. | documented | Adzima GDMag ambient-AI article; docs/research/bai.md |
 | WLD-11 | Each retail city's vehicle road graph is one connected component (SF has exactly one dead end); 166/540 london and 96/379 sf roads are one-way; 176 roads carry no routable vehicle lanes (pedestrian/special/disabled or curve-less). | verified_original | `mm2-inspect nav` on retail |
 | WLD-12 | `PTH1` pathset grammar is uniform across all 98 parseable retail files: header cursor + named paths of attributed points, kinds 0 single-points / 1 directed-pairs / 2 line-strip, spacing authored in quarter metres (0–60 m range seen; 0 and 5 m dominate). Placement names resolve to `geometry/<n>.pkg` (props) or `texture/<n>.*` (decals); `PATHnn` names are route labels (audio paths, parked-car/ferry/train routes). | verified_original | data: all 101 `.pathset` files, `mm2-inspect pathset`; docs/research/pathset.md |
+| WLD-13 | `city/<city>/props.pathset` is the ambient prop-dressing source: london stamps 1188 prop instances from 87 paths (0 unresolved), sf 925 from 113 paths — its remaining 31 paths are `r4i_rails_f` *decal* names living inside the prop file, classified separately not failed. `props.pathset` names are prop PKGs; decal/audio/race pathsets are different consumers. | inferred | `mm2 --city {london,sf}` import reports + rendered stamp rows; docs/research/pathset.md |
 
 ## Deliberate rust-mm2 departures (designed, not original claims)
 
@@ -259,7 +260,7 @@ Retail install: `/Users/linus/coding/rust-mm2/retail`, enumerated
 | UNK-9 | Police pursuit AI, sight model, spawn/de-spawn rules beyond "fixed spots" + "line of sight". |
 | UNK-10 | C&R gold spawn/hideout positions, scoring values, drop mechanics, respawn timing. |
 | UNK-11 | Opponent AI route choice/difficulty model. `.opp` rows now parse (`mm2_formats::opp`, F11-A) but their column semantics and consumption rules remain unverified. |
-| UNK-12 | Traffic/pedestrian ambient models (lanes, lights, panic reactions). `.bai` parses and builds a directed nav graph (`docs/research/bai.md`), `.aimap` overrides parse (`docs/research/aimap.md`), `.pathset` placements parse (`docs/research/pathset.md`) — how the original runtime consumes any of them remains unverified. |
+| UNK-12 | Traffic/pedestrian ambient models (lanes, lights, panic reactions). `.bai` parses and builds a directed nav graph (`docs/research/bai.md`), `.aimap` overrides parse (`docs/research/aimap.md`) — how the original runtime consumes those remains unverified. `.pathset` placements parse and `city/<city>/props.pathset` now stamps ambient prop rows (WLD-13); decal/audio/race pathset consumption is still unimplemented. |
 | UNK-13 | Exact damage accumulation model and breakaway-part rules (DMG-3 documented only as a feature claim). |
 | UNK-14 | Crash Course pass/fail criteria per lesson (time? gates? stunts scored how?). |
 | UNK-15 | Whether pedestrians can be struck and what the consequence is. |
@@ -267,7 +268,7 @@ Retail install: `/Users/linus/coding/rust-mm2/retail`, enumerated
 | UNK-17 | `_strtpnts` row→participant mapping (row 0 treated as the player slot; opponent slots may come from `.opp` instead) and how the original picks a slot per participant. |
 | UNK-18 | Which road-id space the over-range london `.aimap` `[Exceptions]` ids (562–815 vs 540 `city/london.bai` roads) address — `london_sup.bai`'s layout is unparsed, so this stays open (WLD-8). |
 | UNK-19 | BAI `edgeDistances` semantics — not a monotone outer-edge ordering (profiles like `[7.5, 2.5, 2.5, 7.5]` on one-way sides). The nav graph ranks lanes by measured lateral offset instead (WLD-9). |
-| UNK-20 | Pathset per-point `attributes` word, the `OPEN:`/`inactive:`/`open:` name prefixes (event-state decorations on bridge/gate props — inferred), and what the three truncated london files (`blitz10/11`, `london_bridge_blitz10.pathset`) were meant to place. `current_path`/`selection` are inferred dev-tool cursors, preserved raw. |
+| UNK-20 | Pathset per-point `attributes` word, the `OPEN:`/`inactive:`/`open:` name prefixes (event-state decorations on bridge/gate props — inferred), and what the three truncated london files (`blitz10/11`, `london_bridge_blitz10.pathset`) were meant to place. `current_path`/`selection` are inferred dev-tool cursors, preserved raw. Runtime stamping details are likewise unverified: which local axis the directed/line-strip yaw maps (the INST X-axis convention is assumed), whether line-strip spacing restarts per segment or runs continuously (per-segment implemented), whether the final vertex is capped (it is), and what zero spacing means (one prop per vertex implemented). |
 
 ## Gaps in this ledger
 

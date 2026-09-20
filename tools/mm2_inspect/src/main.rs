@@ -1474,25 +1474,12 @@ fn bai_road_ids<'a>(
 /// `docs/research/pathset.md`) are stripped for the lookup; the raw
 /// name is tried first.
 fn pathset_name_resolves(vfs: &Vfs, name: &str) -> bool {
-    let tail = name.rsplit(':').next().unwrap_or(name);
-    for cand in std::iter::once(name).chain((tail != name).then_some(tail)) {
-        if vfs.resolve(&format!("geometry/{cand}.pkg")).is_some() {
-            return true;
-        }
-        if TEXTURE_EXTS
-            .iter()
-            .any(|ext| vfs.resolve(&format!("texture/{cand}.{ext}")).is_some())
-        {
-            return true;
-        }
+    if vfs.resolve(&format!("geometry/{name}.pkg")).is_some() {
+        return true;
     }
-    false
-}
-
-/// `PATHnn` names are internal route labels (ambient-sound paths,
-/// parked-car/ferry/train routes), not asset references.
-fn pathset_name_is_label(name: &str) -> bool {
-    name.len() > 4 && name.starts_with("PATH") && name[4..].chars().all(|c| c.is_ascii_digit())
+    TEXTURE_EXTS
+        .iter()
+        .any(|ext| vfs.resolve(&format!("texture/{name}.{ext}")).is_some())
 }
 
 /// Placement-pathset audit (F03-A): the expected denominator is every
@@ -1559,8 +1546,11 @@ fn pathset(
         }
 
         let mut checked = std::collections::BTreeSet::new();
-        for name in ps.paths.iter().map(|p| p.name.as_str()) {
-            if pathset_name_is_label(name) || !checked.insert(name) {
+        for path in &ps.paths {
+            let Some(name) = path.asset_name() else {
+                continue;
+            };
+            if !checked.insert(name) {
                 continue;
             }
             if !pathset_name_resolves(&vfs, name) {

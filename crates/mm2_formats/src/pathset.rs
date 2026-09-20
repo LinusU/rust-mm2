@@ -115,6 +115,24 @@ impl Path {
     pub fn spacing_metres(&self) -> f32 {
         f32::from(self.spacing_code) / 4.0
     }
+
+    /// The asset basename this path stamps, if the name is one.
+    /// `PATHnn` names are internal route labels (ambient-sound paths,
+    /// parked-car/ferry/train routes), never asset references — `None`.
+    /// `PREFIX:` event-state decorations (`OPEN:`, `inactive:` — see
+    /// `docs/research/pathset.md`) are stripped: the returned name is
+    /// the last `:`-separated segment. `None` also for an empty tail.
+    pub fn asset_name(&self) -> Option<&str> {
+        let tail = self.name.rsplit(':').next().unwrap_or(&self.name);
+        if tail.is_empty()
+            || (tail.len() > 4
+                && tail.starts_with("PATH")
+                && tail[4..].chars().all(|c| c.is_ascii_digit()))
+        {
+            return None;
+        }
+        Some(tail)
+    }
 }
 
 /// A parsed pathset file.

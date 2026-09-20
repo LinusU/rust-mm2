@@ -1,118 +1,104 @@
 # Last implementation iteration
 
-- Task ID and title: F03-A.1 — parse and audit the `PTH1` placement
-  pathsets (`*.pathset`), the missing authored placement format named
-  by F03-A.
+- Task ID and title: F03-B continuation — consume
+  `city/<city>/props.pathset` and stamp ambient prop rows (trees,
+  lamps, barricades) through the shared `PropCache`.
 - Starting commit and resulting commits: started at
-  `3f08fa7c877ce4895c1889383ef747928ada4016` (clean tree, branch
-  `ralph/night`, F09-B.2 externally checked); result = the commit on
+  `9ef2534df59241926a144899a0a29146836ac05d` (clean tree, branch
+  `ralph/night`, F03-A.1 externally checked); result = the commit on
   top of it.
-- Why this slice: PLAN named F13-A / F03-A / F09-C. F03-A's remaining
-  unmapped sources were `.pathset`, `.cpvs`, `.ldef`; `.pathset` is
-  the only one that is a *placement* format (cpvs/ldef are F18-claimed
-  culling/lights), it is documented in R3, and it is the dependency
-  F03-B prop instantiation actually needs. Split as F03-A.1 —
-  parser + audit, no runtime consumer yet (instantiation is F03-B).
-- Review fix-forward applied first: the F09-B.2 `--turns` summary
-  fractions were wrong (denominators undercounted) — corrected to
-  471/492 (95.7%) london and 963/971 (99.2%) sf in
-  `docs/research/bai.md`, `PLAN.md` and the previous
-  `LAST_ITERATION.md`. Conclusion unchanged.
+- Why this slice: PLAN named F13-A / F03-A.2 / F09-C, but the checked
+  F03-A.1 parser was written explicitly for this consumer and the
+  previous report teed it up ("F03-B prop instantiation can now
+  consume `mm2_formats::pathset`"). It is the highest-value remaining
+  F03 work — visible city population — versus another audit slice.
+  F13-A's substance is largely already implemented by F11-B.2/F12
+  (checkpoint events load, run AnyOrder, finish arms, elapsed clock
+  shows); its remainder is opponent/cop scope (F15/F20).
 - Production code changed:
-  - `crates/mm2_formats/src/pathset.rs` (new): PTH1 parser —
-    `"PTH1" u32 path_count u32 current_path`, then per path
-    `char[32] NUL-padded name + u32 point_count + u32 selection +
-    points(u32 attributes + f32 xyz) + u8 kind + u8 spacing + pad[2]`.
-    Typed `PathKind` (0 single-points / 1 directed-pairs /
-    2 line-strip, `kind_code` kept raw), `spacing_metres()`
-    (quarter-metre units), per-point `attributes` word and the
-    `current_path`/`selection` cursors preserved verbatim (inferred
-    dev-tool state — UNK-20). `Pathset::validate()` reports
-    `PathsetIssue`: undocumented kind, odd directed-pair count,
-    non-finite coordinate, out-of-range `current_path`, empty name.
-    Sanity caps (4096 paths / 64k points) bound corrupt counts;
-    trailing bytes are an error.
-  - `crates/mm2_formats/src/lib.rs`: `pub mod pathset`.
-  - `tools/mm2_inspect/src/main.rs`: `pathset <install> [--city]
-    [--strict]` audit. Denominator = *every* discovered `.pathset`
-    (no filtering — junk extensions never match the glob anyway).
-    Per file: paths/points/kind histogram + `validate()` issues +
-    a name cross-check — `PATHnn` labels skipped, `PREFIX:` event
-    decorations stripped for the lookup, then `geometry/<n>.pkg`
-    or `texture/<n>.{tex,tga,png,ktx2}` must resolve (VFS is
-    case-insensitive; `r4i_railsX_f` resolves). `--city` restricts
-    to `city/<stem>/` + `race/<stem>/`; an empty discovery is an
-    error. `scan` now recognizes `.pathset`.
-- Research/documentation: `docs/research/pathset.md` records the
-  measured grammar, the kind/spacing semantics (R3-documented,
-  byte-confirmed), the preserved uninterpreted fields, the
-  placement-source inventory table for F03-A, and the audit results.
-  Ledger: new WLD-12 (verified_original grammar + name resolution)
-  and UNK-20 (attributes word, `PREFIX:` states, truncated files);
-  UNK-12 updated — `.pathset` now parses, runtime consumption still
-  unverified. Event-catalog `RecordContent::Unparsed` still covers
-  `.pathset` — parsing records into the catalog belongs to the F03-B
-  consumer slice, same as `.aimap`.
-- Retail findings reported by the audit (not repaired):
-  - 101 files = expected denominator; 98 parse — 2692 paths /
-    13185 points, kinds {0:137, 1:122, 2:2433}. Every parsed path
-    uses a documented kind.
-  - 3 authored truncations fail with specific errors:
-    `race/london/blitz10.pathset` (58 B, truncated mid-header),
-    `race/london/blitz11.pathset` (663 B, path 1 declares 0x40000
-    points), `race/london/london_bridge_blitz10.pathset` (326 B,
-    truncated mid-points). UNK-20.
-  - 66 zero-point paths across both cities are normal authored data
-    (an empty path stamps nothing) — not flagged.
-  - Name cross-check: 120/126 unique asset names resolve; the 6 dead
-    refs (`r_concrete`, `sp_boxfruit_f`, `sp_fruitcard_l`,
-    `sp_plantcard_l`, `prop_sp_*`, `xcp_banrred_f`) are confined to
-    `city/phys/` test sets, `city/race0.pathset` and `bak/` snapshots.
-    Every mainline `city/<city>/{props,decals*}.pathset` name
-    resolves.
-- Tests added and why:
-  - `mm2_formats::pathset` unit tests (8): all three kinds + field
-    decode + `spacing_metres`; bad magic; truncated point list;
-    trailing bytes; absurd counts (sanity cap); zero-point paths are
-    legal (the retail case); `validate()` reports every issue class;
-    32-byte unterminated names.
+  - `crates/mm2_formats/src/pathset.rs`: `Path::asset_name()` — the
+    shared name classifier (`PREFIX:` event-state decorations
+    stripped to the last `:`-segment, `PATHnn` route labels and empty
+    tails → `None`).
+  - `tools/mm2_inspect/src/main.rs`: pathset audit's private
+    label/prefix helpers replaced by `asset_name()`; audit output on
+    retail is byte-identical to the checked baseline (98/101, 3
+    failures, 6 issues, `--strict` exit 2).
+  - `crates/mm2_app/src/city.rs`:
+    - `stamped_transforms(path)` — pure expansion per documented kind
+      (R3): `Points` one unrotated prop/vertex; `Directed` one prop
+      per pair yawed about Y so local +X runs to the second point
+      (INST heading convention — the axis is undocumented, inferred);
+      `LineStrip` each segment filled at `spacing` intervals from its
+      start (t < len; shared vertex stamped by the next segment's
+      t=0), final vertex caps the row, stamps yaw along the segment.
+      Zero spacing → per-vertex; lone vertex stamps once; odd
+      `Directed` tail / unknown kinds stamp nothing.
+    - `spawn_prop` helper shared by INST and pathset placements.
+    - `load_city`: `PropCache` hoisted so INST + pathset share model
+      builds; consumes `<dir>/<stem>/props.pathset` next to the PSDL;
+      names resolving to `texture/<n>.*` instead of a PKG are counted
+      as `pathset_decal_paths` (SF's 31 `r4i_rails_f` cable-car rail
+      decals inside `props.pathset`), not failures; `PATHnn` labels
+      skipped; entities named `pathset-<name>-<path>-<stamp>`
+      (deterministic).
+    - `CityReport`: `pathset_props_spawned` / `pathset_decal_paths` /
+      `pathset_props_failed` + Display.
+- Semantics deliberately NOT claimed original (UNK-20): which local
+  axis directed yaw maps (INST convention assumed), per-segment vs
+  continuous spacing, the end cap, zero-spacing meaning, decal strip
+  width/orientation. Decals, `audio_pathsets/`, `race/*.pathset`
+  overlays and `city/phys/`+`bak/` dev sets remain unconsumed on
+  purpose.
+- Tests added and why (11, all in `city::tests`, pure Mat4 checks):
+  per-vertex `Points`; `Directed` pair yaw + degenerate-offset
+  fallback + odd-tail drop; `LineStrip` spacing positions + per-segment
+  restart + shared-vertex single stamp + end cap + yaw per segment;
+  zero-spacing per-vertex; zero-length segment skip; lone-vertex strip;
+  empty/unknown-kind no-ops; `asset_name` prefix/label cases.
 - Commands actually run and results (this machine, macOS arm64):
-  - `cargo fmt --all -- --check` — PASS.
+  - `cargo fmt --all -- --check` — PASS (after `cargo fmt`).
   - `cargo clippy --locked --workspace --all-targets --all-features
     -- -D warnings` — PASS.
   - `cargo test --locked --workspace` — PASS, all groups, 0 failures.
-  - `mm2-inspect pathset <retail>` — exit 0; 98/101 parsed, 3
-    failures, 6 issues (numbers above).
-  - `mm2-inspect pathset <retail> --strict` — exit 2 (3 failures +
-    6 issues).
-  - `mm2-inspect pathset <retail> --city london` — 46 files, 3
-    failures, 0 issues; `--city sf` — 52 files, 1 issue
-    (`xcp_banrred_f` in `bak/`).
-  - `mm2-inspect scan <retail>` — `.pathset` recognized: 98 parsed,
-    same 3 failures listed.
+  - `mm2 --mm2-path <retail> --city london --headless` — `status=pass`;
+    report `1188 pathset props (0 decal paths, 0 failed)`.
+  - `mm2 --mm2-path <retail> --city sf --headless` — `status=pass`;
+    `925 pathset props (31 decal paths, 0 failed)`.
+  - `mm2 --mm2-path <retail> --city sf --cam=-1790,45,-1150,180,-8
+    --frames 90 --screenshot` — `status=pass`, ~3.9 MB PNG
+    (`screenshots/pathset-sf-lamps.png`, gitignored): the stamped
+    `sp_lightstreet_rt_f` lamp row draws evenly spaced along the road.
+  - `mm2 --mm2-path <retail> --city london --cam=-469,8,-290,180,-10
+    --frames 90 --screenshot` — `status=pass`, ~5.6 MB PNG
+    (`screenshots/pathset-london-trees.png`): stamped `sp_tree1_s`
+    bushes in the park.
+  - `mm2-inspect pathset <retail>` / `--strict` / `--city london` —
+    identical to checked baseline (98/101, exit 2 strict, 43/46 + 3
+    failures london).
 - Acceptance IDs satisfied / still open:
-  - F03-AC06 (strict audit covers every expected source family):
-    ADVANCED — pathsets now have a strict per-file audit with an
-    unfiltered denominator; INST/PSDL were already covered. `.cpvs`/
-    `.ldef` remain unparsed (F18 scope), so AC06 stays open.
-  - F03-AC01 (synthetic pathset tests: spacing, rotation/pairs,
-    scale, repeated/shared models, deterministic IDs): PARTIAL —
-    parser-level tests cover kinds/pairs/spacing; stamped-placement
-    determinism needs the F03-B instantiation slice.
-  - F03-AC02/03/04/05: open — runtime placement evidence owed by
-    F03-B/F03-C.
-  - F03-A parent: stays `queued` — `.cpvs`/`.ldef` sources and
-    embedded-PSDL-prop coverage remain (A.2 scope).
-- Stock data/GPU/audio/network limitations: audit ran on the real
-  retail install through the VFS; no rendering/audio/network paths
-  touched. The 3 truncated retail files and 6 dead name refs are
-  reported as authored anomalies, not repaired. How the original
-  runtime consumes pathsets (which files load per session, exact
-  stamping semantics) is unverified — UNK-12/UNK-20.
+  - F03-AC01 (synthetic pathset tests: spacing, rotation, scale,
+    repeated/shared models, deterministic IDs): ADVANCED — expansion
+    tests pin spacing/yaw/edge cases; nonunit scale is N/A (pathsets
+    carry no scale); shared models covered by the hoisted `PropCache`
+    (INST+pathset share builds); IDs deterministic by index naming.
+    Rendered retail evidence for stamp rows recorded above.
+  - F03-AC02 (sampled original locations contain expected props):
+    PARTIAL — lamp rows + park bushes render at authored locations;
+    systematic spot validation remains F03-C.
+  - F03-AC03/AC04/AC05: open — decal collision policy, race overlay
+    add/remove (race pathsets unconsumed), mod-override pathset
+    evidence.
+  - F03-AC06: still open (`.cpvs`/`.ldef` + decal family coverage).
+- Stock data/GPU/audio/network limitations: ran on the real retail
+  install through the VFS; rendered evidence on this machine's GPU.
+  Collision classification is the same interim static-trimesh policy
+  INST props use — trees/lamps are solid until F04 reclassifies
+  breakables; SF's 31 rail decals are reported unhandled, not hidden.
 - Unresolved blockers or discovered regressions: none introduced.
-- Next smallest useful action: F03-A.2 (remaining placement-source
-  inventory: `.cpvs`/`.ldef` scope decision vs F18, embedded PSDL
-  props) or F13-A (checkpoint rules; deps candidates) or F09-C.
-  F03-B prop instantiation can now consume `mm2_formats::pathset`.
+- Next smallest useful action: F03-A.2 scope decision (`.cpvs`/`.ldef`
+  vs F18, embedded PSDL props) or decal stamping (needs a strip-width
+  rule — research first) or `race/*.pathset` event-overlay consumption
+  under F03-AC04. F13-A/F09-C remain ready alternatives.
 
 This is a candidate handoff. External code-gate and separate review results live in the runner state directory and are not implied by this report.

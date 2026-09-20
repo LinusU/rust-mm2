@@ -32,6 +32,7 @@ use bevy::{
 use mm2_assets::{Resolved, Vfs};
 use mm2_formats::{
     inst::{self, InstPlacement},
+    pathset::{self, PathKind},
     pkg::{Pkg, PkgStrip},
     psdl::{AttributeType, Psdl, RoomAttribute},
     tex::TexFile,
@@ -505,6 +506,15 @@ pub struct CityReport {
     pub props_spawned: usize,
     /// INST placements skipped because the PKG was missing/undecodable.
     pub props_failed: usize,
+    /// Pathset-stamped prop instances spawned.
+    pub pathset_props_spawned: usize,
+    /// Pathset paths whose name resolves to a texture, not a PKG —
+    /// decal stamping is unhandled (e.g. SF's `r4i_rails_f` cable-car
+    /// rails inside `props.pathset`). Reported, never silently dropped.
+    pub pathset_decal_paths: usize,
+    /// Pathset paths skipped because their name resolved to neither a
+    /// PKG nor a texture.
+    pub pathset_props_failed: usize,
 }
 
 impl std::fmt::Display for CityReport {
@@ -525,11 +535,14 @@ impl std::fmt::Display for CityReport {
         }
         write!(
             f,
-            "; {} mesh groups, {} collider rooms, {} props ({} failed), {} missing textures",
+            "; {} mesh groups, {} collider rooms, {} props ({} failed), {} pathset props ({} decal paths, {} failed), {} missing textures",
             self.mesh_groups,
             self.collider_rooms,
             self.props_spawned,
             self.props_failed,
+            self.pathset_props_spawned,
+            self.pathset_decal_paths,
+            self.pathset_props_failed,
             self.missing_textures.len(),
         )
     }
@@ -2210,6 +2223,141 @@ fn simple_transform(s: &inst::InstSimple) -> Mat4 {
 }
 
 // ---------------------------------------------------------------------------
+// Pathset prop stamping (PTH1)
+// ---------------------------------------------------------------------------
+
+/// Placement with the prop's local +X axis yawed about Y to run along
+/// `dir` (authored space, XZ only — R3 rotates about the Y axis alone).
+/// The axis convention matches INST simple placements, verified on
+/// retail London's `wl_buckpalace_l` fence: the heading is the image
+/// of the prop's X axis (which local axis R3's "direction" names is
+/// undocumented, so this is inferred). A degenerate XZ direction
+/// leaves the prop unrotated rather than dropping it.
+fn yawed_transform(origin: [f32; 3], dir: Vec3) -> Mat4 {
+    let d = Vec3::new(dir.x, 0.0, dir.z).normalize_or(Vec3::X);
+    inst_transform(&inst::InstCoordinate {
+        x_axis: [d.x, 0.0, d.z],
+        y_axis: [0.0, 1.0, 0.0],
+        z_axis: [-d.z, 0.0, d.x],
+        origin,
+    })
+}
+
+/// Expand one pathset path into stamped prop transforms (authored
+/// space; [`inst_transform`] converts). Kind rules per R3 —
+/// `docs/research/pathset.md`:
+///
+/// - `Points`: one unrotated prop per vertex.
+/// - `Directed`: one prop per point pair at the first point, yawed so
+///   +X runs toward the second. A lone trailing point on an odd-count
+///   path stamps nothing (`Pathset::validate` reports the anomaly; the
+///   runtime does not guess its mate).
+/// - `LineStrip`: each segment is filled with props at `spacing`
+///   intervals measured from the segment's start (t = 0, s, 2s, …
+///   strictly below the segment length, so the shared vertex is
+///   stamped once by the following segment), and the path's final
+///   vertex caps the row. Stamps are yawed along their segment. The
+///   per-segment restart is the literal R3 rule — whether the original
+///   resets spacing at vertices is unverified (UNK-20).
+///
+/// A zero `spacing` on a strip stamps one unrotated prop per vertex
+/// (designed fallback — spacing 0 means "densest possible" and no
+/// documented rule subdivides further). Undocumented kinds stamp
+/// nothing; `validate()` names them.
+fn stamped_transforms(path: &pathset::Path) -> Vec<Mat4> {
+    match path.kind() {
+        Some(PathKind::Points) => path
+            .points
+            .iter()
+            .map(|p| Mat4::from_translation(v3(p.position)))
+            .collect(),
+        Some(PathKind::Directed) => path
+            .points
+            .chunks_exact(2)
+            .map(|pair| {
+                yawed_transform(
+                    pair[0].position,
+                    Vec3::from(pair[1].position) - Vec3::from(pair[0].position),
+                )
+            })
+            .collect(),
+        Some(PathKind::LineStrip) => stamp_line_strip(path),
+        None => Vec::new(),
+    }
+}
+
+/// `LineStrip` stamping — see [`stamped_transforms`] for the rule.
+fn stamp_line_strip(path: &pathset::Path) -> Vec<Mat4> {
+    let spacing = path.spacing_metres();
+    let pts: Vec<Vec3> = path.points.iter().map(|p| Vec3::from(p.position)).collect();
+    if spacing <= f32::EPSILON {
+        return pts
+            .iter()
+            .map(|p| Mat4::from_translation(v3(p.to_array())))
+            .collect();
+    }
+    let mut out = Vec::new();
+    let mut last_dir = Vec3::X;
+    for w in pts.windows(2) {
+        let seg = w[1] - w[0];
+        let len = seg.length();
+        if len <= f32::EPSILON {
+            continue;
+        }
+        let dir = seg / len;
+        last_dir = dir;
+        let mut t = 0.0;
+        while t < len {
+            out.push(yawed_transform((w[0] + dir * t).to_array(), dir));
+            t += spacing;
+        }
+    }
+    // The walk stops short of the final vertex by construction;
+    // the authored row is capped at its end point. A lone vertex
+    // (no segments) still stamps once, unrotated.
+    if let Some(&last) = pts.last() {
+        if pts.len() > 1 {
+            out.push(yawed_transform(last.to_array(), last_dir));
+        } else {
+            out.push(Mat4::from_translation(v3(last.to_array())));
+        }
+    }
+    out
+}
+
+/// Spawn one prop placement: every render part plus the prop's single
+/// static collider (not one per shader group, which stacked duplicate
+/// colliders), all owned by the session.
+fn spawn_prop(
+    commands: &mut Commands,
+    model: &PropModel,
+    transform: Transform,
+    owner: SessionEntity,
+    name: &str,
+) {
+    for (mesh, material) in &model.parts {
+        commands.spawn((
+            CityEntity,
+            owner,
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(material.clone()),
+            transform,
+            Name::new(name.to_string()),
+        ));
+    }
+    if let Some(collider) = &model.collider {
+        commands.spawn((
+            CityEntity,
+            owner,
+            RigidBody::Static,
+            collider.clone(),
+            transform,
+            Name::new(format!("{name}-collider")),
+        ));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Orchestration
 // ---------------------------------------------------------------------------
 
@@ -2317,20 +2465,23 @@ pub fn load_city(
         ));
     }
 
+    // PKG prop cache shared by both placement sources: a prop stamped
+    // by INST and by a pathset reuses the same prepared meshes,
+    // materials and collider.
+    let mut cache = PropCache {
+        vfs,
+        meshes,
+        mats,
+        cache: HashMap::new(),
+        missing_prims: 0,
+    };
+
     // INST placements → PKG props. Collision is the prop's own triangle
     // mesh, spawned once per placement beside its visual parts.
-    let animated;
     let inst_path = psdl_path.replace(".psdl", ".inst");
     match vfs.read_path(&inst_path) {
         Ok((inst_bytes, inst_res)) => match inst::parse(&inst_bytes) {
             Ok(comps) => {
-                let mut cache = PropCache {
-                    vfs,
-                    meshes,
-                    mats,
-                    cache: HashMap::new(),
-                    missing_prims: 0,
-                };
                 for comp in &comps {
                     let Some(model) = cache.get(&comp.package_name) else {
                         report.props_failed += 1;
@@ -2340,52 +2491,86 @@ pub fn load_city(
                         InstPlacement::Coordinate(c) => inst_transform(c),
                         InstPlacement::Simple(s) => simple_transform(s),
                     };
-                    let transform = Transform::from_matrix(mat4);
-                    for (mesh, material) in &model.parts {
-                        commands.spawn((
-                            CityEntity,
-                            owner,
-                            Mesh3d(mesh.clone()),
-                            MeshMaterial3d(material.clone()),
-                            transform,
-                            Name::new(format!("prop-{}", comp.package_name)),
-                        ));
-                    }
-                    // One static body per placement — not one per shader
-                    // group, which used to stack duplicate colliders.
-                    if let Some(collider) = &model.collider {
-                        commands.spawn((
-                            CityEntity,
-                            owner,
-                            RigidBody::Static,
-                            collider.clone(),
-                            transform,
-                            Name::new(format!("prop-{}-collider", comp.package_name)),
-                        ));
-                    }
+                    let name = format!("prop-{}", comp.package_name);
+                    spawn_prop(commands, model, Transform::from_matrix(mat4), owner, &name);
                     report.props_spawned += 1;
                 }
-                if cache.missing_prims > 0 {
-                    report
-                        .unsupported
-                        .insert("pkg-non-triangle-strips".into(), cache.missing_prims);
-                }
-                report.missing_textures = std::mem::take(&mut cache.mats.missing);
-                animated = std::mem::take(&mut cache.mats.animated);
                 info!(path = %inst_res.logical, props = report.props_spawned, "inst props spawned");
             }
             Err(e) => {
                 warn!(path = %inst_res.logical, error = %e, "INST parse failed");
-                report.missing_textures = std::mem::take(&mut mats.missing);
-                animated = std::mem::take(&mut mats.animated);
             }
         },
         Err(_) => {
             debug!(path = %inst_path, "no INST file; skipping props");
-            report.missing_textures = std::mem::take(&mut mats.missing);
-            animated = std::mem::take(&mut mats.animated);
         }
     }
+
+    // `props.pathset` beside the PSDL stamps rows of street dressing —
+    // trees, lamps, barricades — along authored paths (F03-B). Only
+    // this file is consumed here: `decals*.pathset` stamp textures,
+    // not props (unhandled), `audio_pathsets/` carry `PATHnn` sound
+    // routes (F07/F08) and `race/<city>/*.pathset` are event-scoped
+    // overlays (F03-AC04), all deliberately out of scope.
+    let pathset_path = psdl_path.replace(".psdl", "/props.pathset");
+    match vfs.read_path(&pathset_path) {
+        Ok((pathset_bytes, pathset_res)) => match pathset::Pathset::parse(&pathset_bytes) {
+            Ok(pathset) => {
+                for (pi, path) in pathset.paths.iter().enumerate() {
+                    let Some(name) = path.asset_name() else {
+                        // `PATHnn` route labels are not prop names.
+                        debug!(path = %path.name, "pathset path is a label; skipped");
+                        continue;
+                    };
+                    let Some(model) = cache.get(name) else {
+                        // A name that resolves to a texture rather
+                        // than a PKG is a decal path — decal stamping
+                        // is unhandled, but it is not a dead ref.
+                        if TEXTURE_EXTS
+                            .iter()
+                            .any(|ext| vfs.resolve(&format!("texture/{name}.{ext}")).is_some())
+                        {
+                            report.pathset_decal_paths += 1;
+                        } else {
+                            report.pathset_props_failed += 1;
+                        }
+                        continue;
+                    };
+                    for (ii, mat4) in stamped_transforms(path).iter().enumerate() {
+                        spawn_prop(
+                            commands,
+                            model,
+                            Transform::from_matrix(*mat4),
+                            owner,
+                            &format!("pathset-{name}-{pi}-{ii}"),
+                        );
+                        report.pathset_props_spawned += 1;
+                    }
+                }
+                info!(
+                    path = %pathset_res.logical,
+                    stamped = report.pathset_props_spawned,
+                    decals = report.pathset_decal_paths,
+                    failed = report.pathset_props_failed,
+                    "pathset props stamped"
+                );
+            }
+            Err(e) => {
+                warn!(path = %pathset_res.logical, error = %e, "props.pathset parse failed");
+            }
+        },
+        Err(_) => {
+            debug!(path = %pathset_path, "no props.pathset; skipping stamped props");
+        }
+    }
+
+    if cache.missing_prims > 0 {
+        report
+            .unsupported
+            .insert("pkg-non-triangle-strips".into(), cache.missing_prims);
+    }
+    report.missing_textures = std::mem::take(&mut cache.mats.missing);
+    let animated = std::mem::take(&mut cache.mats.animated);
     for anim in animated {
         commands.spawn((CityEntity, owner, anim));
     }
@@ -2424,6 +2609,149 @@ mod tests {
         // Local +X maps onto authored +Z, scaled by the heading length.
         let p = m.transform_point3(v3([1.0, 1.0, 0.0]));
         assert!((p - v3([0.0, 2.0, 2.0])).length() < 1e-5);
+    }
+
+    fn path(points: &[[f32; 3]], kind: u8, spacing: u8) -> pathset::Path {
+        pathset::Path {
+            name: "sp_test_f".to_string(),
+            selection: 0,
+            points: points
+                .iter()
+                .map(|&position| pathset::PathPoint {
+                    attributes: 0,
+                    position,
+                })
+                .collect(),
+            kind_code: kind,
+            spacing_code: spacing,
+        }
+    }
+
+    fn origin_of(m: &Mat4) -> Vec3 {
+        m.transform_point3(Vec3::ZERO)
+    }
+
+    /// Where the prop's local +X lands relative to its origin.
+    fn x_axis_of(m: &Mat4) -> Vec3 {
+        m.transform_point3(Vec3::X) - origin_of(m)
+    }
+
+    #[test]
+    fn points_path_stamps_one_unrotated_prop_per_vertex() {
+        let p = path(&[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], 0, 20);
+        let out = stamped_transforms(&p);
+        assert_eq!(out.len(), 2);
+        assert!((origin_of(&out[0]) - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-5);
+        // No direction control: local +X stays +X.
+        assert!((x_axis_of(&out[1]) - Vec3::X).length() < 1e-5);
+    }
+
+    #[test]
+    fn directed_path_stamps_pairs_yawed_about_y() {
+        // Prop at (0,0,0) aimed at (0,0,5): local +X runs toward +Z.
+        let p = path(&[[0.0, 0.0, 0.0], [0.0, 0.0, 5.0]], 1, 20);
+        let out = stamped_transforms(&p);
+        assert_eq!(out.len(), 1);
+        assert!((origin_of(&out[0]) - Vec3::ZERO).length() < 1e-5);
+        assert!((x_axis_of(&out[0]) - Vec3::Z).length() < 1e-5);
+    }
+
+    #[test]
+    fn directed_path_drops_a_lone_trailing_point() {
+        let p = path(&[[0.0, 0.0, 0.0], [0.0, 0.0, 5.0], [9.0, 9.0, 9.0]], 1, 20);
+        assert_eq!(stamped_transforms(&p).len(), 1);
+    }
+
+    #[test]
+    fn directed_degenerate_offset_leaves_prop_unrotated() {
+        let p = path(&[[1.0, 0.0, 1.0], [1.0, 3.0, 1.0]], 1, 20);
+        let out = stamped_transforms(&p);
+        assert_eq!(out.len(), 1);
+        assert!((x_axis_of(&out[0]) - Vec3::X).length() < 1e-5);
+    }
+
+    #[test]
+    fn line_strip_stamps_every_spacing_and_caps_the_end() {
+        // One 12 m segment, 5 m spacing (spacing code is quarter metres):
+        // t = 0, 5, 10 along it, plus the authored end vertex at 12.
+        let p = path(&[[0.0, 0.0, 0.0], [0.0, 0.0, 12.0]], 2, 20);
+        let out = stamped_transforms(&p);
+        let zs: Vec<f32> = out.iter().map(|m| origin_of(m).z).collect();
+        assert_eq!(zs, vec![0.0, 5.0, 10.0, 12.0]);
+        // Every stamp is yawed along the segment.
+        for m in &out {
+            assert!((x_axis_of(m) - Vec3::Z).length() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn line_strip_restarts_spacing_at_each_vertex() {
+        // Two 12 m segments joined at (0,0,12); the second runs +X.
+        // The shared vertex is stamped once, by the second segment's
+        // t = 0, and the row is capped at its final vertex.
+        let p = path(
+            &[[0.0, 0.0, 0.0], [0.0, 0.0, 12.0], [12.0, 0.0, 12.0]],
+            2,
+            20,
+        );
+        let out = stamped_transforms(&p);
+        let origins: Vec<Vec3> = out.iter().map(origin_of).collect();
+        assert_eq!(
+            origins,
+            vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(0.0, 0.0, 5.0),
+                Vec3::new(0.0, 0.0, 10.0),
+                Vec3::new(0.0, 0.0, 12.0),
+                Vec3::new(5.0, 0.0, 12.0),
+                Vec3::new(10.0, 0.0, 12.0),
+                Vec3::new(12.0, 0.0, 12.0),
+            ]
+        );
+        // First segment stamps face +Z, second +X.
+        assert!((x_axis_of(&out[0]) - Vec3::Z).length() < 1e-5);
+        assert!((x_axis_of(&out[3]) - Vec3::X).length() < 1e-5);
+    }
+
+    #[test]
+    fn line_strip_zero_spacing_stamps_per_vertex() {
+        let p = path(&[[0.0, 0.0, 0.0], [0.0, 0.0, 5.0], [0.0, 0.0, 9.0]], 2, 0);
+        let out = stamped_transforms(&p);
+        assert_eq!(out.len(), 3);
+        assert!((x_axis_of(&out[0]) - Vec3::X).length() < 1e-5);
+    }
+
+    #[test]
+    fn line_strip_zero_length_segments_stamp_nothing() {
+        let p = path(&[[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 6.0]], 2, 20);
+        let out = stamped_transforms(&p);
+        let zs: Vec<f32> = out.iter().map(|m| origin_of(m).z).collect();
+        assert_eq!(zs, vec![0.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn single_vertex_strip_stamps_once() {
+        let p = path(&[[7.0, 0.0, 7.0]], 2, 20);
+        let out = stamped_transforms(&p);
+        assert_eq!(out.len(), 1);
+        assert!((origin_of(&out[0]) - Vec3::new(7.0, 0.0, 7.0)).length() < 1e-5);
+    }
+
+    #[test]
+    fn empty_and_unknown_kind_paths_stamp_nothing() {
+        assert!(stamped_transforms(&path(&[], 2, 20)).is_empty());
+        assert!(stamped_transforms(&path(&[[0.0, 0.0, 0.0]], 7, 20)).is_empty());
+    }
+
+    #[test]
+    fn asset_name_strips_state_prefixes_and_labels() {
+        let mut p = path(&[], 0, 0);
+        p.name = "OPEN:giz_bridge01_l".to_string();
+        assert_eq!(p.asset_name(), Some("giz_bridge01_l"));
+        p.name = "PATH12".to_string();
+        assert_eq!(p.asset_name(), None);
+        p.name = "sp_tree1_s".to_string();
+        assert_eq!(p.asset_name(), Some("sp_tree1_s"));
     }
 
     #[test]
