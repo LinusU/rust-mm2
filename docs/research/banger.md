@@ -127,9 +127,92 @@ dead refs (no such PKG/chunks on retail — likely a cut car).
 - `mm2-inspect scan` parses all 995 `.dgbangerdata` names (the 4
   `.1.2` backups don't carry the extension).
 
+## Placement binding (`mm2-inspect banger-bind`, retail 2026-09-20)
+
+The binding rule is by name: a placed name `N` binds iff
+`tune/banger/<N>.dgbangerdata` resolves through the VFS. The audit walks
+every placement source that can stamp a world object — INST files,
+`*.pathset` files under `city/` and `race/`, `propdefs.csv`,
+`proprules.csv`, `props.csv` group tables, and the PSDL `prop_rule`
+bytes — and cross-checks each placed name against the banger stems and
+`geometry/<N>.pkg` separately, so dead placement refs stay visible.
+
+**Verified measurements (129 source files, 0 failures):**
+
+| Source | Result |
+| --- | --- |
+| `city/london.inst` | 1997 placements / 221 names — **0 bound** |
+| `city/sf.inst` | 3763 placements / 165 names — **0 bound** |
+| `city/{london,sf}/props.pathset` | london 17/17 prop names bound; sf 30/30 bound (31 decal paths separate) |
+| `city/{london,sf}/propdefs.csv` | london 16 defs → 12 pkg names bound; sf 33 defs → 27 bound |
+| `city/{london,sf}/props.csv` groups | london 19 entries: 18 bound + `sp_bollard_pedsafe_l` dead; sf 16/16 |
+| `city/props.csv` root group table | 3/3 bound (`sp_barricadeconcl_f`, `sp_barricadeconcr_f`, `sp_jumptrailer_f`) |
+| `race/<city>/*.pathset` overlays | every resolved prop name bound; `blitz10`/`blitz11` truncated → unsupported |
+| `city/*_ai.inst`, `*.sdl_ai.inst` | supplemental files stamping only `sp_stop_f` (40–67 instances each, all `modifiers=0x0200`) — bound |
+| PSDL `prop_rule` reachability | london 17 rule numbers / 415 rooms → 15 defs → 11 files, all bound; sf 20 / 397 rooms → 25 defs → 20 files, all bound |
+| dev/backup sources (`city/phys`, `sfai`, `variant`, `sf/bak`, `race0`) | dead refs kept in the denominator: 45 `*_m` phys names, `r_concrete`, `prop_sp_barricadeconcr_f`, `xcp_banrred_f` |
+
+Union per stock city: london 277 placed names → 55 bound / 221 unbound /
+1 dead; sf 232 → 67 bound / 165 unbound / 0 dead.
+
+**The binding conclusion is verified, not inferred:** INST placement is
+the static-architecture channel — not one of its 386 distinct names has
+a banger record. World knockables reach the world through the *pathset*
+stamping channel (`props.pathset`, race overlays) and the *prop-rule*
+channel (`proprules.csv` → `propdefs.csv` files selected per PSDL room
+edge); every name those channels can produce binds. The `*_ai.inst`
+stop-sign supplements are the only INST files that place a bound name.
+
+**Reverse coverage:** of 994 records (999 minus `default` and the 4
+`.#*` backups), 269 are reachable through audited placements. 562 sit on
+105 `vp*`/`va*` owner PKGs — vehicle bangers bind through the vehicle
+pipeline (`partName`), not world placement. The remaining 163 records on
+87 owners are authored-but-never-placed on retail: unused prop variants
+(`sp_fruitcart_l` + 7 fragments, `sp_newsgroup*`, `sp_oneway*`,
+`sp_office_door_f`), mode/marker objects (`pt_check`, `pt_finish`,
+`pt_red`/`pt_blue`, `wpobj_gold`, `tptpole_bnd`), animated `giz_*`
+records whose paths exist only in overlays the audit names separately,
+and building ornaments (`kp_harrod_*`, `sp_awning_*`, `ep_transam_door_f`).
+
+## Recovered runtime structure (MM2Hook / R4)
+
+From `Dummiesman/mm2hook` `src/modules/banger/` — struct layouts
+recovered from the original binary. These establish the *shape* of the
+runtime model; field-level semantics are still inference.
+
+- `dgBangerDataManager::AddBangerDataEntry(name, partName)` — records
+  are registered under a name *plus* part name, matching the
+  stem/named-part audit classification.
+- `dgBangerInstance` — placement-side object storing a packed banger
+  type/variant index into the manager's table.
+- `dgUnhitBangerInstance` — the dormant placement state, in Y-axis-angle
+  and full-matrix variants (the two placement forms seen in INST and
+  pathset stamping).
+- `dgHitBangerInstance` — the struck-but-now-static state; implies the
+  dormant → hit transition is a distinct instance class, not a flag.
+- `dgBangerActive` — the dynamic state: physics body state, `phSleep`
+  sleep flag, `Target` back-pointer to the dormant instance, an
+  `asParticles` effect, and a `Timer` read as the despawn/settle
+  timeout.
+- `dgBangerActiveManager` — a fixed pool of **32** active objects:
+  the original bounds simultaneous dynamic bangers, consistent with an
+  oldest-first reclaim policy (reclaim order itself unverified).
+- `lvlInstance` flags `INST_BANGER`, `INST_STATIC`, `INST_LANDMARK`,
+  `INST_VISIBLE` — instance flags exist, but the retail INST
+  `modifiers` word is *not* this flag word (its low bits are paint
+  variants, 0x0100 lands on monuments). How a stamped prop's instance
+  acquires `INST_BANGER` is unknown — likely the binding lookup itself.
+
+The implied state machine: **dormant placement (`dgUnhitBangerInstance`)
+→ dynamic (`dgBangerActive`, pooled ×32) on impact → settled/hit
+(`dgHitBangerInstance`) or despawned on `Timer`.** Which threshold gates
+the first transition (`ImpulseLimit2` against what quantity), whether
+fragments spawn at activation or at a later break threshold, and what
+`phSleep`/`Timer` exactly do remain UNK-22.
+
 ## Runtime consumption — what is not known
 
-Parsed, not yet simulated. Everything below is UNK-22:
+Parsed and bound, not yet simulated. Everything below is UNK-22:
 
 - What `ImpulseLimit2` is compared against (contact impulse? impact
   speed × mass?) and what crossing it does — break vs. tip vs. nothing.
@@ -140,8 +223,11 @@ Parsed, not yet simulated. Everything below is UNK-22:
 - `SpinAxis`, `BillFlags`, `Flash`, `YRadius` semantics.
 - The `type: a` tag — version field or class marker.
 - `BirthRule` field semantics beyond "particle spec for the break
-  effect"; when it fires relative to breakage.
+  effect"; when it fires relative to the dormant→active transition.
 - How the fallback `default.dgbangerdata` is selected (globally? per
   unstamped geometry?).
+- How a stamped placement acquires `INST_BANGER`, and the exact
+  dormant→active→hit/despawn transition conditions and pool-reclaim
+  order inside `dgBangerActiveManager` (pool of 32 verified; order not).
 - Whether fragment `NumParts>0` records (the 4 flagged) mean
   fragments-of-fragments the data can't back, or inert leftover fields.

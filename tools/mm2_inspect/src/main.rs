@@ -19,6 +19,7 @@ use mm2_formats::psdl::Psdl;
 use mm2_formats::tex::TexFile;
 use mm2_formats::{FormatError, inst};
 
+mod bind;
 mod inventory;
 
 /// Extensions the texture pipeline tries, in preference order — the same
@@ -283,6 +284,23 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Audit which placement sources stamp banger-bound props (F04-A):
+    /// every INST record, stamped pathset path, prop-rule def file and
+    /// prop-group entry is checked for a `tune/banger/<name>`
+    /// `.dgbangerdata` record; the reverse check lists banger records
+    /// no audited placement ever names.
+    BangerBind {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Restrict to one city bucket (default: every discovered
+        /// placement source plus the unplaced-records reverse check).
+        #[arg(long)]
+        city: Option<String>,
+        /// Exit nonzero when any expected file is missing or fails to
+        /// parse, or any placed name resolves to no geometry.
+        #[arg(long)]
+        strict: bool,
+    },
     /// Versioned content inventory: expected/discovered/accepted/
     /// rejected/unverified counts per content family, fingerprinted by
     /// engine commit and resolved-path provenance.
@@ -379,6 +397,9 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             pathset(dir, cli.mods.as_deref(), city.as_deref(), *strict)
         }
         Command::Banger { dir, strict } => banger(dir, cli.mods.as_deref(), *strict),
+        Command::BangerBind { dir, city, strict } => {
+            bind::banger_bind(dir, cli.mods.as_deref(), city.as_deref(), *strict)
+        }
         Command::Inventory { dir, json, strict } => {
             inventory_cmd(dir, cli.mods.as_deref(), *json, *strict)
         }

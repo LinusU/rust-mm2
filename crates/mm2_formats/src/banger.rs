@@ -503,6 +503,39 @@ pub fn stem_role(stem: &str) -> BangerStem<'_> {
     BangerStem::Named(stem)
 }
 
+/// The PKG stem a record's geometry lives in — the name a placement
+/// source must stamp for this record to be exercised. Fragments belong
+/// to `<base>` when `geometry/<base>.pkg` exists, otherwise to their own
+/// stem (a `.mtx` part or a dead ref). Named records belong to their own
+/// stem when it has a PKG; otherwise to the longest `_`-prefixed base
+/// that has one (a part chunk), else to their own stem (a `.mtx` part or
+/// dead ref). `pkg_exists` answers whether `geometry/<stem>.pkg`
+/// resolves; chunk-level correctness stays with the `banger` audit.
+pub fn geometry_owner(stem: &str, mut pkg_exists: impl FnMut(&str) -> bool) -> &str {
+    match stem_role(stem) {
+        BangerStem::Default => stem,
+        BangerStem::Fragment { base, .. } => {
+            if pkg_exists(base) {
+                base
+            } else {
+                stem
+            }
+        }
+        BangerStem::Named(_) => {
+            if pkg_exists(stem) {
+                return stem;
+            }
+            for (i, _) in stem.match_indices('_').collect::<Vec<_>>().iter().rev() {
+                let base = &stem[..*i];
+                if pkg_exists(base) {
+                    return base;
+                }
+            }
+            stem
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -668,5 +701,30 @@ mod tests {
                 index: "2"
             }
         );
+    }
+
+    #[test]
+    fn geometry_owner_resolution() {
+        let pkgs = ["sp_tree1_s", "vpsemi", "sp_benchwood_f"];
+        let has = |s: &str| pkgs.contains(&s);
+        // Standalone prop owns itself.
+        assert_eq!(geometry_owner("sp_tree1_s", has), "sp_tree1_s");
+        // Fragment joins its base's pkg when it exists.
+        assert_eq!(
+            geometry_owner("sp_benchwood_f_break03", has),
+            "sp_benchwood_f"
+        );
+        // Fragment whose base pkg is absent keeps its own stem
+        // (`.mtx` part or dead ref — the banger audit classifies which).
+        assert_eq!(
+            geometry_owner("sp_roundbout_l_break01", has),
+            "sp_roundbout_l_break01"
+        );
+        // Named part joins the longest base prefix that has a pkg.
+        assert_eq!(geometry_owner("vpsemi_whl3", has), "vpsemi");
+        assert_eq!(geometry_owner("vpsemi_dash_wheel", has), "vpsemi");
+        // No pkg at any split → owns itself.
+        assert_eq!(geometry_owner("vpeagle_whl1", has), "vpeagle_whl1");
+        assert_eq!(geometry_owner("default", has), "default");
     }
 }

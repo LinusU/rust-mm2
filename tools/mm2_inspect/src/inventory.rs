@@ -831,7 +831,7 @@ fn breakables(paths: &[String]) -> Family {
     f.extras = files;
     f.unverified = files;
     f.notes.push(format!(
-        "{files} banger records across {} prop ids; no dgbangerdata consumer exists",
+        "{files} banger records across {} prop ids; parsed and audited by `banger`/`banger-bind`, no runtime consumer yet",
         stems.len()
     ));
     f
