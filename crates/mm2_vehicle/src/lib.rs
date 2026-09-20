@@ -23,7 +23,9 @@ pub mod vehicle;
 pub use analysis::{HandlingMetrics, WheelMetrics, hull_points};
 pub use config::VehicleConfig;
 pub use debug::VehicleDebugEnabled;
-pub use vehicle::{ResetVehicle, Teleported, Vehicle, VehicleInput, VehicleState, WheelState};
+pub use vehicle::{
+    ResetVehicle, StrikeBound, Teleported, Vehicle, VehicleInput, VehicleState, WheelState,
+};
 
 /// Registers the vehicle simulation. Requires [`PhysicsPlugins`] and a fixed
 /// timestep (`Time<Fixed>`) configured by the app.
@@ -51,7 +53,9 @@ impl Plugin for VehiclePlugin {
 ///
 /// Uses `collider_points` for a convex-hull collider when configured,
 /// otherwise a cuboid of `chassis_size`. `inertia` overrides the principal
-/// angular inertia Avian would derive from the collider.
+/// angular inertia Avian would derive from the collider. The entity also
+/// carries a [`StrikeBound`] — the `striker_points` hull when present —
+/// for prop-strike overlap queries; it is not a world collider.
 pub fn vehicle_bundle(config: &VehicleConfig) -> impl Bundle {
     let collider = config
         .collider_points
@@ -63,6 +67,16 @@ pub fn vehicle_bundle(config: &VehicleConfig) -> impl Bundle {
             let chassis = Vec3::from(config.chassis_size);
             Collider::cuboid(chassis.x, chassis.y, chassis.z)
         });
+    // The strike surface prefers the unmodified authored bound and
+    // falls back to the world collider itself — a config with no bound
+    // source strikes props with the same shape the world sees.
+    let strike_bound = config
+        .striker_points
+        .as_ref()
+        .and_then(|pts| {
+            Collider::convex_hull(pts.iter().map(|p| Vec3::from(*p)).collect::<Vec<_>>())
+        })
+        .map_or_else(|| StrikeBound(collider.clone()), StrikeBound);
     // Inertia: authored principal tensor when present, otherwise the solid
     // cuboid estimate so `AngularInertia` is always explicit.
     let inertia = config.inertia.unwrap_or_else(|| {
@@ -81,6 +95,7 @@ pub fn vehicle_bundle(config: &VehicleConfig) -> impl Bundle {
             },
             VehicleState::new(config),
             VehicleInput::default(),
+            StrikeBound(strike_bound.0),
             Name::new(config.name.clone()),
         ),
         (

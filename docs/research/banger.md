@@ -337,10 +337,35 @@ city/<city>.bai`) for placements lying on a road.
   `sp_bollard_black_l` rows and `sp_cone_l` clusters registering no
   contact at all; the same rows stop or activate under `vpbug`,
   whose hull sits lower. `ImpulseLimit2` is irrelevant when no
-  contact occurs. Whether the original lets wheels/low bumpers
-  strike kerb-height props (cones 0.85–1.14 m) is an open fidelity
-  question — with the current hull a tall vehicle can never touch
-  them.
+  contact occurs.
+- **Resolved by the authored-bound strike surface (F04-C.3):**
+  mm2hook's struct layout shows prop collision is bound-vs-bound —
+  `dgBangerData` carries `Bound`/`ColliderId`, and every car carries
+  its own `phBound` — so the shape that should strike props is the
+  *unmodified* authored bound, not the snag-safe world hull. The
+  authored `vpddbus` bound floor is ≈0.27–0.43 m at the nose/tail
+  lower verts — under an `sp_cone_f` top (0.85 m) along the whole
+  underside — while `clear_underside` lifts the reshaped hull's
+  underside ≥0.25 m plus the 25°/15° ramps (≈1.1 m of lift mid-body
+  on a 5.19 m wheelbase), so kerb-height props pass beneath the
+  raised belly untouched. `convert()` now keeps both: `collider_points` (the
+  reshaped hull, world contact only) and `striker_points` (the bound
+  verbatim, a `StrikeBound` component used only for overlap queries).
+  A moving vehicle activates any dormant banger its `StrikeBound`
+  overlaps; approach speed is the bound's surface velocity at the
+  prop's centre and the authored `ImpulseLimit2` gate applies
+  unchanged. Retail verification (install `fnv1a64:e91e6cd4b2ae30d9`,
+  `--bot` driver): `vpddbus --spawn=-1641.6,36.7,410,0` — the run
+  that previously passed the `sp_cone_f` cluster with zero contacts —
+  now records `bng_ev=1a/0s/0b`; `vpbus --spawn=0.4,5.5,-720,0`
+  through the `sp_bollard_black_l` row it previously ghosted records
+  `bng_ev=1a/1s/0b`; `vpbug` on the same run records `2a/2s` (was
+  `1a/1s` — the bound catches a second bollard the contact hull
+  squeezed past). Whether the original also lets wheels/bumpers
+  strike props a bound clears is still unknown, and whether a bound
+  strike imparts the same impulse as a manifold contact is
+  provisional (UNK-22 territory — overlap supplies speed and an
+  upwind-face lever, no manifold).
 - **Retracted claim:** an earlier record cited `vpbug
   --spawn 762,0.5,-424,0` activating the `sp_bollard_black_l` at
   (759.7, −427). It is not reproducible and was physically
@@ -394,11 +419,11 @@ records are unchanged.
   (>32 simultaneous) reclaim remains unobserved — staging 33 live
   actives needs dense simultaneous breaks that no surveyed retail
   site produces; the dev bound exercises the same claim/reclaim path.
-- **Hull-clearance corollary:** the `vpddbus` (~4 915 kg) passes
-  clean over `sp_cone_f` clusters — zero contacts where `vpbug`
-  activates. Heavy strikers for barricade thresholds and low-floor
-  strikers for cone/bollard thresholds must be chosen separately;
-  still an open fidelity question, not a confirmed defect.
+- **Hull-clearance corollary — resolved (F04-C.3):** the `vpddbus`
+  (~4 915 kg) used to pass clean over `sp_cone_f` clusters — zero
+  contacts where `vpbug` activates. With the authored-bound strike
+  surface it now activates them on the same run (`bng_ev=1a`, see
+  above); striker choice no longer splits by floor height.
 
 ## Runtime consumption — what is not known
 

@@ -28,7 +28,7 @@ use mm2_game::{
     SessionAuthority, SessionConfig, SessionEntity, SessionPhase, WorldMode, advance_session_tick,
     despawn_session_entities,
 };
-use mm2_vehicle::{VehicleConfig, VehiclePlugin};
+use mm2_vehicle::{StrikeBound, VehicleConfig, VehiclePlugin, vehicle_bundle};
 
 const FRAMES_PER_SECOND: usize = 60;
 
@@ -340,6 +340,146 @@ fn the_pool_reclaims_oldest_first_at_capacity() {
     assert_eq!(
         app.world().get::<Banger>(b2).unwrap().phase,
         BangerPhase::Active
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Authored-bound strikes: a moving vehicle's `StrikeBound` — the
+// unmodified bound the original prop test used — activates dormant
+// bangers the snag-safe world hull rides over (a bus over a cone).
+// The tests pin the implemented rule, not verified original behaviour.
+// ---------------------------------------------------------------------------
+
+/// A striker whose world collider rides *above* the prop while its
+/// `StrikeBound` reaches down to it — the high-floor vehicle the
+/// authored bound still strikes with. `GravityScale(0)` keeps the
+/// separation exact: the world hull can never touch the prop.
+fn spawn_bound_striker(app: &mut App, pos: Vec3, vel: Vec3) -> Entity {
+    app.world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            // World hull: floor at pos.y - 0.1 — clears a prop top
+            // below that mark entirely.
+            Collider::cuboid(0.5, 0.2, 0.5),
+            // Authored bound: floor at pos.y - 1.5 — overlaps the prop.
+            StrikeBound(Collider::cuboid(0.9, 3.0, 0.9)),
+            Mass(1000.0),
+            GravityScale(0.0),
+            Position(pos),
+            Transform::from_translation(pos),
+            LinearVelocity(vel),
+        ))
+        .id()
+}
+
+#[test]
+fn a_strike_bound_overlap_activates_a_prop_the_hull_clears() {
+    let mut app = test_app_with(SessionAuthority::Local, 32);
+    let (banger, object) =
+        spawn_banger(&mut app, Vec3::new(0.0, 0.5, 0.0), banger_def("cone", 0.0));
+    // World-hull floor at 1.3 rides over the prop's 1.0 top without
+    // contact; the bound floor at -0.1 overlaps it when aligned.
+    let striker = spawn_bound_striker(
+        &mut app,
+        Vec3::new(-3.0, 1.4, 0.0),
+        Vec3::new(10.0, 0.0, 0.0),
+    );
+
+    let events = run(&mut app, FRAMES_PER_SECOND);
+
+    let activations: Vec<_> = events
+        .iter()
+        .filter(|e| e.phase == BangerPhase::Active)
+        .collect();
+    assert_eq!(
+        activations.len(),
+        1,
+        "the authored bound strikes what the world hull clears: {events:?}"
+    );
+    assert_eq!(activations[0].object, object);
+    match activations[0].cause {
+        BangerCause::Impact { severity, estimate } => {
+            assert!(severity > 5.0, "approach speed, got {severity}");
+            assert!(estimate > 0.0);
+        }
+        c => panic!("activation must name its impact, got {c:?}"),
+    }
+
+    // The world hull never touched: the striker kept its speed and
+    // passed cleanly over where the prop stood.
+    let pos = app.world().get::<Position>(striker).unwrap().0;
+    assert!(pos.x > 3.0, "nothing slowed the striker: {pos:?}");
+    assert!(
+        (pos.y - 1.4).abs() < 0.01,
+        "the striker never fell or deflected: {pos:?}"
+    );
+    assert_eq!(
+        app.world().get::<Banger>(banger).unwrap().phase,
+        BangerPhase::Active
+    );
+}
+
+#[test]
+fn a_parked_strike_bound_activates_nothing() {
+    // A stationary vehicle overlapping a prop must not detonate it —
+    // the overlap carries approach speed, not presence.
+    let mut app = test_app_with(SessionAuthority::Local, 32);
+    let (banger, _) = spawn_banger(&mut app, Vec3::new(0.0, 0.5, 0.0), banger_def("cone", 0.0));
+    spawn_bound_striker(&mut app, Vec3::new(0.0, 1.4, 0.0), Vec3::ZERO);
+
+    let events = run(&mut app, FRAMES_PER_SECOND);
+    assert!(events.is_empty(), "no transitions: {events:?}");
+    assert_eq!(
+        app.world().get::<Banger>(banger).unwrap().phase,
+        BangerPhase::Dormant
+    );
+}
+
+#[test]
+fn a_below_limit_strike_bound_overlap_leaves_the_prop_dormant() {
+    // The authored impulse gate applies to bound strikes the same as
+    // contacts: a monument-class prop ignores an overlap.
+    let mut app = test_app_with(SessionAuthority::Local, 32);
+    let (banger, _) = spawn_banger(&mut app, Vec3::new(0.0, 0.5, 0.0), banger_def("gate", 1e30));
+    spawn_bound_striker(
+        &mut app,
+        Vec3::new(-3.0, 1.4, 0.0),
+        Vec3::new(10.0, 0.0, 0.0),
+    );
+
+    let events = run(&mut app, FRAMES_PER_SECOND);
+    assert!(events.is_empty(), "no transitions: {events:?}");
+    assert_eq!(
+        app.world().get::<Banger>(banger).unwrap().phase,
+        BangerPhase::Dormant
+    );
+}
+
+#[test]
+fn vehicle_bundle_stamps_the_authored_bound_as_strike_surface() {
+    // The production bundle carries `striker_points` as a StrikeBound;
+    // a config without one strikes with the world hull's shape.
+    let mut app = test_app_with(SessionAuthority::Local, 32);
+    let mut cfg = VehicleConfig {
+        striker_points: Some(vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]),
+        ..VehicleConfig::default()
+    };
+    let with_bound = app.world_mut().spawn(vehicle_bundle(&cfg)).id();
+    assert!(
+        app.world().get::<StrikeBound>(with_bound).is_some(),
+        "striker_points becomes the entity's strike surface"
+    );
+
+    cfg.striker_points = None;
+    let without_bound = app.world_mut().spawn(vehicle_bundle(&cfg)).id();
+    assert!(
+        app.world().get::<StrikeBound>(without_bound).is_some(),
+        "the fallback strike surface is the world collider itself"
     );
 }
 

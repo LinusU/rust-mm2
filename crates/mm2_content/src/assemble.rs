@@ -330,6 +330,7 @@ pub fn apply_handling_override(
     }
     // Collision geometry is part of the model, not the handling override.
     over.collider_points = imported.collider_points.clone();
+    over.striker_points = imported.striker_points.clone();
     over.chassis_size = imported.chassis_size;
     Ok(over)
 }

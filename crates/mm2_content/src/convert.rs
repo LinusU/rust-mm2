@@ -617,12 +617,17 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
     } else {
         contact_ys.iter().sum::<f32>() / contact_ys.len() as f32
     };
-    let collider_points = input.bound.map(|b| {
-        let mut pts = b
-            .verts
+    // The unmodified bound is kept beside the reshaped hull: world
+    // contact uses `collider_points` (underside lifted against snags),
+    // while props are struck through `striker_points` — the shape the
+    // original bound-vs-bound prop collision used.
+    let striker_points = input.bound.map(|b| {
+        b.verts
             .iter()
             .map(|v| [v[0], v[1], v[2]])
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+    });
+    let collider_points = striker_points.clone().map(|mut pts| {
         clear_underside(&mut pts, ground_y, front_z, rear_z);
         pts
     });
@@ -648,9 +653,9 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
     );
     report.imported(
         "bound/<id>_bound.bnd",
-        "collider_points/chassis_size",
+        "collider_points/striker_points/chassis_size",
         format!(
-            "{} hull verts from {bounds_src}",
+            "{} hull verts from {bounds_src} (striker keeps the unmodified bound)",
             collider_points.as_ref().map(|p| p.len()).unwrap_or(0)
         ),
     );
@@ -696,6 +701,7 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
         chassis_size: size,
         inertia: Some(inertia),
         collider_points,
+        striker_points,
         collider_friction: sim.bound_friction.unwrap_or(0.5).min(MAX_COLLIDER_FRICTION),
         collider_restitution: (sim.bound_elasticity.unwrap_or(0.1) * MAX_RESTITUTION)
             .clamp(0.0, MAX_RESTITUTION),

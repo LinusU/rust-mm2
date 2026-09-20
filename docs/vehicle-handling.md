@@ -45,7 +45,7 @@ behind the adaptations.
 | `Wheel*.StaticFric` / `SlidingFric` | `tires.lateral_grip`, `slide_fraction` | scaled, see below |
 | `Wheel*.SuspensionExtent` + `Limit` | `suspension.travel` | |
 | `Aero.Drag` / `Down` | `aero.*` | × frontal area × air density |
-| `bound/<id>_bound.bnd` | `collider_points` | hull verts, underside reshaped |
+| `bound/<id>_bound.bnd` | `collider_points`, `striker_points` | hull verts, underside reshaped for world contact; unmodified copy kept as the prop-strike surface |
 | `geometry/<id>_whlN.mtx` | `wheels[].position`, `radius` | hardpoints raised for sag |
 
 ## The adaptations, and why
@@ -182,6 +182,15 @@ Each hull vertex is lifted to whatever height its position demands: beyond
 an axle, the ramp that overhang has to clear; between the axles, the crest
 rising from the nearer axle; everywhere, at least `MIN_GROUND_CLEARANCE`.
 The **visual** body is untouched, so a car still looks slammed.
+
+The reshape is confined to world contact. MM2's prop collision is
+bound-vs-bound (the `phBound` every `dgBangerData` record and every car
+carries), so the lifted floor would let a tall vehicle ride over a
+kerb-height prop the authored shell would have touched — a double-decker
+over a cone. The unmodified bound is therefore kept on the entity as a
+`StrikeBound` and dormant bangers are activated through a shape-overlap
+test against it, while roads and bodies still only ever meet the
+snag-safe hull.
 
 ### Bodywork contact
 

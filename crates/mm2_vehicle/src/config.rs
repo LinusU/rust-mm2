@@ -288,6 +288,14 @@ pub struct VehicleConfig {
     /// When absent a cuboid of `chassis_size` is used.
     #[serde(default)]
     pub collider_points: Option<Vec<[f32; 3]>>,
+    /// Convex-hull points of the *unmodified* authored bound (metres,
+    /// chassis space) — the prop-strike surface. `collider_points` may be
+    /// reshaped away from the authored bound (the snag-avoidance
+    /// underside); props are still tested against the shape the original
+    /// bound-vs-bound prop collision used. `None` means the chassis
+    /// collider is the only bound.
+    #[serde(default)]
+    pub striker_points: Option<Vec<[f32; 3]>>,
     /// Chassis collider friction coefficient (panel friction, not tires).
     #[serde(default = "default_collider_friction")]
     pub collider_friction: f32,
@@ -345,6 +353,7 @@ impl Default for VehicleConfig {
             chassis_size: [1.85, 0.55, 4.4],
             inertia: None,
             collider_points: None,
+            striker_points: None,
             collider_friction: default_collider_friction(),
             collider_restitution: 0.0,
             wheels: vec![
@@ -514,6 +523,16 @@ impl VehicleConfig {
             for (i, p) in pts.iter().enumerate() {
                 for (j, v) in p.iter().enumerate() {
                     check!(&format!("collider_points[{i}][{j}]"), finite(*v));
+                }
+            }
+        }
+        if let Some(pts) = &self.striker_points {
+            if pts.len() < 4 {
+                problems.push("striker_points needs at least 4 points".to_string());
+            }
+            for (i, p) in pts.iter().enumerate() {
+                for (j, v) in p.iter().enumerate() {
+                    check!(&format!("striker_points[{i}][{j}]"), finite(*v));
                 }
             }
         }

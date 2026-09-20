@@ -1,5 +1,6 @@
 //! ECS components describing a simulated vehicle.
 
+use avian3d::prelude::Collider;
 use bevy::prelude::*;
 
 use crate::config::VehicleConfig;
@@ -29,6 +30,15 @@ pub struct Vehicle {
     /// Handling definition.
     pub config: VehicleConfig,
 }
+
+/// The vehicle's unmodified authored bound as a convex-hull collider —
+/// a prop-strike surface, **not** a world collider. It is stored on the
+/// entity for shape-overlap queries only, so it can never touch roads,
+/// bodies or the solver: the snag-avoidance reshaped chassis collider
+/// remains the only world bound. `striker_points` on the config builds
+/// it; without one it defaults to the chassis collider's shape.
+#[derive(Component, Clone)]
+pub struct StrikeBound(pub Collider);
 
 /// Per-wheel runtime state (useful for debug drawing and tuning).
 #[derive(Debug, Clone, Copy, Default)]

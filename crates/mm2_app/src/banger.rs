@@ -39,7 +39,7 @@
 //! `Predicted` session never transitions banger state — replication
 //! (F26) delivers authoritative `BangerStateChanged` instead.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
@@ -49,6 +49,7 @@ use mm2_game::{
     AuthorityRole, Banger, BangerCause, BangerDefinition, BangerPhase, BangerPool,
     BangerStateChanged, CityEntity, ObjectId, ObjectIdentity, Session, SessionEntity,
 };
+use mm2_vehicle::StrikeBound;
 use tracing::{debug, warn};
 
 use crate::contracts::deepest_contact;
@@ -216,6 +217,17 @@ type BangerMut = (
     &'static Position,
     &'static mut LinearVelocity,
     &'static mut AngularVelocity,
+);
+
+/// The read-only pieces a bound-strike query needs: the striker's
+/// `StrikeBound` shape plus the pose/velocity the overlap test reads.
+type StrikerRef = (
+    Entity,
+    &'static StrikeBound,
+    &'static Position,
+    &'static Rotation,
+    &'static LinearVelocity,
+    &'static AngularVelocity,
 );
 
 /// One activation decision taken off a contact edge, before any
@@ -406,10 +418,26 @@ fn banger_name(bangers: &Query<BangerMut>, entity: Entity) -> String {
 /// contacts the solver owns (AC02). A placement carrying
 /// [`BangerPieces`] goes [`BangerPhase::Broken`] instead — its pieces
 /// become the active bodies.
+///
+/// Contacts are not the only strike source: a moving vehicle also
+/// activates any dormant banger its [`StrikeBound`] overlaps — the
+/// *unmodified* authored bound, the shape the original bound-vs-bound
+/// prop test used. The snag-safe chassis hull's raised floor can ride
+/// over kerb-height props (a bus over a cone) that bound would have
+/// touched; the overlap restores those strikes without re-introducing
+/// the road snags the reshape removed. The overlap carries no
+/// manifold: approach speed is the bound's surface velocity at the
+/// prop's centre, and the "contact point" is the prop's upwind face —
+/// the lever the spin kick needs.
+// Threads the same query the contact path mutates plus the read-only
+// striker/spatial-query params — the signature stays flat because the
+// decision list and pool accounting below must see one merged set.
 #[allow(clippy::too_many_arguments)]
 pub fn activate_bangers(
     mut reader: MessageReader<CollisionStart>,
     collisions: Collisions,
+    spatial: SpatialQuery,
+    strikers: Query<StrikerRef, Without<Banger>>,
     mut session: ResMut<Session>,
     pool: Res<BangerPool>,
     mut bangers: Query<BangerMut>,
@@ -468,6 +496,52 @@ pub fn activate_bangers(
                 estimate,
                 dir: normal * sign,
                 point,
+            });
+        }
+    }
+
+    // Authored-bound strikes: any dormant banger a striker's
+    // `StrikeBound` overlaps this tick is a candidate, deduplicated
+    // against the contact activations above and against itself (two
+    // strikers can overlap one prop). A below-threshold overlap leaves
+    // the prop dormant and — since the bound is not a world collider —
+    // the vehicle passes through it visually; the authored limits make
+    // that a corner case (a cone's 8 500 vs a bus's ~5 000 kg striker
+    // fires at walking pace).
+    let mut claimed: HashSet<Entity> = activations.iter().map(|a| a.entity).collect();
+    for (entity, bound, position, rotation, linvel, angvel) in &strikers {
+        if linvel.0 == Vec3::ZERO && angvel.0 == Vec3::ZERO {
+            continue;
+        }
+        let filter = SpatialQueryFilter::from_excluded_entities([entity]);
+        for hit in spatial.shape_intersections(&bound.0, position.0, rotation.0, &filter) {
+            let Ok((_, identity, banger, bpos, _, _)) = bangers.get(hit) else {
+                continue;
+            };
+            if banger.phase != BangerPhase::Dormant || claimed.contains(&hit) {
+                continue;
+            }
+            // Surface velocity of the bound at the prop's centre — the
+            // same role the manifold's normal speed plays for contacts.
+            let surface = linvel.0 + angvel.0.cross(bpos.0 - position.0);
+            let severity = surface.length();
+            if severity <= 0.0 {
+                continue;
+            }
+            let estimate = impulse_estimate(entity, severity, &masses);
+            if !banger.def.activates_on(estimate) {
+                continue;
+            }
+            claimed.insert(hit);
+            let dir = surface.try_normalize().unwrap_or(Vec3::X);
+            let reach = banger.def.size.iter().fold(0.0f32, |m, h| m.max(h.abs()));
+            activations.push(Activation {
+                entity: hit,
+                object: identity.0,
+                severity,
+                estimate,
+                dir,
+                point: bpos.0 - dir * reach,
             });
         }
     }
