@@ -16,6 +16,11 @@ pub struct VehicleInput {
     pub steering: f32,
     /// 0..1 handbrake.
     pub handbrake: f32,
+    /// Explicit gear-hold command: `Some(i)` pins the gearbox to gear `i`
+    /// (clamped to the configured range) instead of running the automatic
+    /// selector; `None` = automatic. A control command for AI, network
+    /// input and dev tuning — device mappings leave it `None`.
+    pub forced_gear: Option<usize>,
 }
 
 /// The vehicle entity marker + static configuration.
@@ -34,6 +39,9 @@ pub struct WheelState {
     pub contact_point: Vec3,
     /// World-space contact normal.
     pub contact_normal: Vec3,
+    /// The collider entity the wheel ray hit — lets telemetry resolve the
+    /// surface under the wheel. `None` while airborne.
+    pub contact_entity: Option<Entity>,
     /// Current compression of the suspension, metres.
     pub compression: f32,
     /// Last applied suspension (normal) force, N.
@@ -88,6 +96,11 @@ pub struct VehicleState {
     pub gear: usize,
     /// Estimated engine RPM.
     pub rpm: f32,
+    /// Drive force delivered this step as a fraction of what the
+    /// drivetrain could deliver at the current rpm/gear (0 coasting or
+    /// airborne, ~1 at full demand; dips during shifts and under
+    /// traction control).
+    pub engine_load: f32,
     /// Whether any wheel is grounded.
     pub grounded: bool,
     /// Speed along the vehicle forward axis, m/s (signed).
@@ -108,6 +121,7 @@ impl VehicleState {
             direction: DriveDirection::Forward,
             gear: 0,
             rpm: config.engine.idle_rpm,
+            engine_load: 0.0,
             grounded: false,
             forward_speed: 0.0,
             shifting: 0.0,

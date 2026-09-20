@@ -102,6 +102,9 @@ pub fn vehicle_bundle(config: &VehicleConfig) -> impl Bundle {
             LinearVelocity::ZERO,
             AngularVelocity::ZERO,
             SleepingDisabled,
+            // Vehicles participate in collision-event reporting so the
+            // app's impact pipeline sees their contacts.
+            CollisionEventsEnabled,
         ),
     )
 }

@@ -30,7 +30,9 @@
 
 use bevy::prelude::*;
 
-use crate::config::{ConfigError, SessionConfig};
+use crate::config::{ConfigError, SessionConfig, SessionMode};
+use crate::ids::{AuthorityRole, ObjectId, PlayerId};
+use crate::result::ResultId;
 
 /// One session's lifecycle phase.
 #[derive(Debug, Clone, PartialEq)]
@@ -120,6 +122,9 @@ pub struct Session {
     config: Option<SessionConfig>,
     generation: u64,
     tick: u64,
+    next_object_slot: u32,
+    next_player: u16,
+    next_result_sequence: u32,
 }
 
 impl Default for Session {
@@ -136,6 +141,9 @@ impl Session {
             config: None,
             generation: 0,
             tick: 0,
+            next_object_slot: 0,
+            next_player: 0,
+            next_result_sequence: 0,
         }
     }
 
@@ -165,6 +173,61 @@ impl Session {
         self.phase == SessionPhase::Playing
     }
 
+    /// The [`AuthorityRole`] this session stamps on simulated objects:
+    /// `Local` and `Host` sessions simulate their own rules; a `Remote`
+    /// client predicts/replicates. Spawn sites use this so rule systems
+    /// never have to ask the network who is in charge.
+    pub fn authority_role(&self) -> AuthorityRole {
+        if self
+            .config
+            .as_ref()
+            .is_none_or(|c| c.authority.is_authoritative())
+        {
+            AuthorityRole::Authority
+        } else {
+            AuthorityRole::Predicted
+        }
+    }
+
+    /// Mint the next stable [`ObjectId`] for this session. Ids carry the
+    /// current generation, so anything minted before the last `begin` is
+    /// detectably stale.
+    pub fn mint_object_id(&mut self) -> ObjectId {
+        let slot = self.next_object_slot;
+        self.next_object_slot += 1;
+        ObjectId {
+            generation: self.generation,
+            slot,
+        }
+    }
+
+    /// Mint the next [`PlayerId`] for this session — unique per
+    /// generation so a local driver and later remote/AI drivers can
+    /// coexist (AC05 groundwork).
+    pub fn mint_player_id(&mut self) -> PlayerId {
+        let id = PlayerId(self.next_player);
+        self.next_player += 1;
+        id
+    }
+
+    /// Mint the next [`ResultId`] for `participant` — generation +
+    /// participant + the session's event (when any) + sequence, so two
+    /// results can never share an identity (AC04).
+    pub fn mint_result_id(&mut self, participant: PlayerId) -> ResultId {
+        let event = self.config.as_ref().and_then(|c| match &c.mode {
+            SessionMode::Event(e) => Some(e.clone()),
+            SessionMode::Cruise => None,
+        });
+        let id = ResultId {
+            generation: self.generation,
+            participant,
+            event,
+            sequence: self.next_result_sequence,
+        };
+        self.next_result_sequence += 1;
+        id
+    }
+
     /// Validate `config` and start loading a new session
     /// (`Menu → Loading`). Illegal from any other phase — restart goes
     /// `Unloading → Menu` first, so a session always tears down before
@@ -175,6 +238,9 @@ impl Session {
         self.transition(SessionPhase::Loading)?;
         self.generation += 1;
         self.tick = 0;
+        self.next_object_slot = 0;
+        self.next_player = 0;
+        self.next_result_sequence = 0;
         self.config = Some(config);
         Ok(())
     }

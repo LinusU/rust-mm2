@@ -129,7 +129,7 @@ pub enum SessionMode {
 /// Identity of one authored event: a row in one city's `mm*data.csv`
 /// table. This is the data model the shipped tables actually use —
 /// content-driven, so mods adding a city or table rows stay referable.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EventRef {
     /// City stem the event table lives under (`london`, `sf`, or a
     /// mod-provided city). Deliberately a string, not a closed enum.
@@ -156,7 +156,7 @@ impl EventRef {
 
 /// The four authored `mm*data.csv` event tables each stock city ships
 /// (RACE-1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventTableKind {
     /// `mmblitzdata.csv` — solo checkpoint hunts against the clock.
     Blitz,
@@ -342,6 +342,14 @@ impl SessionAuthority {
     /// "no pausing in multiplayer").
     pub fn allows_pause(self) -> bool {
         matches!(self, Self::Local)
+    }
+
+    /// Whether a session under this authority simulates its own game
+    /// rules (`Local` offline and a `Host` server) rather than predicting
+    /// a remote server's (`Remote`). The boundary F01-B objects are
+    /// stamped with via `Session::authority_role`.
+    pub fn is_authoritative(self) -> bool {
+        !matches!(self, Self::Remote)
     }
 }
 

@@ -577,3 +577,131 @@ fn simulation_is_deterministic_across_update_batching() {
         "trajectories diverged across batching: {a:?} vs {b:?}"
     );
 }
+
+#[test]
+fn forced_gear_pins_the_gearbox() {
+    let (mut app, car) = test_app();
+    drive(
+        &mut app,
+        car,
+        FRAMES_PER_SECOND * 2,
+        VehicleInput::default(),
+    );
+    // Hold first gear through a run that would upshift several times.
+    drive(
+        &mut app,
+        car,
+        FRAMES_PER_SECOND * 8,
+        VehicleInput {
+            throttle: 1.0,
+            forced_gear: Some(0),
+            ..default()
+        },
+    );
+    let state = app.world().get::<VehicleState>(car).unwrap();
+    assert_eq!(state.gear, 0, "forced gear must pin the gearbox");
+    assert!(
+        state.forward_speed > 15.0,
+        "the run should be well past the automatic's shift points, speed {}",
+        state.forward_speed
+    );
+    // An out-of-range command clamps to the top gear, never panics.
+    drive(
+        &mut app,
+        car,
+        FRAMES_PER_SECOND,
+        VehicleInput {
+            throttle: 1.0,
+            forced_gear: Some(99),
+            ..default()
+        },
+    );
+    let state = app.world().get::<VehicleState>(car).unwrap();
+    let top = VehicleConfig::default().transmission.gear_ratios.len() - 1;
+    assert_eq!(state.gear, top);
+    // Releasing the command returns to the automatic selector: pin back
+    // to first, then let go — the selector must upshift again on its own.
+    drive(
+        &mut app,
+        car,
+        FRAMES_PER_SECOND,
+        VehicleInput {
+            throttle: 1.0,
+            forced_gear: Some(0),
+            ..default()
+        },
+    );
+    drive(
+        &mut app,
+        car,
+        FRAMES_PER_SECOND * 3,
+        VehicleInput {
+            throttle: 1.0,
+            ..default()
+        },
+    );
+    let state = app.world().get::<VehicleState>(car).unwrap();
+    assert!(
+        state.gear > 0,
+        "automatic selection must resume after the hold is released (gear {})",
+        state.gear
+    );
+    assert_finite(&app, car);
+}
+
+#[test]
+fn engine_load_tracks_delivered_demand() {
+    let (mut app, car) = test_app();
+    // Settled and coasting: nothing is demanded of the drivetrain.
+    drive(
+        &mut app,
+        car,
+        FRAMES_PER_SECOND * 3,
+        VehicleInput::default(),
+    );
+    assert!(
+        app.world().get::<VehicleState>(car).unwrap().engine_load < 0.05,
+        "coasting load should be ~0"
+    );
+    // Full throttle delivers nearly everything the drivetrain has.
+    drive(
+        &mut app,
+        car,
+        FRAMES_PER_SECOND * 2,
+        VehicleInput {
+            throttle: 1.0,
+            ..default()
+        },
+    );
+    let load = app.world().get::<VehicleState>(car).unwrap().engine_load;
+    assert!(load > 0.8, "full-throttle load should be ~1, got {load}");
+    // Airborne: no driven wheel touches the ground, so nothing can be
+    // delivered — the load drops even with the pedal held.
+    app.world_mut().write_message(ResetVehicle {
+        entity: Some(car),
+        position: Vec3::new(0.0, 5.0, 0.0),
+        yaw: 0.0,
+    });
+    app.update();
+    set_input(
+        &mut app,
+        car,
+        VehicleInput {
+            throttle: 1.0,
+            ..default()
+        },
+    );
+    let mut saw_airborne = false;
+    for _ in 0..FRAMES_PER_SECOND {
+        app.update();
+        let state = app.world().get::<VehicleState>(car).unwrap();
+        if !state.grounded {
+            saw_airborne = true;
+            assert_eq!(
+                state.engine_load, 0.0,
+                "airborne drivetrain delivers nothing"
+            );
+        }
+    }
+    assert!(saw_airborne, "car never left the ground");
+}

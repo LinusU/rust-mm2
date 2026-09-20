@@ -19,13 +19,13 @@ use bevy::time::TimeUpdateStrategy;
 use mm2_assets::Vfs;
 use mm2_content::VehicleDef;
 use mm2_game::{
-    PlayerVehicle, Session, SessionConfig, SessionEntity, SessionPhase, WorldMode,
-    advance_session_tick,
+    DamageSignals, ImpactEvent, ObjectIdentity, Player, PlayerControl, PlayerVehicle, Session,
+    SessionConfig, SessionEntity, SessionPhase, WorldMode, advance_session_tick,
 };
 use mm2_vehicle::vehicle::{VehicleInput, VehicleState};
 use mm2_vehicle::{VehicleConfig, VehiclePlugin, vehicle_bundle};
 
-use crate::{city, dev_world};
+use crate::{city, contracts, dev_world};
 
 /// Engine commit embedded by `build.rs` — reports stay versioned by the
 /// exact code that produced them.
@@ -141,6 +141,10 @@ pub fn headless_smoke(
         return record(SmokeStatus::Fail, format!("session begin: {e}"));
     }
     let owner = SessionEntity(session.generation());
+    // Mint the player's stable ids before the session moves into the app.
+    let vehicle_object = session.mint_object_id();
+    let player_id = session.mint_player_id();
+    let role = session.authority_role();
 
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
@@ -159,7 +163,17 @@ pub fn headless_smoke(
         .insert_resource(session)
         .add_plugins(TransformPlugin)
         .add_plugins(VehiclePlugin)
-        .add_systems(FixedUpdate, advance_session_tick);
+        .add_message::<ImpactEvent>()
+        .init_resource::<contracts::ImpactFilter>()
+        .add_systems(FixedUpdate, advance_session_tick)
+        .add_systems(
+            FixedLast,
+            (
+                contracts::collect_impacts,
+                contracts::publish_vehicle_telemetry,
+            )
+                .chain(),
+        );
     app.finish();
     app.cleanup();
 
@@ -239,6 +253,13 @@ pub fn headless_smoke(
         .spawn((
             PlayerVehicle,
             owner,
+            ObjectIdentity(vehicle_object),
+            Player {
+                id: player_id,
+                control: PlayerControl::Local,
+            },
+            role,
+            DamageSignals::default(),
             vehicle_bundle(vehicle_config),
             Transform::from_translation(spawn_pos).with_rotation(Quat::from_rotation_y(spawn_yaw)),
         ))
@@ -269,12 +290,17 @@ pub fn headless_smoke(
 
     let world_ecs = app.world();
     let ticks = world_ecs.resource::<Session>().tick();
+    // Impact evidence: the contract pipeline emitted N events over the
+    // run (the spawn drop is usually one on flat ground).
+    let filter = world_ecs.resource::<contracts::ImpactFilter>();
+    let impacts = filter.emitted;
+    let dropped = filter.dropped;
     let pos = world_ecs.get::<Position>(car).map(|p| p.0);
     let vel = world_ecs.get::<LinearVelocity>(car).map(|v| v.0);
     let rot = world_ecs.get::<Rotation>(car).map(|r| r.0);
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){extra}",
+            "updates={frames} ticks={ticks} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){extra}",
             moved = pos.map(|p| (p - spawn_pos).length()).unwrap_or(f32::NAN),
             total = vehicle_config.wheels.len(),
             x = pos.map(|p| p.x).unwrap_or(f32::NAN),

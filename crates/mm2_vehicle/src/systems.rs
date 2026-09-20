@@ -221,6 +221,7 @@ pub fn vehicle_simulation(
             grounded_any = true;
             ws.contact_point = contact;
             ws.contact_normal = normal;
+            ws.contact_entity = Some(hit.entity);
             ws.compression = compression;
             ws.suspension_force = sus_force;
 
@@ -246,8 +247,12 @@ pub fn vehicle_simulation(
             .unwrap_or(0.34)
             .max(0.01);
         let wheel_rps = mean_wheel_speed / (std::f32::consts::TAU * wheel_radius);
-        let new_gear =
-            sim::select_gear(state.gear, wheel_rps.abs(), &cfg.transmission, &cfg.engine);
+        // `forced_gear` is an explicit control command (AI/network/dev
+        // tuning): it pins the gearbox instead of running the selector.
+        let new_gear = match input.forced_gear {
+            Some(g) => g.min(cfg.transmission.gear_ratios.len().saturating_sub(1)),
+            None => sim::select_gear(state.gear, wheel_rps.abs(), &cfg.transmission, &cfg.engine),
+        };
         if new_gear != state.gear {
             state.shifting = cfg.transmission.shift_time;
         }
@@ -272,6 +277,11 @@ pub fn vehicle_simulation(
 
         // --- second pass: tire forces -----------------------------------------
         let reference_load = cfg.mass * 9.81 / wheel_count.max(1) as f32;
+        // `engine_load` bookkeeping: what the drivetrain could deliver at
+        // this rpm/gear across the contacting driven wheels vs. what was
+        // actually requested (post-traction-control).
+        let mut drive_available = 0.0f32;
+        let mut drive_delivered = 0.0f32;
         for i in 0..wheel_count {
             let wheel = &cfg.wheels[i];
             let ws = state.wheels[i];
@@ -320,31 +330,44 @@ pub fn vehicle_simulation(
             };
             let lateral = sim::lateral_force(slip, load, tires) * (1.0 - 0.6 * hb);
 
+            // What the drivetrain could push through this wheel at the
+            // current rpm/gear — the `engine_load` denominator. Uses the
+            // same torque/ratio/direction terms as the request below.
+            let wheel_drive_available = if wheel.driven {
+                let (torque, ratio) = if reversing {
+                    (
+                        sim::engine_torque(state.rpm.max(cfg.engine.idle_rpm), &cfg.engine),
+                        cfg.transmission.reverse_ratio,
+                    )
+                } else {
+                    (
+                        sim::engine_torque(state.rpm, &cfg.engine),
+                        cfg.transmission
+                            .gear_ratios
+                            .get(state.gear)
+                            .copied()
+                            .unwrap_or(1.0),
+                    )
+                };
+                torque * ratio * cfg.transmission.final_drive * cfg.transmission.efficiency
+                    / wheel.radius
+                    * drive_share
+                    * shift_torque
+            } else {
+                0.0
+            };
+            drive_available += wheel_drive_available;
+
             // Longitudinal: engine / reverse / engine-brake / brakes /
             // rolling resistance. The drive request is computed separately
             // so traction control can cap just the power side.
             let mut longitudinal = sim::rolling_resistance(vel_long, load, tires);
             let mut drive_request = 0.0f32;
             if wheel.driven && input.throttle > 0.0 && !reversing {
-                let torque = sim::engine_torque(state.rpm, &cfg.engine);
-                let ratio = cfg
-                    .transmission
-                    .gear_ratios
-                    .get(state.gear)
-                    .copied()
-                    .unwrap_or(1.0);
-                let wheel_torque =
-                    torque * ratio * cfg.transmission.final_drive * cfg.transmission.efficiency;
-                drive_request +=
-                    wheel_torque / wheel.radius * drive_share * input.throttle * shift_torque;
+                drive_request += wheel_drive_available * input.throttle;
             }
             if wheel.driven && reversing {
-                let torque = sim::engine_torque(state.rpm.max(cfg.engine.idle_rpm), &cfg.engine);
-                let wheel_torque = torque
-                    * cfg.transmission.reverse_ratio
-                    * cfg.transmission.final_drive
-                    * cfg.transmission.efficiency;
-                drive_request -= wheel_torque / wheel.radius * drive_share * input.brake;
+                drive_request -= wheel_drive_available * input.brake;
             }
             // Engine braking through the driven wheels at closed throttle.
             if wheel.driven
@@ -372,6 +395,7 @@ pub fn vehicle_simulation(
                 let cap = traction_limit * cfg.assists.traction_control;
                 drive_request = drive_request.clamp(-cap, cap);
             }
+            drive_delivered += drive_request;
             longitudinal += drive_request;
 
             // Foot brake only in forward direction — in reverse the pedal is
@@ -439,6 +463,14 @@ pub fn vehicle_simulation(
             ws.longitudinal_force = longitudinal;
             ws.spin += (vel_long / wheel.radius.max(0.01)) * dt;
         }
+
+        // Delivered vs. available drive force — 0 when no driven wheel
+        // touches the ground, ~1 at full demand.
+        state.engine_load = if drive_available > 1.0 {
+            (drive_delivered / drive_available).abs().clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
 
         // --- chassis-level forces ---------------------------------------------
         // Aero drag + downforce at the centre of mass.

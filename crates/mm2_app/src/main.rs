@@ -16,12 +16,13 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use clap::Parser;
-use mm2_app::{camera, car_visual, city, dev_world, input, smoke};
+use mm2_app::{camera, car_visual, city, contracts, dev_world, input, smoke};
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
 use mm2_game::{
-    CameraPose, DevOverrides, Mm2Vfs, PlayerVehicle, Session, SessionConfig, SessionEntity,
-    SessionPhase, VehicleSelection, WorldMode, advance_session_tick,
+    CameraPose, DevOverrides, ImpactEvent, Mm2Vfs, ObjectIdentity, Player, PlayerControl,
+    PlayerVehicle, Session, SessionConfig, SessionEntity, SessionPhase, VehicleSelection,
+    WorldMode, advance_session_tick,
 };
 use mm2_vehicle::{ResetVehicle, VehicleConfig, VehicleDebugEnabled, VehiclePlugin};
 use tracing::{error, info, warn};
@@ -442,8 +443,18 @@ fn main() {
         CameraMode::Chase
     })
     .add_plugins(VehiclePlugin)
+    .add_message::<ImpactEvent>()
+    .init_resource::<contracts::ImpactFilter>()
     .add_systems(Startup, setup)
     .add_systems(FixedUpdate, advance_session_tick)
+    .add_systems(
+        FixedLast,
+        (
+            contracts::collect_impacts,
+            contracts::publish_vehicle_telemetry,
+        )
+            .chain(),
+    )
     .add_systems(
         Update,
         (
@@ -773,10 +784,24 @@ fn setup(
             .unwrap_or(-def.config.chassis_size[1] * 0.5);
         spawn.position.y += (0.25 - hull_min_y).max(0.35);
     }
+    // Stable identities + authority role for the contract consumers
+    // (telemetry, impacts, results): the entity gets a session-minted
+    // `ObjectId`, its driver a `PlayerId`, and its rules the session's
+    // authority boundary — local play stamps `Authority`.
+    let vehicle_object = session.mint_object_id();
+    let player_id = session.mint_player_id();
+    let role = session.authority_role();
     let vehicle = commands
         .spawn((
             PlayerVehicle,
             owner,
+            ObjectIdentity(vehicle_object),
+            Player {
+                id: player_id,
+                control: PlayerControl::Local,
+            },
+            role,
+            mm2_game::DamageSignals::default(),
             mm2_vehicle::vehicle_bundle(&vehicle_config.0),
             Transform::from_translation(spawn.position)
                 .with_rotation(Quat::from_rotation_y(spawn.yaw)),
@@ -820,6 +845,11 @@ fn setup(
                 if !tmissing.is_empty() {
                     warn!(car = %def.id, "trailer missing textures: {}", tmissing.join(", "));
                 }
+                // The trailer is a simulated object too — stable id and
+                // the session's authority role, but no player driver.
+                commands
+                    .entity(te)
+                    .insert((ObjectIdentity(session.mint_object_id()), role));
                 spawn.trailers.push((
                     te,
                     Vec3::from(trailer.car_hitch) - Vec3::from(trailer.trailer_hitch),
@@ -875,12 +905,14 @@ fn setup(
         .expect("Ready → Playing is a legal transition");
 }
 
-/// HUD line: speed, gear/direction, RPM, grounded wheels.
+/// HUD line: speed, gear/direction, RPM, grounded wheels — read from the
+/// `VehicleTelemetry` snapshot, the presentation-side contract, not the
+/// mutable simulation state.
 fn update_hud(
     session: Res<Session>,
     mut hud: Query<&mut Text, (With<Hud>, Without<ErrorText>)>,
     mut err: Query<&mut Text, (With<ErrorText>, Without<Hud>)>,
-    vehicles: Query<(&mm2_vehicle::vehicle::VehicleState, &LinearVelocity), With<PlayerVehicle>>,
+    vehicles: Query<&mm2_game::VehicleTelemetry, With<PlayerVehicle>>,
     cameras: Query<(&Camera, &Transform)>,
 ) {
     for mut text in &mut err {
@@ -889,7 +921,7 @@ fn update_hud(
             _ => Text::new(""),
         };
     }
-    let Ok((veh, vel)) = vehicles.single() else {
+    let Ok(veh) = vehicles.single() else {
         for mut text in &mut hud {
             *text = Text::new(match session.phase() {
                 SessionPhase::Failed(_) => String::new(),
@@ -899,10 +931,11 @@ fn update_hud(
         }
         return;
     };
-    let speed = vel.0.length() * 3.6;
-    let dir = match veh.direction {
-        mm2_vehicle::vehicle::DriveDirection::Forward => format!("D{}", veh.gear + 1),
-        mm2_vehicle::vehicle::DriveDirection::Reverse => "R".to_string(),
+    let speed = veh.linear_velocity.length() * 3.6;
+    let dir = if veh.reverse {
+        "R".to_string()
+    } else {
+        format!("D{}", veh.gear + 1)
     };
     let grounded = veh.wheels.iter().filter(|w| w.grounded).count();
     let cam = active_cam_pose(&cameras).unwrap_or_default();

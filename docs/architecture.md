@@ -12,13 +12,13 @@ The engine is a Cargo workspace with strict dependency direction:
   ┌───────────┐  ┌───────────┐  ┌────────────┐
   │ mm2_game  │  │mm2_vehicle│  │ mm2_assets │
   │ domain    │  │ Avian sim │  │    VFS     │
-  │  state    │  └─────┬─────┘  └─────┬──────┘
-  └───────────┘        │              │
-                       │              ▼
-                       │        ┌────────────┐
-                       │        │mm2_formats │
-                       │        │  parsers   │
-                       │        └────────────┘
+  │  state    │  └───────────┘  └─────┬──────┘
+  └─────┬─────┘                       │
+        │                             ▼
+        │                       ┌────────────┐
+        └──────────────────────►│mm2_formats │
+                                │  parsers   │
+                                └────────────┘
 ```
 
 Dependency rules:
@@ -40,8 +40,21 @@ Dependency rules:
   `Session` lifecycle state machine (`Menu → Loading → Ready →
   Countdown → Playing → Paused/Results → Unloading → Menu`, `Failed` on
   load errors), `SessionEntity` ownership markers for teardown, and the
-  fixed-step session clock. Deliberately small; gameplay systems grow
-  here later.
+  fixed-step session clock. It also owns the shared contracts gameplay
+  and a future network layer read: stable `PlayerId`/`ObjectId`/
+  `ImpactId`/`ResultId` identity (distinct from Bevy `Entity`, minted by
+  the session with its generation), `AuthorityRole` marking who may
+  simulate an object, `SurfaceMaterial`/`SurfaceState` (authored codes
+  carried uninterpreted, physical material kept separate from visual
+  identity), `ImpactEvent`+`ImpactPolicy`/`ImpactDedup` (bounded,
+  deduplicated contact semantics — never raw solver spam),
+  `VehicleTelemetry`/`WheelTelemetry`/`DamageSignals` (read-only
+  per-step snapshots stamped with generation+tick), and
+  `SessionResult`/`ResultLedger` (stable result identity with
+  deduplication). `mm2_game` may reference `mm2_formats` types (e.g.
+  authored event-table kinds) but never parsing, VFS, Bevy rendering or
+  Avian internals. Deliberately small; gameplay systems grow here
+  later.
 - `mm2_app` is the only place where everything is allowed to meet. Bevy
   conversion of parsed formats (TEX → `Image`, PSDL/PKG → `Mesh`) lives here,
   not in the parser crates.
@@ -95,14 +108,39 @@ serve `mm2_app` and `mm2-inspect`, so both see identical resolution.
   suspension, engine torque curve, gearbox, tire grip curves, steering,
   brakes, aero and assist strengths. Systems contain no magic constants.
 - Input is a normalized `VehicleInput` component (throttle/brake/steering/
-  handbrake ∈ 0..1 / -1..1). Physics systems never read devices; `mm2_app`
+  handbrake ∈ 0..1 / -1..1) plus an explicit `forced_gear` override for
+  consumers that pin the gearbox (clamped to the top gear; `None` resumes
+  the automatic selector). Physics systems never read devices; `mm2_app`
   maps keyboard/gamepad into the component and clears it on focus loss or
   while the free camera is active.
 - Brake-to-reverse is an explicit `DriveDirection` state with a near-stop
   hysteresis band — no oscillating around a single speed threshold.
 - Wheel telemetry is honest about the arcade model: `traction_demand` is
   force utilization against the grip limit, not measured wheel slip (there
-  is no wheel-speed state); it is clamped and signed by direction.
+  is no wheel-speed state); it is clamped and signed by direction. Each
+  `WheelState` also records `contact_entity` — the entity its ray probe
+  hit — so surface lookups can resolve what the wheel is driving on.
+  `VehicleState.engine_load` reports delivered drive force vs. the
+  demandable maximum (0 while airborne), and `vehicle_bundle` carries
+  `CollisionEventsEnabled` so chassis contacts reach the impact pipeline.
+
+## Contract bridge (`mm2_app::contracts`)
+
+`mm2_game` owns the contract *types*; `mm2_app::contracts` owns the
+*producers* that turn engine data into them, running in `FixedLast` after
+the physics step and only while the session is `Playing`:
+
+- `collect_impacts` reads Avian `CollisionStart` edges + `Collisions`
+  manifolds, resolves participants to stable `ObjectId`s (unmarked static
+  world → `ObjectId::WORLD`), and emits bounded, deduplicated
+  `ImpactEvent`s — severity from pre-solver normal approach speed, one
+  event per physical impact via `ImpactDedup`, capped per tick by
+  `ImpactPolicy` with drops counted in `ImpactFilter`. Emitted impacts
+  also accumulate `DamageSignals` on the participants.
+- `publish_vehicle_telemetry` inserts the read-only `VehicleTelemetry`
+  snapshot on each simulated vehicle, stamped with session generation,
+  fixed-step tick and authority role. Presentation (the HUD) reads this
+  snapshot, not the mutable `VehicleState`.
 
 ## City import
 
