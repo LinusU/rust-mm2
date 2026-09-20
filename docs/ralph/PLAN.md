@@ -38,8 +38,23 @@
 
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
-**Next selected slice: F13-A remainder, F14-A, or F11-C** — the
-latest iteration re-took the F04-C.2/-C.3 retail evidence the
+**Next selected slice: F14-A remainder, F11-C, or F13-B** — the
+latest iteration landed F14-A.1, the binding-honesty leg of
+circuit/lap rules: authored `NumLaps` is now a checked parameter
+(`BadParam` on `≤0`/overflow instead of a silent `.max(1) as u32`
+clamp+truncate — the column's 2–3 amateur / 2–4 professional counts
+bind per difficulty, CIR-5), `RaceProgress::advance` is inert
+outside `Racing` (a resolved participant cannot re-finish or clear
+more gates even if positions are still fed in — AC04's once-only
+rule is a contract property, and AwaitingStart steps only
+re-anchor), the dead `with_next` builder is removed, `Ordered`'s
+start-lap semantics are documented in the contract (lap 1 begins at
+release; the start-line copy closes each lap), and the headless
+smoke record gains `lap={cur}/{laps}` for Ordered defs. Retail:
+`race-defs --table circuit` shows 10/10 rows/city building with
+distinct authored laps/gates/slots; london `circuit:0 --bot` records
+`lap=2/3` mid-race and `lap=2/4` under `--pro`. Iteration
+41 re-took the F04-C.2/-C.3 retail evidence the
 operator-report repair had invalidated: on corrected geometry the
 original SF barricade-row staging spawn now sits just under the authored
 `ImpulseLimit2` (the bus slides around the row — corrected record,
@@ -166,6 +181,9 @@ F04-C.2 — no surveyed retail site produces that density.
 | `mm2-inspect banger <retail>` | exit 0 — 999/999 `tune/banger/*.dgbangerdata` parse (1 expected `default` fallback + 994 extras + 4 `.#*.1.2` editor backups, 0 unsupported/failed): 216 standalone props (own PKG), 477 named parts (`.mtx`/embedded chunk), 254 resolved break fragments (`BREAK<NN>` chunks), 47 dead refs; `NumParts` ↔ distinct BREAK-index count holds on every standalone (0 mismatches). 54 issues (47 dead refs, 4 fragment `NumParts>0`, 2 glow-count mismatches, 1 `asBirthRule`); `--strict` exits 2. `scan` parses all 995 `.dgbangerdata` names |
 | `mm2-inspect banger-bind <retail>` | exit 0 — 129 placement-source files audited (INST, `city/`/`race/` pathsets, propdefs/proprules/props CSVs, PSDL `prop_rule` reachability; expected/overlay/extra classified, dev+backup dirs kept): 3 unsupported (truncated `blitz10`/`blitz11` pathsets), 0 failures, 51 issues (dead placement refs — phys `*_m` names, `sp_bollard_pedsafe_l`, `r_concrete`, `prop_sp_barricadeconcr_f`, `xcp_banrred_f`). INST places static architecture (london 0/221, sf 0/165 names bound); `*_ai.inst` stamp bound `sp_stop_f` only; `props.pathset` 17/17 + 30/30 bound; propdefs 12/12 + 27/27 bound; PSDL-reachable def files 11/11 + 20/20 bound. Reverse: 269/994 records placed-reachable, 562 on 105 `vp*`/`va*` vehicle owners, 163 on 87 never-placed owners. `--strict` exits 2; `--city london` → 50 files/1 issue |
 || `mm2 --mm2-path <retail> --city sf --car vpddbus --spawn=-141.9,1.5,-608.5,115 --headless --frames 5000` | `status=pass` — `bng_ev=0a/5s/2b` at 10 000 ticks (bit-identical re-run): the post-F03-B.5 re-take of F04-C.2's flat-ground break+settle leg. The original `−170,1.5,−565,30` spawn now sits under the authored 51 888 limit (`0a/0s/0b` — corrected record); `--banger-pool 2`/`1` cap live fragments at 2/1; London `vpbug 802,6,-905,180` reclaim ring bit-identical; `checkpoint:7 --car vpddbus --spawn=-703,1.5,217,190` shatters two `sp_sawhrslt_f` at ~9–12 m/s. Full matrix in `docs/research/banger.md` §re-take. |
+
+|| `mm2-inspect race-defs <retail> --table circuit` | exit 0 — 10/10 circuit rows/city build at both difficulties: london authored laps `3am/4pro` (except c1 `2/2`, c9 `3/2`), sf `3/4` (except c8-9 `2/2`), 6–23 gates, 4–7 opp/0 cop, 1–8 start slots — every row binds its own authored lap/route config (CIR-5). |
+|| `mm2 --mm2-path <retail> --city london --event circuit:0 [--pro] --headless --bot` | `status=pass` — amateur `--frames 12000` → `race=Running cp=2/6 lap=2/3` at 23 640 ticks; `--pro --frames 4000` → `lap=2/4`: Ordered lap tracking + per-difficulty `NumLaps` binding on real content. The bot deterministically wedges mid-lap-2 at `(-413,-169)` — bot-limited, not a lap-logic defect (the earlier matrix recorded this event `outcome=finished` under the same driver). |
 
 ## Operator report (2026-09-20, human play-test — PRIORITY)
 
@@ -296,7 +314,8 @@ remainder / F14-A / F11-C per the selection policy).
 | F13-A.1 | implemented | F02-B, F11-B | Results flow (UI-5, DSN-11): `advance_race` transitions `Playing → Results` on the same step it records a *local* participant's terminal resolution (`Finished`/`TimedOut`) — the race clock, progress and ledger freeze with the phase; a remote/AI participant resolving while the local driver still races ends nothing (per-participant progress stays independent). `update_hud` shows the outcome + recorded finish time during `Results`. Tests +4 in `tests/race.rs` (31 total): finish→Results + once-only ledger, non-local resolution keeps `Playing` then local finish resolves, timeout→Results, restart-from-Results rebegins gen-2 with no stale `RaceState`. Retail: sf `checkpoint:0 --bot` → `phase=results cp=6/6 outcome=finished`; london `blitz:0` → `phase=results outcome=timed-out`. Ledger: RACE-11 (aimap difficulty rosters, 23/24 + `sf/race0` anomaly), WPT-2 measured on all 24 waypoint files, MP-9 corrected. AC02/AC03/AC05 evidence strengthened; AC04 needs F15, AC06 needs representative playability. Candidate pending external check. |
 | F13-B | queued | F13-A | — |
 | F13-C | queued | F13-B, F15-B | — |
-| F14-A | queued | F02-B, F11-B | London circuit0–11, SF circuit0–11 authored data present (circuit11 partial: opp/pathset only, no .aimap). SF `cir1–9` are the circuit events' start grids under a short stem — aliased to `circuit<N>` since F11-B.2 (WPT-3). |
+| F14-A | active | F02-B, F11-B | Split into A.1 (binding honesty + lap evidence — implemented below). London circuit0–11, SF circuit0–11 authored data present (circuit11 partial: opp/pathset only, no .aimap). SF `cir1–9` are the circuit events' start grids under a short stem — aliased to `circuit<N>` since F11-B.2 (WPT-3). Remaining: event `.aimap` `[Exceptions]`/density scoping needs consumers (F15/F10 scope), AC06 representative-playability matrix. |
+| F14-A.1 | implemented | F02-B, F11-B | Circuit/lap binding hardening + evidence. `race_def`: authored `NumLaps` is a checked parameter like every other authored value — `BadParam` on `≤0`/overflow (was a silent `.max(1) as u32` clamp+truncate); `laps: 0` stays unbound on AnyOrder rows (UNK-5 template junk). `RaceProgress::advance` is inert outside `Racing` — re-anchors for `AwaitingStart`, can never re-finish or clear gates once resolved (AC04's once-only rule is now a contract property; F14-AC02's repeated-finish-hits leg). Dead `with_next` builder removed; `Ordered` doc spells out start-lap semantics (lap 1 begins at release, the start-line copy closes each lap). Smoke record gains `lap={cur}/{laps}` for Ordered defs (any-order records bit-identical). Tests: +2 contract (closing gate counts once per completed sequence; resolved participant inert) +1 producer (`NumLaps` 0/-2/5e9 → BadParam, per-difficulty blocks, checkpoint junk ignored); two existing tests now set `Racing` before `advance` to match the driver gate. Retail (`fnv1a64:e91e6cd4b2ae30d9`): `race-defs --table circuit` — 10/10 rows/city, distinct authored laps (london 3am/4pro except c1 2/2, c9 3/2; sf 3/4 except c8-9 2/2), 6–23 gates, 4–7 opp/0 cop, 1–8 slots; london `circuit:0 --bot` → `race=Running cp=2/6 lap=2/3`, `--pro` → `lap=2/4` (bot wedges mid-lap-2 — bot-limited, deterministic, finish previously recorded). AC01 strengthened, AC02 negative legs evidenced; AC03–AC06 open. Candidate pending external check. |
 | F14-B | queued | F14-A | — |
 | F14-C | queued | F14-B, F15-B | — |
 | F15-A | queued | F02-B, F09-B, F11-B | 612 `.opp` files present; no opponent AI. |
