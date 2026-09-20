@@ -334,9 +334,18 @@ pub fn headless_smoke(
     let race_detail = world_ecs
         .get_resource::<RaceState>()
         .map_or_else(String::new, |r| {
-            let cleared = world_ecs
-                .get::<RaceProgress>(car)
-                .map_or(0, |p| p.cleared_count());
+            let progress = world_ecs.get::<RaceProgress>(car);
+            let cleared = progress.map_or(0, |p| p.cleared_count());
+            // Ordered (Circuit) runs also name the lap in progress —
+            // `lap` counts completed laps, so `lap+1` is the lap under
+            // way, clamped at the finish. Any-order records stay
+            // bit-identical.
+            let lap = if r.definition.rule == mm2_game::CheckpointRule::Ordered {
+                let current = progress.map_or(1, |p| (p.lap + 1).min(r.definition.laps));
+                format!(" lap={current}/{}", r.definition.laps)
+            } else {
+                String::new()
+            };
             let ledger = world_ecs.resource::<mm2_game::ResultLedger>();
             let limit = r
                 .time_remaining()
@@ -348,11 +357,12 @@ pub fn headless_smoke(
                 .map(|s| format!(" outcome={}", s.outcome.name()))
                 .unwrap_or_default();
             format!(
-                " race={:?} cp={}/{} results={}{}{}",
+                " race={:?} cp={}/{} results={}{}{}{}",
                 r.phase,
                 cleared,
                 r.definition.checkpoints.len(),
                 ledger.len(),
+                lap,
                 limit,
                 outcome,
             )
