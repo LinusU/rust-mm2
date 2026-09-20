@@ -167,37 +167,42 @@ Reported, verbatim: "all of the stuff is spawned in at the wrong height",
 and a sawhorse barricade struck at over 100 km/h "didn't move it (maybe
 because half of it is stuck inside the ground?)".
 
-1. **Stamped props sit at the wrong height and are partly below the road
-   surface.** The operator reports this for the scene generally, not for
-   one channel, so check all three placement channels (INST,
-   `*.pathset`, PSDL `prop_rule`), not only pathsets.
+1. **Stamped props sat at the wrong height — root cause found and
+   fixed (F03-B.5).** All three channels checked. Diagnosis (measured
+   on retail `dgBangerData` + PKG geometry, not inferred): prop meshes
+   are authored centred at the bound centre, `Size` is the bound's
+   *full* extents, `CG` is the bound centre, and the authored stamp
+   point is where the bound's *base* rests. `city.rs` previously
+   stamped the mesh *centre* at the point — every prop sank by ~half
+   its height, exactly matching the report. Fix: `PropOffset` —
+   `+CG` for bound stamps, `−min_y` lift for unbound stamps, verbatim
+   for INST — baked into render + collision vertices and BREAK
+   fragments, keyed per offset class in `PropCache`. Verified on
+   retail London + SF screenshots and unchanged stamp counts;
+   regression test asserts collider AABBs through `load_city` + Avian.
 
-2. **Two recorded hypotheses are contradicted — treat both as wrong until
-   re-derived.** F04-C.1 records "hull underside clearance means tall
-   vehicles cannot contact <~1 m props (raycast wheels) — open fidelity
-   question" and "fragments/knocked props stay `Active` on slopes
-   (slope-tumbling suspected, unproven)". Both were inferred to explain
-   props that would not respond. A prop sunk into the ground explains the
-   same symptoms without either mechanism. Do not build further work on
-   these explanations; establish the actual vertical placement first.
+2. **The two recorded hypotheses are superseded by the diagnosis.**
+   The sawhorse that "didn't move" was sunk ~0.73 m — its bound was
+   already below the road surface, so it read as immovable. The
+   sink explains the same symptoms as the inferred slope-tumble and
+   hull-clearance mechanisms. F04-C.3's strike-bound evidence was
+   measured against *sunk* props (props were lower than authored —
+   the striker bound had *more* clearance, not less); its
+   implementation stays, but the "previously ghosted" evidence must
+   be re-taken on corrected geometry before F04-C.3 rolls up.
 
-3. **F04-C.2's retail evidence is unreliable.** "Flat-ground settle,
-   repeated hits, pool reclaim" was measured against misplaced geometry.
-   F04 must not roll up to `checked` on that evidence. Re-take it after
-   the height defect is resolved.
+3. **F04-C.2's retail evidence remains unreliable — re-take owed.**
+   "Flat-ground settle, repeated hits, pool reclaim" was measured
+   against misplaced geometry. Re-run the `--spawn` evidence commands
+   on the fixed placement before F04 rolls up to `checked`.
 
-Code lead, not a diagnosis: `stamp_line_strip` places each prop at the
-authored pathset point verbatim through `yawed_transform` /
-`unrotated_transform`, and no vertical adjustment exists anywhere in the
-stamping path — no ground snap, and no correction for whether an authored
-origin denotes a mesh base or its centre. Whether the true cause is a
-mesh-origin convention, a missing ground query, or a PSDL-vs-pathset
-datum mismatch is unestablished. Verify against authored data before
-changing placement maths; a blanket offset that merely looks better is
-not acceptable.
+Code lead resolved: `stamp_line_strip` did place each prop at the
+authored point verbatim — correct for the *transform*; the missing
+piece was the content-space offset between the authored point and the
+centred mesh, now the `PropOffset` contract.
 
-Expected next iteration: investigate and fix this in preference to new
-feature work, with a regression test that fails on the current placement.
+Expected next iteration: re-take the F04-C.2 retail runs on the fixed
+placement; then return to the queued feature work.
 
 ## Task table
 
@@ -221,6 +226,7 @@ feature work, with a regression test that fails on the current placement.
 | F03-B.2 | checked | F03-B | Event `.pathset` overlays (F03-AC04 leg): `event_race_setup` returns `EventSetup { definition, pathsets }` — the `<stem>.pathset` records the catalog attributes to the resolved event; `load_session_world` calls `city::spawn_event_pathsets` which runs the shared `stamp_pathset` classifier (`prop`/`PATHnn` label/`giz_*` animated/decal/`unresolved` + per-file 8192 budget + `validate()` issues) through a fresh `PropCache` into `event-pathset-*` session-owned entities. Teardown removes exactly the overlay; re-entry restamps once (AC04 — restart test asserts identical gen-2 count, no gen-1 survivors). Parse/read failures land in `EventPathsetReport::failed_files`, warned, non-fatal (optional record). Retail: london `circuit0` 181 props, `race6` 256, sf `circuit0` 85 — all `sp_*` names. `<object>_<event>` overrides (`london_bridge_circuit0`…) stay extras — all `giz_*`/`PATHnn`/`sp_pcar*` on retail, need animated-object/parked-car features. Tests: +3 in `tests/event.rs`. Externally checked at `afff57d`. |
 | F03-B.3 | implemented | F03-B | Prop-rule stamping channel (WLD-17/UNK-21). `mm2_game::props::walk_prop_rules` — pure geometry walk: `RoomPath::road_rooms` chains, `start/end_crossroads` curb-pair junction runs, interior room-to-road boundaries found via the widest neighbour-marked perimeter pair, the two arcs between crossings walked as sidewalk building lines with side labels measured against travel direction (left/right of *travel*, not winding). Per-side `start`/`distance`/`maxUse` budgets and `(minLerp+maxLerp)/2` curb→outer placement are inferred policies; `file1–4` pick is a deterministic hash; output bounded at `MAX_PROP_RULE_STAMPS`, issues + stats counted. `load_city` spawns `PropStamp`s through the shared `PropCache` — bound names become dormant bangers via `spawn_banger_prop` (same path as pathset stamps), the rest `spawn_prop`; `CityReport` gains `proprule_*` counters + Display fields. Retail: sf 345 rooms/5002 stamps/5002 bangers, london 410/5083/5083 — 0 unresolved, 0 no_crossing; 109 bad `road_rooms` refs (65 0xx encoded values) + 52 sf / 5 london unreached rule rooms counted honestly. Screenshots: lamps line both sidewalks at authored ~29 m stagger, london phone booths/trees/bollards at curb edges, multi-room freeway parapet lamps — visually consistent. Unit tests (4, synthetic PSDL) + app test through `load_city`. TEX fix included: `decode_tex` clamps declared mip count to the size-supported max (`p_parkmeter_f.tex` 7 mips on 32×32 → hard wgpu error, now warned+clamped). UNK-21 narrowed to field semantics; geometry promoted to WLD-17. Candidate pending external check. |
 | F03-B.4 | implemented | F03-B.3 | Decal pathset channel — the last ambient placement source. `mm2_app::decals::stamp_decals` consumes `<dir>/<stem>/decals.pathset`: measured geometry (WLD-18 — `LineStrip` points interleave two authored ribbon edges, even/odd pair = cross-section, consecutive sections join into quads; authored widths ~1 m zigzag → 20 m junction paint), `u` across the pair / `v` along the centre line tiled per `spacing` (inferred axis policy — texture contents agree: zigzag oscillates along V, rxwalk bars along U), palette alpha honoured via new `decode_rgba_honoring_alpha` (P8 decals carry authored translucency; ordinary `decode_rgba` unchanged), alpha-bearing textures `AlphaMode::Blend`, 2 cm lift + −1 depth bias, lit double-sided render-only entities merged per texture stem — no colliders. Every path classified: ribbons/labels/`giz_*` animated/PKG-props/unresolved/empty/degenerate/odd-tail/skipped quads/capped/missing textures/issues all counted in `CityReport.decals`. Retail: london 79 ribbons/85 quads/3 entities (zigzag, box junction, zebra), sf 48/223/2 (rails, skid marks) — 0 unresolved, 0 missing textures; screenshots show rail channels, zebra stripes, junction wash. `props.pathset` keeps classifying its 31 stale `r4i_rails_f` copies (26 byte-identical) without double-stamping. `MaterialCache::get_decal` shares the existing texture→material cache. Candidate pending external check. |
+| F03-B.5 | implemented | F03-B.3, F04-B.1 | Placement-height repair for the operator report — all three channels. Root cause measured on retail `dgBangerData`+PKG pairs (temporary `probe_height` probe, since removed): prop meshes are authored centred at the bound centre; `Size` is the bound's *full* extents (`CG ± Size/2`, `CG.y = Size.y/2` on every measured record — cone 0.425/0.85, sawhorse 0.727/1.453, streetlamp 3.862/7.702, tptpole 6.151/12.309); the authored stamp point is where the bound's *base* rests. `city.rs` stamped the mesh centre at the point → props sank ~half their height. `PropOffset` contract: `Bound(+CG)` for stamped bound names, `Ground(−min_y, lift-only)` for unbound, `Verbatim` for INST — baked into render verts, collision accumulation and BREAK fragment pieces; `PropCache` keyed by name+offset class (same pkg can reach all three channels). `mm2_game`/`mm2_formats` docs corrected (`Size` full extents, `CG` bound centre); `angular_kick`/`strike` reach use half-extents of `Size` (kick lever now measured from the bound centre = CoM, not the origin); existing tests' settle windows widened for the physically-correct stronger kick. Regression test `tests/banger.rs::stamped_props_rest_their_bounds_on_the_path_point` asserts Avian `ColliderAabb` on all three channels through `load_city`. Retail: london headless counts unchanged (1997 inst / 1188 pathset / 5083 proprule, 0 unresolved, 0 decode failures); screenshots `/tmp/props-fixed-{london-trees,sf-lamps}.png` vs `screenshots/pathset-*.png` — trees rooted, lamps full height, benches/bollards on the surface, SF hill trees no longer stumps. Operator-visible defect corrected; F04-C.2/-C.3 retail evidence must be re-taken on corrected geometry before F04 rolls up. Candidate pending external check. |
 | F03-C | queued | F03-B | Owed: sampled original locations, all source records, race cleanup, mod replacement end-to-end. |
 || F04-A | implemented | F01-B, F03-B | Split: A.1 (banger parser + record↔geometry audit — externally checked at `ad471b0`), A.2 (placement→banger binding audit + R4 runtime-model research — externally checked) and A.3 (dormant→active→settled runtime slice — implemented below). Threshold semantics and the Timer despawn remain open (UNK-22); the prop-rule channel landed in F03-B.3 — the parent stays non-checked until the remaining legs land and AC01–AC06 each see direct evidence. |
 | F04-A.1 | implemented | F01-B, F03-B | `mm2_formats::banger`: typed `BangerData`/`BirthRule` decoder on the shared `tune` grammar — Size/CG/Mass/Elasticity/Friction/ImpulseLimit2/NumParts + ids + `asBirthRule` variant (warning); `BangerIssue` validation (non-finite/negative physicals, glow-count, missing birth rule); `stem_role` (fallback/fragment/named). `mm2-inspect banger <install> [--strict]`: expected = `default.dgbangerdata`, denominator = every discovered file incl `.#*.1.2` backups; stem→geometry resolved via VFS (own pkg / `.mtx` / `BREAK<NN>` chunk in base pkg / longest-base part chunk), standalone `NumParts` ↔ BREAK-index counts. Retail: 999/999 parse, 216 standalone/477 part/254 fragment/47 dead refs, 54 issues, `--strict` exits 2; `scan` recognizes `.dgbangerdata`. docs/research/banger.md + WLD-15/UNK-22. Runtime unwired by design. Candidate pending external check. |

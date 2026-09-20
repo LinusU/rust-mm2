@@ -97,10 +97,15 @@ pub struct BangerDefinition {
     /// the provisional estimate documented on the module. `0`
     /// activates on any approaching contact; ≈1e30 never activates.
     pub impulse_limit2: f32,
-    /// `Size` — authored bounds (inferred half-extents, metres), used
-    /// for the spin-kick inertia estimate.
+    /// `Size` — the authored bound box's full extents (metres); the
+    /// bound is `cg ± size/2`. Measured on retail: `cg.y = size.y/2`
+    /// on every record, so the bound's base rests on the instance
+    /// origin — stamped placements put their *contact point* on the
+    /// path, not their centre.
     pub size: [f32; 3],
-    /// `CG` — authored centre-of-gravity offset (prop-local).
+    /// `CG` — the bound box's centre in prop-local space (also the
+    /// authored centre of gravity). PKG geometry is authored centred
+    /// at that centre, so stamping offsets content by `+CG`.
     pub cg: [f32; 3],
     /// `NumParts` — authored break-fragment count. Carried for
     /// diagnostics; fragment spawning is driven by the `BREAK<NN>`
@@ -163,12 +168,13 @@ impl BangerDefinition {
     }
 
     /// The spin kick a point impulse adds, via the solid-cuboid
-    /// inertia estimate of the authored `Size` bounds (treated as
-    /// half-extents). Provisional feel — the record carries no inertia
-    /// field, so this derives one instead of applying a fixed spin.
-    /// Returns zero for degenerate inputs rather than NaNs.
+    /// inertia estimate of the authored `Size` bound (full extents —
+    /// verified on retail: `cg.y = size.y/2`). Provisional feel — the
+    /// record carries no inertia field, so this derives one instead of
+    /// applying a fixed spin. Returns zero for degenerate inputs
+    /// rather than NaNs.
     pub fn angular_kick(&self, lever: Vec3, impulse: Vec3) -> Vec3 {
-        let dims = Vec3::from(self.size.map(|h| (2.0 * h.abs()).max(0.01)));
+        let dims = Vec3::from(self.size.map(|h| h.abs().max(0.01)));
         let m = self.mass.max(0.001);
         let inertia = Vec3::new(
             m * (dims.y * dims.y + dims.z * dims.z) / 12.0,

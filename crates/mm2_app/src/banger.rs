@@ -152,8 +152,13 @@ impl<'a> BangerDefs<'a> {
 }
 
 /// The authored `CG` re-expressed in the mirrored world frame —
-/// prop-local, before the placement's own rotation.
-fn mirrored_cg(def: &BangerDefinition) -> Vec3 {
+/// prop-local, before the placement's own rotation. `CG` is the bound
+/// box's centre (measured on retail: `cg.y = size.y/2`, so the bound
+/// rests its base on the instance origin): it is both the body's
+/// centre of mass and the offset centred PKG geometry needs to sit
+/// inside the bound — `city` stamping bakes the same vector into the
+/// prop's vertices.
+pub(crate) fn mirrored_cg(def: &BangerDefinition) -> Vec3 {
     Vec3::new(
         def.cg[0],
         def.cg[1],
@@ -215,6 +220,7 @@ type BangerMut = (
     &'static ObjectIdentity,
     &'static mut Banger,
     &'static Position,
+    &'static Rotation,
     &'static mut LinearVelocity,
     &'static mut AngularVelocity,
 );
@@ -276,9 +282,9 @@ fn claim_slot(
     if *occupied >= pool.max_active {
         let oldest = bangers
             .iter()
-            .filter(|(_, _, b, _, _, _)| b.phase == BangerPhase::Active)
-            .min_by_key(|(_, id, b, _, _, _)| (b.activated.unwrap_or(u64::MAX), id.0.slot))
-            .map(|(e, _, _, _, _, _)| e);
+            .filter(|(_, _, b, _, _, _, _)| b.phase == BangerPhase::Active)
+            .min_by_key(|(_, id, b, _, _, _, _)| (b.activated.unwrap_or(u64::MAX), id.0.slot))
+            .map(|(e, _, _, _, _, _, _)| e);
         match oldest {
             Some(oldest) => {
                 settle(
@@ -328,7 +334,7 @@ fn break_banger(
     // The placement keeps its entity/identity — only the collider and
     // the unified mesh are replaced by the spawned pieces.
     let parent_name = banger_name(bangers, entity);
-    if let Ok((_, _, mut banger, _, mut linvel, mut angvel)) = bangers.get_mut(entity) {
+    if let Ok((_, _, mut banger, _, _, mut linvel, mut angvel)) = bangers.get_mut(entity) {
         banger.phase = BangerPhase::Broken;
         banger.activated = None;
         linvel.0 = Vec3::ZERO;
@@ -408,7 +414,7 @@ fn break_banger(
 fn banger_name(bangers: &Query<BangerMut>, entity: Entity) -> String {
     bangers
         .get(entity)
-        .map(|(_, _, b, _, _, _)| b.def.name.clone())
+        .map(|(_, _, b, _, _, _, _)| b.def.name.clone())
         .unwrap_or_default()
 }
 
@@ -471,7 +477,7 @@ pub fn activate_bangers(
                 1.0f32,
             ),
         ] {
-            let Ok((_, identity, banger, _, _, _)) = bangers.get(collider) else {
+            let Ok((_, identity, banger, _, _, _, _)) = bangers.get(collider) else {
                 continue;
             };
             if banger.phase != BangerPhase::Dormant {
@@ -515,15 +521,17 @@ pub fn activate_bangers(
         }
         let filter = SpatialQueryFilter::from_excluded_entities([entity]);
         for hit in spatial.shape_intersections(&bound.0, position.0, rotation.0, &filter) {
-            let Ok((_, identity, banger, bpos, _, _)) = bangers.get(hit) else {
+            let Ok((_, identity, banger, bpos, brot, _, _)) = bangers.get(hit) else {
                 continue;
             };
             if banger.phase != BangerPhase::Dormant || claimed.contains(&hit) {
                 continue;
             }
             // Surface velocity of the bound at the prop's centre — the
-            // same role the manifold's normal speed plays for contacts.
-            let surface = linvel.0 + angvel.0.cross(bpos.0 - position.0);
+            // authored `CG` (the bound's centre, verified on retail:
+            // `cg.y = size.y/2`), not the bound-base origin.
+            let centre = bpos.0 + brot.0 * mirrored_cg(&banger.def);
+            let surface = linvel.0 + angvel.0.cross(centre - position.0);
             let severity = surface.length();
             if severity <= 0.0 {
                 continue;
@@ -534,14 +542,16 @@ pub fn activate_bangers(
             }
             claimed.insert(hit);
             let dir = surface.try_normalize().unwrap_or(Vec3::X);
-            let reach = banger.def.size.iter().fold(0.0f32, |m, h| m.max(h.abs()));
+            // `Size` is the bound's full extents (verified): half its
+            // largest axis reaches from the bound's centre to a face.
+            let reach = banger.def.size.iter().fold(0.0f32, |m, h| m.max(h.abs())) * 0.5;
             activations.push(Activation {
                 entity: hit,
                 object: identity.0,
                 severity,
                 estimate,
                 dir,
-                point: bpos.0 - dir * reach,
+                point: centre - dir * reach,
             });
         }
     }
@@ -551,7 +561,7 @@ pub fn activate_bangers(
     // on the next flush, so they must be accounted as pending.
     let mut occupied = bangers
         .iter()
-        .filter(|(_, _, b, _, _, _)| b.phase == BangerPhase::Active)
+        .filter(|(_, _, b, _, _, _, _)| b.phase == BangerPhase::Active)
         .count();
 
     for a in activations {
@@ -562,7 +572,7 @@ pub fn activate_bangers(
         // entity twice.
         if bangers
             .get(a.entity)
-            .map(|(_, _, b, _, _, _)| b.phase != BangerPhase::Dormant)
+            .map(|(_, _, b, _, _, _, _)| b.phase != BangerPhase::Dormant)
             .unwrap_or(true)
         {
             continue;
@@ -599,7 +609,8 @@ pub fn activate_bangers(
             // the prop stays dormant rather than exceed the bound.
             continue;
         }
-        let Ok((_, _, mut banger, position, mut linvel, mut angvel)) = bangers.get_mut(a.entity)
+        let Ok((_, _, mut banger, position, rotation, mut linvel, mut angvel)) =
+            bangers.get_mut(a.entity)
         else {
             continue;
         };
@@ -610,10 +621,15 @@ pub fn activate_bangers(
         }
         // One impulse, one transition: the body goes dynamic and
         // leaves at the striker's approach speed (bounded by the
-        // impact, not scaled by it), plus the record's spin kick.
+        // impact, not scaled by it), plus the record's spin kick —
+        // the lever runs from the body's centre of mass (the authored
+        // `CG`, the bound's centre), not the bound-base origin.
         let impulse = a.dir * a.severity * banger.def.mass;
         linvel.0 += a.dir * a.severity;
-        angvel.0 += banger.def.angular_kick(a.point - position.0, impulse);
+        angvel.0 += banger.def.angular_kick(
+            a.point - (position.0 + rotation.0 * mirrored_cg(&banger.def)),
+            impulse,
+        );
         banger.phase = BangerPhase::Active;
         banger.activated = Some(tick);
         commands.entity(a.entity).insert(RigidBody::Dynamic);
@@ -648,7 +664,8 @@ fn settle<F: bevy::ecs::query::QueryFilter>(
     writer: &mut MessageWriter<BangerStateChanged>,
     commands: &mut Commands,
 ) {
-    let Ok((_, identity, mut banger, _, mut linvel, mut angvel)) = bangers.get_mut(entity) else {
+    let Ok((_, identity, mut banger, _, _, mut linvel, mut angvel)) = bangers.get_mut(entity)
+    else {
         return;
     };
     banger.phase = BangerPhase::Settled;
@@ -686,8 +703,8 @@ pub fn settle_bangers(
     let generation = session.generation();
     let sleepers: Vec<Entity> = bangers
         .iter()
-        .filter(|(_, _, b, _, _, _)| b.phase == BangerPhase::Active)
-        .map(|(e, _, _, _, _, _)| e)
+        .filter(|(_, _, b, _, _, _, _)| b.phase == BangerPhase::Active)
+        .map(|(e, _, _, _, _, _, _)| e)
         .collect();
     for entity in sleepers {
         settle(

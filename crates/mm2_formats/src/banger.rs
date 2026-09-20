@@ -203,9 +203,15 @@ impl BirthRule {
 pub struct BangerData {
     /// `AudioId` — impact-sound selector (0 on every retail record).
     pub audio_id: i64,
-    /// `Size` — bounds of the banger, inferred half-extents (metres).
+    /// `Size` — the bound box's full extents (metres). Measured on
+    /// retail: `CG.y = Size.y / 2` on every record, so the box
+    /// `CG ± Size/2` rests its base on the instance origin — the
+    /// authored placement point is the bound's *base contact point*,
+    /// not its centre.
     pub size: [f32; 3],
-    /// `CG` — centre-of-gravity offset.
+    /// `CG` — the bound box's centre in prop-local space (also the
+    /// authored centre of gravity). PKG geometry is authored centred
+    /// at that centre, so instantiated content is offset by `+CG`.
     pub cg: [f32; 3],
     /// `NumGlows` declaration, when authored (light-glow count; absent
     /// on 2 retail records that still carry a `GlowOffset`).

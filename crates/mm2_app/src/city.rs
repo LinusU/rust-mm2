@@ -43,7 +43,7 @@ use mm2_game::{
 };
 use tracing::{debug, info, warn};
 
-use crate::banger::{BangerDefs, BangerPieces, FragmentPiece, banger_bundle};
+use crate::banger::{BangerDefs, BangerPieces, FragmentPiece, banger_bundle, mirrored_cg};
 use crate::decals::{self, DecalStampReport};
 
 /// Whether to mirror Z when converting MM2 coordinates to Bevy space.
@@ -2216,6 +2216,7 @@ fn pkg_to_parts(
     mats: &mut MaterialCache<'_>,
     meshes: &mut Assets<Mesh>,
     missing_prims: &mut usize,
+    offset: Vec3,
 ) -> PropModel {
     let mut best: HashMap<String, (u8, &str)> = HashMap::new();
     for (name, _geo) in pkg.geometries() {
@@ -2266,7 +2267,7 @@ fn pkg_to_parts(
                     *missing_prims += 1;
                     continue;
                 }
-                emit_strip(b, strip, col);
+                emit_strip(b, strip, col, offset);
             }
         }
         let mut parts = Vec::new();
@@ -2301,13 +2302,16 @@ fn pkg_to_parts(
 }
 
 /// Emit one PKG strip into a builder; authored normals and UVs preserved.
-/// The same triangles are accumulated into `col` for collision (winding is
-/// irrelevant to the physics backend).
-fn emit_strip(b: &mut MeshBuilder, strip: &PkgStrip, col: &mut PropCollision) {
+/// `offset` is the prop's content offset (see [`PropOffset`]) — baked
+/// into render and collision verts alike so the stamped placement can
+/// use the authored point verbatim. The same triangles are accumulated
+/// into `col` for collision (winding is irrelevant to the physics
+/// backend).
+fn emit_strip(b: &mut MeshBuilder, strip: &PkgStrip, col: &mut PropCollision, offset: Vec3) {
     let base = b.positions.len() as u32;
     let col_base = col.positions.len() as u32;
     for v in &strip.vertices {
-        let p = v3(v.position);
+        let p = v3(v.position) + offset;
         // PKG UVs are authored against TEX's bottom-up row order, which
         // `decode_rgba` now normalises to top-down, so v is complemented.
         // Unlike the city's walls, whose UVs this crate generates, these
@@ -2370,27 +2374,75 @@ struct PropModel {
     fragments: Vec<FragmentModel>,
 }
 
-/// Cache of PKG name → prepared meshes+materials handles.
+/// How stamped prop content maps onto its placement point — the offset
+/// baked into a [`PropModel`]'s vertices (render and collision alike,
+/// `BREAK<NN>` pieces included) so the placement transform can use the
+/// authored point verbatim.
+///
+/// The convention is measured on retail `dgBangerData` records: a
+/// bound prop's `CG` is the centre of its `Size` bound box in
+/// prop-local space, and `cg.y = size.y/2` on every measured record —
+/// the authored stamp point is where the bound's *base* rests, while
+/// the PKG geometry is authored centred at that centre (e.g.
+/// `sp_sawhrslt_f` spans y −0.727..0.978, `sp_tree1_s` −3.5..3.5).
+/// Content therefore lands `+CG` above the authored point. See
+/// `docs/research/banger.md`.
+#[derive(Clone, Copy)]
+enum PropOffset {
+    /// No content offset — the authored transform positions the mesh
+    /// verbatim. INST placements only: their full 4×4 basis is the
+    /// placement (verified against retail room geometry — the
+    /// `wl_buckpalace_l` fence traces its room perimeter only unstaged),
+    /// and INST names bind no `tune/banger` records to offset by.
+    Verbatim,
+    /// A bound prop: offset by the record's `CG` (mirrored), so the
+    /// centred mesh lands inside the bound whose base rests on the
+    /// stamp point.
+    Bound(Vec3),
+    /// A stamped prop with no record: recover the same convention
+    /// from the geometry — lift by `−min_y` so the mesh's lowest
+    /// authored vertex rests on the stamp point. Lift-only: content
+    /// authored entirely above its origin (floating signs, pickups)
+    /// keeps its authored height.
+    Ground,
+}
+
+impl PropOffset {
+    /// Cache-key discriminant: `Bound`'s vector is deterministic per
+    /// prop name, so the variant alone distinguishes cache entries.
+    fn class(self) -> u8 {
+        match self {
+            Self::Verbatim => 0,
+            Self::Ground => 1,
+            Self::Bound(_) => 2,
+        }
+    }
+}
+
+/// Cache of PKG name → prepared meshes+materials handles. The same
+/// prop name can be requested with different [`PropOffset`]s (e.g.
+/// verbatim by INST, bound-centred by a pathset), so the cache keys
+/// on the offset class as well as the name.
 struct PropCache<'a> {
     vfs: &'a Vfs,
     meshes: &'a mut Assets<Mesh>,
     mats: MaterialCache<'a>,
-    cache: HashMap<String, Option<PropModel>>,
+    cache: HashMap<(String, u8), Option<PropModel>>,
     /// Strips with unsupported primitive types encountered while building.
     missing_prims: usize,
 }
 
 impl<'a> PropCache<'a> {
-    fn get(&mut self, name: &str) -> Option<&PropModel> {
-        let key = name.to_ascii_lowercase();
+    fn get(&mut self, name: &str, offset: PropOffset) -> Option<&PropModel> {
+        let key = (name.to_ascii_lowercase(), offset.class());
         if !self.cache.contains_key(&key) {
-            let built = self.build(&key);
+            let built = self.build(&key.0, offset);
             self.cache.insert(key.clone(), built);
         }
         self.cache.get(&key).and_then(|o| o.as_ref())
     }
 
-    fn build(&mut self, name: &str) -> Option<PropModel> {
+    fn build(&mut self, name: &str, offset: PropOffset) -> Option<PropModel> {
         let resolved = self
             .vfs
             .resolve_preferred(&format!("geometry/{name}"), &["pkg"])
@@ -2403,7 +2455,27 @@ impl<'a> PropCache<'a> {
                 return None;
             }
         };
-        let model = pkg_to_parts(&pkg, &mut self.mats, self.meshes, &mut self.missing_prims);
+        let offset = match offset {
+            PropOffset::Verbatim => Vec3::ZERO,
+            PropOffset::Bound(v) => v,
+            PropOffset::Ground => {
+                let min_y = pkg
+                    .geometries()
+                    .flat_map(|(_, g)| g.sections.iter())
+                    .flat_map(|s| s.strips.iter())
+                    .flat_map(|s| s.vertices.iter())
+                    .map(|v| v.position[1])
+                    .fold(f32::MAX, f32::min);
+                Vec3::new(0.0, (-min_y).max(0.0), 0.0)
+            }
+        };
+        let model = pkg_to_parts(
+            &pkg,
+            &mut self.mats,
+            self.meshes,
+            &mut self.missing_prims,
+            offset,
+        );
         if model.parts.is_empty() {
             return None;
         }
@@ -2776,40 +2848,47 @@ impl std::ops::AddAssign for PathsetStampReport {
     }
 }
 
-/// Resolve one stamped prop name to its bound `tune/banger` record
-/// and its authored `BREAK<NN>` pieces — shared by pathset and
-/// prop-rule stamping so both placement channels classify identical
-/// names identically (F04-A/F04-B). A bound prop's pieces resolve
-/// their own `<name>_break<NN>` records when authored and fall back
-/// to the parent def otherwise.
-fn resolve_prop(
+/// One stamped prop's authored `BREAK<NN>` pieces, each resolved to
+/// its own `<name>_break<NN>` record when authored and to the parent
+/// `def` otherwise — shared by pathset and prop-rule stamping so both
+/// placement channels classify identical names identically (F04-B).
+/// The piece's verts carry the *parent's* content offset (all chunks
+/// of a PKG share one geometry space), so a fragment spawned at the
+/// parent's pose appears exactly where it was while intact.
+fn fragment_pieces(
     bangers: &mut BangerDefs,
     name: &str,
     model: &PropModel,
-) -> (Option<BangerDefinition>, Vec<FragmentPiece>) {
-    let bound = bangers.get(name).cloned();
-    let pieces: Vec<FragmentPiece> = match &bound {
-        Some(def) => model
-            .fragments
-            .iter()
-            .map(|f| {
-                let stem = format!("{name}_break{}", f.index);
-                let fdef = bangers.get(&stem).cloned().unwrap_or_else(|| {
-                    let mut d = def.clone();
-                    d.name = stem;
-                    d
-                });
-                FragmentPiece {
-                    index: f.index.clone(),
-                    def: fdef,
-                    parts: f.parts.clone(),
-                    collider: f.collider.clone(),
-                }
-            })
-            .collect(),
-        None => Vec::new(),
-    };
-    (bound, pieces)
+    def: &BangerDefinition,
+) -> Vec<FragmentPiece> {
+    model
+        .fragments
+        .iter()
+        .map(|f| {
+            let stem = format!("{name}_break{}", f.index);
+            let fdef = bangers.get(&stem).cloned().unwrap_or_else(|| {
+                let mut d = def.clone();
+                d.name = stem;
+                d
+            });
+            FragmentPiece {
+                index: f.index.clone(),
+                def: fdef,
+                parts: f.parts.clone(),
+                collider: f.collider.clone(),
+            }
+        })
+        .collect()
+}
+
+/// The [`PropOffset`] a stamped prop name wants: the bound record's
+/// `CG` when `bangers` resolves one, the geometry-recovered ground
+/// lift otherwise.
+fn stamp_offset(bound: Option<&BangerDefinition>) -> PropOffset {
+    match bound {
+        Some(def) => PropOffset::Bound(mirrored_cg(def)),
+        None => PropOffset::Ground,
+    }
 }
 
 /// Stamp every prop path of a parsed pathset through `cache` (F03-B):
@@ -2862,7 +2941,10 @@ fn stamp_pathset(
             debug!(path = %path.name, "pathset path is an animated object; unhandled");
             continue;
         }
-        let Some(model) = cache.get(name) else {
+        // The bound record resolves before the model: it carries the
+        // `CG` the centred mesh is offset by (`PropOffset::Bound`).
+        let bound = bangers.get(name).cloned();
+        let Some(model) = cache.get(name, stamp_offset(bound.as_ref())) else {
             // A name that resolves to a texture rather than a PKG is
             // a decal path — decal entries in prop-consumed files are
             // measured authoring leftovers (see `decals.pathset`
@@ -2885,7 +2967,10 @@ fn stamp_pathset(
         // A bound name with collision stamps as a dormant banger
         // entity; unbound names (or bound props with no collider —
         // they can never be struck) stay ordinary static props.
-        let (bound, pieces) = resolve_prop(bangers, name, model);
+        let pieces = bound
+            .as_ref()
+            .map(|def| fragment_pieces(bangers, name, model, def))
+            .unwrap_or_default();
         for (ii, mat4) in stamped.transforms.iter().enumerate() {
             let pname = format!("{name_prefix}-{name}-{pi}-{ii}");
             match (&bound, &model.collider) {
@@ -2953,11 +3038,17 @@ fn stamp_prop_rules(
     let mut report = PropRuleStampReport::default();
     let banger_failed_before = bangers.failed;
     for stamp in &walk.stamps {
-        let Some(model) = cache.get(&stamp.pkg) else {
+        // Same offset convention as pathset stamping: the bound
+        // record's `CG` lifts the centred mesh onto the stamp point.
+        let bound = bangers.get(&stamp.pkg).cloned();
+        let Some(model) = cache.get(&stamp.pkg, stamp_offset(bound.as_ref())) else {
             report.unresolved += 1;
             continue;
         };
-        let (bound, pieces) = resolve_prop(bangers, &stamp.pkg, model);
+        let pieces = bound
+            .as_ref()
+            .map(|def| fragment_pieces(bangers, &stamp.pkg, model, def))
+            .unwrap_or_default();
         let side = match stamp.side {
             PropRuleSide::Left => 'L',
             PropRuleSide::Right => 'R',
@@ -3236,7 +3327,7 @@ pub fn load_city(
         Ok((inst_bytes, inst_res)) => match inst::parse(&inst_bytes) {
             Ok(comps) => {
                 for comp in &comps {
-                    let Some(model) = cache.get(&comp.package_name) else {
+                    let Some(model) = cache.get(&comp.package_name, PropOffset::Verbatim) else {
                         report.props_failed += 1;
                         continue;
                     };

@@ -160,7 +160,10 @@ fn a_hard_impact_activates_then_settles_once() {
         Vec3::new(20.0, 0.0, 0.0),
     );
 
-    let events = run(&mut app, FRAMES_PER_SECOND * 8);
+    // The corrected `Size` semantics (full bound extents, not
+    // half-extents) quarter the inertia estimate — the kick tumbles
+    // the prop harder and it needs longer to sleep.
+    let events = run(&mut app, FRAMES_PER_SECOND * 30);
 
     let activations: Vec<_> = events
         .iter()
@@ -801,7 +804,9 @@ fn a_breakable_prop_shatters_into_its_authored_pieces() {
         Vec3::new(10.0, 0.0, 0.0),
     );
 
-    let events = run(&mut app, FRAMES_PER_SECOND * 10);
+    // Same corrected-inertia note as above: the pieces scatter harder
+    // and need a longer window to come to rest.
+    let events = run(&mut app, FRAMES_PER_SECOND * 30);
 
     // One logical break event for the placement — the parent itself
     // never goes Active (AC02/AC03).
@@ -1355,4 +1360,159 @@ fn restart_restores_stamped_placements_after_a_break() {
         .filter(|owner| **owner != SessionEntity(2))
         .count();
     assert_eq!(leaked, 0, "no generation-1 entity may survive restart");
+}
+
+// ---------------------------------------------------------------------------
+// Placement height (operator-reported defect): stamped props rendered
+// with their mesh *centre* on the path point, half-buried. Retail
+// `dgBangerData` records pin the authored convention — the bound box is
+// `CG ± Size/2` and `cg.y = size.y/2` on every measured record (cone
+// 0.425/0.85, sawhorse 0.727/1.453, lamp 3.862/7.702, tree 3.5/7.0),
+// so the bound's *base* rests on the instance origin while the PKG
+// geometry is authored centred at the bound's centre. Stamping must
+// offset content by `+CG`; a name with no record lifts so its lowest
+// authored vertex rests on the point. INST placements keep their
+// authored basis verbatim.
+// ---------------------------------------------------------------------------
+
+/// A cube-ish prop authored *centred* on the origin — verts y ∈
+/// [−0.5, 0.5] — the way retail prop PKGs are actually modelled
+/// (`sp_cone_f`, `sp_sawhrslt_f`, …). `banger_record`'s `CG 0 0.5 0`
+/// is exactly its bound centre.
+fn centred_pkg() -> Vec<u8> {
+    let mut geo = Vec::new();
+    geo.extend_from_slice(&1u32.to_le_bytes()); // nSections
+    geo.extend_from_slice(&4u32.to_le_bytes()); // total vertices
+    geo.extend_from_slice(&12u32.to_le_bytes()); // total indices
+    geo.extend_from_slice(&1u32.to_le_bytes()); // sections duplicate
+    geo.extend_from_slice(&0x112u32.to_le_bytes()); // fvf: XYZ|NORMAL|1 tex
+    geo.extend_from_slice(&1u16.to_le_bytes()); // nStrips
+    geo.extend_from_slice(&0u16.to_le_bytes()); // section flags
+    geo.extend_from_slice(&(-1i32).to_le_bytes()); // shader offset → fallback
+    geo.extend_from_slice(&3i32.to_le_bytes()); // prim type: triangles
+    geo.extend_from_slice(&4u32.to_le_bytes()); // strip vertices
+    let verts: &[([f32; 3], [f32; 3], [f32; 2])] = &[
+        ([-0.5, -0.5, -0.5], [0., 1., 0.], [0., 0.]),
+        ([0.5, -0.5, 0.5], [0., 1., 0.], [1., 0.]),
+        ([-0.5, -0.5, 0.5], [0., 1., 0.], [0., 1.]),
+        ([0.0, 0.5, 0.0], [0., 1., 0.], [0.5, 0.5]),
+    ];
+    for &(p, n, uv) in verts {
+        for c in p {
+            geo.extend_from_slice(&c.to_le_bytes());
+        }
+        for c in n {
+            geo.extend_from_slice(&c.to_le_bytes());
+        }
+        for c in uv {
+            geo.extend_from_slice(&c.to_le_bytes());
+        }
+    }
+    geo.extend_from_slice(&12u32.to_le_bytes()); // strip indices
+    for i in [0u16, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3] {
+        geo.extend_from_slice(&i.to_le_bytes());
+    }
+
+    let mut d = Vec::new();
+    d.extend_from_slice(b"PKG3");
+    d.extend_from_slice(b"FILE");
+    d.push(b"centred_h".len() as u8 + 1);
+    d.extend_from_slice(b"centred_h");
+    d.push(0);
+    d.extend_from_slice(&(geo.len() as u32).to_le_bytes());
+    d.extend_from_slice(&geo);
+    d
+}
+
+/// A minimal `.inst` file stamping each `(name, location)` as a simple
+/// placement — unit heading, scale 1.
+fn inst_file(comps: &[(&str, [f32; 3])]) -> Vec<u8> {
+    let mut d = Vec::new();
+    for (name, loc) in comps {
+        d.extend_from_slice(&1u16.to_le_bytes()); // room
+        d.extend_from_slice(&0x100u16.to_le_bytes()); // modifiers
+        d.push(0x80 | (name.len() as u8 + 1)); // simple placement; name + NUL
+        d.extend_from_slice(name.as_bytes());
+        d.push(0);
+        d.extend_from_slice(&1.0f32.to_le_bytes()); // x_delta → unit heading
+        d.extend_from_slice(&0.0f32.to_le_bytes()); // z_delta
+        for c in loc {
+            d.extend_from_slice(&c.to_le_bytes());
+        }
+    }
+    d
+}
+
+/// A city that stamps the centred prop three ways: bound via
+/// `props.pathset` at (0,0,15), unbound at (3,0,15), and verbatim
+/// through `.inst` at (5,0,15) — the road's y is 0 everywhere.
+fn centred_install() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(d, "city/test.psdl", city_psdl());
+    std::fs::create_dir_all(d.join("texture")).unwrap();
+    std::fs::write(
+        d.join("texture/test_road.png"),
+        include_bytes!("../../../assets/texture/dev_road.png"),
+    )
+    .unwrap();
+    write(d, "geometry/centred.pkg", centred_pkg());
+    write(d, "geometry/plain.pkg", centred_pkg());
+    write(d, "tune/banger/centred.dgbangerdata", banger_record(0.0));
+    write(
+        d,
+        "city/test.inst",
+        inst_file(&[("centred", [5.0, 0.0, 15.0])]),
+    );
+    write(
+        d,
+        "city/test/props.pathset",
+        pth1(&[
+            pth1_path("centred", &[[0.0, 0.0, 15.0]], 0, 0),
+            pth1_path("plain", &[[3.0, 0.0, 15.0]], 0, 0),
+        ]),
+    );
+    tmp
+}
+
+fn aabb_of(app: &mut App, name: &str) -> ColliderAabb {
+    let mut q = app.world_mut().query::<(&Name, &ColliderAabb)>();
+    q.iter(app.world())
+        .find(|(n, _)| n.as_str() == name)
+        .map(|(_, a)| *a)
+        .unwrap_or_else(|| panic!("no ColliderAabb on {name}"))
+}
+
+#[test]
+fn stamped_props_rest_their_bound_base_on_the_path_point() {
+    let tmp = centred_install();
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(tmp.path(), 0).unwrap();
+    let mut app = city_app(vfs);
+    // One update loads the city; a second lets the collider pipeline
+    // publish world AABBs.
+    app.update();
+    app.update();
+
+    // Bound prop at (0, 0, 15): `CG 0 0.5 0` lifts the centred mesh so
+    // the bound's *base* rests on the path point — y 0..1, not the
+    // half-buried y −0.5..0.5 a verbatim stamp produced.
+    let a = aabb_of(&mut app, "pathset-centred-0-0");
+    assert!(
+        (a.min.y - 0.0).abs() < 0.05,
+        "bound base on the point: {a:?}"
+    );
+    assert!((a.max.y - 1.0).abs() < 0.05, "{a:?}");
+
+    // No record: the same convention recovered from the geometry —
+    // the lowest authored vertex rests on the point.
+    let p = aabb_of(&mut app, "pathset-plain-1-0-collider");
+    assert!((p.min.y - 0.0).abs() < 0.05, "unbound ground lift: {p:?}");
+    assert!((p.max.y - 1.0).abs() < 0.05, "{p:?}");
+
+    // INST placements keep their authored basis verbatim — the
+    // stamping offset must not leak into that channel.
+    let i = aabb_of(&mut app, "prop-centred-collider");
+    assert!((i.min.y + 0.5).abs() < 0.05, "INST stays verbatim: {i:?}");
+    assert!((i.max.y - 0.5).abs() < 0.05, "{i:?}");
 }

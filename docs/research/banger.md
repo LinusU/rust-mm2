@@ -54,7 +54,7 @@ dgBangerData {
 
 | Field | Retail values | Status |
 | --- | --- | --- |
-| `Size`, `CG` | 3-float vectors | verified structural (bounds, centre of gravity) |
+| `Size`, `CG` | 3-float vectors | verified: `Size` is the bound box's **full** extents and `CG` its centre in prop-local space — `cg.y = size.y/2` on every measured record, so the bound's base rests on the instance origin (see below) |
 | `Mass` | 0.5 – 72,580,104 | verified authored value; units unverified |
 | `Elasticity` | mostly 0.5, a few 0.9 / 1.5 | verified authored value (>1 authored once, so not an anomaly) |
 | `Friction` | always 0.9 | verified authored value |
@@ -70,6 +70,47 @@ dgBangerData {
 | `BillFlags` | integer flags | parsed; billboard-flag semantics unverified |
 | `YRadius` | 0 – ~30 | parsed; inferred cylindrical-bound radius |
 | `NumGlows` / `GlowOffset` | 0 or paired | verified pairing (two records carry `GlowOffset` without `NumGlows` — anomaly, reported) |
+
+## The `Size`/`CG` bound convention (measured on retail)
+
+Decoding representative prop PKGs against their records pins down
+what the bound pair means for placement:
+
+- **`Size` = the bound box's full extents** (metres), **`CG` = the
+  bound's centre** in prop-local space, so the bound is `CG ± Size/2`.
+- **`CG.y = Size.y / 2` on every record measured** — the bound's base
+  sits exactly at the instance origin. The authored placement point
+  (pathset point, prop-rule stamp) is where the prop's bound *rests*,
+  not where its centre sits. Examples: `sp_cone_f` 0.425/0.85,
+  `sp_sawhrslt_f` 0.727/1.453, `sp_tree1_s` 3.5/7.0,
+  `sp_lightstreet_rt_f` 3.862/7.702, `sp_barricadeconcl_f` 0.5/1.0,
+  `tptpole_bnd` 6.151/12.309.
+- **PKG geometry is authored centred at the bound's centre**, so
+  instantiated content is offset by `+CG`: adding `CG` to the
+  authored vertex ranges lands the mesh inside the bound on every
+  record measured (exact for `sp_barricadeconcl_f`,
+  `np_ghirardelli_f` — bound [0,5]×[0,1]×[−0.5,0] and
+  [−29.97,15.41]×[0,15.13]×[−7.56,0] respectively; the streetlight's
+  bound covers only the pole while the arm overhangs the road, so the
+  bound can be tighter than the mesh on any axis — it is not a mesh
+  AABB).
+- **`BREAK<NN>` fragment records follow the same convention in their
+  own instance space**: `sp_sawhrslt_f_break01` `CG ± Size/2` boxes
+  its chunk exactly when the chunk's (also centred) verts are offset
+  by the piece's own `CG`.
+- `wpobj_gold` is the counterpoint: `CG.y ≈ 0` on a small floating
+  mesh — the bound's base sits at the origin and the pickup floats,
+  as authored.
+
+Stamping a prop's mesh *centre* on the authored point therefore
+buries roughly `cg.y` of it — the operator-visible defect this
+measurement repaired (every stamped lamp post at half height, trees
+sunk to their canopies, a sawhorse wedged into the road so a 100+
+km/h strike couldn't move it). `mm2_app::city::PropOffset` bakes the
+offset into the prop's verts at build: `Bound(+CG)` for records,
+`Ground(−min_y)` as the geometry-recovered equivalent for names
+without a record, `Verbatim` for INST placements whose full authored
+basis is itself the placement.
 
 ## Stem → geometry resolution
 
@@ -218,7 +259,10 @@ verified original behaviour — every provisional point is still UNK-22.
 
 - **Binding consumption.** `stamp_pathset` resolves each prop name
   through a per-load `BangerDefs` cache
-  (`tune/banger/<name>.dgbangerdata`, lowercased). A bound name with a
+  (`tune/banger/<name>.dgbangerdata`, lowercased). The record's `CG`
+  becomes the model's content offset (`PropOffset::Bound` — see the
+  bound convention above), so the centred mesh and its collider sit
+  inside the bound resting on the authored point. A bound name with a
   collider stamps one session-owned entity — collider, authored
   physicals (`Mass`, `Friction`, `Restitution`, `CenterOfMass` from
   `CG`), `Banger` state, `ObjectIdentity`, `AuthorityRole` — with the

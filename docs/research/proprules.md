@@ -101,6 +101,13 @@ on `city/{sf,london}.psdl`:
 Implemented walk policy (all inferred — a retail-visual comparison
 can still falsify any of them):
 
+- The stamp position's Y is the curb↔outer lerp in 3D — whether the
+  original stamps at sidewalk-top height (~curb + 0.15) or the lerped
+  value is unverified; the residual error is centimetre-class. Prop
+  content is then offset by the bound convention measured on retail
+  records (`docs/research/banger.md` § "The `Size`/`CG` bound
+  convention"): the bound's *base* rests on the stamp point and the
+  centred mesh is offset by `+CG`.
 - Each side is walked so the road stays on the walker's left: the
   right-of-travel side runs entry→exit, the left-of-travel side runs
   exit→entry, and `start` measures from the crossing its walk begins

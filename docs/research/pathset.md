@@ -132,6 +132,14 @@ stamps in `CityReport::pathset_props_capped` rather than truncating
 silently. `Pathset::validate()` runs at load and its issues land in
 `CityReport::pathset_issues`; non-finite coordinates stamp nothing.
 
+Height convention (verified on retail `dgBangerData` records, see
+`docs/research/banger.md` § "The `Size`/`CG` bound convention"): a
+path point is where the prop's bound *base* rests — prop geometry is
+authored centred at the bound centre and stamped content is offset by
+`+CG` (or by `−min_y` when no record binds). The point's own Y is
+used verbatim otherwise — sloped and elevated placements (bridge
+furniture, ramp barricades) keep their authored terrain height.
+
 Event overlays (implemented for `<stem>.pathset` records, 2026-09-20):
 `load_session_world` consumes the `.pathset` records the event
 catalog attributes to a resolved event's stem — `circuit<N>.pathset`
