@@ -258,10 +258,13 @@ fn start_slots(event: &CatalogEvent, rows: &[mm2_formats::waypoints::Waypoint]) 
     if let Some(slots) = authored_start_slots(event) {
         return slots;
     }
-    // Designed fallback (DSN-6): a single player slot behind the
-    // start line, facing the course tangent row0→row1. The authored
-    // `a` convention is unverified for this purpose, so the tangent
-    // — which every event's data supports — supplies facing.
+    // Designed fallback (DSN-6): a single player slot on the start
+    // line, facing the course tangent row0→row1. The line is the one
+    // point the authored data guarantees is on the course — backing
+    // off along the tangent can leave the drivable surface (london
+    // `blitz6`'s line sits on an elevated deck; 10 m behind it is
+    // past the edge, over a void). The authored `a` convention is
+    // unverified for facing, so the tangent supplies it.
     let line = Vec3::new(
         rows[0].position[0],
         rows[0].position[1],
@@ -274,7 +277,7 @@ fn start_slots(event: &CatalogEvent, rows: &[mm2_formats::waypoints::Waypoint]) 
     );
     let d = (next - line).normalize_or_zero();
     vec![RaceStart {
-        position: line - d * 10.0,
+        position: line,
         // Store in the authored `a` convention: forward = (sin a, cos a)
         // in XZ (see `Checkpoint::forward`).
         yaw_deg: d.x.atan2(d.z).to_degrees(),

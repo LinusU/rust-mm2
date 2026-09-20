@@ -85,7 +85,7 @@ fn checkpoint_event_produces_anyorder_gates_and_a_finish() {
 }
 
 #[test]
-fn derived_start_slot_sits_behind_the_line_facing_the_course() {
+fn derived_start_slot_sits_on_the_line_facing_the_course() {
     let tmp = tempfile::tempdir().unwrap();
     let d = tmp.path();
     write(
@@ -115,7 +115,12 @@ fn derived_start_slot_sits_behind_the_line_facing_the_course() {
 
     assert_eq!(def.start_slots.len(), 1, "no authored grid → one slot");
     let slot = def.start_slots[mm2_content::PLAYER_SLOT];
-    assert!(slot.position.z > 0.0, "behind the start line: {slot:?}");
+    assert_eq!(
+        slot.position,
+        bevy::prelude::Vec3::new(0.0, 0.0, 0.0),
+        "on the authored start line, not an invented back-off (DSN-6): \
+         backing off the tangent can leave the drivable surface"
+    );
     // Facing (sin a, cos a) must point down-course toward -Z.
     let a = slot.yaw_deg.to_radians();
     assert!(

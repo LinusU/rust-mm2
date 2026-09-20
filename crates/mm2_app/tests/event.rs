@@ -185,13 +185,13 @@ fn authored_event_loads_into_countdown() {
     assert_eq!(race.definition.checkpoints.len(), 3);
     assert!(race.definition.finish.is_some());
 
-    // The player spawned at the authored slot — 10 m behind the start
-    // line (the designed fallback, no `_strtpnts` authored) — facing
+    // The player spawned at the authored slot — on the start line
+    // (the designed fallback, no `_strtpnts` authored) — facing
     // the course, and it is a race participant.
     let car = car(&mut app);
     let pos = app.world().get::<Position>(car).unwrap().0;
     assert!(
-        (pos.x - 50.0).abs() < 3.0 && (pos.z - COURSE_Z).abs() < 3.0,
+        (pos.x - COURSE[0]).abs() < 3.0 && (pos.z - COURSE_Z).abs() < 3.0,
         "player at the authored start slot, got {pos:?}"
     );
     let progress = app.world().get::<RaceProgress>(car).unwrap();
