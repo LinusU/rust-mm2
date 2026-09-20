@@ -123,6 +123,15 @@ are inferred and tracked under UNK-20):
   vertex stamps once. Undocumented kinds and odd `Directed` tails
   stamp nothing (`validate()` reports them).
 
+Runtime bounds (implementation choice, not an original rule): the
+parser caps path/point counts but coordinates are unbounded, and a
+strip expands to `len / spacing` stamps per segment — so the loader
+threads a per-file budget of 8192 stamps (~7x the densest retail
+expansion, London's 1188) through all paths and counts any suppressed
+stamps in `CityReport::pathset_props_capped` rather than truncating
+silently. `Pathset::validate()` runs at load and its issues land in
+`CityReport::pathset_issues`; non-finite coordinates stamp nothing.
+
 Still unconsumed: `decals*.pathset` (texture stamping — strip width
 and orientation semantics unknown), `audio_pathsets/` (`PATHnn` sound
 routes, F07/F08), `race/<city>/*.pathset` (event-scoped overlays —

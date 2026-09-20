@@ -515,6 +515,12 @@ pub struct CityReport {
     /// Pathset paths skipped because their name resolved to neither a
     /// PKG nor a texture.
     pub pathset_props_failed: usize,
+    /// Pathset stamps suppressed by the [`MAX_PATHSET_STAMPS`]
+    /// expansion bound — counted, never silently truncated.
+    pub pathset_props_capped: usize,
+    /// Authored anomalies `Pathset::validate` reported on the consumed
+    /// file (non-finite points, odd `Directed` counts, …).
+    pub pathset_issues: usize,
 }
 
 impl std::fmt::Display for CityReport {
@@ -535,7 +541,7 @@ impl std::fmt::Display for CityReport {
         }
         write!(
             f,
-            "; {} mesh groups, {} collider rooms, {} props ({} failed), {} pathset props ({} decal paths, {} failed), {} missing textures",
+            "; {} mesh groups, {} collider rooms, {} props ({} failed), {} pathset props ({} decal paths, {} failed, {} capped, {} issues), {} missing textures",
             self.mesh_groups,
             self.collider_rooms,
             self.props_spawned,
@@ -543,6 +549,8 @@ impl std::fmt::Display for CityReport {
             self.pathset_props_spawned,
             self.pathset_decal_paths,
             self.pathset_props_failed,
+            self.pathset_props_capped,
+            self.pathset_issues,
             self.missing_textures.len(),
         )
     }
@@ -2226,6 +2234,28 @@ fn simple_transform(s: &inst::InstSimple) -> Mat4 {
 // Pathset prop stamping (PTH1)
 // ---------------------------------------------------------------------------
 
+/// Hard bound on the prop instances one `props.pathset` file may stamp.
+/// The parser bounds path/point *counts* but not coordinates: a line
+/// strip expands to `segment_length / spacing` stamps, so authored
+/// positions make the expansion unbounded without this cap — a corrupt
+/// or hostile file (a VFS mod can legitimately override
+/// `props.pathset`) could stall `t += spacing` below the f32 ulp or
+/// push millions of instances and hang/OOM the city load. Retail's
+/// densest expansion is London's `props.pathset` at 1188 stamps / 87
+/// paths (sf: 925 / 113 + 31 decal-only paths; densest single path
+/// 162) — the cap sits ~7x above it. Suppressed stamps are counted in
+/// `CityReport::pathset_props_capped`, never dropped silently.
+const MAX_PATHSET_STAMPS: usize = 8192;
+
+/// The transforms one pathset path expands to.
+struct StampedPath {
+    /// Stamped prop transforms — at most the `budget` passed in.
+    transforms: Vec<Mat4>,
+    /// Stamps suppressed because the file's [`MAX_PATHSET_STAMPS`]
+    /// budget ran out.
+    capped: usize,
+}
+
 /// Placement with the prop's local +X axis yawed about Y to run along
 /// `dir` (authored space, XZ only — R3 rotates about the Y axis alone).
 /// The axis convention matches INST simple placements, verified on
@@ -2243,8 +2273,22 @@ fn yawed_transform(origin: [f32; 3], dir: Vec3) -> Mat4 {
     })
 }
 
+/// One prop stamped with no rotation, at `origin` (authored space) —
+/// routed through [`inst_transform`] like every other placement so the
+/// `MIRROR_Z` convention stays in one place.
+fn unrotated_transform(origin: [f32; 3]) -> Mat4 {
+    inst_transform(&inst::InstCoordinate {
+        x_axis: [1.0, 0.0, 0.0],
+        y_axis: [0.0, 1.0, 0.0],
+        z_axis: [0.0, 0.0, 1.0],
+        origin,
+    })
+}
+
 /// Expand one pathset path into stamped prop transforms (authored
-/// space; [`inst_transform`] converts). Kind rules per R3 —
+/// space; [`inst_transform`] converts), emitting at most `budget`
+/// stamps — the caller threads the file's [`MAX_PATHSET_STAMPS`]
+/// allowance through every path. Kind rules per R3 —
 /// `docs/research/pathset.md`:
 ///
 /// - `Points`: one unrotated prop per vertex.
@@ -2264,65 +2308,124 @@ fn yawed_transform(origin: [f32; 3], dir: Vec3) -> Mat4 {
 /// (designed fallback — spacing 0 means "densest possible" and no
 /// documented rule subdivides further). Undocumented kinds stamp
 /// nothing; `validate()` names them.
-fn stamped_transforms(path: &pathset::Path) -> Vec<Mat4> {
+///
+/// Non-finite point coordinates stamp nothing either — the parser
+/// bounds counts, not magnitudes; `load_city` runs
+/// [`Pathset::validate`] so corrupt points are reported as issues.
+fn stamped_transforms(path: &pathset::Path, budget: usize) -> StampedPath {
     match path.kind() {
-        Some(PathKind::Points) => path
-            .points
-            .iter()
-            .map(|p| Mat4::from_translation(v3(p.position)))
-            .collect(),
-        Some(PathKind::Directed) => path
-            .points
-            .chunks_exact(2)
-            .map(|pair| {
-                yawed_transform(
-                    pair[0].position,
-                    Vec3::from(pair[1].position) - Vec3::from(pair[0].position),
-                )
-            })
-            .collect(),
-        Some(PathKind::LineStrip) => stamp_line_strip(path),
-        None => Vec::new(),
+        Some(PathKind::Points) => {
+            let finite: Vec<&pathset::PathPoint> = path
+                .points
+                .iter()
+                .filter(|p| p.position.iter().all(|c| c.is_finite()))
+                .collect();
+            let take = finite.len().min(budget);
+            StampedPath {
+                transforms: finite[..take]
+                    .iter()
+                    .map(|p| unrotated_transform(p.position))
+                    .collect(),
+                capped: finite.len() - take,
+            }
+        }
+        Some(PathKind::Directed) => {
+            let pairs: Vec<&[pathset::PathPoint]> = path
+                .points
+                .chunks_exact(2)
+                .filter(|pair| {
+                    pair.iter()
+                        .all(|p| p.position.iter().all(|c| c.is_finite()))
+                })
+                .collect();
+            let take = pairs.len().min(budget);
+            StampedPath {
+                transforms: pairs[..take]
+                    .iter()
+                    .map(|pair| {
+                        yawed_transform(
+                            pair[0].position,
+                            Vec3::from(pair[1].position) - Vec3::from(pair[0].position),
+                        )
+                    })
+                    .collect(),
+                capped: pairs.len() - take,
+            }
+        }
+        Some(PathKind::LineStrip) => stamp_line_strip(path, budget),
+        None => StampedPath {
+            transforms: Vec::new(),
+            capped: 0,
+        },
     }
 }
 
 /// `LineStrip` stamping — see [`stamped_transforms`] for the rule.
-fn stamp_line_strip(path: &pathset::Path) -> Vec<Mat4> {
+fn stamp_line_strip(path: &pathset::Path, budget: usize) -> StampedPath {
     let spacing = path.spacing_metres();
     let pts: Vec<Vec3> = path.points.iter().map(|p| Vec3::from(p.position)).collect();
     if spacing <= f32::EPSILON {
-        return pts
-            .iter()
-            .map(|p| Mat4::from_translation(v3(p.to_array())))
-            .collect();
+        let finite: Vec<&Vec3> = pts.iter().filter(|p| p.is_finite()).collect();
+        let take = finite.len().min(budget);
+        return StampedPath {
+            transforms: finite[..take]
+                .iter()
+                .map(|p| unrotated_transform(p.to_array()))
+                .collect(),
+            capped: finite.len() - take,
+        };
     }
     let mut out = Vec::new();
+    let mut capped = 0usize;
+    let mut left = budget;
     let mut last_dir = Vec3::X;
     for w in pts.windows(2) {
         let seg = w[1] - w[0];
         let len = seg.length();
-        if len <= f32::EPSILON {
+        // Zero-length segments stamp nothing. Non-finite lengths come
+        // from corrupt coordinates (`Pathset::validate` reports them);
+        // skipping them also keeps the expansion arithmetic finite.
+        if !len.is_finite() || len <= f32::EPSILON {
             continue;
         }
         let dir = seg / len;
         last_dir = dir;
-        let mut t = 0.0;
-        while t < len {
-            out.push(yawed_transform((w[0] + dir * t).to_array(), dir));
-            t += spacing;
+        // Stamps sit at t = 0, s, 2s, … strictly below len: ceil(len/s)
+        // of them, counted arithmetically so a huge or hostile segment
+        // is measured against the budget instead of walked — `t += s`
+        // stalls below the f32 ulp long before a multi-thousand-km
+        // segment ends. The float→int cast saturates, which `min`
+        // turns into the full remaining budget.
+        let want = (f64::from(len) / f64::from(spacing)).ceil() as usize;
+        let take = want.min(left);
+        for i in 0..take {
+            out.push(yawed_transform(
+                (w[0] + dir * (i as f32 * spacing)).to_array(),
+                dir,
+            ));
         }
+        left -= take;
+        capped = capped.saturating_add(want - take);
     }
     // The walk stops short of the final vertex by construction;
     // the authored row is capped at its end point. A lone vertex
-    // (no segments) still stamps once, unrotated.
-    if let Some(&last) = pts.last() {
-        if pts.len() > 1 {
-            out.push(yawed_transform(last.to_array(), last_dir));
+    // (no segments) still stamps once, unrotated. A non-finite final
+    // vertex stamps nothing.
+    if let Some(&last) = pts.last().filter(|p| p.is_finite()) {
+        if left == 0 {
+            capped = capped.saturating_add(1);
         } else {
-            out.push(Mat4::from_translation(v3(last.to_array())));
+            out.push(if pts.len() > 1 {
+                yawed_transform(last.to_array(), last_dir)
+            } else {
+                unrotated_transform(last.to_array())
+            });
         }
     }
-    out
+    StampedPath {
+        transforms: out,
+        capped,
+    }
 }
 
 /// Spawn one prop placement: every render part plus the prop's single
@@ -2516,6 +2619,15 @@ pub fn load_city(
     match vfs.read_path(&pathset_path) {
         Ok((pathset_bytes, pathset_res)) => match pathset::Pathset::parse(&pathset_bytes) {
             Ok(pathset) => {
+                for issue in pathset.validate() {
+                    report.pathset_issues += 1;
+                    warn!(path = %pathset_res.logical, %issue, "props.pathset authored issue");
+                }
+                // Stamps expand `len / spacing` per segment — authored
+                // coordinates are unbounded, so the file gets a hard
+                // budget shared across its paths; overflow is counted,
+                // not truncated silently.
+                let mut stamps_left = MAX_PATHSET_STAMPS;
                 for (pi, path) in pathset.paths.iter().enumerate() {
                     let Some(name) = path.asset_name() else {
                         // `PATHnn` route labels are not prop names.
@@ -2536,7 +2648,11 @@ pub fn load_city(
                         }
                         continue;
                     };
-                    for (ii, mat4) in stamped_transforms(path).iter().enumerate() {
+                    let stamped = stamped_transforms(path, stamps_left);
+                    stamps_left -= stamped.transforms.len();
+                    report.pathset_props_capped =
+                        report.pathset_props_capped.saturating_add(stamped.capped);
+                    for (ii, mat4) in stamped.transforms.iter().enumerate() {
                         spawn_prop(
                             commands,
                             model,
@@ -2552,6 +2668,7 @@ pub fn load_city(
                     stamped = report.pathset_props_spawned,
                     decals = report.pathset_decal_paths,
                     failed = report.pathset_props_failed,
+                    capped = report.pathset_props_capped,
                     "pathset props stamped"
                 );
             }
@@ -2627,6 +2744,12 @@ mod tests {
         }
     }
 
+    /// Expand a path the way `load_city` does when it is a file's only
+    /// consumer: the full [`MAX_PATHSET_STAMPS`] budget.
+    fn stamps(p: &pathset::Path) -> StampedPath {
+        stamped_transforms(p, MAX_PATHSET_STAMPS)
+    }
+
     fn origin_of(m: &Mat4) -> Vec3 {
         m.transform_point3(Vec3::ZERO)
     }
@@ -2639,7 +2762,7 @@ mod tests {
     #[test]
     fn points_path_stamps_one_unrotated_prop_per_vertex() {
         let p = path(&[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], 0, 20);
-        let out = stamped_transforms(&p);
+        let out = stamps(&p).transforms;
         assert_eq!(out.len(), 2);
         assert!((origin_of(&out[0]) - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-5);
         // No direction control: local +X stays +X.
@@ -2650,7 +2773,7 @@ mod tests {
     fn directed_path_stamps_pairs_yawed_about_y() {
         // Prop at (0,0,0) aimed at (0,0,5): local +X runs toward +Z.
         let p = path(&[[0.0, 0.0, 0.0], [0.0, 0.0, 5.0]], 1, 20);
-        let out = stamped_transforms(&p);
+        let out = stamps(&p).transforms;
         assert_eq!(out.len(), 1);
         assert!((origin_of(&out[0]) - Vec3::ZERO).length() < 1e-5);
         assert!((x_axis_of(&out[0]) - Vec3::Z).length() < 1e-5);
@@ -2659,13 +2782,13 @@ mod tests {
     #[test]
     fn directed_path_drops_a_lone_trailing_point() {
         let p = path(&[[0.0, 0.0, 0.0], [0.0, 0.0, 5.0], [9.0, 9.0, 9.0]], 1, 20);
-        assert_eq!(stamped_transforms(&p).len(), 1);
+        assert_eq!(stamps(&p).transforms.len(), 1);
     }
 
     #[test]
     fn directed_degenerate_offset_leaves_prop_unrotated() {
         let p = path(&[[1.0, 0.0, 1.0], [1.0, 3.0, 1.0]], 1, 20);
-        let out = stamped_transforms(&p);
+        let out = stamps(&p).transforms;
         assert_eq!(out.len(), 1);
         assert!((x_axis_of(&out[0]) - Vec3::X).length() < 1e-5);
     }
@@ -2675,7 +2798,7 @@ mod tests {
         // One 12 m segment, 5 m spacing (spacing code is quarter metres):
         // t = 0, 5, 10 along it, plus the authored end vertex at 12.
         let p = path(&[[0.0, 0.0, 0.0], [0.0, 0.0, 12.0]], 2, 20);
-        let out = stamped_transforms(&p);
+        let out = stamps(&p).transforms;
         let zs: Vec<f32> = out.iter().map(|m| origin_of(m).z).collect();
         assert_eq!(zs, vec![0.0, 5.0, 10.0, 12.0]);
         // Every stamp is yawed along the segment.
@@ -2694,7 +2817,7 @@ mod tests {
             2,
             20,
         );
-        let out = stamped_transforms(&p);
+        let out = stamps(&p).transforms;
         let origins: Vec<Vec3> = out.iter().map(origin_of).collect();
         assert_eq!(
             origins,
@@ -2716,7 +2839,7 @@ mod tests {
     #[test]
     fn line_strip_zero_spacing_stamps_per_vertex() {
         let p = path(&[[0.0, 0.0, 0.0], [0.0, 0.0, 5.0], [0.0, 0.0, 9.0]], 2, 0);
-        let out = stamped_transforms(&p);
+        let out = stamps(&p).transforms;
         assert_eq!(out.len(), 3);
         assert!((x_axis_of(&out[0]) - Vec3::X).length() < 1e-5);
     }
@@ -2724,7 +2847,7 @@ mod tests {
     #[test]
     fn line_strip_zero_length_segments_stamp_nothing() {
         let p = path(&[[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 6.0]], 2, 20);
-        let out = stamped_transforms(&p);
+        let out = stamps(&p).transforms;
         let zs: Vec<f32> = out.iter().map(|m| origin_of(m).z).collect();
         assert_eq!(zs, vec![0.0, 5.0, 6.0]);
     }
@@ -2732,15 +2855,94 @@ mod tests {
     #[test]
     fn single_vertex_strip_stamps_once() {
         let p = path(&[[7.0, 0.0, 7.0]], 2, 20);
-        let out = stamped_transforms(&p);
+        let out = stamps(&p).transforms;
         assert_eq!(out.len(), 1);
         assert!((origin_of(&out[0]) - Vec3::new(7.0, 0.0, 7.0)).length() < 1e-5);
     }
 
     #[test]
     fn empty_and_unknown_kind_paths_stamp_nothing() {
-        assert!(stamped_transforms(&path(&[], 2, 20)).is_empty());
-        assert!(stamped_transforms(&path(&[[0.0, 0.0, 0.0]], 7, 20)).is_empty());
+        assert!(stamps(&path(&[], 2, 20)).transforms.is_empty());
+        assert!(
+            stamps(&path(&[[0.0, 0.0, 0.0]], 7, 20))
+                .transforms
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn non_finite_points_stamp_nothing() {
+        // One good vertex and one NaN: the corrupt point produces no
+        // transform at all (`Pathset::validate` reports it at load).
+        let p = path(&[[1.0, 2.0, 3.0], [f32::NAN, 0.0, 0.0]], 0, 0);
+        let out = stamps(&p).transforms;
+        assert_eq!(out.len(), 1);
+        assert!((origin_of(&out[0]) - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-5);
+        // A directed pair is only stamped when both points are finite.
+        let p = path(&[[0.0, 0.0, 0.0], [f32::INFINITY, 0.0, 0.0]], 1, 0);
+        assert!(stamps(&p).transforms.is_empty());
+    }
+
+    #[test]
+    fn expansion_is_bounded_by_the_stamp_budget() {
+        // 12 m at 5 m spacing wants t = 0, 5, 10 plus the end cap = 4
+        // stamps; a budget of 2 emits the first two and counts the
+        // suppressed rest rather than truncating silently.
+        let p = path(&[[0.0, 0.0, 0.0], [0.0, 0.0, 12.0]], 2, 20);
+        let s = stamped_transforms(&p, 2);
+        assert_eq!(s.transforms.len(), 2);
+        assert_eq!(s.capped, 2);
+        // The budget applies to point/directed expansions too.
+        let p = path(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]], 0, 0);
+        let s = stamped_transforms(&p, 2);
+        assert_eq!(s.transforms.len(), 2);
+        assert_eq!(s.capped, 1);
+    }
+
+    #[test]
+    fn a_hostile_segment_is_capped_instead_of_hanging() {
+        // A corrupt/hostile coordinate: ~1e18 m at 0.25 m spacing is a
+        // ~4e18-stamp segment — walking `t += spacing` stalls below the
+        // f32 ulp and never ends. The segment is counted arithmetically
+        // and the file budget caps what is emitted.
+        let p = path(&[[0.0, 0.0, 0.0], [1e18, 0.0, 0.0]], 2, 1);
+        let s = stamped_transforms(&p, 8);
+        assert_eq!(s.transforms.len(), 8);
+        assert!(s.capped > 0);
+        // Same bound with the production cap: the row is still
+        // truncated at MAX_PATHSET_STAMPS, not millions of instances.
+        let s = stamps(&p);
+        assert_eq!(s.transforms.len(), MAX_PATHSET_STAMPS);
+        assert!(s.capped > 0);
+    }
+
+    #[test]
+    fn non_finite_segments_stamp_nothing_but_stay_bounded() {
+        // +inf and NaN coordinates produce non-finite segment lengths;
+        // they are skipped (reported by `Pathset::validate` at load) and
+        // can neither loop nor stamp non-finite transforms.
+        let p = path(
+            &[
+                [0.0, 0.0, 0.0],
+                [f32::INFINITY, 0.0, 0.0],
+                [f32::NAN, 1.0, 0.0],
+            ],
+            2,
+            4,
+        );
+        assert!(stamps(&p).transforms.is_empty());
+        // A non-finite final vertex does not cap the row either; the
+        // finite prefix still stamps.
+        let p = path(
+            &[[0.0, 0.0, 0.0], [0.0, 0.0, 10.0], [f32::NAN, 0.0, 0.0]],
+            2,
+            20,
+        );
+        let out = stamps(&p).transforms;
+        assert_eq!(out.len(), 2); // t = 0, 5 — no end cap on the NaN vertex
+        for m in &out {
+            assert!(origin_of(m).is_finite());
+        }
     }
 
     #[test]
