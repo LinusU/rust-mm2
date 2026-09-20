@@ -279,8 +279,46 @@ verified original behaviour — every provisional point is still UNK-22.
 - **Deliberately deferred:** `BirthRule` particles, `AudioId`/`Flash`/
   `TexNumber` effects, decals, prop-rule-channel stamping, the
   `dgBangerActive` `Timer` despawn, and replication. `NumParts` is
-  carried on `BangerDefinition` and bounds the prepared piece set, but
-  whether it also gates runtime spawning is still UNK-22.
+  carried on `BangerDefinition` but does not bound the prepared piece
+  set — every collidable `BREAK<NN>` chunk is prepared regardless,
+  since the audit verified the two always agree on standalone props;
+  whether `NumParts` gates runtime spawning is still UNK-22.
+
+## Observed retail strikes (F04-C.1)
+
+Headless `hold`-driver strikes on the retail install, targeted with
+`--spawn x,y,z[,yaw]` (dev pose) and read off the `bng=`/`bng_ev=`
+counters in the `smoke=headless-physics` record. BAI road
+centre-lines (`mm2-inspect dump city/<city>.bai`) were used to place
+the car on real streets near stamped placements.
+
+- **Activation + settle (London roam):** `vpbug` at
+  `--spawn 762,0.5,-424,0` struck a stamped `sp_bollard_black_l`
+  near (757, −425) on road494 → `bng=1187d/0a/1s/0b
+  bng_ev=1a/1s/0b`. One activation event, one settle, prop left
+  dormant count −1.
+- **Break (SF roam):** `vpsemi` at `--spawn=-169,35.5,744,172`
+  struck the `sp_wrongwayfw` freeway sign stamped at
+  (−178.9, 34.9, 784.8) beside road4 → `bng=924d/3a/0s/1b
+  bng_ev=0a/0s/1b`. One `Broken` event, 3 `Active` fragments —
+  exactly the authored `NumParts 3` / BREAK01–03 chunks. Fragments
+  emit no spawn event by contract.
+- **Below threshold (SF roam):** `vpsemi` at
+  `--spawn=-180,35.5,776,187` grazed the same sign at ~3 m/s →
+  `impacts=1`, `bng_ev=0a/0s/0b`. Contact registered, no transition.
+- **Unbroken attempt (London `circuit:7`):** the `sp_sawhrslt_f`
+  wall (ImpulseLimit2 34982) on road216 near (−695, 235) was
+  reachable at only ~8 m/s semi — below threshold, no transition.
+- **Open observation:** the sign fragments stayed `Active` over 3000
+  ticks on the sloped elevated freeway (never reached Avian sleep);
+  slope tumbling suspected, a flat-ground retail break would settle
+  whether this is a settle-path issue. The London bollard settled
+  normally on flat ground.
+- **Targeting notes:** `hold` waits ~2 s then drives straight at
+  full throttle — no steering, and vehicles drift on cambered roads.
+  Spawns that are not on collision geometry fail `never grounded`.
+  Signs with thin collision (e.g. `sp_noenter_f`, Size 0.06 m) are
+  impractical to hit deliberately.
 
 ## Runtime consumption — what is not known
 

@@ -363,6 +363,16 @@ pub struct CameraPose {
     pub pitch: f32,
 }
 
+/// A player-vehicle spawn pose (`--spawn x,y,z[,yaw]`): the
+/// `Quat::from_rotation_y` convention — forward is local −Z, so yaw 0
+/// drives toward −Z and yaw π/2 toward −X.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpawnPose {
+    pub position: Vec3,
+    /// Yaw in radians.
+    pub yaw: f32,
+}
+
 /// Local developer tweaks that must never count for progression or be
 /// legal in a networked session. Quarantined here — off the
 /// session-legal fields — so nothing downstream confuses them with real
@@ -376,6 +386,10 @@ pub struct DevOverrides {
     /// `--nav` BAI navigation debug overlay over an imported city
     /// (F09-B diagnostics — never a gameplay input).
     pub nav_overlay: Option<NavOverlay>,
+    /// `--spawn` fixed player-vehicle start pose: replaces whatever the
+    /// world or authored event slot chose (evidence/diagnostic runs —
+    /// never a session-legal parameter).
+    pub spawn: Option<SpawnPose>,
 }
 
 /// Configuration of the `--nav` debug overlay: draw the city's BAI

@@ -26,7 +26,7 @@ pub use banger::{
 pub use config::{
     CameraPose, ConfigError, Densities, DevOverrides, Difficulty, EventRef, EventTableKind,
     NavOverlay, SelectorError, SessionAuthority, SessionConditions, SessionConfig, SessionMode,
-    TimeOfDay, VehicleSelection, Weather,
+    SpawnPose, TimeOfDay, VehicleSelection, Weather,
 };
 pub use ids::{AuthorityRole, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerId};
 pub use impact::{ImpactDedup, ImpactEvent, ImpactId, ImpactPolicy};

@@ -265,6 +265,10 @@ pub fn headless_smoke(
     let mut saw_grounded = false;
     let mut grounded_wheels = 0usize;
     let mut peak_speed = 0.0f32;
+    // Emitted banger transitions by phase — the event stream, not just
+    // the end-state buckets below (a prop that activated then settled
+    // counts in both).
+    let mut bng_events = [0usize; 4];
     for f in 0..frames {
         // The `Hold` driver writes input directly; `Scripted` is owned
         // by `scripted_drive` inside the update. Either way the
@@ -291,6 +295,18 @@ pub fn headless_smoke(
             }
         }
         app.update();
+        for e in app
+            .world_mut()
+            .resource_mut::<Messages<BangerStateChanged>>()
+            .drain()
+        {
+            bng_events[match e.phase {
+                BangerPhase::Dormant => 0,
+                BangerPhase::Active => 1,
+                BangerPhase::Settled => 2,
+                BangerPhase::Broken => 3,
+            }] += 1;
+        }
         if let Some(state) = app.world().get::<VehicleState>(car) {
             saw_grounded |= state.grounded;
             grounded_wheels = state.wheels.iter().filter(|w| w.grounded).count();
@@ -362,8 +378,14 @@ pub fn headless_smoke(
         }
         if counts.iter().sum::<usize>() > 0 {
             format!(
-                " bng={}d/{}a/{}s/{}b",
-                counts[0], counts[1], counts[2], counts[3]
+                " bng={}d/{}a/{}s/{}b bng_ev={}a/{}s/{}b",
+                counts[0],
+                counts[1],
+                counts[2],
+                counts[3],
+                bng_events[1],
+                bng_events[2],
+                bng_events[3],
             )
         } else {
             String::new()

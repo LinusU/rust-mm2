@@ -106,6 +106,12 @@ struct Cli {
     #[arg(long, value_name = "x,y,z[,yaw,pitch]", conflicts_with = "headless")]
     cam: Option<String>,
 
+    /// Spawn the player vehicle at `x,y,z[,yaw-deg]` instead of the
+    /// world/authored start (diagnostic aid; yaw 0 faces -Z). Replaces
+    /// the roam spawn and any authored event slot.
+    #[arg(long, value_name = "x,y,z[,yaw]")]
+    spawn: Option<String>,
+
     /// Run without a window or GPU: simulate `--frames` updates
     /// (default 600), print a `smoke=headless-physics` record and exit.
     #[arg(long)]
@@ -172,6 +178,28 @@ fn main() {
         Some(Ok(c)) => Some(c),
         Some(Err(())) => {
             error!("invalid --cam: expected x,y,z[,yaw,pitch]");
+            std::process::exit(2);
+        }
+        None => None,
+    };
+
+    // `--spawn x,y,z[,yaw-deg]` pins the player vehicle's start pose
+    // (yaw in degrees, same convention as the roam spawn's
+    // `Quat::from_rotation_y` angle).
+    let spawn_pose = cli.spawn.as_deref().map(|s| {
+        let parts: Result<Vec<f32>, _> = s.split(',').map(|p| p.trim().parse::<f32>()).collect();
+        match parts {
+            Ok(f) if f.len() == 3 || f.len() == 4 => Ok(mm2_game::SpawnPose {
+                position: Vec3::new(f[0], f[1], f[2]),
+                yaw: f.get(3).copied().unwrap_or(0.0).to_radians(),
+            }),
+            _ => Err(()),
+        }
+    });
+    let spawn_pose = match spawn_pose {
+        Some(Ok(p)) => Some(p),
+        Some(Err(())) => {
+            error!("invalid --spawn: expected x,y,z[,yaw]");
             std::process::exit(2);
         }
         None => None,
@@ -405,6 +433,7 @@ fn main() {
             vehicle_config: cli.vehicle_config.clone(),
             camera: cam_start,
             nav_overlay: nav_overlay_cfg,
+            spawn: spawn_pose,
         },
         ..SessionConfig::default()
     };

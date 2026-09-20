@@ -362,6 +362,13 @@ pub fn load_session_world(
             }
         }
     }
+    // A `--spawn` dev pose replaces whatever the world or authored
+    // event slot chose — quarantined like `--cam`, never a session
+    // parameter (evidence/diagnostic runs only).
+    if let Some(pose) = config.dev.spawn {
+        spawn.position = pose.position;
+        spawn.yaw = pose.yaw;
+    }
     if world_ok {
         session
             .transition(SessionPhase::Ready)

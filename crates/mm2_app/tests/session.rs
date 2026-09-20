@@ -16,9 +16,9 @@ use mm2_app::session::{
 };
 use mm2_assets::Vfs;
 use mm2_game::{
-    DamageSignals, ImpactEvent, ImpactId, Mm2Vfs, ObjectId, ObjectIdentity, PlayerVehicle, Session,
-    SessionConfig, SessionEntity, SessionPhase, WorldMode, advance_session_tick,
-    despawn_session_entities,
+    DamageSignals, DevOverrides, ImpactEvent, ImpactId, Mm2Vfs, ObjectId, ObjectIdentity,
+    PlayerVehicle, Session, SessionConfig, SessionEntity, SessionPhase, SpawnPose, WorldMode,
+    advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::{Vehicle, VehicleConfig, VehicleInput, VehiclePlugin, VehicleState};
 
@@ -361,6 +361,42 @@ fn restart_resets_the_impact_stream() {
         app.world().resource::<ImpactFilter>().emitted as usize,
         gen2.len(),
         "emitted counts only the current session's stream"
+    );
+}
+
+/// A `--spawn` dev pose replaces the world's roam spawn — the player
+/// lands exactly where the override says, at the override's yaw, and
+/// `SpawnPoint` records it for resets.
+#[test]
+fn dev_spawn_override_pins_the_player_pose() {
+    let config = SessionConfig {
+        dev: DevOverrides {
+            spawn: Some(SpawnPose {
+                position: Vec3::new(5.0, 2.0, -7.0),
+                yaw: 1.0,
+            }),
+            ..DevOverrides::default()
+        },
+        ..SessionConfig::default()
+    };
+    let mut app = test_app(config, 1.0 / 60.0);
+    app.update();
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+
+    let car = single::<With<PlayerVehicle>>(&mut app);
+    assert_eq!(
+        app.world().get::<Position>(car).unwrap().0,
+        Vec3::new(5.0, 2.0, -7.0),
+        "the override pose wins over the world spawn"
+    );
+    assert_eq!(
+        app.world().get::<Rotation>(car).unwrap().0,
+        Quat::from_rotation_y(1.0),
+    );
+    assert_eq!(
+        app.world().resource::<SpawnPoint>().position,
+        Vec3::new(5.0, 2.0, -7.0),
+        "resets return to the override pose"
     );
 }
 

@@ -38,24 +38,28 @@
 
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
-**Next selected slice: F04-C (threshold/repeated-collision/reset +
-resource-budget validation), prop-rule stamping research (UNK-21 —
-the second verified banger channel), decal stamping (same
-research-first caveat), F13-A or F09-C** — this iteration landed
-F04-B.1: BREAK<NN> fragment spawning on activation. `pkg_to_parts`
-splits authored break chunks into `FragmentModel`s; stamped bound
-props carry `BangerPieces`; a qualifying impact now goes
-`BangerPhase::Broken` — parent collider/mesh removed, one `Active`
-fragment body per collidable piece (own `ObjectId`, own
-`<name>_break<NN>` record or parent-def fallback, convex collider,
-pool-bounded, one logical `BangerStateChanged`). No-collidable-piece
-props tip over instead. Review nits from F04-A.3 fixed (INST-binding
-doc wording, `max_active = 0` cap). Retail: sf 925 bangers/3092
-pieces, london 1188/2710, 0 decode failures; london circuit:0
-overlay 181 bangers/0 pieces (authored — barricades carry no BREAK
-chunks). F04-A.1 checked at `ad471b0`; F04-A.2 + F04-A.3 checked per
-external review; F04-B.1 is a candidate. F13-A's deps (F02-B, F11-B)
-remain candidates, not checked.
+**Next selected slice: F04-C.2 (flat-ground fragment settle +
+repeated-collision/pool-reclaim retail runs), prop-rule stamping
+research (UNK-21 — the second verified banger channel), decal
+stamping (same research-first caveat), F13-A or F09-C** — this
+iteration landed F04-C.1: original-content banger strike evidence.
+New dev tooling: `--spawn x,y,z[,yaw]` (quarantined
+`DevOverrides::spawn`, applied after world/event spawn selection)
+and `bng_ev=` emitted-transition counters in the headless record.
+Retail: a London `sp_bollard_black_l` activated and settled on a
+real impact (`bng_ev=1a/1s/0b`); an SF `sp_wrongwayfw` freeway sign
+went `Broken` into exactly its authored 3 BREAK fragments
+(`bng=924d/3a/0s/1b bng_ev=0a/0s/1b`); a ~3 m/s graze of the same
+prop produced nothing — AC01's both sides on real content. AC05
+restart coverage moved to session level: a synthetic-city break +
+`SessionControl.restart` restamps the dormant placement, removes
+husk + fragments, no generation leaks. Observation: sign fragments
+stayed `Active` 3000 ticks on the sloped freeway — plausible
+slope-tumbling, not proven a defect. UNK-22 (break timing/threshold
+semantics) stays provisional. F04-A.1 checked at `ad471b0`; F04-A.2
++ F04-A.3 + F04-B.1 checked per external review; F04-C.1 is a
+candidate. F13-A's deps (F02-B, F11-B) remain candidates, not
+checked.
 
 ## Baseline gate results (this checkout, 2026-09-20)
 
@@ -128,7 +132,8 @@ remain candidates, not checked.
 || F04-A.3 | implemented | F04-A.2 | `mm2_game::banger` (`BangerPhase` dormant/active/settled, `Banger`, `BangerDefinition` distilled from `BangerData`, `BangerStateChanged` message, `BangerPool` ×32 — the R4-recovered pool size) + `mm2_app::banger` (`BangerDefs` VFS cache, `banger_bundle`, `activate_bangers`, `settle_bangers`). `stamp_pathset` binds each prop name: bound+collidable → one session-owned dynamic-capable entity (mesh children follow); unbound/failed/no-collider → the ordinary static pair (decode failures counted, not hidden). Activation reads raw `CollisionStart` via shared `deepest_contact`; provisional estimate `approach_speed × striker_mass` vs `ImpulseLimit2` (UNK-22); one impulse + `Size`-derived spin kick; oldest-first pool reclaim; Avian sleep → `Settled` static; authority-gated (`Predicted` never transitions). 7 integration tests on real physics + 5 `mm2_game` unit tests; retail headless london `bng=1188d/0a/0s`, sf `bng=925d/0a/0s`, 0 decode failures. DSN-10 added. Deferred: fragments (F04-B), BirthRule/audio/flash/decal effects, prop-rule channel, Timer despawn, replication. AC01–AC06 stay open. Candidate pending external check. |
 | F04-B | implemented | F04-A | Split: B.1 (BREAK<NN> fragment spawning on activation — implemented below). Fragment timing vs a later break threshold, `NumParts` runtime role, `BirthRule`/audio/flash/decal effects and original-content activation remain open (UNK-22); parent stays non-checked until F04-C + AC evidence land. |
 | F04-B.1 | implemented | F04-A.3 | `BangerPhase::Broken`; `pkg_to_parts` splits `BREAK<NN>` chunks into `FragmentModel`s (authored file order); `stamp_pathset` stamps `BangerPieces` (each piece resolves `tune/banger/<name>_break<NN>`, parent-def fallback). `break_banger` on a qualifying edge: parent → `Broken` (collider + mesh children removed, one `BangerStateChanged`, never also `Active`), one dynamic fragment body per collidable piece — own `ObjectId`, session-owned, convex collider, impact velocity + CG-lever spin, pool-bounded via `claim_slot` (pending same-tick spawns counted; `max_active = 0` spawns nothing). Pieces without colliders → ordinary activation. Fragments spawn `Active` and settle through `settle_bangers`. 4 new integration tests (shatter/pool-bound/no-collider-fallback/stamp pieces) + teardown coverage; retail sf `bng=925d/0a/0s/0b` pieces=3092, london 1188/2710, overlay barricades 0 pieces (authored). DSN-10 + UNK-22 updated. F04-A.3 review nits fixed (INST-doc wording, zero-cap). Deferred: `BirthRule` particles, audio/flash/decal effects, prop-rule channel, Timer despawn, replication, original-content activation. AC01–AC06 stay open. Candidate pending external check. |
-| F04-C | queued | F04-B | — |
+| F04-C | implemented | F04-B | Split: C.1 (original-content strike evidence + dev spawn/tooling — implemented below). Remaining legs: C.2 fragment settle on flat ground + repeated-collision/pool-reclaim on retail; break timing vs a separate original break threshold and `NumParts` runtime role stay UNK-22; parent stays non-checked. |
+| F04-C.1 | implemented | F04-B.1 | `DevOverrides::spawn` + `--spawn x,y,z[,yaw]` (quarantined dev pose applied after world/event spawn selection); `bng_ev=<a>a/<s>s/<b>b` emitted-transition counters in the headless smoke record (distinct from `bng=` end-state buckets; fragment spawns are silent by contract). New tests: `dev_spawn_override_pins_the_player_pose`; `restart_restores_stamped_placements_after_a_break` — synthetic city, real `load_session_world` + `drive_session` restart, husk+fragments removed, dormant restamp under gen-2, zero generation leaks. Retail evidence: London `sp_bollard_black_l` activation+settle (`bng_ev=1a/1s/0b`); SF `sp_wrongwayfw` break into its authored 3 fragments (`bng_ev=0a/0s/1b`, `bng=924d/3a/0s/1b`); below-threshold graze → no transition (AC01 both sides, real content); `circuit:7` overlay stamps 899 bangers incl. `sp_sawhrslt_f` walls. Gap: fragments stayed Active on sloped freeway (slope-tumbling suspected, unproven); no GPU break capture; UNK-22 semantics unverified. Candidate pending external check. |
 | F05-A | queued | F01-B, F02-B | `.vehcardamage` readable via generic tune parser; no typed rules or runtime. |
 | F05-B | queued | F05-A | — |
 | F05-C | queued | F05-B | — |

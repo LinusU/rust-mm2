@@ -18,11 +18,17 @@ use bevy::time::TimeUpdateStrategy;
 use mm2_app::banger::{
     BangerPieces, FragmentPiece, activate_bangers, banger_bundle, settle_bangers,
 };
+use mm2_app::camera::CameraMode;
+use mm2_app::contracts::{self, ImpactFilter};
+use mm2_app::session::{self, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
+use mm2_assets::Vfs;
 use mm2_game::{
     AuthorityRole, Banger, BangerCause, BangerDefinition, BangerPhase, BangerPool,
-    BangerStateChanged, CityEntity, ObjectId, ObjectIdentity, Session, SessionAuthority,
-    SessionConfig, SessionEntity, SessionPhase, advance_session_tick, despawn_session_entities,
+    BangerStateChanged, CityEntity, ImpactEvent, Mm2Vfs, ObjectId, ObjectIdentity, Session,
+    SessionAuthority, SessionConfig, SessionEntity, SessionPhase, WorldMode, advance_session_tick,
+    despawn_session_entities,
 };
+use mm2_vehicle::{VehicleConfig, VehiclePlugin};
 
 const FRAMES_PER_SECOND: usize = 60;
 
@@ -907,4 +913,306 @@ fn breakable_props_stamp_their_authored_pieces() {
     // The dormant prop keeps only its intact mesh — the BREAK chunks
     // are not part of its surface or collider.
     assert_eq!(world.get::<Children>(bangers[0]).unwrap().len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// F04-C: restart restores the stamped placements (AC05) — a break
+// through the real `load_session_world` city path, then
+// `SessionControl.restart` through `drive_session`, must restamp the
+// same dormant placement and leave no fragment or husk behind.
+// ---------------------------------------------------------------------------
+
+fn push_lp(out: &mut Vec<u8>, s: &str) {
+    out.push(s.len() as u8 + 1);
+    out.extend_from_slice(s.as_bytes());
+    out.push(0);
+}
+
+fn push_f32s(out: &mut Vec<u8>, v: &[f32]) {
+    for f in v {
+        out.extend_from_slice(&f.to_le_bytes());
+    }
+}
+
+/// The same one-room synthetic PSDL `import_pipeline` stamps — a road
+/// (x −5..5, z 0..20) plus a ground fan — copied so this test stays
+/// self-contained (each `tests/` file is a crate).
+fn city_psdl() -> Vec<u8> {
+    let mut d = Vec::new();
+    d.extend_from_slice(b"PSD0");
+    d.extend_from_slice(&2u32.to_le_bytes()); // target_size
+    let verts: &[[f32; 3]] = &[
+        [-5., 0., 0.],
+        [-3., 0., 0.],
+        [3., 0., 0.],
+        [5., 0., 0.], // road section 0: sw_l, rl, rr, sw_r
+        [-5., 0., 20.],
+        [-3., 0., 20.],
+        [3., 0., 20.],
+        [5., 0., 20.], // road section 1
+        [10., 0., 0.],
+        [10., 0., 10.],
+        [20., 0., 10.],
+        [20., 0., 0.], // fan (clockwise in x,z)
+        [30., 0., 0.],
+        [30., 0., 10.], // wall edge
+        [35., 5., 0.],
+        [45., 5., 0.],
+        [45., 5., 10.],
+        [35., 5., 10.], // roof
+    ];
+    d.extend_from_slice(&(verts.len() as u32).to_le_bytes());
+    for v in verts {
+        push_f32s(&mut d, v);
+    }
+    let heights = [0.15f32, 2.0, 6.0];
+    d.extend_from_slice(&(heights.len() as u32).to_le_bytes());
+    push_f32s(&mut d, &heights);
+    d.extend_from_slice(&2u32.to_le_bytes());
+    push_lp(&mut d, "test_road");
+    d.extend_from_slice(&2u32.to_le_bytes()); // nRooms
+    d.extend_from_slice(&0u32.to_le_bytes()); // junctions
+    let mut attr_words: Vec<u16> = Vec::new();
+    let attr = |words: &mut Vec<u16>, word: u16, data: &[u16]| {
+        words.push(word);
+        words.extend_from_slice(data);
+    };
+    attr(&mut attr_words, 0x0a << 3, &[1]); // texture ref → textures[0]
+    attr(&mut attr_words, 0x00, &[2, 0, 1, 2, 3, 4, 5, 6, 7]); // counted road
+    attr(&mut attr_words, 0x06 << 3, &[2, 8, 9, 10, 11]); // counted fan
+    attr(&mut attr_words, (0x0b << 3) | 6, &[1, 2, 3, 2, 12, 13]); // facade
+    attr(&mut attr_words, (0x07 << 3) | 4, &[0, 2, 12, 13]); // facade bound
+    attr(&mut attr_words, (0x0c << 3) | 3, &[2, 14, 15, 16, 17]); // roof fan
+    attr(&mut attr_words, (0x03 << 3) | 4, &[2, 0, 12, 13]); // sliver
+    attr(&mut attr_words, (0x09 << 3) | 3 | 0x80, &[9, 9, 9]); // tunnel (last)
+    let mut room = Vec::new();
+    room.extend_from_slice(&4u32.to_le_bytes()); // nPerimeter
+    room.extend_from_slice(&(attr_words.len() as u32).to_le_bytes());
+    for v in [0u16, 1, 2, 3] {
+        room.extend_from_slice(&v.to_le_bytes());
+        room.extend_from_slice(&0u16.to_le_bytes()); // neighbour room
+    }
+    for w in &attr_words {
+        room.extend_from_slice(&w.to_le_bytes());
+    }
+    d.extend_from_slice(&room);
+    d.extend_from_slice(&[0u8; 2]); // room flags (nRooms entries)
+    d.extend_from_slice(&[0u8; 2]); // prop rules
+    push_f32s(&mut d, &[-5., 0., 0.]); // bounds min
+    push_f32s(&mut d, &[45., 6., 20.]); // bounds max
+    push_f32s(&mut d, &[20., 3., 10.]); // bounds centre
+    push_f32s(&mut d, &[30.]); // radius
+    d.extend_from_slice(&0u32.to_le_bytes()); // nPaths
+    d
+}
+
+/// A drivable synthetic city whose `props.pathset` stamps one
+/// breakable `breakpkg` prop on the road at (0, 0, 15).
+fn city_install() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(d, "city/test.psdl", city_psdl());
+    std::fs::create_dir_all(d.join("texture")).unwrap();
+    std::fs::write(
+        d.join("texture/test_road.png"),
+        include_bytes!("../../../assets/texture/dev_road.png"),
+    )
+    .unwrap();
+    write(d, "geometry/breakpkg.pkg", breakable_pkg());
+    write(
+        d,
+        "tune/banger/breakpkg.dgbangerdata",
+        breakable_record(0.0, 2),
+    );
+    write(
+        d,
+        "city/test/props.pathset",
+        pth1(&[pth1_path("breakpkg", &[[0.0, 0.0, 15.0]], 0, 0)]),
+    );
+    tmp
+}
+
+/// The production session wiring for a cruise city — the same systems
+/// `headless_smoke` and the binary schedule, including the banger
+/// driver and the lifecycle driver a restart rides.
+fn city_app(vfs: Vfs) -> App {
+    let mut session = Session::new();
+    session
+        .begin(SessionConfig {
+            world: WorldMode::City {
+                psdl: "city/test.psdl".into(),
+            },
+            ..SessionConfig::default()
+        })
+        .unwrap();
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_plugins(AssetPlugin::default())
+        .add_plugins(bevy::mesh::MeshPlugin)
+        .add_plugins(bevy::gizmos::GizmoPlugin)
+        .add_plugins(PhysicsPlugins::default())
+        .insert_resource(Time::<Fixed>::from_hz(120.0))
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / 60.0,
+        )))
+        .insert_resource(Gravity(Vec3::NEG_Y * 9.81))
+        .insert_resource(session)
+        .add_plugins(TransformPlugin)
+        .add_plugins(VehiclePlugin)
+        .add_message::<BangerStateChanged>()
+        .add_message::<ImpactEvent>()
+        .init_resource::<ImpactFilter>()
+        .init_resource::<SessionControl>()
+        .init_resource::<ButtonInput<KeyCode>>()
+        .init_resource::<BangerPool>()
+        .init_resource::<Assets<Mesh>>()
+        .init_resource::<Assets<Image>>()
+        .init_resource::<Assets<StandardMaterial>>()
+        .insert_resource(CameraMode::Chase)
+        .insert_resource(SpawnPoint {
+            position: Vec3::new(0.0, 1.5, 0.0),
+            yaw: 0.0,
+            trailers: Vec::new(),
+        })
+        .insert_resource(Mm2Vfs(vfs))
+        .insert_resource(TunedVehicle(VehicleConfig::default()))
+        .insert_resource(SelectedCar {
+            def: None,
+            paint: 0,
+        })
+        .add_systems(FixedUpdate, advance_session_tick)
+        .add_systems(
+            FixedLast,
+            (contracts::collect_impacts, activate_bangers, settle_bangers).chain(),
+        )
+        .add_systems(
+            Update,
+            (
+                session::load_session_world.run_if(session::loading),
+                session::session_control_input,
+                (
+                    despawn_session_entities.run_if(session::unloading),
+                    session::drive_session,
+                )
+                    .chain(),
+            ),
+        );
+    app.finish();
+    app.cleanup();
+    app
+}
+
+/// Every `Banger` entity with its phase and owning generation.
+fn banger_states(app: &mut App) -> Vec<(BangerPhase, SessionEntity)> {
+    let mut q = app
+        .world_mut()
+        .query_filtered::<(&Banger, &SessionEntity), ()>();
+    q.iter(app.world())
+        .map(|(b, owner)| (b.phase, *owner))
+        .collect()
+}
+
+/// AC05: a session restart through the real teardown/reload cycle
+/// restores the same initial stamped placements and removes every
+/// fragment the break spawned — no leaked bodies, no leftover husks.
+#[test]
+fn restart_restores_stamped_placements_after_a_break() {
+    let tmp = city_install();
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(tmp.path(), 0).unwrap();
+    let mut app = city_app(vfs);
+    app.update();
+    assert!(matches!(
+        app.world().resource::<Session>().phase(),
+        SessionPhase::Playing
+    ));
+
+    // The authored breakable stamped once, dormant, carrying pieces.
+    let states = banger_states(&mut app);
+    assert_eq!(states, vec![(BangerPhase::Dormant, SessionEntity(1))]);
+    let banger = app
+        .world_mut()
+        .query_filtered::<Entity, With<Banger>>()
+        .iter(app.world())
+        .next()
+        .unwrap();
+    assert_eq!(
+        app.world()
+            .get::<BangerPieces>(banger)
+            .unwrap()
+            .fragments
+            .len(),
+        2
+    );
+
+    // A striker breaks it: the husk goes Broken and two fragment
+    // bodies appear — the state a restart must not leave behind.
+    spawn_striker(
+        &mut app,
+        Vec3::new(0.0, 0.5, 8.0),
+        Vec3::new(0.0, 0.0, 15.0),
+    );
+    let events = run(&mut app, FRAMES_PER_SECOND * 3);
+    assert!(
+        events.iter().any(|e| e.phase == BangerPhase::Broken),
+        "the stamped breakable shatters: {events:?}"
+    );
+    let states = banger_states(&mut app);
+    assert_eq!(
+        states
+            .iter()
+            .filter(|(p, _)| *p == BangerPhase::Broken)
+            .count(),
+        1,
+        "one broken husk: {states:?}"
+    );
+    assert_eq!(states.len(), 3, "husk + two fragments: {states:?}");
+
+    // Restart through the real lifecycle: teardown must remove husk
+    // and fragments, the reload restamps the placement dormant.
+    app.world_mut().resource_mut::<SessionControl>().restart = true;
+    let mut restarted = false;
+    for _ in 0..40 {
+        app.update();
+        let s = app.world().resource::<Session>();
+        if s.generation() == 2 && matches!(s.phase(), SessionPhase::Playing) {
+            restarted = true;
+            break;
+        }
+    }
+    assert!(restarted, "restart never returned to Playing");
+
+    let states = banger_states(&mut app);
+    assert_eq!(
+        states,
+        vec![(BangerPhase::Dormant, SessionEntity(2))],
+        "the placement restamps dormant under the new generation"
+    );
+    let banger = app
+        .world_mut()
+        .query_filtered::<Entity, With<Banger>>()
+        .iter(app.world())
+        .next()
+        .unwrap();
+    assert!(
+        app.world().get::<Collider>(banger).is_some(),
+        "the restamped prop is a whole collider again"
+    );
+    assert_eq!(
+        app.world()
+            .get::<BangerPieces>(banger)
+            .unwrap()
+            .fragments
+            .len(),
+        2,
+        "its authored pieces are ready to break again"
+    );
+    let leaked = app
+        .world_mut()
+        .query::<&SessionEntity>()
+        .iter(app.world())
+        .filter(|owner| **owner != SessionEntity(2))
+        .count();
+    assert_eq!(leaked, 0, "no generation-1 entity may survive restart");
 }
