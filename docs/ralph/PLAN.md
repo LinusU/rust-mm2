@@ -155,6 +155,50 @@ F04-C.2 — no surveyed retail site produces that density.
 | `mm2-inspect banger <retail>` | exit 0 — 999/999 `tune/banger/*.dgbangerdata` parse (1 expected `default` fallback + 994 extras + 4 `.#*.1.2` editor backups, 0 unsupported/failed): 216 standalone props (own PKG), 477 named parts (`.mtx`/embedded chunk), 254 resolved break fragments (`BREAK<NN>` chunks), 47 dead refs; `NumParts` ↔ distinct BREAK-index count holds on every standalone (0 mismatches). 54 issues (47 dead refs, 4 fragment `NumParts>0`, 2 glow-count mismatches, 1 `asBirthRule`); `--strict` exits 2. `scan` parses all 995 `.dgbangerdata` names |
 | `mm2-inspect banger-bind <retail>` | exit 0 — 129 placement-source files audited (INST, `city/`/`race/` pathsets, propdefs/proprules/props CSVs, PSDL `prop_rule` reachability; expected/overlay/extra classified, dev+backup dirs kept): 3 unsupported (truncated `blitz10`/`blitz11` pathsets), 0 failures, 51 issues (dead placement refs — phys `*_m` names, `sp_bollard_pedsafe_l`, `r_concrete`, `prop_sp_barricadeconcr_f`, `xcp_banrred_f`). INST places static architecture (london 0/221, sf 0/165 names bound); `*_ai.inst` stamp bound `sp_stop_f` only; `props.pathset` 17/17 + 30/30 bound; propdefs 12/12 + 27/27 bound; PSDL-reachable def files 11/11 + 20/20 bound. Reverse: 269/994 records placed-reachable, 562 on 105 `vp*`/`va*` vehicle owners, 163 on 87 never-placed owners. `--strict` exits 2; `--city london` → 50 files/1 issue |
 
+## Operator report (2026-09-20, human play-test — PRIORITY)
+
+Source: the repository owner drove retail London and SF in a windowed
+build at `8907c54` (`--city london --spawn 0.4,5.5,-720,0`, `--city sf`,
+`--event circuit:7`). This is direct observation of rendered gameplay,
+not a synthetic test, and it outranks the inferred explanations recorded
+below.
+
+Reported, verbatim: "all of the stuff is spawned in at the wrong height",
+and a sawhorse barricade struck at over 100 km/h "didn't move it (maybe
+because half of it is stuck inside the ground?)".
+
+1. **Stamped props sit at the wrong height and are partly below the road
+   surface.** The operator reports this for the scene generally, not for
+   one channel, so check all three placement channels (INST,
+   `*.pathset`, PSDL `prop_rule`), not only pathsets.
+
+2. **Two recorded hypotheses are contradicted — treat both as wrong until
+   re-derived.** F04-C.1 records "hull underside clearance means tall
+   vehicles cannot contact <~1 m props (raycast wheels) — open fidelity
+   question" and "fragments/knocked props stay `Active` on slopes
+   (slope-tumbling suspected, unproven)". Both were inferred to explain
+   props that would not respond. A prop sunk into the ground explains the
+   same symptoms without either mechanism. Do not build further work on
+   these explanations; establish the actual vertical placement first.
+
+3. **F04-C.2's retail evidence is unreliable.** "Flat-ground settle,
+   repeated hits, pool reclaim" was measured against misplaced geometry.
+   F04 must not roll up to `checked` on that evidence. Re-take it after
+   the height defect is resolved.
+
+Code lead, not a diagnosis: `stamp_line_strip` places each prop at the
+authored pathset point verbatim through `yawed_transform` /
+`unrotated_transform`, and no vertical adjustment exists anywhere in the
+stamping path — no ground snap, and no correction for whether an authored
+origin denotes a mesh base or its centre. Whether the true cause is a
+mesh-origin convention, a missing ground query, or a PSDL-vs-pathset
+datum mismatch is unestablished. Verify against authored data before
+changing placement maths; a blanket offset that merely looks better is
+not acceptable.
+
+Expected next iteration: investigate and fix this in preference to new
+feature work, with a regression test that fails on the current placement.
+
 ## Task table
 
 | Task | Status | Dependencies | Evidence / reason / next action |
