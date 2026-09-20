@@ -431,3 +431,177 @@ fn too_few_rows_is_an_explicit_error() {
         Err(RaceBuildError::TooFewRows { .. })
     ));
 }
+
+/// A mixed `race/<city>/` install for the catalog audit: race0 ready,
+/// race1 missing waypoints, blitz0 ready, circuit0 ready, crash0 a
+/// complete-but-deferred Crash Course event.
+fn audit_install() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(
+        d,
+        "race/london/mmracedata.csv",
+        &format!("{MM_HEADER}\n{ROW}\n{ROW}\n"),
+    );
+    write(d, "race/london/race0.aimap", "#\n");
+    write(
+        d,
+        "race/london/race0waypoints.csv",
+        &format!(
+            "{WAYPOINTS}{}{}{}{}",
+            row(0.0, 0.0, 15.0),
+            row(10.0, -30.0, 8.0),
+            row(40.0, -60.0, 9.0),
+            row(70.0, -90.0, 10.0)
+        ),
+    );
+    write(d, "race/london/race1.aimap", "#\n"); // no waypoints
+    write(
+        d,
+        "race/london/mmblitzdata.csv",
+        &format!("{MM_HEADER}\nnone,0,0,0,0,0,0.3,0.1,3,25,1,0,0,0,0,0,0.4,0.2,4,18,1\n"),
+    );
+    write(d, "race/london/blitz0.aimap", "#\n");
+    write(
+        d,
+        "race/london/blitz0waypoints.csv",
+        &format!(
+            "{WAYPOINTS}{}{}{}{}",
+            row(0.0, 0.0, 15.0),
+            row(30.0, 0.0, 8.0),
+            row(60.0, 0.0, 9.0),
+            row(90.0, 0.0, 10.0)
+        ),
+    );
+    write(
+        d,
+        "race/london/mmcircuitdata.csv",
+        &format!("{MM_HEADER}\n{ROW}\n"),
+    );
+    write(d, "race/london/circuit0.aimap", "#\n");
+    write(
+        d,
+        "race/london/circuit0waypoints.csv",
+        &format!(
+            "{WAYPOINTS}{}{}{}{}",
+            row(0.0, 0.0, 15.0),
+            row(30.0, 0.0, 8.0),
+            row(60.0, 0.0, 9.0),
+            row(90.0, 0.0, 10.0)
+        ),
+    );
+    write(
+        d,
+        "race/london/mmcrashdata.csv",
+        &format!("{MM_HEADER}\n{ROW}\n"),
+    );
+    write(d, "race/london/crash0.aimap", "#\n");
+    write(
+        d,
+        "race/london/crash0data.csv",
+        "Filename,Event,Checkpoints,TimeLimit,AmbDensity,extra,extra,extra,extra,etra,\nlongjump,0,1,26,0,0,0,0,0,0,0\n",
+    );
+    write(
+        d,
+        "race/london/crash0data_p.csv",
+        "Filename,Event,Checkpoints,TimeLimit,AmbDensity,extra,extra,extra,extra,etra,\nlongjump,0,1,25,0,0,0,0,0,0,0\n",
+    );
+    write(
+        d,
+        "race/london/longjump.csv",
+        &format!(
+            "{WAYPOINTS}{}{}{}",
+            row(0.0, 0.0, 15.0),
+            row(30.0, 0.0, 8.0),
+            row(60.0, 0.0, 10.0)
+        ),
+    );
+    tmp
+}
+
+#[test]
+fn report_audits_every_event_at_both_difficulties() {
+    let tmp = audit_install();
+    let vfs = vfs_of(tmp.path());
+    let report = mm2_content::RaceDefReport::scan(&vfs, "london");
+
+    assert!(report.table_errors.is_empty());
+    assert_eq!(report.entries.len(), 5, "every table row is an entry");
+    // race0/blitz0/circuit0 build at both difficulties; crash0 defers;
+    // race1 fails as NotReady at both.
+    assert_eq!(report.built(), 6);
+    assert_eq!(report.unsupported(), 2);
+    assert_eq!(report.failed(), 2);
+    assert_eq!(report.failed_events(), 1);
+
+    let find = |table: EventTableKind, index: usize| {
+        report
+            .entries
+            .iter()
+            .find(|e| e.event_ref.table == table && e.event_ref.index == index)
+            .unwrap()
+    };
+    let blitz = find(EventTableKind::Blitz, 0);
+    let mm2_content::RaceDefBuild::Built(am) = &blitz.amateur else {
+        panic!("blitz amateur should build: {:?}", blitz.amateur)
+    };
+    assert_eq!(am.gates, 2);
+    assert!(am.finish);
+    assert_eq!(am.time_limit_ticks, Some(25 * mm2_game::RACE_TICK_HZ));
+    assert_eq!(am.start_slots, 1);
+    let mm2_content::RaceDefBuild::Built(pro) = &blitz.professional else {
+        panic!("blitz professional should build")
+    };
+    assert_eq!(pro.time_limit_ticks, Some(18 * mm2_game::RACE_TICK_HZ));
+
+    let crash = find(EventTableKind::CrashCourse, 0);
+    assert!(matches!(
+        crash.amateur,
+        mm2_content::RaceDefBuild::Unsupported
+    ));
+    assert!(matches!(
+        crash.professional,
+        mm2_content::RaceDefBuild::Unsupported
+    ));
+
+    let race1 = find(EventTableKind::Checkpoint, 1);
+    assert!(matches!(
+        race1.amateur,
+        mm2_content::RaceDefBuild::Failed(RaceBuildError::NotReady(_))
+    ));
+}
+
+#[test]
+fn report_flags_a_failure_on_one_difficulty_only() {
+    // Professional TimeLimit unusable while Amateur is fine — the
+    // audit must flag the event without losing the good build.
+    let tmp = blitz_install("none,0,0,0,0,0,0.3,0.1,3,25,1,0,0,0,0,0,0.4,0.2,4,-5,1");
+    let vfs = vfs_of(tmp.path());
+    let report = mm2_content::RaceDefReport::scan(&vfs, "london");
+
+    assert_eq!(report.built(), 1);
+    assert_eq!(report.failed(), 1);
+    assert_eq!(report.failed_events(), 1);
+    let entry = &report.entries[0];
+    assert!(matches!(entry.amateur, mm2_content::RaceDefBuild::Built(_)));
+    assert!(matches!(
+        entry.professional,
+        mm2_content::RaceDefBuild::Failed(RaceBuildError::BadParam {
+            field: "TimeLimit",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn report_records_table_errors_and_an_empty_catalog() {
+    // No `race/<city>/` at all: the four tables error, zero entries.
+    let tmp = tempfile::tempdir().unwrap();
+    let vfs = vfs_of(tmp.path());
+    let report = mm2_content::RaceDefReport::scan(&vfs, "london");
+
+    assert_eq!(report.entries.len(), 0);
+    assert_eq!(report.table_errors.len(), 4, "all four tables unresolvable");
+    assert_eq!(report.built(), 0);
+    assert_eq!(report.failed(), 0);
+}

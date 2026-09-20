@@ -1,104 +1,121 @@
 # Last implementation iteration
 
-- Task ID and title: F12-B.2 — the low-time warning cue for timed
-  races: a session-owned `LOW TIME` banner in `mm2_app` that pulses on
-  the authoritative race clock once `time_remaining` reaches 10 s,
-  classified **designed** (DSN-9) because the ledger documents no
-  original low-time rule (HUD-2 lists only the countdown timer).
-- Starting commit and resulting commit: started at
-  `56e764c9f266912aed64143d9f89452c3d22c1e4` (clean tree, branch
-  `ralph/night`, F12-B.1 externally checked); result = this commit.
-- Why this slice: LAST_ITERATION named it — "F12-B remainder: decide
-  the low-time warning cue (designed policy) or close F12-B". It was
-  the last implementable leg of F12-B's required "warning cues"
-  behavior; results/fail screens beyond HUD text stay F17/UI-5 scope,
-  and an audio cue is impossible until F07 exists. F12-B moves to
-  candidate with those scopes recorded.
+- Task ID and title: F12-C (first slice) — the complete-catalog
+  structural audit plus the retail valid/invalid Blitz scenario matrix.
+  Includes a spawn-policy repair the matrix itself caught (DSN-6
+  amendment, committed separately).
+- Starting commit and resulting commits: started at
+  `32eab12276e762753452f1cc0ff9349c4d001206` (clean tree, branch
+  `ralph/night`, F12-B.2 externally checked); results =
+  `f8bd917` (spawn repair) + the audit commit on top.
+- Why this slice: LAST_ITERATION named it — "F12-C: the Blitz catalog
+  structural/playthrough matrix (AC01/AC06)". Split deliberately: this
+  commit delivers the *structural* leg (every cataloged event through
+  the production builder at both difficulties) plus the headless
+  playable-scenario matrix. Scripted/bot-assisted full playthrough
+  completions and reward-fact emission stay open on the parent.
 - Production code changed:
-  - `crates/mm2_app/src/race.rs`: `LOW_TIME_TICKS` (10 s at
-    `RACE_TICK_HZ`, inclusive threshold matching the deadline's
-    convention), `LOW_TIME_FLASH_TICKS` (0.5 s half-period),
-    `LOW_TIME_BRIGHT`/`LOW_TIME_DIM`, the `LowTimeWarning` marker,
-    `spawn_race_warning` (hidden `LOW TIME` UI text under the nav
-    arrow, session-owned), and `update_race_warning` — armed while the
-    race is `Running`, timed, and the `PlayerControl::Local`
-    participant is unresolved; the bright/dim phase is
-    `((LOW_TIME_TICKS - remaining) / FLASH) % 2`, derived from the
-    remaining ticks so it freezes with a pause and cannot drift from
-    the deadline (AC04). Hidden for stale/complete/countdown/untimed
-    races and a resolved local participant — the `Local` filter avoids
-    the latent multi-participant wrinkle the B.1 review flagged on the
-    arrow systems.
-  - `crates/mm2_app/src/session.rs`: `spawn_race_warning` called in
-    the event branch next to `spawn_nav_arrow`, so non-event sessions
-    carry no dead UI.
-  - `crates/mm2_app/src/main.rs`: `update_race_warning` registered in
-    `Update`; the race presentation systems were nested into a
-    sub-tuple because the `Update` tuple hit Bevy's 20-system
-    `IntoScheduleConfigs` limit.
-  - `docs/original-rules.md`: `DSN-9` records the cue as designed —
-    threshold, cadence, same-clock derivation, and the deferred audio
-    cue.
+  - `crates/mm2_content/src/race_def.rs`: `RaceDefReport::scan(vfs,
+    city)` — the whole-city audit. One `RaceDefEntry` per cataloged
+    table row (denominator = authored rows, never filtered), each
+    built at Amateur + Professional through the production
+    `race_definition` producer. Builds classify as
+    `RaceDefBuild::Built(RaceDefSummary)` (gates, finish, laps,
+    `time_limit_ticks`, start slots, opponents, cops, authored
+    `CarType`, time-of-day/weather selectors — the AC01 evidence that
+    each event binds its own authored settings),
+    `Unsupported` (Crash Course — deferred F21 scope, never counted
+    as failure), or `Failed(RaceBuildError)` (NotReady/incomplete,
+    bad param, too few rows). Table-level scan errors are kept
+    separately so a missing `mm*data.csv` can't silently shrink the
+    denominator. Counts: `built/unsupported/failed/failed_events`
+    (a single-difficulty failure still flags the event).
+  - `tools/mm2_inspect`: `race-defs <dir> [--city] [--table]
+    [--strict]` prints the matrix (per-event am/pro cells), defaults
+    to every discovered `race/<city>/`, strict exits nonzero on empty
+    catalogs, table errors, or failed builds — unsupported does not
+    fail strict. `mm2_game` added as a dep for `EventTableKind`/
+    `RACE_TICK_HZ`; the city-discovery loop shared with `events` was
+    factored into `race_cities`.
+  - `crates/mm2_content/src/race_def.rs` (commit `f8bd917`): the
+    DSN-6 fallback start now spawns **on** the authored start line
+    (was: 10 m back along the row0→row1 tangent — an invented point).
+    Retail evidence forced this: london `blitz:6`'s start line sits on
+    an elevated deck and the back-off landed past its edge — the car
+    spawned over a void and fell to y≈−907 without ever grounding.
+    The authored line is the only point the waypoint data guarantees
+    is on the course. `docs/original-rules.md` DSN-6 updated.
 - Tests added/changed and why:
-  - `crates/mm2_app/tests/race.rs` (+4, 27 total): the harness now
-    spawns the banner via production `spawn_race_warning` like the
-    real session.
-    - `low_time_warning_pulses_on_the_race_clock` — hidden above the
-      threshold, arms bright as remaining crosses it mid-update,
-      bright→dim→bright on the 0.5 s cadence, pause holds the pulse
-      phase, expiry (`TimedOut` → `Complete`) hides it.
-    - `low_time_warning_waits_for_the_running_phase` — a limit shorter
-      than the threshold still shows nothing during countdown, then
-      warns from the first running tick.
-    - `low_time_warning_ignores_other_participants_deadlines` — a
-      finished local participant stops seeing the cue while a
-      `Remote` participant keeps the race `Running`.
-    - `untimed_race_never_warns_and_teardown_cleans_up` — `None`
-      remaining never warns; restart despawns the session-owned node.
-    - Harness note discovered: the first `app.update()` runs no fixed
-      step, so `clock = 2(n−1)−1` after release — test timing
-      comments corrected to match.
+  - `crates/mm2_content/tests/race_def.rs` (+3, 13 total):
+    `report_audits_every_event_at_both_difficulties` — a mixed
+    synthetic install (ready/incomplete/blitz/circuit/crash rows)
+    produces one entry per row with correct
+    built=6/unsupported=2/failed=2 counts and per-difficulty authored
+    values (distinct amateur/pro time limits);
+    `report_flags_a_failure_on_one_difficulty_only` — a pro-only bad
+    `TimeLimit` flags the event while keeping the good amateur build;
+    `report_records_table_errors_and_an_empty_catalog` — no
+    `race/<city>/` yields 4 table errors + 0 entries, not silence.
+    Existing fallback-start test renamed/asserts the on-line slot.
+  - `crates/mm2_app/tests/event.rs`: the authored-load test now
+    expects the player at `COURSE[0]` (the authored line), not the
+    old back-off point.
 - Commands actually run and results (this machine, macOS arm64):
-  - `cargo test -p mm2_app --test race` — 27/27 ok.
   - `cargo fmt --all -- --check` — PASS.
   - `cargo clippy --locked --workspace --all-targets --all-features
     -- -D warnings` — PASS (exit 0).
   - `cargo test --locked --workspace` — PASS, all groups, 0 failures.
-  - Retail `--city london --event blitz:0 --headless --frames 1800` —
-    `status=pass`, `race=Complete cp=3/3 results=1 tl=0.0s
-    outcome=timed-out` (warning systems live; deadline resolved once).
-  - Retail `--city london --event blitz:0 --headless --frames 1200` —
-    `status=pass`, `tl=8.0s` running (sub-threshold).
-  - Retail `--city london --event blitz:0 --frames 1150 --screenshot`
-    — `status=pass`, PNG shows `time 16.1s`, no banner (windowed runs
-    pace ≈0.93 race-ticks/frame, slower than headless — needed 2600
-    frames to get under the threshold).
-  - Retail `--city london --event blitz:0 --frames 2600 --screenshot`
-    — `status=pass`, 4.4 MB PNG: `time 1.5s` with the `LOW TIME`
-    banner rendered under the green needle on its dim half-pulse
-    (local capture, not committed).
+  - `mm2-inspect race-defs <retail>` — london: 45 events, 64 built /
+    26 unsupported / 0 failed; sf: identical. Per-event cells show
+    distinct authored values (e.g. london `blitz9` 21 gates/120 s am
+    vs 103 s pro; `race5` 7 opp/1 cop am vs 7/4 pro). `--table blitz
+    --strict` exits 0; `--table crash --strict` exits 0 (unsupported
+    is not a failure).
+  - Retail headless Blitz matrix (all 20 authored rows, `--frames
+    1500`): 20/20 `status=pass` — every event loads its own course,
+    the car grounds (wheels contact) and drives, `tl=` ticks down.
+    Before the spawn fix this matrix caught 3 falls: london blitz:6
+    (spawn-over-void, never grounded), sf blitz:5/9 (fell through the
+    world while driving — both were the same back-off defect, not
+    collision gaps; they pass after the fix).
+  - Invalid scenarios: `blitz:10` → `status=fail` "no authored event
+    row for this reference"; `crash:0` → `status=fail` "crash course
+    events are not loadable yet"; `bogus:0` → CLI usage error. All
+    explicit, no panics.
+  - Rendered: london `blitz:6` `--frames 700 --screenshot` — 3.7 MB
+    PNG (fresh path, local only): car grounded on the elevated deck
+    (wheels 4/4), green nav needle, `cp 0/4`, `time 54.9s`. Plus
+    earlier sf `blitz:0` capture (4.6 MB): gate marker + needle +
+    `time 25.6s`.
 - Acceptance IDs satisfied / still open:
-  - F12-AC04 advances: the cue is pure presentation on the same
-    authoritative race clock — pulse phase derived from
-    `time_remaining` ticks, verified deterministic incl. pause freeze.
-    Still partial (no audio exists).
-  - F12-AC02/AC03 legs unchanged (F12-A status): the cue adds no
-    success path — a resolved/expired race only hides it.
-  - F12-AC05 leg: the banner is session-owned — teardown test proves
-    despawn; nothing stale survives a restart.
-  - F12-AC01/AC06 unchanged — the full Blitz catalog matrix is F12-C.
-- Stock data/GPU/audio/network limitations: rendered evidence covers
-  the armed banner (dim half) and the hidden state above the
-  threshold; the bright half and the pulse toggle are exercised by
-  tests, not captured — a mid-pulse frame pair needs timing control a
-  `--frames` capture can't supply precisely. No audio system exists,
-  so an audible warning stays unimplementable (recorded in DSN-9).
-- Unresolved blockers or discovered regressions: none. Incidental
-  finding worth knowing: reusing a `--screenshot` path lets the
-  waiter pass on stale bytes when the new capture fails — use fresh
-  paths (this run's first 2600-frame attempt hit it).
-- Next smallest useful action: F12-C — the Blitz catalog
-  structural/playthrough matrix (AC01/AC06). Independent ready
-  alternates: F03-A (prop audit) or F09-A (BAI parser).
+  - F12-AC01 advances: all 90 authored rows across both cities build
+    validated definitions through the production producer at both
+    difficulties; per-event authored values are distinct and reported
+    (not a shared template). Structural leg done; no event is dropped
+    from the denominator.
+  - F12-AC02 partially: valid events load and run; invalid refs
+    (out-of-range, unsupported kind, bad params) fail explicitly and
+    cannot manufacture a session. Scripted full *completion*
+    playthroughs on retail remain open.
+  - F12-AC06 partially: complete catalog structurally tested +
+    headless-run on all 20 authored Blitz rows; representative renders
+    in both cities exist. Checkpoint/Circuit headless matrix and any
+    playthrough-to-finish remain open — unplayed entries stay labeled
+    (the audit itself says `built`, not `played`).
+  - F12-AC03/AC04/AC05 unchanged from F12-A/B status.
+- Stock data/GPU/audio/network limitations: playthrough evidence is
+  drive-forward-only — the bot holds throttle, so most runs end
+  `race=Running` mid-course, not `Complete`; finishing retail events
+  needs steering/scripted inputs or opponents. No audio (F07). No
+  opponents/cops spawn yet (F15/F20) — `opp`/`cop` counts are reported
+  as authored facts, not simulated actors.
+- Unresolved blockers or discovered regressions: none known. The
+  matrix's 3 earlier falls were all the same DSN-6 back-off defect,
+  repaired — not collision-coverage bugs.
+- Next smallest useful action: F12-C remainder — scripted/bot-assisted
+  *completions* (steering toward `navigation_target`) to exercise the
+  finish/result path on retail events, plus the Checkpoint/Circuit
+  headless matrix; then F13-A (Checkpoint feature) proper. Independent
+  ready alternates: F03-A (prop audit) or F09-A (BAI parser).
 
 This is a candidate handoff. External code-gate and separate review results live in the runner state directory and are not implied by this report.

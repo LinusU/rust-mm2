@@ -155,6 +155,27 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Structural race-definition audit: run every cataloged event
+    /// through the production `CatalogEvent → RaceDefinition` builder at
+    /// both difficulties and report the per-event result.
+    RaceDefs {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Restrict to one city stem (default: every discovered
+        /// `race/<city>/` directory).
+        #[arg(long)]
+        city: Option<String>,
+        /// Restrict to one event table: `checkpoint`/`race`, `blitz`,
+        /// `circuit`, `crash`/`crashcourse`.
+        #[arg(long)]
+        table: Option<String>,
+        /// Exit nonzero on an empty catalog, a table scan error, or any
+        /// event the producer cannot build. Crash Course events are
+        /// reported as `unsupported` (deferred scope, F21), not
+        /// failures.
+        #[arg(long)]
+        strict: bool,
+    },
     /// Versioned content inventory: expected/discovered/accepted/
     /// rejected/unverified counts per content family, fingerprinted by
     /// engine commit and resolved-path provenance.
@@ -212,6 +233,18 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Events { dir, city, strict } => {
             events(dir, cli.mods.as_deref(), city.as_deref(), *strict)
         }
+        Command::RaceDefs {
+            dir,
+            city,
+            table,
+            strict,
+        } => race_defs(
+            dir,
+            cli.mods.as_deref(),
+            city.as_deref(),
+            table.as_deref(),
+            *strict,
+        ),
         Command::Inventory { dir, json, strict } => {
             inventory_cmd(dir, cli.mods.as_deref(), *json, *strict)
         }
@@ -612,17 +645,10 @@ fn record_tag(r: &mm2_content::EventRecord) -> String {
     }
 }
 
-fn events(
-    dir: &Path,
-    mods: Option<&Path>,
-    city: Option<&str>,
-    strict: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let vfs = build_vfs(dir, mods)?;
-
-    // Which cities to scan: the explicit one, or every `race/<city>/`
-    // directory discovered (stock + any mod-provided cities).
-    let cities: Vec<String> = match city {
+/// Which cities to scan: the explicit one, or every `race/<city>/`
+/// directory discovered (stock + any mod-provided cities).
+fn race_cities(vfs: &Vfs, city: Option<&str>) -> Vec<String> {
+    match city {
         Some(c) => vec![c.to_ascii_lowercase()],
         None => {
             let mut found: std::collections::BTreeSet<String> = mm2_content::EXPECTED_RACE_CITIES
@@ -638,7 +664,17 @@ fn events(
             }
             found.into_iter().collect()
         }
-    };
+    }
+}
+
+fn events(
+    dir: &Path,
+    mods: Option<&Path>,
+    city: Option<&str>,
+    strict: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let vfs = build_vfs(dir, mods)?;
+    let cities = race_cities(&vfs, city);
 
     let mut failures: Vec<String> = Vec::new();
     for city in &cities {
@@ -719,6 +755,114 @@ fn events(
     }
     if strict && !failures.is_empty() {
         return Err(format!("strict events audit: {} failures", failures.len()).into());
+    }
+    Ok(())
+}
+
+/// `--table` filter vocabulary — same names `mm2 --event` accepts.
+fn parse_table_filter(s: &str) -> Result<mm2_game::EventTableKind, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "checkpoint" | "race" => Ok(mm2_game::EventTableKind::Checkpoint),
+        "blitz" => Ok(mm2_game::EventTableKind::Blitz),
+        "circuit" => Ok(mm2_game::EventTableKind::Circuit),
+        "crash" | "crashcourse" => Ok(mm2_game::EventTableKind::CrashCourse),
+        other => Err(format!(
+            "unknown table {other:?}: expected checkpoint|race, blitz, circuit, crash|crashcourse"
+        )),
+    }
+}
+
+/// Compact one-cell description of a per-difficulty build outcome.
+fn describe_build(build: &mm2_content::RaceDefBuild) -> String {
+    use mm2_content::RaceDefBuild as B;
+    match build {
+        B::Built(s) => {
+            let mut d = format!("{}g", s.gates);
+            if s.finish {
+                d.push_str("+fin");
+            }
+            if s.laps > 0 {
+                d.push_str(&format!("x{}lap", s.laps));
+            }
+            if let Some(t) = s.time_limit_ticks {
+                d.push_str(&format!(
+                    " {:.1}s",
+                    t as f32 / mm2_game::RACE_TICK_HZ as f32
+                ));
+            }
+            d.push_str(&format!(" {}slt", s.start_slots));
+            if s.opponents > 0 || s.cops > 0 {
+                d.push_str(&format!(" {}opp/{}cop", s.opponents, s.cops));
+            }
+            d.push_str(&format!(" tod{}/w{}", s.time_of_day, s.weather));
+            format!("ok: {d}")
+        }
+        B::Unsupported => "unsupported (crash course — F21)".to_string(),
+        B::Failed(mm2_content::RaceBuildError::NotReady(
+            mm2_content::EventStatus::Incomplete { missing },
+        )) => format!("incomplete ({})", missing.join(", ")),
+        B::Failed(e) => format!("failed: {e}"),
+    }
+}
+
+/// The complete-catalog structural check (F12-C): every event's
+/// authored objectives must convert into a validated `RaceDefinition`
+/// at both difficulties through the production builder — the same one
+/// the session loader calls.
+fn race_defs(
+    dir: &Path,
+    mods: Option<&Path>,
+    city: Option<&str>,
+    table: Option<&str>,
+    strict: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let vfs = build_vfs(dir, mods)?;
+    let cities = race_cities(&vfs, city);
+    let filter = table.map(parse_table_filter).transpose()?;
+
+    let mut failures: Vec<String> = Vec::new();
+    for city in &cities {
+        let report = mm2_content::RaceDefReport::scan(&vfs, city);
+        println!("== race definitions: {city} ==");
+        for e in &report.table_errors {
+            println!("  table error: {e}");
+            failures.push(format!("{city}: {e}"));
+        }
+        for entry in &report.entries {
+            if filter.is_some_and(|f| entry.event_ref.table != f) {
+                continue;
+            }
+            println!(
+                "  {:<10} {:>2} {:<12} am: {:<58} pro: {}",
+                format!("{:?}", entry.event_ref.table).to_lowercase(),
+                entry.event_ref.index,
+                entry.stem,
+                describe_build(&entry.amateur),
+                describe_build(&entry.professional),
+            );
+        }
+        println!(
+            "  {city}: {} events — {} built, {} unsupported, {} failed builds across {} events",
+            report.entries.len(),
+            report.built(),
+            report.unsupported(),
+            report.failed(),
+            report.failed_events(),
+        );
+        if report.entries.is_empty() {
+            failures.push(format!("{city}: event catalog is empty"));
+        }
+        if report.failed() > 0 {
+            failures.push(format!(
+                "{city}: {} failed build(s) across {} event(s)",
+                report.failed(),
+                report.failed_events(),
+            ));
+        }
+        println!();
+    }
+    if strict && !failures.is_empty() {
+        return Err(format!("strict race-defs audit: {} failures", failures.len()).into());
     }
     Ok(())
 }

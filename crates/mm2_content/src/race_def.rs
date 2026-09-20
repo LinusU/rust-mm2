@@ -23,15 +23,16 @@
 //! path anchors, not player grid slots (`UNK-17`).
 
 use bevy::prelude::Vec3;
+use mm2_assets::Vfs;
 use mm2_formats::racedata::RaceParams;
 use mm2_formats::racefiles::RaceFileKind;
 use mm2_game::{
-    Checkpoint, CheckpointRule, Densities, Difficulty, EventParams, EventTableKind, RACE_TICK_HZ,
-    RaceDefinition, RaceError, RaceStart, SessionConditions, TimeOfDay, Weather,
+    Checkpoint, CheckpointRule, Densities, Difficulty, EventParams, EventRef, EventTableKind,
+    RACE_TICK_HZ, RaceDefinition, RaceError, RaceStart, SessionConditions, TimeOfDay, Weather,
 };
 use thiserror::Error;
 
-use crate::events::{CatalogEvent, EventStatus, RecordContent};
+use crate::events::{CatalogEvent, EventCatalog, EventStatus, RecordContent};
 
 /// Index of the player slot inside [`RaceDefinition::start_slots`].
 /// With an authored `_strtpnts` grid the first row is the player's
@@ -305,4 +306,168 @@ fn authored_start_slots(event: &CatalogEvent) -> Option<Vec<RaceStart>> {
         })
         .collect();
     if slots.is_empty() { None } else { Some(slots) }
+}
+
+/// Outcome of building one event's [`RaceDefinition`] at one difficulty
+/// inside a [`RaceDefReport`].
+#[derive(Debug)]
+pub enum RaceDefBuild {
+    /// The definition built and passed `RaceDefinition::validate`.
+    Built(RaceDefSummary),
+    /// The event kind is deliberately not loadable yet (Crash Course —
+    /// F21 scope). Reported and counted, never treated as a failure.
+    Unsupported,
+    /// The producer rejected the event — a `NotReady` catalog event, an
+    /// out-of-range authored parameter, too few waypoint rows, or a
+    /// definition that failed validation.
+    Failed(RaceBuildError),
+}
+
+/// The parts of a built definition the catalog audit reports — enough
+/// to show each event binds its own authored objectives and settings
+/// rather than a shared template (F12-AC01).
+#[derive(Debug)]
+pub struct RaceDefSummary {
+    /// Checkpoint triggers (`checkpoints.len()`).
+    pub gates: usize,
+    /// A separate finish trigger exists (any-order modes).
+    pub finish: bool,
+    /// Authored lap count (ordered modes; 0 elsewhere).
+    pub laps: u32,
+    /// Deadline in race ticks — timed modes only.
+    pub time_limit_ticks: Option<u32>,
+    /// Start slots the definition carries.
+    pub start_slots: usize,
+    /// Authored opponent count.
+    pub opponents: u32,
+    /// Authored cop count.
+    pub cops: u32,
+    /// Authored `CarType` column verbatim (UNK-1).
+    pub car_type: i64,
+    /// Authored time-of-day selector (WLD-4).
+    pub time_of_day: u8,
+    /// Authored weather selector (WLD-4).
+    pub weather: u8,
+}
+
+/// One catalog event audited at both authored difficulties.
+#[derive(Debug)]
+pub struct RaceDefEntry {
+    /// Stable identity — `(city, table, row)`.
+    pub event_ref: EventRef,
+    /// File stem (`blitz3`).
+    pub stem: String,
+    /// Amateur parameter-block build.
+    pub amateur: RaceDefBuild,
+    /// Professional parameter-block build.
+    pub professional: RaceDefBuild,
+}
+
+/// Whole-city audit: every cataloged event run through the production
+/// `CatalogEvent → RaceDefinition` producer at both difficulties
+/// (F12-C). This is the complete-catalog structural check — the same
+/// builder the session loader uses proves each event's authored
+/// objectives convert into a validated runtime definition, and events
+/// that cannot are named in [`RaceDefBuild::Failed`] rather than
+/// dropped from the denominator.
+#[derive(Debug)]
+pub struct RaceDefReport {
+    /// City stem audited.
+    pub city: String,
+    /// Table-level scan problems (missing or malformed `mm*data.csv`).
+    /// Kept separate because a missing table means its rows never
+    /// became events — the entries list alone would under-report.
+    pub table_errors: Vec<String>,
+    /// One entry per authored table row, in catalog order.
+    pub entries: Vec<RaceDefEntry>,
+}
+
+impl RaceDefReport {
+    /// Scan `race/<city>/` through the VFS and audit every cataloged
+    /// event. Never fails as a whole — like the catalog itself, a
+    /// partial install reports honestly instead of erroring out.
+    pub fn scan(vfs: &Vfs, city: &str) -> Self {
+        let catalog = EventCatalog::scan(vfs, city);
+        let table_errors = catalog
+            .tables
+            .iter()
+            .filter_map(|t| t.error.as_ref().map(|e| format!("{}: {e}", t.logical)))
+            .collect();
+        let entries = catalog
+            .events
+            .iter()
+            .map(|event| RaceDefEntry {
+                event_ref: event.event_ref.clone(),
+                stem: event.stem.clone(),
+                amateur: audit_build(event, Difficulty::Amateur),
+                professional: audit_build(event, Difficulty::Professional),
+            })
+            .collect();
+        Self {
+            city: catalog.city,
+            table_errors,
+            entries,
+        }
+    }
+
+    /// Builds that produced a validated definition (at most
+    /// `2 × entries.len()`).
+    pub fn built(&self) -> usize {
+        self.entries
+            .iter()
+            .flat_map(|e| [&e.amateur, &e.professional])
+            .filter(|b| matches!(b, RaceDefBuild::Built(_)))
+            .count()
+    }
+
+    /// Builds on deliberately-deferred kinds (Crash Course).
+    pub fn unsupported(&self) -> usize {
+        self.entries
+            .iter()
+            .flat_map(|e| [&e.amateur, &e.professional])
+            .filter(|b| matches!(b, RaceDefBuild::Unsupported))
+            .count()
+    }
+
+    /// Builds the producer rejected.
+    pub fn failed(&self) -> usize {
+        self.entries
+            .iter()
+            .flat_map(|e| [&e.amateur, &e.professional])
+            .filter(|b| matches!(b, RaceDefBuild::Failed(_)))
+            .count()
+    }
+
+    /// Events carrying at least one `Failed` build — a per-difficulty
+    /// failure (e.g. only the Professional block is out of range) still
+    /// flags the event.
+    pub fn failed_events(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| {
+                [&e.amateur, &e.professional]
+                    .iter()
+                    .any(|b| matches!(b, RaceDefBuild::Failed(_)))
+            })
+            .count()
+    }
+}
+
+fn audit_build(event: &CatalogEvent, difficulty: Difficulty) -> RaceDefBuild {
+    match race_definition(event, difficulty) {
+        Ok(def) => RaceDefBuild::Built(RaceDefSummary {
+            gates: def.checkpoints.len(),
+            finish: def.finish.is_some(),
+            laps: def.laps,
+            time_limit_ticks: def.time_limit_ticks,
+            start_slots: def.start_slots.len(),
+            opponents: def.params.opponents,
+            cops: def.params.cops,
+            car_type: def.params.car_type,
+            time_of_day: def.params.conditions.time_of_day.get(),
+            weather: def.params.conditions.weather.get(),
+        }),
+        Err(RaceBuildError::CrashCourseUnsupported) => RaceDefBuild::Unsupported,
+        Err(e) => RaceDefBuild::Failed(e),
+    }
 }

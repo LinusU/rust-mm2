@@ -38,4 +38,7 @@ pub use model::{
     Lod, MeshGroup, ModelPart, PartRole, VehicleModel, WheelVisual, build_model, classify_stem,
     shader_for_paint, split_lod,
 };
-pub use race_def::{PLAYER_SLOT, RaceBuildError, race_definition};
+pub use race_def::{
+    PLAYER_SLOT, RaceBuildError, RaceDefBuild, RaceDefEntry, RaceDefReport, RaceDefSummary,
+    race_definition,
+};

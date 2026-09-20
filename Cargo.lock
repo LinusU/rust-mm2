@@ -3858,6 +3858,7 @@ dependencies = [
  "mm2_assets",
  "mm2_content",
  "mm2_formats",
+ "mm2_game",
  "mm2_vehicle",
  "serde",
  "serde_json",

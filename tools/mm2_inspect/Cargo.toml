@@ -13,6 +13,7 @@ path = "src/main.rs"
 clap.workspace = true
 mm2_assets.workspace = true
 mm2_content.workspace = true
+mm2_game.workspace = true
 mm2_vehicle.workspace = true
 mm2_formats.workspace = true
 serde.workspace = true

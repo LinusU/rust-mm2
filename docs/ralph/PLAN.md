@@ -38,23 +38,17 @@
 
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
-**Next selected slice: F12-B is now a candidate** — B.1 (RACE-6
-navigation arrow) is externally checked; B.2 (the low-time warning
-cue) landed this iteration. `mm2_app::race` gained a session-owned
-`LOW TIME` banner + `update_race_warning`: armed once
-`time_remaining` reaches `LOW_TIME_TICKS` (10 s, inclusive like the
-deadline), pulsing bright/dim every `LOW_TIME_FLASH_TICKS` (0.5 s) of
-remaining time — derived from the same race ticks that judge the
-deadline (AC04), frozen by pause, hidden for untimed/countdown/
-complete races and a resolved local participant. No documented
-original rule exists for a low-time cue, so it is classified designed
-(DSN-9); an audio cue stays impossible until F07. Retail evidence:
-london `blitz:0` rendered capture at `time 1.5s` shows the armed
-banner; the 16.1 s frame shows it correctly hidden. F12-B's remaining
-surface — results/fail screens beyond HUD text — is F17/UI-5 scope;
-AC01/AC06 full-catalog evidence is F12-C. Ready next: F12-C catalog
-playthrough matrix. Independent ready alternates: F03-A (prop audit)
-or F09-A (BAI parser).
+**Next selected slice: F12-C remainder** — the structural leg landed
+this iteration (`RaceDefReport` + `mm2-inspect race-defs`, retail
+90/90 authored rows build at both difficulties, 0 failed) and the
+headless Blitz matrix runs 20/20 — after it caught and we fixed a
+real spawn defect (DSN-6 back-off could place the car off an elevated
+start deck; london `blitz:6` fell to y≈−907). Still owed on F12-C:
+scripted/bot-assisted *completions* exercising finish→result on
+retail events (current bot only holds throttle → `race=Running`),
+the Checkpoint/Circuit headless matrix, and reward-fact verification.
+Independent ready alternates: F03-A (prop audit) or F09-A (BAI
+parser).
 
 ## Baseline gate results (this checkout, 2026-09-20)
 
@@ -80,6 +74,10 @@ or F09-A (BAI parser).
 || `mm2 --mm2-path <retail> --city london --event blitz:0 --frames 100/700 --screenshot` | `status=pass`, ~4.3 MB PNGs — the RACE-6 nav needle renders top-center, green ahead, tilted toward the nearest gate during countdown and while driving (local captures, not committed) |
 || `mm2 --mm2-path <retail> --city london --event blitz:0 --headless --frames 1800` | `status=pass` — `race=Complete cp=3/3 results=1 tl=0.0s outcome=timed-out`: the deadline resolved the run once, ledger kept it |
 || `mm2 --mm2-path <retail> --city london --event blitz:0 --frames 1150/2600 --screenshot` | `status=pass`, ~4.3 MB PNGs — at `time 16.1s` no warning banner (above threshold); at `time 1.5s` the `LOW TIME` banner renders under the needle on its dim half-pulse (local captures, not committed). Windowed runs pace ≈0.93 race-ticks/frame, slower than headless |
+|| `mm2-inspect race-defs <retail>` | exit 0 — london 45 + sf 45 authored rows: 64 built / 26 unsupported / 0 failed per city at both difficulties (13 crash-course rows × 2 = unsupported, not failures). Per-event cells show distinct authored values (gates/laps/time-limit/slots/opp/cop/tod/weather). `--table blitz --strict` and `--table crash --strict` both exit 0 |
+|| `mm2 --mm2-path <retail> --city {london,sf} --event blitz:{0..9} --headless --frames 1500` | 20/20 `status=pass` — every authored Blitz row loads its own course, grounds (wheels contact), drives, `tl=` ticks. Pre-fix this caught 3 falls (london blitz:6 spawn-over-void; sf blitz:5/9 mid-drive) — all were the same DSN-6 back-off defect, repaired |
+|| `mm2 --mm2-path <retail> --event blitz:10 --headless` | `status=fail` — "no authored event row for this reference"; `crash:0` → `status=fail` "crash course events are not loadable yet"; `bogus:0` → CLI usage error. Invalid refs fail explicitly |
+|| `mm2 --mm2-path <retail> --city london --event blitz:6 --frames 700 --screenshot` | `status=pass`, 3.7 MB PNG (fresh path, local only) — car grounded on the elevated start deck (wheels 4/4), green nav needle, `cp 0/4`, `time 54.9s`; this event previously spawned over a void |
 
 ## Task table
 
@@ -129,7 +127,7 @@ or F09-A (BAI parser).
 | F12-B | implemented | F12-A | Split: B.1 = navigation arrow (checked), B.2 = low-time warning cue (implemented below). In-scope legs done: timer/objectives/finish/failure + HUD/navigation + warning cue. Still open on the parent: results/fail screens beyond HUD text (F17/UI-5 scope), audio cue (needs F07), AC01/AC06 catalog evidence (F12-C). |
 | F12-B.1 | checked | F12-A | RACE-6 navigation arrow. `mm2_game::race`: `navigation_target` (nearest un-cleared gate XZ, explicit `picked` wins until cleared then falls back, armed `Finish` once all gates clear, `Ordered` → `None` per HUD-2), `cycle_target` (authored-order walk, wraps, skips cleared, empty → clears pick), `relative_bearing` (signed driver-frame angle, `+` = right, ground-plane only), `TargetSelection` component, `RaceProgress::remaining`. `mm2_app::race`: session-owned `NavArrow`/`NavArrowPart` UI needle + diamond tip (node-drawn — embedded font is ASCII-only, DSN-8), `spawn_nav_arrow`, `nav_target_input` (X/Z cycle — original X/S blocked by WASD brake, DSN-8), `update_nav_arrow` (rotation = bearing, green ahead / yellow behind, hidden without a live target). Tests: +6 contract, +5 production-path (bearing/color/visibility through `Position` writes, X/Z cycling incl. edge-trigger + Complete gate, finish arming, teardown despawn). Retail: london `blitz:0` headless `status=pass` (tl ticking); windowed captures at frames 100 (countdown) + 700 (driving) show the needle green ahead tracking the gate. Yellow-behind leg covered by tests, not rendered. Externally checked (review pass at `56e764c`, iteration 016 feedback). |
 | F12-B.2 | implemented | F12-B.1 | Low-time warning cue — designed policy (DSN-9): no documented original rule (HUD-2 lists only the countdown timer). `mm2_app::race`: `LOW_TIME_TICKS` (10 s, inclusive threshold), `LOW_TIME_FLASH_TICKS` (0.5 s half-period), `LOW_TIME_BRIGHT`/`LOW_TIME_DIM`, session-owned `LowTimeWarning` `LOW TIME` UI banner + `spawn_race_warning`, `update_race_warning` — armed while a timed race runs and the local participant is unresolved, pulsing bright/dim on the remaining ticks themselves (same race clock as the deadline → AC04; freezes with pause), hidden for stale/complete/countdown/untimed races and a resolved local participant (`PlayerControl::Local` filtered — avoids the latent multi-participant wrinkle the B.1 review flagged on the arrow). Tests: +4 production-path (threshold boundary + pulse cadence + pause freeze + timeout hide; countdown gate for sub-threshold limits; resolved-local hides while a remote races; untimed never warns + teardown despawn). Retail: london `blitz:0` headless `status=pass` incl. `--frames 1800` → `race=Complete outcome=timed-out`; windowed capture at `time 1.5s` shows the armed banner (dim half-pulse), a `time 16.1s` frame shows it correctly hidden. Candidate pending external check. |
-| F12-C | queued | F12-B | — |
+| F12-C | implemented | F12-B | First slice landed (two commits): `mm2_content::RaceDefReport` — per-row, per-difficulty production-builder audit (`Built`/`Unsupported`/`Failed`, table errors kept, denominator never filtered) + `mm2-inspect race-defs [--city/--table/--strict]`; retail 90/90 rows build, crash=unsupported not failure. Headless Blitz matrix 20/20 pass; invalid refs (out-of-range/crash/bogus) fail explicitly; london blitz:6 rendered post-fix. The matrix caught a real spawn defect — DSN-6 back-off could land off an elevated deck; now spawns on the authored line (commit `f8bd917`, ledger updated). Remaining open: scripted completions → finish/result on retail, Checkpoint/Circuit matrix, reward facts. Candidate pending external check. |
 | F13-A | queued | F02-B, F11-B | London race0–13, SF race0–11 (+r0) authored data present. |
 | F13-B | queued | F13-A | — |
 | F13-C | queued | F13-B, F15-B | — |
@@ -265,4 +263,4 @@ or F09-A (BAI parser).
   `lookup`, `tex`, `pkg`, `psdl`, `dump`, `cars`, `car` (`--paint`,
   `--json`), `handling` (`--strict`), `validate-cars` (`--all`,
   `--strict`), `inventory` (`--json`, `--strict`), `events` (`--city`,
-  `--strict`).
+  `--strict`), `race-defs` (`--city`, `--table`, `--strict`).
