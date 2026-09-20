@@ -354,6 +354,52 @@ city/<city>.bai`) for placements lying on a road.
   Signs with thin collision (e.g. `sp_noenter_f`, Size 0.06 m) are
   impractical to hit deliberately.
 
+## Observed retail strikes (F04-C.2): flat-ground settle, repeated hits, pool bound
+
+Same method as above; retail install `fnv1a64:e91e6cd4b2ae30d9`. Two
+more smoke-record fields exist for this slice: `bng_pool=<n>` appears
+when the dev `--banger-pool <n>` bound overrides the recovered ×32
+default, and `bng_rec=<n>` counts `BangerStateChanged` transitions
+whose cause is `Reclaimed` (a pool settle is otherwise
+indistinguishable from an Avian-sleep settle in `bng_ev=`). Default
+records are unchanged.
+
+- **Flat-ground break + fragment settle (SF roam):** `vpddbus` at
+  `--spawn=-170,1.5,-565,30` struck the `sp_barricadewood_f` row
+  stamped diagonally across the y≈0 lot at (−177…−188, −578…−601)
+  → `bng=924d/3a/1s/1b bng_ev=0a/1s/1b` at 2400 ticks, `2a/2s` at
+  5000 ticks and `1a/3s` at 10000 ticks — one break into its authored
+  4 fragments, which then reached Avian sleep one by one on flat
+  ground. This answers the F04-C.1 open observation: the settle path
+  works on real fragments; slope tumbling is why the earlier freeway
+  pieces stayed `Active`.
+- **Repeated collisions within budget (same run):** the stalled bus
+  kept battering the pen — `impacts=104` at 5000 ticks, `impacts=105`
+  at 10000 ticks, all poses finite, no further transitions (every
+  later hit below the 51 900 limit or against already-broken pieces).
+- **Pool bound enforced (dev-bound runs, same spawn):**
+  `--banger-pool 2` → `bng=924d/2a/0s/1b bng_pool=2` — only 2 of the
+  authored 4 fragments spawned, the rest skipped at the cap;
+  `--banger-pool 1` → `bng=924d/1a/0s/1b bng_pool=1`. The bound is
+  enforced on real placements, not just the synthetic test.
+- **Repeated activations + pool reclaim (London roam):** `vpbug` at
+  `--spawn=802,6,-905,180` drove ~50 m through the
+  `sp_bollard_stone_l` ring stamped around the plaza at
+  (786…827, −814…−857) → default pool `bng=1185d/3a/0s/0b
+  bng_ev=3a/0s/0b` (three distinct activations, no dupes). Same spawn
+  at `--banger-pool 2` → `bng=1185d/0a/3s/0b bng_ev=3a/3s/0b
+  bng_pool=2 bng_rec=1` — the third hit reclaimed the oldest active
+  (cause `Reclaimed`), the other two slept naturally. At
+  `--banger-pool 1` → `bng_rec=2`. Re-ran bit-identical. Natural-pool
+  (>32 simultaneous) reclaim remains unobserved — staging 33 live
+  actives needs dense simultaneous breaks that no surveyed retail
+  site produces; the dev bound exercises the same claim/reclaim path.
+- **Hull-clearance corollary:** the `vpddbus` (~4 915 kg) passes
+  clean over `sp_cone_f` clusters — zero contacts where `vpbug`
+  activates. Heavy strikers for barricade thresholds and low-floor
+  strikers for cone/bollard thresholds must be chosen separately;
+  still an open fidelity question, not a confirmed defect.
+
 ## Runtime consumption — what is not known
 
 Parsed, bound and provisionally simulated. Everything below is UNK-22:
