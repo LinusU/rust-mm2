@@ -38,16 +38,17 @@
 
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
-**Next selected slice: F03-A.2 (remaining placement-source scope),
-decal stamping (research first), `<object>_<event>`/ambient pathset
-consumers, F13-A or F09-C** — this iteration landed F03-B.2: event
-`.pathset` overlays (`<stem>.pathset` catalog records) now stamp
-session-owned props through `load_session_world` →
-`spawn_event_pathsets`; retail london `circuit0` 181, `race6` 256,
-sf `circuit0` 85, all 0 unclassified. `giz_*`/`PATHnn`/decal names
-are classified+counted, not stamped. F03-B's expansion-bound repair
-was externally checked at `f6e151f`. F13-A's deps (F02-B, F11-B)
-remain candidates, not checked.
+**Next selected slice: prop-rule stamping research (UNK-21 — measure
+how the original walks a room perimeter before any runtime consumer),
+decal stamping (same research-first caveat), `<object>_<event>`/
+ambient pathset consumers, F13-A or F09-C** — this iteration landed
+F03-A.2: `mm2_formats::proprules` typed parsers for
+`propdefs.csv`/`proprules.csv`/`props.csv`/`geometry/props.csv` plus
+`mm2-inspect proprules` — every discovered table parses (16/16
+retail), and the PSDL `prop_rule` byte↔`n{NN}{left,right}` link is
+verified (london 1–16, sf 1–20, one authored 205 anomaly each).
+F03-B.2 was externally checked at `afff57d`. F13-A's deps (F02-B,
+F11-B) remain candidates, not checked.
 
 ## Baseline gate results (this checkout, 2026-09-20)
 
@@ -89,6 +90,7 @@ remain candidates, not checked.
 || `mm2 --mm2-path <retail> --city sf --cam=-1790,45,-1150,180,-8 --frames 90 --screenshot` | `status=pass`, ~3.9 MB PNG (local only — `screenshots/pathset-sf-lamps.png`): the stamped `sp_lightstreet_rt_f` lamp row renders at regular ~40 m spacing along the road. |
 || `mm2 --mm2-path <retail> --city london --cam=-469,8,-290,180,-10 --frames 90 --screenshot` | `status=pass`, ~5.6 MB PNG (local only — `screenshots/pathset-london-trees.png`): stamped `sp_tree1_s` bushes visible in the park. |
 || `mm2 --mm2-path <retail> --city london --event circuit:0 --headless` | `status=pass` (`race=Running cp=1/6`) — `event pathset overlay stamped files=1 stamped=181 labels=0 animated=0 decals=0 unresolved=0 capped=0 issues=0`: `race/london/circuit0.pathset` barricades stamped as session-owned props. `checkpoint:6` → 256 stamped (`race6.pathset`), sf `circuit:0` → 85 (`sp=0` → one per vertex). Ambient counts unchanged: london 1188, sf 925+31 decal. |
+|| `mm2-inspect proprules <retail>` | exit 0 — 16/16 discovered prop-rule tables parse (6 expected `city/{london,sf}/{propdefs,proprules,props}.csv` + 10 extras incl `.csv.txt` exports, `city/phys/`, `sf/bak/`, `city/props.csv`, `geometry/props.csv` LOD table): all rule→def refs resolve; PSDL `prop_rule` bytes ↔ rule numbers verified (london 415 rule-bearing rooms ↔ n01–16, sf 397 ↔ n01–20, n14 unused); issues: 41 phys `*_m` + 3 phys group dead refs (dev city), `sp_bollard_pedsafe_l` + `va_garbagetruck.pkg` LOD dead refs, 1 room/city at undefined rule 205. `--strict` exits 2 (48 issues); `--city london` 4 files/2 issues, `--city sf` 7/1. |
 
 ## Task table
 
@@ -105,10 +107,11 @@ remain candidates, not checked.
 | F02-A | implemented | F00-B, F01-B | `VehicleCatalog::scan` + `EXPECTED_STOCK_ROSTER` + `stock_audit_failures` + `mm2-inspect cars/validate-cars` exist and ran on retail install tonight (21/21 ready, 8 audited extras). Candidate pending external check; deps not yet checked. |
 | F02-B | implemented | F02-A | `mm2_content::convert`, handling measurement (`analysis.rs`, drive probe), recent steering/gearbox/levelling fixes. Candidate; gap list still owed by F02-A audit. |
 | F02-C | queued | F02-B | Tooling exists (`handling` roster audit, `validate-cars --all`); owed: run full roster/paint/handling matrix and publish honest original-vs-synthetic coverage. |
-| F03-A | queued | F00-B, F01-A | INST + PSDL placement parsed. Split: A.1 (`.pathset` parser + audit — implemented below). `.opp`/race `.csv` waypoints parsed under F11-A. Unmapped sources remain: `.cpvs`, `.ldef` (F18-claimed), embedded PSDL props. |
+| F03-A | implemented | F00-B, F01-A | INST + PSDL placement parsed. Split: A.1 (`.pathset` parser + audit — implemented below), A.2 (prop-rule tables — implemented below). `.opp`/race `.csv` waypoints parsed under F11-A. Every discovered placement-source grammar now has a parser; remaining unmapped sources are feature-deferred: `.cpvs`/`.ldef` → F18, `audio_pathsets/` → F07/F08, PSDL `paths` records preserved raw (semantics unknown). |
 | F03-A.1 | implemented | F00-B, F01-A | `mm2_formats::pathset`: PTH1 parser measured on all 101 retail files — named paths of attributed points, kinds 0 single/1 directed-pairs/2 line-strip, quarter-metre spacing; per-point attribute word + `current_path`/`selection` cursors preserved raw (inferred dev-tool state, UNK-20). `Pathset::validate()`: unknown kind, odd directed-pair count, non-finite point, out-of-range cursor, empty name — zero issues on retail (66 empty paths are authored data, not flagged). `mm2-inspect pathset <install> [--city] [--strict]`: denominator = every discovered `.pathset` (101 — no filtering): 98 parse, 3 authored truncations fail (`race/london/{blitz10,blitz11,london_bridge_blitz10}.pathset`); name cross-check resolves `geometry/<n>.pkg`/`texture/<n>.*` with `PREFIX:` state decorations stripped and `PATHnn` labels skipped — 120/126 names resolve, 6 dead refs all in `city/phys/` + `bak/` files; `--strict` exits 2. `scan` recognizes `.pathset`. `docs/research/pathset.md` + ledger WLD-12/UNK-20. Candidate pending external check. |
+| F03-A.2 | implemented | F03-A.1 | `mm2_formats::proprules`: `PropDefs`/`PropRules`/`PropGroups`/`PropLodStats` parsers + `validate()` — `n{NN}left`/`n{NN}right` rules → `PropRule::rule_key()` byte/side split. `mm2-inspect proprules <install> [--city] [--strict]`: expected = `city/<stock>/{propdefs,proprules,props}.csv`, denominator = every discovered `city/**` prop-rule CSV incl `.csv.txt` exports + `geometry/props.csv` (different LOD schema). Cross-checks: rule refs → sibling defs, def file refs + group names → `geometry/<n>.pkg`, LOD rows → `geometry/<name>`, PSDL `prop_rule` bytes → defined rule numbers. Retail: 16/16 parse; byte↔rule link verified (WLD-14); 48 issues — 41 phys `*_m` + 3 phys group dead refs, `sp_bollard_pedsafe_l`, `va_garbagetruck.pkg`, rule 205 ×2; `--strict` exits 2. docs/research/proprules.md + WLD-14/UNK-21. Runtime stamping unwired — perimeter-walk semantics unverified (UNK-21). Candidate pending external check. |
 | F03-B | implemented | F03-A | ~2000/3763 INST props instantiate with collision (README; `city.rs`) plus `props.pathset` ambient rows stamped through the shared `PropCache` — london 1188, sf 925 instances, decal paths classified. Stamping micro-semantics inferred (UNK-20); decal/audio pathsets unconsumed. First candidate failed review on an unbounded line-strip expansion (huge/non-finite authored coordinates could stall `t += spacing` and OOM the load); repaired with the 8192/file stamp budget, arithmetic per-segment counting, non-finite skipping, load-time `validate()` and `pathset_props_capped`/`pathset_issues` report fields plus regression tests. Externally checked at `f6e151f`. |
-| F03-B.2 | implemented | F03-B | Event `.pathset` overlays (F03-AC04 leg): `event_race_setup` returns `EventSetup { definition, pathsets }` — the `<stem>.pathset` records the catalog attributes to the resolved event; `load_session_world` calls `city::spawn_event_pathsets` which runs the shared `stamp_pathset` classifier (`prop`/`PATHnn` label/`giz_*` animated/decal/`unresolved` + per-file 8192 budget + `validate()` issues) through a fresh `PropCache` into `event-pathset-*` session-owned entities. Teardown removes exactly the overlay; re-entry restamps once (AC04 — restart test asserts identical gen-2 count, no gen-1 survivors). Parse/read failures land in `EventPathsetReport::failed_files`, warned, non-fatal (optional record). Retail: london `circuit0` 181 props, `race6` 256, sf `circuit0` 85 — all `sp_*` names. `<object>_<event>` overrides (`london_bridge_circuit0`…) stay extras — all `giz_*`/`PATHnn`/`sp_pcar*` on retail, need animated-object/parked-car features. Tests: +3 in `tests/event.rs`. Candidate pending external check. |
+| F03-B.2 | checked | F03-B | Event `.pathset` overlays (F03-AC04 leg): `event_race_setup` returns `EventSetup { definition, pathsets }` — the `<stem>.pathset` records the catalog attributes to the resolved event; `load_session_world` calls `city::spawn_event_pathsets` which runs the shared `stamp_pathset` classifier (`prop`/`PATHnn` label/`giz_*` animated/decal/`unresolved` + per-file 8192 budget + `validate()` issues) through a fresh `PropCache` into `event-pathset-*` session-owned entities. Teardown removes exactly the overlay; re-entry restamps once (AC04 — restart test asserts identical gen-2 count, no gen-1 survivors). Parse/read failures land in `EventPathsetReport::failed_files`, warned, non-fatal (optional record). Retail: london `circuit0` 181 props, `race6` 256, sf `circuit0` 85 — all `sp_*` names. `<object>_<event>` overrides (`london_bridge_circuit0`…) stay extras — all `giz_*`/`PATHnn`/`sp_pcar*` on retail, need animated-object/parked-car features. Tests: +3 in `tests/event.rs`. Externally checked at `afff57d`. |
 | F03-C | queued | F03-B | Owed: sampled original locations, all source records, race cleanup, mod replacement end-to-end. |
 | F04-A | queued | F01-B, F03-B | No breakable-prop classification or state transitions yet. |
 | F04-B | queued | F04-A | — |
@@ -290,4 +293,4 @@ remain candidates, not checked.
   `--strict`), `race-defs` (`--city`, `--table`, `--strict`),
   `bai` (`--city`, `--strict`), `aimap` (`--city`, `--strict`),
   `nav` (`--city`, `--route`, `--turns`, `--strict`),
-  `pathset` (`--city`, `--strict`).
+  `pathset` (`--city`, `--strict`), `proprules` (`--city`, `--strict`).
