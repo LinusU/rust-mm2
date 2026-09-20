@@ -5,11 +5,10 @@
 use std::path::Path;
 
 use mm2_assets::Vfs;
+use mm2_content::{EventCatalog, EventResolveError, EventStatus, RecordContent};
 use mm2_formats::racefiles::RaceFileKind;
 use mm2_formats::rewards::RewardNum;
-use mm2_game::{
-    EventCatalog, EventRef, EventResolveError, EventStatus, EventTableKind, RecordContent,
-};
+use mm2_game::{EventRef, EventTableKind};
 
 const MM_HEADER: &str = "Description, CarType, TimeofDay, Weather, Opponents, Cops, Ambient, Peds, NumLaps, TimeLimit, Difficulty, CarType, TimeofDay, Weather, Opponents, Cops, Ambient, Peds, NumLaps, TimeLimit, Difficulty";
 const WAYPOINTS: &str = "x,y,z,a,poly count,frane rate,state changes,texture changes,msg\n";

@@ -7,6 +7,11 @@ The engine is a Cargo workspace with strict dependency direction:
                 │  mm2_app    │  Bevy executable (winit/wgpu window,
                 │  (binary)   │  input, cameras, city import, glue)
                 └──────┬──────┘
+                       ▼
+                ┌─────────────┐
+                │ mm2_content │  VFS scans, catalogs and
+                │  (producer) │  tuning→runtime conversion
+                └──────┬──────┘
         ┌──────────────┼───────────────┐
         ▼              ▼               ▼
   ┌───────────┐  ┌───────────┐  ┌────────────┐
@@ -20,6 +25,12 @@ The engine is a Cargo workspace with strict dependency direction:
                                 │  parsers   │
                                 └────────────┘
 ```
+
+Edges are simplified for readability: `mm2_app` may depend on every
+crate, `mm2_content` also reads `mm2_formats` parsers directly plus the
+`mm2_game`/`mm2_vehicle` types it fills in, and `mm2_game` holds the
+`Mm2Vfs` handle — a type-level edge, not content access. The crate
+`Cargo.toml`s are authoritative.
 
 Dependency rules:
 
@@ -52,9 +63,18 @@ Dependency rules:
   per-step snapshots stamped with generation+tick), and
   `SessionResult`/`ResultLedger` (stable result identity with
   deduplication). `mm2_game` may reference `mm2_formats` types (e.g.
-  authored event-table kinds) but never parsing, VFS, Bevy rendering or
-  Avian internals. Deliberately small; gameplay systems grow here
+  authored event-table kinds) and carry the `Mm2Vfs` resource handle so
+  app-side systems can reach content, but it never lists, reads or
+  parses anything itself — VFS-backed scans and file parsing live in
+  `mm2_content`. Deliberately small; gameplay systems grow here
   later.
+- `mm2_content` is the content→runtime producer layer. It scans the
+  mounted VFS and runs `mm2_formats` parsers to build what the app
+  consumes: `VehicleCatalog`/`load_vehicle`/`build_model` for vehicles,
+  `convert` for tuning→`VehicleConfig`, and `EventCatalog::scan` for a
+  city's authored events. It fills in `mm2_game` contract types
+  (`EventRef`, `EventTableKind`) and `mm2_vehicle` configs, but owns no
+  session state, no Bevy rendering and no Avian internals.
 - `mm2_app` is the only place where everything is allowed to meet. Bevy
   conversion of parsed formats (TEX → `Image`, PSDL/PKG → `Mesh`) lives here,
   not in the parser crates.
@@ -168,7 +188,9 @@ How a feature plugin attaches:
 - Contract *types* (identity, telemetry, impact, surface, result) live in
   `mm2_game`; the *producers* that turn engine/solver data into them live
   in `mm2_app::contracts` or the feature's app-side module, because only
-  `mm2_app` may see both.
+  `mm2_app` may see both. Producers that turn *file content* into runtime
+  data (catalogs, parsed event records) live in `mm2_content`, never in
+  `mm2_game`.
 - Gameplay systems go in `FixedUpdate`/`FixedLast` and gate on
   `session.is_playing()` so the fixed clock defines their view of time;
   presentation reads `VehicleTelemetry`/events in `Update` and never

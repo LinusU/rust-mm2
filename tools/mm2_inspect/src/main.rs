@@ -594,9 +594,9 @@ fn cars(dir: &Path, mods: Option<&Path>) -> Result<(), Box<dyn std::error::Error
 }
 
 /// A compact per-record summary for the events listing.
-fn record_tag(r: &mm2_game::EventRecord) -> String {
+fn record_tag(r: &mm2_content::EventRecord) -> String {
+    use mm2_content::RecordContent as C;
     use mm2_formats::racefiles::RaceFileKind as K;
-    use mm2_game::RecordContent as C;
     match &r.content {
         C::Waypoints {
             rows, width_label, ..
@@ -644,7 +644,7 @@ fn events(
 
     let mut failures: Vec<String> = Vec::new();
     for city in &cities {
-        let cat = mm2_game::EventCatalog::scan(&vfs, city);
+        let cat = mm2_content::EventCatalog::scan(&vfs, city);
         println!("== events: {city} ==");
         for t in &cat.tables {
             match &t.error {
@@ -670,8 +670,8 @@ fn events(
                 .collect::<Vec<_>>()
                 .join(" ");
             let status = match &ev.status {
-                mm2_game::EventStatus::Ready => "ready".to_string(),
-                mm2_game::EventStatus::Incomplete { missing } => {
+                mm2_content::EventStatus::Ready => "ready".to_string(),
+                mm2_content::EventStatus::Incomplete { missing } => {
                     failures.push(format!(
                         "{city}: {} — incomplete: {}",
                         ev.stem,

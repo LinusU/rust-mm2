@@ -46,8 +46,10 @@ independent ready slice instead: F03-A (prop audit) or F09-A (BAI
 parser) both have all deps checked. F01 is complete as a candidate:
 F01-A/F01-B externally checked; F01-C implemented. F11-A implemented:
 shared `racefiles` classifier, waypoint/start-point/`.opp`/crash-data/
-rewards parsers, `EventCatalog` in `mm2_game`, `mm2-inspect events`
-(strict-clean on retail: 45/45 events ready per city, extras listed).
+rewards parsers, `EventCatalog` in `mm2_content` (moved out of
+`mm2_game` at iteration 010 after review flagged the VFS/parse producer
+inside the domain crate), `mm2-inspect events` (strict-clean on retail:
+45/45 events ready per city, extras listed).
 
 ## Baseline gate results (this checkout, 2026-09-20)
 
@@ -105,7 +107,7 @@ rewards parsers, `EventCatalog` in `mm2_game`, `mm2-inspect events`
 | F10-A | queued | F01-B, F02-A, F09-B | `va*` traffic vehicles exist in install; no ambient-traffic code. |
 | F10-B | queued | F10-A | — |
 | F10-C | queued | F10-B | — |
-| F11-A | implemented | F00-B, F01-A | `mm2_formats::racefiles` shared classifier (was private to `mm2-inspect` inventory); new parsers `waypoints` (waypoint + `_strtpnts` CSVs), `opp`, `crashdata` (tolerates retail `AmbDenisty` typo / omitted `Filename` label / named tail columns — kept as diagnostics), `rewards`. `mm2_game::EventCatalog`: VFS scan per city, `mm*data.csv` rows → `EventRef`-keyed entries (ready/incomplete + failed refs), dep records attached by stem (aimap/aimap_p/pathset/waypoints/startpoints/per-difficulty opp), Crash Course `Filename` links resolve whole linked stems (incl. sibling `.opp`), rewards + milestone rewards linked, unclaimed stems listed as extras. `mm2-inspect events <install> [--city] [--strict]` — strict exits 0 on retail: 45/45 events ready per city, 33/32 extras. Candidate pending external check. |
+| F11-A | implemented | F00-B, F01-A | `mm2_formats::racefiles` shared classifier (was private to `mm2-inspect` inventory); new parsers `waypoints` (waypoint + `_strtpnts` CSVs), `opp`, `crashdata` (tolerates retail `AmbDenisty` typo / omitted `Filename` label / named tail columns — kept as diagnostics), `rewards`. `mm2_content::EventCatalog`: VFS scan per city, `mm*data.csv` rows → `EventRef`-keyed entries (ready/incomplete + failed refs), dep records attached by stem (aimap/aimap_p/pathset/waypoints/startpoints/per-difficulty opp), Crash Course `Filename` links resolve whole linked stems (incl. sibling `.opp`), rewards + milestone rewards linked, unclaimed stems listed as extras. `mm2-inspect events <install> [--city] [--strict]` — strict exits 0 on retail: 45/45 events ready per city, 33/32 extras. First candidate failed review on crate placement (VFS+parsing producer inside `mm2_game` contradicted `docs/architecture.md`); moved to `mm2_content::events` with a `mm2_content → mm2_game` edge for `EventRef`/`EventTableKind` and the doc updated to name `mm2_content` as the content-producer layer. Candidate pending external check. |
 | F11-B | queued | F11-A | — |
 | F11-C | queued | F11-B | — |
 | F12-A | queued | F02-B, F11-B | London blitz0–12, SF blitz0–13 authored data present. |

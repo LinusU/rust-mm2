@@ -26,8 +26,7 @@ use mm2_formats::racedata::{EventRow, EventTable, RaceParams};
 use mm2_formats::racefiles::{RaceFileKind, classify_race_file, opp_difficulty};
 use mm2_formats::rewards::{RewardNum, RewardRow, RewardsFile};
 use mm2_formats::waypoints::{StartPointsFile, WaypointFile};
-
-use crate::config::{EventRef, EventTableKind};
+use mm2_game::{EventRef, EventTableKind};
 
 /// File-stem prefix a table's rows map to (the `<prefix><index>`
 /// convention — inferred, see module docs).

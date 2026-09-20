@@ -10,7 +10,6 @@ use bevy::prelude::*;
 use mm2_assets::Vfs;
 
 pub mod config;
-pub mod events;
 pub mod ids;
 pub mod impact;
 pub mod result;
@@ -22,10 +21,6 @@ pub use config::{
     CameraPose, ConfigError, Densities, DevOverrides, Difficulty, EventRef, EventTableKind,
     SelectorError, SessionAuthority, SessionConditions, SessionConfig, SessionMode, TimeOfDay,
     VehicleSelection, Weather,
-};
-pub use events::{
-    CatalogEvent, EventCatalog, EventRecord, EventResolveError, EventStatus, EventTableStatus,
-    ExtraRecord, FailedRef, RecordContent,
 };
 pub use ids::{AuthorityRole, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerId};
 pub use impact::{ImpactDedup, ImpactEvent, ImpactId, ImpactPolicy};
