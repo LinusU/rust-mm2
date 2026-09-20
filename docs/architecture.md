@@ -33,8 +33,15 @@ Dependency rules:
   unit-tested without a physics world. `config.rs` owns `VehicleConfig`
   (serde/TOML, validated before spawn); the optional `--vehicle-config` file
   swaps the whole tuning without recompiling.
-- `mm2_game` holds shared domain state (`WorldMode`, markers). Deliberately
-  small; gameplay systems grow here later.
+- `mm2_game` holds shared domain state and contracts: `WorldMode`, the
+  typed `SessionConfig` a session starts from (world, mode/event,
+  difficulty, conditions, densities, seed, vehicle, authority — with
+  local developer overrides quarantined in `DevOverrides`), the
+  `Session` lifecycle state machine (`Menu → Loading → Ready →
+  Countdown → Playing → Paused/Results → Unloading → Menu`, `Failed` on
+  load errors), `SessionEntity` ownership markers for teardown, and the
+  fixed-step session clock. Deliberately small; gameplay systems grow
+  here later.
 - `mm2_app` is the only place where everything is allowed to meet. Bevy
   conversion of parsed formats (TEX → `Image`, PSDL/PKG → `Mesh`) lives here,
   not in the parser crates.

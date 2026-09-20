@@ -1,15 +1,29 @@
 //! Game-domain state for the MM2-inspired engine.
 //!
-//! Kept deliberately small for the vertical slice: the world mode being
-//! played and which city is loaded. Cities, traffic, pedestrians and races
-//! will grow here over time — this is not a framework, just the shared
-//! domain state that neither rendering nor app bootstrap should own.
+//! Shared contracts that neither rendering nor app bootstrap should own:
+//! the world mode being played, the typed [`SessionConfig`] a session is
+//! started from, the [`Session`] lifecycle/ownership state machine, and
+//! the marker components gameplay and app code query by. This is not a
+//! framework — gameplay systems grow here over time.
 
 use bevy::prelude::*;
 use mm2_assets::Vfs;
 
+pub mod config;
+pub mod session;
+
+pub use config::{
+    CameraPose, ConfigError, Densities, DevOverrides, Difficulty, EventRef, EventTableKind,
+    SelectorError, SessionAuthority, SessionConditions, SessionConfig, SessionMode, TimeOfDay,
+    VehicleSelection, Weather,
+};
+pub use session::{
+    Session, SessionEntity, SessionError, SessionPhase, advance_session_tick,
+    despawn_session_entities,
+};
+
 /// What the app should do at startup.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub enum WorldMode {
     /// Synthetic development playground — no MM2 data required.
     #[default]
@@ -20,10 +34,6 @@ pub enum WorldMode {
         psdl: String,
     },
 }
-
-/// Resource holding the resolved world mode.
-#[derive(Resource, Debug, Clone, Default)]
-pub struct ActiveWorld(pub WorldMode);
 
 /// Resource wrapping the mounted virtual filesystem, when an MM2
 /// installation (or any content) has been provided.

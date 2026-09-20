@@ -38,11 +38,11 @@
 
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
-**Next selected slice: F01-A** — typed session configuration and
-explicit session ownership/lifecycle transitions (see task table).
-F00-B's children are externally checked; F00-C (evidence commands) is
-implemented as a candidate. F01-A is the next foundation slice: `mm2_game`
-is still a 40-line stub with no SessionConfig/lifecycle.
+**Next selected slice: F01-B** — stable IDs, telemetry, surface/impact/
+result contracts and local authority boundaries (see task table). F01-A
+is implemented as a candidate: typed `SessionConfig` + `Session`
+lifecycle/ownership in `mm2_game`, consumed by both the windowed and
+headless paths.
 
 ## Baseline gate results (this checkout, 2026-09-20)
 
@@ -50,12 +50,12 @@ is still a 40-line stub with no SessionConfig/lifecycle.
 |---|---|
 | `cargo fmt --all -- --check` | PASS |
 | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | PASS |
-| `cargo test --locked --workspace` | PASS — 17 test binaries/doc-test groups, ~108 tests, 0 failures |
+| `cargo test --locked --workspace` | PASS — 19 test binaries/doc-test groups, 0 failures (incl. 13 F01-A session tests) |
 | `mm2-inspect cars <retail>` | 29 catalog entries; all 21 `EXPECTED_STOCK_ROSTER` cars `ready`; 8 extra ids kept with explicit incompleteness reasons |
 | `mm2-inspect list <retail>` | 13,389 logical paths; families: texture 3977, aud 3293, geometry 1867, tune 1356, race 1080, bound 1034, city 247, anim 95 |
 | `mm2-inspect inventory <retail>` | 12 families: cities 2/5 exp/disc all parsed; vehicles 21/21 ready + 8 rejected; races 80 exp, 78 accepted, 2 partial (circuit11), 31 extras; lessons 42/42; placement 13 inst parsed; audio 7/7 families (3293 files unverified); peds 4/4 + wolf partial; MP/breakables/traffic/profile/interface discovered-only. Event-metadata tables parse: 12/10/10/13 checkpoint/blitz/circuit/crash rows per city. `--strict` exits 2 (33 findings) — honest: partial/junk records exist on retail. |
-|| `mm2 --dev-world --headless` | `status=pass` (updates=600, peak 27.9 m/s, moved 157 m, 4/4 wheels) — dev world starts with no MM2 data, car settles + drives |
-|| `mm2 --mm2-path <retail> --city sf --headless --frames 300` | `status=pass` — 1171 rooms / 3763 props via VFS, imported vpbug drove 30 m on real collision |
+|| `mm2 --dev-world --headless` | `status=pass` (updates=600, ticks=1198, peak 27.9 m/s, moved 157 m, 4/4 wheels) — dev world starts with no MM2 data, car settles + drives; session clock ≈2× updates at 120 Hz |
+|| `mm2 --mm2-path <retail> --city sf --headless --frames 300` | `status=pass` (ticks=598) — 1171 rooms / 3763 props via VFS, imported vpbug drove 30 m on real collision |
 || `mm2 --dev-world --frames 90 --screenshot` | `status=pass`, 2.9 MB PNG awaited + verified (GPU/render evidence recorded on this machine) |
 || `mm2 --headless --city bogus` (no data) | `status=unavailable`, exit 4 — missing data is not a failure |
 || `mm2 --mm2-path <retail> --city bogus --headless` / `--frames 60` | `status=fail`, exit 3 — explicit failure, logical path + reason |
@@ -64,12 +64,12 @@ is still a 40-line stub with no SessionConfig/lifecycle.
 
 | Task | Status | Dependencies | Evidence / reason / next action |
 |---|---|---|---|
-| F00-A | implemented | - | Audit done in this planning pass: gates pass, env/install/toolchain recorded above. Candidate pending external check/review. |
-| F00-B | implemented | F00-A | Split into F00-B.1 (inventory) and F00-B.2 (rules ledger); both children implemented. Candidate pending external check. |
-| F00-B.1 | implemented | F00-A | `mm2-inspect inventory` landed: versioned report (engine commit + fnv1a64 catalog fingerprint) with expected/discovered/accepted/rejected/unverified counts across 12 families; `--strict` exits 2 with 33 findings on retail (8 incomplete vehicles, 2 partial circuit11, junk/partial records). Candidate pending external check. |
-| F00-B.2 | implemented | F00-A | `docs/original-rules.md` ledger landed: ~90 classified facts from MM2HELP.HLP (decompiled locally via helpdeco), Readme.rtf, Booklet.pdf and authored data. `mm2_formats::racedata` parses the `mm*data.csv` event tables; inventory cross-checks them (12/10/10/13 rows/city, missing/malformed → rejected). Candidate pending external check. |
-| F00-C | implemented | F00-B | `mm2 --headless` headless physics smoke (no window/GPU; dev world + real cities via VFS), windowed `--frames`/`--screenshot` visual smoke that awaits the capture file, unified `smoke=` records versioned by build-embedded commit, statuses pass/fail/unavailable → exits 0/3/4. `--city` without data sources is `unavailable`; a requested missing city/vehicle is an explicit failure. AC04+AC05 advanced. Candidate pending external check. |
-| F01-A | queued | F00-A | `mm2_game` is a 40-line stub (`WorldMode`, `Mm2Vfs`, markers). No SessionConfig/lifecycle yet. |
+| F00-A | checked | - | Audit done in this planning pass: gates pass, env/install/toolchain recorded above. Externally checked. |
+| F00-B | checked | F00-A | Split into F00-B.1 (inventory) and F00-B.2 (rules ledger); both children externally checked. |
+| F00-B.1 | checked | F00-A | `mm2-inspect inventory` landed: versioned report (engine commit + fnv1a64 catalog fingerprint) with expected/discovered/accepted/rejected/unverified counts across 12 families; `--strict` exits 2 with 33 findings on retail (8 incomplete vehicles, 2 partial circuit11, junk/partial records). Externally checked. |
+| F00-B.2 | checked | F00-A | `docs/original-rules.md` ledger landed: ~90 classified facts from MM2HELP.HLP (decompiled locally via helpdeco), Readme.rtf, Booklet.pdf and authored data. `mm2_formats::racedata` parses the `mm*data.csv` event tables; inventory cross-checks them (12/10/10/13 rows/city, missing/malformed → rejected). Externally checked. |
+| F00-C | checked | F00-B | `mm2 --headless` headless physics smoke (no window/GPU; dev world + real cities via VFS), windowed `--frames`/`--screenshot` visual smoke that awaits the capture file, unified `smoke=` records versioned by build-embedded commit, statuses pass/fail/unavailable → exits 0/3/4. `--city` without data sources is `unavailable`; a requested missing city/vehicle is an explicit failure. Externally checked (review pass 2026-09-20; AC04/AC05 verified by reviewer). |
+| F01-A | implemented | F00-A | `SessionConfig` (world/mode/event-ref/difficulty/conditions/densities/seed/vehicle/authority + quarantined `DevOverrides`) and `Session` (`Menu→Loading→Ready→Countdown→Playing→Paused/Results→Unloading→Menu`, `Failed` load-time only, MP-6 pause rule enforced from authority) landed in `mm2_game`; `SessionEntity(gen)` ownership markers thread through world/vehicle/HUD/camera spawns; `advance_session_tick` fixed clock; `WorldState`/`ActiveWorld`/`CamStart` replaced. 13 session tests; smoke records now carry `ticks=`. Candidate pending external check. |
 | F01-B | queued | F01-A | No stable IDs, VehicleTelemetry, ImpactEvent, SurfaceState or result contracts exist. |
 | F01-C | queued | F01-B | No session start/quit integration tests or plugin-attach docs yet. |
 | F02-A | implemented | F00-B, F01-B | `VehicleCatalog::scan` + `EXPECTED_STOCK_ROSTER` + `stock_audit_failures` + `mm2-inspect cars/validate-cars` exist and ran on retail install tonight (21/21 ready, 8 audited extras). Candidate pending external check; deps not yet checked. |

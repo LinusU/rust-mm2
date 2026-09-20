@@ -10,7 +10,7 @@ use bevy::pbr::StandardMaterial;
 use mm2_app::city::{emit_psdl, load_city, load_image, load_image_sequence};
 use mm2_assets::Vfs;
 use mm2_formats::psdl::Psdl;
-use mm2_game::CityEntity;
+use mm2_game::{CityEntity, SessionEntity};
 
 // ---------------------------------------------------------------------------
 // Fixture builders
@@ -250,6 +250,7 @@ fn vfs_to_city_spawns_meshes_colliders_and_props() {
             &mut meshes,
             &mut images,
             &mut materials,
+            SessionEntity(1),
         )
         .expect("city loads")
     };

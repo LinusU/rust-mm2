@@ -398,6 +398,7 @@ fn headless_city(vfs: &Vfs, city_name: &str, cfg: VehicleConfig) -> (App, Entity
                 &mut meshes,
                 &mut images,
                 &mut materials,
+                mm2_game::SessionEntity(1),
             )
             .unwrap()
         };

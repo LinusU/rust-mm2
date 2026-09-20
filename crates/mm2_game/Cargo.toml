@@ -8,4 +8,5 @@ license.workspace = true
 [dependencies]
 bevy.workspace = true
 mm2_assets.workspace = true
+mm2_formats.workspace = true
 tracing.workspace = true

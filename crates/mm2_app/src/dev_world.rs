@@ -13,6 +13,7 @@ use bevy::{
     prelude::*,
 };
 use mm2_assets::Vfs;
+use mm2_game::SessionEntity;
 
 use crate::city;
 
@@ -28,6 +29,7 @@ pub const DEV_ROAD_STEM: &str = "dev_road";
 /// Tile size for the dev ground texture, metres.
 const GROUND_TILE: f32 = 8.0;
 
+#[allow(clippy::too_many_arguments)]
 fn box_obstacle(
     commands: &mut Commands<'_, '_>,
     meshes: &mut Assets<Mesh>,
@@ -36,9 +38,11 @@ fn box_obstacle(
     size: Vec3,
     rotation: Quat,
     color: Color,
+    owner: SessionEntity,
 ) {
     commands.spawn((
         DevWorldEntity,
+        owner,
         Mesh3d(meshes.add(Cuboid::from_size(size))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: color,
@@ -75,13 +79,15 @@ fn ground_quad(size: f32, tile: f32) -> Mesh {
     mesh
 }
 
-/// Spawn the playground.
+/// Spawn the playground. Every entity is stamped with `owner` so session
+/// teardown can remove the world wholesale.
 pub fn spawn_dev_world(
     commands: &mut Commands<'_, '_>,
     meshes: &mut Assets<Mesh>,
     images: &mut Assets<Image>,
     materials: &mut Assets<StandardMaterial>,
     vfs: &Vfs,
+    owner: SessionEntity,
 ) {
     let grey = Color::srgb(0.45, 0.47, 0.5);
     let dark = Color::srgb(0.3, 0.3, 0.33);
@@ -91,6 +97,7 @@ pub fn spawn_dev_world(
     // stays untextured; the visible surface is the textured plane on top.
     commands.spawn((
         DevWorldEntity,
+        owner,
         RigidBody::Static,
         Collider::cuboid(400.0, 1.0, 400.0),
         Transform::from_translation(Vec3::new(0.0, -0.5, 0.0)),
@@ -108,6 +115,7 @@ pub fn spawn_dev_world(
     };
     commands.spawn((
         DevWorldEntity,
+        owner,
         Mesh3d(meshes.add(ground_quad(400.0, GROUND_TILE))),
         MeshMaterial3d(ground_mat),
         Transform::from_translation(Vec3::new(0.0, 0.01, 0.0)),
@@ -122,6 +130,7 @@ pub fn spawn_dev_world(
         Vec3::new(30.0, 0.4, 40.0),
         Quat::from_rotation_x(0.17),
         dark,
+        owner,
     );
 
     // Steeper jump ramp (~20°).
@@ -133,6 +142,7 @@ pub fn spawn_dev_world(
         Vec3::new(10.0, 0.4, 20.0),
         Quat::from_rotation_x(0.36),
         accent,
+        owner,
     );
 
     // Curb / small step.
@@ -144,6 +154,7 @@ pub fn spawn_dev_world(
         Vec3::new(20.0, 0.3, 6.0),
         Quat::IDENTITY,
         dark,
+        owner,
     );
 
     // A row of small bumps.
@@ -156,6 +167,7 @@ pub fn spawn_dev_world(
             Vec3::new(3.0, 0.2 + 0.05 * (i as f32 % 3.0), 3.0),
             Quat::IDENTITY,
             dark,
+            owner,
         );
     }
 
@@ -174,6 +186,7 @@ pub fn spawn_dev_world(
             Vec3::new(sx, 4.0, sz),
             Quat::IDENTITY,
             grey,
+            owner,
         );
     }
 
@@ -193,12 +206,14 @@ pub fn spawn_dev_world(
             Vec3::new(4.0, 1.0, 0.4),
             Quat::from_rotation_y(yaw),
             accent,
+            owner,
         );
     }
 
     // Sun + sky-ish ambient.
     commands.spawn((
         DevWorldEntity,
+        owner,
         DirectionalLight {
             illuminance: 15_000.0,
             shadow_maps_enabled: true,

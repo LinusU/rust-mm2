@@ -36,7 +36,7 @@ use mm2_formats::{
     psdl::{AttributeType, Psdl, RoomAttribute},
     tex::TexFile,
 };
-use mm2_game::CityEntity;
+use mm2_game::{CityEntity, SessionEntity};
 use tracing::{debug, info, warn};
 
 /// Whether to mirror Z when converting MM2 coordinates to Bevy space.
@@ -2249,7 +2249,9 @@ impl std::fmt::Display for LoadCityError {
 impl std::error::Error for LoadCityError {}
 
 /// Load a city from `psdl_path` (e.g. `city/london.psdl`) plus its sibling
-/// `.inst` placement file.
+/// `.inst` placement file. Every spawned entity is stamped with `owner`
+/// so session teardown can remove the city wholesale.
+#[allow(clippy::too_many_arguments)]
 pub fn load_city(
     commands: &mut Commands,
     vfs: &Vfs,
@@ -2257,6 +2259,7 @@ pub fn load_city(
     meshes: &mut Assets<Mesh>,
     images: &mut Assets<Image>,
     materials: &mut Assets<StandardMaterial>,
+    owner: SessionEntity,
 ) -> Result<LoadedCity, LoadCityError> {
     let (bytes, resolved) = vfs
         .read_path(psdl_path)
@@ -2293,6 +2296,7 @@ pub fn load_city(
         };
         commands.spawn((
             CityEntity,
+            owner,
             Mesh3d(meshes.add(builder.build())),
             MeshMaterial3d(material),
             Name::new(format!(
@@ -2306,6 +2310,7 @@ pub fn load_city(
     for col in import.colliders {
         commands.spawn((
             CityEntity,
+            owner,
             RigidBody::Static,
             Collider::trimesh(col.positions, col.tris),
             Name::new(format!("city-room{}-collider", col.room + 1)),
@@ -2339,6 +2344,7 @@ pub fn load_city(
                     for (mesh, material) in &model.parts {
                         commands.spawn((
                             CityEntity,
+                            owner,
                             Mesh3d(mesh.clone()),
                             MeshMaterial3d(material.clone()),
                             transform,
@@ -2350,6 +2356,7 @@ pub fn load_city(
                     if let Some(collider) = &model.collider {
                         commands.spawn((
                             CityEntity,
+                            owner,
                             RigidBody::Static,
                             collider.clone(),
                             transform,
@@ -2380,7 +2387,7 @@ pub fn load_city(
         }
     }
     for anim in animated {
-        commands.spawn((CityEntity, anim));
+        commands.spawn((CityEntity, owner, anim));
     }
     info!(report = %report, "city import");
 

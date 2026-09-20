@@ -1,101 +1,114 @@
 # Last implementation iteration
 
-- Task ID and title: F00-C — reusable synthetic / original-data /
-  graphical evidence commands with explicit missing-capability outcomes
-  (completes the F00 evidence-harness scope; selected per the reconciled
-  plan after F00-B's children passed external check+review).
+- Task ID and title: F01-A — typed session configuration and explicit
+  session ownership/lifecycle transitions (the reconciled plan's next
+  foundation slice after F00-C passed external check+review).
 - Starting commit and resulting commit: started at
-  `ab32a705e08e399b4b2fc20e7040d9837658d6fa` (clean tree, branch
-  `ralph/night`, external check+review had just passed on F00-B.2);
-  result = this commit.
+  `3c7b0303b174e079fc5ef3d1c225cb8876c829d8` (clean tree, branch
+  `ralph/night`); result = this commit.
 - Production code changed:
-  - `crates/mm2_app/src/smoke.rs` (new): `SmokeRecord`/`SmokeStatus`
-    report (`smoke=<kind> world=<w> status=<pass|fail|unavailable>
-    <metrics>`), kinds `headless-physics` vs `visual`, exit codes
-    0/3/4 (2 stays usage-error), `header()` with the build-embedded
-    engine commit, and `headless_smoke()` — the MinimalPlugins +
-    Avian runner (same pattern as `tests/drive.rs` /
-    `examples/drive_probe.rs`) that spawns the dev world or a real
-    city through the VFS, settles, then holds full throttle and checks
-    finite/grounded (+drove, for the synthetic world).
-  - `crates/mm2_app/build.rs` (new): embeds `MM2_BUILD_COMMIT` — same
-    mechanism as `mm2-inspect` so smoke reports are versioned by the
-    code that produced them.
-  - `crates/mm2_app/src/main.rs`: `--headless` flag (conflicts with
-    `--screenshot`/`--cam`); `--city` is now `Option<String>` and a
-    specifically requested city always means City mode — a VFS miss is
-    a hard failure or `unavailable`, never a silent dev world; smoke
-    records printed for the `--car` load failure and the two
-    capability checks (requested city with no data source →
-    `unavailable` exit 4; visual run with no display → `unavailable`);
-    `smoke_test` now ends early with `status=fail` on
-    `WorldState::Failed` and awaits the screenshot file on disk before
-    reporting `pass` (no more fixed 5-frame hopeful delay); `AppExit`
-    codes propagate to the process exit code.
-  - `crates/mm2_app/src/lib.rs`: `pub mod smoke`.
+  - `crates/mm2_game/src/config.rs` (new): `SessionConfig` — world,
+    `SessionMode` (`Cruise` / `Event(EventRef)` where `EventRef` is
+    city-stem + `EventTableKind` + row, the `mm*data.csv` data model),
+    `Difficulty` (Amateur/Professional ↔ the authored param blocks,
+    DRV-2/3), `SessionConditions` (`TimeOfDay`/`Weather` selector
+    newtypes bounded to authored 0-3 — index→name mapping stays UNK-1,
+    no invented names), `Densities` (0..=1 validated fractions, WLD-1),
+    `seed`, `VehicleSelection`, `SessionAuthority` (Local/Host/Remote;
+    `allows_pause` encodes MP-6), and `DevOverrides` quarantining
+    `--vehicle-config`/`--cam` from progression/network-legal fields.
+    `SessionConfig::validate` rejects out-of-range densities, blank city
+    paths and blank vehicle ids.
+  - `crates/mm2_game/src/session.rs` (new): `Session` resource —
+    `SessionPhase` state machine (`Menu→Loading→Ready→Countdown→
+    Playing→Paused/Results→Unloading→Menu`, `Failed(reason)` reachable
+    only from Loading/Ready so a failed load cannot fake play), illegal
+    transitions rejected via `SessionError`, `begin()` validates + bumps
+    `generation` + resets the clock, `Playing→Paused` rejected under
+    Host/Remote authority (MP-6). `SessionEntity(gen)` ownership marker,
+    `despawn_session_entities` (root despawn, children cascade),
+    `advance_session_tick` fixed-step clock for `FixedUpdate`.
+  - `crates/mm2_game/src/lib.rs`: module wiring + re-exports; `WorldMode`
+    gains `PartialEq`; `ActiveWorld` removed (session config replaces
+    it). `Cargo.toml` gains `mm2_formats` (event-row typing only —
+    formats stays a leaf).
+  - `crates/mm2_app/src/main.rs`: CLI builds one `SessionConfig`;
+    `Session::begin` before `app.run` (`Menu→Loading`); `setup` drives
+    `Loading→Ready→Playing` or `Loading→Failed`, stamps every spawned
+    entity (world, HUD, cameras, city light, player, trailer, joint)
+    with `SessionEntity(generation)`; `WorldState`, `CamStart` resource
+    and `ActiveWorld` deleted — `smoke_test`, `update_hud`, input gating
+    all read the `Session` phase. `FixedUpdate` runs
+    `advance_session_tick`.
+  - `crates/mm2_app/src/smoke.rs`: `headless_smoke` takes the
+    `SessionConfig`, runs the real `Session` lifecycle inside the
+    MinimalPlugins app (`Failed` on world-load error), stamps entities
+    with the session generation, and reports `ticks=` — the fixed-step
+    session clock — in the smoke record.
+  - `crates/mm2_app/src/{dev_world,city,car_visual,input,lib}.rs`:
+    `SessionEntity` owner threaded through `spawn_dev_world`,
+    `load_city`, `spawn_trailer`; `input` gates on `session.is_playing()`;
+    `WorldState` enum removed.
 - Documentation changed:
-  - `README.md`: "Smoke tests (evidence commands)" section — commands,
-    record format, status table, exit codes.
+  - `docs/architecture.md`: `mm2_game` bullet now names the session
+    contracts.
+  - `docs/ralph/PLAN.md`: F00 family marked `checked` (external review
+    pass), F01-A marked `implemented` (candidate), next slice F01-B.
 - Key behavior verified on this machine (macOS arm64, retail install):
-  - `mm2 --dev-world --headless` → `status=pass` (600 updates, peak
-    27.9 m/s, moved 157 m, 4/4 wheels grounded), exit 0 — dev world
-    starts with no MM2 data and the car actually drives (AC04).
+  - `mm2 --dev-world --headless` → `status=pass`, `updates=600
+    ticks=1198` (2×/update minus the clock-priming first update),
+    peak 27.9 m/s, moved 157 m, exit 0.
   - `mm2 --mm2-path <retail> --city sf --headless --frames 300` →
-    `status=pass` — 1171 rooms / 3763 props imported via VFS, stock
+    `status=pass`, `ticks=598` — 1171 rooms / 3763 props via VFS, stock
     `vpbug` drove 30 m on real city collision, exit 0.
-  - `mm2 --dev-world --frames 90 --screenshot /tmp/x.png` →
-    `status=pass`, screenshot awaited: report printed only after the
-    2.9 MB PNG existed on disk; image visually verified (dev car on
-    textured road, live HUD). First recorded GPU/render evidence of the
-    run (AC05).
-  - `mm2 --headless --city bogus` (no install/mods) →
-    `status=unavailable`, exit 4 — missing data is not a failure.
   - `mm2 --mm2-path <retail> --city bogus --headless` → `status=fail`,
-    exit 3, record names `city/bogus.psdl` + reason — explicit failure
-    for a requested missing city (AC04).
-  - `mm2 --mm2-path <retail> --city bogus --frames 60` (windowed) →
-    `status=fail`, exit 3 via `WorldState::Failed`.
-  - `mm2 --headless --dev-world --car nosuchcar` → `status=fail` record
-    + exit 2 (usage-level explicit failure for a requested missing
-    vehicle).
-  - `--headless --screenshot` → clap conflict, exit 2.
-- Tests added/changed and why: `crates/mm2_app/tests/smoke.rs` — 3
-  integration tests driving the production `headless_smoke`: dev-world
-  pass on an empty VFS, requested-missing-city → explicit `fail` naming
-  the logical path, and record-line kind/status distinguishability
-  (AC05) + exit codes.
+    exit 3, names `city/bogus.psdl`; session phase went `Failed` inside
+    the runner too.
+  - `mm2 --headless --city bogus` (no data) → `status=unavailable`,
+    exit 4.
+- Tests added/changed and why: `crates/mm2_game/tests/session.rs` — 13
+  contract tests: legal/illegal transition matrix incl. quit-during-
+  play and failed-load-cleanup-before-restart (AC02 mechanism), MP-6
+  pause rejection under Host/Remote authority, config validation,
+  selector bounds, `Difficulty::params` block selection, `EventRef`
+  table-path/row resolution, `SessionEntity` teardown preserving
+  persistent entities (children cascade; old generations cleaned too),
+  and the fixed-step clock counting exactly 2 ticks per 60 Hz update at
+  120 Hz — stopping while Paused (AC03 mechanism). `tests/smoke.rs`
+  gained the `ticks=` assertion; `tests/import_pipeline.rs` and
+  `examples/drive_probe.rs` updated for the `owner` parameter.
 - Commands actually run and results:
   - `cargo fmt --all -- --check` — PASS.
   - `cargo clippy --locked --workspace --all-targets --all-features --
     -D warnings` — PASS.
-  - `cargo test --locked --workspace` — PASS, 18 test binaries/doc-test
-    groups, 0 failures (incl. the 3 new smoke tests).
+  - `cargo test --locked --workspace` — PASS, 19 test binaries/doc-test
+    groups, 0 failures.
 - Acceptance IDs satisfied / still open:
-  - F00-AC04: satisfied — dev world starts without original data
-    (headless + visual evidence); a specifically requested missing
-    city/vehicle exits or reports an explicit failure
-    (`status=fail`/`unavailable`, non-zero exits).
-  - F00-AC05: satisfied — `smoke=headless-physics` and `smoke=visual`
-    records are independently distinguishable; both were run and their
-    records observed. Candidate, pending external check.
-  - F00-AC01: gates re-run and pass.
-  - F00-AC02/AC03/AC06: unchanged — carried by F00-B.1/B.2, still
-    externally checked.
-- Evidence files: none committed; the verification screenshot lives at
-  `/tmp/mm2-smoke-devworld.png` (local only, synthetic dev world — no
-  original content).
-- Stock data/GPU/audio/network limitations: GPU/render evidence now
-  recorded on this machine for the synthetic dev world only — no
-  original-content frame has been captured this run (the city visual
-  smoke is runnable but was not captured; London/SF visual evidence
-  still open). Audio unexercised (no audio code / no `bevy_audio`).
-  Network unexercised (no networking code).
-- Unresolved blockers or discovered regressions: none. The visual
-  smoke's display check is heuristic (Linux DISPLAY/WAYLAND_DISPLAY);
-  on a genuinely GPU-less but display-present session wgpu would fail
-  noisily rather than report `unavailable` — honest crash, not a false
-  pass.
-- Next smallest useful action: F01-A — typed SessionConfig + explicit
-  session lifecycle in `mm2_game` (plan's next foundation slice).
+  - F01-AC02: mechanism landed — `Failed` is load-time-only and the only
+    path back is `Unloading → Menu`; a failed load spawns no player
+    (unchanged app behavior, now lifecycle-enforced). Full evidence is
+    an F01-C integration test.
+  - F01-AC03: advanced — the session clock counts fixed steps
+    independent of update batching (`ticks=1198` for 600 updates);
+    full equivalence of gameplay *events* awaits F01-B/C input/event
+    contracts.
+  - F01-AC01/AC04/AC05/AC06: contracts only — `SessionEntity` teardown
+    + generation (AC01), `SessionMode::Event`/`EventRef` + session
+    tick for result identity (AC04 groundwork), `SessionAuthority`
+    variants typed (AC05 groundwork), transition/despawn/tick tests +
+    module docs (AC06 groundwork). None claimed satisfied this slice.
+- Evidence files: none committed; no captures made.
+- Stock data/GPU/audio/network limitations: unchanged — original-content
+  rendered frame still uncaptured; no audio or networking code exists.
+  `Host`/`Remote` authorities are typed but unexercised (no network
+  sessions exist).
+- Unresolved blockers or discovered regressions: none. Deliberate
+  carry-overs: `Countdown`/`Results`/`Paused` phases are unreachable in
+  the app today (no races/pause UI — contract only); the first
+  `app.update()` primes the time clock and produces no fixed steps,
+  hence `ticks` ≈ `2 × (updates − 1)`.
+- Next smallest useful action: F01-B — stable player/vehicle/prop IDs,
+  `VehicleTelemetry`, impact/surface events, result identity (using
+  `Session::generation` + `tick`), and authority boundaries.
 
 This is a candidate handoff. External code-gate and separate review results live in the runner state directory and are not implied by this report.

@@ -13,6 +13,7 @@ use bevy::prelude::*;
 use mm2_assets::Vfs;
 use mm2_content::TrailerDef;
 use mm2_content::model::{MeshGroup, ModelPart, PartRole, VehicleModel};
+use mm2_game::SessionEntity;
 use mm2_vehicle::vehicle::{DriveDirection, Vehicle, VehicleInput, VehicleState};
 
 use crate::city::MaterialCache;
@@ -299,7 +300,8 @@ pub fn spawn_vehicle_model(
 
 /// Spawn a trailer body joined to `car` at the authored hitch anchors and
 /// build its model under it. Returns the trailer entity and any missing
-/// texture stems.
+/// texture stems. The trailer body and its joint are stamped with `owner`
+/// (its model children cascade through it).
 // Bevy spawn helpers thread `Commands` plus the several `Assets<T>`
 // stores the meshes, images and materials live in; bundling them behind
 // a context struct would only move the same borrows one level down.
@@ -314,6 +316,7 @@ pub fn spawn_trailer(
     materials: &mut Assets<StandardMaterial>,
     car: Entity,
     car_transform: Transform,
+    owner: SessionEntity,
 ) -> (Entity, Vec<String>) {
     // Trailer spawn pose: both hitch anchors coincide in world space while
     // the trailer shares the car's heading. `rest_offset` is the car-space
@@ -322,6 +325,7 @@ pub fn spawn_trailer(
     let pos = car_transform.translation + car_transform.rotation * rest_offset;
     let entity = commands
         .spawn((
+            owner,
             Trailer {
                 towing: car,
                 rest_offset,
@@ -332,13 +336,14 @@ pub fn spawn_trailer(
             Visibility::Visible,
         ))
         .id();
-    commands.spawn(
+    commands.spawn((
+        owner,
         SphericalJoint::new(car, entity)
             .with_local_anchor1(Vec3::from(trailer.car_hitch))
             .with_local_anchor2(Vec3::from(trailer.trailer_hitch))
             .with_swing_limits(-0.6, 0.6)
             .with_twist_limits(-0.15, 0.15),
-    );
+    ));
     let missing = spawn_vehicle_model(
         commands,
         vfs,

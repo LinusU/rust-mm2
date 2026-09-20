@@ -1,6 +1,10 @@
 //! `mm2_app` — the Bevy executable's import and world modules, exposed as a
 //! library so integration tests can drive the same code paths the binary
 //! uses.
+//!
+//! Session lifecycle (load/ready/play/failure) lives in
+//! `mm2_game::Session`; the app reads it instead of keeping a parallel
+//! world-state resource.
 
 pub mod camera;
 pub mod car_visual;
@@ -8,16 +12,3 @@ pub mod city;
 pub mod dev_world;
 pub mod input;
 pub mod smoke;
-
-/// Whether the world finished loading. Vehicle input is ignored until the
-/// world is `Ready`; a `Failed` load shows the reason instead of spawning
-/// into an empty world.
-#[derive(Debug, Clone, PartialEq, bevy::prelude::Resource)]
-pub enum WorldState {
-    /// Still building (no load attempt has run yet).
-    Loading,
-    /// World is built; the player may drive.
-    Ready,
-    /// Required content failed to load.
-    Failed(String),
-}

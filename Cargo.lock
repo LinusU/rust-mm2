@@ -3842,6 +3842,7 @@ version = "0.0.0"
 dependencies = [
  "bevy",
  "mm2_assets",
+ "mm2_formats",
  "tracing",
 ]
 

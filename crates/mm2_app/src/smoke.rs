@@ -18,7 +18,10 @@ use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_assets::Vfs;
 use mm2_content::VehicleDef;
-use mm2_game::{PlayerVehicle, WorldMode};
+use mm2_game::{
+    PlayerVehicle, Session, SessionConfig, SessionEntity, SessionPhase, WorldMode,
+    advance_session_tick,
+};
 use mm2_vehicle::vehicle::{VehicleInput, VehicleState};
 use mm2_vehicle::{VehicleConfig, VehiclePlugin, vehicle_bundle};
 
@@ -107,17 +110,22 @@ impl SmokeRecord {
 /// to load, keep the car finite and grounded (props may legitimately
 /// block its path — `moved=` reports how far it got either way).
 ///
+/// The run drives the real `Session` lifecycle (`Menu → Loading → Ready
+/// → Playing`, `Failed` on a load error) and reports `ticks=` — the
+/// fixed-step session clock, which must outpace `updates=` at exactly
+/// the 120/60 Hz ratio.
+///
 /// `selected` mirrors the binary's spawn rule: imported cars get extra
 /// spawn clearance from their authored collider hull; the synthetic dev
 /// car does not.
 pub fn headless_smoke(
-    mode: &WorldMode,
+    config: &SessionConfig,
     vfs: &Vfs,
     selected: Option<&VehicleDef>,
-    config: &VehicleConfig,
+    vehicle_config: &VehicleConfig,
     frames: u32,
 ) -> SmokeRecord {
-    let world = match mode {
+    let world = match &config.world {
         WorldMode::DevWorld => "dev-world".to_string(),
         WorldMode::City { psdl } => psdl.clone(),
     };
@@ -127,6 +135,12 @@ pub fn headless_smoke(
         status,
         detail,
     };
+
+    let mut session = Session::new();
+    if let Err(e) = session.begin(config.clone()) {
+        return record(SmokeStatus::Fail, format!("session begin: {e}"));
+    }
+    let owner = SessionEntity(session.generation());
 
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
@@ -142,8 +156,10 @@ pub fn headless_smoke(
             1.0 / 60.0,
         )))
         .insert_resource(Gravity(Vec3::NEG_Y * 9.81))
+        .insert_resource(session)
         .add_plugins(TransformPlugin)
-        .add_plugins(VehiclePlugin);
+        .add_plugins(VehiclePlugin)
+        .add_systems(FixedUpdate, advance_session_tick);
     app.finish();
     app.cleanup();
 
@@ -160,7 +176,7 @@ pub fn headless_smoke(
                 Assets::<Image>::default(),
                 Assets::<StandardMaterial>::default(),
             );
-            match mode {
+            match &config.world {
                 WorldMode::DevWorld => {
                     dev_world::spawn_dev_world(
                         &mut commands,
@@ -168,6 +184,7 @@ pub fn headless_smoke(
                         &mut images,
                         &mut materials,
                         vfs,
+                        owner,
                     );
                     Ok((Vec3::new(0.0, 1.5, 0.0), 0.0))
                 }
@@ -178,6 +195,7 @@ pub fn headless_smoke(
                     &mut meshes,
                     &mut images,
                     &mut materials,
+                    owner,
                 )
                 .map(|loaded| (loaded.spawn, loaded.spawn_yaw)),
             }
@@ -188,24 +206,40 @@ pub fn headless_smoke(
     let (mut spawn_pos, spawn_yaw) = match spawned {
         Ok(v) => v,
         Err(e) => {
+            // The session records the failure too — the phase is the
+            // observable state, not just the record line.
+            let _ = app
+                .world_mut()
+                .resource_mut::<Session>()
+                .fail(format!("world load: {e}"));
             return record(SmokeStatus::Fail, format!("world load: {e}"));
         }
     };
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session
+            .transition(SessionPhase::Ready)
+            .expect("Loading → Ready is a legal transition");
+        session
+            .transition(SessionPhase::Playing)
+            .expect("Ready → Playing is a legal transition");
+    }
 
     // Same spawn clearance the binary gives imported vehicles.
     if selected.is_some() {
-        let hull_min_y = config
+        let hull_min_y = vehicle_config
             .collider_points
             .as_ref()
             .and_then(|pts| pts.iter().map(|p| p[1]).reduce(f32::min))
-            .unwrap_or(-config.chassis_size[1] * 0.5);
+            .unwrap_or(-vehicle_config.chassis_size[1] * 0.5);
         spawn_pos.y += (0.25 - hull_min_y).max(0.35);
     }
     let car = app
         .world_mut()
         .spawn((
             PlayerVehicle,
-            vehicle_bundle(config),
+            owner,
+            vehicle_bundle(vehicle_config),
             Transform::from_translation(spawn_pos).with_rotation(Quat::from_rotation_y(spawn_yaw)),
         ))
         .id();
@@ -234,14 +268,15 @@ pub fn headless_smoke(
     }
 
     let world_ecs = app.world();
+    let ticks = world_ecs.resource::<Session>().tick();
     let pos = world_ecs.get::<Position>(car).map(|p| p.0);
     let vel = world_ecs.get::<LinearVelocity>(car).map(|v| v.0);
     let rot = world_ecs.get::<Rotation>(car).map(|r| r.0);
     let detail = |extra: &str| {
         format!(
-            "updates={frames} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){extra}",
+            "updates={frames} ticks={ticks} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){extra}",
             moved = pos.map(|p| (p - spawn_pos).length()).unwrap_or(f32::NAN),
-            total = config.wheels.len(),
+            total = vehicle_config.wheels.len(),
             x = pos.map(|p| p.x).unwrap_or(f32::NAN),
             y = pos.map(|p| p.y).unwrap_or(f32::NAN),
             z = pos.map(|p| p.z).unwrap_or(f32::NAN),
@@ -265,7 +300,7 @@ pub fn headless_smoke(
     // The dev world is flat and empty ahead of spawn — a healthy car must
     // be able to drive. A city can legitimately wall the car in, so its
     // bar is load + finite + grounded only.
-    if matches!(mode, WorldMode::DevWorld) && peak_speed < 5.0 {
+    if matches!(&config.world, WorldMode::DevWorld) && peak_speed < 5.0 {
         return record(SmokeStatus::Fail, detail(" car never drove"));
     }
     record(SmokeStatus::Pass, detail(""))

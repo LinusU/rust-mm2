@@ -7,7 +7,7 @@
 
 use mm2_app::smoke::{self, SmokeRecord, SmokeStatus};
 use mm2_assets::Vfs;
-use mm2_game::WorldMode;
+use mm2_game::{SessionConfig, WorldMode};
 use mm2_vehicle::VehicleConfig;
 
 /// The dev world must start with no original data at all — an empty VFS —
@@ -16,7 +16,7 @@ use mm2_vehicle::VehicleConfig;
 fn dev_world_headless_smoke_passes_without_mm2_data() {
     let vfs = Vfs::new();
     let rec = smoke::headless_smoke(
-        &WorldMode::DevWorld,
+        &SessionConfig::default(),
         &vfs,
         None,
         &VehicleConfig::default(),
@@ -30,6 +30,17 @@ fn dev_world_headless_smoke_passes_without_mm2_data() {
     );
     assert!(rec.line().starts_with("smoke=headless-physics"));
     assert!(rec.line().contains("world=dev-world"));
+    // The session clock ran on the fixed step: ~2 ticks per 60 Hz update
+    // at the 120 Hz timestep, minus the clock priming update (F01-AC03).
+    let ticks: u64 = rec
+        .line()
+        .split_whitespace()
+        .find_map(|kv| kv.strip_prefix("ticks=").and_then(|v| v.parse().ok()))
+        .expect("record reports ticks=");
+    assert!(
+        (1100..=1200).contains(&ticks),
+        "600 updates should produce ~1200 fixed ticks, got {ticks}"
+    );
 }
 
 /// A specifically requested city that the VFS cannot provide must report
@@ -37,10 +48,13 @@ fn dev_world_headless_smoke_passes_without_mm2_data() {
 #[test]
 fn requested_missing_city_is_an_explicit_failure() {
     let vfs = Vfs::new();
-    let mode = WorldMode::City {
-        psdl: "city/atlantis.psdl".into(),
+    let config = SessionConfig {
+        world: WorldMode::City {
+            psdl: "city/atlantis.psdl".into(),
+        },
+        ..SessionConfig::default()
     };
-    let rec = smoke::headless_smoke(&mode, &vfs, None, &VehicleConfig::default(), 600);
+    let rec = smoke::headless_smoke(&config, &vfs, None, &VehicleConfig::default(), 600);
     assert_eq!(
         rec.status,
         SmokeStatus::Fail,

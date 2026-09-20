@@ -16,10 +16,13 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use clap::Parser;
-use mm2_app::{WorldState, camera, car_visual, city, dev_world, input, smoke};
+use mm2_app::{camera, car_visual, city, dev_world, input, smoke};
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
-use mm2_game::{ActiveWorld, Mm2Vfs, PlayerVehicle, WorldMode};
+use mm2_game::{
+    CameraPose, DevOverrides, Mm2Vfs, PlayerVehicle, Session, SessionConfig, SessionEntity,
+    SessionPhase, VehicleSelection, WorldMode, advance_session_tick,
+};
 use mm2_vehicle::{ResetVehicle, VehicleConfig, VehicleDebugEnabled, VehiclePlugin};
 use tracing::{error, info, warn};
 
@@ -138,15 +141,6 @@ struct SmokeTest {
     capture_wait: u32,
 }
 
-/// `--cam` starting pose for the free camera (position + yaw/pitch in
-/// radians).
-#[derive(Resource)]
-struct CamStart {
-    position: Vec3,
-    yaw: f32,
-    pitch: f32,
-}
-
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -162,7 +156,7 @@ fn main() {
     let cam_start = cli.cam.as_deref().map(|s| {
         let parts: Result<Vec<f32>, _> = s.split(',').map(|p| p.trim().parse::<f32>()).collect();
         match parts {
-            Ok(f) if f.len() == 3 || f.len() == 5 => Ok(CamStart {
+            Ok(f) if f.len() == 3 || f.len() == 5 => Ok(CameraPose {
                 position: Vec3::new(f[0], f[1], f[2]),
                 yaw: f.get(3).copied().unwrap_or(0.0).to_radians(),
                 pitch: f.get(4).copied().unwrap_or(0.0).to_radians(),
@@ -343,12 +337,30 @@ fn main() {
         warn!(car = ?selected.as_ref().map(|d| d.id.as_str()), "{w}");
     }
 
+    // The session's typed configuration (F01-A): world + mode +
+    // difficulty/conditions/densities/seed + vehicle + authority. Only
+    // `world`, `vehicle` and the `dev` overrides have runtime consumers
+    // today — the rest are the contract F11+ builds against. Developer
+    // tweaks stay quarantined in `dev`.
+    let session_config = SessionConfig {
+        world: mode,
+        vehicle: VehicleSelection {
+            id: selected.as_ref().map(|d| d.id.clone()),
+            paint: cli.paint,
+        },
+        dev: DevOverrides {
+            vehicle_config: cli.vehicle_config.clone(),
+            camera: cam_start,
+        },
+        ..SessionConfig::default()
+    };
+
     // Capability checks with their own status: a requested city with no
     // data source at all is `unavailable` (missing data), and a visual
     // smoke with no display is `unavailable` (no GPU/windowing). Neither
     // is a failure — and neither is allowed to fake a pass.
     if smoke_requested {
-        if matches!(mode, WorldMode::City { .. }) && !has_mm2 && !has_mods {
+        if matches!(&session_config.world, WorldMode::City { .. }) && !has_mm2 && !has_mods {
             println!(
                 "{}",
                 record(
@@ -375,7 +387,7 @@ fn main() {
     // Headless physics smoke: no window, no GPU. Runs and exits here.
     if cli.headless {
         let rec = smoke::headless_smoke(
-            &mode,
+            &session_config,
             &vfs,
             selected.as_ref(),
             &vehicle,
@@ -383,6 +395,15 @@ fn main() {
         );
         println!("{}", rec.line());
         std::process::exit(rec.status.exit_code());
+    }
+
+    // Menu → Loading: the session resource the app drives through
+    // `SessionPhase` transitions (`setup` takes it to Ready → Playing,
+    // or Failed). An invalid config is a usage error, not a smoke fail.
+    let mut session = Session::new();
+    if let Err(e) = session.begin(session_config) {
+        error!(error = %e, "invalid session configuration");
+        std::process::exit(2);
     }
 
     let mut app = App::new();
@@ -402,13 +423,12 @@ fn main() {
     .insert_resource(Time::<Fixed>::from_hz(120.0))
     .insert_resource(Gravity(Vec3::NEG_Y * 9.81))
     .insert_resource(ClearColor(Color::srgb(0.5, 0.65, 0.85)))
-    .insert_resource(ActiveWorld(mode))
+    .insert_resource(session)
     .insert_resource(SpawnPoint {
         position: Vec3::new(0.0, 1.5, 0.0),
         yaw: 0.0,
         trailers: Vec::new(),
     })
-    .insert_resource(WorldState::Loading)
     .insert_resource(Mm2Vfs(vfs))
     .insert_resource(TunedVehicle(vehicle))
     .insert_resource(SelectedCar {
@@ -423,6 +443,7 @@ fn main() {
     })
     .add_plugins(VehiclePlugin)
     .add_systems(Startup, setup)
+    .add_systems(FixedUpdate, advance_session_tick)
     .add_systems(
         Update,
         (
@@ -442,9 +463,6 @@ fn main() {
             update_hud,
         ),
     );
-    if let Some(c) = cam_start {
-        app.insert_resource(c);
-    }
     if cli.screenshot.is_some() || cli.frames.is_some() {
         app.insert_resource(SmokeTest {
             world: world_label,
@@ -491,7 +509,7 @@ fn capturing(smoke: Option<Res<SmokeTest>>) -> bool {
 fn smoke_test(
     mut commands: Commands,
     mut st: ResMut<SmokeTest>,
-    state: Res<WorldState>,
+    session: Res<Session>,
     mut exit: MessageWriter<AppExit>,
 ) {
     let world = st.world.clone();
@@ -501,7 +519,7 @@ fn smoke_test(
         status,
         detail,
     };
-    if let WorldState::Failed(m) = &*state {
+    if let SessionPhase::Failed(m) = session.phase() {
         println!("{}", record(smoke::SmokeStatus::Fail, m.clone()).line());
         exit.write(AppExit::from_code(
             smoke::SmokeStatus::Fail.exit_code() as u8
@@ -565,22 +583,28 @@ struct AssetStores<'w> {
     materials: ResMut<'w, Assets<StandardMaterial>>,
 }
 
-/// Spawn the world, vehicle, cameras, HUD and lights per `ActiveWorld`.
+/// Spawn the world, vehicle, cameras, HUD and lights per the session
+/// config, driving `Loading → Ready → Playing` (or `Failed`). Everything
+/// spawned is stamped with the session's `SessionEntity` generation so a
+/// later `Unloading` removes the whole session, not a subset.
 #[allow(clippy::too_many_arguments)]
 fn setup(
     mut commands: Commands,
     mut assets: AssetStores,
-    mode: Res<ActiveWorld>,
+    mut session: ResMut<Session>,
     vfs: Res<Mm2Vfs>,
     vehicle_config: Res<TunedVehicle>,
     selected: Res<SelectedCar>,
-    cam_start: Option<Res<CamStart>>,
     cam_mode: Res<CameraMode>,
     mut spawn: ResMut<SpawnPoint>,
-    mut state: ResMut<WorldState>,
 ) {
+    let owner = SessionEntity(session.generation());
+    let Some(config) = session.config().cloned() else {
+        error!("setup ran without a session config");
+        return;
+    };
     let mut world_ok = true;
-    match &mode.0 {
+    match &config.world {
         WorldMode::DevWorld => {
             dev_world::spawn_dev_world(
                 &mut commands,
@@ -588,6 +612,7 @@ fn setup(
                 &mut assets.images,
                 &mut assets.materials,
                 &vfs.0,
+                owner,
             );
             spawn.position = Vec3::new(0.0, 1.5, 0.0);
             spawn.yaw = 0.0;
@@ -600,6 +625,7 @@ fn setup(
                 &mut assets.meshes,
                 &mut assets.images,
                 &mut assets.materials,
+                owner,
             ) {
                 Ok(loaded) => {
                     spawn.position = loaded.spawn;
@@ -608,12 +634,15 @@ fn setup(
                 }
                 Err(e) => {
                     error!(error = %e, "city failed to load");
-                    *state = WorldState::Failed(format!("{e}"));
+                    session
+                        .fail(format!("{e}"))
+                        .expect("Loading → Failed is a legal transition");
                     world_ok = false;
                 }
             }
             // City lighting.
             commands.spawn((
+                owner,
                 DirectionalLight {
                     illuminance: 15_000.0,
                     shadow_maps_enabled: true,
@@ -629,11 +658,14 @@ fn setup(
         }
     }
     if world_ok {
-        *state = WorldState::Ready;
+        session
+            .transition(SessionPhase::Ready)
+            .expect("Loading → Ready is a legal transition");
     }
 
     // HUD + error text.
     commands.spawn((
+        owner,
         Hud,
         Text::new(""),
         TextFont {
@@ -652,6 +684,7 @@ fn setup(
         },
     ));
     commands.spawn((
+        owner,
         ErrorText,
         Text::new(""),
         TextFont {
@@ -682,6 +715,7 @@ fn setup(
         None => ChaseCamera::default(),
     };
     commands.spawn((
+        owner,
         Camera3d::default(),
         Camera {
             is_active: *cam_mode == CameraMode::Chase,
@@ -690,7 +724,7 @@ fn setup(
         chase,
         Transform::from_translation(spawn.position + Vec3::new(0.0, 4.0, 9.0)),
     ));
-    let (free_xf, free_cam) = match cam_start.as_ref() {
+    let (free_xf, free_cam) = match config.dev.camera.as_ref() {
         Some(c) => (
             Transform::from_translation(c.position).with_rotation(Quat::from_euler(
                 EulerRot::YXZ,
@@ -710,6 +744,7 @@ fn setup(
         ),
     };
     commands.spawn((
+        owner,
         Camera3d::default(),
         Camera {
             is_active: *cam_mode == CameraMode::Free,
@@ -725,7 +760,7 @@ fn setup(
     if !world_ok {
         return;
     }
-    let config = &vehicle_config.0;
+    let vehicle_cfg = &vehicle_config.0;
 
     // Spawn clearance: keep the collider hull's lowest point off the
     // ground plus a settle margin.
@@ -741,7 +776,8 @@ fn setup(
     let vehicle = commands
         .spawn((
             PlayerVehicle,
-            mm2_vehicle::vehicle_bundle(config),
+            owner,
+            mm2_vehicle::vehicle_bundle(&vehicle_config.0),
             Transform::from_translation(spawn.position)
                 .with_rotation(Quat::from_rotation_y(spawn.yaw)),
             TransformInterpolation,
@@ -779,6 +815,7 @@ fn setup(
                     &mut assets.materials,
                     vehicle,
                     car_xf,
+                    owner,
                 );
                 if !tmissing.is_empty() {
                     warn!(car = %def.id, "trailer missing textures: {}", tmissing.join(", "));
@@ -794,7 +831,7 @@ fn setup(
         None => {
             let body_mesh = assets
                 .meshes
-                .add(Cuboid::from_size(Vec3::from(config.chassis_size)));
+                .add(Cuboid::from_size(Vec3::from(vehicle_cfg.chassis_size)));
             let body_mat = assets.materials.add(StandardMaterial {
                 base_color: Color::srgb(0.85, 0.15, 0.1),
                 metallic: 0.3,
@@ -810,7 +847,7 @@ fn setup(
                 perceptual_roughness: 0.9,
                 ..default()
             });
-            for (i, w) in config.wheels.iter().enumerate() {
+            for (i, w) in vehicle_cfg.wheels.iter().enumerate() {
                 let mount = commands
                     .spawn((
                         WheelMount { vehicle, index: i },
@@ -831,28 +868,33 @@ fn setup(
             }
         }
     }
+
+    // World built and the player exists — release control.
+    session
+        .transition(SessionPhase::Playing)
+        .expect("Ready → Playing is a legal transition");
 }
 
 /// HUD line: speed, gear/direction, RPM, grounded wheels.
 fn update_hud(
-    state: Res<WorldState>,
+    session: Res<Session>,
     mut hud: Query<&mut Text, (With<Hud>, Without<ErrorText>)>,
     mut err: Query<&mut Text, (With<ErrorText>, Without<Hud>)>,
     vehicles: Query<(&mm2_vehicle::vehicle::VehicleState, &LinearVelocity), With<PlayerVehicle>>,
     cameras: Query<(&Camera, &Transform)>,
 ) {
     for mut text in &mut err {
-        *text = match &*state {
-            WorldState::Failed(m) => Text::new(format!("world failed to load:\n{m}")),
+        *text = match session.phase() {
+            SessionPhase::Failed(m) => Text::new(format!("world failed to load:\n{m}")),
             _ => Text::new(""),
         };
     }
     let Ok((veh, vel)) = vehicles.single() else {
         for mut text in &mut hud {
-            *text = Text::new(match &*state {
-                WorldState::Loading => "loading…".to_string(),
-                WorldState::Failed(_) => String::new(),
-                WorldState::Ready => "no vehicle".to_string(),
+            *text = Text::new(match session.phase() {
+                SessionPhase::Failed(_) => String::new(),
+                SessionPhase::Playing => "no vehicle".to_string(),
+                _ => "loading…".to_string(),
             });
         }
         return;

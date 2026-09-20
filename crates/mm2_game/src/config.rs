@@ -1,0 +1,368 @@
+//! Typed session configuration (F01-A).
+//!
+//! Everything needed to start a session lives in one `SessionConfig`
+//! instead of loose CLI-derived resources. Fields that would be
+//! progression- or network-legal are typed here; local developer
+//! overrides (`--vehicle-config`, `--cam`) are quarantined in
+//! [`DevOverrides`] so they cannot leak into progression or protocol
+//! decisions by accident.
+//!
+//! Classification notes (`docs/original-rules.md`): weather and
+//! time-of-day are authored *selectors* 0-3 (WLD-4) whose index→name
+//! mapping is unverified (UNK-1), so the types below model the selector,
+//! not invented names.
+
+use std::path::PathBuf;
+
+use bevy::prelude::Vec3;
+use mm2_formats::racedata::{EventRow, EventTable, RaceParams};
+
+use crate::WorldMode;
+
+/// Top-level session configuration; `Session::begin` validates it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionConfig {
+    /// Which world to load — synthetic dev world or a VFS city.
+    pub world: WorldMode,
+    /// Free roam or a cataloged authored event.
+    pub mode: SessionMode,
+    /// Amateur/Professional — the driver's rank (DRV-2/DRV-3).
+    pub difficulty: Difficulty,
+    /// Weather and time-of-day selectors.
+    pub conditions: SessionConditions,
+    /// Ambient traffic / pedestrian densities.
+    pub densities: Densities,
+    /// Deterministic seed for session-level randomness. Typed now so
+    /// consumers (traffic, opponents, event shuffles) can share it
+    /// instead of each rolling their own entropy source.
+    pub seed: u64,
+    /// The player's vehicle and paint.
+    pub vehicle: VehicleSelection,
+    /// Who owns game-rule authority for the session.
+    pub authority: SessionAuthority,
+    /// Local-only developer overrides — never progression- or
+    /// network-legal.
+    pub dev: DevOverrides,
+}
+
+impl Default for SessionConfig {
+    /// A zero-content session: dev world, cruise, amateur, local
+    /// authority, no vehicle request, no developer overrides.
+    fn default() -> Self {
+        Self {
+            world: WorldMode::DevWorld,
+            mode: SessionMode::Cruise,
+            difficulty: Difficulty::Amateur,
+            conditions: SessionConditions::default(),
+            densities: Densities::default(),
+            seed: 0,
+            vehicle: VehicleSelection::default(),
+            authority: SessionAuthority::Local,
+            dev: DevOverrides::default(),
+        }
+    }
+}
+
+impl SessionConfig {
+    /// Reject configurations that would fail or misbehave at load time.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        self.densities.validate()?;
+        if let WorldMode::City { psdl } = &self.world
+            && psdl.trim().is_empty()
+        {
+            return Err(ConfigError::EmptyCityPath);
+        }
+        if self
+            .vehicle
+            .id
+            .as_deref()
+            .is_some_and(|id| id.trim().is_empty())
+        {
+            return Err(ConfigError::EmptyVehicleId);
+        }
+        Ok(())
+    }
+}
+
+/// A rejected `SessionConfig` field.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConfigError {
+    /// A density fraction outside `0..=1` or non-finite.
+    Density {
+        /// Which density field overflowed.
+        field: &'static str,
+        /// The rejected value.
+        value: f32,
+    },
+    /// `WorldMode::City` with a blank logical path.
+    EmptyCityPath,
+    /// A vehicle id that is present but blank.
+    EmptyVehicleId,
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Density { field, value } => {
+                write!(f, "{field} density {value} is outside 0..=1")
+            }
+            Self::EmptyCityPath => write!(f, "city world has an empty logical path"),
+            Self::EmptyVehicleId => write!(f, "vehicle id is empty"),
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+/// What kind of session the player is in.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum SessionMode {
+    /// Free roam — no opponents, no clock (CRZ-1). The only mode with a
+    /// runtime today.
+    #[default]
+    Cruise,
+    /// A cataloged authored event; the F11 event catalog resolves the
+    /// reference into checkpoints, opponents and rules.
+    Event(EventRef),
+}
+
+/// Identity of one authored event: a row in one city's `mm*data.csv`
+/// table. This is the data model the shipped tables actually use —
+/// content-driven, so mods adding a city or table rows stay referable.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EventRef {
+    /// City stem the event table lives under (`london`, `sf`, or a
+    /// mod-provided city). Deliberately a string, not a closed enum.
+    pub city: String,
+    /// Which `mm*data.csv` table the event is a row of.
+    pub table: EventTableKind,
+    /// 0-based row within the table, authored order.
+    pub index: usize,
+}
+
+impl EventRef {
+    /// Logical VFS path of the table file, e.g.
+    /// `race/london/mmblitzdata.csv`.
+    pub fn table_path(&self) -> String {
+        format!("race/{}/{}", self.city, self.table.file_name())
+    }
+
+    /// The event's row inside a parsed table; `None` when `index` is out
+    /// of bounds.
+    pub fn row<'a>(&self, table: &'a EventTable) -> Option<&'a EventRow> {
+        table.rows.get(self.index)
+    }
+}
+
+/// The four authored `mm*data.csv` event tables each stock city ships
+/// (RACE-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventTableKind {
+    /// `mmblitzdata.csv` — solo checkpoint hunts against the clock.
+    Blitz,
+    /// `mmracedata.csv` — checkpoint races against opponents.
+    Checkpoint,
+    /// `mmcircuitdata.csv` — lapped races.
+    Circuit,
+    /// `mmcrashdata.csv` — Crash Course lessons/midterms/finals.
+    CrashCourse,
+}
+
+impl EventTableKind {
+    /// The authored file name inside `race/<city>/`.
+    pub fn file_name(self) -> &'static str {
+        match self {
+            Self::Blitz => "mmblitzdata.csv",
+            Self::Checkpoint => "mmracedata.csv",
+            Self::Circuit => "mmcircuitdata.csv",
+            Self::CrashCourse => "mmcrashdata.csv",
+        }
+    }
+}
+
+/// Driver rank — the authored Amateur/Professional parameter split
+/// (DRV-2/DRV-3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Difficulty {
+    /// First parameter block: longer limits, lighter traffic.
+    #[default]
+    Amateur,
+    /// Second parameter block: shorter limits, denser traffic.
+    Professional,
+}
+
+impl Difficulty {
+    /// The parameter block this difficulty selects on an event row.
+    pub fn params(self, row: &EventRow) -> &RaceParams {
+        match self {
+            Self::Amateur => &row.amateur,
+            Self::Professional => &row.professional,
+        }
+    }
+}
+
+/// A time-of-day selector. Authored values are 0-3 (WLD-4); which index
+/// means which time is unverified (UNK-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TimeOfDay(u8);
+
+impl TimeOfDay {
+    /// Largest authored selector value.
+    pub const MAX: u8 = 3;
+
+    pub fn new(value: u8) -> Result<Self, SelectorError> {
+        if value <= Self::MAX {
+            Ok(Self(value))
+        } else {
+            Err(SelectorError {
+                name: "time-of-day",
+                value,
+            })
+        }
+    }
+
+    pub fn get(self) -> u8 {
+        self.0
+    }
+}
+
+/// A weather selector. Authored values are 0-3 (WLD-4); which index
+/// means which weather is unverified (UNK-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Weather(u8);
+
+impl Weather {
+    /// Largest authored selector value.
+    pub const MAX: u8 = 3;
+
+    pub fn new(value: u8) -> Result<Self, SelectorError> {
+        if value <= Self::MAX {
+            Ok(Self(value))
+        } else {
+            Err(SelectorError {
+                name: "weather",
+                value,
+            })
+        }
+    }
+
+    pub fn get(self) -> u8 {
+        self.0
+    }
+}
+
+/// A condition selector outside the authored 0-3 range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectorError {
+    /// Which selector overflowed.
+    pub name: &'static str,
+    /// The rejected value.
+    pub value: u8,
+}
+
+impl std::fmt::Display for SelectorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} selector {} is outside 0-3", self.name, self.value)
+    }
+}
+
+impl std::error::Error for SelectorError {}
+
+/// The session's weather and time-of-day pair. Defaults to selector 0
+/// for both — index 0's meaning is unverified, so this is a neutral
+/// default, not a claim about what the original shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SessionConditions {
+    pub time_of_day: TimeOfDay,
+    pub weather: Weather,
+}
+
+/// Ambient population densities, authored per event as 0-1 fractions
+/// (WLD-1: `mm*data.csv` Ambient/Peds).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Densities {
+    /// Ambient traffic density.
+    pub traffic: f32,
+    /// Pedestrian density.
+    pub pedestrians: f32,
+}
+
+impl Densities {
+    /// Designed default — no authored source; authored events override
+    /// it (and Circuit rows force pedestrians to 0, CIR-3).
+    pub const DEFAULT: Self = Self {
+        traffic: 0.5,
+        pedestrians: 0.5,
+    };
+
+    /// Densities are fractions; anything outside `0..=1` or non-finite
+    /// is a config error, not something to clamp silently.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        for (field, value) in [("traffic", self.traffic), ("pedestrians", self.pedestrians)] {
+            if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                return Err(ConfigError::Density { field, value });
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Default for Densities {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// The player's chosen vehicle.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct VehicleSelection {
+    /// Catalog id (`vpbug`); `None` = synthetic dev car.
+    pub id: Option<String>,
+    /// Zero-based paint index.
+    pub paint: usize,
+}
+
+/// Who owns the session's game-rule authority. `Local` is the only
+/// authority a session can have today; the networked variants exist so
+/// rule systems are written against the contract, not against a
+/// single-player assumption (F24 fills them in).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionAuthority {
+    /// This process runs the rules — single player and development.
+    #[default]
+    Local,
+    /// This process hosts a networked session and stays authoritative.
+    Host,
+    /// A remote server is authoritative; this client predicts.
+    Remote,
+}
+
+impl SessionAuthority {
+    /// Single-player pause is legal; multiplayer never pauses (MP-6:
+    /// "no pausing in multiplayer").
+    pub fn allows_pause(self) -> bool {
+        matches!(self, Self::Local)
+    }
+}
+
+/// A free-camera spawn pose (`--cam x,y,z[,yaw,pitch]`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CameraPose {
+    pub position: Vec3,
+    /// Yaw in radians.
+    pub yaw: f32,
+    /// Pitch in radians.
+    pub pitch: f32,
+}
+
+/// Local developer tweaks that must never count for progression or be
+/// legal in a networked session. Quarantined here — off the
+/// session-legal fields — so nothing downstream confuses them with real
+/// session parameters.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DevOverrides {
+    /// `--vehicle-config` TOML: replaces the selected car's handling.
+    pub vehicle_config: Option<PathBuf>,
+    /// `--cam` fixed free-camera start pose.
+    pub camera: Option<CameraPose>,
+}
