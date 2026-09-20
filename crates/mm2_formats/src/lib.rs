@@ -5,6 +5,7 @@
 //! Malformed input produces structured [`FormatError`] values rather than
 //! panicking.
 
+pub mod aimap;
 pub mod bai;
 pub mod bnd;
 pub mod crashdata;

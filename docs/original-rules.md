@@ -222,6 +222,9 @@ Retail install: `/Users/linus/coding/rust-mm2/retail`, enumerated
 | WLD-3 | Documented original defect: vehicles can stick in soft ground under SF dock archways; less likely at speed. | documented | readme:§3.05 |
 | WLD-4 | Weather and time-of-day are per-event selectors (0-3 each in data; enum meaning unverified — UNK-1). | verified_original | data:`mm*data.csv` Weather/TimeofDay columns |
 | WLD-5 | Sidewalks, alleys, parks, wrong side of road are all drivable shortcuts. | documented | help:Tips for Winning |
+| WLD-6 | `.aimap` override grammar is uniform across all 209 retail files: `[Speed Limit]` scalar, counted `[Exceptions]` (road-id/density/speed), `[Police]`/`[Opponent]` spawns, `[Ambient Types/Density]` cumulative weights closing at 1.0, `[Ambients Drive On The Left]` (1 london / 0 sf), ped-model pairs; rarer `[Density]`, `[CopChaseDistance]`, `[AmbientLaneChanges]`, `[Traffic Lights]`, `[Hookmen]`. | verified_original | data: all `city/`+`race/` aimaps, `mm2-inspect aimap`; docs/research/aimap.md |
+| WLD-7 | Retail exception density/speed values are all `0.00`/`0` — consistent with R3's claim that event aimaps close course roads to ambient traffic. Runtime consumption of these values is unverified (UNK-12). | inferred | data: every `[Exceptions]` row on retail |
+| WLD-8 | Eight london `.aimap` files carry `[Exceptions]` road ids 562–815, outside `city/london.bai`'s 540-road space; SF exceptions are all in range. Different id space or dead authored refs — unknown (UNK-18). | verified_original | `mm2-inspect aimap` cross-check vs `city/london.bai` |
 
 ## Deliberate rust-mm2 departures (designed, not original claims)
 
@@ -252,12 +255,13 @@ Retail install: `/Users/linus/coding/rust-mm2/retail`, enumerated
 | UNK-9 | Police pursuit AI, sight model, spawn/de-spawn rules beyond "fixed spots" + "line of sight". |
 | UNK-10 | C&R gold spawn/hideout positions, scoring values, drop mechanics, respawn timing. |
 | UNK-11 | Opponent AI route choice/difficulty model. `.opp` rows now parse (`mm2_formats::opp`, F11-A) but their column semantics and consumption rules remain unverified. |
-| UNK-12 | Traffic/pedestrian ambient models (lanes, lights, panic reactions); `.pathset` still unparsed. `.bai` structure now parses (`docs/research/bai.md`) — runtime semantics remain unverified. |
+| UNK-12 | Traffic/pedestrian ambient models (lanes, lights, panic reactions); `.pathset` still unparsed. `.bai` structure now parses (`docs/research/bai.md`) and `.aimap` overrides parse (`docs/research/aimap.md`) — runtime semantics of both remain unverified. |
 | UNK-13 | Exact damage accumulation model and breakaway-part rules (DMG-3 documented only as a feature claim). |
 | UNK-14 | Crash Course pass/fail criteria per lesson (time? gates? stunts scored how?). |
 | UNK-15 | Whether pedestrians can be struck and what the consequence is. |
 | UNK-16 | Waypoint/start `a` angle convention (WPT-4) and whether the original enforces gate direction or uses `a` at all at runtime. |
 | UNK-17 | `_strtpnts` row→participant mapping (row 0 treated as the player slot; opponent slots may come from `.opp` instead) and how the original picks a slot per participant. |
+| UNK-18 | Which road-id space the over-range london `.aimap` `[Exceptions]` ids (562–815 vs 540 `city/london.bai` roads) address — `london_sup.bai`'s layout is unparsed, so this stays open (WLD-8). |
 
 ## Gaps in this ledger
 

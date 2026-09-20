@@ -192,6 +192,22 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Audit the AI-map override files (`city/*.aimap`,
+    /// `race/<city>/*.aimap`/`*.aimap_p`): parse every discovered file,
+    /// validate section values, cross-check exception road ids against
+    /// the city's BAI, and resolve opponent `.opp` references.
+    Aimap {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Restrict to one city stem (default: every discovered aimap
+        /// plus the expected `city/<name>.aimap` for each stock city).
+        #[arg(long)]
+        city: Option<String>,
+        /// Exit nonzero when an expected file is missing or fails to
+        /// parse, or when any parsed file reports issues.
+        #[arg(long)]
+        strict: bool,
+    },
     /// Versioned content inventory: expected/discovered/accepted/
     /// rejected/unverified counts per content family, fingerprinted by
     /// engine commit and resolved-path provenance.
@@ -263,6 +279,9 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         ),
         Command::Bai { dir, city, strict } => {
             bai(dir, cli.mods.as_deref(), city.as_deref(), *strict)
+        }
+        Command::Aimap { dir, city, strict } => {
+            aimap(dir, cli.mods.as_deref(), city.as_deref(), *strict)
         }
         Command::Inventory { dir, json, strict } => {
             inventory_cmd(dir, cli.mods.as_deref(), *json, *strict)
@@ -376,6 +395,13 @@ fn scan(dir: &Path, mods: Option<&Path>, strict: bool) -> Result<(), Box<dyn std
                 Err(e) => stats.failures.push((logical.clone(), e.to_string())),
             },
             "bai" => match Bai::parse(&bytes) {
+                Ok(_) => stats.parsed_ok += 1,
+                Err(e) => stats.failures.push((logical.clone(), e.to_string())),
+            },
+            "aimap" | "aimap_p" => match std::str::from_utf8(&bytes)
+                .map_err(|e| FormatError::parse(0, format!("not UTF-8 text: {e}")))
+                .and_then(mm2_formats::aimap::Aimap::parse)
+            {
                 Ok(_) => stats.parsed_ok += 1,
                 Err(e) => stats.failures.push((logical.clone(), e.to_string())),
             },
@@ -1028,6 +1054,188 @@ fn bai(
         .into());
     }
     Ok(())
+}
+
+/// AI-map override audit (F09-A.2): the expected denominator is
+/// `city/<name>.aimap` plus every discovered `race/<name>/*.aimap` /
+/// `*.aimap_p` for each stock city — authored event data whose parse
+/// failures are real failures. Any other discovered `*.aimap`/
+/// `*.aimap_p` is an audited extra whose failures are reported
+/// `unsupported`, never hidden. Parsed files get `Aimap::validate`
+/// issues plus two cross-checks: `[Exceptions]` road ids against the
+/// same-city `city/<city>.bai` road space, and `[Opponent]` waypoint
+/// references resolved through the VFS.
+fn aimap(
+    dir: &Path,
+    mods: Option<&Path>,
+    city: Option<&str>,
+    strict: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use mm2_formats::aimap::Aimap;
+
+    let vfs = build_vfs(dir, mods)?;
+    let stock: Vec<String> = match city {
+        Some(c) => vec![c.to_ascii_lowercase()],
+        None => mm2_content::EXPECTED_CITIES
+            .iter()
+            .map(|c| c.to_string())
+            .collect(),
+    };
+    let paths = vfs.list();
+    let is_aimap = |p: &str| p.ends_with(".aimap") || p.ends_with(".aimap_p");
+
+    let mut expected: Vec<String> = stock.iter().map(|c| format!("city/{c}.aimap")).collect();
+    expected.extend(
+        paths
+            .iter()
+            .filter(|p| stock.iter().any(|c| p.starts_with(&format!("race/{c}/"))) && is_aimap(p))
+            .cloned(),
+    );
+    expected.sort();
+
+    let mut extras: Vec<String> = match city {
+        // A single-city audit sees no other city's files at all.
+        Some(_) => Vec::new(),
+        None => paths
+            .iter()
+            .filter(|p| is_aimap(p) && !expected.contains(p))
+            .cloned()
+            .collect(),
+    };
+    extras.sort();
+
+    // BAI road-id spaces per city, loaded on first use.
+    let mut bai_roads: BTreeMap<String, Option<std::collections::BTreeSet<u16>>> = BTreeMap::new();
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut issues_total = 0usize;
+    let mut parsed = 0usize;
+    let mut unsupported = 0usize;
+
+    println!("== AI-map overrides (aimap) ==");
+    for logical in expected.iter().chain(extras.iter()) {
+        let is_expected = expected.contains(logical);
+        let tag = if is_expected { "expected" } else { "extra" };
+        let Some(res) = vfs.resolve(logical) else {
+            println!("  {logical:<34} {tag:<9} missing");
+            failures.push(format!("{logical}: expected file not found"));
+            continue;
+        };
+        let bytes = vfs.read(&res)?;
+        let text = match std::str::from_utf8(&bytes) {
+            Ok(t) => t,
+            Err(e) => {
+                let msg = format!("not UTF-8 text: {e}");
+                if is_expected {
+                    println!("  {logical:<34} {tag:<9} failed: {msg}");
+                    failures.push(format!("{logical}: {msg}"));
+                } else {
+                    println!("  {logical:<34} {tag:<9} unsupported: {msg}");
+                    unsupported += 1;
+                }
+                continue;
+            }
+        };
+        let aimap = match Aimap::parse(text) {
+            Ok(a) => a,
+            Err(e) => {
+                if is_expected {
+                    println!("  {logical:<34} {tag:<9} failed: {e}");
+                    failures.push(format!("{logical}: {e}"));
+                } else {
+                    println!("  {logical:<34} {tag:<9} unsupported: {e}");
+                    unsupported += 1;
+                }
+                continue;
+            }
+        };
+        parsed += 1;
+        let mut file_issues: Vec<String> = aimap.validate().iter().map(|i| i.to_string()).collect();
+        file_issues.extend(aimap.diagnostics.iter().map(|d| d.to_string()));
+
+        // Cross-checks against the file's own city: `city/<stem>.aimap`
+        // and `race/<city>/…` both key off the path's second component.
+        let file_city = logical
+            .strip_prefix("city/")
+            .map(|s| s.trim_end_matches(".aimap"))
+            .or_else(|| logical.split('/').nth(1));
+        if let Some(city) = file_city {
+            match bai_road_ids(&mut bai_roads, &vfs, city) {
+                Some(roads) => {
+                    let missing: Vec<u32> = aimap
+                        .exceptions
+                        .iter()
+                        .map(|e| e.road)
+                        .filter(|id| !roads.contains(&(*id as u16)))
+                        .collect();
+                    if !missing.is_empty() {
+                        file_issues.push(format!(
+                            "{} exception road id(s) outside city/{city}.bai: {missing:?}",
+                            missing.len()
+                        ));
+                    }
+                }
+                None => {
+                    if !aimap.exceptions.is_empty() {
+                        println!("    note: no city/{city}.bai — exception road ids not checked");
+                    }
+                }
+            }
+            for opp in &aimap.opponents {
+                let opp_path = format!("race/{city}/{}", opp.waypoints);
+                if vfs.resolve(&opp_path).is_none() {
+                    file_issues.push(format!(
+                        "opponent {}: waypoint file {} not found",
+                        opp.geo, opp_path
+                    ));
+                }
+            }
+        }
+        issues_total += file_issues.len();
+        println!(
+            "  {logical:<34} {tag:<9} ok — exc {}, police {}, opp {}, amb {} ({} issues)",
+            aimap.exceptions.len(),
+            aimap.police.len(),
+            aimap.opponents.len(),
+            aimap.ambient_types.len(),
+            file_issues.len(),
+        );
+        for issue in &file_issues {
+            println!("    issue: {issue}");
+        }
+    }
+    println!(
+        "  {parsed} parsed ({}/{} expected resolved), {unsupported} unsupported extras, {issues_total} issue(s)",
+        expected.iter().filter(|l| vfs.resolve(l).is_some()).count(),
+        expected.len(),
+    );
+    if strict && (issues_total > 0 || !failures.is_empty()) {
+        return Err(format!(
+            "strict aimap audit: {} failures, {issues_total} issues",
+            failures.len()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Load (and cache) the road-id set of `city/<city>.bai` for the
+/// aimap exception cross-check. `None` when the BAI is missing or
+/// unparseable — the audit notes the skipped check per file.
+fn bai_road_ids<'a>(
+    cache: &'a mut BTreeMap<String, Option<std::collections::BTreeSet<u16>>>,
+    vfs: &Vfs,
+    city: &str,
+) -> Option<&'a std::collections::BTreeSet<u16>> {
+    if !cache.contains_key(city) {
+        let ids = vfs
+            .resolve(&format!("city/{city}.bai"))
+            .and_then(|res| vfs.read(&res).ok())
+            .and_then(|bytes| Bai::parse(&bytes).ok())
+            .map(|bai| bai.roads.iter().map(|r| r.id).collect());
+        cache.insert(city.to_string(), ids);
+    }
+    cache.get(city).and_then(|o| o.as_ref())
 }
 
 /// Paint-variant validation: every shader offset referenced by any mesh
