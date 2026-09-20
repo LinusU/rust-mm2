@@ -112,9 +112,6 @@ pub fn collect_impacts(
         if a.is_world() && b.is_world() {
             continue;
         }
-        if !filter.dedup.allow(c1, c2, tick) {
-            continue;
-        }
         // The deepest contact carries the point, normal and the
         // pre-solver approach speed — mass-independent severity.
         let Some(pair) = collisions.get(c1, c2) else {
@@ -134,6 +131,12 @@ pub fn collect_impacts(
         };
         let severity = (-contact.normal_speed).max(0.0);
         if severity < policy.min_severity {
+            continue;
+        }
+        // The cooldown starts on a *reportable* contact: checking it
+        // earlier would let a filtered-out touch consume the window and
+        // silently discard a genuine re-impact inside it.
+        if !filter.dedup.allow(c1, c2, tick) {
             continue;
         }
         // The "surface" is the passive participant's material — for a

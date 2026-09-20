@@ -54,11 +54,14 @@ pub struct ImpactEvent {
 pub struct ImpactPolicy {
     /// Approach speed below which a contact is a touch, not an impact
     /// (m/s). Filters out resting-contact edges and parking taps.
+    /// Emission is edge-triggered (`CollisionStart`): a contact that
+    /// begins below this and escalates while staying in contact does
+    /// not emit — no new edge fires for it.
     pub min_severity: f32,
-    /// Ticks the same collider pair may not re-emit after reporting —
-    /// collapses the flap of a contact edge that starts/stops over
-    /// consecutive solver steps into one impact. 24 ticks = 200 ms at
-    /// the 120 Hz fixed step.
+    /// Ticks the same collider pair may not emit again after a
+    /// reportable contact — collapses the flap of a contact edge that
+    /// starts/stops over consecutive solver steps into one impact.
+    /// 24 ticks = 200 ms at the 120 Hz fixed step.
     pub pair_cooldown_ticks: u64,
     /// Most impacts one tick may emit; beyond it the lowest-severity
     /// candidates are dropped (and counted, so suppression is visible).

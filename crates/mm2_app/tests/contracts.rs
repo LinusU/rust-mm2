@@ -20,6 +20,12 @@ const FRAMES_PER_SECOND: usize = 60;
 /// A playing session plus a marked ground plane and the player's car,
 /// fully stamped with contract identities. Returns the minted object id.
 fn test_app(car_pos: Vec3) -> (App, Entity, ObjectId) {
+    test_app_with_policy(car_pos, ImpactPolicy::default())
+}
+
+/// [`test_app`] with an explicit [`ImpactPolicy`], so a test can widen
+/// the pair cooldown to span its choreography.
+fn test_app_with_policy(car_pos: Vec3, policy: ImpactPolicy) -> (App, Entity, ObjectId) {
     let mut session = Session::new();
     session.begin(SessionConfig::default()).unwrap();
     session.transition(SessionPhase::Ready).unwrap();
@@ -44,7 +50,7 @@ fn test_app(car_pos: Vec3) -> (App, Entity, ObjectId) {
         .add_plugins(TransformPlugin)
         .add_plugins(VehiclePlugin)
         .add_message::<ImpactEvent>()
-        .init_resource::<ImpactFilter>()
+        .insert_resource(ImpactFilter::new(policy))
         .add_systems(FixedUpdate, advance_session_tick)
         .add_systems(
             FixedLast,
@@ -194,4 +200,75 @@ fn paused_session_publishes_nothing_and_drains_contact_edges() {
         emitted,
         "paused session emits no impacts"
     );
+}
+
+#[test]
+fn a_quiet_touch_does_not_suppress_a_real_reimpact() {
+    // Regression: the pair cooldown must start when a contact qualifies
+    // for reporting, not when the raw `CollisionStart` edge arrives.
+    // Otherwise a sub-threshold touch consumes the window and a genuine
+    // re-impact inside it is discarded silently — emitted and dropped
+    // both stay 0 for a real crash.
+    let policy = ImpactPolicy {
+        // 2 s at the 120 Hz step — comfortably spans the choreography,
+        // so the second edge lands deep inside the cooldown.
+        pair_cooldown_ticks: 240,
+        ..ImpactPolicy::default()
+    };
+    let (mut app, _car, _) = test_app_with_policy(Vec3::new(0.0, 1.2, 0.0), policy);
+
+    // A plain dynamic box spawned already resting on the marked ground:
+    // its first `CollisionStart` edge is a sub-threshold touch.
+    let box_object = app.world_mut().resource_mut::<Session>().mint_object_id();
+    let cube = app
+        .world_mut()
+        .spawn((
+            ObjectIdentity(box_object),
+            DamageSignals::default(),
+            RigidBody::Dynamic,
+            Collider::cuboid(1.0, 1.0, 1.0),
+            CollisionEventsEnabled,
+            Position(Vec3::new(3.0, 0.5, 0.0)),
+            Transform::from_xyz(3.0, 0.5, 0.0),
+        ))
+        .id();
+
+    let mut box_events = Vec::new();
+    for _ in 0..10 {
+        app.update();
+        box_events.extend(
+            drain_impacts(&mut app)
+                .into_iter()
+                .filter(|e| e.participants.0 == box_object || e.participants.1 == box_object),
+        );
+    }
+    assert!(
+        box_events.is_empty(),
+        "a resting touch stays below min severity and emits nothing"
+    );
+
+    // Separate, then re-impact well inside the cooldown: 0.6 m of fall
+    // is ~3.4 m/s of approach speed, far above the 0.5 threshold.
+    {
+        let world = app.world_mut();
+        world.get_mut::<Position>(cube).unwrap().0 = Vec3::new(3.0, 1.1, 0.0);
+        world.get_mut::<Transform>(cube).unwrap().translation = Vec3::new(3.0, 1.1, 0.0);
+        *world.get_mut::<LinearVelocity>(cube).unwrap() = LinearVelocity::ZERO;
+    }
+    for _ in 0..FRAMES_PER_SECOND {
+        app.update();
+        box_events.extend(
+            drain_impacts(&mut app)
+                .into_iter()
+                .filter(|e| e.participants.0 == box_object || e.participants.1 == box_object),
+        );
+    }
+
+    assert!(
+        box_events.iter().any(|e| e.severity >= policy.min_severity),
+        "the re-impact inside the cooldown window must still be reported"
+    );
+    let worst = box_events.iter().map(|e| e.severity).fold(0.0f32, f32::max);
+    let damage = app.world().get::<DamageSignals>(cube).unwrap();
+    assert!(damage.impact_count >= 1 && damage.impact_total >= worst);
 }
