@@ -2,10 +2,11 @@
 //!
 //! [`SurfaceMaterial`] is the *physical* identity of what a wheel or
 //! chassis is touching — deliberately independent of the visual texture
-//! so a reskin never changes traction. The authored material taxonomy is
-//! not verified yet (F06 maps PSDL attributes to it), so the type
-//! preserves authored codes without claiming what they mean, exactly
-//! like the weather/time-of-day selectors in `config.rs` (UNK-1).
+//! so a reskin never changes traction. F06-A binds `Authored(i)` to the
+//! session's loaded `materials.mtl` index space; what the material
+//! fields *mean* to the original force path stays unverified (UNK-23),
+//! so the code is carried, not interpreted, exactly like the
+//! weather/time-of-day selectors in `config.rs` (UNK-1).
 
 use bevy::prelude::*;
 
@@ -14,13 +15,15 @@ use bevy::prelude::*;
 /// [`Unspecified`](Self::Unspecified).
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SurfaceMaterial {
-    /// No authored material was attached — or the source content does not
-    /// author one. The honest value until F06 classifies materials.
+    /// No authored material was attached, the source content does not
+    /// author one, or the surface tables could not classify it (`none`
+    /// rows, blank slots, unmapped names all land here).
     #[default]
     Unspecified,
-    /// An authored material code preserved from source data whose
-    /// semantics are unverified. Carried as data; nothing may interpret
-    /// the number as a named surface yet.
+    /// The index of a material in the session's loaded
+    /// `city/materials.mtl` table (`MaterialSet::defs`). Carried as
+    /// data; nothing may interpret the index as a named surface yet
+    /// (UNK-23).
     Authored(u16),
 }
 

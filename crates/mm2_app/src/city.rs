@@ -30,6 +30,7 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 use mm2_assets::{Resolved, Vfs};
+use mm2_content::surface::{SurfaceSlot, SurfaceTables};
 use mm2_formats::{
     inst::{self, InstPlacement},
     pathset::{self, PathKind},
@@ -39,7 +40,8 @@ use mm2_formats::{
     tex::TexFile,
 };
 use mm2_game::{
-    Banger, BangerDefinition, CityEntity, PropWalk, Session, SessionEntity, walk_prop_rules,
+    Banger, BangerDefinition, CityEntity, PropWalk, Session, SessionEntity, SurfaceMaterial,
+    walk_prop_rules,
 };
 use tracing::{debug, info, warn};
 
@@ -360,8 +362,11 @@ impl MeshBuilder {
     }
 }
 
-/// Collision triangles accumulated per room (positions + indices; winding
-/// is irrelevant to the physics backend).
+/// Collision triangles accumulated for one (room, surface) pair
+/// (positions + indices; winding is irrelevant to the physics backend).
+/// Since F06-A a room's collider is split per authored surface class —
+/// road, sidewalk and water tris become separate entities carrying
+/// their own [`SurfaceMaterial`].
 #[derive(Default)]
 struct ColliderBuilder {
     positions: Vec<Vec3>,
@@ -502,7 +507,8 @@ pub struct CityReport {
     /// Attributes whose payloads were approximated rather than fully
     /// interpreted (e.g. elevated/wedged dividers).
     pub approximated: usize,
-    /// Rooms that produced a collision mesh.
+    /// Collision meshes produced — one per (room, surface class)
+    /// since F06-A, so ≥ the number of rooms that emit collision.
     pub collider_rooms: usize,
     /// Render mesh groups produced (room × material).
     pub mesh_groups: usize,
@@ -555,6 +561,35 @@ pub struct CityReport {
     /// `decals.pathset` consumption: ribbons stamped, per-class skips
     /// and malformed-record counts (F03-B.4).
     pub decals: DecalStampReport,
+    /// Surface-material classification of the PSDL texture table
+    /// (F06-A): which collider groups carry an authored material and
+    /// which names the tables could not classify.
+    pub surfaces: SurfaceReport,
+}
+
+/// Surface-table outcome for one city import (F06-A).
+#[derive(Debug, Default)]
+pub struct SurfaceReport {
+    /// The global `materials.{csv,mtl}` pair loaded and classified the
+    /// texture table. `false` = absent pair, or a present pair that
+    /// failed — `failure` carries the reason.
+    pub loaded: bool,
+    /// Why a present pair did not load (parse/UTF-8/partial pair).
+    /// `None` when the pair is simply absent.
+    pub failure: Option<String>,
+    /// Texture names mapped to a named material.
+    pub named: usize,
+    /// Texture names mapped to the `none` keyword.
+    pub none: usize,
+    /// Blank texture-table slots.
+    pub blank: usize,
+    /// Texture names the tables could not classify — they take the
+    /// conservative default surface, and the names stay recorded
+    /// (F06-AC04).
+    pub unmapped: BTreeSet<String>,
+    /// `validate()` issues plus dead csv → mtl references on the
+    /// loaded pair.
+    pub issues: usize,
 }
 
 impl std::fmt::Display for CityReport {
@@ -620,7 +655,23 @@ impl std::fmt::Display for CityReport {
             d.capped,
             d.missing_textures,
             d.issues,
-        )
+        )?;
+        let s = &self.surfaces;
+        if s.loaded {
+            write!(
+                f,
+                "; surfaces: {} named, {} none, {} blank, {} unmapped ({} issues)",
+                s.named,
+                s.none,
+                s.blank,
+                s.unmapped.len(),
+                s.issues,
+            )
+        } else if s.failure.is_some() {
+            write!(f, "; surfaces: table failed")
+        } else {
+            write!(f, "; surfaces: no tables")
+        }
     }
 }
 
@@ -642,10 +693,15 @@ pub struct MeshGroup {
     pub indices: Vec<u32>,
 }
 
-/// Static collision triangles for one room.
+/// Static collision triangles for one (room, surface) pair — since
+/// F06-A a room's collider splits per authored surface class so each
+/// entity can carry its own [`SurfaceMaterial`].
 pub struct RoomCollider {
     /// Room index.
     pub room: usize,
+    /// The physical surface identity every triangle shares —
+    /// `Authored(i)` indexes the session's [`SurfaceTables::set`].
+    pub surface: SurfaceMaterial,
     /// Vertices (Bevy space).
     pub positions: Vec<Vec3>,
     /// Triangles.
@@ -667,13 +723,37 @@ pub struct CityImport {
 }
 
 /// Emit all room attributes into mesh groups and collider meshes.
-pub fn emit_psdl(psdl: &Psdl) -> CityImport {
+/// `surfaces` is the session's loaded `materials.{csv,mtl}` pair: each
+/// PSDL texture's collider triangles are grouped under the authored
+/// material index its name resolves to (F06-A). `None` — or names the
+/// tables cannot classify — land in the default `Unspecified` group,
+/// which preserves the pre-F06 single-collider-per-room behaviour.
+pub fn emit_psdl(psdl: &Psdl, surfaces: Option<&SurfaceTables>) -> CityImport {
     let verts: Vec<Vec3> = psdl.vertices.iter().map(|&p| v3(p)).collect();
     let heights = &psdl.heights;
+    let resolved = surfaces.map(|t| t.resolve_psdl(&psdl.textures));
+    // `psdl.textures[i]` → authored material index; empty without tables.
+    let surface_slots: Vec<Option<u16>> = resolved
+        .as_ref()
+        .map(|r| r.slots.iter().map(|s| s.material_index()).collect())
+        .unwrap_or_default();
     let mut report = CityReport {
         rooms: psdl.rooms.len(),
         ..Default::default()
     };
+    if let (Some(tables), Some(r)) = (surfaces, resolved.as_ref()) {
+        let count = |want: SurfaceSlot| r.slots.iter().filter(|&&s| s == want).count();
+        report.surfaces.loaded = true;
+        report.surfaces.named = r
+            .slots
+            .iter()
+            .filter(|s| s.material_index().is_some())
+            .count();
+        report.surfaces.none = count(SurfaceSlot::Default);
+        report.surfaces.blank = count(SurfaceSlot::Blank);
+        report.surfaces.unmapped = r.unmapped.clone();
+        report.surfaces.issues = tables.issues();
+    }
 
     let mut meshes = Vec::new();
     let mut colliders = Vec::new();
@@ -714,7 +794,7 @@ pub fn emit_psdl(psdl: &Psdl) -> CityImport {
             )
         });
         let mut groups: BTreeMap<i64, MeshBuilder> = BTreeMap::new();
-        let mut collider = ColliderBuilder::default();
+        let mut collider: BTreeMap<Option<u16>, ColliderBuilder> = BTreeMap::new();
         let mut road_acc = Vec3::ZERO;
         let mut road_n = 0usize;
         let mut road_max_y = f32::MIN;
@@ -745,6 +825,7 @@ pub fn emit_psdl(psdl: &Psdl) -> CityImport {
                 room_is_street,
                 groups: &mut groups,
                 collider: &mut collider,
+                surfaces: &surface_slots,
                 tex_key,
                 road_tunnel: &mut road_tunnel,
                 road_midpoints: &mut road_midpoints,
@@ -785,11 +866,15 @@ pub fn emit_psdl(psdl: &Psdl) -> CityImport {
                 indices: builder.indices,
             });
         }
-        if !collider.tris.is_empty() {
+        for (surface, group) in collider {
+            if group.tris.is_empty() {
+                continue;
+            }
             colliders.push(RoomCollider {
                 room: room_idx,
-                positions: collider.positions,
-                tris: collider.tris,
+                surface: surface.map_or(SurfaceMaterial::Unspecified, SurfaceMaterial::Authored),
+                positions: group.positions,
+                tris: group.tris,
             });
         }
     }
@@ -888,7 +973,13 @@ struct EmitCtx<'a> {
     /// face outward.
     room_is_street: bool,
     groups: &'a mut BTreeMap<i64, MeshBuilder>,
-    collider: &'a mut ColliderBuilder,
+    /// Per-surface collider groups, keyed by the authored material
+    /// index (`None` = the default `Unspecified` surface).
+    collider: &'a mut BTreeMap<Option<u16>, ColliderBuilder>,
+    /// `psdl.textures[i]` → authored material index; empty when no
+    /// surface tables loaded, so every triangle lands in the `None`
+    /// (default) group.
+    surfaces: &'a [Option<u16>],
     tex_key: i64,
     /// Pending road-tunnel spec shared across the room's attributes:
     /// subtype-3 tunnel attributes set it, road attributes read it.
@@ -916,6 +1007,28 @@ impl EmitCtx<'_> {
     /// The mesh group for an absolute texture index (−1 = fallback).
     fn builder_at(&mut self, abs: i64) -> &mut MeshBuilder {
         self.groups.entry(abs.max(-1)).or_default()
+    }
+
+    /// The collider group for the surface an absolute texture index
+    /// maps to — negative, out-of-range, `none`, blank and unmapped
+    /// slots all share the default (`Unspecified`) group.
+    fn collider_at(&mut self, abs_tex: i64) -> &mut ColliderBuilder {
+        let key = usize::try_from(abs_tex)
+            .ok()
+            .and_then(|i| self.surfaces.get(i).copied().flatten());
+        self.collider.entry(key).or_default()
+    }
+
+    /// [`collider_at`](Self::collider_at) for a slot relative to the
+    /// current texture ref — the same index arithmetic
+    /// [`builder`](Self::builder) applies for mesh groups.
+    fn collider_rel(&mut self, rel: i64) -> &mut ColliderBuilder {
+        let abs = if self.tex_key < 0 {
+            -1
+        } else {
+            self.tex_key + rel
+        };
+        self.collider_at(abs)
     }
 
     /// Record spawn candidates: the midpoint of each segment of a
@@ -1067,7 +1180,7 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
                 Some(facing) => ctx.builder(0).fan_facing(&pts, facing),
                 None => ctx.builder(0).fan(&pts),
             }
-            ctx.collider.fan(&pts);
+            ctx.collider_rel(0).fan(&pts);
             Outcome::Emitted
         }
         AttributeType::RoofFan => {
@@ -1095,7 +1208,7 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
                 .map(|p| Vec3::new(p.x, h, p.z))
                 .collect();
             ctx.builder(0).fan(&pts);
-            ctx.collider.fan(&pts);
+            ctx.collider_rel(0).fan(&pts);
             Outcome::Emitted
         }
         AttributeType::RoadWithSidewalks => {
@@ -1114,7 +1227,7 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
                 sw_r.push(vertex(s[3], ctx.verts)?);
             }
             emit_road_surface(ctx, &rl, &rr);
-            ctx.collider.strip(&rl, &rr);
+            ctx.collider_rel(0).strip(&rl, &rr);
             ctx.note_road(&rl);
             ctx.note_road(&rr);
             ctx.note_midline(&rl, &rr);
@@ -1136,7 +1249,7 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
                 // emit both windings so it never back-face-culls away.
                 ctx.builder(1).fan(&[b, a, apex]);
                 ctx.builder(1).fan(&[a, b, apex]);
-                ctx.collider.tri(a, b, apex);
+                ctx.collider_rel(1).tri(a, b, apex);
                 return Ok(Outcome::Emitted);
             }
             // Pairs (a, b): `a` is authored at ground level and lifted
@@ -1159,8 +1272,8 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
             let us = chain_u(&lifted, &top, SIDEWALK_TILE_LENGTH);
             ctx.builder(1).strip_uv(&lifted, &top, &us, 0.0, 1.0);
             emit_curb(ctx, &ground, &lifted, &top);
-            ctx.collider.strip(&lifted, &top);
-            ctx.collider.strip(&ground, &lifted);
+            ctx.collider_rel(1).strip(&lifted, &top);
+            ctx.collider_rel(1).strip(&ground, &lifted);
             ctx.note_road(&lifted);
             ctx.note_road(&top);
             Outcome::Emitted
@@ -1177,7 +1290,7 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
             // Walkway textures span the full width (e.g. subway rails).
             let us = chain_u(&l, &r, ROAD_TILE_LENGTH);
             ctx.builder(0).strip_uv(&l, &r, &us, 0.0, 1.0);
-            ctx.collider.strip(&l, &r);
+            ctx.collider_rel(0).strip(&l, &r);
             ctx.note_road(&l);
             ctx.note_road(&r);
             emit_road_tunnel(ctx, &l, &r);
@@ -1228,8 +1341,8 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
             let us = chain_u(&rl_out, &rr_out, ROAD_TILE_LENGTH);
             ctx.builder(0).strip_uv(&rl_out, &rl_in, &us, 1.0, 0.0);
             ctx.builder(0).strip_uv(&rr_in, &rr_out, &us, 0.0, 1.0);
-            ctx.collider.strip(&rl_out, &rl_in);
-            ctx.collider.strip(&rr_in, &rr_out);
+            ctx.collider_rel(0).strip(&rl_out, &rl_in);
+            ctx.collider_rel(0).strip(&rr_in, &rr_out);
             ctx.note_road(&rl_out);
             ctx.note_road(&rl_in);
             ctx.note_road(&rr_in);
@@ -1255,7 +1368,7 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
             let reps = ((pts[2] - pts[0]).length() / depth).round().max(1.0);
             let (a, b) = ([pts[0], pts[1]], [pts[2], pts[3]]);
             ctx.builder(2).strip_uv(&a, &b, &[0.0, 1.0], 0.0, reps);
-            ctx.collider.strip(&a, &b);
+            ctx.collider_rel(2).strip(&a, &b);
             Outcome::Emitted
         }
         AttributeType::Sliver => {
@@ -1281,7 +1394,10 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
             let top = height(attr.data[1], ctx.heights)?;
             let l = vertex(attr.data[2], ctx.verts)?;
             let r = vertex(attr.data[3], ctx.verts)?;
-            ctx.collider
+            // Collision-only bound: the attribute itself authors no
+            // texture, so its surface follows the enclosing texture
+            // ref like every other attribute's (unverified — UNK-23).
+            ctx.collider_rel(0)
                 .quad(l, r, Vec3::new(r.x, top, r.z), Vec3::new(l.x, top, l.z));
             Outcome::Emitted
         }
@@ -1350,7 +1466,7 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
                             tri.map(MeshBuilder::planar_uv),
                             Vec3::NEG_Y,
                         );
-                        ctx.collider.tri(centre, a, b);
+                        ctx.collider_rel(2).tri(centre, a, b);
                     }
                 }
                 Outcome::Emitted
@@ -1415,8 +1531,9 @@ fn emit_sidewalk(ctx: &mut EmitCtx<'_>, outer: &[Vec3], road: &[Vec3]) {
     let us = chain_u(&inner, outer, SIDEWALK_TILE_LENGTH);
     ctx.builder(1).strip_uv(&inner, outer, &us, 0.0, 1.0); // top
     emit_curb(ctx, road, &inner, outer);
-    ctx.collider.strip(outer, &inner);
-    ctx.collider.strip(road, &inner);
+    // Top and curb face both render from the sidewalk texture (n+1).
+    ctx.collider_rel(1).strip(outer, &inner);
+    ctx.collider_rel(1).strip(road, &inner);
     ctx.note_road(&inner);
 }
 
@@ -1475,7 +1592,9 @@ fn emit_wall(
         .quad_facing(a, b, bt, at, uvs, facing);
     ctx.builder_at(tex_out)
         .quad_facing(a, b, bt, at, uvs, -facing);
-    ctx.collider.quad(a, b, bt, at);
+    // One collider for two faces: the interior face's texture is what
+    // traffic meets (the outer face's material is unverified — UNK-23).
+    ctx.collider_at(tex_in).quad(a, b, bt, at);
 }
 
 /// Walls (and, for the wall style, a flat ceiling) along the outermost
@@ -1538,7 +1657,8 @@ fn emit_road_tunnel(ctx: &mut EmitCtx<'_>, left: &[Vec3], right: &[Vec3]) {
                     quad.map(MeshBuilder::planar_uv),
                     Vec3::NEG_Y,
                 );
-                ctx.collider.quad(quad[0], quad[1], quad[2], quad[3]);
+                ctx.collider_at(t.tex_key + 2)
+                    .quad(quad[0], quad[1], quad[2], quad[3]);
             }
         }
     }
@@ -1570,10 +1690,12 @@ fn emit_divider(
     match div_type {
         0 => {
             // Invisible divider: collision bound only (approximated).
+            // Its surface follows the packed divider texture (usually
+            // 0 → the default group); authored semantics unverified.
             for i in 0..n - 1 {
                 let mid0 = (rl_in[i] + rr_in[i]) * 0.5;
                 let mid1 = (rl_in[i + 1] + rr_in[i + 1]) * 0.5;
-                ctx.collider.quad(
+                ctx.collider_at(dt(0)).quad(
                     mid0,
                     mid1,
                     mid1 + Vec3::Y * INVISIBLE_DIVIDER_HEIGHT,
@@ -1600,7 +1722,7 @@ fn emit_divider(
                     Vec3::Y,
                 );
             }
-            ctx.collider.strip(rl_in, rr_in);
+            ctx.collider_at(dt(1)).strip(rl_in, rr_in);
         }
         3 => {
             // Wedge (jersey barrier): two faces sloping from the inner
@@ -1631,7 +1753,7 @@ fn emit_divider(
                         out + Vec3::Y,
                     );
                 }
-                ctx.collider.strip(base, &ridge);
+                ctx.collider_at(dt(1)).strip(base, &ridge);
             }
             // Close both ends: the road surface does not continue under
             // the divider, so an open end shows the void beneath.
@@ -1644,7 +1766,7 @@ fn emit_divider(
                     [[0.0, 1.0], [1.0, 1.0], [0.5, 0.0]],
                     along,
                 );
-                ctx.collider.tri(rl_in[e], rr_in[e], ridge[e]);
+                ctx.collider_at(dt(1)).tri(rl_in[e], rr_in[e], ridge[e]);
             }
             ctx.report.approximated += 1;
         }
@@ -1699,11 +1821,12 @@ fn emit_divider(
                     [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
                     along,
                 );
-                ctx.collider.quad(rl_in[e], rr_in[e], top_r[e], top_l[e]);
+                ctx.collider_at(side_tex)
+                    .quad(rl_in[e], rr_in[e], top_r[e], top_l[e]);
             }
-            ctx.collider.strip(&top_l, &top_r);
-            ctx.collider.strip(rl_in, &top_l);
-            ctx.collider.strip(&top_r, rr_in);
+            ctx.collider_at(dt(2)).strip(&top_l, &top_r);
+            ctx.collider_at(side_tex).strip(rl_in, &top_l);
+            ctx.collider_at(side_tex).strip(&top_r, rr_in);
             ctx.report.approximated += 1;
         }
     }
@@ -3173,13 +3296,18 @@ pub fn spawn_event_pathsets(
 // Orchestration
 // ---------------------------------------------------------------------------
 
-/// Result of loading a city: where to put the player plus the import
-/// report for diagnostics.
+/// Result of loading a city: where to put the player, the surface
+/// identity space and the import report for diagnostics.
 pub struct LoadedCity {
     /// Validated spawn point on road geometry.
     pub spawn: Vec3,
     /// Heading along the road at the spawn point.
     pub spawn_yaw: f32,
+    /// The loaded surface tables, when the install carries them — the
+    /// index space `SurfaceMaterial::Authored` on the city colliders
+    /// refers to. The session inserts them as a resource so consumers
+    /// can resolve codes back to material names and fields.
+    pub surfaces: Option<SurfaceTables>,
     /// Import statistics.
     pub report: CityReport,
 }
@@ -3234,13 +3362,27 @@ pub fn load_city(
         "loading city"
     );
 
-    let import = emit_psdl(&psdl);
+    // Surface identity (F06-A): the global `materials.{csv,mtl}` pair
+    // classifies every collider triangle's texture. An absent pair
+    // leaves every collider `Unspecified`; a present-but-broken pair
+    // warns and does the same — never a silently partial
+    // classification.
+    let (surfaces, surface_failure) = match mm2_content::load_surface_tables(vfs) {
+        Ok(t) => (t, None),
+        Err(e) => {
+            warn!(error = %e, "surface tables failed; colliders default to Unspecified");
+            (None, Some(e.to_string()))
+        }
+    };
+
+    let import = emit_psdl(&psdl, surfaces.as_ref());
     if import.meshes.is_empty() && import.colliders.is_empty() {
         return Err(LoadCityError::Empty(resolved.logical.clone()));
     }
 
     let mut mats = MaterialCache::new(vfs, images, materials);
     let mut report = import.report;
+    report.surfaces.failure = surface_failure;
 
     // Render meshes: one entity per (room, texture) — spatially bounded,
     // retaining the room id in the entity name.
@@ -3267,14 +3409,21 @@ pub fn load_city(
             )),
         ));
     }
-    // Collision: one static trimesh per room.
+    // Collision: one static trimesh per (room, surface class) — the
+    // `SurfaceMaterial` component is what wheel raycasts and the impact
+    // pipeline classify contacts through (F06-A).
     for col in import.colliders {
+        let tag = match col.surface {
+            SurfaceMaterial::Authored(i) => format!("-m{i}"),
+            SurfaceMaterial::Unspecified => String::new(),
+        };
         commands.spawn((
             CityEntity,
             owner,
             RigidBody::Static,
+            col.surface,
             Collider::trimesh(col.positions, col.tris),
-            Name::new(format!("city-room{}-collider", col.room + 1)),
+            Name::new(format!("city-room{}-collider{tag}", col.room + 1)),
         ));
     }
 
@@ -3488,6 +3637,7 @@ pub fn load_city(
     Ok(LoadedCity {
         spawn: import.spawn,
         spawn_yaw: import.spawn_yaw,
+        surfaces,
         report,
     })
 }

@@ -18,6 +18,7 @@ pub mod expect;
 pub mod model;
 pub mod nav;
 pub mod race_def;
+pub mod surface;
 
 pub use assemble::{LoadError, TrailerDef, VehicleDef, load_by_id, load_vehicle};
 pub use catalog::{
@@ -43,4 +44,7 @@ pub use nav::{NavLoadError, load_nav_graph, load_nav_overrides};
 pub use race_def::{
     PLAYER_SLOT, RaceBuildError, RaceDefBuild, RaceDefEntry, RaceDefReport, RaceDefSummary,
     race_definition,
+};
+pub use surface::{
+    PsdlSurfaces, SurfaceLoadError, SurfaceSlot, SurfaceTables, load_surface_tables,
 };

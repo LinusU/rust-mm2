@@ -160,6 +160,7 @@ pub fn drive_session(
             // timer survives).
             commands.remove_resource::<RaceState>();
             commands.remove_resource::<crate::nav_overlay::CityNav>();
+            commands.remove_resource::<mm2_content::SurfaceTables>();
             session
                 .transition(SessionPhase::Menu)
                 .expect("Unloading → Menu is a legal transition");
@@ -256,6 +257,12 @@ pub fn load_session_world(
                 Ok(loaded) => {
                     spawn.position = loaded.spawn;
                     spawn.yaw = loaded.spawn_yaw;
+                    // The surface tables' index space is what
+                    // `SurfaceMaterial::Authored` on the city colliders
+                    // refers to — session-scoped like `CityNav`.
+                    if let Some(tables) = loaded.surfaces {
+                        commands.insert_resource(tables);
+                    }
                     info!(report = %loaded.report, "city ready");
                 }
                 Err(e) => {

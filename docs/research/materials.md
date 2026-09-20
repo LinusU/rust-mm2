@@ -149,3 +149,33 @@ performs it is not. Candidates seen in the data:
   grass → grass, water planes → water/deepwater).
 - PKG bound materials via semantic-only stems (`vp_*` rows).
 - INST/banger colliders — no material link found; likely `_default`.
+
+## Runtime wiring (implemented, F06-A — provisional policy)
+
+`mm2_content::surface::load_surface_tables` resolves the global pair
+through the VFS (absent pair → `None`; a present-but-broken or
+half-present pair is an error, never a partial classification) into a
+`SurfaceTables` session resource — the index space
+`SurfaceMaterial::Authored(i)` refers to (`MaterialSet::defs` order).
+
+`mm2_app::city::emit_psdl` classifies each PSDL texture-table name
+through the tables (`slot_for`, with the frame-stem fallback) and
+splits each room's collider per authored material index instead of
+emitting one trimesh per room: every collider entity carries a
+`SurfaceMaterial` component, so wheel raycasts and the impact pipeline
+read the surface identity off `WheelState.contact_entity` /
+contact-entity queries unchanged. Visual mesh grouping stays keyed by
+texture — a cosmetic texture swap does not move collision tris between
+material groups.
+
+Fallback policy (implementation choice, *not* verified original
+behavior — the original's `_default` semantics are unknown): `none`
+rows, blank slots, unmapped names and dead csv→mtl refs all carry
+`SurfaceMaterial::Unspecified`; unmapped names land in
+`CityReport.surfaces.unmapped` and table issues in `.issues`. A
+missing pair leaves every collider `Unspecified` (the pre-F06 single
+collider per room); a broken pair warns and does the same with
+`.failure` set.
+
+`SurfaceTables::issues()` = `validate()` on both halves +
+`undefined_refs` — the same counts the audit reports.

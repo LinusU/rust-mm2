@@ -2,6 +2,7 @@
 //! materials, props — with no MM2 installation required.
 
 use bevy::asset::Assets;
+use bevy::ecs::query::With;
 use bevy::ecs::system::Commands;
 use bevy::ecs::world::{CommandQueue, World};
 use bevy::image::Image;
@@ -9,8 +10,10 @@ use bevy::mesh::Mesh;
 use bevy::pbr::StandardMaterial;
 use mm2_app::city::{emit_psdl, load_city, load_image, load_image_sequence};
 use mm2_assets::Vfs;
+use mm2_content::{SurfaceTables, surface};
+use mm2_formats::materials::{MaterialMap, MaterialSet};
 use mm2_formats::psdl::Psdl;
-use mm2_game::{CityEntity, SessionEntity};
+use mm2_game::{CityEntity, SessionEntity, SurfaceMaterial};
 
 // ---------------------------------------------------------------------------
 // Fixture builders
@@ -115,6 +118,133 @@ fn synthetic_psdl() -> Vec<u8> {
     push_f32s(&mut d, &[30.]); // radius
     d.extend_from_slice(&0u32.to_le_bytes()); // nPaths
     d
+}
+
+/// A three-texture room for the F06-A surface tests: a road under
+/// `test_road` (its sidewalks take the next slot, `test_grass`), and a
+/// ground fan under `mystery` — a name the surface tables cannot
+/// classify.
+fn two_surface_psdl() -> Vec<u8> {
+    let mut d = Vec::new();
+    d.extend_from_slice(b"PSD0");
+    d.extend_from_slice(&2u32.to_le_bytes()); // target_size
+    let verts: &[[f32; 3]] = &[
+        [-5., 0., 0.],
+        [-3., 0., 0.],
+        [3., 0., 0.],
+        [5., 0., 0.], // road section 0: sw_l, rl, rr, sw_r
+        [-5., 0., 20.],
+        [-3., 0., 20.],
+        [3., 0., 20.],
+        [5., 0., 20.], // road section 1
+        [10., 0., 0.],
+        [10., 0., 10.],
+        [20., 0., 10.],
+        [20., 0., 0.], // fan (clockwise in x,z)
+    ];
+    d.extend_from_slice(&(verts.len() as u32).to_le_bytes());
+    for v in verts {
+        push_f32s(&mut d, v);
+    }
+    let heights = [0.15f32, 2.0, 6.0];
+    d.extend_from_slice(&(heights.len() as u32).to_le_bytes());
+    push_f32s(&mut d, &heights);
+
+    // Texture table stores count + 1 → three names.
+    d.extend_from_slice(&4u32.to_le_bytes());
+    push_lp(&mut d, "test_road");
+    push_lp(&mut d, "test_grass");
+    push_lp(&mut d, "mystery");
+
+    d.extend_from_slice(&2u32.to_le_bytes()); // nRooms
+    d.extend_from_slice(&0u32.to_le_bytes()); // junctions
+
+    let mut attr_words: Vec<u16> = Vec::new();
+    let attr = |words: &mut Vec<u16>, word: u16, data: &[u16]| {
+        words.push(word);
+        words.extend_from_slice(data);
+    };
+    attr(&mut attr_words, 0x0a << 3, &[1]); // texture ref → textures[0]
+    attr(&mut attr_words, 0x00, &[2, 0, 1, 2, 3, 4, 5, 6, 7]); // counted road
+    attr(&mut attr_words, 0x0a << 3, &[3]); // texture ref → textures[2]
+    attr(&mut attr_words, 0x06 << 3, &[2, 8, 9, 10, 11]); // counted fan
+
+    let mut room = Vec::new();
+    room.extend_from_slice(&4u32.to_le_bytes()); // nPerimeter
+    room.extend_from_slice(&(attr_words.len() as u32).to_le_bytes());
+    for v in [0u16, 1, 2, 3] {
+        room.extend_from_slice(&v.to_le_bytes());
+        room.extend_from_slice(&0u16.to_le_bytes()); // neighbour room
+    }
+    for w in &attr_words {
+        room.extend_from_slice(&w.to_le_bytes());
+    }
+    d.extend_from_slice(&room);
+
+    d.extend_from_slice(&[0u8; 2]); // room flags (nRooms entries)
+    d.extend_from_slice(&[0u8; 2]); // prop rules
+
+    push_f32s(&mut d, &[-5., 0., 0.]); // bounds min
+    push_f32s(&mut d, &[20., 2., 20.]); // bounds max
+    push_f32s(&mut d, &[7., 1., 10.]); // bounds centre
+    push_f32s(&mut d, &[30.]); // radius
+    d.extend_from_slice(&0u32.to_le_bytes()); // nPaths
+    d
+}
+
+/// The `city/materials.{mtl,csv}` pair the surface tests share:
+/// `test_road` → `cobblestone` (index 1), `test_grass` → `grass`
+/// (index 2); `mystery` has no row.
+const SURF_MTL: &str = "\
+mtl _default {
+    elasticity: 0.0
+    friction: 1.0
+    effect: none
+    sound: 0
+    drag: 0.0
+    width: 0.0
+    height: 0.0
+    depth: 0.0
+    ptxindex: 0 0
+    ptxthreshold: 0.0 0.0
+}
+mtl cobblestone {
+    elasticity: 0.1
+    friction: 0.9
+    effect: none
+    sound: 0
+    drag: 0.0
+    width: 0.0
+    height: 0.0
+    depth: 0.0
+    ptxindex: 0 0
+    ptxthreshold: 0.0 0.0
+}
+mtl grass {
+    elasticity: 0.4
+    friction: 0.7
+    effect: none
+    sound: 2
+    drag: 0.0
+    width: 0.0
+    height: 0.0
+    depth: 0.0
+    ptxindex: 0 0
+    ptxthreshold: 0.0 0.0
+}
+";
+
+const SURF_CSV: &str = "\
+texture,physics
+test_road,cobblestone
+test_grass,grass
+";
+
+fn surface_tables() -> SurfaceTables {
+    SurfaceTables {
+        set: MaterialSet::parse(SURF_MTL).expect("mtl parses"),
+        map: MaterialMap::parse(SURF_CSV).expect("csv parses"),
+    }
 }
 
 /// INST file placing one `testprop` PKG at (40, 0, 5) via the simple form.
@@ -294,7 +424,7 @@ fn emits_counted_attributes_meshes_colliders_and_report() {
     assert_eq!(psdl.rooms.len(), 1);
     assert_eq!(psdl.rooms[0].attributes.len(), 8);
 
-    let import = emit_psdl(&psdl);
+    let import = emit_psdl(&psdl, None);
 
     // Every attribute produces geometry, collision or tunnel state.
     assert_eq!(import.report.attributes, 8);
@@ -330,6 +460,181 @@ fn emits_counted_attributes_meshes_colliders_and_report() {
         forward.x.abs() < 1e-4 && forward.z.abs() > 0.99,
         "{forward:?}"
     );
+}
+
+/// F06-A: the room's collider splits per authored surface class — the
+/// road strip, its sidewalk-texture slot and the unmapped fan texture
+/// become three colliders carrying `Authored(i)`/`Unspecified`, and
+/// the report names what fell back. Without tables the pre-F06 single
+/// `Unspecified` collider per room is preserved.
+#[test]
+fn emit_psdl_groups_colliders_by_authored_surface() {
+    let psdl = Psdl::parse(&two_surface_psdl()).expect("synthetic PSDL parses");
+    let tables = surface_tables();
+
+    let import = emit_psdl(&psdl, Some(&tables));
+    assert_eq!(import.colliders.len(), 3, "one collider per surface class");
+    assert!(import.colliders.iter().all(|c| c.room == 0));
+    let by_surface = |s: SurfaceMaterial| {
+        import
+            .colliders
+            .iter()
+            .find(|c| c.surface == s)
+            .unwrap_or_else(|| panic!("a collider carries {s:?}"))
+    };
+    let road = by_surface(SurfaceMaterial::Authored(1));
+    let walk = by_surface(SurfaceMaterial::Authored(2));
+    let fan = by_surface(SurfaceMaterial::Unspecified);
+    // The groups split on the authored material, not on geometry:
+    // road tris span |x| ≤ 3, sidewalk kerbs |x| ∈ 3..5, the fan x > 9.
+    let xs = |c: &mm2_app::city::RoomCollider| c.positions.iter().map(|p| p.x).collect::<Vec<_>>();
+    assert!(xs(road).iter().all(|x| x.abs() <= 3.01));
+    assert!(xs(walk).iter().all(|x| (3.0..=5.01).contains(&x.abs())));
+    assert!(xs(fan).iter().all(|x| *x > 9.0));
+
+    let s = &import.report.surfaces;
+    assert!(s.loaded);
+    assert_eq!(s.named, 2);
+    assert_eq!(s.none, 0);
+    assert_eq!(s.blank, 0);
+    assert_eq!(
+        s.unmapped.iter().map(String::as_str).collect::<Vec<_>>(),
+        ["mystery"]
+    );
+
+    // No tables: one default collider per room, exactly as before F06.
+    let import = emit_psdl(&psdl, None);
+    assert_eq!(import.colliders.len(), 1);
+    assert_eq!(import.colliders[0].surface, SurfaceMaterial::Unspecified);
+    assert!(!import.report.surfaces.loaded);
+    assert!(import.report.surfaces.failure.is_none());
+}
+
+/// End to end through `load_city`: the VFS-resolved tables classify
+/// the texture table, every spawned collider entity carries the
+/// `SurfaceMaterial` wheel raycasts read, and `LoadedCity` hands the
+/// session its index space.
+#[test]
+fn vfs_to_city_marks_colliders_with_their_authored_surfaces() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("city")).unwrap();
+    std::fs::create_dir_all(root.join("texture")).unwrap();
+    std::fs::write(root.join("city/test.psdl"), two_surface_psdl()).unwrap();
+    std::fs::write(root.join(surface::MTL_PATH), SURF_MTL).unwrap();
+    std::fs::write(root.join(surface::CSV_PATH), SURF_CSV).unwrap();
+    for name in ["test_road", "test_grass", "mystery"] {
+        std::fs::write(
+            root.join(format!("texture/{name}.png")),
+            include_bytes!("../../../assets/texture/dev_road.png"),
+        )
+        .unwrap();
+    }
+
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(root, 0).unwrap();
+
+    let mut world = World::new();
+    let mut queue = CommandQueue::default();
+    let mut meshes: Assets<Mesh> = Assets::default();
+    let mut images: Assets<Image> = Assets::default();
+    let mut materials: Assets<StandardMaterial> = Assets::default();
+
+    let loaded = {
+        let mut commands = Commands::new(&mut queue, &world);
+        let mut session = mm2_game::Session::new();
+        load_city(
+            &mut commands,
+            &vfs,
+            "city/test.psdl",
+            &mut meshes,
+            &mut images,
+            &mut materials,
+            SessionEntity(1),
+            &mut session,
+        )
+        .expect("city loads")
+    };
+    queue.apply(&mut world);
+
+    // The session's surface identity space survived the load.
+    let tables = loaded.surfaces.expect("tables loaded");
+    assert_eq!(tables.set.defs[1].name, "cobblestone");
+    assert_eq!(tables.set.defs[2].name, "grass");
+    assert_eq!(loaded.report.surfaces.named, 2);
+    assert_eq!(loaded.report.surfaces.unmapped.len(), 1);
+
+    // Three collider entities, each carrying the component the
+    // contact pipeline queries — and no others.
+    let mut q = world.query_filtered::<&SurfaceMaterial, With<CityEntity>>();
+    let mut surfaces: Vec<SurfaceMaterial> = q.iter(&world).copied().collect();
+    surfaces.sort_by_key(|s| match s {
+        SurfaceMaterial::Unspecified => 0,
+        SurfaceMaterial::Authored(i) => i + 1,
+    });
+    assert_eq!(
+        surfaces,
+        vec![
+            SurfaceMaterial::Unspecified,
+            SurfaceMaterial::Authored(1),
+            SurfaceMaterial::Authored(2),
+        ]
+    );
+}
+
+/// A present-but-broken table pair warns and falls back — the city
+/// still loads, every collider is `Unspecified`, and the report
+/// records the failure rather than hiding it (F06-AC04).
+#[test]
+fn vfs_to_city_with_a_broken_table_pair_marks_everything_unspecified() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("city")).unwrap();
+    std::fs::create_dir_all(root.join("texture")).unwrap();
+    std::fs::write(root.join("city/test.psdl"), two_surface_psdl()).unwrap();
+    std::fs::write(root.join(surface::MTL_PATH), "garbage {").unwrap();
+    std::fs::write(root.join(surface::CSV_PATH), SURF_CSV).unwrap();
+    for name in ["test_road", "test_grass", "mystery"] {
+        std::fs::write(
+            root.join(format!("texture/{name}.png")),
+            include_bytes!("../../../assets/texture/dev_road.png"),
+        )
+        .unwrap();
+    }
+
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(root, 0).unwrap();
+
+    let mut world = World::new();
+    let mut queue = CommandQueue::default();
+    let mut meshes: Assets<Mesh> = Assets::default();
+    let mut images: Assets<Image> = Assets::default();
+    let mut materials: Assets<StandardMaterial> = Assets::default();
+
+    let loaded = {
+        let mut commands = Commands::new(&mut queue, &world);
+        let mut session = mm2_game::Session::new();
+        load_city(
+            &mut commands,
+            &vfs,
+            "city/test.psdl",
+            &mut meshes,
+            &mut images,
+            &mut materials,
+            SessionEntity(1),
+            &mut session,
+        )
+        .expect("city loads")
+    };
+    queue.apply(&mut world);
+
+    assert!(loaded.surfaces.is_none());
+    assert!(!loaded.report.surfaces.loaded);
+    assert!(loaded.report.surfaces.failure.is_some());
+
+    let mut q = world.query_filtered::<&SurfaceMaterial, With<CityEntity>>();
+    let surfaces: Vec<SurfaceMaterial> = q.iter(&world).copied().collect();
+    assert_eq!(surfaces, vec![SurfaceMaterial::Unspecified]);
 }
 
 #[test]
@@ -655,7 +960,7 @@ fn retail_london_imports_driveable_geometry() {
         };
         assert!(resolved.source.kind == mm2_assets::SourceKind::Archive);
         let psdl = Psdl::parse(&bytes).unwrap_or_else(|e| panic!("{logical} parses: {e}"));
-        let import = emit_psdl(&psdl);
+        let import = emit_psdl(&psdl, None);
         println!("{city}: {}", import.report);
         println!("{city} spawn: {:?}", import.spawn);
 

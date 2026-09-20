@@ -39,15 +39,29 @@
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
 **Next selected slice: F13-B remainder, F14-B remainder, F11-C,
-or F06-A runtime legs** — the latest iteration landed F06-A.1,
+or F06-B traction** — the latest iteration landed F06-A.2,
+the runtime-identity leg of surface materials: `mm2_content::surface`
+produces `SurfaceTables` from the VFS-resolved `city/materials.{csv,mtl}`
+pair and `mm2_app::city::emit_psdl` splits each room's collider per
+authored material index — every collider entity carries
+`SurfaceMaterial::Authored(i)` (the `MaterialSet::defs` index space,
+held session-scoped as a resource) or `Unspecified` for `none`/blank/
+unmapped/dead-ref slots. Wheel raycasts and the impact pipeline read
+the identity off the contact entity unchanged; `CityReport.surfaces`
+records the named/none/blank/unmapped split plus table issues.
+Synthetic tests prove per-region ray classification on real Avian
+physics (AC01's collider leg); UNK-23 still covers the original's
+`_default` policy and consumer semantics — the fallback is a
+documented conservative implementation policy. The traction leg —
+`friction`/`elasticity`/`drag` into the real Avian force path plus
+wetness/snow modifiers — stays queued under F06-B. The iteration
+before landed F06-A.1,
 the authored-data leg of surface materials: `mm2_formats::materials`
 parses the global `city/materials.{csv,mtl}` pair (texture→material
 map + `mtl` property blocks) and `mm2-inspect materials` audits the
 pair plus each PSDL texture table's coverage, measured on retail
 (137 named mappings, 8 materials, 2 dead authored refs; both cities'
-tables classified). WLD-19/UNK-23 recorded. The runtime legs —
-surface identity through collider import, tire×surface traction —
-stay queued under F06-A/B. The iteration before
+tables classified). WLD-19/UNK-23 recorded. The iteration before
 landed F14-B.1, the live running-order leg of
 participant ranking (also the rank-presentation remainder of
 F13-B): `mm2_game::race::live_order` sorts participants best→worst

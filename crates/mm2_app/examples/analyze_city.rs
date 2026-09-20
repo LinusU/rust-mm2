@@ -492,7 +492,7 @@ fn main() {
     // Coverage probe: grid-sample the island strip (Bevy coords) and
     // report points where NO emitted triangle covers the ground — the
     // visible holes. Triangles are projected to (x, z).
-    let import = mm2_app::city::emit_psdl(&psdl);
+    let import = mm2_app::city::emit_psdl(&psdl, None);
     let (x0, x1, z0, z1) = (40.0f32, 100.0f32, 20.0f32, 60.0f32);
     // Flatten all triangles that could intersect the region once.
     type Tri2D = ([f32; 2], [f32; 2], [f32; 2], usize);
