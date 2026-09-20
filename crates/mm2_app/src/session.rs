@@ -251,6 +251,7 @@ pub fn load_session_world(
                 &mut assets.images,
                 &mut assets.materials,
                 owner,
+                &mut session,
             ) {
                 Ok(loaded) => {
                     spawn.position = loaded.spawn;
@@ -329,6 +330,7 @@ pub fn load_session_world(
                     &mut assets.images,
                     &mut assets.materials,
                     owner,
+                    &mut session,
                 );
                 if overlay.files > 0 {
                     info!(

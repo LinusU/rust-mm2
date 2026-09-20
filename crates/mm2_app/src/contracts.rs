@@ -71,6 +71,29 @@ impl ImpactFilter {
     }
 }
 
+/// The deepest contact of a live pair: its world point, the manifold
+/// normal (pointing from `c1` toward `c2`) and the pre-solver approach
+/// speed (m/s, ≥ 0 while approaching). The impact pipeline and the
+/// banger activation walk the same manifold data so "the hit" means
+/// the same thing to both.
+pub(crate) fn deepest_contact(
+    collisions: &Collisions,
+    c1: Entity,
+    c2: Entity,
+) -> Option<(Vec3, Vec3, f32)> {
+    let pair = collisions.get(c1, c2)?;
+    let (contact, normal) = pair
+        .manifolds
+        .iter()
+        .filter_map(|m| m.find_deepest_contact().map(|c| (c, m.normal)))
+        .max_by(|a, b| {
+            a.0.penetration
+                .partial_cmp(&b.0.penetration)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })?;
+    Some((contact.point, normal, (-contact.normal_speed).max(0.0)))
+}
+
 /// The stable identity of a contact side: its collider's
 /// [`ObjectIdentity`], else its body's, else [`ObjectId::WORLD`].
 fn object_of(
@@ -130,22 +153,9 @@ pub fn collect_impacts(
         }
         // The deepest contact carries the point, normal and the
         // pre-solver approach speed — mass-independent severity.
-        let Some(pair) = collisions.get(c1, c2) else {
+        let Some((point, normal, severity)) = deepest_contact(&collisions, c1, c2) else {
             continue;
         };
-        let Some((contact, normal)) = pair
-            .manifolds
-            .iter()
-            .filter_map(|m| m.find_deepest_contact().map(|c| (c, m.normal)))
-            .max_by(|a, b| {
-                a.0.penetration
-                    .partial_cmp(&b.0.penetration)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-        else {
-            continue;
-        };
-        let severity = (-contact.normal_speed).max(0.0);
         if severity < policy.min_severity {
             continue;
         }
@@ -167,7 +177,7 @@ pub fn collect_impacts(
             .copied()
             .map(SurfaceState::of)
             .unwrap_or_default();
-        candidates.push((event, a, b, contact.point, normal, severity, surface));
+        candidates.push((event, a, b, point, normal, severity, surface));
     }
 
     // Bound the tick's emission: keep the most severe, count the rest.

@@ -37,8 +37,10 @@ use mm2_formats::{
     psdl::{AttributeType, Psdl, RoomAttribute},
     tex::TexFile,
 };
-use mm2_game::{CityEntity, SessionEntity};
+use mm2_game::{BangerDefinition, CityEntity, Session, SessionEntity};
 use tracing::{debug, info, warn};
+
+use crate::banger::{BangerDefs, banger_bundle};
 
 /// Whether to mirror Z when converting MM2 coordinates to Bevy space.
 ///
@@ -46,7 +48,7 @@ use tracing::{debug, info, warn};
 /// whole city — verified on retail San Francisco, where it put the city on
 /// the wrong side of the Golden Gate bridge and rendered facade signage
 /// back to front (a shopfront reading `PASTA` came out as `ATSAP`).
-const MIRROR_Z: bool = false;
+pub(crate) const MIRROR_Z: bool = false;
 
 /// World scale (metres) per texture repeat for planar-mapped city surfaces.
 /// The PSDL format does not store UVs for most ground attributes; this is a
@@ -521,6 +523,11 @@ pub struct CityReport {
     /// Authored anomalies `Pathset::validate` reported on the consumed
     /// file (non-finite points, odd `Directed` counts, …).
     pub pathset_issues: usize,
+    /// Pathset stamps that spawned as dormant banger entities — prop
+    /// names bound to `tune/banger` records (F04-A, WLD-16).
+    pub pathset_bangers: usize,
+    /// Prop names whose bound banger record failed to decode.
+    pub pathset_banger_failed: usize,
 }
 
 impl std::fmt::Display for CityReport {
@@ -541,16 +548,18 @@ impl std::fmt::Display for CityReport {
         }
         write!(
             f,
-            "; {} mesh groups, {} collider rooms, {} props ({} failed), {} pathset props ({} decal paths, {} failed, {} capped, {} issues), {} missing textures",
+            "; {} mesh groups, {} collider rooms, {} props ({} failed), {} pathset props ({} bangers, {} decal paths, {} failed, {} capped, {} issues, {} banger-decode-failed), {} missing textures",
             self.mesh_groups,
             self.collider_rooms,
             self.props_spawned,
             self.props_failed,
             self.pathset_props_spawned,
+            self.pathset_bangers,
             self.pathset_decal_paths,
             self.pathset_props_failed,
             self.pathset_props_capped,
             self.pathset_issues,
+            self.pathset_banger_failed,
             self.missing_textures.len(),
         )
     }
@@ -2460,6 +2469,52 @@ fn spawn_prop(
     }
 }
 
+/// Spawn one *bound* placement (F04-A): the prop's name resolved a
+/// `tune/banger/<name>.dgbangerdata` record through [`BangerDefs`], so
+/// the stamp becomes a single session-owned entity — collider,
+/// distilled [`BangerDefinition`] and dormant [`mm2_game::Banger`]
+/// state on the root, render parts as children that follow it when
+/// the activation system knocks the prop loose. `model.collider`
+/// must exist (the caller checks) — a banger without collision can
+/// never be struck and stamps as an ordinary prop instead.
+#[allow(clippy::too_many_arguments)]
+fn spawn_banger_prop(
+    commands: &mut Commands,
+    model: &PropModel,
+    transform: Transform,
+    owner: SessionEntity,
+    name: &str,
+    def: &BangerDefinition,
+    session: &mut Session,
+) {
+    let Some(collider) = &model.collider else {
+        return;
+    };
+    let object = session.mint_object_id();
+    let role = session.authority_role();
+    let root = commands
+        .spawn(banger_bundle(
+            def,
+            object,
+            role,
+            owner,
+            collider.clone(),
+            transform,
+            name.to_string(),
+        ))
+        .id();
+    for (mesh, material) in &model.parts {
+        let part = commands
+            .spawn((
+                Mesh3d(mesh.clone()),
+                MeshMaterial3d(material.clone()),
+                Transform::IDENTITY,
+            ))
+            .id();
+        commands.entity(root).add_child(part);
+    }
+}
+
 /// What one consumed pathset produced and skipped, classified — every
 /// path lands in a count, nothing is dropped silently.
 #[derive(Debug, Default, Clone, Copy)]
@@ -2485,6 +2540,12 @@ pub struct PathsetStampReport {
     pub capped: usize,
     /// `Pathset::validate()` issues on the file.
     pub issues: usize,
+    /// Stamps spawned as banger entities — placements whose prop name
+    /// bound a `tune/banger/*.dgbangerdata` record (F04-A, WLD-16).
+    pub bangers: usize,
+    /// Prop names whose bound record resolved but failed to decode —
+    /// stamped unbound, counted once per name per file.
+    pub banger_failed: usize,
 }
 
 impl std::ops::AddAssign for PathsetStampReport {
@@ -2496,13 +2557,17 @@ impl std::ops::AddAssign for PathsetStampReport {
         self.unresolved_paths += rhs.unresolved_paths;
         self.capped = self.capped.saturating_add(rhs.capped);
         self.issues += rhs.issues;
+        self.bangers += rhs.bangers;
+        self.banger_failed += rhs.banger_failed;
     }
 }
 
 /// Stamp every prop path of a parsed pathset through `cache` (F03-B):
 /// each stamped transform becomes a [`spawn_prop`] placement owned by
-/// the session. `PATHnn` labels, `giz_*` animated objects and decal
-/// (texture) names are classified and counted, never stamped — see
+/// the session — or a [`spawn_banger_prop`] entity when `bangers`
+/// resolves the prop's name to a `tune/banger` record (F04-A, WLD-16).
+/// `PATHnn` labels, `giz_*` animated objects and decal (texture) names
+/// are classified and counted, never stamped — see
 /// `docs/research/pathset.md` for what each is inferred to be. The
 /// `giz_` check runs on the asset name after `PREFIX:` stripping, so
 /// `OPEN:giz_bridge01_l` still classifies as animated.
@@ -2510,15 +2575,19 @@ impl std::ops::AddAssign for PathsetStampReport {
 /// `logical` names the consumed file in diagnostics; `name_prefix`
 /// distinguishes the spawned entities by consumer (`pathset-*` for
 /// the ambient city set, `event-pathset-*` for race overlays).
+#[allow(clippy::too_many_arguments)]
 fn stamp_pathset(
     commands: &mut Commands,
     cache: &mut PropCache,
+    bangers: &mut BangerDefs,
+    session: &mut Session,
     pathset: &pathset::Pathset,
     logical: &str,
     name_prefix: &str,
     owner: SessionEntity,
 ) -> PathsetStampReport {
     let mut report = PathsetStampReport::default();
+    let banger_failed_before = bangers.failed;
     for issue in pathset.validate() {
         report.issues += 1;
         warn!(path = %logical, %issue, "pathset authored issue");
@@ -2559,17 +2628,37 @@ fn stamp_pathset(
         let stamped = stamped_transforms(path, stamps_left);
         stamps_left -= stamped.transforms.len();
         report.capped = report.capped.saturating_add(stamped.capped);
+        // A bound name with collision stamps as a dormant banger
+        // entity; unbound names (or bound props with no collider —
+        // they can never be struck) stay ordinary static props.
+        let bound = bangers.get(name).cloned();
         for (ii, mat4) in stamped.transforms.iter().enumerate() {
-            spawn_prop(
-                commands,
-                model,
-                Transform::from_matrix(*mat4),
-                owner,
-                &format!("{name_prefix}-{name}-{pi}-{ii}"),
-            );
+            let pname = format!("{name_prefix}-{name}-{pi}-{ii}");
+            match (&bound, &model.collider) {
+                (Some(def), Some(_)) => {
+                    spawn_banger_prop(
+                        commands,
+                        model,
+                        Transform::from_matrix(*mat4),
+                        owner,
+                        &pname,
+                        def,
+                        session,
+                    );
+                    report.bangers += 1;
+                }
+                _ => spawn_prop(
+                    commands,
+                    model,
+                    Transform::from_matrix(*mat4),
+                    owner,
+                    &pname,
+                ),
+            }
             report.spawned += 1;
         }
     }
+    report.banger_failed = bangers.failed - banger_failed_before;
     report
 }
 
@@ -2611,6 +2700,7 @@ pub fn spawn_event_pathsets(
     images: &mut Assets<Image>,
     materials: &mut Assets<StandardMaterial>,
     owner: SessionEntity,
+    session: &mut Session,
 ) -> EventPathsetReport {
     let mut report = EventPathsetReport {
         files: logicals.len(),
@@ -2629,6 +2719,7 @@ pub fn spawn_event_pathsets(
         cache: HashMap::new(),
         missing_prims: 0,
     };
+    let mut bangers = BangerDefs::new(vfs);
     for logical in logicals {
         match vfs.read_path(logical) {
             Ok((bytes, resolved)) => match pathset::Pathset::parse(&bytes) {
@@ -2636,6 +2727,8 @@ pub fn spawn_event_pathsets(
                     report.stats += stamp_pathset(
                         commands,
                         &mut cache,
+                        &mut bangers,
+                        session,
                         &pathset,
                         &resolved.logical,
                         "event-pathset",
@@ -2714,6 +2807,7 @@ pub fn load_city(
     images: &mut Assets<Image>,
     materials: &mut Assets<StandardMaterial>,
     owner: SessionEntity,
+    session: &mut Session,
 ) -> Result<LoadedCity, LoadCityError> {
     let (bytes, resolved) = vfs
         .read_path(psdl_path)
@@ -2822,9 +2916,12 @@ pub fn load_city(
     match vfs.read_path(&pathset_path) {
         Ok((pathset_bytes, pathset_res)) => match pathset::Pathset::parse(&pathset_bytes) {
             Ok(pathset) => {
+                let mut bangers = BangerDefs::new(vfs);
                 let stamped = stamp_pathset(
                     commands,
                     &mut cache,
+                    &mut bangers,
+                    session,
                     &pathset,
                     &pathset_res.logical,
                     "pathset",
@@ -2836,9 +2933,12 @@ pub fn load_city(
                 report.pathset_props_capped =
                     report.pathset_props_capped.saturating_add(stamped.capped);
                 report.pathset_issues += stamped.issues;
+                report.pathset_bangers += stamped.bangers;
+                report.pathset_banger_failed += stamped.banger_failed;
                 info!(
                     path = %pathset_res.logical,
                     stamped = stamped.spawned,
+                    bangers = stamped.bangers,
                     decals = stamped.decal_paths,
                     labels = stamped.label_paths,
                     animated = stamped.animated_paths,

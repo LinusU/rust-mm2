@@ -18,13 +18,13 @@ use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use clap::Parser;
 use mm2_app::session::{ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
-    camera, car_visual, city, contracts, input, nav_overlay, race, scripted, session, smoke,
+    banger, camera, car_visual, city, contracts, input, nav_overlay, race, scripted, session, smoke,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
 use mm2_game::{
-    CameraPose, DevOverrides, ImpactEvent, Mm2Vfs, PlayerVehicle, RaceStarted, Session,
-    SessionConfig, SessionPhase, VehicleSelection, WorldMode, advance_session_tick,
+    BangerStateChanged, CameraPose, DevOverrides, ImpactEvent, Mm2Vfs, PlayerVehicle, RaceStarted,
+    Session, SessionConfig, SessionPhase, VehicleSelection, WorldMode, advance_session_tick,
     despawn_session_entities,
 };
 use mm2_vehicle::{ResetVehicle, VehicleConfig, VehicleDebugEnabled, VehiclePlugin};
@@ -505,14 +505,21 @@ fn main() {
     .add_plugins(VehiclePlugin)
     .add_message::<ImpactEvent>()
     .add_message::<RaceStarted>()
+    .add_message::<BangerStateChanged>()
     .init_resource::<contracts::ImpactFilter>()
     .init_resource::<mm2_game::ResultLedger>()
+    .init_resource::<mm2_game::BangerPool>()
     .init_resource::<SessionControl>()
     .add_systems(FixedUpdate, advance_session_tick)
     .add_systems(
         FixedLast,
         (
             contracts::collect_impacts,
+            // Banger activation/settle consume the same contact edges
+            // the impact pipeline reads — independent consumers of the
+            // solver's edge stream.
+            banger::activate_bangers,
+            banger::settle_bangers,
             contracts::publish_vehicle_telemetry,
             // Teleport re-anchoring must precede the race driver so a
             // reset never sweeps a checkpoint (AC02).

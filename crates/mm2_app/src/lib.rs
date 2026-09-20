@@ -6,6 +6,7 @@
 //! `mm2_game::Session`; the app reads it instead of keeping a parallel
 //! world-state resource.
 
+pub mod banger;
 pub mod camera;
 pub mod car_visual;
 pub mod city;

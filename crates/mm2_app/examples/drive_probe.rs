@@ -391,6 +391,7 @@ fn headless_city(vfs: &Vfs, city_name: &str, cfg: VehicleConfig) -> (App, Entity
                 Assets::<Image>::default(),
                 Assets::<StandardMaterial>::default(),
             );
+            let mut session = mm2_game::Session::new();
             city::load_city(
                 &mut commands,
                 vfs,
@@ -399,6 +400,7 @@ fn headless_city(vfs: &Vfs, city_name: &str, cfg: VehicleConfig) -> (App, Entity
                 &mut images,
                 &mut materials,
                 mm2_game::SessionEntity(1),
+                &mut session,
             )
             .unwrap()
         };

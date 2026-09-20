@@ -674,6 +674,7 @@ fn event_pathset_classification_counts_every_path() {
     let mut materials: Assets<StandardMaterial> = Assets::default();
     let report = {
         let mut commands = Commands::new(&mut queue, &world);
+        let mut session = mm2_game::Session::new();
         mm2_app::city::spawn_event_pathsets(
             &mut commands,
             &vfs,
@@ -682,6 +683,7 @@ fn event_pathset_classification_counts_every_path() {
             &mut images,
             &mut materials,
             SessionEntity(1),
+            &mut session,
         )
     };
     queue.apply(&mut world);
@@ -709,6 +711,7 @@ fn event_pathset_classification_counts_every_path() {
     write(d, "race/testcity/race1.pathset", b"PTH1\x01bad");
     let report = {
         let mut commands = Commands::new(&mut queue, &world);
+        let mut session = mm2_game::Session::new();
         mm2_app::city::spawn_event_pathsets(
             &mut commands,
             &vfs,
@@ -717,6 +720,7 @@ fn event_pathset_classification_counts_every_path() {
             &mut images,
             &mut materials,
             SessionEntity(1),
+            &mut session,
         )
     };
     assert_eq!(report.files, 1);

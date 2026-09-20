@@ -9,6 +9,7 @@
 use bevy::prelude::*;
 use mm2_assets::Vfs;
 
+pub mod banger;
 pub mod config;
 pub mod ids;
 pub mod impact;
@@ -19,6 +20,9 @@ pub mod session;
 pub mod surface;
 pub mod telemetry;
 
+pub use banger::{
+    Banger, BangerCause, BangerDefinition, BangerPhase, BangerPool, BangerStateChanged,
+};
 pub use config::{
     CameraPose, ConfigError, Densities, DevOverrides, Difficulty, EventRef, EventTableKind,
     NavOverlay, SelectorError, SessionAuthority, SessionConditions, SessionConfig, SessionMode,

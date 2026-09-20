@@ -243,6 +243,7 @@ fn vfs_to_city_spawns_meshes_colliders_and_props() {
 
     let loaded = {
         let mut commands = Commands::new(&mut queue, &world);
+        let mut session = mm2_game::Session::new();
         load_city(
             &mut commands,
             &vfs,
@@ -251,6 +252,7 @@ fn vfs_to_city_spawns_meshes_colliders_and_props() {
             &mut images,
             &mut materials,
             SessionEntity(1),
+            &mut session,
         )
         .expect("city loads")
     };

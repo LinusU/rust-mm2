@@ -21,8 +21,9 @@ use bevy::time::TimeUpdateStrategy;
 use mm2_assets::Vfs;
 use mm2_content::VehicleDef;
 use mm2_game::{
-    ImpactEvent, Mm2Vfs, PlayerVehicle, RaceProgress, RaceStarted, RaceState, Session,
-    SessionConfig, SessionPhase, WorldMode, advance_session_tick, despawn_session_entities,
+    Banger, BangerPhase, BangerStateChanged, ImpactEvent, Mm2Vfs, PlayerVehicle, RaceProgress,
+    RaceStarted, RaceState, Session, SessionConfig, SessionPhase, WorldMode, advance_session_tick,
+    despawn_session_entities,
 };
 use mm2_vehicle::vehicle::{VehicleInput, VehicleState};
 use mm2_vehicle::{VehicleConfig, VehiclePlugin};
@@ -186,8 +187,10 @@ pub fn headless_smoke(
         .add_plugins(VehiclePlugin)
         .add_message::<ImpactEvent>()
         .add_message::<RaceStarted>()
+        .add_message::<BangerStateChanged>()
         .init_resource::<contracts::ImpactFilter>()
         .init_resource::<mm2_game::ResultLedger>()
+        .init_resource::<mm2_game::BangerPool>()
         .init_resource::<session::SessionControl>()
         .init_resource::<ButtonInput<KeyCode>>()
         // `load_session_world` writes marker/HUD meshes into the shared
@@ -213,6 +216,8 @@ pub fn headless_smoke(
             FixedLast,
             (
                 contracts::collect_impacts,
+                crate::banger::activate_bangers,
+                crate::banger::settle_bangers,
                 contracts::publish_vehicle_telemetry,
                 race::reanchor_teleported_participants,
                 race::advance_race,
@@ -339,9 +344,29 @@ pub fn headless_smoke(
             format!(" nav={}", s.strip_prefix("nav ").unwrap_or(&s))
         })
         .unwrap_or_default();
+    // Banger evidence: how many bound placements exist and how the
+    // dormant → active → settled machine left them at the frame cap.
+    let bng_detail = {
+        let mut counts = [0usize; 3];
+        for e in world_ecs.iter_entities() {
+            let Some(b) = e.get::<Banger>() else {
+                continue;
+            };
+            counts[match b.phase {
+                BangerPhase::Dormant => 0,
+                BangerPhase::Active => 1,
+                BangerPhase::Settled => 2,
+            }] += 1;
+        }
+        if counts.iter().sum::<usize>() > 0 {
+            format!(" bng={}d/{}a/{}s", counts[0], counts[1], counts[2])
+        } else {
+            String::new()
+        }
+    };
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{nav_detail}{extra}",
+            "updates={frames} ticks={ticks} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{nav_detail}{bng_detail}{extra}",
             driver.as_str(),
             session.phase().name(),
             moved = pos.map(|p| (p - spawn_pos).length()).unwrap_or(f32::NAN),

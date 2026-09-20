@@ -210,12 +210,67 @@ the first transition (`ImpulseLimit2` against what quantity), whether
 fragments spawn at activation or at a later break threshold, and what
 `phSleep`/`Timer` exactly do remain UNK-22.
 
+## Implemented runtime slice (F04-A.3 — provisional)
+
+`mm2_game::banger` + `mm2_app::banger` implement the recovered state
+machine's first half on Avian. This is an *implementation choice*, not
+verified original behaviour — every provisional point is still UNK-22.
+
+- **Binding consumption.** `stamp_pathset` resolves each prop name
+  through a per-load `BangerDefs` cache
+  (`tune/banger/<name>.dgbangerdata`, lowercased). A bound name with a
+  collider stamps one session-owned entity — collider, authored
+  physicals (`Mass`, `Friction`, `Restitution`, `CenterOfMass` from
+  `CG`), `Banger` state, `ObjectIdentity`, `AuthorityRole` — with the
+  mesh parts as children that follow the body. Unbound names and bound
+  names without collision stamp as the ordinary static render/collider
+  pair. Records that resolve but fail decode are counted
+  (`banger_failed`) and stamp unbound. Verified on retail: sf
+  `props.pathset` 925/925 stamps bound, london 1188/1188, zero decode
+  failures (`bng=925d/0a/0s`, `bng=1188d/0a/0s` in headless smoke).
+- **Dormant → Active.** `activate_bangers` (FixedLast) reads
+  `CollisionStart` edges — a second consumer alongside
+  `collect_impacts`, since bangers need every approaching contact, not
+  only deduplicated reportable ones. Approach speed is the deepest
+  manifold contact's pre-solver `normal_speed` (shared
+  `deepest_contact` helper with the impact pipeline). The provisional
+  estimate is `approach_speed × striker_mass` compared against
+  `ImpulseLimit2`; a qualifying edge flips `RigidBody` to dynamic once,
+  applies one impulse leaving the prop at the striker's approach speed
+  plus a spin kick derived from the authored `Size` bounds (solid-cuboid
+  inertia estimate), and emits `BangerStateChanged`.
+- **Pool.** `BangerPool.max_active = 32` — the R4-recovered
+  `dgBangerActiveManager` size. At capacity the oldest activation
+  (lowest `(activated_tick, object_slot)`) settles with
+  `BangerCause::Reclaimed` before the new one takes the slot. Reclaim
+  order is provisional — R4 recovers the size, not the order.
+- **Active → Settled.** A dynamic banger Avian puts to sleep turns back
+  into a static collider at its rest pose — the `dgHitBangerInstance`
+  state. `Settled` is terminal for the session (no
+  `dgHitBangerInstance`→anything transition is recovered); session
+  teardown/restamp restores the original placement.
+- **Authority.** Both systems are gated like the race driver:
+  `Predicted` sessions drain edges but never transition banger state —
+  replication (F26) delivers authoritative `BangerStateChanged`.
+- **Messages.** `BangerStateChanged` carries `ObjectId` + session
+  generation + fixed tick + phase + cause (`Impact{severity,estimate}` /
+  `Slept` / `Reclaimed`) — the semantic stream audio/particle/
+  replication consumers read instead of watching physics.
+- **Deliberately deferred:** BREAK-chunk fragment spawning (F04-B),
+  `BirthRule` particles, `AudioId`/`Flash`/`TexNumber` effects, decals,
+  prop-rule-channel stamping, the `dgBangerActive` `Timer` despawn, and
+  replication. `NumParts` is carried on `BangerDefinition` for F04-B but
+  not acted on.
+
 ## Runtime consumption — what is not known
 
-Parsed and bound, not yet simulated. Everything below is UNK-22:
+Parsed, bound and provisionally simulated. Everything below is UNK-22:
 
 - What `ImpulseLimit2` is compared against (contact impulse? impact
   speed × mass?) and what crossing it does — break vs. tip vs. nothing.
+  The implemented `approach_speed × striker_mass` estimate is a
+  stand-in; original evidence could change both the quantity and the
+  comparison.
 - Whether `NumParts` also bounds spawned fragments at runtime or is
   purely an authoring echo of the PKG's BREAK count.
 - `ColliderId`/`AudioId`/`TexNumber` id spaces (collider table? audio
@@ -229,5 +284,7 @@ Parsed and bound, not yet simulated. Everything below is UNK-22:
 - How a stamped placement acquires `INST_BANGER`, and the exact
   dormant→active→hit/despawn transition conditions and pool-reclaim
   order inside `dgBangerActiveManager` (pool of 32 verified; order not).
+  The `Timer` despawn is recovered but unimplemented — the slice settles
+  instead of despawning.
 - Whether fragment `NumParts>0` records (the 4 flagged) mean
   fragments-of-fragments the data can't back, or inert leftover fields.
