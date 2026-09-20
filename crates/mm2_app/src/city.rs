@@ -1668,9 +1668,26 @@ fn decode_tex(bytes: &[u8], logical: &str) -> Option<(Image, bool)> {
             return None;
         }
     };
+    // wgpu requires `mip_level_count <= floor(log2(max(w, h))) + 1`;
+    // a file claiming more levels than its size supports decodes
+    // degenerate 1×1 repeats — drop them rather than failing texture
+    // creation.
+    let max_levels = 32
+        - (tex.header.width.max(tex.header.height) as u32)
+            .max(1)
+            .leading_zeros();
     let mut data = Vec::new();
     let mut level_count = 0u32;
     for level in 0..tex.levels.len() {
+        if level_count == max_levels {
+            warn!(
+                logical = %logical,
+                stored = tex.levels.len(),
+                max_levels,
+                "TEX declares more mip levels than its size allows; dropping the excess"
+            );
+            break;
+        }
         match tex.decode_rgba(level) {
             Some(rgba) => {
                 data.extend_from_slice(&rgba);
