@@ -47,8 +47,9 @@ cycles frames at an approximated 10 fps.
 "Alpha ignored" above is the *ordinary-texture* policy. Decal TEXes
 (`decal_zigzag_l`, `decal_rxwalk03_l`, `decal_x_inter_l`…) carry authored
 alpha in the palette's fourth byte even in nominal P8/P4 types: measured on retail,
-`decal_rxwalk03_l`'s unpainted surround sits at alpha ≈ 36 and its
-painted bars at ≈ 240; `decal_x_inter_l` runs ≈ 70–235. The values are
+`decal_rxwalk03_l`'s most-used unpainted surround entries sit at alpha
+≈ 65–105 (used-entry min 36) against its painted bars at ≈ 235–243;
+`decal_x_inter_l` runs ≈ 28–251. The values are
 coherent (low-alpha surround vs high-alpha paint), not garbage, so the
 decal renderer must read them — the decal channel decodes with
 `decode_rgba_honoring_alpha` and blends; ordinary surfaces keep the

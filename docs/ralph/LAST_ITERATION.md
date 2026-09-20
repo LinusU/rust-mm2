@@ -36,8 +36,8 @@
   - `mm2_app::city` — consumes `<dir>/<stem>/decals.pathset` beside
     the PSDL (missing file non-fatal), report gains `decals` block
     in `CityReport` + Display. `props.pathset` keeps classifying its
-    texture-named paths without stamping (26 of sf's 31
-    `r4i_rails_f` entries are byte-identical `decals.pathset`
+    texture-named paths without stamping (27 of sf's 31
+    `r4i_rails_f` entries are name+points-identical `decals.pathset`
     duplicates — measured authoring leftovers; stamping them would
     double-draw the rail street).
   - Tests: `mm2_app::decals` unit tests (section pairing, odd tail,

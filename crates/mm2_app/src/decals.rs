@@ -23,7 +23,8 @@
 //! `texture/decal_zigzag_l` like any other texture.
 //!
 //! `props.pathset` also names decal textures (31 `r4i_rails_f` paths
-//! on SF — 26 byte-identical duplicates of `decals.pathset` entries);
+//! on SF — 27 name+points-identical duplicates of `decals.pathset`
+//! entries);
 //! the prop channel keeps classifying them without stamping — they are
 //! authoring leftovers the prop loader ignores, and double-stamping
 //! would z-fight the rail street.
@@ -177,6 +178,9 @@ pub struct DecalStampReport {
     pub label_paths: usize,
     /// `giz_*` animated-object paths — counted, left for that work.
     pub animated_paths: usize,
+    /// Texture-named paths dropped because their texture failed to
+    /// read/decode — every such path lands here.
+    pub missing_texture_paths: usize,
     /// Paths naming a `geometry/*.pkg` prop rather than a texture —
     /// misfiled in a decal file, counted not stamped.
     pub prop_paths: usize,
@@ -242,6 +246,9 @@ impl RibbonBuilder {
 /// distinguishes spawned entities by consumer (`decal` for the ambient
 /// city file). Materials come from the shared [`MaterialCache`] decal
 /// path (palette-alpha honoring, blend/opaque by decoded alpha).
+// Load-time helper that must thread Commands plus the VFS, material
+// cache, mesh assets and owner borrows — splitting the signature would
+// only shuffle the same borrows into a context struct.
 #[allow(clippy::too_many_arguments)]
 pub fn stamp_decals(
     commands: &mut Commands,
@@ -306,14 +313,20 @@ pub fn stamp_decals(
             report.degenerate_paths += 1;
             continue;
         }
-        let take = ribbon.quads.min(quads_left);
-        report.capped += ribbon.quads - take;
-        quads_left -= take;
+        // A failed texture drops the path without touching the quad
+        // budget — missing material is a content fault, not expansion.
         let Some(material) = mats.get_decal(name) else {
             debug!(path = %path.name, "decal texture failed to decode; ribbon dropped");
+            report.missing_texture_paths += 1;
             missing.insert(name.to_string());
             continue;
         };
+        let take = ribbon.quads.min(quads_left);
+        report.capped += ribbon.quads - take;
+        quads_left -= take;
+        if take == 0 {
+            continue;
+        }
         let trimmed = if take < ribbon.quads {
             DecalRibbon {
                 indices: ribbon.indices[..take * 6].to_vec(),
@@ -359,6 +372,7 @@ pub fn stamp_decals(
         unsupported = report.unsupported_kind_paths,
         skipped = report.skipped_quads,
         capped = report.capped,
+        missing_paths = report.missing_texture_paths,
         missing = report.missing_textures,
         issues = report.issues,
         "decal pathset stamped"

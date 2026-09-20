@@ -165,8 +165,9 @@ below.
 `mm2_app::decals::stamp_decals` — the last ambient placement channel.
 Retail counts: london 79 ribbons / 85 quads (3 merged entities:
 `decal_zigzag_l`, `decal_x_inter_l`, `decal_rxwalk03_l`), sf
-48 / 223 (2: `r4i_rails_f`, `trackdecal_l`) — render-only, session-
-owned, no colliders, ~4–5 empty/odd/degenerate paths counted per city.
+48 / 223 (2: `r4i_rails_f` on 45 paths, `r4i_railsX_f` on 4) —
+render-only, session-owned, no colliders, ~4–5 empty/odd/degenerate
+paths counted per city.
 
 **Geometry — measured, verified on retail (WLD-18):** a decal path is
 a `LineStrip` whose points interleave the ribbon's *two* edges: even
@@ -186,16 +187,17 @@ widths — a centreline reading yields alternating ~1 m/~20 m segments.
   whether `u` can land flipped — is unresolved; authored `ClampU`/
   `ClampV` flags are honoured by the sampler either way.
 - Palette alpha is honoured on every palette format: the P8 decals
-  carry authored per-entry translucency (rxwalk's unpainted surround
-  ≈ 36, its bars ≈ 240; x_inter's film ≈ 70–235) that only makes
-  sense if the decal renderer reads it. Alpha-bearing textures render
-  `AlphaMode::Blend`; `Rgb888` decals (`r4i_rails_f`) stay opaque.
+  carry authored per-entry translucency (rxwalk's most-used surround
+  entries ≈ 65–105 against its bars ≈ 235–243, used-entry min 36;
+  x_inter's film ≈ 28–251) that only makes sense if the decal
+  renderer reads it. Alpha-bearing textures render `AlphaMode::Blend`;
+  `Rgb888` decals (`r4i_rails_f`) stay opaque.
 - Ribbons sit `DECAL_LIFT` (2 cm) above the authored points with a
   −1 depth bias against z-fighting, normals oriented upward, material
   lit + double-sided (authored winding is not guaranteed).
 
 **Duplicate-source finding:** sf `props.pathset` carries 31
-`r4i_rails_f` paths; 26 are byte-identical duplicates of
+`r4i_rails_f` paths; 27 are name+points-identical duplicates of
 `decals.pathset` entries, so the prop channel classifies them without
 stamping (authoring leftovers — double-stamping would z-fight the
 rail street). The 4–5 props-only rail segments are never drawn; if
