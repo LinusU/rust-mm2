@@ -1,100 +1,101 @@
 # Last implementation iteration
 
-- Task ID and title: F00-B.2 — original-rules ledger (child of F00-B;
-  completes the F00-B scope alongside B.1's inventory). Also added the
-  `mm*data.csv` event-metadata table parser so the ledger's authored
-  roster claims are reproducible through the VFS.
+- Task ID and title: F00-C — reusable synthetic / original-data /
+  graphical evidence commands with explicit missing-capability outcomes
+  (completes the F00 evidence-harness scope; selected per the reconciled
+  plan after F00-B's children passed external check+review).
 - Starting commit and resulting commit: started at
-  `156b0cc7621b8ba743047a52ab0f67922f06643a` (clean tree, branch
-  `ralph/night`, external check+review had just passed); result = this
-  commit.
+  `ab32a705e08e399b4b2fc20e7040d9837658d6fa` (clean tree, branch
+  `ralph/night`, external check+review had just passed on F00-B.2);
+  result = this commit.
 - Production code changed:
-  - `crates/mm2_formats/src/racedata.rs` (new): `EventTable` parser for
-    `race/<city>/mm{race,blitz,circuit,crash}data.csv` — one row per
-    selectable event carrying the ten-parameter block twice (Amateur +
-    Professional halves; the amateur/pro mapping is marked inferred in
-    the doc since headers are unlabeled). Structural failures return
-    `FormatError`; malformed rows become `TableDiagnostic`s.
-  - `crates/mm2_formats/src/lib.rs`: `pub mod racedata`.
-  - `crates/mm2_content/src/expect.rs`: `EXPECTED_EVENT_TABLES` — the
-    four table names per race city, flagged race-vs-lesson family.
-  - `tools/mm2_inspect/src/inventory.rs`: `events()` now reads each
-    discovered `mm*data.csv` through the VFS and parses it. Row counts
-    go to the races notes (`sf event-metadata rows: mmracedata.csv=12
-    rows, …`); missing expected tables, malformed tables and malformed
-    rows become rejected records (strict-visible), `mmcrashdata.csv`
-    auditing against the lessons family.
+  - `crates/mm2_app/src/smoke.rs` (new): `SmokeRecord`/`SmokeStatus`
+    report (`smoke=<kind> world=<w> status=<pass|fail|unavailable>
+    <metrics>`), kinds `headless-physics` vs `visual`, exit codes
+    0/3/4 (2 stays usage-error), `header()` with the build-embedded
+    engine commit, and `headless_smoke()` — the MinimalPlugins +
+    Avian runner (same pattern as `tests/drive.rs` /
+    `examples/drive_probe.rs`) that spawns the dev world or a real
+    city through the VFS, settles, then holds full throttle and checks
+    finite/grounded (+drove, for the synthetic world).
+  - `crates/mm2_app/build.rs` (new): embeds `MM2_BUILD_COMMIT` — same
+    mechanism as `mm2-inspect` so smoke reports are versioned by the
+    code that produced them.
+  - `crates/mm2_app/src/main.rs`: `--headless` flag (conflicts with
+    `--screenshot`/`--cam`); `--city` is now `Option<String>` and a
+    specifically requested city always means City mode — a VFS miss is
+    a hard failure or `unavailable`, never a silent dev world; smoke
+    records printed for the `--car` load failure and the two
+    capability checks (requested city with no data source →
+    `unavailable` exit 4; visual run with no display → `unavailable`);
+    `smoke_test` now ends early with `status=fail` on
+    `WorldState::Failed` and awaits the screenshot file on disk before
+    reporting `pass` (no more fixed 5-frame hopeful delay); `AppExit`
+    codes propagate to the process exit code.
+  - `crates/mm2_app/src/lib.rs`: `pub mod smoke`.
 - Documentation changed:
-  - `docs/original-rules.md` (new): the F00-B.2 ledger — ~90 classified
-    facts (verified_original / documented / inferred / designed /
-    unknown) covering drivers/progression, all five modes, Crash Course,
-    vehicle/paint unlocks, damage, police, multiplayer + C&R, HUD/map/
-    cameras, controls/options, menus, world behavior, plus a designed-
-    departures list and a 15-item UNK open-question table.
-- Source material (all from the local retail install, read-only):
-  - `MM2HELP.HLP` decompiled locally with helpdeco (GPLv3 tool, cloned
-    to /tmp only — decompiled text is original content and is NOT
-    committed; the ledger cites topic names).
-  - `Readme.rtf` / `TROUBLE.RTF` via `textutil`; `Booklet.pdf` via pypdf
-    in a /tmp venv.
-  - Authored data via `mm2-inspect dump`/`inventory`: `mm*data.csv`
-    aggregates and all `tune/*.info` Unlock fields.
-- Key findings now on record:
-  - Authored selectable rosters are 12 checkpoint / 10 blitz / 10
-    circuit / 13 crash-course rows per city — matching help's "12
-    Checkpoint Races" and "nine lessons + midterms + final". The extra
-    `.aimap` files beyond those rosters stay in the expected denominator
-    but their selectability is UNK-2.
-  - Help documents 20 vehicles; the roster ships 21 — `vpmoonrover` is
-    the undocumented one (UNK-3).
-  - Circuit races have zero peds, ambient and cops in data (confirms
-    documented no-peds rule; no-cops is a new verified fact).
-  - Blitz: no opponents/cops, per-event time limits 18–120 (unit
-    unverified). Checkpoint: fixed authored cop counts 0–8.
-  - `.info` `UnlockScore`/`UnlockFlags` exist (GTR-1 = 8000) but bit/score
-    semantics stay unknown (UNK-6).
-- Tests added/changed and why: 4 new `racedata` unit tests (retail-shaped
-  table, wrong header, empty input, malformed rows as diagnostics) +
-  `synthetic_install_counts` extended (well-formed table row count,
-  missing table reject, malformed `mmcrashdata` reject on lessons).
+  - `README.md`: "Smoke tests (evidence commands)" section — commands,
+    record format, status table, exit codes.
+- Key behavior verified on this machine (macOS arm64, retail install):
+  - `mm2 --dev-world --headless` → `status=pass` (600 updates, peak
+    27.9 m/s, moved 157 m, 4/4 wheels grounded), exit 0 — dev world
+    starts with no MM2 data and the car actually drives (AC04).
+  - `mm2 --mm2-path <retail> --city sf --headless --frames 300` →
+    `status=pass` — 1171 rooms / 3763 props imported via VFS, stock
+    `vpbug` drove 30 m on real city collision, exit 0.
+  - `mm2 --dev-world --frames 90 --screenshot /tmp/x.png` →
+    `status=pass`, screenshot awaited: report printed only after the
+    2.9 MB PNG existed on disk; image visually verified (dev car on
+    textured road, live HUD). First recorded GPU/render evidence of the
+    run (AC05).
+  - `mm2 --headless --city bogus` (no install/mods) →
+    `status=unavailable`, exit 4 — missing data is not a failure.
+  - `mm2 --mm2-path <retail> --city bogus --headless` → `status=fail`,
+    exit 3, record names `city/bogus.psdl` + reason — explicit failure
+    for a requested missing city (AC04).
+  - `mm2 --mm2-path <retail> --city bogus --frames 60` (windowed) →
+    `status=fail`, exit 3 via `WorldState::Failed`.
+  - `mm2 --headless --dev-world --car nosuchcar` → `status=fail` record
+    + exit 2 (usage-level explicit failure for a requested missing
+    vehicle).
+  - `--headless --screenshot` → clap conflict, exit 2.
+- Tests added/changed and why: `crates/mm2_app/tests/smoke.rs` — 3
+  integration tests driving the production `headless_smoke`: dev-world
+  pass on an empty VFS, requested-missing-city → explicit `fail` naming
+  the logical path, and record-line kind/status distinguishability
+  (AC05) + exit codes.
 - Commands actually run and results:
   - `cargo fmt --all -- --check` — PASS.
   - `cargo clippy --locked --workspace --all-targets --all-features --
     -D warnings` — PASS.
-  - `cargo test --locked --workspace` — PASS, ~112 tests, 0 failures.
-  - `mm2-inspect inventory /Users/linus/coding/rust-mm2/retail` —
-    event-metadata rows line present per city; counts unchanged
-    (races 80/111/78, lessons 42/42).
-  - `mm2-inspect inventory <retail> --strict` — exit 2, 33 findings
-    (same genuine findings as before; all 8 tables parse cleanly so the
-    new check adds no noise on retail).
-  - `mm2-inspect inventory <retail> --json` — parses; strict_failures
-    embedded.
+  - `cargo test --locked --workspace` — PASS, 18 test binaries/doc-test
+    groups, 0 failures (incl. the 3 new smoke tests).
 - Acceptance IDs satisfied / still open:
-  - F00 req. 4 (original-rules ledger): delivered —
-    `docs/original-rules.md` marks every fact
-    verified_original/documented/inferred/designed/unknown with source
-    citations. Candidate, pending external check.
-  - F00-AC06: advanced — unverified rules stay explicitly open (UNK-1..
-    UNK-15); nothing doc-only is claimed as verified.
-  - F00-AC02/AC03: advanced slightly — malformed/missing `mm*data.csv`
-    tables now reject with logical path + reason through the normal
-    strict path.
+  - F00-AC04: satisfied — dev world starts without original data
+    (headless + visual evidence); a specifically requested missing
+    city/vehicle exits or reports an explicit failure
+    (`status=fail`/`unavailable`, non-zero exits).
+  - F00-AC05: satisfied — `smoke=headless-physics` and `smoke=visual`
+    records are independently distinguishable; both were run and their
+    records observed. Candidate, pending external check.
   - F00-AC01: gates re-run and pass.
-  - F00-AC04/AC05: unchanged — dev-world and visual/headless smokes
-    still not run (F00-C).
-- Evidence files: none; no screenshots/original-content captures
-  committed. Decompiled help text lives only in /tmp.
-- Stock data/GPU/audio/network limitations: help text was extracted
-  offline and cited, not reproduced; no original executable was run, so
-  *documented* facts remain doc-trust (the ledger says so). GPU/audio/
-  network still unexercised run-wide.
-- Unresolved blockers or discovered regressions: none new. The UNK list
-  needs either observable original behavior (running retail — not
-  possible in this environment) or further format research; it should
-  not block unrelated ready work.
-- Next smallest useful action: F00-C — unified evidence commands
-  (dev-world smoke AC04, visual + headless smokes AC05) with explicit
-  missing-capability outcomes.
+  - F00-AC02/AC03/AC06: unchanged — carried by F00-B.1/B.2, still
+    externally checked.
+- Evidence files: none committed; the verification screenshot lives at
+  `/tmp/mm2-smoke-devworld.png` (local only, synthetic dev world — no
+  original content).
+- Stock data/GPU/audio/network limitations: GPU/render evidence now
+  recorded on this machine for the synthetic dev world only — no
+  original-content frame has been captured this run (the city visual
+  smoke is runnable but was not captured; London/SF visual evidence
+  still open). Audio unexercised (no audio code / no `bevy_audio`).
+  Network unexercised (no networking code).
+- Unresolved blockers or discovered regressions: none. The visual
+  smoke's display check is heuristic (Linux DISPLAY/WAYLAND_DISPLAY);
+  on a genuinely GPU-less but display-present session wgpu would fail
+  noisily rather than report `unavailable` — honest crash, not a false
+  pass.
+- Next smallest useful action: F01-A — typed SessionConfig + explicit
+  session lifecycle in `mm2_game` (plan's next foundation slice).
 
 This is a candidate handoff. External code-gate and separate review results live in the runner state directory and are not implied by this report.

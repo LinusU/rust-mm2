@@ -83,11 +83,36 @@ cargo run -- --mm2-path "/path/to/Midtown Madness 2"
 #   --city london|sf                 (default: london)
 #   --mods <mods dir>
 #   --vehicle-config <toml>          (e.g. examples/vehicles/dev-car.toml)
-#   --frames N --screenshot out.png  (smoke test: run N frames, capture, exit)
 ```
 
 The app mounts every `.ar` archive found in the install directory plus loose
-files, then loads `city/<name>.psdl` through the VFS.
+files, then loads `city/<name>.psdl` through the VFS. A `--city` the VFS
+cannot provide is a hard failure — it never falls back to the dev world.
+
+### Smoke tests (evidence commands)
+
+```sh
+# headless physics smoke — no window or GPU needed; settles, then drives:
+cargo run -- --dev-world --headless [--frames N]            # default 600
+cargo run -- --mm2-path <dir> --city sf --headless          # real city collision
+
+# visual smoke — real render path, windowed; the screenshot is awaited
+# (pass is reported only once the file actually lands):
+cargo run -- --dev-world --frames 90 --screenshot out.png
+```
+
+Every smoke prints `mm2-smoke commit=<sha>` then one record:
+`smoke=<headless-physics|visual> world=<world> status=<status> <metrics>`.
+
+`status` distinguishes outcomes that must never be conflated:
+
+| status        | meaning                                            | exit |
+|---------------|----------------------------------------------------|------|
+| `pass`        | ran, criteria held                                 | 0    |
+| `fail`        | ran and failed (bad/missing resource, NaN, …)      | 3    |
+| `unavailable` | capability absent (no MM2 data, no display/GPU)    | 4    |
+
+Usage errors (bad flags, unloadable `--car`/`--vehicle-config`) exit 2.
 
 ### Texture override demo
 

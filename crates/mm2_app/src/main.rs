@@ -5,6 +5,10 @@
 //!   cargo run -p mm2_app --bin mm2 -- --dev-world --mods examples/mods
 //!   cargo run -p mm2_app --bin mm2 -- --mm2-path "/path/to/Midtown Madness 2" [--city london]
 //!   cargo run -p mm2_app --bin mm2 -- --mm2-path <dir> --mods <dir> --vehicle-config <toml>
+//!
+//! Smoke modes print `smoke=<kind> … status=<pass|fail|unavailable>`
+//! records (see `mm2_app::smoke`) and exit 0/3/4 respectively; usage
+//! errors exit 2.
 
 use std::path::PathBuf;
 
@@ -12,7 +16,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use clap::Parser;
-use mm2_app::{WorldState, camera, car_visual, city, dev_world, input};
+use mm2_app::{WorldState, camera, car_visual, city, dev_world, input, smoke};
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
 use mm2_game::{ActiveWorld, Mm2Vfs, PlayerVehicle, WorldMode};
@@ -38,9 +42,12 @@ struct Cli {
     #[arg(long)]
     mods: Option<PathBuf>,
 
-    /// City to load when --mm2-path is given (without --dev-world).
-    #[arg(long, default_value = "london")]
-    city: String,
+    /// City to load through the VFS (install or mods). Defaults to
+    /// `london` when --mm2-path is given. A specifically requested city
+    /// the VFS cannot provide is a hard failure, never a silent dev
+    /// world.
+    #[arg(long)]
+    city: Option<String>,
 
     /// Stock/modded vehicle id or unique display-name alias to load
     /// (`--list-cars` shows the roster). Requires `--mm2-path` or mods
@@ -67,8 +74,9 @@ struct Cli {
     vehicle_config: Option<PathBuf>,
 
     /// Save a screenshot of the primary window after `--frames` frames and
-    /// exit (headless smoke testing).
-    #[arg(long, requires = "frames")]
+    /// exit (visual smoke testing). The run waits for the capture to
+    /// actually land on disk before reporting `pass`.
+    #[arg(long, requires = "frames", conflicts_with = "headless")]
     screenshot: Option<PathBuf>,
 
     /// Frames to run before taking the screenshot / exiting in smoke mode.
@@ -77,8 +85,13 @@ struct Cli {
 
     /// Start with the free camera active at `x,y,z[,yaw-deg,pitch-deg]`
     /// (screenshot/diagnostic aid).
-    #[arg(long, value_name = "x,y,z[,yaw,pitch]")]
+    #[arg(long, value_name = "x,y,z[,yaw,pitch]", conflicts_with = "headless")]
     cam: Option<String>,
+
+    /// Run without a window or GPU: simulate `--frames` updates
+    /// (default 600), print a `smoke=headless-physics` record and exit.
+    #[arg(long)]
+    headless: bool,
 }
 
 /// Where the player vehicle (re)spawns. `trailers` holds each spawned
@@ -111,11 +124,18 @@ struct Hud;
 #[derive(Component)]
 struct ErrorText;
 
-/// Smoke-test capture: take a screenshot after N frames, then exit.
+/// Smoke-test capture: run N frames, take the screenshot (if requested),
+/// report a `smoke=visual` record, then exit.
 #[derive(Resource)]
 struct SmokeTest {
+    /// `dev-world` or the city's logical path — the record's `world=`.
+    world: String,
     screenshot: Option<PathBuf>,
     frames_left: u32,
+    /// Capture whose on-disk arrival we're still waiting for.
+    pending: Option<PathBuf>,
+    /// Frames left to wait for `pending` before calling it a failure.
+    capture_wait: u32,
 }
 
 /// `--cam` starting pose for the free camera (position + yaw/pitch in
@@ -192,9 +212,11 @@ fn main() {
     {
         warn!(dir = %app_assets.display(), error = %e, "failed to mount app assets");
     }
+    let mut has_mods = false;
     if let Some(mods) = &cli.mods {
         match mount_mods(&mut vfs, mods) {
             Ok(manifests) => {
+                has_mods = !manifests.is_empty();
                 for m in &manifests {
                     info!(mod_id = %m.id, dir = %mods.display(), "mounted mod");
                 }
@@ -210,6 +232,46 @@ fn main() {
         return;
     }
 
+    // World mode. A specifically requested `--city` always means City —
+    // even without an install (a mod may provide it, and a VFS miss is a
+    // hard failure rather than a silent dev world). `--dev-world` wins
+    // over both.
+    let mode = if cli.dev_world {
+        if cli.city.is_some() {
+            warn!("--city is ignored with --dev-world");
+        }
+        WorldMode::DevWorld
+    } else if cli.city.is_some() || has_mm2 {
+        WorldMode::City {
+            psdl: format!(
+                "city/{}.psdl",
+                cli.city.as_deref().unwrap_or("london").to_ascii_lowercase()
+            ),
+        }
+    } else {
+        warn!("no --mm2-path and no --dev-world; starting the dev world");
+        WorldMode::DevWorld
+    };
+    let world_label = match &mode {
+        WorldMode::DevWorld => "dev-world".to_string(),
+        WorldMode::City { psdl } => psdl.clone(),
+    };
+    let smoke_requested = cli.headless || cli.frames.is_some() || cli.screenshot.is_some();
+    let smoke_kind = if cli.headless {
+        smoke::KIND_HEADLESS_PHYSICS
+    } else {
+        smoke::KIND_VISUAL
+    };
+    let record = |status: smoke::SmokeStatus, detail: String| smoke::SmokeRecord {
+        kind: smoke_kind,
+        world: world_label.clone(),
+        status,
+        detail,
+    };
+    if smoke_requested {
+        println!("{}", smoke::header());
+    }
+
     // Vehicle selection: explicit `--car`, else the documented stock
     // default when an installation is mounted, else the synthetic dev car.
     let selected: Option<VehicleDef> = if let Some(query) = &cli.car {
@@ -220,6 +282,12 @@ fn main() {
             }
             Err(e) => {
                 error!(car = %query, error = %e, "vehicle failed to load");
+                if smoke_requested {
+                    println!(
+                        "{}",
+                        record(smoke::SmokeStatus::Fail, format!("vehicle {query}: {e}")).line()
+                    );
+                }
                 std::process::exit(2);
             }
         }
@@ -275,16 +343,47 @@ fn main() {
         warn!(car = ?selected.as_ref().map(|d| d.id.as_str()), "{w}");
     }
 
-    let mode = if cli.dev_world || !has_mm2 {
-        if !cli.dev_world && !has_mm2 && cli.mm2_path.is_none() {
-            warn!("no --mm2-path and no --dev-world; starting the dev world");
+    // Capability checks with their own status: a requested city with no
+    // data source at all is `unavailable` (missing data), and a visual
+    // smoke with no display is `unavailable` (no GPU/windowing). Neither
+    // is a failure — and neither is allowed to fake a pass.
+    if smoke_requested {
+        if matches!(mode, WorldMode::City { .. }) && !has_mm2 && !has_mods {
+            println!(
+                "{}",
+                record(
+                    smoke::SmokeStatus::Unavailable,
+                    "requested city needs MM2 data: pass --mm2-path or --mods".into(),
+                )
+                .line()
+            );
+            std::process::exit(smoke::SmokeStatus::Unavailable.exit_code());
         }
-        WorldMode::DevWorld
-    } else {
-        WorldMode::City {
-            psdl: format!("city/{}.psdl", cli.city.to_ascii_lowercase()),
+        if !cli.headless && !display_available() {
+            println!(
+                "{}",
+                record(
+                    smoke::SmokeStatus::Unavailable,
+                    "no display detected (DISPLAY/WAYLAND_DISPLAY unset)".into(),
+                )
+                .line()
+            );
+            std::process::exit(smoke::SmokeStatus::Unavailable.exit_code());
         }
-    };
+    }
+
+    // Headless physics smoke: no window, no GPU. Runs and exits here.
+    if cli.headless {
+        let rec = smoke::headless_smoke(
+            &mode,
+            &vfs,
+            selected.as_ref(),
+            &vehicle,
+            cli.frames.unwrap_or(600),
+        );
+        println!("{}", rec.line());
+        std::process::exit(rec.status.exit_code());
+    }
 
     let mut app = App::new();
     app.add_plugins(
@@ -348,12 +447,29 @@ fn main() {
     }
     if cli.screenshot.is_some() || cli.frames.is_some() {
         app.insert_resource(SmokeTest {
+            world: world_label,
             screenshot: cli.screenshot.clone(),
             frames_left: cli.frames.unwrap_or(600),
+            pending: None,
+            capture_wait: 0,
         });
         app.add_systems(Update, smoke_test);
     }
-    app.run();
+    let exit = app.run();
+    if let AppExit::Error(code) = exit {
+        std::process::exit(code.get() as i32);
+    }
+}
+
+/// Whether a windowing system is present for a windowed/visual run.
+/// macOS and Windows always have one in a GUI session; a headless Linux
+/// box does not.
+fn display_available() -> bool {
+    if cfg!(target_os = "linux") {
+        std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
+    } else {
+        true
+    }
 }
 
 /// Whether a `--frames` capture is running.
@@ -368,7 +484,30 @@ fn capturing(smoke: Option<Res<SmokeTest>>) -> bool {
 }
 
 /// After N frames, take the screenshot (if requested) and exit.
-fn smoke_test(mut commands: Commands, mut st: ResMut<SmokeTest>, mut exit: MessageWriter<AppExit>) {
+///
+/// A `Failed` world ends the smoke immediately with `status=fail`. A
+/// requested screenshot is awaited — `pass` is reported only once the
+/// capture file actually exists and is non-empty, never on a fixed delay.
+fn smoke_test(
+    mut commands: Commands,
+    mut st: ResMut<SmokeTest>,
+    state: Res<WorldState>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    let world = st.world.clone();
+    let record = |status: smoke::SmokeStatus, detail: String| smoke::SmokeRecord {
+        kind: smoke::KIND_VISUAL,
+        world: world.clone(),
+        status,
+        detail,
+    };
+    if let WorldState::Failed(m) = &*state {
+        println!("{}", record(smoke::SmokeStatus::Fail, m.clone()).line());
+        exit.write(AppExit::from_code(
+            smoke::SmokeStatus::Fail.exit_code() as u8
+        ));
+        return;
+    }
     if st.frames_left > 0 {
         st.frames_left -= 1;
         return;
@@ -376,11 +515,45 @@ fn smoke_test(mut commands: Commands, mut st: ResMut<SmokeTest>, mut exit: Messa
     if let Some(path) = st.screenshot.take() {
         commands
             .spawn(Screenshot::primary_window())
-            .observe(save_to_disk(path));
-        // Give the capture a couple of frames to complete.
-        st.frames_left = 5;
+            .observe(save_to_disk(path.clone()));
+        st.pending = Some(path);
+        // ~15 s at 60 fps — generous for a single frame capture.
+        st.capture_wait = 900;
         return;
     }
+    if let Some(path) = &st.pending {
+        let landed = std::fs::metadata(path).is_ok_and(|m| m.len() > 0);
+        if landed {
+            let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            println!(
+                "{}",
+                record(
+                    smoke::SmokeStatus::Pass,
+                    format!("frames=done screenshot={} bytes={bytes}", path.display()),
+                )
+                .line()
+            );
+            exit.write(AppExit::Success);
+        } else if st.capture_wait == 0 {
+            println!(
+                "{}",
+                record(
+                    smoke::SmokeStatus::Fail,
+                    format!("screenshot never landed at {}", path.display()),
+                )
+                .line()
+            );
+            exit.write(AppExit::from_code(
+                smoke::SmokeStatus::Fail.exit_code() as u8
+            ));
+        }
+        st.capture_wait = st.capture_wait.saturating_sub(1);
+        return;
+    }
+    println!(
+        "{}",
+        record(smoke::SmokeStatus::Pass, "frames=done".into()).line()
+    );
     exit.write(AppExit::Success);
 }
 
