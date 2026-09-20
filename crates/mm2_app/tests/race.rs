@@ -612,6 +612,9 @@ fn remote_authority_does_not_simulate() {
 fn progress_advance_is_the_shared_step() {
     let def = any_order_def(0);
     let mut p = RaceProgress::new(&def);
+    // The driver only advances `Racing` participants — the contract
+    // itself is inert outside that state.
+    p.state = ParticipantState::Racing;
     p.advance(&def, Vec3::new(-200.0, 0.0, 0.0));
     assert_eq!(
         p.advance(&def, Vec3::new(200.0, 0.0, 0.0)),

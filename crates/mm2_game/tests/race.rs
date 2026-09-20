@@ -210,6 +210,103 @@ fn one_segment_consumes_every_ordered_checkpoint_it_crosses() {
     assert_eq!(p.crossings, 2);
 }
 
+/// CIR-1's flip side: the gate that closes a lap only counts once per
+/// completed sequence. Repeated line crossings while earlier gates are
+/// outstanding clear nothing, and crossings after the wrap still aim
+/// at the first gate of the new lap.
+#[test]
+fn the_lap_line_only_closes_a_completed_sequence() {
+    // Gates A/B plus the start-line copy at C — the producer's circuit
+    // shape (rows[1..] + lifted row0 last).
+    let def = ordered(
+        vec![
+            checkpoint(0.0, 0.0),
+            checkpoint(100.0, 0.0),
+            checkpoint(200.0, 0.0),
+        ],
+        2,
+    );
+    let mut p = RaceProgress::new(&def);
+    p.state = ParticipantState::Racing;
+    // Oscillate on the closing gate before any sequence progress:
+    // repeated finish-line hits without the required gates are inert.
+    for z in [-10.0, 10.0, -10.0, 10.0] {
+        p.advance(&def, Vec3::new(200.0, 0.0, z));
+    }
+    assert_eq!(p.cleared_count(), 0);
+    assert_eq!(p.lap, 0);
+    assert_eq!(p.crossings, 0);
+    // A complete sequence closes lap 1 exactly once.
+    for x in [0.0, 100.0, 200.0] {
+        p.break_segment();
+        p.advance(&def, Vec3::new(x, 0.0, -10.0));
+        p.advance(&def, Vec3::new(x, 0.0, 10.0));
+    }
+    assert_eq!(p.lap, 1);
+    assert_eq!(p.crossings, 3);
+    // Bouncing on the line again clears nothing — the new lap's first
+    // required gate is A, not the line.
+    for z in [-10.0, 10.0, -10.0] {
+        p.advance(&def, Vec3::new(200.0, 0.0, z));
+    }
+    assert_eq!(p.lap, 1);
+    assert_eq!(p.crossings, 3);
+    // Lap 2's sequence finishes the race on the line crossing.
+    for x in [0.0, 100.0] {
+        p.break_segment();
+        p.advance(&def, Vec3::new(x, 0.0, -10.0));
+        p.advance(&def, Vec3::new(x, 0.0, 10.0));
+    }
+    p.break_segment();
+    p.advance(&def, Vec3::new(200.0, 0.0, -10.0));
+    assert_eq!(
+        p.advance(&def, Vec3::new(200.0, 0.0, 10.0)),
+        ProgressOutcome::Finished
+    );
+    assert_eq!(p.lap, 2);
+}
+
+/// AC04's once-only rule is a contract property, not a caller
+/// discipline: `advance` is inert outside `Racing`. An `AwaitingStart`
+/// participant's steps only re-anchor the segment, and a `Finished`
+/// participant fed more positions can never re-emit a finish or clear
+/// another gate.
+#[test]
+fn a_participant_outside_racing_cannot_advance() {
+    let def = ordered(vec![checkpoint(0.0, 0.0), checkpoint(50.0, 0.0)], 1);
+    // AwaitingStart: a creep across both gates before release clears
+    // nothing — and the re-anchor means the post-release step is not
+    // treated as a giant sweep either.
+    let mut p = RaceProgress::new(&def);
+    p.advance(&def, Vec3::new(-10.0, 0.0, 0.0));
+    assert_eq!(
+        p.advance(&def, Vec3::new(200.0, 0.0, 0.0)),
+        ProgressOutcome::Racing
+    );
+    assert_eq!(p.cleared_count(), 0);
+    assert_eq!(p.crossings, 0);
+    // Finished: repeated finish hits stay inert (F14-AC02's "repeated
+    // finish hits do not accumulate laps").
+    let mut q = RaceProgress::new(&def);
+    q.state = ParticipantState::Finished {
+        race_ticks: 10,
+        result: ResultId {
+            generation: 1,
+            participant: PlayerId(0),
+            event: None,
+            sequence: 0,
+        },
+    };
+    q.advance(&def, Vec3::new(-10.0, 0.0, 0.0));
+    assert_eq!(
+        q.advance(&def, Vec3::new(200.0, 0.0, 0.0)),
+        ProgressOutcome::Racing,
+        "a resolved participant cannot re-finish"
+    );
+    assert_eq!(q.cleared_count(), 0);
+    assert_eq!(q.lap, 0);
+}
+
 /// Teleport/reset handling: `break_segment` re-anchors so the jump
 /// cannot clear checkpoints the car skipped.
 #[test]

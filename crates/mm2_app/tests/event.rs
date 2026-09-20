@@ -292,10 +292,13 @@ fn markers_hide_cleared_gates_and_reveal_the_finish() {
 
     // Clear every gate through the contract's own `advance` — the
     // swept-segment math is exercised elsewhere; this test only needs
-    // the cleared flags the marker system reads.
+    // the cleared flags the marker system reads. Flags only move while
+    // `Racing`, so the participant is put there the way the driver's
+    // countdown release would.
     let def = app.world().resource::<RaceState>().definition.clone();
     for x in [COURSE[1], COURSE[2], COURSE[3]] {
         let mut p = app.world_mut().get_mut::<RaceProgress>(car).unwrap();
+        p.state = ParticipantState::Racing;
         p.advance(&def, Vec3::new(x - 25.0, 0.0, COURSE_Z));
         p.advance(&def, Vec3::new(x + 25.0, 0.0, COURSE_Z));
         p.advance(&def, Vec3::new(50.0, 0.0, COURSE_Z));

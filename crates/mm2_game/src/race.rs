@@ -143,6 +143,14 @@ pub enum CheckpointRule {
     /// while an earlier is outstanding clears nothing (documented
     /// Circuit rule, CIR-1). The sequence wraps for `laps`; clearing
     /// the last checkpoint of the final lap finishes the race.
+    ///
+    /// Start-lap handling (implementation choice): lap 1 begins at the
+    /// countdown release with `next` at the first gate — the producer
+    /// puts participants on or behind the start line and makes the
+    /// line itself each lap's *last* gate, so crossing the line is
+    /// what closes a lap. Repeated crossings of the line — or of any
+    /// gate — while an earlier gate is outstanding clear nothing, and
+    /// a lap counts exactly once per completed sequence.
     Ordered,
 }
 
@@ -447,14 +455,6 @@ impl RaceProgress {
         p
     }
 
-    /// First required checkpoint under `Ordered` — a producer places
-    /// this past the start line when the authored data puts the
-    /// participants on it. No-op under `AnyOrder`.
-    pub fn with_next(mut self, next: usize) -> Self {
-        self.next = next;
-        self
-    }
-
     /// Break the swept segment — call on teleport/reset so the jump
     /// cannot clear checkpoints it physically skipped. The next step
     /// re-anchors at the new position.
@@ -489,7 +489,19 @@ impl RaceProgress {
     /// step's. Every checkpoint the segment crosses is consumed in one
     /// pass — a fast car cannot skip *through* a trigger, nor past two
     /// of them (AC02).
+    ///
+    /// Only a `Racing` participant accumulates progress — the rule
+    /// authority gates on the lifecycle too, but the guard lives here
+    /// so a resolved participant can never re-finish or keep clearing
+    /// gates if positions are still fed in, and an `AwaitingStart`
+    /// participant's steps only re-anchor the segment (AC04's
+    /// once-only-result rule is a contract property, not a caller
+    /// discipline).
     pub fn advance(&mut self, definition: &RaceDefinition, to: Vec3) -> ProgressOutcome {
+        if self.state != ParticipantState::Racing {
+            self.last_position = Some(to);
+            return ProgressOutcome::Racing;
+        }
         let Some(from) = self.last_position.replace(to) else {
             // Anchoring step after spawn/teleport: no segment, no
             // crossings.
