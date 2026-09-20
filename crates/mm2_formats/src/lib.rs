@@ -6,17 +6,22 @@
 //! panicking.
 
 pub mod bnd;
+pub mod crashdata;
 pub mod dave;
 pub mod info;
 pub mod inst;
 pub mod mtx;
+pub mod opp;
 pub mod pkg;
 pub mod psdl;
 pub mod racedata;
+pub mod racefiles;
 pub mod reader;
+pub mod rewards;
 pub mod tex;
 pub mod tune;
 pub mod veh;
+pub mod waypoints;
 
 pub use reader::Reader;
 

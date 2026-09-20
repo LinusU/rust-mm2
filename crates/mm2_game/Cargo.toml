@@ -10,3 +10,6 @@ bevy.workspace = true
 mm2_assets.workspace = true
 mm2_formats.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

@@ -32,6 +32,7 @@ use mm2_content::{
 use mm2_formats::inst;
 use mm2_formats::psdl::Psdl;
 use mm2_formats::racedata::EventTable;
+use mm2_formats::racefiles::{RaceFileKind as Kind, classify_race_file};
 use serde_json::{Value, json};
 
 /// Engine commit embedded by `build.rs`; `unknown` outside a git checkout.
@@ -203,11 +204,6 @@ fn basename(logical: &str) -> &str {
     logical.rsplit('/').next().unwrap_or(logical)
 }
 
-/// Strip one trailing `.ext` (or a known multi-part tail) from `name`.
-fn stem_of<'a>(name: &'a str, suffixes: &[&str]) -> Option<&'a str> {
-    suffixes.iter().find_map(|s| name.strip_suffix(s))
-}
-
 // ---------------------------------------------------------------------------
 // Families
 // ---------------------------------------------------------------------------
@@ -315,86 +311,22 @@ fn vehicles(vfs: &Vfs) -> Family {
 // Race / lesson events
 // ---------------------------------------------------------------------------
 
-/// Authored-file kinds found under `race/<city>/`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Kind {
-    Aimap,
-    AimapP,
-    Pathset,
-    Waypoints,
-    DataCsv,
-    Csv,
-    Opp,
-    StartPoints,
-    Meta,
-    Junk,
-    Other,
-}
-
-impl Kind {
-    fn satisfies(self, primary: PrimaryRecord) -> bool {
-        match primary {
-            PrimaryRecord::Aimap => self == Kind::Aimap,
-            PrimaryRecord::CsvRecord => {
-                matches!(
-                    self,
-                    Kind::Csv | Kind::DataCsv | Kind::Waypoints | Kind::StartPoints
-                )
-            }
-            PrimaryRecord::Pathset => self == Kind::Pathset,
+/// Does a discovered record satisfy an expected event's primary-record
+/// requirement? The classification itself lives in
+/// `mm2_formats::racefiles` — shared with the event catalog so audits
+/// and the catalog never disagree about which record belongs to an
+/// event.
+fn satisfies(kind: Kind, primary: PrimaryRecord) -> bool {
+    match primary {
+        PrimaryRecord::Aimap => kind == Kind::Aimap,
+        PrimaryRecord::CsvRecord => {
+            matches!(
+                kind,
+                Kind::Csv | Kind::DataCsv | Kind::Waypoints | Kind::StartPoints
+            )
         }
+        PrimaryRecord::Pathset => kind == Kind::Pathset,
     }
-}
-
-/// Classify a `race/<city>/` basename; returns the kind and the event stem
-/// the record belongs to (records with no stem — metadata tables, junk —
-/// return `None`).
-fn classify_race_file(name: &str) -> (Kind, Option<String>) {
-    if name.starts_with(".#") {
-        return (Kind::Junk, None); // version-control conflict artifact
-    }
-    for ext in [
-        ".bak", ".old", ".csvs", ".ps2", ".short", ".pt", ".bat", ".tmp",
-    ] {
-        if name.ends_with(ext) {
-            return (Kind::Junk, None);
-        }
-    }
-    if name.starts_with("mm") && name.ends_with("data.csv") {
-        return (Kind::Meta, None); // e.g. mmracedata.csv city event table
-    }
-    let (kind, stem) = if let Some(s) = stem_of(name, &[".aimap_p"]) {
-        (Kind::AimapP, s)
-    } else if let Some(s) = stem_of(name, &[".aimap"]) {
-        (Kind::Aimap, s)
-    } else if let Some(s) = stem_of(name, &[".pathset"]) {
-        (Kind::Pathset, s)
-    } else if let Some(s) = stem_of(name, &["waypoints.csv"]) {
-        (Kind::Waypoints, s)
-    } else if let Some(s) = stem_of(name, &["data_p.csv", "data.csv"]) {
-        (Kind::DataCsv, s)
-    } else if let Some(s) = stem_of(name, &["_strtpnts"]) {
-        (Kind::StartPoints, s)
-    } else if let Some(s) = stem_of(name, &[".opp"]) {
-        // `x-a-N.opp` / `x-p-N.opp` / `x-N.opp` all belong to event `x`.
-        let mut s = s;
-        if let Some((base, tail)) = s.rsplit_once('-')
-            && tail.chars().all(|c| c.is_ascii_digit())
-        {
-            s = base;
-        }
-        if let Some((base, tail)) = s.rsplit_once('-')
-            && matches!(tail, "a" | "p")
-        {
-            s = base;
-        }
-        (Kind::Opp, s)
-    } else if let Some(s) = stem_of(name, &[".csv"]) {
-        (Kind::Csv, s)
-    } else {
-        (Kind::Other, name)
-    };
-    (kind, Some(stem.to_string()))
 }
 
 /// Aggregated per-city counts that do not belong to either family.
@@ -480,7 +412,7 @@ fn events(vfs: &Vfs, paths: &[String]) -> (Family, Family) {
             fam.discovered += 1;
             if matched
                 .iter()
-                .any(|s| stems[s].iter().any(|k| k.satisfies(ev.primary)))
+                .any(|s| stems[s].iter().any(|k| satisfies(*k, ev.primary)))
             {
                 fam.accepted += 1;
             } else {

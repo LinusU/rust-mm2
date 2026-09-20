@@ -140,6 +140,21 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// List the authored event catalog per city: every `mm*data.csv`
+    /// row with its resolved dependent records, parse status and failed
+    /// references.
+    Events {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Restrict to one city stem (default: every discovered
+        /// `race/<city>/` directory).
+        #[arg(long)]
+        city: Option<String>,
+        /// Exit nonzero on an empty catalog, a missing/malformed table,
+        /// or any incomplete event.
+        #[arg(long)]
+        strict: bool,
+    },
     /// Versioned content inventory: expected/discovered/accepted/
     /// rejected/unverified counts per content family, fingerprinted by
     /// engine commit and resolved-path provenance.
@@ -193,6 +208,9 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::ValidateCars { dir, all, strict } => {
             validate_cars(dir, cli.mods.as_deref(), *all, *strict)
+        }
+        Command::Events { dir, city, strict } => {
+            events(dir, cli.mods.as_deref(), city.as_deref(), *strict)
         }
         Command::Inventory { dir, json, strict } => {
             inventory_cmd(dir, cli.mods.as_deref(), *json, *strict)
@@ -571,6 +589,138 @@ fn cars(dir: &Path, mods: Option<&Path>) -> Result<(), Box<dyn std::error::Error
         for f in &failures {
             println!("  {f}");
         }
+    }
+    Ok(())
+}
+
+/// A compact per-record summary for the events listing.
+fn record_tag(r: &mm2_game::EventRecord) -> String {
+    use mm2_formats::racefiles::RaceFileKind as K;
+    use mm2_game::RecordContent as C;
+    match &r.content {
+        C::Waypoints {
+            rows, width_label, ..
+        } => format!("wp:{rows}({width_label})"),
+        C::StartPoints { rows, .. } => format!("strtpnts:{rows}"),
+        C::Opp { rows, .. } => format!("opp{}:{rows}", r.difficulty.unwrap_or('-')),
+        C::CrashData { rows, .. } => format!("data:{rows}"),
+        C::Unparsed => match r.kind {
+            K::Aimap => "aimap".into(),
+            K::AimapP => "aimap_p".into(),
+            K::Pathset => "pathset".into(),
+            other => format!("{other:?}"),
+        },
+        C::Failed(_) => format!("!{:?}", r.kind),
+    }
+}
+
+fn events(
+    dir: &Path,
+    mods: Option<&Path>,
+    city: Option<&str>,
+    strict: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let vfs = build_vfs(dir, mods)?;
+
+    // Which cities to scan: the explicit one, or every `race/<city>/`
+    // directory discovered (stock + any mod-provided cities).
+    let cities: Vec<String> = match city {
+        Some(c) => vec![c.to_ascii_lowercase()],
+        None => {
+            let mut found: std::collections::BTreeSet<String> = mm2_content::EXPECTED_RACE_CITIES
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            for p in vfs.list() {
+                if let Some(rest) = p.strip_prefix("race/")
+                    && let Some((c, _)) = rest.split_once('/')
+                {
+                    found.insert(c.to_string());
+                }
+            }
+            found.into_iter().collect()
+        }
+    };
+
+    let mut failures: Vec<String> = Vec::new();
+    for city in &cities {
+        let cat = mm2_game::EventCatalog::scan(&vfs, city);
+        println!("== events: {city} ==");
+        for t in &cat.tables {
+            match &t.error {
+                Some(e) => {
+                    println!("  {:<18} ERROR: {e}", t.logical);
+                    failures.push(format!("{city}: {} — {e}", t.logical));
+                }
+                None => println!(
+                    "  {:<18} {:>2} rows ({} row diagnostics)",
+                    t.logical, t.rows, t.diagnostics
+                ),
+            }
+        }
+        if cat.is_empty() {
+            println!("  (no authored events cataloged)");
+            failures.push(format!("{city}: event catalog is empty"));
+        }
+        for ev in &cat.events {
+            let deps = ev
+                .records
+                .iter()
+                .map(record_tag)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let status = match &ev.status {
+                mm2_game::EventStatus::Ready => "ready".to_string(),
+                mm2_game::EventStatus::Incomplete { missing } => {
+                    failures.push(format!(
+                        "{city}: {} — incomplete: {}",
+                        ev.stem,
+                        missing.join(", ")
+                    ));
+                    format!("incomplete ({})", missing.join(", "))
+                }
+            };
+            println!(
+                "  [{:>2}] {:<10} {:<9} {:<28} {}",
+                ev.event_ref.index, ev.stem, ev.description, status, deps
+            );
+            for f in &ev.failed {
+                println!("       failed ref: {} — {}", f.reference, f.reason);
+            }
+            for r in &ev.rewards {
+                println!(
+                    "       reward: {} {:?} {} variant {} — {}",
+                    r.race_type, r.race_num, r.car, r.variant, r.message
+                );
+            }
+        }
+        if !cat.extras.is_empty() {
+            println!(
+                "  extras ({}): {}",
+                cat.extras.len(),
+                cat.extras
+                    .iter()
+                    .map(|e| e.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        if !cat.milestone_rewards.is_empty() {
+            println!("  milestone rewards:");
+            for r in &cat.milestone_rewards {
+                println!(
+                    "    {} {:?} → {} variant {} — {}",
+                    r.race_type, r.race_num, r.car, r.variant, r.message
+                );
+            }
+        }
+        for d in &cat.diagnostics {
+            println!("  note: {d}");
+        }
+        println!();
+    }
+    if strict && !failures.is_empty() {
+        return Err(format!("strict events audit: {} failures", failures.len()).into());
     }
     Ok(())
 }

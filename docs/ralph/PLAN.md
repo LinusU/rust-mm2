@@ -38,14 +38,16 @@
 
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
-**Next selected slice: F11-A** — race catalog and shared runtime. Deps
-(F00-B, F01-A) are externally checked and it unblocks the whole race
-subtree (F12–F15, F21, F26, F27). The authored `mm*data.csv` tables
-already parse (`mm2_formats::racedata`) — the likely first split is an
-`EventRef`-resolving event catalog plus `.opp`/waypoint parsing rather
-than one big change. F01 is complete as a candidate: F01-A/F01-B
-externally checked; F01-C implemented (session quit/restart driven in
-the real app, teardown resets, plugin-attach docs).
+**Next selected slice: F11-B** — shared race lifecycle over the new
+`EventCatalog` (countdown/input lock, swept checkpoint triggers,
+progress, restart/cleanup, once-only results). Its dep F11-A is
+implemented but not yet externally checked, so the runner may prefer an
+independent ready slice instead: F03-A (prop audit) or F09-A (BAI
+parser) both have all deps checked. F01 is complete as a candidate:
+F01-A/F01-B externally checked; F01-C implemented. F11-A implemented:
+shared `racefiles` classifier, waypoint/start-point/`.opp`/crash-data/
+rewards parsers, `EventCatalog` in `mm2_game`, `mm2-inspect events`
+(strict-clean on retail: 45/45 events ready per city, extras listed).
 
 ## Baseline gate results (this checkout, 2026-09-20)
 
@@ -57,6 +59,7 @@ the real app, teardown resets, plugin-attach docs).
 | `mm2-inspect cars <retail>` | 29 catalog entries; all 21 `EXPECTED_STOCK_ROSTER` cars `ready`; 8 extra ids kept with explicit incompleteness reasons |
 | `mm2-inspect list <retail>` | 13,389 logical paths; families: texture 3977, aud 3293, geometry 1867, tune 1356, race 1080, bound 1034, city 247, anim 95 |
 | `mm2-inspect inventory <retail>` | 12 families: cities 2/5 exp/disc all parsed; vehicles 21/21 ready + 8 rejected; races 80 exp, 78 accepted, 2 partial (circuit11), 31 extras; lessons 42/42; placement 13 inst parsed; audio 7/7 families (3293 files unverified); peds 4/4 + wolf partial; MP/breakables/traffic/profile/interface discovered-only. Event-metadata tables parse: 12/10/10/13 checkpoint/blitz/circuit/crash rows per city. `--strict` exits 2 (33 findings) — honest: partial/junk records exist on retail. |
+| `mm2-inspect events <retail> --strict` | exit 0 — london 45/45 ready (12 race + 10 blitz + 10 circuit + 13 crash, 33 extras listed), sf 45/45 ready (32 extras); per-event + milestone rewards resolved; no failed refs |
 || `mm2 --dev-world --headless` | `status=pass` (updates=600, ticks=1198, impacts=1 dropped=0, peak 27.9 m/s, moved 157 m, 4/4 wheels) — dev world starts with no MM2 data, car settles + drives; session clock ≈2× updates at 120 Hz; impact pipeline live |
 || `mm2 --mm2-path <retail> --city sf --headless` | `status=pass` (updates=600, ticks=1198, impacts=3 dropped=0, peak 37.2 m/s, moved 172 m) — 1171 rooms / 3763 props via VFS, imported vpbug driving on real city collision; contract pipeline emits real impacts |
 || `mm2 --dev-world --frames 90 --screenshot` | `status=pass`, 2.9 MB PNG awaited + verified (GPU/render evidence recorded on this machine) |
@@ -102,7 +105,7 @@ the real app, teardown resets, plugin-attach docs).
 | F10-A | queued | F01-B, F02-A, F09-B | `va*` traffic vehicles exist in install; no ambient-traffic code. |
 | F10-B | queued | F10-A | — |
 | F10-C | queued | F10-B | — |
-| F11-A | queued | F00-B, F01-A | Race data inventoried at path level (see Discoveries); no `.aimap`/`.opp`/`.pathset` parsers or event catalog. |
+| F11-A | implemented | F00-B, F01-A | `mm2_formats::racefiles` shared classifier (was private to `mm2-inspect` inventory); new parsers `waypoints` (waypoint + `_strtpnts` CSVs), `opp`, `crashdata` (tolerates retail `AmbDenisty` typo / omitted `Filename` label / named tail columns — kept as diagnostics), `rewards`. `mm2_game::EventCatalog`: VFS scan per city, `mm*data.csv` rows → `EventRef`-keyed entries (ready/incomplete + failed refs), dep records attached by stem (aimap/aimap_p/pathset/waypoints/startpoints/per-difficulty opp), Crash Course `Filename` links resolve whole linked stems (incl. sibling `.opp`), rewards + milestone rewards linked, unclaimed stems listed as extras. `mm2-inspect events <install> [--city] [--strict]` — strict exits 0 on retail: 45/45 events ready per city, 33/32 extras. Candidate pending external check. |
 | F11-B | queued | F11-A | — |
 | F11-C | queued | F11-B | — |
 | F12-A | queued | F02-B, F11-B | London blitz0–12, SF blitz0–13 authored data present. |
@@ -213,6 +216,20 @@ the real app, teardown resets, plugin-attach docs).
   selectable event with Amateur + Professional parameter blocks
   (car/time-of-day/weather/opponents/cops/ambient/peds/laps/timelimit/
   difficulty). See `docs/original-rules.md` for the full ledger.
+- Race file grammar (F11-A, 2026-09-20): the `race/<city>` classifier
+  now lives in `mm2_formats::racefiles` (shared by inventory and the
+  event catalog). Waypoint CSVs use `x,y,z,a,radius|poly count,frame
+  rate|frane rate,...` headers; `*_strtpnts` are headerless numeric CSV;
+  `.opp` is 9-column CSV (x,y,z,brake,fwd/side offsets,target speed,
+  speed/side start) with `-a`/`-p` difficulty suffixes; `.aimap` is
+  INI-like text; `.pathset` is binary `PTH1`. Crash `crash<N>data.csv`
+  headers are inconsistent on retail — `AmbDenisty` typo, named tail
+  columns (`Misc`, `cornerspeed`, `chkflags`, `numopp`), and london
+  `crash8data.csv` omits the `Filename` label while rows still carry
+  it — so the parser keys off the `Event,Checkpoints,TimeLimit` prefix
+  and keeps anomalies as diagnostics. `*_rewards.csv` links crash
+  sub-event indexes to vehicle/paint unlocks plus Half/All milestone
+  rows per mode.
 - City files: `city/{city,london,sf,sfai,variant}.psdl`,
   `{london,sf}{,_sup,_bak}.bai`, `sfai.bai`, 44 `.pathset`, 42 `.csv`,
   35 `.ldef`, 25 `.cpvs`, 13 `.inst`, 3 `.sky`, 3 `.txt`,
@@ -228,4 +245,5 @@ the real app, teardown resets, plugin-attach docs).
 - `mm2-inspect` commands: `scan` (`--strict`), `list`, `resolve`,
   `lookup`, `tex`, `pkg`, `psdl`, `dump`, `cars`, `car` (`--paint`,
   `--json`), `handling` (`--strict`), `validate-cars` (`--all`,
-  `--strict`), `inventory` (`--json`, `--strict`).
+  `--strict`), `inventory` (`--json`, `--strict`), `events` (`--city`,
+  `--strict`).
