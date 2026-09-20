@@ -218,10 +218,16 @@ enum Command {
         /// Restrict to one city stem (default: both stock cities).
         #[arg(long)]
         city: Option<String>,
-        /// Route probe `from:to` as BAI road indices; snaps the nearest
-        /// routable lane to each road's centre point.
+        /// Route probe `from:to` as BAI road indices; anchors each end
+        /// on the road's first arc lane and honours the city aimap's
+        /// road closures.
         #[arg(long)]
         route: Option<String>,
+        /// Reconcile each exit's geometric turn classification against
+        /// the authored counterclockwise road-index delta, histogrammed
+        /// by intersection arity.
+        #[arg(long)]
+        turns: bool,
         /// Exit nonzero when an expected graph fails to build or any
         /// issue is reported.
         #[arg(long)]
@@ -306,12 +312,14 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             dir,
             city,
             route,
+            turns,
             strict,
         } => nav(
             dir,
             cli.mods.as_deref(),
             city.as_deref(),
             route.as_deref(),
+            *turns,
             *strict,
         ),
         Command::Inventory { dir, json, strict } => {
@@ -1091,16 +1099,18 @@ fn bai(
 /// is loaded through the production `mm2_content::load_nav_graph` path
 /// and its `NavGraph` build reported — arc/lane counts, one-way roads,
 /// dead ends, weakly connected components and every `NavIssue`. The
-/// optional `--route from:to` probe anchors each road index at the
-/// midpoint of one of its routable arcs, snaps to the nearest routable
-/// lane and runs the bounded A* route query, printing the step
-/// sequence or the specific `RouteError`. `--strict` fails on any
-/// load failure or issue.
+/// optional `--route from:to` probe anchors each road index on its
+/// first arc's lane and runs the bounded A* route query — honouring
+/// the city aimap's road closures — printing the step sequence or the
+/// specific `RouteError`. `--turns` reconciles every exit's geometric
+/// turn classification against the authored counterclockwise road-index
+/// delta. `--strict` fails on any load failure or issue.
 fn nav(
     dir: &Path,
     mods: Option<&Path>,
     city: Option<&str>,
     route: Option<&str>,
+    turns: bool,
     strict: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let vfs = build_vfs(dir, mods)?;
@@ -1157,47 +1167,81 @@ fn nav(
             println!("    issue: {issue}");
         }
 
+        // Aimap overrides: an absent file is fine (a modded city may
+        // not ship one); a malformed one is reported, not fatal.
+        let overrides = match mm2_content::load_nav_overrides(&vfs, &format!("city/{c}.aimap")) {
+            Ok(o) => o,
+            Err(e) => {
+                println!("    aimap: failed to parse ({e}); overrides ignored");
+                None
+            }
+        };
+        if let Some(o) = &overrides {
+            println!(
+                "    aimap: {} closed road(s), speed limit {:?}",
+                o.closed_roads.len(),
+                o.default_speed_limit
+            );
+        }
+
         if let Some((from, to)) = probe {
-            let snap = |road: u16| -> Option<[f32; 3]> {
-                let r = g.road(road)?;
-                // Anchor at the arc's midpoint; nearest_lane then finds
-                // the closest lane (possibly a neighbouring road's).
-                let anchor = r.arcs.iter().flatten().next().map(|a| {
-                    let arc = g.arc(*a);
-                    [
-                        (arc.entry_point[0] + arc.exit_point[0]) / 2.0,
-                        (arc.entry_point[1] + arc.exit_point[1]) / 2.0,
-                        (arc.entry_point[2] + arc.exit_point[2]) / 2.0,
-                    ]
-                })?;
-                g.nearest_lane(anchor, &mm2_game::LaneQuery::vehicles(64.0))
-                    .map(|h| h.point)
-            };
-            match (snap(from), snap(to)) {
-                (Some(a), Some(b)) => match g.route(a, b, &mm2_game::RouteOptions::default()) {
-                    Ok(r) => {
-                        let steps: Vec<String> = r
-                            .steps
-                            .iter()
-                            .map(|id| {
-                                let arc = g.arc(*id);
-                                let dir = match arc.dir {
-                                    mm2_game::TravelDir::Forward => "+",
-                                    mm2_game::TravelDir::Backward => "-",
-                                };
-                                format!("{}{dir}", arc.road)
-                            })
-                            .collect();
-                        println!(
-                            "    route {from}→{to}: {} steps ({:.0} m) {}",
-                            r.steps.len(),
-                            r.length,
-                            steps.join(" → "),
-                        );
+            let opts = overrides
+                .as_ref()
+                .map_or_else(mm2_game::RouteOptions::default, |o| o.route_options());
+            match g.route_roads(from, to, &opts) {
+                Ok(r) => {
+                    let steps: Vec<String> = r
+                        .steps
+                        .iter()
+                        .map(|id| {
+                            let arc = g.arc(*id);
+                            let dir = match arc.dir {
+                                mm2_game::TravelDir::Forward => "+",
+                                mm2_game::TravelDir::Backward => "-",
+                            };
+                            format!("{}{dir}", arc.road)
+                        })
+                        .collect();
+                    println!(
+                        "    route {from}→{to}: {} steps ({:.0} m) {}",
+                        r.steps.len(),
+                        r.length,
+                        steps.join(" → "),
+                    );
+                }
+                Err(e) => println!("    route {from}→{to}: {e}"),
+            }
+        }
+
+        if turns {
+            // Reconciliation report: the authored counterclockwise
+            // road-index delta vs the geometric turn classification,
+            // histogrammed by intersection arity. The original's index
+            // arithmetic is only documented for 4-ways — this report is
+            // how that claim gets measured against retail data.
+            let mut table: std::collections::BTreeMap<(usize, u8), [u32; 3]> =
+                std::collections::BTreeMap::new();
+            let mut total = 0u32;
+            for road in g.roads() {
+                for arc in road.arcs.iter().flatten() {
+                    for exit in g.exits(*arc) {
+                        let arity = g.intersections()[exit.intersection as usize].roads.len();
+                        let slot = match exit.turn {
+                            mm2_game::TurnKind::Left => 0,
+                            mm2_game::TurnKind::Straight => 1,
+                            mm2_game::TurnKind::Right => 2,
+                        };
+                        table.entry((arity, exit.ccw_delta)).or_default()[slot] += 1;
+                        total += 1;
                     }
-                    Err(e) => println!("    route {from}→{to}: {e}"),
-                },
-                _ => println!("    route {from}→{to}: road index missing or no routable lane"),
+                }
+            }
+            println!("    turns: {total} exits");
+            for ((arity, delta), counts) in &table {
+                println!(
+                    "      {arity}-way Δccw={delta}: left={} straight={} right={}",
+                    counts[0], counts[1], counts[2]
+                );
             }
         }
     }

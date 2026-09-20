@@ -26,6 +26,7 @@
 //! T-junction) the straightest exit is returned as a documented
 //! fallback rather than inventing connectivity.
 
+use mm2_formats::aimap::Aimap;
 use mm2_formats::bai::{AmbientType, Bai, End, Side, VehicleRule};
 use std::collections::{BTreeSet, BinaryHeap, HashMap};
 use std::fmt;
@@ -465,6 +466,86 @@ pub struct LaneHit {
     pub tangent: [f32; 3],
     /// Distance along the curve in storage order.
     pub along: f32,
+}
+
+/// Ambient-navigation overrides distilled from a parsed `.aimap`
+/// file — the contract the content producer fills for routing and
+/// diagnostics consumers. Interpretation (`docs/research/aimap.md`):
+///
+/// - `[Exceptions]` rows carry `density 0.00` on every retail row:
+///   a zero density is treated as "ambient traffic forbidden here",
+///   closing the road to ambient routing (inferred — the original's
+///   runtime semantics are unverified). Rows with a nonzero density
+///   are kept for consumers but do not close the road.
+/// - `[Speed Limit]` overrides [`NavRoad::base_speed`] on every road;
+///   a positive per-road exception speed beats the file default.
+///   Units are the BAI base speed's (unverified).
+/// - `[Ambients Drive On The Left]` is informational only: authored
+///   lane direction already encodes handedness, so the flag never
+///   changes the graph.
+#[derive(Debug, Clone, Default)]
+pub struct NavOverrides {
+    /// BAI road ids closed to ambient traffic (zero-density
+    /// `[Exceptions]` rows). Ids outside the city's road space — seen
+    /// on several retail London race files — are kept verbatim: they
+    /// simply never match an arc.
+    pub closed_roads: BTreeSet<u16>,
+    /// `[Speed Limit]` file default; overrides `base_speed` when set.
+    pub default_speed_limit: Option<f32>,
+    /// Raw `[Exceptions]` rows, for consumers that need density or
+    /// per-road speed detail.
+    pub exceptions: Vec<mm2_formats::aimap::RoadException>,
+    /// `[Ambients Drive On The Left]` raw flag (0/1 on retail).
+    pub drive_on_left: Option<i64>,
+}
+
+impl NavOverrides {
+    /// Distill a parsed aimap into navigation overrides.
+    pub fn from_aimap(aimap: &Aimap) -> Self {
+        Self {
+            closed_roads: aimap
+                .exceptions
+                .iter()
+                .filter(|e| e.density <= 0.0)
+                .filter_map(|e| u16::try_from(e.road).ok())
+                .collect(),
+            default_speed_limit: aimap.speed_limit,
+            exceptions: aimap.exceptions.clone(),
+            drive_on_left: aimap.drive_on_left,
+        }
+    }
+
+    /// Whether `road` (BAI id, equal to the road index on retail) is
+    /// closed to ambient traffic.
+    pub fn is_closed(&self, road: u16) -> bool {
+        self.closed_roads.contains(&road)
+    }
+
+    /// Speed limit for `road`: a positive per-road exception wins,
+    /// then the file default. `None` leaves the authored base speed.
+    pub fn speed_limit(&self, road: u16) -> Option<f32> {
+        self.exceptions
+            .iter()
+            .find(|e| e.road == road as u32 && e.speed_limit > 0.0)
+            .map(|e| e.speed_limit)
+            .or(self.default_speed_limit)
+    }
+
+    /// The effective limit for a graph road — the aimap value or the
+    /// authored `base_speed`.
+    pub fn effective_speed(&self, road: &NavRoad) -> f32 {
+        self.speed_limit(road.id).unwrap_or(road.base_speed)
+    }
+
+    /// Route options honouring the closures: a closed road is never
+    /// entered through a turn (start/goal endpoints may still snap
+    /// onto one, matching [`RouteOptions::closed_roads`] semantics).
+    pub fn route_options(&self) -> RouteOptions {
+        RouteOptions {
+            closed_roads: self.closed_roads.clone(),
+            ..RouteOptions::default()
+        }
+    }
 }
 
 /// Options for [`NavGraph::route`].
@@ -1237,6 +1318,36 @@ impl NavGraph {
             steps,
             length,
         })
+    }
+
+    /// Route probe between two BAI road indices — the shared helper
+    /// `mm2-inspect nav --route` and the `--nav-route` overlay use.
+    /// Each end anchors at the midpoint of the road's first arc's
+    /// first lane: a point on the lane curve resolves unambiguously
+    /// to that lane, where the arc's centreline would sit equidistant
+    /// between both travel directions. A road with no arc maps to
+    /// [`RouteError::NoStartLane`]/[`RouteError::NoGoalLane`].
+    pub fn route_roads(
+        &self,
+        from: u16,
+        to: u16,
+        options: &RouteOptions,
+    ) -> Result<Route, RouteError> {
+        let anchor = |road: u16| -> Option<[f32; 3]> {
+            let arc = self
+                .road(road)?
+                .arcs
+                .iter()
+                .flatten()
+                .next()
+                .map(|a| self.arc(*a))?;
+            let lane = self.lane(*arc.lanes.first()?)?;
+            self.sample_lane(lane.id, lane.length * 0.5)
+                .map(|s| s.position)
+        };
+        let a = anchor(from).ok_or(RouteError::NoStartLane)?;
+        let b = anchor(to).ok_or(RouteError::NoGoalLane)?;
+        self.route(a, b, options)
     }
 
     /// Start a cursor at a route's snapped start position.

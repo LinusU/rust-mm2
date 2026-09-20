@@ -39,7 +39,7 @@ pub use model::{
     Lod, MeshGroup, ModelPart, PartRole, VehicleModel, WheelVisual, build_model, classify_stem,
     shader_for_paint, split_lod,
 };
-pub use nav::{NavLoadError, load_nav_graph};
+pub use nav::{NavLoadError, load_nav_graph, load_nav_overrides};
 pub use race_def::{
     PLAYER_SLOT, RaceBuildError, RaceDefBuild, RaceDefEntry, RaceDefReport, RaceDefSummary,
     race_definition,

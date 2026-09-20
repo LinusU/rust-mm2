@@ -330,9 +330,18 @@ pub fn headless_smoke(
                 outcome,
             )
         });
+    // `--nav` evidence: the graph + overrides loaded through the real
+    // session path (`dev.nav_overlay` on the session config).
+    let nav_detail = world_ecs
+        .get_resource::<crate::nav_overlay::CityNav>()
+        .map(|n| {
+            let s = crate::nav_overlay::hud_summary(n);
+            format!(" nav={}", s.strip_prefix("nav ").unwrap_or(&s))
+        })
+        .unwrap_or_default();
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{extra}",
+            "updates={frames} ticks={ticks} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{nav_detail}{extra}",
             driver.as_str(),
             session.phase().name(),
             moved = pos.map(|p| (p - spawn_pos).length()).unwrap_or(f32::NAN),

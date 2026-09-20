@@ -1,138 +1,154 @@
 # Last implementation iteration
 
-- Task ID and title: F09-B.1 — directed navigation graph over the BAI
-  road network: lane sampling, elevation-aware nearest-lane queries,
-  legal turn exits, seeded route choice, bounded deterministic routing,
-  per-consumer route cursors, a `mm2_content` VFS loader and a
-  `mm2-inspect nav` audit. Debug rendering overlays deliberately stay
-  in F09-B.2; AIMAP override *application* stays in F09-B.2/F10+.
+- Task ID and title: F09-B.2 — debug navigation overlays over imported
+  city geometry (F09-AC04), aimap override application, and a
+  turn-classification reconciliation report on retail data.
 - Starting commit and resulting commits: started at
-  `a5205d1917b5367378d7aca89324b96e51f48bc5` (clean tree, branch
-  `ralph/night`, F09-A.2 externally checked); result = the commit on
+  `0d884825cadeb0d874fc1eb220c82656dc866d2f` (clean tree, branch
+  `ralph/night`, F09-B.1 externally checked); result = the commit on
   top of it.
-- Why this slice: PLAN named F09-B as the next slice and both its
-  inputs (BAI + aimap) now parse. F09-B is broad, so it split: B.1 is
-  the query graph + audit; B.2 keeps debug overlays and deeper
-  original-data validation. Parent F09 acceptance stays whole.
+- Why this slice: PLAN named F09-B.2 next — F09-AC04 was the only F09
+  acceptance criterion without any evidence, and the B.1 review noted
+  aimap `[Exceptions]`/`[Speed Limit]` were parsed but never applied
+  and that `ccw_delta` awaited reconciliation against geometry.
 - Production code changed:
-  - `crates/mm2_game/src/nav.rs` (new): `NavGraph::build(&Bai)` —
-    directed arcs per road direction (right-side curves travel with
-    the sections, left-side against; London's left-hand driving is
-    baked into authored BAI data per the Adzima GDMag article, so no
-    per-city handedness flag), lane records for vehicle/sidewalk/
-    tram/train curves with measured signed lateral offset, resolved
-    end→intersection connectivity with `UnresolvedEnd` degradation to
-    dead ends, turn connections (no U-turns), union-find components,
-    an XZ bucket grid, and `NavStats`. Queries: `sample_lane`
-    (travel-direction position+tangent), `nearest_lane` (full-3D
-    distance — bridge decks cannot win over ground lanes by horizontal
-    proximity; `LaneQuery::rooms` filters by PSDL room for stacked
-    geometry), `exits`/`legal_exits` (documented lane-position rules:
-    inner lane toward centre, outer kerb-side, middle straight,
-    one-ways any exit; geometric turn classification plus authored
-    `ccw_delta` carried for research), `choose_exit` (seeded
-    `NavRng` — SplitMix64-seeded xorshift, deterministic on every
-    platform), `route` (bounded A* with `NoStartLane`/`NoGoalLane`/
-    `Unreachable`/`ExpansionLimit` failures and `closed_roads` for
-    future aimap `[Exceptions]`), `cursor`/`advance_cursor`/
-    `cursor_sample` (per-consumer state over the immutable graph).
-    Issues (`NavIssue`) report unresolved ends, degenerate lanes,
-    recomputed distances and non-routable roads — reported, never
-    repaired.
-  - `crates/mm2_game/src/lib.rs`: `pub mod nav`.
-  - `crates/mm2_content/src/nav.rs` (new): `load_nav_graph(vfs, city)`
-    — resolves `city/<name>.bai` through the VFS, parses `Bai`,
-    builds `NavGraph`, returns `NavBuild`; structured `NavLoadError`
-    (`Resolve`/`Read`/`Parse`).
-  - `crates/mm2_content/src/lib.rs`: `pub mod nav`.
-  - `tools/mm2_inspect/src/main.rs`: new `nav` subcommand
-    (`[--city] [--strict] [--route from:to]`) — expected denominator
-    `city/{london,sf}.bai`, extras audited as unsupported-on-failure;
-    prints per-city stats + every `NavIssue`; `--route` snaps both
-    road midpoints to the nearest routable lane (any direction) and
-    prints the arc sequence + length; `--strict` exits nonzero on
-    failures/issues.
-- Research/documentation: `docs/research/bai.md` gained a
-  "Lane direction and the navigation graph" section — measured
-  `x_axis ≈ tangent × up` (SF 1719/1723, London 2504/2508 sections,
-  0 opposite), right-side curves at +x / left-side at −x in the large
-  majority, `edgeDistances` proven *not* a lane ordering (profiles
-  like `[7.5, 2.5, 2.5, 7.5]` on one-way sides → lanes rank by
-  measured offset), sidewalk curves reliably last in the shared
-  curve arrays, and the documented turn/London rules sourced to the
-  Adzima article. Ledger: WLD-9/10/11 added, UNK-12 updated (graph
-  builds; runtime consumption still unverified), UNK-19 added
-  (`edgeDistances` semantics). `docs/architecture.md` records the
-  nav contract in `mm2_game` and the loader in `mm2_content`.
-- Retail findings reported by the audit (not repaired):
-  - London: 540 roads (166 one-way) → 606 arcs, 1141 vehicle + 1080
-    sidewalk + 28 rail lanes, 328 intersections, 0 dead ends, 1
-    connected component.
-  - SF: 379 roads (96 one-way) → 618 arcs, 1212 + 758 + 42 lanes,
-    214 intersections, 1 dead end, 1 component.
-  - 176 roads carry no routable vehicle lanes (pedestrian/special/
-    disabled or curve-less) — listed individually as issues.
-  - Route probes succeed on both cities, e.g. `13→50` on SF = 4 steps
-    (576 m) `13- → 12- → 130+ → 50-`; London `13→50` = 30 steps
-    (1948 m).
-  - A self-review fix mattered on real data: vehicle curves on
-    `PedestriansOnly`/`Disabled` sides were briefly stamped with the
-    next arc's id; after the fix London's routable-lane count dropped
-    1381→1141 (SF 1235→1212) — the honest counts.
-- Tests added and why (`mm2_game/tests/nav.rs`, 20): straight
-  two-way roads produce two oppositely directed arcs (AC01);
-  curved roads sample correctly; one-way roads (right-only and
-  left-only authored forms) produce a single arc (AC01); 4-way and
-  T intersections wire legal exits, lane position governs legal
-  turns, middle lanes go straight, one-ways take any exit, U-turns
-  excluded; unresolved ends degrade to dead ends with issues (AC05
-  input-honesty); stacked bridge/ground lanes snap by 3D distance
-  not horizontal proximity and room hints disambiguate (AC03);
-  routing fails `Unreachable`/`ExpansionLimit`/`NoStartLane`/
-  `NoGoalLane` with bounds honored (AC05); `closed_roads` blocks
-  transit but not endpoints; seeded exit choice is deterministic;
-  two `RouteCursor`s advance independently over one graph (AC06);
-  degenerate lanes drop out with issues.
+  - `crates/mm2_game/src/nav.rs`: `NavOverrides` — the contract the
+    content producer fills for routing/diagnostics consumers.
+    Zero-density `[Exceptions]` rows close roads to ambient routing
+    (inferred semantics — documented in the type docs), `[Speed
+    Limit]` resolves per-road exception → file default → authored
+    `base_speed`, `route_options()` feeds the existing `closed_roads`
+    routing hook, out-of-range road ids kept verbatim. Also
+    `NavGraph::route_roads` — road-index route probe shared by
+    `mm2-inspect nav --route` and `--nav-route`. Self-review catch:
+    the first version anchored each end at the arc's *centreline*
+    midpoint, which sits equidistant between both travel directions;
+    `nearest_lane`'s tie-break could then snap the dead-end-facing
+    lane (the synthetic fixture returned `Unreachable{expanded:1}`).
+    The shipped version anchors on the first lane's curve midpoint —
+    a point on the lane resolves unambiguously to that lane.
+  - `crates/mm2_game/src/config.rs` + `lib.rs`: `NavOverlay`
+    (`route: Option<(u16,u16)>`) inside quarantined `DevOverrides`.
+  - `crates/mm2_content/src/nav.rs` + `lib.rs`:
+    `load_nav_overrides(vfs, path)` — absent aimap → `Ok(None)`
+    (a modded city may not ship one), malformed →
+    `NavLoadError::ParseAimap`, valid → `NavOverrides::from_aimap`.
+  - `crates/mm2_app/src/nav_overlay.rs` (new): `CityNav` session
+    resource (graph + build issues + overrides + probe result),
+    `load_city_nav` (City world + `dev.nav_overlay` only; load
+    failures log and the city still runs), `overlay_lines` — a pure
+    segment builder classifying every drawable stroke (fwd/bwd lane,
+    sidewalk, rail, direction chevron, aimap-closed, route probe,
+    intersection marker) so geometry is assertable without a
+    renderer, `hud_summary`, `draw_nav_overlay` (Bevy gizmos, lanes
+    lifted 0.35 m / route 0.9 m above the surface).
+  - `crates/mm2_app/src/session.rs`: `CityNav` inserted only after a
+    successful city world load and removed with `RaceState` on
+    teardown — nav state cannot leak into the next session.
+  - `crates/mm2_app/src/main.rs`: `--nav` + `--nav-route from:to`
+    CLI (route implies `--nav`; bad syntax exits 2; `--nav` on the
+    dev world warns and draws nothing); draw system on its own
+    `add_systems` (the Update tuple hit Bevy's arity limit); HUD
+    `nav` summary suffix.
+  - `crates/mm2_app/src/smoke.rs`: `nav=` field on the headless
+    smoke record when `CityNav` is loaded.
+  - `tools/mm2_inspect/src/main.rs`: `nav` gained `--turns` (per-city
+    histogram of authored CCW road-index delta vs geometric turn
+    kind, by intersection arity) and now applies the city aimap's
+    `route_options()` to `--route` probes via `route_roads`.
+- Research/documentation: `docs/research/bai.md` records the measured
+  reconciliation — at 4-ways Δccw=1→right / 2→straight / 3→left for
+  471/486 London (96.9%) and 963/968 SF (99.5%) exits, so the
+  documented index arithmetic agrees with authored geometry exactly
+  where it is documented; other arities mix (as expected — the
+  scheme is only documented for 4-ways). Runtime consumption stays
+  UNK-12.
+- Retail findings reported by the audit/overlay (not repaired):
+  - City aimaps carry no `[Exceptions]` rows (0 closed roads) and a
+    15.0 `[Speed Limit]` default on both cities.
+  - Route probes through `route_roads` + aimap options reproduce the
+    B.1 baseline exactly: SF `13→50` = 4 steps/576 m
+    `13- → 12- → 130+ → 50-`; London = 30 steps/1948 m.
+  - `--turns`: 1106 London + 1401 SF exits histogrammed; the 4-way
+    correlation above; 3-way deltas mix all three kinds; 5-ways are
+    sparse and noisy.
+- Tests added and why:
+  - `mm2_game/tests/nav.rs` (+2, now 22): zero-density exceptions
+    close roads to transit routing while nonzero density does not;
+    speed-limit precedence (exception → file default → base speed).
+  - `mm2_content/tests/nav.rs` (new, 5): missing BAI → Resolve
+    error; absent aimap → `None`; exceptions/speed-limit distil into
+    overrides; malformed aimap → error not empty overrides; graph
+    loads through the VFS.
+  - `mm2_app/tests/nav_overlay.rs` (new, 7): lane segments classify
+    by kind/direction and lift above the surface; chevrons point
+    along each lane's travel direction; closed roads draw Closed;
+    the route probe highlights both arcs' lanes at the taller lift;
+    `load_city_nav` pulls graph+aimap+route through the real VFS;
+    `None` without the flag/city/graph; a full session harness proves
+    `CityNav` is inserted on city load and removed on quit.
 - Commands actually run and results (this machine, macOS arm64):
   - `cargo fmt --all -- --check` — PASS.
   - `cargo clippy --locked --workspace --all-targets --all-features
-    -- -D warnings` — PASS.
-  - `cargo test --locked --workspace` — PASS, 29 test-result groups,
-    0 failures (incl. 20 new nav tests).
-  - `mm2-inspect nav /Users/linus/coding/rust-mm2/retail` — exit 0:
-    both expected BAIs build (stats above), 0 failures, 176 issues.
-  - `mm2-inspect nav <retail> --route 13:50` — both cities route
-    (SF 4 steps/576 m, London 30 steps/1948 m).
-  - `mm2-inspect nav <retail> --strict` — exit 2 on the 176
-    non-routable-road issues (honest report, not hidden).
+    -- -D warnings` — PASS (one `too_many_arguments` on `update_hud`,
+    resolved with a targeted allow + explanatory comment per
+    AGENTS.md).
+  - `cargo test --locked --workspace` — PASS, 31 test-result groups,
+    0 failures.
+  - `mm2-inspect nav <retail> --route 13:50 --turns` — exit 0;
+    numbers above.
+  - `mm2 --mm2-path <retail> --city sf --headless --frames 120 --nav
+    --nav-route 13:50` — `status=pass`, record includes
+    `nav=618a/1212l closed=0 route=4st/576m`.
+  - `mm2 --mm2-path <retail> --city london --headless --frames 300
+    --nav` — `status=pass`, `nav=606a/1141l closed=0`. (A 30-frame
+    run reported `never grounded` — London spawn settling, unrelated
+    to nav; 300 frames grounds 4/4.)
+  - `mm2 --mm2-path <retail> --city sf --cam=-747.5,42.4,275.0,179,-15
+    --frames 90 --screenshot screenshots/nav-sf.png --nav
+    --nav-route 13:50` — `status=pass`, 4.5 MB PNG awaited:
+    amber route highlight on the probe's arcs + an intersection
+    cross; HUD `nav 618a/1212l closed=0 route=4st/576m`.
+  - `mm2 --mm2-path <retail> --city sf --cam=-747.5,180,275.0,179,-55
+    --frames 90 --screenshot screenshots/nav-sf-high.png --nav` —
+    `status=pass`, 6.3 MB PNG: lane polylines on every street,
+    direction chevrons (opposing arrows on two-way streets), yellow
+    intersection crosses, purple rail curves on the cable-car
+    street.
+  - `mm2 --mm2-path <retail> --city london
+    --cam=99,150,-177,0,-50 --frames 90 --screenshot
+    screenshots/nav-london-high.png --nav` — `status=pass`, 6.3 MB
+    PNG over Trafalgar Square: lanes + chevrons on the *left* side
+    (London's authored left-hand data), intersection markers, rail
+    curves. HUD `nav 606a/1141l closed=0`.
 - Acceptance IDs satisfied / still open:
-  - F09-AC01 — synthetic straight/curved/one-way/intersection/
-    dead-end/multilevel cases produce legal directed routes:
-    SATISFIED at synthetic level (20 tests).
-  - F09-AC03 — bridge and ground lanes do not connect by horizontal
-    proximity: SATISFIED at synthetic level (3D nearest-lane + room
-    hints; components only join through authored intersections).
-  - F09-AC05 — bounded search with specific failures: SATISFIED
-    (Unreachable/ExpansionLimit/NoStartLane/NoGoalLane).
-  - F09-AC06 — two consumers share the graph without disturbing each
-    other: SATISFIED (immutable graph + per-consumer cursors).
-  - F09-AC02 — already satisfied by A.1/A.2; this slice adds
-    nav-level issue reporting on top.
-  - F09-AC04 — debug overlays match geometry/direction: OPEN, F09-B.2.
-- Stock data/GPU/audio/network limitations: audit + synthetic
-  evidence only — no runtime consumer drives on the graph yet
-  (traffic F10, opponents F15, police F20), so whether the original
-  honors the documented lane rules at runtime stays unverified
-  (UNK-12). Turn *classification* is geometric, not the original's
-  CCW index arithmetic (only documented for 4-ways); `ccw_delta` is
-  carried for future reconciliation. `edgeDistances` meaning unknown
-  (UNK-19). AIMAP `[Exceptions]`/`[Speed Limit]` are not yet applied
-  to routing (hook exists via `closed_roads`). No rendered/audio/
-  network evidence this iteration.
+  - F09-AC04 — debug overlays for sampled original roads in both
+    cities match imported geometry and intended travel direction:
+    SATISFIED at rendered/original-data level (both stock cities,
+    overlay lines trace authored lane curves, chevrons follow
+    authored direction incl. London left-hand, route + closure
+    classes exercised synthetically). Candidate pending external
+    check.
+  - F09-AC01/AC03/AC05/AC06 — unchanged (synthetic level, B.1).
+  - F09-AC02 — unchanged (parser/audit level, A.1/A.2); this slice
+    adds aimap → consumer plumbing on top.
+  - F09 parent: all ACs now carry some evidence; parent stays
+    `implemented`/candidate — runtime consumption by traffic
+    (F10)/opponents (F15)/police (F20) remains unbuilt and the
+    original's runtime semantics unverified (UNK-12).
+- Stock data/GPU/audio/network limitations: GPU/render evidence now
+  exists for the overlay on both cities (local PNGs, not committed —
+  retail content). Still no runtime consumer drives on the graph;
+  `NavOverrides` "zero density = closed" is an inference labelled as
+  such; aimap `density`/`speed_limit` units unverified (UNK-18 area);
+  no audio/network code.
 - Unresolved blockers or discovered regressions: none introduced.
-- Next smallest useful action: F09-B.2 (debug-render overlays over
-  imported geometry + deeper retail route validation against authored
-  data). Alternates: F13-A (checkpoint rules; deps F02-B/F11-B are
-  candidates, not checked) or F03-A (prop audit).
+  (Noted for later: `--turns` shows 3-way Δccw=0 exits exist —
+  ends that reference their own slot's index; carried in the data,
+  worth a future look when the original's runtime is understood.)
+- Next smallest useful action: F13-A (checkpoint rules; deps
+  F02-B/F11-B candidates) or F03-A (prop audit) or F09-C. F10-A
+  (ambient traffic) is the first real graph consumer — its deps now
+  include this B.2 plumbing.
 
 This is a candidate handoff. External code-gate and separate review results live in the runner state directory and are not implied by this report.

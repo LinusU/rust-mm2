@@ -108,9 +108,16 @@ Measured on `city/sf.bai` and `city/london.bai` (2026-09-21):
   outgoing road, freeway ramps can force a right, U-turns never.
   Intersection road lists are authored counterclockwise and the
   original selects exits by index arithmetic — `mm2_game::nav`
-  carries that `ccw_delta` for research but classifies turns
-  geometrically (heading change) because the index scheme is only
-  documented for 4-ways.
+  carries that `ccw_delta` and classifies turns geometrically
+  (heading change). `mm2-inspect nav --turns` reconciles the two on
+  retail (2026-09-20): at 4-ways Δccw=1→right / Δccw=2→straight /
+  Δccw=3→left holds for 471/486 London exits (96.9%) and 963/968 SF
+  exits (99.5%) — the index scheme and measured geometry agree, so
+  the documented convention is consistent with the authored data.
+  Other arities show no clean mapping (3-way deltas mix all three
+  kinds), matching the note that the scheme is only documented for
+  4-ways. The original's *runtime* consumption stays unverified
+  (UNK-12).
 - `edgeDistances` per curve are **not** a lane ordering: profiles like
   `[7.5, 2.5, 2.5, 7.5]` occur on one-way left sides. Their exact
   meaning stays unknown (UNK-19); lane ranking uses the measured
@@ -130,6 +137,10 @@ to ground lanes through horizontal proximity; PSDL-room hints
 disambiguate stacked geometry), legal exits per lane position,
 seeded exit choice, bounded deterministic A* routing with specific
 failure reasons, and per-consumer `RouteCursor`s. `mm2_content::nav`
-loads `city/<name>.bai` through the VFS; `mm2-inspect nav <install>`
-audits the graph per city with `--route from:to` road-index probes
-and `--strict`.
+loads `city/<name>.bai` through the VFS and distils `city/<name>.aimap`
+into `NavOverrides` (zero-density `[Exceptions]` close roads to ambient
+routing; `[Speed Limit]` overrides base speeds). `mm2-inspect nav
+<install>` audits the graph per city with `--route from:to` road-index
+probes (honouring aimap closures), the `--turns` ccw-delta/geometry
+reconciliation, and `--strict`. The app's `--nav`/`--nav-route` flags
+draw the graph over the imported city through gizmos (F09-AC04).

@@ -12,6 +12,7 @@ pub mod city;
 pub mod contracts;
 pub mod dev_world;
 pub mod input;
+pub mod nav_overlay;
 pub mod race;
 pub mod scripted;
 pub mod session;

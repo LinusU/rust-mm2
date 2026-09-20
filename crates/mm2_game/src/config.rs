@@ -373,4 +373,16 @@ pub struct DevOverrides {
     pub vehicle_config: Option<PathBuf>,
     /// `--cam` fixed free-camera start pose.
     pub camera: Option<CameraPose>,
+    /// `--nav` BAI navigation debug overlay over an imported city
+    /// (F09-B diagnostics — never a gameplay input).
+    pub nav_overlay: Option<NavOverlay>,
+}
+
+/// Configuration of the `--nav` debug overlay: draw the city's BAI
+/// navigation graph over the imported geometry.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NavOverlay {
+    /// Optional route probe `<from>:<to>` as BAI road indices, snapped
+    /// like `mm2-inspect nav --route` and highlighted over the lanes.
+    pub route: Option<(u16, u16)>,
 }

@@ -155,9 +155,11 @@ pub fn drive_session(
             filter.reset();
             spawn.trailers.clear();
             // Session-scoped resources die with the session: a race's
-            // countdown/clock/progress must never survive into the next
-            // session (AC03 — no old timer survives).
+            // countdown/clock/progress and the city's nav overlay must
+            // never survive into the next session (AC03 — no old
+            // timer survives).
             commands.remove_resource::<RaceState>();
+            commands.remove_resource::<crate::nav_overlay::CityNav>();
             session
                 .transition(SessionPhase::Menu)
                 .expect("Unloading → Menu is a legal transition");
@@ -262,6 +264,13 @@ pub fn load_session_world(
                         .expect("Loading → Failed is a legal transition");
                     world_ok = false;
                 }
+            }
+            // F09-B diagnostics: the `--nav` overlay loads the city's
+            // navigation graph + aimap overrides as a session resource.
+            // A failed nav load logs and draws nothing — it never
+            // sinks an otherwise loadable city.
+            if world_ok && let Some(nav) = crate::nav_overlay::load_city_nav(&vfs.0, &config) {
+                commands.insert_resource(nav);
             }
             // City lighting.
             commands.spawn((

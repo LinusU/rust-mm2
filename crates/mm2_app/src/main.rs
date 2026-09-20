@@ -17,7 +17,9 @@ use bevy::prelude::*;
 use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use clap::Parser;
 use mm2_app::session::{ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
-use mm2_app::{camera, car_visual, city, contracts, input, race, scripted, session, smoke};
+use mm2_app::{
+    camera, car_visual, city, contracts, input, nav_overlay, race, scripted, session, smoke,
+};
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
 use mm2_game::{
@@ -116,6 +118,17 @@ struct Cli {
     /// countdown, checkpoint and result path.
     #[arg(long)]
     bot: bool,
+
+    /// Draw the city's BAI navigation graph over the imported geometry
+    /// (F09-B debug overlay): lane polylines, travel-direction
+    /// chevrons, intersection markers and aimap-closed roads in red.
+    #[arg(long)]
+    nav: bool,
+
+    /// Highlight a route between two BAI road indices `<from>:<to>` on
+    /// the nav overlay (implies --nav).
+    #[arg(long, value_name = "from:to")]
+    nav_route: Option<String>,
 }
 
 /// Smoke-test capture: run N frames, take the screenshot (if requested),
@@ -346,6 +359,29 @@ fn main() {
         warn!(car = ?selected.as_ref().map(|d| d.id.as_str()), "{w}");
     }
 
+    // `--nav-route from:to` probes the nav graph between two BAI road
+    // indices and implies --nav.
+    let nav_route = cli.nav_route.as_deref().map(|s| {
+        match s
+            .split_once(':')
+            .and_then(|(a, b)| a.parse::<u16>().ok().zip(b.parse::<u16>().ok()))
+        {
+            Some(pair) => pair,
+            None => {
+                error!("invalid --nav-route: expected <from>:<to> road indices");
+                std::process::exit(2);
+            }
+        }
+    });
+    let nav_overlay_cfg = if cli.nav || nav_route.is_some() {
+        if cli.dev_world {
+            warn!("--nav has no effect on the dev world");
+        }
+        Some(mm2_game::NavOverlay { route: nav_route })
+    } else {
+        None
+    };
+
     // The session's typed configuration (F01-A): world + mode +
     // difficulty/conditions/densities/seed + vehicle + authority. Only
     // `world`, `vehicle` and the `dev` overrides have runtime consumers
@@ -368,6 +404,7 @@ fn main() {
         dev: DevOverrides {
             vehicle_config: cli.vehicle_config.clone(),
             camera: cam_start,
+            nav_overlay: nav_overlay_cfg,
         },
         ..SessionConfig::default()
     };
@@ -527,6 +564,12 @@ fn main() {
             ),
             update_hud,
         ),
+    )
+    // The F09-B overlay draws only while a session carries a loaded
+    // CityNav resource.
+    .add_systems(
+        Update,
+        nav_overlay::draw_nav_overlay.run_if(resource_exists::<nav_overlay::CityNav>),
     );
     if cli.bot {
         app.insert_resource(scripted::ScriptedDrive);
@@ -660,9 +703,13 @@ fn smoke_test(
 /// HUD line: speed, gear/direction, RPM, grounded wheels — read from the
 /// `VehicleTelemetry` snapshot, the presentation-side contract, not the
 /// mutable simulation state.
+// Bevy systems thread one parameter per borrowed resource/query; the
+// HUD legitimately reads several.
+#[allow(clippy::too_many_arguments)]
 fn update_hud(
     session: Res<Session>,
     race: Option<Res<mm2_game::RaceState>>,
+    nav: Option<Res<nav_overlay::CityNav>>,
     mut hud: Query<&mut Text, (With<Hud>, Without<ErrorText>)>,
     mut err: Query<&mut Text, (With<ErrorText>, Without<Hud>)>,
     vehicles: Query<&mm2_game::VehicleTelemetry, With<PlayerVehicle>>,
@@ -726,9 +773,12 @@ fn update_hud(
     };
     let grounded = veh.wheels.iter().filter(|w| w.grounded).count();
     let cam = active_cam_pose(&cameras).unwrap_or_default();
+    let nav_text = nav.map_or_else(String::new, |n| {
+        format!("  {}", nav_overlay::hud_summary(&n))
+    });
     for mut text in &mut hud {
         *text = Text::new(format!(
-            "{speed:5.1} km/h  {dir}  {rpm:4.0} rpm  wheels {grounded}/{total}  cam {cam}{race_text}",
+            "{speed:5.1} km/h  {dir}  {rpm:4.0} rpm  wheels {grounded}/{total}  cam {cam}{race_text}{nav_text}",
             rpm = veh.rpm,
             total = veh.wheels.len(),
         ));

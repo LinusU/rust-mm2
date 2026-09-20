@@ -3,6 +3,7 @@
 //! synthetic BAI fixtures — straight, curved, one-way, intersection,
 //! dead-end and multilevel cases (F09-AC01/AC03/AC05/AC06).
 
+use mm2_formats::aimap::Aimap;
 use mm2_formats::bai::{
     Bai, Culling, END_FILL, Intersection, Road, RoadEnd, RoadSection, RoadSide,
 };
@@ -887,4 +888,84 @@ fn sidewalks_and_rails_are_queryable_but_not_routable() {
         .nearest_lane([8.0, 0.0, 50.0], &LaneQuery::vehicles(20.0))
         .unwrap();
     assert_eq!(hit.lane.kind, LaneKind::Vehicle);
+}
+
+// ---------- aimap overrides ----------
+
+fn exception(road: u32, density: f32, speed_limit: f32) -> mm2_formats::aimap::RoadException {
+    mm2_formats::aimap::RoadException {
+        road,
+        density,
+        speed_limit,
+        line: 1,
+    }
+}
+
+#[test]
+fn zero_density_exceptions_close_roads_to_routing() {
+    // The chain from `closed_roads_are_never_entered`, with the closure
+    // arriving through `NavOverrides` instead of a hand-built set.
+    let c0 = [[0.0, 0.0, -30.0], [0.0, 0.0, -4.0]];
+    let c1 = [[0.0, 0.0, 4.0], [0.0, 0.0, 30.0]];
+    let c2 = [[0.0, 0.0, 34.0], [0.0, 0.0, 60.0]];
+    let mk = |id: u16, c: &[[f32; 3]], start: RoadEnd, end: RoadEnd| {
+        road(
+            id,
+            c,
+            vec![1],
+            side(0, &[(3.75, offset(c, 3.75, 0.0))], &[], 2),
+            side(0, &[(-3.75, offset(c, -3.75, 0.0))], &[], 2),
+            start,
+            end,
+        )
+    };
+    let b = bai(
+        vec![
+            mk(0, &c0, dead_end(), connected(0, 0)),
+            mk(1, &c1, connected(0, 1), connected(1, 0)),
+            mk(2, &c2, connected(1, 1), dead_end()),
+        ],
+        vec![
+            intersection(0, [0.0; 3], &[0, 1]),
+            intersection(1, [0.0, 0.0, 32.0], &[1, 2]),
+        ],
+    );
+    let g = NavGraph::build(&b).graph;
+    let aimap = Aimap {
+        exceptions: vec![exception(1, 0.0, 0.0), exception(2, 0.5, 0.0)],
+        ..Aimap::default()
+    };
+    let overrides = NavOverrides::from_aimap(&aimap);
+    // Zero density closes road 1; a nonzero density on road 2 does not.
+    assert!(overrides.is_closed(1));
+    assert!(!overrides.is_closed(2));
+    let err = g
+        .route(
+            [3.0, 0.0, -20.0],
+            [3.0, 0.0, 50.0],
+            &overrides.route_options(),
+        )
+        .unwrap_err();
+    assert!(matches!(err, RouteError::Unreachable { .. }));
+}
+
+#[test]
+fn speed_limit_resolution_prefers_exception_then_default_then_base() {
+    let aimap = Aimap {
+        exceptions: vec![exception(9, 0.0, 30.0)],
+        speed_limit: Some(20.0),
+        drive_on_left: Some(1),
+        ..Aimap::default()
+    };
+    let o = NavOverrides::from_aimap(&aimap);
+    assert_eq!(o.speed_limit(9), Some(30.0));
+    assert_eq!(o.speed_limit(4), Some(20.0));
+    assert_eq!(o.drive_on_left, Some(1));
+    let bare = NavOverrides::from_aimap(&Aimap::default());
+    assert_eq!(bare.speed_limit(9), None);
+    // `effective_speed` falls back to the authored base speed.
+    let g = NavGraph::build(&straight()).graph;
+    let road = &g.roads()[0];
+    assert_eq!(bare.effective_speed(road), road.base_speed);
+    assert_eq!(o.effective_speed(road), 20.0);
 }

@@ -38,21 +38,18 @@
 
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
-**Next selected slice: F09-B.2 (debug nav overlays + deeper retail
-route validation), F13-A (Checkpoint feature proper) or F03-A
-(prop audit)** — F09-B.1 (`mm2_game::nav` directed graph, sampling,
-3D nearest-lane, legal exits, seeded bounded routing, cursors;
-`mm2_content` loader; `mm2-inspect nav`) is implemented this
-iteration: both retail cities build as single connected components
-(London 606 arcs/1141 vehicle lanes, SF 618/1212), 176 non-routable
-roads reported honestly, real route probes succeed. Measured
-semantics baked in: `x_axis ≈ tangent×up` (driver's right),
-right-side lanes travel with sections / left-side against (London's
-left-hand data is authored, not a runtime flag), lanes rank by
-measured lateral offset because `edgeDistances` is not an ordering
-(UNK-19). Still open in F09-B.2: debug overlays (AC04), applying
-aimap `[Exceptions]`/`[Speed Limit]` to consumers. F13-A's deps
-(F02-B, F11-B) remain candidates, not checked.
+**Next selected slice: F13-A (Checkpoint feature proper), F03-A
+(prop audit) or F09-C** — F09-B.2 (`--nav`/`--nav-route` gizmo
+overlay over imported city geometry, aimap `[Exceptions]`/`[Speed
+Limit]` distilled into `NavOverrides` and applied to route probes,
+`mm2-inspect nav --turns` ccw-delta/geometry reconciliation) is
+implemented this iteration with rendered evidence on both stock
+cities: SF lanes/chevrons/intersection markers/rail curves over
+imported geometry, London left-hand chevrons over Trafalgar Square;
+route probes reproduce the B.1 baseline exactly (SF 4 steps/576 m,
+London 30/1948 m) and the aimap closures hook is live. AC04 now has
+rendered original-data evidence (candidate pending external check).
+F13-A's deps (F02-B, F11-B) remain candidates, not checked.
 
 ## Baseline gate results (this checkout, 2026-09-20)
 
@@ -85,6 +82,10 @@ aimap `[Exceptions]`/`[Speed Limit]` to consumers. F13-A's deps
 | `mm2 --mm2-path <retail> --city {london,sf} --event {blitz,checkpoint,circuit}:<all> --headless --bot` | 64/64 authored rows ran the production race path under the scripted driver — 4 `outcome=finished` through finish→result (london blitz:0 `cp=3/3 tl=7.6s`, london checkpoint:0 `cp=5/5`, london circuit:0 `cp=6/6` incl. lap wraps, sf checkpoint:0 `cp=6/6`); 20/20 Blitz `race=Complete` (1 finished + 19 `timed-out`, one ledger result each); 41 untimed checkpoint/circuit runs `race=Running` at the frame cap; 8 SF `status=fail` "fell through the world" (incl. sf checkpoint:0, which recorded its finish first). Cruise `--bot` (no event) passes; london blitz:0 `--pro` finishes with `tl=0.6s` |
 | `mm2-inspect bai <retail>` | exit 0 — london.bai 540 roads/328 intersections (culling 1342 rooms) + sf.bai 379/214 (culling 1172) parse byte-exact, `validate()` clean, all room refs in range vs matching PSDL; extras london_bak/sf_bak clean, sfai.bai parses with 1 authored anomaly (intersection room ref 0), london_sup/sf_sup `unsupported` (CAI1 magic, different layout — reported, not hidden). `--strict` exits 2 (2 issues, all on the sfai dev-map extra) |
 | `mm2-inspect aimap <retail>` | exit 0 — 209/209 expected files resolve + parse (2 city + 207 race `.aimap`/`.aimap_p`, 0 unsupported extras): all declared counts exact, `validate()` clean except 9 cross-check issues — 8 london files carry `[Exceptions]` road ids 562–815 beyond `city/london.bai`'s 540-road space (UNK-18) and `race/sf/stunt0.aimap`'s `opp-c0.2` opponent ref is dead. `--strict` exits 2; `--city sf` filters to 107 files / 1 issue. `scan` recognizes `aimap`/`aimap_p` (all 209 parse). |
+|| `mm2-inspect nav <retail> --route 13:50 --turns` | exit 0 — both city graphs build (unchanged B.1 stats/issues); city aimaps report 0 closed roads, speed limit 15.0; route probes reproduce the baseline exactly (sf `13- → 12- → 130+ → 50-` 4 steps/576 m, london 30 steps/1948 m). `--turns`: 1106 London + 1401 SF exits; 4-way Δccw=1→right, Δccw=2→straight, Δccw=3→left holds for 471/486 (96.9%) and 963/968 (99.5%) — the authored CCW index arithmetic and measured geometry agree where documented; other arities mix. |
+|| `mm2 --mm2-path <retail> --city sf --headless --nav --nav-route 13:50` | `status=pass` — `nav=618a/1212l closed=0 route=4st/576m` in the smoke record: graph + aimap + probe loaded through the real session path. London `--headless --nav` 300f `status=pass` (`nav=606a/1141l closed=0 route=30st/1948m`); a 30-frame run failed `never grounded` — spawn settling, unrelated to nav. |
+|| `mm2 --mm2-path <retail> --city sf --cam=… --frames 90 --screenshot … --nav [--nav-route 13:50]` | `status=pass`, awaited PNGs (~4.5/6.3 MB, local only — `screenshots/nav-sf.png`, `nav-sf-high.png`): lane polylines trace every street's authored lanes, white chevrons point along travel direction (opposing arrows on two-way streets), yellow crosses mark intersections, purple rail curves on the cable-car street, amber route highlight follows the probe arcs. |
+|| `mm2 --mm2-path <retail> --city london --cam=99,150,-177,0,-50 --frames 90 --screenshot … --nav` | `status=pass`, ~6.3 MB PNG (local only — `screenshots/nav-london-high.png`): over Trafalgar Square, lanes + chevrons run on the *left* side of the carriageway (London's authored left-hand data) with intersection markers at each junction. |
 
 ## Task table
 
@@ -124,7 +125,7 @@ aimap `[Exceptions]`/`[Speed Limit]` to consumers. F13-A's deps
 | F09-A.2 | implemented | F00-B, F01-A | `mm2_formats::aimap`: INI-like parser measured on all 209 retail files — `#` comments, `[Section]` headers, scalar vs counted-list bodies (exact-count on retail), free-form `[Traffic Lights]`, unknown sections preserved verbatim in `unknown_sections`. Typed records keep undocumented numeric tails raw (`PoliceRecord.params`, `OpponentRecord.params` — two retail shapes each); malformed rows → `diagnostics` + skip. `Aimap::validate()` reports `AimapIssue`: duplicate exception roads, ambient-weight range/monotonicity/1.0-closure, non-0/1 flags, negative scalars, uninterpreted sections. `mm2-inspect aimap <install> [--city] [--strict]`: expected = `city/<stock>.aimap` + every discovered `race/<stock>/*.aimap{,_p}` (209/209 resolve+parse), extras audited as unsupported-on-failure; cross-checks exception road ids vs same-city `city/<city>.bai` and opponent `.opp` refs via VFS. Retail: 9 issues — 8 london files with exception ids 562–815 beyond the 540-road BAI (UNK-18/WLD-8, reported not repaired), stunt0's `opp-c0.2` ref dead. `--strict` exits 2. `.aimap`/`.aimap_p` added to `scan` recognized formats. docs/research/aimap.md + ledger WLD-6/7/8, UNK-12/18. Candidate pending external check. |
 | F09-B | queued | F09-A | Split into B.1 (nav graph + audit — implemented below) and B.2 (debug overlays + deeper retail route validation). Parent AC04 stays open until B.2. |
 | F09-B.1 | implemented | F09-A | `mm2_game::nav::NavGraph::build(&Bai)`: directed arcs (right-side curves travel with sections, left-side against — London left-hand is authored data per the Adzima article, no handedness flag), vehicle/sidewalk/tram/train lane records ranked by measured lateral offset (`edgeDistances` is not an ordering — UNK-19), end→intersection resolution with dead-end degradation + `NavIssue` reporting, turn connections minus U-turns, union-find components, XZ grid. Queries: `sample_lane`, 3D `nearest_lane` (elevation-aware; `rooms` hint for stacked geometry), `legal_exits` (documented lane-position rules; geometric turn class + authored `ccw_delta`), seeded `choose_exit`, bounded A* `route` (`closed_roads` hook for aimap `[Exceptions]`; specific `RouteError`s), per-consumer `RouteCursor`s. `mm2_content::nav::load_nav_graph` (VFS→`Bai`→graph). `mm2-inspect nav <install> [--city] [--strict] [--route from:to]`. Retail: London 540 roads→606 arcs/1141 vehicle+1080 sidewalk+28 rail lanes/328 ints/0 dead ends/1 component; SF 379→618/1212+758+42/214/1/1; 176 non-routable roads reported; routes resolve (sf 13→50 = 4 steps/576 m). AC01/AC03/AC05/AC06 satisfied at synthetic level (20 tests); AC04 open → B.2. Candidate pending external check. |
-| F09-B.2 | queued | F09-B.1 | Debug-render overlays over imported geometry + direction (AC04); apply aimap `[Exceptions]`/`[Speed Limit]` to route consumers; reconcile geometric turn class vs authored `ccw_delta` on retail. |
+| F09-B.2 | implemented | F09-B.1 | `NavOverrides` distils a parsed aimap (zero-density `[Exceptions]` → `closed_roads`, `[Speed Limit]` → per-road/file-default speed lookup) with `route_options()` feeding the existing `closed_roads` hook. `NavGraph::route_roads` road-index probe (anchors on the first arc's first lane midpoint — a centreline anchor sits equidistant between directions and can snap the dead-end-facing lane). `mm2_content::load_nav_overrides` (absent → `None`, malformed → error). `mm2_app::nav_overlay`: session-scoped `CityNav` (graph + issues + overrides + probe), `overlay_lines` pure segment builder (8 classes: fwd/bwd lanes, sidewalk, rail, direction chevron, closed, route, intersection), `draw_nav_overlay` gizmos, `hud_summary`; `--nav`/`--nav-route` CLI; HUD + `smoke=` `nav=` fields; resource removed on session teardown. `mm2-inspect nav --turns` + aimap-applied `--route`. Retail: probes reproduce baseline exactly; 4-way Δccw↔geometry agreement 96.9% London/99.5% SF (`docs/research/bai.md`). Rendered captures on both cities (local, not committed). Tests: +2 game, +5 content, +7 app. AC04 candidate pending external check. |
 | F09-C | queued | F09-B | — |
 | F10-A | queued | F01-B, F02-A, F09-B | `va*` traffic vehicles exist in install; no ambient-traffic code. |
 | F10-B | queued | F10-A | — |
