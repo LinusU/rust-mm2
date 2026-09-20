@@ -225,6 +225,9 @@ Retail install: `/Users/linus/coding/rust-mm2/retail`, enumerated
 | WLD-6 | `.aimap` override grammar is uniform across all 209 retail files: `[Speed Limit]` scalar, counted `[Exceptions]` (road-id/density/speed), `[Police]`/`[Opponent]` spawns, `[Ambient Types/Density]` cumulative weights closing at 1.0, `[Ambients Drive On The Left]` (1 london / 0 sf), ped-model pairs; rarer `[Density]`, `[CopChaseDistance]`, `[AmbientLaneChanges]`, `[Traffic Lights]`, `[Hookmen]`. | verified_original | data: all `city/`+`race/` aimaps, `mm2-inspect aimap`; docs/research/aimap.md |
 | WLD-7 | Retail exception density/speed values are all `0.00`/`0` — consistent with R3's claim that event aimaps close course roads to ambient traffic. Runtime consumption of these values is unverified (UNK-12). | inferred | data: every `[Exceptions]` row on retail |
 | WLD-8 | Eight london `.aimap` files carry `[Exceptions]` road ids 562–815, outside `city/london.bai`'s 540-road space; SF exceptions are all in range. Different id space or dead authored refs — unknown (UNK-18). | verified_original | `mm2-inspect aimap` cross-check vs `city/london.bai` |
+| WLD-9 | BAI section frames carry `x_axis` = `tangent × up` (the geometric right of travel with the sections) on ~all sections of both retail cities; right-side lane curves sit mostly at +x, left-side at −x — exceptions are authored geometry, so lane rank comes from measured offset, not side slot. | verified_original | measured on `city/{sf,london}.bai`; docs/research/bai.md |
+| WLD-10 | Ambient turn rules: innermost lane turns toward centre or straight, outermost kerb-side or straight, middle lanes straight; one-way roads may take any outgoing road; freeway ramps may force a right; U-turns never. Intersection road lists are authored counterclockwise. London's left-hand driving is baked into authored BAI data (lane swap + reversed vertex/lane order), not a runtime flag. | documented | Adzima GDMag ambient-AI article; docs/research/bai.md |
+| WLD-11 | Each retail city's vehicle road graph is one connected component (SF has exactly one dead end); 166/540 london and 96/379 sf roads are one-way; 176 roads carry no routable vehicle lanes (pedestrian/special/disabled or curve-less). | verified_original | `mm2-inspect nav` on retail |
 
 ## Deliberate rust-mm2 departures (designed, not original claims)
 
@@ -255,13 +258,14 @@ Retail install: `/Users/linus/coding/rust-mm2/retail`, enumerated
 | UNK-9 | Police pursuit AI, sight model, spawn/de-spawn rules beyond "fixed spots" + "line of sight". |
 | UNK-10 | C&R gold spawn/hideout positions, scoring values, drop mechanics, respawn timing. |
 | UNK-11 | Opponent AI route choice/difficulty model. `.opp` rows now parse (`mm2_formats::opp`, F11-A) but their column semantics and consumption rules remain unverified. |
-| UNK-12 | Traffic/pedestrian ambient models (lanes, lights, panic reactions); `.pathset` still unparsed. `.bai` structure now parses (`docs/research/bai.md`) and `.aimap` overrides parse (`docs/research/aimap.md`) — runtime semantics of both remain unverified. |
+| UNK-12 | Traffic/pedestrian ambient models (lanes, lights, panic reactions); `.pathset` still unparsed. `.bai` structure parses and builds a directed nav graph (`docs/research/bai.md`), `.aimap` overrides parse (`docs/research/aimap.md`) — how the original runtime consumes either remains unverified. |
 | UNK-13 | Exact damage accumulation model and breakaway-part rules (DMG-3 documented only as a feature claim). |
 | UNK-14 | Crash Course pass/fail criteria per lesson (time? gates? stunts scored how?). |
 | UNK-15 | Whether pedestrians can be struck and what the consequence is. |
 | UNK-16 | Waypoint/start `a` angle convention (WPT-4) and whether the original enforces gate direction or uses `a` at all at runtime. |
 | UNK-17 | `_strtpnts` row→participant mapping (row 0 treated as the player slot; opponent slots may come from `.opp` instead) and how the original picks a slot per participant. |
 | UNK-18 | Which road-id space the over-range london `.aimap` `[Exceptions]` ids (562–815 vs 540 `city/london.bai` roads) address — `london_sup.bai`'s layout is unparsed, so this stays open (WLD-8). |
+| UNK-19 | BAI `edgeDistances` semantics — not a monotone outer-edge ordering (profiles like `[7.5, 2.5, 2.5, 7.5]` on one-way sides). The nav graph ranks lanes by measured lateral offset instead (WLD-9). |
 
 ## Gaps in this ledger
 

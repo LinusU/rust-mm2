@@ -208,6 +208,25 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Build the shared navigation graph (`mm2_game::nav`) for each
+    /// stock city's `city/<name>.bai`: directed arcs, lanes, dead ends,
+    /// connected components and build issues, with an optional directed
+    /// route probe between two road indices.
+    Nav {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Restrict to one city stem (default: both stock cities).
+        #[arg(long)]
+        city: Option<String>,
+        /// Route probe `from:to` as BAI road indices; snaps the nearest
+        /// routable lane to each road's centre point.
+        #[arg(long)]
+        route: Option<String>,
+        /// Exit nonzero when an expected graph fails to build or any
+        /// issue is reported.
+        #[arg(long)]
+        strict: bool,
+    },
     /// Versioned content inventory: expected/discovered/accepted/
     /// rejected/unverified counts per content family, fingerprinted by
     /// engine commit and resolved-path provenance.
@@ -283,6 +302,18 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Aimap { dir, city, strict } => {
             aimap(dir, cli.mods.as_deref(), city.as_deref(), *strict)
         }
+        Command::Nav {
+            dir,
+            city,
+            route,
+            strict,
+        } => nav(
+            dir,
+            cli.mods.as_deref(),
+            city.as_deref(),
+            route.as_deref(),
+            *strict,
+        ),
         Command::Inventory { dir, json, strict } => {
             inventory_cmd(dir, cli.mods.as_deref(), *json, *strict)
         }
@@ -1049,6 +1080,135 @@ fn bai(
     if strict && (issues_total > 0 || !failures.is_empty()) {
         return Err(format!(
             "strict bai audit: {} failures, {issues_total} issues",
+            failures.len()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Navigation-graph audit (F09-B): each stock city's `city/<name>.bai`
+/// is loaded through the production `mm2_content::load_nav_graph` path
+/// and its `NavGraph` build reported — arc/lane counts, one-way roads,
+/// dead ends, weakly connected components and every `NavIssue`. The
+/// optional `--route from:to` probe anchors each road index at the
+/// midpoint of one of its routable arcs, snaps to the nearest routable
+/// lane and runs the bounded A* route query, printing the step
+/// sequence or the specific `RouteError`. `--strict` fails on any
+/// load failure or issue.
+fn nav(
+    dir: &Path,
+    mods: Option<&Path>,
+    city: Option<&str>,
+    route: Option<&str>,
+    strict: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let vfs = build_vfs(dir, mods)?;
+
+    let probe = match route {
+        Some(spec) => {
+            let (a, b) = spec
+                .split_once(':')
+                .and_then(|(a, b)| a.parse::<u16>().ok().zip(b.parse::<u16>().ok()))
+                .ok_or_else(|| format!("--route expects <from>:<to> road indices, got {spec:?}"))?;
+            Some((a, b))
+        }
+        None => None,
+    };
+
+    let cities: Vec<String> = match city {
+        Some(c) => vec![c.to_ascii_lowercase()],
+        None => mm2_content::EXPECTED_CITIES
+            .iter()
+            .map(|c| c.to_string())
+            .collect(),
+    };
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut issues_total = 0usize;
+
+    println!("== navigation graph (BAI) ==");
+    for c in &cities {
+        let logical = format!("city/{c}.bai");
+        let build = match mm2_content::load_nav_graph(&vfs, c) {
+            Ok(b) => b,
+            Err(e) => {
+                println!("  {logical:<22} failed: {e}");
+                failures.push(format!("{logical}: {e}"));
+                continue;
+            }
+        };
+        let g = &build.graph;
+        let s = g.stats();
+        println!(
+            "  {logical:<22} ok — {} roads ({} one-way), {} arcs, {} vehicle + {} sidewalk + {} rail lanes, {} intersections, {} dead ends, {} components",
+            s.roads,
+            s.one_way_roads,
+            s.vehicle_arcs,
+            s.vehicle_lanes,
+            s.sidewalk_lanes,
+            s.tram_lanes + s.train_lanes,
+            s.intersections,
+            s.dead_ends,
+            s.components,
+        );
+        issues_total += build.issues.len();
+        for issue in &build.issues {
+            println!("    issue: {issue}");
+        }
+
+        if let Some((from, to)) = probe {
+            let snap = |road: u16| -> Option<[f32; 3]> {
+                let r = g.road(road)?;
+                // Anchor at the arc's midpoint; nearest_lane then finds
+                // the closest lane (possibly a neighbouring road's).
+                let anchor = r.arcs.iter().flatten().next().map(|a| {
+                    let arc = g.arc(*a);
+                    [
+                        (arc.entry_point[0] + arc.exit_point[0]) / 2.0,
+                        (arc.entry_point[1] + arc.exit_point[1]) / 2.0,
+                        (arc.entry_point[2] + arc.exit_point[2]) / 2.0,
+                    ]
+                })?;
+                g.nearest_lane(anchor, &mm2_game::LaneQuery::vehicles(64.0))
+                    .map(|h| h.point)
+            };
+            match (snap(from), snap(to)) {
+                (Some(a), Some(b)) => match g.route(a, b, &mm2_game::RouteOptions::default()) {
+                    Ok(r) => {
+                        let steps: Vec<String> = r
+                            .steps
+                            .iter()
+                            .map(|id| {
+                                let arc = g.arc(*id);
+                                let dir = match arc.dir {
+                                    mm2_game::TravelDir::Forward => "+",
+                                    mm2_game::TravelDir::Backward => "-",
+                                };
+                                format!("{}{dir}", arc.road)
+                            })
+                            .collect();
+                        println!(
+                            "    route {from}→{to}: {} steps ({:.0} m) {}",
+                            r.steps.len(),
+                            r.length,
+                            steps.join(" → "),
+                        );
+                    }
+                    Err(e) => println!("    route {from}→{to}: {e}"),
+                },
+                _ => println!("    route {from}→{to}: road index missing or no routable lane"),
+            }
+        }
+    }
+    println!(
+        "  {} cities, {} failures, {issues_total} issue(s)",
+        cities.len(),
+        failures.len(),
+    );
+    if strict && (issues_total > 0 || !failures.is_empty()) {
+        return Err(format!(
+            "strict nav audit: {} failures, {issues_total} issues",
             failures.len()
         )
         .into());

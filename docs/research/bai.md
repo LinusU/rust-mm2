@@ -83,3 +83,53 @@ helpers (`ambient_type`, `vehicle_rule`, `is_connected`, `FLAG_*` /
 `mm2-inspect bai <install>` audits every discovered `city/*.bai`,
 cross-checks room refs against the same-stem PSDL, and `--strict` exits
 nonzero on missing expected files or any issue.
+
+## Lane direction and the navigation graph (F09-B.1)
+
+Measured on `city/sf.bai` and `city/london.bai` (2026-09-21):
+
+- Section frame `x_axis` equals `tangent × up` on essentially every
+  section (SF 1719/1723 agree, 0 opposite; London 2504/2508, 0
+  opposite; remainder are degenerate frames), so authored `+x` is the
+  geometric right of a vehicle travelling with the sections.
+- Right-side lane curves sit at `+x` (SF 1147 +x vs 66 −x; London
+  1184 vs 123) and left-side curves at `−x` (SF 1202 −x vs 398 +x;
+  London 1322 vs 548). The minority cases are real authored geometry,
+  so lane *position* — not side slot — decides driver-relative rank.
+- The Angel Studios GDMag article (Joe Adzima, "Ambient Traffic
+  AI in Midtown Madness 2") documents that London's left-hand driving
+  is baked into the BAI by the toolchain — right/left lane data
+  swapped, vertex order and lane order reversed — so runtime direction
+  logic is uniform: right-side curves travel with the sections,
+  left-side curves against them. No per-city handedness flag.
+- The same article documents the lane-position turn rules: far-left
+  lane may turn left or go straight, far-right may turn right or go
+  straight, middle lanes go straight, one-way roads may choose any
+  outgoing road, freeway ramps can force a right, U-turns never.
+  Intersection road lists are authored counterclockwise and the
+  original selects exits by index arithmetic — `mm2_game::nav`
+  carries that `ccw_delta` for research but classifies turns
+  geometrically (heading change) because the index scheme is only
+  documented for 4-ways.
+- `edgeDistances` per curve are **not** a lane ordering: profiles like
+  `[7.5, 2.5, 2.5, 7.5]` occur on one-way left sides. Their exact
+  meaning stays unknown (UNK-19); lane ranking uses the measured
+  lateral offset instead. Sidewalk curves do reliably come last in the
+  shared `laneVertices`/`edgeDistances` arrays.
+- Built graphs: London = 540 roads (166 one-way) → 606 directed arcs,
+  1141 routable vehicle + 1080 sidewalk + 28 rail lanes, 328
+  intersections, 0 dead ends, 1 connected component. SF = 379 roads
+  (96 one-way) → 618 arcs, 1212 + 758 + 42 lanes, 214 intersections,
+  1 dead end, 1 component. 176 roads carry no routable vehicle lanes
+  (pedestrian/special/disabled or curve-less) — reported, not
+  repaired.
+
+`mm2_game::nav` turns `Bai` into an immutable `NavGraph`: directed
+arcs, lane sampling, full-3D `nearest_lane` (bridge decks do not snap
+to ground lanes through horizontal proximity; PSDL-room hints
+disambiguate stacked geometry), legal exits per lane position,
+seeded exit choice, bounded deterministic A* routing with specific
+failure reasons, and per-consumer `RouteCursor`s. `mm2_content::nav`
+loads `city/<name>.bai` through the VFS; `mm2-inspect nav <install>`
+audits the graph per city with `--route from:to` road-index probes
+and `--strict`.

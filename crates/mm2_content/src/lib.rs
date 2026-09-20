@@ -16,6 +16,7 @@ pub mod convert;
 pub mod events;
 pub mod expect;
 pub mod model;
+pub mod nav;
 pub mod race_def;
 
 pub use assemble::{LoadError, TrailerDef, VehicleDef, load_by_id, load_vehicle};
@@ -38,6 +39,7 @@ pub use model::{
     Lod, MeshGroup, ModelPart, PartRole, VehicleModel, WheelVisual, build_model, classify_stem,
     shader_for_paint, split_lod,
 };
+pub use nav::{NavLoadError, load_nav_graph};
 pub use race_def::{
     PLAYER_SLOT, RaceBuildError, RaceDefBuild, RaceDefEntry, RaceDefReport, RaceDefSummary,
     race_definition,

@@ -68,7 +68,13 @@ Dependency rules:
   mode data, not an imposed rule), `RaceState` (generation-stamped
   countdown/clock resource), `RaceProgress` (per-participant clearing
   state with explicit teleport segment breaks), `RaceStarted` and
-  `SessionOutcome` (finish provenance on results). `mm2_game` may
+  `SessionOutcome` (finish provenance on results), and the shared
+  navigation contract: `nav::NavGraph` turns a parsed `bai::Bai` into
+  an immutable directed road/lane graph (lane sampling, 3D
+  nearest-lane queries, legal turn exits, bounded seeded routing,
+  per-consumer `RouteCursor`s) that ambient traffic, opponents and
+  police can query without owning each other's route state.
+  `mm2_game` may
   reference `mm2_formats` types (e.g. authored event-table kinds) and
   carry the `Mm2Vfs` resource handle so app-side systems can reach
   content, but it never lists, reads or parses anything itself —
@@ -80,7 +86,9 @@ Dependency rules:
   `convert` for tuning→`VehicleConfig`, and `EventCatalog::scan` for a
   city's authored events. `race_def::race_definition` turns a resolved
   `CatalogEvent` (parsed waypoint/start-grid records retained on the
-  catalog entries) into an `mm2_game::RaceDefinition`. It fills in
+  catalog entries) into an `mm2_game::RaceDefinition`; `nav::load_nav_graph`
+  resolves a city's `.bai` through the VFS and builds its
+  `mm2_game::nav::NavGraph`. It fills in
   `mm2_game` contract types (`EventRef`, `EventTableKind`) and
   `mm2_vehicle` configs, but owns no session state, no Bevy rendering
   and no Avian internals.
