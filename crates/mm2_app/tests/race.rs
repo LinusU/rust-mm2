@@ -8,7 +8,7 @@ use std::time::Duration;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
-use mm2_app::race::advance_race;
+use mm2_app::race::{advance_race, reanchor_teleported_participants};
 use mm2_app::session::{self, SessionControl};
 use mm2_game::{
     Checkpoint, CheckpointRule, EventRef, EventTableKind, ParticipantState, Player, PlayerControl,
@@ -16,6 +16,7 @@ use mm2_game::{
     RaceState, ResultLedger, Session, SessionAuthority, SessionConfig, SessionEntity, SessionMode,
     SessionPhase, advance_session_tick, despawn_session_entities,
 };
+use mm2_vehicle::{ResetVehicle, Teleported, Vehicle, VehicleConfig, VehicleState};
 
 fn cp(x: f32, z: f32) -> Checkpoint {
     Checkpoint {
@@ -89,11 +90,16 @@ fn race_app(config: SessionConfig, def: RaceDefinition) -> App {
         .init_resource::<mm2_app::contracts::ImpactFilter>()
         .init_resource::<ButtonInput<KeyCode>>()
         .add_message::<RaceStarted>()
+        .add_message::<ResetVehicle>()
         .add_systems(FixedUpdate, advance_session_tick)
-        .add_systems(FixedLast, advance_race)
+        .add_systems(
+            FixedLast,
+            (reanchor_teleported_participants, advance_race).chain(),
+        )
         .add_systems(
             Update,
             (
+                mm2_vehicle::systems::vehicle_reset,
                 session::session_control_input,
                 (
                     despawn_session_entities.run_if(session::unloading),
@@ -124,10 +130,15 @@ fn drain_started(app: &mut App) -> usize {
 
 /// Spawn a race participant — a `Player`-marked entity carrying
 /// `RaceProgress` and the `Position` the driver reads, stamped with the
-/// session's ownership generation like every session spawn.
+/// session's ownership generation like every session spawn. It also
+/// carries the vehicle components `vehicle_reset`'s query needs, so
+/// the production `ResetVehicle` teleport path works on it (no
+/// `RigidBody` — physics leaves its `Position` alone between the
+/// segment writes the tests make).
 fn spawn_participant(app: &mut App, def: &RaceDefinition, pos: Vec3) -> (Entity, PlayerId) {
     let generation = app.world().resource::<Session>().generation();
     let id = app.world_mut().resource_mut::<Session>().mint_player_id();
+    let cfg = VehicleConfig::default();
     let entity = app
         .world_mut()
         .spawn((
@@ -137,7 +148,14 @@ fn spawn_participant(app: &mut App, def: &RaceDefinition, pos: Vec3) -> (Entity,
                 control: PlayerControl::Local,
             },
             RaceProgress::new(def),
+            Vehicle {
+                config: cfg.clone(),
+            },
+            VehicleState::new(&cfg),
             Position(pos),
+            Rotation::default(),
+            LinearVelocity::ZERO,
+            AngularVelocity::ZERO,
             Transform::from_translation(pos),
         ))
         .id();
@@ -146,6 +164,14 @@ fn spawn_participant(app: &mut App, def: &RaceDefinition, pos: Vec3) -> (Entity,
 
 fn set_position(app: &mut App, entity: Entity, pos: Vec3) {
     *app.world_mut().get_mut::<Position>(entity).unwrap() = Position(pos);
+    // Keep `Transform` in step like every real mover does (`vehicle_reset`
+    // writes both, the solver syncs both): participants now carry
+    // `Rotation`, so avian's `transform_to_position` would otherwise copy
+    // the stale `GlobalTransform` back over `Position` a step later.
+    app.world_mut()
+        .get_mut::<Transform>(entity)
+        .unwrap()
+        .translation = pos;
 }
 
 fn progress(app: &App, entity: Entity) -> &RaceProgress {
@@ -298,6 +324,102 @@ fn teleport_breaks_the_swept_segment() {
     set_position(&mut app, car, Vec3::new(-10.0, 0.0, 0.0));
     run(&mut app, 1);
     assert!(progress(&app, car).is_cleared(0));
+}
+
+/// AC02 reset leg, production path: a `ResetVehicle` teleport — the
+/// R-key reset's real route through `vehicle_reset` — marks the entity
+/// `Teleported`, and `reanchor_teleported_participants` breaks the
+/// swept segment so the jump cannot consume checkpoints or mint a
+/// finish it physically skipped.
+#[test]
+fn vehicle_reset_breaks_the_swept_segment() {
+    let def = RaceDefinition {
+        checkpoints: vec![cp(0.0, 0.0), cp(50.0, 0.0)],
+        finish: None,
+        rule: CheckpointRule::Ordered,
+        laps: 1,
+        countdown_ticks: 0,
+        start_slots: Vec::new(),
+    };
+    let mut app = race_app(event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(-100.0, 0.0, 0.0));
+    run(&mut app, 2); // release + anchor at -100
+
+    // The production teleport path: message → vehicle_reset → marker.
+    // One update applies the teleport, the next consumes the marker and
+    // re-anchors at the spawn point — the jump itself sweeps nothing.
+    app.world_mut().write_message(ResetVehicle {
+        entity: Some(car),
+        position: Vec3::new(200.0, 0.0, 0.0),
+        yaw: 0.0,
+    });
+    run(&mut app, 2);
+
+    assert_eq!(
+        app.world().get::<Position>(car).unwrap().0,
+        Vec3::new(200.0, 0.0, 0.0),
+        "vehicle_reset applied the teleport"
+    );
+    let p = progress(&app, car);
+    assert_eq!(
+        p.cleared_count(),
+        0,
+        "the reset jump must not consume the checkpoints it skipped"
+    );
+    assert!(
+        matches!(p.state, ParticipantState::Racing),
+        "no finish minted from the jump"
+    );
+    assert_eq!(
+        app.world().resource::<ResultLedger>().len(),
+        0,
+        "no result recorded"
+    );
+    assert!(
+        app.world().get::<Teleported>(car).is_none(),
+        "the marker was consumed"
+    );
+    // And the anchor re-established: driving back over the checkpoints
+    // sweeps them legitimately.
+    set_position(&mut app, car, Vec3::new(-10.0, 0.0, 0.0));
+    run(&mut app, 1);
+    assert!(progress(&app, car).is_cleared(0));
+}
+
+/// A reset while paused still lands: the `Teleported` marker persists
+/// through the freeze, so resuming re-anchors instead of sweeping the
+/// jump across the checkpoints.
+#[test]
+fn reset_while_paused_cannot_sweep_checkpoints() {
+    let def = any_order_def(0);
+    let mut app = race_app(event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(-200.0, 0.0, 0.0));
+    run(&mut app, 2); // released + anchored
+
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Paused)
+        .unwrap();
+    app.world_mut().write_message(ResetVehicle {
+        entity: Some(car),
+        position: Vec3::new(200.0, 0.0, 0.0),
+        yaw: 0.0,
+    });
+    run(&mut app, 3);
+    assert_eq!(progress(&app, car).cleared_count(), 0);
+
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Playing)
+        .unwrap();
+    run(&mut app, 3);
+    let p = progress(&app, car);
+    assert_eq!(
+        p.cleared_count(),
+        0,
+        "the paused reset's jump must not count after resume"
+    );
+    assert!(matches!(p.state, ParticipantState::Racing));
 }
 
 /// AC04: finishing emits exactly one result per participant per

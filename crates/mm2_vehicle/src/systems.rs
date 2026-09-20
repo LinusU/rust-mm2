@@ -5,7 +5,7 @@ use bevy::prelude::*;
 
 use crate::sim;
 use crate::vehicle::{
-    DriveDirection, ResetVehicle, Vehicle, VehicleInput, VehicleState, WheelState,
+    DriveDirection, ResetVehicle, Teleported, Vehicle, VehicleInput, VehicleState, WheelState,
 };
 
 /// What the steered axle can do with steering lock: how much grip it makes
@@ -612,7 +612,16 @@ type ResetQuery<'w, 's> = Query<
 >;
 
 /// Handle [`ResetVehicle`] messages: teleport + clear motion state.
-pub fn vehicle_reset(mut events: MessageReader<ResetVehicle>, mut vehicles: ResetQuery) {
+/// Every teleported entity is marked [`Teleported`] in the same pass so
+/// swept-segment consumers (the race runtime, F11-B) re-anchor instead
+/// of counting the jump as a crossing — the marker and the `Position`
+/// write are atomic, so the break can never land a step early or be
+/// missed outright.
+pub fn vehicle_reset(
+    mut commands: Commands,
+    mut events: MessageReader<ResetVehicle>,
+    mut vehicles: ResetQuery,
+) {
     for ev in events.read() {
         for (entity, vehicle, mut pos, mut rot, mut lv, mut av, mut transform, mut state) in
             &mut vehicles
@@ -629,6 +638,7 @@ pub fn vehicle_reset(mut events: MessageReader<ResetVehicle>, mut vehicles: Rese
             transform.translation = ev.position;
             transform.rotation = Quat::from_rotation_y(ev.yaw);
             *state = VehicleState::new(&vehicle.config);
+            commands.entity(entity).insert(Teleported);
         }
     }
 }

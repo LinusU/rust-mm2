@@ -26,6 +26,11 @@
 //!
 //! A stale `RaceState` (generation mismatch, e.g. the frames between a
 //! restart's `begin` and teardown's resource removal) is never stepped.
+//!
+//! [`reanchor_teleported_participants`] runs chained before
+//! [`advance_race`] in `FixedLast`: a `ResetVehicle` teleport is not
+//! motion, so the swept segment must be re-anchored rather than counted
+//! as a crossing (AC02).
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
@@ -33,7 +38,28 @@ use mm2_game::{
     ParticipantState, Player, ProgressOutcome, RacePhase, RaceProgress, RaceStarted, RaceState,
     ResultLedger, Session, SessionOutcome, SessionPhase, SessionResult,
 };
+use mm2_vehicle::Teleported;
 use tracing::warn;
+
+/// Re-anchor swept segments on teleported participants.
+///
+/// `vehicle_reset` marks each entity it teleports with [`Teleported`]
+/// in the same pass that writes the new `Position`; a participant's
+/// swept segment must break on that jump rather than consume every
+/// checkpoint between the two poses (AC02 — the reset-near-finish
+/// edge). The marker is consumed here, before [`advance_race`] in
+/// `FixedLast`, so it applies in every session phase — a reset while
+/// paused or mid-countdown still lands. Markers on entities without
+/// `RaceProgress` are inert and despawn with the entity.
+pub fn reanchor_teleported_participants(
+    mut commands: Commands,
+    mut participants: Query<(Entity, &mut RaceProgress), With<Teleported>>,
+) {
+    for (entity, mut progress) in &mut participants {
+        progress.break_segment();
+        commands.entity(entity).remove::<Teleported>();
+    }
+}
 
 /// Fixed-step race driver — see module docs.
 pub fn advance_race(

@@ -23,7 +23,7 @@ pub mod vehicle;
 pub use analysis::{HandlingMetrics, WheelMetrics, hull_points};
 pub use config::VehicleConfig;
 pub use debug::VehicleDebugEnabled;
-pub use vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState, WheelState};
+pub use vehicle::{ResetVehicle, Teleported, Vehicle, VehicleInput, VehicleState, WheelState};
 
 /// Registers the vehicle simulation. Requires [`PhysicsPlugins`] and a fixed
 /// timestep (`Time<Fixed>`) configured by the app.

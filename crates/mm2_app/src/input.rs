@@ -28,7 +28,7 @@ pub fn vehicle_input(
     // A race countdown locks input the same way (AC03) — the session is
     // already `Countdown` in the normal flow, but `input_locked` also
     // covers a race resource that outlives its gate.
-    let race_locked = race.is_some_and(|r| r.input_locked());
+    let race_locked = race.is_some_and(|r| r.input_locked() && !r.is_stale(session.generation()));
     let focused = windows.iter().all(|w| w.focused);
     let driving = *cam_mode == CameraMode::Chase && session.is_playing() && focused && !race_locked;
     if !driving {

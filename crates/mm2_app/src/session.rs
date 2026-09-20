@@ -132,8 +132,9 @@ pub fn session_control_input(
 /// - `Menu`: `quit` exits the process; `restart` calls `begin` with the
 ///   retained config, flipping the phase to `Loading` so the spawn system
 ///   builds the next session.
-/// - `Playing`/`Paused`/`Results`/`Failed`: a queued intent moves the
-///   session to `Unloading`; teardown proceeds on later frames.
+/// - `Countdown`/`Playing`/`Paused`/`Results`/`Failed`: a queued intent
+///   moves the session to `Unloading`; teardown proceeds on later
+///   frames.
 pub fn drive_session(
     mut commands: Commands,
     mut session: ResMut<Session>,

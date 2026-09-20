@@ -1,102 +1,102 @@
 # Last implementation iteration
 
-- Task ID and title: F11-B.1 — shared race lifecycle, swept triggers,
-  participant progress and result identity (contract + driver slice of
-  F11-B; the catalog→`RaceDefinition` producer and event-session
-  loading wiring are split off as F11-B.2 — the task was too broad for
-  one coherent change, parent acceptance retained).
+- Task ID and title: F11-B.1 repair — wire the reset/teleport segment
+  break into production (external review's single blocking finding on
+  the previous F11-B.1 candidate).
 - Starting commit and resulting commit: started at
-  `bb562724b18f5414539d03add94c2e712f4a301a` (clean tree, branch
+  `07551a032dcff010d87d0ac53ff176a3c1f5babb` (clean tree, branch
   `ralph/night`); result = this commit.
-- Design classification (per the contract's four classes):
-  - `CheckpointRule::AnyOrder` / `Ordered` are *documented* rules
-    (BLZ-1/CHK-1 vs CIR-1) carried on `RaceDefinition`, not imposed
-    across modes (spec non-goal).
-  - Separate finish trigger inert until full clearance — *documented*
-    (RACE-7).
-  - Trigger vertical band ±8 m, direction-check default off, 3 s
-    countdown at 120 Hz — *designed* defaults (DSN-5 in
-    `docs/original-rules.md`); no authored value exists for any.
+- Review finding being repaired: `RaceProgress::break_segment` had no
+  production caller. The only production teleport path is `reset_input`
+  (R key, not session-phase gated) → `ResetVehicle` →
+  `mm2_vehicle::vehicle_reset`, which writes `Position` directly. A
+  mid-race reset therefore produced a swept segment from the pre-reset
+  pose to the spawn point that consumed — and could finish — every
+  checkpoint it crossed: exactly the spec's "reset near finish" AC02
+  edge. The prior test called `break_segment()` by hand, so the suite
+  could not see the gap.
+- Root cause: `mm2_vehicle` cannot depend on `mm2_game`, so the reset
+  system cannot call `break_segment` itself, and nobody bridged the
+  two. The reviewer's suggested fix (drain `ResetVehicle` in the race
+  system or a `FixedLast` system before it) was considered and
+  rejected on timing grounds: `reset_input`/`vehicle_reset` ordering
+  inside `Update` is unconstrained, so a drain can consume the message
+  a frame *before* the teleport lands (break spent early), and Bevy
+  messages expire after two frames while `FixedLast` legitimately runs
+  zero steps in a frame at update rates above the 120 Hz fixed clock
+  (break missed entirely).
+- Design classification: the fix is *implementation choice* — an
+  engine-internal teleport signal, no original-behavior claim.
 - Production code changed:
-  - `crates/mm2_game/src/race.rs` (new): `Checkpoint` swept cylinder
-    test (closest XZ approach within `radius` and `±height`; segment,
-    not sampling — a fast car cannot skip a trigger), `CheckpointRule`,
-    `RaceDefinition` + `validate`, `RaceState` (generation-stamped
-    countdown/clock resource, `input_locked`, `is_stale`),
-    `RaceProgress` (per-checkpoint cleared flags, ordered `next`/lap
-    wrap, `break_segment` for teleport/reset, one segment consumes
-    every checkpoint it crosses), `ParticipantState`, `RaceStarted`
-    message, `RaceError`.
-  - `crates/mm2_game/src/result.rs`: `SessionResult` gains
-    `outcome: SessionOutcome` (`Finished { race_ticks }`) — the first
-    real result producer's provenance payload; enum extends as modes
-    land.
-  - `crates/mm2_app/src/race.rs` (new): `advance_race` in `FixedLast`
-    (post-solver `Position` segments — the same path tests drive).
-    Countdown ticks during session `Countdown`/`Playing`, releases
-    exactly once (`RaceStarted` + participants `AwaitingStart→Racing` +
-    `Countdown→Playing`), clock + swept `advance` while `Playing`,
-    `Finished` mints+records one `SessionResult` per participant into
-    `ResultLedger`, all-finished → `Complete`. Gated on
-    `authority_role().is_authority()` — a `Remote` session never steps
-    its race; stale-generation resources never step.
-  - `crates/mm2_app/src/session.rs`: `drive_session` removes the
-    `RaceState` resource on `Unloading → Menu` (no old timer survives);
-    `Countdown` is now quittable/restartable like other live phases.
-  - `crates/mm2_app/src/input.rs`: `vehicle_input` also honours
-    `RaceState::input_locked` — belt-and-braces over the `Countdown`
-    session phase for a race resource that outlives its gate.
-  - `crates/mm2_app/src/main.rs`: `add_message::<RaceStarted>` +
-    `race::advance_race` scheduled in `FixedLast`.
-  - `docs/architecture.md`: `mm2_game` bullet gains the race contract;
-    `FixedLast` row gains `advance_race`.
-  - `docs/original-rules.md`: DSN-5 records the designed defaults.
+  - `crates/mm2_vehicle/src/vehicle.rs` (new `Teleported` marker
+    component): stamped by the reset path on each entity it teleports;
+    persists until a swept-segment consumer claims it, inert otherwise.
+  - `crates/mm2_vehicle/src/systems.rs`: `vehicle_reset` inserts
+    `Teleported` in the same pass that writes `Position`/`Transform` —
+    the marker and the teleport are atomic, so the re-anchor can
+    neither land early nor be missed; covers every current and future
+    `ResetVehicle` producer (R key now, fall-recovery/netcode later).
+  - `crates/mm2_app/src/race.rs` (new
+    `reanchor_teleported_participants`): consumes `Teleported` on
+    `RaceProgress` entities → `break_segment()` + remove marker. Runs
+    in `FixedLast` chained before `advance_race`, in every session
+    phase — a reset during pause or countdown still lands.
+  - `crates/mm2_app/src/main.rs`: `FixedLast` is now one deterministic
+    chain `collect_impacts → publish_vehicle_telemetry →
+    reanchor_teleported_participants → advance_race` (also resolves the
+    review's unordered-telemetry nit).
+  - `crates/mm2_app/src/input.rs` (nit): the race input-lock now also
+    checks `!is_stale`, so a dead `RaceState` can't lock controls.
+  - `crates/mm2_app/src/session.rs` (nit): `drive_session` doc bullet
+    now lists `Countdown` among intent-handled phases.
+  - `docs/architecture.md`: `FixedLast` row updated for the chain and
+    the `Teleported` consumer.
 - Tests added/changed and why:
-  - `crates/mm2_game/tests/race.rs` (new, 11 tests): swept geometry
-    (high-speed skip, wrong height, boundary, inside/parked, direction
-    flag), AnyOrder independent+once clearing, RACE-7 finish gating,
-    Ordered sequence/lap-wrap/finish, multi-checkpoint single segment,
-    `break_segment` re-anchor, staleness/input-lock, late join,
-    validation.
-  - `crates/mm2_app/tests/race.rs` (new, 13 tests): the production
-    `advance_race` path — countdown unlocks exactly once (AC03),
-    countdown completing while session already Playing, AC02 cases via
-    `Position` writes (high-speed, wrong-height, repeated, teleport),
-    once-only result with generation/participant/event provenance
-    (AC04), tied finishes, pause freeze, restart removes `RaceState`
-    + a planted stale resource never ticks, quit during countdown,
-    remote-authority no-op, and a pin that `advance` is the shared
-    step.
-  - `crates/mm2_game/tests/contracts.rs`: the three `SessionResult`
-    constructors updated for the new `outcome` field.
+  - `crates/mm2_app/tests/race.rs`: the harness now registers
+    `ResetVehicle`, runs the real `mm2_vehicle::systems::vehicle_reset`
+    in `Update`, and chains `reanchor_teleported_participants` before
+    `advance_race` exactly like `main.rs`. Participants carry the
+    vehicle components `vehicle_reset`'s query needs (no `RigidBody`,
+    so physics leaves them alone between the tests' segment writes);
+    `set_position` now writes `Transform` alongside `Position` because
+    adding `Rotation` put participants under avian's
+    `transform_to_position`, which otherwise reverts a manual
+    `Position` write to the stale `GlobalTransform` a step later.
+  - New `vehicle_reset_breaks_the_swept_segment` (AC02 reset leg):
+    writes a real `ResetVehicle` past two ordered checkpoints —
+    asserts teleport applied, zero cleared, still `Racing`, empty
+    ledger, marker consumed — then verifies normal driving clears
+    again. Verified to FAIL on the old wiring (cleared 2).
+  - New `reset_while_paused_cannot_sweep_checkpoints`: reset under
+    `Paused`, resume — the marker persists through the freeze and the
+    jump never counts. Also verified to FAIL on the old wiring.
+  - `crates/mm2_vehicle/tests/drive.rs`: `reset_teleports_and_clears_
+    motion` now asserts the `Teleported` marker lands.
 - Commands actually run and results (this machine, macOS arm64):
-  - `cargo test -p mm2_game --test race` — 11/11 ok.
-  - `cargo test -p mm2_app --test race` — 13/13 ok.
+  - `cargo test -p mm2_app --test race` — 15/15 ok.
+  - `cargo test -p mm2_vehicle --test drive` — 15/15 ok.
+  - Negative check: with the `Teleported` insert removed, both new
+    tests fail (cleared 2 — the exact reported defect); restored.
   - `cargo fmt --all -- --check` — PASS.
   - `cargo clippy --locked --workspace --all-targets --all-features --
     -D warnings` — PASS.
   - `cargo test --locked --workspace` — PASS, 25 test result groups, 0
     failures.
-  - `cargo run -p mm2_app --bin mm2 -- --dev-world --headless` —
-    `status=pass`, identical to baseline (updates=600, ticks=1198,
-    impacts=1, peak 27.9 m/s, moved 157 m): the race system no-ops
-    with no `RaceState`.
-- Acceptance IDs satisfied / still open: F11-AC02 (synthetic
-  high-speed/wrong-height/repeated/teleport through the production
-  trigger path — candidate-level), F11-AC03 (countdown once,
-  deterministic pause, no surviving timer — candidate-level), F11-AC04
-  (once-only results with provenance — candidate-level). Still open:
-  AC01/AC06 (catalog evidence — F11-A checked), AC05 (event props —
-  F11-B.2), and *every* AC's real-event evidence: no authored event has
-  been loaded through this runtime yet (F11-B.2).
+- Acceptance IDs satisfied / still open: F11-AC02's teleport/reset leg
+  is now exercised through the production path (candidate-level —
+  synthetic positions, no authored event). AC03/AC04 unchanged
+  (candidate-level). Still open: AC05 (event-prop scoping — F11-B.2)
+  and all real-event evidence: no authored event has driven a
+  `RaceDefinition` yet.
 - Evidence files: none committed; no captures made.
-- Stock data/GPU/audio/network limitations: no authored event was run —
-  all tests use synthetic definitions; `RecordContent` retains counts
-  not rows, so no real waypoint data has driven a `RaceDefinition` yet.
-  GPU/audio/network unexercised.
-- Unresolved blockers or discovered regressions: none. The `Countdown`
-  session phase previously had no entrants — nothing else depended on
-  it being terminal.
+- Stock data/GPU/audio/network limitations: unchanged — no authored
+  event run; GPU/audio/network unexercised this iteration.
+- Unresolved blockers or discovered regressions: none. One noted
+  boundary: `vehicle_self_right` adjusts `Position.y` continuously to
+  drop the car onto the surface below — a small correction, not a
+  teleport; it does not stamp `Teleported`. If a future review shows a
+  self-right hop crossing a trigger it shouldn't, the marker is the
+  mechanism to reuse.
 - Next smallest useful action: F11-B.2 — `mm2_content` producer
   turning a `CatalogEvent`'s records into a `RaceDefinition`
   (`RecordContent` must retain or re-read parsed waypoint/start rows),

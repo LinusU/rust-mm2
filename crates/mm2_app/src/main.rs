@@ -422,13 +422,14 @@ fn main() {
     .add_systems(
         FixedLast,
         (
-            (
-                contracts::collect_impacts,
-                contracts::publish_vehicle_telemetry,
-            )
-                .chain(),
+            contracts::collect_impacts,
+            contracts::publish_vehicle_telemetry,
+            // Teleport re-anchoring must precede the race driver so a
+            // reset never sweeps a checkpoint (AC02).
+            race::reanchor_teleported_participants,
             race::advance_race,
-        ),
+        )
+            .chain(),
     )
     .add_systems(
         Update,

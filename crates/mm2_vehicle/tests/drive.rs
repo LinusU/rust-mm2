@@ -13,7 +13,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_vehicle::vehicle::{DriveDirection, VehicleInput, VehicleState};
-use mm2_vehicle::{ResetVehicle, VehicleConfig, VehiclePlugin, vehicle_bundle};
+use mm2_vehicle::{ResetVehicle, Teleported, VehicleConfig, VehiclePlugin, vehicle_bundle};
 
 const FRAMES_PER_SECOND: usize = 60;
 
@@ -513,6 +513,10 @@ fn reset_teleports_and_clears_motion() {
     app.update();
     let pos = app.world().get::<Position>(car).unwrap().0;
     assert!((pos - Vec3::new(5.0, 1.2, 5.0)).length() < 1e-3);
+    assert!(
+        app.world().get::<Teleported>(car).is_some(),
+        "the reset marks the teleport for swept-segment consumers"
+    );
     let vel = app.world().get::<LinearVelocity>(car).unwrap().0;
     assert!(vel.length() < 1e-3);
     // Stale suspension/drivetrain state is gone.

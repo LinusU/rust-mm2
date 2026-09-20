@@ -140,3 +140,13 @@ pub struct ResetVehicle {
     /// Yaw angle, radians.
     pub yaw: f32,
 }
+
+/// Marker [`vehicle_reset`](crate::systems::vehicle_reset) inserts on
+/// each entity it teleports. Consumers that keep swept-segment state
+/// derived from `Position` — the race runtime's per-participant segment
+/// anchor is the current one — must re-anchor on this marker and remove
+/// it, so the jump is never counted as motion. It persists until a
+/// consumer clears it; a marker nobody claims is inert and despawns
+/// with the entity.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Teleported;
