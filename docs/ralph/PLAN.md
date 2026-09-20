@@ -38,17 +38,23 @@
 
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
-**Next selected slice: F12-C remainder** — the structural leg landed
-this iteration (`RaceDefReport` + `mm2-inspect race-defs`, retail
-90/90 authored rows build at both difficulties, 0 failed) and the
-headless Blitz matrix runs 20/20 — after it caught and we fixed a
-real spawn defect (DSN-6 back-off could place the car off an elevated
-start deck; london `blitz:6` fell to y≈−907). Still owed on F12-C:
-scripted/bot-assisted *completions* exercising finish→result on
-retail events (current bot only holds throttle → `race=Running`),
-the Checkpoint/Circuit headless matrix, and reward-fact verification.
-Independent ready alternates: F03-A (prop audit) or F09-A (BAI
-parser).
+**Next selected slice: F12-C reward leg, or F13-A (Checkpoint
+feature proper)** — the scripted-completion leg landed this
+iteration: `mm2_app::scripted` (`--bot`) steers the player vehicle at
+the live race objective through the production
+`VehicleInput`/session/race path, and a 64-run retail matrix covered
+every authored Blitz/Checkpoint/Circuit row in both cities. Honest
+outcome: 4 `outcome=finished` through finish→result (london blitz:0,
+checkpoint:0, circuit:0 incl. lap wraps, sf checkpoint:0), all 20
+Blitz events `race=Complete` (1 finished + 19 `timed-out`, one ledger
+result each — the deadline path exercised on real content), 41
+untimed checkpoint/circuit runs `Running` at the frame cap, 8 SF runs
+`status=fail` "fell through the world". The straight-line bot is an
+evidence driver, not route-aware AI — most retail courses still need
+pathfinding (F15 scope). Still owed on F12-C: reward-fact
+verification (AC05's "no duplicate rewards" leg has no reward
+emission to exercise yet — F16 scope). Independent ready alternates:
+F03-A (prop audit) or F09-A (BAI parser).
 
 ## Baseline gate results (this checkout, 2026-09-20)
 
@@ -56,7 +62,7 @@ parser).
 |---|---|
 | `cargo fmt --all -- --check` | PASS |
 | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | PASS |
-| `cargo test --locked --workspace` | PASS — all groups, 0 failures (incl. 18 mm2_game race contract tests, 27 mm2_app production-path race tests, 15 mm2_vehicle drive tests, 13 F01-A session tests) |
+| `cargo test --locked --workspace` | PASS — all groups, 0 failures (incl. 18 mm2_game race contract tests, 27 mm2_app production-path race tests, 15 mm2_vehicle drive tests, 13 F01-A session tests, 6 scripted-driver tests) |
 | `mm2-inspect cars <retail>` | 29 catalog entries; all 21 `EXPECTED_STOCK_ROSTER` cars `ready`; 8 extra ids kept with explicit incompleteness reasons |
 | `mm2-inspect list <retail>` | 13,389 logical paths; families: texture 3977, aud 3293, geometry 1867, tune 1356, race 1080, bound 1034, city 247, anim 95 |
 | `mm2-inspect inventory <retail>` | 12 families: cities 2/5 exp/disc all parsed; vehicles 21/21 ready + 8 rejected; races 80 exp, 78 accepted, 2 partial (circuit11), 31 extras; lessons 42/42; placement 13 inst parsed; audio 7/7 families (3293 files unverified); peds 4/4 + wolf partial; MP/breakables/traffic/profile/interface discovered-only. Event-metadata tables parse: 12/10/10/13 checkpoint/blitz/circuit/crash rows per city. `--strict` exits 2 (33 findings) — honest: partial/junk records exist on retail. |
@@ -78,6 +84,7 @@ parser).
 || `mm2 --mm2-path <retail> --city {london,sf} --event blitz:{0..9} --headless --frames 1500` | 20/20 `status=pass` — every authored Blitz row loads its own course, grounds (wheels contact), drives, `tl=` ticks. Pre-fix this caught 3 falls (london blitz:6 spawn-over-void; sf blitz:5/9 mid-drive) — all were the same DSN-6 back-off defect, repaired |
 || `mm2 --mm2-path <retail> --event blitz:10 --headless` | `status=fail` — "no authored event row for this reference"; `crash:0` → `status=fail` "crash course events are not loadable yet"; `bogus:0` → CLI usage error. Invalid refs fail explicitly |
 || `mm2 --mm2-path <retail> --city london --event blitz:6 --frames 700 --screenshot` | `status=pass`, 3.7 MB PNG (fresh path, local only) — car grounded on the elevated start deck (wheels 4/4), green nav needle, `cp 0/4`, `time 54.9s`; this event previously spawned over a void |
+| `mm2 --mm2-path <retail> --city {london,sf} --event {blitz,checkpoint,circuit}:<all> --headless --bot` | 64/64 authored rows ran the production race path under the scripted driver — 4 `outcome=finished` through finish→result (london blitz:0 `cp=3/3 tl=7.6s`, london checkpoint:0 `cp=5/5`, london circuit:0 `cp=6/6` incl. lap wraps, sf checkpoint:0 `cp=6/6`); 20/20 Blitz `race=Complete` (1 finished + 19 `timed-out`, one ledger result each); 41 untimed checkpoint/circuit runs `race=Running` at the frame cap; 8 SF `status=fail` "fell through the world" (incl. sf checkpoint:0, which recorded its finish first). Cruise `--bot` (no event) passes; london blitz:0 `--pro` finishes with `tl=0.6s` |
 
 ## Task table
 
@@ -127,7 +134,7 @@ parser).
 | F12-B | implemented | F12-A | Split: B.1 = navigation arrow (checked), B.2 = low-time warning cue (implemented below). In-scope legs done: timer/objectives/finish/failure + HUD/navigation + warning cue. Still open on the parent: results/fail screens beyond HUD text (F17/UI-5 scope), audio cue (needs F07), AC01/AC06 catalog evidence (F12-C). |
 | F12-B.1 | checked | F12-A | RACE-6 navigation arrow. `mm2_game::race`: `navigation_target` (nearest un-cleared gate XZ, explicit `picked` wins until cleared then falls back, armed `Finish` once all gates clear, `Ordered` → `None` per HUD-2), `cycle_target` (authored-order walk, wraps, skips cleared, empty → clears pick), `relative_bearing` (signed driver-frame angle, `+` = right, ground-plane only), `TargetSelection` component, `RaceProgress::remaining`. `mm2_app::race`: session-owned `NavArrow`/`NavArrowPart` UI needle + diamond tip (node-drawn — embedded font is ASCII-only, DSN-8), `spawn_nav_arrow`, `nav_target_input` (X/Z cycle — original X/S blocked by WASD brake, DSN-8), `update_nav_arrow` (rotation = bearing, green ahead / yellow behind, hidden without a live target). Tests: +6 contract, +5 production-path (bearing/color/visibility through `Position` writes, X/Z cycling incl. edge-trigger + Complete gate, finish arming, teardown despawn). Retail: london `blitz:0` headless `status=pass` (tl ticking); windowed captures at frames 100 (countdown) + 700 (driving) show the needle green ahead tracking the gate. Yellow-behind leg covered by tests, not rendered. Externally checked (review pass at `56e764c`, iteration 016 feedback). |
 | F12-B.2 | implemented | F12-B.1 | Low-time warning cue — designed policy (DSN-9): no documented original rule (HUD-2 lists only the countdown timer). `mm2_app::race`: `LOW_TIME_TICKS` (10 s, inclusive threshold), `LOW_TIME_FLASH_TICKS` (0.5 s half-period), `LOW_TIME_BRIGHT`/`LOW_TIME_DIM`, session-owned `LowTimeWarning` `LOW TIME` UI banner + `spawn_race_warning`, `update_race_warning` — armed while a timed race runs and the local participant is unresolved, pulsing bright/dim on the remaining ticks themselves (same race clock as the deadline → AC04; freezes with pause), hidden for stale/complete/countdown/untimed races and a resolved local participant (`PlayerControl::Local` filtered — avoids the latent multi-participant wrinkle the B.1 review flagged on the arrow). Tests: +4 production-path (threshold boundary + pulse cadence + pause freeze + timeout hide; countdown gate for sub-threshold limits; resolved-local hides while a remote races; untimed never warns + teardown despawn). Retail: london `blitz:0` headless `status=pass` incl. `--frames 1800` → `race=Complete outcome=timed-out`; windowed capture at `time 1.5s` shows the armed banner (dim half-pulse), a `time 16.1s` frame shows it correctly hidden. Candidate pending external check. |
-| F12-C | implemented | F12-B | First slice landed (two commits): `mm2_content::RaceDefReport` — per-row, per-difficulty production-builder audit (`Built`/`Unsupported`/`Failed`, table errors kept, denominator never filtered) + `mm2-inspect race-defs [--city/--table/--strict]`; retail 90/90 rows build, crash=unsupported not failure. Headless Blitz matrix 20/20 pass; invalid refs (out-of-range/crash/bogus) fail explicitly; london blitz:6 rendered post-fix. The matrix caught a real spawn defect — DSN-6 back-off could land off an elevated deck; now spawns on the authored line (commit `f8bd917`, ledger updated). Remaining open: scripted completions → finish/result on retail, Checkpoint/Circuit matrix, reward facts. Candidate pending external check. |
+| F12-C | implemented | F12-B | Structural leg (checked at `f62a977`): `RaceDefReport` + `mm2-inspect race-defs`, retail 90/90 rows build at both difficulties, 0 failed; headless Blitz matrix 20/20; invalid refs fail explicitly; DSN-6 spawn repair (`f8bd917`). Scripted-completion leg (this iteration, candidate): `mm2_app::scripted` — the `--bot` evidence driver. `ScriptedDrive` resource flag + session-owned `ScriptedBot` component state; `drive_target` follows the live objective (earliest un-cleared gate in authored order for `AnyOrder` — the waypoint rows are the only route data blitz/checkpoint events ship — `progress.next` for `Ordered`, armed finish last); `scripted_input` proportional steer + throttle bands + corner brake + speed cap + two-phase stuck escape (reverse-and-turn, alternating side); `scripted_drive` owns `VehicleInput` after the keyboard mapping only while `--bot` inserts the resource, honors the countdown lock and yields on a resolved participant. Wired headless (`smoke::Driver::{Hold,Scripted}`, `driver=` record field) and windowed (`.after(input::vehicle_input)`, gated `resource_exists`). Tests +6 (`tests/bot.rs`): control law, stuck escape, live-target selection, countdown lock, L-turn AnyOrder finish → 1 `Finished` result, 2-lap Ordered circuit finish incl. lap wraps — all through `load_session_world`→`advance_race`. Retail bot matrix 64/64 events both cities (see baseline table): 4 finished, all 20 Blitz `race=Complete`, 41 `Running` at frame cap, 8 SF falls — bot-limited evidence, not a playability claim; most retail courses need route-aware driving (F15). Still open on the parent: reward-fact leg (AC05 — no reward emission exists to exercise, F16 scope). Candidate pending external check. |
 | F13-A | queued | F02-B, F11-B | London race0–13, SF race0–11 (+r0) authored data present. |
 | F13-B | queued | F13-A | — |
 | F13-C | queued | F13-B, F15-B | — |

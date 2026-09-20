@@ -21,6 +21,7 @@ fn dev_world_headless_smoke_passes_without_mm2_data() {
         None,
         &VehicleConfig::default(),
         600,
+        smoke::Driver::Hold,
     );
     assert_eq!(
         rec.status,
@@ -54,7 +55,14 @@ fn requested_missing_city_is_an_explicit_failure() {
         },
         ..SessionConfig::default()
     };
-    let rec = smoke::headless_smoke(&config, vfs, None, &VehicleConfig::default(), 600);
+    let rec = smoke::headless_smoke(
+        &config,
+        vfs,
+        None,
+        &VehicleConfig::default(),
+        600,
+        smoke::Driver::Hold,
+    );
     assert_eq!(
         rec.status,
         SmokeStatus::Fail,

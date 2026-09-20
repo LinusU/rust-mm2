@@ -27,7 +27,7 @@ use mm2_game::{
 use mm2_vehicle::vehicle::{VehicleInput, VehicleState};
 use mm2_vehicle::{VehicleConfig, VehiclePlugin};
 
-use crate::{camera, contracts, race, session};
+use crate::{camera, contracts, race, scripted, session};
 
 /// Engine commit embedded by `build.rs` — reports stay versioned by the
 /// exact code that produced them.
@@ -103,15 +103,42 @@ impl SmokeRecord {
     }
 }
 
+/// Which driver writes the player vehicle's [`VehicleInput`] in a
+/// headless run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Driver {
+    /// Settle, then hold full throttle straight (the original smoke).
+    #[default]
+    Hold,
+    /// The scripted course-follower (`--bot`): steers at the live race
+    /// objective through the production `VehicleInput` path, so event
+    /// sessions can reach a finish/result instead of running straight
+    /// off the course.
+    Scripted,
+}
+
+impl Driver {
+    /// Stable lowercase name for the `driver=` record field.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hold => "hold",
+            Self::Scripted => "scripted",
+        }
+    }
+}
+
 /// Run the world + player vehicle headlessly for `frames` app updates
 /// (60 Hz virtual time; physics ticks at 120 Hz internally) through the
 /// same session systems the windowed binary runs.
 ///
-/// The car settles for up to two seconds, then holds full throttle — the
-/// smoke exercises input → simulation → telemetry, not just spawning.
-/// Dev-world criteria require the car to actually drive; a city only has
-/// to load, keep the car finite and grounded (props may legitimately
-/// block its path — `moved=` reports how far it got either way).
+/// The `Hold` driver settles for up to two seconds, then holds full
+/// throttle — the smoke exercises input → simulation → telemetry, not
+/// just spawning. The `Scripted` driver inserts [`ScriptedDrive`] and
+/// lets `scripted_drive` steer at the live objective instead; it owns
+/// the input from the first update. Dev-world criteria require the car
+/// to actually drive; a city only has to load, keep the car finite and
+/// grounded (props may legitimately block its path — `moved=` reports
+/// how far it got either way).
 ///
 /// Event sessions honor the countdown's input lock (throttle stays zero
 /// until `RaceStarted`'s release) and report `race=`/`cp=` evidence.
@@ -122,6 +149,7 @@ pub fn headless_smoke(
     selected: Option<VehicleDef>,
     vehicle_config: &VehicleConfig,
     frames: u32,
+    driver: Driver,
 ) -> SmokeRecord {
     let world = match &config.world {
         WorldMode::DevWorld => "dev-world".to_string(),
@@ -202,8 +230,12 @@ pub fn headless_smoke(
                 )
                     .chain(),
                 race::update_checkpoint_markers,
+                scripted::scripted_drive.run_if(resource_exists::<scripted::ScriptedDrive>),
             ),
         );
+    if driver == Driver::Scripted {
+        app.insert_resource(scripted::ScriptedDrive);
+    }
     app.finish();
     app.cleanup();
 
@@ -229,25 +261,29 @@ pub fn headless_smoke(
     let mut grounded_wheels = 0usize;
     let mut peak_speed = 0.0f32;
     for f in 0..frames {
-        // Honor the countdown lock the way `vehicle_input` does — the
-        // smoke's direct writes must not sneak throttle past it (AC03).
-        let driving = {
-            let session = app.world().resource::<Session>();
-            let locked = app
-                .world()
-                .get_resource::<RaceState>()
-                .is_some_and(|r| r.input_locked() && !r.is_stale(session.generation()));
-            session.is_playing() && !locked
-        };
-        if let Some(mut input) = app.world_mut().get_mut::<VehicleInput>(car) {
-            *input = if driving && f >= settle {
-                VehicleInput {
-                    throttle: 1.0,
-                    ..default()
-                }
-            } else {
-                VehicleInput::default()
+        // The `Hold` driver writes input directly; `Scripted` is owned
+        // by `scripted_drive` inside the update. Either way the
+        // countdown lock must not be bypassed (AC03) — `scripted_drive`
+        // gates on it the same way `vehicle_input` does.
+        if driver == Driver::Hold {
+            let driving = {
+                let session = app.world().resource::<Session>();
+                let locked = app
+                    .world()
+                    .get_resource::<RaceState>()
+                    .is_some_and(|r| r.input_locked() && !r.is_stale(session.generation()));
+                session.is_playing() && !locked
             };
+            if let Some(mut input) = app.world_mut().get_mut::<VehicleInput>(car) {
+                *input = if driving && f >= settle {
+                    VehicleInput {
+                        throttle: 1.0,
+                        ..default()
+                    }
+                } else {
+                    VehicleInput::default()
+                };
+            }
         }
         app.update();
         if let Some(state) = app.world().get::<VehicleState>(car) {
@@ -296,7 +332,8 @@ pub fn headless_smoke(
         });
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{extra}",
+            "updates={frames} ticks={ticks} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{extra}",
+            driver.as_str(),
             session.phase().name(),
             moved = pos.map(|p| (p - spawn_pos).length()).unwrap_or(f32::NAN),
             total = vehicle_config.wheels.len(),

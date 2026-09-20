@@ -13,5 +13,6 @@ pub mod contracts;
 pub mod dev_world;
 pub mod input;
 pub mod race;
+pub mod scripted;
 pub mod session;
 pub mod smoke;

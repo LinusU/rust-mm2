@@ -105,6 +105,10 @@ cannot provide is a hard failure — it never falls back to the dev world.
 cargo run -- --dev-world --headless [--frames N]            # default 600
 cargo run -- --mm2-path <dir> --city sf --headless          # real city collision
 cargo run -- --mm2-path <dir> --city london --event blitz:0 --headless  # authored race
+cargo run -- --mm2-path <dir> --city london --event blitz:0 --headless --bot
+#   --bot steers at the live race objective (nav target / next ordered
+#   gate) instead of holding throttle straight — event completions go
+#   through the real checkpoint/finish/result path. Works windowed too.
 
 # visual smoke — real render path, windowed; the screenshot is awaited
 # (pass is reported only once the file actually lands):

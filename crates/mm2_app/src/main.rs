@@ -17,7 +17,7 @@ use bevy::prelude::*;
 use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use clap::Parser;
 use mm2_app::session::{ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
-use mm2_app::{camera, car_visual, city, contracts, input, race, session, smoke};
+use mm2_app::{camera, car_visual, city, contracts, input, race, scripted, session, smoke};
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
 use mm2_game::{
@@ -108,6 +108,14 @@ struct Cli {
     /// (default 600), print a `smoke=headless-physics` record and exit.
     #[arg(long)]
     headless: bool,
+
+    /// Scripted course-follower: the player vehicle steers at the live
+    /// race objective (the RACE-6 target / next ordered gate) instead of
+    /// waiting for keyboard/gamepad input. An evidence driver for
+    /// completions — an event session still goes through the real
+    /// countdown, checkpoint and result path.
+    #[arg(long)]
+    bot: bool,
 }
 
 /// Smoke-test capture: run N frames, take the screenshot (if requested),
@@ -402,6 +410,11 @@ fn main() {
             selected,
             &vehicle,
             cli.frames.unwrap_or(600),
+            if cli.bot {
+                smoke::Driver::Scripted
+            } else {
+                smoke::Driver::Hold
+            },
         );
         println!("{}", rec.line());
         std::process::exit(rec.status.exit_code());
@@ -487,6 +500,13 @@ fn main() {
             )
                 .chain(),
             input::vehicle_input.run_if(not(capturing)),
+            // The scripted driver owns `VehicleInput` while `--bot` is
+            // on — scheduled after the keyboard mapping so it wins
+            // deterministically, and frozen during a capture like every
+            // other input.
+            scripted::scripted_drive
+                .after(input::vehicle_input)
+                .run_if(not(capturing).and_then(resource_exists::<scripted::ScriptedDrive>)),
             race::nav_target_input.run_if(not(capturing)),
             camera::toggle_camera.run_if(not(capturing)),
             camera::chase_follow,
@@ -508,6 +528,9 @@ fn main() {
             update_hud,
         ),
     );
+    if cli.bot {
+        app.insert_resource(scripted::ScriptedDrive);
+    }
     if cli.screenshot.is_some() || cli.frames.is_some() {
         app.insert_resource(SmokeTest {
             world: world_label,
