@@ -1,118 +1,102 @@
 # Last implementation iteration
 
-- Task ID and title: F03-B.5 — placement-height repair for the
-  operator's play-test report ("all of the stuff is spawned in at the
-  wrong height"; a sawhorse struck at 100+ km/h did not move).
+- Task ID and title: F04-C.2/-C.3 evidence re-take — re-run the
+  retail strike/settle/pool commands the F03-B.5 placement repair
+  had invalidated (the external review's top verification gap and
+  the named next action in the previous handoff).
 - Starting commit and resulting commits: started at
-  `ff7ab7effc224b2ade61c90c54e22d21ab353491` (the operator-report
-  commit; branch `ralph/night`, clean tree).
-- Why this slice: the operator report is a PRIORITY entry in PLAN.md
-  and outranks every queued feature candidate — it is direct
-  observation of rendered gameplay on retail content, and two
-  recorded hypotheses (slope-tumble, hull clearance) were built on
-  the misplaced geometry it describes.
-- Diagnosis (measured, not inferred): a temporary `mm2_inspect`
-  probe dumped `dgBangerData` `Size`/`CG` against PKG vertex AABBs on
-  the retail install. Prop meshes are authored **centred at the bound
-  centre** (e.g. `sp_sawhrslt_f` y ∈ [−0.727, +0.978]); `Size` is the
-  bound's **full** extents, `CG` is the bound centre, and `CG.y =
-  Size.y/2` on every measured record (cone 0.425/0.85, sawhorse
-  0.727/1.453, tree 3.5/7.0, streetlamp 3.862/7.702, tptpole
-  6.151/12.309, `ghirardelli` sign and BREAK fragments too). The
-  authored stamp point is where the bound's *base* rests — so `mesh +
-  CG` lands inside `CG ± Size/2` with its base at y=0. `city.rs`
-  stamped the mesh centre at the point: every stamped prop sank by
-  ~half its height, matching the report exactly (the sawhorse's bound
-  was already under the road, hence immovable).
-- What landed (code):
-  - `mm2_app::city::PropOffset` — `Verbatim` (INST), `Bound(Vec3)`
-    (`+CG` for stamped bound names), `Ground` (`−min_y`, lift-only,
-    for unbound stamped names). Offset is baked into render vertices
-    and collision accumulation in `emit_strip`, and into BREAK
-    fragment pieces via the new `fragment_pieces` resolver (parent
-    content offset applied to fragment chunks). `PropCache` keys now
-    carry the offset class — one pkg name can reach all three
-    channels with different offsets.
-  - `stamp_pathset` resolves the banger record *before* fetching the
-    model (so the `CG` is known); `stamp_prop_rules` does the same;
-    INST stamping passes `Verbatim`.
-  - `mm2_app::banger`: `mirrored_cg` is `pub(crate)` for city.rs;
-    the bound-strike path measures reach as half the max `Size` axis
-    (`Size` is full extents, not half) and aims at the bound centre
-    (`position + rot·cg`); the spin-kick lever is measured from the
-    centre of mass rather than the body origin.
-  - `mm2_game::banger` + `mm2_formats::banger`: `Size`/`CG` docs
-    corrected to the measured convention (full extents / bound
-    centre); `angular_kick` treats `size` as full extents (inertia
-    dims were doubled — now corrected, kick is ~4× stronger).
-  - Docs: `docs/research/banger.md` records the measured convention
-    with the retail table and the operator-visible defect;
-    `pathset.md`/`proprules.md` note the base-on-point convention;
-    `PLAN.md` marks F04-C.2/-C.3 retail evidence for re-take.
-- Tests added (in `crates/mm2_app/tests/banger.rs`):
-  - `stamped_props_rest_their_bounds_on_the_path_point` — synthetic
-    city through `load_city` + real Avian: bound pathset prop's
-    `ColliderAabb` base rests on the authored path point
-    (centred-fixture pkg), unbound prop's lowest vertex rests on the
-    point, INST prop stays verbatim (fixture authored base-at-origin
-    — a `Bound` offset would have lifted it).
-  - Two existing settle-window tests widened (10 s → 30 s budget;
-    they settle in ~0.9 s) because the corrected kick is ~4×
-    stronger — physically right, not a regression.
-- Retail evidence (install `/Users/linus/coding/rust-mm2/retail`):
-  - `mm2 --mm2-path <retail> --city london --headless` — `status=pass`,
-    counts unchanged (1997 INST / 1188 pathset props+bangers /
-    5083 prop-rule stamps+bangers, 0 unresolved, 0 decode failures).
-  - `mm2 --city london --cam=<park view> --frames 90 --screenshot`
-    → `/tmp/props-fixed-london-trees.png` — trees rooted on grass,
-    bench on path, lamps upright, post boxes standing (before:
-    `screenshots/pathset-london-trees.png` showed buried shrubs).
-  - `mm2 --city sf --cam=<lamp view> --frames 90 --screenshot`
-    → `/tmp/props-fixed-sf-lamps.png` — lamps full height with arms
-    over the road, hill trees full (before:
-    `screenshots/pathset-sf-lamps.png` showed poles buried to their
-    arms, stump trees).
-- What this proves / does not prove:
-  - Proves: stamped-prop heights now match the authored bound
-    convention on all three channels; rendered evidence on both stock
-    cities; collider AABBs (not just render meshes) rest on the
-    authored points; INST untouched.
-  - Does not prove: the original used the identical convention for
-    every prop (measured on ~a dozen records incl. fragments, not all
-    994); whether prop-rule stamp Y is curb-top or lerped (cm-class,
-    still open); the F04 activation/settle evidence — measured on
-    sunk geometry and owed a re-take.
-- Classification: `Size`-full-extents / `CG`-bound-centre /
-  base-on-point is a verified_original measurement of authored data
-  (WLD-15 extended in banger.md); `PropOffset`, the `Ground` lift
-  policy for unbound names, and the CoM-relative kick lever are
-  implementation choices.
-- Commands actually run and results:
-  - `cargo test -p mm2_app --test banger` — 17/17 pass.
-  - `cargo fmt --all -- --check` PASS; `cargo clippy --workspace
-    --all-targets --all-features -- -D warnings` PASS (after deleting
-    the temporary `probe_height.rs`, which tripped lints and was
-    measurement-only); `cargo test --workspace` PASS.
-  - Retail runs as recorded above; physics smoke `status=fail
-    never grounded` on london — pre-existing, unrelated to this fix
-    (counts/visuals clean); recorded, not attributed.
-- Acceptance IDs satisfied / still open: repairs the F03-B stamped-
-  placement contract on real data; F04 stays `implemented` — C.2's
-  settle/pool/repeat evidence and C.3's ghosted-prop evidence must be
-  re-run on corrected geometry before any rollup.
-- Deferred deliberately: F04-C.2/-C.3 retail re-take (next
-  iteration's named action); per-prop verification of the remaining
-  ~980 records (audit-scale, not needed to land the fix).
-- Stock data/GPU/audio/network limitations: screenshots are local
-  captures of our renderer on retail content — no original-executable
-  comparison; no GPU break capture; no audio/network coverage.
-- Unresolved blockers or discovered regressions: none known from
-  this change; the london headless physics smoke's `never grounded`
-  predates it.
-- Next smallest useful action: re-run the F04-C.2 `--spawn` evidence
-  commands on the fixed placement (London bollard row, SF wood
-  barricade, cone cluster); then return to queued work (F13-A
-  remainder / F14-A / F11-C).
+  `3ac8a5a4ff96c46b0065c5196ebacc185c940b09` (the externally checked
+  F03-B.5 commit; branch `ralph/night`, clean tree).
+- Why this slice: review/repair before new feature work. The
+  corrected prop bounds invalidate every retail transition count
+  recorded against the sunk geometry; F04 cannot roll up until the
+  evidence is re-taken. No production code change resulted — the
+  re-take produced honest measurements, including one legitimately
+  changed outcome that is a *corrected record*, not a defect.
+- Retail install: `/Users/linus/coding/rust-mm2/retail`
+  (`fnv1a64:e91e6cd4b2ae30d9`), all runs `--headless` on this
+  machine's dev-profile binary; `bng=` denominators now include the
+  prop-rule channel (sf 5 927, london 6 271 dormant bangers).
+
+## What changed vs the sunk-geometry records
+
+- **F04-C.3 bound-strikes (`--bot`, 1500f):**
+  - `vpddbus --spawn=-1641.6,36.7,410,0` → `bng_ev=3a/2s/0b` (was
+    `1a/0s`; re-run bit-identical). Full-height `sp_cone_f` bounds
+    (0.85 m vs ~0.43 m exposed when sunk) overlap the bus bound
+    across more of the row; two sleep on the slope.
+  - `vpbus --spawn=0.4,5.5,-720,0` → `1a/1s/0b` (unchanged).
+  - `vpbug` same run → `1a/1s/0b` (was `2a/2s` on the sunk row —
+    halved strike reach + the corrected ~4× kick changed which
+    bollard the trajectory clips).
+- **F04-C.2 settle/pool/repeat:**
+  - Original spawn `--spawn=-170,1.5,-565,30` → `0a/0s/0b` at
+    10 000 ticks: the bus reaches the `sp_barricadewood_f` row's
+    first prop at ~10 m/s → estimate ~49 000 < authored 51 888 →
+    stays dormant, bus slides around the row. The pre-fix `1b`
+    here was measured on the sunk bound; the corrected record is
+    that this spawn sits just under the limit.
+  - Negative leg re-taken: `--spawn=-164,1.5,-552,30` → `0a/0s/0b`,
+    peak 9.7 m/s — dormant barricade stops the bus dead.
+  - Restaged positive leg (same row, perpendicular approach):
+    `--spawn=-141.9,1.5,-608.5,115` → two `banger shattered` at
+    ~16.85 m/s (estimate ~82 800) → `0a/5s/2b` at 10 000 ticks:
+    8 fragments, 5 `Slept`-settled on the flat lot, `impacts=80`
+    of battering all finite. Re-run bit-identical.
+  - Pool bound on fragments (same spawn): `--banger-pool 2` →
+    `1a/1s/2b`; `--banger-pool 1` → `1a/0s/2b` — live pieces never
+    exceed the cap.
+  - London reclaim ring (`vpbug --spawn=802,6,-905,180`):
+    `3a/0s/0b` default, `bng_rec=1` at pool 2, `bng_rec=2` at
+    pool 1 — bit-identical to the pre-fix records.
+- **Operator's sawhorse (root-cause confirmation):**
+  `sp_sawhrslt_f` resolves only to `race/london/race7.pathset` —
+  the `checkpoint:7` overlay (13 `Points` stamps near (−695, 235),
+  limit 34 982, NumParts 3; `circuit7.pathset` is all concrete
+  barricades — an event-name slip in the earlier notes, now
+  corrected in both docs). `vpddbus --event checkpoint:7
+  --spawn=-703,1.5,217,190` → two `banger shattered` at 8.7 and
+  11.7 m/s → `0a/1s/2b`. The prop that "didn't move" at 100+ km/h
+  in the operator's build was buried ~0.73 m; on corrected
+  geometry it shatters at a third of that speed.
+
+## What this proves / does not prove
+
+- Proves: activation/break/settle/pool-cap/reclaim all behave on
+  corrected geometry on real content; both sides of the authored
+  `ImpulseLimit2` gate have corrected-geometry evidence; the
+  strike-bound repair still fires (more so, on taller bounds);
+  results are deterministic (bit-identical re-runs).
+- Does not prove: sub-limit hit → tip (UNK-22 — a ~1 200 kg car at
+  100 km/h still estimates under the sawhorse's 34 982 limit);
+  natural-pool (>32) reclaim (no surveyed site); impulse
+  equivalence of bound-strike vs manifold contact; GPU/audio/net
+  coverage. The re-take is counter evidence, not original-rule
+  verification.
+- Incidental finding, recorded not fixed: two `sp_parkmtr_f`
+  prop-rule props now sit inside the longer runway of one staging
+  path — new denominator from the prop-rule channel, not a defect.
+
+## Commands actually run and results
+
+- `cargo build -p mm2_app --bin mm2` — clean.
+- All smoke commands above → `status=pass`; debug-level
+  `mm2_app::banger` logs captured the per-prop
+  name/severity/estimate for each transition.
+- `mm2 --event checkpoint:7 --cam=<overhead> --frames <n>
+  --screenshot /tmp/*.png` → awaited PNGs used to locate the
+  roadblock (local captures only, not committed).
+- `cargo fmt --all -- --check` PASS; `cargo clippy --workspace
+  --all-targets --all-features -- -D warnings` PASS;
+  `cargo test --workspace` PASS (docs-only diff, suite unchanged).
+- Acceptance IDs: advances F04-C.2/C.3's original-content evidence
+  to the corrected geometry; F04 stays `implemented` pending
+  external check + UNK-22. AC01's both-sides-of-threshold leg is
+  re-evidenced.
+- Deferred deliberately: F13-A remainder / F14-A / F11-C (next
+  slice per selection policy); per-prop audit of the remaining
+  ~980 records stays open.
+- Unresolved blockers or regressions: none found this iteration.
 
 This is a candidate handoff. External code-gate and separate review
 results live in the runner state directory and are not implied by

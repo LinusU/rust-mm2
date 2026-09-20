@@ -364,9 +364,14 @@ city/<city>.bai`) for placements lying on a road.
   still `1a/0s` at 5000 ticks — the punted cone never reached Avian
   sleep on the sloped streets, matching the fragment observation
   below.
-- **Unbroken attempt (London `circuit:7`):** the `sp_sawhrslt_f`
-  wall (ImpulseLimit2 34982) on road216 near (−695, 235) was
-  reachable at only ~8 m/s semi — below threshold, no transition.
+- **Unbroken attempt (London `checkpoint:7`):** the `sp_sawhrslt_f`
+  roadblock (ImpulseLimit2 34982, 13 `Points` stamps from
+  `race/london/race7.pathset` near (−695, 235)) was reachable at
+  only ~8 m/s semi — below threshold, no transition. (Earlier text
+  said `circuit:7`; `circuit7.pathset` stamps only the 899
+  `sp_barricadeconc[lr]_f` concrete walls — `sp_sawhrslt_f` resolves
+  to `race7.pathset`, the `checkpoint:7` overlay. Post-F03-B.5 a
+  `vpddbus` shatters these at ~9–12 m/s — see the C.2 re-take.)
 - **Open observation:** the sign fragments stayed `Active` over 3000
   ticks on the sloped elevated freeway (never reached Avian sleep);
   slope tumbling suspected, a flat-ground retail break would settle
@@ -410,6 +415,17 @@ city/<city>.bai`) for placements lying on a road.
   strike imparts the same impulse as a manifold contact is
   provisional (UNK-22 territory — overlap supplies speed and an
   upwind-face lever, no manifold).
+- **Re-taken on corrected prop geometry (F03-B.5, same install):**
+  `vpddbus --spawn=-1641.6,36.7,410,0 --bot --frames 1500` →
+  `bng_ev=3a/2s/0b`, re-run bit-identical — three `sp_cone_f`
+  activations where the sunk cluster gave one: cones now stand on
+  their full 0.85 m bound (was ~0.43 m exposed), so the bound sweep
+  catches more of the row and two sleep on the slope. `vpbus
+  --spawn=0.4,5.5,-720,0 --bot --frames 1500` → `bng_ev=1a/1s/0b`
+  (unchanged). `vpbug` on the same run → `1a/1s/0b` (was `2a/2s` on
+  the sunk row — the halved strike reach and the corrected kick
+  changed which bollard the trajectory clips; still one activation
+  plus one settle on the flat row).
 - **Retracted claim:** an earlier record cited `vpbug
   --spawn 762,0.5,-424,0` activating the `sp_bollard_black_l` at
   (759.7, −427). It is not reproducible and was physically
@@ -432,6 +448,12 @@ default, and `bng_rec=<n>` counts `BangerStateChanged` transitions
 whose cause is `Reclaimed` (a pool settle is otherwise
 indistinguishable from an Avian-sleep settle in `bng_ev=`). Default
 records are unchanged.
+
+*The runs below were measured before the F03-B.5 placement repair —
+the stamped props sat ~half their bound-height low, and the
+prop-rule stamping channel (now +5 002 sf / +5 083 london dormant
+bangers in every `bng=` denominator) did not exist yet. The
+corrected-geometry re-take follows at the end of the section.*
 
 - **Flat-ground break + fragment settle (SF roam):** `vpddbus` at
   `--spawn=-170,1.5,-565,30` struck the `sp_barricadewood_f` row
@@ -468,6 +490,54 @@ records are unchanged.
   contacts where `vpbug` activates. With the authored-bound strike
   surface it now activates them on the same run (`bng_ev=1a`, see
   above); striker choice no longer splits by floor height.
+
+### Re-take on corrected geometry (F03-B.5, same install, 2026-09-20)
+
+All `--headless`; `bng=` denominators now include the prop-rule
+channel (sf 5 927 total, london 6 271).
+
+- **The original staging spawn no longer reaches the threshold.**
+  `vpddbus --spawn=-170,1.5,-565,30` → `bng_ev=0a/0s/0b` at 10 000
+  ticks (8 impacts, moved 83 m): the bus reaches the row's first
+  barricade at ~10 m/s, an estimate of ~49 000 against the authored
+  51 888 limit — the prop stays dormant and the bus slides around the
+  row's end. The pre-fix break on this spawn was measured on the
+  sunk bound (and before the strike surface existed); the corrected
+  record is that this spawn sits just under the limit.
+- **Below-threshold negative case (same row):**
+  `vpddbus --spawn=-164,1.5,-552,30` → `bng_ev=0a/0s/0b`, peak 9.7
+  m/s, moved 23 m — the dormant barricade stops the bus dead
+  (estimate ~47 700 < 51 888). Both sides of the activation gate now
+  have corrected-geometry evidence on real content.
+- **Flat-ground break + fragment settle (restaged, same row):**
+  `vpddbus --spawn=-141.9,1.5,-608.5,115` approaches the row
+  perpendicular from the lot side → two `banger shattered` events at
+  severity 16.85 m/s (estimate ~82 800 > 51 888) → `bng=5925d/3a/5s/2b
+  bng_ev=0a/5s/2b` at 10 000 ticks: 8 fragments spawned, 5 already
+  `Slept`-settled on the flat lot (3 still `Active`). Re-run
+  bit-identical. `impacts=80` of post-break battering, all poses
+  finite — the repeated-hits leg.
+- **Pool bound on fragments (same spawn):** `--banger-pool 2` →
+  `bng=5925d/1a/1s/2b bng_pool=2` — at most 2 of the 8 authored
+  pieces ever live (skipped pieces emit nothing); `--banger-pool 1`
+  → `1a/0s/2b bng_pool=1`.
+- **Repeated activations + reclaim (London ring, unchanged spawn):**
+  `vpbug --spawn=802,6,-905,180` → `bng_ev=3a/0s/0b` default;
+  `--banger-pool 2` → `bng_ev=3a/3s/0b bng_rec=1`; `--banger-pool 1`
+  → `bng_rec=2` — identical to the pre-fix records.
+- **Operator's sawhorse (event overlay, `checkpoint:7`):** the
+  `sp_sawhrslt_f` roadblock (13 `Points` stamps around
+  (−686…−702, 226…245), `race/london/race7.pathset`, limit 34 982,
+  NumParts 3) — `vpddbus --event checkpoint:7
+  --spawn=-703,1.5,217,190` → two `banger shattered` events at 8.7
+  and 11.7 m/s (estimates 42 833 / 57 541) → `bng_ev=0a/1s/2b`. The
+  prop that "didn't move" at 100+ km/h in the operator's build was
+  buried ~0.73 m; on corrected geometry it shatters at a third of
+  that speed. (A ~1 200 kg car at 100 km/h estimates ~33 000, still
+  under the authored limit — whether sub-limit hits should tip is
+  UNK-22.)
+- Natural-pool (>32 simultaneous) reclaim remains unobserved —
+  unchanged; the dev bound exercises the same claim/reclaim path.
 
 ## Runtime consumption — what is not known
 
