@@ -130,17 +130,36 @@ Measured on `city/sf.bai` and `city/london.bai` (2026-09-21):
   1 dead end, 1 component. 176 roads carry no routable vehicle lanes
   (pedestrian/special/disabled or curve-less) — reported, not
   repaired.
+- Directed reachability census (`NavGraph::reachable_arcs`,
+  `mm2-inspect nav --routes`, 2026-09-20): London's vehicle graph is
+  strongly connected — every arc reaches all 606. SF's is not: road
+  0's backward arc ends at the authored dead end, and six more arcs
+  reach junctions no other arm legally departs (one-way traps —
+  roads 92/94/97/99 reach only themselves, 102/111 reach 2, road 1
+  backward reaches 617 of 618). 4927 ordered arc pairs (~1.3%) are
+  unreachable; 505/512 seeded `route_roads` probes succeed and the 7
+  failures are exactly the trap sources — honest authored
+  constraints, not invented connectivity (0 chain violations).
+  Event `[Exceptions]` closures bind at route time:
+  `race/london/blitz0.aimap` (8 closed roads) raises unreachable
+  pairs to 15016 and `race/sf/blitz0.aimap` (3) to 7977, with named
+  probes (e.g. london `270→108`: 19 steps open → `Unreachable`
+  closed) and zero closed-road traversals.
 
 `mm2_game::nav` turns `Bai` into an immutable `NavGraph`: directed
 arcs, lane sampling, full-3D `nearest_lane` (bridge decks do not snap
 to ground lanes through horizontal proximity; PSDL-room hints
 disambiguate stacked geometry), legal exits per lane position,
 seeded exit choice, bounded deterministic A* routing with specific
-failure reasons, and per-consumer `RouteCursor`s. `mm2_content::nav`
+failure reasons, per-consumer `RouteCursor`s and a bounded
+`reachable_arcs` census walk. `mm2_content::nav`
 loads `city/<name>.bai` through the VFS and distils `city/<name>.aimap`
 into `NavOverrides` (zero-density `[Exceptions]` close roads to ambient
 routing; `[Speed Limit]` overrides base speeds). `mm2-inspect nav
 <install>` audits the graph per city with `--route from:to` road-index
 probes (honouring aimap closures), the `--turns` ccw-delta/geometry
-reconciliation, and `--strict`. The app's `--nav`/`--nav-route` flags
+reconciliation, `--aimap <logical>` to substitute an event aimap's
+overrides, `--routes n` for the directed-reachability census plus `n`
+seeded probes (chain-consistency and closed-road-traversal checks),
+and `--strict`. The app's `--nav`/`--nav-route` flags
 draw the graph over the imported city through gizmos (F09-AC04).

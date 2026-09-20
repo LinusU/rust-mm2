@@ -1350,6 +1350,28 @@ impl NavGraph {
         self.route(a, b, options)
     }
 
+    /// Every arc reachable from `start` through turn connections,
+    /// `start` itself included. `closed_roads` carries the same meaning
+    /// as [`RouteOptions::closed_roads`]: a closed road is never entered
+    /// through a turn, though a `start` sitting on one still expands.
+    /// The walk is bounded by the visited set — it always terminates
+    /// and can never leave the authored connectivity.
+    pub fn reachable_arcs(&self, start: ArcId, closed_roads: &BTreeSet<u16>) -> BTreeSet<ArcId> {
+        let mut seen = BTreeSet::from([start]);
+        let mut stack = vec![start];
+        while let Some(arc) = stack.pop() {
+            for exit in &self.exits[arc.0 as usize] {
+                if closed_roads.contains(&self.arc(exit.to).road) {
+                    continue;
+                }
+                if seen.insert(exit.to) {
+                    stack.push(exit.to);
+                }
+            }
+        }
+        seen
+    }
+
     /// Start a cursor at a route's snapped start position.
     pub fn cursor(&self, route: &Route) -> RouteCursor {
         RouteCursor {

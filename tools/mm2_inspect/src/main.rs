@@ -225,6 +225,17 @@ enum Command {
         /// road closures.
         #[arg(long)]
         route: Option<String>,
+        /// Route-constraint validation: a per-arc directed reachability
+        /// census plus `n` seeded route probes between routable roads,
+        /// each checked for chain consistency and closed-road
+        /// traversal.
+        #[arg(long)]
+        routes: Option<usize>,
+        /// Logical `.aimap` path supplying the routing overrides instead
+        /// of `city/<name>.aimap` (e.g. an event file's `[Exceptions]`).
+        /// Must resolve through the VFS.
+        #[arg(long)]
+        aimap: Option<String>,
         /// Reconcile each exit's geometric turn classification against
         /// the authored counterclockwise road-index delta, histogrammed
         /// by intersection arity.
@@ -380,15 +391,21 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             dir,
             city,
             route,
+            routes,
+            aimap,
             turns,
             strict,
         } => nav(
             dir,
             cli.mods.as_deref(),
             city.as_deref(),
-            route.as_deref(),
-            *turns,
-            *strict,
+            &NavOptions {
+                route: route.as_deref(),
+                routes: *routes,
+                aimap: aimap.as_deref(),
+                turns: *turns,
+                strict: *strict,
+            },
         ),
         Command::Proprules { dir, city, strict } => {
             proprules(dir, cli.mods.as_deref(), city.as_deref(), *strict)
@@ -1184,26 +1201,51 @@ fn bai(
     Ok(())
 }
 
+/// The `nav` audit's optional report flags, bundled so `nav` stays
+/// readable.
+struct NavOptions<'a> {
+    /// `--route from:to` probe spec.
+    route: Option<&'a str>,
+    /// `--routes n` census + seeded-probe count.
+    routes: Option<usize>,
+    /// `--aimap` override path.
+    aimap: Option<&'a str>,
+    /// `--turns` reconciliation report.
+    turns: bool,
+    /// `--strict` failure gate.
+    strict: bool,
+}
+
 /// Navigation-graph audit (F09-B): each stock city's `city/<name>.bai`
 /// is loaded through the production `mm2_content::load_nav_graph` path
 /// and its `NavGraph` build reported — arc/lane counts, one-way roads,
 /// dead ends, weakly connected components and every `NavIssue`. The
 /// optional `--route from:to` probe anchors each road index on its
 /// first arc's lane and runs the bounded A* route query — honouring
-/// the city aimap's road closures — printing the step sequence or the
-/// specific `RouteError`. `--turns` reconciles every exit's geometric
-/// turn classification against the authored counterclockwise road-index
-/// delta. `--strict` fails on any load failure or issue.
+/// the aimap's road closures — printing the step sequence or the
+/// specific `RouteError`. `--aimap` substitutes a different override
+/// file (an explicit path must resolve). `--routes n` adds the F09-C
+/// route-constraint validation: a per-arc directed reachability census
+/// over authored exits plus `n` seeded `route_roads` probes, each
+/// checked for chain consistency and closed-road traversal.
+/// `--turns` reconciles every exit's geometric turn classification
+/// against the authored counterclockwise road-index delta. `--strict`
+/// fails on any load failure or issue.
 fn nav(
     dir: &Path,
     mods: Option<&Path>,
     city: Option<&str>,
-    route: Option<&str>,
-    turns: bool,
-    strict: bool,
+    opts: &NavOptions<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let vfs = build_vfs(dir, mods)?;
 
+    let NavOptions {
+        route,
+        routes,
+        aimap,
+        turns,
+        strict,
+    } = *opts;
     let probe = match route {
         Some(spec) => {
             let (a, b) = spec
@@ -1222,6 +1264,13 @@ fn nav(
             .map(|c| c.to_string())
             .collect(),
     };
+
+    // An explicit `--aimap` is operator input: it must resolve.
+    if let Some(p) = aimap
+        && vfs.resolve(p).is_none()
+    {
+        return Err(format!("--aimap {p} does not resolve in the VFS").into());
+    }
 
     let mut failures: Vec<String> = Vec::new();
     let mut issues_total = 0usize;
@@ -1256,18 +1305,21 @@ fn nav(
             println!("    issue: {issue}");
         }
 
-        // Aimap overrides: an absent file is fine (a modded city may
-        // not ship one); a malformed one is reported, not fatal.
-        let overrides = match mm2_content::load_nav_overrides(&vfs, &format!("city/{c}.aimap")) {
+        // Aimap overrides: the default `city/<c>.aimap` may be absent
+        // (a modded city may not ship one); an explicit `--aimap` path
+        // was already checked to resolve. A malformed file is reported,
+        // not fatal.
+        let aimap_path = aimap.map_or_else(|| format!("city/{c}.aimap"), str::to_string);
+        let overrides = match mm2_content::load_nav_overrides(&vfs, &aimap_path) {
             Ok(o) => o,
             Err(e) => {
-                println!("    aimap: failed to parse ({e}); overrides ignored");
+                println!("    aimap {aimap_path}: failed to parse ({e}); overrides ignored");
                 None
             }
         };
         if let Some(o) = &overrides {
             println!(
-                "    aimap: {} closed road(s), speed limit {:?}",
+                "    aimap {aimap_path}: {} closed road(s), speed limit {:?}",
                 o.closed_roads.len(),
                 o.default_speed_limit
             );
@@ -1300,6 +1352,149 @@ fn nav(
                 }
                 Err(e) => println!("    route {from}→{to}: {e}"),
             }
+        }
+
+        if let Some(n) = routes {
+            let opts = overrides
+                .as_ref()
+                .map_or_else(mm2_game::RouteOptions::default, |o| o.route_options());
+            // Directed reachability census: one bounded walk per arc
+            // over authored exits — the walk can never leave authored
+            // connectivity, so unreachable pairs are real constraints.
+            let n_arcs = g.stats().vehicle_arcs as u32;
+            let mut full = 0u32;
+            let mut self_only = 0u32;
+            let mut unreachable_pairs = 0u64;
+            let mut reach: Vec<(usize, u32)> = Vec::with_capacity(n_arcs as usize);
+            for i in 0..n_arcs {
+                let r = g
+                    .reachable_arcs(mm2_game::ArcId(i), &opts.closed_roads)
+                    .len();
+                unreachable_pairs += n_arcs as u64 - r as u64;
+                if r as u32 == n_arcs {
+                    full += 1;
+                }
+                if r == 1 {
+                    self_only += 1;
+                }
+                reach.push((r, i));
+            }
+            reach.sort();
+            println!(
+                "    census: {full}/{n_arcs} arcs reach the whole graph, \
+                 {self_only} reach only themselves, \
+                 {unreachable_pairs} ordered arc pairs unreachable"
+            );
+            for &(r, i) in reach.iter().take(8) {
+                if r as u32 == n_arcs {
+                    break;
+                }
+                let a = g.arc(mm2_game::ArcId(i));
+                let dir = match a.dir {
+                    mm2_game::TravelDir::Forward => "+",
+                    mm2_game::TravelDir::Backward => "-",
+                };
+                // Reach 1 splits two ways: an authored dead end, or a
+                // junction every other arm only *enters* (one-way trap).
+                if r == 1 {
+                    let why = match a.exit {
+                        mm2_game::ArcEnd::DeadEnd => "dead end",
+                        mm2_game::ArcEnd::Intersection(_) => "no legal continuation",
+                    };
+                    println!("      smallest reach: {}{dir} reaches {r} ({why})", a.road);
+                } else {
+                    println!("      smallest reach: {}{dir} reaches {r}", a.road);
+                }
+            }
+
+            // Seeded probes between routable roads: every query must
+            // terminate, and every returned route must be a real chain
+            // of authored turns — endpoints land on the asked roads and
+            // consecutive arcs share a turn. An expansion-limit hit or
+            // a closed-road traversal mid-route is a finding.
+            let routable: Vec<u16> = g
+                .roads()
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.arcs.iter().any(|a| a.is_some()))
+                .map(|(i, _)| i as u16)
+                .collect();
+            let mut rng = mm2_game::NavRng::new(0xF09C);
+            let mut tallies: BTreeMap<&str, u64> = BTreeMap::new();
+            let mut violations = 0u64;
+            let mut shown_errors = 0;
+            for _ in 0..n {
+                let (Some(&from), Some(&to)) = (rng.pick(&routable), rng.pick(&routable)) else {
+                    break;
+                };
+                match g.route_roads(from, to, &opts) {
+                    Ok(route) => {
+                        *tallies.entry("ok").or_default() += 1;
+                        let steps = &route.steps;
+                        if g.arc(steps[0]).road != from || g.arc(*steps.last().unwrap()).road != to
+                        {
+                            violations += 1;
+                            println!(
+                                "      violation: route {from}→{to} ran roads {}→{}",
+                                g.arc(steps[0]).road,
+                                g.arc(*steps.last().unwrap()).road
+                            );
+                        }
+                        for w in steps.windows(2) {
+                            if !g.exits(w[0]).iter().any(|e| e.to == w[1]) {
+                                violations += 1;
+                                println!(
+                                    "      violation: route {from}→{to} steps {}→{} share no turn",
+                                    g.arc(w[0]).road,
+                                    g.arc(w[1]).road
+                                );
+                            }
+                        }
+                        // Interior arcs are always entered through a
+                        // turn; endpoints may legitimately sit on a
+                        // closed road.
+                        for a in steps.iter().take(steps.len().saturating_sub(1)).skip(1) {
+                            let road = g.arc(*a).road;
+                            if opts.closed_roads.contains(&road) {
+                                violations += 1;
+                                println!(
+                                    "      violation: route {from}→{to} enters closed road {road}"
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let key = match e {
+                            mm2_game::RouteError::NoStartLane => "no-start-lane",
+                            mm2_game::RouteError::NoGoalLane => "no-goal-lane",
+                            mm2_game::RouteError::Unreachable { .. } => "unreachable",
+                            mm2_game::RouteError::ExpansionLimit { .. } => {
+                                issues_total += 1;
+                                "expansion-limit"
+                            }
+                        };
+                        *tallies.entry(key).or_default() += 1;
+                        if shown_errors < 10 {
+                            println!("      probe {from}→{to}: {e}");
+                            shown_errors += 1;
+                        }
+                    }
+                }
+            }
+            let tally = if tallies.is_empty() {
+                "none run".to_string()
+            } else {
+                tallies
+                    .iter()
+                    .map(|(k, v)| format!("{v} {k}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            println!(
+                "    routes: {n} seeded probes over {} routable roads — {tally}, {violations} violations",
+                routable.len()
+            );
+            issues_total += violations as usize;
         }
 
         if turns {

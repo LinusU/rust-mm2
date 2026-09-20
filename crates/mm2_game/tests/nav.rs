@@ -8,6 +8,7 @@ use mm2_formats::bai::{
     Bai, Culling, END_FILL, Intersection, Road, RoadEnd, RoadSection, RoadSide,
 };
 use mm2_game::*;
+use std::collections::BTreeSet;
 
 // ---------- synthetic BAI fixtures ----------
 
@@ -615,6 +616,77 @@ fn closed_roads_are_never_entered() {
         .route([3.0, 0.0, -20.0], [3.0, 0.0, 50.0], &opts)
         .unwrap_err();
     assert!(matches!(err, RouteError::Unreachable { .. }));
+}
+
+#[test]
+fn reachable_arcs_follow_only_authored_turns() {
+    let g = NavGraph::build(&cross(1)).graph;
+    let open = BTreeSet::new();
+    // Road 0 forward ends at the junction and may enter any other
+    // arm's departing arc; every departure dead-ends, so the walk
+    // stops there instead of wandering back.
+    let entry = g.arc_of(0, TravelDir::Forward).unwrap();
+    let reach = g.reachable_arcs(entry, &open);
+    let mut roads: Vec<u16> = reach.iter().map(|a| g.arc(*a).road).collect();
+    roads.sort_unstable();
+    assert_eq!(roads, vec![0, 1, 2, 3]);
+    assert_eq!(reach.len(), 4);
+    // The U-turn exclusion holds in reachability: road 0's backward
+    // arc departs the junction but is never re-entered from the start.
+    let back = g.arc_of(0, TravelDir::Backward).unwrap();
+    assert!(!reach.contains(&back));
+    // A departing arc exits to a dead end: it reaches only itself.
+    let dep = g.arc_of(1, TravelDir::Forward).unwrap();
+    assert_eq!(g.reachable_arcs(dep, &open), BTreeSet::from([dep]));
+}
+
+/// The r0 → I0 → r1 → I1 → r2 chain both `closed_roads` tests build.
+fn chain() -> Bai {
+    let c0 = [[0.0, 0.0, -30.0], [0.0, 0.0, -4.0]];
+    let c1 = [[0.0, 0.0, 4.0], [0.0, 0.0, 30.0]];
+    let c2 = [[0.0, 0.0, 34.0], [0.0, 0.0, 60.0]];
+    let mk = |id: u16, c: &[[f32; 3]], start: RoadEnd, end: RoadEnd| {
+        road(
+            id,
+            c,
+            vec![1],
+            side(0, &[(3.75, offset(c, 3.75, 0.0))], &[], 2),
+            side(0, &[(-3.75, offset(c, -3.75, 0.0))], &[], 2),
+            start,
+            end,
+        )
+    };
+    bai(
+        vec![
+            mk(0, &c0, dead_end(), connected(0, 0)),
+            mk(1, &c1, connected(0, 1), connected(1, 0)),
+            mk(2, &c2, connected(1, 1), dead_end()),
+        ],
+        vec![
+            intersection(0, [0.0; 3], &[0, 1]),
+            intersection(1, [0.0, 0.0, 32.0], &[1, 2]),
+        ],
+    )
+}
+
+#[test]
+fn reachable_arcs_shrink_under_road_closures() {
+    let g = NavGraph::build(&chain()).graph;
+    let open = BTreeSet::new();
+    let f0 = g.arc_of(0, TravelDir::Forward).unwrap();
+    let f1 = g.arc_of(1, TravelDir::Forward).unwrap();
+    let f2 = g.arc_of(2, TravelDir::Forward).unwrap();
+    // Open: r0 forward reaches straight down the chain.
+    assert_eq!(g.reachable_arcs(f0, &open), BTreeSet::from([f0, f1, f2]));
+    let closed = BTreeSet::from([1u16]);
+    // A turn onto the closed road is never taken — the same rule
+    // `route` applies — while a start already on it still expands.
+    assert_eq!(g.reachable_arcs(f0, &closed), BTreeSet::from([f0]));
+    assert_eq!(g.reachable_arcs(f1, &closed), BTreeSet::from([f1, f2]));
+    // Closures bind both directions: r2 backward cannot turn onto
+    // road 1 either.
+    let b2 = g.arc_of(2, TravelDir::Backward).unwrap();
+    assert_eq!(g.reachable_arcs(b2, &closed), BTreeSet::from([b2]));
 }
 
 #[test]
