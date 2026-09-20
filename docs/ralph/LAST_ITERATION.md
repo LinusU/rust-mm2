@@ -1,149 +1,146 @@
 # Last implementation iteration
 
-- Task ID and title: F04-A.3 — banger runtime slice: the
-  dormant → active → settled state machine on Avian for
-  pathset-stamped, name-bound props, using the binding verified by
-  F04-A.2 (`banger-bind`). Threshold semantics remain UNK-22 —
-  the activation estimate is a documented provisional stand-in, not a
-  verified original rule.
+- Task ID and title: F04-B.1 — BREAK<NN> fragment spawning on
+  activation: a bound pathset prop whose PKG carries authored
+  `BREAK<NN>` chunks shatters into per-piece fragment bodies instead
+  of tipping over. Threshold and fragment-timing semantics remain
+  UNK-22 — the break fires on the same provisional activation edge,
+  which is a documented implementation choice, not verified original
+  behavior.
 - Starting commit and resulting commits: started at
-  `3970b91e73a4debff99525ba1dd8b614c9ae2d08` (clean tree, branch
-  `ralph/night`; F04-A.2 had just passed external gates + review,
-  verdict pass, no blocking findings). Result = one feature commit
-  plus this handoff note.
-- Why this slice: named by the plan as the next F04-A leg. The binding
-  is verified (WLD-16) and the runtime class shape is recovered (R4),
-  so the state machine's first half could be implemented against real
-  data without inventing thresholds.
+  `dd29ea1cafd2705095c938019e90d11a0b65a158` (clean tree, branch
+  `ralph/night`; F04-A.3 had just passed external gates + review,
+  verdict pass, no blocking findings, two non-blocking nits both
+  addressed here). Result = one feature commit plus this handoff
+  note.
+- Why this slice: named by the plan as the next F04 leg. The binding
+  (WLD-16), the `NumParts` ↔ BREAK-index audit (WLD-15: 0 mismatches
+  on retail) and the dormant→active→settled machine were all in
+  place; fragments were the remaining named piece of F04-AC03.
 - What changed:
-  - `crates/mm2_game/src/banger.rs` (new) + `lib.rs` exports — the
-    physics/rendering-independent contract: `BangerPhase`
-    (Dormant/Active/Settled mirroring `dgUnhitBangerInstance`/
-    `dgBangerActive`/`dgHitBangerInstance`), `Banger` component,
-    `BangerDefinition` (authored Mass/Friction/Elasticity/
-    ImpulseLimit2/Size/CG distilled from `BangerData`, anomalies
-    collapsed to documented defaults), `BangerStateChanged` message
-    (ObjectId + generation + tick + phase + `BangerCause`),
-    `BangerPool` (`max_active = 32` — the R4-recovered pool size).
-    `activates_on` implements the provisional UNK-22 rule; non-finite
-    physicals sanitize rather than poison the solver.
-  - `crates/mm2_app/src/banger.rs` (new) + `lib.rs` — `BangerDefs`
-    VFS cache (`tune/banger/<name>.dgbangerdata`, lowercased, missing
-    = unbound, decode failure counted per name); `banger_bundle` —
-    one entity carrying collider + authored physicals (`Mass`,
-    `CenterOfMass` from `CG`, `Friction`, `Restitution`),
-    `CollisionEventsEnabled`, dormant `Banger`, `ObjectIdentity`,
-    `AuthorityRole`, `SessionEntity`; `activate_bangers` and
-    `settle_bangers` FixedLast systems, both authority-gated
-    (`Predicted` drains edges but never transitions).
-  - `crates/mm2_app/src/contracts.rs` — new shared
-    `deepest_contact` helper (deepest manifold contact → point,
-    normal, nonneg pre-solver approach speed); `collect_impacts`
-    refactored onto it so "the hit" means the same thing to impact
-    reporting and banger activation.
-  - `crates/mm2_app/src/city.rs` — `spawn_banger_prop`: a bound,
-    collidable stamp becomes one dynamic-capable root with mesh parts
-    as children (no split render/collider pair, no duplicate
-    collider). `stamp_pathset` resolves each name through
-    `BangerDefs`; bound+collider → banger entity, else the unchanged
-    `spawn_prop`. `PathsetStampReport` gains `bangers` /
-    `banger_failed`; `CityReport` gains `pathset_bangers` /
-    `pathset_banger_failed`; `load_city`/`spawn_event_pathsets` take
-    `&mut Session` (id minting + authority role). `MIRROR_Z` is now
-    `pub(crate)` for the CG mirror.
-  - `crates/mm2_app/src/session.rs` — `load_session_world` passes the
-    session through.
-  - `crates/mm2_app/src/main.rs` / `smoke.rs` — `BangerStateChanged`
-    message, `BangerPool` resource, activate/settle chained in
-    `FixedLast` after `collect_impacts`; smoke records a `bng=` field
-    (`Nd/Na/Ns` dormant/active/settled) when bound props exist.
-  - `crates/mm2_app/examples/drive_probe.rs`,
-    `tests/event.rs`, `tests/import_pipeline.rs` — signature updates
-    for the threaded `&mut Session`.
-  - `docs/research/banger.md` — new "Implemented runtime slice
-    (F04-A.3 — provisional)" section; UNK-22 list narrowed to the
-    genuinely remaining unknowns.
-  - `docs/original-rules.md` — new DSN-10 (the provisional policy);
-    UNK-22 updated to name the implemented stand-in.
+  - `crates/mm2_game/src/banger.rs` — `BangerPhase::Broken` added to
+    the contract (terminal like `Settled`; the placement remains as
+    the break event's identity). Module doc corrected: the verified
+    INST rule is that ordinary INST names do not bind while
+    `*_ai.inst` binds `sp_stop_f` — the old wording overstated it.
+    `num_parts` doc now says fragment spawning is chunk-driven.
+  - `crates/mm2_app/src/banger.rs` — `FragmentPiece` (index,
+    `<name>_break<NN>` record or the parent's def, render parts,
+    convex-hull collider) and the `BangerPieces` component.
+    `banger_bundle` now takes a `Banger` so fragments spawn already
+    `Active`; the `CG` mirror is a shared helper. `activate_bangers`
+    gained a `claim_slot` pool gate that accounts pending same-tick
+    spawns and returns `false` at a degenerate `max_active = 0`
+    (closes the F04-A.3 review nit where zero capacity could be
+    exceeded). `break_banger` performs the transition: parent phase
+    `Broken`, velocities zeroed, collider/body/mesh children removed,
+    one `BangerStateChanged` (`Broken`) emitted, then one dynamic
+    fragment entity per collidable piece — own `ObjectId`, same
+    session owner + authority role, impact velocity plus its own
+    CG-lever spin kick, pool-bounded. A placement with pieces but no
+    collidable piece takes the ordinary activation path.
+  - `crates/mm2_app/src/city.rs` — `pkg_to_parts` splits `BREAK<NN>`
+    chunks out of the intact LOD set into `FragmentModel`s (authored
+    file order → deterministic fragment sequence); the dormant prop
+    no longer draws/collides break chunks as part of its unified
+    surface. `stamp_pathset` resolves each piece's
+    `<name>_break<NN>` record through `BangerDefs` (parent def
+    fallback) and stamps `BangerPieces` via `spawn_banger_prop`.
+    `PathsetStampReport.pieces` counts collidable pieces;
+    `CityReport.pathset_pieces` and both stamp log lines report it.
+  - `crates/mm2_app/src/session.rs` — overlay stamp log line gains
+    `bangers`/`pieces`.
+  - `crates/mm2_app/src/smoke.rs` — `bng=` gains a `/Nb` broken
+    bucket.
+  - `docs/research/banger.md` — runtime slice section renamed
+    F04-A/B, `Broken` policy documented, deferred list narrowed,
+    UNK-22 keeps the genuinely open semantics.
+  - `docs/original-rules.md` — DSN-10 updated with the break path;
+    UNK-22 gains fragment-timing.
 - Implemented semantics (provisional where marked):
-  - Dormant → Active: raw `CollisionStart` edge with deepest-contact
-    approach speed > 0; estimate = `severity × striker_mass`
-    (striker's `ComputedMass`, 1 kg fallback) must exceed
-    `ImpulseLimit2` — provisional (UNK-22). One edge, one transition:
-    `RigidBody` → dynamic (inserted — Avian 0.7 `RigidBody` is
-    immutable), impulse leaves the prop at the striker's approach
-    speed plus a `Size`-derived solid-cuboid spin kick.
-  - Pool: at 32 actives the oldest `(activated_tick, slot)` settles
-    with `BangerCause::Reclaimed` — reclaim order provisional.
-  - Active → Settled: Avian `Sleeping` → velocities zeroed,
-    `RigidBody` → static at rest pose; terminal for the session
-    (teardown restamps). The recovered `Timer` despawn is not
-    implemented — the slice settles instead.
-  - `0` limit activates on any approach (most retail props);
-    `≈1e30` never activates (bridge gates, monuments — a monument
-    cannot go dynamic from a generic collision).
-- Deferred deliberately: BREAK-chunk fragments (F04-B), `BirthRule`
-  particles, `AudioId`/`Flash`/`TexNumber` effects, decals, prop-rule
-  channel stamping, `Timer` despawn, replication (F26). `NumParts` is
-  carried on `BangerDefinition` but not acted on.
-- Tests added:
-  - `crates/mm2_app/tests/banger.rs` (7, real Avian physics):
-    hard impact activates once then settles (identity/generation/tick
-    stamps, static-again body, finite pose, knocked loose); monument
-    limit never activates; midrange limit discriminates (dormant vs
-    active); `Predicted` sessions never transition; ×1 pool reclaims
-    oldest-first with `Reclaimed`; bound pathset names stamp as
-    dormant bangers (single entity + mesh child, no duplicate
-    collider, teardown despawns root+children); malformed/missing
-    records fall back to static props with `banger_failed` counted.
-  - `crates/mm2_game/src/banger.rs` unit tests (5): limit
-    discrimination incl. zero/at-limit/huge, authored-junk
-    sanitization, finite angular kick.
+  - Dormant → Broken: same qualifying `CollisionStart` edge as
+    activation (one `ImpulseLimit2` gate for both — UNK-22). The
+    parent keeps entity/identity/generation; exactly one
+    `BangerStateChanged` fires for it — the parent never also
+    reports `Active` (F04-AC03 shape).
+  - Fragments: one dynamic body per collidable `BREAK<NN>` chunk, in
+    authored file order, minted `ObjectId`s, `Banger` phase `Active`
+    from spawn so they settle through the shared path and count
+    against the ×32 pool — a break at capacity reclaims oldest-first
+    or skips pieces (pool = 1 test bounds it; `max_active = 0`
+    spawns nothing).
+  - Piece records: `<name>_break<NN>` `dgbangerdata` when authored
+    (254 exist on retail), parent def otherwise — documented
+    fallback for authored gaps.
+  - Piece colliders: convex hull over the chunk's triangles (dynamic
+    debris does not need the prop's authored concavity; degenerate
+    pieces fall back to trimesh or count as non-collidable).
+- Deferred deliberately: `BirthRule` particles, `AudioId`/`Flash`/
+  `TexNumber` effects, decals, prop-rule channel stamping, `Timer`
+  despawn, replication (F26), original-content activation evidence.
+- Tests added (`crates/mm2_app/tests/banger.rs`, real Avian):
+  a breakable prop shatters into its authored pieces — exactly one
+  `Broken` event, no `Active` event for the parent, pieces mint own
+  `ObjectId`s with colliders + render children + finite poses and
+  settle; pool = 1 bounds fragment spawns; a piece set with no
+  collidable piece tips over instead (ordinary activation);
+  breakable pathset stamping extracts authored pieces with
+  `<name>_break<NN>` defs and parent-def fallback; teardown removes
+  parent + fragments. All prior F04-A tests still pass.
 - Commands actually run and results (this machine, macOS arm64):
-  - `cargo fmt --all -- --check` — PASS (after auto-format).
+  - `cargo fmt --all -- --check` — PASS.
   - `cargo clippy --locked --workspace --all-targets --all-features
     -- -D warnings` — PASS.
   - `cargo test --locked --workspace` — PASS, all 32 suites,
-    0 failures (incl. new 7 banger integration + 5 contract tests).
-  - `mm2 --mm2-path <retail> --city sf --headless --frames 120` —
-    `status=pass`: `pathset props stamped stamped=925 bangers=925
-    failed=0 capped=0`, `0 banger-decode-failed`,
-    `bng=925d/0a/0s` — every stamped prop bound dormant, matching the
-    F04-A.2 audit (30/30 names).
+    0 failures (11 banger integration + 5 contract tests).
+  - `mm2 --mm2-path <retail> --city sf --headless --frames 60` —
+    `status=pass`: `stamped=925 bangers=925 pieces=3092`,
+    `bng=925d/0a/0s/0b`, 0 decode failures — every stamped banger
+    carries its authored pieces, all dormant (hold driver).
   - `mm2 --mm2-path <retail> --city london --headless --frames 60` —
-    `status=pass`: 1188/1188 bound, `bng=1188d/0a/0s`.
-  - No activation was exercised on retail (the hold driver does not
-    strike a prop); activation evidence is the synthetic physics
-    tests, not original-content proof.
+    `status=pass`: `stamped=1188 bangers=1188 pieces=2710`,
+    `bng=1188d/0a/0s/0b`.
+  - `mm2 --mm2-path <retail> --city london --event circuit:0
+    --headless --frames 60` — `status=pass`: overlay
+    `stamped=181 bangers=181 pieces=0`, `bng=1369d/0a/0s/0b`.
+    `pieces=0` is authored data, not a wiring gap: the stamped
+    `sp_barricadeconcr_f` PKG carries no BREAK chunks and its record
+    says `NumParts 0` (verified via `mm2-inspect pkg`/`banger`) —
+    concrete barricades tip over, they do not shatter.
+  - No activation or break was exercised on retail content (the hold
+    driver never strikes a prop); break evidence is the synthetic
+    physics tests plus real-data piece extraction, not
+    original-behavior proof.
 - Acceptance IDs satisfied / still open:
-  - F04-AC01–AC06: all remain OPEN. This slice implements the state
-    machine's first half only — fragments, authored-effect fidelity,
-    the Timer despawn, prop-rule channel and replication have no
-    evidence. No F04 completeness is claimed.
-  - DSN-10: added — the provisional runtime policy is explicitly an
-    implementation choice, not an original-behavior claim.
-  - UNK-22: still open — `ImpulseLimit2` comparison quantity, exact
-    transition conditions, `INST_BANGER` acquisition, pool reclaim
-    order, `Timer` despawn, BirthRule timing, fallback selection.
-- Scope decisions recorded: `Settled` is terminal for the session
-  (no recovered `dgHitBangerInstance`→anything transition); settle
-  replaces the recovered `Timer` despawn for now. Bound props without
-  collision stamp unbound — unreachable today since prop colliders
-  derive from the same triangles as the render parts, kept as a
-  defensive guard. `*_ai.inst` stop-sign supplements stamp through
-  INST, not the pathset path, so they remain static this slice
-  (INST placements do not resolve `BangerDefs` — pathset is the
-  verified world channel).
-- Stock data/GPU/audio/network limitations: retail numbers above are
-  code-path validation through the VFS (binding + counts), not
-  original-behaviour proof. No GPU capture needed — no rendering
-  change (the same mesh parts render, now parented). No audio or
-  network code exists.
+  - F04-AC01/02/04/05/06: unchanged from F04-A.3 — partial synthetic
+    evidence, still open.
+  - F04-AC03: partially evidenced — authored pieces spawn with one
+    logical break event in synthetic tests; original break timing,
+    `BirthRule`/audio/flash effects and real-content activation are
+    unproven, so the AC stays open.
+  - DSN-10: updated — the break path is explicitly implementation
+    choice, not original behavior.
+  - UNK-22: still open — `ImpulseLimit2` quantity, fragment timing,
+    `NumParts` runtime role, reclaim order, `Timer`, `BirthRule`
+    timing, `INST_BANGER` acquisition, fallback selection.
+- Scope decisions recorded: `Broken` is terminal like `Settled` (no
+  recovered transition out of it; teardown/restamp restores the
+  placement). Fragments spawn `Active` directly rather than passing
+  through a dormant phase — they only exist post-impact. The parent
+  keeps its `ObjectId` as the break event's identity; pieces mint
+  fresh ids. Pieces with no collider never spawn as bodies — and a
+  prop whose every piece lacks collision tips over instead of
+  breaking into nothing.
+- Stock data/GPU/audio/network limitations: piece counts are
+  code-path validation through the VFS on real PKGs, not visual or
+  original-behavior proof. No GPU capture needed — no rendering
+  change claimed (fragment parts reuse the same mesh pipeline). No
+  audio or network code exists.
 - Unresolved blockers or discovered regressions: none known.
-- Next smallest useful action: F04-B — BREAK<NN> fragment spawning on
-  activation (`NumParts` consumption, effects timing stays UNK-22);
-  prop-rule stamping research (UNK-21 — the second verified banger
-  channel); decal stamping; F13-A; F09-C.
+- Next smallest useful action: F04-C — threshold/repeated-collision/
+  reset and resource-budget validation; prop-rule stamping research
+  (UNK-21 — the second verified banger channel); `BirthRule` effect
+  research; F13-A; F09-C.
 
 This is a candidate handoff. External code-gate and separate review
 results live in the runner state directory and are not implied by
