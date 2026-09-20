@@ -7,6 +7,7 @@
 
 pub mod aimap;
 pub mod bai;
+pub mod banger;
 pub mod bnd;
 pub mod crashdata;
 pub mod dave;

@@ -6,7 +6,7 @@
 //! Exit codes: 0 = success; 2 = a requested lookup failed, a parse failed,
 //! or `--strict` found failures.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -270,6 +270,19 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Audit breakable/knockable object records (`tune/banger/
+    /// *.dgbangerdata`): parse every discovered file, classify each
+    /// record (fallback / standalone prop / `.mtx` part / embedded
+    /// `BREAK<NN>` fragment), and resolve each name against
+    /// `geometry/` PKG chunks and `.mtx` transforms.
+    Banger {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Exit nonzero when the expected fallback record is missing,
+        /// any record fails to parse, or any issue is reported.
+        #[arg(long)]
+        strict: bool,
+    },
     /// Versioned content inventory: expected/discovered/accepted/
     /// rejected/unverified counts per content family, fingerprinted by
     /// engine commit and resolved-path provenance.
@@ -365,6 +378,7 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Pathset { dir, city, strict } => {
             pathset(dir, cli.mods.as_deref(), city.as_deref(), *strict)
         }
+        Command::Banger { dir, strict } => banger(dir, cli.mods.as_deref(), *strict),
         Command::Inventory { dir, json, strict } => {
             inventory_cmd(dir, cli.mods.as_deref(), *json, *strict)
         }
@@ -487,6 +501,13 @@ fn scan(dir: &Path, mods: Option<&Path>, strict: bool) -> Result<(), Box<dyn std
             "aimap" | "aimap_p" => match std::str::from_utf8(&bytes)
                 .map_err(|e| FormatError::parse(0, format!("not UTF-8 text: {e}")))
                 .and_then(mm2_formats::aimap::Aimap::parse)
+            {
+                Ok(_) => stats.parsed_ok += 1,
+                Err(e) => stats.failures.push((logical.clone(), e.to_string())),
+            },
+            "dgbangerdata" => match std::str::from_utf8(&bytes)
+                .map_err(|e| e.to_string())
+                .and_then(|t| mm2_formats::banger::BangerData::parse(t).map_err(|e| e.to_string()))
             {
                 Ok(_) => stats.parsed_ok += 1,
                 Err(e) => stats.failures.push((logical.clone(), e.to_string())),
@@ -1941,6 +1962,236 @@ fn proprules(
     if strict && (issues_total > 0 || !failures.is_empty()) {
         return Err(format!(
             "strict proprules audit: {} failures, {issues_total} issues",
+            failures.len()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Breakable/knockable object audit (F04-A.1): the expected denominator
+/// is `tune/banger/default.dgbangerdata` (the fallback record the
+/// name→record lookup needs); every other discovered `tune/banger/`
+/// path is an audited extra — including `.#*` editor backup copies,
+/// which parse but are exempt from geometry resolution. Each record
+/// stem is classified by [`mm2_formats::banger::stem_role`] and
+/// resolved against `geometry/`: own `.pkg` → standalone prop, own
+/// `.mtx` → transformed part, `<base>_break<NN>` → a `BREAK<NN>` chunk
+/// inside `geometry/<base>.pkg` (or a `.mtx` part transform), and
+/// `<base>_<part>` → a `<PART>`/`<PART>_*` chunk inside
+/// `geometry/<base>.pkg`. `NumParts` is cross-checked against the
+/// standalone's own BREAK chunk count. Records with no resolvable
+/// geometry are issues, never hidden. `--strict` exits nonzero on any
+/// failure or issue.
+fn banger(dir: &Path, mods: Option<&Path>, strict: bool) -> Result<(), Box<dyn std::error::Error>> {
+    use mm2_formats::banger::{BangerData, BangerStem, stem_role};
+
+    let vfs = build_vfs(dir, mods)?;
+    const EXPECTED: &str = "tune/banger/default.dgbangerdata";
+    let mut logicals: Vec<String> = vfs
+        .list()
+        .into_iter()
+        .filter(|p| p.starts_with("tune/banger/"))
+        .collect();
+    if !logicals.iter().any(|p| p == EXPECTED) {
+        logicals.push(EXPECTED.to_string());
+    }
+    logicals.sort();
+    logicals.dedup();
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut issues_total = 0usize;
+    let mut parsed = 0usize;
+    let mut unsupported = 0usize;
+    let mut dead_refs = 0usize;
+    // Uppercased PKG chunk names, cached per resolved pkg path.
+    let mut chunk_cache: BTreeMap<String, Option<BTreeSet<String>>> = BTreeMap::new();
+    let mut chunks_of = |vfs: &Vfs, pkg_path: &str| -> Option<BTreeSet<String>> {
+        if let Some(hit) = chunk_cache.get(pkg_path) {
+            return hit.clone();
+        }
+        let names = vfs
+            .resolve(pkg_path)
+            .and_then(|res| vfs.read(&res).ok())
+            .and_then(|bytes| Pkg::parse(&bytes).ok())
+            .map(|pkg| {
+                pkg.files
+                    .iter()
+                    .map(|f| f.name.to_ascii_uppercase())
+                    .collect::<BTreeSet<_>>()
+            });
+        chunk_cache.insert(pkg_path.to_string(), names.clone());
+        names
+    };
+    // True when `chunks` holds `<prefix>` or `<prefix>_*`.
+    let has_chunk = |chunks: &BTreeSet<String>, prefix: &str| {
+        chunks.contains(prefix) || chunks.iter().any(|c| c.starts_with(&format!("{prefix}_")))
+    };
+    // Distinct BREAK<digits> indices among the chunk names.
+    let break_indices = |chunks: &BTreeSet<String>| -> BTreeSet<String> {
+        chunks
+            .iter()
+            .filter_map(|c| c.strip_prefix("BREAK"))
+            .map(|rest| {
+                rest.chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+            })
+            .filter(|d| !d.is_empty())
+            .collect()
+    };
+
+    println!("== banger records (tune/banger/*.dgbangerdata) ==");
+    for logical in &logicals {
+        let stem = logical
+            .trim_start_matches("tune/banger/")
+            .trim_end_matches(".dgbangerdata");
+        let is_expected = logical == EXPECTED;
+        let is_backup = stem.starts_with(".#");
+        let tag = if is_expected {
+            "expected"
+        } else if is_backup {
+            "backup"
+        } else {
+            "extra"
+        };
+        let Some(res) = vfs.resolve(logical) else {
+            println!("  {logical:<58} {tag:<9} missing");
+            failures.push(format!("{logical}: expected file not found"));
+            continue;
+        };
+        let bytes = vfs.read(&res)?;
+        let text = String::from_utf8_lossy(&bytes);
+        let record = match BangerData::parse(&text) {
+            Ok(d) => d,
+            Err(e) => {
+                if is_expected {
+                    println!("  {logical:<58} {tag:<9} failed: {e}");
+                    failures.push(format!("{logical}: {e}"));
+                } else {
+                    println!("  {logical:<58} {tag:<9} unsupported: {e}");
+                    unsupported += 1;
+                }
+                continue;
+            }
+        };
+        parsed += 1;
+        let mut issues: Vec<String> = record.warnings.clone();
+        issues.extend(record.validate().iter().map(|i| i.to_string()));
+
+        // Geometry classification; `.#*` backups are editor leftovers —
+        // parsed above, exempt from resolution.
+        let class = if is_backup {
+            "backup copy".to_string()
+        } else {
+            match stem_role(stem) {
+                BangerStem::Default => "fallback record".to_string(),
+                BangerStem::Fragment { base, index } => {
+                    if record.num_parts > 0 {
+                        issues.push(format!(
+                            "fragment record carries NumParts={} with no pkg of its own",
+                            record.num_parts
+                        ));
+                    }
+                    let base_pkg = format!("geometry/{base}.pkg");
+                    match chunks_of(&vfs, &base_pkg) {
+                        Some(chunks) if break_indices(&chunks).iter().any(|d| d == index) => {
+                            format!("fragment break{index} of {base} (pkg chunk)")
+                        }
+                        Some(_) if vfs.resolve(&format!("geometry/{stem}.mtx")).is_some() => {
+                            format!("fragment break{index} of {base} (.mtx part)")
+                        }
+                        Some(_) => {
+                            dead_refs += 1;
+                            issues.push(format!(
+                                "no BREAK{index} chunk in {base_pkg} and no geometry/{stem}.mtx"
+                            ));
+                            "dead fragment ref".to_string()
+                        }
+                        None if vfs.resolve(&format!("geometry/{stem}.mtx")).is_some() => {
+                            format!("fragment break{index} of {base} (.mtx part)")
+                        }
+                        None => {
+                            dead_refs += 1;
+                            issues.push(format!(
+                                "fragment of {base}: no {base_pkg} and no geometry/{stem}.mtx"
+                            ));
+                            "dead fragment ref".to_string()
+                        }
+                    }
+                }
+                BangerStem::Named(_) => {
+                    if vfs.resolve(&format!("geometry/{stem}.pkg")).is_some() {
+                        // Standalone prop: NumParts must equal the BREAK
+                        // chunk count in its own pkg.
+                        let pkg_path = format!("geometry/{stem}.pkg");
+                        let n = chunks_of(&vfs, &pkg_path)
+                            .map(|c| break_indices(&c).len())
+                            .unwrap_or(0);
+                        if record.num_parts != n as i64 {
+                            issues.push(format!(
+                                "NumParts={} but {pkg_path} carries {n} BREAK chunk(s)",
+                                record.num_parts
+                            ));
+                        }
+                        format!("standalone (geometry/{stem}.pkg)")
+                    } else if vfs.resolve(&format!("geometry/{stem}.mtx")).is_some() {
+                        if record.num_parts > 0 {
+                            issues.push(format!(
+                                "part record carries NumParts={} with no pkg of its own",
+                                record.num_parts
+                            ));
+                        }
+                        format!("part (geometry/{stem}.mtx)")
+                    } else {
+                        // `<base>_<part>` where the part is a chunk inside
+                        // `geometry/<base>.pkg`; try every '_' split,
+                        // longest base first.
+                        let mut resolved = None;
+                        for (i, _) in stem.match_indices('_').collect::<Vec<_>>().iter().rev() {
+                            let (base, part) = stem.split_at(*i);
+                            let part = &part[1..];
+                            let base_pkg = format!("geometry/{base}.pkg");
+                            if let Some(chunks) = chunks_of(&vfs, &base_pkg)
+                                && has_chunk(&chunks, &part.to_ascii_uppercase())
+                            {
+                                resolved = Some(format!("part {part} of {base} (pkg chunk)"));
+                                break;
+                            }
+                        }
+                        match resolved {
+                            Some(r) => r,
+                            None => {
+                                dead_refs += 1;
+                                issues.push(format!(
+                                    "no geometry/{stem}.pkg/.mtx and no matching part chunk"
+                                ));
+                                "dead geometry ref".to_string()
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        println!(
+            "  {logical:<58} {tag:<9} ok — {class} (mass {:.1}, limit {:.0}, parts {})",
+            record.mass, record.impulse_limit2, record.num_parts
+        );
+        issues_total += issues.len();
+        for i in &issues {
+            println!("    issue: {i}");
+        }
+    }
+
+    println!(
+        "  {parsed}/{} parsed, {unsupported} unsupported extras, {dead_refs} dead geometry refs, {} failures, {issues_total} issue(s)",
+        logicals.len(),
+        failures.len(),
+    );
+    if strict && (issues_total > 0 || !failures.is_empty()) {
+        return Err(format!(
+            "strict banger audit: {} failures, {issues_total} issues",
             failures.len()
         )
         .into());
