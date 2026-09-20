@@ -38,17 +38,18 @@
 
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
-**Next selected slice: prop-rule stamping research (UNK-21 — measure
-how the original walks a room perimeter before any runtime consumer),
-decal stamping (same research-first caveat), `<object>_<event>`/
-ambient pathset consumers, F13-A or F09-C** — this iteration landed
-F03-A.2: `mm2_formats::proprules` typed parsers for
-`propdefs.csv`/`proprules.csv`/`props.csv`/`geometry/props.csv` plus
-`mm2-inspect proprules` — every discovered table parses (16/16
-retail), and the PSDL `prop_rule` byte↔`n{NN}{left,right}` link is
-verified (london 1–16, sf 1–20, one authored 205 anomaly each).
-F03-B.2 was externally checked at `afff57d`. F13-A's deps (F02-B,
-F11-B) remain candidates, not checked.
+**Next selected slice: F04-A.2 (banger placement/state research —
+UNK-22 runtime semantics plus which stamped INST/pathset/proprule
+props bind to banger records), prop-rule stamping research (UNK-21),
+decal stamping (same research-first caveat), F13-A or F09-C** — this
+iteration landed F04-A.1: `mm2_formats::banger` typed parser +
+`mm2-inspect banger` — every discovered `tune/banger/*.dgbangerdata`
+parses (999/999 retail), and the stem↔geometry link is verified
+(216 standalones, 477 parts, 254 fragments, 47 dead refs; `NumParts`
+↔ `BREAK<NN>` chunk counts with 0 mismatches). Runtime breakage stays
+unverified (UNK-22) — no Avian integration yet. F03-A.2 was externally
+checked at `0d0be9f`. F13-A's deps (F02-B, F11-B) remain candidates,
+not checked.
 
 ## Baseline gate results (this checkout, 2026-09-20)
 
@@ -91,6 +92,7 @@ F11-B) remain candidates, not checked.
 || `mm2 --mm2-path <retail> --city london --cam=-469,8,-290,180,-10 --frames 90 --screenshot` | `status=pass`, ~5.6 MB PNG (local only — `screenshots/pathset-london-trees.png`): stamped `sp_tree1_s` bushes visible in the park. |
 || `mm2 --mm2-path <retail> --city london --event circuit:0 --headless` | `status=pass` (`race=Running cp=1/6`) — `event pathset overlay stamped files=1 stamped=181 labels=0 animated=0 decals=0 unresolved=0 capped=0 issues=0`: `race/london/circuit0.pathset` barricades stamped as session-owned props. `checkpoint:6` → 256 stamped (`race6.pathset`), sf `circuit:0` → 85 (`sp=0` → one per vertex). Ambient counts unchanged: london 1188, sf 925+31 decal. |
 || `mm2-inspect proprules <retail>` | exit 0 — 16/16 discovered prop-rule tables parse (6 expected `city/{london,sf}/{propdefs,proprules,props}.csv` + 10 extras incl `.csv.txt` exports, `city/phys/`, `sf/bak/`, `city/props.csv`, `geometry/props.csv` LOD table): all rule→def refs resolve; PSDL `prop_rule` bytes ↔ rule numbers verified (london 415 rule-bearing rooms ↔ n01–16, sf 397 ↔ n01–20, n14 unused); issues: 41 phys `*_m` + 3 phys group dead refs (dev city), `sp_bollard_pedsafe_l` + `va_garbagetruck.pkg` LOD dead refs, 1 room/city at undefined rule 205. `--strict` exits 2 (48 issues); `--city london` 4 files/2 issues, `--city sf` 7/1. |
+| `mm2-inspect banger <retail>` | exit 0 — 999/999 `tune/banger/*.dgbangerdata` parse (1 expected `default` fallback + 994 extras + 4 `.#*.1.2` editor backups, 0 unsupported/failed): 216 standalone props (own PKG), 477 named parts (`.mtx`/embedded chunk), 254 resolved break fragments (`BREAK<NN>` chunks), 47 dead refs; `NumParts` ↔ distinct BREAK-index count holds on every standalone (0 mismatches). 54 issues (47 dead refs, 4 fragment `NumParts>0`, 2 glow-count mismatches, 1 `asBirthRule`); `--strict` exits 2. `scan` parses all 995 `.dgbangerdata` names |
 
 ## Task table
 
@@ -113,7 +115,9 @@ F11-B) remain candidates, not checked.
 | F03-B | implemented | F03-A | ~2000/3763 INST props instantiate with collision (README; `city.rs`) plus `props.pathset` ambient rows stamped through the shared `PropCache` — london 1188, sf 925 instances, decal paths classified. Stamping micro-semantics inferred (UNK-20); decal/audio pathsets unconsumed. First candidate failed review on an unbounded line-strip expansion (huge/non-finite authored coordinates could stall `t += spacing` and OOM the load); repaired with the 8192/file stamp budget, arithmetic per-segment counting, non-finite skipping, load-time `validate()` and `pathset_props_capped`/`pathset_issues` report fields plus regression tests. Externally checked at `f6e151f`. |
 | F03-B.2 | checked | F03-B | Event `.pathset` overlays (F03-AC04 leg): `event_race_setup` returns `EventSetup { definition, pathsets }` — the `<stem>.pathset` records the catalog attributes to the resolved event; `load_session_world` calls `city::spawn_event_pathsets` which runs the shared `stamp_pathset` classifier (`prop`/`PATHnn` label/`giz_*` animated/decal/`unresolved` + per-file 8192 budget + `validate()` issues) through a fresh `PropCache` into `event-pathset-*` session-owned entities. Teardown removes exactly the overlay; re-entry restamps once (AC04 — restart test asserts identical gen-2 count, no gen-1 survivors). Parse/read failures land in `EventPathsetReport::failed_files`, warned, non-fatal (optional record). Retail: london `circuit0` 181 props, `race6` 256, sf `circuit0` 85 — all `sp_*` names. `<object>_<event>` overrides (`london_bridge_circuit0`…) stay extras — all `giz_*`/`PATHnn`/`sp_pcar*` on retail, need animated-object/parked-car features. Tests: +3 in `tests/event.rs`. Externally checked at `afff57d`. |
 | F03-C | queued | F03-B | Owed: sampled original locations, all source records, race cleanup, mod replacement end-to-end. |
-| F04-A | queued | F01-B, F03-B | No breakable-prop classification or state transitions yet. |
+| F04-A | implemented | F01-B, F03-B | Split: A.1 (banger parser + record↔geometry audit — implemented below). Runtime state machine, placement binding and threshold semantics remain open (UNK-22) — the parent stays non-checked until F04-A.2+ research lands. |
+| F04-A.1 | implemented | F01-B, F03-B | `mm2_formats::banger`: typed `BangerData`/`BirthRule` decoder on the shared `tune` grammar — Size/CG/Mass/Elasticity/Friction/ImpulseLimit2/NumParts + ids + `asBirthRule` variant (warning); `BangerIssue` validation (non-finite/negative physicals, glow-count, missing birth rule); `stem_role` (fallback/fragment/named). `mm2-inspect banger <install> [--strict]`: expected = `default.dgbangerdata`, denominator = every discovered file incl `.#*.1.2` backups; stem→geometry resolved via VFS (own pkg / `.mtx` / `BREAK<NN>` chunk in base pkg / longest-base part chunk), standalone `NumParts` ↔ BREAK-index counts. Retail: 999/999 parse, 216 standalone/477 part/254 fragment/47 dead refs, 54 issues, `--strict` exits 2; `scan` recognizes `.dgbangerdata`. docs/research/banger.md + WLD-15/UNK-22. Runtime unwired by design. Candidate pending external check. |
+| F04-A.2 | queued | F04-A.1 | Research + runtime binding: which stamped props (INST/pathset/proprule) bind to banger records, breakage state machine, `ImpulseLimit2` semantics (UNK-22). |
 | F04-B | queued | F04-A | — |
 | F04-C | queued | F04-B | — |
 | F05-A | queued | F01-B, F02-B | `.vehcardamage` readable via generic tune parser; no typed rules or runtime. |

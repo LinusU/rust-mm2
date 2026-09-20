@@ -1,86 +1,109 @@
 # Last implementation iteration
 
-- Task ID and title: F03-A.2 — roadside-prop rule tables
-  (`propdefs.csv`, `proprules.csv`, `props.csv`, `geometry/props.csv`):
-  typed parsers plus an `mm2-inspect proprules` audit, completing the
-  F03-A placement-source inventory named in the plan's next-slice list.
+- Task ID and title: F04-A.1 — banger data parser and record↔geometry
+  audit (`tune/banger/*.dgbangerdata`): a typed `mm2_formats::banger`
+  decoder plus an `mm2-inspect banger` audit, the parser/classification
+  half of F04-A "authored breakable-prop behavior" from TASKS.json.
 - Starting commit and resulting commits: started at
-  `afff57d4e32fef786ea63d42ad4396279a7e6c45` (clean tree, branch
-  `ralph/night`; F03-B.2 had just passed external gates + review,
+  `0d0be9ff5d74ee3596b0d58871fc39898bb37a8c` (clean tree, branch
+  `ralph/night`; F03-A.2 had just passed external gates + review,
   verdict pass, no blocking findings). Result = one feature commit
   plus this handoff note.
-- Why this slice: no failing gate/review finding to repair, so the
-  first-listed ready task. It explains the long-parsed-but-unused PSDL
-  `prop_rule` byte and leaves only feature-deferred placement sources
-  (`.cpvs`/`.ldef` → F18, `audio_pathsets/` → F07/F08). Runtime
-  stamping deliberately not attempted — the perimeter-walk semantics
-  are unverified (UNK-21), same research-first posture as decals.
+- Why this slice: no failing gate/review finding to repair; F04-A was
+  the only queued task whose dependencies (F01-B, F03-B) were both
+  checked — the runner selected it. F04-A is broad ("parse/classify
+  authored breakable-prop behavior AND define stable state
+  transitions"), so it split: A.1 = typed parsing + auditing (this
+  iteration, research-first); A.2 = runtime binding/state-machine
+  research (queued) — the record↔geometry link is verifiable from data
+  (WLD-15) but the breakage state machine is not (UNK-22), and wiring
+  Avian impulses on an unverified threshold would guess original
+  behavior.
 - What changed:
-  - `crates/mm2_formats/src/proprules.rs` (new) — `PropDefs`,
-    `PropRules`, `PropGroups`, `PropLodStats` parsers in the
-    `racedata` CSV style (strict header prefix, per-row
-    `TableDiagnostic`s, blank-line tolerant). `PropRule::rule_key()`
-    splits `n{NN}left`/`n{NN}right` into the PSDL byte value + side.
-    `validate()` reports `PropRuleIssue` — duplicate defs/rules/
-    entries, def-without-files, nonpositive distance/maxUse, negative
-    start, inverted lerp range, non-conforming rule names, empty
-    rules, repeated rule props. `props.csv` tolerates the `city/phys/`
-    dev copy's mislabeled `name,start` header (labels preserved).
-  - `crates/mm2_formats/src/lib.rs` — `pub mod proprules`.
-  - `tools/mm2_inspect/src/main.rs` — `proprules` command: expected =
-    `city/<stock>/{propdefs,proprules,props}.csv`; denominator = every
-    discovered `city/**` `propdefs*`/`proprules*`/`props*` `.csv`/
-    `.csv.txt` plus `geometry/props.csv` (same basename, different LOD
-    schema, own parser). Cross-checks: rule prop refs → sibling def
-    names, def `fileN` + group names → `geometry/<n>.pkg`, LOD rows →
-    `geometry/<name>`, nonzero PSDL `prop_rule` bytes → defined rule
-    numbers; `--city` restricts to `city/<stem>/`, `--strict` exits 2
-    on failures or issues.
-  - `docs/research/proprules.md` + ledger WLD-14/UNK-21.
-- Tests added (9, in the module): retail-shaped parses, header
-  rejection, diagnostic rows, every `PropRuleIssue` variant,
-  `rule_key` edge cases (`n0xleft`, `n300left`, `n01`, `left`,
-  `n1mid`, empty), mislabeled-dev-header tolerance, LOD dup/numeric.
+  - `crates/mm2_formats/src/banger.rs` (new) — `BangerData`/`BirthRule`
+    typed decoder on the shared `tune` block grammar (no duplicate
+    parser). Decodes Size/CG/Mass/Elasticity/Friction/ImpulseLimit2/
+    NumParts/AudioId/TexNumber/SpinAxis/Flash/BillFlags/YRadius +
+    optional NumGlows/GlowOffset list/ColliderId/CollisionPrim/
+    CollisionType; integer fields read the grammar's f64 values so
+    odd flag values never round through f32. `BirthRule` decodes the
+    full 23-field particle spec. The `asBirthRule` variant
+    (`sp_tree1_s_break06`, the only one on retail) is accepted and
+    reported as a warning; a truly absent block is `None` →
+    `BangerIssue::MissingBirthRule`. `validate()` reports
+    `BangerIssue`: non-finite or negative physical values, NumGlows↔
+    GlowOffset mismatch, missing birth rule. `stem_role()` classifies
+    fallback/`_break<NN>` fragment/named. Unknown field/block names
+    accumulate into `warnings` rather than failing.
+  - `crates/mm2_formats/src/lib.rs` — `pub mod banger`.
+  - `tools/mm2_inspect/src/main.rs` — `banger` command: expected =
+    `tune/banger/default.dgbangerdata` (counted even if absent);
+    denominator = every discovered `tune/banger/*.dgbangerdata*` incl
+    `.#*.1.2` editor backups (parsed, classified `backup`). Each
+    record's stem resolves through the VFS: own `geometry/<stem>.pkg`
+    → standalone, `geometry/<stem>.mtx` → part, `<base>_break<NN>` →
+    `BREAK<NN>` chunk inside `geometry/<base>.pkg` (PKG chunk names
+    cached per package), else a longest-base `_` split into a part
+    chunk, else dead ref. Standalone `NumParts` is cross-checked
+    against the package's distinct BREAK indices; fragment/part
+    records carrying `NumParts>0` are flagged (no pkg of their own).
+    `--strict` exits 2 on any failure or issue. `scan` recognizes
+    `.dgbangerdata`.
+  - `docs/research/banger.md` + ledger WLD-15/UNK-22.
+  - Removed the temporary `examples/survey_bangers.rs` survey tool;
+    its measurements are in the research doc.
+- Tests added (11, in the module): retail-shaped record incl. all
+  optional fields, wrong root rejection, missing required fields,
+  non-integer ID rejection, missing `BirthRule` → issue,
+  `asBirthRule` → warning + decode, missing optional fields → `None`,
+  glow-count mismatch, negative + non-finite values, stem-role
+  classification (default/fragment/named, empty index, non-digit
+  index, empty base).
 - Commands actually run and results (this machine, macOS arm64):
   - `cargo fmt --all -- --check` — PASS (after one auto-format).
   - `cargo clippy --locked --workspace --all-targets --all-features
-    -- -D warnings` — PASS.
+    -- -D warnings` — PASS (survey example deleted; it held lint
+    violations).
   - `cargo test --locked --workspace` — PASS, all groups, 0 failures
-    (mm2_formats lib 93/93 incl. 9 new proprules tests).
-  - `mm2-inspect proprules <retail>` — exit 0: 16/16 files parse
-    (6 expected + 10 extras), 0 unsupported, 0 failures, 48 issues:
-    41 `city/phys/` `*_m` + 3 phys group dead refs (dev city, same
-    names the pathset audit flags), `sp_bollard_pedsafe_l` and
-    `va_garbagetruck.pkg` LOD dead refs, 1 room per city referencing
-    undefined rule 205. PSDL check: london 415 rule-bearing rooms ↔
-    n01–n16, sf 397 ↔ n01–n20 (n14 unused).
-  - `mm2-inspect proprules <retail> --strict` — exit 2 (48 issues).
-  - `--city london` → 4 files / 2 issues; `--city sf` → 7 / 1.
+    (mm2_formats lib 104/104 incl. 11 new banger tests).
+  - `mm2-inspect banger <retail>` — exit 0: 999/999 parse (1 expected
+    fallback + 994 extras + 4 backups, 0 unsupported/failed):
+    216 standalone props, 477 named parts, 254 resolved fragments,
+    47 dead refs (30 named + 17 fragments). `NumParts` ↔ BREAK-index
+    count: 0 mismatches on standalones. 54 issues = 47 dead refs +
+    4 fragment `NumParts>0` + 2 `GlowOffset`-without-`NumGlows` +
+    1 `asBirthRule`.
+  - `mm2-inspect banger <retail> --strict` — exit 2 (54 issues —
+    authored anomalies/dead refs, not load failures).
+  - `mm2-inspect scan <retail>` — `dgbangerdata 995` parsed (the 4
+    `.1.2` backups don't carry the extension), 13,389 total logical.
 - Acceptance IDs satisfied / still open:
-  - F03-AC06: ADVANCED — the strict placement audit now covers the
-    prop-rule source family too (INST + PSDL + pathset + prop rules
-    all have parsers and audits); F03-C still owns the end-to-end
-    strict claim.
-  - F03-AC01/02/03/04/05: unchanged — synthetic stamping tests, spot
-    validation, ramp/decal collision, race enter/exit, mod override
-    evidence stay open under F03-B/F03-C.
-- Scope decisions recorded: no runtime consumer this slice — the
-  byte→rule link is verified (WLD-14) but which perimeter edges
-  left/right apply to and the start/distance/maxUse/lerp semantics
-  are UNK-21. `geometry/props.csv` parsed with its own LOD schema,
-  not folded into the group table. `.csv.txt` exports audited as
-  extras (parse identically; not game-loaded). `scan`/`inventory`
-  unchanged (pathset precedent: dedicated audits carry coverage).
+  - F04-AC01–AC06: all remain OPEN — this slice parses and classifies
+    authored data; no runtime activation, breakage, fragment spawn,
+    cleanup, reset or replication exists to exercise. The audit gives
+    AC03's "authored fallback pieces" their verified data source
+    (WLD-15).
+  - WLD-15: verified — stem↔geometry naming convention + `NumParts`↔
+    BREAK-chunk correspondence.
+  - UNK-22: opened — impulse-threshold comparison, state transitions,
+    fallback selection, id namespaces, `type: a`, BirthRule timing.
+- Scope decisions recorded: no runtime consumer this slice — same
+  research-first posture as UNK-21/UNK-20. Fragment records with
+  `NumParts>0` (4 on retail, all `sp_tree*` oddities) are flagged as
+  issues since no child geometry exists; whether the runtime reads it
+  as fragments-of-fragments or inert leftover stays UNK-22.
+  `.#*.dgbangerdata.1.2` backups parse and classify `backup` — in the
+  denominator, out of geometry checks. `default.dgbangerdata` is the
+  one expected record; how the original selects it is unverified.
 - Stock data/GPU/audio/network limitations: all audit numbers are
-  from the real retail install through the VFS; no rendered capture
-  needed (no rendering change). No audio/network code exists.
+  from the real retail install through the VFS (fingerprint
+  `fnv1a64:e91e6cd4b2ae30d9`); no rendered capture needed (no
+  rendering change). No audio/network code exists.
 - Unresolved blockers or discovered regressions: none known.
-- Next smallest useful action: prop-rule stamping research against
-  retail room geometry (UNK-21 — which perimeter edges left/right
-  apply to, what `start` measures from), decal stamping research,
-  `<object>_<event>` pathset consumers (need animated-object/parked-
-  car features), or F13-A/F09-C. F04-A (banger data) is also now
-  dependency-ready.
+- Next smallest useful action: F04-A.2 — which stamped props
+  (INST/pathset/proprule) bind to banger records + `ImpulseLimit2`/
+  state-transition research (UNK-22), or independent ready work:
+  prop-rule stamping research (UNK-21), decal stamping, F13-A, F09-C.
 
 This is a candidate handoff. External code-gate and separate review
 results live in the runner state directory and are not implied by
