@@ -37,10 +37,10 @@ use mm2_formats::{
     psdl::{AttributeType, Psdl, RoomAttribute},
     tex::TexFile,
 };
-use mm2_game::{BangerDefinition, CityEntity, Session, SessionEntity};
+use mm2_game::{Banger, BangerDefinition, CityEntity, Session, SessionEntity};
 use tracing::{debug, info, warn};
 
-use crate::banger::{BangerDefs, banger_bundle};
+use crate::banger::{BangerDefs, BangerPieces, FragmentPiece, banger_bundle};
 
 /// Whether to mirror Z when converting MM2 coordinates to Bevy space.
 ///
@@ -526,6 +526,9 @@ pub struct CityReport {
     /// Pathset stamps that spawned as dormant banger entities — prop
     /// names bound to `tune/banger` records (F04-A, WLD-16).
     pub pathset_bangers: usize,
+    /// Collidable `BREAK<NN>` pieces the stamped bangers carry — the
+    /// fragments an activation would spawn (F04-B).
+    pub pathset_pieces: usize,
     /// Prop names whose bound banger record failed to decode.
     pub pathset_banger_failed: usize,
 }
@@ -548,13 +551,14 @@ impl std::fmt::Display for CityReport {
         }
         write!(
             f,
-            "; {} mesh groups, {} collider rooms, {} props ({} failed), {} pathset props ({} bangers, {} decal paths, {} failed, {} capped, {} issues, {} banger-decode-failed), {} missing textures",
+            "; {} mesh groups, {} collider rooms, {} props ({} failed), {} pathset props ({} bangers, {} pieces, {} decal paths, {} failed, {} capped, {} issues, {} banger-decode-failed), {} missing textures",
             self.mesh_groups,
             self.collider_rooms,
             self.props_spawned,
             self.props_failed,
             self.pathset_props_spawned,
             self.pathset_bangers,
+            self.pathset_pieces,
             self.pathset_decal_paths,
             self.pathset_props_failed,
             self.pathset_props_capped,
@@ -2009,6 +2013,15 @@ fn lod_split(name: &str) -> (String, u8) {
     (lower, 3)
 }
 
+/// The authored break index of a prop stem — `BREAK<NN>` chunks are
+/// breakaway pieces (`lod_split` leaves them as `break<NN>` stems).
+/// Returns the index digits verbatim (`BREAK2` → `"2"`, `BREAK01` →
+/// `"01"`), which is how the `<prop>_break<index>` record names it.
+fn break_index(stem: &str) -> Option<&str> {
+    let digits = stem.strip_prefix("break")?;
+    (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())).then_some(digits)
+}
+
 /// Collision triangles accumulated over a whole prop (all best-LOD
 /// geometries, every section). Props are static, so their collision is the
 /// authored triangle mesh: a convex hull would seal the openings of the
@@ -2027,10 +2040,38 @@ impl PropCollision {
         }
         Some(Collider::trimesh(self.positions, self.tris))
     }
+
+    /// The collider a spawned fragment body gets: a convex hull over
+    /// the piece's positions — dynamic debris wants convex collision,
+    /// not a shared trimesh. Degenerate (flat) pieces fall back to the
+    /// authored triangles.
+    fn into_fragment_collider(self) -> Option<Collider> {
+        if self.positions.is_empty() || self.tris.is_empty() {
+            return None;
+        }
+        Collider::convex_hull(self.positions.clone())
+            .or_else(|| Some(Collider::trimesh(self.positions, self.tris)))
+    }
+}
+
+/// One `BREAK<NN>` piece of a prop PKG: its own best-LOD render parts
+/// and a convex collider — the parts a break spawns as a fragment body.
+struct FragmentModel {
+    /// The authored index digits (`BREAK<index>` chunk prefix), kept
+    /// verbatim for the `<prop>_break<index>` record lookup.
+    index: String,
+    /// Render parts of the piece.
+    parts: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
+    /// Convex-hull collider (trimesh fallback on degenerate pieces).
+    collider: Option<Collider>,
 }
 
 /// Build renderable parts (best-LOD mesh per stem, grouped by shader) plus
-/// one triangle-mesh collider covering the whole prop.
+/// one triangle-mesh collider covering the whole prop. `BREAK<NN>`
+/// chunks are split out into [`FragmentModel`]s — they are the
+/// authored breakaway pieces, not part of the dormant prop's surface
+/// or collider (they only composed the same shape with duplicate
+/// overdraw before).
 fn pkg_to_parts(
     pkg: &Pkg,
     mats: &mut MaterialCache<'_>,
@@ -2056,14 +2097,25 @@ fn pkg_to_parts(
     };
 
     let mut out = Vec::new();
+    let mut fragments: Vec<FragmentModel> = Vec::new();
     let mut collision = PropCollision::default();
-    for (stem, (_, name)) in best {
+    // Best-LOD chunks are consumed in file order — the authored order —
+    // so the fragment sequence is the same on every run (replication
+    // ids mint in piece order).
+    for (name, geo) in pkg.geometries() {
+        let (stem, _) = lod_split(name);
         // Shadow/damage stand-ins are not rendered props.
         if stem.contains("shadow") || stem.contains("dmg") {
             continue;
         }
-        let Some((_, geo)) = pkg.geometries().find(|(n, _)| *n == name) else {
-            continue;
+        if best.get(&stem).map(|(_, n)| *n) != Some(name) {
+            continue; // a better-LOD chunk owns this stem
+        }
+        let mut piece_collision = PropCollision::default();
+        let col = if break_index(&stem).is_some() {
+            &mut piece_collision
+        } else {
+            &mut collision
         };
         let mut by_shader: HashMap<i32, MeshBuilder> = HashMap::new();
         for section in &geo.sections {
@@ -2075,9 +2127,10 @@ fn pkg_to_parts(
                     *missing_prims += 1;
                     continue;
                 }
-                emit_strip(b, strip, &mut collision);
+                emit_strip(b, strip, col);
             }
         }
+        let mut parts = Vec::new();
         for (shader_off, builder) in by_shader {
             if builder.is_empty() {
                 continue;
@@ -2089,12 +2142,22 @@ fn pkg_to_parts(
                 }
                 None => mats.fallback.clone(),
             };
-            out.push((meshes.add(builder.build()), mat));
+            parts.push((meshes.add(builder.build()), mat));
+        }
+        if let Some(index) = break_index(&stem) {
+            fragments.push(FragmentModel {
+                index: index.to_string(),
+                parts,
+                collider: piece_collision.into_fragment_collider(),
+            });
+        } else {
+            out.extend(parts);
         }
     }
     PropModel {
         parts: out,
         collider: collision.into_collider(),
+        fragments,
     }
 }
 
@@ -2160,10 +2223,12 @@ fn adjust_material(
 }
 
 /// Everything prepared from one PKG: the renderable parts and the single
-/// collider shared by every placement of that prop.
+/// collider shared by every placement of that prop, plus the authored
+/// `BREAK<NN>` breakaway pieces (empty for props that only topple).
 struct PropModel {
     parts: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
     collider: Option<Collider>,
+    fragments: Vec<FragmentModel>,
 }
 
 /// Cache of PKG name → prepared meshes+materials handles.
@@ -2476,7 +2541,10 @@ fn spawn_prop(
 /// state on the root, render parts as children that follow it when
 /// the activation system knocks the prop loose. `model.collider`
 /// must exist (the caller checks) — a banger without collision can
-/// never be struck and stamps as an ordinary prop instead.
+/// never be struck and stamps as an ordinary prop instead. `pieces`
+/// carries the prop's authored `BREAK<NN>` fragments (F04-B); when at
+/// least one is collidable the entity gets [`BangerPieces`] and a
+/// qualifying impact shatters it instead of tipping it over.
 #[allow(clippy::too_many_arguments)]
 fn spawn_banger_prop(
     commands: &mut Commands,
@@ -2486,23 +2554,26 @@ fn spawn_banger_prop(
     name: &str,
     def: &BangerDefinition,
     session: &mut Session,
+    pieces: Vec<FragmentPiece>,
 ) {
     let Some(collider) = &model.collider else {
         return;
     };
     let object = session.mint_object_id();
     let role = session.authority_role();
-    let root = commands
-        .spawn(banger_bundle(
-            def,
-            object,
-            role,
-            owner,
-            collider.clone(),
-            transform,
-            name.to_string(),
-        ))
-        .id();
+    let mut root = commands.spawn(banger_bundle(
+        Banger::new(def.clone()),
+        object,
+        role,
+        owner,
+        collider.clone(),
+        transform,
+        name.to_string(),
+    ));
+    if pieces.iter().any(|p| p.collider.is_some()) {
+        root.insert(BangerPieces { fragments: pieces });
+    }
+    let root = root.id();
     for (mesh, material) in &model.parts {
         let part = commands
             .spawn((
@@ -2543,6 +2614,9 @@ pub struct PathsetStampReport {
     /// Stamps spawned as banger entities — placements whose prop name
     /// bound a `tune/banger/*.dgbangerdata` record (F04-A, WLD-16).
     pub bangers: usize,
+    /// Collidable `BREAK<NN>` pieces the stamped bangers carry — the
+    /// fragments an activation would spawn (F04-B).
+    pub pieces: usize,
     /// Prop names whose bound record resolved but failed to decode —
     /// stamped unbound, counted once per name per file.
     pub banger_failed: usize,
@@ -2558,6 +2632,7 @@ impl std::ops::AddAssign for PathsetStampReport {
         self.capped = self.capped.saturating_add(rhs.capped);
         self.issues += rhs.issues;
         self.bangers += rhs.bangers;
+        self.pieces += rhs.pieces;
         self.banger_failed += rhs.banger_failed;
     }
 }
@@ -2632,10 +2707,35 @@ fn stamp_pathset(
         // entity; unbound names (or bound props with no collider —
         // they can never be struck) stay ordinary static props.
         let bound = bangers.get(name).cloned();
+        // A bound prop's `BREAK<NN>` chunks become its break pieces:
+        // each resolves its own `<name>_break<NN>` record when authored
+        // and falls back to the parent def otherwise.
+        let pieces: Vec<FragmentPiece> = match &bound {
+            Some(def) => model
+                .fragments
+                .iter()
+                .map(|f| {
+                    let stem = format!("{name}_break{}", f.index);
+                    let fdef = bangers.get(&stem).cloned().unwrap_or_else(|| {
+                        let mut d = def.clone();
+                        d.name = stem;
+                        d
+                    });
+                    FragmentPiece {
+                        index: f.index.clone(),
+                        def: fdef,
+                        parts: f.parts.clone(),
+                        collider: f.collider.clone(),
+                    }
+                })
+                .collect(),
+            None => Vec::new(),
+        };
         for (ii, mat4) in stamped.transforms.iter().enumerate() {
             let pname = format!("{name_prefix}-{name}-{pi}-{ii}");
             match (&bound, &model.collider) {
                 (Some(def), Some(_)) => {
+                    report.pieces += pieces.iter().filter(|p| p.collider.is_some()).count();
                     spawn_banger_prop(
                         commands,
                         model,
@@ -2644,6 +2744,7 @@ fn stamp_pathset(
                         &pname,
                         def,
                         session,
+                        pieces.clone(),
                     );
                     report.bangers += 1;
                 }
@@ -2934,11 +3035,13 @@ pub fn load_city(
                     report.pathset_props_capped.saturating_add(stamped.capped);
                 report.pathset_issues += stamped.issues;
                 report.pathset_bangers += stamped.bangers;
+                report.pathset_pieces += stamped.pieces;
                 report.pathset_banger_failed += stamped.banger_failed;
                 info!(
                     path = %pathset_res.logical,
                     stamped = stamped.spawned,
                     bangers = stamped.bangers,
+                    pieces = stamped.pieces,
                     decals = stamped.decal_paths,
                     labels = stamped.label_paths,
                     animated = stamped.animated_paths,

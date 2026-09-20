@@ -345,9 +345,10 @@ pub fn headless_smoke(
         })
         .unwrap_or_default();
     // Banger evidence: how many bound placements exist and how the
-    // dormant → active → settled machine left them at the frame cap.
+    // dormant → active → settled/broken machine left them at the
+    // frame cap.
     let bng_detail = {
-        let mut counts = [0usize; 3];
+        let mut counts = [0usize; 4];
         for e in world_ecs.iter_entities() {
             let Some(b) = e.get::<Banger>() else {
                 continue;
@@ -356,10 +357,14 @@ pub fn headless_smoke(
                 BangerPhase::Dormant => 0,
                 BangerPhase::Active => 1,
                 BangerPhase::Settled => 2,
+                BangerPhase::Broken => 3,
             }] += 1;
         }
         if counts.iter().sum::<usize>() > 0 {
-            format!(" bng={}d/{}a/{}s", counts[0], counts[1], counts[2])
+            format!(
+                " bng={}d/{}a/{}s/{}b",
+                counts[0], counts[1], counts[2], counts[3]
+            )
         } else {
             String::new()
         }

@@ -3,26 +3,31 @@
 //! A *banger* is a stamped world prop that has a bound
 //! `tune/banger/<name>.dgbangerdata` record — the binding verified by
 //! `mm2-inspect banger-bind` (WLD-16): pathset and prop-rule placements
-//! bind by name, INST placements do not. The runtime model follows the
-//! structure recovered from MM2Hook (R4, `docs/research/banger.md`):
+//! bind by name; of the INST channel only the `*_ai.inst` stop-sign
+//! supplements bind (`sp_stop_f`), ordinary INST names do not. The
+//! runtime model follows the structure recovered from MM2Hook (R4,
+//! `docs/research/banger.md`):
 //!
 //! ```text
 //!   Dormant (dgUnhitBangerInstance, static collider)
 //!     ── impact above the authored threshold ──▶
-//!   Active  (dgBangerActive, pooled dynamic body)
-//!     ── body sleeps / pool reclaims the slot ──▶
-//!   Settled (dgHitBangerInstance, static again at its rest pose)
+//!   ┌ Active  (dgBangerActive, pooled dynamic body)
+//!   │   ── body sleeps / pool reclaims the slot ──▶
+//!   │ Settled (dgHitBangerInstance, static again at its rest pose)
+//!   └ Broken  (a NumParts prop shatters into its BREAK<NN> chunks)
 //! ```
 //!
 //! What the original compares `ImpulseLimit2` against is unverified
-//! (UNK-22), as are the pool-reclaim order and fragment spawning —
-//! those stay provisional policy here: the estimate is
-//! `approach_speed × striker_mass` and the applied kick leaves the prop
-//! at the striker's approach speed. The active-pool bound (32) is the
-//! R4-recovered `dgBangerActiveManager` size. `Settled` is terminal for
-//! the session: the recovered `dgHitBangerInstance` has no further
-//! transition, so a knocked-down prop stays down until the session
-//! restamps it.
+//! (UNK-22), as are the pool-reclaim order and the exact fragment
+//! semantics — those stay provisional policy here: the estimate is
+//! `approach_speed × striker_mass`, the applied kick leaves the prop at
+//! the striker's approach speed, and a prop whose PKG carries authored
+//! `BREAK<NN>` chunks shatters into them at activation. The active-pool
+//! bound (32) is the R4-recovered `dgBangerActiveManager` size; spawned
+//! fragments count against it. `Settled`/`Broken` are terminal for the
+//! session: the recovered `dgHitBangerInstance` has no further
+//! transition, so a knocked-down or shattered prop stays that way until
+//! the session restamps it.
 
 use bevy::prelude::*;
 use mm2_formats::banger::BangerData;
@@ -47,6 +52,14 @@ pub enum BangerPhase {
     /// its new pose, the R4 `dgHitBangerInstance` state. Terminal for
     /// the session.
     Settled,
+    /// Shattered into its authored `BREAK<NN>` fragment chunks at
+    /// activation: the placement's collider and unified mesh are gone,
+    /// replaced by spawned fragment bodies. Terminal for the session —
+    /// the broken placement remains only as the identity the break
+    /// event belongs to. Provisional timing: R4 does not settle whether
+    /// fragments spawn at activation or at a later break threshold
+    /// (UNK-22), so this slice breaks on the activation edge.
+    Broken,
 }
 
 impl BangerPhase {
@@ -56,15 +69,17 @@ impl BangerPhase {
             Self::Dormant => "dormant",
             Self::Active => "active",
             Self::Settled => "settled",
+            Self::Broken => "broken",
         }
     }
 }
 
 /// The runtime parameters a stamped placement needs from its bound
-/// `dgBangerData` record. Fields the record keeps for features that do
-/// not exist yet (fragments, birth-rule particles, glows, ids) are not
-/// distilled here — the parsed record remains the source of truth for
-/// F04-B fragment work.
+/// `dgBangerData` record. The same distilled shape serves fragment
+/// (`<name>_break<NN>`) records — one per `BREAK<NN>` chunk the prop's
+/// PKG carries. Fields the record keeps for features that do not exist
+/// yet (birth-rule particles, glows, ids) are not distilled here — the
+/// parsed record remains the source of truth for that work.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BangerDefinition {
     /// The bound record stem (e.g. `sp_lightstreet_rt_f`) — kept for
@@ -87,8 +102,10 @@ pub struct BangerDefinition {
     pub size: [f32; 3],
     /// `CG` — authored centre-of-gravity offset (prop-local).
     pub cg: [f32; 3],
-    /// `NumParts` — authored break-fragment count. Carried, not acted
-    /// on: fragment spawning is F04-B.
+    /// `NumParts` — authored break-fragment count. Carried for
+    /// diagnostics; fragment spawning is driven by the `BREAK<NN>`
+    /// chunks the prop's PKG actually contains (the two agree on every
+    /// standalone retail record — the audit cross-checks them).
     pub num_parts: i64,
 }
 

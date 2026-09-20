@@ -336,6 +336,8 @@ pub fn load_session_world(
                     info!(
                         files = overlay.files,
                         stamped = overlay.stats.spawned,
+                        bangers = overlay.stats.bangers,
+                        pieces = overlay.stats.pieces,
                         labels = overlay.stats.label_paths,
                         animated = overlay.stats.animated_paths,
                         decals = overlay.stats.decal_paths,

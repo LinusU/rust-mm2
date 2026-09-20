@@ -1,11 +1,12 @@
-//! F04-A banger runtime integration: the dormant → active → settled
-//! state machine on real Avian physics, plus the WLD-16 name-binding
-//! stamp path through `spawn_event_pathsets` — the same headless-app
-//! harness `tests/contracts.rs` uses.
+//! F04 banger runtime integration: the dormant → active/broken →
+//! settled state machine on real Avian physics, plus the WLD-16
+//! name-binding stamp path through `spawn_event_pathsets` — the same
+//! headless-app harness `tests/contracts.rs` uses.
 //!
-//! Threshold semantics are provisional (UNK-22): these tests pin the
-//! implemented rule — `approach_speed × striker_mass > ImpulseLimit2` —
-//! not a verified original behaviour.
+//! Threshold and fragment semantics are provisional (UNK-22): these
+//! tests pin the implemented rules — `approach_speed × striker_mass >
+//! ImpulseLimit2` and BREAK-chunk spawning on the activation edge —
+//! not verified original behaviour.
 
 use std::path::Path;
 use std::time::Duration;
@@ -14,7 +15,9 @@ use avian3d::prelude::*;
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
-use mm2_app::banger::{activate_bangers, banger_bundle, settle_bangers};
+use mm2_app::banger::{
+    BangerPieces, FragmentPiece, activate_bangers, banger_bundle, settle_bangers,
+};
 use mm2_game::{
     AuthorityRole, Banger, BangerCause, BangerDefinition, BangerPhase, BangerPool,
     BangerStateChanged, CityEntity, ObjectId, ObjectIdentity, Session, SessionAuthority,
@@ -71,10 +74,11 @@ fn test_app_with(authority: SessionAuthority, pool: usize) -> App {
     app.finish();
     app.cleanup();
 
-    // Flat ground the props and strikers rest/slide on.
+    // Flat ground the props and strikers rest/slide on — wide enough
+    // that break fragments scattering at approach speed stay on it.
     app.world_mut().spawn((
         RigidBody::Static,
-        Collider::cuboid(400.0, 1.0, 400.0),
+        Collider::cuboid(2000.0, 1.0, 2000.0),
         Friction::new(0.8),
         Position(Vec3::new(0.0, -0.5, 0.0)),
         Transform::from_xyz(0.0, -0.5, 0.0),
@@ -89,16 +93,17 @@ fn spawn_banger(app: &mut App, pos: Vec3, def: BangerDefinition) -> (Entity, Obj
         let mut session = app.world_mut().resource_mut::<Session>();
         (session.mint_object_id(), session.authority_role())
     };
+    let name = format!("banger-{}", def.name);
     let entity = app
         .world_mut()
         .spawn(banger_bundle(
-            &def,
+            Banger::new(def),
             object,
             role,
             SessionEntity(1),
             Collider::cuboid(1.0, 1.0, 1.0),
             Transform::from_translation(pos),
-            format!("banger-{}", def.name),
+            name,
         ))
         .id();
     (entity, object)
@@ -553,4 +558,353 @@ fn malformed_and_missing_records_fall_back_to_static_props() {
             .is_none(),
         "a failed decode stamps an ordinary static prop"
     );
+}
+
+// ---------------------------------------------------------------------------
+// F04-B: BREAK<NN> pieces — a bound prop whose PKG carries break chunks
+// shatters on activation instead of tipping over.
+// ---------------------------------------------------------------------------
+
+/// The distilled def one fragment piece carries — its own record's
+/// shape, small and light next to the parent prop.
+fn piece_def(name: &str, mass: f32) -> BangerDefinition {
+    BangerDefinition {
+        name: name.into(),
+        mass,
+        friction: 0.9,
+        elasticity: 0.5,
+        impulse_limit2: 0.0,
+        size: [0.2, 0.2, 0.2],
+        cg: [0.0, 0.1, 0.0],
+        num_parts: 0,
+    }
+}
+
+/// A dormant banger carrying `n` authored break pieces (each with a
+/// collidable cube chunk and a mesh part) plus one unified mesh child —
+/// the shape `spawn_banger_prop` produces for a prop whose PKG has
+/// `BREAK<NN>` chunks.
+fn spawn_breakable(
+    app: &mut App,
+    pos: Vec3,
+    def: BangerDefinition,
+    n: usize,
+) -> (Entity, ObjectId) {
+    let (entity, object) = spawn_banger(app, pos, def);
+    let mesh = app
+        .world_mut()
+        .resource_mut::<Assets<Mesh>>()
+        .add(Cuboid::new(0.3, 0.3, 0.3));
+    if !app.world().contains_resource::<Assets<StandardMaterial>>() {
+        app.world_mut().init_resource::<Assets<StandardMaterial>>();
+    }
+    let mat = app
+        .world_mut()
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(StandardMaterial::default());
+    // The intact prop renders one unified mesh child.
+    let child = app
+        .world_mut()
+        .spawn((
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(mat.clone()),
+            Transform::IDENTITY,
+        ))
+        .id();
+    app.world_mut().entity_mut(entity).add_child(child);
+    let pieces: Vec<FragmentPiece> = (1..=n)
+        .map(|i| FragmentPiece {
+            index: format!("{i:02}"),
+            def: piece_def(&format!("frag{i:02}"), 5.0),
+            parts: vec![(mesh.clone(), mat.clone())],
+            collider: Some(Collider::cuboid(0.3, 0.3, 0.3)),
+        })
+        .collect();
+    app.world_mut()
+        .entity_mut(entity)
+        .insert(BangerPieces { fragments: pieces });
+    (entity, object)
+}
+
+/// Every banger entity other than `except`, with its identity.
+fn other_bangers(app: &mut App, except: Entity) -> Vec<(Entity, ObjectId, BangerPhase)> {
+    let mut q = app
+        .world_mut()
+        .query_filtered::<(Entity, &Banger, &ObjectIdentity), With<Collider>>();
+    q.iter(app.world())
+        .filter(|(e, _, _)| *e != except)
+        .map(|(e, b, id)| (e, id.0, b.phase))
+        .collect()
+}
+
+#[test]
+fn a_breakable_prop_shatters_into_its_authored_pieces() {
+    let mut app = test_app_with(SessionAuthority::Local, 32);
+    let (banger, object) = spawn_breakable(
+        &mut app,
+        Vec3::new(0.0, 0.5, 0.0),
+        banger_def("bench", 0.0),
+        3,
+    );
+    // A modest hit still clears the zero threshold while keeping the
+    // pieces inside the test ground — the striker starts close since
+    // ground friction brakes it on approach.
+    spawn_striker(
+        &mut app,
+        Vec3::new(-3.0, 0.5, 0.0),
+        Vec3::new(10.0, 0.0, 0.0),
+    );
+
+    let events = run(&mut app, FRAMES_PER_SECOND * 10);
+
+    // One logical break event for the placement — the parent itself
+    // never goes Active (AC02/AC03).
+    let breaks: Vec<_> = events
+        .iter()
+        .filter(|e| e.phase == BangerPhase::Broken)
+        .collect();
+    assert_eq!(breaks.len(), 1, "one break event: {events:?}");
+    assert_eq!(breaks[0].object, object);
+    match breaks[0].cause {
+        BangerCause::Impact { severity, .. } => {
+            assert!(severity > 1.0, "the break names its impact");
+        }
+        c => panic!("a break must name its impact, got {c:?}"),
+    }
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.object == object && e.phase == BangerPhase::Active),
+        "the shattered parent never activates: {events:?}"
+    );
+
+    // The placement is a collider-less identity husk: no collider, no
+    // unified mesh children.
+    assert_eq!(
+        app.world().get::<Banger>(banger).unwrap().phase,
+        BangerPhase::Broken
+    );
+    assert!(app.world().get::<Collider>(banger).is_none());
+    assert_eq!(
+        app.world()
+            .get::<Children>(banger)
+            .map(|c| c.len())
+            .unwrap_or(0),
+        0,
+        "the unified mesh is replaced by the pieces"
+    );
+
+    // Exactly three fragment bodies exist, each session-owned with its
+    // own minted identity and a collider — and they settle where they
+    // lie like any other active.
+    let fragments = other_bangers(&mut app, banger);
+    assert_eq!(fragments.len(), 3, "one body per collidable piece");
+    assert!(
+        fragments.iter().all(|(_, id, _)| *id != object),
+        "pieces mint their own ids"
+    );
+    let settled = events
+        .iter()
+        .filter(|e| e.phase == BangerPhase::Settled)
+        .count();
+    assert!(
+        settled >= 1,
+        "fragments come to rest and settle: {events:?}"
+    );
+
+    // Session teardown removes the husk and every piece it spawned.
+    app.world_mut()
+        .run_system_once(despawn_session_entities)
+        .expect("teardown runs");
+    assert_eq!(
+        app.world_mut()
+            .query::<&CityEntity>()
+            .iter(app.world())
+            .count(),
+        0,
+        "no placement or fragment survives teardown"
+    );
+}
+
+#[test]
+fn the_pool_bounds_fragment_spawns() {
+    let mut app = test_app_with(SessionAuthority::Local, 1);
+    let (banger, _) = spawn_breakable(
+        &mut app,
+        Vec3::new(0.0, 0.5, 0.0),
+        banger_def("bench", 0.0),
+        3,
+    );
+    spawn_striker(
+        &mut app,
+        Vec3::new(-6.0, 0.5, 0.0),
+        Vec3::new(20.0, 0.0, 0.0),
+    );
+
+    let events = run(&mut app, FRAMES_PER_SECOND);
+    assert!(
+        events.iter().any(|e| e.phase == BangerPhase::Broken),
+        "the prop still shatters: {events:?}"
+    );
+    // With a pool of one and nothing reclaimable (the just-spawned
+    // pieces are pending, not in the world), exactly one piece becomes
+    // a body — the cap is never exceeded.
+    let fragments = other_bangers(&mut app, banger);
+    assert_eq!(fragments.len(), 1, "the pool bound caps the pieces");
+}
+
+#[test]
+fn pieces_without_collision_tip_over_instead() {
+    let mut app = test_app_with(SessionAuthority::Local, 32);
+    let (banger, object) =
+        spawn_banger(&mut app, Vec3::new(0.0, 0.5, 0.0), banger_def("limp", 0.0));
+    // A BangerPieces component whose pieces all lack collision carries
+    // no spawnable body — the placement takes the ordinary activation
+    // path rather than shattering into nothing.
+    app.world_mut().entity_mut(banger).insert(BangerPieces {
+        fragments: vec![FragmentPiece {
+            index: "01".into(),
+            def: piece_def("limp_break01", 5.0),
+            parts: Vec::new(),
+            collider: None,
+        }],
+    });
+    spawn_striker(
+        &mut app,
+        Vec3::new(-6.0, 0.5, 0.0),
+        Vec3::new(20.0, 0.0, 0.0),
+    );
+
+    let events = run(&mut app, FRAMES_PER_SECOND * 3);
+    assert!(
+        events
+            .iter()
+            .any(|e| e.object == object && e.phase == BangerPhase::Active),
+        "no collidable pieces → ordinary activation: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| e.phase == BangerPhase::Broken),
+        "nothing shatters: {events:?}"
+    );
+    assert!(other_bangers(&mut app, banger).is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// The stamp path for breakables: `BREAK<NN>` chunks become `BangerPieces`.
+// ---------------------------------------------------------------------------
+
+/// `banger_record` with an explicit `NumParts` — a breakable's record.
+fn breakable_record(limit: f32, num_parts: i64) -> String {
+    format!(
+        "type: a\ndgBangerData {{\n  AudioId 0\n  Size 0.5 1.0 0.5\n  CG 0.0 0.5 0.0\n  Mass 40.0\n  Elasticity 0.5\n  Friction 0.9\n  ImpulseLimit2 {limit}\n  SpinAxis 0\n  Flash 0\n  NumParts {num_parts}\n  TexNumber 0\n  BillFlags 0\n  YRadius 0.5\n}}\n"
+    )
+}
+
+/// A PKG with one intact chunk plus two `BREAK<NN>` pieces — the
+/// `sp_benchwood_f` layout in miniature.
+fn breakable_pkg() -> Vec<u8> {
+    let geo = |verts: &[([f32; 3], [f32; 3], [f32; 2])], indices: &[u16]| {
+        let mut d = Vec::new();
+        d.extend_from_slice(&1u32.to_le_bytes()); // nSections
+        d.extend_from_slice(&(verts.len() as u32).to_le_bytes());
+        d.extend_from_slice(&(indices.len() as u32).to_le_bytes());
+        d.extend_from_slice(&1u32.to_le_bytes()); // sections duplicate
+        d.extend_from_slice(&0x112u32.to_le_bytes()); // fvf: XYZ|NORMAL|1 tex
+        d.extend_from_slice(&1u16.to_le_bytes()); // nStrips
+        d.extend_from_slice(&0u16.to_le_bytes()); // section flags
+        d.extend_from_slice(&(-1i32).to_le_bytes()); // shader offset → fallback
+        d.extend_from_slice(&3i32.to_le_bytes()); // prim type: triangles
+        d.extend_from_slice(&(verts.len() as u32).to_le_bytes());
+        for &(p, n, uv) in verts {
+            for c in p {
+                d.extend_from_slice(&c.to_le_bytes());
+            }
+            for c in n {
+                d.extend_from_slice(&c.to_le_bytes());
+            }
+            for c in uv {
+                d.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        d.extend_from_slice(&(indices.len() as u32).to_le_bytes());
+        for &i in indices {
+            d.extend_from_slice(&i.to_le_bytes());
+        }
+        d
+    };
+    let tetra = [
+        ([0., 0., 0.], [0., 1., 0.], [0., 0.]),
+        ([1., 0., 0.], [0., 1., 0.], [1., 0.]),
+        ([0., 0., 1.], [0., 1., 0.], [0., 1.]),
+        ([0., 1., 0.], [0., 1., 0.], [0.5, 0.5]),
+    ];
+    let tris = [0u16, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3];
+    let chunk = |name: &str, data: Vec<u8>| {
+        let mut d = Vec::new();
+        d.extend_from_slice(b"FILE");
+        d.push(name.len() as u8 + 1);
+        d.extend_from_slice(name.as_bytes());
+        d.push(0);
+        d.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        d.extend_from_slice(&data);
+        d
+    };
+    let mut d = b"PKG3".to_vec();
+    d.extend_from_slice(&chunk("breakpkg_h", geo(&tetra, &tris)));
+    d.extend_from_slice(&chunk("BREAK01_H", geo(&tetra, &tris)));
+    d.extend_from_slice(&chunk("BREAK02_H", geo(&tetra, &tris)));
+    d
+}
+
+#[test]
+fn breakable_props_stamp_their_authored_pieces() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(d, "geometry/breakpkg.pkg", breakable_pkg());
+    write(
+        d,
+        "tune/banger/breakpkg.dgbangerdata",
+        breakable_record(0.0, 2),
+    );
+    // break01 has its own record (a light piece); break02 does not and
+    // must fall back to the parent def.
+    write(
+        d,
+        "tune/banger/breakpkg_break01.dgbangerdata",
+        breakable_record(0.0, 0).replace("Mass 40.0", "Mass 7.0"),
+    );
+    write(
+        d,
+        "race/t/overlay.pathset",
+        pth1(&[pth1_path("breakpkg", &[[0.0, 0.0, 0.0]], 0, 0)]),
+    );
+
+    let (report, mut world) = stamp_overlay(d);
+    assert_eq!(report.stats.bangers, 1);
+    assert_eq!(report.stats.pieces, 2, "two collidable pieces stamped");
+
+    let bangers: Vec<Entity> = world
+        .query_filtered::<Entity, With<Banger>>()
+        .iter(&world)
+        .collect();
+    assert_eq!(bangers.len(), 1);
+    let pieces = world.get::<BangerPieces>(bangers[0]).unwrap();
+    assert_eq!(pieces.fragments.len(), 2);
+    assert_eq!(pieces.fragments[0].index, "01");
+    assert_eq!(pieces.fragments[0].def.mass, 7.0, "the piece's own record");
+    assert_eq!(pieces.fragments[0].def.name, "breakpkg_break01");
+    assert_eq!(pieces.fragments[1].index, "02");
+    assert_eq!(
+        pieces.fragments[1].def.mass, 40.0,
+        "a piece without a record inherits the parent def"
+    );
+    assert_eq!(pieces.fragments[1].def.name, "breakpkg_break02");
+    assert!(
+        pieces.fragments.iter().all(|f| f.collider.is_some()),
+        "every authored piece got a collider"
+    );
+
+    // The dormant prop keeps only its intact mesh — the BREAK chunks
+    // are not part of its surface or collider.
+    assert_eq!(world.get::<Children>(bangers[0]).unwrap().len(), 1);
 }

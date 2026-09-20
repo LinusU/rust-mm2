@@ -210,7 +210,7 @@ the first transition (`ImpulseLimit2` against what quantity), whether
 fragments spawn at activation or at a later break threshold, and what
 `phSleep`/`Timer` exactly do remain UNK-22.
 
-## Implemented runtime slice (F04-A.3 — provisional)
+## Implemented runtime slice (F04-A/B — provisional)
 
 `mm2_game::banger` + `mm2_app::banger` implement the recovered state
 machine's first half on Avian. This is an *implementation choice*, not
@@ -226,8 +226,10 @@ verified original behaviour — every provisional point is still UNK-22.
   names without collision stamp as the ordinary static render/collider
   pair. Records that resolve but fail decode are counted
   (`banger_failed`) and stamp unbound. Verified on retail: sf
-  `props.pathset` 925/925 stamps bound, london 1188/1188, zero decode
-  failures (`bng=925d/0a/0s`, `bng=1188d/0a/0s` in headless smoke).
+  `props.pathset` 925/925 stamps bound carrying 3,092 collidable BREAK
+  pieces, london 1188/1188 carrying 2,710, zero decode failures
+  (`bng=925d/0a/0s/0b`, `bng=1188d/0a/0s/0b` in headless smoke; pieces
+  are the prepared fragments, not spawned bodies).
 - **Dormant → Active.** `activate_bangers` (FixedLast) reads
   `CollisionStart` edges — a second consumer alongside
   `collect_impacts`, since bangers need every approaching contact, not
@@ -256,11 +258,29 @@ verified original behaviour — every provisional point is still UNK-22.
   generation + fixed tick + phase + cause (`Impact{severity,estimate}` /
   `Slept` / `Reclaimed`) — the semantic stream audio/particle/
   replication consumers read instead of watching physics.
-- **Deliberately deferred:** BREAK-chunk fragment spawning (F04-B),
-  `BirthRule` particles, `AudioId`/`Flash`/`TexNumber` effects, decals,
-  prop-rule-channel stamping, the `dgBangerActive` `Timer` despawn, and
-  replication. `NumParts` is carried on `BangerDefinition` for F04-B but
-  not acted on.
+- **Dormant → Broken (F04-B.1).** On a qualifying impact a bound prop
+  carrying collidable `BREAK<NN>` pieces does not go dynamic itself: the
+  parent's collider and render children are removed, its phase becomes
+  `Broken`, and each prepared piece spawns as its own dynamic entity —
+  own `ObjectId`, same session owner, own collider and render children.
+  `pkg_to_parts` splits `BREAK<NN>` chunks out of the intact LOD set at
+  load; each piece resolves `tune/banger/<parent>_break<NN>` for its
+  physicals and falls back to the parent's `BangerDefinition` when no
+  fragment-specific record exists. Pieces claim `BangerPool` slots like
+  any activation, so a break at capacity reclaims oldest-first and
+  `max_active = 0` spawns nothing. Exactly one `BangerStateChanged`
+  (`phase: Broken`) is emitted for the parent — fragment entities carry
+  `Banger` too and settle through the normal active → settled path.
+  Whether the original spawns fragments at the *same* threshold as
+  activation (implemented choice: yes — one `ImpulseLimit2` gate for
+  both) is UNK-22; a prop with no collidable pieces takes the ordinary
+  activation path, which matches authored data like
+  `sp_barricadeconc[lr]_f` (`NumParts` = 0 — they tip, not shatter).
+- **Deliberately deferred:** `BirthRule` particles, `AudioId`/`Flash`/
+  `TexNumber` effects, decals, prop-rule-channel stamping, the
+  `dgBangerActive` `Timer` despawn, and replication. `NumParts` is
+  carried on `BangerDefinition` and bounds the prepared piece set, but
+  whether it also gates runtime spawning is still UNK-22.
 
 ## Runtime consumption — what is not known
 
@@ -271,8 +291,12 @@ Parsed, bound and provisionally simulated. Everything below is UNK-22:
   The implemented `approach_speed × striker_mass` estimate is a
   stand-in; original evidence could change both the quantity and the
   comparison.
-- Whether `NumParts` also bounds spawned fragments at runtime or is
-  purely an authoring echo of the PKG's BREAK count.
+- Whether `NumParts` bounds runtime fragment spawning or is purely an
+  authoring echo of the PKG's BREAK count — the implementation prepares
+  every collidable `BREAK<NN>` chunk regardless of `NumParts`, since the
+  audit verified the two always agree on standalone props.
+- Whether fragments spawn at the activation threshold or a later break
+  threshold — implemented as the same `ImpulseLimit2` gate, unverified.
 - `ColliderId`/`AudioId`/`TexNumber` id spaces (collider table? audio
   table? which texture atlas?).
 - `SpinAxis`, `BillFlags`, `Flash`, `YRadius` semantics.

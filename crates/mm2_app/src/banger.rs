@@ -24,6 +24,17 @@
 //! at its rest pose — the `dgHitBangerInstance` state. `Settled` is
 //! terminal for the session; teardown restamps dormant placements.
 //!
+//! A placement whose PKG carries authored `BREAK<NN>` chunks (attached
+//! to the entity as [`BangerPieces`]) does not tip over on activation:
+//! it goes `Broken` — the unified collider and mesh are replaced by
+//! one fragment body per collidable piece, each spawned directly in
+//! the `Active` phase with its own `<name>_break<NN>` record (the
+//! parent's def when the piece has none). Fragments are ordinary
+//! actives from then on: they count against the pool and settle
+//! through [`settle_bangers`]. One logical break event fires for the
+//! placement itself (F04-AC03). Fragment spawn timing is provisional
+//! (UNK-22): this slice breaks on the activation edge.
+//!
 //! Both systems are authority-gated like the race driver: a
 //! `Predicted` session never transitions banger state — replication
 //! (F26) delivers authoritative `BangerStateChanged` instead.
@@ -41,6 +52,47 @@ use mm2_game::{
 use tracing::{debug, warn};
 
 use crate::contracts::deepest_contact;
+
+/// One authored `BREAK<NN>` piece of a breakable prop — the parts the
+/// break transition turns into a fragment body: the chunk's render
+/// parts, a convex collider and its runtime parameters.
+#[derive(Clone)]
+pub struct FragmentPiece {
+    /// The authored BREAK index digits (e.g. `01`); the piece's own
+    /// record stem is `<prop>_break<index>`.
+    pub index: String,
+    /// The piece's own `<prop>_break<index>` record, or the parent
+    /// prop's distilled def when the piece has no record — a
+    /// documented provisional fallback (254 retail fragment records
+    /// exist; pieces without one are rare authored gaps).
+    pub def: BangerDefinition,
+    /// Best-LOD render parts of the piece, shared handles out of the
+    /// prop cache.
+    pub parts: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
+    /// Convex-hull collider over the piece's triangles (dynamic
+    /// fragments get convex collision, not the prop's trimesh — small
+    /// debris doesn't need authored concavity). `None` means the piece
+    /// never spawns as a body.
+    pub collider: Option<Collider>,
+}
+
+/// The authored break pieces of a stamped placement (F04-B) — present
+/// only when the prop's PKG carries `BREAK<NN>` chunks. On activation
+/// the placement goes [`BangerPhase::Broken`] and its pieces spawn as
+/// fragment bodies; a placement without pieces tips over instead.
+#[derive(Component)]
+pub struct BangerPieces {
+    /// Pieces in PKG chunk order.
+    pub fragments: Vec<FragmentPiece>,
+}
+
+impl BangerPieces {
+    /// Pieces that can spawn as bodies — a fragment without usable
+    /// collision is never a physical participant.
+    pub fn collidable(&self) -> impl Iterator<Item = &FragmentPiece> {
+        self.fragments.iter().filter(|f| f.collider.is_some())
+    }
+}
 
 /// Cache of `tune/banger/<name>.dgbangerdata` → distilled definition,
 /// filled as stamping meets each prop name. Mirrors `PropCache`'s
@@ -98,14 +150,29 @@ impl<'a> BangerDefs<'a> {
     }
 }
 
-/// The entity-level bundle of one bound placement: collider, authored
-/// physicals (inert while static), the banger state machine and the
-/// contract stamps — shared by city stamping and the test harness so
-/// both exercise the same spawn shape. Render parts are children the
-/// caller adds under this root.
+/// The authored `CG` re-expressed in the mirrored world frame —
+/// prop-local, before the placement's own rotation.
+fn mirrored_cg(def: &BangerDefinition) -> Vec3 {
+    Vec3::new(
+        def.cg[0],
+        def.cg[1],
+        if crate::city::MIRROR_Z {
+            -def.cg[2]
+        } else {
+            def.cg[2]
+        },
+    )
+}
+
+/// The entity-level bundle of one bound placement (or break
+/// fragment): collider, authored physicals (inert while static), the
+/// given [`Banger`] state and the contract stamps — shared by city
+/// stamping, fragment spawning and the test harness so all exercise
+/// the same spawn shape. Render parts are children the caller adds
+/// under this root.
 #[allow(clippy::too_many_arguments)]
 pub fn banger_bundle(
-    def: &BangerDefinition,
+    banger: Banger,
     object: ObjectId,
     role: AuthorityRole,
     owner: SessionEntity,
@@ -113,27 +180,20 @@ pub fn banger_bundle(
     transform: Transform,
     name: String,
 ) -> impl Bundle {
+    let def = banger.def.clone();
     (
         CityEntity,
         owner,
         ObjectIdentity(object),
         role,
-        Banger::new(def.clone()),
+        banger,
         RigidBody::Static,
         collider,
         // Authored physicals ride the dormant collider already: they
         // shape resting contact the same way and the activation only
         // has to flip the body kind.
         Mass(def.mass),
-        CenterOfMass(Vec3::new(
-            def.cg[0],
-            def.cg[1],
-            if crate::city::MIRROR_Z {
-                -def.cg[2]
-            } else {
-                def.cg[2]
-            },
-        )),
+        CenterOfMass(mirrored_cg(&def)),
         Friction::new(def.friction),
         Restitution::new(def.elasticity),
         // The striker usually enables the pair's events (the vehicle
@@ -183,17 +243,177 @@ fn impulse_estimate(striker: Entity, severity: f32, masses: &Query<&ComputedMass
     severity * mass
 }
 
+/// Claim one active-pool slot for a transition or fragment spawn.
+/// `occupied` tracks `Active` bangers in the query plus bodies spawned
+/// this tick (they only land in the world on the next flush). At
+/// capacity the oldest `Active` settles in place first (reclaim order
+/// provisional — R4 recovers the pool size, not the order). Returns
+/// `false` when the pool is full and nothing is reclaimable — e.g.
+/// `max_active = 0`, or every occupied slot is a pending spawn — so a
+/// degenerate cap can never be exceeded.
+#[allow(clippy::too_many_arguments)]
+fn claim_slot(
+    occupied: &mut usize,
+    tick: u64,
+    generation: u64,
+    pool: &BangerPool,
+    bangers: &mut Query<BangerMut>,
+    writer: &mut MessageWriter<BangerStateChanged>,
+    commands: &mut Commands,
+) -> bool {
+    if *occupied >= pool.max_active {
+        let oldest = bangers
+            .iter()
+            .filter(|(_, _, b, _, _, _)| b.phase == BangerPhase::Active)
+            .min_by_key(|(_, id, b, _, _, _)| (b.activated.unwrap_or(u64::MAX), id.0.slot))
+            .map(|(e, _, _, _, _, _)| e);
+        match oldest {
+            Some(oldest) => {
+                settle(
+                    oldest,
+                    tick,
+                    generation,
+                    BangerCause::Reclaimed,
+                    bangers,
+                    writer,
+                    commands,
+                );
+                *occupied -= 1;
+            }
+            None => return false,
+        }
+    }
+    *occupied += 1;
+    true
+}
+
+/// The break transition (F04-B): the placement's unified collider and
+/// mesh children are replaced by one fragment body per collidable
+/// [`BangerPieces`] piece — each spawned already `Active` at the
+/// parent's pose with the impact's velocity and its own spin kick. One
+/// logical [`BangerStateChanged`] fires for the placement (`Broken`);
+/// the pieces then live inside the shared pool like any active.
+#[allow(clippy::too_many_arguments)]
+fn break_banger(
+    a: &Activation,
+    pieces: &BangerPieces,
+    owner: SessionEntity,
+    parent_gt: &GlobalTransform,
+    session: &mut Session,
+    occupied: &mut usize,
+    pool: &BangerPool,
+    bangers: &mut Query<BangerMut>,
+    writer: &mut MessageWriter<BangerStateChanged>,
+    commands: &mut Commands,
+) {
+    let entity = a.entity;
+    let tick = session.tick();
+    let generation = session.generation();
+    let role = session.authority_role();
+    let parent_pos = parent_gt.translation();
+    let parent_rot = parent_gt.rotation();
+
+    // The placement keeps its entity/identity — only the collider and
+    // the unified mesh are replaced by the spawned pieces.
+    let parent_name = banger_name(bangers, entity);
+    if let Ok((_, _, mut banger, _, mut linvel, mut angvel)) = bangers.get_mut(entity) {
+        banger.phase = BangerPhase::Broken;
+        banger.activated = None;
+        linvel.0 = Vec3::ZERO;
+        angvel.0 = Vec3::ZERO;
+    }
+    commands
+        .entity(entity)
+        .remove::<(Collider, RigidBody, CollisionEventsEnabled, Sleeping)>()
+        .despawn_related::<Children>();
+    writer.write(BangerStateChanged {
+        object: a.object,
+        generation,
+        tick,
+        phase: BangerPhase::Broken,
+        cause: BangerCause::Impact {
+            severity: a.severity,
+            estimate: a.estimate,
+        },
+    });
+
+    let base_vel = a.dir * a.severity;
+    for piece in pieces.collidable() {
+        if !claim_slot(occupied, tick, generation, pool, bangers, writer, commands) {
+            debug!(
+                piece = %piece.index,
+                "banger piece skipped: active pool full"
+            );
+            continue;
+        }
+        let object = session.mint_object_id();
+        // Each piece spins off its own lever arm: the contact point
+        // relative to the piece's authored CG in world space.
+        let lever = a.point - (parent_pos + parent_rot * mirrored_cg(&piece.def));
+        let ang = piece
+            .def
+            .angular_kick(lever, a.dir * a.severity * piece.def.mass);
+        let transform = Transform::from_translation(parent_pos).with_rotation(parent_rot);
+        let fragment = commands
+            .spawn(banger_bundle(
+                Banger {
+                    phase: BangerPhase::Active,
+                    def: piece.def.clone(),
+                    activated: Some(tick),
+                },
+                object,
+                role,
+                owner,
+                piece.collider.clone().unwrap(),
+                transform,
+                format!("{parent_name}-break{}", piece.index),
+            ))
+            .insert((
+                RigidBody::Dynamic,
+                LinearVelocity(base_vel),
+                AngularVelocity(ang),
+            ))
+            .id();
+        for (mesh, material) in &piece.parts {
+            let part = commands
+                .spawn((
+                    Mesh3d(mesh.clone()),
+                    MeshMaterial3d(material.clone()),
+                    Transform::IDENTITY,
+                ))
+                .id();
+            commands.entity(fragment).add_child(part);
+        }
+    }
+    debug!(
+        severity = a.severity,
+        estimate = a.estimate,
+        "banger shattered"
+    );
+}
+
+/// The prop name a banger entity's def carries — for fragment names.
+fn banger_name(bangers: &Query<BangerMut>, entity: Entity) -> String {
+    bangers
+        .get(entity)
+        .map(|(_, _, b, _, _, _)| b.def.name.clone())
+        .unwrap_or_default()
+}
+
 /// Fixed-step dormant → active transition, driven by `CollisionStart`
 /// edges. A banger activates at most once — the `Dormant` check is the
 /// dedup: later edges against an `Active`/`Settled` prop are ordinary
-/// contacts the solver owns (AC02).
+/// contacts the solver owns (AC02). A placement carrying
+/// [`BangerPieces`] goes [`BangerPhase::Broken`] instead — its pieces
+/// become the active bodies.
 #[allow(clippy::too_many_arguments)]
 pub fn activate_bangers(
     mut reader: MessageReader<CollisionStart>,
     collisions: Collisions,
-    session: Res<Session>,
+    mut session: ResMut<Session>,
     pool: Res<BangerPool>,
     mut bangers: Query<BangerMut>,
+    pieces: Query<(&BangerPieces, &SessionEntity, &GlobalTransform)>,
     masses: Query<&ComputedMass>,
     mut writer: MessageWriter<BangerStateChanged>,
     mut commands: Commands,
@@ -252,40 +472,66 @@ pub fn activate_bangers(
         }
     }
 
+    // Pool occupancy counts `Active` bangers in the query plus the
+    // fragment bodies this tick spawns — those only land in the world
+    // on the next flush, so they must be accounted as pending.
+    let mut occupied = bangers
+        .iter()
+        .filter(|(_, _, b, _, _, _)| b.phase == BangerPhase::Active)
+        .count();
+
     for a in activations {
-        // Pool bound: at capacity the oldest activation settles in
-        // place before the new one takes its slot (reclaim order
-        // provisional — R4 recovers the pool size, not the order).
+        // A placement that carries break pieces shatters; everything
+        // else takes the ordinary dormant → active transition. The
+        // `Dormant` re-check still holds: a reclaim cannot touch a
+        // dormant prop, but a `CollisionStart` pair can name the same
+        // entity twice.
         if bangers
-            .iter()
-            .filter(|(_, _, b, _, _, _)| b.phase == BangerPhase::Active)
-            .count()
-            >= pool.max_active
+            .get(a.entity)
+            .map(|(_, _, b, _, _, _)| b.phase != BangerPhase::Dormant)
+            .unwrap_or(true)
         {
-            let oldest = bangers
-                .iter()
-                .filter(|(_, _, b, _, _, _)| b.phase == BangerPhase::Active)
-                .min_by_key(|(_, id, b, _, _, _)| (b.activated.unwrap_or(u64::MAX), id.0.slot))
-                .map(|(e, _, _, _, _, _)| e);
-            if let Some(oldest) = oldest {
-                settle(
-                    oldest,
-                    tick,
-                    generation,
-                    BangerCause::Reclaimed,
+            continue;
+        }
+        match pieces.get(a.entity) {
+            Ok((pieces, owner, gt)) if pieces.collidable().next().is_some() => {
+                break_banger(
+                    &a,
+                    pieces,
+                    *owner,
+                    gt,
+                    &mut session,
+                    &mut occupied,
+                    &pool,
                     &mut bangers,
                     &mut writer,
                     &mut commands,
                 );
+                continue;
             }
+            _ => {}
         }
 
+        if !claim_slot(
+            &mut occupied,
+            tick,
+            generation,
+            &pool,
+            &mut bangers,
+            &mut writer,
+            &mut commands,
+        ) {
+            // The pool is full of pending spawns (or capped at zero):
+            // the prop stays dormant rather than exceed the bound.
+            continue;
+        }
         let Ok((_, _, mut banger, position, mut linvel, mut angvel)) = bangers.get_mut(a.entity)
         else {
             continue;
         };
         // The reclaim above may have settled this entity already.
         if banger.phase != BangerPhase::Dormant {
+            occupied -= 1;
             continue;
         }
         // One impulse, one transition: the body goes dynamic and
