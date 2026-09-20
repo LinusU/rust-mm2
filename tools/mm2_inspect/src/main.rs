@@ -12,6 +12,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use mm2_assets::{AssetsError, InstallMount, MountReport, Vfs, mount_install, mount_mods};
+use mm2_formats::bai::Bai;
 use mm2_formats::pkg::{Pkg, PkgChunk};
 use mm2_formats::psdl::Psdl;
 use mm2_formats::tex::TexFile;
@@ -176,6 +177,21 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Audit the ambient-navigation files (`city/*.bai`): parse every
+    /// discovered BAI, validate internal cross-references, and cross-check
+    /// room references against the matching PSDL when one resolves.
+    Bai {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Restrict to one city stem (default: every `city/*.bai` plus
+        /// the expected `city/<name>.bai` for each stock city).
+        #[arg(long)]
+        city: Option<String>,
+        /// Exit nonzero when an expected city file is missing or fails to
+        /// parse, or when any parsed file reports validation issues.
+        #[arg(long)]
+        strict: bool,
+    },
     /// Versioned content inventory: expected/discovered/accepted/
     /// rejected/unverified counts per content family, fingerprinted by
     /// engine commit and resolved-path provenance.
@@ -245,6 +261,9 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             table.as_deref(),
             *strict,
         ),
+        Command::Bai { dir, city, strict } => {
+            bai(dir, cli.mods.as_deref(), city.as_deref(), *strict)
+        }
         Command::Inventory { dir, json, strict } => {
             inventory_cmd(dir, cli.mods.as_deref(), *json, *strict)
         }
@@ -353,6 +372,10 @@ fn scan(dir: &Path, mods: Option<&Path>, strict: bool) -> Result<(), Box<dyn std
                 Err(e) => stats.failures.push((logical.clone(), e.to_string())),
             },
             "inst" => match inst::parse(&bytes) {
+                Ok(_) => stats.parsed_ok += 1,
+                Err(e) => stats.failures.push((logical.clone(), e.to_string())),
+            },
+            "bai" => match Bai::parse(&bytes) {
                 Ok(_) => stats.parsed_ok += 1,
                 Err(e) => stats.failures.push((logical.clone(), e.to_string())),
             },
@@ -863,6 +886,146 @@ fn race_defs(
     }
     if strict && !failures.is_empty() {
         return Err(format!("strict race-defs audit: {} failures", failures.len()).into());
+    }
+    Ok(())
+}
+
+/// Ambient-navigation audit (F09-A): every discovered `city/*.bai` is
+/// parsed through `mm2_formats::bai`, internal cross-references are
+/// validated by `Bai::validate`, and — when a same-stem `city/<stem>.psdl`
+/// resolves — room references and the culling room count are checked
+/// against it. `city/<name>.bai` for each stock city is the expected
+/// denominator; other discovered files are audited extras whose parse
+/// failures are reported as `unsupported`, not hidden.
+fn bai(
+    dir: &Path,
+    mods: Option<&Path>,
+    city: Option<&str>,
+    strict: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let vfs = build_vfs(dir, mods)?;
+
+    let mut expected: Vec<String> = match city {
+        Some(c) => vec![format!("city/{}.bai", c.to_ascii_lowercase())],
+        None => mm2_content::EXPECTED_CITIES
+            .iter()
+            .map(|c| format!("city/{c}.bai"))
+            .collect(),
+    };
+    expected.sort();
+    let prefix = city.map(|c| format!("city/{}", c.to_ascii_lowercase()));
+    let mut extras: Vec<String> = vfs
+        .list()
+        .into_iter()
+        .filter(|p| {
+            p.starts_with("city/")
+                && p.ends_with(".bai")
+                && !expected.contains(p)
+                && prefix.as_ref().is_none_or(|pre| p.starts_with(pre))
+        })
+        .collect();
+    extras.sort();
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut issues_total = 0usize;
+    let mut parsed = 0usize;
+    let mut unsupported = 0usize;
+
+    println!("== ambient navigation (BAI) ==");
+    for logical in expected.iter().chain(extras.iter()) {
+        let is_expected = expected.contains(logical);
+        let tag = if is_expected { "expected" } else { "extra" };
+        let Some(res) = vfs.resolve(logical) else {
+            println!("  {logical:<22} {tag:<9} missing");
+            failures.push(format!("{logical}: expected file not found"));
+            continue;
+        };
+        let bytes = vfs.read(&res)?;
+        let bai = match Bai::parse(&bytes) {
+            Ok(b) => b,
+            Err(e) => {
+                if is_expected {
+                    println!("  {logical:<22} {tag:<9} failed: {e}");
+                    failures.push(format!("{logical}: {e}"));
+                } else {
+                    println!("  {logical:<22} {tag:<9} unsupported: {e}");
+                    unsupported += 1;
+                }
+                continue;
+            }
+        };
+        parsed += 1;
+        let issues = bai.validate();
+        issues_total += issues.len();
+        let cull_rooms = bai.culling.large.len();
+        println!(
+            "  {logical:<22} {tag:<9} ok — {} roads, {} intersections, culling {} rooms",
+            bai.roads.len(),
+            bai.intersections.len(),
+            cull_rooms,
+        );
+        for issue in &issues {
+            println!("    issue: {issue}");
+        }
+
+        // Cross-check room references when a same-stem PSDL resolves.
+        let stem = logical.trim_start_matches("city/").trim_end_matches(".bai");
+        let psdl_path = format!("city/{stem}.psdl");
+        match vfs.resolve(&psdl_path) {
+            Some(pres) => {
+                let pbytes = vfs.read(&pres)?;
+                match Psdl::parse(&pbytes) {
+                    Ok(psdl) => {
+                        let rooms = psdl.rooms.len();
+                        let mut bad = Vec::new();
+                        if cull_rooms != rooms + 1 {
+                            bad.push(format!(
+                                "culling covers {cull_rooms} rooms, psdl has {rooms} (+1)"
+                            ));
+                        }
+                        let road_oor = bai
+                            .roads
+                            .iter()
+                            .flat_map(|r| r.rooms.iter())
+                            .filter(|&&r| r == 0 || r as usize > rooms)
+                            .count();
+                        if road_oor > 0 {
+                            bad.push(format!("{road_oor} road room ref(s) out of range"));
+                        }
+                        let int_oor = bai
+                            .intersections
+                            .iter()
+                            .filter(|i| i.room == 0 || i.room as usize > rooms)
+                            .count();
+                        if int_oor > 0 {
+                            bad.push(format!("{int_oor} intersection room ref(s) out of range"));
+                        }
+                        if bad.is_empty() {
+                            println!("    rooms: all refs within {psdl_path} ({rooms} rooms)");
+                        } else {
+                            for b in &bad {
+                                println!("    issue: {b} (vs {psdl_path})");
+                                issues_total += 1;
+                            }
+                        }
+                    }
+                    Err(e) => println!("    note: {psdl_path} failed to parse: {e}"),
+                }
+            }
+            None => println!("    note: no {psdl_path} — room refs not cross-checked"),
+        }
+    }
+    println!(
+        "  {parsed} parsed ({}/{} expected), {unsupported} unsupported extras, {issues_total} issue(s)",
+        expected.iter().filter(|l| vfs.resolve(l).is_some()).count(),
+        expected.len(),
+    );
+    if strict && (issues_total > 0 || !failures.is_empty()) {
+        return Err(format!(
+            "strict bai audit: {} failures, {issues_total} issues",
+            failures.len()
+        )
+        .into());
     }
     Ok(())
 }

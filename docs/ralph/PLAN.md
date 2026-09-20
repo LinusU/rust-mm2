@@ -38,23 +38,16 @@
 
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
-**Next selected slice: F12-C reward leg, or F13-A (Checkpoint
-feature proper)** — the scripted-completion leg landed this
-iteration: `mm2_app::scripted` (`--bot`) steers the player vehicle at
-the live race objective through the production
-`VehicleInput`/session/race path, and a 64-run retail matrix covered
-every authored Blitz/Checkpoint/Circuit row in both cities. Honest
-outcome: 4 `outcome=finished` through finish→result (london blitz:0,
-checkpoint:0, circuit:0 incl. lap wraps, sf checkpoint:0), all 20
-Blitz events `race=Complete` (1 finished + 19 `timed-out`, one ledger
-result each — the deadline path exercised on real content), 41
-untimed checkpoint/circuit runs `Running` at the frame cap, 8 SF runs
-`status=fail` "fell through the world". The straight-line bot is an
-evidence driver, not route-aware AI — most retail courses still need
-pathfinding (F15 scope). Still owed on F12-C: reward-fact
-verification (AC05's "no duplicate rewards" leg has no reward
-emission to exercise yet — F16 scope). Independent ready alternates:
-F03-A (prop audit) or F09-A (BAI parser).
+**Next selected slice: F09-A.2 (`.aimap` parser), or F13-A
+(Checkpoint feature proper)** — F09-A.1 landed this iteration:
+`mm2_formats::bai` parses the `CAI1` ambient-navigation container
+(roads/sides/ends/intersections/per-room culling) with `validate()`
+cross-reference diagnostics, and `mm2-inspect bai` audits every
+discovered `city/*.bai` against the matching PSDL. Both stock cities
+parse byte-exact with clean validation. Still owed on F09-A: the
+`.aimap` INI-like per-event/city override parser (A.2). Independent
+ready alternates: F13-A (checkpoint rules; deps F02-B/F11-B are
+candidates, not yet checked) or F03-A (prop audit).
 
 ## Baseline gate results (this checkout, 2026-09-20)
 
@@ -85,6 +78,7 @@ F03-A (prop audit) or F09-A (BAI parser).
 || `mm2 --mm2-path <retail> --event blitz:10 --headless` | `status=fail` — "no authored event row for this reference"; `crash:0` → `status=fail` "crash course events are not loadable yet"; `bogus:0` → CLI usage error. Invalid refs fail explicitly |
 || `mm2 --mm2-path <retail> --city london --event blitz:6 --frames 700 --screenshot` | `status=pass`, 3.7 MB PNG (fresh path, local only) — car grounded on the elevated start deck (wheels 4/4), green nav needle, `cp 0/4`, `time 54.9s`; this event previously spawned over a void |
 | `mm2 --mm2-path <retail> --city {london,sf} --event {blitz,checkpoint,circuit}:<all> --headless --bot` | 64/64 authored rows ran the production race path under the scripted driver — 4 `outcome=finished` through finish→result (london blitz:0 `cp=3/3 tl=7.6s`, london checkpoint:0 `cp=5/5`, london circuit:0 `cp=6/6` incl. lap wraps, sf checkpoint:0 `cp=6/6`); 20/20 Blitz `race=Complete` (1 finished + 19 `timed-out`, one ledger result each); 41 untimed checkpoint/circuit runs `race=Running` at the frame cap; 8 SF `status=fail` "fell through the world" (incl. sf checkpoint:0, which recorded its finish first). Cruise `--bot` (no event) passes; london blitz:0 `--pro` finishes with `tl=0.6s` |
+| `mm2-inspect bai <retail>` | exit 0 — london.bai 540 roads/328 intersections (culling 1342 rooms) + sf.bai 379/214 (culling 1172) parse byte-exact, `validate()` clean, all room refs in range vs matching PSDL; extras london_bak/sf_bak clean, sfai.bai parses with 1 authored anomaly (intersection room ref 0), london_sup/sf_sup `unsupported` (CAI1 magic, different layout — reported, not hidden). `--strict` exits 2 (2 issues, all on the sfai dev-map extra) |
 
 ## Task table
 
@@ -119,7 +113,9 @@ F03-A (prop audit) or F09-A (BAI parser).
 | F08-A | queued | F01-B, F07-A | — |
 | F08-B | queued | F08-A | — |
 | F08-C | queued | F08-B | — |
-| F09-A | queued | F00-B, F01-A | `city/london.bai`, `city/sf.bai` (+ `_sup`/`_bak` variants, `sfai.bai`) present in install; no BAI parser in `mm2_formats`. |
+| F09-A | active | F00-B, F01-A | Split into A.1 (BAI parser + audit — implemented below) and A.2 (`.aimap` override parser). |
+| F09-A.1 | implemented | F00-B, F01-A | `mm2_formats::bai`: `CAI1` parser — roads (per-side lane/sidewalk/rail curves, rooms, half-width, base speed, flags, per-section frames), intersections (room, center, counterclockwise road refs), per-room large/small culling lists. Measured layout correction vs the R3 doc: the `[lanes+sidewalks][sections]` distance matrix precedes the per-curve edge distances (`docs/research/bai.md`). `Bai::validate()` reports `BaiIssue` diagnostics: duplicate ids, unknown flag/ambient/rule codes, dangling/mismatched end↔intersection back-refs, room-0 refs, dangling culling refs, <2 sections. `mm2-inspect bai <install> [--city] [--strict]`: expected = `city/{london,sf}.bai`, every other `city/*.bai` audited as an extra, room refs cross-checked against the same-stem PSDL. Retail: both expected files parse byte-exact, validate clean, rooms in range; `_bak` copies clean; `sfai.bai` parses with 1 authored anomaly (intersection room ref 0 — reported); `_sup` files share CAI1 magic but don't fit the layout → `unsupported` (not hidden). `--strict` exits 2 (2 issues, all on the sfai dev-map extra). `.bai` added to `scan` recognized formats — `_sup` files now appear as honest parse failures there. Candidate pending external check. |
+| F09-A.2 | queued | F00-B, F01-A | `.aimap` INI-like per-city/per-event overrides: `[Speed Limit]`, `[Exceptions]` (per-road density/speed), `[Police]`, `[Opponent]`, `[Ambient Types/Density]`, `[Ambients Drive On The Left]`, `[GoodWeatherPedName / BadWeatherPedName]` sections observed; full section vocabulary unmapped. |
 | F09-B | queued | F09-A | — |
 | F09-C | queued | F09-B | — |
 | F10-A | queued | F01-B, F02-A, F09-B | `va*` traffic vehicles exist in install; no ambient-traffic code. |
@@ -270,4 +266,5 @@ F03-A (prop audit) or F09-A (BAI parser).
   `lookup`, `tex`, `pkg`, `psdl`, `dump`, `cars`, `car` (`--paint`,
   `--json`), `handling` (`--strict`), `validate-cars` (`--all`,
   `--strict`), `inventory` (`--json`, `--strict`), `events` (`--city`,
-  `--strict`), `race-defs` (`--city`, `--table`, `--strict`).
+  `--strict`), `race-defs` (`--city`, `--table`, `--strict`),
+  `bai` (`--city`, `--strict`).

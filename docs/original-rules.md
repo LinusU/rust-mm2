@@ -251,8 +251,8 @@ Retail install: `/Users/linus/coding/rust-mm2/retail`, enumerated
 | UNK-8 | Pro-points scoring formula (inputs documented; weights unknown). |
 | UNK-9 | Police pursuit AI, sight model, spawn/de-spawn rules beyond "fixed spots" + "line of sight". |
 | UNK-10 | C&R gold spawn/hideout positions, scoring values, drop mechanics, respawn timing. |
-| UNK-11 | Opponent AI route choice/difficulty model; `.opp` record semantics (612 files, unparsed). |
-| UNK-12 | Traffic/pedestrian ambient models (lanes, lights, panic reactions); `.bai`/`.pathset` semantics unparsed. |
+| UNK-11 | Opponent AI route choice/difficulty model. `.opp` rows now parse (`mm2_formats::opp`, F11-A) but their column semantics and consumption rules remain unverified. |
+| UNK-12 | Traffic/pedestrian ambient models (lanes, lights, panic reactions); `.pathset` still unparsed. `.bai` structure now parses (`docs/research/bai.md`) — runtime semantics remain unverified. |
 | UNK-13 | Exact damage accumulation model and breakaway-part rules (DMG-3 documented only as a feature claim). |
 | UNK-14 | Crash Course pass/fail criteria per lesson (time? gates? stunts scored how?). |
 | UNK-15 | Whether pedestrians can be struck and what the consequence is. |
