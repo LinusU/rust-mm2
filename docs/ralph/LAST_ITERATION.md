@@ -1,118 +1,103 @@
 # Last implementation iteration
 
-- Task ID and title: F12-A — Blitz-specific authored rules bound into
-  the shared race runtime: authored `TimeLimit` → fixed ticks,
-  distilled event params, inclusive-deadline timeout enforcement,
-  authoritative `TimedOut` results, HUD/smoke remaining-time output.
+- Task ID and title: F12-B.1 — the RACE-6 objective navigation arrow:
+  contract targeting in `mm2_game` (nearest un-cleared gate, explicit
+  pick, armed finish, signed bearing), a session-owned UI needle in
+  `mm2_app` (green ahead / yellow behind), and X/Z target cycling.
 - Starting commit and resulting commit: started at
-  `8f8ae4a8c927c6666821707ef71f0ebd59217fb4` (clean tree, branch
-  `ralph/night`, F11-B.2 externally checked); result = this commit.
-- Why this slice: F11-B.2's review left the Blitz timer as the named
-  scope gap ("blitz time limit ... remain open by design on parent/
-  other tasks"). With the `CatalogEvent → RaceDefinition` producer
-  checked, the Blitz timer is the highest-value ready leg: every
-  authored Blitz row carries a per-difficulty `TimeLimit` the runtime
-  previously ignored entirely.
+  `6d1c163fb3c1453d666897715e8a654da1e17909` (clean tree, branch
+  `ralph/night`, F12-A externally checked); result = this commit.
+- Why this slice: F12-B is next per the reconciled plan ("Implement
+  timer/objectives/finish/failure with HUD/navigation feedback").
+  Timer/objectives/finish/failure already landed under F12-A; the
+  documented navigation instrument (RACE-6, HUD-2, CTL-1) was the
+  biggest remaining discrete leg. Split as F12-B.1 — warning cues and
+  results presentation stay open on the parent (see below).
 - Production code changed:
-  - `crates/mm2_game/src/race.rs`: `RaceDefinition` gained
-    `time_limit_ticks` + `params: EventParams`; `EventParams` distills
-    the authored parameter block (`SessionConditions`,
-    `Densities`, opponent/cop counts, car type) so the producer stops
-    dropping authored settings on the floor. `RaceState::time_remaining`
-    reports `limit − clock` saturating at 0 on the one authoritative
-    race clock; `validate()` rejects `Some(0)` (`RaceError::BadTimeLimit`).
-    `ParticipantState::TimedOut { race_ticks, result }` is the new
-    terminal state — the driver only advances `Racing` participants,
-    so a timed-out participant freezes like a finished one.
-  - `crates/mm2_game/src/result.rs`: `SessionOutcome::TimedOut {
-    race_ticks }` alongside `Finished`; the ledger now retains
-    `SessionResult` records (was: ids only) so the timeout outcome —
-    and the finish tick — are queryable (`get`, `iter`).
-  - `crates/mm2_content/src/race_def.rs`: the producer binds the
-    authored parameter block (`event.race_params(difficulty)`) into
-    `EventParams` with range validation — selectors 0–3, densities
-    0..=1, non-negative actor counts; out-of-range authored values
-    fail with `RaceBuildError::BadParam`, never clamp. Blitz rows
-    convert `TimeLimit` seconds → 120 Hz ticks; non-finite/
-    non-positive/unrepresentable values fail explicitly. Checkpoint/
-    Circuit rows stay untimed — their constant 50/40 `TimeLimit` is a
-    likely-unused template column (UNK-4).
-  - `crates/mm2_app/src/race.rs`: `advance_race` enforces the deadline
-    while `Playing` — participant segments evaluate first, then any
-    unresolved participant (Racing *or* unreleased AwaitingStart) with
-    `clock >= limit` mints exactly one `TimedOut` result into the
-    ledger. Finish-on-the-expiry-tick wins (DSN-7: inclusive boundary).
-    `Complete` still requires every participant terminal.
-  - `crates/mm2_app/src/main.rs`: HUD shows `m:ss` remaining while a
-    timed race runs (same `RaceState` clock — AC04), `OUT OF TIME` on
-    a timeout-completed race, elapsed time for untimed races.
-  - `crates/mm2_app/src/smoke.rs`: headless smoke records carry
-    `tl=<remaining>s` and `outcome=<name>` from the retained ledger.
+  - `crates/mm2_game/src/race.rs`: `NavTarget` (`Gate(i)`/`Finish`),
+    `TargetSelection` component (`picked`), `navigation_target`
+    (nearest un-cleared gate by XZ distance; a valid pick wins until
+    its gate clears then falls back; all gates cleared → the armed
+    finish; `Ordered` → `None` per HUD-2's instrument list),
+    `cycle_target` (authored-order walk, wraps both ways, skips
+    cleared gates, empty remaining → `None`), `relative_bearing`
+    (signed driver-frame angle, `+` = right, ground-plane,
+    coincident → 0), `RaceProgress::remaining`.
+  - `crates/mm2_app/src/race.rs`: `NavArrow`/`NavArrowPart` markers,
+    `spawn_nav_arrow` (UI needle 6×34 px at screen top-center +
+    diamond child at the tip — node-drawn because the embedded font
+    is ASCII-only, DSN-8), `nav_target_input` (X forward / Z back —
+    the original's X/S conflicts with WASD brake, DSN-8), and
+    `update_nav_arrow` (rotation = bearing, `NAV_AHEAD`/`NAV_BEHIND`,
+    hidden with no live target: no/stale/complete race, `Ordered`
+    definition, resolved participant).
+  - `crates/mm2_app/src/session.rs`: the player vehicle gets
+    `TargetSelection` with its `RaceProgress`; the needle spawns in
+    the event branch so non-event sessions carry no dead UI.
+  - `crates/mm2_app/src/main.rs`: `nav_target_input` (frozen during
+    `--frames` captures like all input) and `update_nav_arrow`
+    registered in `Update`.
+  - `README.md`: X/Z rows in the controls table.
+  - `docs/original-rules.md`: `DSN-8` records the needle-vs-bitmap
+    presentation, the `Ordered` no-arrow decision, the
+    finish-targeting inference and the X/S → X/Z key departure.
 - Tests added/changed and why:
-  - `crates/mm2_content/tests/race_def.rs` (+3): authored Blitz binds
-    per-difficulty limits (25 s → 3000 ticks amateur / 18 s → 2160 pro)
-    plus conditions/densities/car type; Checkpoint/Circuit rows stay
-    untimed; bad selectors/densities/actor counts/limits fail with
-    `BadParam` naming the field.
-  - `crates/mm2_game/tests/race.rs` (+1): `time_remaining` counts down
-    and saturates; `validate` rejects a zero limit.
-  - `crates/mm2_app/tests/race.rs` (+3, 18 total): timeout records one
-    `TimedOut` result and completes without refiring; a finish on the
-    exact expiry tick counts (inclusive boundary); an unreleased
-    `AwaitingStart` participant can't hold the race open past the
-    deadline; pause already freezes the clock (existing test) so no
-    deadline accrues while paused.
-  - `crates/mm2_app/tests/event.rs` (+1): end-to-end authored Blitz
-    fixture — `mmblitzdata.csv` 0.5 s limit → `time_limit_ticks=60`,
-    params on the definition, `Ready → Countdown → Playing`, race
-    expires into `TimedOut { race_ticks: 60 }` through the real
-    `advance_race`.
+  - `crates/mm2_game/tests/race.rs` (+6, 18 total): nearest-default,
+    pick-wins/fallback/out-of-range, armed-finish targeting +
+    position, `Ordered` → no arrow, cycling walk/wrap/skip-cleared/
+    empty→None, bearing sign conventions incl. height-independence
+    and the coincident case.
+  - `crates/mm2_app/tests/race.rs` (+5, 23 total): the needle tracks
+    the live objective through `Position` writes (visible/rotation≈0/
+    green ahead → swept-gate retarget → yellow/behind), X/Z cycling
+    through real `ButtonInput` (edge-triggered — a held key does not
+    re-cycle; `Complete` ignores input), live during countdown,
+    `Ordered` stays hidden, finish arming → resolved → teardown
+    despawns the session-owned needle. Harness now spawns the arrow
+    via the production `spawn_nav_arrow` and stamps participants
+    with `TargetSelection` like the real session does.
 - Commands actually run and results (this machine, macOS arm64):
-  - `cargo test -p mm2_game -p mm2_content -p mm2_app` — all groups ok
-    (incl. 10 race_def, 18 race, 8 event tests).
-  - Retail `--event blitz:0 --city london --headless` — `status=pass`,
-    `cp=1/3 tl=18.0s` (25 s amateur limit − ~7 s raced).
-  - Retail `--event blitz:0 --city sf --headless` — `status=pass`,
-    `cp=1/4 tl=23.0s` (30 s amateur limit).
-  - Retail `--event blitz:0 --frames 2200 --headless` — `status=pass`,
-    `race=Complete cp=3/3 results=1 tl=0.0s outcome=timed-out`: the bot
-    cleared all three authored gates but never crossed the finish
-    trigger inside the authored 25 s, so the deadline expired it —
-    the inclusive-boundary/finish-arms-after-gates semantics on real
-    data.
+  - `cargo test -p mm2_game -p mm2_app` — all groups ok (incl. 18
+    race contract + 23 app race tests).
   - `cargo fmt --all -- --check` — PASS.
-  - `cargo clippy --workspace --all-targets --all-features --
-    -D warnings` — PASS.
-  - `cargo test --workspace` — PASS, all groups, 0 failures.
+  - `cargo clippy --locked --workspace --all-targets --all-features
+    -- -D warnings` — PASS (one `type_complexity` hit refactored into
+    the `NavArrowPart` marker rather than allowed).
+  - `cargo test --locked --workspace` — PASS, all groups, 0 failures.
+  - Retail `--city london --event blitz:0 --headless` —
+    `status=pass`, `cp=1/3 tl=18.0s` (arrow systems live, timer
+    unchanged).
+  - Retail `--city london --event blitz:0 --frames 100 --screenshot`
+    — `status=pass`, 4.3 MB PNG: needle + diamond visible top-center
+    during `GET READY`, green, tilted slightly right toward the gate.
+  - Retail `--city london --event blitz:0 --frames 700 --screenshot`
+    — `status=pass`: needle green ahead tracking the gate while
+    `time 20.6s` counts down (`cp 0/3` — capture input is frozen, so
+    the car idles; expected).
 - Acceptance IDs satisfied / still open:
-  - F12-AC01 partial: Blitz events bind their authored limit +
-    conditions/densities/actor counts at load (structural coverage of
-    the full 40-row Blitz roster not yet exercised — the catalog
-    already resolves all of them ready, but per-row limit binding is
-    only sampled, not matrixed).
-  - F12-AC03 satisfied at candidate level: timeout and
-    finish-on-boundary are deterministic, tested both ways.
-  - F12-AC04 partial: timer/countdown/results all run on `race.clock`;
-    HUD text uses the same clock — but no audio cues exist (no audio
-    system at all), and the objective/navigation HUD (RACE-6 compass)
-    is F12-B/F22.
-  - F12-AC02/AC05/AC06 open: invalid/repeated objectives and restart
-    dedup were already covered under F11-B but Blitz-specific restart/
-    reward flow isn't separately exercised; full-roster playthrough
-    matrix and both-cities rendered evidence are owed by F12-C.
-  - UNK-4 stays open: seconds is the bound unit by strong inference
-    (course length vs MM2 speeds), documented provisional in DSN-7.
-- Stock data/GPU/audio/network limitations: retail headless runs
-  exercised the real VFS/authored data; no GPU screenshot this
-  iteration (timer is HUD text — the windowed capture path is
-  unchanged); audio/network nonexistent by design so far.
-- Unresolved blockers or discovered regressions: none. The timeout
-  smoke shows the scripted driver clears all gates then wanders — the
-  finish trigger still requires an actual crossing (RACE-7 semantics
-  hold on real data).
-- Next smallest useful action: F12-B (timer/objective/navigation HUD,
-  warning cues, Blitz restart flow through the shared runtime) or
-  F11-C; independent ready alternates: F03-A (prop audit), F09-A
-  (BAI parser).
+  - F12-AC04 advances: the needle is presentation on the same
+    authoritative progress/clock — verified deterministic via
+    `Position`-driven segments. Still partial (no audio exists).
+  - F12-AC02 leg: cleared-pick fallback + `Complete` input gate mean
+    a stale pick cannot aim at a resolved objective — candidate
+    level.
+  - F12-AC05 leg: the needle and `TargetSelection` are
+    session-owned — teardown test proves despawn; no stale pick
+    survives a restart. Rewards still don't exist (no reward system),
+    so "no duplicate rewards" stays vacuous until F16.
+  - F12-AC01/AC03/AC06 unchanged from F12-A's status.
+- Stock data/GPU/audio/network limitations: rendered evidence covers
+  the ahead/green needle only — the yellow-behind state and X/Z
+  cycling are exercised by tests, not rendered (a behind-target frame
+  needs input the frozen capture can't supply). No audio system
+  exists, so warning cues can only ever be visual; whether the
+  original even has a low-time cue is undocumented — a designed-only
+  decision is owed, not implemented.
+- Unresolved blockers or discovered regressions: none.
+- Next smallest useful action: F12-B remainder — decide the low-time
+  warning cue (designed policy; no documented original rule) or close
+  F12-B if presentation is deferred to F17; then F12-C catalog
+  playthrough matrix. Independent ready alternates: F03-A (prop
+  audit), F09-A (BAI parser).
 
 This is a candidate handoff. External code-gate and separate review results live in the runner state directory and are not implied by this report.

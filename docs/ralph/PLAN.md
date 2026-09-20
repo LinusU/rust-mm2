@@ -38,20 +38,22 @@
 
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
-**Next selected slice: F12-A is now a candidate** — authored Blitz
-rules bind into the shared race runtime: per-difficulty `TimeLimit`
-seconds → 120 Hz ticks (provisional unit, UNK-4/DSN-7), validated
-`EventParams` on every `RaceDefinition`, inclusive-deadline timeout
-enforcement with exactly one authoritative `TimedOut` result per
-participant, retained `SessionResult` records, HUD `m:ss`/`OUT OF
-TIME`, smoke `tl=`/`outcome=`. Retail evidence: London `blitz:0`
-expires `timed-out` after the bot clears all gates without crossing
-the finish (RACE-7 holds on real data); SF `blitz:0` reports the
-authored 30 s limit ticking down. Open on F12: full-roster binding
-matrix, objective/navigation HUD + warning cues (F12-B), both-cities
-rendered playthrough matrix (F12-C), stronger TimeLimit-unit evidence
-(UNK-4). F11-B.2 is externally checked. Independent ready alternates:
-F03-A (prop audit) or F09-A (BAI parser).
+**Next selected slice: F12-B.1 is now a candidate** — the RACE-6
+objective navigation arrow. `mm2_game::race` gained the contract:
+`navigation_target` (nearest un-cleared gate, explicit pick, armed
+finish once all gates clear, `Ordered` → none per HUD-2),
+`cycle_target` (authored-order wrap, skips cleared), `relative_bearing`
+(signed driver-frame angle) and the `TargetSelection` component.
+`mm2_app` draws a session-owned UI needle + diamond tip (ASCII-only
+font → node-drawn, DSN-8), rotates it to the bearing, green ahead /
+yellow behind, cycles on X/Z (S is brake — CTL-1 input departure,
+DSN-8). Retail evidence: London `blitz:0` headless pass and two
+rendered captures (countdown + driving) show the needle tracking the
+gate. Open on F12-B: low-time warning cue (no documented original
+rule — designed-only decision owed), finish/fail presentation beyond
+HUD text (results screen is F17/UI-5), Blitz restart-dedup exercise.
+F12-A is externally checked. Independent ready alternates: F03-A
+(prop audit) or F09-A (BAI parser).
 
 ## Baseline gate results (this checkout, 2026-09-20)
 
@@ -59,7 +61,7 @@ F03-A (prop audit) or F09-A (BAI parser).
 |---|---|
 | `cargo fmt --all -- --check` | PASS |
 | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | PASS |
-| `cargo test --locked --workspace` | PASS — 25 test result groups, 0 failures (incl. 11 F11-B.1 contract tests, 15 F11-B.1 production-path race tests, 15 mm2_vehicle drive tests, 13 F01-A session tests, 9 F01-B contract units) |
+| `cargo test --locked --workspace` | PASS — all groups, 0 failures (incl. 18 mm2_game race contract tests, 23 mm2_app production-path race tests, 15 mm2_vehicle drive tests, 13 F01-A session tests) |
 | `mm2-inspect cars <retail>` | 29 catalog entries; all 21 `EXPECTED_STOCK_ROSTER` cars `ready`; 8 extra ids kept with explicit incompleteness reasons |
 | `mm2-inspect list <retail>` | 13,389 logical paths; families: texture 3977, aud 3293, geometry 1867, tune 1356, race 1080, bound 1034, city 247, anim 95 |
 | `mm2-inspect inventory <retail>` | 12 families: cities 2/5 exp/disc all parsed; vehicles 21/21 ready + 8 rejected; races 80 exp, 78 accepted, 2 partial (circuit11), 31 extras; lessons 42/42; placement 13 inst parsed; audio 7/7 families (3293 files unverified); peds 4/4 + wolf partial; MP/breakables/traffic/profile/interface discovered-only. Event-metadata tables parse: 12/10/10/13 checkpoint/blitz/circuit/crash rows per city. `--strict` exits 2 (33 findings) — honest: partial/junk records exist on retail. |
@@ -74,6 +76,7 @@ F03-A (prop audit) or F09-A (BAI parser).
 || `mm2 --mm2-path <retail> --city london --event checkpoint:0 --headless` | `status=pass` — `Checkpoint[0] gates=5`, `cp=2/5` swept while driving straight |
 || `mm2 --mm2-path <retail> --event checkpoint:12 --headless` | `status=fail`, exit 3 — out-of-range event is an explicit `Failed` session, not a panic |
 || `mm2 --mm2-path <retail> --event blitz:0 --frames 90 --screenshot` | `status=pass`, 4.3 MB PNG — authored gate column visible ahead of the spawned car, HUD shows `GET READY` countdown |
+|| `mm2 --mm2-path <retail> --city london --event blitz:0 --frames 100/700 --screenshot` | `status=pass`, ~4.3 MB PNGs — the RACE-6 nav needle renders top-center, green ahead, tilted toward the nearest gate during countdown and while driving (local captures, not committed) |
 
 ## Task table
 
@@ -119,8 +122,9 @@ F03-A (prop audit) or F09-A (BAI parser).
 | F11-B.1 | implemented | F11-A | `mm2_game::race`: `Checkpoint` swept cylinder test (XZ radius + ±height band + opt-in direction flag), `CheckpointRule` (`AnyOrder` documented BLZ-1/CHK-1 / `Ordered` documented CIR-1 — carried on the definition, not imposed), `RaceDefinition` (checkpoints/finish/start slots/laps/countdown + `validate`), `RaceState` (generation-stamped countdown→running→complete, `input_locked`, `is_stale`), `RaceProgress` (per-checkpoint cleared flags, ordered `next`/lap wrap, `break_segment` for teleport/reset, one segment consumes every checkpoint it crosses), `RaceStarted` message, `SessionOutcome::Finished{race_ticks}` on `SessionResult`. `mm2_app::race::advance_race` in `FixedLast` (post-solver `Position` segments): countdown→one `RaceStarted`+`Countdown→Playing`, clock+advance while `Playing`, `Finished` → mint+record `SessionResult` once into `ResultLedger`, all-finished → `Complete`; authority-gated (Remote never steps). Teardown: `drive_session` removes `RaceState`; `vehicle_input` honours `input_locked` (stale-gated); `Countdown` quittable/restartable. First candidate failed review on a real defect — `break_segment` had no production caller, so an R-key `ResetVehicle` teleport swept (and could finish) every checkpoint between the two poses; repaired with `mm2_vehicle::Teleported` stamped by `vehicle_reset` atomically with the `Position` write (chosen over draining `ResetVehicle` in the race system, which has message-lifetime and Update-ordering holes) plus `reanchor_teleported_participants` chained before `advance_race`; regression tests `vehicle_reset_breaks_the_swept_segment` + `reset_while_paused_cannot_sweep_checkpoints` fail on the old wiring. Tests: 11 contract + 15 production-path (AC02 high-speed/wrong-height/repeated/teleport + reset-via-message + paused-reset, AC03 countdown-once/pause-freeze/restart-removes-timer, AC04 once-only results with provenance, ties, remote-authority no-op, quit during countdown). Candidate pending external re-check. |
 | F11-B.2 | implemented | F11-B.1 | `RecordContent` retains parsed payloads (`Waypoints`/`StartPoints`/`Opp`/`CrashData`). `mm2_content::race_def::race_definition` builds a `RaceDefinition` from a resolved `CatalogEvent`: Blitz/Checkpoint → `AnyOrder` (row 0 = start line, last row = finish trigger), Circuit → `Ordered` (rows 1.. + lifted line copy closes the lap, authored `NumLaps`); authored `w` radii; authored `_strtpnts` grids or a derived tangent start; Crash Course rejected explicitly. Catalog attributes SF's `cir<N>_strtpnts` siblings to `circuit<N>` (inferred alias, WPT-3). `load_session_world` event mode: catalog resolve → `Ready → Countdown`, spawn on the authored/derived slot, `RaceState`/`RaceProgress`/`ResultLedger` inserted (the ledger was unregistered — latent panic once any race ran), session-owned orange/green checkpoint/finish markers + `update_checkpoint_markers` (cleared gates hidden, finish revealed after all gates). `--event <table>:<index>` CLI; `headless_smoke` rewired onto the real session systems so `--event --headless` is production-path evidence. Retail: London `Blitz[0]` 3/3 gates swept (`race=Running` — finish not crossed in-window), SF `Circuit[1]` authored-grid spawn, `checkpoint:12` → clean `Failed` exit 3; screenshot shows gate column + `GET READY` countdown. 7 producer + 7 app event tests incl. a full synthetic course finish → one ledger result. AC05 event-prop/traffic scoping deferred (no such systems exist to scope yet). Candidate pending external check. |
 | F11-C | queued | F11-B | — |
-| F12-A | implemented | F02-B, F11-B | Authored Blitz `TimeLimit` binds per difficulty → 120 Hz ticks (seconds, provisional UNK-4); distilled `EventParams` (conditions/densities/actor counts) validated at build — out-of-range authored values are explicit `BadParam` errors. `advance_race` enforces an inclusive deadline (finish on the expiry tick counts, DSN-7), mints exactly one `TimedOut` result per unresolved participant into the retained ledger; `SessionOutcome::TimedOut` added. HUD shows `m:ss` remaining / `OUT OF TIME`; smoke records `tl=`/`outcome=`. Retail: london blitz:0 `cp=3/3 → timed-out` (bot cleared all gates, never crossed the finish — RACE-7 holds), sf blitz:0 `tl=23.0s` running. Tests: +3 producer, +1 contract, +3 race-driver, +1 end-to-end authored-limit expiry. AC03 candidate-level; AC01/02/04–06 partially open (full-roster matrix, objective/nav HUD, warning cues → F12-B/C). Candidate pending external check. |
-| F12-B | queued | F12-A | — |
+| F12-A | checked | F02-B, F11-B | Authored Blitz `TimeLimit` binds per difficulty → 120 Hz ticks (seconds, provisional UNK-4); distilled `EventParams` (conditions/densities/actor counts) validated at build — out-of-range authored values are explicit `BadParam` errors. `advance_race` enforces an inclusive deadline (finish on the expiry tick counts, DSN-7), mints exactly one `TimedOut` result per unresolved participant into the retained ledger; `SessionOutcome::TimedOut` added. HUD shows `m:ss` remaining / `OUT OF TIME`; smoke records `tl=`/`outcome=`. Retail: london blitz:0 `cp=3/3 → timed-out` (bot cleared all gates, never crossed the finish — RACE-7 holds), sf blitz:0 `tl=23.0s` running. Externally checked (review pass, iteration 015 feedback) — AC03 candidate-level; AC01/02/04–06 partially open per review gaps (full-roster matrix, objective/nav HUD, warning cues → F12-B/C). |
+| F12-B | active | F12-A | Split: B.1 = navigation arrow (implemented below). Still owed: low-time warning cue (no documented original rule — designed-only decision), finish/fail presentation beyond HUD text (results screen = F17/UI-5). |
+| F12-B.1 | implemented | F12-A | RACE-6 navigation arrow. `mm2_game::race`: `navigation_target` (nearest un-cleared gate XZ, explicit `picked` wins until cleared then falls back, armed `Finish` once all gates clear, `Ordered` → `None` per HUD-2), `cycle_target` (authored-order walk, wraps, skips cleared, empty → clears pick), `relative_bearing` (signed driver-frame angle, `+` = right, ground-plane only), `TargetSelection` component, `RaceProgress::remaining`. `mm2_app::race`: session-owned `NavArrow`/`NavArrowPart` UI needle + diamond tip (node-drawn — embedded font is ASCII-only, DSN-8), `spawn_nav_arrow`, `nav_target_input` (X/Z cycle — original X/S blocked by WASD brake, DSN-8), `update_nav_arrow` (rotation = bearing, green ahead / yellow behind, hidden without a live target). Tests: +6 contract, +5 production-path (bearing/color/visibility through `Position` writes, X/Z cycling incl. edge-trigger + Complete gate, finish arming, teardown despawn). Retail: london `blitz:0` headless `status=pass` (tl ticking); windowed captures at frames 100 (countdown) + 700 (driving) show the needle green ahead tracking the gate. Yellow-behind leg covered by tests, not rendered. Candidate pending external check. |
 | F12-C | queued | F12-B | — |
 | F13-A | queued | F02-B, F11-B | London race0–13, SF race0–11 (+r0) authored data present. |
 | F13-B | queued | F13-A | — |

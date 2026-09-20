@@ -300,3 +300,160 @@ fn definition_validation_rejects_unusable_shapes() {
     instant.time_limit_ticks = Some(0);
     assert_eq!(instant.validate(), Err(RaceError::BadTimeLimit));
 }
+
+/// RACE-6: with no pick the arrow tracks the nearest un-cleared gate —
+/// XZ distance, not the lowest index.
+#[test]
+fn arrow_defaults_to_nearest_uncleared_gate() {
+    let def = any_order(
+        vec![
+            checkpoint(0.0, 100.0),
+            checkpoint(300.0, 0.0),
+            checkpoint(0.0, -60.0),
+        ],
+        Some(checkpoint(0.0, 0.0)),
+    );
+    let p = RaceProgress::new(&def);
+    assert_eq!(
+        navigation_target(&def, &p, None, Vec3::ZERO),
+        Some(NavTarget::Gate(2)),
+        "gate 2 at (0,-60) is nearer than gate 0 at (0,100)"
+    );
+}
+
+/// RACE-6: an explicit pick wins over the nearest gate; once that gate
+/// is cleared the arrow falls back to the nearest remaining one.
+#[test]
+fn arrow_pick_wins_until_its_gate_is_cleared() {
+    let def = any_order(
+        vec![
+            checkpoint(0.0, 0.0),
+            checkpoint(100.0, 0.0),
+            checkpoint(200.0, 0.0),
+        ],
+        None,
+    );
+    let mut p = RaceProgress::new(&def);
+    p.state = ParticipantState::Racing;
+    let at = Vec3::new(-50.0, 0.0, 0.0);
+    // Gate 0 is nearest but the pick aims at gate 2.
+    assert_eq!(
+        navigation_target(&def, &p, Some(2), at),
+        Some(NavTarget::Gate(2))
+    );
+    // Clear the picked gate — the arrow must not keep aiming at it.
+    p.advance(&def, Vec3::new(199.0, 0.0, -10.0));
+    p.advance(&def, Vec3::new(199.0, 0.0, 10.0));
+    assert!(p.is_cleared(2));
+    assert_eq!(
+        navigation_target(&def, &p, Some(2), at),
+        Some(NavTarget::Gate(0)),
+        "a cleared pick falls back to the nearest remaining gate"
+    );
+    // An out-of-range pick never aims at anything invalid either.
+    assert_eq!(
+        navigation_target(&def, &p, Some(9), at),
+        Some(NavTarget::Gate(0))
+    );
+}
+
+/// RACE-6 (inferred leg): once every gate is cleared the armed finish
+/// is the remaining objective — the arrow points at it while the
+/// definition has a finish trigger.
+#[test]
+fn arrow_tracks_the_armed_finish() {
+    let finish = checkpoint(500.0, 0.0);
+    let def = any_order(vec![checkpoint(0.0, 0.0)], Some(finish));
+    let mut p = RaceProgress::new(&def);
+    p.state = ParticipantState::Racing;
+    p.advance(&def, Vec3::new(-10.0, 0.0, 0.0));
+    p.advance(&def, Vec3::new(10.0, 0.0, 0.0));
+    assert!(p.is_cleared(0));
+    let at = Vec3::new(300.0, 0.0, 0.0);
+    assert_eq!(
+        navigation_target(&def, &p, None, at),
+        Some(NavTarget::Finish)
+    );
+    assert_eq!(
+        NavTarget::Finish.position(&def),
+        Some(Vec3::new(500.0, 0.0, 0.0)),
+        "the finish target resolves to the trigger's position"
+    );
+    // Without a finish trigger there is nothing left to aim at.
+    let no_finish = any_order(vec![checkpoint(0.0, 0.0)], None);
+    let mut q = RaceProgress::new(&no_finish);
+    q.state = ParticipantState::Racing;
+    q.advance(&no_finish, Vec3::new(-10.0, 0.0, 0.0));
+    q.advance(&no_finish, Vec3::new(10.0, 0.0, 0.0));
+    assert_eq!(navigation_target(&no_finish, &q, None, at), None);
+}
+
+/// HUD-2 scopes the compass arrow to Blitz/Checkpoint — an `Ordered`
+/// (Circuit) definition reports no target.
+#[test]
+fn ordered_definitions_have_no_arrow() {
+    let def = ordered(vec![checkpoint(0.0, 0.0), checkpoint(100.0, 0.0)], 2);
+    let p = RaceProgress::new(&def);
+    assert_eq!(navigation_target(&def, &p, None, Vec3::ZERO), None);
+}
+
+/// RACE-6: cycling walks the remaining gates in authored order,
+/// wrapping at both ends and skipping cleared gates.
+#[test]
+fn cycling_walks_remaining_gates_and_wraps() {
+    let def = any_order(
+        vec![
+            checkpoint(0.0, 0.0),
+            checkpoint(100.0, 0.0),
+            checkpoint(200.0, 0.0),
+        ],
+        None,
+    );
+    let mut p = RaceProgress::new(&def);
+    p.state = ParticipantState::Racing;
+    let at = Vec3::new(-50.0, 0.0, 0.0);
+    // No pick yet: the first step moves off the nearest gate (0).
+    let mut pick = cycle_target(&def, &p, None, at, 1);
+    assert_eq!(pick, Some(1));
+    pick = cycle_target(&def, &p, pick, at, 1);
+    assert_eq!(pick, Some(2));
+    pick = cycle_target(&def, &p, pick, at, 1);
+    assert_eq!(pick, Some(0), "forward cycling wraps");
+    pick = cycle_target(&def, &p, pick, at, -1);
+    assert_eq!(pick, Some(2), "backward cycling wraps the other way");
+
+    // A cleared gate is skipped in both directions.
+    p.advance(&def, Vec3::new(99.0, 0.0, -10.0));
+    p.advance(&def, Vec3::new(99.0, 0.0, 10.0));
+    assert!(p.is_cleared(1));
+    assert_eq!(cycle_target(&def, &p, Some(0), at, 1), Some(2));
+    assert_eq!(cycle_target(&def, &p, Some(0), at, -1), Some(2));
+
+    // Nothing left to aim at clears the pick.
+    p.advance(&def, Vec3::new(-10.0, 0.0, 0.0));
+    p.advance(&def, Vec3::new(10.0, 0.0, 0.0));
+    p.advance(&def, Vec3::new(199.0, 0.0, -10.0));
+    p.advance(&def, Vec3::new(199.0, 0.0, 10.0));
+    assert_eq!(cycle_target(&def, &p, Some(0), at, 1), None);
+}
+
+/// The bearing is signed on the driver's frame: `+` right, `−` left,
+/// `±π` behind — on the `Quat::from_rotation_y` yaw convention
+/// (forward = −Z at yaw 0).
+#[test]
+fn relative_bearing_is_signed_on_the_driver_frame() {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let at = Vec3::ZERO;
+    // Facing −Z (yaw 0): +X dead right, −X dead left.
+    assert!((relative_bearing(0.0, at, Vec3::new(10.0, 0.0, 0.0)) - FRAC_PI_2).abs() < 1e-4);
+    assert!((relative_bearing(0.0, at, Vec3::new(-10.0, 0.0, 0.0)) + FRAC_PI_2).abs() < 1e-4);
+    // Ahead ≈ 0, behind ≈ ±π.
+    assert!(relative_bearing(0.0, at, Vec3::new(0.0, 0.0, -10.0)).abs() < 1e-4);
+    assert!((relative_bearing(0.0, at, Vec3::new(0.0, 0.0, 10.0)) - PI).abs() < 1e-4);
+    // Rotated 90° (facing −X): a −Z target is dead right now.
+    assert!((relative_bearing(FRAC_PI_2, at, Vec3::new(0.0, 0.0, -10.0)) - FRAC_PI_2).abs() < 1e-4);
+    // Height does not rotate the needle — bearing is ground-plane.
+    assert!(relative_bearing(0.0, at, Vec3::new(0.0, 50.0, -10.0)).abs() < 1e-4);
+    // A coincident target reports 0, never NaN.
+    assert_eq!(relative_bearing(0.0, at, at), 0.0);
+}

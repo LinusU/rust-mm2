@@ -487,6 +487,7 @@ fn main() {
             )
                 .chain(),
             input::vehicle_input.run_if(not(capturing)),
+            race::nav_target_input.run_if(not(capturing)),
             camera::toggle_camera.run_if(not(capturing)),
             camera::chase_follow,
             camera::free_fly.run_if(not(capturing)),
@@ -500,6 +501,7 @@ fn main() {
             car_visual::trailer_input,
             city::animate_textures,
             race::update_checkpoint_markers,
+            race::update_nav_arrow,
             update_hud,
         ),
     );

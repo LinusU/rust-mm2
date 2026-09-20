@@ -8,13 +8,16 @@ use std::time::Duration;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
-use mm2_app::race::{advance_race, reanchor_teleported_participants};
+use mm2_app::race::{
+    NAV_AHEAD, NAV_BEHIND, NavArrow, advance_race, nav_target_input,
+    reanchor_teleported_participants, spawn_nav_arrow, update_nav_arrow,
+};
 use mm2_app::session::{self, SessionControl};
 use mm2_game::{
     Checkpoint, CheckpointRule, EventRef, EventTableKind, ParticipantState, Player, PlayerControl,
     PlayerId, ProgressOutcome, RaceDefinition, RacePhase, RaceProgress, RaceStart, RaceStarted,
     RaceState, ResultLedger, Session, SessionAuthority, SessionConfig, SessionEntity, SessionMode,
-    SessionOutcome, SessionPhase, advance_session_tick, despawn_session_entities,
+    SessionOutcome, SessionPhase, TargetSelection, advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::{ResetVehicle, Teleported, Vehicle, VehicleConfig, VehicleState};
 
@@ -103,13 +106,20 @@ fn race_app(config: SessionConfig, def: RaceDefinition) -> App {
             (
                 mm2_vehicle::systems::vehicle_reset,
                 session::session_control_input,
+                nav_target_input,
+                update_nav_arrow,
                 (
                     despawn_session_entities.run_if(session::unloading),
                     session::drive_session,
                 )
                     .chain(),
             ),
-        );
+        )
+        // The production spawn path stamps the needle with the owning
+        // session generation — do the same so teardown tests exercise it.
+        .add_systems(Startup, |mut commands: Commands, session: Res<Session>| {
+            spawn_nav_arrow(&mut commands, SessionEntity(session.generation()));
+        });
     app.finish();
     app.cleanup();
     app
@@ -150,6 +160,7 @@ fn spawn_participant(app: &mut App, def: &RaceDefinition, pos: Vec3) -> (Entity,
                 control: PlayerControl::Local,
             },
             RaceProgress::new(def),
+            TargetSelection::default(),
             Vehicle {
                 config: cfg.clone(),
             },
@@ -704,4 +715,208 @@ fn timeout_resolves_an_unreleased_participant() {
     );
     assert_eq!(app.world().resource::<ResultLedger>().len(), 2);
     assert_eq!(race(&app).phase, RacePhase::Complete);
+}
+
+/// The one session-owned needle, read back as
+/// `(rotation, visibility, color)`.
+fn arrow(app: &mut App) -> (Rot2, Visibility, Color) {
+    let entity = {
+        let world = app.world_mut();
+        world
+            .query_filtered::<Entity, With<NavArrow>>()
+            .iter(world)
+            .next()
+            .expect("the harness spawns the nav arrow")
+    };
+    (
+        app.world().get::<UiTransform>(entity).unwrap().rotation,
+        *app.world().get::<Visibility>(entity).unwrap(),
+        app.world().get::<BackgroundColor>(entity).unwrap().0,
+    )
+}
+
+/// Simulate one key press through `ButtonInput` the way winit would
+/// deliver it; `clear` after the consuming update ends the press the
+/// way the input plugin would (MinimalPlugins installs none).
+fn press(app: &mut App, key: KeyCode) {
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(key);
+}
+
+fn end_press(app: &mut App, key: KeyCode) {
+    let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+    keys.release(key);
+    keys.clear();
+}
+
+/// RACE-6 through the production systems: the needle tracks the
+/// nearest un-cleared gate, rotates to the signed bearing, and turns
+/// yellow when the target is behind the car.
+#[test]
+fn arrow_tracks_the_live_objective() {
+    // Gates on the Z axis: gate 0 dead ahead (−Z), gate 1 behind.
+    let def = RaceDefinition {
+        checkpoints: vec![cp(0.0, -100.0), cp(0.0, 100.0)],
+        ..any_order_def(0)
+    };
+    let mut app = race_app(event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(0.0, 0.0, 0.0));
+    run(&mut app, 3);
+
+    let (rot, vis, color) = arrow(&mut app);
+    assert_eq!(vis, Visibility::Visible);
+    assert!(
+        rot.as_radians().abs() < 1e-3,
+        "gate 0 is dead ahead — needle up: {}",
+        rot.as_radians()
+    );
+    assert_eq!(color, NAV_AHEAD, "ahead target is green");
+
+    // Sweep gate 0: the arrow retargets to gate 1, which now sits
+    // dead behind — yellow needle pointing back (RACE-6).
+    set_position(&mut app, car, Vec3::new(0.0, 0.0, -200.0));
+    run(&mut app, 2);
+    assert!(progress(&app, car).is_cleared(0));
+    let (rot, vis, color) = arrow(&mut app);
+    assert_eq!(vis, Visibility::Visible);
+    assert_eq!(color, NAV_BEHIND, "the remaining gate is behind");
+    assert!(
+        rot.as_radians().abs() > std::f32::consts::FRAC_PI_2,
+        "needle points back: {}",
+        rot.as_radians()
+    );
+}
+
+/// RACE-6 cycling through the real input path: `X` steps the pick
+/// forward and `Z` backward through the remaining gates — edge
+/// triggered, so a held key does not keep cycling.
+#[test]
+fn arrow_pick_cycles_through_input() {
+    let def = RaceDefinition {
+        checkpoints: vec![cp(-100.0, 0.0), cp(0.0, 0.0), cp(100.0, 0.0)],
+        finish: None,
+        ..any_order_def(0)
+    };
+    let mut app = race_app(event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(0.0, 0.0, -50.0));
+    run(&mut app, 3);
+    let picked = |app: &App| app.world().get::<TargetSelection>(car).unwrap().picked;
+    assert_eq!(picked(&app), None, "no pick until the player chooses");
+
+    // Nearest to (0,-50) is gate 1 — the first press moves off it.
+    press(&mut app, KeyCode::KeyX);
+    run(&mut app, 1);
+    assert_eq!(picked(&app), Some(2));
+    end_press(&mut app, KeyCode::KeyX);
+    run(&mut app, 2);
+    assert_eq!(picked(&app), Some(2), "a held state does not re-cycle");
+
+    press(&mut app, KeyCode::KeyX);
+    run(&mut app, 1);
+    end_press(&mut app, KeyCode::KeyX);
+    assert_eq!(picked(&app), Some(0), "forward cycling wraps");
+    press(&mut app, KeyCode::KeyZ);
+    run(&mut app, 1);
+    end_press(&mut app, KeyCode::KeyZ);
+    assert_eq!(picked(&app), Some(2), "Z steps backward");
+
+    // A complete race stops listening — the pick can no longer move.
+    app.world_mut().resource_mut::<RaceState>().phase = RacePhase::Complete;
+    press(&mut app, KeyCode::KeyX);
+    run(&mut app, 1);
+    end_press(&mut app, KeyCode::KeyX);
+    assert_eq!(picked(&app), Some(2), "a dead race ignores cycling");
+}
+
+/// The needle is already live while the race counts down — the
+/// original's arrow works before the start too (RACE-6 names no
+/// phase gate).
+#[test]
+fn arrow_is_live_during_countdown() {
+    let def = any_order_def(600);
+    let mut app = race_app(event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(-200.0, 0.0, 0.0));
+    run(&mut app, 2);
+    assert!(matches!(race(&app).phase, RacePhase::Countdown { .. }));
+    assert_eq!(arrow(&mut app).1, Visibility::Visible);
+    press(&mut app, KeyCode::KeyX);
+    run(&mut app, 1);
+    end_press(&mut app, KeyCode::KeyX);
+    assert_eq!(
+        app.world().get::<TargetSelection>(car).unwrap().picked,
+        Some(1),
+        "cycling already works during the countdown"
+    );
+}
+
+/// HUD-2 scopes the compass arrow to Blitz/Checkpoint — an `Ordered`
+/// (Circuit) race never shows the needle.
+#[test]
+fn ordered_race_shows_no_arrow() {
+    let def = RaceDefinition {
+        rule: CheckpointRule::Ordered,
+        ..any_order_def(0)
+    };
+    let mut app = race_app(event_config(), def.clone());
+    spawn_participant(&mut app, &def, Vec3::new(-50.0, 0.0, 0.0));
+    run(&mut app, 5);
+    assert_eq!(arrow(&mut app).1, Visibility::Hidden);
+}
+
+/// Once every gate is cleared the needle points at the armed finish
+/// trigger; a resolved participant and a complete race hide it, and
+/// session teardown despawns it (AC05 — nothing stale survives).
+#[test]
+fn arrow_arms_the_finish_then_cleans_up() {
+    let def = RaceDefinition {
+        finish: Some(cp(500.0, 0.0)),
+        ..any_order_def(0)
+    };
+    let mut app = race_app(event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(-200.0, 0.0, 0.0));
+    run(&mut app, 3);
+    assert_eq!(arrow(&mut app).1, Visibility::Visible);
+
+    // One segment sweeps both gates — the finish is now the objective.
+    set_position(&mut app, car, Vec3::new(200.0, 0.0, 0.0));
+    run(&mut app, 1);
+    assert_eq!(progress(&app, car).cleared_count(), 2);
+    let (rot, vis, _) = arrow(&mut app);
+    assert_eq!(vis, Visibility::Visible);
+    assert!(
+        (rot.as_radians() - std::f32::consts::FRAC_PI_2).abs() < 1e-3,
+        "the finish at (500,0) is dead right of a −Z-facing car: {}",
+        rot.as_radians()
+    );
+
+    // Cross the finish — the participant resolves and the needle hides.
+    set_position(&mut app, car, Vec3::new(520.0, 0.0, 0.0));
+    run(&mut app, 1);
+    assert!(matches!(
+        progress(&app, car).state,
+        ParticipantState::Finished { .. }
+    ));
+    assert_eq!(arrow(&mut app).1, Visibility::Hidden);
+
+    // Teardown removes the session-owned needle with the rest.
+    app.world_mut().resource_mut::<SessionControl>().restart = true;
+    let mut reached = false;
+    for _ in 0..12 {
+        app.update();
+        if phase(&app) == SessionPhase::Loading {
+            reached = true;
+            break;
+        }
+    }
+    assert!(reached, "restart never re-began the session");
+    let world = app.world_mut();
+    assert_eq!(
+        world
+            .query_filtered::<Entity, With<NavArrow>>()
+            .iter(world)
+            .count(),
+        0,
+        "the session-owned arrow despawned"
+    );
 }

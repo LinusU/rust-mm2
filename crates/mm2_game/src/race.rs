@@ -473,6 +473,17 @@ impl RaceProgress {
         self.cleared.get(index).copied().unwrap_or(false)
     }
 
+    /// Un-cleared checkpoint indices in authored order — the
+    /// "remaining checkpoints" the navigation arrow can target
+    /// (RACE-6). Under `Ordered` the flags are a prefix of authored
+    /// order, so this is `next..len` while the lap runs.
+    pub fn remaining(&self) -> impl Iterator<Item = usize> + '_ {
+        self.cleared
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| (!c).then_some(i))
+    }
+
     /// Feed one fixed-step segment to the participant: `to` is the
     /// entity's position this step, `last_position` the previous
     /// step's. Every checkpoint the segment crosses is consumed in one
@@ -526,4 +537,125 @@ impl RaceProgress {
         }
         ProgressOutcome::Racing
     }
+}
+
+/// What the navigation arrow points at (RACE-6): an un-cleared
+/// checkpoint gate, or the finish trigger once every gate is cleared
+/// (the finish is what remains — RACE-7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavTarget {
+    /// Index into [`RaceDefinition::checkpoints`].
+    Gate(usize),
+    /// [`RaceDefinition::finish`].
+    Finish,
+}
+
+impl NavTarget {
+    /// World position of the target on `definition`.
+    pub fn position(self, definition: &RaceDefinition) -> Option<Vec3> {
+        match self {
+            Self::Gate(i) => definition.checkpoints.get(i).map(|c| c.center),
+            Self::Finish => definition.finish.as_ref().map(|c| c.center),
+        }
+    }
+}
+
+/// Which checkpoint the player's navigation arrow tracks when it is
+/// not following the nearest gate (RACE-6: the documented keys cycle
+/// the arrow through the remaining checkpoints). A component on the
+/// participant entity — session-owned like [`RaceProgress`], so a
+/// restart cannot keep a stale pick (AC05).
+#[derive(Component, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TargetSelection {
+    /// Picked checkpoint index, or `None` for nearest-remaining.
+    pub picked: Option<usize>,
+}
+
+/// The objective the navigation arrow tracks for a participant at
+/// `position` (RACE-6).
+///
+/// The compass arrow is a Blitz/Checkpoint instrument — HUD-2's
+/// instrument list scopes it to those modes and gives Circuit the lap
+/// record instead — so `Ordered` definitions return `None`. A `picked`
+/// gate that is out of range or already cleared falls back to the
+/// nearest un-cleared gate (XZ distance: the triggers are vertical
+/// cylinders, so height is not part of "nearest"). Once every gate is
+/// cleared the arrow tracks the finish trigger while the definition
+/// has one (inferred — RACE-6 names only checkpoints; the armed finish
+/// is the remaining objective).
+pub fn navigation_target(
+    definition: &RaceDefinition,
+    progress: &RaceProgress,
+    picked: Option<usize>,
+    position: Vec3,
+) -> Option<NavTarget> {
+    if definition.rule != CheckpointRule::AnyOrder {
+        return None;
+    }
+    let mut nearest: Option<(usize, f32)> = None;
+    for i in progress.remaining() {
+        let c = definition.checkpoints[i].center;
+        let (dx, dz) = (c.x - position.x, c.z - position.z);
+        let d2 = dx.mul_add(dx, dz * dz);
+        if nearest.is_none_or(|(_, d)| d2 < d) {
+            nearest = Some((i, d2));
+        }
+    }
+    match nearest {
+        // Every gate cleared: the armed finish is the remaining
+        // objective (RACE-7).
+        None => definition.finish.as_ref().map(|_| NavTarget::Finish),
+        Some((nearest, _)) => {
+            let gate = match picked {
+                Some(p) if progress.remaining().any(|r| r == p) => p,
+                _ => nearest,
+            };
+            Some(NavTarget::Gate(gate))
+        }
+    }
+}
+
+/// Cycle the arrow pick through the remaining gates (RACE-6: the
+/// documented keys move the arrow through the remaining checkpoints).
+/// `dir` `+1`/`-1` steps forward/backward in authored order, wrapping;
+/// a stale or cleared pick starts from the current effective target.
+/// Returns the new `picked` value — `None` when no gate remains, which
+/// also clears the pick.
+pub fn cycle_target(
+    definition: &RaceDefinition,
+    progress: &RaceProgress,
+    picked: Option<usize>,
+    position: Vec3,
+    dir: i32,
+) -> Option<usize> {
+    let remaining: Vec<usize> = progress.remaining().collect();
+    if remaining.is_empty() {
+        return None;
+    }
+    let current = match navigation_target(definition, progress, picked, position) {
+        Some(NavTarget::Gate(i)) => remaining.iter().position(|&r| r == i).unwrap_or(0),
+        _ => 0,
+    };
+    let len = remaining.len() as i32;
+    let next = (current as i32 + dir).rem_euclid(len) as usize;
+    Some(remaining[next])
+}
+
+/// Signed ground-plane angle from a heading to `target`: `0` = dead
+/// ahead, positive = to the driver's right (screen-clockwise), `±π` =
+/// dead behind. `yaw` uses the `Quat::from_rotation_y` convention the
+/// vehicle transform uses — forward is `(−sin yaw, −cos yaw)` in XZ.
+/// A coincident target reports `0` rather than NaN.
+pub fn relative_bearing(yaw: f32, from: Vec3, to: Vec3) -> f32 {
+    let dx = to.x - from.x;
+    let dz = to.z - from.z;
+    if dx.mul_add(dx, dz * dz) < 1e-9 {
+        return 0.0;
+    }
+    let (sin, cos) = yaw.sin_cos();
+    // forward = (−sin, −cos), right = (cos, −sin) in XZ — projecting
+    // the offset onto them gives the ahead/right components.
+    let ahead = -(dx * sin + dz * cos);
+    let right = dx * cos - dz * sin;
+    right.atan2(ahead)
 }

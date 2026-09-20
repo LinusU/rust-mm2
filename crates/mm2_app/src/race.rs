@@ -42,7 +42,8 @@ use mm2_assets::Vfs;
 use mm2_game::{
     Checkpoint, CheckpointRule, Difficulty, EventRef, ParticipantState, Player, ProgressOutcome,
     RaceDefinition, RacePhase, RaceProgress, RaceStarted, RaceState, ResultLedger, Session,
-    SessionEntity, SessionOutcome, SessionPhase, SessionResult,
+    SessionEntity, SessionOutcome, SessionPhase, SessionResult, TargetSelection, cycle_target,
+    navigation_target, relative_bearing,
 };
 use mm2_vehicle::Teleported;
 use tracing::warn;
@@ -315,5 +316,145 @@ pub fn advance_race(
             }
         }
         RacePhase::Complete => {}
+    }
+}
+
+/// Needle color while the arrow's target is ahead of the car
+/// (RACE-6's green compass arrow).
+pub const NAV_AHEAD: Color = Color::srgb(0.2, 1.0, 0.4);
+/// Needle color while the target sits in the rear half-plane —
+/// RACE-6's "turns yellow when that checkpoint is behind you".
+pub const NAV_BEHIND: Color = Color::srgb(1.0, 0.85, 0.2);
+
+/// Marker on the session-owned navigation-arrow needle: the thin bar
+/// pivoted at screen top-center whose `UiTransform.rotation` is the
+/// signed bearing to the player's current objective. The embedded
+/// font is ASCII-only, so the arrow is drawn from UI nodes, not a
+/// glyph (designed dev-rig visual, not the original bitmap arrow).
+#[derive(Component)]
+pub struct NavArrow;
+
+/// Marker on every colored piece of the arrow — the needle and the
+/// diamond child at its tip (a child of [`NavArrow`], so it inherits
+/// the needle's rotation and stays on the pointing end).
+/// [`update_nav_arrow`] writes one shared color to all of them.
+#[derive(Component)]
+pub struct NavArrowPart;
+
+/// Spawn the RACE-6 navigation arrow: a thin bar at screen top-center
+/// with a rotated square as the head diamond. Hidden until a live
+/// race hands it a target — [`update_nav_arrow`] owns visibility,
+/// rotation and color every frame.
+pub fn spawn_nav_arrow(commands: &mut Commands, owner: SessionEntity) {
+    commands
+        .spawn((
+            owner,
+            NavArrow,
+            NavArrowPart,
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(56.0),
+                left: Val::Percent(50.0),
+                margin: UiRect::left(Val::Px(-3.0)),
+                width: Val::Px(6.0),
+                height: Val::Px(34.0),
+                ..default()
+            },
+            BackgroundColor(NAV_AHEAD),
+            Visibility::Hidden,
+        ))
+        .with_child((
+            NavArrowPart,
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(-12.0),
+                left: Val::Px(-7.0),
+                width: Val::Px(20.0),
+                height: Val::Px(20.0),
+                ..default()
+            },
+            // The child rides in the needle's rotated frame, so its own
+            // 45° makes it a diamond sitting on the pointing end.
+            UiTransform::from_rotation(Rot2::degrees(45.0)),
+            BackgroundColor(NAV_AHEAD),
+        ));
+}
+
+/// `X`/`Z` cycle the arrow's target through the remaining gates
+/// (RACE-6). The original binds this to X/S (CTL-1), but `S` is brake
+/// under this app's added WASD mapping, so the backward cycle moved to
+/// `Z` — an input-map departure, not a rules one (designed). Cycling
+/// is allowed while the race counts down: the arrow is already live.
+pub fn nav_target_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    session: Res<Session>,
+    race: Option<Res<RaceState>>,
+    mut players: Query<(&Position, &RaceProgress, &mut TargetSelection)>,
+) {
+    let dir = if keys.just_pressed(KeyCode::KeyX) {
+        1
+    } else if keys.just_pressed(KeyCode::KeyZ) {
+        -1
+    } else {
+        return;
+    };
+    let Some(race) = race else { return };
+    if race.is_stale(session.generation()) || race.phase == RacePhase::Complete {
+        return;
+    }
+    for (pos, progress, mut selection) in &mut players {
+        selection.picked = cycle_target(&race.definition, progress, selection.picked, pos.0, dir);
+    }
+}
+
+/// Drive the arrow to the player's current objective every frame: the
+/// needle's rotation is the signed bearing to the target (clockwise,
+/// so `+` bearing = right), green while the target is in the forward
+/// half-plane and yellow behind (RACE-6). Hidden whenever there is no
+/// live target — no race, a stale/complete race, an `Ordered`
+/// definition, or a participant already resolved.
+pub fn update_nav_arrow(
+    race: Option<Res<RaceState>>,
+    session: Res<Session>,
+    players: Query<(&Position, &Rotation, &RaceProgress, &TargetSelection)>,
+    mut arrow: Query<(&mut UiTransform, &mut Visibility), With<NavArrow>>,
+    mut parts: Query<&mut BackgroundColor, With<NavArrowPart>>,
+) {
+    let live = race
+        .filter(|r| !r.is_stale(session.generation()))
+        .filter(|r| r.phase != RacePhase::Complete);
+    let target = live.and_then(|r| {
+        players.iter().find_map(|(pos, rot, progress, selection)| {
+            if !matches!(
+                progress.state,
+                ParticipantState::AwaitingStart | ParticipantState::Racing
+            ) {
+                return None;
+            }
+            let target = navigation_target(&r.definition, progress, selection.picked, pos.0)?;
+            let target_pos = target.position(&r.definition)?;
+            // Heading from the physics rotation, projected to XZ:
+            // vehicle forward is local −Z (same convention
+            // `relative_bearing` documents).
+            let fwd = rot.0 * Vec3::NEG_Z;
+            let yaw = (-fwd.x).atan2(-fwd.z);
+            Some(relative_bearing(yaw, pos.0, target_pos))
+        })
+    });
+    for (mut ui, mut vis) in &mut arrow {
+        match target {
+            Some(bearing) => {
+                *vis = Visibility::Visible;
+                ui.rotation = Rot2::radians(bearing);
+            }
+            None => *vis = Visibility::Hidden,
+        }
+    }
+    let color = match target {
+        Some(b) if b.abs() > std::f32::consts::FRAC_PI_2 => NAV_BEHIND,
+        _ => NAV_AHEAD,
+    };
+    for mut bg in &mut parts {
+        *bg = BackgroundColor(color);
     }
 }

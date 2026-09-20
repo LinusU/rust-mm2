@@ -27,8 +27,9 @@ pub use ids::{AuthorityRole, ObjectId, ObjectIdentity, Player, PlayerControl, Pl
 pub use impact::{ImpactDedup, ImpactEvent, ImpactId, ImpactPolicy};
 pub use race::{
     Checkpoint, CheckpointRule, DEFAULT_CHECKPOINT_HEIGHT, DEFAULT_COUNTDOWN_TICKS, EventParams,
-    ParticipantState, ProgressOutcome, RACE_TICK_HZ, RaceDefinition, RaceError, RacePhase,
-    RaceProgress, RaceStart, RaceStarted, RaceState,
+    NavTarget, ParticipantState, ProgressOutcome, RACE_TICK_HZ, RaceDefinition, RaceError,
+    RacePhase, RaceProgress, RaceStart, RaceStarted, RaceState, TargetSelection, cycle_target,
+    navigation_target, relative_bearing,
 };
 pub use result::{DuplicateResult, ResultId, ResultLedger, SessionOutcome, SessionResult};
 pub use session::{

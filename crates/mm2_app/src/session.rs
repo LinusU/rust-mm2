@@ -29,7 +29,8 @@ use bevy::prelude::*;
 use mm2_content::VehicleDef;
 use mm2_game::{
     DamageSignals, Mm2Vfs, ObjectIdentity, Player, PlayerControl, PlayerVehicle, RaceDefinition,
-    RaceProgress, RaceState, Session, SessionEntity, SessionMode, SessionPhase, WorldMode,
+    RaceProgress, RaceState, Session, SessionEntity, SessionMode, SessionPhase, TargetSelection,
+    WorldMode,
 };
 use mm2_vehicle::{VehicleConfig, vehicle_bundle};
 use tracing::{error, info, warn};
@@ -559,7 +560,9 @@ pub fn load_session_world(
     // can own the release (one `RaceStarted`, one unlock — AC03).
     match event_race {
         Some(def) => {
-            commands.entity(vehicle).insert(RaceProgress::new(&def));
+            commands
+                .entity(vehicle)
+                .insert((RaceProgress::new(&def), TargetSelection::default()));
             race::spawn_checkpoint_markers(
                 &mut commands,
                 &mut assets.meshes,
@@ -567,6 +570,7 @@ pub fn load_session_world(
                 &def,
                 owner,
             );
+            race::spawn_nav_arrow(&mut commands, owner);
             commands.insert_resource(RaceState::new(def, session.generation()));
             session
                 .transition(SessionPhase::Countdown)

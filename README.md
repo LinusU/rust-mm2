@@ -64,6 +64,7 @@ Controls:
 | Space        | handbrake                     |
 | R            | reset vehicle to spawn        |
 | C            | toggle chase / free camera    |
+| X / Z        | cycle nav-arrow target (in a race) |
 | F1           | toggle physics debug gizmos   |
 | Backspace    | restart the session           |
 | Esc          | quit (session teardown → exit)|
