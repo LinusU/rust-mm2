@@ -40,9 +40,12 @@ Choose the highest-value ready small slice; repair current regressions before un
 
 **Next selected slice: F03-A.2 (remaining placement-source scope),
 pathset decal/race-overlay consumers (F03-B/AC04), F13-A or F09-C** —
-this iteration extended F03-B: `city/<city>/props.pathset` now stamps
-ambient prop rows through the shared `PropCache` (london 1188, sf 925
-instances; sf's 31 `r4i_rails_f` decal paths classified, not failed).
+this iteration repaired the F03-B external-review blocker: pathset
+stamping now bounds expansion (`MAX_PATHSET_STAMPS` = 8192/file, ~7x
+the retail max; per-segment counts computed arithmetically, non-finite
+coordinates stamp nothing, `Pathset::validate()` runs at load) with
+overflow counted in `CityReport::pathset_props_capped`. Retail counts
+unchanged (london 1188, sf 925 + 31 decal paths, 0 capped/0 issues).
 F03-A.1 was externally checked. Stamping micro-semantics are inferred
 (UNK-20); decals (`decals*.pathset` + texture names), `audio_pathsets/`
 and `race/*.pathset` overlays stay unconsumed. F13-A's deps (F02-B,
@@ -84,7 +87,7 @@ F11-B) remain candidates, not checked.
 || `mm2 --mm2-path <retail> --city sf --cam=… --frames 90 --screenshot … --nav [--nav-route 13:50]` | `status=pass`, awaited PNGs (~4.5/6.3 MB, local only — `screenshots/nav-sf.png`, `nav-sf-high.png`): lane polylines trace every street's authored lanes, white chevrons point along travel direction (opposing arrows on two-way streets), yellow crosses mark intersections, purple rail curves on the cable-car street, amber route highlight follows the probe arcs. |
 || `mm2 --mm2-path <retail> --city london --cam=99,150,-177,0,-50 --frames 90 --screenshot … --nav` | `status=pass`, ~6.3 MB PNG (local only — `screenshots/nav-london-high.png`): over Trafalgar Square, lanes + chevrons run on the *left* side of the carriageway (London's authored left-hand data) with intersection markers at each junction. |
 || `mm2-inspect pathset <retail>` | exit 0 — 101 discovered `.pathset` files audited (no filtering): 98 parse (2692 paths / 13185 points, kinds {0:137, 1:122, 2:2433}), 3 authored truncations fail (`race/london/{blitz10,blitz11,london_bridge_blitz10}.pathset`); `validate()` clean on all parsed; 120/126 unique asset names resolve via VFS, 6 dead refs confined to `city/phys/` + `bak/` files. `--strict` exits 2 (3 failures + 6 issues); `--city london` 46 files/3 failures/0 issues; `--city sf` 52/1 issue. `scan` parses 98 pathsets (same 3 failures). Identical results after the `Path::asset_name()` refactor. |
-|| `mm2 --mm2-path <retail> --city {london,sf} --headless` | `status=pass` — `props.pathset` consumed beside the PSDL: london 1188 stamped instances / 87 paths (0 decal/0 failed), sf 925 / 113 paths with 31 `r4i_rails_f` decal paths classified (0 failed). Reports in `city import`/`city ready` lines. |
+|| `mm2 --mm2-path <retail> --city {london,sf} --headless` | `status=pass` — `props.pathset` consumed beside the PSDL: london 1188 stamped instances / 87 paths, sf 925 / 113 paths with 31 `r4i_rails_f` decal paths classified (both `0 failed, 0 capped, 0 issues` under the 8192/file expansion bound). Reports in `city import`/`city ready` lines. |
 || `mm2 --mm2-path <retail> --city sf --cam=-1790,45,-1150,180,-8 --frames 90 --screenshot` | `status=pass`, ~3.9 MB PNG (local only — `screenshots/pathset-sf-lamps.png`): the stamped `sp_lightstreet_rt_f` lamp row renders at regular ~40 m spacing along the road. |
 || `mm2 --mm2-path <retail> --city london --cam=-469,8,-290,180,-10 --frames 90 --screenshot` | `status=pass`, ~5.6 MB PNG (local only — `screenshots/pathset-london-trees.png`): stamped `sp_tree1_s` bushes visible in the park. |
 
@@ -105,7 +108,7 @@ F11-B) remain candidates, not checked.
 | F02-C | queued | F02-B | Tooling exists (`handling` roster audit, `validate-cars --all`); owed: run full roster/paint/handling matrix and publish honest original-vs-synthetic coverage. |
 | F03-A | queued | F00-B, F01-A | INST + PSDL placement parsed. Split: A.1 (`.pathset` parser + audit — implemented below). `.opp`/race `.csv` waypoints parsed under F11-A. Unmapped sources remain: `.cpvs`, `.ldef` (F18-claimed), embedded PSDL props. |
 | F03-A.1 | implemented | F00-B, F01-A | `mm2_formats::pathset`: PTH1 parser measured on all 101 retail files — named paths of attributed points, kinds 0 single/1 directed-pairs/2 line-strip, quarter-metre spacing; per-point attribute word + `current_path`/`selection` cursors preserved raw (inferred dev-tool state, UNK-20). `Pathset::validate()`: unknown kind, odd directed-pair count, non-finite point, out-of-range cursor, empty name — zero issues on retail (66 empty paths are authored data, not flagged). `mm2-inspect pathset <install> [--city] [--strict]`: denominator = every discovered `.pathset` (101 — no filtering): 98 parse, 3 authored truncations fail (`race/london/{blitz10,blitz11,london_bridge_blitz10}.pathset`); name cross-check resolves `geometry/<n>.pkg`/`texture/<n>.*` with `PREFIX:` state decorations stripped and `PATHnn` labels skipped — 120/126 names resolve, 6 dead refs all in `city/phys/` + `bak/` files; `--strict` exits 2. `scan` recognizes `.pathset`. `docs/research/pathset.md` + ledger WLD-12/UNK-20. Candidate pending external check. |
-| F03-B | implemented | F03-A | ~2000/3763 INST props instantiate with collision (README; `city.rs`) plus `props.pathset` ambient rows stamped through the shared `PropCache` — london 1188, sf 925 instances, decal paths classified. Stamping micro-semantics inferred (UNK-20); decal/race/audio pathsets unconsumed (AC04 territory). Candidate; original-location spot validation still owed (F03-C). |
+| F03-B | implemented | F03-A | ~2000/3763 INST props instantiate with collision (README; `city.rs`) plus `props.pathset` ambient rows stamped through the shared `PropCache` — london 1188, sf 925 instances, decal paths classified. Stamping micro-semantics inferred (UNK-20); decal/race/audio pathsets unconsumed (AC04 territory). First candidate failed review on an unbounded line-strip expansion (huge/non-finite authored coordinates could stall `t += spacing` and OOM the load); repaired with the 8192/file stamp budget, arithmetic per-segment counting, non-finite skipping, load-time `validate()` and `pathset_props_capped`/`pathset_issues` report fields plus regression tests. Candidate; original-location spot validation still owed (F03-C). |
 | F03-C | queued | F03-B | Owed: sampled original locations, all source records, race cleanup, mod replacement end-to-end. |
 | F04-A | queued | F01-B, F03-B | No breakable-prop classification or state transitions yet. |
 | F04-B | queued | F04-A | — |
