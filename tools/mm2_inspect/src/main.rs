@@ -264,6 +264,22 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Audit the surface-material tables (`city/materials.mtl`,
+    /// `city/materials.csv`): parse every discovered `.mtl` /
+    /// `materials*.csv`, cross-check `physics` refs against defined
+    /// material names, and report how each stock city's PSDL texture
+    /// table maps onto materials.
+    Materials {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Restrict the PSDL texture-table cross-check to one city stem.
+        #[arg(long)]
+        city: Option<String>,
+        /// Exit nonzero when any expected file is missing or fails to
+        /// parse, or when any issue is reported.
+        #[arg(long)]
+        strict: bool,
+    },
     /// Audit prop/decal placement pathsets (`*.pathset`, binary PTH1):
     /// parse every discovered file, validate authored consistency, and
     /// resolve each path's asset name against `geometry/` and
@@ -410,6 +426,9 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Proprules { dir, city, strict } => {
             proprules(dir, cli.mods.as_deref(), city.as_deref(), *strict)
         }
+        Command::Materials { dir, city, strict } => {
+            materials(dir, cli.mods.as_deref(), city.as_deref(), *strict)
+        }
         Command::Pathset { dir, city, strict } => {
             pathset(dir, cli.mods.as_deref(), city.as_deref(), *strict)
         }
@@ -539,6 +558,13 @@ fn scan(dir: &Path, mods: Option<&Path>, strict: bool) -> Result<(), Box<dyn std
             "aimap" | "aimap_p" => match std::str::from_utf8(&bytes)
                 .map_err(|e| FormatError::parse(0, format!("not UTF-8 text: {e}")))
                 .and_then(mm2_formats::aimap::Aimap::parse)
+            {
+                Ok(_) => stats.parsed_ok += 1,
+                Err(e) => stats.failures.push((logical.clone(), e.to_string())),
+            },
+            "mtl" => match std::str::from_utf8(&bytes)
+                .map_err(|e| FormatError::parse(0, format!("not UTF-8 text: {e}")))
+                .and_then(mm2_formats::materials::MaterialSet::parse)
             {
                 Ok(_) => stats.parsed_ok += 1,
                 Err(e) => stats.failures.push((logical.clone(), e.to_string())),
@@ -2178,6 +2204,328 @@ fn proprules(
     if strict && (issues_total > 0 || !failures.is_empty()) {
         return Err(format!(
             "strict proprules audit: {} failures, {issues_total} issues",
+            failures.len()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Surface-material audit (F06-A.1): the expected denominator is the
+/// global pair `city/materials.mtl` + `city/materials.csv` — retail ships
+/// exactly one pair shared by both cities (no per-city copies). Every
+/// other discovered `*.mtl` / `city/**/materials*.csv` file is an
+/// audited extra. `physics` refs in each parsed map are checked against
+/// the union of defined material names; PSDL texture-table coverage is
+/// reported per stock city (`--city` restricts it). `--strict` exits
+/// nonzero on any failure or issue.
+fn materials(
+    dir: &Path,
+    mods: Option<&Path>,
+    city: Option<&str>,
+    strict: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use mm2_formats::materials::{MaterialMap, MaterialSet, NONE_PHYSICS};
+
+    let vfs = build_vfs(dir, mods)?;
+    let expected = ["city/materials.mtl", "city/materials.csv"];
+
+    let is_map = |p: &str| {
+        let name = p.rsplit('/').next().unwrap_or(p);
+        (name.ends_with(".csv") || name.ends_with(".csv.txt")) && name.starts_with("materials")
+    };
+    let mut logicals: Vec<String> = vfs
+        .list()
+        .into_iter()
+        .filter(|p| p.ends_with(".mtl") || (p.starts_with("city/") && is_map(p)))
+        .collect();
+    for e in &expected {
+        if !logicals.iter().any(|l| l == e) {
+            logicals.push((*e).to_string());
+        }
+    }
+    logicals.sort();
+    logicals.dedup();
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut issues_total = 0usize;
+    let mut parsed = 0usize;
+    let mut unsupported = 0usize;
+    let mut sets: Vec<(String, MaterialSet)> = Vec::new();
+    let mut maps: Vec<(String, MaterialMap)> = Vec::new();
+
+    println!("== surface materials (materials.mtl / materials.csv) ==");
+    for logical in &logicals {
+        let is_expected = expected.contains(&logical.as_str());
+        let tag = if is_expected { "expected" } else { "extra" };
+        let Some(res) = vfs.resolve(logical) else {
+            println!("  {logical:<52} {tag:<9} missing");
+            failures.push(format!("{logical}: expected file not found"));
+            continue;
+        };
+        let bytes = vfs.read(&res)?;
+        let text = String::from_utf8_lossy(&bytes);
+        if logical.ends_with(".mtl") {
+            match MaterialSet::parse(&text) {
+                Ok(t) => {
+                    let issues = t.validate();
+                    parsed += 1;
+                    issues_total += issues.len();
+                    println!(
+                        "  {logical:<52} {tag:<9} ok — {} materials ({})",
+                        t.defs.len(),
+                        t.defs
+                            .iter()
+                            .map(|d| d.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    for i in &issues {
+                        println!("    issue: {i}");
+                    }
+                    sets.push((logical.clone(), t));
+                }
+                Err(e) if is_expected => {
+                    println!("  {logical:<52} {tag:<9} failed: {e}");
+                    failures.push(format!("{logical}: {e}"));
+                }
+                Err(e) => {
+                    println!("  {logical:<52} {tag:<9} unsupported: {e}");
+                    unsupported += 1;
+                }
+            }
+        } else {
+            match MaterialMap::parse(&text) {
+                Ok(t) => {
+                    let issues = t.validate();
+                    parsed += 1;
+                    issues_total += t.diagnostics.len() + issues.len();
+                    let named = t.rows.iter().filter(|r| !r.is_none()).count();
+                    println!(
+                        "  {logical:<52} {tag:<9} ok — {} rows ({} named, {} {})",
+                        t.rows.len(),
+                        named,
+                        t.rows.len() - named,
+                        NONE_PHYSICS
+                    );
+                    for d in &t.diagnostics {
+                        println!("    issue: {d}");
+                    }
+                    for i in &issues {
+                        println!("    issue: {i}");
+                    }
+                    maps.push((logical.clone(), t));
+                }
+                Err(e) if is_expected => {
+                    println!("  {logical:<52} {tag:<9} failed: {e}");
+                    failures.push(format!("{logical}: {e}"));
+                }
+                Err(e) => {
+                    println!("  {logical:<52} {tag:<9} unsupported: {e}");
+                    unsupported += 1;
+                }
+            }
+        }
+    }
+
+    // Cross-checks. Each is an issue (authored anomaly or broken
+    // reference), not a load failure.
+    let issue = |issues: &mut usize, msg: String| {
+        *issues += 1;
+        println!("    issue: {msg}");
+    };
+    println!("  cross-checks:");
+
+    // csv physics refs → defined material names (union across all
+    // parsed .mtl sets; duplicate definitions across sets are issues).
+    {
+        let mut defined: BTreeMap<&str, &str> = BTreeMap::new();
+        for (path, set) in &sets {
+            for def in &set.defs {
+                if let Some(first) = defined.insert(def.name.as_str(), path.as_str()) {
+                    issue(
+                        &mut issues_total,
+                        format!("{path}: material {:?} also defined by {first}", def.name),
+                    );
+                }
+            }
+        }
+        for (path, map) in &maps {
+            for row in &map.rows {
+                if row.is_none() {
+                    continue;
+                }
+                match defined.get(row.physics.as_str()) {
+                    Some(_) => {}
+                    None => issue(
+                        &mut issues_total,
+                        format!(
+                            "{path}: line {}: {:?} refs undefined material {:?}",
+                            row.line, row.texture, row.physics
+                        ),
+                    ),
+                }
+            }
+        }
+        let used: std::collections::BTreeSet<&str> = maps
+            .iter()
+            .flat_map(|(_, m)| {
+                m.rows
+                    .iter()
+                    .filter(|r| !r.is_none())
+                    .map(|r| r.physics.as_str())
+            })
+            .collect();
+        let unused: Vec<&str> = defined
+            .keys()
+            .filter(|n| !used.contains(**n))
+            .copied()
+            .collect();
+        println!(
+            "    defined: {} materials ({} used by maps{})",
+            defined.len(),
+            used.len(),
+            if unused.is_empty() {
+                String::new()
+            } else {
+                format!(", unused: {}", unused.join(","))
+            }
+        );
+    }
+
+    // csv texture stems → texture/ files: informational — names like
+    // `s_ocean`/`s_thames` mark surface semantics on geometry whose
+    // texture table entry has no file, so an unresolved stem is not a
+    // defect on its own.
+    for (path, map) in &maps {
+        let unresolved: Vec<&str> = map
+            .rows
+            .iter()
+            .filter(|r| {
+                vfs.resolve_preferred(&format!("texture/{}", r.texture), TEXTURE_EXTS)
+                    .is_none()
+            })
+            .map(|r| r.texture.as_str())
+            .collect();
+        println!(
+            "    {path}: {}/{} texture stems resolve to texture/ files",
+            map.rows.len() - unresolved.len(),
+            map.rows.len()
+        );
+        if !unresolved.is_empty() {
+            println!(
+                "      unresolved (semantic-only names, not defects): {}{}",
+                unresolved
+                    .iter()
+                    .take(15)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if unresolved.len() > 15 {
+                    format!(" … +{}", unresolved.len() - 15)
+                } else {
+                    String::new()
+                }
+            );
+        }
+    }
+
+    // PSDL texture-table → material coverage per stock city.
+    let stems: Vec<String> = match city {
+        Some(c) => vec![c.to_ascii_lowercase()],
+        None => mm2_content::EXPECTED_CITIES
+            .iter()
+            .map(|c| c.to_string())
+            .collect(),
+    };
+    for stem in stems {
+        let psdl_path = format!("city/{stem}.psdl");
+        let Some(pres) = vfs.resolve(&psdl_path) else {
+            println!("    note: no {psdl_path} — texture table not cross-checked");
+            continue;
+        };
+        let pbytes = vfs.read(&pres)?;
+        match Psdl::parse(&pbytes) {
+            Ok(psdl) => {
+                let mut named: BTreeMap<String, usize> = BTreeMap::new();
+                let mut none_count = 0usize;
+                let mut unmapped: Vec<&str> = Vec::new();
+                // A `<stem>-NNNN` table entry is one frame of an animated
+                // texture sequence (s_thames-0001..30); the map names the
+                // base stem, so fall back to it when the full name is
+                // unmapped — the same stem convention
+                // `mm2_app::city::load_image_sequence` decodes.
+                let lookup = |tex: &str| -> Option<&str> {
+                    maps.iter().find_map(|(_, m)| m.lookup(tex)).or_else(|| {
+                        mm2_formats::tex::frame_base_stem(tex)
+                            .and_then(|b| maps.iter().find_map(|(_, m)| m.lookup(b)))
+                    })
+                };
+                let mut blank_count = 0usize;
+                for tex in &psdl.textures {
+                    if tex.is_empty() {
+                        // Authored blank table slots — no texture, so no
+                        // material coverage is expected of them.
+                        blank_count += 1;
+                        continue;
+                    }
+                    match lookup(tex) {
+                        Some(p) if p != NONE_PHYSICS => {
+                            *named.entry(p.to_string()).or_default() += 1;
+                        }
+                        Some(_) => none_count += 1,
+                        None => unmapped.push(tex.as_str()),
+                    }
+                }
+                println!(
+                    "    psdl: {psdl_path} — {} texture names: {} named-material, {} {}, {} blank, {} not in map",
+                    psdl.textures.len(),
+                    named.values().sum::<usize>(),
+                    none_count,
+                    NONE_PHYSICS,
+                    blank_count,
+                    unmapped.len(),
+                );
+                if !unmapped.is_empty() {
+                    println!(
+                        "      not in map: {}{}",
+                        unmapped
+                            .iter()
+                            .take(15)
+                            .copied()
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        if unmapped.len() > 15 {
+                            format!(" … +{}", unmapped.len() - 15)
+                        } else {
+                            String::new()
+                        }
+                    );
+                }
+                if !named.is_empty() {
+                    println!(
+                        "      materials used: {}",
+                        named
+                            .iter()
+                            .map(|(n, c)| format!("{n}×{c}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+            }
+            Err(e) => println!("    note: {psdl_path} failed to parse: {e}"),
+        }
+    }
+
+    println!(
+        "  {parsed}/{} parsed, {} unsupported extras, {} failures, {issues_total} issue(s)",
+        logicals.len(),
+        unsupported,
+        failures.len(),
+    );
+    if strict && (issues_total > 0 || !failures.is_empty()) {
+        return Err(format!(
+            "strict materials audit: {} failures, {issues_total} issues",
             failures.len()
         )
         .into());

@@ -1,109 +1,114 @@
 # Last implementation iteration
 
-- Task ID and title: F03-B.6 — prop-rule stamps follow the authored
-  kerb chain (defect repair on the F03-B.3 stamping channel:
-  trees/lamps/meters landed inside the carriageway on curved
-  blocks).
+- Task ID and title: F06-A.1 — authored surface-material tables parsed
+  and audited (`city/materials.mtl` property blocks +
+  `city/materials.csv` texture→material map).
 - Starting commit and resulting commits: started at
-  `f55276042b20adf13b3abad367f3040fa05f47ef` (externally checked
-  F14-B.1 handoff; branch `ralph/night`, clean tree).
-- Why this slice: operator screenshots showed trees, a phone box
-  and lamp posts standing on the carriageway at kerb lines. The
-  geometric probe against BAI sidewalk curves measured 532/5 083
-  london stamps inside the road approximation, worst case 11.75 m
-  past the kerb — a real placement defect in shipped code, ahead
-  of any new feature.
+  `f7158806e02ef9d7a9605b07a63f2036e5d228d1` (externally checked
+  F03-B.6 handoff; branch `ralph/night`, clean tree).
+- Why this slice: F06's deps (F00-B, F01-B) are both checked and the
+  traction work needs its authored input first. The retail install
+  ships exactly one `materials.{csv,mtl}` pair — the texture-name →
+  physics-material system every later F06 leg must resolve through.
+  Parsing + auditing it is the smallest honest step: it verifies the
+  grammar, measures real coverage against both PSDL texture tables,
+  and surfaces authored anomalies before any runtime semantics are
+  assumed.
 - Retail install: `/Users/linus/coding/rust-mm2/retail`
-  (`fnv1a64:e91e6cd4b2ae30d9`), all runs `--headless` on this
-  machine's dev-profile binary.
+  (`fnv1a64:e91e6cd4b2ae30d9`).
 
 ## What changed
 
-- **Root cause (measured, not inferred):** `walk_prop_rules`
-  modelled each side's kerb as the straight chord between the two
-  crossings' curb-corner vertices. The real kerb bends with the
-  road surface and is not on the room perimeter — it lives in the
-  room's road attributes (`RoadWithSidewalks`
-  `[sw_l, road_l, road_r, sw_r]`, `DividedRoad`
-  `[sw_l, rl_out, rl_in, rr_in, rr_out, sw_r]`, `SidewalkStrip`
-  `(ground, top)` pairs, `RoadNoSidewalks` walkway edges). On a
-  curved block the chord cuts through the carriageway — london
-  room 816's authored kerb deviates ~22 m from its chord.
-- **`mm2_game::props`**: `kerb_strips` extracts each room's
-  (kerb, outer) vertex chains from its road attributes using the
-  same `counted`/inline layouts as the city importer;
-  `match_strip` picks the chain spanning the side's two curb-
-  corner vertex ids (longest arc wins) and orientates it to the
-  walk. Stamps now walk the authored kerb by arc length and lerp
-  toward the outer chain *index-paired per cross-section*, so the
-  authored kerb↔building-line correspondence is kept (previously
-  the outer arc was arc-length-parametrized independently of a
-  straight kerb chord).
-- **Fallback:** a side with no matching strip stamps on its
-  building-line arc — on the sidewalk edge, never inside the
-  road — and is counted in the new `sides_no_kerb` stat plus a
-  bounded issue line. Both retail cities: `sides_no_kerb = 0`.
-- **`mm2_app::city`:** the prop-rule import log line reports
-  `no_kerb=`.
-- **`docs/research/proprules.md`:** kerb-chain geometry recorded
-  (was: "curb segment"); audit numbers updated; UNK-21 unchanged
-  — the *placement policy* remains inferred, the *geometry* is
-  now measured.
+- **`mm2_formats::materials` (new):**
+  - `MaterialSet::parse` — line-oriented `mtl <name> { … }` blocks;
+    `{` may sit on the next line, `key:` is optional (whitespace
+    separates otherwise), lone `}` closes, `//` comments. Fields kept
+    raw with typed accessors (`f32`, `vec_f32`, `vec_i64`, `text`);
+    `index()` gives the authored index space.
+  - `MaterialMap::parse` — `texture,physics` csv; `none` keyword =
+    "no named material"; header recorded not enforced; short/extra-
+    cell rows go to `diagnostics` (bounded, recoverable).
+  - `MaterialIssue` + `validate()` on both: duplicate defs/rows,
+    missing `_default`, missing/bad/negative/unknown fields,
+    nonstandard header. `MaterialMap::undefined_refs(&set)` cross-
+    checks named refs against defined materials.
+- **`mm2_formats::tex::frame_base_stem`** — shared `<stem>-NNNN`
+  animated-frame convention (exactly 4 digits): `s_thames-0009` →
+  `s_thames`. The PSDL texture table references single frames of the
+  water sequences while `materials.csv` keys the base stem — the same
+  convention `mm2_app::city::load_image_sequence` expands in the other
+  direction.
+- **`mm2-inspect materials <install> [--city] [--strict]`** — audit
+  over the VFS: expected `city/materials.{csv,mtl}` (missing = parse
+  failure), every discovered `.mtl`/`materials*.csv` in the
+  denominator, csv→mtl dead-ref issues, defined-vs-used material
+  counts, texture-file resolution split (semantic-only stems reported
+  as informational, not defects), and per-city PSDL texture-table
+  coverage — named/`none`/blank-slot/unmapped with the frame-stem
+  fallback. `scan` recognizes `.mtl`. `--strict` exits nonzero on
+  issues/failures.
+- **`docs/research/materials.md`** — grammar, field table, measured
+  coverage, dead refs, the separate `floors/walls.csv` neighborhood
+  table called out.
+- **`docs/original-rules.md`** — WLD-19 (verified_original: pair
+  structure, counts, coverage, anomalies) and UNK-23 (consumer chain,
+  `_default` policy, dead-ref semantics, `sound`/`ptx*` spaces,
+  `width/height/depth` meaning, force-path combination — all
+  unverified).
+
+## Retail audit (measured)
+
+```
+city/materials.csv  3423 rows (137 named, 3286 none)
+city/materials.mtl  8 materials (deepwater,_default,grass,water,
+                    dirt,sand,cobblestone,wood)
+issues: transbay_ramp_f→ash (l.2563), s_grass2mud→mud (l.2824)
+        — dead authored refs; --strict exits 2
+defined: 8, used: 7 (unused: _default,dirt,wood)
+csv stems resolving to texture/ files: 3287/3423 (136 semantic-only)
+london psdl: 469 names = 152 named + 308 none + 6 blank + 3 unmapped
+  (cobblestone×141, grass×10, deepwater×1;
+   unmapped: sliver, sf_win_brickyel01_2s_4_l, sf_base_tan09_1s_5_l)
+sf psdl:     457 names = 148 named + 301 none + 6 blank + 2 unmapped
+  (cobblestone×136, grass×10, deepwater×1, water×1;
+   unmapped: sliver, gw_stc_offwhite_marswin_f)
+```
 
 ## Tests
 
-- `mm2_game::props` unit tests (+2, existing 4 updated to carry a
-  synthetic `RoadWithSidewalks` strip):
-  - `a_curved_kerb_follows_the_authored_strip` — a room whose
-    right kerb bulges 14 m at mid-block; stamps land on the
-    authored chain (22, 25.5) where the chord would have put
-    them at x = 28–29 inside the carriageway.
-  - `a_room_without_a_kerb_strip_stamps_the_building_line` —
-    attr-less room stamps on the perimeter arc and counts
-    `sides_no_kerb = 1`.
-- Existing tests (side assignment, boundary marks, budgets)
-  re-derived against the same quad rooms plus their authored
-  strip — expectations unchanged (straight kerb ⇒ same spots).
+- `mm2_formats::materials` — 7 unit tests: block parsing (brace on
+  next line, colon-less field, comment), garbage rejection
+  (unterminated/missing brace/nameless), validate issues (duplicate,
+  missing default/field, negative, bad ptx shape, unknown field), csv
+  parsing (header, `none`, diagnostics), duplicate/bad-header,
+  `undefined_refs`.
+- `mm2_formats::tex::frame_base_stem` — strips only exactly-4-digit
+  suffixes; non-frame dashes, wrong digit counts and empty bases kept.
 
 ## Commands actually run and results
 
-- `cargo test -p mm2_game` — 24/24 lib tests pass incl. both new
-  tests; `cargo test --workspace` — all groups, 0 failures.
-- `cargo fmt --all -- --check` PASS; `cargo clippy --workspace
-  --all-targets --all-features -- -D warnings` PASS.
-- BAI placement audit (throwaway probe, not committed — stamp
-  inside its own road's `sidewalk_inner` polygon = in-road):
-  london 699 → 348 in-road (worst depth 11.22 m → 1.34 m), sf
-  318 → 159 (12.24 m → 1.00 m). Residuals cluster at exactly
-  0.8 m — a systematic inset between the BAI inner curve and the
-  PSDL kerb verts, not placement error (stamps are constructed
-  inside the authored kerb↔building-line band and cannot be
-  inside the PSDL carriageway at all).
-- `mm2 --mm2-path <retail> --city london
-  --cam=-226,140,-126,0,-90 --nav --frames 90 --screenshot
-  /tmp/propfix-nav.png` → `status=pass`, PNG local only — the
-  Regent's Park bend (former worst site, room 816) now shows
-  every lamp/tree on the kerb line outside the BAI lane
-  polylines.
+- `cargo fmt --all -- --check` PASS.
+- `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings` PASS.
+- `cargo test --locked --workspace` — all groups, 0 failures.
+- `mm2-inspect materials <retail>` — output above; `--strict` exits 2
+  on the two authored dead refs.
 
 ## What this proves / does not prove
 
-- Proves: prop-rule stamps follow the authored road-edge
-  geometry; no stamp can land inside the PSDL carriageway by
-  construction; measured ~50% reduction of BAI-classified
-  in-road stamps on both cities with the deep (>9 m) violations
-  eliminated entirely; synthetic curved-kerb regression covered.
-- Does not prove: that the original walks the same kerb chains —
-  the geometry source is verified authored data, the *policy*
-  (`start`/`distance`/`maxUse`/`lerp` semantics, side labels,
-  variant pick, yaw) stays inferred under UNK-21; the residual
-  0.8–1.3 m BAI inset is a data-level offset between two authored
-  files, unverifiable without retail-side comparison; junction-
-  fragment `SidewalkStrip` matching is endpoint-based (longest
-  spanning chain) — no retail room needed the fallback.
-- Acceptance IDs: advances F03-AC02's correct-transform leg for
-  the prop-rule channel; F03-C's sampled-location validation
-  stays open.
+- Proves: both authored tables parse under a verified grammar; the
+  texture→material map covers ~all real texture names in both cities'
+  PSDL tables once frame stems and blank slots are normalized; the
+  audit distinguishes named/`none`/unmapped honestly and fails strict
+  on dead refs.
+- Does not prove: any runtime behavior — no surface identity reaches
+  colliders, no traction consumes `friction`, no consumer chain is
+  verified (UNK-23). The `_default` fallback for unmapped names, the
+  `ash`/`mud` dead-ref semantics and the frame-stem normalization are
+  all unverified against the original.
+- Acceptance IDs: supplies the authored-data leg F06-A needs (source
+  surface IDs begin here as material names/index space); F06-AC
+  contact/traction legs all remain open.
 
 This is a candidate handoff. External code-gate and separate review
 results live in the runner state directory and are not implied by

@@ -38,8 +38,17 @@
 
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
-**Next selected slice: F13-B remainder, F14-B, or F11-C** — the
-latest iteration landed F14-B.1, the live running-order leg of
+**Next selected slice: F13-B remainder, F14-B remainder, F11-C,
+or F06-A runtime legs** — the latest iteration landed F06-A.1,
+the authored-data leg of surface materials: `mm2_formats::materials`
+parses the global `city/materials.{csv,mtl}` pair (texture→material
+map + `mtl` property blocks) and `mm2-inspect materials` audits the
+pair plus each PSDL texture table's coverage, measured on retail
+(137 named mappings, 8 materials, 2 dead authored refs; both cities'
+tables classified). WLD-19/UNK-23 recorded. The runtime legs —
+surface identity through collider import, tire×surface traction —
+stay queued under F06-A/B. The iteration before
+landed F14-B.1, the live running-order leg of
 participant ranking (also the rank-presentation remainder of
 F13-B): `mm2_game::race::live_order` sorts participants best→worst
 while a race runs — `Finished` lead by recorded `race_ticks` (the
@@ -379,7 +388,8 @@ rendered gameplay; outranks inference.
 | F05-A | queued | F01-B, F02-B | `.vehcardamage` readable via generic tune parser; no typed rules or runtime. |
 | F05-B | queued | F05-A | — |
 | F05-C | queued | F05-B | — |
-| F06-A | queued | F00-B, F01-B | PSDL room attributes parsed; no typed surface/material representation or traction hookup. |
+| F06-A | active | F00-B, F01-B | Split: A.1 (materials parser + audit — implemented below). Remaining: typed surface identity through collider import and contact classification. |
+| F06-A.1 | implemented | F00-B, F01-B | `mm2_formats::materials`: `MaterialSet` (line-oriented `mtl <name> { key: v… }` blocks; brace may sit on next line, `:` optional, `//` comments; all ten retail fields preserved + typed accessors) and `MaterialMap` (`texture,physics` csv; `none` keyword, header recorded, short/extra-cell rows into `diagnostics`), each with `validate()` issues (duplicate/missing/bad/negative fields, missing `_default`, dup rows, bad header) + `undefined_refs` cross-check. `mm2_formats::tex::frame_base_stem` shares the `<stem>-NNNN` animated-frame convention (s_thames-0009 → s_thames). `mm2-inspect materials <install> [--city] [--strict]`: expected `city/materials.{csv,mtl}` + every discovered `.mtl`/`materials*.csv`, csv→mtl ref check, texture-file resolution split (semantic-only stems informational), and per-city PSDL texture-table coverage (named/`none`/blank-slot/unmapped, frame-stem fallback). Retail: 3423 rows (137 named, 3286 `none`), 8 materials, 2 dead refs (`transbay_ramp_f→ash`, `s_grass2mud→mud`) — `--strict` exits 2; london 469 names = 152 named + 308 none + 6 blank + 3 unmapped, sf 457 = 148 + 301 + 6 + 2. `scan` recognizes `.mtl`. docs/research/materials.md + WLD-19/UNK-23. Runtime lookup/traction unwired — the parsed pair is not yet a `SurfaceMaterial` source. Candidate pending external check. |
 | F06-B | queued | F06-A | — |
 | F06-C | queued | F06-B | — |
 | F07-A | queued | F01-B, F02-B, F06-A | No audio decoders/voices; `aud/` family = 3293 files incl. cardata/dmusic/spchdata. bevy built without `bevy_audio`. |

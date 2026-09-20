@@ -328,6 +328,20 @@ fn expand5(v: u16) -> u8 {
     ((v << 3) | (v >> 2)) as u8
 }
 
+/// Strip an animated-texture frame suffix (`<stem>-NNNN`, exactly four
+/// digits) from a texture stem. MM2 stores animated surfaces (water:
+/// `s_thames`, `s_pond`, `s_ocean`) as numbered frames `s_thames-0001` …
+/// `s_thames-0030` with no plain `s_thames` file, and the PSDL texture
+/// table references single frames (`s_thames-0009`). Consumers looking
+/// up the surface *stem* — `materials.csv` keys the base name — call
+/// this when the full name misses. Returns `None` when the tail is not
+/// a four-digit frame number.
+pub fn frame_base_stem(name: &str) -> Option<&str> {
+    let (base, frame) = name.rsplit_once('-')?;
+    (frame.len() == 4 && frame.bytes().all(|b| b.is_ascii_digit()) && !base.is_empty())
+        .then_some(base)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,6 +444,17 @@ mod tests {
         let mut d = header(4, 4, 18, 1);
         d.extend_from_slice(&[0u8; 10]);
         assert!(TexFile::parse(&d).is_err());
+    }
+
+    #[test]
+    fn frame_base_stem_strips_only_four_digits() {
+        assert_eq!(frame_base_stem("s_thames-0009"), Some("s_thames"));
+        assert_eq!(frame_base_stem("s_ocean-0001"), Some("s_ocean"));
+        assert_eq!(frame_base_stem("r1_l"), None);
+        assert_eq!(frame_base_stem("base4_garage-basewindow"), None);
+        assert_eq!(frame_base_stem("x-123"), None);
+        assert_eq!(frame_base_stem("x-12345"), None);
+        assert_eq!(frame_base_stem("-0001"), None);
     }
 
     #[test]

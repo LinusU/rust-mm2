@@ -13,6 +13,7 @@ pub mod crashdata;
 pub mod dave;
 pub mod info;
 pub mod inst;
+pub mod materials;
 pub mod mtx;
 pub mod opp;
 pub mod pathset;
