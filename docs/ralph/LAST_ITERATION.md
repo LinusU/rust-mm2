@@ -1,85 +1,103 @@
 # Last implementation iteration
 
-- Task ID and title: F03-B review repair — bound the `props.pathset`
-  line-strip expansion flagged by external review of candidate
-  `9e444eb` (iteration 24, verdict fail, 1 blocking finding).
+- Task ID and title: F03-B.2 — event-scoped `race/<city>/<stem>.pathset`
+  overlays, the F03-AC04 leg named in the plan's next-slice list.
 - Starting commit and resulting commits: started at
-  `9e444eb881ea343e4bbd3cf2e4a71667e3993e0b` (clean tree, branch
-  `ralph/night`); result = one repair commit plus this handoff note.
-- Root cause (external review finding): `stamp_line_strip` walked
-  `while t < len { out.push(...); t += spacing }` over authored
-  coordinates the parser never bounds (counts are capped, magnitudes
-  are not). A finite segment beyond ~4e6 m stalls `t += spacing`
-  below the f32 ulp — the loop never terminates; `len = +inf`
-  likewise — and even shorter hostile lengths push millions of
-  instances → hang/OOM during city load. Reachable through a
-  supported path: a VFS mod can override
-  `city/<city>/props.pathset`, or ~16 bad bytes in a corrupt install.
-- Fix (smallest real change, same style as the parsers' sanity caps):
+  `f6e151fc5b688ed2c891fbcd2709ad6943198eaf` (clean tree, branch
+  `ralph/night`; the F03-B expansion-bound repair had just passed
+  external gates + review, verdict pass, no blocking findings).
+  Result = one feature commit plus this handoff note.
+- Why this slice: no failing gate/review finding to repair, so the
+  highest-value ready task from the plan's list. Race overlays advance
+  F03-AC04 directly; decal stamping needs a strip-width rule
+  (research first) and F13-A's deps are still candidates.
+- What changed:
   - `crates/mm2_app/src/city.rs`
-    - `MAX_PATHSET_STAMPS = 8192`: per-file stamp budget threaded
-      through every path in `load_city`. ~7x the densest retail
-      expansion (London 1188 / sf 925; densest single path 162 —
-      measured by dumping both retail `props.pathset` files through
-      `mm2-inspect dump` and replicating the expansion in a script).
-    - `stamped_transforms(path, budget) -> StampedPath { transforms,
-      capped }`: every kind emits at most `budget`; `capped` counts
-      suppressed stamps (saturating) instead of truncating silently.
-    - `stamp_line_strip`: per-segment stamp count computed
-      arithmetically (`ceil(len/spacing)` in f64; the float→int cast
-      saturates into the budget `min`), index-based `t = i*s` — no
-      accumulator to stall. Non-finite segment lengths skipped; a
-      non-finite final vertex does not cap the row.
-    - Non-finite point coordinates stamp nothing in all kinds (no
-      NaN-transform entities).
-    - `load_city` runs `Pathset::validate()` on the consumed file:
-      issues warn-logged and counted in `CityReport::pathset_issues`;
-      suppressed stamps counted in `CityReport::pathset_props_capped`.
-      Both appear in the report `Display`.
-    - Unrotated stamps (`Points`, zero-spacing strips, lone vertices)
-      now route through `inst_transform` via `unrotated_transform` —
-      semantically identical today, closes the reviewer's minor note
-      about the `MIRROR_Z` convention living in one place.
-  - `docs/research/pathset.md`: the bound documented as an
-    implementation choice, not an original rule.
-- Tests added (4, all in `city::tests`, pure checks):
-  `a_hostile_segment_is_capped_instead_of_hanging` (1e18 m fixture
-  asserts the cap at both a small budget and the production
-  constant), `non_finite_segments_stamp_nothing_but_stay_bounded`
-  (+inf/NaN segments skipped, NaN final vertex not capped, emitted
-  origins finite), `non_finite_points_stamp_nothing` (Points and
-  Directed), `expansion_is_bounded_by_the_stamp_budget` (capped
-  counts: strip interval stamps + end cap; Points).
-  Existing 11 stamping tests updated for the new signature.
+    - `PathsetStampReport` + shared `stamp_pathset` — the
+      `props.pathset` loop in `load_city` extracted so both consumers
+      run one classification: prop paths stamp through `PropCache`;
+      `PATHnn` names → `label_paths`; `giz_*` names →
+      `animated_paths` (movable objects — a static trimesh collider
+      is the wrong class, so they are counted, not stamped);
+      texture-resolving names → `decal_paths`; dead refs →
+      `unresolved_paths`; per-file `MAX_PATHSET_STAMPS` budget and
+      `Pathset::validate()` issues threaded through as before.
+    - `EventPathsetReport` + `spawn_event_pathsets(commands, vfs,
+      logicals, meshes, images, materials, owner)` — reads/parses/
+      stamps each `.pathset` logical with `event-pathset-*` entity
+      names through a fresh `PropCache` (the city's own cache is
+      local to `load_city`); `failed_files` for unreadable/
+      unparseable records (warned, non-fatal — the catalog treats
+      `.pathset` as an optional overlay record); animated-texture
+      components and `missing_textures`/`missing_prims` reported
+      like `load_city`.
+  - `crates/mm2_app/src/race.rs`: `event_race_setup` now returns
+    `EventSetup { definition, pathsets }` — the event's
+    `RaceFileKind::Pathset` record logicals straight from the
+    resolved `CatalogEvent` (single catalog scan).
+  - `crates/mm2_app/src/session.rs`: `load_session_world` calls
+    `spawn_event_pathsets` after a successful event resolve —
+    `event pathset overlay stamped files=… stamped=… labels=…
+    animated=… decals=… unresolved=… capped=… issues=…
+    failed_files=…`.
+- Tests added (3, in `crates/mm2_app/tests/event.rs`, production-path
+  harness): `event_pathset_overlay_spawns_session_owned_props` (4
+  stamps × part+collider = 8 `event-pathset-*` `CityEntity`s, all
+  `SessionEntity(1)`), `restarting_the_event_respawns_its_overlay_once`
+  (AC04 — identical gen-2 count, zero gen-1 survivors),
+  `event_pathset_classification_counts_every_path` (strip stamps;
+  PATHnn label/giz_/decal/dead-ref each counted; undocumented kind 9
+  is a validate issue stamping nothing; truncated file →
+  `failed_files`). PTH1 + PKG3 fixtures added locally.
 - Commands actually run and results (this machine, macOS arm64):
-  - `cargo fmt --all -- --check` — PASS.
+  - `cargo fmt --all -- --check` — PASS (after one auto-format).
   - `cargo clippy --locked --workspace --all-targets --all-features
     -- -D warnings` — PASS.
-  - `cargo test --locked --workspace` — PASS, all groups, 0 failures
-    (mm2_app lib 18/18).
-  - `mm2 --mm2-path <retail> --city london --headless` — `status=pass`;
-    `1188 pathset props (0 decal paths, 0 failed, 0 capped, 0 issues)`
-    — identical stamped count to the pre-fix baseline.
-  - `mm2 --mm2-path <retail> --city sf --headless` — `status=pass`;
-    `925 pathset props (31 decal paths, 0 failed, 0 capped, 0 issues)`.
+  - `cargo test --locked --workspace` — PASS, all 31 groups,
+    0 failures (event.rs 11/11).
+  - `mm2 --mm2-path <retail> --city london --event circuit:0
+    --headless` — `status=pass`, `overlay files=1 stamped=181
+    labels=0 animated=0 decals=0 unresolved=0 capped=0 issues=0`,
+    `race=Running cp=1/6`.
+  - `mm2 --mm2-path <retail> --city london --event checkpoint:6
+    --headless` — `status=pass`, `stamped=256` (`race6.pathset`).
+  - `mm2 --mm2-path <retail> --city sf --event circuit:0 --headless`
+    — `status=pass`, `stamped=85` (`sp=0` → one prop per vertex).
+  - `mm2 --mm2-path <retail> --city london --headless` — ambient
+    counts unchanged: `1188 pathset props (0 decal …)`.
+  - `mm2 --mm2-path <retail> --city sf --headless` — `925 pathset
+    props (31 decal …)`; ends wheels=0/4 airborne again — the same
+    known airborne end state as the checked baseline, not a
+    regression.
 - Acceptance IDs satisfied / still open:
-  - Review blocker: addressed — expansion is bounded per file,
-    non-finite data skipped and reported, overflow counted in
-    `CityReport`, regression tests cover huge/infinite fixtures.
-  - F03-AC01: ADVANCED as before (budget/cap semantics now also
-    pinned by tests).
-  - F03-AC02/AC03/AC04/AC05/AC06: unchanged — open per the previous
-    handoff (spot validation, decal policy, race overlays, mod
-    evidence, `.cpvs`/`.ldef`).
+  - F03-AC04: ADVANCED — synthetic restart test proves adds/removes
+    only event objects with no duplicates; retail events stamp real
+    authored overlays. "Entering and exiting a race twice" via menu
+    flow is F17 territory; the session restart path is the exercised
+    mechanism.
+  - F03-AC01: ADVANCED — shared stamping now also exercised for
+    event files.
+  - F03-AC02/AC03/AC05/AC06: unchanged — open (spot validation,
+    ramp/decal collision, mod-override evidence, full source-family
+    audit → F03-C).
+- Scope decisions recorded: `giz_*` animated objects classified and
+  counted, not stamped (wrong physics class as statics; needs the
+  animated-object feature — bridges/ferries/parked cars).
+  `<city>_<object>.pathset` ambient sets and `<object>_<event>`
+  overrides stay unconsumed extras — all `giz_*`/`PATHnn`/`sp_pcar*`
+  on retail, nothing stampable lost on reachable events. Crash-course
+  stem pathsets are claimed but unreachable (CrashCourse setup
+  rejects first, F21). `PREFIX:` names strip before classifying —
+  `OPEN:giz_*` still counts as animated.
 - Stock data/GPU/audio/network limitations: ran on the real retail
-  install through the VFS; no new rendered capture needed (the stamped
-  counts and transforms are byte-identical on retail — the bound is
-  inert on valid data). sf headless smoke ended wheels=0/4 again —
-  same airborne end state as the reviewed baseline (peak 37.2 m/s,
-  moved ~171 m), not a regression.
+  install through the VFS; no rendered capture this iteration
+  (stamped transforms are the same pipeline the checked city pathset
+  code emits). No audio/network code exists.
 - Unresolved blockers or discovered regressions: none known.
-- Next smallest useful action: F03-A.2 scope decision, decal stamping
-  (needs a strip-width rule — research first), or `race/*.pathset`
-  overlays under F03-AC04. F13-A/F09-C remain ready alternatives.
+- Next smallest useful action: F03-A.2 scope decision (`.cpvs`,
+  `.ldef`, embedded PSDL props), decal stamping research, or
+  F13-A/F09-C.
 
-This is a candidate handoff. External code-gate and separate review results live in the runner state directory and are not implied by this report.
+This is a candidate handoff. External code-gate and separate review
+results live in the runner state directory and are not implied by
+this report.
