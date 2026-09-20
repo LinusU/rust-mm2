@@ -44,6 +44,7 @@ use mm2_game::{
 use tracing::{debug, info, warn};
 
 use crate::banger::{BangerDefs, BangerPieces, FragmentPiece, banger_bundle};
+use crate::decals::{self, DecalStampReport};
 
 /// Whether to mirror Z when converting MM2 coordinates to Bevy space.
 ///
@@ -92,10 +93,10 @@ const TEXTURE_ANIM_FPS: f32 = 10.0;
 
 /// MM2 texture lookup order for a logical stem: lossless formats first so a
 /// mod can ship a `.png` next to the original `.tex`.
-const TEXTURE_EXTS: &[&str] = &["png", "ktx2", "tga", "tex"];
+pub(crate) const TEXTURE_EXTS: &[&str] = &["png", "ktx2", "tga", "tex"];
 
 #[inline]
-fn v3(p: [f32; 3]) -> Vec3 {
+pub(crate) fn v3(p: [f32; 3]) -> Vec3 {
     if MIRROR_Z {
         Vec3::new(p[0], p[1], -p[2])
     } else {
@@ -514,8 +515,10 @@ pub struct CityReport {
     /// Pathset-stamped prop instances spawned.
     pub pathset_props_spawned: usize,
     /// Pathset paths whose name resolves to a texture, not a PKG —
-    /// decal stamping is unhandled (e.g. SF's `r4i_rails_f` cable-car
-    /// rails inside `props.pathset`). Reported, never silently dropped.
+    /// decal entries inside `props.pathset` stay classified-only
+    /// (measured authoring leftovers; the dedicated `decals.pathset`
+    /// is stamped via [`CityReport::decals`]). Reported, never
+    /// silently dropped.
     pub pathset_decal_paths: usize,
     /// Pathset paths skipped because their name resolved to neither a
     /// PKG nor a texture.
@@ -549,6 +552,9 @@ pub struct CityReport {
     pub proprule_issues: usize,
     /// Prop-rule prop names whose bound banger record failed to decode.
     pub proprule_banger_failed: usize,
+    /// `decals.pathset` consumption: ribbons stamped, per-class skips
+    /// and malformed-record counts (F03-B.4).
+    pub decals: DecalStampReport,
 }
 
 impl std::fmt::Display for CityReport {
@@ -594,6 +600,26 @@ impl std::fmt::Display for CityReport {
             self.proprule_issues,
             self.proprule_banger_failed,
             self.missing_textures.len(),
+        )?;
+        let d = &self.decals;
+        write!(
+            f,
+            "; decals: {} ribbons/{} quads ({} entities, {} labels, {} animated, {} props, {} unresolved, {} empty, {} degenerate, {} odd, {} unsupported-kind, {} skipped, {} capped, {} missing-textures, {} issues)",
+            d.ribbons,
+            d.quads,
+            d.entities,
+            d.label_paths,
+            d.animated_paths,
+            d.prop_paths,
+            d.unresolved_paths,
+            d.empty_paths,
+            d.degenerate_paths,
+            d.odd_point_paths,
+            d.unsupported_kind_paths,
+            d.skipped_quads,
+            d.capped,
+            d.missing_textures,
+            d.issues,
         )
     }
 }
@@ -1690,6 +1716,19 @@ fn emit_divider(
 /// Decode a TEX file preserving every mip level (concatenated layer-major,
 /// matching `Image::data` layout for multi-mip textures).
 fn decode_tex(bytes: &[u8], logical: &str) -> Option<(Image, bool)> {
+    decode_tex_with(bytes, logical, false)
+}
+
+/// [`decode_tex`] with a palette-alpha override for the decal channel:
+/// `honor_palette_alpha` decodes through
+/// [`TexFile::decode_rgba_honoring_alpha`] (P8/P4 carry authored
+/// translucency on decal textures — inferred, see
+/// `docs/research/pathset.md`).
+pub(crate) fn decode_tex_with(
+    bytes: &[u8],
+    logical: &str,
+    honor_palette_alpha: bool,
+) -> Option<(Image, bool)> {
     let tex = match TexFile::parse(bytes) {
         Ok(t) => t,
         Err(e) => {
@@ -1717,7 +1756,11 @@ fn decode_tex(bytes: &[u8], logical: &str) -> Option<(Image, bool)> {
             );
             break;
         }
-        match tex.decode_rgba(level) {
+        match if honor_palette_alpha {
+            tex.decode_rgba_honoring_alpha(level)
+        } else {
+            tex.decode_rgba(level)
+        } {
             Some(rgba) => {
                 data.extend_from_slice(&rgba);
                 level_count += 1;
@@ -1766,10 +1809,13 @@ fn decode_tex(bytes: &[u8], logical: &str) -> Option<(Image, bool)> {
     image.sampler = ImageSampler::Descriptor(sampler);
     // Alpha is decided from the decoded pixels: only formats that actually
     // carry an alpha channel can produce transparency.
-    let has_alpha = tex
-        .decode_rgba(0)
-        .map(|rgba| rgba.chunks_exact(4).any(|px| px[3] < 250))
-        .unwrap_or(false);
+    let has_alpha = if honor_palette_alpha {
+        tex.decode_rgba_honoring_alpha(0)
+    } else {
+        tex.decode_rgba(0)
+    }
+    .map(|rgba| rgba.chunks_exact(4).any(|px| px[3] < 250))
+    .unwrap_or(false);
     Some((image, has_alpha))
 }
 
@@ -1779,7 +1825,7 @@ fn decode_tex(bytes: &[u8], logical: &str) -> Option<(Image, bool)> {
 /// formats compiled into this build — a recognized extension is not a
 /// guarantee: unsupported encodings or missing GPU formats fail the decode
 /// and are reported as a miss, never silently replaced.
-fn decode_buffer_image(bytes: &[u8], ext: &str, logical: &str) -> Option<(Image, bool)> {
+pub(crate) fn decode_buffer_image(bytes: &[u8], ext: &str, logical: &str) -> Option<(Image, bool)> {
     let mut image = match Image::from_buffer(
         bytes,
         ImageType::Extension(ext),
@@ -1993,6 +2039,53 @@ impl<'a> MaterialCache<'a> {
     pub fn shader_material(&mut self, s: &mm2_formats::pkg::PkgShader) -> Handle<StandardMaterial> {
         let base = self.get(&s.texture);
         adjust_material(s, &base, self.materials).unwrap_or(base)
+    }
+
+    /// Material for a decal texture stem (F03-B.4): same VFS
+    /// resolution and extension order as [`get`](Self::get), but TEX
+    /// decodes honor palette alpha on every palette format (decal
+    /// textures carry authored translucency there — inferred, see
+    /// `docs/research/pathset.md`), alpha-bearing results blend, and
+    /// the material is double-sided plus depth-biased to sit on its
+    /// surface. `None` — never the fallback — when the stem does not
+    /// resolve or fails to read/decode; the caller counts the miss.
+    pub fn get_decal(&mut self, stem: &str) -> Option<Handle<StandardMaterial>> {
+        let key = format!("decal:{}", stem.to_ascii_lowercase());
+        if let Some(m) = self.by_key.get(&key) {
+            return Some(m.clone());
+        }
+        let resolved = self
+            .vfs
+            .resolve_preferred(&format!("texture/{stem}"), TEXTURE_EXTS)?;
+        let bytes = match self.vfs.read(&resolved) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(logical = %resolved.logical, error = %e, "decal texture unreadable");
+                return None;
+            }
+        };
+        let ext = resolved.logical.rsplit('.').next().unwrap_or_default();
+        let (image, has_alpha) = if ext == "tex" {
+            decode_tex_with(&bytes, &resolved.logical, true)
+        } else {
+            decode_buffer_image(&bytes, ext, &resolved.logical)
+        }?;
+        let mat = self.materials.add(StandardMaterial {
+            base_color_texture: Some(self.images.add(image)),
+            alpha_mode: if has_alpha {
+                AlphaMode::Blend
+            } else {
+                AlphaMode::Opaque
+            },
+            // Authored winding is not guaranteed on either edge order —
+            // draw both sides rather than guess.
+            cull_mode: None,
+            depth_bias: crate::decals::DECAL_DEPTH_BIAS,
+            perceptual_roughness: 0.95,
+            ..default()
+        });
+        self.by_key.insert(key, mat.clone());
+        Some(mat)
     }
 
     /// Texture stems that could not be resolved while building materials.
@@ -2725,9 +2818,12 @@ fn resolve_prop(
 /// resolves the prop's name to a `tune/banger` record (F04-A, WLD-16).
 /// `PATHnn` labels, `giz_*` animated objects and decal (texture) names
 /// are classified and counted, never stamped — see
-/// `docs/research/pathset.md` for what each is inferred to be. The
-/// `giz_` check runs on the asset name after `PREFIX:` stripping, so
-/// `OPEN:giz_bridge01_l` still classifies as animated.
+/// `docs/research/pathset.md` for what each is inferred to be (decal
+/// entries inside prop-consumed files are measured authoring
+/// leftovers; `decals.pathset` stamps through
+/// [`crate::decals::stamp_decals`]). The `giz_` check runs on the asset
+/// name after `PREFIX:` stripping, so `OPEN:giz_bridge01_l` still
+/// classifies as animated.
 ///
 /// `logical` names the consumed file in diagnostics; `name_prefix`
 /// distinguishes the spawned entities by consumer (`pathset-*` for
@@ -2768,8 +2864,9 @@ fn stamp_pathset(
         }
         let Some(model) = cache.get(name) else {
             // A name that resolves to a texture rather than a PKG is
-            // a decal path — decal stamping is unhandled, but it is
-            // not a dead ref.
+            // a decal path — decal entries in prop-consumed files are
+            // measured authoring leftovers (see `decals.pathset`
+            // consumption in `load_city`), not dead refs.
             if TEXTURE_EXTS.iter().any(|ext| {
                 cache
                     .vfs
@@ -3090,6 +3187,37 @@ pub fn load_city(
         ));
     }
 
+    // `decals.pathset` beside the PSDL paints the road markings —
+    // cable-car rails, zigzag junction lines, box crosshatch — as
+    // texture ribbons on the two-edge path geometry (F03-B.4). It runs
+    // before the `PropCache` consumers: it owns its own material cache
+    // and never touches PKGs, so it can hold `images`/`materials`
+    // directly. The alternate `decals01`/`decals_bad`/`decals_good`
+    // files are development extras, never consumed.
+    let decals_path = psdl_path.replace(".psdl", "/decals.pathset");
+    match vfs.read_path(&decals_path) {
+        Ok((decal_bytes, decal_res)) => match pathset::Pathset::parse(&decal_bytes) {
+            Ok(pathset) => {
+                report.decals = decals::stamp_decals(
+                    commands,
+                    vfs,
+                    &mut mats,
+                    &pathset,
+                    &decal_res.logical,
+                    "decal",
+                    meshes,
+                    owner,
+                );
+            }
+            Err(e) => {
+                warn!(path = %decal_res.logical, error = %e, "decals.pathset parse failed");
+            }
+        },
+        Err(_) => {
+            debug!(path = %decals_path, "no decals.pathset; skipping decals");
+        }
+    }
+
     // PKG prop cache shared by both placement sources: a prop stamped
     // by INST and by a pathset reuses the same prepared meshes,
     // materials and collider.
@@ -3132,11 +3260,14 @@ pub fn load_city(
     }
 
     // `props.pathset` beside the PSDL stamps rows of street dressing —
-    // trees, lamps, barricades — along authored paths (F03-B). Only
-    // this file is consumed here: `decals*.pathset` stamp textures,
-    // not props (unhandled), `audio_pathsets/` carry `PATHnn` sound
-    // routes (F07/F08) and `race/<city>/*.pathset` are event-scoped
-    // overlays consumed by `load_session_world` (F03-AC04).
+    // trees, lamps, barricades — along authored paths (F03-B). Its
+    // texture-named paths stay classified-only: measured on retail SF,
+    // 26 of the 31 are byte-identical duplicates of `decals.pathset`
+    // entries — authoring leftovers the prop loader ignores (stamping
+    // them here would double-draw the rail street).
+    // `audio_pathsets/` carry `PATHnn` sound routes (F07/F08) and
+    // `race/<city>/*.pathset` are event-scoped overlays consumed by
+    // `load_session_world` (F03-AC04).
     let pathset_path = psdl_path.replace(".psdl", "/props.pathset");
     match vfs.read_path(&pathset_path) {
         Ok((pathset_bytes, pathset_res)) => match pathset::Pathset::parse(&pathset_bytes) {

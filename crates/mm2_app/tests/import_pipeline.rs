@@ -129,6 +129,55 @@ fn synthetic_inst() -> Vec<u8> {
     d
 }
 
+/// One `PTH1` path record: `name`, `points`, raw `kind`/`spacing` bytes.
+fn pth1_path(name: &str, points: &[[f32; 3]], kind: u8, spacing: u8) -> Vec<u8> {
+    let mut d = vec![0u8; 32];
+    d[..name.len()].copy_from_slice(name.as_bytes());
+    d.extend_from_slice(&(points.len() as u32).to_le_bytes());
+    d.extend_from_slice(&0u32.to_le_bytes()); // selection
+    for p in points {
+        d.extend_from_slice(&0u32.to_le_bytes()); // attributes
+        push_f32s(&mut d, p);
+    }
+    d.push(kind);
+    d.push(spacing);
+    d.extend_from_slice(&[0, 0]);
+    d
+}
+
+/// A `PTH1` file from path records.
+fn pth1(paths: &[Vec<u8>]) -> Vec<u8> {
+    let mut d = b"PTH1".to_vec();
+    d.extend_from_slice(&(paths.len() as u32).to_le_bytes());
+    d.extend_from_slice(&0u32.to_le_bytes());
+    for p in paths {
+        d.extend_from_slice(p);
+    }
+    d
+}
+
+/// A 2×2 P8 TEX: palette entry 1 is red at alpha 0x40 — the decal
+/// decode must surface it (palette-alpha honoring) where ordinary
+/// decodes would report opaque.
+fn synthetic_decal_tex() -> Vec<u8> {
+    let mut d = Vec::new();
+    d.extend_from_slice(&2u16.to_le_bytes()); // w
+    d.extend_from_slice(&2u16.to_le_bytes()); // h
+    d.extend_from_slice(&1u16.to_le_bytes()); // P8
+    d.extend_from_slice(&1u16.to_le_bytes()); // mips
+    d.extend_from_slice(&0u16.to_le_bytes()); // unknown
+    d.extend_from_slice(&0u32.to_le_bytes()); // bits
+    for i in 0..256usize {
+        if i == 1 {
+            d.extend_from_slice(&[0, 0, 255, 0x40]); // BGRA
+        } else {
+            d.extend_from_slice(&[0, 0, 0, 0xff]);
+        }
+    }
+    d.extend_from_slice(&[1, 1, 1, 1]); // pixels
+    d
+}
+
 /// One quad road room (road x 2–28, building lines x 0/30, z 0–20)
 /// carrying `prop_rule` byte 1 and one single-room prop path — the
 /// minimum PSDL that exercises the prop-rule walk end to end.
@@ -414,6 +463,120 @@ fn vfs_to_city_stamps_prop_rule_props() {
         .filter(|n| n.as_str().starts_with("proprule-"))
         .count();
     assert_eq!(stamped, 8, "4 render parts + 4 colliders");
+}
+
+/// The decal channel end to end: `decals.pathset` → ribbon quads on a
+/// merged `decal-<stem>` entity, texture resolved through the VFS,
+/// palette-alpha honored → blended material, no collider — plus every
+/// non-decal path class landing in the report.
+#[test]
+fn vfs_to_city_stamps_decal_ribbons() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("city/test")).unwrap();
+    std::fs::create_dir_all(root.join("geometry")).unwrap();
+    std::fs::create_dir_all(root.join("texture")).unwrap();
+    std::fs::write(root.join("city/test.psdl"), synthetic_psdl()).unwrap();
+    std::fs::write(root.join("geometry/testprop.pkg"), synthetic_pkg()).unwrap();
+    std::fs::write(root.join("texture/testdecal.tex"), synthetic_decal_tex()).unwrap();
+    std::fs::write(
+        root.join("texture/test_road.png"),
+        include_bytes!("../../../assets/texture/dev_road.png"),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("city/test/decals.pathset"),
+        pth1(&[
+            // A 4-point ribbon and an odd-tailed one — same stem,
+            // merged into one entity: 1 + 2 = 3 quads.
+            pth1_path(
+                "testdecal",
+                &[
+                    [0.0, 0.0, 0.0],
+                    [2.0, 0.0, 0.0],
+                    [0.0, 0.0, 10.0],
+                    [2.0, 0.0, 10.0],
+                ],
+                2,
+                20,
+            ),
+            pth1_path(
+                "testdecal",
+                &[
+                    [0.0, 0.0, 0.0],
+                    [2.0, 0.0, 0.0],
+                    [0.0, 0.0, 10.0],
+                    [2.0, 0.0, 10.0],
+                    [0.0, 0.0, 20.0],
+                    [2.0, 0.0, 20.0],
+                    [9.0, 9.0, 9.0],
+                ],
+                2,
+                20,
+            ),
+            pth1_path("PATH01", &[[0.0, 0.0, 0.0]], 0, 0),
+            pth1_path("testprop", &[[0.0, 0.0, 0.0]], 0, 0),
+            pth1_path("missingtex", &[[0.0, 0.0, 0.0]], 0, 0),
+            // Empty and under-4-point paths on a resolved stem reach
+            // the empty/degenerate classes.
+            pth1_path("testdecal", &[], 2, 20),
+            pth1_path("testdecal", &[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]], 2, 20),
+        ]),
+    )
+    .unwrap();
+
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(root, 0).unwrap();
+
+    let mut world = World::new();
+    let mut queue = CommandQueue::default();
+    let mut meshes: Assets<Mesh> = Assets::default();
+    let mut images: Assets<Image> = Assets::default();
+    let mut materials: Assets<StandardMaterial> = Assets::default();
+
+    let loaded = {
+        let mut commands = Commands::new(&mut queue, &world);
+        let mut session = mm2_game::Session::new();
+        load_city(
+            &mut commands,
+            &vfs,
+            "city/test.psdl",
+            &mut meshes,
+            &mut images,
+            &mut materials,
+            SessionEntity(1),
+            &mut session,
+        )
+        .expect("city loads")
+    };
+    queue.apply(&mut world);
+
+    let d = &loaded.report.decals;
+    assert_eq!(d.ribbons, 2);
+    assert_eq!(d.quads, 3, "1 + 2 (odd tail dropped)");
+    assert_eq!(d.entities, 1, "both ribbons merge under one texture stem");
+    assert_eq!(d.label_paths, 1);
+    assert_eq!(d.prop_paths, 1, "PKG-named path classified, not stamped");
+    assert_eq!(d.unresolved_paths, 1);
+    assert_eq!(d.empty_paths, 1);
+    assert_eq!(d.degenerate_paths, 1, "the two-point path has no extent");
+    assert_eq!(d.odd_point_paths, 1);
+    assert_eq!(d.missing_textures, 0);
+
+    // One merged, render-only decal entity — mesh + material, no body.
+    let mut decals = world
+        .query::<(&bevy::prelude::Name, Option<&avian3d::prelude::RigidBody>)>()
+        .iter(&world)
+        .filter(|(n, _)| n.as_str() == "decal-testdecal")
+        .collect::<Vec<_>>();
+    assert_eq!(decals.len(), 1);
+    assert!(decals.pop().unwrap().1.is_none(), "decals carry no body");
+
+    // Palette alpha on a P8 decal decoded translucent → Blend.
+    let mat = materials.iter().map(|(_, m)| m).find(|m| {
+        m.base_color_texture.is_some() && matches!(m.alpha_mode, bevy::prelude::AlphaMode::Blend)
+    });
+    assert!(mat.is_some(), "decal material blends on authored alpha");
 }
 
 #[test]

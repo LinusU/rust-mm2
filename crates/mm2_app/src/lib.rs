@@ -11,6 +11,7 @@ pub mod camera;
 pub mod car_visual;
 pub mod city;
 pub mod contracts;
+pub mod decals;
 pub mod dev_world;
 pub mod input;
 pub mod nav_overlay;

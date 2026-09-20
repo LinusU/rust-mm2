@@ -150,15 +150,58 @@ naming conventions above): `PATHnn` names are route labels — skipped
 and counted; `giz_*` names are animated objects (bridges, ferries,
 crash-course parked cars) — counted as `animated` and *not* stamped,
 because a static collider is the wrong class for a movable object;
-names resolving to `texture/*` are decal paths — counted, unstamped;
+names resolving to `texture/*` are decal paths — counted; stamped only
+when the consuming file is `decals.pathset` (below), left classified
+in prop-consumed files where they are measured authoring leftovers;
 names resolving to neither are dead refs — counted as `unresolved`.
 On retail the reachable event files carry only `sp_*` prop paths;
 `giz_*`/`PATHnn`/`PREFIX:` names appear only on crash-course stems
 (not loadable yet) and the `<object>_<event>`/ambient object sets
 below.
 
-Still unconsumed: `decals*.pathset` (texture stamping — strip width
-and orientation semantics unknown), `audio_pathsets/` (`PATHnn` sound
+## Decal consumption (implemented 2026-09-20, F03-B.4)
+
+`load_city` consumes `<dir>/<stem>/decals.pathset` through
+`mm2_app::decals::stamp_decals` — the last ambient placement channel.
+Retail counts: london 79 ribbons / 85 quads (3 merged entities:
+`decal_zigzag_l`, `decal_x_inter_l`, `decal_rxwalk03_l`), sf
+48 / 223 (2: `r4i_rails_f`, `trackdecal_l`) — render-only, session-
+owned, no colliders, ~4–5 empty/odd/degenerate paths counted per city.
+
+**Geometry — measured, verified on retail (WLD-18):** a decal path is
+a `LineStrip` whose points interleave the ribbon's *two* edges: even
+indices form one edge, odd the other; each (even, odd) pair is a
+cross-section carrying the authored width (~1 m zigzag, ~2 m rails,
+8–20 m junction paint) and consecutive sections join into quads. The
+even/odd pairing is the only reading that produces coherent authored
+widths — a centreline reading yields alternating ~1 m/~20 m segments.
+
+**UV and material — inferred, not verified:**
+- `u` runs across the pair in authored order (0 → 1), `v` runs along
+  the strip's centre line tiled every `spacing` metres (the quarter-
+  metre field; `spacing == 0` defaults to 5 m like Angel's own
+  `dgPath::setSpacing` guard). Texture-axis evidence agrees: the
+  zigzag line oscillates along texture V, the rxwalk zebra bars run
+  along U. Whether the original stretches `v` 0→1 or tiles it — and
+  whether `u` can land flipped — is unresolved; authored `ClampU`/
+  `ClampV` flags are honoured by the sampler either way.
+- Palette alpha is honoured on every palette format: the P8 decals
+  carry authored per-entry translucency (rxwalk's unpainted surround
+  ≈ 36, its bars ≈ 240; x_inter's film ≈ 70–235) that only makes
+  sense if the decal renderer reads it. Alpha-bearing textures render
+  `AlphaMode::Blend`; `Rgb888` decals (`r4i_rails_f`) stay opaque.
+- Ribbons sit `DECAL_LIFT` (2 cm) above the authored points with a
+  −1 depth bias against z-fighting, normals oriented upward, material
+  lit + double-sided (authored winding is not guaranteed).
+
+**Duplicate-source finding:** sf `props.pathset` carries 31
+`r4i_rails_f` paths; 26 are byte-identical duplicates of
+`decals.pathset` entries, so the prop channel classifies them without
+stamping (authoring leftovers — double-stamping would z-fight the
+rail street). The 4–5 props-only rail segments are never drawn; if
+original evidence shows prop-channel decals render, one flag flips.
+
+Still unconsumed: `audio_pathsets/` (`PATHnn` sound
 routes, F07/F08), the `<city>_<object>.pathset` ambient object sets
 and `<object>_<event>.pathset` overrides (`london_bridge*`,
 `*_parkedcar*`, `*_ferry`, `*_sailboat`, `london_train` — all

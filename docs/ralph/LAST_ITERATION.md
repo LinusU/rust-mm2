@@ -1,107 +1,103 @@
 # Last implementation iteration
 
-- Task ID and title: F03-B.3 — prop-rule stamping channel
-  (PSDL `prop_rule` → `proprules.csv` → `propdefs.csv` → PKG/banger).
+- Task ID and title: F03-B.4 — decal pathset channel
+  (`city/<city>/decals.pathset` → textured ribbon meshes, the last
+  ambient placement source named in the F03-B research).
 - Starting commit and resulting commits: started at
-  `405a671a808fab23300da589739f75d95861e48c` (clean tree, branch
-  `ralph/night`; F04-C.2 passed external gates + review).
-- Why this slice: highest-value ready item on the plan — the second
-  verified banger placement channel, blocked on UNK-21. Public sources
-  (mm2hook, Open1560) only stub the prop-rule walk, so the semantics
-  were recovered by measuring retail PSDL geometry with a temporary
-  probe, then implemented as an inferred policy with the verified
-  parts promoted to WLD-17. The probe was removed before commit.
+  `de55fbb2668bd0b6564bd2cce0f3e55840895574` (clean tree, branch
+  `ralph/night`; F03-B.3 passed external gates + review).
+- Why this slice: the plan's named next work — the one placement
+  channel still counted-but-unstamped. Public sources (mm2hook,
+  Open1560) only stub decal drawing (`sdlPage16::Draw` per room), so
+  the ribbon semantics were recovered by measuring retail data, same
+  approach as the prop-rule slice.
 - What landed (code):
-  - `mm2_game::props` — pure `walk_prop_rules` over PSDL rooms/paths
-    + rule tables. Per `RoomPath`: resolve `road_rooms` (non-room
-    encoded values counted as bad refs), find the entry/exit
-    crossings — `start/end_crossroads` curb pairs at path ends,
-    widest neighbour-marked perimeter pair at interior room-to-road
-    boundaries — then walk the two arcs between them as the sidewalk
-    building lines. Side labels measured against travel direction;
-    each side walked with the road on the walker's left;
-    `start`/`distance`/`maxUse` scoped per def per side per room;
-    placement = `lerp(curb, outer, (minLerp+maxLerp)/2)`; variant by
-    deterministic hash; `PropStamp` carries room/side/def/variant/
-    position/direction/ordinal. Output bounded at
-    `MAX_PROP_RULE_STAMPS`; `PropWalkStats` + issue strings count
-    no-rule rooms, missing rules/defs, bad refs, missing crossings,
-    unreached rule rooms and cap hits — nothing dropped silently.
-  - `mm2_app::city` — `stamp_prop_rules` resolves each stamp's PKG
-    through the shared `PropCache`: bound names → `spawn_banger_prop`
-    dormant bangers (identical to pathset stamps), unbound →
-    `spawn_prop` statics; `CityReport` gains `proprule_*` counters
-    and Display fields; walk issues logged with the sibling CSV path.
-  - `decode_tex` clamps declared mip count to the size-supported
-    maximum (`p_parkmeter_f.tex` declares 7 mips on 32×32 — a hard
-    wgpu validation error once prop-rule props pulled the texture;
-    now warned + clamped).
-  - Tests: 4 `mm2_game::props` unit tests on a synthetic PSDL
-    (single/multi-room sides + labels, start/distance/maxUse
-    bounds, bad refs/undefined byte/unreached counting,
-    interior-boundary marks) + one app test through `load_city` on
-    a synthetic install (rule-bearing room → stamped prop entity +
-    report counts).
+  - `mm2_formats::tex` — decoding refactored through
+    `decode_rgba_impl(level, honor_palette_alpha)`; existing
+    `decode_rgba` unchanged (palette alpha forced opaque) and new
+    `decode_rgba_honoring_alpha` keeps authored palette alpha. P8
+    unit test added.
+  - `mm2_app::decals` — `stamp_decals`: pairs a `LineStrip`'s
+    interleaved edge points into cross-sections (even index = one
+    edge, odd = other — measured, WLD-18), joins consecutive
+    sections into quads, `u` 0→1 across the pair, `v` = centre-line
+    distance tiled per `spacing` (quarter-metre field; 0 → 5 m
+    default, inferred), normals oriented upward, 2 cm lift + −1
+    depth bias, lit double-sided material. Textures resolve through
+    the shared `MaterialCache::get_decal` (same `png/ktx2/tga/tex`
+    order; `.tex` via `decode_tex_with(..., true)`); alpha-bearing
+    textures get `AlphaMode::Blend`. Geometry merges per texture
+    stem into one entity each — render-only, no colliders,
+    session-owned via `CityEntity`. `MAX_DECAL_QUADS` bounds
+    expansion; every path lands in a counted class (ribbons /
+    `PATHnn` labels / `giz_*` animated / PKG-prop / unresolved /
+    empty / degenerate / odd-tail / skipped quads / capped / missing
+    textures / issues).
+  - `mm2_app::city` — consumes `<dir>/<stem>/decals.pathset` beside
+    the PSDL (missing file non-fatal), report gains `decals` block
+    in `CityReport` + Display. `props.pathset` keeps classifying its
+    texture-named paths without stamping (26 of sf's 31
+    `r4i_rails_f` entries are byte-identical `decals.pathset`
+    duplicates — measured authoring leftovers; stamping them would
+    double-draw the rail street).
+  - Tests: `mm2_app::decals` unit tests (section pairing, odd tail,
+    cumulative-v distance) + `import_pipeline` end-to-end through
+    `load_city` on a synthetic install (two ribbons → one merged
+    entity, quad counts, all classification counters, blended
+    material, no collider).
 - Retail evidence gathered (install
-  `/Users/linus/coding/rust-mm2/retail`, fnv1a64:e91e6cd4b2ae30d9,
-  `target/debug/mm2`):
-  - `--city sf --headless` → `prop-rule props stamped rooms=345
-    stamps=5002 bangers=5002 unresolved=0 no_crossing=0 bad_refs=109
-    unreached=52 capped=0`.
-  - `--city london --headless` → `rooms=410 stamps=5083 bangers=5083
-    unresolved=0 no_crossing=0 bad_refs=0 unreached=5`.
-  - `bad_refs` = encoded non-room `road_rooms` values (65 0xx range)
-    on sf only; `unreached` = rule-bearing rooms no path traverses —
-    both counted, not hidden.
-  - Every prop-rule PKG resolves to a bound banger record on retail
-    (consistent with WLD-16), so all stamps are dormant bangers.
-  - Screenshots (local only): `/tmp/proprule_sf.png` — lamps line
-    both sidewalks at authored ~29 m staggered spacing, banner arms
-    over the road; `/tmp/proprule_sf2.png` — multi-room freeway
-    parapet lamps (interior boundaries work);
-    `/tmp/proprule_london2.png` — plaza phone booths, trees,
-    bollards at curb edges.
+  `/Users/linus/coding/rust-mm2/retail`, `target/debug/mm2`):
+  - `--city sf --headless` → `decals ribbons=48 quads=223 entities=2
+    labels=3 empty=1 odd=1 unresolved=0 missing=0 issues=0`.
+  - `--city london --headless` → `ribbons=79 quads=85 entities=3
+    empty=4 degenerate=1 odd=1 unresolved=0 missing=0 issues=0`.
+  - Screenshots (local only): `/tmp/decal_sf_rails.png` — paired
+    cable-car rail channels down the street;
+    `/tmp/decal_london_xwalk.png` — zebra crossing with correct UK
+    stripe orientation; `/tmp/decal_london_zigzag2.png` — faint
+    zigzag line (authored ~29% alpha);
+    `/tmp/decal_london_xinter.png` — translucent yellow junction
+    wash (the texture is a mostly-uniform alpha film — the wash is
+    the authored content, not a rendering defect).
 - What this proves / does not prove:
-  - Proves: the stamping *geometry* (WLD-17) — every rule-bearing
-    room reached by a sane path resolves its crossings on both cities
-    (`no_crossing=0`), multi-room interior boundaries resolve via
-    neighbour marks, and retail-visual sanity holds. The channel is
-    live end-to-end through `load_city` with honest counters.
-  - Does not prove: the original's field semantics — UNK-21 stays
-    open, narrowed to `start`/`distance`/`maxUse` scope (implemented
-    per room-side), the `file1`–`file4` pick (deterministic hash,
-    original seed unrecovered), `minLerp`/`maxLerp` meaning (midpoint
-    lerp implemented), the left/right label convention and prop yaw
-    axis, the 65 0xx `road_rooms` record kind, and the `props.csv`
-    `Races` consumer. No comparison against an original-executable
-    frame.
+  - Proves: the ribbon *geometry* (WLD-18) — the even/odd edge-pair
+    reading is the only one producing coherent authored widths;
+    texture contents corroborate the u-across/v-along axes; the
+    channel is live end-to-end through `load_city` on both cities
+    with honest counters and zero unresolved names.
+  - Does not prove: the original's UV policy (v tiled per `spacing`
+    vs stretched — inferred), u direction (could be flipped on some
+    textures), exact blend/render state (palette-alpha blending is
+    inferred from authored alpha values), whether prop-channel decal
+    names render (leftovers currently not stamped), or the per-point
+    `attributes` word (UNK-20). No original-executable comparison
+    exists.
 - Commands actually run and results:
-  - `cargo test -p mm2_game --lib props::` — 4 pass; `cargo test -p
-    mm2_app --test import_pipeline` — pass.
-  - `mm2 --mm2-path <retail> --city {sf,london} --headless` — counts
-    above; screenshots above.
+  - `cargo test -p mm2_formats --lib tex` — pass; `cargo test -p
+    mm2_app` — pass (incl. new decal tests).
+  - `mm2 --mm2-path <retail> --city {sf,london} --headless` —
+    counts above; screenshots above via `--frames 90 --screenshot`.
   - Gates at the candidate commit: `cargo fmt --all -- --check`
     pass; `cargo clippy --workspace --all-targets --all-features
     -- -D warnings` pass, exit 0; `cargo test --workspace` pass —
     all suites, 0 failures.
 - Acceptance IDs satisfied / still open:
-  - F03-AC01/AC02 (all placement sources instantiated): the third
-    verified ambient source now stamps; `props.csv` `Races` group +
-    decal pathsets remain unconsumed. Open.
-  - F04 (bangers): the prop-rule channel leg of the parent note is
-    now covered — 5 002/5 083 retail placements bind as dormant
-    bangers through the same path as pathset stamps. UNK-22
-    thresholds unchanged. Open.
-- Deferred deliberately: decal stamping research, `props.csv` group
-  consumers, original variant-pick/lerp semantics (UNK-21),
-  hull-clearance fidelity, `BirthRule`/audio/flash/decal banger
-  effects, `Timer` despawn, replication (F26).
+  - F03-AC01/AC02 (all placement sources instantiated): every
+    ambient-city placement source now instantiates — INST, PSDL room
+    props, `props.pathset`, prop-rules, `decals.pathset`. Remaining
+    unconsumed pathset families need features, not stamping rules
+    (`audio_pathsets/` → F07/F08, `giz_*` object sets → animated
+    objects, `props.csv` `Races` consumer unknown). Open.
+  - F03-AC03–AC06: unchanged by this slice.
+- Deferred deliberately: decal UV/blend verification vs original
+  evidence (UNK-20), `props.csv` `Races` group consumer, prop-channel
+  decal stamping if original evidence appears, hull-clearance
+  fidelity, F13-A/F09-C.
 - Stock data/GPU/audio/network limitations: retail evidence is
   headless loads + local screenshots through the VFS; no
   original-executable comparison exists.
 - Unresolved blockers or discovered regressions: none known.
-- Next smallest useful action: decal stamping research (same
-  measure-first approach), the hull-clearance fidelity question,
+- Next smallest useful action: the hull-clearance fidelity question,
   F13-A or F09-C.
 
 This is a candidate handoff. External code-gate and separate review
