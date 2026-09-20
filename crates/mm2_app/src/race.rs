@@ -40,10 +40,10 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_assets::Vfs;
 use mm2_game::{
-    Checkpoint, CheckpointRule, Difficulty, EventRef, ParticipantState, Player, ProgressOutcome,
-    RaceDefinition, RacePhase, RaceProgress, RaceStarted, RaceState, ResultLedger, Session,
-    SessionEntity, SessionOutcome, SessionPhase, SessionResult, TargetSelection, cycle_target,
-    navigation_target, relative_bearing,
+    Checkpoint, CheckpointRule, Difficulty, EventRef, ParticipantState, Player, PlayerControl,
+    ProgressOutcome, RACE_TICK_HZ, RaceDefinition, RacePhase, RaceProgress, RaceStarted, RaceState,
+    ResultLedger, Session, SessionEntity, SessionOutcome, SessionPhase, SessionResult,
+    TargetSelection, cycle_target, navigation_target, relative_bearing,
 };
 use mm2_vehicle::Teleported;
 use tracing::warn;
@@ -456,5 +456,103 @@ pub fn update_nav_arrow(
     };
     for mut bg in &mut parts {
         *bg = BackgroundColor(color);
+    }
+}
+
+/// Remaining time at which the low-time warning starts pulsing —
+/// a designed cue (DSN-9): the ledger documents no original Blitz
+/// low-time warning (HUD-2 lists only the countdown timer), so 10 s
+/// at the race tick rate is a presentation policy, not an
+/// original-behavior claim. Inclusive, matching the deadline's own
+/// convention.
+pub const LOW_TIME_TICKS: u32 = 10 * RACE_TICK_HZ;
+
+/// Half-period of the low-time pulse in race ticks (0.5 s). The
+/// bright/dim phase is derived from the remaining ticks themselves,
+/// so the pulse freezes with a pause and cannot drift from the
+/// deadline clock (F12-AC04).
+pub const LOW_TIME_FLASH_TICKS: u32 = RACE_TICK_HZ / 2;
+
+/// Warning text color on the bright half of the pulse.
+pub const LOW_TIME_BRIGHT: Color = Color::srgb(1.0, 0.28, 0.16);
+
+/// Warning text color on the dim half — the banner pulses between
+/// bright and dim rather than blinking out, so the cue stays readable
+/// the whole warning window.
+pub const LOW_TIME_DIM: Color = Color::srgb(0.6, 0.18, 0.12);
+
+/// Marker on the session-owned low-time warning banner — a `LOW TIME`
+/// text line under the nav arrow, spawned for event sessions and
+/// driven by [`update_race_warning`]. Dev-rig presentation (DSN-9),
+/// not a claim about the original's HUD.
+#[derive(Component)]
+pub struct LowTimeWarning;
+
+/// Spawn the low-time warning banner, session-owned and hidden until
+/// [`update_race_warning`] arms it. Untimed definitions never produce
+/// a `time_remaining`, so it simply stays dark for them.
+pub fn spawn_race_warning(commands: &mut Commands, owner: SessionEntity) {
+    commands.spawn((
+        owner,
+        LowTimeWarning,
+        Text::new("LOW TIME"),
+        TextFont {
+            font_size: bevy::text::FontSize::Px(26.0),
+            ..default()
+        },
+        TextColor(LOW_TIME_BRIGHT),
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(108.0),
+            left: Val::Percent(50.0),
+            margin: UiRect::left(Val::Px(-62.0)),
+            padding: UiRect::axes(Val::Px(8.0), Val::Px(2.0)),
+            ..default()
+        },
+        Visibility::Hidden,
+    ));
+}
+
+/// Drive the low-time warning off the authoritative race clock: while
+/// a timed race runs and the local participant is still unresolved,
+/// the banner pulses once [`RaceState::time_remaining`] reaches
+/// [`LOW_TIME_TICKS`], alternating [`LOW_TIME_BRIGHT`]/[`LOW_TIME_DIM`]
+/// every [`LOW_TIME_FLASH_TICKS`] of remaining time. Hidden whenever
+/// no timed race is live — stale or `Complete` races, countdowns,
+/// untimed definitions, or an already-resolved local participant.
+pub fn update_race_warning(
+    race: Option<Res<RaceState>>,
+    session: Res<Session>,
+    participants: Query<(&Player, &RaceProgress)>,
+    mut warning: Query<(&mut Visibility, &mut TextColor), With<LowTimeWarning>>,
+) {
+    let live = race
+        .filter(|r| !r.is_stale(session.generation()))
+        .filter(|r| r.phase == RacePhase::Running);
+    let unresolved_local = participants.iter().any(|(player, progress)| {
+        player.control == PlayerControl::Local
+            && matches!(
+                progress.state,
+                ParticipantState::AwaitingStart | ParticipantState::Racing
+            )
+    });
+    let remaining = match (live, unresolved_local) {
+        (Some(race), true) => race.time_remaining(),
+        _ => None,
+    };
+    for (mut vis, mut color) in &mut warning {
+        match remaining {
+            Some(t) if t <= LOW_TIME_TICKS => {
+                *vis = Visibility::Visible;
+                let phase = ((LOW_TIME_TICKS - t) / LOW_TIME_FLASH_TICKS) % 2;
+                color.0 = if phase == 0 {
+                    LOW_TIME_BRIGHT
+                } else {
+                    LOW_TIME_DIM
+                };
+            }
+            _ => *vis = Visibility::Hidden,
+        }
     }
 }

@@ -9,8 +9,9 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::race::{
-    NAV_AHEAD, NAV_BEHIND, NavArrow, advance_race, nav_target_input,
-    reanchor_teleported_participants, spawn_nav_arrow, update_nav_arrow,
+    LOW_TIME_BRIGHT, LOW_TIME_DIM, LOW_TIME_TICKS, LowTimeWarning, NAV_AHEAD, NAV_BEHIND, NavArrow,
+    advance_race, nav_target_input, reanchor_teleported_participants, spawn_nav_arrow,
+    spawn_race_warning, update_nav_arrow, update_race_warning,
 };
 use mm2_app::session::{self, SessionControl};
 use mm2_game::{
@@ -108,6 +109,7 @@ fn race_app(config: SessionConfig, def: RaceDefinition) -> App {
                 session::session_control_input,
                 nav_target_input,
                 update_nav_arrow,
+                update_race_warning,
                 (
                     despawn_session_entities.run_if(session::unloading),
                     session::drive_session,
@@ -118,7 +120,9 @@ fn race_app(config: SessionConfig, def: RaceDefinition) -> App {
         // The production spawn path stamps the needle with the owning
         // session generation — do the same so teardown tests exercise it.
         .add_systems(Startup, |mut commands: Commands, session: Res<Session>| {
-            spawn_nav_arrow(&mut commands, SessionEntity(session.generation()));
+            let owner = SessionEntity(session.generation());
+            spawn_nav_arrow(&mut commands, owner);
+            spawn_race_warning(&mut commands, owner);
         });
     app.finish();
     app.cleanup();
@@ -918,5 +922,180 @@ fn arrow_arms_the_finish_then_cleans_up() {
             .count(),
         0,
         "the session-owned arrow despawned"
+    );
+}
+
+/// The session-owned `LOW TIME` banner, read back as
+/// `(visibility, text color)`.
+fn warning(app: &mut App) -> (Visibility, Color) {
+    let entity = {
+        let world = app.world_mut();
+        world
+            .query_filtered::<Entity, With<LowTimeWarning>>()
+            .iter(world)
+            .next()
+            .expect("the harness spawns the race warning")
+    };
+    (
+        *app.world().get::<Visibility>(entity).unwrap(),
+        app.world().get::<TextColor>(entity).unwrap().0,
+    )
+}
+
+/// The designed low-time cue (DSN-9): the banner arms when
+/// `time_remaining` reaches `LOW_TIME_TICKS` and pulses bright/dim on
+/// a 0.5 s cadence derived from the remaining ticks — the same
+/// authoritative race clock the deadline is judged on (F12-AC04), so
+/// it freezes with a pause and clears when the deadline resolves.
+#[test]
+fn low_time_warning_pulses_on_the_race_clock() {
+    let def = timed_def(0, LOW_TIME_TICKS + 40);
+    let mut app = race_app(event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(-50.0, 0.0, 0.0));
+
+    // The first `update` runs no fixed step, so clock = 2(n−1)−1
+    // after release: 39 at update 21, and the remaining time crosses
+    // the threshold inside update 22.
+    run(&mut app, 21);
+    assert!(race(&app).time_remaining() > Some(LOW_TIME_TICKS));
+    assert_eq!(
+        warning(&mut app).0,
+        Visibility::Hidden,
+        "above the threshold"
+    );
+
+    run(&mut app, 1); // clock 41 — remaining is one tick under
+    assert_eq!(
+        warning(&mut app),
+        (Visibility::Visible, LOW_TIME_BRIGHT),
+        "the warning arms at the threshold, bright first"
+    );
+
+    // The pulse reads the race clock, not a wall clock: each
+    // `LOW_TIME_FLASH_TICKS` of remaining time flips the phase.
+    run(&mut app, 29); // 60 ticks of warning elapsed — still bright
+    assert_eq!(warning(&mut app).1, LOW_TIME_BRIGHT);
+    run(&mut app, 1); // 61 elapsed — dim half
+    assert_eq!(warning(&mut app).1, LOW_TIME_DIM);
+    run(&mut app, 29); // 119 elapsed — still dim
+    assert_eq!(warning(&mut app).1, LOW_TIME_DIM);
+    run(&mut app, 1); // 121 elapsed — bright again
+    assert_eq!(warning(&mut app).1, LOW_TIME_BRIGHT);
+
+    // Paused, the race clock holds — so does the pulse phase.
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Paused)
+        .unwrap();
+    run(&mut app, 10);
+    assert_eq!(
+        warning(&mut app),
+        (Visibility::Visible, LOW_TIME_BRIGHT),
+        "the frozen clock holds the pulse phase"
+    );
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Playing)
+        .unwrap();
+
+    // Stand the clock one step short of the deadline: expiry resolves
+    // the participant and the race — the banner hides with it.
+    app.world_mut().resource_mut::<RaceState>().clock = u64::from(LOW_TIME_TICKS) + 38;
+    run(&mut app, 1);
+    assert!(matches!(
+        progress(&app, car).state,
+        ParticipantState::TimedOut { .. }
+    ));
+    assert_eq!(race(&app).phase, RacePhase::Complete);
+    assert_eq!(warning(&mut app).0, Visibility::Hidden);
+}
+
+/// The cue waits for `Running`: a race whose whole limit sits under
+/// the threshold still shows nothing while the countdown holds the
+/// clock at zero.
+#[test]
+fn low_time_warning_waits_for_the_running_phase() {
+    let def = timed_def(600, 400);
+    let mut app = race_app(event_config(), def.clone());
+    spawn_participant(&mut app, &def, Vec3::new(-50.0, 0.0, 0.0));
+    run(&mut app, 20);
+    assert!(matches!(race(&app).phase, RacePhase::Countdown { .. }));
+    assert_eq!(race(&app).time_remaining(), Some(400));
+    assert_eq!(
+        warning(&mut app).0,
+        Visibility::Hidden,
+        "a counting-down race never warns"
+    );
+
+    run(&mut app, 302); // 600 countdown ticks release at update 300
+    assert_eq!(race(&app).phase, RacePhase::Running);
+    assert_eq!(
+        warning(&mut app).0,
+        Visibility::Visible,
+        "a sub-threshold limit warns from the first running tick"
+    );
+}
+
+/// The cue belongs to the local participant: once it resolves, the
+/// banner hides even while a remote participant keeps the race
+/// running — the remaining deadline is theirs, not the finished
+/// driver's.
+#[test]
+fn low_time_warning_ignores_other_participants_deadlines() {
+    let def = timed_def(0, LOW_TIME_TICKS + 40);
+    let mut app = race_app(event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(-200.0, 0.0, 0.0));
+    let (remote, _) = spawn_participant(&mut app, &def, Vec3::new(-200.0, 0.0, 0.0));
+    app.world_mut().get_mut::<Player>(remote).unwrap().control = PlayerControl::Remote;
+    run(&mut app, 22); // remaining under the threshold
+    assert_eq!(warning(&mut app).0, Visibility::Visible);
+
+    // The local car sweeps both gates and finishes — the remote is
+    // still racing, so the race stays Running, but the local driver's
+    // warning is done.
+    set_position(&mut app, car, Vec3::new(200.0, 0.0, 0.0));
+    run(&mut app, 1);
+    assert!(matches!(
+        progress(&app, car).state,
+        ParticipantState::Finished { .. }
+    ));
+    assert_eq!(
+        race(&app).phase,
+        RacePhase::Running,
+        "the remote keeps it open"
+    );
+    assert_eq!(warning(&mut app).0, Visibility::Hidden);
+}
+
+/// Untimed races never arm the banner (`time_remaining` is `None`),
+/// and session teardown despawns the session-owned node (AC05).
+#[test]
+fn untimed_race_never_warns_and_teardown_cleans_up() {
+    let def = any_order_def(0);
+    let mut app = race_app(event_config(), def.clone());
+    spawn_participant(&mut app, &def, Vec3::new(-200.0, 0.0, 0.0));
+    run(&mut app, 10);
+    assert_eq!(race(&app).phase, RacePhase::Running);
+    assert_eq!(race(&app).time_remaining(), None);
+    assert_eq!(warning(&mut app).0, Visibility::Hidden);
+
+    app.world_mut().resource_mut::<SessionControl>().restart = true;
+    let mut reached = false;
+    for _ in 0..12 {
+        app.update();
+        if phase(&app) == SessionPhase::Loading {
+            reached = true;
+            break;
+        }
+    }
+    assert!(reached, "restart never re-began the session");
+    let world = app.world_mut();
+    assert_eq!(
+        world
+            .query_filtered::<Entity, With<LowTimeWarning>>()
+            .iter(world)
+            .count(),
+        0,
+        "the session-owned banner despawned"
     );
 }

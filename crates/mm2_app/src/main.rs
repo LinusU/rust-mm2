@@ -500,8 +500,11 @@ fn main() {
             car_visual::toggle_headlights,
             car_visual::trailer_input,
             city::animate_textures,
-            race::update_checkpoint_markers,
-            race::update_nav_arrow,
+            (
+                race::update_checkpoint_markers,
+                race::update_nav_arrow,
+                race::update_race_warning,
+            ),
             update_hud,
         ),
     );

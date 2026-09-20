@@ -571,6 +571,7 @@ pub fn load_session_world(
                 owner,
             );
             race::spawn_nav_arrow(&mut commands, owner);
+            race::spawn_race_warning(&mut commands, owner);
             commands.insert_resource(RaceState::new(def, session.generation()));
             session
                 .transition(SessionPhase::Countdown)
