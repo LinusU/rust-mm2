@@ -231,6 +231,24 @@ impl TexFile {
     /// San Francisco ended up with arched windows arching downwards and a
     /// shopfront whose `SHIRTS` sign read upside down.
     pub fn decode_rgba(&self, level: usize) -> Option<Vec<u8>> {
+        self.decode_rgba_impl(level, false)
+    }
+
+    /// Like [`decode_rgba`](Self::decode_rgba) but the palette alpha byte
+    /// is honored on every palette format, not only `Pa8`/`Pa4`.
+    ///
+    /// The P-type palette alpha is nominally ignored, but decal textures
+    /// (`texture/decal_*`, `r4i_rails_f`) carry authored per-entry
+    /// translucency — e.g. `decal_rxwalk03_l`'s unpainted surround sits
+    /// at alpha ≈ 36 while its crosswalk bars carry ≈ 240 — which only
+    /// makes sense if the decal renderer reads it (inferred; see
+    /// `docs/research/pathset.md`). Ordinary surfaces must keep calling
+    /// [`decode_rgba`](Self::decode_rgba).
+    pub fn decode_rgba_honoring_alpha(&self, level: usize) -> Option<Vec<u8>> {
+        self.decode_rgba_impl(level, true)
+    }
+
+    fn decode_rgba_impl(&self, level: usize, honor_palette_alpha: bool) -> Option<Vec<u8>> {
         let mip = self.levels.get(level)?;
         let count = (mip.width * mip.height) as usize;
         let mut out: Vec<u8> = Vec::with_capacity(count * 4);
@@ -248,7 +266,8 @@ impl TexFile {
                 } else {
                     mip.data.clone()
                 };
-                let has_alpha = matches!(fmt, PixelFormat::Pa8 | PixelFormat::Pa4);
+                let has_alpha =
+                    honor_palette_alpha || matches!(fmt, PixelFormat::Pa8 | PixelFormat::Pa4);
                 for idx in indices {
                     let entry = palette.get(idx as usize).copied().unwrap_or([0; 4]);
                     out.extend_from_slice(&[
@@ -355,6 +374,27 @@ mod tests {
         let rgba = tex.decode_rgba(0).unwrap();
         assert_eq!(&rgba[..4], &[255, 0, 0, 0xff]);
         assert_eq!(&rgba[12..16], &[255, 0, 0, 0xff]);
+    }
+
+    #[test]
+    fn honoring_alpha_reads_p8_palette_alpha() {
+        // Same P8 file as above but entry 1 carries alpha 0x40: the
+        // decal decode surfaces it where `decode_rgba` reports opaque.
+        let mut d = header(2, 2, 1, 1);
+        for i in 0..256usize {
+            if i == 1 {
+                d.extend_from_slice(&[0, 0, 255, 0x40]);
+            } else {
+                d.extend_from_slice(&[0, 0, 0, 0]);
+            }
+        }
+        d.extend_from_slice(&[0, 1, 1, 0]);
+        let tex = TexFile::parse(&d).unwrap();
+        let rgba = tex.decode_rgba_honoring_alpha(0).unwrap();
+        assert_eq!(&rgba[..4], &[255, 0, 0, 0x40]);
+        assert_eq!(&rgba[12..16], &[255, 0, 0, 0x40]);
+        // Untouched decode still reports opaque.
+        assert_eq!(tex.decode_rgba(0).unwrap()[3], 0xff);
     }
 
     #[test]

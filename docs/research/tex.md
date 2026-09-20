@@ -42,6 +42,19 @@ Animated surfaces have no plain `<stem>.tex`; they ship as numbered frames
 to the bare stem. The playback rate is not stored in the data; the importer
 cycles frames at an approximated 10 fps.
 
+## Palette alpha on decals (measured, F03-B.4)
+
+"Alpha ignored" above is the *ordinary-texture* policy. Decal TEXes
+(`decal_zigzag_l`, `decal_rxwalk03_l`, `decal_x_inter_l`…) carry authored
+alpha in the palette's fourth byte even in nominal P8/P4 types: measured on retail,
+`decal_rxwalk03_l`'s unpainted surround sits at alpha ≈ 36 and its
+painted bars at ≈ 240; `decal_x_inter_l` runs ≈ 70–235. The values are
+coherent (low-alpha surround vs high-alpha paint), not garbage, so the
+decal renderer must read them — the decal channel decodes with
+`decode_rgba_honoring_alpha` and blends; ordinary surfaces keep the
+opaque decode. Whether the original keys off the pixel type, the bits
+flags, or the decal draw call itself is unverified.
+
 ## Confidence
 
 - Header fields + type numbers: **documented** (angel-file-formats TEX spec)
@@ -54,4 +67,6 @@ cycles frames at an approximated 10 fps.
 ## Implementation
 
 `mm2_formats::tex` — `TexFile::parse`, `levels`, `decode_rgba(level)` →
-RGBA8. `mm2_app::city` converts to `bevy::Image`.
+RGBA8 (palette alpha forced opaque),
+`decode_rgba_honoring_alpha(level)` → RGBA8 (palette alpha kept — decal
+channel only). `mm2_app::city` converts to `bevy::Image`.
