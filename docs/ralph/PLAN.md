@@ -38,20 +38,23 @@
 
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
-**Next selected slice: F04-A.3 (banger runtime slice — dormant/active/
-hit state machine on Avian using the now-verified binding, threshold
-semantics still UNK-22), prop-rule stamping research (UNK-21), decal
-stamping (same research-first caveat), F13-A or F09-C** — this
-iteration landed F04-A.2: `mm2-inspect banger-bind` proves the
-placement binding by name across every stamped-prop source — INST is
-the static channel (0/386 names bound), pathset props and the PSDL
-prop-rule channel bind ~100%, `*_ai.inst` supplements stamp bound
-`sp_stop_f`; 269/994 records reachable via placements, 562
-vehicle-owned, 163 authored-but-never-placed. MM2Hook (R4) recovered
-the runtime class structure (unhit/hit instances, ×32 active pool) —
-documented in docs/research/banger.md; transition thresholds stay
-UNK-22, no Avian integration yet. F04-A.1 was externally checked at
-`ad471b0`. F13-A's deps (F02-B, F11-B) remain candidates, not checked.
+**Next selected slice: F04-B (break fragments — BREAK<NN> chunk
+spawning on activation, NumParts semantics still UNK-22), prop-rule
+stamping research (UNK-21 — the second verified banger channel),
+decal stamping (same research-first caveat), F13-A or F09-C** — this
+iteration landed F04-A.3: the dormant→active→settled banger state
+machine on Avian. Pathset-stamped bound names now spawn as one
+session-owned entity (collider + `Banger` + `ObjectIdentity`/
+`AuthorityRole`, mesh children); `activate_bangers` flips the body
+dynamic on a qualifying `CollisionStart` (provisional
+`approach_speed × striker_mass` vs `ImpulseLimit2` — UNK-22), a ×32
+`BangerPool` bounds actives oldest-first, `settle_bangers` returns a
+slept body to static, `BangerStateChanged` carries the semantic
+stream; predicted sessions never transition. Retail: london
+1188/1188 + sf 925/925 pathset stamps bound dormant, 0 decode
+failures. F04-A.1 checked at `ad471b0`; F04-A.2 checked per external
+review; F04-A.3 is a candidate. F13-A's deps (F02-B, F11-B) remain
+candidates, not checked.
 
 ## Baseline gate results (this checkout, 2026-09-20)
 
@@ -118,9 +121,10 @@ UNK-22, no Avian integration yet. F04-A.1 was externally checked at
 | F03-B | implemented | F03-A | ~2000/3763 INST props instantiate with collision (README; `city.rs`) plus `props.pathset` ambient rows stamped through the shared `PropCache` — london 1188, sf 925 instances, decal paths classified. Stamping micro-semantics inferred (UNK-20); decal/audio pathsets unconsumed. First candidate failed review on an unbounded line-strip expansion (huge/non-finite authored coordinates could stall `t += spacing` and OOM the load); repaired with the 8192/file stamp budget, arithmetic per-segment counting, non-finite skipping, load-time `validate()` and `pathset_props_capped`/`pathset_issues` report fields plus regression tests. Externally checked at `f6e151f`. |
 | F03-B.2 | checked | F03-B | Event `.pathset` overlays (F03-AC04 leg): `event_race_setup` returns `EventSetup { definition, pathsets }` — the `<stem>.pathset` records the catalog attributes to the resolved event; `load_session_world` calls `city::spawn_event_pathsets` which runs the shared `stamp_pathset` classifier (`prop`/`PATHnn` label/`giz_*` animated/decal/`unresolved` + per-file 8192 budget + `validate()` issues) through a fresh `PropCache` into `event-pathset-*` session-owned entities. Teardown removes exactly the overlay; re-entry restamps once (AC04 — restart test asserts identical gen-2 count, no gen-1 survivors). Parse/read failures land in `EventPathsetReport::failed_files`, warned, non-fatal (optional record). Retail: london `circuit0` 181 props, `race6` 256, sf `circuit0` 85 — all `sp_*` names. `<object>_<event>` overrides (`london_bridge_circuit0`…) stay extras — all `giz_*`/`PATHnn`/`sp_pcar*` on retail, need animated-object/parked-car features. Tests: +3 in `tests/event.rs`. Externally checked at `afff57d`. |
 | F03-C | queued | F03-B | Owed: sampled original locations, all source records, race cleanup, mod replacement end-to-end. |
-| F04-A | implemented | F01-B, F03-B | Split: A.1 (banger parser + record↔geometry audit — externally checked at `ad471b0`) and A.2 (placement→banger binding audit + R4 runtime-model research — implemented below). Runtime state machine and threshold semantics remain open (UNK-22) — the parent stays non-checked until F04-A.3+ runtime work lands. |
+|| F04-A | implemented | F01-B, F03-B | Split: A.1 (banger parser + record↔geometry audit — externally checked at `ad471b0`), A.2 (placement→banger binding audit + R4 runtime-model research — externally checked) and A.3 (dormant→active→settled runtime slice — implemented below). Threshold semantics, fragments, prop-rule channel and the Timer despawn remain open (UNK-22) — the parent stays non-checked until F04-B+ lands and AC01–AC06 each see direct evidence. |
 | F04-A.1 | implemented | F01-B, F03-B | `mm2_formats::banger`: typed `BangerData`/`BirthRule` decoder on the shared `tune` grammar — Size/CG/Mass/Elasticity/Friction/ImpulseLimit2/NumParts + ids + `asBirthRule` variant (warning); `BangerIssue` validation (non-finite/negative physicals, glow-count, missing birth rule); `stem_role` (fallback/fragment/named). `mm2-inspect banger <install> [--strict]`: expected = `default.dgbangerdata`, denominator = every discovered file incl `.#*.1.2` backups; stem→geometry resolved via VFS (own pkg / `.mtx` / `BREAK<NN>` chunk in base pkg / longest-base part chunk), standalone `NumParts` ↔ BREAK-index counts. Retail: 999/999 parse, 216 standalone/477 part/254 fragment/47 dead refs, 54 issues, `--strict` exits 2; `scan` recognizes `.dgbangerdata`. docs/research/banger.md + WLD-15/UNK-22. Runtime unwired by design. Candidate pending external check. |
 | F04-A.2 | implemented | F04-A.1 | `mm2-inspect banger-bind <install> [--city] [--strict]` + `mm2_formats::banger::geometry_owner` (record → owning PKG stem). Audits every stamped-prop source through the VFS: INST files, `city/`/`race/` `*.pathset` (incl overlays, backups, dev cities — no filtering), `propdefs/proprules/props.csv`, PSDL `prop_rule` reachability. Binding rule `N` → `tune/banger/<N>.dgbangerdata`. Retail: 129 source files, 3 unsupported (truncated blitz10/11 pathsets), 0 failures, 51 issues (dead placement refs kept in denominator). INST = static channel (london 0/221, sf 0/165 bound); `*_ai.inst` = bound `sp_stop_f` supplements; pathset/prop-rule names ~all bound. Reverse: 269/994 placed-reachable, 562 vehicle-owned, 163 never-placed. docs/research/banger.md binding + R4 runtime model; WLD-16 added, UNK-22 narrowed. Runtime state machine still unwired. Candidate pending external check. |
+|| F04-A.3 | implemented | F04-A.2 | `mm2_game::banger` (`BangerPhase` dormant/active/settled, `Banger`, `BangerDefinition` distilled from `BangerData`, `BangerStateChanged` message, `BangerPool` ×32 — the R4-recovered pool size) + `mm2_app::banger` (`BangerDefs` VFS cache, `banger_bundle`, `activate_bangers`, `settle_bangers`). `stamp_pathset` binds each prop name: bound+collidable → one session-owned dynamic-capable entity (mesh children follow); unbound/failed/no-collider → the ordinary static pair (decode failures counted, not hidden). Activation reads raw `CollisionStart` via shared `deepest_contact`; provisional estimate `approach_speed × striker_mass` vs `ImpulseLimit2` (UNK-22); one impulse + `Size`-derived spin kick; oldest-first pool reclaim; Avian sleep → `Settled` static; authority-gated (`Predicted` never transitions). 7 integration tests on real physics + 5 `mm2_game` unit tests; retail headless london `bng=1188d/0a/0s`, sf `bng=925d/0a/0s`, 0 decode failures. DSN-10 added. Deferred: fragments (F04-B), BirthRule/audio/flash/decal effects, prop-rule channel, Timer despawn, replication. AC01–AC06 stay open. Candidate pending external check. |
 | F04-B | queued | F04-A | — |
 | F04-C | queued | F04-B | — |
 | F05-A | queued | F01-B, F02-B | `.vehcardamage` readable via generic tune parser; no typed rules or runtime. |
