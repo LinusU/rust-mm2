@@ -132,10 +132,39 @@ stamps in `CityReport::pathset_props_capped` rather than truncating
 silently. `Pathset::validate()` runs at load and its issues land in
 `CityReport::pathset_issues`; non-finite coordinates stamp nothing.
 
+Event overlays (implemented for `<stem>.pathset` records, 2026-09-20):
+`load_session_world` consumes the `.pathset` records the event
+catalog attributes to a resolved event's stem — `circuit<N>.pathset`
+barricades, `race6`/`race7` jumps and prop arrangements — through
+`mm2_app::city::spawn_event_pathsets`, which runs the same
+`stamp_pathset` classifier the ambient set uses with a fresh
+`PropCache` and session-owned entities (`event-pathset-*` names).
+Session teardown removes exactly the overlay; re-entry restamps it
+once (F03-AC04). Measured on retail: london `circuit0` 181 props /
+21 paths, `race6` (checkpoint:6) 256 / 5, sf `circuit0` 85 / 13 —
+all `sp_*` names, `0` labels/animated/decals/unresolved on every
+reachable file.
+
+Path classification (shared by both consumers, inferred from the
+naming conventions above): `PATHnn` names are route labels — skipped
+and counted; `giz_*` names are animated objects (bridges, ferries,
+crash-course parked cars) — counted as `animated` and *not* stamped,
+because a static collider is the wrong class for a movable object;
+names resolving to `texture/*` are decal paths — counted, unstamped;
+names resolving to neither are dead refs — counted as `unresolved`.
+On retail the reachable event files carry only `sp_*` prop paths;
+`giz_*`/`PATHnn`/`PREFIX:` names appear only on crash-course stems
+(not loadable yet) and the `<object>_<event>`/ambient object sets
+below.
+
 Still unconsumed: `decals*.pathset` (texture stamping — strip width
 and orientation semantics unknown), `audio_pathsets/` (`PATHnn` sound
-routes, F07/F08), `race/<city>/*.pathset` (event-scoped overlays —
-barricades, parked cars, animated `giz_*` object paths; F03-AC04),
-and `city/phys/`, `bak/` dev sets. Which pathsets the original loads
-per session and whether the stamping micro-rules match its output
-remain unverified (UNK-12/UNK-20).
+routes, F07/F08), the `<city>_<object>.pathset` ambient object sets
+and `<object>_<event>.pathset` overrides (`london_bridge*`,
+`*_parkedcar*`, `*_ferry`, `*_sailboat`, `london_train` — all
+`giz_*`/`PATHnn`/`sp_pcar*` on retail; they need the animated-object
+and parked-car features, not static stamping), crash-course stem
+files (the events are not loadable yet, F21), `circuitx`/`slalom`/
+`*_test`/`ramp` dev files, and `city/phys/`, `bak/` dev sets. Which
+pathsets the original loads per session and whether the stamping
+micro-rules match its output remain unverified (UNK-12/UNK-20).

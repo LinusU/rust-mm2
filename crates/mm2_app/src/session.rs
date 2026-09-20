@@ -296,7 +296,8 @@ pub fn load_session_world(
     let mut event_race: Option<RaceDefinition> = None;
     if world_ok && let SessionMode::Event(event_ref) = &config.mode {
         match race::event_race_setup(&vfs.0, event_ref, config.difficulty) {
-            Ok(def) => {
+            Ok(setup) => {
+                let def = setup.definition;
                 // The player slot overrides the world's roam spawn; an
                 // event without slots keeps the roam spawn.
                 if let Some(slot) = def.start_slots.get(mm2_content::PLAYER_SLOT) {
@@ -315,6 +316,34 @@ pub fn load_session_world(
                     gates = def.checkpoints.len(),
                     "event race loaded"
                 );
+                // The event's `.pathset` overlays (F03-AC04): course
+                // barricades, jumps and prop arrangements stamp as
+                // session-owned placements, so teardown removes
+                // exactly this event's objects — re-entry stamps the
+                // overlay once again, never duplicated.
+                let overlay = city::spawn_event_pathsets(
+                    &mut commands,
+                    &vfs.0,
+                    &setup.pathsets,
+                    &mut assets.meshes,
+                    &mut assets.images,
+                    &mut assets.materials,
+                    owner,
+                );
+                if overlay.files > 0 {
+                    info!(
+                        files = overlay.files,
+                        stamped = overlay.stats.spawned,
+                        labels = overlay.stats.label_paths,
+                        animated = overlay.stats.animated_paths,
+                        decals = overlay.stats.decal_paths,
+                        unresolved = overlay.stats.unresolved_paths,
+                        capped = overlay.stats.capped,
+                        issues = overlay.stats.issues,
+                        failed_files = overlay.failed_files.len(),
+                        "event pathset overlay stamped"
+                    );
+                }
                 event_race = Some(def);
             }
             Err(e) => {

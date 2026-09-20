@@ -2460,6 +2460,209 @@ fn spawn_prop(
     }
 }
 
+/// What one consumed pathset produced and skipped, classified — every
+/// path lands in a count, nothing is dropped silently.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PathsetStampReport {
+    /// Prop instances spawned (each spawns its render parts plus one
+    /// static collider).
+    pub spawned: usize,
+    /// Paths naming a decal texture rather than a PKG — decal
+    /// stamping is unhandled, but these are not dead refs.
+    pub decal_paths: usize,
+    /// `PATHnn` route labels — never asset references (ambient-sound
+    /// routes, parked-car/ferry paths).
+    pub label_paths: usize,
+    /// `giz_*` animated-object paths — movable objects (bridges,
+    /// ferries, crash-course parked cars); stamping them as static
+    /// colliders would be the wrong class, so they are counted and
+    /// left for the animated-object work.
+    pub animated_paths: usize,
+    /// Paths whose asset name resolves to no `geometry/*.pkg` and no
+    /// `texture/*` — genuine dead refs.
+    pub unresolved_paths: usize,
+    /// Stamps suppressed by the file's [`MAX_PATHSET_STAMPS`] budget.
+    pub capped: usize,
+    /// `Pathset::validate()` issues on the file.
+    pub issues: usize,
+}
+
+impl std::ops::AddAssign for PathsetStampReport {
+    fn add_assign(&mut self, rhs: Self) {
+        self.spawned += rhs.spawned;
+        self.decal_paths += rhs.decal_paths;
+        self.label_paths += rhs.label_paths;
+        self.animated_paths += rhs.animated_paths;
+        self.unresolved_paths += rhs.unresolved_paths;
+        self.capped = self.capped.saturating_add(rhs.capped);
+        self.issues += rhs.issues;
+    }
+}
+
+/// Stamp every prop path of a parsed pathset through `cache` (F03-B):
+/// each stamped transform becomes a [`spawn_prop`] placement owned by
+/// the session. `PATHnn` labels, `giz_*` animated objects and decal
+/// (texture) names are classified and counted, never stamped — see
+/// `docs/research/pathset.md` for what each is inferred to be. The
+/// `giz_` check runs on the asset name after `PREFIX:` stripping, so
+/// `OPEN:giz_bridge01_l` still classifies as animated.
+///
+/// `logical` names the consumed file in diagnostics; `name_prefix`
+/// distinguishes the spawned entities by consumer (`pathset-*` for
+/// the ambient city set, `event-pathset-*` for race overlays).
+fn stamp_pathset(
+    commands: &mut Commands,
+    cache: &mut PropCache,
+    pathset: &pathset::Pathset,
+    logical: &str,
+    name_prefix: &str,
+    owner: SessionEntity,
+) -> PathsetStampReport {
+    let mut report = PathsetStampReport::default();
+    for issue in pathset.validate() {
+        report.issues += 1;
+        warn!(path = %logical, %issue, "pathset authored issue");
+    }
+    // Stamps expand `len / spacing` per segment — authored
+    // coordinates are unbounded, so the file gets a hard budget
+    // shared across its paths; overflow is counted, not truncated
+    // silently.
+    let mut stamps_left = MAX_PATHSET_STAMPS;
+    for (pi, path) in pathset.paths.iter().enumerate() {
+        let Some(name) = path.asset_name() else {
+            // `PATHnn` route labels are not prop names.
+            report.label_paths += 1;
+            debug!(path = %path.name, "pathset path is a route label; skipped");
+            continue;
+        };
+        if name.starts_with("giz_") {
+            report.animated_paths += 1;
+            debug!(path = %path.name, "pathset path is an animated object; unhandled");
+            continue;
+        }
+        let Some(model) = cache.get(name) else {
+            // A name that resolves to a texture rather than a PKG is
+            // a decal path — decal stamping is unhandled, but it is
+            // not a dead ref.
+            if TEXTURE_EXTS.iter().any(|ext| {
+                cache
+                    .vfs
+                    .resolve(&format!("texture/{name}.{ext}"))
+                    .is_some()
+            }) {
+                report.decal_paths += 1;
+            } else {
+                report.unresolved_paths += 1;
+            }
+            continue;
+        };
+        let stamped = stamped_transforms(path, stamps_left);
+        stamps_left -= stamped.transforms.len();
+        report.capped = report.capped.saturating_add(stamped.capped);
+        for (ii, mat4) in stamped.transforms.iter().enumerate() {
+            spawn_prop(
+                commands,
+                model,
+                Transform::from_matrix(*mat4),
+                owner,
+                &format!("{name_prefix}-{name}-{pi}-{ii}"),
+            );
+            report.spawned += 1;
+        }
+    }
+    report
+}
+
+/// What an event's `*.pathset` overlays produced (F03-AC04).
+#[derive(Debug, Default)]
+pub struct EventPathsetReport {
+    /// `.pathset` records the event's stem owns.
+    pub files: usize,
+    /// Logical paths that failed to read or parse.
+    pub failed_files: Vec<String>,
+    /// Aggregate stamping/classification across the parsed files.
+    pub stats: PathsetStampReport,
+    /// Texture stems prop materials failed to resolve.
+    pub missing_textures: BTreeSet<String>,
+    /// Strips with unsupported primitive types seen while building
+    /// prop models.
+    pub missing_prims: usize,
+}
+
+/// Consume an event's authored `*.pathset` overlay records — the
+/// `<stem>.pathset` files the catalog attributes to its stem
+/// (F03-AC04). Every prop path stamps through a fresh `PropCache`
+/// into session-owned placements, so session teardown removes exactly
+/// the overlay and re-entering the event stamps it once again, never
+/// twice. `PATHnn` labels, `giz_*` animated objects and decal names
+/// are classified in the report rather than stamped.
+///
+/// A record that fails to read or parse lands in `failed_files` and
+/// is warned — it does not sink the event session: the catalog treats
+/// `.pathset` as an optional overlay record, not a required one (the
+/// three truncated retail files are unreachable extras, so this path
+/// is exercised only by well-formed records or mod content).
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_event_pathsets(
+    commands: &mut Commands,
+    vfs: &Vfs,
+    logicals: &[String],
+    meshes: &mut Assets<Mesh>,
+    images: &mut Assets<Image>,
+    materials: &mut Assets<StandardMaterial>,
+    owner: SessionEntity,
+) -> EventPathsetReport {
+    let mut report = EventPathsetReport {
+        files: logicals.len(),
+        ..default()
+    };
+    if logicals.is_empty() {
+        return report;
+    }
+    // The city's own PropCache lives inside `load_city` and is gone by
+    // the time event setup runs; a second cache re-prepares only the
+    // props the overlay actually names.
+    let mut cache = PropCache {
+        vfs,
+        meshes,
+        mats: MaterialCache::new(vfs, images, materials),
+        cache: HashMap::new(),
+        missing_prims: 0,
+    };
+    for logical in logicals {
+        match vfs.read_path(logical) {
+            Ok((bytes, resolved)) => match pathset::Pathset::parse(&bytes) {
+                Ok(pathset) => {
+                    report.stats += stamp_pathset(
+                        commands,
+                        &mut cache,
+                        &pathset,
+                        &resolved.logical,
+                        "event-pathset",
+                        owner,
+                    );
+                }
+                Err(e) => {
+                    warn!(path = %resolved.logical, error = %e, "event pathset parse failed");
+                    report.failed_files.push(resolved.logical.clone());
+                }
+            },
+            Err(e) => {
+                warn!(path = %logical, error = %e, "event pathset unreadable");
+                report.failed_files.push(logical.clone());
+            }
+        }
+    }
+    if cache.missing_prims > 0 {
+        report.missing_prims = cache.missing_prims;
+    }
+    report.missing_textures = std::mem::take(&mut cache.mats.missing);
+    for anim in std::mem::take(&mut cache.mats.animated) {
+        commands.spawn((CityEntity, owner, anim));
+    }
+    report
+}
+
 // ---------------------------------------------------------------------------
 // Orchestration
 // ---------------------------------------------------------------------------
@@ -2614,61 +2817,33 @@ pub fn load_city(
     // this file is consumed here: `decals*.pathset` stamp textures,
     // not props (unhandled), `audio_pathsets/` carry `PATHnn` sound
     // routes (F07/F08) and `race/<city>/*.pathset` are event-scoped
-    // overlays (F03-AC04), all deliberately out of scope.
+    // overlays consumed by `load_session_world` (F03-AC04).
     let pathset_path = psdl_path.replace(".psdl", "/props.pathset");
     match vfs.read_path(&pathset_path) {
         Ok((pathset_bytes, pathset_res)) => match pathset::Pathset::parse(&pathset_bytes) {
             Ok(pathset) => {
-                for issue in pathset.validate() {
-                    report.pathset_issues += 1;
-                    warn!(path = %pathset_res.logical, %issue, "props.pathset authored issue");
-                }
-                // Stamps expand `len / spacing` per segment — authored
-                // coordinates are unbounded, so the file gets a hard
-                // budget shared across its paths; overflow is counted,
-                // not truncated silently.
-                let mut stamps_left = MAX_PATHSET_STAMPS;
-                for (pi, path) in pathset.paths.iter().enumerate() {
-                    let Some(name) = path.asset_name() else {
-                        // `PATHnn` route labels are not prop names.
-                        debug!(path = %path.name, "pathset path is a label; skipped");
-                        continue;
-                    };
-                    let Some(model) = cache.get(name) else {
-                        // A name that resolves to a texture rather
-                        // than a PKG is a decal path — decal stamping
-                        // is unhandled, but it is not a dead ref.
-                        if TEXTURE_EXTS
-                            .iter()
-                            .any(|ext| vfs.resolve(&format!("texture/{name}.{ext}")).is_some())
-                        {
-                            report.pathset_decal_paths += 1;
-                        } else {
-                            report.pathset_props_failed += 1;
-                        }
-                        continue;
-                    };
-                    let stamped = stamped_transforms(path, stamps_left);
-                    stamps_left -= stamped.transforms.len();
-                    report.pathset_props_capped =
-                        report.pathset_props_capped.saturating_add(stamped.capped);
-                    for (ii, mat4) in stamped.transforms.iter().enumerate() {
-                        spawn_prop(
-                            commands,
-                            model,
-                            Transform::from_matrix(*mat4),
-                            owner,
-                            &format!("pathset-{name}-{pi}-{ii}"),
-                        );
-                        report.pathset_props_spawned += 1;
-                    }
-                }
+                let stamped = stamp_pathset(
+                    commands,
+                    &mut cache,
+                    &pathset,
+                    &pathset_res.logical,
+                    "pathset",
+                    owner,
+                );
+                report.pathset_props_spawned += stamped.spawned;
+                report.pathset_decal_paths += stamped.decal_paths;
+                report.pathset_props_failed += stamped.unresolved_paths;
+                report.pathset_props_capped =
+                    report.pathset_props_capped.saturating_add(stamped.capped);
+                report.pathset_issues += stamped.issues;
                 info!(
                     path = %pathset_res.logical,
-                    stamped = report.pathset_props_spawned,
-                    decals = report.pathset_decal_paths,
-                    failed = report.pathset_props_failed,
-                    capped = report.pathset_props_capped,
+                    stamped = stamped.spawned,
+                    decals = stamped.decal_paths,
+                    labels = stamped.label_paths,
+                    animated = stamped.animated_paths,
+                    failed = stamped.unresolved_paths,
+                    capped = stamped.capped,
                     "pathset props stamped"
                 );
             }

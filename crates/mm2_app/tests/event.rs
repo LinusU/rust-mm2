@@ -14,9 +14,9 @@ use mm2_app::session::{self, SessionControl};
 use mm2_app::{camera, contracts};
 use mm2_assets::Vfs;
 use mm2_game::{
-    EventRef, EventTableKind, ImpactEvent, Mm2Vfs, ParticipantState, PlayerVehicle, RacePhase,
-    RaceProgress, RaceStarted, RaceState, ResultLedger, Session, SessionConfig, SessionMode,
-    SessionPhase, advance_session_tick, despawn_session_entities,
+    CityEntity, EventRef, EventTableKind, ImpactEvent, Mm2Vfs, ParticipantState, PlayerVehicle,
+    RacePhase, RaceProgress, RaceStarted, RaceState, ResultLedger, Session, SessionConfig,
+    SessionEntity, SessionMode, SessionPhase, advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::{VehicleConfig, VehicleInput, VehiclePlugin, VehicleState};
 
@@ -29,7 +29,7 @@ const ROW: &str = "none,0,0,0,0,0,0.1,0.0,1,50,1,0,0,0,0,0,0.2,0.0,1,40,1";
 const COURSE: &[f32] = &[60.0, 110.0, 140.0, 165.0, 180.0];
 const COURSE_Z: f32 = 140.0;
 
-fn write(dir: &Path, rel: &str, contents: &str) {
+fn write(dir: &Path, rel: &str, contents: impl AsRef<[u8]>) {
     let p = dir.join(rel);
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
     std::fs::write(p, contents).unwrap();
@@ -46,13 +46,13 @@ fn event_install() -> tempfile::TempDir {
     write(
         d,
         "race/testcity/mmracedata.csv",
-        &format!("{MM_HEADER}\n{ROW}\n"),
+        format!("{MM_HEADER}\n{ROW}\n"),
     );
     write(d, "race/testcity/race0.aimap", "#\n");
     write(
         d,
         "race/testcity/race0waypoints.csv",
-        &format!(
+        format!(
             "{WAYPOINTS}{}{}{}{}{}",
             waypoint_row(COURSE[0], COURSE_Z), // start line
             waypoint_row(COURSE[1], COURSE_Z), // gates
@@ -345,7 +345,7 @@ fn incomplete_event_fails_the_session() {
     write(
         d,
         "race/testcity/mmracedata.csv",
-        &format!("{MM_HEADER}\n{ROW}\n"),
+        format!("{MM_HEADER}\n{ROW}\n"),
     );
     write(d, "race/testcity/race0.aimap", "#\n");
     // No waypoints.
@@ -374,13 +374,13 @@ fn authored_blitz_limit_times_out_the_race() {
     write(
         d,
         "race/testcity/mmblitzdata.csv",
-        &format!("{MM_HEADER}\nnone,0,2,1,0,0,0.3,0.2,3,0.5,1,0,0,0,0,0,0.4,0.1,4,0.5,1\n"),
+        format!("{MM_HEADER}\nnone,0,2,1,0,0,0.3,0.2,3,0.5,1,0,0,0,0,0,0.4,0.1,4,0.5,1\n"),
     );
     write(d, "race/testcity/blitz0.aimap", "#\n");
     write(
         d,
         "race/testcity/blitz0waypoints.csv",
-        &format!(
+        format!(
             "{WAYPOINTS}{}{}{}{}",
             waypoint_row(COURSE[0], COURSE_Z),
             waypoint_row(COURSE[1], COURSE_Z),
@@ -468,4 +468,257 @@ fn restart_rebuilds_the_event_session() {
         .iter(app.world())
         .count();
     assert_eq!(markers, 4, "markers respawned with the new session");
+}
+
+// ---------------------------------------------------------------------------
+// Event pathset overlays (F03-AC04)
+// ---------------------------------------------------------------------------
+
+/// One `PTH1` path record: `name`, `points`, raw `kind`/`spacing` bytes.
+fn pth1_path(name: &str, points: &[[f32; 3]], kind: u8, spacing: u8) -> Vec<u8> {
+    let mut d = vec![0u8; 32];
+    d[..name.len()].copy_from_slice(name.as_bytes());
+    d.extend_from_slice(&(points.len() as u32).to_le_bytes());
+    d.extend_from_slice(&0u32.to_le_bytes()); // selection
+    for p in points {
+        d.extend_from_slice(&0u32.to_le_bytes()); // attributes
+        for c in p {
+            d.extend_from_slice(&c.to_le_bytes());
+        }
+    }
+    d.push(kind);
+    d.push(spacing);
+    d.extend_from_slice(&[0, 0]);
+    d
+}
+
+/// A `PTH1` file from path records.
+fn pth1(paths: &[Vec<u8>]) -> Vec<u8> {
+    let mut d = b"PTH1".to_vec();
+    d.extend_from_slice(&(paths.len() as u32).to_le_bytes());
+    d.extend_from_slice(&0u32.to_le_bytes()); // current_path
+    for p in paths {
+        d.extend_from_slice(p);
+    }
+    d
+}
+
+/// PKG3 with one tetrahedron geometry chunk (`testprop_h`), no shaders —
+/// the same minimal prop `import_pipeline` stamps through INST.
+fn testprop_pkg() -> Vec<u8> {
+    let mut geo = Vec::new();
+    geo.extend_from_slice(&1u32.to_le_bytes()); // nSections
+    geo.extend_from_slice(&4u32.to_le_bytes()); // total vertices
+    geo.extend_from_slice(&12u32.to_le_bytes()); // total indices
+    geo.extend_from_slice(&1u32.to_le_bytes()); // sections duplicate
+    geo.extend_from_slice(&0x112u32.to_le_bytes()); // fvf: XYZ|NORMAL|1 tex
+    geo.extend_from_slice(&1u16.to_le_bytes()); // nStrips
+    geo.extend_from_slice(&0u16.to_le_bytes()); // section flags
+    geo.extend_from_slice(&(-1i32).to_le_bytes()); // shader offset → fallback
+    geo.extend_from_slice(&3i32.to_le_bytes()); // prim type: triangles
+    geo.extend_from_slice(&4u32.to_le_bytes()); // strip vertices
+    let verts: &[([f32; 3], [f32; 3], [f32; 2])] = &[
+        ([0., 0., 0.], [0., 1., 0.], [0., 0.]),
+        ([1., 0., 0.], [0., 1., 0.], [1., 0.]),
+        ([0., 0., 1.], [0., 1., 0.], [0., 1.]),
+        ([0., 1., 0.], [0., 1., 0.], [0.5, 0.5]),
+    ];
+    for &(p, n, uv) in verts {
+        for c in p {
+            geo.extend_from_slice(&c.to_le_bytes());
+        }
+        for c in n {
+            geo.extend_from_slice(&c.to_le_bytes());
+        }
+        for c in uv {
+            geo.extend_from_slice(&c.to_le_bytes());
+        }
+    }
+    geo.extend_from_slice(&12u32.to_le_bytes()); // strip indices
+    for i in [0u16, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3] {
+        geo.extend_from_slice(&i.to_le_bytes());
+    }
+
+    let mut d = Vec::new();
+    d.extend_from_slice(b"PKG3");
+    d.extend_from_slice(b"FILE");
+    d.push(b"testprop_h".len() as u8 + 1);
+    d.extend_from_slice(b"testprop_h");
+    d.push(0);
+    d.extend_from_slice(&(geo.len() as u32).to_le_bytes());
+    d.extend_from_slice(&geo);
+    d
+}
+
+/// `event_install` plus a `race0.pathset` overlay: one `testprop`
+/// line strip — a 12 m segment stamped at 5 m intervals gives 4
+/// placements (t = 0, 5, 10 + the end cap).
+fn overlay_install() -> tempfile::TempDir {
+    let tmp = event_install();
+    write(tmp.path(), "geometry/testprop.pkg", testprop_pkg());
+    write(
+        tmp.path(),
+        "race/testcity/race0.pathset",
+        pth1(&[pth1_path(
+            "testprop",
+            &[[200.0, 0.0, 140.0], [212.0, 0.0, 140.0]],
+            2,
+            20,
+        )]),
+    );
+    tmp
+}
+
+/// Session-owned entities an `event-pathset-*` name marks.
+fn overlay_entities(app: &mut App) -> Vec<(Entity, SessionEntity)> {
+    app.world_mut()
+        .query_filtered::<(Entity, &Name, &SessionEntity), With<CityEntity>>()
+        .iter(app.world())
+        .filter(|(_, name, _)| name.as_str().starts_with("event-pathset-"))
+        .map(|(e, _, owner)| (e, *owner))
+        .collect()
+}
+
+/// The event's `.pathset` record stamps through the real
+/// `load_session_world` path: `spawn_event_pathsets` places each
+/// authored stamp as a session-owned prop (render part + static
+/// collider), exactly like the ambient city set.
+#[test]
+fn event_pathset_overlay_spawns_session_owned_props() {
+    let tmp = overlay_install();
+    let mut app = event_app(event_config(), vfs_of(tmp.path()));
+    app.update();
+    assert_eq!(phase(&app), SessionPhase::Countdown);
+
+    let props = overlay_entities(&mut app);
+    assert_eq!(
+        props.len(),
+        8,
+        "4 stamps × (1 render part + 1 collider), got {props:?}"
+    );
+    assert!(
+        props.iter().all(|(_, owner)| *owner == SessionEntity(1)),
+        "every overlay entity is owned by the session that stamped it"
+    );
+}
+
+/// F03-AC04: restarting the event removes exactly its overlay and
+/// restamps it once — generation 2 carries the same prop count with
+/// no leftovers from generation 1.
+#[test]
+fn restarting_the_event_respawns_its_overlay_once() {
+    let tmp = overlay_install();
+    let mut app = event_app(event_config(), vfs_of(tmp.path()));
+    app.update();
+    let first = overlay_entities(&mut app);
+    assert_eq!(first.len(), 8);
+
+    app.world_mut().resource_mut::<SessionControl>().restart = true;
+    let mut reached = false;
+    for _ in 0..20 {
+        app.update();
+        if phase(&app) == SessionPhase::Countdown
+            && app.world().resource::<Session>().generation() == 2
+        {
+            reached = true;
+            break;
+        }
+    }
+    assert!(reached, "restart never returned to Countdown");
+
+    let second = overlay_entities(&mut app);
+    assert_eq!(
+        second.len(),
+        first.len(),
+        "the overlay restamps exactly once — no duplicates, nothing lost"
+    );
+    assert!(
+        second.iter().all(|(_, owner)| *owner == SessionEntity(2)),
+        "generation-1 overlay entities must not survive teardown"
+    );
+}
+
+/// Every path class is counted, not dropped: prop strips stamp,
+/// `PATHnn` labels, `giz_*` animated objects, decal textures and dead
+/// refs each land in their own report field, and an undocumented kind
+/// is a validation issue that stamps nothing.
+#[test]
+fn event_pathset_classification_counts_every_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(d, "geometry/testprop.pkg", testprop_pkg());
+    std::fs::create_dir_all(d.join("texture")).unwrap();
+    std::fs::write(
+        d.join("texture/testdecal.png"),
+        include_bytes!("../../../assets/texture/dev_road.png"),
+    )
+    .unwrap();
+    write(
+        d,
+        "race/testcity/race0.pathset",
+        pth1(&[
+            pth1_path("testprop", &[[0.0, 0.0, 0.0], [12.0, 0.0, 0.0]], 2, 20),
+            pth1_path("PATH03", &[[0.0, 0.0, 0.0], [5.0, 0.0, 0.0]], 2, 20),
+            pth1_path("giz_pcar01_l", &[[0.0, 0.0, 0.0], [5.0, 0.0, 0.0]], 2, 20),
+            pth1_path("testdecal", &[[0.0, 0.0, 0.0], [5.0, 0.0, 0.0]], 2, 20),
+            pth1_path("nosuchprop", &[[0.0, 0.0, 0.0], [5.0, 0.0, 0.0]], 2, 20),
+            pth1_path("testprop", &[[0.0, 0.0, 0.0], [5.0, 0.0, 0.0]], 9, 20),
+        ]),
+    );
+    let vfs = vfs_of(d);
+
+    let mut world = World::new();
+    let mut queue = bevy::ecs::world::CommandQueue::default();
+    let mut meshes: Assets<Mesh> = Assets::default();
+    let mut images: Assets<Image> = Assets::default();
+    let mut materials: Assets<StandardMaterial> = Assets::default();
+    let report = {
+        let mut commands = Commands::new(&mut queue, &world);
+        mm2_app::city::spawn_event_pathsets(
+            &mut commands,
+            &vfs,
+            &["race/testcity/race0.pathset".to_string()],
+            &mut meshes,
+            &mut images,
+            &mut materials,
+            SessionEntity(1),
+        )
+    };
+    queue.apply(&mut world);
+
+    assert_eq!(report.files, 1);
+    assert!(report.failed_files.is_empty());
+    assert_eq!(report.stats.spawned, 4, "the one prop strip stamps");
+    assert_eq!(report.stats.label_paths, 1, "PATH03 is a route label");
+    assert_eq!(report.stats.animated_paths, 1, "giz_pcar01_l is animated");
+    assert_eq!(
+        report.stats.decal_paths, 1,
+        "testdecal resolves to a texture"
+    );
+    assert_eq!(report.stats.unresolved_paths, 1, "nosuchprop is a dead ref");
+    assert_eq!(report.stats.issues, 1, "kind 9 is an undocumented type");
+    // The kind-9 path named `testprop` stamps nothing despite resolving.
+    let stamped = world
+        .query_filtered::<&Name, With<CityEntity>>()
+        .iter(&world)
+        .filter(|n| n.as_str().starts_with("event-pathset-"))
+        .count();
+    assert_eq!(stamped, 8, "4 stamps × (part + collider)");
+
+    // A record that does not parse is reported, never silently dropped.
+    write(d, "race/testcity/race1.pathset", b"PTH1\x01bad");
+    let report = {
+        let mut commands = Commands::new(&mut queue, &world);
+        mm2_app::city::spawn_event_pathsets(
+            &mut commands,
+            &vfs,
+            &["race/testcity/race1.pathset".to_string()],
+            &mut meshes,
+            &mut images,
+            &mut materials,
+            SessionEntity(1),
+        )
+    };
+    assert_eq!(report.files, 1);
+    assert_eq!(report.failed_files.len(), 1);
 }

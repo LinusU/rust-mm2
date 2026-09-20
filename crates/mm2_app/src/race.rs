@@ -60,18 +60,41 @@ pub enum EventSetupError {
     Build(#[from] mm2_content::RaceBuildError),
 }
 
-/// Resolve an `EventRef` through the VFS into a shared
-/// [`RaceDefinition`]: catalog scan → dependency-checked resolve → the
-/// `mm2_content` producer. Called once per event session load, so the
+/// An event session's authored content beyond the race definition —
+/// the `.pathset` overlay records the event's stem owns (F03-AC04:
+/// course barricades, jumps, prop arrangements stamped only while the
+/// event session lives).
+pub struct EventSetup {
+    /// The shared race runtime definition.
+    pub definition: RaceDefinition,
+    /// Logical paths of the event's `.pathset` records, in catalog
+    /// order (records are stored sorted by logical path).
+    pub pathsets: Vec<String>,
+}
+
+/// Resolve an `EventRef` through the VFS into the event's runtime
+/// setup: catalog scan → dependency-checked resolve → the
+/// `mm2_content` race-definition producer plus the authored overlay
+/// records the event owns. Called once per event session load, so the
 /// catalog stays a load-time object rather than a resource.
 pub fn event_race_setup(
     vfs: &Vfs,
     event_ref: &EventRef,
     difficulty: Difficulty,
-) -> Result<RaceDefinition, EventSetupError> {
+) -> Result<EventSetup, EventSetupError> {
     let catalog = mm2_content::EventCatalog::scan(vfs, &event_ref.city);
     let event = catalog.resolve(event_ref)?;
-    Ok(mm2_content::race_definition(event, difficulty)?)
+    let definition = mm2_content::race_definition(event, difficulty)?;
+    let pathsets = event
+        .records
+        .iter()
+        .filter(|r| r.kind == mm2_formats::racefiles::RaceFileKind::Pathset)
+        .map(|r| r.logical.clone())
+        .collect();
+    Ok(EventSetup {
+        definition,
+        pathsets,
+    })
 }
 
 /// Marker on a session-owned checkpoint/finish marker entity —
