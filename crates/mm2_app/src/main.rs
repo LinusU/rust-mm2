@@ -766,36 +766,51 @@ fn update_hud(
         };
     }
     let hz = mm2_game::RACE_TICK_HZ as f32;
+    // The local participant's terminal state, rendered once the race is
+    // over — the finish carries its recorded race-clock time (UI-5's
+    // "placing + total time"; placing waits on F13-B/F15).
+    let outcome = |state: Option<&mm2_game::ParticipantState>| match state {
+        Some(mm2_game::ParticipantState::Finished { race_ticks, .. }) => {
+            format!("  FINISHED  {:.1}s", *race_ticks as f32 / hz)
+        }
+        Some(mm2_game::ParticipantState::TimedOut { .. }) => "  OUT OF TIME".to_string(),
+        _ => "  FINISHED".to_string(),
+    };
     let race_text = race
         .filter(|r| !r.is_stale(session.generation()))
-        .map(|r| match r.phase {
-            mm2_game::RacePhase::Countdown { remaining } => {
-                format!("  GET READY {:.0}", (remaining as f32 / hz).ceil())
+        .map(|r| {
+            // A resolved local driver ends the session at `Results`
+            // (UI-5) even while other participants' progress keeps the
+            // race itself `Running` — the outcome text wins either way.
+            if *session.phase() == SessionPhase::Results {
+                return outcome(progress.iter().next().map(|p| &p.state));
             }
-            mm2_game::RacePhase::Running => {
-                let cleared = progress.iter().next().map_or(0, |p| p.cleared_count());
-                let lap = progress.iter().next().map_or(0, |p| p.lap + 1);
-                // A timed event counts down the same authoritative race
-                // clock the deadline is judged on (AC04); untimed races
-                // show elapsed.
-                let clock = match r.time_remaining() {
-                    Some(t) => format!("  time {:.1}s", t as f32 / hz),
-                    None => format!("  {:.1}s", r.clock as f32 / hz),
-                };
-                if r.definition.rule == mm2_game::CheckpointRule::Ordered {
-                    format!(
-                        "  lap {lap}/{}  cp {cleared}/{}{clock}",
-                        r.definition.laps,
-                        r.definition.checkpoints.len(),
-                    )
-                } else {
-                    format!("  cp {cleared}/{}{clock}", r.definition.checkpoints.len())
+            match r.phase {
+                mm2_game::RacePhase::Countdown { remaining } => {
+                    format!("  GET READY {:.0}", (remaining as f32 / hz).ceil())
                 }
+                mm2_game::RacePhase::Running => {
+                    let cleared = progress.iter().next().map_or(0, |p| p.cleared_count());
+                    let lap = progress.iter().next().map_or(0, |p| p.lap + 1);
+                    // A timed event counts down the same authoritative race
+                    // clock the deadline is judged on (AC04); untimed races
+                    // show elapsed.
+                    let clock = match r.time_remaining() {
+                        Some(t) => format!("  time {:.1}s", t as f32 / hz),
+                        None => format!("  {:.1}s", r.clock as f32 / hz),
+                    };
+                    if r.definition.rule == mm2_game::CheckpointRule::Ordered {
+                        format!(
+                            "  lap {lap}/{}  cp {cleared}/{}{clock}",
+                            r.definition.laps,
+                            r.definition.checkpoints.len(),
+                        )
+                    } else {
+                        format!("  cp {cleared}/{}{clock}", r.definition.checkpoints.len())
+                    }
+                }
+                mm2_game::RacePhase::Complete => outcome(progress.iter().next().map(|p| &p.state)),
             }
-            mm2_game::RacePhase::Complete => match progress.iter().next().map(|p| &p.state) {
-                Some(mm2_game::ParticipantState::TimedOut { .. }) => "  OUT OF TIME".to_string(),
-                _ => "  FINISHED".to_string(),
-            },
         })
         .unwrap_or_default();
     let Ok(veh) = vehicles.single() else {

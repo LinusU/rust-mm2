@@ -8,9 +8,19 @@ opponent spawns, ambient vehicle roster, drive-on-left, ped models.
 
 Measured on all 209 retail files (2026-09-20): 108 `.aimap` +
 99 `.aimap_p` under `race/{london,sf}/`, plus `city/london.aimap` and
-`city/sf.aimap`. The `_p` variant's role is unverified (Amateur vs
-Professional vs multiplayer — see `mm2_formats::racefiles`, ledger
-MP-9); the grammar is identical.
+`city/sf.aimap`. The `_p` variant's role is now evidenced for the
+checkpoint events (2026-09-20, F13-A): `<stem>.aimap` binds the
+Amateur actor roster and `<stem>.aimap_p` the Professional one —
+`[Opponent]`/`[Police]` counts match the corresponding
+`mmracedata.csv` parameter block on 23 of 24 checkpoint events
+(london race0: aimap 4 `vpcoop` vs amateur Opponents 4, aimap_p 6
+`vpcoop2k` vs professional 6). The one mismatch is `sf/race0`:
+the amateur block asks for 7 opponents while `race0.aimap` wires 6 —
+a seventh `race0-a-6.opp` route file ships but is unreferenced
+(authored inconsistency, reported not repaired). Opponent `.opp`
+refs inside aimaps follow the same split (`-a-`/`p-` name suffixes).
+The grammar is identical; whether `_p` also carries a multiplayer
+meaning is separate (ledger MP-9).
 
 ## Grammar (measured, no shipped documentation)
 
@@ -74,8 +84,13 @@ MP-9); the grammar is identical.
 
 - Grammar/section vocabulary/counts: **measured** — all 209 files
   parse, every declared count matches, section set enumerated above.
+- `_p` role: **measured** for checkpoint events — Amateur vs
+  Professional split confirmed by `mmracedata.csv` cross-check
+  (23/24; `sf/race0` authored anomaly noted above). Whether `_p`
+  files outside the checkpoint roster follow the same rule is
+  unverified per-file but consistent with the same convention.
 - Police/opponent tail columns, `[Traffic Lights]` shape, `[Hookmen]`
-  rows, `_p` role: **unknown**, preserved raw.
+  rows: **unknown**, preserved raw.
 - Runtime semantics (how the original consumes speed limits, density
   picks, spawns, drive-on-left): **unverified** — ledger UNK-12.
 

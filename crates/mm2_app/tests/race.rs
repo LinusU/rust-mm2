@@ -721,6 +721,121 @@ fn timeout_resolves_an_unreleased_participant() {
     assert_eq!(race(&app).phase, RacePhase::Complete);
 }
 
+/// UI-5's results flow through the production driver: the local
+/// driver's finish moves the session `Playing → Results` on the same
+/// step — the race freezes with the phase change and the result is
+/// already recorded once (F13-A: the finish is terminal, not just a
+/// checkpoint count).
+#[test]
+fn local_finish_moves_the_session_to_results() {
+    let def = any_order_def(0);
+    let mut app = race_app(event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(-200.0, 0.0, 0.0));
+    run(&mut app, 2);
+    set_position(&mut app, car, Vec3::new(200.0, 0.0, 0.0));
+    run(&mut app, 1);
+    assert!(matches!(
+        progress(&app, car).state,
+        ParticipantState::Finished { .. }
+    ));
+    assert_eq!(race(&app).phase, RacePhase::Complete);
+    assert_eq!(
+        phase(&app),
+        SessionPhase::Results,
+        "the local driver's finish ends the playing session (UI-5)"
+    );
+    run(&mut app, 4);
+    assert_eq!(phase(&app), SessionPhase::Results);
+    assert_eq!(
+        app.world().resource::<ResultLedger>().len(),
+        1,
+        "the result stays recorded once — nothing re-fires"
+    );
+}
+
+/// A remote/AI participant resolving while the local driver still
+/// races must not end the local session — only a *local* terminal
+/// resolution moves `Playing → Results` (AC03: one participant's
+/// trigger cannot update everyone else's race).
+#[test]
+fn a_non_local_resolution_does_not_end_the_local_race() {
+    let def = any_order_def(0);
+    let mut app = race_app(event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(-200.0, 0.0, 0.0));
+    let (remote, _) = spawn_participant(&mut app, &def, Vec3::new(-200.0, 0.0, 1.0));
+    app.world_mut().get_mut::<Player>(remote).unwrap().control = PlayerControl::Remote;
+    run(&mut app, 2);
+
+    // The remote sweeps both gates and finishes while the local car
+    // is still racing — the session and race stay open.
+    set_position(&mut app, remote, Vec3::new(200.0, 0.0, 1.0));
+    run(&mut app, 1);
+    assert!(matches!(
+        progress(&app, remote).state,
+        ParticipantState::Finished { .. }
+    ));
+    assert_eq!(
+        phase(&app),
+        SessionPhase::Playing,
+        "a remote finish must not end the local driver's race"
+    );
+    assert_eq!(race(&app).phase, RacePhase::Running);
+
+    // The local driver's own finish still resolves the session — and
+    // completes the race now that everyone has recorded a result.
+    set_position(&mut app, car, Vec3::new(200.0, 0.0, 0.0));
+    run(&mut app, 1);
+    assert_eq!(phase(&app), SessionPhase::Results);
+    assert_eq!(race(&app).phase, RacePhase::Complete);
+    assert_eq!(app.world().resource::<ResultLedger>().len(), 2);
+}
+
+/// The deadline's `TimedOut` is terminal for the local session too —
+/// an expired race lands in `Results`, not just `RacePhase::Complete`
+/// (UI-5 covers failure as well as finishes).
+#[test]
+fn local_timeout_moves_the_session_to_results() {
+    let def = timed_def(0, 10);
+    let mut app = race_app(event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(-50.0, 0.0, 0.0));
+    run(&mut app, 8); // clock ≈2 ticks/update → expiry inside update 6
+    assert!(matches!(
+        progress(&app, car).state,
+        ParticipantState::TimedOut { .. }
+    ));
+    assert_eq!(race(&app).phase, RacePhase::Complete);
+    assert_eq!(phase(&app), SessionPhase::Results);
+}
+
+/// `Results` is a live quittable phase, not a dead end: a restart
+/// intent unloads and re-begins exactly like from `Playing`.
+#[test]
+fn restart_from_results_rebegins_the_session() {
+    let def = any_order_def(0);
+    let mut app = race_app(event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(-200.0, 0.0, 0.0));
+    run(&mut app, 2);
+    set_position(&mut app, car, Vec3::new(200.0, 0.0, 0.0));
+    run(&mut app, 1);
+    assert_eq!(phase(&app), SessionPhase::Results);
+
+    app.world_mut().resource_mut::<SessionControl>().restart = true;
+    let mut reached = false;
+    for _ in 0..12 {
+        app.update();
+        if phase(&app) == SessionPhase::Loading {
+            reached = true;
+            break;
+        }
+    }
+    assert!(reached, "restart from Results never re-began the session");
+    assert_eq!(app.world().resource::<Session>().generation(), 2);
+    assert!(
+        app.world().get_resource::<RaceState>().is_none(),
+        "the old race timer must not survive the restart"
+    );
+}
+
 /// The one session-owned needle, read back as
 /// `(rotation, visibility, color)`.
 fn arrow(app: &mut App) -> (Rot2, Visibility, Color) {

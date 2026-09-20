@@ -1,107 +1,117 @@
 # Last implementation iteration
 
-- Task ID and title: F04-C.3 — the hull-clearance fidelity question:
-  whether the snag-avoidance hull reshape prevents tall vehicles from
-  striking short props, and what shape the original struck them with.
+- Task ID and title: F13-A.1 — the results-flow leg of per-event
+  Checkpoint objective/finish semantics.
 - Starting commit and resulting commits: started at
-  `46b496862ea503435cbe705cd37b4a7093bb22f9` (clean tree, branch
-  `ralph/night`; F03-B.4 passed external gates + review). A separate
-  nit-fix commit `53f167b` addressed the prior review's non-blocking
-  doc/counting remarks first.
-- Why this slice: the plan's first-listed candidate. The open question
-  from F04-C.1/C.2 — a `vpbus`/`vpddbus` ghosted through cone and
-  bollard rows that stop or activate under `vpbug` — is now answered:
-  the reshape was responsible, and the original's own collision model
-  supplies the fix.
-- The finding: mm2hook's struct layout shows prop collision is
-  bound-vs-bound — `dgBangerData` carries `Bound`/`ColliderId` and
-  every car carries a `phBound`. The authored bound is therefore the
-  shape that should strike props. Measured: the `vpddbus` authored
-  bound floor is ≈0.27–0.43 m at the nose/tail lower verts — under an
-  `sp_cone_f` top (0.85 m) along the whole underside — while
-  `clear_underside` lifts the world hull's underside ≥0.25 m plus
-  25°/15° ramps (≈1.1 m mid-body on the 5.19 m wheelbase), so
-  kerb-height props pass beneath the raised belly untouched.
+  `d758b72c95e674a319b57458cd427eeb6e4a1846` (clean tree, branch
+  `ralph/night`; F04-C.3 passed external gates + review).
+- Why this slice: the plan's first-listed candidate (F13-A).
+  `Session`'s `Playing → Results` transition was legal since F01-A
+  but nothing ever made it — a finished or timed-out race left the
+  session in `Playing` forever while the HUD only knew
+  `FINISHED`/`OUT OF TIME` on a `Complete` race. UI-5 documents a
+  results screen after every race, so the terminal-resolution →
+  session transition is a real semantic gap implementable now,
+  without F15 opponents or F05 destruction.
 - What landed (code):
-  - `mm2_vehicle::config` — `VehicleConfig.striker_points`: the
-    unmodified authored bound, validated like `collider_points`.
-  - `mm2_vehicle::vehicle` — `StrikeBound(Collider)` component: a
-    prop-strike surface for shape-overlap queries only, never a world
-    collider; `vehicle_bundle` builds it from `striker_points` and
-    falls back to the chassis collider itself.
-  - `mm2_content::convert` — keeps the bound verbatim into
-    `striker_points` beside the `clear_underside`-reshaped
-    `collider_points`; `assemble` paint/variant overrides inherit it
-    with the rest of the collision geometry.
-  - `mm2_app::banger::activate_bangers` — a second strike source beside
-    `CollisionStart` edges: each moving `StrikeBound` runs
-    `SpatialQuery::shape_intersections` and any dormant banger it
-    overlaps is a candidate. Severity = the bound's surface velocity at
-    the prop's centre (`v + ω×r`), the estimate and `ImpulseLimit2`
-    gate are unchanged, the impulse lever is the prop's upwind face by
-    `Size`, and the same `claimed` set dedupes against same-tick
-    contact edges and between strikers. Stationary strikers query
-    nothing.
-  - Tests (all in `tests/banger.rs`, real physics): an overlap
-    activates a prop the world hull demonstrably clears (striker keeps
-    speed/altitude — no contact); a parked overlap activates nothing; a
-    monument-limit prop stays dormant under a moving overlap; the
-    production bundle carries `StrikeBound` from `striker_points` and
-    falls back to the chassis shape.
-- Retail evidence gathered (install
-  `/Users/linus/coding/rust-mm2/retail`, `fnv1a64:e91e6cd4b2ae30d9`,
-  `target/debug/mm2`, `--bot` driver):
-  - `vpddbus --spawn=-1641.6,36.7,410,0 --frames 800` (SF): the run
-    that previously passed the `sp_cone_f` cluster with zero contacts →
-    `bng_ev=1a/0s/0b`, `impacts=10`, `status=pass`.
-  - `vpbus --spawn=0.4,5.5,-720,0 --frames 1500` (London): through the
-    `sp_bollard_black_l` road row it previously ghosted →
-    `bng_ev=1a/1s/0b`.
-  - `vpbug --spawn=0.4,5.5,-720,0 --frames 1500` (London): →
-    `bng_ev=2a/2s/0b` (was `1a/1s` — the bound catches a second
-    bollard the contact hull squeezed past).
+  - `mm2_app::race::advance_race` — when the step that records a
+    participant's `Finished`/`TimedOut` result also resolves a
+    `PlayerControl::Local` participant, the session transitions
+    `Playing → Results` on that same step. The race clock, per-
+    participant progress and `ResultLedger` freeze with the phase
+    change (the system is gated on `is_playing`). A remote/AI
+    participant resolving while the local driver still races changes
+    nothing; `RacePhase::Complete` still waits for every participant.
+  - `mm2_app::main::update_hud` — during `Results` the HUD line
+    surfaces the local outcome (`FINISHED <t>s` carrying the
+    recorded race-clock time, `OUT OF TIME`) instead of stale
+    checkpoint counts. A full placing/results screen is F13-B/F17.
+  - No new machinery: the shared `RaceDefinition`/`RaceProgress`/
+    `ParticipantState`/`ResultLedger` and the generation-scoped
+    session lifecycle are reused unchanged.
+- Tests added (all in `tests/race.rs`, production systems through
+  `load_session_world`/`advance_race`/`drive_session`):
+  - `local_finish_moves_the_session_to_results` — finish →
+    `ParticipantState::Finished` + `RacePhase::Complete` +
+    `SessionPhase::Results`; the ledger keeps exactly one result.
+  - `a_non_local_resolution_does_not_end_the_local_race` — a Remote
+    finish while the local driver races leaves `Playing`/`Running`;
+    the local finish then resolves both (AC03 strengthened).
+  - `local_timeout_moves_the_session_to_results` — `TimedOut` is
+    terminal for the session too (AC02's failure leg).
+  - `restart_from_results_rebegins_the_session` — Results is a live
+    phase: restart unloads/loads, generation increments, the stale
+    `RaceState` is gone (AC05 leg).
+- Ledger evidence gathered (install
+  `/Users/linus/coding/rust-mm2/retail`, `fnv1a64:e91e6cd4b2ae30d9`):
+  - All 24 checkpoint waypoint files (12/city) measured: ≥3 rows
+    each, row 0 = start line, distinct last row = finish trigger
+    (WPT-2's inferred convention now measured on the full roster —
+    london race0 finish ~840 m from the start, london race9's
+    closest at ~49 m).
+  - `.aimap` vs `.aimap_p` cross-checked against `mmracedata.csv`:
+    `[Opponent]`/`[Police]` counts equal the Amateur/Professional
+    parameter blocks on 23/24 checkpoint events → RACE-11
+    (verified_original). The one anomaly is authored: `sf/race0`
+    amateur Opponents=7 while `race0.aimap` wires 6 —
+    `race0-a-6.opp` ships unreferenced. Reported, not repaired.
+    `docs/research/aimap.md` updated; MP-9's "`_p` = MP variant"
+    suspicion corrected; non-Checkpoint `_p` semantics stay
+    unverified.
+- Retail runtime evidence (`target/debug/mm2`):
+  - `--city sf --event checkpoint:0 --bot --headless --frames 12000`
+    → `phase=results race=Complete cp=6/6 results=1
+    outcome=finished` — the bot's finish ends the session at
+    Results on real content. The record's `status=fail` "fell
+    through the world" is the pre-existing post-resolution sanity
+    check (car ends >25 m under spawn altitude during the remaining
+    idle frames) — already documented for 8 SF runs incl. this
+    event, not a regression.
+  - `--city london --event blitz:0 --headless --frames 2000` →
+    `status=pass`, `phase=results race=Complete cp=3/3 results=1
+    outcome=timed-out` — the deadline's TimedOut is terminal too.
 - What this proves / does not prove:
-  - Proves: the reshape was the mechanism (documented zero-contact
-    ghosting); the authored bound is the right strike shape per the
-    original's bound-vs-bound model; activation through overlap
-    restores the documented strikes without touching the world hull or
-    per-vehicle handling.
-  - Does not prove: that an overlap strike imparts the same impulse as
-    a manifold contact (the overlap supplies approach speed and an
-    upwind-face lever, not a manifold — UNK-22 territory); whether the
-    original also lets wheels/bumpers strike props a bound clears; or
-    whether `ImpulseLimit2` semantics are right at all.
-- Classification: the bound-vs-bound prop model is an original
-  requirement (mm2hook layout + authored bound geometry); striking
-  dormant bangers through a `StrikeBound` overlap while the reshaped
-  hull stays the only world collider is an implementation choice; the
-  estimate/gate reuse stays provisional (UNK-22).
+  - Proves: a local terminal resolution now ends the playing session
+    per UI-5 on the production path, synthetic tests and two real
+    authored events; per-participant progress stays independent;
+    Results is restartable without stale state; the aimap
+    difficulty-split convention is measured, not guessed.
+  - Does not prove: a placing/results screen (HUD line only);
+    opponent participation (F15); progression/unlock saving (F16);
+    recovery-penalty semantics (F05); that `_p` means Professional
+    outside the checkpoint roster; original-executable results-flow
+    timing.
+- Classification: `Playing → Results` on local terminal resolution
+  is documented (UI-5); the same-step transition and the outcome
+  HUD line are implementation choice (DSN-11); `.aimap`/`.aimap_p`
+  = Amateur/Professional rosters is verified_original (RACE-11).
 - Commands actually run and results:
-  - `cargo test -p mm2_app --test banger` — 16/16 pass incl. the 4 new
-    tests.
-  - `mm2 --mm2-path <retail> --city sf --car vpddbus
-    --spawn=-1641.6,36.7,410,0 --bot --headless --frames 800`,
-    `--city london --car vpbus --spawn=0.4,5.5,-720,0 --bot --headless
-    --frames 1500`, same spawn `--car vpbug` — records above.
+  - `cargo test -p mm2_app --test race` — 31/31 pass (27 existing +
+    4 new).
+  - `cargo build -p mm2_app --bin mm2` — clean.
+  - Retail runs and data measurements as recorded above.
   - Gates at the candidate commit: `cargo fmt --all -- --check`
-    pass; `cargo clippy --workspace --all-targets --all-features
-    -- -D warnings` pass, exit 0; `cargo test --workspace` pass —
-    all suites, 0 failures.
-- Acceptance IDs satisfied / still open: F04-AC01–AC06 unchanged —
-  this slice strengthens the AC01 evidence base (both sides of the
-  threshold on real content, now including high-floor strikers) but
-  claims no new AC.
-- Deferred deliberately: wheel/bumper strike question (unknown),
-  overlap-vs-contact impulse equivalence (UNK-22), `ImpulseLimit2`
-  semantics, F13-A/F09-C.
+    PASS; `cargo clippy --workspace --all-targets --all-features
+    -- -D warnings` PASS; `cargo test --workspace` PASS — all
+    suites, 0 failures (incl. 31 mm2_app race tests).
+- Acceptance IDs satisfied / still open: F13-AC02 (finish
+  eligibility now ends the session; invalid-crossing tests already
+  existed) and AC03 (independent progress incl. terminal
+  resolution) strengthened; AC05 gains a restart-from-Results leg.
+  AC04 stays open until F15 opponents race; AC06 stays open until
+  representative original races are playable with an honest
+  coverage matrix (bot finishes 4/64 events — route-aware driving
+  is F15 scope).
+- Deferred deliberately: results/placing screen (F13-B/F17),
+  progression persistence (F16), recovery/destruction penalties
+  (F05), tod/weather event overrides (F18), non-Checkpoint `_p`
+  semantics.
 - Stock data/GPU/audio/network limitations: retail evidence is
-  headless physics records through the VFS; no original-executable
-  comparison exists.
-- Unresolved blockers or discovered regressions: none known. The
-  `vpbug` London run now records `2a/2s` instead of `1a/1s` — a
-  deliberate consequence (the bound is wider than the contact hull),
-  documented rather than a defect.
-- Next smallest useful action: F13-A or F09-C.
+  headless physics records through the VFS plus file measurement;
+  no GPU capture, no original-executable comparison.
+- Unresolved blockers or discovered regressions: none known.
+- Next smallest useful action: F13-A remainder (coverage matrix,
+  ledger legs not blocked by F05/F16/F18) or F09-C.
 
 This is a candidate handoff. External code-gate and separate review
 results live in the runner state directory and are not implied by

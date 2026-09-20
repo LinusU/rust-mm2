@@ -23,7 +23,11 @@
 //!   inclusive — segments evaluate first, so a finish landing on the
 //!   expiry tick itself still counts — then every participant still
 //!   unresolved records one [`SessionOutcome::TimedOut`] (DSN-7).
-//!   All-resolved marks the race `Complete`.
+//!   All-resolved marks the race `Complete`. A *local* participant's
+//!   terminal resolution (`Finished`/`TimedOut`) also moves the session
+//!   `Playing → Results` on the same step (UI-5: a results screen
+//!   follows each race) — a remote/AI participant resolving while the
+//!   local driver still races changes nothing.
 //! - anything else (`Paused`, `Unloading`, …): frozen — the race clock
 //!   and every swept segment hold still, so pause/resume is
 //!   deterministic and no timer runs during teardown.
@@ -264,6 +268,7 @@ pub fn advance_race(
             }
             race.clock += 1;
             let mut pending = false;
+            let mut local_resolved = false;
             for (player, position, mut progress) in &mut participants {
                 // AwaitingStart during Running counts as pending: the
                 // race cannot complete with a participant that never
@@ -296,6 +301,9 @@ pub fn advance_race(
                         race_ticks: race.clock,
                         result: id,
                     };
+                    if player.control == PlayerControl::Local {
+                        local_resolved = true;
+                    }
                 } else {
                     pending = true;
                 }
@@ -330,12 +338,26 @@ pub fn advance_race(
                             race_ticks: race.clock,
                             result: id,
                         };
+                        if player.control == PlayerControl::Local {
+                            local_resolved = true;
+                        }
                     }
                 }
                 pending = false;
             }
             if !pending && !participants.is_empty() {
                 race.phase = RacePhase::Complete;
+            }
+            // UI-5's results-screen rule: the local driver's terminal
+            // resolution ends the playing session — the race state and
+            // ledger freeze with the phase change (the system no longer
+            // runs once the session leaves `Playing`). A non-local
+            // participant resolving while the local driver still races
+            // never ends the local race.
+            if local_resolved {
+                session
+                    .transition(SessionPhase::Results)
+                    .expect("Playing → Results is a legal transition");
             }
         }
         RacePhase::Complete => {}
