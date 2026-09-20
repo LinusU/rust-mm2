@@ -16,9 +16,9 @@ use mm2_app::session::{
 };
 use mm2_assets::Vfs;
 use mm2_game::{
-    DamageSignals, DevOverrides, ImpactEvent, ImpactId, Mm2Vfs, ObjectId, ObjectIdentity,
-    PlayerVehicle, Session, SessionConfig, SessionEntity, SessionPhase, SpawnPose, WorldMode,
-    advance_session_tick, despawn_session_entities,
+    BangerPool, DEFAULT_ACTIVE_POOL, DamageSignals, DevOverrides, ImpactEvent, ImpactId, Mm2Vfs,
+    ObjectId, ObjectIdentity, PlayerVehicle, Session, SessionConfig, SessionEntity, SessionPhase,
+    SpawnPose, WorldMode, advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::{Vehicle, VehicleConfig, VehicleInput, VehiclePlugin, VehicleState};
 
@@ -397,6 +397,38 @@ fn dev_spawn_override_pins_the_player_pose() {
         app.world().resource::<SpawnPoint>().position,
         Vec3::new(5.0, 2.0, -7.0),
         "resets return to the override pose"
+    );
+}
+
+/// A `--banger-pool` dev bound lands on the session-scoped pool through
+/// the real load path — and stays quarantined: an unconfigured session
+/// keeps the recovered ×32 default.
+#[test]
+fn dev_banger_pool_override_bounds_the_active_pool() {
+    let mut app = test_app(
+        SessionConfig {
+            dev: DevOverrides {
+                banger_pool: Some(4),
+                ..DevOverrides::default()
+            },
+            ..SessionConfig::default()
+        },
+        1.0 / 60.0,
+    );
+    app.update();
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+    assert_eq!(
+        app.world().resource::<BangerPool>().max_active,
+        4,
+        "the dev bound replaces the default"
+    );
+
+    let mut app = dev_app();
+    app.update();
+    assert_eq!(
+        app.world().resource::<BangerPool>().max_active,
+        DEFAULT_ACTIVE_POOL,
+        "no override keeps the recovered default"
     );
 }
 

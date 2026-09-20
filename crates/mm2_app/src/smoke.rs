@@ -267,8 +267,11 @@ pub fn headless_smoke(
     let mut peak_speed = 0.0f32;
     // Emitted banger transitions by phase — the event stream, not just
     // the end-state buckets below (a prop that activated then settled
-    // counts in both).
+    // counts in both). `bng_reclaims` separately counts settles whose
+    // cause is the pool reclaiming a slot — otherwise a pool-settle and
+    // an Avian-sleep settle are indistinguishable in the record.
     let mut bng_events = [0usize; 4];
+    let mut bng_reclaims = 0usize;
     for f in 0..frames {
         // The `Hold` driver writes input directly; `Scripted` is owned
         // by `scripted_drive` inside the update. Either way the
@@ -306,6 +309,9 @@ pub fn headless_smoke(
                 BangerPhase::Settled => 2,
                 BangerPhase::Broken => 3,
             }] += 1;
+            if e.cause == mm2_game::BangerCause::Reclaimed {
+                bng_reclaims += 1;
+            }
         }
         if let Some(state) = app.world().get::<VehicleState>(car) {
             saw_grounded |= state.grounded;
@@ -377,8 +383,21 @@ pub fn headless_smoke(
             }] += 1;
         }
         if counts.iter().sum::<usize>() > 0 {
+            // The dev `--banger-pool` bound is recorded when set so a
+            // reclaim run is self-describing; default runs stay
+            // bit-identical to earlier records.
+            let pool = config
+                .dev
+                .banger_pool
+                .map(|n| format!(" bng_pool={n}"))
+                .unwrap_or_default();
+            let rec = if bng_reclaims > 0 {
+                format!(" bng_rec={bng_reclaims}")
+            } else {
+                String::new()
+            };
             format!(
-                " bng={}d/{}a/{}s/{}b bng_ev={}a/{}s/{}b",
+                " bng={}d/{}a/{}s/{}b bng_ev={}a/{}s/{}b{pool}{rec}",
                 counts[0],
                 counts[1],
                 counts[2],

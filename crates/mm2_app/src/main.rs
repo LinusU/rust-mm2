@@ -112,6 +112,12 @@ struct Cli {
     #[arg(long, value_name = "x,y,z[,yaw]")]
     spawn: Option<String>,
 
+    /// Bound simultaneously active bangers at `n` instead of the
+    /// recovered ×32 default (diagnostic aid — exercises pool reclaim
+    /// without needing 32 real collisions).
+    #[arg(long, value_name = "n")]
+    banger_pool: Option<usize>,
+
     /// Run without a window or GPU: simulate `--frames` updates
     /// (default 600), print a `smoke=headless-physics` record and exit.
     #[arg(long)]
@@ -434,6 +440,7 @@ fn main() {
             camera: cam_start,
             nav_overlay: nav_overlay_cfg,
             spawn: spawn_pose,
+            banger_pool: cli.banger_pool,
         },
         ..SessionConfig::default()
     };

@@ -22,6 +22,7 @@ pub mod telemetry;
 
 pub use banger::{
     Banger, BangerCause, BangerDefinition, BangerPhase, BangerPool, BangerStateChanged,
+    DEFAULT_ACTIVE_POOL,
 };
 pub use config::{
     CameraPose, ConfigError, Densities, DevOverrides, Difficulty, EventRef, EventTableKind,

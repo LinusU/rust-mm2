@@ -390,6 +390,10 @@ pub struct DevOverrides {
     /// world or authored event slot chose (evidence/diagnostic runs —
     /// never a session-legal parameter).
     pub spawn: Option<SpawnPose>,
+    /// `--banger-pool` bound on simultaneously active bangers: replaces
+    /// the recovered ×32 default (evidence/diagnostic runs — never a
+    /// session-legal parameter).
+    pub banger_pool: Option<usize>,
 }
 
 /// Configuration of the `--nav` debug overlay: draw the city's BAI

@@ -28,9 +28,9 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_content::VehicleDef;
 use mm2_game::{
-    DamageSignals, Mm2Vfs, ObjectIdentity, Player, PlayerControl, PlayerVehicle, RaceDefinition,
-    RaceProgress, RaceState, Session, SessionEntity, SessionMode, SessionPhase, TargetSelection,
-    WorldMode,
+    BangerPool, DEFAULT_ACTIVE_POOL, DamageSignals, Mm2Vfs, ObjectIdentity, Player, PlayerControl,
+    PlayerVehicle, RaceDefinition, RaceProgress, RaceState, Session, SessionEntity, SessionMode,
+    SessionPhase, TargetSelection, WorldMode,
 };
 use mm2_vehicle::{VehicleConfig, vehicle_bundle};
 use tracing::{error, info, warn};
@@ -369,6 +369,12 @@ pub fn load_session_world(
         spawn.position = pose.position;
         spawn.yaw = pose.yaw;
     }
+    // A `--banger-pool` dev bound replaces the recovered ×32 default —
+    // quarantined like `--spawn`, session-scoped so a restart re-stamps
+    // the same bound (evidence/diagnostic runs only).
+    commands.insert_resource(BangerPool {
+        max_active: config.dev.banger_pool.unwrap_or(DEFAULT_ACTIVE_POOL),
+    });
     if world_ok {
         session
             .transition(SessionPhase::Ready)
