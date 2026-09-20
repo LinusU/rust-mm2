@@ -1,80 +1,100 @@
 # Last implementation iteration
 
-- Task ID and title: F00-B.1 — versioned content inventory via
-  `mm2-inspect inventory` (child of F00-B; advances F00-AC02). Also
-  repaired the external review's factual defect: SF circuit authored
-  data is `circuit0–11`, not `cir1–9/circuit8–9` (fixed in PLAN.md
-  Discoveries + F14-A row; `cir1–9` are `_strtpnts` records only).
+- Task ID and title: F00-B.2 — original-rules ledger (child of F00-B;
+  completes the F00-B scope alongside B.1's inventory). Also added the
+  `mm*data.csv` event-metadata table parser so the ledger's authored
+  roster claims are reproducible through the VFS.
 - Starting commit and resulting commit: started at
-  `4f624e314deb9f94f061e5e0f27ea00eb4dc375b` (clean tree, branch
-  `ralph/night`); result = this commit.
+  `156b0cc7621b8ba743047a52ab0f67922f06643a` (clean tree, branch
+  `ralph/night`, external check+review had just passed); result = this
+  commit.
 - Production code changed:
-  - `crates/mm2_content/src/expect.rs` (new): authored stock
-    denominators — expected cities, per-city event rosters
-    (london 40 races/16 lessons, sf 40 races/26 lessons), ped
-    archetypes, audio families. Shared next to `EXPECTED_STOCK_ROSTER`
-    so F11's event catalog audits against the same table.
-  - `tools/mm2_inspect/src/inventory.rs` (new): report builder composing
-    the existing VFS, `VehicleCatalog`, `Psdl`/`inst` parsers — no
-    second loader. 12 families, per-family
-    expected/discovered/accepted/rejected/unverified/extras counts,
-    rejected entries preserved with reasons, `fnv1a64` catalog
-    fingerprint over resolved-path provenance + source sizes,
-    `--json`/`--strict` modes.
-  - `tools/mm2_inspect/build.rs` (new): embeds `git rev-parse HEAD`
-    (+`-dirty`) so reports are versioned by engine commit.
-  - `tools/mm2_inspect/src/main.rs`: `inventory` subcommand;
-    `build_vfs_report` exposes mount diagnostics (archive/mod list)
-    alongside the VFS.
-  - `tools/mm2_inspect/Cargo.toml`: `tempfile` dev-dependency (same
-    version already used by other workspace crates).
-- Tests added/changed and why: 5 new tests —
-  `expect::roster_sizes_match_retail_audit` (expected table totals),
-  `inventory::race_file_classification` (14 file-kind/stem cases
-  incl. `.#` junk, `-a/-p` opp tails, `data_p`, `waypoints`,
-  `strtpnts`), `synthetic_install_counts` (synthetic loose-file install
-  exercising every family's expected/missing/partial/junk paths),
-  `empty_install_never_passes_strict` (F00-AC02 empty-catalog guard),
-  `fingerprint_changes_with_catalog` (determinism + change detection).
+  - `crates/mm2_formats/src/racedata.rs` (new): `EventTable` parser for
+    `race/<city>/mm{race,blitz,circuit,crash}data.csv` — one row per
+    selectable event carrying the ten-parameter block twice (Amateur +
+    Professional halves; the amateur/pro mapping is marked inferred in
+    the doc since headers are unlabeled). Structural failures return
+    `FormatError`; malformed rows become `TableDiagnostic`s.
+  - `crates/mm2_formats/src/lib.rs`: `pub mod racedata`.
+  - `crates/mm2_content/src/expect.rs`: `EXPECTED_EVENT_TABLES` — the
+    four table names per race city, flagged race-vs-lesson family.
+  - `tools/mm2_inspect/src/inventory.rs`: `events()` now reads each
+    discovered `mm*data.csv` through the VFS and parses it. Row counts
+    go to the races notes (`sf event-metadata rows: mmracedata.csv=12
+    rows, …`); missing expected tables, malformed tables and malformed
+    rows become rejected records (strict-visible), `mmcrashdata.csv`
+    auditing against the lessons family.
+- Documentation changed:
+  - `docs/original-rules.md` (new): the F00-B.2 ledger — ~90 classified
+    facts (verified_original / documented / inferred / designed /
+    unknown) covering drivers/progression, all five modes, Crash Course,
+    vehicle/paint unlocks, damage, police, multiplayer + C&R, HUD/map/
+    cameras, controls/options, menus, world behavior, plus a designed-
+    departures list and a 15-item UNK open-question table.
+- Source material (all from the local retail install, read-only):
+  - `MM2HELP.HLP` decompiled locally with helpdeco (GPLv3 tool, cloned
+    to /tmp only — decompiled text is original content and is NOT
+    committed; the ledger cites topic names).
+  - `Readme.rtf` / `TROUBLE.RTF` via `textutil`; `Booklet.pdf` via pypdf
+    in a /tmp venv.
+  - Authored data via `mm2-inspect dump`/`inventory`: `mm*data.csv`
+    aggregates and all `tune/*.info` Unlock fields.
+- Key findings now on record:
+  - Authored selectable rosters are 12 checkpoint / 10 blitz / 10
+    circuit / 13 crash-course rows per city — matching help's "12
+    Checkpoint Races" and "nine lessons + midterms + final". The extra
+    `.aimap` files beyond those rosters stay in the expected denominator
+    but their selectability is UNK-2.
+  - Help documents 20 vehicles; the roster ships 21 — `vpmoonrover` is
+    the undocumented one (UNK-3).
+  - Circuit races have zero peds, ambient and cops in data (confirms
+    documented no-peds rule; no-cops is a new verified fact).
+  - Blitz: no opponents/cops, per-event time limits 18–120 (unit
+    unverified). Checkpoint: fixed authored cop counts 0–8.
+  - `.info` `UnlockScore`/`UnlockFlags` exist (GTR-1 = 8000) but bit/score
+    semantics stay unknown (UNK-6).
+- Tests added/changed and why: 4 new `racedata` unit tests (retail-shaped
+  table, wrong header, empty input, malformed rows as diagnostics) +
+  `synthetic_install_counts` extended (well-formed table row count,
+  missing table reject, malformed `mmcrashdata` reject on lessons).
 - Commands actually run and results:
   - `cargo fmt --all -- --check` — PASS.
   - `cargo clippy --locked --workspace --all-targets --all-features --
     -D warnings` — PASS.
-  - `cargo test --locked --workspace` — PASS, ~108 tests, 0 failures.
-  - `mm2-inspect inventory /Users/linus/coding/rust-mm2/retail` — 13,389
-    logical paths; cities 5/5 parsed (2 expected + 3 extras); vehicles
-    21/29 accepted (8 rejected w/ dep reasons); races 80 expected, 78
-    accepted, `circuit11` partial in both cities (opp/pathset only, no
-    `.aimap`), 31 extra records; crash lessons 42/42; placement 13 inst
-    parsed + 157 unparsed aux; audio 7/7 families present, 3293 files
-    unverified; peds 4/4 + wolf partial + CVS junk rejected; MP 131
-    markers (99 `.aimap_p`, copchase/multicop/`*_p` variants, no C&R
-    data); traffic 23 va* ids (garbagetruck lacks model); breakables
-    995; profiles 17; interface/effects 117.
-  - `mm2-inspect inventory <retail> --json` — parses as JSON; 12
-    families, 33 strict failures listed.
-  - `mm2-inspect inventory <retail> --strict` — exit 2 (findings are
-    real partial/junk authored records, not tool errors).
+  - `cargo test --locked --workspace` — PASS, ~112 tests, 0 failures.
+  - `mm2-inspect inventory /Users/linus/coding/rust-mm2/retail` —
+    event-metadata rows line present per city; counts unchanged
+    (races 80/111/78, lessons 42/42).
+  - `mm2-inspect inventory <retail> --strict` — exit 2, 33 findings
+    (same genuine findings as before; all 8 tables parse cleanly so the
+    new check adds no noise on retail).
+  - `mm2-inspect inventory <retail> --json` — parses; strict_failures
+    embedded.
 - Acceptance IDs satisfied / still open:
-  - F00-AC02: advanced — the report carries all five counts per family
-    plus extras; strict fails on empty expected catalogs and on real
-    rejected entries. Candidate, pending external check.
-  - F00-AC06: advanced — unverified content (audio, races, peds, MP,
-    traffic, breakables) is reported as unverified, never as supported.
-  - F00-AC01/AC03/AC04/AC05: unchanged from last iteration (AC01
-    gates re-run and pass; dev-world smoke still not run).
-- Evidence files: none; no screenshots/original-content captures.
-- Stock data/GPU/audio/network limitations: retail install enumerated
-  read-only; race/audio/anim/banger formats have no parser so those
-  families report presence-level acceptance + unverified content — the
-  classification is stated in the report notes, not hidden.
-- Unresolved blockers or discovered regressions: none new. `circuit11`
-  (both cities) and the SF `r0` record are authored-but-partial; whether
-  they are real events or dev leftovers stays `unknown` until F00-B.2's
-  rules ledger. `MM2_GAME_DIR` convention still open — inventory keeps
-  the explicit-dir convention used by every `mm2-inspect` command.
-- Next smallest useful action: F00-B.2 — original-rules ledger
-  (MM2HELP.HLP / Readme.rtf / authored data), each fact classified
-  verified_original/documented/inferred/designed/unknown.
+  - F00 req. 4 (original-rules ledger): delivered —
+    `docs/original-rules.md` marks every fact
+    verified_original/documented/inferred/designed/unknown with source
+    citations. Candidate, pending external check.
+  - F00-AC06: advanced — unverified rules stay explicitly open (UNK-1..
+    UNK-15); nothing doc-only is claimed as verified.
+  - F00-AC02/AC03: advanced slightly — malformed/missing `mm*data.csv`
+    tables now reject with logical path + reason through the normal
+    strict path.
+  - F00-AC01: gates re-run and pass.
+  - F00-AC04/AC05: unchanged — dev-world and visual/headless smokes
+    still not run (F00-C).
+- Evidence files: none; no screenshots/original-content captures
+  committed. Decompiled help text lives only in /tmp.
+- Stock data/GPU/audio/network limitations: help text was extracted
+  offline and cited, not reproduced; no original executable was run, so
+  *documented* facts remain doc-trust (the ledger says so). GPU/audio/
+  network still unexercised run-wide.
+- Unresolved blockers or discovered regressions: none new. The UNK list
+  needs either observable original behavior (running retail — not
+  possible in this environment) or further format research; it should
+  not block unrelated ready work.
+- Next smallest useful action: F00-C — unified evidence commands
+  (dev-world smoke AC04, visual + headless smokes AC05) with explicit
+  missing-capability outcomes.
 
 This is a candidate handoff. External code-gate and separate review results live in the runner state directory and are not implied by this report.

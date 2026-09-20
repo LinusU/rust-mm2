@@ -38,11 +38,11 @@
 
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
-**Next selected slice: F00-B.2** — original-rules ledger (see task
-table). F00-B.1's inventory now names the authored denominator per
-family; the ledger marks each original rule verified_original /
-documented / inferred / designed / unknown from MM2HELP.HLP, Readme.rtf
-and authored data.
+**Next selected slice: F00-C** — reusable synthetic / original-data /
+graphical evidence commands (see task table). F00-B's children are both
+implemented: the inventory (B.1) and `docs/original-rules.md` (B.2).
+F00-C owed: unified evidence commands with explicit missing-capability
+outcomes (AC04 dev-world smoke, AC05 visual/headless smoke).
 
 ## Baseline gate results (this checkout, 2026-09-20)
 
@@ -53,16 +53,16 @@ and authored data.
 | `cargo test --locked --workspace` | PASS — 17 test binaries/doc-test groups, ~108 tests, 0 failures |
 | `mm2-inspect cars <retail>` | 29 catalog entries; all 21 `EXPECTED_STOCK_ROSTER` cars `ready`; 8 extra ids kept with explicit incompleteness reasons |
 | `mm2-inspect list <retail>` | 13,389 logical paths; families: texture 3977, aud 3293, geometry 1867, tune 1356, race 1080, bound 1034, city 247, anim 95 |
-| `mm2-inspect inventory <retail>` | 12 families: cities 2/5 exp/disc all parsed; vehicles 21/21 ready + 8 rejected; races 80 exp, 78 accepted, 2 partial (circuit11), 31 extras; lessons 42/42; placement 13 inst parsed; audio 7/7 families (3293 files unverified); peds 4/4 + wolf partial; MP/breakables/traffic/profile/interface discovered-only. `--strict` exits 2 (33 findings) — honest: partial/junk records exist on retail. |
+| `mm2-inspect inventory <retail>` | 12 families: cities 2/5 exp/disc all parsed; vehicles 21/21 ready + 8 rejected; races 80 exp, 78 accepted, 2 partial (circuit11), 31 extras; lessons 42/42; placement 13 inst parsed; audio 7/7 families (3293 files unverified); peds 4/4 + wolf partial; MP/breakables/traffic/profile/interface discovered-only. Event-metadata tables parse: 12/10/10/13 checkpoint/blitz/circuit/crash rows per city. `--strict` exits 2 (33 findings) — honest: partial/junk records exist on retail. |
 
 ## Task table
 
 | Task | Status | Dependencies | Evidence / reason / next action |
 |---|---|---|---|
 | F00-A | implemented | - | Audit done in this planning pass: gates pass, env/install/toolchain recorded above. Candidate pending external check/review. |
-| F00-B | active | F00-A | Split into F00-B.1 (inventory) and F00-B.2 (rules ledger). B.1 implemented (candidate); rules ledger still owed. |
+| F00-B | implemented | F00-A | Split into F00-B.1 (inventory) and F00-B.2 (rules ledger); both children implemented. Candidate pending external check. |
 | F00-B.1 | implemented | F00-A | `mm2-inspect inventory` landed: versioned report (engine commit + fnv1a64 catalog fingerprint) with expected/discovered/accepted/rejected/unverified counts across 12 families; `--strict` exits 2 with 33 findings on retail (8 incomplete vehicles, 2 partial circuit11, junk/partial records). Candidate pending external check. |
-| F00-B.2 | queued | F00-A | Child of F00-B. Original-rules ledger from MM2HELP.HLP/Readme.rtf/authored data, each fact marked verified_original/documented/inferred/designed/unknown. |
+| F00-B.2 | implemented | F00-A | `docs/original-rules.md` ledger landed: ~90 classified facts from MM2HELP.HLP (decompiled locally via helpdeco), Readme.rtf, Booklet.pdf and authored data. `mm2_formats::racedata` parses the `mm*data.csv` event tables; inventory cross-checks them (12/10/10/13 rows/city, missing/malformed → rejected). Candidate pending external check. |
 | F00-C | queued | F00-B | Partial infra exists: `--frames N --screenshot`, `--dev-world` without data, `mm2-inspect --strict`. Owed: unified evidence commands with explicit missing-capability outcomes. |
 | F01-A | queued | F00-A | `mm2_game` is a 40-line stub (`WorldMode`, `Mm2Vfs`, markers). No SessionConfig/lifecycle yet. |
 | F01-B | queued | F01-A | No stable IDs, VehicleTelemetry, ImpactEvent, SurfaceState or result contracts exist. |
@@ -171,9 +171,11 @@ and authored data.
   the feature is a real change for F07, not a config flag to flip
   silently).
 - Original rules are unverified for everything outside
-  `docs/research/` + `docs/vehicle-handling.md`. F00-B.2 is the ledger
-  task; until then, race/breakable/surface/traffic/pedestrian/police/C&R
-  behaviors are `unknown`, not designed.
+  `docs/research/` + `docs/vehicle-handling.md` +
+  `docs/original-rules.md`. The ledger marks each fact
+  verified_original/documented/inferred/designed/unknown; its UNK list
+  (cop AI, C&R mechanics, enum maps, race names, ped behavior, …) stays
+  open until evidenced — documented ≠ verified.
 - Single writer rule: this worktree shares build artifacts/stash with
   other agents per AGENTS.md — rebuilds must be coordinated.
 
@@ -197,7 +199,11 @@ and authored data.
   `.pathset` (57), `*waypoints.csv`/`*_strtpnts` (175 csv), plus
   oddities (`bak`, `old`, `ps2`, `.1`/`.4`/`.5` suffixes, `csvs` dir).
   `mm{race,blitz,circuit,crash}data.csv` per city are the authored event
-  metadata tables.
+  metadata tables — parsed by `mm2_formats::racedata`: 12 checkpoint /
+  10 blitz / 10 circuit / 13 crash-course rows per city, one row per
+  selectable event with Amateur + Professional parameter blocks
+  (car/time-of-day/weather/opponents/cops/ambient/peds/laps/timelimit/
+  difficulty). See `docs/original-rules.md` for the full ledger.
 - City files: `city/{city,london,sf,sfai,variant}.psdl`,
   `{london,sf}{,_sup,_bak}.bai`, `sfai.bai`, 44 `.pathset`, 42 `.csv`,
   35 `.ldef`, 25 `.cpvs`, 13 `.inst`, 3 `.sky`, 3 `.txt`,

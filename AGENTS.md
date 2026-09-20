@@ -61,6 +61,11 @@ the build artefacts and the git stash stack are shared:
   are deliberate. Read it before changing `mm2_content::convert` or the
   assists; `mm2-inspect handling <install>` audits the whole roster and
   is how claims about handling get checked.
+- [docs/original-rules.md](docs/original-rules.md) — the original-rules
+  ledger: every known retail-game rule classified verified_original /
+  documented / inferred / designed / unknown with sources. Read it
+  before implementing a game-mode, unlock or world-behavior rule, and
+  update it when a rule's evidence changes.
 - [docs/research/](docs/research/) — notes on the MM2 binary formats. When
   a format's meaning is inferred rather than documented, say so there and
   in the code, and prefer measuring against the retail data over guessing.
