@@ -17,12 +17,13 @@ use bevy::prelude::*;
 use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use clap::Parser;
 use mm2_app::session::{ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
-use mm2_app::{camera, car_visual, city, contracts, input, session, smoke};
+use mm2_app::{camera, car_visual, city, contracts, input, race, session, smoke};
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
 use mm2_game::{
-    CameraPose, DevOverrides, ImpactEvent, Mm2Vfs, PlayerVehicle, Session, SessionConfig,
-    SessionPhase, VehicleSelection, WorldMode, advance_session_tick, despawn_session_entities,
+    CameraPose, DevOverrides, ImpactEvent, Mm2Vfs, PlayerVehicle, RaceStarted, Session,
+    SessionConfig, SessionPhase, VehicleSelection, WorldMode, advance_session_tick,
+    despawn_session_entities,
 };
 use mm2_vehicle::{ResetVehicle, VehicleConfig, VehicleDebugEnabled, VehiclePlugin};
 use tracing::{error, info, warn};
@@ -414,16 +415,20 @@ fn main() {
     })
     .add_plugins(VehiclePlugin)
     .add_message::<ImpactEvent>()
+    .add_message::<RaceStarted>()
     .init_resource::<contracts::ImpactFilter>()
     .init_resource::<SessionControl>()
     .add_systems(FixedUpdate, advance_session_tick)
     .add_systems(
         FixedLast,
         (
-            contracts::collect_impacts,
-            contracts::publish_vehicle_telemetry,
-        )
-            .chain(),
+            (
+                contracts::collect_impacts,
+                contracts::publish_vehicle_telemetry,
+            )
+                .chain(),
+            race::advance_race,
+        ),
     )
     .add_systems(
         Update,

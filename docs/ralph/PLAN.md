@@ -38,18 +38,22 @@
 
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
-**Next selected slice: F11-B** — shared race lifecycle over the new
-`EventCatalog` (countdown/input lock, swept checkpoint triggers,
-progress, restart/cleanup, once-only results). Its dep F11-A is
-implemented but not yet externally checked, so the runner may prefer an
-independent ready slice instead: F03-A (prop audit) or F09-A (BAI
-parser) both have all deps checked. F01 is complete as a candidate:
-F01-A/F01-B externally checked; F01-C implemented. F11-A implemented:
-shared `racefiles` classifier, waypoint/start-point/`.opp`/crash-data/
-rewards parsers, `EventCatalog` in `mm2_content` (moved out of
-`mm2_game` at iteration 010 after review flagged the VFS/parse producer
-inside the domain crate), `mm2-inspect events` (strict-clean on retail:
-45/45 events ready per city, extras listed).
+**Next selected slice: F11-B.2** — the `mm2_content` producer that
+turns a `CatalogEvent`'s parsed records into a `RaceDefinition` plus
+the `load_session_world` wiring (event mode → `Ready → Countdown`,
+`RaceState`/`RaceProgress` insertion, checkpoint entity/markers,
+event-prop session scope). `RecordContent` currently keeps only counts
+— the producer must retain or re-read parsed waypoint/start rows.
+F11-B.1 landed this iteration: `mm2_game::race` contract (swept
+cylinder triggers, `CheckpointRule` AnyOrder/Ordered per BLZ-1/CHK-1
+vs CIR-1, `RaceState`/`RaceProgress`, `RaceStarted`,
+`SessionOutcome::Finished`) + `mm2_app::race::advance_race` driver in
+`FixedLast`, teardown removes `RaceState`, `vehicle_input` honours
+`input_locked`, `Countdown` is quittable/restartable. F11-A is now
+externally checked (review pass at `bb56272`). F01 complete as a
+candidate: F01-A/F01-B checked; F01-C implemented. Independent ready
+alternates if the runner prefers: F03-A (prop audit) or F09-A (BAI
+parser), both with all deps checked.
 
 ## Baseline gate results (this checkout, 2026-09-20)
 
@@ -57,7 +61,7 @@ inside the domain crate), `mm2-inspect events` (strict-clean on retail:
 |---|---|
 | `cargo fmt --all -- --check` | PASS |
 | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | PASS |
-| `cargo test --locked --workspace` | PASS — 21 test binaries/doc-test groups, 0 failures (incl. 13 F01-A session tests, 9 F01-B contract units, 3 real-physics contract integration tests) |
+| `cargo test --locked --workspace` | PASS — 25 test result groups, 0 failures (incl. 11 F11-B.1 contract tests, 13 F11-B.1 production-path race tests, 13 F01-A session tests, 9 F01-B contract units) |
 | `mm2-inspect cars <retail>` | 29 catalog entries; all 21 `EXPECTED_STOCK_ROSTER` cars `ready`; 8 extra ids kept with explicit incompleteness reasons |
 | `mm2-inspect list <retail>` | 13,389 logical paths; families: texture 3977, aud 3293, geometry 1867, tune 1356, race 1080, bound 1034, city 247, anim 95 |
 | `mm2-inspect inventory <retail>` | 12 families: cities 2/5 exp/disc all parsed; vehicles 21/21 ready + 8 rejected; races 80 exp, 78 accepted, 2 partial (circuit11), 31 extras; lessons 42/42; placement 13 inst parsed; audio 7/7 families (3293 files unverified); peds 4/4 + wolf partial; MP/breakables/traffic/profile/interface discovered-only. Event-metadata tables parse: 12/10/10/13 checkpoint/blitz/circuit/crash rows per city. `--strict` exits 2 (33 findings) — honest: partial/junk records exist on retail. |
@@ -107,8 +111,10 @@ inside the domain crate), `mm2-inspect events` (strict-clean on retail:
 | F10-A | queued | F01-B, F02-A, F09-B | `va*` traffic vehicles exist in install; no ambient-traffic code. |
 | F10-B | queued | F10-A | — |
 | F10-C | queued | F10-B | — |
-| F11-A | implemented | F00-B, F01-A | `mm2_formats::racefiles` shared classifier (was private to `mm2-inspect` inventory); new parsers `waypoints` (waypoint + `_strtpnts` CSVs), `opp`, `crashdata` (tolerates retail `AmbDenisty` typo / omitted `Filename` label / named tail columns — kept as diagnostics), `rewards`. `mm2_content::EventCatalog`: VFS scan per city, `mm*data.csv` rows → `EventRef`-keyed entries (ready/incomplete + failed refs), dep records attached by stem (aimap/aimap_p/pathset/waypoints/startpoints/per-difficulty opp), Crash Course `Filename` links resolve whole linked stems (incl. sibling `.opp`), rewards + milestone rewards linked, unclaimed stems listed as extras. `mm2-inspect events <install> [--city] [--strict]` — strict exits 0 on retail: 45/45 events ready per city, 33/32 extras. First candidate failed review on crate placement (VFS+parsing producer inside `mm2_game` contradicted `docs/architecture.md`); moved to `mm2_content::events` with a `mm2_content → mm2_game` edge for `EventRef`/`EventTableKind` and the doc updated to name `mm2_content` as the content-producer layer. Candidate pending external check. |
-| F11-B | queued | F11-A | — |
+| F11-A | checked | F00-B, F01-A | `mm2_formats::racefiles` shared classifier (was private to `mm2-inspect` inventory); new parsers `waypoints` (waypoint + `_strtpnts` CSVs), `opp`, `crashdata` (tolerates retail `AmbDenisty` typo / omitted `Filename` label / named tail columns — kept as diagnostics), `rewards`. `mm2_content::EventCatalog`: VFS scan per city, `mm*data.csv` rows → `EventRef`-keyed entries (ready/incomplete + failed refs), dep records attached by stem, Crash Course `Filename` links resolve whole linked stems, rewards + milestone rewards linked, extras listed. `mm2-inspect events <install> [--city] [--strict]` — strict exits 0 on retail: 45/45 events ready per city. Producer correctly placed in `mm2_content` after the iteration-010 review rejection. Externally checked (review pass at `bb56272`, iteration 011 feedback). |
+| F11-B | active | F11-A | Split into B.1 (shared runtime contract + driver, this iteration) and B.2 (`mm2_content` catalog→`RaceDefinition` producer + event-session loading wiring). Parent AC02–AC05 stay open until B.2 loads a real event. |
+| F11-B.1 | implemented | F11-A | `mm2_game::race`: `Checkpoint` swept cylinder test (XZ radius + ±height band + opt-in direction flag), `CheckpointRule` (`AnyOrder` documented BLZ-1/CHK-1 / `Ordered` documented CIR-1 — carried on the definition, not imposed), `RaceDefinition` (checkpoints/finish/start slots/laps/countdown + `validate`), `RaceState` (generation-stamped countdown→running→complete, `input_locked`, `is_stale`), `RaceProgress` (per-checkpoint cleared flags, ordered `next`/lap wrap, `break_segment` for teleport/reset, one segment consumes every checkpoint it crosses), `RaceStarted` message, `SessionOutcome::Finished{race_ticks}` on `SessionResult`. `mm2_app::race::advance_race` in `FixedLast` (post-solver `Position` segments): countdown→one `RaceStarted`+`Countdown→Playing`, clock+advance while `Playing`, `Finished` → mint+record `SessionResult` once into `ResultLedger`, all-finished → `Complete`; authority-gated (Remote never steps). Teardown: `drive_session` removes `RaceState`; `vehicle_input` honours `input_locked`; `Countdown` quittable/restartable. Tests: 11 contract (geometry/rules/staleness/validation) + 13 production-path (AC02 high-speed/wrong-height/repeated/teleport via `Position`, AC03 countdown-once/pause-freeze/restart-removes-timer, AC04 once-only results with generation+participant+event provenance, ties, remote-authority no-op, quit during countdown). Candidate pending external check. |
+| F11-B.2 | queued | F11-B.1 | Owed: producer `CatalogEvent`→`RaceDefinition` (RecordContent must retain or re-read parsed waypoint/start rows — currently counts only), `load_session_world` event-mode wiring (`Ready → Countdown`, `RaceState`/`RaceProgress`/start-slot placement), checkpoint entities/markers, event-prop session scope (AC05). |
 | F11-C | queued | F11-B | — |
 | F12-A | queued | F02-B, F11-B | London blitz0–12, SF blitz0–13 authored data present. |
 | F12-B | queued | F12-A | — |

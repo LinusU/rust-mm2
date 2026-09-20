@@ -172,7 +172,7 @@ Scheduling in `mm2` (`main.rs`):
 |---|---|
 | `Update` | `load_session_world.run_if(session::loading)` (spawns the whole session, drives `Loading → Ready → Playing`/`Failed`), `session_control_input` (`Esc` quit → exit, `Backspace` restart), `despawn_session_entities.run_if(session::unloading)` chained before `drive_session` (despawn flushes, then the driver observes the empty world → `Menu`) |
 | `FixedUpdate` | `advance_session_tick` — the gameplay clock, `Playing` only |
-| `FixedLast` | `collect_impacts` → `publish_vehicle_telemetry` (chained, post-solver, `Playing` only) |
+| `FixedLast` | `collect_impacts` → `publish_vehicle_telemetry` (chained, post-solver, `Playing` only); `race::advance_race` (post-solver, drives the shared race lifecycle when a `RaceState` exists — countdown, swept triggers, once-only results) |
 
 Ownership rules a feature must follow:
 

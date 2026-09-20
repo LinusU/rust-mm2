@@ -28,8 +28,8 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_content::VehicleDef;
 use mm2_game::{
-    DamageSignals, Mm2Vfs, ObjectIdentity, Player, PlayerControl, PlayerVehicle, Session,
-    SessionEntity, SessionPhase, WorldMode,
+    DamageSignals, Mm2Vfs, ObjectIdentity, Player, PlayerControl, PlayerVehicle, RaceState,
+    Session, SessionEntity, SessionPhase, WorldMode,
 };
 use mm2_vehicle::{VehicleConfig, vehicle_bundle};
 use tracing::{error, info, warn};
@@ -95,7 +95,9 @@ pub fn unloading(session: Res<Session>) -> bool {
 
 /// `Esc` asks to quit, `Backspace` asks to restart. Intents are only read
 /// from the phases a session can sit in — while `Loading`, `Unloading` or
-/// `Menu` the driver is already working and input is ignored.
+/// `Menu` the driver is already working and input is ignored. `Countdown`
+/// is quittable: a race that has not started still tears down like any
+/// other live session.
 pub fn session_control_input(
     keys: Res<ButtonInput<KeyCode>>,
     session: Res<Session>,
@@ -103,7 +105,8 @@ pub fn session_control_input(
 ) {
     let quittable = matches!(
         session.phase(),
-        SessionPhase::Playing
+        SessionPhase::Countdown
+            | SessionPhase::Playing
             | SessionPhase::Paused
             | SessionPhase::Results
             | SessionPhase::Failed(_)
@@ -132,6 +135,7 @@ pub fn session_control_input(
 /// - `Playing`/`Paused`/`Results`/`Failed`: a queued intent moves the
 ///   session to `Unloading`; teardown proceeds on later frames.
 pub fn drive_session(
+    mut commands: Commands,
     mut session: ResMut<Session>,
     mut control: ResMut<SessionControl>,
     mut filter: ResMut<ImpactFilter>,
@@ -148,6 +152,10 @@ pub fn drive_session(
             }
             filter.reset();
             spawn.trailers.clear();
+            // Session-scoped resources die with the session: a race's
+            // countdown/clock/progress must never survive into the next
+            // session (AC03 — no old timer survives).
+            commands.remove_resource::<RaceState>();
             session
                 .transition(SessionPhase::Menu)
                 .expect("Unloading → Menu is a legal transition");
@@ -171,7 +179,8 @@ pub fn drive_session(
                 }
             }
         }
-        SessionPhase::Playing
+        SessionPhase::Countdown
+        | SessionPhase::Playing
         | SessionPhase::Paused
         | SessionPhase::Results
         | SessionPhase::Failed(_)
@@ -181,8 +190,8 @@ pub fn drive_session(
                 .transition(SessionPhase::Unloading)
                 .expect("live/failed session → Unloading is a legal transition");
         }
-        // Loading/Ready/Countdown: transient phases this app drives
-        // synchronously — no queued intent handling here.
+        // Loading/Ready: transient phases this app drives synchronously
+        // — no queued intent handling here.
         _ => {}
     }
 }
