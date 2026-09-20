@@ -65,6 +65,8 @@ Controls:
 | R            | reset vehicle to spawn        |
 | C            | toggle chase / free camera    |
 | F1           | toggle physics debug gizmos   |
+| Backspace    | restart the session           |
+| Esc          | quit (session teardown → exit)|
 | Cmd/Ctrl+P   | save a screenshot to `screenshots/` |
 | WASD+mouse   | fly (in free-camera mode)     |
 

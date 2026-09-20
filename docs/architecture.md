@@ -124,6 +124,59 @@ serve `mm2_app` and `mm2-inspect`, so both see identical resolution.
   demandable maximum (0 while airborne), and `vehicle_bundle` carries
   `CollisionEventsEnabled` so chassis contacts reach the impact pipeline.
 
+## Session lifecycle and how features attach
+
+`mm2_game::Session` is the phase state machine; `mm2_app::session` drives
+it inside the app. The cycle is:
+
+```text
+  Menu ─begin(config)─► Loading ─load_session_world─► Ready ─► Playing
+   ▲      (drive_session)        (run_if loading)                │
+   │                                    │                        │ quit/restart
+   │                                    ▼                        ▼  (drive_session)
+   │                                  Failed ◄─────────────► Unloading
+   │                                    │                        │ (despawn_session_entities
+   └─────────────── Menu ◄──────────────┴────────────────────────┘  → drive_session)
+        restart = begin again
+```
+
+Scheduling in `mm2` (`main.rs`):
+
+| Schedule | Systems |
+|---|---|
+| `Update` | `load_session_world.run_if(session::loading)` (spawns the whole session, drives `Loading → Ready → Playing`/`Failed`), `session_control_input` (`Esc` quit → exit, `Backspace` restart), `despawn_session_entities.run_if(session::unloading)` chained before `drive_session` (despawn flushes, then the driver observes the empty world → `Menu`) |
+| `FixedUpdate` | `advance_session_tick` — the gameplay clock, `Playing` only |
+| `FixedLast` | `collect_impacts` → `publish_vehicle_telemetry` (chained, post-solver, `Playing` only) |
+
+Ownership rules a feature must follow:
+
+- Every entity a session spawns carries `SessionEntity(generation)`;
+  `Unloading` despawns those roots wholesale. Persistent UI/profile/dev
+  state must never carry the marker.
+- Session-scoped resources are cleared in `drive_session`'s teardown
+  (`ImpactFilter::reset` — the dedup map is keyed by `Entity`, which the
+  next session may recycle — and `SpawnPoint.trailers`) or rewritten by
+  the next spawn (`SpawnPoint.position/yaw`).
+- Restart always goes `Unloading → Menu → begin` — `begin` bumps the
+  generation, so stale ids (`ObjectId`/`ImpactId`/`ResultId`) and stale
+  `Entity` handles from the old session are detectable.
+- A failed load is a session too: `Failed` keeps the error visible,
+  spawns no player simulation, and quit/restart still tear it down.
+
+How a feature plugin attaches:
+
+- Contract *types* (identity, telemetry, impact, surface, result) live in
+  `mm2_game`; the *producers* that turn engine/solver data into them live
+  in `mm2_app::contracts` or the feature's app-side module, because only
+  `mm2_app` may see both.
+- Gameplay systems go in `FixedUpdate`/`FixedLast` and gate on
+  `session.is_playing()` so the fixed clock defines their view of time;
+  presentation reads `VehicleTelemetry`/events in `Update` and never
+  touches the mutable simulation state.
+- New session-owned spawns take the `SessionEntity(session.generation())`
+  stamp at spawn time; new session-scoped resources register their reset
+  in `drive_session`'s `Unloading` branch.
+
 ## Contract bridge (`mm2_app::contracts`)
 
 `mm2_game` owns the contract *types*; `mm2_app::contracts` owns the

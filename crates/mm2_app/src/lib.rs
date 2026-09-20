@@ -12,4 +12,5 @@ pub mod city;
 pub mod contracts;
 pub mod dev_world;
 pub mod input;
+pub mod session;
 pub mod smoke;

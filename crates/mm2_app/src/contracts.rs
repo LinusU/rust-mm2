@@ -55,6 +55,22 @@ impl Default for ImpactFilter {
     }
 }
 
+impl ImpactFilter {
+    /// Forget all session-scoped impact bookkeeping — called on session
+    /// teardown. The dedup map is keyed by `Entity`, which the next
+    /// session may recycle, so a stale entry would silently suppress a
+    /// new session's first impact on the recycled pair. The id counter
+    /// and evidence counters restart too: `ImpactId` is per-session
+    /// (events carry `generation`) and `emitted`/`dropped` describe the
+    /// active session's stream.
+    pub fn reset(&mut self) {
+        self.dedup.clear();
+        self.next = 0;
+        self.emitted = 0;
+        self.dropped = 0;
+    }
+}
+
 /// The stable identity of a contact side: its collider's
 /// [`ObjectIdentity`], else its body's, else [`ObjectId::WORLD`].
 fn object_of(

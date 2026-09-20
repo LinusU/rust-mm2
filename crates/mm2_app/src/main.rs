@@ -16,19 +16,18 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use clap::Parser;
-use mm2_app::{camera, car_visual, city, contracts, dev_world, input, smoke};
+use mm2_app::session::{ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
+use mm2_app::{camera, car_visual, city, contracts, input, session, smoke};
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
 use mm2_game::{
-    CameraPose, DevOverrides, ImpactEvent, Mm2Vfs, ObjectIdentity, Player, PlayerControl,
-    PlayerVehicle, Session, SessionConfig, SessionEntity, SessionPhase, VehicleSelection,
-    WorldMode, advance_session_tick,
+    CameraPose, DevOverrides, ImpactEvent, Mm2Vfs, PlayerVehicle, Session, SessionConfig,
+    SessionPhase, VehicleSelection, WorldMode, advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::{ResetVehicle, VehicleConfig, VehicleDebugEnabled, VehiclePlugin};
 use tracing::{error, info, warn};
 
-use camera::{CameraMode, ChaseCamera, FreeCamera};
-use car_visual::{WheelMount, WheelSpin};
+use camera::CameraMode;
 
 #[derive(Parser, Debug)]
 #[command(name = "mm2", about = "MM2-inspired open engine — development build")]
@@ -97,36 +96,6 @@ struct Cli {
     #[arg(long)]
     headless: bool,
 }
-
-/// Where the player vehicle (re)spawns. `trailers` holds each spawned
-/// trailer's entity plus its car-space rest offset so a reset can place it
-/// back behind the car instead of on top of it.
-#[derive(Resource)]
-struct SpawnPoint {
-    position: Vec3,
-    yaw: f32,
-    trailers: Vec<(Entity, Vec3)>,
-}
-
-/// The imported stock vehicle selected by `--car` or the deterministic
-/// stock default (`vpbug`). `None` = synthetic dev car.
-#[derive(Resource)]
-struct SelectedCar {
-    def: Option<VehicleDef>,
-    paint: usize,
-}
-
-/// The validated vehicle configuration the player car was built from.
-#[derive(Resource)]
-struct TunedVehicle(VehicleConfig);
-
-/// Marker for the on-screen HUD text.
-#[derive(Component)]
-struct Hud;
-
-/// Marker for the big error line shown when the world fails to load.
-#[derive(Component)]
-struct ErrorText;
 
 /// Smoke-test capture: run N frames, take the screenshot (if requested),
 /// report a `smoke=visual` record, then exit.
@@ -399,8 +368,9 @@ fn main() {
     }
 
     // Menu → Loading: the session resource the app drives through
-    // `SessionPhase` transitions (`setup` takes it to Ready → Playing,
-    // or Failed). An invalid config is a usage error, not a smoke fail.
+    // `SessionPhase` transitions (`load_session_world` takes it to
+    // Ready → Playing, or Failed). An invalid config is a usage error,
+    // not a smoke fail.
     let mut session = Session::new();
     if let Err(e) = session.begin(session_config) {
         error!(error = %e, "invalid session configuration");
@@ -445,7 +415,7 @@ fn main() {
     .add_plugins(VehiclePlugin)
     .add_message::<ImpactEvent>()
     .init_resource::<contracts::ImpactFilter>()
-    .add_systems(Startup, setup)
+    .init_resource::<SessionControl>()
     .add_systems(FixedUpdate, advance_session_tick)
     .add_systems(
         FixedLast,
@@ -458,6 +428,18 @@ fn main() {
     .add_systems(
         Update,
         (
+            // The session lifecycle: spawn while Loading (once per
+            // `begin`), read quit/restart intents, despawn while
+            // Unloading and advance the phase machine. Despawn is
+            // chained before the driver so teardown is observed
+            // complete the same frame.
+            session::load_session_world.run_if(session::loading),
+            session::session_control_input.run_if(not(capturing)),
+            (
+                despawn_session_entities.run_if(session::unloading),
+                session::drive_session,
+            )
+                .chain(),
             input::vehicle_input.run_if(not(capturing)),
             camera::toggle_camera.run_if(not(capturing)),
             camera::chase_follow,
@@ -584,328 +566,6 @@ fn smoke_test(
         record(smoke::SmokeStatus::Pass, "frames=done".into()).line()
     );
     exit.write(AppExit::Success);
-}
-
-/// The asset collections world spawning writes into.
-#[derive(bevy::ecs::system::SystemParam)]
-struct AssetStores<'w> {
-    meshes: ResMut<'w, Assets<Mesh>>,
-    images: ResMut<'w, Assets<Image>>,
-    materials: ResMut<'w, Assets<StandardMaterial>>,
-}
-
-/// Spawn the world, vehicle, cameras, HUD and lights per the session
-/// config, driving `Loading → Ready → Playing` (or `Failed`). Everything
-/// spawned is stamped with the session's `SessionEntity` generation so a
-/// later `Unloading` removes the whole session, not a subset.
-#[allow(clippy::too_many_arguments)]
-fn setup(
-    mut commands: Commands,
-    mut assets: AssetStores,
-    mut session: ResMut<Session>,
-    vfs: Res<Mm2Vfs>,
-    vehicle_config: Res<TunedVehicle>,
-    selected: Res<SelectedCar>,
-    cam_mode: Res<CameraMode>,
-    mut spawn: ResMut<SpawnPoint>,
-) {
-    let owner = SessionEntity(session.generation());
-    let Some(config) = session.config().cloned() else {
-        error!("setup ran without a session config");
-        return;
-    };
-    let mut world_ok = true;
-    match &config.world {
-        WorldMode::DevWorld => {
-            dev_world::spawn_dev_world(
-                &mut commands,
-                &mut assets.meshes,
-                &mut assets.images,
-                &mut assets.materials,
-                &vfs.0,
-                owner,
-            );
-            spawn.position = Vec3::new(0.0, 1.5, 0.0);
-            spawn.yaw = 0.0;
-        }
-        WorldMode::City { psdl } => {
-            match city::load_city(
-                &mut commands,
-                &vfs.0,
-                psdl,
-                &mut assets.meshes,
-                &mut assets.images,
-                &mut assets.materials,
-                owner,
-            ) {
-                Ok(loaded) => {
-                    spawn.position = loaded.spawn;
-                    spawn.yaw = loaded.spawn_yaw;
-                    info!(report = %loaded.report, "city ready");
-                }
-                Err(e) => {
-                    error!(error = %e, "city failed to load");
-                    session
-                        .fail(format!("{e}"))
-                        .expect("Loading → Failed is a legal transition");
-                    world_ok = false;
-                }
-            }
-            // City lighting.
-            commands.spawn((
-                owner,
-                DirectionalLight {
-                    illuminance: 15_000.0,
-                    shadow_maps_enabled: true,
-                    ..default()
-                },
-                Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, 0.6, -0.9, 0.0)),
-            ));
-            commands.insert_resource(GlobalAmbientLight {
-                color: Color::srgb(0.7, 0.75, 0.85),
-                brightness: 400.0,
-                affects_lightmapped_meshes: false,
-            });
-        }
-    }
-    if world_ok {
-        session
-            .transition(SessionPhase::Ready)
-            .expect("Loading → Ready is a legal transition");
-    }
-
-    // HUD + error text.
-    commands.spawn((
-        owner,
-        Hud,
-        Text::new(""),
-        TextFont {
-            font_size: bevy::text::FontSize::Px(16.0),
-            ..default()
-        },
-        TextColor(Color::srgb(0.95, 0.95, 0.95)),
-        // Keeps the line legible over bright facades and sky.
-        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(8.0),
-            left: Val::Px(10.0),
-            padding: UiRect::axes(Val::Px(6.0), Val::Px(2.0)),
-            ..default()
-        },
-    ));
-    commands.spawn((
-        owner,
-        ErrorText,
-        Text::new(""),
-        TextFont {
-            font_size: bevy::text::FontSize::Px(22.0),
-            ..default()
-        },
-        TextColor(Color::srgb(1.0, 0.4, 0.35)),
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(120.0),
-            left: Val::Px(40.0),
-            ..default()
-        },
-    ));
-
-    // Cameras. The chase boom is sized to the selected vehicle so a city
-    // bus and a roadster are both framed sensibly.
-    let chase = match &selected.def {
-        Some(def) => {
-            let [_w, h, d] = def.config.chassis_size;
-            ChaseCamera {
-                distance: d * 0.85 + 3.5,
-                height: h * 0.55 + 1.4,
-                look_height: h * 0.45,
-                ..default()
-            }
-        }
-        None => ChaseCamera::default(),
-    };
-    commands.spawn((
-        owner,
-        Camera3d::default(),
-        Camera {
-            is_active: *cam_mode == CameraMode::Chase,
-            ..default()
-        },
-        chase,
-        Transform::from_translation(spawn.position + Vec3::new(0.0, 4.0, 9.0)),
-    ));
-    let (free_xf, free_cam) = match config.dev.camera.as_ref() {
-        Some(c) => (
-            Transform::from_translation(c.position).with_rotation(Quat::from_euler(
-                EulerRot::YXZ,
-                c.yaw,
-                c.pitch,
-                0.0,
-            )),
-            FreeCamera {
-                yaw: c.yaw,
-                pitch: c.pitch,
-                ..default()
-            },
-        ),
-        None => (
-            Transform::from_translation(spawn.position + Vec3::new(0.0, 8.0, 12.0)),
-            FreeCamera::default(),
-        ),
-    };
-    commands.spawn((
-        owner,
-        Camera3d::default(),
-        Camera {
-            is_active: *cam_mode == CameraMode::Free,
-            ..default()
-        },
-        free_cam,
-        free_xf,
-    ));
-
-    // The dynamic player spawns only once the world is `Ready` — after the
-    // static colliders above exist, so it can't fall through a half-built
-    // city.
-    if !world_ok {
-        return;
-    }
-    let vehicle_cfg = &vehicle_config.0;
-
-    // Spawn clearance: keep the collider hull's lowest point off the
-    // ground plus a settle margin.
-    if let Some(def) = &selected.def {
-        let hull_min_y = def
-            .config
-            .collider_points
-            .as_ref()
-            .and_then(|pts| pts.iter().map(|p| p[1]).reduce(f32::min))
-            .unwrap_or(-def.config.chassis_size[1] * 0.5);
-        spawn.position.y += (0.25 - hull_min_y).max(0.35);
-    }
-    // Stable identities + authority role for the contract consumers
-    // (telemetry, impacts, results): the entity gets a session-minted
-    // `ObjectId`, its driver a `PlayerId`, and its rules the session's
-    // authority boundary — local play stamps `Authority`.
-    let vehicle_object = session.mint_object_id();
-    let player_id = session.mint_player_id();
-    let role = session.authority_role();
-    let vehicle = commands
-        .spawn((
-            PlayerVehicle,
-            owner,
-            ObjectIdentity(vehicle_object),
-            Player {
-                id: player_id,
-                control: PlayerControl::Local,
-            },
-            role,
-            mm2_game::DamageSignals::default(),
-            mm2_vehicle::vehicle_bundle(&vehicle_config.0),
-            Transform::from_translation(spawn.position)
-                .with_rotation(Quat::from_rotation_y(spawn.yaw)),
-            TransformInterpolation,
-            // Parents of renderable children need the visibility chain.
-            Visibility::Visible,
-        ))
-        .id();
-
-    match &selected.def {
-        // Imported stock vehicle: the model carries the visuals.
-        Some(def) => {
-            let missing = car_visual::spawn_vehicle_model(
-                &mut commands,
-                &vfs.0,
-                &def.model,
-                selected.paint,
-                &mut assets.meshes,
-                &mut assets.images,
-                &mut assets.materials,
-                vehicle,
-            );
-            if !missing.is_empty() {
-                warn!(car = %def.id, "missing textures: {}", missing.join(", "));
-            }
-            if let Some(trailer) = &def.trailer {
-                let car_xf = Transform::from_translation(spawn.position)
-                    .with_rotation(Quat::from_rotation_y(spawn.yaw));
-                let (te, tmissing) = car_visual::spawn_trailer(
-                    &mut commands,
-                    &vfs.0,
-                    trailer,
-                    selected.paint,
-                    &mut assets.meshes,
-                    &mut assets.images,
-                    &mut assets.materials,
-                    vehicle,
-                    car_xf,
-                    owner,
-                );
-                if !tmissing.is_empty() {
-                    warn!(car = %def.id, "trailer missing textures: {}", tmissing.join(", "));
-                }
-                // The trailer is a simulated object too — stable id, the
-                // session's authority role and its own damage signals,
-                // but no player driver.
-                commands.entity(te).insert((
-                    ObjectIdentity(session.mint_object_id()),
-                    role,
-                    mm2_game::DamageSignals::default(),
-                ));
-                spawn.trailers.push((
-                    te,
-                    Vec3::from(trailer.car_hitch) - Vec3::from(trailer.trailer_hitch),
-                ));
-            }
-        }
-        // Synthetic dev car: cuboid body + cylinder wheels, same
-        // mount/spin rig as imported wheels.
-        None => {
-            let body_mesh = assets
-                .meshes
-                .add(Cuboid::from_size(Vec3::from(vehicle_cfg.chassis_size)));
-            let body_mat = assets.materials.add(StandardMaterial {
-                base_color: Color::srgb(0.85, 0.15, 0.1),
-                metallic: 0.3,
-                perceptual_roughness: 0.5,
-                ..default()
-            });
-            commands
-                .entity(vehicle)
-                .insert((Mesh3d(body_mesh), MeshMaterial3d(body_mat)));
-            let wheel_mesh = assets.meshes.add(Cylinder::new(0.34, 0.25));
-            let wheel_mat = assets.materials.add(StandardMaterial {
-                base_color: Color::srgb(0.1, 0.1, 0.1),
-                perceptual_roughness: 0.9,
-                ..default()
-            });
-            for (i, w) in vehicle_cfg.wheels.iter().enumerate() {
-                let mount = commands
-                    .spawn((
-                        WheelMount { vehicle, index: i },
-                        Transform::from_translation(Vec3::from(w.position)),
-                    ))
-                    .id();
-                commands.entity(vehicle).add_child(mount);
-                let spin = commands.spawn((WheelSpin, Transform::IDENTITY)).id();
-                commands.entity(mount).add_child(spin);
-                commands.entity(spin).with_child((
-                    Mesh3d(wheel_mesh.clone()),
-                    MeshMaterial3d(wheel_mat.clone()),
-                    // Cylinder is Y-aligned: rotate onto the axle (X) and
-                    // scale to the configured radius.
-                    Transform::from_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2))
-                        .with_scale(Vec3::new(w.radius / 0.34, 1.0, w.radius / 0.34)),
-                ));
-            }
-        }
-    }
-
-    // World built and the player exists — release control.
-    session
-        .transition(SessionPhase::Playing)
-        .expect("Ready → Playing is a legal transition");
 }
 
 /// HUD line: speed, gear/direction, RPM, grounded wheels — read from the
