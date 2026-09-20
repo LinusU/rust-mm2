@@ -44,8 +44,10 @@ pub enum SessionPhase {
     Loading,
     /// World built; the player may exist but control is not released.
     Ready,
-    /// Authored-event countdown before control is released. Nothing
-    /// enters this phase yet — races land with F12+.
+    /// Authored-event countdown before control is released. Event
+    /// sessions enter it from `Ready`; `advance_race` ticks the race
+    /// resource's own countdown and drives `Countdown → Playing` when
+    /// it reaches zero (F11-B).
     Countdown,
     /// Live gameplay.
     Playing,

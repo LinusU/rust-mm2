@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+bevy.workspace = true
 mm2_assets.workspace = true
 mm2_formats.workspace = true
 mm2_game.workspace = true

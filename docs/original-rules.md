@@ -94,6 +94,16 @@ Retail install: `/Users/linus/coding/rust-mm2/retail`, enumerated
 | CIR-4 | No ambient traffic and no police in Circuit races. | verified_original | data:`mmcircuitdata.csv` Ambient=0, Cops=0 in all rows |
 | CIR-5 | Lap counts are authored per event (2-3 amateur, 2-4 professional on retail). | verified_original | data:`mmcircuitdata.csv` NumLaps |
 
+## Authored race records (waypoints, start grids)
+
+|| ID | Rule | Class | Source |
+|| --- | --- | --- | --- |
+|| WPT-1 | `<stem>waypoints.csv` rows carry `x,y,z,a,w`; `w` behaves as the checkpoint trigger radius (half street width — retail values 8-15 m). | inferred | data:`race/*/…waypoints.csv`; used by `mm2_content::race_def` |
+|| WPT-2 | Row roles for Blitz/Checkpoint: row 0 is the start line, rows 1..n-1 are any-order checkpoints, the last row is the finish trigger. For Circuit every row after 0 is an ordered gate and the course closes through the start line again. | inferred | consistent across retail rows (e.g. blitz0 = line + 3 gates + finish, matching BLZ-1/CHK-1/CIR-1 docs); provisional |
+|| WPT-3 | `<stem>_strtpnts` files hold the starting grid (one `x,y,z,a` row per slot). Only SF circuits ship them, under the short stem `cir<N>` — `cir1_strtpnts` … `cir9_strtpnts` — while the event rows are `circuit1`…`circuit9`; the same-index alias is the catalog's inference. | inferred | data:`race/sf/cir*_strtpnts`; `mm2-inspect events` extras listing |
+|| WPT-4 | The `a` column on waypoint/start rows is an authored orientation angle, convention unverified (degrees vs radians, yaw axis). The producer derives facing from the course tangent instead. | unknown | provisional; see UNK-16 |
+|| WPT-5 | All waypoint/start coordinates are in world space in the same frame as the PSDL city mesh. | verified_original | retail blitz0 waypoints coincide with the London street mesh the spawned car sits on (screenshot evidence) |
+
 ## Cruise
 
 | ID | Rule | Class | Source |
@@ -221,6 +231,7 @@ Retail install: `/Users/linus/coding/rust-mm2/retail`, enumerated
 | DSN-3 | Modern engine-to-engine multiplayer only; no DirectPlay/Zone/serial/modem compatibility. | PROJECT.md |
 | DSN-4 | VFS reads installs read-only with deterministic mod overrides. | PROJECT.md, docs/modding.md |
 | DSN-5 | Shared race runtime defaults not pinned by authored data: checkpoint vertical band ±8 m, direction-check flag off, 3 s start countdown at 120 Hz. Provisional until real event evidence exists. | `mm2_game::race` constants + docs |
+| DSN-6 | Event start without authored `_strtpnts`: the player spawns 10 m behind the start line facing the row0→row1 tangent (the only start every event's data supports). Checkpoint markers are translucent orange columns, finish a green column — dev-rig visuals, not the original gate rendering. | `mm2_content::race_def`, `mm2_app::race` |
 
 ## Open questions (unknown until evidenced)
 
@@ -241,6 +252,8 @@ Retail install: `/Users/linus/coding/rust-mm2/retail`, enumerated
 | UNK-13 | Exact damage accumulation model and breakaway-part rules (DMG-3 documented only as a feature claim). |
 | UNK-14 | Crash Course pass/fail criteria per lesson (time? gates? stunts scored how?). |
 | UNK-15 | Whether pedestrians can be struck and what the consequence is. |
+| UNK-16 | Waypoint/start `a` angle convention (WPT-4) and whether the original enforces gate direction or uses `a` at all at runtime. |
+| UNK-17 | `_strtpnts` row→participant mapping (row 0 treated as the player slot; opponent slots may come from `.opp` instead) and how the original picks a slot per participant. |
 
 ## Gaps in this ledger
 

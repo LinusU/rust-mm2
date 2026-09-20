@@ -34,12 +34,137 @@
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
+use mm2_assets::Vfs;
 use mm2_game::{
-    ParticipantState, Player, ProgressOutcome, RacePhase, RaceProgress, RaceStarted, RaceState,
-    ResultLedger, Session, SessionOutcome, SessionPhase, SessionResult,
+    Checkpoint, CheckpointRule, Difficulty, EventRef, ParticipantState, Player, ProgressOutcome,
+    RaceDefinition, RacePhase, RaceProgress, RaceStarted, RaceState, ResultLedger, Session,
+    SessionEntity, SessionOutcome, SessionPhase, SessionResult,
 };
 use mm2_vehicle::Teleported;
 use tracing::warn;
+
+/// Why an `EventRef` cannot become a live race.
+#[derive(Debug, thiserror::Error)]
+pub enum EventSetupError {
+    /// Catalog lookup failed — unknown row, wrong city, or required
+    /// records missing (the resolve error carries the detail).
+    #[error("event resolve failed: {0}")]
+    Resolve(#[from] mm2_content::EventResolveError),
+    /// The resolved event's records could not produce a runnable race.
+    #[error("race definition failed: {0}")]
+    Build(#[from] mm2_content::RaceBuildError),
+}
+
+/// Resolve an `EventRef` through the VFS into a shared
+/// [`RaceDefinition`]: catalog scan → dependency-checked resolve → the
+/// `mm2_content` producer. Called once per event session load, so the
+/// catalog stays a load-time object rather than a resource.
+pub fn event_race_setup(
+    vfs: &Vfs,
+    event_ref: &EventRef,
+    difficulty: Difficulty,
+) -> Result<RaceDefinition, EventSetupError> {
+    let catalog = mm2_content::EventCatalog::scan(vfs, &event_ref.city);
+    let event = catalog.resolve(event_ref)?;
+    Ok(mm2_content::race_definition(event, difficulty)?)
+}
+
+/// Marker on a session-owned checkpoint/finish marker entity —
+/// [`update_checkpoint_markers`] reads it to reflect per-participant
+/// progress on the mesh.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct CheckpointMarker {
+    /// `Some(i)` = gate `i` of `RaceState::definition.checkpoints`;
+    /// `None` = the finish trigger.
+    pub gate: Option<usize>,
+}
+
+/// Spawn one translucent cylinder per trigger — gates orange, the
+/// finish green. Decorative only: they carry no collider and the
+/// swept-segment tests in `Checkpoint::crossed` own correctness. All
+/// are stamped `owner` so session teardown removes them (AC03).
+pub fn spawn_checkpoint_markers(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    definition: &RaceDefinition,
+    owner: SessionEntity,
+) {
+    let gate_mat = materials.add(StandardMaterial {
+        base_color: Color::srgba(1.0, 0.55, 0.1, 0.28),
+        alpha_mode: AlphaMode::Blend,
+        unlit: true,
+        cull_mode: None,
+        ..default()
+    });
+    let finish_mat = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.2, 1.0, 0.4, 0.35),
+        alpha_mode: AlphaMode::Blend,
+        unlit: true,
+        cull_mode: None,
+        ..default()
+    });
+    let mut spawn_gate = |cp: &Checkpoint, gate: Option<usize>, mat: &Handle<StandardMaterial>| {
+        let mesh = meshes.add(Cylinder::new(cp.radius, cp.height));
+        commands.spawn((
+            owner,
+            CheckpointMarker { gate },
+            Mesh3d(mesh),
+            MeshMaterial3d(mat.clone()),
+            // The finish starts hidden — it only appears once every
+            // gate is cleared (RACE-7).
+            if gate.is_none() {
+                Visibility::Hidden
+            } else {
+                Visibility::Visible
+            },
+            // The trigger band is ±height around the authored point;
+            // show the above-ground half so the gate reads as a column.
+            Transform::from_translation(cp.center + Vec3::Y * (cp.height * 0.5)),
+        ));
+    };
+    for (i, cp) in definition.checkpoints.iter().enumerate() {
+        spawn_gate(cp, Some(i), &gate_mat);
+    }
+    if let Some(finish) = &definition.finish {
+        spawn_gate(finish, None, &finish_mat);
+    }
+}
+
+/// Reflect progress on the markers: a cleared `AnyOrder` gate hides;
+/// the finish stays hidden until every gate is cleared — RACE-7's
+/// "the finish line appears" rule, visible, not just modeled.
+/// `Ordered` gates stay visible (they reset each lap).
+pub fn update_checkpoint_markers(
+    race: Option<Res<RaceState>>,
+    session: Res<Session>,
+    progress: Query<&RaceProgress, With<Player>>,
+    mut markers: Query<(&CheckpointMarker, &mut Visibility)>,
+) {
+    let Some(race) = race else { return };
+    if race.is_stale(session.generation()) {
+        return;
+    }
+    let progress = progress.iter().next();
+    let def = &race.definition;
+    for (marker, mut vis) in &mut markers {
+        let show = match marker.gate {
+            Some(i) => match def.rule {
+                CheckpointRule::Ordered => true,
+                CheckpointRule::AnyOrder => !progress.is_some_and(|p| p.is_cleared(i)),
+            },
+            None => {
+                matches!(race.phase, RacePhase::Complete)
+                    || progress.is_some_and(|p| p.cleared_count() >= def.checkpoints.len())
+            }
+        };
+        *vis = if show {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+}
 
 /// Re-anchor swept segments on teleported participants.
 ///

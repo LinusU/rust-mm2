@@ -38,23 +38,21 @@
 
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
-**Next selected slice: F11-B.2** — the `mm2_content` producer that
-turns a `CatalogEvent`'s parsed records into a `RaceDefinition` plus
-the `load_session_world` wiring (event mode → `Ready → Countdown`,
-`RaceState`/`RaceProgress` insertion, checkpoint entity/markers,
-event-prop session scope). `RecordContent` currently keeps only counts
-— the producer must retain or re-read parsed waypoint/start rows.
-F11-B.1 landed, failed review on the unwired reset/teleport segment
-break, and was repaired this iteration: `vehicle_reset` stamps a
-`Teleported` marker atomically with each teleport, and
-`race::reanchor_teleported_participants` (chained before
-`advance_race` in `FixedLast`) breaks the swept segment — regression
-tests drive the real `ResetVehicle` → `vehicle_reset` → marker →
-re-anchor path, including a paused-session reset. F11-A is now
-externally checked (review pass at `bb56272`). F01 complete as a
-candidate: F01-A/F01-B checked; F01-C implemented. Independent ready
-alternates if the runner prefers: F03-A (prop audit) or F09-A (BAI
-parser), both with all deps checked.
+**Next selected slice: F11-B.2 is now a candidate** — the
+`mm2_content::race_def` producer (parsed `CatalogEvent` records →
+`RaceDefinition`), `load_session_world` event wiring (`Ready →
+Countdown`, `RaceState`/`RaceProgress`, session-owned checkpoint
+markers, `--event` CLI, real-path headless smoke) landed with retail
+evidence (London Blitz 3/3 gates swept; SF Circuit authored
+`cir<N>_strtpnts` grid spawn). Event-prop/traffic-override session
+scoping (AC05) stayed out of this slice — no traffic/prop-override
+systems exist to scope yet; it travels with F09/F10 or a dedicated
+follow-up. F11-B.1 landed, failed review on the unwired
+reset/teleport segment break, and was repaired last iteration.
+F11-A/F11-B.1 are externally checked. Independent ready alternates if
+the runner prefers: F03-A (prop audit) or F09-A (BAI parser), both
+with all deps checked; natural F11 continuations are F11-C (audit/CLI
+polish) or F12-A (Blitz timer).
 
 ## Baseline gate results (this checkout, 2026-09-20)
 
@@ -72,6 +70,11 @@ parser), both with all deps checked.
 || `mm2 --dev-world --frames 90 --screenshot` | `status=pass`, 2.9 MB PNG awaited + verified (GPU/render evidence recorded on this machine) |
 || `mm2 --headless --city bogus` (no data) | `status=unavailable`, exit 4 — missing data is not a failure |
 || `mm2 --mm2-path <retail> --city bogus --headless` / `--frames 60` | `status=fail`, exit 3 — explicit failure, logical path + reason |
+|| `mm2 --mm2-path <retail> --city london --event blitz:0 --headless` | `status=pass` — real authored Blitz loaded (`event race loaded event=Blitz[0] gates=3`), countdown released, car drove through all gates `cp=3/3`, `race=Running` (finish trigger not crossed in-window, expected) |
+|| `mm2 --mm2-path <retail> --city sf --event circuit:1 --headless` | `status=pass` — `Circuit[1] gates=10`, car spawned on the authored `cir1_strtpnts` grid (moved 136 m from the authored slot) |
+|| `mm2 --mm2-path <retail> --city london --event checkpoint:0 --headless` | `status=pass` — `Checkpoint[0] gates=5`, `cp=2/5` swept while driving straight |
+|| `mm2 --mm2-path <retail> --event checkpoint:12 --headless` | `status=fail`, exit 3 — out-of-range event is an explicit `Failed` session, not a panic |
+|| `mm2 --mm2-path <retail> --event blitz:0 --frames 90 --screenshot` | `status=pass`, 4.3 MB PNG — authored gate column visible ahead of the spawned car, HUD shows `GET READY` countdown |
 
 ## Task table
 
@@ -113,9 +116,9 @@ parser), both with all deps checked.
 | F10-B | queued | F10-A | — |
 | F10-C | queued | F10-B | — |
 | F11-A | checked | F00-B, F01-A | `mm2_formats::racefiles` shared classifier (was private to `mm2-inspect` inventory); new parsers `waypoints` (waypoint + `_strtpnts` CSVs), `opp`, `crashdata` (tolerates retail `AmbDenisty` typo / omitted `Filename` label / named tail columns — kept as diagnostics), `rewards`. `mm2_content::EventCatalog`: VFS scan per city, `mm*data.csv` rows → `EventRef`-keyed entries (ready/incomplete + failed refs), dep records attached by stem, Crash Course `Filename` links resolve whole linked stems, rewards + milestone rewards linked, extras listed. `mm2-inspect events <install> [--city] [--strict]` — strict exits 0 on retail: 45/45 events ready per city. Producer correctly placed in `mm2_content` after the iteration-010 review rejection. Externally checked (review pass at `bb56272`, iteration 011 feedback). |
-| F11-B | active | F11-A | Split into B.1 (shared runtime contract + driver, this iteration) and B.2 (`mm2_content` catalog→`RaceDefinition` producer + event-session loading wiring). Parent AC02–AC05 stay open until B.2 loads a real event. |
+| F11-B | active | F11-A | Split into B.1 (shared runtime contract + driver — checked) and B.2 (`mm2_content` catalog→`RaceDefinition` producer + event-session loading wiring). Parent AC05 (event-prop/traffic-override session scope) stays open — no traffic/prop-override systems exist to scope yet. |
 | F11-B.1 | implemented | F11-A | `mm2_game::race`: `Checkpoint` swept cylinder test (XZ radius + ±height band + opt-in direction flag), `CheckpointRule` (`AnyOrder` documented BLZ-1/CHK-1 / `Ordered` documented CIR-1 — carried on the definition, not imposed), `RaceDefinition` (checkpoints/finish/start slots/laps/countdown + `validate`), `RaceState` (generation-stamped countdown→running→complete, `input_locked`, `is_stale`), `RaceProgress` (per-checkpoint cleared flags, ordered `next`/lap wrap, `break_segment` for teleport/reset, one segment consumes every checkpoint it crosses), `RaceStarted` message, `SessionOutcome::Finished{race_ticks}` on `SessionResult`. `mm2_app::race::advance_race` in `FixedLast` (post-solver `Position` segments): countdown→one `RaceStarted`+`Countdown→Playing`, clock+advance while `Playing`, `Finished` → mint+record `SessionResult` once into `ResultLedger`, all-finished → `Complete`; authority-gated (Remote never steps). Teardown: `drive_session` removes `RaceState`; `vehicle_input` honours `input_locked` (stale-gated); `Countdown` quittable/restartable. First candidate failed review on a real defect — `break_segment` had no production caller, so an R-key `ResetVehicle` teleport swept (and could finish) every checkpoint between the two poses; repaired with `mm2_vehicle::Teleported` stamped by `vehicle_reset` atomically with the `Position` write (chosen over draining `ResetVehicle` in the race system, which has message-lifetime and Update-ordering holes) plus `reanchor_teleported_participants` chained before `advance_race`; regression tests `vehicle_reset_breaks_the_swept_segment` + `reset_while_paused_cannot_sweep_checkpoints` fail on the old wiring. Tests: 11 contract + 15 production-path (AC02 high-speed/wrong-height/repeated/teleport + reset-via-message + paused-reset, AC03 countdown-once/pause-freeze/restart-removes-timer, AC04 once-only results with provenance, ties, remote-authority no-op, quit during countdown). Candidate pending external re-check. |
-| F11-B.2 | queued | F11-B.1 | Owed: producer `CatalogEvent`→`RaceDefinition` (RecordContent must retain or re-read parsed waypoint/start rows — currently counts only), `load_session_world` event-mode wiring (`Ready → Countdown`, `RaceState`/`RaceProgress`/start-slot placement), checkpoint entities/markers, event-prop session scope (AC05). |
+| F11-B.2 | implemented | F11-B.1 | `RecordContent` retains parsed payloads (`Waypoints`/`StartPoints`/`Opp`/`CrashData`). `mm2_content::race_def::race_definition` builds a `RaceDefinition` from a resolved `CatalogEvent`: Blitz/Checkpoint → `AnyOrder` (row 0 = start line, last row = finish trigger), Circuit → `Ordered` (rows 1.. + lifted line copy closes the lap, authored `NumLaps`); authored `w` radii; authored `_strtpnts` grids or a derived tangent start; Crash Course rejected explicitly. Catalog attributes SF's `cir<N>_strtpnts` siblings to `circuit<N>` (inferred alias, WPT-3). `load_session_world` event mode: catalog resolve → `Ready → Countdown`, spawn on the authored/derived slot, `RaceState`/`RaceProgress`/`ResultLedger` inserted (the ledger was unregistered — latent panic once any race ran), session-owned orange/green checkpoint/finish markers + `update_checkpoint_markers` (cleared gates hidden, finish revealed after all gates). `--event <table>:<index>` CLI; `headless_smoke` rewired onto the real session systems so `--event --headless` is production-path evidence. Retail: London `Blitz[0]` 3/3 gates swept (`race=Running` — finish not crossed in-window), SF `Circuit[1]` authored-grid spawn, `checkpoint:12` → clean `Failed` exit 3; screenshot shows gate column + `GET READY` countdown. 7 producer + 7 app event tests incl. a full synthetic course finish → one ledger result. AC05 event-prop/traffic scoping deferred (no such systems exist to scope yet). Candidate pending external check. |
 | F11-C | queued | F11-B | — |
 | F12-A | queued | F02-B, F11-B | London blitz0–12, SF blitz0–13 authored data present. |
 | F12-B | queued | F12-A | — |
@@ -123,7 +126,7 @@ parser), both with all deps checked.
 | F13-A | queued | F02-B, F11-B | London race0–13, SF race0–11 (+r0) authored data present. |
 | F13-B | queued | F13-A | — |
 | F13-C | queued | F13-B, F15-B | — |
-| F14-A | queued | F02-B, F11-B | London circuit0–11, SF circuit0–11 authored data present (circuit11 partial: opp/pathset only, no .aimap). SF `cir1–9` are only `_strtpnts` files, not circuit events. |
+| F14-A | queued | F02-B, F11-B | London circuit0–11, SF circuit0–11 authored data present (circuit11 partial: opp/pathset only, no .aimap). SF `cir1–9` are the circuit events' start grids under a short stem — aliased to `circuit<N>` since F11-B.2 (WPT-3). |
 | F14-B | queued | F14-A | — |
 | F14-C | queued | F14-B, F15-B | — |
 | F15-A | queued | F02-B, F09-B, F11-B | 612 `.opp` files present; no opponent AI. |

@@ -49,42 +49,21 @@ const TABLE_ORDER: [EventTableKind; 4] = [
     EventTableKind::CrashCourse,
 ];
 
-/// Parse outcome for a record kind that has a parser.
+/// Parse outcome for a record kind that has a parser. The parsed rows
+/// are retained — producers (the race definition builder, future
+/// opponent/crash-course loaders) consume them directly instead of
+/// re-reading the VFS.
 #[derive(Debug, Clone)]
 pub enum RecordContent {
     /// `*waypoints.csv` / free-standing event `.csv`.
-    Waypoints {
-        /// Data rows parsed.
-        rows: usize,
-        /// Recoverable row problems.
-        diagnostics: usize,
-        /// Authored fifth-column label (`radius`/`poly count`).
-        width_label: String,
-    },
+    Waypoints(WaypointFile),
     /// `_strtpnts` headerless start points.
-    StartPoints {
-        /// Data rows parsed.
-        rows: usize,
-        /// Recoverable row problems.
-        diagnostics: usize,
-    },
+    StartPoints(StartPointsFile),
     /// `.opp` opponent path.
-    Opp {
-        /// Data rows parsed.
-        rows: usize,
-        /// Recoverable row problems.
-        diagnostics: usize,
-    },
-    /// `crash<N>data.csv` lesson sub-table; `files` are the waypoint
-    /// CSV stems its rows reference.
-    CrashData {
-        /// Sub-event rows parsed.
-        rows: usize,
-        /// Referenced waypoint stems (`Filename` column).
-        files: Vec<String>,
-        /// Recoverable row problems.
-        diagnostics: usize,
-    },
+    Opp(OppFile),
+    /// `crash<N>data.csv` lesson sub-table; the rows' `Filename`
+    /// column names the waypoint CSVs they reference.
+    CrashData(CrashDataFile),
     /// Present and resolved; no parser exists for this kind yet
     /// (`.aimap`, `.pathset`, unclassified `.csv`, other records).
     Unparsed,
@@ -161,6 +140,18 @@ pub struct CatalogEvent {
     pub rewards: Vec<RewardRow>,
     /// Completeness against the authored record set.
     pub status: EventStatus,
+}
+
+impl CatalogEvent {
+    /// The parameter block a difficulty selects on this event —
+    /// amateur is the first authored block, professional the second
+    /// (inferred split, see `mm2_formats::racedata`).
+    pub fn race_params(&self, difficulty: mm2_game::Difficulty) -> &RaceParams {
+        match difficulty {
+            mm2_game::Difficulty::Amateur => &self.amateur,
+            mm2_game::Difficulty::Professional => &self.professional,
+        }
+    }
 }
 
 /// Parse status of one `mm*data.csv` table.
@@ -424,8 +415,8 @@ impl EventCatalog {
             for (name, kind) in files {
                 let logical = format!("{prefix}{name}");
                 let content = Self::parse_record(vfs, &logical, *kind, &mut failed);
-                if let RecordContent::CrashData { files, .. } = &content {
-                    crash_links.extend(files.iter().cloned());
+                if let RecordContent::CrashData(file) = &content {
+                    crash_links.extend(file.rows.iter().map(|r| r.filename.clone()));
                 }
                 records.push(EventRecord {
                     logical,
@@ -437,6 +428,29 @@ impl EventCatalog {
                     },
                     content,
                 });
+            }
+        }
+
+        // SF circuit start grids ship under the short `cir<N>` stem
+        // (`cir1_strtpnts`), not `circuit<N>` — claim the sibling stem
+        // for circuit events so the authored grid reaches the
+        // producer. Same-index mapping is inferred (ledger WPT-3);
+        // circuit0 and London ship none, so this is data-driven, not
+        // a hard requirement.
+        if event_ref.table == EventTableKind::Circuit {
+            let alias = format!("cir{}", event_ref.index);
+            if let Some(files) = stems.get(&alias) {
+                claimed.insert(alias);
+                for (name, kind) in files {
+                    let logical = format!("{prefix}{name}");
+                    let content = Self::parse_record(vfs, &logical, *kind, &mut failed);
+                    records.push(EventRecord {
+                        logical,
+                        kind: *kind,
+                        difficulty: None,
+                        content,
+                    });
+                }
             }
         }
 
@@ -567,11 +581,7 @@ impl EventCatalog {
         let text = String::from_utf8_lossy(&bytes);
         match kind {
             RaceFileKind::Waypoints | RaceFileKind::Csv => match WaypointFile::parse(&text) {
-                Ok(f) => RecordContent::Waypoints {
-                    rows: f.rows.len(),
-                    diagnostics: f.diagnostics.len(),
-                    width_label: f.width_label,
-                },
+                Ok(f) => RecordContent::Waypoints(f),
                 Err(e) => {
                     failed.push(FailedRef {
                         reference: logical.to_string(),
@@ -581,10 +591,7 @@ impl EventCatalog {
                 }
             },
             RaceFileKind::StartPoints => match StartPointsFile::parse(&text) {
-                Ok(f) => RecordContent::StartPoints {
-                    rows: f.rows.len(),
-                    diagnostics: f.diagnostics.len(),
-                },
+                Ok(f) => RecordContent::StartPoints(f),
                 Err(e) => {
                     failed.push(FailedRef {
                         reference: logical.to_string(),
@@ -594,10 +601,7 @@ impl EventCatalog {
                 }
             },
             RaceFileKind::Opp => match OppFile::parse(&text) {
-                Ok(f) => RecordContent::Opp {
-                    rows: f.rows.len(),
-                    diagnostics: f.diagnostics.len(),
-                },
+                Ok(f) => RecordContent::Opp(f),
                 Err(e) => {
                     failed.push(FailedRef {
                         reference: logical.to_string(),
@@ -607,11 +611,7 @@ impl EventCatalog {
                 }
             },
             RaceFileKind::DataCsv => match CrashDataFile::parse(&text) {
-                Ok(f) => RecordContent::CrashData {
-                    rows: f.rows.len(),
-                    files: f.rows.iter().map(|r| r.filename.clone()).collect(),
-                    diagnostics: f.diagnostics.len(),
-                },
+                Ok(f) => RecordContent::CrashData(f),
                 Err(e) => {
                     failed.push(FailedRef {
                         reference: logical.to_string(),

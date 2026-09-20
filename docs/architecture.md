@@ -78,9 +78,12 @@ Dependency rules:
   mounted VFS and runs `mm2_formats` parsers to build what the app
   consumes: `VehicleCatalog`/`load_vehicle`/`build_model` for vehicles,
   `convert` for tuning→`VehicleConfig`, and `EventCatalog::scan` for a
-  city's authored events. It fills in `mm2_game` contract types
-  (`EventRef`, `EventTableKind`) and `mm2_vehicle` configs, but owns no
-  session state, no Bevy rendering and no Avian internals.
+  city's authored events. `race_def::race_definition` turns a resolved
+  `CatalogEvent` (parsed waypoint/start-grid records retained on the
+  catalog entries) into an `mm2_game::RaceDefinition`. It fills in
+  `mm2_game` contract types (`EventRef`, `EventTableKind`) and
+  `mm2_vehicle` configs, but owns no session state, no Bevy rendering
+  and no Avian internals.
 - `mm2_app` is the only place where everything is allowed to meet. Bevy
   conversion of parsed formats (TEX → `Image`, PSDL/PKG → `Mesh`) lives here,
   not in the parser crates.
@@ -170,7 +173,7 @@ Scheduling in `mm2` (`main.rs`):
 
 | Schedule | Systems |
 |---|---|
-| `Update` | `load_session_world.run_if(session::loading)` (spawns the whole session, drives `Loading → Ready → Playing`/`Failed`), `session_control_input` (`Esc` quit → exit, `Backspace` restart), `despawn_session_entities.run_if(session::unloading)` chained before `drive_session` (despawn flushes, then the driver observes the empty world → `Menu`) |
+| `Update` | `load_session_world.run_if(session::loading)` (spawns the whole session; `Ready → Countdown` when an `Event` mode's `RaceDefinition` built, else `Ready → Playing`; `Failed` on error), `session_control_input` (`Esc` quit → exit, `Backspace` restart), `race::update_checkpoint_markers` (hides cleared gates, reveals the finish once all gates clear), `despawn_session_entities.run_if(session::unloading)` chained before `drive_session` (despawn flushes, then the driver observes the empty world → `Menu`) |
 | `FixedUpdate` | `advance_session_tick` — the gameplay clock, `Playing` only |
 | `FixedLast` | `collect_impacts` → `publish_vehicle_telemetry` → `race::reanchor_teleported_participants` → `race::advance_race` (one chain, post-solver). Impacts/telemetry publish `Playing` only; `reanchor_teleported_participants` consumes the `Teleported` marker `vehicle_reset` stamps on every reset/teleport so a `Position` jump can never sweep checkpoints (AC02); `advance_race` drives the shared race lifecycle when a `RaceState` exists — countdown, swept triggers, once-only results |
 

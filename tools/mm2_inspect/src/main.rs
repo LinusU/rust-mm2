@@ -598,12 +598,10 @@ fn record_tag(r: &mm2_content::EventRecord) -> String {
     use mm2_content::RecordContent as C;
     use mm2_formats::racefiles::RaceFileKind as K;
     match &r.content {
-        C::Waypoints {
-            rows, width_label, ..
-        } => format!("wp:{rows}({width_label})"),
-        C::StartPoints { rows, .. } => format!("strtpnts:{rows}"),
-        C::Opp { rows, .. } => format!("opp{}:{rows}", r.difficulty.unwrap_or('-')),
-        C::CrashData { rows, .. } => format!("data:{rows}"),
+        C::Waypoints(f) => format!("wp:{}({})", f.rows.len(), f.width_label),
+        C::StartPoints(f) => format!("strtpnts:{}", f.rows.len()),
+        C::Opp(f) => format!("opp{}:{}", r.difficulty.unwrap_or('-'), f.rows.len()),
+        C::CrashData(f) => format!("data:{}", f.rows.len()),
         C::Unparsed => match r.kind {
             K::Aimap => "aimap".into(),
             K::AimapP => "aimap_p".into(),

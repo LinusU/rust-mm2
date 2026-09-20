@@ -28,8 +28,8 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_content::VehicleDef;
 use mm2_game::{
-    DamageSignals, Mm2Vfs, ObjectIdentity, Player, PlayerControl, PlayerVehicle, RaceState,
-    Session, SessionEntity, SessionPhase, WorldMode,
+    DamageSignals, Mm2Vfs, ObjectIdentity, Player, PlayerControl, PlayerVehicle, RaceDefinition,
+    RaceProgress, RaceState, Session, SessionEntity, SessionMode, SessionPhase, WorldMode,
 };
 use mm2_vehicle::{VehicleConfig, vehicle_bundle};
 use tracing::{error, info, warn};
@@ -37,7 +37,7 @@ use tracing::{error, info, warn};
 use crate::camera::{CameraMode, ChaseCamera, FreeCamera};
 use crate::car_visual::{self, WheelMount, WheelSpin};
 use crate::contracts::ImpactFilter;
-use crate::{city, dev_world};
+use crate::{city, dev_world, race};
 
 /// Where the player vehicle (re)spawns. `trailers` holds each spawned
 /// trailer's entity plus its car-space rest offset so a reset can place it
@@ -279,6 +279,46 @@ pub fn load_session_world(
             });
         }
     }
+    // Event mode: resolve the catalog event into the shared race
+    // definition before the session is declared Ready. An event that
+    // cannot load fails the session — it never silently cruises. The
+    // authored player slot replaces the world's roam spawn.
+    let mut event_race: Option<RaceDefinition> = None;
+    if world_ok && let SessionMode::Event(event_ref) = &config.mode {
+        match race::event_race_setup(&vfs.0, event_ref, config.difficulty) {
+            Ok(def) => {
+                // The player slot overrides the world's roam spawn; an
+                // event without slots keeps the roam spawn.
+                if let Some(slot) = def.start_slots.get(mm2_content::PLAYER_SLOT) {
+                    spawn.position = slot.position;
+                    // `RaceStart.yaw_deg` uses the authored `a`
+                    // convention (forward = (sin a, cos a) in XZ);
+                    // spawn yaw is the `Quat::from_rotation_y` angle
+                    // whose forward is (−sin θ, −cos θ) — vehicle
+                    // forward is local −Z.
+                    let a = slot.yaw_deg.to_radians();
+                    let forward = Vec2::new(a.sin(), a.cos());
+                    spawn.yaw = (-forward.x).atan2(-forward.y);
+                }
+                info!(
+                    event = %format!("{:?}[{}]", event_ref.table, event_ref.index),
+                    gates = def.checkpoints.len(),
+                    "event race loaded"
+                );
+                event_race = Some(def);
+            }
+            Err(e) => {
+                error!(error = %e, event = ?event_ref, "event failed to load");
+                session
+                    .fail(format!(
+                        "event {:?}[{}]: {e}",
+                        event_ref.table, event_ref.index
+                    ))
+                    .expect("Loading → Failed is a legal transition");
+                world_ok = false;
+            }
+        }
+    }
     if world_ok {
         session
             .transition(SessionPhase::Ready)
@@ -513,8 +553,29 @@ pub fn load_session_world(
         }
     }
 
-    // World built and the player exists — release control.
-    session
-        .transition(SessionPhase::Playing)
-        .expect("Ready → Playing is a legal transition");
+    // World built and the player exists — release control. Event
+    // sessions go through the countdown instead: the race resource and
+    // the participant's progress are inserted first so `advance_race`
+    // can own the release (one `RaceStarted`, one unlock — AC03).
+    match event_race {
+        Some(def) => {
+            commands.entity(vehicle).insert(RaceProgress::new(&def));
+            race::spawn_checkpoint_markers(
+                &mut commands,
+                &mut assets.meshes,
+                &mut assets.materials,
+                &def,
+                owner,
+            );
+            commands.insert_resource(RaceState::new(def, session.generation()));
+            session
+                .transition(SessionPhase::Countdown)
+                .expect("Ready → Countdown is a legal transition");
+        }
+        None => {
+            session
+                .transition(SessionPhase::Playing)
+                .expect("Ready → Playing is a legal transition");
+        }
+    }
 }

@@ -53,6 +53,18 @@ struct Cli {
     #[arg(long)]
     city: Option<String>,
 
+    /// Start an authored event: `<table>:<row>` with table one of
+    /// `checkpoint`, `blitz`, `circuit`, `crash` and row the 0-based
+    /// table row (`mm2-inspect events <install>` lists them). Implies
+    /// the event's `--city`; an event that cannot resolve or build is
+    /// a load failure, never a silent roam.
+    #[arg(long, value_name = "table:row")]
+    event: Option<String>,
+
+    /// Drive the Professional parameter block instead of Amateur.
+    #[arg(long)]
+    pro: bool,
+
     /// Stock/modded vehicle id or unique display-name alias to load
     /// (`--list-cars` shows the roster). Requires `--mm2-path` or mods
     /// providing vehicle data.
@@ -197,16 +209,34 @@ fn main() {
         return;
     }
 
+    // `--event <table>:<row>` selects an authored event in the chosen
+    // city (default london). Crash Course rows are rejected by the
+    // producer until F21 — an explicit load failure, not a fallback.
+    let event_ref = cli.event.as_deref().map(|s| match parse_event_ref(s) {
+        Ok((table, index)) => mm2_game::EventRef {
+            city: cli.city.as_deref().unwrap_or("london").to_ascii_lowercase(),
+            table,
+            index,
+        },
+        Err(()) => {
+            error!("invalid --event {s:?}: expected checkpoint|blitz|circuit|crash:<row>");
+            std::process::exit(2);
+        }
+    });
+
     // World mode. A specifically requested `--city` always means City —
     // even without an install (a mod may provide it, and a VFS miss is a
-    // hard failure rather than a silent dev world). `--dev-world` wins
-    // over both.
+    // hard failure rather than a silent dev world). `--event` implies
+    // its city the same way. `--dev-world` wins over both.
     let mode = if cli.dev_world {
         if cli.city.is_some() {
             warn!("--city is ignored with --dev-world");
         }
+        // `--event` still applies: an event over the dev world is a
+        // valid developer/test rig — its data resolves through the
+        // same VFS and missing data fails explicitly.
         WorldMode::DevWorld
-    } else if cli.city.is_some() || has_mm2 {
+    } else if cli.city.is_some() || cli.event.is_some() || has_mm2 {
         WorldMode::City {
             psdl: format!(
                 "city/{}.psdl",
@@ -315,6 +345,14 @@ fn main() {
     // tweaks stay quarantined in `dev`.
     let session_config = SessionConfig {
         world: mode,
+        mode: event_ref
+            .clone()
+            .map_or(mm2_game::SessionMode::Cruise, mm2_game::SessionMode::Event),
+        difficulty: if cli.pro {
+            mm2_game::Difficulty::Professional
+        } else {
+            mm2_game::Difficulty::Amateur
+        },
         vehicle: VehicleSelection {
             id: selected.as_ref().map(|d| d.id.clone()),
             paint: cli.paint,
@@ -355,12 +393,13 @@ fn main() {
         }
     }
 
-    // Headless physics smoke: no window, no GPU. Runs and exits here.
+    // Headless physics smoke: no window, no GPU. Runs and exits here —
+    // `vfs`/`selected` move in, the process exits on the record.
     if cli.headless {
         let rec = smoke::headless_smoke(
             &session_config,
-            &vfs,
-            selected.as_ref(),
+            vfs,
+            selected,
             &vehicle,
             cli.frames.unwrap_or(600),
         );
@@ -417,6 +456,7 @@ fn main() {
     .add_message::<ImpactEvent>()
     .add_message::<RaceStarted>()
     .init_resource::<contracts::ImpactFilter>()
+    .init_resource::<mm2_game::ResultLedger>()
     .init_resource::<SessionControl>()
     .add_systems(FixedUpdate, advance_session_tick)
     .add_systems(
@@ -459,6 +499,7 @@ fn main() {
             car_visual::toggle_headlights,
             car_visual::trailer_input,
             city::animate_textures,
+            race::update_checkpoint_markers,
             update_hud,
         ),
     );
@@ -476,6 +517,20 @@ fn main() {
     if let AppExit::Error(code) = exit {
         std::process::exit(code.get() as i32);
     }
+}
+
+/// Parse `--event <table>:<row>` into a table kind + row index.
+fn parse_event_ref(s: &str) -> Result<(mm2_game::EventTableKind, usize), ()> {
+    let (table, row) = s.split_once(':').ok_or(())?;
+    let table = match table.to_ascii_lowercase().as_str() {
+        "checkpoint" | "race" => mm2_game::EventTableKind::Checkpoint,
+        "blitz" => mm2_game::EventTableKind::Blitz,
+        "circuit" => mm2_game::EventTableKind::Circuit,
+        "crash" | "crashcourse" => mm2_game::EventTableKind::CrashCourse,
+        _ => return Err(()),
+    };
+    let index = row.trim().parse().map_err(|_| ())?;
+    Ok((table, index))
 }
 
 /// Whether a windowing system is present for a windowed/visual run.
@@ -579,9 +634,11 @@ fn smoke_test(
 /// mutable simulation state.
 fn update_hud(
     session: Res<Session>,
+    race: Option<Res<mm2_game::RaceState>>,
     mut hud: Query<&mut Text, (With<Hud>, Without<ErrorText>)>,
     mut err: Query<&mut Text, (With<ErrorText>, Without<Hud>)>,
     vehicles: Query<&mm2_game::VehicleTelemetry, With<PlayerVehicle>>,
+    progress: Query<&mm2_game::RaceProgress, With<PlayerVehicle>>,
     cameras: Query<(&Camera, &Transform)>,
 ) {
     for mut text in &mut err {
@@ -590,12 +647,39 @@ fn update_hud(
             _ => Text::new(""),
         };
     }
+    let race_text = race
+        .filter(|r| !r.is_stale(session.generation()))
+        .map(|r| match r.phase {
+            mm2_game::RacePhase::Countdown { remaining } => {
+                format!("  GET READY {:.0}", (remaining as f32 / 120.0).ceil())
+            }
+            mm2_game::RacePhase::Running => {
+                let cleared = progress.iter().next().map_or(0, |p| p.cleared_count());
+                let lap = progress.iter().next().map_or(0, |p| p.lap + 1);
+                if r.definition.rule == mm2_game::CheckpointRule::Ordered {
+                    format!(
+                        "  lap {lap}/{}  cp {cleared}/{}  {:.1}s",
+                        r.definition.laps,
+                        r.definition.checkpoints.len(),
+                        r.clock as f32 / 120.0
+                    )
+                } else {
+                    format!(
+                        "  cp {cleared}/{}  {:.1}s",
+                        r.definition.checkpoints.len(),
+                        r.clock as f32 / 120.0
+                    )
+                }
+            }
+            mm2_game::RacePhase::Complete => "  FINISHED".to_string(),
+        })
+        .unwrap_or_default();
     let Ok(veh) = vehicles.single() else {
         for mut text in &mut hud {
             *text = Text::new(match session.phase() {
                 SessionPhase::Failed(_) => String::new(),
                 SessionPhase::Playing => "no vehicle".to_string(),
-                _ => "loading…".to_string(),
+                _ => format!("loading…{race_text}"),
             });
         }
         return;
@@ -610,7 +694,7 @@ fn update_hud(
     let cam = active_cam_pose(&cameras).unwrap_or_default();
     for mut text in &mut hud {
         *text = Text::new(format!(
-            "{speed:5.1} km/h  {dir}  {rpm:4.0} rpm  wheels {grounded}/{total}  cam {cam}",
+            "{speed:5.1} km/h  {dir}  {rpm:4.0} rpm  wheels {grounded}/{total}  cam {cam}{race_text}",
             rpm = veh.rpm,
             total = veh.wheels.len(),
         ));

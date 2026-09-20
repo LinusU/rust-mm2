@@ -174,8 +174,8 @@ fn catalog_indexes_rows_and_dependencies() {
         .find(|r| r.kind == RaceFileKind::Waypoints)
         .unwrap();
     assert!(matches!(
-        wp.content,
-        RecordContent::Waypoints { rows: 2, .. }
+        &wp.content,
+        RecordContent::Waypoints(f) if f.rows.len() == 2
     ));
     let mut diffs: Vec<char> = first.records.iter().filter_map(|r| r.difficulty).collect();
     diffs.sort();
@@ -210,7 +210,7 @@ fn crash_course_links_and_rewards() {
             .records
             .iter()
             .any(|r| r.logical == "race/london/longjump.csv"
-                && matches!(r.content, RecordContent::Waypoints { rows: 1, .. }))
+                && matches!(&r.content, RecordContent::Waypoints(f) if f.rows.len() == 1))
     );
     assert_eq!(crash0.rewards.len(), 1);
     assert_eq!(crash0.rewards[0].car, "vpy");

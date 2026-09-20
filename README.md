@@ -83,9 +83,15 @@ left trigger brakes.
 cargo run -- --mm2-path "/path/to/Midtown Madness 2"
 # optionally:
 #   --city london|sf                 (default: london)
+#   --event <table>:<index>          e.g. blitz:0, checkpoint:3, circuit:1
 #   --mods <mods dir>
 #   --vehicle-config <toml>          (e.g. examples/vehicles/dev-car.toml)
 ```
+
+`--event` loads an authored race from the city's event tables: the session
+enters countdown on the event's start grid, checkpoint/finish markers are
+placed from the authored waypoint rows, and crossing them advances shared
+race progress. Crash Course events are parsed but not yet playable.
 
 The app mounts every `.ar` archive found in the install directory plus loose
 files, then loads `city/<name>.psdl` through the VFS. A `--city` the VFS
@@ -97,6 +103,7 @@ cannot provide is a hard failure — it never falls back to the dev world.
 # headless physics smoke — no window or GPU needed; settles, then drives:
 cargo run -- --dev-world --headless [--frames N]            # default 600
 cargo run -- --mm2-path <dir> --city sf --headless          # real city collision
+cargo run -- --mm2-path <dir> --city london --event blitz:0 --headless  # authored race
 
 # visual smoke — real render path, windowed; the screenshot is awaited
 # (pass is reported only once the file actually lands):

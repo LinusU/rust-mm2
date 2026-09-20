@@ -19,6 +19,7 @@ mm2_content.workspace = true
 mm2_formats.workspace = true
 mm2_game.workspace = true
 mm2_vehicle.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
