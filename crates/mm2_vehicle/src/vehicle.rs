@@ -98,8 +98,8 @@ pub struct VehicleState {
     pub rpm: f32,
     /// Drive force delivered this step as a fraction of what the
     /// drivetrain could deliver at the current rpm/gear (0 coasting or
-    /// airborne, ~1 at full demand; dips during shifts and under
-    /// traction control).
+    /// airborne, ~1 at full demand; traction-control clamping lowers
+    /// it — a gear change scales both sides of the ratio equally).
     pub engine_load: f32,
     /// Whether any wheel is grounded.
     pub grounded: bool,

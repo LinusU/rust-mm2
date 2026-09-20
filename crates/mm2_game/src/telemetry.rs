@@ -72,9 +72,10 @@ pub struct VehicleTelemetry {
     pub rpm: f32,
     /// Drive force delivered as a fraction of what the drivetrain could
     /// deliver at the current rpm/gear — 0 when coasting or airborne,
-    /// ~1 at full demand. Dip during gear changes and under traction
-    /// control is deliberate: those are the engine actually working
-    /// less hard.
+    /// ~1 at full demand. A dip under traction control is deliberate:
+    /// the engine is working less hard than it could. A gear change
+    /// does not dip it — the shift torque factor scales the delivered
+    /// and available sides of the ratio equally.
     pub engine_load: f32,
     /// Current gear (index into `gear_ratios`).
     pub gear: usize,

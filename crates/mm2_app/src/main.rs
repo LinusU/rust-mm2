@@ -845,11 +845,14 @@ fn setup(
                 if !tmissing.is_empty() {
                     warn!(car = %def.id, "trailer missing textures: {}", tmissing.join(", "));
                 }
-                // The trailer is a simulated object too — stable id and
-                // the session's authority role, but no player driver.
-                commands
-                    .entity(te)
-                    .insert((ObjectIdentity(session.mint_object_id()), role));
+                // The trailer is a simulated object too — stable id, the
+                // session's authority role and its own damage signals,
+                // but no player driver.
+                commands.entity(te).insert((
+                    ObjectIdentity(session.mint_object_id()),
+                    role,
+                    mm2_game::DamageSignals::default(),
+                ));
                 spawn.trailers.push((
                     te,
                     Vec3::from(trailer.car_hitch) - Vec3::from(trailer.trailer_hitch),
