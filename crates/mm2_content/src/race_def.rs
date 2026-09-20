@@ -134,8 +134,20 @@ pub fn race_definition(
         checkpoints,
         finish,
         rule,
+        // `NumLaps` is meaningful only on Ordered (Circuit) definitions —
+        // the constant 3/4 on Blitz/Checkpoint rows is template junk
+        // (`UNK-5`). There it binds like every other authored value: a
+        // lap race needs a positive count that fits the field, and an
+        // out-of-range value is a named build error, never a silent
+        // clamp (`BadParam`).
         laps: if rule == CheckpointRule::Ordered {
-            params.num_laps.max(1) as u32
+            u32::try_from(params.num_laps)
+                .ok()
+                .filter(|&n| n >= 1)
+                .ok_or(RaceBuildError::BadParam {
+                    field: "NumLaps",
+                    value: params.num_laps.to_string(),
+                })?
         } else {
             0
         },

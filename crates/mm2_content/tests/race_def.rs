@@ -404,6 +404,100 @@ fn unusable_params_fail_the_build_explicitly() {
     }
 }
 
+/// A one-row `race/sf/` circuit install from a table row.
+fn circuit_install(table_row: &str) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(
+        d,
+        "race/sf/mmcircuitdata.csv",
+        &format!("{MM_HEADER}\n{table_row}\n"),
+    );
+    write(d, "race/sf/circuit0.aimap", "#\n");
+    write(
+        d,
+        "race/sf/circuit0waypoints.csv",
+        &format!(
+            "{WAYPOINTS}{}{}{}{}",
+            row(0.0, 0.0, 15.0),
+            row(30.0, 0.0, 8.0),
+            row(60.0, 0.0, 9.0),
+            row(90.0, 0.0, 10.0)
+        ),
+    );
+    tmp
+}
+
+#[test]
+fn circuit_num_laps_is_a_checked_authored_value() {
+    // Ordered builds bind `NumLaps` like every other authored
+    // parameter (CIR-5): a lap race needs a positive count that fits
+    // the field — zero, negative and overflowing values are named
+    // `BadParam` errors, never silent clamps.
+    for amateur_laps in ["0", "-2", "5000000000"] {
+        let tmp = circuit_install(&format!(
+            "none,0,0,0,0,0,0.0,0.0,{amateur_laps},50,1,0,0,0,0,0,0.0,0.0,2,40,1"
+        ));
+        let vfs = vfs_of(tmp.path());
+        let catalog = EventCatalog::scan(&vfs, "sf");
+        let ev = event(&catalog, EventTableKind::Circuit, 0);
+        match race_definition(ev, Difficulty::Amateur) {
+            Err(RaceBuildError::BadParam {
+                field: "NumLaps", ..
+            }) => {}
+            other => panic!("NumLaps={amateur_laps}: expected BadParam, got {other:?}"),
+        }
+    }
+    // The difficulties are independent parameter blocks — a valid
+    // amateur value does not rescue an unusable professional one.
+    let tmp = circuit_install("none,0,0,0,0,0,0.0,0.0,2,50,1,0,0,0,0,0,0.0,0.0,0,40,1");
+    let vfs = vfs_of(tmp.path());
+    let catalog = EventCatalog::scan(&vfs, "sf");
+    let ev = event(&catalog, EventTableKind::Circuit, 0);
+    assert_eq!(
+        race_definition(ev, Difficulty::Amateur).unwrap().laps,
+        2,
+        "a valid authored count binds verbatim"
+    );
+    assert!(matches!(
+        race_definition(ev, Difficulty::Professional),
+        Err(RaceBuildError::BadParam {
+            field: "NumLaps",
+            ..
+        })
+    ));
+    // The binding is Ordered-only: junk in the same column on a
+    // checkpoint row stays ignored like the template values are
+    // (UNK-5) — it never reaches validation.
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(
+        d,
+        "race/london/mmracedata.csv",
+        &format!("{MM_HEADER}\nnone,0,0,0,0,0,0.1,0.0,-9,50,1,0,0,0,0,0,0.2,0.0,0,40,1\n"),
+    );
+    write(d, "race/london/race0.aimap", "#\n");
+    write(
+        d,
+        "race/london/race0waypoints.csv",
+        &format!(
+            "{WAYPOINTS}{}{}{}{}",
+            row(0.0, 0.0, 15.0),
+            row(10.0, -30.0, 8.0),
+            row(40.0, -60.0, 9.0),
+            row(70.0, -90.0, 10.0)
+        ),
+    );
+    let vfs = vfs_of(d);
+    let catalog = EventCatalog::scan(&vfs, "london");
+    let def = race_definition(
+        event(&catalog, EventTableKind::Checkpoint, 0),
+        Difficulty::Amateur,
+    )
+    .expect("a checkpoint row's NumLaps is template junk, not validated");
+    assert_eq!(def.laps, 0);
+}
+
 #[test]
 fn too_few_rows_is_an_explicit_error() {
     let tmp = tempfile::tempdir().unwrap();
