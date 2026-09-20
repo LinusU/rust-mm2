@@ -220,6 +220,7 @@ Retail install: `/Users/linus/coding/rust-mm2/retail`, enumerated
 | DSN-2 | Rust/Bevy/Avian stack, wgpu rasterized rendering — a modern engine, not a Direct3D emulation; original renderer options (CTL-4) inform features, not implementation. | PROJECT.md, docs/architecture.md |
 | DSN-3 | Modern engine-to-engine multiplayer only; no DirectPlay/Zone/serial/modem compatibility. | PROJECT.md |
 | DSN-4 | VFS reads installs read-only with deterministic mod overrides. | PROJECT.md, docs/modding.md |
+| DSN-5 | Shared race runtime defaults not pinned by authored data: checkpoint vertical band ±8 m, direction-check flag off, 3 s start countdown at 120 Hz. Provisional until real event evidence exists. | `mm2_game::race` constants + docs |
 
 ## Open questions (unknown until evidenced)
 

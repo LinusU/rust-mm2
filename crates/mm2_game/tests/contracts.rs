@@ -157,6 +157,7 @@ fn result_ids_are_unique_and_ledger_deduplicates() {
         .record(SessionResult {
             id: r0.clone(),
             tick: s.tick(),
+            outcome: SessionOutcome::Finished { race_ticks: 100 },
         })
         .unwrap();
     // The exact delivery repeated is a duplicate, not a new result.
@@ -164,6 +165,7 @@ fn result_ids_are_unique_and_ledger_deduplicates() {
         .record(SessionResult {
             id: r0.clone(),
             tick: s.tick(),
+            outcome: SessionOutcome::Finished { race_ticks: 100 },
         })
         .unwrap_err();
     assert_eq!(dup.0, r0);
@@ -172,6 +174,7 @@ fn result_ids_are_unique_and_ledger_deduplicates() {
         .record(SessionResult {
             id: r1,
             tick: s.tick(),
+            outcome: SessionOutcome::Finished { race_ticks: 120 },
         })
         .unwrap();
     assert_eq!(ledger.len(), 2);

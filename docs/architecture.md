@@ -60,14 +60,20 @@ Dependency rules:
   identity), `ImpactEvent`+`ImpactPolicy`/`ImpactDedup` (bounded,
   deduplicated contact semantics — never raw solver spam),
   `VehicleTelemetry`/`WheelTelemetry`/`DamageSignals` (read-only
-  per-step snapshots stamped with generation+tick), and
+  per-step snapshots stamped with generation+tick),
   `SessionResult`/`ResultLedger` (stable result identity with
-  deduplication). `mm2_game` may reference `mm2_formats` types (e.g.
-  authored event-table kinds) and carry the `Mm2Vfs` resource handle so
-  app-side systems can reach content, but it never lists, reads or
-  parses anything itself — VFS-backed scans and file parsing live in
-  `mm2_content`. Deliberately small; gameplay systems grow here
-  later.
+  deduplication), and the shared race contract: `RaceDefinition`
+  (checkpoints/finish/start slots/laps/countdown), `Checkpoint`'s swept
+  cylinder trigger test, `CheckpointRule` (`AnyOrder` vs `Ordered` —
+  mode data, not an imposed rule), `RaceState` (generation-stamped
+  countdown/clock resource), `RaceProgress` (per-participant clearing
+  state with explicit teleport segment breaks), `RaceStarted` and
+  `SessionOutcome` (finish provenance on results). `mm2_game` may
+  reference `mm2_formats` types (e.g. authored event-table kinds) and
+  carry the `Mm2Vfs` resource handle so app-side systems can reach
+  content, but it never lists, reads or parses anything itself —
+  VFS-backed scans and file parsing live in `mm2_content`.
+  Deliberately small; gameplay systems grow here later.
 - `mm2_content` is the content→runtime producer layer. It scans the
   mounted VFS and runs `mm2_formats` parsers to build what the app
   consumes: `VehicleCatalog`/`load_vehicle`/`build_model` for vehicles,

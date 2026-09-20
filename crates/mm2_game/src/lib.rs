@@ -12,6 +12,7 @@ use mm2_assets::Vfs;
 pub mod config;
 pub mod ids;
 pub mod impact;
+pub mod race;
 pub mod result;
 pub mod session;
 pub mod surface;
@@ -24,7 +25,12 @@ pub use config::{
 };
 pub use ids::{AuthorityRole, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerId};
 pub use impact::{ImpactDedup, ImpactEvent, ImpactId, ImpactPolicy};
-pub use result::{DuplicateResult, ResultId, ResultLedger, SessionResult};
+pub use race::{
+    Checkpoint, CheckpointRule, DEFAULT_CHECKPOINT_HEIGHT, DEFAULT_COUNTDOWN_TICKS,
+    ParticipantState, ProgressOutcome, RaceDefinition, RaceError, RacePhase, RaceProgress,
+    RaceStart, RaceStarted, RaceState,
+};
+pub use result::{DuplicateResult, ResultId, ResultLedger, SessionOutcome, SessionResult};
 pub use session::{
     Session, SessionEntity, SessionError, SessionPhase, advance_session_tick,
     despawn_session_entities,

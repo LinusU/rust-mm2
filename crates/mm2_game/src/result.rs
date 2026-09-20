@@ -35,10 +35,25 @@ pub struct ResultId {
     pub sequence: u32,
 }
 
-/// A finished session's result record. The payload stays deliberately
-/// thin until real modes exist: identity plus the session tick it was
-/// recorded at. Mode-specific fields (placement, time, score) extend
-/// this struct when the races that produce them land.
+/// What a session result records. The payload stays deliberately thin —
+/// mode-specific fields (placement, score, DNF reasons) extend this
+/// enum as the modes that produce them land; the shared race runtime
+/// (F11-B) produces `Finished`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SessionOutcome {
+    /// The event's required checkpoints were all cleared, and its
+    /// finish trigger crossed where the definition has one.
+    Finished {
+        /// Ticks on the race clock from start to finish — the
+        /// authoritative finish time progression compares.
+        race_ticks: u64,
+    },
+}
+
+/// A finished session's result record: stable identity plus the session
+/// tick it was recorded at and what happened. Mode-specific fields
+/// (placement, time, score) extend [`SessionOutcome`] when the modes
+/// that produce them land.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionResult {
     /// Stable identity — mint via
@@ -46,6 +61,8 @@ pub struct SessionResult {
     pub id: ResultId,
     /// Fixed-step session tick the result was recorded on.
     pub tick: u64,
+    /// What the result records.
+    pub outcome: SessionOutcome,
 }
 
 /// A result whose [`ResultId`] was already recorded.
