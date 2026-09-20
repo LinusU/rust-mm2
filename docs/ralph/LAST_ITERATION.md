@@ -68,7 +68,10 @@
     dev_banger_pool` — pass.
   - All retail probe runs above; screenshots `/tmp/sf_barr*.png`,
     `/tmp/sf_fwy.png`, `/tmp/lon_r7*.png` (local only, not committed).
-  - Full gates re-run before commit — results in the handoff below.
+  - Gates at the candidate commit: `cargo fmt --all -- --check` pass
+    (import-order fixes applied first); `cargo clippy --workspace
+    --all-targets --all-features -- -D warnings` pass, exit 0;
+    `cargo test --workspace` pass — 32 suites, 0 failures.
 - Acceptance IDs satisfied / still open:
   - F04-AC04 (repeated collisions + budgets): now has retail evidence —
     repeated hits within a configured bound, cap enforced, reclaim
