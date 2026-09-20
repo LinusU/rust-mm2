@@ -41,6 +41,21 @@ pub const EXPECTED_AUDIO_FAMILIES: &[&str] = &[
     "spchdata",
 ];
 
+/// The `mm*data.csv` event-metadata tables every race city ships:
+/// Checkpoint (`mmracedata`), Blitz (`mmblitzdata`), Circuit
+/// (`mmcircuitdata`) and Crash Course (`mmcrashdata`). One row per
+/// selectable event carrying an Amateur and a Professional parameter
+/// set; parsed by `mm2_formats::racedata`.
+///
+/// The flag marks which inventory family a table audits against —
+/// `mmcrashdata` is lesson metadata, the rest are race metadata.
+pub const EXPECTED_EVENT_TABLES: &[(&str, bool)] = &[
+    ("mmracedata.csv", false),
+    ("mmblitzdata.csv", false),
+    ("mmcircuitdata.csv", false),
+    ("mmcrashdata.csv", true),
+];
+
 /// The record kind an expected event must carry to count as complete.
 ///
 /// This encodes the authored convention observed on retail — e.g. every

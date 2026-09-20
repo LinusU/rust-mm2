@@ -25,12 +25,13 @@ use std::path::{Path, PathBuf};
 
 use mm2_assets::{MountReport, Vfs};
 use mm2_content::{
-    EXPECTED_AUDIO_FAMILIES, EXPECTED_CITIES, EXPECTED_PEDS, EXPECTED_RACE_CITIES,
-    EXPECTED_STOCK_ROSTER, EntryStatus, PED_REQUIRED_EXTS, PrimaryRecord, VehicleCatalog,
-    expected_events,
+    EXPECTED_AUDIO_FAMILIES, EXPECTED_CITIES, EXPECTED_EVENT_TABLES, EXPECTED_PEDS,
+    EXPECTED_RACE_CITIES, EXPECTED_STOCK_ROSTER, EntryStatus, PED_REQUIRED_EXTS, PrimaryRecord,
+    VehicleCatalog, expected_events,
 };
 use mm2_formats::inst;
 use mm2_formats::psdl::Psdl;
+use mm2_formats::racedata::EventTable;
 use serde_json::{Value, json};
 
 /// Engine commit embedded by `build.rs`; `unknown` outside a git checkout.
@@ -109,7 +110,7 @@ pub fn build(
     let mut families = Vec::new();
     families.push(cities(vfs, &paths));
     families.push(vehicles(vfs));
-    let (races, lessons) = events(&paths);
+    let (races, lessons) = events(vfs, &paths);
     families.push(races);
     families.push(lessons);
     families.push(placement(vfs, &paths));
@@ -407,7 +408,7 @@ struct RaceAux {
     variant_records: usize,
 }
 
-fn events(paths: &[String]) -> (Family, Family) {
+fn events(vfs: &Vfs, paths: &[String]) -> (Family, Family) {
     let mut races = Family::new("races");
     let mut lessons = Family::new("crash-course lessons");
     let mut aux_totals = RaceAux::default();
@@ -417,6 +418,7 @@ fn events(paths: &[String]) -> (Family, Family) {
         // stem -> file kinds seen, plus non-event records bucketed aside.
         let mut stems: BTreeMap<String, BTreeSet<Kind>> = BTreeMap::new();
         let mut junk: Vec<Rejected> = Vec::new();
+        let mut meta_tables: Vec<String> = Vec::new();
         for p in paths {
             if *p == format!("race/{city}") {
                 aux_totals.aux_records += 1; // extensionless loose file
@@ -435,7 +437,10 @@ fn events(paths: &[String]) -> (Family, Family) {
                     entry: p.clone(),
                     reason: "non-content artifact (backup/conflict/dev leftover)".into(),
                 }),
-                Kind::Meta => aux_totals.meta_tables += 1,
+                Kind::Meta => {
+                    aux_totals.meta_tables += 1;
+                    meta_tables.push(p.clone());
+                }
                 _ => {
                     if kind == Kind::AimapP {
                         aux_totals.aimap_p += 1;
@@ -522,16 +527,58 @@ fn events(paths: &[String]) -> (Family, Family) {
                 .join(", "),
             if extras.len() > 12 { ", …" } else { "" }
         ));
+        // Event-metadata tables: parse the authored rosters through the
+        // VFS, not just their presence. A missing expected table or a
+        // malformed row is a rejected record; row counts become the
+        // ledger's reproducible evidence for the per-city event roster.
+        let mut table_note: Vec<String> = Vec::new();
+        for (table, lesson) in EXPECTED_EVENT_TABLES {
+            let logical = format!("{prefix}{table}");
+            let fam = if *lesson { &mut lessons } else { &mut races };
+            if !meta_tables.contains(&logical) {
+                fam.rejected.push(Rejected {
+                    entry: logical,
+                    reason: "expected event-metadata table not discovered".into(),
+                });
+                continue;
+            }
+            match vfs
+                .read_logical(&logical)
+                .map_err(|e| e.to_string())
+                .and_then(|b| {
+                    EventTable::parse(&String::from_utf8_lossy(&b)).map_err(|e| e.to_string())
+                }) {
+                Ok(t) => {
+                    table_note.push(format!("{table}={} rows", t.rows.len()));
+                    for d in &t.diagnostics {
+                        fam.rejected.push(Rejected {
+                            entry: logical.clone(),
+                            reason: d.to_string(),
+                        });
+                    }
+                }
+                Err(e) => fam.rejected.push(Rejected {
+                    entry: logical,
+                    reason: format!("malformed event-metadata table: {e}"),
+                }),
+            }
+        }
+        races.notes.push(format!(
+            "{city} event-metadata rows: {}",
+            table_note.join(", ")
+        ));
+
         races.rejected.extend(junk);
     }
 
-    // No race-format parser exists: every discovered record is
-    // unverified at content level even when its authored files are
+    // The mm*data.csv rosters now parse, but no race-format parser
+    // exists for the events themselves: every discovered event record
+    // is unverified at content level even when its authored files are
     // structurally complete.
     races.unverified = races.discovered;
     lessons.unverified = lessons.discovered;
     races.notes.push(format!(
-        "{} .aimap_p variants, {} -a-N.opp / {} -p-N.opp opponent records, {} mm*data.csv metadata tables, {} aux records, {} *_p variant records — all unparsed",
+        "{} .aimap_p variants, {} -a-N.opp / {} -p-N.opp opponent records, {} mm*data.csv metadata tables (parsed), {} aux records, {} *_p variant records — all other records unparsed",
         aux_totals.aimap_p,
         aux_totals.opp_a,
         aux_totals.opp_p,
@@ -1111,6 +1158,12 @@ mod tests {
         write(d, "race/london/exam1_1.csv", b"");
         write(d, "race/london/circuit11-a-0.opp", b"");
         write(d, "race/sf/multicopwaypoints.csv", b"");
+        write(
+            d,
+            "race/london/mmracedata.csv",
+            b"Description, CarType, TimeofDay, Weather, Opponents, Cops, Ambient, Peds, NumLaps, TimeLimit, Difficulty, CarType, TimeofDay, Weather, Opponents, Cops, Ambient, Peds, NumLaps, TimeLimit, Difficulty\nnone,0,0,0,7,0,0.1,0.0,3,50,1,0,0,1,6,0,0.2,0.0,4,40,1\n",
+        );
+        write(d, "race/london/mmcrashdata.csv", b"not,a,table\n");
         write(d, "anim/pedmodel_man.mod", b"");
         write(d, "anim/pedmodel_man.skel", b"");
         write(d, "anim/pedmodel_man.rays", b"");
@@ -1156,6 +1209,17 @@ mod tests {
                 .iter()
                 .any(|r| r.entry == "race/sf/blitz0" && r.reason.contains("not discovered"))
         );
+        // Event-metadata tables: the well-formed one reports its row
+        // count, missing tables reject as undiscovered expected data.
+        assert!(
+            races
+                .notes
+                .iter()
+                .any(|n| n.contains("mmracedata.csv=1 rows"))
+        );
+        assert!(races.rejected.iter().any(
+            |r| r.entry == "race/london/mmblitzdata.csv" && r.reason.contains("not discovered")
+        ));
 
         let lessons = family(&report, "crash-course lessons");
         assert_eq!(lessons.expected, 42);
@@ -1165,6 +1229,14 @@ mod tests {
                 .rejected
                 .iter()
                 .all(|r| !r.reason.starts_with("partial"))
+        );
+        // The malformed Crash Course table rejects on the lessons family.
+        assert!(
+            lessons
+                .rejected
+                .iter()
+                .any(|r| r.entry == "race/london/mmcrashdata.csv"
+                    && r.reason.contains("malformed event-metadata table"))
         );
 
         let placement = family(&report, "placement sources");

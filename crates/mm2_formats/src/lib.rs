@@ -12,6 +12,7 @@ pub mod inst;
 pub mod mtx;
 pub mod pkg;
 pub mod psdl;
+pub mod racedata;
 pub mod reader;
 pub mod tex;
 pub mod tune;

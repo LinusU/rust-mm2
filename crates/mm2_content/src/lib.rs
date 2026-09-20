@@ -20,8 +20,8 @@ pub use convert::{
     convert_trailer,
 };
 pub use expect::{
-    EXPECTED_AUDIO_FAMILIES, EXPECTED_CITIES, EXPECTED_PEDS, EXPECTED_RACE_CITIES, ExpectedEvent,
-    PED_REQUIRED_EXTS, PrimaryRecord, expected_events,
+    EXPECTED_AUDIO_FAMILIES, EXPECTED_CITIES, EXPECTED_EVENT_TABLES, EXPECTED_PEDS,
+    EXPECTED_RACE_CITIES, ExpectedEvent, PED_REQUIRED_EXTS, PrimaryRecord, expected_events,
 };
 pub use model::{
     Lod, MeshGroup, ModelPart, PartRole, VehicleModel, WheelVisual, build_model, classify_stem,
