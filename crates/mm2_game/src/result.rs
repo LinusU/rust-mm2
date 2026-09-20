@@ -142,4 +142,47 @@ impl ResultLedger {
     pub fn is_empty(&self) -> bool {
         self.recorded.is_empty()
     }
+
+    /// The recorded results in finishing order — the authoritative
+    /// standings a results screen or progression (F16) ranks by
+    /// (F13-B).
+    ///
+    /// Ordering contract (**designed** — the ledger records no
+    /// verified original placing rule, so this is an explicit policy,
+    /// not an original-behavior claim):
+    ///
+    /// - `Finished` outranks `TimedOut`: a completed event beats a DNF
+    ///   no matter the times.
+    /// - `Finished` orders by `race_ticks` — the authoritative race
+    ///   clock the finish was recorded against, so recording order
+    ///   cannot scramble the standings.
+    /// - Equal `race_ticks` (a same-tick finish, or two expiries on
+    ///   the shared deadline) order by `participant` — a deterministic
+    ///   tie-break that does not depend on query or recording order
+    ///   (the spec's required explicit tie resolution).
+    /// - A participant with no recorded result has no standing at
+    ///   all: still-racing or quit participants are unplaced, not
+    ///   ranked last.
+    pub fn standings(&self) -> Vec<&SessionResult> {
+        fn key(result: &SessionResult) -> (u8, u64, PlayerId) {
+            match result.outcome {
+                SessionOutcome::Finished { race_ticks } => (0, race_ticks, result.id.participant),
+                SessionOutcome::TimedOut { race_ticks } => (1, race_ticks, result.id.participant),
+            }
+        }
+        let mut ordered: Vec<&SessionResult> = self.recorded.values().collect();
+        ordered.sort_by_key(|r| key(r));
+        ordered
+    }
+
+    /// `participant`'s 1-based place in [`standings`](Self::standings)
+    /// — `None` when no result is recorded for them. A participant
+    /// with several results (e.g. a retried event inside one session)
+    /// places by the best one.
+    pub fn place_of(&self, participant: PlayerId) -> Option<u32> {
+        self.standings()
+            .iter()
+            .position(|r| r.id.participant == participant)
+            .map(|i| i as u32 + 1)
+    }
 }

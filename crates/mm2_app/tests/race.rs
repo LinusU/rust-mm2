@@ -498,6 +498,93 @@ fn tied_finishes_record_separately() {
     assert_eq!(rb.participant, pb);
 }
 
+/// F13-AC03/F14-AC03: two participants on one Ordered course lap
+/// independently through the production driver — each wraps its own
+/// `next`/`lap`, each finishes once, and the ledger's standings order
+/// them by the recorded race clock (the remote's earlier finish
+/// outranks the local's). The remote's resolution does not end the
+/// local driver's race; the local's does (UI-5).
+#[test]
+fn ordered_multi_lap_participants_stay_independent_and_order() {
+    let def = RaceDefinition {
+        checkpoints: vec![cp(0.0, 0.0), cp(100.0, 0.0)],
+        finish: None,
+        rule: CheckpointRule::Ordered,
+        laps: 2,
+        time_limit_ticks: None,
+        params: mm2_game::EventParams::default(),
+        countdown_ticks: 0,
+        start_slots: Vec::new(),
+    };
+    let mut app = race_app(event_config(), def.clone());
+    let (remote, pr) = spawn_participant(&mut app, &def, Vec3::new(-200.0, 0.0, -2.0));
+    let (local, pl) = spawn_participant(&mut app, &def, Vec3::new(-200.0, 0.0, 2.0));
+    app.world_mut().get_mut::<Player>(remote).unwrap().control = PlayerControl::Remote;
+    run(&mut app, 2); // release + anchor
+
+    // The drive path, per gate: enter the trigger, leave into the
+    // middle zone (x in 15..85), then enter the next. One segment
+    // clears one gate — resting inside a radius would let the next
+    // segment clear the wrapped sequence too (the swept contract's
+    // intended multi-crossing, pinned by other tests).
+    let drive = |app: &mut App, e: Entity, z: f32, xs: &[f32]| {
+        for &x in xs {
+            set_position(app, e, Vec3::new(x, 0.0, z));
+            run(app, 1);
+        }
+    };
+
+    // Lap 1 for both, interleaved so each participant's progress is
+    // provably its own: gate 0, out, gate 1.
+    drive(&mut app, remote, -2.0, &[10.0]);
+    drive(&mut app, local, 2.0, &[10.0]);
+    assert_eq!(progress(&app, remote).next, 1);
+    assert_eq!(progress(&app, local).next, 1);
+    drive(&mut app, remote, -2.0, &[40.0, 90.0]);
+    assert_eq!(progress(&app, remote).lap, 1, "remote finished lap 1");
+    assert_eq!(progress(&app, remote).next, 0);
+    assert_eq!(progress(&app, local).next, 1, "local still owes gate 1");
+    assert_eq!(progress(&app, local).lap, 0);
+    drive(&mut app, local, 2.0, &[40.0, 90.0]);
+    assert_eq!(progress(&app, local).lap, 1);
+
+    // The remote's lap 2 finishes first — its resolution is recorded
+    // but the local still races, so the session stays Playing.
+    drive(&mut app, remote, -2.0, &[50.0, 10.0]);
+    assert_eq!(progress(&app, remote).next, 1, "lap-2 gate 0 cleared");
+    drive(&mut app, remote, -2.0, &[40.0, 90.0]);
+    assert!(
+        matches!(
+            progress(&app, remote).state,
+            ParticipantState::Finished { .. }
+        ),
+        "the remote finished its second lap"
+    );
+    assert_eq!(race(&app).phase, RacePhase::Running);
+    assert_eq!(phase(&app), SessionPhase::Playing);
+
+    // The local completes lap 2 a few ticks later — one result each,
+    // standings ordered by the recorded clock.
+    drive(&mut app, local, 2.0, &[50.0, 10.0, 40.0, 90.0]);
+    assert!(matches!(
+        progress(&app, local).state,
+        ParticipantState::Finished { .. }
+    ));
+    assert_eq!(phase(&app), SessionPhase::Results);
+    assert_eq!(race(&app).phase, RacePhase::Complete);
+
+    let ledger = app.world().resource::<ResultLedger>();
+    assert_eq!(ledger.len(), 2, "one result per participant");
+    let order: Vec<PlayerId> = ledger
+        .standings()
+        .iter()
+        .map(|r| r.id.participant)
+        .collect();
+    assert_eq!(order, vec![pr, pl], "earlier finish outranks");
+    assert_eq!(ledger.place_of(pr), Some(1));
+    assert_eq!(ledger.place_of(pl), Some(2));
+}
+
 /// AC03 pause: the race clock and progress freeze with the session and
 /// resume deterministically.
 #[test]

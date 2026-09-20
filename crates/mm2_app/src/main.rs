@@ -753,10 +753,12 @@ fn update_hud(
     session: Res<Session>,
     race: Option<Res<mm2_game::RaceState>>,
     nav: Option<Res<nav_overlay::CityNav>>,
+    ledger: Res<mm2_game::ResultLedger>,
     mut hud: Query<&mut Text, (With<Hud>, Without<ErrorText>)>,
     mut err: Query<&mut Text, (With<ErrorText>, Without<Hud>)>,
     vehicles: Query<&mm2_game::VehicleTelemetry, With<PlayerVehicle>>,
-    progress: Query<&mm2_game::RaceProgress, With<PlayerVehicle>>,
+    progress: Query<(Option<&mm2_game::Player>, &mm2_game::RaceProgress), With<PlayerVehicle>>,
+    participants: Query<(), With<mm2_game::RaceProgress>>,
     cameras: Query<(&Camera, &Transform)>,
 ) {
     for mut text in &mut err {
@@ -767,14 +769,26 @@ fn update_hud(
     }
     let hz = mm2_game::RACE_TICK_HZ as f32;
     // The local participant's terminal state, rendered once the race is
-    // over — the finish carries its recorded race-clock time (UI-5's
-    // "placing + total time"; placing waits on F13-B/F15).
-    let outcome = |state: Option<&mm2_game::ParticipantState>| match state {
-        Some(mm2_game::ParticipantState::Finished { race_ticks, .. }) => {
-            format!("  FINISHED  {:.1}s", *race_ticks as f32 / hz)
+    // over — the finish carries its recorded race-clock time and its
+    // place in the ledger's standings (UI-5's "placing + total time",
+    // F13-B). `TimedOut` participants rank but show no place — a DNF
+    // banner is clearer than an ordinal.
+    let participant_count = participants.iter().count();
+    let outcome = |id: Option<mm2_game::PlayerId>, state: Option<&mm2_game::ParticipantState>| {
+        let placing = id
+            .and_then(|id| ledger.place_of(id))
+            .map(|p| match participant_count {
+                n if n > 1 => format!(" {} of {n}", ordinal(p)),
+                _ => format!(" {}", ordinal(p)),
+            })
+            .unwrap_or_default();
+        match state {
+            Some(mm2_game::ParticipantState::Finished { race_ticks, .. }) => {
+                format!("  FINISHED{placing}  {:.1}s", *race_ticks as f32 / hz)
+            }
+            Some(mm2_game::ParticipantState::TimedOut { .. }) => "  OUT OF TIME".to_string(),
+            _ => "  FINISHED".to_string(),
         }
-        Some(mm2_game::ParticipantState::TimedOut { .. }) => "  OUT OF TIME".to_string(),
-        _ => "  FINISHED".to_string(),
     };
     let race_text = race
         .filter(|r| !r.is_stale(session.generation()))
@@ -783,15 +797,20 @@ fn update_hud(
             // (UI-5) even while other participants' progress keeps the
             // race itself `Running` — the outcome text wins either way.
             if *session.phase() == SessionPhase::Results {
-                return outcome(progress.iter().next().map(|p| &p.state));
+                let (id, state) = progress
+                    .iter()
+                    .next()
+                    .map(|(p, progress)| (p.map(|p| p.id), &progress.state))
+                    .unzip();
+                return outcome(id.flatten(), state);
             }
             match r.phase {
                 mm2_game::RacePhase::Countdown { remaining } => {
                     format!("  GET READY {:.0}", (remaining as f32 / hz).ceil())
                 }
                 mm2_game::RacePhase::Running => {
-                    let cleared = progress.iter().next().map_or(0, |p| p.cleared_count());
-                    let lap = progress.iter().next().map_or(0, |p| p.lap + 1);
+                    let cleared = progress.iter().next().map_or(0, |(_, p)| p.cleared_count());
+                    let lap = progress.iter().next().map_or(0, |(_, p)| p.lap + 1);
                     // A timed event counts down the same authoritative race
                     // clock the deadline is judged on (AC04); untimed races
                     // show elapsed.
@@ -809,7 +828,14 @@ fn update_hud(
                         format!("  cp {cleared}/{}{clock}", r.definition.checkpoints.len())
                     }
                 }
-                mm2_game::RacePhase::Complete => outcome(progress.iter().next().map(|p| &p.state)),
+                mm2_game::RacePhase::Complete => {
+                    let (id, state) = progress
+                        .iter()
+                        .next()
+                        .map(|(p, progress)| (p.map(|p| p.id), &progress.state))
+                        .unzip();
+                    outcome(id.flatten(), state)
+                }
             }
         })
         .unwrap_or_default();
@@ -841,6 +867,21 @@ fn update_hud(
             total = veh.wheels.len(),
         ));
     }
+}
+
+/// English ordinal for a 1-based place: 1st, 2nd, 3rd, 4th…, with the
+/// 11th/12th/13th irregulars handled.
+fn ordinal(place: u32) -> String {
+    let suffix = match place % 100 {
+        11..=13 => "th",
+        _ => match place % 10 {
+            1 => "st",
+            2 => "nd",
+            3 => "rd",
+            _ => "th",
+        },
+    };
+    format!("{place}{suffix}")
 }
 
 /// The root UI nodes of the HUD.

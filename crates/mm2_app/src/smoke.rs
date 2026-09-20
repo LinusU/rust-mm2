@@ -351,10 +351,18 @@ pub fn headless_smoke(
                 .time_remaining()
                 .map(|t| format!(" tl={:.1}s", t as f32 / mm2_game::RACE_TICK_HZ as f32))
                 .unwrap_or_default();
-            let outcome = ledger
-                .iter()
-                .next()
-                .map(|s| format!(" outcome={}", s.outcome.name()))
+            // The local participant's result (there is only ever one
+            // participant in a real run today, but pick by id so the
+            // record names the driver's result, not an arbitrary one)
+            // plus its place in the ledger's standings (F13-B).
+            let local = world_ecs.get::<mm2_game::Player>(car).map(|p| p.id);
+            let outcome = local
+                .and_then(|id| ledger.iter().find(|s| s.id.participant == id))
+                .or_else(|| ledger.iter().next())
+                .map(|s| match ledger.place_of(s.id.participant) {
+                    Some(place) => format!(" outcome={} place={}", s.outcome.name(), place),
+                    None => format!(" outcome={}", s.outcome.name()),
+                })
                 .unwrap_or_default();
             format!(
                 " race={:?} cp={}/{} results={}{}{}{}",

@@ -211,6 +211,78 @@ fn result_ids_carry_the_event_and_survive_restart() {
     assert!(second.event.is_none());
 }
 
+/// F13-B standings: the ledger's finishing order ranks `Finished` by
+/// the recorded race clock (never recording order), breaks same-tick
+/// ties deterministically by participant, and ranks every `TimedOut`
+/// below every finish. Unrecorded participants are unplaced.
+#[test]
+fn standings_order_by_finish_then_participant() {
+    let mut s = playing_session();
+    let (p0, p1, p2, p3) = (
+        s.mint_player_id(),
+        s.mint_player_id(),
+        s.mint_player_id(),
+        s.mint_player_id(),
+    );
+    let mut ledger = ResultLedger::default();
+    let record = |ledger: &mut ResultLedger, s: &mut Session, p: PlayerId, outcome| {
+        ledger
+            .record(SessionResult {
+                id: s.mint_result_id(p),
+                tick: s.tick(),
+                outcome,
+            })
+            .unwrap();
+    };
+    // Recorded deliberately out of finishing order — the standings must
+    // come from the recorded ticks, not insertion order.
+    record(
+        &mut ledger,
+        &mut s,
+        p2,
+        SessionOutcome::TimedOut { race_ticks: 200 },
+    );
+    record(
+        &mut ledger,
+        &mut s,
+        p1,
+        SessionOutcome::Finished { race_ticks: 140 },
+    );
+    record(
+        &mut ledger,
+        &mut s,
+        p3,
+        SessionOutcome::Finished { race_ticks: 90 },
+    );
+    record(
+        &mut ledger,
+        &mut s,
+        p0,
+        SessionOutcome::Finished { race_ticks: 140 },
+    );
+
+    let order: Vec<PlayerId> = ledger
+        .standings()
+        .iter()
+        .map(|r| r.id.participant)
+        .collect();
+    assert_eq!(
+        order,
+        vec![p3, p0, p1, p2],
+        "finished by race_ticks (same-tick tie by participant), timed-out last"
+    );
+    assert_eq!(ledger.place_of(p3), Some(1));
+    assert_eq!(ledger.place_of(p0), Some(2));
+    assert_eq!(ledger.place_of(p1), Some(3));
+    assert_eq!(ledger.place_of(p2), Some(4));
+    let unrecorded = s.mint_player_id();
+    assert_eq!(
+        ledger.place_of(unrecorded),
+        None,
+        "a participant with no result is unplaced"
+    );
+}
+
 #[test]
 fn surface_state_defaults_to_unmodified() {
     let s = SurfaceState::default();
