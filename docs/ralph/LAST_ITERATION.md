@@ -1,106 +1,121 @@
 # Last implementation iteration
 
-- Task ID and title: F13-B.1 — authoritative standings (finish
-  ordering) and placing presentation. First slice of F13-B ("Add
-  participant progress, rank/result presentation and opponent
-  integration hooks"), the next task named by the selection policy
-  after F14-A.1 passed external review (`561b8b7`).
+- Task ID and title: F14-B.1 — live running order / place
+  indicator. First slice of F14-B's "participant ranking" leg; it
+  is also the remaining rank-presentation leg of F13-B, named by
+  the selection policy after F13-B.1's standings landed.
 - Starting commit and resulting commits: started at
-  `561b8b76c19dd227288179f6f129b9f29a862932` (the externally checked
-  F14-A.1 handoff; branch `ralph/night`, clean tree).
-- Why this slice: the F14-A remainder is either blocked on F15/F10
-  consumers (event `.aimap` exception/density scoping) or bot-limited
-  (AC06 representative playtests), and F11-C is mostly satisfied by
-  the existing audits/tests. F13-B's rank leg was ready: the spec
-  demands an explicit tie resolution (F14 required-behavior 3, F11
-  edge cases), the HUD literally noted "placing waits on F13-B", and
-  F16 progression will need a "won?" predicate over authoritative
-  results.
+  `9728bb440214d2b2f950cd03b0b0205b7fed0a59` (operator's docs-only
+  commit on the externally checked `7756026` F13-B.1 handoff;
+  branch `ralph/night`, clean tree).
+- Why this slice: HUD-2 documents a place indicator, F13-B.1
+  already delivered the *terminal* standings, and no live
+  participant ranking existed while a race runs. The other
+  candidates were blocked — opponent hooks need F15 — or mostly
+  satisfied — F11-C's audit legs already exist.
 - Retail install: `/Users/linus/coding/rust-mm2/retail`
   (`fnv1a64:e91e6cd4b2ae30d9`), all runs `--headless` on this
   machine's dev-profile binary.
 
 ## What changed
 
-- **`mm2_game::result`: `ResultLedger::standings()`/`place_of()`.**
-  The ledger's recorded results now have a defined finishing order —
-  the authoritative standings a results screen or progression ranks
-  by (DSN-12, designed — no verified original placing rule exists):
-  `Finished` outranks `TimedOut` regardless of times, `Finished`
-  orders by the recorded `race_ticks`, and equal ticks (a same-tick
-  finish or two expiries on the shared deadline) order by `PlayerId`
-  — a deterministic tie-break independent of recording/query order.
-  A participant with no recorded result is unplaced, not ranked
-  last; a participant with several results places by the best.
-- **`mm2_app::main` (HUD): place on the Results line.** The
-  `Finished` outcome now reads `FINISHED {ord}[ of {n}] {time}s`
-  from the standings (ordinal-only for a lone participant);
-  `TimedOut` keeps `OUT OF TIME` (a DNF banner, not an ordinal).
-  The "placing waits on F13-B" comment is resolved.
-- **`mm2_app::smoke`: `place=` in the headless record.** The
-  `outcome=` field now picks the *local participant's* result by id
-  (not an arbitrary first record) and appends `place={n}` whenever
-  the result has a standing — multi-participant headless runs become
-  self-describing.
-- **`docs/original-rules.md`:** DSN-12 added (standings policy);
-  DSN-11's "placing is F13-B scope" wording updated.
-- **Doc fix (review nit):** london circuit authored laps are
-  `3am/4pro` except c1 *and c2* `2/2`, c9 `3/2` — re-verified with
-  `race-defs --table circuit`; PLAN.md corrected in both places it
-  claimed only c1 was 2/2. The 60 000-frame finish attempt left
-  running last iteration was never recorded and is treated as
-  unrecorded (not evidence).
+- **`mm2_game::race::live_order`** — a contract function that
+  takes `(PlayerId, &RaceProgress, Vec3)` rows and returns ids
+  best→worst (DSN-13, designed — HUD-2 names the instrument; no
+  verified original rule describes its ordering):
+  `Finished` participants lead ordered by their recorded
+  `race_ticks` (the same key DSN-12's standings use, so the live
+  order converges to the standings as everyone resolves); active
+  participants (`Racing`/`AwaitingStart`) sort by progress —
+  `Ordered`: `(lap, next)`; `AnyOrder`: cleared-gate count;
+  progress ties sort toward whoever is closer (straight-line XZ)
+  to their *own* current objective — `checkpoints[next]`, or
+  `navigation_target`'s nearest remaining gate / armed finish for
+  `AnyOrder`; `TimedOut` participants trail ordered by
+  `race_ticks`; `PlayerId` breaks all remaining ties. The
+  distance tie-break is a presentation heuristic, not course
+  distance — results never consume this order (the ledger owns
+  them).
+- **`mm2_app::main` (HUD): live place indicator.** While the race
+  is `Countdown`/`Running` the HUD shows `{ord} of {n}` for the
+  local participant whenever ≥2 participants have a standing —
+  ordinal-only for a lone driver (a place indicator is a
+  competitive instrument). The terminal `FINISHED {ord}[ of {n}]`
+  Results line from F13-B.1 is unchanged.
+- **`mm2_app::smoke`: `pos={i}/{n}` field.** The headless record
+  reports the local participant's live standing whenever one
+  exists — distinct from `place=`, which is the ledger's terminal
+  standings placing on a recorded result.
+- **`docs/original-rules.md`:** DSN-13 added (live-order policy,
+  designed).
 
 ## Tests
 
-- `mm2_game/tests/contracts.rs` (+1):
-  `standings_order_by_finish_then_participant` — results recorded out
-  of finishing order still rank by `race_ticks`; a same-tick tie
-  orders by `PlayerId`; `TimedOut` ranks below every finish;
-  unrecorded participants are unplaced.
+- `mm2_game/tests/contracts.rs` (+2):
+  - `live_order_ranks_ordered_participants` — finished-first by
+    ticks, progress score `(lap, next)`, distance tie-break to the
+    next authored gate, `TimedOut` trailing, `PlayerId` fallback,
+    input-order independence.
+  - `live_order_any_order_ranks_by_objective` — cleared-gate
+    count outranks distance; equal counts sort by distance to each
+    participant's *own* nearest remaining gate (`navigation_target`
+    reuse); armed finish used as objective once all gates clear.
 - `mm2_app/tests/race.rs` (+1):
-  `ordered_multi_lap_participants_stay_independent_and_order` — two
-  participants (remote + local) driven through a 2-lap Ordered course
-  via the production `advance_race` path: each wraps its own
-  `next`/`lap` (the remote's lap-1 wrap leaves the local at
-  `next=1, lap=0`), the remote's resolution records without ending
-  the local race (`Running`/`Playing`), the local's later finish
-  ends the session at `Results`, and the ledger's standings order
-  them by recorded clock (`place_of` 1 and 2). One-position-per-gate
-  drive path so each segment clears exactly one gate (resting inside
-  a radius would let the next segment clear the wrapped sequence —
-  the swept contract's intended multi-crossing).
+  `live_order_tracks_progress_and_locks_finished_places` — two
+  participants through a 2-lap Ordered course via the production
+  `advance_race` path: a remote's extra gate outranks the local's
+  empty progress; equal progress ranks the nearer-to-gate driver
+  first; the remote's lap-1 wrap outranks the local's proximity;
+  the remote's finish locks 1st while the session stays `Playing`;
+  the local's later finish resolves the live order into the
+  ledger's standings `[remote, local]`.
+  - Harness note: each `set_position` write also produces ghost
+    segments back toward the previous `GlobalTransform` on the
+    next fixed step (avian's `transform_to_position` copies
+    `GlobalTransform → Position` whenever `Position` wasn't
+    changed that tick — both sync directions are on by default).
+    The test's waypoints therefore never park inside an un-cleared
+    trigger radius, so every park-to-park path (real or ghost)
+    sweeps only the gates it means to. This quirk affects all
+    `set_position`-driven tests equally; the new waypoints are the
+    fix, not a special-casing.
 
 ## Commands actually run and results
 
+- `cargo test -p mm2_game --test contracts` — 12/12 pass (incl.
+  both new `live_order` tests).
+- `cargo test -p mm2_app --test race` — 33/33 pass (incl. the new
+  production-path test).
 - `cargo fmt --all -- --check` PASS; `cargo clippy --locked
   --workspace --all-targets --all-features -- -D warnings` PASS;
-  `cargo test --locked --workspace` PASS (all 32 groups incl.
+  `cargo test --locked --workspace` PASS (all groups incl.
   doc-tests, 0 failures).
-- `mm2 --mm2-path <retail> --city london --event blitz:0 --headless
-  --bot --frames 2000` → `status=pass`, `phase=results
-  race=Complete cp=3/3 results=1 tl=7.6s outcome=finished place=1` —
-  the standings field end-to-end on real authored content.
-- `mm2-inspect race-defs <retail> --city london --table circuit` —
-  10/10 rows build; confirmed c1/c2 both `2/2` (the review's doc
-  correction).
+- `mm2 --mm2-path <retail> --city london --event blitz:0
+  --headless --bot --frames 2500` → `status=pass`,
+  `phase=results race=Complete cp=3/3 results=1 tl=7.6s pos=1/1
+  outcome=finished place=1` — the new `pos=` field end-to-end on
+  real authored content (solo run → `pos=1/1`; a multi-place
+  retail record needs F15 opponents, which do not exist yet).
 
 ## What this proves / does not prove
 
-- Proves: the finish ordering is a defined contract property —
-  deterministic, recording-order-independent, with an explicit tie
-  policy (F14 req. 3); multi-lap multi-participant progress is
-  independent and yields a consistent ordering through the
-  production driver (F13-AC03/F14-AC03 legs, test level); `place=`
-  reaches the smoke record on a real authored event.
-- Does not prove: live position/leaderboard while racing (F14-B);
-  opponent-driven standings (F15 — standings are exercised with
-  synthetic remote participants, no AI exists); a full results
-  screen (F17); any original placing rule — the ordering is
-  designed (DSN-12), not verified_original.
-- Acceptance IDs: advances F13-AC03 (independent progress +
-  consistent ordering) and F14-AC03's ordering leg; F13-AC04 needs
-  F15 opponents, F14-AC04/AC05/AC06 stay open.
+- Proves: a deterministic live participant ordering exists as a
+  contract property for both progress rules (F14 req.: explicit
+  start-lap/tie policy); the production driver keeps independent
+  progress and the live order resolves into the authoritative
+  standings (F14-AC03 ordering leg, test level); the HUD presents
+  the local participant's place while racing and the smoke record
+  carries `pos=` on real authored content.
+- Does not prove: opponent-driven live ordering (F15 — exercised
+  with synthetic remote participants; no AI exists); any original
+  live-placing rule — the ordering is designed (DSN-13), not
+  verified_original; the distance heuristic vs. the original's
+  (unknown) placement metric — straight-line XZ is an explicit
+  approximation; a full results screen (F17); HUD legibility
+  in-game (no screenshot evidence taken — headless run only).
+- Acceptance IDs: advances F13-AC03/F14-AC03's ordering legs and
+  the HUD-2 place-indicator instrument; F13-AC04 needs F15
+  opponents, F14-AC04/AC05/AC06 stay open.
 
 This is a candidate handoff. External code-gate and separate review
 results live in the runner state directory and are not implied by

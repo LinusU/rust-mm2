@@ -31,6 +31,7 @@
 use bevy::prelude::*;
 
 use crate::config::{Densities, SessionConditions};
+use crate::ids::PlayerId;
 use crate::result::ResultId;
 
 /// The fixed-step rate the shared race clock counts at — the
@@ -625,6 +626,90 @@ pub fn navigation_target(
             Some(NavTarget::Gate(gate))
         }
     }
+}
+
+/// The live running order — best to worst — while a race runs: the
+/// place indicator's ordering (HUD-2 names the instrument) computed
+/// from authoritative progress state, not from who crossed a line most
+/// recently.
+///
+/// Ordering contract (**designed** — no verified original live-place
+/// rule exists, so this is an explicit policy, DSN-13):
+///
+/// - `Finished` participants lead: a completed race's place is locked.
+///   They order among themselves by the recorded `race_ticks`, the same
+///   key [`ResultLedger::standings`](crate::ResultLedger::standings)
+///   uses, so the live order converges to the standings as everyone
+///   resolves.
+/// - Then active participants (`Racing`, `AwaitingStart`) by progress:
+///   `Ordered` counts `(lap, next)` — a later lap, then a later gate in
+///   the lap; `AnyOrder` counts cleared gates. A progress tie breaks
+///   toward the participant closer (XZ) to their own current objective
+///   — `checkpoints[next]` under `Ordered`, the [`navigation_target`]
+///   objective under `AnyOrder` (nearest remaining gate, or the armed
+///   finish once every gate is cleared). `AwaitingStart` participants
+///   carry zero progress, so a countdown grid orders by proximity to
+///   the first objective.
+/// - `TimedOut` participants trail: they can no longer improve. Among
+///   themselves they order like the standings — recorded `race_ticks`,
+///   then `PlayerId` — so a shared-deadline expiry is a pure `PlayerId`
+///   tie there too.
+/// - Every remaining tie orders by `PlayerId`: deterministic and
+///   independent of query order.
+///
+/// The distance tie-break is straight-line, not course distance — two
+/// participants on different routes to the same objective can rank
+/// "wrong" for a few steps. It is a presentation aid only: results and
+/// progression read the ledger, never this order.
+pub fn live_order<'a>(
+    definition: &RaceDefinition,
+    participants: impl IntoIterator<Item = (PlayerId, &'a RaceProgress, Vec3)>,
+) -> Vec<PlayerId> {
+    fn tier(state: &ParticipantState) -> u8 {
+        match state {
+            ParticipantState::Finished { .. } => 0,
+            ParticipantState::AwaitingStart | ParticipantState::Racing => 1,
+            ParticipantState::TimedOut { .. } => 2,
+        }
+    }
+    fn resolved_ticks(state: &ParticipantState) -> u64 {
+        match state {
+            ParticipantState::Finished { race_ticks, .. }
+            | ParticipantState::TimedOut { race_ticks, .. } => *race_ticks,
+            _ => 0,
+        }
+    }
+    let score = |p: &RaceProgress| -> (u32, u32) {
+        match definition.rule {
+            CheckpointRule::Ordered => (p.lap, p.next as u32),
+            CheckpointRule::AnyOrder => (p.cleared_count() as u32, 0),
+        }
+    };
+    let objective_distance = |p: &RaceProgress, pos: Vec3| -> f32 {
+        let target = match definition.rule {
+            CheckpointRule::Ordered => definition.checkpoints.get(p.next).map(|c| c.center),
+            CheckpointRule::AnyOrder => {
+                navigation_target(definition, p, None, pos).and_then(|t| t.position(definition))
+            }
+        };
+        target.map_or(0.0, |c| {
+            let (dx, dz) = (c.x - pos.x, c.z - pos.z);
+            dx.mul_add(dx, dz * dz).sqrt()
+        })
+    };
+    let mut rows: Vec<(PlayerId, &RaceProgress, Vec3)> = participants.into_iter().collect();
+    rows.sort_by(|(a_id, a_p, a_pos), (b_id, b_p, b_pos)| {
+        tier(&a_p.state)
+            .cmp(&tier(&b_p.state))
+            .then_with(|| match tier(&a_p.state) {
+                1 => score(b_p).cmp(&score(a_p)).then_with(|| {
+                    objective_distance(a_p, *a_pos).total_cmp(&objective_distance(b_p, *b_pos))
+                }),
+                _ => resolved_ticks(&a_p.state).cmp(&resolved_ticks(&b_p.state)),
+            })
+            .then_with(|| a_id.cmp(b_id))
+    });
+    rows.into_iter().map(|(id, _, _)| id).collect()
 }
 
 /// Cycle the arrow pick through the remaining gates (RACE-6: the

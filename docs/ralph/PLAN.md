@@ -39,7 +39,28 @@
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
 **Next selected slice: F13-B remainder, F14-B, or F11-C** — the
-latest iteration landed F13-B.1, the standings/placing leg of
+latest iteration landed F14-B.1, the live running-order leg of
+participant ranking (also the rank-presentation remainder of
+F13-B): `mm2_game::race::live_order` sorts participants best→worst
+while a race runs — `Finished` lead by recorded `race_ticks` (the
+same key DSN-12's standings use, so the order converges as
+everyone resolves), active participants by progress (`Ordered`:
+`(lap, next)`; `AnyOrder`: cleared-gate count), progress ties by
+straight-line XZ distance to each participant's own objective
+(`checkpoints[next]` / `navigation_target`'s nearest remaining
+gate or armed finish), `TimedOut` trailing, `PlayerId` breaking
+all remaining ties (DSN-13, designed). The HUD shows `{ord} of {n}`
+while `Countdown`/`Running` whenever ≥2 participants have a
+standing (the terminal `FINISHED {ord}` line is unchanged), and
+the smoke record gains `pos={i}/{n}` for the local participant.
+A production-path test drives two participants through a 2-lap
+Ordered course exercising every rule: progress beats position,
+proximity breaks a progress tie, a finished place locks ahead of
+an active leader, and the live order resolves into the ledger's
+standings. Retail: london `blitz:0 --bot` headless reports
+`pos=1/1 outcome=finished place=1` — the field composes on real
+authored content. The iteration before
+that landed F13-B.1, the standings/placing leg of
 participant progress: `ResultLedger::standings`/`place_of` define the
 authoritative finish ordering (DSN-12 — `Finished` outranks
 `TimedOut`, `race_ticks` ascending, equal ticks broken by `PlayerId`;

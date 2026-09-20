@@ -758,7 +758,7 @@ fn update_hud(
     mut err: Query<&mut Text, (With<ErrorText>, Without<Hud>)>,
     vehicles: Query<&mm2_game::VehicleTelemetry, With<PlayerVehicle>>,
     progress: Query<(Option<&mm2_game::Player>, &mm2_game::RaceProgress), With<PlayerVehicle>>,
-    participants: Query<(), With<mm2_game::RaceProgress>>,
+    participants: Query<(&mm2_game::Player, &mm2_game::RaceProgress, &Position)>,
     cameras: Query<(&Camera, &Transform)>,
 ) {
     for mut text in &mut err {
@@ -790,6 +790,19 @@ fn update_hud(
             _ => "  FINISHED".to_string(),
         }
     };
+    // The local participant's identity for the live place indicator —
+    // the PlayerVehicle's `Player`, or any `Local`-controlled
+    // participant if the vehicle entity is not a participant.
+    let local_id = progress
+        .iter()
+        .next()
+        .and_then(|(p, _)| p.map(|p| p.id))
+        .or_else(|| {
+            participants
+                .iter()
+                .find(|(p, _, _)| p.control == mm2_game::PlayerControl::Local)
+                .map(|(p, _, _)| p.id)
+        });
     let race_text = race
         .filter(|r| !r.is_stale(session.generation()))
         .map(|r| {
@@ -804,9 +817,26 @@ fn update_hud(
                     .unzip();
                 return outcome(id.flatten(), state);
             }
+            // HUD-2's place indicator: the live running order (DSN-13).
+            // Only a competitive field gets one — a lone participant
+            // has no placing to show.
+            let order = mm2_game::live_order(
+                &r.definition,
+                participants
+                    .iter()
+                    .map(|(p, prog, pos)| (p.id, prog, pos.0)),
+            );
+            let place = if order.len() > 1 {
+                local_id
+                    .and_then(|id| order.iter().position(|p| *p == id))
+                    .map(|i| format!("  {} of {}", ordinal(i as u32 + 1), order.len()))
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
             match r.phase {
                 mm2_game::RacePhase::Countdown { remaining } => {
-                    format!("  GET READY {:.0}", (remaining as f32 / hz).ceil())
+                    format!("  GET READY {:.0}{place}", (remaining as f32 / hz).ceil())
                 }
                 mm2_game::RacePhase::Running => {
                     let cleared = progress.iter().next().map_or(0, |(_, p)| p.cleared_count());
@@ -820,12 +850,15 @@ fn update_hud(
                     };
                     if r.definition.rule == mm2_game::CheckpointRule::Ordered {
                         format!(
-                            "  lap {lap}/{}  cp {cleared}/{}{clock}",
+                            "  lap {lap}/{}  cp {cleared}/{}{place}{clock}",
                             r.definition.laps,
                             r.definition.checkpoints.len(),
                         )
                     } else {
-                        format!("  cp {cleared}/{}{clock}", r.definition.checkpoints.len())
+                        format!(
+                            "  cp {cleared}/{}{place}{clock}",
+                            r.definition.checkpoints.len()
+                        )
                     }
                 }
                 mm2_game::RacePhase::Complete => {

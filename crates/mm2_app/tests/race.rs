@@ -19,6 +19,7 @@ use mm2_game::{
     PlayerId, ProgressOutcome, RaceDefinition, RacePhase, RaceProgress, RaceStart, RaceStarted,
     RaceState, ResultLedger, Session, SessionAuthority, SessionConfig, SessionEntity, SessionMode,
     SessionOutcome, SessionPhase, TargetSelection, advance_session_tick, despawn_session_entities,
+    live_order,
 };
 use mm2_vehicle::{ResetVehicle, Teleported, Vehicle, VehicleConfig, VehicleState};
 
@@ -1303,4 +1304,100 @@ fn untimed_race_never_warns_and_teardown_cleans_up() {
         0,
         "the session-owned banner despawned"
     );
+}
+
+/// F14-B/F13-B live order (DSN-13) through the production driver: each
+/// participant's own progress moves it in the order — more gates, then
+/// proximity to the next one — a finish locks the lead while the other
+/// still races, and once everyone resolves the order equals the
+/// ledger's standings.
+#[test]
+fn live_order_tracks_progress_and_locks_finished_places() {
+    let def = RaceDefinition {
+        checkpoints: vec![cp(0.0, 0.0), cp(100.0, 0.0)],
+        finish: None,
+        rule: CheckpointRule::Ordered,
+        laps: 2,
+        time_limit_ticks: None,
+        params: mm2_game::EventParams::default(),
+        countdown_ticks: 0,
+        start_slots: Vec::new(),
+    };
+    let mut app = race_app(event_config(), def.clone());
+    let (remote, pr) = spawn_participant(&mut app, &def, Vec3::new(-200.0, 0.0, -2.0));
+    let (local, pl) = spawn_participant(&mut app, &def, Vec3::new(-200.0, 0.0, 2.0));
+    app.world_mut().get_mut::<Player>(remote).unwrap().control = PlayerControl::Remote;
+    run(&mut app, 2); // release + anchor
+
+    let order = |app: &App| -> Vec<PlayerId> {
+        let world = app.world();
+        let definition = &world.resource::<RaceState>().definition;
+        live_order(
+            definition,
+            world.iter_entities().filter_map(|e| {
+                match (
+                    e.get::<Player>(),
+                    e.get::<RaceProgress>(),
+                    e.get::<Position>(),
+                ) {
+                    (Some(p), Some(prog), Some(pos)) => Some((p.id, prog, pos.0)),
+                    _ => None,
+                }
+            }),
+        )
+    };
+    // Waypoints never park inside an un-cleared trigger (the 15 m
+    // radius covers 85..115): each `set_position` also produces ghost
+    // segments back toward the previous `GlobalTransform` via avian's
+    // `transform_to_position`, so every park-to-park path must sweep
+    // only the gates it means to.
+    let drive = |app: &mut App, e: Entity, z: f32, xs: &[f32]| {
+        for &x in xs {
+            set_position(app, e, Vec3::new(x, 0.0, z));
+            run(app, 1);
+        }
+    };
+
+    // The remote's extra gate outranks the local's empty progress.
+    drive(&mut app, remote, -2.0, &[10.0, 30.0]);
+    assert_eq!(order(&app), vec![pr, pl]);
+
+    // Same progress: proximity to the next gate decides the lead —
+    // the local parks nearer gate 1 (x=80, just outside its radius).
+    drive(&mut app, local, 2.0, &[10.0, 80.0]);
+    assert_eq!(order(&app), vec![pl, pr], "nearer gate 1 leads");
+
+    // A completed lap outranks proximity: the remote's lap-1 wrap beats
+    // the local parked outside gate 1's door.
+    drive(&mut app, remote, -2.0, &[90.0]);
+    assert_eq!(progress(&app, remote).lap, 1);
+    assert_eq!(order(&app), vec![pr, pl]);
+
+    // The remote finishes lap 2 — its lead is now a locked place, not
+    // progress; the local still races so the session stays Playing.
+    drive(&mut app, remote, -2.0, &[40.0, 10.0, 40.0, 90.0]);
+    assert!(matches!(
+        progress(&app, remote).state,
+        ParticipantState::Finished { .. }
+    ));
+    assert_eq!(phase(&app), SessionPhase::Playing);
+    assert_eq!(order(&app), vec![pr, pl], "a finished place is locked");
+
+    // The local finishes later; the live order resolves into the same
+    // ordering the ledger's standings record.
+    drive(&mut app, local, 2.0, &[90.0, 40.0, 10.0, 40.0, 90.0]);
+    assert!(matches!(
+        progress(&app, local).state,
+        ParticipantState::Finished { .. }
+    ));
+    assert_eq!(race(&app).phase, RacePhase::Complete);
+    assert_eq!(order(&app), vec![pr, pl]);
+    let standings: Vec<PlayerId> = app
+        .world()
+        .resource::<ResultLedger>()
+        .standings()
+        .iter()
+        .map(|r| r.id.participant)
+        .collect();
+    assert_eq!(standings, order(&app), "live order converges to standings");
 }

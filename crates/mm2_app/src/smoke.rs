@@ -351,11 +351,32 @@ pub fn headless_smoke(
                 .time_remaining()
                 .map(|t| format!(" tl={:.1}s", t as f32 / mm2_game::RACE_TICK_HZ as f32))
                 .unwrap_or_default();
-            // The local participant's result (there is only ever one
-            // participant in a real run today, but pick by id so the
-            // record names the driver's result, not an arbitrary one)
-            // plus its place in the ledger's standings (F13-B).
+            // The local participant (there is only ever one in a real
+            // run today, but pick by id so the record names the driver,
+            // not an arbitrary participant).
             let local = world_ecs.get::<mm2_game::Player>(car).map(|p| p.id);
+            // The live running order — the local participant's place
+            // in it (DSN-13). Unlike the standings `place=`, this
+            // exists before anyone resolves.
+            let order = mm2_game::live_order(
+                &r.definition,
+                world_ecs.iter_entities().filter_map(|e| {
+                    match (
+                        e.get::<mm2_game::Player>(),
+                        e.get::<RaceProgress>(),
+                        e.get::<Position>(),
+                    ) {
+                        (Some(p), Some(prog), Some(pos)) => Some((p.id, prog, pos.0)),
+                        _ => None,
+                    }
+                }),
+            );
+            let pos = local
+                .and_then(|id| order.iter().position(|p| *p == id))
+                .map(|i| format!(" pos={}/{}", i + 1, order.len()))
+                .unwrap_or_default();
+            // The local participant's result plus its place in the
+            // ledger's standings (F13-B).
             let outcome = local
                 .and_then(|id| ledger.iter().find(|s| s.id.participant == id))
                 .or_else(|| ledger.iter().next())
@@ -365,13 +386,14 @@ pub fn headless_smoke(
                 })
                 .unwrap_or_default();
             format!(
-                " race={:?} cp={}/{} results={}{}{}{}",
+                " race={:?} cp={}/{} results={}{}{}{}{}",
                 r.phase,
                 cleared,
                 r.definition.checkpoints.len(),
                 ledger.len(),
                 lap,
                 limit,
+                pos,
                 outcome,
             )
         });

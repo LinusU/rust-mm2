@@ -283,6 +283,226 @@ fn standings_order_by_finish_then_participant() {
     );
 }
 
+fn race_checkpoint(x: f32, z: f32) -> Checkpoint {
+    Checkpoint {
+        center: Vec3::new(x, 0.0, z),
+        radius: 10.0,
+        height: DEFAULT_CHECKPOINT_HEIGHT,
+        heading_deg: 0.0,
+        require_direction: false,
+    }
+}
+
+fn race_def(
+    rule: CheckpointRule,
+    checkpoints: Vec<Checkpoint>,
+    finish: Option<Checkpoint>,
+    laps: u32,
+) -> RaceDefinition {
+    RaceDefinition {
+        checkpoints,
+        finish,
+        rule,
+        laps,
+        time_limit_ticks: None,
+        params: EventParams::default(),
+        countdown_ticks: 0,
+        start_slots: Vec::new(),
+    }
+}
+
+fn racing(def: &RaceDefinition) -> RaceProgress {
+    let mut p = RaceProgress::new(def);
+    p.state = ParticipantState::Racing;
+    p
+}
+
+/// F14-B/F13-B live order (DSN-13): `Finished` participants lock their
+/// lead by the recorded clock, active ones rank by `(lap, gate)`
+/// progress then distance to the next gate, `TimedOut` trails, and a
+/// dead tie orders by `PlayerId` — independent of input order.
+#[test]
+fn live_order_ranks_ordered_participants() {
+    let def = race_def(
+        CheckpointRule::Ordered,
+        vec![race_checkpoint(0.0, 0.0), race_checkpoint(100.0, 0.0)],
+        None,
+        2,
+    );
+    let mut s = playing_session();
+    let (p0, p1, p2, p3) = (
+        s.mint_player_id(),
+        s.mint_player_id(),
+        s.mint_player_id(),
+        s.mint_player_id(),
+    );
+
+    // A later lap outranks sitting next to an earlier lap's next gate.
+    let mut behind = racing(&def);
+    behind.lap = 0;
+    behind.next = 1;
+    let mut ahead = racing(&def);
+    ahead.lap = 1;
+    ahead.next = 0;
+    assert_eq!(
+        live_order(
+            &def,
+            [
+                (p0, &behind, Vec3::new(99.0, 0.0, 0.0)),
+                (p1, &ahead, Vec3::new(-200.0, 0.0, 0.0)),
+            ],
+        ),
+        vec![p1, p0],
+    );
+
+    // Equal progress: nearer the next gate leads; an exact tie orders
+    // by `PlayerId` regardless of input order.
+    let mut a = racing(&def);
+    a.next = 1;
+    let mut b = racing(&def);
+    b.next = 1;
+    assert_eq!(
+        live_order(
+            &def,
+            [
+                (p1, &b, Vec3::new(50.0, 0.0, 0.0)),
+                (p0, &a, Vec3::new(90.0, 0.0, 0.0)),
+            ],
+        ),
+        vec![p0, p1],
+    );
+    let (lo, hi) = if p0 < p1 { (p0, p1) } else { (p1, p0) };
+    for input in [
+        [
+            (hi, &a, Vec3::new(50.0, 0.0, 0.0)),
+            (lo, &b, Vec3::new(50.0, 0.0, 0.0)),
+        ],
+        [
+            (lo, &b, Vec3::new(50.0, 0.0, 0.0)),
+            (hi, &a, Vec3::new(50.0, 0.0, 0.0)),
+        ],
+    ] {
+        assert_eq!(live_order(&def, input), vec![lo, hi]);
+    }
+
+    // Resolved participants bracket the live field: a finish locks the
+    // lead on the recorded clock; a DNF trails anyone still racing.
+    let mut fin = racing(&def);
+    fin.state = ParticipantState::Finished {
+        race_ticks: 100,
+        result: s.mint_result_id(p2),
+    };
+    let mut out = racing(&def);
+    out.state = ParticipantState::TimedOut {
+        race_ticks: 200,
+        result: s.mint_result_id(p3),
+    };
+    assert_eq!(
+        live_order(
+            &def,
+            [
+                (p3, &out, Vec3::ZERO),
+                (p0, &behind, Vec3::ZERO),
+                (p2, &fin, Vec3::ZERO),
+            ],
+        ),
+        vec![p2, p0, p3],
+    );
+
+    // AwaitingStart is zero progress: a countdown grid orders by
+    // proximity to the first gate.
+    let near = RaceProgress::new(&def);
+    let far = RaceProgress::new(&def);
+    assert_eq!(
+        live_order(
+            &def,
+            [
+                (p1, &far, Vec3::new(-80.0, 0.0, 0.0)),
+                (p0, &near, Vec3::new(-20.0, 0.0, 0.0)),
+            ],
+        ),
+        vec![p0, p1],
+    );
+}
+
+/// F14-B/F13-B live order under `AnyOrder` (DSN-13): cleared count,
+/// then distance to the participant's *own* current objective — the
+/// nearest remaining gate, or the armed finish once every gate is
+/// cleared.
+#[test]
+fn live_order_any_order_ranks_by_objective() {
+    // WPT-2 shape: any-order gates plus a separate finish trigger.
+    let def = race_def(
+        CheckpointRule::AnyOrder,
+        vec![
+            race_checkpoint(0.0, 0.0),
+            race_checkpoint(100.0, 0.0),
+            race_checkpoint(200.0, 0.0),
+        ],
+        Some(race_checkpoint(300.0, 0.0)),
+        1,
+    );
+    let mut s = playing_session();
+    let (p0, p1, p2) = (s.mint_player_id(), s.mint_player_id(), s.mint_player_id());
+
+    // `cleared` is private, so progress comes through the same swept
+    // `advance` the runtime feeds: approach off-axis, then dive in —
+    // one segment clears only the named gate.
+    let with_gates = |xs: &[f32]| {
+        let mut p = racing(&def);
+        for &x in xs {
+            p.advance(&def, Vec3::new(x, 0.0, 30.0));
+            p.advance(&def, Vec3::new(x, 0.0, 0.0));
+        }
+        p
+    };
+    let one = with_gates(&[0.0]);
+    let two = with_gates(&[0.0, 100.0]);
+    assert_eq!(one.cleared_count(), 1);
+    assert_eq!(two.cleared_count(), 2);
+    assert_eq!(
+        live_order(
+            &def,
+            [
+                (p0, &one, Vec3::new(50.0, 0.0, 0.0)),
+                (p1, &two, Vec3::new(-500.0, 0.0, 0.0)),
+            ],
+        ),
+        vec![p1, p0],
+        "more cleared gates outranks any proximity"
+    );
+
+    // Equal counts: each participant is measured to its own nearest
+    // remaining gate — p1 by gate 2 beats p0 by gate 1.
+    assert_eq!(
+        live_order(
+            &def,
+            [
+                (p0, &one, Vec3::new(60.0, 0.0, 0.0)),
+                (p1, &one, Vec3::new(195.0, 0.0, 0.0)),
+            ],
+        ),
+        vec![p1, p0],
+    );
+
+    // Every gate cleared: the armed finish is the objective, and a
+    // full-clearance participant outranks anyone still owing gates.
+    let all = with_gates(&[0.0, 100.0, 200.0]);
+    assert_eq!(all.cleared_count(), 3);
+    assert_eq!(
+        live_order(
+            &def,
+            [
+                (p0, &all, Vec3::new(250.0, 0.0, 0.0)),
+                (p1, &all, Vec3::new(295.0, 0.0, 0.0)),
+                (p2, &two, Vec3::new(290.0, 0.0, 0.0)),
+            ],
+        ),
+        vec![p1, p0, p2],
+        "closer to the armed finish leads; owing gates trails"
+    );
+}
+
 #[test]
 fn surface_state_defaults_to_unmodified() {
     let s = SurfaceState::default();
