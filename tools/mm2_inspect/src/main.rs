@@ -234,6 +234,24 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Audit the roadside-prop rule tables (`propdefs.csv`,
+    /// `proprules.csv`, `props.csv`, `geometry/props.csv`): parse every
+    /// discovered file, cross-check rule prop references against
+    /// propdefs, prop PKG names against `geometry/`, and the PSDL
+    /// `prop_rule` bytes against defined rule numbers.
+    Proprules {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Restrict to one city stem: `city/<stem>/` files only
+        /// (unaffiliated dirs like `city/phys/` belong to the full
+        /// audit).
+        #[arg(long)]
+        city: Option<String>,
+        /// Exit nonzero when any expected file is missing or fails to
+        /// parse, or when any issue is reported.
+        #[arg(long)]
+        strict: bool,
+    },
     /// Audit prop/decal placement pathsets (`*.pathset`, binary PTH1):
     /// parse every discovered file, validate authored consistency, and
     /// resolve each path's asset name against `geometry/` and
@@ -341,6 +359,9 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             *turns,
             *strict,
         ),
+        Command::Proprules { dir, city, strict } => {
+            proprules(dir, cli.mods.as_deref(), city.as_deref(), *strict)
+        }
         Command::Pathset { dir, city, strict } => {
             pathset(dir, cli.mods.as_deref(), city.as_deref(), *strict)
         }
@@ -1586,6 +1607,340 @@ fn pathset(
     if strict && (issues_total > 0 || !failures.is_empty()) {
         return Err(format!(
             "strict pathset audit: {} failures, {issues_total} issues",
+            failures.len()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Roadside-prop rule-table audit (F03-A.2): the expected denominator
+/// is `city/<stock>/{propdefs,proprules,props}.csv` for each stock
+/// city; every other discovered `city/**` `propdefs*`/`proprules*`/
+/// `props*` CSV (including `.csv.txt` exports and the `city/phys/`,
+/// `bak/` dev sets) is an audited extra whose parse failures are
+/// reported `unsupported`, never hidden. `geometry/props.csv` shares
+/// the basename but is a different table (per-PKG LOD triangle
+/// counts) and is parsed with its own layout. Cross-checks: rule prop
+/// references must name a sibling `propdefs.csv` entry, def file refs
+/// and `props.csv` names must resolve `geometry/<n>.pkg`, LOD rows
+/// must resolve `geometry/<name>`, and each nonzero PSDL `prop_rule`
+/// byte must name a defined `n{NN}` rule number. `--city` restricts
+/// to `city/<stem>/`; `--strict` exits nonzero on any failure or
+/// issue.
+fn proprules(
+    dir: &Path,
+    mods: Option<&Path>,
+    city: Option<&str>,
+    strict: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use mm2_formats::proprules::{PropDefs, PropGroups, PropLodStats, PropRules};
+
+    let vfs = build_vfs(dir, mods)?;
+    let stem = city.map(|c| c.to_ascii_lowercase());
+    let cities: Vec<String> = match &stem {
+        Some(c) => vec![c.clone()],
+        None => mm2_content::EXPECTED_CITIES
+            .iter()
+            .map(|c| c.to_string())
+            .collect(),
+    };
+    let mut expected: Vec<String> = cities
+        .iter()
+        .flat_map(|c| {
+            ["propdefs.csv", "proprules.csv", "props.csv"]
+                .iter()
+                .map(move |f| format!("city/{c}/{f}"))
+        })
+        .collect();
+    expected.sort();
+
+    let is_table = |p: &str| {
+        let name = p.rsplit('/').next().unwrap_or(p);
+        (name.ends_with(".csv") || name.ends_with(".csv.txt"))
+            && (name.starts_with("propdefs")
+                || name.starts_with("proprules")
+                || name.starts_with("props"))
+    };
+    let mut logicals: Vec<String> = vfs
+        .list()
+        .into_iter()
+        .filter(|p| p.starts_with("city/") && is_table(p))
+        .filter(|p| {
+            stem.as_ref()
+                .is_none_or(|c| p.starts_with(&format!("city/{c}/")))
+        })
+        .collect();
+    // geometry/props.csv is the LOD table — different schema, audited
+    // in the unfiltered audit only.
+    if stem.is_none() && vfs.resolve("geometry/props.csv").is_some() {
+        logicals.push("geometry/props.csv".to_string());
+    }
+    for e in &expected {
+        if !logicals.contains(e) {
+            logicals.push(e.clone());
+        }
+    }
+    logicals.sort();
+    logicals.dedup();
+    if logicals.is_empty() {
+        return Err("proprules audit: no prop rule tables discovered".into());
+    }
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut issues_total = 0usize;
+    let mut parsed = 0usize;
+    let mut unsupported = 0usize;
+    // Parsed tables grouped by containing directory for cross-checks.
+    let mut defs_by_dir: BTreeMap<String, Vec<(String, PropDefs)>> = BTreeMap::new();
+    let mut rules_by_dir: BTreeMap<String, Vec<(String, PropRules)>> = BTreeMap::new();
+    let mut groups: Vec<(String, PropGroups)> = Vec::new();
+    let mut lods: Vec<(String, PropLodStats)> = Vec::new();
+
+    println!("== roadside prop rules (propdefs/proprules/props.csv) ==");
+    for logical in &logicals {
+        let is_expected = expected.contains(logical);
+        let tag = if is_expected { "expected" } else { "extra" };
+        let Some(res) = vfs.resolve(logical) else {
+            println!("  {logical:<52} {tag:<9} missing");
+            failures.push(format!("{logical}: expected file not found"));
+            continue;
+        };
+        let bytes = vfs.read(&res)?;
+        let text = String::from_utf8_lossy(&bytes);
+        let name = logical.rsplit('/').next().unwrap_or(logical);
+        let dir_key = logical
+            .rsplit_once('/')
+            .map(|(d, _)| d.to_string())
+            .unwrap_or_default();
+        let mut emit = |what: &str,
+                        count: usize,
+                        diagnostics: &[mm2_formats::racedata::TableDiagnostic],
+                        issues: Vec<mm2_formats::proprules::PropRuleIssue>| {
+            parsed += 1;
+            issues_total += diagnostics.len() + issues.len();
+            println!("  {logical:<52} {tag:<9} ok — {count} {what}");
+            for d in diagnostics {
+                println!("    issue: {d}");
+            }
+            for i in &issues {
+                println!("    issue: {i}");
+            }
+        };
+        let mut fail = |e: mm2_formats::FormatError| {
+            if is_expected {
+                println!("  {logical:<52} {tag:<9} failed: {e}");
+                failures.push(format!("{logical}: {e}"));
+            } else {
+                println!("  {logical:<52} {tag:<9} unsupported: {e}");
+                unsupported += 1;
+            }
+        };
+        if logical == "geometry/props.csv" {
+            match PropLodStats::parse(&text) {
+                Ok(t) => {
+                    let issues = t.validate();
+                    emit("LOD rows", t.stats.len(), &t.diagnostics, issues);
+                    lods.push((logical.clone(), t));
+                }
+                Err(e) => fail(e),
+            }
+        } else if name.starts_with("propdefs") {
+            match PropDefs::parse(&text) {
+                Ok(t) => {
+                    let issues = t.validate();
+                    emit("defs", t.defs.len(), &t.diagnostics, issues);
+                    defs_by_dir
+                        .entry(dir_key)
+                        .or_default()
+                        .push((logical.clone(), t));
+                }
+                Err(e) => fail(e),
+            }
+        } else if name.starts_with("proprules") {
+            match PropRules::parse(&text) {
+                Ok(t) => {
+                    let issues = t.validate();
+                    emit("rules", t.rules.len(), &t.diagnostics, issues);
+                    rules_by_dir
+                        .entry(dir_key)
+                        .or_default()
+                        .push((logical.clone(), t));
+                }
+                Err(e) => fail(e),
+            }
+        } else {
+            match PropGroups::parse(&text) {
+                Ok(t) => {
+                    let issues = t.validate();
+                    emit(
+                        &format!("group entries ({},{})", t.header[0], t.header[1]),
+                        t.entries.len(),
+                        &t.diagnostics,
+                        issues,
+                    );
+                    groups.push((logical.clone(), t));
+                }
+                Err(e) => fail(e),
+            }
+        }
+    }
+
+    // Cross-checks. Each is an issue (authored anomaly or broken
+    // reference), not a load failure.
+    let issue = |issues: &mut usize, msg: String| {
+        *issues += 1;
+        println!("    issue: {msg}");
+    };
+    println!("  cross-checks:");
+    for (d, rules) in &rules_by_dir {
+        let def_names: std::collections::BTreeSet<&str> = defs_by_dir
+            .get(d)
+            .map(|v| {
+                v.iter()
+                    .flat_map(|(_, t)| t.defs.iter().map(|d| d.name.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if def_names.is_empty() {
+            issue(
+                &mut issues_total,
+                format!("{d}: proprules has no sibling propdefs.csv to resolve refs against"),
+            );
+        }
+        let mut reported = std::collections::BTreeSet::new();
+        for (path, table) in rules {
+            for rule in &table.rules {
+                for prop in &rule.props {
+                    if !def_names.contains(prop.as_str()) && reported.insert(prop.as_str()) {
+                        issue(
+                            &mut issues_total,
+                            format!(
+                                "{path}: rule {:?} refs undefined propdef {prop:?}",
+                                rule.name
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    for defs in defs_by_dir.values().flatten() {
+        let mut reported = std::collections::BTreeSet::new();
+        for def in &defs.1.defs {
+            for f in &def.files {
+                if vfs.resolve(&format!("geometry/{f}.pkg")).is_none()
+                    && reported.insert(f.as_str())
+                {
+                    issue(
+                        &mut issues_total,
+                        format!(
+                            "{}: propdef {:?} file {f:?} resolves to no geometry PKG",
+                            defs.0, def.name
+                        ),
+                    );
+                }
+            }
+        }
+    }
+    for (path, table) in &groups {
+        let mut reported = std::collections::BTreeSet::new();
+        for e in &table.entries {
+            if vfs.resolve(&format!("geometry/{}.pkg", e.name)).is_none()
+                && reported.insert(e.name.as_str())
+            {
+                issue(
+                    &mut issues_total,
+                    format!(
+                        "{path}: {} entry {:?} resolves to no geometry PKG",
+                        e.group, e.name
+                    ),
+                );
+            }
+        }
+    }
+    for (path, table) in &lods {
+        for s in &table.stats {
+            if vfs.resolve(&format!("geometry/{}", s.name)).is_none() {
+                issue(
+                    &mut issues_total,
+                    format!("{path}: LOD row {:?} resolves to no geometry file", s.name),
+                );
+            }
+        }
+    }
+    // PSDL prop_rule byte ↔ rule-number check for direct city/<stem>
+    // dirs that parsed a proprules table.
+    for (d, rules) in &rules_by_dir {
+        let Some(stem) = d.strip_prefix("city/").filter(|s| !s.contains('/')) else {
+            continue;
+        };
+        let psdl_path = format!("city/{stem}.psdl");
+        let defined: std::collections::BTreeSet<u8> = rules
+            .iter()
+            .flat_map(|(_, t)| t.rules.iter().filter_map(|r| r.rule_key().map(|(n, _)| n)))
+            .collect();
+        match vfs.resolve(&psdl_path) {
+            Some(pres) => {
+                let pbytes = vfs.read(&pres)?;
+                match Psdl::parse(&pbytes) {
+                    Ok(psdl) => {
+                        let mut used: BTreeMap<u8, usize> = BTreeMap::new();
+                        for &b in &psdl.prop_rules {
+                            if b != 0 {
+                                *used.entry(b).or_default() += 1;
+                            }
+                        }
+                        let zero = psdl.prop_rules.iter().filter(|&&b| b == 0).count();
+                        for (v, count) in &used {
+                            if !defined.contains(v) {
+                                issue(
+                                    &mut issues_total,
+                                    format!(
+                                        "{psdl_path}: {count} room(s) reference undefined prop rule {v}"
+                                    ),
+                                );
+                            }
+                        }
+                        let unused: Vec<u8> = defined
+                            .iter()
+                            .filter(|n| !used.contains_key(n))
+                            .copied()
+                            .collect();
+                        println!(
+                            "    psdl: {psdl_path} — {} rooms, {} rule-bearing, {} rules defined{}",
+                            psdl.prop_rules.len(),
+                            psdl.prop_rules.len() - zero,
+                            defined.len(),
+                            if unused.is_empty() {
+                                String::new()
+                            } else {
+                                format!(
+                                    " (unused: {})",
+                                    unused
+                                        .iter()
+                                        .map(|n| format!("n{n:02}"))
+                                        .collect::<Vec<_>>()
+                                        .join(",")
+                                )
+                            },
+                        );
+                    }
+                    Err(e) => println!("    note: {psdl_path} failed to parse: {e}"),
+                }
+            }
+            None => println!("    note: no {psdl_path} — prop_rule bytes not cross-checked"),
+        }
+    }
+    println!(
+        "  {parsed}/{} parsed, {} unsupported extras, {} failures, {issues_total} issue(s)",
+        logicals.len(),
+        unsupported,
+        failures.len(),
+    );
+    if strict && (issues_total > 0 || !failures.is_empty()) {
+        return Err(format!(
+            "strict proprules audit: {} failures, {issues_total} issues",
             failures.len()
         )
         .into());

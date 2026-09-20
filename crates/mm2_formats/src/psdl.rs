@@ -146,7 +146,10 @@ pub struct Psdl {
     pub rooms: Vec<PsdlRoom>,
     /// Per-room flag bytes (see PSDL.md bit table).
     pub room_flags: Vec<u8>,
-    /// Per-room prop-rule indices into `proprules.csv`.
+    /// Per-room prop-rule indices selecting `n{NN}left`/`n{NN}right`
+    /// rows in the city's `proprules.csv` (see
+    /// [`crate::proprules::PropRule::rule_key`]); 0 = no roadside
+    /// props.
     pub prop_rules: Vec<u8>,
     /// Undocumented count stored next to the room count (junction count?).
     pub junction_count: u32,

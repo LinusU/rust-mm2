@@ -568,7 +568,10 @@ fn placement(vfs: &Vfs, paths: &[String]) -> Family {
         }
     }
 
-    // Placement-adjacent authored records no parser exists for.
+    // Placement-adjacent authored records outside the .inst
+    // denominator. Some have parsers with dedicated audits
+    // (`mm2-inspect pathset`, `mm2-inspect proprules`); the rest stay
+    // unverified until their formats are understood.
     let aux_exts = [
         "pathset", "cpvs", "ldef", "pvs", "pvshist", "lmap", "water", "rid", "reset", "ext",
         "extra", "grp", "mtl",
