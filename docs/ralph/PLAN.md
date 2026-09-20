@@ -162,6 +162,23 @@ parapets. `decode_tex` now clamps over-declared mip counts
 (`p_parkmeter_f.tex`) instead of hard-failing wgpu validation.
 Natural-pool (>32 simultaneous) reclaim remains unstaged from
 F04-C.2 — no surveyed retail site produces that density.
+Iteration 37 repaired the F03-B.3 channel's kerb geometry
+(F03-B.6): the walk modelled each side's kerb as the straight
+chord between crossing curb corners, but the authored kerb bends
+with the road surface and lives in the room's road attributes —
+the chord put up to ~12 m of stamps inside the carriageway on
+curved blocks (operator screenshots showed trees/lamps on the
+road). `walk_prop_rules` now extracts each side's (kerb, outer)
+vertex chains from `RoadWithSidewalks`/`DividedRoad`/
+`SidewalkStrip`/`RoadNoSidewalks` attributes, matched to the
+side's curb-corner vertex ids, and stamps along the authored
+kerb index-paired to the outer chain; unmatched sides fall back
+to the building-line arc (counted `sides_no_kerb` — 0 on both
+cities). BAI audit: london in-road stamps 699 → 348 (worst
+11.2 m → 1.3 m), sf 318 → 159 (12.2 m → 1.0 m); residuals are
+a systematic ~0.8 m BAI-vs-PSDL curve inset, not placement
+error. 5 118 london / 5 028 sf stamps; field semantics still
+inferred under UNK-21.
 
 ## Baseline gate results (this checkout, 2026-09-20)
 

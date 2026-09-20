@@ -19,20 +19,30 @@
 //!   of perimeter points marked with the neighbouring room's id (the
 //!   curb gap spans the road; the corner–curb gap only the sidewalk).
 //! - The two perimeter arcs between the entry and exit crossings are
-//!   the sidewalk building lines; each pairs with the curb segment
-//!   joining the crossings' curbs on that side.
+//!   the sidewalk building lines. The *kerb* between a side's two curb
+//!   corners is not on the perimeter — it lives in the room's road
+//!   attributes (`RoadWithSidewalks`/`DividedRoad`/`SidewalkStrip`/
+//!   `RoadNoSidewalks`) as the road-edge vertex chain, which bends with
+//!   the authored surface. Walking a straight chord between the curb
+//!   corners cuts into the carriageway on every curved block.
 //!
 //! Placement policy — inferred, not verified (UNK-21):
 //!
 //! - Each side is walked so the road stays on the walker's left: the
 //!   side on the right of travel runs entry→exit, the side on the
 //!   left runs exit→entry. `start`/`distance` are metres along the
-//!   side's curb segment from its walk-start crossing; `maxUse` caps
+//!   side's kerb chain from its walk-start crossing; `maxUse` caps
 //!   placements per def, per side, per room.
-//! - A stamp at offset `s` sits at `lerp(curb(u), outer(u))` — `u` the
-//!   curb fraction `s / curb_len`, `outer` arc-length-parametrized —
-//!   with lerp factor `(minLerp + maxLerp) / 2` (the two are equal on
-//!   every retail row; 0.1 ≈ curb-hugging, 0.5 ≈ mid-sidewalk).
+//! - A stamp at offset `s` sits at `lerp(kerb, outer)` evaluated on
+//!   the authored strip's cross-section containing `s` — the kerb and
+//!   outer chains are index-paired, so the stamp keeps the authored
+//!   kerb↔building-line correspondence — with lerp factor
+//!   `(minLerp + maxLerp) / 2` (the two are equal on every retail row;
+//!   0.1 ≈ curb-hugging, 0.5 ≈ mid-sidewalk).
+//! - A side whose kerb chain cannot be resolved (junction rooms whose
+//!   strips are fragments, rooms with no road attribute) falls back to
+//!   stamping on the building-line arc — never inside the road —
+//!   and is counted in `sides_no_kerb`.
 //! - `n{NN}left`/`n{NN}right` rows are assigned by which side of
 //!   travel each arc lies on, using the authored left-handed
 //!   convention `right(d) = (d.z, -d.x)`. If retail comparison shows
@@ -45,7 +55,7 @@
 
 use mm2_formats::{
     proprules::{PropDefs, PropRuleSide, PropRules},
-    psdl::Psdl,
+    psdl::{AttributeType, Psdl, PsdlRoom, RoomAttribute},
 };
 
 /// Hard bound on stamps one walk may emit — authored data is bounded,
@@ -106,6 +116,10 @@ pub struct PropWalkStats {
     /// `prop_rule`-bearing rooms no path reaches (kept visible — they
     /// carry authored rules the path relation does not cover).
     pub rule_rooms_unreached: usize,
+    /// Sides whose authored kerb chain could not be resolved from the
+    /// room's road attributes — stamped on the building-line arc so
+    /// they never land in the carriageway.
+    pub sides_no_kerb: usize,
     /// Human-readable anomalies, bounded at [`MAX_ISSUES`].
     pub issues: Vec<String>,
 }
@@ -244,26 +258,6 @@ fn chain(psdl: &Psdl, room: usize, a: usize, b: usize) -> Option<Vec<[f32; 3]>> 
     }
 }
 
-/// Point at fraction `t` of a polyline's total arc length.
-fn polyline_at(poly: &[[f32; 3]], lens: &[f32], total: f32, t: f32) -> [f32; 3] {
-    if poly.len() < 2 || total <= f32::EPSILON {
-        return poly.first().copied().unwrap_or([0.0; 3]);
-    }
-    let target = t.clamp(0.0, 1.0) * total;
-    for (i, w) in poly.windows(2).enumerate() {
-        let (s0, s1) = (lens[i], lens[i + 1]);
-        if target <= s1 || i + 2 == poly.len() {
-            let u = if s1 > s0 {
-                (target - s0) / (s1 - s0)
-            } else {
-                0.0
-            };
-            return lerp3(w[0], w[1], u.clamp(0.0, 1.0));
-        }
-    }
-    *poly.last().unwrap()
-}
-
 fn arc_lengths(poly: &[[f32; 3]]) -> (Vec<f32>, f32) {
     let mut lens = Vec::with_capacity(poly.len());
     lens.push(0.0);
@@ -274,13 +268,226 @@ fn arc_lengths(poly: &[[f32; 3]]) -> (Vec<f32>, f32) {
     (lens, total)
 }
 
-/// One side of a room resolved for stamping: the curb segment and the
-/// building-line arc, both in walk order (walk-start → walk-end).
+/// Point pair at arc-length `s` along `kerb`, evaluated with the same
+/// section index and fraction on `outer` — the two chains are
+/// index-paired (section `i` joins `kerb[i]` to `outer[i]`), so the
+/// authored kerb↔sidewalk correspondence is preserved.
+fn strip_at(kerb: &[[f32; 3]], outer: &[[f32; 3]], lens: &[f32], s: f32) -> ([f32; 3], [f32; 3]) {
+    let n = kerb.len();
+    if n < 2 {
+        let p = kerb.first().copied().unwrap_or([0.0; 3]);
+        let q = outer.first().copied().unwrap_or(p);
+        return (p, q);
+    }
+    for (i, w) in lens.windows(2).enumerate().take(n - 1) {
+        let (s0, s1) = (w[0], w[1]);
+        if s <= s1 || i + 2 == n {
+            let u = if s1 > s0 {
+                ((s - s0) / (s1 - s0)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            return (
+                lerp3(kerb[i], kerb[i + 1], u),
+                lerp3(outer[i], outer[i + 1], u),
+            );
+        }
+    }
+    (*kerb.last().unwrap(), *outer.last().unwrap())
+}
+
+/// The `counted` layout shared by road, sidewalk and walkway strips:
+/// `subtype == 0` → `data = [count, count*per_item refs]`, otherwise
+/// `data = subtype*per_item refs`. `None` on a malformed record — the
+/// room's city import reports the same attribute as malformed.
+fn counted_refs(attr: &RoomAttribute, per_item: usize) -> Option<&[u16]> {
+    if attr.subtype == 0 {
+        let (&n, rest) = attr.data.split_first()?;
+        (rest.len() == n as usize * per_item).then_some(rest)
+    } else {
+        (attr.data.len() == attr.subtype as usize * per_item).then_some(&attr.data)
+    }
+}
+
+/// A kerb→outer pair of vertex-id chains extracted from a room's road
+/// attribute. `kerb` runs along the road edge, `outer` along the far
+/// edge of the sidewalk (the building line); chains are index-paired
+/// per cross-section. For a `RoadNoSidewalks` walkway the room edge is
+/// both kerb and outer, so a stamp lands on the edge itself.
+struct KerbStrip {
+    kerb: Vec<u16>,
+    outer: Vec<u16>,
+}
+
+/// The room's authored kerb strips — the road-edge chains the
+/// perimeter does not carry. `RoadWithSidewalks` sections are
+/// `[sw_l, road_l, road_r, sw_r]`, `DividedRoad` adds the divider's
+/// inner edges `[sw_l, rl_out, rl_in, rr_in, rr_out, sw_r]`, and a
+/// `SidewalkStrip` is `(ground, top)` pairs. Layouts mirror the city
+/// importer's decoders; malformed attributes are skipped, not guessed.
+fn kerb_strips(room: &PsdlRoom) -> Vec<KerbStrip> {
+    let mut out = Vec::new();
+    for attr in &room.attributes {
+        match attr.kind {
+            AttributeType::RoadWithSidewalks => {
+                let Some(refs) = counted_refs(attr, 4) else {
+                    continue;
+                };
+                let (mut kl, mut ol, mut kr, mut or_) =
+                    (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+                for s in refs.chunks_exact(4) {
+                    ol.push(s[0]);
+                    kl.push(s[1]);
+                    kr.push(s[2]);
+                    or_.push(s[3]);
+                }
+                out.push(KerbStrip {
+                    kerb: kl,
+                    outer: ol,
+                });
+                out.push(KerbStrip {
+                    kerb: kr,
+                    outer: or_,
+                });
+            }
+            AttributeType::DividedRoad => {
+                // [packed, value, subtype×6] inline; [count, packed,
+                // value, count×6] counted — same layout as the city
+                // importer's DividedRoad arm.
+                let refs: &[u16] = if attr.subtype == 0 {
+                    if attr.data.len() < 3 || attr.data[3..].len() != attr.data[0] as usize * 6 {
+                        continue;
+                    }
+                    &attr.data[3..]
+                } else {
+                    if attr.data.len() < 2 || attr.data[2..].len() != attr.subtype as usize * 6 {
+                        continue;
+                    }
+                    &attr.data[2..]
+                };
+                let (mut kl, mut ol, mut kr, mut or_) =
+                    (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+                for s in refs.chunks_exact(6) {
+                    ol.push(s[0]);
+                    kl.push(s[1]);
+                    kr.push(s[4]);
+                    or_.push(s[5]);
+                }
+                out.push(KerbStrip {
+                    kerb: kl,
+                    outer: ol,
+                });
+                out.push(KerbStrip {
+                    kerb: kr,
+                    outer: or_,
+                });
+            }
+            AttributeType::SidewalkStrip => {
+                let Some(refs) = counted_refs(attr, 2) else {
+                    continue;
+                };
+                // Triangular end-cap piece, not a strip (refs 0–1 are
+                // the repeated marker, 2–3 the cap's bottom verts).
+                if refs.len() >= 4 && refs[0] == refs[1] && refs[0] <= 1 {
+                    continue;
+                }
+                let (mut kerb, mut outer) = (Vec::new(), Vec::new());
+                for s in refs.chunks_exact(2) {
+                    kerb.push(s[0]);
+                    outer.push(s[1]);
+                }
+                out.push(KerbStrip { kerb, outer });
+            }
+            AttributeType::RoadNoSidewalks => {
+                let Some(refs) = counted_refs(attr, 2) else {
+                    continue;
+                };
+                let (mut l, mut r) = (Vec::new(), Vec::new());
+                for s in refs.chunks_exact(2) {
+                    l.push(s[0]);
+                    r.push(s[1]);
+                }
+                out.push(KerbStrip {
+                    kerb: l.clone(),
+                    outer: l,
+                });
+                out.push(KerbStrip {
+                    kerb: r.clone(),
+                    outer: r,
+                });
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A resolved (kerb, outer) position-chain pair.
+type Chains = (Vec<[f32; 3]>, Vec<[f32; 3]>);
+
+/// The authored kerb/outer chain pair spanning the side between curb
+/// corners `start`→`end` (vertex ids, travel order) — or the same
+/// chains reversed when the strip runs the other way. The strip with
+/// the longest kerb arc wins when several match; `None` when no
+/// authored strip joins the side's two corners.
+fn match_strip(psdl: &Psdl, strips: &[KerbStrip], start: u16, end: u16) -> Option<Chains> {
+    let arc = |ids: &[u16]| -> Option<f32> {
+        let mut len = 0.0;
+        for w in ids.windows(2) {
+            let (Some(&a), Some(&b)) = (
+                psdl.vertices.get(w[0] as usize),
+                psdl.vertices.get(w[1] as usize),
+            ) else {
+                return None;
+            };
+            len += dist(a, b);
+        }
+        Some(len)
+    };
+    let mut best: Option<(usize, bool, f32)> = None;
+    for (i, st) in strips.iter().enumerate() {
+        if st.kerb.len() != st.outer.len() || st.kerb.len() < 2 {
+            continue;
+        }
+        let (first, last) = (*st.kerb.first().unwrap(), *st.kerb.last().unwrap());
+        let reversed = if first == start && last == end {
+            false
+        } else if first == end && last == start {
+            true
+        } else {
+            continue;
+        };
+        let Some(len) = arc(&st.kerb) else {
+            continue;
+        };
+        if best.is_none_or(|(_, _, bl)| len > bl) {
+            best = Some((i, reversed, len));
+        }
+    }
+    let (i, reversed, _) = best?;
+    let st = &strips[i];
+    let resolve = |ids: &[u16]| {
+        ids.iter()
+            .map(|&v| psdl.vertices.get(v as usize).copied())
+            .collect::<Option<Vec<_>>>()
+    };
+    let (mut kerb, mut outer) = (resolve(&st.kerb)?, resolve(&st.outer)?);
+    if reversed {
+        kerb.reverse();
+        outer.reverse();
+    }
+    Some((kerb, outer))
+}
+
+/// One side of a room resolved for stamping: the kerb chain and the
+/// sidewalk-outer chain, index-paired, both in walk order
+/// (walk-start → walk-end). On the building-line fallback the two
+/// chains are the same arc.
 struct Side {
     which: PropRuleSide,
-    curb_a: [f32; 3],
-    curb_b: [f32; 3],
+    kerb: Vec<[f32; 3]>,
     outer: Vec<[f32; 3]>,
+    authored_kerb: bool,
     forward: [f32; 3],
 }
 
@@ -435,23 +642,33 @@ pub fn walk_prop_rules(psdl: &Psdl, defs: &PropDefs, rules: &PropRules) -> PropW
             // `arc` arrives in travel order (entry → exit); the walk
             // keeps it for a right-of-travel side and reverses it for
             // a left-of-travel side.
+            let strips = kerb_strips(&psdl.rooms[ri]);
             let side = |which: PropRuleSide,
-                        entry_curb: [f32; 3],
-                        exit_curb: [f32; 3],
+                        entry_curb: u16,
+                        exit_curb: u16,
                         arc: Vec<[f32; 3]>,
                         walk_with_travel: bool| {
-                let (curb_a, curb_b, outer, forward) = if walk_with_travel {
-                    (entry_curb, exit_curb, arc, d)
+                // The kerb between the side's curb corners: the
+                // authored road-edge chain when a strip spans them,
+                // otherwise the building-line arc itself — stamps on
+                // the arc never land inside the carriageway.
+                let (mut kerb, mut outer, authored_kerb) =
+                    match match_strip(psdl, &strips, entry_curb, exit_curb) {
+                        Some((k, o)) => (k, o, true),
+                        None => (arc.clone(), arc, false),
+                    };
+                let forward = if walk_with_travel {
+                    d
                 } else {
-                    let mut rev = arc;
-                    rev.reverse();
-                    (exit_curb, entry_curb, rev, [-d[0], 0.0, -d[2]])
+                    kerb.reverse();
+                    outer.reverse();
+                    [-d[0], 0.0, -d[2]]
                 };
                 Side {
                     which,
-                    curb_a,
-                    curb_b,
+                    kerb,
                     outer,
+                    authored_kerb,
                     forward,
                 }
             };
@@ -466,8 +683,8 @@ pub fn walk_prop_rules(psdl: &Psdl, defs: &PropDefs, rules: &PropRules) -> PropW
                     } else {
                         PropRuleSide::Left
                     },
-                    e_curb_b,
-                    x_curb_a,
+                    perim[e[2]].vertex,
+                    perim[x[1]].vertex,
                     arc_a,
                     a_right,
                 ),
@@ -477,8 +694,8 @@ pub fn walk_prop_rules(psdl: &Psdl, defs: &PropDefs, rules: &PropRules) -> PropW
                     } else {
                         PropRuleSide::Right
                     },
-                    e_curb_a,
-                    x_curb_b,
+                    perim[e[1]].vertex,
+                    perim[x[2]].vertex,
                     arc_b_fwd,
                     !a_right,
                 ),
@@ -486,15 +703,23 @@ pub fn walk_prop_rules(psdl: &Psdl, defs: &PropDefs, rules: &PropRules) -> PropW
 
             let mut stamped_room = false;
             for side in &sides {
-                let curb_len = dist(side.curb_a, side.curb_b);
+                let (lens, curb_len) = arc_lengths(&side.kerb);
                 if curb_len <= f32::EPSILON {
                     continue;
                 }
-                let (lens, _) = arc_lengths(&side.outer);
-                let outer_total = *lens.last().unwrap_or(&0.0);
                 let Some(row) = rule_of(rule, side.which) else {
                     continue;
                 };
+                if !side.authored_kerb {
+                    walk.stats.sides_no_kerb += 1;
+                    issue(
+                        &mut walk.stats,
+                        format!(
+                            "path {pi} room {rid}: no authored kerb for {:?}; stamping the building line",
+                            side.which
+                        ),
+                    );
+                }
                 for name in &row.props {
                     let Some(def) = def_of(name) else {
                         walk.stats.defs_missing += 1;
@@ -521,9 +746,7 @@ pub fn walk_prop_rules(psdl: &Psdl, defs: &PropDefs, rules: &PropRules) -> PropW
                     let lerp = (def.lerp_min + def.lerp_max) * 0.5;
                     for k in 0..take {
                         let s = def.start + k as f32 * def.distance;
-                        let u = s / curb_len;
-                        let curb = lerp3(side.curb_a, side.curb_b, u);
-                        let outer = polyline_at(&side.outer, &lens, outer_total, u);
+                        let (curb, outer) = strip_at(&side.kerb, &side.outer, &lens, s);
                         let position = lerp3(curb, outer, lerp);
                         let pkg = &def.files[(variant_hash(pi, rid, side.which, &def.name, k)
                             as usize)
@@ -562,7 +785,7 @@ mod tests {
     use super::*;
     use mm2_formats::{
         proprules::{PropDef, PropRule},
-        psdl::{PerimeterPoint, PsdlRoom, RoomPath},
+        psdl::{PerimeterPoint, PsdlRoom, RoomAttribute, RoomPath},
     };
 
     /// Two quad road rooms sharing the z = 20 boundary: room 1 spans
@@ -586,14 +809,35 @@ mod tests {
         ]
     }
 
-    fn room(perim: &[(u16, u16)]) -> PsdlRoom {
+    fn room(perim: &[(u16, u16)], attributes: Vec<RoomAttribute>) -> PsdlRoom {
         PsdlRoom {
             perimeter: perim
                 .iter()
                 .map(|&(vertex, room)| PerimeterPoint { vertex, room })
                 .collect(),
-            attributes: Vec::new(),
+            attributes,
             unparsed_attributes: Vec::new(),
+        }
+    }
+
+    /// An inline `RoadWithSidewalks` attribute: `sections` are
+    /// `[sw_l, road_l, road_r, sw_r]` vertex ids per cross-section.
+    fn road_attr(sections: &[[u16; 4]]) -> RoomAttribute {
+        RoomAttribute {
+            last: false,
+            kind: AttributeType::RoadWithSidewalks,
+            subtype: sections.len() as u8,
+            data: sections.iter().flatten().copied().collect(),
+        }
+    }
+
+    /// The quad room's straight road strip: kerbs on the x = 2 and
+    /// x = 28 lines, building lines on x = 0 and x = 30.
+    fn quad_road(room2: bool) -> RoomAttribute {
+        if room2 {
+            road_attr(&[[7, 6, 5, 4], [11, 10, 9, 8]])
+        } else {
+            road_attr(&[[0, 1, 2, 3], [7, 6, 5, 4]])
         }
     }
 
@@ -609,10 +853,15 @@ mod tests {
         }
     }
 
-    fn psdl(rooms: Vec<PsdlRoom>, rules: &[u8], paths: Vec<RoomPath>) -> Psdl {
+    fn psdl(
+        vertices: Vec<[f32; 3]>,
+        rooms: Vec<PsdlRoom>,
+        rules: &[u8],
+        paths: Vec<RoomPath>,
+    ) -> Psdl {
         Psdl {
             target_size: 2,
-            vertices: quad_verts(),
+            vertices,
             heights: Vec::new(),
             textures: Vec::new(),
             rooms,
@@ -666,18 +915,21 @@ mod tests {
     }
 
     /// Room 1's perimeter, marks cleared (junction crossings at both
-    /// ends — the single-room-path case).
+    /// ends — the single-room-path case), with its straight road strip.
     fn room1_solo() -> PsdlRoom {
-        room(&[
-            (0, 0),
-            (1, 0),
-            (2, 0),
-            (3, 0),
-            (4, 0),
-            (5, 0),
-            (6, 0),
-            (7, 0),
-        ])
+        room(
+            &[
+                (0, 0),
+                (1, 0),
+                (2, 0),
+                (3, 0),
+                (4, 0),
+                (5, 0),
+                (6, 0),
+                (7, 0),
+            ],
+            vec![quad_road(false)],
+        )
     }
 
     #[test]
@@ -685,6 +937,7 @@ mod tests {
         // n01right = lamps on the x≈30 side (right of +z travel),
         // n01left = meters on the x≈0 side walked exit→entry.
         let city = psdl(
+            quad_verts(),
             vec![room1_solo()],
             &[0, 1],
             vec![path([1, 2, 0, 0], [5, 6, 0, 0], &[1])],
@@ -723,6 +976,7 @@ mod tests {
     #[test]
     fn start_beyond_the_curb_and_max_use_bound_the_row() {
         let city = psdl(
+            quad_verts(),
             vec![room1_solo()],
             &[0, 1],
             vec![path([1, 2, 0, 0], [5, 6, 0, 0], &[1])],
@@ -744,27 +998,34 @@ mod tests {
         // Room 1's exit run and room 2's entry run are the shared
         // z = 20 boundary, identified by neighbour marks — the curb
         // pair is the widest consecutive marked pair.
-        let r1 = room(&[
-            (0, 0),
-            (1, 0),
-            (2, 0),
-            (3, 0),
-            (4, 2),
-            (5, 2),
-            (6, 2),
-            (7, 0),
-        ]);
-        let r2 = room(&[
-            (4, 1),
-            (5, 1),
-            (6, 1),
-            (7, 0),
-            (11, 0),
-            (10, 0),
-            (9, 0),
-            (8, 0),
-        ]);
+        let r1 = room(
+            &[
+                (0, 0),
+                (1, 0),
+                (2, 0),
+                (3, 0),
+                (4, 2),
+                (5, 2),
+                (6, 2),
+                (7, 0),
+            ],
+            vec![quad_road(false)],
+        );
+        let r2 = room(
+            &[
+                (4, 1),
+                (5, 1),
+                (6, 1),
+                (7, 0),
+                (11, 0),
+                (10, 0),
+                (9, 0),
+                (8, 0),
+            ],
+            vec![quad_road(true)],
+        );
         let city = psdl(
+            quad_verts(),
             vec![r1, r2],
             &[0, 1, 1],
             vec![path([1, 2, 0, 0], [10, 9, 0, 0], &[1, 2])],
@@ -803,6 +1064,7 @@ mod tests {
     #[test]
     fn zero_rules_bad_refs_and_undefined_bytes_are_counted() {
         let city = psdl(
+            quad_verts(),
             vec![room1_solo(), room1_solo()],
             // room 1: no rule; room 2: byte 205 (the retail anomaly);
             // room 4: rule-bearing but on no path.
@@ -822,5 +1084,103 @@ mod tests {
         assert_eq!(walk.stats.rules_missing, 1);
         assert_eq!(walk.stats.rule_rooms_unreached, 1);
         assert!(walk.stamps.is_empty());
+    }
+
+    /// A curved room: the right kerb bulges to x = 14 at z = 20 while
+    /// the building line stays straight — the layout that put retail
+    /// stamps inside the carriageway when the kerb was a chord.
+    fn curved_verts() -> Vec<[f32; 3]> {
+        vec![
+            [0., 0., 0.],
+            [2., 0., 0.],
+            [28., 0., 0.],
+            [30., 0., 0.], // entry (z = 0)
+            [30., 0., 40.],
+            [28., 0., 40.],
+            [2., 0., 40.],
+            [0., 0., 40.], // exit (z = 40)
+            [0., 0., 20.],
+            [2., 0., 20.],
+            [14., 0., 20.],
+            [30., 0., 20.], // strip mid-section (z = 20)
+        ]
+    }
+
+    #[test]
+    fn a_curved_kerb_follows_the_authored_strip() {
+        // The right side's kerb chain (28,0)→(14,20)→(28,40) makes a
+        // chord corner-to-corner run down x = 28 — 14 m inside the
+        // road at mid-block. The stamp must sit on the chain instead.
+        let room = room(
+            &[
+                (0, 0),
+                (1, 0),
+                (2, 0),
+                (3, 0),
+                (4, 0),
+                (5, 0),
+                (6, 0),
+                (7, 0),
+            ],
+            vec![road_attr(&[[0, 1, 2, 3], [8, 9, 10, 11], [7, 6, 5, 4]])],
+        );
+        let city = psdl(
+            curved_verts(),
+            vec![room],
+            &[0, 1],
+            vec![path([1, 2, 0, 0], [5, 6, 0, 0], &[1])],
+        );
+        // Kerb segments: (28,0)→(14,20) and (14,20)→(28,40), each
+        // √(14²+20²) ≈ 24.413 m. s = seg lands on the mid vertex, s =
+        // 1.5·seg halfway down the second segment.
+        let seg = (14f32 * 14. + 20. * 20.).sqrt();
+        let (defs, rules) = tables(
+            vec![def("lamp", seg, seg * 0.5, 2, &["pb"])],
+            vec![rule("n01right", &["lamp"])],
+        );
+        let walk = walk_prop_rules(&city, &defs, &rules);
+        assert_eq!(walk.stats.sides_no_kerb, 0);
+        assert_eq!(walk.stamps.len(), 2);
+        // s = seg → strip section 1: kerb (14,20) → outer (30,20),
+        // lerp 0.5 → (22,20). A chord kerb would have put it at
+        // (29,20), 7 m inside the carriageway.
+        assert!(near(walk.stamps[0].position, [22., 0., 20.]));
+        // s = 1.5·seg → kerb (21,30) → outer (30,30) → (25.5,30).
+        assert!(near(walk.stamps[1].position, [25.5, 0., 30.]));
+    }
+
+    #[test]
+    fn a_room_without_a_kerb_strip_stamps_the_building_line() {
+        // Rule-bearing room with no road attribute: the side has no
+        // authored kerb, so the walk falls back to the perimeter arc —
+        // on the building line, never inside the road — and counts it.
+        let room = room(
+            &[
+                (0, 0),
+                (1, 0),
+                (2, 0),
+                (3, 0),
+                (4, 0),
+                (5, 0),
+                (6, 0),
+                (7, 0),
+            ],
+            Vec::new(),
+        );
+        let city = psdl(
+            quad_verts(),
+            vec![room],
+            &[0, 1],
+            vec![path([1, 2, 0, 0], [5, 6, 0, 0], &[1])],
+        );
+        let (defs, rules) = tables(
+            vec![def("lamp", 2., 6., 2, &["pb"])],
+            vec![rule("n01right", &["lamp"])],
+        );
+        let walk = walk_prop_rules(&city, &defs, &rules);
+        assert_eq!(walk.stats.sides_no_kerb, 1);
+        assert_eq!(walk.stamps.len(), 2);
+        assert!(near(walk.stamps[0].position, [30., 0., 2.]));
+        assert!(near(walk.stamps[1].position, [30., 0., 8.]));
     }
 }

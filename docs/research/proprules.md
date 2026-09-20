@@ -75,10 +75,16 @@ on `city/{sf,london}.psdl`:
   the neighbouring room's id (the curb gap spans the road width;
   the corner–curb gap only the sidewalk).
 - The two perimeter arcs between the entry and exit crossings are the
-  sidewalk building lines; each pairs with the curb segment joining
-  the crossings' curbs on that side. Arc bulge over the straight curb
-  averages ≈9 m (sf) / ≈7 m (london) — consistent with sidewalk
-  corner returns, not a second roadway.
+  sidewalk building lines. The **kerb** between a side's two curb
+  corners is *not* on the perimeter — it lives in the room's road
+  attributes: `RoadWithSidewalks` carries `[sw_l, road_l, road_r,
+  sw_r]` per cross-section (road_l/road_r are the kerb chains, sw_l/
+  sw_r the building lines), `DividedRoad` `[sw_l, rl_out, rl_in,
+  rr_in, rr_out, sw_r]`, `SidewalkStrip` `(ground, top)` pairs, and
+  `RoadNoSidewalks` walkway edges that are their own kerb+outer. The
+  chains bend with the authored surface — a straight curb-corner
+  chord cut up to ≈12 m into the carriageway on curved blocks
+  (london room 816 measured 11.75 m; see the runtime audit below).
 - Some sf `road_rooms` entries hold out-of-range values (65 0xx) — a
   different encoded record kind, not room refs (109 entries across 23
   sf paths, 0 on london). The walk counts them as bad refs rather
@@ -92,10 +98,10 @@ on `city/{sf,london}.psdl`:
 
 | Column | Retail values | Status |
 | --- | --- | --- |
-| `start` | 1–20 | implemented as metres along the side's curb segment from its walk-start crossing |
+| `start` | 1–20 | implemented as metres along the side's authored kerb chain from its walk-start crossing |
 | `distance` | 1–90 | implemented as spacing (m) between successive placements of that def |
 | `maxUse` | 1–9999 | implemented as a per-def, per-side, per-room cap (`9999` ≈ unlimited) |
-| `minLerp`/`maxLerp` | 0.1–0.5, always equal | implemented as the curb→outer lerp factor, `(min+max)/2` (0.1 ≈ curb-hugging, 0.5 ≈ mid-sidewalk) |
+| `minLerp`/`maxLerp` | 0.1–0.5, always equal | implemented as the kerb→outer lerp factor on the strip's cross-section, `(min+max)/2` (0.1 ≈ kerb-hugging, 0.5 ≈ mid-sidewalk) |
 | `file1`–`file4` | 1–4 PKG names | implemented as a variant pick list chosen by a deterministic hash; the original's `RandomSeed` selection is unrecovered |
 
 Implemented walk policy (all inferred — a retail-visual comparison
@@ -115,6 +121,14 @@ can still falsify any of them):
   against the travel direction (authored left-handed convention
   `right(d) = (d.z, −d.x)` — a one-line flip if comparison shows the
   labels swapped).
+- Each side stamps along the authored kerb chain — the road-edge
+  vertex chain extracted from the room's road attribute, matched to
+  the side by its two curb-corner vertex ids (longest matching chain
+  wins). Kerb and outer chains are index-paired per cross-section,
+  so the lerp keeps the authored kerb↔building-line correspondence.
+  A side with no matching strip falls back to stamping on the
+  building-line arc — on the sidewalk edge, never inside the road —
+  and is counted (`sides_no_kerb`; 0 on both retail cities).
 - A stamp faces its walk direction; the app yaws the prop's +X axis
   along it (same convention as directed pathset stamps).
 
@@ -151,17 +165,27 @@ dormant banger entities, the rest ordinary static props.
 
 Retail (2026-09-20, `city {london,sf}` headless + screenshots):
 
-- sf: 345 rooms stamped, **5 002** props — every one bound as a
+- sf: 345 rooms stamped, **5 028** props — every one bound as a
   dormant banger (consistent with WLD-16: prop-rule files all bind);
   0 unresolved variants, 109 bad `road_rooms` refs counted, 52
-  rule-bearing rooms unreached.
-- london: 410 rooms stamped, **5 083** props, all bound; 0 bad refs,
-  5 unreached.
+  rule-bearing rooms unreached, 0 kerb fallbacks.
+- london: 410 rooms stamped, **5 118** props, all bound; 0 bad refs,
+  5 unreached, 0 kerb fallbacks.
+- Placement audit against `bai` sidewalk curves (stamp inside its own
+  road's `sidewalk_inner` polygon = in-road): with the authored-kerb
+  walk london went 699 → 348 in-road and sf 318 → 159; worst-case
+  depth 11.2 m → 1.3 m (london), 12.2 m → 1.0 m (sf). The residual
+  clusters at exactly 0.8 m — a systematic inset between the BAI
+  inner curve and the PSDL kerb verts, not placement error: stamps
+  are constructed inside the authored kerb↔building-line band, so
+  they cannot sit inside the PSDL carriageway at all.
 - Screenshots: lamps line both sidewalks at the authored ~29 m
   staggered spacing, banner arms over the road (sf park road /
   freeway parapets / london Trafalgar Square phone booths, trees,
-  bollards). Placement visually consistent; orientation of asymmetric
-  props not yet compared against the original frame-by-frame.
+  bollards); the Regent's Park bend stamps now sit on the kerb line
+  outside the BAI lane polylines (was: trees/lamps inside the
+  carriageway). Orientation of asymmetric props not yet compared
+  against the original frame-by-frame.
 - Side note: `texture/p_parkmeter_f.tex` declares 7 mips on a 32×32 —
   the TEX decoder now clamps `mip_level_count` to the size-supported
   maximum and warns (was a hard wgpu validation error once prop-rule

@@ -3454,6 +3454,7 @@ pub fn load_city(
                         defs_missing = walk.stats.defs_missing,
                         unreached = walk.stats.rule_rooms_unreached,
                         capped = walk.stats.stamps_capped,
+                        no_kerb = walk.stats.sides_no_kerb,
                         "prop-rule props stamped"
                     );
                 }
