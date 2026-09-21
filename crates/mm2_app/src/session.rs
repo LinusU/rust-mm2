@@ -76,9 +76,10 @@ pub struct Hud;
 pub struct ErrorText;
 
 /// What the player asked the session to do next. Written by
-/// [`session_control_input`] (and `pause_input`'s row activations while
-/// `Paused`), consumed by [`drive_session`]. `quit` wins over `restart`
-/// and `pause` if several are set in the same frame.
+/// [`session_control_input`] (and `pause_input`'s/`results_input`'s
+/// row activations while `Paused`/`Results`), consumed by
+/// [`drive_session`]. `quit` wins over `restart` and `pause` if several
+/// are set in the same frame.
 #[derive(Resource, Default)]
 pub struct SessionControl {
     /// Tear down, reach `Menu`, then exit the app.
@@ -89,6 +90,19 @@ pub struct SessionControl {
     /// whose authority allows pause — `session_control_input` falls
     /// back to `quit` when `allows_pause` is false (MP-6).
     pub pause: bool,
+}
+
+/// How the last session ended, carried across teardown so the menu can
+/// say *why* it is back (F17-AC04's return leg): `drive_session`
+/// records a `Failed` reason as the session tears down, `menu_watch`
+/// puts it on the reopened shell's status line, and
+/// `load_session_world` clears it when a new session starts loading —
+/// a restart bypasses the menu, so a stale note must never outlive the
+/// run it describes.
+#[derive(Resource, Default)]
+pub struct SessionNote {
+    /// The failed session's reason, if it ended in `Failed`.
+    pub failure: Option<String>,
 }
 
 /// Run condition: the session is in `Loading` — gates
@@ -106,12 +120,13 @@ pub fn unloading(session: Res<Session>) -> bool {
 /// `Esc` (or a gamepad `Start`) asks to pause, `Backspace` asks to
 /// restart. Intents are only read from the phases a session can sit in
 /// — while `Loading`, `Unloading` or `Menu` the driver is already
-/// working and input is ignored. `Paused` is deliberately absent:
-/// `pause_input` owns the keyboard there (`Esc` is resume, and the
-/// overlay's Quit/Restart rows set these same intents). `Countdown` is
-/// quittable: a race that has not started still tears down like any
-/// other live session, and since the lifecycle has no `Countdown →
-/// Paused` edge, `Esc` there stays quit.
+/// working and input is ignored. `Paused` and `Results` are
+/// deliberately absent: `pause_input`/`results_input` own the keyboard
+/// there (`Esc` is resume/continue, and the overlays' Quit/Restart
+/// rows set these same intents). `Countdown` is quittable: a race that
+/// has not started still tears down like any other live session, and
+/// since the lifecycle has no `Countdown → Paused` edge, `Esc` there
+/// stays quit.
 ///
 /// Pause is only requested when the session authority allows it
 /// (MP-6) — a non-pausable session takes `Esc` as quit, so the key
@@ -124,10 +139,7 @@ pub fn session_control_input(
 ) {
     let quittable = matches!(
         session.phase(),
-        SessionPhase::Countdown
-            | SessionPhase::Playing
-            | SessionPhase::Results
-            | SessionPhase::Failed(_)
+        SessionPhase::Countdown | SessionPhase::Playing | SessionPhase::Failed(_)
     );
     if !quittable {
         return;
@@ -181,6 +193,7 @@ pub fn drive_session(
     mut spawn: ResMut<SpawnPoint>,
     menu: Option<Res<crate::menu::MenuShell>>,
     roots: Query<Entity, (With<SessionEntity>, Without<ChildOf>)>,
+    mut note: Option<ResMut<SessionNote>>,
     mut exit: MessageWriter<AppExit>,
 ) {
     match *session.phase() {
@@ -193,11 +206,12 @@ pub fn drive_session(
             filter.reset();
             spawn.trailers.clear();
             // Session-scoped resources die with the session: a race's
-            // countdown/clock/progress and the city's nav overlay must
-            // never survive into the next session (AC03 — no old
-            // timer survives).
+            // countdown/clock/progress, its reward/report view and the
+            // city's nav overlay must never survive into the next
+            // session (AC03 — no old timer survives).
             commands.remove_resource::<RaceState>();
             commands.remove_resource::<crate::progression::EventRewards>();
+            commands.remove_resource::<crate::progression::SessionReport>();
             commands.remove_resource::<crate::nav_overlay::CityNav>();
             commands.remove_resource::<mm2_content::SurfaceTables>();
             // `TireConditions` stays: it is a system input (the impact
@@ -250,6 +264,13 @@ pub fn drive_session(
         | SessionPhase::Failed(_)
             if control.quit || control.restart =>
         {
+            // A failed session's reason rides along to the menu —
+            // AC04's return leg needs to say *why* it is back.
+            if let SessionPhase::Failed(reason) = session.phase()
+                && let Some(note) = note.as_mut()
+            {
+                note.failure = Some(reason.clone());
+            }
             // A queued pause must not outlive the session it was meant
             // for — the next `Playing` phase belongs to a new run.
             control.pause = false;
@@ -286,7 +307,14 @@ pub fn load_session_world(
     cam_mode: Res<CameraMode>,
     mut spawn: ResMut<SpawnPoint>,
     mut active_profile: Option<ResMut<crate::profile::ActiveProfile>>,
+    mut note: Option<ResMut<SessionNote>>,
 ) {
+    // A session loading retires the last session's end-note — a
+    // restart bypasses the menu, so a stale failure must not surface
+    // after a successful reload.
+    if let Some(note) = note.as_mut() {
+        note.failure = None;
+    }
     let owner = SessionEntity(session.generation());
     let Some(config) = session.config().cloned() else {
         error!("load_session_world ran without a session config");

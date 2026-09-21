@@ -235,6 +235,9 @@ pub fn headless_smoke(
                     .chain(),
                 race::update_checkpoint_markers,
                 scripted::scripted_drive.run_if(resource_exists::<scripted::ScriptedDrive>),
+                // `--finish` works headless too — the record still
+                // reports the real resolved outcome.
+                crate::results::dev_finish_once,
                 opponents::opponent_drive,
                 // F16-B: the same result → profile consumption the
                 // windowed app runs — a bound profile in a headless

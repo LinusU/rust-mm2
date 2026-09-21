@@ -456,6 +456,14 @@ pub struct DevOverrides {
     /// still a legal gameplay state, so like `--cam`/`--nav` this stays
     /// out of `record_eligibility`.
     pub pause: bool,
+    /// `--finish`: sweep the local participant through the remaining
+    /// race triggers — one gate per update — until the run resolves to
+    /// the results screen (evidence/diagnostic runs: how a
+    /// `--frames`/`--screenshot` capture reaches `Results` while live
+    /// input is frozen; never a session-legal parameter). Unlike
+    /// `--pause` this changes the run's outcome, so it IS in
+    /// `record_eligibility` — results it produces never record.
+    pub finish: bool,
 }
 
 /// Configuration of the `--nav` debug overlay: draw the city's BAI

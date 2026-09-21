@@ -1,119 +1,127 @@
 # Last implementation iteration
 
-- Task ID and title: F17-B.1 — pause/resume: `Esc`/pad `Start` pauses a
-  live local session, an overlay drives Resume/Restart/Quit, and the
-  physics clock freezes for the duration. Chosen over the listed F17-A
-  remainder (weather controls are F18-blocked; mouse nav/text entry are
-  nav polish) and F16-C's AC01 leg (needs an interactive human session):
-  `SessionPhase::Paused`, `allows_pause` (MP-6) and the frozen race
-  clocks already existed, but no input path could ever reach `Paused`.
-- Starting commit: `19f1f0e4510f33d765c198cbf14519a6fcbb2794` on
+- Task ID and title: F17-B.2 — results screen and the
+  play → reward → return leg: a real overlay at `Results` (UI-5), an
+  authoritative `SessionReport` so the screen presents the actual
+  persistence/reward disposition, `Failed` carrying its reason back to
+  the menu, a menu-reopen repair on the restart path, and a
+  quarantined `--finish` dev override so captures can reach the phase.
+  Chosen over the remaining F17-B items (countdown visuals are
+  presentational; C&R scoring needs F17-C's mode) and the F17-A
+  remainder (weather controls are F18-blocked): `Results` existed in
+  the phase machine but was only a HUD line with Esc-quit, and the
+  reward path's outcome was invisible to the player.
+- Starting commit: `e82b79f06db240bdec7aac2dc16998dff1088c8a` on
   `ralph/night`; tree was clean.
 
 ## What changed
 
-- `crates/mm2_app/src/pause.rs` (new) — the in-session half of the
-  phase machine's `Paused` state:
-  - `PauseMenu` resource: focus, transient status line, redraw latch —
-    presentation only; session flow stays in `Session`/`SessionControl`.
-  - `pause_input` owns the keyboard while `Paused` (arrow/D-pad/stick
-    focus, Enter/Space/South activate, Esc/Backspace/East/Start
-    resume). Scheduled after `session_control_input` (which ignores
-    `Paused`) and before `drive_session`, so the Esc that entered pause
-    is never re-read as a resume in the same update.
-  - `sync_physics_pause` mirrors `phase == Paused` onto
-    `Time<Physics>::pause()`/`unpause()` — Avian's schedule runner
-    skips the step, so the whole world (not just inputs) holds still.
-    Mirroring covers every exit path: resume, restart and quit all
-    leave `Paused`.
-  - `pause_present` draws a `SessionEntity`-stamped overlay (dimmed
-    backdrop over the frozen world) carrying `PauseUi`, which
-    `HudNodes`/`retarget_hud` keep on the active camera. Quit/restart
-    teardown removes it with the session.
-  - `dev_pause_once` is the `--pause` dev override: pause the first
-    `Playing` frame so a `--frames`/`--screenshot` capture (live input
-    frozen) can render the overlay.
-  - Rows: Resume, Restart, Quit-to-menu/Quit — and `Options` as a
-    visible disabled row naming F23, same honesty convention as the
-    root menu (F17 req 3).
-- `crates/mm2_app/src/session.rs`
-  - `SessionControl` gains a `pause` intent; `quit`/`restart` still win
-    a same-frame conflict.
-  - `session_control_input` maps Esc/gamepad Start onto `pause` only
-    for a `Playing` session whose authority `allows_pause()` (MP-6);
-    `Countdown`/`Results`/`Failed` and non-local authorities keep Esc
-    as quit — the key always escapes a live session rather than going
-    dead.
-  - `drive_session`: `Playing + pause` transitions to `Paused`; the
-    quit/restart arm now covers `Paused` and clears a stale pause
-    intent so the next session's `Playing` can never consume it.
-- `crates/mm2_app/src/main.rs`
-  - `--pause` CLI flag (conflicts with `--headless`) →
-    `DevOverrides::pause`; excluded from `menu_mode` flag selection.
-  - `PauseMenu` resource + pause systems in a separate `add_systems`
-    (the main Update tuple is at Bevy's arity limit), with the ordering
-    contract above and `sync_physics_pause`/`pause_present` after
-    `drive_session` so the entering/leaving update sees the settled
-    phase.
-  - `HudNodes` gains `With<pause::PauseUi>`; `reset_input` now requires
-    `session.is_playing()` — `R` can't teleport while paused.
-- `crates/mm2_game/src/config.rs` — `DevOverrides::pause` field
-  (quarantined evidence-only, like `--spawn`/`--cam`).
-- `crates/mm2_app/tests/session.rs` — +4 tests (12 total):
-  `esc_pauses_then_resumes_a_frozen_world` (Esc → `Paused` →
-  `Time<Physics>` paused → overlay up → 30 frozen updates: no position
-  or session-tick drift → Esc resumes → clock/tick resume),
-  `pause_menu_rows_drive_the_session` (Enter on Resume resumes; the
-  disabled Options row lands its reason on the status line without
-  navigating; Quit → `Unloading → Menu` → `AppExit` with no shell),
-  `pause_menu_restart_reloads_clean` (generation bumps, world/HUD
-  respawn singly, physics unpaused, overlay gone),
-  `esc_quits_when_the_authority_cannot_pause` (`SessionAuthority::Host`
-  keeps Esc as quit — MP-6), `dev_pause_pauses_once_at_playing`
-  (`dev.pause` pauses once; a resume stays resumed).
-- `crates/mm2_app/tests/menu.rs` — harness wires the pause systems;
-  the four in-session Esc sites now leave through the pause menu
-  (`quit_session` helper handles both `Playing`→pause→Quit and
-  `Countdown`→direct-quit legs).
+- `crates/mm2_app/src/results.rs` (new) — the `Results` phase's
+  screen, mirroring `pause.rs`'s shape:
+  - `ResultsMenu` resource: focus, status, redraw latch —
+    presentation only; session flow stays in `Session`/
+    `SessionControl`.
+  - `results_input` owns the keyboard while `Results` (arrow/D-pad/
+    stick focus, Enter/Space/South activate, Esc/Backspace/East
+    continue). Scheduled between `session_control_input` (which now
+    ignores `Results` for Esc) and `drive_session`, so the key that
+    ended the race can't be re-read as a quit in the same update.
+  - `results_present` draws a `SessionEntity`-stamped `ResultsUi`
+    overlay which `HudNodes`/`retarget_hud` keep on the active
+    camera; teardown removes it with the session. Rows: outcome line
+    (`1st of 7 — 0.1s` / timeout), standings from the
+    generation-scoped ledger (resolved participants placed per
+    DSN-12; unresolved listed `still racing`, never ranked), granted
+    rewards, the `SessionReport` note, and
+    Continue(-to-menu)/Quit + Restart.
+  - `dev_finish_once` backs `--finish`: teleports the local
+    participant to its next navigation target once per update until
+    the run resolves (countdown `input_locked` honoured; no
+    `Teleported` stamp, so swept segments stay honest).
+- `crates/mm2_app/src/progression.rs` — `SessionReport` resource
+  (`generation`, `recorded`, `granted`, `note`) and
+  `record_session_results` reworked: resets on generation change,
+  consumes the local participant's pending results exactly once
+  (blocked results still marked consumed), applies the
+  sandbox/`ScriptedDrive`/`record_eligibility` gates and records the
+  refusing reason as the report's note instead of only logging it;
+  `TimedOut` notes non-recording. The report is what the results
+  screen prints.
+- `crates/mm2_app/src/session.rs` — `SessionNote` resource carries a
+  `Failed(reason)` through teardown; `drive_session` also removes
+  `RaceState`/`EventRewards`/`SessionReport` and the city/surface
+  session resources on teardown; `session_control_input` stops
+  claiming Esc at `Results` (the overlay owns it).
+- `crates/mm2_app/src/menu.rs` — `menu_watch` enforces shell
+  ownership: active only while `Menu` *and* no `restart` is pending
+  (repairs a latent defect — a restart transits `Menu` for one
+  update and could reopen the shell over the live session, stealing
+  keys and spawning the menu camera); consumes `SessionNote.failure`
+  onto the status line (`load failed: <reason>`). `menu_input` is
+  phase-gated to `Menu`.
+- `crates/mm2_game` — `DevOverrides::finish` (documented as
+  outcome-changing, unlike the presentation-only `--pause`);
+  `record_eligibility` refuses it as `dev override finish`;
+  `result::ordinal` (`1st`/`2nd`/`3rd`/`11th`…) shared by the HUD
+  and the overlay — the app's local duplicate was removed.
+- `crates/mm2_app/src/main.rs` / `smoke.rs` / `lib.rs` — `--finish`
+  flag → `DevOverrides::finish`; `results` module registered;
+  `ResultsMenu`/`SessionReport`/`SessionNote` resources and the
+  results/finish systems wired into both the app and the headless
+  smoke schedule with the ordering contract above.
+- `crates/mm2_app/tests/results.rs` (new, 9 tests): outcome+field
+  presentation, unresolved participants listed, timeout
+  presentation, profileless + dev-override ineligibility notes,
+  granted-reward lines, stray keys ignored at `Results`,
+  Continue→teardown→`AppExit`, Restart replays the event,
+  `--finish` reaches `Results` and reports ineligible.
+- `crates/mm2_app/tests/menu.rs` (+2, 11 total): a restart from the
+  pause menu never reopens the shell mid-session; a failed launch
+  returns to the menu showing the reason.
+- `crates/mm2_app/tests/session.rs` — harness wires the new
+  resources/systems for fidelity.
 
 ## Evidence
 
 - Rendered: `./target/debug/mm2 --mm2-path
-  /Users/linus/coding/rust-mm2/retail --city sf --pause --frames 90
-  --screenshot /tmp/mm2-pause.png` → `smoke=visual world=city/sf.psdl
-  status=pass frames=done screenshot=/tmp/mm2-pause.png
-  bytes=3434617` on Apple M1/Metal. The PNG was inspected: the dimmed
-  overlay draws over the frozen SF cruise — "Paused" heading, focused
-  `> Resume`, Restart, disabled `Options - not implemented yet (F23)`,
-  Quit, and the controls footer. Capture kept out of git (local
-  evidence only).
-- `cargo test --locked -p mm2_app --test session --test menu` — PASS
-  (12 + 9).
+  /Users/linus/coding/rust-mm2/retail --city sf --event checkpoint:0
+  --finish --frames 180 --screenshot /tmp/mm2-results-review.png` →
+  `smoke=visual world=city/sf.psdl status=pass frames=done
+  screenshot=/tmp/mm2-results-review.png bytes=2573476` on Apple
+  M1/Metal. The PNG was inspected: the overlay draws over the
+  finished race — "Race results" heading, `1st of 7 — 0.1s` outcome,
+  `1. You — 0.1s` plus six opponents listed `still racing`, the
+  `no driver profile — progress is not saved` note, focused `> Quit`
+  and `Restart race` rows, controls footer. Capture kept out of git
+  (local evidence only).
 - `cargo fmt --all -- --check` — PASS.
-- `cargo clippy --locked --workspace --all-targets --all-features --
+- `cargo clippy --workspace --all-targets --all-features --
   -D warnings` — PASS.
-- `cargo test --locked --workspace` — PASS, all suites, 0 failures.
-- Note: Avian's schedule runner drains one stale-delta step on the
-  first paused FixedMain frame (its delta is zeroed after the run
-  check, not before) — the freeze is effective from the second paused
-  frame; invisible in practice and documented in the freeze test.
+- `cargo test --workspace` — PASS, all suites, 0 failures (results
+  9, menu 11, session 13).
 
 ## Still open
 
-- F17-B remainder: results screens and the play → reward → return leg
-  (AC01's in-session half), `Failed` sessions carrying the reason back
-  to the menu, countdown visuals.
-- F17-A remainder, unchanged: per-event weather/time/density controls
-  (need F18's session-legal writers), mouse navigation, text entry for
-  profile names, and the original-menu audit against F17-AC05's
-  capability denominator.
-- Gamepad pause path is source-only (no device to drive it); the
-  pause-overlay dims but does not hide the world — a HUD legibility
-  check at other camera modes is unverified.
-- F17-AC01/02/04/05 remain unverified; rendered evidence covers the
-  root menu and now the pause overlay — sub-screens, the
-  play→reward→return leg and high-DPI layouts (spec req 6) are still
-  missing.
+- F17-B remainder: countdown presentation; C&R/points result
+  variants are F17-C scope (no such mode exists yet).
+- The results overlay's `Continue` is quit-to-menu (or `AppExit`
+  with no shell) — the original's post-race flow returns to a
+  results/records sub-screen; a Records screen (DRV-5) is
+  unimplemented.
+- Standings show unresolved opponents as `still racing` — honest,
+  but a session that sits at `Results` forever never resolves them;
+  no "wait for field" behaviour is claimed (the original ends the
+  race on the local finish too — DSN-11).
+- Gamepad results path is source-only (no device to drive it);
+  overlay legibility at other camera modes/high-DPI unverified —
+  same standing gap as the pause overlay.
+- F17-A remainder, unchanged: per-event weather/time/density
+  controls (need F18's session-legal writers), mouse navigation,
+  text entry for profile names, and the original-menu audit against
+  F17-AC05's capability denominator.
+- F17-AC02/AC05 remain unverified; AC01's return leg and AC04's
+  failed-load leg are now exercised by tests + the rendered capture,
+  pending external check.
 - F16-C remainder: AC01's process-level leg (two real interactive
   launches completing an event) still needs a playable session;
-  `--bot` finishes are deliberately ineligible.
+  `--bot` and `--finish` results are deliberately ineligible.

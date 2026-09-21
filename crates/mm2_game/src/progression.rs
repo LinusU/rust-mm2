@@ -575,6 +575,8 @@ pub fn record_eligibility(config: &SessionConfig) -> Result<(), Ineligible> {
         Err(Ineligible::DevOverride("banger-pool"))
     } else if dev.traction.is_some_and(|t| t != 1.0) {
         Err(Ineligible::DevOverride("traction"))
+    } else if dev.finish {
+        Err(Ineligible::DevOverride("finish"))
     } else {
         Ok(())
     }

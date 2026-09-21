@@ -28,8 +28,9 @@
 //!
 //! Deferred honestly, like the root menu does: `Options` is a visible
 //! disabled row (F23 owns it), and pause is reachable only from
-//! `Playing` — `Countdown`/`Results` still take `Esc` as quit
-//! (the lifecycle's legal-transition table has no `Countdown → Paused`).
+//! `Playing` — `Countdown` still takes `Esc` as quit (the lifecycle's
+//! legal-transition table has no `Countdown → Paused` edge), while
+//! `Results` is owned by `crate::results` (Esc is its Continue row).
 
 use avian3d::prelude::*;
 use bevy::prelude::*;

@@ -38,31 +38,46 @@
 
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
-**Next selected slice: F17-B remainder (results screens /
-play→reward→return leg, Failed→menu reason, countdown), F17-A
-remainder (per-event weather controls need F18; mouse nav, text
-entry, AC05 audit), F15-B remainder, F11-C remainder, or F16-C's
-AC01 process-level leg** — the latest iteration landed F17-B.1, the
-pause flow: `Esc`/pad `Start` on a live `Playing` session now takes
-the previously unreachable `Playing → Paused` edge (only when
-`SessionAuthority::allows_pause()` — MP-6 keeps host/remote Esc as
-quit), `mm2_app::pause` owns the `Paused` keyboard and draws a
-`SessionEntity`-stamped Resume/Restart/Quit overlay over the dimmed
-frozen world (`Options` stays a visible disabled row naming F23), and
-`sync_physics_pause` mirrors the phase onto `Time<Physics>` so
-Avian's whole schedule — not just inputs — holds still. Restart and
-Quit ride the existing `SessionControl` intents and teardown paths;
-`reset_input` is `is_playing`-gated so `R` can't teleport under the
-overlay; `--pause` (quarantined `DevOverrides`) auto-pauses the first
-`Playing` frame so `--frames`/`--screenshot` captures can render it —
-verified on Metal/Apple M1 (`world=city/sf.psdl ... bytes=3434617`,
-PNG inspected). Five new session integration tests cover
-pause→frozen-world→resume, the overlay rows driving real intents,
-restart-from-pause cleanliness, the non-pausable-authority quit leg
-and the dev-flag one-shot; the menu tests' in-session Esc sites now
-leave through the pause menu. Known Avian quirk recorded: the runner
-drains one stale-delta physics step on the first paused FixedMain
-frame before the freeze takes hold. Before that the latest iteration
+**Next selected slice: F17-B remainder (countdown presentation;
+C&R/scoring variants), F17-A remainder (per-event weather controls
+need F18; mouse nav, text entry, AC05 audit), F15-B remainder,
+F11-C remainder, or F16-C's AC01 process-level leg** — the latest
+iteration landed F17-B.2, the results screen and the
+play→reward→return leg: `mm2_app::results` draws a
+`SessionEntity`-stamped overlay at `Results` (UI-5) — local outcome
+(ordinal placing + total time), the generation-scoped standings with
+unresolved participants listed as still racing, the rewards actually
+granted, and the persistence disposition — with Continue/Restart
+rows; `record_session_results` now writes a `SessionReport` resource
+(processed once per generation, local participant only, sandbox and
+scripted/bot runs excluded, `record_eligibility` enforced, `TimedOut`
+records nothing) so the screen presents the real disposition instead
+of a log line. `Failed(reason)` now rides a `SessionNote` back to the
+menu's status line; `menu_watch` enforces shell ownership (active only
+at `Menu` with no pending restart) — repairing the latent defect where
+a restart's transient `Menu` phase could reopen the shell over a live
+session; `--finish` (quarantined, record-ineligible) sweeps the local
+car through its objectives so `--frames`/`--screenshot` captures can
+reach `Results` — verified on Metal/Apple M1
+(`sf checkpoint:0 --finish --frames 180` → `bytes=2573476`, PNG
+inspected). Nine new results tests plus two menu regressions cover
+outcome/field/unresolved presentation, timeout, reward and
+ineligibility notes, key ownership, continue-quit and restart legs,
+`--finish` reachability + ineligibility, the menu-reopen repair and
+the failed-load status. Before that the latest iteration landed
+F17-B.1, the pause flow: `Esc`/pad `Start` on a live `Playing`
+session takes the previously unreachable `Playing → Paused` edge
+(only when `SessionAuthority::allows_pause()` — MP-6 keeps
+host/remote Esc as quit), `mm2_app::pause` owns the `Paused`
+keyboard and draws a `SessionEntity`-stamped Resume/Restart/Quit
+overlay over the dimmed frozen world (`Options` stays a visible
+disabled row naming F23), and `sync_physics_pause` mirrors the phase
+onto `Time<Physics>` so Avian's whole schedule — not just inputs —
+holds still; `--pause` (quarantined `DevOverrides`) auto-pauses the
+first `Playing` frame so captures can render it. Known Avian quirk
+recorded: the runner drains one stale-delta physics step on the
+first paused FixedMain frame before the freeze takes hold. Before
+that the latest iteration
 landed F17-A.2, Quick Race (DRV-8): the root menu gains a
 `Quick Race: <Table> #<n> (<stem>)` row that relaunches the bound
 profile's `selections.last_event` with the current
@@ -949,8 +964,9 @@ at `563c34e`. Direct observation of rendered gameplay.
 | F17-A | active | F01-A, F02-A, F11-A, F16-A | Split: A.1 (menu shell — profile/mode/content selection over the real catalogs) and A.2 (Quick Race — DRV-8's `last_event` launch), both implemented below. Remaining: per-event weather/time/density controls (need F18's session-legal writers; RACE-3 `customizable`), mouse navigation, no-text-entry profile naming, original menu audit vs F17-AC05's capability denominator. |
 | F17-A.2 | implemented | F17-A.1 | Quick Race (DRV-8). `menu::quick_race_row` adds a root row between Cruise and Events: with a bound profile carrying `selections.last_event` it resolves the stem-keyed `EventKey` back through the live catalog (`table`+`stem` match → `EventRef`, never the stale row index) and launches it through the same `Session::begin` path the event list uses. Disabled-with-reason legs: no bound profile, no event played yet, Crash Course key (not loadable, F21), missing `city/*.psdl`, stem no longer in the catalog, `Incomplete` records, availability gate (`beat <stems> first`). The documented original's vehicle-select step is folded into the root's persistent vehicle/difficulty selections — enhanced-layout choice, recorded in code. Tests +2 (`tests/menu.rs` 9 total): `quick_race_replays_the_last_event` (bind → Events→race0 launch → `note_session_start` persists the stem key on disk → quit → `Quick Race: Checkpoint #0 (race0)` enabled → activate lands `SessionMode::Event(checkpoint:0)`), `quick_race_reports_an_unresolvable_last_event` (gated race3 / incomplete race2 / unknown race99 all disabled with reasons, activation never launches). Rendered evidence: `--new-profile QR --city sf --event checkpoint:0 --headless --frames 300` wrote `last_event=sf/checkpoint/race0`, then `--menu --profile driver-0 --frames 90 --screenshot /tmp/mm2-menu-qr.png` → `smoke=visual world=menu status=pass bytes=172980` on Metal/Apple M1 — the enabled row draws under Cruise with `Driver: QR (driver-0)` bound and the remembered VW New Beetle restored. Candidate pending external check. |
 | F17-A.1 | implemented | F17-A deps | `mm2_app::menu`: `MenuShell` (screen stack + focus + rebuilt row model + launch selections), `MenuData` (profile-store handle + lazily-scanned cities/`VehicleCatalog`/`GarageTable`/`EventCatalog`/`AvailabilityTable` — scans once, VFS is static), `MenuCommand`/`MenuEffect` (model emits, `menu_input` executes — launches resolve `load_by_id` then `Session::begin`; binds/unbinds write `ActiveProfile`), `menu_watch` (reopens the shell when the session reaches `Menu` — quit-to-menu), `menu_present` (`bevy_ui` text tree, focused `›` marker, disabled rows dimmed with their reason). Screens: Root (Cruise/Events/Vehicle/Driver/Difficulty + disabled-with-reason Options+Multiplayer + Quit), CruiseCity (`city/*.psdl` stems, missing psdl names it), EventCity→EventTable→EventList (real `EventRef`s; incomplete rows report missing files, CHK-3/CC gates name the unbeaten prerequisites, Crash Course and empty/errored tables disabled with reasons — nothing hidden, nothing dead-ends), Garage (`listed` roster only; locked/incomplete refused with reasons), Paints (`Colors` names, gated indices disabled), Profiles (list/create/`X`-delete behind `Screen::ConfirmDelete` — F16-AC06's deliberate confirmation; DRV-7's last-profile refusal surfaces as a status line; deleting the bound profile unbinds). Launch builds `SessionConfig{world,mode,difficulty,vehicle,mods_active}` + `SelectedCar`/`TunedVehicle` and `Session::begin`s — the same loader as a direct boot. `mm2_game::progression` gained `AvailabilityTable::of_unbound`/`GarageTable::of_unbound` — the fresh-driver view (restricted, nothing beaten) for profile-less evaluation, sharing the bound-profile evaluators via a `beaten`/`holds` closure. Boot: `menu_mode` = no session-shaping flag and no smoke flag — `--city`/`--event`/`--dev-world`/`--spawn`/`--cam`/`--vehicle-config`/`--bot`/`--nav`/… all stay direct launches; `drive_session`'s Menu-quit only exits when no `MenuShell` exists. Input: arrows/WASD nav, Enter/Space select, Esc/Backspace back (quit at root), X/Delete delete; gamepad dpad+left-stick edge nav, South select, East back, West delete. Shell seeds from `choose_launch` (CLI > remembered > default) and reseeds difficulty from the bound profile's rank (DRV-2). Tests +6 (`tests/menu.rs`): boot parks at Menu + draws rows; cruise→Playing→Esc→menu→repeat with single menu root/player (AC06 menu leg); event rows carry incomplete/gated reasons and the open row launches the real `EventRef`; garage/paint gating carries to `SelectedCar`; profile bind/create/delete/unbind/last-profile refusal; empty install reports reasons and nothing launches. Candidate pending external check. |
-| F17-B | active | F17-A | Split: B.1 (pause/resume — implemented below). Remaining: results screens and the play→reward→return leg (AC01's in-session half), `Failed`→menu carrying the reason, countdown presentation. |
+| F17-B | active | F17-A | Split: B.1 (pause/resume — implemented below), B.2 (results screen + reward/return leg — implemented below). Remaining: countdown presentation, C&R/scoring result variants (F17-C scope). |
 | F17-B.1 | implemented | F17-A | Pause/resume (F17 req 4's pause leg). `session_control_input` maps `Esc`/pad `Start` onto a new `SessionControl::pause` intent only for a `Playing` session whose authority `allows_pause()` (MP-6 — host/remote and `Countdown`/`Results`/`Failed` keep Esc as quit); `drive_session` takes `Playing → Paused` and its quit/restart arm covers `Paused` and clears stale pause intents. `mm2_app::pause`: `pause_input` owns the `Paused` keyboard (scheduled between the intent reader and the driver so the entering Esc can't re-read as resume), `sync_physics_pause` mirrors the phase onto `Time<Physics>` (Avian's runner skips the schedule — noted quirk: it drains one stale-delta step on the first paused frame), `pause_present` draws a `SessionEntity`-stamped `PauseUi` overlay (in `HudNodes`, follows the active camera) with Resume/Restart/Quit-to-menu|Quit and a disabled `Options` row naming F23, `dev_pause_once` backs `--pause` (one-shot; capture-only evidence flag). `reset_input` is `is_playing`-gated. Tests +5 (`tests/session.rs` 12 total): Esc→Paused→frozen Position/tick over 30 updates→Esc resume, overlay rows drive real intents (Resume/Quit→`AppExit`/disabled-row status), restart-from-pause cleanliness, Host authority keeps Esc=quit, `dev.pause` one-shot; `tests/menu.rs` in-session Esc sites route through the pause Quit row. Rendered: `--city sf --pause --frames 90 --screenshot` → `status=pass bytes=3434617` on Metal/Apple M1, PNG inspected (dimmed overlay over the frozen cruise). Candidate pending external check. |
+| F17-B.2 | implemented | F17-B.1 | Results screen + play→reward→return leg (UI-5's screen, AC01's in-session half, AC04's failed-load leg). `mm2_app::results`: `ResultsMenu` (focus/status/dirty — presentation only) + `results_input` owns the keyboard at `Results` (scheduled between `session_control_input` and `drive_session`; Esc/Backspace = Continue) + `results_present` draws a `SessionEntity`-stamped `ResultsUi` overlay (in `HudNodes`, follows the active camera): local outcome line (`ordinal placing of n — m:ss.s`), generation-scoped standings rows (resolved participants placed per DSN-12; unresolved listed as `still racing`, never ranked), granted-reward lines, the `SessionReport` disposition note, and Continue(-to-menu|exit)/Restart rows. `record_session_results` now accumulates a `SessionReport` resource — generation-scoped, processed once (consumed `ResultId`s marked even when a gate refuses), local `Player` only, sandbox/`ScriptedDrive`/`record_eligibility` gates recorded as the on-screen reason instead of only logged; `TimedOut` notes non-recording. `SessionNote` carries `Failed(reason)` through teardown onto the reopened shell's status (`load failed: <reason>`), cleared on the next successful load. `menu_watch` now enforces ownership — shell active only at `Menu` with no pending `restart`, forced inactive otherwise (repairs the latent defect where a restart's transient `Menu` phase reopened the shell over the live session; `menu_input` is `Menu`-gated). `DevOverrides::finish` + `dev_finish_once` sweep the local participant to its next objective once per update until `Results` (countdown lock honoured; `Teleported` untouched so swept segments stay honest) — `record_eligibility` refuses it as `dev override finish`, so `--frames`/`--screenshot` evidence runs can't bank progress. `ordinal` moved to `mm2_game::result` (shared by HUD/results, 11th/12th/13th correct). Tests +11: `tests/results.rs` ×9 (outcome+field, unresolved participants, timeout presentation, profileless/ineligible notes, granted rewards, Results key ownership, continue-quit teardown, restart replays, `--finish`→Results+ineligible), `tests/menu.rs` ×2 (restart doesn't reopen the shell, failed launch returns to menu with the reason). Rendered: `sf --event checkpoint:0 --finish --frames 180 --screenshot` → `status=pass bytes=2573476` on Metal/Apple M1, PNG inspected (overlay over the finished race: `1st of 7 — 0.1s`, six `still racing` opponents, profileless note). Candidate pending external check. |
 | F17-C | queued | F12-B, F15-B, F16-B, F17-B | — |
 | F18-A | queued | F01-B, F06-B | `city/*.sky`, `*.ldef`, `*.cpvs` present unparsed; no weather/time-of-day selection. |
 | F18-B | queued | F18-A | — |

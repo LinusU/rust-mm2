@@ -20,6 +20,7 @@ use mm2_app::contracts::ImpactFilter;
 use mm2_app::menu::{self, MenuCamera, MenuData, MenuShell, MenuUi};
 use mm2_app::pause::{self, PauseMenu};
 use mm2_app::profile::ActiveProfile;
+use mm2_app::results::{self, ResultsMenu};
 use mm2_app::session::{self, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_assets::Vfs;
 use mm2_game::{
@@ -297,7 +298,9 @@ fn menu_app(dir: &Path, store: Option<ProfileStore>) -> App {
         .init_resource::<ResultLedger>()
         .init_resource::<BangerPool>()
         .init_resource::<SessionControl>()
+        .init_resource::<session::SessionNote>()
         .init_resource::<PauseMenu>()
+        .init_resource::<ResultsMenu>()
         .init_resource::<ButtonInput<KeyCode>>()
         .init_resource::<Assets<Mesh>>()
         .init_resource::<Assets<Image>>()
@@ -334,6 +337,12 @@ fn menu_app(dir: &Path, store: Option<ProfileStore>) -> App {
                 pause::pause_input
                     .after(session::session_control_input)
                     .before(session::drive_session),
+                // `Results` gets the same ownership contract — the
+                // overlay's keys, between the intent reader and the
+                // driver.
+                results::results_input
+                    .after(session::session_control_input)
+                    .before(session::drive_session),
                 (
                     despawn_session_entities.run_if(session::unloading),
                     session::drive_session,
@@ -341,6 +350,7 @@ fn menu_app(dir: &Path, store: Option<ProfileStore>) -> App {
                     .chain(),
                 pause::sync_physics_pause.after(session::drive_session),
                 pause::pause_present.after(session::drive_session),
+                results::results_present.after(session::drive_session),
                 (menu::menu_watch, menu::menu_input, menu::menu_present).chain(),
             ),
         );
@@ -1063,4 +1073,93 @@ fn an_empty_install_reports_instead_of_faking() {
     activate_row(&mut app, "london");
     assert_eq!(phase(&app), SessionPhase::Menu, "nothing can launch");
     assert!(shell(&app).status.is_some());
+}
+
+/// Regression guard for the restart transit: a pause-menu Restart
+/// transits `Menu` for one update while `drive_session` re-`begin`s —
+/// `menu_watch` must not reopen the shell mid-transit. A reopened
+/// shell would draw over the new session (menu root + menu camera
+/// mid-game) and steal its keys (menu `Back` reaching `Exit` while
+/// `Playing`). Asserted per-update so an ordering shift can't hide it.
+#[test]
+fn restart_in_menu_mode_leaves_the_shell_closed() {
+    let tmp = install();
+    let mut app = menu_app(tmp.path(), None);
+    app.update();
+    activate_row(&mut app, "Cruise");
+    activate_row(&mut app, "testcity");
+    assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Playing));
+
+    // Esc → pause → Restart row (the second row).
+    press(&mut app, KeyCode::Escape);
+    assert_eq!(phase(&app), SessionPhase::Paused);
+    press(&mut app, KeyCode::ArrowDown);
+    press(&mut app, KeyCode::Enter);
+
+    let mut replayed = false;
+    for _ in 0..12 {
+        app.update();
+        assert!(
+            !shell(&app).active,
+            "the shell must never reopen mid-restart (phase {:?})",
+            phase(&app)
+        );
+        assert_eq!(menu_roots(&mut app), 0, "menu drew mid-restart");
+        assert_eq!(menu_cameras(&mut app), 0, "menu camera mid-restart");
+        if phase(&app) == SessionPhase::Playing {
+            replayed = true;
+            break;
+        }
+    }
+    assert!(replayed, "the restart never reached Playing");
+    assert_eq!(players(&mut app), 1);
+
+    // The shell stays closed in the new session: Esc pauses, it does
+    // not run a menu Back → Exit.
+    press(&mut app, KeyCode::Escape);
+    assert_eq!(
+        phase(&app),
+        SessionPhase::Paused,
+        "Esc must pause, not exit"
+    );
+    assert!(
+        app.world().resource::<Messages<AppExit>>().is_empty(),
+        "no AppExit from a restart transit"
+    );
+}
+
+/// F17-AC04's return leg: a launch whose world fails to load lands
+/// back on the menu with the reason on the status line — the user is
+/// told *why*, not silently returned.
+#[test]
+fn a_failed_launch_returns_to_the_menu_with_the_reason() {
+    let tmp = install();
+    // Resolves (so the city row is enabled) but cannot parse.
+    write(tmp.path(), "city/broken.psdl", b"junk");
+    let mut app = menu_app(tmp.path(), None);
+    app.update();
+    activate_row(&mut app, "Cruise");
+    activate_row(&mut app, "broken");
+    assert!(
+        run_until(&mut app, 12, |a| matches!(
+            phase(a),
+            SessionPhase::Failed(_)
+        )),
+        "the broken city never failed: {:?}",
+        phase(&app)
+    );
+
+    press(&mut app, KeyCode::Escape);
+    assert!(
+        run_until(&mut app, 12, |a| phase(a) == SessionPhase::Menu),
+        "quit from Failed never reached the menu"
+    );
+    app.update();
+    assert!(shell(&app).active, "the menu reopens after a failure");
+    let status = shell(&app).status.as_deref().unwrap_or("");
+    assert!(
+        status.contains("load failed"),
+        "the failure reason lands on the status line: {status:?}"
+    );
+    assert_eq!(menu_roots(&mut app), 1);
 }

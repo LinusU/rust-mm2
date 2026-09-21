@@ -214,3 +214,17 @@ fn standing_key(result: &SessionResult) -> (u8, u64, PlayerId) {
         SessionOutcome::TimedOut { race_ticks } => (1, race_ticks, result.id.participant),
     }
 }
+
+/// English ordinal for a 1-based place: 1st, 2nd, 3rd… (the standings
+/// formatter — shared by the HUD line and the results screen so the
+/// two agree on a place's spelling).
+pub fn ordinal(place: u32) -> String {
+    let suffix = match (place % 100, place % 10) {
+        (11..=13, _) => "th",
+        (_, 1) => "st",
+        (_, 2) => "nd",
+        (_, 3) => "rd",
+        _ => "th",
+    };
+    format!("{place}{suffix}")
+}

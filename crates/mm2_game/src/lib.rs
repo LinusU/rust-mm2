@@ -65,7 +65,7 @@ pub use race::{
     RacePhase, RaceProgress, RaceStart, RaceStarted, RaceState, TargetSelection, cycle_target,
     live_order, navigation_target, relative_bearing,
 };
-pub use result::{DuplicateResult, ResultId, ResultLedger, SessionOutcome, SessionResult};
+pub use result::{DuplicateResult, ResultId, ResultLedger, SessionOutcome, SessionResult, ordinal};
 pub use session::{
     Session, SessionEntity, SessionError, SessionPhase, advance_session_tick,
     despawn_session_entities,

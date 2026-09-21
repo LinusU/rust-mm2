@@ -19,14 +19,14 @@ use clap::Parser;
 use mm2_app::session::{ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
     banger, camera, car_visual, city, contracts, input, menu, nav_overlay, opponents, pause,
-    profile, progression, race, scripted, session, smoke,
+    profile, progression, race, results, scripted, session, smoke,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
 use mm2_game::{
     BangerStateChanged, CameraPose, DevOverrides, ImpactEvent, Mm2Vfs, PlayerVehicle, RaceStarted,
     Session, SessionConfig, SessionPhase, VehicleSelection, WorldMode, advance_session_tick,
-    despawn_session_entities,
+    despawn_session_entities, ordinal,
 };
 use mm2_vehicle::{ResetVehicle, VehicleConfig, VehicleDebugEnabled, VehiclePlugin};
 use tracing::{error, info, warn};
@@ -156,6 +156,15 @@ struct Cli {
     /// is how the pause overlay gets rendered). Meaningless headless.
     #[arg(long, conflicts_with = "headless")]
     pause: bool,
+
+    /// Sweep the local participant through an event session's remaining
+    /// triggers — one gate per update — until the run resolves to the
+    /// results screen (diagnostic aid: how a `--frames`/`--screenshot`
+    /// capture reaches `Results` while live input is frozen; the
+    /// results it produces are record-ineligible). No-op outside an
+    /// event session.
+    #[arg(long, conflicts_with = "bot")]
+    finish: bool,
 
     /// Multiply every tire contact's grip by `f` for the session — an
     /// environment traction stand-in (wetness/ice) for evidence runs.
@@ -623,6 +632,7 @@ fn main() {
             banger_pool: cli.banger_pool,
             traction,
             pause: cli.pause,
+            finish: cli.finish,
         },
         // Any mounted mod makes records/unlocks ineligible — a result
         // under modded content is not comparable to stock (designed
@@ -703,6 +713,7 @@ fn main() {
         && cli.banger_pool.is_none()
         && cli.traction.is_none()
         && !cli.pause
+        && !cli.finish
         && !cli.nav
         && cli.nav_route.is_none()
         && !cli.bot;
@@ -792,7 +803,9 @@ fn main() {
     .init_resource::<mm2_game::ResultLedger>()
     .init_resource::<mm2_game::BangerPool>()
     .init_resource::<SessionControl>()
+    .init_resource::<session::SessionNote>()
     .init_resource::<pause::PauseMenu>()
+    .init_resource::<results::ResultsMenu>()
     .add_systems(FixedUpdate, advance_session_tick)
     .add_systems(
         FixedLast,
@@ -827,6 +840,11 @@ fn main() {
                 // deliberately ungated by `capturing`: putting a
                 // capture into pause is exactly what it is for.
                 pause::dev_pause_once,
+                // `--finish` sweeps the local participant through the
+                // remaining race triggers — deliberately ungated by
+                // `capturing` for the same reason: a capture is how the
+                // results screen gets rendered.
+                results::dev_finish_once,
                 session::drive_session,
             )
                 .chain(),
@@ -875,6 +893,14 @@ fn main() {
                 .run_if(not(capturing)),
             pause::sync_physics_pause.after(session::drive_session),
             pause::pause_present.after(session::drive_session),
+            // Results owns the keyboard while `Results` — same
+            // scheduling slot as the pause input so the session
+            // control reader and the driver never re-read its keys.
+            results::results_input
+                .after(session::session_control_input)
+                .before(session::drive_session)
+                .run_if(not(capturing)),
+            results::results_present.after(session::drive_session),
         ),
     )
     // AI opponents own their own `VehicleInput` — `vehicle_input` only
@@ -1211,24 +1237,14 @@ fn update_hud(
     }
 }
 
-/// English ordinal for a 1-based place: 1st, 2nd, 3rd, 4th…, with the
-/// 11th/12th/13th irregulars handled.
-fn ordinal(place: u32) -> String {
-    let suffix = match place % 100 {
-        11..=13 => "th",
-        _ => match place % 10 {
-            1 => "st",
-            2 => "nd",
-            3 => "rd",
-            _ => "th",
-        },
-    };
-    format!("{place}{suffix}")
-}
-
 /// The root UI nodes pinned to the active camera — the HUD plus the
-/// pause overlay, which shares the session's render target.
-type HudNodes = Or<(With<Hud>, With<ErrorText>, With<pause::PauseUi>)>;
+/// pause/results overlays, which share the session's render target.
+type HudNodes = Or<(
+    With<Hud>,
+    With<ErrorText>,
+    With<pause::PauseUi>,
+    With<results::ResultsUi>,
+)>;
 
 /// Keep the HUD on whichever camera is active — UI otherwise stays on the
 /// first camera and disappears in free-camera mode.

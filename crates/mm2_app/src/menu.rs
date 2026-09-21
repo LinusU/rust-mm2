@@ -26,8 +26,8 @@
 //! Deferred to later slices (honest gaps, not placeholders): per-event
 //! weather/time/density controls (needs F18's session-legal writers;
 //! RACE-3 `customizable`), mouse navigation, text entry for profile
-//! names, results screens (F17-B — the pause overlay itself landed
-//! in `crate::pause`), original menu art and audio.
+//! names, original menu art and audio. The in-session overlays landed
+//! in their own modules — `crate::pause`, `crate::results`.
 
 use std::collections::BTreeMap;
 
@@ -42,7 +42,7 @@ use mm2_game::{
 use tracing::{info, warn};
 
 use crate::profile::{ActiveProfile, ProfileRequest};
-use crate::session::{SelectedCar, TunedVehicle};
+use crate::session::{SelectedCar, SessionControl, SessionNote, TunedVehicle};
 
 /// One user intent. Keyboard, gamepad and tests all produce these —
 /// the model never reads devices.
@@ -1046,19 +1046,45 @@ pub struct MenuUi;
 #[derive(Component)]
 pub struct MenuCamera;
 
-/// Reopen the shell whenever the session reaches `Menu` — this is what
-/// makes a quit from a menu-launched session return to the menu, and
+/// Keep the shell's `active` flag honest: open exactly while the
+/// session sits at `Menu`, closed everywhere else — this is what makes
+/// a quit from a menu-launched session return to the menu, and it
 /// refreshes the bound-profile view from the resource the session
-/// systems updated.
+/// systems updated. Two subtleties:
+///
+/// - A pending `control.restart` means the session is only *transiting*
+///   `Menu` — `drive_session` re-`begin`s it on the next update.
+///   Reopening mid-transit would leave the shell active over the new
+///   session (menu keys fighting the session's, a menu camera spawning
+///   mid-game), so a restart never reopens it.
+/// - The `_` arm force-closes the shell outside `Menu` — `active` is
+///   the "the menu owns the screen" claim, so it cannot outlive the
+///   phase that owns it, whatever ordering produced the stray flag.
+///
+/// A carried [`SessionNote`] — set when a `Failed` session tears down —
+/// lands on the status line, so a failed load returns to the menu with
+/// the reason instead of silence (F17-AC04).
 pub fn menu_watch(
     session: Res<Session>,
+    control: Res<SessionControl>,
     active: Option<Res<ActiveProfile>>,
+    mut note: Option<ResMut<SessionNote>>,
     mut shell: ResMut<MenuShell>,
     mut data: ResMut<MenuData>,
 ) {
-    if matches!(session.phase(), SessionPhase::Menu) && !shell.active {
-        shell.reopen();
-        data.bound = active.map(|a| a.profile.clone());
+    match session.phase() {
+        SessionPhase::Menu if !control.restart => {
+            if !shell.active {
+                shell.reopen();
+                data.bound = active.map(|a| a.profile.clone());
+                if let Some(note) = note.as_mut()
+                    && let Some(reason) = note.failure.take()
+                {
+                    shell.status = Some(format!("load failed: {reason}"));
+                }
+            }
+        }
+        _ => shell.active = false,
     }
 }
 
@@ -1077,6 +1103,11 @@ pub struct MenuTarget<'w, 's> {
 /// `apply`, and execute the effects — launches call `Session::begin`,
 /// which `load_session_world` picks up on the next update like any
 /// other `Menu → Loading` transition.
+///
+/// The phase check is belt-and-braces: `menu_watch` already keeps
+/// `active` true only at `Menu`, but a one-frame straddle (the shell
+/// closed this update while the phase still reads `Menu`... or vice
+/// versa) must never let a menu `Back` reach `Exit` inside a session.
 pub fn menu_input(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
@@ -1085,7 +1116,7 @@ pub fn menu_input(
     vfs: Res<Mm2Vfs>,
     mut target: MenuTarget,
 ) {
-    if !shell.active {
+    if !shell.active || !matches!(target.session.phase(), SessionPhase::Menu) {
         return;
     }
     let mut cmds = Vec::new();

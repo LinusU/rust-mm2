@@ -12,8 +12,9 @@ use bevy::time::TimeUpdateStrategy;
 use mm2_app::camera::CameraMode;
 use mm2_app::contracts::{self, ImpactFilter};
 use mm2_app::pause::{self, PauseMenu, PauseUi};
+use mm2_app::results::{self, ResultsMenu};
 use mm2_app::session::{
-    self, ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, TunedVehicle,
+    self, ErrorText, Hud, SelectedCar, SessionControl, SessionNote, SpawnPoint, TunedVehicle,
 };
 use mm2_assets::Vfs;
 use mm2_game::{
@@ -66,7 +67,9 @@ fn test_app(config: SessionConfig, frame_secs: f64) -> App {
         .init_resource::<ButtonInput<KeyCode>>()
         .init_resource::<ImpactFilter>()
         .init_resource::<SessionControl>()
+        .init_resource::<SessionNote>()
         .init_resource::<PauseMenu>()
+        .init_resource::<ResultsMenu>()
         .add_systems(FixedUpdate, advance_session_tick)
         .add_systems(
             FixedLast,
@@ -87,9 +90,14 @@ fn test_app(config: SessionConfig, frame_secs: f64) -> App {
                 pause::pause_input
                     .after(session::session_control_input)
                     .before(session::drive_session),
+                // `Results` input has the same ownership contract.
+                results::results_input
+                    .after(session::session_control_input)
+                    .before(session::drive_session),
                 (
                     despawn_session_entities.run_if(session::unloading),
                     pause::dev_pause_once,
+                    results::dev_finish_once,
                     session::drive_session,
                 )
                     .chain(),
@@ -97,6 +105,7 @@ fn test_app(config: SessionConfig, frame_secs: f64) -> App {
                 // enters/leaves `Paused` sees the settled phase.
                 pause::sync_physics_pause.after(session::drive_session),
                 pause::pause_present.after(session::drive_session),
+                results::results_present.after(session::drive_session),
             ),
         );
     app.finish();

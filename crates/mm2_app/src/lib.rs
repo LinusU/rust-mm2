@@ -21,6 +21,7 @@ pub mod pause;
 pub mod profile;
 pub mod progression;
 pub mod race;
+pub mod results;
 pub mod scripted;
 pub mod session;
 pub mod smoke;
