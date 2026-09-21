@@ -634,6 +634,12 @@ pub struct JunctionPolicy {
     /// Distance before the lane end marking the stop line (m) — about
     /// a car half-length, so a held car's nose stays out of the box.
     pub stop_inset: f32,
+    /// A car this close to the stop line counts as standing on it
+    /// (m). The brake ramp decays `dist_to_stop` geometrically — an
+    /// f32 lane cursor asymptotes a hair short of an exact zero and
+    /// stalls — so "at the line" is this tolerance, never
+    /// `dist_to_stop <= 0`, or a queued car would never register.
+    pub stop_line_tolerance: f32,
     /// Seconds per metre converting distance-to-stop into the desired
     /// approach speed — the ramp a closed gate brakes toward.
     pub approach_time: f32,
@@ -652,6 +658,7 @@ impl Default for JunctionPolicy {
             clear_ticks: 120,
             stop_dwell_ticks: 90,
             stop_inset: 2.5,
+            stop_line_tolerance: 0.1,
             approach_time: 1.0,
             decel: 9.0,
             enter_clearance: 6.0,
@@ -798,9 +805,11 @@ impl Junctions {
     /// ends open, `AlwaysStop` never opens, `TrafficLight` opens while
     /// the car's road holds the phase green, and `StopSign` opens for
     /// the FCFS head once its dwell elapsed. Reaching the stop line
-    /// (`at_line`) at a standstill (`stopped`) registers a stop-sign
-    /// car in the junction queue — registration is what makes the
-    /// wait ordering first-come-first-served.
+    /// (`at_line` — the caller judges it against
+    /// [`JunctionPolicy::stop_line_tolerance`], since the f32 cursor
+    /// never lands on an exact zero) at a standstill (`stopped`)
+    /// registers a stop-sign car in the junction queue — registration
+    /// is what makes the wait ordering first-come-first-served.
     pub fn gate(
         &mut self,
         graph: &NavGraph,

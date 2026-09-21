@@ -1017,7 +1017,7 @@ fn a_stop_sign_serialises_competing_approaches_in_arrival_order() {
         held_seen = held_seen.max(app.world().resource::<AmbientTraffic>().junction_held);
         if let Some((_, speed, cur)) = car_state(&mut app, a) {
             if cur.lane == lane_r0 {
-                if cur.along >= 22.0 && speed <= 1.0 {
+                if cur.along >= 23.0 && speed <= 1.0 {
                     a_stood = true;
                 }
             } else if a_crossed == usize::MAX {
@@ -1026,7 +1026,7 @@ fn a_stop_sign_serialises_competing_approaches_in_arrival_order() {
         }
         if let Some((_, speed, cur)) = car_state(&mut app, b) {
             if cur.lane == lane_r1 {
-                if cur.along >= 22.0 && speed <= 1.0 {
+                if cur.along >= 23.0 && speed <= 1.0 {
                     b_stood = true;
                 }
             } else if b_crossed == usize::MAX {
@@ -1040,9 +1040,84 @@ fn a_stop_sign_serialises_competing_approaches_in_arrival_order() {
     assert!(a_stood, "A never stood at its stop line");
     assert!(b_stood, "B never stood at its stop line");
     assert!(held_seen >= 1, "no car ever reported junction-held");
+    // A crossing never observed would read `usize::MAX` — a car that
+    // stalls short of the line must fail here, not sort first.
+    assert_ne!(a_crossed, usize::MAX, "A never took the junction");
+    assert_ne!(b_crossed, usize::MAX, "B never took the junction");
     assert!(
         a_crossed < b_crossed,
         "the first arrival must take the junction first: {a_crossed}/{b_crossed}"
+    );
+}
+
+/// The review-caught regression: a follower queued behind the head
+/// car resumes from rest several metres short of its stop line. The
+/// brake ramp decays the remaining distance geometrically, so without
+/// the stop-line tolerance the f32 cursor asymptotes a hair short of
+/// the line — never registering in the FCFS queue — and the queue
+/// deadlocks forever behind a departed head.
+#[test]
+fn a_queued_follower_reaches_the_line_and_takes_its_turn() {
+    let install = junction_install(0, 0);
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+
+    let lane_r0 = lane(0, Side::Right);
+    // Same approach: A near its stop line, B ~7 m behind — B queues
+    // on the corridor sense while A stands, dwells and crosses, then
+    // must roll up to the line from a standstill.
+    let a = spawn_follower(&mut app, lane_r0, 20.0, 15.0);
+    let b = spawn_follower(&mut app, lane_r0, 13.0, 15.0);
+
+    let (mut a_crossed, mut b_crossed) = (usize::MAX, usize::MAX);
+    let mut b_stood = false;
+    let mut b_registered = false;
+    for tick in 0..3600 {
+        app.update();
+        if let Some((_, speed, cur)) = car_state(&mut app, b)
+            && cur.lane == lane_r0
+            && cur.along >= 23.0
+            && speed <= 1.0
+        {
+            b_stood = true;
+        }
+        for (car, crossed) in [(a, &mut a_crossed), (b, &mut b_crossed)] {
+            if *crossed == usize::MAX
+                && car_state(&mut app, car).is_none_or(|(_, _, c)| c.lane != lane_r0)
+            {
+                *crossed = tick;
+            }
+        }
+        // After the head departs the queue must seat B — the register
+        // the old `dist <= 0` line test never let it reach.
+        if a_crossed != usize::MAX && b_crossed == usize::MAX {
+            b_registered |= app.world().resource::<AmbientTraffic>().junctions.waiting() >= 1;
+        }
+        if b_crossed != usize::MAX {
+            break;
+        }
+    }
+    assert_ne!(
+        a_crossed,
+        usize::MAX,
+        "the head car never took the junction"
+    );
+    assert!(b_stood, "the queued follower never stood at the stop line");
+    assert!(
+        b_registered,
+        "the follower never entered the FCFS queue after the head departed"
+    );
+    assert_ne!(
+        b_crossed,
+        usize::MAX,
+        "the queued follower stalled short of the line — the queue deadlocked"
+    );
+    assert!(
+        a_crossed < b_crossed,
+        "the queue served out of order: {a_crossed}/{b_crossed}"
     );
 }
 

@@ -43,6 +43,18 @@ F17-C's mode), F17-A remainder (per-event weather controls
 need F18; mouse nav, AC05 audit), F15-B remainder,
 F11-C remainder, F16-C's AC01 process-level leg, or F10-B's
 remaining stuck-recovery/collision scope** — the latest iteration
+repaired F10-B.2's external-review blocker: a closed gate's
+`junction_speed` ramp converged to `speed = dist/approach_time`, so
+`ds = min(speed*dt, dist)` decayed the stop-line gap geometrically
+and the f32 cursor stalled ~1.1e-4 m short — `at_line` (`<= 0`) was
+never satisfied, stop-sign followers never registered in the FCFS
+queue, and `jq=` missed every stalled hold. "At the line" is now a
+designed `JunctionPolicy::stop_line_tolerance` (0.1 m) feeding
+`gate()` registration, `junction_held`, and the closed-gate `ds`
+clamp (the residual closes outright inside the tolerance, never
+past the line). The serialisation test now requires finite crossing
+ticks, and a new same-lane queued-follower test reproduces the
+reported deadlock regime end-to-end. Before that the iteration
 landed F10-B.2, authored junction rules: `mm2_game::traffic`'s new
 `Junctions` controller gates each lane-end transfer on the BAI
 `vehicleRule` code — `TrafficLight` approaches wait for their road's

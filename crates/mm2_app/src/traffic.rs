@@ -33,7 +33,11 @@
 //! phase in a deterministic per-junction signal cycle, `StopSign`
 //! approaches queue first-come-first-served through a registered
 //! dwell, and `AlwaysStop` never opens (the two last are unused on
-//! retail data). A transfer that would land inside a live car or
+//! retail data). "At the stop line" is a small designed tolerance —
+//! the brake ramp decays the remaining distance geometrically, so an
+//! f32 cursor asymptotes a hair short of an exact zero — keying the
+//! FCFS registration, the held diagnostic and the last-step clamp.
+//! A transfer that would land inside a live car or
 //! participant reverts to the lane end and retries — cars never
 //! materialise inside a junction queue. Signal timing, dwells,
 //! stop-line inset and entry clearance are designed values (the
@@ -490,20 +494,33 @@ pub fn drive_ambient(
             .lane(car.cursor.lane)
             .map(|l| l.length - jpolicy.stop_inset - car.cursor.along)
             .unwrap_or(f32::MAX);
+        // "At the line" is the policy tolerance, never an exact zero:
+        // the brake ramp decays `dist_to_stop` geometrically, so the
+        // f32 cursor asymptotes a hair short of the line and would
+        // otherwise never register, never open a stop-sign queue, and
+        // never report held.
+        let at_line = dist_to_stop <= jpolicy.stop_line_tolerance;
         let gate = traffic.junctions.gate(
             &traffic.graph,
             car.cursor.lane,
             entity,
-            dist_to_stop <= 0.0,
+            at_line,
             car.speed <= follow.held_speed,
         );
         car.speed = junction_speed(car.speed, dist_to_stop, gate, dt, &jpolicy);
-        if gate == JunctionGate::Closed && dist_to_stop <= 0.0 && car.speed <= follow.held_speed {
+        if gate == JunctionGate::Closed && at_line && car.speed <= follow.held_speed {
             junction_held += 1;
         }
         let mut ds = car.speed.max(0.0) * dt;
         if gate == JunctionGate::Closed {
-            ds = ds.min(dist_to_stop.max(0.0));
+            // Inside the tolerance the residual is below the ramp's
+            // f32 resolution — close it outright so the car stands on
+            // the line; outside it, never step past the line.
+            ds = if at_line {
+                dist_to_stop.max(0.0)
+            } else {
+                ds.min(dist_to_stop)
+            };
         }
         let previous = car.cursor;
         let step = if ds > 0.0 {
