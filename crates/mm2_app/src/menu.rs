@@ -15,10 +15,13 @@
 //!   plus [`MenuEffect`]s — the only way the menu touches the world.
 //!   `menu_input` executes the effects against ECS resources, so the
 //!   model itself is drivable headlessly.
-//! - `menu_present` (re)draws the `bevy_ui` text tree when `dirty`;
-//!   `menu_watch` reopens the shell whenever the session returns to
-//!   `Menu`, which is also how a quit from a menu-launched session
-//!   returns here instead of exiting.
+//! - `menu_present` (re)draws the `bevy_ui` text tree when `dirty` and
+//!   owns the menu's `Camera2d` — `bevy_ui` renders per camera view and
+//!   session cameras are `SessionEntity`-stamped, so without it the
+//!   shell would have nothing to draw into. `menu_watch` reopens the
+//!   shell whenever the session returns to `Menu`, which is also how a
+//!   quit from a menu-launched session returns here instead of
+//!   exiting.
 //!
 //! Deferred to later slices (honest gaps, not placeholders): Quick Race
 //! (DRV-8's `last_event` launch), per-event weather/time/density
@@ -519,7 +522,7 @@ impl MenuShell {
             Action::DriveProfileless => {
                 data.bound = None;
                 effects.push(MenuEffect::Unbind);
-                self.status = Some("no driver profile — progress will not be saved".into());
+                self.status = Some("no driver profile - progress will not be saved".into());
             }
             Action::AskDelete { id, label } => self.push(Screen::ConfirmDelete { id, label }),
             Action::ConfirmDelete(id) => {
@@ -712,7 +715,7 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
         Screen::Profiles => profile_rows(shell, data),
         Screen::ConfirmDelete { id, label } => vec![
             Row {
-                text: format!("Delete {label} — this cannot be undone"),
+                text: format!("Delete {label} - this cannot be undone"),
                 enabled: Ok(()),
                 action: Action::ConfirmDelete(id.clone()),
             },
@@ -745,7 +748,7 @@ fn root_rows(shell: &MenuShell, data: &MenuData) -> Vec<Row> {
         Row {
             text: "Cruise".into(),
             enabled: if data.cities.is_empty() {
-                Err("no city data — pass --mm2-path <install>".to_string())
+                Err("no city data - pass --mm2-path <install>".to_string())
             } else {
                 Ok(())
             },
@@ -760,7 +763,7 @@ fn root_rows(shell: &MenuShell, data: &MenuData) -> Vec<Row> {
             text: format!("Vehicle: {vehicle_label}"),
             enabled: match &data.garage {
                 Some(g) if g.rows.iter().any(|r| r.listed) => Ok(()),
-                _ => Err("no vehicle data — pass --mm2-path <install>".to_string()),
+                _ => Err("no vehicle data - pass --mm2-path <install>".to_string()),
             },
             action: Action::Push(Screen::Garage),
         },
@@ -831,7 +834,7 @@ fn garage_rows(shell: &MenuShell, data: &MenuData) -> Vec<Row> {
                     .unwrap_or_else(|| "not in the catalog".to_string());
                 Err(format!("incomplete: {missing}"))
             } else if !avail.is_some_and(|a| a.unlocked) {
-                Err("locked — earned through event rewards".to_string())
+                Err("locked - earned through event rewards".to_string())
             } else {
                 Ok(())
             };
@@ -839,7 +842,7 @@ fn garage_rows(shell: &MenuShell, data: &MenuData) -> Vec<Row> {
                 text: format!(
                     "{}{}",
                     entry.map(|e| e.display_name.as_str()).unwrap_or(&row.id),
-                    if selected { "  •" } else { "" }
+                    if selected { "  *" } else { "" }
                 ),
                 enabled,
                 action: Action::PickVehicle { id: row.id.clone() },
@@ -877,17 +880,13 @@ fn paint_rows(shell: &MenuShell, data: &MenuData, car: &str) -> Vec<Row> {
         .enumerate()
         .map(|(i, name)| {
             let enabled = match avail.as_ref().and_then(|a| a.paints.get(i)) {
-                Some(false) => Err("locked — earned through event rewards".to_string()),
+                Some(false) => Err("locked - earned through event rewards".to_string()),
                 _ => Ok(()),
             };
             Row {
                 text: format!(
                     "{name}{}",
-                    if shell.vehicle.paint == i {
-                        "  •"
-                    } else {
-                        ""
-                    }
+                    if shell.vehicle.paint == i { "  *" } else { "" }
                 ),
                 enabled,
                 action: Action::PickPaint {
@@ -910,7 +909,7 @@ fn profile_rows(_shell: &MenuShell, data: &mut MenuData) -> Vec<Row> {
                 Some(m) => format!(
                     "{}{} ({}, {}{})",
                     m.name,
-                    if bound { " •" } else { "" },
+                    if bound { " *" } else { "" },
                     p.id.as_str(),
                     match m.rank {
                         Difficulty::Amateur => "Amateur",
@@ -955,6 +954,15 @@ fn profile_rows(_shell: &MenuShell, data: &mut MenuData) -> Vec<Row> {
 /// menu, never `SessionEntity`-stamped (it outlives sessions).
 #[derive(Component)]
 pub struct MenuUi;
+
+/// Marker for the menu's `Camera2d` — the view `bevy_ui` draws the
+/// `MenuUi` tree into. Session cameras are `SessionEntity`-stamped and
+/// only exist in-game, so while the menu owns the screen nothing else
+/// provides a render target. Deliberately not `MenuUi`: it survives the
+/// per-redraw rebuild of the text tree and is despawned only when the
+/// menu hands the screen to a session.
+#[derive(Component)]
+pub struct MenuCamera;
 
 /// Reopen the shell whenever the session reaches `Menu` — this is what
 /// makes a quit from a menu-launched session return to the menu, and
@@ -1088,35 +1096,49 @@ pub fn menu_input(
 fn screen_title(screen: &Screen) -> String {
     match screen {
         Screen::Root => "rust-mm2".to_string(),
-        Screen::CruiseCity => "Cruise — pick a city".to_string(),
-        Screen::EventCity => "Events — pick a city".to_string(),
-        Screen::EventTable { city } => format!("Events — {city}"),
+        Screen::CruiseCity => "Cruise - pick a city".to_string(),
+        Screen::EventCity => "Events - pick a city".to_string(),
+        Screen::EventTable { city } => format!("Events - {city}"),
         Screen::EventList { city, table } => {
-            format!("{} — {}", table_name(*table), city)
+            format!("{} - {}", table_name(*table), city)
         }
         Screen::Garage => "Vehicle".to_string(),
-        Screen::Paints { car } => format!("Paint — {car}"),
-        Screen::Profiles => "Driver profiles — X deletes".to_string(),
+        Screen::Paints { car } => format!("Paint - {car}"),
+        Screen::Profiles => "Driver profiles - X deletes".to_string(),
         Screen::ConfirmDelete { label, .. } => format!("Delete {label}?"),
     }
 }
 
-/// (Re)draw the menu while it is active: rebuild the row model when
-/// `dirty`, then respawn the text tree. Entities carry `MenuUi`, not
-/// `SessionEntity` — the menu outlives sessions.
+/// (Re)draw the menu while it is active: keep a `Camera2d` up as the
+/// UI's render target, rebuild the row model when `dirty`, then respawn
+/// the text tree. Entities carry `MenuUi`, not `SessionEntity` — the
+/// menu outlives sessions. The camera carries `MenuCamera` so the
+/// teardown path can drop it with the shell while redraws leave it
+/// alone.
 pub fn menu_present(
     mut commands: Commands,
     mut shell: ResMut<MenuShell>,
     mut data: ResMut<MenuData>,
     vfs: Res<Mm2Vfs>,
     roots: Query<Entity, (With<MenuUi>, Without<ChildOf>)>,
+    cameras: Query<Entity, With<MenuCamera>>,
 ) {
     if !shell.active {
         for root in &roots {
             commands.entity(root).despawn();
         }
+        for camera in &cameras {
+            commands.entity(camera).despawn();
+        }
         return;
     }
+    // The menu owns the screen — it must bring its own render target,
+    // or the `Node`/`Text` tree below is built but never drawn (the
+    // world holds zero cameras at boot and after each quit-to-menu).
+    let camera = match cameras.iter().next() {
+        Some(camera) => camera,
+        None => commands.spawn((MenuCamera, Camera2d)).id(),
+    };
     if !shell.dirty {
         return;
     }
@@ -1137,7 +1159,9 @@ pub fn menu_present(
         let (text, color) = match &row.enabled {
             Ok(()) => (
                 if i == shell.focus {
-                    format!("› {}", row.text)
+                    // The bundled font has no `›` glyph — it renders
+                    // as tofu, which would erase the focus marker.
+                    format!("> {}", row.text)
                 } else {
                     format!("  {}", row.text)
                 },
@@ -1148,7 +1172,7 @@ pub fn menu_present(
                 },
             ),
             Err(reason) => (
-                format!("  {} — {reason}", row.text),
+                format!("  {} - {reason}", row.text),
                 Color::srgb(0.45, 0.45, 0.5),
             ),
         };
@@ -1159,7 +1183,7 @@ pub fn menu_present(
         lines.push((status.clone(), 18.0, Color::srgb(1.0, 0.75, 0.35)));
     }
     lines.push((
-        "↑/↓ move · Enter select · Esc back · X delete".to_string(),
+        "Up/Down move | Enter select | Esc back | X delete".to_string(),
         14.0,
         Color::srgb(0.5, 0.5, 0.55),
     ));
@@ -1167,6 +1191,10 @@ pub fn menu_present(
     commands
         .spawn((
             MenuUi,
+            // Pin the tree to the menu camera — without it the UI
+            // would fall back to the default camera, which is nothing
+            // while no session world is loaded.
+            UiTargetCamera(camera),
             Node {
                 position_type: PositionType::Absolute,
                 top: Val::Px(0.0),

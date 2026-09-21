@@ -17,7 +17,7 @@ use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::camera::CameraMode;
 use mm2_app::contracts::ImpactFilter;
-use mm2_app::menu::{self, MenuData, MenuShell, MenuUi};
+use mm2_app::menu::{self, MenuCamera, MenuData, MenuShell, MenuUi};
 use mm2_app::profile::ActiveProfile;
 use mm2_app::session::{self, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_assets::Vfs;
@@ -416,6 +416,16 @@ fn menu_entities(app: &mut App) -> usize {
         .count()
 }
 
+/// The menu's own render target. `bevy_ui` draws per camera view, so a
+/// shell with no `MenuCamera` is invisible even though its rows exist.
+fn menu_cameras(app: &mut App) -> usize {
+    let world = app.world_mut();
+    world
+        .query_filtered::<Entity, With<MenuCamera>>()
+        .iter(world)
+        .count()
+}
+
 fn players(app: &mut App) -> usize {
     let world = app.world_mut();
     world
@@ -433,6 +443,11 @@ fn the_app_boots_into_the_menu() {
     app.update();
     assert_eq!(phase(&app), SessionPhase::Menu);
     assert!(menu_roots(&mut app) >= 1, "the menu should draw");
+    assert_eq!(
+        menu_cameras(&mut app),
+        1,
+        "the menu needs a camera or nothing renders"
+    );
     assert_eq!(players(&mut app), 0);
     for _ in 0..10 {
         app.update();
@@ -453,6 +468,71 @@ fn the_app_boots_into_the_menu() {
             .iter()
             .any(|r| { r.enabled.is_err() && (r.text == "Options" || r.text == "Multiplayer") })
     );
+}
+
+/// Regression for the F17-A.1 review blocker: `bevy_ui` renders per
+/// camera view and the only cameras in the app are session-owned, so a
+/// menu without its own camera built an invisible tree. The shell must
+/// own a live `Camera2d`, pin the UI roots to it, keep it stable across
+/// redraws, and drop it when a session takes the screen.
+#[test]
+fn the_menu_draws_into_its_own_camera() {
+    let tmp = install();
+    let mut app = menu_app(tmp.path(), None);
+    app.update();
+
+    let (cam, active) = {
+        let world = app.world_mut();
+        let mut cams = world.query_filtered::<(Entity, &Camera), With<MenuCamera>>();
+        let (entity, camera) = cams
+            .iter(world)
+            .next()
+            .expect("the menu must spawn a camera to draw into");
+        (entity, camera.is_active)
+    };
+    assert!(active, "a disabled camera renders nothing");
+    {
+        let world = app.world_mut();
+        let mut ui = world.query_filtered::<&UiTargetCamera, (With<MenuUi>, Without<ChildOf>)>();
+        let targets: Vec<Entity> = ui.iter(world).map(|t| t.0).collect();
+        assert_eq!(
+            targets,
+            vec![cam],
+            "the menu UI root must be pinned to the menu camera"
+        );
+    }
+
+    // A redraw (focus moved, tree rebuilt) keeps the same camera
+    // entity — presentation churn must not churn the render target.
+    press(&mut app, KeyCode::ArrowDown);
+    {
+        let world = app.world_mut();
+        let mut cams = world.query_filtered::<Entity, With<MenuCamera>>();
+        let after: Vec<Entity> = cams.iter(world).collect();
+        assert_eq!(after, vec![cam], "a redraw must not churn the camera");
+    }
+
+    // Launch: the session supplies its own cameras and the menu's is
+    // gone — the shell never double-draws over a live world.
+    activate_row(&mut app, "Cruise");
+    activate_row(&mut app, "testcity");
+    assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Playing));
+    assert_eq!(menu_cameras(&mut app), 0);
+    {
+        let world = app.world_mut();
+        let mut cams = world.query_filtered::<Entity, (With<Camera>, Without<MenuCamera>)>();
+        assert!(
+            cams.iter(world).count() >= 1,
+            "the session supplies its own cameras"
+        );
+    }
+
+    // Quit-to-menu brings the render target back — a returning shell
+    // is drawable again, not just active.
+    press(&mut app, KeyCode::Escape);
+    assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Menu));
+    app.update();
+    assert_eq!(menu_cameras(&mut app), 1);
 }
 
 /// Cruise → city → session: the whole launch leg through the real
@@ -478,6 +558,11 @@ fn cruise_launches_then_quit_returns_to_the_menu() {
         0,
         "no menu row leaks into the session"
     );
+    assert_eq!(
+        menu_cameras(&mut app),
+        0,
+        "the menu camera must not outlive the menu (AC06 — no duplicate cameras)"
+    );
     let car = app.world().resource::<SelectedCar>();
     assert_eq!(car.def.as_ref().map(|d| d.id.as_str()), Some("vpt"));
 
@@ -490,6 +575,7 @@ fn cruise_launches_then_quit_returns_to_the_menu() {
     app.update();
     assert!(shell(&app).active, "the menu should reopen");
     assert_eq!(menu_roots(&mut app), 1, "exactly one menu root");
+    assert_eq!(menu_cameras(&mut app), 1, "the menu camera is back");
     assert_eq!(players(&mut app), 0);
     assert!(
         app.world().resource::<Messages<AppExit>>().is_empty(),

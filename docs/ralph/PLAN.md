@@ -40,7 +40,21 @@ Choose the highest-value ready small slice; repair current regressions before un
 
 **Next selected slice: F17-A remainder (Quick Race + weather controls
 need F18), F15-B remainder, F11-C remainder, or F16-C's AC01
-process-level leg** — the latest iteration landed F17-A.1, the menu
+process-level leg** — the latest iteration repaired F17-A.1's
+external-review blocker: the shell drew nothing because `bevy_ui`
+renders per camera view and the only cameras were
+`SessionEntity`-stamped (zero existed at boot or after quit-to-menu).
+`menu_present` now owns a `MenuCamera`-tagged `Camera2d` while the
+shell is active — pinned onto the UI root via `UiTargetCamera`, kept
+stable across redraws, despawned when a session takes the screen
+(regression test `the_menu_draws_into_its_own_camera`). A new `--menu`
+flag pairs with `--frames`/`--screenshot` so the existing capture
+harness can render the shell itself (`world=menu` records;
+`menu_input` freezes during captures like every other input), and the
+first rendered capture exposed a second defect — the bundled font
+lacks `›`/`•`/`—`/`·`/`↑`/`↓` so markers and separators were tofu;
+user-facing strings are now ASCII. Before that repair the iteration
+landed F17-A.1, the menu
 shell: a bare `--mm2-path` boot now parks in `mm2_app::menu` over the
 real catalogs — Cruise cities from `city/*.psdl`, event tables/rows
 from `EventCatalog`+`AvailabilityTable` (CHK-3/CC gates and incomplete
@@ -55,10 +69,13 @@ is bound. Launches build the real `SessionConfig` and call
 `Session::begin`; `menu_watch` reopens the shell on `Unloading →
 Menu`, and `drive_session` only writes `AppExit` at Menu when no
 `MenuShell` exists — every session-shaping or smoke flag still boots
-directly into a world. Six headless integration tests cover boot,
+directly into a world. Seven headless integration tests cover boot,
 the launch→quit→menu→relaunch loop (AC06's menu leg), gated/incomplete
 event rows, garage→`SelectedCar` carry-through, the profile
-bind/create/delete flow, and the empty-install honest-failure path.
+bind/create/delete flow, the camera lifecycle, and the empty-install
+honest-failure path. Rendered evidence exists: a
+`--menu --frames 60 --screenshot` run against the retail install drew
+the real root menu on Metal/Apple M1.
 Still open under F17-A: Quick Race (`last_event`), per-event
 weather/time/density (needs F18's session-legal writers), mouse nav,
 text entry, and the original-menu audit against F17-AC05's capability

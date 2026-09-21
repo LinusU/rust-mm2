@@ -180,6 +180,15 @@ struct Cli {
     /// the nav overlay (implies --nav).
     #[arg(long, value_name = "from:to")]
     nav_route: Option<String>,
+
+    /// Force the menu front-end even alongside the capture flags —
+    /// `--menu --frames N --screenshot out.png` renders the shell
+    /// itself for visual evidence instead of launching a world.
+    /// Session-shaping flags still take precedence: a requested session
+    /// never parks in the menu, and `--menu` is ignored (with a
+    /// warning) when one is present.
+    #[arg(long, conflicts_with = "headless")]
+    menu: bool,
 }
 
 /// Smoke-test capture: run N frames, take the screenshot (if requested),
@@ -673,8 +682,11 @@ fn main() {
     // session-shaping flag (`--city`, `--event`, `--dev-world`,
     // `--spawn`, `--cam`, a tuning/physics override, `--bot`, the nav
     // overlay) stays a direct launch, as does every smoke/evidence
-    // run: their records must stay reproducible and unattended.
-    let menu_mode = !smoke_requested
+    // run: their records must stay reproducible and unattended. The
+    // one exception is `--menu`, which pairs with the capture flags to
+    // render the shell itself (`--frames`/`--screenshot` become a menu
+    // visual smoke instead of a world one).
+    let menu_mode = (!smoke_requested || cli.menu)
         && cli.city.is_none()
         && cli.event.is_none()
         && !cli.dev_world
@@ -686,6 +698,9 @@ fn main() {
         && !cli.nav
         && cli.nav_route.is_none()
         && !cli.bot;
+    if cli.menu && !menu_mode {
+        warn!("--menu ignored: a session-shaping flag requested a direct launch");
+    }
 
     // Menu → Loading: the session resource the app drives through
     // `SessionPhase` transitions (`load_session_world` takes it to
@@ -857,7 +872,14 @@ fn main() {
             .insert_resource(menu::MenuData::new(menu_store, has_mods, menu_bound))
             .add_systems(
                 Update,
-                (menu::menu_watch, menu::menu_input, menu::menu_present).chain(),
+                (
+                    menu::menu_watch,
+                    // Frozen during a capture like every other input: a
+                    // `--menu --frames` screenshot must be reproducible.
+                    menu::menu_input.run_if(not(capturing)),
+                    menu::menu_present,
+                )
+                    .chain(),
             );
     }
     if cli.bot {
@@ -868,7 +890,12 @@ fn main() {
     }
     if cli.screenshot.is_some() || cli.frames.is_some() {
         app.insert_resource(SmokeTest {
-            world: world_label,
+            // A menu capture never loaded a world — say so in the record.
+            world: if menu_mode {
+                "menu".to_string()
+            } else {
+                world_label
+            },
             screenshot: cli.screenshot.clone(),
             frames_left: cli.frames.unwrap_or(600),
             pending: None,
