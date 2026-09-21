@@ -41,7 +41,17 @@ Choose the highest-value ready small slice; repair current regressions before un
 **Next selected slice: F16-B remainder (vehicle/paint selectability
 query for F17's garage), F16-C evidence run, F15-B remainder,
 F13-B/F14-B remainders, or F11-C remainder** — the latest iteration
-landed F16-B.2, event availability derived state (DSN-17). Before that
+repaired F16-B.2's external-review blocker: `crash_gate` computed the
+`midtrm<N>` lesson-group bounds (`3N-2`…`3N`) in u32 on an authored
+tag number, so `N >= 1431655765` panicked under overflow checks and
+`midtrm2863311533` wrapped onto real group 5 in release — a silent
+wrong gate. The bounds now compute in u64, so an out-of-range tag can
+never match a lesson row and falls through to the existing
+no-lessons diagnostic + `Open`; regression test
+`an_out_of_range_midterm_tag_is_open_and_diagnosed` authors lesson5-7
+plus the wrapping tag and fails both ways under the old code. Before
+that the iteration landed F16-B.2, event availability derived state
+(DSN-17). Before that
 the iteration repaired F16-B.1's first
 external-review finding: the two remaining unscoped `ResultLedger`
 rank consumers could report a stale prior-generation place after an

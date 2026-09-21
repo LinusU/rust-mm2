@@ -143,6 +143,39 @@ fn crash_course_gates_follow_the_authored_tags() {
     assert!(table.diagnostics[0].contains("crash6"));
 }
 
+/// A `midtrm<N>` tag number is authored data — `3N` can exceed the
+/// u32 lesson numbers without naming any real group. The group
+/// arithmetic must not overflow (a debug-build panic) nor wrap onto
+/// a real lesson group (a silent wrong gate in release): the row
+/// fails open and is diagnosed. `midtrm2863311533` wraps to group 5
+/// under u32 arithmetic — with lesson5-7 authored, a wrapping build
+/// would lock the midterm on them with no diagnostic.
+#[test]
+fn an_out_of_range_midterm_tag_is_open_and_diagnosed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let crash_row = |desc: &str| format!("{desc},0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,1");
+    write(
+        tmp.path(),
+        "race/testcity/mmcrashdata.csv",
+        &format!(
+            "{MM_HEADER}\n{}\n",
+            ["lesson5", "lesson6", "lesson7", "midtrm2863311533"]
+                .map(crash_row)
+                .join("\n")
+        ),
+    );
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(tmp.path(), 0).unwrap();
+    let cat = EventCatalog::scan(&vfs, "testcity");
+    let table = availability_table(&cat);
+    assert_eq!(
+        gate(&table, EventTableKind::CrashCourse, "crash3"),
+        &EventGate::Open
+    );
+    assert_eq!(table.diagnostics.len(), 1);
+    assert!(table.diagnostics[0].contains("crash3"));
+}
+
 /// A midterm whose whole lesson group is absent fails open and is
 /// reported — the diagnostic, not silence, is the finding.
 #[test]

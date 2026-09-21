@@ -134,11 +134,17 @@ fn crash_gate(
         CrashTag::Lesson(_) => EventGate::Open,
         CrashTag::Midterm(n) => {
             // Group N's lessons are `lesson{3N-2}`…`lesson{3N}` — the
-            // tag numbering matches the authored order (CC-2).
-            let first = 3 * n.saturating_sub(1) + 1;
+            // tag numbering matches the authored order (CC-2). The tag
+            // number is authored data: a modded/corrupt table can name
+            // any u32, and `3N` can exceed the lesson numbers' range
+            // without ever matching a row — compute in u64 so that
+            // case falls through to the no-lessons diagnostic instead
+            // of panicking (debug) or wrapping onto a real group
+            // (release).
+            let first = 3 * u64::from(n.saturating_sub(1)) + 1;
             let reqs: Vec<EventKey> = lessons
                 .iter()
-                .filter(|(l, _)| (first..first + 3).contains(l))
+                .filter(|(l, _)| (first..first + 3).contains(&u64::from(*l)))
                 .map(|(_, k)| k.clone())
                 .collect();
             if reqs.is_empty() {
