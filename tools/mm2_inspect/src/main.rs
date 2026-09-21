@@ -20,6 +20,7 @@ use mm2_formats::tex::TexFile;
 use mm2_formats::{FormatError, inst};
 
 mod bind;
+mod event;
 mod inventory;
 
 /// Extensions the texture pipeline tries, in preference order — the same
@@ -176,6 +177,29 @@ enum Command {
         /// event the producer cannot build. Crash Course events are
         /// reported as `unsupported` (deferred scope, F21), not
         /// failures.
+        #[arg(long)]
+        strict: bool,
+    },
+    /// Inspect one selected event: resolve a `<table>:<row>` row through
+    /// the production catalog and validate its whole dependency closure —
+    /// every attributed record (aimap/pathset deep-parsed), the
+    /// `RaceDefinition` and `OpponentRoster` builds at both difficulties,
+    /// and wired vehicle ids cross-checked against the vehicle catalog.
+    Event {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// City stem the event lives in (`london`, `sf`).
+        #[arg(long)]
+        city: String,
+        /// Event reference: `<table>:<row>` — same vocabulary as
+        /// `mm2 --event` (`checkpoint`/`race`, `blitz`, `circuit`,
+        /// `crash`/`crashcourse`).
+        #[arg(long)]
+        event: String,
+        /// Exit nonzero on an incomplete event, a failed record or
+        /// reference, a record validation issue, a failed production
+        /// build, a roster issue, or a wired vehicle id outside the
+        /// catalog.
         #[arg(long)]
         strict: bool,
     },
@@ -415,6 +439,12 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             table.as_deref(),
             *strict,
         ),
+        Command::Event {
+            dir,
+            city,
+            event: spec,
+            strict,
+        } => event::run(dir, cli.mods.as_deref(), city, spec, *strict),
         Command::Opponents { dir, city, strict } => {
             opponents(dir, cli.mods.as_deref(), city.as_deref(), *strict)
         }

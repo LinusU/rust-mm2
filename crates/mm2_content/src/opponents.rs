@@ -457,7 +457,12 @@ impl OpponentReport {
     }
 }
 
-fn audit_roster(
+/// Run one event through [`opponent_roster`] at one difficulty and
+/// distill the outcome into a [`RosterBuild`], collecting the wired
+/// vehicle ids into `wired_vehicles` for the catalog cross-check —
+/// the per-event unit [`OpponentReport::scan`] and single-event
+/// inspection both share.
+pub fn audit_roster(
     vfs: &Vfs,
     event: &CatalogEvent,
     difficulty: Difficulty,

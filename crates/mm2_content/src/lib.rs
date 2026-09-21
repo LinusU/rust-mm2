@@ -44,11 +44,11 @@ pub use model::{
 pub use nav::{NavLoadError, load_nav_graph, load_nav_overrides};
 pub use opponents::{
     ExtraRoster, OpponentReport, RosterBuild, RosterBuildError, RosterEntry, RosterSummary,
-    opponent_roster,
+    audit_roster, opponent_roster,
 };
 pub use race_def::{
     PLAYER_SLOT, RaceBuildError, RaceDefBuild, RaceDefEntry, RaceDefReport, RaceDefSummary,
-    race_definition,
+    audit_build, race_definition,
 };
 pub use surface::{
     PsdlSurfaces, SurfaceLoadError, SurfaceSlot, SurfaceTables, load_surface_tables,

@@ -472,7 +472,10 @@ impl RaceDefReport {
     }
 }
 
-fn audit_build(event: &CatalogEvent, difficulty: Difficulty) -> RaceDefBuild {
+/// Run one event through [`race_definition`] at one difficulty and
+/// distill the outcome into a [`RaceDefBuild`] — the per-event unit
+/// [`RaceDefReport::scan`] and single-event inspection both share.
+pub fn audit_build(event: &CatalogEvent, difficulty: Difficulty) -> RaceDefBuild {
     match race_definition(event, difficulty) {
         Ok(def) => RaceDefBuild::Built(RaceDefSummary {
             gates: def.checkpoints.len(),
