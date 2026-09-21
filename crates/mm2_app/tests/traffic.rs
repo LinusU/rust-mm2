@@ -22,7 +22,8 @@ use mm2_formats::bai::Side;
 use mm2_game::{
     DevOverrides, EventRef, EventTableKind, ImpactEvent, LaneCursor, LaneId, LaneKind, Mm2Vfs,
     Player, PlayerControl, PlayerId, PlayerVehicle, Session, SessionConfig, SessionMode,
-    SessionPhase, SpawnPose, WorldMode, advance_session_tick, despawn_session_entities,
+    SessionPhase, SpawnPose, StuckWindow, WorldMode, advance_session_tick,
+    despawn_session_entities,
 };
 use mm2_vehicle::{VehicleConfig, VehiclePlugin};
 
@@ -513,6 +514,7 @@ fn spawn_follower(app: &mut App, lane: LaneId, along: f32, target_speed: f32) ->
                 cursor: LaneCursor { lane, along },
                 target_speed,
                 speed: target_speed.max(0.0),
+                stuck: StuckWindow::new(pos.to_array()),
             },
             RigidBody::Kinematic,
             Collider::cuboid(1.8, 0.9, 3.2),
@@ -1331,5 +1333,161 @@ fn an_occupied_exit_lane_holds_the_transfer_at_the_lane_end() {
             car_state(a, car).is_none_or(|(_, _, c)| c.lane != lane_r0)
         }),
         "the freed exit was never taken"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// F10-B.3 bounded stuck recovery
+// ---------------------------------------------------------------------------
+
+/// A follower penned behind a parked participant forever makes no
+/// progress: once `window_ticks` pass without `min_displacement` of
+/// movement it leaves the world — despawn into the pool the
+/// maintainer refills is the bounded recovery, never a drive-through
+/// — and every car penned the same way recovers the same way, counted
+/// as `traffic.stuck` outcomes (F10-AC05's stuck reporting leg).
+#[test]
+fn a_penned_car_is_recycled_after_the_stuck_window() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(d, "city/test.psdl", synthetic_psdl());
+    write(d, "city/test.bai", bai_bytes());
+    write(d, "city/test.aimap", density0_aimap());
+    ambient_assets(d, "va_test_a");
+    ambient_assets(d, "va_test_b");
+    let mut app = test_app(city_config(), vfs_of(d));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    {
+        // A two-second window: comfortably past the approach-and-
+        // brake, far under any wait the junction rules could
+        // legitimately impose.
+        let mut t = app.world_mut().resource_mut::<AmbientTraffic>();
+        t.stuck_policy.window_ticks = 240;
+    }
+    let lane = {
+        let traffic = app.world().resource::<AmbientTraffic>();
+        traffic
+            .graph()
+            .lanes()
+            .iter()
+            .find(|l| l.arc.is_some() && l.length > 22.0)
+            .map(|l| l.id)
+            .expect("the fixture authors routable lanes")
+    };
+    let blocker_at = {
+        let traffic = app.world().resource::<AmbientTraffic>();
+        Vec3::from(
+            traffic
+                .graph()
+                .sample_lane(lane, 20.0)
+                .expect("the lane samples")
+                .position,
+        )
+    };
+    app.world_mut().spawn((
+        Player {
+            id: PlayerId(93),
+            control: PlayerControl::Ai,
+        },
+        Position(blocker_at),
+    ));
+
+    // Two fixed drive ticks run per update (120 Hz under a 1/60
+    // manual clock), so the 240-tick window cannot fire before ~120
+    // updates of standing.
+    for (i, spawn_at) in [10.0f32, 8.0].iter().enumerate() {
+        let car = spawn_follower(&mut app, lane, *spawn_at, 15.0);
+        let mut min_gap = f32::MAX;
+        let mut despawned_at = None;
+        for tick in 0..600 {
+            app.update();
+            match car_state(&mut app, car) {
+                Some((pos, _, _)) => min_gap = min_gap.min(pos.distance(blocker_at)),
+                None => {
+                    despawned_at = Some(tick);
+                    break;
+                }
+            }
+        }
+        let at = despawned_at.expect("the penned car was never recovered");
+        assert!(
+            at >= 100,
+            "car {i} despawned at update {at} — the 240-tick window never ran"
+        );
+        assert!(
+            min_gap >= 4.0,
+            "car {i} reached {min_gap} m of the blocker — the recovery drove through it"
+        );
+        assert_eq!(
+            app.world().resource::<AmbientTraffic>().stuck,
+            i + 1,
+            "each penned car must count as a stuck outcome"
+        );
+    }
+    // The lane ahead of the blocker is empty because the cars left
+    // the world — nothing teleported through it.
+    for (_, pos) in ambient_cars(&mut app) {
+        assert!(
+            pos.distance(blocker_at) >= 4.0,
+            "a car materialised past the pen: {pos:?}"
+        );
+    }
+}
+
+/// The window must not trip on a legitimate hold: a car standing at a
+/// red light waits at most one member cycle — far under the designed
+/// bound — then crosses on its green, its window resetting on the
+/// first metres of progress.
+#[test]
+fn a_signal_wait_shorter_than_the_window_never_recovers() {
+    let install = junction_install(1, 1);
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    {
+        let mut t = app.world_mut().resource_mut::<AmbientTraffic>();
+        // A 1200-tick window triples the worst hold this junction can
+        // impose (one member cycle: 240 green + 120 all-red).
+        t.stuck_policy.window_ticks = 1200;
+        t.junctions.policy.green_ticks = 240;
+        t.junctions.policy.clear_ticks = 120;
+    }
+    let lane_r0 = lane(0, Side::Right);
+
+    // Spawn inside road 1's green so the car's whole red stands ahead
+    // of it.
+    assert!(
+        run_until(&mut app, 1500, |a| {
+            let t = a.world().resource::<AmbientTraffic>();
+            t.junctions.green_road(t.graph(), 0) == Some(1)
+        }),
+        "road 1 never held green"
+    );
+    let car = spawn_follower(&mut app, lane_r0, 20.0, 15.0);
+
+    // 1000 updates = 2000 drive ticks > the window: the car must
+    // cross on its green long before then, alive throughout.
+    let mut crossed = false;
+    for _ in 0..1000 {
+        app.update();
+        match car_state(&mut app, car) {
+            Some((_, _, cur)) if cur.lane == lane_r0 => {}
+            Some(_) => {
+                crossed = true;
+                break;
+            }
+            None => panic!("a legitimate signal wait tripped the stuck recovery"),
+        }
+    }
+    assert!(crossed, "the held car never got its green");
+    assert_eq!(
+        app.world().resource::<AmbientTraffic>().stuck,
+        0,
+        "a legitimate red wait counted as stuck"
     );
 }

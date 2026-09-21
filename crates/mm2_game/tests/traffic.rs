@@ -952,3 +952,39 @@ fn junction_speed_brakes_to_the_stop_line_and_never_accelerates() {
     let v = junction_speed(3.0, -1.0, JunctionGate::Closed, dt, &p);
     assert!((v - (3.0 - 9.0 / 120.0)).abs() < 1.0e-6, "{v}");
 }
+
+/// The stuck window (F10-B.3): "cannot get anywhere", not "moved
+/// slowly" — progress past `min_displacement` re-anchors, a full
+/// stationary window expires on its bound tick and stays expired, and
+/// a non-finite pose resets rather than counting as a stall.
+#[test]
+fn stuck_window_resets_on_progress_and_expires_stationary() {
+    let policy = StuckPolicy {
+        window_ticks: 10,
+        min_displacement: 4.0,
+    };
+    let mut w = StuckWindow::new([0.0, 0.0, 0.0]);
+    // Standing still fills the window without expiring early.
+    for _ in 0..9 {
+        assert!(!w.tick([0.0, 0.0, 0.0], &policy));
+    }
+    // Progress past the bound re-anchors and zeroes the window.
+    assert!(!w.tick([5.0, 0.0, 0.0], &policy));
+    assert_eq!((w.ticks, w.anchor), (0, [5.0, 0.0, 0.0]));
+    // Exactly-under progress keeps counting — a penned car nudged a
+    // hair is still penned.
+    assert!(!w.tick([5.0 + 3.9, 0.0, 0.0], &policy));
+    assert_eq!(w.ticks, 1);
+    // A full stationary window expires on its bound tick — and stays
+    // expired while the car is left in place, so a late despawn still
+    // reads stuck.
+    for _ in 0..8 {
+        assert!(!w.tick([8.9, 0.0, 0.0], &policy));
+    }
+    assert!(w.tick([8.9, 0.0, 0.0], &policy));
+    assert!(w.tick([8.9, 0.0, 0.0], &policy));
+    // A non-finite pose resets rather than counting as "no progress".
+    let mut nan = StuckWindow::new([0.0, 0.0, 0.0]);
+    assert!(!nan.tick([f32::NAN; 3], &policy));
+    assert_eq!(nan.ticks, 0);
+}

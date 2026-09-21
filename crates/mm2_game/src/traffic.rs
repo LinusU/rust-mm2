@@ -878,6 +878,102 @@ impl Junctions {
     }
 }
 
+// ---------- stuck recovery (F10-B.3) ----------
+
+/// Bounds on how long an ambient car may go without progress before
+/// the runtime recycles it. All values are designed: the original's
+/// stuck handling is unverified (UNK-12 covers the ambient policy
+/// constants generally), so the window is sized against the worst
+/// *legitimate* wait this controller can impose — a junction's
+/// longest red is `(members − 1) × (green + clear)` under
+/// [`JunctionPolicy`], ~21 s at four members and ~35 s at six — not
+/// tuned to observed retail behaviour.
+///
+/// The recovery the runtime applies on expiry is despawn into the
+/// pool the maintainer refills from — bounded, never a teleport
+/// through whatever pens the car (the F10 spec's explicit bar on
+/// aggressive unconditional teleports). A multi-cycle queue tail
+/// *can* outwait the window at a heavily loaded signal: that car is
+/// sacrificed to the recycler, which is the designed trade — the
+/// freed slot repopulates elsewhere and the queue drains instead of
+/// freezing the population.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StuckPolicy {
+    /// Drive ticks a car may go without `min_displacement` of
+    /// progress before it is declared stuck — 4800 is 40 s at the
+    /// 120 Hz fixed step, roughly double a four-member signal's worst
+    /// red and beyond a six-member one's.
+    pub window_ticks: u64,
+    /// Progress that resets the window (m). Large enough that
+    /// stop-line creep and solver jitter never read as progress;
+    /// small enough that a queue genuinely advancing a car-length at
+    /// a time keeps its cars.
+    pub min_displacement: f32,
+}
+
+impl Default for StuckPolicy {
+    fn default() -> Self {
+        Self {
+            window_ticks: 4800,
+            min_displacement: 4.0,
+        }
+    }
+}
+
+/// A car's displacement window for stuck detection: the anchor the
+/// window measures from plus the consecutive drive ticks gone without
+/// `min_displacement` of progress. The test is "cannot get anywhere",
+/// not "moved slowly" — a penned car and a parked blocker look the
+/// same to a speed check, but only progress resets the window, so a
+/// car held at a legitimate red whose light turns green re-anchors on
+/// its first metres and never recovers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StuckWindow {
+    /// World position the current window measures progress from.
+    pub anchor: [f32; 3],
+    /// Consecutive ticks the car has stayed within
+    /// [`StuckPolicy::min_displacement`] of `anchor`.
+    pub ticks: u64,
+}
+
+impl StuckWindow {
+    /// Start a window at `pos` — call once at spawn.
+    pub fn new(pos: [f32; 3]) -> Self {
+        Self {
+            anchor: pos,
+            ticks: 0,
+        }
+    }
+
+    /// One drive tick; `pos` is the car's position *after* this
+    /// tick's move. Returns `true` on the tick the window expires —
+    /// and keeps returning `true` while the caller leaves the car
+    /// alive, so a late despawn still reads stuck. A non-finite
+    /// position resets the window rather than counting as "no
+    /// progress": the driver already despawns non-finite poses
+    /// upstream, and a NaN gap must not masquerade as a stall.
+    pub fn tick(&mut self, pos: [f32; 3], policy: &StuckPolicy) -> bool {
+        if !pos.iter().all(|c| c.is_finite()) {
+            self.ticks = 0;
+            return false;
+        }
+        let d = [
+            pos[0] - self.anchor[0],
+            pos[1] - self.anchor[1],
+            pos[2] - self.anchor[2],
+        ];
+        let reach = policy.min_displacement.max(0.0);
+        if d[0] * d[0] + d[1] * d[1] + d[2] * d[2] >= reach * reach {
+            self.anchor = pos;
+            self.ticks = 0;
+            false
+        } else {
+            self.ticks = self.ticks.saturating_add(1);
+            self.ticks >= policy.window_ticks
+        }
+    }
+}
+
 /// The speed a closed gate allows at `dist_to_stop` metres before the
 /// stop line — a `decel`-limited ramp to a standstill at the line. An
 /// open gate imposes nothing (returns `speed`); the law never

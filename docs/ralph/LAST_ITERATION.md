@@ -1,89 +1,84 @@
 # Last implementation iteration
 
-- Task ID and title: F10-B.2 review repair — the external review of
-  `d055433` (authored junction rules gate lane transfers) found the
-  stop-sign FCFS queue deadlocks for exactly the queueing regime it
-  exists for: a closed gate's `junction_speed` ramp converges to
-  `speed = dist_to_stop / approach_time`, so the driver's
-  `ds = min(speed*dt, dist_to_stop)` decays the gap geometrically and
-  the f32 cursor asymptotes ~1.1e-4 m short of the line. A car then
-  never satisfies `gate()`'s `at_line` (`dist_to_stop <= 0`), never
-  registers in the FCFS queue, and waits forever — invisible to
-  `jq=`, which used the same `<= 0` test.
-- Starting commit: `d055433f488ba55ff60bf2b136ae05d6766b529d` on
-  `ralph/night`; tree was clean.
-
-## Root cause
-
-Not a test expectation or missing capability — an implementation
-defect in `drive_ambient`'s closed-gate stepping plus an
-exact-zero `at_line` definition. Verified independently with an f32
-simulation of the per-tick update: resuming from rest at 7/9/14 m of
-braking room freezes permanently at `dist_to_stop ≈ 1.14e-4`
-(ds ≈ half-ULP of `along ≈ 23.5`, rounds to even); only fast
-approaches landed, by clamping onto the line while still moving.
+- Task ID and title: F10-B.3 — bounded stuck recovery for ambient
+  traffic (spec req 3's "obstruction response and stuck recovery";
+  F10-AC05's "stuck-car outcomes" reporting leg). Selected per the
+  selection policy's F10-B remainder: a car penned forever — behind a
+  parked participant, a queue that never drains, an `AlwaysStop` end,
+  a permanently occupied junction exit — previously waited
+  indefinitely; the only recovery was the 400 m distance recycler.
+- Starting commit: `ff80f1dcc29bafb3f135ac81fb916c7b6dfc3ce7` on
+  `ralph/night`; tree was clean, previous external review verdict pass
+  (F10-B.2), so this is feature work, not a repair.
 
 ## What changed
 
-- `mm2_game::traffic::JunctionPolicy` — new `stop_line_tolerance`
-  (0.1 m, designed like every other constant here): a car that close
-  to the stop line counts as standing on it. Documented why "at the
-  line" must be a tolerance, not `dist <= 0`.
-- `mm2_app::traffic::drive_ambient` — one `at_line` judgement
-  (`dist_to_stop <= stop_line_tolerance`) now feeds all three
-  consumers the review named: `gate()`'s registration input, the
-  `junction_held` counter, and the closed-gate `ds` clamp — inside
-  the tolerance the residual is closed outright (bounded by the
-  tolerance, never past the line) so the car stands *on* the line
-  instead of halving a micrometre gap forever. Open-gate and
-  out-of-tolerance stepping are unchanged, so the clamp still never
-  lets a closed-gate car past the line.
-- `tests/traffic.rs` (mm2_app) — tightened
-  `a_stop_sign_serialises_competing_approaches_in_arrival_order`:
-  both cars must actually cross (finite tick — `usize::MAX` no
-  longer sorts first) and `stood` now requires `along >= 23.0`
-  (the line is at 23.5). New regression test
-  `a_queued_follower_reaches_the_line_and_takes_its_turn`: the exact
-  reported scenario — a follower queued ~7 m behind the stop-sign
-  head resumes from rest, must stand at the line, enter the FCFS
-  queue after the head departs (`junctions.waiting() >= 1`), and
-  take the junction in order. Under the old code B stalls ~1e-4 m
-  short and every assertion after `a_crossed` fails.
+- `mm2_game::traffic` — new `StuckPolicy` (`window_ticks` 4800 = 40 s
+  at 120 Hz, `min_displacement` 4 m; designed values, UNK-12 like
+  every ambient constant) and `StuckWindow` (anchor + still-ticks).
+  The window is sized past the worst *legitimate* wait this
+  controller can impose — a junction's longest red is
+  `(members − 1) × (green + clear)`, ~2520 ticks at four members —
+  so a real signal hold never trips it. Progress ≥ `min_displacement`
+  re-anchors (the test is "cannot get anywhere", not "moved slowly");
+  a non-finite pose resets rather than counting as a stall.
+- `mm2_app::traffic` — `AmbientCar` carries a `StuckWindow` seeded at
+  spawn; `drive_ambient` expires it after the post-move position
+  write: despawn + `junctions.depart` (queue shedding like the
+  dead-end/recycle paths) + `traffic.stuck += 1`. The recovery is
+  removal into the pool `maintain_ambient` refills — bounded, and
+  never a teleport through whatever pens the car (the spec's explicit
+  bar). `AmbientTraffic.stuck_policy` is `pub` so tests/evidence runs
+  can bind a shorter window; `stuck=` joins the `traf=` smoke record.
+- Recovery trade-off recorded in code: a multi-cycle queue tail at a
+  heavily loaded signal *can* outwait the window — that car is
+  sacrificed to the recycler so the queue drains instead of freezing
+  the population.
 
 ## Evidence
 
-- f32 simulation of the per-tick update (old vs new rule): resume
-  from rest at 7/9/14 m never lands under the old rule (frozen at
-  dist ≈ 1.14e-4); under the tolerance all regimes land in bounded
-  ticks (528–723 ticks ≈ 4.4–6 s at 120 Hz) and a 15 m/s approach
-  still lands via the existing overshoot clamp.
-- `cargo test -p mm2_app --test traffic` — 13 pass (+1 regression
-  test); `cargo test -p mm2_game --test traffic` — 20 pass.
+- `cargo test -p mm2_game --test traffic` — 21 pass (+1:
+  `stuck_window_resets_on_progress_and_expires_stationary` —
+  re-anchor on progress, just-under progress keeps counting, expiry
+  on the bound tick stays expired, NaN resets).
+- `cargo test -p mm2_app --test traffic` — 15 pass (+2:
+  `a_penned_car_is_recycled_after_the_stuck_window` — a parked
+  participant pens a follower; with `window_ticks=240` it despawns
+  after the bound having never closed inside 4 m, and a second
+  penned follower recovers identically, `stuck` counting each;
+  `a_signal_wait_shorter_than_the_window_never_recovers` — a
+  1200-tick window over a ≤360-tick red: the car stands, crosses on
+  green, `stuck=0`).
 - `cargo fmt --all -- --check` — PASS.
 - `cargo clippy --locked --workspace --all-targets --all-features
   -D warnings` — PASS.
 - `cargo test --locked --workspace` — PASS, 49 suites, 0 failures.
-- Retail headless smoke (real install, this change):
+- Retail headless smoke (install `fnv1a64:e91e6cd4b2ae30d9`):
   - `--city sf --frames 600` → `status=pass … traf=16/16 sp=23
-    rec=7 dead=0 uns=0 q=0 jq=5`.
+    rec=7 dead=0 uns=0 q=0 jq=5 stuck=0` — prior counters unchanged.
   - `--city london --frames 600` → `status=pass … traf=16/16 sp=21
-    rec=5 dead=0 uns=0 q=0 jq=3`.
-  Held counts match the pre-repair run; the difference is the held
-  cars now genuinely stand on the line (registered/queued), which
-  only the synthetic queue test can observe end-to-end.
+    rec=5 dead=0 uns=0 q=0 jq=3 stuck=0`.
+  - `--city sf --frames 3000` (6000 ticks > the window) →
+    `traf=16/16 sp=37 rec=21 dead=0 uns=0 q=0 jq=5 stuck=0` — a
+    moving player never pens a car, so no organic stuck outcome was
+    observed on retail; the recovery path is synthetic-verified.
+  - `--city london --spawn=0.4,5.5,-720,0 --frames 3000` →
+    `status=pass … moved=44m … stuck=0` (opportunistic pen attempt
+    on the pedestrianised street; the player kept bumping around,
+    never penned a car for the window).
 
 ## Still open
 
-- Signal/dwell/stop-line/entry-clearance values remain designed —
-  original junction timing unverified (UNK-12); `stop_line_tolerance`
-  joins that set.
-- A car mid-approach when its phase flips red still freezes wherever
-  it stands (possibly just past the line) — bounded, safe, original
-  clear-the-box behaviour unverified. Cars landing via the overshoot
-  regime still arrive at the line moving ~8–14 m/s and bleed speed
-  standing (designed abruptness).
+- Stuck-window constants are designed — original stuck/despawn
+  behaviour unverified (UNK-12). Despawn near the player is a
+  visible pop (no occlusion check); queue-tail sacrifice at heavily
+  loaded signals is a designed trade, not an original rule.
 - F10-AC02 remainder: no yielding to crossing traffic inside the
-  box; F10-AC04: spawn-vs-spawn overlap unchecked; F10-AC03:
-  kinematic followers stop short, no collision fidelity or
-  lane-change passing. No rendered/GPU check of junction behaviour
-  (headless only); multiplayer union-of-interest bubbles open.
+  box (a transfer still cannot see same-tick transfers); F10-AC04:
+  spawn-vs-spawn/spawn-vs-participant overlap unchecked;
+  F10-AC03: kinematic followers stop short, no collision fidelity
+  or lane-change passing. Multiplayer union-of-interest bubbles,
+  signal-prop rendering, rendered/GPU junction checks all open.
+- A car mid-approach when its phase flips red still freezes wherever
+  it stands (bounded, safe, original clear-the-box behaviour
+  unverified).

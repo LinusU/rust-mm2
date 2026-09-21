@@ -22,10 +22,9 @@
 //! forward corridor senses every `Player` participant and other
 //! ambient cars, and the follow law brakes to a bounded stop behind
 //! the nearest blocker — queueing, never shoving — and resumes when
-//! it clears. Lane-change passing and stuck recovery beyond the
-//! wait-and-recycle bound stay open (F10-B/F10-C remainder), and
-//! dynamic car-vs-player crash fidelity (AC03) is not claimed — the
-//! follower stops short, nothing more.
+//! it clears. Lane-change passing stays open (F10-B/F10-C remainder),
+//! and dynamic car-vs-player crash fidelity (AC03) is not claimed —
+//! the follower stops short, nothing more.
 //!
 //! F10-B.2 adds the junction controller: the authored `vehicleRule`
 //! on each road end (BAI) gates the lane transfer — `NeverStop`
@@ -42,6 +41,16 @@
 //! materialise inside a junction queue. Signal timing, dwells,
 //! stop-line inset and entry clearance are designed values (the
 //! original's are unverified, UNK-12).
+//!
+//! F10-B.3 adds the bounded stuck recovery the spec's "obstruction
+//! response and stuck recovery" requirement asks for: each car runs a
+//! displacement window (`StuckWindow`/`StuckPolicy`, designed — the
+//! original's handling is unverified) and a car that cannot make
+//! `min_displacement` of progress for `window_ticks` despawns into
+//! the pool `maintain_ambient` refills from. That is a bounded
+//! recovery — the window sits far beyond the worst legitimate wait a
+//! signal or draining queue can impose, and the car leaves the world
+//! rather than teleporting through whatever pens it.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
@@ -55,9 +64,9 @@ use mm2_formats::veh::AiVehicleData;
 use mm2_game::{
     AmbientRoster, AmbientSpec, AuthorityRole, FollowPolicy, JunctionGate, Junctions, LaneAdvance,
     LaneCursor, LaneId, NavGraph, NavOverrides, NavRng, ObjectIdentity, Player, Session,
-    SessionConfig, SessionEntity, SessionPhase, SpawnDirective, SpawnDraw, SpawnPolicy, WorldMode,
-    advance_lane_cursor, corridor_gap, draw_spawn, eligible_lanes, follow_speed, junction_speed,
-    plan_ambient,
+    SessionConfig, SessionEntity, SessionPhase, SpawnDirective, SpawnDraw, SpawnPolicy,
+    StuckPolicy, StuckWindow, WorldMode, advance_lane_cursor, corridor_gap, draw_spawn,
+    eligible_lanes, follow_speed, junction_speed, plan_ambient,
 };
 use tracing::{info, warn};
 
@@ -107,6 +116,12 @@ pub struct AmbientTraffic {
     /// red, stop-sign dwell/queue, `AlwaysStop`) — refreshed every
     /// `drive_ambient` tick.
     pub junction_held: usize,
+    /// Cars despawned by the bounded stuck recovery (F10-B.3) — the
+    /// "stuck-car outcomes" F10-AC05 asks the record to report.
+    pub stuck: usize,
+    /// The displacement-window policy the recovery runs under —
+    /// `pub` so evidence runs and tests can bind a shorter window.
+    pub stuck_policy: StuckPolicy,
     /// The per-junction right-of-way/signal controller (F10-B.2) —
     /// session-scoped like the plan it polices.
     pub junctions: Junctions,
@@ -136,6 +151,11 @@ pub struct AmbientCar {
     /// `target_speed` on a clear corridor, braked down to a bounded
     /// stop by the obstruction sense (F10-B.1).
     pub speed: f32,
+    /// Displacement window for the bounded stuck recovery (F10-B.3):
+    /// accumulates drive ticks without `stuck_policy.min_displacement`
+    /// of progress; on expiry the car despawns into the pool the
+    /// maintainer refills from.
+    pub stuck: StuckWindow,
 }
 
 /// Load the ambient setup for this session and spawn the initial plan.
@@ -233,6 +253,8 @@ pub fn load_ambient_traffic(
         dropped: plan.dropped,
         queued: 0,
         junction_held: 0,
+        stuck: 0,
+        stuck_policy: StuckPolicy::default(),
         junctions: Junctions::default(),
         issues: plan
             .issues
@@ -365,6 +387,7 @@ fn spawn_ambient_car(
                 },
                 target_speed: directive.target_speed,
                 speed: directive.target_speed.max(0.0),
+                stuck: StuckWindow::new(pos.to_array()),
             },
             RigidBody::Kinematic,
             class.collider.clone(),
@@ -413,8 +436,9 @@ fn spawn_ambient_car(
 /// blocks it — and resumes when the corridor clears. `traffic.queued`
 /// reports the held count each tick.
 ///
-/// A car that runs out of road despawns; `maintain_ambient` decides
-/// whether a replacement spawns.
+/// A car that runs out of road despawns, as does one whose
+/// displacement window expires (F10-B.3 stuck recovery);
+/// `maintain_ambient` decides whether a replacement spawns.
 #[allow(clippy::type_complexity)] // Bevy system: the two queries are the system's actual signature
 pub fn drive_ambient(
     session: Res<Session>,
@@ -454,6 +478,7 @@ pub fn drive_ambient(
     blockers.extend(cars.iter().map(|(e, _, p, _, _, _)| (e, p.0)));
     let follow = FollowPolicy::default();
     let jpolicy = traffic.junctions.policy;
+    let stuck_policy = traffic.stuck_policy;
     // The controller's clock ticks with the driver, then sheds queue
     // entries whose cars the recycler collected since last tick.
     traffic.junctions.advance_tick();
@@ -593,6 +618,21 @@ pub fn drive_ambient(
         position.0 = pos;
         rotation.0 = rot;
         *transform = Transform::from_translation(pos).with_rotation(rot);
+        // Bounded stuck recovery (F10-B.3): a car that has made no
+        // `min_displacement` of progress for `window_ticks` — penned
+        // behind a parked blocker, trapped in a queue that never
+        // drains, standing at an `AlwaysStop` end or a permanently
+        // occupied exit — leaves the world; the maintainer's refill
+        // is the recovery. The window sits far beyond the worst
+        // legitimate wait (a multi-member signal's full red cycle),
+        // so an ordinary hold never trips it, and the despawn is
+        // bounded rather than a teleport through whatever pens it.
+        if car.stuck.tick(pos.to_array(), &stuck_policy) {
+            traffic.stuck += 1;
+            traffic.junctions.depart(entity);
+            commands.entity(entity).despawn();
+            continue;
+        }
     }
     traffic.queued = queued;
     traffic.junction_held = junction_held;
