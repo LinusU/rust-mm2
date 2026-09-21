@@ -67,13 +67,19 @@ pub enum EventSetupError {
 /// An event session's authored content beyond the race definition —
 /// the `.pathset` overlay records the event's stem owns (F03-AC04:
 /// course barricades, jumps, prop arrangements stamped only while the
-/// event session lives).
+/// event session lives) and the difficulty-selected opponent lineup
+/// (F15-A).
 pub struct EventSetup {
     /// The shared race runtime definition.
     pub definition: RaceDefinition,
     /// Logical paths of the event's `.pathset` records, in catalog
     /// order (records are stored sorted by logical path).
     pub pathsets: Vec<String>,
+    /// The event's authored opponent lineup at the session difficulty.
+    /// A roster that fails to build degrades to empty — the race still
+    /// runs, with the failure logged — since a missing `.aimap` never
+    /// blocks an otherwise runnable event.
+    pub roster: mm2_game::OpponentRoster,
 }
 
 /// Resolve an `EventRef` through the VFS into the event's runtime
@@ -95,9 +101,17 @@ pub fn event_race_setup(
         .filter(|r| r.kind == mm2_formats::racefiles::RaceFileKind::Pathset)
         .map(|r| r.logical.clone())
         .collect();
+    let roster = match mm2_content::opponent_roster(vfs, event, difficulty) {
+        Ok(roster) => roster,
+        Err(e) => {
+            warn!(error = %e, "opponent roster failed to build — racing without opponents");
+            mm2_game::OpponentRoster::default()
+        }
+    };
     Ok(EventSetup {
         definition,
         pathsets,
+        roster,
     })
 }
 

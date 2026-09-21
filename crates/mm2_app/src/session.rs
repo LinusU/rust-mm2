@@ -38,7 +38,7 @@ use tracing::{error, info, warn};
 use crate::camera::{CameraMode, ChaseCamera, FreeCamera};
 use crate::car_visual::{self, WheelMount, WheelSpin};
 use crate::contracts::ImpactFilter;
-use crate::{city, dev_world, race};
+use crate::{city, dev_world, opponents, race};
 
 /// Where the player vehicle (re)spawns. `trailers` holds each spawned
 /// trailer's entity plus its car-space rest offset so a reset can place it
@@ -305,7 +305,7 @@ pub fn load_session_world(
     // definition before the session is declared Ready. An event that
     // cannot load fails the session — it never silently cruises. The
     // authored player slot replaces the world's roam spawn.
-    let mut event_race: Option<RaceDefinition> = None;
+    let mut event_race: Option<(RaceDefinition, mm2_game::OpponentRoster)> = None;
     if world_ok && let SessionMode::Event(event_ref) = &config.mode {
         match race::event_race_setup(&vfs.0, event_ref, config.difficulty) {
             Ok(setup) => {
@@ -359,7 +359,7 @@ pub fn load_session_world(
                         "event pathset overlay stamped"
                     );
                 }
-                event_race = Some(def);
+                event_race = Some((def, setup.roster));
             }
             Err(e) => {
                 error!(error = %e, event = ?event_ref, "event failed to load");
@@ -633,10 +633,25 @@ pub fn load_session_world(
     // the participant's progress are inserted first so `advance_race`
     // can own the release (one `RaceStarted`, one unlock — AC03).
     match event_race {
-        Some(def) => {
+        Some((def, roster)) => {
             commands
                 .entity(vehicle)
                 .insert((RaceProgress::new(&def), TargetSelection::default()));
+            // F15-A.2: the authored opponent lineup spawns as real
+            // participants — own vehicles, own routes, AI control.
+            opponents::spawn_opponents(
+                &mut commands,
+                &vfs.0,
+                &mut assets.meshes,
+                &mut assets.images,
+                &mut assets.materials,
+                &roster,
+                &def,
+                owner,
+                &mut session,
+                spawn.position,
+                spawn.yaw,
+            );
             race::spawn_checkpoint_markers(
                 &mut commands,
                 &mut assets.meshes,

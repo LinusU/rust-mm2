@@ -15,6 +15,7 @@ pub mod decals;
 pub mod dev_world;
 pub mod input;
 pub mod nav_overlay;
+pub mod opponents;
 pub mod race;
 pub mod scripted;
 pub mod session;

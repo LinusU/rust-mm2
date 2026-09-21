@@ -243,6 +243,36 @@ impl TuneFile {
     }
 }
 
+impl TuneBlock {
+    /// Merge `overlay` over `self` in place: overlay fields replace
+    /// same-named fields, overlay blocks merge recursively into
+    /// same-named blocks, and entries only in the overlay are appended.
+    /// Field/block name comparison is exact, matching `field`/`block`
+    /// lookups. Entries only in `self` are preserved — this is the
+    /// "sparse override file" shape MM2's `_opp` tuning files use.
+    pub fn merge_overlay(&mut self, overlay: &TuneBlock) {
+        for entry in &overlay.entries {
+            match entry {
+                TuneEntry::Field(f) => {
+                    self.entries
+                        .retain(|e| !matches!(e, TuneEntry::Field(b) if b.name == f.name));
+                    self.entries.push(entry.clone());
+                }
+                TuneEntry::Block(b) => {
+                    match self
+                        .entries
+                        .iter_mut()
+                        .find(|e| matches!(e, TuneEntry::Block(bb) if bb.name == b.name))
+                    {
+                        Some(TuneEntry::Block(base)) => base.merge_overlay(b),
+                        _ => self.entries.push(entry.clone()),
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn parse_block(toks: &[Token], pos: &mut usize, depth: &mut usize) -> Result<TuneBlock, TuneError> {
     if *depth >= MAX_DEPTH {
         let (line, col) = toks.get(*pos).map(|t| (t.line, t.col)).unwrap_or((0, 0));

@@ -1,111 +1,143 @@
 # Last implementation iteration
 
-- Task ID and title: F15-A.1 — opponent-roster import: the
-  `CatalogEvent → OpponentRoster` producer, the `OpponentReport`
-  audit, and `mm2-inspect opponents`.
-- Starting commit: `5de58083d6d3ec8373e20c9b5d33b45b146a5f9a`
-  (externally checked F06-B.2; branch `ralph/night`).
-- Why this slice: the plan's named candidates (F13-B/F14-B
-  remainders) both block on real opponent participants, and F15-A's
-  first half — "import opponent rosters/route intent" — was a ready
-  dependency-light slice: `.aimap`/`.aimap_p`/`.opp` parsers, the
-  event catalog and `race_def` all exist; what was missing was the
-  production roster contract and an audit path. The driving
-  controller, spawn slots and everything behavioral stay open under
-  F15-A (F15-A.2) — this is data loading, not opponent AI.
+- Task ID and title: F15-A.2 — opponent spawn/drive: the authored
+  `[Opponent]` lineup spawned as real AI participants driving their own
+  `.opp` routes through the shared `VehicleInput` → physics →
+  `advance_race` path.
+- Starting commit: `7328362d3887d1822ac92e1251132d40c11c18f9`
+  (externally checked F15-A.1; branch `ralph/night`).
+- Why this slice: F15-A.1 landed the roster contract; this is its
+  named remaining half — spawn opponent entities into valid start
+  slots and drive the authored routes through the production vehicle
+  sim. The F13-B/F14-B remainders block on real opponent participants.
 - Retail install: `/Users/linus/coding/rust-mm2/retail`
   (`fnv1a64:e91e6cd4b2ae30d9`).
 
 ## What changed
 
-- **`mm2_game::opponent`** (new module): `OpponentRoute` (authored
-  `.opp` points + `length()`), `OpponentSpec` (`vehicle`, resolved
-  `route`, raw `params`, `skill()` = first value), `OpponentRoster`
-  (`entries`, `issues`, `resolved_routes()` keeps dead wired refs
-  distinct from spare files), `OpponentIssue` (`MissingVariant`,
-  `UnresolvedRoute`, `RouteFailed`, `WrongDifficultyTag`,
-  `CountMismatch`, `UnreferencedRoute`).
-- **`mm2_content::opponents`** (new): `opponent_roster(&Vfs,
-  &CatalogEvent, Difficulty)` — `.aimap` binds Amateur, `.aimap_p`
-  Professional with an explicit fallback when an event ships only one
-  variant (recorded as `MissingVariant`).
-  Each `[Opponent]` row keeps its authored slot even when the wired
-  `.opp` does not resolve; route points preserve every authored
-  column. Issues are attached, never dropped or repaired: wired-vs-
-  table `Opponents` count mismatch, dead route ref, `-a-`/`-p-`
-  name-tag disagreement with the selected difficulty, `.opp` records
-  the selected roster references nowhere (scoped per variant — the
-  other difficulty's files are not noise). `OpponentReport::scan`
-  walks a whole city: every catalog event × both difficulties, plus
-  extra roster-bearing stems (aimap files outside the event tables
-  that still wire `[Opponent]` rows) and `VehicleCatalog` vehicle-id
-  resolution.
-- **`mm2-inspect opponents <install> [--city] [--strict]`**: per-event
-  Amateur/Professional lines (wired count, table count when they
-  differ, resolved routes, distinct vehicles, issue count), every
-  issue, extra stems, unresolved vehicles, city totals; `--strict`
-  exits nonzero on any failure or issue.
-- Ledger: `race_def.rs`'s dangling `RACE-12` comment corrected to
-  `RACE-7`; RACE-11 strengthened (the wired-vs-table equality now
-  measured on every table kind, not just checkpoint); RACE-12 new
-  (roster wiring model + spare routes + extras); UNK-11 narrowed to
-  route/parameter semantics and the driving model.
+- **`mm2_content::load_opponent`** (`assemble.rs`): each roster
+  vehicle loads with its authored `tune/vehicle/<id>_opp.vehcarsim`
+  merged over the base tune, not substituted for it. Retail evidence
+  forced this: all 23 `_opp` files are *sparse overrides* — authored
+  values differ (inertia box, drivetrain, horsepower, top speed) but
+  most omit fields the base file carries, and several
+  (`vp4x4_opp`, `vpbus_opp`, `vpcab_opp`…) author transmission data in
+  an alternate schema (`NumGears`/`GearRatios`/`UpshiftRPM`/
+  `DownshiftRPM`/`DownshiftBias`) the player files' `ManualNumGears`/
+  `Low`/`High` band schema does not use. The first retail run failed
+  all six wired `vpbug` opponents on `missing required field
+  "TireDragCoefLong"` before the merge existed. Merge mechanics live
+  in `mm2_formats::tune::TuneBlock::merge_overlay` (generic AST
+  overlay, recursive); the policy and docs stay in `assemble.rs`.
+  `_opp`-only fields our schema doesn't model surface through the
+  existing unrecognised-field warnings — preserved diagnostics, not
+  silent drops. Missing variant → base tune (unchanged fallback);
+  every other dependency (`.info`/`.pkg`/`.bnd`/`.mtx`/`.asnode`/
+  `.vehtrailer`) stays the vehicle's own.
+- **`mm2_app::opponents`** (new): `OpponentDriver` component (authored
+  `OpponentSpec` verbatim + chase index + `ScriptedBot` recovery
+  state); `spawn_opponents` — one session-owned entity per authored
+  roster entry with its own `VehicleDef` (opponent tuning preferred →
+  per-vehicle character, not player clones), minted `ObjectId`/
+  `PlayerId`, `PlayerControl::Ai`, the session's authority role,
+  `DamageSignals`, `RaceProgress` on the shared `RaceDefinition`, the
+  same `vehicle_bundle` + model path as the player. Roster issues log
+  at load; a vehicle that fails to load warns and skips only its
+  authored slot; a dead `.opp` ref spawns and holds still. Trailer
+  rigs spawn without the trailer (no retail roster wires a hauler).
+- **`opponent_drive`** (Update in `main.rs` + `smoke.rs`): gates on
+  `session.is_playing()`, the countdown's `input_locked`, and the
+  participant's own `RaceProgress` state; `route_target` advances
+  past reached anchors (reach radius or the passed-the-plane test —
+  no U-turns back), wraps closed routes (retail circuit `.opp`s
+  close onto their start), and bounds retries on degenerate routes;
+  `scripted_input` — the same normalized-input control law the
+  scripted evidence driver uses — produces steer/throttle/brake with
+  its bounded reverse-and-turn stuck recovery. Route missing or
+  complete → zeroed input (open-route completion means coast; the
+  race progress lives in checkpoints, not the polyline).
+- **`spawn_pose`** (provisional — UNK-16/17): authored `_strtpnts`
+  slot `index+1` when the event ships a grid (slot 0 is the player by
+  convention), else the route's first point, else a designed stagger
+  behind the player; facing always from the route's first leg, since
+  the `a` columns' conventions are unverified. Same hull-clearance
+  lift as the player spawn.
+- **Wiring**: `EventSetup.roster` carries the built roster (build
+  failure degrades to empty with a warning — the race still runs);
+  `load_session_world` spawns opponents before `RaceState` so
+  `advance_race` owns countdown/release for every participant; smoke
+  record gains `opp={resolved}/{spawned}` only when a roster exists
+  (records without a roster stay bit-identical).
+- **Ledger**: RACE-13 new (`_opp` sparse-override shape + alternate
+  Trans schema, measured on all 23 retail files); UNK-11 updated
+  (`.opp` columns measured all-zero → polyline treatment stated;
+  `_opp` consumption noted as designed merge).
 
 ## Tests
 
-- `mm2_content/tests/opponents.rs` — +9 against a synthetic VFS
-  through the production builder: `.aimap`→Amateur; `.aimap_p`
-  preferred for Professional; missing-`_p` fallback; dead route ref
-  retains its authored slot with `UnresolvedRoute`; `-a-` route wired
-  from the `_p` file → `WrongDifficultyTag`; spare routes
-  scoped to the selected variant; count mismatch is diagnostic, not
-  a build failure; incomplete event + crash table rejected/
-  unsupported; `OpponentReport` covers events + extras + vehicle
-  resolution.
-- `mm2_game/tests/opponent.rs` — +3: route `length()` sums segment
-  distances; `skill()` reads the first authored param;
-  `resolved_routes()` counts wired lines only (dead ref excluded,
-  spare file excluded).
+- `mm2_app/tests/opponents.rs` — +11 through `load_session_world` →
+  `advance_race` on a synthetic install (PKG3 geometry + ASCII `.bnd`
+  + base/`_opp` tunes + event/aimap/opp records): distinct entities
+  spawn with `PlayerControl::Ai`/session owner/`RaceProgress`;
+  unloadable vehicle skips only its slot; dead route ref spawns and
+  holds still; countdown locks inputs; `route_target` advance, skip-
+  passed-point (incoming-leg direction), open-route completion,
+  closed-route wrap, degenerate-route bound; `spawn_pose` grid→
+  anchor→stagger preference; two opponents drive their routes and
+  resolve `Finished` through shared validation; restart despawns and
+  respawns the lineup under the new generation.
+- `mm2_content` merge behavior is exercised by the app suite's
+  `_opp`-variant fixture; the `TuneBlock::merge_overlay` mechanics are
+  covered transitively (`_opp` tune omits no fields the app tests
+  depend on — the retail run below is the load-bearing evidence).
 
 ## Commands actually run and results
 
-- `cargo fmt --all -- --check` PASS.
+- `cargo fmt --all -- --check` PASS (after `cargo fmt --all`).
 - `cargo clippy --locked --workspace --all-targets --all-features --
   -D warnings` PASS.
-- `cargo test --locked --workspace` — all groups, 0 failures.
-- `mm2-inspect opponents <retail>` — exit 0. Per city: 64 roster
-  builds at both difficulties, 0 failed, 26 unsupported (the two
-  crash-course tables — no race records). London: 271 opponents
-  wired, 43 issues (all `UnreferencedRoute` — spare `.opp` files,
-  incl. `blitz3`/`blitz4` route files on 0-opponent events). SF: 246
-  wired, 35 issues (34 spare routes + `race0` amateur 6 wired vs 7
-  authored — the RACE-11 anomaly, and the only count mismatch on any
-  table kind). Extras listed: `race/london/race12.aimap` (1 wired),
-  `race/sf/stunt0.aimap` (1 wired + dead `opp-c0.2` ref). 0
-  unresolved vehicle ids; pro lineups field `vpcoop2k`, `vpvwcup`,
-  `vpdb7`, `vppanoz`, `vppanozgt` — all `ready` catalog entries.
-- `mm2-inspect opponents <retail> --strict` — exit 2 on the findings
-  above (expected: strict means "fail on any issue").
+- `cargo test --locked --workspace` — all groups, 0 failures
+  (incl. all 11 new opponent tests).
+- `cargo test -p mm2_app --test opponents` — 11/11 ok.
+- Retail `sf checkpoint:0 --headless --bot --frames 1800` — first run
+  *before* the merge: all 6 wired `vpbug` opponents failed to load
+  (`missing required field "TireDragCoefLong"`), `opp=` absent.
+  After the merge: `opponent roster spawned opponents=6`,
+  `pos=5/7` mid-race — roster issues surface in-run (`race0` 6-wired-
+  vs-7-authored count mismatch + `race0-a-6.opp` unreferenced).
+- Retail `sf checkpoint:0 --headless --bot --frames 5400`:
+  `opp=3/6` — three opponents resolved `Finished` through shared
+  `advance_race` validation; `results=4`, `outcome=finished
+  place=4`, `pos=4/7`. Smoke `status=fail`/`fell through the world`
+  is the scripted bot's pre-existing course limitation (present on
+  the same run before opponents spawned, and in the F12-C bot
+  matrix), not an opponent failure.
+- `mm2-inspect list`/`dump` audit of all 23 retail `_opp` files —
+  the RACE-13 sparse-override/alternate-schema measurement.
 
 ## What this proves / does not prove
 
-- Proves: the authored opponent lineup is loadable per event per
-  difficulty through the production path — real vehicle ids (not
-  player clones), real `.opp` driving lines with every column
-  preserved, the `.aimap`/`.aimap_p` Amateur/Professional binding
-  re-verified across every event table; authored inconsistencies
-  (the `sf/race0` count mismatch, spare route files, the dead
-  `stunt0` ref) are surfaced with the denominator intact.
-- Does not prove: any driving — no opponent entities spawn, no
-  controller consumes the routes, no `.opp` column semantics are
-  claimed (UNK-11 keeps those open); the 10-value `[Opponent]` tail
-  beyond `skill` is raw; how opponents take grid slots is UNK-17;
-  what the spare `.opp` files were for is unknown. This slice is a
-  roster/data contract, not opponent AI.
-- Acceptance IDs: F15-AC01's import leg advanced (roster + distinct
-  vehicles resolved — the "spawn in valid start slots" half needs
-  F15-A.2); AC02–AC06 untouched (all require driving opponents).
-  F15-A stays `active`; F15 stays incomplete.
+- Proves: authored opponent lineups spawn as real participants on
+  retail data — own vehicles with `_opp` opponent tuning where
+  authored, own `.opp` driving lines, shared race validation,
+  countdown gating, session-scoped teardown/restart; opponents
+  complete a retail course ahead of the scripted player (place 4 of
+  7). F15-AC01's spawn leg, AC02 (own vehicles/routes), AC03
+  (countdown/release + recovery law) and AC05's progress leg have
+  retail-backed evidence; the `opp=` smoke field exposes it.
+- Does not prove: exact retail AI behavior — the control law is the
+  shared scripted law (designed), the difficulty/param-tail model is
+  untouched (UNK-11), `.opp` brake/offset/speed columns are preserved
+  but uninterpreted (measured all-zero on sampled routes), `_opp`
+  merge semantics are a designed policy (the alternate Trans schema
+  decodes nowhere), grid-slot assignment stays provisional
+  (UNK-16/17), and `status=fail` on the smoke line is a bot/course
+  limitation. Opponents finishing 3/6 in 90 s is honest evidence of
+  competence, not parity with the original AI.
+- Acceptance IDs: F15-AC01 (spawn + drive legs), AC02, AC03, AC05 —
+  candidate evidence as above; AC04/AC06 (full-mode competitiveness/
+  representative matrix) still open; F15-A stays `active` pending
+  external review; F15-B (difficulty model) queued.
 
 This is a candidate handoff. External code-gate and separate review
 results live in the runner state directory and are not implied by

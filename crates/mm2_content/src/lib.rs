@@ -21,7 +21,7 @@ pub mod opponents;
 pub mod race_def;
 pub mod surface;
 
-pub use assemble::{LoadError, TrailerDef, VehicleDef, load_by_id, load_vehicle};
+pub use assemble::{LoadError, TrailerDef, VehicleDef, load_by_id, load_opponent, load_vehicle};
 pub use catalog::{
     CatalogEntry, DepSet, EXPECTED_STOCK_ROSTER, EntryStatus, VehicleCatalog, VehicleClass,
 };

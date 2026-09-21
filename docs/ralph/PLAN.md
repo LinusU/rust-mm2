@@ -38,9 +38,31 @@
 
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
-**Next selected slice: F15-A.2 opponent spawn/drive leg, F13-B/F14-B
-remainders, or F11-C** — the latest iteration landed F15-A.1, the
-opponent-roster import leg of F15-A: `mm2_game::opponent` declares
+**Next selected slice: F13-B/F14-B remainders, F15-B, or F11-C** —
+the latest iteration landed F15-A.2, the opponent spawn/drive leg of
+F15-A: `mm2_content::load_opponent` loads each roster vehicle with its
+authored `<id>_opp.vehcarsim` tuning merged as a sparse override over
+the base tune (RACE-13 — most `_opp` files omit fields and several
+author an alternate Trans schema; unrecognised `_opp`-only fields
+surface as warnings); `mm2_app::opponents` spawns one session-owned
+participant per authored roster entry — own `VehicleDef` (per-vehicle
+character kept, not player clones), `ObjectId`/`PlayerId`,
+`PlayerControl::Ai`, shared `RaceProgress`, `OpponentDriver` —
+and `opponent_drive` chases the authored `.opp` polyline through the
+same normalized `VehicleInput` control law the scripted evidence
+driver uses (advance-past-reached anchors, closed-route wrap, bounded
+stuck recovery, countdown/hold gates). Provisional (UNK-16/17):
+`_strtpnts` slot `index+1` when a grid ships, else the route anchor,
+else a stagger behind the player; facing from the route's first leg.
+A vehicle that fails to load keeps its authored slot reported and
+skipped; a dead `.opp` ref holds still. Retail `sf checkpoint:0`
+headless: 6 opponents spawn, `opp=3/6` finish through shared
+`advance_race` validation, player places 4/7. Ledger: RACE-13 new
+(`_opp` sparse-override schema measured on all 23 files), UNK-11
+updated. Still open under F15-A's parent: difficulty/param-tail
+driving model and everything F15-B.
+The iteration before landed F15-A.1, the opponent-roster import leg
+of F15-A: `mm2_game::opponent` declares
 `OpponentRoute`/`OpponentSpec`/`OpponentRoster`/`OpponentIssue`;
 `mm2_content::opponents::opponent_roster` builds a roster from a
 `CatalogEvent` — `<stem>.aimap` binds Amateur, `<stem>.aimap_p`
@@ -57,9 +79,7 @@ retail: 64 builds/city, 0 failed, 26 unsupported (crash tables),
 43+34 unreferenced route records, `sf/race0` amateur remains the only
 count mismatch; `--strict` exits 2. Ledger: RACE-12 new, RACE-11
 strengthened to an all-table measurement, UNK-11 narrowed to
-route/parameter semantics + the driving model. Still open under
-F15-A: spawning opponent entities, start slots, and the route-following
-production-vehicle controller (F15-A.2).
+route/parameter semantics + the driving model.
 The iteration before landed the remaining authored-physicals leg of
 F06-B (F06-B.2): `TireSurface` gains `drag` — the def's `drag` field
 consumed raw (`_default` authors 0.0, nothing to divide by) as a
@@ -511,8 +531,9 @@ rendered gameplay; outranks inference.
 | F14-A.1 | implemented | F02-B, F11-B | Circuit/lap binding hardening + evidence. `race_def`: authored `NumLaps` is a checked parameter like every other authored value — `BadParam` on `≤0`/overflow (was a silent `.max(1) as u32` clamp+truncate); `laps: 0` stays unbound on AnyOrder rows (UNK-5 template junk). `RaceProgress::advance` is inert outside `Racing` — re-anchors for `AwaitingStart`, can never re-finish or clear gates once resolved (AC04's once-only rule is now a contract property; F14-AC02's repeated-finish-hits leg). Dead `with_next` builder removed; `Ordered` doc spells out start-lap semantics (lap 1 begins at release, the start-line copy closes each lap). Smoke record gains `lap={cur}/{laps}` for Ordered defs (any-order records bit-identical). Tests: +2 contract (closing gate counts once per completed sequence; resolved participant inert) +1 producer (`NumLaps` 0/-2/5e9 → BadParam, per-difficulty blocks, checkpoint junk ignored); two existing tests now set `Racing` before `advance` to match the driver gate. Retail (`fnv1a64:e91e6cd4b2ae30d9`): `race-defs --table circuit` — 10/10 rows/city, distinct authored laps (london 3am/4pro except c1,c2 2/2, c9 3/2; sf 3/4 except c8-9 2/2), 6–23 gates, 4–7 opp/0 cop, 1–8 slots; london `circuit:0 --bot` → `race=Running cp=2/6 lap=2/3`, `--pro` → `lap=2/4` (bot wedges mid-lap-2 — bot-limited, deterministic, finish previously recorded). AC01 strengthened, AC02 negative legs evidenced; AC03–AC06 open. Externally checked (review pass at `561b8b7`). |
 | F14-B | queued | F14-A | — |
 | F14-C | queued | F14-B, F15-B | — |
-| F15-A | active | F02-B, F09-B, F11-B | Split into A.1 (roster/route-intent import — implemented below). 612 `.opp` files present; no opponent AI yet. Remaining: spawn opponent entities into valid start slots, drive the authored routes through the production vehicle sim (F15-A.2). |
+| F15-A | active | F02-B, F09-B, F11-B | Split into A.1 (roster/route-intent import) + A.2 (spawn/drive — both implemented below). Remaining against the parent: the difficulty/param-tail driving model (UNK-11) and any F15-A acceptance legs the external review still counts open. |
 | F15-A.1 | implemented | F02-B, F09-B, F11-B | Opponent-roster import: `mm2_game::opponent` contract (`OpponentRoute`/`OpponentSpec`/`OpponentRoster`/`OpponentIssue` — `resolved_routes()` keeps dead wired refs distinct from spare files); `mm2_content::opponents::opponent_roster` builds from a `CatalogEvent` — `.aimap`→Amateur, `.aimap_p`→Professional with explicit `MissingVariant` fallback; each row wires geo id + `.opp` route (VFS-resolved, all point columns preserved) + param tail (`skill` = first). Issues: `CountMismatch` vs table `Opponents`, `UnresolvedRoute`/`RouteFailed`, `WrongDifficultyTag`, `UnreferencedRoute` — reported, denominator kept. `OpponentReport::scan` + `mm2-inspect opponents <install> [--city] [--strict]` audit every catalog event ×2 difficulties + extra roster stems + `VehicleCatalog` vehicle resolution. Tests +12 (`tests/opponents.rs` 9 content + `tests/opponent.rs` 3 contract): variant selection, fallback, dead route keeps slot, tag mismatch, scoped spare routes, count mismatch diagnostic, crash/incomplete rejection, extras+vehicle report, route length/skill/wired-count. Retail: 64 builds/city, 0 failed, 26 unsupported (crash tables), 271+246 wired, 0 unresolved vehicles, 43+34 spare routes, `sf/race0` amateur sole count mismatch; `--strict` exits 2. Ledger RACE-11/RACE-12, UNK-11 narrowed. Candidate pending external check. |
+| F15-A.2 | implemented | F15-A.1 | Opponent spawn/drive runtime. `mm2_content::load_opponent` loads each roster vehicle with its authored `<id>_opp.vehcarsim` merged as a sparse override over the base tune (`TuneBlock::merge_overlay`, RACE-13: most `_opp` files omit fields the base carries; several author an alternate Trans schema — `NumGears`/`GearRatios`/`Up|DownshiftRPM`/`DownshiftBias` — whose fields surface as unrecognised-field warnings). `EventSetup.roster` carries the built roster; `load_session_world` calls `spawn_opponents`: one session-owned entity per authored entry — own `VehicleDef` (per-vehicle mass/power/size, not player clones), minted `ObjectId`/`PlayerId`, `PlayerControl::Ai`, session authority role, `DamageSignals`, `RaceProgress` on the shared definition, `OpponentDriver`; load failure warns + skips only its slot; dead `.opp` ref holds still. `opponent_drive` (Update, `main.rs` + `smoke.rs`) chases the `.opp` polyline through `scripted_input` — the same normalized `VehicleInput` law as the evidence bot (proportional steer, corner brake, bounded reverse-and-turn recovery); gates on `is_playing`, countdown lock and resolved participants; `route_target` advances past reached/passed anchors, wraps closed routes, bounded retry on degenerate ones. `spawn_pose` (provisional, UNK-16/17): `_strtpnts` slot `index+1` → route anchor → designed stagger; facing from the route's first leg. Smoke record gains `opp={resolved}/{spawned}` only when a roster exists. Tests +11 (`tests/opponents.rs`, synthetic install incl. `.bnd` fixture): distinct-entity spawn, unloadable-vehicle slot skip, dead-route holds still, countdown lock, route-target advance/skip/open-complete/closed-wrap, spawn-pose preference, drive-and-finish through `advance_race`, restart respawns the lineup. Retail (`fnv1a64:e91e6cd4b2ae30d9`): `sf checkpoint:0 --bot --frames 5400` → `opponent roster spawned opponents=6`, `opp=3/6` resolved `Finished` through shared validation, `results=4`, player `place=4` of `pos=4/7`; roster issues (`race0` count mismatch + `race0-a-6.opp` unreferenced) surface in-run. First run exposed `_opp` files failing the strict tune decoder — fixed by the documented merge. Candidate pending external check. |
 | F15-B | queued | F15-A | — |
 | F15-C | queued | F15-B | — |
 | F16-A | queued | F01-A, F11-A | No profile storage; `players/` dir exists in install (17 files). |

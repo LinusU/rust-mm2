@@ -18,7 +18,8 @@ use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use clap::Parser;
 use mm2_app::session::{ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
-    banger, camera, car_visual, city, contracts, input, nav_overlay, race, scripted, session, smoke,
+    banger, camera, car_visual, city, contracts, input, nav_overlay, opponents, race, scripted,
+    session, smoke,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
@@ -628,6 +629,10 @@ fn main() {
             update_hud,
         ),
     )
+    // AI opponents own their own `VehicleInput` — `vehicle_input` only
+    // writes `PlayerVehicle`, so no ordering is needed. Frozen during
+    // captures like every other driver.
+    .add_systems(Update, opponents::opponent_drive.run_if(not(capturing)))
     // The F09-B overlay draws only while a session carries a loaded
     // CityNav resource.
     .add_systems(

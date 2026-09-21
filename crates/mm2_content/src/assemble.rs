@@ -109,7 +109,58 @@ fn load_mtx(vfs: &Vfs, pkg_stem: &str, part: &str) -> Option<Mtx> {
 /// `paint` selects the paint-job shader set (zero-based); it is validated
 /// here so an invalid index fails before any geometry is emitted.
 pub fn load_vehicle(vfs: &Vfs, id: &str, paint: usize) -> Result<VehicleDef, LoadError> {
-    let mut sources = Vec::new();
+    let logical = format!("tune/vehicle/{id}.vehcarsim");
+    let (bytes, src) = read(vfs, &logical, id, "tuning")?;
+    let tune = parse_tune(&bytes, id, &logical)?;
+    load_vehicle_impl(vfs, id, paint, tune, vec![src])
+}
+
+/// Load a catalog vehicle for AI opponent use (F15-A.2).
+///
+/// MM2 ships opponent tuning at `tune/vehicle/<id>_opp.vehcarsim` for
+/// nearly every stock car. The files are *sparse overrides* over the
+/// base `.vehcarsim`, not standalone tunes: authored values differ
+/// (e.g. `vpbug_opp` has different inertia box, drivetrain and end-train
+/// inertias, horsepower, top speed), but most `_opp` files omit required
+/// fields and several author transmission data in an alternate schema
+/// (`NumGears`/`GearRatios`/`UpshiftRPM`/`DownshiftRPM`/`DownshiftBias`
+/// instead of the `ManualNumGears`/`Low`/`High` band schema our decoder
+/// reads). The loader therefore merges the `_opp` document over the
+/// base tune: fields the variant authors win, everything else inherits
+/// the vehicle's own tuning, and `_opp`-only fields our schema does not
+/// model surface through the usual unrecognised-field warnings rather
+/// than failing the load. Mods or partial installs without the variant
+/// fall back to the base tune: a missing variant is not a failure.
+/// Every other dependency (`.info`, `.pkg`, `.bnd`, `.mtx`, `.asnode`,
+/// `.vehtrailer`) stays the vehicle's own. The merge policy is designed:
+/// the `_opp` files' existence and contents are verified retail data,
+/// their exact original consumption is not (see RACE-12/UNK-11).
+pub fn load_opponent(vfs: &Vfs, id: &str, paint: usize) -> Result<VehicleDef, LoadError> {
+    let logical = format!("tune/vehicle/{id}.vehcarsim");
+    let (bytes, src) = read(vfs, &logical, id, "tuning")?;
+    let mut tune = parse_tune(&bytes, id, &logical)?;
+    let mut tune_sources = vec![src];
+
+    let opp_logical = format!("tune/vehicle/{id}_opp.vehcarsim");
+    if let Some((bytes, src)) = read_opt(vfs, &opp_logical) {
+        let opp = parse_tune(&bytes, id, &opp_logical)?;
+        tune_sources.push(src);
+        tune.root.merge_overlay(&opp.root);
+    }
+    load_vehicle_impl(vfs, id, paint, tune, tune_sources)
+}
+
+/// Shared loader behind [`load_vehicle`]/[`load_opponent`]: `id` owns
+/// every dependency except the `.vehcarsim`, which arrives pre-parsed
+/// (opponent loads merge the `_opp` override over the base document).
+fn load_vehicle_impl(
+    vfs: &Vfs,
+    id: &str,
+    paint: usize,
+    tune: TuneFile,
+    tune_sources: Vec<String>,
+) -> Result<VehicleDef, LoadError> {
+    let mut sources = tune_sources;
 
     // Metadata (optional but preferred; alternates handled by the catalog).
     let mut display_name = id.to_string();
@@ -127,11 +178,8 @@ pub fn load_vehicle(vfs: &Vfs, id: &str, paint: usize) -> Result<VehicleDef, Loa
         }
     }
 
-    // Tuning — required.
-    let logical = format!("tune/vehicle/{id}.vehcarsim");
-    let (bytes, src) = read(vfs, &logical, id, "tuning")?;
-    sources.push(src);
-    let tune = parse_tune(&bytes, id, &logical)?;
+    // Tuning — required; the caller supplies the parsed document
+    // (`load_opponent` merges the authored `<id>_opp` override first).
     let sim =
         VehCarSim::from_tune(&tune).map_err(|e| LoadError::Parse(id.into(), e.to_string()))?;
 

@@ -21,14 +21,14 @@ use bevy::time::TimeUpdateStrategy;
 use mm2_assets::Vfs;
 use mm2_content::VehicleDef;
 use mm2_game::{
-    Banger, BangerPhase, BangerStateChanged, ImpactEvent, Mm2Vfs, PlayerVehicle, RaceProgress,
-    RaceStarted, RaceState, Session, SessionConfig, SessionPhase, WorldMode, advance_session_tick,
-    despawn_session_entities,
+    Banger, BangerPhase, BangerStateChanged, ImpactEvent, Mm2Vfs, ParticipantState, PlayerVehicle,
+    RaceProgress, RaceStarted, RaceState, Session, SessionConfig, SessionPhase, WorldMode,
+    advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::vehicle::{VehicleInput, VehicleState};
 use mm2_vehicle::{VehicleConfig, VehiclePlugin};
 
-use crate::{camera, contracts, race, scripted, session};
+use crate::{camera, contracts, opponents, race, scripted, session};
 
 /// Engine commit embedded by `build.rs` — reports stay versioned by the
 /// exact code that produced them.
@@ -236,6 +236,7 @@ pub fn headless_smoke(
                     .chain(),
                 race::update_checkpoint_markers,
                 scripted::scripted_drive.run_if(resource_exists::<scripted::ScriptedDrive>),
+                opponents::opponent_drive,
             ),
         );
     if driver == Driver::Scripted {
@@ -385,8 +386,30 @@ pub fn headless_smoke(
                     None => format!(" outcome={}", s.outcome.name()),
                 })
                 .unwrap_or_default();
+            // F15-A.2: spawned opponents and how many resolved
+            // (finished/timed out). Absent on runs without a roster so
+            // older records stay bit-identical.
+            let (opp, opp_done) = world_ecs
+                .iter_entities()
+                .fold((0usize, 0usize), |(n, d), e| {
+                    if e.get::<opponents::OpponentDriver>().is_none() {
+                        return (n, d);
+                    }
+                    let resolved = e.get::<RaceProgress>().is_some_and(|p| {
+                        matches!(
+                            p.state,
+                            ParticipantState::Finished { .. } | ParticipantState::TimedOut { .. }
+                        )
+                    });
+                    (n + 1, d + resolved as usize)
+                });
+            let opp = if opp > 0 {
+                format!(" opp={opp_done}/{opp}")
+            } else {
+                String::new()
+            };
             format!(
-                " race={:?} cp={}/{} results={}{}{}{}{}",
+                " race={:?} cp={}/{} results={}{}{}{}{}{}",
                 r.phase,
                 cleared,
                 r.definition.checkpoints.len(),
@@ -395,6 +418,7 @@ pub fn headless_smoke(
                 limit,
                 pos,
                 outcome,
+                opp,
             )
         });
     // `--nav` evidence: the graph + overrides loaded through the real
