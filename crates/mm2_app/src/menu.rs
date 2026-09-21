@@ -22,22 +22,26 @@
 //!   shell whenever the session returns to `Menu`, which is also how a
 //!   quit from a menu-launched session returns here instead of
 //!   exiting.
+//! - [`Screen::NewProfile`] is a text field rather than a row list:
+//!   `menu_input` routes `KeyboardInput.text` into it so driver names
+//!   are typed, not auto-generated.
 //!
 //! Deferred to later slices (honest gaps, not placeholders): per-event
 //! weather/time/density controls (needs F18's session-legal writers;
-//! RACE-3 `customizable`), mouse navigation, text entry for profile
-//! names, original menu art and audio. The in-session overlays landed
-//! in their own modules — `crate::pause`, `crate::results`.
+//! RACE-3 `customizable`), mouse navigation, original menu art and
+//! audio. The in-session overlays landed in their own modules —
+//! `crate::pause`, `crate::results`.
 
 use std::collections::BTreeMap;
 
+use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 use mm2_assets::Vfs;
 use mm2_content::{EventCatalog, VehicleCatalog, VehicleDef};
 use mm2_game::{
-    AvailabilityTable, Difficulty, EventRef, EventTableKind, GarageTable, Mm2Vfs, PlayerProfile,
-    ProfileId, ProfileStore, ProfileSummary, Session, SessionConfig, SessionMode, SessionPhase,
-    VehicleSelection, WorldMode,
+    AvailabilityTable, Difficulty, EventRef, EventTableKind, GarageTable, MAX_NAME_CHARS, Mm2Vfs,
+    PlayerProfile, ProfileId, ProfileStore, ProfileSummary, Session, SessionConfig, SessionMode,
+    SessionPhase, VehicleSelection, WorldMode,
 };
 use tracing::{info, warn};
 
@@ -62,6 +66,13 @@ pub enum MenuCommand {
     Back,
     /// Destructive-action key on the Profiles screen (X / Delete).
     Delete,
+    /// Append a character to a text field — only [`Screen::NewProfile`]
+    /// accepts text today. Production input feeds this from
+    /// `KeyboardInput.text` so layout, Shift and dead keys resolve to
+    /// the character the OS intended.
+    Type(char),
+    /// Erase the last character of a text field (Backspace).
+    Erase,
 }
 
 /// The menu's navigation state. Each screen rebuilds its rows from
@@ -103,6 +114,14 @@ pub enum Screen {
         /// Display label from the profile row.
         label: String,
     },
+    /// Name-entry step for a new driver — a text field, not a row
+    /// list. `name` is the edit buffer; Enter creates and binds, Esc
+    /// cancels. The created profile takes the shell's current rank
+    /// selection, matching the auto-name path it replaced.
+    NewProfile {
+        /// The name being typed.
+        name: String,
+    },
 }
 
 /// What a row activation does. Actions are resolved at rebuild time —
@@ -136,8 +155,6 @@ pub enum Action {
     },
     /// Bind an existing profile (marks it `active`).
     BindProfile(ProfileId),
-    /// Create and bind a new auto-named standard profile.
-    CreateProfile,
     /// Drop the bound profile and drive profile-less.
     DriveProfileless,
     /// Open the delete confirmation for a profile.
@@ -386,6 +403,45 @@ impl MenuShell {
             return Vec::new();
         }
         let mut effects = Vec::new();
+        // The name-entry screen is a text field, not a row list: it
+        // owns typing, erase, Enter (create) and Esc (cancel) and
+        // ignores the nav commands. Other screens ignore text.
+        if let Screen::NewProfile { name } = &mut self.screen {
+            match cmd {
+                MenuCommand::Type(c) => {
+                    // The bundled font is ASCII-only — accepting a
+                    // character it cannot draw would store a name that
+                    // renders as tofu.
+                    if !c.is_ascii() || c.is_ascii_control() {
+                        self.status = Some("names use ASCII characters only".into());
+                    } else if name.chars().count() >= MAX_NAME_CHARS {
+                        self.status =
+                            Some(format!("names are at most {MAX_NAME_CHARS} characters"));
+                    } else {
+                        name.push(c);
+                        self.status = None;
+                    }
+                }
+                MenuCommand::Erase => {
+                    name.pop();
+                    self.status = None;
+                }
+                MenuCommand::Back => {
+                    self.pop();
+                }
+                MenuCommand::Activate => {
+                    let name = name.trim().to_string();
+                    if name.is_empty() {
+                        self.status = Some("type a name first".into());
+                    } else {
+                        self.create_profile(data, name, &mut effects);
+                    }
+                }
+                _ => {}
+            }
+            self.dirty = true;
+            return effects;
+        }
         match cmd {
             MenuCommand::Up => self.focus = self.focus.saturating_sub(1),
             MenuCommand::Down => {
@@ -432,6 +488,8 @@ impl MenuShell {
                     None => {}
                 }
             }
+            // Row screens carry no text field — typing is inert.
+            MenuCommand::Type(_) | MenuCommand::Erase => {}
         }
         self.dirty = true;
         effects
@@ -494,31 +552,6 @@ impl MenuShell {
                     Err(e) => self.status = Some(e.to_string()),
                 }
             }
-            Action::CreateProfile => {
-                let Some(store) = &data.store else {
-                    self.status = Some("profile store unavailable".into());
-                    return;
-                };
-                // Auto-named — a rename/text-entry flow is a later
-                // slice; the id, not the name, is the identity.
-                let name = format!("Driver {}", data.profiles.len() + 1);
-                let request = ProfileRequest::Create {
-                    name,
-                    rank: self.difficulty,
-                    kind: mm2_game::ProfileKind::Standard,
-                };
-                match crate::profile::resolve(store, &request) {
-                    Ok(Some(slot)) => {
-                        info!(profile = %slot.profile.id, name = %slot.profile.name, "driver created");
-                        self.status = Some(format!("created {}", slot.profile.name));
-                        data.bound = Some(slot.profile.clone());
-                        effects.push(MenuEffect::Bind(Box::new(slot)));
-                    }
-                    Ok(None) => self.status = Some("profile create returned nothing".into()),
-                    Err(e) => self.status = Some(e.to_string()),
-                }
-                data.refresh_profiles();
-            }
             Action::DriveProfileless => {
                 data.bound = None;
                 effects.push(MenuEffect::Unbind);
@@ -551,6 +584,35 @@ impl MenuShell {
                 self.status = Some(outcome);
             }
             Action::Quit => effects.push(MenuEffect::Exit),
+        }
+    }
+
+    /// Create and bind a profile from the name-entry buffer. Success
+    /// pops back to the profile list; a store/validation failure keeps
+    /// the entry screen open with the reason on its status line so the
+    /// typed name isn't lost.
+    fn create_profile(&mut self, data: &mut MenuData, name: String, effects: &mut Vec<MenuEffect>) {
+        let Some(store) = &data.store else {
+            self.status = Some("profile store unavailable".into());
+            return;
+        };
+        let request = ProfileRequest::Create {
+            name,
+            rank: self.difficulty,
+            kind: mm2_game::ProfileKind::Standard,
+        };
+        match crate::profile::resolve(store, &request) {
+            Ok(Some(slot)) => {
+                info!(profile = %slot.profile.id, name = %slot.profile.name, "driver created");
+                let status = format!("created {}", slot.profile.name);
+                data.bound = Some(slot.profile.clone());
+                effects.push(MenuEffect::Bind(Box::new(slot)));
+                data.refresh_profiles();
+                self.pop();
+                self.status = Some(status);
+            }
+            Ok(None) => self.status = Some("profile create returned nothing".into()),
+            Err(e) => self.status = Some(e.to_string()),
         }
     }
 
@@ -713,6 +775,9 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
         Screen::Garage => garage_rows(shell, data),
         Screen::Paints { car } => paint_rows(shell, data, car),
         Screen::Profiles => profile_rows(shell, data),
+        // A text field, not a row list — the buffer lives on the
+        // screen and `menu_present` draws it.
+        Screen::NewProfile { .. } => Vec::new(),
         Screen::ConfirmDelete { id, label } => vec![
             Row {
                 text: format!("Delete {label} - this cannot be undone"),
@@ -1018,7 +1083,9 @@ fn profile_rows(_shell: &MenuShell, data: &mut MenuData) -> Vec<Row> {
     rows.push(Row {
         text: "New driver".into(),
         enabled: Ok(()),
-        action: Action::CreateProfile,
+        action: Action::Push(Screen::NewProfile {
+            name: String::new(),
+        }),
     });
     rows.push(Row {
         text: "Drive without a profile".into(),
@@ -1110,6 +1177,7 @@ pub struct MenuTarget<'w, 's> {
 /// versa) must never let a menu `Back` reach `Exit` inside a session.
 pub fn menu_input(
     keys: Res<ButtonInput<KeyCode>>,
+    mut key_events: MessageReader<KeyboardInput>,
     pads: Query<&Gamepad>,
     mut shell: ResMut<MenuShell>,
     mut data: ResMut<MenuData>,
@@ -1117,61 +1185,101 @@ pub fn menu_input(
     mut target: MenuTarget,
 ) {
     if !shell.active || !matches!(target.session.phase(), SessionPhase::Menu) {
+        key_events.clear();
         return;
     }
     let mut cmds = Vec::new();
-    if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::KeyW) {
-        cmds.push(MenuCommand::Up);
-    }
-    if keys.just_pressed(KeyCode::ArrowDown) || keys.just_pressed(KeyCode::KeyS) {
-        cmds.push(MenuCommand::Down);
-    }
-    if keys.just_pressed(KeyCode::ArrowLeft) || keys.just_pressed(KeyCode::KeyA) {
-        cmds.push(MenuCommand::Left);
-    }
-    if keys.just_pressed(KeyCode::ArrowRight) || keys.just_pressed(KeyCode::KeyD) {
-        cmds.push(MenuCommand::Right);
-    }
-    if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space) {
-        cmds.push(MenuCommand::Activate);
-    }
-    if keys.just_pressed(KeyCode::Escape) || keys.just_pressed(KeyCode::Backspace) {
-        cmds.push(MenuCommand::Back);
-    }
-    if keys.just_pressed(KeyCode::Delete) || keys.just_pressed(KeyCode::KeyX) {
-        cmds.push(MenuCommand::Delete);
-    }
-    if let Some(pad) = pads.iter().next() {
-        if pad.just_pressed(GamepadButton::DPadUp) {
-            cmds.push(MenuCommand::Up);
+    let name_entry = matches!(shell.screen, Screen::NewProfile { .. });
+    // The stream is drained every frame — on other screens typed text
+    // is discarded so a nav key's character (WASD all carry text)
+    // can't leak into a freshly opened name field. On the entry
+    // screen `KeyboardInput.text` appends the OS-resolved characters
+    // (layout/Shift/dead keys included) and Backspace erases — both
+    // honouring held-key repeats — while Enter creates and Esc
+    // cancels. The nav bindings are off there: Space is a character,
+    // not Activate, and arrows/WASD move no focus.
+    for ev in key_events.read() {
+        if !name_entry || !ev.state.is_pressed() {
+            continue;
         }
-        if pad.just_pressed(GamepadButton::DPadDown) {
-            cmds.push(MenuCommand::Down);
+        if ev.key_code == KeyCode::Backspace {
+            cmds.push(MenuCommand::Erase);
         }
-        if pad.just_pressed(GamepadButton::DPadLeft) {
-            cmds.push(MenuCommand::Left);
+        if let Some(text) = &ev.text {
+            for c in text.chars().filter(|c| !c.is_control()) {
+                cmds.push(MenuCommand::Type(c));
+            }
         }
-        if pad.just_pressed(GamepadButton::DPadRight) {
-            cmds.push(MenuCommand::Right);
-        }
-        if pad.just_pressed(GamepadButton::South) {
+    }
+    if name_entry {
+        if keys.just_pressed(KeyCode::Enter) {
             cmds.push(MenuCommand::Activate);
         }
-        if pad.just_pressed(GamepadButton::East) {
+        if keys.just_pressed(KeyCode::Escape) {
             cmds.push(MenuCommand::Back);
         }
-        if pad.just_pressed(GamepadButton::West) {
-            cmds.push(MenuCommand::Delete);
+        if let Some(pad) = pads.iter().next() {
+            if pad.just_pressed(GamepadButton::South) {
+                cmds.push(MenuCommand::Activate);
+            }
+            if pad.just_pressed(GamepadButton::East) {
+                cmds.push(MenuCommand::Back);
+            }
         }
-        // Left-stick nav on edge transitions, so holding the stick
-        // doesn't run the list.
-        let y = pad.get(GamepadAxis::LeftStickY).unwrap_or(0.0);
-        if y > 0.6 && shell.pad_axis <= 0.6 {
+    } else {
+        if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::KeyW) {
             cmds.push(MenuCommand::Up);
-        } else if y < -0.6 && shell.pad_axis >= -0.6 {
+        }
+        if keys.just_pressed(KeyCode::ArrowDown) || keys.just_pressed(KeyCode::KeyS) {
             cmds.push(MenuCommand::Down);
         }
-        shell.pad_axis = y;
+        if keys.just_pressed(KeyCode::ArrowLeft) || keys.just_pressed(KeyCode::KeyA) {
+            cmds.push(MenuCommand::Left);
+        }
+        if keys.just_pressed(KeyCode::ArrowRight) || keys.just_pressed(KeyCode::KeyD) {
+            cmds.push(MenuCommand::Right);
+        }
+        if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space) {
+            cmds.push(MenuCommand::Activate);
+        }
+        if keys.just_pressed(KeyCode::Escape) || keys.just_pressed(KeyCode::Backspace) {
+            cmds.push(MenuCommand::Back);
+        }
+        if keys.just_pressed(KeyCode::Delete) || keys.just_pressed(KeyCode::KeyX) {
+            cmds.push(MenuCommand::Delete);
+        }
+        if let Some(pad) = pads.iter().next() {
+            if pad.just_pressed(GamepadButton::DPadUp) {
+                cmds.push(MenuCommand::Up);
+            }
+            if pad.just_pressed(GamepadButton::DPadDown) {
+                cmds.push(MenuCommand::Down);
+            }
+            if pad.just_pressed(GamepadButton::DPadLeft) {
+                cmds.push(MenuCommand::Left);
+            }
+            if pad.just_pressed(GamepadButton::DPadRight) {
+                cmds.push(MenuCommand::Right);
+            }
+            if pad.just_pressed(GamepadButton::South) {
+                cmds.push(MenuCommand::Activate);
+            }
+            if pad.just_pressed(GamepadButton::East) {
+                cmds.push(MenuCommand::Back);
+            }
+            if pad.just_pressed(GamepadButton::West) {
+                cmds.push(MenuCommand::Delete);
+            }
+            // Left-stick nav on edge transitions, so holding the stick
+            // doesn't run the list.
+            let y = pad.get(GamepadAxis::LeftStickY).unwrap_or(0.0);
+            if y > 0.6 && shell.pad_axis <= 0.6 {
+                cmds.push(MenuCommand::Up);
+            } else if y < -0.6 && shell.pad_axis >= -0.6 {
+                cmds.push(MenuCommand::Down);
+            }
+            shell.pad_axis = y;
+        }
     }
     for cmd in cmds {
         for effect in shell.apply(cmd, &mut data, &vfs.0) {
@@ -1219,6 +1327,7 @@ fn screen_title(screen: &Screen) -> String {
         Screen::Paints { car } => format!("Paint - {car}"),
         Screen::Profiles => "Driver profiles - X deletes".to_string(),
         Screen::ConfirmDelete { label, .. } => format!("Delete {label}?"),
+        Screen::NewProfile { .. } => "New driver".to_string(),
     }
 }
 
@@ -1268,6 +1377,9 @@ pub fn menu_present(
         Color::srgb(0.95, 0.9, 0.6),
     ));
     lines.push((String::new(), 8.0, Color::NONE));
+    if let Screen::NewProfile { name } = &shell.screen {
+        lines.push((format!("  Name: {name}_"), 22.0, Color::srgb(1.0, 1.0, 1.0)));
+    }
     for (i, row) in shell.rows.iter().enumerate() {
         let (text, color) = match &row.enabled {
             Ok(()) => (
@@ -1295,11 +1407,12 @@ pub fn menu_present(
     if let Some(status) = &shell.status {
         lines.push((status.clone(), 18.0, Color::srgb(1.0, 0.75, 0.35)));
     }
-    lines.push((
-        "Up/Down move | Enter select | Esc back | X delete".to_string(),
-        14.0,
-        Color::srgb(0.5, 0.5, 0.55),
-    ));
+    let footer = if matches!(shell.screen, Screen::NewProfile { .. }) {
+        "Type a name | Enter create | Esc cancel"
+    } else {
+        "Up/Down move | Enter select | Esc back | X delete"
+    };
+    lines.push((footer.to_string(), 14.0, Color::srgb(0.5, 0.5, 0.55)));
 
     commands
         .spawn((

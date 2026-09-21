@@ -87,14 +87,15 @@ cargo run -- --mm2-path "/path/to/Midtown Madness 2"
 With no session-shaping flag the app opens the menu front-end
 (F17-A.1): Cruise and authored-event pickers over the real city/event
 catalogs, the garage (reward-locked cars and paints are listed but
-refuse with their reason), the driver-profile screen (select, create —
-`X`/`Delete` deletes behind a confirmation screen), the difficulty
-toggle, and disabled-with-reason rows for the not-yet-built Options
-and Multiplayer screens. Menu controls: ↑/↓ or W/S move, ←/→ or A/D
-adjust, Enter/Space select, Esc/Backspace back (quit at the root),
-X/Delete delete; on a gamepad the dpad/left stick navigates, South
-selects, East backs, West deletes. Quitting a menu-launched session
-returns to the menu.
+refuse with their reason), the driver-profile screen (select, create
+through a typed-name entry screen, `X`/`Delete` deletes behind a
+confirmation screen), the difficulty toggle, and disabled-with-reason
+rows for the not-yet-built Options and Multiplayer screens. Menu
+controls: ↑/↓ or W/S move, ←/→ or A/D adjust, Enter/Space select,
+Esc/Backspace back (quit at the root), X/Delete delete; on the name
+field, type to edit, Backspace erases, Enter creates, Esc cancels; on
+a gamepad the dpad/left stick navigates, South selects, East backs,
+West deletes. Quitting a menu-launched session returns to the menu.
 
 Any session-shaping flag skips the menu and boots straight in:
 

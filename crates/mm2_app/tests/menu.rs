@@ -13,6 +13,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use avian3d::prelude::*;
+use bevy::input::ButtonState;
+use bevy::input::keyboard::{Key, KeyboardInput, NativeKey, NativeKeyCode};
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::camera::CameraMode;
@@ -302,6 +304,7 @@ fn menu_app(dir: &Path, store: Option<ProfileStore>) -> App {
         .init_resource::<PauseMenu>()
         .init_resource::<ResultsMenu>()
         .init_resource::<ButtonInput<KeyCode>>()
+        .add_message::<KeyboardInput>()
         .init_resource::<Assets<Mesh>>()
         .init_resource::<Assets<Image>>()
         .init_resource::<Assets<StandardMaterial>>()
@@ -371,6 +374,55 @@ fn press(app: &mut App, key: KeyCode) {
     app.world_mut()
         .resource_mut::<ButtonInput<KeyCode>>()
         .reset_all();
+}
+
+/// Feed one `KeyboardInput` press through the real message path —
+/// `menu_input` reads `ev.text`/`key_code` on the name-entry screen.
+fn key_text(app: &mut App, key_code: KeyCode, text: Option<&str>) {
+    app.world_mut().write_message(KeyboardInput {
+        key_code,
+        logical_key: text.map_or(Key::Unidentified(NativeKey::Unidentified), |t| {
+            Key::Character(t.into())
+        }),
+        state: ButtonState::Pressed,
+        text: text.map(Into::into),
+        repeat: false,
+        window: Entity::PLACEHOLDER,
+    });
+}
+
+/// Type a string into the focused field (one message per char), then
+/// run one update so `menu_input` consumes the batch.
+fn type_text(app: &mut App, text: &str) {
+    for c in text.chars() {
+        key_text(
+            app,
+            KeyCode::Unidentified(NativeKeyCode::Unidentified),
+            Some(&c.to_string()),
+        );
+    }
+    app.update();
+}
+
+/// One Backspace press on the entry field.
+fn erase(app: &mut App) {
+    key_text(app, KeyCode::Backspace, None);
+    app.update();
+}
+
+/// The entry screen's edit buffer, or a failure elsewhere.
+fn name_buffer(app: &App) -> String {
+    match &app.world().resource::<MenuShell>().screen {
+        menu::Screen::NewProfile { name } => name.clone(),
+        other => panic!("expected the name-entry screen, on {other:?}"),
+    }
+}
+
+/// The text the menu's UI tree currently draws.
+fn menu_texts(app: &mut App) -> Vec<String> {
+    let world = app.world_mut();
+    let mut q = world.query_filtered::<&Text, With<MenuUi>>();
+    q.iter(world).map(|t| t.0.clone()).collect()
 }
 
 fn shell(app: &App) -> &MenuShell {
@@ -839,8 +891,19 @@ fn profiles_bind_create_and_delete() {
         "deleting the bound profile must unbind it"
     );
 
-    // A fresh driver binds immediately.
+    // A fresh driver is named on the entry screen — creating binds it
+    // and pops back to the profile list.
     activate_row(&mut app, "New driver");
+    assert!(
+        matches!(shell(&app).screen, menu::Screen::NewProfile { .. }),
+        "New driver opens the name-entry screen"
+    );
+    type_text(&mut app, "Dave");
+    press(&mut app, KeyCode::Enter);
+    assert!(
+        matches!(shell(&app).screen, menu::Screen::Profiles),
+        "a successful create returns to the profile list"
+    );
     app.update();
     let created = app
         .world()
@@ -849,9 +912,13 @@ fn profiles_bind_create_and_delete() {
         .profile
         .id
         .clone();
+    assert_eq!(
+        store.load(&created).unwrap().profile.name,
+        "Dave",
+        "the typed name is the profile's name"
+    );
 
-    // Carol (not bound, not last) still deletes. (We're still on the
-    // Profiles screen — create doesn't navigate.)
+    // Carol (not bound, not last) still deletes.
     focus_row(&mut app, "Carol");
     press(&mut app, KeyCode::KeyX);
     activate_row(&mut app, "Delete");
@@ -874,6 +941,165 @@ fn profiles_bind_create_and_delete() {
     assert!(
         app.world().get_resource::<ActiveProfile>().is_some(),
         "the refused delete leaves the profile bound"
+    );
+}
+
+/// The name-entry screen owns the keyboard: typed characters append,
+/// Backspace erases, Enter creates and binds with the typed name, and
+/// the field's screen is a text field — not a row list.
+#[test]
+fn new_driver_entry_types_edits_and_binds() {
+    let tmp = install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let mut app = menu_app(tmp.path(), Some(store.clone()));
+    app.update();
+
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "New driver");
+    assert_eq!(name_buffer(&app), "");
+    assert!(
+        shell(&app).rows.is_empty(),
+        "the entry screen is a text field, not a row list"
+    );
+
+    // Typing goes through the real KeyboardInput message path;
+    // Backspace edits.
+    type_text(&mut app, "Ada Lovelacex");
+    assert_eq!(name_buffer(&app), "Ada Lovelacex");
+    erase(&mut app);
+    assert_eq!(name_buffer(&app), "Ada Lovelace");
+    assert!(
+        menu_texts(&mut app)
+            .iter()
+            .any(|t| t == "  Name: Ada Lovelace_"),
+        "the entry field draws the live buffer"
+    );
+
+    press(&mut app, KeyCode::Enter);
+    assert!(matches!(shell(&app).screen, menu::Screen::Profiles));
+    let bound = app
+        .world()
+        .get_resource::<ActiveProfile>()
+        .expect("create binds the typed profile");
+    assert_eq!(bound.profile.name, "Ada Lovelace");
+    assert!(
+        store
+            .list()
+            .unwrap()
+            .iter()
+            .any(|p| p.meta.as_ref().is_some_and(|m| m.name == "Ada Lovelace")),
+        "the typed name is persisted in the store"
+    );
+}
+
+/// Enter on an empty field refuses with a visible reason and stays;
+/// Esc cancels without creating anything, and a reopened field starts
+/// empty — the cancelled text doesn't linger.
+#[test]
+fn new_driver_entry_refuses_empty_and_cancels() {
+    let tmp = install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let mut app = menu_app(tmp.path(), Some(store.clone()));
+    app.update();
+
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "New driver");
+
+    press(&mut app, KeyCode::Enter);
+    assert!(
+        matches!(shell(&app).screen, menu::Screen::NewProfile { .. }),
+        "an empty name keeps the entry screen open"
+    );
+    assert_eq!(
+        shell(&app).status.as_deref(),
+        Some("type a name first"),
+        "the refusal names the reason"
+    );
+    assert!(store.list().unwrap().is_empty(), "no profile was created");
+
+    // A whitespace-only name trims to the same refusal.
+    type_text(&mut app, "   ");
+    press(&mut app, KeyCode::Enter);
+    assert!(matches!(
+        shell(&app).screen,
+        menu::Screen::NewProfile { .. }
+    ));
+    assert!(store.list().unwrap().is_empty());
+
+    // Esc cancels: back to the list, nothing created, and reopening
+    // starts from an empty buffer.
+    press(&mut app, KeyCode::Escape);
+    assert!(matches!(shell(&app).screen, menu::Screen::Profiles));
+    assert!(store.list().unwrap().is_empty());
+    activate_row(&mut app, "New driver");
+    assert_eq!(name_buffer(&app), "");
+}
+
+/// Characters the embedded font cannot draw are refused with a status
+/// note instead of storing a name that renders as tofu; the field is
+/// bounded at the store's name limit; and nav keys on the entry
+/// screen move nothing — Space is a character, not Activate.
+#[test]
+fn new_driver_entry_bounds_and_filters_input() {
+    let tmp = install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let mut app = menu_app(tmp.path(), Some(store.clone()));
+    app.update();
+
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "New driver");
+
+    // Non-ASCII input is refused with a note; ASCII appends and clears
+    // the note again.
+    type_text(&mut app, "é");
+    assert_eq!(name_buffer(&app), "");
+    assert_eq!(
+        shell(&app).status.as_deref(),
+        Some("names use ASCII characters only")
+    );
+    type_text(&mut app, "ab");
+    assert_eq!(name_buffer(&app), "ab");
+    assert!(shell(&app).status.is_none());
+
+    // Arrow keys produce no text and move no focus — the buffer is
+    // untouched and no row list exists to focus.
+    press(&mut app, KeyCode::ArrowDown);
+    press(&mut app, KeyCode::ArrowUp);
+    assert_eq!(name_buffer(&app), "ab");
+
+    // Space is a character on the entry screen, not Activate.
+    type_text(&mut app, " ");
+    assert_eq!(name_buffer(&app), "ab ");
+    assert!(matches!(
+        shell(&app).screen,
+        menu::Screen::NewProfile { .. }
+    ));
+
+    // The buffer stops at the store's name bound (MAX_NAME_CHARS = 32)
+    // with the limit named on the status line.
+    type_text(&mut app, &"x".repeat(40));
+    assert_eq!(name_buffer(&app).chars().count(), 32);
+    assert!(
+        shell(&app)
+            .status
+            .as_deref()
+            .is_some_and(|s| s.contains("32")),
+        "the cap refusal names the bound"
+    );
+
+    // The bounded, trimmed name still creates.
+    erase(&mut app);
+    erase(&mut app);
+    erase(&mut app);
+    press(&mut app, KeyCode::Enter);
+    assert!(matches!(shell(&app).screen, menu::Screen::Profiles));
+    assert_eq!(
+        store.list().unwrap().len(),
+        1,
+        "the bounded name created one profile"
     );
 }
 

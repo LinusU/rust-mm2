@@ -188,8 +188,12 @@ pub fn pause_input(
             MenuCommand::Back => session
                 .transition(SessionPhase::Playing)
                 .expect("Paused → Playing is a legal transition"),
-            // No value rows or deletable rows under pause.
-            MenuCommand::Left | MenuCommand::Right | MenuCommand::Delete => {}
+            // No value rows, deletable rows or text fields under pause.
+            MenuCommand::Left
+            | MenuCommand::Right
+            | MenuCommand::Delete
+            | MenuCommand::Type(_)
+            | MenuCommand::Erase => {}
         }
         pause.dirty = true;
     }

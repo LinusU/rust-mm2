@@ -168,8 +168,12 @@ pub fn results_input(
                 None => {}
             },
             MenuCommand::Back => control.quit = true,
-            // No value rows or deletable rows at results.
-            MenuCommand::Left | MenuCommand::Right | MenuCommand::Delete => {}
+            // No value rows, deletable rows or text fields at results.
+            MenuCommand::Left
+            | MenuCommand::Right
+            | MenuCommand::Delete
+            | MenuCommand::Type(_)
+            | MenuCommand::Erase => {}
         }
         results.dirty = true;
     }
