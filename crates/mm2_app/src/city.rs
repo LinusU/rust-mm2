@@ -3411,13 +3411,16 @@ pub fn load_city(
     }
     // Collision: one static trimesh per (room, surface class) — the
     // `SurfaceMaterial` component is what wheel raycasts and the impact
-    // pipeline classify contacts through (F06-A).
+    // pipeline classify contacts through (F06-A), and its `TireSurface`
+    // is the normalized grip the tire path applies (F06-B). Both come
+    // from the same loaded tables, computed once here so the physics
+    // step stays a component read.
     for col in import.colliders {
         let tag = match col.surface {
             SurfaceMaterial::Authored(i) => format!("-m{i}"),
             SurfaceMaterial::Unspecified => String::new(),
         };
-        commands.spawn((
+        let mut entity = commands.spawn((
             CityEntity,
             owner,
             RigidBody::Static,
@@ -3425,6 +3428,12 @@ pub fn load_city(
             Collider::trimesh(col.positions, col.tris),
             Name::new(format!("city-room{}-collider{tag}", col.room + 1)),
         ));
+        if let Some(tire) = surfaces
+            .as_ref()
+            .and_then(|t| t.tire_surface_for(col.surface))
+        {
+            entity.insert(tire);
+        }
     }
 
     // `decals.pathset` beside the PSDL paints the road markings —

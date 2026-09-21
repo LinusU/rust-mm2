@@ -450,9 +450,16 @@ pub fn headless_smoke(
             String::new()
         }
     };
+    // The dev `--traction` modifier is recorded when set so a wetness
+    // run is self-describing; unmodified runs stay bit-identical.
+    let traction_detail = config
+        .dev
+        .traction
+        .map(|t| format!(" traction={t}"))
+        .unwrap_or_default();
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{nav_detail}{bng_detail}{extra}",
+            "updates={frames} ticks={ticks} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{nav_detail}{bng_detail}{traction_detail}{extra}",
             driver.as_str(),
             session.phase().name(),
             moved = pos.map(|p| (p - spawn_pos).length()).unwrap_or(f32::NAN),

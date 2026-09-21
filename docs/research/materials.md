@@ -179,3 +179,36 @@ collider per room); a broken pair warns and does the same with
 
 `SurfaceTables::issues()` = `validate()` on both halves +
 `undefined_refs` — the same counts the audit reports.
+
+## Tire-path consumption (implemented, F06-B — provisional policy)
+
+The tire force path now consumes the authored `friction` field:
+
+- `SurfaceTables::tire_surface(i)` reads `defs[i].friction` and
+  normalizes it against the `_default` block's `friction`, producing
+  `mm2_vehicle::TireSurface { grip }` — so `_default` lands exactly on
+  `1.0` and other materials scale relative to it. Retail numbers
+  (`_default` friction = 0.90): `cobblestone`/`grass`/`sand` → 1.0,
+  `water` → ~0.76, `deepwater` → ~0.72, `dirt` → ~0.83, `wood` →
+  ~1.06. Missing/negative/non-finite values and out-of-range indices
+  sanitize to the neutral `1.0` (and to the raw authored value when
+  `_default` itself is absent — conservative, not verified).
+- `mm2_app::city` attaches `TireSurface` beside `SurfaceMaterial` on
+  every collider at spawn; unmarked colliders are the neutral
+  reference (no component), so `Unspecified` surfaces drive
+  unmodified.
+- `mm2_vehicle::vehicle_simulation` multiplies material grip ×
+  `TireConditions.traction` (the separate environment term — a
+  quarantined `--traction` dev override today, owned by F18 weather
+  later) into one `surface_grip` applied to the lateral force, the
+  longitudinal limit, the TC cap and the friction ellipse — exactly
+  once (F06 spec R4).
+- Wheel telemetry and impact events report the environment term in
+  `SurfaceState.traction`; the material term stays with the
+  `TireSurface`/`WheelState.surface_grip` physics view.
+
+This is an *implementation choice*, not verified original behavior:
+how the original combines `friction`/`elasticity`/`drag` with tire
+parameters is unknown (UNK-23), and `_default`-as-divisor is a
+convenient normalization, not a discovered rule. `elasticity` and
+`drag` still have no runtime consumer.

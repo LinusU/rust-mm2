@@ -118,6 +118,12 @@ struct Cli {
     #[arg(long, value_name = "n")]
     banger_pool: Option<usize>,
 
+    /// Multiply every tire contact's grip by `f` for the session — an
+    /// environment traction stand-in (wetness/ice) for evidence runs.
+    /// `1.0` is unmodified; must be finite and non-negative.
+    #[arg(long, value_name = "f")]
+    traction: Option<f32>,
+
     /// Run without a window or GPU: simulate `--frames` updates
     /// (default 600), print a `smoke=headless-physics` record and exit.
     #[arg(long)]
@@ -206,6 +212,19 @@ fn main() {
         Some(Ok(p)) => Some(p),
         Some(Err(())) => {
             error!("invalid --spawn: expected x,y,z[,yaw]");
+            std::process::exit(2);
+        }
+        None => None,
+    };
+
+    // `--traction f` pins the session's environment traction modifier —
+    // a wetness stand-in quarantined in DevOverrides (UNK-1/F18 owns the
+    // session-legal writer). A negative or non-finite multiplier is a
+    // usage error, never a clamp.
+    let traction = match cli.traction {
+        Some(f) if f.is_finite() && f >= 0.0 => Some(f),
+        Some(_) => {
+            error!("invalid --traction: expected a finite, non-negative multiplier");
             std::process::exit(2);
         }
         None => None,
@@ -441,6 +460,7 @@ fn main() {
             nav_overlay: nav_overlay_cfg,
             spawn: spawn_pose,
             banger_pool: cli.banger_pool,
+            traction,
         },
         ..SessionConfig::default()
     };

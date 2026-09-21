@@ -8,6 +8,8 @@ use std::path::Path;
 use mm2_assets::Vfs;
 use mm2_content::surface::{CSV_PATH, MTL_PATH, SurfaceLoadError, load_surface_tables};
 use mm2_content::{PsdlSurfaces, SurfaceSlot};
+use mm2_game::SurfaceMaterial;
+use mm2_vehicle::TireSurface;
 
 fn write(dir: &Path, rel: &str, contents: &[u8]) {
     let p = dir.join(rel);
@@ -135,6 +137,131 @@ fn resolve_psdl_reports_each_slot_and_the_unmapped_set() {
     );
     // The one dead csv row is the pair's only consistency issue.
     assert_eq!(tables.issues(), 1);
+}
+
+/// A table whose `_default` friction is not `1.0`, so normalization
+/// has a visible divisor: `slick` (0.4/0.8 = 0.5), `tacky` (1.2/0.8 =
+/// 1.5), `fieldless` (no `friction` line → neutral), `negative`
+/// (invalid → neutral).
+const MTL_SCALED: &str = "\
+mtl _default {
+    elasticity: 0.0
+    friction: 0.8
+    effect: none
+    sound: 0
+    drag: 0.0
+    width: 0.0
+    height: 0.0
+    depth: 0.0
+    ptxindex: 0 0
+    ptxthreshold: 0.0 0.0
+}
+mtl slick {
+    elasticity: 0.1
+    friction: 0.4
+    effect: none
+    sound: 0
+    drag: 0.0
+    width: 0.0
+    height: 0.0
+    depth: 0.0
+    ptxindex: 0 0
+    ptxthreshold: 0.0 0.0
+}
+mtl tacky {
+    elasticity: 0.1
+    friction: 1.2
+    effect: none
+    sound: 0
+    drag: 0.0
+    width: 0.0
+    height: 0.0
+    depth: 0.0
+    ptxindex: 0 0
+    ptxthreshold: 0.0 0.0
+}
+mtl fieldless {
+    elasticity: 0.1
+    effect: none
+    sound: 0
+    drag: 0.0
+    width: 0.0
+    height: 0.0
+    depth: 0.0
+    ptxindex: 0 0
+    ptxthreshold: 0.0 0.0
+}
+mtl negative {
+    elasticity: 0.1
+    friction: -0.5
+    effect: none
+    sound: 0
+    drag: 0.0
+    width: 0.0
+    height: 0.0
+    depth: 0.0
+    ptxindex: 0 0
+    ptxthreshold: 0.0 0.0
+}
+";
+
+#[test]
+fn tire_surface_normalizes_friction_against_the_default_material() {
+    let dir = tempfile::tempdir().unwrap();
+    let vfs = mount_with(dir.path(), &[(MTL_PATH, MTL), (CSV_PATH, CSV)]);
+    let tables = load_surface_tables(&vfs).unwrap().unwrap();
+
+    // `_default` friction 1.0 is the reference: authored values land
+    // as relative grip scales.
+    assert_eq!(tables.tire_surface(0).grip, 1.0);
+    assert!((tables.tire_surface(1).grip - 0.9).abs() < 1e-6);
+    assert!((tables.tire_surface(2).grip - 0.7).abs() < 1e-6);
+    // An out-of-range index resolves to the neutral reference, never
+    // panics or guesses.
+    assert_eq!(tables.tire_surface(99).grip, 1.0);
+    // `Unspecified` carries no `TireSurface` — an unmarked collider is
+    // the neutral surface.
+    assert_eq!(tables.tire_surface_for(SurfaceMaterial::Unspecified), None);
+    assert_eq!(
+        tables.tire_surface_for(SurfaceMaterial::Authored(2)),
+        Some(TireSurface { grip: 0.7 })
+    );
+
+    // A non-1.0 `_default` divides visibly: slick halves, tacky grows.
+    let dir = tempfile::tempdir().unwrap();
+    let vfs = mount_with(
+        dir.path(),
+        &[(MTL_PATH, MTL_SCALED), (CSV_PATH, "texture,physics\n")],
+    );
+    let tables = load_surface_tables(&vfs).unwrap().unwrap();
+    assert_eq!(tables.tire_surface(0).grip, 1.0, "_default itself");
+    assert!((tables.tire_surface(1).grip - 0.5).abs() < 1e-6, "slick");
+    assert!((tables.tire_surface(2).grip - 1.5).abs() < 1e-6, "tacky");
+    // A missing or invalid `friction` — both flagged by `issues()` —
+    // resolves neutral rather than guessed.
+    assert_eq!(tables.tire_surface(3).grip, 1.0, "fieldless");
+    assert_eq!(tables.tire_surface(4).grip, 1.0, "negative");
+    assert!(tables.issues() > 0);
+
+    // Without a `_default` block the authored values apply raw.
+    let dir = tempfile::tempdir().unwrap();
+    let vfs = mount_with(
+        dir.path(),
+        &[
+            (
+                MTL_PATH,
+                MTL_SCALED
+                    .replacen("mtl _default", "mtl fallback", 1)
+                    .as_str(),
+            ),
+            (CSV_PATH, "texture,physics\n"),
+        ],
+    );
+    let tables = load_surface_tables(&vfs).unwrap().unwrap();
+    assert!(
+        (tables.tire_surface(1).grip - 0.4).abs() < 1e-6,
+        "slick applies raw without a _default"
+    );
 }
 
 #[test]

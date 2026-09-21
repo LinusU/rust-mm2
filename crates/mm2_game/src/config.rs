@@ -394,6 +394,12 @@ pub struct DevOverrides {
     /// the recovered ×32 default (evidence/diagnostic runs — never a
     /// session-legal parameter).
     pub banger_pool: Option<usize>,
+    /// `--traction` fixed environment traction multiplier applied to
+    /// every tire contact: a wetness/ice stand-in for evidence runs
+    /// (the authored weather→wetness mapping is UNK-1, so no
+    /// session-legal parameter drives this yet — F18 owns the real
+    /// writer). `None`/`1.0` is unmodified.
+    pub traction: Option<f32>,
 }
 
 /// Configuration of the `--nav` debug overlay: draw the city's BAI

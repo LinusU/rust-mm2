@@ -18,6 +18,7 @@ use mm2_app::city::load_city;
 use mm2_assets::Vfs;
 use mm2_content::surface::{CSV_PATH, MTL_PATH};
 use mm2_game::{CityEntity, SessionEntity, SurfaceMaterial};
+use mm2_vehicle::TireSurface;
 
 fn write(dir: &Path, rel: &str, contents: impl AsRef<[u8]>) {
     let p = dir.join(rel);
@@ -234,6 +235,25 @@ fn surface_at(app: &mut App, x: f32, z: f32) -> Option<SurfaceMaterial> {
         .expect("raycast system runs")
 }
 
+/// The `TireSurface` under `x, z` — the collider marking the tire path
+/// consumes. `None` means the collider carries no component (the
+/// neutral reference surface).
+fn tire_at(app: &mut App, x: f32, z: f32) -> Option<TireSurface> {
+    app.world_mut()
+        .run_system_once(move |spatial: SpatialQuery, tires: Query<&TireSurface>| {
+            spatial
+                .cast_ray(
+                    Vec3::new(x, 5.0, z),
+                    Dir3::NEG_Y,
+                    20.0,
+                    true,
+                    &SpatialQueryFilter::default(),
+                )
+                .and_then(|hit| tires.get(hit.entity).ok().copied())
+        })
+        .expect("raycast system runs")
+}
+
 #[test]
 fn a_ray_into_each_region_reports_its_authored_surface() {
     let dir = tempfile::tempdir().unwrap();
@@ -284,5 +304,45 @@ fn a_ray_into_each_region_reports_its_authored_surface() {
         surface_at(&mut app, 15.0, 5.0),
         Some(SurfaceMaterial::Unspecified),
         "fan on an unmapped name"
+    );
+}
+
+#[test]
+fn colliders_carry_the_normalized_tire_surface_of_their_material() {
+    // F06-B: the same region split that carries `SurfaceMaterial` also
+    // carries the physics-side `TireSurface` — the material's authored
+    // `friction` normalized against `_default` (here friction 1.0, so
+    // authored values land raw: cobblestone 0.9, grass 0.7).
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "city/test.psdl", city_psdl());
+    write(root, MTL_PATH, SURF_MTL);
+    write(root, CSV_PATH, SURF_CSV);
+    for name in ["test_road", "test_grass", "mystery"] {
+        write(
+            root,
+            &format!("texture/{name}.png"),
+            include_bytes!("../../../assets/texture/dev_road.png"),
+        );
+    }
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(root, 0).unwrap();
+
+    let mut app = city_app(vfs);
+
+    assert_eq!(
+        tire_at(&mut app, 0.0, 5.0),
+        Some(TireSurface { grip: 0.9 }),
+        "road strip carries cobblestone's normalized grip"
+    );
+    assert_eq!(
+        tire_at(&mut app, 4.0, 5.0),
+        Some(TireSurface { grip: 0.7 }),
+        "sidewalk carries grass's normalized grip"
+    );
+    assert_eq!(
+        tire_at(&mut app, 15.0, 5.0),
+        None,
+        "the unmapped fan is the neutral reference — no component"
     );
 }

@@ -17,12 +17,14 @@ pub mod analysis;
 pub mod config;
 pub mod debug;
 pub mod sim;
+pub mod surface;
 pub mod systems;
 pub mod vehicle;
 
 pub use analysis::{HandlingMetrics, WheelMetrics, hull_points};
 pub use config::VehicleConfig;
 pub use debug::VehicleDebugEnabled;
+pub use surface::{TireConditions, TireSurface};
 pub use vehicle::{
     ResetVehicle, StrikeBound, Teleported, Vehicle, VehicleInput, VehicleState, WheelState,
 };
@@ -35,6 +37,9 @@ impl Plugin for VehiclePlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<ResetVehicle>()
             .init_resource::<VehicleDebugEnabled>()
+            // The tire path reads this every physics step; sessions
+            // overwrite it at load with their environment modifier.
+            .init_resource::<TireConditions>()
             .add_systems(
                 PhysicsSchedule,
                 systems::vehicle_simulation

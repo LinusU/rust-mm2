@@ -73,6 +73,12 @@ pub struct WheelState {
     pub lateral_force: f32,
     /// Applied longitudinal force, N.
     pub longitudinal_force: f32,
+    /// The combined surface × environment grip multiplier the tire path
+    /// applied to this wheel's force limits this step (F06-B): `1.0`
+    /// is unmodified — airborne wheels and unmarked colliders report
+    /// `1.0`, and the field is `0.0` only before the first physics step
+    /// writes it.
+    pub surface_grip: f32,
     /// Accumulated spin for visuals, radians.
     pub spin: f32,
 }

@@ -21,6 +21,7 @@ use mm2_game::{
     AuthorityRole, DamageSignals, ImpactDedup, ImpactEvent, ImpactId, ImpactPolicy, ObjectId,
     ObjectIdentity, Session, SurfaceMaterial, SurfaceState, VehicleTelemetry, WheelTelemetry,
 };
+use mm2_vehicle::surface::TireConditions;
 use mm2_vehicle::vehicle::{Vehicle, VehicleState};
 
 /// Impact reporting bookkeeping for [`collect_impacts`]. The dedup
@@ -126,6 +127,7 @@ pub fn collect_impacts(
     identities: Query<&ObjectIdentity>,
     vehicles: Query<(), With<Vehicle>>,
     surfaces: Query<&SurfaceMaterial>,
+    conditions: Res<TireConditions>,
     mut damage: Query<&mut DamageSignals>,
     mut filter: ResMut<ImpactFilter>,
     session: Res<Session>,
@@ -166,17 +168,18 @@ pub fn collect_impacts(
             continue;
         }
         // The "surface" is the passive participant's material — for a
-        // vehicle hitting the world, the world's side.
+        // vehicle hitting the world, the world's side. `traction`
+        // reports the session's environment modifier, the same input
+        // the tire path reads (F06-B).
         let surface_entity = if vehicles.contains(c1) && !vehicles.contains(c2) {
             c2
         } else {
             c1
         };
-        let surface = surfaces
-            .get(surface_entity)
-            .copied()
-            .map(SurfaceState::of)
-            .unwrap_or_default();
+        let surface = SurfaceState {
+            material: surfaces.get(surface_entity).copied().unwrap_or_default(),
+            traction: conditions.traction,
+        };
         candidates.push((event, a, b, point, normal, severity, surface));
     }
 
@@ -232,6 +235,7 @@ pub fn publish_vehicle_telemetry(
         Option<&AuthorityRole>,
     )>,
     surfaces: Query<&SurfaceMaterial>,
+    conditions: Res<TireConditions>,
 ) {
     if !session.is_playing() {
         return;
@@ -246,11 +250,17 @@ pub fn publish_vehicle_telemetry(
                 contact_normal: w.contact_normal,
                 slip_angle: w.slip_angle,
                 traction_demand: w.traction_demand,
-                surface: w
-                    .contact_entity
-                    .and_then(|e| surfaces.get(e).ok())
-                    .map(|m| SurfaceState::of(*m))
-                    .unwrap_or_default(),
+                surface: SurfaceState {
+                    material: w
+                        .contact_entity
+                        .and_then(|e| surfaces.get(e).ok())
+                        .copied()
+                        .unwrap_or_default(),
+                    // The session's environment modifier — the same
+                    // value the tire path multiplied into this wheel's
+                    // limits (F06-B).
+                    traction: conditions.traction,
+                },
             })
             .collect();
         commands.entity(entity).insert(VehicleTelemetry {

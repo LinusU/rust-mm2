@@ -4,6 +4,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 use crate::sim;
+use crate::surface::{TireConditions, TireSurface};
 use crate::vehicle::{
     DriveDirection, ResetVehicle, Teleported, Vehicle, VehicleInput, VehicleState, WheelState,
 };
@@ -84,6 +85,8 @@ type VehicleQuery<'w, 's> = Query<
 pub fn vehicle_simulation(
     time: Res<Time>,
     spatial_query: SpatialQuery,
+    tire_surfaces: Query<&TireSurface>,
+    conditions: Res<TireConditions>,
     mut vehicles: VehicleQuery,
 ) {
     let dt = time.delta_secs();
@@ -192,6 +195,7 @@ pub fn vehicle_simulation(
             *ws = WheelState {
                 contact_normal: Vec3::Y,
                 spin: ws.spin,
+                surface_grip: 1.0,
                 ..Default::default()
             };
 
@@ -309,8 +313,24 @@ pub fn vehicle_simulation(
             let vel_lat = contact_vel.dot(tire_right);
             let slip = sim::slip_angle(vel_long, vel_lat);
 
+            // The surface under this wheel: the collider's `TireSurface`
+            // (authored material, normalized at import — an unmarked
+            // collider is the neutral reference) times the session's
+            // environment modifier. One effective coefficient applied
+            // to every tire limit below — lateral peak, longitudinal
+            // limit, traction-control cap and the combined-force
+            // ellipse — so the modifier lands once, not twice (F06-B).
+            // Delivered force scales; commanded steering geometry does
+            // not (a slippery road turns less grip, not less lock).
+            let surface_grip = (ws
+                .contact_entity
+                .and_then(|e| tire_surfaces.get(e).ok())
+                .map_or(1.0, |s| s.grip)
+                * conditions.traction)
+                .max(0.0);
+
             let load = sim::load_adjusted_grip(ws.suspension_force, reference_load, tires);
-            let traction_limit = tires.longitudinal_grip * load;
+            let traction_limit = tires.longitudinal_grip * load * surface_grip;
 
             // This wheel's share of total drive torque (0 for undriven).
             let drive_share = if !wheel.driven {
@@ -328,7 +348,7 @@ pub fn vehicle_simulation(
             } else {
                 0.0
             };
-            let lateral = sim::lateral_force(slip, load, tires) * (1.0 - 0.6 * hb);
+            let lateral = sim::lateral_force(slip, load, tires) * (1.0 - 0.6 * hb) * surface_grip;
 
             // What the drivetrain could push through this wheel at the
             // current rpm/gear — the `engine_load` denominator. Uses the
@@ -414,13 +434,15 @@ pub fn vehicle_simulation(
 
             // Combined force is limited by the tire's traction curve (see
             // `sim::longitudinal_force`); over-demand slides rather than
-            // hard-clamping.
+            // hard-clamping. The surface's grip scale is the curve's
+            // `traction_limit` input — the same coefficient the lateral
+            // peak and the ellipse below use.
             let (longitudinal_clamped, demand_ratio) =
-                sim::longitudinal_force(longitudinal, load, tires, 1.0);
+                sim::longitudinal_force(longitudinal, load, tires, surface_grip);
 
             // Friction ellipse: combined force can't exceed μ·load.
             let total = (lateral * lateral + longitudinal_clamped * longitudinal_clamped).sqrt();
-            let max_total = tires.lateral_grip * load;
+            let max_total = tires.lateral_grip * load * surface_grip;
             let (lateral, longitudinal) = if total > max_total && total > 0.0 {
                 (
                     lateral * max_total / total,
@@ -459,6 +481,7 @@ pub fn vehicle_simulation(
             ws.vel_lat = vel_lat;
             ws.slip_angle = slip;
             ws.traction_demand = demand_ratio;
+            ws.surface_grip = surface_grip;
             ws.lateral_force = lateral;
             ws.longitudinal_force = longitudinal;
             ws.spin += (vel_long / wheel.radius.max(0.01)) * dt;

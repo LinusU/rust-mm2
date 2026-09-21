@@ -32,7 +32,7 @@ use mm2_game::{
     PlayerVehicle, RaceDefinition, RaceProgress, RaceState, Session, SessionEntity, SessionMode,
     SessionPhase, TargetSelection, WorldMode,
 };
-use mm2_vehicle::{VehicleConfig, vehicle_bundle};
+use mm2_vehicle::{TireConditions, VehicleConfig, vehicle_bundle};
 use tracing::{error, info, warn};
 
 use crate::camera::{CameraMode, ChaseCamera, FreeCamera};
@@ -161,6 +161,10 @@ pub fn drive_session(
             commands.remove_resource::<RaceState>();
             commands.remove_resource::<crate::nav_overlay::CityNav>();
             commands.remove_resource::<mm2_content::SurfaceTables>();
+            // `TireConditions` stays: it is a system input (the impact
+            // filter and telemetry read `Res` every frame), and
+            // `load_session_world` re-stamps it from the next session's
+            // config — removing it only opens a panic window.
             session
                 .transition(SessionPhase::Menu)
                 .expect("Unloading → Menu is a legal transition");
@@ -381,6 +385,14 @@ pub fn load_session_world(
     // the same bound (evidence/diagnostic runs only).
     commands.insert_resource(BangerPool {
         max_active: config.dev.banger_pool.unwrap_or(DEFAULT_ACTIVE_POOL),
+    });
+    // The session's environment traction modifier (F06-B): `--traction`
+    // is a quarantined dev override like `--banger-pool`; every real
+    // session drives unmodified (`1.0`) until F18's weather work owns a
+    // session-legal writer. Re-stamped on every load, so it survives
+    // teardown without leaking a stale value.
+    commands.insert_resource(TireConditions {
+        traction: config.dev.traction.unwrap_or(1.0).max(0.0),
     });
     if world_ok {
         session

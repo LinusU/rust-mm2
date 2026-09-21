@@ -13,7 +13,7 @@ use mm2_game::{
     Player, PlayerControl, Session, SessionConfig, SessionPhase, SurfaceMaterial, VehicleTelemetry,
     advance_session_tick,
 };
-use mm2_vehicle::{VehicleConfig, VehiclePlugin, vehicle_bundle};
+use mm2_vehicle::{TireConditions, VehicleConfig, VehiclePlugin, vehicle_bundle};
 
 const FRAMES_PER_SECOND: usize = 60;
 
@@ -26,6 +26,28 @@ fn test_app(car_pos: Vec3) -> (App, Entity, ObjectId) {
 /// [`test_app`] with an explicit [`ImpactPolicy`], so a test can widen
 /// the pair cooldown to span its choreography.
 fn test_app_with_policy(car_pos: Vec3, policy: ImpactPolicy) -> (App, Entity, ObjectId) {
+    test_app_full(car_pos, policy, TireConditions::default(), |app| {
+        // Ground marked with an authored surface code — unverified
+        // meaning, carried as data.
+        app.world_mut().spawn((
+            RigidBody::Static,
+            Collider::cuboid(400.0, 1.0, 400.0),
+            SurfaceMaterial::Authored(3),
+            Position(Vec3::new(0.0, -0.5, 0.0)),
+            Transform::from_xyz(0.0, -0.5, 0.0),
+        ));
+    })
+}
+
+/// The full harness: `policy` configures the impact filter,
+/// `conditions` is the session's environment traction modifier, and
+/// `ground` spawns the world's static colliders.
+fn test_app_full(
+    car_pos: Vec3,
+    policy: ImpactPolicy,
+    conditions: TireConditions,
+    ground: impl FnOnce(&mut App),
+) -> (App, Entity, ObjectId) {
     let mut session = Session::new();
     session.begin(SessionConfig::default()).unwrap();
     session.transition(SessionPhase::Ready).unwrap();
@@ -47,6 +69,7 @@ fn test_app_with_policy(car_pos: Vec3, policy: ImpactPolicy) -> (App, Entity, Ob
         )))
         .insert_resource(Gravity(Vec3::NEG_Y * 9.81))
         .insert_resource(session)
+        .insert_resource(conditions)
         .add_plugins(TransformPlugin)
         .add_plugins(VehiclePlugin)
         .add_message::<ImpactEvent>()
@@ -63,15 +86,7 @@ fn test_app_with_policy(car_pos: Vec3, policy: ImpactPolicy) -> (App, Entity, Ob
     app.finish();
     app.cleanup();
 
-    // Ground marked with an authored surface code — unverified meaning,
-    // carried as data.
-    app.world_mut().spawn((
-        RigidBody::Static,
-        Collider::cuboid(400.0, 1.0, 400.0),
-        SurfaceMaterial::Authored(3),
-        Position(Vec3::new(0.0, -0.5, 0.0)),
-        Transform::from_xyz(0.0, -0.5, 0.0),
-    ));
+    ground(&mut app);
 
     let car = app
         .world_mut()
@@ -271,4 +286,99 @@ fn a_quiet_touch_does_not_suppress_a_real_reimpact() {
     let worst = box_events.iter().map(|e| e.severity).fold(0.0f32, f32::max);
     let damage = app.world().get::<DamageSignals>(cube).unwrap();
     assert!(damage.impact_count >= 1 && damage.impact_total >= worst);
+}
+
+#[test]
+fn each_wheel_reports_the_material_of_the_collider_under_it() {
+    // F06-AC01's wheel leg: the car straddles the seam of two marked
+    // grounds, so the real wheel raycast → `contact_entity` →
+    // `SurfaceMaterial` chain must resolve different authored codes on
+    // different wheels of the same car.
+    let (mut app, car, _) = test_app_full(
+        Vec3::new(0.0, 1.2, 0.0),
+        ImpactPolicy::default(),
+        TireConditions::default(),
+        |app| {
+            app.world_mut().spawn((
+                RigidBody::Static,
+                Collider::cuboid(200.0, 1.0, 400.0),
+                SurfaceMaterial::Authored(3),
+                Position(Vec3::new(-100.0, -0.5, 0.0)),
+                Transform::from_xyz(-100.0, -0.5, 0.0),
+            ));
+            app.world_mut().spawn((
+                RigidBody::Static,
+                Collider::cuboid(200.0, 1.0, 400.0),
+                SurfaceMaterial::Authored(4),
+                Position(Vec3::new(100.0, -0.5, 0.0)),
+                Transform::from_xyz(100.0, -0.5, 0.0),
+            ));
+        },
+    );
+    for _ in 0..FRAMES_PER_SECOND {
+        app.update();
+    }
+    let cfg = VehicleConfig::default();
+    let t = app.world().get::<VehicleTelemetry>(car).unwrap();
+    for (i, w) in t.wheels.iter().enumerate() {
+        assert!(w.grounded, "wheel {i} settled");
+        let expected = if cfg.wheels[i].position[0] > 0.0 {
+            SurfaceMaterial::Authored(4)
+        } else {
+            SurfaceMaterial::Authored(3)
+        };
+        assert_eq!(
+            w.surface.material, expected,
+            "wheel {i} over x={}",
+            cfg.wheels[i].position[0]
+        );
+    }
+}
+
+#[test]
+fn wheel_and_impact_surfaces_report_the_environment_modifier() {
+    // The session's `TireConditions` is the same input the tire path
+    // multiplies in (F06-B): telemetry wheels and impact events must
+    // report it on `SurfaceState.traction` — the modifier is a
+    // separate term from the base material, so a wetness change never
+    // rewrites collider identity.
+    let (mut app, car, _) = test_app_full(
+        Vec3::new(0.0, 4.0, 0.0),
+        ImpactPolicy::default(),
+        TireConditions { traction: 0.6 },
+        |app| {
+            app.world_mut().spawn((
+                RigidBody::Static,
+                Collider::cuboid(400.0, 1.0, 400.0),
+                SurfaceMaterial::Authored(3),
+                Position(Vec3::new(0.0, -0.5, 0.0)),
+                Transform::from_xyz(0.0, -0.5, 0.0),
+            ));
+        },
+    );
+    // Land the car on its roof so the chassis itself contacts.
+    let inverted = Quat::from_rotation_x(std::f32::consts::PI);
+    {
+        let world = app.world_mut();
+        world.get_mut::<Rotation>(car).unwrap().0 = inverted;
+        world.get_mut::<Transform>(car).unwrap().rotation = inverted;
+    }
+    let mut events = Vec::new();
+    // Four seconds: land, report, and self-right (2 s delay) so the
+    // wheels ground again and their telemetry can be checked too.
+    for _ in 0..FRAMES_PER_SECOND * 4 {
+        app.update();
+        events.extend(drain_impacts(&mut app));
+    }
+    assert!(!events.is_empty(), "the roof drop must impact");
+    for e in &events {
+        assert_eq!(e.surface.material, SurfaceMaterial::Authored(3));
+        assert_eq!(e.surface.traction, 0.6, "impact reports the modifier");
+    }
+    let t = app.world().get::<VehicleTelemetry>(car).unwrap();
+    let grounded = t.wheels.iter().filter(|w| w.grounded).count();
+    assert!(grounded > 0, "self-righted car grounds its wheels");
+    for w in t.wheels.iter().filter(|w| w.grounded) {
+        assert_eq!(w.surface.traction, 0.6, "wheel reports the modifier");
+    }
 }

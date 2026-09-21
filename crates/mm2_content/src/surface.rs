@@ -21,6 +21,8 @@ use mm2_assets::{AssetsError, Resolved, Vfs};
 use mm2_formats::FormatError;
 use mm2_formats::materials::{MaterialMap, MaterialSet, NONE_PHYSICS};
 use mm2_formats::tex::frame_base_stem;
+use mm2_game::SurfaceMaterial;
+use mm2_vehicle::TireSurface;
 
 /// Logical path of the material property blocks.
 pub const MTL_PATH: &str = "city/materials.mtl";
@@ -123,6 +125,48 @@ impl SurfaceTables {
         self.set.validate().len()
             + self.map.validate().len()
             + self.map.undefined_refs(&self.set).len()
+    }
+
+    /// The physics-side surface the tire path consumes for one authored
+    /// material index (F06-B): the def's `friction` normalized so the
+    /// table's `_default` block lands on exactly `1.0` — the reference
+    /// surface the handling was tuned against. That keeps authored
+    /// differences relative (retail `water` ≈ 0.76, `deepwater` ≈ 0.72)
+    /// without rescaling every standard surface's grip — an
+    /// implementation choice, not verified original scaling (UNK-23).
+    /// A table without a usable `_default` friction falls back to a
+    /// `1.0` reference, applying authored values raw. A def whose
+    /// `friction` is missing, non-finite or negative — all flagged by
+    /// [`issues`](Self::issues) — resolves to the neutral reference
+    /// rather than a guessed value.
+    pub fn tire_surface(&self, material_index: u16) -> TireSurface {
+        let reference = self
+            .set
+            .default_def()
+            .and_then(|d| d.f32("friction"))
+            .filter(|f| f.is_finite() && *f > 0.0)
+            .unwrap_or(1.0);
+        let grip = self
+            .set
+            .defs
+            .get(material_index as usize)
+            .and_then(|d| d.f32("friction"))
+            .map(|f| f / reference)
+            .filter(|g| g.is_finite() && *g >= 0.0)
+            .unwrap_or(1.0);
+        TireSurface { grip }
+    }
+
+    /// [`tire_surface`](Self::tire_surface) for a collider's
+    /// `SurfaceMaterial`: `Authored(i)` carries its material's
+    /// normalized grip; `Unspecified` carries no component at all — an
+    /// unmarked collider is the neutral reference surface, the same
+    /// conservative policy the identity layer applies.
+    pub fn tire_surface_for(&self, material: SurfaceMaterial) -> Option<TireSurface> {
+        match material {
+            SurfaceMaterial::Authored(i) => Some(self.tire_surface(i)),
+            SurfaceMaterial::Unspecified => None,
+        }
     }
 }
 

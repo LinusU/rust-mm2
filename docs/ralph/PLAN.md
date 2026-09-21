@@ -39,7 +39,30 @@
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
 **Next selected slice: F13-B remainder, F14-B remainder, F11-C,
-or F06-B traction** — the latest iteration landed F06-A.2,
+or F06-B remainder (elasticity/drag, consumer consistency)** — the
+latest iteration landed the traction leg of F06-B:
+`mm2_vehicle::surface` declares the physics-side inputs the sim
+consumes — `TireSurface` (collider component, normalized material
+grip) and `TireConditions` (session resource, environment/wetness
+modifier kept as a separate term). `SurfaceTables::tire_surface`
+normalizes each authored `friction` against the `_default` block
+(`_default` → 1.0; retail water ≈ 0.76, deepwater ≈ 0.72,
+cobblestone/grass/sand → 1.0 — an implementation choice, not a
+verified original rule), and `emit_psdl` attaches it beside
+`SurfaceMaterial` on every collider. `vehicle_simulation` resolves
+`contact_entity → TireSurface` × `TireConditions.traction` into one
+`surface_grip` applied to lateral force, the longitudinal limit, the
+TC cap and the friction ellipse — exactly once — and wheel telemetry
++ impact events report the environment term in `SurfaceState.traction`.
+A quarantined `--traction <f>` dev override (finite, ≥0, else usage
+exit 2) makes the environment leg demonstrable; retail london
+`--traction 0.5` drops the 600-update smoke peak 29.0→22.3 m/s.
+Synthetic tests prove per-wheel material grip over split ground, the
+modifier composition, and measurable delivered-force differences on
+real Avian physics (AC02's physics leg). Still open under F06-B:
+`elasticity`/`drag` consumers, AC03 runtime texture-swap invariance
+test, AC05 audio/dust consumer consistency, AC06 network authority.
+The iteration before landed F06-A.2,
 the runtime-identity leg of surface materials: `mm2_content::surface`
 produces `SurfaceTables` from the VFS-resolved `city/materials.{csv,mtl}`
 pair and `mm2_app::city::emit_psdl` splits each room's collider per
@@ -52,9 +75,7 @@ records the named/none/blank/unmapped split plus table issues.
 Synthetic tests prove per-region ray classification on real Avian
 physics (AC01's collider leg); UNK-23 still covers the original's
 `_default` policy and consumer semantics — the fallback is a
-documented conservative implementation policy. The traction leg —
-`friction`/`elasticity`/`drag` into the real Avian force path plus
-wetness/snow modifiers — stays queued under F06-B. The iteration
+documented conservative implementation policy. The iteration
 before landed F06-A.1,
 the authored-data leg of surface materials: `mm2_formats::materials`
 parses the global `city/materials.{csv,mtl}` pair (texture→material
@@ -402,9 +423,9 @@ rendered gameplay; outranks inference.
 | F05-A | queued | F01-B, F02-B | `.vehcardamage` readable via generic tune parser; no typed rules or runtime. |
 | F05-B | queued | F05-A | — |
 | F05-C | queued | F05-B | — |
-| F06-A | active | F00-B, F01-B | Split: A.1 (materials parser + audit — implemented below). Remaining: typed surface identity through collider import and contact classification. |
+| F06-A | implemented | F00-B, F01-B | A.1 (parser + audit — below) + A.2 (runtime identity — externally checked at `d292898`): `emit_psdl` splits colliders per authored material index; `SurfaceMaterial` on every collider; `SurfaceTables` session-scoped; `CityReport.surfaces` diagnostics. |
 | F06-A.1 | implemented | F00-B, F01-B | `mm2_formats::materials`: `MaterialSet` (line-oriented `mtl <name> { key: v… }` blocks; brace may sit on next line, `:` optional, `//` comments; all ten retail fields preserved + typed accessors) and `MaterialMap` (`texture,physics` csv; `none` keyword, header recorded, short/extra-cell rows into `diagnostics`), each with `validate()` issues (duplicate/missing/bad/negative fields, missing `_default`, dup rows, bad header) + `undefined_refs` cross-check. `mm2_formats::tex::frame_base_stem` shares the `<stem>-NNNN` animated-frame convention (s_thames-0009 → s_thames). `mm2-inspect materials <install> [--city] [--strict]`: expected `city/materials.{csv,mtl}` + every discovered `.mtl`/`materials*.csv`, csv→mtl ref check, texture-file resolution split (semantic-only stems informational), and per-city PSDL texture-table coverage (named/`none`/blank-slot/unmapped, frame-stem fallback). Retail: 3423 rows (137 named, 3286 `none`), 8 materials, 2 dead refs (`transbay_ramp_f→ash`, `s_grass2mud→mud`) — `--strict` exits 2; london 469 names = 152 named + 308 none + 6 blank + 3 unmapped, sf 457 = 148 + 301 + 6 + 2. `scan` recognizes `.mtl`. docs/research/materials.md + WLD-19/UNK-23. Runtime lookup/traction unwired — the parsed pair is not yet a `SurfaceMaterial` source. Candidate pending external check. |
-| F06-B | queued | F06-A | — |
+| F06-B | active | F06-A | Traction leg implemented (below): `TireSurface` collider component + `TireConditions` env resource; authored `friction` normalized to `_default` feeds lateral/longitudinal/TC/ellipse — exactly once; `--traction` dev override; telemetry+impacts report the env term. Remaining: `elasticity`/`drag` consumers, AC03 texture-swap invariance test, AC05 audio/dust consistency, AC06 network authority. Candidate pending external check. |
 | F06-C | queued | F06-B | — |
 | F07-A | queued | F01-B, F02-B, F06-A | No audio decoders/voices; `aud/` family = 3293 files incl. cardata/dmusic/spchdata. bevy built without `bevy_audio`. |
 | F07-B | queued | F07-A | — |
