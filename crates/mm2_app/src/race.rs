@@ -85,6 +85,10 @@ pub struct EventSetup {
     /// runs, with the failure logged — since a missing `.aimap` never
     /// blocks an otherwise runnable event.
     pub roster: mm2_game::OpponentRoster,
+    /// The city's normalized reward surface (F16-B): the authored
+    /// `<city>_rewards.csv` rules the result consumer grants unlocks
+    /// from, plus the authored family sizes `half`/`all` measure.
+    pub rewards: mm2_game::RewardTable,
 }
 
 /// Resolve an `EventRef` through the VFS into the event's runtime
@@ -113,6 +117,10 @@ pub fn event_race_setup(
             mm2_game::OpponentRoster::default()
         }
     };
+    let rewards = mm2_content::reward_table(&catalog);
+    for d in &rewards.diagnostics {
+        warn!(diagnostic = %d, "reward row did not become a rule");
+    }
     Ok(EventSetup {
         definition,
         key: mm2_game::EventKey {
@@ -122,6 +130,7 @@ pub fn event_race_setup(
         },
         pathsets,
         roster,
+        rewards,
     })
 }
 

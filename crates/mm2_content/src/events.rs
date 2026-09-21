@@ -28,17 +28,6 @@ use mm2_formats::rewards::{RewardNum, RewardRow, RewardsFile};
 use mm2_formats::waypoints::{StartPointsFile, WaypointFile};
 use mm2_game::{EventRef, EventTableKind};
 
-/// File-stem prefix a table's rows map to (the `<prefix><index>`
-/// convention — inferred, see module docs).
-fn stem_prefix(table: EventTableKind) -> &'static str {
-    match table {
-        EventTableKind::Blitz => "blitz",
-        EventTableKind::Checkpoint => "race",
-        EventTableKind::Circuit => "circuit",
-        EventTableKind::CrashCourse => "crash",
-    }
-}
-
 /// Scan order for the four tables: the order a menu presents them on
 /// retail (Checkpoint, Blitz, Circuit, Crash Course). Determines
 /// [`EventCatalog::events`] ordering — ids never depend on load order.
@@ -328,7 +317,7 @@ impl EventCatalog {
                     table: table_kind,
                     index,
                 };
-                let stem = format!("{}{}", stem_prefix(table_kind), index);
+                let stem = format!("{}{}", table_kind.stem_prefix(), index);
                 claimed.insert(stem.clone());
                 catalog.events.push(Self::build_event(
                     vfs,
@@ -355,8 +344,10 @@ impl EventCatalog {
                     }
                     for row in rewards.rows {
                         let mut attached = false;
-                        if let RewardNum::Index(i) = &row.race_num {
-                            let stem = format!("crash{i}");
+                        if let RewardNum::Index(i) = &row.race_num
+                            && let Some(family) = EventTableKind::from_reward_token(&row.race_type)
+                        {
+                            let stem = format!("{}{i}", family.stem_prefix());
                             if let Some(ev) = catalog.events.iter_mut().find(|e| e.stem == stem) {
                                 ev.rewards.push(row.clone());
                                 attached = true;

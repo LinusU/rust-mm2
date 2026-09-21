@@ -19,6 +19,7 @@ pub mod model;
 pub mod nav;
 pub mod opponents;
 pub mod race_def;
+pub mod rewards;
 pub mod surface;
 
 pub use assemble::{LoadError, TrailerDef, VehicleDef, load_by_id, load_opponent, load_vehicle};
@@ -50,6 +51,7 @@ pub use race_def::{
     PLAYER_SLOT, RaceBuildError, RaceDefBuild, RaceDefEntry, RaceDefReport, RaceDefSummary,
     audit_build, race_definition,
 };
+pub use rewards::reward_table;
 pub use surface::{
     PsdlSurfaces, SurfaceLoadError, SurfaceSlot, SurfaceTables, load_surface_tables,
 };

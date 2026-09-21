@@ -40,6 +40,12 @@ pub struct SessionConfig {
     pub vehicle: VehicleSelection,
     /// Who owns game-rule authority for the session.
     pub authority: SessionAuthority,
+    /// Mod content was mounted for this session (`--mods`). Mods are
+    /// legitimate content, but a result produced under them is not
+    /// comparable to a stock-content record — progression eligibility
+    /// treats a modded session conservatively until F29 can classify
+    /// per-mod impact (designed policy, not an original rule).
+    pub mods_active: bool,
     /// Local-only developer overrides — never progression- or
     /// network-legal.
     pub dev: DevOverrides,
@@ -58,6 +64,7 @@ impl Default for SessionConfig {
             seed: 0,
             vehicle: VehicleSelection::default(),
             authority: SessionAuthority::Local,
+            mods_active: false,
             dev: DevOverrides::default(),
         }
     }
@@ -180,6 +187,44 @@ impl EventTableKind {
             Self::Circuit => "mmcircuitdata.csv",
             Self::CrashCourse => "mmcrashdata.csv",
         }
+    }
+
+    /// The file-stem prefix the table's rows map to (`blitz3`,
+    /// `race0`, `circuit5`, `crash9`) — the inferred `<prefix><index>`
+    /// convention the event catalog uses.
+    pub fn stem_prefix(self) -> &'static str {
+        match self {
+            Self::Blitz => "blitz",
+            Self::Checkpoint => "race",
+            Self::Circuit => "circuit",
+            Self::CrashCourse => "crash",
+        }
+    }
+
+    /// The `RaceType` token a `<city>_rewards.csv` row uses for this
+    /// family — `race` names the Checkpoint table, matching the file
+    /// stem prefix.
+    pub fn reward_token(self) -> &'static str {
+        match self {
+            Self::Blitz => "blitz",
+            Self::Checkpoint => "race",
+            Self::Circuit => "circuit",
+            Self::CrashCourse => "crash",
+        }
+    }
+
+    /// Reverse of [`reward_token`](Self::reward_token) — `None` for a
+    /// `RaceType` token no family claims (kept raw by producers as a
+    /// diagnostic, never silently attached).
+    pub fn from_reward_token(token: &str) -> Option<Self> {
+        [
+            Self::Blitz,
+            Self::Checkpoint,
+            Self::Circuit,
+            Self::CrashCourse,
+        ]
+        .into_iter()
+        .find(|kind| kind.reward_token() == token)
     }
 }
 

@@ -16,6 +16,7 @@ pub mod impact;
 pub mod nav;
 pub mod opponent;
 pub mod profile;
+pub mod progression;
 pub mod props;
 pub mod race;
 pub mod result;
@@ -47,6 +48,10 @@ pub use profile::{
     EventKey, EventRecord, MAX_NAME_CHARS, PROFILE_SCHEMA_VERSION, PlayerProfile, ProfileError,
     ProfileId, ProfileKind, ProfileLoad, ProfileMeta, ProfileProgress, ProfileSelections,
     ProfileStore, ProfileSummary, VehicleChoice,
+};
+pub use progression::{
+    ApplyOutcome, Grant, Ineligible, RewardRequirement, RewardRule, RewardTable, Unlock,
+    apply_result, place_requirement, record_eligibility,
 };
 pub use props::{MAX_PROP_RULE_STAMPS, PropStamp, PropWalk, PropWalkStats, walk_prop_rules};
 pub use race::{

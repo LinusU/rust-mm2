@@ -1019,6 +1019,28 @@ fn events(
                 );
             }
         }
+        // F16-B: the normalized session reward table — every authored
+        // row becomes an event-bound or milestone rule, or a named
+        // diagnostic (AC05: no silently dropped unlock rule).
+        let rewards = mm2_content::reward_table(&cat);
+        if !rewards.per_event.is_empty() || !rewards.milestones.is_empty() {
+            let sizes = rewards
+                .family_sizes
+                .iter()
+                .map(|(t, n)| format!("{t:?}={n}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            println!(
+                "  reward table: {} event-bound + {} milestone rules ({}), {} diagnostics",
+                rewards.per_event.len(),
+                rewards.milestones.len(),
+                sizes,
+                rewards.diagnostics.len(),
+            );
+            for d in &rewards.diagnostics {
+                println!("    reward note: {d}");
+            }
+        }
         for d in &cat.diagnostics {
             println!("  note: {d}");
         }

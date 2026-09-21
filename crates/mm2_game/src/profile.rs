@@ -168,18 +168,49 @@ pub struct EventRecord {
     pub finishes: u32,
     /// Best (lowest) recorded finish in race ticks.
     pub best_race_ticks: Option<u64>,
+    /// Best (lowest) recorded finishing place — 1 is a win.
+    #[serde(default)]
+    pub best_place: Option<u32>,
+    /// The amateur win criterion (a top-3 finish — RACE-3/CHK-3) was
+    /// met on at least one Amateur run.
+    #[serde(default)]
+    pub beaten_amateur: bool,
+    /// The professional win criterion (a 1st-place finish) was met on
+    /// at least one Professional run.
+    #[serde(default)]
+    pub beaten_professional: bool,
 }
 
 impl EventRecord {
-    /// Note one authoritative finish at `race_ticks` — bumps the count
-    /// and keeps the best (lowest) time. Idempotency is the caller's
-    /// (the `ResultLedger` dedups by `ResultId`, spec req 3).
-    pub fn record_finish(&mut self, race_ticks: u64) {
+    /// Note one authoritative finish at `race_ticks` in `place` under
+    /// `difficulty` — bumps the count, keeps the best (lowest) time and
+    /// place, and sets the difficulty's `beaten` flag when the place
+    /// met the documented win criterion
+    /// ([`crate::progression::place_requirement`]: top-3 Amateur, 1st
+    /// Professional). Idempotency is the caller's (the `ResultLedger`
+    /// dedups by `ResultId`, spec req 3).
+    pub fn record_finish(&mut self, race_ticks: u64, place: Option<u32>, difficulty: Difficulty) {
         self.finishes += 1;
         self.best_race_ticks = Some(
             self.best_race_ticks
                 .map_or(race_ticks, |best| best.min(race_ticks)),
         );
+        if let Some(place) = place {
+            self.best_place = Some(self.best_place.map_or(place, |best| best.min(place)));
+            if place <= crate::progression::place_requirement(difficulty) {
+                match difficulty {
+                    Difficulty::Amateur => self.beaten_amateur = true,
+                    Difficulty::Professional => self.beaten_professional = true,
+                }
+            }
+        }
+    }
+
+    /// Whether the event's win criterion was ever met — at either
+    /// difficulty. Milestone rewards (`half`/`all` family counts) and
+    /// indexed rewards count beaten events, not mere finishes.
+    pub fn is_beaten(&self) -> bool {
+        self.beaten_amateur || self.beaten_professional
     }
 }
 
@@ -314,18 +345,25 @@ impl PlayerProfile {
         let pos = match self.progress.events.binary_search_by(|r| r.key.cmp(&key)) {
             Ok(pos) => pos,
             Err(pos) => {
-                self.progress.events.insert(
-                    pos,
-                    EventRecord {
-                        key,
-                        finishes: 0,
-                        best_race_ticks: None,
-                    },
-                );
+                self.progress.events.insert(pos, EventRecord::empty(key));
                 pos
             }
         };
         &mut self.progress.events[pos]
+    }
+}
+
+impl EventRecord {
+    /// A zeroed record for `key` — `event_mut`'s insertion shape.
+    fn empty(key: EventKey) -> Self {
+        Self {
+            key,
+            finishes: 0,
+            best_race_ticks: None,
+            best_place: None,
+            beaten_amateur: false,
+            beaten_professional: false,
+        }
     }
 }
 

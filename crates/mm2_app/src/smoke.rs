@@ -236,6 +236,10 @@ pub fn headless_smoke(
                 race::update_checkpoint_markers,
                 scripted::scripted_drive.run_if(resource_exists::<scripted::ScriptedDrive>),
                 opponents::opponent_drive,
+                // F16-B: the same result → profile consumption the
+                // windowed app runs — a bound profile in a headless
+                // evidence run must record identically.
+                crate::progression::record_session_results,
             ),
         );
     if driver == Driver::Scripted {

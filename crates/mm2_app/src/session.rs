@@ -159,6 +159,7 @@ pub fn drive_session(
             // never survive into the next session (AC03 — no old
             // timer survives).
             commands.remove_resource::<RaceState>();
+            commands.remove_resource::<crate::progression::EventRewards>();
             commands.remove_resource::<crate::nav_overlay::CityNav>();
             commands.remove_resource::<mm2_content::SurfaceTables>();
             // `TireConditions` stays: it is a system input (the impact
@@ -306,7 +307,11 @@ pub fn load_session_world(
     // definition before the session is declared Ready. An event that
     // cannot load fails the session — it never silently cruises. The
     // authored player slot replaces the world's roam spawn.
-    let mut event_race: Option<(RaceDefinition, mm2_game::OpponentRoster)> = None;
+    let mut event_race: Option<(
+        RaceDefinition,
+        mm2_game::OpponentRoster,
+        mm2_game::RewardTable,
+    )> = None;
     // The event's stable save identity — recorded on the bound profile
     // once the session is live (F16 `selections.last_event`).
     let mut event_key = None;
@@ -371,7 +376,7 @@ pub fn load_session_world(
                         "event pathset overlay stamped"
                     );
                 }
-                event_race = Some((def, setup.roster));
+                event_race = Some((def, setup.roster, setup.rewards));
             }
             Err(e) => {
                 error!(error = %e, event = ?event_ref, "event failed to load");
@@ -645,7 +650,7 @@ pub fn load_session_world(
     // the participant's progress are inserted first so `advance_race`
     // can own the release (one `RaceStarted`, one unlock — AC03).
     match event_race {
-        Some((def, roster)) => {
+        Some((def, roster, rewards)) => {
             commands
                 .entity(vehicle)
                 .insert((RaceProgress::new(&def), TargetSelection::default()));
@@ -673,6 +678,13 @@ pub fn load_session_world(
             );
             race::spawn_nav_arrow(&mut commands, owner);
             race::spawn_race_warning(&mut commands, owner);
+            // F16-B: the event's reward surface — consumed by
+            // `record_session_results` while the session lives, removed
+            // by teardown so a following cruise never sees it.
+            commands.insert_resource(crate::progression::EventRewards {
+                key: event_key.clone().expect("an event setup carries its key"),
+                table: rewards,
+            });
             commands.insert_resource(RaceState::new(def, session.generation()));
             session
                 .transition(SessionPhase::Countdown)

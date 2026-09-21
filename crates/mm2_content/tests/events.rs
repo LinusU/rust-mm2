@@ -122,12 +122,13 @@ fn synthetic_install() -> tempfile::TempDir {
         &format!("{CRASHDATA}ghost,0,1,25,0,0,0,0,0,0,0\n"),
     );
 
-    // Rewards: one indexed crash reward, two milestones.
+    // Rewards: two milestones, two indexed rows that attach, and one
+    // indexed row naming an event no table row owns.
     write(
         d,
         "race/london/london_rewards.csv",
         &format!(
-            "{REWARDS}race,half,vpx,0,msg one,\nblitz,all,vpz,2,msg two,\ncrash,0,vpy,1,msg three,\n"
+            "{REWARDS}race,half,vpx,0,msg one,\nblitz,all,vpz,2,msg two,\ncrash,0,vpy,1,msg three,\nrace,1,vpw,1,msg four,\ncrash,9,vpq,0,ghost,\n"
         ),
     );
 
@@ -221,14 +222,29 @@ fn crash_course_links_and_rewards() {
     assert!(crash1.failed.iter().any(|f| f.reference.contains("ghost")));
     assert!(!crash1.status.is_ready());
 
-    // Milestone rewards stay on the catalog; the referenced waypoint
-    // stem and the rewards table itself are not extras.
-    assert_eq!(cat.milestone_rewards.len(), 2);
+    // Milestone rewards stay on the catalog — including `crash,9`,
+    // whose index no authored event owns; the referenced waypoint stem
+    // and the rewards table itself are not extras.
+    assert_eq!(cat.milestone_rewards.len(), 3);
+    assert_eq!(
+        cat.milestone_rewards
+            .iter()
+            .filter(|r| matches!(r.race_num, RewardNum::Half | RewardNum::All))
+            .count(),
+        2
+    );
     assert!(
         cat.milestone_rewards
             .iter()
-            .all(|r| matches!(r.race_num, RewardNum::Half | RewardNum::All))
+            .any(|r| matches!(r.race_num, RewardNum::Index(9)))
     );
+
+    // Indexed rows attach by family: `crash,0` → `crash0`, and `race,1`
+    // → the checkpoint event `race1` — the family-aware binding, not a
+    // hard-coded crash prefix.
+    let race1 = cat.events.iter().find(|e| e.stem == "race1").unwrap();
+    assert_eq!(race1.rewards.len(), 1);
+    assert_eq!(race1.rewards[0].car, "vpw");
     let extra_labels: Vec<&str> = cat.extras.iter().map(|e| e.label.as_str()).collect();
     assert!(extra_labels.contains(&"roam"));
     assert!(extra_labels.contains(&"race5"));
@@ -279,6 +295,65 @@ fn resolve_validates_dependencies() {
         cat.resolve(&wrong_city),
         Err(EventResolveError::WrongCity { .. })
     ));
+}
+
+/// `reward_table` normalizes the catalog into the session-scoped
+/// `mm2_game::RewardTable`: authored family sizes as denominators,
+/// milestones with their requirements, indexed rows bound to the
+/// event's stable `EventKey`, and a diagnostic for the row that
+/// references a nonexistent event (F16-AC05: no silent drops).
+#[test]
+fn reward_table_normalizes_the_catalog() {
+    let tmp = synthetic_install();
+    let vfs = vfs_of(tmp.path());
+    let cat = EventCatalog::scan(&vfs, "london");
+    let table = mm2_content::reward_table(&cat);
+
+    // Authored family sizes — the `half`/`all` denominators.
+    assert_eq!(table.family_sizes[&EventTableKind::Checkpoint], 2);
+    assert_eq!(table.family_sizes[&EventTableKind::Blitz], 1);
+    assert_eq!(table.family_sizes[&EventTableKind::Circuit], 1);
+    assert_eq!(table.family_sizes[&EventTableKind::CrashCourse], 2);
+
+    // The two milestone rows: `race,half` unlocks the car, `blitz,all`
+    // a paint — `race` is the checkpoint family's authored token.
+    assert_eq!(table.milestones.len(), 2);
+    let half = table
+        .milestones
+        .iter()
+        .find(|r| r.requirement == mm2_game::RewardRequirement::Half)
+        .unwrap();
+    assert_eq!(half.family, EventTableKind::Checkpoint);
+    assert_eq!(half.unlock, mm2_game::Unlock::Vehicle("vpx".to_string()));
+    let all = table
+        .milestones
+        .iter()
+        .find(|r| r.requirement == mm2_game::RewardRequirement::All)
+        .unwrap();
+    assert_eq!(all.family, EventTableKind::Blitz);
+    assert_eq!(
+        all.unlock,
+        mm2_game::Unlock::Paint {
+            car: "vpz".to_string(),
+            variant: 2
+        }
+    );
+
+    // Indexed rows bind to their event's stable key — `crash,0` to
+    // crash0, `race,1` to race1 (family-aware, not crash-only).
+    assert_eq!(table.per_event.len(), 2);
+    let bound: Vec<&str> = table
+        .per_event
+        .iter()
+        .map(|(k, _)| k.stem.as_str())
+        .collect();
+    assert!(bound.contains(&"crash0"));
+    assert!(bound.contains(&"race1"));
+
+    // `crash,9` attaches to no authored event — a diagnostic, not a
+    // rule, and not dropped.
+    assert_eq!(table.diagnostics.len(), 1, "{:?}", table.diagnostics);
+    assert!(table.diagnostics[0].contains('9'));
 }
 
 #[test]

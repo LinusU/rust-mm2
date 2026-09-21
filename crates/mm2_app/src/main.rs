@@ -18,8 +18,8 @@ use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use clap::Parser;
 use mm2_app::session::{ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
-    banger, camera, car_visual, city, contracts, input, nav_overlay, opponents, profile, race,
-    scripted, session, smoke,
+    banger, camera, car_visual, city, contracts, input, nav_overlay, opponents, profile,
+    progression, race, scripted, session, smoke,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
@@ -593,6 +593,10 @@ fn main() {
             banger_pool: cli.banger_pool,
             traction,
         },
+        // Any mounted mod makes records/unlocks ineligible — a result
+        // under modded content is not comparable to stock (designed
+        // conservative policy until per-mod impact classification).
+        mods_active: has_mods,
         ..SessionConfig::default()
     };
 
@@ -767,6 +771,10 @@ fn main() {
     // writes `PlayerVehicle`, so no ordering is needed. Frozen during
     // captures like every other driver.
     .add_systems(Update, opponents::opponent_drive.run_if(not(capturing)))
+    // F16-B: drain authoritative results into the bound profile —
+    // records finishes, grants rewards, saves on change. Inert without
+    // an event or a bound profile.
+    .add_systems(Update, progression::record_session_results)
     // The F09-B overlay draws only while a session carries a loaded
     // CityNav resource.
     .add_systems(

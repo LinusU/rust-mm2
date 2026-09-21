@@ -164,14 +164,8 @@ impl ResultLedger {
     ///   all: still-racing or quit participants are unplaced, not
     ///   ranked last.
     pub fn standings(&self) -> Vec<&SessionResult> {
-        fn key(result: &SessionResult) -> (u8, u64, PlayerId) {
-            match result.outcome {
-                SessionOutcome::Finished { race_ticks } => (0, race_ticks, result.id.participant),
-                SessionOutcome::TimedOut { race_ticks } => (1, race_ticks, result.id.participant),
-            }
-        }
         let mut ordered: Vec<&SessionResult> = self.recorded.values().collect();
-        ordered.sort_by_key(|r| key(r));
+        ordered.sort_by_key(|r| standing_key(r));
         ordered
     }
 
@@ -184,5 +178,39 @@ impl ResultLedger {
             .iter()
             .position(|r| r.id.participant == participant)
             .map(|i| i as u32 + 1)
+    }
+
+    /// [`standings`](Self::standings) scoped to one session generation.
+    /// The ledger is not cleared between sessions — results carry their
+    /// generation — so consumers ranking a *live* race must scope, or a
+    /// finished restart's results pollute the new session's order.
+    pub fn standings_in(&self, generation: u64) -> Vec<&SessionResult> {
+        let mut ordered: Vec<&SessionResult> = self
+            .recorded
+            .values()
+            .filter(|r| r.id.generation == generation)
+            .collect();
+        ordered.sort_by_key(|r| standing_key(r));
+        ordered
+    }
+
+    /// `participant`'s 1-based place in
+    /// [`standings_in`](Self::standings_in) — `None` when they recorded
+    /// no result in `generation`.
+    pub fn place_of_in(&self, generation: u64, participant: PlayerId) -> Option<u32> {
+        self.standings_in(generation)
+            .iter()
+            .position(|r| r.id.participant == participant)
+            .map(|i| i as u32 + 1)
+    }
+}
+
+/// The standings sort key — see [`ResultLedger::standings`]' ordering
+/// contract: finished before timed-out, then race ticks, then
+/// participant id.
+fn standing_key(result: &SessionResult) -> (u8, u64, PlayerId) {
+    match result.outcome {
+        SessionOutcome::Finished { race_ticks } => (0, race_ticks, result.id.participant),
+        SessionOutcome::TimedOut { race_ticks } => (1, race_ticks, result.id.participant),
     }
 }

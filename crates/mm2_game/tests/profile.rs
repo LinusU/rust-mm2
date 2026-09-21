@@ -29,8 +29,12 @@ fn create_save_load_round_trip() {
     assert_eq!(profile.id.as_str(), "driver-0");
     assert_eq!(profile.version, PROFILE_SCHEMA_VERSION);
 
-    profile.event_mut(event_key()).record_finish(14_400);
-    profile.event_mut(event_key()).record_finish(13_200);
+    profile
+        .event_mut(event_key())
+        .record_finish(14_400, Some(2), Difficulty::Amateur);
+    profile
+        .event_mut(event_key())
+        .record_finish(13_200, Some(1), Difficulty::Amateur);
     profile.progress.unlocks.insert("vehicle:vpbus".to_string());
     profile.selections.vehicle = Some(VehicleChoice {
         id: "vpbug".to_string(),
@@ -49,6 +53,8 @@ fn create_save_load_round_trip() {
     let record = loaded.event(&event_key()).unwrap();
     assert_eq!(record.finishes, 2);
     assert_eq!(record.best_race_ticks, Some(13_200));
+    assert_eq!(record.best_place, Some(1));
+    assert!(record.beaten_amateur);
     assert!(loaded.progress.unlocks.contains("vehicle:vpbus"));
     assert_eq!(
         loaded.selections.vehicle,
@@ -96,7 +102,8 @@ fn profiles_are_isolated() {
         .unwrap();
     assert_ne!(a.id, b.id);
 
-    a.event_mut(event_key()).record_finish(9_000);
+    a.event_mut(event_key())
+        .record_finish(9_000, Some(1), Difficulty::Amateur);
     a.progress.unlocks.insert("vehicle:vpcoop".to_string());
     store.save(&mut a).unwrap();
 
