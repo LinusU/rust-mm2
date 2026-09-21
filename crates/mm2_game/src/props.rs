@@ -52,8 +52,16 @@
 //!   selection is unrecovered.
 //! - A stamp faces its walk direction (`forward`); the app yaws the
 //!   prop's +X axis along it like a directed pathset stamp.
+//!
+//! The module also hosts the two shared placement helpers the audit
+//! tooling reuses: [`path_stamp_sites`] expands a `PTH1` path into the
+//! stamp positions `mm2_app` then spawns (one source of truth for the
+//! expansion policy), and [`carriageways`] extracts each room's
+//! authored drivable surfaces — the reference a stamped position is
+//! checked against when auditing "prop in the road" reports.
 
 use mm2_formats::{
+    pathset::{Path, PathKind},
     proprules::{PropDefs, PropRuleSide, PropRules},
     psdl::{AttributeType, Psdl, PsdlRoom, RoomAttribute},
 };
@@ -351,19 +359,9 @@ fn kerb_strips(room: &PsdlRoom) -> Vec<KerbStrip> {
                 });
             }
             AttributeType::DividedRoad => {
-                // [packed, value, subtype×6] inline; [count, packed,
-                // value, count×6] counted — same layout as the city
-                // importer's DividedRoad arm.
-                let refs: &[u16] = if attr.subtype == 0 {
-                    if attr.data.len() < 3 || attr.data[3..].len() != attr.data[0] as usize * 6 {
-                        continue;
-                    }
-                    &attr.data[3..]
-                } else {
-                    if attr.data.len() < 2 || attr.data[2..].len() != attr.subtype as usize * 6 {
-                        continue;
-                    }
-                    &attr.data[2..]
+                // Six refs per section — layout in `divided_refs`.
+                let Some(refs) = divided_refs(attr) else {
+                    continue;
                 };
                 let (mut kl, mut ol, mut kr, mut or_) =
                     (Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -780,6 +778,368 @@ pub fn walk_prop_rules(psdl: &Psdl, defs: &PropDefs, rules: &PropRules) -> PropW
     walk
 }
 
+// ---------------------------------------------------------------------------
+// Pathset stamp expansion (shared with the app) and the drivable-surface
+// reference the placement audit classifies stamps against.
+// ---------------------------------------------------------------------------
+
+/// Hard bound on the prop instances one `props.pathset` file may stamp.
+/// The parser bounds path/point *counts* but not coordinates: a line
+/// strip expands to `segment_length / spacing` stamps, so authored
+/// positions make the expansion unbounded without this cap — a corrupt
+/// or hostile file (a VFS mod can legitimately override
+/// `props.pathset`) could stall `t += spacing` below the f32 ulp or
+/// push millions of instances and hang/OOM the city load. Retail's
+/// densest expansion is London's `props.pathset` at 1188 stamps / 87
+/// paths (sf: 925 / 113 + 31 decal-only paths; densest single path
+/// 162) — the cap sits ~7x above it. Suppressed stamps are counted in
+/// [`PathStampSites::capped`], never dropped silently.
+pub const MAX_PATHSET_STAMPS: usize = 8192;
+
+/// One stamp the pathset expansion produces: the authored-space
+/// position plus the facing the prop's +X axis is yawed to (`None` =
+/// unrotated). The direction is the raw authored intent — consumers
+/// normalize on XZ.
+#[derive(Debug, Clone)]
+pub struct PathStampSite {
+    /// Placement position, authored coordinates.
+    pub position: [f32; 3],
+    /// Direction the stamp faces, or `None` for an unrotated stamp.
+    pub forward: Option<[f32; 3]>,
+}
+
+/// What [`path_stamp_sites`] produced and suppressed — expansion
+/// over the `budget` is counted, never dropped silently.
+#[derive(Debug, Default)]
+pub struct PathStampSites {
+    /// Stamped sites in expansion order.
+    pub sites: Vec<PathStampSite>,
+    /// Stamps suppressed because `budget` ran out.
+    pub capped: usize,
+}
+
+/// Expand one pathset path into stamped sites, emitting at most
+/// `budget` — the sole implementation of the stamping policy both the
+/// city loader and the placement audit consume, so an audit measures
+/// exactly what the game stamps. Kind rules per R3 —
+/// `docs/research/pathset.md`:
+///
+/// - `Points`: one unrotated stamp per vertex.
+/// - `Directed`: one stamp per point pair at the first point, facing
+///   toward the second. A lone trailing point on an odd-count path
+///   stamps nothing (`Pathset::validate` reports the anomaly; the
+///   expansion does not guess its mate).
+/// - `LineStrip`: each segment is filled with stamps at `spacing`
+///   intervals measured from the segment's start (t = 0, s, 2s, …
+///   strictly below the segment length, so the shared vertex is
+///   stamped once by the following segment), and the path's final
+///   vertex caps the row. Stamps face along their segment. The
+///   per-segment restart is the literal R3 rule — whether the original
+///   resets spacing at vertices is unverified (UNK-20).
+///
+/// A zero `spacing` on a strip stamps one unrotated prop per vertex
+/// (designed fallback — spacing 0 means "densest possible" and no
+/// documented rule subdivides further). Undocumented kinds stamp
+/// nothing; `validate()` names them.
+///
+/// Non-finite point coordinates stamp nothing either — the parser
+/// bounds counts, not magnitudes; callers run [`Pathset::validate`] so
+/// corrupt points are reported as issues.
+///
+/// [`Pathset::validate`]: mm2_formats::pathset::Pathset::validate
+pub fn path_stamp_sites(path: &Path, budget: usize) -> PathStampSites {
+    match path.kind() {
+        Some(PathKind::Points) => {
+            let finite: Vec<[f32; 3]> = path
+                .points
+                .iter()
+                .map(|p| p.position)
+                .filter(|p| p.iter().all(|c| c.is_finite()))
+                .collect();
+            let take = finite.len().min(budget);
+            PathStampSites {
+                sites: finite[..take]
+                    .iter()
+                    .map(|&position| PathStampSite {
+                        position,
+                        forward: None,
+                    })
+                    .collect(),
+                capped: finite.len() - take,
+            }
+        }
+        Some(PathKind::Directed) => {
+            let pairs: Vec<([f32; 3], [f32; 3])> = path
+                .points
+                .chunks_exact(2)
+                .filter(|pair| {
+                    pair.iter()
+                        .all(|p| p.position.iter().all(|c| c.is_finite()))
+                })
+                .map(|pair| (pair[0].position, pair[1].position))
+                .collect();
+            let take = pairs.len().min(budget);
+            PathStampSites {
+                sites: pairs[..take]
+                    .iter()
+                    .map(|&(a, b)| PathStampSite {
+                        position: a,
+                        forward: Some(sub(b, a)),
+                    })
+                    .collect(),
+                capped: pairs.len() - take,
+            }
+        }
+        Some(PathKind::LineStrip) => line_strip_sites(path, budget),
+        None => PathStampSites::default(),
+    }
+}
+
+/// `LineStrip` expansion — see [`path_stamp_sites`] for the rule.
+fn line_strip_sites(path: &Path, budget: usize) -> PathStampSites {
+    let spacing = path.spacing_metres();
+    let pts: Vec<[f32; 3]> = path.points.iter().map(|p| p.position).collect();
+    if spacing <= f32::EPSILON {
+        let finite: Vec<[f32; 3]> = pts
+            .iter()
+            .copied()
+            .filter(|p| p.iter().all(|c| c.is_finite()))
+            .collect();
+        let take = finite.len().min(budget);
+        return PathStampSites {
+            sites: finite[..take]
+                .iter()
+                .map(|&position| PathStampSite {
+                    position,
+                    forward: None,
+                })
+                .collect(),
+            capped: finite.len() - take,
+        };
+    }
+    let mut out = Vec::new();
+    let mut capped = 0usize;
+    let mut left = budget;
+    let mut last_dir = [1.0, 0.0, 0.0];
+    for w in pts.windows(2) {
+        let seg = sub(w[1], w[0]);
+        let len = (seg[0] * seg[0] + seg[1] * seg[1] + seg[2] * seg[2]).sqrt();
+        // Zero-length segments stamp nothing. Non-finite lengths come
+        // from corrupt coordinates (`Pathset::validate` reports them);
+        // skipping them also keeps the expansion arithmetic finite.
+        if !len.is_finite() || len <= f32::EPSILON {
+            continue;
+        }
+        let dir = [seg[0] / len, seg[1] / len, seg[2] / len];
+        last_dir = dir;
+        // Stamps sit at t = 0, s, 2s, … strictly below len: ceil(len/s)
+        // of them, counted arithmetically so a huge or hostile segment
+        // is measured against the budget instead of walked — `t += s`
+        // stalls below the f32 ulp long before a multi-thousand-km
+        // segment ends. The float→int cast saturates, which `min`
+        // turns into the full remaining budget.
+        let want = (f64::from(len) / f64::from(spacing)).ceil() as usize;
+        let take = want.min(left);
+        for i in 0..take {
+            let t = i as f32 * spacing;
+            out.push(PathStampSite {
+                position: [
+                    w[0][0] + dir[0] * t,
+                    w[0][1] + dir[1] * t,
+                    w[0][2] + dir[2] * t,
+                ],
+                forward: Some(dir),
+            });
+        }
+        left -= take;
+        capped = capped.saturating_add(want - take);
+    }
+    // The walk stops short of the final vertex by construction;
+    // the authored row is capped at its end point. A lone vertex
+    // (no segments) still stamps once, unrotated. A non-finite final
+    // vertex stamps nothing.
+    if let Some(&last) = pts.last().filter(|p| p.iter().all(|c| c.is_finite())) {
+        if left == 0 {
+            capped = capped.saturating_add(1);
+        } else {
+            out.push(PathStampSite {
+                position: last,
+                forward: (pts.len() > 1).then_some(last_dir),
+            });
+        }
+    }
+    PathStampSites { sites: out, capped }
+}
+
+/// One drivable region extracted from a room's road attributes: the
+/// carriageway surface the renderer and colliders both emit, expressed
+/// as a boundary ring plus its triangulation. This is the reference a
+/// stamped prop position is checked against when auditing lateral
+/// placement — a stamp inside a ring at surface height sits on the
+/// road.
+///
+/// Drivable surfaces are `RoadWithSidewalks` (`road_l`↔`road_r`),
+/// `DividedRoad` (`rl_out`↔`rl_in` and `rr_in`↔`rr_out` — the divider
+/// strip is not drivable), `RoadNoSidewalks` (the whole walkway strip),
+/// `Crosswalk` rectangles and `RoadFan` rings. `SidewalkStrip` and
+/// generic `Fan` surfaces are not carriageway. Junction rooms carry no
+/// road attributes, so a stamp inside a junction box is not detected —
+/// the audit is conservative, it can miss in-road stamps but not
+/// invent them.
+#[derive(Debug)]
+pub struct Carriageway {
+    /// 1-based room id.
+    pub room: u16,
+    /// Which attribute authored the region.
+    pub kind: AttributeType,
+    /// Boundary ring in authored coordinates (closed implicitly).
+    pub ring: Vec<[f32; 3]>,
+    /// Triangles covering the region — the XZ point-in-triangle test
+    /// plus a barycentric surface height for the point.
+    pub tris: Vec<[[f32; 3]; 3]>,
+}
+
+/// The `DividedRoad` payload's six-refs-per-section slice, shared by
+/// the kerb-strip walk and the carriageway extraction. Inline form is
+/// `[packed, value, subtype×6]`; counted form `[count, packed, value,
+/// count×6]`. `None` on a malformed record.
+fn divided_refs(attr: &RoomAttribute) -> Option<&[u16]> {
+    if attr.subtype == 0 {
+        if attr.data.len() < 3 || attr.data[3..].len() != attr.data[0] as usize * 6 {
+            return None;
+        }
+        Some(&attr.data[3..])
+    } else {
+        if attr.data.len() < 2 || attr.data[2..].len() != attr.subtype as usize * 6 {
+            return None;
+        }
+        Some(&attr.data[2..])
+    }
+}
+
+/// A fan attribute's vertex refs — `[pivot, ring…]` — or `None` on a
+/// malformed record. `subtype` is the triangle count; subtype 0 takes
+/// a leading count word instead.
+fn fan_refs(attr: &RoomAttribute) -> Option<&[u16]> {
+    if attr.subtype == 0 {
+        let (&n, rest) = attr.data.split_first()?;
+        (rest.len() == n as usize + 2).then_some(rest)
+    } else {
+        (attr.data.len() == attr.subtype as usize + 2).then_some(&attr.data)
+    }
+}
+
+/// Extract every drivable surface region in the city — see
+/// [`Carriageway`] for what counts. Malformed attribute data is
+/// skipped whole (the city importer's own policy), never guessed.
+pub fn carriageways(psdl: &Psdl) -> Vec<Carriageway> {
+    let mut out = Vec::new();
+    let resolve = |ids: &[u16]| -> Option<Vec<[f32; 3]>> {
+        ids.iter()
+            .map(|&v| psdl.vertices.get(v as usize).copied())
+            .collect()
+    };
+    // A strip's two index-paired edge chains → ring + quads split into
+    // triangles.
+    let strip =
+        |room: u16, kind: AttributeType, a: &[u16], b: &[u16], out: &mut Vec<Carriageway>| {
+            if a.len() != b.len() || a.len() < 2 {
+                return;
+            }
+            let (Some(a), Some(b)) = (resolve(a), resolve(b)) else {
+                return;
+            };
+            let mut ring = a.clone();
+            ring.extend(b.iter().rev());
+            let mut tris = Vec::with_capacity((a.len() - 1) * 2);
+            for i in 0..a.len() - 1 {
+                tris.push([a[i], a[i + 1], b[i + 1]]);
+                tris.push([a[i], b[i + 1], b[i]]);
+            }
+            out.push(Carriageway {
+                room,
+                kind,
+                ring,
+                tris,
+            });
+        };
+    for (ri, room) in psdl.rooms.iter().enumerate() {
+        let rid = (ri + 1) as u16;
+        for attr in &room.attributes {
+            match attr.kind {
+                AttributeType::RoadWithSidewalks => {
+                    // Sections [sw_l, road_l, road_r, sw_r]: the
+                    // carriageway is the road_l↔road_r band.
+                    let Some(refs) = counted_refs(attr, 4) else {
+                        continue;
+                    };
+                    let a: Vec<u16> = refs.chunks_exact(4).map(|s| s[1]).collect();
+                    let b: Vec<u16> = refs.chunks_exact(4).map(|s| s[2]).collect();
+                    strip(rid, attr.kind, &a, &b, &mut out);
+                }
+                AttributeType::DividedRoad => {
+                    // [sw_l, rl_out, rl_in, rr_in, rr_out, sw_r]: two
+                    // carriageways; the rl_in↔rr_in divider is not
+                    // drivable surface.
+                    let Some(refs) = divided_refs(attr) else {
+                        continue;
+                    };
+                    let rl_out: Vec<u16> = refs.chunks_exact(6).map(|s| s[1]).collect();
+                    let rl_in: Vec<u16> = refs.chunks_exact(6).map(|s| s[2]).collect();
+                    let rr_in: Vec<u16> = refs.chunks_exact(6).map(|s| s[3]).collect();
+                    let rr_out: Vec<u16> = refs.chunks_exact(6).map(|s| s[4]).collect();
+                    strip(rid, attr.kind, &rl_out, &rl_in, &mut out);
+                    strip(rid, attr.kind, &rr_in, &rr_out, &mut out);
+                }
+                AttributeType::RoadNoSidewalks => {
+                    let Some(refs) = counted_refs(attr, 2) else {
+                        continue;
+                    };
+                    let a: Vec<u16> = refs.chunks_exact(2).map(|s| s[0]).collect();
+                    let b: Vec<u16> = refs.chunks_exact(2).map(|s| s[1]).collect();
+                    strip(rid, attr.kind, &a, &b, &mut out);
+                }
+                AttributeType::Crosswalk => {
+                    // Four corner refs in strip order — (0, 1) one
+                    // short end, (2, 3) the other.
+                    let Some(p) = (attr.data.len() == 4)
+                        .then(|| resolve(&attr.data))
+                        .flatten()
+                    else {
+                        continue;
+                    };
+                    out.push(Carriageway {
+                        room: rid,
+                        kind: attr.kind,
+                        ring: vec![p[0], p[1], p[3], p[2]],
+                        tris: vec![[p[0], p[1], p[3]], [p[0], p[3], p[2]]],
+                    });
+                }
+                AttributeType::RoadFan => {
+                    // [pivot, ring…] — the fan's ring is the boundary.
+                    let Some(pts) = fan_refs(attr).and_then(&resolve) else {
+                        continue;
+                    };
+                    if pts.len() < 3 {
+                        continue;
+                    }
+                    let ring: Vec<[f32; 3]> = pts[1..].to_vec();
+                    let tris: Vec<[[f32; 3]; 3]> =
+                        ring.windows(2).map(|w| [pts[0], w[0], w[1]]).collect();
+                    out.push(Carriageway {
+                        room: rid,
+                        kind: attr.kind,
+                        ring,
+                        tris,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1182,5 +1542,263 @@ mod tests {
         assert_eq!(walk.stamps.len(), 2);
         assert!(near(walk.stamps[0].position, [30., 0., 2.]));
         assert!(near(walk.stamps[1].position, [30., 0., 8.]));
+    }
+
+    // ------------------------------------------------------------------
+    // Shared pathset expansion and carriageway extraction.
+    // ------------------------------------------------------------------
+
+    fn pp(position: [f32; 3]) -> mm2_formats::pathset::PathPoint {
+        mm2_formats::pathset::PathPoint {
+            attributes: 0,
+            position,
+        }
+    }
+
+    fn ppath(points: &[[f32; 3]], kind: u8, spacing: u8) -> mm2_formats::pathset::Path {
+        mm2_formats::pathset::Path {
+            name: "sp_test".to_string(),
+            selection: 0,
+            points: points.iter().map(|&p| pp(p)).collect(),
+            kind_code: kind,
+            spacing_code: spacing,
+        }
+    }
+
+    #[test]
+    fn points_expansion_marks_unrotated_sites() {
+        let p = ppath(&[[1., 0., 0.], [2., 0., 0.]], 0, 0);
+        let s = path_stamp_sites(&p, 100);
+        assert_eq!(s.capped, 0);
+        assert_eq!(s.sites.len(), 2);
+        assert!(s.sites.iter().all(|s| s.forward.is_none()));
+        assert_eq!(s.sites[1].position, [2., 0., 0.]);
+    }
+
+    #[test]
+    fn directed_expansion_faces_pair_targets() {
+        let p = ppath(&[[0., 0., 0.], [0., 0., 5.], [9., 9., 9.]], 1, 0);
+        let s = path_stamp_sites(&p, 100);
+        // The lone trailing point stamps nothing.
+        assert_eq!(s.sites.len(), 1);
+        assert_eq!(s.sites[0].position, [0., 0., 0.]);
+        assert_eq!(s.sites[0].forward, Some([0., 0., 5.]));
+    }
+
+    #[test]
+    fn line_strip_restarts_spacing_per_segment() {
+        // Two 4 m segments with a bend, spacing 1 m (code 4): four
+        // stamps per segment at t = 0,1,2,3 plus the final vertex = 9.
+        let p = ppath(&[[0., 0., 0.], [4., 0., 0.], [4., 0., 4.]], 2, 4);
+        let s = path_stamp_sites(&p, 100);
+        assert_eq!(s.capped, 0);
+        let positions: Vec<[f32; 3]> = s.sites.iter().map(|s| s.position).collect();
+        assert_eq!(
+            positions,
+            vec![
+                [0., 0., 0.],
+                [1., 0., 0.],
+                [2., 0., 0.],
+                [3., 0., 0.],
+                [4., 0., 0.],
+                [4., 0., 1.],
+                [4., 0., 2.],
+                [4., 0., 3.],
+                [4., 0., 4.],
+            ]
+        );
+        // The bend: the shared vertex's stamp faces the second
+        // segment, and the cap faces it too.
+        assert_eq!(s.sites[4].forward, Some([0., 0., 1.]));
+        assert_eq!(s.sites[8].forward, Some([0., 0., 1.]));
+    }
+
+    #[test]
+    fn the_budget_caps_and_counts() {
+        let p = ppath(&[[0., 0., 0.], [4., 0., 0.]], 2, 4);
+        let s = path_stamp_sites(&p, 2);
+        assert_eq!(s.sites.len(), 2);
+        // Four wanted on the segment + the cap vertex; 2 emitted.
+        assert_eq!(s.capped, 3);
+    }
+
+    #[test]
+    fn zero_spacing_and_unknown_kinds_stamp_minimally() {
+        // spacing 0 → one unrotated stamp per vertex (designed
+        // fallback — no documented subdivision).
+        let p = ppath(&[[0., 0., 0.], [4., 0., 0.]], 2, 0);
+        let s = path_stamp_sites(&p, 100);
+        assert_eq!(s.sites.len(), 2);
+        assert!(s.sites.iter().all(|s| s.forward.is_none()));
+        // Undocumented kind stamps nothing.
+        let p = ppath(&[[0., 0., 0.], [4., 0., 0.]], 9, 4);
+        assert!(path_stamp_sites(&p, 100).sites.is_empty());
+    }
+
+    #[test]
+    fn non_finite_points_stamp_nothing() {
+        let p = ppath(&[[0., 0., 0.], [f32::NAN, 0., 1.], [4., 0., 0.]], 0, 0);
+        let s = path_stamp_sites(&p, 100);
+        assert_eq!(s.sites.len(), 2);
+    }
+
+    /// A `RoadWithSidewalks` attribute over `quad_verts` room 1 — the
+    /// same one `quad_road` builds, asserting only the road band is
+    /// extracted (sidewalk bands are not carriageway).
+    #[test]
+    fn carriageways_extracts_the_road_band_only() {
+        let city = psdl(
+            quad_verts(),
+            vec![room(
+                &[
+                    (0, 0),
+                    (1, 0),
+                    (2, 0),
+                    (3, 0),
+                    (4, 0),
+                    (5, 0),
+                    (6, 0),
+                    (7, 0),
+                ],
+                vec![quad_road(false)],
+            )],
+            &[0, 0],
+            Vec::new(),
+        );
+        let cw = carriageways(&city);
+        assert_eq!(cw.len(), 1);
+        assert_eq!(cw[0].room, 1);
+        assert_eq!(cw[0].kind, AttributeType::RoadWithSidewalks);
+        // The band is road_l↔road_r: x ∈ [2, 28], z ∈ [0, 20] — the
+        // x ∈ [0, 2] and [28, 30] sidewalks are outside.
+        let xs: Vec<f32> = cw[0].ring.iter().map(|v| v[0]).collect();
+        assert!(xs.iter().all(|&x| (2.0..=28.0).contains(&x)));
+        assert_eq!(cw[0].tris.len(), 2);
+    }
+
+    #[test]
+    fn carriageways_extracts_divided_road_as_two_strips() {
+        // Divided room: 8 m roadway, 4 m median, 8 m roadway along z;
+        // 2 m sidewalks outboard. Section layout is [sw_l, rl_out,
+        // rl_in, rr_in, rr_out, sw_r] per the format doc.
+        let verts = vec![
+            [0., 0., 0.],   // 0 sw_l near
+            [2., 0., 0.],   // 1 rl_out near
+            [10., 0., 0.],  // 2 rl_in near
+            [14., 0., 0.],  // 3 rr_in near
+            [22., 0., 0.],  // 4 rr_out near
+            [24., 0., 0.],  // 5 sw_r near
+            [0., 0., 20.],  // 6 sw_l far
+            [2., 0., 20.],  // 7 rl_out far
+            [10., 0., 20.], // 8 rl_in far
+            [14., 0., 20.], // 9 rr_in far
+            [22., 0., 20.], // 10 rr_out far
+            [24., 0., 20.], // 11 sw_r far
+        ];
+        let attr = RoomAttribute {
+            last: false,
+            kind: AttributeType::DividedRoad,
+            subtype: 2,
+            data: vec![0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        };
+        let city = psdl(verts, vec![room(&[], vec![attr])], &[0], Vec::new());
+        let cw = carriageways(&city);
+        assert_eq!(cw.len(), 2);
+        // Left carriageway x ∈ [2,10], right x ∈ [14,22] — the median
+        // x ∈ [10,14] is not drivable.
+        let mut bands: Vec<(f32, f32)> = cw
+            .iter()
+            .map(|c| {
+                let xs: Vec<f32> = c.ring.iter().map(|v| v[0]).collect();
+                (
+                    xs.iter().cloned().fold(f32::INFINITY, f32::min),
+                    xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
+                )
+            })
+            .collect();
+        bands.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        assert_eq!(bands, vec![(2.0, 10.0), (14.0, 22.0)]);
+    }
+
+    #[test]
+    fn carriageways_covers_fans_and_crosswalks() {
+        let verts = vec![
+            [0., 0., 0.],  // 0: fan pivot
+            [4., 0., 0.],  // 1
+            [4., 0., 4.],  // 2
+            [0., 0., 4.],  // 3
+            [8., 0., 0.],  // 4: crosswalk quad
+            [12., 0., 0.], // 5
+            [8., 0., 4.],  // 6
+            [12., 0., 4.], // 7
+            [16., 0., 0.], // 8: no-sidewalk strip
+            [20., 0., 0.], // 9
+            [16., 0., 4.], // 10
+            [20., 0., 4.], // 11
+        ];
+        let room = room(
+            &[],
+            vec![
+                RoomAttribute {
+                    last: false,
+                    kind: AttributeType::RoadFan,
+                    subtype: 2, // two triangles: pivot + ring of 3
+                    data: vec![0, 1, 2, 3],
+                },
+                RoomAttribute {
+                    last: false,
+                    kind: AttributeType::Crosswalk,
+                    subtype: 0,
+                    data: vec![4, 5, 6, 7],
+                },
+                RoomAttribute {
+                    last: false,
+                    kind: AttributeType::RoadNoSidewalks,
+                    subtype: 2,
+                    data: vec![8, 9, 10, 11],
+                },
+                // A sidewalk strip in the same room must not become
+                // carriageway.
+                RoomAttribute {
+                    last: false,
+                    kind: AttributeType::SidewalkStrip,
+                    subtype: 2,
+                    data: vec![0, 1, 3, 2],
+                },
+            ],
+        );
+        let city = psdl(verts, vec![room], &[0], Vec::new());
+        let cw = carriageways(&city);
+        let mut kinds: Vec<AttributeType> = cw.iter().map(|c| c.kind).collect();
+        kinds.sort_by_key(|k| format!("{k:?}"));
+        assert_eq!(
+            kinds,
+            vec![
+                AttributeType::Crosswalk,
+                AttributeType::RoadFan,
+                AttributeType::RoadNoSidewalks,
+            ]
+        );
+        let fan = cw
+            .iter()
+            .find(|c| c.kind == AttributeType::RoadFan)
+            .unwrap();
+        assert_eq!(fan.tris.len(), 2); // pivot + two ring edges
+        assert_eq!(fan.ring.len(), 3);
+        // Crosswalk ring orders (0,1,3,2) around the quad.
+        let x = cw
+            .iter()
+            .find(|c| c.kind == AttributeType::Crosswalk)
+            .unwrap();
+        assert_eq!(x.ring.len(), 4);
+        assert_eq!(x.tris.len(), 2);
+    }
+
+    #[test]
+    fn carriageways_skips_malformed_attributes() {
+        let mut bad = quad_road(false);
+        bad.data.truncate(6); // subtype claims 2 sections, data has 1.5
+        let city = psdl(quad_verts(), vec![room(&[], vec![bad])], &[0], Vec::new());
+        assert!(carriageways(&city).is_empty());
     }
 }

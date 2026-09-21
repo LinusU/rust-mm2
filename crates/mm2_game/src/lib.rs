@@ -53,7 +53,10 @@ pub use progression::{
     ApplyOutcome, Grant, Ineligible, RewardRequirement, RewardRule, RewardTable, Unlock,
     apply_result, place_requirement, record_eligibility,
 };
-pub use props::{MAX_PROP_RULE_STAMPS, PropStamp, PropWalk, PropWalkStats, walk_prop_rules};
+pub use props::{
+    Carriageway, MAX_PATHSET_STAMPS, MAX_PROP_RULE_STAMPS, PathStampSite, PathStampSites,
+    PropStamp, PropWalk, PropWalkStats, carriageways, path_stamp_sites, walk_prop_rules,
+};
 pub use race::{
     Checkpoint, CheckpointRule, DEFAULT_CHECKPOINT_HEIGHT, DEFAULT_COUNTDOWN_TICKS, EventParams,
     NavTarget, ParticipantState, ProgressOutcome, RACE_TICK_HZ, RaceDefinition, RaceError,

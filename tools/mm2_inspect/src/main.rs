@@ -22,6 +22,7 @@ use mm2_formats::{FormatError, inst};
 mod bind;
 mod event;
 mod inventory;
+mod placement;
 
 /// Extensions the texture pipeline tries, in preference order — the same
 /// order `mm2_app` uses.
@@ -370,6 +371,23 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Audit lateral prop placement (F03-C): expand each channel's
+    /// stamps — INST records, `props.pathset` rows, and PSDL
+    /// `prop_rule` roadside stamping — and classify every position
+    /// against the city's authored PSDL carriageway regions, listing
+    /// stamps that land on the drivable surface.
+    Placement {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Restrict to one city stem (default: both stock cities).
+        #[arg(long)]
+        city: Option<String>,
+        /// Exit nonzero on missing/failed sources or channel issues.
+        /// In-road counts are reported findings — retail authors
+        /// legitimately stamp onto some drivable surfaces.
+        #[arg(long)]
+        strict: bool,
+    },
     /// Versioned content inventory: expected/discovered/accepted/
     /// rejected/unverified counts per content family, fingerprinted by
     /// engine commit and resolved-path provenance.
@@ -486,6 +504,9 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Banger { dir, strict } => banger(dir, cli.mods.as_deref(), *strict),
         Command::BangerBind { dir, city, strict } => {
             bind::banger_bind(dir, cli.mods.as_deref(), city.as_deref(), *strict)
+        }
+        Command::Placement { dir, city, strict } => {
+            placement::placement(dir, cli.mods.as_deref(), city.as_deref(), *strict)
         }
         Command::Inventory { dir, json, strict } => {
             inventory_cmd(dir, cli.mods.as_deref(), *json, *strict)

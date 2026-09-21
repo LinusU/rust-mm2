@@ -1,82 +1,107 @@
 # Last implementation iteration
 
-- Task ID and title: review-finding repair — generation-scope the two
-  remaining unscoped `ResultLedger` rank consumers. F16-B.1 passed
-  external review (`fb09bda`); its first verification gap was a latent
-  defect adjacent to the diff's own invariant, so repair preceded new
-  feature work per the selection policy.
-- Starting commit: `fb09bdac38fc0e859358d5d84434e6108a81fa31` on
+- Task ID and title: F03-C.1 — lateral prop-placement audit across all
+  three channels (operator report 2, item 2: "things in the road").
+  The prop-rule channel was already repaired in F03-B.6; INST and
+  `props.pathset` were still unverified, and the report asked for all
+  three checked independently. Selected over queued feature work per
+  the operator-priority policy.
+- Starting commit: `563c34ea7c1313ccff9b78cb4f36f81b85dfb490` on
   `ralph/night`; tree was clean.
-- Retail install: `/Users/linus/coding/rust-mm2/retail` — untouched this
-  iteration (display-path repair, no content claims).
-
-## The defect
-
-`ResultLedger` is `init_resource`'d once and never cleared;
-`Session::begin` resets `next_player`, so a restarted session reissues
-the same `PlayerId`s while the ledger keeps every generation's results.
-F16-B.1 added generation-scoped `standings_in`/`place_of_in` with a doc
-contract — "consumers ranking a *live* race must scope" — but two
-pre-existing consumers still read unscoped data:
-
-- `update_hud` (`main.rs`) ranked the results-screen placing through
-  `ledger.place_of`.
-- The smoke record (`smoke.rs`) found the local participant's result
-  through `ledger.iter().find` (unordered `HashMap` values — arbitrary
-  among several same-participant results), ranked it with `place_of`,
-  and fell back to `ledger.iter().next()` — an arbitrary result from
-  any finished session.
-
-After an in-process restart + refinish (the flow
-`a_repeat_finish_never_reawards` exercises), a slower refinish could
-still report the earlier generation's better place — display-only, but
-wrong.
+- Retail install: `/Users/linus/coding/rust-mm2/retail` — read-only,
+  audited below.
 
 ## What changed
 
-- `crates/mm2_app/src/main.rs`: `update_hud` ranks through
-  `ledger.place_of_in(session.generation(), …)` — the same scoped API
-  `record_session_results` uses.
-- `crates/mm2_app/src/smoke.rs`: the `outcome=`/`place=` field is a new
-  `result_outcome(ledger, generation, local)` helper — the participant
-  lookup reads `standings_in(generation)` (the participant's
-  best-ranked result, matching `place_of_in` semantics instead of an
-  arbitrary `HashMap` hit), the fallback is the generation's leading
-  standing (never a prior session's), and the place comes from
-  `place_of_in`. `results=` now counts `standings_in(generation)` so
-  the record stays internally consistent — bit-identical on every
-  single-generation run, which is all a smoke run can be (input is
-  frozen under `--frames`).
+- `crates/mm2_game/src/props.rs`: new shared `path_stamp_sites`
+  (Points / Directed-pairs / LineStrip expansion, quarter-metre
+  spacing, per-segment restart, final-vertex cap, non-finite skips,
+  odd directed tails dropped) under `MAX_PATHSET_STAMPS = 8192`;
+  new `carriageways` extraction — drivable-region boundary rings +
+  triangulated surfaces from `RoadWithSidewalks`, `DividedRoad`
+  (median excluded), `RoadNoSidewalks`, `RoadFan` and `Crosswalk`
+  attributes; `SidewalkStrip`/facades/medians excluded.
+- `crates/mm2_app/src/city.rs`: `stamped_transforms` now wraps
+  `path_stamp_sites` — runtime and audit share one expansion policy;
+  the duplicated expansion and local stamp cap were removed.
+- `tools/mm2_inspect/src/placement.rs` + `main.rs`: new
+  `mm2-inspect placement <install> [--city] [--strict]` — per city it
+  parses `city/<c>.inst`, `city/<c>/props.pathset` and
+  `propdefs/proprules.csv` + PSDL `prop_rule` bytes, measures every
+  stamped position against the carriageway regions (XZ inside a tri +
+  ±1.0/0.6 m height band), and reports a channel×kind histogram plus
+  the deepest hits with `dy=`/`depth=`. Denominators keep everything:
+  parse failures, unresolved names, skipped labels/decals/`giz_*`,
+  cap overflow, walk issues. In-road counts are *findings*, not
+  failures — retail authors legitimately stamp on these surfaces —
+  so `--strict` exits 2 on failures/issues only.
+- `crates/mm2_game/src/lib.rs`: exports `Carriageway`,
+  `MAX_PATHSET_STAMPS`, `PathStampSite`, `PathStampSites`,
+  `carriageways`, `path_stamp_sites`.
 
 ## Tests
 
-- `smoke::tests::outcome_scopes_to_the_session_generation` (new unit):
-  generation-1 opponent beats local (50 vs 100 ticks), generation-2
-  local finishes alone slower (150) — unscoped `place_of` still
-  reports 2, `result_outcome(gen 2)` reports `place=1`, and a
-  resultless generation records no outcome (the fallback cannot reach
-  back). Fails on the old wiring.
-- `update_hud` is private to the binary — not reachable from
-  integration tests; its change is the same `place_of_in` the
-  progression consumer's restart test (`a_repeat_finish_never_reawards`)
-  already exercises.
+- `props.rs` (new): Points/Directed/LineStrip expansion, odd-tail
+  drop, per-segment spacing restart, budget capping + counted
+  overflow, zero-spacing and unknown kinds; carriageway extraction on
+  synthetic PSDLs — divided road → two strips with the median
+  excluded, fans/crosswalks/no-sidewalk roads, malformed attrs skipped.
+- `placement.rs` (new): flat/sloped surface classification, height
+  band bounds, degenerate tris, depth-from-edge, stamps vs issues
+  accounting.
+- Existing `city.rs` pathset tests re-verify orientation/budget
+  through the shared impl.
 
 ## Commands actually run and results
 
-- `cargo test -p mm2_app --lib` — 26/26 pass (incl. the new test).
-- `cargo test -p mm2_app --test smoke --test progression` — 11/11 pass.
-- `cargo fmt --all -- --check` — PASS.
+- `cargo fmt --all -- --check` — PASS (after a first failure on the
+  new code; fixed by `cargo fmt`).
 - `cargo clippy --workspace --all-targets --all-features -- -D
-  warnings` — PASS.
-- `cargo test --workspace` — all suites green, 0 failures.
+  warnings` — PASS (after fixing a redundant closure + a needless
+  lifetime).
+- `cargo test --workspace` — PASS, all suites green, 0 failures.
+- `mm2-inspect placement <retail>` — exit 0. London (3224 regions):
+  inst 1997 stamps/15 in-road, pathset 87 paths→1188/185, prop-rule
+  415 rooms→5118/209. SF (2871 regions): inst 3763/6, pathset
+  144→925/34 (+31 skipped decal paths), prop-rule 397→5028/0. 449
+  findings, 0 failures, 67 issues (pre-existing prop-rule walk counts:
+  65 0xx `road_rooms` + unreached rooms). `--strict` → exit 2 on those
+  issues.
+- `mm2 --mm2-path <retail> --city london --spawn 0.4,5.5,-720,0
+  --frames 90 --screenshot /tmp/placement-spawn.png` — the operator's
+  spawn reproduced: bollards across a pedestrianised street, kerbside
+  lamps/dressing, no tree in the carriageway (the known `vpbug` rear-
+  windscreen texture defect visible, unrelated).
+- Divided-road captures `/tmp/placement-divroad{,2}.png` — the flagged
+  `sp_tree1_s` sits at a median taper meeting a junction; plausible
+  authored dressing, not a placement bug.
+
+## Findings
+
+- **No systematic lateral defect in any channel.** `MIRROR_Z` is off;
+  INST stamps verbatim authored transforms; pathset/prop-rule stamps
+  land where the authored data puts them.
+- The props the operator saw in the road are authored there: the spawn
+  area is a pedestrianised street encoded `RoadNoSidewalks` (trees/
+  bollards/crates on the walkable surface by design); SF `cp_banr*`
+  banner rows pivot at road surface mid-span (depth to 10 m, dy≈0 —
+  mesh hangs overhead); INST hits are authored facades/bridges over
+  and under drivable surfaces; prop-rule `RoadNoSidewalks` hits are
+  kerb-edge stamps at depth≈0.
+- Flagged for review (deepest non-banner hits): 2 `sp_stackboxes_4_l`
+  ~1.2–1.8 m inside london `RoadWithSidewalks` room 570, 2 `sp_tree1_s`
+  ~1–3.9 m inside london `DividedRoad` rooms 937/952 (visually checked:
+  median taper at a junction), 5 crosswalk stamps.
 
 ## Still open
 
-- The review's other (non-blocking) gaps stand: `mm2-inspect events`
-  prints no reward summary when a city's rows are all diagnostics;
-  `Unlock` car ids are not cross-checked against the vehicle catalog;
-  `record_eligibility` does not gate `SessionAuthority` (unreachable
-  today, F24 scope); F16-AC01's two-profile restart observation and
-  AC06's delete UI remain F16-C/F17.
-- No GUI/manual playtest this iteration; no GPU/audio evidence
-  applies.
+- The audit measures stamp *positions*; pathset expansion positions
+  along a segment remain an inferred policy (UNK-20 — stamps could be
+  denser/sparser than retail along the same authored path) and
+  asymmetric-prop yaw is not frame-compared.
+- The 5 hard-surface flagged hits above are authored-intent
+  ambiguities pending a human look, not proven defects.
+- Per report 2's caution, F03/F04 do not roll up to `checked` on this
+  evidence; strike/settle evidence stays provisional.
+- F03-C remainder: race cleanup, mod replacement end-to-end.
+- Candidate pending external check.
