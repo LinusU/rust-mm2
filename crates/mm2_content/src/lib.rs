@@ -54,7 +54,7 @@ pub use model::{
 pub use nav::{NavLoadError, load_nav_graph, load_nav_overrides};
 pub use opponents::{
     EventAimap, ExtraRoster, OpponentReport, RosterBuild, RosterBuildError, RosterEntry,
-    RosterSummary, audit_roster, event_aimap, opponent_roster,
+    RosterSummary, audit_roster, event_aimap, opponent_roster, opponent_roster_from_aimap,
 };
 pub use race_def::{
     PLAYER_SLOT, RaceBuildError, RaceDefBuild, RaceDefEntry, RaceDefReport, RaceDefSummary,

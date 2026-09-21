@@ -74,8 +74,9 @@ pub use session::{
 pub use surface::{SurfaceMaterial, SurfaceState};
 pub use telemetry::{DamageSignals, VehicleTelemetry, WheelTelemetry};
 pub use traffic::{
-    AmbientPlan, AmbientRoster, AmbientSpec, LaneAdvance, LaneCursor, SpawnDirective, SpawnDraw,
-    SpawnPolicy, TrafficIssue, advance_lane_cursor, draw_spawn, eligible_lanes, plan_ambient,
+    AmbientPlan, AmbientRoster, AmbientSpec, FollowPolicy, LaneAdvance, LaneCursor, SpawnDirective,
+    SpawnDraw, SpawnPolicy, TrafficIssue, advance_lane_cursor, corridor_gap, draw_spawn,
+    eligible_lanes, follow_speed, plan_ambient,
 };
 
 /// What the app should do at startup.

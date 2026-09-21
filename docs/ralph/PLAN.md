@@ -41,20 +41,29 @@ Choose the highest-value ready small slice; repair current regressions before un
 **Next selected slice: F17-B remainder (C&R/scoring variants — need
 F17-C's mode), F17-A remainder (per-event weather controls
 need F18; mouse nav, AC05 audit), F15-B remainder,
-F11-C remainder, F16-C's AC01 process-level leg, or F10-A's
-remaining controller/collision scope** — the latest iteration landed
-F10-A.2, runtime ambient traffic: `load_session_world` layers the
-event aimap over the city's, runs `plan_ambient` and spawns
-session-owned kinematic cars (`AmbientTraffic`/`AmbientCar`,
-bound-hull colliders, real `va_*` models); `drive_ambient` follows
-`LaneCursor`s through seeded legal exits (closed roads skipped, rank
-preserved, `DeadEnd` despawns) and `maintain_ambient` recycles
-outside the bubble and respawns to the density target; the headless
-record gained `traf=`. Synthetic-install tests drive the real
-session path (seeded placement/replay, dead-end/recycle, event
-`[Density] 0.0` authors off, teardown/replan); retail sf headless
-shows `traf=16/16 sp=140 rec=124`. F10-AC02/AC03 stay open — no
-controller, signals or collision fidelity. Before that the
+F11-C remainder, F16-C's AC01 process-level leg, or F10-B's
+remaining controller/stuck-recovery scope** — the latest iteration
+landed F10-B.1, ambient obstruction response: `drive_ambient` senses
+a forward corridor (`corridor_gap` — XZ heading, lateral half-width,
+vertical tolerance, speed-scaled reach) against every `Player`
+participant and other ambient cars, and `follow_speed` brakes to a
+bounded `follow_gap` hold / `panic_gap` stop behind the nearest
+blocker, resuming when it clears (`AmbientTraffic::queued`, `q=` in
+the headless record). Same-subsystem review repairs folded in:
+`maintain_ambient` is phase-gated like the driver (paused sessions no
+longer churn), `draw_spawn` places inside the
+`[min_player_distance, recycle_distance]` annulus (`OutOfBand` covers
+both bounds — retail sf churn dropped `sp=140 rec=124` →
+`sp=26 rec=10`), `AmbientTraffic::issues` warn-log at load, and
+`event_race_setup` parses the event aimap once for both the opponent
+roster (`opponent_roster_from_aimap`) and the ambient setup. A
+measured-delta `LinearVelocity` feedback bug the pause test exposed
+(kinematic bodies diverged to ~km/s) is fixed — the velocity is now
+the intended `tangent * speed`. Synthetic tests cover hold/release,
+two-car queueing and the pause freeze. F10-AC02/AC03 stay open — no
+controller, signals, right-of-way, stuck recovery or collision
+fidelity, and turns/spawns still don't check occupied space. Before
+that the
 iteration repaired F10-A.1's external-review blocker: `plan_ambient`
 could sweep a NaN-length lane into `sample_storage`'s
 `s.clamp(0.0, lane.length)` panic (BAI lane vertices are raw f32 bits;
@@ -980,7 +989,8 @@ at `563c34e`. Direct observation of rendered gameplay.
 | F10-A | active | F01-B, F02-A, F09-B | Split into A.1 (catalog + planner) and A.2 (session-scoped runtime — implemented below). Remaining: intersection controller/signals/right-of-way, queueing/obstruction/stuck handling, collision-response fidelity, spawn-vs-spawn overlap rejection, verified original population/bubble constants (UNK-12), F10-AC evidence vs the spec. |
 | F10-A.2 | implemented | F10-A.1 | Runtime consumer of `plan_ambient`. `mm2_game::traffic`: `eligible_lanes`/`draw_spawn` extracted for planner+respawner reuse; `LaneCursor`/`advance_lane_cursor` — seeded legal-exit turns through new `NavGraph::transfer_lane`, closed-road exits skipped, lane rank preserved, explicit `DeadEnd`. `mm2_content`: `opponents::event_aimap` (difficulty selection shared with `opponent_roster`), `ambient_setup` (event roster replaces city's; overrides merged — closed union, event exceptions first; event speed-limit/left-drive wins), `assemble::ambient_vehicle` (pkg+mtx+bound; aivehicledata not a VehicleConfig — no drivetrain). `mm2_app::traffic`: `AmbientTraffic` resource + `AmbientCar`; `load_ambient_traffic` spawns session-owned kinematic bodies (bound hull / Size-box collider, real `va_*` model) on planned poses; `drive_ambient` lane-follows in FixedLast with per-road speed refresh on turns and dead-end despawn; `maintain_ambient` recycles outside the bubble and respawns to target (bounded attempts). `load_session_world` layers event aimap over city, inserts/removes the resource with the session; `traf=` headless field (absent without a roster). Synthetic-install app tests (real session path): seeded placement + replay, drive/dead-end/recycle, event `[Density] 0.0` authors off, teardown/replan. Retail sf headless: `traf=16/16 sp=140 rec=124 dead=0 uns=0`, 1212 eligible lanes. Kinematic followers only — no controller/collision claims; candidate pending external check. |
 | F10-A.1 | implemented | F01-B, F02-A, F09-B | `mm2_formats::veh::AiVehicleData` — typed `aiVehicleData` decoder (Mass/Size/MaxAng/Elasticity/Friction/MaxDamage/PtxThresh/Spring/Damping/Limit/RubberSpring/RubberDamp + optional CG; MSVC `1.#QNAN0`/`-1.#INF000` literals decode to non-finite, malformed optional vectors warn not zero). `mm2_game::traffic`: `AmbientSpec`/`AmbientRoster` (authored cumulative-weight table — duplicate ids legit, e.g. london `va_compact_s` on two bands), `SpawnPolicy` (designed pool/distance bound — original values UNK-12), `plan_ambient` seeded planner: density-scaled target, cumulative pick, position over `NavOverrides`-open routable vehicle lanes, bounded min-player-distance retries, unresolved-class draws drop + report once per id (never rebalanced). `NavRng::next_f32` added. `mm2_content::traffic`: `ambient_roster`/`ambient_roster_from_aimap` (event files carry their own tables — `race/london/roam.aimap{,_p}`/`roambak` measured), `EXPECTED_AMBIENTS` (23 records), `TrafficAudit::scan` — per-class `aivehicledata`/`pkg`/`bnd` + `.mtx` count, unrostered ids, undiscovered expected ids, event `aimap{,_p}` override census. `mm2-inspect traffic <install> [--city] [--strict]`. Retail (`fnv1a64:e91e6cd4b2ae30d9`): london 23 discovered/12 rostered/11 unrostered, sf 23/11/12, all rostered assets ok, 0 diagnostics; 101 london + 104 sf event overrides (35/53 exceptions, 3/6 density, 3/0 own rosters); strict exits 0. WLD-20 added, UNK-12 narrowed, docs/research/aimap.md extended. Tests: +6 formats, +8 game, +3 content. No runtime spawning yet — candidate pending external check. External review #12 failed on one panic: `plan_ambient` swept a NaN-length lane (BAI vertices are raw f32 bits, unchecked) into `sample_storage`'s `s.clamp(0.0, lane.length)`, which panics on a NaN bound; a +inf length was the sibling NaN-position case. Repaired: `push_lane` now requires finite authored distances (else recompute), finite vertices and finite length, dropping offenders with the new `NavIssue::NonFiniteLane`; `plan_ambient`'s eligible-lane filter re-checks finiteness; `Bai::validate` reports `BaiIssue::NonFiniteCurveVertex` per curve; malformed `CG` warns like `MaxAng` (shared `opt_vec3`) and the "25 retail records" doc corrected to 23. Tests: +1 game (`plan_skips_non_finite_lane_geometry`), +1 formats bai (`validate_flags_non_finite_curve_vertices`), +1 leg in `aivehicledata_tolerates_absent_cg_and_flags_garbage`. |
-| F10-B | queued | F10-A | — |
+| F10-B.1 | implemented | F10-A.2 | Ambient obstruction response. `mm2_game::traffic`: `FollowPolicy` (designed — original braking unverified, UNK-12), `corridor_gap` (nearest blocker in a forward corridor: XZ heading, half-width, vertical tolerance, speed-scaled reach), `follow_speed` (clear → road limit; blocked → brake to `follow_gap`; `panic_gap` → instant stop; `turn_speed` cap on intersection turns). `mm2_app::traffic`: blocker list = every `Player` participant + ambient cars; `queued` counter; `maintain_ambient` phase-gated like the driver; `issues` warn-logged; `LinearVelocity` now the intended `tangent * speed` (measured-delta feedback diverged kinematic bodies to ~km/s — found by the new pause test). `draw_spawn` takes `&SpawnPolicy` and places inside the `[min, recycle]` annulus (`OutOfBand` both bounds). `mm2_content`: `opponent_roster_from_aimap` splits the roster build so `event_race_setup` parses the aimap once. `q=` in `traf=` smoke. Retail sf: `traf=16/16 sp=26 rec=10 dead=0 uns=0 q=0` (was `sp=140 rec=124`). Tests: +3 game (annulus, corridor, follow law), +3 app (parked hold/release, two-car queue, pause freeze); fixture PSDL widened — the player had no ground. Open: no controller/signals/right-of-way/stuck recovery, no occupied-space checks at spawn or junction transfer, AC02/AC03 unmet. Candidate pending external check. |
+| F10-B | active | F10-A | B.1 obstruction response implemented above. Remaining: intersection controller/signals/right-of-way, queue-through-intersection, stuck-car recovery, occupied-space checks (spawn + junction transfer), multiplayer union-of-interest bubbles, F10-AC evidence vs the spec. |
 | F10-C | queued | F10-B | — |
 | F11-A | checked | F00-B, F01-A | `mm2_formats::racefiles` shared classifier (was private to `mm2-inspect` inventory); new parsers `waypoints` (waypoint + `_strtpnts` CSVs), `opp`, `crashdata` (tolerates retail `AmbDenisty` typo / omitted `Filename` label / named tail columns — kept as diagnostics), `rewards`. `mm2_content::EventCatalog`: VFS scan per city, `mm*data.csv` rows → `EventRef`-keyed entries (ready/incomplete + failed refs), dep records attached by stem, Crash Course `Filename` links resolve whole linked stems, rewards + milestone rewards linked, extras listed. `mm2-inspect events <install> [--city] [--strict]` — strict exits 0 on retail: 45/45 events ready per city. Producer correctly placed in `mm2_content` after the iteration-010 review rejection. Externally checked (review pass at `bb56272`, iteration 011 feedback). |
 | F11-B | active | F11-A | Split into B.1 (shared runtime contract + driver — checked) and B.2 (`mm2_content` catalog→`RaceDefinition` producer + event-session loading wiring). Parent AC05 (event-prop/traffic-override session scope) stays open — no traffic/prop-override systems exist to scope yet. |

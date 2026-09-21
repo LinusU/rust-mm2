@@ -121,18 +121,26 @@ pub fn event_race_setup(
         .filter(|r| r.kind == mm2_formats::racefiles::RaceFileKind::Pathset)
         .map(|r| r.logical.clone())
         .collect();
-    let roster = match mm2_content::opponent_roster(vfs, event, difficulty) {
-        Ok(roster) => roster,
-        Err(e) => {
-            warn!(error = %e, "opponent roster failed to build — racing without opponents");
-            mm2_game::OpponentRoster::default()
+    // One aimap resolution+parse feeds both consumers: the roster
+    // reads its `[Opponent]` rows, the ambient setup its traffic
+    // overrides. A record that fails degrades both to empty/None —
+    // the race still runs, with the failure logged.
+    let (roster, aimap) = match mm2_content::event_aimap(vfs, event, difficulty) {
+        Ok((aimap, picked)) => {
+            let roster = match mm2_content::opponent_roster_from_aimap(
+                event, difficulty, &aimap, &picked,
+            ) {
+                Ok(roster) => roster,
+                Err(e) => {
+                    warn!(error = %e, "opponent roster failed to build — racing without opponents");
+                    mm2_game::OpponentRoster::default()
+                }
+            };
+            (roster, Some(aimap))
         }
-    };
-    let aimap = match mm2_content::event_aimap(vfs, event, difficulty) {
-        Ok((aimap, _)) => Some(aimap),
         Err(e) => {
-            warn!(error = %e, "event aimap unreadable — city ambient defaults apply");
-            None
+            warn!(error = %e, "event aimap unreadable — racing without opponents; city ambient defaults apply");
+            (mm2_game::OpponentRoster::default(), None)
         }
     };
     let rewards = mm2_content::reward_table(&catalog);

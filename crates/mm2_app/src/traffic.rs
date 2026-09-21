@@ -18,10 +18,15 @@
 //! (its own doc says it is not `vehCarSim` input), so the car is a
 //! rigid hull moved by lane sampling, which also keeps every pose
 //! finite and on-road by construction. The kinematic collider blocks
-//! the player coherently, but there is no intersection controller,
-//! signal or right-of-way handling, obstruction response, queueing or
-//! stuck recovery yet (F10-B/F10-C), and car-vs-player contact
-//! fidelity (AC03) is not claimed — the hull blocks, nothing more.
+//! the player coherently, and F10-B.1 adds the obstruction response: a
+//! forward corridor senses every `Player` participant and other
+//! ambient cars, and the follow law brakes to a bounded stop behind
+//! the nearest blocker — queueing, never shoving — and resumes when
+//! it clears. There is still no intersection controller, signal or
+//! right-of-way handling, lane-change passing or stuck recovery beyond
+//! the wait-and-recycle bound (F10-B/F10-C remainder), and dynamic
+//! car-vs-player crash fidelity (AC03) is not claimed — the follower
+//! stops short, nothing more.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -33,10 +38,10 @@ use mm2_assets::Vfs;
 use mm2_formats::aimap::Aimap;
 use mm2_formats::veh::AiVehicleData;
 use mm2_game::{
-    AmbientRoster, AmbientSpec, AuthorityRole, LaneAdvance, LaneCursor, LaneId, NavGraph,
-    NavOverrides, NavRng, ObjectIdentity, Session, SessionConfig, SessionEntity, SessionPhase,
-    SpawnDirective, SpawnDraw, SpawnPolicy, WorldMode, advance_lane_cursor, draw_spawn,
-    eligible_lanes, plan_ambient,
+    AmbientRoster, AmbientSpec, AuthorityRole, FollowPolicy, LaneAdvance, LaneCursor, LaneId,
+    NavGraph, NavOverrides, NavRng, ObjectIdentity, Player, Session, SessionConfig, SessionEntity,
+    SessionPhase, SpawnDirective, SpawnDraw, SpawnPolicy, WorldMode, advance_lane_cursor,
+    corridor_gap, draw_spawn, eligible_lanes, follow_speed, plan_ambient,
 };
 use tracing::{info, warn};
 
@@ -77,10 +82,21 @@ pub struct AmbientTraffic {
     /// Draws that selected an unspawnable class or fell off an open
     /// weight table — the authored band stood.
     pub unspawnable: usize,
-    /// Initial-plan directives dropped inside the player bubble.
+    /// Initial-plan directives dropped outside the spawn annulus.
     pub dropped: usize,
+    /// Cars currently held at a stop behind a corridor blocker —
+    /// refreshed every `drive_ambient` tick.
+    pub queued: usize,
     /// Planner/setup problems, reported honestly.
     pub issues: Vec<String>,
+}
+
+impl AmbientTraffic {
+    /// The navigation graph the cars follow — exposed for diagnostics
+    /// and tests that resolve a [`LaneCursor`] to a world pose.
+    pub fn graph(&self) -> &NavGraph {
+        &self.graph
+    }
 }
 
 /// One ambient car on the network.
@@ -93,6 +109,10 @@ pub struct AmbientCar {
     /// The current road's effective speed — refreshed on every turn so
     /// per-road exception limits apply.
     pub target_speed: f32,
+    /// The kinematic speed the car actually travels this tick —
+    /// `target_speed` on a clear corridor, braked down to a bounded
+    /// stop by the obstruction sense (F10-B.1).
+    pub speed: f32,
 }
 
 /// Load the ambient setup for this session and spawn the initial plan.
@@ -188,6 +208,7 @@ pub fn load_ambient_traffic(
         dead_ends: 0,
         unspawnable: plan.unspawnable,
         dropped: plan.dropped,
+        queued: 0,
         issues: plan
             .issues
             .iter()
@@ -212,6 +233,9 @@ pub fn load_ambient_traffic(
         {
             traffic.spawned += 1;
         }
+    }
+    for i in &traffic.issues {
+        warn!(issue = %i, "ambient issue");
     }
     info!(
         density,
@@ -315,6 +339,7 @@ fn spawn_ambient_car(
                     along: directive.along,
                 },
                 target_speed: directive.target_speed,
+                speed: directive.target_speed.max(0.0),
             },
             RigidBody::Kinematic,
             class.collider.clone(),
@@ -345,25 +370,43 @@ fn spawn_ambient_car(
     Some(entity)
 }
 
-/// Advance every ambient car along its lane by `target_speed × dt`,
+/// Advance every ambient car along its lane by `speed × dt`,
 /// re-posing it from the sampled lane each fixed tick. Runs in
 /// `FixedLast` — after the physics step consumed the previous pose —
 /// so the written `Position`/`Rotation` is what the next solver step
 /// and the renderer both see, and `LinearVelocity` reports the surface
-/// velocity contacts resolve against. A car that runs out of road
-/// despawns; `maintain_ambient` decides whether a replacement spawns.
+/// velocity contacts resolve against.
+///
+/// F10-B.1 obstruction response: before advancing, each car senses a
+/// forward corridor (`corridor_gap`) against every `Player`
+/// participant — the local driver and AI opponents alike — and every
+/// other ambient car, then the `follow_speed` law sets its kinematic
+/// `speed`: road limit on a clear corridor, a bounded brake to
+/// `follow_gap` behind a blocker, an outright stop inside
+/// `panic_gap`, and a `turn_speed` cap across intersections. A queued
+/// car waits — a kinematic body that kept moving would shove whatever
+/// blocks it — and resumes when the corridor clears. `traffic.queued`
+/// reports the held count each tick.
+///
+/// A car that runs out of road despawns; `maintain_ambient` decides
+/// whether a replacement spawns.
+#[allow(clippy::type_complexity)] // Bevy system: the two queries are the system's actual signature
 pub fn drive_ambient(
     session: Res<Session>,
     time: Res<Time<Fixed>>,
     traffic: Option<ResMut<AmbientTraffic>>,
-    mut cars: Query<(
-        Entity,
-        &mut AmbientCar,
-        &mut Position,
-        &mut Rotation,
-        &mut LinearVelocity,
-        &mut Transform,
-    )>,
+    mut cars: Query<
+        (
+            Entity,
+            &mut AmbientCar,
+            &mut Position,
+            &mut Rotation,
+            &mut LinearVelocity,
+            &mut Transform,
+        ),
+        Without<Player>,
+    >,
+    players: Query<(Entity, &Position), (With<Player>, Without<AmbientCar>)>,
     mut commands: Commands,
 ) {
     let Some(mut traffic) = traffic else {
@@ -379,8 +422,34 @@ pub fn drive_ambient(
     }
     let traffic = &mut *traffic;
     let dt = time.delta_secs();
-    for (entity, mut car, mut position, mut rotation, mut velocity, mut transform) in &mut cars {
-        let ds = car.target_speed.max(0.0) * dt;
+    // Corridor blockers: every participant plus every ambient car —
+    // the follower queues behind whatever sits on its lane without
+    // distinguishing who it is.
+    let mut blockers: Vec<(Entity, Vec3)> = players.iter().map(|(e, p)| (e, p.0)).collect();
+    blockers.extend(cars.iter().map(|(e, _, p, _, _, _)| (e, p.0)));
+    let follow = FollowPolicy::default();
+    let mut queued = 0usize;
+    for (entity, mut car, mut position, mut rotation, mut velocity, mut transform) in
+        cars.iter_mut()
+    {
+        let fwd = rotation.0 * Vec3::NEG_Z;
+        let reach = follow.near + follow.lead * car.speed.max(0.0);
+        let gap = corridor_gap(
+            position.0.to_array(),
+            fwd.to_array(),
+            follow.half_width,
+            follow.max_rise,
+            reach,
+            blockers
+                .iter()
+                .filter(|(e, _)| *e != entity)
+                .map(|(_, p)| p.to_array()),
+        );
+        car.speed = follow_speed(car.speed, car.target_speed, gap, dt, &follow);
+        if gap.is_some() && car.speed <= follow.held_speed {
+            queued += 1;
+        }
+        let ds = car.speed.max(0.0) * dt;
         let step = advance_lane_cursor(
             &traffic.graph,
             &traffic.overrides,
@@ -393,10 +462,13 @@ pub fn drive_ambient(
             commands.entity(entity).despawn();
             continue;
         }
-        if step == LaneAdvance::Turned
-            && let Some(road) = traffic.graph.road(car.cursor.lane.road)
-        {
-            car.target_speed = traffic.overrides.effective_speed(road);
+        if step == LaneAdvance::Turned {
+            if let Some(road) = traffic.graph.road(car.cursor.lane.road) {
+                car.target_speed = traffic.overrides.effective_speed(road);
+            }
+            // Corner braking stand-in: an intersection turn is never
+            // taken at full road speed.
+            car.speed = car.speed.min(follow.turn_speed);
         }
         let Some(sample) = traffic.graph.sample_lane(car.cursor.lane, car.cursor.along) else {
             traffic.dead_ends += 1;
@@ -413,11 +485,17 @@ pub fn drive_ambient(
         let yaw = (-tangent.x).atan2(-tangent.z);
         let pitch = tangent.y.clamp(-1.0, 1.0).asin();
         let rot = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
-        velocity.0 = (pos - position.0) / dt;
+        // The *intended* surface velocity, never the measured delta:
+        // Avian integrates kinematic bodies from `LinearVelocity`, so
+        // a delta measured across the physics step feeds back on
+        // itself and diverges — and a contact resolving against it
+        // would see a phantom ~km/s impactor.
+        velocity.0 = tangent * car.speed.max(0.0);
         position.0 = pos;
         rotation.0 = rot;
         *transform = Transform::from_translation(pos).with_rotation(rot);
     }
+    traffic.queued = queued;
 }
 
 /// Keep the population at the plan's target: despawn cars that left
@@ -439,7 +517,15 @@ pub fn maintain_ambient(
     let (Some(mut traffic), Some(vfs)) = (traffic, vfs) else {
         return;
     };
-    if !session.authority_role().is_authority() {
+    // Same live-phase gate `drive_ambient` runs under — a paused or
+    // resolved session freezes its population instead of churning
+    // respawns behind the overlay.
+    if !session.authority_role().is_authority()
+        || !matches!(
+            session.phase(),
+            SessionPhase::Countdown | SessionPhase::Playing
+        )
+    {
         return;
     }
     let Some(player_at) = player.iter().next().map(|p| p.0) else {
@@ -475,9 +561,9 @@ pub fn maintain_ambient(
             &traffic.roster,
             &mut traffic.rng,
             player_at.to_array(),
-            traffic.policy.min_player_distance,
+            &traffic.policy,
         ) {
-            SpawnDraw::InsideBubble => continue,
+            SpawnDraw::OutOfBand => continue,
             SpawnDraw::Unspawnable(_) => {
                 traffic.unspawnable += 1;
                 break;

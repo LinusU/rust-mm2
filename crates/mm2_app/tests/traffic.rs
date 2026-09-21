@@ -19,9 +19,9 @@ use mm2_app::session::{self, SelectedCar, SessionControl, SpawnPoint, TunedVehic
 use mm2_app::traffic::{AmbientCar, AmbientTraffic};
 use mm2_assets::Vfs;
 use mm2_game::{
-    DevOverrides, EventRef, EventTableKind, ImpactEvent, Mm2Vfs, Session, SessionConfig,
-    SessionMode, SessionPhase, SpawnPose, WorldMode, advance_session_tick,
-    despawn_session_entities,
+    DevOverrides, EventRef, EventTableKind, ImpactEvent, LaneCursor, LaneId, Mm2Vfs, Player,
+    PlayerControl, PlayerId, PlayerVehicle, Session, SessionConfig, SessionMode, SessionPhase,
+    SpawnPose, WorldMode, advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::{VehicleConfig, VehiclePlugin};
 
@@ -149,12 +149,20 @@ fn bai_bytes() -> Vec<u8> {
     d
 }
 
-/// One-room PSDL quad, same as `tests/nav_overlay.rs`.
+/// One-room PSDL quad, same as `tests/nav_overlay.rs` but widened to
+/// span the fixture's whole play space — the BAI lanes at x ±3.75 and
+/// the player's quarantine spawn at z=200 all need ground under them
+/// (a parked blocker or a bubble centre cannot stand on nothing).
 fn synthetic_psdl() -> Vec<u8> {
     let mut d = Vec::new();
     d.extend_from_slice(b"PSD0");
     d.extend_from_slice(&2u32.to_le_bytes());
-    let verts: &[[f32; 3]] = &[[10., 0., 0.], [10., 0., 10.], [20., 0., 10.], [20., 0., 0.]];
+    let verts: &[[f32; 3]] = &[
+        [-40., 0., -40.],
+        [-40., 0., 240.],
+        [40., 0., 240.],
+        [40., 0., -40.],
+    ];
     d.extend_from_slice(&(verts.len() as u32).to_le_bytes());
     for v in verts {
         push_f32s(&mut d, v);
@@ -178,10 +186,10 @@ fn synthetic_psdl() -> Vec<u8> {
     d.extend_from_slice(&room);
     d.extend_from_slice(&[0u8; 2]);
     d.extend_from_slice(&[0u8; 2]);
-    push_f32s(&mut d, &[10., 0., 0.]);
-    push_f32s(&mut d, &[20., 6., 10.]);
-    push_f32s(&mut d, &[15., 3., 5.]);
-    push_f32s(&mut d, &[10.]);
+    push_f32s(&mut d, &[-40., 0., -40.]);
+    push_f32s(&mut d, &[40., 6., 240.]);
+    push_f32s(&mut d, &[0., 3., 100.]);
+    push_f32s(&mut d, &[160.]);
     d.extend_from_slice(&0u32.to_le_bytes());
     d
 }
@@ -375,6 +383,7 @@ fn test_app(config: SessionConfig, vfs: Vfs) -> App {
         .init_resource::<ImpactFilter>()
         .init_resource::<SessionControl>()
         .add_systems(FixedUpdate, advance_session_tick)
+        .add_systems(FixedLast, mm2_app::pause::sync_physics_pause)
         .add_systems(
             FixedLast,
             (
@@ -428,6 +437,77 @@ fn ambient_cars(app: &mut App) -> Vec<(Entity, Vec3)> {
         .iter(app.world())
         .map(|(e, p)| (e, p.0))
         .collect()
+}
+
+/// Teleport the player vehicle — the production `Position` write a
+/// `ResetVehicle` lands on, minus the event bookkeeping the driving
+/// systems read.
+fn teleport_player(app: &mut App, to: Vec3) {
+    let mut q = app.world_mut().query_filtered::<(
+        &mut Position,
+        &mut LinearVelocity,
+        &mut AngularVelocity,
+        &mut Transform,
+    ), With<PlayerVehicle>>();
+    let (mut pos, mut lv, mut av, mut t) =
+        q.single_mut(app.world_mut()).expect("one player vehicle");
+    pos.0 = to;
+    lv.0 = Vec3::ZERO;
+    av.0 = Vec3::ZERO;
+    *t = Transform::from_translation(to);
+}
+
+fn player_pos(app: &mut App) -> Vec3 {
+    app.world_mut()
+        .query_filtered::<&Position, With<PlayerVehicle>>()
+        .iter(app.world())
+        .next()
+        .map(|p| p.0)
+        .expect("player vehicle")
+}
+
+fn car_state(app: &mut App, car: Entity) -> Option<(Vec3, f32, LaneCursor)> {
+    app.world_mut()
+        .query::<(Entity, &AmbientCar, &Position)>()
+        .iter(app.world())
+        .find(|(e, _, _)| *e == car)
+        .map(|(_, c, p)| (p.0, c.speed, c.cursor))
+}
+
+/// Spawn a bare lane follower — the `AmbientCar` component plus the
+/// kinematic hull `spawn_ambient_car` stamps — straight onto a lane
+/// pose. The class index is inert (asset loading never runs for it);
+/// `drive_ambient` only needs the cursor and the speed fields.
+fn spawn_follower(app: &mut App, lane: LaneId, along: f32, target_speed: f32) -> Entity {
+    let (pos, rot) = {
+        let traffic = app.world().resource::<AmbientTraffic>();
+        let sample = traffic
+            .graph()
+            .sample_lane(lane, along)
+            .expect("a live lane samples");
+        let pos = Vec3::from(sample.position);
+        let tangent = Vec3::from(sample.tangent).normalize_or(Vec3::NEG_Z);
+        let yaw = (-tangent.x).atan2(-tangent.z);
+        let pitch = tangent.y.clamp(-1.0, 1.0).asin();
+        (pos, Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0))
+    };
+    app.world_mut()
+        .spawn((
+            AmbientCar {
+                class: 0,
+                cursor: LaneCursor { lane, along },
+                target_speed,
+                speed: target_speed.max(0.0),
+            },
+            RigidBody::Kinematic,
+            Collider::cuboid(1.8, 0.9, 3.2),
+            Position(pos),
+            Rotation(rot),
+            LinearVelocity::ZERO,
+            AngularVelocity::ZERO,
+            Transform::from_translation(pos).with_rotation(rot),
+        ))
+        .id()
 }
 
 // ---------------------------------------------------------------------------
@@ -631,4 +711,238 @@ fn teardown_removes_traffic_and_restart_replans() {
         v
     };
     assert!(!first.is_empty(), "restart replanned the population");
+}
+
+/// F10-B.1 obstruction response: a participant parked on the lane is a
+/// corridor blocker — the follower brakes to the hold gap and waits
+/// instead of driving through it, then pulls away when it clears. Runs
+/// on the `[Density] 0.0` install so the only car is the spawned
+/// follower — the full-density fixture saturates its ~100 m of lanes
+/// and keeps the corridor legitimately occupied.
+#[test]
+fn a_parked_participant_holds_traffic_and_clearing_releases_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(d, "city/test.psdl", synthetic_psdl());
+    write(d, "city/test.bai", bai_bytes());
+    write(d, "city/test.aimap", density0_aimap());
+    ambient_assets(d, "va_test_a");
+    ambient_assets(d, "va_test_b");
+    let mut app = test_app(city_config(), vfs_of(d));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+
+    let lane = {
+        let traffic = app.world().resource::<AmbientTraffic>();
+        traffic
+            .graph()
+            .lanes()
+            .iter()
+            .find(|l| l.arc.is_some() && l.length > 22.0)
+            .map(|l| l.id)
+            .expect("the fixture authors routable lanes")
+    };
+    let spot = {
+        let traffic = app.world().resource::<AmbientTraffic>();
+        Vec3::from(
+            traffic
+                .graph()
+                .sample_lane(lane, 20.0)
+                .expect("the lane samples")
+                .position,
+        )
+    };
+    // The parked player vehicle is the blocker — the participant an
+    // ambient car is most likely to meet. The widened PSDL ground
+    // holds it on the lane.
+    teleport_player(&mut app, spot + Vec3::Y * 0.4);
+    let car = spawn_follower(&mut app, lane, 10.0, 15.0);
+
+    // Three seconds at 15 m/s: the follower must brake to a hold
+    // behind the parked player — never closing to contact range —
+    // and stay held. Tracking the closest approach stops a drive-
+    // through from passing the test.
+    let mut min_gap = f32::MAX;
+    for _ in 0..360 {
+        app.update();
+        let (pos, _, _) = car_state(&mut app, car).expect("the held car despawned");
+        min_gap = min_gap.min(pos.distance(player_pos(&mut app)));
+    }
+    assert!(
+        min_gap >= 4.0,
+        "the follower closed to {min_gap} m of the parked player"
+    );
+    let (pos, speed, _) = car_state(&mut app, car).unwrap();
+    let gap = pos.distance(player_pos(&mut app));
+    assert!(
+        speed <= 1.0 && gap >= 4.0,
+        "expected a hold: speed {speed} gap {gap}"
+    );
+    assert!(
+        app.world().resource::<AmbientTraffic>().queued >= 1,
+        "the held car never reported queued"
+    );
+
+    // Clear the lane — the held car pulls away again. A dead-end
+    // despawn counts as resumed: it had to drive to reach the end.
+    teleport_player(&mut app, Vec3::new(0.0, 1.5, 200.0));
+    let mut resumed = false;
+    for _ in 0..240 {
+        app.update();
+        match car_state(&mut app, car) {
+            None => {
+                resumed = true;
+                break;
+            }
+            Some((_, speed, _)) if speed > 2.0 => {
+                resumed = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(resumed, "the released car never resumed");
+}
+
+/// The roster ships but `[Density] 0.0` authors the population off —
+/// manually spawned followers are then the only cars on the network,
+/// so the queue leg is deterministic.
+fn density0_aimap() -> String {
+    "[Ambient Types/Density]\n2\nva_test_a 0.5 0\nva_test_b 1.0 0\n[Density]\n0.0\n".to_string()
+}
+
+/// Ambient cars are corridor blockers too: a participant standing on
+/// the lane holds a queue of followers, each at a bounded gap behind
+/// the next — the synthetic queue leg of F10-AC02's checklist.
+#[test]
+fn ambient_cars_queue_behind_a_blocker() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(d, "city/test.psdl", synthetic_psdl());
+    write(d, "city/test.bai", bai_bytes());
+    write(d, "city/test.aimap", density0_aimap());
+    ambient_assets(d, "va_test_a");
+    ambient_assets(d, "va_test_b");
+    let mut app = test_app(city_config(), vfs_of(d));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    assert!(
+        ambient_cars(&mut app).is_empty(),
+        "[Density] 0.0 plans nothing"
+    );
+
+    // A lane long enough for the blocker plus two queued followers.
+    let lane = {
+        let traffic = app.world().resource::<AmbientTraffic>();
+        traffic
+            .graph()
+            .lanes()
+            .iter()
+            .find(|l| l.arc.is_some() && l.length > 22.0)
+            .map(|l| l.id)
+            .expect("the fixture authors routable lanes")
+    };
+    // A bare participant standing on the lane heads the queue — the
+    // sense reads `Player` + `Position`, the same contract an opponent
+    // or remote driver carries.
+    let blocker_at = {
+        let traffic = app.world().resource::<AmbientTraffic>();
+        Vec3::from(
+            traffic
+                .graph()
+                .sample_lane(lane, 20.0)
+                .expect("the lane samples")
+                .position,
+        )
+    };
+    app.world_mut().spawn((
+        Player {
+            id: PlayerId(90),
+            control: PlayerControl::Ai,
+        },
+        Position(blocker_at),
+    ));
+    let front = spawn_follower(&mut app, lane, 10.0, 15.0);
+    let rear = spawn_follower(&mut app, lane, 2.0, 15.0);
+
+    // Track closest approaches: neither follower may close to contact
+    // range of what it queues behind.
+    let mut min_front = f32::MAX;
+    let mut min_rear = f32::MAX;
+    for _ in 0..360 {
+        app.update();
+        if let Some((fp, _, _)) = car_state(&mut app, front) {
+            min_front = min_front.min(fp.distance(blocker_at));
+            if let Some((rp, _, _)) = car_state(&mut app, rear) {
+                min_rear = min_rear.min(rp.distance(fp));
+            }
+        }
+    }
+    assert!(
+        min_front >= 4.0,
+        "the head car reached {min_front} m of the blocker"
+    );
+    assert!(
+        min_rear >= 4.0,
+        "the tail car reached {min_rear} m of the head car"
+    );
+    let (_, fspeed, _) = car_state(&mut app, front).expect("front despawned");
+    let (_, rspeed, _) = car_state(&mut app, rear).expect("rear despawned");
+    assert!(
+        fspeed <= 1.0 && rspeed <= 1.0,
+        "the queue never held: {fspeed}/{rspeed}"
+    );
+    assert!(
+        app.world().resource::<AmbientTraffic>().queued >= 2,
+        "held followers did not report queued"
+    );
+}
+
+/// The maintainer runs under the same live-phase gate as the driver —
+/// a paused session freezes the population rather than churning
+/// recycle/respawn work behind the pause overlay.
+#[test]
+fn maintain_ambient_holds_during_pause() {
+    let install = city_install();
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    run(&mut app, 180); // let the recycler actually churn first
+    let (spawns0, recycled0) = {
+        let t = app.world().resource::<AmbientTraffic>();
+        (t.spawned, t.recycled)
+    };
+    let frozen: Vec<Vec3> = ambient_cars(&mut app).iter().map(|(_, p)| *p).collect();
+
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Paused)
+        .expect("a local session pauses");
+    run(&mut app, 180);
+    let t = app.world().resource::<AmbientTraffic>();
+    assert_eq!(
+        (t.spawned, t.recycled),
+        (spawns0, recycled0),
+        "paused traffic kept churning"
+    );
+    // Kinematic cars may drift one stale physics step before the pause
+    // takes hold (the recorded Avian quirk) — half a metre of slack,
+    // not the metres a live drive would cover.
+    let now: Vec<Vec3> = ambient_cars(&mut app).iter().map(|(_, p)| *p).collect();
+    assert_eq!(frozen.len(), now.len());
+    for (a, b) in frozen.iter().zip(&now) {
+        assert!(a.distance(*b) < 0.5, "paused car drifted {a:?} -> {b:?}");
+    }
+
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Playing)
+        .expect("a paused session resumes");
+    run(&mut app, 60);
 }

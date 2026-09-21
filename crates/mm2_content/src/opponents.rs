@@ -146,6 +146,22 @@ pub fn opponent_roster(
     event: &CatalogEvent,
     difficulty: Difficulty,
 ) -> Result<OpponentRoster, RosterBuildError> {
+    let (aimap, picked) = event_aimap(vfs, event, difficulty)?;
+    opponent_roster_from_aimap(event, difficulty, &aimap, &picked)
+}
+
+/// [`opponent_roster`] with the difficulty-selected aimap already
+/// resolved and parsed — a caller that also needs the record itself
+/// (the event session setup: the same aimap authors the ambient
+/// overrides) shares one read+parse between both consumers instead of
+/// paying it twice. The roster build itself reads only already-parsed
+/// record content, so it takes no `vfs`.
+pub fn opponent_roster_from_aimap(
+    event: &CatalogEvent,
+    difficulty: Difficulty,
+    aimap: &Aimap,
+    picked: &EventAimap,
+) -> Result<OpponentRoster, RosterBuildError> {
     if !event.status.is_ready() {
         return Err(RosterBuildError::NotReady(event.status.clone()));
     }
@@ -153,7 +169,6 @@ pub fn opponent_roster(
         return Err(RosterBuildError::CrashCourseUnsupported);
     }
 
-    let (aimap, picked) = event_aimap(vfs, event, difficulty)?;
     let tag = picked.tag;
 
     let mut issues = Vec::new();

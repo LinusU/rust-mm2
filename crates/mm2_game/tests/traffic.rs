@@ -238,7 +238,11 @@ fn roster(specs: &[(&str, f32)]) -> AmbientRoster {
     AmbientRoster::new(specs.iter().map(|(id, w)| spec(id, *w, true)).collect())
 }
 
+/// Past the recycle radius — every lane is out of the spawn annulus.
 const FAR_AWAY: [f32; 3] = [0.0, -500.0, 0.0];
+/// Inside the annulus but outside the 60 m bubble: every fixture lane
+/// sample is 150–260 m away, so draws always reach the class pick.
+const CLEAR: [f32; 3] = [10.0, 0.0, -150.0];
 
 // ---------- roster selection ----------
 
@@ -294,7 +298,7 @@ fn plan_is_deterministic_and_seed_sensitive() {
         &r,
         42,
         0.5,
-        FAR_AWAY,
+        CLEAR,
         &SpawnPolicy::default(),
     );
     let b = plan_ambient(
@@ -303,7 +307,7 @@ fn plan_is_deterministic_and_seed_sensitive() {
         &r,
         42,
         0.5,
-        FAR_AWAY,
+        CLEAR,
         &SpawnPolicy::default(),
     );
     assert_eq!(a.spawns, b.spawns, "same seed must replay identically");
@@ -315,7 +319,7 @@ fn plan_is_deterministic_and_seed_sensitive() {
         &r,
         7,
         0.5,
-        FAR_AWAY,
+        CLEAR,
         &SpawnPolicy::default(),
     );
     assert_ne!(a.spawns, c.spawns, "different seed, different draw");
@@ -329,14 +333,14 @@ fn plan_bounds_output_and_scales_with_density() {
         max_active: 10,
         ..SpawnPolicy::default()
     };
-    let full = plan_ambient(&g, &NavOverrides::default(), &r, 1, 1.0, FAR_AWAY, &policy);
+    let full = plan_ambient(&g, &NavOverrides::default(), &r, 1, 1.0, CLEAR, &policy);
     assert_eq!(full.target, 10);
     assert_eq!(full.spawns.len(), 10);
     assert!(full.spawns.len() <= policy.max_active);
 
-    let half = plan_ambient(&g, &NavOverrides::default(), &r, 1, 0.5, FAR_AWAY, &policy);
+    let half = plan_ambient(&g, &NavOverrides::default(), &r, 1, 0.5, CLEAR, &policy);
     assert_eq!(half.target, 5);
-    let off = plan_ambient(&g, &NavOverrides::default(), &r, 1, 0.0, FAR_AWAY, &policy);
+    let off = plan_ambient(&g, &NavOverrides::default(), &r, 1, 0.0, CLEAR, &policy);
     assert_eq!(off.target, 0);
     assert!(off.spawns.is_empty());
 }
@@ -350,21 +354,21 @@ fn plan_honours_closed_roads_and_pedestrian_only_sides() {
     let g = two_roads();
     let mut overrides = NavOverrides::default();
     overrides.closed_roads.insert(0);
-    let plan = plan_ambient(&g, &overrides, &r, 9, 1.0, FAR_AWAY, &policy);
+    let plan = plan_ambient(&g, &overrides, &r, 9, 1.0, CLEAR, &policy);
     assert_eq!(plan.eligible_lanes, 2, "only road 1's two lanes");
     assert!(plan.spawns.iter().all(|s| s.lane.road == 1));
 
     // Pedestrian-only sides never become routable arcs — the graph
     // withholds them, so the planner cannot pick them.
     let g = road1_pedestrian_only();
-    let plan = plan_ambient(&g, &NavOverrides::default(), &r, 9, 1.0, FAR_AWAY, &policy);
+    let plan = plan_ambient(&g, &NavOverrides::default(), &r, 9, 1.0, CLEAR, &policy);
     assert_eq!(plan.eligible_lanes, 2, "only road 0's two lanes");
     assert!(plan.spawns.iter().all(|s| s.lane.road == 0));
 
     // Closing every road leaves the plan empty but well-formed.
     let mut overrides = NavOverrides::default();
     overrides.closed_roads.extend([0u16, 1u16]);
-    let plan = plan_ambient(&g, &overrides, &r, 9, 1.0, FAR_AWAY, &policy);
+    let plan = plan_ambient(&g, &overrides, &r, 9, 1.0, CLEAR, &policy);
     assert!(plan.spawns.is_empty());
     assert!(
         plan.issues
@@ -381,7 +385,7 @@ fn plan_flags_unspawnable_and_empty_rosters() {
     // A class with no resolved tuning stays in the weight table; draws
     // landing on it spawn nothing and report once per id.
     let r = AmbientRoster::new(vec![spec("va_ghost", 1.0, false)]);
-    let plan = plan_ambient(&g, &NavOverrides::default(), &r, 3, 1.0, FAR_AWAY, &policy);
+    let plan = plan_ambient(&g, &NavOverrides::default(), &r, 3, 1.0, CLEAR, &policy);
     assert!(plan.spawns.is_empty());
     assert_eq!(plan.unspawnable, plan.target);
     assert_eq!(
@@ -395,15 +399,7 @@ fn plan_flags_unspawnable_and_empty_rosters() {
 
     // Empty roster → EmptyRoster, no panic, no spawns.
     let empty = AmbientRoster::default();
-    let plan = plan_ambient(
-        &g,
-        &NavOverrides::default(),
-        &empty,
-        3,
-        1.0,
-        FAR_AWAY,
-        &policy,
-    );
+    let plan = plan_ambient(&g, &NavOverrides::default(), &empty, 3, 1.0, CLEAR, &policy);
     assert!(plan.spawns.is_empty());
     assert!(
         plan.issues
@@ -505,7 +501,7 @@ fn plan_skips_non_finite_lane_geometry() {
         &r,
         5,
         1.0,
-        FAR_AWAY,
+        CLEAR,
         &SpawnPolicy::default(),
     );
     assert_eq!(plan.eligible_lanes, 2, "only road 0's lanes survive");
@@ -632,4 +628,133 @@ fn cursor_keeps_its_lane_rank_across_a_turn() {
         LaneAdvance::Turned
     );
     assert_eq!(cur.lane, lane_id(1, Side::Right, 1));
+}
+
+// ---------- spawn annulus (F10-B.1: the recycler-radius bound) ----------
+
+/// Placements past the recycler's own radius are never drawn — a car
+/// that the next tick would collect is churn, not population. The
+/// bubble test above covers the annulus's inner bound; this is the
+/// outer one.
+#[test]
+fn plan_never_spawns_beyond_the_recycle_radius() {
+    let g = two_roads();
+    let r = roster(&[("va_a", 1.0)]);
+    let policy = SpawnPolicy::default();
+    // The whole network sits past 400 m — every attempt is out of
+    // band, so the directives drop rather than spawning churn.
+    let plan = plan_ambient(&g, &NavOverrides::default(), &r, 5, 1.0, FAR_AWAY, &policy);
+    assert!(plan.spawns.is_empty());
+    assert_eq!(plan.dropped, plan.target);
+
+    // With lanes inside the annulus every placement respects both
+    // bounds: never inside the bubble, never past the recycle radius.
+    let plan = plan_ambient(&g, &NavOverrides::default(), &r, 5, 1.0, CLEAR, &policy);
+    assert_eq!(plan.spawns.len(), plan.target);
+    for s in &plan.spawns {
+        let d = [
+            s.sample.position[0] - CLEAR[0],
+            s.sample.position[1] - CLEAR[1],
+            s.sample.position[2] - CLEAR[2],
+        ];
+        let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        assert!(
+            dist >= policy.min_player_distance && dist <= policy.recycle_distance,
+            "spawn out of annulus at {dist} m: {:?}",
+            s.sample.position
+        );
+    }
+}
+
+// ---------- obstruction sense + follow law (F10-B.1) ----------
+
+#[test]
+fn corridor_reports_the_nearest_in_band_blocker() {
+    let pos = [0.0, 0.0, 0.0];
+    let fwd = [0.0, 0.0, 1.0];
+    // Two blockers ahead in the corridor — the nearer wins.
+    assert_eq!(
+        corridor_gap(
+            pos,
+            fwd,
+            2.4,
+            3.0,
+            40.0,
+            [[0.5, 0.0, 20.0], [0.0, 0.0, 10.0]]
+        ),
+        Some(10.0)
+    );
+    // Behind, beside, above or past the reach: none of these count.
+    for b in [
+        [0.0, 0.0, -5.0], // behind
+        [3.4, 0.0, 10.0], // neighbouring lane
+        [0.0, 6.0, 10.0], // overpass
+        [0.0, 0.0, 45.0], // beyond reach
+    ] {
+        assert_eq!(
+            corridor_gap(pos, fwd, 2.4, 3.0, 40.0, [b]),
+            None,
+            "blocker {b:?} must not be sensed"
+        );
+    }
+    // The corridor resolves against the heading, not a fixed axis.
+    assert_eq!(
+        corridor_gap(
+            pos,
+            [-1.0, 0.0, 0.0],
+            2.4,
+            3.0,
+            40.0,
+            [[-12.0, 0.0, 1.0], [12.0, 0.0, 0.0]]
+        ),
+        Some(12.0)
+    );
+    // A degenerate heading senses nothing rather than dividing by zero.
+    assert_eq!(
+        corridor_gap(pos, [0.0, 1.0, 0.0], 2.4, 3.0, 40.0, [[0.0, 0.0, 5.0]]),
+        None
+    );
+}
+
+#[test]
+fn follow_speed_brakes_to_the_gap_and_resumes() {
+    let p = FollowPolicy::default();
+    let dt = 1.0 / 120.0;
+    // A clear corridor accelerates to the road limit and holds it.
+    let mut v = 0.0;
+    for _ in 0..1200 {
+        v = follow_speed(v, 15.0, None, dt, &p);
+    }
+    assert_eq!(v, 15.0);
+    // Room ahead caps the desired speed on a sliding scale — 30 m is
+    // still nearly a free run, 8 m is a crawl.
+    let far = follow_speed(15.0, 15.0, Some(30.0), dt, &p);
+    assert!(far > 14.0, "{far}");
+    let near = follow_speed(15.0, 15.0, Some(8.0), dt, &p);
+    assert!(near < 15.0, "{near}");
+    // Rolling up on a standing blocker: the speed bleeds off and the
+    // car settles at the follow gap — it never closes to contact.
+    let mut v = 15.0;
+    let mut gap = 40.0;
+    for _ in 0..3600 {
+        v = follow_speed(v, 15.0, Some(gap), dt, &p);
+        gap -= v * dt;
+    }
+    assert!(
+        v <= p.held_speed,
+        "still rolling at the hold: v={v} gap={gap}"
+    );
+    assert!(
+        (p.follow_gap - 1.0..=p.follow_gap + 1.0).contains(&gap),
+        "held at gap {gap}, expected ~{}",
+        p.follow_gap
+    );
+    // A blocker already inside panic range stops the car outright —
+    // a kinematic hull that kept moving would shove it.
+    assert_eq!(
+        follow_speed(8.0, 15.0, Some(p.panic_gap - 0.1), dt, &p),
+        0.0
+    );
+    // Corridor clear again: the car pulls away.
+    assert!(follow_speed(0.0, 15.0, None, dt, &p) > 0.0);
 }

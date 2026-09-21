@@ -1,99 +1,99 @@
 # Last implementation iteration
 
-- Task ID and title: F10-A.2 — runtime ambient traffic: the seeded
-  spawn plan's consumer. External review #12 passed F10-A.1 and noted
-  nothing consumes `plan_ambient`; this slice is the runtime leg the
-  plan recorded as remaining.
-- Starting commit: `8051e2eb890ea061e8d275d072876895bf8c039d` on
+- Task ID and title: F10-B.1 — ambient-traffic obstruction response
+  (forward corridor + bounded follow/stop), plus the F10-A.2 external
+  review's same-subsystem non-blocking repairs. The review passed
+  F10-A.2 with no blocking findings; this slice takes the highest-value
+  F10-B leg and folds in its four noted subsystem gaps.
+- Starting commit: `a035b38c33b66700239b0f7e5da221654aadba62` on
   `ralph/night`; tree was clean.
 
 ## What changed
 
-- `mm2_game::traffic` — the plan's inline lane pick refactored into
-  `eligible_lanes` (routable arc, finite length/vertices, not closed)
-  and `draw_spawn` (one deterministic class+position draw returning
-  `Placed`/`InsideBubble`/`Unspawnable`) so the runtime respawner runs
-  the same logic the planner used. New `LaneCursor { lane, along }`
-  (travel-direction distance) plus `advance_lane_cursor`: walks the
-  lane, then at its end picks a seeded legal exit through
-  `NavGraph::transfer_lane` (new — `advance_cursor`'s turn math
-  extracted), preserving lane rank and skipping closed destination
-  roads; `DeadEnd` is an explicit result for runtime despawn.
-- `mm2_content` — `opponents::event_aimap` extracted (difficulty-
-  selected aimap with the same cross-fallback `opponent_roster` used;
-  `EventAimap` records which variant won). `traffic::ambient_setup`
-  merges city + event aimap layers: a non-empty event roster replaces
-  the city's, `NavOverrides` merge (closed roads unioned, event
-  exceptions first so event speed limits win), event `[Speed Limit]`/
-  left-driving override the city's. `assemble::ambient_vehicle` loads
-  `geometry/<id>.pkg` + `.mtx` + optional `bound/<id>_bound.bnd` —
-  `aivehicledata` is deliberately not converted to a `VehicleConfig`
-  (it authors no drivetrain).
-- `mm2_app::traffic` (new) — `AmbientTraffic` resource (graph,
-  merged overrides, roster, eligible lanes, a second `NavRng` stream
-  for runtime draws, counters) and `AmbientCar` component.
-  `load_ambient_traffic` runs `plan_ambient` and spawns session-owned
-  kinematic rigid bodies with bound-convex-hull (or authored `Size`
-  box fallback) colliders and the real `va_*` model. `drive_ambient`
-  (FixedLast, after the solver) walks each cursor, re-poses from the
-  sampled lane, refreshes per-road effective speed on turns and
-  despawns dead ends. `maintain_ambient` despawns cars outside the
-  recycle bubble and respawns through `draw_spawn` to the density
-  target, bounded per tick by `placement_attempts`.
-- `session::load_session_world` — `EventSetup` gained the parsed
-  event aimap; ambient load runs after the player spawns (its pose is
-  the bubble centre); teardown removes the resource. `main.rs` and
-  `smoke.rs` register `drive_ambient`/`maintain_ambient` in the
-  `FixedLast` chain after `advance_race`; the headless record gained
-  `traf={active}/{target} sp=… rec=… dead=… uns=…` — absent on worlds
-  with no roster so older records stay bit-identical.
+- `mm2_game::traffic` — `draw_spawn` now takes `&SpawnPolicy` and
+  places inside the `[min_player_distance, recycle_distance]` annulus:
+  `SpawnDraw::InsideBubble` became `OutOfBand` covering both bounds, so
+  a draw can never land past the radius the recycler would collect it
+  at immediately. New `FollowPolicy` (designed values — the original
+  braking model is unverified, UNK-12), `corridor_gap` (nearest blocker
+  inside a forward corridor: XZ-projected heading, lateral
+  half-width, vertical tolerance, speed-scaled reach) and
+  `follow_speed` (road limit on a clear corridor, desired speed capped
+  so the car rolls up to `follow_gap`, instant stop inside
+  `panic_gap`, `turn_speed` cap across intersections).
+- `mm2_app::traffic` — `drive_ambient` builds a blocker list from
+  every `Player` participant (local driver and AI opponents alike)
+  plus every other ambient car, senses the corridor per car, applies
+  `follow_speed`, and counts held cars into the new
+  `AmbientTraffic::queued`. `maintain_ambient` now runs under the same
+  `Countdown|Playing` phase gate as the driver — a paused session no
+  longer recycles/respawns behind the overlay. `AmbientTraffic::issues`
+  are warn-logged at load instead of counted silently.
+- `mm2_app::traffic` bug found by the new pause test — the kinematic
+  velocity was derived from the measured position delta across the
+  physics step; Avian integrates kinematic bodies from
+  `LinearVelocity`, so the delta fed back on itself and diverged (cars
+  reached ~km/s once a pause stopped the position overwrite).
+  `LinearVelocity` now carries the intended surface velocity
+  `tangent * speed` — contacts resolve against a real velocity.
+- `mm2_content::opponents` — `opponent_roster` split so
+  `opponent_roster_from_aimap` builds the roster from an already
+  resolved+parsed aimap; `event_race_setup` calls `event_aimap` once
+  and shares the record between the roster and the ambient setup
+  (the double parse the review noted is gone).
+- `mm2_app::smoke` — the headless `traf=` record gained `q=` (queued
+  cars held behind a blocker at the final tick).
+- Tests — `mm2_game`: annulus bounds (`plan_never_spawns_beyond_the_
+  recycle_radius`), corridor nearest-in-band selection, and the
+  follow law's brake-to-gap/resume. `mm2_app`: a parked participant
+  holds a follower at a bounded gap and clearing releases it
+  (sparse `[Density] 0.0` install — the full-density fixture
+  saturates its ~100 m of lanes so the corridor stays legitimately
+  occupied), two followers queue behind a blocker reporting
+  `queued >= 2`, and `maintain_ambient` freezes during `Paused`.
+  The synthetic PSDL ground was widened to span the fixture's lanes
+  and the player's quarantine spawn — the player previously fell
+  through the world, which the annulus bound correctly exposed as
+  population drain.
 
 ## Evidence
 
-- `cargo test -p mm2_game --test traffic` — 13 pass, incl. new
-  `cursor_advances_then_turns_then_dead_ends`,
-  `cursor_faces_the_authored_travel_direction`,
-  `cursor_never_enters_a_closed_road`,
-  `cursor_keeps_its_lane_rank_across_a_turn`.
-- `cargo test -p mm2_app --test traffic` — 4 pass on a synthetic
-  install (CAI1 two-road chain + PSDL + aimap + `va_*` fixtures)
-  through the real `load_session_world`: seeded placement on authored
-  lanes outside the bubble and identical replay under the same seed;
-  lane-following advances survivors, dead ends despawn and the
-  recycler refills to target; an event aimap `[Density] 0.0` authors
-  the population off over the city's `0.25` (AC06's consumption leg);
-  teardown removes the resource and a restart replans.
+- `cargo test -p mm2_game --test traffic` — 16 pass.
+- `cargo test -p mm2_app --test traffic` — 7 pass on the synthetic
+  install through the real `load_session_world`.
 - Retail headless smoke:
   `mm2 --mm2-path <retail> --city sf --headless --frames 600` →
-  `status=pass … traf=16/16 sp=140 rec=124 dead=0 uns=0` — 1212
-  eligible lanes, density 0.5 → target 16, seeded plan placed 16/16,
-  the recycler churned distant cars back to the bubble over 10 s
-  (`sp=140` counts respawns; `dead=0` on a live graph is expected —
-  cars recycle by distance before running out of road).
+  `status=pass … traf=16/16 sp=26 rec=10 dead=0 uns=0 q=0` — vs
+  `sp=140 rec=124` before the annulus bound: the spawn-past-recycle
+  churn is gone. `ambient traffic loaded density=0.5 target=16
+  spawned=12 eligible=1212 issues=22` — the 22 issues (unroutable
+  roads) now log as warnings; 4 initial draws landed out-of-band and
+  the maintainer refilled to target. `q=0` at the final tick — no
+  car held at the sample instant; the queued counter is exercised
+  synthetically.
 - `cargo fmt --all -- --check` — PASS.
-- `cargo clippy --workspace --all-targets --all-features -D warnings`
-  — PASS.
-- `cargo test --workspace` — PASS, 49 suites, 0 failures.
+- `cargo clippy --locked --workspace --all-targets --all-features
+  -D warnings` — PASS.
+- `cargo test --locked --workspace` — PASS, 49 suites, 0 failures.
 
 ## Still open
 
 - F10-AC02/AC03 remain unmet: no intersection controller, signals,
-  right-of-way, queueing, obstruction response, stuck recovery or
-  collision-response fidelity. Ambient cars are kinematic lane
-  followers — their hull blocks the player, nothing more.
+  right-of-way, stuck recovery or dynamic collision fidelity. The
+  follow law is a local bounded brake — a kinematic follower stops
+  behind a blocker and waits; it never passes, changes lane or
+  recovers. Junction turns transfer onto the next lane without an
+  occupied-space check, so cars can materialise inside a queue (they
+  then hold safely — `along <= 0` blockers are skipped only for the
+  car itself).
 - Spawn-vs-spawn overlap is still unchecked (F10-AC04's "reject
-  occupied space" leg) — `draw_spawn` only enforces the player bubble.
-- The recycle policy churns on a large city (140 spawns / 10 s on sf):
-  `draw_spawn` places anywhere outside the 60 m bubble including
-  beyond the 400 m recycle radius, so far placements recycle
-  immediately. Bounded by `placement_attempts` but wasteful — a
-  candidate tighten-up (draw inside the recycle annulus) for a later
-  slice.
-- `SpawnPolicy` bounds and the density precedence chain
-  (event aimap → authored table dial → city aimap → config) are
-  designed values (UNK-12) — the original layering is unverified.
+  occupied space" leg) — `draw_spawn` enforces the annulus only.
+- `FollowPolicy` constants, `SpawnPolicy` bounds and the density
+  precedence chain are designed values (UNK-12) — original braking /
+  follow behaviour is unverified.
+- No rendered/GPU check of traffic on either city; london not run
+  this iteration. A saturated tiny network legitimately queues —
+  `q=` on retail sf read 0 at the sample tick, so the hold behaviour
+  is proven synthetically only.
 - `maintain_ambient` reads the first `PlayerVehicle` position —
   remote-player bubbles and per-player populations are F10-B+ scope.
-- Remaining non-blocking review notes not taken this round:
-  `TrafficAudit::discovered()` counts rostered-but-unresolved ids;
-  the two thin city-aimap wrappers could share a helper.

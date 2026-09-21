@@ -462,8 +462,8 @@ pub fn headless_smoke(
                 .filter(|e| e.get::<crate::traffic::AmbientCar>().is_some())
                 .count();
             format!(
-                " traf={}/{} sp={} rec={} dead={} uns={}",
-                active, t.target, t.spawned, t.recycled, t.dead_ends, t.unspawnable
+                " traf={}/{} sp={} rec={} dead={} uns={} q={}",
+                active, t.target, t.spawned, t.recycled, t.dead_ends, t.unspawnable, t.queued
             )
         })
         .unwrap_or_default();

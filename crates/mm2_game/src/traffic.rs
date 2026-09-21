@@ -14,11 +14,13 @@
 //!
 //! [`plan_ambient`] draws an initial spawn set: the authored density
 //! fraction times a bounded vehicle budget, each draw picking a class
-//! through the cumulative table and a lane-position over the routable
-//! vehicle lanes that survive the overrides (closed roads and
-//! pedestrian-only/disabled road sides are already excluded from the
-//! graph's arcs). Everything is seeded through [`NavRng`] — the same
-//! `(seed, content)` pair produces the same plan on every platform.
+//! through the cumulative table and a lane-position inside the spawn
+//! annulus (`min_player_distance`…`recycle_distance` of the bubble
+//! centre) over the routable vehicle lanes that survive the overrides
+//! (closed roads and pedestrian-only/disabled road sides are already
+//! excluded from the graph's arcs). Everything is seeded through
+//! [`NavRng`] — the same `(seed, content)` pair produces the same
+//! plan on every platform.
 //!
 //! This is *not* original traffic: the plan is spawn/despawn policy
 //! data for the ambient system F10-B/C fills in — no intersection
@@ -246,10 +248,12 @@ pub struct AmbientPlan {
 /// pedestrian-only/disabled road sides, so `arc.is_some()` is the BAI
 /// ambient-classification test. Each of `target` draws picks a lane
 /// uniformly, a position along it, and a class through the roster's
-/// cumulative weights; placements inside `policy.min_player_distance`
-/// of `player_at` retry up to `policy.placement_attempts` times before
-/// the directive is dropped. `player_at` may be a spawn pose, not a
-/// tracked position — the planner only needs the bubble centre.
+/// cumulative weights; placements outside the `[min_player_distance,
+/// recycle_distance]` annulus around `player_at` retry up to
+/// `policy.placement_attempts` times before the directive is dropped —
+/// the outer bound keeps the plan from populating road the recycler
+/// would collect on its first tick. `player_at` may be a spawn pose,
+/// not a tracked position — the planner only needs the bubble centre.
 pub fn plan_ambient(
     graph: &NavGraph,
     overrides: &NavOverrides,
@@ -288,15 +292,9 @@ pub fn plan_ambient(
         }
         for _ in 0..policy.placement_attempts {
             match draw_spawn(
-                graph,
-                overrides,
-                &eligible,
-                roster,
-                &mut rng,
-                player_at,
-                policy.min_player_distance,
+                graph, overrides, &eligible, roster, &mut rng, player_at, policy,
             ) {
-                SpawnDraw::InsideBubble => continue,
+                SpawnDraw::OutOfBand => continue,
                 SpawnDraw::Placed(directive) => spawns.push(directive),
                 SpawnDraw::Unspawnable(class) => {
                     unspawnable += 1;
@@ -356,9 +354,13 @@ pub fn eligible_lanes(graph: &NavGraph, overrides: &NavOverrides) -> Vec<LaneId>
 pub enum SpawnDraw {
     /// A directive was placed.
     Placed(SpawnDirective),
-    /// The sampled position fell inside `min_player_distance` of the
-    /// player — the caller retries on a fresh lane sample.
-    InsideBubble,
+    /// The sampled position fell outside the spawn annulus — inside
+    /// `min_player_distance` of the player (a car must not materialise
+    /// next to them) or beyond `max_player_distance` (a placement past
+    /// the recycler's own radius would be despawned on the next tick,
+    /// so drawing it is pure churn). The caller retries on a fresh
+    /// lane sample.
+    OutOfBand,
     /// The class draw selected an unspawnable row (`Some`) or fell off
     /// a non-closed weight table (`None`) — this slot produces nothing;
     /// the authored band is never rebalanced.
@@ -367,7 +369,11 @@ pub enum SpawnDraw {
 
 /// One spawn-placement attempt — [`plan_ambient`] retries it
 /// `policy.placement_attempts` times per directive and the runtime
-/// recycler reuses it to top the population back up.
+/// recycler reuses it to top the population back up. Placements are
+/// drawn inside the `[min_player_distance, recycle_distance]` annulus
+/// `policy` declares around `player_at` — the population lives in the
+/// player's bubble, never on the far side of the city where the
+/// recycler would collect it immediately.
 pub fn draw_spawn(
     graph: &NavGraph,
     overrides: &NavOverrides,
@@ -375,7 +381,7 @@ pub fn draw_spawn(
     roster: &AmbientRoster,
     rng: &mut NavRng,
     player_at: [f32; 3],
-    min_player_distance: f32,
+    policy: &SpawnPolicy,
 ) -> SpawnDraw {
     let lane = *rng.pick(eligible).expect("eligible is non-empty");
     let l = graph.lane(lane).expect("eligible lanes exist");
@@ -386,8 +392,9 @@ pub fn draw_spawn(
         sample.position[1] - player_at[1],
         sample.position[2] - player_at[2],
     ];
-    if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() < min_player_distance {
-        return SpawnDraw::InsideBubble;
+    let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    if !(policy.min_player_distance..=policy.recycle_distance).contains(&dist) {
+        return SpawnDraw::OutOfBand;
     }
     match roster.pick(rng) {
         Some(class) if roster.spawnable(class) => {
@@ -478,4 +485,125 @@ pub fn advance_lane_cursor(
         turned = true;
     }
     LaneAdvance::DeadEnd
+}
+
+/// Bounds on how a lane-following ambient car may change speed, plus
+/// the corridor it senses blockers through. All values are designed:
+/// the original's ambient braking/follow model is unverified (UNK-12
+/// covers the policy constants generally), so these are chosen for
+/// believable, collision-safe motion — a blocked car sheds speed,
+/// holds a visible gap, and never shoves what it queues behind.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FollowPolicy {
+    /// Rate a clear car regains its road speed (m/s²).
+    pub accel: f32,
+    /// Rate a blocked car sheds speed (m/s²).
+    pub decel: f32,
+    /// Centre-to-centre gap the follower holds behind a blocker (m).
+    pub follow_gap: f32,
+    /// Gap below which the car stops outright — contact range, where
+    /// rate-limiting would still roll it into the blocker (m).
+    pub panic_gap: f32,
+    /// Seconds of travel per metre of excess gap — the slope that
+    /// converts room ahead into a desired speed.
+    pub follow_time: f32,
+    /// A blocked car at or below this speed counts as queued (m/s).
+    pub held_speed: f32,
+    /// Corridor reach at a standstill (m); grows with own speed.
+    pub near: f32,
+    /// Added corridor reach per m/s of own speed.
+    pub lead: f32,
+    /// Corridor half-width (m) — about a car width, so a blocker in
+    /// the neighbouring lane does not count.
+    pub half_width: f32,
+    /// A blocker offset vertically by more than this rides another
+    /// road level (overpass/underpass) and is not sensed (m).
+    pub max_rise: f32,
+    /// Speed cap applied on an intersection turn (m/s) — the cheap
+    /// stand-in for corner braking until real curvature-aware braking
+    /// lands (F10-B remainder).
+    pub turn_speed: f32,
+}
+
+impl Default for FollowPolicy {
+    fn default() -> Self {
+        Self {
+            accel: 4.0,
+            decel: 9.0,
+            follow_gap: 7.0,
+            panic_gap: 4.5,
+            follow_time: 1.2,
+            held_speed: 1.0,
+            near: 14.0,
+            lead: 1.4,
+            half_width: 2.4,
+            max_rise: 3.0,
+            turn_speed: 8.0,
+        }
+    }
+}
+
+/// Distance (m) to the nearest blocker inside a forward corridor —
+/// `None` when the corridor ahead is clear out to `reach`.
+///
+/// `pos`/`fwd` are the follower's centre and heading; only the XZ
+/// projection of `fwd` is used so a pitched lane still senses level
+/// traffic. A blocker counts when it sits ahead (`0 < along <=
+/// reach`), within `half_width` laterally, and within `max_rise`
+/// vertically — the last test keeps a car on an underpass from
+/// braking for the overpass above it.
+pub fn corridor_gap(
+    pos: [f32; 3],
+    fwd: [f32; 3],
+    half_width: f32,
+    max_rise: f32,
+    reach: f32,
+    blockers: impl IntoIterator<Item = [f32; 3]>,
+) -> Option<f32> {
+    let n = (fwd[0] * fwd[0] + fwd[2] * fwd[2]).sqrt();
+    if n < 1.0e-6 {
+        return None;
+    }
+    let (fx, fz) = (fwd[0] / n, fwd[2] / n);
+    let mut best: Option<f32> = None;
+    for b in blockers {
+        let dx = b[0] - pos[0];
+        let dz = b[2] - pos[2];
+        let along = dx * fx + dz * fz;
+        if along <= 0.0 || along > reach || best.is_some_and(|c| along >= c) {
+            continue;
+        }
+        let lateral = (dx * -fz + dz * fx).abs();
+        if lateral > half_width || (b[1] - pos[1]).abs() > max_rise {
+            continue;
+        }
+        best = Some(along);
+    }
+    best
+}
+
+/// One tick of the lane follower's speed law. `target` is the road's
+/// speed limit; `gap` is [`corridor_gap`]'s distance to the nearest
+/// blocker ahead. A clear corridor drives at `target` (rate-limited
+/// by `accel`); a sensed blocker caps the desired speed so the car
+/// rolls up to `follow_gap` behind it and holds, and a blocker inside
+/// `panic_gap` stops it outright — a kinematic body that keeps moving
+/// would shove whatever it touches. The response is bounded and
+/// symmetric: the car waits rather than passing, and resumes the
+/// moment the corridor clears; the only lasting recovery is the
+/// distance recycler.
+pub fn follow_speed(
+    speed: f32,
+    target: f32,
+    gap: Option<f32>,
+    dt: f32,
+    policy: &FollowPolicy,
+) -> f32 {
+    let desired = match gap {
+        Some(g) if g <= policy.panic_gap => return 0.0,
+        Some(g) => target.min(((g - policy.follow_gap) / policy.follow_time).max(0.0)),
+        None => target,
+    };
+    let dv = (desired - speed).clamp(-policy.decel * dt, policy.accel * dt);
+    (speed + dv).max(0.0)
 }
