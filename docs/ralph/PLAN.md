@@ -650,6 +650,57 @@ rendered gameplay; outranks inference.
    `1789920955999_cam_-340.4,2.0,-104.2,-136,-12.png` (earlier commit)
    and `1789942678043_cam_828.2,7.0,-1038.7,51,-13.png` (at `561b8b7`).
 
+## Operator report 3 (2026-09-21, human play-test — PRIORITY)
+
+Source: the repository owner driving retail London in a windowed build
+at `563c34e`. Direct observation of rendered gameplay.
+
+1. **Every stamped prop is rotated 90 degrees clockwise.** Operator:
+   "All the props are loaded in 90 clockwise. e.g. the lampposts doesn't
+   point out over the road, and bus benches stick out into the road."
+   Lamp arms should reach out over the carriageway and benches should
+   sit along the kerb facing it; both are turned a quarter-circle.
+
+2. **`ea1a9ef` (F03-C.1) does NOT rule this out.** That audit classifies
+   each stamped *position* against carriageway triangles. It measures
+   neither orientation nor the prop's footprint, so a bench whose origin
+   sits correctly on the kerb while its body lies across the road passes
+   it cleanly. Its conclusion "no systematic lateral defect in any
+   channel" is therefore not evidence against this defect, and the 449
+   in-road stamps it dismissed as authored intent should be re-read once
+   orientation is fixed. Extend `mm2-inspect placement` to check
+   orientation and swept footprint, not just the origin point — without
+   that, no automated gate here can see what the operator sees.
+
+3. Code lead, not a diagnosis: `yawed_transform` (city.rs) assigns the
+   path tangent `d` to `x_axis` and `(-d.z, 0, d.x)` — `d` rotated +90
+   degrees about Y — to `z_axis`. If authored prop geometry faces along
+   +Z rather than +X, every derived-basis stamp is rotated by exactly a
+   quarter-turn, which is the reported symptom. Both callers are the
+   `props.pathset` stamp path and the prop-rule stamp path.
+
+   Discriminator worth running first: INST placements carry their own
+   authored full basis and never call `yawed_transform`. If INST-placed
+   lamps and benches are correctly oriented while pathset and prop-rule
+   ones are not, the defect is in this basis and not in a mesh
+   convention. If INST props are rotated too, it is not this function.
+
+   Establish the authored convention from retail data before changing
+   it. Do not apply a blanket 90-degree correction because the result
+   looks better; a compensating rotation in the wrong place will hide
+   the real convention error and break mods later.
+
+4. **Vehicle handling is operator-owned — do not tune it.** The operator
+   judges current steering and handling to be poor, and intends to tune
+   it personally by feel rather than have it adjusted autonomously.
+   Continue structural and contract work on vehicles, but do not change
+   handling parameters or tuning curves for feel. Relatedly: the
+   frequent `opponent re-anchored onto its route after a bounded stuck`
+   events observed on `circuit:0` (Minis, both rosters, roughly one per
+   five seconds) are understood to be downstream of vehicle handling,
+   not a routing or placement defect. Do not treat them as an opponent
+   AI bug, and do not widen the re-anchor recovery to mask them further.
+
 ## Task table
 
 | Task | Status | Dependencies | Evidence / reason / next action |
