@@ -192,6 +192,124 @@ fn interrupted_write_recovers_the_backup() {
     let loaded = store.load(&profile.id).unwrap();
     assert!(loaded.recovered_from_backup);
     assert_eq!(loaded.profile.name, "Crash");
+    // The orphaned backup still lists and still owns its id — a new
+    // profile must not inherit driver-0's surviving data.
+    let summaries = store.list().unwrap();
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].meta.as_ref().unwrap().name, "Crash");
+    assert!(summaries[0].error.is_some());
+    let next = store
+        .create("New", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    assert_eq!(next.id.as_str(), "driver-1");
+    assert_eq!(store.load(&profile.id).unwrap().profile.name, "Crash");
+}
+
+#[test]
+fn a_complete_tmp_is_newer_than_the_main_it_never_replaced() {
+    let (_dir, store) = store();
+    let mut profile = store
+        .create("V1", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    store.save(&mut profile).unwrap();
+    // Simulate a crash after the tmp write was flushed: the complete
+    // newer document sits in tmp while main still holds the previous
+    // revision.
+    profile.name = "V2".to_string();
+    profile.revision += 1;
+    std::fs::write(
+        store.root().join("driver-0.json.tmp"),
+        serde_json::to_vec_pretty(&profile).unwrap(),
+    )
+    .unwrap();
+
+    let loaded = store.load(&profile.id).unwrap();
+    assert!(loaded.recovered_from_backup);
+    assert_eq!(loaded.profile.name, "V2");
+    assert_eq!(loaded.profile.revision, profile.revision);
+}
+
+#[test]
+fn an_orphaned_backup_still_owns_its_id() {
+    let (_dir, store) = store();
+    let mut a = store
+        .create("A", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    let _b = store
+        .create("B", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    store.save(&mut a).unwrap(); // driver-0 now has a main and a .bak
+    // A delete or save interrupted after the main file vanished leaves
+    // only the .bak — the id is still owned and the data recoverable.
+    std::fs::remove_file(store.root().join("driver-0.json")).unwrap();
+
+    let summaries = store.list().unwrap();
+    assert_eq!(summaries.len(), 2);
+    assert_eq!(summaries[0].id.as_str(), "driver-0");
+    assert_eq!(summaries[0].meta.as_ref().unwrap().name, "A");
+    assert!(summaries[0].error.is_some());
+
+    let loaded = store.load(&a.id).unwrap();
+    assert!(loaded.recovered_from_backup);
+    assert_eq!(loaded.profile.name, "A");
+
+    // The orphan's id is not reallocated...
+    let c = store
+        .create("C", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    assert_eq!(c.id.as_str(), "driver-2");
+    // ...and the orphan can still be deleted deliberately.
+    store.delete(&a.id).unwrap();
+    assert!(!store.root().join("driver-0.json.bak").exists());
+}
+
+#[test]
+fn malformed_ids_are_rejected_before_any_path_probe() {
+    let (_dir, store) = store();
+    store
+        .create("Real", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    let escape = ProfileId::from("../escape".to_string());
+    assert!(matches!(store.load(&escape), Err(ProfileError::Invalid(_))));
+    assert!(matches!(
+        store.set_active(&escape),
+        Err(ProfileError::Invalid(_))
+    ));
+    assert!(matches!(
+        store.delete(&escape),
+        Err(ProfileError::Invalid(_))
+    ));
+    // Marker content is data, not caller input — a garbage marker
+    // reads as no selection rather than an error.
+    std::fs::write(store.root().join("active"), "../escape\n").unwrap();
+    assert_eq!(store.active().unwrap(), None);
+}
+
+#[test]
+fn unsorted_or_duplicate_event_records_are_corrupt() {
+    let (_dir, store) = store();
+    let profile = store
+        .create("Sloppy", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    // Hand-edit the file so `events` is out of key order — the own
+    // writers never produce this, and `event_mut` relies on the order.
+    let path = store.root().join("driver-0.json");
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    doc["progress"]["events"] = serde_json::json!([
+        {"key": {"city": "sf", "table": "checkpoint", "stem": "race9"},
+         "finishes": 1, "best_race_ticks": null},
+        {"key": {"city": "sf", "table": "checkpoint", "stem": "race3"},
+         "finishes": 1, "best_race_ticks": null},
+    ]);
+    std::fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
+
+    match store.load(&profile.id) {
+        Err(ProfileError::Corrupt { main, .. }) => {
+            assert!(main.unwrap().contains("unsorted"));
+        }
+        other => panic!("expected Corrupt, got {other:?}"),
+    }
 }
 
 #[test]
@@ -205,7 +323,9 @@ fn fully_corrupt_profile_reports_and_preserves_files() {
     std::fs::write(root.join("driver-0.json.bak"), b"also not json").unwrap();
 
     match store.load(&profile.id) {
-        Err(ProfileError::Corrupt { id, main, backup }) => {
+        Err(ProfileError::Corrupt {
+            id, main, backup, ..
+        }) => {
             assert_eq!(id, profile.id);
             assert!(main.unwrap().contains("invalid JSON"));
             assert!(backup.unwrap().contains("invalid JSON"));

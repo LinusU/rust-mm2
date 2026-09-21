@@ -11,13 +11,16 @@
 //!
 //! - `save` writes `<id>.json.tmp` and flushes it, rotates the existing
 //!   `<id>.json` to `<id>.json.bak`, then renames the tmp over the
-//!   target — at every instant a complete file exists under one of the
-//!   three names.
-//! - `load` falls back to the `.bak` when the main file is missing or
-//!   unparseable and reports the recovery through
-//!   [`ProfileLoad::recovered_from_backup`]. A corrupt file is never
-//!   deleted or overwritten by a load; the next successful `save` heals
-//!   the main file while the backup stays.
+//!   target and fsyncs the directory — at every instant a complete
+//!   file exists under one of the three names.
+//! - `load` reads every surviving copy and keeps the highest
+//!   `revision`: a `.tmp` left behind by an interrupted save is always
+//!   a newer attempt than the main it never got renamed over, so the
+//!   freshest complete document wins. Anything but a clean main-file
+//!   read is reported through [`ProfileLoad::recovered_from_backup`].
+//!   A corrupt file is never deleted or overwritten by a load; the
+//!   next successful `save` heals the main file while the backup
+//!   stays.
 //! - `version` stamps every write; a file whose schema is not
 //!   [`PROFILE_SCHEMA_VERSION`] is rejected rather than guessed at —
 //!   migrations land explicitly when a v2 exists.
@@ -28,8 +31,10 @@
 //! Identity contract:
 //!
 //! - [`ProfileId`]s are `driver-<n>` allocated by scanning the store for
-//!   the highest used suffix — a deleted id is never reused, so a stale
-//!   reference can never point at a different person.
+//!   the highest used suffix across all three file names — a `.bak` or
+//!   `.tmp` left behind by an interrupted save or delete still owns its
+//!   id, so a deleted id is never reused and a stale reference can
+//!   never point at a different person.
 //! - Progress is keyed by [`EventKey`] — the event's authored file stem
 //!   (`race3`), not its table row index — so a mod inserting a table row
 //!   cannot silently retarget a saved record (spec req 4). The consumer
@@ -221,8 +226,9 @@ pub struct PlayerProfile {
     pub rank: Difficulty,
     /// Standard vs sandbox identity (spec req 5).
     pub kind: ProfileKind,
-    /// Number of successful saves — bumps per `save`, making a
-    /// half-overwritten file detectable against its backup.
+    /// Number of successful saves — bumps per `save`. `load` keeps the
+    /// highest surviving revision, so an interrupted save's orphaned
+    /// `.tmp` beats the older main it never got renamed over.
     pub revision: u64,
     /// Records and unlocks.
     #[serde(default)]
@@ -269,6 +275,17 @@ impl PlayerProfile {
         }
         if self.id.suffix().is_none() {
             return Err(format!("malformed profile id {:?}", self.id.as_str()));
+        }
+        // `event_mut` binary-searches this Vec; a hand-edited file with
+        // unsorted or duplicated keys would silently split one event's
+        // record, so the invariant is enforced at the boundary.
+        if self
+            .progress
+            .events
+            .windows(2)
+            .any(|pair| pair[0].key >= pair[1].key)
+        {
+            return Err("event records are unsorted or repeat a key".to_string());
         }
         validate_name(&self.name)
     }
@@ -318,23 +335,26 @@ fn validate_name(name: &str) -> Result<(), String> {
 pub struct ProfileLoad {
     /// The recovered or cleanly-read profile.
     pub profile: PlayerProfile,
-    /// `true` when the main file was missing/unreadable and the `.bak`
-    /// supplied this profile — observable evidence of the recovery path
+    /// `true` when a surviving `.tmp`/`.bak` — not the main file —
+    /// supplied this profile: observable evidence of the recovery path
     /// (F16-AC04). The caller can `save` to heal the main file.
     pub recovered_from_backup: bool,
 }
 
 /// A store listing entry. Corrupt files still list by their id so a
 /// broken profile is inspectable and deletable rather than silently
-/// disappearing (the expected-denominator rule).
+/// disappearing (the expected-denominator rule). An id whose main file
+/// is gone but whose `.tmp`/`.bak` survives still lists, carrying that
+/// copy's metadata plus an error noting the recovery.
 #[derive(Debug)]
 pub struct ProfileSummary {
     /// Identity taken from the file stem — reliable even when the body
     /// is corrupt.
     pub id: ProfileId,
-    /// Stored fields when the file parses; `None` when it does not.
+    /// Stored fields when a file parses; `None` when none does.
     pub meta: Option<ProfileMeta>,
-    /// Why the body failed to parse, when it did.
+    /// Why the entry is degraded — the main file's parse failure, or a
+    /// note that the metadata came from a surviving backup copy.
     pub error: Option<String>,
 }
 
@@ -371,6 +391,9 @@ pub enum ProfileError {
         id: ProfileId,
         /// Why the main file was rejected, when one existed.
         main: Option<String>,
+        /// Why the interrupted-save file was rejected, when one
+        /// existed.
+        tmp: Option<String>,
         /// Why the backup file was rejected, when one existed.
         backup: Option<String>,
     },
@@ -385,13 +408,17 @@ impl std::fmt::Display for ProfileError {
             Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
             Self::Invalid(reason) => write!(f, "invalid profile: {reason}"),
             Self::UnknownProfile(id) => write!(f, "no profile {id}"),
-            Self::Corrupt { id, main, backup } => {
+            Self::Corrupt {
+                id,
+                main,
+                tmp,
+                backup,
+            } => {
                 write!(f, "profile {id} is unreadable")?;
-                if let Some(reason) = main {
-                    write!(f, " (main: {reason})")?;
-                }
-                if let Some(reason) = backup {
-                    write!(f, " (backup: {reason})")?;
+                for (label, reason) in [("main", main), ("tmp", tmp), ("backup", backup)] {
+                    if let Some(reason) = reason {
+                        write!(f, " ({label}: {reason})")?;
+                    }
                 }
                 Ok(())
             }
@@ -470,8 +497,28 @@ impl ProfileStore {
         self.root.join(format!("{}.{PROFILE_EXT}.tmp", id.as_str()))
     }
 
+    /// Whether `id` is usable as a file stem inside the store root.
+    /// `ProfileId`'s public constructors accept arbitrary strings, so
+    /// callers can hand in `../x`-shaped values; every operation that
+    /// turns an id into a path checks this first rather than probing
+    /// outside the root.
+    fn is_safe_stem(id: &ProfileId) -> bool {
+        let s = id.as_str();
+        !s.is_empty() && !s.contains('/') && !s.contains('\\') && s != "." && s != ".."
+    }
+
+    /// Whether any file — main, tmp or backup — exists for `id`.
+    fn id_has_file(&self, id: &ProfileId) -> bool {
+        [self.main_path(id), self.tmp_path(id), self.backup_path(id)]
+            .iter()
+            .any(|p| p.exists())
+    }
+
     /// Every profile id present in the store, highest suffix last —
-    /// filename-derived, so corrupt files still count.
+    /// filename-derived, so corrupt files still count. All three file
+    /// names occupy the id: a `.bak`/`.tmp` orphaned by an interrupted
+    /// save or delete is still that profile's data, and reallocating
+    /// the id would attach it to a different identity.
     fn existing_ids(&self) -> Result<Vec<ProfileId>, ProfileError> {
         let mut ids = Vec::new();
         let entries = std::fs::read_dir(&self.root).map_err(|source| ProfileError::Io {
@@ -485,7 +532,11 @@ impl ProfileStore {
             })?;
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
-            if let Some(stem) = name.strip_suffix(&format!(".{PROFILE_EXT}"))
+            let stem = name
+                .strip_suffix(&format!(".{PROFILE_EXT}.bak"))
+                .or_else(|| name.strip_suffix(&format!(".{PROFILE_EXT}.tmp")))
+                .or_else(|| name.strip_suffix(&format!(".{PROFILE_EXT}")));
+            if let Some(stem) = stem
                 && stem.starts_with("driver-")
             {
                 ids.push(ProfileId(stem.to_string()));
@@ -495,29 +546,94 @@ impl ProfileStore {
         // `driver-2`; non-standard names (a hand-created `driver-x.json`)
         // sort last.
         ids.sort_by_key(|id| (id.suffix().unwrap_or(u64::MAX), id.as_str().to_string()));
+        ids.dedup();
         Ok(ids)
     }
 
+    /// Read every surviving file for `id`. Returns the newest readable
+    /// copy — highest `revision`, with earlier slots winning ties —
+    /// plus the slot that supplied it (0 = main, 1 = tmp, 2 = backup)
+    /// and each existing file's rejection reason.
+    fn read_candidates(
+        &self,
+        id: &ProfileId,
+    ) -> (Option<(PlayerProfile, usize)>, [Option<String>; 3]) {
+        let paths = [self.main_path(id), self.tmp_path(id), self.backup_path(id)];
+        let mut errors: [Option<String>; 3] = [None, None, None];
+        let mut best: Option<(PlayerProfile, usize)> = None;
+        for (slot, path) in paths.iter().enumerate() {
+            if !path.exists() {
+                continue;
+            }
+            match read_profile(path, id) {
+                Ok(profile) => {
+                    let fresher = best
+                        .as_ref()
+                        .is_none_or(|(current, _)| profile.revision > current.revision);
+                    if fresher {
+                        best = Some((profile, slot));
+                    }
+                }
+                Err(reason) => errors[slot] = Some(reason),
+            }
+        }
+        (best, errors)
+    }
+
     /// Every profile in the store, id-ordered. A file that fails to
-    /// parse still lists — by id, with its error attached.
+    /// parse still lists — by id, with its error attached — and an id
+    /// surviving only as a `.tmp`/`.bak` lists with that copy's
+    /// metadata marked as recovered.
     pub fn list(&self) -> Result<Vec<ProfileSummary>, ProfileError> {
         let mut summaries = Vec::new();
         for id in self.existing_ids()? {
-            let path = self.main_path(&id);
-            let (meta, error) = match read_profile(&path, &id) {
-                Ok(profile) => (
-                    Some(ProfileMeta {
-                        name: profile.name,
-                        rank: profile.rank,
-                        kind: profile.kind,
-                    }),
-                    None,
-                ),
-                Err(reason) => (None, Some(reason)),
-            };
+            let (meta, error) = self.summarize(&id);
             summaries.push(ProfileSummary { id, meta, error });
         }
         Ok(summaries)
+    }
+
+    /// Listing data for one id: metadata from the newest readable copy
+    /// and an error describing any degradation — an unreadable or
+    /// missing main file the summary had to recover around.
+    fn summarize(&self, id: &ProfileId) -> (Option<ProfileMeta>, Option<String>) {
+        let (best, [main_err, tmp_err, backup_err]) = self.read_candidates(id);
+        let meta = |p: &PlayerProfile| ProfileMeta {
+            name: p.name.clone(),
+            rank: p.rank,
+            kind: p.kind,
+        };
+        match best {
+            Some((profile, 0)) => (Some(meta(&profile)), None),
+            Some((profile, _)) => (
+                Some(meta(&profile)),
+                Some(match main_err {
+                    Some(reason) => {
+                        format!(
+                            "main file unreadable ({reason}); metadata recovered from a surviving copy"
+                        )
+                    }
+                    None => {
+                        "main file missing; metadata recovered from a surviving copy".to_string()
+                    }
+                }),
+            ),
+            None => {
+                let detail = [main_err, tmp_err, backup_err]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                (
+                    None,
+                    Some(if detail.is_empty() {
+                        "no readable file survives".to_string()
+                    } else {
+                        detail
+                    }),
+                )
+            }
+        }
     }
 
     /// Create a fresh profile under the next free `driver-<n>` id and
@@ -541,45 +657,36 @@ impl ProfileStore {
         Ok(profile)
     }
 
-    /// Load `id`, falling back to its backup file when the main file is
-    /// missing, truncated or unparseable. Recovery is reported through
-    /// [`ProfileLoad::recovered_from_backup`]; corrupt files are left
-    /// untouched on disk.
+    /// Load `id` from the newest surviving copy — the highest
+    /// `revision` among the main, `.tmp` and `.bak` files. An orphaned
+    /// `.tmp` is a complete save whose rename never ran, so it is
+    /// always fresher than the main it would have replaced; a missing
+    /// or unparseable main falls back the same way. Recovery is
+    /// reported through [`ProfileLoad::recovered_from_backup`]; corrupt
+    /// files are left untouched on disk.
     pub fn load(&self, id: &ProfileId) -> Result<ProfileLoad, ProfileError> {
-        let main = self.main_path(id);
-        let backup = self.backup_path(id);
-        let mut main_err = None;
-        let mut backup_err = None;
-        if main.exists() {
-            match read_profile(&main, id) {
-                Ok(profile) => {
-                    return Ok(ProfileLoad {
-                        profile,
-                        recovered_from_backup: false,
-                    });
-                }
-                Err(reason) => main_err = Some(reason),
+        if !Self::is_safe_stem(id) {
+            return Err(ProfileError::Invalid(format!(
+                "malformed profile id {:?}",
+                id.as_str()
+            )));
+        }
+        let (best, [main, tmp, backup]) = self.read_candidates(id);
+        match best {
+            Some((profile, slot)) => Ok(ProfileLoad {
+                profile,
+                recovered_from_backup: slot != 0,
+            }),
+            None if main.is_none() && tmp.is_none() && backup.is_none() => {
+                Err(ProfileError::UnknownProfile(id.clone()))
             }
+            None => Err(ProfileError::Corrupt {
+                id: id.clone(),
+                main,
+                tmp,
+                backup,
+            }),
         }
-        if backup.exists() {
-            match read_profile(&backup, id) {
-                Ok(profile) => {
-                    return Ok(ProfileLoad {
-                        profile,
-                        recovered_from_backup: true,
-                    });
-                }
-                Err(reason) => backup_err = Some(reason),
-            }
-        }
-        if main_err.is_none() && backup_err.is_none() {
-            return Err(ProfileError::UnknownProfile(id.clone()));
-        }
-        Err(ProfileError::Corrupt {
-            id: id.clone(),
-            main: main_err,
-            backup: backup_err,
-        })
     }
 
     /// Persist `profile` atomically: write `<id>.json.tmp` (flushed to
@@ -622,13 +729,23 @@ impl ProfileStore {
             })?;
         }
         std::fs::rename(&tmp, &main).map_err(|source| ProfileError::Io { path: main, source })?;
+        sync_dir(&self.root)?;
         Ok(())
     }
 
     /// Delete `id`'s files (main, backup, stale tmp). Refuses when it is
     /// the store's last profile (DRV-7). Unknown ids are an explicit
     /// error — deleting nothing silently would hide a bad reference.
+    /// The main file unlinks last, so a crash mid-delete leaves either
+    /// an intact profile or a recoverable backup — never a
+    /// half-removed identity whose id could be reallocated.
     pub fn delete(&self, id: &ProfileId) -> Result<(), ProfileError> {
+        if !Self::is_safe_stem(id) {
+            return Err(ProfileError::Invalid(format!(
+                "malformed profile id {:?}",
+                id.as_str()
+            )));
+        }
         let ids = self.existing_ids()?;
         if !ids.contains(id) {
             return Err(ProfileError::UnknownProfile(id.clone()));
@@ -636,19 +753,21 @@ impl ProfileStore {
         if ids.len() == 1 {
             return Err(ProfileError::LastProfile(id.clone()));
         }
-        for path in [self.main_path(id), self.backup_path(id), self.tmp_path(id)] {
+        for path in [self.tmp_path(id), self.backup_path(id), self.main_path(id)] {
             match std::fs::remove_file(&path) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(source) => return Err(ProfileError::Io { path, source }),
             }
         }
+        sync_dir(&self.root)?;
         Ok(())
     }
 
     /// The most recently selected profile, when the `active` marker
-    /// names an id whose file exists. A marker pointing at a deleted or
-    /// never-written profile reads as `None` rather than a stale id.
+    /// names an id that still has a file. A marker that is malformed
+    /// or points at a deleted or never-written profile reads as `None`
+    /// rather than a stale id.
     pub fn active(&self) -> Result<Option<ProfileId>, ProfileError> {
         let path = self.root.join(ACTIVE_FILE);
         let text = match std::fs::read_to_string(&path) {
@@ -657,7 +776,7 @@ impl ProfileStore {
             Err(source) => return Err(ProfileError::Io { path, source }),
         };
         let id = ProfileId(text.trim().to_string());
-        if self.main_path(&id).exists() {
+        if Self::is_safe_stem(&id) && self.id_has_file(&id) {
             Ok(Some(id))
         } else {
             Ok(None)
@@ -665,23 +784,55 @@ impl ProfileStore {
     }
 
     /// Record `id` as the selected profile — written like the profile
-    /// files (tmp + rename) so a crash cannot leave a torn marker.
-    /// `id` must exist.
+    /// files (tmp + flush + rename + directory fsync) so a crash cannot
+    /// leave a torn marker. `id` must be a well-formed stem with at
+    /// least one surviving file.
     pub fn set_active(&self, id: &ProfileId) -> Result<(), ProfileError> {
-        if !self.main_path(id).exists() {
+        if !Self::is_safe_stem(id) {
+            return Err(ProfileError::Invalid(format!(
+                "malformed profile id {:?}",
+                id.as_str()
+            )));
+        }
+        if !self.id_has_file(id) {
             return Err(ProfileError::UnknownProfile(id.clone()));
         }
         let tmp = self.root.join(format!("{ACTIVE_FILE}.tmp"));
-        std::fs::write(&tmp, format!("{id}\n")).map_err(|source| ProfileError::Io {
+        let mut file = std::fs::File::create(&tmp).map_err(|source| ProfileError::Io {
             path: tmp.clone(),
             source,
         })?;
+        file.write_all(format!("{id}\n").as_bytes())
+            .and_then(|()| file.sync_all())
+            .map_err(|source| ProfileError::Io {
+                path: tmp.clone(),
+                source,
+            })?;
+        drop(file);
         std::fs::rename(&tmp, self.root.join(ACTIVE_FILE)).map_err(|source| ProfileError::Io {
             path: self.root.join(ACTIVE_FILE),
             source,
         })?;
+        sync_dir(&self.root)?;
         Ok(())
     }
+}
+
+/// Flush the directory itself so the renames and removals above
+/// survive a power loss. Directory fsync is a Unix facility; on other
+/// platforms this is a no-op and the file-level `sync_all` calls still
+/// stand.
+fn sync_dir(dir: &Path) -> Result<(), ProfileError> {
+    #[cfg(unix)]
+    std::fs::File::open(dir)
+        .and_then(|d| d.sync_all())
+        .map_err(|source| ProfileError::Io {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
 }
 
 /// Read, size-bound, parse and validate one profile file. The reason
