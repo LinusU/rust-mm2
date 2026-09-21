@@ -18,10 +18,11 @@ use mm2_app::contracts::{self, ImpactFilter};
 use mm2_app::session::{self, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::traffic::{AmbientCar, AmbientTraffic};
 use mm2_assets::Vfs;
+use mm2_formats::bai::Side;
 use mm2_game::{
-    DevOverrides, EventRef, EventTableKind, ImpactEvent, LaneCursor, LaneId, Mm2Vfs, Player,
-    PlayerControl, PlayerId, PlayerVehicle, Session, SessionConfig, SessionMode, SessionPhase,
-    SpawnPose, WorldMode, advance_session_tick, despawn_session_entities,
+    DevOverrides, EventRef, EventTableKind, ImpactEvent, LaneCursor, LaneId, LaneKind, Mm2Vfs,
+    Player, PlayerControl, PlayerId, PlayerVehicle, Session, SessionConfig, SessionMode,
+    SessionPhase, SpawnPose, WorldMode, advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::{VehicleConfig, VehiclePlugin};
 
@@ -51,91 +52,105 @@ fn push_f32s(d: &mut Vec<u8>, v: &[f32]) {
 /// chained through one intersection at the origin — road 0 spans
 /// z −30..−4 (end joins the intersection), road 1 spans z 4..30
 /// (start joins it). One vehicle lane + one sidewalk per side.
+///
+/// `r0_end`/`r1_start` are the authored `vehicleRule` codes on the two
+/// junction-connected ends: `r0_end` rules the forward approach into
+/// the junction (road 0's right lane), `r1_start` the backward
+/// approach (road 1's left lane). `bai_bytes` authors `NeverStop` so
+/// the plain fixture keeps its free-flow semantics.
 fn bai_bytes() -> Vec<u8> {
+    bai_with_rules(3, 3)
+}
+
+fn bai_with_rules(r0_end: u16, r1_start: u16) -> Vec<u8> {
     let mut d = Vec::new();
     d.extend_from_slice(b"CAI1");
     d.extend_from_slice(&1u16.to_le_bytes());
     d.extend_from_slice(&2u16.to_le_bytes());
 
-    let write_road =
-        |d: &mut Vec<u8>, id: u16, z0: f32, z1: f32, end: (u32, u32), start: (u32, u32)| {
-            d.extend_from_slice(&id.to_le_bytes());
-            d.extend_from_slice(&2u16.to_le_bytes()); // nSections
-            d.extend_from_slice(&0u16.to_le_bytes()); // flags
-            d.extend_from_slice(&1u16.to_le_bytes()); // nRooms
-            d.extend_from_slice(&1u16.to_le_bytes()); // room 1
-            d.extend_from_slice(&7.5f32.to_le_bytes()); // half_width
-            d.extend_from_slice(&15.0f32.to_le_bytes()); // base_speed
-            for side in [1f32, -1f32] {
-                for n in [1u16, 0, 0, 1, 0] {
-                    // lanes, trams, trains, sidewalks, ambientTypes
-                    d.extend_from_slice(&n.to_le_bytes());
-                }
-                for _ in 0..2 {
-                    for s in [0f32, (z1 - z0).abs()] {
-                        d.extend_from_slice(&s.to_le_bytes());
-                    }
-                }
-                for e in [5.0f32, 9.5] {
-                    d.extend_from_slice(&e.to_le_bytes());
-                }
-                d.extend_from_slice(&[0xCDu8; 40]);
-                for off in [3.75f32 * side, 8.5f32 * side] {
-                    for z in [z0, z1] {
-                        push_v3(d, [off, 0.0, z]);
-                    }
-                }
-                for z in [z0, z1] {
-                    push_v3(d, [7.5 * side, 0.0, z]);
-                }
-                for z in [z0, z1] {
-                    push_v3(d, [9.5 * side, 0.0, z]);
+    let write_road = |d: &mut Vec<u8>,
+                      id: u16,
+                      z0: f32,
+                      z1: f32,
+                      end: (u32, u32, u16),
+                      start: (u32, u32, u16)| {
+        d.extend_from_slice(&id.to_le_bytes());
+        d.extend_from_slice(&2u16.to_le_bytes()); // nSections
+        d.extend_from_slice(&0u16.to_le_bytes()); // flags
+        d.extend_from_slice(&1u16.to_le_bytes()); // nRooms
+        d.extend_from_slice(&1u16.to_le_bytes()); // room 1
+        d.extend_from_slice(&7.5f32.to_le_bytes()); // half_width
+        d.extend_from_slice(&15.0f32.to_le_bytes()); // base_speed
+        for side in [1f32, -1f32] {
+            for n in [1u16, 0, 0, 1, 0] {
+                // lanes, trams, trains, sidewalks, ambientTypes
+                d.extend_from_slice(&n.to_le_bytes());
+            }
+            for _ in 0..2 {
+                for s in [0f32, (z1 - z0).abs()] {
+                    d.extend_from_slice(&s.to_le_bytes());
                 }
             }
-            for s in [0f32, (z1 - z0).abs()] {
-                d.extend_from_slice(&s.to_le_bytes());
+            for e in [5.0f32, 9.5] {
+                d.extend_from_slice(&e.to_le_bytes());
+            }
+            d.extend_from_slice(&[0xCDu8; 40]);
+            for off in [3.75f32 * side, 8.5f32 * side] {
+                for z in [z0, z1] {
+                    push_v3(d, [off, 0.0, z]);
+                }
             }
             for z in [z0, z1] {
-                push_v3(d, [0.0, 0.0, z]);
+                push_v3(d, [7.5 * side, 0.0, z]);
             }
-            for _ in 0..2 {
-                push_v3(d, [1.0, 0.0, 0.0]);
+            for z in [z0, z1] {
+                push_v3(d, [9.5 * side, 0.0, z]);
             }
-            for _ in 0..2 {
-                push_v3(d, [0.0, 1.0, 0.0]);
-            }
-            for _ in 0..2 {
-                push_v3(d, [0.0, 0.0, 1.0]);
-            }
-            for _ in 0..2 {
-                push_v3(d, [0.0, 0.0, 1.0]);
-            }
-            // The file stores `end` first, then `start`.
-            for (intersection, road_index) in [end, start] {
-                d.extend_from_slice(&intersection.to_le_bytes());
-                d.extend_from_slice(&0xCDCDu16.to_le_bytes());
-                d.extend_from_slice(&0u16.to_le_bytes());
-                d.extend_from_slice(&0u16.to_le_bytes());
-                d.extend_from_slice(&road_index.to_le_bytes());
-                push_v3(d, [0.0; 3]);
-                push_v3(d, [0.0; 3]);
-            }
-        };
+        }
+        for s in [0f32, (z1 - z0).abs()] {
+            d.extend_from_slice(&s.to_le_bytes());
+        }
+        for z in [z0, z1] {
+            push_v3(d, [0.0, 0.0, z]);
+        }
+        for _ in 0..2 {
+            push_v3(d, [1.0, 0.0, 0.0]);
+        }
+        for _ in 0..2 {
+            push_v3(d, [0.0, 1.0, 0.0]);
+        }
+        for _ in 0..2 {
+            push_v3(d, [0.0, 0.0, 1.0]);
+        }
+        for _ in 0..2 {
+            push_v3(d, [0.0, 0.0, 1.0]);
+        }
+        // The file stores `end` first, then `start`.
+        for (intersection, road_index, rule) in [end, start] {
+            d.extend_from_slice(&intersection.to_le_bytes());
+            d.extend_from_slice(&0xCDCDu16.to_le_bytes());
+            d.extend_from_slice(&rule.to_le_bytes());
+            d.extend_from_slice(&0u16.to_le_bytes());
+            d.extend_from_slice(&road_index.to_le_bytes());
+            push_v3(d, [0.0; 3]);
+            push_v3(d, [0.0; 3]);
+        }
+    };
     write_road(
         &mut d,
         0,
         -30.0,
         -4.0,
-        (0, 0),
-        (0, mm2_formats::bai::END_FILL),
+        (0, 0, r0_end),
+        (0, mm2_formats::bai::END_FILL, 0),
     );
     write_road(
         &mut d,
         1,
         4.0,
         30.0,
-        (0, mm2_formats::bai::END_FILL),
-        (0, 1),
+        (0, mm2_formats::bai::END_FILL, 0),
+        (0, 1, r1_start),
     );
 
     d.extend_from_slice(&0u16.to_le_bytes()); // intersection id
@@ -945,4 +960,301 @@ fn maintain_ambient_holds_during_pause() {
         .transition(SessionPhase::Playing)
         .expect("a paused session resumes");
     run(&mut app, 60);
+}
+
+// ---------------------------------------------------------------------------
+// F10-B.2 junction rules — authored vehicleRule gates on the lane end
+// ---------------------------------------------------------------------------
+
+/// The `[Density] 0.0` install with caller-authored `vehicleRule`
+/// codes on the junction's two approach ends — manually spawned
+/// followers are the only cars, so junction behaviour is deterministic.
+fn junction_install(r0_end: u16, r1_start: u16) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(d, "city/test.psdl", synthetic_psdl());
+    write(d, "city/test.bai", bai_with_rules(r0_end, r1_start));
+    write(d, "city/test.aimap", density0_aimap());
+    ambient_assets(d, "va_test_a");
+    ambient_assets(d, "va_test_b");
+    tmp
+}
+
+/// The fixture's single vehicle lane of a road side.
+fn lane(road: u16, side: Side) -> LaneId {
+    LaneId {
+        road,
+        side,
+        index: 0,
+        kind: LaneKind::Vehicle,
+    }
+}
+
+/// Authored `StopSign` on both junction approaches: two followers
+/// converging from opposite directions must each stand at their stop
+/// line and take the junction in arrival order — the documented
+/// "longest waiting vehicle drives first".
+#[test]
+fn a_stop_sign_serialises_competing_approaches_in_arrival_order() {
+    let install = junction_install(0, 0);
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+
+    let lane_r0 = lane(0, Side::Right);
+    let lane_r1 = lane(1, Side::Left);
+    // A starts much closer to its stop line — it must win the junction.
+    let a = spawn_follower(&mut app, lane_r0, 20.0, 15.0);
+    let b = spawn_follower(&mut app, lane_r1, 8.0, 15.0);
+
+    let (mut a_stood, mut b_stood) = (false, false);
+    let (mut a_crossed, mut b_crossed) = (usize::MAX, usize::MAX);
+    let mut held_seen = 0usize;
+    for tick in 0..1200 {
+        app.update();
+        held_seen = held_seen.max(app.world().resource::<AmbientTraffic>().junction_held);
+        if let Some((_, speed, cur)) = car_state(&mut app, a) {
+            if cur.lane == lane_r0 {
+                if cur.along >= 22.0 && speed <= 1.0 {
+                    a_stood = true;
+                }
+            } else if a_crossed == usize::MAX {
+                a_crossed = tick;
+            }
+        }
+        if let Some((_, speed, cur)) = car_state(&mut app, b) {
+            if cur.lane == lane_r1 {
+                if cur.along >= 22.0 && speed <= 1.0 {
+                    b_stood = true;
+                }
+            } else if b_crossed == usize::MAX {
+                b_crossed = tick;
+            }
+        }
+        if a_crossed != usize::MAX && b_crossed != usize::MAX {
+            break;
+        }
+    }
+    assert!(a_stood, "A never stood at its stop line");
+    assert!(b_stood, "B never stood at its stop line");
+    assert!(held_seen >= 1, "no car ever reported junction-held");
+    assert!(
+        a_crossed < b_crossed,
+        "the first arrival must take the junction first: {a_crossed}/{b_crossed}"
+    );
+}
+
+/// Authored `TrafficLight` on both junction approaches: the two-member
+/// signal cycle admits one road at a time — a car may only transfer
+/// while its own road holds the phase green.
+#[test]
+fn a_traffic_light_admits_only_the_green_member_road() {
+    let install = junction_install(1, 1);
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    {
+        // A quick cycle keeps the window bounded: two-second greens,
+        // half-second all-red.
+        let mut t = app.world_mut().resource_mut::<AmbientTraffic>();
+        t.junctions.policy.green_ticks = 120;
+        t.junctions.policy.clear_ticks = 60;
+    }
+    let lane_r0 = lane(0, Side::Right);
+    let lane_r1 = lane(1, Side::Left);
+    let a = spawn_follower(&mut app, lane_r0, 20.0, 15.0);
+    let b = spawn_follower(&mut app, lane_r1, 20.0, 15.0);
+
+    // Two fixed drive steps run per update, so the transfer tick's
+    // phase is the current or previous green read.
+    let mut prev_green = None;
+    let mut crossed = [false; 2];
+    for _ in 0..2000 {
+        app.update();
+        let green = {
+            let t = app.world().resource::<AmbientTraffic>();
+            t.junctions.green_road(t.graph(), 0)
+        };
+        for (car, approach, road) in [(a, lane_r0, 0u16), (b, lane_r1, 1u16)] {
+            let i = road as usize;
+            if crossed[i] {
+                continue;
+            }
+            match car_state(&mut app, car) {
+                Some((_, _, cur)) if cur.lane == approach => {}
+                Some(_) => {
+                    assert!(
+                        green == Some(road) || prev_green == Some(road),
+                        "road-{road} approach crossed on {green:?} (prev {prev_green:?})"
+                    );
+                    crossed[i] = true;
+                }
+                None => panic!("car despawned before an observed transfer"),
+            }
+        }
+        prev_green = green;
+        if crossed == [true, true] {
+            break;
+        }
+    }
+    assert_eq!(crossed, [true, true], "both approaches must get a green");
+}
+
+/// A held red proves the gate closes, not just that greens admit:
+/// spawn the follower at the stop line while the *other* member holds
+/// green — its own red is then guaranteed for at least that green's
+/// length — and it must stand until its own road's phase comes.
+#[test]
+fn a_red_window_holds_the_approach_until_its_road_greens() {
+    let install = junction_install(1, 1);
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    {
+        // Long phases so the guaranteed red comfortably outlasts the
+        // decel ramp from spawn speed to a standstill at the line.
+        let mut t = app.world_mut().resource_mut::<AmbientTraffic>();
+        t.junctions.policy.green_ticks = 480;
+        t.junctions.policy.clear_ticks = 120;
+    }
+    let lane_r0 = lane(0, Side::Right);
+
+    // Wait for road 1's green — road 0 is then red for the whole phase.
+    assert!(
+        run_until(&mut app, 1500, |a| {
+            let t = a.world().resource::<AmbientTraffic>();
+            t.junctions.green_road(t.graph(), 0) == Some(1)
+        }),
+        "road 1 never held green"
+    );
+    let car = spawn_follower(&mut app, lane_r0, 22.0, 15.0);
+
+    // On red the car must never pass the stop line (along 23.5 → z
+    // −6.5) and must brake down to a standstill at it — `junction_speed`
+    // decelerates at the policy rate rather than snapping to zero, so
+    // the hold is judged by position, not by an instant speed of 0.
+    let mut red_ticks = 0usize;
+    let mut stood_at_line = false;
+    let mut released = false;
+    for _ in 0..600 {
+        app.update();
+        let green = {
+            let t = app.world().resource::<AmbientTraffic>();
+            t.junctions.green_road(t.graph(), 0)
+        };
+        let Some((pos, speed, cur)) = car_state(&mut app, car) else {
+            break;
+        };
+        if cur.lane != lane_r0 {
+            released = true;
+            break;
+        }
+        if green != Some(0) {
+            red_ticks += 1;
+            assert!(pos.z < -6.4, "crossed the stop line on red: {pos:?}");
+            stood_at_line |= cur.along >= 23.0 && speed <= 1.0;
+        }
+    }
+    assert!(
+        red_ticks >= 30,
+        "spawned inside road 1's green, road 0's red ended after {red_ticks} ticks"
+    );
+    assert!(stood_at_line, "the held car never stood at its stop line");
+    assert!(released, "the held car never got its green");
+}
+
+/// The authored `AlwaysStop` end never releases: the follower brakes
+/// to the stop line and stands while the junction's other approach —
+/// authored `NeverStop` — flows through freely. Per-approach rules at
+/// a mixed junction, the retail norm.
+#[test]
+fn an_always_stop_end_never_releases_while_the_never_stop_flows() {
+    let install = junction_install(2, 3);
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+
+    let lane_r0 = lane(0, Side::Right);
+    let lane_r1 = lane(1, Side::Left);
+    let held = spawn_follower(&mut app, lane_r0, 18.0, 15.0);
+    let free = spawn_follower(&mut app, lane_r1, 10.0, 15.0);
+
+    let mut free_crossed = false;
+    let mut held_seen = 0usize;
+    for _ in 0..360 {
+        app.update();
+        held_seen = held_seen.max(app.world().resource::<AmbientTraffic>().junction_held);
+        let (pos, _, cur) = car_state(&mut app, held).expect("the held car despawned");
+        assert!(
+            pos.z < -4.0,
+            "an AlwaysStop car entered the junction: {pos:?}"
+        );
+        assert_eq!(cur.lane, lane_r0, "an AlwaysStop car transferred");
+        if car_state(&mut app, free).is_none_or(|(_, _, c)| c.lane != lane_r1) {
+            free_crossed = true;
+        }
+    }
+    assert!(free_crossed, "the NeverStop approach never crossed");
+    assert!(held_seen >= 1, "the held car never reported junction-held");
+    let (_, speed, cur) = car_state(&mut app, held).unwrap();
+    assert!(
+        speed <= 1.0 && cur.along >= 23.0,
+        "not standing at the line: {cur:?} v={speed}"
+    );
+}
+
+/// F10-AC04's junction leg: a transfer that would land inside a live
+/// blocker is rejected — the car holds at its lane end and retries
+/// rather than materialising inside a junction queue.
+#[test]
+fn an_occupied_exit_lane_holds_the_transfer_at_the_lane_end() {
+    let install = junction_install(3, 3);
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+
+    let lane_r0 = lane(0, Side::Right);
+    // Parked off the follower's corridor (3.75 m lateral, beyond the
+    // 2.4 m half-width) but inside the entry clearance of the
+    // r1-right landing — only the transfer check can see it.
+    let blocker = app
+        .world_mut()
+        .spawn((
+            Player {
+                id: PlayerId(92),
+                control: PlayerControl::Ai,
+            },
+            Position(Vec3::new(0.0, 0.0, 2.0)),
+        ))
+        .id();
+    let car = spawn_follower(&mut app, lane_r0, 15.0, 15.0);
+
+    for _ in 0..240 {
+        app.update();
+        let (pos, _, cur) = car_state(&mut app, car).expect("the held car despawned");
+        assert_eq!(cur.lane, lane_r0, "transferred into an occupied exit");
+        assert!(pos.z < -3.0, "entered the junction box: {pos:?}");
+        assert!(
+            pos.distance(Vec3::new(0.0, 0.0, 2.0)) > 3.5,
+            "materialised inside the blocker: {pos:?}"
+        );
+    }
+    // Clearing the exit releases the turn.
+    app.world_mut().despawn(blocker);
+    assert!(
+        run_until(&mut app, 240, |a| {
+            car_state(a, car).is_none_or(|(_, _, c)| c.lane != lane_r0)
+        }),
+        "the freed exit was never taken"
+    );
 }

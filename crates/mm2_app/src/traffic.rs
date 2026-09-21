@@ -22,13 +22,24 @@
 //! forward corridor senses every `Player` participant and other
 //! ambient cars, and the follow law brakes to a bounded stop behind
 //! the nearest blocker — queueing, never shoving — and resumes when
-//! it clears. There is still no intersection controller, signal or
-//! right-of-way handling, lane-change passing or stuck recovery beyond
-//! the wait-and-recycle bound (F10-B/F10-C remainder), and dynamic
-//! car-vs-player crash fidelity (AC03) is not claimed — the follower
-//! stops short, nothing more.
+//! it clears. Lane-change passing and stuck recovery beyond the
+//! wait-and-recycle bound stay open (F10-B/F10-C remainder), and
+//! dynamic car-vs-player crash fidelity (AC03) is not claimed — the
+//! follower stops short, nothing more.
+//!
+//! F10-B.2 adds the junction controller: the authored `vehicleRule`
+//! on each road end (BAI) gates the lane transfer — `NeverStop`
+//! approaches flow, `TrafficLight` approaches wait for their road's
+//! phase in a deterministic per-junction signal cycle, `StopSign`
+//! approaches queue first-come-first-served through a registered
+//! dwell, and `AlwaysStop` never opens (the two last are unused on
+//! retail data). A transfer that would land inside a live car or
+//! participant reverts to the lane end and retries — cars never
+//! materialise inside a junction queue. Signal timing, dwells,
+//! stop-line inset and entry clearance are designed values (the
+//! original's are unverified, UNK-12).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -38,10 +49,11 @@ use mm2_assets::Vfs;
 use mm2_formats::aimap::Aimap;
 use mm2_formats::veh::AiVehicleData;
 use mm2_game::{
-    AmbientRoster, AmbientSpec, AuthorityRole, FollowPolicy, LaneAdvance, LaneCursor, LaneId,
-    NavGraph, NavOverrides, NavRng, ObjectIdentity, Player, Session, SessionConfig, SessionEntity,
-    SessionPhase, SpawnDirective, SpawnDraw, SpawnPolicy, WorldMode, advance_lane_cursor,
-    corridor_gap, draw_spawn, eligible_lanes, follow_speed, plan_ambient,
+    AmbientRoster, AmbientSpec, AuthorityRole, FollowPolicy, JunctionGate, Junctions, LaneAdvance,
+    LaneCursor, LaneId, NavGraph, NavOverrides, NavRng, ObjectIdentity, Player, Session,
+    SessionConfig, SessionEntity, SessionPhase, SpawnDirective, SpawnDraw, SpawnPolicy, WorldMode,
+    advance_lane_cursor, corridor_gap, draw_spawn, eligible_lanes, follow_speed, junction_speed,
+    plan_ambient,
 };
 use tracing::{info, warn};
 
@@ -87,6 +99,13 @@ pub struct AmbientTraffic {
     /// Cars currently held at a stop behind a corridor blocker —
     /// refreshed every `drive_ambient` tick.
     pub queued: usize,
+    /// Cars standing at a closed junction gate's stop line (signal
+    /// red, stop-sign dwell/queue, `AlwaysStop`) — refreshed every
+    /// `drive_ambient` tick.
+    pub junction_held: usize,
+    /// The per-junction right-of-way/signal controller (F10-B.2) —
+    /// session-scoped like the plan it polices.
+    pub junctions: Junctions,
     /// Planner/setup problems, reported honestly.
     pub issues: Vec<String>,
 }
@@ -209,6 +228,8 @@ pub fn load_ambient_traffic(
         unspawnable: plan.unspawnable,
         dropped: plan.dropped,
         queued: 0,
+        junction_held: 0,
+        junctions: Junctions::default(),
         issues: plan
             .issues
             .iter()
@@ -428,7 +449,16 @@ pub fn drive_ambient(
     let mut blockers: Vec<(Entity, Vec3)> = players.iter().map(|(e, p)| (e, p.0)).collect();
     blockers.extend(cars.iter().map(|(e, _, p, _, _, _)| (e, p.0)));
     let follow = FollowPolicy::default();
+    let jpolicy = traffic.junctions.policy;
+    // The controller's clock ticks with the driver, then sheds queue
+    // entries whose cars the recycler collected since last tick.
+    traffic.junctions.advance_tick();
+    {
+        let live: BTreeSet<Entity> = cars.iter().map(|(e, ..)| e).collect();
+        traffic.junctions.retain(&live);
+    }
     let mut queued = 0usize;
+    let mut junction_held = 0usize;
     for (entity, mut car, mut position, mut rotation, mut velocity, mut transform) in
         cars.iter_mut()
     {
@@ -449,35 +479,87 @@ pub fn drive_ambient(
         if gap.is_some() && car.speed <= follow.held_speed {
             queued += 1;
         }
-        let ds = car.speed.max(0.0) * dt;
-        let step = advance_lane_cursor(
+        // Junction gate (F10-B.2): the authored `vehicleRule` at the
+        // arc's downstream end decides whether the car may pass the
+        // lane end this tick — signal red, stop-sign queue/dwell and
+        // `AlwaysStop` close it, everything else opens it. A closed
+        // gate brakes to the stop line and never lets the cursor past
+        // it; a stopped stop-sign car registers in the FCFS queue.
+        let dist_to_stop = traffic
+            .graph
+            .lane(car.cursor.lane)
+            .map(|l| l.length - jpolicy.stop_inset - car.cursor.along)
+            .unwrap_or(f32::MAX);
+        let gate = traffic.junctions.gate(
             &traffic.graph,
-            &traffic.overrides,
-            &mut car.cursor,
-            ds,
-            &mut traffic.rng,
+            car.cursor.lane,
+            entity,
+            dist_to_stop <= 0.0,
+            car.speed <= follow.held_speed,
         );
+        car.speed = junction_speed(car.speed, dist_to_stop, gate, dt, &jpolicy);
+        if gate == JunctionGate::Closed && dist_to_stop <= 0.0 && car.speed <= follow.held_speed {
+            junction_held += 1;
+        }
+        let mut ds = car.speed.max(0.0) * dt;
+        if gate == JunctionGate::Closed {
+            ds = ds.min(dist_to_stop.max(0.0));
+        }
+        let previous = car.cursor;
+        let step = if ds > 0.0 {
+            advance_lane_cursor(
+                &traffic.graph,
+                &traffic.overrides,
+                &mut car.cursor,
+                ds,
+                &mut traffic.rng,
+            )
+        } else {
+            LaneAdvance::Along
+        };
         if step == LaneAdvance::DeadEnd {
             traffic.dead_ends += 1;
+            traffic.junctions.depart(entity);
             commands.entity(entity).despawn();
             continue;
         }
         if step == LaneAdvance::Turned {
-            if let Some(road) = traffic.graph.road(car.cursor.lane.road) {
-                car.target_speed = traffic.overrides.effective_speed(road);
+            // Occupied-transfer check (F10-AC04's junction leg): a
+            // landing inside `enter_clearance` of a live blocker would
+            // materialise the car inside a junction queue — revert to
+            // the lane end and retry next tick.
+            let landing_occupied = traffic
+                .graph
+                .sample_lane(car.cursor.lane, car.cursor.along)
+                .is_some_and(|s| {
+                    let p = Vec3::from(s.position);
+                    blockers
+                        .iter()
+                        .any(|(e, b)| *e != entity && b.distance(p) < jpolicy.enter_clearance)
+                });
+            if landing_occupied {
+                car.cursor = previous;
+                car.speed = 0.0;
+            } else {
+                traffic.junctions.depart(entity);
+                if let Some(road) = traffic.graph.road(car.cursor.lane.road) {
+                    car.target_speed = traffic.overrides.effective_speed(road);
+                }
+                // Corner braking stand-in: an intersection turn is
+                // never taken at full road speed.
+                car.speed = car.speed.min(follow.turn_speed);
             }
-            // Corner braking stand-in: an intersection turn is never
-            // taken at full road speed.
-            car.speed = car.speed.min(follow.turn_speed);
         }
         let Some(sample) = traffic.graph.sample_lane(car.cursor.lane, car.cursor.along) else {
             traffic.dead_ends += 1;
+            traffic.junctions.depart(entity);
             commands.entity(entity).despawn();
             continue;
         };
         let pos = Vec3::from(sample.position);
         if !pos.is_finite() {
             traffic.dead_ends += 1;
+            traffic.junctions.depart(entity);
             commands.entity(entity).despawn();
             continue;
         }
@@ -496,6 +578,7 @@ pub fn drive_ambient(
         *transform = Transform::from_translation(pos).with_rotation(rot);
     }
     traffic.queued = queued;
+    traffic.junction_held = junction_held;
 }
 
 /// Keep the population at the plan's target: despawn cars that left
@@ -538,6 +621,7 @@ pub fn maintain_ambient(
     for (entity, _, pos) in &mut cars {
         if pos.0.distance_squared(player_at) > recycle2 {
             traffic.recycled += 1;
+            traffic.junctions.depart(entity);
             commands.entity(entity).despawn();
         } else {
             active += 1;

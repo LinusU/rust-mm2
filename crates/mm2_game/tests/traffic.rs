@@ -3,6 +3,7 @@
 //! pedestrian-only sides, the player bubble, unspawnable classes and
 //! plan bounds (F10-AC01's data slice).
 
+use bevy::prelude::Entity;
 use mm2_formats::bai::{Bai, Culling, Intersection, Road, RoadEnd, RoadSection, RoadSide, Side};
 use mm2_formats::veh::AiVehicleData;
 use mm2_game::*;
@@ -757,4 +758,197 @@ fn follow_speed_brakes_to_the_gap_and_resumes() {
     );
     // Corridor clear again: the car pulls away.
     assert!(follow_speed(0.0, 15.0, None, dt, &p) > 0.0);
+}
+
+// ---------- junction rules (F10-B.2) ----------
+
+fn car(n: u32) -> Entity {
+    Entity::from_raw_u32(n).expect("a test entity")
+}
+
+fn connected_rule(intersection: u32, road_index: u32, rule: u16) -> RoadEnd {
+    RoadEnd {
+        vehicle_rule_code: rule,
+        ..connected(intersection, road_index)
+    }
+}
+
+/// `chain` with caller-authored `vehicleRule` codes on the two
+/// junction-connected ends — `r0_end` rules road 0's forward approach,
+/// `r1_start` rules road 1's backward approach.
+fn chain_with_rules(r0_end: u16, r1_start: u16) -> NavGraph {
+    let r0 = road_full(
+        0,
+        &[[0.0, 0.0, 0.0], [0.0, 0.0, 100.0]],
+        1,
+        dead_end(),
+        connected_rule(0, 0, r0_end),
+    );
+    let r1 = road_full(
+        1,
+        &[[0.0, 0.0, 100.0], [0.0, 0.0, 200.0]],
+        1,
+        connected_rule(0, 1, r1_start),
+        dead_end(),
+    );
+    NavGraph::build(&bai_full(
+        vec![r0, r1],
+        vec![Intersection {
+            id: 0,
+            room: 1,
+            center: [0.0, 0.0, 100.0],
+            roads: vec![0, 1],
+        }],
+    ))
+    .graph
+}
+
+#[test]
+fn junction_gate_binds_the_authored_end_rule() {
+    let r0 = lane_id(0, Side::Right, 0);
+    let r1 = lane_id(1, Side::Left, 0);
+
+    // NeverStop on both approaches: the gate is inert at any distance.
+    let g = chain_with_rules(3, 3);
+    let mut j = Junctions::default();
+    assert_eq!(j.gate(&g, r0, car(1), false, false), JunctionGate::Open);
+    assert_eq!(j.gate(&g, r1, car(2), true, true), JunctionGate::Open);
+
+    // AlwaysStop never releases, however long the car stands.
+    let g = chain_with_rules(2, 3);
+    let mut j = Junctions::default();
+    assert_eq!(j.gate(&g, r0, car(1), false, false), JunctionGate::Closed);
+    for _ in 0..1000 {
+        j.advance_tick();
+    }
+    assert_eq!(j.gate(&g, r0, car(1), true, true), JunctionGate::Closed);
+
+    // An unconnected end carries no junction at all — the approach
+    // lookup reports it rather than inventing a rule.
+    assert_eq!(Junctions::approach(&g, lane_id(0, Side::Left, 0)), None);
+}
+
+#[test]
+fn a_stop_sign_admits_the_first_arrival_after_its_dwell() {
+    // StopSign on both approaches into the same junction.
+    let g = chain_with_rules(0, 0);
+    let mut j = Junctions::default();
+    let dwell = j.policy.stop_dwell_ticks;
+    let r0 = lane_id(0, Side::Right, 0);
+    let r1 = lane_id(1, Side::Left, 0);
+
+    // Not at the line: closed, and not registered — a car that brakes
+    // short of the stop takes no place in the queue.
+    assert_eq!(j.gate(&g, r0, car(1), false, false), JunctionGate::Closed);
+    assert_eq!(j.waiting(), 0);
+
+    // A stands at its line and registers; the dwell still holds it.
+    j.advance_tick();
+    assert_eq!(j.gate(&g, r0, car(1), true, true), JunctionGate::Closed);
+    assert_eq!(j.waiting(), 1);
+
+    // B arrives on the other approach after A and queues behind it.
+    j.advance_tick();
+    assert_eq!(j.gate(&g, r1, car(2), true, true), JunctionGate::Closed);
+    assert_eq!(j.waiting(), 2);
+
+    // A's dwell elapses → A alone may go; B stays closed — FCFS is
+    // one-at-a-time, not simultaneous.
+    for _ in 0..dwell {
+        j.advance_tick();
+    }
+    assert_eq!(j.gate(&g, r0, car(1), true, true), JunctionGate::Open);
+    assert_eq!(j.gate(&g, r1, car(2), true, true), JunctionGate::Closed);
+
+    // A departs: B heads the queue and its own dwell has long passed.
+    j.depart(car(1));
+    assert_eq!(j.gate(&g, r1, car(2), true, true), JunctionGate::Open);
+
+    // A stale entry never holds the queue — a recycled car's id is
+    // dropped by `retain` against the live set.
+    j.depart(car(2));
+    assert_eq!(j.waiting(), 0);
+    j.gate(&g, r0, car(9), true, true);
+    assert_eq!(j.waiting(), 1);
+    j.retain(&std::collections::BTreeSet::from([car(1), car(2)]));
+    assert_eq!(j.waiting(), 0);
+}
+
+#[test]
+fn a_traffic_light_cycles_one_member_road_at_a_time() {
+    // TrafficLight on both approaches → a two-member signal cycle.
+    let g = chain_with_rules(1, 1);
+    assert_eq!(Junctions::signal_members(&g, 0), vec![0, 1]);
+    let mut j = Junctions::default();
+    j.policy.green_ticks = 10;
+    j.policy.clear_ticks = 5;
+    let r0 = lane_id(0, Side::Right, 0);
+    let r1 = lane_id(1, Side::Left, 0);
+
+    // Sweep a full 30-tick cycle: each member holds a contiguous
+    // green, the all-red slice closes both approaches, and no tick
+    // opens both.
+    let mut seen_green = [false, false];
+    let mut saw_all_red = false;
+    for _ in 0..30 {
+        match j.green_road(&g, 0) {
+            Some(0) => {
+                seen_green[0] = true;
+                assert_eq!(j.gate(&g, r0, car(1), true, true), JunctionGate::Open);
+                assert_eq!(j.gate(&g, r1, car(2), true, true), JunctionGate::Closed);
+            }
+            Some(1) => {
+                seen_green[1] = true;
+                assert_eq!(j.gate(&g, r1, car(2), true, true), JunctionGate::Open);
+                assert_eq!(j.gate(&g, r0, car(1), true, true), JunctionGate::Closed);
+            }
+            other => {
+                assert_eq!(other, None, "only member roads may hold green");
+                saw_all_red = true;
+                assert_eq!(j.gate(&g, r0, car(1), true, true), JunctionGate::Closed);
+                assert_eq!(j.gate(&g, r1, car(2), true, true), JunctionGate::Closed);
+            }
+        }
+        j.advance_tick();
+    }
+    assert_eq!(seen_green, [true, true], "both members must cycle");
+    assert!(saw_all_red, "the clearance slice must close every road");
+
+    // The retail-typical mixed junction: r1's approach authors
+    // NeverStop — the signal cycles the lit member alone while the
+    // free approach ignores the phase entirely.
+    let g = chain_with_rules(1, 3);
+    assert_eq!(Junctions::signal_members(&g, 0), vec![0]);
+    let mut j = Junctions::default();
+    j.policy.green_ticks = 10;
+    j.policy.clear_ticks = 5;
+    let mut lit_open = 0;
+    let mut lit_closed = 0;
+    for _ in 0..30 {
+        match j.gate(&g, r0, car(1), true, true) {
+            JunctionGate::Open => lit_open += 1,
+            JunctionGate::Closed => lit_closed += 1,
+        }
+        assert_eq!(j.gate(&g, r1, car(2), true, true), JunctionGate::Open);
+        j.advance_tick();
+    }
+    assert!(lit_open > 0 && lit_closed > 0, "{lit_open}/{lit_closed}");
+}
+
+#[test]
+fn junction_speed_brakes_to_the_stop_line_and_never_accelerates() {
+    let p = JunctionPolicy::default();
+    let dt = 1.0 / 120.0;
+    // An open gate is inert.
+    assert_eq!(junction_speed(15.0, 1.0, JunctionGate::Open, dt, &p), 15.0);
+    // Far out the ramp allows more than the car's speed — it keeps
+    // it, never gains.
+    assert_eq!(junction_speed(2.0, 30.0, JunctionGate::Closed, dt, &p), 2.0);
+    // Faster than the ramp: bleeds off at `decel`, clamped at the ramp.
+    let v = junction_speed(10.0, 5.0, JunctionGate::Closed, dt, &p);
+    assert!((v - (10.0 - 9.0 / 120.0)).abs() < 1.0e-6, "{v}");
+    // At and past the line the ramp is zero — the car stands.
+    assert_eq!(junction_speed(0.05, 0.0, JunctionGate::Closed, dt, &p), 0.0);
+    let v = junction_speed(3.0, -1.0, JunctionGate::Closed, dt, &p);
+    assert!((v - (3.0 - 9.0 / 120.0)).abs() < 1.0e-6, "{v}");
 }

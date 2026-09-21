@@ -28,12 +28,14 @@
 //! ambient population bound and bubble distances are unverified, so
 //! [`SpawnPolicy`]'s defaults are designed values, not recovered ones.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
+use bevy::prelude::Entity;
+use mm2_formats::bai::VehicleRule;
 use mm2_formats::veh::AiVehicleData;
 
-use crate::nav::{LaneId, LaneSample, NavGraph, NavOverrides, NavRng};
+use crate::nav::{ArcEnd, LaneId, LaneSample, NavGraph, NavOverrides, NavRng};
 
 /// One authored ambient class — an `[Ambient Types/Density]` row plus
 /// its decoded tuning.
@@ -606,4 +608,286 @@ pub fn follow_speed(
     };
     let dv = (desired - speed).clamp(-policy.decel * dt, policy.accel * dt);
     (speed + dv).max(0.0)
+}
+
+// ---------- junction rules (F10-B.2) ----------
+
+/// Signal and right-of-way policy constants for the junction
+/// controller. The rule *kinds* are authored — the BAI `vehicleRule`
+/// code on every road end (`mm2_formats::bai::RoadEnd::vehicle_rule`)
+/// documents `StopSign` ("longest waiting vehicle drives first"),
+/// `TrafficLight` ("one road at a time"), `AlwaysStop` and
+/// `NeverStop`. The timing and distance values are designed: the
+/// original's signal period, stop dwell, stop-line placement and
+/// entry clearance are unverified (UNK-12).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JunctionPolicy {
+    /// Ticks each light-controlled member road holds green — at the
+    /// 120 Hz fixed step the default is a six-second phase.
+    pub green_ticks: u64,
+    /// All-red clearance ticks between member greens, so a crossing
+    /// car clears the junction before the next road is admitted.
+    pub clear_ticks: u64,
+    /// Ticks a car must stand at a stop sign before it may take the
+    /// junction — the "stop" half of the documented stop-sign rule.
+    pub stop_dwell_ticks: u64,
+    /// Distance before the lane end marking the stop line (m) — about
+    /// a car half-length, so a held car's nose stays out of the box.
+    pub stop_inset: f32,
+    /// Seconds per metre converting distance-to-stop into the desired
+    /// approach speed — the ramp a closed gate brakes toward.
+    pub approach_time: f32,
+    /// Decel bound while braking to a closed gate (m/s²).
+    pub decel: f32,
+    /// A lane transfer landing within this distance of a live car or
+    /// participant would materialise inside it — the car holds at the
+    /// lane end and retries instead (m).
+    pub enter_clearance: f32,
+}
+
+impl Default for JunctionPolicy {
+    fn default() -> Self {
+        Self {
+            green_ticks: 720,
+            clear_ticks: 120,
+            stop_dwell_ticks: 90,
+            stop_inset: 2.5,
+            approach_time: 1.0,
+            decel: 9.0,
+            enter_clearance: 6.0,
+        }
+    }
+}
+
+/// Whether a car may pass its lane end this tick, per [`Junctions::gate`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JunctionGate {
+    /// Proceed — no rule, `NeverStop`, the car's road green, an
+    /// admitted stop-sign head, or a lane that does not end at a
+    /// junction.
+    Open,
+    /// Brake to the stop line and wait.
+    Closed,
+}
+
+/// Per-intersection controller state the ambient driver consults each
+/// tick — the "one authoritative controller" the F10 spec asks for,
+/// scoped to junction admission only (ambient routing stays separate
+/// from opponents/pursuit per the spec).
+///
+/// Two documented mechanisms live here:
+///
+/// - **Signals**: a junction whose member roads author `TrafficLight`
+///   approaches cycles a green through those members — the roads (in
+///   authored counterclockwise order) that have at least one arc
+///   exiting into the junction under that rule — with an all-red
+///   clearance slice inside each period. Mixed junctions are the
+///   retail norm (SF: 82 of 212 vehicle-approached junctions
+///   uniformly lit, 92 mixed, none uniformly stop-signed; London:
+///   76/76/102 of 254) — each approach gates by its own end's rule:
+///   `NeverStop` approaches flow regardless of the phase.
+/// - **Stop signs**: a first-come-first-served queue per junction —
+///   the documented "longest waiting vehicle drives first". A car
+///   registers when it stands at its stop line, takes the junction
+///   once it reaches the head and its dwell has elapsed, and is
+///   dropped on departure.
+///
+/// `AlwaysStop` ends are never admitted (unused on retail data).
+/// Queue keys are `Entity`s: junction admission is ephemeral
+/// per-world state, never a result or network identity.
+#[derive(Default)]
+pub struct Junctions {
+    /// Fixed-step clock — `advance_tick` runs once per driver tick, so
+    /// phases and dwells are deterministic under the session seed.
+    tick: u64,
+    /// The constants this controller runs under — `pub` so sessions
+    /// and tests can bind a different cadence.
+    pub policy: JunctionPolicy,
+    /// Junction index → FIFO of `(car, arrival tick)` standing at its
+    /// stop-signed approaches.
+    waiting: BTreeMap<u16, VecDeque<(Entity, u64)>>,
+}
+
+/// Per-junction signal-phase desynchronisation, in ticks — a fixed
+/// spread so neighbouring junctions never share a phase edge.
+const PHASE_SPREAD: u64 = 137;
+
+impl Junctions {
+    /// Advance the controller clock — call once per drive tick, under
+    /// the same phase gate the driver runs.
+    pub fn advance_tick(&mut self) {
+        self.tick += 1;
+    }
+
+    /// The controller's current tick (diagnostics/tests).
+    pub fn tick(&self) -> u64 {
+        self.tick
+    }
+
+    /// Cars standing at stop-signed approaches across all junctions.
+    pub fn waiting(&self) -> usize {
+        self.waiting.values().map(VecDeque::len).sum()
+    }
+
+    /// The junction `lane`'s travel arc exits into, the arc's road,
+    /// and the authored rule at that end — `None` when the lane ends
+    /// at a dead end or carries no routable arc.
+    pub fn approach(graph: &NavGraph, lane: LaneId) -> Option<(u16, u16, Option<VehicleRule>)> {
+        let l = graph.lane(lane)?;
+        let arc = graph.arc(l.arc?);
+        match arc.exit {
+            ArcEnd::Intersection(ix) => Some((ix, arc.road, arc.exit_rule())),
+            ArcEnd::DeadEnd => None,
+        }
+    }
+
+    /// Member roads the signal at `ix` cycles through: every road (in
+    /// the intersection's authored counterclockwise order, deduped)
+    /// with at least one arc exiting into the junction under a
+    /// `TrafficLight` end. Empty when nothing at the junction is
+    /// light-controlled.
+    pub fn signal_members(graph: &NavGraph, ix: u16) -> Vec<u16> {
+        let Some(intersection) = graph.intersections().get(ix as usize) else {
+            return Vec::new();
+        };
+        let mut members = Vec::new();
+        for &idx in &intersection.roads {
+            let Ok(road_idx) = u16::try_from(idx) else {
+                continue;
+            };
+            let Some(road) = graph.road(road_idx) else {
+                continue;
+            };
+            let lit = road.arcs.iter().flatten().any(|a| {
+                let arc = graph.arc(*a);
+                arc.exit == ArcEnd::Intersection(ix)
+                    && arc.exit_rule() == Some(VehicleRule::TrafficLight)
+            });
+            if lit && !members.contains(&road_idx) {
+                members.push(road_idx);
+            }
+        }
+        members
+    }
+
+    /// The member road currently green at `ix`, or `None` during the
+    /// all-red clearance slice. Deterministic: the member index is
+    /// `(tick + ix·PHASE_SPREAD) / period mod members`, green for the
+    /// first `green_ticks` of each `green+clear` period.
+    pub fn green_road(&self, graph: &NavGraph, ix: u16) -> Option<u16> {
+        let members = Self::signal_members(graph, ix);
+        self.green_member(ix, &members)
+    }
+
+    fn green_member(&self, ix: u16, members: &[u16]) -> Option<u16> {
+        let n = members.len() as u64;
+        if n == 0 {
+            return None;
+        }
+        let period = self.policy.green_ticks + self.policy.clear_ticks;
+        if period == 0 {
+            return members.first().copied();
+        }
+        let t = (self.tick + ix as u64 * PHASE_SPREAD) % (period * n);
+        let member = (t / period) as usize;
+        (t % period < self.policy.green_ticks).then(|| members[member])
+    }
+
+    /// May `car` pass the end of `lane` this tick? The authored rule
+    /// at the arc's downstream end decides: `NeverStop`/unruled/dead
+    /// ends open, `AlwaysStop` never opens, `TrafficLight` opens while
+    /// the car's road holds the phase green, and `StopSign` opens for
+    /// the FCFS head once its dwell elapsed. Reaching the stop line
+    /// (`at_line`) at a standstill (`stopped`) registers a stop-sign
+    /// car in the junction queue — registration is what makes the
+    /// wait ordering first-come-first-served.
+    pub fn gate(
+        &mut self,
+        graph: &NavGraph,
+        lane: LaneId,
+        car: Entity,
+        at_line: bool,
+        stopped: bool,
+    ) -> JunctionGate {
+        let Some((ix, road, rule)) = Self::approach(graph, lane) else {
+            return JunctionGate::Open;
+        };
+        match rule {
+            None | Some(VehicleRule::NeverStop) => JunctionGate::Open,
+            Some(VehicleRule::AlwaysStop) => JunctionGate::Closed,
+            Some(VehicleRule::TrafficLight) => {
+                let members = Self::signal_members(graph, ix);
+                if !members.contains(&road) {
+                    // A light-coded end on a junction whose member set
+                    // somehow excludes its road (inconsistent authored
+                    // data) degrades to free flow, not a permanent red.
+                    return JunctionGate::Open;
+                }
+                match self.green_member(ix, &members) {
+                    Some(green) if green == road => JunctionGate::Open,
+                    _ => JunctionGate::Closed,
+                }
+            }
+            Some(VehicleRule::StopSign) => {
+                if at_line && stopped {
+                    let q = self.waiting.entry(ix).or_default();
+                    if !q.iter().any(|(c, _)| *c == car) {
+                        q.push_back((car, self.tick));
+                    }
+                }
+                let admitted = self.waiting.get(&ix).and_then(|q| q.front()).is_some_and(
+                    |(front, arrived)| {
+                        *front == car
+                            && self.tick.saturating_sub(*arrived) >= self.policy.stop_dwell_ticks
+                    },
+                );
+                if admitted {
+                    JunctionGate::Open
+                } else {
+                    JunctionGate::Closed
+                }
+            }
+        }
+    }
+
+    /// Forget `car` everywhere — on transfer out of a junction and on
+    /// despawn, so a stale entry can never hold the queue.
+    pub fn depart(&mut self, car: Entity) {
+        self.waiting.retain(|_, q| {
+            q.retain(|(c, _)| *c != car);
+            !q.is_empty()
+        });
+    }
+
+    /// Drop queued cars absent from `live` — the recycler can collect
+    /// a registered car, and the queue must not wait on a ghost.
+    pub fn retain(&mut self, live: &BTreeSet<Entity>) {
+        self.waiting.retain(|_, q| {
+            q.retain(|(c, _)| live.contains(c));
+            !q.is_empty()
+        });
+    }
+}
+
+/// The speed a closed gate allows at `dist_to_stop` metres before the
+/// stop line — a `decel`-limited ramp to a standstill at the line. An
+/// open gate imposes nothing (returns `speed`); the law never
+/// accelerates a car — the follow law owns that.
+pub fn junction_speed(
+    speed: f32,
+    dist_to_stop: f32,
+    gate: JunctionGate,
+    dt: f32,
+    policy: &JunctionPolicy,
+) -> f32 {
+    let speed = speed.max(0.0);
+    if gate == JunctionGate::Open {
+        return speed;
+    }
+    let ramp = (dist_to_stop / policy.approach_time.max(1.0e-3)).max(0.0);
+    if speed > ramp {
+        (speed - policy.decel.max(0.0) * dt).max(ramp)
+    } else {
+        speed
+    }
 }

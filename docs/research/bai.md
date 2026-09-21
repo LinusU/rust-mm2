@@ -59,6 +59,14 @@ occupies each room.
   {0,1,2,5,8,9,10} (documented bits only).
 - `sfai.bai` (dev/test map) parses but has one authored anomaly:
   intersection 0 references room 0 — reported as an issue, not repaired.
+- `vehicleRule` census on *approach* ends (arc exits into a junction,
+  2026-09-21): SF authors 449 `TrafficLight` / 138 `NeverStop` / 30
+  `StopSign` approaches across 212 junctions receiving vehicle arcs —
+  82 uniformly lit, 38 uniformly free-flow, 92 mixed, none uniformly
+  stop-signed. London authors 369 / 214 / 23 across 254 — 76 lit, 76
+  free-flow, 102 mixed. Mixed-rule junctions are the norm, so each
+  approach must gate on its own end's rule; `AlwaysStop` (=2) is
+  authored nowhere.
 - `london_sup.bai`/`sf_sup.bai` share the `CAI1` magic but do not fit
   this layout under either field reading — reported `unsupported`; their
   record structure is uninvestigated.
