@@ -5,7 +5,7 @@ use mm2_formats::bnd::BndFile;
 use mm2_formats::info::InfoFile;
 use mm2_formats::mtx::Mtx;
 use mm2_formats::tune::TuneFile;
-use mm2_formats::veh::{DrivetrainType, VehCarSim, VehTrailer};
+use mm2_formats::veh::{AiVehicleData, DrivetrainType, VehCarSim, VehTrailer};
 
 const INFO: &str = "BaseName=vpbug\r\n\
 Description=VW New Beetle\r\n\
@@ -311,4 +311,85 @@ fn bnd_rejects_bad_input() {
     assert!(BndFile::parse("\0binary").is_err());
     // Out-of-range vertex index.
     assert!(BndFile::parse("verts: 1\npolys: 1\nv 0 0 0\ntri 0 1 2 0\n").is_err());
+}
+
+/// Minimal ambient-vehicle record — the retail `va_*` shape (all fields
+/// present, `CG` authored).
+const AIVEHICLE: &str = "type: a\r\n\
+aiVehicleData {\r\n\
+  Mass 585.095459\r\n\
+  Size 1.838961 1.122816 4.286561\r\n\
+  MaxAng 0.000000 0.000000 0.000000\r\n\
+  Elasticity 0.9100000\r\n\
+  Friction 0.1500000\r\n\
+  MaxDamage 70807.632813\r\n\
+  PtxThresh 70807.640625\r\n\
+  Spring 17701.910156\r\n\
+  Damping 1239.133667\r\n\
+  Limit 0.070000\r\n\
+  RubberSpring 12391.335938\r\n\
+  RubberDamp 619.566833\r\n\
+  CG 0.000026 0.819497 0.170570\r\n\
+}\r\n";
+
+#[test]
+fn aivehicledata_decodes_the_retail_field_set() {
+    let tune = TuneFile::parse(AIVEHICLE).unwrap();
+    let data = AiVehicleData::from_tune(&tune).unwrap();
+    assert_eq!(data.mass, 585.095_46);
+    assert_eq!(data.size, [1.838961, 1.122816, 4.286561]);
+    assert_eq!(data.max_ang, Some([0.0, 0.0, 0.0]));
+    assert_eq!(data.limit, 0.07);
+    assert_eq!(data.rubber_damp, 619.566_83);
+    assert_eq!(data.cg, Some([0.000026, 0.819497, 0.170570]));
+    assert!(data.warnings.is_empty(), "{:?}", data.warnings);
+}
+
+#[test]
+fn aivehicledata_decodes_msvc_non_finite_literals() {
+    // Retail `va_garbagetruck.aivehicledata` authors `MaxAng 1.#QNAN0 …`
+    // — MSVC's NaN print — which `f64::parse` rejects. The component
+    // decodes as the NaN it prints, not as missing/zero.
+    let src = AIVEHICLE.replace(
+        "MaxAng 0.000000 0.000000 0.000000",
+        "MaxAng 1.#QNAN0 0.000000 -1.#INF000",
+    );
+    let tune = TuneFile::parse(&src).unwrap();
+    let data = AiVehicleData::from_tune(&tune).unwrap();
+    let max_ang = data.max_ang.expect("MaxAng decodes");
+    assert!(max_ang[0].is_nan());
+    assert_eq!(max_ang[1], 0.0);
+    assert_eq!(max_ang[2], f32::NEG_INFINITY);
+    assert!(data.warnings.is_empty(), "{:?}", data.warnings);
+}
+
+#[test]
+fn aivehicledata_tolerates_absent_cg_and_flags_garbage() {
+    // va_cablecar_f / va_ug_l / va_garbagetruck ship without CG.
+    let src = AIVEHICLE.replace("CG 0.000026 0.819497 0.170570\r\n", "");
+    let tune = TuneFile::parse(&src).unwrap();
+    let data = AiVehicleData::from_tune(&tune).unwrap();
+    assert_eq!(data.cg, None);
+
+    // A present-but-non-numeric MaxAng is a warning, not a failure or a
+    // silently zeroed value.
+    let src = AIVEHICLE.replace(
+        "MaxAng 0.000000 0.000000 0.000000",
+        "MaxAng someday 0.0 0.0",
+    );
+    let tune = TuneFile::parse(&src).unwrap();
+    let data = AiVehicleData::from_tune(&tune).unwrap();
+    assert_eq!(data.max_ang, None);
+    assert!(
+        data.warnings.iter().any(|w| w.contains("MaxAng")),
+        "{:?}",
+        data.warnings
+    );
+
+    // Missing required fields and wrong roots still fail.
+    let src = AIVEHICLE.replace("Mass 585.095459\r\n", "");
+    let tune = TuneFile::parse(&src).unwrap();
+    assert!(AiVehicleData::from_tune(&tune).is_err());
+    let tune = TuneFile::parse("vehCarSim { Mass 1.0 }").unwrap();
+    assert!(AiVehicleData::from_tune(&tune).is_err());
 }

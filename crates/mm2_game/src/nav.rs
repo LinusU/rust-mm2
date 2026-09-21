@@ -674,6 +674,13 @@ impl NavRng {
             Some(&items[(self.next_u64() % items.len() as u64) as usize])
         }
     }
+
+    /// Uniform `f32` in `[0, 1)` — the top 24 bits of the next value,
+    /// like a canonical float RNG. Deterministic across platforms: no
+    /// `HashMap`, no float formatting.
+    pub fn next_f32(&mut self) -> f32 {
+        (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32
+    }
 }
 
 /// Uniform XZ bucket grid accelerating [`NavGraph::nearest_lane`].

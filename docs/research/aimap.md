@@ -232,3 +232,58 @@ passes within ~6 m of the grid heading +Z, so a verbatim 0 yaw (−Z)
 faces the whole grid backward. Producers therefore read `a = 0` as
 "no authored heading" and derive a course facing instead of spawning
 backward; every nonzero `a` on retail binds verbatim.
+
+## Ambient rosters (F10-A.1, 2026-09-21 — measured)
+
+`mm2_content::traffic` turns a city aimap's `[Ambient Types/Density]`
+rows into an `mm2_game::traffic::AmbientRoster`: one `AmbientSpec` per
+row — the `va_*` id, the authored cumulative weight and flag verbatim,
+plus the decoded `tune/vehicle/<id>.aivehicledata` (`AiVehicleData`,
+`mm2_formats::veh`). `ambient_roster_from_aimap` works on any parsed
+aimap, because event files author their own tables — measured on
+retail: `race/london/roam.aimap{,_p}` and `roambak.aimap` each carry a
+12-row roster *different* from `city/london.aimap`'s 13-row table (no
+`va_ultrasport_l`/`va_euro_l`/`va_cab_l`, different weights), so an
+event session's ambient config is not just the city file's.
+
+The retail pool is 23 `tune/vehicle/*.aivehicledata` records (the
+`EXPECTED_AMBIENTS` denominator): sf rosters 11 distinct ids, london
+12 — `va_compact_s` legitimately occupies two weight bands (0.07 and
+0.98), so duplicate ids are authored data, not an anomaly. Unrostered
+in *both* cities: `va_cablecar_f`, `va_ug_l` (subway car — london
+aimap's `#[Subway]` section is a `#` comment), `va_garbagetruck`,
+`va_minivan_s`, `va_pickup_f`, plus each city's own leftovers — the
+pool is shared, so a city rosters a subset and the rest are reported
+as discovered-but-unrostered extras, never dropped.
+
+Event-level density also exists: `race/sf/collide0.aimap` authors
+`[Density] 0.0` (ambient traffic off), `evade0` 0.07, `jump0` 0.05,
+`roam` 0.1 — the per-event dial beside the `mm*data.csv` `Ambient`
+column. The `[Ambient Types/Density]` row shape itself is
+`name cumulative-weight flag` — flag 0 on every retail row (omitted on
+one `roambak` row); semantics unverified.
+
+`mm2_game::traffic::plan_ambient` is the seeded spawn-policy planner
+consuming the roster: density fraction × `SpawnPolicy::max_active`
+(designed bound — the original's ambient pool size is unverified),
+each draw picking a class through the cumulative table and a
+lane-position over the routable vehicle lanes the `NavOverrides` leave
+open (`NavGraph::build` already withholds arcs from
+pedestrian-only/disabled sides, so `arc.is_some()` is the BAI
+ambient-type test). Placements inside `min_player_distance` of the
+player retry a bounded number of times then drop; a draw on a class
+whose tuning did not resolve spawns nothing and reports once per id —
+the authored weight band is never rebalanced onto another class.
+`SpawnPolicy` distances/pool are designed values (implementation
+choice); what the original used is UNK-12.
+
+`mm2-inspect traffic <install> [--city] [--strict]` audits both stock
+cities plus any discovered `city/*.aimap` stem: roster table, per-class
+`aivehicledata`/`pkg`/`bnd` resolution + `.mtx` part count, unrostered
+ids, undiscovered expected ids, and every `race/<city>/*.aimap{,_p}`
+carrying `[Density]`/`[Speed Limit]`/`[Exceptions]`/`[Ambient
+Types/Density]`. Retail (`fnv1a64:e91e6cd4b2ae30d9`): both cities 23/23
+ambients discovered, all rostered assets ok (garbagetruck's
+`MaxAng 1.#QNAN0` MSVC literal decodes to NaN), 0 failed checks, 101
+london + 104 sf event overrides (35/53 with exceptions, 3/6 with
+density, 3/0 with own rosters). `--strict` exits 0.

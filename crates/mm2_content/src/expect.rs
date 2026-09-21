@@ -19,6 +19,35 @@ pub const EXPECTED_CITIES: &[&str] = &["london", "sf"];
 /// exist without an authored event roster.
 pub const EXPECTED_RACE_CITIES: &[&str] = &["london", "sf"];
 
+/// Ambient-traffic vehicles: `tune/vehicle/<id>.aivehicledata` plus
+/// `geometry/<id>.pkg` and `bound/<id>_bound.bnd` — the shared pool both
+/// stock cities' `[Ambient Types/Density]` tables draw from (F10-A.1).
+pub const EXPECTED_AMBIENTS: &[&str] = &[
+    "va_2siter_s",
+    "va_2sitersport_l",
+    "va_bus_f",
+    "va_cab_l",
+    "va_cablecar_f",
+    "va_compact_s",
+    "va_cooper_l",
+    "va_ddbus_l",
+    "va_diesels_s",
+    "va_euro_l",
+    "va_eurocargo_l",
+    "va_eurovan_f",
+    "va_garbagetruck",
+    "va_largesuv_s",
+    "va_limo_f",
+    "va_minivan_s",
+    "va_pickup_f",
+    "va_sedans_s",
+    "va_smallsuv_s",
+    "va_taxi_f",
+    "va_ug_l",
+    "va_ultrasport_l",
+    "va_wedelivertruck_f",
+];
+
 /// Pedestrian archetypes: `anim/<id>.{mod,skel,rays,shaders}`.
 pub const EXPECTED_PEDS: &[&str] = &[
     "pedmodel_man",

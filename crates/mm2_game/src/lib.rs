@@ -23,6 +23,7 @@ pub mod result;
 pub mod session;
 pub mod surface;
 pub mod telemetry;
+pub mod traffic;
 
 pub use banger::{
     Banger, BangerCause, BangerDefinition, BangerPhase, BangerPool, BangerStateChanged,
@@ -72,6 +73,10 @@ pub use session::{
 };
 pub use surface::{SurfaceMaterial, SurfaceState};
 pub use telemetry::{DamageSignals, VehicleTelemetry, WheelTelemetry};
+pub use traffic::{
+    AmbientPlan, AmbientRoster, AmbientSpec, SpawnDirective, SpawnPolicy, TrafficIssue,
+    plan_ambient,
+};
 
 /// What the app should do at startup.
 #[derive(Debug, Clone, Default, PartialEq)]

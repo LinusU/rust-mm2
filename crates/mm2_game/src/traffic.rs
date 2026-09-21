@@ -1,0 +1,344 @@
+//! The ambient-traffic contract: the typed roster a city aimap wires
+//! plus the deterministic seeded spawn-policy planner (F10-A.1).
+//!
+//! An [`AmbientRoster`] is the runtime-facing counterpart of a city's
+//! `[Ambient Types/Density]` rows (`mm2_formats::aimap`): one
+//! [`AmbientSpec`] per row, authored cumulative weights kept verbatim —
+//! they are non-decreasing and close at `1.0` on every retail file, and
+//! an id may legitimately appear in more than one weight band (london
+//! authors `va_compact_s` twice). Each spec optionally carries the
+//! decoded `aiVehicleData` tuning — `None` when the row's
+//! `tune/vehicle/<id>.aivehicledata` did not resolve, which the planner
+//! treats as unspawnable: the authored weight band is preserved, never
+//! silently rebalanced onto another class.
+//!
+//! [`plan_ambient`] draws an initial spawn set: the authored density
+//! fraction times a bounded vehicle budget, each draw picking a class
+//! through the cumulative table and a lane-position over the routable
+//! vehicle lanes that survive the overrides (closed roads and
+//! pedestrian-only/disabled road sides are already excluded from the
+//! graph's arcs). Everything is seeded through [`NavRng`] — the same
+//! `(seed, content)` pair produces the same plan on every platform.
+//!
+//! This is *not* original traffic: the plan is spawn/despawn policy
+//! data for the ambient system F10-B/C fills in — no intersection
+//! yielding, signals or collisions are implied here. The original's
+//! ambient population bound and bubble distances are unverified, so
+//! [`SpawnPolicy`]'s defaults are designed values, not recovered ones.
+
+use std::collections::BTreeSet;
+use std::fmt;
+
+use mm2_formats::veh::AiVehicleData;
+
+use crate::nav::{LaneId, LaneSample, NavGraph, NavOverrides, NavRng};
+
+/// One authored ambient class — an `[Ambient Types/Density]` row plus
+/// its decoded tuning.
+#[derive(Debug, Clone)]
+pub struct AmbientSpec {
+    /// The authored vehicle id — the `tune/vehicle/<id>.aivehicledata`
+    /// and `geometry/<id>.pkg` basename (`va_*` on retail).
+    pub id: String,
+    /// Cumulative selection weight: non-decreasing down the roster and
+    /// closing at `1.0` on retail. A pick is the first row whose weight
+    /// exceeds the draw.
+    pub cumulative_weight: f32,
+    /// Raw trailing flag column — `0` on every retail row, absent on
+    /// one `roambak` row; semantics unverified, kept verbatim.
+    pub flag: i64,
+    /// Decoded `aiVehicleData` tuning. `None` when the record did not
+    /// resolve — the row stays in the weight table (the authored
+    /// denominator is preserved) but a draw landing on it spawns
+    /// nothing.
+    pub tuning: Option<AiVehicleData>,
+}
+
+/// A problem the roster or plan reports rather than repairs.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrafficIssue {
+    /// A weight is lower than the previous row's — cumulative tables
+    /// are non-decreasing on retail.
+    WeightOrder {
+        /// Roster index of the offending row.
+        index: usize,
+        /// This row's cumulative weight.
+        weight: f32,
+        /// The previous row's cumulative weight.
+        previous: f32,
+    },
+    /// The last cumulative weight is below `1.0` — draws above it
+    /// select nothing (unverified whether the original tolerates this;
+    /// retail always closes at `1.0`).
+    WeightsNotClosed {
+        /// The last authored cumulative weight.
+        last: f32,
+    },
+    /// A roster row's tuning did not resolve. Reported once per id at
+    /// plan time — the row stays in the weight table.
+    UnspawnableClass {
+        /// The authored vehicle id.
+        id: String,
+    },
+    /// The roster carries no rows — planning produces no traffic.
+    EmptyRoster,
+    /// No routable vehicle lane survived the overrides — planning
+    /// produces no traffic.
+    NoEligibleLanes,
+}
+
+impl fmt::Display for TrafficIssue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WeightOrder {
+                index,
+                weight,
+                previous,
+            } => write!(
+                f,
+                "ambient row {index}: weight {weight} below previous {previous}"
+            ),
+            Self::WeightsNotClosed { last } => {
+                write!(f, "ambient weights close at {last}, not 1.0")
+            }
+            Self::UnspawnableClass { id } => {
+                write!(f, "ambient class {id} has no resolved tuning")
+            }
+            Self::EmptyRoster => write!(f, "ambient roster is empty"),
+            Self::NoEligibleLanes => write!(f, "no eligible ambient vehicle lanes"),
+        }
+    }
+}
+
+/// A city's ambient-vehicle pick table.
+#[derive(Debug, Clone, Default)]
+pub struct AmbientRoster {
+    /// One entry per authored row, in file order.
+    pub entries: Vec<AmbientSpec>,
+    /// Structural problems found while validating the table.
+    pub issues: Vec<TrafficIssue>,
+}
+
+impl AmbientRoster {
+    /// Validate the authored table — weight monotonicity and closure.
+    /// Duplicate ids are *not* an issue: a class may legitimately
+    /// occupy two weight bands.
+    pub fn new(entries: Vec<AmbientSpec>) -> Self {
+        let mut issues = Vec::new();
+        for (i, e) in entries.iter().enumerate() {
+            if i > 0 && e.cumulative_weight < entries[i - 1].cumulative_weight {
+                issues.push(TrafficIssue::WeightOrder {
+                    index: i,
+                    weight: e.cumulative_weight,
+                    previous: entries[i - 1].cumulative_weight,
+                });
+            }
+        }
+        if let Some(last) = entries.last()
+            && last.cumulative_weight < 1.0 - f32::EPSILON
+        {
+            issues.push(TrafficIssue::WeightsNotClosed {
+                last: last.cumulative_weight,
+            });
+        }
+        Self { entries, issues }
+    }
+
+    /// Select the class for a cumulative draw `u` in `[0, 1)`: the
+    /// first row whose weight exceeds `u`. `None` on an empty roster
+    /// or a table that does not close at `1.0`.
+    pub fn select(&self, u: f32) -> Option<usize> {
+        self.entries.iter().position(|e| u < e.cumulative_weight)
+    }
+
+    /// Seeded pick — [`Self::select`] driven by `rng`.
+    pub fn pick(&self, rng: &mut NavRng) -> Option<usize> {
+        self.select(rng.next_f32())
+    }
+
+    /// Whether `index` can spawn — resolved tuning present.
+    pub fn spawnable(&self, index: usize) -> bool {
+        self.entries.get(index).is_some_and(|e| e.tuning.is_some())
+    }
+}
+
+/// Spawn/despawn policy constants the ambient system runs under.
+/// All values are designed defaults: the original's ambient pool size
+/// and bubble distances are unverified, so these are implementation
+/// choices, not recovered rules.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpawnPolicy {
+    /// Bound on simultaneously active ambient vehicles — the density
+    /// fraction scales the target inside this cap.
+    pub max_active: usize,
+    /// No spawn is placed within this distance of the player, in
+    /// metres — ambient cars materialising inside the view cone is the
+    /// failure this guards.
+    pub min_player_distance: f32,
+    /// A vehicle beyond this distance from the player is recycled into
+    /// the spawn pool (the ambient bubble radius), in metres.
+    pub recycle_distance: f32,
+    /// Bound on placement attempts per directive before the draw is
+    /// dropped — keeps the planner finite when the player sits in the
+    /// only eligible pocket.
+    pub placement_attempts: usize,
+}
+
+impl Default for SpawnPolicy {
+    fn default() -> Self {
+        Self {
+            max_active: 32,
+            min_player_distance: 60.0,
+            recycle_distance: 400.0,
+            placement_attempts: 8,
+        }
+    }
+}
+
+/// One planned ambient spawn.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpawnDirective {
+    /// Roster index of the class drawn.
+    pub class: usize,
+    /// Lane the vehicle spawns on.
+    pub lane: LaneId,
+    /// Distance along the lane's travel direction.
+    pub along: f32,
+    /// Spawned pose — sampled position and travel-direction tangent.
+    pub sample: LaneSample,
+    /// The road's effective speed (`NavOverrides::effective_speed` —
+    /// authored BAI/aimap units, unverified as m/s).
+    pub target_speed: f32,
+}
+
+/// The seeded spawn plan for one session: the target population, the
+/// initial placement set and the policy the recycler runs under.
+#[derive(Debug, Clone)]
+pub struct AmbientPlan {
+    /// Seed the draw ran under.
+    pub seed: u64,
+    /// Density fraction applied (0–1 authored, clamped defensively).
+    pub density: f32,
+    /// Target simultaneous population — `density × policy.max_active`,
+    /// rounded. The plan never exceeds `policy.max_active`.
+    pub target: usize,
+    /// Routable vehicle lanes surviving the overrides.
+    pub eligible_lanes: usize,
+    /// Initial spawn set — at most `target` entries.
+    pub spawns: Vec<SpawnDirective>,
+    /// Directives dropped because every placement attempt landed inside
+    /// `policy.min_player_distance` of the player.
+    pub dropped: usize,
+    /// Draws that selected a class with no resolved tuning or fell off
+    /// a non-closed weight table — the authored weight band stood, so
+    /// the slot spawns nothing rather than silently rebalancing.
+    pub unspawnable: usize,
+    /// The policy the plan was built under.
+    pub policy: SpawnPolicy,
+    /// Non-fatal problems found while planning.
+    pub issues: Vec<TrafficIssue>,
+}
+
+/// Draw a seeded ambient spawn plan over `graph` under `overrides`.
+///
+/// Eligible lanes are the graph's routable vehicle lanes on roads the
+/// overrides leave open — `NavGraph::build` already withholds arcs from
+/// pedestrian-only/disabled road sides, so `arc.is_some()` is the BAI
+/// ambient-classification test. Each of `target` draws picks a lane
+/// uniformly, a position along it, and a class through the roster's
+/// cumulative weights; placements inside `policy.min_player_distance`
+/// of `player_at` retry up to `policy.placement_attempts` times before
+/// the directive is dropped. `player_at` may be a spawn pose, not a
+/// tracked position — the planner only needs the bubble centre.
+pub fn plan_ambient(
+    graph: &NavGraph,
+    overrides: &NavOverrides,
+    roster: &AmbientRoster,
+    seed: u64,
+    density: f32,
+    player_at: [f32; 3],
+    policy: &SpawnPolicy,
+) -> AmbientPlan {
+    let mut issues = Vec::new();
+    let density = if density.is_finite() {
+        density.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let target = (density * policy.max_active as f32).round() as usize;
+
+    let eligible: Vec<LaneId> = graph
+        .lanes()
+        .iter()
+        .filter(|l| l.arc.is_some() && !overrides.is_closed(l.id.road))
+        .map(|l| l.id)
+        .collect();
+
+    if roster.entries.is_empty() {
+        issues.push(TrafficIssue::EmptyRoster);
+    }
+    if eligible.is_empty() {
+        issues.push(TrafficIssue::NoEligibleLanes);
+    }
+
+    let mut rng = NavRng::new(seed);
+    let mut spawns = Vec::with_capacity(target.min(eligible.len().max(1) * 4));
+    let mut dropped = 0usize;
+    let mut unspawnable = 0usize;
+    let mut flagged: BTreeSet<&str> = BTreeSet::new();
+
+    'draws: for _ in 0..target {
+        if eligible.is_empty() {
+            break;
+        }
+        for _ in 0..policy.placement_attempts {
+            let lane = *rng.pick(&eligible).expect("eligible is non-empty");
+            let l = graph.lane(lane).expect("eligible lanes exist");
+            let along = rng.next_f32() * l.length;
+            let sample = graph.sample_lane(lane, along).expect("a live lane samples");
+            let d = [
+                sample.position[0] - player_at[0],
+                sample.position[1] - player_at[1],
+                sample.position[2] - player_at[2],
+            ];
+            if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() < policy.min_player_distance {
+                continue;
+            }
+            match roster.pick(&mut rng) {
+                Some(class) if roster.spawnable(class) => {
+                    let road = graph.road(lane.road).expect("a live lane's road exists");
+                    spawns.push(SpawnDirective {
+                        class,
+                        lane,
+                        along,
+                        sample,
+                        target_speed: overrides.effective_speed(road),
+                    });
+                }
+                Some(class) => {
+                    unspawnable += 1;
+                    let id = roster.entries[class].id.as_str();
+                    if flagged.insert(id) {
+                        issues.push(TrafficIssue::UnspawnableClass { id: id.to_string() });
+                    }
+                }
+                // Non-closed weight table: the draw selects nothing.
+                None => unspawnable += 1,
+            }
+            continue 'draws;
+        }
+        dropped += 1;
+    }
+
+    AmbientPlan {
+        seed,
+        density,
+        target,
+        eligible_lanes: eligible.len(),
+        spawns,
+        dropped,
+        unspawnable,
+        policy: policy.clone(),
+        issues,
+    }
+}

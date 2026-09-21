@@ -23,6 +23,7 @@ pub mod opponents;
 pub mod race_def;
 pub mod rewards;
 pub mod surface;
+pub mod traffic;
 
 pub use assemble::{LoadError, TrailerDef, VehicleDef, load_by_id, load_opponent, load_vehicle};
 pub use availability::availability_table;
@@ -38,8 +39,9 @@ pub use events::{
     ExtraRecord, FailedRef, RecordContent, race_cities,
 };
 pub use expect::{
-    EXPECTED_AUDIO_FAMILIES, EXPECTED_CITIES, EXPECTED_EVENT_TABLES, EXPECTED_PEDS,
-    EXPECTED_RACE_CITIES, ExpectedEvent, PED_REQUIRED_EXTS, PrimaryRecord, expected_events,
+    EXPECTED_AMBIENTS, EXPECTED_AUDIO_FAMILIES, EXPECTED_CITIES, EXPECTED_EVENT_TABLES,
+    EXPECTED_PEDS, EXPECTED_RACE_CITIES, ExpectedEvent, PED_REQUIRED_EXTS, PrimaryRecord,
+    expected_events,
 };
 pub use garage::{garage_table, scan_garage};
 pub use model::{
@@ -58,4 +60,8 @@ pub use race_def::{
 pub use rewards::reward_table;
 pub use surface::{
     PsdlSurfaces, SurfaceLoadError, SurfaceSlot, SurfaceTables, load_surface_tables,
+};
+pub use traffic::{
+    AmbientAssets, AssetCheck, EventOverride, TrafficAudit, TrafficLoadError, ambient_roster,
+    ambient_roster_from_aimap, load_city_aimap,
 };

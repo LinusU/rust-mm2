@@ -1,11 +1,12 @@
 //! Typed views over the block-structured vehicle tuning files
-//! (`vehCarSim`, `vehTrailer`, `asNode`) parsed by [`crate::tune`].
+//! (`vehCarSim`, `vehTrailer`, `asNode`, `aiVehicleData`) parsed by
+//! [`crate::tune`].
 //!
 //! These types decode the fields the runtime conversion needs, keep raw
 //! values for diagnostics, and report unknown fields so authored data is
 //! never silently dropped.
 
-use crate::tune::{TuneBlock, TuneFile};
+use crate::tune::{TuneBlock, TuneFile, TuneValue};
 use std::fmt;
 
 /// Which axle(s) the engine drives (`DrivetrainType` in vehCarSim).
@@ -612,5 +613,162 @@ impl AsNode {
             speed_base_hi: root.f32("SpeedBaseHi"),
             raw: file,
         }
+    }
+}
+
+/// MSVC's non-finite float serialization (`1.#QNAN0`, `-1.#INF000`,
+/// `1.#IND`) — retail `va_garbagetruck.aivehicledata` authors
+/// `MaxAng 1.#QNAN0 …`, which Rust's `f64::parse` rejects. Decode it as
+/// the NaN it prints rather than dropping the component.
+fn msvc_float(v: &TuneValue) -> Option<f64> {
+    if let Some(n) = v.number {
+        return Some(n);
+    }
+    let upper = v.raw.to_ascii_uppercase();
+    let body = upper.trim_start_matches(['+', '-']);
+    let neg = upper.starts_with('-');
+    if body.contains("#QNAN") || body.contains("#IND") || body.contains("#SNAN") {
+        Some(f64::NAN)
+    } else if body.contains("#INF") {
+        Some(if neg {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        })
+    } else {
+        None
+    }
+}
+
+/// `vec3` variant tolerant of MSVC non-finite literals; `None` when the
+/// field is absent or any component is genuinely non-numeric.
+fn vec3_loose(b: &TuneBlock, name: &str) -> Option<[f32; 3]> {
+    let f = b.field(name)?;
+    if f.values.len() < 3 {
+        return None;
+    }
+    let mut out = [0.0f32; 3];
+    for (i, v) in f.values[..3].iter().enumerate() {
+        out[i] = msvc_float(v)? as f32;
+    }
+    Some(out)
+}
+
+/// Fully decoded `aiVehicleData` tuning — the ambient-traffic vehicle
+/// record (`tune/vehicle/<va_*>.aivehicledata`, F10-A).
+///
+/// One flat block per file: mass, full-extent `Size` (same convention
+/// as `dgBangerData`), collision spring/damper coefficients and damage
+/// thresholds. There is no drivetrain, wheel or gearing data — ambient
+/// vehicles are not driven through `vehCarSim` physics, matching the
+/// spec's "ambient vehicle data may differ from player tuning". All 25
+/// retail records carry the same field set; `CG` is absent on three
+/// (`va_cablecar_f`, `va_garbagetruck`, `va_ug_l`).
+#[derive(Debug, Clone)]
+pub struct AiVehicleData {
+    /// `Mass` in kg.
+    pub mass: f32,
+    /// `Size` — bound full extents (width, height, length).
+    pub size: [f32; 3],
+    /// `MaxAng` — authored on every retail file, all-zero except
+    /// `va_garbagetruck`'s NaN first component. Semantics unverified
+    /// (likely an angular-velocity cap); retained verbatim.
+    pub max_ang: Option<[f32; 3]>,
+    /// `Elasticity` — collision restitution coefficient.
+    pub elasticity: f32,
+    /// `Friction` — collision friction coefficient.
+    pub friction: f32,
+    /// `MaxDamage` — damage-energy bound (the F05 damage consumer, not
+    /// traffic, owns its interpretation).
+    pub max_damage: f32,
+    /// `PtxThresh` — particle-trigger impulse threshold (same name as
+    /// `dgBangerData`'s).
+    pub ptx_thresh: f32,
+    /// `Spring`/`Damping` — collision-response coefficients.
+    pub spring: f32,
+    /// See [`Self::spring`].
+    pub damping: f32,
+    /// `Limit` — 0.07 on every retail file; semantics unverified.
+    pub limit: f32,
+    /// `RubberSpring`/`RubberDamp` — secondary (tyre?) response
+    /// coefficients; exact original use unverified.
+    pub rubber_spring: f32,
+    /// See [`Self::rubber_spring`].
+    pub rubber_damp: f32,
+    /// `CG` — bound centre offset; absent on three retail files.
+    pub cg: Option<[f32; 3]>,
+    /// Unknown/unmapped fields encountered while decoding.
+    pub warnings: Vec<String>,
+}
+
+impl AiVehicleData {
+    /// Decode the root `aiVehicleData` block of a parsed tune file.
+    pub fn from_tune(file: &TuneFile) -> VehResult<Self> {
+        if file.root.name != "aiVehicleData" {
+            return err(
+                "aiVehicleData",
+                format!(
+                    "expected aiVehicleData root block, found {:?}",
+                    file.root.name
+                ),
+            );
+        }
+        let root = &file.root;
+        let ctx = "aiVehicleData";
+        let mut warnings = Vec::new();
+
+        let max_ang = match root.field("MaxAng") {
+            Some(f) if vec3_loose(root, "MaxAng").is_none() => {
+                warnings.push(format!(
+                    "aiVehicleData: MaxAng is not three numeric values ({})",
+                    f.values
+                        .iter()
+                        .map(|v| v.raw.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ));
+                None
+            }
+            Some(_) => vec3_loose(root, "MaxAng"),
+            None => None,
+        };
+
+        unknown_fields(
+            root,
+            ctx,
+            &[
+                "Mass",
+                "Size",
+                "MaxAng",
+                "Elasticity",
+                "Friction",
+                "MaxDamage",
+                "PtxThresh",
+                "Spring",
+                "Damping",
+                "Limit",
+                "RubberSpring",
+                "RubberDamp",
+                "CG",
+            ],
+            &mut warnings,
+        );
+
+        Ok(AiVehicleData {
+            mass: req_f32(root, ctx, "Mass")?,
+            size: req_vec3(root, ctx, "Size")?,
+            max_ang,
+            elasticity: req_f32(root, ctx, "Elasticity")?,
+            friction: req_f32(root, ctx, "Friction")?,
+            max_damage: req_f32(root, ctx, "MaxDamage")?,
+            ptx_thresh: req_f32(root, ctx, "PtxThresh")?,
+            spring: req_f32(root, ctx, "Spring")?,
+            damping: req_f32(root, ctx, "Damping")?,
+            limit: req_f32(root, ctx, "Limit")?,
+            rubber_spring: req_f32(root, ctx, "RubberSpring")?,
+            rubber_damp: req_f32(root, ctx, "RubberDamp")?,
+            cg: vec3_loose(root, "CG"),
+            warnings,
+        })
     }
 }

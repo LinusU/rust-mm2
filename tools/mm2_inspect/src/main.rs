@@ -388,6 +388,23 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Audit ambient-traffic content (F10-A.1): each city's
+    /// `[Ambient Types/Density]` roster, per-class
+    /// `aivehicledata`/PKG/BND resolution, ambient tune files no roster
+    /// references, and every event aimap carrying ambient overrides.
+    Traffic {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Restrict to one city stem (default: both stock cities plus
+        /// every discovered `city/*.aimap` stem).
+        #[arg(long)]
+        city: Option<String>,
+        /// Exit nonzero on a missing/failed expected aimap, a class
+        /// asset failure, an undiscovered expected ambient id, an
+        /// unparseable event aimap, or any roster/diagnostic issue.
+        #[arg(long)]
+        strict: bool,
+    },
     /// Versioned content inventory: expected/discovered/accepted/
     /// rejected/unverified counts per content family, fingerprinted by
     /// engine commit and resolved-path provenance.
@@ -507,6 +524,9 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Placement { dir, city, strict } => {
             placement::placement(dir, cli.mods.as_deref(), city.as_deref(), *strict)
+        }
+        Command::Traffic { dir, city, strict } => {
+            traffic(dir, cli.mods.as_deref(), city.as_deref(), *strict)
         }
         Command::Inventory { dir, json, strict } => {
             inventory_cmd(dir, cli.mods.as_deref(), *json, *strict)
@@ -1359,6 +1379,157 @@ fn opponents(
     }
     if strict && !failures.is_empty() {
         return Err(format!("strict opponents audit: {} failures", failures.len()).into());
+    }
+    Ok(())
+}
+
+/// Ambient-traffic audit (F10-A.1): each city's `[Ambient
+/// Types/Density]` roster through the production
+/// `mm2_content::ambient_roster` producer, per-class asset resolution
+/// (`aivehicledata` decode, `geometry/<id>.pkg`, `bound/<id>_bound.bnd`,
+/// `.mtx` parts), ambient tune files no roster references, expected
+/// stock ids never discovered, and every event aimap carrying
+/// ambient-relevant overrides.
+fn traffic(
+    dir: &Path,
+    mods: Option<&Path>,
+    city: Option<&str>,
+    strict: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let vfs = build_vfs(dir, mods)?;
+    // The expected denominator is both stock cities plus every
+    // discovered `city/*.aimap` stem (mod cities included).
+    let cities: Vec<String> = match city {
+        Some(c) => vec![c.to_ascii_lowercase()],
+        None => {
+            let mut set: BTreeSet<String> = mm2_content::EXPECTED_CITIES
+                .iter()
+                .map(|c| c.to_string())
+                .collect();
+            for p in vfs.list() {
+                if let Some(stem) = p
+                    .strip_prefix("city/")
+                    .and_then(|s| s.strip_suffix(".aimap"))
+                    && !stem.contains('/')
+                {
+                    set.insert(stem.to_string());
+                }
+            }
+            set.into_iter().collect()
+        }
+    };
+
+    let mut failures: Vec<String> = Vec::new();
+    for city in &cities {
+        let audit = mm2_content::TrafficAudit::scan(&vfs, city);
+        println!("== ambient traffic: {city} ==");
+        if !audit.aimap_present {
+            println!("  city/{city}.aimap: not resolved");
+        } else if let Some(e) = &audit.aimap_error {
+            println!("  city/{city}.aimap: {e}");
+        }
+        if let Some(roster) = &audit.roster {
+            println!("  roster ({} rows):", roster.entries.len());
+            for (i, e) in roster.entries.iter().enumerate() {
+                let tuning = if e.tuning.is_some() {
+                    "ok"
+                } else {
+                    "NO TUNING"
+                };
+                println!(
+                    "    [{:>2}] {:<24} cum {:>5.2} flag {} {tuning}",
+                    i, e.id, e.cumulative_weight, e.flag
+                );
+            }
+            for issue in &roster.issues {
+                println!("    issue: {issue}");
+            }
+        }
+        for a in &audit.assets {
+            let flag = |c: &mm2_content::AssetCheck| match c {
+                mm2_content::AssetCheck::Parsed => "ok".to_string(),
+                mm2_content::AssetCheck::Missing => "MISSING".to_string(),
+                mm2_content::AssetCheck::Failed(e) => format!("FAILED {e}"),
+            };
+            println!(
+                "  {:<24} tune:{} pkg:{} bnd:{} mtx:{}",
+                a.id,
+                flag(&a.tuning),
+                flag(&a.geometry),
+                flag(&a.bound),
+                a.mtx_parts
+            );
+            for w in &a.tuning_warnings {
+                println!("      warning: {w}");
+            }
+        }
+        if !audit.unrostered.is_empty() {
+            println!(
+                "  unrostered ambient tunes: {}",
+                audit.unrostered.join(", ")
+            );
+        }
+        if !audit.missing_expected.is_empty() {
+            println!(
+                "  expected stock ambients not discovered: {}",
+                audit.missing_expected.join(", ")
+            );
+        }
+        if !audit.event_overrides.is_empty() {
+            println!(
+                "  event overrides ({}): {} with exceptions, {} with density, {} with ambient rosters",
+                audit.event_overrides.len(),
+                audit
+                    .event_overrides
+                    .iter()
+                    .filter(|o| o.exceptions > 0)
+                    .count(),
+                audit
+                    .event_overrides
+                    .iter()
+                    .filter(|o| o.density.is_some())
+                    .count(),
+                audit
+                    .event_overrides
+                    .iter()
+                    .filter(|o| o.ambient_types > 0)
+                    .count(),
+            );
+            for o in audit
+                .event_overrides
+                .iter()
+                .filter(|o| o.density.is_some() || o.ambient_types > 0 || o.failed.is_some())
+            {
+                println!(
+                    "    {:<40} exc {} amb {} {}",
+                    o.logical,
+                    o.exceptions,
+                    o.ambient_types,
+                    o.failed.as_deref().unwrap_or("")
+                );
+            }
+        }
+        for d in &audit.diagnostics {
+            println!("  diagnostic: {d}");
+        }
+        let city_failures = audit.failures();
+        println!(
+            "  {city}: expected {} ambients — {} discovered, {} rostered, {} unrostered, {} failed check(s), {} diagnostic(s)",
+            audit.expected(),
+            audit.discovered(),
+            audit.assets.len(),
+            audit.unrostered.len(),
+            city_failures.len(),
+            audit.diagnostics.len(),
+        );
+        failures.extend(city_failures.into_iter().map(|f| format!("{city}: {f}")));
+        println!();
+    }
+    if strict && !failures.is_empty() {
+        for f in &failures {
+            eprintln!("  strict: {f}");
+        }
+        return Err(format!("strict traffic audit: {} failures", failures.len()).into());
     }
     Ok(())
 }
