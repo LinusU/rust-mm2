@@ -398,6 +398,37 @@ fn definition_validation_rejects_unusable_shapes() {
     assert_eq!(instant.validate(), Err(RaceError::BadTimeLimit));
 }
 
+/// `course_yaw` derives the course-facing a headless authored slot
+/// (`yaw_deg == None`) falls back to: the first trigger far enough
+/// away to define a direction, as a vehicle-yaw heading — the same
+/// facing the producer's no-grid tangent fallback derives.
+#[test]
+fn course_yaw_faces_the_first_real_trigger() {
+    // Course running +X, like the producer's row0→row1 tangent.
+    let def = ordered(vec![checkpoint(110.0, 0.0), checkpoint(200.0, 0.0)], 1);
+    let yaw = def.course_yaw(Vec3::new(60.0, 0.0, 0.0)).unwrap();
+    let fwd = Vec3::new(-yaw.sin(), 0.0, -yaw.cos());
+    assert!(fwd.x > 0.98, "faces +X toward the first gate: {fwd:?}");
+
+    // A trigger too close to define a direction is skipped — the
+    // start-line copy sits on the slot, the next real gate decides.
+    let def = ordered(
+        vec![
+            checkpoint(60.0, 0.0),
+            checkpoint(60.0, 0.0),
+            checkpoint(60.0, -100.0),
+        ],
+        1,
+    );
+    let yaw = def.course_yaw(Vec3::new(60.0, 0.0, 0.0)).unwrap();
+    let fwd = Vec3::new(-yaw.sin(), 0.0, -yaw.cos());
+    assert!(fwd.z < -0.98, "skips the on-slot trigger: {fwd:?}");
+
+    // Every trigger on the slot — degenerate authored data, no course.
+    let def = ordered(vec![checkpoint(60.0, 0.0)], 1);
+    assert_eq!(def.course_yaw(Vec3::new(60.0, 0.0, 0.0)), None);
+}
+
 /// RACE-6: with no pick the arrow tracks the nearest un-cleared gate —
 /// XZ distance, not the lowest index.
 #[test]

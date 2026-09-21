@@ -165,3 +165,11 @@ course mid-leg — chasing row 1 from the staged pose U-turns the car.
 `race/sf/race5-a-{5,6,7}` carry a second staging row mid-file (what
 re-stages there is unknown). Every other column authors 0 on retail
 and is preserved raw.
+
+The same zero-means-unset rule shows on the `_strtpnts` side:
+`cir6_strtpnts` is the only all-zero `a` column on retail — its
+position-matched `.opp` routes stage ~177–183° and the driving line
+passes within ~6 m of the grid heading +Z, so a verbatim 0 yaw (−Z)
+faces the whole grid backward. Producers therefore read `a = 0` as
+"no authored heading" and derive a course facing instead of spawning
+backward; every nonzero `a` on retail binds verbatim.

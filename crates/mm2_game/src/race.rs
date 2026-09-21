@@ -129,12 +129,21 @@ impl Checkpoint {
 /// while the waypoint `a` column
 /// ([`Checkpoint::heading_deg`]) is a course *bearing* — the same
 /// column name, exactly 180° apart (the UNK-16 split).
+///
+/// `None` means the authored record supplies no heading: a `_strtpnts`
+/// row authoring `a = 0` is the same zero-means-unset convention the
+/// `.opp` staging field uses (`brake == 0` = no staged facing) —
+/// measured on retail `cir6_strtpnts`, the lone all-zero grid, whose
+/// routes stage ~180°. Reading authored 0 as a real −Z yaw spawned the
+/// whole grid backward; consumers of `None` derive a course facing
+/// instead (the player faces the course — [`RaceDefinition::course_yaw`]
+/// — an opponent its route's staged heading or first leg).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RaceStart {
     /// Authored slot position.
     pub position: Vec3,
-    /// Heading in vehicle-yaw degrees.
-    pub yaw_deg: f32,
+    /// Heading in vehicle-yaw degrees, `None` when nothing is authored.
+    pub yaw_deg: Option<f32>,
 }
 
 /// How a participant's checkpoint crossings accumulate — carried on
@@ -292,6 +301,24 @@ impl RaceDefinition {
             return Err(RaceError::BadExtent);
         }
         Ok(())
+    }
+
+    /// The course's opening direction from `from` — a vehicle-yaw
+    /// heading in radians facing the first trigger far enough away to
+    /// define one (2 m in XZ). This is the same facing the producer's
+    /// no-grid fallback derives from the row0→row1 waypoint tangent:
+    /// `checkpoints[0]` is that tangent's far end under both rules.
+    /// Used when a [`RaceStart`] carries no authored heading
+    /// (`yaw_deg == None` — the `_strtpnts` `a = 0` case). `None` when
+    /// no trigger defines a direction — degenerate authored data, not
+    /// a course.
+    pub fn course_yaw(&self, from: Vec3) -> Option<f32> {
+        self.checkpoints
+            .iter()
+            .chain(self.finish.iter())
+            .map(|c| c.center - from)
+            .find(|d| d.x * d.x + d.z * d.z > 4.0)
+            .map(|d| (-d.x).atan2(-d.z))
     }
 }
 

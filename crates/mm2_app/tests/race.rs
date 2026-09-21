@@ -55,7 +55,7 @@ fn any_order_def(countdown: u32) -> RaceDefinition {
         countdown_ticks: countdown,
         start_slots: vec![RaceStart {
             position: Vec3::new(-50.0, 0.0, 0.0),
-            yaw_deg: 0.0,
+            yaw_deg: Some(0.0),
         }],
     }
 }

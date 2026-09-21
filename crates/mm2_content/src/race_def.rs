@@ -293,16 +293,21 @@ fn start_slots(event: &CatalogEvent, rows: &[mm2_formats::waypoints::Waypoint]) 
         position: line,
         // `yaw_deg` is the vehicle-yaw convention: forward =
         // (−sin a, −cos a) in XZ — the tangent's bearing + 180°.
-        yaw_deg: (-d.x).atan2(-d.z).to_degrees(),
+        yaw_deg: Some((-d.x).atan2(-d.z).to_degrees()),
     }]
 }
 
 /// `_strtpnts` rows as start slots — only SF circuit records ship
 /// these on retail (F11-A); row 0 is the player slot by convention
-/// (inferred, `WPT-3`/`UNK-17`). Angles stay verbatim — the column is
-/// measured as a vehicle-yaw heading (the grid's ~+92° faces the −X
-/// course on `cir1_strtpnts`), *not* the waypoint `a` bearing — the
-/// two `a` columns sit exactly 180° apart (UNK-16 split).
+/// (inferred, `WPT-3`/`UNK-17`). Nonzero angles stay verbatim — the
+/// column is measured as a vehicle-yaw heading (the grid's ~+92° faces
+/// the −X course on `cir1_strtpnts`), *not* the waypoint `a` bearing —
+/// the two `a` columns sit exactly 180° apart (UNK-16 split). An
+/// authored `a = 0` means no heading — the same zero-means-unset rule
+/// the `.opp` staging field uses: retail `cir6_strtpnts` is the lone
+/// all-zero grid and its routes stage ~180°, so a verbatim 0 would
+/// face the whole grid backward. `None` lets each consumer derive a
+/// course facing instead.
 fn authored_start_slots(event: &CatalogEvent) -> Option<Vec<RaceStart>> {
     let file = event.records.iter().find_map(|r| {
         if let RecordContent::StartPoints(f) = &r.content {
@@ -316,7 +321,7 @@ fn authored_start_slots(event: &CatalogEvent) -> Option<Vec<RaceStart>> {
         .iter()
         .map(|p| RaceStart {
             position: Vec3::new(p.position[0], p.position[1], p.position[2]),
-            yaw_deg: p.angle_deg,
+            yaw_deg: (p.angle_deg != 0.0).then_some(p.angle_deg),
         })
         .collect();
     if slots.is_empty() { None } else { Some(slots) }

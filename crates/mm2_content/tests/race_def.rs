@@ -124,11 +124,14 @@ fn derived_start_slot_sits_on_the_line_facing_the_course() {
     // `yaw_deg` is the vehicle-yaw convention: forward =
     // (−sin a, −cos a), the course tangent turned +180° from the
     // waypoint bearing. The course runs −Z, so −cos(a) ≈ −1 → a ≈ 0.
-    let a = slot.yaw_deg.to_radians();
+    let a = slot
+        .yaw_deg
+        .expect("the designed slot faces the course")
+        .to_radians();
     assert!(
         -a.cos() < -0.98,
         "vehicle-yaw {:.1}° should face -Z (the course)",
-        slot.yaw_deg
+        slot.yaw_deg.unwrap()
     );
 }
 
@@ -170,16 +173,70 @@ fn authored_strtpnts_become_the_start_slots() {
 
     assert_eq!(def.start_slots.len(), 2, "both authored slots kept");
     assert_eq!(def.start_slots[0].position.x, -489.25);
-    assert_eq!(def.start_slots[0].yaw_deg, 92.36, "authored yaw verbatim");
+    assert_eq!(
+        def.start_slots[0].yaw_deg,
+        Some(92.36),
+        "authored yaw verbatim"
+    );
     // Measured convention: the `a` column is vehicle yaw — forward
     // (−sin a, −cos a) — so ~92° faces −X, the cir1 course direction.
     // The waypoint `a` bearing would read the same number as +X.
-    let a = def.start_slots[0].yaw_deg.to_radians();
+    let a = def.start_slots[0].yaw_deg.unwrap().to_radians();
     assert!(
         -a.sin() < -0.99,
         "authored 92° yaw must face −X (the course), fwd=({}, {})",
         -a.sin(),
         -a.cos()
+    );
+}
+
+/// An authored `a = 0` means *no heading* — the same zero-means-unset
+/// rule the `.opp` staging field uses (retail `cir6_strtpnts` is the
+/// lone all-zero grid; its routes stage ~180°, so a verbatim 0 faces
+/// the grid backward). The producer must hand consumers `None`, not a
+/// real −Z yaw.
+#[test]
+fn zero_strtpnts_angle_is_no_authored_heading() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(
+        d,
+        "race/sf/mmcircuitdata.csv",
+        &format!("{MM_HEADER}\n{ROW}\n"),
+    );
+    write(d, "race/sf/circuit0.aimap", "#\n");
+    write(
+        d,
+        "race/sf/circuit0waypoints.csv",
+        &format!(
+            "{WAYPOINTS}{}{}{}{}",
+            row(0.0, 0.0, 15.0),
+            row(30.0, 0.0, 8.0),
+            row(60.0, 0.0, 9.0),
+            row(90.0, 0.0, 10.0)
+        ),
+    );
+    // cir6-shaped grid: positions real, every `a` authored 0.
+    write(
+        d,
+        "race/sf/cir0_strtpnts",
+        "-395.0,0.0,-402.0,0,0,0,0,0,0,\n-391.0,0.0,-406.0,0,0,0,0,0,0,\n-399.0,0.0,-406.0,90.0,0,0,0,0,0,\n",
+    );
+    let vfs = vfs_of(d);
+    let catalog = EventCatalog::scan(&vfs, "sf");
+    let def = race_definition(
+        event(&catalog, EventTableKind::Circuit, 0),
+        Difficulty::Amateur,
+    )
+    .unwrap();
+
+    assert_eq!(def.start_slots.len(), 3, "all authored slots kept");
+    assert_eq!(def.start_slots[0].yaw_deg, None, "a=0 → no heading");
+    assert_eq!(def.start_slots[1].yaw_deg, None, "a=0 → no heading");
+    assert_eq!(
+        def.start_slots[2].yaw_deg,
+        Some(90.0),
+        "a nonzero authored angle still binds verbatim"
     );
 }
 

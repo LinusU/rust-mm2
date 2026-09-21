@@ -263,6 +263,63 @@ fn authored_strtpnts_yaw_faces_the_player_spawn() {
     );
 }
 
+/// An all-zero `_strtpnts` `a` column authors *no heading* (retail
+/// `cir6_strtpnts` — the same zero-means-unset rule the `.opp` staging
+/// field uses). The player must fall back to the course facing — a
+/// verbatim yaw 0 faced the whole grid −Z, backward off a course that
+/// measures ~180°.
+#[test]
+fn zero_strtpnts_yaw_falls_back_to_the_course() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(
+        d,
+        "race/testcity/mmcircuitdata.csv",
+        format!("{MM_HEADER}\n{ROW}\n"),
+    );
+    write(d, "race/testcity/circuit0.aimap", "#\n");
+    write(
+        d,
+        "race/testcity/circuit0waypoints.csv",
+        format!(
+            "{WAYPOINTS}{}{}{}{}",
+            waypoint_row(60.0, COURSE_Z),
+            waypoint_row(110.0, COURSE_Z),
+            waypoint_row(140.0, COURSE_Z),
+            waypoint_row(165.0, COURSE_Z),
+        ),
+    );
+    // cir6-shaped grid: authored positions, `a` all zero.
+    write(
+        d,
+        "race/testcity/cir0_strtpnts",
+        "60,0,140,0,0,0,0,0,0,\n56,0,144,0,0,0,0,0,0,\n",
+    );
+    let config = SessionConfig {
+        mode: SessionMode::Event(EventRef {
+            city: "testcity".into(),
+            table: EventTableKind::Circuit,
+            index: 0,
+        }),
+        ..SessionConfig::default()
+    };
+    let mut app = event_app(config, vfs_of(tmp.path()));
+    app.update();
+    assert_eq!(phase(&app), SessionPhase::Countdown);
+
+    let car = car(&mut app);
+    let pos = app.world().get::<Position>(car).unwrap().0;
+    assert!(
+        (pos.x - 60.0).abs() < 3.0 && (pos.z - COURSE_Z).abs() < 3.0,
+        "player still on the authored grid slot, got {pos:?}"
+    );
+    let fwd = app.world().get::<Transform>(car).unwrap().rotation * Vec3::NEG_Z;
+    assert!(
+        fwd.x > 0.98,
+        "no authored heading → face the course (+X toward gate 0), fwd={fwd:?}"
+    );
+}
+
 /// The countdown releases through `advance_race` exactly once, into
 /// `Playing` — the authored event drives the shared lifecycle, not a
 /// test-side stand-in.

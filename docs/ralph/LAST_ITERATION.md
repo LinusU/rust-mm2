@@ -1,142 +1,126 @@
 # Last implementation iteration
 
-- Task ID and title: F15-A.3 — authored start headings: `.opp` row-0
-  staging heading + `_strtpnts` `a` measured as vehicle yaw; player
-  spawn-yaw defect repaired; opponents face their authored heading;
-  the initial route chase skips anchors behind the staged facing.
-- Starting commit: `09e2b0045d00ca861f37cb322c267f425246278b`
-  (externally checked F15-B.1; branch `ralph/night`).
-- Why this slice: the F15-A spawn/drive leg left facing provisional
-  (UNK-16/17). Measuring all 612 retail `.opp` files against the
-  `cir*_strtpnts` grids resolved the convention split — and exposed a
-  live defect: `session.rs` read the authored slot angle as a bearing
-  and added 180°, so the player spawned facing backward on every
-  authored SF circuit grid. One coherent repair covers player spawn,
-  opponent facing and the first chase target.
+- Task ID and title: F15-A.3 review repair — an authored `_strtpnts`
+  `a = 0` is *no heading* (the `.opp` `brake == 0` convention applied
+  to start grids): `RaceStart.yaw_deg` → `Option<f32>`, and a `None`
+  slot derives a course facing instead of spawning backward.
+- Starting commit: `36b05304816083af2cf9ee65f37355eb582417b1` on
+  `ralph/night` — the iteration-10 candidate the external review
+  rejected on one blocking finding.
 - Retail install: `/Users/linus/coding/rust-mm2/retail`
   (`fnv1a64:e91e6cd4b2ae30d9`).
 
-## What the measurement established
+## The blocker being repaired
 
-- The `.opp` `brake` header misleads: a nonzero value marks a *staging
-  record* whose payload is a heading in degrees — row 0 carries it on
-  592/612 retail files; 542 of those agree with the route's course
-  direction within ~25°; grid events share one value across their
-  routes (`circuit0-*` all read 175.0). `race/sf/race5-a-{5,6,7}` carry
-  a second staging row mid-file — what re-stages there is still open.
-  Every other `.opp` column authors 0 on retail.
-- `_strtpnts` `a` is the same convention: vehicle yaw — forward
-  `(−sin a, −cos a)` in XZ, exactly what `Quat::from_rotation_y`
-  produces for local −Z forward (`cir1` ≈ +92° faces the −X course).
-- The waypoint `a` column is a *course bearing* (`atan2(dx,dz)` along
-  the rows) — exactly 180° apart, which is the UNK-16 split, now
-  measured rather than suspected. `MIRROR_Z` is `false` — authored
-  space is runtime space, no transform accounts for the difference.
-- A staged start is not necessarily on the driving line:
-  `circuit1-a-0`'s heading runs −X while its row-1 anchor sits +X of
-  the spawn — the `.opp` line is a loop the staged start joins mid-leg.
+External review (iteration-10 feedback, `review.verdict: fail`):
+`cir6_strtpnts` authors `a = 0` on all three rows — the lone all-zero
+grid on retail — yet `authored_start_slots` kept it verbatim, so
+`session.rs`/`spawn_pose` spawned the player and the two grid-slot
+opponents at yaw 0 = −Z. The `.opp` routes bound to `circuit:6` stage
+~177–183° (vehicle-yaw +Z) and the driving line passes within ~6 m of
+the grid heading +Z; the reviewer's live run had the hold-driver go
+`z=-402 → z=-483`, 81 m backward into the start-line area, and the
+grid-slot opponents U-turned at green. The reviewer's own convention
+already treats `.opp brake == 0` as "no authored heading"; the same
+rule was missing on the `_strtpnts` side.
+
+## Root cause
+
+`authored_start_slots` mapped `p.angle_deg` verbatim into
+`RaceStart.yaw_deg: f32` — a scalar contract with no way to say
+"nothing authored". Every nonzero grid on retail (8/9 files) carries
+a real heading, so the convention fix was correct for them; the zero
+column needed the same zero-means-unset reading `start_heading_deg`
+applies to `.opp` row-0 `brake`.
 
 ## What changed
 
-- `mm2_game::race::RaceStart.yaw_deg` is now defined as vehicle-yaw
-  degrees (doc spell-out; consumers were the bug).
-- `mm2_content::race_def`: the no-grid fallback derives
-  `atan2(−dx,−dz)` (was `atan2(dx,dz)` — the opposite bearing);
-  `_strtpnts` keeps authored `a` verbatim, now documented as yaw.
-- `mm2_app::session`: `spawn.yaw = slot.yaw_deg.to_radians()` — the
-  old code re-derived a bearing and added 180°, spawning the player
-  backward on `_strtpnts` grids.
-- `mm2_game::OpponentRoute::start_heading_deg()` returns row-0's
-  nonzero staged heading (raw `brake` preserved);
-  `OpponentRoutePoint::brake`/`mm2_formats::opp` docs corrected —
-  the field is not a speed.
-- `mm2_app::opponents::spawn_pose` faces by position source: authored
-  grid slot → its `yaw_deg`; route anchor → staged heading when
-  authored, else the previous first-leg facing; designed stagger →
-  the player's yaw (unchanged).
-- `initial_route_index` starts `OpponentDriver.next` at the first
-  route anchor ahead of the staged facing and not already reached —
-  chasing a behind anchor U-turns the car off its authored heading
-  (`circuit1-a-0` shape). Anchors left behind are picked up by the
-  closed-route wrap like every other passed point.
-- Remaining provisional policies (UNK-17, unchanged): `_strtpnts`
-  row 0 = player slot, opponents take `index + 1` or the route's
-  staged point; which authored start set the original consumes per
-  participant is still unverified.
+- `mm2_game::race::RaceStart.yaw_deg` is now `Option<f32>` — `Some`
+  is an authored (or producer-derived) vehicle-yaw heading, `None`
+  means the record supplied none. Doc updated with the measured
+  `cir6` case.
+- `mm2_game::race::RaceDefinition::course_yaw(from)` — new shared
+  helper: the course's opening direction as a vehicle-yaw radians
+  heading toward the first trigger ≥2 m away in XZ (the same facing
+  the no-grid producer fallback derives from the row0→row1 tangent —
+  `checkpoints[0]` is its far end under both rules). `None` on
+  degenerate data.
+- `mm2_content::race_def::authored_start_slots` maps `a = 0` →
+  `yaw_deg: None`; nonzero stays verbatim; the designed no-grid
+  fallback slot stores `Some`.
+- `mm2_app::session` player spawn: `yaw_deg` → `course_yaw` → the
+  world roam yaw, in that order — matching the reviewer's suggested
+  "derived/course facing" leg.
+- `mm2_app::opponents::spawn_pose` restructured so a `None` grid slot
+  falls through to the same chain a route-anchor spawn uses: route
+  staged heading → first-leg direction → player's yaw — the
+  reviewer's suggested opponent leg. Position still follows the slot.
+- `mm2_formats::waypoints::StartPoint` doc notes authored 0 = no
+  heading (parser keeps raw, as before).
 
 ## Tests
 
-- `mm2_app/tests/opponents.rs` — 19 total (+3):
-  `spawn_pose_faces_the_authored_staging_heading` (a 90° staging
-  heading beats the +X first leg — discriminates authored facing from
-  the old fallback), `initial_chase_index_skips_anchors_behind_the_
-  staging` (both directions), `authored_staging_heading_faces_the_
-  spawn` (production path: authored −X facing reaches the entity's
-  rotation, `driver.next` lands past the behind tail, no drive demand
-  reverses it). `spawn_pose_prefers_…` now asserts the slot's authored
-  yaw (was the route-leg facing); restart asserts the computed first
-  chase index.
-- `mm2_app/tests/event.rs` — 12 total (+1):
-  `authored_strtpnts_yaw_faces_the_player_spawn` — a retail-style
-  90° `_strtpnts` grid puts the player's forward at −X verbatim
-  through `load_session_world` (the regression: the old code faced
-  +X, backward).
-- `mm2_content/tests/race_def.rs` — the derived fallback asserts
-  vehicle-yaw convention (`−cos a` down-course); the `_strtpnts` test
-  now asserts authored 92° faces −X.
+- `mm2_content/tests/race_def.rs` — `zero_strtpnts_angle_is_no_
+  authored_heading`: a cir6-shaped all-zero grid produces `None`
+  slots while a nonzero row in the same file still binds verbatim.
+  Existing strtpnts/tangent tests updated for `Option` (15 total).
+- `mm2_app/tests/event.rs` — `zero_strtpnts_yaw_falls_back_to_the_
+  course` (production path): an all-zero grid on a +X course spawns
+  the player on the authored slot facing +X toward gate 0 — the old
+  code faced −Z (13 total).
+- `mm2_app/tests/opponents.rs` — `spawn_pose_on_a_headless_grid_slot_
+  uses_the_route_facing`: `None` slot keeps its position and takes
+  the route's staged heading; no staged heading → first leg; no route
+  → player's yaw (20 total).
+- `mm2_game/tests/race.rs` — `course_yaw_faces_the_first_real_
+  trigger`: first-trigger facing, on-slot trigger skip, degenerate →
+  `None` (21 total).
 
 ## Commands actually run and results
 
 - `cargo fmt --all -- --check` PASS.
 - `cargo clippy --locked --workspace --all-targets --all-features --
   -D warnings` PASS.
-- `cargo test --locked --workspace` — all groups ok, 0 failures
-  (38 groups).
-- `cargo test -p mm2_app --test opponents --test event -p mm2_content
-  --test race_def` — all ok during development.
-- Retail evidence — `fnv1a64:e91e6cd4b2ae30d9`, deterministic headless,
-  with a same-iteration `09e2b00` baseline worktree (`/tmp`,
-  since removed) run for direct comparison:
-  - `sf circuit:1 --headless --frames 900` (hold driver — straight-line
-    facing probe): final `(-507,·,-52)` from the `cir1_strtpnts` slot
-    `(-489,·,-55)` yaw 92.4° — the car drives **−X, the authored
-    facing/course direction**. Baseline same command: `(-485,·,-55)` —
-    +X, backward off the grid, run this iteration on the old binary.
-  - `sf circuit:1 --bot --frames 14400`: `opp=0/7` `cp=4/10` lap 1/3,
-    impacts 1049 — baseline `opp=0/7` `cp=4/10` impacts 1075,
-    `final` within 2 m. Parity: a 3-lap × 10-gate course the scripted
-    driver cannot finish in 240 s — not a stall, and identical on the
-    old build.
-  - `sf checkpoint:0 --bot --frames 5400`: `opp=6/6` impacts 233 —
-    baseline `opp=3/6` impacts 195. All six opponents finish through
-    shared `advance_race` validation. Both builds end `status=fail`
-    "fell through the world" — the scripted player drives off-course
-    after the race resolves; a `--bot` limit on both builds.
-  - `london circuit:0 --bot --frames 14400`: `opp=2/7` impacts 576,
-    player unresolved at lap 3 — baseline `opp=3/7` impacts 408,
-    player finished place 4. One fewer finisher through the
-    authored-heading launch (the staged heading aims the pack down
-    the p1→p2 leg immediately instead of the old south detour +
-    U-turn); disclosed honestly — equal to the pre-F15-B.1 `2/7`.
+- `cargo test --locked --workspace` — all 38 groups ok, 0 failures.
+- Retail evidence — `fnv1a64:e91e6cd4b2ae30d9`, deterministic
+  headless (`./target/debug/mm2 --mm2-path …/retail`):
+  - `sf circuit:6 --headless --frames 900` (hold driver — the
+    reviewer's reproduction command): spawn `(-1478,·,-402)` →
+    `final=(-1646,38.6,-393)`, `cp=1/9`, `pos=1/7` — drives down-course
+    −X through gate 0 toward the next gate. The rejected candidate
+    drove `z=-402 → -483` (81 m backward, −Z); the course direction is
+    now correct.
+  - `sf circuit:6 --headless --bot --frames 5400`: `pos=2/7`,
+    `final=(-1759,·,-307)` — the scripted player cleared gate 0 and is
+    chasing gate 1 with one opponent ahead; the field makes progress
+    instead of U-turning off the grid. (No pre-fix `circuit:6` bot
+    baseline exists — the reviewer measured the defect live.)
+  - `sf circuit:1 --headless --frames 900` (regression check):
+    `final=(-507,18.9,-52)` — bit-identical to the verified
+    iteration-10 record; the nonzero-heading path is untouched.
+  - `mm2-inspect dump race/sf/cir6_strtpnts` confirms all three rows
+    author `a=0.0`; `circuit6-a-0.opp` row 0 stages at `(-1474,-474)`
+    heading `177.0` and drives +Z through the grid before turning −X.
 - Evidence classification: code gates + synthetic integration tests +
-  deterministic headless retail runs. No GPU/rendered/audio evidence
-  this iteration; no original-executable comparison exists.
+  deterministic headless retail runs. No GPU/rendered/audio evidence;
+  no original-executable comparison exists.
 
 ## Ledger / research updates
 
-- `docs/original-rules.md`: WPT-4 rewritten — both `a` conventions
-  measured (waypoint bearing vs start/staging vehicle yaw, 180°
-  apart); UNK-16 narrowed to gate-direction enforcement; UNK-11's
-  "all `.opp` columns author zero" misstatement corrected — `brake`
-  measured as the staging heading; UNK-17 narrowed to the
-  participant↔slot mapping question.
-- `docs/research/aimap.md`: `.opp` record section added with the
-  612-file measurement (staging rows, shared grid headings,
-  mid-leg joins, `race5` second staging row).
-- `docs/ralph/PLAN.md`: F15-A.3 row added under F15-A.
+- `docs/original-rules.md` WPT-4: the `a = 0` unset rule added to the
+  measured conventions (`Option` contract + per-consumer fallbacks).
+- `docs/research/aimap.md`: `_strtpnts` side of the zero-means-unset
+  convention recorded with the `cir6` measurements.
+- `docs/ralph/PLAN.md`: F15-A.3 row gains the review-repair note.
 
 ## Still open
 
+- The `cir<N>` → `circuit<N>` same-index alias (WPT-3, pre-existing):
+  the review's positional+heading matching contradicts it for several
+  grids (cir2↔circuit0, cir4↔circuit5, cir5↔circuit8, cir8↔circuit4;
+  cir9 ambiguous). Wrong-event grid *positions* were already consumed
+  before F15-A.3; the alias needs its own measurement/ledger update —
+  left open as its own slice, not silently repaired here.
 - What triggers `race/sf/race5-a-{5,6,7}`'s mid-file staging row.
 - Whether the original consumes `.opp` staged poses vs `_strtpnts`
   slots per participant (UNK-17), and whether waypoint `a` enforces

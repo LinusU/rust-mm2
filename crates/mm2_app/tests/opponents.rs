@@ -438,11 +438,11 @@ fn spawn_pose_prefers_the_authored_grid_then_the_route_anchor() {
         start_slots: vec![
             mm2_game::RaceStart {
                 position: Vec3::new(60.0, 0.0, 140.0),
-                yaw_deg: 90.0,
+                yaw_deg: Some(90.0),
             },
             mm2_game::RaceStart {
                 position: Vec3::new(56.0, 0.0, 144.0),
-                yaw_deg: 90.0,
+                yaw_deg: Some(90.0),
             },
         ],
     };
@@ -500,7 +500,7 @@ fn spawn_pose_faces_the_authored_staging_heading() {
         countdown_ticks: 0,
         start_slots: vec![mm2_game::RaceStart {
             position: Vec3::new(60.0, 0.0, 140.0),
-            yaw_deg: 0.0,
+            yaw_deg: Some(0.0),
         }],
     };
     let spec = OpponentSpec {
@@ -517,6 +517,75 @@ fn spawn_pose_faces_the_authored_staging_heading() {
         (yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-4,
         "authored 90° staging faces −X (vehicle yaw +π/2), got {yaw}"
     );
+}
+
+/// A grid slot carrying no authored heading (`yaw_deg == None` — the
+/// producer's `_strtpnts` `a = 0` mapping, retail `cir6`'s all-zero
+/// column) still spawns on the slot but takes the route's staged
+/// heading — a verbatim −Z would face it backward off the measured
+/// ~180° course. With no staged heading the first leg supplies the
+/// facing, like a route-anchor spawn.
+#[test]
+fn spawn_pose_on_a_headless_grid_slot_uses_the_route_facing() {
+    let def = RaceDefinition {
+        checkpoints: Vec::new(),
+        finish: None,
+        rule: mm2_game::CheckpointRule::AnyOrder,
+        laps: 0,
+        time_limit_ticks: None,
+        params: mm2_game::EventParams::default(),
+        countdown_ticks: 0,
+        start_slots: vec![
+            mm2_game::RaceStart {
+                position: Vec3::new(60.0, 0.0, 140.0),
+                yaw_deg: None,
+            },
+            mm2_game::RaceStart {
+                position: Vec3::new(56.0, 0.0, 144.0),
+                yaw_deg: None,
+            },
+        ],
+    };
+    let fwd = |yaw: f32| Vec3::new(-yaw.sin(), 0.0, -yaw.cos());
+    // Staged route: the authored 180° heading faces +Z (vehicle yaw π),
+    // not the authored-0 −Z a verbatim read would produce.
+    let staged = OpponentSpec {
+        vehicle: "vpt".into(),
+        params: Vec::new(),
+        route: Some(staged_route(
+            180.0,
+            &[[70.0, 0.0, 144.0], [70.0, 0.0, 170.0]],
+        )),
+    };
+    let (pos, yaw) = spawn_pose(&def, 0, &staged, Vec3::new(60.0, 0.0, 140.0), 0.0);
+    assert_eq!(pos, Vec3::new(56.0, 0.0, 144.0), "the authored slot stands");
+    assert!(
+        fwd(yaw).z > 0.98,
+        "no authored slot yaw → the route's 180° staging faces +Z, got {yaw}"
+    );
+
+    // No staged heading either → the route's first leg supplies it:
+    // the nearest anchor sits +X of the slot.
+    let unstaged = OpponentSpec {
+        vehicle: "vpt".into(),
+        params: Vec::new(),
+        route: Some(route(&[[70.0, 0.0, 144.0], [70.0, 0.0, 170.0]])),
+    };
+    let (pos, yaw) = spawn_pose(&def, 0, &unstaged, Vec3::new(60.0, 0.0, 140.0), 0.0);
+    assert_eq!(pos, Vec3::new(56.0, 0.0, 144.0));
+    assert!(
+        fwd(yaw).x > 0.98,
+        "no authored headings at all → the first-leg facing, got {yaw}"
+    );
+
+    // A route-less entry on a headless slot inherits the player's yaw.
+    let bare = OpponentSpec {
+        vehicle: "vpt".into(),
+        params: Vec::new(),
+        route: None,
+    };
+    let (_, yaw) = spawn_pose(&def, 0, &bare, Vec3::new(60.0, 0.0, 140.0), 0.4);
+    assert_eq!(yaw, 0.4, "no route → the player's heading");
 }
 
 /// A staged start joins the `.opp` line mid-leg (measured on retail

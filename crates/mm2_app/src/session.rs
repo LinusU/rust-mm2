@@ -321,7 +321,14 @@ pub fn load_session_world(
                     // column measures this way (retail `cir1` ≈ +92°
                     // faces the −X course); it is *not* the waypoint
                     // `a` bearing — the two sit 180° apart (UNK-16).
-                    spawn.yaw = slot.yaw_deg.to_radians();
+                    // `None` means the record authored no heading
+                    // (`cir6_strtpnts`' all-zero column): fall back to
+                    // the course facing, not a verbatim −Z.
+                    spawn.yaw = slot
+                        .yaw_deg
+                        .map(f32::to_radians)
+                        .or_else(|| def.course_yaw(slot.position))
+                        .unwrap_or(spawn.yaw);
                 }
                 info!(
                     event = %format!("{:?}[{}]", event_ref.table, event_ref.index),

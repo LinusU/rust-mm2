@@ -47,8 +47,12 @@
 //! heading on a route anchor — both measured as the vehicle-yaw
 //! convention (the `_strtpnts` `a` column and the `.opp` `brake` field
 //! agree; the waypoint `a` column is the opposite bearing — the UNK-16
-//! split, now measured). Which of the two authored start sets the
-//! original consumes stays open under UNK-17.
+//! split, now measured). A grid slot authoring `a = 0` carries no
+//! heading (`yaw_deg == None` — `cir6_strtpnts` ships all-zero while
+//! its routes stage ~180°) and falls through to the same staged →
+//! first-leg chain rather than facing backward off the course. Which
+//! of the two authored start sets the original consumes stays open
+//! under UNK-17.
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
@@ -259,7 +263,11 @@ pub fn route_target(route: &OpponentRoute, mut next: usize, pos: Vec3) -> (usize
 /// heading (the mislabelled `brake` column — measured as the same yaw
 /// convention on 592/612 retail files). Only a route with no authored
 /// heading falls back to the first-leg direction it used before, and
-/// a route-less entry inherits the player's yaw.
+/// a route-less entry inherits the player's yaw. A grid slot carrying
+/// no authored heading (`yaw_deg == None` — `cir6_strtpnts`' all-zero
+/// `a` column) takes the same staged-heading → first-leg chain: a
+/// verbatim 0 would face the slot backward off the measured course
+/// (the staged routes there run ~180°).
 pub fn spawn_pose(
     definition: &RaceDefinition,
     index: usize,
@@ -267,21 +275,24 @@ pub fn spawn_pose(
     player_pos: Vec3,
     player_yaw: f32,
 ) -> (Vec3, f32) {
-    if let Some(slot) = definition.start_slots.get(index + 1) {
-        return (slot.position, slot.yaw_deg.to_radians());
-    }
-    let position = spec
-        .route
-        .as_ref()
-        .and_then(|r| r.points.first().map(|p| p.position))
-        .unwrap_or_else(|| {
-            let back = Vec3::new(-player_yaw.sin(), 0.0, -player_yaw.cos());
-            player_pos - back * (FALLBACK_SPACING * (index + 1) as f32)
-        });
-    let yaw = spec
-        .route
-        .as_ref()
-        .and_then(|r| r.start_heading_deg().map(f32::to_radians))
+    let slot = definition.start_slots.get(index + 1);
+    let position = slot.map(|s| s.position).unwrap_or_else(|| {
+        spec.route
+            .as_ref()
+            .and_then(|r| r.points.first().map(|p| p.position))
+            .unwrap_or_else(|| {
+                let back = Vec3::new(-player_yaw.sin(), 0.0, -player_yaw.cos());
+                player_pos - back * (FALLBACK_SPACING * (index + 1) as f32)
+            })
+    });
+    let yaw = slot
+        .and_then(|s| s.yaw_deg)
+        .map(f32::to_radians)
+        .or_else(|| {
+            spec.route
+                .as_ref()
+                .and_then(|r| r.start_heading_deg().map(f32::to_radians))
+        })
         .or_else(|| {
             spec.route.as_ref().and_then(|r| {
                 r.points
