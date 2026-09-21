@@ -38,31 +38,52 @@
 
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
-**Next selected slice: F16-C remainder (AC06's deliberate-delete
-flow is F17-shared), F15-B remainder, F11-C remainder, or F17-A** —
-the latest iteration landed F16-C.1, the AC01/AC04 evidence legs:
-a two-profile restart-isolation test drives A to a real authored
-finish through the production race/progression path, drops the app
-and reopens the store on a fresh handle (a new process's only view
-is the files), binds B and proves no progress/unlock/selection leak
-in either direction — including A's earned grant still gating
-`vpreward` for B through `vehicle_gate_note` — then drives B's own
-finish and proves A's file untouched. The AC04 leg binds through a
-complete-but-orphaned `.tmp` (crash between flush and rename) and
-verifies the bind-time heal. Review repairs folded in: the stale
-`Unlock::Paint` "unverified index base" comment now records the
-measured zero-based variant (DSN-16), and VEH-5's nonzero
-`UnlockFlags` list gains the omitted `vpeagle` (verified `0/1` on
-the roster audit). `mm2-inspect events` now prints the reward
-coverage reconciliation AC05 wants — `N authored rows → E
-event-bound + M milestone rules, K diagnostics` — no longer hides
-a city whose authored rows are all diagnostics, and fails strict
-when accounted ≠ authored; retail records 10 → 4+6, 0 diagnostics
-per city. Still open under F16-C: the AC01 process-level leg (two
-real interactive launches completing an event) is unproven —
+**Next selected slice: F17-A remainder (Quick Race + weather controls
+need F18), F15-B remainder, F11-C remainder, or F16-C's AC01
+process-level leg** — the latest iteration landed F17-A.1, the menu
+shell: a bare `--mm2-path` boot now parks in `mm2_app::menu` over the
+real catalogs — Cruise cities from `city/*.psdl`, event tables/rows
+from `EventCatalog`+`AvailabilityTable` (CHK-3/CC gates and incomplete
+content name their reasons instead of hiding), the `listed` garage
+with locked-vehicle/gated-paint refusals, the profile screen with
+select/create and `X`/`Delete` behind `Screen::ConfirmDelete`
+(F16-AC06's deliberate-confirmation leg — a plain activation binds;
+deleting the bound profile unbinds; the last profile refuses per
+DRV-7 with the reason left visible). `AvailabilityTable::of_unbound`/
+`GarageTable::of_unbound` give the fresh-driver view when no profile
+is bound. Launches build the real `SessionConfig` and call
+`Session::begin`; `menu_watch` reopens the shell on `Unloading →
+Menu`, and `drive_session` only writes `AppExit` at Menu when no
+`MenuShell` exists — every session-shaping or smoke flag still boots
+directly into a world. Six headless integration tests cover boot,
+the launch→quit→menu→relaunch loop (AC06's menu leg), gated/incomplete
+event rows, garage→`SelectedCar` carry-through, the profile
+bind/create/delete flow, and the empty-install honest-failure path.
+Still open under F17-A: Quick Race (`last_event`), per-event
+weather/time/density (needs F18's session-legal writers), mouse nav,
+text entry, and the original-menu audit against F17-AC05's capability
+denominator. Before that the iteration landed F16-C.1 — the
+AC01/AC04 evidence legs: a two-profile restart-isolation test drives
+A to a real authored finish through the production race/progression
+path, drops the app and reopens the store on a fresh handle (a new
+process's only view is the files), binds B and proves no
+progress/unlock/selection leak in either direction — including A's
+earned grant still gating `vpreward` for B through
+`vehicle_gate_note` — then drives B's own finish and proves A's file
+untouched. The AC04 leg binds through a complete-but-orphaned `.tmp`
+(crash between flush and rename) and verifies the bind-time heal.
+Review repairs folded in: the stale `Unlock::Paint` "unverified
+index base" comment now records the measured zero-based variant
+(DSN-16), and VEH-5's nonzero `UnlockFlags` list gains the omitted
+`vpeagle` (verified `0/1` on the roster audit). `mm2-inspect events`
+now prints the reward coverage reconciliation AC05 wants — `N
+authored rows → E event-bound + M milestone rules, K diagnostics` —
+no longer hides a city whose authored rows are all diagnostics, and
+fails strict when accounted ≠ authored; retail records 10 → 4+6, 0
+diagnostics per city. Still open under F16-C: the AC01 process-level
+leg (two real interactive launches completing an event) is unproven —
 headless `--bot` finishes are deliberately ineligible, so the
-synthetic-integration legs are the recorded evidence; AC06 needs
-F17's delete flow. Before that the iteration
+synthetic-integration legs are the recorded evidence. Before that the iteration
 landed F16-B.3, vehicle/paint selectability derived state for F17's
 garage (DSN-18): `mm2_game::progression` gained `GarageTable`
 (one `GarageRow` per catalog entry — `listed`, `VehicleGate`,
@@ -864,9 +885,10 @@ at `563c34e`. Direct observation of rendered gameplay.
 | F16-B.1 | implemented | F16-A | Reward/unlock import + authoritative result consumption (DSN-16). `mm2_content::reward_table` maps `race/<city>/<city>_rewards.csv` into a `RewardTable`: milestone rows keyed `{blitz,circuit,race},half|all` against the catalog's authored family sizes (the indexed-attach fix now decodes the row's `race_type` — a `race,N` row binds `race<N>`, not `crash<N>`), indexed rows bind the event whose stem is `<prefix><N>`, and rows that match no event stay in `diagnostics` rather than dropping silently. `mm2_game::progression`: `Unlock` (`vehicle:<id>` / `paint:<id>:<variant>` — variant is the zero-based paint index, measured under VEH-4), `place_requirement` (top-3 Amateur / 1st Professional — RACE-3/CHK-3/VEH-3/VEH-4 documented wording), `record_eligibility` (DRV-6 extension: dev world, dev car, gameplay-affecting `DevOverrides`, mounted mods → ineligible), `apply_result` (indexed + milestone rules read per-rank `beaten` flags; the `unlocks` set dedups re-grants, AC02). `EventRecord` gains `finishes`/`best_race_ticks`/`best_place`/`beaten_{amateur,professional}`; `ResultLedger` gains generation-scoped `standings_in`/`place_of_in` so a restarted session's place ignores prior generations. `mm2_app::progression::EventRewards` (session-scoped, inserted only on successful event setup, removed on teardown) + `record_session_results` drains the ledger into the bound profile — authoritative `ResultId`s only, never UI (req 3) — filters to the current generation + local participant + `Finished` + event-associated results, skips sandbox/profile-less runs and `--bot` (`ScriptedDrive`) sessions — the scripted driver is evidence tooling, not the player — saves only on change. `mm2-inspect events` prints the normalized summary. Tests +22: game-unit (place criterion, milestone math, dedup, timeout), content (family-aware attach, stray-index diagnostics, denominators), app-integration ×8 (real `load_session_world`→drive-to-finish→profile-on-disk, amateur/pro criteria, ineligible paths, non-local results, bot-driven finish, duplicate delivery). Retail audit 2026-09-21: london+sf each 4 event-bound + 6 milestone rules over Blitz=10/Checkpoint=12/Circuit=10/CrashCourse=13, 0 diagnostics. VEH-3/VEH-4/CC-6 promoted to verified_original — authored rows match help exactly. Candidate pending external check. |
 | F16-B.2 | implemented | F16-B.1 | Event availability derived state (DSN-17). `mm2_game::progression`: `EventGate` (`Open`/`AfterAll(EventKey)`s), `AvailabilityTable` (`rows` in catalog order + `diagnostics`), `EventAvailability{unlocked, customizable, blocked_by}` evaluated per query off the persisted `beaten` flags — sandbox profiles evaluate unrestricted (spec req 5). `mm2_content::availability::availability_table` builds it from the catalog: checkpoint rows gate in authored-order sets of three (CHK-2/CHK-3), crash rows read the authored `Description` tags — lessons open, `midtrm<N>` gates `lesson{3N-2..3N}`, `final` gates all midterms (CC-2/CC-3) — Blitz/Circuit open; unreadable tags/missing groups fail open + diagnosed. Wiring: `EventSetup.availability` → `EventRewards.availability` (session-scoped like the reward table); a `--event` launch of a still-locked event runs but warns naming the un-beaten prerequisites (enforcement is F17's menu, not the CLI); `mm2-inspect events` prints the open/gated split + each gate's prerequisites. Tests +10: game ×5 (set gating, partial-beat blocking, RACE-3 customizable flag, midterm group, sandbox unrestricted, uncatalogued key), content ×4 (set chunking, tag arithmetic incl. partial groups, unrecognized tag diagnostic, midterm-less/final fallbacks), app ×1 (locked launch reaches Countdown with the gate visible on the resource). Retail (install `fnv1a64:e91e6cd4b2ae30d9`, `mm2-inspect events` both cities): 32 open / 13 gated / 0 diagnostics — `race3-5←race0-2`, `race6-8←race3-5`, `race9-11←race6-8`; `crash3←crash0-2`, `crash7←crash4-6`, `crash11←crash8-10`, `crash12←crash3,7,11` — matching CHK-2/CHK-3/CC-3 exactly. Candidate pending external check. |
 | F16-B.3 | implemented | F16-B.1 | Vehicle/paint selectability derived state for F17's garage (DSN-18). `mm2_game::progression`: `VehicleGate`/`PaintGate` (`Open`/`Reward`), `GarageRow` (id + `listed` + gates + verbatim `UnlockScore`/`UnlockFlags` audit fields), `GarageTable::{evaluate,of,row}`, `VehicleAvailability{unlocked, paints[]}` — evaluated per query off the persisted `unlocks` set, sandbox unrestricted (spec req 5). `mm2_content::garage`: `garage_table(catalog, &[&RewardTable])` unions every city's authored grants (a London unlock opens in SF's garage), `scan_garage(vfs)` composes catalog + `race_cities` scans + reward tables and folds reward diagnostics in. Semantics: `vehicle:<id>` grants gate the car (VEH-3), `paint:<id>:<variant>` gates the zero-based `Colors` index (VEH-4 — the index-base question is now measured closed: vpvwcup variant 5/6 land on "Team Angel"/"Team MS", the documented Angel/Microsoft cup paints); a locked vehicle reports all paints locked and unlocking the car does not open gated paints. Roster membership (`GarageRow::listed`) is the canonical `tune/*.info` scan — designed reading: fallback-extension or metadata-less entries (vpmoonrover's `.inf`, UNK-3; pkg/tune-only dev leftovers) are unlisted but still evaluate. Grants for uncatalogued ids/out-of-range variants → diagnostics, never dropped. `CatalogEntry::locked` (`UnlockScore|UnlockFlags` ≠ 0) was measured wrong for this purpose — nonzero on `vpbus`/`vpbullet`/`vpcentury`/`vpcop`/`vpsemi`/`vppanozgt` but zero on six reward-locked cars — and is replaced by raw `unlock_score`/`unlock_flags` + `canonical_info` (VEH-5/UNK-6 recorded). Wiring warn-don't-enforce like the locked `--event` launch: `mm2_app::profile::vehicle_gate_note` → `VehicleGateNote::{Uncatalogued,Unlisted,Locked,LockedPaint}` warns once at launch on a gated `--car`/remembered selection; `--list-cars` and `mm2-inspect cars` print the `gate` column (`open`/`reward`/`unlisted`, `+Ng` gated paints) + authored `s/f` fields. Tests +10: game ×6 (fresh-profile gates, vehicle grant opens car not gated paints, paint grant opens exactly its index, unknown ids inert, sandbox unrestricted, uncatalogued row), content ×3 (grant→gate mapping + unlisted flags, off-catalog/out-of-range diagnostics, two-city union through `scan_garage`), app ×1 (`vehicle_gate_note` notes locked/gated-paint/unlisted/uncatalogued, grants clear, sandbox silent). Retail audit (`mm2-inspect cars`, install `fnv1a64:e91e6cd4b2ae30d9`): `reward` = exactly the 8 VEH-3 locked cars; gated-paint counts match the authored rewards (vpvwcup 4+3g for variants 4/5/6); vpmoonrover + dev leftovers `unlisted`; 0 garage diagnostics. Candidate pending external check. |
-| F16-C | active | F12-B, F13-B, F14-B, F16-B | Split: C.1 (AC01 two-profile isolation + AC04 `.tmp`-recovery app legs — implemented below). Remaining: AC06's deliberate-delete UI confirmation (F17 scope — no delete flow exists beyond the store), and process-level AC01 evidence (an interactive finish — `--bot` results are deliberately ineligible). |
+| F16-C | active | F12-B, F13-B, F14-B, F16-B | Split: C.1 (AC01 two-profile isolation + AC04 `.tmp`-recovery app legs — implemented below). AC06's deliberate-delete UI confirmation landed in F17-A.1 — `Screen::ConfirmDelete` + `MenuCommand::Delete`/`ConfirmDelete` + the `X`/`Delete`+West-button path, covered by `profiles_bind_create_and_delete`. Remaining: process-level AC01 evidence (an interactive finish — `--bot` results are deliberately ineligible). |
 | F16-C.1 | implemented | F16-B | AC01/AC04 evidence legs. `tests/progression.rs` gains `two_profiles_isolate_progress_across_a_restart`: A drives the authored course to a real finish (production `advance_race` → `record_session_results`; the 900-frame throttle loop is now the shared `drive_to_finish` helper), the app+store drop and the store reopens on the same directory, B binds fresh with zero progress/unlocks/selections while A's earned grant still gates `vpreward` for B through `vehicle_gate_note`, then B drives the same event to its own finish — records + grants land on B alone, A's progress/selections untouched (spec req 6 no-leak, both directions). `tests/profile.rs` gains `an_interrupted_save_recovers_through_the_bind` — a flushed-but-never-renamed revision-3 `.tmp` beats the stale revision-2 main (`recovered_from_backup`), the bind-time heal re-saves it and a fresh load is clean. Review repairs: `Unlock::Paint`'s stale "unverified index base" comment → measured zero-based (DSN-16); VEH-5's nonzero-`UnlockFlags` list gains `vpeagle` (unlisted, `0/1`). `mm2-inspect events` reward coverage now prints `N authored rows → E event-bound + M milestone rules, K diagnostics`, reports a city whose rows are all diagnostics instead of hiding them, and pushes a strict failure when accounted ≠ authored. Retail (`fnv1a64:e91e6cd4b2ae30d9`): london + sf each `10 authored rows → 4 event-bound + 6 milestone (Blitz=10 Checkpoint=12 Circuit=10 CrashCourse=13), 0 diagnostics`. Candidate pending external check. |
-| F17-A | queued | F01-A, F02-A, F11-A, F16-A | App boots straight into a world; no menus. |
+| F17-A | active | F01-A, F02-A, F11-A, F16-A | Split: A.1 (menu shell — profile/mode/content selection over the real catalogs — implemented below). Remaining: Quick Race (DRV-8's `last_event` launch), per-event weather/time/density controls (need F18's session-legal writers; RACE-3 `customizable`), mouse navigation, no-text-entry profile naming, original menu audit vs F17-AC05's capability denominator. |
+| F17-A.1 | implemented | F17-A deps | `mm2_app::menu`: `MenuShell` (screen stack + focus + rebuilt row model + launch selections), `MenuData` (profile-store handle + lazily-scanned cities/`VehicleCatalog`/`GarageTable`/`EventCatalog`/`AvailabilityTable` — scans once, VFS is static), `MenuCommand`/`MenuEffect` (model emits, `menu_input` executes — launches resolve `load_by_id` then `Session::begin`; binds/unbinds write `ActiveProfile`), `menu_watch` (reopens the shell when the session reaches `Menu` — quit-to-menu), `menu_present` (`bevy_ui` text tree, focused `›` marker, disabled rows dimmed with their reason). Screens: Root (Cruise/Events/Vehicle/Driver/Difficulty + disabled-with-reason Options+Multiplayer + Quit), CruiseCity (`city/*.psdl` stems, missing psdl names it), EventCity→EventTable→EventList (real `EventRef`s; incomplete rows report missing files, CHK-3/CC gates name the unbeaten prerequisites, Crash Course and empty/errored tables disabled with reasons — nothing hidden, nothing dead-ends), Garage (`listed` roster only; locked/incomplete refused with reasons), Paints (`Colors` names, gated indices disabled), Profiles (list/create/`X`-delete behind `Screen::ConfirmDelete` — F16-AC06's deliberate confirmation; DRV-7's last-profile refusal surfaces as a status line; deleting the bound profile unbinds). Launch builds `SessionConfig{world,mode,difficulty,vehicle,mods_active}` + `SelectedCar`/`TunedVehicle` and `Session::begin`s — the same loader as a direct boot. `mm2_game::progression` gained `AvailabilityTable::of_unbound`/`GarageTable::of_unbound` — the fresh-driver view (restricted, nothing beaten) for profile-less evaluation, sharing the bound-profile evaluators via a `beaten`/`holds` closure. Boot: `menu_mode` = no session-shaping flag and no smoke flag — `--city`/`--event`/`--dev-world`/`--spawn`/`--cam`/`--vehicle-config`/`--bot`/`--nav`/… all stay direct launches; `drive_session`'s Menu-quit only exits when no `MenuShell` exists. Input: arrows/WASD nav, Enter/Space select, Esc/Backspace back (quit at root), X/Delete delete; gamepad dpad+left-stick edge nav, South select, East back, West delete. Shell seeds from `choose_launch` (CLI > remembered > default) and reseeds difficulty from the bound profile's rank (DRV-2). Tests +6 (`tests/menu.rs`): boot parks at Menu + draws rows; cruise→Playing→Esc→menu→repeat with single menu root/player (AC06 menu leg); event rows carry incomplete/gated reasons and the open row launches the real `EventRef`; garage/paint gating carries to `SelectedCar`; profile bind/create/delete/unbind/last-profile refusal; empty install reports reasons and nothing launches. Candidate pending external check. |
 | F17-B | queued | F17-A | — |
 | F17-C | queued | F12-B, F15-B, F16-B, F17-B | — |
 | F18-A | queued | F01-B, F06-B | `city/*.sky`, `*.ldef`, `*.cpvs` present unparsed; no weather/time-of-day selection. |

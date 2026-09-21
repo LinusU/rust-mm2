@@ -8,8 +8,9 @@
 //!   session's [`SessionEntity`] generation) and drives `Loading → Ready →
 //!   Playing`, or `→ Failed` on a load error.
 //! - [`session_control_input`] maps keys onto [`SessionControl`] intents:
-//!   `Esc` quits (tears down, then exits — there is no menu yet, F17),
-//!   `Backspace` restarts the session with the same config.
+//!   `Esc` quits (tears down, then exits — or returns to the menu when a
+//!   `MenuShell` resource is running, F17-A.1), `Backspace` restarts the
+//!   session with the same config.
 //! - `despawn_session_entities` (mm2_game, scheduled while `Unloading`)
 //!   removes every session-owned root; [`drive_session`] waits for the
 //!   world to be observably empty, clears session-scoped caches
@@ -130,18 +131,25 @@ pub fn session_control_input(
 /// - `Unloading`: once no session-owned roots remain, clear
 ///   session-scoped caches — the impact dedup map is keyed by `Entity`,
 ///   which the next session may recycle — and move to `Menu`.
-/// - `Menu`: `quit` exits the process; `restart` calls `begin` with the
-///   retained config, flipping the phase to `Loading` so the spawn system
-///   builds the next session.
+/// - `Menu`: `quit` exits the process — unless a `MenuShell` resource
+///   exists, in which case the menu owns exit and a quit here just
+///   returns to it; `restart` calls `begin` with the retained config,
+///   flipping the phase to `Loading` so the spawn system builds the
+///   next session.
 /// - `Countdown`/`Playing`/`Paused`/`Results`/`Failed`: a queued intent
 ///   moves the session to `Unloading`; teardown proceeds on later
 ///   frames.
+// The menu-shell presence adds one param past the lint's limit — a
+// SystemParam bundle would hide `session`/`control`, the two handles
+// every arm uses, for no real gain.
+#[allow(clippy::too_many_arguments)]
 pub fn drive_session(
     mut commands: Commands,
     mut session: ResMut<Session>,
     mut control: ResMut<SessionControl>,
     mut filter: ResMut<ImpactFilter>,
     mut spawn: ResMut<SpawnPoint>,
+    menu: Option<Res<crate::menu::MenuShell>>,
     roots: Query<Entity, (With<SessionEntity>, Without<ChildOf>)>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -173,7 +181,13 @@ pub fn drive_session(
         SessionPhase::Menu => {
             if control.quit {
                 control.quit = false;
-                exit.write(AppExit::Success);
+                // With a menu shell running, quit-to-menu lands back on
+                // the menu — the shell itself owns process exit (its
+                // Quit row / Esc at the root). Without one, Menu is
+                // terminal: quit exits.
+                if menu.is_none() {
+                    exit.write(AppExit::Success);
+                }
             } else if control.restart {
                 control.restart = false;
                 match session.config().cloned() {
@@ -684,8 +698,8 @@ pub fn load_session_world(
             // lives, removed by teardown so a following cruise never
             // sees it.
             let key = event_key.clone().expect("an event setup carries its key");
-            // A `--event` launch bypasses the (unbuilt, F17) menu that
-            // enforces availability — surface a still-locked event
+            // A `--event` launch bypasses the menu that enforces
+            // availability (F17-A.1) — surface a still-locked event
             // honestly rather than pretending the profile selected it.
             if let Some(profile) = &active_profile
                 && let Some(entry) = availability.of(&profile.profile, &key)

@@ -1,75 +1,112 @@
 # Last implementation iteration
 
-- Task ID and title: F16-C.1 — F16-C evidence legs: AC01 two-profile
-  restart isolation and AC04's interrupted-save recovery through the
-  app bind path, plus the two non-blocking review repairs and an AC05
-  coverage-accounting fix in `mm2-inspect events`. Selected as the
-  plan's first-listed next slice (F16-C evidence run); no external
-  review blockers were outstanding.
-- Starting commit: `6d4b90baff7645d6f9596770bf21499efb76fe34` on
+- Task ID and title: F17-A.1 — menu shell: profile/mode/content
+  selection over the real catalogs, launch through `Session::begin`,
+  quit back to the menu, and the F16-AC06 deliberate-delete
+  confirmation leg. Selected from the plan's candidate list; F17-A's
+  dependencies are all implemented, F16-C's remainder is blocked on a
+  UI surface (now provided), F15-B is research-gated and F11-C is
+  evidence-only — the menu unblocks the most downstream work.
+- Starting commit: `812aea245b6f8c7cac702b27a5131af023e8be43` on
   `ralph/night`; tree was clean.
 
 ## What changed
 
-- `crates/mm2_app/tests/progression.rs` (AC01):
-  `two_profiles_isolate_progress_across_a_restart` — A and B share one
-  synthetic install. A binds, drives the authored checkpoint course to
-  a *real* finish through `advance_race` → `record_session_results`
-  (the 900-frame throttle loop is now the shared `drive_to_finish`
-  helper), earns both authored grants. The app and store handle drop;
-  a reopened `ProfileStore` on the same directory is the restart. A's
-  record + 2 unlocks + persisted selections survive; B binds fresh
-  with zero progress/unlocks and default selections (spec req 6 — no
-  leak of A's remembered `vpt`), and A's earned `vpreward` still
-  reports `VehicleGateNote::Locked` for B through the production
-  garage surface while reporting open for A. B then drives the same
-  event to its own finish — record and grants land on B alone; A's
-  progress and selections are untouched.
-- `crates/mm2_app/tests/profile.rs` (AC04):
-  `an_interrupted_save_recovers_through_the_bind` — the `.tmp`-orphan
-  leg the `.bak` test didn't cover: a flushed-but-never-renamed
-  revision-3 `.tmp` (crash between flush and rename) beats the stale
-  revision-2 main, `resolve` reports `recovered_from_backup`, the
-  bind-time heal re-saves it (revision 4), and a fresh load is clean.
-- Review repairs (non-blocking findings from the F16-B.3 review):
-  `Unlock::Paint`'s doc comment no longer claims the variant index
-  base is unverified — it records the measured zero-based reading
-  (DSN-16); VEH-5's nonzero-`UnlockFlags` list gains the omitted
-  `vpeagle` (unlisted, `0/1` — verified on the roster audit).
-- `tools/mm2_inspect` `events` (AC05 accounting): the reward-table
-  block now prints `N authored rows → E event-bound + M milestone
-  rules (<family sizes>), K diagnostics`, states its denominator
-  explicitly, prints the block even when *every* authored row became
-  a diagnostic (previously hidden by the non-empty-rule condition),
-  and pushes a strict failure if accounted ≠ authored.
+- `crates/mm2_app/src/menu.rs` (new) — the whole menu slice, ~1000
+  lines plus docs:
+  - `MenuShell` — the model resource: a `Screen` stack (Root /
+    CruiseCity / EventCity / EventTable / EventList / Garage /
+    Paints / Profiles / ConfirmDelete), focus index, a `Vec<MenuRow>`
+    rebuilt on `dirty`, status line, launch selections
+    (vehicle/paint/difficulty), and `active`.
+  - `MenuData` — shared state: optional `ProfileStore` + bound
+    profile, lazily-scanned cities/`VehicleCatalog`/`GarageTable`/
+    `EventCatalog`/`AvailabilityTable` caches (scanned once; the VFS
+    is static per run), mod flag. Scans never fail silently — errors
+    and empty results become disabled rows / status text.
+  - `MenuCommand` / `Action` / `MenuEffect` — pure-ish decision
+    surface: `apply(command, data) -> Vec<MenuEffect>`; `menu_input`
+    executes effects (bind/unbind write or remove `ActiveProfile`,
+    launch resolves `VehicleCatalog::load_by_id` then calls
+    `Session::begin`, quit writes `AppExit`). A rejected config lands
+    in `status` — no panic path.
+  - `menu_watch` reopens the shell when the session reports `Menu`
+    again; `menu_input` maps keyboard (arrows/WASD, Enter/Space,
+    Esc/Backspace, X/Delete) and gamepad (dpad + left-stick edge nav,
+    South/East/West); `menu_present` rebuilds a `bevy_ui` text tree
+    (focused `›` marker, disabled rows dimmed with their reason).
+  - Screens show real catalog data: Cruise picks from `city/*.psdl`
+    stems (a catalogued city without its psdl says so); Events walks
+    city → table → rows of real `EventRef`s where incomplete events
+    name their missing files, CHK-3/CC gates name the unbeaten
+    prerequisites, and Crash Course / empty tables are disabled with
+    reasons; Garage lists `listed` roster entries only and refuses
+    locked/incomplete cars with the reason; Paints shows authored
+    `Colors` names with gated indices disabled; Profiles lists the
+    store, binds on activate, creates a driver profile on demand, and
+    `X`/`Delete` opens `ConfirmDelete` — activating the profile row
+    itself never deletes.
+  - Deleting the bound profile unbinds (`ActiveProfile` removed);
+    DRV-7's last-profile refusal is preserved — the status is set
+    *after* `pop()` so the reason survives the stack pop.
+- `crates/mm2_game/src/progression.rs` —
+  `AvailabilityTable::of_unbound` / `GarageTable::of_unbound`: the
+  fresh-driver view for profile-less menus — still restricted,
+  nothing beaten, no grants held (profile-less play cannot persist).
+  Both share the bound-profile evaluators through a `beaten`/`holds`
+  closure.
+- `crates/mm2_app/src/main.rs` — `menu_mode` when no session-shaping
+  or smoke/evidence flag is present (`--city`/`--event`/`--dev-world`/
+  `--spawn`/`--cam`/`--vehicle-config`/`--banger-pool`/`--traction`/
+  `--nav`/`--nav-route`/`--bot` all stay direct launches; smoke flags
+  unchanged). Menu mode skips the boot `Session::begin`, inserts
+  `MenuShell` + `MenuData` (seeded from the same `choose_launch`
+  resolution a direct launch would use — CLI > remembered > default),
+  and chains `menu_watch → menu_input → menu_present` into `Update`.
+- `crates/mm2_app/src/session.rs` — `drive_session` takes an
+  `Option<Res<MenuShell>>`: at `Menu`, quit intent only writes
+  `AppExit` when no menu owns the process; `Unloading → Menu` still
+  clears every session-scoped resource, so a menu-launched session
+  quits back to the menu and a direct launch still exits. A targeted
+  `#[allow(clippy::too_many_arguments)]` carries a comment (the menu
+  parameter pushed the system over the lint; bundling its unrelated
+  borrows would not improve it). `mm2_app::lib` exposes `menu`;
+  `profile::ActiveProfile` derives `Debug` for the test assertions.
 
 ## Tests
 
-- `cargo test -p mm2_app --test progression --test profile` — PASS
-  (11 + 12, both new tests green).
+- `cargo test -p mm2_app --test menu` — PASS (6):
+  `the_app_boots_into_the_menu` (parked at `Menu`, rows drawn,
+  real roster/city names present);
+  `an_empty_install_reports_instead_of_faking` (every picker reports
+  its reason; Enter never produces a `Loading`);
+  `event_rows_carry_real_availability` (incomplete row names the
+  missing file, gated row names the prerequisite, open row launches
+  the real `EventRef`);
+  `garage_picks_carry_through_launch` (gated paint refused; open
+  paint lands on `SelectedCar`);
+  `cruise_launches_then_quit_returns_to_the_menu` (menu hides →
+  Playing → Esc → menu reopens → relaunch; single menu root and a
+  single player entity throughout, zero `MenuUi` entities in-game);
+  `profiles_bind_create_and_delete` (bind on activate, create,
+  `X` opens the confirmation screen, delete removes the file, bound
+  delete unbinds, last profile refuses with a visible reason).
 - `cargo fmt --all -- --check` — PASS.
-- `cargo clippy --locked --workspace --all-targets --all-features --
+- `cargo clippy --workspace --all-targets --all-features --
   -D warnings` — PASS.
-- `cargo test --locked --workspace` — PASS, 44 suites, 0 failures.
-- Retail audit (`mm2-inspect events`, install
-  `fnv1a64:e91e6cd4b2ae30d9`): london and sf each report `10 authored
-  rows → 4 event-bound + 6 milestone rules (Blitz=10 Checkpoint=12
-  Circuit=10 CrashCourse=13), 0 diagnostics`; `mm2-inspect cars`
-  confirms `vpeagle` `0/1` for the VEH-5 correction.
+- `cargo test --workspace` — PASS, all suites, 0 failures.
 
 ## Still open
 
-- F16-AC01's process-level leg: two real app launches completing an
-  event. Headless `--bot` finishes are deliberately ineligible for
-  records, so an interactive/operator run is needed — the
-  synthetic-integration test above is the recorded evidence, honestly
-  scoped.
-- F16-AC06 (deliberate-delete UI confirmation) is F17 scope — no
-  delete flow exists beyond `ProfileStore::delete`.
-- F16-AC05's coverage enumeration is now printed per city by
-  `mm2-inspect events` (retail: 10/10 authored rows accounted, 0
-  diagnostics per city); promotion to `checked` awaits the external
-  gate/review of this commit.
-- `UnlockScore`/`UnlockFlags` semantics stay UNK-6; `vpmoonrover`
-  roster path stays UNK-3; gate enforcement stays F17.
-- Candidate pending external check.
+- F17-A remainder: Quick Race (`last_event` launch), per-event
+  weather/time/density controls (need F18's session-legal writers;
+  RACE-3 `customizable` is already surfaced), mouse navigation, text
+  entry for profile names (new profiles get `Driver N` names), and
+  the original-menu audit against F17-AC05's capability denominator.
+- No GPU/manual playtest of the menu this slice — verification is the
+  headless integration suite; the `bevy_ui` tree structure is asserted
+  (row text, focus marker, entity counts) but no screenshot evidence
+  exists yet.
+- F16-C remainder: AC01's process-level leg (two real interactive
+  launches completing an event) still needs a playable session;
+  `--bot` finishes are deliberately ineligible.

@@ -214,12 +214,37 @@ impl AvailabilityTable {
             .find(|row| &row.key == key)
             .map(|row| evaluate_row(row, profile, unrestricted))
     }
+
+    /// `key`'s availability with no bound profile — the fresh-driver
+    /// view: still restricted, nothing beaten. Profile-less play cannot
+    /// persist progress, so this is also the honest answer for it.
+    pub fn of_unbound(&self, key: &EventKey) -> Option<EventAvailability> {
+        self.rows
+            .iter()
+            .find(|row| &row.key == key)
+            .map(evaluate_row_unbound)
+    }
 }
 
 fn evaluate_row(
     row: &AvailabilityRow,
     profile: &PlayerProfile,
     unrestricted: bool,
+) -> EventAvailability {
+    evaluate_row_with(row, unrestricted, |k| {
+        profile.event(k).is_some_and(|r| r.is_beaten())
+    })
+}
+
+/// The unbound view: restricted, and no event counts as beaten.
+fn evaluate_row_unbound(row: &AvailabilityRow) -> EventAvailability {
+    evaluate_row_with(row, false, |_| false)
+}
+
+fn evaluate_row_with(
+    row: &AvailabilityRow,
+    unrestricted: bool,
+    beaten: impl Fn(&EventKey) -> bool,
 ) -> EventAvailability {
     if unrestricted {
         return EventAvailability {
@@ -228,7 +253,6 @@ fn evaluate_row(
             blocked_by: Vec::new(),
         };
     }
-    let beaten = |k: &EventKey| profile.event(k).is_some_and(|r| r.is_beaten());
     let blocked_by = match &row.gate {
         EventGate::Open => Vec::new(),
         EventGate::AfterAll(reqs) => reqs.iter().filter(|k| !beaten(k)).cloned().collect(),
@@ -346,6 +370,15 @@ impl GarageTable {
     pub fn row(&self, id: &str) -> Option<&GarageRow> {
         self.rows.iter().find(|row| row.id == id)
     }
+
+    /// `id`'s availability with no bound profile — the fresh-driver
+    /// view: reward-gated vehicles and paints stay locked.
+    pub fn of_unbound(&self, id: &str) -> Option<VehicleAvailability> {
+        self.rows
+            .iter()
+            .find(|row| row.id == id)
+            .map(evaluate_garage_row_unbound)
+    }
 }
 
 fn evaluate_garage_row(
@@ -353,7 +386,21 @@ fn evaluate_garage_row(
     profile: &PlayerProfile,
     unrestricted: bool,
 ) -> VehicleAvailability {
-    let holds = |id: String| profile.progress.unlocks.contains(&id);
+    evaluate_garage_row_with(row, unrestricted, |id| {
+        profile.progress.unlocks.contains(&id)
+    })
+}
+
+/// The unbound view: restricted, and no unlock is held.
+fn evaluate_garage_row_unbound(row: &GarageRow) -> VehicleAvailability {
+    evaluate_garage_row_with(row, false, |_| false)
+}
+
+fn evaluate_garage_row_with(
+    row: &GarageRow,
+    unrestricted: bool,
+    holds: impl Fn(String) -> bool,
+) -> VehicleAvailability {
     let unlocked = unrestricted || row.gate == VehicleGate::Open || holds(row.vehicle_id());
     let paints = row
         .paint_gates

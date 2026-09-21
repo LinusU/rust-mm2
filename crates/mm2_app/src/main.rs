@@ -18,7 +18,7 @@ use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use clap::Parser;
 use mm2_app::session::{ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
-    banger, camera, car_visual, city, contracts, input, nav_overlay, opponents, profile,
+    banger, camera, car_visual, city, contracts, input, menu, nav_overlay, opponents, profile,
     progression, race, scripted, session, smoke,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
@@ -667,15 +667,64 @@ fn main() {
         std::process::exit(rec.status.exit_code());
     }
 
+    // F17-A.1: a bare `mm2` (with content but no explicit session
+    // request) boots into the menu front-end — profile/mode/content
+    // selection over the real catalogs, then `Session::begin`. Any
+    // session-shaping flag (`--city`, `--event`, `--dev-world`,
+    // `--spawn`, `--cam`, a tuning/physics override, `--bot`, the nav
+    // overlay) stays a direct launch, as does every smoke/evidence
+    // run: their records must stay reproducible and unattended.
+    let menu_mode = !smoke_requested
+        && cli.city.is_none()
+        && cli.event.is_none()
+        && !cli.dev_world
+        && cli.spawn.is_none()
+        && cli.cam.is_none()
+        && cli.vehicle_config.is_none()
+        && cli.banger_pool.is_none()
+        && cli.traction.is_none()
+        && !cli.nav
+        && cli.nav_route.is_none()
+        && !cli.bot;
+
     // Menu → Loading: the session resource the app drives through
     // `SessionPhase` transitions (`load_session_world` takes it to
     // Ready → Playing, or Failed). An invalid config is a usage error,
-    // not a smoke fail.
+    // not a smoke fail. In menu mode the session parks at `Menu` and
+    // the shell owns `begin`.
     let mut session = Session::new();
-    if let Err(e) = session.begin(session_config) {
+    if !menu_mode && let Err(e) = session.begin(session_config) {
         error!(error = %e, "invalid session configuration");
         std::process::exit(2);
     }
+
+    // Menu seeding — computed before `selected`/`active_profile` move
+    // into the app. The store handle is shared with the bound profile
+    // when there is one so the Driver screen can list/create/delete;
+    // `--no-profile` keeps it off entirely.
+    let menu_vehicle = VehicleSelection {
+        id: selected.as_ref().map(|d| d.id.clone()),
+        paint,
+    };
+    let menu_bound = active_profile.as_ref().map(|s| s.profile.clone());
+    let menu_store = if cli.no_profile {
+        None
+    } else {
+        active_profile
+            .as_ref()
+            .map(|s| s.store.clone())
+            .or_else(|| {
+                profile::store_root(cli.profile_dir.clone()).and_then(|root| {
+                    match mm2_game::ProfileStore::open(&root) {
+                        Ok(store) => Some(store),
+                        Err(e) => {
+                            warn!(dir = %root.display(), error = %e, "profile store unavailable for the menu");
+                            None
+                        }
+                    }
+                })
+            })
+    };
 
     let mut app = App::new();
     app.add_plugins(
@@ -796,6 +845,21 @@ fn main() {
         Update,
         nav_overlay::draw_nav_overlay.run_if(resource_exists::<nav_overlay::CityNav>),
     );
+    if menu_mode {
+        // The shell seeds from the same launch resolution a direct
+        // boot uses (`--car`/remembered/default vehicle, `--pro`/rank
+        // difficulty) — the menu refines the pick, it doesn't
+        // re-derive it. `menu_input` runs `Session::begin` on launch
+        // rows and `menu_watch` reopens the shell whenever the session
+        // returns to `Menu`, so quitting a menu-launched session
+        // comes back here instead of exiting.
+        app.insert_resource(menu::MenuShell::new(menu_vehicle, difficulty))
+            .insert_resource(menu::MenuData::new(menu_store, has_mods, menu_bound))
+            .add_systems(
+                Update,
+                (menu::menu_watch, menu::menu_input, menu::menu_present).chain(),
+            );
+    }
     if cli.bot {
         app.insert_resource(scripted::ScriptedDrive);
     }

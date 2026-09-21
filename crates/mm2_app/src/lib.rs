@@ -14,6 +14,7 @@ pub mod contracts;
 pub mod decals;
 pub mod dev_world;
 pub mod input;
+pub mod menu;
 pub mod nav_overlay;
 pub mod opponents;
 pub mod profile;
