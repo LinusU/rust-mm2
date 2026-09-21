@@ -225,6 +225,64 @@ fn input_law_steers_and_modulates_throttle() {
     assert_eq!(capped.brake, 0.0);
 }
 
+/// The opponent tuning overlay (F15-B.2): the authored `maxThrottle`
+/// caps every band including the speed-capped coast, and the authored
+/// corner-speed multiplier raises the corner-brake floor — at 2.0 a
+/// 20 m/s sharp bearing is under the raised floor and keeps the crawl
+/// throttle instead of braking. `ScriptedTuning::DEFAULT` reproduces
+/// the untuned law exactly.
+#[test]
+fn tuned_input_law_scales_throttle_and_corner_floor() {
+    use mm2_app::scripted::ScriptedTuning;
+
+    let mut bot = ScriptedBot::default();
+    let tame = ScriptedTuning {
+        throttle_cap: 0.4,
+        corner_speed: ScriptedTuning::DEFAULT.corner_speed,
+    };
+    let straight = scripted::scripted_input_tuned(&mut bot, 0.05, 10.0, true, &tame);
+    assert!(
+        (straight.throttle - 0.4).abs() < 1e-6,
+        "the authored cap tops the full band: {}",
+        straight.throttle
+    );
+    let mid = scripted::scripted_input_tuned(&mut bot, 0.5, 10.0, true, &tame);
+    assert_eq!(mid.throttle, 0.4, "0.45 is over the cap — ceiling binds");
+    let sharp = scripted::scripted_input_tuned(&mut bot, -1.5, 10.0, true, &tame);
+    assert_eq!(
+        sharp.throttle, 0.25,
+        "0.25 is under the cap — the band is a ceiling, not a scale"
+    );
+
+    let fast_corner = ScriptedTuning {
+        throttle_cap: 1.0,
+        corner_speed: ScriptedTuning::DEFAULT.corner_speed * 2.0,
+    };
+    let tuned = scripted::scripted_input_tuned(&mut bot, 1.5, 20.0, true, &fast_corner);
+    assert_eq!(
+        tuned.brake, 0.0,
+        "20 m/s is under the doubled corner floor — no brake"
+    );
+    assert_eq!(tuned.throttle, 0.25, "the sharp band still applies");
+    let untuned = scripted::scripted_input(&mut ScriptedBot::default(), 1.5, 20.0, true);
+    assert_eq!(
+        untuned.brake, 0.6,
+        "the default floor still brakes at 20 m/s"
+    );
+
+    // The default overlay is the untuned law, bit-for-bit.
+    let mut a = ScriptedBot::default();
+    let mut b = ScriptedBot::default();
+    for bearing in [0.0f32, 0.3, -0.8, 1.5] {
+        let d = scripted::scripted_input(&mut a, bearing, 20.0, true);
+        let t =
+            scripted::scripted_input_tuned(&mut b, bearing, 20.0, true, &ScriptedTuning::DEFAULT);
+        assert_eq!(d.throttle, t.throttle);
+        assert_eq!(d.brake, t.brake);
+        assert_eq!(d.steering, t.steering);
+    }
+}
+
 /// Grounded and barely moving with the throttle demanded accumulates
 /// the stuck timer into a two-phase escape — reverse-and-turn, then a
 /// forward full-lock — then releases back to normal drive. Airborne

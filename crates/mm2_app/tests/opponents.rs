@@ -16,6 +16,7 @@ use mm2_app::opponents::{
     Blocker, OpponentDriver, Traffic, apply_gap_brake, initial_route_index, nearest_blocker,
     opponent_drive, pick_pass_side, route_target, spawn_pose,
 };
+use mm2_app::scripted::{ScriptedBot, ScriptedTuning};
 use mm2_app::session::{self, SessionControl};
 use mm2_app::{camera, contracts, race};
 use mm2_assets::Vfs;
@@ -189,6 +190,17 @@ fn waypoint_row(x: f32, z: f32) -> String {
 /// lanes (`vpt` at z=140, `vpheavy` at z=146) plus the vehicle files
 /// `load_opponent` resolves through the same VFS.
 fn roster_install(extra_aimap_rows: &str, extra_files: &[(&str, String)]) -> tempfile::TempDir {
+    roster_install_rows(
+        &format!(
+            "vpt race0-a-0.opp 0.90 0 50.0 0.7 1 1 1 1 0 1.0\nvpheavy race0-a-1.opp 0.80 0 50.0 0.7 1 1 1 1 0 1.0\n{extra_aimap_rows}"
+        ),
+        extra_files,
+    )
+}
+
+/// The same install with a caller-authored `[Opponent]` body — the
+/// production parameter-tail test feeds real tail variants through it.
+fn roster_install_rows(rows: &str, extra_files: &[(&str, String)]) -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     let d = tmp.path();
     write(
@@ -196,10 +208,7 @@ fn roster_install(extra_aimap_rows: &str, extra_files: &[(&str, String)]) -> tem
         "race/testcity/mmracedata.csv",
         format!("{MM_HEADER}\nnone,0,0,0,2,0,0.1,0.0,1,50,1,0,0,0,2,0,0.2,0.0,1,40,1\n"),
     );
-    let rows = format!(
-        "vpt race0-a-0.opp 0.90 0 50.0 0.7 0 0 0 0 0 1.0\nvpheavy race0-a-1.opp 0.80 0 50.0 0.7 0 0 0 0 0 1.0\n{extra_aimap_rows}"
-    );
-    write(d, "race/testcity/race0.aimap", aimap_with_opponents(&rows));
+    write(d, "race/testcity/race0.aimap", aimap_with_opponents(rows));
     write(
         d,
         "race/testcity/race0waypoints.csv",
@@ -906,6 +915,7 @@ fn drain_impacts(app: &mut App) -> Vec<ImpactEvent> {
 fn traffic(e: u32, pos: [f32; 3], fwd: [f32; 3], speed: f32) -> Traffic {
     Traffic {
         entity: Entity::from_raw_u32(e).unwrap(),
+        control: PlayerControl::Local,
         pos: Vec3::from_array(pos),
         fwd: Vec3::from_array(fwd),
         speed,
@@ -926,22 +936,81 @@ fn nearest_blocker_reads_only_the_corridor_ahead() {
     let far = traffic(5, [0.0, 0.0, -80.0], [0.0, 0.0, -1.0], 10.0);
     let all = [self_entry, ahead, near, next_lane, behind, far];
 
-    let b = nearest_blocker(me, pos, fwd, reach, &all).unwrap();
+    let b = nearest_blocker(me, pos, fwd, reach, &all, |_| true).unwrap();
     assert_eq!(b.entity, all[2].entity, "the nearer corridor car wins");
     assert!((b.gap - 12.0).abs() < 0.01);
     assert!(b.lat > 0.0, "x=+1 sits to the right of a -Z heading");
     assert_eq!(b.speed, 0.0, "parked blocker reads no closing pace");
 
     let all = [self_entry, all[1], all[3], all[4], all[5]];
-    let b = nearest_blocker(me, pos, fwd, reach, &all).unwrap();
+    let b = nearest_blocker(me, pos, fwd, reach, &all, |_| true).unwrap();
     assert_eq!(b.entity, all[1].entity, "next-nearest corridor car");
     assert!((b.speed - 10.0).abs() < 0.01);
 
     // Off the corridor entirely: nothing ahead.
     let clear = [traffic(6, [4.0, 0.0, -10.0], [0.0, 0.0, -1.0], 0.0)];
     assert!(
-        nearest_blocker(me, pos, fwd, reach, &clear).is_none(),
+        nearest_blocker(me, pos, fwd, reach, &clear, |_| true).is_none(),
         "a car on the next lane is not a blocker"
+    );
+}
+
+/// A bare driver for the sense-gate tests: authored spec, default
+/// tuning, no committed pass — only `avoid_players` varies.
+fn driver(avoid_players: bool) -> OpponentDriver {
+    OpponentDriver {
+        spec: OpponentSpec {
+            vehicle: "vpt".into(),
+            params: vec![],
+            route: None,
+        },
+        tuning: ScriptedTuning::DEFAULT,
+        avoid_players,
+        next: 0,
+        recovery: ScriptedBot::default(),
+        pass_entity: None,
+        pass_side: 0.0,
+        clear_frames: 0,
+        stall_frames: 0,
+        stall_pos: Vec3::ZERO,
+        pass_ban: None,
+    }
+}
+
+/// The authored `avoidPlayers` flag gates which participant classes
+/// the corridor sees (F15-B.2): an opponent that does not avoid
+/// players drives through a parked human car as if it were not there.
+/// `avoidOpponents` stays inert — AI participants are sensed
+/// regardless of what the tail authors (retail ≈ universal 0).
+#[test]
+fn authored_avoid_players_gates_the_corridor() {
+    let me = Entity::from_raw_u32(0).unwrap();
+    let pos = Vec3::ZERO;
+    let fwd = Vec3::NEG_Z;
+    let reach = 50.0;
+    let human = traffic(1, [0.0, 0.0, -20.0], [0.0, 0.0, -1.0], 0.0);
+    let mut ai = traffic(2, [0.0, 0.0, -30.0], [0.0, 0.0, -1.0], 0.0);
+    ai.control = PlayerControl::Ai;
+    let all = [human, ai];
+
+    // Sensing players: the nearer human car blocks.
+    let aware = driver(true);
+    let b = nearest_blocker(me, pos, fwd, reach, &all, |t| aware.senses(t));
+    assert_eq!(b.unwrap().entity, human.entity);
+
+    // avoidPlayers off: the human is transparent, the AI blocks.
+    let deaf = driver(false);
+    let b = nearest_blocker(me, pos, fwd, reach, &all, |t| deaf.senses(t));
+    assert_eq!(b.unwrap().entity, ai.entity);
+    assert!(
+        nearest_blocker(me, pos, fwd, reach, &all[..1], |t| deaf.senses(t)).is_none(),
+        "a driver that does not avoid players sees nobody in a human-only lane"
+    );
+
+    // AI is sensed regardless: `avoidOpponents` is bound but inert.
+    assert!(
+        nearest_blocker(me, pos, fwd, reach, &all[1..], |t| deaf.senses(t)).is_some(),
+        "an authored-0 avoidOpponents must not blind the driver to AI"
     );
 }
 
@@ -1158,4 +1227,122 @@ fn checkpoint_markers_track_the_local_participant() {
         Some(Visibility::Visible),
         "an AI's cleared gate must not hide the local driver's marker"
     );
+}
+
+// ---------------------------------------------------------------------------
+// F15-B.2 — authored parameter tail
+// ---------------------------------------------------------------------------
+
+/// The authored tail reaches the driver through the production roster
+/// path: `maxThrottle` clamps to the input ceiling, the corner-speed
+/// column multiplies the corner-brake floor and `avoidPlayers` gates
+/// the corridor — `None` columns take the `RegisterRoute` defaults.
+#[test]
+fn authored_tail_binds_the_driver_tuning() {
+    let tmp = roster_install_rows(
+        "vpt race0-a-0.opp 0.90 0 50.0 0.7 1 1 1 0 0 1.5\nvpheavy race0-a-1.opp 0.80 0 50.0 0.7 1 1 1 1 0 2.0\n",
+        &[],
+    );
+    let mut app = event_app(event_config(), vfs_of(tmp.path()));
+    app.update();
+
+    let vpt = opponent_by_vehicle(&mut app, "vpt");
+    let d = app.world().get::<OpponentDriver>(vpt).unwrap();
+    assert!((d.tuning.throttle_cap - 0.9).abs() < 1e-6);
+    assert!(
+        (d.tuning.corner_speed - ScriptedTuning::DEFAULT.corner_speed * 1.5).abs() < 1e-4,
+        "col 9 multiplies the corner-brake floor: {}",
+        d.tuning.corner_speed
+    );
+    assert!(
+        !d.avoid_players,
+        "authored avoidPlayers=0 gates human sensing off"
+    );
+
+    let heavy = opponent_by_vehicle(&mut app, "vpheavy");
+    let d = app.world().get::<OpponentDriver>(heavy).unwrap();
+    assert!((d.tuning.throttle_cap - 0.8).abs() < 1e-6);
+    assert!((d.tuning.corner_speed - ScriptedTuning::DEFAULT.corner_speed * 2.0).abs() < 1e-4);
+    assert!(d.avoid_players);
+}
+
+/// The same car on the same lane shape differs only in authored
+/// `maxThrottle` (0.5 vs 1.0): through the production path the
+/// uncapped driver covers measurably more road at a fixed tick — the
+/// authored difficulty dial is observable, not just parsed.
+#[test]
+fn authored_max_throttle_measures_on_track() {
+    let tmp = roster_install_rows(
+        "vpt race0-a-0.opp 0.5 0 50.0 0.7 1 1 1 1 0 1.0\nvpt race0-a-1.opp 1.0 0 50.0 0.7 1 1 1 1 0 1.0\n",
+        &[],
+    );
+    let mut app = event_app(event_config(), vfs_of(tmp.path()));
+    app.update();
+
+    run(&mut app, 480);
+
+    let mut by_cap: Vec<(f32, f32)> = app
+        .world_mut()
+        .query::<(&OpponentDriver, &Position)>()
+        .iter(app.world())
+        .map(|(d, p)| (d.tuning.throttle_cap, p.0.x))
+        .collect();
+    by_cap.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    let (slow_x, fast_x) = (by_cap[0].1, by_cap[1].1);
+    assert!(
+        fast_x - slow_x > 10.0,
+        "authored maxThrottle must measure: 0.5-cap x={slow_x:.1} vs 1.0-cap x={fast_x:.1}"
+    );
+}
+
+/// `avoidPlayers` gates the corridor through the full driving system:
+/// with the local car parked mid-lane, an authored-1 driver commits a
+/// pass and drives around without contact; the authored-0 twin never
+/// senses it and collides head-on.
+#[test]
+fn authored_avoid_players_decides_the_parked_player() {
+    for (tail, expect_contact) in [("1 1 1 1 0", false), ("1 1 1 0 0", true)] {
+        let tmp = roster_install_rows(
+            &format!("vpt race0-a-0.opp 0.90 0 50.0 0.7 {tail} 1.0\n"),
+            &[],
+        );
+        let mut app = event_app(event_config(), vfs_of(tmp.path()));
+        app.update();
+        let vpt = opponent_by_vehicle(&mut app, "vpt");
+        let player = app
+            .world_mut()
+            .query_filtered::<Entity, With<PlayerVehicle>>()
+            .iter(app.world())
+            .next()
+            .unwrap();
+        let player_obj = app.world().get::<ObjectIdentity>(player).unwrap().0;
+        // The grid hold re-asserts the slot pose until the green —
+        // park the local car dead-centre on vpt's lane once it is over.
+        run(&mut app, 240);
+        app.world_mut().get_mut::<Position>(player).unwrap().0 = Vec3::new(110.0, 0.0, COURSE_Z);
+
+        let mut impacts = Vec::new();
+        let mut max_dev = 0.0f32;
+        for _ in 0..460 {
+            app.update();
+            impacts.extend(drain_impacts(&mut app));
+            let p = app.world().get::<Position>(vpt).unwrap().0;
+            max_dev = max_dev.max((p.z - COURSE_Z).abs());
+        }
+        let hit = impacts
+            .iter()
+            .any(|e| e.participants.0 == player_obj || e.participants.1 == player_obj);
+        assert_eq!(
+            hit, expect_contact,
+            "avoidPlayers tail {tail}: contact with the parked player = {hit}"
+        );
+        if expect_contact {
+            continue;
+        }
+        let p = app.world().get::<Position>(vpt).unwrap().0;
+        assert!(
+            p.x > 115.0 && max_dev > 0.5,
+            "the sensing driver slips past the parked car off the lane line: pos={p:?} max_dev={max_dev}"
+        );
+    }
 }

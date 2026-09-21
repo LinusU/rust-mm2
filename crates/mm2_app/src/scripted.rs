@@ -93,13 +93,46 @@ const REVERSE_FRAMES: u32 = 72;
 /// after the reverse, turning the nose away from the wall.
 const TURN_FRAMES: u32 = 45;
 
+/// Per-driver tuning of the control law (F15-B.2). The player
+/// evidence bot always uses [`ScriptedTuning::DEFAULT`]; opponents
+/// resolve theirs from the authored `[Opponent]` parameter tail, so
+/// authored skill shows up as throttle demand and carried corner
+/// speed rather than a different car or a different law.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScriptedTuning {
+    /// Ceiling applied to every throttle demand — the authored
+    /// `maxThrottle` column (default 1.0 = unchanged).
+    pub throttle_cap: f32,
+    /// Speed (m/s) above which a sharp bearing brakes instead of
+    /// throttling — [`CORNER_SPEED`] scaled by the authored
+    /// corner-speed multiplier (default = `CORNER_SPEED`).
+    pub corner_speed: f32,
+}
+
+impl ScriptedTuning {
+    /// The shared constants — what every driver used before authored
+    /// tuning existed.
+    pub const DEFAULT: Self = Self {
+        throttle_cap: 1.0,
+        corner_speed: CORNER_SPEED,
+    };
+}
+
+impl Default for ScriptedTuning {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 fn steer_cmd(bearing: f32) -> f32 {
     (bearing * STEER_GAIN).clamp(-1.0, 1.0)
 }
 
-/// One frame of the control law. `bearing` is the signed angle to the
-/// target (positive = right), `forward_speed` the signed speed along
-/// the nose (m/s), `grounded` whether any wheel has contact.
+/// One frame of the control law under the driver's [`ScriptedTuning`]:
+/// `corner_speed` sets the corner-brake engage speed and
+/// `throttle_cap` ceilings every throttle demand, recovery included —
+/// an authored `maxThrottle` of 0.8 limits the car everywhere, not
+/// just on straights.
 ///
 /// The stuck recovery is a blind three-point escape: reverse while
 /// swinging the nose toward `recovery_side` (reversing pivots the nose
@@ -107,11 +140,12 @@ fn steer_cmd(bearing: f32) -> f32 {
 /// full lock the same way. When the bearing already points somewhere
 /// useful the reverse steers `-steer_cmd` instead — straight at the
 /// target. `recovery_side` alternates between escapes.
-pub fn scripted_input(
+pub fn scripted_input_tuned(
     bot: &mut ScriptedBot,
     bearing: f32,
     forward_speed: f32,
     grounded: bool,
+    tuning: &ScriptedTuning,
 ) -> VehicleInput {
     if bot.reverse_frames > 0 {
         bot.reverse_frames -= 1;
@@ -129,7 +163,7 @@ pub fn scripted_input(
     if bot.turn_frames > 0 {
         bot.turn_frames -= 1;
         return VehicleInput {
-            throttle: 0.5,
+            throttle: 0.5_f32.min(tuning.throttle_cap),
             steering: bot.recovery_side,
             ..default()
         };
@@ -139,16 +173,17 @@ pub fn scripted_input(
         ..default()
     };
     let b = bearing.abs();
-    if b > CORNER_RAD && forward_speed > CORNER_SPEED {
+    if b > CORNER_RAD && forward_speed > tuning.corner_speed {
         input.brake = 0.6;
     } else if forward_speed < SPEED_CAP {
-        input.throttle = if b <= STRAIGHT_RAD {
+        let band: f32 = if b <= STRAIGHT_RAD {
             1.0
         } else if b <= TURN_RAD {
             0.45
         } else {
             0.25
         };
+        input.throttle = band.min(tuning.throttle_cap);
     }
     if grounded && input.throttle > 0.0 && forward_speed.abs() < STUCK_SPEED {
         bot.stuck_frames += 1;
@@ -162,6 +197,25 @@ pub fn scripted_input(
         bot.stuck_frames = 0;
     }
     input
+}
+
+/// One frame of the control law at [`ScriptedTuning::DEFAULT`].
+/// `bearing` is the signed angle to the target (positive = right),
+/// `forward_speed` the signed speed along the nose (m/s), `grounded`
+/// whether any wheel has contact.
+pub fn scripted_input(
+    bot: &mut ScriptedBot,
+    bearing: f32,
+    forward_speed: f32,
+    grounded: bool,
+) -> VehicleInput {
+    scripted_input_tuned(
+        bot,
+        bearing,
+        forward_speed,
+        grounded,
+        &ScriptedTuning::DEFAULT,
+    )
 }
 
 /// The world position the bot drives at — the live objective, never a

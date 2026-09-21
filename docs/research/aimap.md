@@ -48,8 +48,10 @@ meaning is separate (ledger MP-9).
       tail columns are preserved raw.
     - `[Opponent]` — `geo waypoint-file <tail>`: geo basename
       (`vpcoop`, `vpford`, …), a `*.opp` path record name, then 10
-      numbers on 536 rows (first is a 0.75–1.0 skill-like value) or 1
-      number on 1 row (`race/sf/stunt0.aimap`).
+      numbers on 536 rows or 1 number on 1 row
+      (`race/sf/stunt0.aimap`). The tail decodes into the driving-
+      parameter vocabulary mm2hook recovers — see *Opponent
+      parameter tail* below.
     - `[Ambient Types/Density]` — `name cumulative-weight flag`
       (flag 0, omitted on one roambak row). Weights are non-decreasing
       and close at exactly 1.0 on every retail file — a cumulative
@@ -89,8 +91,11 @@ meaning is separate (ledger MP-9).
   (23/24; `sf/race0` authored anomaly noted above). Whether `_p`
   files outside the checkpoint roster follow the same rule is
   unverified per-file but consistent with the same convention.
-- Police/opponent tail columns, `[Traffic Lights]` shape, `[Hookmen]`
-  rows: **unknown**, preserved raw.
+- Opponent tail column *mapping*: **inferred** — mm2hook's recovered
+  `OpponentData`/`RegisterRoute` vocabulary plus retail distributions
+  (see below); not original-executable verified. Police tail columns,
+  `[Traffic Lights]` shape, `[Hookmen]` rows: **unknown**, preserved
+  raw.
 - Runtime semantics (how the original consumes speed limits, density
   picks, spawns, drive-on-left): **unverified** — ledger UNK-12.
 
@@ -146,6 +151,60 @@ which carry no race records), 271 london + 246 sf opponents wired,
   files for the same event (`vpcoop`→`vpcoop2k`, plus `vpvwcup`,
   `vpdb7`, `vppanoz`, `vppanozgt` — including the reward-locked Panoz
   GTR-1). All wired ids resolve to `ready` catalog entries.
+
+## Opponent parameter tail (F15-B.2, 2026-09-21 — inferred)
+
+The ten-value `[Opponent]` tail decodes into the driving-behavior
+vocabulary mm2hook recovers (`OpponentData`, `aiVehiclePhysics::
+RegisterRoute` — documented names, R4). The decode is **inferred,
+not original-verified**: mm2hook's own `OpponentData` field order
+does not match the retail distributions positionally (its four
+floats land where retail authors flags and vice versa), so the
+column assignment below orders the *same* recovered field names by
+what each column's authored values can actually be. Every assigned
+column's retail range matches the corresponding `RegisterRoute`
+default, and short rows (`stunt0`'s single value) decode trailing
+fields as absent rather than zero.
+
+| col | field | retail range | consumed |
+|-----|-------|--------------|----------|
+| 0 | `maxThrottle` (default 1.0) | 0.57–1.00 | throttle ceiling on the scripted control law |
+| 1 | `weirdPathfinding`/`BadPathfinding` flag | mostly 0; set on london `crash6`/`race12` rows | bound, unconsumed |
+| 2 | `someDistancePadding`/`TurnRadius` | 50–150 | bound, unconsumed |
+| 3 | `cornerBrakingThreshold`/`TurnSpeedMultiplier` (default 0.7) | 0.07–1.0, centred ~0.7 | bound, unconsumed |
+| 4 | `unusedFlag` | 0/1 | bound, unconsumed |
+| 5 | `avoidTraffic` | 0/1 | bound, inert — no ambient-traffic class exists |
+| 6 | `avoidProps` | 0/1 | bound, inert — the corridor senses participants only |
+| 7 | `avoidPlayers` | 0/1, both authored often | gates human participants in the traffic corridor |
+| 8 | `avoidOpponents` | ≈ universal 0 | bound, **inert** — see below |
+| 9 | `cornerSpeedMultiplier` (default 2.0) | 0.89–2.29 | multiplies the corner-brake engage speed |
+
+The `avoidOpponents` caveat deserves emphasis: retail authors it ≈
+universally 0, so consuming the flag as written would make every
+stock opponent blind to the rest of the field — either the original
+genuinely never avoids AI (possible; stock AI is famously chaotic),
+or the flag order/polarity here is wrong. It stays decoded-but-inert
+until it can be measured; the corridor senses AI unconditionally.
+`avoidPlayers` is consumed because it carries real authored variance
+(rows authoring 0 and 1 coexist in the same file — e.g.
+`race/sf/race1.aimap_p`), so the gate differentiates per-driver.
+
+Difficulty signal: amateur rows author `maxThrottle` at the low end
+more often (sf `race0` amateur vpbug 0.70–0.75 vs professional
+0.93–1.00; `circuit6` reverses — amateur 1.00 vs professional
+vppanoz/vpdb7 0.81), and professional rows author
+`cornerSpeedMultiplier` at the high end (2.0+ on later races —
+`race/sf/race5.aimap_p` 2.29, `race/london/race2.aimap_p` 2.08 — vs
+the ~1.0 amateur mode). Vehicle variants and routes also
+differ per difficulty, so finish-pace differences are *not*
+attributable to the tail alone — dynamics data, not a controlled A/B.
+
+Runtime: `mm2_game::OpponentDriveParams` /
+`OpponentSpec::drive_params()` decode the tail; `mm2_app::opponents`
+binds it per driver at spawn into `ScriptedTuning`
+(`throttle_cap`, `corner_speed`) plus the `avoid_players` sense gate.
+`None` columns take the `RegisterRoute` defaults — the pre-tail
+behavior. Ledger: RACE-14/UNK-11.
 
 ## `.opp` route records (measured 2026-09-21)
 

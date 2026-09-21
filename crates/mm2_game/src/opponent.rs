@@ -8,9 +8,13 @@
 //! and driving systems consume this, never CSV text.
 //!
 //! Authored scalars are kept verbatim: row 0's `brake` is measured as
-//! the staged-start heading, but the rest of the `.opp` columns and the
-//! ten-value parameter tail remain unverified (ledger UNK-11), so
-//! nothing here interprets them. Problems that do not prevent building
+//! the staged-start heading, but the rest of the `.opp` columns remain
+//! unverified (ledger UNK-11) and nothing here interprets them. The
+//! ten-value `[Opponent]` parameter tail decodes through
+//! [`OpponentSpec::drive_params`] into the driving-behavior vocabulary
+//! mm2hook documents (`OpponentData`/`RegisterRoute`, R4) — a
+//! documented-but-inferred mapping kept beside the raw values, not a
+//! replacement for them. Problems that do not prevent building
 //! the roster (a dead `.opp` reference, a wired count that disagrees
 //! with the table row) are [`OpponentIssue`]s on the roster — they are
 //! reported, never silently repaired.
@@ -85,9 +89,8 @@ pub struct OpponentSpec {
     /// contract's.
     pub vehicle: String,
     /// Authored numeric tail, preserved raw: ten values on retail race
-    /// rows — the first behaves like a 0-1 skill (inferred, UNK-11) —
-    /// one on the `race/sf/stunt0.aimap` extra. Interpretation belongs
-    /// to the difficulty model (F15-B), not this contract.
+    /// rows — the driving parameters [`OpponentSpec::drive_params`]
+    /// decodes — one on the `race/sf/stunt0.aimap` extra.
     pub params: Vec<f32>,
     /// The wired driving line. `None` when the `.opp` reference failed
     /// to resolve — the authored slot is kept (the roster still knows
@@ -96,11 +99,87 @@ pub struct OpponentSpec {
     pub route: Option<OpponentRoute>,
 }
 
+/// The `[Opponent]` parameter tail decoded into the driving-behavior
+/// vocabulary mm2hook recovers for it (`OpponentData` +
+/// `aiVehiclePhysics::RegisterRoute`, R4 — documented, not
+/// original-verified; ledger UNK-11/RACE-14). The column-to-field
+/// assignment is inferred from the recovered parameter names plus the
+/// retail value distributions (536 rows measured): every column's
+/// authored range matches the corresponding `RegisterRoute` default.
+///
+/// Columns the tail is too short to supply (`stunt0`'s single-value
+/// row, malformed rows) stay `None` — consumers resolve their own
+/// defaults; a missing column is authored absence, not a zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct OpponentDriveParams {
+    /// Column 0 — `maxThrottle` (RegisterRoute default 1.0): the
+    /// throttle demand ceiling. Retail 0.57–1.00; amateur rows author
+    /// the low end far more often than professional ones — the
+    /// authored difficulty dial.
+    pub max_throttle: Option<f32>,
+    /// Column 1 — a 0/1 flag (set only on london `crash6`/`race12`
+    /// rows on retail): `weirdPathfinding`/`unkFlag` candidate. Bound,
+    /// unconsumed — no pathfinding variant exists to switch.
+    pub weird_pathfinding: Option<bool>,
+    /// Column 2 — a distance in metres (retail 50–150):
+    /// `someDistancePadding` (default 75)/`TurnRadius` candidate.
+    /// Bound, unconsumed — which distance it pads is unverified.
+    pub distance_padding: Option<f32>,
+    /// Column 3 — corner braking factor (retail 0.07–1.0, centred
+    /// ~0.7): `cornerBrakingThreshold` (default 0.7)/
+    /// `TurnSpeedMultiplier` candidate. Bound, unconsumed — its exact
+    /// threshold semantics are unverified.
+    pub corner_brake: Option<f32>,
+    /// Column 4 — a 0/1 flag, purpose unknown. Bound, unconsumed.
+    pub unused_flag: Option<bool>,
+    /// Column 5 — `avoidTraffic`: sense ambient traffic. Bound but
+    /// inert — no ambient-traffic class exists yet (F10 scope).
+    pub avoid_traffic: Option<bool>,
+    /// Column 6 — `avoidProps`: sense props. Bound but inert — the
+    /// corridor senses participants only.
+    pub avoid_props: Option<bool>,
+    /// Column 7 — `avoidPlayers`: sense human participants (local and
+    /// remote). `false` makes the player transparent to the corridor.
+    pub avoid_players: Option<bool>,
+    /// Column 8 — `avoidOpponents`: sense other AI opponents. Bound
+    /// but **inert**: retail authors it ≈ universally 0, so consuming
+    /// it under this inferred mapping would make every stock opponent
+    /// blind to the rest of the field — either the original genuinely
+    /// never avoids AI, or the flag order/polarity here is wrong. Held
+    /// unverified until it can be measured; the corridor senses AI
+    /// participants unconditionally meanwhile.
+    pub avoid_opponents: Option<bool>,
+    /// Column 9 — `cornerSpeedMultiplier` (RegisterRoute default 2.0):
+    /// how much corner speed the driver carries. Retail 0.89–2.29;
+    /// professional rows author the high end (>2.0).
+    pub corner_speed_multiplier: Option<f32>,
+}
+
 impl OpponentSpec {
-    /// The first authored parameter — behaves like a 0-1 skill level on
-    /// retail data (0.57-1.00; inferred, UNK-11).
+    /// The first authored parameter — the `maxThrottle` ceiling
+    /// (0.57–1.00 on retail; inferred, UNK-11).
     pub fn skill(&self) -> Option<f32> {
         self.params.first().copied()
+    }
+
+    /// Decode the authored tail into the documented driving-parameter
+    /// vocabulary (RACE-14). Columns are positional — a row short of
+    /// ten values leaves the trailing fields `None`.
+    pub fn drive_params(&self) -> OpponentDriveParams {
+        let num = |i: usize| self.params.get(i).copied();
+        let flag = |i: usize| num(i).map(|v| v != 0.0);
+        OpponentDriveParams {
+            max_throttle: num(0),
+            weird_pathfinding: flag(1),
+            distance_padding: num(2),
+            corner_brake: num(3),
+            unused_flag: flag(4),
+            avoid_traffic: flag(5),
+            avoid_props: flag(6),
+            avoid_players: flag(7),
+            avoid_opponents: flag(8),
+            corner_speed_multiplier: num(9),
+        }
     }
 }
 

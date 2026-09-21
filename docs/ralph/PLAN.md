@@ -39,7 +39,33 @@
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
 **Next selected slice: F13-B/F14-B remainders, F15-B remainder, or
-F11-C** — the latest iteration repaired F15-A.3's one external-review
+F11-C** — the latest iteration landed F15-B.2, the authored
+`[Opponent]` parameter-tail slice of the difficulty model: the
+ten-value tail decodes into `mm2_game::OpponentDriveParams` (the
+vocabulary mm2hook recovers for `OpponentData`/`RegisterRoute` —
+*inferred* mapping, RACE-14 new; short rows decode trailing fields
+absent, not zero), and `mm2_app::opponents` binds it per driver at
+spawn into a new `ScriptedTuning` overlay on the shared control law:
+`maxThrottle` ceilings every throttle demand, `cornerSpeedMultiplier`
+scales the corner-brake engage speed, and `avoidPlayers` gates which
+human participants the traffic corridor senses. `avoidOpponents`
+stays **decoded but inert** — retail authors it ≈ universally 0, so
+consuming it under the inferred mapping would blind every stock
+opponent to the field (the flag's order/polarity is unverified);
+`avoidTraffic`/`avoidProps` stay inert (no such runtime classes);
+the rest are bound, unconsumed. `ScriptedTuning::DEFAULT` reproduces
+the pre-tail law bit-for-bit. Evidence: `sf circuit:1` 900-frame
+hold-driver is bit-identical to the verified record; `sf
+checkpoint:0` amateur (vpbug 0.70–0.75 throttle) vs professional
+(0.93–1.00) runs differ in field composition but 5400-frame finish
+counts land 4/6 both — disclosed as dynamics data, not a controlled
+throttle A/B (vehicles and routes differ too); `sf circuit:6 --bot`
+5400 holds `pos=2/7` amateur, `pos=5/7` professional. Still open
+under F15-B's parent: catch-up semantics, AC06's measured difficulty
+effects, `weirdPathfinding`/`distancePadding`/`cornerBrakingThreshold`
+consumption once semantics verify, and the `avoidOpponents` polarity
+question.
+Before that it repaired F15-A.3's one external-review
 blocker (`cir6_strtpnts`' all-zero `a` column is *no authored
 heading* — `RaceStart.yaw_deg` is now `Option`, and a `None` slot
 derives a course facing instead of a verbatim −Z: the player faces

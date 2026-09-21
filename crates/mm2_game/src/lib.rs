@@ -39,7 +39,8 @@ pub use nav::{
     RouteCursor, RouteError, RouteOptions, TravelDir, TurnKind,
 };
 pub use opponent::{
-    OpponentIssue, OpponentRoster, OpponentRoute, OpponentRoutePoint, OpponentSpec,
+    OpponentDriveParams, OpponentIssue, OpponentRoster, OpponentRoute, OpponentRoutePoint,
+    OpponentSpec,
 };
 pub use props::{MAX_PROP_RULE_STAMPS, PropStamp, PropWalk, PropWalkStats, walk_prop_rules};
 pub use race::{

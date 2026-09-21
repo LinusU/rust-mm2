@@ -45,6 +45,44 @@ fn skill_is_the_first_authored_param_only() {
     assert_eq!(bare.skill(), None);
 }
 
+/// F15-B.2: the ten-value `[Opponent]` tail decodes positionally into
+/// the documented `RegisterRoute` vocabulary (RACE-14) — a retail
+/// `circuit1` amateur row binds throttle, corner multiplier and the
+/// avoid flags; a short tail leaves the missing columns `None` rather
+/// than inventing zeros.
+#[test]
+fn drive_params_decodes_the_authored_tail() {
+    let spec = OpponentSpec {
+        vehicle: "vpcoop".into(),
+        // A london `circuit0` amateur row, verbatim.
+        params: vec![0.86, 0.0, 50.0, 0.7, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0],
+        route: None,
+    };
+    let p = spec.drive_params();
+    assert_eq!(p.max_throttle, Some(0.86));
+    assert_eq!(p.weird_pathfinding, Some(false));
+    assert_eq!(p.distance_padding, Some(50.0));
+    assert_eq!(p.corner_brake, Some(0.7));
+    assert_eq!(p.unused_flag, Some(true));
+    assert_eq!(p.avoid_traffic, Some(true));
+    assert_eq!(p.avoid_props, Some(true));
+    assert_eq!(p.avoid_players, Some(true));
+    assert_eq!(p.avoid_opponents, Some(false));
+    assert_eq!(p.corner_speed_multiplier, Some(1.0));
+
+    // The `stunt0` single-value row: the throttle column binds and
+    // everything else stays absent — not authored, not zero.
+    let stub = OpponentSpec {
+        vehicle: "vpfoo".into(),
+        params: vec![1.0],
+        route: None,
+    };
+    let p = stub.drive_params();
+    assert_eq!(p.max_throttle, Some(1.0));
+    assert_eq!(p.avoid_players, None);
+    assert_eq!(p.corner_speed_multiplier, None);
+}
+
 #[test]
 fn resolved_routes_counts_only_wired_lines() {
     let roster = OpponentRoster {

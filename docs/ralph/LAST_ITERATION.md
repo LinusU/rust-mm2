@@ -1,132 +1,143 @@
 # Last implementation iteration
 
-- Task ID and title: F15-A.3 review repair — an authored `_strtpnts`
-  `a = 0` is *no heading* (the `.opp` `brake == 0` convention applied
-  to start grids): `RaceStart.yaw_deg` → `Option<f32>`, and a `None`
-  slot derives a course facing instead of spawning backward.
-- Starting commit: `36b05304816083af2cf9ee65f37355eb582417b1` on
-  `ralph/night` — the iteration-10 candidate the external review
-  rejected on one blocking finding.
+- Task ID and title: F15-B.2 — the authored `[Opponent]` parameter
+  tail: decode it into `OpponentDriveParams` (mm2hook's recovered
+  `OpponentData`/`RegisterRoute` vocabulary — inferred mapping) and
+  consume the parts that can be supported without overstating
+  uncertain original semantics.
+- Starting commit: `d64ba5523afc4ef1f311a5c239bc3b50e278eb28` on
+  `ralph/night` — the iteration-11 candidate the external review
+  passed.
 - Retail install: `/Users/linus/coding/rust-mm2/retail`
   (`fnv1a64:e91e6cd4b2ae30d9`).
 
-## The blocker being repaired
-
-External review (iteration-10 feedback, `review.verdict: fail`):
-`cir6_strtpnts` authors `a = 0` on all three rows — the lone all-zero
-grid on retail — yet `authored_start_slots` kept it verbatim, so
-`session.rs`/`spawn_pose` spawned the player and the two grid-slot
-opponents at yaw 0 = −Z. The `.opp` routes bound to `circuit:6` stage
-~177–183° (vehicle-yaw +Z) and the driving line passes within ~6 m of
-the grid heading +Z; the reviewer's live run had the hold-driver go
-`z=-402 → z=-483`, 81 m backward into the start-line area, and the
-grid-slot opponents U-turned at green. The reviewer's own convention
-already treats `.opp brake == 0` as "no authored heading"; the same
-rule was missing on the `_strtpnts` side.
-
-## Root cause
-
-`authored_start_slots` mapped `p.angle_deg` verbatim into
-`RaceStart.yaw_deg: f32` — a scalar contract with no way to say
-"nothing authored". Every nonzero grid on retail (8/9 files) carries
-a real heading, so the convention fix was correct for them; the zero
-column needed the same zero-means-unset reading `start_heading_deg`
-applies to `.opp` row-0 `brake`.
-
 ## What changed
 
-- `mm2_game::race::RaceStart.yaw_deg` is now `Option<f32>` — `Some`
-  is an authored (or producer-derived) vehicle-yaw heading, `None`
-  means the record supplied none. Doc updated with the measured
-  `cir6` case.
-- `mm2_game::race::RaceDefinition::course_yaw(from)` — new shared
-  helper: the course's opening direction as a vehicle-yaw radians
-  heading toward the first trigger ≥2 m away in XZ (the same facing
-  the no-grid producer fallback derives from the row0→row1 tangent —
-  `checkpoints[0]` is its far end under both rules). `None` on
-  degenerate data.
-- `mm2_content::race_def::authored_start_slots` maps `a = 0` →
-  `yaw_deg: None`; nonzero stays verbatim; the designed no-grid
-  fallback slot stores `Some`.
-- `mm2_app::session` player spawn: `yaw_deg` → `course_yaw` → the
-  world roam yaw, in that order — matching the reviewer's suggested
-  "derived/course facing" leg.
-- `mm2_app::opponents::spawn_pose` restructured so a `None` grid slot
-  falls through to the same chain a route-anchor spawn uses: route
-  staged heading → first-leg direction → player's yaw — the
-  reviewer's suggested opponent leg. Position still follows the slot.
-- `mm2_formats::waypoints::StartPoint` doc notes authored 0 = no
-  heading (parser keeps raw, as before).
+- `mm2_game::opponent` — new `OpponentDriveParams` +
+  `OpponentSpec::drive_params()`: the ten-value tail decodes
+  positionally into mm2hook's recovered vocabulary (R4): col 0
+  `maxThrottle`, col 1 `weirdPathfinding`/`BadPathfinding` flag, col 2
+  `someDistancePadding`/`TurnRadius`, col 3
+  `cornerBrakingThreshold`/`TurnSpeedMultiplier`, cols 4–8
+  `unused`/`avoidTraffic`/`avoidProps`/`avoidPlayers`/
+  `avoidOpponents`, col 9 `cornerSpeedMultiplier`. The mapping is
+  explicitly *inferred, not original-verified*: mm2hook's own
+  `OpponentData` field order does not match retail distributions
+  positionally, so the assignment orders the same recovered names by
+  what each column's authored values can be — every column's range
+  matches the corresponding `RegisterRoute` default (536 rows
+  measured). Short rows (`stunt0`'s single value) decode trailing
+  fields `None` — authored absence, not zero. Raw params are kept
+  verbatim beside the decode.
+- `mm2_app::scripted` — new `ScriptedTuning { throttle_cap,
+  corner_speed }` overlay + `scripted_input_tuned`: `throttle_cap`
+  ceilings every throttle demand (recovery included; a ceiling, not a
+  scale), `corner_speed` sets the corner-brake engage speed.
+  `ScriptedTuning::DEFAULT` reproduces the pre-tail law bit-for-bit;
+  `scripted_input` is now a default-tuned wrapper, so the `--bot`
+  evidence driver is untouched.
+- `mm2_app::opponents` — `Traffic` gains `control: PlayerControl`;
+  `nearest_blocker` takes a sense predicate; `OpponentDriver` binds
+  `tuning` + `avoid_players` at spawn from `spec.drive_params()`
+  (`None` columns → the `RegisterRoute` defaults = pre-tail
+  behavior). `driver.senses` gates human participants on the authored
+  `avoidPlayers` flag; the corridor filter, the room scan and the
+  held-target path all run through it, so an unsensed participant is
+  fully transparent — no blocker, no brake, no pass, no ban.
+
+## Deliberate scope decisions (inferred mapping, honestly partial)
+
+- `avoidOpponents` is **bound but inert**: retail authors it ≈
+  universally 0, so consuming it under this inferred mapping would
+  blind every stock opponent to the rest of the field — either the
+  original genuinely never avoids AI, or the flag's order/polarity
+  here is wrong. Held unverified (UNK-11); the corridor senses AI
+  unconditionally meanwhile. `avoidPlayers` *is* consumed because it
+  carries real authored variance (0 and 1 rows coexist in the same
+  file, e.g. `race/sf/race1.aimap_p`), so the gate differentiates
+  per-driver.
+- `avoidTraffic`/`avoidProps` bound but inert — no ambient-traffic or
+  prop runtime classes exist to sense (F10 scope).
+- `weirdPathfinding`, `distance_padding`, `corner_brake`,
+  `unused_flag` bound but unconsumed — semantics unverified.
 
 ## Tests
 
-- `mm2_content/tests/race_def.rs` — `zero_strtpnts_angle_is_no_
-  authored_heading`: a cir6-shaped all-zero grid produces `None`
-  slots while a nonzero row in the same file still binds verbatim.
-  Existing strtpnts/tangent tests updated for `Option` (15 total).
-- `mm2_app/tests/event.rs` — `zero_strtpnts_yaw_falls_back_to_the_
-  course` (production path): an all-zero grid on a +X course spawns
-  the player on the authored slot facing +X toward gate 0 — the old
-  code faced −Z (13 total).
-- `mm2_app/tests/opponents.rs` — `spawn_pose_on_a_headless_grid_slot_
-  uses_the_route_facing`: `None` slot keeps its position and takes
-  the route's staged heading; no staged heading → first leg; no route
-  → player's yaw (20 total).
-- `mm2_game/tests/race.rs` — `course_yaw_faces_the_first_real_
-  trigger`: first-trigger facing, on-slot trigger skip, degenerate →
-  `None` (21 total).
+- `mm2_game/tests/opponent.rs` — `drive_params_decodes_the_authored_
+  tail`: a verbatim retail row binds all ten columns; the `stunt0`
+  single-value row leaves trailing fields `None` (4 total).
+- `mm2_app/tests/bot.rs` — `tuned_input_law_scales_throttle_and_
+  corner_floor`: the cap ceilings over-cap bands and leaves under-cap
+  bands; a doubled `corner_speed` floor drops the corner brake at
+  20 m/s; `ScriptedTuning::DEFAULT` reproduces the untuned law
+  bit-for-bit across bearings (7 total).
+- `mm2_app/tests/opponents.rs` — `authored_avoid_players_gates_the_
+  corridor` (sense predicate + inert `avoidOpponents`),
+  `authored_tail_binds_the_driver_tuning` (production spawn binds
+  throttle cap, corner floor, avoid flag), `authored_max_throttle_
+  measures_on_track` (0.5 vs 1.0 cap twins on identical lanes — the
+  uncapped car covers >10 m more in 480 updates),
+  `authored_avoid_players_decides_the_parked_player` (sensed leg
+  slips past the parked local car without contact; unsensed leg
+  collides and shoves it ~67 m down the road). Existing tests updated
+  for `Traffic.control`/`nearest_blocker` predicate and the
+  retail-realistic flag block on the synthetic roster (24 total).
+- `mm2_content/tests/opponents.rs` — unchanged, all 9 pass.
 
 ## Commands actually run and results
 
 - `cargo fmt --all -- --check` PASS.
 - `cargo clippy --locked --workspace --all-targets --all-features --
   -D warnings` PASS.
-- `cargo test --locked --workspace` — all 38 groups ok, 0 failures.
+- `cargo test --locked --workspace` — all groups ok, 0 failures
+  (opponents 24, bot 7, mm2_game opponent 4, mm2_content opponents 9).
 - Retail evidence — `fnv1a64:e91e6cd4b2ae30d9`, deterministic
   headless (`./target/debug/mm2 --mm2-path …/retail`):
-  - `sf circuit:6 --headless --frames 900` (hold driver — the
-    reviewer's reproduction command): spawn `(-1478,·,-402)` →
-    `final=(-1646,38.6,-393)`, `cp=1/9`, `pos=1/7` — drives down-course
-    −X through gate 0 toward the next gate. The rejected candidate
-    drove `z=-402 → -483` (81 m backward, −Z); the course direction is
-    now correct.
-  - `sf circuit:6 --headless --bot --frames 5400`: `pos=2/7`,
-    `final=(-1759,·,-307)` — the scripted player cleared gate 0 and is
-    chasing gate 1 with one opponent ahead; the field makes progress
-    instead of U-turning off the grid. (No pre-fix `circuit:6` bot
-    baseline exists — the reviewer measured the defect live.)
-  - `sf circuit:1 --headless --frames 900` (regression check):
-    `final=(-507,18.9,-52)` — bit-identical to the verified
-    iteration-10 record; the nonzero-heading path is untouched.
-  - `mm2-inspect dump race/sf/cir6_strtpnts` confirms all three rows
-    author `a=0.0`; `circuit6-a-0.opp` row 0 stages at `(-1474,-474)`
-    heading `177.0` and drives +Z through the grid before turning −X.
+  - `sf checkpoint:0 --headless --frames 5400` amateur (vpbug
+    0.70–0.75 throttle): `opp=4/6`; `--pro` (0.93–1.00): `opp=4/6`;
+    at 3600 updates amateur 4/6 vs pro 3/6 — *dynamics data, not a
+    controlled throttle A/B*: the difficulty rosters differ in
+    vehicles and routes too, and a throttle ceiling mostly changes
+    acceleration, not top speed.
+  - `sf circuit:1 --headless --frames 900` (hold driver):
+    `final=(-507,18.9,-52)` — bit-identical to the verified record;
+    the player path is unaffected by opponent tuning.
+  - `sf circuit:6 --headless --bot --frames 5400`: amateur `pos=2/7`
+    `final=(-1786,57.1,-313)` (prior verified record pos=2/7
+    `final=(-1759,·,-307)` — same standing, position perturbed by the
+    now-bound authored corner multipliers 0.98/1.02 + interactions);
+    `--pro` `pos=5/7` `moved=98m` — different field composition,
+    disclosed as dynamics data.
+  - `mm2-inspect dump` re-verified the tail distributions cited
+    (536 ten-value rows; `avoidOpponents` ≈ universal 0; pro csm
+    reaches 2.29 on `race/sf/race5.aimap_p`).
 - Evidence classification: code gates + synthetic integration tests +
   deterministic headless retail runs. No GPU/rendered/audio evidence;
-  no original-executable comparison exists.
+  no original-executable comparison exists — the column mapping and
+  consumed semantics remain *inferred*.
 
 ## Ledger / research updates
 
-- `docs/original-rules.md` WPT-4: the `a = 0` unset rule added to the
-  measured conventions (`Option` contract + per-consumer fallbacks).
-- `docs/research/aimap.md`: `_strtpnts` side of the zero-means-unset
-  convention recorded with the `cir6` measurements.
-- `docs/ralph/PLAN.md`: F15-A.3 row gains the review-repair note.
+- `docs/original-rules.md` — RACE-14 new (the inferred tail decode +
+  partial consumption); RACE-12's tail note now points at it; UNK-11
+  narrowed (original consumption still unverified, including the
+  `avoidOpponents` polarity question).
+- `docs/research/aimap.md` — new *Opponent parameter tail* section:
+  the full column table, the `avoidOpponents` caveat, the difficulty
+  signal, and what the runtime consumes.
+- `docs/ralph/PLAN.md` — F15-B.2 recorded; remainder updated.
 
 ## Still open
 
-- The `cir<N>` → `circuit<N>` same-index alias (WPT-3, pre-existing):
-  the review's positional+heading matching contradicts it for several
-  grids (cir2↔circuit0, cir4↔circuit5, cir5↔circuit8, cir8↔circuit4;
-  cir9 ambiguous). Wrong-event grid *positions* were already consumed
-  before F15-A.3; the alias needs its own measurement/ledger update —
-  left open as its own slice, not silently repaired here.
-- What triggers `race/sf/race5-a-{5,6,7}`'s mid-file staging row.
-- Whether the original consumes `.opp` staged poses vs `_strtpnts`
-  slots per participant (UNK-17), and whether waypoint `a` enforces
-  gate direction at runtime (UNK-16 remainder).
-- `london circuit:0` opponent parity (-1 finisher vs baseline) — race
-  dynamics, not a verified regression; a representative seeded matrix
-  remains an F15-B open item.
-- F15-B remainder: difficulty/param-tail model (UNK-11), catch-up,
-  AC06 measured difficulty effects.
+- `avoidOpponents` order/polarity — retail ≈ universal 0 stays an
+  open measurement question (inert meanwhile), not silently consumed.
+- Catch-up/rubber-band semantics and AC06's measured difficulty
+  effects (F15-B remainder); `weirdPathfinding`/`distancePadding`/
+  `cornerBrakingThreshold` consumption once semantics verify.
+- The `cir<N>` → `circuit<N>` same-index alias contradiction (WPT-3)
+  and UNK-17 grid-slot consumption — unchanged, own slices.
+- `london circuit:0` opponent-finisher discrepancy (-1 vs baseline) —
+  unchanged dynamics data.
+- Amateur-vs-pro pace attribution is confounded by authored vehicle/
+  route differences — no controlled retail A/B exists; the synthetic
+  production test carries the measured-throttle claim.

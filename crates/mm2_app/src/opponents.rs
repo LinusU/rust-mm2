@@ -13,7 +13,7 @@
 //!   skipped, never repaired or re-numbered.
 //! - **Route following vs. driving control.** [`route_target`] owns
 //!   where the car is going (advance past reached points, close out or
-//!   loop the polyline); [`crate::scripted::scripted_input`] owns how
+//!   loop the polyline); [`crate::scripted::scripted_input_tuned`] owns how
 //!   it gets there (proportional steering, corner braking, bounded
 //!   reverse-and-turn stuck recovery — the same normalized-input
 //!   control law the scripted evidence driver uses).
@@ -29,6 +29,21 @@
 //!   merge would cut back across its nose. Static geometry (walls,
 //!   props) is deliberately not sensed here; a hit the pass cannot
 //!   make stays the recovery law's job.
+//! - **Authored tuning (F15-B.2).** The `[Opponent]` row's ten-value
+//!   parameter tail — the documented `aiVehiclePhysics::RegisterRoute`
+//!   behavioral vocabulary (mm2hook `OpponentData`, R4; the
+//!   column-to-field mapping is inferred — UNK-11/RACE-14) — resolves
+//!   at spawn into a per-driver [`ScriptedTuning`] and corridor sense
+//!   mask: `maxThrottle` ceilings the car's throttle demand, the
+//!   corner-speed multiplier scales the corner-brake engage speed,
+//!   and the `avoidPlayers` flag gates whether the corridor senses
+//!   human participants at all (an unsensed class is fully
+//!   transparent). `avoidOpponents` binds but stays inert — retail
+//!   authors it ≈ universally 0, so consuming it under the inferred
+//!   mapping would blind the field to itself; `avoidTraffic`/
+//!   `avoidProps` bind but stay inert — no ambient-traffic class
+//!   exists (F10) and the corridor never sensed props; the remaining
+//!   columns stay decoded-but-unconsumed pending verified semantics.
 //!
 //! Opponents are *not* clones of the player car: each roster entry
 //! loads its own authored vehicle id through
@@ -66,7 +81,7 @@ use mm2_vehicle::{VehicleInput, VehicleState, vehicle_bundle};
 use tracing::{info, warn};
 
 use crate::car_visual;
-use crate::scripted::{ScriptedBot, scripted_input};
+use crate::scripted::{ScriptedBot, ScriptedTuning, scripted_input_tuned};
 
 /// XZ distance within which a route point counts as reached. `.opp`
 /// points on retail routes sit 40-200 m apart; a generous radius keeps
@@ -153,12 +168,25 @@ const CRAWL_SPEED: f32 = 3.0;
 /// Per-opponent controller state — a component on the vehicle so
 /// session teardown despawns it with everything else the session owns.
 /// Carries the authored [`OpponentSpec`] verbatim: the vehicle id (for
-/// diagnostics), the raw parameter tail (difficulty work, F15-B), and
-/// the resolved route being chased.
+/// diagnostics), the raw parameter tail, and the resolved route being
+/// chased.
 #[derive(Component, Debug, Clone)]
 pub struct OpponentDriver {
     /// The authored lineup entry this participant was spawned from.
     pub spec: OpponentSpec,
+    /// Control-law tuning resolved from the authored parameter tail at
+    /// spawn (F15-B.2): `maxThrottle` → the throttle ceiling, the
+    /// corner-speed multiplier → the corner-brake engage speed.
+    /// `None` columns take the `RegisterRoute` defaults — full
+    /// throttle, base corner speed — i.e. the pre-tail behavior.
+    pub tuning: ScriptedTuning,
+    /// Whether the corridor senses human participants — authored
+    /// `avoidPlayers` (default on). Other AI opponents are always
+    /// sensed: retail authors `avoidOpponents` ≈ universally 0, so
+    /// consuming it under the inferred mapping would blind every
+    /// stock opponent to the rest of the field — bound on the spec,
+    /// inert until the flag's order/polarity is verified.
+    pub avoid_players: bool,
     /// Index of the route point currently being chased.
     pub next: usize,
     /// Bounded stuck-recovery state machine — the same three-point
@@ -191,6 +219,21 @@ pub struct OpponentDriver {
     /// with the frames left on the ban — the car drives the route
     /// line past it (push or slip) before the clean pass retries.
     pub pass_ban: Option<(Entity, u32)>,
+}
+
+impl OpponentDriver {
+    /// Whether the authored avoid flags let the corridor sense `t` —
+    /// human participants under `avoidPlayers`; AI participants always
+    /// (`avoidOpponents` is bound but inert — see
+    /// [`mm2_game::OpponentDriveParams::avoid_opponents`]) (F15-B.2).
+    /// An unsensed class is fully transparent: no pass, no brake, no
+    /// ban — the authored lineup drives through it.
+    pub fn senses(&self, t: &Traffic) -> bool {
+        match t.control {
+            PlayerControl::Ai => true,
+            _ => self.avoid_players,
+        }
+    }
 }
 
 /// Whether `pos` has reached route point `i`: inside [`ROUTE_REACH`],
@@ -394,6 +437,7 @@ pub fn spawn_opponents(
 
         let object = session.mint_object_id();
         let player_id = session.mint_player_id();
+        let drive_params = spec.drive_params();
         let vehicle = commands
             .spawn((
                 owner,
@@ -407,6 +451,12 @@ pub fn spawn_opponents(
                 RaceProgress::new(definition),
                 OpponentDriver {
                     spec: spec.clone(),
+                    tuning: ScriptedTuning {
+                        throttle_cap: drive_params.max_throttle.unwrap_or(1.0).clamp(0.0, 1.0),
+                        corner_speed: ScriptedTuning::DEFAULT.corner_speed
+                            * drive_params.corner_speed_multiplier.unwrap_or(1.0).max(0.0),
+                    },
+                    avoid_players: drive_params.avoid_players.unwrap_or(true),
                     next,
                     recovery: ScriptedBot::default(),
                     pass_entity: None,
@@ -445,11 +495,16 @@ pub fn spawn_opponents(
 
 /// Another participant on the road — the traffic the avoidance reads.
 /// Positions, headings and speeds come from live physics state: the
-/// local player and every other AI are obstacles exactly alike.
+/// local player and every other AI are obstacles exactly alike. The
+/// authored avoid flags then decide which control classes each
+/// opponent senses at all (F15-B.2).
 #[derive(Debug, Clone, Copy)]
 pub struct Traffic {
     /// The participant's entity — self is excluded by comparison.
     pub entity: Entity,
+    /// Which input authority drives it — the authored avoid flags key
+    /// on this class.
+    pub control: PlayerControl,
     /// World position this step.
     pub pos: Vec3,
     /// Its nose direction (XZ-projected heading basis).
@@ -491,17 +546,19 @@ fn blocker_at(pos: Vec3, fwd: Vec3, t: &Traffic) -> Blocker {
 /// The nearest participant ahead inside the brake corridor — the
 /// overtake/brake trigger. Only strictly-positive gaps count: a car
 /// already alongside or behind is the hold window's question, not a
-/// new blocker.
+/// new blocker. `senses` is the driver's authored avoid mask — a
+/// class it does not sense never registers as a blocker.
 pub fn nearest_blocker(
     entity: Entity,
     pos: Vec3,
     fwd: Vec3,
     reach: f32,
     traffic: &[Traffic],
+    senses: impl Fn(&Traffic) -> bool,
 ) -> Option<Blocker> {
     traffic
         .iter()
-        .filter(|t| t.entity != entity)
+        .filter(|t| t.entity != entity && senses(t))
         .map(|t| blocker_at(pos, fwd, t))
         .filter(|b| b.gap > 0.0 && b.gap <= reach && b.lat.abs() < BLOCK_HALF_WIDTH)
         .min_by(|a, b| a.gap.total_cmp(&b.gap))
@@ -607,7 +664,7 @@ pub fn opponent_drive(
             &RaceProgress,
             &mut OpponentDriver,
         )>,
-        Query<(Entity, &Position, &Rotation, &VehicleState), With<Player>>,
+        Query<(Entity, &Player, &Position, &Rotation, &VehicleState)>,
     )>,
 ) {
     let race = race
@@ -617,8 +674,9 @@ pub fn opponent_drive(
     let traffic: Vec<Traffic> = set
         .p1()
         .iter()
-        .map(|(entity, pos, rot, vstate)| Traffic {
+        .map(|(entity, player, pos, rot, vstate)| Traffic {
             entity,
+            control: player.control,
             pos: pos.0,
             fwd: rot.0 * Vec3::NEG_Z,
             speed: vstate.forward_speed,
@@ -660,8 +718,8 @@ pub fn opponent_drive(
         // what lets the fallback actually push or slip past instead
         // of brake-shuffling at the same unyielding gap.
         let banned = |e: Entity| driver.pass_ban.is_some_and(|(b, _)| b == e);
-        let narrow =
-            nearest_blocker(entity, pos.0, fwd, reach, &traffic).filter(|b| !banned(b.entity));
+        let narrow = nearest_blocker(entity, pos.0, fwd, reach, &traffic, |t| driver.senses(t))
+            .filter(|b| !banned(b.entity));
         let held = driver
             .pass_entity
             .and_then(|e| held_blocker(e, pos.0, fwd, reach, &traffic))
@@ -714,7 +772,7 @@ pub fn opponent_drive(
                 // the corridor never saw — take the emptier side.
                 let mut room = [0.0f32; 2];
                 for t in &traffic {
-                    if t.entity == entity {
+                    if t.entity == entity || !driver.senses(t) {
                         continue;
                     }
                     let o = blocker_at(pos.0, fwd, t);
@@ -753,11 +811,13 @@ pub fn opponent_drive(
             }
         }
         let bearing = relative_bearing(yaw, pos.0, target);
-        *input = scripted_input(
+        let tuning = driver.tuning;
+        *input = scripted_input_tuned(
             &mut driver.recovery,
             bearing,
             vstate.forward_speed,
             vstate.grounded,
+            &tuning,
         );
         // Braking answers the narrow corridor only: the committed pass
         // target may sit outside it while we are alongside, and braking
