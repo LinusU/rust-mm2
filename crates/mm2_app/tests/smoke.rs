@@ -5,6 +5,7 @@
 //! data, explicit failure for a requested-but-missing city, and report
 //! records whose kinds stay distinguishable.
 
+use mm2_app::session::SelectedCar;
 use mm2_app::smoke::{self, SmokeRecord, SmokeStatus};
 use mm2_assets::Vfs;
 use mm2_game::{SessionConfig, WorldMode};
@@ -18,10 +19,14 @@ fn dev_world_headless_smoke_passes_without_mm2_data() {
     let rec = smoke::headless_smoke(
         &SessionConfig::default(),
         vfs,
-        None,
+        SelectedCar {
+            def: None,
+            paint: 0,
+        },
         &VehicleConfig::default(),
         600,
         smoke::Driver::Hold,
+        None,
     );
     assert_eq!(
         rec.status,
@@ -58,10 +63,14 @@ fn requested_missing_city_is_an_explicit_failure() {
     let rec = smoke::headless_smoke(
         &config,
         vfs,
-        None,
+        SelectedCar {
+            def: None,
+            paint: 0,
+        },
         &VehicleConfig::default(),
         600,
         smoke::Driver::Hold,
+        None,
     );
     assert_eq!(
         rec.status,

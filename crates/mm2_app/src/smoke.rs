@@ -19,7 +19,6 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_assets::Vfs;
-use mm2_content::VehicleDef;
 use mm2_game::{
     Banger, BangerPhase, BangerStateChanged, ImpactEvent, Mm2Vfs, ParticipantState, PlayerVehicle,
     RaceProgress, RaceStarted, RaceState, Session, SessionConfig, SessionPhase, WorldMode,
@@ -143,14 +142,17 @@ impl Driver {
 ///
 /// Event sessions honor the countdown's input lock (throttle stays zero
 /// until `RaceStarted`'s release) and report `race=`/`cp=` evidence.
-/// `vfs`/`selected` are taken by value — the process exits on return.
+/// `vfs`/`car` are taken by value — the process exits on return. A
+/// bound `profile` is inserted as a resource so the session-load path
+/// records its selections through the same code the windowed app runs.
 pub fn headless_smoke(
     config: &SessionConfig,
     vfs: Vfs,
-    selected: Option<VehicleDef>,
+    car: session::SelectedCar,
     vehicle_config: &VehicleConfig,
     frames: u32,
     driver: Driver,
+    profile: Option<crate::profile::ActiveProfile>,
 ) -> SmokeRecord {
     let world = match &config.world {
         WorldMode::DevWorld => "dev-world".to_string(),
@@ -207,10 +209,7 @@ pub fn headless_smoke(
         })
         .insert_resource(Mm2Vfs(vfs))
         .insert_resource(session::TunedVehicle(vehicle_config.clone()))
-        .insert_resource(session::SelectedCar {
-            def: selected,
-            paint: 0,
-        })
+        .insert_resource(car)
         .add_systems(FixedUpdate, advance_session_tick)
         .add_systems(
             FixedLast,
@@ -241,6 +240,9 @@ pub fn headless_smoke(
         );
     if driver == Driver::Scripted {
         app.insert_resource(scripted::ScriptedDrive);
+    }
+    if let Some(profile) = profile {
+        app.insert_resource(profile);
     }
     app.finish();
     app.cleanup();
@@ -490,9 +492,16 @@ pub fn headless_smoke(
         .traction
         .map(|t| format!(" traction={t}"))
         .unwrap_or_default();
+    // A bound driver profile is recorded so a run under persisted
+    // selections is self-describing; absent without one, keeping
+    // existing records bit-identical.
+    let profile_detail = world_ecs
+        .get_resource::<crate::profile::ActiveProfile>()
+        .map(|p| format!(" profile={}", p.profile.id))
+        .unwrap_or_default();
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{nav_detail}{bng_detail}{traction_detail}{extra}",
+            "updates={frames} ticks={ticks} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{nav_detail}{bng_detail}{traction_detail}{profile_detail}{extra}",
             driver.as_str(),
             session.phase().name(),
             moved = pos.map(|p| (p - spawn_pos).length()).unwrap_or(f32::NAN),

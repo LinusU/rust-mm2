@@ -18,8 +18,8 @@ use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use clap::Parser;
 use mm2_app::session::{ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
-    banger, camera, car_visual, city, contracts, input, nav_overlay, opponents, race, scripted,
-    session, smoke,
+    banger, camera, car_visual, city, contracts, input, nav_overlay, opponents, profile, race,
+    scripted, session, smoke,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
@@ -75,8 +75,40 @@ struct Cli {
     car: Option<String>,
 
     /// Paint variant for the selected vehicle (zero-based index).
-    #[arg(long, default_value_t = 0)]
-    paint: usize,
+    /// Defaults to the bound profile's remembered paint, else 0.
+    #[arg(long)]
+    paint: Option<usize>,
+
+    /// Bind a driver profile by id (`driver-<n>`) or unique display
+    /// name: its remembered vehicle/paint and rank apply unless
+    /// `--car`/`--paint`/`--pro` override, the session's selections are
+    /// saved back to it, and it becomes the store's `active` profile
+    /// for later runs.
+    #[arg(long, value_name = "id|name", conflicts_with = "new_profile")]
+    profile: Option<String>,
+
+    /// Create a new driver profile and bind it. `--pro` fixes its rank
+    /// at Professional; `--sandbox` makes it a dev identity whose
+    /// results never feed progression.
+    #[arg(long, value_name = "name")]
+    new_profile: Option<String>,
+
+    /// Create the `--new-profile` driver as a sandbox profile (F16):
+    /// selections still persist, but its results are ineligible for
+    /// rewards and records.
+    #[arg(long, requires = "new_profile")]
+    sandbox: bool,
+
+    /// Directory holding the profile store instead of the OS user-data
+    /// directory. Passing it also enables profile binding on
+    /// smoke/evidence runs (which otherwise never touch the store).
+    #[arg(long, value_name = "dir")]
+    profile_dir: Option<PathBuf>,
+
+    /// Run without a profile — no profile reads or writes even when an
+    /// `active` profile exists.
+    #[arg(long, conflicts_with_all = ["profile", "new_profile", "profile_dir"])]
+    no_profile: bool,
 
     /// Print the discovered vehicle roster and exit without opening a
     /// window.
@@ -342,42 +374,142 @@ fn main() {
         println!("{}", smoke::header());
     }
 
-    // Vehicle selection: explicit `--car`, else the documented stock
-    // default when an installation is mounted, else the synthetic dev car.
-    let selected: Option<VehicleDef> = if let Some(query) = &cli.car {
-        match mm2_content::load_by_id(&vfs, query, cli.paint) {
-            Ok(def) => {
-                info!(car = %def.id, name = %def.display_name, paint = cli.paint, "vehicle loaded");
-                Some(def)
-            }
-            Err(e) => {
-                error!(car = %query, error = %e, "vehicle failed to load");
-                if smoke_requested {
-                    println!(
-                        "{}",
-                        record(smoke::SmokeStatus::Fail, format!("vehicle {query}: {e}")).line()
-                    );
+    // F16-A: bind a driver profile. `--profile`/`--new-profile` (or a
+    // `--profile-dir`) request one explicitly; an interactive run with
+    // no profile flag still binds the store's `active` marker so a
+    // chosen driver persists across launches. Smoke/evidence runs never
+    // bind implicitly — their records must stay reproducible — but do
+    // honor an explicit request. `--no-profile` opts out entirely.
+    // Explicit failures are usage errors; implicit ones degrade to a
+    // profile-less run.
+    let profile_request = if let Some(name) = &cli.new_profile {
+        Some(profile::ProfileRequest::Create {
+            name: name.clone(),
+            rank: if cli.pro {
+                mm2_game::Difficulty::Professional
+            } else {
+                mm2_game::Difficulty::Amateur
+            },
+            kind: if cli.sandbox {
+                mm2_game::ProfileKind::Sandbox
+            } else {
+                mm2_game::ProfileKind::Standard
+            },
+        })
+    } else {
+        cli.profile.clone().map(profile::ProfileRequest::Select)
+    };
+    let profile_explicit = profile_request.is_some() || cli.profile_dir.is_some();
+    let active_profile = if cli.no_profile || (smoke_requested && !profile_explicit) {
+        None
+    } else {
+        match profile::store_root(cli.profile_dir.clone()) {
+            Some(root) => match mm2_game::ProfileStore::open(&root) {
+                Ok(store) => {
+                    let request = profile_request.unwrap_or(profile::ProfileRequest::Active);
+                    match profile::resolve(&store, &request) {
+                        Ok(bound) => bound,
+                        Err(e) if profile_explicit => {
+                            error!(error = %e, "profile request failed");
+                            std::process::exit(2);
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "profile unavailable; running without one");
+                            None
+                        }
+                    }
                 }
+                Err(e) if profile_explicit => {
+                    error!(dir = %root.display(), error = %e, "cannot open profile store");
+                    std::process::exit(2);
+                }
+                Err(e) => {
+                    warn!(dir = %root.display(), error = %e, "profile store unavailable; running without a profile");
+                    None
+                }
+            },
+            None if profile_explicit => {
+                error!("no profile store location determinable; pass --profile-dir");
                 std::process::exit(2);
             }
+            None => None,
         }
-    } else if has_mm2 {
-        match default_stock_car(&vfs, cli.paint) {
-            Some(def) => {
-                info!(car = %def.id, name = %def.display_name, "default stock vehicle loaded");
-                Some(def)
-            }
-            None => {
-                warn!("no usable stock vehicle found; using the synthetic dev car");
-                None
+    };
+    if let Some(slot) = &active_profile {
+        info!(
+            profile = %slot.profile.id,
+            name = %slot.profile.name,
+            recovered = slot.recovered_from_backup,
+            "driver profile bound"
+        );
+    }
+
+    // Vehicle selection: explicit `--car`, else the bound profile's
+    // remembered vehicle — a soft preference that falls back to the
+    // stock default when the saved id no longer resolves (changed
+    // install, missing mod content) — else the documented stock default.
+    let (vehicle_source, mut paint, difficulty) = profile::choose_launch(
+        cli.car.as_deref(),
+        cli.paint,
+        cli.pro,
+        active_profile.as_ref().map(|p| &p.profile),
+    );
+    let mut selected: Option<VehicleDef> = None;
+    match vehicle_source {
+        profile::VehicleSource::Explicit(query) => {
+            match mm2_content::load_by_id(&vfs, query, paint) {
+                Ok(def) => {
+                    info!(car = %def.id, name = %def.display_name, paint, "vehicle loaded");
+                    selected = Some(def);
+                }
+                Err(e) => {
+                    error!(car = %query, error = %e, "vehicle failed to load");
+                    if smoke_requested {
+                        println!(
+                            "{}",
+                            record(smoke::SmokeStatus::Fail, format!("vehicle {query}: {e}"))
+                                .line()
+                        );
+                    }
+                    std::process::exit(2);
+                }
             }
         }
-    } else {
-        if cli.car.is_none() && cli.paint != 0 {
+        profile::VehicleSource::Remembered(choice) => {
+            match mm2_content::load_by_id(&vfs, &choice.id, paint) {
+                Ok(def) => {
+                    info!(car = %def.id, name = %def.display_name, paint, "profile vehicle restored");
+                    selected = Some(def);
+                }
+                Err(e) => match mm2_content::load_by_id(&vfs, &choice.id, 0) {
+                    Ok(def) => {
+                        warn!(car = %choice.id, error = %e, "saved paint unavailable; using paint 0");
+                        paint = 0;
+                        selected = Some(def);
+                    }
+                    Err(e) => {
+                        warn!(car = %choice.id, error = %e, "remembered vehicle unavailable; using the stock default");
+                    }
+                },
+            }
+        }
+        profile::VehicleSource::Default => {}
+    }
+    if selected.is_none() && cli.car.is_none() {
+        if has_mm2 {
+            match default_stock_car(&vfs, paint) {
+                Some(def) => {
+                    info!(car = %def.id, name = %def.display_name, "default stock vehicle loaded");
+                    selected = Some(def);
+                }
+                None => {
+                    warn!("no usable stock vehicle found; using the synthetic dev car");
+                }
+            }
+        } else if cli.paint.is_some_and(|p| p != 0) {
             warn!("--paint has no effect without --car / an MM2 installation");
         }
-        None
-    };
+    }
 
     // Handling config: `--vehicle-config` is a full override applied after
     // the import when a car was selected; otherwise it tunes the dev car.
@@ -446,14 +578,12 @@ fn main() {
         mode: event_ref
             .clone()
             .map_or(mm2_game::SessionMode::Cruise, mm2_game::SessionMode::Event),
-        difficulty: if cli.pro {
-            mm2_game::Difficulty::Professional
-        } else {
-            mm2_game::Difficulty::Amateur
-        },
+        // The bound profile's rank supplies the difficulty unless
+        // `--pro` overrides (DRV-2/3); no profile keeps Amateur.
+        difficulty,
         vehicle: VehicleSelection {
             id: selected.as_ref().map(|d| d.id.clone()),
-            paint: cli.paint,
+            paint,
         },
         dev: DevOverrides {
             vehicle_config: cli.vehicle_config.clone(),
@@ -501,7 +631,10 @@ fn main() {
         let rec = smoke::headless_smoke(
             &session_config,
             vfs,
-            selected,
+            SelectedCar {
+                def: selected,
+                paint,
+            },
             &vehicle,
             cli.frames.unwrap_or(600),
             if cli.bot {
@@ -509,6 +642,7 @@ fn main() {
             } else {
                 smoke::Driver::Hold
             },
+            active_profile,
         );
         println!("{}", rec.line());
         std::process::exit(rec.status.exit_code());
@@ -551,7 +685,7 @@ fn main() {
     .insert_resource(TunedVehicle(vehicle))
     .insert_resource(SelectedCar {
         def: selected,
-        paint: cli.paint,
+        paint,
     })
     .init_resource::<car_visual::HeadlightsOn>()
     .insert_resource(if cam_start.is_some() {
@@ -641,6 +775,9 @@ fn main() {
     );
     if cli.bot {
         app.insert_resource(scripted::ScriptedDrive);
+    }
+    if let Some(slot) = active_profile {
+        app.insert_resource(slot);
     }
     if cli.screenshot.is_some() || cli.frames.is_some() {
         app.insert_resource(SmokeTest {

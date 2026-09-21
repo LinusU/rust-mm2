@@ -85,6 +85,7 @@ cargo run -- --mm2-path "/path/to/Midtown Madness 2"
 # optionally:
 #   --city london|sf                 (default: london)
 #   --event <table>:<index>          e.g. blitz:0, checkpoint:3, circuit:1
+#   --car <id|name> [--paint <n>]    stock/modded vehicle + paint index
 #   --mods <mods dir>
 #   --vehicle-config <toml>          (e.g. examples/vehicles/dev-car.toml)
 ```
@@ -93,6 +94,16 @@ cargo run -- --mm2-path "/path/to/Midtown Madness 2"
 enters countdown on the event's start grid, checkpoint/finish markers are
 placed from the authored waypoint rows, and crossing them advances shared
 race progress. Crash Course events are parsed but not yet playable.
+
+Driver profiles live in the OS user-data directory (never the install):
+`--profile <id|name>` binds one, `--new-profile <name>` creates and binds
+one (`--sandbox` makes it a dev identity ineligible for progression,
+`--pro` fixes its rank), `--profile-dir <dir>` relocates the store, and
+`--no-profile` opts out. Without a flag, interactive runs bind whichever
+profile was last selected. A bound profile restores your last
+vehicle/paint and driver rank — `--car`, `--paint`, `--pro` still
+override — and the session's selections are saved back when a session
+starts. Smoke runs never touch profiles unless explicitly asked.
 
 The app mounts every `.ar` archive found in the install directory plus loose
 files, then loads `city/<name>.psdl` through the VFS. A `--city` the VFS

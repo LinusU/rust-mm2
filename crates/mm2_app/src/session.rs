@@ -227,6 +227,7 @@ pub fn load_session_world(
     selected: Res<SelectedCar>,
     cam_mode: Res<CameraMode>,
     mut spawn: ResMut<SpawnPoint>,
+    mut active_profile: Option<ResMut<crate::profile::ActiveProfile>>,
 ) {
     let owner = SessionEntity(session.generation());
     let Some(config) = session.config().cloned() else {
@@ -306,9 +307,13 @@ pub fn load_session_world(
     // cannot load fails the session — it never silently cruises. The
     // authored player slot replaces the world's roam spawn.
     let mut event_race: Option<(RaceDefinition, mm2_game::OpponentRoster)> = None;
+    // The event's stable save identity — recorded on the bound profile
+    // once the session is live (F16 `selections.last_event`).
+    let mut event_key = None;
     if world_ok && let SessionMode::Event(event_ref) = &config.mode {
         match race::event_race_setup(&vfs.0, event_ref, config.difficulty) {
             Ok(setup) => {
+                event_key = Some(setup.key);
                 let def = setup.definition;
                 // The player slot overrides the world's roam spawn; an
                 // event without slots keeps the roam spawn.
@@ -678,5 +683,13 @@ pub fn load_session_world(
                 .transition(SessionPhase::Playing)
                 .expect("Ready → Playing is a legal transition");
         }
+    }
+
+    // F16-A: the session is live — record what it launched on the bound
+    // profile and persist immediately, so a crash mid-session cannot
+    // lose the selections. A failed load never reaches here, so nothing
+    // records an event the player never entered.
+    if let Some(profile) = &mut active_profile {
+        crate::profile::note_session_start(profile, &selected, event_key.as_ref());
     }
 }

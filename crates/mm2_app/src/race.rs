@@ -72,6 +72,11 @@ pub enum EventSetupError {
 pub struct EventSetup {
     /// The shared race runtime definition.
     pub definition: RaceDefinition,
+    /// The event's stable save identity (F16): city + table + the
+    /// authored file stem — the key `ProfileProgress` records and
+    /// `selections.last_event` use, so a mod inserting a table row
+    /// cannot retarget a saved record.
+    pub key: mm2_game::EventKey,
     /// Logical paths of the event's `.pathset` records, in catalog
     /// order (records are stored sorted by logical path).
     pub pathsets: Vec<String>,
@@ -110,6 +115,11 @@ pub fn event_race_setup(
     };
     Ok(EventSetup {
         definition,
+        key: mm2_game::EventKey {
+            city: event.event_ref.city.clone(),
+            table: event.event_ref.table,
+            stem: event.stem.clone(),
+        },
         pathsets,
         roster,
     })

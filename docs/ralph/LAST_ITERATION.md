@@ -1,88 +1,95 @@
 # Last implementation iteration
 
-- Task ID and title: F16-A.1 repair #2 — external review rejected
-  `08ceb8e` because the "deleted id is never reused" invariant was
-  still falsifiable on a clean public-API path: `create` allocated
-  `max(existing file suffix)+1` and `delete` removed every file a
-  profile owned, so deleting the *highest-numbered* profile erased
-  all trace of its id and the next `create` reissued it — resolving a
-  stale `active` marker (or any saved reference) to a different
-  person. The prior repair had only closed the crash-state vector
-  (orphan `.bak`/`.tmp` owns its id); `deleted_ids_are_never_reused`
-  deleted a non-max id, so the hole was untested.
-- Starting commit: `08ceb8e21022c2ea55cbf8bc3b9b6bbf0310038c` on
-  `ralph/night` — the failed F16-A.1 repair candidate; tree was clean.
+- Task ID and title: F16-A.2 — profile application wiring. F16-A.1's
+  store passed external review (`fd49a36`); its disclosed remainder was
+  that no production consumer existed. This slice binds a driver
+  profile at startup, restores its remembered selections, and persists
+  the session's selections — the `mm2_game::profile` store API is the
+  flow primitive; UI flows stay F17 scope.
+- Starting commit: `fd49a360615a68f75369de2c5bcef594c3ab4f00` on
+  `ralph/night`; tree was clean.
 - Retail install: `/Users/linus/coding/rust-mm2/retail` — untouched;
-  this slice is user-data storage with no original-data interaction.
+  profiles live in the OS user-data dir (`ProfileStore::default_root`).
 
-## Root cause
+## What changed
 
-`existing_ids` derives store membership solely from surviving
-filenames, and nothing persisted an allocation high-water mark. A
-delete of the maximum id is therefore indistinguishable from that id
-never existing: `create A(driver-0)`, `create B(driver-1)`,
-`set_active(driver-1)`, `delete(driver-1)` (legal — two ids),
-`create C` → `driver-1` again, and `active()` resolved B's stale
-marker to C.
+- `crates/mm2_app/src/profile.rs` (new): `ActiveProfile` resource
+  (store + working copy + `recovered_from_backup`), `ProfileRequest`
+  (`Select`/`Create`/`Active`), `resolve`, `choose_launch`,
+  `note_session_start`, `store_root`.
+- `crates/mm2_app/src/main.rs`: `--profile <id|name>`,
+  `--new-profile <name>`, `--sandbox` (requires `--new-profile`),
+  `--profile-dir <dir>`, `--no-profile` (conflicts with the rest);
+  `--paint` is now `Option<usize>` so "absent" and "explicit 0" are
+  distinguishable. Interactive runs with no profile flag bind the
+  store's `active` marker; smoke runs (`--headless`/`--frames`/
+  `--screenshot`) never bind implicitly but honor an explicit request —
+  their records must stay reproducible. Explicit failures exit 2;
+  implicit failures warn and run profile-less. Vehicle selection now
+  runs `choose_launch`: `--car`/`--paint`/`--pro` override the
+  remembered vehicle/paint/rank; a remembered car that fails to load
+  retries paint 0 then degrades to the stock default (warned — saved
+  prefs never gate launch).
+- `crates/mm2_app/src/race.rs`: `EventSetup.key` carries the event's
+  stable `EventKey{city,table,stem}` — save identity by authored stem,
+  never a table row index.
+- `crates/mm2_app/src/session.rs`: `load_session_world` takes an
+  optional `ResMut<ActiveProfile>` and calls `note_session_start` only
+  after the world, player, race resources and phase transition succeed
+  — a failed load records nothing, a cruise does not erase
+  `last_event`, a dev-car session does not erase the remembered
+  vehicle.
+- `crates/mm2_app/src/smoke.rs`: `headless_smoke` accepts a bound
+  profile and inserts it as a resource; the record gains `profile=<id>`
+  only when one is bound — unbound records are bit-identical.
+- Binding a profile recovered from `.tmp`/`.bak` re-saves once so the
+  main file heals; selecting marks the profile `active` for later
+  runs.
 
-## What changed (`crates/mm2_game/src/profile.rs`)
+## Design decisions
 
-- `create` now allocates through `allocate_id`: `max(next-id mark,
-  max surviving file suffix + 1)`. The `next-id` file is a small
-  marker written by `write_marker` — the same tmp sibling +
-  `sync_all` + rename + directory fsync shape as the `active` marker
-  and profile saves — and is advanced *before* the new profile's
-  first `save`. Order matters: a crash between mark and save wastes
-  a suffix; the reverse could reissue a live id. Losing or
-  corrupting the mark degrades to the file-scan floor (a deleted
-  highest id could then reissue — documented limit; no live profile
-  is ever displaced).
-- `set_active`/`active` and `next-id` share new `write_marker`/
-  `read_marker` helpers; marker reads are now bounded
-  (`MAX_MARKER_BYTES` = 4 KiB) like profile documents
-  (`MAX_FILE_BYTES`), closing the unbounded `read_to_string` review
-  gap.
-- `summarize` distinguishes a superseded main ("main file holds an
-  older revision") from a missing or unreadable one — the old
-  message claimed "missing" whenever a `.tmp`/`.bak` won on
-  `revision`, even with a healthy main.
-- Module doc and DSN-15 (`docs/original-rules.md`) updated: the
-  allocation rule and `load`'s three-copy revision recovery now
-  match the code.
+- `last_event` is recorded but *not* launched — Quick Race is F17
+  scope (DRV-8).
+- Nothing here writes `progress`/`unlocks` — that is F16-B's
+  authoritative result→progress pipeline (AC02/AC03/AC05 open).
+- Sandbox profiles persist selections like standard ones; the
+  `records_progress()` gate keeps them out of F16-B records.
 
-## Tests (`tests/profile.rs` — still 20; extended two)
+## Tests (`crates/mm2_app/tests/profile.rs` — 11 new)
 
-- `deleted_ids_are_never_reused` gains the review's scenario: delete
-  the highest id (`driver-2`) after `set_active`, assert the next
-  `create` allocates `driver-3`, and assert the stale marker reads
-  `None` rather than attaching to the new profile.
-- `a_complete_tmp_is_newer_than_the_main_it_never_replaced` now also
-  asserts the listing reports "older revision" (superseded), not
-  "missing".
+Resolution by id and unique name; ambiguous/unknown selectors error;
+create binds + marks `active` + honors rank/kind; implicit `active`
+bind (empty store → none); corrupt `active` degrades profile-less;
+backup recovery heals the main file at bind; flag-over-remembered
+precedence incl. difficulty; session-start persistence of vehicle +
+`EventKey` through `load_session_world`; dev-car/cruise
+non-clobbering; per-profile file isolation; failed load records no
+event.
 
 ## Commands actually run and results
 
-- `cargo test -p mm2_game --test profile` — 20/20 pass.
+- `cargo test -p mm2_app --test profile` — 11/11 pass.
 - `cargo fmt --all -- --check` — PASS.
-- `cargo clippy --locked --workspace --all-targets --all-features --
-  -D warnings` — PASS, 0 warnings.
-- `cargo test --locked --workspace` — all suites ok, 0 failures.
-- Evidence classification: code gates + synthetic store tests against
-  tempdirs. No retail/GPU/audio evidence applies.
+- `cargo clippy --workspace --all-targets --all-features -- -D
+  warnings` — PASS.
+- `cargo clippy --locked …` — PASS, 0 warnings.
+- `cargo test --workspace` and `cargo test --locked --workspace` — all
+  40 suites ok, 0 failures.
+- Evidence classification: code gates + synthetic tempdir/Bevy-app
+  tests. No retail/GPU/audio evidence applies — no retail smoke was
+  run this iteration (store paths are install-independent; the
+  profile-free smoke path is unchanged when unbound).
 
 ## Still open
 
-- F16-A remainder: app wiring (`default_root()`/`--profile` at
-  startup, restore `selections`, persist on exit). AC01's
-  restart-isolation evidence additionally needs F16-B's result→progress
-  consumption. UI create/select/delete flows are F17 scope.
+- F16-A parent: AC01's restart-isolation evidence needs F16-B's
+  result→progress consumption to be observable; UI create/select/
+  delete flows with deliberate confirmation are F17 scope.
 - F16-B/F16-C, F15-B remainder, F13-B/F14-B remainders, F11-C
   remainder — unchanged.
-- Known limits (documented, user-data-dir adversary model): losing
-  the `next-id` mark degrades non-reuse to the surviving-files floor;
-  `revision` ordering is the recovery rule, not a tamper check — a
-  hand-edited file with a forged high revision wins recovery;
-  case-variant foreign filenames (`DRIVER-9.JSON`) are not counted
-  yet collide on case-insensitive filesystems.
+- Store-level known limits unchanged (documented in F16-A.1's
+  iteration notes): `next-id` mark loss degrades non-reuse to the
+  file floor; revision ordering is recovery not tamper-proofing;
+  case-variant foreign filenames uncounted.
 - `sf checkpoint:0`'s idle-player "fell through the world" smoke
   artifact remains pre-existing (unrelated).
