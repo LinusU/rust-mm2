@@ -9,9 +9,10 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::race::{
-    LOW_TIME_BRIGHT, LOW_TIME_DIM, LOW_TIME_TICKS, LowTimeWarning, NAV_AHEAD, NAV_BEHIND, NavArrow,
-    advance_race, nav_target_input, reanchor_teleported_participants, spawn_nav_arrow,
-    spawn_race_warning, update_nav_arrow, update_race_warning,
+    COUNTDOWN_GO_TICKS, CountdownBanner, CountdownBannerText, LOW_TIME_BRIGHT, LOW_TIME_DIM,
+    LOW_TIME_TICKS, LowTimeWarning, NAV_AHEAD, NAV_BEHIND, NavArrow, advance_race,
+    nav_target_input, reanchor_teleported_participants, spawn_countdown_banner, spawn_nav_arrow,
+    spawn_race_warning, update_countdown_banner, update_nav_arrow, update_race_warning,
 };
 use mm2_app::session::{self, SessionControl};
 use mm2_game::{
@@ -111,6 +112,7 @@ fn race_app(config: SessionConfig, def: RaceDefinition) -> App {
                 nav_target_input,
                 update_nav_arrow,
                 update_race_warning,
+                update_countdown_banner,
                 (
                     despawn_session_entities.run_if(session::unloading),
                     session::drive_session,
@@ -124,6 +126,7 @@ fn race_app(config: SessionConfig, def: RaceDefinition) -> App {
             let owner = SessionEntity(session.generation());
             spawn_nav_arrow(&mut commands, owner);
             spawn_race_warning(&mut commands, owner);
+            spawn_countdown_banner(&mut commands, owner);
         });
     app.finish();
     app.cleanup();
@@ -1400,4 +1403,185 @@ fn live_order_tracks_progress_and_locks_finished_places() {
         .map(|r| r.id.participant)
         .collect();
     assert_eq!(standings, order(&app), "live order converges to standings");
+}
+
+/// The session-owned countdown banner, read back as
+/// `(visibility, label)` from its root and text child.
+fn countdown_banner(app: &mut App) -> (Visibility, String) {
+    let (root, text) = {
+        let world = app.world_mut();
+        let root = world
+            .query_filtered::<Entity, (With<CountdownBanner>, Without<CountdownBannerText>)>()
+            .iter(world)
+            .next()
+            .expect("the harness spawns the countdown banner");
+        let text = world
+            .query_filtered::<Entity, With<CountdownBannerText>>()
+            .iter(world)
+            .next()
+            .expect("the banner carries a text child");
+        (root, text)
+    };
+    (
+        *app.world().get::<Visibility>(root).unwrap(),
+        app.world().get::<Text>(text).unwrap().0.clone(),
+    )
+}
+
+/// F17-B countdown presentation (DSN-19): the banner counts one second
+/// per digit off the same `remaining` ticks the release is judged on,
+/// then flashes `GO!` for `COUNTDOWN_GO_TICKS` of the race clock and
+/// goes dark.
+#[test]
+fn countdown_banner_counts_digits_then_flashes_go() {
+    let hz = mm2_game::RACE_TICK_HZ;
+    let def = any_order_def(3 * hz);
+    let mut app = race_app(event_config(), def.clone());
+    spawn_participant(&mut app, &def, Vec3::new(-50.0, 0.0, 0.0));
+
+    run(&mut app, 1);
+    assert!(matches!(race(&app).phase, RacePhase::Countdown { .. }));
+    assert_eq!(
+        countdown_banner(&mut app),
+        (Visibility::Visible, "3".to_string()),
+        "the top digit is up from the first update"
+    );
+
+    // Step to each second boundary and read the digit the remaining
+    // ticks imply — `ceil` keeps each digit up exactly one second.
+    let reach = |app: &mut App, bound: u32| {
+        for _ in 0..400 {
+            match race(app).phase {
+                RacePhase::Countdown { remaining } if remaining > bound => app.update(),
+                _ => break,
+            }
+        }
+    };
+    reach(&mut app, 2 * hz);
+    assert_eq!(countdown_banner(&mut app).1, "2");
+    reach(&mut app, hz);
+    assert_eq!(countdown_banner(&mut app).1, "1");
+
+    // Release: the digit becomes `GO!` on the race clock.
+    for _ in 0..400 {
+        if race(&app).phase == RacePhase::Running {
+            break;
+        }
+        app.update();
+    }
+    assert_eq!(phase(&app), SessionPhase::Playing);
+    assert_eq!(
+        countdown_banner(&mut app),
+        (Visibility::Visible, "GO!".to_string())
+    );
+
+    // The flash is bounded by the race clock, not a wall clock.
+    while race(&app).clock < COUNTDOWN_GO_TICKS {
+        app.update();
+    }
+    assert_eq!(
+        countdown_banner(&mut app).0,
+        Visibility::Hidden,
+        "GO! goes dark once its race-clock window ends"
+    );
+}
+
+/// The `GO!` flash only belongs to a live `Playing` session: pausing
+/// hides it (the pause overlay owns the screen) and resuming inside
+/// the frozen clock's window brings it back — deterministic, since the
+/// window is measured in race ticks. A `Results` session can never sit
+/// under it either: even a finish landed inside the window takes the
+/// banner down with the phase.
+#[test]
+fn countdown_banner_go_belongs_to_a_live_playing_session() {
+    let def = any_order_def(0); // no digits — release shows only GO!
+    let mut app = race_app(event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(-200.0, 0.0, 0.0));
+    for _ in 0..10 {
+        if race(&app).phase == RacePhase::Running {
+            break;
+        }
+        app.update();
+    }
+    assert!(race(&app).clock < COUNTDOWN_GO_TICKS);
+    assert_eq!(countdown_banner(&mut app).1, "GO!");
+
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Paused)
+        .unwrap();
+    run(&mut app, 1);
+    assert_eq!(
+        countdown_banner(&mut app).0,
+        Visibility::Hidden,
+        "paused: the overlay owns the screen and the clock holds"
+    );
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Playing)
+        .unwrap();
+    run(&mut app, 1);
+    assert_eq!(
+        countdown_banner(&mut app).1,
+        "GO!",
+        "the frozen race clock keeps the window open across a pause"
+    );
+
+    // A finish inside the window ends the session at Results — the
+    // frozen race clock still sits inside it, but the cue must not
+    // linger under the results overlay.
+    set_position(&mut app, car, Vec3::new(200.0, 0.0, 0.0));
+    run(&mut app, 1);
+    assert_eq!(phase(&app), SessionPhase::Results);
+    assert!(race(&app).clock < COUNTDOWN_GO_TICKS);
+    assert_eq!(
+        countdown_banner(&mut app).0,
+        Visibility::Hidden,
+        "Results owns the screen — no GO! behind it"
+    );
+}
+
+/// The banner is presentation over the live race only: a stale
+/// `RaceState` (generation mismatch — the restart seam) shows nothing,
+/// and teardown despawns the session-owned tree (AC05/AC06 — nothing
+/// survives into the next generation).
+#[test]
+fn countdown_banner_ignores_stale_race_and_despawns() {
+    let def = any_order_def(600);
+    let mut app = race_app(event_config(), def.clone());
+    spawn_participant(&mut app, &def, Vec3::new(-50.0, 0.0, 0.0));
+    run(&mut app, 2);
+    assert_eq!(countdown_banner(&mut app).0, Visibility::Visible);
+
+    // A race stamped for another generation is never the cue's input.
+    app.world_mut().resource_mut::<RaceState>().generation += 1;
+    run(&mut app, 1);
+    assert_eq!(
+        countdown_banner(&mut app).0,
+        Visibility::Hidden,
+        "a stale race cannot drive the countdown"
+    );
+    app.world_mut().resource_mut::<RaceState>().generation -= 1;
+    run(&mut app, 1);
+    assert_eq!(countdown_banner(&mut app).0, Visibility::Visible);
+
+    app.world_mut().resource_mut::<SessionControl>().restart = true;
+    let mut reached = false;
+    for _ in 0..12 {
+        app.update();
+        if phase(&app) == SessionPhase::Loading {
+            reached = true;
+            break;
+        }
+    }
+    assert!(reached, "restart never re-began the session");
+    let world = app.world_mut();
+    assert_eq!(
+        world
+            .query_filtered::<Entity, With<CountdownBanner>>()
+            .iter(world)
+            .count(),
+        0,
+        "the session-owned banner despawned"
+    );
 }

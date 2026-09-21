@@ -554,6 +554,106 @@ pub fn update_nav_arrow(
     }
 }
 
+/// How long the `GO!` cue stays up after the countdown releases —
+/// measured in [`RaceState::clock`] ticks, the same authoritative
+/// clock results timestamp, so the flash freezes with a pause and
+/// ends deterministically. Designed presentation (DSN-19): no
+/// documented original rule pins the start cue's look; the 3 s
+/// countdown itself is DSN-5's provisional default.
+pub const COUNTDOWN_GO_TICKS: u64 = RACE_TICK_HZ as u64;
+
+/// Digit color while the start countdown runs.
+pub const COUNTDOWN_DIGIT: Color = Color::srgb(1.0, 0.85, 0.2);
+
+/// `GO!` color — the same green the nav arrow uses for "ahead".
+pub const COUNTDOWN_GO: Color = Color::srgb(0.2, 1.0, 0.4);
+
+/// Marker on the session-owned countdown banner's root — a full-screen
+/// flex node that centers the cue [`update_countdown_banner`] writes
+/// into [`CountdownBannerText`]. Dev-rig presentation (DSN-19), not a
+/// claim about the original's HUD.
+#[derive(Component)]
+pub struct CountdownBanner;
+
+/// Marker on the banner's text child — carries the digit/`GO!` label.
+#[derive(Component)]
+pub struct CountdownBannerText;
+
+/// Spawn the countdown banner, session-owned and hidden until
+/// [`update_countdown_banner`] drives it. A cruise session never shows
+/// it — no `RaceState` exists — and session teardown removes it with
+/// every other `SessionEntity` root.
+pub fn spawn_countdown_banner(commands: &mut Commands, owner: SessionEntity) {
+    commands
+        .spawn((
+            owner,
+            CountdownBanner,
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(0.0),
+                left: Val::Px(0.0),
+                right: Val::Px(0.0),
+                bottom: Val::Px(0.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            Visibility::Hidden,
+        ))
+        .with_child((
+            CountdownBannerText,
+            Text::new(""),
+            TextFont {
+                font_size: bevy::text::FontSize::Px(120.0),
+                ..default()
+            },
+            TextColor(COUNTDOWN_DIGIT),
+        ));
+}
+
+/// Drive the countdown cue off the authoritative race state: while the
+/// race counts down, the banner shows `ceil(remaining / RACE_TICK_HZ)`
+/// — one second per digit, matching the HUD line's convention — and
+/// once released it flashes `GO!` for [`COUNTDOWN_GO_TICKS`] of the
+/// race clock. Hidden whenever no live race wants it: a stale or
+/// `Complete` race, a `remaining` of 0 (a zero-length countdown shows
+/// only `GO!`), or a session phase where the cue does not belong —
+/// `GO!` is a `Playing`-phase flash, so it cannot linger under the
+/// pause or results overlays even when the frozen race clock still
+/// sits inside the window.
+pub fn update_countdown_banner(
+    race: Option<Res<RaceState>>,
+    session: Res<Session>,
+    mut banner: Query<&mut Visibility, With<CountdownBanner>>,
+    mut text: Query<(&mut Text, &mut TextColor), With<CountdownBannerText>>,
+) {
+    let cue = race
+        .filter(|r| !r.is_stale(session.generation()))
+        .and_then(|r| match r.phase {
+            RacePhase::Countdown { remaining } if remaining > 0 => Some((
+                format!("{}", remaining.div_ceil(RACE_TICK_HZ)),
+                COUNTDOWN_DIGIT,
+            )),
+            RacePhase::Running if session.is_playing() && r.clock < COUNTDOWN_GO_TICKS => {
+                Some(("GO!".to_string(), COUNTDOWN_GO))
+            }
+            _ => None,
+        });
+    for mut vis in &mut banner {
+        *vis = if cue.is_some() {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+    if let Some((label, color)) = cue {
+        for (mut t, mut c) in &mut text {
+            *t = Text::new(label.clone());
+            c.0 = color;
+        }
+    }
+}
+
 /// Remaining time at which the low-time warning starts pulsing —
 /// a designed cue (DSN-9): the ledger documents no original Blitz
 /// low-time warning (HUD-2 lists only the countdown timer), so 10 s

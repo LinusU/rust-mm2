@@ -10,10 +10,11 @@
 //! - [`session_control_input`] maps keys onto [`SessionControl`] intents:
 //!   `Esc` pauses a live `Playing` session (F17-B — the pause overlay's
 //!   Quit/Resume rows take it from there), quits a
-//!   `Countdown`/`Results`/`Failed` one (tears down, then exits — or
-//!   returns to the menu when a `MenuShell` resource is running,
-//!   F17-A.1), and `Backspace` restarts the session with the same
-//!   config.
+//!   `Countdown`/`Failed` one (tears down, then exits — or returns to
+//!   the menu when a `MenuShell` resource is running, F17-A.1), and
+//!   `Backspace` restarts the session with the same config. `Paused`
+//!   and `Results` are absent: `pause_input`/`results_input` own the
+//!   keyboard there (Esc is resume/continue).
 //! - `despawn_session_entities` (mm2_game, scheduled while `Unloading`)
 //!   removes every session-owned root; [`drive_session`] waits for the
 //!   world to be observably empty, clears session-scoped caches
@@ -764,6 +765,7 @@ pub fn load_session_world(
             );
             race::spawn_nav_arrow(&mut commands, owner);
             race::spawn_race_warning(&mut commands, owner);
+            race::spawn_countdown_banner(&mut commands, owner);
             // F16-B: the event's reward + availability surface —
             // consumed by `record_session_results` while the session
             // lives, removed by teardown so a following cruise never

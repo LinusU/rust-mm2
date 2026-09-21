@@ -873,6 +873,7 @@ fn main() {
                 race::update_checkpoint_markers,
                 race::update_nav_arrow,
                 race::update_race_warning,
+                race::update_countdown_banner,
             ),
             update_hud,
         ),
@@ -1244,6 +1245,7 @@ type HudNodes = Or<(
     With<ErrorText>,
     With<pause::PauseUi>,
     With<results::ResultsUi>,
+    With<race::CountdownBanner>,
 )>;
 
 /// Keep the HUD on whichever camera is active — UI otherwise stays on the
