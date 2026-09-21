@@ -30,11 +30,15 @@
 //!
 //! Identity contract:
 //!
-//! - [`ProfileId`]s are `driver-<n>` allocated by scanning the store for
-//!   the highest used suffix across all three file names — a `.bak` or
-//!   `.tmp` left behind by an interrupted save or delete still owns its
-//!   id, so a deleted id is never reused and a stale reference can
-//!   never point at a different person.
+//! - [`ProfileId`]s are `driver-<n>` allocated from a persisted
+//!   high-water mark (`next-id`, advanced before the new profile's
+//!   first save) floored at the highest surviving file suffix. A
+//!   `.bak`/`.tmp` left behind by an interrupted save or delete still
+//!   owns its id, and a deleted id is never reused — so a stale
+//!   reference can never resolve to a different person. If the mark
+//!   file itself is lost, allocation degrades to the file-scan floor:
+//!   a deleted highest id could then be reissued, but no live profile
+//!   is ever displaced.
 //! - Progress is keyed by [`EventKey`] — the event's authored file stem
 //!   (`race3`), not its table row index — so a mod inserting a table row
 //!   cannot silently retarget a saved record (spec req 4). The consumer
@@ -73,6 +77,14 @@ const MAX_FILE_BYTES: u64 = 1024 * 1024;
 const PROFILE_EXT: &str = "json";
 /// Name of the file recording the most recently selected profile.
 const ACTIVE_FILE: &str = "active";
+/// Name of the file recording the next `driver-<n>` suffix to hand
+/// out — the high-water mark that keeps a deleted id retired even
+/// when every file the profile owned is gone.
+const NEXT_ID_FILE: &str = "next-id";
+/// Read bound for the one-token marker files (`active`, `next-id`).
+/// Profile documents get [`MAX_FILE_BYTES`]; a marker that runs past
+/// this cap is garbage, not a longer selection.
+const MAX_MARKER_BYTES: u64 = 4096;
 
 /// Stable identity of one driver profile — `driver-<n>`; unique within
 /// a store and never reused after deletion.
@@ -550,6 +562,79 @@ impl ProfileStore {
         Ok(ids)
     }
 
+    /// The recorded allocation high-water mark — the lowest suffix
+    /// `create` may hand out. `None` when the mark file does not exist
+    /// or does not parse; both degrade to the surviving-files floor.
+    fn next_id_mark(&self) -> Result<Option<u64>, ProfileError> {
+        Ok(self
+            .read_marker(NEXT_ID_FILE)?
+            .and_then(|text| text.trim().parse().ok()))
+    }
+
+    /// Allocate a fresh `driver-<n>` suffix, advancing the on-disk
+    /// high-water mark before any file for the new id exists. The mark
+    /// is what retires deleted ids: `existing_ids` sees only surviving
+    /// files, so without it deleting the highest-numbered profile
+    /// would free its suffix for the next `create`. Advancing first is
+    /// deliberate — a crash between the mark write and the profile
+    /// save wastes a suffix, while the opposite order could hand out
+    /// a live id twice.
+    fn allocate_id(&self) -> Result<u64, ProfileError> {
+        let floor = self
+            .existing_ids()?
+            .iter()
+            .filter_map(ProfileId::suffix)
+            .max()
+            .map_or(0, |max| max + 1);
+        let next = self.next_id_mark()?.unwrap_or(0).max(floor);
+        let after = next
+            .checked_add(1)
+            .ok_or_else(|| ProfileError::Invalid("profile id space exhausted".to_string()))?;
+        self.write_marker(NEXT_ID_FILE, &format!("{after}\n"))?;
+        Ok(next)
+    }
+
+    /// Read a one-token marker file (`active`, `next-id`) with a size
+    /// cap — the same bound discipline profile documents get, scaled
+    /// to a marker. `None` when the file does not exist.
+    fn read_marker(&self, name: &str) -> Result<Option<String>, ProfileError> {
+        use std::io::Read;
+        let path = self.root.join(name);
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(ProfileError::Io { path, source }),
+        };
+        let mut text = String::new();
+        file.take(MAX_MARKER_BYTES)
+            .read_to_string(&mut text)
+            .map_err(|source| ProfileError::Io { path, source })?;
+        Ok(Some(text))
+    }
+
+    /// Write `contents` to `root/name` atomically — tmp sibling +
+    /// `sync_all` + rename + directory fsync — the same durability
+    /// shape `save` gives profile documents.
+    fn write_marker(&self, name: &str, contents: &str) -> Result<(), ProfileError> {
+        let tmp = self.root.join(format!("{name}.tmp"));
+        let mut file = std::fs::File::create(&tmp).map_err(|source| ProfileError::Io {
+            path: tmp.clone(),
+            source,
+        })?;
+        file.write_all(contents.as_bytes())
+            .and_then(|()| file.sync_all())
+            .map_err(|source| ProfileError::Io {
+                path: tmp.clone(),
+                source,
+            })?;
+        drop(file);
+        std::fs::rename(&tmp, self.root.join(name)).map_err(|source| ProfileError::Io {
+            path: self.root.join(name),
+            source,
+        })?;
+        sync_dir(&self.root)
+    }
+
     /// Read every surviving file for `id`. Returns the newest readable
     /// copy — highest `revision`, with earlier slots winning ties —
     /// plus the slot that supplied it (0 = main, 1 = tmp, 2 = backup)
@@ -605,19 +690,24 @@ impl ProfileStore {
         };
         match best {
             Some((profile, 0)) => (Some(meta(&profile)), None),
-            Some((profile, _)) => (
-                Some(meta(&profile)),
-                Some(match main_err {
-                    Some(reason) => {
-                        format!(
-                            "main file unreadable ({reason}); metadata recovered from a surviving copy"
-                        )
+            Some((profile, _)) => {
+                let main_state = match main_err {
+                    Some(reason) => format!("main file unreadable ({reason})"),
+                    // A parseable main that lost on `revision` is
+                    // superseded, not missing — the recovery picked the
+                    // newer surviving copy.
+                    None if self.main_path(id).exists() => {
+                        "main file holds an older revision".to_string()
                     }
-                    None => {
-                        "main file missing; metadata recovered from a surviving copy".to_string()
-                    }
-                }),
-            ),
+                    None => "main file missing".to_string(),
+                };
+                (
+                    Some(meta(&profile)),
+                    Some(format!(
+                        "{main_state}; metadata recovered from a surviving copy"
+                    )),
+                )
+            }
             None => {
                 let detail = [main_err, tmp_err, backup_err]
                     .into_iter()
@@ -646,13 +736,7 @@ impl ProfileStore {
     ) -> Result<PlayerProfile, ProfileError> {
         let name = name.into();
         validate_name(&name).map_err(ProfileError::Invalid)?;
-        let next = self
-            .existing_ids()?
-            .iter()
-            .filter_map(ProfileId::suffix)
-            .max()
-            .map_or(0, |max| max + 1);
-        let mut profile = PlayerProfile::new(ProfileId::new(next), name, rank, kind);
+        let mut profile = PlayerProfile::new(ProfileId::new(self.allocate_id()?), name, rank, kind);
         self.save(&mut profile)?;
         Ok(profile)
     }
@@ -769,11 +853,8 @@ impl ProfileStore {
     /// or points at a deleted or never-written profile reads as `None`
     /// rather than a stale id.
     pub fn active(&self) -> Result<Option<ProfileId>, ProfileError> {
-        let path = self.root.join(ACTIVE_FILE);
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(source) => return Err(ProfileError::Io { path, source }),
+        let Some(text) = self.read_marker(ACTIVE_FILE)? else {
+            return Ok(None);
         };
         let id = ProfileId(text.trim().to_string());
         if Self::is_safe_stem(&id) && self.id_has_file(&id) {
@@ -797,24 +878,7 @@ impl ProfileStore {
         if !self.id_has_file(id) {
             return Err(ProfileError::UnknownProfile(id.clone()));
         }
-        let tmp = self.root.join(format!("{ACTIVE_FILE}.tmp"));
-        let mut file = std::fs::File::create(&tmp).map_err(|source| ProfileError::Io {
-            path: tmp.clone(),
-            source,
-        })?;
-        file.write_all(format!("{id}\n").as_bytes())
-            .and_then(|()| file.sync_all())
-            .map_err(|source| ProfileError::Io {
-                path: tmp.clone(),
-                source,
-            })?;
-        drop(file);
-        std::fs::rename(&tmp, self.root.join(ACTIVE_FILE)).map_err(|source| ProfileError::Io {
-            path: self.root.join(ACTIVE_FILE),
-            source,
-        })?;
-        sync_dir(&self.root)?;
-        Ok(())
+        self.write_marker(ACTIVE_FILE, &format!("{id}\n"))
     }
 }
 

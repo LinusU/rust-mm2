@@ -154,6 +154,21 @@ fn deleted_ids_are_never_reused() {
         .unwrap();
     assert_eq!(c.id.as_str(), "driver-2");
     assert!(store.load(&b.id).is_ok());
+
+    // Deleting the highest-numbered profile removes every file it
+    // owned, so only the persisted high-water mark still remembers the
+    // id — the next create must skip it rather than reissue driver-2.
+    store.set_active(&c.id).unwrap();
+    store.delete(&c.id).unwrap();
+    let d = store
+        .create("D", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    assert_eq!(d.id.as_str(), "driver-3");
+    // The selection marker left pointing at the deleted id resolves to
+    // no selection — not to the new profile a reissued id would have
+    // attached it to.
+    assert_eq!(store.active().unwrap(), None);
+    assert_eq!(store.load(&b.id).unwrap().profile.name, "B");
 }
 
 #[test]
@@ -227,6 +242,11 @@ fn a_complete_tmp_is_newer_than_the_main_it_never_replaced() {
     assert!(loaded.recovered_from_backup);
     assert_eq!(loaded.profile.name, "V2");
     assert_eq!(loaded.profile.revision, profile.revision);
+    // The main file parsed fine but lost on revision — the listing
+    // reports a superseded main, not a missing one.
+    let summaries = store.list().unwrap();
+    let error = summaries[0].error.as_deref().unwrap();
+    assert!(error.contains("older revision"), "{error}");
 }
 
 #[test]
