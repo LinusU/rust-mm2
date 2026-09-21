@@ -186,7 +186,7 @@ The tire force path now consumes the authored `friction` field:
 
 - `SurfaceTables::tire_surface(i)` reads `defs[i].friction` and
   normalizes it against the `_default` block's `friction`, producing
-  `mm2_vehicle::TireSurface { grip }` — so `_default` lands exactly on
+  `mm2_vehicle::TireSurface { grip, .. }` — so `_default` lands exactly on
   `1.0` and other materials scale relative to it. Retail numbers
   (`_default` friction = 0.90): `cobblestone`/`grass`/`sand` → 1.0,
   `water` → ~0.76, `deepwater` → ~0.72, `dirt` → ~0.83, `wood` →
@@ -207,8 +207,53 @@ The tire force path now consumes the authored `friction` field:
   `SurfaceState.traction`; the material term stays with the
   `TireSurface`/`WheelState.surface_grip` physics view.
 
+## Drag and elasticity consumption (implemented, F06-B.2 — provisional
+policy)
+
+The remaining scalar fields now reach real consumers:
+
+- `TireSurface` gains `drag`: the def's `drag` consumed **raw**
+  (`_default` authors `0.0`, so there is no reference to divide by).
+  `vehicle_simulation` applies a viscous force per grounded wheel —
+  `-v_plane × drag × load` opposing the wheel's motion in the contact
+  plane, kept outside the friction ellipse because it is fluid
+  resistance on the wheel, not a tire force. Retail: only `water`
+  (0.119) and `deepwater` (0.5) carry nonzero `drag`, so dry surfaces
+  are untouched. `WheelState.surface_drag` reports the coefficient
+  per wheel (0 airborne/unmarked).
+- `SurfaceTables::contact_restitution` maps the def's `elasticity`
+  into `0..MAX_SURFACE_RESTITUTION` (0.1 — the same conservative cap
+  `convert` applies to `vehCarSim.BoundElasticity`: MM2's elasticity
+  drove its own impact solver, so it is scaled rather than applied
+  verbatim) and `load_city` attaches it as Avian `Restitution` on
+  each named-material collider. Retail: `_default`/grass/sand/
+  cobblestone 0.9 → 0.09, deepwater 0.5 → 0.05, water 0.19 → 0.019,
+  wood 0.03 → 0.003, dirt 0.0 → 0.0. Unmarked colliders keep Avian's
+  default. The collider's `Friction` deliberately stays at Avian's
+  default — authored `friction` is a tire-grip coefficient, and
+  applying it to chassis/prop contact would fight the
+  `MAX_COLLIDER_FRICTION` scrape policy.
+
+Retail evidence (install `fnv1a64:e91e6cd4b2ae30d9`, 2026-09-21):
+London's `deepwater` colliders are the Thames rooms (~337–364 of
+`london.psdl`, surface at y = −4.0 — measured via `emit_psdl` +
+`load_surface_tables`). `mm2 --city london --spawn=-80,2,805,0
+--headless` drops the car onto that surface, where full throttle
+reaches only `peak=1.1m/s moved=11m` in 10 s (dry-land baseline
+`peak=29.0m/s moved=84m`, unchanged). The authored `elasticity`
+restitution changed two recorded banger scenarios on
+named-material streets — the SF perpendicular restage
+(`vpddbus --spawn=-141.9,1.5,-608.5,115`) now records
+`bng_ev=0a/2s/1b` at 10 000 ticks (was `0a/5s/2b`: fragments bounce
+more on the cobblestone/grass colliders there) and the London
+reclaim ring (`vpbug --spawn=802,6,-905,180`) records
+`bng_ev=3a/3s/0b` (same 3 activations, all now settled — was
+`3a/0s`). Both are the feature working, not regressions; the
+pre-restitution records are superseded.
+
 This is an *implementation choice*, not verified original behavior:
 how the original combines `friction`/`elasticity`/`drag` with tire
-parameters is unknown (UNK-23), and `_default`-as-divisor is a
-convenient normalization, not a discovered rule. `elasticity` and
-`drag` still have no runtime consumer.
+parameters is unknown (UNK-23), `_default`-as-divisor is a
+convenient normalization, and the restitution cap is a conservative
+scaling — none are discovered rules. `sound`, `effect`,
+`width`/`height`/`depth` and `ptx*` still have no runtime consumer.

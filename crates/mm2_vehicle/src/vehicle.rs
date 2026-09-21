@@ -79,6 +79,10 @@ pub struct WheelState {
     /// `1.0`, and the field is `0.0` only before the first physics step
     /// writes it.
     pub surface_grip: f32,
+    /// The wading-resistance coefficient (`TireSurface::drag`) of the
+    /// collider under this wheel: `0.0` is none — airborne wheels and
+    /// unmarked colliders report `0.0`.
+    pub surface_drag: f32,
     /// Accumulated spin for visuals, radians.
     pub spin: f32,
 }

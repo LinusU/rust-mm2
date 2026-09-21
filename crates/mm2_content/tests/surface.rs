@@ -224,7 +224,10 @@ fn tire_surface_normalizes_friction_against_the_default_material() {
     assert_eq!(tables.tire_surface_for(SurfaceMaterial::Unspecified), None);
     assert_eq!(
         tables.tire_surface_for(SurfaceMaterial::Authored(2)),
-        Some(TireSurface { grip: 0.7 })
+        Some(TireSurface {
+            grip: 0.7,
+            drag: 0.0
+        })
     );
 
     // A non-1.0 `_default` divides visibly: slick halves, tacky grows.
@@ -261,6 +264,106 @@ fn tire_surface_normalizes_friction_against_the_default_material() {
     assert!(
         (tables.tire_surface(1).grip - 0.4).abs() < 1e-6,
         "slick applies raw without a _default"
+    );
+}
+
+/// A table carrying the retail water pattern: `water`/`deepwater`
+/// author nonzero `drag`, `fieldless`/`negative` cover the invalid
+/// legs, and the elasticity values spread across the restitution cap.
+const MTL_WATER: &str = "\
+mtl _default {
+    elasticity: 0.9
+    friction: 0.9
+    effect: none
+    sound: 0
+    drag: 0.0
+    width: 0.0
+    height: 0.0
+    depth: 0.0
+    ptxindex: 0 0
+    ptxthreshold: 0.0 0.0
+}
+mtl water {
+    elasticity: 0.19
+    friction: 0.68
+    effect: none
+    sound: 1
+    drag: 0.119
+    width: 0.1
+    height: 0.1
+    depth: 0.1
+    ptxindex: 1 2
+    ptxthreshold: 0.0 0.0
+}
+mtl deepwater {
+    elasticity: 0.5
+    friction: 0.65
+    effect: none
+    sound: 0
+    drag: 0.5
+    width: 1.0
+    height: 1.0
+    depth: 100.0
+    ptxindex: 4 5
+    ptxthreshold: 0.0 0.0
+}
+mtl dragless {
+    elasticity: -0.2
+    friction: 1.0
+    effect: none
+    sound: 0
+    drag: -0.3
+    width: 0.0
+    height: 0.0
+    depth: 0.0
+    ptxindex: 0 0
+    ptxthreshold: 0.0 0.0
+}
+";
+
+#[test]
+fn tire_surface_carries_the_authored_wading_drag() {
+    let dir = tempfile::tempdir().unwrap();
+    let vfs = mount_with(
+        dir.path(),
+        &[(MTL_PATH, MTL_WATER), (CSV_PATH, "texture,physics\n")],
+    );
+    let tables = load_surface_tables(&vfs).unwrap().unwrap();
+
+    // `drag` is consumed raw: `_default` authors 0.0, so there is no
+    // reference to divide by.
+    assert_eq!(tables.tire_surface(0).drag, 0.0);
+    assert_eq!(tables.tire_surface(1).drag, 0.119, "water");
+    assert_eq!(tables.tire_surface(2).drag, 0.5, "deepwater");
+    // A negative `drag` — flagged by `issues()` — resolves to none
+    // rather than pulling a car forward.
+    assert_eq!(tables.tire_surface(3).drag, 0.0, "negative drag");
+    assert_eq!(tables.tire_surface(99).drag, 0.0, "out of range");
+    assert!(tables.issues() > 0);
+}
+
+#[test]
+fn contact_restitution_scales_elasticity_into_the_bounce_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let vfs = mount_with(
+        dir.path(),
+        &[(MTL_PATH, MTL_WATER), (CSV_PATH, "texture,physics\n")],
+    );
+    let tables = load_surface_tables(&vfs).unwrap().unwrap();
+
+    let cap = mm2_content::surface::MAX_SURFACE_RESTITUTION;
+    assert!((tables.contact_restitution(0) - 0.9 * cap).abs() < 1e-6);
+    assert!((tables.contact_restitution(1) - 0.19 * cap).abs() < 1e-6);
+    assert!((tables.contact_restitution(2) - 0.5 * cap).abs() < 1e-6);
+    // Invalid elasticity and out-of-range indices resolve to none.
+    assert_eq!(tables.contact_restitution(3), 0.0, "negative elasticity");
+    assert_eq!(tables.contact_restitution(99), 0.0, "out of range");
+    // `Unspecified` carries no restitution override — the unmarked
+    // collider keeps Avian's default.
+    assert_eq!(tables.restitution_for(SurfaceMaterial::Unspecified), None);
+    assert_eq!(
+        tables.restitution_for(SurfaceMaterial::Authored(1)),
+        Some(0.19 * cap)
     );
 }
 

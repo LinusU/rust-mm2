@@ -3434,6 +3434,16 @@ pub fn load_city(
         {
             entity.insert(tire);
         }
+        // The same material's `elasticity` becomes the collider's
+        // contact restitution (scaled — `SurfaceTables` owns the
+        // policy): banger/prop bounces off authored surfaces differ by
+        // material without touching the tire path's neutral policy.
+        if let Some(restitution) = surfaces
+            .as_ref()
+            .and_then(|t| t.restitution_for(col.surface))
+        {
+            entity.insert(Restitution::new(restitution));
+        }
     }
 
     // `decals.pathset` beside the PSDL paints the road markings —

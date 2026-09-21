@@ -322,12 +322,13 @@ pub fn vehicle_simulation(
             // ellipse — so the modifier lands once, not twice (F06-B).
             // Delivered force scales; commanded steering geometry does
             // not (a slippery road turns less grip, not less lock).
-            let surface_grip = (ws
-                .contact_entity
-                .and_then(|e| tire_surfaces.get(e).ok())
-                .map_or(1.0, |s| s.grip)
-                * conditions.traction)
-                .max(0.0);
+            let surface = ws.contact_entity.and_then(|e| tire_surfaces.get(e).ok());
+            let surface_grip = (surface.map_or(1.0, |s| s.grip) * conditions.traction).max(0.0);
+            // The same component's `drag` is the surface's wading
+            // resistance — only water materials carry it on retail.
+            // Clamped to a finite bound so a bad programmatic value
+            // can stall a car but never produce a non-finite force.
+            let surface_drag = surface.map_or(0.0, |s| s.drag).clamp(0.0, 1e4);
 
             let load = sim::load_adjusted_grip(ws.suspension_force, reference_load, tires);
             let traction_limit = tires.longitudinal_grip * load * surface_grip;
@@ -476,12 +477,24 @@ pub fn vehicle_simulation(
             // power and braking are wanted, and they do not tip the car.
             forces.apply_force_at_point(tire_fwd * longitudinal, ws.contact_point);
 
+            // Wading resistance: the surface's authored `drag` applies a
+            // viscous force opposing the contact point's motion in the
+            // contact plane — scaled by load like the tire terms but kept
+            // outside the friction ellipse, since it is fluid resistance
+            // on the wheel, not a tire force. Only water materials carry
+            // `drag` on retail, so this is inert on dry ground.
+            if surface_drag > 0.0 {
+                let v_plane = contact_vel - n * contact_vel.dot(n);
+                forces.apply_force_at_point(-v_plane * surface_drag * load, ws.contact_point);
+            }
+
             let ws = &mut state.wheels[i];
             ws.vel_long = vel_long;
             ws.vel_lat = vel_lat;
             ws.slip_angle = slip;
             ws.traction_demand = demand_ratio;
             ws.surface_grip = surface_grip;
+            ws.surface_drag = surface_drag;
             ws.lateral_force = lateral;
             ws.longitudinal_force = longitudinal;
             ws.spin += (vel_long / wheel.radius.max(0.01)) * dt;

@@ -15,9 +15,10 @@
 //!
 //! Both are plain data read once per grounded wheel inside the physics
 //! step: the texture→csv→mtl lookup happened at import, so the hot loop
-//! stays a component read (F06 spec req 6). Neither touches Avian's own
-//! `Friction`/`Restitution` — chassis and prop contacts are unaffected;
-//! `elasticity`/`drag` consumers are the remaining F06-B work.
+//! stays a component read (F06 spec req 6). `grip`/`drag` steer the
+//! tire model only — the authored `elasticity` feeds Avian's own
+//! `Restitution` on the collider (attached by the spawner, not this
+//! component), and `sound`/`ptx*` still wait for the F07 consumers.
 
 use bevy::prelude::*;
 
@@ -35,12 +36,27 @@ pub struct TireSurface {
     /// geometry. Must be finite and `>= 0`; the sim clamps negative or
     /// non-finite values to `0` rather than flipping a force's sign.
     pub grip: f32,
+    /// Viscous resistance the surface applies to a wheel rolling over
+    /// it — the authored `drag` field, which only water (`0.119`) and
+    /// deepwater (`0.5`) carry nonzero on retail: it is the wading
+    /// term, not rolling resistance. The sim applies a contact-plane
+    /// force opposing the wheel's motion proportional to `drag ×
+    /// load`, so a car bogs down crossing water instead of sliding
+    /// over it. `0.0` is none — the neutral value every dry surface
+    /// takes. Must be finite and `>= 0`; the sim clamps the value into
+    /// `0..=1e4` so a bad coefficient can stall a car but never
+    /// produce a non-finite force.
+    pub drag: f32,
 }
 
 impl Default for TireSurface {
-    /// The neutral reference surface: unmodified tire grip.
+    /// The neutral reference surface: unmodified tire grip, no wading
+    /// resistance.
     fn default() -> Self {
-        Self { grip: 1.0 }
+        Self {
+            grip: 1.0,
+            drag: 0.0,
+        }
     }
 }
 

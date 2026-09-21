@@ -24,6 +24,13 @@ use mm2_formats::tex::frame_base_stem;
 use mm2_game::SurfaceMaterial;
 use mm2_vehicle::TireSurface;
 
+/// Cap applied to authored `elasticity` when it becomes an Avian
+/// restitution coefficient — matching `convert`'s `BoundElasticity`
+/// policy (`MAX_RESTITUTION` there): the authored value drove MM2's
+/// own impact solver, so it is scaled rather than applied verbatim
+/// (a 0.9 road would otherwise bounce every prop like rubber).
+pub const MAX_SURFACE_RESTITUTION: f32 = 0.1;
+
 /// Logical path of the material property blocks.
 pub const MTL_PATH: &str = "city/materials.mtl";
 /// Logical path of the texture → material map.
@@ -138,7 +145,8 @@ impl SurfaceTables {
     /// `1.0` reference, applying authored values raw. A def whose
     /// `friction` is missing, non-finite or negative — all flagged by
     /// [`issues`](Self::issues) — resolves to the neutral reference
-    /// rather than a guessed value.
+    /// rather than a guessed value. The component's `drag` carries the
+    /// def's `drag` raw (see the field comment below).
     pub fn tire_surface(&self, material_index: u16) -> TireSurface {
         let reference = self
             .set
@@ -146,15 +154,21 @@ impl SurfaceTables {
             .and_then(|d| d.f32("friction"))
             .filter(|f| f.is_finite() && *f > 0.0)
             .unwrap_or(1.0);
-        let grip = self
-            .set
-            .defs
-            .get(material_index as usize)
+        let def = self.set.defs.get(material_index as usize);
+        let grip = def
             .and_then(|d| d.f32("friction"))
             .map(|f| f / reference)
             .filter(|g| g.is_finite() && *g >= 0.0)
             .unwrap_or(1.0);
-        TireSurface { grip }
+        // `drag` is used raw — the table's `_default` block authors
+        // `0.0`, so there is no reference to normalize against. Retail
+        // carries nonzero drag only on water (0.119) and deepwater
+        // (0.5); missing/negative/non-finite resolves to none.
+        let drag = def
+            .and_then(|d| d.f32("drag"))
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(0.0);
+        TireSurface { grip, drag }
     }
 
     /// [`tire_surface`](Self::tire_surface) for a collider's
@@ -165,6 +179,36 @@ impl SurfaceTables {
     pub fn tire_surface_for(&self, material: SurfaceMaterial) -> Option<TireSurface> {
         match material {
             SurfaceMaterial::Authored(i) => Some(self.tire_surface(i)),
+            SurfaceMaterial::Unspecified => None,
+        }
+    }
+
+    /// The contact restitution a collider of one authored material
+    /// exposes to Avian: the def's `elasticity` scaled into
+    /// `0..MAX_SURFACE_RESTITUTION` — the same conservative policy
+    /// `convert` applies to `vehCarSim.BoundElasticity`, because MM2's
+    /// elasticity drove its own impact solver, not bounce in ours
+    /// (implementation choice, UNK-23; retail `_default` 0.9 → 0.09,
+    /// deepwater 0.5 → 0.05, dirt 0.0 → 0.0). Missing/negative/
+    /// non-finite values and out-of-range indices resolve to `0.0`.
+    pub fn contact_restitution(&self, material_index: u16) -> f32 {
+        self.set
+            .defs
+            .get(material_index as usize)
+            .and_then(|d| d.f32("elasticity"))
+            .filter(|e| e.is_finite() && *e >= 0.0)
+            .map(|e| e * MAX_SURFACE_RESTITUTION)
+            .unwrap_or(0.0)
+    }
+
+    /// [`contact_restitution`](Self::contact_restitution) for a
+    /// collider's `SurfaceMaterial`: `Authored(i)` carries its
+    /// material's scaled coefficient; `Unspecified` carries none — an
+    /// unmarked collider keeps Avian's default restitution, the same
+    /// conservative policy the identity layer applies.
+    pub fn restitution_for(&self, material: SurfaceMaterial) -> Option<f32> {
+        match material {
+            SurfaceMaterial::Authored(i) => Some(self.contact_restitution(i)),
             SurfaceMaterial::Unspecified => None,
         }
     }

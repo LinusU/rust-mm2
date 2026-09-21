@@ -38,9 +38,33 @@
 
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
-**Next selected slice: F13-B remainder, F14-B remainder, F11-C,
-or F06-B remainder (elasticity/drag, consumer consistency)** — the
-latest iteration landed the traction leg of F06-B:
+**Next selected slice: F13-B remainder, F14-B remainder, or F11-C** —
+the latest iteration landed the remaining authored-physicals leg of
+F06-B (F06-B.2): `TireSurface` gains `drag` — the def's `drag` field
+consumed raw (`_default` authors 0.0, nothing to divide by) as a
+per-wheel viscous wading resistance (`-v_plane × drag × load` in the
+contact plane, outside the friction ellipse — fluid resistance on the
+wheel, not a tire force; only water/deepwater carry it on retail, so
+dry surfaces are untouched) — and `SurfaceTables::contact_restitution`
+scales the def's `elasticity` into `0..0.1` (the same cap `convert`
+applies to `BoundElasticity`), attached as Avian `Restitution` on
+every named-material collider. `WheelState.surface_drag` reports the
+coefficient per wheel; collider `Friction` deliberately stays at
+Avian's default (authored `friction` is a tire-grip coefficient —
+applying it to chassis/prop contact would fight the
+`MAX_COLLIDER_FRICTION` scrape policy). Retail: london
+`--spawn=-80,2,805,0` drops the car onto the Thames `deepwater`
+colliders (rooms ~337–364, y=−4.0) where full throttle crawls at
+`peak=1.1m/s` vs the unchanged 29.0 m/s land baseline; the added
+restitution shifted two recorded banger scenarios on named-material
+streets (sf restage `0a/5s/2b`→`0a/2s/1b`, london ring `3a/0s`→
+`3a/3s` — feature working, not regressions; `docs/research/banger.md`
+annotated). AC03's runtime texture-swap invariance test landed
+(a higher-priority mount replacing the texture file leaves
+`SurfaceMaterial`/`TireSurface`/`Restitution` identical). Still open
+under F06-B: AC05's audio/dust consumer consistency (no consumers
+exist — F07 scope) and AC06's network authority (F24 scope).
+The iteration before landed the traction leg of F06-B:
 `mm2_vehicle::surface` declares the physics-side inputs the sim
 consumes — `TireSurface` (collider component, normalized material
 grip) and `TireConditions` (session resource, environment/wetness
@@ -277,6 +301,8 @@ inferred under UNK-21.
 || `mm2-inspect race-defs <retail> --table circuit` | exit 0 — 10/10 circuit rows/city build at both difficulties: london authored laps `3am/4pro` (except c1/c2 `2/2`, c9 `3/2`), sf `3/4` (except c8-9 `2/2`), 6–23 gates, 4–7 opp/0 cop, 1–8 start slots — every row binds its own authored lap/route config (CIR-5). |
 || `mm2 --mm2-path <retail> --city london --event circuit:0 [--pro] --headless --bot` | `status=pass` — amateur `--frames 12000` → `race=Running cp=2/6 lap=2/3` at 23 640 ticks; `--pro --frames 4000` → `lap=2/4`: Ordered lap tracking + per-difficulty `NumLaps` binding on real content. The bot deterministically wedges mid-lap-2 at `(-413,-169)` — bot-limited, not a lap-logic defect (the earlier matrix recorded this event `outcome=finished` under the same driver). |
 ||| `mm2 --mm2-path <retail> --city london --event blitz:0 --headless --bot --frames 2000` (post-F13-B.1) | `status=pass` — `phase=results race=Complete cp=3/3 results=1 tl=7.6s outcome=finished place=1`: the ledger standings' `place=` field records end-to-end on a real authored event (single participant → place 1, per DSN-12). |
+|| `mm2 --mm2-path <retail> --city london --spawn=-80,2,805,0 --headless` (post-F06-B.2) | `status=pass` — car lands on the Thames `deepwater` colliders (final y=−4.0): full throttle reaches only `peak=1.1m/s moved=11m` in 10 s — authored `drag` bogs the car down on real content. Land baseline unchanged (`peak=29.0m/s moved=84m`); sf baseline bit-identical (`peak=37.2m/s`); `--traction 0.5` still records `peak=22.3m/s`. |
+|| `mm2 --mm2-path <retail> --city {sf,london} --car {vpddbus,vpbug} --spawn=… --headless` (post-F06-B.2) | Banger re-takes on named-material streets (now carrying scaled authored `elasticity` restitution): sf `--spawn=-141.9,1.5,-608.5,115` → `bng_ev=0a/2s/1b` (was `0a/5s/2b`); london ring `--spawn=802,6,-905,180` → `bng_ev=3a/3s/0b` (was `3a/0s` — same activations, now settling). `docs/research/banger.md` annotated. |
 
 ## Operator report (2026-09-20, human play-test — PRIORITY)
 
@@ -425,7 +451,7 @@ rendered gameplay; outranks inference.
 | F05-C | queued | F05-B | — |
 | F06-A | implemented | F00-B, F01-B | A.1 (parser + audit — below) + A.2 (runtime identity — externally checked at `d292898`): `emit_psdl` splits colliders per authored material index; `SurfaceMaterial` on every collider; `SurfaceTables` session-scoped; `CityReport.surfaces` diagnostics. |
 | F06-A.1 | implemented | F00-B, F01-B | `mm2_formats::materials`: `MaterialSet` (line-oriented `mtl <name> { key: v… }` blocks; brace may sit on next line, `:` optional, `//` comments; all ten retail fields preserved + typed accessors) and `MaterialMap` (`texture,physics` csv; `none` keyword, header recorded, short/extra-cell rows into `diagnostics`), each with `validate()` issues (duplicate/missing/bad/negative fields, missing `_default`, dup rows, bad header) + `undefined_refs` cross-check. `mm2_formats::tex::frame_base_stem` shares the `<stem>-NNNN` animated-frame convention (s_thames-0009 → s_thames). `mm2-inspect materials <install> [--city] [--strict]`: expected `city/materials.{csv,mtl}` + every discovered `.mtl`/`materials*.csv`, csv→mtl ref check, texture-file resolution split (semantic-only stems informational), and per-city PSDL texture-table coverage (named/`none`/blank-slot/unmapped, frame-stem fallback). Retail: 3423 rows (137 named, 3286 `none`), 8 materials, 2 dead refs (`transbay_ramp_f→ash`, `s_grass2mud→mud`) — `--strict` exits 2; london 469 names = 152 named + 308 none + 6 blank + 3 unmapped, sf 457 = 148 + 301 + 6 + 2. `scan` recognizes `.mtl`. docs/research/materials.md + WLD-19/UNK-23. Runtime lookup/traction unwired — the parsed pair is not yet a `SurfaceMaterial` source. Candidate pending external check. |
-| F06-B | active | F06-A | Traction leg implemented (below): `TireSurface` collider component + `TireConditions` env resource; authored `friction` normalized to `_default` feeds lateral/longitudinal/TC/ellipse — exactly once; `--traction` dev override; telemetry+impacts report the env term. Remaining: `elasticity`/`drag` consumers, AC03 texture-swap invariance test, AC05 audio/dust consistency, AC06 network authority. Candidate pending external check. |
+| F06-B | active | F06-A | Traction leg (checked at `7bfbba8`) + F06-B.2 authored-physicals leg (below): `TireSurface` gains `drag` (raw authored value — per-wheel viscous wading resistance, outside the ellipse); `contact_restitution` scales `elasticity` ×0.1 → Avian `Restitution` on named colliders; `WheelState.surface_drag`; AC03 mod-override swap test (cosmetic texture replacement leaves material identity + physics components identical). Retail: Thames spawn `peak=1.1m/s` vs unchanged 29.0 land baseline; restitution shifted two recorded banger scenarios (annotated in `docs/research/banger.md`). Remaining: AC05 audio/dust consumer consistency (F07 scope), AC06 network authority (F24 scope). Candidate pending external check. |
 | F06-C | queued | F06-B | — |
 | F07-A | queued | F01-B, F02-B, F06-A | No audio decoders/voices; `aud/` family = 3293 files incl. cardata/dmusic/spchdata. bevy built without `bevy_audio`. |
 | F07-B | queued | F07-A | — |

@@ -77,7 +77,10 @@ fn each_wheel_reports_the_grip_of_the_collider_under_it() {
     slab(
         &mut app,
         Vec3::new(100.0, -0.5, 0.0),
-        Some(TireSurface { grip: 0.5 }),
+        Some(TireSurface {
+            grip: 0.5,
+            ..Default::default()
+        }),
     );
     let car = spawn_car(&mut app, Vec3::new(0.0, 1.2, 0.0));
 
@@ -112,7 +115,10 @@ fn the_environment_modifier_multiplies_the_materials_grip() {
     slab(
         &mut app,
         Vec3::new(0.0, -0.5, 0.0),
-        Some(TireSurface { grip: 0.5 }),
+        Some(TireSurface {
+            grip: 0.5,
+            ..Default::default()
+        }),
     );
     let car = spawn_car(&mut app, Vec3::new(0.0, 1.2, 0.0));
 
@@ -158,7 +164,10 @@ fn an_airborne_wheel_reports_neutral_grip() {
     slab(
         &mut app,
         Vec3::new(0.0, -0.5, 0.0),
-        Some(TireSurface { grip: 0.5 }),
+        Some(TireSurface {
+            grip: 0.5,
+            ..Default::default()
+        }),
     );
     // Still falling toward the marked slab: no contact, no surface.
     let car = spawn_car(&mut app, Vec3::new(0.0, 4.0, 0.0));
@@ -201,7 +210,14 @@ fn a_slippery_surface_limits_delivered_drive_force() {
     // two distinct grips produce measurably different acceleration
     // (F06-AC02's surface leg).
     let reference = speed_after_launch(None, 1.0, 4);
-    let slippery = speed_after_launch(Some(TireSurface { grip: 0.4 }), 1.0, 4);
+    let slippery = speed_after_launch(
+        Some(TireSurface {
+            grip: 0.4,
+            ..Default::default()
+        }),
+        1.0,
+        4,
+    );
     assert!(
         reference > 15.0,
         "reference launch should be well underway, {reference} m/s"
@@ -220,4 +236,112 @@ fn a_wet_environment_limits_delivered_drive_force() {
     let dry = speed_after_launch(None, 1.0, 4);
     let wet = speed_after_launch(None, 0.4, 4);
     assert!(wet < dry * 0.7, "wet launch {wet} m/s vs dry {dry} m/s");
+}
+
+#[test]
+fn each_wheel_reports_the_drag_of_the_collider_under_it() {
+    let mut app = test_app();
+    // Same two-slab seam as the grip test: unmarked left (neutral,
+    // no drag), right carrying the retail `deepwater` coefficient.
+    slab(&mut app, Vec3::new(-100.0, -0.5, 0.0), None);
+    slab(
+        &mut app,
+        Vec3::new(100.0, -0.5, 0.0),
+        Some(TireSurface {
+            grip: 1.0,
+            drag: 0.5,
+        }),
+    );
+    let car = spawn_car(&mut app, Vec3::new(0.0, 1.2, 0.0));
+
+    drive(
+        &mut app,
+        car,
+        FRAMES_PER_SECOND * 2,
+        VehicleInput::default(),
+    );
+
+    let cfg = VehicleConfig::default();
+    let state = app.world().get::<VehicleState>(car).unwrap();
+    for (i, w) in state.wheels.iter().enumerate() {
+        assert!(w.grounded, "wheel {i} settled");
+        let expected = if cfg.wheels[i].position[0] > 0.0 {
+            0.5
+        } else {
+            0.0
+        };
+        assert_eq!(
+            w.surface_drag, expected,
+            "wheel {i} over x={}",
+            cfg.wheels[i].position[0]
+        );
+    }
+}
+
+#[test]
+fn a_wading_surface_measurably_slogs_the_car() {
+    // Water drag resists planar motion at every grounded wheel: a
+    // launch across a `deepwater`-strength slab reaches far less
+    // speed than the same launch on the neutral reference, and a car
+    // dropped already moving on it coasts down hard.
+    let dry = speed_after_launch(None, 1.0, 4);
+    let wading = speed_after_launch(
+        Some(TireSurface {
+            grip: 1.0,
+            drag: 0.5,
+        }),
+        1.0,
+        4,
+    );
+    assert!(
+        dry > 15.0,
+        "reference launch should be well underway, {dry} m/s"
+    );
+    assert!(
+        wading < dry * 0.5,
+        "wading launch {wading} m/s vs dry {dry} m/s"
+    );
+
+    // Coasting leg: the same slab decelerates a moving car with no
+    // pedals held — viscous resistance, not a traction change (grip
+    // stayed 1.0 above, so the tire model itself is unmodified). The
+    // car builds speed on an unmarked slab first; stamping the same
+    // collider mid-drive exercises the component-read path — nothing
+    // about the collider itself changes.
+    let mut app = test_app();
+    let slab_entity = app
+        .world_mut()
+        .spawn((
+            RigidBody::Static,
+            Collider::cuboid(200.0, 1.0, 400.0),
+            Position(Vec3::new(0.0, -0.5, 0.0)),
+        ))
+        .id();
+    let car = spawn_car(&mut app, Vec3::new(0.0, 1.2, 0.0));
+    drive(
+        &mut app,
+        car,
+        FRAMES_PER_SECOND * 4,
+        VehicleInput {
+            throttle: 1.0,
+            ..default()
+        },
+    );
+    app.world_mut().entity_mut(slab_entity).insert(TireSurface {
+        grip: 1.0,
+        drag: 0.5,
+    });
+    let before = app.world().get::<VehicleState>(car).unwrap().forward_speed;
+    drive(
+        &mut app,
+        car,
+        FRAMES_PER_SECOND * 2,
+        VehicleInput::default(),
+    );
+    let after = app.world().get::<VehicleState>(car).unwrap().forward_speed;
+    assert!(before > 5.0, "car should be moving, {before} m/s");
+    assert!(
+        after < before * 0.5,
+        "wading coast {after} m/s vs entry {before} m/s"
+    );
 }

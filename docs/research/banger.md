@@ -516,7 +516,14 @@ channel (sf 5 927 total, london 6 271).
   bng_ev=0a/5s/2b` at 10 000 ticks: 8 fragments spawned, 5 already
   `Slept`-settled on the flat lot (3 still `Active`). Re-run
   bit-identical. `impacts=80` of post-break battering, all poses
-  finite — the repeated-hits leg.
+  finite — the repeated-hits leg. **Superseded by the F06-B.2
+  surface-restitution consumer (2026-09-21):** this site sits on
+  cobblestone/grass-named colliders, which now carry scaled authored
+  `elasticity` as Avian `Restitution` — the same spawn records
+  `bng_ev=0a/2s/1b` (`impacts=35`, `moved=42m`): one shatter, two
+  fragment settles, two still active. The activation and settle
+  mechanics are unchanged; contact response on the authored-elasticity
+  surface is the new input.
 - **Pool bound on fragments (same spawn):** `--banger-pool 2` →
   `bng=5925d/1a/1s/2b bng_pool=2` — at most 2 of the 8 authored
   pieces ever live (skipped pieces emit nothing); `--banger-pool 1`
@@ -524,7 +531,11 @@ channel (sf 5 927 total, london 6 271).
 - **Repeated activations + reclaim (London ring, unchanged spawn):**
   `vpbug --spawn=802,6,-905,180` → `bng_ev=3a/0s/0b` default;
   `--banger-pool 2` → `bng_ev=3a/3s/0b bng_rec=1`; `--banger-pool 1`
-  → `bng_rec=2` — identical to the pre-fix records.
+  → `bng_rec=2` — identical to the pre-fix records. **Updated by
+  F06-B.2 (same install):** default-pool record is now
+  `bng_ev=3a/3s/0b` — the same three activations, but the knocked
+  bollards now reach `Slept` settle within the 1 500-frame window
+  (was `3a/0s` still-moving). Pool-bound re-takes not yet re-run.
 - **Operator's sawhorse (event overlay, `checkpoint:7`):** the
   `sp_sawhrslt_f` roadblock (13 `Points` stamps around
   (−686…−702, 226…245), `race/london/race7.pathset`, limit 34 982,
