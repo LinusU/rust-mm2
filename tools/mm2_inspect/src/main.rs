@@ -881,16 +881,47 @@ fn cars(dir: &Path, mods: Option<&Path>) -> Result<(), Box<dyn std::error::Error
     if catalog.entries.is_empty() {
         return Err("vehicle catalog is empty — no tune/geometry data discovered".into());
     }
+    let garage = mm2_content::scan_garage(&vfs);
     println!("== vehicle roster ({} entries) ==", catalog.entries.len());
     println!(
-        "{:<14} {:<30} {:<8} {:<5} {:<6} status",
-        "id", "name", "class", "lock", "paints"
+        "{:<14} {:<30} {:<8} {:<8} {:<7} {:<10} status",
+        "id", "name", "class", "gate", "paints", "unlock s/f"
     );
     for e in &catalog.entries {
         let class = match e.class {
             mm2_content::VehicleClass::Stock => "stock",
             mm2_content::VehicleClass::Mod => "mod",
             mm2_content::VehicleClass::ModOnly => "mod-only",
+        };
+        let (gate, gated_paints) = match garage.row(&e.id) {
+            Some(row) => (
+                if !row.listed {
+                    "unlisted".to_string()
+                } else {
+                    match row.gate {
+                        mm2_game::VehicleGate::Open => "open".to_string(),
+                        mm2_game::VehicleGate::Reward => "reward".to_string(),
+                    }
+                },
+                row.paint_gates
+                    .iter()
+                    .filter(|g| **g == mm2_game::PaintGate::Reward)
+                    .count(),
+            ),
+            None => ("?".to_string(), 0),
+        };
+        let paints = if gated_paints > 0 {
+            format!("{}+{gated_paints}g", e.paints.len() - gated_paints)
+        } else {
+            e.paints.len().to_string()
+        };
+        // The authored .info fields, verbatim — audit context for
+        // UNK-6, not a gate (nonzero values do not correlate with the
+        // reward-locked set).
+        let unlock_sf = if e.unlock_score > 0 || e.unlock_flags > 0 {
+            format!("{}/{}", e.unlock_score, e.unlock_flags)
+        } else {
+            "-".to_string()
         };
         let status = match &e.status {
             mm2_content::EntryStatus::Ready => "ready".to_string(),
@@ -899,14 +930,12 @@ fn cars(dir: &Path, mods: Option<&Path>) -> Result<(), Box<dyn std::error::Error
             }
         };
         println!(
-            "{:<14} {:<30} {:<8} {:<5} {:<6} {}",
-            e.id,
-            e.display_name,
-            class,
-            if e.locked { "yes" } else { "-" },
-            e.paints.len(),
-            status
+            "{:<14} {:<30} {:<8} {:<8} {:<7} {:<10} {}",
+            e.id, e.display_name, class, gate, paints, unlock_sf, status
         );
+    }
+    for d in &garage.diagnostics {
+        println!("  garage diagnostic: {d}");
     }
     let failures = catalog.stock_audit_failures();
     if !failures.is_empty() {
@@ -942,20 +971,7 @@ fn record_tag(r: &mm2_content::EventRecord) -> String {
 fn race_cities(vfs: &Vfs, city: Option<&str>) -> Vec<String> {
     match city {
         Some(c) => vec![c.to_ascii_lowercase()],
-        None => {
-            let mut found: std::collections::BTreeSet<String> = mm2_content::EXPECTED_RACE_CITIES
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
-            for p in vfs.list() {
-                if let Some(rest) = p.strip_prefix("race/")
-                    && let Some((c, _)) = rest.split_once('/')
-                {
-                    found.insert(c.to_string());
-                }
-            }
-            found.into_iter().collect()
-        }
+        None => mm2_content::race_cities(vfs),
     }
 }
 

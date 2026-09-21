@@ -225,6 +225,25 @@ pub struct EventCatalog {
     pub diagnostics: Vec<String>,
 }
 
+/// Every city that carries authored race data: the expected stock pair
+/// plus any `race/<city>/` directory the mounted VFS discovers (mod
+/// cities included). Sorted; the union, never a filter — a missing
+/// stock city still appears so its audit can report it absent.
+pub fn race_cities(vfs: &Vfs) -> Vec<String> {
+    let mut found: BTreeSet<String> = crate::expect::EXPECTED_RACE_CITIES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    for p in vfs.list() {
+        if let Some(rest) = p.strip_prefix("race/")
+            && let Some((c, _)) = rest.split_once('/')
+        {
+            found.insert(c.to_string());
+        }
+    }
+    found.into_iter().collect()
+}
+
 impl EventCatalog {
     /// Scan `race/<city>/` through the VFS: parse the four
     /// `mm*data.csv` tables, attribute every discovered record to an

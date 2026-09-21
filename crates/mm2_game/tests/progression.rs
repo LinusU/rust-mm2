@@ -555,3 +555,141 @@ fn an_uncatalogued_key_has_no_availability() {
     let table = availability_table();
     assert!(table.of(&p, &key("race99")).is_none());
 }
+
+/// A garage surface: one open car, one reward-gated car whose last
+/// paint is also gated, and one unlisted entry (no canonical `.info`
+/// — the vpmoonrover case).
+fn garage_table() -> GarageTable {
+    GarageTable {
+        rows: vec![
+            GarageRow {
+                id: "vpbug".to_string(),
+                listed: true,
+                gate: VehicleGate::Open,
+                paint_gates: vec![PaintGate::Open; 4],
+                unlock_score: 0,
+                unlock_flags: 0,
+            },
+            GarageRow {
+                id: "vpvwcup".to_string(),
+                listed: true,
+                gate: VehicleGate::Reward,
+                paint_gates: vec![
+                    PaintGate::Open,
+                    PaintGate::Open,
+                    PaintGate::Open,
+                    PaintGate::Reward,
+                ],
+                unlock_score: 0,
+                unlock_flags: 0,
+            },
+            GarageRow {
+                id: "vpmoonrover".to_string(),
+                listed: false,
+                gate: VehicleGate::Open,
+                paint_gates: vec![PaintGate::Open],
+                unlock_score: 0,
+                unlock_flags: 0,
+            },
+        ],
+        diagnostics: Vec::new(),
+    }
+}
+
+/// VEH-3/VEH-4: a fresh standard profile may select open vehicles but
+/// not the reward-gated one — and a locked vehicle reports every paint
+/// locked, gated or not.
+#[test]
+fn a_fresh_profile_sees_gates() {
+    let p = profile();
+    let table = garage_table();
+
+    let bug = table.of(&p, "vpbug").unwrap();
+    assert!(bug.unlocked);
+    assert_eq!(bug.paints, vec![true; 4]);
+
+    let cup = table.of(&p, "vpvwcup").unwrap();
+    assert!(!cup.unlocked);
+    assert_eq!(cup.paints, vec![false; 4], "a locked car opens nothing");
+
+    // Unlisted entries still evaluate — roster membership is a
+    // GarageRow fact, not part of the availability answer.
+    assert!(table.of(&p, "vpmoonrover").unwrap().unlocked);
+    assert!(!table.row("vpmoonrover").unwrap().listed);
+}
+
+/// Granting `vehicle:<id>` — the id an authored VariantNum-0 row
+/// produces — opens the vehicle and its open paints, but not its
+/// reward-gated ones.
+#[test]
+fn a_vehicle_unlock_opens_the_car_not_gated_paints() {
+    let mut p = profile();
+    let table = garage_table();
+    p.progress.unlocks.insert("vehicle:vpvwcup".to_string());
+
+    let cup = table.of(&p, "vpvwcup").unwrap();
+    assert!(cup.unlocked);
+    assert_eq!(cup.paints, vec![true, true, true, false]);
+}
+
+/// VEH-4: `paint:<id>:<variant>` opens exactly that paint index — the
+/// vehicle itself still needs its own grant.
+#[test]
+fn a_paint_unlock_opens_exactly_that_index() {
+    let mut p = profile();
+    let table = garage_table();
+    p.progress.unlocks.insert("vehicle:vpvwcup".to_string());
+    p.progress.unlocks.insert("paint:vpvwcup:3".to_string());
+
+    let cup = table.of(&p, "vpvwcup").unwrap();
+    assert!(cup.unlocked);
+    assert_eq!(cup.paints, vec![true, true, true, true]);
+    // The paint grant does not leak onto another vehicle.
+    assert!(!table.of(&p, "vpvwcup").unwrap().paints[0..3].contains(&false));
+    assert_eq!(table.of(&p, "vpbug").unwrap().paints, vec![true; 4]);
+}
+
+/// Unlock ids the table never produced are inert — a hand-edited or
+/// foreign save cannot open anything.
+#[test]
+fn unknown_unlock_ids_change_nothing() {
+    let mut p = profile();
+    let table = garage_table();
+    p.progress.unlocks.insert("vehicle:vpzzz".to_string());
+    p.progress.unlocks.insert("paint:vpvwcup:99".to_string());
+    p.progress.unlocks.insert("nonsense".to_string());
+
+    assert!(!table.of(&p, "vpvwcup").unwrap().unlocked);
+    assert_eq!(
+        table.of(&p, "vpbug").unwrap(),
+        table.of(&profile(), "vpbug").unwrap()
+    );
+}
+
+/// A sandbox identity sees every vehicle and paint — spec req 5's
+/// unrestricted view applies to the garage too.
+#[test]
+fn a_sandbox_profile_selects_everything() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(dir.path()).unwrap();
+    let p = store
+        .create("dev", Difficulty::Amateur, ProfileKind::Sandbox)
+        .unwrap();
+    let table = garage_table();
+    assert!(
+        table
+            .evaluate(&p)
+            .iter()
+            .all(|a| a.unlocked && a.paints.iter().all(|p| *p))
+    );
+}
+
+/// An id the catalog never produced has no availability — `of`
+/// reports `None`, and `evaluate` cannot invent a row.
+#[test]
+fn an_uncatalogued_vehicle_has_no_garage_row() {
+    let p = profile();
+    let table = garage_table();
+    assert!(table.of(&p, "vpzzz").is_none());
+    assert_eq!(table.evaluate(&p).len(), table.rows.len());
+}

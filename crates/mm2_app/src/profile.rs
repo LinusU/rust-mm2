@@ -242,6 +242,53 @@ pub fn choose_launch<'a>(
     (source, paint, difficulty)
 }
 
+/// Why the launch selection breaches the garage's gates (F16-B.3).
+/// `--car`/a remembered vehicle bypass the menu that will enforce
+/// these gates in F17 — the note surfaces the breach honestly, the
+/// same warn-don't-enforce interim the locked `--event` launch uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VehicleGateNote {
+    /// The vehicle id is not in the catalog at all.
+    Uncatalogued,
+    /// The entry is not on the select roster (fallback-extension or
+    /// metadata-less — vpmoonrover's `.inf` is the retail case, UNK-3).
+    Unlisted,
+    /// The vehicle is reward-gated and the profile lacks its unlock.
+    Locked,
+    /// The vehicle is open but this paint index is reward-gated and
+    /// the profile lacks `paint:<id>:<index>`.
+    LockedPaint,
+}
+
+/// Evaluate the launch selection against the bound profile's garage
+/// gates. `None` means selectable (also the sandbox view — an
+/// unrestricted identity never produces a note). Builds the garage
+/// table on demand; callers run it once per launch, not per frame.
+pub fn vehicle_gate_note(
+    vfs: &mm2_assets::Vfs,
+    profile: &PlayerProfile,
+    id: &str,
+    paint: usize,
+) -> Option<VehicleGateNote> {
+    let garage = mm2_content::scan_garage(vfs);
+    let Some(row) = garage.row(id) else {
+        return Some(VehicleGateNote::Uncatalogued);
+    };
+    if !row.listed {
+        return Some(VehicleGateNote::Unlisted);
+    }
+    let avail = garage
+        .of(profile, id)
+        .expect("a catalog row always evaluates");
+    if !avail.unlocked {
+        return Some(VehicleGateNote::Locked);
+    }
+    if avail.paints.get(paint) == Some(&false) {
+        return Some(VehicleGateNote::LockedPaint);
+    }
+    None
+}
+
 /// Record the session's selections on the bound profile and persist
 /// immediately — at session start, not exit, so a crash mid-session
 /// cannot lose them.

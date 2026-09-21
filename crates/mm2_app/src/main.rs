@@ -312,7 +312,7 @@ fn main() {
     // `--list-cars` needs the VFS only — no window, no GPU.
     if cli.list_cars {
         let catalog = VehicleCatalog::scan(&vfs);
-        print_roster(&catalog);
+        print_roster(&catalog, &mm2_content::scan_garage(&vfs));
         return;
     }
 
@@ -509,6 +509,21 @@ fn main() {
         } else if cli.paint.is_some_and(|p| p != 0) {
             warn!("--paint has no effect without --car / an MM2 installation");
         }
+    }
+
+    // F16-B.3: `--car` and remembered selections bypass the menu that
+    // will enforce garage gates in F17 — surface a locked, unlisted or
+    // unrecorded choice honestly, mirroring the locked `--event` warn.
+    if let (Some(slot), Some(def)) = (&active_profile, &selected)
+        && let Some(note) = profile::vehicle_gate_note(&vfs, &slot.profile, &def.id, paint)
+    {
+        let reason = match note {
+            profile::VehicleGateNote::Uncatalogued => "not in the vehicle catalog",
+            profile::VehicleGateNote::Unlisted => "not on the select roster",
+            profile::VehicleGateNote::Locked => "still locked for this profile",
+            profile::VehicleGateNote::LockedPaint => "paint still locked for this profile",
+        };
+        warn!(car = %def.id, paint, "{reason}");
     }
 
     // Handling config: `--vehicle-config` is a full override applied after
@@ -1217,8 +1232,13 @@ fn default_stock_car(vfs: &Vfs, paint: usize) -> Option<VehicleDef> {
     None
 }
 
-/// `--list-cars` output: id, name, class, lock status, paints, deps.
-fn print_roster(catalog: &VehicleCatalog) {
+/// `--list-cars` output: id, name, class, roster gate, paints, deps.
+/// The `gate` column is the garage's authored progression gate —
+/// `open`, `reward` (a `<city>_rewards.csv` row unlocks it) or
+/// `unlisted` (no canonical `tune/<id>.info`; the original's roster
+/// is that scan — vpmoonrover's `.inf` is the retail case, UNK-3).
+/// `paints` shows the authored count, `+Ng` marking reward-gated ones.
+fn print_roster(catalog: &VehicleCatalog, garage: &mm2_game::GarageTable) {
     if catalog.entries.is_empty() {
         eprintln!(
             "no vehicles discovered — mount an MM2 install with --mm2-path (or mods with --mods)"
@@ -1226,14 +1246,36 @@ fn print_roster(catalog: &VehicleCatalog) {
         std::process::exit(2);
     }
     println!(
-        "{:<14} {:<30} {:<8} {:<5} {:<6} status",
-        "id", "name", "class", "lock", "paints"
+        "{:<14} {:<30} {:<8} {:<8} {:<7} status",
+        "id", "name", "class", "gate", "paints"
     );
     for e in &catalog.entries {
         let class = match e.class {
             mm2_content::VehicleClass::Stock => "stock",
             mm2_content::VehicleClass::Mod => "mod",
             mm2_content::VehicleClass::ModOnly => "mod-only",
+        };
+        let (gate, gated_paints) = match garage.row(&e.id) {
+            Some(row) => (
+                if !row.listed {
+                    "unlisted".to_string()
+                } else {
+                    match row.gate {
+                        mm2_game::VehicleGate::Open => "open".to_string(),
+                        mm2_game::VehicleGate::Reward => "reward".to_string(),
+                    }
+                },
+                row.paint_gates
+                    .iter()
+                    .filter(|g| **g == mm2_game::PaintGate::Reward)
+                    .count(),
+            ),
+            None => ("?".to_string(), 0),
+        };
+        let paints = if gated_paints > 0 {
+            format!("{}+{gated_paints}g", e.paints.len() - gated_paints)
+        } else {
+            e.paints.len().to_string()
         };
         let status = match &e.status {
             mm2_content::EntryStatus::Ready => "ready".to_string(),
@@ -1242,14 +1284,12 @@ fn print_roster(catalog: &VehicleCatalog) {
             }
         };
         println!(
-            "{:<14} {:<30} {:<8} {:<5} {:<6} {}",
-            e.id,
-            e.display_name,
-            class,
-            if e.locked { "yes" } else { "-" },
-            e.paints.len(),
-            status
+            "{:<14} {:<30} {:<8} {:<8} {:<7} {}",
+            e.id, e.display_name, class, gate, paints, status
         );
+    }
+    for d in &garage.diagnostics {
+        eprintln!("garage: {d}");
     }
     let failures = catalog.stock_audit_failures();
     if !failures.is_empty() {

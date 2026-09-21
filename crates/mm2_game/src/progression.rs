@@ -240,6 +240,148 @@ fn evaluate_row(
     }
 }
 
+/// How a roster vehicle's selection is gated for a progressing
+/// profile (VEH-3). `mm2_content::garage_table` builds one row per
+/// catalog entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VehicleGate {
+    /// Selectable from a fresh profile — no authored reward row locks
+    /// it.
+    Open,
+    /// Selectable once the profile holds `vehicle:<id>` — an authored
+    /// `<city>_rewards.csv` `VariantNum` 0 row grants it (VEH-3).
+    Reward,
+}
+
+/// How one authored paint job is gated (VEH-4). The gate index is the
+/// authored `VariantNum` — measured as the zero-based `Colors`/paint-job
+/// index (vpvwcup variant 5 = "Team Angel" = the documented Angel Cup
+/// paint, 6 = "Team MS" = the Microsoft Cup — CC-6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaintGate {
+    /// Selectable with the vehicle — no authored reward row locks it.
+    Open,
+    /// Selectable once the profile holds `paint:<id>:<index>`.
+    Reward,
+}
+
+/// One catalog vehicle's availability rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GarageRow {
+    /// Stable catalog id (`vpbug`).
+    pub id: String,
+    /// Whether the entry belongs on the select roster. The original's
+    /// vehicle list is the `tune/*.info` scan — an entry whose metadata
+    /// resolved through a fallback extension (`.inf`/`.vinfo`/
+    /// `.info.bak`) or not at all is a dev leftover, not a menu row
+    /// (`vpmoonrover` is the retail case — UNK-3; designed reading,
+    /// not verified). Unlisted rows still evaluate — a dev/cheat
+    /// selection is a separate concern from the roster.
+    pub listed: bool,
+    /// The vehicle gate.
+    pub gate: VehicleGate,
+    /// Gate per authored paint index — aligned with
+    /// `mm2_content::CatalogEntry::paints` (empty when the metadata
+    /// declared no colors).
+    pub paint_gates: Vec<PaintGate>,
+    /// Authored `UnlockScore`, kept verbatim for audit — semantics
+    /// unverified (UNK-6; the only nonzero stock value is
+    /// vppanozgt's 8000 — consistent with a score-gated paint but no
+    /// score consumer exists yet).
+    pub unlock_score: u32,
+    /// Authored `UnlockFlags`, kept verbatim — semantics unverified
+    /// (UNK-6); nonzero stock values do not correlate with the
+    /// reward-locked set, so the field is not consumed as a gate.
+    pub unlock_flags: u32,
+}
+
+/// The garage selectability surface: one row per catalog entry. Same
+/// content/runtime split as [`AvailabilityTable`] — `mm2_content`
+/// builds it from the vehicle catalog plus every city's reward table
+/// (a vehicle unlock authored in one city must open the car in the
+/// other's garage too, so the producer unions all of them).
+#[derive(Debug, Clone, Default)]
+pub struct GarageTable {
+    /// One row per catalog entry, catalog order.
+    pub rows: Vec<GarageRow>,
+    /// Reward grants/catalog entries that could not become a gate —
+    /// surfaced, never silently dropped.
+    pub diagnostics: Vec<String>,
+}
+
+/// What `profile` may select for one vehicle right now — derived
+/// state, recomputed per query from the persisted `unlocks` set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VehicleAvailability {
+    /// The vehicle may be selected.
+    pub unlocked: bool,
+    /// Per authored paint index — `false` while the vehicle itself is
+    /// locked or the paint's reward grant is unearned.
+    pub paints: Vec<bool>,
+}
+
+impl GarageTable {
+    /// Every row's availability under `profile`, in catalog order. A
+    /// sandbox identity sees the unrestricted view (spec req 5).
+    pub fn evaluate(&self, profile: &PlayerProfile) -> Vec<VehicleAvailability> {
+        let unrestricted = !profile.records_progress();
+        self.rows
+            .iter()
+            .map(|row| evaluate_garage_row(row, profile, unrestricted))
+            .collect()
+    }
+
+    /// `id`'s availability — `None` when the catalog has no entry for
+    /// it.
+    pub fn of(&self, profile: &PlayerProfile, id: &str) -> Option<VehicleAvailability> {
+        let unrestricted = !profile.records_progress();
+        self.rows
+            .iter()
+            .find(|row| row.id == id)
+            .map(|row| evaluate_garage_row(row, profile, unrestricted))
+    }
+
+    /// `id`'s row — the gate/listing metadata an availability answer
+    /// does not carry.
+    pub fn row(&self, id: &str) -> Option<&GarageRow> {
+        self.rows.iter().find(|row| row.id == id)
+    }
+}
+
+fn evaluate_garage_row(
+    row: &GarageRow,
+    profile: &PlayerProfile,
+    unrestricted: bool,
+) -> VehicleAvailability {
+    let holds = |id: String| profile.progress.unlocks.contains(&id);
+    let unlocked = unrestricted || row.gate == VehicleGate::Open || holds(row.vehicle_id());
+    let paints = row
+        .paint_gates
+        .iter()
+        .enumerate()
+        .map(|(i, gate)| {
+            unlocked && (unrestricted || *gate == PaintGate::Open || holds(row.paint_id(i as u32)))
+        })
+        .collect();
+    VehicleAvailability { unlocked, paints }
+}
+
+impl GarageRow {
+    /// The `unlocks` id this row's vehicle gate checks.
+    pub fn vehicle_id(&self) -> String {
+        Unlock::Vehicle(self.id.clone()).id()
+    }
+
+    /// The `unlocks` id paint `index`'s gate checks.
+    pub fn paint_id(&self, index: u32) -> String {
+        Unlock::Paint {
+            car: self.id.clone(),
+            variant: i64::from(index),
+        }
+        .id()
+    }
+}
+
 /// A newly granted unlock — reported once, on the result that earned
 /// it (`unlocks` set membership makes every later delivery a no-op).
 #[derive(Debug, Clone, PartialEq)]

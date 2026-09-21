@@ -16,6 +16,7 @@ pub mod catalog;
 pub mod convert;
 pub mod events;
 pub mod expect;
+pub mod garage;
 pub mod model;
 pub mod nav;
 pub mod opponents;
@@ -34,12 +35,13 @@ pub use convert::{
 };
 pub use events::{
     CatalogEvent, EventCatalog, EventRecord, EventResolveError, EventStatus, EventTableStatus,
-    ExtraRecord, FailedRef, RecordContent,
+    ExtraRecord, FailedRef, RecordContent, race_cities,
 };
 pub use expect::{
     EXPECTED_AUDIO_FAMILIES, EXPECTED_CITIES, EXPECTED_EVENT_TABLES, EXPECTED_PEDS,
     EXPECTED_RACE_CITIES, ExpectedEvent, PED_REQUIRED_EXTS, PrimaryRecord, expected_events,
 };
+pub use garage::{garage_table, scan_garage};
 pub use model::{
     Lod, MeshGroup, ModelPart, PartRole, VehicleModel, WheelVisual, build_model, classify_stem,
     shader_for_paint, split_lod,

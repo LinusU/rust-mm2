@@ -719,3 +719,73 @@ fn a_locked_event_launches_with_its_gate_visible() {
         .evaluate(&world.resource::<ActiveProfile>().profile);
     assert!(open.iter().take(3).all(|a| a.unlocked && !a.customizable));
 }
+
+/// F16-B.3: the launch-time vehicle-gate note reads the same garage
+/// surface F17's menu will enforce — a reward-gated car, a gated paint
+/// index and a non-roster entry each report, and a sandbox identity
+/// reports nothing.
+#[test]
+fn a_gated_vehicle_selection_reports_its_note() {
+    let tmp = install();
+    let d = tmp.path();
+    // Give the catalog canonical `.info` rows: the test car (open),
+    // the `race,half` reward car (gated), the `race,0` paint target
+    // (open, one gated index), and an `.inf` leftover (unlisted).
+    write(d, "tune/vpt.info", "Description=Test\nColors=A|B\n");
+    write(d, "tune/vpreward.info", "Description=Reward\nColors=R\n");
+    write(
+        d,
+        "tune/vppaint.info",
+        "Description=Painted\nColors=P0|P1|P2|P3\n",
+    );
+    write(d, "tune/vprover.inf", "Description=Rover\nColors=Primer\n");
+    let vfs = vfs_of(d);
+
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let mut slot = bound_profile(&store, ProfileKind::Standard);
+    let profile = &mut slot.profile;
+
+    use mm2_app::profile::{VehicleGateNote, vehicle_gate_note};
+    assert_eq!(
+        vehicle_gate_note(&vfs, profile, "vpreward", 0),
+        Some(VehicleGateNote::Locked)
+    );
+    assert_eq!(
+        vehicle_gate_note(&vfs, profile, "vppaint", 3),
+        Some(VehicleGateNote::LockedPaint)
+    );
+    assert_eq!(vehicle_gate_note(&vfs, profile, "vppaint", 0), None);
+    assert_eq!(vehicle_gate_note(&vfs, profile, "vpt", 0), None);
+    assert_eq!(
+        vehicle_gate_note(&vfs, profile, "vprover", 0),
+        Some(VehicleGateNote::Unlisted)
+    );
+    assert_eq!(
+        vehicle_gate_note(&vfs, profile, "vpzzz", 0),
+        Some(VehicleGateNote::Uncatalogued)
+    );
+
+    // The earned grants open exactly their targets.
+    profile
+        .progress
+        .unlocks
+        .insert("vehicle:vpreward".to_string());
+    profile
+        .progress
+        .unlocks
+        .insert("paint:vppaint:3".to_string());
+    assert_eq!(vehicle_gate_note(&vfs, profile, "vpreward", 0), None);
+    assert_eq!(vehicle_gate_note(&vfs, profile, "vppaint", 3), None);
+
+    // A sandbox identity selects anything — the note never fires.
+    let sandbox = bound_profile(&store, ProfileKind::Sandbox);
+    assert_eq!(
+        vehicle_gate_note(&vfs, &sandbox.profile, "vpreward", 0),
+        None
+    );
+    assert_eq!(
+        vehicle_gate_note(&vfs, &sandbox.profile, "vppaint", 3),
+        None
+    );
+}

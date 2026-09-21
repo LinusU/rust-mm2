@@ -101,8 +101,21 @@ pub struct CatalogEntry {
     pub display_name: String,
     /// Paint variant names from `Colors` (zero-based index into this list).
     pub paints: Vec<String>,
-    /// Locked/reward vehicle in stock progression (`UnlockScore`/`UnlockFlags`).
-    pub locked: bool,
+    /// Metadata resolved via the canonical `tune/<id>.info` — true even
+    /// when a mod provides it. The original's select roster is the
+    /// `tune/*.info` scan; an entry whose metadata only resolved
+    /// through a fallback (`.inf`/`.vinfo`/`.info.bak`) or not at all
+    /// is not a menu row (vpmoonrover's `.inf` is the retail case —
+    /// UNK-3; designed reading). The garage producer maps this to
+    /// `GarageRow::listed`.
+    pub canonical_info: bool,
+    /// Authored `UnlockScore`, verbatim (UNK-6 — the only nonzero
+    /// stock value is vppanozgt's 8000). Not a progression gate: the
+    /// authored reward tables are.
+    pub unlock_score: u32,
+    /// Authored `UnlockFlags`, verbatim (UNK-6 — nonzero stock values
+    /// do not correlate with the reward-locked set).
+    pub unlock_flags: u32,
     /// Stock / mod classification.
     pub class: VehicleClass,
     /// Resolved dependency paths.
@@ -215,13 +228,16 @@ impl VehicleCatalog {
 
         let mut display_name = id.to_string();
         let mut paints = Vec::new();
-        let mut locked = false;
+        let mut canonical_info = false;
+        let mut unlock_score = 0;
+        let mut unlock_flags = 0;
         let mut saw_info = false;
 
         if let Some(r) = &info_res {
             note_src(r, &mut any_mod, &mut all_mod);
             deps.info = Some(describe(r));
             saw_info = true;
+            canonical_info = r.logical.eq_ignore_ascii_case(&format!("tune/{id}.info"));
             match vfs.read(r) {
                 Ok(bytes) => {
                     let info = InfoFile::parse(&String::from_utf8_lossy(&bytes));
@@ -232,8 +248,8 @@ impl VehicleCatalog {
                         display_name = d.to_string();
                     }
                     paints = info.list("Colors");
-                    locked = info.u32("UnlockScore").unwrap_or(0) > 0
-                        || info.u32("UnlockFlags").unwrap_or(0) != 0;
+                    unlock_score = info.u32("UnlockScore").unwrap_or(0);
+                    unlock_flags = info.u32("UnlockFlags").unwrap_or(0);
                     if let Some(base) = info.get("BaseName")
                         && !base.eq_ignore_ascii_case(id)
                     {
@@ -300,7 +316,9 @@ impl VehicleCatalog {
             id: id.to_string(),
             display_name,
             paints,
-            locked,
+            canonical_info,
+            unlock_score,
+            unlock_flags,
             class,
             deps,
             status: if missing.is_empty() {
