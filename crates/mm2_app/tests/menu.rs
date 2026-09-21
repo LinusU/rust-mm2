@@ -22,8 +22,8 @@ use mm2_app::profile::ActiveProfile;
 use mm2_app::session::{self, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_assets::Vfs;
 use mm2_game::{
-    BangerPool, Difficulty, EventTableKind, ImpactEvent, Mm2Vfs, PlayerVehicle, ProfileKind,
-    ProfileStore, ResultLedger, Session, SessionMode, SessionPhase, VehicleSelection,
+    BangerPool, Difficulty, EventKey, EventTableKind, ImpactEvent, Mm2Vfs, PlayerVehicle,
+    ProfileKind, ProfileStore, ResultLedger, Session, SessionMode, SessionPhase, VehicleSelection,
     advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::{VehicleConfig, VehiclePlugin};
@@ -840,6 +840,164 @@ fn profiles_bind_create_and_delete() {
         app.world().get_resource::<ActiveProfile>().is_some(),
         "the refused delete leaves the profile bound"
     );
+}
+
+/// The Quick Race row's enabled state under `shell` — the focused
+/// assertions for both Quick Race tests.
+fn quick_race(app: &App) -> (String, Result<(), String>) {
+    shell(app)
+        .rows
+        .iter()
+        .find(|r| r.text.starts_with("Quick Race"))
+        .map(|r| (r.text.clone(), r.enabled.clone()))
+        .unwrap_or_else(|| {
+            let rows: Vec<String> = shell(app).rows.iter().map(|r| r.text.clone()).collect();
+            panic!("no Quick Race row — rows: {rows:?}")
+        })
+}
+
+/// F17-A.2 / DRV-8: a bound profile's `last_event` relaunches straight
+/// from the root row. The event is resolved stem-keyed through the live
+/// catalog, the profile file itself records the stem on session start,
+/// and activating the row lands in the same `EventRef` the event list
+/// would have launched.
+#[test]
+fn quick_race_replays_the_last_event() {
+    let tmp = install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let alice = store
+        .create("Alice", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+
+    let mut app = menu_app(tmp.path(), Some(store.clone()));
+    app.update();
+
+    // No driver bound: the row exists but explains itself.
+    let (_, enabled) = quick_race(&app);
+    assert!(
+        enabled.unwrap_err().contains("no driver profile"),
+        "profile-less runs have no last_event"
+    );
+
+    // Bind Alice — she has never played an event.
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "Alice");
+    press(&mut app, KeyCode::Escape);
+    let (_, enabled) = quick_race(&app);
+    assert!(
+        enabled.unwrap_err().contains("no event played yet"),
+        "a fresh profile has nothing to replay"
+    );
+
+    // Play race0 through the real Events path — `note_session_start`
+    // records the stem-keyed last_event at session start.
+    activate_row(&mut app, "Events");
+    activate_row(&mut app, "testcity");
+    activate_row(&mut app, "Checkpoint");
+    activate_row(&mut app, "race0");
+    assert!(
+        run_until(&mut app, 12, |a| matches!(
+            phase(a),
+            SessionPhase::Countdown | SessionPhase::Playing
+        )),
+        "race0 never launched: {:?}",
+        phase(&app)
+    );
+    let saved = store.load(&alice.id).unwrap().profile;
+    assert_eq!(
+        saved.selections.last_event,
+        Some(EventKey {
+            city: "testcity".into(),
+            table: EventTableKind::Checkpoint,
+            stem: "race0".into(),
+        }),
+        "the session start must persist the stem-keyed event"
+    );
+
+    // Quit-to-menu — the root row now names the last event.
+    press(&mut app, KeyCode::Escape);
+    assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Menu));
+    app.update();
+    let (text, enabled) = quick_race(&app);
+    assert_eq!(text, "Quick Race: Checkpoint #0 (race0)");
+    assert!(
+        enabled.is_ok(),
+        "the replayed event must be open: {enabled:?}"
+    );
+
+    // Activating it launches the same authored event — no walk through
+    // the event tree, no fake quick-race mode.
+    activate_row(&mut app, "Quick Race");
+    assert!(run_until(&mut app, 12, |a| matches!(
+        phase(a),
+        SessionPhase::Countdown | SessionPhase::Playing
+    )));
+    match app.world().resource::<Session>().config() {
+        Some(cfg) => assert_eq!(
+            cfg.mode,
+            SessionMode::Event(mm2_game::EventRef {
+                city: "testcity".into(),
+                table: EventTableKind::Checkpoint,
+                index: 0,
+            })
+        ),
+        None => panic!("a launched session has a config"),
+    }
+}
+
+/// A `last_event` that no longer resolves — gated, incomplete, or
+/// absent from the catalog — disables Quick Race with the reason; the
+/// row never launches a different event at the stale index.
+#[test]
+fn quick_race_reports_an_unresolvable_last_event() {
+    let tmp = install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let cases = [
+        // race3 is gated by CHK-3 on the unbeaten first set.
+        ("Gated", "race3", "beat"),
+        // race2 has no waypoint record — the catalog knows it but
+        // cannot produce a race.
+        ("Broken", "race2", "incomplete"),
+        // A stem no mounted table row claims (deleted mod, older save).
+        ("Gone", "race99", "not in the testcity catalog"),
+    ];
+    for (name, stem, _) in &cases {
+        let profile = store
+            .create(*name, Difficulty::Amateur, ProfileKind::Standard)
+            .unwrap();
+        let mut loaded = store.load(&profile.id).unwrap().profile;
+        loaded.selections.last_event = Some(EventKey {
+            city: "testcity".into(),
+            table: EventTableKind::Checkpoint,
+            stem: stem.to_string(),
+        });
+        store.save(&mut loaded).unwrap();
+    }
+
+    let mut app = menu_app(tmp.path(), Some(store));
+    app.update();
+
+    for (name, stem, reason) in &cases {
+        activate_row(&mut app, "Driver:");
+        activate_row(&mut app, name);
+        press(&mut app, KeyCode::Escape);
+        let (text, enabled) = quick_race(&app);
+        assert!(
+            text.contains(stem),
+            "{name}: row should name {stem}: {text}"
+        );
+        let err = enabled.unwrap_err();
+        assert!(
+            err.contains(reason),
+            "{name}: expected {reason:?} in {err:?}"
+        );
+        // The disabled row never launches.
+        activate_row(&mut app, "Quick Race");
+        assert_eq!(phase(&app), SessionPhase::Menu, "{name} must not launch");
+        assert!(shell(&app).status.is_some());
+    }
 }
 
 /// No content and no store: the rows exist but carry honest reasons —

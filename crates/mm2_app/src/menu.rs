@@ -23,11 +23,10 @@
 //!   quit from a menu-launched session returns here instead of
 //!   exiting.
 //!
-//! Deferred to later slices (honest gaps, not placeholders): Quick Race
-//! (DRV-8's `last_event` launch), per-event weather/time/density
-//! controls (needs F18's session-legal writers; RACE-3 `customizable`),
-//! mouse navigation, results/pause screens (F17-B), original menu art
-//! and audio.
+//! Deferred to later slices (honest gaps, not placeholders): per-event
+//! weather/time/density controls (needs F18's session-legal writers;
+//! RACE-3 `customizable`), mouse navigation, results/pause screens
+//! (F17-B), original menu art and audio.
 
 use std::collections::BTreeMap;
 
@@ -616,7 +615,7 @@ const TABLE_KINDS: [EventTableKind; 4] = [
 fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
     data.ensure_scan(vfs);
     let rows = match &shell.screen {
-        Screen::Root => root_rows(shell, data),
+        Screen::Root => root_rows(shell, data, vfs),
         Screen::CruiseCity => data
             .cities
             .iter()
@@ -730,7 +729,7 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
     shell.focus = shell.focus.min(shell.rows.len().saturating_sub(1));
 }
 
-fn root_rows(shell: &MenuShell, data: &MenuData) -> Vec<Row> {
+fn root_rows(shell: &MenuShell, data: &mut MenuData, vfs: &Vfs) -> Vec<Row> {
     let vehicle_label = match &shell.vehicle.id {
         Some(id) => data
             .catalog
@@ -754,6 +753,7 @@ fn root_rows(shell: &MenuShell, data: &MenuData) -> Vec<Row> {
             },
             action: Action::Push(Screen::CruiseCity),
         },
+        quick_race_row(data, vfs),
         Row {
             text: "Events".into(),
             enabled: Ok(()),
@@ -803,6 +803,87 @@ fn root_rows(shell: &MenuShell, data: &MenuData) -> Vec<Row> {
             action: Action::Quit,
         },
     ]
+}
+
+/// The Quick Race row (DRV-8): relaunch the bound profile's
+/// `last_event` with the current vehicle/paint/difficulty selections.
+/// The documented original inserts a vehicle-select screen between the
+/// pick and the launch; this shell already keeps vehicle/difficulty as
+/// persistent root selections, so the row launches directly — an
+/// enhanced-layout choice, not an original-rules claim.
+///
+/// The stem-keyed [`mm2_game::EventKey`] is resolved back through the
+/// live catalog: a mod that deleted or broke the event disables the row
+/// with the reason instead of launching whatever row now sits at the
+/// saved index (the whole point of storing the stem, spec req 4).
+fn quick_race_row(data: &mut MenuData, vfs: &Vfs) -> Row {
+    let disabled = |text: String, reason: String| Row {
+        text,
+        enabled: Err(reason),
+        action: Action::Back, // unreachable while disabled
+    };
+    let bound = data.bound.clone();
+    let Some(key) = bound.as_ref().and_then(|p| p.selections.last_event.clone()) else {
+        return disabled(
+            "Quick Race".into(),
+            if data.bound.is_none() {
+                "no driver profile - quick race replays the last event".to_string()
+            } else {
+                "no event played yet".to_string()
+            },
+        );
+    };
+    let text = format!("Quick Race: {}", key.stem);
+    if key.table == EventTableKind::CrashCourse {
+        return disabled(
+            text,
+            "crash course events are not loadable yet (F21)".to_string(),
+        );
+    }
+    if let Err(reason) = data.city_loadable(vfs, &key.city) {
+        return disabled(text, reason);
+    }
+    let availability = data.availability_of(vfs, &key.city).clone();
+    let Some(event) = data
+        .catalog_of(vfs, &key.city)
+        .events
+        .iter()
+        .find(|e| e.event_ref.table == key.table && e.stem == key.stem)
+    else {
+        return disabled(
+            text,
+            format!("{} is not in the {} catalog any more", key.stem, key.city),
+        );
+    };
+    let enabled = match &event.status {
+        mm2_content::EventStatus::Incomplete { missing } => {
+            Err(format!("incomplete: {}", missing.join(", ")))
+        }
+        mm2_content::EventStatus::Ready => {
+            let profile = bound.as_ref().expect("a key implies a bound profile");
+            match availability.of(profile, &key) {
+                Some(a) if !a.unlocked => Err(format!(
+                    "beat {} first",
+                    a.blocked_by
+                        .iter()
+                        .map(|k| k.stem.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+                _ => Ok(()),
+            }
+        }
+    };
+    Row {
+        text: format!(
+            "Quick Race: {} #{} ({})",
+            table_name(key.table),
+            event.event_ref.index,
+            key.stem
+        ),
+        enabled,
+        action: Action::LaunchEvent(event.event_ref.clone()),
+    }
 }
 
 fn garage_rows(shell: &MenuShell, data: &MenuData) -> Vec<Row> {
