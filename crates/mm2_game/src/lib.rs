@@ -55,7 +55,8 @@ pub use progression::{
 };
 pub use props::{
     Carriageway, MAX_PATHSET_STAMPS, MAX_PROP_RULE_STAMPS, PathStampSite, PathStampSites,
-    PropStamp, PropWalk, PropWalkStats, carriageways, path_stamp_sites, walk_prop_rules,
+    PropStamp, PropWalk, PropWalkStats, carriageways, path_stamp_sites, stamp_content_offset,
+    stamp_space_verts, walk_prop_rules, yawed_basis,
 };
 pub use race::{
     Checkpoint, CheckpointRule, DEFAULT_CHECKPOINT_HEIGHT, DEFAULT_COUNTDOWN_TICKS, EventParams,

@@ -34,14 +34,14 @@ use mm2_content::surface::{SurfaceSlot, SurfaceTables};
 use mm2_formats::{
     inst::{self, InstPlacement},
     pathset,
-    pkg::{Pkg, PkgStrip},
+    pkg::{Pkg, PkgStrip, lod_split},
     proprules::{self, PropRuleSide},
     psdl::{AttributeType, Psdl, RoomAttribute},
     tex::TexFile,
 };
 use mm2_game::{
     Banger, BangerDefinition, CityEntity, MAX_PATHSET_STAMPS, PropWalk, Session, SessionEntity,
-    SurfaceMaterial, path_stamp_sites, walk_prop_rules,
+    SurfaceMaterial, path_stamp_sites, stamp_content_offset, walk_prop_rules, yawed_basis,
 };
 use tracing::{debug, info, warn};
 
@@ -1220,7 +1220,7 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
             let mut rl = Vec::new();
             let mut rr = Vec::new();
             let mut sw_r = Vec::new();
-            for s in refs.chunks_exact(4) {
+            for s in refs.as_chunks::<4>().0 {
                 sw_l.push(vertex(s[0], ctx.verts)?);
                 rl.push(vertex(s[1], ctx.verts)?);
                 rr.push(vertex(s[2], ctx.verts)?);
@@ -1259,7 +1259,7 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
             // vertical curb face sits on the `a` edge facing away from b.
             let mut ground = Vec::new();
             let mut top = Vec::new();
-            for s in refs.chunks_exact(2) {
+            for s in refs.as_chunks::<2>().0 {
                 ground.push(vertex(s[0], ctx.verts)?);
                 top.push(vertex(s[1], ctx.verts)?);
             }
@@ -1283,7 +1283,7 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
             let refs = counted_refs(attr, 2, "walkway")?;
             let mut l = Vec::new();
             let mut r = Vec::new();
-            for s in refs.chunks_exact(2) {
+            for s in refs.as_chunks::<2>().0 {
                 l.push(vertex(s[0], ctx.verts)?);
                 r.push(vertex(s[1], ctx.verts)?);
             }
@@ -1319,10 +1319,7 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
             };
             let div_type = (packed & 0x7) as u8;
             let div_tex = ((packed >> 8) & 0xff) as i64 - 1;
-            let sections: Vec<[u16; 6]> = refs
-                .chunks_exact(6)
-                .map(|c| [c[0], c[1], c[2], c[3], c[4], c[5]])
-                .collect();
+            let sections: Vec<[u16; 6]> = refs.as_chunks::<6>().0.to_vec();
             let mut sw_l = Vec::new();
             let mut rl_out = Vec::new();
             let mut rl_in = Vec::new();
@@ -1937,7 +1934,7 @@ pub(crate) fn decode_tex_with(
     } else {
         tex.decode_rgba(0)
     }
-    .map(|rgba| rgba.chunks_exact(4).any(|px| px[3] < 250))
+    .map(|rgba| rgba.as_chunks::<4>().0.iter().any(|px| px[3] < 250))
     .unwrap_or(false);
     Some((image, has_alpha))
 }
@@ -1977,7 +1974,7 @@ pub(crate) fn decode_buffer_image(bytes: &[u8], ext: &str, logical: &str) -> Opt
         | TextureFormat::Bgra8Unorm => image
             .data
             .as_ref()
-            .map(|d| d.chunks_exact(4).any(|px| px[3] < 250))
+            .map(|d| d.as_chunks::<4>().0.iter().any(|px| px[3] < 250))
             .unwrap_or(false),
         // Compressed formats with an alpha channel.
         f if format_has_alpha(f) => true,
@@ -2239,42 +2236,6 @@ impl<'a> MaterialCache<'a> {
 // PKG props
 // ---------------------------------------------------------------------------
 
-/// LOD rank of a geometry chunk name: `*_vl` < `*_l` < `*_m` < `*_h` —
-/// higher rank = higher detail. Names without a recognized LOD suffix rank
-/// as `*_h`; only the last `_`-separated component is interpreted so real
-/// part names are preserved.
-/// Split a PKG geometry name into the stem its LOD variants share and the
-/// rank of this variant (higher is more detailed).
-///
-/// MM2 writes the variants either as `<stem>_<tag>` or as a bare tag —
-/// `el_unionsquare_f` names its four geometries exactly `H`, `M`, `L` and
-/// `VL`. Splitting on `_` alone leaves a bare tag as its own stem, so the
-/// four variants stop competing and every one of them is drawn: at Union
-/// Square the coarse 26-vertex shell has no cut for the garage entrance
-/// and buries it under grass, and elsewhere the stacked shells z-fight.
-fn lod_split(name: &str) -> (String, u8) {
-    fn rank(tag: &str) -> Option<u8> {
-        match tag {
-            "vl" => Some(0),
-            "l" => Some(1),
-            "m" => Some(2),
-            "h" => Some(3),
-            _ => None,
-        }
-    }
-    let lower = name.to_ascii_lowercase();
-    if let Some(r) = rank(&lower) {
-        return (String::new(), r);
-    }
-    if let Some((stem, tag)) = lower.rsplit_once('_')
-        && let Some(r) = rank(tag)
-    {
-        return (stem.to_string(), r);
-    }
-    // Not an LOD variant: its own stem, ranked as full detail.
-    (lower, 3)
-}
-
 /// The authored break index of a prop stem — `BREAK<NN>` chunks are
 /// breakaway pieces (`lod_split` leaves them as `break<NN>` stems).
 /// Returns the index digits verbatim (`BREAK2` → `"2"`, `BREAK01` →
@@ -2454,7 +2415,7 @@ fn emit_strip(b: &mut MeshBuilder, strip: &PkgStrip, col: &mut PropCollision, of
         }
         col.positions.push(p);
     }
-    for t in strip.indices.chunks_exact(3) {
+    for t in strip.indices.as_chunks::<3>().0 {
         b.tri(base + t[0] as u32, base + t[1] as u32, base + t[2] as u32);
         col.tris.push([
             col_base + t[0] as u32,
@@ -2581,16 +2542,7 @@ impl<'a> PropCache<'a> {
         let offset = match offset {
             PropOffset::Verbatim => Vec3::ZERO,
             PropOffset::Bound(v) => v,
-            PropOffset::Ground => {
-                let min_y = pkg
-                    .geometries()
-                    .flat_map(|(_, g)| g.sections.iter())
-                    .flat_map(|s| s.strips.iter())
-                    .flat_map(|s| s.vertices.iter())
-                    .map(|v| v.position[1])
-                    .fold(f32::MAX, f32::min);
-                Vec3::new(0.0, (-min_y).max(0.0), 0.0)
-            }
+            PropOffset::Ground => Vec3::from(stamp_content_offset(&pkg, None)),
         };
         let model = pkg_to_parts(
             &pkg,
@@ -2658,17 +2610,14 @@ struct StampedPath {
 
 /// Placement with the prop's local +X axis yawed about Y to run along
 /// `dir` (authored space, XZ only — R3 rotates about the Y axis alone).
-/// The axis convention matches INST simple placements, verified on
-/// retail London's `wl_buckpalace_l` fence: the heading is the image
-/// of the prop's X axis (which local axis R3's "direction" names is
-/// undocumented, so this is inferred). A degenerate XZ direction
-/// leaves the prop unrotated rather than dropping it.
+/// The axis convention is [`yawed_basis`]'s — shared with the
+/// placement audit so both measure the same orientation.
 fn yawed_transform(origin: [f32; 3], dir: Vec3) -> Mat4 {
-    let d = Vec3::new(dir.x, 0.0, dir.z).normalize_or(Vec3::X);
+    let (x_axis, y_axis, z_axis) = yawed_basis([dir.x, dir.y, dir.z]);
     inst_transform(&inst::InstCoordinate {
-        x_axis: [d.x, 0.0, d.z],
-        y_axis: [0.0, 1.0, 0.0],
-        z_axis: [-d.z, 0.0, d.x],
+        x_axis,
+        y_axis,
+        z_axis,
         origin,
     })
 }
@@ -3019,8 +2968,10 @@ pub struct PropRuleStampReport {
 /// classification as [`stamp_pathset`] — a name that binds a
 /// `tune/banger` record and carries collision becomes a dormant
 /// banger entity, anything else an ordinary static prop. Stamps are
-/// yawed so the prop's +X axis follows the side's walk direction,
-/// matching the directed-pathset convention.
+/// yawed by [`yawed_transform`] so the prop's +X axis follows
+/// `stamp.forward` — the kerb→building-line direction the walk
+/// measures per stamp, which puts the authored −X front (lamp/mast
+/// arms, bench and sign faces) on the carriageway.
 fn stamp_prop_rules(
     commands: &mut Commands,
     cache: &mut PropCache,

@@ -1,107 +1,134 @@
 # Last implementation iteration
 
-- Task ID and title: F03-C.1 — lateral prop-placement audit across all
-  three channels (operator report 2, item 2: "things in the road").
-  The prop-rule channel was already repaired in F03-B.6; INST and
-  `props.pathset` were still unverified, and the report asked for all
-  three checked independently. Selected over queued feature work per
-  the operator-priority policy.
-- Starting commit: `563c34ea7c1313ccff9b78cb4f36f81b85dfb490` on
+- Task ID and title: F03-C.2 — prop-rule stamp orientation repair
+  (operator report 3, item 1: "every stamped prop is rotated 90 degrees
+  clockwise") plus the swept-footprint audit the report's item 2 asked
+  for. Selected over queued feature work per the operator-priority
+  policy.
+- Starting commit: `5e0751a17fc46bf751f04aa6984a947cf30ff1fb` on
   `ralph/night`; tree was clean.
 - Retail install: `/Users/linus/coding/rust-mm2/retail` — read-only,
-  audited below.
+  audited below (fingerprint `fnv1a64:e91e6cd4b2ae30d9`).
+
+## What the defect actually was
+
+The report's code lead (`yawed_transform`) was measured against retail
+data first, per the report's own instruction — and it is *not* the
+defect:
+
+- Pathset `direction` → local +X is verified correct: all 85 sampled
+  `sp_lightstreet_rt_f` line-strip stamps (SF kerb lamp rows) place
+  their local-+Z arm tip over a carriageway, and
+  `sp_barricadeconcl_{l,r}_f`'s 5 m wall segments (authored extending
+  local +X) form continuous barriers — a +Z mapping would comb them
+  perpendicular to the road.
+- Prop-rule props are a different authored convention: every
+  directional kerb prop measured (`sp_lightstreet_f`,
+  `sp_lightbanrb_f`, `sp_traflitdual_f`, `sp_benchwood_f`, sign
+  plates) carries its front/arm on local **−X**, and its
+  `dgBangerData` bound wraps only the pole/base. The walk stamped
+  `forward = side.forward` (the walk direction), so each prop's face
+  pointed a quarter-turn away from the road — exactly the reported
+  symptom.
 
 ## What changed
 
-- `crates/mm2_game/src/props.rs`: new shared `path_stamp_sites`
-  (Points / Directed-pairs / LineStrip expansion, quarter-metre
-  spacing, per-segment restart, final-vertex cap, non-finite skips,
-  odd directed tails dropped) under `MAX_PATHSET_STAMPS = 8192`;
-  new `carriageways` extraction — drivable-region boundary rings +
-  triangulated surfaces from `RoadWithSidewalks`, `DividedRoad`
-  (median excluded), `RoadNoSidewalks`, `RoadFan` and `Crosswalk`
-  attributes; `SidewalkStrip`/facades/medians excluded.
-- `crates/mm2_app/src/city.rs`: `stamped_transforms` now wraps
-  `path_stamp_sites` — runtime and audit share one expansion policy;
-  the duplicated expansion and local stamp cap were removed.
-- `tools/mm2_inspect/src/placement.rs` + `main.rs`: new
-  `mm2-inspect placement <install> [--city] [--strict]` — per city it
-  parses `city/<c>.inst`, `city/<c>/props.pathset` and
-  `propdefs/proprules.csv` + PSDL `prop_rule` bytes, measures every
-  stamped position against the carriageway regions (XZ inside a tri +
-  ±1.0/0.6 m height band), and reports a channel×kind histogram plus
-  the deepest hits with `dy=`/`depth=`. Denominators keep everything:
-  parse failures, unresolved names, skipped labels/decals/`giz_*`,
-  cap overflow, walk issues. In-road counts are *findings*, not
-  failures — retail authors legitimately stamp on these surfaces —
-  so `--strict` exits 2 on failures/issues only.
-- `crates/mm2_game/src/lib.rs`: exports `Carriageway`,
-  `MAX_PATHSET_STAMPS`, `PathStampSite`, `PathStampSites`,
-  `carriageways`, `path_stamp_sites`.
+- `crates/mm2_game/src/props.rs`: `walk_prop_rules` now sets
+  `PropStamp.forward` to the per-stamp kerb→building-line direction
+  from the strip cross-section — `norm_xz(outer − curb)`, falling back
+  to `norm_xz(position − centre)` on the building-line fallback, then
+  the side's own right on degenerate geometry. +X goes building-ward,
+  so the authored −X front lands on the carriageway, and curved kerbs
+  rotate each stamp individually. New shared helpers the audit reuses:
+  `yawed_basis` (the axis images `yawed_transform` builds),
+  `stamp_content_offset` (bound `+CG` / ground `−min_y` lift) and
+  `stamp_space_verts` (best-LOD-per-stem rendered verts, shadow/dmg
+  stand-ins excluded — the same selection `pkg_to_parts` renders and
+  collides).
+- `crates/mm2_formats/src/pkg.rs`: `lod_split` moved here verbatim
+  from `city.rs` (PKG naming is a format concern) so both consumers
+  share it.
+- `crates/mm2_app/src/city.rs`: `yawed_transform` wraps `yawed_basis`
+  (unchanged semantics); `PropCache::build`'s `Ground` arm uses
+  `stamp_content_offset`; `stamp_prop_rules` docs describe the new
+  `forward` contract.
+- `tools/mm2_inspect/src/placement.rs`: the placement audit now also
+  sweeps each pathset/prop-rule stamp's `stamp_space_verts` through
+  the stamp's basis and tests every vertex against the carriageway
+  regions — street-level band (`≤2.5 m` above the surface) deeper than
+  0.15 m counts `body_in_road`, the overhead band (`≤8 m`) counts
+  `overhang`. Per-channel `swept`/`body-in-road`/`overhang` counters,
+  channel×kind and channel×prop histograms, deepest-first hit list.
+  INST keeps the origin-only check (verbatim authored transforms —
+  nothing to sweep for orientation). Origin and footprint results
+  stay separate; both are findings, not failures. PKG/banger
+  resolution mirrors `PropCache`/`BangerDefs` exactly (lowercased key,
+  `geometry/<n>` → `<n>` fallback, `tune/banger` CG with the
+  `from_record` finite-clean).
+- `docs/research/proprules.md`, `docs/research/pathset.md`,
+  `docs/original-rules.md` (UNK-20/UNK-21 narrowed) updated with the
+  measured evidence.
 
 ## Tests
 
-- `props.rs` (new): Points/Directed/LineStrip expansion, odd-tail
-  drop, per-segment spacing restart, budget capping + counted
-  overflow, zero-spacing and unknown kinds; carriageway extraction on
-  synthetic PSDLs — divided road → two strips with the median
-  excluded, fans/crosswalks/no-sidewalk roads, malformed attrs skipped.
-- `placement.rs` (new): flat/sloped surface classification, height
-  band bounds, degenerate tris, depth-from-edge, stamps vs issues
-  accounting.
-- Existing `city.rs` pathset tests re-verify orientation/budget
-  through the shared impl.
+- `props.rs`: straight-room right/left forwards now assert `[1,0,0]` /
+  `[-1,0,0]` (kerb→building-line), multi-room the same; curved-kerb
+  test asserts each stamp faces its own cross-section; the no-kerb
+  fallback test asserts stamps aim away from the room centre. Pathset
+  directed-strip tests still assert the authored direction.
+- `placement.rs`: new `footprint_catches_the_rotation_the_origin_
+  misses` — a bench-shaped prop yawed across the kerb registers
+  `body_in_road` (0.5 m deep) while the origin check sees nothing, and
+  yawed the authored way it does not; pole-top vertex exercises the
+  overhang band.
+- 42 test suites, 0 failures.
 
 ## Commands actually run and results
 
-- `cargo fmt --all -- --check` — PASS (after a first failure on the
-  new code; fixed by `cargo fmt`).
+- `cargo fmt --all -- --check` — PASS (after `cargo fmt` on new code).
 - `cargo clippy --workspace --all-targets --all-features -- -D
-  warnings` — PASS (after fixing a redundant closure + a needless
-  lifetime).
-- `cargo test --workspace` — PASS, all suites green, 0 failures.
-- `mm2-inspect placement <retail>` — exit 0. London (3224 regions):
-  inst 1997 stamps/15 in-road, pathset 87 paths→1188/185, prop-rule
-  415 rooms→5118/209. SF (2871 regions): inst 3763/6, pathset
-  144→925/34 (+31 skipped decal paths), prop-rule 397→5028/0. 449
-  findings, 0 failures, 67 issues (pre-existing prop-rule walk counts:
-  65 0xx `road_rooms` + unreached rooms). `--strict` → exit 2 on those
-  issues.
-- `mm2 --mm2-path <retail> --city london --spawn 0.4,5.5,-720,0
-  --frames 90 --screenshot /tmp/placement-spawn.png` — the operator's
-  spawn reproduced: bollards across a pedestrianised street, kerbside
-  lamps/dressing, no tree in the carriageway (the known `vpbug` rear-
-  windscreen texture defect visible, unrelated).
-- Divided-road captures `/tmp/placement-divroad{,2}.png` — the flagged
-  `sp_tree1_s` sits at a median taper meeting a junction; plausible
-  authored dressing, not a placement bug.
-
-## Findings
-
-- **No systematic lateral defect in any channel.** `MIRROR_Z` is off;
-  INST stamps verbatim authored transforms; pathset/prop-rule stamps
-  land where the authored data puts them.
-- The props the operator saw in the road are authored there: the spawn
-  area is a pedestrianised street encoded `RoadNoSidewalks` (trees/
-  bollards/crates on the walkable surface by design); SF `cp_banr*`
-  banner rows pivot at road surface mid-span (depth to 10 m, dy≈0 —
-  mesh hangs overhead); INST hits are authored facades/bridges over
-  and under drivable surfaces; prop-rule `RoadNoSidewalks` hits are
-  kerb-edge stamps at depth≈0.
-- Flagged for review (deepest non-banner hits): 2 `sp_stackboxes_4_l`
-  ~1.2–1.8 m inside london `RoadWithSidewalks` room 570, 2 `sp_tree1_s`
-  ~1–3.9 m inside london `DividedRoad` rooms 937/952 (visually checked:
-  median taper at a junction), 5 crosswalk stamps.
+  warnings` — PASS. **Pre-existing gate failure repaired first:** the
+  rust-1.98 `chunks_exact_to_as_chunks` lint fired on 14 untouched
+  sites in `psdl.rs`/`tex.rs`/`props.rs`/`model.rs`/`city.rs`/
+  `analyze_city.rs`; all converted to `as_chunks::<N>().0`
+  mechanically. Also folded `measure_footprint`'s 8 args into a
+  `FootprintStamp` struct for `too_many_arguments`.
+- `cargo test --workspace` — PASS, all suites green.
+- `mm2-inspect placement <retail>` — exit 0. Combined: 449 in-road
+  origins, **488 body-in-road footprint hits**, 67 issues (pre-existing
+  walk counts), 0 failures. Per channel:
+  - london prop-rule: 5118 swept, **243 body-in-road** (vs **574** on
+    the A/B-reverted walk-facing orientation), 2542 overhang (vs
+    ~1700 — lamp arms now reach over carriageways).
+  - sf prop-rule: 5028 swept, **2 body-in-road** (vs **108**), 2573
+    overhang (vs 747).
+  - Residuals classify as authored: `RoadNoSidewalks`/`RoadFan` plaza
+    dressing (`sp_lightpark_f`, `sp_phonebooth_l`, `sp_benchwood_f`,
+    `sp_can_royal_l`), freeway supports in DividedRoad medians,
+    kerb-edge grazes.
+- Deterministic before/after captures on sf room 444's lamp rows
+  (`--cam=-1470,38,392,90,-8`, `--frames 90`): `/tmp/lamps_before.png`
+  (walk-facing — arms parallel to the kerb, as the operator reported)
+  vs `/tmp/lamps_after.png` (kerb→building-line — arms reach over the
+  carriageway from both kerbs). Both are render-verified.
 
 ## Still open
 
-- The audit measures stamp *positions*; pathset expansion positions
-  along a segment remain an inferred policy (UNK-20 — stamps could be
-  denser/sparser than retail along the same authored path) and
-  asymmetric-prop yaw is not frame-compared.
-- The 5 hard-surface flagged hits above are authored-intent
-  ambiguities pending a human look, not proven defects.
-- Per report 2's caution, F03/F04 do not roll up to `checked` on this
-  evidence; strike/settle evidence stays provisional.
-- F03-C remainder: race cleanup, mod replacement end-to-end.
+- The residual footprint hits are findings, not proven defects — the
+  plaza-dressing/kerb-graze classification is plausible but each
+  cluster could still hide an authored-intent mismatch; the hit list +
+  histograms are there for a human pass.
+- Whether the original composes the identical prop-rule basis from the
+  same cross-section stays inferred — the format carries no
+  orientation field (UNK-21 narrowed accordingly).
+- `yawed_basis` asserts +X→direction for pathset *and* prop-rule; the
+  measured evidence is strong (85/85 lamp arms, barricade walls) but
+  it is still a single-city prop sample — a frame-by-frame comparison
+  against retail screenshots is not yet done.
+- Gate repair folded in (the `chunks_exact` lint appeared between
+  `5e0751a`'s check and this iteration — toolchain drift, not this
+  diff's code). If the runner pins an older toolchain, `as_chunks`
+  needs Rust ≥ 1.88 — current stable is 1.98.1.
+- F03-C remainder: race cleanup, mod replacement end-to-end,
+  UNK-20 expansion density.
 - Candidate pending external check.

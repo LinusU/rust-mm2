@@ -261,6 +261,42 @@ impl Pkg {
     }
 }
 
+/// LOD rank of a geometry chunk name: `*_vl` < `*_l` < `*_m` < `*_h` —
+/// higher rank = higher detail. Names without a recognized LOD suffix rank
+/// as `*_h`; only the last `_`-separated component is interpreted so real
+/// part names are preserved.
+/// Split a PKG geometry name into the stem its LOD variants share and the
+/// rank of this variant (higher is more detailed).
+///
+/// MM2 writes the variants either as `<stem>_<tag>` or as a bare tag —
+/// `el_unionsquare_f` names its four geometries exactly `H`, `M`, `L` and
+/// `VL`. Splitting on `_` alone leaves a bare tag as its own stem, so the
+/// four variants stop competing and every one of them is drawn: at Union
+/// Square the coarse 26-vertex shell has no cut for the garage entrance
+/// and buries it under grass, and elsewhere the stacked shells z-fight.
+pub fn lod_split(name: &str) -> (String, u8) {
+    fn rank(tag: &str) -> Option<u8> {
+        match tag {
+            "vl" => Some(0),
+            "l" => Some(1),
+            "m" => Some(2),
+            "h" => Some(3),
+            _ => None,
+        }
+    }
+    let lower = name.to_ascii_lowercase();
+    if let Some(r) = rank(&lower) {
+        return (String::new(), r);
+    }
+    if let Some((stem, tag)) = lower.rsplit_once('_')
+        && let Some(r) = rank(tag)
+    {
+        return (stem.to_string(), r);
+    }
+    // Not an LOD variant: its own stem, ranked as full detail.
+    (lower, 3)
+}
+
 /// Whether a chunk name marks a geometry section (`*VL`, `*L`, `*M`, `*H`).
 fn is_geometry_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();

@@ -129,8 +129,28 @@ can still falsify any of them):
   A side with no matching strip falls back to stamping on the
   building-line arc — on the sidewalk edge, never inside the road —
   and is counted (`sides_no_kerb`; 0 on both retail cities).
-- A stamp faces its walk direction; the app yaws the prop's +X axis
-  along it (same convention as directed pathset stamps).
+- A stamp's `forward` is the kerb→building-line direction measured
+  from the strip cross-section at the stamp's own offset — per stamp,
+  so a curved kerb rotates each prop with the road edge. The app yaws
+  the prop's +X axis onto it (same basis as directed pathset stamps).
+  On the building-line fallback (kerb == outer) the stamp aims away
+  from the room centre; a degenerate room keeps the walk's own right.
+
+  Orientation evidence (measured on retail PKGs + placements,
+  2026-09-21, `tools/mm2_inspect` placement sweep): every directional
+  kerb prop is authored front/arm-first along local **−X** —
+  `sp_lightstreet_f`'s arm reaches ≈ −7 m in x, `sp_traflitdual_f`'s
+  mast arm ≈ −11.6 m, `sp_benchwood_f`'s seat faces −X, sign plates
+  face −X — while each prop's `dgBangerData` bound wraps only the
+  pole/base. Yawing +X building-ward therefore puts the prop's face
+  on the carriageway; yawing +X along the walk direction (the earlier
+  guess) turns every stamped prop a quarter turn — the operator's
+  "streetlight arms don't overhang the road" report. The A/B
+  footprint audit confirms it: with +X→building-line, london prop-rule
+  body-in-road hits drop 574 → 243 and sf 108 → 2 (the residuals are
+  authored plaza dressing on `RoadNoSidewalks`/`RoadFan` and
+  kerb-edge grazes), while overhead overhangs (lamp arms reaching
+  over the carriageway) rise from ~1 700 → 2 542 / 747 → 2 573.
 
 `props.csv` group meaning is likewise unverified: `Races` groups the
 props race events place (barricades, cones, parked cars) plus some
@@ -158,7 +178,8 @@ beyond bookkeeping is unknown.
 
 `mm2_game::props::walk_prop_rules` resolves every `road_rooms` entry
 to its crossing runs and emits `PropStamp`s (room, side, def, chosen
-variant, authored-space position + walk direction, per-def ordinal);
+variant, authored-space position + kerb→building-line facing,
+per-def ordinal);
 `load_city` spawns them through the shared `PropCache` with the same
 bound/unbound classification as pathset stamps — bound names become
 dormant banger entities, the rest ordinary static props.
@@ -184,8 +205,10 @@ Retail (2026-09-20, `city {london,sf}` headless + screenshots):
   freeway parapets / london Trafalgar Square phone booths, trees,
   bollards); the Regent's Park bend stamps now sit on the kerb line
   outside the BAI lane polylines (was: trees/lamps inside the
-  carriageway). Orientation of asymmetric props not yet compared
-  against the original frame-by-frame.
+  carriageway). Prop orientation is now measured (see the walk-policy
+  bullet): a 2026-09-21 before/after capture on sf room 444's lamp
+  rows shows the arms over the carriageway where the old walk-facing
+  yaw ran them parallel to the kerb.
 - Side note: `texture/p_parkmeter_f.tex` declares 7 mips on a 32×32 —
   the TEX decoder now clamps `mip_level_count` to the size-supported
   maximum and warns (was a hard wgpu validation error once prop-rule
@@ -193,6 +216,10 @@ Retail (2026-09-20, `city {london,sf}` headless + screenshots):
 
 Still unverified (UNK-21, narrowed): the original's left/right label
 assignment, whether `start`/`distance`/`maxUse` scope is per room or
-per path, the variant-pick rule, `minLerp`≠`maxLerp` behaviour, prop
-yaw convention, the encoded non-room `road_rooms` record kind, and
-the `props.csv` `Races` group's consumer.
+per path, the variant-pick rule, `minLerp`≠`maxLerp` behaviour, the
+encoded non-room `road_rooms` record kind, and the `props.csv`
+`Races` group's consumer. (Prop yaw is no longer open in the "which
+axis" sense — the −X-front convention is measured — but it remains
+inferred that the original composes the same basis from the same
+cross-section; the file format carries no explicit orientation
+field.)

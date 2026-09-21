@@ -245,7 +245,7 @@ fn geometry_mesh(geo: &PkgGeometry, warnings: &mut Vec<String>, part: &str) -> V
                         .unwrap_or([0.0, 0.0]),
                 );
             }
-            for t in strip.indices.chunks_exact(3) {
+            for t in strip.indices.as_chunks::<3>().0 {
                 g.indices.extend(t.iter().map(|&i| base + i as u32));
             }
         }

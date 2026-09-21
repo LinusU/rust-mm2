@@ -279,8 +279,8 @@ impl TexFile {
                 }
             }
             PixelFormat::A1R5G5B5 => {
-                for px in mip.data.chunks_exact(2) {
-                    let v = u16::from_le_bytes([px[0], px[1]]);
+                for px in mip.data.as_chunks::<2>().0 {
+                    let v = u16::from_le_bytes(*px);
                     let a = if v & 0x8000 != 0 { 0xff } else { 0 };
                     let r = expand5((v >> 10) & 0x1f);
                     let g = expand5((v >> 5) & 0x1f);
@@ -294,12 +294,12 @@ impl TexFile {
                 }
             }
             PixelFormat::A8I8 => {
-                for px in mip.data.chunks_exact(2) {
+                for px in mip.data.as_chunks::<2>().0 {
                     out.extend_from_slice(&[px[1], px[1], px[1], px[0]]);
                 }
             }
             PixelFormat::Rgb888 => {
-                for px in mip.data.chunks_exact(3) {
+                for px in mip.data.as_chunks::<3>().0 {
                     out.extend_from_slice(&[px[0], px[1], px[2], 0xff]);
                 }
             }

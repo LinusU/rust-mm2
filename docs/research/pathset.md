@@ -113,7 +113,13 @@ are inferred and tracked under UNK-20):
 - `Points`: one unrotated prop per vertex.
 - `Directed`: one prop per pair at the first point, yawed about Y so
   local +X runs toward the second (the INST heading convention — R3
-  does not name the axis).
+  does not name the axis). Measured on retail 2026-09-21: sf's
+  `sp_lightstreet_rt_f` kerb rows are `LineStrip`s and the lamp's arm
+  extends local +Z — under the +X→direction reading all 85 sampled
+  arm tips land over a carriageway (the arm lands on `left(dir)`),
+  and `sp_barricadeconcl_*_f`'s 5 m wall segment — authored extending
+  local +X — forms continuous barriers under the same reading where
+  a +Z→direction yaw would comb them perpendicular to the road.
 - `LineStrip`: each segment fills at `spacing` intervals from its
   start (t = 0, s, 2s, … < len — the shared vertex is stamped by the
   following segment's t = 0), the final vertex caps the row, stamps

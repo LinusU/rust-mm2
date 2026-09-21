@@ -419,7 +419,7 @@ fn main() {
             if refs.len() >= 4 && refs[0] == refs[1] && refs[0] <= 1 {
                 continue; // end cap
             }
-            for s in refs.chunks_exact(2) {
+            for s in refs.as_chunks::<2>().0 {
                 let a = psdl.vertices.get(s[0] as usize);
                 let b = psdl.vertices.get(s[1] as usize);
                 if let (Some(a), Some(b)) = (a, b) {
@@ -498,7 +498,7 @@ fn main() {
     type Tri2D = ([f32; 2], [f32; 2], [f32; 2], usize);
     let mut region_tris: Vec<Tri2D> = Vec::new();
     for m in &import.meshes {
-        for tri in m.indices.chunks_exact(3) {
+        for tri in m.indices.as_chunks::<3>().0 {
             let a = m.positions[tri[0] as usize];
             let b = m.positions[tri[1] as usize];
             let c = m.positions[tri[2] as usize];
@@ -617,7 +617,12 @@ fn main() {
         let Some(rgba) = tex.decode_rgba(0) else {
             continue;
         };
-        let transparent = rgba.chunks_exact(4).filter(|px| px[3] < 128).count();
+        let transparent = rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|px| px[3] < 128)
+            .count();
         let total = rgba.len() / 4;
         if transparent > 0 {
             alpha_tex += 1;
@@ -658,7 +663,7 @@ fn main() {
         let rgba = tex.decode_rgba(0).unwrap();
         let n = rgba.len() / 4;
         let (mut sr, mut sg, mut sb, mut sa) = (0u64, 0u64, 0u64, 0u64);
-        for px in rgba.chunks_exact(4) {
+        for px in rgba.as_chunks::<4>().0 {
             sr += px[0] as u64;
             sg += px[1] as u64;
             sb += px[2] as u64;
@@ -678,7 +683,7 @@ fn main() {
         // Dump mip0 as a PPM for visual inspection.
         let path = format!("/tmp/tex_{name}.ppm");
         let mut out = format!("P6\n{} {}\n255\n", tex.header.width, tex.header.height).into_bytes();
-        for px in rgba.chunks_exact(4) {
+        for px in rgba.as_chunks::<4>().0 {
             out.extend_from_slice(&px[..3]);
         }
         std::fs::write(&path, out).unwrap();

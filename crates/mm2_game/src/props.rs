@@ -50,8 +50,15 @@
 //! - `file1`–`file4` variants are picked by a deterministic hash of
 //!   (path, room, side, def, index); the original's `RandomSeed`
 //!   selection is unrecovered.
-//! - A stamp faces its walk direction (`forward`); the app yaws the
-//!   prop's +X axis along it like a directed pathset stamp.
+//! - A stamp's `forward` is the direction the prop's +X axis is yawed
+//!   to — the kerb→building-line direction measured from the strip
+//!   cross-section at the stamp (inferred; `docs/research/
+//!   proprules.md`). Retail kerb props are authored front/arm-first
+//!   along local −X — lamp and traffic-light mast arms reach −X
+//!   metres off the pole while the `dgBangerData` bound wraps the
+//!   pole alone — so +X building-ward puts the prop's face on the
+//!   carriageway and, on a curved kerb, rotates each stamp with the
+//!   road edge.
 //!
 //! The module also hosts the two shared placement helpers the audit
 //! tooling reuses: [`path_stamp_sites`] expands a `PTH1` path into the
@@ -60,8 +67,11 @@
 //! authored drivable surfaces — the reference a stamped position is
 //! checked against when auditing "prop in the road" reports.
 
+use std::collections::HashMap;
+
 use mm2_formats::{
     pathset::{Path, PathKind},
+    pkg::{Pkg, lod_split},
     proprules::{PropDefs, PropRuleSide, PropRules},
     psdl::{AttributeType, Psdl, PsdlRoom, RoomAttribute},
 };
@@ -92,7 +102,11 @@ pub struct PropStamp {
     pub index: u32,
     /// Placement position, authored coordinates.
     pub position: [f32; 3],
-    /// Walk direction the prop faces (XZ-normalized).
+    /// Direction the prop's local +X axis is yawed to (XZ-normalized):
+    /// the kerb→building-line direction at the stamp, so directional
+    /// props — authored front/arm-first along local −X on every
+    /// measured retail kerb prop (lamps, traffic-light masts, benches,
+    /// sign plates) — face the carriageway.
     pub forward: [f32; 3],
 }
 
@@ -159,6 +173,13 @@ fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
 fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
     let d = sub(a, b);
     (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+}
+
+/// `v` normalized on the XZ plane, or `None` when it has no
+/// horizontal component to normalize.
+fn norm_xz(v: [f32; 3]) -> Option<[f32; 3]> {
+    let l = (v[0] * v[0] + v[2] * v[2]).sqrt();
+    (l > 1e-6).then(|| [v[0] / l, 0.0, v[2] / l])
 }
 
 /// Deterministic variant pick — FNV-1a over the stamp's identity.
@@ -343,7 +364,7 @@ fn kerb_strips(room: &PsdlRoom) -> Vec<KerbStrip> {
                 };
                 let (mut kl, mut ol, mut kr, mut or_) =
                     (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-                for s in refs.chunks_exact(4) {
+                for s in refs.as_chunks::<4>().0 {
                     ol.push(s[0]);
                     kl.push(s[1]);
                     kr.push(s[2]);
@@ -365,7 +386,7 @@ fn kerb_strips(room: &PsdlRoom) -> Vec<KerbStrip> {
                 };
                 let (mut kl, mut ol, mut kr, mut or_) =
                     (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-                for s in refs.chunks_exact(6) {
+                for s in refs.as_chunks::<6>().0 {
                     ol.push(s[0]);
                     kl.push(s[1]);
                     kr.push(s[4]);
@@ -390,7 +411,7 @@ fn kerb_strips(room: &PsdlRoom) -> Vec<KerbStrip> {
                     continue;
                 }
                 let (mut kerb, mut outer) = (Vec::new(), Vec::new());
-                for s in refs.chunks_exact(2) {
+                for s in refs.as_chunks::<2>().0 {
                     kerb.push(s[0]);
                     outer.push(s[1]);
                 }
@@ -401,7 +422,7 @@ fn kerb_strips(room: &PsdlRoom) -> Vec<KerbStrip> {
                     continue;
                 };
                 let (mut l, mut r) = (Vec::new(), Vec::new());
-                for s in refs.chunks_exact(2) {
+                for s in refs.as_chunks::<2>().0 {
                     l.push(s[0]);
                     r.push(s[1]);
                 }
@@ -746,6 +767,23 @@ pub fn walk_prop_rules(psdl: &Psdl, defs: &PropDefs, rules: &PropRules) -> PropW
                         let s = def.start + k as f32 * def.distance;
                         let (curb, outer) = strip_at(&side.kerb, &side.outer, &lens, s);
                         let position = lerp3(curb, outer, lerp);
+                        // `forward` is the direction the prop's +X axis
+                        // is yawed to. Every directional kerb prop
+                        // measured on retail (lamp/mast arms, bench and
+                        // sign faces) is authored facing local −X, so
+                        // +X must run kerb→building-line for the face
+                        // to end up on the carriageway — walking the
+                        // side's travel direction instead leaves every
+                        // prop turned a quarter turn (operator
+                        // play-test report 3). The strip cross-section
+                        // gives that direction per stamp, so stamps
+                        // follow a curved kerb. On the building-line
+                        // fallback (kerb == outer) the stamp aims away
+                        // from the room centre; a degenerate room keeps
+                        // the walk's own right (road stays on its left).
+                        let forward = norm_xz(sub(outer, curb))
+                            .or_else(|| norm_xz(sub(position, centre)))
+                            .unwrap_or([side.forward[2], 0.0, -side.forward[0]]);
                         let pkg = &def.files[(variant_hash(pi, rid, side.which, &def.name, k)
                             as usize)
                             % def.files.len()];
@@ -758,7 +796,7 @@ pub fn walk_prop_rules(psdl: &Psdl, defs: &PropDefs, rules: &PropRules) -> PropW
                             pkg: pkg.clone(),
                             index: k as u32,
                             position,
-                            forward: side.forward,
+                            forward,
                         });
                         stamped_room = true;
                     }
@@ -871,7 +909,9 @@ pub fn path_stamp_sites(path: &Path, budget: usize) -> PathStampSites {
         Some(PathKind::Directed) => {
             let pairs: Vec<([f32; 3], [f32; 3])> = path
                 .points
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .filter(|pair| {
                     pair.iter()
                         .all(|p| p.position.iter().all(|c| c.is_finite()))
@@ -969,6 +1009,82 @@ fn line_strip_sites(path: &Path, budget: usize) -> PathStampSites {
         }
     }
     PathStampSites { sites: out, capped }
+}
+
+/// The authored-space basis a stamp facing `dir` gets: the prop's
+/// local +X axis yawed about Y onto `dir`'s XZ projection — the INST
+/// simple-placement convention (`docs/research/inst.md`, verified on
+/// `wl_buckpalace_l`'s fence; confirmed for directed pathset stamps by
+/// the retail `sp_lightstreet_rt_f` kerb rows, whose +Z lamp arms land
+/// over the carriageway only under this reading). +Z lands on
+/// `left(dir)`; a degenerate XZ direction leaves the prop unrotated.
+/// `mm2_app` wraps the returned (x, y, z) axis images into its
+/// placement transform; the placement audit sweeps prop footprints
+/// through the same basis.
+pub fn yawed_basis(dir: [f32; 3]) -> ([f32; 3], [f32; 3], [f32; 3]) {
+    let x = norm_xz(dir).unwrap_or([1.0, 0.0, 0.0]);
+    (x, [0.0, 1.0, 0.0], [-x[2], 0.0, x[0]])
+}
+
+/// The content offset a stamped prop carries onto its authored point
+/// — measured on retail `dgBangerData` records
+/// (`docs/research/banger.md` § "The `Size`/`CG` bound convention"): a
+/// bound prop's mesh is authored centred at the bound's `CG`, so
+/// content lands `+CG` above the stamp point; an unbound prop is
+/// ground-lifted by `−min_y` so its lowest authored vertex rests on
+/// the point.
+pub fn stamp_content_offset(pkg: &Pkg, bound_cg: Option<[f32; 3]>) -> [f32; 3] {
+    if let Some(cg) = bound_cg {
+        return cg;
+    }
+    let min_y = pkg
+        .geometries()
+        .flat_map(|(_, g)| g.sections.iter())
+        .flat_map(|s| s.strips.iter())
+        .flat_map(|s| s.vertices.iter())
+        .map(|v| v.position[1])
+        .fold(f32::MAX, f32::min);
+    [0.0, (-min_y).max(0.0), 0.0]
+}
+
+/// The prop's rendered-geometry vertices in stamp space — best LOD per
+/// stem with `shadow`/`dmg` stand-ins excluded, every vertex offset by
+/// [`stamp_content_offset`]. This is the selection `mm2_app` renders
+/// and collides; the placement audit sweeps it through each stamp's
+/// basis as the prop's world-space footprint.
+pub fn stamp_space_verts(pkg: &Pkg, bound_cg: Option<[f32; 3]>) -> Vec<[f32; 3]> {
+    let offset = stamp_content_offset(pkg, bound_cg);
+    let mut best: HashMap<String, (u8, &str)> = HashMap::new();
+    for (name, _geo) in pkg.geometries() {
+        let (stem, rank) = lod_split(name);
+        let entry = best.entry(stem).or_insert((rank, name));
+        if rank > entry.0 {
+            *entry = (rank, name);
+        }
+    }
+    let mut out = Vec::new();
+    for (name, geo) in pkg.geometries() {
+        let (stem, _) = lod_split(name);
+        // Shadow/damage stand-ins are not rendered prop surface.
+        if stem.contains("shadow") || stem.contains("dmg") {
+            continue;
+        }
+        if best.get(&stem).map(|(_, n)| *n) != Some(name) {
+            continue; // a better-LOD chunk owns this stem
+        }
+        for section in &geo.sections {
+            for strip in &section.strips {
+                for v in &strip.vertices {
+                    out.push([
+                        v.position[0] + offset[0],
+                        v.position[1] + offset[1],
+                        v.position[2] + offset[2],
+                    ]);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// One drivable region extracted from a room's road attributes: the
@@ -1073,8 +1189,8 @@ pub fn carriageways(psdl: &Psdl) -> Vec<Carriageway> {
                     let Some(refs) = counted_refs(attr, 4) else {
                         continue;
                     };
-                    let a: Vec<u16> = refs.chunks_exact(4).map(|s| s[1]).collect();
-                    let b: Vec<u16> = refs.chunks_exact(4).map(|s| s[2]).collect();
+                    let a: Vec<u16> = refs.as_chunks::<4>().0.iter().map(|s| s[1]).collect();
+                    let b: Vec<u16> = refs.as_chunks::<4>().0.iter().map(|s| s[2]).collect();
                     strip(rid, attr.kind, &a, &b, &mut out);
                 }
                 AttributeType::DividedRoad => {
@@ -1084,10 +1200,10 @@ pub fn carriageways(psdl: &Psdl) -> Vec<Carriageway> {
                     let Some(refs) = divided_refs(attr) else {
                         continue;
                     };
-                    let rl_out: Vec<u16> = refs.chunks_exact(6).map(|s| s[1]).collect();
-                    let rl_in: Vec<u16> = refs.chunks_exact(6).map(|s| s[2]).collect();
-                    let rr_in: Vec<u16> = refs.chunks_exact(6).map(|s| s[3]).collect();
-                    let rr_out: Vec<u16> = refs.chunks_exact(6).map(|s| s[4]).collect();
+                    let rl_out: Vec<u16> = refs.as_chunks::<6>().0.iter().map(|s| s[1]).collect();
+                    let rl_in: Vec<u16> = refs.as_chunks::<6>().0.iter().map(|s| s[2]).collect();
+                    let rr_in: Vec<u16> = refs.as_chunks::<6>().0.iter().map(|s| s[3]).collect();
+                    let rr_out: Vec<u16> = refs.as_chunks::<6>().0.iter().map(|s| s[4]).collect();
                     strip(rid, attr.kind, &rl_out, &rl_in, &mut out);
                     strip(rid, attr.kind, &rr_in, &rr_out, &mut out);
                 }
@@ -1095,8 +1211,8 @@ pub fn carriageways(psdl: &Psdl) -> Vec<Carriageway> {
                     let Some(refs) = counted_refs(attr, 2) else {
                         continue;
                     };
-                    let a: Vec<u16> = refs.chunks_exact(2).map(|s| s[0]).collect();
-                    let b: Vec<u16> = refs.chunks_exact(2).map(|s| s[1]).collect();
+                    let a: Vec<u16> = refs.as_chunks::<2>().0.iter().map(|s| s[0]).collect();
+                    let b: Vec<u16> = refs.as_chunks::<2>().0.iter().map(|s| s[1]).collect();
                     strip(rid, attr.kind, &a, &b, &mut out);
                 }
                 AttributeType::Crosswalk => {
@@ -1322,7 +1438,10 @@ mod tests {
         assert!(near(walk.stamps[0].position, [29., 0., 2.]));
         assert!(near(walk.stamps[1].position, [29., 0., 8.]));
         assert!(walk.stamps[0..2].iter().all(lamp));
-        assert!(near(walk.stamps[0].forward, [0., 0., 1.]));
+        // Stamps face kerb→building-line (+X maps there; the prop's
+        // authored −X front then lies on the carriageway): +x on the
+        // right-hand x≈30 building line.
+        assert!(near(walk.stamps[0].forward, [1., 0., 0.]));
         assert_eq!(walk.stamps[0].pkg, "pb");
 
         // The left side walks backward from the exit crossing: start=5
@@ -1330,7 +1449,7 @@ mod tests {
         assert_eq!(walk.stamps[2].side, PropRuleSide::Left);
         assert!(near(walk.stamps[2].position, [1., 0., 15.]));
         assert!(near(walk.stamps[3].position, [1., 0., 5.]));
-        assert!(near(walk.stamps[2].forward, [0., 0., -1.]));
+        assert!(near(walk.stamps[2].forward, [-1., 0., 0.]));
     }
 
     #[test]
@@ -1410,7 +1529,7 @@ mod tests {
             .collect();
         assert!(near(r2_right[0].position, [29., 0., 22.]));
         assert!(near(r2_right[1].position, [29., 0., 28.]));
-        assert!(near(r2_right[0].forward, [0., 0., 1.]));
+        assert!(near(r2_right[0].forward, [1., 0., 0.]));
         let r2_left: Vec<&PropStamp> = walk
             .stamps
             .iter()
@@ -1418,7 +1537,7 @@ mod tests {
             .collect();
         assert!(near(r2_left[0].position, [1., 0., 35.]));
         assert!(near(r2_left[1].position, [1., 0., 25.]));
-        assert!(near(r2_left[0].forward, [0., 0., -1.]));
+        assert!(near(r2_left[0].forward, [-1., 0., 0.]));
     }
 
     #[test]
@@ -1507,6 +1626,11 @@ mod tests {
         assert!(near(walk.stamps[0].position, [22., 0., 20.]));
         // s = 1.5·seg → kerb (21,30) → outer (30,30) → (25.5,30).
         assert!(near(walk.stamps[1].position, [25.5, 0., 30.]));
+        // The stamp's facing is the strip's kerb→outer direction at
+        // its own offset — +x here — not the side's walk direction
+        // (+z): a prop authored front-first along −X faces the road.
+        assert!(near(walk.stamps[0].forward, [1., 0., 0.]));
+        assert!(near(walk.stamps[1].forward, [1., 0., 0.]));
     }
 
     #[test]
@@ -1542,6 +1666,14 @@ mod tests {
         assert_eq!(walk.stamps.len(), 2);
         assert!(near(walk.stamps[0].position, [30., 0., 2.]));
         assert!(near(walk.stamps[1].position, [30., 0., 8.]));
+        // No strip means no kerb→outer direction either: the fallback
+        // aims the stamp away from the room's crossing midpoint —
+        // outward toward the building line, not along the walk.
+        let centre = [15., 0., 10.];
+        for s in &walk.stamps {
+            let want = norm_xz(sub(s.position, centre)).unwrap();
+            assert!(near(s.forward, want));
+        }
     }
 
     // ------------------------------------------------------------------

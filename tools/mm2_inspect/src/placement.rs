@@ -32,20 +32,35 @@
 //! band hit is hard evidence, a `RoadFan`/`RoadNoSidewalks` hit may be
 //! authored plaza dressing.
 //!
+//! The stamped channels additionally sweep each prop's rendered
+//! geometry ([`stamp_space_verts`]) through the stamp's basis —
+//! [`yawed_basis`], the same transform the runtime builds — and test
+//! every vertex against the carriageway. A vertex inside a region
+//! within the street-level band is footprint evidence ("the bench
+//! sticks into the road" — the check that sees orientation, which the
+//! origin test cannot); vertices in the overhead band record a
+//! legitimate overhang (lamp arms, banners) as a separate count. INST
+//! placements are verbatim authored transforms — their orientation is
+//! not synthesized — so they keep the origin check alone.
+//!
 //! `--strict` exits nonzero on missing/failed expected sources,
-//! unresolved names and channel issues. In-road counts are measured
-//! findings, not failures — strict stays meaningful on retail data.
+//! unresolved names and channel issues. In-road and footprint counts
+//! are measured findings, not failures — strict stays meaningful on
+//! retail data.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use mm2_assets::Vfs;
+use mm2_formats::banger::BangerData;
 use mm2_formats::inst::{self, InstPlacement};
 use mm2_formats::pathset::Pathset;
 use mm2_formats::pkg::Pkg;
 use mm2_formats::proprules::{PropDefs, PropRules};
 use mm2_formats::psdl::{AttributeType, Psdl};
-use mm2_game::{Carriageway, MAX_PATHSET_STAMPS, carriageways, path_stamp_sites};
+use mm2_game::{
+    Carriageway, MAX_PATHSET_STAMPS, carriageways, path_stamp_sites, stamp_space_verts, yawed_basis,
+};
 
 use crate::TEXTURE_EXTS;
 
@@ -59,6 +74,18 @@ const BAND_BELOW: f32 = 1.0;
 const BAND_ABOVE: f32 = 0.6;
 /// In-road hits listed per city; the total is always printed.
 const MAX_HITS_SHOWN: usize = 24;
+/// Footprint band ceiling above the surface: verts below this are
+/// street-level prop body — inside a region, they are the "bench in
+/// the road" evidence (a car is ~2 m tall; 2.5 m clears one).
+const BODY_TOP: f32 = 2.5;
+/// Overhang band ceiling: verts between [`BODY_TOP`] and this inside a
+/// region are overhead content (lamp arms, banners) — a separate
+/// count, not a footprint hit.
+const OVERHANG_TOP: f32 = 8.0;
+/// A vert less than this deep inside a region is kerb-edge contact,
+/// not an incursion — bounds and ring vertices share float error at
+/// the shared edge.
+const FOOTPRINT_EPS: f32 = 0.15;
 
 /// A carriageway region plus its XZ bounds for cheap rejection.
 struct Region {
@@ -180,6 +207,16 @@ struct Channel {
     stamps: usize,
     /// Stamps inside a carriageway region at surface height.
     in_road: usize,
+    /// Stamps whose rendered geometry was swept through the stamp
+    /// basis (stamped channels only).
+    swept: usize,
+    /// Swept stamps whose street-level verts reach a carriageway
+    /// region past [`FOOTPRINT_EPS`] — the prop's body sits on the
+    /// drivable surface.
+    body_in_road: usize,
+    /// Swept stamps with verts over a region in the overhead band —
+    /// legitimate overhangs (lamp arms, banners), not hits.
+    overhang: usize,
     /// Items classified but never stamped (labels, decals, animated,
     /// unresolved names, cap-overflow).
     skipped: usize,
@@ -209,6 +246,144 @@ fn on_road(p: [f32; 3], regions: &[Region]) -> Option<(&Region, f32)> {
         }
     }
     None
+}
+
+/// Cache of prop name → stamp-space rendered verts ([`stamp_space_verts`]
+/// — best-LOD, bound `CG`/ground-lift offset applied), resolved exactly
+/// like the runtime's `PropCache` plus the `tune/banger` record that
+/// chooses the offset convention.
+struct GeomCache<'a> {
+    vfs: &'a Vfs,
+    cache: HashMap<String, Option<Vec<[f32; 3]>>>,
+}
+
+impl GeomCache<'_> {
+    fn get(&mut self, name: &str) -> Option<&Vec<[f32; 3]>> {
+        // The runtime's PropCache resolves the lowercased name; match.
+        let key = name.to_ascii_lowercase();
+        if !self.cache.contains_key(&key) {
+            let built = self.build(&key);
+            self.cache.insert(key.clone(), built);
+        }
+        self.cache.get(&key).and_then(|o| o.as_ref())
+    }
+
+    fn build(&self, name: &str) -> Option<Vec<[f32; 3]>> {
+        let res = self
+            .vfs
+            .resolve_preferred(&format!("geometry/{name}"), &["pkg"])
+            .or_else(|| self.vfs.resolve_preferred(name, &["pkg"]))?;
+        let pkg = Pkg::parse(&self.vfs.read(&res).ok()?).ok()?;
+        let cg = self
+            .vfs
+            .read_path(&format!("tune/banger/{name}.dgbangerdata"))
+            .ok()
+            .and_then(|(b, _)| BangerData::parse(&String::from_utf8_lossy(&b)).ok())
+            // Same clean `BangerDefinition::from_record` applies —
+            // `MIRROR_Z` is off, so `mirrored_cg` is the identity.
+            .map(|d| d.cg.map(|c| if c.is_finite() { c } else { 0.0 }));
+        let verts = stamp_space_verts(&pkg, cg);
+        (!verts.is_empty()).then_some(verts)
+    }
+}
+
+/// One stamp's placement for the footprint sweep: `axes` is the
+/// stamp's basis images ([`yawed_basis`] for a directed stamp,
+/// identity for an unrotated one), `verts` its stamp-space rendered
+/// geometry.
+struct FootprintStamp<'a> {
+    channel: &'static str,
+    detail: String,
+    position: [f32; 3],
+    axes: ([f32; 3], [f32; 3], [f32; 3]),
+    verts: &'a [[f32; 3]],
+}
+
+/// Sweep one stamp's rendered geometry through its basis and test the
+/// verts against the carriageway — the orientation check the origin
+/// test cannot see. A vert inside a region at street level past
+/// [`FOOTPRINT_EPS`] deep counts the stamp `body_in_road`; one in the
+/// overhead band counts `overhang` instead.
+fn measure_footprint(
+    stamp: FootprintStamp<'_>,
+    regions: &[Region],
+    out: &mut Channel,
+    hits: &mut Vec<Hit>,
+) {
+    out.swept += 1;
+    let (x, y, z) = stamp.axes;
+    let position = stamp.position;
+    let mut min = [f32::INFINITY; 2];
+    let mut max = [f32::NEG_INFINITY; 2];
+    let world = |v: &[f32; 3]| -> [f32; 3] {
+        [
+            position[0] + v[0] * x[0] + v[1] * y[0] + v[2] * z[0],
+            position[1] + v[0] * x[1] + v[1] * y[1] + v[2] * z[1],
+            position[2] + v[0] * x[2] + v[1] * y[2] + v[2] * z[2],
+        ]
+    };
+    for v in stamp.verts {
+        let w = world(v);
+        min[0] = min[0].min(w[0]);
+        min[1] = min[1].min(w[2]);
+        max[0] = max[0].max(w[0]);
+        max[1] = max[1].max(w[2]);
+    }
+    let candidates: Vec<&Region> = regions
+        .iter()
+        .filter(|r| {
+            min[0] <= r.max[0] && max[0] >= r.min[0] && min[1] <= r.max[1] && max[1] >= r.min[1]
+        })
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+    // Deepest street-level vert carries the finding; overhead verts
+    // only flip the overhang flag.
+    let mut deepest: Option<(f32, f32, &Region)> = None;
+    let mut overhang = false;
+    for v in stamp.verts {
+        let w = world(v);
+        for r in &candidates {
+            if w[0] < r.min[0] || w[0] > r.max[0] || w[2] < r.min[1] || w[2] > r.max[1] {
+                continue;
+            }
+            let mut inside = false;
+            for t in &r.tris {
+                if let Some(sy) = tri_surface_y(w, t) {
+                    inside = true;
+                    let dy = w[1] - sy;
+                    if (-BAND_BELOW..=BODY_TOP).contains(&dy) {
+                        let dep = r.depth(w);
+                        if deepest.is_none_or(|(d, _, _)| dep > d) {
+                            deepest = Some((dep, dy, r));
+                        }
+                    } else if (BODY_TOP..=OVERHANG_TOP).contains(&dy) {
+                        overhang = true;
+                    }
+                    break;
+                }
+            }
+            if inside {
+                break; // regions do not overlap on the drivable surface
+            }
+        }
+    }
+    if let Some((dep, dy, r)) = deepest.filter(|(d, _, _)| *d > FOOTPRINT_EPS) {
+        out.body_in_road += 1;
+        hits.push(Hit {
+            channel: stamp.channel,
+            detail: stamp.detail,
+            pos: stamp.position,
+            room: r.room,
+            kind: r.kind,
+            dy,
+            depth: dep,
+        });
+    }
+    if overhang {
+        out.overhang += 1;
+    }
 }
 
 /// Measure one batch of stamped positions for `channel`, recording
@@ -242,17 +417,28 @@ fn measure(
     }
 }
 
+/// The basis an unrotated stamp gets — `yawed_basis` on a degenerate
+/// direction returns the same identity axes.
+const IDENTITY_BASIS: ([f32; 3], [f32; 3], [f32; 3]) =
+    ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]);
+
 /// Run the audit for one city against a parsed PSDL and its
-/// extracted carriageway regions.
+/// extracted carriageway regions. `hits` collects in-road origins,
+/// `fp_hits` swept-footprint body hits.
 fn audit_city(
     vfs: &Vfs,
     city: &str,
     psdl: &Psdl,
     regions: &[Region],
     hits: &mut Vec<Hit>,
+    fp_hits: &mut Vec<Hit>,
 ) -> (BTreeMap<&'static str, Channel>, Vec<String>) {
     let mut channels: BTreeMap<&'static str, Channel> = BTreeMap::new();
     let mut failures: Vec<String> = Vec::new();
+    let mut geoms = GeomCache {
+        vfs,
+        cache: HashMap::new(),
+    };
     let inst = channels.entry("inst").or_default();
     inst.expected = 1;
     let inst_path = format!("city/{city}.inst");
@@ -349,6 +535,24 @@ fn audit_city(
                             pathset,
                             hits,
                         );
+                        // Swept footprint — same yawed basis the
+                        // runtime builds for each site.
+                        if let Some(verts) = geoms.get(&name) {
+                            for (si, s) in sites.sites.iter().enumerate() {
+                                measure_footprint(
+                                    FootprintStamp {
+                                        channel: "pathset",
+                                        detail: format!("{}:{pi}:{si} {name}", res.logical),
+                                        position: s.position,
+                                        axes: s.forward.map(yawed_basis).unwrap_or(IDENTITY_BASIS),
+                                        verts,
+                                    },
+                                    regions,
+                                    pathset,
+                                    fp_hits,
+                                );
+                            }
+                        }
                     }
                 }
                 Err(e) => {
@@ -421,6 +625,25 @@ fn audit_city(
                 rules,
                 hits,
             );
+            // Swept footprint through each stamp's measured facing —
+            // the prop's −X front toward the carriageway.
+            for s in &walk.stamps {
+                let Some(verts) = geoms.get(&s.pkg) else {
+                    continue;
+                };
+                measure_footprint(
+                    FootprintStamp {
+                        channel: "prop-rule",
+                        detail: format!("path {} room {} {:?} {}", s.path, s.room, s.side, s.pkg),
+                        position: s.position,
+                        axes: yawed_basis(s.forward),
+                        verts,
+                    },
+                    regions,
+                    rules,
+                    fp_hits,
+                );
+            }
         }
         (d, r) => {
             for res in [d.err(), r.err()].into_iter().flatten() {
@@ -459,6 +682,7 @@ pub fn placement(
     let mut issues: Vec<String> = Vec::new();
     let mut any_stamps = false;
     let mut any_in_road = 0usize;
+    let mut any_body = 0usize;
 
     for c in &cities {
         println!("city {c}");
@@ -494,17 +718,21 @@ pub fn placement(
         );
 
         let mut hits = Vec::new();
-        let (channels, ch_failures) = audit_city(&vfs, c, &psdl, &regions, &mut hits);
+        let mut fp_hits = Vec::new();
+        let (channels, ch_failures) = audit_city(&vfs, c, &psdl, &regions, &mut hits, &mut fp_hits);
         failures.extend(ch_failures);
         for (name, ch) in &channels {
             println!(
-                "  {name}: {}/{} sources ok ({} failed), {} items, {} stamps, {} in-road, {} skipped, {} capped, {} issues",
+                "  {name}: {}/{} sources ok ({} failed), {} items, {} stamps, {} in-road, {} swept, {} body-in-road, {} overhang, {} skipped, {} capped, {} issues",
                 ch.found,
                 ch.expected,
                 ch.failed,
                 ch.items,
                 ch.stamps,
                 ch.in_road,
+                ch.swept,
+                ch.body_in_road,
+                ch.overhang,
                 ch.skipped,
                 ch.capped,
                 ch.issues.len(),
@@ -512,6 +740,7 @@ pub fn placement(
             issues.extend(ch.issues.iter().cloned());
             any_stamps |= ch.stamps > 0;
             any_in_road += ch.in_road;
+            any_body += ch.body_in_road;
         }
         // In-road totals by channel × region kind: `RoadFan` regions
         // cover junctions but also authored plazas where dressing is
@@ -563,11 +792,71 @@ pub fn placement(
         if hits.len() > MAX_HITS_SHOWN {
             println!("    … +{} more in-road stamps", hits.len() - MAX_HITS_SHOWN);
         }
+        // Swept-footprint body hits — the prop's street-level mesh on
+        // the carriageway, deepest penetration first. These are what
+        // an orientation defect looks like to the driver.
+        let mut fp_by_ck: BTreeMap<(&'static str, String), usize> = BTreeMap::new();
+        for h in &fp_hits {
+            *fp_by_ck
+                .entry((h.channel, format!("{:?}", h.kind)))
+                .or_default() += 1;
+        }
+        if !fp_by_ck.is_empty() {
+            let detail: Vec<String> = fp_by_ck
+                .iter()
+                .map(|((ch, k), n)| format!("{ch}/{k}={n}"))
+                .collect();
+            println!("  body-in-road by channel/kind: {}", detail.join(" "));
+        }
+        // …and by channel×prop — the hit list's last token is the
+        // PKG — so a systematic defect shows as a family, not a
+        // position.
+        let mut fp_by_prop: BTreeMap<(&'static str, String), usize> = BTreeMap::new();
+        for h in &fp_hits {
+            if let Some(name) = h.detail.rsplit(' ').next() {
+                *fp_by_prop.entry((h.channel, name.to_string())).or_default() += 1;
+            }
+        }
+        if !fp_by_prop.is_empty() {
+            let mut by_prop: Vec<(&(&'static str, String), &usize)> = fp_by_prop.iter().collect();
+            by_prop.sort_by(|a, b| b.1.cmp(a.1));
+            let detail: Vec<String> = by_prop
+                .iter()
+                .take(16)
+                .map(|((ch, k), n)| format!("{ch}/{k}={n}"))
+                .collect();
+            println!("  body-in-road by prop (top): {}", detail.join(" "));
+        }
+        fp_hits.sort_by(|a, b| b.depth.total_cmp(&a.depth));
+        if !fp_hits.is_empty() {
+            println!("  body-in-road footprint hits ({})", fp_hits.len());
+        }
+        for h in fp_hits.iter().take(MAX_HITS_SHOWN) {
+            println!(
+                "    body-in-road [{ch}] {det} pos=({x:.2},{y:.2},{z:.2}) room {room} {kind:?} dy={dy:+.2} depth={depth:.2}",
+                ch = h.channel,
+                det = h.detail,
+                x = h.pos[0],
+                y = h.pos[1],
+                z = h.pos[2],
+                room = h.room,
+                kind = h.kind,
+                dy = h.dy,
+                depth = h.depth,
+            );
+        }
+        if fp_hits.len() > MAX_HITS_SHOWN {
+            println!(
+                "    … +{} more footprint hits",
+                fp_hits.len() - MAX_HITS_SHOWN
+            );
+        }
     }
 
     println!(
-        "  {} in-road stamps across audited channels; {} issue(s), {} failure(s)",
+        "  {} in-road stamps, {} body-in-road footprint hits across audited channels; {} issue(s), {} failure(s)",
         any_in_road,
+        any_body,
         issues.len(),
         failures.len(),
     );
@@ -717,5 +1006,68 @@ mod tests {
         assert_eq!(ch.issues.len(), 1);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].channel, "inst");
+    }
+
+    #[test]
+    fn footprint_catches_the_rotation_the_origin_misses() {
+        let r = [flat_region(0.0)];
+        // A bench-shaped prop: 0.6 m deep along local ±X, 2 m along
+        // ±Z, waist-high — plus one vertex up a 5 m pole.
+        let verts: Vec<[f32; 3]> = vec![
+            [-0.3, 0.0, -1.0],
+            [0.3, 0.0, -1.0],
+            [-0.3, 0.6, -1.0],
+            [0.3, 0.6, -1.0],
+            [-0.3, 0.0, 1.0],
+            [0.3, 0.0, 1.0],
+            [-0.3, 0.6, 1.0],
+            [0.3, 0.6, 1.0],
+            [0.0, 5.0, -1.6],
+        ];
+        let mut ch = Channel::default();
+        let mut hits = Vec::new();
+        // Stamped just off the road's z = 2 edge. With the prop's long
+        // axis yawed across the kerb (local +Z → world +Z) the body
+        // reaches half a metre into the carriageway — the quarter-turn
+        // defect the operator reported — while the pole-top vertex
+        // overhangs in the overhead band.
+        measure_footprint(
+            FootprintStamp {
+                channel: "prop-rule",
+                detail: "bench".to_string(),
+                position: [5.0, 0.0, 2.5],
+                axes: yawed_basis([1.0, 0.0, 0.0]),
+                verts: &verts,
+            },
+            &r,
+            &mut ch,
+            &mut hits,
+        );
+        assert_eq!(ch.swept, 1);
+        assert_eq!(ch.body_in_road, 1);
+        assert_eq!(ch.overhang, 1);
+        assert_eq!(hits.len(), 1);
+        assert!((hits[0].depth - 0.5).abs() < 1e-4, "{}", hits[0].depth);
+        // Turned the authored way — long axis along the kerb — nothing
+        // but the pole's overhead vertex touches the region XZ.
+        measure_footprint(
+            FootprintStamp {
+                channel: "prop-rule",
+                detail: "bench".to_string(),
+                position: [5.0, 0.0, 2.5],
+                axes: yawed_basis([0.0, 0.0, 1.0]),
+                verts: &verts,
+            },
+            &r,
+            &mut ch,
+            &mut hits,
+        );
+        assert_eq!(ch.swept, 2);
+        assert_eq!(ch.body_in_road, 1, "no new body hit");
+        assert_eq!(
+            ch.overhang, 1,
+            "pole top lands at x≈6.6, z=2.5 — off the road"
+        );
+        assert_eq!(hits.len(), 1);
     }
 }
