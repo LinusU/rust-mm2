@@ -1091,9 +1091,16 @@ fn events(
         }
         // F16-B: the normalized session reward table — every authored
         // row becomes an event-bound or milestone rule, or a named
-        // diagnostic (AC05: no silently dropped unlock rule).
+        // diagnostic (AC05: no silently dropped unlock rule). The
+        // authored-row count is printed against the accounted total so
+        // the audit states its denominator, and a city whose rows are
+        // *all* diagnostics still reports them.
         let rewards = mm2_content::reward_table(&cat);
-        if !rewards.per_event.is_empty() || !rewards.milestones.is_empty() {
+        let authored_rows =
+            cat.events.iter().map(|e| e.rewards.len()).sum::<usize>() + cat.milestone_rewards.len();
+        let accounted =
+            rewards.per_event.len() + rewards.milestones.len() + rewards.diagnostics.len();
+        if authored_rows > 0 || accounted > 0 {
             let sizes = rewards
                 .family_sizes
                 .iter()
@@ -1101,12 +1108,17 @@ fn events(
                 .collect::<Vec<_>>()
                 .join(" ");
             println!(
-                "  reward table: {} event-bound + {} milestone rules ({}), {} diagnostics",
+                "  reward table: {authored_rows} authored rows → {} event-bound + {} milestone rules ({}), {} diagnostics",
                 rewards.per_event.len(),
                 rewards.milestones.len(),
                 sizes,
                 rewards.diagnostics.len(),
             );
+            if accounted != authored_rows {
+                failures.push(format!(
+                    "{city}: reward coverage lost rows ({authored_rows} authored, {accounted} accounted)"
+                ));
+            }
             for d in &rewards.diagnostics {
                 println!("    reward note: {d}");
             }

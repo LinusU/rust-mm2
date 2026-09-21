@@ -402,6 +402,27 @@ fn local_player_id(app: &mut App) -> PlayerId {
         .id
 }
 
+/// Drive the player vehicle down the authored course to a real finish —
+/// the full-throttle profile the `advance_race` path resolves into a
+/// `Finished` result and the progression consumer records.
+fn drive_to_finish(app: &mut App) {
+    let car = app
+        .world_mut()
+        .query_filtered::<Entity, With<mm2_game::PlayerVehicle>>()
+        .iter(app.world())
+        .next()
+        .unwrap();
+    for f in 0..900 {
+        if let Some(mut input) = app.world_mut().get_mut::<VehicleInput>(car) {
+            *input = VehicleInput {
+                throttle: if f > 200 { 1.0 } else { 0.0 },
+                ..default()
+            };
+        }
+        app.update();
+    }
+}
+
 /// Mint and record a result for `participant` through the session's own
 /// id allocator — the same identity `advance_race` produces, so the
 /// consumer sees an authoritative record, not a test-shaped stand-in.
@@ -445,21 +466,7 @@ fn an_authored_finish_grants_the_event_unlocks() {
         "the event session carries its reward surface"
     );
 
-    let car = app
-        .world_mut()
-        .query_filtered::<Entity, With<mm2_game::PlayerVehicle>>()
-        .iter(app.world())
-        .next()
-        .unwrap();
-    for f in 0..900 {
-        if let Some(mut input) = app.world_mut().get_mut::<VehicleInput>(car) {
-            *input = VehicleInput {
-                throttle: if f > 200 { 1.0 } else { 0.0 },
-                ..default()
-            };
-        }
-        app.update();
-    }
+    drive_to_finish(&mut app);
 
     let saved = saved_progress(&mut app, &store);
     let record = saved
@@ -787,5 +794,125 @@ fn a_gated_vehicle_selection_reports_its_note() {
     assert_eq!(
         vehicle_gate_note(&vfs, &sandbox.profile, "vppaint", 3),
         None
+    );
+}
+
+/// F16-AC01: two drivers share one install. A's finish persists on A's
+/// file across a restart — a fresh `ProfileStore` on the same directory
+/// is a new process's only view — and none of it leaks into B: B binds
+/// with no progress, no unlocks and no remembered selections, and the
+/// reward A earned still gates for B. B's own finish then lands on B
+/// alone; A's file is untouched (spec req 6's no-leak rule).
+#[test]
+fn two_profiles_isolate_progress_across_a_restart() {
+    let tmp = install();
+    let d = tmp.path();
+    // Catalog metadata for the reward targets so the per-profile gate
+    // difference is observable through the production garage surface.
+    write(d, "tune/vpreward.info", "Description=Reward\nColors=R\n");
+    write(
+        d,
+        "tune/vppaint.info",
+        "Description=Painted\nColors=P0|P1|P2|P3\n",
+    );
+
+    let store_dir = tempfile::tempdir().unwrap();
+    let (a_id, b_id) = {
+        let store = ProfileStore::open(store_dir.path()).unwrap();
+        let a = bound_profile(&store, ProfileKind::Standard);
+        let a_id = a.profile.id.clone();
+        // B exists before A's run — isolation is between live profiles,
+        // not creation order.
+        let b_id = store
+            .create("driver", Difficulty::Amateur, ProfileKind::Standard)
+            .unwrap()
+            .id;
+
+        // Run 1: A binds and drives the authored course to a real
+        // finish through the production race/progression path.
+        let (vfs, car) = selected_car(d);
+        let mut app = test_app(event_config(), vfs, car, Some(a));
+        app.update();
+        drive_to_finish(&mut app);
+        let saved = saved_progress(&mut app, &store);
+        assert!(
+            saved
+                .events
+                .iter()
+                .any(|r| r.key.stem == "race0" && r.is_beaten()),
+            "A's finish records the beaten event"
+        );
+        assert_eq!(saved.unlocks.len(), 2, "A earns both authored grants");
+        (a_id, b_id)
+    };
+
+    // The restart: the app and the store handle are gone; a reopened
+    // store sees only what the files hold.
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let a_saved = store.load(&a_id).unwrap().profile;
+    assert_eq!(a_saved.progress.unlocks.len(), 2);
+    assert_eq!(
+        a_saved.selections.vehicle,
+        Some(mm2_game::VehicleChoice {
+            id: "vpt".to_string(),
+            paint: 0
+        }),
+        "A's session persisted its driven vehicle"
+    );
+
+    // Run 2: B binds fresh. No progress, no unlocks, and none of A's
+    // remembered selections carried over.
+    let b = mm2_app::profile::resolve(&store, &ProfileRequest::Select(b_id.as_str().to_string()))
+        .unwrap()
+        .expect("B binds");
+    assert!(b.profile.progress.events.is_empty());
+    assert!(b.profile.progress.unlocks.is_empty());
+    assert_eq!(
+        b.profile.selections,
+        mm2_game::ProfileSelections::default(),
+        "B must not inherit A's remembered selections"
+    );
+    // The grant A earned opens the gate for A only.
+    {
+        use mm2_app::profile::{VehicleGateNote, vehicle_gate_note};
+        let vfs = vfs_of(d);
+        assert_eq!(
+            vehicle_gate_note(&vfs, &b.profile, "vpreward", 0),
+            Some(VehicleGateNote::Locked),
+            "A's earned car stays gated for B"
+        );
+        assert_eq!(vehicle_gate_note(&vfs, &a_saved, "vpreward", 0), None);
+    }
+
+    // Run 3: B drives the same event to its own finish — the record
+    // and grants land on B alone.
+    let (vfs, car) = selected_car(d);
+    let mut app = test_app(event_config(), vfs, car, Some(b));
+    app.update();
+    drive_to_finish(&mut app);
+
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let b_saved = store.load(&b_id).unwrap().profile;
+    assert!(
+        b_saved
+            .progress
+            .events
+            .iter()
+            .any(|r| r.key.stem == "race0" && r.is_beaten()),
+        "B's own finish records on B"
+    );
+    assert_eq!(
+        b_saved.progress.unlocks.len(),
+        2,
+        "B earns the same grants independently"
+    );
+    let a_after = store.load(&a_id).unwrap().profile;
+    assert_eq!(
+        a_after.progress, a_saved.progress,
+        "B's session must not touch A's progress"
+    );
+    assert_eq!(
+        a_after.selections, a_saved.selections,
+        "B's session must not touch A's selections"
     );
 }

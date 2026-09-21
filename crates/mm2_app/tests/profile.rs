@@ -403,6 +403,46 @@ fn recovered_backup_heals_the_main_file() {
     assert_eq!(reload.profile.name, "anna");
 }
 
+/// The interrupted-write leg of F16-AC04 through the app: a crash
+/// between the flushed `.tmp` and its rename leaves a *complete,
+/// newer* document orphaned beside the older main. `resolve` must
+/// recover that copy — it is the freshest authoritative state — and
+/// heal the main file at bind, same as the `.bak` path.
+#[test]
+fn an_interrupted_save_recovers_through_the_bind() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(tmp.path()).unwrap();
+    let mut p = store
+        .create("anna", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    store.save(&mut p).unwrap(); // main holds revision 2, .bak revision 1
+
+    // Simulate the crash window: a third save flushed its `.tmp` (the
+    // complete revision-3 document) but died before the rename, so the
+    // main file still holds revision 2.
+    let main = std::fs::read_to_string(tmp.path().join("driver-0.json")).unwrap();
+    let orphaned = main.replacen("\"revision\": 2", "\"revision\": 3", 1);
+    assert_ne!(main, orphaned, "the fixture must bump the revision");
+    std::fs::write(tmp.path().join("driver-0.json.tmp"), orphaned).unwrap();
+
+    let slot = bound(&store, ProfileRequest::Select("driver-0".to_string()));
+    assert!(
+        slot.recovered_from_backup,
+        "the orphaned tmp must win over the stale main"
+    );
+    // The bind-time heal re-saves the recovered document, so the bound
+    // profile already carries the bumped revision.
+    assert_eq!(slot.profile.revision, 4, "revision 3 recovered + healed");
+
+    // The heal already ran: a fresh load reads the main file cleanly.
+    let reload = store.load(&slot.profile.id).unwrap();
+    assert!(!reload.recovered_from_backup);
+    assert_eq!(reload.profile.revision, 4);
+    // The stale main's content is gone for good — the pre-crash
+    // document was superseded, not preserved as truth.
+    assert_eq!(reload.profile.name, "anna");
+}
+
 /// `choose_launch` precedence: `--car`/`--paint`/`--pro` beat the
 /// remembered selections; without them the profile's vehicle, paint and
 /// rank apply.

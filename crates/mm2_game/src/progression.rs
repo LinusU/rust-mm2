@@ -47,9 +47,9 @@ pub enum Unlock {
     /// `VariantNum` 0 — the vehicle itself becomes selectable.
     Vehicle(String),
     /// `VariantNum` ≠ 0 — a paint job for the named vehicle. The
-    /// authored variant number is kept verbatim; whether it is a
-    /// 0-based paint index or a 1-based count is unverified (the
-    /// header only documents the 0 = car case).
+    /// authored variant number is the zero-based `Colors`/paint index —
+    /// measured on retail (vpvwcup variant 5/6 land on "Team Angel"/
+    /// "Team MS", the documented cup paints; DSN-16).
     Paint {
         /// Vehicle catalog id the paint belongs to.
         car: String,
