@@ -121,13 +121,19 @@ impl Checkpoint {
 }
 
 /// A starting slot: a pose the producer places a participant at.
-/// `yaw_deg` keeps the authored angle verbatim — its convention is
-/// inferred (same `a` column as [`Checkpoint::heading_deg`]).
+/// `yaw_deg` is a heading in the *vehicle-yaw* convention — forward is
+/// `(−sin a, −cos a)` in XZ, so the value converts to a spawn yaw with
+/// `to_radians()` directly. That is measured, not inferred: the
+/// `_strtpnts` `a` column and the `.opp` row-0 heading both author it
+/// this way (retail `cir1_strtpnts` ≈ +92° faces the grid's −X course),
+/// while the waypoint `a` column
+/// ([`Checkpoint::heading_deg`]) is a course *bearing* — the same
+/// column name, exactly 180° apart (the UNK-16 split).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RaceStart {
     /// Authored slot position.
     pub position: Vec3,
-    /// Authored heading in degrees.
+    /// Heading in vehicle-yaw degrees.
     pub yaw_deg: f32,
 }
 

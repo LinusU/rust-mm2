@@ -276,8 +276,8 @@ fn start_slots(event: &CatalogEvent, rows: &[mm2_formats::waypoints::Waypoint]) 
     // point the authored data guarantees is on the course — backing
     // off along the tangent can leave the drivable surface (london
     // `blitz6`'s line sits on an elevated deck; 10 m behind it is
-    // past the edge, over a void). The authored `a` convention is
-    // unverified for facing, so the tangent supplies it.
+    // past the edge, over a void). The waypoint `a` column is a
+    // bearing, not a facing (UNK-16 split), so the tangent supplies it.
     let line = Vec3::new(
         rows[0].position[0],
         rows[0].position[1],
@@ -291,16 +291,18 @@ fn start_slots(event: &CatalogEvent, rows: &[mm2_formats::waypoints::Waypoint]) 
     let d = (next - line).normalize_or_zero();
     vec![RaceStart {
         position: line,
-        // Store in the authored `a` convention: forward = (sin a, cos a)
-        // in XZ (see `Checkpoint::forward`).
-        yaw_deg: d.x.atan2(d.z).to_degrees(),
+        // `yaw_deg` is the vehicle-yaw convention: forward =
+        // (−sin a, −cos a) in XZ — the tangent's bearing + 180°.
+        yaw_deg: (-d.x).atan2(-d.z).to_degrees(),
     }]
 }
 
 /// `_strtpnts` rows as start slots — only SF circuit records ship
 /// these on retail (F11-A); row 0 is the player slot by convention
-/// (inferred, `WPT-3`/`UNK-17`). Angles stay verbatim — their
-/// convention is the same unverified `a` column (`UNK-16`).
+/// (inferred, `WPT-3`/`UNK-17`). Angles stay verbatim — the column is
+/// measured as a vehicle-yaw heading (the grid's ~+92° faces the −X
+/// course on `cir1_strtpnts`), *not* the waypoint `a` bearing — the
+/// two `a` columns sit exactly 180° apart (UNK-16 split).
 fn authored_start_slots(event: &CatalogEvent) -> Option<Vec<RaceStart>> {
     let file = event.records.iter().find_map(|r| {
         if let RecordContent::StartPoints(f) = &r.content {

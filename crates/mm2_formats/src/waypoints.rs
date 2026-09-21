@@ -64,8 +64,10 @@ pub struct WaypointFile {
 pub struct StartPoint {
     /// Authored `x,y,z` position.
     pub position: [f32; 3],
-    /// Fourth column — the start heading in degrees (inferred from
-    /// retail values; unverified).
+    /// Fourth column — the slot heading in degrees, in the vehicle-yaw
+    /// convention (measured on retail `cir*_strtpnts`: ~+92° faces the
+    /// grid's −X course). It is *not* the waypoint `a` convention —
+    /// that column is a course bearing, exactly 180° apart.
     pub angle_deg: f32,
     /// Remaining authored columns (all 0 on retail data).
     pub aux: Vec<i64>,

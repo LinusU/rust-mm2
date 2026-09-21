@@ -41,13 +41,14 @@
 //!
 //! Slot assignment is provisional (UNK-17): authored `_strtpnts` slot
 //! `index + 1` when the event ships a grid (slot 0 is the player by
-//! convention), else the route's first point, else a designed stagger
-//! behind the player. The `.opp` first row is a route anchor — verified
-//! retail data puts it near, not on, the start line — so it is a spawn
-//! fallback, not an asserted original grid slot. Facing always comes
-//! from the route's first leg, since the `_strtpnts` `a` column's
-//! convention is unverified (UNK-16: measured `cir1_strtpnts` headings
-//! disagree with the waypoint `a` convention by ~180°).
+//! convention), else the `.opp` row-0 staging position, else a designed
+//! stagger behind the player. Facing is authored wherever the position
+//! came from: the slot's `yaw_deg` on a grid, the `.opp` row-0 staging
+//! heading on a route anchor — both measured as the vehicle-yaw
+//! convention (the `_strtpnts` `a` column and the `.opp` `brake` field
+//! agree; the waypoint `a` column is the opposite bearing — the UNK-16
+//! split, now measured). Which of the two authored start sets the
+//! original consumes stays open under UNK-17.
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
@@ -249,10 +250,16 @@ pub fn route_target(route: &OpponentRoute, mut next: usize, pos: Vec3) -> (usize
 ///
 /// Position, provisional (UNK-17): authored `_strtpnts` slot `index + 1`
 /// when the event ships a grid (slot 0 is the player), else the route's
-/// first point, else a staggered line behind the player along its
-/// reverse heading. Facing: toward the first route point at least a
-/// car-length away — the route's first leg is verified course
-/// direction, unlike the `a` columns whose conventions are open.
+/// row-0 staging position, else a staggered line behind the player
+/// along its reverse heading.
+///
+/// Facing follows the position source, all authored: a grid slot's own
+/// `yaw_deg` (measured vehicle-yaw convention — the `a` column faces
+/// the course, not away from it), else the `.opp` row-0 staging
+/// heading (the mislabelled `brake` column — measured as the same yaw
+/// convention on 592/612 retail files). Only a route with no authored
+/// heading falls back to the first-leg direction it used before, and
+/// a route-less entry inherits the player's yaw.
 pub fn spawn_pose(
     definition: &RaceDefinition,
     index: usize,
@@ -260,15 +267,13 @@ pub fn spawn_pose(
     player_pos: Vec3,
     player_yaw: f32,
 ) -> (Vec3, f32) {
-    let position = definition
-        .start_slots
-        .get(index + 1)
-        .map(|s| s.position)
-        .or_else(|| {
-            spec.route
-                .as_ref()
-                .and_then(|r| r.points.first().map(|p| p.position))
-        })
+    if let Some(slot) = definition.start_slots.get(index + 1) {
+        return (slot.position, slot.yaw_deg.to_radians());
+    }
+    let position = spec
+        .route
+        .as_ref()
+        .and_then(|r| r.points.first().map(|p| p.position))
         .unwrap_or_else(|| {
             let back = Vec3::new(-player_yaw.sin(), 0.0, -player_yaw.cos());
             player_pos - back * (FALLBACK_SPACING * (index + 1) as f32)
@@ -276,18 +281,46 @@ pub fn spawn_pose(
     let yaw = spec
         .route
         .as_ref()
-        .and_then(|r| {
-            r.points.iter().map(|p| p.position).find(|p| {
-                let d = *p - position;
-                d.x * d.x + d.z * d.z > 4.0
+        .and_then(|r| r.start_heading_deg().map(f32::to_radians))
+        .or_else(|| {
+            spec.route.as_ref().and_then(|r| {
+                r.points
+                    .iter()
+                    .map(|p| p.position)
+                    .find(|p| {
+                        let d = *p - position;
+                        d.x * d.x + d.z * d.z > 4.0
+                    })
+                    .map(|target| {
+                        let f = target - position;
+                        (-f.x).atan2(-f.z)
+                    })
             })
-        })
-        .map(|target| {
-            let f = target - position;
-            (-f.x).atan2(-f.z)
         })
         .unwrap_or(player_yaw);
     (position, yaw)
+}
+
+/// The chase index a fresh spawn should start from: the first route
+/// point that is both ahead of the spawn facing and not already
+/// reached. An `.opp` line's early anchors can sit *behind* its
+/// authored staging heading — the staged start joins the driving line
+/// mid-leg (measured on retail `circuit1-a-0`: heading −X while row 1
+/// sits +X behind it) — and chasing one U-turns the car off its
+/// authored facing. Scanning is bounded to the authored order; a point
+/// left behind is picked up on the next pass through a closed route.
+pub fn initial_route_index(route: &OpponentRoute, pos: Vec3, yaw: f32) -> usize {
+    let fwd = Vec3::new(-yaw.sin(), 0.0, -yaw.cos());
+    let mut next = 0;
+    while next < route.points.len() {
+        let rel = route.points[next].position - pos;
+        let ahead = rel.x * fwd.x + rel.z * fwd.z > 0.0;
+        if ahead && !point_reached(&route.points, next, pos) {
+            break;
+        }
+        next += 1;
+    }
+    next
 }
 
 /// Spawn every roster entry that loads as a real participant: its own
@@ -330,6 +363,14 @@ pub fn spawn_opponents(
             }
         };
         let (mut pos, yaw) = spawn_pose(definition, i, spec, player_pos, player_yaw);
+        // First chase index along the authored facing — early anchors
+        // behind the staged heading are left for the next pass, not
+        // chased off the spawn line.
+        let next = spec
+            .route
+            .as_ref()
+            .map(|r| initial_route_index(r, pos, yaw))
+            .unwrap_or(0);
         // The same hull clearance the player spawn applies: the
         // collider's lowest point off the ground plus a settle margin.
         let hull_min_y = def
@@ -355,7 +396,7 @@ pub fn spawn_opponents(
                 RaceProgress::new(definition),
                 OpponentDriver {
                     spec: spec.clone(),
-                    next: 0,
+                    next,
                     recovery: ScriptedBot::default(),
                     pass_entity: None,
                     pass_side: 0.0,

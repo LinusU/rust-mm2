@@ -206,6 +206,63 @@ fn authored_event_loads_into_countdown() {
     assert_eq!(markers, 4);
 }
 
+/// Authored `_strtpnts` yaw is vehicle yaw (measured: the `a` column's
+/// ~92° faces the retail `cir1` −X course). The player slot's heading
+/// must reach the spawn verbatim — reading it as the waypoint bearing
+/// turned the car +180° and spawned it backward on SF's authored grids.
+#[test]
+fn authored_strtpnts_yaw_faces_the_player_spawn() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(
+        d,
+        "race/testcity/mmcircuitdata.csv",
+        format!("{MM_HEADER}\n{ROW}\n"),
+    );
+    write(d, "race/testcity/circuit0.aimap", "#\n");
+    write(
+        d,
+        "race/testcity/circuit0waypoints.csv",
+        format!(
+            "{WAYPOINTS}{}{}{}{}",
+            waypoint_row(60.0, COURSE_Z),
+            waypoint_row(110.0, COURSE_Z),
+            waypoint_row(140.0, COURSE_Z),
+            waypoint_row(165.0, COURSE_Z),
+        ),
+    );
+    // Retail-style grid facing −X (vehicle yaw +90°) on a course whose
+    // waypoint tangent runs +X — the measured convention split.
+    write(
+        d,
+        "race/testcity/cir0_strtpnts",
+        "60,0,140,90,0,0,0,0,0,\n56,0,144,90,0,0,0,0,0,\n",
+    );
+    let config = SessionConfig {
+        mode: SessionMode::Event(EventRef {
+            city: "testcity".into(),
+            table: EventTableKind::Circuit,
+            index: 0,
+        }),
+        ..SessionConfig::default()
+    };
+    let mut app = event_app(config, vfs_of(tmp.path()));
+    app.update();
+    assert_eq!(phase(&app), SessionPhase::Countdown);
+
+    let car = car(&mut app);
+    let pos = app.world().get::<Position>(car).unwrap().0;
+    assert!(
+        (pos.x - 60.0).abs() < 3.0 && (pos.z - COURSE_Z).abs() < 3.0,
+        "player on the authored grid slot, got {pos:?}"
+    );
+    let fwd = app.world().get::<Transform>(car).unwrap().rotation * Vec3::NEG_Z;
+    assert!(
+        fwd.x < -0.98,
+        "authored 90° grid yaw must face −X verbatim, fwd={fwd:?}"
+    );
+}
+
 /// The countdown releases through `advance_race` exactly once, into
 /// `Playing` — the authored event drives the shared lifecycle, not a
 /// test-side stand-in.

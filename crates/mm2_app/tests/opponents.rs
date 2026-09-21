@@ -13,8 +13,8 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::opponents::{
-    Blocker, OpponentDriver, Traffic, apply_gap_brake, nearest_blocker, opponent_drive,
-    pick_pass_side, route_target, spawn_pose,
+    Blocker, OpponentDriver, Traffic, apply_gap_brake, initial_route_index, nearest_blocker,
+    opponent_drive, pick_pass_side, route_target, spawn_pose,
 };
 use mm2_app::session::{self, SessionControl};
 use mm2_app::{camera, contracts, race};
@@ -400,6 +400,14 @@ fn route_target_open_route_completes() {
     assert_eq!(target, None, "open route past its end drives nothing");
 }
 
+/// A route whose row-0 `brake` carries the authored staging heading —
+/// the measured meaning of a nonzero value on retail `.opp` files.
+fn staged_route(heading_deg: f32, points: &[[f32; 3]]) -> OpponentRoute {
+    let mut r = route(points);
+    r.points[0].brake = heading_deg;
+    r
+}
+
 #[test]
 fn route_target_closed_route_loops_to_nearest() {
     // A circuit: the last anchor sits 10 m from the first.
@@ -445,16 +453,22 @@ fn spawn_pose_prefers_the_authored_grid_then_the_route_anchor() {
     };
     let (pos, yaw) = spawn_pose(&def, 0, &spec, Vec3::new(60.0, 0.0, 140.0), 1.57);
     assert_eq!(pos, Vec3::new(56.0, 0.0, 144.0), "authored slot 1 wins");
-    // Facing: toward the first route point ahead (+X ⇒ yaw ≈ −π/2).
+    // The slot's own authored `a` is the facing — vehicle-yaw degrees —
+    // not the route leg (+X would give −π/2).
     assert!(
-        (yaw + std::f32::consts::FRAC_PI_2).abs() < 0.35,
-        "faces the route leg, got {yaw}"
+        (yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-4,
+        "slot spawn faces its authored yaw, got {yaw}"
     );
 
-    // No authored grid → the route's first point anchors the spawn.
+    // No authored grid → the route's row-0 anchors the spawn; with no
+    // authored staging heading the first leg still supplies the facing.
     def.start_slots.truncate(1);
-    let (pos, _) = spawn_pose(&def, 0, &spec, Vec3::new(60.0, 0.0, 140.0), 1.57);
+    let (pos, yaw) = spawn_pose(&def, 0, &spec, Vec3::new(60.0, 0.0, 140.0), 1.57);
     assert_eq!(pos, Vec3::new(70.0, 0.0, 140.0), "route row0 anchors");
+    assert!(
+        (yaw + std::f32::consts::FRAC_PI_2).abs() < 0.35,
+        "no authored heading → the +X first leg faces it, got {yaw}"
+    );
 
     // No grid, no route → designed stagger behind the player.
     let bare = OpponentSpec {
@@ -468,6 +482,69 @@ fn spawn_pose_prefers_the_authored_grid_then_the_route_anchor() {
         "staggered behind a -Z-facing player, got {pos:?}"
     );
     assert_eq!(yaw, 0.0, "no route → the player's heading");
+}
+
+/// The `.opp` row-0 `brake` is the staged-start heading (measured on
+/// 592/612 retail files): on a route-anchor spawn it beats the
+/// first-leg direction — an authored −X facing must not flip to the
+/// +X leg.
+#[test]
+fn spawn_pose_faces_the_authored_staging_heading() {
+    let def = RaceDefinition {
+        checkpoints: Vec::new(),
+        finish: None,
+        rule: mm2_game::CheckpointRule::AnyOrder,
+        laps: 0,
+        time_limit_ticks: None,
+        params: mm2_game::EventParams::default(),
+        countdown_ticks: 0,
+        start_slots: vec![mm2_game::RaceStart {
+            position: Vec3::new(60.0, 0.0, 140.0),
+            yaw_deg: 0.0,
+        }],
+    };
+    let spec = OpponentSpec {
+        vehicle: "vpt".into(),
+        params: Vec::new(),
+        route: Some(staged_route(
+            90.0,
+            &[[70.0, 0.0, 140.0], [110.0, 0.0, 140.0]],
+        )),
+    };
+    let (pos, yaw) = spawn_pose(&def, 0, &spec, Vec3::new(60.0, 0.0, 140.0), 1.57);
+    assert_eq!(pos, Vec3::new(70.0, 0.0, 140.0));
+    assert!(
+        (yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-4,
+        "authored 90° staging faces −X (vehicle yaw +π/2), got {yaw}"
+    );
+}
+
+/// A staged start joins the `.opp` line mid-leg (measured on retail
+/// `circuit1-a-0`: the staging heading runs −X while row 1 sits +X of
+/// it): the first chase target must lie ahead of the authored facing —
+/// chasing the staging row's own tail U-turns the car off the line.
+#[test]
+fn initial_chase_index_skips_anchors_behind_the_staging() {
+    let r = staged_route(
+        90.0,
+        &[
+            [0.0, 0.0, 0.0],
+            [50.0, 0.0, 0.0],  // behind a −X-facing spawn
+            [-50.0, 0.0, 0.0], // down-course
+            [-100.0, 0.0, 0.0],
+        ],
+    );
+    let pos = Vec3::new(0.0, 0.0, 0.0);
+    assert_eq!(
+        initial_route_index(&r, pos, std::f32::consts::FRAC_PI_2),
+        2,
+        "facing −X the +X anchors are behind the line"
+    );
+    assert_eq!(
+        initial_route_index(&r, pos, -std::f32::consts::FRAC_PI_2),
+        1,
+        "facing +X the first leg is the chase"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -533,6 +610,41 @@ fn roster_spawns_distinct_ai_participants() {
     assert!(
         (p.x - 70.0).abs() < 2.0 && (p.z - 146.0).abs() < 2.0,
         "vpheavy at its route anchor: {p:?}"
+    );
+}
+
+/// The authored staging heading reaches the real spawn: `vpt`'s row-0
+/// `brake` of 90° faces −X even though its route legs run +X — the
+/// authored facing wins, every +X anchor is left behind the line and
+/// the car holds its staged nose instead of reversing into the tail.
+#[test]
+fn authored_staging_heading_faces_the_spawn() {
+    let mut staged = OPP_HEADER.to_string();
+    staged.push_str("70,0,140,90,0,0,0,0,0\n");
+    for x in [110.0, 140.0, 165.0, 180.0] {
+        staged.push_str(&format!("{x},0,140,0,0,0,0,0,0\n"));
+    }
+    let tmp = roster_install("", &[("race0-a-0.opp", staged)]);
+    let mut app = event_app(event_config(), vfs_of(tmp.path()));
+    app.update();
+
+    let vpt = opponent_by_vehicle(&mut app, "vpt");
+    let fwd = app.world().get::<Transform>(vpt).unwrap().rotation * Vec3::NEG_Z;
+    assert!(fwd.x < -0.98, "authored 90° staging faces −X, fwd={fwd:?}");
+    assert_eq!(
+        app.world().get::<OpponentDriver>(vpt).unwrap().next,
+        5,
+        "every +X anchor sits behind the staged facing"
+    );
+
+    // Past the countdown there is still nothing ahead to chase — the
+    // car holds its line rather than U-turning back for row 1.
+    run(&mut app, 400);
+    let input = app.world().get::<VehicleInput>(vpt).unwrap();
+    assert_eq!(
+        (input.throttle, input.steering),
+        (0.0, 0.0),
+        "no ahead target → no drive demand"
     );
 }
 
@@ -699,7 +811,11 @@ fn restart_respawns_the_lineup() {
             app.world().get::<RaceProgress>(e).unwrap().state,
             ParticipantState::AwaitingStart
         );
-        assert_eq!(app.world().get::<OpponentDriver>(e).unwrap().next, 0);
+        assert_eq!(
+            app.world().get::<OpponentDriver>(e).unwrap().next,
+            1,
+            "the reached row-0 anchor is skipped — the chase starts on the first leg"
+        );
     }
 }
 

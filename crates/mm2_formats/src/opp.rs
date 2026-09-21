@@ -28,8 +28,11 @@ const HEADER: [&str; 9] = [
 pub struct OppPoint {
     /// Authored `x,y,z` position (MM2 world axes, unmirrored).
     pub position: [f32; 3],
-    /// `brake` column — authored values are speeds on retail data; the
-    /// exact semantics are unverified.
+    /// `brake` column — the header name misleads: nonzero values mark
+    /// a staging record whose value is a heading in degrees (measured
+    /// on retail: row 0 carries it on 592/612 files, matching the
+    /// vehicle-yaw convention; `race/sf/race5-a-{5,6,7}` carry a second
+    /// staging row mid-file). Every other column authors 0 on retail.
     pub brake: f32,
     /// `forward offset` column.
     pub forward_offset: f32,

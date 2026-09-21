@@ -7,8 +7,9 @@
 //! parser records (`mm2_formats::aimap`, `mm2_formats::opp`) — spawn
 //! and driving systems consume this, never CSV text.
 //!
-//! Authored scalars are kept verbatim: the `.opp` column semantics and
-//! the ten-value parameter tail are unverified (ledger UNK-11), so
+//! Authored scalars are kept verbatim: row 0's `brake` is measured as
+//! the staged-start heading, but the rest of the `.opp` columns and the
+//! ten-value parameter tail remain unverified (ledger UNK-11), so
 //! nothing here interprets them. Problems that do not prevent building
 //! the roster (a dead `.opp` reference, a wired count that disagrees
 //! with the table row) are [`OpponentIssue`]s on the roster — they are
@@ -26,8 +27,13 @@ use crate::Difficulty;
 pub struct OpponentRoutePoint {
     /// Authored position (MM2 world axes, unmirrored).
     pub position: Vec3,
-    /// `brake` column — authored values are speeds on retail data; the
-    /// real semantics are unverified (UNK-11), kept raw.
+    /// `brake` column — mislabelled in the authored header: nonzero
+    /// values mark a *staging record*, and the value is a heading in
+    /// vehicle-yaw degrees (measured on all 612 retail files: row 0
+    /// carries it on 592, agreeing with the route's course direction
+    /// within ~25° on 542 — deviations are scattered checkpoint
+    /// stagings; `race/sf/race5-a-{5,6,7}` carry a second staging row
+    /// mid-file, semantics open). Plain route rows author 0. Kept raw.
     pub brake: f32,
     /// `forward offset` column, raw.
     pub forward_offset: f32,
@@ -56,6 +62,17 @@ impl OpponentRoute {
             .windows(2)
             .map(|w| w[0].position.distance(w[1].position))
             .sum()
+    }
+
+    /// The authored start heading in vehicle-yaw degrees — row 0's
+    /// nonzero `brake` value (measured: the `.opp` first row is a
+    /// staging record carrying the opponent's staged facing; `to_radians`
+    /// turns it into a spawn yaw). `None` when row 0 authors 0 —
+    /// 20/612 retail files, where no facing is authored.
+    pub fn start_heading_deg(&self) -> Option<f32> {
+        self.points
+            .first()
+            .and_then(|p| (p.brake != 0.0).then_some(p.brake))
     }
 }
 

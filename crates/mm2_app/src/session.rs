@@ -314,14 +314,14 @@ pub fn load_session_world(
                 // event without slots keeps the roam spawn.
                 if let Some(slot) = def.start_slots.get(mm2_content::PLAYER_SLOT) {
                     spawn.position = slot.position;
-                    // `RaceStart.yaw_deg` uses the authored `a`
-                    // convention (forward = (sin a, cos a) in XZ);
-                    // spawn yaw is the `Quat::from_rotation_y` angle
-                    // whose forward is (−sin θ, −cos θ) — vehicle
-                    // forward is local −Z.
-                    let a = slot.yaw_deg.to_radians();
-                    let forward = Vec2::new(a.sin(), a.cos());
-                    spawn.yaw = (-forward.x).atan2(-forward.y);
+                    // `RaceStart.yaw_deg` is already the vehicle-yaw
+                    // convention — forward is (−sin a, −cos a) in XZ,
+                    // exactly what `Quat::from_rotation_y` produces for
+                    // local −Z forward. The authored `_strtpnts` `a`
+                    // column measures this way (retail `cir1` ≈ +92°
+                    // faces the −X course); it is *not* the waypoint
+                    // `a` bearing — the two sit 180° apart (UNK-16).
+                    spawn.yaw = slot.yaw_deg.to_radians();
                 }
                 info!(
                     event = %format!("{:?}[{}]", event_ref.table, event_ref.index),

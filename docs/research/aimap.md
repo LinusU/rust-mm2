@@ -146,3 +146,22 @@ which carry no race records), 271 london + 246 sf opponents wired,
   files for the same event (`vpcoop`→`vpcoop2k`, plus `vpvwcup`,
   `vpdb7`, `vppanoz`, `vppanozgt` — including the reward-locked Panoz
   GTR-1). All wired ids resolve to `ready` catalog entries.
+
+## `.opp` route records (measured 2026-09-21)
+
+The `.opp` files themselves are CSVs headed
+`x,y,z,brake,forward offset,side offset,target speed,speed start,side
+start`. Measured on all 612 retail files: the `brake` header misleads —
+a nonzero value marks a *staging record* whose payload is a heading in
+vehicle-yaw degrees (forward `(−sin a, −cos a)` in XZ — the same
+convention as `_strtpnts`' `a` column, and exactly 180° from the
+waypoint `a` course bearing). Row 0 carries it on 592 of 612 files
+(grid events share one value across all their routes — e.g. every
+`circuit0-*` row 0 reads 175.0), and on 542 files that heading agrees
+with the route's own course direction within ~25°. The staged point is
+not necessarily *on* the driving line: `circuit1-a-0`'s heading runs
+−X while row 1 sits +X of the spawn, so the authored line joins the
+course mid-leg — chasing row 1 from the staged pose U-turns the car.
+`race/sf/race5-a-{5,6,7}` carry a second staging row mid-file (what
+re-stages there is unknown). Every other column authors 0 on retail
+and is preserved raw.

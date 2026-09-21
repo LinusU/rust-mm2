@@ -1,149 +1,148 @@
 # Last implementation iteration
 
-- Task ID and title: review repair (`update_checkpoint_markers`
-  ambiguous participant pick) + F15-B.1 — opponent traffic
-  avoidance/overtake: live-participant corridor sensing, committed
-  pass side, following brake, bounded response to uncompletable
-  passes.
-- Starting commit: `f4fe9bbe94d253da5da44e70990ff2f239cce6e7`
-  (externally checked F15-A.2; branch `ralph/night`).
-- Why this slice: the external review's only finding was the marker
-  ambiguity — repaired first per policy. For feature work the
-  selection policy named F15-B among the ready slices; the
-  avoidance/overtake leg is its smallest coherent piece and directly
-  advances F15-AC03 (blocked roads → bounded response, not
-  indefinite stationary cars). The difficulty/param-tail model
-  (UNK-11) stays open — no semantics are invented for it.
+- Task ID and title: F15-A.3 — authored start headings: `.opp` row-0
+  staging heading + `_strtpnts` `a` measured as vehicle yaw; player
+  spawn-yaw defect repaired; opponents face their authored heading;
+  the initial route chase skips anchors behind the staged facing.
+- Starting commit: `09e2b0045d00ca861f37cb322c267f425246278b`
+  (externally checked F15-B.1; branch `ralph/night`).
+- Why this slice: the F15-A spawn/drive leg left facing provisional
+  (UNK-16/17). Measuring all 612 retail `.opp` files against the
+  `cir*_strtpnts` grids resolved the convention split — and exposed a
+  live defect: `session.rs` read the authored slot angle as a bearing
+  and added 180°, so the player spawned facing backward on every
+  authored SF circuit grid. One coherent repair covers player spawn,
+  opponent facing and the first chase target.
 - Retail install: `/Users/linus/coding/rust-mm2/retail`
   (`fnv1a64:e91e6cd4b2ae30d9`).
 
+## What the measurement established
+
+- The `.opp` `brake` header misleads: a nonzero value marks a *staging
+  record* whose payload is a heading in degrees — row 0 carries it on
+  592/612 retail files; 542 of those agree with the route's course
+  direction within ~25°; grid events share one value across their
+  routes (`circuit0-*` all read 175.0). `race/sf/race5-a-{5,6,7}` carry
+  a second staging row mid-file — what re-stages there is still open.
+  Every other `.opp` column authors 0 on retail.
+- `_strtpnts` `a` is the same convention: vehicle yaw — forward
+  `(−sin a, −cos a)` in XZ, exactly what `Quat::from_rotation_y`
+  produces for local −Z forward (`cir1` ≈ +92° faces the −X course).
+- The waypoint `a` column is a *course bearing* (`atan2(dx,dz)` along
+  the rows) — exactly 180° apart, which is the UNK-16 split, now
+  measured rather than suspected. `MIRROR_Z` is `false` — authored
+  space is runtime space, no transform accounts for the difference.
+- A staged start is not necessarily on the driving line:
+  `circuit1-a-0`'s heading runs −X while its row-1 anchor sits +X of
+  the spawn — the `.opp` line is a loop the staged start joins mid-leg.
+
 ## What changed
 
-- **`race.rs` review repair**: `update_checkpoint_markers` queried
-  `(&Player, &RaceProgress)` and took `iter().next()` — correct only
-  by archetype-iteration luck once opponents also carried both
-  components. It now selects `PlayerControl::Local`, the same
-  disambiguation `update_race_warning` already uses; markers
-  represent the local driver's view.
-- **`opponents.rs` avoidance** (designed controller — no claim of
-  original AI behavior, which remains UNK-11):
-  - `Traffic`/`Blocker`: every other participant (player included)
-    resolved into the driver's frame from live `Position`/`Rotation`/
-    `VehicleState` — real physics obstacles, no map data.
-  - `nearest_blocker`: nearest car inside a forward corridor
-    (`BLOCK_HALF_WIDTH` 2.4 m lane, `reach = 14 m + 1.4·speed`).
-  - Pass engagement: a *standing* blocker (`< CRAWL_SPEED` 3 m/s)
-    anywhere in the corridor, or a *moving* one only on genuine
-    closure (`> FOLLOW_RELEASE` 2 m/s). A matched-pace car is a
-    queue to sit in — with a field sharing `.opp` lines, always-on
-    offset aims weave the whole field off-line all race (measured:
-    first version dropped `london circuit:0` to `opp=0/7`).
-  - Commit: `pass_side` ±1 from `pick_pass_side` (open side of an
-    offset blocker → route side for a centred one → default), then
-    a `PASS_SCAN` room weighting over every nearby car flips it if
-    the picked lane is the busier one. Held for the pass so
-    alternating blockers cannot flicker it.
-  - Aim: `pos + fwd·PASS_LOOKAHEAD + route-lateral·PASS_OFFSET` —
-    a short-range point down the offset lane (a shifted distant
-    anchor is a ~4° wiggle, not a lane change); the lateral derives
-    from the route leg each frame so the offset lane bends with
-    the road (a world-fixed vector aimed cars across corners).
-  - `held_blocker`: the pass holds across a wider window
-    (`PASS_WIDE`) until the blocker is `PASS_BEHIND` behind — no
-    cut-back across its nose; `PASS_RELEASE` bounds the linger.
-  - `apply_gap_brake`: moving blocker inside the comfort gap →
-    soft adaptive-cruise brake even at matched pace (a queue keeps
-    its gaps instead of riding bumpers — measured: matched-pace
-    bumper-riding drove impacts up); standing blocker → brake only
-    on a real approach so crawl-pace steering can still complete
-    the drive-around; `PANIC_GAP` → hard brake on active closure.
-  - Bounded response (AC03): `PASS_STALL` frames (6 s) without
-    `PASS_STALL_DIST` (8 m) of displacement abandons the pass and
-    bans that blocker for `PASS_BAN` (5 s) — *fully* transparent
-    (no aim, no brake) so the route line can push or slip past;
-    the clean pass retries after. Displacement, not speed, is the
-    stall signal — recovery shuffles oscillate through 2 m/s and
-    reset a velocity check. Static walls/props stay with
-    `ScriptedBot`'s existing bounded recovery — no second
-    geometry-avoidance system.
-- All tuning constants are designed controller values, disclosed as
-  such; nothing claims retail-game constants.
+- `mm2_game::race::RaceStart.yaw_deg` is now defined as vehicle-yaw
+  degrees (doc spell-out; consumers were the bug).
+- `mm2_content::race_def`: the no-grid fallback derives
+  `atan2(−dx,−dz)` (was `atan2(dx,dz)` — the opposite bearing);
+  `_strtpnts` keeps authored `a` verbatim, now documented as yaw.
+- `mm2_app::session`: `spawn.yaw = slot.yaw_deg.to_radians()` — the
+  old code re-derived a bearing and added 180°, spawning the player
+  backward on `_strtpnts` grids.
+- `mm2_game::OpponentRoute::start_heading_deg()` returns row-0's
+  nonzero staged heading (raw `brake` preserved);
+  `OpponentRoutePoint::brake`/`mm2_formats::opp` docs corrected —
+  the field is not a speed.
+- `mm2_app::opponents::spawn_pose` faces by position source: authored
+  grid slot → its `yaw_deg`; route anchor → staged heading when
+  authored, else the previous first-leg facing; designed stagger →
+  the player's yaw (unchanged).
+- `initial_route_index` starts `OpponentDriver.next` at the first
+  route anchor ahead of the staged facing and not already reached —
+  chasing a behind anchor U-turns the car off its authored heading
+  (`circuit1-a-0` shape). Anchors left behind are picked up by the
+  closed-route wrap like every other passed point.
+- Remaining provisional policies (UNK-17, unchanged): `_strtpnts`
+  row 0 = player slot, opponents take `index + 1` or the route's
+  staged point; which authored start set the original consumes per
+  participant is still unverified.
 
 ## Tests
 
-- `mm2_app/tests/opponents.rs` — 16 total (+5): `pick_pass_side`
-  open/route-side/default picks, corridor-only sensing (adjacent
-  lane, behind, out-of-reach excluded), gap-brake bands (outside
-  gap, hard close, matched-pace station-keeping, moving-blocker
-  queue brake, crawl-pace no-brake), `blocked_route_drives_around_
-  the_parked_car` — a parked participant on the route is driven
-  around through `load_session_world` → `advance_race` with zero
-  blocker contacts and all gates cleared — and
-  `checkpoint_markers_track_the_local_participant` (review
-  regression).
+- `mm2_app/tests/opponents.rs` — 19 total (+3):
+  `spawn_pose_faces_the_authored_staging_heading` (a 90° staging
+  heading beats the +X first leg — discriminates authored facing from
+  the old fallback), `initial_chase_index_skips_anchors_behind_the_
+  staging` (both directions), `authored_staging_heading_faces_the_
+  spawn` (production path: authored −X facing reaches the entity's
+  rotation, `driver.next` lands past the behind tail, no drive demand
+  reverses it). `spawn_pose_prefers_…` now asserts the slot's authored
+  yaw (was the route-leg facing); restart asserts the computed first
+  chase index.
+- `mm2_app/tests/event.rs` — 12 total (+1):
+  `authored_strtpnts_yaw_faces_the_player_spawn` — a retail-style
+  90° `_strtpnts` grid puts the player's forward at −X verbatim
+  through `load_session_world` (the regression: the old code faced
+  +X, backward).
+- `mm2_content/tests/race_def.rs` — the derived fallback asserts
+  vehicle-yaw convention (`−cos a` down-course); the `_strtpnts` test
+  now asserts authored 92° faces −X.
 
 ## Commands actually run and results
 
 - `cargo fmt --all -- --check` PASS.
 - `cargo clippy --locked --workspace --all-targets --all-features --
   -D warnings` PASS.
-- `cargo test --locked --workspace` — all groups ok, 0 failures.
-- `cargo test -p mm2_app --test opponents` — 16/16 ok.
-- Retail evidence, both this build and a `f4fe9bb` baseline
-  worktree run this iteration (deterministic headless, same
-  commands):
-  - `sf checkpoint:0 --bot --frames 5400`: `opp=3/6` place 4,
-    impacts 195 — baseline `opp=3/6` place 4, impacts 208
-    (parity, fewer impacts).
-  - `london circuit:0 --bot --frames 14400`: `opp=3/7` place 4,
-    impacts 408 — baseline `opp=2/7` place 3, impacts 367. First
-    retail circuit opponent evidence at all (AC02's circuit leg
-    was a noted gap); three opponents complete 3 laps × 6 gates
-    through shared `advance_race` validation.
-  - `sf checkpoint:0` hold-driver `--frames 5400` (player becomes
-    a mid-course obstacle, full window for opponents): `opp=4/6`
-    impacts 165 — baseline `opp=4/6` impacts 232.
-  - `london circuit:0` hold-driver `--frames 14400`: `opp=3/7` —
-    baseline `opp=4/7`.
-  - `london checkpoint:0 --bot --frames 5400`: `opp=1/4` place 2 —
-    baseline `opp=3/4`. Confounded the other way here: the baseline
-    player never resolved inside the window (`cp=3/5`, full Playing
-    time for opponents) while this build's player finished at ~75 s
-    and ended their clock; the unresolved three were at c2–c5, not
-    stalled.
-- Process of getting here matters for the record: the first
-  avoidance cut measured `opp=0/7` on the circuit (always-on offset
-  aim wove the pack; matched-pace bumper-riding raised impacts).
-  The corridor narrowing, moving/standing split, occupancy scan,
-  route-relative lane and transparency-ban are what bring the
-  numbers above — evidence-tuned, not assumed.
+- `cargo test --locked --workspace` — all groups ok, 0 failures
+  (38 groups).
+- `cargo test -p mm2_app --test opponents --test event -p mm2_content
+  --test race_def` — all ok during development.
+- Retail evidence — `fnv1a64:e91e6cd4b2ae30d9`, deterministic headless,
+  with a same-iteration `09e2b00` baseline worktree (`/tmp`,
+  since removed) run for direct comparison:
+  - `sf circuit:1 --headless --frames 900` (hold driver — straight-line
+    facing probe): final `(-507,·,-52)` from the `cir1_strtpnts` slot
+    `(-489,·,-55)` yaw 92.4° — the car drives **−X, the authored
+    facing/course direction**. Baseline same command: `(-485,·,-55)` —
+    +X, backward off the grid, run this iteration on the old binary.
+  - `sf circuit:1 --bot --frames 14400`: `opp=0/7` `cp=4/10` lap 1/3,
+    impacts 1049 — baseline `opp=0/7` `cp=4/10` impacts 1075,
+    `final` within 2 m. Parity: a 3-lap × 10-gate course the scripted
+    driver cannot finish in 240 s — not a stall, and identical on the
+    old build.
+  - `sf checkpoint:0 --bot --frames 5400`: `opp=6/6` impacts 233 —
+    baseline `opp=3/6` impacts 195. All six opponents finish through
+    shared `advance_race` validation. Both builds end `status=fail`
+    "fell through the world" — the scripted player drives off-course
+    after the race resolves; a `--bot` limit on both builds.
+  - `london circuit:0 --bot --frames 14400`: `opp=2/7` impacts 576,
+    player unresolved at lap 3 — baseline `opp=3/7` impacts 408,
+    player finished place 4. One fewer finisher through the
+    authored-heading launch (the staged heading aims the pack down
+    the p1→p2 leg immediately instead of the old south detour +
+    U-turn); disclosed honestly — equal to the pre-F15-B.1 `2/7`.
+- Evidence classification: code gates + synthetic integration tests +
+  deterministic headless retail runs. No GPU/rendered/audio evidence
+  this iteration; no original-executable comparison exists.
 
-## What this proves / does not prove
+## Ledger / research updates
 
-- Proves: opponents sense live participants and alter their driving —
-  brake for closing traffic, commit and hold a pass side, drive
-  around parked cars, queue at matched pace instead of weaving —
-  through the same `VehicleInput` path and physics; on retail data
-  the field matches or beats the no-avoidance baseline on finishers
-  with materially fewer impacts on open courses; circuit opponents
-  now have retail completion evidence; a failed pass is bounded
-  (stall → transparent push-through window → retry), not an
-  indefinite hold.
-- Does not prove: exact original AI behavior (designed controller);
-  difficulty/param-tail semantics (UNK-11, untouched); that
-  avoidance never hurts pace — on the tightest narrow-street
-  circuit a mid-pack knot can circulate at crawl for tens of
-  seconds inside stall/ban cycles (baseline instead stranded cars
-  permanently: honest different failure profile, hold-driver leg
-  `3/7` vs `4/7` records the remaining deficit); the `opp=`
-  denominator still counts spawned cars, not authored slots.
-- Acceptance IDs: F15-AC02 circuit leg now has retail evidence;
-  AC03 advanced (drive-around + bounded pass abandonment +
-  queue/brake behavior — an observed *recovery* event from a
-  wall/prop trap is still unevidenced); AC05 still needs a
-  seeded soak matrix; AC06 untouched (difficulty). F15-B stays
-  `active` pending external review.
+- `docs/original-rules.md`: WPT-4 rewritten — both `a` conventions
+  measured (waypoint bearing vs start/staging vehicle yaw, 180°
+  apart); UNK-16 narrowed to gate-direction enforcement; UNK-11's
+  "all `.opp` columns author zero" misstatement corrected — `brake`
+  measured as the staging heading; UNK-17 narrowed to the
+  participant↔slot mapping question.
+- `docs/research/aimap.md`: `.opp` record section added with the
+  612-file measurement (staging rows, shared grid headings,
+  mid-leg joins, `race5` second staging row).
+- `docs/ralph/PLAN.md`: F15-A.3 row added under F15-A.
 
-This is a candidate handoff. External code-gate and separate review
-results live in the runner state directory and are not implied by
-this report.
+## Still open
+
+- What triggers `race/sf/race5-a-{5,6,7}`'s mid-file staging row.
+- Whether the original consumes `.opp` staged poses vs `_strtpnts`
+  slots per participant (UNK-17), and whether waypoint `a` enforces
+  gate direction at runtime (UNK-16 remainder).
+- `london circuit:0` opponent parity (-1 finisher vs baseline) — race
+  dynamics, not a verified regression; a representative seeded matrix
+  remains an F15-B open item.
+- F15-B remainder: difficulty/param-tail model (UNK-11), catch-up,
+  AC06 measured difficulty effects.

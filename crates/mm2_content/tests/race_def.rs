@@ -121,11 +121,13 @@ fn derived_start_slot_sits_on_the_line_facing_the_course() {
         "on the authored start line, not an invented back-off (DSN-6): \
          backing off the tangent can leave the drivable surface"
     );
-    // Facing (sin a, cos a) must point down-course toward -Z.
+    // `yaw_deg` is the vehicle-yaw convention: forward =
+    // (−sin a, −cos a), the course tangent turned +180° from the
+    // waypoint bearing. The course runs −Z, so −cos(a) ≈ −1 → a ≈ 0.
     let a = slot.yaw_deg.to_radians();
     assert!(
-        a.cos() < -0.98,
-        "yaw {:.1}° should face -Z (the course)",
+        -a.cos() < -0.98,
+        "vehicle-yaw {:.1}° should face -Z (the course)",
         slot.yaw_deg
     );
 }
@@ -169,6 +171,16 @@ fn authored_strtpnts_become_the_start_slots() {
     assert_eq!(def.start_slots.len(), 2, "both authored slots kept");
     assert_eq!(def.start_slots[0].position.x, -489.25);
     assert_eq!(def.start_slots[0].yaw_deg, 92.36, "authored yaw verbatim");
+    // Measured convention: the `a` column is vehicle yaw — forward
+    // (−sin a, −cos a) — so ~92° faces −X, the cir1 course direction.
+    // The waypoint `a` bearing would read the same number as +X.
+    let a = def.start_slots[0].yaw_deg.to_radians();
+    assert!(
+        -a.sin() < -0.99,
+        "authored 92° yaw must face −X (the course), fwd=({}, {})",
+        -a.sin(),
+        -a.cos()
+    );
 }
 
 #[test]
