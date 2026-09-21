@@ -654,6 +654,28 @@ fn vec3_loose(b: &TuneBlock, name: &str) -> Option<[f32; 3]> {
     Some(out)
 }
 
+/// Optional-`vec3` accessor: `None` when absent, the decoded value when
+/// well-formed, and `None` plus a warning when present but not three
+/// numeric components — a malformed optional vector is reported, never
+/// silently equated with an absent one.
+fn opt_vec3(b: &TuneBlock, ctx: &str, name: &str, warnings: &mut Vec<String>) -> Option<[f32; 3]> {
+    let f = b.field(name)?;
+    match vec3_loose(b, name) {
+        Some(v) => Some(v),
+        None => {
+            warnings.push(format!(
+                "{ctx}: {name} is not three numeric values ({})",
+                f.values
+                    .iter()
+                    .map(|v| v.raw.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ));
+            None
+        }
+    }
+}
+
 /// Fully decoded `aiVehicleData` tuning — the ambient-traffic vehicle
 /// record (`tune/vehicle/<va_*>.aivehicledata`, F10-A).
 ///
@@ -661,7 +683,7 @@ fn vec3_loose(b: &TuneBlock, name: &str) -> Option<[f32; 3]> {
 /// as `dgBangerData`), collision spring/damper coefficients and damage
 /// thresholds. There is no drivetrain, wheel or gearing data — ambient
 /// vehicles are not driven through `vehCarSim` physics, matching the
-/// spec's "ambient vehicle data may differ from player tuning". All 25
+/// spec's "ambient vehicle data may differ from player tuning". All 23
 /// retail records carry the same field set; `CG` is absent on three
 /// (`va_cablecar_f`, `va_garbagetruck`, `va_ug_l`).
 #[derive(Debug, Clone)]
@@ -717,21 +739,7 @@ impl AiVehicleData {
         let ctx = "aiVehicleData";
         let mut warnings = Vec::new();
 
-        let max_ang = match root.field("MaxAng") {
-            Some(f) if vec3_loose(root, "MaxAng").is_none() => {
-                warnings.push(format!(
-                    "aiVehicleData: MaxAng is not three numeric values ({})",
-                    f.values
-                        .iter()
-                        .map(|v| v.raw.as_str())
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                ));
-                None
-            }
-            Some(_) => vec3_loose(root, "MaxAng"),
-            None => None,
-        };
+        let max_ang = opt_vec3(root, ctx, "MaxAng", &mut warnings);
 
         unknown_fields(
             root,
@@ -767,7 +775,7 @@ impl AiVehicleData {
             limit: req_f32(root, ctx, "Limit")?,
             rubber_spring: req_f32(root, ctx, "RubberSpring")?,
             rubber_damp: req_f32(root, ctx, "RubberDamp")?,
-            cg: vec3_loose(root, "CG"),
+            cg: opt_vec3(root, ctx, "CG", &mut warnings),
             warnings,
         })
     }

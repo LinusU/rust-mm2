@@ -321,6 +321,23 @@ pub enum BaiIssue {
         /// Section count.
         sections: usize,
     },
+    /// A lane/sidewalk/rail curve carries a non-finite vertex
+    /// coordinate — raw f32 bits are untrusted, and such a curve cannot
+    /// be length-measured or sampled. One issue per curve, at the first
+    /// offending vertex.
+    NonFiniteCurveVertex {
+        /// Road index.
+        road: usize,
+        /// Which side.
+        side: Side,
+        /// Curve family: `"lane"` (driving lanes and sidewalks),
+        /// `"tram"` or `"train"`.
+        kind: &'static str,
+        /// Index within that family's curve list.
+        curve: usize,
+        /// First non-finite vertex index.
+        vertex: usize,
+    },
     /// A road or intersection references PSDL room 0; rooms are stored
     /// index + 1 and 0 never appears on retail data.
     ZeroRoomReference {
@@ -406,6 +423,16 @@ impl fmt::Display for BaiIssue {
             BaiIssue::TooFewSections { road, sections } => {
                 write!(f, "road {road}: only {sections} section(s)")
             }
+            BaiIssue::NonFiniteCurveVertex {
+                road,
+                side,
+                kind,
+                curve,
+                vertex,
+            } => write!(
+                f,
+                "road {road} {side} {kind} curve {curve}: non-finite vertex {vertex}"
+            ),
             BaiIssue::ZeroRoomReference { subject, index } => {
                 write!(
                     f,
@@ -530,6 +557,25 @@ impl Bai {
                         side,
                         value: s.ambient_types,
                     });
+                }
+                for (kind, curves) in [
+                    ("lane", &s.lane_vertices),
+                    ("tram", &s.tram_vertices),
+                    ("train", &s.train_vertices),
+                ] {
+                    for (ci, curve) in curves.iter().enumerate() {
+                        if let Some(vi) =
+                            curve.iter().position(|p| p.iter().any(|c| !c.is_finite()))
+                        {
+                            issues.push(BaiIssue::NonFiniteCurveVertex {
+                                road: ri,
+                                side,
+                                kind,
+                                curve: ci,
+                                vertex: vi,
+                            });
+                        }
+                    }
                 }
             }
             if road.sections.len() < 2 {
@@ -1148,6 +1194,54 @@ mod tests {
             issues
                 .iter()
                 .any(|i| matches!(i, BaiIssue::DanglingIntersectionRoad { road: 7, .. })),
+            "{issues:?}"
+        );
+    }
+
+    #[test]
+    fn validate_flags_non_finite_curve_vertices() {
+        // Lane/rail vertices are raw f32 bits — a corrupt or modded file
+        // can carry NaN/inf coordinates; validate reports one issue per
+        // curve at the first offending vertex.
+        let mut bai = Bai::parse(&two_road_fixture()).unwrap();
+        bai.roads[0].right.lane_vertices[0][1][0] = f32::NAN;
+        bai.roads[1].left.lane_vertices[1][2][2] = f32::INFINITY;
+        bai.roads[1]
+            .right
+            .train_vertices
+            .push(vec![[0.0, 0.0, f32::NEG_INFINITY]; 3]);
+        let issues = bai.validate();
+        for want in [
+            BaiIssue::NonFiniteCurveVertex {
+                road: 0,
+                side: Side::Right,
+                kind: "lane",
+                curve: 0,
+                vertex: 1,
+            },
+            BaiIssue::NonFiniteCurveVertex {
+                road: 1,
+                side: Side::Left,
+                kind: "lane",
+                curve: 1,
+                vertex: 2,
+            },
+            BaiIssue::NonFiniteCurveVertex {
+                road: 1,
+                side: Side::Right,
+                kind: "train",
+                curve: 0,
+                vertex: 0,
+            },
+        ] {
+            assert!(issues.contains(&want), "missing {want:?}: {issues:?}");
+        }
+        assert_eq!(
+            issues
+                .iter()
+                .filter(|i| matches!(i, BaiIssue::NonFiniteCurveVertex { .. }))
+                .count(),
+            3,
             "{issues:?}"
         );
     }

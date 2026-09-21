@@ -386,6 +386,18 @@ fn aivehicledata_tolerates_absent_cg_and_flags_garbage() {
         data.warnings
     );
 
+    // A present-but-non-numeric CG warns like MaxAng — malformed does
+    // not silently read as absent.
+    let src = AIVEHICLE.replace("CG 0.000026 0.819497 0.170570", "CG soon 0.0 0.0");
+    let tune = TuneFile::parse(&src).unwrap();
+    let data = AiVehicleData::from_tune(&tune).unwrap();
+    assert_eq!(data.cg, None);
+    assert!(
+        data.warnings.iter().any(|w| w.contains("CG")),
+        "{:?}",
+        data.warnings
+    );
+
     // Missing required fields and wrong roots still fail.
     let src = AIVEHICLE.replace("Mass 585.095459\r\n", "");
     let tune = TuneFile::parse(&src).unwrap();

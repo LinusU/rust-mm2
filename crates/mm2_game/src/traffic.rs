@@ -270,7 +270,18 @@ pub fn plan_ambient(
     let eligible: Vec<LaneId> = graph
         .lanes()
         .iter()
-        .filter(|l| l.arc.is_some() && !overrides.is_closed(l.id.road))
+        // `arc.is_some()` is the routable-vehicle test; the finiteness
+        // guard is belt-and-braces — `NavGraph::build` already drops
+        // non-finite curves with `NavIssue::NonFiniteLane`, and a NaN
+        // length here would panic `sample_storage`'s clamp while an
+        // inf length would spawn at NaN positions past the bubble
+        // check.
+        .filter(|l| {
+            l.arc.is_some()
+                && l.length.is_finite()
+                && l.vertices().iter().all(|p| p.iter().all(|c| c.is_finite()))
+                && !overrides.is_closed(l.id.road)
+        })
         .map(|l| l.id)
         .collect();
 

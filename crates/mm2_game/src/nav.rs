@@ -301,6 +301,20 @@ pub enum NavIssue {
         /// Index among curves of the same kind on that side.
         index: usize,
     },
+    /// A curve carries a non-finite vertex or length — raw BAI floats
+    /// are untrusted, and a NaN/`inf` here would otherwise poison every
+    /// sampled position. Vehicle curves drop out of their arc; other
+    /// kinds stay queryable but unsampleable.
+    NonFiniteLane {
+        /// BAI road index.
+        road: usize,
+        /// Authored side.
+        side: Side,
+        /// Curve kind.
+        kind: LaneKind,
+        /// Index among curves of the same kind on that side.
+        index: usize,
+    },
     /// Authored per-vertex distances were absent or not monotone;
     /// cumulative distances were recomputed from vertex positions.
     LaneDistancesRecomputed {
@@ -337,6 +351,15 @@ impl fmt::Display for NavIssue {
             } => write!(
                 f,
                 "road {road} {side} {kind:?} lane {index}: degenerate curve"
+            ),
+            NavIssue::NonFiniteLane {
+                road,
+                side,
+                kind,
+                index,
+            } => write!(
+                f,
+                "road {road} {side} {kind:?} lane {index}: non-finite curve data"
             ),
             NavIssue::LaneDistancesRecomputed {
                 road,
@@ -1491,8 +1514,11 @@ fn push_lane(
     road: usize,
     issues: &mut Vec<NavIssue>,
 ) -> Option<usize> {
-    let valid_cum =
-        authored.is_some_and(|c| c.len() == points.len() && c.windows(2).all(|w| w[1] >= w[0]));
+    let valid_cum = authored.is_some_and(|c| {
+        c.len() == points.len()
+            && c.iter().all(|v| v.is_finite())
+            && c.windows(2).all(|w| w[1] >= w[0])
+    });
     let cum: Vec<f32> = if valid_cum {
         authored.unwrap().to_vec()
     } else {
@@ -1517,6 +1543,19 @@ fn push_lane(
     let length = cum.last().copied().unwrap_or(0.0);
     if points.len() < 2 || length <= f32::EPSILON {
         issues.push(NavIssue::DegenerateLane {
+            road,
+            side: id.side,
+            kind: id.kind,
+            index: id.index as usize,
+        });
+        return None;
+    }
+    // BAI vertices are raw untrusted f32 bits: a NaN/inf coordinate or
+    // length must never enter the graph — `sample_storage`'s clamp
+    // panics on a NaN bound and a NaN position slips past distance
+    // checks.
+    if !length.is_finite() || !points.iter().all(|p| p.iter().all(|c| c.is_finite())) {
+        issues.push(NavIssue::NonFiniteLane {
             road,
             side: id.side,
             kind: id.kind,

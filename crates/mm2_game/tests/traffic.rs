@@ -3,7 +3,7 @@
 //! pedestrian-only sides, the player bubble, unspawnable classes and
 //! plan bounds (F10-AC01's data slice).
 
-use mm2_formats::bai::{Bai, Culling, Intersection, Road, RoadSection, RoadSide};
+use mm2_formats::bai::{Bai, Culling, Intersection, Road, RoadSection, RoadSide, Side};
 use mm2_formats::veh::AiVehicleData;
 use mm2_game::*;
 
@@ -363,6 +363,73 @@ fn plan_never_spawns_inside_the_player_bubble() {
             s.sample.position
         );
     }
+}
+
+/// A corrupt or modded `.bai` can author non-finite lane geometry —
+/// lane vertices are raw `f32` bits. The graph drops such curves with
+/// `NavIssue::NonFiniteLane` and the planner never sees them; before
+/// the fix, a NaN-length lane reached `sample_storage`'s
+/// `s.clamp(0.0, lane.length)`, which panics on a NaN bound, and an
+/// inf-length lane produced NaN spawn positions that slipped past the
+/// player-bubble check.
+#[test]
+fn plan_skips_non_finite_lane_geometry() {
+    let mut b = bai(vec![road_x(0, 0.0, 0), road_x(1, 20.0, 0)]);
+    // Road 1 right lane: NaN vertex with the authored distances
+    // dropped, so the recomputed length is NaN — the old panic path.
+    b.roads[1].right.lane_vertices[0][1][0] = f32::NAN;
+    b.roads[1].right.lane_distances[0].clear();
+    // Road 1 left lane: +inf vertex under still-valid authored
+    // distances — finite length, non-finite samples (the sibling case).
+    b.roads[1].left.lane_vertices[0][0][2] = f32::INFINITY;
+    // Road 0 right lane: a non-finite authored distance under finite
+    // vertices — recomputed, not dropped.
+    b.roads[0].right.lane_distances[0][1] = f32::NAN;
+
+    let build = NavGraph::build(&b);
+    for side in [Side::Right, Side::Left] {
+        assert!(
+            build.issues.iter().any(|i| matches!(
+                i,
+                NavIssue::NonFiniteLane {
+                    road: 1,
+                    side: s,
+                    kind: LaneKind::Vehicle,
+                    ..
+                } if *s == side
+            )),
+            "missing NonFiniteLane for road 1 {side}: {:?}",
+            build.issues
+        );
+    }
+    assert!(
+        build
+            .issues
+            .iter()
+            .any(|i| matches!(i, NavIssue::LaneDistancesRecomputed { road: 0, .. })),
+        "{:?}",
+        build.issues
+    );
+
+    let r = roster(&[("va_a", 1.0)]);
+    let plan = plan_ambient(
+        &build.graph,
+        &NavOverrides::default(),
+        &r,
+        5,
+        1.0,
+        FAR_AWAY,
+        &SpawnPolicy::default(),
+    );
+    assert_eq!(plan.eligible_lanes, 2, "only road 0's lanes survive");
+    assert_eq!(plan.spawns.len(), plan.target);
+    assert!(plan.spawns.iter().all(|s| s.lane.road == 0));
+    assert!(
+        plan.spawns
+            .iter()
+            .all(|s| s.sample.position.iter().all(|c| c.is_finite())),
+        "non-finite spawn position"
+    );
 }
 
 #[test]
