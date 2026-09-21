@@ -26,6 +26,7 @@ use mm2_formats::bnd::BndFile;
 use mm2_formats::pkg::Pkg;
 use mm2_formats::tune::TuneFile;
 use mm2_formats::veh::AiVehicleData;
+use mm2_game::nav::NavOverrides;
 use mm2_game::traffic::{AmbientRoster, AmbientSpec};
 
 use crate::expect::EXPECTED_AMBIENTS;
@@ -125,6 +126,87 @@ pub fn ambient_roster_from_aimap(vfs: &Vfs, aimap: &Aimap) -> (AmbientRoster, Ve
         })
         .collect();
     (AmbientRoster::new(entries), diagnostics)
+}
+
+/// Everything a session needs to run ambient traffic over a city: the
+/// roster to draw classes from, the merged navigation overrides, and
+/// the density each authored layer set.
+#[derive(Debug)]
+pub struct AmbientSetup {
+    /// Roster to draw classes from. An event aimap's non-empty
+    /// `[Ambient Types/Density]` replaces the city's roster — authored
+    /// event rosters (retail `race/london/roam.aimap{,_p}`) exist for
+    /// exactly that purpose; an empty event table leaves the city's.
+    pub roster: AmbientRoster,
+    /// Navigation overrides merged from the city aimap plus the event
+    /// aimap, the event layer winning: its `[Exceptions]` rows prepend
+    /// (so `speed_limit`'s first-match lookup prefers them), its closed
+    /// roads union in, and its `[Speed Limit]`/`[Ambients Drive On The
+    /// Left]` supersede the city's when authored.
+    pub overrides: NavOverrides,
+    /// `[Density]` the event aimap authored, when any.
+    pub event_density: Option<f32>,
+    /// `[Density]` the city aimap authored, when any.
+    pub city_density: Option<f32>,
+    /// Non-fatal diagnostics (per-row tuning load failures).
+    pub diagnostics: Vec<String>,
+}
+
+/// Build the session's ambient configuration: `city/<city>.aimap`
+/// supplies the baseline roster and overrides; `event_aimap` — the
+/// difficulty-selected record `opponents::event_aimap` resolves —
+/// layers its authored overrides on top. `Ok(None)` when no layer
+/// authors a roster (no aimap, or every table empty).
+pub fn ambient_setup(
+    vfs: &Vfs,
+    city: &str,
+    event_aimap: Option<&Aimap>,
+) -> Result<Option<AmbientSetup>, TrafficLoadError> {
+    let city_aimap = load_city_aimap(vfs, city)?;
+    // An event's non-empty table replaces the city's roster (see the
+    // struct docs); otherwise the city roster stands.
+    let roster_src = event_aimap
+        .filter(|e| !e.ambient_types.is_empty())
+        .or(city_aimap.as_ref());
+    let Some(src) = roster_src else {
+        return Ok(None);
+    };
+    let (roster, diagnostics) = ambient_roster_from_aimap(vfs, src);
+
+    let mut overrides = city_aimap
+        .as_ref()
+        .map(NavOverrides::from_aimap)
+        .unwrap_or_default();
+    if let Some(ev) = event_aimap {
+        overrides.closed_roads.extend(
+            ev.exceptions
+                .iter()
+                .filter(|e| e.density <= 0.0)
+                .filter_map(|e| u16::try_from(e.road).ok()),
+        );
+        // Event rows first: `speed_limit`'s first-match lookup must
+        // prefer the event layer.
+        overrides.exceptions = ev
+            .exceptions
+            .iter()
+            .cloned()
+            .chain(overrides.exceptions)
+            .collect();
+        if ev.speed_limit.is_some() {
+            overrides.default_speed_limit = ev.speed_limit;
+        }
+        if ev.drive_on_left.is_some() {
+            overrides.drive_on_left = ev.drive_on_left;
+        }
+    }
+
+    Ok(Some(AmbientSetup {
+        roster,
+        overrides,
+        event_density: event_aimap.and_then(|e| e.density),
+        city_density: city_aimap.and_then(|a| a.density),
+        diagnostics,
+    }))
 }
 
 /// Resolution state of one asset a rostered ambient class needs.

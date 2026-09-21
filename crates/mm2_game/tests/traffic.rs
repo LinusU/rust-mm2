@@ -3,7 +3,7 @@
 //! pedestrian-only sides, the player bubble, unspawnable classes and
 //! plan bounds (F10-AC01's data slice).
 
-use mm2_formats::bai::{Bai, Culling, Intersection, Road, RoadSection, RoadSide, Side};
+use mm2_formats::bai::{Bai, Culling, Intersection, Road, RoadEnd, RoadSection, RoadSide, Side};
 use mm2_formats::veh::AiVehicleData;
 use mm2_game::*;
 
@@ -67,6 +67,14 @@ fn dead_end() -> mm2_formats::bai::RoadEnd {
     }
 }
 
+fn connected(intersection: u32, road_index: u32) -> RoadEnd {
+    RoadEnd {
+        intersection,
+        intersection_road_index: road_index,
+        ..dead_end()
+    }
+}
+
 fn offset(pts: &[[f32; 3]], dx: f32, dz: f32) -> Vec<[f32; 3]> {
     pts.iter().map(|p| [p[0] + dx, p[1], p[2] + dz]).collect()
 }
@@ -110,6 +118,85 @@ fn bai(roads: Vec<Road>) -> Bai {
 /// Two parallel vehicle roads (0 and 1), each 100 m long.
 fn two_roads() -> NavGraph {
     NavGraph::build(&bai(vec![road_x(0, 0.0, 0), road_x(1, 20.0, 0)])).graph
+}
+
+/// A road along `centre` with `lanes` (edge distance, vertices) per
+/// side and caller-wired junction records.
+fn road_full(
+    id: u16,
+    centre: &[[f32; 3]],
+    lanes_per_side: usize,
+    start: RoadEnd,
+    end: RoadEnd,
+) -> Road {
+    let mk = |sign: f32| -> Vec<(f32, Vec<[f32; 3]>)> {
+        (0..lanes_per_side)
+            .map(|k| {
+                let o = sign * (1.5 + k as f32 * 2.25);
+                (o.abs(), offset(centre, o, 0.0))
+            })
+            .collect()
+    };
+    let right = side(0, &mk(1.0), centre.len());
+    let left = side(0, &mk(-1.0), centre.len());
+    let dists = cum(centre);
+    Road {
+        id,
+        flags: 0,
+        rooms: vec![1],
+        half_width: 7.5,
+        base_speed: 15.0,
+        right,
+        left,
+        sections: dists
+            .iter()
+            .enumerate()
+            .map(|(i, d)| section(*d, centre[i], [0.0, 0.0, 1.0]))
+            .collect(),
+        start,
+        end,
+    }
+}
+
+/// Two 100 m roads chained end-to-start at an intersection at z=100 —
+/// road 0 forward runs into road 1 forward; both other extremities are
+/// dead ends.
+fn chain(lanes_per_side: usize) -> (NavGraph, Vec<NavIssue>) {
+    let r0 = road_full(
+        0,
+        &[[0.0, 0.0, 0.0], [0.0, 0.0, 100.0]],
+        lanes_per_side,
+        dead_end(),
+        connected(0, 0),
+    );
+    let r1 = road_full(
+        1,
+        &[[0.0, 0.0, 100.0], [0.0, 0.0, 200.0]],
+        lanes_per_side,
+        connected(0, 1),
+        dead_end(),
+    );
+    let build = NavGraph::build(&bai_full(
+        vec![r0, r1],
+        vec![Intersection {
+            id: 0,
+            room: 1,
+            center: [0.0, 0.0, 100.0],
+            roads: vec![0, 1],
+        }],
+    ));
+    (build.graph, build.issues)
+}
+
+fn bai_full(roads: Vec<Road>, intersections: Vec<Intersection>) -> Bai {
+    Bai {
+        roads,
+        intersections,
+        culling: Culling {
+            large: vec![Vec::new()],
+            small: vec![Vec::new()],
+        },
+    }
 }
 
 /// Road 1's sides are pedestrian-only (ambientTypes 1) — no arcs.
@@ -439,4 +526,110 @@ fn nav_rng_next_f32_stays_in_unit_range() {
         let u = rng.next_f32();
         assert!((0.0..1.0).contains(&u), "{u}");
     }
+}
+
+// ---------- lane cursor (F10-A.2 runtime follow) ----------
+
+fn lane_id(road: u16, side: Side, index: u16) -> LaneId {
+    LaneId {
+        road,
+        side,
+        kind: LaneKind::Vehicle,
+        index,
+    }
+}
+
+#[test]
+fn cursor_advances_then_turns_then_dead_ends() {
+    let (g, issues) = chain(1);
+    assert!(issues.is_empty(), "{issues:?}");
+    let overrides = NavOverrides::default();
+    let mut rng = NavRng::new(42);
+    let mut cur = LaneCursor {
+        lane: lane_id(0, Side::Right, 0),
+        along: 90.0,
+    };
+
+    // Mid-lane: stays put, `along` is travel distance.
+    assert_eq!(
+        advance_lane_cursor(&g, &overrides, &mut cur, 5.0, &mut rng),
+        LaneAdvance::Along
+    );
+    assert_eq!(cur.lane, lane_id(0, Side::Right, 0));
+    assert_eq!(cur.along, 95.0);
+
+    // A step past the end turns onto road 1's forward lane and
+    // consumes the remainder there.
+    assert_eq!(
+        advance_lane_cursor(&g, &overrides, &mut cur, 10.0, &mut rng),
+        LaneAdvance::Turned
+    );
+    assert_eq!(cur.lane, lane_id(1, Side::Right, 0));
+    assert_eq!(cur.along, 5.0);
+
+    // Road 1's far end is a dead end — no legal exit at all.
+    let step = advance_lane_cursor(&g, &overrides, &mut cur, 200.0, &mut rng);
+    assert_eq!(step, LaneAdvance::DeadEnd);
+}
+
+#[test]
+fn cursor_faces_the_authored_travel_direction() {
+    let (g, _) = chain(1);
+    let overrides = NavOverrides::default();
+    let mut rng = NavRng::new(1);
+    // Left side travels -z on these +z roads: the sampled pose must
+    // face -z and advancing must move the car toward z=0.
+    let left = lane_id(0, Side::Left, 0);
+    let mut cur = LaneCursor {
+        lane: left,
+        along: 10.0,
+    };
+    let before = g.sample_lane(left, cur.along).unwrap();
+    assert!(before.tangent[2] < 0.0, "left side drives -z: {before:?}");
+    assert_eq!(
+        advance_lane_cursor(&g, &overrides, &mut cur, 5.0, &mut rng),
+        LaneAdvance::Along
+    );
+    let after = g.sample_lane(left, cur.along).unwrap();
+    assert!(after.position[2] < before.position[2]);
+    // The -z end of road 0 is a dead end.
+    assert_eq!(
+        advance_lane_cursor(&g, &overrides, &mut cur, 100.0, &mut rng),
+        LaneAdvance::DeadEnd
+    );
+}
+
+#[test]
+fn cursor_never_enters_a_closed_road() {
+    let (g, _) = chain(1);
+    let mut overrides = NavOverrides::default();
+    overrides.closed_roads.insert(1);
+    let mut rng = NavRng::new(7);
+    let mut cur = LaneCursor {
+        lane: lane_id(0, Side::Right, 0),
+        along: 95.0,
+    };
+    // The only exit leads onto closed road 1 — the car stops instead.
+    assert_eq!(
+        advance_lane_cursor(&g, &overrides, &mut cur, 10.0, &mut rng),
+        LaneAdvance::DeadEnd
+    );
+}
+
+#[test]
+fn cursor_keeps_its_lane_rank_across_a_turn() {
+    let (g, issues) = chain(2);
+    assert!(issues.is_empty(), "{issues:?}");
+    let overrides = NavOverrides::default();
+    let mut rng = NavRng::new(3);
+    // Inner lane (rank 1 of 2) on road 0 → rank 1 on road 1.
+    let mut cur = LaneCursor {
+        lane: lane_id(0, Side::Right, 1),
+        along: 98.0,
+    };
+    assert_eq!(
+        advance_lane_cursor(&g, &overrides, &mut cur, 10.0, &mut rng),
+        LaneAdvance::Turned
+    );
+    assert_eq!(cur.lane, lane_id(1, Side::Right, 1));
 }

@@ -220,6 +220,11 @@ pub fn headless_smoke(
                 contracts::publish_vehicle_telemetry,
                 race::reanchor_teleported_participants,
                 race::advance_race,
+                // F10-A.2: ambient lane-following + recycle/respawn —
+                // the headless record's `traf=` field reads the state
+                // these leave behind.
+                crate::traffic::drive_ambient,
+                crate::traffic::maintain_ambient,
             )
                 .chain(),
         )
@@ -446,6 +451,22 @@ pub fn headless_smoke(
             format!(" nav={}", s.strip_prefix("nav ").unwrap_or(&s))
         })
         .unwrap_or_default();
+    // F10-A.2 ambient evidence: live/target population plus the
+    // recycler counters. Absent on worlds without a rostered aimap so
+    // those records stay bit-identical.
+    let traf_detail = world_ecs
+        .get_resource::<crate::traffic::AmbientTraffic>()
+        .map(|t| {
+            let active = world_ecs
+                .iter_entities()
+                .filter(|e| e.get::<crate::traffic::AmbientCar>().is_some())
+                .count();
+            format!(
+                " traf={}/{} sp={} rec={} dead={} uns={}",
+                active, t.target, t.spawned, t.recycled, t.dead_ends, t.unspawnable
+            )
+        })
+        .unwrap_or_default();
     // Banger evidence: how many bound placements exist and how the
     // dormant → active → settled/broken machine left them at the
     // frame cap.
@@ -506,7 +527,7 @@ pub fn headless_smoke(
         .unwrap_or_default();
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{nav_detail}{bng_detail}{traction_detail}{profile_detail}{extra}",
+            "updates={frames} ticks={ticks} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{nav_detail}{traf_detail}{bng_detail}{traction_detail}{profile_detail}{extra}",
             driver.as_str(),
             session.phase().name(),
             moved = pos.map(|p| (p - spawn_pos).length()).unwrap_or(f32::NAN),

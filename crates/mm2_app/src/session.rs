@@ -214,6 +214,7 @@ pub fn drive_session(
             commands.remove_resource::<crate::progression::EventRewards>();
             commands.remove_resource::<crate::progression::SessionReport>();
             commands.remove_resource::<crate::nav_overlay::CityNav>();
+            commands.remove_resource::<crate::traffic::AmbientTraffic>();
             commands.remove_resource::<mm2_content::SurfaceTables>();
             // `TireConditions` stays: it is a system input (the impact
             // filter and telemetry read `Res` every frame), and
@@ -398,6 +399,7 @@ pub fn load_session_world(
         mm2_game::OpponentRoster,
         mm2_game::RewardTable,
         mm2_game::AvailabilityTable,
+        Option<mm2_formats::aimap::Aimap>,
     )> = None;
     // The event's stable save identity — recorded on the bound profile
     // once the session is live (F16 `selections.last_event`).
@@ -463,7 +465,13 @@ pub fn load_session_world(
                         "event pathset overlay stamped"
                     );
                 }
-                event_race = Some((def, setup.roster, setup.rewards, setup.availability));
+                event_race = Some((
+                    def,
+                    setup.roster,
+                    setup.rewards,
+                    setup.availability,
+                    setup.aimap,
+                ));
             }
             Err(e) => {
                 error!(error = %e, event = ?event_ref, "event failed to load");
@@ -732,12 +740,38 @@ pub fn load_session_world(
         }
     }
 
+    // F10-A.2: ambient traffic — the event aimap's authored overrides
+    // (roster replacement, `[Density]`, closed roads, speed limits)
+    // layer over the city's aimap; the final spawn pose is the bubble
+    // centre. Non-city worlds and predicted sessions get `None`.
+    if world_ok {
+        let (event_aimap, authored_density) = match &event_race {
+            Some((def, _, _, _, aimap)) => (aimap.as_ref(), Some(def.params.densities.traffic)),
+            None => (None, None),
+        };
+        if let Some(t) = crate::traffic::load_ambient_traffic(
+            &mut commands,
+            &vfs.0,
+            &config,
+            event_aimap,
+            authored_density,
+            owner,
+            &mut session,
+            spawn.position,
+            &mut assets.meshes,
+            &mut assets.images,
+            &mut assets.materials,
+        ) {
+            commands.insert_resource(t);
+        }
+    }
+
     // World built and the player exists — release control. Event
     // sessions go through the countdown instead: the race resource and
     // the participant's progress are inserted first so `advance_race`
     // can own the release (one `RaceStarted`, one unlock — AC03).
     match event_race {
-        Some((def, roster, rewards, availability)) => {
+        Some((def, roster, rewards, availability, _aimap)) => {
             commands
                 .entity(vehicle)
                 .insert((RaceProgress::new(&def), TargetSelection::default()));

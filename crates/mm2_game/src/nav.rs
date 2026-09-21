@@ -1447,25 +1447,36 @@ impl NavGraph {
             let Some(&arc_id) = route.steps.get(cursor.step) else {
                 return rest;
             };
-            let arc = self.arc(arc_id);
-            // Keep the same normalized inner→outer rank on the new arc.
-            let prev_arc = self.arc(route.steps[cursor.step - 1]);
-            let rank = prev_arc
-                .lanes
-                .iter()
-                .position(|id| *id == cursor.lane)
-                .map(|i| {
-                    if prev_arc.lanes.len() > 1 {
-                        i as f32 / (prev_arc.lanes.len() - 1) as f32
-                    } else {
-                        0.0
-                    }
-                })
-                .unwrap_or(0.0);
-            let pick = ((arc.lanes.len() - 1) as f32 * rank).round() as usize;
-            cursor.lane = arc.lanes[pick.min(arc.lanes.len() - 1)];
+            let Some(next) = self.transfer_lane(cursor.lane, arc_id) else {
+                return rest;
+            };
+            cursor.lane = next;
             cursor.distance = 0.0;
         }
+    }
+
+    /// The lane on `to` preserving `from`'s normalized inner→outer rank —
+    /// the lane-keeping rule [`NavGraph::advance_cursor`] applies at an
+    /// arc boundary and ambient traffic reuses when it turns through an
+    /// intersection. `None` when `from` has left the graph or `to`
+    /// carries no lanes.
+    pub fn transfer_lane(&self, from: LaneId, to: ArcId) -> Option<LaneId> {
+        let from_arc = self.arc(self.lane(from)?.arc?);
+        let rank = from_arc
+            .lanes
+            .iter()
+            .position(|id| *id == from)
+            .map(|i| {
+                if from_arc.lanes.len() > 1 {
+                    i as f32 / (from_arc.lanes.len() - 1) as f32
+                } else {
+                    0.0
+                }
+            })
+            .unwrap_or(0.0);
+        let to_arc = self.arc(to);
+        let pick = ((to_arc.lanes.len() - 1) as f32 * rank).round() as usize;
+        to_arc.lanes.get(pick).copied()
     }
 }
 

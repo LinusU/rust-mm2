@@ -94,6 +94,12 @@ pub struct EventSetup {
     /// rest. Enforcement is F17's menu flow — until then this is the
     /// honest record of what a `--event` launch bypassed.
     pub availability: mm2_game::AvailabilityTable,
+    /// The event's difficulty-selected aimap, parsed — ambient-traffic
+    /// overrides (`[Ambient Types/Density]`, `[Density]`,
+    /// `[Exceptions]`, `[Speed Limit]`) live in the same record the
+    /// opponent roster reads. `None` when no record resolves or parses
+    /// — ambient setup then runs on the city aimap alone.
+    pub aimap: Option<mm2_formats::aimap::Aimap>,
 }
 
 /// Resolve an `EventRef` through the VFS into the event's runtime
@@ -122,6 +128,13 @@ pub fn event_race_setup(
             mm2_game::OpponentRoster::default()
         }
     };
+    let aimap = match mm2_content::event_aimap(vfs, event, difficulty) {
+        Ok((aimap, _)) => Some(aimap),
+        Err(e) => {
+            warn!(error = %e, "event aimap unreadable — city ambient defaults apply");
+            None
+        }
+    };
     let rewards = mm2_content::reward_table(&catalog);
     for d in &rewards.diagnostics {
         warn!(diagnostic = %d, "reward row did not become a rule");
@@ -141,6 +154,7 @@ pub fn event_race_setup(
         roster,
         rewards,
         availability,
+        aimap,
     })
 }
 

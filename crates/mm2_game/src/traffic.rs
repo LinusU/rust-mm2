@@ -267,23 +267,7 @@ pub fn plan_ambient(
     };
     let target = (density * policy.max_active as f32).round() as usize;
 
-    let eligible: Vec<LaneId> = graph
-        .lanes()
-        .iter()
-        // `arc.is_some()` is the routable-vehicle test; the finiteness
-        // guard is belt-and-braces — `NavGraph::build` already drops
-        // non-finite curves with `NavIssue::NonFiniteLane`, and a NaN
-        // length here would panic `sample_storage`'s clamp while an
-        // inf length would spawn at NaN positions past the bubble
-        // check.
-        .filter(|l| {
-            l.arc.is_some()
-                && l.length.is_finite()
-                && l.vertices().iter().all(|p| p.iter().all(|c| c.is_finite()))
-                && !overrides.is_closed(l.id.road)
-        })
-        .map(|l| l.id)
-        .collect();
+    let eligible = eligible_lanes(graph, overrides);
 
     if roster.entries.is_empty() {
         issues.push(TrafficIssue::EmptyRoster);
@@ -303,38 +287,26 @@ pub fn plan_ambient(
             break;
         }
         for _ in 0..policy.placement_attempts {
-            let lane = *rng.pick(&eligible).expect("eligible is non-empty");
-            let l = graph.lane(lane).expect("eligible lanes exist");
-            let along = rng.next_f32() * l.length;
-            let sample = graph.sample_lane(lane, along).expect("a live lane samples");
-            let d = [
-                sample.position[0] - player_at[0],
-                sample.position[1] - player_at[1],
-                sample.position[2] - player_at[2],
-            ];
-            if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() < policy.min_player_distance {
-                continue;
-            }
-            match roster.pick(&mut rng) {
-                Some(class) if roster.spawnable(class) => {
-                    let road = graph.road(lane.road).expect("a live lane's road exists");
-                    spawns.push(SpawnDirective {
-                        class,
-                        lane,
-                        along,
-                        sample,
-                        target_speed: overrides.effective_speed(road),
-                    });
-                }
-                Some(class) => {
+            match draw_spawn(
+                graph,
+                overrides,
+                &eligible,
+                roster,
+                &mut rng,
+                player_at,
+                policy.min_player_distance,
+            ) {
+                SpawnDraw::InsideBubble => continue,
+                SpawnDraw::Placed(directive) => spawns.push(directive),
+                SpawnDraw::Unspawnable(class) => {
                     unspawnable += 1;
-                    let id = roster.entries[class].id.as_str();
-                    if flagged.insert(id) {
-                        issues.push(TrafficIssue::UnspawnableClass { id: id.to_string() });
+                    if let Some(class) = class {
+                        let id = roster.entries[class].id.as_str();
+                        if flagged.insert(id) {
+                            issues.push(TrafficIssue::UnspawnableClass { id: id.to_string() });
+                        }
                     }
                 }
-                // Non-closed weight table: the draw selects nothing.
-                None => unspawnable += 1,
             }
             continue 'draws;
         }
@@ -352,4 +324,158 @@ pub fn plan_ambient(
         policy: policy.clone(),
         issues,
     }
+}
+
+/// Lanes ambient traffic may spawn on: routed through an arc
+/// (`arc.is_some()` is the routable-vehicle test — `NavGraph::build`
+/// withholds arcs from pedestrian-only/disabled road sides), finite
+/// geometry, and not on a road the event overrides close. Dead ends
+/// stay eligible — a car that runs out of road despawns at runtime
+/// rather than being pre-filtered here.
+///
+/// The finiteness guard is belt-and-braces — `NavGraph::build` already
+/// drops non-finite curves with `NavIssue::NonFiniteLane`, and a NaN
+/// length here would panic `sample_storage`'s clamp while an inf
+/// length would spawn at NaN positions past the bubble check.
+pub fn eligible_lanes(graph: &NavGraph, overrides: &NavOverrides) -> Vec<LaneId> {
+    graph
+        .lanes()
+        .iter()
+        .filter(|l| {
+            l.arc.is_some()
+                && l.length.is_finite()
+                && l.vertices().iter().all(|p| p.iter().all(|c| c.is_finite()))
+                && !overrides.is_closed(l.id.road)
+        })
+        .map(|l| l.id)
+        .collect()
+}
+
+/// The result of one spawn-placement attempt.
+#[derive(Debug)]
+pub enum SpawnDraw {
+    /// A directive was placed.
+    Placed(SpawnDirective),
+    /// The sampled position fell inside `min_player_distance` of the
+    /// player — the caller retries on a fresh lane sample.
+    InsideBubble,
+    /// The class draw selected an unspawnable row (`Some`) or fell off
+    /// a non-closed weight table (`None`) — this slot produces nothing;
+    /// the authored band is never rebalanced.
+    Unspawnable(Option<usize>),
+}
+
+/// One spawn-placement attempt — [`plan_ambient`] retries it
+/// `policy.placement_attempts` times per directive and the runtime
+/// recycler reuses it to top the population back up.
+pub fn draw_spawn(
+    graph: &NavGraph,
+    overrides: &NavOverrides,
+    eligible: &[LaneId],
+    roster: &AmbientRoster,
+    rng: &mut NavRng,
+    player_at: [f32; 3],
+    min_player_distance: f32,
+) -> SpawnDraw {
+    let lane = *rng.pick(eligible).expect("eligible is non-empty");
+    let l = graph.lane(lane).expect("eligible lanes exist");
+    let along = rng.next_f32() * l.length;
+    let sample = graph.sample_lane(lane, along).expect("a live lane samples");
+    let d = [
+        sample.position[0] - player_at[0],
+        sample.position[1] - player_at[1],
+        sample.position[2] - player_at[2],
+    ];
+    if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() < min_player_distance {
+        return SpawnDraw::InsideBubble;
+    }
+    match roster.pick(rng) {
+        Some(class) if roster.spawnable(class) => {
+            let road = graph.road(lane.road).expect("a live lane's road exists");
+            SpawnDraw::Placed(SpawnDirective {
+                class,
+                lane,
+                along,
+                sample,
+                target_speed: overrides.effective_speed(road),
+            })
+        }
+        // Some(unspawnable) or a non-closed weight table's None: the
+        // draw selects nothing.
+        other => SpawnDraw::Unspawnable(other),
+    }
+}
+
+/// A car's position on the authored network — lane plus
+/// travel-direction distance, the same convention
+/// [`crate::nav::RouteCursor::distance`] uses.
+/// [`NavGraph::sample_lane`] converts it to a world pose facing the
+/// authored travel direction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LaneCursor {
+    /// Lane the car is travelling on.
+    pub lane: LaneId,
+    /// Distance travelled along the lane.
+    pub along: f32,
+}
+
+/// What [`advance_lane_cursor`] did with the step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneAdvance {
+    /// Still on the same lane.
+    Along,
+    /// Crossed into a new lane through an intersection exit.
+    Turned,
+    /// No legal open exit — the car has run out of road.
+    DeadEnd,
+}
+
+/// Advance `cursor` `ds` metres along the authored network, choosing a
+/// seeded legal exit at each lane end. Exits onto roads the overrides
+/// close are excluded, so closed roads are never entered; a car
+/// already on one runs to its end and stops. Lane rank is preserved
+/// across the crossing ([`NavGraph::transfer_lane`]), matching the
+/// router's lane choice. `DeadEnd` means the car has run out of road —
+/// the caller despawns/recycles it; the intersection controller
+/// (F10-B) will later queue instead.
+pub fn advance_lane_cursor(
+    graph: &NavGraph,
+    overrides: &NavOverrides,
+    cursor: &mut LaneCursor,
+    ds: f32,
+    rng: &mut NavRng,
+) -> LaneAdvance {
+    let mut rest = ds.max(0.0);
+    let mut turned = false;
+    // Bound the crossing loop — a degenerate graph must terminate.
+    for _ in 0..64 {
+        let Some(lane) = graph.lane(cursor.lane) else {
+            return LaneAdvance::DeadEnd;
+        };
+        let remaining = (lane.length - cursor.along).max(0.0);
+        if rest < remaining {
+            cursor.along += rest;
+            return if turned {
+                LaneAdvance::Turned
+            } else {
+                LaneAdvance::Along
+            };
+        }
+        rest -= remaining;
+        let exits: Vec<crate::nav::ArcExit> = graph
+            .legal_exits(cursor.lane)
+            .into_iter()
+            .filter(|e| !overrides.is_closed(graph.arc(e.to).road))
+            .collect();
+        let Some(exit) = rng.pick(&exits).copied() else {
+            return LaneAdvance::DeadEnd;
+        };
+        let Some(next) = graph.transfer_lane(cursor.lane, exit.to) else {
+            return LaneAdvance::DeadEnd;
+        };
+        cursor.lane = next;
+        cursor.along = 0.0;
+        turned = true;
+    }
+    LaneAdvance::DeadEnd
 }

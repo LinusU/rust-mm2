@@ -1,81 +1,99 @@
 # Last implementation iteration
 
-- Task ID and title: F10-A.1 review repair — non-finite BAI lane
-  geometry panics `plan_ambient`. External review #12 (verdict fail)
-  had exactly one blocking finding; per the iteration contract a
-  failing review is repaired before any new feature work.
-- Starting commit: `a14263a451def609000878608c528ffc8c05a93b` on
+- Task ID and title: F10-A.2 — runtime ambient traffic: the seeded
+  spawn plan's consumer. External review #12 passed F10-A.1 and noted
+  nothing consumes `plan_ambient`; this slice is the runtime leg the
+  plan recorded as remaining.
+- Starting commit: `8051e2eb890ea061e8d275d072876895bf8c039d` on
   `ralph/night`; tree was clean.
-
-## Root cause
-
-`Bai` lane vertices are raw `f32::from_bits` with no finiteness check.
-`push_lane` (nav.rs) computed `length` from the cumulative distances
-and admitted a NaN length because `NaN <= f32::EPSILON` is false — no
-`NavIssue` emitted. `plan_ambient` sweeps every eligible lane every
-draw, so `along = rng.next_f32() * l.length` became NaN and
-`sample_storage`'s `s.clamp(0.0, lane.length)` panicked on the NaN
-bound (verified by the reviewer). Sibling case: a `+inf` length gave
-`0.0 * inf = NaN` positions that passed the player-bubble check
-(`NaN < min` is false). Prior consumers never hit it: `nearest_lane`'s
-distance filter never selects a NaN lane and the nav overlay's
-`while s < lane.length` loop skips it. A corrupt or modded `.bai`
-(mod content is in scope) turned ambient planning into a deterministic
-crash.
 
 ## What changed
 
-- `crates/mm2_game/src/nav.rs` — new `NavIssue::NonFiniteLane`
-  (road/side/kind/index, mirrors `DegenerateLane`). `push_lane` now
-  requires authored distances finite + monotone (else recompute from
-  vertices with the existing `LaneDistancesRecomputed` issue), finite
-  vertices and finite length — offenders drop out of the graph with the
-  new issue instead of being admitted.
-- `crates/mm2_game/src/traffic.rs` — `plan_ambient`'s eligible-lane
-  filter re-checks `l.length.is_finite()` and finite vertices
-  (belt-and-braces; the graph already guarantees it).
-- `crates/mm2_formats/src/bai.rs` — `Bai::validate` reports the new
-  `BaiIssue::NonFiniteCurveVertex` (road/side/kind lane|tram|train/
-  curve/first-bad-vertex; one issue per curve) so `mm2-inspect bai`
-  audits corrupt geometry instead of reporting the file clean.
-- `crates/mm2_formats/src/veh.rs` — non-blocking review notes folded
-  in: malformed `CG` now warns like `MaxAng` through a shared
-  `opt_vec3` helper (a malformed optional vector is no longer
-  indistinguishable from an absent one), and the "All 25 retail
-  records" doc is corrected to the measured 23.
-- Docs: `docs/ralph/PLAN.md` (F10-A.1 row, F09-A.1 validate coverage,
-  selection-policy header).
+- `mm2_game::traffic` — the plan's inline lane pick refactored into
+  `eligible_lanes` (routable arc, finite length/vertices, not closed)
+  and `draw_spawn` (one deterministic class+position draw returning
+  `Placed`/`InsideBubble`/`Unspawnable`) so the runtime respawner runs
+  the same logic the planner used. New `LaneCursor { lane, along }`
+  (travel-direction distance) plus `advance_lane_cursor`: walks the
+  lane, then at its end picks a seeded legal exit through
+  `NavGraph::transfer_lane` (new — `advance_cursor`'s turn math
+  extracted), preserving lane rank and skipping closed destination
+  roads; `DeadEnd` is an explicit result for runtime despawn.
+- `mm2_content` — `opponents::event_aimap` extracted (difficulty-
+  selected aimap with the same cross-fallback `opponent_roster` used;
+  `EventAimap` records which variant won). `traffic::ambient_setup`
+  merges city + event aimap layers: a non-empty event roster replaces
+  the city's, `NavOverrides` merge (closed roads unioned, event
+  exceptions first so event speed limits win), event `[Speed Limit]`/
+  left-driving override the city's. `assemble::ambient_vehicle` loads
+  `geometry/<id>.pkg` + `.mtx` + optional `bound/<id>_bound.bnd` —
+  `aivehicledata` is deliberately not converted to a `VehicleConfig`
+  (it authors no drivetrain).
+- `mm2_app::traffic` (new) — `AmbientTraffic` resource (graph,
+  merged overrides, roster, eligible lanes, a second `NavRng` stream
+  for runtime draws, counters) and `AmbientCar` component.
+  `load_ambient_traffic` runs `plan_ambient` and spawns session-owned
+  kinematic rigid bodies with bound-convex-hull (or authored `Size`
+  box fallback) colliders and the real `va_*` model. `drive_ambient`
+  (FixedLast, after the solver) walks each cursor, re-poses from the
+  sampled lane, refreshes per-road effective speed on turns and
+  despawns dead ends. `maintain_ambient` despawns cars outside the
+  recycle bubble and respawns through `draw_spawn` to the density
+  target, bounded per tick by `placement_attempts`.
+- `session::load_session_world` — `EventSetup` gained the parsed
+  event aimap; ambient load runs after the player spawns (its pose is
+  the bubble centre); teardown removes the resource. `main.rs` and
+  `smoke.rs` register `drive_ambient`/`maintain_ambient` in the
+  `FixedLast` chain after `advance_race`; the headless record gained
+  `traf={active}/{target} sp=… rec=… dead=… uns=…` — absent on worlds
+  with no roster so older records stay bit-identical.
 
 ## Evidence
 
-- `cargo test -p mm2_game --test traffic` — 9 pass, incl. the new
-  `plan_skips_non_finite_lane_geometry` regression: a NaN-vertex lane
-  with dropped distances (the old panic path) and an inf vertex under
-  valid authored distances (the sibling NaN-position path) both surface
-  as `NonFiniteLane`, the plan runs, only road 0's two lanes stay
-  eligible, every spawn is finite; a non-finite authored distance row
-  recomputes instead of dropping.
-- `cargo test -p mm2_formats` — 115 unit + 13 vehicle-format tests
-  pass, incl. `validate_flags_non_finite_curve_vertices` (lane/tram
-  kinds, per-curve reporting) and the new malformed-CG leg in
-  `aivehicledata_tolerates_absent_cg_and_flags_garbage`.
+- `cargo test -p mm2_game --test traffic` — 13 pass, incl. new
+  `cursor_advances_then_turns_then_dead_ends`,
+  `cursor_faces_the_authored_travel_direction`,
+  `cursor_never_enters_a_closed_road`,
+  `cursor_keeps_its_lane_rank_across_a_turn`.
+- `cargo test -p mm2_app --test traffic` — 4 pass on a synthetic
+  install (CAI1 two-road chain + PSDL + aimap + `va_*` fixtures)
+  through the real `load_session_world`: seeded placement on authored
+  lanes outside the bubble and identical replay under the same seed;
+  lane-following advances survivors, dead ends despawn and the
+  recycler refills to target; an event aimap `[Density] 0.0` authors
+  the population off over the city's `0.25` (AC06's consumption leg);
+  teardown removes the resource and a restart replans.
+- Retail headless smoke:
+  `mm2 --mm2-path <retail> --city sf --headless --frames 600` →
+  `status=pass … traf=16/16 sp=140 rec=124 dead=0 uns=0` — 1212
+  eligible lanes, density 0.5 → target 16, seeded plan placed 16/16,
+  the recycler churned distant cars back to the bubble over 10 s
+  (`sp=140` counts respawns; `dead=0` on a live graph is expected —
+  cars recycle by distance before running out of road).
 - `cargo fmt --all -- --check` — PASS.
-- `cargo clippy --locked --workspace --all-targets --all-features --
-  -D warnings` — PASS.
-- `cargo test --locked --workspace` — PASS, all suites, 0 failures.
+- `cargo clippy --workspace --all-targets --all-features -D warnings`
+  — PASS.
+- `cargo test --workspace` — PASS, 49 suites, 0 failures.
 
 ## Still open
 
-- Unchanged from the F10-A.1 slice: no runtime ambient entities,
-  lane-following or collision yet — F10-A's ACs and F10-B remain unmet.
-- `SpawnPolicy`'s pool/distance bounds remain designed values (UNK-12).
+- F10-AC02/AC03 remain unmet: no intersection controller, signals,
+  right-of-way, queueing, obstruction response, stuck recovery or
+  collision-response fidelity. Ambient cars are kinematic lane
+  followers — their hull blocks the player, nothing more.
+- Spawn-vs-spawn overlap is still unchecked (F10-AC04's "reject
+  occupied space" leg) — `draw_spawn` only enforces the player bubble.
+- The recycle policy churns on a large city (140 spawns / 10 s on sf):
+  `draw_spawn` places anywhere outside the 60 m bubble including
+  beyond the 400 m recycle radius, so far placements recycle
+  immediately. Bounded by `placement_attempts` but wasteful — a
+  candidate tighten-up (draw inside the recycle annulus) for a later
+  slice.
+- `SpawnPolicy` bounds and the density precedence chain
+  (event aimap → authored table dial → city aimap → config) are
+  designed values (UNK-12) — the original layering is unverified.
+- `maintain_ambient` reads the first `PlayerVehicle` position —
+  remote-player bubbles and per-player populations are F10-B+ scope.
 - Remaining non-blocking review notes not taken this round:
-  `TrafficAudit::discovered()` counts rostered ids whose tune file
-  never resolved (slightly inflates "discovered" on partial installs);
-  the two thin city-aimap resolve/read/parse wrappers
-  (`load_city_aimap` vs `load_nav_overrides`) could share a helper.
-- Retail `mm2-inspect bai /Users/linus/coding/rust-mm2/retail --strict`
-  re-run: identical to baseline — 5 parsed, 2 unsupported extras, exit
-  2 on the same 2 pre-existing `sfai.bai` issues; the new
-  `NonFiniteCurveVertex` check fires zero times on retail data (it only
-  reports corrupt/modded files).
+  `TrafficAudit::discovered()` counts rostered-but-unresolved ids;
+  the two thin city-aimap wrappers could share a helper.

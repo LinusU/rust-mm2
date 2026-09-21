@@ -344,6 +344,40 @@ fn load_trailer(
     ))
 }
 
+/// Ambient (`va_*`) vehicle assembly: geometry + transforms + bound.
+/// Ambient cars are not catalog vehicles — their `aivehicledata` tune
+/// carries no drivetrain, so there is no `VehicleConfig` to convert;
+/// the roster resolves the tune separately. The `.pkg`/`.mtx`/`.bnd`
+/// set resolves through the same VFS paths a stock car's does.
+#[derive(Debug)]
+pub struct AmbientVehicle {
+    /// Roster id (`va_*`).
+    pub id: String,
+    /// Intermediate visual model.
+    pub model: VehicleModel,
+    /// Parsed bound, when it resolves and parses.
+    pub bound: Option<BndFile>,
+}
+
+/// Load one ambient class's visual/physical assets. `geometry/<id>.pkg`
+/// is required — a class whose model does not resolve cannot spawn;
+/// the bound is optional (the runtime falls back to a hull over the
+/// tuning's authored `Size`).
+pub fn ambient_vehicle(vfs: &Vfs, id: &str) -> Result<AmbientVehicle, LoadError> {
+    let logical = format!("geometry/{id}.pkg");
+    let (bytes, _) = read(vfs, &logical, id, "model")?;
+    let pkg =
+        Pkg::parse(&bytes).map_err(|e| LoadError::Parse(id.into(), format!("{logical}: {e}")))?;
+    let model = build_model(&pkg, |stem| load_mtx(vfs, id, stem));
+    let bound = read_opt(vfs, &format!("bound/{id}_bound.bnd"))
+        .and_then(|(bytes, _)| BndFile::parse(&String::from_utf8_lossy(&bytes)).ok());
+    Ok(AmbientVehicle {
+        id: id.to_string(),
+        model,
+        bound,
+    })
+}
+
 /// Convenience: catalog scan + vehicle load in one call.
 pub fn load_by_id(vfs: &Vfs, query: &str, paint: usize) -> Result<VehicleDef, LoadError> {
     let catalog = VehicleCatalog::scan(vfs);

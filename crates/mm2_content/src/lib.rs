@@ -25,7 +25,10 @@ pub mod rewards;
 pub mod surface;
 pub mod traffic;
 
-pub use assemble::{LoadError, TrailerDef, VehicleDef, load_by_id, load_opponent, load_vehicle};
+pub use assemble::{
+    AmbientVehicle, LoadError, TrailerDef, VehicleDef, ambient_vehicle, load_by_id, load_opponent,
+    load_vehicle,
+};
 pub use availability::availability_table;
 pub use catalog::{
     CatalogEntry, DepSet, EXPECTED_STOCK_ROSTER, EntryStatus, VehicleCatalog, VehicleClass,
@@ -50,8 +53,8 @@ pub use model::{
 };
 pub use nav::{NavLoadError, load_nav_graph, load_nav_overrides};
 pub use opponents::{
-    ExtraRoster, OpponentReport, RosterBuild, RosterBuildError, RosterEntry, RosterSummary,
-    audit_roster, opponent_roster,
+    EventAimap, ExtraRoster, OpponentReport, RosterBuild, RosterBuildError, RosterEntry,
+    RosterSummary, audit_roster, event_aimap, opponent_roster,
 };
 pub use race_def::{
     PLAYER_SLOT, RaceBuildError, RaceDefBuild, RaceDefEntry, RaceDefReport, RaceDefSummary,
@@ -62,6 +65,6 @@ pub use surface::{
     PsdlSurfaces, SurfaceLoadError, SurfaceSlot, SurfaceTables, load_surface_tables,
 };
 pub use traffic::{
-    AmbientAssets, AssetCheck, EventOverride, TrafficAudit, TrafficLoadError, ambient_roster,
-    ambient_roster_from_aimap, load_city_aimap,
+    AmbientAssets, AmbientSetup, AssetCheck, EventOverride, TrafficAudit, TrafficLoadError,
+    ambient_roster, ambient_roster_from_aimap, ambient_setup, load_city_aimap,
 };

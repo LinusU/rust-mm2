@@ -69,25 +69,28 @@ pub enum RosterBuildError {
     },
 }
 
-/// Build the difficulty-selected opponent roster for a catalog event.
-///
-/// The event must be `Ready` — like [`crate::race_definition`], the
-/// producer refuses incomplete content rather than racing a partial
-/// authored set. A built roster can still carry [`OpponentIssue`]s;
-/// those are authored-data problems the runtime should see, not
-/// reasons to reject the event.
-pub fn opponent_roster(
+/// Which aimap record [`event_aimap`] resolved, beyond the parse.
+#[derive(Debug, Clone)]
+pub struct EventAimap {
+    /// Difficulty tag of the record used (`'a'`/`'p'`) — `.opp` route
+    /// records are checked against it.
+    pub tag: char,
+    /// Difficulty whose record was used — differs from the requested
+    /// one when only the other variant shipped (see
+    /// [`OpponentIssue::MissingVariant`]).
+    pub used: Difficulty,
+}
+
+/// Resolve, read and parse an event's difficulty-selected aimap record
+/// — the shared pick `opponent_roster` and the ambient-traffic session
+/// setup both need: Professional prefers `<stem>.aimap_p`, Amateur
+/// `<stem>.aimap`, and when only one variant ships the other difficulty
+/// falls back to it (RACE-11).
+pub fn event_aimap(
     vfs: &Vfs,
     event: &CatalogEvent,
     difficulty: Difficulty,
-) -> Result<OpponentRoster, RosterBuildError> {
-    if !event.status.is_ready() {
-        return Err(RosterBuildError::NotReady(event.status.clone()));
-    }
-    if event.event_ref.table == EventTableKind::CrashCourse {
-        return Err(RosterBuildError::CrashCourseUnsupported);
-    }
-
+) -> Result<(Aimap, EventAimap), RosterBuildError> {
     let (preferred, fallback, preferred_tag) = match difficulty {
         Difficulty::Amateur => (RaceFileKind::Aimap, RaceFileKind::AimapP, 'a'),
         Difficulty::Professional => (RaceFileKind::AimapP, RaceFileKind::Aimap, 'p'),
@@ -128,12 +131,36 @@ pub fn opponent_roster(
             reason: e.to_string(),
         }
     })?;
+    Ok((aimap, EventAimap { tag, used }))
+}
+
+/// Build the difficulty-selected opponent roster for a catalog event.
+///
+/// The event must be `Ready` — like [`crate::race_definition`], the
+/// producer refuses incomplete content rather than racing a partial
+/// authored set. A built roster can still carry [`OpponentIssue`]s;
+/// those are authored-data problems the runtime should see, not
+/// reasons to reject the event.
+pub fn opponent_roster(
+    vfs: &Vfs,
+    event: &CatalogEvent,
+    difficulty: Difficulty,
+) -> Result<OpponentRoster, RosterBuildError> {
+    if !event.status.is_ready() {
+        return Err(RosterBuildError::NotReady(event.status.clone()));
+    }
+    if event.event_ref.table == EventTableKind::CrashCourse {
+        return Err(RosterBuildError::CrashCourseUnsupported);
+    }
+
+    let (aimap, picked) = event_aimap(vfs, event, difficulty)?;
+    let tag = picked.tag;
 
     let mut issues = Vec::new();
-    if used != difficulty {
+    if picked.used != difficulty {
         issues.push(OpponentIssue::MissingVariant {
             wanted: difficulty,
-            used,
+            used: picked.used,
         });
     }
 

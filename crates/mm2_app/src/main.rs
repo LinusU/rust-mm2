@@ -19,7 +19,7 @@ use clap::Parser;
 use mm2_app::session::{ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
     banger, camera, car_visual, city, contracts, input, menu, nav_overlay, opponents, pause,
-    profile, progression, race, results, scripted, session, smoke,
+    profile, progression, race, results, scripted, session, smoke, traffic,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
@@ -821,6 +821,10 @@ fn main() {
             // reset never sweeps a checkpoint (AC02).
             race::reanchor_teleported_participants,
             race::advance_race,
+            // F10-A.2: lane-following runs after the solver step; the
+            // recycler reads the poses it leaves (drive → maintain).
+            traffic::drive_ambient,
+            traffic::maintain_ambient,
         )
             .chain(),
     )
