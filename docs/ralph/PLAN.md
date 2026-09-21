@@ -38,8 +38,29 @@
 
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
-**Next selected slice: F13-B remainder, F14-B remainder, or F11-C** —
-the latest iteration landed the remaining authored-physicals leg of
+**Next selected slice: F15-A.2 opponent spawn/drive leg, F13-B/F14-B
+remainders, or F11-C** — the latest iteration landed F15-A.1, the
+opponent-roster import leg of F15-A: `mm2_game::opponent` declares
+`OpponentRoute`/`OpponentSpec`/`OpponentRoster`/`OpponentIssue`;
+`mm2_content::opponents::opponent_roster` builds a roster from a
+`CatalogEvent` — `<stem>.aimap` binds Amateur, `<stem>.aimap_p`
+Professional (explicit fallback when only the amateur file ships);
+each `[Opponent]` row wires vehicle id + `.opp` route + raw param
+tail (first kept as `skill`), route points preserved with every
+authored column. Roster issues (`MissingVariant`, `UnresolvedRoute`,
+`WrongDifficultyTag`, `CountMismatch`, `UnreferencedRoute`) are
+reported, not repaired; a wired-but-missing route keeps its authored
+slot. `OpponentReport::scan` + `mm2-inspect opponents` audit every
+event at both difficulties and list extra roster-bearing stems;
+retail: 64 builds/city, 0 failed, 26 unsupported (crash tables),
+271 london + 246 sf opponents wired, 0 unresolved vehicle ids,
+43+34 unreferenced route records, `sf/race0` amateur remains the only
+count mismatch; `--strict` exits 2. Ledger: RACE-12 new, RACE-11
+strengthened to an all-table measurement, UNK-11 narrowed to
+route/parameter semantics + the driving model. Still open under
+F15-A: spawning opponent entities, start slots, and the route-following
+production-vehicle controller (F15-A.2).
+The iteration before landed the remaining authored-physicals leg of
 F06-B (F06-B.2): `TireSurface` gains `drag` — the def's `drag` field
 consumed raw (`_default` authors 0.0, nothing to divide by) as a
 per-wheel viscous wading resistance (`-v_plane × drag × load` in the
@@ -299,6 +320,7 @@ inferred under UNK-21.
 || `mm2 --mm2-path <retail> --city sf --car vpddbus --spawn=-141.9,1.5,-608.5,115 --headless --frames 5000` | `status=pass` — `bng_ev=0a/5s/2b` at 10 000 ticks (bit-identical re-run): the post-F03-B.5 re-take of F04-C.2's flat-ground break+settle leg. The original `−170,1.5,−565,30` spawn now sits under the authored 51 888 limit (`0a/0s/0b` — corrected record); `--banger-pool 2`/`1` cap live fragments at 2/1; London `vpbug 802,6,-905,180` reclaim ring bit-identical; `checkpoint:7 --car vpddbus --spawn=-703,1.5,217,190` shatters two `sp_sawhrslt_f` at ~9–12 m/s. Full matrix in `docs/research/banger.md` §re-take. |
 
 || `mm2-inspect race-defs <retail> --table circuit` | exit 0 — 10/10 circuit rows/city build at both difficulties: london authored laps `3am/4pro` (except c1/c2 `2/2`, c9 `3/2`), sf `3/4` (except c8-9 `2/2`), 6–23 gates, 4–7 opp/0 cop, 1–8 start slots — every row binds its own authored lap/route config (CIR-5). |
+|| `mm2-inspect opponents <retail>` (post-F15-A.1) | exit 0 — 64 roster builds/city at both difficulties (0 failed, 26 unsupported = crash tables): london 271 opponents wired / 43 issues (all spare `.opp` records — incl. `blitz3`/`blitz4` routes on 0-opponent events), sf 246 / 35 (34 spare routes + `race0` amateur 6-wired-vs-7-authored, the RACE-11 anomaly and the only count mismatch anywhere). Extras `race/london/race12.aimap` (1 wired) + `race/sf/stunt0.aimap` (1 wired, dead `opp-c0.2` ref) listed. 0 unresolved vehicle ids — pro lineups field `vpcoop2k`/`vpvwcup`/`vpdb7`/`vppanoz`/`vppanozgt`. `--strict` exits 2. |
 || `mm2 --mm2-path <retail> --city london --event circuit:0 [--pro] --headless --bot` | `status=pass` — amateur `--frames 12000` → `race=Running cp=2/6 lap=2/3` at 23 640 ticks; `--pro --frames 4000` → `lap=2/4`: Ordered lap tracking + per-difficulty `NumLaps` binding on real content. The bot deterministically wedges mid-lap-2 at `(-413,-169)` — bot-limited, not a lap-logic defect (the earlier matrix recorded this event `outcome=finished` under the same driver). |
 ||| `mm2 --mm2-path <retail> --city london --event blitz:0 --headless --bot --frames 2000` (post-F13-B.1) | `status=pass` — `phase=results race=Complete cp=3/3 results=1 tl=7.6s outcome=finished place=1`: the ledger standings' `place=` field records end-to-end on a real authored event (single participant → place 1, per DSN-12). |
 || `mm2 --mm2-path <retail> --city london --spawn=-80,2,805,0 --headless` (post-F06-B.2) | `status=pass` — car lands on the Thames `deepwater` colliders (final y=−4.0): full throttle reaches only `peak=1.1m/s moved=11m` in 10 s — authored `drag` bogs the car down on real content. Land baseline unchanged (`peak=29.0m/s moved=84m`); sf baseline bit-identical (`peak=37.2m/s`); `--traction 0.5` still records `peak=22.3m/s`. |
@@ -489,7 +511,8 @@ rendered gameplay; outranks inference.
 | F14-A.1 | implemented | F02-B, F11-B | Circuit/lap binding hardening + evidence. `race_def`: authored `NumLaps` is a checked parameter like every other authored value — `BadParam` on `≤0`/overflow (was a silent `.max(1) as u32` clamp+truncate); `laps: 0` stays unbound on AnyOrder rows (UNK-5 template junk). `RaceProgress::advance` is inert outside `Racing` — re-anchors for `AwaitingStart`, can never re-finish or clear gates once resolved (AC04's once-only rule is now a contract property; F14-AC02's repeated-finish-hits leg). Dead `with_next` builder removed; `Ordered` doc spells out start-lap semantics (lap 1 begins at release, the start-line copy closes each lap). Smoke record gains `lap={cur}/{laps}` for Ordered defs (any-order records bit-identical). Tests: +2 contract (closing gate counts once per completed sequence; resolved participant inert) +1 producer (`NumLaps` 0/-2/5e9 → BadParam, per-difficulty blocks, checkpoint junk ignored); two existing tests now set `Racing` before `advance` to match the driver gate. Retail (`fnv1a64:e91e6cd4b2ae30d9`): `race-defs --table circuit` — 10/10 rows/city, distinct authored laps (london 3am/4pro except c1,c2 2/2, c9 3/2; sf 3/4 except c8-9 2/2), 6–23 gates, 4–7 opp/0 cop, 1–8 slots; london `circuit:0 --bot` → `race=Running cp=2/6 lap=2/3`, `--pro` → `lap=2/4` (bot wedges mid-lap-2 — bot-limited, deterministic, finish previously recorded). AC01 strengthened, AC02 negative legs evidenced; AC03–AC06 open. Externally checked (review pass at `561b8b7`). |
 | F14-B | queued | F14-A | — |
 | F14-C | queued | F14-B, F15-B | — |
-| F15-A | queued | F02-B, F09-B, F11-B | 612 `.opp` files present; no opponent AI. |
+| F15-A | active | F02-B, F09-B, F11-B | Split into A.1 (roster/route-intent import — implemented below). 612 `.opp` files present; no opponent AI yet. Remaining: spawn opponent entities into valid start slots, drive the authored routes through the production vehicle sim (F15-A.2). |
+| F15-A.1 | implemented | F02-B, F09-B, F11-B | Opponent-roster import: `mm2_game::opponent` contract (`OpponentRoute`/`OpponentSpec`/`OpponentRoster`/`OpponentIssue` — `resolved_routes()` keeps dead wired refs distinct from spare files); `mm2_content::opponents::opponent_roster` builds from a `CatalogEvent` — `.aimap`→Amateur, `.aimap_p`→Professional with explicit `MissingVariant` fallback; each row wires geo id + `.opp` route (VFS-resolved, all point columns preserved) + param tail (`skill` = first). Issues: `CountMismatch` vs table `Opponents`, `UnresolvedRoute`/`RouteFailed`, `WrongDifficultyTag`, `UnreferencedRoute` — reported, denominator kept. `OpponentReport::scan` + `mm2-inspect opponents <install> [--city] [--strict]` audit every catalog event ×2 difficulties + extra roster stems + `VehicleCatalog` vehicle resolution. Tests +12 (`tests/opponents.rs` 9 content + `tests/opponent.rs` 3 contract): variant selection, fallback, dead route keeps slot, tag mismatch, scoped spare routes, count mismatch diagnostic, crash/incomplete rejection, extras+vehicle report, route length/skill/wired-count. Retail: 64 builds/city, 0 failed, 26 unsupported (crash tables), 271+246 wired, 0 unresolved vehicles, 43+34 spare routes, `sf/race0` amateur sole count mismatch; `--strict` exits 2. Ledger RACE-11/RACE-12, UNK-11 narrowed. Candidate pending external check. |
 | F15-B | queued | F15-A | — |
 | F15-C | queued | F15-B | — |
 | F16-A | queued | F01-A, F11-A | No profile storage; `players/` dir exists in install (17 files). |

@@ -14,6 +14,7 @@ pub mod config;
 pub mod ids;
 pub mod impact;
 pub mod nav;
+pub mod opponent;
 pub mod props;
 pub mod race;
 pub mod result;
@@ -36,6 +37,9 @@ pub use nav::{
     ArcEnd, ArcExit, ArcId, LaneHit, LaneId, LaneKind, LaneQuery, LaneSample, NavArc, NavBuild,
     NavGraph, NavIntersection, NavIssue, NavLane, NavOverrides, NavRng, NavRoad, NavStats, Route,
     RouteCursor, RouteError, RouteOptions, TravelDir, TurnKind,
+};
+pub use opponent::{
+    OpponentIssue, OpponentRoster, OpponentRoute, OpponentRoutePoint, OpponentSpec,
 };
 pub use props::{MAX_PROP_RULE_STAMPS, PropStamp, PropWalk, PropWalkStats, walk_prop_rules};
 pub use race::{

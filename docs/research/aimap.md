@@ -107,3 +107,42 @@ discovered aimap: expected = `city/<stock>.aimap` + all
 `race/<stock>/*.aimap{,_p}`; cross-checks exception road ids against
 `city/<city>.bai` and resolves opponent waypoint refs through the VFS.
 `.aimap`/`.aimap_p` are recognized `scan` formats.
+
+## Opponent rosters (F15-A.1, 2026-09-21)
+
+`mm2_content::opponents` turns a `CatalogEvent` into an
+`mm2_game::opponent::OpponentRoster`: the event stem's `.aimap`
+(Amateur) or `.aimap_p` (Professional, with an explicit missing-variant
+fallback when only the amateur file ships) provides the `[Opponent]`
+rows, each of which wires a vehicle geo id, a `.opp` route record
+resolved through the VFS, and the raw parameter tail (first value kept
+as `skill`). Route points keep every authored column (`mm2_formats::
+opp`); driving semantics stay out of this layer. Roster issues —
+count mismatch vs the table's `Opponents` field, a wired route missing
+from the VFS, a `-a-`/`-p-` route name that disagrees with the selected
+difficulty, and `.opp` records the selected roster references nowhere —
+are reported on the roster rather than dropped or repaired, and the
+authored slot survives even when its route does not resolve.
+
+`mm2-inspect opponents <install> [--city] [--strict]` runs the same
+builder over every cataloged event at both difficulties, cross-checks
+wired vehicle ids against `VehicleCatalog`, and lists non-table stems
+that still carry `[Opponent]` rows. Measured on retail: 64 builds per
+city with 0 failures (26 unsupported — the two Crash Course tables,
+which carry no race records), 271 london + 246 sf opponents wired,
+0 unresolved vehicle ids. Findings, all authored-data:
+
+- `sf/race0` amateur is the only wired-vs-table count mismatch
+  (6 wired vs 7 authored) — the RACE-11 anomaly, now confirmed against
+  every table kind, not just checkpoint.
+- 43 london + 34 sf `.opp` records are wired by no `[Opponent]` row,
+  including `blitz3`/`blitz4` route files on 0-opponent events. Spare
+  routes are scoped to the variant that ships them and reported, never
+  silently attached.
+- `race/london/race12.aimap` (extra stem beyond the 12 table rows)
+  wires a 1-opponent lineup; `race/sf/stunt0.aimap` wires 1 opponent
+  whose `opp-c0.2` is a dead ref (the anomaly above).
+- Professional lineups field harder vehicle variants than the amateur
+  files for the same event (`vpcoop`→`vpcoop2k`, plus `vpvwcup`,
+  `vpdb7`, `vppanoz`, `vppanozgt` — including the reward-locked Panoz
+  GTR-1). All wired ids resolve to `ready` catalog entries.

@@ -17,6 +17,7 @@ pub mod events;
 pub mod expect;
 pub mod model;
 pub mod nav;
+pub mod opponents;
 pub mod race_def;
 pub mod surface;
 
@@ -41,6 +42,10 @@ pub use model::{
     shader_for_paint, split_lod,
 };
 pub use nav::{NavLoadError, load_nav_graph, load_nav_overrides};
+pub use opponents::{
+    ExtraRoster, OpponentReport, RosterBuild, RosterBuildError, RosterEntry, RosterSummary,
+    opponent_roster,
+};
 pub use race_def::{
     PLAYER_SLOT, RaceBuildError, RaceDefBuild, RaceDefEntry, RaceDefReport, RaceDefSummary,
     race_definition,

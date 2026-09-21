@@ -179,6 +179,24 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Opponent-roster audit: run every cataloged event through the
+    /// production `CatalogEvent → OpponentRoster` builder at both
+    /// difficulties, cross-check wired `.opp` route references and
+    /// vehicle ids, and count non-event stems carrying a wired lineup.
+    Opponents {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Restrict to one city stem (default: every discovered
+        /// `race/<city>/` directory).
+        #[arg(long)]
+        city: Option<String>,
+        /// Exit nonzero on an empty catalog, any event the producer
+        /// cannot build, any roster issue, dead route references on
+        /// extra rosters, or wired vehicle ids outside the vehicle
+        /// catalog.
+        #[arg(long)]
+        strict: bool,
+    },
     /// Audit the ambient-navigation files (`city/*.bai`): parse every
     /// discovered BAI, validate internal cross-references, and cross-check
     /// room references against the matching PSDL when one resolves.
@@ -397,6 +415,9 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             table.as_deref(),
             *strict,
         ),
+        Command::Opponents { dir, city, strict } => {
+            opponents(dir, cli.mods.as_deref(), city.as_deref(), *strict)
+        }
         Command::Bai { dir, city, strict } => {
             bai(dir, cli.mods.as_deref(), city.as_deref(), *strict)
         }
@@ -1083,6 +1104,127 @@ fn race_defs(
     }
     if strict && !failures.is_empty() {
         return Err(format!("strict race-defs audit: {} failures", failures.len()).into());
+    }
+    Ok(())
+}
+
+/// Compact one-cell description of a per-difficulty roster build.
+fn describe_roster(build: &mm2_content::RosterBuild) -> String {
+    use mm2_content::RosterBuild as B;
+    match build {
+        B::Built(s) => {
+            let mut d = format!("{}opp", s.wired);
+            if s.table_opponents != s.wired as i64 {
+                d.push_str(&format!("/{}tbl", s.table_opponents));
+            }
+            d.push_str(&format!(" {}rt", s.routes));
+            if !s.vehicles.is_empty() {
+                d.push_str(&format!(" [{}]", s.vehicles.join(",")));
+            }
+            if s.issues.is_empty() {
+                format!("ok: {d}")
+            } else {
+                format!("ok: {d} — {} issue(s)", s.issues.len())
+            }
+        }
+        B::Unsupported => "unsupported (crash course — F21)".to_string(),
+        B::Failed(mm2_content::RosterBuildError::NotReady(
+            mm2_content::EventStatus::Incomplete { missing },
+        )) => format!("incomplete ({})", missing.join(", ")),
+        B::Failed(e) => format!("failed: {e}"),
+    }
+}
+
+/// Opponent-roster audit (F15-A.1): every cataloged event's
+/// difficulty-selected `[Opponent]` lineup runs through the production
+/// `CatalogEvent → OpponentRoster` producer — wired count vs the table
+/// row's authored `Opponents`, `.opp` route resolution, difficulty-tag
+/// consistency and unreferenced route records. Non-event stems whose
+/// aimaps still wire a lineup are counted as extra rosters, and every
+/// wired vehicle id is checked against the vehicle catalog.
+fn opponents(
+    dir: &Path,
+    mods: Option<&Path>,
+    city: Option<&str>,
+    strict: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let vfs = build_vfs(dir, mods)?;
+    let cities = race_cities(&vfs, city);
+
+    let mut failures: Vec<String> = Vec::new();
+    for city in &cities {
+        let report = mm2_content::OpponentReport::scan(&vfs, city);
+        println!("== opponent rosters: {city} ==");
+        if report.entries.is_empty() {
+            println!("  (no authored events cataloged)");
+            failures.push(format!("{city}: event catalog is empty"));
+        }
+        for entry in &report.entries {
+            println!(
+                "  {:<10} {:>2} {:<12} am: {:<44} pro: {}",
+                format!("{:?}", entry.event_ref.table).to_lowercase(),
+                entry.event_ref.index,
+                entry.stem,
+                describe_roster(&entry.amateur),
+                describe_roster(&entry.professional),
+            );
+            for build in [&entry.amateur, &entry.professional] {
+                if let mm2_content::RosterBuild::Built(s) = build {
+                    for issue in &s.issues {
+                        println!("       issue: {issue}");
+                        failures.push(format!("{city}: {} — {issue}", entry.stem));
+                    }
+                }
+            }
+            if matches!(entry.amateur, mm2_content::RosterBuild::Failed(_))
+                || matches!(entry.professional, mm2_content::RosterBuild::Failed(_))
+            {
+                failures.push(format!("{city}: {} — roster build failed", entry.stem));
+            }
+        }
+        for x in &report.extra_rosters {
+            println!(
+                "  extra: {:<44} {x_wired} wired{dead}",
+                x.logical,
+                x_wired = x.wired,
+                dead = if x.dead_refs > 0 {
+                    format!(", {} dead route ref(s)", x.dead_refs)
+                } else {
+                    String::new()
+                },
+            );
+            if x.dead_refs > 0 {
+                failures.push(format!(
+                    "{city}: {} — {} dead route ref(s)",
+                    x.logical, x.dead_refs
+                ));
+            }
+        }
+        for v in &report.unresolved_vehicles {
+            println!("  unresolved vehicle id: {v}");
+            failures.push(format!(
+                "{city}: wired vehicle {v} is not in the vehicle catalog"
+            ));
+        }
+        println!(
+            "  {city}: {} events — {} built ({} opponents wired), {} unsupported, {} failed, {} issue(s)",
+            report.entries.len(),
+            report.built(),
+            report.wired(),
+            report.unsupported(),
+            report.failed(),
+            report.issues(),
+        );
+        if report.failed() > 0 {
+            failures.push(format!(
+                "{city}: {} failed roster build(s)",
+                report.failed()
+            ));
+        }
+        println!();
+    }
+    if strict && !failures.is_empty() {
+        return Err(format!("strict opponents audit: {} failures", failures.len()).into());
     }
     Ok(())
 }

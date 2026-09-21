@@ -235,7 +235,7 @@ fn gates_for(
 ) -> Result<(Vec<Checkpoint>, Option<Checkpoint>), RaceBuildError> {
     match rule {
         // Rows 1..n-1 are the any-order gates; the last row is the
-        // finish the runtime arms once all gates are cleared (RACE-12).
+        // finish the runtime arms once all gates are cleared (RACE-7).
         CheckpointRule::AnyOrder => {
             if rows.len() < 3 {
                 return Err(RaceBuildError::TooFewRows {
