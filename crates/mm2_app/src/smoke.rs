@@ -388,23 +388,32 @@ pub fn headless_smoke(
                 .unwrap_or_default();
             // F15-A.2: spawned opponents and how many resolved
             // (finished/timed out). Absent on runs without a roster so
-            // older records stay bit-identical.
-            let (opp, opp_done) = world_ecs
-                .iter_entities()
-                .fold((0usize, 0usize), |(n, d), e| {
-                    if e.get::<opponents::OpponentDriver>().is_none() {
-                        return (n, d);
-                    }
-                    let resolved = e.get::<RaceProgress>().is_some_and(|p| {
-                        matches!(
-                            p.state,
-                            ParticipantState::Finished { .. } | ParticipantState::TimedOut { .. }
-                        )
+            // older records stay bit-identical. `opp_rec` counts the
+            // field's disclosed re-anchor teleports (F15-B.3) and only
+            // appears when one fired.
+            let (opp, opp_done, opp_rec) =
+                world_ecs
+                    .iter_entities()
+                    .fold((0usize, 0usize, 0usize), |(n, d, r), e| {
+                        let Some(driver) = e.get::<opponents::OpponentDriver>() else {
+                            return (n, d, r);
+                        };
+                        let resolved = e.get::<RaceProgress>().is_some_and(|p| {
+                            matches!(
+                                p.state,
+                                ParticipantState::Finished { .. }
+                                    | ParticipantState::TimedOut { .. }
+                            )
+                        });
+                        (n + 1, d + resolved as usize, r + driver.reanchors as usize)
                     });
-                    (n + 1, d + resolved as usize)
-                });
             let opp = if opp > 0 {
-                format!(" opp={opp_done}/{opp}")
+                let rec = if opp_rec > 0 {
+                    format!(" opp_rec={opp_rec}")
+                } else {
+                    String::new()
+                };
+                format!(" opp={opp_done}/{opp}{rec}")
             } else {
                 String::new()
             };

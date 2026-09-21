@@ -13,8 +13,8 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::opponents::{
-    Blocker, OpponentDriver, Traffic, apply_gap_brake, initial_route_index, nearest_blocker,
-    opponent_drive, pick_pass_side, route_target, spawn_pose,
+    Blocker, OpponentDriver, REANCHOR_FRAMES, Traffic, apply_gap_brake, initial_route_index,
+    nearest_blocker, opponent_drive, pick_pass_side, reanchor_pose, route_target, spawn_pose,
 };
 use mm2_app::scripted::{ScriptedBot, ScriptedTuning};
 use mm2_app::session::{self, SessionControl};
@@ -974,6 +974,9 @@ fn driver(avoid_players: bool) -> OpponentDriver {
         stall_frames: 0,
         stall_pos: Vec3::ZERO,
         pass_ban: None,
+        stuck_pos: Vec3::ZERO,
+        stuck_frames: 0,
+        reanchors: 0,
     }
 }
 
@@ -1344,5 +1347,272 @@ fn authored_avoid_players_decides_the_parked_player() {
             p.x > 115.0 && max_dev > 0.5,
             "the sensing driver slips past the parked car off the lane line: pos={p:?} max_dev={max_dev}"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F15-B.3 — bounded re-anchor recovery
+// ---------------------------------------------------------------------------
+
+/// A mid-leg projection steps back `REANCHOR_BACK` along the chased
+/// leg and faces down-leg.
+#[test]
+fn reanchor_pose_projects_onto_the_chased_leg() {
+    let r = route(&[[70.0, 0.0, 140.0], [140.0, 0.0, 140.0], [165.0, 0.0, 140.0]]);
+    // Chasing anchor 2 → the chased leg is 140→165; pos projects at
+    // x=150 and steps back 4 m to x=146 on the route line.
+    let (pose, yaw) = reanchor_pose(&r, 2, Vec3::new(150.0, 0.0, 150.0), 0.0, |_| false);
+    assert!(
+        (pose.x - 146.0).abs() < 1e-4 && (pose.z - 140.0).abs() < 1e-4,
+        "{pose:?}"
+    );
+    assert!(
+        (yaw + std::f32::consts::FRAC_PI_2).abs() < 1e-4,
+        "the +X leg faces vehicle yaw −π/2, got {yaw}"
+    );
+}
+
+/// A candidate landing inside an un-cleared trigger keeps walking back
+/// along the polyline — across a leg boundary — until it stands clear,
+/// so the assist cannot bank a gate the car never drove (AC04).
+#[test]
+fn reanchor_pose_walks_back_out_of_uncleared_triggers() {
+    let r = route(&[
+        [70.0, 0.0, 140.0],
+        [110.0, 0.0, 140.0],
+        [140.0, 0.0, 140.0],
+        [165.0, 0.0, 140.0],
+    ]);
+    // Triggers at x=110 and x=140 (r=15) are still pending; x=165 is
+    // already cleared so it must not force the walk further back.
+    let blocked = |p: Vec3| {
+        [(110.0, 15.0), (140.0, 15.0)]
+            .iter()
+            .any(|(cx, rad)| (p.x - cx).abs() < *rad && (p.z - 140.0).abs() < *rad)
+    };
+    // next=3 → chased leg 140→165; pos x=135 projects behind the leg
+    // start, so the walk crosses onto leg 110→140 and keeps going
+    // while either pending cylinder covers the candidate.
+    let (pose, _) = reanchor_pose(&r, 3, Vec3::new(135.0, 0.0, 140.0), 0.0, blocked);
+    assert!(
+        (pose.x - 92.0).abs() < 1e-3 && (pose.z - 140.0).abs() < 1e-3,
+        "walked back out of both pending triggers: {pose:?}"
+    );
+    assert!(!blocked(pose));
+
+    // With 110 already cleared the same stuck spot only steps out of
+    // the 140 cylinder — the walk stops at x=124, not behind 110.
+    let cleared_110 = |p: Vec3| (p.x - 140.0).abs() < 15.0 && (p.z - 140.0).abs() < 15.0;
+    let (pose, _) = reanchor_pose(&r, 3, Vec3::new(135.0, 0.0, 140.0), 0.0, cleared_110);
+    assert!(
+        (pose.x - 124.0).abs() < 1e-3,
+        "a cleared gate does not push the landing back: {pose:?}"
+    );
+}
+
+/// A closed route's `next == 0` walks the wrap leg (last → first), and
+/// an open route cannot walk back before its first point.
+#[test]
+fn reanchor_pose_wraps_closed_and_clamps_open() {
+    // Closed square with a 10 m closing gap (≤ ROUTE_LOOP).
+    let r = route(&[
+        [0.0, 0.0, 0.0],
+        [100.0, 0.0, 0.0],
+        [100.0, 0.0, 100.0],
+        [0.0, 0.0, 100.0],
+        [0.0, 0.0, 10.0],
+    ]);
+    // next=0 chasing point 0 → the chased leg is p4 (0,10) → p0 (0,0);
+    // a car beside it projects mid-leg (z=5) and steps back toward p4.
+    let (pose, yaw) = reanchor_pose(&r, 0, Vec3::new(5.0, 0.0, 5.0), 0.0, |_| false);
+    assert!(
+        (pose.z - 9.0).abs() < 1e-4 && pose.x.abs() < 1e-4,
+        "on the wrap leg, {pose:?}"
+    );
+    assert!(yaw.abs() < 1e-4, "the −Z wrap leg keeps yaw 0, got {yaw}");
+
+    // Open route (60 m leg > ROUTE_LOOP, so not closed), car behind
+    // the first anchor chasing it (next=0): leg 0 is the approach
+    // line, and the walk clamps at its start.
+    let open = route(&[[70.0, 0.0, 140.0], [130.0, 0.0, 140.0]]);
+    let (pose, _) = reanchor_pose(&open, 0, Vec3::new(60.0, 0.0, 160.0), 0.0, |_| true);
+    assert_eq!(pose, Vec3::new(70.0, 0.0, 140.0), "bounded at route start");
+}
+
+/// Degenerate routes anchor at what they have; an empty route cannot
+/// re-anchor at all.
+#[test]
+fn reanchor_pose_handles_degenerate_routes() {
+    let single = route(&[[50.0, 2.0, 60.0]]);
+    let (pose, yaw) = reanchor_pose(&single, 0, Vec3::new(9.0, 0.0, 9.0), 0.7, |_| false);
+    assert_eq!(pose, Vec3::new(50.0, 2.0, 60.0));
+    assert_eq!(yaw, 0.7, "no leg → the car's own yaw");
+
+    let empty = OpponentRoute { points: vec![] };
+    let (pose, yaw) = reanchor_pose(&empty, 0, Vec3::new(9.0, 1.0, 9.0), 0.7, |_| false);
+    assert_eq!((pose, yaw), (Vec3::new(9.0, 1.0, 9.0), 0.7));
+}
+
+/// The penned-opponent bound end to end (F15-B.3, AC03): `vpt` is
+/// teleported into a walled pocket off its lane where no escape can
+/// progress — the displacement window spends its budget and the
+/// disclosed `ResetVehicle` re-anchor drops it back on the chased
+/// route leg, walked clear of the gates it has not cleared. The jump
+/// banks nothing (`Teleported` broke the segment and the landing is
+/// outside every pending trigger) and the car resumes driving to a
+/// real finish.
+#[test]
+fn permanently_stuck_opponent_reanchors_and_resumes() {
+    let tmp = roster_install("", &[]);
+    let mut app = event_app(event_config(), vfs_of(tmp.path()));
+    app.update();
+    let vpt = opponent_by_vehicle(&mut app, "vpt");
+
+    // During the countdown, wall off a pocket off the lane at
+    // (134,·,160) — beyond every gate's z reach — and move the car in
+    // through the production teleport contract (`Teleported` breaks
+    // the swept segment, so even this test jump cannot bank a gate).
+    let y = app.world().get::<Position>(vpt).unwrap().0.y;
+    for (center, size) in [
+        (Vec3::new(132.0, y + 1.0, 160.0), Vec3::new(0.4, 3.0, 8.0)),
+        (Vec3::new(136.0, y + 1.0, 160.0), Vec3::new(0.4, 3.0, 8.0)),
+        (Vec3::new(134.0, y + 1.0, 158.0), Vec3::new(8.0, 3.0, 0.4)),
+        (Vec3::new(134.0, y + 1.0, 162.0), Vec3::new(8.0, 3.0, 0.4)),
+    ] {
+        app.world_mut().spawn((
+            RigidBody::Static,
+            Collider::cuboid(size.x, size.y, size.z),
+            Transform::from_translation(center),
+        ));
+    }
+    app.world_mut().get_mut::<Position>(vpt).unwrap().0 = Vec3::new(134.0, y, 160.0);
+    app.world_mut()
+        .get_mut::<Transform>(vpt)
+        .unwrap()
+        .translation = Vec3::new(134.0, y, 160.0);
+    app.world_mut()
+        .entity_mut(vpt)
+        .insert(mm2_vehicle::Teleported);
+
+    // The car sits penned through release and every failed escape;
+    // the pocket never lets it near a pending trigger, so cleared
+    // stays 0 until the re-anchor fires.
+    let mut fired_at = None;
+    for u in 0..1400 {
+        app.update();
+        let d = app.world().get::<OpponentDriver>(vpt).unwrap();
+        if d.reanchors > 0 {
+            fired_at = Some(u);
+            break;
+        }
+        if u > 200 {
+            assert_eq!(
+                app.world()
+                    .get::<RaceProgress>(vpt)
+                    .unwrap()
+                    .cleared_count(),
+                0,
+                "the penned car banked a gate at update {u}"
+            );
+        }
+    }
+    assert!(
+        fired_at.is_some(),
+        "the bounded re-anchor never fired for a penned car"
+    );
+
+    // The teleport itself may land an update after the counter flips
+    // (message ordering) and the marker is consumed at the next
+    // frame's FixedLast — give the pipeline its two frames.
+    run(&mut app, 3);
+
+    // The jump landed back on the chased leg, walked clear of the
+    // pending gates — inside none of them, so the next step's crossing
+    // is the car's own driving, not the teleport's.
+    let pose = app.world().get::<Position>(vpt).unwrap().0;
+    assert!(
+        (pose.z - COURSE_Z).abs() < 2.0 && pose.x > 70.0 && pose.x < 130.0,
+        "re-anchored onto the route behind the pocket: {pose:?}"
+    );
+    let rot = app.world().get::<Rotation>(vpt).unwrap().0;
+    assert!((rot * Vec3::Y).y > 0.99, "re-anchor lands upright: {rot:?}");
+    assert!(
+        app.world().get::<mm2_vehicle::Teleported>(vpt).is_none(),
+        "reanchor_teleported_participants consumed the marker"
+    );
+    assert_eq!(
+        app.world()
+            .get::<RaceProgress>(vpt)
+            .unwrap()
+            .cleared_count(),
+        0,
+        "the teleport itself banked nothing"
+    );
+
+    // And it resumes: the re-anchored car re-drives the course and
+    // finishes through the shared validation.
+    run(&mut app, 900);
+    let progress = app.world().get::<RaceProgress>(vpt).unwrap();
+    assert!(
+        matches!(progress.state, ParticipantState::Finished { .. }),
+        "the re-anchored opponent finishes for real: {:?} cleared {}/3",
+        progress.state,
+        progress.cleared_count()
+    );
+}
+
+/// The dispatch mechanics without the 900-frame wait: a driver whose
+/// stuck budget is spent teleports through `ResetVehicle` on the next
+/// updates — `reanchors` records it and the pass state clears.
+#[test]
+fn reanchor_dispatches_through_the_production_reset_path() {
+    let tmp = roster_install("", &[]);
+    let mut app = event_app(event_config(), vfs_of(tmp.path()));
+    app.update();
+    let vpt = opponent_by_vehicle(&mut app, "vpt");
+    run(&mut app, 260); // released and driving
+
+    let before = app.world().get::<Position>(vpt).unwrap().0;
+    {
+        let mut d = app.world_mut().get_mut::<OpponentDriver>(vpt).unwrap();
+        d.stuck_pos = before;
+        d.stuck_frames = REANCHOR_FRAMES - 1; // one driving update short of the bound
+        d.pass_side = 1.0;
+        d.pass_entity = Some(vpt); // stale pass state must clear
+    }
+    run(&mut app, 4);
+
+    let d = app.world().get::<OpponentDriver>(vpt).unwrap();
+    assert_eq!(d.reanchors, 1, "the spent budget fired once");
+    assert_eq!(d.pass_side, 0.0);
+    assert_eq!(d.pass_entity, None);
+    // The window restarted at the landing pose — a fresh small count
+    // while the car accelerates away, not the spent budget.
+    assert!(d.stuck_frames < 60, "stuck_frames={}", d.stuck_frames);
+    let after = app.world().get::<Position>(vpt).unwrap().0;
+    assert!(
+        (after.z - COURSE_Z).abs() < 2.0 && after.x < before.x + 4.0,
+        "back on the route line, not ahead of the failure: {before:?} → {after:?}"
+    );
+    assert!(
+        app.world().get::<mm2_vehicle::Teleported>(vpt).is_none(),
+        "the swept-segment break was consumed"
+    );
+}
+
+/// A field that keeps making progress never triggers the assist:
+/// both opponents drive the whole course and `reanchors` stays 0.
+#[test]
+fn progressing_opponents_never_reanchor() {
+    let tmp = roster_install("", &[]);
+    let mut app = event_app(event_config(), vfs_of(tmp.path()));
+    app.update();
+    run(&mut app, 1200); // past the budget — both cars finish inside it
+
+    let mut q = app.world_mut().query::<(Entity, &OpponentDriver)>();
+    let counts: Vec<(Entity, u32)> = q.iter(app.world()).map(|(e, d)| (e, d.reanchors)).collect();
+    assert!(!counts.is_empty());
+    for (e, n) in counts {
+        assert_eq!(n, 0, "opponent {e:?} re-anchored while progressing");
     }
 }

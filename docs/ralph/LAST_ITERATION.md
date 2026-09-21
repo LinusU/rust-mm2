@@ -1,88 +1,73 @@
 # Last implementation iteration
 
-- Task ID and title: F15-B.2 — the authored `[Opponent]` parameter
-  tail: decode it into `OpponentDriveParams` (mm2hook's recovered
-  `OpponentData`/`RegisterRoute` vocabulary — inferred mapping) and
-  consume the parts that can be supported without overstating
-  uncertain original semantics.
-- Starting commit: `d64ba5523afc4ef1f311a5c239bc3b50e278eb28` on
-  `ralph/night` — the iteration-11 candidate the external review
-  passed.
+- Task ID and title: F15-B.3 — bounded opponent re-anchor recovery:
+  the disclosed last-resort teleport for opponents the escape/pass
+  machinery cannot free (F15-AC03's "blocked indefinitely" leg and
+  AC04's "no checkpoints from teleports" leg).
+- Starting commit: `a203f83304908ab4d5c5d204a65a72eea68a1e98` on
+  `ralph/night` — the iteration-12 candidate the external review
+  passed (F15-B.2).
 - Retail install: `/Users/linus/coding/rust-mm2/retail`
   (`fnv1a64:e91e6cd4b2ae30d9`).
 
 ## What changed
 
-- `mm2_game::opponent` — new `OpponentDriveParams` +
-  `OpponentSpec::drive_params()`: the ten-value tail decodes
-  positionally into mm2hook's recovered vocabulary (R4): col 0
-  `maxThrottle`, col 1 `weirdPathfinding`/`BadPathfinding` flag, col 2
-  `someDistancePadding`/`TurnRadius`, col 3
-  `cornerBrakingThreshold`/`TurnSpeedMultiplier`, cols 4–8
-  `unused`/`avoidTraffic`/`avoidProps`/`avoidPlayers`/
-  `avoidOpponents`, col 9 `cornerSpeedMultiplier`. The mapping is
-  explicitly *inferred, not original-verified*: mm2hook's own
-  `OpponentData` field order does not match retail distributions
-  positionally, so the assignment orders the same recovered names by
-  what each column's authored values can be — every column's range
-  matches the corresponding `RegisterRoute` default (536 rows
-  measured). Short rows (`stunt0`'s single value) decode trailing
-  fields `None` — authored absence, not zero. Raw params are kept
-  verbatim beside the decode.
-- `mm2_app::scripted` — new `ScriptedTuning { throttle_cap,
-  corner_speed }` overlay + `scripted_input_tuned`: `throttle_cap`
-  ceilings every throttle demand (recovery included; a ceiling, not a
-  scale), `corner_speed` sets the corner-brake engage speed.
-  `ScriptedTuning::DEFAULT` reproduces the pre-tail law bit-for-bit;
-  `scripted_input` is now a default-tuned wrapper, so the `--bot`
-  evidence driver is untouched.
-- `mm2_app::opponents` — `Traffic` gains `control: PlayerControl`;
-  `nearest_blocker` takes a sense predicate; `OpponentDriver` binds
-  `tuning` + `avoid_players` at spawn from `spec.drive_params()`
-  (`None` columns → the `RegisterRoute` defaults = pre-tail
-  behavior). `driver.senses` gates human participants on the authored
-  `avoidPlayers` flag; the corridor filter, the room scan and the
-  held-target path all run through it, so an unsensed participant is
-  fully transparent — no blocker, no brake, no pass, no ban.
+- `mm2_app::opponents` — `OpponentDriver` gains `stuck_pos`,
+  `stuck_frames`, `reanchors`. While a route target exists the
+  authority counts frames spent within `REANCHOR_DIST` (8 m) of the
+  window anchor — **displacement, not grounded speed**: a penned car
+  can roll forever inside its bubble, and an ungrounded or
+  hull-beached car never reaches `scripted_input`'s grounded-gated
+  stuck counter at all, so both classes sat forever before this
+  slice. At `REANCHOR_FRAMES` (900 ≈ 15 s at 60 Hz — the
+  reverse-and-turn escapes and the pass stall/ban cycle get their
+  turns first) the driver writes a `ResetVehicle` for itself.
+- The teleport is the production path, not a second mechanism:
+  `vehicle_reset` writes position/upright yaw/zero motion and marks
+  the entity `Teleported`, and `reanchor_teleported_participants`
+  (FixedLast, before `advance_race`) breaks the swept segment — so
+  the jump cannot bank a checkpoint crossing (AC04).
+- `reanchor_pose` picks the landing: project the car onto the route
+  leg it was chasing (`driver.next`, closed-route wrap leg for
+  `next == 0`, open-route leg 0 approach), walk *backward* along the
+  authored polyline `REANCHOR_BACK` (4 m) for clearance and further
+  in the same stride while the candidate sits inside a trigger the
+  participant has not cleared (built from `RaceProgress::remaining`
+  over the live `RaceDefinition`), bounded by `REANCHOR_WALK` (60 m)
+  and the open-route start. The landing is upright, faces down-leg,
+  gets the spawn's hull clearance, and `driver.next` recomputes via
+  `initial_route_index`; recovery/pass/stall/stuck state resets.
+- Observable and scoped: `info!` logs each assist with vehicle id +
+  running count, `OpponentDriver::reanchors` accumulates them, and
+  `smoke.rs` appends `opp_rec=<n>` to the existing `opp=` record only
+  when at least one fired (records without re-anchors stay
+  byte-identical). Authority-only — a predicted client's
+  `opponent_drive` resets the window instead of teleporting. Ledger
+  entry **DSN-14** — a designed anti-standstill policy, no verified
+  original recovery rule exists.
 
-## Deliberate scope decisions (inferred mapping, honestly partial)
+## Tests (`tests/opponents.rs` 24 → 31)
 
-- `avoidOpponents` is **bound but inert**: retail authors it ≈
-  universally 0, so consuming it under this inferred mapping would
-  blind every stock opponent to the rest of the field — either the
-  original genuinely never avoids AI, or the flag's order/polarity
-  here is wrong. Held unverified (UNK-11); the corridor senses AI
-  unconditionally meanwhile. `avoidPlayers` *is* consumed because it
-  carries real authored variance (0 and 1 rows coexist in the same
-  file, e.g. `race/sf/race1.aimap_p`), so the gate differentiates
-  per-driver.
-- `avoidTraffic`/`avoidProps` bound but inert — no ambient-traffic or
-  prop runtime classes exist to sense (F10 scope).
-- `weirdPathfinding`, `distance_padding`, `corner_brake`,
-  `unused_flag` bound but unconsumed — semantics unverified.
-
-## Tests
-
-- `mm2_game/tests/opponent.rs` — `drive_params_decodes_the_authored_
-  tail`: a verbatim retail row binds all ten columns; the `stunt0`
-  single-value row leaves trailing fields `None` (4 total).
-- `mm2_app/tests/bot.rs` — `tuned_input_law_scales_throttle_and_
-  corner_floor`: the cap ceilings over-cap bands and leaves under-cap
-  bands; a doubled `corner_speed` floor drops the corner brake at
-  20 m/s; `ScriptedTuning::DEFAULT` reproduces the untuned law
-  bit-for-bit across bearings (7 total).
-- `mm2_app/tests/opponents.rs` — `authored_avoid_players_gates_the_
-  corridor` (sense predicate + inert `avoidOpponents`),
-  `authored_tail_binds_the_driver_tuning` (production spawn binds
-  throttle cap, corner floor, avoid flag), `authored_max_throttle_
-  measures_on_track` (0.5 vs 1.0 cap twins on identical lanes — the
-  uncapped car covers >10 m more in 480 updates),
-  `authored_avoid_players_decides_the_parked_player` (sensed leg
-  slips past the parked local car without contact; unsensed leg
-  collides and shoves it ~67 m down the road). Existing tests updated
-  for `Traffic.control`/`nearest_blocker` predicate and the
-  retail-realistic flag block on the synthetic roster (24 total).
-- `mm2_content/tests/opponents.rs` — unchanged, all 9 pass.
+- `reanchor_pose_projects_onto_the_chased_leg` — projection + 4 m
+  step-back + down-leg facing.
+- `reanchor_pose_walks_back_out_of_uncleared_triggers` — a landing
+  inside a pending gate keeps walking across a leg boundary until
+  clear; a *cleared* gate does not extend the walk.
+- `reanchor_pose_wraps_closed_and_clamps_open` — `next == 0` on a
+  closed route walks the wrap leg; an open route clamps at its start
+  even when every candidate is blocked.
+- `reanchor_pose_handles_degenerate_routes` — empty/single-point.
+- `permanently_stuck_opponent_reanchors_and_resumes` — end to end:
+  `vpt` is walled into an off-lane pocket during the countdown via
+  the `Teleported` contract itself; zero gates banked while penned,
+  the bounded window fires, the car lands on the route clear of all
+  pending triggers (cleared stays 0), upright, marker consumed — then
+  re-drives the course to a real `Finished` through `advance_race`.
+- `reanchor_dispatches_through_the_production_reset_path` — a spent
+  budget fires exactly once, resets pass/recovery state, restarts the
+  window.
+- `progressing_opponents_never_reanchor` — 1200 updates of free
+  driving, `reanchors == 0` for the whole field.
 
 ## Commands actually run and results
 
@@ -90,54 +75,52 @@
 - `cargo clippy --locked --workspace --all-targets --all-features --
   -D warnings` PASS.
 - `cargo test --locked --workspace` — all groups ok, 0 failures
-  (opponents 24, bot 7, mm2_game opponent 4, mm2_content opponents 9).
+  (opponents 31, race 33+21, bot 7, session 13, event 13, vehicle 21
+  + drive 15 + surface 8, banger 17, contracts 6, import 10, nav 7,
+  mm2_game opponent 4, mm2_inspect 5, mm2_app lib 25).
 - Retail evidence — `fnv1a64:e91e6cd4b2ae30d9`, deterministic
   headless (`./target/debug/mm2 --mm2-path …/retail`):
-  - `sf checkpoint:0 --headless --frames 5400` amateur (vpbug
-    0.70–0.75 throttle): `opp=4/6`; `--pro` (0.93–1.00): `opp=4/6`;
-    at 3600 updates amateur 4/6 vs pro 3/6 — *dynamics data, not a
-    controlled throttle A/B*: the difficulty rosters differ in
-    vehicles and routes too, and a throttle ceiling mostly changes
-    acceleration, not top speed.
   - `sf circuit:1 --headless --frames 900` (hold driver):
-    `final=(-507,18.9,-52)` — bit-identical to the verified record;
-    the player path is unaffected by opponent tuning.
-  - `sf circuit:6 --headless --bot --frames 5400`: amateur `pos=2/7`
-    `final=(-1786,57.1,-313)` (prior verified record pos=2/7
-    `final=(-1759,·,-307)` — same standing, position perturbed by the
-    now-bound authored corner multipliers 0.98/1.02 + interactions);
-    `--pro` `pos=5/7` `moved=98m` — different field composition,
-    disclosed as dynamics data.
-  - `mm2-inspect dump` re-verified the tail distributions cited
-    (536 ten-value rows; `avoidOpponents` ≈ universal 0; pro csm
-    reaches 2.29 on `race/sf/race5.aimap_p`).
-- Evidence classification: code gates + synthetic integration tests +
+    `final=(-507,18.9,-52)` `opp=0/7`, no `opp_rec` — bit-identical
+    to the verified record; the dormant path changes nothing.
+  - `sf checkpoint:0 --headless --frames 5400`: `opp=5/6 opp_rec=2`
+    — `vpbug` re-anchored twice mid-race (each logged) and the field
+    resolved one more car than the F15-B.2 baseline's `opp=4/6`
+    (dynamics data, not a controlled A/B). `status=fail "fell
+    through the world"` is the documented pre-existing hold-driver
+    artifact (PLAN baseline table — the idle car ends >25 m below
+    spawn altitude), unchanged by this slice.
+  - `sf circuit:1 --headless --bot --frames 14400`:
+    `opp=0/7 opp_rec=15` — the assist fired 15 times across the field
+    (`vpbug` ×5, `vpcoop`, …) on genuinely stationary cars, each
+    ~15 s after its last 8 m of progress; no opponent finishes 3 laps
+    inside the 240 s cap either way. Player bot reached `cp=9/10`
+    (baseline `cp=4/10` — the field no longer parks as obstacles on
+    the line; dynamics data).
+- Evidence classification: code gates + synthetic production tests +
   deterministic headless retail runs. No GPU/rendered/audio evidence;
-  no original-executable comparison exists — the column mapping and
-  consumed semantics remain *inferred*.
+  no original-executable comparison — whether retail opponents
+  re-anchor at all is unmeasured (DSN-14 is a designed policy).
 
 ## Ledger / research updates
 
-- `docs/original-rules.md` — RACE-14 new (the inferred tail decode +
-  partial consumption); RACE-12's tail note now points at it; UNK-11
-  narrowed (original consumption still unverified, including the
-  `avoidOpponents` polarity question).
-- `docs/research/aimap.md` — new *Opponent parameter tail* section:
-  the full column table, the `avoidOpponents` caveat, the difficulty
-  signal, and what the runtime consumes.
-- `docs/ralph/PLAN.md` — F15-B.2 recorded; remainder updated.
+- `docs/original-rules.md` — **DSN-14** new (designed departure:
+  bounded opponent re-anchor, disclosed + counted + smoke-surfaced).
+- `docs/ralph/PLAN.md` — F15-B.2 row added (was narrative-only;
+  external-review bookkeeping nit), F15-B.3 recorded, F15-B parent's
+  Remaining updated.
 
 ## Still open
 
-- `avoidOpponents` order/polarity — retail ≈ universal 0 stays an
-  open measurement question (inert meanwhile), not silently consumed.
-- Catch-up/rubber-band semantics and AC06's measured difficulty
-  effects (F15-B remainder); `weirdPathfinding`/`distancePadding`/
-  `cornerBrakingThreshold` consumption once semantics verify.
-- The `cir<N>` → `circuit<N>` same-index alias contradiction (WPT-3)
-  and UNK-17 grid-slot consumption — unchanged, own slices.
-- `london circuit:0` opponent-finisher discrepancy (-1 vs baseline) —
-  unchanged dynamics data.
-- Amateur-vs-pro pace attribution is confounded by authored vehicle/
-  route differences — no controlled retail A/B exists; the synthetic
-  production test carries the measured-throttle claim.
+- Catch-up/rubber-band semantics — unimplemented, needs an explicit
+  rules decision before any assistance is designed (F15 spec req 9).
+- AC06 measured difficulty effects — still confounded by authored
+  vehicle/route differences; no controlled retail A/B exists.
+- `avoidOpponents` polarity; `weirdPathfinding`/`distancePadding`/
+  `cornerBrakingThreshold` consumption once semantics verify (UNK-11).
+- Re-anchoring into the same difficult pocket repeats every ~15 s —
+  bounded and disclosed, not a progress guarantee; field pace on the
+  tightest circuits stays an F15-B/F15-C open item.
+- AC05 fixed-seed soak of finish/DNF/stuck outcomes — `reanchors`
+  is now the recorded per-car recovery channel.
+- `cir<N>` alias (WPT-3), UNK-17 grid-slot mapping — own slices.

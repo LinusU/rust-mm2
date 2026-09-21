@@ -44,6 +44,16 @@
 //!   `avoidProps` bind but stay inert — no ambient-traffic class
 //!   exists (F10) and the corridor never sensed props; the remaining
 //!   columns stay decoded-but-unconsumed pending verified semantics.
+//! - **Bounded re-anchor (F15-B.3).** A car the escapes and pass
+//!   machinery cannot free — penned, hull-beached with unloaded wheels
+//!   (the stuck detector only counts grounded cars), or knocked off
+//!   the route entirely — gets a disclosed last resort after
+//!   [`REANCHOR_FRAMES`] without [`REANCHOR_DIST`] of displacement: a
+//!   `ResetVehicle` teleport back onto the chased route leg, walked
+//!   back out of un-cleared checkpoint triggers so the assist cannot
+//!   bank a gate it never drove. `OpponentDriver::reanchors` counts
+//!   each one and the smoke record reports the field total; designed
+//!   policy (DSN-14), not a verified original rule.
 //!
 //! Opponents are *not* clones of the player car: each roster entry
 //! loads its own authored vehicle id through
@@ -77,7 +87,7 @@ use mm2_game::{
     Player, PlayerControl, RaceDefinition, RaceProgress, RaceState, Session, SessionEntity,
     relative_bearing,
 };
-use mm2_vehicle::{VehicleInput, VehicleState, vehicle_bundle};
+use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState, vehicle_bundle};
 use tracing::{info, warn};
 
 use crate::car_visual;
@@ -149,6 +159,24 @@ const PASS_STALL: u32 = 360;
 /// long enough to push or slip past it on the route line, then the
 /// clean pass gets another try.
 const PASS_BAN: u32 = 300;
+/// Bubble radius (m) around the episode anchor the stuck clock
+/// tolerates: a car that never leaves it is not progressing even while
+/// it rolls — the same displacement-over-speed test the pass stall
+/// uses. Generous enough that a crawling queue keeps resetting.
+const REANCHOR_DIST: f32 = 8.0;
+/// Frames (60 Hz updates) inside the bubble before the bounded last
+/// resort fires — about 15 s, so the reverse-and-turn escapes (~3.5 s
+/// a cycle) and the pass stall/ban cycle get their turns first.
+pub const REANCHOR_FRAMES: u32 = 900;
+/// Step back (m) along the route polyline the re-anchor takes —
+/// re-approach the point it failed at instead of landing inside it —
+/// and the stride each further step takes while the candidate still
+/// sits inside an un-cleared trigger.
+const REANCHOR_BACK: f32 = 4.0;
+/// Total backward walk (m) the trigger-avoidance may consume — past
+/// this the landing point stands wherever the walk reached and the
+/// normal crossing rules apply (disclosed, not silently unbounded).
+const REANCHOR_WALK: f32 = 60.0;
 /// Base gap (m) the follower keeps behind a blocker.
 const FOLLOW_GAP: f32 = 6.0;
 /// Extra follow gap per m/s of *closing* speed (~0.5 s of travel).
@@ -219,6 +247,18 @@ pub struct OpponentDriver {
     /// with the frames left on the ban — the car drives the route
     /// line past it (push or slip) before the clean pass retries.
     pub pass_ban: Option<(Entity, u32)>,
+    /// Where the current stuck window started — progress is measured
+    /// as displacement from here, not momentary speed: a penned or
+    /// high-centred car can roll without ever leaving the bubble.
+    pub stuck_pos: Vec3,
+    /// Frames spent inside [`REANCHOR_DIST`] of `stuck_pos` while the
+    /// car should be driving — at [`REANCHOR_FRAMES`] the bounded
+    /// re-anchor fires (F15-B.3, AC03).
+    pub stuck_frames: u32,
+    /// Re-anchors this participant has taken this session — the
+    /// observable record of the disclosed teleport assist (surfaced
+    /// in the smoke record as `opp_rec=`).
+    pub reanchors: u32,
 }
 
 impl OpponentDriver {
@@ -377,6 +417,120 @@ pub fn initial_route_index(route: &OpponentRoute, pos: Vec3, yaw: f32) -> usize 
     next
 }
 
+/// The pose a bounded re-anchor drops the car at (F15-B.3, AC03's
+/// bounded recovery): its own position projected onto the route leg it
+/// was chasing, then walked *backward* along the authored polyline —
+/// [`REANCHOR_BACK`] for clearance, and further while the candidate
+/// still sits inside a trigger the participant has not cleared
+/// (`blocked`), bounded by [`REANCHOR_WALK`] and the route start.
+/// Landing outside the un-cleared gates is what keeps the disclosed
+/// teleport from banking a checkpoint the car never drove through:
+/// the jump itself breaks the swept segment via `Teleported`, and the
+/// walk-back keeps the anchored landing point out of pending triggers
+/// (AC04 — a `ResetVehicle` inside a live cylinder still counts as a
+/// crossing on the next step, so the pose must not start there).
+///
+/// Returns `(position, yaw)` — upright facing down-leg. The caller adds
+/// the spawn's hull clearance to `y`; the polyline's authored heights
+/// are interpolated along the walked legs. `blocked` reports whether a
+/// candidate sits inside an un-cleared checkpoint cylinder (XZ radius);
+/// the caller builds it from the race definition and this participant's
+/// progress.
+pub fn reanchor_pose(
+    route: &OpponentRoute,
+    next: usize,
+    pos: Vec3,
+    yaw: f32,
+    blocked: impl Fn(Vec3) -> bool,
+) -> (Vec3, f32) {
+    let n = route.points.len();
+    if n == 0 {
+        return (pos, yaw);
+    }
+    if n == 1 {
+        return (route.points[0].position, yaw);
+    }
+    let closed = {
+        let last = route.points[n - 1].position;
+        let first = route.points[0].position;
+        (last.x - first.x).hypot(last.z - first.z) <= ROUTE_LOOP
+    };
+    let leg_count = if closed { n } else { n - 1 };
+    // Leg i runs points[i] → points[(i+1) % n]. The chased leg is
+    // prev→next; `next == 0` means the car still approaches the first
+    // anchor — an open route's approach line is leg 0, a closed
+    // route's is the wrap leg back into point 0.
+    let mut leg = match next {
+        0 if closed => leg_count - 1,
+        0 => 0,
+        i => (i - 1).min(leg_count - 1),
+    };
+    let geom = |i: usize| -> (Vec3, Vec3) {
+        (route.points[i].position, route.points[(i + 1) % n].position)
+    };
+    let len = |i: usize| -> f32 {
+        let (a, b) = geom(i);
+        (b.x - a.x).hypot(b.z - a.z)
+    };
+    let point_on = |i: usize, d: f32| -> Vec3 {
+        let (a, b) = geom(i);
+        let l = len(i);
+        if l > 1e-3 { a + (b - a) * (d / l) } else { a }
+    };
+    let facing = |i: usize, fallback: f32| -> f32 {
+        let (a, b) = geom(i);
+        let (dx, dz) = (b.x - a.x, b.z - a.z);
+        if dx.hypot(dz) > 1e-3 {
+            (-dx).atan2(-dz)
+        } else {
+            fallback
+        }
+    };
+    // Project onto the chased leg — distance along it from its start.
+    let mut d = {
+        let (a, b) = geom(leg);
+        let l = len(leg);
+        if l > 1e-3 {
+            (((pos.x - a.x) * (b.x - a.x) + (pos.z - a.z) * (b.z - a.z)) / l).clamp(0.0, l)
+        } else {
+            0.0
+        }
+    };
+    // Walk backward along the polyline: REANCHOR_BACK for clearance,
+    // then the same stride while the candidate sits inside an
+    // un-cleared trigger — bounded by REANCHOR_WALK and, for an open
+    // route, the start point.
+    let mut remaining = REANCHOR_BACK;
+    let mut walked = 0.0f32;
+    loop {
+        while remaining > 0.0 {
+            if remaining <= d {
+                d -= remaining;
+                walked += remaining;
+                remaining = 0.0;
+            } else {
+                remaining -= d;
+                walked += d;
+                if leg == 0 && !closed {
+                    d = 0.0;
+                    remaining = 0.0;
+                } else {
+                    leg = (leg + leg_count - 1) % leg_count;
+                    d = len(leg);
+                }
+            }
+            if walked >= REANCHOR_WALK {
+                remaining = 0.0;
+            }
+        }
+        let pose = point_on(leg, d);
+        if !blocked(pose) || walked >= REANCHOR_WALK || (leg == 0 && d <= 0.0 && !closed) {
+            return (pose, facing(leg, yaw));
+        }
+        remaining = REANCHOR_BACK;
+    }
+}
+
 /// Spawn every roster entry that loads as a real participant: its own
 /// authored vehicle (opponent tuning preferred), a session-minted
 /// `ObjectId`/`PlayerId`, `PlayerControl::Ai`, the session's authority
@@ -465,6 +619,9 @@ pub fn spawn_opponents(
                     stall_frames: 0,
                     stall_pos: Vec3::ZERO,
                     pass_ban: None,
+                    stuck_pos: pos,
+                    stuck_frames: 0,
+                    reanchors: 0,
                 },
                 vehicle_bundle(&def.config),
                 Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)),
@@ -650,16 +807,33 @@ pub fn apply_gap_brake(input: &mut VehicleInput, blocker: &Blocker, speed: f32) 
 /// committed pass side and the follow gap converts into braking, so a
 /// slower or stopped car is driven around or trailed — never shoved
 /// (F15-B.1, AC03's blocked-road leg).
+///
+/// The bounded last resort (F15-B.3): the reverse-and-turn escapes and
+/// the pass stall/ban cycle answer ordinary blocks, but a car penned
+/// where every escape lands back in the same pocket, beached on its
+/// hull with the wheels unloaded, or knocked somewhere the route cannot
+/// be regained would sit forever — the stuck detector itself never
+/// counts an ungrounded car. [`REANCHOR_FRAMES`] without
+/// [`REANCHOR_DIST`] of displacement therefore re-anchors it onto the
+/// route it was chasing through the production [`ResetVehicle`] path —
+/// the same disclosed teleport the player's reset uses, so `Teleported`
+/// breaks the swept segment and [`reanchor_pose`]'s trigger walk-back
+/// keeps the landing out of un-cleared gates (AC04). The assist is
+/// explicit and observable: `OpponentDriver::reanchors` counts it and
+/// the smoke record surfaces the field total as `opp_rec=`. Authority
+/// only — a predicted client never teleports a participant.
 #[allow(clippy::type_complexity)]
 pub fn opponent_drive(
     session: Res<Session>,
     race: Option<Res<RaceState>>,
+    mut resets: MessageWriter<ResetVehicle>,
     mut set: ParamSet<(
         Query<(
             Entity,
             &mut VehicleInput,
             &Position,
             &Rotation,
+            &Vehicle,
             &VehicleState,
             &RaceProgress,
             &mut OpponentDriver,
@@ -682,7 +856,7 @@ pub fn opponent_drive(
             speed: vstate.forward_speed,
         })
         .collect();
-    for (entity, mut input, pos, rot, vstate, progress, mut driver) in &mut set.p0() {
+    for (entity, mut input, pos, rot, vehicle, vstate, progress, mut driver) in &mut set.p0() {
         if let Some((_, left)) = &mut driver.pass_ban {
             *left = left.saturating_sub(1);
             if *left == 0 {
@@ -707,11 +881,82 @@ pub fn opponent_drive(
             driver.pass_side = 0.0;
             driver.clear_frames = 0;
             driver.stall_frames = 0;
+            driver.stuck_frames = 0;
+            driver.stuck_pos = pos.0;
             *input = VehicleInput::default();
             continue;
         };
         let fwd = rot.0 * Vec3::NEG_Z;
         let yaw = (-fwd.x).atan2(-fwd.z);
+        // F15-B.3 — the bounded last resort. The stuck window measures
+        // displacement, not speed: a penned or hull-beached car can
+        // roll and still never leave the bubble, and an ungrounded one
+        // never even reaches the recovery law's stuck counter. Once
+        // the budget is spent the car teleports onto its chased route
+        // through `ResetVehicle` — the same disclosed path the
+        // player's reset uses, so the jump cannot sweep checkpoints
+        // and the walk-back keeps the landing out of un-cleared
+        // triggers. `reanchors` is the observable count.
+        if session.authority_role().is_authority() && pos.0.is_finite() {
+            if pos.0.distance(driver.stuck_pos) >= REANCHOR_DIST {
+                driver.stuck_pos = pos.0;
+                driver.stuck_frames = 0;
+            } else {
+                driver.stuck_frames += 1;
+            }
+            if driver.stuck_frames >= REANCHOR_FRAMES
+                && let Some(route) = driver.spec.route.clone()
+            {
+                let gates: Vec<mm2_game::Checkpoint> = race
+                    .map(|r| {
+                        progress
+                            .remaining()
+                            .filter_map(|i| r.definition.checkpoints.get(i))
+                            .copied()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let (mut pose, ryaw) = reanchor_pose(&route, driver.next, pos.0, yaw, |p| {
+                    gates.iter().any(|g| {
+                        let dx = p.x - g.center.x;
+                        let dz = p.z - g.center.z;
+                        dx * dx + dz * dz < g.radius * g.radius
+                    })
+                });
+                // The same hull clearance the spawn applies.
+                let hull_min_y = vehicle
+                    .config
+                    .collider_points
+                    .as_ref()
+                    .and_then(|pts| pts.iter().map(|p| p[1]).reduce(f32::min))
+                    .unwrap_or(-vehicle.config.chassis_size[1] * 0.5);
+                pose.y += (SPAWN_LIFT - hull_min_y).max(0.35);
+                resets.write(ResetVehicle {
+                    entity: Some(entity),
+                    position: pose,
+                    yaw: ryaw,
+                });
+                driver.next = initial_route_index(&route, pose, ryaw);
+                driver.recovery = ScriptedBot::default();
+                driver.pass_entity = None;
+                driver.pass_side = 0.0;
+                driver.clear_frames = 0;
+                driver.stall_frames = 0;
+                driver.stuck_frames = 0;
+                driver.stuck_pos = pose;
+                driver.reanchors += 1;
+                info!(
+                    vehicle = %driver.spec.vehicle,
+                    reanchors = driver.reanchors,
+                    "opponent re-anchored onto its route after a bounded stuck"
+                );
+                *input = VehicleInput::default();
+                continue;
+            }
+        } else {
+            driver.stuck_pos = pos.0;
+            driver.stuck_frames = 0;
+        }
         let reach = BLOCK_NEAR + vstate.forward_speed.max(0.0) * BLOCK_LEAD;
         // A banned blocker — one whose abandoned pass is still on its
         // cooldown — is fully transparent: no aim, no brake. That is
