@@ -1,143 +1,148 @@
 # Last implementation iteration
 
-- Task ID and title: F15-A.2 — opponent spawn/drive: the authored
-  `[Opponent]` lineup spawned as real AI participants driving their own
-  `.opp` routes through the shared `VehicleInput` → physics →
-  `advance_race` path.
-- Starting commit: `7328362d3887d1822ac92e1251132d40c11c18f9`
-  (externally checked F15-A.1; branch `ralph/night`).
-- Why this slice: F15-A.1 landed the roster contract; this is its
-  named remaining half — spawn opponent entities into valid start
-  slots and drive the authored routes through the production vehicle
-  sim. The F13-B/F14-B remainders block on real opponent participants.
+- Task ID and title: review repair (`update_checkpoint_markers`
+  ambiguous participant pick) + F15-B.1 — opponent traffic
+  avoidance/overtake: live-participant corridor sensing, committed
+  pass side, following brake, bounded response to uncompletable
+  passes.
+- Starting commit: `f4fe9bbe94d253da5da44e70990ff2f239cce6e7`
+  (externally checked F15-A.2; branch `ralph/night`).
+- Why this slice: the external review's only finding was the marker
+  ambiguity — repaired first per policy. For feature work the
+  selection policy named F15-B among the ready slices; the
+  avoidance/overtake leg is its smallest coherent piece and directly
+  advances F15-AC03 (blocked roads → bounded response, not
+  indefinite stationary cars). The difficulty/param-tail model
+  (UNK-11) stays open — no semantics are invented for it.
 - Retail install: `/Users/linus/coding/rust-mm2/retail`
   (`fnv1a64:e91e6cd4b2ae30d9`).
 
 ## What changed
 
-- **`mm2_content::load_opponent`** (`assemble.rs`): each roster
-  vehicle loads with its authored `tune/vehicle/<id>_opp.vehcarsim`
-  merged over the base tune, not substituted for it. Retail evidence
-  forced this: all 23 `_opp` files are *sparse overrides* — authored
-  values differ (inertia box, drivetrain, horsepower, top speed) but
-  most omit fields the base file carries, and several
-  (`vp4x4_opp`, `vpbus_opp`, `vpcab_opp`…) author transmission data in
-  an alternate schema (`NumGears`/`GearRatios`/`UpshiftRPM`/
-  `DownshiftRPM`/`DownshiftBias`) the player files' `ManualNumGears`/
-  `Low`/`High` band schema does not use. The first retail run failed
-  all six wired `vpbug` opponents on `missing required field
-  "TireDragCoefLong"` before the merge existed. Merge mechanics live
-  in `mm2_formats::tune::TuneBlock::merge_overlay` (generic AST
-  overlay, recursive); the policy and docs stay in `assemble.rs`.
-  `_opp`-only fields our schema doesn't model surface through the
-  existing unrecognised-field warnings — preserved diagnostics, not
-  silent drops. Missing variant → base tune (unchanged fallback);
-  every other dependency (`.info`/`.pkg`/`.bnd`/`.mtx`/`.asnode`/
-  `.vehtrailer`) stays the vehicle's own.
-- **`mm2_app::opponents`** (new): `OpponentDriver` component (authored
-  `OpponentSpec` verbatim + chase index + `ScriptedBot` recovery
-  state); `spawn_opponents` — one session-owned entity per authored
-  roster entry with its own `VehicleDef` (opponent tuning preferred →
-  per-vehicle character, not player clones), minted `ObjectId`/
-  `PlayerId`, `PlayerControl::Ai`, the session's authority role,
-  `DamageSignals`, `RaceProgress` on the shared `RaceDefinition`, the
-  same `vehicle_bundle` + model path as the player. Roster issues log
-  at load; a vehicle that fails to load warns and skips only its
-  authored slot; a dead `.opp` ref spawns and holds still. Trailer
-  rigs spawn without the trailer (no retail roster wires a hauler).
-- **`opponent_drive`** (Update in `main.rs` + `smoke.rs`): gates on
-  `session.is_playing()`, the countdown's `input_locked`, and the
-  participant's own `RaceProgress` state; `route_target` advances
-  past reached anchors (reach radius or the passed-the-plane test —
-  no U-turns back), wraps closed routes (retail circuit `.opp`s
-  close onto their start), and bounds retries on degenerate routes;
-  `scripted_input` — the same normalized-input control law the
-  scripted evidence driver uses — produces steer/throttle/brake with
-  its bounded reverse-and-turn stuck recovery. Route missing or
-  complete → zeroed input (open-route completion means coast; the
-  race progress lives in checkpoints, not the polyline).
-- **`spawn_pose`** (provisional — UNK-16/17): authored `_strtpnts`
-  slot `index+1` when the event ships a grid (slot 0 is the player by
-  convention), else the route's first point, else a designed stagger
-  behind the player; facing always from the route's first leg, since
-  the `a` columns' conventions are unverified. Same hull-clearance
-  lift as the player spawn.
-- **Wiring**: `EventSetup.roster` carries the built roster (build
-  failure degrades to empty with a warning — the race still runs);
-  `load_session_world` spawns opponents before `RaceState` so
-  `advance_race` owns countdown/release for every participant; smoke
-  record gains `opp={resolved}/{spawned}` only when a roster exists
-  (records without a roster stay bit-identical).
-- **Ledger**: RACE-13 new (`_opp` sparse-override shape + alternate
-  Trans schema, measured on all 23 retail files); UNK-11 updated
-  (`.opp` columns measured all-zero → polyline treatment stated;
-  `_opp` consumption noted as designed merge).
+- **`race.rs` review repair**: `update_checkpoint_markers` queried
+  `(&Player, &RaceProgress)` and took `iter().next()` — correct only
+  by archetype-iteration luck once opponents also carried both
+  components. It now selects `PlayerControl::Local`, the same
+  disambiguation `update_race_warning` already uses; markers
+  represent the local driver's view.
+- **`opponents.rs` avoidance** (designed controller — no claim of
+  original AI behavior, which remains UNK-11):
+  - `Traffic`/`Blocker`: every other participant (player included)
+    resolved into the driver's frame from live `Position`/`Rotation`/
+    `VehicleState` — real physics obstacles, no map data.
+  - `nearest_blocker`: nearest car inside a forward corridor
+    (`BLOCK_HALF_WIDTH` 2.4 m lane, `reach = 14 m + 1.4·speed`).
+  - Pass engagement: a *standing* blocker (`< CRAWL_SPEED` 3 m/s)
+    anywhere in the corridor, or a *moving* one only on genuine
+    closure (`> FOLLOW_RELEASE` 2 m/s). A matched-pace car is a
+    queue to sit in — with a field sharing `.opp` lines, always-on
+    offset aims weave the whole field off-line all race (measured:
+    first version dropped `london circuit:0` to `opp=0/7`).
+  - Commit: `pass_side` ±1 from `pick_pass_side` (open side of an
+    offset blocker → route side for a centred one → default), then
+    a `PASS_SCAN` room weighting over every nearby car flips it if
+    the picked lane is the busier one. Held for the pass so
+    alternating blockers cannot flicker it.
+  - Aim: `pos + fwd·PASS_LOOKAHEAD + route-lateral·PASS_OFFSET` —
+    a short-range point down the offset lane (a shifted distant
+    anchor is a ~4° wiggle, not a lane change); the lateral derives
+    from the route leg each frame so the offset lane bends with
+    the road (a world-fixed vector aimed cars across corners).
+  - `held_blocker`: the pass holds across a wider window
+    (`PASS_WIDE`) until the blocker is `PASS_BEHIND` behind — no
+    cut-back across its nose; `PASS_RELEASE` bounds the linger.
+  - `apply_gap_brake`: moving blocker inside the comfort gap →
+    soft adaptive-cruise brake even at matched pace (a queue keeps
+    its gaps instead of riding bumpers — measured: matched-pace
+    bumper-riding drove impacts up); standing blocker → brake only
+    on a real approach so crawl-pace steering can still complete
+    the drive-around; `PANIC_GAP` → hard brake on active closure.
+  - Bounded response (AC03): `PASS_STALL` frames (6 s) without
+    `PASS_STALL_DIST` (8 m) of displacement abandons the pass and
+    bans that blocker for `PASS_BAN` (5 s) — *fully* transparent
+    (no aim, no brake) so the route line can push or slip past;
+    the clean pass retries after. Displacement, not speed, is the
+    stall signal — recovery shuffles oscillate through 2 m/s and
+    reset a velocity check. Static walls/props stay with
+    `ScriptedBot`'s existing bounded recovery — no second
+    geometry-avoidance system.
+- All tuning constants are designed controller values, disclosed as
+  such; nothing claims retail-game constants.
 
 ## Tests
 
-- `mm2_app/tests/opponents.rs` — +11 through `load_session_world` →
-  `advance_race` on a synthetic install (PKG3 geometry + ASCII `.bnd`
-  + base/`_opp` tunes + event/aimap/opp records): distinct entities
-  spawn with `PlayerControl::Ai`/session owner/`RaceProgress`;
-  unloadable vehicle skips only its slot; dead route ref spawns and
-  holds still; countdown locks inputs; `route_target` advance, skip-
-  passed-point (incoming-leg direction), open-route completion,
-  closed-route wrap, degenerate-route bound; `spawn_pose` grid→
-  anchor→stagger preference; two opponents drive their routes and
-  resolve `Finished` through shared validation; restart despawns and
-  respawns the lineup under the new generation.
-- `mm2_content` merge behavior is exercised by the app suite's
-  `_opp`-variant fixture; the `TuneBlock::merge_overlay` mechanics are
-  covered transitively (`_opp` tune omits no fields the app tests
-  depend on — the retail run below is the load-bearing evidence).
+- `mm2_app/tests/opponents.rs` — 16 total (+5): `pick_pass_side`
+  open/route-side/default picks, corridor-only sensing (adjacent
+  lane, behind, out-of-reach excluded), gap-brake bands (outside
+  gap, hard close, matched-pace station-keeping, moving-blocker
+  queue brake, crawl-pace no-brake), `blocked_route_drives_around_
+  the_parked_car` — a parked participant on the route is driven
+  around through `load_session_world` → `advance_race` with zero
+  blocker contacts and all gates cleared — and
+  `checkpoint_markers_track_the_local_participant` (review
+  regression).
 
 ## Commands actually run and results
 
-- `cargo fmt --all -- --check` PASS (after `cargo fmt --all`).
+- `cargo fmt --all -- --check` PASS.
 - `cargo clippy --locked --workspace --all-targets --all-features --
   -D warnings` PASS.
-- `cargo test --locked --workspace` — all groups, 0 failures
-  (incl. all 11 new opponent tests).
-- `cargo test -p mm2_app --test opponents` — 11/11 ok.
-- Retail `sf checkpoint:0 --headless --bot --frames 1800` — first run
-  *before* the merge: all 6 wired `vpbug` opponents failed to load
-  (`missing required field "TireDragCoefLong"`), `opp=` absent.
-  After the merge: `opponent roster spawned opponents=6`,
-  `pos=5/7` mid-race — roster issues surface in-run (`race0` 6-wired-
-  vs-7-authored count mismatch + `race0-a-6.opp` unreferenced).
-- Retail `sf checkpoint:0 --headless --bot --frames 5400`:
-  `opp=3/6` — three opponents resolved `Finished` through shared
-  `advance_race` validation; `results=4`, `outcome=finished
-  place=4`, `pos=4/7`. Smoke `status=fail`/`fell through the world`
-  is the scripted bot's pre-existing course limitation (present on
-  the same run before opponents spawned, and in the F12-C bot
-  matrix), not an opponent failure.
-- `mm2-inspect list`/`dump` audit of all 23 retail `_opp` files —
-  the RACE-13 sparse-override/alternate-schema measurement.
+- `cargo test --locked --workspace` — all groups ok, 0 failures.
+- `cargo test -p mm2_app --test opponents` — 16/16 ok.
+- Retail evidence, both this build and a `f4fe9bb` baseline
+  worktree run this iteration (deterministic headless, same
+  commands):
+  - `sf checkpoint:0 --bot --frames 5400`: `opp=3/6` place 4,
+    impacts 195 — baseline `opp=3/6` place 4, impacts 208
+    (parity, fewer impacts).
+  - `london circuit:0 --bot --frames 14400`: `opp=3/7` place 4,
+    impacts 408 — baseline `opp=2/7` place 3, impacts 367. First
+    retail circuit opponent evidence at all (AC02's circuit leg
+    was a noted gap); three opponents complete 3 laps × 6 gates
+    through shared `advance_race` validation.
+  - `sf checkpoint:0` hold-driver `--frames 5400` (player becomes
+    a mid-course obstacle, full window for opponents): `opp=4/6`
+    impacts 165 — baseline `opp=4/6` impacts 232.
+  - `london circuit:0` hold-driver `--frames 14400`: `opp=3/7` —
+    baseline `opp=4/7`.
+  - `london checkpoint:0 --bot --frames 5400`: `opp=1/4` place 2 —
+    baseline `opp=3/4`. Confounded the other way here: the baseline
+    player never resolved inside the window (`cp=3/5`, full Playing
+    time for opponents) while this build's player finished at ~75 s
+    and ended their clock; the unresolved three were at c2–c5, not
+    stalled.
+- Process of getting here matters for the record: the first
+  avoidance cut measured `opp=0/7` on the circuit (always-on offset
+  aim wove the pack; matched-pace bumper-riding raised impacts).
+  The corridor narrowing, moving/standing split, occupancy scan,
+  route-relative lane and transparency-ban are what bring the
+  numbers above — evidence-tuned, not assumed.
 
 ## What this proves / does not prove
 
-- Proves: authored opponent lineups spawn as real participants on
-  retail data — own vehicles with `_opp` opponent tuning where
-  authored, own `.opp` driving lines, shared race validation,
-  countdown gating, session-scoped teardown/restart; opponents
-  complete a retail course ahead of the scripted player (place 4 of
-  7). F15-AC01's spawn leg, AC02 (own vehicles/routes), AC03
-  (countdown/release + recovery law) and AC05's progress leg have
-  retail-backed evidence; the `opp=` smoke field exposes it.
-- Does not prove: exact retail AI behavior — the control law is the
-  shared scripted law (designed), the difficulty/param-tail model is
-  untouched (UNK-11), `.opp` brake/offset/speed columns are preserved
-  but uninterpreted (measured all-zero on sampled routes), `_opp`
-  merge semantics are a designed policy (the alternate Trans schema
-  decodes nowhere), grid-slot assignment stays provisional
-  (UNK-16/17), and `status=fail` on the smoke line is a bot/course
-  limitation. Opponents finishing 3/6 in 90 s is honest evidence of
-  competence, not parity with the original AI.
-- Acceptance IDs: F15-AC01 (spawn + drive legs), AC02, AC03, AC05 —
-  candidate evidence as above; AC04/AC06 (full-mode competitiveness/
-  representative matrix) still open; F15-A stays `active` pending
-  external review; F15-B (difficulty model) queued.
+- Proves: opponents sense live participants and alter their driving —
+  brake for closing traffic, commit and hold a pass side, drive
+  around parked cars, queue at matched pace instead of weaving —
+  through the same `VehicleInput` path and physics; on retail data
+  the field matches or beats the no-avoidance baseline on finishers
+  with materially fewer impacts on open courses; circuit opponents
+  now have retail completion evidence; a failed pass is bounded
+  (stall → transparent push-through window → retry), not an
+  indefinite hold.
+- Does not prove: exact original AI behavior (designed controller);
+  difficulty/param-tail semantics (UNK-11, untouched); that
+  avoidance never hurts pace — on the tightest narrow-street
+  circuit a mid-pack knot can circulate at crawl for tens of
+  seconds inside stall/ban cycles (baseline instead stranded cars
+  permanently: honest different failure profile, hold-driver leg
+  `3/7` vs `4/7` records the remaining deficit); the `opp=`
+  denominator still counts spawned cars, not authored slots.
+- Acceptance IDs: F15-AC02 circuit leg now has retail evidence;
+  AC03 advanced (drive-around + bounded pass abandonment +
+  queue/brake behavior — an observed *recovery* event from a
+  wall/prop trap is still unevidenced); AC05 still needs a
+  seeded soak matrix; AC06 untouched (difficulty). F15-B stays
+  `active` pending external review.
 
 This is a candidate handoff. External code-gate and separate review
 results live in the runner state directory and are not implied by

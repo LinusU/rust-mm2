@@ -12,15 +12,18 @@ use std::time::Duration;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
-use mm2_app::opponents::{OpponentDriver, opponent_drive, route_target, spawn_pose};
+use mm2_app::opponents::{
+    Blocker, OpponentDriver, Traffic, apply_gap_brake, nearest_blocker, opponent_drive,
+    pick_pass_side, route_target, spawn_pose,
+};
 use mm2_app::session::{self, SessionControl};
 use mm2_app::{camera, contracts, race};
 use mm2_assets::Vfs;
 use mm2_game::{
-    EventRef, EventTableKind, ImpactEvent, Mm2Vfs, OpponentRoute, OpponentRoutePoint, OpponentSpec,
-    ParticipantState, Player, PlayerControl, PlayerVehicle, RaceDefinition, RaceProgress,
-    RaceStarted, RaceState, ResultLedger, Session, SessionConfig, SessionEntity, SessionMode,
-    SessionPhase, advance_session_tick, despawn_session_entities,
+    EventRef, EventTableKind, ImpactEvent, Mm2Vfs, ObjectIdentity, OpponentRoute,
+    OpponentRoutePoint, OpponentSpec, ParticipantState, Player, PlayerControl, PlayerVehicle,
+    RaceDefinition, RaceProgress, RaceStarted, RaceState, ResultLedger, Session, SessionConfig,
+    SessionEntity, SessionMode, SessionPhase, advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::{Vehicle, VehicleConfig, VehicleInput, VehiclePlugin};
 
@@ -702,6 +705,225 @@ fn restart_respawns_the_lineup() {
 
 fn phase(app: &App) -> SessionPhase {
     app.world().resource::<Session>().phase().clone()
+}
+
+fn drain_impacts(app: &mut App) -> Vec<ImpactEvent> {
+    app.world_mut()
+        .resource_mut::<Messages<ImpactEvent>>()
+        .drain()
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// F15-B.1 — traffic avoidance / overtake
+// ---------------------------------------------------------------------------
+
+fn traffic(e: u32, pos: [f32; 3], fwd: [f32; 3], speed: f32) -> Traffic {
+    Traffic {
+        entity: Entity::from_raw_u32(e).unwrap(),
+        pos: Vec3::from_array(pos),
+        fwd: Vec3::from_array(fwd),
+        speed,
+    }
+}
+
+#[test]
+fn nearest_blocker_reads_only_the_corridor_ahead() {
+    let me = Entity::from_raw_u32(0).unwrap();
+    let pos = Vec3::ZERO;
+    let fwd = Vec3::NEG_Z;
+    let reach = 50.0;
+    let self_entry = traffic(0, [0.0, 0.0, -5.0], [0.0, 0.0, -1.0], 0.0);
+    let ahead = traffic(1, [0.0, 0.0, -20.0], [0.0, 0.0, -1.0], 10.0);
+    let near = traffic(2, [1.0, 0.0, -12.0], [0.0, 0.0, -1.0], 0.0);
+    let next_lane = traffic(3, [6.0, 0.0, -10.0], [0.0, 0.0, -1.0], 10.0);
+    let behind = traffic(4, [0.0, 0.0, 5.0], [0.0, 0.0, -1.0], 10.0);
+    let far = traffic(5, [0.0, 0.0, -80.0], [0.0, 0.0, -1.0], 10.0);
+    let all = [self_entry, ahead, near, next_lane, behind, far];
+
+    let b = nearest_blocker(me, pos, fwd, reach, &all).unwrap();
+    assert_eq!(b.entity, all[2].entity, "the nearer corridor car wins");
+    assert!((b.gap - 12.0).abs() < 0.01);
+    assert!(b.lat > 0.0, "x=+1 sits to the right of a -Z heading");
+    assert_eq!(b.speed, 0.0, "parked blocker reads no closing pace");
+
+    let all = [self_entry, all[1], all[3], all[4], all[5]];
+    let b = nearest_blocker(me, pos, fwd, reach, &all).unwrap();
+    assert_eq!(b.entity, all[1].entity, "next-nearest corridor car");
+    assert!((b.speed - 10.0).abs() < 0.01);
+
+    // Off the corridor entirely: nothing ahead.
+    let clear = [traffic(6, [4.0, 0.0, -10.0], [0.0, 0.0, -1.0], 0.0)];
+    assert!(
+        nearest_blocker(me, pos, fwd, reach, &clear).is_none(),
+        "a car on the next lane is not a blocker"
+    );
+}
+
+#[test]
+fn pick_pass_side_prefers_the_open_side() {
+    assert_eq!(
+        pick_pass_side(2.0, 0.0),
+        -1.0,
+        "blocker on the right → pass left"
+    );
+    assert_eq!(
+        pick_pass_side(-2.0, 0.0),
+        1.0,
+        "blocker on the left → pass right"
+    );
+    assert_eq!(
+        pick_pass_side(0.0, -2.0),
+        -1.0,
+        "dead-centre → the side the route continues"
+    );
+    assert_eq!(
+        pick_pass_side(0.0, 0.0),
+        1.0,
+        "dead-centre on a straight route → the default"
+    );
+}
+
+#[test]
+fn gap_brake_bites_only_inside_the_comfort_gap() {
+    let parked_far = Blocker {
+        entity: Entity::PLACEHOLDER,
+        gap: 40.0,
+        lat: 0.0,
+        speed: 0.0,
+    };
+    let mut input = VehicleInput {
+        throttle: 1.0,
+        ..default()
+    };
+    apply_gap_brake(&mut input, &parked_far, 20.0);
+    assert_eq!(input.throttle, 1.0, "outside the gap the demand stands");
+    assert_eq!(input.brake, 0.0);
+
+    // Inside the gap and closing hard: throttle cut, brake applied.
+    let parked_near = Blocker {
+        gap: 6.0,
+        ..parked_far
+    };
+    let mut input = VehicleInput {
+        throttle: 1.0,
+        ..default()
+    };
+    apply_gap_brake(&mut input, &parked_near, 20.0);
+    assert_eq!(input.throttle, 0.0, "closing inside the gap lifts off");
+    assert!(
+        input.brake > 0.5,
+        "a hard close brakes hard: {}",
+        input.brake
+    );
+
+    // Matched speed in the outer half of the gap: hold station rather
+    // than flap brake/coast.
+    let matched = Blocker {
+        gap: 10.0,
+        speed: 18.0,
+        ..parked_far
+    };
+    let mut input = VehicleInput {
+        throttle: 0.4,
+        ..default()
+    };
+    apply_gap_brake(&mut input, &matched, 18.0);
+    assert_eq!(
+        input.throttle, 0.4,
+        "station-keeping leaves the demand alone"
+    );
+    assert_eq!(input.brake, 0.0);
+
+    // Matched speed *inside* the comfort gap: a moving blocker gets a
+    // soft adaptive-cruise brake so the queue keeps a gap instead of
+    // riding bumpers.
+    let tailgated = Blocker {
+        gap: 5.0,
+        ..matched
+    };
+    let mut input = VehicleInput {
+        throttle: 0.4,
+        ..default()
+    };
+    apply_gap_brake(&mut input, &tailgated, 18.0);
+    assert_eq!(input.throttle, 0.0, "a moving blocker in the gap lifts off");
+    assert!(
+        input.brake > 0.0 && input.brake < 0.5,
+        "gap-keeping is a soft brake, not a panic stop: {}",
+        input.brake
+    );
+
+    // A standing blocker at crawl pace does not brake — braking there
+    // is what deadlocked the follower behind parked cars; the pass
+    // steering is the avoidance.
+    let crawl = Blocker {
+        gap: 6.0,
+        ..parked_far
+    };
+    let mut input = VehicleInput {
+        throttle: 0.2,
+        ..default()
+    };
+    apply_gap_brake(&mut input, &crawl, 1.0);
+    assert_eq!(input.throttle, 0.2, "crawl pace keeps steering priority");
+    assert_eq!(input.brake, 0.0);
+}
+
+/// A participant parked on the route is an obstacle, not a wall
+/// (F15-B.1, AC03's blocked-road leg): `vpheavy`'s `.opp` is a single
+/// point parked mid-lane on `vpt`'s line, so it holds still while the
+/// follower commits a pass side, drives around without contact and
+/// still finishes the course.
+#[test]
+fn blocked_route_drives_around_the_parked_car() {
+    let tmp = roster_install(
+        "",
+        &[("race0-a-1.opp", opp_file(&[[100.0, 0.0, COURSE_Z]]))],
+    );
+    let mut app = event_app(event_config(), vfs_of(tmp.path()));
+    app.update();
+    let vpt = opponent_by_vehicle(&mut app, "vpt");
+    let heavy = opponent_by_vehicle(&mut app, "vpheavy");
+    let heavy_obj = app.world().get::<ObjectIdentity>(heavy).unwrap().0;
+    let heavy_start = app.world().get::<Position>(heavy).unwrap().0;
+
+    let mut impacts = Vec::new();
+    let mut max_dev = 0.0f32;
+    for _ in 0..1800 {
+        app.update();
+        impacts.extend(drain_impacts(&mut app));
+        let p = app.world().get::<Position>(vpt).unwrap().0;
+        max_dev = max_dev.max((p.z - COURSE_Z).abs());
+    }
+
+    let progress = app.world().get::<RaceProgress>(vpt).unwrap();
+    assert!(
+        matches!(progress.state, ParticipantState::Finished { .. }),
+        "the follower still finishes around the obstacle: {:?} cleared {}/3",
+        progress.state,
+        progress.cleared_count()
+    );
+    assert!(
+        max_dev > 1.0,
+        "the pass visibly left the lane line: max |z-140| = {max_dev}"
+    );
+    assert!(
+        impacts
+            .iter()
+            .all(|e| e.participants.0 != heavy_obj && e.participants.1 != heavy_obj),
+        "avoidance drives around — no contact with the parked car"
+    );
+    let heavy_pos = app.world().get::<Position>(heavy).unwrap().0;
+    assert!(
+        (heavy_pos - heavy_start).length() < 3.0,
+        "the obstacle was not shoved down the lane: {heavy_start:?} → {heavy_pos:?}"
+    );
+    assert_eq!(
+        app.world().get::<RaceProgress>(heavy).unwrap().state,
+        ParticipantState::Racing,
+        "the parked entry stays a participant, unresolved"
+    );
 }
 
 /// Regression for the review's ambiguous-pick finding
