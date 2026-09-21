@@ -941,12 +941,14 @@ fn update_hud(
     // The local participant's terminal state, rendered once the race is
     // over — the finish carries its recorded race-clock time and its
     // place in the ledger's standings (UI-5's "placing + total time",
-    // F13-B). `TimedOut` participants rank but show no place — a DNF
-    // banner is clearer than an ordinal.
+    // F13-B). The ledger outlives one session, so the place scopes to
+    // the current generation — a finished restart's stale results must
+    // not re-rank the live race. `TimedOut` participants rank but show
+    // no place — a DNF banner is clearer than an ordinal.
     let participant_count = participants.iter().count();
     let outcome = |id: Option<mm2_game::PlayerId>, state: Option<&mm2_game::ParticipantState>| {
         let placing = id
-            .and_then(|id| ledger.place_of(id))
+            .and_then(|id| ledger.place_of_in(session.generation(), id))
             .map(|p| match participant_count {
                 n if n > 1 => format!(" {} of {n}", ordinal(p)),
                 _ => format!(" {}", ordinal(p)),

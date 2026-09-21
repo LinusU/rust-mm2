@@ -354,6 +354,10 @@ pub fn headless_smoke(
                 String::new()
             };
             let ledger = world_ecs.resource::<mm2_game::ResultLedger>();
+            // The ledger outlives one session, so the result count
+            // scopes to the current generation like the standings
+            // below — a restart's stale results must not inflate it.
+            let result_count = ledger.standings_in(session.generation()).len();
             let limit = r
                 .time_remaining()
                 .map(|t| format!(" tl={:.1}s", t as f32 / mm2_game::RACE_TICK_HZ as f32))
@@ -383,15 +387,9 @@ pub fn headless_smoke(
                 .map(|i| format!(" pos={}/{}", i + 1, order.len()))
                 .unwrap_or_default();
             // The local participant's result plus its place in the
-            // ledger's standings (F13-B).
-            let outcome = local
-                .and_then(|id| ledger.iter().find(|s| s.id.participant == id))
-                .or_else(|| ledger.iter().next())
-                .map(|s| match ledger.place_of(s.id.participant) {
-                    Some(place) => format!(" outcome={} place={}", s.outcome.name(), place),
-                    None => format!(" outcome={}", s.outcome.name()),
-                })
-                .unwrap_or_default();
+            // ledger's standings (F13-B) — scoped to the current
+            // session generation.
+            let outcome = result_outcome(ledger, session.generation(), local);
             // F15-A.2: spawned opponents and how many resolved
             // (finished/timed out). Absent on runs without a roster so
             // older records stay bit-identical. `opp_rec` counts the
@@ -428,7 +426,7 @@ pub fn headless_smoke(
                 r.phase,
                 cleared,
                 r.definition.checkpoints.len(),
-                ledger.len(),
+                result_count,
                 lap,
                 limit,
                 pos,
@@ -540,4 +538,78 @@ pub fn headless_smoke(
         return record(SmokeStatus::Fail, detail(" car never drove"));
     }
     record(SmokeStatus::Pass, detail(""))
+}
+
+/// The record's `outcome=`/`place=` field: the local participant's
+/// result and its place in the ledger's standings for the *current*
+/// session generation (F13-B). The ledger outlives one session —
+/// results carry their generation — so both the result lookup and the
+/// place scope to `generation`: an in-process restart's stale results
+/// must not re-rank the live record. A participant with several
+/// results in the generation (a retried event) reports the
+/// best-ranked one, matching `place_of_in`. When the car is not a
+/// participant the field still names the generation's leading result.
+fn result_outcome(
+    ledger: &mm2_game::ResultLedger,
+    generation: u64,
+    local: Option<mm2_game::PlayerId>,
+) -> String {
+    let standings = ledger.standings_in(generation);
+    local
+        .and_then(|id| standings.iter().copied().find(|s| s.id.participant == id))
+        .or_else(|| standings.first().copied())
+        .map(|s| match ledger.place_of_in(generation, s.id.participant) {
+            Some(place) => format!(" outcome={} place={}", s.outcome.name(), place),
+            None => format!(" outcome={}", s.outcome.name()),
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mm2_game::{PlayerId, ResultId, SessionOutcome, SessionResult};
+
+    fn result(generation: u64, participant: u16, sequence: u32, race_ticks: u64) -> SessionResult {
+        SessionResult {
+            id: ResultId {
+                generation,
+                participant: PlayerId(participant),
+                event: None,
+                sequence,
+            },
+            tick: 0,
+            outcome: SessionOutcome::Finished { race_ticks },
+        }
+    }
+
+    /// The ledger is `init_resource`'d once and never cleared, and a
+    /// restart reuses the same `PlayerId` — the record must rank the
+    /// *current* generation only. Regression: the unscoped lookup let
+    /// a slower refinish keep the prior generation's better place.
+    #[test]
+    fn outcome_scopes_to_the_session_generation() {
+        let local = PlayerId(0);
+        let mut ledger = mm2_game::ResultLedger::default();
+        // Generation 1: an opponent beat the local driver.
+        ledger.record(result(1, 1, 0, 50)).unwrap();
+        ledger.record(result(1, 0, 0, 100)).unwrap();
+        // Generation 2 (restarted session): the local driver finished
+        // alone — slower than either generation-1 result.
+        ledger.record(result(2, 0, 0, 150)).unwrap();
+
+        assert_eq!(
+            ledger.place_of(local),
+            Some(2),
+            "unscoped standings still see the stale win"
+        );
+        assert_eq!(
+            result_outcome(&ledger, 2, Some(local)),
+            " outcome=finished place=1",
+            "the live record ranks only generation 2"
+        );
+        // A generation with no results records no outcome at all —
+        // the fallback must not reach back into a finished session.
+        assert_eq!(result_outcome(&ledger, 3, Some(local)), "");
+    }
 }
