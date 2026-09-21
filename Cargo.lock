@@ -3847,6 +3847,9 @@ dependencies = [
  "bevy",
  "mm2_assets",
  "mm2_formats",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tracing",
 ]
 

@@ -15,6 +15,7 @@ pub mod ids;
 pub mod impact;
 pub mod nav;
 pub mod opponent;
+pub mod profile;
 pub mod props;
 pub mod race;
 pub mod result;
@@ -41,6 +42,11 @@ pub use nav::{
 pub use opponent::{
     OpponentDriveParams, OpponentIssue, OpponentRoster, OpponentRoute, OpponentRoutePoint,
     OpponentSpec,
+};
+pub use profile::{
+    EventKey, EventRecord, MAX_NAME_CHARS, PROFILE_SCHEMA_VERSION, PlayerProfile, ProfileError,
+    ProfileId, ProfileKind, ProfileLoad, ProfileMeta, ProfileProgress, ProfileSelections,
+    ProfileStore, ProfileSummary, VehicleChoice,
 };
 pub use props::{MAX_PROP_RULE_STAMPS, PropStamp, PropWalk, PropWalkStats, walk_prop_rules};
 pub use race::{

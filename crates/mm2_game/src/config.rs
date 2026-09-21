@@ -156,7 +156,10 @@ impl EventRef {
 
 /// The four authored `mm*data.csv` event tables each stock city ships
 /// (RACE-1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum EventTableKind {
     /// `mmblitzdata.csv` — solo checkpoint hunts against the clock.
     Blitz,
@@ -182,7 +185,8 @@ impl EventTableKind {
 
 /// Driver rank — the authored Amateur/Professional parameter split
 /// (DRV-2/DRV-3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Difficulty {
     /// First parameter block: longer limits, lighter traffic.
     #[default]

@@ -1,128 +1,115 @@
 # Last implementation iteration
 
-- Task ID and title: F11-C.1 — single-event dependency inspection:
-  `mm2-inspect event <dir> --city <stem> --event <table>:<row>
-  [--strict]` resolves one authored event row and validates its
-  complete dependency closure without launching the game (the
-  F11-AC06 inspect leg).
-- Starting commit: `2b81ca2e84492047e516f5495efa5ce9f3c5a69e` on
-  `ralph/night` — the iteration-13 candidate the external review
-  passed (F15-B.3).
+- Task ID and title: F16-A.1 — versioned profile storage with atomic
+  load/save and isolated identities (the storage leg of F16-A).
+- Starting commit: `1720a5378e75ac8f7db3bd54cc4c437e7805154a` on
+  `ralph/night` — the iteration-14 candidate the external review
+  passed (F11-C.1).
 - Retail install: `/Users/linus/coding/rust-mm2/retail`
-  (`fnv1a64:e91e6cd4b2ae30d9`).
+  (`fnv1a64:e91e6cd4b2ae30d9`) — inspected, not written to.
 
 ## Why this slice
 
 The plan's selection policy offered F13-B/F14-B remainders, the F15-B
-remainder, or F11-C. F14-B's presentation leg is already landed
-(`update_hud` shows lap/gate/clock/live place/finish). F11-AC06 asks
-for a selected original event to be independently inspectable and
-dependency-validated; the existing audits are catalog-wide
-(`events`/`race-defs`/`opponents`) and leave `.aimap`/`.pathset`
-records `Unparsed`, so a single event could not be deep-checked
-without scanning everything. This slice is the smallest unit that
-closes that gap through the production APIs.
+remainder, or the F11-C remainder. Reassessed: the F11-C remainder is
+evidence-recording (run-and-record audits), not code; F13-B/F14-B's
+open legs are scoped to F15/F17 (results screen, opponent hooks
+already landed); the F15-B remainder's named items are research-gated
+(catch-up semantics unverified, `weirdPathfinding`/`distancePadding`/
+`cornerBrakingThreshold` consumption deferred "once semantics verify",
+`avoidOpponents` polarity open). F16-A was the highest-value *ready*
+slice — both dependencies (F01-A, F11-A) are checked — and it unblocks
+the F16-B → F17-A chain (rewards, then menus/user flow). The retail
+`players/` binaries (`player<N>.sav`/`*.cfg`, 17 files) were inspected
+for shape only; per the F16 non-goal our own format claims no
+compatibility with them.
 
 ## What changed
 
-- `mm2_content::race_def::audit_build` and
-  `mm2_content::opponents::audit_roster` are now `pub` — the
-  per-event build-and-summarize units the catalog-wide
-  `RaceDefReport`/`OpponentReport` already used; no behavior change,
-  just shared with the single-event path so the two can never
-  disagree.
-- `tools/mm2_inspect/src/event.rs` — new module:
-  - `inspect(vfs, city, table, index) -> Result<EventReport, String>`
-    scans the city catalog once and looks the row up via
-    `EventCatalog::get`. Unknown refs (bad row, no such table, wrong
-    city) are a hard lookup error — exit 2. Found-but-incomplete
-    events still produce a full report so the missing piece is
-    visible.
-  - Every attributed record gets a `RecordCheck`: parsed kinds
-    report row counts + diagnostics; `Failed` reports the reason;
-    `Unparsed` records are deep-parsed here — `.aimap`/`.aimap_p`
-    through `Aimap::parse`+`validate()`, `.pathset` through
-    `Pathset::parse`+`validate()`, other kinds honestly labelled
-    uninterpreted.
-  - Both production builds run at both difficulties via
-    `audit_build`/`audit_roster`; Crash Course reports `unsupported`
-    (deferred to F21), never a failure.
-  - Wired opponent vehicle ids accumulate into a scratch set and are
-    cross-checked against `VehicleCatalog::scan` — a roster wiring a
-    `vp*` that resolves nowhere is reported.
-  - `EventReport::failures()` collects everything `--strict` exits
-    on: incomplete status, failed refs/records, record validation
-    issues, failed builds, roster issues, unresolved vehicles.
-  - `parse_event_spec` accepts the same `<table>:<row>` vocabulary
-    as `mm2 --event` (`checkpoint|race`, `blitz`, `circuit`,
-    `crash|crashcourse`).
-- `main.rs` — `Event` subcommand + dispatch; reuses `build_vfs`,
-  `parse_table_filter`, `describe_build`, `describe_roster`.
+- `crates/mm2_game/src/profile.rs` — new module:
+  - `PlayerProfile`: `version` (=`PROFILE_SCHEMA_VERSION` 1, stamped
+    on save, rejected on mismatch), `ProfileId` (`driver-<n>`),
+    `name` (≤32 chars, no control chars — duplicates legal, the id is
+    the identity), `rank` (reuses `Difficulty`, DRV-2), `kind`
+    (`Standard`/`Sandbox` — the spec req-5 split, gated by
+    `records_progress()`), `revision` (per-save counter),
+    `progress` (`Vec<EventRecord>` sorted by key + `unlocks` id set),
+    `selections` (last vehicle/paint, `last_event` for DRV-8), and
+    `extra` (`#[serde(flatten)]` — unknown top-level fields written
+    by a newer build round-trip verbatim, spec req 4).
+  - `EventKey{city, table, stem}` keys progress by the event's
+    authored file stem — not the table row index — so a mod inserting
+    a row cannot silently retarget a saved record (spec req 4).
+  - `ProfileStore`: `open`/`list`/`create`/`load`/`save`/`delete`/
+    `active`/`set_active`/`default_root`. Ids allocate max-suffix+1 so
+    a deleted id is never reused. `save` = tmp write + `sync_all` +
+    rotate `.bak` + rename — a crash at any point leaves a complete
+    document under one of the three names. `load` falls back to `.bak`
+    and reports `ProfileLoad::recovered_from_backup`; corrupt files
+    still `list()` by id with their error and are never deleted by a
+    read (denominator honesty); a parsed file whose `id` field
+    disagrees with its file stem is corrupt, not a different
+    identity. `delete` removes only that id's three files and refuses
+    the store's last profile (DRV-7). `default_root()` resolves the OS
+    user-data dir (macOS `~/Library/Application Support/rust-mm2/
+    profiles`, Windows `%APPDATA%`, other Unix `$XDG_DATA_HOME` or
+    `~/.local/share`) — original installs stay read-only.
+- `config.rs`: `Difficulty` and `EventTableKind` gained serde derives
+  (`snake_case` wire names); `EventTableKind` gained `Ord` for the
+  sorted progress container.
+- `Cargo.toml`/`Cargo.lock`: `serde` + `serde_json` deps on mm2_game
+  (both already in the lockfile — no new crates), `tempfile` dev-dep.
+- `lib.rs`: `pub mod profile` + re-exports.
 
-## Tests (`mm2_inspect` 5 → 12)
+## Tests (`mm2_game` profile suite — 15 new)
 
-- `parses_event_specs` — `circuit:0`, `race:` alias, malformed specs.
-- `inspects_a_complete_event` — synthetic install (circuit table +
-  waypoints + `_strtpnts` + `.aimap`/`.aimap_p` + `-a-`/`-p-` `.opp`
-  routes + empty PTH1 + vehicle catalog stubs): status ready, zero
-  failures, aimap deep-parsed, both builds `Built`.
-- `unknown_event_is_a_lookup_error` — out-of-range row, missing
-  table, wrong city.
-- `incomplete_event_reports_but_fails_strict` — removed `.aimap` →
-  `status: Incomplete` + non-empty failures.
-- `malformed_aimap_is_a_record_failure` — the catalog marks aimaps
-  `Unparsed` at scan time; the deep check is what flags it.
-- `unresolved_wired_vehicle_is_reported` — roster wires a vehicle id
-  absent from the vehicle catalog.
-- `crash_course_reports_unsupported_not_failed` — `data.csv` +
-  `data_p.csv` + referenced waypoint CSV attached, both builds
-  `Unsupported`, zero failures.
+`tests/profile.rs`: create→mutate→save→load round trip; unknown
+fields survive a round trip; two-profile isolation (mutate one, the
+other untouched) + listing; duplicate display names → distinct ids;
+invalid names (empty/blank/over-cap/control) rejected; deleted ids
+never reused; corrupt main → backup recovery flagged; interrupted
+write (missing main + stale tmp + valid bak) recovers; fully-corrupt
+profile → `Corrupt` with per-file reasons, files preserved, still
+listed; `version: 99` rejected; file naming a different id → corrupt;
+last-profile delete refused (DRV-7) and still loadable; delete scoped
+to one id (main+bak+tmp gone, sibling intact, re-delete →
+`UnknownProfile`); `active` marker round trip + stale marker → `None`;
+sandbox `records_progress()` gate.
 
 ## Commands actually run and results
 
-- `cargo fmt --all -- --check` PASS.
+- `cargo test -p mm2_game --test profile` — 15/15 pass.
+- `cargo fmt --all -- --check` — PASS (after `cargo fmt`).
 - `cargo clippy --locked --workspace --all-targets --all-features --
-  -D warnings` PASS.
-- `cargo test --locked --workspace` — 38 suites ok, 0 failures.
-- Retail evidence — `fnv1a64:e91e6cd4b2ae30d9`
-  (`./target/debug/mm2-inspect event /Users/linus/coding/rust-mm2/retail`):
-  - `--city sf --event circuit:1` — ready; 21 records (16 `.opp`
-    routes, both aimaps, pathset 23 paths/112 points, waypoints,
-    `cir1_strtpnts` alias grid); defs `10g×3lap`/`10g×4lap`; rosters
-    `7opp 7rt` both; surfaces the authored anomaly that
-    `circuit1-a-7.opp`/`circuit1-p-7.opp` are wired to no opponent —
-    `--strict` exits 2 on exactly that finding.
-  - `--city london --event crash:0` — ready; `longjump.csv` resolved
-    through the crash-data `Filename` link and reported; both builds
-    `unsupported (crash course — F21)`, no failure.
-  - `--city london --event blitz:0`/`blitz:9` — ready; `radius`-label
-    waypoints, authored time limits bound, `[Exceptions]` counted.
-  - `--city sf --event checkpoint:0` — ready; reports the known
-    RACE-11 authored anomaly (table claims 7 opponents, aimap wires
-    6, `race0-a-6.opp` unreferenced) as roster issues.
-  - `--city london --event blitz:99` — `error: no authored event row
-    for Blitz:99 in london`, exit 2.
-- Evidence classification: code gates + synthetic tests + retail CLI
-  runs. No GPU/rendered/audio evidence — none needed for an
-  inspection command. Original-content coverage is one-row-at-a-time;
-  the catalog-wide audits remain the completeness denominator.
+  -D warnings` — PASS, 0 warnings.
+- `cargo test --locked --workspace` — all suites ok, 0 failures
+  (mm2_game profile suite 15/15; no existing test touched or removed).
+- Evidence classification: code gates + synthetic store tests against
+  tempdirs. No retail/GPU/audio evidence needed — the store is user
+  data, not content; nothing in the original install is read or
+  written by this slice.
 
 ## Ledger / research updates
 
-- `docs/ralph/PLAN.md` — F11-C → active (split recorded), F11-C.1
-  row added, selection narrative updated.
-- No `docs/original-rules.md` change — this slice adds no original-
-  behavior claims; it reports authored data and the existing
-  designed policies.
+- `docs/original-rules.md` — DSN-15 records the profile-store design
+  (own format, no retail-save compatibility; atomic save protocol;
+  stem-keyed progress; sandbox gate; DRV-7 store enforcement).
+- `docs/ralph/PLAN.md` — F16-A → active, F16-A.1 row added, selection
+  narrative updated.
 
 ## Still open
 
-- F11-C remainder is evidence-recording, not code: full-catalog
-  strict audit runs against the fingerprinted install, AC02–AC05
-  promotion through the landed runtime slices, AC06's "loaded" leg
-  already covered by `mm2 --event` headless smoke records.
-- F15-B: catch-up semantics, measured difficulty effects, remaining
-  param-tail fields, fixed-seed soak (unchanged).
-- F13-B/F14-B remainders, F16-A, F07/F08, F10, F21+ (unchanged).
+- F16-A remainder: app wiring — resolve `default_root()`/`--profile`
+  at startup, restore `selections` into `SessionConfig`, persist on
+  exit. UI create/select/delete flows are F17 scope. AC01's
+  restart-isolation evidence additionally needs F16-B's authoritative
+  result→progress consumption to exist.
+- F16-B (reward/unlock rules, idempotent grants — `unlocks` set and
+  `records_progress()` gate are the seams) and F16-C (full matrix)
+  unchanged.
+- F15-B remainder (catch-up semantics, measured difficulty effects,
+  param-tail consumption once verified, `avoidOpponents` polarity,
+  fixed-seed soak), F13-B/F14-B remainders, F11-C remainder — all
+  unchanged.
 - `sf checkpoint:0`'s idle-player "fell through the world" smoke
   artifact remains pre-existing (unrelated to this slice).
