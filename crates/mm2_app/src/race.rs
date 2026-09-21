@@ -184,14 +184,21 @@ pub fn spawn_checkpoint_markers(
 pub fn update_checkpoint_markers(
     race: Option<Res<RaceState>>,
     session: Res<Session>,
-    progress: Query<&RaceProgress, With<Player>>,
+    participants: Query<(&Player, &RaceProgress)>,
     mut markers: Query<(&CheckpointMarker, &mut Visibility)>,
 ) {
     let Some(race) = race else { return };
     if race.is_stale(session.generation()) {
         return;
     }
-    let progress = progress.iter().next();
+    // The markers show the local driver's view of the course — the
+    // same disambiguation `update_race_warning` uses, since AI and
+    // remote participants carry `Player` too and a plain `iter().next()`
+    // would follow whichever archetype iterates first.
+    let progress = participants
+        .iter()
+        .find(|(p, _)| p.control == PlayerControl::Local)
+        .map(|(_, progress)| progress);
     let def = &race.definition;
     for (marker, mut vis) in &mut markers {
         let show = match marker.gate {

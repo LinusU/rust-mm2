@@ -314,6 +314,7 @@ fn event_app(config: SessionConfig, vfs: Vfs) -> App {
                     session::drive_session,
                 )
                     .chain(),
+                race::update_checkpoint_markers,
                 opponent_drive,
             ),
         );
@@ -701,4 +702,53 @@ fn restart_respawns_the_lineup() {
 
 fn phase(app: &App) -> SessionPhase {
     app.world().resource::<Session>().phase().clone()
+}
+
+/// Regression for the review's ambiguous-pick finding
+/// (`update_checkpoint_markers`): the markers show the *local* driver's
+/// view. Opponents carry `Player` too, so the system cannot take the
+/// first `RaceProgress` it meets — moving the local player into an
+/// archetype created after the AI's makes that order-dependent pick
+/// land on an opponent.
+#[test]
+fn checkpoint_markers_track_the_local_participant() {
+    #[derive(Component)]
+    struct Probe;
+
+    let tmp = roster_install("", &[]);
+    let mut app = event_app(event_config(), vfs_of(tmp.path()));
+    app.update();
+    let car = app
+        .world_mut()
+        .query_filtered::<Entity, With<PlayerVehicle>>()
+        .iter(app.world())
+        .next()
+        .unwrap();
+    app.world_mut().entity_mut(car).insert(Probe);
+
+    // An AI clears gate 0 through the contract — `advance` anchors the
+    // segment, then sweeps through the trigger — while the local
+    // driver clears nothing.
+    let def = app.world().resource::<RaceState>().definition.clone();
+    let vpt = opponent_by_vehicle(&mut app, "vpt");
+    {
+        let mut p = app.world_mut().get_mut::<RaceProgress>(vpt).unwrap();
+        p.state = ParticipantState::Racing;
+        p.advance(&def, Vec3::new(85.0, 0.0, COURSE_Z));
+        p.advance(&def, Vec3::new(135.0, 0.0, COURSE_Z));
+        assert!(p.is_cleared(0), "the AI really swept gate 0");
+    }
+    app.update();
+
+    let vis = app
+        .world_mut()
+        .query_filtered::<(&race::CheckpointMarker, &Visibility), ()>()
+        .iter(app.world())
+        .find(|(m, _)| m.gate == Some(0))
+        .map(|(_, v)| *v);
+    assert_eq!(
+        vis,
+        Some(Visibility::Visible),
+        "an AI's cleared gate must not hide the local driver's marker"
+    );
 }
