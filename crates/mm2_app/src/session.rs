@@ -8,9 +8,12 @@
 //!   session's [`SessionEntity`] generation) and drives `Loading → Ready →
 //!   Playing`, or `→ Failed` on a load error.
 //! - [`session_control_input`] maps keys onto [`SessionControl`] intents:
-//!   `Esc` quits (tears down, then exits — or returns to the menu when a
-//!   `MenuShell` resource is running, F17-A.1), `Backspace` restarts the
-//!   session with the same config.
+//!   `Esc` pauses a live `Playing` session (F17-B — the pause overlay's
+//!   Quit/Resume rows take it from there), quits a
+//!   `Countdown`/`Results`/`Failed` one (tears down, then exits — or
+//!   returns to the menu when a `MenuShell` resource is running,
+//!   F17-A.1), and `Backspace` restarts the session with the same
+//!   config.
 //! - `despawn_session_entities` (mm2_game, scheduled while `Unloading`)
 //!   removes every session-owned root; [`drive_session`] waits for the
 //!   world to be observably empty, clears session-scoped caches
@@ -73,14 +76,19 @@ pub struct Hud;
 pub struct ErrorText;
 
 /// What the player asked the session to do next. Written by
-/// [`session_control_input`], consumed by [`drive_session`]. `quit` wins
-/// over `restart` if both are set in the same frame.
+/// [`session_control_input`] (and `pause_input`'s row activations while
+/// `Paused`), consumed by [`drive_session`]. `quit` wins over `restart`
+/// and `pause` if several are set in the same frame.
 #[derive(Resource, Default)]
 pub struct SessionControl {
     /// Tear down, reach `Menu`, then exit the app.
     pub quit: bool,
     /// Tear down, then `begin` a new session with the same config.
     pub restart: bool,
+    /// `Playing → Paused` (F17-B). Only ever set for a live session
+    /// whose authority allows pause — `session_control_input` falls
+    /// back to `quit` when `allows_pause` is false (MP-6).
+    pub pause: bool,
 }
 
 /// Run condition: the session is in `Loading` — gates
@@ -95,13 +103,22 @@ pub fn unloading(session: Res<Session>) -> bool {
     matches!(session.phase(), SessionPhase::Unloading)
 }
 
-/// `Esc` asks to quit, `Backspace` asks to restart. Intents are only read
-/// from the phases a session can sit in — while `Loading`, `Unloading` or
-/// `Menu` the driver is already working and input is ignored. `Countdown`
-/// is quittable: a race that has not started still tears down like any
-/// other live session.
+/// `Esc` (or a gamepad `Start`) asks to pause, `Backspace` asks to
+/// restart. Intents are only read from the phases a session can sit in
+/// — while `Loading`, `Unloading` or `Menu` the driver is already
+/// working and input is ignored. `Paused` is deliberately absent:
+/// `pause_input` owns the keyboard there (`Esc` is resume, and the
+/// overlay's Quit/Restart rows set these same intents). `Countdown` is
+/// quittable: a race that has not started still tears down like any
+/// other live session, and since the lifecycle has no `Countdown →
+/// Paused` edge, `Esc` there stays quit.
+///
+/// Pause is only requested when the session authority allows it
+/// (MP-6) — a non-pausable session takes `Esc` as quit, so the key
+/// always escapes a live session rather than going dead.
 pub fn session_control_input(
     keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<&Gamepad>,
     session: Res<Session>,
     mut control: ResMut<SessionControl>,
 ) {
@@ -109,15 +126,25 @@ pub fn session_control_input(
         session.phase(),
         SessionPhase::Countdown
             | SessionPhase::Playing
-            | SessionPhase::Paused
             | SessionPhase::Results
             | SessionPhase::Failed(_)
     );
     if !quittable {
         return;
     }
-    if keys.just_pressed(KeyCode::Escape) {
-        control.quit = true;
+    let pause_key = keys.just_pressed(KeyCode::Escape)
+        || pads
+            .iter()
+            .next()
+            .is_some_and(|pad| pad.just_pressed(GamepadButton::Start));
+    if pause_key {
+        if *session.phase() == SessionPhase::Playing
+            && session.config().is_none_or(|c| c.authority.allows_pause())
+        {
+            control.pause = true;
+        } else {
+            control.quit = true;
+        }
     }
     if keys.just_pressed(KeyCode::Backspace) {
         control.restart = true;
@@ -136,9 +163,12 @@ pub fn session_control_input(
 ///   returns to it; `restart` calls `begin` with the retained config,
 ///   flipping the phase to `Loading` so the spawn system builds the
 ///   next session.
-/// - `Countdown`/`Playing`/`Paused`/`Results`/`Failed`: a queued intent
-///   moves the session to `Unloading`; teardown proceeds on later
-///   frames.
+/// - `Playing`: a queued `pause` intent (Esc/Start or `--pause`) moves
+///   the session to `Paused` — the pause overlay's Resume row and
+///   `pause_input`'s Esc bring it straight back.
+/// - `Countdown`/`Playing`/`Paused`/`Results`/`Failed`: a queued
+///   quit/restart intent moves the session to `Unloading`; teardown
+///   proceeds on later frames.
 // The menu-shell presence adds one param past the lint's limit — a
 // SystemParam bundle would hide `session`/`control`, the two handles
 // every arm uses, for no real gain.
@@ -203,6 +233,16 @@ pub fn drive_session(
                 }
             }
         }
+        SessionPhase::Playing if control.pause && !(control.quit || control.restart) => {
+            control.pause = false;
+            // The intent is only ever produced for a pausable
+            // authority, so a rejection means the session state
+            // drifted — log and keep playing rather than stranding
+            // the driver.
+            if let Err(e) = session.transition(SessionPhase::Paused) {
+                warn!(error = %e, "pause intent rejected");
+            }
+        }
         SessionPhase::Countdown
         | SessionPhase::Playing
         | SessionPhase::Paused
@@ -210,6 +250,9 @@ pub fn drive_session(
         | SessionPhase::Failed(_)
             if control.quit || control.restart =>
         {
+            // A queued pause must not outlive the session it was meant
+            // for — the next `Playing` phase belongs to a new run.
+            control.pause = false;
             session
                 .transition(SessionPhase::Unloading)
                 .expect("live/failed session → Unloading is a legal transition");

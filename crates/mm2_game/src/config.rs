@@ -449,6 +449,13 @@ pub struct DevOverrides {
     /// session-legal parameter drives this yet — F18 owns the real
     /// writer). `None`/`1.0` is unmodified.
     pub traction: Option<f32>,
+    /// `--pause`: pause the session once it reaches `Playing`
+    /// (evidence/diagnostic runs — a `--frames`/`--screenshot` capture
+    /// freezes live input, so this is how the pause overlay gets
+    /// rendered; never a session-legal parameter). A paused session is
+    /// still a legal gameplay state, so like `--cam`/`--nav` this stays
+    /// out of `record_eligibility`.
+    pub pause: bool,
 }
 
 /// Configuration of the `--nav` debug overlay: draw the city's BAI

@@ -18,8 +18,8 @@ use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use clap::Parser;
 use mm2_app::session::{ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
-    banger, camera, car_visual, city, contracts, input, menu, nav_overlay, opponents, profile,
-    progression, race, scripted, session, smoke,
+    banger, camera, car_visual, city, contracts, input, menu, nav_overlay, opponents, pause,
+    profile, progression, race, scripted, session, smoke,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
@@ -150,6 +150,12 @@ struct Cli {
     /// without needing 32 real collisions).
     #[arg(long, value_name = "n")]
     banger_pool: Option<usize>,
+
+    /// Pause the session once it reaches `Playing` (diagnostic aid —
+    /// a `--frames`/`--screenshot` capture freezes live input, so this
+    /// is how the pause overlay gets rendered). Meaningless headless.
+    #[arg(long, conflicts_with = "headless")]
+    pause: bool,
 
     /// Multiply every tire contact's grip by `f` for the session — an
     /// environment traction stand-in (wetness/ice) for evidence runs.
@@ -616,6 +622,7 @@ fn main() {
             spawn: spawn_pose,
             banger_pool: cli.banger_pool,
             traction,
+            pause: cli.pause,
         },
         // Any mounted mod makes records/unlocks ineligible — a result
         // under modded content is not comparable to stock (designed
@@ -695,6 +702,7 @@ fn main() {
         && cli.vehicle_config.is_none()
         && cli.banger_pool.is_none()
         && cli.traction.is_none()
+        && !cli.pause
         && !cli.nav
         && cli.nav_route.is_none()
         && !cli.bot;
@@ -784,6 +792,7 @@ fn main() {
     .init_resource::<mm2_game::ResultLedger>()
     .init_resource::<mm2_game::BangerPool>()
     .init_resource::<SessionControl>()
+    .init_resource::<pause::PauseMenu>()
     .add_systems(FixedUpdate, advance_session_tick)
     .add_systems(
         FixedLast,
@@ -814,6 +823,10 @@ fn main() {
             session::session_control_input.run_if(not(capturing)),
             (
                 despawn_session_entities.run_if(session::unloading),
+                // `--pause` auto-pauses the first `Playing` frame —
+                // deliberately ungated by `capturing`: putting a
+                // capture into pause is exactly what it is for.
+                pause::dev_pause_once,
                 session::drive_session,
             )
                 .chain(),
@@ -844,6 +857,24 @@ fn main() {
                 race::update_race_warning,
             ),
             update_hud,
+        ),
+    )
+    // Pause owns the keyboard while `Paused`: `pause_input` runs after
+    // `session_control_input` (which ignores `Paused` — Esc while
+    // paused is resume, not quit) and before `drive_session` (so the
+    // Esc that entered pause is never re-read as a resume in the same
+    // update). The physics clock and the overlay are pure phase
+    // mirrors — they run after the driver so the update that enters or
+    // leaves `Paused` already sees the settled phase.
+    .add_systems(
+        Update,
+        (
+            pause::pause_input
+                .after(session::session_control_input)
+                .before(session::drive_session)
+                .run_if(not(capturing)),
+            pause::sync_physics_pause.after(session::drive_session),
+            pause::pause_present.after(session::drive_session),
         ),
     )
     // AI opponents own their own `VehicleInput` — `vehicle_input` only
@@ -1195,8 +1226,9 @@ fn ordinal(place: u32) -> String {
     format!("{place}{suffix}")
 }
 
-/// The root UI nodes of the HUD.
-type HudNodes = Or<(With<Hud>, With<ErrorText>)>;
+/// The root UI nodes pinned to the active camera — the HUD plus the
+/// pause overlay, which shares the session's render target.
+type HudNodes = Or<(With<Hud>, With<ErrorText>, With<pause::PauseUi>)>;
 
 /// Keep the HUD on whichever camera is active — UI otherwise stays on the
 /// first camera and disappears in free-camera mode.
@@ -1267,13 +1299,16 @@ fn screenshot_input(
 }
 
 /// `R` resets the player vehicle (and any trailer) to the spawn point.
+/// Driving-phase only: a reset while `Paused` would teleport the car
+/// under the overlay.
 fn reset_input(
     keys: Res<ButtonInput<KeyCode>>,
+    session: Res<Session>,
     spawn: Res<SpawnPoint>,
     player: Query<Entity, With<PlayerVehicle>>,
     mut writer: MessageWriter<ResetVehicle>,
 ) {
-    if !keys.just_pressed(KeyCode::KeyR) {
+    if !session.is_playing() || !keys.just_pressed(KeyCode::KeyR) {
         return;
     }
     let rot = Quat::from_rotation_y(spawn.yaw);

@@ -25,8 +25,9 @@
 //!
 //! Deferred to later slices (honest gaps, not placeholders): per-event
 //! weather/time/density controls (needs F18's session-legal writers;
-//! RACE-3 `customizable`), mouse navigation, results/pause screens
-//! (F17-B), original menu art and audio.
+//! RACE-3 `customizable`), mouse navigation, text entry for profile
+//! names, results screens (F17-B — the pause overlay itself landed
+//! in `crate::pause`), original menu art and audio.
 
 use std::collections::BTreeMap;
 

@@ -18,6 +18,7 @@ use bevy::time::TimeUpdateStrategy;
 use mm2_app::camera::CameraMode;
 use mm2_app::contracts::ImpactFilter;
 use mm2_app::menu::{self, MenuCamera, MenuData, MenuShell, MenuUi};
+use mm2_app::pause::{self, PauseMenu};
 use mm2_app::profile::ActiveProfile;
 use mm2_app::session::{self, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_assets::Vfs;
@@ -296,6 +297,7 @@ fn menu_app(dir: &Path, store: Option<ProfileStore>) -> App {
         .init_resource::<ResultLedger>()
         .init_resource::<BangerPool>()
         .init_resource::<SessionControl>()
+        .init_resource::<PauseMenu>()
         .init_resource::<ButtonInput<KeyCode>>()
         .init_resource::<Assets<Mesh>>()
         .init_resource::<Assets<Image>>()
@@ -326,11 +328,19 @@ fn menu_app(dir: &Path, store: Option<ProfileStore>) -> App {
             (
                 session::load_session_world.run_if(session::loading),
                 session::session_control_input,
+                // Same ordering contract as the binary: pause owns
+                // `Paused`, running between the intent reader (which
+                // ignores `Paused`) and the driver.
+                pause::pause_input
+                    .after(session::session_control_input)
+                    .before(session::drive_session),
                 (
                     despawn_session_entities.run_if(session::unloading),
                     session::drive_session,
                 )
                     .chain(),
+                pause::sync_physics_pause.after(session::drive_session),
+                pause::pause_present.after(session::drive_session),
                 (menu::menu_watch, menu::menu_input, menu::menu_present).chain(),
             ),
         );
@@ -359,6 +369,20 @@ fn shell(app: &App) -> &MenuShell {
 
 fn phase(app: &App) -> SessionPhase {
     app.world().resource::<Session>().phase().clone()
+}
+
+/// Leave a live session through the pause menu. `Esc` on `Playing`
+/// pauses (navigate to the Quit row); `Esc` on `Countdown` still
+/// requests quit directly — the lifecycle has no `Countdown → Paused`
+/// edge.
+fn quit_session(app: &mut App) {
+    press(app, KeyCode::Escape);
+    if phase(app) == SessionPhase::Paused {
+        for _ in 0..3 {
+            press(app, KeyCode::ArrowDown);
+        }
+        press(app, KeyCode::Enter);
+    }
 }
 
 /// Move focus onto the row containing `needle` through the real key
@@ -529,7 +553,7 @@ fn the_menu_draws_into_its_own_camera() {
 
     // Quit-to-menu brings the render target back — a returning shell
     // is drawable again, not just active.
-    press(&mut app, KeyCode::Escape);
+    quit_session(&mut app);
     assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Menu));
     app.update();
     assert_eq!(menu_cameras(&mut app), 1);
@@ -566,8 +590,9 @@ fn cruise_launches_then_quit_returns_to_the_menu() {
     let car = app.world().resource::<SelectedCar>();
     assert_eq!(car.def.as_ref().map(|d| d.id.as_str()), Some("vpt"));
 
-    // Esc in the world is quit-to-menu, not quit-to-exit.
-    press(&mut app, KeyCode::Escape);
+    // Esc pauses; the pause menu's Quit row is quit-to-menu, not
+    // quit-to-exit.
+    quit_session(&mut app);
     assert!(
         run_until(&mut app, 12, |a| phase(a) == SessionPhase::Menu),
         "quit never reached Menu"
@@ -587,7 +612,7 @@ fn cruise_launches_then_quit_returns_to_the_menu() {
     activate_row(&mut app, "testcity");
     assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Playing));
     assert_eq!(players(&mut app), 1);
-    press(&mut app, KeyCode::Escape);
+    quit_session(&mut app);
     assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Menu));
     app.update();
     assert_eq!(menu_roots(&mut app), 1);
@@ -916,7 +941,7 @@ fn quick_race_replays_the_last_event() {
     );
 
     // Quit-to-menu — the root row now names the last event.
-    press(&mut app, KeyCode::Escape);
+    quit_session(&mut app);
     assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Menu));
     app.update();
     let (text, enabled) = quick_race(&app);

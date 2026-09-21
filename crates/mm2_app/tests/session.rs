@@ -11,14 +11,16 @@ use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::camera::CameraMode;
 use mm2_app::contracts::{self, ImpactFilter};
+use mm2_app::pause::{self, PauseMenu, PauseUi};
 use mm2_app::session::{
     self, ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, TunedVehicle,
 };
 use mm2_assets::Vfs;
 use mm2_game::{
     BangerPool, DEFAULT_ACTIVE_POOL, DamageSignals, DevOverrides, ImpactEvent, ImpactId, Mm2Vfs,
-    ObjectId, ObjectIdentity, PlayerVehicle, Session, SessionConfig, SessionEntity, SessionPhase,
-    SpawnPose, WorldMode, advance_session_tick, despawn_session_entities,
+    ObjectId, ObjectIdentity, PlayerVehicle, Session, SessionAuthority, SessionConfig,
+    SessionEntity, SessionPhase, SpawnPose, WorldMode, advance_session_tick,
+    despawn_session_entities,
 };
 use mm2_vehicle::{Vehicle, VehicleConfig, VehicleInput, VehiclePlugin, VehicleState};
 
@@ -64,6 +66,7 @@ fn test_app(config: SessionConfig, frame_secs: f64) -> App {
         .init_resource::<ButtonInput<KeyCode>>()
         .init_resource::<ImpactFilter>()
         .init_resource::<SessionControl>()
+        .init_resource::<PauseMenu>()
         .add_systems(FixedUpdate, advance_session_tick)
         .add_systems(
             FixedLast,
@@ -78,11 +81,22 @@ fn test_app(config: SessionConfig, frame_secs: f64) -> App {
             (
                 session::load_session_world.run_if(session::loading),
                 session::session_control_input,
+                // Same ordering contract as the binary: pause owns
+                // `Paused`, running between the intent reader (which
+                // ignores `Paused`) and the driver.
+                pause::pause_input
+                    .after(session::session_control_input)
+                    .before(session::drive_session),
                 (
                     despawn_session_entities.run_if(session::unloading),
+                    pause::dev_pause_once,
                     session::drive_session,
                 )
                     .chain(),
+                // Phase mirrors run after the driver — the update that
+                // enters/leaves `Paused` sees the settled phase.
+                pause::sync_physics_pause.after(session::drive_session),
+                pause::pause_present.after(session::drive_session),
             ),
         );
     app.finish();
@@ -128,6 +142,247 @@ fn run_until(app: &mut App, max: usize, mut pred: impl FnMut(&mut App) -> bool) 
 
 fn phase_is(app: &mut App, phase: SessionPhase) -> bool {
     *app.world().resource::<Session>().phase() == phase
+}
+
+/// Press a key for exactly one update (no InputPlugin runs here, so the
+/// input state is managed by hand). `reset_all`, not `clear` — `clear`
+/// keeps `pressed`, so the same key would never re-fire `just_pressed`.
+fn press_key(app: &mut App, key: KeyCode) {
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(key);
+    app.update();
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .reset_all();
+}
+
+fn physics_paused(app: &mut App) -> bool {
+    app.world().resource::<Time<Physics>>().is_paused()
+}
+
+fn pause_rows(app: &mut App) -> usize {
+    let world = app.world_mut();
+    world
+        .query_filtered::<Entity, (With<PauseUi>, Without<ChildOf>)>()
+        .iter(world)
+        .count()
+}
+
+/// F17-B.1: `Esc` pauses a live session — the phase lands on `Paused`,
+/// the physics clock stops, the overlay owns the screen, and the world
+/// holds perfectly still until `Esc` resumes it.
+#[test]
+fn esc_pauses_then_resumes_a_frozen_world() {
+    let mut app = dev_app();
+    app.update();
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+    // Let the car settle so a frozen position is meaningful.
+    for _ in 0..30 {
+        app.update();
+    }
+    let car = single::<With<PlayerVehicle>>(&mut app);
+    assert!(
+        app.world().resource::<Session>().tick() > 0,
+        "the session clock should be counting"
+    );
+
+    press_key(&mut app, KeyCode::Escape);
+    assert!(
+        phase_is(&mut app, SessionPhase::Paused),
+        "Esc on a live session pauses, got {:?}",
+        app.world().resource::<Session>().phase()
+    );
+    assert!(physics_paused(&mut app), "the physics clock must stop");
+    assert_eq!(pause_rows(&mut app), 1, "the pause overlay draws");
+    // The same Esc press must not have been re-read as a resume —
+    // `pause_input` runs between the intent reader and the driver.
+    assert!(
+        !app.world().resource::<SessionControl>().quit,
+        "the entering Esc must not also queue a quit"
+    );
+
+    // A paused world is fully frozen: no physics steps, no session
+    // ticks, no drift. Snapshot after one paused update: Avian's
+    // schedule runner zeroes the physics delta only *after* its run
+    // check, so the first paused FixedMain drains one stale-delta step
+    // — part of the lead-in, not the freeze.
+    app.update();
+    let pos = app.world().get::<Position>(car).unwrap().0;
+    let tick = app.world().resource::<Session>().tick();
+    for _ in 0..30 {
+        app.update();
+    }
+    assert_eq!(app.world().get::<Position>(car).unwrap().0, pos);
+    assert_eq!(app.world().resource::<Session>().tick(), tick);
+    assert!(phase_is(&mut app, SessionPhase::Paused));
+
+    press_key(&mut app, KeyCode::Escape);
+    assert!(
+        phase_is(&mut app, SessionPhase::Playing),
+        "Esc while paused resumes, got {:?}",
+        app.world().resource::<Session>().phase()
+    );
+    assert!(!physics_paused(&mut app));
+    assert_eq!(pause_rows(&mut app), 0, "the overlay is gone");
+    for _ in 0..10 {
+        app.update();
+    }
+    assert!(
+        app.world().resource::<Session>().tick() > tick,
+        "the session clock resumes"
+    );
+}
+
+/// The pause overlay's rows drive the real session intents: Resume is
+/// `Paused → Playing`, Quit lands at `Menu` (and, with no `MenuShell`,
+/// writes `AppExit`), and a disabled row reports its reason without
+/// navigating anywhere.
+#[test]
+fn pause_menu_rows_drive_the_session() {
+    let mut app = dev_app();
+    app.update();
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+
+    // Enter on the focused row resumes.
+    press_key(&mut app, KeyCode::Escape);
+    assert!(phase_is(&mut app, SessionPhase::Paused));
+    press_key(&mut app, KeyCode::Enter);
+    assert!(
+        phase_is(&mut app, SessionPhase::Playing),
+        "Resume should land back in Playing"
+    );
+
+    // The disabled Options row explains itself and goes nowhere.
+    press_key(&mut app, KeyCode::Escape);
+    press_key(&mut app, KeyCode::ArrowDown);
+    press_key(&mut app, KeyCode::ArrowDown);
+    press_key(&mut app, KeyCode::Enter);
+    assert!(
+        phase_is(&mut app, SessionPhase::Paused),
+        "a disabled row must not activate"
+    );
+    assert!(
+        app.world()
+            .resource::<PauseMenu>()
+            .status
+            .as_deref()
+            .unwrap_or("")
+            .contains("F23"),
+        "the disabled reason lands on the status line"
+    );
+
+    // The last row quits: Unloading → Menu, and with no menu shell the
+    // driver writes AppExit.
+    press_key(&mut app, KeyCode::ArrowDown);
+    press_key(&mut app, KeyCode::Enter);
+    assert!(
+        run_until(&mut app, 12, |a| phase_is(a, SessionPhase::Menu)),
+        "quit from pause never reached Menu: {:?}",
+        app.world().resource::<Session>().phase()
+    );
+    assert_eq!(count::<With<SessionEntity>>(&mut app), 0);
+    assert_eq!(pause_rows(&mut app), 0, "the overlay dies with the session");
+    assert!(!physics_paused(&mut app), "physics unpauses at Menu");
+    // The Menu arm consumes the intent on a later update — watch for
+    // the exit message before it ages out of the buffer.
+    let wrote_exit = run_until(&mut app, 6, |a| {
+        !a.world().resource::<Messages<AppExit>>().is_empty()
+    });
+    assert!(wrote_exit, "quit should request AppExit");
+    let exits: Vec<AppExit> = app
+        .world_mut()
+        .resource_mut::<Messages<AppExit>>()
+        .drain()
+        .collect();
+    assert!(
+        exits.iter().any(|e| matches!(e, AppExit::Success)),
+        "quit with no menu shell should exit, got {exits:?}"
+    );
+}
+
+/// Restart from the pause overlay rides the existing restart intent —
+/// teardown, `Menu`, `begin` — so the new session lands clean and
+/// unpaused with a bumped generation.
+#[test]
+fn pause_menu_restart_reloads_clean() {
+    let mut app = dev_app();
+    app.update();
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+
+    press_key(&mut app, KeyCode::Escape);
+    press_key(&mut app, KeyCode::ArrowDown);
+    press_key(&mut app, KeyCode::Enter);
+    assert!(
+        run_until(&mut app, 12, |a| phase_is(a, SessionPhase::Playing)),
+        "restart from pause never returned to Playing: {:?}",
+        app.world().resource::<Session>().phase()
+    );
+    assert_eq!(app.world().resource::<Session>().generation(), 2);
+    assert!(
+        !physics_paused(&mut app),
+        "a restarted session is not paused"
+    );
+    assert_eq!(pause_rows(&mut app), 0);
+    assert_eq!(count::<With<PlayerVehicle>>(&mut app), 1);
+    assert_eq!(count::<With<Hud>>(&mut app), 1);
+}
+
+/// MP-6: a session under non-local authority cannot pause — `Esc`
+/// keeps its quit meaning rather than going dead.
+#[test]
+fn esc_quits_when_the_authority_cannot_pause() {
+    let mut app = test_app(
+        SessionConfig {
+            authority: SessionAuthority::Host,
+            ..SessionConfig::default()
+        },
+        1.0 / 60.0,
+    );
+    app.update();
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+
+    press_key(&mut app, KeyCode::Escape);
+    assert!(
+        run_until(&mut app, 12, |a| phase_is(a, SessionPhase::Menu)),
+        "Esc on a non-pausable session should quit, got {:?}",
+        app.world().resource::<Session>().phase()
+    );
+    assert_eq!(pause_rows(&mut app), 0, "no pause overlay for a host");
+}
+
+/// The `--pause` dev override pauses the first `Playing` frame — how a
+/// `--frames`/`--screenshot` capture (live input frozen) renders the
+/// overlay. It is a one-shot: a resume afterwards stays resumed.
+#[test]
+fn dev_pause_pauses_once_at_playing() {
+    let mut app = test_app(
+        SessionConfig {
+            dev: DevOverrides {
+                pause: true,
+                ..DevOverrides::default()
+            },
+            ..SessionConfig::default()
+        },
+        1.0 / 60.0,
+    );
+    assert!(
+        run_until(&mut app, 12, |a| phase_is(a, SessionPhase::Paused)),
+        "--pause never paused the session: {:?}",
+        app.world().resource::<Session>().phase()
+    );
+    assert!(physics_paused(&mut app));
+    assert_eq!(pause_rows(&mut app), 1);
+
+    press_key(&mut app, KeyCode::Escape);
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+    for _ in 0..10 {
+        app.update();
+    }
+    assert!(
+        phase_is(&mut app, SessionPhase::Playing),
+        "the one-shot must not re-fire after a resume"
+    );
 }
 
 /// AC01: a restart through the real spawn/teardown path leaves exactly

@@ -17,6 +17,7 @@ pub mod input;
 pub mod menu;
 pub mod nav_overlay;
 pub mod opponents;
+pub mod pause;
 pub mod profile;
 pub mod progression;
 pub mod race;
