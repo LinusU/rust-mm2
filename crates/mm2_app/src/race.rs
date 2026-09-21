@@ -89,6 +89,11 @@ pub struct EventSetup {
     /// `<city>_rewards.csv` rules the result consumer grants unlocks
     /// from, plus the authored family sizes `half`/`all` measure.
     pub rewards: mm2_game::RewardTable,
+    /// The city's derived availability surface (F16-B): which authored
+    /// events a progressing profile may select and what gates the
+    /// rest. Enforcement is F17's menu flow — until then this is the
+    /// honest record of what a `--event` launch bypassed.
+    pub availability: mm2_game::AvailabilityTable,
 }
 
 /// Resolve an `EventRef` through the VFS into the event's runtime
@@ -121,6 +126,10 @@ pub fn event_race_setup(
     for d in &rewards.diagnostics {
         warn!(diagnostic = %d, "reward row did not become a rule");
     }
+    let availability = mm2_content::availability_table(&catalog);
+    for d in &availability.diagnostics {
+        warn!(diagnostic = %d, "event row did not become an availability gate");
+    }
     Ok(EventSetup {
         definition,
         key: mm2_game::EventKey {
@@ -131,6 +140,7 @@ pub fn event_race_setup(
         pathsets,
         roster,
         rewards,
+        availability,
     })
 }
 

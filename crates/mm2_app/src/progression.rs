@@ -58,6 +58,11 @@ pub struct EventRewards {
     pub key: EventKey,
     /// The city's normalized reward rules and family denominators.
     pub table: RewardTable,
+    /// The city's derived availability surface (CHK-2/CHK-3, CC-3) —
+    /// which authored events the bound profile may select. Carried
+    /// here so a session can report a locked launch; the menu flow
+    /// that enforces it is F17.
+    pub availability: mm2_game::AvailabilityTable,
 }
 
 /// Per-app-run consumption state: which results already applied, and

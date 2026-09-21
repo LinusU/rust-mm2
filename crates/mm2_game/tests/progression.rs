@@ -398,3 +398,160 @@ fn record_eligibility_gates_dev_and_modded_sessions() {
         Err(Ineligible::DevOverride("spawn"))
     );
 }
+
+/// A table shaped like the authored rules: six checkpoint rows gated
+/// in sets of three (CHK-2/CHK-3) plus one always-open blitz row.
+fn availability_table() -> AvailabilityTable {
+    let row = |stem: &str, gate: EventGate| AvailabilityRow {
+        key: key(stem),
+        gate,
+    };
+    let race = |n: usize| key(&format!("race{n}"));
+    let crash = |n: usize| EventKey {
+        table: EventTableKind::CrashCourse,
+        ..key(&format!("crash{n}"))
+    };
+    AvailabilityTable {
+        rows: vec![
+            row("race0", EventGate::Open),
+            row("race1", EventGate::Open),
+            row("race2", EventGate::Open),
+            row(
+                "race3",
+                EventGate::AfterAll(vec![race(0), race(1), race(2)]),
+            ),
+            row(
+                "race4",
+                EventGate::AfterAll(vec![race(0), race(1), race(2)]),
+            ),
+            row("race5", EventGate::AfterAll(vec![race(3), race(4)])),
+            AvailabilityRow {
+                key: crash(3),
+                gate: EventGate::AfterAll(vec![crash(0), crash(1), crash(2)]),
+            },
+            AvailabilityRow {
+                key: EventKey {
+                    table: EventTableKind::Blitz,
+                    ..key("blitz0")
+                },
+                gate: EventGate::Open,
+            },
+        ],
+        diagnostics: Vec::new(),
+    }
+}
+
+fn beat(profile: &mut PlayerProfile, stem: &str) {
+    profile
+        .event_mut(key(stem))
+        .record_finish(100, Some(1), Difficulty::Amateur);
+}
+
+/// CHK-2/CHK-3: a fresh profile sees the first set open and every
+/// later set locked behind its predecessor's beaten flags; beating a
+/// set unlocks exactly the next one.
+#[test]
+fn checkpoint_sets_gate_on_the_previous_set() {
+    let mut p = profile();
+    let table = availability_table();
+
+    let eval = table.evaluate(&p);
+    let race0 = &eval[0];
+    let race3 = &eval[3];
+    assert!(race0.unlocked && !race0.customizable && race0.blocked_by.is_empty());
+    assert!(!race3.unlocked);
+    assert_eq!(race3.blocked_by.len(), 3, "the whole first set blocks");
+    // The blitz row is open with no prerequisites at all.
+    assert!(eval[7].unlocked);
+
+    for stem in ["race0", "race1"] {
+        beat(&mut p, stem);
+    }
+    let av = table.of(&p, &key("race3")).unwrap();
+    assert!(!av.unlocked, "one un-beaten set member still locks");
+    assert_eq!(
+        av.blocked_by
+            .iter()
+            .map(|k| k.stem.as_str())
+            .collect::<Vec<_>>(),
+        ["race2"]
+    );
+
+    beat(&mut p, "race2");
+    let eval = table.evaluate(&p);
+    assert!(eval[3].unlocked && eval[4].unlocked, "set one opens");
+    assert!(!eval[5].unlocked, "set two waits on set one");
+    assert_eq!(
+        eval[5]
+            .blocked_by
+            .iter()
+            .map(|k| k.stem.as_str())
+            .collect::<Vec<_>>(),
+        ["race3", "race4"]
+    );
+}
+
+/// RACE-3: meeting an event's win criterion opens its conditions
+/// options — the flag tracks the event's own beaten record, nothing
+/// else.
+#[test]
+fn a_beaten_event_opens_its_customization() {
+    let mut p = profile();
+    let table = availability_table();
+
+    assert!(!table.of(&p, &key("race0")).unwrap().customizable);
+    beat(&mut p, "race0");
+    let av = table.of(&p, &key("race0")).unwrap();
+    assert!(av.customizable);
+    // An unbeaten neighbour is unaffected.
+    assert!(!table.of(&p, &key("race1")).unwrap().customizable);
+}
+
+/// A crash-course midterm gate evaluates like any other: locked while
+/// its lesson group is unbeaten.
+#[test]
+fn a_midterm_reports_its_lesson_group() {
+    let mut p = profile();
+    let table = availability_table();
+    let crash3 = EventKey {
+        table: EventTableKind::CrashCourse,
+        ..key("crash3")
+    };
+    assert!(!table.of(&p, &crash3).unwrap().unlocked);
+    for n in 0..3 {
+        let k = EventKey {
+            table: EventTableKind::CrashCourse,
+            ..key(&format!("crash{n}"))
+        };
+        p.event_mut(k)
+            .record_finish(100, Some(1), Difficulty::Amateur);
+    }
+    assert!(table.of(&p, &crash3).unwrap().unlocked);
+}
+
+/// A sandbox identity sees the unrestricted view — spec req 5's
+/// developer access — without touching its (never-written) progress.
+#[test]
+fn a_sandbox_profile_sees_everything_unlocked() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(dir.path()).unwrap();
+    let p = store
+        .create("dev", Difficulty::Amateur, ProfileKind::Sandbox)
+        .unwrap();
+    let table = availability_table();
+    assert!(
+        table
+            .evaluate(&p)
+            .iter()
+            .all(|a| a.unlocked && a.customizable && a.blocked_by.is_empty())
+    );
+}
+
+/// A key the table does not cover reports `None` — the catalog never
+/// produced a row for it.
+#[test]
+fn an_uncatalogued_key_has_no_availability() {
+    let p = profile();
+    let table = availability_table();
+    assert!(table.of(&p, &key("race99")).is_none());
+}

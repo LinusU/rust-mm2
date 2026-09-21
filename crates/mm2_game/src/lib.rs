@@ -50,8 +50,9 @@ pub use profile::{
     ProfileStore, ProfileSummary, VehicleChoice,
 };
 pub use progression::{
-    ApplyOutcome, Grant, Ineligible, RewardRequirement, RewardRule, RewardTable, Unlock,
-    apply_result, place_requirement, record_eligibility,
+    ApplyOutcome, AvailabilityRow, AvailabilityTable, EventAvailability, EventGate, Grant,
+    Ineligible, RewardRequirement, RewardRule, RewardTable, Unlock, apply_result,
+    place_requirement, record_eligibility,
 };
 pub use props::{
     Carriageway, MAX_PATHSET_STAMPS, MAX_PROP_RULE_STAMPS, PathStampSite, PathStampSites,

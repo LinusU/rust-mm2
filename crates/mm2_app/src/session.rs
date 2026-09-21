@@ -311,6 +311,7 @@ pub fn load_session_world(
         RaceDefinition,
         mm2_game::OpponentRoster,
         mm2_game::RewardTable,
+        mm2_game::AvailabilityTable,
     )> = None;
     // The event's stable save identity — recorded on the bound profile
     // once the session is live (F16 `selections.last_event`).
@@ -376,7 +377,7 @@ pub fn load_session_world(
                         "event pathset overlay stamped"
                     );
                 }
-                event_race = Some((def, setup.roster, setup.rewards));
+                event_race = Some((def, setup.roster, setup.rewards, setup.availability));
             }
             Err(e) => {
                 error!(error = %e, event = ?event_ref, "event failed to load");
@@ -650,7 +651,7 @@ pub fn load_session_world(
     // the participant's progress are inserted first so `advance_race`
     // can own the release (one `RaceStarted`, one unlock — AC03).
     match event_race {
-        Some((def, roster, rewards)) => {
+        Some((def, roster, rewards, availability)) => {
             commands
                 .entity(vehicle)
                 .insert((RaceProgress::new(&def), TargetSelection::default()));
@@ -678,12 +679,33 @@ pub fn load_session_world(
             );
             race::spawn_nav_arrow(&mut commands, owner);
             race::spawn_race_warning(&mut commands, owner);
-            // F16-B: the event's reward surface — consumed by
-            // `record_session_results` while the session lives, removed
-            // by teardown so a following cruise never sees it.
+            // F16-B: the event's reward + availability surface —
+            // consumed by `record_session_results` while the session
+            // lives, removed by teardown so a following cruise never
+            // sees it.
+            let key = event_key.clone().expect("an event setup carries its key");
+            // A `--event` launch bypasses the (unbuilt, F17) menu that
+            // enforces availability — surface a still-locked event
+            // honestly rather than pretending the profile selected it.
+            if let Some(profile) = &active_profile
+                && let Some(entry) = availability.of(&profile.profile, &key)
+                && !entry.unlocked
+            {
+                warn!(
+                    event = %key.stem,
+                    blocked_by = %entry
+                        .blocked_by
+                        .iter()
+                        .map(|k| k.stem.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    "event not unlocked for the bound profile"
+                );
+            }
             commands.insert_resource(crate::progression::EventRewards {
-                key: event_key.clone().expect("an event setup carries its key"),
+                key,
                 table: rewards,
+                availability,
             });
             commands.insert_resource(RaceState::new(def, session.generation()));
             session

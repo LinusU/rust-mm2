@@ -11,6 +11,7 @@
 //! `mm2_game`.
 
 pub mod assemble;
+pub mod availability;
 pub mod catalog;
 pub mod convert;
 pub mod events;
@@ -23,6 +24,7 @@ pub mod rewards;
 pub mod surface;
 
 pub use assemble::{LoadError, TrailerDef, VehicleDef, load_by_id, load_opponent, load_vehicle};
+pub use availability::availability_table;
 pub use catalog::{
     CatalogEntry, DepSet, EXPECTED_STOCK_ROSTER, EntryStatus, VehicleCatalog, VehicleClass,
 };

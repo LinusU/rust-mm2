@@ -254,6 +254,28 @@ fn install() -> tempfile::TempDir {
     tmp
 }
 
+/// The same install with a four-row checkpoint table: `race3` sits in
+/// the second, gated set (CHK-3 — the first set must be beaten first).
+fn install_gated() -> tempfile::TempDir {
+    let tmp = install();
+    let d = tmp.path();
+    write(
+        d,
+        "race/testcity/mmracedata.csv",
+        format!(
+            "{MM_HEADER}\nnone,0,0,0,0,0,0.1,0.0,1,50,1,0,0,0,0,0,0.2,0.0,1,40,1\nnone,0,0,0,0,0,0.1,0.0,1,50,1,0,0,0,0,0,0.2,0.0,1,40,1\nnone,0,0,0,0,0,0.1,0.0,1,50,1,0,0,0,0,0,0.2,0.0,1,40,1\nnone,0,0,0,0,0,0.1,0.0,1,50,1,0,0,0,0,0,0.2,0.0,1,40,1\n"
+        ),
+    );
+    write(d, "race/testcity/race2.aimap", "#\n");
+    write(d, "race/testcity/race3.aimap", "#\n");
+    let mut wp = WAYPOINTS.to_string();
+    for x in COURSE {
+        wp.push_str(&format!("{x},0,{COURSE_Z},0,15,0,0,0,\n"));
+    }
+    write(d, "race/testcity/race3waypoints.csv", wp);
+    tmp
+}
+
 fn event_config() -> SessionConfig {
     SessionConfig {
         world: WorldMode::City {
@@ -647,4 +669,53 @@ fn a_bot_driven_finish_records_nothing() {
     let saved = saved_progress(&mut app, &store);
     assert!(saved.events.is_empty());
     assert!(saved.unlocks.is_empty());
+}
+
+/// A `--event` launch of a still-locked event runs — the CLI bypasses
+/// the (unbuilt, F17) menu that enforces availability — but the
+/// session's availability surface reports exactly which authored
+/// events the bound profile has not beaten (CHK-3's set-of-three).
+#[test]
+fn a_locked_event_launches_with_its_gate_visible() {
+    let tmp = install_gated();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let slot = bound_profile(&store, ProfileKind::Standard);
+    let (vfs, car) = selected_car(tmp.path());
+    let mut config = event_config();
+    config.mode = SessionMode::Event(EventRef {
+        city: "testcity".into(),
+        table: EventTableKind::Checkpoint,
+        index: 3,
+    });
+    let mut app = test_app(config, vfs, car, Some(slot));
+    app.update();
+
+    // Warn-only: the locked launch still reaches the race.
+    assert!(matches!(
+        app.world().resource::<Session>().phase(),
+        SessionPhase::Countdown | SessionPhase::Playing
+    ));
+    let world = app.world();
+    let rewards = world.resource::<EventRewards>();
+    assert_eq!(rewards.key.stem, "race3");
+    let availability = rewards
+        .availability
+        .of(&world.resource::<ActiveProfile>().profile, &rewards.key)
+        .expect("the launched event has an availability row");
+    assert!(!availability.unlocked);
+    assert_eq!(
+        availability
+            .blocked_by
+            .iter()
+            .map(|k| k.stem.as_str())
+            .collect::<Vec<_>>(),
+        ["race0", "race1", "race2"],
+        "the first checkpoint set gates the second"
+    );
+    // The open first-set events report unlocked, none customizable.
+    let open = rewards
+        .availability
+        .evaluate(&world.resource::<ActiveProfile>().profile);
+    assert!(open.iter().take(3).all(|a| a.unlocked && !a.customizable));
 }

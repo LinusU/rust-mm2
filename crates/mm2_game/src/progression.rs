@@ -30,9 +30,10 @@
 //!
 //! Event availability (CHK-2/CHK-3's set-of-three gating, CC-3's
 //! lesson→midterm→final chain, RACE-3's per-race customization
-//! unlocks) is *derived* state over the same `beaten` flags — its
-//! consumer is F17's menu flow, so no availability query ships until
-//! then. Pro points (DRV-4) stay unverified (UNK-8).
+//! unlocks) is *derived* state over the same `beaten` flags —
+//! [`AvailabilityTable::evaluate`] computes it; the producer is
+//! `mm2_content::availability_table` and the enforcing consumer is
+//! F17's menu flow. Pro points (DRV-4) stay unverified (UNK-8).
 
 use std::collections::BTreeMap;
 
@@ -127,6 +128,115 @@ pub fn place_requirement(difficulty: Difficulty) -> u32 {
     match difficulty {
         Difficulty::Amateur => 3,
         Difficulty::Professional => 1,
+    }
+}
+
+/// How a catalog event's launch is gated for a progressing profile
+/// (CHK-2/CHK-3, CC-3). `mm2_content::availability_table` builds one
+/// row per authored table row; the gate names its prerequisites as
+/// resolved [`EventKey`]s, never row indexes (spec req 4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventGate {
+    /// Selectable from a fresh profile: Blitz and Circuit rows carry
+    /// no authored gating, Crash Course lessons are always offered
+    /// (CC-3 gates only the exams), and the first Checkpoint set is
+    /// open (CHK-2).
+    Open,
+    /// Selectable once every listed event is beaten — CHK-3's "each
+    /// race in the previous set of three" and CC-3's
+    /// lesson-group→midterm / midterms→final chain. An empty list
+    /// unlocks trivially; producers emit `Open` plus a diagnostic for
+    /// that case instead.
+    AfterAll(Vec<EventKey>),
+}
+
+/// One catalog row's availability rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvailabilityRow {
+    /// The event's stable save identity.
+    pub key: EventKey,
+    /// What must be beaten before the event is selectable.
+    pub gate: EventGate,
+}
+
+/// A city's derived-availability surface: one row per authored event
+/// in catalog order. `mm2_content` builds it from the event catalog —
+/// content stays a load-time object, the table is the session-scoped
+/// runtime view (the same split [`RewardTable`] uses).
+#[derive(Debug, Clone, Default)]
+pub struct AvailabilityTable {
+    /// One row per authored event, catalog order.
+    pub rows: Vec<AvailabilityRow>,
+    /// Authored rows whose structure could not be read as a gate (a
+    /// crash-course row with no lesson/midterm/final tag, a midterm
+    /// whose lesson group is absent) — surfaced, never silently
+    /// dropped.
+    pub diagnostics: Vec<String>,
+}
+
+/// What `profile` may do with one event right now — derived state,
+/// recomputed on every query from the persisted `beaten` flags.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventAvailability {
+    /// The event may be launched.
+    pub unlocked: bool,
+    /// The event's conditions options are open — RACE-3's per-race
+    /// weather/time-of-day/density customization (Circuit: laps +
+    /// opponents) once the win criterion is met. Crash Course rows
+    /// carry CC-4's "passed lessons replay in any vehicle" on the same
+    /// flag; which options the UI exposes per family is F17's call.
+    pub customizable: bool,
+    /// The un-beaten prerequisites keeping `unlocked` false — the
+    /// menu's "beat these first" list. Empty when unlocked.
+    pub blocked_by: Vec<EventKey>,
+}
+
+impl AvailabilityTable {
+    /// Every row's availability under `profile`'s progress, in catalog
+    /// order. A sandbox identity sees the unrestricted view (spec
+    /// req 5's developer access): every event selectable and
+    /// customizable.
+    pub fn evaluate(&self, profile: &PlayerProfile) -> Vec<EventAvailability> {
+        let unrestricted = !profile.records_progress();
+        self.rows
+            .iter()
+            .map(|row| evaluate_row(row, profile, unrestricted))
+            .collect()
+    }
+
+    /// `key`'s availability — `None` when the table has no row for it
+    /// (an event outside the catalog fails to resolve before this is
+    /// ever asked).
+    pub fn of(&self, profile: &PlayerProfile, key: &EventKey) -> Option<EventAvailability> {
+        let unrestricted = !profile.records_progress();
+        self.rows
+            .iter()
+            .find(|row| &row.key == key)
+            .map(|row| evaluate_row(row, profile, unrestricted))
+    }
+}
+
+fn evaluate_row(
+    row: &AvailabilityRow,
+    profile: &PlayerProfile,
+    unrestricted: bool,
+) -> EventAvailability {
+    if unrestricted {
+        return EventAvailability {
+            unlocked: true,
+            customizable: true,
+            blocked_by: Vec::new(),
+        };
+    }
+    let beaten = |k: &EventKey| profile.event(k).is_some_and(|r| r.is_beaten());
+    let blocked_by = match &row.gate {
+        EventGate::Open => Vec::new(),
+        EventGate::AfterAll(reqs) => reqs.iter().filter(|k| !beaten(k)).cloned().collect(),
+    };
+    EventAvailability {
+        unlocked: blocked_by.is_empty(),
+        customizable: beaten(&row.key),
+        blocked_by,
     }
 }
 

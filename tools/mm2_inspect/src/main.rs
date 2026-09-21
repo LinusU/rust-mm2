@@ -1040,6 +1040,39 @@ fn events(
                 );
             }
         }
+        // F16-B: the derived availability surface — which rows a fresh
+        // profile may select and what each gated row needs beaten
+        // (CHK-2/CHK-3 sets of three, CC-3 lesson→midterm→final).
+        let availability = mm2_content::availability_table(&cat);
+        {
+            let gated: Vec<_> = availability
+                .rows
+                .iter()
+                .filter(|r| !matches!(r.gate, mm2_game::EventGate::Open))
+                .collect();
+            println!(
+                "  availability: {} open / {} gated, {} diagnostics",
+                availability.rows.len() - gated.len(),
+                gated.len(),
+                availability.diagnostics.len(),
+            );
+            for row in &gated {
+                let mm2_game::EventGate::AfterAll(reqs) = &row.gate else {
+                    continue;
+                };
+                println!(
+                    "    {} ← beat {}",
+                    row.key.stem,
+                    reqs.iter()
+                        .map(|k| k.stem.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            for d in &availability.diagnostics {
+                println!("    availability note: {d}");
+            }
+        }
         // F16-B: the normalized session reward table — every authored
         // row becomes an event-bound or milestone rule, or a named
         // diagnostic (AC05: no silently dropped unlock rule).
