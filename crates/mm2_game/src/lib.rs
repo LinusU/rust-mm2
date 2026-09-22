@@ -37,8 +37,8 @@ pub use banger::{
 pub use breakaway::{BreakPartSpec, BreakPartState, PartDetached, VehicleBreaks};
 pub use config::{
     CameraPose, ConfigError, Densities, DevOverrides, Difficulty, EventRef, EventTableKind,
-    NavOverlay, SelectorError, SessionAuthority, SessionConditions, SessionConfig, SessionMode,
-    SpawnPose, TimeOfDay, VehicleSelection, Weather,
+    NavOverlay, SelectorError, SessionAuthority, SessionConditions, SessionConfig,
+    SessionCustomization, SessionMode, SpawnPose, TimeOfDay, VehicleSelection, Weather,
 };
 pub use damage::{
     DISABLED_PENALTY_TICKS, DamageEvent, DamageSpec, DamageState, DamageTier, DamageVerdict,

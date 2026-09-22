@@ -405,6 +405,32 @@ fn record_eligibility_gates_dev_and_modded_sessions() {
     );
 }
 
+/// DRV-6's other half: a run under player-customized conditions is not
+/// a default-conditions run, so its results never record (F17-A.6).
+#[test]
+fn record_eligibility_refuses_customized_conditions() {
+    let mut config = SessionConfig {
+        world: WorldMode::City {
+            psdl: "city/sf.psdl".to_string(),
+        },
+        vehicle: VehicleSelection {
+            id: Some("vpbug".to_string()),
+            paint: 0,
+        },
+        ..SessionConfig::default()
+    };
+    assert_eq!(record_eligibility(&config), Ok(()));
+
+    config.customization = Some(SessionCustomization {
+        conditions: SessionConditions {
+            time_of_day: TimeOfDay::new(3).unwrap(),
+            weather: Weather::new(3).unwrap(),
+        },
+        densities: Densities::DEFAULT,
+    });
+    assert_eq!(record_eligibility(&config), Err(Ineligible::Customized));
+}
+
 /// A table shaped like the authored rules: six checkpoint rows gated
 /// in sets of three (CHK-2/CHK-3) plus one always-open blitz row.
 fn availability_table() -> AvailabilityTable {

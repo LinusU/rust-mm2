@@ -803,26 +803,29 @@ fn event_rows_carry_real_availability() {
     }
     activate_row(&mut app, "Checkpoint");
 
-    // The event list: race0/race1 open, race2 incomplete, race3 gated.
+    // The event list: each event is followed by its options row —
+    // race0/race1 open, race2 incomplete, race3 gated.
     let enabled: Vec<(String, Result<(), String>)> = shell(&app)
         .rows
         .iter()
         .map(|r| (r.text.clone(), r.enabled.clone()))
         .collect();
-    assert_eq!(enabled.len(), 4);
+    assert_eq!(enabled.len(), 8);
     assert!(enabled[0].0.contains("race0") && enabled[0].1.is_ok());
-    assert!(enabled[1].0.contains("race1") && enabled[1].1.is_ok());
-    assert!(enabled[2].0.contains("race2"));
+    assert_eq!(enabled[1].0, "  options");
+    assert!(enabled[2].0.contains("race1") && enabled[2].1.is_ok());
+    assert_eq!(enabled[3].0, "  options");
+    assert!(enabled[4].0.contains("race2"));
     assert!(
-        enabled[2].1.as_ref().unwrap_err().contains("incomplete"),
+        enabled[4].1.as_ref().unwrap_err().contains("incomplete"),
         "race2 should report its missing files: {:?}",
-        enabled[2].1
+        enabled[4].1
     );
-    assert!(enabled[3].0.contains("race3"));
+    assert!(enabled[6].0.contains("race3"));
     assert!(
-        enabled[3].1.as_ref().unwrap_err().contains("race0"),
+        enabled[6].1.as_ref().unwrap_err().contains("race0"),
         "race3 should name its gate: {:?}",
-        enabled[3].1
+        enabled[6].1
     );
 
     // Activating the gated row is a status line, never a launch.
@@ -1926,4 +1929,249 @@ fn a_fresh_profile_opens_records_to_the_empty_state() {
         !rows.iter().any(|r| r.text.contains("race0")),
         "another driver's records must not show"
     );
+}
+
+/// RACE-3's gate (F17-A.6): an event's options row opens only once its
+/// own record is beaten — profile-less play, an unbeaten event and a
+/// CHK-3-locked event all keep the row visible with its reason.
+#[test]
+fn event_options_unlock_only_after_the_race_is_beaten() {
+    let tmp = install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    store
+        .create("Bob", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+
+    let mut app = menu_app(tmp.path(), Some(store));
+    app.update();
+
+    // Unbound: the options row names the per-driver requirement.
+    activate_row(&mut app, "Events");
+    activate_row(&mut app, "testcity");
+    activate_row(&mut app, "Checkpoint");
+    let rows = &shell(&app).rows;
+    assert_eq!(rows.len(), 8, "one launch + one options row per event");
+    let race0_options = &rows[1];
+    assert_eq!(race0_options.text, "  options");
+    assert!(
+        race0_options
+            .enabled
+            .as_ref()
+            .unwrap_err()
+            .contains("no driver profile"),
+        "{:?}",
+        race0_options.enabled
+    );
+    // The CHK-3-gated race3's options share its launch block reason,
+    // and the incomplete race2's share its missing-records reason.
+    assert!(
+        rows[7].enabled.as_ref().unwrap_err().contains("beat race0"),
+        "{:?}",
+        rows[7].enabled
+    );
+    assert!(
+        rows[5].enabled.as_ref().unwrap_err().contains("incomplete"),
+        "{:?}",
+        rows[5].enabled
+    );
+
+    // Bind Bob — a driver with nothing beaten gets the unlock reason.
+    press(&mut app, KeyCode::Escape);
+    press(&mut app, KeyCode::Escape);
+    press(&mut app, KeyCode::Escape);
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "Bob");
+    press(&mut app, KeyCode::Escape);
+    activate_row(&mut app, "Events");
+    activate_row(&mut app, "testcity");
+    activate_row(&mut app, "Checkpoint");
+    assert!(
+        shell(&app).rows[1]
+            .enabled
+            .as_ref()
+            .unwrap_err()
+            .contains("beat this race"),
+        "{:?}",
+        shell(&app).rows[1].enabled
+    );
+}
+
+/// The customized event launch (F17-A.6): with the race beaten the
+/// options row opens a screen seeded from the authored params, picks
+/// adjust in place, and `Start race` carries them on the launched
+/// `SessionConfig::customization` — through to the bound environment.
+#[test]
+fn customized_event_launch_carries_the_picks() {
+    let tmp = install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let alice = store
+        .create("Alice", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    // race0's authored params: TimeofDay 0 / Weather 0 / Ambient 0.1.
+    seed_record(
+        &store,
+        &alice.id,
+        EventKey {
+            city: "testcity".into(),
+            table: EventTableKind::Checkpoint,
+            stem: "race0".into(),
+        },
+        120 * 60,
+        Some(1),
+    );
+
+    let mut app = menu_app(tmp.path(), Some(store));
+    app.update();
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "Alice");
+    press(&mut app, KeyCode::Escape);
+    activate_row(&mut app, "Events");
+    activate_row(&mut app, "testcity");
+    activate_row(&mut app, "Checkpoint");
+
+    // race0's options row is enabled and opens the seeded screen.
+    assert!(shell(&app).rows[1].enabled.is_ok());
+    focus_row(&mut app, "options");
+    press(&mut app, KeyCode::Enter);
+    let texts: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
+    assert_eq!(texts[0], "Weather: clear");
+    assert_eq!(texts[1], "Time of day: morning");
+    assert_eq!(texts[2], "Traffic density: 10%");
+    assert_eq!(texts[3], "Start race");
+
+    // Cycle time-of-day one step and traffic one step.
+    focus_row(&mut app, "Time of day:");
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(shell(&app).rows[1].text, "Time of day: noon");
+    focus_row(&mut app, "Traffic density:");
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(shell(&app).rows[2].text, "Traffic density: 25%");
+
+    activate_row(&mut app, "Start race");
+    assert!(
+        run_until(&mut app, 12, |a| matches!(
+            phase(a),
+            SessionPhase::Countdown | SessionPhase::Playing
+        )),
+        "the customized event never launched: {:?}",
+        phase(&app)
+    );
+    let config = app
+        .world()
+        .resource::<Session>()
+        .config()
+        .expect("a launched session has a config")
+        .clone();
+    assert_eq!(
+        config.mode,
+        SessionMode::Event(mm2_game::EventRef {
+            city: "testcity".into(),
+            table: EventTableKind::Checkpoint,
+            index: 0,
+        })
+    );
+    let picks = config
+        .customization
+        .expect("changed picks ride the session config");
+    assert_eq!(picks.conditions.time_of_day.get(), 1);
+    assert_eq!(picks.conditions.weather.get(), 0);
+    assert_eq!(picks.densities.traffic, 0.25);
+    // The bound environment is the picked preset's slot, not the
+    // authored one (no .ltNN ships in this install → the fallback rig,
+    // reported as such).
+    let report = app
+        .world()
+        .resource::<mm2_app::environment::EnvironmentReport>();
+    assert_eq!(report.slot, 4, "picked tod 1 ×4 + weather 0");
+    assert_eq!(
+        report.source,
+        mm2_app::environment::ConditionsSource::Customized
+    );
+    // A customized run is not a default-conditions run (DRV-6).
+    assert_eq!(
+        mm2_game::record_eligibility(&config),
+        Err(mm2_game::Ineligible::Customized)
+    );
+}
+
+/// A visit that changes nothing launches the default run (DRV-6
+/// preserved): `customization` is only set when the picks differ from
+/// the session's authored/default seed.
+#[test]
+fn unchanged_options_launch_a_default_run() {
+    let tmp = install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let alice = store
+        .create("Alice", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    seed_record(
+        &store,
+        &alice.id,
+        EventKey {
+            city: "testcity".into(),
+            table: EventTableKind::Checkpoint,
+            stem: "race0".into(),
+        },
+        120 * 60,
+        Some(1),
+    );
+
+    let mut app = menu_app(tmp.path(), Some(store));
+    app.update();
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "Alice");
+    press(&mut app, KeyCode::Escape);
+    activate_row(&mut app, "Events");
+    activate_row(&mut app, "testcity");
+    activate_row(&mut app, "Checkpoint");
+    focus_row(&mut app, "options");
+    press(&mut app, KeyCode::Enter);
+    activate_row(&mut app, "Start race");
+    assert!(run_until(&mut app, 12, |a| matches!(
+        phase(a),
+        SessionPhase::Countdown | SessionPhase::Playing
+    )));
+    let config = app
+        .world()
+        .resource::<Session>()
+        .config()
+        .expect("a launched session has a config");
+    assert!(config.customization.is_none());
+    assert_eq!(mm2_game::record_eligibility(config), Ok(()));
+}
+
+/// RACE-4: cruise condition options are always open — no beaten
+/// record, no profile needed — and a changed pick launches a
+/// customized cruise.
+#[test]
+fn cruise_options_launch_a_customized_session() {
+    let tmp = install();
+    let mut app = menu_app(tmp.path(), None);
+    app.update();
+
+    activate_row(&mut app, "Cruise");
+    activate_row(&mut app, "options");
+    let texts: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
+    assert_eq!(texts[0], "Weather: clear");
+    assert_eq!(texts[3], "Start cruise");
+
+    focus_row(&mut app, "Weather:");
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(shell(&app).rows[0].text, "Weather: cloudy");
+    activate_row(&mut app, "Start cruise");
+    assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Playing));
+    let config = app
+        .world()
+        .resource::<Session>()
+        .config()
+        .expect("a launched session has a config");
+    assert_eq!(config.mode, SessionMode::Cruise);
+    let picks = config
+        .customization
+        .expect("changed picks ride the session config");
+    assert_eq!(picks.conditions.weather.get(), 1);
+    assert_eq!(picks.conditions.time_of_day.get(), 0);
 }

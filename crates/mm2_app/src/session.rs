@@ -517,7 +517,9 @@ pub fn load_session_world(
     if world_ok && let WorldMode::City { psdl } = &config.world {
         let event_params = event_race.as_ref().map(|(def, ..)| &def.params);
         let conditions = mm2_game::effective_conditions(&config, event_params);
-        let source = if event_params.is_some() {
+        let source = if config.customization.is_some() {
+            crate::environment::ConditionsSource::Customized
+        } else if event_params.is_some() {
             crate::environment::ConditionsSource::Authored
         } else {
             crate::environment::ConditionsSource::Configured

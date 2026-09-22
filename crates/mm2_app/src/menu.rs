@@ -34,11 +34,23 @@
 //!   keys (Amateur/Pro Times, Pro Points — nothing persists points)
 //!   and Driver's Stats stay open in `docs/research/menu.md`.
 //!
-//! Deferred to later slices (honest gaps, not placeholders): per-event
-//! weather/time/density controls (needs F18's session-legal writers;
-//! RACE-3 `customizable`), Driver's Stats (no aggregate stats are
-//! persisted), original menu art and audio. The in-session overlays
-//! landed in their own modules — `crate::pause`, `crate::results`.
+//! - [`Screen::Customize`] is the condition-options screen (UI-2):
+//!   weather, time-of-day and traffic density — the authored option
+//!   fields with runtime consumers today (lighting F18-A.2, ambient
+//!   traffic F10). Cruise offers it unconditionally (RACE-4); an event
+//!   offers it once its own record is beaten — RACE-3's
+//!   `EventAvailability::customizable`. Picks ride the screen seeded
+//!   from the session's defaults and launch through
+//!   `SessionConfig::customization`; an unchanged pick set launches a
+//!   default run so DRV-6 record eligibility is unaffected by a visit.
+//!
+//! Deferred to later slices (honest gaps, not placeholders):
+//! pedestrian/cop density and Circuit laps/opponents options (no
+//! consumers for the first pair — F19/F20 — and laps/opponents sit in
+//! DRV-6's explicit exclusion list), Quick Race customization,
+//! Driver's Stats (no aggregate stats are persisted), original menu
+//! art and audio. The in-session overlays landed in their own modules
+//! — `crate::pause`, `crate::results`.
 
 use std::collections::BTreeMap;
 
@@ -48,9 +60,10 @@ use bevy::window::PrimaryWindow;
 use mm2_assets::Vfs;
 use mm2_content::{EventCatalog, VehicleCatalog, VehicleDef};
 use mm2_game::{
-    AvailabilityTable, Difficulty, EventRef, EventTableKind, GarageTable, MAX_NAME_CHARS, Mm2Vfs,
-    PlayerProfile, ProfileId, ProfileStore, ProfileSummary, Session, SessionConfig, SessionMode,
-    SessionPhase, VehicleSelection, WorldMode,
+    AvailabilityTable, Densities, Difficulty, EventRef, EventTableKind, GarageTable,
+    MAX_NAME_CHARS, Mm2Vfs, PlayerProfile, ProfileId, ProfileStore, ProfileSummary, Session,
+    SessionConditions, SessionConfig, SessionCustomization, SessionMode, SessionPhase, TimeOfDay,
+    VehicleSelection, Weather, WorldMode,
 };
 use tracing::{info, warn};
 
@@ -145,6 +158,44 @@ pub enum Screen {
         /// Race-type filter.
         table: Option<EventTableKind>,
     },
+    /// Condition options for a cruise or a customization-unlocked
+    /// event (UI-2, RACE-3/RACE-4). `conditions`/`densities` are the
+    /// working picks Left/Right adjusts in place; the `seed_*` fields
+    /// record what the session runs without customization, so a
+    /// launch whose picks equal the seed stays a default run (DRV-6).
+    Customize {
+        /// Which session the options configure.
+        target: CustomizeTarget,
+        /// Working weather/time-of-day picks — seeded from the
+        /// event's authored params, or the neutral defaults on cruise.
+        conditions: SessionConditions,
+        /// Working densities — `traffic` is the only exposed control
+        /// (ambient traffic consumes it); `pedestrians` rides the
+        /// seed untouched pending its F19 consumer.
+        densities: Densities,
+        /// The session's default conditions for this target.
+        seed_conditions: SessionConditions,
+        /// The session's default densities for this target.
+        seed_densities: Densities,
+    },
+}
+
+/// What a [`Screen::Customize`] configures — the screen's launch row
+/// turns it back into the session mode.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CustomizeTarget {
+    /// Free-roam options for a city (RACE-4 — always open).
+    Cruise {
+        /// City stem.
+        city: String,
+    },
+    /// Per-event options (RACE-3 — gated on `customizable`).
+    Event {
+        /// The event being customized.
+        event_ref: EventRef,
+        /// Catalog stem, for the title.
+        stem: String,
+    },
 }
 
 /// What a row activation does. Actions are resolved at rebuild time —
@@ -168,6 +219,14 @@ pub enum Action {
     RecordsCityFilter,
     /// Cycle the Records screen's race-type filter.
     RecordsTableFilter,
+    /// Cycle the Customize screen's weather selector.
+    CycleWeather,
+    /// Cycle the Customize screen's time-of-day selector.
+    CycleTimeOfDay,
+    /// Cycle the Customize screen's traffic-density pick.
+    CycleTrafficDensity,
+    /// Launch the session the Customize screen configures.
+    LaunchCustomize,
     /// Select a roster vehicle and open its paint list.
     PickVehicle {
         /// Catalog id.
@@ -494,20 +553,8 @@ impl MenuShell {
             }
             MenuCommand::Left | MenuCommand::Right => {
                 let forward = cmd == MenuCommand::Right;
-                match self.rows.get(self.focus).map(|r| &r.action) {
-                    Some(Action::ToggleDifficulty) => {
-                        self.difficulty = match self.difficulty {
-                            Difficulty::Amateur => Difficulty::Professional,
-                            Difficulty::Professional => Difficulty::Amateur,
-                        };
-                    }
-                    Some(Action::RecordsCityFilter) => {
-                        self.cycle_record_filter(data, true, forward)
-                    }
-                    Some(Action::RecordsTableFilter) => {
-                        self.cycle_record_filter(data, false, forward)
-                    }
-                    _ => {}
+                if let Some(action) = self.rows.get(self.focus).map(|r| r.action.clone()) {
+                    self.adjust_with(data, &action, forward);
                 }
             }
             MenuCommand::Back => {
@@ -567,15 +614,54 @@ impl MenuShell {
                     Difficulty::Professional => Difficulty::Amateur,
                 };
             }
-            // Activate on a filter row cycles forward, same as Right.
-            Action::RecordsCityFilter => self.cycle_record_filter(data, true, true),
-            Action::RecordsTableFilter => self.cycle_record_filter(data, false, true),
+            // Activate on a filter or option row cycles forward, same
+            // as Right.
+            action @ (Action::RecordsCityFilter
+            | Action::RecordsTableFilter
+            | Action::CycleWeather
+            | Action::CycleTimeOfDay
+            | Action::CycleTrafficDensity) => self.adjust_with(data, &action, true),
+            Action::LaunchCustomize => {
+                let Screen::Customize {
+                    target,
+                    conditions,
+                    densities,
+                    seed_conditions,
+                    seed_densities,
+                } = &self.screen
+                else {
+                    return;
+                };
+                let (mode, city) = match target {
+                    CustomizeTarget::Cruise { city } => (SessionMode::Cruise, city.clone()),
+                    CustomizeTarget::Event { event_ref, .. } => (
+                        SessionMode::Event(event_ref.clone()),
+                        event_ref.city.clone(),
+                    ),
+                };
+                // Picks that match the session's defaults launch a
+                // default run — a visit that changed nothing is not a
+                // customized run (DRV-6 eligibility).
+                let customization = (conditions != seed_conditions || densities != seed_densities)
+                    .then_some(SessionCustomization {
+                        conditions: *conditions,
+                        densities: *densities,
+                    });
+                self.launch(data, vfs, mode, city, customization, effects);
+            }
             Action::LaunchCruise { city } => {
-                self.launch(data, vfs, SessionMode::Cruise, city, effects)
+                self.launch(data, vfs, SessionMode::Cruise, city, None, effects)
             }
             Action::LaunchEvent(event_ref) => {
                 let city = event_ref.city.clone();
-                self.launch(data, vfs, SessionMode::Event(event_ref), city, effects)
+                self.launch(
+                    data,
+                    vfs,
+                    SessionMode::Event(event_ref),
+                    city,
+                    None,
+                    effects,
+                )
             }
             Action::PickVehicle { id } => {
                 self.vehicle.id = Some(id.clone());
@@ -671,6 +757,40 @@ impl MenuShell {
         }
     }
 
+    /// The Left/Right (and Activate-on-option-row) adjustment shared by
+    /// every value row — difficulty, Records filters and the Customize
+    /// screen's condition picks.
+    fn adjust_with(&mut self, data: &mut MenuData, action: &Action, forward: bool) {
+        match action {
+            Action::ToggleDifficulty => {
+                self.difficulty = match self.difficulty {
+                    Difficulty::Amateur => Difficulty::Professional,
+                    Difficulty::Professional => Difficulty::Amateur,
+                };
+            }
+            Action::RecordsCityFilter => self.cycle_record_filter(data, true, forward),
+            Action::RecordsTableFilter => self.cycle_record_filter(data, false, forward),
+            Action::CycleWeather => {
+                if let Screen::Customize { conditions, .. } = &mut self.screen {
+                    conditions.weather =
+                        Weather::new(step4(conditions.weather.get(), forward)).unwrap();
+                }
+            }
+            Action::CycleTimeOfDay => {
+                if let Screen::Customize { conditions, .. } = &mut self.screen {
+                    conditions.time_of_day =
+                        TimeOfDay::new(step4(conditions.time_of_day.get(), forward)).unwrap();
+                }
+            }
+            Action::CycleTrafficDensity => {
+                if let Screen::Customize { densities, .. } = &mut self.screen {
+                    densities.traffic = step_density(densities.traffic, forward);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Cycle one of the Records screen's filters through `None` (all)
     /// plus the values actually present in the bound driver's records.
     /// `city` picks which filter; `forward` the direction — Left steps
@@ -707,13 +827,16 @@ impl MenuShell {
 
     /// Build the launch effect for a mode/city pick. The vehicle is
     /// resolved here so a load failure is a menu status line, not a
-    /// half-launched session.
+    /// half-launched session. `customization` is the Customize
+    /// screen's picks — `None` on every direct launch, which is also
+    /// what an unchanged visit produces.
     fn launch(
         &mut self,
         data: &MenuData,
         vfs: &Vfs,
         mode: SessionMode,
         city: String,
+        customization: Option<SessionCustomization>,
         effects: &mut Vec<MenuEffect>,
     ) {
         let config = SessionConfig {
@@ -723,6 +846,7 @@ impl MenuShell {
             mode,
             difficulty: self.difficulty,
             vehicle: self.vehicle.clone(),
+            customization,
             mods_active: data.has_mods,
             ..SessionConfig::default()
         };
@@ -771,10 +895,27 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
         Screen::CruiseCity => data
             .cities
             .iter()
-            .map(|city| Row {
-                text: city.clone(),
-                enabled: data.city_loadable(vfs, city),
-                action: Action::LaunchCruise { city: city.clone() },
+            .flat_map(|city| {
+                let enabled = data.city_loadable(vfs, city);
+                [
+                    Row {
+                        text: city.clone(),
+                        enabled: enabled.clone(),
+                        action: Action::LaunchCruise { city: city.clone() },
+                    },
+                    // RACE-4: cruise condition options are always open.
+                    Row {
+                        text: "  options".to_string(),
+                        enabled,
+                        action: Action::Push(Screen::Customize {
+                            target: CustomizeTarget::Cruise { city: city.clone() },
+                            conditions: SessionConditions::default(),
+                            densities: Densities::DEFAULT,
+                            seed_conditions: SessionConditions::default(),
+                            seed_densities: Densities::DEFAULT,
+                        }),
+                    },
+                ]
             })
             .collect(),
         Screen::EventCity => data
@@ -817,37 +958,49 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
             // data`, which outstanding `data` borrows would block.
             let availability = data.availability_of(vfs, city).clone();
             let bound = data.bound.clone();
+            let difficulty = shell.difficulty;
             let catalog = data.catalog_of(vfs, city);
             catalog
                 .events
                 .iter()
                 .filter(|e| e.event_ref.table == *table)
-                .map(|e| {
-                    let enabled = match &e.status {
-                        mm2_content::EventStatus::Incomplete { missing } => {
-                            Err(format!("incomplete: {}", missing.join(", ")))
-                        }
+                .flat_map(|e| {
+                    let avail = match &e.status {
                         mm2_content::EventStatus::Ready => {
                             let key = mm2_game::EventKey {
                                 city: e.event_ref.city.clone(),
                                 table: e.event_ref.table,
                                 stem: e.stem.clone(),
                             };
-                            let avail = match &bound {
+                            match &bound {
                                 Some(p) => availability.of(p, &key),
                                 // No bound driver evaluates like a
                                 // fresh profile — nothing beaten, still
                                 // restricted (progress can't persist).
                                 None => availability.of_unbound(&key),
-                            };
-                            availability_reason(avail)
+                            }
                         }
+                        mm2_content::EventStatus::Incomplete { .. } => None,
                     };
-                    Row {
-                        text: format!("{} #{} ({})", table_name(*table), e.event_ref.index, e.stem),
-                        enabled,
-                        action: Action::LaunchEvent(e.event_ref.clone()),
-                    }
+                    let enabled = match &e.status {
+                        mm2_content::EventStatus::Incomplete { missing } => {
+                            Err(format!("incomplete: {}", missing.join(", ")))
+                        }
+                        mm2_content::EventStatus::Ready => availability_reason(avail.clone()),
+                    };
+                    [
+                        Row {
+                            text: format!(
+                                "{} #{} ({})",
+                                table_name(*table),
+                                e.event_ref.index,
+                                e.stem
+                            ),
+                            enabled: enabled.clone(),
+                            action: Action::LaunchEvent(e.event_ref.clone()),
+                        },
+                        options_row(e, &enabled, bound.as_ref(), &avail, difficulty),
+                    ]
                 })
                 .collect()
         }
@@ -855,6 +1008,39 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
             let city = city.clone();
             let table = *table;
             record_rows(data, vfs, city.as_deref(), table)
+        }
+        Screen::Customize {
+            target,
+            conditions,
+            densities,
+            ..
+        } => {
+            let start = match target {
+                CustomizeTarget::Cruise { .. } => "Start cruise",
+                CustomizeTarget::Event { .. } => "Start race",
+            };
+            vec![
+                Row {
+                    text: format!("Weather: {}", conditions.weather.name()),
+                    enabled: Ok(()),
+                    action: Action::CycleWeather,
+                },
+                Row {
+                    text: format!("Time of day: {}", conditions.time_of_day.name()),
+                    enabled: Ok(()),
+                    action: Action::CycleTimeOfDay,
+                },
+                Row {
+                    text: format!("Traffic density: {:.0}%", densities.traffic * 100.0),
+                    enabled: Ok(()),
+                    action: Action::CycleTrafficDensity,
+                },
+                Row {
+                    text: start.to_string(),
+                    enabled: Ok(()),
+                    action: Action::LaunchCustomize,
+                },
+            ]
         }
         Screen::Garage => garage_rows(shell, data),
         Screen::Paints { car } => paint_rows(shell, data, car),
@@ -1212,6 +1398,107 @@ fn cycle_choice<T: PartialEq + Copy>(
         (pos + len - 1) % len
     };
     (next > 0).then(|| choices[next - 1])
+}
+
+/// The RACE-3 per-event options row: condition options open once the
+/// event's own record is beaten (`EventAvailability::customizable`),
+/// disabled with the reason otherwise — the capability stays visible
+/// instead of hiding (AC05). The pushed screen seeds its picks from
+/// the difficulty's authored block so a zero-change launch stays a
+/// default run.
+fn options_row(
+    e: &mm2_content::CatalogEvent,
+    event_enabled: &Result<(), String>,
+    bound: Option<&PlayerProfile>,
+    avail: &Option<mm2_game::EventAvailability>,
+    difficulty: Difficulty,
+) -> Row {
+    let gate = match event_enabled {
+        Err(reason) => Err(reason.clone()),
+        Ok(()) => match (bound, avail) {
+            (None, _) => Err("no driver profile - options unlock per driver".to_string()),
+            (_, Some(a)) if !a.customizable => {
+                Err("beat this race to unlock its options".to_string())
+            }
+            (_, None) => Err("no availability rule for this event".to_string()),
+            _ => Ok(()),
+        },
+    };
+    // A seed that cannot be read as authored params disables the row
+    // rather than fabricating defaults — the event's own build would
+    // reject the same values at load.
+    let (gate, seed) = match gate {
+        Ok(()) => match authored_seed(e.race_params(difficulty)) {
+            Some(seed) => (Ok(()), seed),
+            None => (
+                Err("authored conditions are out of range".to_string()),
+                (SessionConditions::default(), Densities::DEFAULT),
+            ),
+        },
+        Err(reason) => (
+            Err(reason),
+            (SessionConditions::default(), Densities::DEFAULT),
+        ),
+    };
+    Row {
+        text: "  options".to_string(),
+        enabled: gate,
+        action: Action::Push(Screen::Customize {
+            target: CustomizeTarget::Event {
+                event_ref: e.event_ref.clone(),
+                stem: e.stem.clone(),
+            },
+            conditions: seed.0,
+            densities: seed.1,
+            seed_conditions: seed.0,
+            seed_densities: seed.1,
+        }),
+    }
+}
+
+/// Read an authored parameter block into the customization seed —
+/// the same distillation `event_params` performs (selector 0-3,
+/// density 0..=1), `None` when a value sits outside the authored
+/// ranges so the row disables instead of guessing.
+fn authored_seed(p: &mm2_formats::racedata::RaceParams) -> Option<(SessionConditions, Densities)> {
+    let conditions = SessionConditions {
+        time_of_day: TimeOfDay::new(u8::try_from(p.time_of_day).ok()?).ok()?,
+        weather: Weather::new(u8::try_from(p.weather).ok()?).ok()?,
+    };
+    let densities = Densities {
+        traffic: p.ambient,
+        pedestrians: p.peds,
+    };
+    densities.validate().ok()?;
+    Some((conditions, densities))
+}
+
+/// Step a 0-3 selector one place in `forward`'s direction, wrapping.
+fn step4(current: u8, forward: bool) -> u8 {
+    (current as i8 + if forward { 1 } else { -1 }).rem_euclid(4) as u8
+}
+
+/// The traffic-density picks the options row cycles — authored values
+/// are 0..=1 fractions (`Densities::validate`), so the steps cover the
+/// legal range in quarters. `current` is the authored seed, which may
+/// sit between steps; the first press snaps to the nearest step in
+/// `forward`'s direction, then walks them, wrapping at the ends.
+fn step_density(current: f32, forward: bool) -> f32 {
+    const STEPS: [f32; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
+    if forward {
+        STEPS
+            .iter()
+            .copied()
+            .find(|s| *s > current + 1e-3)
+            .unwrap_or(STEPS[0])
+    } else {
+        STEPS
+            .iter()
+            .rev()
+            .copied()
+            .find(|s| *s < current - 1e-3)
+            .unwrap_or(STEPS[STEPS.len() - 1])
+    }
 }
 
 /// The gate check every event row shares — a locked event names the
@@ -1742,6 +2029,10 @@ fn screen_title(screen: &Screen) -> String {
         Screen::ConfirmDelete { label, .. } => format!("Delete {label}?"),
         Screen::NewProfile { .. } => "New driver".to_string(),
         Screen::Records { .. } => "Race records".to_string(),
+        Screen::Customize { target, .. } => match target {
+            CustomizeTarget::Cruise { city } => format!("Cruise options - {city}"),
+            CustomizeTarget::Event { stem, .. } => format!("Race options - {stem}"),
+        },
     }
 }
 
@@ -1833,6 +2124,8 @@ pub fn menu_present(
         "Type a name | Enter create | Esc cancel"
     } else if matches!(shell.screen, Screen::Records { .. }) {
         "Enter race again | Left/Right cycle filters | Esc back"
+    } else if matches!(shell.screen, Screen::Customize { .. }) {
+        "Left/Right change | Enter select | Esc back"
     } else {
         "Up/Down move | Enter select | Esc back | X delete | click works"
     };

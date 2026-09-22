@@ -14,9 +14,9 @@ use mm2_app::session::{self, SessionControl};
 use mm2_app::{camera, contracts};
 use mm2_assets::Vfs;
 use mm2_game::{
-    EventRef, EventTableKind, ImpactEvent, Mm2Vfs, RaceStarted, ResultLedger, Session,
-    SessionConfig, SessionEntity, SessionMode, SessionPhase, TimeOfDay, Weather, WorldMode,
-    advance_session_tick, despawn_session_entities,
+    Densities, EventRef, EventTableKind, ImpactEvent, Mm2Vfs, RaceStarted, ResultLedger, Session,
+    SessionConditions, SessionConfig, SessionCustomization, SessionEntity, SessionMode,
+    SessionPhase, TimeOfDay, Weather, WorldMode, advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::{VehicleConfig, VehiclePlugin};
 
@@ -383,6 +383,49 @@ fn authored_event_conditions_take_precedence() {
     assert_eq!(report.slot, 6, "the authored row's tod 1 ×4 + weather 2");
     assert_eq!(report.name.as_deref(), Some("foggy-noon"));
     assert_eq!(report.source, ConditionsSource::Authored);
+    assert!(!report.fallback);
+}
+
+/// The player's `SessionCustomization` picks beat the authored event
+/// conditions (RACE-3 — F17-A.6): the row authors `TimeofDay=1`/
+/// `Weather=2` (slot 6) but the customization picks (3,3) → slot 15,
+/// and the report names the customized source.
+#[test]
+fn customized_event_conditions_take_precedence() {
+    let tmp = city_install();
+    write_event(tmp.path());
+    write(
+        tmp.path(),
+        "city/test.lt15",
+        lt_record("rainy-night", [0.2, 0.2, 0.4], -1000000),
+    );
+    let config = SessionConfig {
+        mode: SessionMode::Event(EventRef {
+            city: "test".into(),
+            table: EventTableKind::Checkpoint,
+            index: 0,
+        }),
+        customization: Some(SessionCustomization {
+            conditions: SessionConditions {
+                time_of_day: TimeOfDay::new(3).unwrap(),
+                weather: Weather::new(3).unwrap(),
+            },
+            densities: Densities::DEFAULT,
+        }),
+        ..city_config(SessionConditions::default())
+    };
+    let mut app = city_app(config, vfs_of(tmp.path()));
+    app.update();
+    let phase = app.world().resource::<Session>().phase().clone();
+    assert!(
+        matches!(phase, SessionPhase::Countdown | SessionPhase::Playing),
+        "the event session loads: {phase:?}"
+    );
+
+    let report = app.world().resource::<EnvironmentReport>();
+    assert_eq!(report.slot, 15, "the player's tod 3 ×4 + weather 3");
+    assert_eq!(report.name.as_deref(), Some("rainy-night"));
+    assert_eq!(report.source, ConditionsSource::Customized);
     assert!(!report.fallback);
 }
 

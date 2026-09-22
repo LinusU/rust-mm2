@@ -42,7 +42,7 @@ const AMBIENT_BRIGHTNESS: f32 = 2_000.0;
 
 /// Where the session's effective conditions came from — drives the
 /// report so evidence can tell an authored event's environment from a
-/// configured one.
+/// configured or player-picked one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConditionsSource {
     /// `SessionConfig::conditions` — cruise/dev fallback (`--weather` /
@@ -50,6 +50,9 @@ pub enum ConditionsSource {
     Configured,
     /// The running event's authored `EventParams::conditions` (RACE-2).
     Authored,
+    /// The player's `SessionCustomization` picks (RACE-3/RACE-4 menu
+    /// options) — beats every other source when present.
+    Customized,
 }
 
 /// What [`spawn_environment`] did — a session-scoped report resource

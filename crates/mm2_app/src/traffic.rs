@@ -332,11 +332,12 @@ pub struct AmbientCar {
 ///
 /// `authored_density` is the event-table `Ambient` dial for event
 /// sessions (`RaceDefinition::params.densities.traffic`); cruise
-/// passes `None`. The density chain is most-specific-authored-first:
-/// the event aimap's `[Density]`, then the authored table dial, then
-/// the city aimap's `[Density]`, then `SessionConfig::densities`
-/// (implementation choice — the original layering is unverified,
-/// UNK-12).
+/// passes `None`. The density chain puts the player's
+/// `SessionCustomization` pick first (RACE-3/RACE-4 menu options),
+/// then most-specific-authored: the event aimap's `[Density]`, the
+/// authored table dial, the city aimap's `[Density]`, then
+/// `SessionConfig::densities` (implementation choice — the original
+/// layering is unverified, UNK-12).
 ///
 /// `interest` is the load-time player interest area set — the spawn
 /// poses every `Player` participant starts from (all staged on the
@@ -390,8 +391,10 @@ pub fn load_ambient_traffic(
         }
     };
 
-    let density = setup
-        .event_density
+    let density = config
+        .customization
+        .map(|c| c.densities.traffic)
+        .or(setup.event_density)
         .or(authored_density)
         .or(setup.city_density)
         .unwrap_or(config.densities.traffic);

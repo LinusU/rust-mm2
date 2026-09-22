@@ -15,7 +15,7 @@ Statuses:
 | Original entry | Status | Notes |
 |---|---|---|
 | Crash Course | tracked | `Events → city → Crash Course` row stays visible with "not loadable yet (F21)". |
-| Races | implemented | `Events → city → table → event list`, availability gates on rows (CHK-3-style). Per-event condition options stay open (below). |
+| Races | implemented | `Events → city → table → event list`, availability gates on rows (CHK-3-style). Per-event condition options landed (below) — deferred fields stay open. |
 | Multiplayer | tracked | Disabled root row, reason names F24. |
 | Quick Race | implemented | DRV-8 leg: replays the bound profile's stem-keyed `last_event`; stale events disable with the reason. The original's vehicle-select interstitial is folded into the persistent root `Vehicle:` pick — an enhanced-layout choice, not a parity claim. |
 | Driver select/create/delete | implemented | Profiles screen binds; New driver is a real text field; delete sits behind a confirm screen; DRV-7's last-profile refusal is a status line. |
@@ -31,18 +31,19 @@ Statuses:
   Pro-points field at all — DRV-4's points formula is UNK-8 and no
   producer writes points. The screen deliberately shows only stored
   fields rather than fabricating columns.
-- **DRV-6 enforcement edge** — `record_eligibility` already excludes
-  modded sessions, dev overrides, non-city worlds and the synthetic
-  car. When F18 lands per-event condition customization (laps,
-  opponents, weather), runs under non-default conditions must also be
-  marked ineligible — the eligibility site is
-  `mm2_game::progression::record_eligibility`.
+- **DRV-6 enforcement** — `record_eligibility` excludes modded
+  sessions, dev overrides, non-city worlds, the synthetic car and
+  (since F17-A.6) any `SessionCustomization` — a run launched with
+  changed condition picks is not a default-conditions run
+  (`Ineligible::Customized`). The menu only sets the field when the
+  picks differ from the session's seed, so opening the options screen
+  and launching unchanged keeps eligibility.
 
 ## Other screens / behaviors
 
 | Capability | Status | Notes |
 |---|---|---|
-| Race condition options (UI-2, RACE-3 `customizable`) | open | Weather/time/density/cop/ped and Circuit laps/opponents options need F18's session-legal writers; `EventAvailability.customizable` is already computed per event. |
+| Race condition options (UI-2, RACE-3 `customizable`) | implemented (partial) | `Screen::Customize`: an `options` row under every event opens weather, time-of-day and traffic-density picks once `EventAvailability.customizable` (the race is beaten); cruise city rows carry an always-open `options` row (RACE-4). The screen seeds from the authored `RaceParams` block (neutral defaults on cruise), cycles selectors 0-3 / density in quarters, and launches through `SessionConfig::customization` — picks beat authored conditions (lighting binds the picked `.ltNN`) and head the ambient-traffic density chain. An unchanged visit sets no customization, so the run stays default/record-eligible; changed picks are excluded by `record_eligibility` (DRV-6). Out-of-range authored values disable the row with the reason rather than fabricating a seed. Deferred: pedestrian/cop density (no consumers — F19/F20), Circuit laps/opponents (DRV-6's named exclusions, no authored writers yet), Quick Race customization. |
 | Vehicle select detail (UI-3) | implemented (partial) | Lock reasons on cars and paints, paint list. The four stats bars and transmission choice are not displayed — open (F22/UI polish, no dedicated task yet). |
 | Per-screen Options + Help "?" (UI-4) | open | No help system exists; F23 scope. |
 | Results screen (UI-5) | implemented | Results overlay shows placing + total time; C&R points leg is F27 scope. |

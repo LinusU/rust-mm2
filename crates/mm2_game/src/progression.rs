@@ -538,6 +538,12 @@ pub enum Ineligible {
     /// comparable to stock (conservative policy until F29's per-mod
     /// classification).
     ModContent,
+    /// The session ran under player-customized conditions — not a
+    /// default-conditions run (DRV-6). The menu only sets
+    /// `customization` when the picks differ from the session's
+    /// defaults, so an unchanged visit to the options screen keeps
+    /// eligibility.
+    Customized,
 }
 
 impl std::fmt::Display for Ineligible {
@@ -547,6 +553,7 @@ impl std::fmt::Display for Ineligible {
             Self::Vehicle => write!(f, "no catalog vehicle"),
             Self::DevOverride(which) => write!(f, "dev override {which}"),
             Self::ModContent => write!(f, "mod content mounted"),
+            Self::Customized => write!(f, "customized conditions"),
         }
     }
 }
@@ -565,6 +572,9 @@ pub fn record_eligibility(config: &SessionConfig) -> Result<(), Ineligible> {
     }
     if config.mods_active {
         return Err(Ineligible::ModContent);
+    }
+    if config.customization.is_some() {
+        return Err(Ineligible::Customized);
     }
     let dev = &config.dev;
     if dev.vehicle_config.is_some() {

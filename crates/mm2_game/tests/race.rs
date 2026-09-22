@@ -789,3 +789,39 @@ fn effective_conditions_prefers_the_authored_event() {
         "authored event params win while the event runs"
     );
 }
+
+/// F17-A.6: the player's `SessionCustomization` picks beat every other
+/// source — an authored event's conditions included — and apply on a
+/// cruise too (RACE-3/RACE-4).
+#[test]
+fn effective_conditions_prefers_the_player_customization() {
+    let customized = SessionConditions {
+        time_of_day: TimeOfDay::new(2).unwrap(),
+        weather: Weather::new(3).unwrap(),
+    };
+    let config = SessionConfig {
+        conditions: SessionConditions::default(),
+        customization: Some(SessionCustomization {
+            conditions: customized,
+            densities: Densities::DEFAULT,
+        }),
+        ..SessionConfig::default()
+    };
+    let authored = EventParams {
+        conditions: SessionConditions {
+            time_of_day: TimeOfDay::new(1).unwrap(),
+            weather: Weather::new(2).unwrap(),
+        },
+        ..EventParams::default()
+    };
+    assert_eq!(
+        effective_conditions(&config, Some(&authored)),
+        customized,
+        "the player's picks beat the authored event params"
+    );
+    assert_eq!(
+        effective_conditions(&config, None),
+        customized,
+        "and they apply on a cruise"
+    );
+}

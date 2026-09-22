@@ -9,8 +9,8 @@
 //!
 //! Classification notes (`docs/original-rules.md`): weather and
 //! time-of-day are authored *selectors* 0-3 (WLD-4) whose index→name
-//! mapping is unverified (UNK-1), so the types below model the selector,
-//! not invented names.
+//! mapping is measured by the `.ltNN` preset grid (WLD-21); the types
+//! below model the selector and expose the measured names.
 
 use std::path::PathBuf;
 
@@ -32,6 +32,16 @@ pub struct SessionConfig {
     pub conditions: SessionConditions,
     /// Ambient traffic / pedestrian densities.
     pub densities: Densities,
+    /// The player's in-session condition picks (RACE-3/RACE-4
+    /// customization through the menu). When set, these take
+    /// precedence over an event's authored [`EventParams`] — see
+    /// [`effective_conditions`](crate::effective_conditions) — and
+    /// over every authored density source; `conditions`/`densities`
+    /// stay the cruise/dev fallback the session-legal CLI flags feed.
+    /// A run under customized conditions is not a default-conditions
+    /// run, so [`record_eligibility`](crate::record_eligibility)
+    /// refuses its results (DRV-6).
+    pub customization: Option<SessionCustomization>,
     /// Deterministic seed for session-level randomness. Typed now so
     /// consumers (traffic, opponents, event shuffles) can share it
     /// instead of each rolling their own entropy source.
@@ -61,6 +71,7 @@ impl Default for SessionConfig {
             difficulty: Difficulty::Amateur,
             conditions: SessionConditions::default(),
             densities: Densities::default(),
+            customization: None,
             seed: 0,
             vehicle: VehicleSelection::default(),
             authority: SessionAuthority::Local,
@@ -74,6 +85,9 @@ impl SessionConfig {
     /// Reject configurations that would fail or misbehave at load time.
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.densities.validate()?;
+        if let Some(c) = &self.customization {
+            c.densities.validate()?;
+        }
         if let WorldMode::City { psdl } = &self.world
             && psdl.trim().is_empty()
         {
@@ -250,8 +264,8 @@ impl Difficulty {
     }
 }
 
-/// A time-of-day selector. Authored values are 0-3 (WLD-4); which index
-/// means which time is unverified (UNK-1).
+/// A time-of-day selector. Authored values are 0-3 (WLD-4); the
+/// index→name mapping is measured by the `.ltNN` preset grid (WLD-21).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TimeOfDay(u8);
 
@@ -273,10 +287,16 @@ impl TimeOfDay {
     pub fn get(self) -> u8 {
         self.0
     }
+
+    /// The measured selector name (WLD-21: the `.ltNN` grid's authored
+    /// `<weather>-<tod>` block names classify back to their file slots).
+    pub fn name(self) -> &'static str {
+        ["morning", "noon", "evening", "night"][self.0 as usize]
+    }
 }
 
-/// A weather selector. Authored values are 0-3 (WLD-4); which index
-/// means which weather is unverified (UNK-1).
+/// A weather selector. Authored values are 0-3 (WLD-4); the index→name
+/// mapping is measured by the `.ltNN` preset grid (WLD-21).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Weather(u8);
 
@@ -298,6 +318,12 @@ impl Weather {
     pub fn get(self) -> u8 {
         self.0
     }
+
+    /// The measured selector name (WLD-21: the `.ltNN` grid's authored
+    /// `<weather>-<tod>` block names classify back to their file slots).
+    pub fn name(self) -> &'static str {
+        ["clear", "cloudy", "foggy", "rainy"][self.0 as usize]
+    }
 }
 
 /// A condition selector outside the authored 0-3 range.
@@ -318,12 +344,28 @@ impl std::fmt::Display for SelectorError {
 impl std::error::Error for SelectorError {}
 
 /// The session's weather and time-of-day pair. Defaults to selector 0
-/// for both — index 0's meaning is unverified, so this is a neutral
-/// default, not a claim about what the original shows.
+/// for both — the measured clear-morning corner of the preset grid
+/// (WLD-21).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SessionConditions {
     pub time_of_day: TimeOfDay,
     pub weather: Weather,
+}
+
+/// The player's explicit condition picks for a session — RACE-3's
+/// per-event customization (unlocked per event by the documented win
+/// criterion, surfaced as `EventAvailability::customizable`) and
+/// RACE-4's always-open cruise options. Set by the menu flow; when
+/// present these beat an event's authored [`EventParams`] wherever the
+/// shared resolvers run (`effective_conditions`, the ambient-density
+/// chain). `densities.pedestrians` has no consumer yet (F19) — it
+/// rides the authored seed so a future picker lands on the field.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SessionCustomization {
+    /// Picked weather + time-of-day selectors.
+    pub conditions: SessionConditions,
+    /// Picked densities — `traffic` drives ambient traffic today.
+    pub densities: Densities,
 }
 
 /// Ambient population densities, authored per event as 0-1 fractions

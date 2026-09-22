@@ -219,17 +219,23 @@ impl Default for EventParams {
 }
 
 /// The environment conditions a session actually runs under (F18-A):
-/// an event's authored [`EventParams::conditions`] take precedence
+/// the player's [`SessionCustomization`] picks win when present
+/// (RACE-3/RACE-4 — an explicit customization is the point of those
+/// options), then an event's authored [`EventParams::conditions`]
 /// while the event runs (RACE-2 — weather/time-of-day are part of the
-/// authored event definition); a cruise/dev session uses its own
-/// [`SessionConfig::conditions`]. Consumers (lighting F18-A.2,
-/// densities, precipitation later) resolve through here rather than
-/// picking a source themselves.
+/// authored event definition), then the session's own
+/// [`SessionConfig::conditions`] cruise/dev fallback. Consumers
+/// (lighting F18-A.2, densities, precipitation later) resolve through
+/// here rather than picking a source themselves.
 pub fn effective_conditions(
     config: &SessionConfig,
     event: Option<&EventParams>,
 ) -> SessionConditions {
-    event.map(|e| e.conditions).unwrap_or(config.conditions)
+    config
+        .customization
+        .map(|c| c.conditions)
+        .or_else(|| event.map(|e| e.conditions))
+        .unwrap_or(config.conditions)
 }
 
 /// Everything the shared runtime needs to run one authored event.
