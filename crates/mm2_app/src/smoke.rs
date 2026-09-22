@@ -20,14 +20,14 @@ use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_assets::Vfs;
 use mm2_game::{
-    Banger, BangerPhase, BangerStateChanged, ImpactEvent, Mm2Vfs, ParticipantState, PlayerVehicle,
-    RaceProgress, RaceStarted, RaceState, Session, SessionConfig, SessionPhase, WorldMode,
-    advance_session_tick, despawn_session_entities,
+    Banger, BangerPhase, BangerStateChanged, DamageEvent, ImpactEvent, Mm2Vfs, ParticipantState,
+    PlayerVehicle, RaceProgress, RaceStarted, RaceState, Session, SessionConfig, SessionPhase,
+    WorldMode, advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::vehicle::{VehicleInput, VehicleState};
 use mm2_vehicle::{VehicleConfig, VehiclePlugin};
 
-use crate::{camera, contracts, opponents, race, scripted, session};
+use crate::{camera, contracts, damage, opponents, race, scripted, session};
 
 /// Engine commit embedded by `build.rs` — reports stay versioned by the
 /// exact code that produced them.
@@ -188,9 +188,11 @@ pub fn headless_smoke(
         .add_plugins(TransformPlugin)
         .add_plugins(VehiclePlugin)
         .add_message::<ImpactEvent>()
+        .add_message::<DamageEvent>()
         .add_message::<RaceStarted>()
         .add_message::<BangerStateChanged>()
         .init_resource::<contracts::ImpactFilter>()
+        .init_resource::<damage::DamageReport>()
         .init_resource::<mm2_game::ResultLedger>()
         .init_resource::<mm2_game::BangerPool>()
         .init_resource::<session::SessionControl>()
@@ -215,6 +217,10 @@ pub fn headless_smoke(
             FixedLast,
             (
                 contracts::collect_impacts,
+                // F05-B.1: impact→damage apply + disabled outcome — the
+                // headless record's `dmg=` field reads the report.
+                damage::apply_impact_damage,
+                damage::resolve_disabled,
                 crate::banger::activate_bangers,
                 crate::banger::settle_bangers,
                 contracts::publish_vehicle_telemetry,
@@ -540,6 +546,19 @@ pub fn headless_smoke(
             String::new()
         }
     };
+    // F05-B.1 damage evidence: applied/disabled/recovered counts.
+    // Only recorded once the pipeline saw any delivery, so impact-free
+    // runs stay bit-identical to earlier records.
+    let dmg_detail = world_ecs
+        .get_resource::<damage::DamageReport>()
+        .filter(|r| r.applied + r.rejected + r.duplicate > 0)
+        .map(|r| {
+            format!(
+                " dmg={}a/{}d/{}r rej={} dup={}",
+                r.applied, r.disabled, r.recovered, r.rejected, r.duplicate
+            )
+        })
+        .unwrap_or_default();
     // The dev `--traction` modifier is recorded when set so a wetness
     // run is self-describing; unmodified runs stay bit-identical.
     let traction_detail = config
@@ -556,7 +575,7 @@ pub fn headless_smoke(
         .unwrap_or_default();
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{nav_detail}{traf_detail}{bng_detail}{traction_detail}{profile_detail}{extra}",
+            "updates={frames} ticks={ticks} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{nav_detail}{traf_detail}{bng_detail}{dmg_detail}{traction_detail}{profile_detail}{extra}",
             driver.as_str(),
             session.phase().name(),
             moved = pos.map(|p| (p - spawn_pos).length()).unwrap_or(f32::NAN),

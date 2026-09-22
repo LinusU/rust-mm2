@@ -405,6 +405,7 @@ fn test_app(config: SessionConfig, vfs: Vfs) -> App {
         .add_message::<ImpactEvent>()
         .init_resource::<ButtonInput<KeyCode>>()
         .init_resource::<ImpactFilter>()
+        .init_resource::<mm2_app::damage::DamageReport>()
         .init_resource::<SessionControl>()
         .add_systems(FixedUpdate, advance_session_tick)
         .add_systems(FixedLast, mm2_app::pause::sync_physics_pause)

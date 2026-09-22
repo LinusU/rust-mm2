@@ -82,12 +82,13 @@ resolves fragment references through — WLD-15).
 Naming measured on retail: `BREAK0`–`BREAK3` are corner pieces and
 `BREAK01`/`BREAK12`/`BREAK23`/`BREAK03` the panels *between* corners
 (**inferred** — the pairs read as edge indices). 14 catalog vehicles
-ship breakaway parts; the largest sets are vpsemi and vpftruck (4
-corners + 2 edges), vpcoop (2 corners + 4 edges). `mm2-inspect
-damage` inventories all three sources per vehicle and flags records
-binding to no geometry — retail carries 10 such dead authored
-fragments (vpeagle `break0/1` — no pkg at all; vpvw_cup/vpvwcup
-`break01/02`; vpvwcup_angel all four) — findings, not failures.
+ship breakaway parts; the largest sets are vpsemi, vpftruck and
+vplafrance (4 corners + 2 edges each), vpcoop (2 corners + 4 edges).
+`mm2-inspect damage` inventories all three sources per vehicle and
+flags records binding to no geometry — retail carries 10 such dead
+authored fragments (vpeagle `break0/1` — no pkg at all;
+vpvw_cup/vpvwcup `break01/02`; vpvwcup_angel all four) — findings,
+not failures.
 
 ## Shared contract (`mm2_game::damage`)
 
@@ -111,6 +112,46 @@ The severity→damage *conversion* is not recovered — `apply` consumes
 the same impulse estimate the impact pipeline reports
 (`approach_speed × striker_mass`, shared with banger activation) as a
 documented designed policy (UNK-13 stands).
+
+## Runtime application (F05-B.1)
+
+`VehicleDamage` is a component spawned on the player and every AI
+opponent whose `vehcardamage` decoded — authored absence stays
+undamageable, never a fabricated spec. It wraps `DamageState` behind
+a monotonic `ImpactId` watermark: re-delivered or out-of-order
+impacts return `DamageVerdict::Duplicate` instead of double-applying
+(F05-AC06, on top of the upstream pair dedup).
+
+`mm2_app::damage::apply_impact_damage` (FixedLast, authority-gated,
+Playing-only) consumes the deduplicated `ImpactEvent` stream. Per
+impact, each participant's delivered impulse is `severity ×
+other_mass` — the vehicle's own mass when the other side is the
+static world or has no resolvable mass — then one `DamageEvent`
+(object, generation, tick, impact id, applied severity, total, tier)
+emits per accepted application. `DamageReport` counts applied/
+rejected/duplicate/disabled/recovered — the headless smoke record's
+`dmg=` field. Retail headless (install `fnv1a64:e91e6cd4b2ae30d9`):
+sf/london `--frames 600` scripted cruises each record
+`dmg=2a/0d/0r rej=1 dup=0`.
+
+`resolve_disabled` enforces `disabled_outcome` on `Disabled` events:
+Cruise resets the player to the spawn point through `ResetVehicle`
+(trailers included) and repairs; Circuit resets in place and adds
+`DISABLED_PENALTY_TICKS` (5 s, designed — RACE-5 documents a time
+penalty but no magnitude, UNK-13) to the live race clock; Blitz/
+Checkpoint/CrashCourse queue the session's own `restart` intent so
+the event restarts through the production lifecycle. AI opponents
+reset in place and repair under every mode (designed — original
+opponent-destruction behavior is unverified); remote participants are
+skipped (F25+ authority). The outcome re-checks the live tier, so two
+disabling impacts in one tick resolve once.
+
+Not yet implemented: visual tiers (smoke pivots, `TextelDamageRadius`
+decals, `DoublePivot`/`MirrorPivot` semantics), breakaway detachment
+(REC-1's authored inventory is inventoried but no part ever
+detaches), impairment short of destruction, `vehstuck`/`vehgyro`
+consumption, water/out-of-bounds recovery, C&R healing (DMG-4's
+`RegenerateRate` channel exists, no mode drives it), replication.
 
 ## Open questions
 

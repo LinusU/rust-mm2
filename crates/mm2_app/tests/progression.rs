@@ -323,6 +323,7 @@ fn test_app(
         .add_message::<RaceStarted>()
         .add_message::<BangerStateChanged>()
         .init_resource::<ImpactFilter>()
+        .init_resource::<mm2_app::damage::DamageReport>()
         .init_resource::<ResultLedger>()
         .init_resource::<BangerPool>()
         .init_resource::<SessionControl>()

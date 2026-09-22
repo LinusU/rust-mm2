@@ -83,9 +83,9 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_assets::Vfs;
 use mm2_game::{
-    DamageSignals, ObjectIdentity, OpponentRoster, OpponentRoute, OpponentSpec, ParticipantState,
-    Player, PlayerControl, RaceDefinition, RaceProgress, RaceState, Session, SessionEntity,
-    relative_bearing,
+    DamageSignals, DamageSpec, ObjectIdentity, OpponentRoster, OpponentRoute, OpponentSpec,
+    ParticipantState, Player, PlayerControl, RaceDefinition, RaceProgress, RaceState, Session,
+    SessionEntity, VehicleDamage, relative_bearing,
 };
 use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState, vehicle_bundle};
 use tracing::{info, warn};
@@ -630,6 +630,14 @@ pub fn spawn_opponents(
                 Visibility::Visible,
             ))
             .id();
+        // Authored damage bounds when the vehicle ships them — the
+        // same spec the player accumulates against (F05-B.1); no
+        // authored record means undamageable, never a fabricated one.
+        if let Some(d) = &def.damage {
+            commands
+                .entity(vehicle)
+                .insert(VehicleDamage::new(DamageSpec::from(d)));
+        }
         let missing = car_visual::spawn_vehicle_model(
             commands, vfs, &def.model, 0, meshes, images, materials, vehicle,
         );

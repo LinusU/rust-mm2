@@ -137,6 +137,44 @@ fn repair_and_reset_restore_full_health() {
 }
 
 #[test]
+fn vehicle_damage_rejects_duplicate_and_stale_impact_ids() {
+    // F05-AC06: the per-vehicle watermark means a re-delivered or
+    // out-of-order impact can never double-apply, on top of the
+    // upstream pair dedup.
+    let mut damage = VehicleDamage::new(spec());
+    assert_eq!(damage.apply(ImpactId(1), 2000.0), DamageVerdict::Intact);
+    // Re-delivery of the same id never accumulates twice.
+    assert_eq!(damage.apply(ImpactId(1), 2000.0), DamageVerdict::Duplicate);
+    assert_eq!(damage.total(), 2000.0);
+    // A later id still lands; an older one arriving after it is stale.
+    assert_eq!(damage.apply(ImpactId(3), 5000.0), DamageVerdict::Intact);
+    assert_eq!(damage.apply(ImpactId(2), 5000.0), DamageVerdict::Duplicate);
+    assert_eq!(damage.total(), 7000.0);
+    // The watermark survives a repair — a late duplicate of a
+    // pre-repair impact still cannot land.
+    damage.repair();
+    assert_eq!(damage.total(), 0.0);
+    assert_eq!(damage.apply(ImpactId(3), 9000.0), DamageVerdict::Duplicate);
+    assert_eq!(damage.total(), 0.0);
+}
+
+#[test]
+fn vehicle_damage_wraps_the_state_against_its_authored_spec() {
+    let mut damage = VehicleDamage::new(spec());
+    assert_eq!(damage.condition(), DamageTier::Intact);
+    assert_eq!(damage.health_fraction(), 1.0);
+    // Sub-threshold deliveries advance the watermark without
+    // accumulating — a rejected impact is still consumed.
+    assert_eq!(damage.apply(ImpactId(1), 100.0), DamageVerdict::Rejected);
+    assert_eq!(damage.apply(ImpactId(1), 100.0), DamageVerdict::Duplicate);
+    damage.apply(ImpactId(2), 400_000.0);
+    assert_eq!(damage.condition(), DamageTier::Disabled);
+    assert_eq!(damage.health_fraction(), 0.0);
+    damage.reset();
+    assert_eq!(damage.condition(), DamageTier::Intact);
+}
+
+#[test]
 fn disabled_outcome_is_per_mode() {
     let ev = |table| {
         SessionMode::Event(EventRef {

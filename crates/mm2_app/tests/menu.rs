@@ -298,6 +298,7 @@ fn menu_app(dir: &Path, store: Option<ProfileStore>) -> App {
         .add_plugins(VehiclePlugin)
         .add_message::<ImpactEvent>()
         .init_resource::<ImpactFilter>()
+        .init_resource::<mm2_app::damage::DamageReport>()
         .init_resource::<ResultLedger>()
         .init_resource::<BangerPool>()
         .init_resource::<SessionControl>()

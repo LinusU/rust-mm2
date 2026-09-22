@@ -29,9 +29,13 @@
 //! suppresses repeated contact events before they reach `apply`, so a
 //! re-delivered impulse cannot double-count (F05-AC06).
 
+use bevy::prelude::*;
 use mm2_formats::veh::VehCarDamage;
 
 use crate::config::{EventTableKind, SessionMode};
+use crate::ids::ObjectId;
+use crate::impact::ImpactId;
+use crate::race::RACE_TICK_HZ;
 
 /// The authored damage bounds for one vehicle — the mechanical-damage
 /// model decoded from `tune/vehicle/<id>.vehcardamage`.
@@ -86,6 +90,10 @@ pub enum DamageVerdict {
     /// impact never reaches the accumulator (the F05-AC01 rule:
     /// resting contact and ordinary suspension loads cannot damage).
     Rejected,
+    /// The impact identity was already applied (or arrived
+    /// out-of-order behind a later one) — a re-delivered event cannot
+    /// double-count (F05-AC06).
+    Duplicate,
     /// Accumulated — the vehicle remains in the `Intact` band.
     Intact,
     /// Accumulated — the vehicle sits in the `Damaged` band.
@@ -213,4 +221,115 @@ pub fn disabled_outcome(mode: &SessionMode) -> DisabledOutcome {
             }
         },
     }
+}
+
+/// The race-clock ticks a Circuit [`DisabledOutcome::PenaltyReset`]
+/// costs — five seconds. RACE-5/DMG-2 documents "a time penalty" but
+/// no source pins the magnitude (UNK-13), so this is a disclosed
+/// designed value, not an original rule.
+pub const DISABLED_PENALTY_TICKS: u64 = RACE_TICK_HZ as u64 * 5;
+
+/// A simulated vehicle's live damage: the authored [`DamageSpec`] it
+/// decoded to plus the session's accumulated [`DamageState`].
+///
+/// This is a component on vehicle entities, spawned only when the
+/// vehicle's `vehcardamage` record decoded — authored absence (retail's
+/// `vpmoonrover`) means no component and no damage, never a fabricated
+/// spec. Authority-owned like the state it wraps: a predicted client
+/// receives totals by replication, it never `apply`s itself.
+///
+/// `last_impact` is a monotonic watermark over applied
+/// [`ImpactId`]s — a re-delivered or out-of-order impact event reports
+/// [`DamageVerdict::Duplicate`] and cannot double-apply (F05-AC06),
+/// on top of the upstream [`crate::ImpactDedup`] pair window.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct VehicleDamage {
+    /// The authored bounds (`vehcardamage`).
+    pub spec: DamageSpec,
+    state: DamageState,
+    last_impact: ImpactId,
+}
+
+impl VehicleDamage {
+    /// A fresh accumulator bound by `spec`.
+    pub fn new(spec: DamageSpec) -> Self {
+        Self {
+            spec,
+            state: DamageState::default(),
+            last_impact: ImpactId(0),
+        }
+    }
+
+    /// The accumulated damage total (authored impulse units).
+    pub fn total(&self) -> f32 {
+        self.state.total()
+    }
+
+    /// The tier the current total maps onto — the DMG-1 meter band.
+    pub fn condition(&self) -> DamageTier {
+        self.state.condition(&self.spec)
+    }
+
+    /// Meter fraction in `0.0..=1.0` — 1.0 undamaged, 0.0 destroyed.
+    pub fn health_fraction(&self) -> f32 {
+        self.state.health_fraction(&self.spec)
+    }
+
+    /// Apply one delivered impact. `id` is the impact pipeline's
+    /// monotonic identity: ids at or behind the watermark are
+    /// duplicates — the delivery is counted and the severity is never
+    /// accumulated twice. `severity` is the same impulse-scale quantity
+    /// [`DamageState::apply`] takes.
+    pub fn apply(&mut self, id: ImpactId, severity: f32) -> DamageVerdict {
+        if id <= self.last_impact {
+            return DamageVerdict::Duplicate;
+        }
+        self.last_impact = id;
+        self.state.apply(severity, &self.spec)
+    }
+
+    /// Advance the authored regeneration channel (`regenerate_rate`
+    /// per second). Whether regeneration runs at all is mode policy —
+    /// DMG-4 heals only non-carriers in C&R.
+    pub fn tick(&mut self, dt: f32) {
+        self.state.tick(dt, &self.spec);
+    }
+
+    /// Restore to full health — authority-only (the session's role
+    /// check decides who may repair, never a remote client for itself).
+    /// The impact watermark survives: a repair is not a rewind, and a
+    /// late duplicate of a pre-repair impact still cannot land.
+    pub fn repair(&mut self) {
+        self.state.repair();
+    }
+
+    /// [`Self::repair`] under a session-reset boundary — same
+    /// semantics, separate name so call sites state which rule they
+    /// implement (session teardown/restart vs an in-session heal).
+    pub fn reset(&mut self) {
+        self.state.reset();
+    }
+}
+
+/// One accepted damage application — the event HUD, effects and future
+/// replication consume. Only [`DamageVerdict`]s that accumulate emit:
+/// `Rejected`/`Duplicate` deliveries are non-events by definition, so
+/// the stream stays bounded by the impact pipeline's per-tick cap.
+#[derive(Message, Debug, Clone, Copy)]
+pub struct DamageEvent {
+    /// The vehicle that took the damage.
+    pub object: ObjectId,
+    /// Session generation the impact belongs to.
+    pub generation: u64,
+    /// Fixed-step session tick the damage was applied on.
+    pub tick: u64,
+    /// The impact that caused it.
+    pub impact: ImpactId,
+    /// Impulse accumulated (kg·m/s — the delivered estimate).
+    pub severity: f32,
+    /// Damage total after this application.
+    pub total: f32,
+    /// Tier after this application — `Disabled` marks destruction and
+    /// is what the session's [`disabled_outcome`] consumer reacts to.
+    pub tier: DamageTier,
 }

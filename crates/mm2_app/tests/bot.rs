@@ -129,6 +129,7 @@ fn bot_app(config: SessionConfig, vfs: Vfs) -> App {
         .add_message::<ImpactEvent>()
         .add_message::<RaceStarted>()
         .init_resource::<contracts::ImpactFilter>()
+        .init_resource::<mm2_app::damage::DamageReport>()
         .init_resource::<ResultLedger>()
         .init_resource::<SessionControl>()
         .init_resource::<ButtonInput<KeyCode>>()

@@ -96,6 +96,7 @@ fn race_app(config: SessionConfig, def: RaceDefinition) -> App {
         .init_resource::<ResultLedger>()
         .init_resource::<SessionControl>()
         .init_resource::<mm2_app::contracts::ImpactFilter>()
+        .init_resource::<mm2_app::damage::DamageReport>()
         .init_resource::<ButtonInput<KeyCode>>()
         .add_message::<RaceStarted>()
         .add_message::<ResetVehicle>()

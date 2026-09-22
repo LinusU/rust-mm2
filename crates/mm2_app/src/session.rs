@@ -33,9 +33,9 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_content::VehicleDef;
 use mm2_game::{
-    BangerPool, DEFAULT_ACTIVE_POOL, DamageSignals, Mm2Vfs, ObjectIdentity, Player, PlayerControl,
-    PlayerVehicle, RaceDefinition, RaceProgress, RaceState, Session, SessionEntity, SessionMode,
-    SessionPhase, TargetSelection, WorldMode,
+    BangerPool, DEFAULT_ACTIVE_POOL, DamageSignals, DamageSpec, Mm2Vfs, ObjectIdentity, Player,
+    PlayerControl, PlayerVehicle, RaceDefinition, RaceProgress, RaceState, Session, SessionEntity,
+    SessionMode, SessionPhase, TargetSelection, VehicleDamage, WorldMode,
 };
 use mm2_vehicle::{TireConditions, VehicleConfig, vehicle_bundle};
 use tracing::{error, info, warn};
@@ -191,6 +191,7 @@ pub fn drive_session(
     mut session: ResMut<Session>,
     mut control: ResMut<SessionControl>,
     mut filter: ResMut<ImpactFilter>,
+    mut damage_report: ResMut<crate::damage::DamageReport>,
     mut spawn: ResMut<SpawnPoint>,
     menu: Option<Res<crate::menu::MenuShell>>,
     roots: Query<Entity, (With<SessionEntity>, Without<ChildOf>)>,
@@ -205,6 +206,7 @@ pub fn drive_session(
                 return;
             }
             filter.reset();
+            damage_report.reset();
             spawn.trailers.clear();
             // Session-scoped resources die with the session: a race's
             // countdown/clock/progress, its reward/report view and the
@@ -652,6 +654,15 @@ pub fn load_session_world(
     match &selected.def {
         // Imported stock vehicle: the model carries the visuals.
         Some(def) => {
+            // Authored damage bounds — `vehcardamage` decodes to the
+            // spec the impact pipeline accumulates against (F05-B.1).
+            // A vehicle with no authored record stays undamageable
+            // rather than borrowing a fabricated spec.
+            if let Some(d) = &def.damage {
+                commands
+                    .entity(vehicle)
+                    .insert(VehicleDamage::new(DamageSpec::from(d)));
+            }
             let missing = car_visual::spawn_vehicle_model(
                 &mut commands,
                 &vfs.0,
