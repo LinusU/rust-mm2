@@ -17,6 +17,7 @@ use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput, NativeKey, NativeKeyCode};
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
+use bevy::window::PrimaryWindow;
 use mm2_app::camera::CameraMode;
 use mm2_app::contracts::ImpactFilter;
 use mm2_app::menu::{self, MenuCamera, MenuData, MenuShell, MenuUi};
@@ -304,6 +305,7 @@ fn menu_app(dir: &Path, store: Option<ProfileStore>) -> App {
         .init_resource::<PauseMenu>()
         .init_resource::<ResultsMenu>()
         .init_resource::<ButtonInput<KeyCode>>()
+        .init_resource::<ButtonInput<MouseButton>>()
         .add_message::<KeyboardInput>()
         .init_resource::<Assets<Mesh>>()
         .init_resource::<Assets<Image>>()
@@ -354,7 +356,15 @@ fn menu_app(dir: &Path, store: Option<ProfileStore>) -> App {
                 pause::sync_physics_pause.after(session::drive_session),
                 pause::pause_present.after(session::drive_session),
                 results::results_present.after(session::drive_session),
-                (menu::menu_watch, menu::menu_input, menu::menu_present).chain(),
+                // Same chain as the binary: the mouse path queues
+                // commands for `menu_input`.
+                (
+                    menu::menu_watch,
+                    menu::menu_mouse,
+                    menu::menu_input,
+                    menu::menu_present,
+                )
+                    .chain(),
             ),
         );
     app.finish();
@@ -482,6 +492,59 @@ fn run_until(app: &mut App, max: usize, mut pred: impl FnMut(&mut App) -> bool) 
         }
     }
     false
+}
+
+/// A primary window the mouse tests drive. `Window` is a plain
+/// component — no WindowPlugin needed — and the default scale factor
+/// makes logical and physical cursor coordinates coincide.
+fn spawn_window(app: &mut App) {
+    app.world_mut().spawn((PrimaryWindow, Window::default()));
+}
+
+/// The y `lay_out_rows` gives the row with `MenuRow::index == index`.
+fn row_y(index: usize) -> f32 {
+    100.0 + index as f32 * 40.0
+}
+
+/// Simulate the UI layout pass on the real `MenuRow` entities —
+/// headless tests have no UiPlugin, so `ComputedNode`/`UiGlobalTransform`
+/// keep their required-component defaults (a zero-size rect at the
+/// origin) unless the test places them. Row `index` gets a
+/// 400x22 rect centred at `(200, row_y(index))`, so cursor positions
+/// map back to rows by `index`.
+fn lay_out_rows(app: &mut App) {
+    let world = app.world_mut();
+    let mut q = world.query::<(Entity, &menu::MenuRow)>();
+    let rows: Vec<(Entity, usize)> = q.iter(world).map(|(e, r)| (e, r.index)).collect();
+    for (entity, index) in rows {
+        world.entity_mut(entity).insert((
+            ComputedNode {
+                size: Vec2::new(400.0, 22.0),
+                ..default()
+            },
+            UiGlobalTransform::from_xy(200.0, row_y(index)),
+        ));
+    }
+}
+
+/// Move the cursor to a logical position (== physical at scale 1).
+fn cursor_to(app: &mut App, x: f32, y: f32) {
+    let world = app.world_mut();
+    let mut q = world.query_filtered::<&mut Window, With<PrimaryWindow>>();
+    let mut window = q.single_mut(world).expect("the test spawned a window");
+    window.set_cursor_position(Some(Vec2::new(x, y)));
+}
+
+/// Press a mouse button for exactly one update — the same one-frame
+/// convention `press` uses for keys.
+fn click(app: &mut App, button: MouseButton) {
+    app.world_mut()
+        .resource_mut::<ButtonInput<MouseButton>>()
+        .press(button);
+    app.update();
+    app.world_mut()
+        .resource_mut::<ButtonInput<MouseButton>>()
+        .reset_all();
 }
 
 fn menu_roots(app: &mut App) -> usize {
@@ -1388,4 +1451,78 @@ fn a_failed_launch_returns_to_the_menu_with_the_reason() {
         "the failure reason lands on the status line: {status:?}"
     );
     assert_eq!(menu_roots(&mut app), 1);
+}
+
+/// F17-A.4: the mouse path. Hover focuses the row under the cursor,
+/// left-click activates it through `MenuCommand::Activate`, right-click
+/// backs out — and a resting cursor is an edge, not a pin, so it never
+/// fights keyboard/gamepad focus.
+#[test]
+fn the_mouse_focuses_rows_and_clicks_drive_the_same_commands() {
+    let tmp = install();
+    let mut app = menu_app(tmp.path(), None);
+    app.update();
+    spawn_window(&mut app);
+    lay_out_rows(&mut app);
+
+    // The drawn row entities map 1:1 onto the shell's rows.
+    let world = app.world_mut();
+    let count = world.query::<&menu::MenuRow>().iter(world).count();
+    assert_eq!(count, shell(&app).rows.len());
+
+    // Empty space focuses nothing.
+    cursor_to(&mut app, 200.0, 10.0);
+    app.update();
+    assert_eq!(shell(&app).focus, 0);
+
+    // Hover moves focus to the row under the cursor.
+    cursor_to(&mut app, 200.0, row_y(2));
+    app.update();
+    assert_eq!(shell(&app).focus, 2);
+
+    // A resting cursor is an edge, not a held state — keyboard nav
+    // still moves focus afterwards and the mouse does not re-assert.
+    // (The focus change respawned the row entities, so re-lay them
+    // out before the next update hit-tests.)
+    press(&mut app, KeyCode::ArrowUp);
+    assert_eq!(shell(&app).focus, 1);
+    lay_out_rows(&mut app);
+    app.update();
+    assert_eq!(shell(&app).focus, 1);
+
+    // Moving over another row focuses it; left-click activates it
+    // through `Activate` — Cruise pushes the city picker.
+    cursor_to(&mut app, 200.0, row_y(0));
+    click(&mut app, MouseButton::Left);
+    assert!(matches!(shell(&app).screen, menu::Screen::CruiseCity));
+
+    // Right-click backs out from anywhere — the mouse's Esc.
+    click(&mut app, MouseButton::Right);
+    assert!(matches!(shell(&app).screen, menu::Screen::Root));
+}
+
+/// F17-A.4 negative leg: clicking a disabled row focuses it and
+/// surfaces its reason — the same `Activate` path a keyboard press
+/// takes — instead of navigating.
+#[test]
+fn a_click_on_a_disabled_row_shows_its_reason() {
+    let tmp = install();
+    let mut app = menu_app(tmp.path(), None);
+    app.update();
+    spawn_window(&mut app);
+    lay_out_rows(&mut app);
+
+    let options = shell(&app)
+        .rows
+        .iter()
+        .position(|r| r.text == "Options")
+        .expect("the root screen lists Options");
+    cursor_to(&mut app, 200.0, row_y(options));
+    click(&mut app, MouseButton::Left);
+    assert!(matches!(shell(&app).screen, menu::Screen::Root));
+    assert_eq!(shell(&app).focus, options);
+    assert_eq!(
+        shell(&app).status.as_deref(),
+        Some("not implemented yet (F23)"),
+    );
 }

@@ -21,21 +21,24 @@
 //!   shell would have nothing to draw into. `menu_watch` reopens the
 //!   shell whenever the session returns to `Menu`, which is also how a
 //!   quit from a menu-launched session returns here instead of
-//!   exiting.
+//!   exiting. `menu_mouse` adds the mouse path: hover focuses, left
+//!   click activates, right click backs out — producing the same
+//!   [`MenuCommand`]s so every effect still executes in `menu_input`.
 //! - [`Screen::NewProfile`] is a text field rather than a row list:
 //!   `menu_input` routes `KeyboardInput.text` into it so driver names
 //!   are typed, not auto-generated.
 //!
 //! Deferred to later slices (honest gaps, not placeholders): per-event
 //! weather/time/density controls (needs F18's session-legal writers;
-//! RACE-3 `customizable`), mouse navigation, original menu art and
-//! audio. The in-session overlays landed in their own modules —
-//! `crate::pause`, `crate::results`.
+//! RACE-3 `customizable`), original menu art and audio. The
+//! in-session overlays landed in their own modules — `crate::pause`,
+//! `crate::results`.
 
 use std::collections::BTreeMap;
 
 use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
 use mm2_assets::Vfs;
 use mm2_content::{EventCatalog, VehicleCatalog, VehicleDef};
 use mm2_game::{
@@ -48,8 +51,8 @@ use tracing::{info, warn};
 use crate::profile::{ActiveProfile, ProfileRequest};
 use crate::session::{SelectedCar, SessionControl, SessionNote, TunedVehicle};
 
-/// One user intent. Keyboard, gamepad and tests all produce these —
-/// the model never reads devices.
+/// One user intent. Keyboard, gamepad, mouse and tests all produce
+/// these — the model never reads devices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuCommand {
     /// Move focus up/down one row (clamped, no wrap).
@@ -66,6 +69,10 @@ pub enum MenuCommand {
     Back,
     /// Destructive-action key on the Profiles screen (X / Delete).
     Delete,
+    /// Focus a row by index — the mouse hover path (`menu_mouse`)
+    /// produces this; keyboard/gamepad use relative moves instead.
+    /// Out-of-range or already-focused indices are no-ops.
+    FocusAt(usize),
     /// Append a character to a text field — only [`Screen::NewProfile`]
     /// accepts text today. Production input feeds this from
     /// `KeyboardInput.text` so layout, Shift and dead keys resolve to
@@ -232,6 +239,10 @@ pub struct MenuShell {
     /// Session difficulty — seeded from `--pro`/the bound profile's
     /// rank (DRV-2) and cycled on the Root row.
     pub difficulty: Difficulty,
+    /// Commands produced by device systems outside `menu_input` (the
+    /// mouse path) — drained first every update so every effect still
+    /// executes in `menu_input`.
+    pub pending: Vec<MenuCommand>,
     dirty: bool,
     /// Last gamepad nav-axis reading — edge detection for stick moves.
     pad_axis: f32,
@@ -360,6 +371,7 @@ impl MenuShell {
             status: None,
             vehicle,
             difficulty,
+            pending: Vec::new(),
             dirty: true,
             pad_axis: 0.0,
         }
@@ -372,6 +384,9 @@ impl MenuShell {
         self.stack.clear();
         self.focus = 0;
         self.status = None;
+        // Stale device commands must not fire against the reopened
+        // shell — a click queued while a session ran has no screen.
+        self.pending.clear();
         self.dirty = true;
     }
 
@@ -446,6 +461,16 @@ impl MenuShell {
             MenuCommand::Up => self.focus = self.focus.saturating_sub(1),
             MenuCommand::Down => {
                 self.focus = (self.focus + 1).min(self.rows.len().saturating_sub(1))
+            }
+            MenuCommand::FocusAt(i) => {
+                // Mouse hover lands here. A no-op (same row, off-list
+                // index) must not dirty — hover alone cannot justify
+                // a redraw, so this arm skips the unconditional mark.
+                if i != self.focus && i < self.rows.len() {
+                    self.focus = i;
+                    self.dirty = true;
+                }
+                return effects;
             }
             MenuCommand::Left | MenuCommand::Right => {
                 if matches!(
@@ -1113,6 +1138,16 @@ pub struct MenuUi;
 #[derive(Component)]
 pub struct MenuCamera;
 
+/// A selectable row entity — `menu_present` tags each screen row with
+/// its `shell.rows` index so `menu_mouse` can map a cursor hit back
+/// to a [`MenuCommand::FocusAt`]. Title/status/footer lines carry no
+/// marker and are never hover targets.
+#[derive(Component)]
+pub struct MenuRow {
+    /// Index into `MenuShell::rows`.
+    pub index: usize,
+}
+
 /// Keep the shell's `active` flag honest: open exactly while the
 /// session sits at `Menu`, closed everywhere else — this is what makes
 /// a quit from a menu-launched session return to the menu, and it
@@ -1186,9 +1221,13 @@ pub fn menu_input(
 ) {
     if !shell.active || !matches!(target.session.phase(), SessionPhase::Menu) {
         key_events.clear();
+        shell.pending.clear();
         return;
     }
-    let mut cmds = Vec::new();
+    // Device systems that ran before this one (the mouse path) queue
+    // here — drain them first so all commands execute through the one
+    // `apply` + effect loop.
+    let mut cmds: Vec<MenuCommand> = std::mem::take(&mut shell.pending);
     let name_entry = matches!(shell.screen, Screen::NewProfile { .. });
     // The stream is drained every frame — on other screens typed text
     // is discarded so a nav key's character (WASD all carry text)
@@ -1313,6 +1352,107 @@ pub fn menu_input(
     }
 }
 
+/// Read-only view of the cursor and the laid-out rows `menu_mouse`
+/// needs — bundled so the system stays under the argument lint.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct MenuPointer<'w, 's> {
+    cameras: Query<'w, 's, &'static Camera, With<MenuCamera>>,
+    windows: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
+    rows: Query<
+        'w,
+        's,
+        (
+            &'static MenuRow,
+            &'static ComputedNode,
+            &'static UiGlobalTransform,
+        ),
+    >,
+}
+
+/// Mouse navigation (F17 spec req 5): hovering a row focuses it,
+/// left-click activates it, right-click backs out. Runs before
+/// `menu_input` in the same chain and feeds it through
+/// `shell.pending`, so clicks execute through the same
+/// `apply`/`MenuEffect` path as Enter — a click on a disabled row
+/// shows its reason, and a click on Quit quits.
+///
+/// Two deliberate semantics:
+///
+/// - Hover is an *edge*, not a pin: only a cursor that moved this
+///   frame can refocus — a cursor resting on a row never re-asserts
+///   focus, so mouse and keyboard/gamepad coexist without fighting.
+/// - The hit test reads the layout the renderer produced — each
+///   [`MenuRow`] entity's `ComputedNode` rect in the physical-pixel
+///   space `UiGlobalTransform` maps into — the same convention
+///   `bevy_ui`'s picking backend uses (logical cursor × the camera's
+///   target scaling factor, then the viewport clip). Layout runs in
+///   `PostUpdate`, so the test is one frame stale at worst.
+pub fn menu_mouse(
+    session: Res<Session>,
+    mut shell: ResMut<MenuShell>,
+    mouse: Option<Res<ButtonInput<MouseButton>>>,
+    pointer: MenuPointer,
+    mut last: Local<Option<Vec2>>,
+) {
+    if !shell.active || !matches!(session.phase(), SessionPhase::Menu) {
+        *last = None;
+        return;
+    }
+    let Some(window) = pointer.windows.iter().next() else {
+        *last = None;
+        return;
+    };
+    let Some(cursor) = window.cursor_position() else {
+        *last = None;
+        return;
+    };
+    // bevy_ui's picking backend maps logical pointer → physical
+    // through the camera's target scaling factor, then clips to the
+    // viewport — `ComputedNode` rects live in that space. The camera's
+    // `computed.target_info` is a render-side product, so headless
+    // runs fall back to the window's own scale factor and skip the
+    // clip — with no custom viewport the whole window is the target.
+    let camera = pointer.cameras.iter().next();
+    let scale = camera
+        .and_then(|c| c.target_scaling_factor())
+        .unwrap_or_else(|| window.scale_factor());
+    let mut pos = cursor * scale;
+    if let Some(viewport) = camera.and_then(|c| c.physical_viewport_rect()) {
+        if !viewport.as_rect().contains(pos) {
+            *last = None;
+            return;
+        }
+        pos -= viewport.min.as_vec2();
+    }
+    let moved = *last != Some(pos);
+    *last = Some(pos);
+    if mouse
+        .as_ref()
+        .is_some_and(|m| m.just_pressed(MouseButton::Right))
+    {
+        // Right-click backs out from anywhere — the mouse's Esc.
+        shell.pending.push(MenuCommand::Back);
+    }
+    let Some(index) = pointer
+        .rows
+        .iter()
+        .filter(|(_, node, transform)| node.contains_point(**transform, pos))
+        .map(|(row, _, _)| row.index)
+        .min()
+    else {
+        return;
+    };
+    if mouse
+        .as_ref()
+        .is_some_and(|m| m.just_pressed(MouseButton::Left))
+    {
+        shell.pending.push(MenuCommand::FocusAt(index));
+        shell.pending.push(MenuCommand::Activate);
+    } else if moved && index != shell.focus {
+        shell.pending.push(MenuCommand::FocusAt(index));
+    }
+}
+
 /// Title shown above a screen's rows.
 fn screen_title(screen: &Screen) -> String {
     match screen {
@@ -1370,15 +1510,23 @@ pub fn menu_present(
         commands.entity(root).despawn();
     }
 
-    let mut lines: Vec<(String, f32, Color)> = Vec::new();
+    // Each line carries the `shell.rows` index it draws, when it is
+    // one — `menu_mouse` hit-tests `MenuRow` entities back to it.
+    let mut lines: Vec<(String, f32, Color, Option<usize>)> = Vec::new();
     lines.push((
         screen_title(&shell.screen),
         34.0,
         Color::srgb(0.95, 0.9, 0.6),
+        None,
     ));
-    lines.push((String::new(), 8.0, Color::NONE));
+    lines.push((String::new(), 8.0, Color::NONE, None));
     if let Screen::NewProfile { name } = &shell.screen {
-        lines.push((format!("  Name: {name}_"), 22.0, Color::srgb(1.0, 1.0, 1.0)));
+        lines.push((
+            format!("  Name: {name}_"),
+            22.0,
+            Color::srgb(1.0, 1.0, 1.0),
+            None,
+        ));
     }
     for (i, row) in shell.rows.iter().enumerate() {
         let (text, color) = match &row.enabled {
@@ -1401,18 +1549,18 @@ pub fn menu_present(
                 Color::srgb(0.45, 0.45, 0.5),
             ),
         };
-        lines.push((text, 22.0, color));
+        lines.push((text, 22.0, color, Some(i)));
     }
-    lines.push((String::new(), 8.0, Color::NONE));
+    lines.push((String::new(), 8.0, Color::NONE, None));
     if let Some(status) = &shell.status {
-        lines.push((status.clone(), 18.0, Color::srgb(1.0, 0.75, 0.35)));
+        lines.push((status.clone(), 18.0, Color::srgb(1.0, 0.75, 0.35), None));
     }
     let footer = if matches!(shell.screen, Screen::NewProfile { .. }) {
         "Type a name | Enter create | Esc cancel"
     } else {
-        "Up/Down move | Enter select | Esc back | X delete"
+        "Up/Down move | Enter select | Esc back | X delete | click works"
     };
-    lines.push((footer.to_string(), 14.0, Color::srgb(0.5, 0.5, 0.55)));
+    lines.push((footer.to_string(), 14.0, Color::srgb(0.5, 0.5, 0.55), None));
 
     commands
         .spawn((
@@ -1436,16 +1584,26 @@ pub fn menu_present(
             BackgroundColor(Color::srgba(0.02, 0.03, 0.07, 0.88)),
         ))
         .with_children(|parent| {
-            for (text, size, color) in lines {
-                parent.spawn((
+            for (text, size, color, row) in lines {
+                let mut line = parent.spawn((
                     MenuUi,
                     Text::new(text),
+                    // Full-width rows: the mouse hit box covers the
+                    // whole line, not just the glyphs (a click right
+                    // of a short label still picks the row).
+                    Node {
+                        width: Val::Percent(100.0),
+                        ..default()
+                    },
                     TextFont {
                         font_size: bevy::text::FontSize::Px(size),
                         ..default()
                     },
                     TextColor(color),
                 ));
+                if let Some(index) = row {
+                    line.insert(MenuRow { index });
+                }
             }
         });
 }

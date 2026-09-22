@@ -944,8 +944,12 @@ fn main() {
                 Update,
                 (
                     menu::menu_watch,
-                    // Frozen during a capture like every other input: a
-                    // `--menu --frames` screenshot must be reproducible.
+                    // The mouse path queues commands for `menu_input` —
+                    // it runs first so a hover/click lands the same
+                    // update. Frozen during a capture like every other
+                    // input: a `--menu --frames` screenshot must be
+                    // reproducible.
+                    menu::menu_mouse.run_if(not(capturing)),
                     menu::menu_input.run_if(not(capturing)),
                     menu::menu_present,
                 )

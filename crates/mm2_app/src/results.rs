@@ -168,10 +168,12 @@ pub fn results_input(
                 None => {}
             },
             MenuCommand::Back => control.quit = true,
-            // No value rows, deletable rows or text fields at results.
+            // No value rows, deletable rows, text fields or
+            // mouse-produced focus commands at results.
             MenuCommand::Left
             | MenuCommand::Right
             | MenuCommand::Delete
+            | MenuCommand::FocusAt(_)
             | MenuCommand::Type(_)
             | MenuCommand::Erase => {}
         }
