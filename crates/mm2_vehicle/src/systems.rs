@@ -7,8 +7,8 @@ use crate::config::VehicleConfig;
 use crate::sim;
 use crate::surface::{TireConditions, TireSurface};
 use crate::vehicle::{
-    DriveDirection, GyroSpin, ResetVehicle, Teleported, Vehicle, VehicleInput, VehicleState,
-    WheelState,
+    DriveDirection, EngineImpairment, GyroSpin, ResetVehicle, Teleported, Vehicle, VehicleInput,
+    VehicleState, WheelState,
 };
 
 /// What the steered axle can do with steering lock: how much grip it makes
@@ -79,6 +79,7 @@ type VehicleQuery<'w, 's> = Query<
         &'static Vehicle,
         &'static mut VehicleState,
         &'static VehicleInput,
+        Option<&'static EngineImpairment>,
         Forces,
     ),
 >;
@@ -95,7 +96,7 @@ pub fn vehicle_simulation(
     if dt <= 0.0 {
         return;
     }
-    for (entity, vehicle, mut state, input, mut forces) in &mut vehicles {
+    for (entity, vehicle, mut state, input, impairment, mut forces) in &mut vehicles {
         let cfg = &vehicle.config;
         let pos = forces.position().0;
         let rot = forces.rotation().0;
@@ -281,6 +282,18 @@ pub fn vehicle_simulation(
             1.0
         };
 
+        // Engine impairment (F05-B, DSN-25): an app-level feature can
+        // scale the drivetrain's drive output — less acceleration and
+        // less top speed by construction. Only `wheel_drive_available`
+        // scales: foot brakes, engine braking and steering are not
+        // engine output. A garbage factor sanitises to full output —
+        // it can neither stall nor over-drive the car.
+        let engine_scale = impairment
+            .map(|i| i.0)
+            .filter(|s| s.is_finite())
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
+
         // --- second pass: tire forces -----------------------------------------
         let reference_load = cfg.mass * 9.81 / wheel_count.max(1) as f32;
         // `engine_load` bookkeeping: what the drivetrain could deliver at
@@ -376,6 +389,7 @@ pub fn vehicle_simulation(
                     / wheel.radius
                     * drive_share
                     * shift_torque
+                    * engine_scale
             } else {
                 0.0
             };

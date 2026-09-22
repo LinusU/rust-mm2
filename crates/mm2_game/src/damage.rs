@@ -229,6 +229,76 @@ pub fn disabled_outcome(mode: &SessionMode) -> DisabledOutcome {
 /// designed value, not an original rule.
 pub const DISABLED_PENALTY_TICKS: u64 = RACE_TICK_HZ as u64 * 5;
 
+/// Designed impairment policy (DSN-25) — what the damaged tier costs
+/// the engine.
+///
+/// MM2Hook's `mm2.ini` `PhysicalEngineDamage` option documents the
+/// original coupling: damage affects engine torque, so "when the
+/// engine spews smoke" the vehicle has "less acceleration and less
+/// top speed". The implemented smoke gate is `MedDamage` (DSN-24), so
+/// impairment keys on the same authored bound — the documented
+/// coupling holds by construction. The ramp shape and floors are
+/// unrecovered (the original `vehCarDamage::Update()` is a binary
+/// thunk, UNK-13): these are disclosed designed values, not an
+/// original-behavior claim. Scaling drive torque produces both named
+/// symptoms — weaker acceleration and a lower drag-equilibrium top
+/// speed — while brakes, engine braking and steering stay unaffected.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImpairmentPolicy {
+    /// Fraction of rated engine torque delivered at `MedDamage` —
+    /// designed. A step down from 1.0 at smoke onset, so the
+    /// documented "when it spews smoke" coupling is literal.
+    pub power_at_med: f32,
+    /// Fraction delivered at `MaxDamage` — designed. Limps a
+    /// near-dead engine without stalling it.
+    pub power_at_max: f32,
+}
+
+impl Default for ImpairmentPolicy {
+    fn default() -> Self {
+        Self {
+            power_at_med: 0.8,
+            power_at_max: 0.4,
+        }
+    }
+}
+
+impl ImpairmentPolicy {
+    /// Engine-output factor for a damage `total` under `spec`: 1.0
+    /// below `MedDamage`, `power_at_med` on reaching it, then a
+    /// linear ramp to `power_at_max` at `MaxDamage`. `factor < 1`
+    /// exactly when the DSN-24 smoke gate emits — the documented
+    /// smoke↔torque coupling. A degenerate `MedDamage >= MaxDamage`
+    /// spec drops to `power_at_max` on the mid tier; non-finite
+    /// input or a non-finite floor degrades to full output, never a
+    /// stalled or over-driven car.
+    pub fn factor(&self, total: f32, spec: &DamageSpec) -> f32 {
+        let med = if self.power_at_med.is_finite() {
+            self.power_at_med.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let max = if self.power_at_max.is_finite() {
+            self.power_at_max.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        if !(total.is_finite()
+            && spec.med_damage.is_finite()
+            && spec.max_damage.is_finite()
+            && total >= spec.med_damage)
+        {
+            return 1.0;
+        }
+        let span = spec.max_damage - spec.med_damage;
+        if span <= 0.0 {
+            return max;
+        }
+        let t = ((total - spec.med_damage) / span).clamp(0.0, 1.0);
+        med + (max - med) * t
+    }
+}
+
 /// A simulated vehicle's live damage: the authored [`DamageSpec`] it
 /// decoded to plus the session's accumulated [`DamageState`].
 ///

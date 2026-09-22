@@ -36,10 +36,10 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_game::{
     DISABLED_PENALTY_TICKS, DamageEvent, DamageTier, DamageVerdict, DisabledOutcome, ImpactEvent,
-    ObjectId, ObjectIdentity, Player, PlayerControl, RaceState, Session, VehicleBreaks,
-    VehicleDamage, VehicleStuck, disabled_outcome,
+    ImpairmentPolicy, ObjectId, ObjectIdentity, Player, PlayerControl, RaceState, Session,
+    VehicleBreaks, VehicleDamage, VehicleStuck, disabled_outcome,
 };
-use mm2_vehicle::ResetVehicle;
+use mm2_vehicle::{EngineImpairment, ResetVehicle};
 
 use crate::breakaway::{BreakPartVisual, BreakReport};
 use crate::session::{SessionControl, SpawnPoint};
@@ -63,6 +63,12 @@ pub struct DamageReport {
     /// Disabled outcomes that repaired and reset a vehicle in place or
     /// at spawn (a `RestartEvent` tears the session down instead).
     pub recovered: u64,
+    /// Impairment episodes — a participant's engine factor dropped
+    /// below 1.0 under the DSN-25 smoke↔torque coupling (F05-B.7).
+    pub impaired: u64,
+    /// Impairment episodes cleared — the factor returned to 1.0
+    /// through a repair (never counted on despawn or teardown).
+    pub restored: u64,
 }
 
 impl DamageReport {
@@ -346,6 +352,63 @@ pub fn resolve_disabled(
             // Remote participants resolve under their own authority —
             // the host-of-record path is F25+ territory.
             Some(PlayerControl::Remote) | None => {}
+        }
+    }
+}
+
+/// Fixed-step: mirror each local/AI participant's authored damage into
+/// the physics-side [`EngineImpairment`] the sim consumes — F05-B.7,
+/// the designed smoke↔engine-torque coupling (DSN-25). MM2Hook's
+/// `PhysicalEngineDamage` option documents the original rule —
+/// "when the engine spews smoke … less acceleration and less top
+/// speed" — so impairment keys on the same `MedDamage` bound the
+/// DSN-24 smoke tier does; the ramp and floors are designed values
+/// (UNK-13 stands for the original's shape).
+///
+/// [`EngineImpairment`] exists exactly while the factor is below 1 —
+/// an undamaged car carries no component and the sim path is
+/// bit-identical. Running after [`resolve_disabled`] in the chain
+/// means a wreck's repair clears the factor the same tick the state
+/// returns to `Intact`; regeneration, where a session lets it run,
+/// lifts it gradually. Remote participants are skipped like every
+/// F05 system — their authority impairs its own sim (F25+).
+/// Entering/leaving the impaired band counts into
+/// [`DamageReport::impaired`]/[`restored`], the headless record's
+/// `imp=` field.
+pub fn sync_impairment(
+    mut commands: Commands,
+    session: Res<Session>,
+    mut cars: Query<(
+        Entity,
+        &VehicleDamage,
+        Option<&Player>,
+        Option<&mut EngineImpairment>,
+    )>,
+    mut report: ResMut<DamageReport>,
+) {
+    if !session.is_playing() || !session.authority_role().is_authority() {
+        return;
+    }
+    let policy = ImpairmentPolicy::default();
+    for (entity, damage, player, impairment) in &mut cars {
+        if player.is_some_and(|p| p.control == PlayerControl::Remote) {
+            continue;
+        }
+        let factor = policy.factor(damage.total(), &damage.spec);
+        match impairment {
+            Some(mut imp) => {
+                if factor >= 1.0 {
+                    commands.entity(entity).remove::<EngineImpairment>();
+                    report.restored += 1;
+                } else {
+                    imp.0 = factor;
+                }
+            }
+            None if factor < 1.0 => {
+                commands.entity(entity).insert(EngineImpairment(factor));
+                report.impaired += 1;
+            }
+            None => {}
         }
     }
 }

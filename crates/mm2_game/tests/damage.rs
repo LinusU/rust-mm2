@@ -175,6 +175,58 @@ fn vehicle_damage_wraps_the_state_against_its_authored_spec() {
 }
 
 #[test]
+fn impairment_steps_down_at_the_smoke_gate_and_ramps_to_max() {
+    // DSN-25: the documented "when the engine spews smoke" coupling —
+    // the factor drops below 1 at exactly the bound the DSN-24 smoke
+    // gate emits on (`MedDamage`), then ramps to the designed floor.
+    let spec = spec(); // med 150 000, max 321 300
+    let policy = ImpairmentPolicy::default();
+    assert_eq!(policy.factor(0.0, &spec), 1.0);
+    assert_eq!(policy.factor(spec.med_damage - 1.0, &spec), 1.0);
+    assert_eq!(
+        policy.factor(spec.med_damage, &spec),
+        policy.power_at_med,
+        "impaired exactly when smoke starts"
+    );
+    let mid = policy.factor((spec.med_damage + spec.max_damage) * 0.5, &spec);
+    let expected = policy.power_at_med + (policy.power_at_max - policy.power_at_med) * 0.5;
+    assert!((mid - expected).abs() < 1e-6);
+    assert_eq!(policy.factor(spec.max_damage, &spec), policy.power_at_max);
+    // Past the bound the factor clamps at the floor (the accumulator
+    // saturates there anyway).
+    assert_eq!(
+        policy.factor(spec.max_damage * 2.0, &spec),
+        policy.power_at_max
+    );
+}
+
+#[test]
+fn impairment_degenerates_to_full_output_never_a_stall() {
+    let policy = ImpairmentPolicy::default();
+    let spec = spec();
+    // Non-finite totals and spec fields can never stall the car.
+    for total in [f32::NAN, f32::NEG_INFINITY] {
+        assert_eq!(policy.factor(total, &spec), 1.0);
+    }
+    let mut bad = spec;
+    bad.med_damage = f32::NAN;
+    assert_eq!(policy.factor(spec.max_damage, &bad), 1.0);
+    // Degenerate band (med >= max): the mid tier drops to the floor
+    // the moment it is reached, mirroring SmokePolicy's max-rate leg.
+    let mut flat = spec;
+    flat.med_damage = flat.max_damage;
+    assert_eq!(policy.factor(flat.med_damage - 1.0, &flat), 1.0);
+    assert_eq!(policy.factor(flat.med_damage, &flat), policy.power_at_max);
+    // Garbage floors sanitise instead of poisoning the ramp.
+    let nan_policy = ImpairmentPolicy {
+        power_at_med: f32::NAN,
+        power_at_max: -5.0,
+    };
+    assert_eq!(nan_policy.factor(spec.med_damage, &spec), 1.0);
+    assert_eq!(nan_policy.factor(spec.max_damage, &spec), 0.0);
+}
+
+#[test]
 fn disabled_outcome_is_per_mode() {
     let ev = |table| {
         SessionMode::Event(EventRef {

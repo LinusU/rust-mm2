@@ -42,7 +42,7 @@ pub use config::{
 };
 pub use damage::{
     DISABLED_PENALTY_TICKS, DamageEvent, DamageSpec, DamageState, DamageTier, DamageVerdict,
-    DisabledOutcome, VehicleDamage, disabled_outcome,
+    DisabledOutcome, ImpairmentPolicy, VehicleDamage, disabled_outcome,
 };
 pub use effects::{ParticleSpec, SmokeEmitter, SmokePolicy, SmokePuff, VehicleSmoke};
 pub use ids::{AuthorityRole, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerId};

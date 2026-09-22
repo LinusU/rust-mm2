@@ -234,6 +234,9 @@ pub fn headless_smoke(
                 // headless record's `brk=` field reads the report.
                 crate::breakaway::detach_breaks,
                 damage::resolve_disabled,
+                // F05-B.7: damage→engine impairment (DSN-25) — the
+                // headless record's `imp=` field reads the report.
+                damage::sync_impairment,
                 crate::stuck::resolve_stuck,
                 // F05-B.5: water/OOB recovery — the headless record's
                 // `rcv=` field reads the report.
@@ -628,6 +631,14 @@ pub fn headless_smoke(
         .filter(|r| r.emitted + r.expired > 0)
         .map(|r| format!(" ptx={}e/{}x", r.emitted, r.expired))
         .unwrap_or_default();
+    // F05-B.7 impairment evidence: episodes entering/leaving the
+    // impaired band (DSN-25). Same presence rule — a run under
+    // MedDamage the whole way stays bit-identical.
+    let imp_detail = world_ecs
+        .get_resource::<damage::DamageReport>()
+        .filter(|r| r.impaired + r.restored > 0)
+        .map(|r| format!(" imp={}i/{}r", r.impaired, r.restored))
+        .unwrap_or_default();
     // The dev `--traction` modifier is recorded when set so a wetness
     // run is self-describing; unmodified runs stay bit-identical.
     let traction_detail = config
@@ -644,7 +655,7 @@ pub fn headless_smoke(
         .unwrap_or_default();
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{nav_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{traction_detail}{profile_detail}{extra}",
+            "updates={frames} ticks={ticks} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{nav_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{traction_detail}{profile_detail}{extra}",
             driver.as_str(),
             session.phase().name(),
             moved = pos.map(|p| (p - spawn_pos).length()).unwrap_or(f32::NAN),

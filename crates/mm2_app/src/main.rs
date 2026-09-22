@@ -836,6 +836,10 @@ fn main() {
             // puts it back (one bounded event per part per attachment).
             breakaway::detach_breaks,
             damage::resolve_disabled,
+            // F05-B.7: damage→engine-impairment coupling (DSN-25) —
+            // after `resolve_disabled` so a wreck's repair clears the
+            // factor the same tick the tier leaves `Disabled`.
+            damage::sync_impairment,
             stuck::resolve_stuck,
             // F05-B.5: water/OOB recovery — observe the wheel contacts
             // the physics step left, then resolve fired episodes to the

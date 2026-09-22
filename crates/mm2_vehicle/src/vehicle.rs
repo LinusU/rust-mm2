@@ -130,6 +130,16 @@ pub struct GyroSpin {
     pub age: f32,
 }
 
+/// Fraction of rated engine drive torque delivered this step — the
+/// physics-side input an app-level impairment feature writes (F05-B
+/// damage, DSN-25); the sim itself knows nothing about damage. `1.0`
+/// is full output and absence of the component is identical. The sim
+/// sanitises the value every step: non-finite reads as `1.0`,
+/// negative/`>1` clamps — a garbage factor can neither stall nor
+/// over-drive the car.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct EngineImpairment(pub f32);
+
 /// Mutable simulation state of a vehicle.
 #[derive(Component)]
 pub struct VehicleState {

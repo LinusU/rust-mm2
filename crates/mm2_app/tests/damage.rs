@@ -96,6 +96,7 @@ fn damage_app(config: SessionConfig, car_pos: Vec3) -> (App, Entity, ObjectId) {
                 contracts::collect_impacts,
                 damage::apply_impact_damage,
                 damage::resolve_disabled,
+                damage::sync_impairment,
             )
                 .chain(),
         );
@@ -493,6 +494,126 @@ fn two_disabling_impacts_in_one_tick_resolve_once() {
     );
     assert_eq!(report(&app).recovered, 1);
     assert_eq!(app.world().get::<VehicleDamage>(car).unwrap().total(), 0.0);
+}
+
+#[test]
+fn a_damaged_car_carries_engine_impairment() {
+    // F05-B.7 / DSN-25: crossing MedDamage — the smoke gate — drops
+    // the engine factor below 1; intact cars carry no component.
+    let (mut app, car, object) = damage_app(cruise_config(), Vec3::new(0.0, 1.2, 0.0));
+    assert!(
+        app.world()
+            .get::<mm2_vehicle::EngineImpairment>(car)
+            .is_none()
+    );
+
+    // Still Intact: no impairment.
+    write_impact(&mut app, 1, object, ObjectId::WORLD, 2.0);
+    app.update();
+    assert!(
+        app.world()
+            .get::<mm2_vehicle::EngineImpairment>(car)
+            .is_none()
+    );
+    assert_eq!(report(&app).impaired, 0);
+
+    // Past MedDamage: the factor mirrors the authored total.
+    write_impact(&mut app, 2, object, ObjectId::WORLD, 120.0);
+    app.update();
+    let damage = app.world().get::<VehicleDamage>(car).unwrap();
+    let expected = mm2_game::ImpairmentPolicy::default().factor(damage.total(), &damage.spec);
+    let factor = app
+        .world()
+        .get::<mm2_vehicle::EngineImpairment>(car)
+        .unwrap()
+        .0;
+    assert_eq!(factor, expected);
+    assert!(factor < 1.0);
+    assert_eq!(report(&app).impaired, 1);
+
+    // Deeper damage deepens the factor — one episode, not two.
+    write_impact(&mut app, 3, object, ObjectId::WORLD, 100.0);
+    app.update();
+    let deeper = app
+        .world()
+        .get::<mm2_vehicle::EngineImpairment>(car)
+        .unwrap()
+        .0;
+    assert!(deeper < factor, "factor must track the total: {deeper}");
+    assert_eq!(report(&app).impaired, 1);
+}
+
+#[test]
+fn repair_restores_full_engine_output() {
+    // Damaged → impaired; a disabling hit's outcome repairs the
+    // damage and clears the factor the same tick.
+    let (mut app, car, object) = damage_app(cruise_config(), Vec3::new(0.0, 1.2, 0.0));
+    write_impact(&mut app, 1, object, ObjectId::WORLD, 120.0);
+    app.update();
+    assert!(
+        app.world()
+            .get::<mm2_vehicle::EngineImpairment>(car)
+            .is_some()
+    );
+    assert_eq!(report(&app).impaired, 1);
+
+    write_impact(&mut app, 2, object, ObjectId::WORLD, 300.0);
+    app.update();
+    assert_eq!(app.world().get::<VehicleDamage>(car).unwrap().total(), 0.0);
+    assert!(
+        app.world()
+            .get::<mm2_vehicle::EngineImpairment>(car)
+            .is_none(),
+        "the repair clears the impairment the same tick"
+    );
+    assert_eq!(report(&app).restored, 1);
+    assert_eq!(report(&app).recovered, 1);
+}
+
+#[test]
+fn a_remote_participants_engine_is_not_impaired() {
+    // A remote participant's damage is its own authority's state —
+    // this host must not feed it into the local sim (F25+).
+    let (mut app, _car, _object) = damage_app(cruise_config(), Vec3::new(0.0, 1.2, 0.0));
+    let remote_object = app.world_mut().resource_mut::<Session>().mint_object_id();
+    let remote_player = app.world_mut().resource_mut::<Session>().mint_player_id();
+    let role = app.world().resource::<Session>().authority_role();
+    let remote = app
+        .world_mut()
+        .spawn((
+            ObjectIdentity(remote_object),
+            Player {
+                id: remote_player,
+                control: PlayerControl::Remote,
+            },
+            role,
+            mm2_game::DamageSignals::default(),
+            VehicleDamage::new(SPEC),
+            vehicle_bundle(&VehicleConfig::default()),
+            Position(Vec3::new(10.0, 1.2, 5.0)),
+            Transform::from_xyz(10.0, 1.2, 5.0),
+        ))
+        .id();
+    app.update();
+    drain_damage(&mut app);
+
+    write_impact(&mut app, 7, remote_object, ObjectId::WORLD, 120.0);
+    app.update();
+    assert_eq!(
+        app.world()
+            .get::<VehicleDamage>(remote)
+            .unwrap()
+            .condition(),
+        DamageTier::Damaged,
+        "the remote accumulator still tracks damage"
+    );
+    assert!(
+        app.world()
+            .get::<mm2_vehicle::EngineImpairment>(remote)
+            .is_none(),
+        "the remote authority owns its own sim"
+    );
+    assert_eq!(report(&app).impaired, 0);
 }
 
 #[test]

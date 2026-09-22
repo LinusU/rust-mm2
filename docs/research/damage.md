@@ -326,10 +326,9 @@ relief is live though: A/B-ing the channel on the retail SF cruise
 endpoint ~1 m with every smoke counter identical — the authored record
 subtly changing slide dynamics is the feature, not drift.
 
-Not yet implemented: visual tiers (smoke pivots, `TextelDamageRadius`
-decals, `DoublePivot`/`MirrorPivot` semantics), damage-driven
-detachment if the original ever uses it (UNK-13), impairment short of
-destruction,
+Not yet implemented: visual tiers (smoke pivots land in F05-B.6,
+`TextelDamageRadius` decals remain), damage-driven detachment if the
+original ever uses it (UNK-13),
 C&R healing (DMG-4's `RegenerateRate` channel exists, no mode drives
 it), replication.
 
@@ -423,21 +422,61 @@ Implemented in `mm2_game::effects` + `mm2_app::damage_fx`:
 
 Not implemented in this slice: `TextelDamageRadius` decals /
 `ImpactsTable` deformation, `asLineSparks` impact sparks, and
-impairment short of destruction (see the `PhysicalEngineDamage` lead
-below).
+impairment short of destruction (implemented next — below).
+
+## Engine impairment (F05-B.7, designed — DSN-25)
+
+MM2Hook's `mm2.ini` documents a `PhysicalEngineDamage` option —
+"damage affects engine torque … when the engine spews smoke" the
+vehicle has "less acceleration and less top speed". That is evidence
+the original *couples* the smoke tier to engine output, not a
+recovered shape: the magnitude, ramp and onset are unrecovered
+(`vehCarDamage::Update()` is a thunk, UNK-13), so the implemented
+policy is designed:
+
+- `mm2_game::damage::ImpairmentPolicy` — `power_at_med` 0.8,
+  `power_at_max` 0.4. `factor(total, spec)` is 1.0 below
+  `MedDamage`, steps to `power_at_med` on reaching it, then ramps
+  linearly to `power_at_max` at `MaxDamage`. The factor drops below
+  1 at exactly the bound the DSN-24 smoke gate emits on, so the
+  documented "when it spews smoke" coupling holds by construction.
+  Degenerate specs (`MedDamage >= MaxDamage`, non-finite fields)
+  and non-finite totals degrade to full output — impairment can
+  never stall or over-drive a car.
+- `mm2_vehicle::EngineImpairment` is the physics-side input: a
+  per-vehicle component scaling only the drivetrain's drive output
+  (`wheel_drive_available` — both forward and reverse drive).
+  Foot brakes, `engine_brake_nm`, steering and tire forces are not
+  engine output and stay unscaled. The sim sanitises the factor
+  (non-finite → 1.0, clamps 0..1); absence of the component is
+  full output.
+- `mm2_app::damage::sync_impairment` (FixedLast, after
+  `resolve_disabled`) mirrors each local/AI participant's authored
+  total into the component: present exactly while `factor < 1`,
+  removed the same tick a repair returns the state to `Intact`.
+  Remote participants are skipped (their authority impairs its own
+  sim, F25+); a pause freezes the factor with the rest of the sim.
+  `DamageReport` counts `impaired`/`restored` episodes — the
+  headless record's `imp=` field, emitted only on activity.
+
+Scaling drive torque produces both documented symptoms — weaker
+acceleration and a lower drag-equilibrium top speed. Whether the
+original scales torque, power, top speed directly, or something
+else entirely stays unverified.
 
 ## Open questions
 
 - The original accumulation model: what quantity `MaxDamage`
   integrates (impact impulse? energy? a contact callback count?) and
   whether `ImpactThreshold` compares the same unit — UNK-13.
-- Whether `MedDamage` gates visual state, impairment or both. The
-  implemented smoke gate (designed) keys on it; MM2Hook's
-  `mm2.ini` option `PhysicalEngineDamage` documents that damage
-  affects engine torque — "when the engine spews smoke" the vehicle
-  has "less acceleration and less top speed" — supporting a
-  smoke↔impairment coupling in the original, but its shape/values are
-  unrecovered (F05-B impairment leg, still open).
+- Whether `MedDamage` gates visual state, impairment or both. Both
+  implemented legs key on it as designed policy (smoke DSN-24,
+  impairment DSN-25); MM2Hook's `mm2.ini` option
+  `PhysicalEngineDamage` documents that damage affects engine
+  torque — "when the engine spews smoke" the vehicle has "less
+  acceleration and less top speed" — supporting a
+  smoke↔impairment coupling in the original, but its shape/values
+  are unrecovered.
 - `TextelDamageRadius`'s consumer — mm2hook binds it to
   `fxTexelDamage::ApplyDamage(position, maxDist)` driven by the
   recovered `ImpactsTable[12]` of impact positions; decal projection

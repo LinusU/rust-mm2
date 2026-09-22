@@ -27,7 +27,8 @@ pub use debug::VehicleDebugEnabled;
 pub use surface::{TireConditions, TireSurface};
 pub use systems::upright_recovery_pose;
 pub use vehicle::{
-    ResetVehicle, StrikeBound, Teleported, Vehicle, VehicleInput, VehicleState, WheelState,
+    EngineImpairment, ResetVehicle, StrikeBound, Teleported, Vehicle, VehicleInput, VehicleState,
+    WheelState,
 };
 
 /// Registers the vehicle simulation. Requires [`PhysicsPlugins`] and a fixed
