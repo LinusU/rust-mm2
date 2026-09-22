@@ -1358,6 +1358,141 @@ at `563c34e`. Direct observation of rendered gameplay.
    not a routing or placement defect. Do not treat them as an opponent
    AI bug, and do not widen the re-anchor recovery to mask them further.
 
+## Operator report 4 (2026-09-22, human play-test — PRIORITY)
+
+Source: the repository owner driving retail London in a windowed build
+on an M5 Max, at `bcaacae` and `c66922e`. Direct observation of
+rendered gameplay. **These observations outrank the loop's own
+evidence.** Every defect below currently reports `pass` in the smoke
+counters — counters cannot see geometry, motion continuity, or
+collision response.
+
+Suggested order of work: the items that invalidate already-recorded
+acceptance evidence first — **4, then 2, then 1** — then investigate
+**3**, then **5**.
+
+**SCOPE NOTE — read before selecting any task below.** Operator report 3
+item 4 marked vehicle handling as operator-owned and off-limits. That
+still holds for steering, grip and driving feel. It does **not** cover
+item 2 below. Prop collision response is driven by authored
+`dgBangerData` (`Mass`, `Elasticity`, `ImpulseLimit2`) and is a
+data-fidelity question, not a feel question. **Do not refuse item 2
+under the handling rule.**
+
+1. **Ambient traffic teleports across intersections.** Operator: "There
+   are cars roaming around, but when they get to intersections they
+   teleport over them to the next road." Cars jump the junction rather
+   than driving through its interior. Everything else about ambient
+   traffic looks right in play: London free roam reports `density=0.5
+   target=16 spawned=14`, 0 stuck, `signals=828`.
+
+   Lead, not a diagnosis: the lane follower may reposition to the next
+   lane's entry instead of traversing the junction interior. Check the
+   lane transfer in F10-B.2 (authored junction rules), F10-B.5
+   (junction-box yield), and whether F10-B.6's kinematic-to-dynamic
+   handover skips junction interiors.
+
+   This invalidates the F10 acceptance evidence gathered from counters
+   alone. Spawn, recycle and stuck counts structurally cannot see a
+   teleport: a car that jumps a junction still spawns, still moves its
+   displacement window, and never registers as stuck. Re-take that
+   evidence with a measure that can see position continuity across a
+   transfer, not just aggregate motion.
+
+2. **Breakable collision response is wrong.** Operator: "Hitting
+   breakables does result in extreme bounce of my car though, especially
+   at high speed. In the original game, if you had enough speed you
+   would just plow right thru things ... the small parking meters takes
+   away all my speed and leaves me flying in another direction."
+
+   Expected behaviour: momentum carries through a light prop. A parking
+   meter should cost a little speed and barely deflect the car. Today it
+   behaves like hitting a wall, and more speed does not help.
+
+   Lead, not a diagnosis: `break_banger` fires on a qualifying collision
+   edge, so the solver may resolve the car against a still-static prop
+   collider in the same step and only then replace it with fragments —
+   the car takes the full rebound of an immovable object regardless of
+   the prop's authored `Mass`. That single mechanism would explain the
+   bounce, the total speed loss and the absence of plow-through
+   together. Check how authored `Mass`, `Elasticity` and
+   `ImpulseLimit2` reach the runtime body, and whether restitution is
+   taken from `Elasticity` correctly.
+
+   Establish the authored model against retail data first. **Do NOT
+   simply lower restitution or scale impulses until it feels better** —
+   a compensating fudge will hide the real data path and break mods
+   later. This is the same failure mode operator report 3 warned about
+   for prop rotation.
+
+   This invalidates F04 and F05 acceptance evidence.
+
+3. **Trees and large light poles cannot be broken at all.** Operator:
+   "I'm not able to break trees and larger light poles at all in this
+   version."
+
+   This one is a **research question first, not a defect report.** Note
+   that F04-A.2 recorded INST props as 0/221 bound in London and 0/165
+   in SF — the static channel binds no banger records — so these may be
+   unbreakable by authored data rather than by defect. Determine
+   whether the original game breaks them. If it does, the INST-to-banger
+   binding is incomplete and that is the bug. If it does not, record it
+   as correct fidelity and close it. **Do not guess**, and do not make
+   them breakable to match an expectation that retail may not share.
+
+4. **Sidewalk props are sunk by roughly the kerb height.** Operator:
+   "things on the sidewalk doesn't spawn on the correct z height? The
+   garbagebox extends under the sidewalk a bit?" Screenshot evidence on
+   the Mac Studio:
+   `screenshots/1790089019040_cam_-275.6,2.0,160.6,38,-13.png` — a
+   London LITTER bin on a raised pavement, buried to roughly the level
+   of its "LITTER" text, with a thin spike of geometry protruding below
+   over the kerb face.
+
+   **This is NOT the defect `3ac8a5a` fixed.** That one was the content
+   offset (`Size` read as half-extents when retail authors full
+   extents) and is genuinely fixed elsewhere in the scene. This is the
+   **datum**: F03-B.6 made prop-rule stamps walk the authored kerb
+   chain, resolving (kerb, outer) vertex pairs from the room's road
+   attributes, and the kerb vertex sits at road level, at the foot of
+   the kerb face. A prop standing on a raised pavement needs the
+   pavement top, one kerb-height higher.
+
+   Testable without guessing: compare each stamp's Y against the
+   outer/building-line chain rather than the kerb chain, and check
+   whether the discrepancy equals the authored kerb height in the PSDL
+   road attributes. If it does, the datum is the defect and the
+   correction is exact rather than tuned.
+
+   `mm2-inspect placement` structurally cannot see this today: F03-C.2
+   extended it to sweep footprints, but horizontally. Extend it to
+   report **vertical penetration into the walkable surface** so this is
+   machine-visible.
+
+   This invalidates the F03-C.1/C.2 placement evidence, which measured
+   horizontal containment only.
+
+5. **Nuisance: startup WARN spam.** 154 `road N: no routable vehicle
+   lanes` WARN lines on every launch, one per road, in both free roam
+   and races. The count is already reported in the ambient summary as
+   `issues=154`. Make it a single DEBUG summary line. The spam currently
+   buries genuine warnings such as the "TEX declares more mip levels
+   than its size allows" one.
+
+**Confirmed working in this play-test — do not regress.** Prop height
+(content offset) and prop rotation both look correct in play; impact
+sparks look right; pushing another car around works; ambient traffic
+spawns, recycles and reports 0 stuck; traffic signals place at 828 BAI
+light origins; races run with 7 opponents plus the player and a working
+place indicator.
+
+**Still open and unchanged.** Vehicle handling is poor and remains
+operator-owned. The frequent `opponent re-anchored ... bounded stuck`
+events on `circuit:0` (Minis, both rosters, ~12 in 25s, no better since
+F15-B.4's catch-up assist) are downstream of handling — not an
+opponent-AI or routing defect. Do not widen the re-anchor recovery to
+mask them.
+
 ## Task table
 
 | Task | Status | Dependencies | Evidence / reason / next action |
