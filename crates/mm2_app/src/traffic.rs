@@ -95,6 +95,24 @@
 //! wreck stays a physical obstacle until the player's bubble collects
 //! it (documented approximation; the original's crash behaviour is
 //! unverified, UNK-12).
+//!
+//! F10-B.7 renders the authored traffic signals: every BAI road end
+//! carries a `trafficLightOrigin`/`trafficLightAxis` pair (R3: lights
+//! render only when the origin is nonzero), surfaced on the nav graph
+//! both per-approach (`NavArc::exit_light`) and as the full authored
+//! head list (`NavGraph::signals` — many heads govern ends no vehicle
+//! arc uses, and the original draws them anyway). At load, one
+//! session-owned [`TrafficSignal`] indicator spawns at every authored
+//! origin within `SIGNAL_MAX_DISTANCE` of its junction (designed
+//! sanity bound — retail authors a few wild outliers, counted in
+//! `signals_dropped`); `drive_signals` then sets each indicator's
+//! aspect off the authoritative [`Junctions`] controller every tick —
+//! green while the approach's road holds the signal phase, red out of
+//! phase and in the all-red clearance, constant green on free-flow
+//! ends, the stop aspect on stop-signed ends. The mapping is a
+//! designed presentation over authored positions and rules; the
+//! original's signal visuals and exact state semantics are unverified
+//! (UNK-12).
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
@@ -107,12 +125,12 @@ use mm2_formats::aimap::Aimap;
 use mm2_formats::bai::VehicleRule;
 use mm2_formats::veh::AiVehicleData;
 use mm2_game::{
-    AmbientRoster, AmbientSpec, AuthorityRole, FollowPolicy, JunctionGate, Junctions, KnockPolicy,
-    LaneAdvance, LaneCursor, LaneId, NavGraph, NavOverrides, NavRng, ObjectIdentity, Player,
-    Session, SessionConfig, SessionEntity, SessionPhase, SpawnDirective, SpawnDraw, SpawnPolicy,
-    StuckPolicy, StuckWindow, WorldMode, advance_lane_cursor, corridor_gap, draw_spawn,
-    eligible_lanes, follow_speed, inside_junction_zone, junction_speed, junction_zone,
-    plan_ambient,
+    AmbientRoster, AmbientSpec, AuthorityRole, FollowPolicy, JunctionGate, JunctionPolicy,
+    Junctions, KnockPolicy, LaneAdvance, LaneCursor, LaneId, NavGraph, NavOverrides, NavRng,
+    ObjectIdentity, Player, Session, SessionConfig, SessionEntity, SessionPhase, SignalAspect,
+    SpawnDirective, SpawnDraw, SpawnPolicy, StuckPolicy, StuckWindow, WorldMode,
+    advance_lane_cursor, corridor_gap, draw_spawn, eligible_lanes, follow_speed,
+    inside_junction_zone, junction_speed, junction_zone, plan_ambient,
 };
 use tracing::{debug, info, warn};
 
@@ -181,8 +199,84 @@ pub struct AmbientTraffic {
     /// The per-junction right-of-way/signal controller (F10-B.2) —
     /// session-scoped like the plan it polices.
     pub junctions: Junctions,
+    /// Authored signal indicators spawned at load (F10-B.7).
+    pub signals: usize,
+    /// Authored signal origins skipped by the `SIGNAL_MAX_DISTANCE`
+    /// sanity bound — retail authors a few wild outliers; counted,
+    /// not hidden.
+    pub signals_dropped: usize,
+    /// Shared lamp mesh and aspect materials for the signal
+    /// indicators — one allocation serves every head.
+    signal_assets: SignalAssets,
     /// Planner/setup problems, reported honestly.
     pub issues: Vec<String>,
+}
+
+/// How far from its junction's occupancy-zone centre an authored
+/// signal origin may sit before it is treated as junk data and
+/// dropped (m) — retail's farthest legitimate origin is ~40 m, and a
+/// handful of authored outliers reach hundreds of metres (counted in
+/// `signals_dropped`). Designed bound, UNK-12.
+const SIGNAL_MAX_DISTANCE: f32 = 60.0;
+
+/// Indicator lamp radius (m) — a designed presentation size; the
+/// authored head's dimensions are not part of the BAI record.
+const SIGNAL_LAMP_RADIUS: f32 = 0.45;
+
+/// The shared lamp mesh and per-aspect materials every signal
+/// indicator draws with.
+struct SignalAssets {
+    lamp: Handle<Mesh>,
+    green: Handle<StandardMaterial>,
+    red: Handle<StandardMaterial>,
+    amber: Handle<StandardMaterial>,
+}
+
+impl SignalAssets {
+    fn new(meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>) -> Self {
+        // Unlit vivid colours — readable in daylight without lighting
+        // support, the same convention the checkpoint markers use.
+        let mut mat = |r: f32, g: f32, b: f32| {
+            materials.add(StandardMaterial {
+                base_color: Color::srgb(r, g, b),
+                unlit: true,
+                ..default()
+            })
+        };
+        Self {
+            lamp: meshes.add(Sphere::new(SIGNAL_LAMP_RADIUS)),
+            green: mat(0.15, 0.95, 0.25),
+            red: mat(0.95, 0.12, 0.08),
+            amber: mat(0.95, 0.65, 0.10),
+        }
+    }
+
+    fn material(&self, aspect: SignalAspect) -> &Handle<StandardMaterial> {
+        match aspect {
+            SignalAspect::Green => &self.green,
+            SignalAspect::Red => &self.red,
+            SignalAspect::Stop => &self.amber,
+        }
+    }
+}
+
+/// One authored traffic signal (F10-B.7): a session-owned indicator
+/// at a BAI `trafficLightOrigin`, its aspect driven by the junction
+/// controller — green while the approach's road holds the phase, red
+/// out of phase, constant green on free-flow ends, the stop aspect on
+/// stop-signed ends. Render-only: no collider, no physics — the same
+/// convention the checkpoint markers use.
+#[derive(Component)]
+pub struct TrafficSignal {
+    /// Junction the signal's approach enters.
+    pub junction: u16,
+    /// Member road the signal governs.
+    pub road: u16,
+    /// The approach's authored rule — selects the aspect.
+    pub rule: Option<VehicleRule>,
+    /// The aspect currently applied — the update skips entities whose
+    /// state did not change.
+    pub aspect: SignalAspect,
 }
 
 impl AmbientTraffic {
@@ -329,6 +423,9 @@ pub fn load_ambient_traffic(
         knocked: 0,
         knock_policy: KnockPolicy::default(),
         junctions: Junctions::default(),
+        signals: 0,
+        signals_dropped: 0,
+        signal_assets: SignalAssets::new(meshes, materials),
         issues: plan
             .issues
             .iter()
@@ -354,6 +451,7 @@ pub fn load_ambient_traffic(
             traffic.spawned += 1;
         }
     }
+    spawn_traffic_signals(commands, &mut traffic, owner);
     for i in &traffic.issues {
         warn!(issue = %i, "ambient issue");
     }
@@ -362,10 +460,103 @@ pub fn load_ambient_traffic(
         target = traffic.target,
         spawned = traffic.spawned,
         eligible = traffic.eligible.len(),
+        signals = traffic.signals,
+        signals_dropped = traffic.signals_dropped,
         issues = traffic.issues.len(),
         "ambient traffic loaded"
     );
     Some(traffic)
+}
+
+/// Spawn the authored traffic-signal indicators (F10-B.7): one
+/// session-owned lamp at every `NavGraph::signals` head that passes
+/// the `SIGNAL_MAX_DISTANCE` sanity bound. Each head shows the aspect
+/// its end's authored rule admits under the junction controller's
+/// initial state — a head whose road never joins the member set
+/// resolves the same green fallback `gate` does; `drive_signals`
+/// keeps them current. The authored `trafficLightAxis` is preserved
+/// on the nav graph but unused — its convention is unverified (R3
+/// notes it only as a flag that the light exists).
+fn spawn_traffic_signals(
+    commands: &mut Commands,
+    traffic: &mut AmbientTraffic,
+    owner: SessionEntity,
+) {
+    // The junction's member list is per-intersection — cache it
+    // rather than rescanning every end's rule per signal.
+    let jpolicy = JunctionPolicy::default();
+    let mut members: HashMap<u16, Vec<u16>> = HashMap::new();
+    for head in traffic.graph.signals() {
+        let ix = head.junction;
+        let origin = Vec3::from(head.signal.origin);
+        if junction_zone(&traffic.graph, ix, &jpolicy).is_none_or(|(center, _)| {
+            !Vec3::from(center).is_finite()
+                || origin.distance(Vec3::from(center)) > SIGNAL_MAX_DISTANCE
+        }) {
+            // No sane zone or a wild outlier — drop it and count
+            // the loss rather than draw a stray lamp kilometres
+            // off the road.
+            traffic.signals_dropped += 1;
+            continue;
+        }
+        let rule = head.rule();
+        let member = members
+            .entry(ix)
+            .or_insert_with(|| Junctions::signal_members(&traffic.graph, ix));
+        let aspect = traffic.junctions.signal_aspect(ix, member, head.road, rule);
+        commands.spawn((
+            owner,
+            TrafficSignal {
+                junction: ix,
+                road: head.road,
+                rule,
+                aspect,
+            },
+            Mesh3d(traffic.signal_assets.lamp.clone()),
+            MeshMaterial3d(traffic.signal_assets.material(aspect).clone()),
+            Transform::from_translation(origin),
+            Visibility::Visible,
+        ));
+        traffic.signals += 1;
+    }
+}
+
+/// Keep every authored signal indicator's aspect in step with the
+/// authoritative [`Junctions`] controller — runs after
+/// `drive_ambient` so the just-advanced phase is what the lamps show
+/// (F10-B.7). Rule admission only: a light member is green exactly
+/// while it holds the phase (red through the all-red clearance),
+/// `NeverStop`/unruled ends stay green, `StopSign` ends show the stop
+/// aspect, `AlwaysStop` ends stay red. The box-yield that holds cars
+/// behind a green is an obstruction rule, not a lamp state.
+pub fn drive_signals(
+    session: Res<Session>,
+    traffic: Option<Res<AmbientTraffic>>,
+    mut signals: Query<(&mut TrafficSignal, &mut MeshMaterial3d<StandardMaterial>)>,
+) {
+    let Some(traffic) = traffic else { return };
+    if session.authority_role() != AuthorityRole::Authority {
+        return;
+    }
+    if !matches!(
+        session.phase(),
+        SessionPhase::Countdown | SessionPhase::Playing
+    ) {
+        return;
+    }
+    let mut members: HashMap<u16, Vec<u16>> = HashMap::new();
+    for (mut sig, mut material) in &mut signals {
+        let member = members
+            .entry(sig.junction)
+            .or_insert_with(|| Junctions::signal_members(&traffic.graph, sig.junction));
+        let aspect = traffic
+            .junctions
+            .signal_aspect(sig.junction, member, sig.road, sig.rule);
+        if aspect != sig.aspect {
+            sig.aspect = aspect;
+            material.0 = traffic.signal_assets.material(aspect).clone();
+        }
+    }
 }
 
 /// Resolve a class's assets once and cache the outcome. A class whose

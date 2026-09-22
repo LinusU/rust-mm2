@@ -37,9 +37,9 @@ pub use config::{
 pub use ids::{AuthorityRole, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerId};
 pub use impact::{ImpactDedup, ImpactEvent, ImpactId, ImpactPolicy};
 pub use nav::{
-    ArcEnd, ArcExit, ArcId, LaneHit, LaneId, LaneKind, LaneQuery, LaneSample, NavArc, NavBuild,
-    NavGraph, NavIntersection, NavIssue, NavLane, NavOverrides, NavRng, NavRoad, NavStats, Route,
-    RouteCursor, RouteError, RouteOptions, TravelDir, TurnKind,
+    ArcEnd, ArcExit, ArcId, EndSignal, LaneHit, LaneId, LaneKind, LaneQuery, LaneSample, NavArc,
+    NavBuild, NavGraph, NavIntersection, NavIssue, NavLane, NavOverrides, NavRng, NavRoad,
+    NavSignal, NavStats, Route, RouteCursor, RouteError, RouteOptions, TravelDir, TurnKind,
 };
 pub use opponent::{
     OpponentDriveParams, OpponentIssue, OpponentRoster, OpponentRoute, OpponentRoutePoint,
@@ -75,10 +75,10 @@ pub use surface::{SurfaceMaterial, SurfaceState};
 pub use telemetry::{DamageSignals, VehicleTelemetry, WheelTelemetry};
 pub use traffic::{
     AmbientPlan, AmbientRoster, AmbientSpec, FollowPolicy, JunctionGate, JunctionPolicy, Junctions,
-    KnockPolicy, LaneAdvance, LaneCursor, SpawnDirective, SpawnDraw, SpawnPolicy, StuckPolicy,
-    StuckWindow, TrafficIssue, advance_lane_cursor, corridor_gap, draw_spawn, eligible_lanes,
-    follow_speed, inside_junction_zone, junction_speed, junction_zone, plan_ambient,
-    spawn_occupied,
+    KnockPolicy, LaneAdvance, LaneCursor, SignalAspect, SpawnDirective, SpawnDraw, SpawnPolicy,
+    StuckPolicy, StuckWindow, TrafficIssue, advance_lane_cursor, corridor_gap, draw_spawn,
+    eligible_lanes, follow_speed, inside_junction_zone, junction_speed, junction_zone,
+    plan_ambient, spawn_occupied,
 };
 
 /// What the app should do at startup.

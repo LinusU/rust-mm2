@@ -826,10 +826,13 @@ fn main() {
             // reads the same contact edges the impact pipeline and the
             // bangers consume, then runs before the driver so a knocked
             // car is solver-owned from the tick it flips
-            // (knock → drive → maintain).
+            // (knock → drive → maintain). The F10-B.7 signal update
+            // reads the junction controller the driver just advanced,
+            // so it runs last (knock → drive → maintain → signals).
             traffic::knock_ambient,
             traffic::drive_ambient,
             traffic::maintain_ambient,
+            traffic::drive_signals,
         )
             .chain(),
     )

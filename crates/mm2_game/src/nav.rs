@@ -237,6 +237,69 @@ pub struct NavArc {
     pub entry_point: [f32; 3],
     /// World position of the downstream extremity.
     pub exit_point: [f32; 3],
+    /// The authored traffic signal at the downstream end, when the
+    /// BAI record carries a nonzero `trafficLightOrigin` — R3 notes
+    /// lights render only when the origin is nonzero. What the signal
+    /// displays is the consumer's decision (the original's mapping is
+    /// unverified, UNK-12).
+    pub exit_light: Option<NavSignal>,
+}
+
+/// An authored traffic-signal marker on a road end — the BAI
+/// `trafficLightOrigin`/`trafficLightAxis` pair, retained verbatim.
+/// Positions are authored world coordinates (the original renders its
+/// signal unit there); the axis convention is unverified.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NavSignal {
+    /// Authored signal position.
+    pub origin: [f32; 3],
+    /// Authored orientation axis — `[0,0,0]` when the authored value
+    /// was non-finite; its exact convention is unverified (UNK-12).
+    pub axis: [f32; 3],
+}
+
+/// Read a road end's authored signal: `Some` only when the origin is
+/// finite and nonzero (the documented render gate); a non-finite axis
+/// is sanitised to zero rather than sinking the placement.
+fn nav_signal(end: &mm2_formats::bai::RoadEnd) -> Option<NavSignal> {
+    let origin = end.traffic_light_origin;
+    if !origin.iter().all(|c| c.is_finite()) || origin.iter().all(|c| *c == 0.0) {
+        return None;
+    }
+    let axis = if end.traffic_light_axis.iter().all(|c| c.is_finite()) {
+        end.traffic_light_axis
+    } else {
+        [0.0; 3]
+    };
+    Some(NavSignal { origin, axis })
+}
+
+/// An authored signal head on a road end whose junction reference
+/// resolved — the road-end furniture the original draws at every
+/// nonzero `trafficLightOrigin` (R3). This is the *full* authored
+/// set: many retail heads (≈47% of London's) sit on ends no vehicle
+/// arc approaches through — one-way upstream ends and
+/// pedestrian/tram-only roads — which [`NavArc::exit_light`] alone
+/// never reaches. A head on an unresolvable end has no junction to
+/// govern and is not listed (no such data exists on the retail
+/// cities).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EndSignal {
+    /// BAI road index the end belongs to.
+    pub road: u16,
+    /// Intersection the end faces.
+    pub junction: u16,
+    /// Raw `vehicleRule` code authored on the end.
+    pub rule_code: u16,
+    /// The authored marker pair.
+    pub signal: NavSignal,
+}
+
+impl EndSignal {
+    /// Interpreted `vehicleRule` on the head's end.
+    pub fn rule(&self) -> Option<VehicleRule> {
+        decode_vehicle_rule(self.rule_code)
+    }
 }
 
 impl NavArc {
@@ -751,6 +814,7 @@ pub struct NavGraph {
     lane_lookup: HashMap<u64, u32>,
     exits: Vec<Vec<ArcExit>>,
     intersections: Vec<NavIntersection>,
+    signals: Vec<EndSignal>,
     grid: LaneGrid,
     stats: NavStats,
 }
@@ -793,6 +857,7 @@ impl NavGraph {
 
         let mut roads = Vec::with_capacity(bai.roads.len());
         let mut arcs: Vec<NavArc> = Vec::new();
+        let mut signals: Vec<EndSignal> = Vec::new();
         let mut lanes: Vec<NavLane> = Vec::new();
         let mut lane_lookup = HashMap::new();
         let mut stats = NavStats {
@@ -806,6 +871,19 @@ impl NavGraph {
             let (start_int, end_int) = resolved[ri];
             let first = road.sections.first();
             let last = road.sections.last();
+
+            // Every authored signal head on a resolved end — arc or
+            // not, the original draws the head it authored (F10-B.7).
+            for (junction, end) in [(start_int, &road.start), (end_int, &road.end)] {
+                if let (Some(ix), Some(signal)) = (junction, nav_signal(end)) {
+                    signals.push(EndSignal {
+                        road: ri as u16,
+                        junction: ix,
+                        rule_code: end.vehicle_rule_code,
+                        signal,
+                    });
+                }
+            }
 
             let mut road_arcs = [None, None];
             // Right-side curves travel with the sections; left-side
@@ -932,18 +1010,20 @@ impl NavGraph {
                         }
                     }
                     stats.vehicle_lanes += vehicle_lanes.len();
-                    let (entry, exit, entry_rule_code, exit_rule_code) = match dir {
+                    let (entry, exit, entry_rule_code, exit_rule_code, exit_light) = match dir {
                         TravelDir::Forward => (
                             start_int,
                             end_int,
                             road.start.vehicle_rule_code,
                             road.end.vehicle_rule_code,
+                            nav_signal(&road.end),
                         ),
                         TravelDir::Backward => (
                             end_int,
                             start_int,
                             road.end.vehicle_rule_code,
                             road.start.vehicle_rule_code,
+                            nav_signal(&road.start),
                         ),
                     };
                     let (entry_point, exit_point) = match dir {
@@ -971,6 +1051,7 @@ impl NavGraph {
                         entry_rule_code,
                         entry_point,
                         exit_point,
+                        exit_light,
                     });
                     road_arcs[dir_index(dir)] = Some(arc);
                     stats.vehicle_arcs += 1;
@@ -1092,6 +1173,7 @@ impl NavGraph {
                 lane_lookup,
                 exits,
                 intersections,
+                signals,
                 grid,
                 stats,
             },
@@ -1112,6 +1194,13 @@ impl NavGraph {
     /// Every intersection.
     pub fn intersections(&self) -> &[NavIntersection] {
         &self.intersections
+    }
+
+    /// Every authored signal head on a resolved road end (F10-B.7) —
+    /// the full set the original draws, including heads whose end no
+    /// vehicle arc approaches through.
+    pub fn signals(&self) -> &[EndSignal] {
+        &self.signals
     }
 
     /// Every lane curve.

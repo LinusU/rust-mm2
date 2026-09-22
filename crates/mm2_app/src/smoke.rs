@@ -223,10 +223,13 @@ pub fn headless_smoke(
                 // F10-A.2: ambient lane-following + recycle/respawn —
                 // the headless record's `traf=` field reads the state
                 // these leave behind. F10-B.6's handover runs before
-                // the driver (knock → drive → maintain).
+                // the driver (knock → drive → maintain); the B.7
+                // signal update reads the controller state the driver
+                // just advanced, so it runs last.
                 crate::traffic::knock_ambient,
                 crate::traffic::drive_ambient,
                 crate::traffic::maintain_ambient,
+                crate::traffic::drive_signals,
             )
                 .chain(),
         )
@@ -479,6 +482,16 @@ pub fn headless_smoke(
             // knock-free runs stay bit-identical to earlier ones.
             if t.knocked > 0 {
                 s.push_str(&format!(" kn={}", t.knocked));
+            }
+            // F10-B.7 authored signal indicators — `sig` only when
+            // any spawned (a BAI without authored light origins stays
+            // bit-identical), `sigd` only when the sanity bound
+            // dropped outliers.
+            if t.signals > 0 {
+                s.push_str(&format!(" sig={}", t.signals));
+            }
+            if t.signals_dropped > 0 {
+                s.push_str(&format!(" sigd={}", t.signals_dropped));
             }
             s
         })

@@ -67,6 +67,22 @@ occupies each room.
   free-flow, 102 mixed. Mixed-rule junctions are the norm, so each
   approach must gate on its own end's rule; `AlwaysStop` (=2) is
   authored nowhere.
+- `trafficLightOrigin`/`trafficLightAxis` census (2026-09-22,
+  `mm2-inspect bai`): nonzero origins on 650 connected ends in SF
+  (533 light-ruled, 117 on other-rule ends) and 828 in London (519 /
+  309), zero non-finite and zero on unconnected ends in either city.
+  Origins sit at road level on the kerb/sidewalk beside the approach
+  — the authored anchor the original's signal unit stands on.
+  Y range −22.1..17.8 London, −0.2..109.8 SF; XZ distance to the
+  authored junction centre ≤ 39.7 m on London while SF authors 3
+  wild outliers (686.8 m max — treated as junk by the runtime's
+  60 m sanity bound, counted not hidden). Only 522 SF / 440 London
+  lit ends are the *downstream* end of a routable vehicle arc: 96 /
+  166 sit on one-way upstream ends and 32 / 222 on roads with no
+  vehicle arcs at all — so arc-only traversal misses roughly half of
+  London's authored heads. `trafficLightAxis` convention and the
+  original's signal-unit draw/state semantics remain unverified
+  (UNK-12); the runtime preserves the pair verbatim.
 - `london_sup.bai`/`sf_sup.bai` share the `CAI1` magic but do not fit
   this layout under either field reading — reported `unsupported`; their
   record structure is uninvestigated.

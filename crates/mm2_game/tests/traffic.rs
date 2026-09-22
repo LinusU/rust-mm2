@@ -4,7 +4,9 @@
 //! plan bounds (F10-AC01's data slice).
 
 use bevy::prelude::Entity;
-use mm2_formats::bai::{Bai, Culling, Intersection, Road, RoadEnd, RoadSection, RoadSide, Side};
+use mm2_formats::bai::{
+    Bai, Culling, Intersection, Road, RoadEnd, RoadSection, RoadSide, Side, VehicleRule,
+};
 use mm2_formats::veh::AiVehicleData;
 use mm2_game::*;
 
@@ -1298,4 +1300,247 @@ fn plan_drops_directives_past_a_lane_s_capacity() {
     // two lanes, never three cars.
     assert!(plan.spawns.len() <= 2, "{:?}", plan.spawns);
     assert!(plan.dropped > 0, "the overflow must drop");
+}
+
+// ---------- authored signal markers + aspects (F10-B.7) ----------
+
+/// A connected end carrying the authored signal marker pair.
+fn signal_end(
+    intersection: u32,
+    road_index: u32,
+    rule: u16,
+    origin: [f32; 3],
+    axis: [f32; 3],
+) -> RoadEnd {
+    RoadEnd {
+        vehicle_rule_code: rule,
+        traffic_light_origin: origin,
+        traffic_light_axis: axis,
+        ..connected(intersection, road_index)
+    }
+}
+
+/// `chain_with_rules` with authored signal data on road 0's
+/// junction-facing end.
+fn chain_with_signal(r0_end: RoadEnd, r1_start: u16) -> NavGraph {
+    let r0 = road_full(
+        0,
+        &[[0.0, 0.0, 0.0], [0.0, 0.0, 100.0]],
+        1,
+        dead_end(),
+        r0_end,
+    );
+    let r1 = road_full(
+        1,
+        &[[0.0, 0.0, 100.0], [0.0, 0.0, 200.0]],
+        1,
+        connected_rule(0, 1, r1_start),
+        dead_end(),
+    );
+    NavGraph::build(&bai_full(
+        vec![r0, r1],
+        vec![Intersection {
+            id: 0,
+            room: 1,
+            center: [0.0, 0.0, 100.0],
+            roads: vec![0, 1],
+        }],
+    ))
+    .graph
+}
+
+/// A nonzero authored origin lands verbatim on the arc exiting that
+/// end — forward arcs read `road.end`, backward arcs read
+/// `road.start`. Zero or non-finite origins expose no signal, and a
+/// non-finite axis is normalised to zero rather than propagated.
+#[test]
+fn exit_light_carries_the_authored_marker_verbatim() {
+    let origin = [2.5, 6.8, 97.0];
+    let axis = [0.0, 1.0, 0.0];
+    let g = chain_with_signal(signal_end(0, 0, 1, origin, axis), 1);
+    let fwd = g
+        .arc_of(0, TravelDir::Forward)
+        .expect("road 0 forward arcs");
+    let light = g.arc(fwd).exit_light.expect("the end authored a light");
+    assert_eq!(light.origin, origin);
+    assert_eq!(light.axis, axis);
+    // Road 1's backward arc exits at its start, which authored no
+    // light — and road 0's backward exit is a dead end.
+    let back = g.arc_of(1, TravelDir::Backward).expect("road 1 backward");
+    assert_eq!(g.arc(back).exit_light, None);
+    let dead = g.arc_of(0, TravelDir::Backward).expect("road 0 backward");
+    assert_eq!(g.arc(dead).exit_light, None);
+
+    // A zero origin means "no light" even when the axis is set (R3).
+    let g = chain_with_signal(signal_end(0, 0, 1, [0.0; 3], axis), 1);
+    let fwd = g.arc_of(0, TravelDir::Forward).unwrap();
+    assert_eq!(g.arc(fwd).exit_light, None);
+    // A non-finite origin is junk, not a signal at the world centre.
+    let g = chain_with_signal(signal_end(0, 0, 1, [f32::NAN, 0.0, 0.0], axis), 1);
+    let fwd = g.arc_of(0, TravelDir::Forward).unwrap();
+    assert_eq!(g.arc(fwd).exit_light, None);
+    // A non-finite axis cannot reach the consumer — it is zeroed.
+    let g = chain_with_signal(signal_end(0, 0, 1, origin, [f32::NAN; 3]), 1);
+    let fwd = g.arc_of(0, TravelDir::Forward).unwrap();
+    assert_eq!(
+        g.arc(fwd).exit_light,
+        Some(NavSignal {
+            origin,
+            axis: [0.0; 3]
+        })
+    );
+}
+
+/// `NavGraph::signals` is the *full* authored head set, not just the
+/// arc exits: a lit end on a one-way road's upstream end and a lit
+/// end on a road with no vehicle arcs at all both list — the
+/// original draws the head it authored. A lit end whose junction
+/// reference does not resolve has nothing to govern and stays out.
+#[test]
+fn signals_lists_every_lit_resolved_end() {
+    let lit = |ix: u32, ri: u32, rule: u16, origin: [f32; 3]| {
+        signal_end(ix, ri, rule, origin, [0.0, 1.0, 0.0])
+    };
+    // Road 0: two-way, lit `end` → its head is a forward arc exit.
+    let r0 = road_full(
+        0,
+        &[[0.0, 0.0, 0.0], [0.0, 0.0, -50.0]],
+        1,
+        RoadEnd {
+            // Lit but unconnected — nothing to govern.
+            traffic_light_origin: [9.0, 9.0, 9.0],
+            traffic_light_axis: [0.0, 1.0, 0.0],
+            ..dead_end()
+        },
+        lit(0, 0, 1, [1.0, 5.0, -1.0]),
+    );
+    // Road 1: right side carries vehicles, left is pedestrians-only —
+    // only the forward arc exists, so a lit `start` is an entry-only
+    // end no arc ever exits.
+    let c1 = [[20.0, 0.0, 0.0], [20.0, 0.0, -50.0]];
+    let r1 = Road {
+        id: 1,
+        flags: 0,
+        rooms: vec![1],
+        half_width: 7.5,
+        base_speed: 15.0,
+        right: side(0, &[(3.75, offset(&c1, 3.75, 0.0))], 2),
+        left: side(1, &[(3.75, offset(&c1, -3.75, 0.0))], 2),
+        sections: cum(&c1)
+            .iter()
+            .enumerate()
+            .map(|(i, d)| section(*d, c1[i], [0.0, 0.0, 1.0]))
+            .collect(),
+        start: lit(0, 1, 3, [21.0, 5.0, -1.0]),
+        end: dead_end(),
+    };
+    // Road 2: pedestrians-only on both sides — no arcs at all — yet
+    // its lit `end` still faces the junction.
+    let c2 = [[-20.0, 0.0, 0.0], [-20.0, 0.0, -50.0]];
+    let r2 = Road {
+        id: 2,
+        flags: 0,
+        rooms: vec![1],
+        half_width: 7.5,
+        base_speed: 15.0,
+        right: side(1, &[(3.75, offset(&c2, 3.75, 0.0))], 2),
+        left: side(1, &[(3.75, offset(&c2, -3.75, 0.0))], 2),
+        sections: cum(&c2)
+            .iter()
+            .enumerate()
+            .map(|(i, d)| section(*d, c2[i], [0.0, 0.0, 1.0]))
+            .collect(),
+        start: dead_end(),
+        end: lit(0, 2, 1, [-19.0, 5.0, -1.0]),
+    };
+    let g = NavGraph::build(&bai_full(
+        vec![r0, r1, r2],
+        vec![Intersection {
+            id: 0,
+            room: 1,
+            center: [0.0, 0.0, 0.0],
+            roads: vec![0, 1, 2],
+        }],
+    ))
+    .graph;
+
+    // The fixture's arc shape: road 1 is one-way forward, road 2
+    // carries no vehicle arcs.
+    assert!(g.arc_of(1, TravelDir::Forward).is_some());
+    assert!(g.arc_of(1, TravelDir::Backward).is_none());
+    assert!(g.arc_of(2, TravelDir::Forward).is_none());
+    assert!(g.arc_of(2, TravelDir::Backward).is_none());
+
+    let sigs = g.signals();
+    assert_eq!(sigs.len(), 3, "every resolved lit end lists: {sigs:?}");
+    let at = |road: u16| sigs.iter().find(|s| s.road == road).expect("head");
+    assert_eq!(
+        at(0),
+        &EndSignal {
+            road: 0,
+            junction: 0,
+            rule_code: 1,
+            signal: NavSignal {
+                origin: [1.0, 5.0, -1.0],
+                axis: [0.0, 1.0, 0.0],
+            },
+        }
+    );
+    assert_eq!(at(1).rule_code, 3, "road 1's entry-only head lists");
+    assert_eq!(at(2).rule_code, 1, "road 2's arc-less head lists");
+    // Only the real arc exit joins the signal cycle; the non-approach
+    // heads resolve the green fallback like `gate`'s unruled ends.
+    assert_eq!(Junctions::signal_members(&g, 0), vec![0]);
+}
+
+/// `signal_aspect` mirrors `gate`'s rule admission without the box
+/// yield: a light member is green exactly while it holds the phase
+/// (red through the all-red clearance), free-flow ends stay green,
+/// stop-signed ends show the stop aspect, `AlwaysStop` stays red, and
+/// a light-coded road outside the member set resolves green like
+/// `gate`'s unruled fallback.
+#[test]
+fn signal_aspect_follows_the_authoritative_phase() {
+    let g = chain_with_rules(1, 1);
+    let members = Junctions::signal_members(&g, 0);
+    assert_eq!(members, vec![0, 1]);
+    let mut j = Junctions::default();
+    j.policy.green_ticks = 10;
+    j.policy.clear_ticks = 5;
+    let light = Some(VehicleRule::TrafficLight);
+
+    let mut saw_all_red = false;
+    for _ in 0..30 {
+        let green = j.green_road(&g, 0);
+        let a0 = j.signal_aspect(0, &members, 0, light);
+        let a1 = j.signal_aspect(0, &members, 1, light);
+        match green {
+            Some(0) => assert_eq!((a0, a1), (SignalAspect::Green, SignalAspect::Red)),
+            Some(1) => assert_eq!((a0, a1), (SignalAspect::Red, SignalAspect::Green)),
+            None => {
+                saw_all_red = true;
+                assert_eq!((a0, a1), (SignalAspect::Red, SignalAspect::Red));
+            }
+            other => panic!("a non-member held the phase: {other:?}"),
+        }
+        // The non-light aspects are phase-independent.
+        assert_eq!(
+            j.signal_aspect(0, &members, 0, Some(VehicleRule::NeverStop)),
+            SignalAspect::Green
+        );
+        assert_eq!(
+            j.signal_aspect(0, &members, 0, Some(VehicleRule::StopSign)),
+            SignalAspect::Stop
+        );
+        assert_eq!(
+            j.signal_aspect(0, &members, 0, Some(VehicleRule::AlwaysStop)),
+            SignalAspect::Red
+        );
+        assert_eq!(j.signal_aspect(0, &members, 0, None), SignalAspect::Green);
+        // A light-coded end outside the member set resolves green —
+        // the same fallback `gate` applies.
+        assert_eq!(j.signal_aspect(0, &members, 9, light), SignalAspect::Green);
+        j.advance_tick();
+    }
+    assert!(saw_all_red, "the clearance slice must red every member");
 }

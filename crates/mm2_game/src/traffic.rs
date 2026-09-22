@@ -761,6 +761,22 @@ pub enum JunctionGate {
     Closed,
 }
 
+/// What an authored traffic signal shows, per
+/// [`Junctions::signal_aspect`] — a designed presentation mapping the
+/// approach's *rule* admission, not a recovered original display
+/// (UNK-12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalAspect {
+    /// The approach is admitted by its rule — green phase or free
+    /// flow.
+    Green,
+    /// The approach is held by its rule — a light member out of
+    /// phase, or an `AlwaysStop` end.
+    Red,
+    /// The approach must stop before proceeding — a stop-signed end.
+    Stop,
+}
+
 /// Per-intersection controller state the ambient driver consults each
 /// tick — the "one authoritative controller" the F10 spec asks for,
 /// scoped to junction admission only (ambient routing stays separate
@@ -955,6 +971,46 @@ impl Junctions {
                     JunctionGate::Open
                 } else {
                     JunctionGate::Closed
+                }
+            }
+        }
+    }
+
+    /// The aspect a signal on `road`'s approach into `ix` displays
+    /// this tick — the *rule* admission only (F10-B.7). This mirrors
+    /// [`Junctions::gate`] minus the box-yield: a light member shows
+    /// green while it holds the phase, red otherwise (including the
+    /// all-red clearance); a `NeverStop`/unruled end shows green
+    /// constantly; a `StopSign` end shows the stop-controlled aspect
+    /// (the per-car FCFS admission cannot be read off a signal); an
+    /// `AlwaysStop` end shows red since its gate never opens. A
+    /// light-coded end on a road outside the member set shows green,
+    /// the same `Open` fallback `gate` resolves to. `members` is the
+    /// caller's [`Junctions::signal_members`] result — the caller
+    /// caches it per junction when evaluating many signals a tick.
+    ///
+    /// This is a designed presentation mapping: the authored data
+    /// places the signal heads, the authored rules pick the aspect;
+    /// the original's signal visuals and exact state semantics are
+    /// unverified (UNK-12).
+    pub fn signal_aspect(
+        &self,
+        ix: u16,
+        members: &[u16],
+        road: u16,
+        rule: Option<VehicleRule>,
+    ) -> SignalAspect {
+        match rule {
+            None | Some(VehicleRule::NeverStop) => SignalAspect::Green,
+            Some(VehicleRule::AlwaysStop) => SignalAspect::Red,
+            Some(VehicleRule::StopSign) => SignalAspect::Stop,
+            Some(VehicleRule::TrafficLight) => {
+                if !members.contains(&road) {
+                    return SignalAspect::Green;
+                }
+                match self.green_member(ix, members) {
+                    Some(green) if green == road => SignalAspect::Green,
+                    _ => SignalAspect::Red,
                 }
             }
         }

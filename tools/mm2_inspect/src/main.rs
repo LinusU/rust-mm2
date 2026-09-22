@@ -12,7 +12,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use mm2_assets::{AssetsError, InstallMount, MountReport, Vfs, mount_install, mount_mods};
-use mm2_formats::bai::Bai;
+use mm2_formats::bai::{Bai, VehicleRule};
 use mm2_formats::pathset::Pathset;
 use mm2_formats::pkg::{Pkg, PkgChunk};
 use mm2_formats::psdl::Psdl;
@@ -1658,6 +1658,92 @@ fn bai(
             }
             None => println!("    note: no {psdl_path} — room refs not cross-checked"),
         }
+
+        // Traffic-light census (F10-B signal rendering): ends carrying a
+        // nonzero `traffic_light_origin`, split by the end's authored
+        // `vehicleRule` — R3 notes lights render only when the origin is
+        // nonzero. Non-finite origins/axes are counted, not hidden.
+        let (mut lit, mut lit_other, mut nonfinite) = (0usize, 0usize, 0usize);
+        let (mut y_min, mut y_max) = (f32::MAX, f32::MIN);
+        let (mut d_max, mut far, mut unconn) = (0.0f32, 0usize, 0usize);
+        let mut sample: Option<([f32; 3], [f32; 3])> = None;
+        for road in &bai.roads {
+            for end in [&road.end, &road.start] {
+                if !end.traffic_light_origin.iter().all(|c| c.is_finite())
+                    || !end.traffic_light_axis.iter().all(|c| c.is_finite())
+                {
+                    nonfinite += 1;
+                } else if end.traffic_light_origin.iter().any(|c| *c != 0.0) {
+                    if end.vehicle_rule() == Some(VehicleRule::TrafficLight) {
+                        lit += 1;
+                    } else {
+                        lit_other += 1;
+                    }
+                    y_min = y_min.min(end.traffic_light_origin[1]);
+                    y_max = y_max.max(end.traffic_light_origin[1]);
+                    if end.is_connected()
+                        && let Some(ix) = bai.intersections.get(end.intersection as usize)
+                    {
+                        let dx = end.traffic_light_origin[0] - ix.center[0];
+                        let dz = end.traffic_light_origin[2] - ix.center[2];
+                        let d = (dx * dx + dz * dz).sqrt();
+                        d_max = d_max.max(d);
+                        if d > 60.0 {
+                            far += 1;
+                        }
+                        if d <= 60.0 && sample.is_none() {
+                            sample = Some((end.traffic_light_origin, ix.center));
+                        }
+                    } else {
+                        unconn += 1;
+                    }
+                }
+            }
+        }
+        println!(
+            "    lights: {lit} light-ruled ends with origins, \
+             {lit_other} origins on other-rule ends, {nonfinite} non-finite, \
+             y {y_min:.1}..{y_max:.1}, {far} beyond 60 m of centre \
+             (max {d_max:.1} m), {unconn} on unconnected ends"
+        );
+        if let Some((o, c)) = sample {
+            println!(
+                "      sample: light ({:.1},{:.1},{:.1}) at junction ({:.1},{:.1},{:.1})",
+                o[0], o[1], o[2], c[0], c[1], c[2]
+            );
+        }
+
+        // Routable-arc coverage (F10-B.7): a lit end only surfaces on
+        // the nav graph as an arc's `exit_light` when the direction
+        // that exits it carries a vehicle arc — one-way and arc-less
+        // roads leave authored heads the runtime never sees.
+        let graph = mm2_game::NavGraph::build(&bai).graph;
+        let (mut exit_lit, mut entry_only, mut no_arc) = (0usize, 0usize, 0usize);
+        for (ri, road) in bai.roads.iter().enumerate() {
+            let lit_end = |end: &mm2_formats::bai::RoadEnd| {
+                end.traffic_light_origin.iter().all(|c| c.is_finite())
+                    && end.traffic_light_origin.iter().any(|c| *c != 0.0)
+            };
+            let nav = graph.road(ri as u16);
+            // `end` exits the forward arc (index 0); `start` exits
+            // the backward arc (index 1).
+            for (end, exit_idx, entry_idx) in
+                [(&road.end, 0usize, 1usize), (&road.start, 1usize, 0usize)]
+            {
+                if !lit_end(end) {
+                    continue;
+                }
+                match nav {
+                    Some(r) if r.arcs[exit_idx].is_some() => exit_lit += 1,
+                    Some(r) if r.arcs[entry_idx].is_some() => entry_only += 1,
+                    _ => no_arc += 1,
+                }
+            }
+        }
+        println!(
+            "      coverage: {exit_lit} lit ends are arc exits, \
+             {entry_only} only touch an upstream arc, {no_arc} on arc-less roads"
+        );
     }
     println!(
         "  {parsed} parsed ({}/{} expected), {unsupported} unsupported extras, {issues_total} issue(s)",

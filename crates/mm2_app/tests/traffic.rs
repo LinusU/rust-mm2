@@ -16,14 +16,14 @@ use bevy::time::TimeUpdateStrategy;
 use mm2_app::camera::CameraMode;
 use mm2_app::contracts::{self, ImpactFilter};
 use mm2_app::session::{self, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
-use mm2_app::traffic::{AmbientCar, AmbientDrive, AmbientTraffic};
+use mm2_app::traffic::{AmbientCar, AmbientDrive, AmbientTraffic, TrafficSignal};
 use mm2_assets::Vfs;
-use mm2_formats::bai::Side;
+use mm2_formats::bai::{Side, VehicleRule};
 use mm2_game::{
     DevOverrides, EventRef, EventTableKind, ImpactEvent, LaneCursor, LaneId, LaneKind, Mm2Vfs,
     Player, PlayerControl, PlayerId, PlayerVehicle, Session, SessionConfig, SessionMode,
-    SessionPhase, SpawnPolicy, SpawnPose, StuckWindow, WorldMode, advance_session_tick,
-    despawn_session_entities,
+    SessionPhase, SignalAspect, SpawnPolicy, SpawnPose, StuckWindow, WorldMode,
+    advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::{VehicleConfig, VehiclePlugin};
 
@@ -64,6 +64,14 @@ fn bai_bytes() -> Vec<u8> {
 }
 
 fn bai_with_rules(r0_end: u16, r1_start: u16) -> Vec<u8> {
+    bai_with_lights((r0_end, None), (r1_start, None))
+}
+
+/// `bai_with_rules` plus authored `trafficLightOrigin` markers on the
+/// two junction-connected ends — `None` writes the zero "no light"
+/// marker. The axis authors a fixed `[0,1,0]` whenever a light
+/// exists; its convention is unverified and the runtime ignores it.
+fn bai_with_lights(r0_end: (u16, Option<[f32; 3]>), r1_start: (u16, Option<[f32; 3]>)) -> Vec<u8> {
     let mut d = Vec::new();
     d.extend_from_slice(b"CAI1");
     d.extend_from_slice(&1u16.to_le_bytes());
@@ -73,8 +81,8 @@ fn bai_with_rules(r0_end: u16, r1_start: u16) -> Vec<u8> {
                       id: u16,
                       z0: f32,
                       z1: f32,
-                      end: (u32, u32, u16),
-                      start: (u32, u32, u16)| {
+                      end: (u32, u32, u16, Option<[f32; 3]>),
+                      start: (u32, u32, u16, Option<[f32; 3]>)| {
         d.extend_from_slice(&id.to_le_bytes());
         d.extend_from_slice(&2u16.to_le_bytes()); // nSections
         d.extend_from_slice(&0u16.to_le_bytes()); // flags
@@ -127,14 +135,14 @@ fn bai_with_rules(r0_end: u16, r1_start: u16) -> Vec<u8> {
             push_v3(d, [0.0, 0.0, 1.0]);
         }
         // The file stores `end` first, then `start`.
-        for (intersection, road_index, rule) in [end, start] {
+        for (intersection, road_index, rule, light) in [end, start] {
             d.extend_from_slice(&intersection.to_le_bytes());
             d.extend_from_slice(&0xCDCDu16.to_le_bytes());
             d.extend_from_slice(&rule.to_le_bytes());
             d.extend_from_slice(&0u16.to_le_bytes());
             d.extend_from_slice(&road_index.to_le_bytes());
-            push_v3(d, [0.0; 3]);
-            push_v3(d, [0.0; 3]);
+            push_v3(d, light.unwrap_or([0.0; 3]));
+            push_v3(d, light.map_or([0.0; 3], |_| [0.0, 1.0, 0.0]));
         }
     };
     write_road(
@@ -142,16 +150,16 @@ fn bai_with_rules(r0_end: u16, r1_start: u16) -> Vec<u8> {
         0,
         -30.0,
         -4.0,
-        (0, 0, r0_end),
-        (0, mm2_formats::bai::END_FILL, 0),
+        (0, 0, r0_end.0, r0_end.1),
+        (0, mm2_formats::bai::END_FILL, 0, None),
     );
     write_road(
         &mut d,
         1,
         4.0,
         30.0,
-        (0, mm2_formats::bai::END_FILL, 0),
-        (0, 1, r1_start),
+        (0, mm2_formats::bai::END_FILL, 0, None),
+        (0, 1, r1_start.0, r1_start.1),
     );
 
     d.extend_from_slice(&0u16.to_le_bytes()); // intersection id
@@ -408,6 +416,7 @@ fn test_app(config: SessionConfig, vfs: Vfs) -> App {
                 mm2_app::traffic::knock_ambient,
                 mm2_app::traffic::drive_ambient,
                 mm2_app::traffic::maintain_ambient,
+                mm2_app::traffic::drive_signals,
             )
                 .chain(),
         )
@@ -1994,4 +2003,152 @@ fn a_knocked_wreck_occupies_the_junction_box() {
         }),
         "the cleared box never released the approach"
     );
+}
+
+// ---------------------------------------------------------------------------
+// F10-B.7 authored signal indicators
+// ---------------------------------------------------------------------------
+
+/// A city install whose junction ends author `trafficLightOrigin`
+/// markers — `r0_end`/`r1_start` are `(vehicleRule, Option<origin>)`.
+fn signal_install(
+    r0_end: (u16, Option<[f32; 3]>),
+    r1_start: (u16, Option<[f32; 3]>),
+) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(d, "city/test.psdl", synthetic_psdl());
+    write(d, "city/test.bai", bai_with_lights(r0_end, r1_start));
+    write(d, "city/test.aimap", city_aimap());
+    ambient_assets(d, "va_test_a");
+    ambient_assets(d, "va_test_b");
+    tmp
+}
+
+/// The live signal indicators as `(junction, road, rule, aspect,
+/// position)` — unordered.
+fn signal_heads(app: &mut App) -> Vec<(u16, u16, Option<VehicleRule>, SignalAspect, Vec3)> {
+    app.world_mut()
+        .query::<(&TrafficSignal, &Transform)>()
+        .iter(app.world())
+        .map(|(s, t)| (s.junction, s.road, s.rule, s.aspect, t.translation))
+        .collect()
+}
+
+/// An authored nonzero light origin spawns one session-owned
+/// indicator at the authored position on the approach's arc — and
+/// session teardown removes it with everything else (F10-B.7).
+#[test]
+fn authored_signals_spawn_at_their_origins_and_despawn_on_teardown() {
+    let r0_light = [2.0, 5.5, -2.0];
+    let r1_light = [-2.0, 5.5, 2.0];
+    let install = signal_install((1, Some(r0_light)), (1, Some(r1_light)));
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+
+    let (signals, dropped) = {
+        let t = app.world().resource::<AmbientTraffic>();
+        (t.signals, t.signals_dropped)
+    };
+    assert_eq!((signals, dropped), (2, 0), "each authored head spawns");
+    let heads = signal_heads(&mut app);
+    assert_eq!(heads.len(), 2);
+    let mut by_road: std::collections::HashMap<u16, (SignalAspect, Vec3)> =
+        heads.iter().map(|(_, r, _, a, p)| (*r, (*a, *p))).collect();
+    assert_eq!(by_road.len(), 2);
+    for (ix, _, rule, _, _) in &heads {
+        assert_eq!(*ix, 0, "the heads face the only junction");
+        assert_eq!(*rule, Some(VehicleRule::TrafficLight));
+    }
+    assert_eq!(
+        by_road.remove(&0).map(|(_, p)| p),
+        Some(Vec3::from(r0_light)),
+        "road 0's head stands at its authored origin"
+    );
+    assert_eq!(
+        by_road.remove(&1).map(|(_, p)| p),
+        Some(Vec3::from(r1_light)),
+        "road 1's head stands at its authored origin"
+    );
+
+    // Teardown is the ordinary session sweep — the indicators are
+    // session-owned like the cars.
+    app.world_mut().resource_mut::<SessionControl>().quit = true;
+    assert!(
+        run_until(&mut app, 12, |a| phase_is(a, SessionPhase::Menu)),
+        "quit never reached Menu"
+    );
+    assert!(
+        signal_heads(&mut app).is_empty(),
+        "signal indicators leaked past teardown"
+    );
+}
+
+/// `drive_signals` keeps every head's aspect on the authoritative
+/// phase: over several cycles each lit member sees green and red, no
+/// tick greens two members at once, and the all-red clearance reds
+/// both — the same admission `gate` enforces on the cars (F10-AC02's
+/// signal leg, presentation).
+#[test]
+fn signal_heads_track_the_junction_phase() {
+    let install = signal_install((1, Some([2.0, 5.5, -2.0])), (1, Some([-2.0, 5.5, 2.0])));
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    // Shorten the authored-independent phase so a few updates sweep
+    // whole cycles — the timings are designed values either way.
+    {
+        let mut t = app.world_mut().resource_mut::<AmbientTraffic>();
+        t.junctions.policy.green_ticks = 4;
+        t.junctions.policy.clear_ticks = 2;
+    }
+
+    let mut green_seen = [false, false];
+    let mut red_seen = [false, false];
+    let mut saw_all_red = false;
+    for _ in 0..30 {
+        app.update();
+        let heads = signal_heads(&mut app);
+        assert_eq!(heads.len(), 2);
+        let greens = heads.iter().filter(|h| h.3 == SignalAspect::Green).count();
+        assert!(greens <= 1, "two members green at once: {heads:?}");
+        for (ix, road, _, aspect, _) in &heads {
+            assert_eq!(*ix, 0);
+            match aspect {
+                SignalAspect::Green => green_seen[*road as usize] = true,
+                SignalAspect::Red => red_seen[*road as usize] = true,
+                SignalAspect::Stop => panic!("a light member showed the stop aspect"),
+            }
+        }
+        if greens == 0 {
+            saw_all_red = true;
+        }
+    }
+    assert_eq!(green_seen, [true, true], "each member greens");
+    assert_eq!(red_seen, [true, true], "each member reds");
+    assert!(saw_all_red, "the clearance slice never showed");
+}
+
+/// An authored origin implausibly far from its junction is junk
+/// data, not a lamp — the sanity bound drops it and the counter
+/// reports the loss rather than hiding it.
+#[test]
+fn a_wild_signal_origin_drops_and_stays_counted() {
+    let install = signal_install((1, Some([500.0, 5.5, 500.0])), (3, None));
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    let (signals, dropped) = {
+        let t = app.world().resource::<AmbientTraffic>();
+        (t.signals, t.signals_dropped)
+    };
+    assert_eq!((signals, dropped), (0, 1));
+    assert!(signal_heads(&mut app).is_empty());
 }
