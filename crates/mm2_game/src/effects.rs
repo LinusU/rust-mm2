@@ -394,7 +394,7 @@ impl SmokePuff {
 /// Designed burst policy for impact sparks (DSN-26). MM2Hook's
 /// recovered `vehCarDamage` owns a per-vehicle `asLineSparks`
 /// renderer fired from the car's impact callback — the primitive is
-/// `RadialBlast(count, radius, velocity)`, a radial burst at the
+/// `RadialBlast(count, position, velocity)`, a radial burst at the
 /// impact point. The ownership, the impact feed and the `spark.tga`
 /// texture are authored/recovered; the struct's `SparkMultiplier` is
 /// runtime state no retail tune record authors, so burst sizing,

@@ -3,13 +3,14 @@
 //!
 //! MM2Hook's recovered `vehCarDamage` owns a per-vehicle
 //! `asLineSparks` renderer fired from the car's impact callback —
-//! `RadialBlast(count, radius, velocity)` is the emission primitive,
-//! a radial burst of streaks at the impact point. `mm2_game::effects`
-//! owns the contract: [`mm2_game::VehicleSparks`] is the per-vehicle
-//! rig (deterministic `NavRng` + [`mm2_game::SparkPolicy`], DSN-26)
-//! and [`mm2_game::Spark`] the bounded live streak. This module feeds
-//! the rig the deduplicated [`ImpactEvent`] stream — the authored
-//! contact point and normal are the blast's `radius`/`velocity` —
+//! `RadialBlast(count, position, velocity)` is the emission
+//! primitive, a radial burst of streaks at the impact point.
+//! `mm2_game::effects` owns the contract:
+//! [`mm2_game::VehicleSparks`] is the per-vehicle rig (deterministic
+//! `NavRng` + [`mm2_game::SparkPolicy`], DSN-26) and
+//! [`mm2_game::Spark`] the bounded live streak. This module feeds the
+//! rig the deduplicated [`ImpactEvent`] stream — the authored contact
+//! point and normal are the blast's `position`/`velocity` —
 //! builds the sprite assets through the VFS (`texture/spark.tga`, an
 //! authored 8×8 spark fleck) and renders each streak as a
 //! velocity-aligned crossed quad under additive blending.

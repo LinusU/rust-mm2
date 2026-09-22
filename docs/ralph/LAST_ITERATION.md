@@ -1,10 +1,57 @@
-# Last iteration — impact sparks (`asLineSparks`)
+# Last iteration — impact-spark ledger repair (F05-B.8)
 
-Iteration 36 on `ralph/night`, continuing from `1425c17` (the
-externally checked F05-B.7 engine-impairment candidate — review
-verdict pass). Task id: `F05-B.8` — the impact-sparks leg of F05-B's
-remaining work (F05 spec req 4: "apply documented damage
-consequences / effects").
+Iteration 37 on `ralph/night`, continuing from `2dfbb03` (the
+F05-B.8 impact-sparks candidate — external review verdict **fail**:
+documentation defects only; the implementation, its tests and both
+retail headless records were independently verified). Task id stays
+`F05-B.8` — the impact-sparks leg of F05-B's remaining work.
+
+## Repair (iteration 37)
+
+Root cause — two ledger-vs-code mislabels in the iteration-36
+write-up:
+
+1. Three docs recorded `emit_sparks` as running in "`FixedUpdate`
+   with `collect_impacts` + `apply_impact_damage`". The code
+   schedules `(emit_sparks, advance_sparks).chain()` in `Update`
+   (`main.rs`, `smoke.rs`) and the producers run in `FixedLast`.
+   Harmless in practice — independent broadcast readers see every
+   buffered message — but the ledger must record the build as made
+   (the iteration-030 class of defect).
+2. `RadialBlast`'s second parameter was written `radius`
+   (`Vector3 *` in two places). mm2hook's recovered header
+   (`src/modules/effects/linespark.h`) declares
+   `RadialBlast(int count, Vector3 &position, Vector3 &velocity)` —
+   re-verified against the public source this iteration.
+
+Actions (doc/comment-only — no behavior change, so the iteration-36
+runtime evidence stands):
+
+- Schedule `FixedUpdate`→`Update` + producer slot `FixedLast`:
+  `docs/research/damage.md`, `docs/ralph/PLAN.md` (F05-B.8 row),
+  this file.
+- Parameter `radius`→`position` (and `Vector3 *`→`Vector3 &`):
+  `docs/research/damage.md`, `docs/ralph/PLAN.md` (selection
+  paragraph + F05-B.8 row), `docs/original-rules.md` (DSN-26 row),
+  this file, and the same wrong signature in the doc comments of
+  `crates/mm2_app/src/spark_fx.rs` and
+  `crates/mm2_game/src/effects.rs`.
+
+Verification: schedule re-checked against
+`crates/mm2_app/src/main.rs` (the `(emit_sparks, advance_sparks)`
+Update chain; `collect_impacts`/`apply_impact_damage` inside the
+FixedLast chain) and `crates/mm2_app/src/smoke.rs` (identical
+headless wiring); signature re-checked against mm2hook
+`linespark.h`. `cargo fmt --all -- --check`, `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` and
+`cargo test --locked --workspace` re-run — see Evidence.
+
+## Iteration 36 record (labels corrected)
+
+Continuing from `1425c17` (the externally checked F05-B.7
+engine-impairment candidate — review verdict pass). Task id:
+`F05-B.8` — the impact-sparks leg of F05-B's remaining work (F05
+spec req 4: "apply documented damage consequences / effects").
 
 ## Slice choice
 
@@ -18,7 +65,7 @@ bounded and generation-stamped. No new contact system was needed.
 Between the two consumers, `asLineSparks` sparks are the actionable
 leg: mm2hook recovers a per-vehicle `asLineSparks* Sparks` on
 `vehCarDamage` fired from `ImpactCB` via
-`RadialBlast(count, Vector3 *radius, Vector3 *velocity)`, and the
+`RadialBlast(count, Vector3 &position, Vector3 &velocity)`, and the
 install ships `texture/spark.tga` (8×8, the only spark-named
 texture). `TextelDamageRadius`/`ImpactsTable` stays open — its
 `fxTexelDamage` consumer and decal-vs-deformation semantics are
@@ -57,8 +104,10 @@ so the implemented policy is designed (DSN-26; UNK-13 stands).
     contribution). A missing texture warns and falls back to an
     untextured additive material — the standard missing-texture
     policy; emission continues.
-  - `emit_sparks` (FixedUpdate with `collect_impacts` +
-    `apply_impact_damage`) — drains the `ImpactEvent` buffer: one
+  - `emit_sparks` (`Update`, chained with `advance_sparks`) —
+    drains the `ImpactEvent` buffer as an independent broadcast
+    reader of the stream the `FixedLast` producers
+    `collect_impacts`/`apply_impact_damage` publish: one
     burst per rigged local/AI participant at `event.point`,
     rebound side = that participant's side of `event.normal`.
     Remote participants skip (their authority renders its own,
@@ -101,6 +150,15 @@ so the implemented policy is designed (DSN-26; UNK-13 stands).
 
 ## Evidence
 
+Iteration 37 re-run (doc/comment-only diff):
+
+- `cargo fmt --all -- --check`: PASS.
+- `cargo clippy --locked --workspace --all-targets --all-features
+  -- -D warnings`: PASS.
+- `cargo test --locked --workspace`: 63 suites, 0 failures.
+
+Iteration 36 (implementation candidate `2dfbb03`):
+
 - `cargo fmt --all -- --check`: PASS.
 - `cargo clippy --locked --workspace --all-targets --all-features
   -- -D warnings`: clean.
@@ -120,8 +178,11 @@ so the implemented policy is designed (DSN-26; UNK-13 stands).
 
 ## Classification / open items
 
-- F05-B.8 is `implemented` (candidate) — pending external gates +
-  review.
+- F05-B.8 is `implemented` (candidate) — external review of
+  `2dfbb03` rejected the candidate on the two doc mislabels above
+  (implementation, tests and retail records all verified by the
+  reviewer); iteration 37 repaired the labels. Re-candidate
+  pending external gates + review.
 - Classifications: the per-vehicle `asLineSparks` renderer and the
   `ImpactCB`→`RadialBlast` call shape are recovered (mm2hook);
   `spark.tga` is a recovered asset; every emission value, the

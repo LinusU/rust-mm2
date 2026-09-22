@@ -469,8 +469,8 @@ else entirely stays unverified.
 MM2Hook recovers a per-vehicle `asLineSparks* Sparks` on
 `vehCarDamage`, `Init`'d alongside the break groups and fired from
 the car's `ImpactCB` via
-`RadialBlast(count, Vector3 *radius, Vector3 *velocity)` — a radial
-burst at the impact point, one `m_Spark` trail per spark. The
+`RadialBlast(count, Vector3 &position, Vector3 &velocity)` — a
+radial burst at the impact point, one `m_Spark` trail per spark. The
 record's `SparkMultiplier`/`SparkFade` are runtime fields
 uninitialised by `Init` and `SparkMultiplier` is not authored on any
 retail tune record, so nothing authored bounds the burst shape; the
@@ -499,9 +499,12 @@ per-vehicle renderer and the impact feed.
   0.04 m so a stalled spark still reads as a fleck) and `alpha()`
   a linear `1 − age/life` burn-down — all designed, no authored
   counterpart.
-- `mm2_app::spark_fx` — `emit_sparks` (FixedUpdate, after
-  `collect_impacts`, with `apply_impact_damage`) drains the
-  `ImpactEvent` buffer: remote participants are skipped (their
+- `mm2_app::spark_fx` — `emit_sparks` (`Update`, chained with
+  `advance_sparks`) drains the `ImpactEvent` buffer as an
+  independent broadcast reader of the stream the `FixedLast`
+  producers `collect_impacts`/`apply_impact_damage` publish — a
+  frame-rate reader still sees every buffered message. Remote
+  participants are skipped (their
   authority renders its own sparks, F25+), a non-`Playing` session
   drains without emitting, and the deferred-spawn live count is
   tracked per-emitter inside the system so a burst-heavy frame
