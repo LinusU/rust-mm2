@@ -254,10 +254,31 @@ pub fn vehicle_simulation(
             .unwrap_or(0.34)
             .max(0.01);
         let wheel_rps = mean_wheel_speed / (std::f32::consts::TAU * wheel_radius);
+        // Reverse is a single band: its authored top is the upshift
+        // point (OptRPM on imported cars) through the reverse ratio.
+        // There is no next gear to take, so past that point the
+        // drivetrain stops pulling — the same way an upshift removes
+        // drive at a forward band's top.
+        let reverse_limit_rpm = cfg
+            .transmission
+            .upshift_rpm
+            .unwrap_or(cfg.engine.redline_rpm * 0.92);
+        let reverse_limited = reversing
+            && wheel_rps.abs()
+                * cfg.transmission.reverse_ratio
+                * cfg.transmission.final_drive
+                * 60.0
+                > reverse_limit_rpm;
         // `forced_gear` is an explicit control command (AI/network/dev
         // tuning): it pins the gearbox instead of running the selector.
+        // In reverse there is no selector to run — the drivetrain is in
+        // the single reverse gear, and the RPM below tracks that ratio
+        // so the torque curve (and the limiter above) bounds reverse
+        // speed instead of letting the car back up through the whole
+        // forward gearbox.
         let new_gear = match input.forced_gear {
             Some(g) => g.min(cfg.transmission.gear_ratios.len().saturating_sub(1)),
+            None if reversing => state.gear,
             None => sim::select_gear(state.gear, wheel_rps.abs(), &cfg.transmission, &cfg.engine),
         };
         if new_gear != state.gear {
@@ -266,8 +287,16 @@ pub fn vehicle_simulation(
         state.gear = new_gear;
         // RPM follows the wheel-implied value at `rpm_response` (1/s)
         // rather than snapping — smooths shift blips and load changes.
-        let target_rpm =
-            sim::engine_rpm(wheel_rps.abs(), state.gear, &cfg.transmission, &cfg.engine);
+        let target_rpm = if reversing {
+            sim::engine_rpm_at_ratio(
+                wheel_rps.abs(),
+                cfg.transmission.reverse_ratio,
+                cfg.transmission.final_drive,
+                &cfg.engine,
+            )
+        } else {
+            sim::engine_rpm(wheel_rps.abs(), state.gear, &cfg.transmission, &cfg.engine)
+        };
         state.rpm += (target_rpm - state.rpm) * (1.0 - (-cfg.engine.rpm_response * dt).exp());
         state.shifting = (state.shifting - dt).max(0.0);
 
@@ -372,7 +401,11 @@ pub fn vehicle_simulation(
             let wheel_drive_available = if wheel.driven {
                 let (torque, ratio) = if reversing {
                     (
-                        sim::engine_torque(state.rpm.max(cfg.engine.idle_rpm), &cfg.engine),
+                        if reverse_limited {
+                            0.0
+                        } else {
+                            sim::engine_torque(state.rpm.max(cfg.engine.idle_rpm), &cfg.engine)
+                        },
                         cfg.transmission.reverse_ratio,
                     )
                 } else {

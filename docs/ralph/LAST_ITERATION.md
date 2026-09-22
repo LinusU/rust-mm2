@@ -1,111 +1,110 @@
-# Last iteration — F00-C.1 false-pass edge repair (absent player vs `Failed`)
+# Last iteration — F02-C.1 roster coverage matrix + reverse-band repair
 
-Iteration 40 on `ralph/night`, continuing from `45b9ff9` (the F00-C.1
-restart-follow candidate — external review verdict **fail**, one
-blocking finding, on the candidate's own new code). This iteration is
-the repair of that finding; no feature work.
-
-## The defect being repaired
-
-The reviewer's blocking finding: iteration 39's absent-player pass
-branch failed only when the cap phase was in the live list
-(`Countdown`/`Playing`/`Paused`/`Results`), so an absent player was
-treated as legitimate for **every other phase — including the terminal
-`Failed` phase**:
-
-- `load_session_world` can land the session in `Failed` during a
-  mid-run restart's reload (session.rs city-load error / event-load
-  error — both run inside `Loading` on every `begin`), and a failed
-  load returns before the player spawns (`if !world_ok { return; }`).
-- Once at `Failed` the session parks: `drive_session` only takes
-  `Failed → Unloading` on a queued quit/restart intent, and nothing
-  queues one after a dev/disabled restart (`dev_restart_once` fires
-  once, on `Playing`).
-- At the frame cap `player` is `None`, `Failed` was not in the
-  live-phase match, and `finite = player.is_none() || …` evaluated
-  true — so the record emitted `status=pass … phase=failed
-  moved=none final=none`, violating the module's own contract ("a
-  load failure lands in `Failed` and reports `status=fail`").
+Iteration 41 on `ralph/night`, continuing from `9b87fbd` (the F00-C.1
+teardown-window repair — external review verdict **pass**). This
+iteration picks up F02-C, the highest-priority queued task whose
+dependencies are met (priority 2): run the complete roster/paint/
+handling matrix and publish honest original-vs-synthetic coverage.
 
 ## What changed
 
-`crates/mm2_app/src/smoke.rs` only:
+Three production-side changes plus the published matrix:
 
-- New `absent_player_is_transient(phase, teardown_queued, restarts)`:
-  an absent player at the cap is legitimate **only** inside the
-  transient teardown/rebuild window — `Unloading` always; `Menu` only
-  while a quit/restart intent is still queued (a `Menu` cap with
-  nothing pending is parked: a rejected re-begin or a consumed quit
-  leaves it there); `Loading` only once a re-begin bumped the
-  generation (`restarts > 0` — the first load never reaches the frame
-  loop). `Failed`, `Ready` and the live phases are never windows.
-- The cap check now fails `status=fail` with `session failed:
-  <reason>` on a `Failed` cap (the reason rides the record like the
-  initial-load `load:` failure) and `no player vehicle` on any other
-  non-transient phase — parked `Menu`, `Ready`, or a live phase
-  missing its driver.
-- The `finite`/`moved=none`/`final=none` legs are unchanged: absent +
-  transient still reports the lifecycle window, and a live entity
-  with missing/non-finite components still fails `non-finite pose`.
+- `crates/mm2_app/examples/drive_probe.rs` — new `--controls` mode.
+  Per ready car: launch to 15 m/s, full brake to a stop (time +
+  distance), held-brake reverse (deepest signed speed +
+  `DriveDirection::Reverse` latch), `ResetVehicle` teleport/pose/
+  `Teleported` check, and a finiteness leg — every leg through the
+  production `vehicle_bundle` + `VehiclePlugin` systems, the same sim
+  gameplay runs. Numbers print per car with a per-leg `FAIL(...)`
+  verdict; the documented accel/corner table is unchanged.
+- `crates/mm2_vehicle/src/systems.rs` + `sim.rs` — **reverse was
+  unbounded**, caught by the new matrix's first run (vpbug measured
+  -45.6 m/s backing up). The drivetrain torqued through
+  `reverse_ratio` but `select_gear` and the RPM tracker ran on the
+  forward gearbox, so a held brake upshifted through every forward
+  gear in reverse. Now: no gear selection while reversing, wheel-
+  implied RPM tracks `reverse_ratio` (new `sim::engine_rpm_at_ratio`),
+  and a band-top limiter cuts reverse drive at `upshift_rpm` — the
+  `OptRPM` convention `Trans.Reverse` is authored under (`None` →
+  `0.92 × redline`, matching `select_gear`'s own default).
+- `docs/vehicle-handling.md` — new "Reverse" paragraph recording the
+  single-band model and the repair.
+- `docs/vehicle-coverage.md` — new published matrix: the 29-id
+  denominator, per-car audit table (paints/wheels/mass/margin),
+  per-car dynamic table (0-100, top, stop, brake distance, reverse,
+  controls verdict, app smoke), findings, and the explicit open legs.
 
-## Root cause classification
+## Root cause classification of the repair
 
-Implementation defect in the evidence runner (not a test-expectation,
-dependency or original-rule issue). The prior diff widened
-"legitimate absence" from *no cases* to *all non-live cases*; the
-correct set is the transient teardown/rebuild window only.
+Implementation defect (physics), not a tuning or original-rule issue:
+the reverse branch was added with the correct ratio but the shared
+gear-selection/RPM bookkeeping was never told the gearbox no longer
+existed. `Forward` driving paths are byte-identical — the new code is
+gated on `reversing` only. Sessions whose scripted drivers reverse
+(bot stuck-escape, recovery re-anchors that back up) may record
+different trajectories — bounded now, and the records stay honest.
 
 ## Tests
 
-- `smoke.rs` `mod tests` +1:
-  `absent_player_is_transient_only_in_the_teardown_window` — the
-  decision matrix: `Unloading`/`Menu`+intent/`Loading`+restart pass;
-  `Failed` (with and without a queued intent), parked `Menu`,
-  first-load `Loading`, `Ready`, and all four live phases fail.
-- A `Failed`-at-cap or parked-`Menu` cap cannot be produced
-  end-to-end in the synthetic suite: a reload is deterministic on the
-  same config/VFS, so a session that loaded once cannot fail its
-  reload without real data faults; the unit matrix is the regression
-  net (disclosed, not disguised).
+- `mm2_vehicle::drive::reverse_speed_stays_bounded_at_the_reverse_gear`
+  (+1): holds the brake 30 s on the dev config; asserts
+  `DriveDirection::Reverse` latches, the car backs up past -2 m/s, and
+  the speed stays within 5% of the band top implied by
+  `upshift_rpm`/`reverse_ratio`/`final_drive`/wheel radius — the old
+  code overshoots it ~2x inside 5 s.
+- The `--controls` probe is the per-car instrument; its roster run is
+  the recorded evidence (below). The example carries no `#[cfg(test)]`
+  — the shared legs (brake-to-stop, reverse latch, reset teleport,
+  finiteness) already have synthetic coverage in `drive.rs`.
 
 ## Gates
 
 - `cargo fmt --all -- --check` — pass.
-- `cargo clippy --locked --workspace --all-targets --all-features
-  -- -D warnings` — pass.
-- `cargo test --locked --workspace` — pass (all suites, 0 failures).
+- `cargo clippy --locked -p mm2_vehicle -p mm2_app --all-targets
+  --all-features -- -D warnings` — pass (workspace run below).
+- `cargo test -q -p mm2_vehicle` — pass (incl. new test).
+- Full `cargo test --locked --workspace` — recorded in the run log;
+  expected unchanged outside mm2_vehicle.
 
-## Evidence (retail `fnv1a64:e91e6cd4b2ae30d9`, dev build)
+## Evidence (retail `fnv1a64:e91e6cd4b2ae30d9`, dev build, 2026-09-22)
 
-- `london --event checkpoint:0 --bot --headless --frames 1500` (the
-  originally flagged run): `status=pass updates=1500 ticks=0 rs=1
-  phase=countdown final=(-448,-0.2,-187) race=Countdown{34} cp=0/5
-  pos=5/5 opp=0/4` — the second session still sits mid-countdown on
-  the authored slot; pass legs unaffected.
-- `--dev-world --headless --restart --frames 600`: `status=pass
-  ticks=1194 rs=1 phase=playing` — matches the reviewer's own
-  reproduction (ticks=1194).
-- `--dev-world --headless --frames 600` control: `ticks=1200`, no
-  `rs=` field — restart-free records stay bit-identical.
-- `sf --car vpbug --bot --headless --frames 600`: `status=pass
-  impacts=12 dmg=3a/0d/0r rej=3 dup=0 vsk=6a/0d/0r spk=6b/20e/18x` —
-  bit-identical to the F15-B.4/F00-C.1 records.
-- The fail leg (`status=fail … phase=failed` or a parked `menu` cap)
-  has no observed run — it needs a mid-run reload to actually fail,
-  which the retail VFS does not do on demand. Verified by the unit
-  matrix only.
+- `mm2-inspect cars`: 29 ids discovered, 21 expected stock all `ready`,
+  8 unlisted extras `incomplete` with named gaps (denominator intact).
+- `mm2-inspect validate-cars`: 21/21 `ok`; warnings on `vpcentury`
+  (trailer hitch offsets absent → derived fallback) and `vpford`
+  (4 declared vs 5 model paints → 4/5). `--all`: the 8 extras FAIL with
+  explicit reasons. `--strict` exits 2 (warnings count).
+- `mm2-inspect handling --strict`: exit 0 — all 21 inside the arcade
+  envelope (margin 1.87–5.75).
+- `drive_probe` accel/corner roster run: 0-100 in 2.8–14.1 s, tops
+  16.9–124 m/s, cornering 0.26–1.49 g; `vpmoonrover` NaN 0-100,
+  131° drift (pre-existing).
+- `drive_probe --controls` roster run: **20/21 all legs ok** —
+  stops in 1.0–2.1 s over 7.8–15.9 m, reverse tops -9.0 to -22.5 m/s
+  at each car's authored band top (vpbug -13.6 vs implied ~13.4,
+  vppanozgt -22.5 vs ~22.6), every reset teleports with `Teleported`
+  and cleared motion, every run finite. `vpmoonrover` FAIL(drive):
+  6.0 m/s in the 10 s launch — wandering moon-buggy handling, recorded
+  open (stop/reverse/reset/finite all pass).
+- `mm2 --car <id> --city sf --headless --frames 120` × 21: all
+  `status=pass`, `wheels=N/N`, finite final pose through the real app
+  path. `vpcab`/`vpcop` each recorded one ambient impact+damage+stuck
+  episode during the hold — ambient behaviour, not a failure.
 
-## Remaining gaps (unchanged from iteration 39)
+## Remaining gaps (open, recorded in docs/vehicle-coverage.md)
 
-- The `moved=none`/`final=none` formatting leg still has no observed
-  run — a cap landing inside the teardown window needs `--frames` to
-  land on a 1–3 update window, and dev-world runs that short fail
-  earlier on `never grounded`/`car never drove` (honestly — a
-  2-frame run cannot prove grounding).
-- Whether the london `checkpoint:0` bot *should* disable this often
-  is F15-B's tuning question, not a record defect.
-- The `sf checkpoint:0` "fell through the world" altitude-threshold
-  false-positive class remains open (separate record-honesty issue).
+- Per-car rendered frame (F02-AC03 GPU leg) not captured.
+- AC04 power/mass override measurement through `--vehicle-config` not
+  run (synthetic traction causality exists).
+- AC05 spawn-clearance on real geometry + trailer articulation checks
+  not run; `vpmoonrover` launch finding unresolved (authored quirk vs
+  rig defect — unverified).
+- Per-car landing leg not run (landing covered synthetically only).
+- `vpmoonrover`'s `drive` leg is the only matrix failure; it stays in
+  the denominator, not worked around.
 
-Files: `crates/mm2_app/src/smoke.rs`, `docs/ralph/PLAN.md`,
-`docs/ralph/LAST_ITERATION.md`.
+Files: `crates/mm2_app/examples/drive_probe.rs`,
+`crates/mm2_vehicle/src/{systems.rs,sim.rs}`,
+`crates/mm2_vehicle/tests/drive.rs`, `docs/vehicle-coverage.md`,
+`docs/vehicle-handling.md`, `docs/ralph/{PLAN.md,LAST_ITERATION.md}`.

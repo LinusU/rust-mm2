@@ -145,6 +145,24 @@ change rather than switching off, and the authored time is capped at
 `MAX_SHIFT_TIME`. The shift is still there to feel; the car never stops
 pulling.
 
+### Reverse
+
+The reverse gear is a single band, exactly like the forward bands the
+`Trans.Low`/`High` interpolation produces: its authored top is
+`Trans.Reverse`, the speed at which the engine sits at `OptRPM` through
+the reverse ratio. There is no next gear to upshift into, so past that
+point the drivetrain simply stops pulling — the limiter an upshift
+imposes on a forward band. Wheel-implied RPM tracks the reverse ratio,
+so the torque curve still tapers toward the cut instead of slamming
+into it.
+
+An earlier draft ran the gearbox's upshift selector and forward-ratio
+RPM tracking while reversing, which let a held brake walk the car
+backwards through every forward gear — the probe measured the Beetle
+backing up at 45.6 m/s. The single-band reading bounds every car at its
+own authored reverse speed (~13 m/s for the Beetle, ~22 for the GTR-1)
+and keeps the roster's authored differences.
+
 ### Levelling in the air
 
 Not an import either, and the fix for a symptom that looks like something

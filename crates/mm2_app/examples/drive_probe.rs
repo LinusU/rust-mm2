@@ -9,6 +9,7 @@
 //! ```sh
 //! cargo run -p mm2_app --example drive_probe -- retail vpdb7
 //! cargo run -p mm2_app --example drive_probe -- retail            # roster
+//! cargo run -p mm2_app --example drive_probe -- retail --controls # launch/brake/reverse/reset
 //! ```
 //!
 //! With a city name it instead reproduces the plainest possible bug
@@ -26,7 +27,7 @@ use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::city;
 use mm2_assets::{InstallMount, Vfs, mount_install};
-use mm2_vehicle::vehicle::{VehicleInput, VehicleState};
+use mm2_vehicle::vehicle::{DriveDirection, ResetVehicle, Teleported, VehicleInput, VehicleState};
 use mm2_vehicle::{VehicleConfig, VehiclePlugin, vehicle_bundle};
 
 const HZ: usize = 60;
@@ -39,6 +40,7 @@ fn main() {
         .position(|a| a == "--city")
         .and_then(|i| args.get(i + 1))
         .cloned();
+    let controls = args.iter().any(|a| a == "--controls");
     let want = args.get(2).filter(|a| !a.starts_with("--")).cloned();
 
     let mut vfs = Vfs::new();
@@ -62,6 +64,55 @@ fn main() {
             .map(|e| e.id.clone())
             .collect(),
     };
+
+    if controls {
+        println!(
+            "{:<14} {:>6} {:>6} {:>6} {:>6} {:>5} {:>6}   result",
+            "id", "launch", "stop_s", "dist_m", "rev", "reset", "finite",
+        );
+        for id in &ids {
+            let def = match mm2_content::load_vehicle(&vfs, id, 0) {
+                Ok(d) => d,
+                Err(e) => {
+                    println!("{id:<14} load failed: {e}");
+                    continue;
+                }
+            };
+            let c = probe_controls(&def.config);
+            let mut legs: Vec<&str> = Vec::new();
+            if c.launch_speed < LAUNCH_TARGET * 0.8 {
+                legs.push("drive");
+            }
+            if c.brake_time.is_nan() {
+                legs.push("stop");
+            }
+            if !(c.reversed && c.reverse_speed <= -0.5) {
+                legs.push("rev");
+            }
+            if !c.reset_ok {
+                legs.push("reset");
+            }
+            if !c.finite {
+                legs.push("finite");
+            }
+            println!(
+                "{:<14} {:>5.1} {:>5.1} {:>6.1} {:>6.1} {:>5} {:>6}   {}",
+                def.id,
+                c.launch_speed,
+                c.brake_time,
+                c.brake_distance,
+                c.reverse_speed,
+                if c.reset_ok { "ok" } else { "FAIL" },
+                if c.finite { "ok" } else { "FAIL" },
+                if legs.is_empty() {
+                    "ok".to_string()
+                } else {
+                    format!("FAIL({})", legs.join(","))
+                },
+            );
+        }
+        return;
+    }
 
     println!(
         "{:<14} {:>7} {:>7} {:>7} {:>8} {:>6}   cornering (g) by speed (m/s)",
@@ -337,6 +388,144 @@ fn probe_corner_g(cfg: &VehicleConfig, speed: f32) -> f32 {
     }
     let turn_rate = swept / (frames as f32 / HZ as f32);
     turn_rate * (speed_sum / frames as f32) / 9.81
+}
+
+/// The standing-control check F02-AC02 asks of every stock car: launch,
+/// brake to a stop, hold the brake through the standstill into reverse,
+/// then reset — each leg through the same `vehicle_bundle` +
+/// `VehiclePlugin` systems gameplay runs. The measured numbers are
+/// reported rather than hidden behind a verdict, so a regression reads
+/// as drift in the table rather than a bare pass/fail flip.
+struct ControlProbe {
+    /// Forward speed the launch reached, m/s.
+    launch_speed: f32,
+    /// Seconds of full brake to `|forward_speed| <= STOP_SPEED`; NaN
+    /// when the car never stopped inside `BRAKE_CAP`.
+    brake_time: f32,
+    /// Ground covered while braking, metres; NaN on the same timeout.
+    brake_distance: f32,
+    /// Deepest signed forward speed while the brake stayed held after
+    /// the stop — a negative number is reverse actually engaging.
+    reverse_speed: f32,
+    /// Whether `DriveDirection::Reverse` latched at any point.
+    reversed: bool,
+    /// Whether `ResetVehicle` put the car on the requested pose with
+    /// motion cleared and `Teleported` stamped.
+    reset_ok: bool,
+    /// Every sampled speed and position stayed finite.
+    finite: bool,
+}
+
+/// Speed the launch leg aims for before braking, m/s — comfortably
+/// under every stock car's measured top speed (slowest: vpbus, 29.0).
+const LAUNCH_TARGET: f32 = 15.0;
+/// Frames the launch gets before the check brakes from whatever speed
+/// it reached — heavy vehicles need the runway.
+const LAUNCH_CAP: usize = HZ * 10;
+/// `|forward_speed|` that counts as stopped, m/s.
+const STOP_SPEED: f32 = 0.2;
+/// Frames of full brake before the stop leg times out.
+const BRAKE_CAP: usize = HZ * 12;
+/// Frames the brake stays held after the stop for the reverse leg.
+const REVERSE_HOLD: usize = HZ * 5;
+
+fn probe_controls(cfg: &VehicleConfig) -> ControlProbe {
+    let (mut app, car) = headless(cfg.clone());
+    settle(&mut app, car);
+    let mut finite = true;
+    let mut sample = |app: &App| {
+        let s = app.world().get::<VehicleState>(car).unwrap();
+        let p = app.world().get::<Position>(car).unwrap().0;
+        finite &= s.forward_speed.is_finite() && p.is_finite();
+        (s.forward_speed, s.direction, p)
+    };
+
+    // Launch leg — full throttle until the target or the runway ends.
+    set_input(
+        &mut app,
+        car,
+        VehicleInput {
+            throttle: 1.0,
+            ..default()
+        },
+    );
+    let mut launch_speed = 0.0f32;
+    for _ in 0..LAUNCH_CAP {
+        app.update();
+        let (v, _, _) = sample(&app);
+        launch_speed = v;
+        if v >= LAUNCH_TARGET {
+            break;
+        }
+    }
+
+    // Brake leg — full brake until stopped or the timeout.
+    set_input(
+        &mut app,
+        car,
+        VehicleInput {
+            brake: 1.0,
+            ..default()
+        },
+    );
+    let brake_start = sample(&app).2;
+    let mut brake_time = f32::NAN;
+    let mut stopped = false;
+    for f in 0..BRAKE_CAP {
+        app.update();
+        let (v, _, _) = sample(&app);
+        if v.abs() <= STOP_SPEED {
+            brake_time = (f + 1) as f32 / HZ as f32;
+            stopped = true;
+            break;
+        }
+    }
+    let brake_distance = if stopped {
+        let stop = sample(&app).2;
+        let d = stop - brake_start;
+        (d.x * d.x + d.z * d.z).sqrt()
+    } else {
+        f32::NAN
+    };
+
+    // Reverse leg — the brake stays held through the standstill; the
+    // direction state machine must latch `Reverse` and back the car up,
+    // not oscillate at the threshold.
+    let mut reverse_speed = 0.0f32;
+    let mut reversed = false;
+    for _ in 0..REVERSE_HOLD {
+        app.update();
+        let (v, dir, _) = sample(&app);
+        reverse_speed = reverse_speed.min(v);
+        reversed |= dir == DriveDirection::Reverse;
+    }
+
+    // Reset leg — the production `ResetVehicle` path must teleport to
+    // the requested pose with motion cleared and `Teleported` stamped.
+    let target = Vec3::new(3.0, 1.2, -7.0);
+    app.world_mut().write_message(ResetVehicle {
+        entity: Some(car),
+        position: target,
+        yaw: 0.5,
+    });
+    app.update();
+    let world = app.world();
+    let pos = world.get::<Position>(car).unwrap().0;
+    let vel = world.get::<LinearVelocity>(car).unwrap().0;
+    finite &= pos.is_finite() && vel.is_finite();
+    let reset_ok = (pos - target).length() < 0.05
+        && vel.length() < 1e-3
+        && world.get::<Teleported>(car).is_some();
+
+    ControlProbe {
+        launch_speed,
+        brake_time,
+        brake_distance,
+        reverse_speed,
+        reversed,
+        reset_ok,
+        finite,
+    }
 }
 
 fn base_app() -> App {

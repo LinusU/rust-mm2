@@ -457,6 +457,70 @@ fn brake_holds_then_reverses() {
 }
 
 #[test]
+fn reverse_speed_stays_bounded_at_the_reverse_gear() {
+    let (mut app, car) = test_app();
+    // The reverse gear is a single band: holding the brake must top the
+    // car out near the band's top speed, not let the gearbox upshift
+    // through the forward gears and back the car to its forward top.
+    drive(
+        &mut app,
+        car,
+        FRAMES_PER_SECOND * 2,
+        VehicleInput::default(),
+    );
+    drive(
+        &mut app,
+        car,
+        FRAMES_PER_SECOND * 15,
+        VehicleInput {
+            brake: 1.0,
+            ..default()
+        },
+    );
+    let mid = app.world().get::<VehicleState>(car).unwrap().forward_speed;
+    drive(
+        &mut app,
+        car,
+        FRAMES_PER_SECOND * 15,
+        VehicleInput {
+            brake: 1.0,
+            ..default()
+        },
+    );
+    let state = app.world().get::<VehicleState>(car).unwrap();
+    let cfg = VehicleConfig::default();
+    let radius = cfg.wheels.iter().find(|w| w.driven).unwrap().radius;
+    // Wheel speed at the band-top limiter through the reverse gear,
+    // before drag pulls the equilibrium a bit lower.
+    let limit_rpm = cfg
+        .transmission
+        .upshift_rpm
+        .unwrap_or(cfg.engine.redline_rpm * 0.92);
+    let band_top = limit_rpm
+        / (cfg.transmission.reverse_ratio * cfg.transmission.final_drive * 60.0)
+        * std::f32::consts::TAU
+        * radius;
+    assert_eq!(state.direction, DriveDirection::Reverse);
+    assert!(
+        state.forward_speed < -2.0,
+        "car should still be backing up, speed {}",
+        state.forward_speed
+    );
+    assert!(
+        state.forward_speed.abs() <= band_top * 1.05,
+        "reverse ran away past the band top: {} > {}",
+        state.forward_speed.abs(),
+        band_top
+    );
+    assert!(
+        state.forward_speed - mid > -band_top * 0.2,
+        "reverse was still pulling hard after 15 s: {mid} -> {}",
+        state.forward_speed
+    );
+    assert_finite(&app, car);
+}
+
+#[test]
 fn airborne_state_clears_and_landing_is_stable() {
     let (mut app, car) = test_app();
     // Teleport the car 3 m up: it must report un-grounded wheels while

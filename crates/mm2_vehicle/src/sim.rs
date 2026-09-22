@@ -153,7 +153,18 @@ pub fn engine_rpm(
     engine: &EngineConfig,
 ) -> f32 {
     let ratio = cfg.gear_ratios.get(gear).copied().unwrap_or(1.0);
-    (wheel_rps * ratio * cfg.final_drive * 60.0).max(engine.idle_rpm)
+    engine_rpm_at_ratio(wheel_rps, ratio, cfg.final_drive, engine)
+}
+
+/// Engine RPM implied by wheel speed through a fixed drivetrain ratio
+/// — the reverse gear, which has no selector to walk.
+pub fn engine_rpm_at_ratio(
+    wheel_rps: f32,
+    ratio: f32,
+    final_drive: f32,
+    engine: &EngineConfig,
+) -> f32 {
+    (wheel_rps * ratio * final_drive * 60.0).max(engine.idle_rpm)
 }
 
 /// Slip angle in radians from longitudinal/lateral contact velocity.
