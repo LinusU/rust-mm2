@@ -397,6 +397,12 @@ fn record_eligibility_gates_dev_and_modded_sessions() {
         record_eligibility(&config),
         Err(Ineligible::DevOverride("spawn"))
     );
+    config.dev.spawn = None;
+    config.dev.restart = true;
+    assert_eq!(
+        record_eligibility(&config),
+        Err(Ineligible::DevOverride("restart"))
+    );
 }
 
 /// A table shaped like the authored rules: six checkpoint rows gated

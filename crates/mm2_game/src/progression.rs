@@ -577,6 +577,8 @@ pub fn record_eligibility(config: &SessionConfig) -> Result<(), Ineligible> {
         Err(Ineligible::DevOverride("traction"))
     } else if dev.finish {
         Err(Ineligible::DevOverride("finish"))
+    } else if dev.restart {
+        Err(Ineligible::DevOverride("restart"))
     } else {
         Ok(())
     }

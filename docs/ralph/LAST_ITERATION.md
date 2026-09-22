@@ -1,86 +1,76 @@
-# Last iteration — opponent catch-up assist (F15-B.4)
+# Last iteration — smoke-record restart repair + `--restart` (F00-C.1)
 
-Iteration 38 on `ralph/night`, continuing from `68a7b99` (the
-externally checked F05-B.8 doc-repair candidate — review verdict
-**pass**). Task id: `F15-B.4` — the catch-up-assistance leg of
-F15-B's difficulty-effects scope (F15 spec req 4: difficulty must
-affect documented/tunable behavior; AC06: "difficulty changes have
-measured effects, with any catch-up assistance disclosed and tested";
-the spec permits rubber-banding only when it is "explicit,
-observable, scoped by rules and not falsely recorded as physical
-racing").
+Iteration 39 on `ralph/night`, continuing from `bcaacae` (the
+externally checked F15-B.4 catch-up candidate — review verdict
+**pass**). Task id: `F00-C.1` — a repair of the evidence runner,
+chosen over feature work because the external review flagged a real
+failing observation on the production path.
 
-## Slice choice
+## The defect being repaired
 
-Of the F15-B remainder, catch-up was the actionable piece: the
-spec's difficulty-effects requirement names it, `RaceProgress`
-already carries enough authoritative state to measure a deficit,
-`OpponentDriver` already carries authored tuning plus a disclosed
-assist counter (`reanchors`), and the smoke record already reports
-opponent fields conditionally. The other named remainders stay
-gated: `weirdPathfinding`/`distancePadding`/`cornerBrakingThreshold`
-consumption waits on semantics verification, `avoidOpponents`
-polarity is open (inert meanwhile), and AC06's measured-difficulty
-evidence leg needs the controlled amateur/pro comparison the
-parameter tail only partially enables.
+The reviewer's spot-check found `london --event checkpoint:0 --bot
+--headless --frames 1500` reporting `status=fail "non-finite pose"`
+with `race=Countdown{36}` and `ticks=0`, and classified it as a
+pre-existing instability outside the F15-B.4 diff. Reproduced
+deterministically at `bcaacae`; root cause is in the smoke harness,
+not the physics:
 
-Whether the original rubber-bands trailing opponents at all is
-unverified (UNK-11) — nothing recovered pins down original catch-up
-semantics — so the entire policy is designed and recorded as
-DSN-27, not an original-behavior claim.
+- `headless_smoke` resolved the `PlayerVehicle` entity **once** before
+  the frame loop. Mid-run the scripted driver accumulated damage to
+  `DamageTier::Disabled`; for a Checkpoint event `resolve_disabled`
+  applies the documented `RestartEvent` outcome (RACE-5/DMG-2), so the
+  session travelled the production `Playing → Unloading → Menu →
+  begin` path — which despawns every `SessionEntity` and spawns a new
+  car.
+- Every post-restart `world.get::<Position>(car)` then returned
+  `None`; `unwrap_or(f32::NAN)` formatted `final=(NaN,NaN,NaN)` and
+  the `finite` check failed. The rest of the record already told the
+  truth: `ticks=0` (the clock only counts `Playing` ticks of the
+  current generation), `race=Countdown{36}` (the *second* session's
+  countdown), `impacts=0` (the per-session filter reset), no `pos=`
+  (the stale `Player` lookup returned `None`).
+
+So the flagged run was a legitimate disabled→restart lifecycle, not a
+NaN — the record mislabeled it.
 
 ## What changed
 
-- `crates/mm2_game/src/race.rs` (+ `lib.rs` exports): the pure
-  catch-up contract.
-  - `CatchUpPolicy` — `deficit_full` 2.0 gates, `assist_max` 0.25;
-    both implementation choices, `pub` for test/evidence binding.
-  - `mean_gate_spacing` — mean authored spacing between consecutive
-    checkpoint centres (`None` under two gates / no finite leg).
-  - `course_progress` — a participant's continuous course position
-    in gate units: banked gates (`lap × gates + next` `Ordered`,
-    cleared count `AnyOrder`) plus the covered fraction of the leg
-    toward the same objective `live_order` tie-breaks on
-    (`checkpoints[next]` / `navigation_target`'s nearest remaining
-    gate or armed finish). Non-finite position, out-of-range `next`,
-    missing objective or dead `leg_ref` degrade to the banked count.
-  - `catch_up_factor` — 0 at/ahead of the lead, linear to
-    `assist_max` at `deficit_full`, NaN/garbage-safe.
-- `crates/mm2_app/src/opponents.rs`: `opponent_drive` resolves the
-  leader as the best `course_progress` across every
-  progress-carrying participant (p1 gains `Option<&RaceProgress>`)
-  — the human included — over one shared leg scale (`mean_gate_spacing`,
-  designed fallback `CATCH_UP_LEG_REF` = 80 m). A trailing AI
-  driver's demand ceiling lifts one-directionally —
-  `throttle_cap + assist` bounded 1.0, `corner_speed × (1 + assist)`
-  — on a per-frame tuning copy, never mutating the authored values.
-  `OpponentDriver` gains `catch_up_policy` and `catch_up` (the live
-  factor, zeroed on every non-driving path including the re-anchor
-  branch — kept distinct from `reanchors`: a lifted demand is not a
-  recovery). The player carries no `OpponentDriver` and is never a
-  recipient; nobody is ever slowed below authored tuning; progress
-  is still earned through the same swept-trigger validation.
-- `crates/mm2_app/src/smoke.rs`: `cu=<n>` counts drivers with
-  `catch_up > 0`, emitted on activity only like `opp_rec=` —
-  unassisted runs stay bit-identical.
+- `crates/mm2_app/src/smoke.rs`: `headless_smoke` keeps a
+  `PlayerVehicle` `QueryState` and re-resolves the live player entity
+  every frame — the `Hold` driver's input write and the telemetry
+  sample follow the respawned car. End-of-run `pos`/`vel`/`rot`,
+  `local` participant, `progress`/`cleared` and `gyr=` all read the
+  live entity. `rs=<n>` counts session restarts (`Session::begin`'s
+  generation delta over the run), emitted on activity only so
+  restart-free records stay bit-identical. When the frame cap lands
+  inside the teardown window (no player entity at all) the record
+  says `moved=none`/`final=none` — a lifecycle state, not a pose —
+  while a live entity with missing or non-finite components still
+  fails `non-finite pose`, and a *live* phase
+  (`Countdown`/`Playing`/`Paused`/`Results`) with no player entity at
+  all fails `no player vehicle` (absence is only legitimate inside
+  `Unloading → Menu → Loading`).
+- `crates/mm2_game/src/config.rs` + `crates/mm2_app/src/session.rs` +
+  `crates/mm2_app/src/main.rs`: `DevOverrides::restart` (`--restart`),
+  quarantined like `--pause`/`--finish`. `dev_restart_once` queues the
+  session's own restart intent once on the first `Playing` frame —
+  the same production lifecycle a disabled-in-event restart or a
+  Backspace restart takes — giving evidence runs a reproducible
+  restart trigger. Scheduled ahead of `drive_session` in both the
+  windowed app and the headless smoke's Update chains; excluded from
+  menu-mode's direct-launch tests.
+- `crates/mm2_game/src/progression.rs`: `record_eligibility` rejects
+  `dev.restart` (`DevOverride("restart")`) — a restarted run is not a
+  continuous recorded run.
 
 ## Tests
 
-- `tests/race.rs` +5 (26 total): `mean_gate_spacing` mean/degenerate
-  legs; ordered `course_progress` banking lap×gates+next plus the
-  leg fraction incl. a leader/follower deficit measure; any-order
-  cleared-count + nearest-objective fraction; degenerate inputs
-  (out-of-range `next`, non-finite position, dead `leg_ref`, empty
-  definition) stay finite; `catch_up_factor` ramp, saturation, and
-  garbage legs.
-- `tests/opponents.rs` +1 (32 total): production-path A/B — a
-  parked player teleported through the shared `advance` validation
-  leads at ~3.3 gate units; both trailing opponents report
-  `catch_up > 0` bounded by `assist_max` and their `VehicleInput`
-  exceeds the authored `throttle_cap` (impossible without the lift);
-  leaders and the countdown-locked field report `catch_up == 0`;
-  `reanchors` stays 0; no progress is granted; the player is never
-  a recipient.
+- `tests/smoke.rs` +1 (4 total):
+  `dev_world_headless_smoke_follows_player_across_restart` — a
+  dev-world `headless_smoke` under `dev.restart` passes with `rs=1`,
+  no `NaN`, `phase=playing` and a live `final=` pose at the cap.
+- `mm2_game/tests/progression.rs` +1 leg: `dev.restart` →
+  `Err(Ineligible::DevOverride("restart"))`.
 
 ## Gates
 
@@ -89,51 +79,51 @@ DSN-27, not an original-behavior claim.
   -- -D warnings` — pass.
 - `cargo test --locked --workspace` — pass (63 suites, 0 failures).
 
-## Evidence (retail `fnv1a64:e91e6cd4b2ae30d9`, dev build at `68a7b99+diff`)
+## Evidence (retail `fnv1a64:e91e6cd4b2ae30d9`, dev build at `bcaacae+diff`)
 
-- `london --event circuit:0 --bot --headless --frames 2700`:
-  `status=pass race=Running lap=2/3 cp=2/6 results=0 pos=1/8
-  opp=0/7 opp_rec=1 cu=7` — the bot leads, all 7 opponents trail
-  and are assisted; `opp_rec=1` (vpcoop re-anchor) stays a distinct
-  counter.
-- `sf --event checkpoint:0 --bot --headless --frames 1500` (mid-race):
-  `race=Running cp=3/6 results=0 pos=5/7 opp=0/6 cu=5` — 5 of 6
-  opponents trail the leading opponent and are assisted; the leader
-  gets nothing (one-directional).
+- `london --event checkpoint:0 --bot --headless --frames 1500` (the
+  flagged run): `status=pass updates=1500 ticks=0 rs=1 phase=countdown
+  … final=(-448,-0.2,-187) race=Countdown{36} cp=0/5 pos=5/5 opp=0/4`
+  — the second session sits mid-countdown on the authored slot; the
+  live running order is populated again. Was `status=fail "non-finite
+  pose"` on the same install before this diff.
+- Same event `--frames 3000`: `status=pass rs=2 phase=playing
+  ticks=288 pos=5/5 cu=3` — the bot disables repeatedly (damage →
+  `RestartEvent` per the authored rule), each restart plays out, and
+  opponent/catch-up counters work on the third generation.
 - `sf --car vpbug --bot --headless --frames 600`: `status=pass
-  impacts=12 dmg=3a/0d/0r rej=3 dup=0 vsk=6a/0d/0r spk=6b/20e/18x`
-  — bit-identical to the F05-B.8 review record.
+  impacts=12 dmg=3a/0d/0r rej=3 dup=0 vsk=6a/0d/0r spk=6b/20e/18x` —
+  bit-identical to the F15-B.4 record (no `rs=` without a restart).
 - `london --bot --headless --frames 600`: `status=pass impacts=7
-  dmg=1a/0d/0r rej=4 dup=0 vsk=5a/0d/0r spk=5b/23e/23x` —
-  bit-identical. No `opp=`/`cu=` fields on roster-free runs.
-
-`cu=` is evidence of the *designed* policy firing in the production
-path — not retail fidelity, and not a measured-difficulty A/B
-(AC06's remaining leg).
+  dmg=1a/0d/0r rej=4 dup=0 vsk=5a/0d/0r spk=5b/23e/23x` — bit-identical.
+- `--dev-world --headless --restart --frames 600`: `status=pass
+  ticks=1196 rs=1 … moved=157m` vs the unmodified `ticks=1200`
+  baseline — the one-shot restart costs ~2 frames of session clock.
 
 ## Disclosures and gaps
 
-- `cu=` reports the *live* assist: it zeroes when the session leaves
-  `Playing` (resolved/held drivers get zeroed input), so
-  end-of-race records show none. It is deliberately not a
-  cumulative counter — the `driver.catch_up` component is the
-  per-frame observable; a cumulative assist-seconds metric is a
-  possible later refinement.
-- `sf checkpoint:0`'s end-of-run `status=fail "fell through the
-  world"` is the pre-existing altitude-threshold trip: the car is
-  grounded (`wheels=4/4`, `cp=3/6`, still racing) but the course
-  descends >25 m below the spawn altitude. Same failure class noted
-  in iteration 11's records — unrelated to this slice (the player
-  is never assisted; the check compares final altitude to spawn).
-- F15-B's parent stays open: AC06's measured amateur-vs-pro
-  difficulty A/B, representative avoidance matrix, the remaining
-  authored-tail columns once semantics verify, `avoidOpponents`
-  polarity (decoded, inert).
-- Catch-up applies to AI opponents only and on authority-local
-  `opponent_drive`; remote participants (F25+) are untouched.
+- `rs=` is a generation delta over the whole run — it counts
+  teardown/begin cycles regardless of cause (disabled restart,
+  `--restart`, a queued restart intent). The record does not attribute
+  the cause; `dmg=`/`vsk=`/`rcv=` counters describe the current
+  session only (they reset on teardown, per the AC03 no-stale-timer
+  rule).
+- `final=none` covers only the teardown window itself; no observed
+  run lands there deterministically, so that formatting leg is
+  review-visible rather than run-proven.
+- Whether the bot *should* disable this often on london
+  `checkpoint:0` is a tuning question, not a defect: impacts are
+  real collisions on the course and the disabled→restart outcome is
+  the documented rule. The event never progresses under the scripted
+  driver because it keeps wrecking — F15-B's difficulty/soak scope
+  owns whether that is acceptable bot behavior.
+- The `sf checkpoint:0` "fell through the world" altitude-threshold
+  false-positive class (noted in earlier iterations) is untouched —
+  a different, still-open record-honesty issue.
 
-Files: `crates/mm2_game/src/race.rs`, `crates/mm2_game/src/lib.rs`,
-`crates/mm2_game/tests/race.rs`, `crates/mm2_app/src/opponents.rs`,
-`crates/mm2_app/src/smoke.rs`, `crates/mm2_app/tests/opponents.rs`,
-`docs/original-rules.md`, `docs/ralph/PLAN.md`,
-`docs/ralph/LAST_ITERATION.md`.
+Files: `crates/mm2_game/src/config.rs`,
+`crates/mm2_game/src/progression.rs`,
+`crates/mm2_game/tests/progression.rs`,
+`crates/mm2_app/src/session.rs`, `crates/mm2_app/src/smoke.rs`,
+`crates/mm2_app/src/main.rs`, `crates/mm2_app/tests/smoke.rs`,
+`docs/ralph/PLAN.md`, `docs/ralph/LAST_ITERATION.md`.

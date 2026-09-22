@@ -268,6 +268,10 @@ pub fn headless_smoke(
                 session::session_control_input,
                 (
                     despawn_session_entities.run_if(session::unloading),
+                    // `--restart` queues the session's own restart
+                    // intent on the first `Playing` frame — evidence
+                    // for the production teardown/begin lifecycle.
+                    session::dev_restart_once,
                     session::drive_session,
                 )
                     .chain(),
@@ -314,15 +318,18 @@ pub fn headless_smoke(
     if let SessionPhase::Failed(m) = app.world().resource::<Session>().phase() {
         return record(SmokeStatus::Fail, format!("load: {m}"));
     }
-    let Some(car) = app
+    let mut player_query = app
         .world_mut()
-        .query_filtered::<Entity, With<PlayerVehicle>>()
-        .iter(app.world())
-        .next()
-    else {
+        .query_filtered::<Entity, With<PlayerVehicle>>();
+    if player_query.iter(app.world()).next().is_none() {
         return record(SmokeStatus::Fail, "no player vehicle spawned".into());
-    };
+    }
     let spawn_pos = app.world().resource::<session::SpawnPoint>().position;
+    // The generation the run started with: a session that restarts
+    // mid-run (a `RestartEvent` disabled outcome, `--restart`, a
+    // Backspace intent) bumps it, and the record reports the delta as
+    // `rs=` rather than mistaking the fresh session for the first.
+    let initial_generation = app.world().resource::<Session>().generation();
 
     let settle = frames.min(120);
     let mut saw_grounded = false;
@@ -336,6 +343,13 @@ pub fn headless_smoke(
     let mut bng_events = [0usize; 4];
     let mut bng_reclaims = 0usize;
     for f in 0..frames {
+        // The player entity is re-resolved every frame: a mid-run
+        // session restart (`RestartEvent` disabled outcome, `--restart`)
+        // despawns the session-owned car and spawns a new one — a
+        // cached entity would silently read nothing (or a recycled
+        // slot), which is how a legitimate restart once reported
+        // `final=(NaN,NaN,NaN)` as a "non-finite pose".
+        let player = player_query.iter(app.world()).next();
         // The `Hold` driver writes input directly; `Scripted` is owned
         // by `scripted_drive` inside the update. Either way the
         // countdown lock must not be bypassed (AC03) — `scripted_drive`
@@ -349,7 +363,8 @@ pub fn headless_smoke(
                     .is_some_and(|r| r.input_locked() && !r.is_stale(session.generation()));
                 session.is_playing() && !locked
             };
-            if let Some(mut input) = app.world_mut().get_mut::<VehicleInput>(car) {
+            if let Some(mut input) = player.and_then(|e| app.world_mut().get_mut::<VehicleInput>(e))
+            {
                 *input = if driving && f >= settle {
                     VehicleInput {
                         throttle: 1.0,
@@ -376,7 +391,10 @@ pub fn headless_smoke(
                 bng_reclaims += 1;
             }
         }
-        if let Some(state) = app.world().get::<VehicleState>(car) {
+        // Re-resolve after the update: teardown/respawn happened inside
+        // it, so the pre-update entity may be gone or replaced.
+        let player = player_query.iter(app.world()).next();
+        if let Some(state) = player.and_then(|e| app.world().get::<VehicleState>(e)) {
             saw_grounded |= state.grounded;
             grounded_wheels = state.wheels.iter().filter(|w| w.grounded).count();
             peak_speed = peak_speed.max(state.forward_speed);
@@ -386,18 +404,32 @@ pub fn headless_smoke(
     let world_ecs = app.world();
     let session = world_ecs.resource::<Session>();
     let ticks = session.tick();
+    // Session restarts observed over the run — `begin` bumps the
+    // generation, so the delta counts teardown/begin cycles the run
+    // went through (`rs=` only appears when one did).
+    let restarts = session.generation().saturating_sub(initial_generation);
+    // The live player at the frame cap: `None` while the session sits
+    // in the teardown/rebuild window, which is a lifecycle state — not
+    // a missing pose.
+    let player = player_query.iter(world_ecs).next();
     // Impact evidence: the contract pipeline emitted N events over the
     // run (the spawn drop is usually one on flat ground).
     let filter = world_ecs.resource::<contracts::ImpactFilter>();
     let impacts = filter.emitted;
     let dropped = filter.dropped;
-    let pos = world_ecs.get::<Position>(car).map(|p| p.0);
-    let vel = world_ecs.get::<LinearVelocity>(car).map(|v| v.0);
-    let rot = world_ecs.get::<Rotation>(car).map(|r| r.0);
+    let pos = player
+        .and_then(|e| world_ecs.get::<Position>(e))
+        .map(|p| p.0);
+    let vel = player
+        .and_then(|e| world_ecs.get::<LinearVelocity>(e))
+        .map(|v| v.0);
+    let rot = player
+        .and_then(|e| world_ecs.get::<Rotation>(e))
+        .map(|r| r.0);
     let race_detail = world_ecs
         .get_resource::<RaceState>()
         .map_or_else(String::new, |r| {
-            let progress = world_ecs.get::<RaceProgress>(car);
+            let progress = player.and_then(|e| world_ecs.get::<RaceProgress>(e));
             let cleared = progress.map_or(0, |p| p.cleared_count());
             // Ordered (Circuit) runs also name the lap in progress —
             // `lap` counts completed laps, so `lap+1` is the lap under
@@ -421,7 +453,9 @@ pub fn headless_smoke(
             // The local participant (there is only ever one in a real
             // run today, but pick by id so the record names the driver,
             // not an arbitrary participant).
-            let local = world_ecs.get::<mm2_game::Player>(car).map(|p| p.id);
+            let local = player
+                .and_then(|e| world_ecs.get::<mm2_game::Player>(e))
+                .map(|p| p.id);
             // The live running order — the local participant's place
             // in it (DSN-13). Unlike the standings `place=`, this
             // exists before anyone resolves.
@@ -626,8 +660,8 @@ pub fn headless_smoke(
     // F05-B.4 gyro evidence: latched spin activations/completions on
     // the local car. Same presence rule — a run whose driver never
     // pulled a gyro maneuver stays bit-identical.
-    let gyr_detail = world_ecs
-        .get::<VehicleState>(car)
+    let gyr_detail = player
+        .and_then(|e| world_ecs.get::<VehicleState>(e))
         .filter(|s| s.gyro_spins + s.gyro_completed > 0)
         .map(|s| format!(" gyr={}/{}", s.gyro_spins, s.gyro_completed))
         .unwrap_or_default();
@@ -680,22 +714,65 @@ pub fn headless_smoke(
         .get_resource::<crate::profile::ActiveProfile>()
         .map(|p| format!(" profile={}", p.profile.id))
         .unwrap_or_default();
+    // `rs=` only appears when the run restarted — records without a
+    // teardown/begin cycle stay bit-identical.
+    let rs_detail = if restarts > 0 {
+        format!(" rs={restarts}")
+    } else {
+        String::new()
+    };
+    // Pose fields: `none` while no player entity exists — the run ended
+    // inside the teardown/rebuild window, a lifecycle state rather than
+    // a missing pose. With an entity present, a missing or non-finite
+    // component still formats NaN and fails the finite check below: a
+    // live player without a pose is a broken spawn, not an absent one.
+    let pose_detail = if player.is_some() {
+        format!(
+            "moved={:.0}m wheels={}/{} final=({:.0},{:.1},{:.0})",
+            pos.map(|p| (p - spawn_pos).length()).unwrap_or(f32::NAN),
+            grounded_wheels,
+            vehicle_config.wheels.len(),
+            pos.map(|p| p.x).unwrap_or(f32::NAN),
+            pos.map(|p| p.y).unwrap_or(f32::NAN),
+            pos.map(|p| p.z).unwrap_or(f32::NAN),
+        )
+    } else {
+        format!(
+            "moved=none wheels={}/{} final=none",
+            grounded_wheels,
+            vehicle_config.wheels.len()
+        )
+    };
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{nav_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{traction_detail}{profile_detail}{extra}",
+            "updates={frames} ticks={ticks}{rs_detail} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{nav_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{traction_detail}{profile_detail}{extra}",
             driver.as_str(),
             session.phase().name(),
-            moved = pos.map(|p| (p - spawn_pos).length()).unwrap_or(f32::NAN),
-            total = vehicle_config.wheels.len(),
-            x = pos.map(|p| p.x).unwrap_or(f32::NAN),
-            y = pos.map(|p| p.y).unwrap_or(f32::NAN),
-            z = pos.map(|p| p.z).unwrap_or(f32::NAN),
         )
     };
 
-    let finite = pos.is_some_and(|p| p.is_finite())
-        && vel.is_some_and(|v| v.is_finite())
-        && rot.is_some_and(|r| r.is_finite());
+    // Absent is only legitimate while the session is mid-teardown: a
+    // live phase (`Countdown`/`Playing`/`Paused`/`Results`) with no
+    // player vehicle is a live world with no driver — a defect, not a
+    // lifecycle window (AC02's mirror).
+    if player.is_none()
+        && matches!(
+            session.phase(),
+            SessionPhase::Countdown
+                | SessionPhase::Playing
+                | SessionPhase::Paused
+                | SessionPhase::Results
+        )
+    {
+        return record(SmokeStatus::Fail, detail(" no player vehicle"));
+    }
+    // No player entity at the cap means the session was mid-teardown —
+    // there is no pose to fault. With an entity present the check is
+    // unchanged: missing or non-finite components fail.
+    let finite = player.is_none()
+        || (pos.is_some_and(|p| p.is_finite())
+            && vel.is_some_and(|v| v.is_finite())
+            && rot.is_some_and(|r| r.is_finite()));
     if !finite {
         return record(SmokeStatus::Fail, detail(" non-finite pose"));
     }

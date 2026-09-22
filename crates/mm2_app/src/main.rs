@@ -167,6 +167,14 @@ struct Cli {
     #[arg(long, conflicts_with = "bot")]
     finish: bool,
 
+    /// Queue the session's own restart intent on the first `Playing`
+    /// frame (diagnostic aid — exercises the production
+    /// `Unloading → Menu → begin` teardown path, the same lifecycle a
+    /// disabled-in-Blitz/Checkpoint restart takes; the restarted run is
+    /// record-ineligible). One-shot.
+    #[arg(long)]
+    restart: bool,
+
     /// Multiply every tire contact's grip by `f` for the session — an
     /// environment traction stand-in (wetness/ice) for evidence runs.
     /// `1.0` is unmodified; must be finite and non-negative.
@@ -634,6 +642,7 @@ fn main() {
             traction,
             pause: cli.pause,
             finish: cli.finish,
+            restart: cli.restart,
         },
         // Any mounted mod makes records/unlocks ineligible — a result
         // under modded content is not comparable to stock (designed
@@ -715,6 +724,7 @@ fn main() {
         && cli.traction.is_none()
         && !cli.pause
         && !cli.finish
+        && !cli.restart
         && !cli.nav
         && cli.nav_route.is_none()
         && !cli.bot;
@@ -894,6 +904,12 @@ fn main() {
                 // `capturing` for the same reason: a capture is how the
                 // results screen gets rendered.
                 results::dev_finish_once,
+                // `--restart` queues the session's own restart intent
+                // on the first `Playing` frame — the same teardown the
+                // pause/results rows and a disabled-in-event restart
+                // take. Ahead of the driver so the intent is consumed
+                // this frame.
+                session::dev_restart_once,
                 session::drive_session,
             )
                 .chain(),

@@ -464,6 +464,15 @@ pub struct DevOverrides {
     /// `--pause` this changes the run's outcome, so it IS in
     /// `record_eligibility` — results it produces never record.
     pub finish: bool,
+    /// `--restart`: queue the session's own restart intent on the first
+    /// `Playing` frame (evidence/diagnostic runs — how a headless
+    /// `--frames` run exercises the production
+    /// `Unloading → Menu → begin` teardown path, the same lifecycle a
+    /// disabled-in-Blitz/Checkpoint restart or a Backspace restart
+    /// takes; never a session-legal parameter). The second session is
+    /// not a continuous run of the first, so it IS in
+    /// `record_eligibility` — results it produces never record.
+    pub restart: bool,
 }
 
 /// Configuration of the `--nav` debug overlay: draw the city's BAI

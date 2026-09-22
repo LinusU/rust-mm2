@@ -302,6 +302,27 @@ pub fn drive_session(
     }
 }
 
+/// `--restart` (quarantined `DevOverrides`, evidence runs only): queue
+/// the session's own restart intent on the first `Playing` frame. The
+/// restart then travels the production lifecycle — `drive_session`
+/// takes it `Playing → Unloading → Menu → begin` — so a headless
+/// `--frames` run exercises the same teardown/rebuild a
+/// disabled-in-Blitz/Checkpoint restart or a Backspace restart takes.
+/// One-shot: a session started by the restart stays running.
+pub fn dev_restart_once(
+    session: Res<Session>,
+    mut control: ResMut<SessionControl>,
+    mut fired: Local<bool>,
+) {
+    if *fired {
+        return;
+    }
+    if session.is_playing() && session.config().is_some_and(|c| c.dev.restart) {
+        *fired = true;
+        control.restart = true;
+    }
+}
+
 /// The asset collections world spawning writes into.
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct AssetStores<'w> {

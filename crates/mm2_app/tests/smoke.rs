@@ -8,7 +8,7 @@
 use mm2_app::session::SelectedCar;
 use mm2_app::smoke::{self, SmokeRecord, SmokeStatus};
 use mm2_assets::Vfs;
-use mm2_game::{SessionConfig, WorldMode};
+use mm2_game::{DevOverrides, SessionConfig, WorldMode};
 use mm2_vehicle::VehicleConfig;
 
 /// The dev world must start with no original data at all — an empty VFS —
@@ -46,6 +46,62 @@ fn dev_world_headless_smoke_passes_without_mm2_data() {
     assert!(
         (1100..=1200).contains(&ticks),
         "600 updates should produce ~1200 fixed ticks, got {ticks}"
+    );
+}
+
+/// A mid-run session restart is a legitimate lifecycle event — a
+/// `RestartEvent` disabled outcome, a Backspace/results-row restart or
+/// the `--restart` dev override all travel the same production
+/// `Playing → Unloading → Menu → begin` path, which despawns the
+/// session-owned car and spawns a new one. The record must follow the
+/// live entity, count the restart and never report the despawned one
+/// as a "non-finite pose" (a false failure observed on retail London
+/// `checkpoint:0`, where the scripted driver disabled mid-run and the
+/// event legitimately restarted).
+#[test]
+fn dev_world_headless_smoke_follows_player_across_restart() {
+    let vfs = Vfs::new();
+    let config = SessionConfig {
+        dev: DevOverrides {
+            restart: true,
+            ..DevOverrides::default()
+        },
+        ..SessionConfig::default()
+    };
+    let rec = smoke::headless_smoke(
+        &config,
+        vfs,
+        SelectedCar {
+            def: None,
+            paint: 0,
+        },
+        &VehicleConfig::default(),
+        600,
+        smoke::Driver::Hold,
+        None,
+    );
+    assert_eq!(
+        rec.status,
+        SmokeStatus::Pass,
+        "expected pass, got: {}",
+        rec.line()
+    );
+    let line = rec.line();
+    assert!(
+        line.contains("rs=1"),
+        "record should count the restart it went through: {line}"
+    );
+    assert!(
+        !line.contains("NaN"),
+        "a despawned entity must not report a NaN pose: {line}"
+    );
+    assert!(
+        line.contains("phase=playing"),
+        "the restarted session should be live again at the cap: {line}"
+    );
+    assert!(
+        line.contains("final=("),
+        "the live player should have a pose at the cap: {line}"
     );
 }
 
