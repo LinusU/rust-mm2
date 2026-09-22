@@ -22,6 +22,7 @@ pub mod props;
 pub mod race;
 pub mod result;
 pub mod session;
+pub mod stuck;
 pub mod surface;
 pub mod telemetry;
 pub mod traffic;
@@ -76,6 +77,7 @@ pub use session::{
     Session, SessionEntity, SessionError, SessionPhase, advance_session_tick,
     despawn_session_entities,
 };
+pub use stuck::{StuckEvent, StuckSpec, StuckVerdict, VehicleStuck};
 pub use surface::{SurfaceMaterial, SurfaceState};
 pub use telemetry::{DamageSignals, VehicleTelemetry, WheelTelemetry};
 pub use traffic::{

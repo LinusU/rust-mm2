@@ -3,6 +3,7 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
+use crate::config::VehicleConfig;
 use crate::sim;
 use crate::surface::{TireConditions, TireSurface};
 use crate::vehicle::{
@@ -570,6 +571,40 @@ type SelfRightQuery<'w, 's> = Query<
     ),
 >;
 
+/// The pose an upright recovery resets to: keep the car's heading,
+/// discard every other rotation, and drop the hull onto whatever its
+/// lowest corner already rests on. On its roof the forward axis can
+/// point steeply up or down; its horizontal part still says which way
+/// the car faces. And the surface is measured, not guessed: the car may
+/// be on a bridge, a kerb or a hillside, and the resting hull is already
+/// touching that surface — so its lowest corner says where it is, no
+/// raycast needed. Shared by [`vehicle_self_right`] and the game-side
+/// `vehstuck` recovery so both land a car the same way.
+pub fn upright_recovery_pose(
+    config: &VehicleConfig,
+    position: Vec3,
+    rotation: Quat,
+) -> (Vec3, f32) {
+    let yaw = {
+        let f = rotation * Vec3::NEG_Z;
+        let flat = Vec3::new(f.x, 0.0, f.z);
+        if flat.length_squared() > 1e-6 {
+            (-flat.x).atan2(-flat.z)
+        } else {
+            0.0
+        }
+    };
+    let surface_y = crate::analysis::hull_points(config)
+        .iter()
+        .map(|p| (position + rotation * Vec3::from(*p)).y)
+        .fold(f32::MAX, f32::min);
+    let ground_y = crate::analysis::HandlingMetrics::of(config).ground_y;
+    (
+        Vec3::new(position.x, surface_y - ground_y + 0.05, position.z),
+        yaw,
+    )
+}
+
 /// Flop an upended car back onto its wheels once it has come to rest.
 ///
 /// Without this a roll is the end of the drive: a car on its roof has no
@@ -597,32 +632,9 @@ pub fn vehicle_self_right(time: Res<Time>, mut vehicles: SelfRightQuery) {
             continue;
         }
 
-        // Keep the heading, discard every other rotation.
-        let yaw = {
-            let f = rot.0 * Vec3::NEG_Z;
-            // On its roof the forward axis can point steeply up or down;
-            // its horizontal part still says which way the car faces.
-            let flat = Vec3::new(f.x, 0.0, f.z);
-            if flat.length_squared() > 1e-6 {
-                (-flat.x).atan2(-flat.z)
-            } else {
-                0.0
-            }
-        };
+        let (landing, yaw) = upright_recovery_pose(&vehicle.config, pos.0, rot.0);
         let level = Quat::from_rotation_y(yaw);
-
-        // Drop it onto whatever is underneath rather than guessing a
-        // height: the car may be on a bridge, a kerb or a hillside. The
-        // resting hull is already touching that surface, so its lowest
-        // corner says where the surface is — no raycast needed, which also
-        // keeps this system's mutable `Position` clear of `SpatialQuery`.
-        let surface_y = crate::analysis::hull_points(&vehicle.config)
-            .iter()
-            .map(|p| (pos.0 + rot.0 * Vec3::from(*p)).y)
-            .fold(f32::MAX, f32::min);
-        let ground_y = crate::analysis::HandlingMetrics::of(&vehicle.config).ground_y;
-
-        pos.0.y = surface_y - ground_y + 0.05;
+        pos.0 = landing;
         rot.0 = level;
         lv.0 = Vec3::ZERO;
         av.0 = Vec3::ZERO;

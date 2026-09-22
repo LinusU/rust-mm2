@@ -116,6 +116,7 @@ fn results_app(
         .init_resource::<ResultsMenu>()
         .init_resource::<mm2_app::contracts::ImpactFilter>()
         .init_resource::<mm2_app::damage::DamageReport>()
+        .init_resource::<mm2_app::stuck::StuckReport>()
         .init_resource::<ButtonInput<KeyCode>>()
         .add_message::<mm2_game::RaceStarted>()
         .add_systems(FixedUpdate, advance_session_tick)

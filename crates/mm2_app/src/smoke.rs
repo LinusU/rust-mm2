@@ -189,10 +189,12 @@ pub fn headless_smoke(
         .add_plugins(VehiclePlugin)
         .add_message::<ImpactEvent>()
         .add_message::<DamageEvent>()
+        .add_message::<mm2_game::StuckEvent>()
         .add_message::<RaceStarted>()
         .add_message::<BangerStateChanged>()
         .init_resource::<contracts::ImpactFilter>()
         .init_resource::<damage::DamageReport>()
+        .init_resource::<crate::stuck::StuckReport>()
         .init_resource::<mm2_game::ResultLedger>()
         .init_resource::<mm2_game::BangerPool>()
         .init_resource::<session::SessionControl>()
@@ -220,7 +222,11 @@ pub fn headless_smoke(
                 // F05-B.1: impact→damage apply + disabled outcome — the
                 // headless record's `dmg=` field reads the report.
                 damage::apply_impact_damage,
+                // F05-B.2: `vehstuck` detection + in-place recovery —
+                // the headless record's `vsk=` field reads the report.
+                crate::stuck::track_stuck,
                 damage::resolve_disabled,
+                crate::stuck::resolve_stuck,
                 crate::banger::activate_bangers,
                 crate::banger::settle_bangers,
                 contracts::publish_vehicle_telemetry,
@@ -559,6 +565,14 @@ pub fn headless_smoke(
             )
         })
         .unwrap_or_default();
+    // F05-B.2 stuck evidence: armed/detected/recovered counts. Same
+    // presence rule as `dmg=` — recorded only once the pipeline saw a
+    // delivery, so impact-free runs stay bit-identical.
+    let vsk_detail = world_ecs
+        .get_resource::<crate::stuck::StuckReport>()
+        .filter(|r| r.armed + r.detections + r.recovered > 0)
+        .map(|r| format!(" vsk={}a/{}d/{}r", r.armed, r.detections, r.recovered))
+        .unwrap_or_default();
     // The dev `--traction` modifier is recorded when set so a wetness
     // run is self-describing; unmodified runs stay bit-identical.
     let traction_detail = config
@@ -575,7 +589,7 @@ pub fn headless_smoke(
         .unwrap_or_default();
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{nav_detail}{traf_detail}{bng_detail}{dmg_detail}{traction_detail}{profile_detail}{extra}",
+            "updates={frames} ticks={ticks} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{nav_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{traction_detail}{profile_detail}{extra}",
             driver.as_str(),
             session.phase().name(),
             moved = pos.map(|p| (p - spawn_pos).length()).unwrap_or(f32::NAN),

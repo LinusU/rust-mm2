@@ -58,6 +58,16 @@ names; the original's test combination is unverified (UNK-13).
 Decoder: `VehStuck::from_tune`; `validate()` enforces non-negative
 time/position/movement bounds while allowing signed angular fields.
 
+MM2Hook's recovered `vehStuck` struct
+(`src/modules/vehicle/stuck.h`, 2026-09-22) supports the detector
+reading structurally: alongside the authored fields it keeps an
+`m_State` machine, an accumulating `m_StuckTime`, an
+`m_LastImpactPos` anchor, squared copies of `m_PosThresh`/
+`m_MoveThresh` (`ComputeConstants` — both bound distance), and an
+`m_InertialCSPtr` pose source. `Update()` is a binary thunk, so the
+exact test combination stays inferred — see the F05-B.2 runtime
+section below for the implemented interpretation.
+
 ## `tune/vehicle/<id>.vehgyro`
 
 One flat `vehGyro` block — 21 retail records (`vpvwcup_angel` ships
@@ -146,11 +156,61 @@ opponent-destruction behavior is unverified); remote participants are
 skipped (F25+ authority). The outcome re-checks the live tier, so two
 disabling impacts in one tick resolve once.
 
+## Runtime stuck detection and recovery (F05-B.2)
+
+`VehicleStuck` is a component spawned on the player and every AI
+opponent whose `vehstuck` decoded — authored absence means no
+component, never a fabricated spec (same policy as `VehicleDamage`).
+`StuckSpec` carries the six authored fields verbatim; `rotation` and
+`translation` decode but are not consumed — the recovered struct
+gives their names, not their tests (UNK-13).
+
+The detector is a designed interpretation of the recovered
+`vehStuck` struct's fields (the `Update()` body is unrecovered):
+
+- an `ImpactEvent` arms it at the pose the car was in — the
+  `m_LastImpactPos` anchor; every new impact re-anchors;
+- inside `pos_thresh` of the anchor the episode accrues toward
+  `time_thresh`; past `move_thresh` the car escaped and the detector
+  disarms — the uniform `move > pos` pair reads as a hysteresis
+  band where accrued time holds;
+- a pose rotated more than `turn` since the anchor is still
+  tumbling — the rotation leg re-anchors the orientation so the
+  settle window only counts a stopped car;
+- reaching `time_thresh` fires `StuckVerdict::Stuck` once and
+  disarms — the `StuckEvent` stream is bounded to one per episode.
+
+`mm2_app::stuck::track_stuck` (FixedLast, authority + `Playing`
+gated, drains stale input) arms off the same deduplicated
+`ImpactEvent` stream damage reads and advances every armed detector
+per tick — `StuckReport` (`vsk=` smoke field) counts armed/
+detections/recovered. `resolve_stuck` answers a detection with the
+bounded in-place recovery: `ResetVehicle` onto
+`upright_recovery_pose` — heading kept, hull dropped onto the
+surface it already rests on — local and AI participants identically
+(designed, UNK-13), trailers re-seated at their authored offsets;
+remote participants are skipped (F25+). `Rotation` 0 and
+`Translation` ≈ 0.1 on every retail record support the in-place
+reading: nothing authors a positional rescue or a yaw change. The
+reset marks the car `Teleported`, so it cannot sweep a checkpoint.
+`resolve_disabled` disarms a wreck's detector — the disabled outcome
+owns the car, and the arm/observe legs both skip `Disabled` vehicles
+(scheduled before the outcome so the skip sees the pre-repair
+tier). The authored `TimeThresh` also drives the pre-existing
+`vehicle_self_right` assist delay — the modern assist and the
+authored detector coexist: the detector only fires post-impact, the
+assist covers impact-free rollovers.
+
+Retail headless (install `fnv1a64:e91e6cd4b2ae30d9`): sf/london
+`--frames 600` scripted cruises each record `vsk=3a/0d/0r` — three
+impacts arm the detector, none persist because the scripted driver
+keeps moving; all pre-existing counters stay bit-identical.
+
 Not yet implemented: visual tiers (smoke pivots, `TextelDamageRadius`
 decals, `DoublePivot`/`MirrorPivot` semantics), breakaway detachment
 (REC-1's authored inventory is inventoried but no part ever
-detaches), impairment short of destruction, `vehstuck`/`vehgyro`
-consumption, water/out-of-bounds recovery, C&R healing (DMG-4's
+detaches), impairment short of destruction, `vehgyro` consumption,
+water/out-of-bounds recovery, C&R healing (DMG-4's
 `RegenerateRate` channel exists, no mode drives it), replication.
 
 ## Open questions
@@ -165,7 +225,10 @@ consumption, water/out-of-bounds recovery, C&R healing (DMG-4's
 - `TextelDamageRadius`'s consumer (decal projection vs vertex
   deformation), `DoublePivot`/`MirrorPivot` semantics, `Color`
   packing, `Height`/`Intensity` roles in the effect spec.
-- `.vehstuck` test combination and `.vehgyro` assist application
-  (torques? angular-velocity targets? per-axis gains?).
+- `.vehstuck`'s exact test combination — the implemented
+  interpretation (impact anchor + hysteresis + tumbling leg + time
+  window) is designed; `Rotation`/`Translation`'s roles are
+  unrecovered. `.vehgyro` assist application (torques?
+  angular-velocity targets? per-axis gains?).
 - Water/out-of-bounds recovery rules — no authored records found yet;
   DMG-2 covers destruction only.

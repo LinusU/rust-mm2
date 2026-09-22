@@ -26,4 +26,5 @@ pub mod results;
 pub mod scripted;
 pub mod session;
 pub mod smoke;
+pub mod stuck;
 pub mod traffic;

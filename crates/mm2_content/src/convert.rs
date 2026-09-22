@@ -23,7 +23,7 @@
 //!   peak of `1.15 × P/ω_opt` at `0.72 × OptRPM` gives the curve its shape.
 
 use mm2_formats::bnd::BndFile;
-use mm2_formats::veh::{AsNode, DrivetrainType, VehCarSim, VehTrailer, VehWheel};
+use mm2_formats::veh::{AsNode, DrivetrainType, VehCarSim, VehStuck, VehTrailer, VehWheel};
 use mm2_vehicle::config::{
     AeroConfig, AssistConfig, BrakeConfig, EngineConfig, SteeringConfig, SuspensionConfig,
     TireConfig, TransmissionConfig, VehicleConfig, WheelConfig,
@@ -77,7 +77,9 @@ const ROLL_RESISTANCE: f32 = 0.85;
 /// How briskly an imported car levels itself in the air, rad/s — roughly
 /// half a second to flat, so a jump lands on its wheels and not its nose.
 const AIR_LEVELLING_RATE: f32 = 8.0;
-/// Seconds an upended car waits before flopping back onto its wheels.
+/// Seconds an upended car waits before flopping back onto its wheels —
+/// the fallback when the vehicle ships no `vehstuck` record; authored
+/// cars right on their own `TimeThresh`.
 const SELF_RIGHT_DELAY: f32 = 2.0;
 /// Ceiling on gear change time. MM2 authors 0.8-1.0 s, which is most of a
 /// second of interrupted drive on every upshift; five of them between rest
@@ -177,6 +179,10 @@ pub struct ConvertInput<'a> {
     pub bound: Option<&'a BndFile>,
     /// Body AABB `(min, max)` from the model, for fallback bounds.
     pub body_aabb: ([f32; 3], [f32; 3]),
+    /// Decoded `vehstuck` record when present — `TimeThresh` feeds the
+    /// self-right delay so an authored car rights on its own bound
+    /// (F05-B.2); the rest of the record is the game-side detector's.
+    pub stuck: Option<&'a VehStuck>,
 }
 
 /// Output of one conversion.
@@ -670,12 +676,25 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
         traction_control: 0.85,
         countersteer: 0.3,
         air_control: AIR_LEVELLING_RATE,
-        self_right_delay: SELF_RIGHT_DELAY,
+        self_right_delay: input
+            .stuck
+            .map(|s| s.time_thresh)
+            .unwrap_or(SELF_RIGHT_DELAY),
     };
     report.defaulted(
         "assists",
         "fixed modern arcade policy (yaw stability, TC, countersteer, air control)",
     );
+    if let Some(s) = input.stuck {
+        report.imported(
+            "vehstuck.TimeThresh",
+            "assists.self_right_delay",
+            format!(
+                "authored {}s persistence bound drives the upended-car recovery",
+                s.time_thresh
+            ),
+        );
+    }
     report.adapted(
         "vehCarSim.CenterOfGravity + track width",
         "assists.roll_resistance",

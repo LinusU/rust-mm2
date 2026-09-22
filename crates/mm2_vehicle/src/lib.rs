@@ -25,6 +25,7 @@ pub use analysis::{HandlingMetrics, WheelMetrics, hull_points};
 pub use config::VehicleConfig;
 pub use debug::VehicleDebugEnabled;
 pub use surface::{TireConditions, TireSurface};
+pub use systems::upright_recovery_pose;
 pub use vehicle::{
     ResetVehicle, StrikeBound, Teleported, Vehicle, VehicleInput, VehicleState, WheelState,
 };

@@ -37,7 +37,7 @@ use bevy::prelude::*;
 use mm2_game::{
     DISABLED_PENALTY_TICKS, DamageEvent, DamageTier, DamageVerdict, DisabledOutcome, ImpactEvent,
     ObjectId, ObjectIdentity, Player, PlayerControl, RaceState, Session, VehicleDamage,
-    disabled_outcome,
+    VehicleStuck, disabled_outcome,
 };
 use mm2_vehicle::ResetVehicle;
 
@@ -200,6 +200,7 @@ pub fn resolve_disabled(
     identities: Query<(Entity, &ObjectIdentity, Option<&Player>)>,
     poses: Query<(&Position, &Rotation)>,
     mut damaged: Query<&mut VehicleDamage>,
+    mut stuck: Query<&mut VehicleStuck>,
     mut resets: MessageWriter<ResetVehicle>,
     mut report: ResMut<DamageReport>,
 ) {
@@ -227,6 +228,19 @@ pub fn resolve_disabled(
         // repaired the state this event describes.
         if damage.condition() != DamageTier::Disabled {
             continue;
+        }
+        // The disabled outcome owns the wreck: its recovery (reset or
+        // restart) supersedes any armed stuck episode, so the detector
+        // disarms here rather than fire a second recovery into the
+        // pose the outcome lands the car in (`VehicleStuck::disarm`'s
+        // reset-path contract). Remote participants' detectors belong
+        // to their own authority.
+        if matches!(
+            control_kind,
+            Some(PlayerControl::Local) | Some(PlayerControl::Ai)
+        ) && let Ok(mut detector) = stuck.get_mut(entity)
+        {
+            detector.disarm();
         }
         match control_kind {
             Some(PlayerControl::Local) => {

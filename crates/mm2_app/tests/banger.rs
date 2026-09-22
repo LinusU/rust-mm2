@@ -1209,6 +1209,7 @@ fn city_app(vfs: Vfs) -> App {
         .add_message::<ImpactEvent>()
         .init_resource::<ImpactFilter>()
         .init_resource::<mm2_app::damage::DamageReport>()
+        .init_resource::<mm2_app::stuck::StuckReport>()
         .init_resource::<SessionControl>()
         .init_resource::<ButtonInput<KeyCode>>()
         .init_resource::<BangerPool>()

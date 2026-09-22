@@ -85,7 +85,7 @@ use mm2_assets::Vfs;
 use mm2_game::{
     DamageSignals, DamageSpec, ObjectIdentity, OpponentRoster, OpponentRoute, OpponentSpec,
     ParticipantState, Player, PlayerControl, RaceDefinition, RaceProgress, RaceState, Session,
-    SessionEntity, VehicleDamage, relative_bearing,
+    SessionEntity, StuckSpec, VehicleDamage, VehicleStuck, relative_bearing,
 };
 use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState, vehicle_bundle};
 use tracing::{info, warn};
@@ -637,6 +637,12 @@ pub fn spawn_opponents(
             commands
                 .entity(vehicle)
                 .insert(VehicleDamage::new(DamageSpec::from(d)));
+        }
+        // Same for the authored stuck thresholds (F05-B.2).
+        if let Some(s) = &def.stuck {
+            commands
+                .entity(vehicle)
+                .insert(VehicleStuck::new(StuckSpec::from(s)));
         }
         let missing = car_visual::spawn_vehicle_model(
             commands, vfs, &def.model, 0, meshes, images, materials, vehicle,

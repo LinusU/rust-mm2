@@ -392,6 +392,7 @@ fn test_app(config: SessionConfig, vfs: Vfs) -> App {
         .init_resource::<ButtonInput<KeyCode>>()
         .init_resource::<ImpactFilter>()
         .init_resource::<mm2_app::damage::DamageReport>()
+        .init_resource::<mm2_app::stuck::StuckReport>()
         .init_resource::<SessionControl>()
         .add_systems(FixedUpdate, advance_session_tick)
         .add_systems(

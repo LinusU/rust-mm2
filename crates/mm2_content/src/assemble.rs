@@ -300,6 +300,7 @@ fn load_vehicle_impl(
         wheels: &wheel_geoms,
         bound: bound.as_ref(),
         body_aabb,
+        stuck: stuck.as_ref(),
     };
     let Converted { config, report } = convert(&input).map_err(LoadError::Convert)?;
 
