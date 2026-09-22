@@ -103,6 +103,33 @@ pub enum DriveDirection {
     Reverse,
 }
 
+/// Latched spin-maneuver state for the authored `vehGyro` assists
+/// (F05-B.4).
+///
+/// Once the handbrake-spin trigger lands, the assist keeps driving the
+/// yaw servo until the car has rotated ~180°, the driver releases the
+/// maneuver inputs, or the bounded age expires. A per-frame gate cannot
+/// express this: halfway through a 180 the car slides sideways, its
+/// *forward* speed collapses to zero, and any speed-gated check would
+/// drop the assist at 90° — stalling the maneuver exactly where it is
+/// supposed to be doing the work. The recovered `mmCarSim` keeps a
+/// `SpinState` machine for the same reason; the original's trigger
+/// tests are unrecovered (UNK-13), so the latch conditions are the
+/// documented designed reading.
+#[derive(Debug, Clone, Copy)]
+pub struct GyroSpin {
+    /// Signed yaw rate the servo drives toward, rad/s (negative yaws the
+    /// nose right — positive steering spins right).
+    pub rate: f32,
+    /// Rotation already delivered in the commanded direction, radians.
+    /// Can regress if something knocks the car back — the maneuver then
+    /// simply has further to go.
+    pub rotated: f32,
+    /// Maneuver age in seconds — bounds the latch so a wedged car is not
+    /// servoed forever.
+    pub age: f32,
+}
+
 /// Mutable simulation state of a vehicle.
 #[derive(Component)]
 pub struct VehicleState {
@@ -130,6 +157,13 @@ pub struct VehicleState {
     /// How long the car has been lying on its side or roof and nearly
     /// still, seconds. Drives the self-righting assist.
     pub upended_for: f32,
+    /// Latched gyro spin maneuver in progress, if any (see [`GyroSpin`]).
+    pub gyro_spin: Option<GyroSpin>,
+    /// Spins the gyro assist has latched (evidence counter — the
+    /// headless record's `gyr=` field).
+    pub gyro_spins: u32,
+    /// Latched spins that ran to ~180° before releasing.
+    pub gyro_completed: u32,
 }
 
 impl VehicleState {
@@ -146,6 +180,9 @@ impl VehicleState {
             forward_speed: 0.0,
             shifting: 0.0,
             upended_for: 0.0,
+            gyro_spin: None,
+            gyro_spins: 0,
+            gyro_completed: 0,
         }
     }
 }

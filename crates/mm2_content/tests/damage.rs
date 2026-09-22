@@ -203,7 +203,7 @@ fn mtx() -> Vec<u8> {
 fn install() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     let d = tmp.path();
-    for id in ["vpt", "vpbroke", "vpnaked"] {
+    for id in ["vpt", "vpbroke", "vpnaked", "vpneg", "vpgyrobad"] {
         write_str(
             d,
             &format!("tune/{id}.info"),
@@ -228,6 +228,18 @@ fn install() -> tempfile::TempDir {
         d,
         "tune/vehicle/vpbroke.vehcardamage",
         "type: a\nvehCarDamage {\n  MaxDamage soon\n}\n",
+    );
+    // vpneg's gyro decodes but authors a nonsensical spin rate;
+    // vpgyrobad's gyro does not decode at all.
+    write_str(
+        d,
+        "tune/vehicle/vpneg.vehgyro",
+        "type: a\nvehGyro {\n  Spin180 -2.0\n  Reverse180 3.0\n  Drift 0.1\n}\n",
+    );
+    write_str(
+        d,
+        "tune/vehicle/vpgyrobad.vehgyro",
+        "type: a\nvehGyro {\n  Spin180 fast\n}\n",
     );
     // The orphan: damage records with no catalog membership at all.
     write_str(d, "tune/vehicle/vporphan.vehcardamage", CARDAMAGE);
@@ -283,11 +295,15 @@ fn the_audit_counts_every_discovered_record() {
     assert_eq!(audit.uncatalogued[0].id, "vporphan");
     assert_eq!(audit.uncatalogued[0].status, AssetCheck::Parsed);
 
-    // Exactly one failure: the malformed vehcardamage. Missing records
-    // and dead fragments are findings, not failures.
+    // Three strict failures: the malformed vehcardamage decode,
+    // vpgyrobad's gyro decode reject, and vpneg's out-of-range Spin180
+    // validation issue. Missing records and dead fragments are
+    // findings, not failures.
     let failures = audit.failures();
-    assert_eq!(failures.len(), 1, "{failures:?}");
-    assert!(failures[0].contains("vpbroke"));
+    assert_eq!(failures.len(), 3, "{failures:?}");
+    assert!(failures.iter().any(|f| f.contains("vpbroke")));
+    assert!(failures.iter().any(|f| f.contains("vpgyrobad")));
+    assert!(failures.iter().any(|f| f.contains("vpneg")));
     assert!(
         audit
             .diagnostics
@@ -315,6 +331,24 @@ fn load_vehicle_attaches_the_records_with_provenance() {
             def.sources
         );
     }
+
+    // F05-B.4: the authored record lands on the chassis config
+    // verbatim — spin rates, drift, and the absent righting axes stay
+    // absent (the record omits Pitch/Roll; nothing is fabricated).
+    let g = def.config.gyro.as_ref().expect("vehgyro converts");
+    assert_eq!(g.spin180, 3.0);
+    assert_eq!(g.reverse180, 3.0);
+    assert_eq!(g.drift, 0.1);
+    assert_eq!(g.pitch, None);
+    assert_eq!(g.roll, None);
+    assert!(
+        def.report
+            .entries
+            .iter()
+            .any(|e| e.source.contains("vehgyro")),
+        "{:?}",
+        def.report.entries
+    );
 }
 
 #[test]
@@ -344,4 +378,39 @@ fn a_malformed_record_warns_instead_of_sinking_the_load() {
     assert!(def.damage.is_none());
     assert!(def.stuck.is_none());
     assert!(def.gyro.is_none());
+    assert!(def.config.gyro.is_none());
+}
+
+#[test]
+fn a_bad_gyro_never_sinks_the_car() {
+    let tmp = install();
+    let vfs = vfs_of(tmp.path());
+
+    // Decodable but nonsensical: the negative spin rate warns and
+    // clamps to 0 — the rest of the record still lands. The decoded
+    // record itself stays verbatim; only the chassis config clamps.
+    let def = load_vehicle(&vfs, "vpneg", 0).unwrap();
+    assert_eq!(def.gyro.as_ref().unwrap().spin180, -2.0);
+    let g = def.config.gyro.as_ref().expect("record still converts");
+    assert_eq!(g.spin180, 0.0, "negative Spin180 clamps to 0");
+    assert_eq!(g.reverse180, 3.0);
+    assert!(
+        def.report
+            .warnings
+            .iter()
+            .any(|w| w.contains("vehgyro.Spin180")),
+        "{:?}",
+        def.report.warnings
+    );
+
+    // Undecodable: the record drops with a warning and `config.gyro`
+    // stays `None` — no fabricated assist.
+    let def = load_vehicle(&vfs, "vpgyrobad", 0).unwrap();
+    assert!(def.gyro.is_none());
+    assert!(def.config.gyro.is_none());
+    assert!(
+        def.report.warnings.iter().any(|w| w.contains("vehgyro")),
+        "{:?}",
+        def.report.warnings
+    );
 }

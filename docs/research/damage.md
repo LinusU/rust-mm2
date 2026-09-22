@@ -80,6 +80,15 @@ decode as `Option<f32>` — absent stays `None` (never an invented
 zero), while a present-but-non-numeric value is a decode error, the
 same rule `MirrorPivot`'s optional integer follows.
 
+MM2Hook's recovered `vehGyro` struct
+(`src/modules/vehicle/gyro.h`, 2026-09-22) carries the same five
+fields plus three asNode feature gates — `Spinable` (0x10000),
+`Driftable` (0x20000) and `Rightable` (0x40000) — which read as
+{Spin180, Reverse180} / {Drift} / {Pitch, Roll} groupings. `Update()`
+is a binary thunk, so the application semantics stay unrecovered
+(UNK-13) — see the F05-B.4 runtime section for the implemented
+designed reading.
+
 ## Breakaway parts (authored inventory)
 
 `geometry/<id>.pkg` `BREAK<NN>` chunks are the intact representation
@@ -269,10 +278,58 @@ scripted driver's contact approach speeds never reach the authored
 ~70 mph detach speed, which is the behaviour the authored
 thresholds encode.
 
+## Runtime gyro maneuvers (F05-B.4)
+
+`VehicleConfig.gyro` carries the decoded record verbatim
+(`Option<GyroConfig>`; `None` on authored absence — never a
+fabricated assist). `mm2_content::convert` clamps a malformed
+negative/non-finite rate to 0 with a warning rather than sinking the
+load, mirroring `VehGyro::validate`'s nonnegative rule; `Pitch`/`Roll`
+keep the authored sign the decoder allows and are inert when
+non-positive.
+
+The application is a **designed** reading (UNK-13 stays open — the
+recovered `Update()` is a thunk), shaped by the recovered feature
+gates and the Crash Course's own lessons:
+
+- *Spinable*: handbrake + steering while travelling latches a spin
+  maneuver — `Spin180` going forward, `Reverse180` (the J-turn)
+  backwards. The latch is `VehicleState::gyro_spin`: a per-frame gate
+  cannot express a 180 because the car's forward speed collapses to
+  zero halfway through (the recovered `mmCarSim` keeps a `SpinState`
+  machine for the same reason). While latched the gyro writes the
+  authored yaw rate directly — it is the maneuver's yaw authority,
+  not a torque fighting the tires, which correctly resist rotation
+  once the car has scrubbed its speed. The handbrake hold doses the
+  rotation ("a short tap ~90°, a held one ~180°" — the community
+  reading of the lesson): releasing either input drops the latch
+  partway, ~π completes it (`gyro_completed`), an opposite flick
+  re-arms, and a bounded age means a wedged car is never servoed
+  forever. `gyro_spins`/`gyro_completed` feed the `gyr=` smoke field
+  only once activity exists.
+- *Driftable*: `Drift` relieves the slip term of the yaw-stability
+  damper (`sim::yaw_damp_factor`) — a car the record says drifts
+  holds a controlled slide instead of being straightened by the
+  damper. `drift = 0` is the unmodified policy exactly, so
+  gyro-absent and zero-drift cars drive identically to before.
+- *Rightable*: `Pitch`/`Roll` are per-axis airborne righting rates —
+  a critically damped return on the axis each authors, shaped on the
+  `air_control` assist. Every retail record authors 0.0 (or omits
+  the fields), so the channel is inert on stock content; stock cars
+  keep being levelled by the designed `air_control`/`self_right`
+  assists, which remain untouched.
+
+The scripted smoke driver never pulls the handbrake, so no maneuver
+latches and no `gyr=` field appears on the stock cruise. The `Drift`
+relief is live though: A/B-ing the channel on the retail SF cruise
+(`--headless --bot --frames 600`, vpbug authors `Drift 0.2`) moves the
+endpoint ~1 m with every smoke counter identical — the authored record
+subtly changing slide dynamics is the feature, not drift.
+
 Not yet implemented: visual tiers (smoke pivots, `TextelDamageRadius`
 decals, `DoublePivot`/`MirrorPivot` semantics), damage-driven
 detachment if the original ever uses it (UNK-13), impairment short of
-destruction, `vehgyro` consumption, water/out-of-bounds recovery,
+destruction, water/out-of-bounds recovery,
 C&R healing (DMG-4's `RegenerateRate` channel exists, no mode drives
 it), replication.
 
@@ -296,7 +353,10 @@ it), replication.
 - `.vehstuck`'s exact test combination — the implemented
   interpretation (impact anchor + hysteresis + tumbling leg + time
   window) is designed; `Rotation`/`Translation`'s roles are
-  unrecovered. `.vehgyro` assist application (torques?
-  angular-velocity targets? per-axis gains?).
+  unrecovered. `.vehgyro`'s application semantics — the implemented
+  reading (latched rate-actuator spins, drift damper relief,
+  per-axis airborne righting) is designed (DSN-22); the original's
+  trigger conditions, application mechanism and whether `Drift`
+  relieves damping or feeds friction multipliers stay unrecovered.
 - Water/out-of-bounds recovery rules — no authored records found yet;
   DMG-2 covers destruction only.

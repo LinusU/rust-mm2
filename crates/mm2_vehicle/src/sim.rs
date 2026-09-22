@@ -236,6 +236,21 @@ pub fn drag_force(speed_sq: f32, forward_speed_sign: f32, drag_coefficient: f32)
     -forward_speed_sign * drag_coefficient * speed_sq
 }
 
+/// Yaw-stability damping factor (0, 1]: how strongly the yaw damper is
+/// allowed to pull the car back to its velocity heading this step.
+///
+/// `body_slip` (rad) and `handbrake` (0..1) both loosen it — a sliding
+/// or handbraking car is allowed to rotate. `drift` (the authored
+/// `vehGyro` value, clamped 0..1) relieves the *slip* term: the
+/// Driftable gate lets a car the record says drifts hold its slide
+/// instead of being straightened out — `drift = 1` never straightens a
+/// slide at all, `drift = 0` is the unmodified policy exactly.
+pub fn yaw_damp_factor(body_slip: f32, handbrake: f32, drift: f32) -> f32 {
+    1.0 / (1.0
+        + body_slip.abs() * 8.0 * (1.0 - drift.clamp(0.0, 1.0))
+        + handbrake.clamp(0.0, 1.0) * 4.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,5 +463,28 @@ mod tests {
         assert!(slip_angle(10.0, 2.0) > 0.0); // sliding right → positive
         assert!(slip_angle(10.0, -2.0) < 0.0);
         assert!(slip_angle(0.0, 0.0).is_finite());
+    }
+
+    #[test]
+    fn yaw_damp_loosens_with_slip_handbrake_and_drift() {
+        // No slip, no handbrake: full damping regardless of drift.
+        assert_eq!(yaw_damp_factor(0.0, 0.0, 0.9), 1.0);
+        // drift = 0 is the unmodified policy.
+        assert_eq!(yaw_damp_factor(0.0, 1.0, 0.0), 0.2);
+        assert_eq!(yaw_damp_factor(0.5, 0.0, 0.0), 0.2);
+        // Drift relieves only the slip term, monotone toward free; the
+        // handbrake term is untouched.
+        let none = yaw_damp_factor(0.5, 0.0, 0.0);
+        let half = yaw_damp_factor(0.5, 0.0, 0.5);
+        let full = yaw_damp_factor(0.5, 0.0, 1.0);
+        assert!(none < half && half < full);
+        assert_eq!(full, 1.0);
+        assert_eq!(
+            yaw_damp_factor(0.0, 1.0, 0.0),
+            yaw_damp_factor(0.0, 1.0, 1.0)
+        );
+        // Out-of-range authored values clamp rather than overshoot.
+        assert_eq!(yaw_damp_factor(0.5, 0.0, 2.0), full);
+        assert_eq!(yaw_damp_factor(0.5, 0.0, -1.0), none);
     }
 }

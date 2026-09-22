@@ -585,6 +585,14 @@ pub fn headless_smoke(
         .filter(|r| r.detached + r.restored > 0)
         .map(|r| format!(" brk={}d/{}r", r.detached, r.restored))
         .unwrap_or_default();
+    // F05-B.4 gyro evidence: latched spin activations/completions on
+    // the local car. Same presence rule — a run whose driver never
+    // pulled a gyro maneuver stays bit-identical.
+    let gyr_detail = world_ecs
+        .get::<VehicleState>(car)
+        .filter(|s| s.gyro_spins + s.gyro_completed > 0)
+        .map(|s| format!(" gyr={}/{}", s.gyro_spins, s.gyro_completed))
+        .unwrap_or_default();
     // The dev `--traction` modifier is recorded when set so a wetness
     // run is self-describing; unmodified runs stay bit-identical.
     let traction_detail = config
@@ -601,7 +609,7 @@ pub fn headless_smoke(
         .unwrap_or_default();
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{nav_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{traction_detail}{profile_detail}{extra}",
+            "updates={frames} ticks={ticks} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{nav_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{traction_detail}{profile_detail}{extra}",
             driver.as_str(),
             session.phase().name(),
             moved = pos.map(|p| (p - spawn_pos).length()).unwrap_or(f32::NAN),

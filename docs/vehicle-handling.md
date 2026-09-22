@@ -161,6 +161,23 @@ so that figure means the same thing on a Mini and on a fire truck, and its
 torque axis is horizontal by construction, so a deliberate spin is left
 alone.
 
+### Authored gyro maneuvers
+
+Unlike the assists above, `.vehgyro` is authored data — every retail
+vehicle carries `Drift`, `Spin180` and `Reverse180` rates (and on 17 of
+21 records, `Pitch`/`Roll`, all authored 0.0). `VehicleConfig.gyro`
+carries the record verbatim; `None` means no record and no assist.
+
+The consumption is a designed reading — the original's `Update()` is
+unrecovered (UNK-13; see `docs/research/damage.md` and DSN-22).
+Handbrake plus steering while travelling latches a spin that *writes*
+the authored yaw rate for as long as the inputs are held — a tap spins
+partway, a held one completes ~180°, `Reverse180` runs the same
+maneuver backwards as the J-turn. `Drift` relieves the yaw damper's
+slip term so a drift-authored car holds its slide; `drift = 0` is the
+unmodified policy. `Pitch`/`Roll` would right the car per-axis in the
+air like `air_control`, but every retail record authors them at 0.0.
+
 ### Suspension damping
 
 Damping is set as a fraction of critical, and critical damping depends on

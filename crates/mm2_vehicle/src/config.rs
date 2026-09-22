@@ -264,6 +264,38 @@ pub struct AssistConfig {
     pub self_right_delay: f32,
 }
 
+/// Authored `vehGyro` stability-assist rates, carried verbatim from the
+/// tuning record (F05-B.4).
+///
+/// The recovered original (`vehGyro` in MM2Hook) keeps three gated
+/// features behind these fields — the asNode flags `Spinable`,
+/// `Driftable` and `Rightable` — mapping `{Spin180, Reverse180}`,
+/// `{Drift}` and `{Pitch, Roll}` to the three maneuver families. Its
+/// `Update()` is unrecovered, so how the sim applies the rates is a
+/// documented designed reading (UNK-13): the rates are yaw-speed
+/// ceilings a servo drives the car toward while the maneuver input
+/// holds — a short handbrake tap doses a partial spin, a held one the
+/// full 180°.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct GyroConfig {
+    /// `Spin180` — yaw-rate ceiling (rad/s) for the handbrake 180° spin
+    /// while travelling forward. `0` = the car authors no spin assist.
+    pub spin180: f32,
+    /// `Reverse180` — yaw-rate ceiling (rad/s) for the reverse 180°
+    /// (J-turn) while travelling backwards.
+    pub reverse180: f32,
+    /// `Drift` — 0..1 share of the handbrake yaw-damping relief: a car
+    /// the record says drifts keeps more of its slide.
+    pub drift: f32,
+    /// `Pitch` — authored airborne pitch-righting rate (rad/s natural
+    /// frequency). Absent on four retail records (`None`), authored
+    /// `0.0` on the rest — stock cars get no righting this way.
+    pub pitch: Option<f32>,
+    /// `Roll` — authored airborne roll-righting rate; same presence and
+    /// values as [`Self::pitch`].
+    pub roll: Option<f32>,
+}
+
 /// The complete vehicle definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VehicleConfig {
@@ -320,6 +352,11 @@ pub struct VehicleConfig {
     pub aero: AeroConfig,
     /// Assists.
     pub assists: AssistConfig,
+    /// Authored `vehGyro` assist rates — `None` when the vehicle ships
+    /// no record (nothing is fabricated; the spin/drift/righting
+    /// channels all stay off).
+    #[serde(default)]
+    pub gyro: Option<GyroConfig>,
     /// Whether this body is a towed trailer (no drivetrain expected).
     #[serde(default)]
     pub trailer: bool,
@@ -424,6 +461,7 @@ impl Default for VehicleConfig {
                 air_control: 8.0,
                 self_right_delay: default_self_right_delay(),
             },
+            gyro: None,
             trailer: false,
         }
     }
@@ -795,6 +833,24 @@ impl VehicleConfig {
             "assists.self_right_delay",
             finite(asst.self_right_delay) && asst.self_right_delay >= 0.0,
         );
+
+        if let Some(g) = &self.gyro {
+            check!("gyro.spin180", finite(g.spin180) && g.spin180 >= 0.0);
+            check!(
+                "gyro.reverse180",
+                finite(g.reverse180) && g.reverse180 >= 0.0,
+            );
+            check!("gyro.drift", finite(g.drift) && g.drift >= 0.0);
+            // Pitch/roll keep the authored sign (the decoder allows it —
+            // direction may be meaningful); negative rates are inert at
+            // application rather than anti-damping.
+            if let Some(p) = g.pitch {
+                check!("gyro.pitch", finite(p));
+            }
+            if let Some(r) = g.roll {
+                check!("gyro.roll", finite(r));
+            }
+        }
 
         if problems.is_empty() {
             Ok(())

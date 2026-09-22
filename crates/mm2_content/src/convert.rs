@@ -23,10 +23,12 @@
 //!   peak of `1.15 × P/ω_opt` at `0.72 × OptRPM` gives the curve its shape.
 
 use mm2_formats::bnd::BndFile;
-use mm2_formats::veh::{AsNode, DrivetrainType, VehCarSim, VehStuck, VehTrailer, VehWheel};
+use mm2_formats::veh::{
+    AsNode, DrivetrainType, VehCarSim, VehGyro, VehStuck, VehTrailer, VehWheel,
+};
 use mm2_vehicle::config::{
-    AeroConfig, AssistConfig, BrakeConfig, EngineConfig, SteeringConfig, SuspensionConfig,
-    TireConfig, TransmissionConfig, VehicleConfig, WheelConfig,
+    AeroConfig, AssistConfig, BrakeConfig, EngineConfig, GyroConfig, SteeringConfig,
+    SuspensionConfig, TireConfig, TransmissionConfig, VehicleConfig, WheelConfig,
 };
 
 const MPH_TO_MPS: f32 = 0.44704;
@@ -183,6 +185,10 @@ pub struct ConvertInput<'a> {
     /// self-right delay so an authored car rights on its own bound
     /// (F05-B.2); the rest of the record is the game-side detector's.
     pub stuck: Option<&'a VehStuck>,
+    /// Decoded `vehgyro` record when present — the authored
+    /// spin/drift/righting rates carry verbatim onto `config.gyro`
+    /// (F05-B.4); absent keeps `None`, never a fabricated assist.
+    pub gyro: Option<&'a VehGyro>,
 }
 
 /// Output of one conversion.
@@ -711,6 +717,41 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
         "cam/wobble and slip-displacement internals have no direct analog",
     );
 
+    // F05-B.4: the authored `vehgyro` record verbatim — spin rates,
+    // drift relief, optional airborne righting.  `VehGyro::validate`
+    // calls a negative Drift/Spin180/Reverse180 malformed; none exists
+    // on the retail roster but a mod could author one — warn and clamp
+    // rather than sink the whole car.  Pitch/Roll keep the authored
+    // sign the decoder allows (negative rates are inert at use).
+    let gyro = input.gyro.map(|g| {
+        let mut bad: Vec<String> = Vec::new();
+        let cfg = GyroConfig {
+            spin180: gyro_rate("Spin180", g.spin180, &mut bad),
+            reverse180: gyro_rate("Reverse180", g.reverse180, &mut bad),
+            drift: gyro_rate("Drift", g.drift, &mut bad),
+            pitch: gyro_axis("Pitch", g.pitch, &mut bad),
+            roll: gyro_axis("Roll", g.roll, &mut bad),
+        };
+        report.warnings.extend(bad);
+        cfg
+    });
+    if let Some(g) = &gyro {
+        report.imported(
+            "vehgyro.Spin180/Reverse180/Drift (+Pitch/Roll)",
+            "gyro",
+            format!(
+                "authored gyro rates — spin {:.2}/{:.2} rad/s, drift {:.2}, righting {}",
+                g.spin180,
+                g.reverse180,
+                g.drift,
+                match (g.pitch, g.roll) {
+                    (Some(p), Some(r)) => format!("pitch {p:.2}, roll {r:.2}"),
+                    _ => "absent".into(),
+                },
+            ),
+        );
+    }
+
     let config = VehicleConfig {
         name: input.display_name.to_string(),
         mass,
@@ -752,10 +793,35 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
         },
         aero,
         assists,
+        gyro,
         trailer: false,
     };
 
     Ok(Converted { config, report })
+}
+
+/// A `vehgyro` scalar that must be nonnegative: malformed values warn
+/// and clamp to 0 rather than sink the car (F05-B.4).
+fn gyro_rate(name: &str, v: f32, bad: &mut Vec<String>) -> f32 {
+    if v.is_finite() && v >= 0.0 {
+        v
+    } else {
+        bad.push(format!("vehgyro.{name} {v} out of range — clamped to 0"));
+        0.0
+    }
+}
+
+/// An optional `vehgyro` axis rate: the authored sign is kept (the
+/// decoder allows it) but a non-finite value warns and drops.
+fn gyro_axis(name: &str, v: Option<f32>, bad: &mut Vec<String>) -> Option<f32> {
+    match v {
+        Some(v) if v.is_finite() => Some(v),
+        Some(v) => {
+            bad.push(format!("vehgyro.{name} {v} non-finite — dropped"));
+            None
+        }
+        None => None,
+    }
 }
 
 /// Convert trailer tuning into a `VehicleConfig` driving the trailer body.

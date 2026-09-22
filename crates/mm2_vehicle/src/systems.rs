@@ -7,7 +7,8 @@ use crate::config::VehicleConfig;
 use crate::sim;
 use crate::surface::{TireConditions, TireSurface};
 use crate::vehicle::{
-    DriveDirection, ResetVehicle, Teleported, Vehicle, VehicleInput, VehicleState, WheelState,
+    DriveDirection, GyroSpin, ResetVehicle, Teleported, Vehicle, VehicleInput, VehicleState,
+    WheelState,
 };
 
 /// What the steered axle can do with steering lock: how much grip it makes
@@ -519,9 +520,12 @@ pub fn vehicle_simulation(
         );
 
         // Yaw stability: damp yaw rate when the car is gripping (less while
-        // sliding or handbraking, so drifts stay possible).
+        // sliding or handbraking, so drifts stay possible). The authored
+        // `vehGyro` `Drift` relieves the slip term further (the Driftable
+        // gate): a car the record says drifts holds its slide.
         let inertia_y = cfg.mass * cfg.wheelbase * cfg.wheelbase / 12.0;
-        let drift_factor = 1.0 / (1.0 + body_slip.abs() * 8.0 + input.handbrake * 4.0);
+        let gyro_drift = cfg.gyro.map(|g| g.drift).unwrap_or(0.0);
+        let drift_factor = sim::yaw_damp_factor(body_slip, input.handbrake, gyro_drift);
         let yaw_torque = -angvel.y * cfg.assists.yaw_stability * inertia_y * drift_factor;
         forces.apply_torque(Vec3::Y * yaw_torque);
 
@@ -547,8 +551,116 @@ pub fn vehicle_simulation(
             let level_rate = angvel - Vec3::Y * angvel.y;
             forces.apply_torque(leveling_inertia(cfg) * (tilt * w * w - level_rate * 2.0 * w));
         }
+
+        // --- authored vehGyro maneuvers (F05-B.4) ----------------------
+        if let Some(gyro) = &cfg.gyro {
+            // Spinable: handbrake + steering while travelling latches a
+            // spin — `Spin180` going forward, `Reverse180` backwards.
+            // The original's trigger tests are unrecovered (UNK-13);
+            // this is the designed reading the Crash Course's 180-turn
+            // lessons describe, with the handbrake hold dosing the
+            // rotation ("a short tap ~90°, a held one ~180°").
+            let spin_request = if grounded_any
+                && input.handbrake > GYRO_SPIN_HANDBRAKE
+                && input.steering.abs() > GYRO_SPIN_STEER
+            {
+                // Positive steering spins right — a negative yaw rate.
+                if fwd_speed > GYRO_SPIN_MIN_SPEED {
+                    Some(-input.steering.signum() * gyro.spin180)
+                } else if fwd_speed < -GYRO_SPIN_MIN_SPEED {
+                    Some(-input.steering.signum() * gyro.reverse180)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            // The gyroscope is the yaw authority for the maneuver's
+            // duration, not a torque source: it sets the body's yaw
+            // rate to the authored value outright each step. A torque
+            // (or a partial blend) has to wrestle the tires' kinetic
+            // friction — which, correctly, resists rotation once the
+            // car has scrubbed its speed, stalling the maneuver at
+            // ~140° exactly where it is meant to work. The record is
+            // the car's authored spin capability; the assist delivers
+            // it. The solver can still knock the rate back within a
+            // step (contacts, tire forces) — the write re-asserts it
+            // next step.
+            match state.gyro_spin.as_mut() {
+                Some(spin) => {
+                    spin.age += dt;
+                    spin.rotated += angvel.y * spin.rate.signum() * dt;
+                    // A finite bound: a wedged car is not servoed
+                    // forever even if it somehow never rotates.
+                    let nominal = std::f32::consts::PI / spin.rate.abs().max(0.05);
+                    let max_age = nominal * 2.5 + 1.0;
+                    let released = !grounded_any
+                        || input.handbrake <= GYRO_SPIN_HANDBRAKE
+                        || input.steering.abs() <= GYRO_SPIN_RELEASE;
+                    // Flicking the wheel the other way re-arms the
+                    // maneuver in the new direction next step.
+                    let reversed =
+                        spin_request.is_some_and(|r| r != 0.0 && r.signum() != spin.rate.signum());
+                    if spin.rotated >= std::f32::consts::PI {
+                        state.gyro_completed += 1;
+                        state.gyro_spin = None;
+                    } else if released || reversed || spin.age >= max_age {
+                        state.gyro_spin = None;
+                    } else {
+                        forces.angular_velocity_mut().y = spin.rate;
+                    }
+                }
+                None => {
+                    if let Some(rate) = spin_request
+                        && rate.abs() > 1e-3
+                    {
+                        state.gyro_spins += 1;
+                        state.gyro_spin = Some(GyroSpin {
+                            rate,
+                            rotated: 0.0,
+                            age: 0.0,
+                        });
+                        forces.angular_velocity_mut().y = rate;
+                    }
+                }
+            }
+
+            // Rightable: authored per-axis righting while airborne. Every
+            // retail record authors `0.0` for both fields — stock cars
+            // get no righting this way (the designed `air_control` and
+            // `self_right` assists are what level them), so the channel
+            // is inert on stock content. A mod authoring nonzero rates
+            // gets a critically damped return on the axis it asked for:
+            // body-X corrects pitch, body-Z corrects roll, scaled by the
+            // car's own inertia like `air_control`.
+            if !grounded_any {
+                let pitch = gyro.pitch.unwrap_or(0.0).max(0.0);
+                let roll = gyro.roll.unwrap_or(0.0).max(0.0);
+                if pitch > 0.0 || roll > 0.0 {
+                    let i = leveling_inertia(cfg);
+                    let tilt_body = rot.inverse() * up.cross(Vec3::Y);
+                    let rate_body = rot.inverse() * (angvel - Vec3::Y * angvel.y);
+                    let torque_body = Vec3::new(
+                        i * (tilt_body.x * pitch * pitch - rate_body.x * 2.0 * pitch),
+                        0.0,
+                        i * (tilt_body.z * roll * roll - rate_body.z * 2.0 * roll),
+                    );
+                    forces.apply_torque(rot * torque_body);
+                }
+            }
+        }
     }
 }
+
+/// Speed (m/s) below which handbrake + steering is a parking maneuver,
+/// not a gyro spin trigger.
+const GYRO_SPIN_MIN_SPEED: f32 = 3.0;
+/// Handbrake level (0..1) counting as the spin modifier held.
+const GYRO_SPIN_HANDBRAKE: f32 = 0.5;
+/// Steering level (0..1) counting as commanding the spin.
+const GYRO_SPIN_STEER: f32 = 0.5;
+/// Steering level below which the driver has let go of the maneuver.
+const GYRO_SPIN_RELEASE: f32 = 0.2;
 
 /// Cosine of the tilt past which a car counts as upended: an up axis
 /// leaning more than ~70 degrees off vertical is on its side or roof, not

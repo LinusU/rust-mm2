@@ -359,6 +359,7 @@ fn load_vehicle_impl(
         bound: bound.as_ref(),
         body_aabb,
         stuck: stuck.as_ref(),
+        gyro: gyro.as_ref(),
     };
     let Converted { config, report } = convert(&input).map_err(LoadError::Convert)?;
 
