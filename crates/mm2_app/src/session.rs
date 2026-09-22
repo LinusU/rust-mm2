@@ -33,9 +33,10 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_content::VehicleDef;
 use mm2_game::{
-    BangerPool, DEFAULT_ACTIVE_POOL, DamageSignals, DamageSpec, Mm2Vfs, ObjectIdentity, Player,
-    PlayerControl, PlayerVehicle, RaceDefinition, RaceProgress, RaceState, Session, SessionEntity,
-    SessionMode, SessionPhase, StuckSpec, TargetSelection, VehicleDamage, VehicleStuck, WorldMode,
+    BangerPool, BreakPartSpec, DEFAULT_ACTIVE_POOL, DamageSignals, DamageSpec, Mm2Vfs,
+    ObjectIdentity, Player, PlayerControl, PlayerVehicle, RaceDefinition, RaceProgress, RaceState,
+    Session, SessionEntity, SessionMode, SessionPhase, StuckSpec, TargetSelection, VehicleBreaks,
+    VehicleDamage, VehicleStuck, WorldMode,
 };
 use mm2_vehicle::{TireConditions, VehicleConfig, vehicle_bundle};
 use tracing::{error, info, warn};
@@ -193,6 +194,7 @@ pub fn drive_session(
     mut filter: ResMut<ImpactFilter>,
     mut damage_report: ResMut<crate::damage::DamageReport>,
     mut stuck_report: ResMut<crate::stuck::StuckReport>,
+    mut break_report: ResMut<crate::breakaway::BreakReport>,
     mut spawn: ResMut<SpawnPoint>,
     menu: Option<Res<crate::menu::MenuShell>>,
     roots: Query<Entity, (With<SessionEntity>, Without<ChildOf>)>,
@@ -209,6 +211,7 @@ pub fn drive_session(
             filter.reset();
             damage_report.reset();
             stuck_report.reset();
+            break_report.reset();
             spawn.trailers.clear();
             // Session-scoped resources die with the session: a race's
             // countdown/clock/progress, its reward/report view and the
@@ -672,6 +675,20 @@ pub fn load_session_world(
                 commands
                     .entity(vehicle)
                     .insert(VehicleStuck::new(StuckSpec::from(s)));
+            }
+            // Authored breakaway inventory (F05-B.3): only
+            // `dgbangerdata`-backed BREAK chunks make a rig, so a car
+            // without authored fragments detaches nothing.
+            if !def.breaks.is_empty() {
+                commands.entity(vehicle).insert(VehicleBreaks::new(
+                    def.breaks
+                        .iter()
+                        .map(|b| BreakPartSpec {
+                            name: b.name.clone(),
+                            def: b.def.clone(),
+                        })
+                        .collect(),
+                ));
             }
             let missing = car_visual::spawn_vehicle_model(
                 &mut commands,

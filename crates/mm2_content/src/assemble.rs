@@ -4,11 +4,13 @@
 //! inspector and headless validation.
 
 use mm2_assets::Vfs;
+use mm2_formats::banger::BangerData;
 use mm2_formats::bnd::BndFile;
 use mm2_formats::mtx::Mtx;
 use mm2_formats::pkg::Pkg;
 use mm2_formats::tune::TuneFile;
 use mm2_formats::veh::{AsNode, VehCarDamage, VehCarSim, VehGyro, VehStuck, VehTrailer};
+use mm2_game::BangerDefinition;
 use mm2_vehicle::config::VehicleConfig;
 
 use crate::catalog::VehicleCatalog;
@@ -45,10 +47,30 @@ pub struct VehicleDef {
     /// `tune/vehicle/<id>.vehgyro` — authored rollover-recovery gyro
     /// assist. `None` when absent/undecodable (same policy as `damage`).
     pub gyro: Option<VehGyro>,
+    /// Authored breakaway parts (F05-B.3): every `BREAK<NN>` model part
+    /// whose fragment record `tune/banger/<id>_<stem>.dgbangerdata`
+    /// resolves and decodes. A part missing either side — chunk or
+    /// record — never enters the list: it stays bolted on rather than
+    /// borrowing a fabricated threshold (same absence policy as
+    /// `damage`/`stuck`/`gyro`; the census's dead fragments and
+    /// record-less chunks are documented authored gaps, REC-1).
+    pub breaks: Vec<BreakPart>,
     /// Conversion audit trail.
     pub report: ConversionReport,
     /// Resolved logical paths used for each dependency.
     pub sources: Vec<String>,
+}
+
+/// One detach-capable breakaway part: a `BREAK<NN>` model part paired
+/// with its own distilled fragment record (F05-B.3).
+#[derive(Debug, Clone)]
+pub struct BreakPart {
+    /// Model part stem, lowercase (`break0`, `break01`, ...) — the
+    /// `VehicleModel.parts` entry carrying the intact geometry.
+    pub name: String,
+    /// `tune/banger/<id>_<name>.dgbangerdata` distilled — the part's
+    /// authored detach threshold and fragment physicals.
+    pub def: BangerDefinition,
 }
 
 /// Trailer assembly: physics config + model + joint anchors.
@@ -272,6 +294,42 @@ fn load_vehicle_impl(
         }
     }
 
+    // Breakaway inventory (F05-B.3): a `BREAK<NN>` model part detaches
+    // only when its own `tune/banger/<id>_<stem>.dgbangerdata` record
+    // resolves and decodes — the record carries the authored
+    // `ImpulseLimit2` the runtime compares against. Chunks without
+    // records and records without chunks stay attached/absent (the
+    // census's documented authored gaps, REC-1); a resolved record
+    // that fails to parse is a load warning, not a sink.
+    let mut breaks = Vec::new();
+    for part in &model.parts {
+        if part.role != crate::model::PartRole::Break {
+            continue;
+        }
+        let logical = format!("tune/banger/{id}_{}.dgbangerdata", part.name);
+        let Some((bytes, src)) = read_opt(vfs, &logical) else {
+            continue;
+        };
+        sources.push(src);
+        match std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|t| BangerData::parse(t).ok())
+        {
+            Some(data) => {
+                for issue in data.validate() {
+                    damage_warnings.push(format!("{logical}: {issue}"));
+                }
+                breaks.push(BreakPart {
+                    name: part.name.clone(),
+                    def: BangerDefinition::from_record(format!("{id}_{}", part.name), &data),
+                });
+            }
+            None => {
+                damage_warnings.push(format!("{logical}: failed to parse"));
+            }
+        }
+    }
+
     // Bounds — optional but expected for stock.
     let bound = read_opt(vfs, &format!("bound/{id}_bound.bnd")).and_then(|(bytes, src)| {
         sources.push(src);
@@ -356,6 +414,7 @@ fn load_vehicle_impl(
         damage,
         stuck,
         gyro,
+        breaks,
         report,
         sources,
     })

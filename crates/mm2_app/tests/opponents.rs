@@ -289,6 +289,7 @@ fn event_app(config: SessionConfig, vfs: Vfs) -> App {
         .init_resource::<contracts::ImpactFilter>()
         .init_resource::<mm2_app::damage::DamageReport>()
         .init_resource::<mm2_app::stuck::StuckReport>()
+        .init_resource::<mm2_app::breakaway::BreakReport>()
         .init_resource::<ResultLedger>()
         .init_resource::<SessionControl>()
         .init_resource::<ButtonInput<KeyCode>>()

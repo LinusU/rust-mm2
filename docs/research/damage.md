@@ -100,6 +100,17 @@ authored fragments (vpeagle `break0/1` — no pkg at all;
 vpvw_cup/vpvwcup `break01/02`; vpvwcup_angel all four) — findings,
 not failures.
 
+`ImpulseLimit2` on the vehicle fragment records is measured
+**`Mass × constant`** (2026-09-22, `mm2-inspect banger`): every
+part on every catalog vehicle reads ≈31.25 m/s of approach speed
+(`limit / mass` — 166/5.3 on vpcoop's corners, 4606/147.4 on
+vpsemi's rear) except a "never detach" class at ≈2500 m/s
+(vpftruck all six parts, vp4x4 `break0`, vpvw_cup `break2/23`,
+vpvwcup_angel `break2/23`). Prop fragment records show the same
+structure with more constants (≈500, ≈800, ≈2500 — see the banger
+census). The field reads as `mass × detach_speed`, not a free-form
+impulse; what the original compares it against stays UNK-22.
+
 ## Shared contract (`mm2_game::damage`)
 
 `DamageSpec` distils the authored bounds (`impact_threshold`,
@@ -206,12 +217,64 @@ Retail headless (install `fnv1a64:e91e6cd4b2ae30d9`): sf/london
 impacts arm the detector, none persist because the scripted driver
 keeps moving; all pre-existing counters stay bit-identical.
 
+## Runtime breakaway detachment (F05-B.3)
+
+`VehicleBreaks` is a component spawned on the player and every AI
+opponent whose `VehicleDef.breaks` is non-empty — authored absence
+means no component, never a fabricated rig (same policy as
+`VehicleDamage`/`VehicleStuck`). `mm2_content::assemble` builds the
+rig only from parts carrying *both* sides of the authored inventory:
+a `PartRole::Break` model part *and* a decodable
+`tune/banger/<id>_<part>.dgbangerdata` record — an unmatched chunk
+stays bolted on, an unmatched record stays dead data (the 10 retail
+dead fragments never spawn anything), a malformed record lands in
+the conversion warnings.
+
+`mm2_app::breakaway::detach_breaks` (FixedLast, authority +
+`Playing` gated, drains stale input) reads the same deduplicated
+`ImpactEvent` stream: each attached part whose `severity ×
+part_mass` exceeds its authored `ImpulseLimit2` detaches — the
+`limit / mass` reading the authored data is shaped for (DSN-21;
+~31.25 m/s panels, ~2500 m/s never-detach anchors on retail). The
+part's `BreakPartVisual` node hides and a fragment body spawns at
+the detached mesh's pose (`car_pose × node_local`, read off the
+physics pose so a never-propagated `GlobalTransform` cannot lag the
+impact): convex hull over the part's own baked verts, the record's
+mass/friction/elasticity, the car's velocity at the part centroid
+plus the `dir × severity` kick and spin the prop fragments use.
+Fragments claim `BangerPool` slots like prop debris — a part leaves
+the rig even when the pool bound denies a body (`fragment: None` on
+the event). One bounded `PartDetached` fires per part per
+attachment (`VehicleBreaks::detach` refuses a second detach —
+F05-AC06); the record's `CG`/`Size` anchors are *not* consumed (they
+mix car-space and ~zero conventions on vehicle fragments — UNK-13),
+the fragment's `CenterOfMass` is the hull's measured centroid.
+Remote rigs are skipped (F25+).
+
+`resolve_disabled` calls `restore_rig` wherever it calls
+`damage.reset()` — Cruise's FreeReset, Circuit's PenaltyReset and the
+AI in-place reset all repair the wreck, so all three restore the rig:
+every part re-attaches, its fragment despawns, the node shows again
+(F05-AC03). A plain reset or the stuck recovery does not repair —
+detached parts stay off until a repair lands. `BreakReport` feeds a
+`brk=` smoke field only once the pipeline saw activity.
+
+Retail headless (install `fnv1a64:e91e6cd4b2ae30d9`): sf/london
+`--frames 600` scripted cruises on the default vpbug record all
+pre-existing counters bit-identical and no `brk=` field — vpbug
+authors no break parts (measured absence, correct). A 1200-frame sf
+cruise on vpcoop (6 authored parts at ~31.25 m/s) recorded
+`impacts=27 dmg=6a/0d/0r vsk=9a/0d/0r` and still no `brk=` — the
+scripted driver's contact approach speeds never reach the authored
+~70 mph detach speed, which is the behaviour the authored
+thresholds encode.
+
 Not yet implemented: visual tiers (smoke pivots, `TextelDamageRadius`
-decals, `DoublePivot`/`MirrorPivot` semantics), breakaway detachment
-(REC-1's authored inventory is inventoried but no part ever
-detaches), impairment short of destruction, `vehgyro` consumption,
-water/out-of-bounds recovery, C&R healing (DMG-4's
-`RegenerateRate` channel exists, no mode drives it), replication.
+decals, `DoublePivot`/`MirrorPivot` semantics), damage-driven
+detachment if the original ever uses it (UNK-13), impairment short of
+destruction, `vehgyro` consumption, water/out-of-bounds recovery,
+C&R healing (DMG-4's `RegenerateRate` channel exists, no mode drives
+it), replication.
 
 ## Open questions
 
@@ -220,8 +283,13 @@ water/out-of-bounds recovery, C&R healing (DMG-4's
   whether `ImpactThreshold` compares the same unit — UNK-13.
 - Whether `MedDamage` gates visual state, impairment or both.
 - Which parts detach at which damage level; whether break detachment
-  is damage-driven or impact-driven; fragment-vs-intact rig swap
-  rules.
+  is damage-driven or impact-driven (the implemented reading is
+  impact-driven against `severity × part_mass`, DSN-21 — the authored
+  `ImpulseLimit2 = Mass × {31.25, 2500}` structure supports a
+  speed-threshold semantic but the original's comparison is
+  unrecovered); fragment-vs-intact rig swap rules (intact-hide +
+  spawned-fragment is implemented; whether the original swaps a
+  damaged variant model is unrecovered).
 - `TextelDamageRadius`'s consumer (decal projection vs vertex
   deformation), `DoublePivot`/`MirrorPivot` semantics, `Color`
   packing, `Height`/`Intensity` roles in the effect spec.

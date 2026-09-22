@@ -7,6 +7,7 @@
 //! world-state resource.
 
 pub mod banger;
+pub mod breakaway;
 pub mod camera;
 pub mod car_visual;
 pub mod city;

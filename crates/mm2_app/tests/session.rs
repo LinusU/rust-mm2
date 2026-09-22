@@ -68,6 +68,7 @@ fn test_app(config: SessionConfig, frame_secs: f64) -> App {
         .init_resource::<ImpactFilter>()
         .init_resource::<mm2_app::damage::DamageReport>()
         .init_resource::<mm2_app::stuck::StuckReport>()
+        .init_resource::<mm2_app::breakaway::BreakReport>()
         .init_resource::<SessionControl>()
         .init_resource::<SessionNote>()
         .init_resource::<PauseMenu>()

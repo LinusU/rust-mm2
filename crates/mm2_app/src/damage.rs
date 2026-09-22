@@ -36,11 +36,12 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_game::{
     DISABLED_PENALTY_TICKS, DamageEvent, DamageTier, DamageVerdict, DisabledOutcome, ImpactEvent,
-    ObjectId, ObjectIdentity, Player, PlayerControl, RaceState, Session, VehicleDamage,
-    VehicleStuck, disabled_outcome,
+    ObjectId, ObjectIdentity, Player, PlayerControl, RaceState, Session, VehicleBreaks,
+    VehicleDamage, VehicleStuck, disabled_outcome,
 };
 use mm2_vehicle::ResetVehicle;
 
+use crate::breakaway::{BreakPartVisual, BreakReport};
 use crate::session::{SessionControl, SpawnPoint};
 
 /// Per-session evidence counters for the damage pipeline — the `dmg=`
@@ -203,6 +204,10 @@ pub fn resolve_disabled(
     mut stuck: Query<&mut VehicleStuck>,
     mut resets: MessageWriter<ResetVehicle>,
     mut report: ResMut<DamageReport>,
+    mut breaks: Query<&mut VehicleBreaks>,
+    mut break_visuals: Query<(&BreakPartVisual, &mut Visibility, &ChildOf)>,
+    mut break_report: ResMut<BreakReport>,
+    mut commands: Commands,
 ) {
     if !session.is_playing() || !session.authority_role().is_authority() {
         reader.read().for_each(drop);
@@ -271,6 +276,18 @@ pub fn resolve_disabled(
                             }
                         }
                         damage.reset();
+                        // Repair restores the rig (F05-AC03): detached
+                        // breakaway parts re-attach, their fragments
+                        // despawn. `restore_rig` is a no-op on a rig
+                        // with nothing off it.
+                        if let Ok(mut rig) = breaks.get_mut(entity) {
+                            break_report.restored += crate::breakaway::restore_rig(
+                                entity,
+                                &mut rig,
+                                &mut break_visuals,
+                                &mut commands,
+                            ) as u64;
+                        }
                         report.recovered += 1;
                     }
                     DisabledOutcome::PenaltyReset => {
@@ -290,6 +307,15 @@ pub fn resolve_disabled(
                             race.clock = race.clock.saturating_add(DISABLED_PENALTY_TICKS);
                         }
                         damage.reset();
+                        // Same repair-restores-rig rule as FreeReset.
+                        if let Ok(mut rig) = breaks.get_mut(entity) {
+                            break_report.restored += crate::breakaway::restore_rig(
+                                entity,
+                                &mut rig,
+                                &mut break_visuals,
+                                &mut commands,
+                            ) as u64;
+                        }
                         report.recovered += 1;
                     }
                 }
@@ -306,6 +332,15 @@ pub fn resolve_disabled(
                     });
                 }
                 damage.reset();
+                // Same repair-restores-rig rule as FreeReset.
+                if let Ok(mut rig) = breaks.get_mut(entity) {
+                    break_report.restored += crate::breakaway::restore_rig(
+                        entity,
+                        &mut rig,
+                        &mut break_visuals,
+                        &mut commands,
+                    ) as u64;
+                }
                 report.recovered += 1;
             }
             // Remote participants resolve under their own authority —

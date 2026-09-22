@@ -214,8 +214,10 @@ pub fn banger_bundle(
 
 /// The mutable pieces the state machine touches. `RigidBody` is an
 /// immutable component in Avian — transitions replace it through
-/// `Commands`, so it is not part of this query.
-type BangerMut = (
+/// `Commands`, so it is not part of this query. `pub(crate)` for the
+/// breakaway pipeline, which claims pool slots through the same
+/// `claim_slot` path.
+pub(crate) type BangerMut = (
     Entity,
     &'static ObjectIdentity,
     &'static mut Banger,
@@ -256,7 +258,7 @@ struct Activation {
 /// `max_active = 0`, or every occupied slot is a pending spawn — so a
 /// degenerate cap can never be exceeded.
 #[allow(clippy::too_many_arguments)]
-fn claim_slot(
+pub(crate) fn claim_slot(
     occupied: &mut usize,
     tick: u64,
     generation: u64,

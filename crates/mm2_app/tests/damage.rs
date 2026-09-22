@@ -85,6 +85,7 @@ fn damage_app(config: SessionConfig, car_pos: Vec3) -> (App, Entity, ObjectId) {
         .add_message::<DamageEvent>()
         .insert_resource(ImpactFilter::default())
         .init_resource::<DamageReport>()
+        .init_resource::<mm2_app::breakaway::BreakReport>()
         .init_resource::<SessionControl>()
         .add_systems(FixedUpdate, advance_session_tick)
         .add_systems(

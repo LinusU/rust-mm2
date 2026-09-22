@@ -10,6 +10,7 @@ use bevy::prelude::*;
 use mm2_assets::Vfs;
 
 pub mod banger;
+pub mod breakaway;
 pub mod config;
 pub mod damage;
 pub mod ids;
@@ -31,6 +32,7 @@ pub use banger::{
     Banger, BangerCause, BangerDefinition, BangerPhase, BangerPool, BangerStateChanged,
     DEFAULT_ACTIVE_POOL,
 };
+pub use breakaway::{BreakPartSpec, BreakPartState, PartDetached, VehicleBreaks};
 pub use config::{
     CameraPose, ConfigError, Densities, DevOverrides, Difficulty, EventRef, EventTableKind,
     NavOverlay, SelectorError, SessionAuthority, SessionConditions, SessionConfig, SessionMode,

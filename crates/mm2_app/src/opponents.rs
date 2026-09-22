@@ -83,9 +83,10 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_assets::Vfs;
 use mm2_game::{
-    DamageSignals, DamageSpec, ObjectIdentity, OpponentRoster, OpponentRoute, OpponentSpec,
-    ParticipantState, Player, PlayerControl, RaceDefinition, RaceProgress, RaceState, Session,
-    SessionEntity, StuckSpec, VehicleDamage, VehicleStuck, relative_bearing,
+    BreakPartSpec, DamageSignals, DamageSpec, ObjectIdentity, OpponentRoster, OpponentRoute,
+    OpponentSpec, ParticipantState, Player, PlayerControl, RaceDefinition, RaceProgress, RaceState,
+    Session, SessionEntity, StuckSpec, VehicleBreaks, VehicleDamage, VehicleStuck,
+    relative_bearing,
 };
 use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState, vehicle_bundle};
 use tracing::{info, warn};
@@ -643,6 +644,20 @@ pub fn spawn_opponents(
             commands
                 .entity(vehicle)
                 .insert(VehicleStuck::new(StuckSpec::from(s)));
+        }
+        // And the authored breakaway inventory (F05-B.3): only
+        // `dgbangerdata`-backed BREAK chunks, so authoredless cars
+        // detach nothing.
+        if !def.breaks.is_empty() {
+            commands.entity(vehicle).insert(VehicleBreaks::new(
+                def.breaks
+                    .iter()
+                    .map(|b| BreakPartSpec {
+                        name: b.name.clone(),
+                        def: b.def.clone(),
+                    })
+                    .collect(),
+            ));
         }
         let missing = car_visual::spawn_vehicle_model(
             commands, vfs, &def.model, 0, meshes, images, materials, vehicle,

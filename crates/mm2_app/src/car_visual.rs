@@ -261,6 +261,18 @@ pub fn spawn_vehicle_model(
                     }
                 }
             }
+            PartRole::Break => {
+                // Intact breakaway panel (F05-B.3): an ordinary part
+                // node plus the `BreakPartVisual` tag the detach
+                // system hides and turns into the fragment body.
+                let local = Transform::from_translation(attach);
+                let node = commands.spawn((local, Visibility::Visible)).id();
+                commands.entity(root).add_child(node);
+                commands
+                    .entity(node)
+                    .insert(crate::breakaway::BreakPartVisual::of(part, local));
+                spawn_groups(commands, node, model, paint, part, &mut mats, meshes, false);
+            }
             role => {
                 let glow = match role {
                     PartRole::HeadlightGlow => Some(GlowKind::Headlight),

@@ -18,15 +18,16 @@ use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use clap::Parser;
 use mm2_app::session::{ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
-    banger, camera, car_visual, city, contracts, damage, input, menu, nav_overlay, opponents,
-    pause, profile, progression, race, results, scripted, session, smoke, stuck, traffic,
+    banger, breakaway, camera, car_visual, city, contracts, damage, input, menu, nav_overlay,
+    opponents, pause, profile, progression, race, results, scripted, session, smoke, stuck,
+    traffic,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
 use mm2_game::{
-    BangerStateChanged, CameraPose, DamageEvent, DevOverrides, ImpactEvent, Mm2Vfs, PlayerVehicle,
-    RaceStarted, Session, SessionConfig, SessionPhase, StuckEvent, VehicleSelection, WorldMode,
-    advance_session_tick, despawn_session_entities, ordinal,
+    BangerStateChanged, CameraPose, DamageEvent, DevOverrides, ImpactEvent, Mm2Vfs, PartDetached,
+    PlayerVehicle, RaceStarted, Session, SessionConfig, SessionPhase, StuckEvent, VehicleSelection,
+    WorldMode, advance_session_tick, despawn_session_entities, ordinal,
 };
 use mm2_vehicle::{ResetVehicle, VehicleConfig, VehicleDebugEnabled, VehiclePlugin};
 use tracing::{error, info, warn};
@@ -799,11 +800,13 @@ fn main() {
     .add_message::<ImpactEvent>()
     .add_message::<DamageEvent>()
     .add_message::<StuckEvent>()
+    .add_message::<PartDetached>()
     .add_message::<RaceStarted>()
     .add_message::<BangerStateChanged>()
     .init_resource::<contracts::ImpactFilter>()
     .init_resource::<damage::DamageReport>()
     .init_resource::<stuck::StuckReport>()
+    .init_resource::<breakaway::BreakReport>()
     .init_resource::<mm2_game::ResultLedger>()
     .init_resource::<mm2_game::BangerPool>()
     .init_resource::<SessionControl>()
@@ -824,6 +827,11 @@ fn main() {
             // so a wreck the outcome is about to repair/reset never
             // starts an episode.
             stuck::track_stuck,
+            // F05-B.3: authored breakaway parts read the same deduped
+            // impact stream; detach before `resolve_disabled` so a
+            // wrecking blow can shed a panel the same tick the repair
+            // puts it back (one bounded event per part per attachment).
+            breakaway::detach_breaks,
             damage::resolve_disabled,
             stuck::resolve_stuck,
             // Banger activation/settle consume the same contact edges
