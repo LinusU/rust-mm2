@@ -19,15 +19,15 @@ use clap::Parser;
 use mm2_app::session::{ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
     banger, breakaway, camera, car_visual, city, contracts, damage, input, menu, nav_overlay,
-    opponents, pause, profile, progression, race, results, scripted, session, smoke, stuck,
-    traffic,
+    opponents, pause, profile, progression, race, recovery, results, scripted, session, smoke,
+    stuck, traffic,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
 use mm2_game::{
     BangerStateChanged, CameraPose, DamageEvent, DevOverrides, ImpactEvent, Mm2Vfs, PartDetached,
-    PlayerVehicle, RaceStarted, Session, SessionConfig, SessionPhase, StuckEvent, VehicleSelection,
-    WorldMode, advance_session_tick, despawn_session_entities, ordinal,
+    PlayerVehicle, RaceStarted, RecoveryEvent, Session, SessionConfig, SessionPhase, StuckEvent,
+    VehicleSelection, WorldMode, advance_session_tick, despawn_session_entities, ordinal,
 };
 use mm2_vehicle::{ResetVehicle, VehicleConfig, VehicleDebugEnabled, VehiclePlugin};
 use tracing::{error, info, warn};
@@ -801,12 +801,14 @@ fn main() {
     .add_message::<DamageEvent>()
     .add_message::<StuckEvent>()
     .add_message::<PartDetached>()
+    .add_message::<RecoveryEvent>()
     .add_message::<RaceStarted>()
     .add_message::<BangerStateChanged>()
     .init_resource::<contracts::ImpactFilter>()
     .init_resource::<damage::DamageReport>()
     .init_resource::<stuck::StuckReport>()
     .init_resource::<breakaway::BreakReport>()
+    .init_resource::<recovery::RecoveryReport>()
     .init_resource::<mm2_game::ResultLedger>()
     .init_resource::<mm2_game::BangerPool>()
     .init_resource::<SessionControl>()
@@ -834,6 +836,12 @@ fn main() {
             breakaway::detach_breaks,
             damage::resolve_disabled,
             stuck::resolve_stuck,
+            // F05-B.5: water/OOB recovery — observe the wheel contacts
+            // the physics step left, then resolve fired episodes to the
+            // dry-grounded anchor (track → resolve, like the detectors
+            // above).
+            recovery::track_recovery,
+            recovery::resolve_recovery,
             // Banger activation/settle consume the same contact edges
             // the impact pipeline reads — independent consumers of the
             // solver's edge stream.

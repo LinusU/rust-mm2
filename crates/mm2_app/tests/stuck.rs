@@ -78,6 +78,7 @@ fn stuck_app(car_pos: Vec3, spec: StuckSpec) -> (App, Entity, ObjectId) {
         .init_resource::<DamageReport>()
         .init_resource::<StuckReport>()
         .init_resource::<mm2_app::breakaway::BreakReport>()
+        .init_resource::<mm2_app::recovery::RecoveryReport>()
         .init_resource::<SessionControl>()
         .add_systems(FixedUpdate, advance_session_tick)
         .add_systems(

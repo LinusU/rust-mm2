@@ -35,8 +35,8 @@ use mm2_content::VehicleDef;
 use mm2_game::{
     BangerPool, BreakPartSpec, DEFAULT_ACTIVE_POOL, DamageSignals, DamageSpec, Mm2Vfs,
     ObjectIdentity, Player, PlayerControl, PlayerVehicle, RaceDefinition, RaceProgress, RaceState,
-    Session, SessionEntity, SessionMode, SessionPhase, StuckSpec, TargetSelection, VehicleBreaks,
-    VehicleDamage, VehicleStuck, WorldMode,
+    RecoveryPolicy, Session, SessionEntity, SessionMode, SessionPhase, StuckSpec, TargetSelection,
+    VehicleBreaks, VehicleDamage, VehicleRecovery, VehicleStuck, WorldMode,
 };
 use mm2_vehicle::{TireConditions, VehicleConfig, vehicle_bundle};
 use tracing::{error, info, warn};
@@ -195,6 +195,7 @@ pub fn drive_session(
     mut damage_report: ResMut<crate::damage::DamageReport>,
     mut stuck_report: ResMut<crate::stuck::StuckReport>,
     mut break_report: ResMut<crate::breakaway::BreakReport>,
+    mut recovery_report: ResMut<crate::recovery::RecoveryReport>,
     mut spawn: ResMut<SpawnPoint>,
     menu: Option<Res<crate::menu::MenuShell>>,
     roots: Query<Entity, (With<SessionEntity>, Without<ChildOf>)>,
@@ -212,6 +213,7 @@ pub fn drive_session(
             damage_report.reset();
             stuck_report.reset();
             break_report.reset();
+            recovery_report.reset();
             spawn.trailers.clear();
             // Session-scoped resources die with the session: a race's
             // countdown/clock/progress, its reward/report view and the
@@ -655,6 +657,18 @@ pub fn load_session_world(
             Visibility::Visible,
         ))
         .id();
+
+    // Water/out-of-bounds recovery (F05-B.5): no authored record gates
+    // it — the designed policy rides on every player vehicle, anchored
+    // at its spawn pose so the fall leg has a landing before the first
+    // dry contact is observed.
+    commands
+        .entity(vehicle)
+        .insert(VehicleRecovery::with_anchor(
+            RecoveryPolicy::default(),
+            spawn.position,
+            spawn.yaw,
+        ));
 
     match &selected.def {
         // Imported stock vehicle: the model carries the visuals.

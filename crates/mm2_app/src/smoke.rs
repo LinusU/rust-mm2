@@ -191,12 +191,14 @@ pub fn headless_smoke(
         .add_message::<DamageEvent>()
         .add_message::<mm2_game::StuckEvent>()
         .add_message::<mm2_game::PartDetached>()
+        .add_message::<mm2_game::RecoveryEvent>()
         .add_message::<RaceStarted>()
         .add_message::<BangerStateChanged>()
         .init_resource::<contracts::ImpactFilter>()
         .init_resource::<damage::DamageReport>()
         .init_resource::<crate::stuck::StuckReport>()
         .init_resource::<crate::breakaway::BreakReport>()
+        .init_resource::<crate::recovery::RecoveryReport>()
         .init_resource::<mm2_game::ResultLedger>()
         .init_resource::<mm2_game::BangerPool>()
         .init_resource::<session::SessionControl>()
@@ -232,6 +234,10 @@ pub fn headless_smoke(
                 crate::breakaway::detach_breaks,
                 damage::resolve_disabled,
                 crate::stuck::resolve_stuck,
+                // F05-B.5: water/OOB recovery — the headless record's
+                // `rcv=` field reads the report.
+                crate::recovery::track_recovery,
+                crate::recovery::resolve_recovery,
                 crate::banger::activate_bangers,
                 crate::banger::settle_bangers,
                 contracts::publish_vehicle_telemetry,
@@ -593,6 +599,19 @@ pub fn headless_smoke(
         .filter(|s| s.gyro_spins + s.gyro_completed > 0)
         .map(|s| format!(" gyr={}/{}", s.gyro_spins, s.gyro_completed))
         .unwrap_or_default();
+    // F05-B.5 recovery evidence: submersion/out-of-bounds detections
+    // and the recoveries they resolved to. Same presence rule — a run
+    // that never left dry ground stays bit-identical.
+    let rcv_detail = world_ecs
+        .get_resource::<crate::recovery::RecoveryReport>()
+        .filter(|r| r.submerged + r.out_of_bounds + r.recovered > 0)
+        .map(|r| {
+            format!(
+                " rcv={}w/{}f/{}r",
+                r.submerged, r.out_of_bounds, r.recovered
+            )
+        })
+        .unwrap_or_default();
     // The dev `--traction` modifier is recorded when set so a wetness
     // run is self-describing; unmodified runs stay bit-identical.
     let traction_detail = config
@@ -609,7 +628,7 @@ pub fn headless_smoke(
         .unwrap_or_default();
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{nav_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{traction_detail}{profile_detail}{extra}",
+            "updates={frames} ticks={ticks} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{nav_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{traction_detail}{profile_detail}{extra}",
             driver.as_str(),
             session.phase().name(),
             moved = pos.map(|p| (p - spawn_pos).length()).unwrap_or(f32::NAN),

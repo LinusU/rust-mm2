@@ -329,9 +329,42 @@ subtly changing slide dynamics is the feature, not drift.
 Not yet implemented: visual tiers (smoke pivots, `TextelDamageRadius`
 decals, `DoublePivot`/`MirrorPivot` semantics), damage-driven
 detachment if the original ever uses it (UNK-13), impairment short of
-destruction, water/out-of-bounds recovery,
+destruction,
 C&R healing (DMG-4's `RegenerateRate` channel exists, no mode drives
 it), replication.
+
+## Water / out-of-bounds recovery (F05-B.5, designed — DSN-23)
+
+No authored record tunes water or out-of-bounds rescue — the
+damage-family census covers `vehcardamage`/`vehstuck`/`vehgyro` only
+and DMG-2 covers destruction — so `mm2_game::recovery` is a designed
+policy end to end (the original's rules stay UNK-13):
+
+- `VehicleRecovery` rides on every local/AI participant (no authored
+  gate to spawn against), pre-anchored at the spawn pose. Its
+  **anchor** is the last pose a grounded wheel sat on a non-water
+  surface — water colliders are solid in this engine, so "in the
+  water" is a surface class under the wheels (`WheelState::
+  surface_drag`, the same coefficient the F06-B.2 wading term reads),
+  not a missing floor.
+- The **submerged** leg fires when every grounded wheel reads `drag`
+  at/above `water_min_drag` (0.3 — splits retail `deepwater` 0.5 from
+  shallow `water` 0.119, which stays wadable) for `submerge_dwell`
+  (2.0 s — the escape window; a car that regains a dry edge inside it
+  keeps driving). Recovery is to the anchor — back on shore, never in
+  place on the water.
+- The **out-of-bounds** leg fires once per airborne fall more than
+  `fall_margin` (50 m — sized past retail drops, since any real
+  landing refreshes the anchor first) below the anchor; a non-finite
+  pose fires at once as defence-in-depth (a pose gone NaN inside the
+  physics step trips the wheel raycast first — the detector can only
+  answer poses written between steps).
+- `mm2_app::recovery::resolve_recovery` answers through the shared
+  `ResetVehicle` (`Teleported` — no checkpoint sweep), trailers
+  re-seat at authored offsets, an armed stuck episode disarms, and
+  recovery is not a repair: damage and detached parts persist.
+  Remote participants' detectors belong to their authority (F25+);
+  `Disabled` wrecks belong to the damage outcome.
 
 ## Open questions
 
@@ -358,5 +391,9 @@ it), replication.
   per-axis airborne righting) is designed (DSN-22); the original's
   trigger conditions, application mechanism and whether `Drift`
   relieves damping or feeds friction multipliers stay unrecovered.
-- Water/out-of-bounds recovery rules — no authored records found yet;
-  DMG-2 covers destruction only.
+- The original's water/out-of-bounds recovery rules — no authored
+  records found yet; DMG-2 covers destruction only. A designed
+  dry-anchor + dwell/margin detector is implemented (DSN-23, section
+  above); whether the original resets to shore, to the last
+  checkpoint, or in place, and what its submersion/OOB tests are,
+  stays unverified.

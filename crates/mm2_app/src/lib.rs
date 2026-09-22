@@ -23,6 +23,7 @@ pub mod pause;
 pub mod profile;
 pub mod progression;
 pub mod race;
+pub mod recovery;
 pub mod results;
 pub mod scripted;
 pub mod session;

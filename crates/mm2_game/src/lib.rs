@@ -21,6 +21,7 @@ pub mod profile;
 pub mod progression;
 pub mod props;
 pub mod race;
+pub mod recovery;
 pub mod result;
 pub mod session;
 pub mod stuck;
@@ -73,6 +74,9 @@ pub use race::{
     NavTarget, ParticipantState, ProgressOutcome, RACE_TICK_HZ, RaceDefinition, RaceError,
     RacePhase, RaceProgress, RaceStart, RaceStarted, RaceState, TargetSelection, cycle_target,
     live_order, navigation_target, relative_bearing,
+};
+pub use recovery::{
+    GroundContact, RecoveryCause, RecoveryEvent, RecoveryPolicy, RecoveryVerdict, VehicleRecovery,
 };
 pub use result::{DuplicateResult, ResultId, ResultLedger, SessionOutcome, SessionResult, ordinal};
 pub use session::{

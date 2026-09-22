@@ -301,6 +301,7 @@ fn menu_app(dir: &Path, store: Option<ProfileStore>) -> App {
         .init_resource::<mm2_app::damage::DamageReport>()
         .init_resource::<mm2_app::stuck::StuckReport>()
         .init_resource::<mm2_app::breakaway::BreakReport>()
+        .init_resource::<mm2_app::recovery::RecoveryReport>()
         .init_resource::<ResultLedger>()
         .init_resource::<BangerPool>()
         .init_resource::<SessionControl>()

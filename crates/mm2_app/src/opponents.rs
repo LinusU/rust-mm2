@@ -85,8 +85,8 @@ use mm2_assets::Vfs;
 use mm2_game::{
     BreakPartSpec, DamageSignals, DamageSpec, ObjectIdentity, OpponentRoster, OpponentRoute,
     OpponentSpec, ParticipantState, Player, PlayerControl, RaceDefinition, RaceProgress, RaceState,
-    Session, SessionEntity, StuckSpec, VehicleBreaks, VehicleDamage, VehicleStuck,
-    relative_bearing,
+    RecoveryPolicy, Session, SessionEntity, StuckSpec, VehicleBreaks, VehicleDamage,
+    VehicleRecovery, VehicleStuck, relative_bearing,
 };
 use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState, vehicle_bundle};
 use tracing::{info, warn};
@@ -659,6 +659,15 @@ pub fn spawn_opponents(
                     .collect(),
             ));
         }
+        // Water/out-of-bounds recovery (F05-B.5) — the designed policy
+        // rides on every participant, anchored at its spawn pose.
+        commands
+            .entity(vehicle)
+            .insert(VehicleRecovery::with_anchor(
+                RecoveryPolicy::default(),
+                pos,
+                yaw,
+            ));
         let missing = car_visual::spawn_vehicle_model(
             commands, vfs, &def.model, 0, meshes, images, materials, vehicle,
         );

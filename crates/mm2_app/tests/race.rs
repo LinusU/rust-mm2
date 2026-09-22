@@ -99,6 +99,7 @@ fn race_app(config: SessionConfig, def: RaceDefinition) -> App {
         .init_resource::<mm2_app::damage::DamageReport>()
         .init_resource::<mm2_app::stuck::StuckReport>()
         .init_resource::<mm2_app::breakaway::BreakReport>()
+        .init_resource::<mm2_app::recovery::RecoveryReport>()
         .init_resource::<ButtonInput<KeyCode>>()
         .add_message::<RaceStarted>()
         .add_message::<ResetVehicle>()
