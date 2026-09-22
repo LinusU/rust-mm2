@@ -514,6 +514,9 @@ pub fn load_session_world(
     // precedence `mm2_game::effective_conditions` encodes). A preset
     // that cannot load spawns the fallback rig and reports it — an
     // explicit diagnostic, never a silent default (F18-AC06).
+    // F18-A.3: the same call resolves the authored fog row; its
+    // `DistanceFog` is attached to the session's cameras below.
+    let mut camera_fog: Option<bevy::pbr::DistanceFog> = None;
     if world_ok && let WorldMode::City { psdl } = &config.world {
         let event_params = event_race.as_ref().map(|(def, ..)| &def.params);
         let conditions = mm2_game::effective_conditions(&config, event_params);
@@ -532,6 +535,7 @@ pub fn load_session_world(
             source,
             owner,
         );
+        camera_fog = report.fog.bound.map(|f| f.distance_fog());
         commands.insert_resource(report);
     }
     // A `--spawn` dev pose replaces whatever the world or authored
@@ -635,7 +639,7 @@ pub fn load_session_world(
         }
         None => ChaseCamera::default(),
     };
-    commands.spawn((
+    let mut chase_cam = commands.spawn((
         owner,
         Camera3d::default(),
         Camera {
@@ -645,6 +649,9 @@ pub fn load_session_world(
         chase,
         Transform::from_translation(spawn.position + Vec3::new(0.0, 4.0, 9.0)),
     ));
+    if let Some(fog) = camera_fog.clone() {
+        chase_cam.insert(fog);
+    }
     let (free_xf, free_cam) = match config.dev.camera.as_ref() {
         Some(c) => (
             Transform::from_translation(c.position).with_rotation(Quat::from_euler(
@@ -664,7 +671,7 @@ pub fn load_session_world(
             FreeCamera::default(),
         ),
     };
-    commands.spawn((
+    let mut free_cam_ent = commands.spawn((
         owner,
         Camera3d::default(),
         Camera {
@@ -674,6 +681,9 @@ pub fn load_session_world(
         free_cam,
         free_xf,
     ));
+    if let Some(fog) = camera_fog {
+        free_cam_ent.insert(fog);
+    }
 
     // The dynamic player spawns only once the world is `Ready` — after the
     // static colliders above exist, so it can't fall through a half-built

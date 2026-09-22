@@ -3202,20 +3202,24 @@ fn materials(
     Ok(())
 }
 
-/// Weather/environment audit (F18-A.1): the expected denominator is, per
-/// stock city, `<stem>.sky`, `<stem>.lt00`..`.lt15` (the measured
-/// time×weather preset grid), `<stem>.cpvs`, `<stem>.pvshist`,
-/// `<stem>.water` and `<stem>.lmap`, plus the shared
-/// `city/amb_<w><t>_<v>.ldef` grid (measured `w ∈ {c,f,p,r}`,
+/// Weather/environment audit (F18-A.1, F18-A.3): the expected
+/// denominator is, per stock city, `<stem>.sky`, `<stem>.lt00`..`.lt15`
+/// (the measured time×weather preset grid), `<stem>.cpvs`,
+/// `<stem>.pvshist`, `<stem>.water`, `<stem>.lmap` and
+/// `<stem>_fog.csv` (the authored per-preset fog table — F18-A.3), plus
+/// the shared `city/amb_<w><t>_<v>.ldef` grid (measured `w ∈ {c,f,p,r}`,
 /// `t ∈ {a,d,m,n}`, `v ∈ {f,l}` — 32 files). Every other discovered
 /// environment file (numbered `.cpvs` fog variants, named `.ldef`s,
-/// `city/phys/j01.sky`, `sf082100.pvshist`, …) is an audited extra —
-/// the denominator is never filtered. Cross-checks: `.sky` dome names
-/// resolve to `geometry/*.pkg`; `amb_<grid>.ldef` pairs with
-/// `texture/sky_<grid>.tex` (measured 32/32 name alignment — inferred
-/// pairing, not documented); `.ltNN` block names classify back to the
-/// file's `NN` slot; and per-city `.cpvs`/`.lmap`/`.pvshist`/`.water`
-/// room references are checked against the PSDL room table.
+/// `sf_fog_orig.csv`, `city/phys/j01.sky`, `sf082100.pvshist`, …) is an
+/// audited extra — the denominator is never filtered. Cross-checks:
+/// `.sky` dome names resolve to `geometry/*.pkg`; `amb_<grid>.ldef`
+/// pairs with `texture/sky_<grid>.tex` (measured 32/32 name alignment —
+/// inferred pairing, not documented); `.ltNN` block names classify back
+/// to the file's `NN` slot; the expected `_fog.csv` row labels are
+/// checked against the `.ltNN` name at the same slot (the measured
+/// positional mapping — verified 16/16 on both retail cities); and
+/// per-city `.cpvs`/`.lmap`/`.pvshist`/`.water` room references are
+/// checked against the PSDL room table.
 /// `--city` narrows the per-city expected denominator and the PSDL
 /// cross-checks; `--strict` exits nonzero on any failure or issue.
 fn weather(
@@ -3225,6 +3229,7 @@ fn weather(
     strict: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use mm2_formats::cpvs::{Cpvs, PvsHist};
+    use mm2_formats::fog::FogTable;
     use mm2_formats::ldef::Ldef;
     use mm2_formats::lighting::{LIGHTING_PRESET_COUNT, LightingPreset};
     use mm2_formats::lmap::Lmap;
@@ -3245,6 +3250,7 @@ fn weather(
         for ext in ["sky", "cpvs", "pvshist", "water", "lmap"] {
             expected.push(format!("city/{c}.{ext}"));
         }
+        expected.push(format!("city/{c}_fog.csv"));
         for i in 0..LIGHTING_PRESET_COUNT {
             expected.push(format!("city/{c}.lt{i:02}"));
         }
@@ -3272,6 +3278,8 @@ fn weather(
             || n.ends_with(".pvshist")
             || n.ends_with(".water")
             || n.ends_with(".lmap")
+            || n.ends_with("_fog.csv")
+            || (n.ends_with(".csv") && n.contains("_fog_"))
             || n.rsplit_once(".lt")
                 .is_some_and(|(_, s)| s.len() == 2 && s.bytes().all(|b| b.is_ascii_digit()))
     };
@@ -3301,13 +3309,14 @@ fn weather(
     let mut hist_by_city: BTreeMap<String, Vec<(String, PvsHist)>> = BTreeMap::new();
     let mut water_by_city: BTreeMap<String, (String, WaterDef)> = BTreeMap::new();
     let mut lmap_by_city: BTreeMap<String, (String, Lmap)> = BTreeMap::new();
+    let mut fog_tables: Vec<(String, FogTable)> = Vec::new();
 
     let issue = |issues: &mut usize, msg: String| {
         *issues += 1;
         println!("    issue: {msg}");
     };
 
-    println!("== weather/environment files (sky/ltNN/ldef/cpvs/pvshist/water/lmap) ==");
+    println!("== weather/environment files (sky/ltNN/ldef/cpvs/pvshist/water/lmap/_fog.csv) ==");
     for logical in &logicals {
         let is_expected = expected.contains(logical);
         let tag = if is_expected { "expected" } else { "extra" };
@@ -3487,6 +3496,31 @@ fn weather(
                 }
                 Err(e) => fail!(e),
             }
+        } else if name.ends_with("_fog.csv") || (name.ends_with(".csv") && name.contains("_fog_")) {
+            match FogTable::parse(&String::from_utf8_lossy(&bytes)) {
+                Ok(t) => {
+                    parsed += 1;
+                    let issues = t.validate();
+                    issues_total += issues.len() + t.diagnostics.len();
+                    println!(
+                        "  {logical:<52} {tag:<9} ok — {} rows{}",
+                        t.rows.len(),
+                        t.rows
+                            .first()
+                            .zip(t.rows.last())
+                            .map(|(f, l)| format!(" ({:?} … {:?})", f.description, l.description))
+                            .unwrap_or_default()
+                    );
+                    for i in &issues {
+                        println!("    issue: {i:?}");
+                    }
+                    for d in &t.diagnostics {
+                        println!("    issue: {d}");
+                    }
+                    fog_tables.push((logical.clone(), t));
+                }
+                Err(e) => fail!(e),
+            }
         } else if name.ends_with(".water") {
             match WaterDef::parse(&String::from_utf8_lossy(&bytes)) {
                 Ok(w) => {
@@ -3586,6 +3620,42 @@ fn weather(
             }
             None => println!("    note: {c}: no parsed .ltNN presets"),
         }
+    }
+
+    // `_fog.csv` positional mapping: the expected table's row i label
+    // must equal the `.ltNN` preset name at slot i (verified 16/16 on
+    // both retail cities — the mapping the recovered `lvlSky` fog
+    // arrays index by `TimeWeatherType`). Extras like `sf_fog_orig.csv`
+    // use a different labelling convention and are not cross-checked.
+    for c in &stems {
+        let fog_path = format!("city/{c}_fog.csv");
+        let Some((_, table)) = fog_tables.iter().find(|(p, _)| *p == fog_path) else {
+            continue;
+        };
+        let mut matched = 0usize;
+        for (i, row) in table.rows.iter().enumerate().take(LIGHTING_PRESET_COUNT) {
+            let Some(slots) = lt_by_city.get(c) else {
+                break;
+            };
+            let Some((_, preset)) = slots.get(&i) else {
+                continue;
+            };
+            if row.description != preset.name {
+                issue(
+                    &mut issues_total,
+                    format!(
+                        "{fog_path}: row {i} labelled {:?}, but {c}.lt{i:02} is {:?} — slot order mismatch",
+                        row.description, preset.name
+                    ),
+                );
+            } else {
+                matched += 1;
+            }
+        }
+        println!(
+            "    fog: {fog_path} — {matched}/{} row labels match the .ltNN slot names",
+            LIGHTING_PRESET_COUNT.min(table.rows.len())
+        );
     }
 
     // PSDL room-table cross-checks per city.

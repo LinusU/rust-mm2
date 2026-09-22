@@ -1,17 +1,19 @@
 # Weather and environment formats
 
 The stock install's weather/environment content family: the sky dome
-definition, the 16-preset time×weather lighting grid, ambient-light
-definitions, the room-visibility (PVS) tables and their runtime history,
-the water plane, and the per-room light map. All files live under `city/`.
+definition, the 16-preset time×weather lighting grid, the per-preset
+fog table, ambient-light definitions, the room-visibility (PVS) tables
+and their runtime history, the water plane, and the per-room light map.
+All files live under `city/`.
 
 Measured on the retail install (2026-09-22) by `mm2-inspect weather`:
-102 environment files discovered, 102 parsed, 0 failures, 0 issues —
-the audit's expected denominator is the 21 per-city files
-(`<stem>.sky`, `.lt00`–`.lt15`, `.cpvs`, `.pvshist`, `.water`, `.lmap`
-= 1 + 16 + 4) × 2 cities plus the 32 shared `amb_*` `.ldef` files = 74
-expected; the other 28 files are audited extras (23 `.cpvs` variants,
-three named `.ldef`s, `city/phys/j01.sky`, `sf082100.pvshist`).
+105 environment files discovered, 105 parsed, 0 failures, 0 issues —
+the audit's expected denominator is the 22 per-city files
+(`<stem>.sky`, `.lt00`–`.lt15`, `.cpvs`, `.pvshist`, `.water`, `.lmap`,
+`<stem>_fog.csv` = 1 + 16 + 4 + 1) × 2 cities plus the 32 shared
+`amb_*` `.ldef` files = 76 expected; the other 29 files are audited
+extras (23 `.cpvs` variants, three named `.ldef`s, `sf_fog_orig.csv`,
+`city/phys/j01.sky`, `sf082100.pvshist`).
 
 Sources: R3 = community format docs (`angel-file-formats`), R4 = MM2Hook
 recovered structures (`lvlSky`, `cityTimeWeatherLighting`,
@@ -67,6 +69,43 @@ rgb(0.9,0.9,0.8), ambient 0xFF1E1E32.
 Parser: `mm2_formats::lighting::LightingPreset` —
 `classify()`/`index()`/`ambient_rgba()`/`validate()`; `WeatherKind`,
 `TimeOfDay`, `preset_index`, `LIGHTING_PRESET_COUNT = 16`.
+
+## `_fog.csv` — per-preset fog table (verified on retail)
+
+`city/<stem>_fog.csv` — one CSV per stock city: a header row
+(`fog red,fog green,fog blue,fog start,fog end,description (ignored)`)
+then sixteen rows of `r,g,b,start,end,label`:
+
+```text
+250,230,200,650,1000,clear-morning
+```
+
+The row index is the same `tod*4 + weather` slot the `.ltNN` grid uses
+— measured: every row's label equals the `.ltNN` block name at its
+position on both cities (16/16, audit-enforced). The header's own
+"description (ignored)" tag confirms the original reads the table
+positionally. MM2Hook's recovered `lvlSky` holds the landing site:
+`FogColors[16]` / `FogNearClip[16]` / `FogFarClip[16]` indexed by
+`TimeWeatherType` — the same 16-slot grid.
+
+`fog start`/`fog end` are the near/far clip distances the fog factor
+interpolates between (fixed-function linear fog — the curve shape is
+inferred from the recovered field names; the values are authored).
+Retail bands differ sharply per city and per preset: london
+`clear-morning` fogs 220–320 m while sf's runs 650–1000 m; the foggy
+slots are extreme (sf `foggy-morning` 2–100 m, london `foggy-evening`
+10–50 m); night slots fade to near-black colours.
+
+`city/sf_fog_orig.csv` is an extra: the same 16-row shape with a
+different labelling convention (`clear morning` — spaces, not the
+`.ltNN` hyphen form) and markedly wider foggy bands (sf
+`foggy-morning` 400–800 m vs the shipped 2–100 m). It reads as an
+earlier authored revision kept on disk — audited, never consumed; the
+runtime binds only the canonical `<stem>_fog.csv`.
+
+Parser: `mm2_formats::fog::FogTable` (`rows`, `row(slot)`,
+`validate()` → `FogIssue`: row count, non-finite/negative values,
+out-of-range colour, `end <= start` degenerate band).
 
 ## `.ldef` — ambient light definitions (verified, semantics unrecovered)
 
@@ -184,6 +223,10 @@ stats; cross-checks:
 - `.sky` dome name → `geometry/<model>.pkg` resolution.
 - `amb_<grid>.ldef` ↔ `texture/sky_<grid>.tex` pairing (inferred).
 - `.ltNN` block name ↔ file slot, and 16/16 slot coverage per city.
+- `<stem>_fog.csv` row *i* label ↔ `<stem>.ltNN` block name at slot
+  *i* (the measured positional mapping; extras like `sf_fog_orig.csv`
+  are parsed but not cross-checked — their labels use a different
+  convention).
 - `<stem>.cpvs` `lists == psdl.rooms + 1`; `.lmap` count vs rooms
   (authored-mismatch note); `.pvshist` max room ≤ rooms; `.water` refs
   ≤ rooms — all against `city/<stem>.psdl`.
@@ -194,18 +237,20 @@ authored anomalies (self-invisible rooms, the sf lmap shortfall, the
 0xCDCDCDCD sentinel, dev-path sources) are notes/findings, so a stock
 retail install exits 0.
 
-## Runtime consumption (F18-A.2)
+## Runtime consumption (F18-A.2/A.3)
 
-The `.ltNN` presets now bind to Bevy lighting through the production
-session path — `mm2_app::environment::spawn_environment`, called from
+The `.ltNN` presets bind to Bevy lighting and the `_fog.csv` row binds
+to Bevy fog through the production session path —
+`mm2_app::environment::spawn_environment`, called from
 `load_session_world` *after* event resolution so an authored event's
 `EventParams::conditions` take precedence over the session's
 configured ones (RACE-2; the shared resolution point is
-`mm2_game::effective_conditions`). `SessionConfig::conditions` is the
+`mm2_game::effective_conditions`; a player `SessionCustomization`
+pick beats both — DSN-29). `SessionConfig::conditions` is the
 cruise/dev fallback, selected session-legally by `--weather` /
 `--time-of-day` (the authored 0-3 grid; out-of-range is a usage error,
-exit 2 — never a clamp). The menu path runs selector-0 defaults; menu
-weather/time controls are still unimplemented (F17-A remainder).
+exit 2 — never a clamp). The menu's options screen picks the same
+fields session-legally (F17-A.6).
 
 Binding (per `docs/research/environment.md`'s recovered record):
 
@@ -219,13 +264,27 @@ Binding (per `docs/research/environment.md`'s recovered record):
   so the key shines from below the horizon and contributes nothing to
   upward faces — the fills do the work.
 - `Ambient` → `GlobalAmbientLight` colour from the BGRA-packed i32.
+- `city/<stem>_fog.csv` row `slot` → `DistanceFog` on both session
+  cameras (chase + free): authored RGB → `Color::srgb`, authored
+  `fog start`/`fog end` → `FogFalloff::Linear` — an implementation
+  mapping of the clip distances onto Bevy's linear falloff (the curve
+  shape is inferred; the recovered `lvlSky` names the same near/far
+  clips). The fog channel is independent of the lighting one — a
+  preset that fell back still binds its fog row.
 - Missing/unparseable preset → the pre-preset fixed rig (one
   directional sun + fixed ambient) spawns and
   `EnvironmentReport.fallback` is set — an explicit diagnostic
   (F18-AC06), never a silent default. `EnvironmentReport` is
   session-scoped (removed on teardown); light entities are
   `SessionEntity`-stamped and despawn with the session. Smoke records
-  carry `env=ltNN(<name>|fallback)`.
+  carry `env=ltNN(<name>|fallback)` plus ` fog=<start>-<end>` or
+  ` fog=none`.
+- Missing/unparseable fog table, a slot with no row, or a row whose
+  band cannot interpolate (`end <= start`, non-finite, negative
+  start) → no `DistanceFog` is attached and `EnvironmentReport.fog
+  .absent` names the reason (`missing`/`unparseable`/`no row for
+  slot`/`degenerate`) — never a fabricated default. Table-level
+  anomalies stay warnings in `fog.issues`.
 
 Designed (not authored) scales: a uniform 15 000 lux illuminance per
 directional light — the authored `Color` carries each light's relative
@@ -233,23 +292,33 @@ weight, exactly as the original's per-channel diffuse contribution —
 and a fixed `GlobalAmbientLight::brightness` of 2 000 anchored so the
 typical authored day ambient (~30/255 lum) lands near the previous
 fixed ambient (~300 effective). Consequence to keep honest: authored
-night ambients are *brighter* than day ones (grey-80 vs 30-blue), and
-no fog exists yet (`.ltNN` authors none — the fog/darkness parameters
-live elsewhere, UNK-24), so `rainy-night` renders pastel-bright rather
-than dark. That is the authored data plus the deferred fog leg, not a
-preset-selection bug.
+night ambients are *brighter* than day ones (grey-80 vs 30-blue), so a
+night preset still renders lighter than a real night inside the fog's
+near band — authored data, not a preset-selection bug. The sky itself
+is not fogged yet (no `.sky` dome is spawned — the clear colour stays
+a designed blue while geometry fogs to the authored colour, visibly
+mismatched on foggy presets until the dome leg lands).
 
 Retail evidence (fingerprinted install, 2026-09-22): `sf.lt00` →
 `clear-morning`, `sf.lt06` → `foggy-noon`, `sf.lt15` → `rainy-night`,
 `london.lt05` → `cloudy-noon` bound through the real path
 (`environment lighting bound` log + `env=` smoke field); rendered
 captures at a frozen `--cam` show visibly different lighting per
-preset; `--weather 4` exits 2. Synthetic tests cover the slot map,
-authored-event precedence, the fallback report and validation-issue
-counting.
+preset; `--weather 4` exits 2. Fog (same install): headless runs
+record `env=lt00(clear-morning) fog=650-1000` on sf and `fog=220-320`
+on london — each city's own authored band; a frozen-`--cam` capture
+pair at sf `foggy-noon` (authored 10–120 m) vs `clear-noon`
+(600–1000 m) shows the skyline dissolving into the authored grey
+versus fully resolved. Synthetic tests cover the slot map,
+authored-event precedence, the fallback report, validation-issue
+counting, the fog row's camera binding, the authored-event fog
+precedence, and the missing/degenerate diagnostics.
 
 Still not consumed (UNK-24 stays open): `.sky` dome geometry and its
-three floats, fog parameters of any source, `.cpvs` variant selection
-and PVS culling, `.ldef` rows, `.pvshist` weights, `.lmap` values,
-`.water`, precipitation/wetness/audio effects (F18-B/C scope), and
-authoritative network replication of conditions (F18 req 5).
+three floats, `.cpvs` variant selection and PVS culling, `.ldef`
+rows, `.pvshist` weights, `.lmap` values, `.water`,
+precipitation/wetness/audio effects (F18-B/C scope), and
+authoritative network replication of conditions (F18 req 5). The fog
+curve's exact original shape (the linear reading is inferred), any
+per-weather `.cpvs` variant switching the recovered `lvlSky` may
+drive, and `sf_fog_orig.csv`'s role also stay open.

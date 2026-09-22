@@ -1,12 +1,14 @@
-//! F18-A.2 environment lighting integration: an authored `.ltNN` preset
-//! binding through the real `load_session_world` path — session-legal
-//! condition selection, authored-event precedence and the missing-file
-//! fallback diagnostic — over a synthetic one-room city.
+//! F18-A.2/.3 environment binding integration: authored `.ltNN` presets
+//! and `city/<stem>_fog.csv` rows through the real `load_session_world`
+//! path — session-legal condition selection, authored-event precedence
+//! and the missing/degenerate-content diagnostics — over a synthetic
+//! one-room city.
 
 use std::path::Path;
 use std::time::Duration;
 
 use avian3d::prelude::*;
+use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::environment::{ConditionsSource, EnvironmentReport};
@@ -143,6 +145,41 @@ fn city_install() -> tempfile::TempDir {
     )
     .unwrap();
     tmp
+}
+
+/// A synthetic `city/<stem>_fog.csv` — the retail 16-row grammar with
+/// self-authored values distinct per slot (`row i` = rgb 10+i/20+i/30+i,
+/// start 100+i, end 900+i, label `slot-i`).
+fn fog_table(rows: &[(u8, u8, u8, i32, i32); 16]) -> String {
+    let mut s =
+        String::from("fog red,fog green,fog blue,fog start,fog end,description (ignored)\n");
+    for (i, (r, g, b, start, end)) in rows.iter().enumerate() {
+        s.push_str(&format!("{r},{g},{b},{start},{end},slot-{i}\n"));
+    }
+    s
+}
+
+fn fog_rows() -> [(u8, u8, u8, i32, i32); 16] {
+    let mut rows = [(0u8, 0u8, 0u8, 0i32, 0i32); 16];
+    for (i, r) in rows.iter_mut().enumerate() {
+        *r = (
+            10 + i as u8,
+            20 + i as u8,
+            30 + i as u8,
+            100 + i as i32,
+            900 + i as i32,
+        );
+    }
+    rows
+}
+
+/// The `DistanceFog` components on the session's 3D cameras.
+fn camera_fogs(app: &mut App) -> Vec<DistanceFog> {
+    app.world_mut()
+        .query_filtered::<&DistanceFog, With<Camera3d>>()
+        .iter(app.world())
+        .cloned()
+        .collect()
 }
 
 const MM_HEADER: &str = "Description, CarType, TimeofDay, Weather, Opponents, Cops, Ambient, Peds, NumLaps, TimeLimit, Difficulty, CarType, TimeofDay, Weather, Opponents, Cops, Ambient, Peds, NumLaps, TimeLimit, Difficulty";
@@ -283,7 +320,7 @@ fn configured_conditions_bind_the_authored_preset() {
     assert_eq!(report.name.as_deref(), Some("clear-evening"));
     assert_eq!(report.source, ConditionsSource::Configured);
     assert!(!report.fallback);
-    assert_eq!(report.smoke_detail(), "lt08(clear-evening)");
+    assert_eq!(report.smoke_detail(), "lt08(clear-evening) fog=none");
 
     // Three authored lights: the key casts shadows, the fills do not.
     let all = lights(&mut app);
@@ -337,13 +374,18 @@ fn missing_preset_reports_the_fallback() {
     assert_eq!(report.path, "city/test.lt07");
     assert!(report.fallback);
     assert_eq!(report.name, None);
-    assert_eq!(report.smoke_detail(), "lt07(fallback)");
+    assert_eq!(report.smoke_detail(), "lt07(fallback) fog=none");
+    // No `city/test_fog.csv` either — the absence is explicit, not a
+    // silent default.
+    assert!(report.fog.bound.is_none());
+    assert_eq!(report.fog.absent, Some("missing"));
 
     // The fallback rig is the pre-preset single sun + fixed ambient.
     let all = lights(&mut app);
     assert_eq!(all.len(), 1);
     let ambient = app.world().resource::<GlobalAmbientLight>();
     assert_eq!(ambient.brightness, 400.0);
+    assert!(camera_fogs(&mut app).is_empty());
 }
 
 /// An authored event's conditions win over the session's configured
@@ -448,4 +490,95 @@ fn off_schema_fields_count_as_issues_not_fallback() {
     assert!(!report.fallback);
     assert_eq!(report.issues, 1, "the unknown SepiaTone field");
     assert_eq!(lights(&mut app).len(), 3);
+}
+
+/// The authored `city/<stem>_fog.csv` row for the session's slot binds
+/// a linear `DistanceFog` on both 3D cameras — colour and clip
+/// distances verbatim — and the report records the binding (F18-A.3).
+#[test]
+fn authored_fog_binds_onto_the_cameras() {
+    let tmp = city_install();
+    write(tmp.path(), "city/test_fog.csv", fog_table(&fog_rows()));
+    // Configured (tod 2, weather 0) → slot 8 → row (18, 28, 38, 108, 908).
+    let config = city_config(mm2_game::SessionConditions {
+        time_of_day: TimeOfDay::new(2).unwrap(),
+        weather: Weather::new(0).unwrap(),
+    });
+    let mut app = city_app(config, vfs_of(tmp.path()));
+    app.update();
+    assert!(matches!(
+        app.world().resource::<Session>().phase(),
+        SessionPhase::Playing
+    ));
+
+    let report = app.world().resource::<EnvironmentReport>();
+    assert_eq!(report.slot, 8);
+    assert_eq!(report.fog.path, "city/test_fog.csv");
+    let bound = report.fog.bound.expect("slot 8's row binds");
+    assert_eq!(bound.color, [18.0, 28.0, 38.0]);
+    assert_eq!(bound.start, 108.0);
+    assert_eq!(bound.end, 908.0);
+    assert_eq!(report.fog.absent, None);
+    assert_eq!(report.smoke_detail(), "lt08(fallback) fog=108-908");
+
+    let fogs = camera_fogs(&mut app);
+    assert_eq!(fogs.len(), 2, "chase + free cameras both fogged");
+    for fog in &fogs {
+        let FogFalloff::Linear { start, end } = fog.falloff.clone() else {
+            panic!("authored distances bind as a linear falloff");
+        };
+        assert_eq!(start, 108.0);
+        assert_eq!(end, 908.0);
+        let c = fog.color.to_srgba();
+        assert!((c.red - 18.0 / 255.0).abs() < 1e-3);
+        assert!((c.green - 28.0 / 255.0).abs() < 1e-3);
+        assert!((c.blue - 38.0 / 255.0).abs() < 1e-3);
+        assert_eq!(fog.directional_light_color, Color::NONE);
+    }
+}
+
+/// The fog channel follows the *effective* slot, not the configured
+/// one: the authored event row (tod 1, weather 2 → slot 6) selects fog
+/// row 6 even though the configured conditions point at slot 15.
+#[test]
+fn authored_event_conditions_select_the_fog_row() {
+    let tmp = city_install();
+    write_event(tmp.path());
+    write(tmp.path(), "city/test_fog.csv", fog_table(&fog_rows()));
+    let config = SessionConfig {
+        mode: SessionMode::Event(EventRef {
+            city: "test".into(),
+            table: EventTableKind::Checkpoint,
+            index: 0,
+        }),
+        ..city_config(SessionConditions::default())
+    };
+    let mut app = city_app(config, vfs_of(tmp.path()));
+    app.update();
+
+    let report = app.world().resource::<EnvironmentReport>();
+    assert_eq!(report.slot, 6, "the authored row's tod 1 ×4 + weather 2");
+    let bound = report.fog.bound.expect("slot 6's row binds");
+    assert_eq!((bound.start, bound.end), (106.0, 906.0));
+}
+
+/// A table whose selected row cannot interpolate (`end <= start`)
+/// binds nothing and says so — the validation issue is counted, the
+/// cameras stay unfogged.
+#[test]
+fn degenerate_fog_row_binds_nothing() {
+    let tmp = city_install();
+    let mut rows = fog_rows();
+    rows[0] = (10, 20, 30, 500, 500); // slot 0: end == start
+    write(tmp.path(), "city/test_fog.csv", fog_table(&rows));
+    let config = city_config(SessionConditions::default());
+    let mut app = city_app(config, vfs_of(tmp.path()));
+    app.update();
+
+    let report = app.world().resource::<EnvironmentReport>();
+    assert!(report.fog.bound.is_none());
+    assert_eq!(report.fog.absent, Some("degenerate"));
+    assert_eq!(report.fog.issues, 1, "the DegenerateBand finding");
+    assert_eq!(report.smoke_detail(), "lt00(fallback) fog=none");
+    assert!(camera_fogs(&mut app).is_empty());
 }

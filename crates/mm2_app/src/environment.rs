@@ -13,19 +13,31 @@
 //!   [`LightSpec::travel_dir`]); colours are authored verbatim. Only the
 //!   key casts shadows (designed — the fills stand in for bounce light).
 //! - `Ambient` → [`GlobalAmbientLight`] from the BGRA-packed colour.
+//! - `city/<stem>_fog.csv` → the session's [`DistanceFog`]: the authored
+//!   per-preset table whose row index is the same `tod*4 + weather`
+//!   slot, verified against mm2hook's recovered `lvlSky`
+//!   (`FogColors[16]`/`FogNearClip[16]`/`FogFarClip[16]` indexed by
+//!   `TimeWeatherType`). `fog start`/`fog end` bind as a linear
+//!   `FogFalloff` — the clip distances the field names describe
+//!   (inferred curve shape; the values are authored).
 //!
 //! The illuminance/ambient-brightness scales are designed mappings —
 //! the authored colours carry the relative weight, the constants anchor
 //! the rig to the lighting level the city used before presets bound
 //! (the previous fixed 15 000 lux sun). A missing or unparseable preset
 //! spawns that same pre-preset rig and reports `fallback` — an explicit
-//! diagnostic (F18-AC06), never a silent default.
+//! diagnostic (F18-AC06), never a silent default. The fog channel is
+//! independent: a preset that fell back still binds its fog row, and a
+//! missing/unparseable/degenerate fog table binds nothing with the
+//! reason recorded in [`FogReport::absent`].
 //!
-//! Deferred: `.sky` dome geometry, fog parameters (none are authored in
-//! `.ltNN`), `.cpvs` PVS culling, `.lmap`/`.ldef` semantics — UNK-24.
+//! Deferred: `.sky` dome geometry, `.cpvs` PVS culling,
+//! `.lmap`/`.ldef` semantics — UNK-24.
 
+use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 use mm2_assets::Vfs;
+use mm2_formats::fog::FogTable;
 use mm2_formats::lighting::{LightSpec, LightingPreset};
 use mm2_game::{SessionConditions, SessionEntity};
 use tracing::{info, warn};
@@ -74,14 +86,71 @@ pub struct EnvironmentReport {
     /// `LightingPreset::validate()` findings (warned; authored anomalies
     /// do not block a preset).
     pub issues: usize,
+    /// The session's authored fog binding (`city/<stem>_fog.csv` row
+    /// `slot`), or the explicit reason none bound.
+    pub fog: FogReport,
+}
+
+/// The authored fog row bound for the session, if any.
+#[derive(Debug, Clone)]
+pub struct FogReport {
+    /// Logical path the table was read from (or attempted at).
+    pub path: String,
+    /// The bound authored row — `None` when [`Self::absent`] names why.
+    pub bound: Option<FogSpec>,
+    /// `FogTable::diagnostics` + `FogTable::validate()` findings
+    /// (warned; authored anomalies do not block the row's binding).
+    pub issues: usize,
+    /// Why no fog bound — `"missing"`, `"unparseable"`,
+    /// `"no row for slot"` or `"degenerate"` — `None` when bound.
+    pub absent: Option<&'static str>,
+}
+
+/// One authored fog row, ready to bind.
+#[derive(Debug, Clone, Copy)]
+pub struct FogSpec {
+    /// Authored colour channels (0-255, clamped at bind).
+    pub color: [f32; 3],
+    /// Near clip distance the fog starts at (metres).
+    pub start: f32,
+    /// Far clip distance the fog is opaque at (metres).
+    pub end: f32,
+}
+
+impl FogSpec {
+    /// The camera component form: a linear `FogFalloff` between the
+    /// authored `fog start`/`fog end` clip distances — the fixed-function
+    /// fog the recovered `FogNearClip`/`FogFarClip` fields describe
+    /// (curve shape inferred; the values are authored). The directional
+    /// glow stays disabled (`Color::NONE`) — the tables carry no
+    /// directional data.
+    pub fn distance_fog(self) -> DistanceFog {
+        DistanceFog {
+            color: Color::srgb(
+                self.color[0] / 255.0,
+                self.color[1] / 255.0,
+                self.color[2] / 255.0,
+            ),
+            falloff: FogFalloff::Linear {
+                start: self.start,
+                end: self.end,
+            },
+            ..default()
+        }
+    }
 }
 
 impl EnvironmentReport {
     /// The smoke record's `env=` field, e.g. `lt04(clear-noon)` or
-    /// `lt07(fallback)`.
+    /// `lt07(fallback)`, followed by ` fog=<start>-<end>` when an
+    /// authored fog row bound or ` fog=none` when it did not.
     pub fn smoke_detail(&self) -> String {
         let tag = self.name.as_deref().unwrap_or("fallback");
-        format!("lt{:02}({tag})", self.slot)
+        let fog = match &self.fog.bound {
+            Some(f) => format!(" fog={}-{}", f.start, f.end),
+            None => " fog=none".to_string(),
+        };
+        format!("lt{:02}({tag}){fog}", self.slot)
     }
 }
 
@@ -151,6 +220,7 @@ pub fn spawn_environment(
     let slot = conditions.time_of_day.get() as usize * 4 + conditions.weather.get() as usize;
     let base = psdl_path.strip_suffix(".psdl").unwrap_or(psdl_path);
     let path = format!("{base}.lt{slot:02}");
+    let fog_path = format!("{base}_fog.csv");
     let mut report = EnvironmentReport {
         slot,
         path: path.clone(),
@@ -158,6 +228,12 @@ pub fn spawn_environment(
         source,
         fallback: false,
         issues: 0,
+        fog: FogReport {
+            path: fog_path,
+            bound: None,
+            issues: 0,
+            absent: None,
+        },
     };
 
     let preset = match vfs.read_path(&path) {
@@ -200,6 +276,61 @@ pub fn spawn_environment(
         None => {
             report.fallback = true;
             spawn_fallback_lights(commands, owner);
+        }
+    }
+
+    // `city/<stem>_fog.csv` — the authored per-preset fog table, indexed
+    // by the same slot as the lighting preset (the `lvlSky` arrays it
+    // fills are per `TimeWeatherType`). The fog channel is independent
+    // of the lighting one: a preset that fell back still binds its row.
+    let fog_path = report.fog.path.clone();
+    match vfs.read_path(&fog_path) {
+        Ok((bytes, _)) => match FogTable::parse(&String::from_utf8_lossy(&bytes)) {
+            Ok(table) => {
+                report.fog.issues = table.diagnostics.len();
+                for d in &table.diagnostics {
+                    warn!(path = %fog_path, diagnostic = %d, "fog table diagnostic");
+                }
+                let issues = table.validate();
+                report.fog.issues += issues.len();
+                for i in &issues {
+                    warn!(path = %fog_path, issue = ?i, "fog table validation issue");
+                }
+                match table.row(slot) {
+                    Some(row) => {
+                        // Bind eligibility: the row must interpolate a
+                        // finite 0..end band (validate() already counted
+                        // the offender; a degenerate row binds nothing).
+                        let eligible = row.color.iter().all(|c| c.is_finite())
+                            && row.start.is_finite()
+                            && row.end.is_finite()
+                            && row.start >= 0.0
+                            && row.end > row.start;
+                        if eligible {
+                            report.fog.bound = Some(FogSpec {
+                                color: row.color.map(|c| c.clamp(0.0, 255.0)),
+                                start: row.start,
+                                end: row.end,
+                            });
+                        } else {
+                            warn!(path = %fog_path, slot, "fog row is degenerate — no fog bound");
+                            report.fog.absent = Some("degenerate");
+                        }
+                    }
+                    None => {
+                        warn!(path = %fog_path, slot, "fog table has no row for this slot");
+                        report.fog.absent = Some("no row for slot");
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(path = %fog_path, error = %e, "fog table failed to parse");
+                report.fog.absent = Some("unparseable");
+            }
+        },
+        Err(e) => {
+            warn!(path = %fog_path, error = %e, "fog table unavailable");
+            report.fog.absent = Some("missing");
         }
     }
     report
