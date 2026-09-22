@@ -9,7 +9,12 @@
 //! `vehCarDamage::Update()` is a binary thunk, so the emission gate,
 //! cadence and per-field interpretation are designed policy (DSN-24);
 //! the pivots, the particle field values and the atlas/tile vocabulary
-//! are authored. `TextelDamageRadius` and the recovered `ImpactsTable`
+//! are authored.
+//!
+//! The same record owns the recovered `asLineSparks` impact-spark
+//! renderer ([`VehicleSparks`]/[`Spark`], DSN-26): bursts draw off the
+//! deduplicated [`crate::ImpactEvent`] stream at the authored contact
+//! point. `TextelDamageRadius` and the recovered `ImpactsTable`
 //! texel-damage leg stay unconsumed here (still UNK-13).
 
 use bevy::prelude::*;
@@ -383,5 +388,206 @@ impl SmokePuff {
             ((c >> 8) & 0xff) as f32 / 255.0,
             (c & 0xff) as f32 / 255.0,
         ]
+    }
+}
+
+/// Designed burst policy for impact sparks (DSN-26). MM2Hook's
+/// recovered `vehCarDamage` owns a per-vehicle `asLineSparks`
+/// renderer fired from the car's impact callback — the primitive is
+/// `RadialBlast(count, radius, velocity)`, a radial burst at the
+/// impact point. The ownership, the impact feed and the `spark.tga`
+/// texture are authored/recovered; the struct's `SparkMultiplier` is
+/// runtime state no retail tune record authors, so burst sizing,
+/// velocities, life and the live bound here are designed values
+/// (UNK-13 stands for the original's shape).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SparkPolicy {
+    /// Sparks per m/s of approach speed — the burst grows with the
+    /// hit, like the recovered per-impact blast (designed).
+    pub sparks_per_speed: f32,
+    /// Burst floor once an impact reports (designed).
+    pub min_burst: usize,
+    /// Burst ceiling per impact (designed bound).
+    pub max_burst: usize,
+    /// Live-spark bound per vehicle (designed — F05-AC03 bounded
+    /// cleanup: impacts can never flood the world).
+    pub max_live: usize,
+    /// Spark exit speed along the rebound direction, m/s (designed).
+    pub speed: f32,
+    /// ± jitter on the exit speed (designed).
+    pub speed_var: f32,
+    /// Cone half-angle off the rebound direction, radians — drawn as
+    /// a uniform lateral jitter of this magnitude (designed).
+    pub spread: f32,
+    /// Seconds a spark streak lives (designed — the recovered struct
+    /// carries no authored spark life).
+    pub life: f32,
+    /// ± jitter on the life (designed).
+    pub life_var: f32,
+    /// Streak length at unit speed, metres — the render side scales
+    /// it by exit speed (designed presentation).
+    pub length: f32,
+    /// Downward pull on live sparks, m/s² (designed).
+    pub gravity: f32,
+}
+
+impl Default for SparkPolicy {
+    fn default() -> Self {
+        Self {
+            sparks_per_speed: 0.8,
+            min_burst: 2,
+            max_burst: 16,
+            max_live: 128,
+            speed: 7.0,
+            speed_var: 3.0,
+            spread: 0.8,
+            life: 0.5,
+            life_var: 0.2,
+            length: 0.04,
+            gravity: 9.8,
+        }
+    }
+}
+
+impl SparkPolicy {
+    /// Burst size for an impact of `severity` m/s — the designed
+    /// `SparkMultiplier` stand-in. A non-finite or non-positive
+    /// severity bursts nothing: a malformed feed produces no sparks
+    /// rather than an arbitrary spray.
+    pub fn burst_count(&self, severity: f32) -> usize {
+        if !(severity.is_finite() && severity > 0.0) {
+            return 0;
+        }
+        (self.min_burst as f32 + severity * self.sparks_per_speed)
+            .clamp(self.min_burst as f32, self.max_burst as f32) as usize
+    }
+}
+
+/// Component: the per-vehicle spark rig — the `asLineSparks*`
+/// `vehCarDamage` owns. Only the deterministic RNG stream and the
+/// designed policy live here; the impact feed arrives as
+/// [`crate::ImpactEvent`]s the app consumes.
+#[derive(Component)]
+pub struct VehicleSparks {
+    /// Emission policy — designed (DSN-26).
+    pub policy: SparkPolicy,
+    rng: NavRng,
+}
+
+impl VehicleSparks {
+    /// `seed` must be session-stable (the vehicle's object id) so a
+    /// burst replays identically — replicable by construction
+    /// (F05 req 6).
+    pub fn new(policy: SparkPolicy, seed: u64) -> Self {
+        Self {
+            policy,
+            rng: NavRng::new(seed),
+        }
+    }
+
+    /// Draw one burst for an impact at `point` whose contact normal
+    /// toward this vehicle is `outward` — the `RadialBlast` reading:
+    /// sparks leave the contact point sprayed away from the surface
+    /// the vehicle struck. `live` is the vehicle's current spark
+    /// count; `max_live` bounds the pool and may cut the burst short.
+    /// Returns the [`Spark`] components to spawn (empty when the
+    /// severity draws no sparks or the pool is full).
+    pub fn burst(
+        &mut self,
+        point: Vec3,
+        outward: Vec3,
+        severity: f32,
+        live: usize,
+        emitter: Entity,
+    ) -> Vec<Spark> {
+        let count = self
+            .policy
+            .burst_count(severity)
+            .min(self.policy.max_live.saturating_sub(live));
+        if count == 0 {
+            return Vec::new();
+        }
+        // A degenerate normal falls back to straight up — a malformed
+        // feed sprays harmlessly rather than NaN-ing the streaks.
+        let dir = outward.try_normalize().unwrap_or(Vec3::Y);
+        let spread = Vec3::splat(self.policy.spread.max(0.0));
+        (0..count)
+            .map(|_| {
+                let velocity = (dir + self.jitter3(Vec3::ZERO, spread))
+                    .try_normalize()
+                    .unwrap_or(dir)
+                    * (self.jitter(self.policy.speed, self.policy.speed_var)).max(0.0);
+                Spark {
+                    emitter,
+                    position: point,
+                    velocity,
+                    age: 0.0,
+                    life: self
+                        .jitter(self.policy.life, self.policy.life_var)
+                        .max(0.01),
+                    length: self.policy.length,
+                    gravity: self.policy.gravity,
+                }
+            })
+            .collect()
+    }
+
+    fn jitter(&mut self, v: f32, var: f32) -> f32 {
+        v + (self.rng.next_f32() * 2.0 - 1.0) * var
+    }
+
+    fn jitter3(&mut self, v: Vec3, var: Vec3) -> Vec3 {
+        Vec3::new(
+            self.jitter(v.x, var.x),
+            self.jitter(v.y, var.y),
+            self.jitter(v.z, var.z),
+        )
+    }
+}
+
+/// Component: one live spark streak — the entity itself is the
+/// particle, like [`SmokePuff`]. [`Spark::advance`] integrates the
+/// designed trajectory; the render side owns the velocity-aligned
+/// streak transform and fade.
+#[derive(Component, Debug, Clone)]
+pub struct Spark {
+    /// The vehicle entity that emitted this spark — pool accounting
+    /// (the `max_live` bound counts sparks per emitter).
+    pub emitter: Entity,
+    /// World-space position — integrated each step.
+    pub position: Vec3,
+    /// World-space velocity — gravity drains the +Y part.
+    pub velocity: Vec3,
+    pub age: f32,
+    pub life: f32,
+    /// Streak length per m/s of speed, metres (designed).
+    pub length: f32,
+    /// Designed downward pull, m/s².
+    pub gravity: f32,
+}
+
+impl Spark {
+    /// Integrate one step — gravity pulls the streak down, position
+    /// follows velocity. Returns `false` past `life` — the caller
+    /// despawns. A non-positive/non-finite `dt` accrues nothing.
+    pub fn advance(&mut self, dt: f32) -> bool {
+        if dt.is_finite() && dt > 0.0 {
+            self.velocity.y -= self.gravity * dt;
+            self.position += self.velocity * dt;
+            self.age += dt;
+        }
+        self.age < self.life
+    }
+
+    /// Streak length, metres — speed-scaled, floored at the policy
+    /// length so a gravity-stalled spark still reads as a fleck.
+    pub fn streak(&self) -> f32 {
+        (self.velocity.length() * self.length).max(self.length)
+    }
+
+    /// Fade in 0..1 — designed linear burn-down over `life` (the
+    /// recovered struct carries no authored spark fade).
+    pub fn alpha(&self) -> f32 {
+        (1.0 - self.age / self.life).clamp(0.0, 1.0)
     }
 }

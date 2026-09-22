@@ -292,6 +292,7 @@ fn event_app(config: SessionConfig, vfs: Vfs) -> App {
         .init_resource::<mm2_app::breakaway::BreakReport>()
         .init_resource::<mm2_app::recovery::RecoveryReport>()
         .init_resource::<mm2_app::damage_fx::SmokeFxReport>()
+        .init_resource::<mm2_app::spark_fx::SparkFxReport>()
         .init_resource::<ResultLedger>()
         .init_resource::<SessionControl>()
         .init_resource::<ButtonInput<KeyCode>>()

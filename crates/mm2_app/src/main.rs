@@ -20,7 +20,7 @@ use mm2_app::session::{ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, 
 use mm2_app::{
     banger, breakaway, camera, car_visual, city, contracts, damage, damage_fx, input, menu,
     nav_overlay, opponents, pause, profile, progression, race, recovery, results, scripted,
-    session, smoke, stuck, traffic,
+    session, smoke, spark_fx, stuck, traffic,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
@@ -810,6 +810,7 @@ fn main() {
     .init_resource::<breakaway::BreakReport>()
     .init_resource::<recovery::RecoveryReport>()
     .init_resource::<damage_fx::SmokeFxReport>()
+    .init_resource::<spark_fx::SparkFxReport>()
     .init_resource::<mm2_game::ResultLedger>()
     .init_resource::<mm2_game::BangerPool>()
     .init_resource::<SessionControl>()
@@ -964,6 +965,14 @@ fn main() {
     .add_systems(
         Update,
         (damage_fx::drive_smoke, damage_fx::advance_smoke).chain(),
+    )
+    // F05-B.8: authored impact sparks — emission consumes the
+    // deduplicated impact stream the FixedLast systems publish, then
+    // the advance step integrates the streaks it just spawned. Same
+    // schedule slot and `is_playing` gate as the smoke pair.
+    .add_systems(
+        Update,
+        (spark_fx::emit_sparks, spark_fx::advance_sparks).chain(),
     )
     // F16-B: drain authoritative results into the bound profile —
     // records finishes, grants rewards, saves on change. Inert without

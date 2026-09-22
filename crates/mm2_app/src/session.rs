@@ -35,9 +35,9 @@ use mm2_content::VehicleDef;
 use mm2_game::{
     BangerPool, BreakPartSpec, DEFAULT_ACTIVE_POOL, DamageSignals, DamageSpec, Mm2Vfs,
     ObjectIdentity, Player, PlayerControl, PlayerVehicle, RaceDefinition, RaceProgress, RaceState,
-    RecoveryPolicy, Session, SessionEntity, SessionMode, SessionPhase, SmokePolicy, StuckSpec,
-    TargetSelection, VehicleBreaks, VehicleDamage, VehicleRecovery, VehicleSmoke, VehicleStuck,
-    WorldMode,
+    RecoveryPolicy, Session, SessionEntity, SessionMode, SessionPhase, SmokePolicy, SparkPolicy,
+    StuckSpec, TargetSelection, VehicleBreaks, VehicleDamage, VehicleRecovery, VehicleSmoke,
+    VehicleSparks, VehicleStuck, WorldMode,
 };
 use mm2_vehicle::{TireConditions, VehicleConfig, vehicle_bundle};
 use tracing::{error, info, warn};
@@ -198,6 +198,7 @@ pub fn drive_session(
     mut break_report: ResMut<crate::breakaway::BreakReport>,
     mut recovery_report: ResMut<crate::recovery::RecoveryReport>,
     mut smoke_fx_report: ResMut<crate::damage_fx::SmokeFxReport>,
+    mut spark_fx_report: ResMut<crate::spark_fx::SparkFxReport>,
     mut spawn: ResMut<SpawnPoint>,
     menu: Option<Res<crate::menu::MenuShell>>,
     roots: Query<Entity, (With<SessionEntity>, Without<ChildOf>)>,
@@ -217,6 +218,7 @@ pub fn drive_session(
             break_report.reset();
             recovery_report.reset();
             smoke_fx_report.reset();
+            spark_fx_report.reset();
             spawn.trailers.clear();
             // Session-scoped resources die with the session: a race's
             // countdown/clock/progress, its reward/report view and the
@@ -229,6 +231,7 @@ pub fn drive_session(
             commands.remove_resource::<crate::traffic::AmbientTraffic>();
             commands.remove_resource::<mm2_content::SurfaceTables>();
             commands.remove_resource::<crate::damage_fx::SmokeFx>();
+            commands.remove_resource::<crate::spark_fx::SparkFx>();
             // `TireConditions` stays: it is a system input (the impact
             // filter and telemetry read `Res` every frame), and
             // `load_session_world` re-stamps it from the next session's
@@ -532,6 +535,16 @@ pub fn load_session_world(
             SmokePolicy::default().atlas_tiles,
         ),
     });
+    // F05-B.8: the spark streak assets — `spark.tga` through the same
+    // VFS path; a missing texture warns and emits untextured streaks.
+    commands.insert_resource(crate::spark_fx::SparkFx {
+        assets: crate::spark_fx::spark_assets(
+            &vfs.0,
+            &mut assets.meshes,
+            &mut assets.images,
+            &mut assets.materials,
+        ),
+    });
     if world_ok {
         session
             .transition(SessionPhase::Ready)
@@ -706,6 +719,13 @@ pub fn load_session_world(
                 commands.entity(vehicle).insert(VehicleSmoke::new(
                     d,
                     SmokePolicy::default(),
+                    (vehicle_object.generation << 32) | vehicle_object.slot as u64,
+                ));
+                // F05-B.8: the authored damage record also owns the
+                // impact-spark renderer (`asLineSparks`) — same seed
+                // domain, same authored-presence gate (DSN-26).
+                commands.entity(vehicle).insert(VehicleSparks::new(
+                    SparkPolicy::default(),
                     (vehicle_object.generation << 32) | vehicle_object.slot as u64,
                 ));
             }

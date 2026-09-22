@@ -200,6 +200,7 @@ pub fn headless_smoke(
         .init_resource::<crate::breakaway::BreakReport>()
         .init_resource::<crate::recovery::RecoveryReport>()
         .init_resource::<crate::damage_fx::SmokeFxReport>()
+        .init_resource::<crate::spark_fx::SparkFxReport>()
         .init_resource::<mm2_game::ResultLedger>()
         .init_resource::<mm2_game::BangerPool>()
         .init_resource::<session::SessionControl>()
@@ -282,6 +283,13 @@ pub fn headless_smoke(
                 (
                     crate::damage_fx::drive_smoke,
                     crate::damage_fx::advance_smoke,
+                )
+                    .chain(),
+                // F05-B.8: authored impact sparks — the headless
+                // record's `spk=` field reads the report.
+                (
+                    crate::spark_fx::emit_sparks,
+                    crate::spark_fx::advance_sparks,
                 )
                     .chain(),
                 // F16-B: the same result → profile consumption the
@@ -639,6 +647,13 @@ pub fn headless_smoke(
         .filter(|r| r.impaired + r.restored > 0)
         .map(|r| format!(" imp={}i/{}r", r.impaired, r.restored))
         .unwrap_or_default();
+    // F05-B.8 spark evidence: bursts/emitted/expired counts. Same
+    // presence rule — an impact-free run stays bit-identical.
+    let spk_detail = world_ecs
+        .get_resource::<crate::spark_fx::SparkFxReport>()
+        .filter(|r| r.bursts + r.emitted + r.expired > 0)
+        .map(|r| format!(" spk={}b/{}e/{}x", r.bursts, r.emitted, r.expired))
+        .unwrap_or_default();
     // The dev `--traction` modifier is recorded when set so a wetness
     // run is self-describing; unmodified runs stay bit-identical.
     let traction_detail = config
@@ -655,7 +670,7 @@ pub fn headless_smoke(
         .unwrap_or_default();
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{nav_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{traction_detail}{profile_detail}{extra}",
+            "updates={frames} ticks={ticks} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{nav_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{traction_detail}{profile_detail}{extra}",
             driver.as_str(),
             session.phase().name(),
             moved = pos.map(|p| (p - spawn_pos).length()).unwrap_or(f32::NAN),

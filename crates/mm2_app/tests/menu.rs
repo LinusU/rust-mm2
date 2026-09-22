@@ -303,6 +303,7 @@ fn menu_app(dir: &Path, store: Option<ProfileStore>) -> App {
         .init_resource::<mm2_app::breakaway::BreakReport>()
         .init_resource::<mm2_app::recovery::RecoveryReport>()
         .init_resource::<mm2_app::damage_fx::SmokeFxReport>()
+        .init_resource::<mm2_app::spark_fx::SparkFxReport>()
         .init_resource::<ResultLedger>()
         .init_resource::<BangerPool>()
         .init_resource::<SessionControl>()

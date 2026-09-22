@@ -2,10 +2,17 @@
 //! emission policy/gate and the puff integrator. The gate/cadence and
 //! field readings are designed policy (DSN-24); these tests pin the
 //! contract, not original behavior.
+//!
+//! F05-B.8 coverage for the `asLineSparks` impact-spark rig lives at
+//! the bottom: burst sizing, deterministic draws, the live bound and
+//! the streak integrator — all designed policy (DSN-26).
 
+use bevy::prelude::Vec3;
 use mm2_formats::tune::TuneFile;
 use mm2_formats::veh::VehCarDamage;
-use mm2_game::{DamageSpec, SmokePolicy, SmokePuff, VehicleSmoke};
+use mm2_game::{
+    DamageSpec, SmokePolicy, SmokePuff, Spark, SparkPolicy, VehicleSmoke, VehicleSparks,
+};
 
 /// A `vehCardamage` fixture shaped like the retail records — two
 /// authored pivots, the designed-ramp spec fields and a black
@@ -319,4 +326,127 @@ fn garbage_dt_emits_and_ages_nothing() {
     assert!(puff.advance(f32::NAN));
     assert_eq!(puff.position, before.position);
     assert_eq!(puff.age, 0.0);
+}
+
+// ---- F05-B.8: `asLineSparks` impact sparks (designed, DSN-26) ----
+
+fn sparks() -> VehicleSparks {
+    VehicleSparks::new(SparkPolicy::default(), 7)
+}
+
+#[test]
+fn burst_count_scales_with_severity_and_clamps() {
+    let p = SparkPolicy::default();
+    // A reportable touch draws the floor; severity grows the burst.
+    assert_eq!(p.burst_count(0.5), p.min_burst);
+    assert_eq!(
+        p.burst_count(5.0),
+        p.min_burst + (5.0 * p.sparks_per_speed) as usize
+    );
+    // The ceiling binds on a hard hit.
+    assert_eq!(p.burst_count(200.0), p.max_burst);
+    // Garbage produces nothing — a malformed feed sparks nothing.
+    assert_eq!(p.burst_count(f32::NAN), 0);
+    assert_eq!(p.burst_count(f32::INFINITY), 0);
+    assert_eq!(p.burst_count(0.0), 0);
+    assert_eq!(p.burst_count(-3.0), 0);
+}
+
+#[test]
+fn bursts_are_deterministic_and_bounded() {
+    let point = Vec3::new(1.0, 0.5, -2.0);
+    let outward = Vec3::new(0.0, 0.0, 1.0);
+    let e = bevy::prelude::Entity::PLACEHOLDER;
+
+    // Same seed → identical bursts (replicable by construction).
+    let a = sparks().burst(point, outward, 8.0, 0, e);
+    let b = sparks().burst(point, outward, 8.0, 0, e);
+    assert_eq!(a.len(), b.len());
+    for (x, y) in a.iter().zip(&b) {
+        assert_eq!(x.position, y.position);
+        assert_eq!(x.velocity, y.velocity);
+        assert_eq!(x.life, y.life);
+    }
+    // A different seed draws a different stream.
+    let c = VehicleSparks::new(SparkPolicy::default(), 8).burst(point, outward, 8.0, 0, e);
+    assert_ne!(
+        a.iter().map(|s| s.velocity.to_array()).collect::<Vec<_>>(),
+        c.iter().map(|s| s.velocity.to_array()).collect::<Vec<_>>()
+    );
+
+    // Every spark is born at the authored contact point, leaves in the
+    // rebound hemisphere and names its emitter.
+    for s in &a {
+        assert_eq!(s.position, point);
+        assert!(s.velocity.dot(outward) > 0.0, "{s:?}");
+        assert!(s.life > 0.0);
+        assert_eq!(s.emitter, e);
+    }
+
+    // The live bound truncates the burst instead of overflowing.
+    let p = SparkPolicy::default();
+    assert_eq!(
+        sparks().burst(point, outward, 8.0, p.max_live - 1, e).len(),
+        1
+    );
+    assert!(
+        sparks()
+            .burst(point, outward, 8.0, p.max_live, e)
+            .is_empty()
+    );
+    // A degenerate normal sprays harmlessly upward rather than NaN-ing.
+    for s in sparks().burst(point, Vec3::ZERO, 8.0, 0, e) {
+        assert!(s.velocity.is_finite(), "{s:?}");
+        assert!(s.velocity.y > 0.0, "{s:?}");
+    }
+    for s in sparks().burst(point, Vec3::NAN, 8.0, 0, e) {
+        assert!(s.velocity.is_finite(), "{s:?}");
+    }
+    // A zero-draw severity emits nothing and consumes no stream.
+    assert!(sparks().burst(point, outward, f32::NAN, 0, e).is_empty());
+}
+
+#[test]
+fn spark_advance_falls_and_expires() {
+    let mut s = Spark {
+        emitter: bevy::prelude::Entity::PLACEHOLDER,
+        position: Vec3::ZERO,
+        velocity: Vec3::new(1.0, 2.0, 0.0),
+        age: 0.0,
+        life: 0.5,
+        length: 0.04,
+        gravity: 10.0,
+    };
+    let dt = 0.1;
+    assert!(s.advance(dt));
+    // Gravity drains +Y; position follows velocity.
+    assert!((s.velocity.y - 1.0).abs() < 1e-5, "{s:?}");
+    assert!(s.position.x > 0.0, "{s:?}");
+    // Streak length tracks speed with the floor at `length`.
+    assert!(s.streak() >= s.length);
+    // Alpha burns down linearly.
+    assert!((s.alpha() - 0.8).abs() < 1e-4, "{s:?}");
+
+    // Expiry at `life`.
+    while s.advance(dt) {}
+    assert!(s.age >= s.life);
+    assert_eq!(s.alpha(), 0.0);
+
+    // Garbage dt accrues nothing.
+    let mut s = Spark {
+        emitter: bevy::prelude::Entity::PLACEHOLDER,
+        position: Vec3::ZERO,
+        velocity: Vec3::new(0.0, 1.0, 0.0),
+        age: 0.0,
+        life: 1.0,
+        length: 0.04,
+        gravity: 10.0,
+    };
+    let before = s.clone();
+    assert!(s.advance(0.0));
+    assert!(s.advance(-1.0));
+    assert!(s.advance(f32::NAN));
+    assert_eq!(s.position, before.position);
+    assert_eq!(s.velocity, before.velocity);
+    assert_eq!(s.age, 0.0);
 }

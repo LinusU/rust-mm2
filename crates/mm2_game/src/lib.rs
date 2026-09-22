@@ -44,7 +44,10 @@ pub use damage::{
     DISABLED_PENALTY_TICKS, DamageEvent, DamageSpec, DamageState, DamageTier, DamageVerdict,
     DisabledOutcome, ImpairmentPolicy, VehicleDamage, disabled_outcome,
 };
-pub use effects::{ParticleSpec, SmokeEmitter, SmokePolicy, SmokePuff, VehicleSmoke};
+pub use effects::{
+    ParticleSpec, SmokeEmitter, SmokePolicy, SmokePuff, Spark, SparkPolicy, VehicleSmoke,
+    VehicleSparks,
+};
 pub use ids::{AuthorityRole, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerId};
 pub use impact::{ImpactDedup, ImpactEvent, ImpactId, ImpactPolicy};
 pub use nav::{

@@ -85,8 +85,8 @@ use mm2_assets::Vfs;
 use mm2_game::{
     BreakPartSpec, DamageSignals, DamageSpec, ObjectIdentity, OpponentRoster, OpponentRoute,
     OpponentSpec, ParticipantState, Player, PlayerControl, RaceDefinition, RaceProgress, RaceState,
-    RecoveryPolicy, Session, SessionEntity, SmokePolicy, StuckSpec, VehicleBreaks, VehicleDamage,
-    VehicleRecovery, VehicleSmoke, VehicleStuck, relative_bearing,
+    RecoveryPolicy, Session, SessionEntity, SmokePolicy, SparkPolicy, StuckSpec, VehicleBreaks,
+    VehicleDamage, VehicleRecovery, VehicleSmoke, VehicleSparks, VehicleStuck, relative_bearing,
 };
 use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState, vehicle_bundle};
 use tracing::{info, warn};
@@ -643,6 +643,12 @@ pub fn spawn_opponents(
             commands.entity(vehicle).insert(VehicleSmoke::new(
                 d,
                 SmokePolicy::default(),
+                (object.generation << 32) | object.slot as u64,
+            ));
+            // F05-B.8: the authored record owns the impact-spark
+            // renderer too (DSN-26) — same seed domain.
+            commands.entity(vehicle).insert(VehicleSparks::new(
+                SparkPolicy::default(),
                 (object.generation << 32) | object.slot as u64,
             ));
         }

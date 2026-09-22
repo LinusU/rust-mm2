@@ -227,6 +227,7 @@ fn test_app(
         .init_resource::<mm2_app::breakaway::BreakReport>()
         .init_resource::<mm2_app::recovery::RecoveryReport>()
         .init_resource::<mm2_app::damage_fx::SmokeFxReport>()
+        .init_resource::<mm2_app::spark_fx::SparkFxReport>()
         .init_resource::<BangerPool>()
         .init_resource::<SessionControl>()
         .add_systems(FixedUpdate, advance_session_tick)

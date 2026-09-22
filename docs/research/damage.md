@@ -464,6 +464,70 @@ acceleration and a lower drag-equilibrium top speed. Whether the
 original scales torque, power, top speed directly, or something
 else entirely stays unverified.
 
+## Impact sparks (F05-B.8, designed — DSN-26)
+
+MM2Hook recovers a per-vehicle `asLineSparks* Sparks` on
+`vehCarDamage`, `Init`'d alongside the break groups and fired from
+the car's `ImpactCB` via
+`RadialBlast(count, Vector3 *radius, Vector3 *velocity)` — a radial
+burst at the impact point, one `m_Spark` trail per spark. The
+record's `SparkMultiplier`/`SparkFade` are runtime fields
+uninitialised by `Init` and `SparkMultiplier` is not authored on any
+retail tune record, so nothing authored bounds the burst shape; the
+exact count/velocity/cadence/texture choice are unrecovered
+(`vehCarDamage::Update()` is a thunk, UNK-13). The implemented
+policy is therefore designed on top of two recovered facts: the
+per-vehicle renderer and the impact feed.
+
+- `mm2_game::effects` — `SparkPolicy` + `VehicleSparks` ride on
+  every rigged participant (inserted where `vehcardamage` decodes,
+  same gate as `VehicleSmoke`; absent where the record is absent).
+  Each deduplicated `ImpactEvent` delivers a burst at its authored
+  contact `point`: `min_burst` 2 + `sparks_per_speed` 0.8/m/s of
+  `severity`, ceiling `max_burst` 16, per-vehicle `max_live` 128.
+  Velocities are `rebound_dir` — the participant's own side of the
+  contact normal — plus a ±`spread` 0.8 lateral jitter
+  renormalized, at `speed` 7 ±3 m/s, so the striker's sparks blow
+  back toward it while the struck side's rebound away. Lives
+  `life` 0.5 ±0.2 s under `gravity` 9.8 m/s². A per-vehicle
+  `NavRng` seeded from the `ObjectId` keeps bursts replicable; a
+  non-finite or non-positive `severity` bursts nothing, a
+  degenerate normal falls back to straight up, and
+  `live >= max_live` truncates the burst. `Spark::advance(dt)`
+  integrates gravity/position and reports expiry at `life`;
+  `streak()` is the speed-scaled streak length (floor `length`
+  0.04 m so a stalled spark still reads as a fleck) and `alpha()`
+  a linear `1 − age/life` burn-down — all designed, no authored
+  counterpart.
+- `mm2_app::spark_fx` — `emit_sparks` (FixedUpdate, after
+  `collect_impacts`, with `apply_impact_damage`) drains the
+  `ImpactEvent` buffer: remote participants are skipped (their
+  authority renders its own sparks, F25+), a non-`Playing` session
+  drains without emitting, and the deferred-spawn live count is
+  tracked per-emitter inside the system so a burst-heavy frame
+  cannot overrun `max_live`. Each `Spark` spawns a
+  session-stamped entity — a velocity-aligned crossed-quad streak
+  (two quads sharing the velocity axis, width 0.03 m) in an unlit
+  `AlphaMode::Add` material cloned per spark so `alpha()` animates
+  one streak. `advance_sparks` reposes each streak along its live
+  velocity, writes the linear fade into the material, and despawns
+  on `advance`'s expiry.
+- Texture: `spark.tga` — the install's only spark-named texture,
+  an 8×8 fleck — resolves through the VFS onto the shared material.
+  A missing texture warns and falls back to an untextured additive
+  material (the standard missing-texture policy — emission
+  continues); the `SparkFx` resource absent entirely (a world that
+  never loaded) emits nothing. The original's `Init` texture name
+  is unrecovered, so the binding is a designed choice on a
+  recovered asset.
+- `SparkFxReport` counts bursts/emitted/expired — the headless
+  record's `spk=<b>b/<e>e/<x>x` field, emitted only on activity so
+  impact-free runs stay bit-identical.
+
+`TextelDamageRadius`/`ImpactsTable` texel damage remains
+unconsumed — its consumer is `fxTexelDamage`, a separate system
+from `asLineSparks`.
+
 ## Open questions
 
 - The original accumulation model: what quantity `MaxDamage`
@@ -481,7 +545,9 @@ else entirely stays unverified.
   `fxTexelDamage::ApplyDamage(position, maxDist)` driven by the
   recovered `ImpactsTable[12]` of impact positions; decal projection
   vs vertex deformation and the per-impact table's fill rules stay
-  unrecovered. `asLineSparks` impact sparks likewise.
+  unrecovered. The original `asLineSparks` burst semantics
+  (count/velocity/cadence/texture binding) likewise — a designed
+  radial-rebound policy is implemented (DSN-26).
 - `MirrorPivot` semantics — the implemented mirror-about-x reading
   is designed; every retail value is 0, so no authored case
   distinguishes readings yet.

@@ -29,5 +29,6 @@ pub mod results;
 pub mod scripted;
 pub mod session;
 pub mod smoke;
+pub mod spark_fx;
 pub mod stuck;
 pub mod traffic;
