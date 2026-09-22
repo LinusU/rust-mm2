@@ -40,8 +40,9 @@ use mm2_formats::{
     tex::TexFile,
 };
 use mm2_game::{
-    Banger, BangerDefinition, CityEntity, MAX_PATHSET_STAMPS, PropWalk, Session, SessionEntity,
-    SurfaceMaterial, path_stamp_sites, stamp_content_offset, walk_prop_rules, yawed_basis,
+    Banger, BangerDefinition, CityEntity, MAX_PATHSET_STAMPS, PropWalk, SIDEWALK_KERB_LIFT,
+    Session, SessionEntity, SurfaceMaterial, path_stamp_sites, stamp_content_offset,
+    walk_prop_rules, yawed_basis,
 };
 use tracing::{debug, info, warn};
 
@@ -74,8 +75,9 @@ const CURB_V: f32 = 0.07;
 
 /// Sidewalks sit this far above road vertices (per `Room_attributes`:
 /// "the road surface vertices are expected to be located 0.15 units below
-/// the sidewalk vertices").
-const SIDEWALK_LIFT: f32 = 0.15;
+/// the sidewalk vertices"). Shared with `mm2_game::props` — the prop-rule
+/// walk evaluates stamps on the same raised surface this emits.
+const SIDEWALK_LIFT: f32 = SIDEWALK_KERB_LIFT;
 
 /// Extra depth added below curb bottom edges to seal hairline seams
 /// against neighbouring surfaces.

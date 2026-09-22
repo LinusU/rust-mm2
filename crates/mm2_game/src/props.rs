@@ -38,7 +38,12 @@
 //!   outer chains are index-paired, so the stamp keeps the authored
 //!   kerb↔building-line correspondence — with lerp factor
 //!   `(minLerp + maxLerp) / 2` (the two are equal on every retail row;
-//!   0.1 ≈ curb-hugging, 0.5 ≈ mid-sidewalk).
+//!   0.1 ≈ curb-hugging, 0.5 ≈ mid-sidewalk). The kerb chain runs at
+//!   the *foot* of the kerb face (road level), so its height is first
+//!   lifted by [`SIDEWALK_KERB_LIFT`] — the walkable surface the
+//!   renderer emits — before lerping. Stamping the raw lerp buried
+//!   every kerbside prop ≈ kerb-height × (1 − lerp) into the
+//!   pavement (operator play-test report 4).
 //! - A side whose kerb chain cannot be resolved (junction rooms whose
 //!   strips are fragments, rooms with no road attribute) falls back to
 //!   stamping on the building-line arc — never inside the road —
@@ -75,6 +80,18 @@ use mm2_formats::{
     proprules::{PropDefs, PropRuleSide, PropRules},
     psdl::{AttributeType, Psdl, PsdlRoom, RoomAttribute},
 };
+
+/// The height a sidewalk top sits above the kerb *foot* (road-edge)
+/// vertex — measured on retail `city/{london,sf}.psdl`:
+/// `sw.y − road.y == 0.15` on the overwhelming majority of
+/// `RoadWithSidewalks`/`DividedRoad` sections (the few at 0 are
+/// authored flush ramps/driveways) and `top.y − ground.y == 0.15` on
+/// every `SidewalkStrip` pair (~11.5k, both cities). `mm2_app::city`
+/// emits the sidewalk top and its collider as the road-edge chain
+/// lifted by this constant, so the walkable surface a prop stands on
+/// is `lerp(kerb + SIDEWALK_KERB_LIFT, outer, t)` — see
+/// [`walk_prop_rules`] and [`walkable_surfaces`].
+pub const SIDEWALK_KERB_LIFT: f32 = 0.15;
 
 /// Hard bound on stamps one walk may emit — authored data is bounded,
 /// but a hostile table could request `maxUse` placements at near-zero
@@ -346,6 +363,12 @@ fn counted_refs(attr: &RoomAttribute, per_item: usize) -> Option<&[u16]> {
 struct KerbStrip {
     kerb: Vec<u16>,
     outer: Vec<u16>,
+    /// Height the kerb chain's vertices sit *below* the walkable
+    /// surface they bound: [`SIDEWALK_KERB_LIFT`] when the chain is
+    /// the foot of a raised kerb face (road-edge and sidewalk-strip
+    /// ground chains), `0` for walkways whose authored edge is already
+    /// the surface.
+    lift: f32,
 }
 
 /// The room's authored kerb strips — the road-edge chains the
@@ -373,10 +396,12 @@ fn kerb_strips(room: &PsdlRoom) -> Vec<KerbStrip> {
                 out.push(KerbStrip {
                     kerb: kl,
                     outer: ol,
+                    lift: SIDEWALK_KERB_LIFT,
                 });
                 out.push(KerbStrip {
                     kerb: kr,
                     outer: or_,
+                    lift: SIDEWALK_KERB_LIFT,
                 });
             }
             AttributeType::DividedRoad => {
@@ -395,10 +420,12 @@ fn kerb_strips(room: &PsdlRoom) -> Vec<KerbStrip> {
                 out.push(KerbStrip {
                     kerb: kl,
                     outer: ol,
+                    lift: SIDEWALK_KERB_LIFT,
                 });
                 out.push(KerbStrip {
                     kerb: kr,
                     outer: or_,
+                    lift: SIDEWALK_KERB_LIFT,
                 });
             }
             AttributeType::SidewalkStrip => {
@@ -415,7 +442,11 @@ fn kerb_strips(room: &PsdlRoom) -> Vec<KerbStrip> {
                     kerb.push(s[0]);
                     outer.push(s[1]);
                 }
-                out.push(KerbStrip { kerb, outer });
+                out.push(KerbStrip {
+                    kerb,
+                    outer,
+                    lift: SIDEWALK_KERB_LIFT,
+                });
             }
             AttributeType::RoadNoSidewalks => {
                 let Some(refs) = counted_refs(attr, 2) else {
@@ -429,10 +460,12 @@ fn kerb_strips(room: &PsdlRoom) -> Vec<KerbStrip> {
                 out.push(KerbStrip {
                     kerb: l.clone(),
                     outer: l,
+                    lift: 0.0,
                 });
                 out.push(KerbStrip {
                     kerb: r.clone(),
                     outer: r,
+                    lift: 0.0,
                 });
             }
             _ => {}
@@ -494,6 +527,15 @@ fn match_strip(psdl: &Psdl, strips: &[KerbStrip], start: u16, end: u16) -> Optio
     if reversed {
         kerb.reverse();
         outer.reverse();
+    }
+    // The kerb chain runs at the *foot* of the kerb face; the walkable
+    // surface `mm2_app` renders and collides starts one kerb height
+    // above it. Stamps rest on that surface, so evaluate the chain at
+    // its lifted height — XZ (and therefore every arc length, cross-
+    // section lerp and facing) is untouched. Walkway and fallback
+    // chains carry `lift = 0`.
+    for p in &mut kerb {
+        p[1] += st.lift;
     }
     Some((kerb, outer))
 }
@@ -1108,11 +1150,37 @@ pub struct Carriageway {
     pub room: u16,
     /// Which attribute authored the region.
     pub kind: AttributeType,
+    /// Which authored surface of the attribute the region covers —
+    /// [`SurfaceBand::Driving`] for every region [`carriageways`]
+    /// returns; [`walkable_surfaces`] adds the others.
+    pub band: SurfaceBand,
     /// Boundary ring in authored coordinates (closed implicitly).
     pub ring: Vec<[f32; 3]>,
     /// Triangles covering the region — the XZ point-in-triangle test
     /// plus a barycentric surface height for the point.
     pub tris: Vec<[[f32; 3]; 3]>,
+}
+
+/// Which authored surface of a room attribute a [`Carriageway`]
+/// region covers — one attribute authors several (a
+/// `RoadWithSidewalks` is a drivable band *and* two raised sidewalk
+/// tops).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceBand {
+    /// The drivable band [`carriageways`] extracts — road surface,
+    /// walkway strip, crosswalk or road fan.
+    Driving,
+    /// The raised sidewalk top: the kerb-foot chain lifted by
+    /// [`SIDEWALK_KERB_LIFT`] on the inside edge, the authored
+    /// outer/building-line chain outside — the surface
+    /// `mm2_app::city` renders and collides, and the one prop-rule
+    /// stamps rest on.
+    SidewalkTop,
+    /// A generic floor `Fan` — junction floors and plaza aprons the
+    /// drivable audit does not classify. Only fans whose surface
+    /// normal is mostly vertical (the renderer's own floor-vs-wall
+    /// test) are included.
+    FloorFan,
 }
 
 /// The `DividedRoad` payload's six-refs-per-section slice, shared by
@@ -1145,39 +1213,76 @@ fn fan_refs(attr: &RoomAttribute) -> Option<&[u16]> {
     }
 }
 
+/// Resolve a chain of vertex ids against the PSDL vertex table.
+fn resolve_ids(psdl: &Psdl, ids: &[u16]) -> Option<Vec<[f32; 3]>> {
+    ids.iter()
+        .map(|&v| psdl.vertices.get(v as usize).copied())
+        .collect()
+}
+
+/// A resolved strip's two index-paired edge chains → boundary ring +
+/// quads split into triangles.
+fn push_strip(
+    room: u16,
+    kind: AttributeType,
+    band: SurfaceBand,
+    a: &[[f32; 3]],
+    b: &[[f32; 3]],
+    out: &mut Vec<Carriageway>,
+) {
+    if a.len() != b.len() || a.len() < 2 {
+        return;
+    }
+    let mut ring = a.to_vec();
+    ring.extend(b.iter().rev());
+    let mut tris = Vec::with_capacity((a.len() - 1) * 2);
+    for i in 0..a.len() - 1 {
+        tris.push([a[i], a[i + 1], b[i + 1]]);
+        tris.push([a[i], b[i + 1], b[i]]);
+    }
+    out.push(Carriageway {
+        room,
+        kind,
+        band,
+        ring,
+        tris,
+    });
+}
+
+/// A fan record's resolved points → boundary ring + pivot triangles.
+fn push_fan(
+    room: u16,
+    kind: AttributeType,
+    band: SurfaceBand,
+    pts: &[[f32; 3]],
+    out: &mut Vec<Carriageway>,
+) {
+    if pts.len() < 3 {
+        return;
+    }
+    let ring: Vec<[f32; 3]> = pts[1..].to_vec();
+    let tris: Vec<[[f32; 3]; 3]> = ring.windows(2).map(|w| [pts[0], w[0], w[1]]).collect();
+    out.push(Carriageway {
+        room,
+        kind,
+        band,
+        ring,
+        tris,
+    });
+}
+
 /// Extract every drivable surface region in the city — see
 /// [`Carriageway`] for what counts. Malformed attribute data is
 /// skipped whole (the city importer's own policy), never guessed.
 pub fn carriageways(psdl: &Psdl) -> Vec<Carriageway> {
     let mut out = Vec::new();
-    let resolve = |ids: &[u16]| -> Option<Vec<[f32; 3]>> {
-        ids.iter()
-            .map(|&v| psdl.vertices.get(v as usize).copied())
-            .collect()
-    };
-    // A strip's two index-paired edge chains → ring + quads split into
-    // triangles.
+    // A strip's two index-paired edge id-chains → resolved chains.
     let strip =
         |room: u16, kind: AttributeType, a: &[u16], b: &[u16], out: &mut Vec<Carriageway>| {
-            if a.len() != b.len() || a.len() < 2 {
-                return;
-            }
-            let (Some(a), Some(b)) = (resolve(a), resolve(b)) else {
+            let (Some(a), Some(b)) = (resolve_ids(psdl, a), resolve_ids(psdl, b)) else {
                 return;
             };
-            let mut ring = a.clone();
-            ring.extend(b.iter().rev());
-            let mut tris = Vec::with_capacity((a.len() - 1) * 2);
-            for i in 0..a.len() - 1 {
-                tris.push([a[i], a[i + 1], b[i + 1]]);
-                tris.push([a[i], b[i + 1], b[i]]);
-            }
-            out.push(Carriageway {
-                room,
-                kind,
-                ring,
-                tris,
-            });
+            push_strip(room, kind, SurfaceBand::Driving, &a, &b, out);
         };
     for (ri, room) in psdl.rooms.iter().enumerate() {
         let rid = (ri + 1) as u16;
@@ -1219,7 +1324,7 @@ pub fn carriageways(psdl: &Psdl) -> Vec<Carriageway> {
                     // Four corner refs in strip order — (0, 1) one
                     // short end, (2, 3) the other.
                     let Some(p) = (attr.data.len() == 4)
-                        .then(|| resolve(&attr.data))
+                        .then(|| resolve_ids(psdl, &attr.data))
                         .flatten()
                     else {
                         continue;
@@ -1227,27 +1332,147 @@ pub fn carriageways(psdl: &Psdl) -> Vec<Carriageway> {
                     out.push(Carriageway {
                         room: rid,
                         kind: attr.kind,
+                        band: SurfaceBand::Driving,
                         ring: vec![p[0], p[1], p[3], p[2]],
                         tris: vec![[p[0], p[1], p[3]], [p[0], p[3], p[2]]],
                     });
                 }
                 AttributeType::RoadFan => {
                     // [pivot, ring…] — the fan's ring is the boundary.
-                    let Some(pts) = fan_refs(attr).and_then(&resolve) else {
+                    let Some(pts) = fan_refs(attr).and_then(|ids| resolve_ids(psdl, ids)) else {
                         continue;
                     };
-                    if pts.len() < 3 {
+                    push_fan(rid, attr.kind, SurfaceBand::Driving, &pts, &mut out);
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// Extract every surface a stamped prop can legitimately stand on —
+/// the drivable regions of [`carriageways`] plus the raised sidewalk
+/// tops and the generic floor `Fan`s. This is the reference the
+/// placement audit measures *vertical penetration* against: a prop
+/// base sitting below the surface covering its XZ is sunk into the
+/// geometry, the defect operator play-test report 4 item 4 names.
+///
+/// The extra bands are built exactly as `mm2_app::city` emits them:
+/// a sidewalk top spans the kerb-foot (road-edge) chain lifted by
+/// [`SIDEWALK_KERB_LIFT`] to the authored outer chain — on retail
+/// data the outer edge sits ≈ the same height, so the top is flat —
+/// and a `SidewalkStrip` top spans lifted-ground → authored top.
+/// Generic `Fan`s join only when their surface normal is mostly
+/// vertical (`|n.y| ≥ 0.3`, the renderer's own floor-vs-wall test in
+/// `vertical_facing`), so wall-like fans never produce phantom
+/// floors. Divider, wall, curb-face and roof surfaces are not
+/// standable and are excluded — the reference can miss a surface,
+/// never invent one. Junction rooms still carry no road attributes,
+/// so a stamp under a junction floor's `Fan` *is* seen here.
+pub fn walkable_surfaces(psdl: &Psdl) -> Vec<Carriageway> {
+    let mut out = carriageways(psdl);
+    // Resolve a chain of ids, then lift it to the walkable height.
+    let lifted = |ids: &[u16]| -> Option<Vec<[f32; 3]>> {
+        resolve_ids(psdl, ids).map(|c| {
+            c.iter()
+                .map(|p| [p[0], p[1] + SIDEWALK_KERB_LIFT, p[2]])
+                .collect()
+        })
+    };
+    for (ri, room) in psdl.rooms.iter().enumerate() {
+        let rid = (ri + 1) as u16;
+        for attr in &room.attributes {
+            match attr.kind {
+                AttributeType::RoadWithSidewalks => {
+                    // [sw_l, road_l, road_r, sw_r]: each sidewalk top
+                    // spans lifted-road-edge → authored outer edge.
+                    let Some(refs) = counted_refs(attr, 4) else {
+                        continue;
+                    };
+                    let secs = refs.as_chunks::<4>().0;
+                    let (sw_l, rl, rr, sw_r) = (
+                        secs.iter().map(|s| s[0]).collect::<Vec<_>>(),
+                        secs.iter().map(|s| s[1]).collect::<Vec<_>>(),
+                        secs.iter().map(|s| s[2]).collect::<Vec<_>>(),
+                        secs.iter().map(|s| s[3]).collect::<Vec<_>>(),
+                    );
+                    let (Some(il), Some(ol), Some(ir), Some(or)) = (
+                        lifted(&rl),
+                        resolve_ids(psdl, &sw_l),
+                        lifted(&rr),
+                        resolve_ids(psdl, &sw_r),
+                    ) else {
+                        continue;
+                    };
+                    push_strip(rid, attr.kind, SurfaceBand::SidewalkTop, &il, &ol, &mut out);
+                    push_strip(rid, attr.kind, SurfaceBand::SidewalkTop, &ir, &or, &mut out);
+                }
+                AttributeType::DividedRoad => {
+                    let Some(refs) = divided_refs(attr) else {
+                        continue;
+                    };
+                    let secs = refs.as_chunks::<6>().0;
+                    let (sw_l, rl, rr, sw_r) = (
+                        secs.iter().map(|s| s[0]).collect::<Vec<_>>(),
+                        secs.iter().map(|s| s[1]).collect::<Vec<_>>(),
+                        secs.iter().map(|s| s[4]).collect::<Vec<_>>(),
+                        secs.iter().map(|s| s[5]).collect::<Vec<_>>(),
+                    );
+                    let (Some(il), Some(ol), Some(ir), Some(or)) = (
+                        lifted(&rl),
+                        resolve_ids(psdl, &sw_l),
+                        lifted(&rr),
+                        resolve_ids(psdl, &sw_r),
+                    ) else {
+                        continue;
+                    };
+                    push_strip(rid, attr.kind, SurfaceBand::SidewalkTop, &il, &ol, &mut out);
+                    push_strip(rid, attr.kind, SurfaceBand::SidewalkTop, &ir, &or, &mut out);
+                }
+                AttributeType::SidewalkStrip => {
+                    let Some(refs) = counted_refs(attr, 2) else {
+                        continue;
+                    };
+                    // Same end-cap exclusion `kerb_strips` applies.
+                    if refs.len() >= 4 && refs[0] == refs[1] && refs[0] <= 1 {
                         continue;
                     }
-                    let ring: Vec<[f32; 3]> = pts[1..].to_vec();
-                    let tris: Vec<[[f32; 3]; 3]> =
-                        ring.windows(2).map(|w| [pts[0], w[0], w[1]]).collect();
-                    out.push(Carriageway {
-                        room: rid,
-                        kind: attr.kind,
-                        ring,
-                        tris,
-                    });
+                    let secs = refs.as_chunks::<2>().0;
+                    let (ground, top) = (
+                        secs.iter().map(|s| s[0]).collect::<Vec<_>>(),
+                        secs.iter().map(|s| s[1]).collect::<Vec<_>>(),
+                    );
+                    let (Some(i), Some(o)) = (lifted(&ground), resolve_ids(psdl, &top)) else {
+                        continue;
+                    };
+                    push_strip(rid, attr.kind, SurfaceBand::SidewalkTop, &i, &o, &mut out);
+                }
+                AttributeType::Fan => {
+                    // Generic fan — the junction-floor/plaza surface.
+                    // Wall-like fans (mostly-horizontal normal, the
+                    // renderer's `vertical_facing` test) are excluded.
+                    let Some(pts) = fan_refs(attr).and_then(|ids| resolve_ids(psdl, ids)) else {
+                        continue;
+                    };
+                    let mut n = [0.0f32; 3];
+                    for i in 1..pts.len().saturating_sub(1) {
+                        let (a, b) = (sub(pts[i], pts[0]), sub(pts[i + 1], pts[0]));
+                        let c = [
+                            a[1] * b[2] - a[2] * b[1],
+                            a[2] * b[0] - a[0] * b[2],
+                            a[0] * b[1] - a[1] * b[0],
+                        ];
+                        if c[0] * c[0] + c[1] * c[1] + c[2] * c[2] > 1e-6 {
+                            n = c;
+                            break;
+                        }
+                    }
+                    let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                    if l <= f32::EPSILON || n[1].abs() / l < 0.3 {
+                        continue;
+                    }
+                    push_fan(rid, attr.kind, SurfaceBand::FloorFan, &pts, &mut out);
                 }
                 _ => {}
             }
@@ -1267,21 +1492,24 @@ mod tests {
     /// Two quad road rooms sharing the z = 20 boundary: room 1 spans
     /// z 0–20, room 2 spans z 20–40; the road runs x 2–28 with the
     /// building lines at x = 0 and x = 30. Perimeters wind CCW in the
-    /// (x, z) plane like the retail rooms.
+    /// (x, z) plane like the retail rooms. Heights follow the authored
+    /// convention: the building-line chains sit at kerb-top height,
+    /// the road-edge (kerb-foot) chains at road level.
     fn quad_verts() -> Vec<[f32; 3]> {
+        let sw = SIDEWALK_KERB_LIFT;
         vec![
-            [0., 0., 0.],
+            [0., sw, 0.],
             [2., 0., 0.],
             [28., 0., 0.],
-            [30., 0., 0.], // room 1 entry (z = 0)
-            [30., 0., 20.],
+            [30., sw, 0.], // room 1 entry (z = 0)
+            [30., sw, 20.],
             [28., 0., 20.],
             [2., 0., 20.],
-            [0., 0., 20.], // shared boundary (z = 20)
-            [30., 0., 40.],
+            [0., sw, 20.], // shared boundary (z = 20)
+            [30., sw, 40.],
             [28., 0., 40.],
             [2., 0., 40.],
-            [0., 0., 40.], // room 2 exit (z = 40)
+            [0., sw, 40.], // room 2 exit (z = 40)
         ]
     }
 
@@ -1435,8 +1663,11 @@ mod tests {
         assert_eq!(walk.stamps.len(), 4);
 
         let lamp = |s: &PropStamp| s.side == PropRuleSide::Right;
-        assert!(near(walk.stamps[0].position, [29., 0., 2.]));
-        assert!(near(walk.stamps[1].position, [29., 0., 8.]));
+        // Stamps stand on the raised sidewalk top (kerb height above
+        // the road-edge chain), not on the kerb foot — the burial
+        // defect of operator report 4.
+        assert!(near(walk.stamps[0].position, [29., SIDEWALK_KERB_LIFT, 2.]));
+        assert!(near(walk.stamps[1].position, [29., SIDEWALK_KERB_LIFT, 8.]));
         assert!(walk.stamps[0..2].iter().all(lamp));
         // Stamps face kerb→building-line (+X maps there; the prop's
         // authored −X front then lies on the carriageway): +x on the
@@ -1447,8 +1678,8 @@ mod tests {
         // The left side walks backward from the exit crossing: start=5
         // measures 5 m back along the curb from z = 20.
         assert_eq!(walk.stamps[2].side, PropRuleSide::Left);
-        assert!(near(walk.stamps[2].position, [1., 0., 15.]));
-        assert!(near(walk.stamps[3].position, [1., 0., 5.]));
+        assert!(near(walk.stamps[2].position, [1., SIDEWALK_KERB_LIFT, 15.]));
+        assert!(near(walk.stamps[3].position, [1., SIDEWALK_KERB_LIFT, 5.]));
         assert!(near(walk.stamps[2].forward, [-1., 0., 0.]));
     }
 
@@ -1527,16 +1758,16 @@ mod tests {
             .iter()
             .filter(|s| s.room == 2 && s.side == PropRuleSide::Right)
             .collect();
-        assert!(near(r2_right[0].position, [29., 0., 22.]));
-        assert!(near(r2_right[1].position, [29., 0., 28.]));
+        assert!(near(r2_right[0].position, [29., SIDEWALK_KERB_LIFT, 22.]));
+        assert!(near(r2_right[1].position, [29., SIDEWALK_KERB_LIFT, 28.]));
         assert!(near(r2_right[0].forward, [1., 0., 0.]));
         let r2_left: Vec<&PropStamp> = walk
             .stamps
             .iter()
             .filter(|s| s.room == 2 && s.side == PropRuleSide::Left)
             .collect();
-        assert!(near(r2_left[0].position, [1., 0., 35.]));
-        assert!(near(r2_left[1].position, [1., 0., 25.]));
+        assert!(near(r2_left[0].position, [1., SIDEWALK_KERB_LIFT, 35.]));
+        assert!(near(r2_left[1].position, [1., SIDEWALK_KERB_LIFT, 25.]));
         assert!(near(r2_left[0].forward, [-1., 0., 0.]));
     }
 
@@ -1569,19 +1800,20 @@ mod tests {
     /// the building line stays straight — the layout that put retail
     /// stamps inside the carriageway when the kerb was a chord.
     fn curved_verts() -> Vec<[f32; 3]> {
+        let sw = SIDEWALK_KERB_LIFT;
         vec![
-            [0., 0., 0.],
+            [0., sw, 0.],
             [2., 0., 0.],
             [28., 0., 0.],
-            [30., 0., 0.], // entry (z = 0)
-            [30., 0., 40.],
+            [30., sw, 0.], // entry (z = 0)
+            [30., sw, 40.],
             [28., 0., 40.],
             [2., 0., 40.],
-            [0., 0., 40.], // exit (z = 40)
-            [0., 0., 20.],
+            [0., sw, 40.], // exit (z = 40)
+            [0., sw, 20.],
             [2., 0., 20.],
             [14., 0., 20.],
-            [30., 0., 20.], // strip mid-section (z = 20)
+            [30., sw, 20.], // strip mid-section (z = 20)
         ]
     }
 
@@ -1623,9 +1855,15 @@ mod tests {
         // s = seg → strip section 1: kerb (14,20) → outer (30,20),
         // lerp 0.5 → (22,20). A chord kerb would have put it at
         // (29,20), 7 m inside the carriageway.
-        assert!(near(walk.stamps[0].position, [22., 0., 20.]));
+        assert!(near(
+            walk.stamps[0].position,
+            [22., SIDEWALK_KERB_LIFT, 20.]
+        ));
         // s = 1.5·seg → kerb (21,30) → outer (30,30) → (25.5,30).
-        assert!(near(walk.stamps[1].position, [25.5, 0., 30.]));
+        assert!(near(
+            walk.stamps[1].position,
+            [25.5, SIDEWALK_KERB_LIFT, 30.]
+        ));
         // The stamp's facing is the strip's kerb→outer direction at
         // its own offset — +x here — not the side's walk direction
         // (+z): a prop authored front-first along −X faces the road.
@@ -1664,8 +1902,8 @@ mod tests {
         let walk = walk_prop_rules(&city, &defs, &rules);
         assert_eq!(walk.stats.sides_no_kerb, 1);
         assert_eq!(walk.stamps.len(), 2);
-        assert!(near(walk.stamps[0].position, [30., 0., 2.]));
-        assert!(near(walk.stamps[1].position, [30., 0., 8.]));
+        assert!(near(walk.stamps[0].position, [30., SIDEWALK_KERB_LIFT, 2.]));
+        assert!(near(walk.stamps[1].position, [30., SIDEWALK_KERB_LIFT, 8.]));
         // No strip means no kerb→outer direction either: the fallback
         // aims the stamp away from the room's crossing midpoint —
         // outward toward the building line, not along the walk.
@@ -1673,6 +1911,123 @@ mod tests {
         for s in &walk.stamps {
             let want = norm_xz(sub(s.position, centre)).unwrap();
             assert!(near(s.forward, want));
+        }
+    }
+
+    /// A def like [`def`] with an explicit kerb↔outer lerp factor:
+    /// `0` stamps on the kerb chain, `1` on the outer edge.
+    fn def_lerp(name: &str, lerp: f32, files: &[&str]) -> PropDef {
+        PropDef {
+            name: name.into(),
+            start: 2.,
+            distance: 6.,
+            max_use: 1,
+            lerp_min: lerp,
+            lerp_max: lerp,
+            files: files.iter().map(|s| s.to_string()).collect(),
+            line: 0,
+        }
+    }
+
+    #[test]
+    fn a_kerb_side_stamp_stands_on_the_sidewalk_top() {
+        // Operator report 4's regression: a prop stamped at the kerb
+        // (lerp 0) sits on the raised top — before the lift it landed
+        // at road level, kerb-height inside the rendered sidewalk.
+        let city = psdl(
+            quad_verts(),
+            vec![room1_solo()],
+            &[0, 1],
+            vec![path([1, 2, 0, 0], [5, 6, 0, 0], &[1])],
+        );
+        let (defs, rules) = tables(
+            vec![def_lerp("kerb", 0.0, &["pa"])],
+            vec![rule("n01left", &["kerb"]), rule("n01right", &["kerb"])],
+        );
+        let walk = walk_prop_rules(&city, &defs, &rules);
+        assert_eq!(walk.stamps.len(), 2);
+        for s in &walk.stamps {
+            // On the kerb chains (x = 2 left, x = 28 right) at top
+            // height. The left side matches its strip reversed, so
+            // both directions carry the lift.
+            let on_edge = (s.position[0] - 2.0).abs() < 1e-3 || (s.position[0] - 28.0).abs() < 1e-3;
+            assert!(on_edge, "pos {:?}", s.position);
+            assert!(
+                (s.position[1] - SIDEWALK_KERB_LIFT).abs() < 1e-3,
+                "pos {:?}",
+                s.position
+            );
+        }
+    }
+
+    #[test]
+    fn a_flush_authored_outer_edge_keeps_its_height() {
+        // Ramps and driveways author the outer chain flush with the
+        // road: the lift applies to the kerb foot, never to authored
+        // heights — a stamp on the building edge lands on the
+        // authored vertex, not above it.
+        let flush = quad_verts().into_iter().map(|v| [v[0], 0., v[2]]).collect();
+        let city = psdl(
+            flush,
+            vec![room1_solo()],
+            &[0, 1],
+            vec![path([1, 2, 0, 0], [5, 6, 0, 0], &[1])],
+        );
+        let (defs, rules) = tables(
+            vec![
+                def_lerp("kerb", 0.0, &["pa"]),
+                def_lerp("edge", 1.0, &["pb"]),
+            ],
+            vec![rule("n01left", &[]), rule("n01right", &["kerb", "edge"])],
+        );
+        let walk = walk_prop_rules(&city, &defs, &rules);
+        assert_eq!(walk.stamps.len(), 2);
+        // Kerb foot lifted to the top; authored flush edge untouched.
+        assert!(near(walk.stamps[0].position, [28., SIDEWALK_KERB_LIFT, 2.]));
+        assert!(near(walk.stamps[1].position, [30., 0., 2.]));
+    }
+
+    #[test]
+    fn a_no_sidewalk_walkway_stamps_at_its_authored_height() {
+        // RoadNoSidewalks (walkways, rails) carries no kerb: the
+        // authored edge is already the surface, so authored Y is
+        // preserved — no lift, on either side or direction.
+        let mut verts = quad_verts();
+        for i in [1usize, 2, 5, 6] {
+            verts[i][1] = 2.0;
+        }
+        let walkway = RoomAttribute {
+            last: false,
+            kind: AttributeType::RoadNoSidewalks,
+            subtype: 2,
+            data: vec![1, 2, 6, 5],
+        };
+        let city = psdl(
+            verts,
+            vec![room(
+                &[
+                    (0, 0),
+                    (1, 0),
+                    (2, 0),
+                    (3, 0),
+                    (4, 0),
+                    (5, 0),
+                    (6, 0),
+                    (7, 0),
+                ],
+                vec![walkway],
+            )],
+            &[0, 1],
+            vec![path([1, 2, 0, 0], [5, 6, 0, 0], &[1])],
+        );
+        let (defs, rules) = tables(
+            vec![def("lamp", 2., 6., 2, &["pb"])],
+            vec![rule("n01left", &["lamp"]), rule("n01right", &["lamp"])],
+        );
+        let walk = walk_prop_rules(&city, &defs, &rules);
+        assert_eq!(walk.stamps.len(), 4);
+        for s in &walk.stamps {
+            assert!((s.position[1] - 2.0).abs() < 1e-3, "pos {:?}", s.position);
         }
     }
 
@@ -1932,5 +2287,124 @@ mod tests {
         bad.data.truncate(6); // subtype claims 2 sections, data has 1.5
         let city = psdl(quad_verts(), vec![room(&[], vec![bad])], &[0], Vec::new());
         assert!(carriageways(&city).is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Walkable-surface extraction (the placement audit's vertical leg).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn walkable_surfaces_adds_the_raised_sidewalk_tops() {
+        let city = psdl(quad_verts(), vec![room1_solo()], &[0, 0], Vec::new());
+        let ws = walkable_surfaces(&city);
+        let count = |b: SurfaceBand| ws.iter().filter(|c| c.band == b).count();
+        assert_eq!(count(SurfaceBand::Driving), 1);
+        assert_eq!(count(SurfaceBand::SidewalkTop), 2);
+        assert_eq!(count(SurfaceBand::FloorFan), 0);
+        // Each top is flat at kerb height and spans the 2 m sidewalk
+        // margin outboard of the road band — the surface
+        // `emit_sidewalk` renders and collides.
+        let mut bands: Vec<(f32, f32)> = ws
+            .iter()
+            .filter(|c| c.band == SurfaceBand::SidewalkTop)
+            .map(|c| {
+                assert!(
+                    c.ring
+                        .iter()
+                        .all(|v| (v[1] - SIDEWALK_KERB_LIFT).abs() < 1e-4),
+                    "top must be flat at kerb height: {:?}",
+                    c.ring
+                );
+                let xs: Vec<f32> = c.ring.iter().map(|v| v[0]).collect();
+                (
+                    xs.iter().cloned().fold(f32::INFINITY, f32::min),
+                    xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
+                )
+            })
+            .collect();
+        bands.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        assert_eq!(bands, vec![(0.0, 2.0), (28.0, 30.0)]);
+    }
+
+    #[test]
+    fn walkable_surfaces_keeps_walkways_at_authored_height() {
+        // RoadNoSidewalks is one driving band at authored height —
+        // no sidewalk top, no lift.
+        let mut verts = quad_verts();
+        for i in [1usize, 2, 5, 6] {
+            verts[i][1] = 2.0;
+        }
+        let walkway = RoomAttribute {
+            last: false,
+            kind: AttributeType::RoadNoSidewalks,
+            subtype: 2,
+            data: vec![1, 2, 6, 5],
+        };
+        let city = psdl(verts, vec![room(&[], vec![walkway])], &[0], Vec::new());
+        let ws = walkable_surfaces(&city);
+        assert_eq!(ws.len(), 1);
+        assert_eq!(ws[0].band, SurfaceBand::Driving);
+        assert!(ws[0].ring.iter().all(|v| v[1] == 2.0));
+    }
+
+    #[test]
+    fn walkable_surfaces_lifts_strips_and_reads_fan_normals() {
+        // A SidewalkStrip's (ground, top) pairs plus a horizontal
+        // plaza Fan and a vertical wall Fan in one room.
+        let verts = vec![
+            [2., 0., 0.],    // 0: strip ground near
+            [0., 0.15, 0.],  // 1: strip top near
+            [2., 0., 20.],   // 2: ground far
+            [0., 0.15, 20.], // 3: top far
+            [8., 0., 0.],    // 4: plaza fan pivot
+            [12., 0., 0.],   // 5
+            [12., 0., 4.],   // 6
+            [8., 0., 4.],    // 7
+            [16., 0., 0.],   // 8: wall fan pivot
+            [20., 0., 0.],   // 9
+            [20., 3., 0.],   // 10
+            [16., 3., 0.],   // 11
+        ];
+        let attr = |kind: AttributeType, subtype: u8, data: &[u16]| RoomAttribute {
+            last: false,
+            kind,
+            subtype,
+            data: data.to_vec(),
+        };
+        let city = psdl(
+            verts,
+            vec![room(
+                &[],
+                vec![
+                    attr(AttributeType::SidewalkStrip, 2, &[0, 1, 2, 3]),
+                    attr(AttributeType::Fan, 2, &[4, 5, 6, 7]),
+                    attr(AttributeType::Fan, 2, &[8, 9, 10, 11]),
+                ],
+            )],
+            &[0],
+            Vec::new(),
+        );
+        let ws = walkable_surfaces(&city);
+        let tops: Vec<&Carriageway> = ws
+            .iter()
+            .filter(|c| c.band == SurfaceBand::SidewalkTop)
+            .collect();
+        assert_eq!(tops.len(), 1);
+        assert_eq!(tops[0].kind, AttributeType::SidewalkStrip);
+        // Lifted-ground → authored top, flat at kerb height.
+        assert!(
+            tops[0]
+                .ring
+                .iter()
+                .all(|v| (v[1] - SIDEWALK_KERB_LIFT).abs() < 1e-4),
+            "strip top: {:?}",
+            tops[0].ring
+        );
+        let fans: Vec<&Carriageway> = ws
+            .iter()
+            .filter(|c| c.band == SurfaceBand::FloorFan)
+            .collect();
+        assert_eq!(fans.len(), 1, "the wall fan never becomes a floor");
+        assert_eq!(fans[0].kind, AttributeType::Fan);
     }
 }

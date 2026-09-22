@@ -59,7 +59,8 @@ use mm2_formats::pkg::Pkg;
 use mm2_formats::proprules::{PropDefs, PropRules};
 use mm2_formats::psdl::{AttributeType, Psdl};
 use mm2_game::{
-    Carriageway, MAX_PATHSET_STAMPS, carriageways, path_stamp_sites, stamp_space_verts, yawed_basis,
+    Carriageway, MAX_PATHSET_STAMPS, SurfaceBand, carriageways, path_stamp_sites,
+    stamp_space_verts, walkable_surfaces, yawed_basis,
 };
 
 use crate::TEXTURE_EXTS;
@@ -86,11 +87,25 @@ const OVERHANG_TOP: f32 = 8.0;
 /// not an incursion — bounds and ring vertices share float error at
 /// the shared edge.
 const FOOTPRINT_EPS: f32 = 0.15;
+/// How far a walkable surface may stand above a stamp's base before
+/// the stamp counts as *sunk into the geometry* (operator report 4
+/// item 4 — kerb-height burial is ≈0.135 m). Below this is authored
+/// noise: props planted a centimetre into cambered surfaces.
+const SUNK_EPS: f32 = 0.05;
+/// A surface this far above the stamp is a storey overhead, not the
+/// ground it should rest on — props under overpasses and bridge
+/// decks stay out of the sunk count.
+const SUNK_MAX: f32 = 1.0;
+/// A stamp less than this deep inside the surface's XZ footprint sits
+/// on the shared kerb/edge line, where "above road level" and "below
+/// sidewalk top" both apply — not penetration evidence.
+const SUNK_DEPTH_EPS: f32 = 0.05;
 
-/// A carriageway region plus its XZ bounds for cheap rejection.
+/// A surface region plus its XZ bounds for cheap rejection.
 struct Region {
     room: u16,
     kind: AttributeType,
+    band: SurfaceBand,
     min: [f32; 2],
     max: [f32; 2],
     ring: Vec<[f32; 3]>,
@@ -112,6 +127,7 @@ impl Region {
         Region {
             room: c.room,
             kind: c.kind,
+            band: c.band,
             min,
             max,
             ring: c.ring.clone(),
@@ -191,6 +207,24 @@ struct Hit {
     depth: f32,
 }
 
+/// One sunk-into-surface finding (operator report 4 item 4): a
+/// walkable surface stands `penetration` metres above the stamp's
+/// base over its XZ footprint.
+struct SunkHit {
+    channel: &'static str,
+    detail: String,
+    pos: [f32; 3],
+    room: u16,
+    kind: AttributeType,
+    /// Which band of the attribute authored the covering surface —
+    /// the kerb-burial defect lands on `SidewalkTop`.
+    band: SurfaceBand,
+    /// How far the surface stands above the stamp base.
+    penetration: f32,
+    /// XZ distance from the surface's boundary edge.
+    depth: f32,
+}
+
 /// Per-channel tallies — every discovered/expected item lands in a
 /// count; nothing filters out of a denominator.
 #[derive(Default)]
@@ -222,6 +256,10 @@ struct Channel {
     skipped: usize,
     /// Stamps suppressed by the shared stamp budget.
     capped: usize,
+    /// Stamps whose base sits under a walkable surface covering their
+    /// XZ — sunk into the geometry (the vertical leg the in-road
+    /// check cannot see).
+    sunk: usize,
     /// Channel anomalies (dead refs, walk issues, …).
     issues: Vec<String>,
 }
@@ -246,6 +284,34 @@ fn on_road(p: [f32; 3], regions: &[Region]) -> Option<(&Region, f32)> {
         }
     }
     None
+}
+
+/// The deepest walkable surface standing over `p` — the largest
+/// `surface_y − p.y` among regions whose XZ footprint contains `p`
+/// past [`SUNK_DEPTH_EPS`], with the gap inside
+/// [`SUNK_EPS`]..=[`SUNK_MAX`]. `None` when no surface above the
+/// stamp claims it (on a surface, in the open, or a storey below an
+/// overpass). Returns `(penetration, depth, region)`.
+fn sunk_penetration(p: [f32; 3], regions: &[Region]) -> Option<(f32, f32, &Region)> {
+    let mut best: Option<(f32, f32, &Region)> = None;
+    for r in regions {
+        if p[0] < r.min[0] || p[0] > r.max[0] || p[2] < r.min[1] || p[2] > r.max[1] {
+            continue;
+        }
+        for t in &r.tris {
+            if let Some(sy) = tri_surface_y(p, t) {
+                let gap = sy - p[1];
+                if (SUNK_EPS..=SUNK_MAX).contains(&gap) {
+                    let dep = r.depth(p);
+                    if dep > SUNK_DEPTH_EPS && best.is_none_or(|(g, _, _)| gap > g) {
+                        best = Some((gap, dep, r));
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    best
 }
 
 /// Cache of prop name → stamp-space rendered verts ([`stamp_space_verts`]
@@ -386,14 +452,26 @@ fn measure_footprint(
     }
 }
 
-/// Measure one batch of stamped positions for `channel`, recording
-/// hits into `hits`.
+/// The audit's three finding legs, collected per city.
+#[derive(Default)]
+struct Findings {
+    /// Stamps inside a carriageway region at surface height.
+    hits: Vec<Hit>,
+    /// Swept-prop bodies reaching a carriageway region.
+    fp_hits: Vec<Hit>,
+    /// Stamps under a walkable surface covering their XZ.
+    sunk: Vec<SunkHit>,
+}
+
+/// Measure one batch of stamped positions for `channel` against the
+/// carriageways (`hits`) and the walkable reference (`sunk`).
 fn measure(
     channel: &'static str,
     positions: impl Iterator<Item = ([f32; 3], String)>,
     regions: &[Region],
+    walkable: &[Region],
     out: &mut Channel,
-    hits: &mut Vec<Hit>,
+    findings: &mut Findings,
 ) {
     for (pos, detail) in positions {
         if !pos.iter().all(|c| c.is_finite()) {
@@ -404,14 +482,27 @@ fn measure(
         out.stamps += 1;
         if let Some((r, dy)) = on_road(pos, regions) {
             out.in_road += 1;
-            hits.push(Hit {
+            findings.hits.push(Hit {
                 channel,
-                detail,
+                detail: detail.clone(),
                 pos,
                 room: r.room,
                 kind: r.kind,
                 dy,
                 depth: r.depth(pos),
+            });
+        }
+        if let Some((pen, dep, r)) = sunk_penetration(pos, walkable) {
+            out.sunk += 1;
+            findings.sunk.push(SunkHit {
+                channel,
+                detail,
+                pos,
+                room: r.room,
+                kind: r.kind,
+                band: r.band,
+                penetration: pen,
+                depth: dep,
             });
         }
     }
@@ -423,15 +514,15 @@ const IDENTITY_BASIS: ([f32; 3], [f32; 3], [f32; 3]) =
     ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]);
 
 /// Run the audit for one city against a parsed PSDL and its
-/// extracted carriageway regions. `hits` collects in-road origins,
-/// `fp_hits` swept-footprint body hits.
+/// extracted carriageway/walkable regions, collecting all three
+/// finding legs into `findings`.
 fn audit_city(
     vfs: &Vfs,
     city: &str,
     psdl: &Psdl,
     regions: &[Region],
-    hits: &mut Vec<Hit>,
-    fp_hits: &mut Vec<Hit>,
+    walkable: &[Region],
+    findings: &mut Findings,
 ) -> (BTreeMap<&'static str, Channel>, Vec<String>) {
     let mut channels: BTreeMap<&'static str, Channel> = BTreeMap::new();
     let mut failures: Vec<String> = Vec::new();
@@ -458,7 +549,7 @@ fn audit_city(
                             format!("{}#{i} {} room {}", res.logical, c.package_name, c.room),
                         )
                     });
-                    measure("inst", positions, regions, inst, hits);
+                    measure("inst", positions, regions, walkable, inst, findings);
                 }
                 Err(e) => {
                     inst.failed += 1;
@@ -532,8 +623,9 @@ fn audit_city(
                                 (s.position, format!("{}:{pi}:{si} {name}", res.logical))
                             }),
                             regions,
+                            walkable,
                             pathset,
-                            hits,
+                            findings,
                         );
                         // Swept footprint — same yawed basis the
                         // runtime builds for each site.
@@ -549,7 +641,7 @@ fn audit_city(
                                     },
                                     regions,
                                     pathset,
-                                    fp_hits,
+                                    &mut findings.fp_hits,
                                 );
                             }
                         }
@@ -622,8 +714,9 @@ fn audit_city(
                     )
                 }),
                 regions,
+                walkable,
                 rules,
-                hits,
+                findings,
             );
             // Swept footprint through each stamp's measured facing —
             // the prop's −X front toward the carriageway.
@@ -641,7 +734,7 @@ fn audit_city(
                     },
                     regions,
                     rules,
-                    fp_hits,
+                    &mut findings.fp_hits,
                 );
             }
         }
@@ -683,6 +776,7 @@ pub fn placement(
     let mut any_stamps = false;
     let mut any_in_road = 0usize;
     let mut any_body = 0usize;
+    let mut any_sunk = 0usize;
 
     for c in &cities {
         println!("city {c}");
@@ -716,14 +810,36 @@ pub fn placement(
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+        // Walkable reference for the sunk-into-surface leg: driving
+        // bands plus raised sidewalk tops and horizontal floor fans.
+        let ws = walkable_surfaces(&psdl);
+        let walkable: Vec<Region> = ws.iter().map(Region::from_carriageway).collect();
+        let mut by_band: BTreeMap<String, usize> = BTreeMap::new();
+        for r in &walkable {
+            *by_band.entry(format!("{:?}", r.band)).or_default() += 1;
+        }
+        println!(
+            "  walkable surfaces: {} ({})",
+            walkable.len(),
+            by_band
+                .iter()
+                .map(|(k, n)| format!("{k}={n}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
 
-        let mut hits = Vec::new();
-        let mut fp_hits = Vec::new();
-        let (channels, ch_failures) = audit_city(&vfs, c, &psdl, &regions, &mut hits, &mut fp_hits);
+        let mut findings = Findings::default();
+        let (channels, ch_failures) =
+            audit_city(&vfs, c, &psdl, &regions, &walkable, &mut findings);
         failures.extend(ch_failures);
+        let Findings {
+            mut hits,
+            mut fp_hits,
+            mut sunk,
+        } = findings;
         for (name, ch) in &channels {
             println!(
-                "  {name}: {}/{} sources ok ({} failed), {} items, {} stamps, {} in-road, {} swept, {} body-in-road, {} overhang, {} skipped, {} capped, {} issues",
+                "  {name}: {}/{} sources ok ({} failed), {} items, {} stamps, {} in-road, {} swept, {} body-in-road, {} overhang, {} sunk, {} skipped, {} capped, {} issues",
                 ch.found,
                 ch.expected,
                 ch.failed,
@@ -733,6 +849,7 @@ pub fn placement(
                 ch.swept,
                 ch.body_in_road,
                 ch.overhang,
+                ch.sunk,
                 ch.skipped,
                 ch.capped,
                 ch.issues.len(),
@@ -741,6 +858,7 @@ pub fn placement(
             any_stamps |= ch.stamps > 0;
             any_in_road += ch.in_road;
             any_body += ch.body_in_road;
+            any_sunk += ch.sunk;
         }
         // In-road totals by channel × region kind: `RoadFan` regions
         // cover junctions but also authored plazas where dressing is
@@ -851,12 +969,49 @@ pub fn placement(
                 fp_hits.len() - MAX_HITS_SHOWN
             );
         }
+        // Sunk-into-surface hits — the vertical leg (operator report 4
+        // item 4). The channel×band split separates kerb-buried
+        // sidewalk props from stamps under plaza floors; penetration
+        // is how far the surface stands above the stamp's base.
+        let mut sunk_by_cb: BTreeMap<(&'static str, String), usize> = BTreeMap::new();
+        for h in &sunk {
+            *sunk_by_cb
+                .entry((h.channel, format!("{:?}", h.band)))
+                .or_default() += 1;
+        }
+        if !sunk_by_cb.is_empty() {
+            let detail: Vec<String> = sunk_by_cb
+                .iter()
+                .map(|((ch, b), n)| format!("{ch}/{b}={n}"))
+                .collect();
+            println!("  sunk by channel/band: {}", detail.join(" "));
+        }
+        sunk.sort_by(|a, b| b.penetration.total_cmp(&a.penetration));
+        for h in sunk.iter().take(MAX_HITS_SHOWN) {
+            println!(
+                "    sunk [{ch}] {det} pos=({x:.2},{y:.2},{z:.2}) room {room} {kind:?} {band:?} penetration={pen:.2} depth={depth:.2}",
+                ch = h.channel,
+                det = h.detail,
+                x = h.pos[0],
+                y = h.pos[1],
+                z = h.pos[2],
+                room = h.room,
+                kind = h.kind,
+                band = h.band,
+                pen = h.penetration,
+                depth = h.depth,
+            );
+        }
+        if sunk.len() > MAX_HITS_SHOWN {
+            println!("    … +{} more sunk stamps", sunk.len() - MAX_HITS_SHOWN);
+        }
     }
 
     println!(
-        "  {} in-road stamps, {} body-in-road footprint hits across audited channels; {} issue(s), {} failure(s)",
+        "  {} in-road stamps, {} body-in-road footprint hits, {} sunk stamps across audited channels; {} issue(s), {} failure(s)",
         any_in_road,
         any_body,
+        any_sunk,
         issues.len(),
         failures.len(),
     );
@@ -887,6 +1042,7 @@ mod tests {
         Region {
             room: 1,
             kind: AttributeType::RoadWithSidewalks,
+            band: SurfaceBand::Driving,
             min: [0.0, -2.0],
             max: [10.0, 2.0],
             ring: vec![
@@ -947,6 +1103,7 @@ mod tests {
         let r = [Region {
             room: 2,
             kind: AttributeType::RoadNoSidewalks,
+            band: SurfaceBand::Driving,
             min: [0.0, -2.0],
             max: [10.0, 2.0],
             ring: vec![
@@ -974,6 +1131,7 @@ mod tests {
         let r = [Region {
             room: 3,
             kind: AttributeType::RoadFan,
+            band: SurfaceBand::Driving,
             min: [0.0, 0.0],
             max: [1.0, 1.0],
             ring: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 1.0]],
@@ -988,7 +1146,7 @@ mod tests {
     fn measure_counts_stamps_and_hits() {
         let r = [flat_region(0.0)];
         let mut ch = Channel::default();
-        let mut hits = Vec::new();
+        let mut findings = Findings::default();
         measure(
             "inst",
             [
@@ -998,14 +1156,73 @@ mod tests {
             ]
             .into_iter(),
             &r,
+            &r,
             &mut ch,
-            &mut hits,
+            &mut findings,
         );
         assert_eq!(ch.stamps, 2); // the NaN position is an issue, not a stamp
         assert_eq!(ch.in_road, 1);
         assert_eq!(ch.issues.len(), 1);
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].channel, "inst");
+        assert_eq!(findings.hits.len(), 1);
+        assert_eq!(findings.hits[0].channel, "inst");
+    }
+
+    /// A 10 m × 2 m sidewalk-top strip along +X at kerb-top height —
+    /// the band `walkable_surfaces` adds beside a road.
+    fn sidewalk_region(y: f32) -> Region {
+        Region {
+            room: 1,
+            kind: AttributeType::RoadWithSidewalks,
+            band: SurfaceBand::SidewalkTop,
+            min: [0.0, 2.0],
+            max: [10.0, 4.0],
+            ring: vec![[0.0, y, 2.0], [10.0, y, 2.0], [10.0, y, 4.0], [0.0, y, 4.0]],
+            tris: vec![
+                [[0.0, y, 2.0], [10.0, y, 2.0], [10.0, y, 4.0]],
+                [[0.0, y, 2.0], [10.0, y, 4.0], [0.0, y, 4.0]],
+            ],
+        }
+    }
+
+    #[test]
+    fn a_stamp_under_the_sidewalk_is_sunk() {
+        let r = [sidewalk_region(0.15)];
+        // Stamped at road level mid-sidewalk — the kerb-height burial
+        // operator report 4 item 4 describes.
+        let (pen, dep, region) =
+            sunk_penetration([5.0, 0.0, 3.0], &r).expect("under the sidewalk top");
+        assert!((pen - 0.15).abs() < 1e-4, "pen {pen}");
+        assert!(dep > SUNK_DEPTH_EPS, "depth {dep}");
+        assert_eq!(region.band, SurfaceBand::SidewalkTop);
+        // The fix: stamped on the top, nothing stands above it.
+        assert!(sunk_penetration([5.0, 0.15, 3.0], &r).is_none());
+    }
+
+    #[test]
+    fn sunk_measurement_respects_its_limits() {
+        let r = [sidewalk_region(0.15)];
+        // On the kerb-line edge the stamp straddles both surfaces —
+        // inside the depth epsilon, not penetration evidence.
+        assert!(sunk_penetration([5.0, 0.0, 2.02], &r).is_none());
+        // Outside the XZ footprint entirely.
+        assert!(sunk_penetration([5.0, 0.0, 5.0], &r).is_none());
+        // A stamp a full storey under a surface is under an overpass,
+        // not buried — the SUNK_MAX window keeps it out.
+        assert!(sunk_penetration([5.0, -2.0, 3.0], &r).is_none());
+    }
+
+    #[test]
+    fn sunk_winner_is_the_lowest_surface_over_the_stamp() {
+        // A plaza fan directly over the sidewalk top: the deepest
+        // gap wins so the finding names the surface the prop is
+        // actually under.
+        let mut over = sidewalk_region(0.6);
+        over.kind = AttributeType::Fan;
+        over.band = SurfaceBand::FloorFan;
+        let r = [sidewalk_region(0.15), over];
+        let (pen, _, region) = sunk_penetration([5.0, 0.0, 3.0], &r).expect("under a surface");
+        assert!((pen - 0.6).abs() < 1e-4, "pen {pen}");
+        assert_eq!(region.band, SurfaceBand::FloorFan);
     }
 
     #[test]

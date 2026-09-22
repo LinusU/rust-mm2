@@ -107,13 +107,29 @@ on `city/{sf,london}.psdl`:
 Implemented walk policy (all inferred — a retail-visual comparison
 can still falsify any of them):
 
-- The stamp position's Y is the curb↔outer lerp in 3D — whether the
-  original stamps at sidewalk-top height (~curb + 0.15) or the lerped
-  value is unverified; the residual error is centimetre-class. Prop
-  content is then offset by the bound convention measured on retail
-  records (`docs/research/banger.md` § "The `Size`/`CG` bound
-  convention"): the bound's *base* rests on the stamp point and the
-  centred mesh is offset by `+CG`.
+- The stamp position's Y is the kerb↔outer lerp evaluated on the
+  *walkable* chains: the authored kerb chains (road edge / strip
+  ground) run at the **foot** of the kerb face — road level — and are
+  lifted by the authored kerb height 0.15 m before lerping, so stamps
+  rest on the sidewalk top the renderer and collider emit
+  (`emit_sidewalk` raises the same chains by the same constant,
+  `mm2_game::SIDEWALK_KERB_LIFT`). Evidence: the `Room_attributes`
+  format doc states "the road surface vertices are expected to be
+  located 0.15 units below the sidewalk vertices", and retail
+  measurement agrees — `sw.y − road.y == 0.15` on 943/1087 london and
+  1205/1321 sf `RoadWithSidewalks` sections (the rest are authored
+  flush ramps/driveways, which the lerp still honours because only
+  the kerb foot is lifted), and `top.y − ground.y == 0.15` on all
+  5 880 london / 5 665 sf `SidewalkStrip` pairs. `RoadNoSidewalks`
+  walkway edges carry no kerb and are never lifted. Before the lift
+  kerb-side props sat ≈0.135 m inside the rendered pavement — the
+  litter-bin burial of operator report 4 (visual: `/tmp/kerb-before`
+  vs `/tmp/kerb-after`, london `cam -275.6,2.0,160.6,38,-13`; audit:
+  prop-rule sunk 0/5 118 after the fix). Prop content is then offset
+  by the bound convention measured on retail records
+  (`docs/research/banger.md` § "The `Size`/`CG` bound convention"):
+  the bound's *base* rests on the stamp point and the centred mesh is
+  offset by `+CG`.
 - Each side is walked so the road stays on the walker's left: the
   right-of-travel side runs entry→exit, the left-of-travel side runs
   exit→entry, and `start` measures from the crossing its walk begins

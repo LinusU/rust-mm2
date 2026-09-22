@@ -71,8 +71,9 @@ pub use progression::{
 };
 pub use props::{
     Carriageway, MAX_PATHSET_STAMPS, MAX_PROP_RULE_STAMPS, PathStampSite, PathStampSites,
-    PropStamp, PropWalk, PropWalkStats, carriageways, path_stamp_sites, stamp_content_offset,
-    stamp_space_verts, walk_prop_rules, yawed_basis,
+    PropStamp, PropWalk, PropWalkStats, SIDEWALK_KERB_LIFT, SurfaceBand, carriageways,
+    path_stamp_sites, stamp_content_offset, stamp_space_verts, walk_prop_rules, walkable_surfaces,
+    yawed_basis,
 };
 pub use race::{
     CatchUpPolicy, Checkpoint, CheckpointRule, DEFAULT_CHECKPOINT_HEIGHT, DEFAULT_COUNTDOWN_TICKS,
