@@ -5,7 +5,10 @@ use mm2_formats::bnd::BndFile;
 use mm2_formats::info::InfoFile;
 use mm2_formats::mtx::Mtx;
 use mm2_formats::tune::TuneFile;
-use mm2_formats::veh::{AiVehicleData, DrivetrainType, VehCarSim, VehTrailer};
+use mm2_formats::veh::{
+    AiVehicleData, DamageIssue, DrivetrainType, VehCarDamage, VehCarSim, VehGyro, VehStuck,
+    VehTrailer,
+};
 
 const INFO: &str = "BaseName=vpbug\r\n\
 Description=VW New Beetle\r\n\
@@ -404,4 +407,225 @@ fn aivehicledata_tolerates_absent_cg_and_flags_garbage() {
     assert!(AiVehicleData::from_tune(&tune).is_err());
     let tune = TuneFile::parse("vehCarSim { Mass 1.0 }").unwrap();
     assert!(AiVehicleData::from_tune(&tune).is_err());
+}
+
+/// Full `vehCarDamage` record — the retail field set (all 37 fields
+/// plus `MirrorPivot`, authored on 7 of 20 files).
+const CARDAMAGE: &str = "type: a\r\n\
+vehCarDamage {\r\n\
+  MaxDamage 321300.000000\r\n\
+  MedDamage 150000.000000\r\n\
+  ImpactThreshold 1500.000000\r\n\
+  RegenerateRate 0.000000\r\n\
+  SmokeOffset 0.000000 0.500000 -1.000000\r\n\
+  TextelDamageRadius 0.500000\r\n\
+  Position 0.000000 0.000000 0.000000\r\n\
+  PositionVar 0.100000 0.100000 0.100000\r\n\
+  Velocity 0.000000 1.000000 0.000000\r\n\
+  VelocityVar 0.500000 0.500000 0.500000\r\n\
+  Life 1.000000\r\n\
+  LifeVar 0.500000\r\n\
+  Mass 1.000000\r\n\
+  MassVar 0.000000\r\n\
+  Radius 0.500000\r\n\
+  RadiusVar 0.250000\r\n\
+  Drag 0.000000\r\n\
+  DragVar 0.000000\r\n\
+  Damp 0.000000\r\n\
+  DampVar 0.000000\r\n\
+  DRadius 0.500000\r\n\
+  DRadiusVar 0.000000\r\n\
+  DAlpha -0.500000\r\n\
+  DAlphaVar 0.000000\r\n\
+  DRotation 0.000000\r\n\
+  DRotationVar 0.000000\r\n\
+  InitialBlast 0\r\n\
+  SpewRate 10.000000\r\n\
+  SpewTimeLimit 0.000000\r\n\
+  Gravity -9.800000\r\n\
+  TexFrameStart 0\r\n\
+  TexFrameEnd 0\r\n\
+  BirthFlags 0\r\n\
+  Height 0.000000\r\n\
+  Intensity 1.000000\r\n\
+  Color -167772161\r\n\
+  SmokeOffset2 0.000000 0.500000 1.000000\r\n\
+  DoublePivot 0\r\n\
+  MirrorPivot 0\r\n\
+}\r\n";
+
+const STUCK: &str = "type: a\r\n\
+vehStuck {\r\n\
+  Turn 1.570796\r\n\
+  Translation 0.100000\r\n\
+  TimeThresh 1.000000\r\n\
+  Rotation 0.000000\r\n\
+  PosThresh 0.500000\r\n\
+  MoveThresh 0.050000\r\n\
+}\r\n";
+
+const GYRO: &str = "type: a\r\n\
+vehGyro {\r\n\
+  Spin180 3.000000\r\n\
+  Reverse180 3.000000\r\n\
+  Drift 0.100000\r\n\
+  Roll 5.000000\r\n\
+  Pitch 5.000000\r\n\
+}\r\n";
+
+#[test]
+fn vehcardamage_decodes_the_retail_field_set() {
+    let tune = TuneFile::parse(CARDAMAGE).unwrap();
+    let d = VehCarDamage::from_tune(&tune).unwrap();
+    assert_eq!(d.max_damage, 321300.0);
+    assert_eq!(d.med_damage, 150000.0);
+    assert_eq!(d.impact_threshold, 1500.0);
+    assert_eq!(d.regenerate_rate, 0.0);
+    assert_eq!(d.textel_damage_radius, 0.5);
+    assert_eq!(d.smoke_offset, [0.0, 0.5, -1.0]);
+    assert_eq!(d.smoke_offset2, [0.0, 0.5, 1.0]);
+    assert_eq!(d.double_pivot, 0);
+    assert_eq!(d.mirror_pivot, Some(0));
+    assert_eq!(d.effect.life_var, 0.5);
+    assert_eq!(d.effect.gravity, -9.8);
+    assert_eq!(d.effect.color, -167772161);
+    assert!(d.validate().is_empty(), "{:?}", d.validate());
+    assert!(d.warnings.is_empty(), "{:?}", d.warnings);
+}
+
+#[test]
+fn vehcardamage_tolerates_absent_mirror_pivot() {
+    // 13 of 20 retail records ship no MirrorPivot.
+    let src = CARDAMAGE.replace("MirrorPivot 0\r\n", "");
+    let tune = TuneFile::parse(&src).unwrap();
+    let d = VehCarDamage::from_tune(&tune).unwrap();
+    assert_eq!(d.mirror_pivot, None);
+    assert!(d.warnings.is_empty(), "{:?}", d.warnings);
+}
+
+#[test]
+fn vehcardamage_rejects_wrong_root_and_missing_fields() {
+    let tune = TuneFile::parse("vehStuck { Turn 1.0 }").unwrap();
+    assert!(VehCarDamage::from_tune(&tune).is_err());
+
+    // A required field gone is a decode error, not a fabricated zero.
+    let src = CARDAMAGE.replace("MaxDamage 321300.000000\r\n", "");
+    let tune = TuneFile::parse(&src).unwrap();
+    assert!(VehCarDamage::from_tune(&tune).is_err());
+}
+
+#[test]
+fn vehcardamage_warns_on_unknown_fields() {
+    let src = CARDAMAGE.replace("MirrorPivot 0\r\n", "MirrorPivot 0\r\nFutureField 42\r\n");
+    let tune = TuneFile::parse(&src).unwrap();
+    let d = VehCarDamage::from_tune(&tune).unwrap();
+    assert!(
+        d.warnings.iter().any(|w| w.contains("FutureField")),
+        "{:?}",
+        d.warnings
+    );
+}
+
+#[test]
+fn vehcardamage_validate_flags_bad_ordering_and_values() {
+    // MedDamage above MaxDamage breaks the tier ordering every retail
+    // record keeps.
+    let src = CARDAMAGE.replace("MaxDamage 321300.000000", "MaxDamage 100000.000000");
+    let tune = TuneFile::parse(&src).unwrap();
+    let d = VehCarDamage::from_tune(&tune).unwrap();
+    assert!(
+        d.validate()
+            .iter()
+            .any(|i| matches!(i, DamageIssue::MedAboveMax { .. })),
+        "{:?}",
+        d.validate()
+    );
+
+    // A negative bound is structurally invalid.
+    let src = CARDAMAGE.replace("ImpactThreshold 1500.000000", "ImpactThreshold -1.000000");
+    let tune = TuneFile::parse(&src).unwrap();
+    let d = VehCarDamage::from_tune(&tune).unwrap();
+    assert!(
+        d.validate().iter().any(|i| matches!(
+            i,
+            DamageIssue::Negative {
+                field: "ImpactThreshold",
+                ..
+            }
+        )),
+        "{:?}",
+        d.validate()
+    );
+
+    // A non-finite scalar decodes (the lexer accepts `NaN`), then
+    // validate reports it rather than the decode silently clamping.
+    let src = CARDAMAGE.replace("MedDamage 150000.000000", "MedDamage NaN");
+    let tune = TuneFile::parse(&src).unwrap();
+    let d = VehCarDamage::from_tune(&tune).unwrap();
+    assert!(
+        d.validate()
+            .iter()
+            .any(|i| matches!(i, DamageIssue::NonFinite { field: "MedDamage" })),
+        "{:?}",
+        d.validate()
+    );
+}
+
+#[test]
+fn vehstuck_decodes_and_validates() {
+    let tune = TuneFile::parse(STUCK).unwrap();
+    let s = VehStuck::from_tune(&tune).unwrap();
+    // The authored value (1.570796) reads as π/2.
+    assert!((s.turn - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+    assert_eq!(s.time_thresh, 1.0);
+    assert_eq!(s.pos_thresh, 0.5);
+    assert_eq!(s.move_thresh, 0.05);
+    assert!(s.validate().is_empty(), "{:?}", s.validate());
+    assert!(s.warnings.is_empty(), "{:?}", s.warnings);
+
+    // Time/position bounds are non-negative; the angular fields may
+    // legitimately carry signs.
+    let src = STUCK.replace("TimeThresh 1.000000", "TimeThresh -1.000000");
+    let tune = TuneFile::parse(&src).unwrap();
+    let s = VehStuck::from_tune(&tune).unwrap();
+    assert!(
+        s.validate().iter().any(|i| matches!(
+            i,
+            DamageIssue::Negative {
+                field: "TimeThresh",
+                ..
+            }
+        )),
+        "{:?}",
+        s.validate()
+    );
+
+    let tune = TuneFile::parse("vehGyro { Drift 0.1 }").unwrap();
+    assert!(VehStuck::from_tune(&tune).is_err());
+}
+
+#[test]
+fn vehgyro_decodes_optional_fields() {
+    let tune = TuneFile::parse(GYRO).unwrap();
+    let g = VehGyro::from_tune(&tune).unwrap();
+    assert_eq!(g.spin180, 3.0);
+    assert_eq!(g.reverse180, 3.0);
+    assert_eq!(g.drift, 0.1);
+    assert_eq!(g.roll, Some(5.0));
+    assert_eq!(g.pitch, Some(5.0));
+    assert!(g.validate().is_empty(), "{:?}", g.validate());
+
+    // Four retail records ship without Roll/Pitch — absent is not an
+    // invented zero.
+    let src = GYRO
+        .replace("Roll 5.000000\r\n", "")
+        .replace("Pitch 5.000000\r\n", "");
+    let tune = TuneFile::parse(&src).unwrap();
+    let g = VehGyro::from_tune(&tune).unwrap();
+    assert_eq!(g.roll, None);
+    assert_eq!(g.pitch, None);
+    assert!(g.warnings.is_empty(), "{:?}", g.warnings);
+
+    let tune = TuneFile::parse("vehStuck { Turn 1.0 }").unwrap();
+    assert!(VehGyro::from_tune(&tune).is_err());
 }

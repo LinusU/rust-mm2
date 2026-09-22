@@ -1,103 +1,103 @@
 # Last implementation iteration
 
-- Task ID and title: F17-A.5 — Race Records screen (DRV-5's first leg)
-  plus the F17-AC05 original-menu capability audit. Also folds in the
-  F17-A.4 review's non-blocking right-click/focus quirk.
-- Starting commit: `b5ff6839acbdb17d496964fa41a182542cd48b4b` on
+- Task ID and title: F05-A.1 — authored vehicle damage and recovery
+  data boundary (the F05-A format/contract/audit leg).
+- Starting commit: `2a2cb6f222d3dac45e7d555580d48843545f1629` on
   `ralph/night`; tree was clean, previous external review verdict pass
-  (F17-A.4), so this is feature work plus a review-repair fold-in.
-- Why this slice: the F10-B remainder is research-gated (UNK-12) and
-  F17-A's other open leg (per-event weather/time/density) is F18-gated.
-  The ledger documents Race Records / Driver's Stats (DRV-5) and the
-  profile already persists per-event records — real data for a real
-  screen, no new persistence format.
+  (F17-A.5), so this is feature work.
+- Why this slice: F10-B's remainder is research-gated (UNK-12) and
+  F17-A's open leg is F18-gated; F05-A's dependencies (F01-B impact
+  signals, F02-B vehicle content) are checked/landed and the retail
+  `vehcardamage`/`vehstuck`/`vehgyro` records were already known to
+  exist. It unblocks F05-B (runtime damage) and feeds F10-B's
+  collision-fidelity and F20-A police legs.
 
 ## What changed
 
-- `mm2_app::menu` — new `Screen::Records { city, table }`, pushed from
-  a new `Race Records` root row (disabled without a bound profile —
-  records are per-driver):
-  - Two filter rows on top (`City:`, `Race type:`) cycling `all` plus
-    the values actually present in the bound driver's records —
-    Left/Right step back/forward, Enter cycles forward, all through
-    `cycle_record_filter`/`cycle_choice` (authored table order, not
-    lexicographic). The filters ride the screen like `NewProfile`'s
-    buffer.
-  - Record rows sorted deterministically (city → authored table order
-    → stem — never finish chronology). Each shows the persisted
-    numbers: `best <m:ss.t> place <n> x<finishes>` plus `[A]`/`[P]`/
-    `[A+P]` beaten marks. `fmt_race_time` renders ticks (`s.s` under a
-    minute, `m:ss.t` above).
-  - A record row re-launches its event through the same `Session::begin`
-    path when it still resolves and clears the gates — the stem-keyed
-    `EventKey` resolves back through the live catalog like Quick Race's
-    `last_event`. Gated rows name the unbeaten prerequisites,
-    `Incomplete` rows their missing files, catalog-absent stems report
-    themselves, Crash Course stays F21-gated — disabled rows still show
-    the stored numbers.
-  - Shared refactor: `availability_reason` now backs the EventList,
-    Quick Race and record rows identically.
-  - Deliberately absent: the documented screen's Amateur Times / Pro
-    Times / Pro Points sort keys — `EventRecord` stores one
-    difficulty-agnostic best time and no Pro-points field exists
-    (DRV-4's formula is UNK-8). The screen shows persisted data rather
-    than fabricating columns; the gap is recorded in
-    `docs/research/menu.md`.
-- `mm2_app::menu` root — `Driver's Stats` added as a disabled row
-  naming the audit doc: the capability is tracked, not a dead-end
-  placeholder (nothing persists aggregate stats to display).
-- `docs/research/menu.md` (new) — the F17-AC05 capability denominator:
-  every documented original menu capability (UI-1..5, DRV-1..8, CTL-8)
-  mapped to implemented / tracked / open, with the design
-  classifications spelled out (enhanced-policy layout choices vs
-  original requirements vs unknowns). Open items stay explicit:
-  Driver's Stats fields, per-screen Help "?", original art/audio,
-  UI-3's stats/transmission detail, DRV-6's customization leg when F18
-  lands (the eligibility site is named).
-- `mm2_app::menu::menu_mouse` — review-repair: a right-click now
-  returns after queueing `Back`. Previously it fell through and also
-  queued the hover `FocusAt`, which applied *after* the pop and
-  clobbered the parent screen's restored focus with a stale child
-  index.
+- `mm2_formats::veh` — typed decoders on the shared tune grammar:
+  - `VehCarDamage` — the full 37-field retail set: damage bounds
+    (`MaxDamage`/`MedDamage`/`ImpactThreshold`/`RegenerateRate`),
+    `TextelDamageRadius`, `SmokeOffset`/`SmokeOffset2` pivots with
+    `DoublePivot` and optional `MirrorPivot`, and a flat embedded
+    `DamageEffect` particle spec (the `dgBangerData` `BirthRule`
+    vocabulary plus `LifeVar`/`DampVar`/`Height`/`Intensity`/`Color`).
+  - `VehStuck` — the uniform 6-field stuck-detection record.
+  - `VehGyro` — `Drift`/`Spin180`/`Reverse180` required, `Roll`/`Pitch`
+    optional (absent on 4 retail records — `None`, never a fabricated
+    zero).
+  - `DamageIssue::{NonFinite, Negative, MedAboveMax}` validation on all
+    three; unknown fields preserved as warnings; expected-root checks;
+    malformed values are `VehError`s, not panics.
+- `mm2_game::damage` (new) — the shared contract F05-B consumes:
+  `DamageSpec` distilled from `VehCarDamage`; `DamageState` — an
+  authority-owned saturating accumulator whose `apply` rejects
+  non-finite/non-positive/at-or-below-threshold severities (F05-AC01)
+  and reports the resulting `DamageTier`/`DamageVerdict`; `tick`
+  advances the authored `RegenerateRate` channel; `repair`/`reset` are
+  explicitly named authority operations; `disabled_outcome(mode)`
+  maps documented RACE-5/DMG-2 consequences (Blitz/Checkpoint restart,
+  Circuit penalty+reset, Cruise free reset designed, CrashCourse →
+  restart marked designed pending F21). The severity→damage conversion
+  is a disclosed designed policy — UNK-13 stands.
+- `mm2_content::assemble` — `VehicleDef` gains `damage`/`stuck`/`gyro`
+  options loaded through the VFS with provenance in `sources`; a
+  resolved-but-malformed record reports into `ConversionReport`
+  warnings instead of sinking the load, and decoder warnings forward
+  too. `None` means authored absence — no fabricated defaults.
+- `mm2_content::damage` (new) — `DamageAudit::scan`: per-catalog-entry
+  coverage of all three record families, the breakaway inventory
+  (pkg `BREAK*` chunks ↔ `geometry/<id>_break*.mtx` ↔
+  `tune/banger/<id>_break*.dgbangerdata`, dead fragments flagged),
+  uncatalogued records kept in the denominator, strict failures =
+  decode rejects + validation issues only.
+- `mm2-inspect` — new `damage [--strict]` audit command; `car` output
+  (text + JSON) now shows the decoded damage/stuck/gyro values.
+- Docs — `docs/research/damage.md` (measured field census, break-part
+  naming, open questions); `docs/original-rules.md` gains DMG-5..8 and
+  REC-1; UNK-13 narrowed to the still-unverified runtime semantics.
 
 ## Evidence
 
-- `cargo test -p mm2_app --test menu` — 21 pass (+5):
-  - `the_records_screen_shows_persisted_results_and_relaunches` —
-    seeded finishes surface as `1:30.5` / `place 1` / `x2` / `[A]`;
-    activating the record lands `SessionMode::Event(checkpoint:0)`
-    through the real launch path.
-  - `unresolvable_records_stay_listed_with_their_reasons` — gated,
-    incomplete, catalog-absent and crash-course records all list
-    disabled with their reasons and stored numbers, in deterministic
-    sorted order; activating one never launches.
-  - `records_filters_narrow_and_widen_the_list` — both filters cycle
-    `all` + present values and wrap; Left steps back, Enter cycles
-    like Right.
-  - `a_fresh_profile_opens_records_to_the_empty_state` — a bound
-    profile with no records gets the honest empty state; another
-    driver's records never show.
-  - `a_right_click_backs_out_without_clobbering_the_restored_focus` —
-    the F17-A.4 review quirk regression.
+- `cargo test -p mm2_formats --test vehicle_formats` — 20 pass (+7):
+  retail field-set decode, `MirrorPivot`/`Roll`/`Pitch` absence →
+  `None`, wrong-root and missing-field rejection, unknown-field
+  warnings, `MedAboveMax`/`Negative`/`NonFinite` validation.
+- `cargo test -p mm2_game --test damage` — 6 pass: spec extraction,
+  threshold rejection (AC01: resting/curb/suspension cannot damage),
+  tier accumulation + saturation at `MaxDamage`, regeneration floor,
+  repair/reset, per-mode disabled outcomes.
+- `cargo test -p mm2_content --test damage` — 3 pass: audit census on a
+  synthetic install (parsed/malformed/missing/uncatalogued all counted,
+  dead break fragment flagged, exactly one failure), `load_vehicle`
+  attachment with provenance, malformed-record warning path.
+- `mm2-inspect damage /Users/linus/coding/rust-mm2/retail` (install
+  `fnv1a64:e91e6cd4b2ae30d9`): 29 catalog vehicles — 20 `vehcardamage`
+  + 20 `vehstuck` + 21 `vehgyro` = 61/61 parsed, 0 issues;
+  `vpmoonrover` authored-absent (the undocumented secret car, UNK-3);
+  14 vehicles carry breakaway parts (vpsemi/vpftruck 6-piece sets);
+  10 dead fragment records reported as findings (vpeagle, vpvw_cup,
+  vpvwcup, vpvwcup_angel — consistent with the banger audit's dead-ref
+  list). `--strict` exits 0.
 - `cargo fmt --all -- --check` — PASS.
 - `cargo clippy --locked --workspace --all-targets
   --all-features -D warnings` — PASS.
-- `cargo test --locked --workspace` — PASS, 685 tests, 0 failures.
+- `cargo test --locked --workspace` — PASS, 701 tests, 0 failures
+  across 51 test binaries (685 + 16 new).
 
 ## Still open
 
-- Records display is proven through headless model/system tests only;
-  no rendered capture of the new screen was taken (the menu render
-  path is unchanged since F17-A.3's screenshot).
-- No original-parity claim: DRV-5's documented Amateur Times / Pro
-  Times / Pro Points sort keys are absent because nothing persists
-  points or per-difficulty times — DRV-5 is not marked verified. The
-  original screen's layout/behavior is documented-level only.
-- A seeded `EventRecord` bypasses `record_eligibility` — that's
-  synthetic test data, matching how the Quick Race tests seed
-  `last_event`; the eligibility writer path itself is unchanged.
-- F17-A remains active: per-event weather/time/density controls need
-  F18's session-legal writers (RACE-3 `customizable`); F17-AC03's full
-  keyboard/gamepad + visible-focus evidence leg remains open. AC05's
-  denominator now exists but AC05 itself stays open until external
-  review agrees every capability is functional or tracked.
+- This is the authored-data boundary only: no runtime impact→damage
+  application, no damage tiers/visuals, no breakaway lifecycle, no
+  impairment/disabled behavior, no recovery logic, no replication.
+  F05 is not original-verified — parsers and synthetic tests do not
+  prove original behavior.
+- UNK-13 remains open: the original's accumulation quantity,
+  `MedDamage`'s consumer, detach rules, `vehstuck`/`vehgyro`
+  application semantics, water/out-of-bounds recovery rules.
+- `DamageState::apply` consumes `approach_speed × striker_mass` — a
+  disclosed designed stand-in shared with banger activation (DSN-10),
+  not a recovered original conversion.
+- `disabled_outcome` for Cruise and CrashCourse is designed, not
+  documented (help names no free-roam consequence; F21 owns CC rules).
+- F05-A stays active: the runtime legs (impact application, visual
+  tiers, breakaway, impairment, recovery, replication) remain.

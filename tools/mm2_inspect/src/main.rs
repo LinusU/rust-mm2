@@ -405,6 +405,22 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Audit vehicle damage content (F05-A.1): every discovered
+    /// `tune/vehicle/*.{vehcardamage,vehstuck,vehgyro}` decoded through
+    /// the production parsers, each catalog vehicle's coverage and
+    /// authored breakaway inventory (pkg BREAK chunks vs
+    /// `_break*.mtx` parts vs `_break*` banger records), plus records
+    /// on ids outside the vehicle catalog.
+    Damage {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Exit nonzero on a decode reject or validation issue on any
+        /// discovered record. Missing records (retail's `vpmoonrover`
+        /// ships no `vehcardamage`), orphaned records and dead break
+        /// fragments are reported findings, not failures.
+        #[arg(long)]
+        strict: bool,
+    },
     /// Versioned content inventory: expected/discovered/accepted/
     /// rejected/unverified counts per content family, fingerprinted by
     /// engine commit and resolved-path provenance.
@@ -528,6 +544,7 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Traffic { dir, city, strict } => {
             traffic(dir, cli.mods.as_deref(), city.as_deref(), *strict)
         }
+        Command::Damage { dir, strict } => damage(dir, cli.mods.as_deref(), *strict),
         Command::Inventory { dir, json, strict } => {
             inventory_cmd(dir, cli.mods.as_deref(), *json, *strict)
         }
@@ -1530,6 +1547,103 @@ fn traffic(
             eprintln!("  strict: {f}");
         }
         return Err(format!("strict traffic audit: {} failures", failures.len()).into());
+    }
+    Ok(())
+}
+
+/// Vehicle-damage audit (F05-A.1): every discovered
+/// `tune/vehicle/*.{vehcardamage,vehstuck,vehgyro}` through
+/// [`mm2_content::DamageAudit`], per-vehicle coverage and breakaway
+/// inventory, uncatalogued records kept in the denominator.
+fn damage(dir: &Path, mods: Option<&Path>, strict: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let vfs = build_vfs(dir, mods)?;
+    let audit = mm2_content::DamageAudit::scan(&vfs);
+
+    println!("== vehicle damage (F05-A.1) ==");
+    let flag = |c: &mm2_content::AssetCheck| match c {
+        mm2_content::AssetCheck::Parsed => "ok".to_string(),
+        mm2_content::AssetCheck::Missing => "—".to_string(),
+        mm2_content::AssetCheck::Failed(_) => "FAILED".to_string(),
+    };
+    for a in &audit.assets {
+        let breaks = match &a.break_chunks {
+            Some(c) => c.join(","),
+            None => "pkg?".to_string(),
+        };
+        println!(
+            "  {:<14} damage:{} stuck:{} gyro:{} break[pkg:{} mtx:{} rec:{}]",
+            a.id,
+            flag(&a.damage),
+            flag(&a.stuck),
+            flag(&a.gyro),
+            breaks,
+            a.break_mtx.join(","),
+            a.break_records.join(","),
+        );
+        for d in &a.dead_breaks {
+            println!("      dead fragment: {d}");
+        }
+        for w in a.warnings.iter().chain(&a.issues) {
+            println!("      {w}");
+        }
+    }
+    if !audit.uncatalogued.is_empty() {
+        println!("  uncatalogued records ({}):", audit.uncatalogued.len());
+        for r in &audit.uncatalogued {
+            println!(
+                "    {:<48} {}",
+                r.logical,
+                match &r.status {
+                    mm2_content::AssetCheck::Parsed => "ok".to_string(),
+                    mm2_content::AssetCheck::Missing => "missing".to_string(),
+                    mm2_content::AssetCheck::Failed(e) => format!("FAILED {e}"),
+                }
+            );
+            for w in r.warnings.iter().chain(&r.issues) {
+                println!("      {w}");
+            }
+        }
+    }
+    for d in &audit.diagnostics {
+        println!("  diagnostic: {d}");
+    }
+
+    let parsed = audit
+        .assets
+        .iter()
+        .flat_map(|a| [&a.damage, &a.stuck, &a.gyro])
+        .filter(|c| **c == mm2_content::AssetCheck::Parsed)
+        .count()
+        + audit
+            .uncatalogued
+            .iter()
+            .filter(|r| r.status == mm2_content::AssetCheck::Parsed)
+            .count();
+    let failures = audit.failures();
+    let with_breaks = audit
+        .assets
+        .iter()
+        .filter(|a| {
+            !a.break_records.is_empty()
+                || a.break_chunks.as_ref().is_some_and(|c| !c.is_empty())
+                || !a.break_mtx.is_empty()
+        })
+        .count();
+    println!(
+        "  {} catalog vehicles — {} carry damage records, {parsed} records parsed, \
+         {with_breaks} with breakaway parts, {} uncatalogued record(s), \
+         {} failed check(s), {} diagnostic(s)",
+        audit.assets.len(),
+        audit.discovered(),
+        audit.uncatalogued.len(),
+        failures.len(),
+        audit.diagnostics.len(),
+    );
+    if strict && !failures.is_empty() {
+        for f in &failures {
+            eprintln!("  strict: {f}");
+        }
+        return Err(format!("strict damage audit: {} failures", failures.len()).into());
     }
     Ok(())
 }
@@ -3419,6 +3533,30 @@ fn car(
                     "width": w.width,
                 })).collect::<Vec<_>>(),
             },
+            "damage": def.damage.as_ref().map(|d| serde_json::json!({
+                "max_damage": d.max_damage,
+                "med_damage": d.med_damage,
+                "impact_threshold": d.impact_threshold,
+                "regenerate_rate": d.regenerate_rate,
+                "textel_damage_radius": d.textel_damage_radius,
+                "smoke_offset": d.smoke_offset,
+                "smoke_offset2": d.smoke_offset2,
+            })),
+            "stuck": def.stuck.as_ref().map(|s| serde_json::json!({
+                "turn": s.turn,
+                "rotation": s.rotation,
+                "translation": s.translation,
+                "time_thresh": s.time_thresh,
+                "pos_thresh": s.pos_thresh,
+                "move_thresh": s.move_thresh,
+            })),
+            "gyro": def.gyro.as_ref().map(|g| serde_json::json!({
+                "drift": g.drift,
+                "spin180": g.spin180,
+                "reverse180": g.reverse180,
+                "roll": g.roll,
+                "pitch": g.pitch,
+            })),
             "sources": def.sources,
             "conversion": def.report.entries.iter().map(|e| serde_json::json!({
                 "source": e.source,
@@ -3506,6 +3644,32 @@ fn car(
                 t.wheels.len(),
                 t.car_hitch,
                 t.trailer_hitch
+            );
+        }
+        match &def.damage {
+            Some(d) => println!(
+                "damage: max {:.0} med {:.0} threshold {:.0} regen {:.1}/s \
+                 decal r {:.2} m, smoke pivots {:?} / {:?}",
+                d.max_damage,
+                d.med_damage,
+                d.impact_threshold,
+                d.regenerate_rate,
+                d.textel_damage_radius,
+                d.smoke_offset,
+                d.smoke_offset2
+            ),
+            None => println!("damage: no vehcardamage record"),
+        }
+        if let Some(s) = &def.stuck {
+            println!(
+                "stuck: turn {:.2} rot {:.2} trans {:.2}, time {:.1} s, pos {:.2} move {:.2}",
+                s.turn, s.rotation, s.translation, s.time_thresh, s.pos_thresh, s.move_thresh
+            );
+        }
+        if let Some(g) = &def.gyro {
+            println!(
+                "gyro: drift {:.2} spin180 {:.2} rev180 {:.2} roll {:?} pitch {:?}",
+                g.drift, g.spin180, g.reverse180, g.roll, g.pitch
             );
         }
         if !paint_problems.is_empty() {

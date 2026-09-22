@@ -14,6 +14,7 @@ pub mod assemble;
 pub mod availability;
 pub mod catalog;
 pub mod convert;
+pub mod damage;
 pub mod events;
 pub mod expect;
 pub mod garage;
@@ -37,6 +38,7 @@ pub use convert::{
     ConversionReport, ConvertInput, Converted, Provenance, ReportEntry, WheelGeom, convert,
     convert_trailer,
 };
+pub use damage::{DamageAudit, RecordCheck, VehicleDamageAssets};
 pub use events::{
     CatalogEvent, EventCatalog, EventRecord, EventResolveError, EventStatus, EventTableStatus,
     ExtraRecord, FailedRef, RecordContent, race_cities,

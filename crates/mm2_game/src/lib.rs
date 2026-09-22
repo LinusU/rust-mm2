@@ -11,6 +11,7 @@ use mm2_assets::Vfs;
 
 pub mod banger;
 pub mod config;
+pub mod damage;
 pub mod ids;
 pub mod impact;
 pub mod nav;
@@ -33,6 +34,9 @@ pub use config::{
     CameraPose, ConfigError, Densities, DevOverrides, Difficulty, EventRef, EventTableKind,
     NavOverlay, SelectorError, SessionAuthority, SessionConditions, SessionConfig, SessionMode,
     SpawnPose, TimeOfDay, VehicleSelection, Weather,
+};
+pub use damage::{
+    DamageSpec, DamageState, DamageTier, DamageVerdict, DisabledOutcome, disabled_outcome,
 };
 pub use ids::{AuthorityRole, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerId};
 pub use impact::{ImpactDedup, ImpactEvent, ImpactId, ImpactPolicy};

@@ -1,0 +1,124 @@
+# Vehicle damage and recovery records
+
+Research for F05-A.1 — the authored-data leg of vehicle damage and
+recovery. Everything below is measured on the retail installation at
+`/Users/linus/coding/rust-mm2/retail` (`mm2-inspect damage <install>`,
+2026-09-22). Format semantics that are not directly measured are
+marked **inferred** or **unverified**; nothing here is an
+original-behavior claim.
+
+## `tune/vehicle/<id>.vehcardamage`
+
+One flat `vehCarDamage` tune block per player vehicle. 20 records on
+retail — every listed car plus `vpvwcup`; `vpmoonrover` ships none
+(the undocumented secret car, UNK-3). All 20 carry the same 37 fields;
+`MirrorPivot` appears on 7 (vpbus, vpcab, vpcaddie, vpcoop, vpcop,
+vpddbus, vpsemi — the tall bodies).
+
+Damage model fields:
+
+| Field | Retail range | Reading |
+| --- | --- | --- |
+| `MaxDamage` | 238 750 (`vpauditt`) – 3 281 300 (`vpsemi`) | Accumulated bound at which the vehicle is destroyed — the DMG-1 meter's empty end. Tracks vehicle mass, so the unit is impulse-scale (**inferred**, UNK-13). |
+| `MedDamage` | 150 000 – 2 343 800 | Mid-tier bound; `MedDamage < MaxDamage` on every record (the meter's yellow band / damaged-visual tier). |
+| `ImpactThreshold` | 1500 on every record | Impacts at or below this do not damage — the authored floor that keeps resting contact, curb taps and suspension loads out of the accumulator (F05-AC01). |
+| `RegenerateRate` | 0 on every record | Damage healed per second — the authored channel DMG-4's C&R healing would drive; no stock car regenerates. |
+| `TextelDamageRadius` | ~0.5 | Decal/deformation radius around an impact point (**inferred**). |
+| `SmokeOffset` / `SmokeOffset2` | car-space pivots | Two smoke-emitter attachment points; `DoublePivot` (0 everywhere) and `MirrorPivot` (0 where authored) gate their use (**inferred**). |
+
+The remaining ~30 fields are a flat particle spec sharing the root
+block — the same vocabulary as `dgBangerData`'s `BirthRule`
+(`Position/Var`, `Velocity/Var`, `Life/Var`, `Mass/Var`, `Radius/Var`,
+`Drag/Var`, `Damp/Var`, `DRadius/Var`, `DAlpha/Var`, `DRotation/Var`,
+`InitialBlast`, `SpewRate`, `SpewTimeLimit`, `Gravity`,
+`TexFrameStart/End`, `BirthFlags`) plus `LifeVar`, `DampVar`,
+`Height`, `Intensity` and `Color` extras. It is decoded as
+`DamageEffect` but embedded flat rather than as a nested sub-block.
+`Color` is a packed word preserved verbatim (retail authors
+`-167772161` — reads as a negative 32-bit ARGB-ish value). What the
+original emits with it is unverified (UNK-13).
+
+Decoder: `mm2_formats::veh::VehCarDamage::from_tune` — expected-root
+check, typed scalars/vectors, unknown fields into `warnings`,
+`validate()` reporting `DamageIssue::{NonFinite, Negative,
+MedAboveMax}`.
+
+## `tune/vehicle/<id>.vehstuck`
+
+One flat `vehStuck` block — 20 retail records, uniform 6-field set:
+`Turn` (≈ π/2 on most), `Rotation` (0 on most), `Translation`,
+`TimeThresh`, `PosThresh`, `MoveThresh`. The names read as a stuck
+detector: an angular/linear test over a time window with position and
+movement bounds — all **inferred** from names; the original's test
+combination is unverified (UNK-13). Decoder:
+`VehStuck::from_tune`; `validate()` enforces non-negative
+time/position/movement bounds while allowing signed angular fields.
+
+## `tune/vehicle/<id>.vehgyro`
+
+One flat `vehGyro` block — 21 retail records (`vpvwcup_angel` ships
+one despite having no other damage records). `Drift`, `Spin180`,
+`Reverse180` on every record; `Roll` and `Pitch` on 17 of 21 (absent
+on vpdune, vpford, vpmustang99, vpvwcup_angel). The names read as
+assisted air-control/righting rates — semantics **inferred**
+(UNK-13). Decoder: `VehGyro::from_tune`; `Roll`/`Pitch` decode as
+`Option<f32>` — absent stays `None`, never an invented zero.
+
+## Breakaway parts (authored inventory)
+
+`geometry/<id>.pkg` `BREAK<NN>` chunks are the intact representation
+of detachable panels; the runtime fragment is bound by name through
+either the pkg chunk or a `geometry/<id>_break<NN>.mtx` transform, and
+the physics/audio record is `tune/banger/<id>_break<NN>.dgbangerdata`
+(the same `<base>_break<N>` → `BREAK<N>` convention the banger audit
+resolves fragment references through — WLD-15).
+
+Naming measured on retail: `BREAK0`–`BREAK3` are corner pieces and
+`BREAK01`/`BREAK12`/`BREAK23`/`BREAK03` the panels *between* corners
+(**inferred** — the pairs read as edge indices). 14 catalog vehicles
+ship breakaway parts; the largest sets are vpsemi and vpftruck (4
+corners + 2 edges), vpcoop (2 corners + 4 edges). `mm2-inspect
+damage` inventories all three sources per vehicle and flags records
+binding to no geometry — retail carries 10 such dead authored
+fragments (vpeagle `break0/1` — no pkg at all; vpvw_cup/vpvwcup
+`break01/02`; vpvwcup_angel all four) — findings, not failures.
+
+## Shared contract (`mm2_game::damage`)
+
+`DamageSpec` distils the authored bounds (`impact_threshold`,
+`med_damage`, `max_damage`, `regenerate_rate`) from `VehCarDamage`.
+`DamageState` is the authority-owned accumulator: `apply` rejects
+non-finite/non-positive/at-or-below-threshold severities outright,
+saturates at `max_damage`, and returns the resulting tier
+(`DamageTier::{Intact, Damaged, Disabled}` — the DMG-1 green/yellow/
+empty bands). `tick` advances the authored regeneration channel
+(mechanism only — whether a session allows healing is DMG-4 mode
+policy). `repair`/`reset` are named authority operations; the
+session's role check decides who may call them (F05 req 6).
+`disabled_outcome(mode)` maps the documented RACE-5/DMG-2
+consequences: `RestartEvent` for Blitz/Checkpoint/CrashCourse (the
+crash-course mapping is designed — F21 territory), `PenaltyReset` for
+Circuit, `FreeReset` for Cruise (designed — the help names no
+free-roam consequence).
+
+The severity→damage *conversion* is not recovered — `apply` consumes
+the same impulse estimate the impact pipeline reports
+(`approach_speed × striker_mass`, shared with banger activation) as a
+documented designed policy (UNK-13 stands).
+
+## Open questions
+
+- The original accumulation model: what quantity `MaxDamage`
+  integrates (impact impulse? energy? a contact callback count?) and
+  whether `ImpactThreshold` compares the same unit — UNK-13.
+- Whether `MedDamage` gates visual state, impairment or both.
+- Which parts detach at which damage level; whether break detachment
+  is damage-driven or impact-driven; fragment-vs-intact rig swap
+  rules.
+- `TextelDamageRadius`'s consumer (decal projection vs vertex
+  deformation), `DoublePivot`/`MirrorPivot` semantics, `Color`
+  packing, `Height`/`Intensity` roles in the effect spec.
+- `.vehstuck` test combination and `.vehgyro` assist application
+  (torques? angular-velocity targets? per-axis gains?).
+- Water/out-of-bounds recovery rules — no authored records found yet;
+  DMG-2 covers destruction only.

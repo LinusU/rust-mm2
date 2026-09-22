@@ -8,7 +8,7 @@ use mm2_formats::bnd::BndFile;
 use mm2_formats::mtx::Mtx;
 use mm2_formats::pkg::Pkg;
 use mm2_formats::tune::TuneFile;
-use mm2_formats::veh::{AsNode, VehCarSim, VehTrailer};
+use mm2_formats::veh::{AsNode, VehCarDamage, VehCarSim, VehGyro, VehStuck, VehTrailer};
 use mm2_vehicle::config::VehicleConfig;
 
 use crate::catalog::VehicleCatalog;
@@ -32,6 +32,19 @@ pub struct VehicleDef {
     pub model: VehicleModel,
     /// Towed trailer, when the vehicle has one (`vpsemi`, `vpcentury`).
     pub trailer: Option<TrailerDef>,
+    /// `tune/vehicle/<id>.vehcardamage` — the authored damage model and
+    /// its embedded effect spec (F05-A). `None` when the record does not
+    /// resolve or does not decode; the vehicle still loads — the F05-B
+    /// runtime treats `None` as "no authored damage tuning" and reports
+    /// it rather than fabricating bounds.
+    pub damage: Option<VehCarDamage>,
+    /// `tune/vehicle/<id>.vehstuck` — authored stuck-detection
+    /// thresholds. `None` when absent/undecodable (same policy as
+    /// `damage`).
+    pub stuck: Option<VehStuck>,
+    /// `tune/vehicle/<id>.vehgyro` — authored rollover-recovery gyro
+    /// assist. `None` when absent/undecodable (same policy as `damage`).
+    pub gyro: Option<VehGyro>,
     /// Conversion audit trail.
     pub report: ConversionReport,
     /// Resolved logical paths used for each dependency.
@@ -102,6 +115,29 @@ fn load_mtx(vfs: &Vfs, pkg_stem: &str, part: &str) -> Option<Mtx> {
     let logical = format!("geometry/{pkg_stem}_{part}.mtx");
     let (bytes, _) = read_opt(vfs, &logical)?;
     Mtx::parse(&bytes).ok()
+}
+
+/// Resolve and parse an optional `tune/vehicle/<id>.<ext>` record —
+/// `None` when it does not resolve; a resolved-but-malformed file
+/// reports through `warnings` instead of sinking the load or
+/// disappearing.
+fn opt_tune(
+    vfs: &Vfs,
+    id: &str,
+    ext: &str,
+    sources: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) -> Option<TuneFile> {
+    let logical = format!("tune/vehicle/{id}.{ext}");
+    let (bytes, src) = read_opt(vfs, &logical)?;
+    sources.push(src);
+    match parse_tune(&bytes, id, &logical) {
+        Ok(t) => Some(t),
+        Err(e) => {
+            warnings.push(e.to_string());
+            None
+        }
+    }
 }
 
 /// Load and convert one catalog vehicle.
@@ -190,6 +226,38 @@ fn load_vehicle_impl(
         Some(AsNode::from_tune(tune))
     });
 
+    // Damage/recovery tuning (F05-A) — optional records, decoded
+    // through the same tune grammar. A record that resolves but fails
+    // to parse/decode is reported in the conversion warnings rather
+    // than sinking the load or vanishing silently.
+    let mut damage_warnings: Vec<String> = Vec::new();
+    let damage =
+        opt_tune(vfs, id, "vehcardamage", &mut sources, &mut damage_warnings).and_then(|t| {
+            VehCarDamage::from_tune(&t)
+                .map_err(|e| damage_warnings.push(format!("{id}.vehcardamage: {e}")))
+                .ok()
+        });
+    let stuck = opt_tune(vfs, id, "vehstuck", &mut sources, &mut damage_warnings).and_then(|t| {
+        VehStuck::from_tune(&t)
+            .map_err(|e| damage_warnings.push(format!("{id}.vehstuck: {e}")))
+            .ok()
+    });
+    let gyro = opt_tune(vfs, id, "vehgyro", &mut sources, &mut damage_warnings).and_then(|t| {
+        VehGyro::from_tune(&t)
+            .map_err(|e| damage_warnings.push(format!("{id}.vehgyro: {e}")))
+            .ok()
+    });
+    // Surface decoder warnings too — unknown authored fields must not
+    // drop silently.
+    for w in damage
+        .iter()
+        .flat_map(|d| d.warnings.iter().cloned())
+        .chain(stuck.iter().flat_map(|s| s.warnings.iter().cloned()))
+        .chain(gyro.iter().flat_map(|g| g.warnings.iter().cloned()))
+    {
+        damage_warnings.push(w);
+    }
+
     // Geometry — required.
     let logical = format!("geometry/{id}.pkg");
     let (bytes, src) = read(vfs, &logical, id, "model")?;
@@ -275,6 +343,7 @@ fn load_vehicle_impl(
             paints.len()
         ));
     }
+    report.warnings.extend(damage_warnings);
 
     Ok(VehicleDef {
         id: id.to_string(),
@@ -283,6 +352,9 @@ fn load_vehicle_impl(
         config,
         model,
         trailer,
+        damage,
+        stuck,
+        gyro,
         report,
         sources,
     })
