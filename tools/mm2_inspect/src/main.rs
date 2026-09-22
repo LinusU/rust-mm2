@@ -421,6 +421,25 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Audit weather/environment content (F18-A.1): census every
+    /// `.sky`, `.ltNN`, `.ldef`, `.cpvs`, `.pvshist`, `.water` and `.lmap`
+    /// file; parse each through the production decoders; cross-check the
+    /// measured 16-preset lighting grid, the `amb_*`/`sky_*` ldef/texture
+    /// pairs, `.sky` dome geometry and per-city data against the PSDL
+    /// room table.
+    Weather {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Restrict the per-city expected denominator and PSDL
+        /// cross-checks to one city stem (default: both stock cities).
+        /// Every discovered environment file is still audited.
+        #[arg(long)]
+        city: Option<String>,
+        /// Exit nonzero when any expected file is missing or fails to
+        /// parse, or when any issue is reported.
+        #[arg(long)]
+        strict: bool,
+    },
     /// Versioned content inventory: expected/discovered/accepted/
     /// rejected/unverified counts per content family, fingerprinted by
     /// engine commit and resolved-path provenance.
@@ -545,6 +564,9 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             traffic(dir, cli.mods.as_deref(), city.as_deref(), *strict)
         }
         Command::Damage { dir, strict } => damage(dir, cli.mods.as_deref(), *strict),
+        Command::Weather { dir, city, strict } => {
+            weather(dir, cli.mods.as_deref(), city.as_deref(), *strict)
+        }
         Command::Inventory { dir, json, strict } => {
             inventory_cmd(dir, cli.mods.as_deref(), *json, *strict)
         }
@@ -3173,6 +3195,481 @@ fn materials(
     if strict && (issues_total > 0 || !failures.is_empty()) {
         return Err(format!(
             "strict materials audit: {} failures, {issues_total} issues",
+            failures.len()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Weather/environment audit (F18-A.1): the expected denominator is, per
+/// stock city, `<stem>.sky`, `<stem>.lt00`..`.lt15` (the measured
+/// time×weather preset grid), `<stem>.cpvs`, `<stem>.pvshist`,
+/// `<stem>.water` and `<stem>.lmap`, plus the shared
+/// `city/amb_<w><t>_<v>.ldef` grid (measured `w ∈ {c,f,p,r}`,
+/// `t ∈ {a,d,m,n}`, `v ∈ {f,l}` — 32 files). Every other discovered
+/// environment file (numbered `.cpvs` fog variants, named `.ldef`s,
+/// `city/phys/j01.sky`, `sf082100.pvshist`, …) is an audited extra —
+/// the denominator is never filtered. Cross-checks: `.sky` dome names
+/// resolve to `geometry/*.pkg`; `amb_<grid>.ldef` pairs with
+/// `texture/sky_<grid>.tex` (measured 32/32 name alignment — inferred
+/// pairing, not documented); `.ltNN` block names classify back to the
+/// file's `NN` slot; and per-city `.cpvs`/`.lmap`/`.pvshist`/`.water`
+/// room references are checked against the PSDL room table.
+/// `--city` narrows the per-city expected denominator and the PSDL
+/// cross-checks; `--strict` exits nonzero on any failure or issue.
+fn weather(
+    dir: &Path,
+    mods: Option<&Path>,
+    city: Option<&str>,
+    strict: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use mm2_formats::cpvs::{Cpvs, PvsHist};
+    use mm2_formats::ldef::Ldef;
+    use mm2_formats::lighting::{LIGHTING_PRESET_COUNT, LightingPreset};
+    use mm2_formats::lmap::Lmap;
+    use mm2_formats::sky::SkyDef;
+    use mm2_formats::water::WaterDef;
+
+    let vfs = build_vfs(dir, mods)?;
+    let stems: Vec<String> = match city {
+        Some(c) => vec![c.to_ascii_lowercase()],
+        None => mm2_content::EXPECTED_CITIES
+            .iter()
+            .map(|c| c.to_string())
+            .collect(),
+    };
+
+    let mut expected: Vec<String> = Vec::new();
+    for c in &stems {
+        for ext in ["sky", "cpvs", "pvshist", "water", "lmap"] {
+            expected.push(format!("city/{c}.{ext}"));
+        }
+        for i in 0..LIGHTING_PRESET_COUNT {
+            expected.push(format!("city/{c}.lt{i:02}"));
+        }
+    }
+    // Shared ambient-light-definition grid (city/ root, not
+    // stem-affiliated): measured 4×4×2 = 32 retail files.
+    for w in ['c', 'f', 'p', 'r'] {
+        for t in ['a', 'd', 'm', 'n'] {
+            for v in ['f', 'l'] {
+                expected.push(format!("city/amb_{w}{t}_{v}.ldef"));
+            }
+        }
+    }
+    expected.sort();
+    expected.dedup();
+
+    let is_env = |p: &str| {
+        if !p.starts_with("city/") {
+            return false;
+        }
+        let n = p.rsplit('/').next().unwrap_or(p);
+        n.ends_with(".sky")
+            || n.ends_with(".ldef")
+            || n.ends_with(".cpvs")
+            || n.ends_with(".pvshist")
+            || n.ends_with(".water")
+            || n.ends_with(".lmap")
+            || n.rsplit_once(".lt")
+                .is_some_and(|(_, s)| s.len() == 2 && s.bytes().all(|b| b.is_ascii_digit()))
+    };
+    let mut logicals: Vec<String> = vfs.list().into_iter().filter(|p| is_env(p)).collect();
+    for e in &expected {
+        if !logicals.contains(e) {
+            logicals.push(e.clone());
+        }
+    }
+    logicals.sort();
+    logicals.dedup();
+    if logicals.is_empty() {
+        return Err("weather audit: no environment files discovered".into());
+    }
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut issues_total = 0usize;
+    let mut parsed = 0usize;
+    let mut unsupported = 0usize;
+
+    // Parsed data kept for cross-checks, keyed by city stem.
+    let mut skies: Vec<(String, SkyDef)> = Vec::new();
+    let mut ldef_stems: Vec<(String, String)> = Vec::new();
+    let mut lt_by_city: BTreeMap<String, BTreeMap<usize, (String, LightingPreset)>> =
+        BTreeMap::new();
+    let mut cpvs_by_city: BTreeMap<String, Vec<(String, Cpvs)>> = BTreeMap::new();
+    let mut hist_by_city: BTreeMap<String, Vec<(String, PvsHist)>> = BTreeMap::new();
+    let mut water_by_city: BTreeMap<String, (String, WaterDef)> = BTreeMap::new();
+    let mut lmap_by_city: BTreeMap<String, (String, Lmap)> = BTreeMap::new();
+
+    let issue = |issues: &mut usize, msg: String| {
+        *issues += 1;
+        println!("    issue: {msg}");
+    };
+
+    println!("== weather/environment files (sky/ltNN/ldef/cpvs/pvshist/water/lmap) ==");
+    for logical in &logicals {
+        let is_expected = expected.contains(logical);
+        let tag = if is_expected { "expected" } else { "extra" };
+        let Some(res) = vfs.resolve(logical) else {
+            println!("  {logical:<52} {tag:<9} missing");
+            failures.push(format!("{logical}: expected file not found"));
+            continue;
+        };
+        let bytes = vfs.read(&res)?;
+        let name = logical.rsplit('/').next().unwrap_or(logical);
+        // City stem for `city/<stem>.<ext>` files directly under city/
+        // (`<stem>` or `<stem>_<variant>` / `<stem><digits>`).
+        let file_stem = logical
+            .strip_prefix("city/")
+            .filter(|rest| !rest.contains('/'))
+            .and_then(|rest| rest.rsplit_once('.'))
+            .map(|(s, _)| s);
+        let city_of = |s: &str| -> Option<String> {
+            mm2_content::EXPECTED_CITIES
+                .iter()
+                .find(|c| {
+                    s == **c || s.starts_with(&format!("{c}_")) || {
+                        s.starts_with(*c) && s[c.len()..].chars().all(|b| b.is_ascii_digit())
+                    }
+                })
+                .map(|c| c.to_string())
+        };
+        macro_rules! fail {
+            ($e:expr) => {
+                if is_expected {
+                    println!("  {logical:<52} {tag:<9} failed: {}", $e);
+                    failures.push(format!("{logical}: {}", $e));
+                } else {
+                    println!("  {logical:<52} {tag:<9} unsupported: {}", $e);
+                    unsupported += 1;
+                }
+            };
+        }
+        if name.ends_with(".sky") {
+            match SkyDef::parse(&String::from_utf8_lossy(&bytes)) {
+                Ok(s) => {
+                    parsed += 1;
+                    let issues = s.validate();
+                    issues_total += issues.len();
+                    println!(
+                        "  {logical:<52} {tag:<9} ok — dome {:?}, hat_y {}, y_mul {}, rot {}",
+                        s.model, s.hat_y_offset, s.y_multiplier, s.rotation_rate
+                    );
+                    for i in &issues {
+                        println!("    issue: {i:?}");
+                    }
+                    skies.push((logical.clone(), s));
+                }
+                Err(e) => fail!(e),
+            }
+        } else if name.ends_with(".ldef") {
+            match Ldef::parse(&String::from_utf8_lossy(&bytes)) {
+                Ok(l) => {
+                    parsed += 1;
+                    let stem = l.texture_stem().unwrap_or("?").to_string();
+                    println!(
+                        "  {logical:<52} {tag:<9} ok — src {:?}, {} row(s)",
+                        stem,
+                        l.rows.len()
+                    );
+                    ldef_stems.push((logical.clone(), stem));
+                }
+                Err(e) => fail!(e),
+            }
+        } else if let Some((_, suffix)) = name.rsplit_once(".lt") {
+            let file_index = suffix.parse::<usize>().unwrap_or(usize::MAX);
+            match LightingPreset::parse(&String::from_utf8_lossy(&bytes)) {
+                Ok(p) => {
+                    parsed += 1;
+                    let issues = p.validate();
+                    issues_total += issues.len();
+                    println!(
+                        "  {logical:<52} {tag:<9} ok — {:?}: key h{:.2}/p{:.2} {:?}, ambient 0x{:08X}",
+                        p.name, p.key.heading, p.key.pitch, p.key.color, p.ambient_packed as u32
+                    );
+                    for i in &issues {
+                        println!("    issue: {i:?}");
+                    }
+                    if p.index() != Some(file_index) {
+                        issue(
+                            &mut issues_total,
+                            format!(
+                                "{logical}: preset {:?} classifies to slot {:?}, file suffix says {file_index}",
+                                p.name,
+                                p.index()
+                            ),
+                        );
+                    }
+                    if let Some(c) = file_stem.and_then(city_of) {
+                        lt_by_city
+                            .entry(c)
+                            .or_default()
+                            .insert(file_index, (logical.clone(), p));
+                    }
+                }
+                Err(e) => fail!(e),
+            }
+        } else if name.ends_with(".cpvs") {
+            match Cpvs::parse(&bytes) {
+                Ok(c) => {
+                    parsed += 1;
+                    // Format violations (unknown 2-bit codes) are issues;
+                    // rooms that do not see themselves are authored
+                    // anomalies — retail ships a handful per city.
+                    let (violations, self_invisible): (Vec<_>, Vec<_>) =
+                        c.validate().into_iter().partition(|i| {
+                            !matches!(i, mm2_formats::cpvs::CpvsIssue::SelfInvisible { .. })
+                        });
+                    issues_total += violations.len();
+                    let mut nonempty = 0usize;
+                    let mut max_len = 0usize;
+                    let mut undecodable = 0usize;
+                    for i in 0..c.list_count() {
+                        match c.decompress(i) {
+                            Ok(l) => {
+                                if l.iter().any(|&b| b != 0) {
+                                    nonempty += 1;
+                                }
+                                max_len = max_len.max(l.len());
+                            }
+                            Err(_) => undecodable += 1,
+                        }
+                    }
+                    if undecodable > 0 {
+                        issue(
+                            &mut issues_total,
+                            format!("{logical}: {undecodable} list(s) fail to decompress"),
+                        );
+                    }
+                    println!(
+                        "  {logical:<52} {tag:<9} ok — {} lists ({} nonzero), max {} bytes{}",
+                        c.list_count(),
+                        nonempty,
+                        max_len,
+                        if self_invisible.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                ", {} room(s) not self-visible (authored)",
+                                self_invisible.len()
+                            )
+                        }
+                    );
+                    for i in &violations {
+                        println!("    issue: {i:?}");
+                    }
+                    if let Some(city) = file_stem.and_then(city_of) {
+                        cpvs_by_city
+                            .entry(city)
+                            .or_default()
+                            .push((logical.clone(), c));
+                    }
+                }
+                Err(e) => fail!(e),
+            }
+        } else if name.ends_with(".pvshist") {
+            match PvsHist::parse(&String::from_utf8_lossy(&bytes)) {
+                Ok(h) => {
+                    parsed += 1;
+                    let max_room = h.rows.iter().map(|r| r.from.max(r.to)).max().unwrap_or(0);
+                    println!(
+                        "  {logical:<52} {tag:<9} ok — {} rows, max room {}",
+                        h.rows.len(),
+                        max_room
+                    );
+                    if let Some(c) = file_stem.and_then(city_of) {
+                        hist_by_city
+                            .entry(c)
+                            .or_default()
+                            .push((logical.clone(), h));
+                    }
+                }
+                Err(e) => fail!(e),
+            }
+        } else if name.ends_with(".water") {
+            match WaterDef::parse(&String::from_utf8_lossy(&bytes)) {
+                Ok(w) => {
+                    parsed += 1;
+                    let issues = w.validate();
+                    issues_total += issues.len();
+                    println!(
+                        "  {logical:<52} {tag:<9} ok — level {}, refs {:?}",
+                        w.level, w.refs
+                    );
+                    for i in &issues {
+                        println!("    issue: {i:?}");
+                    }
+                    if let Some(c) = file_stem.and_then(city_of) {
+                        water_by_city.insert(c, (logical.clone(), w));
+                    }
+                }
+                Err(e) => fail!(e),
+            }
+        } else if name.ends_with(".lmap") {
+            match Lmap::parse(&bytes) {
+                Ok(l) => {
+                    parsed += 1;
+                    let sentinel = l.entries.iter().filter(|&&v| v == -842150451).count();
+                    println!(
+                        "  {logical:<52} {tag:<9} ok — {} entries{}",
+                        l.entries.len(),
+                        if sentinel > 0 {
+                            format!(" ({sentinel} 0xCDCDCDCD sentinel value(s))")
+                        } else {
+                            String::new()
+                        }
+                    );
+                    if let Some(c) = file_stem.and_then(city_of) {
+                        lmap_by_city.insert(c, (logical.clone(), l));
+                    }
+                }
+                Err(e) => fail!(e),
+            }
+        }
+    }
+
+    // Cross-checks — authored anomalies and broken references, not load
+    // failures.
+    println!("  cross-checks:");
+
+    // `.sky` dome → geometry/<model>.pkg.
+    for (path, sky) in &skies {
+        let pkg = format!("geometry/{}.pkg", sky.model);
+        if vfs.resolve(&pkg).is_none() {
+            issue(
+                &mut issues_total,
+                format!("{path}: dome {:?} resolves to no {pkg}", sky.model),
+            );
+        }
+    }
+
+    // `amb_<grid>.ldef` ↔ `texture/sky_<grid>.tex` pairing (measured
+    // 32/32 grid-name alignment on retail — inferred).
+    for (path, stem) in &ldef_stems {
+        let name = path.rsplit('/').next().unwrap_or(path);
+        if let Some(grid) = name
+            .strip_prefix("amb_")
+            .and_then(|s| s.strip_suffix(".ldef"))
+        {
+            let tex = format!("texture/sky_{grid}");
+            if vfs.resolve_preferred(&tex, TEXTURE_EXTS).is_none() {
+                issue(
+                    &mut issues_total,
+                    format!("{path}: no {tex}.* counterpart for grid {grid:?}"),
+                );
+            }
+        } else {
+            println!(
+                "    note: {path}: bake-source {:?} is a dev path (provenance only, never shipped)",
+                stem
+            );
+        }
+    }
+
+    // `.ltNN` slot coverage per city.
+    for c in &stems {
+        match lt_by_city.get(c) {
+            Some(slots) => {
+                let missing: Vec<usize> = (0..LIGHTING_PRESET_COUNT)
+                    .filter(|i| !slots.contains_key(i))
+                    .collect();
+                println!(
+                    "    lt: {c} — {}/{LIGHTING_PRESET_COUNT} preset slots{}",
+                    slots.len(),
+                    if missing.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", missing slots {missing:?}")
+                    }
+                );
+            }
+            None => println!("    note: {c}: no parsed .ltNN presets"),
+        }
+    }
+
+    // PSDL room-table cross-checks per city.
+    for c in &stems {
+        let psdl_path = format!("city/{c}.psdl");
+        let Some(pres) = vfs.resolve(&psdl_path) else {
+            println!("    note: no {psdl_path} — room counts not cross-checked");
+            continue;
+        };
+        let pbytes = vfs.read(&pres)?;
+        let rooms = match Psdl::parse(&pbytes) {
+            Ok(p) => p.rooms.len(),
+            Err(e) => {
+                println!("    note: {psdl_path} failed to parse: {e}");
+                continue;
+            }
+        };
+        // `<stem>.cpvs` list count is `rooms + 1` on retail (list 0 is
+        // reserved, lists 1..=rooms map to rooms 1..=rooms — mm2hook
+        // IsRoomVisible convention, verified against 1340/1341 London
+        // self-visible rooms).
+        if let Some(cpvs_list) = cpvs_by_city.get(c) {
+            for (path, cpvs) in cpvs_list {
+                let base = path.rsplit('/').next().unwrap_or(path) == format!("{c}.cpvs").as_str();
+                if base && cpvs.list_count() != rooms + 1 {
+                    issue(
+                        &mut issues_total,
+                        format!(
+                            "{path}: {} lists but {psdl_path} has {rooms} rooms (expected rooms+1)",
+                            cpvs.list_count()
+                        ),
+                    );
+                }
+            }
+        }
+        // `.lmap` is authored with fewer entries than rooms on sf —
+        // a count difference is a measured authored fact, not a broken
+        // reference.
+        if let Some((path, lmap)) = lmap_by_city.get(c) {
+            println!(
+                "    lmap: {path} — {} entries vs {rooms} rooms{}",
+                lmap.entries.len(),
+                if lmap.entries.len() != rooms {
+                    " (authored mismatch — not all rooms covered)"
+                } else {
+                    ""
+                }
+            );
+        }
+        if let Some(hists) = hist_by_city.get(c) {
+            for (path, h) in hists {
+                let max_room = h.rows.iter().map(|r| r.from.max(r.to)).max().unwrap_or(0);
+                if max_room > rooms as u32 {
+                    issue(
+                        &mut issues_total,
+                        format!(
+                            "{path}: references room {max_room} but {psdl_path} has {rooms} rooms"
+                        ),
+                    );
+                }
+            }
+        }
+        if let Some((path, w)) = water_by_city.get(c) {
+            for &r in &w.refs {
+                if r > rooms as i64 {
+                    issue(
+                        &mut issues_total,
+                        format!("{path}: reference {r} exceeds {rooms} {psdl_path} rooms"),
+                    );
+                }
+            }
+        }
+        println!("    psdl: {psdl_path} — {rooms} rooms (cross-checked)");
+    }
+
+    println!(
+        "  {parsed}/{} parsed, {} unsupported extras, {} failures, {issues_total} issue(s)",
+        logicals.len(),
+        unsupported,
+        failures.len(),
+    );
+    if strict && (issues_total > 0 || !failures.is_empty()) {
+        return Err(format!(
+            "strict weather audit: {} failures, {issues_total} issues",
             failures.len()
         )
         .into());
