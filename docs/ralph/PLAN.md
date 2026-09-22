@@ -60,7 +60,14 @@ fires per attachment, and `resolve_disabled`'s repair calls
 `restore_rig` — re-attach, despawn fragments, show nodes
 (F05-AC03). `brk=` feeds the smoke record on activity. Retail
 sf/london cruises stay bit-identical (vpbug authors no parts;
-vpcoop's scripted impacts never reach ~70 mph). Before that the
+vpcoop's scripted impacts never reach ~70 mph). Iteration 31 then
+repaired the candidate's two external-review blockers — both
+evidence defects, no implementation fault: the DSN-21/UNK-13
+ledger rows now record the implemented `severity × part_mass`
+(the part's own record `Mass`; the `other_mass` wording was the
+rejected draft), and a `mesh_children_respawn_under_the_fragment`
+test now exercises the fragment-visual re-spawn the record
+already claimed. Before that the
 latest iteration landed F05-B.2, authored `vehstuck` consumption:
 `VehicleStuck` (authored spec + impact-armed detector) now spawns
 on the player and AI opponents, `mm2_app::stuck`'s `track_stuck`

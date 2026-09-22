@@ -280,6 +280,72 @@ fn a_panel_detaches_once_and_its_node_hides() {
 }
 
 #[test]
+fn mesh_children_respawn_under_the_fragment() {
+    // The fragment's visuals are the intact node's mesh children,
+    // re-spawned under the fragment body with cloned handles — the
+    // originals stay on the hidden node so nothing renders twice.
+    let (mut app, _car, object, nodes) = break_app(
+        vec![part("break0", LIMIT)],
+        Vec3::new(0.0, 1.2, 0.0),
+        BangerPool::default(),
+    );
+    if !app.world().contains_resource::<Assets<StandardMaterial>>() {
+        app.world_mut().init_resource::<Assets<StandardMaterial>>();
+    }
+    let mesh = app
+        .world_mut()
+        .resource_mut::<Assets<Mesh>>()
+        .add(Cuboid::new(0.4, 0.2, 0.6));
+    let mat = app
+        .world_mut()
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(StandardMaterial::default());
+    let panel_child = app
+        .world_mut()
+        .spawn((
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(mat.clone()),
+            Transform::IDENTITY,
+        ))
+        .id();
+    app.world_mut().entity_mut(nodes[0]).add_child(panel_child);
+
+    write_impact(&mut app, 1, object, ObjectId::WORLD, 6.0);
+    app.update();
+    assert_eq!(report(&app).detached, 1);
+
+    let fragments: Vec<Entity> = app
+        .world_mut()
+        .query_filtered::<Entity, With<BreakFragment>>()
+        .iter(app.world())
+        .collect();
+    assert_eq!(fragments.len(), 1);
+    let children = app
+        .world()
+        .get::<Children>(fragments[0])
+        .expect("the fragment body carries the re-spawned mesh children");
+    assert_eq!(children.len(), 1);
+    let respawned = children[0];
+    assert_ne!(
+        respawned, panel_child,
+        "a fresh render entity under the fragment, not a reparent"
+    );
+    assert_eq!(app.world().get::<Mesh3d>(respawned).unwrap().0, mesh);
+    assert_eq!(
+        app.world()
+            .get::<MeshMaterial3d<StandardMaterial>>(respawned)
+            .unwrap()
+            .0,
+        mat
+    );
+    // The hidden intact node keeps its original child.
+    assert_eq!(
+        app.world().get::<ChildOf>(panel_child).unwrap().parent(),
+        nodes[0]
+    );
+}
+
+#[test]
 fn below_the_authored_limit_the_panel_stays() {
     let (mut app, _car, object, nodes) = break_app(
         vec![part("break0", LIMIT)],
