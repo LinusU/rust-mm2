@@ -1594,3 +1594,145 @@ fn respawns_reject_space_a_participant_occupies() {
         "the default box must allow refills"
     );
 }
+
+// ---------------------------------------------------------------------------
+// F10-B.5 junction-box yield — an admitted approach waits on an occupied box
+// ---------------------------------------------------------------------------
+
+/// A participant parked in the junction box is invisible to the
+/// corridor sense (6.75 m lateral > the 2.4 m half-width) and to the
+/// landing check (9.7 m from the turn's landing > the 6 m entry
+/// clearance) — only the box-yield sees it. The green-lit approach
+/// must stand at its stop line through a whole green while the box
+/// is occupied, then cross once it clears (F10-AC02's right-of-way
+/// leg; the "player blocks intersection" edge case).
+#[test]
+fn a_participant_in_the_box_yields_the_green_approach() {
+    let install = junction_install(1, 1);
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    {
+        let mut t = app.world_mut().resource_mut::<AmbientTraffic>();
+        t.junctions.policy.green_ticks = 120;
+        t.junctions.policy.clear_ticks = 60;
+    }
+    // Inside the zone (|XZ| 4.2 < the 7 m radius) but outside every
+    // other check's reach.
+    let blocker = app
+        .world_mut()
+        .spawn((
+            Player {
+                id: PlayerId(95),
+                control: PlayerControl::Ai,
+            },
+            Position(Vec3::new(-3.0, 0.0, -3.0)),
+        ))
+        .id();
+    let lane_r0 = lane(0, Side::Right);
+    let car = spawn_follower(&mut app, lane_r0, 15.0, 15.0);
+
+    // The car must reach its stop line and stand through at least one
+    // whole green — a turn that ignored the occupied box would cross
+    // on the first green it met.
+    let mut stood_on_green = 0usize;
+    let mut held_seen = 0usize;
+    for _ in 0..300 {
+        app.update();
+        held_seen = held_seen.max(app.world().resource::<AmbientTraffic>().junction_held);
+        let green = {
+            let t = app.world().resource::<AmbientTraffic>();
+            t.junctions.green_road(t.graph(), 0)
+        };
+        let (pos, speed, cur) = car_state(&mut app, car).expect("the yielded car despawned");
+        assert_eq!(cur.lane, lane_r0, "entered an occupied box");
+        // The stop line sits at z = −6.5; the lane end at −4. Held at
+        // the line means z < −5 — the occupied-exit revert alone would
+        // leave the car oscillating at the lane end (along ≈ 26).
+        assert!(
+            pos.z < -5.0,
+            "past the stop line inside an occupied box: {pos:?}"
+        );
+        assert!(
+            cur.along <= 24.0,
+            "oscillating at the lane end — the yield never ran: {cur:?}"
+        );
+        if green == Some(0) && cur.along >= 23.0 && speed <= 1.0 {
+            stood_on_green += 1;
+        }
+    }
+    assert!(
+        held_seen >= 1,
+        "the yielded car never reported junction-held"
+    );
+    assert!(
+        stood_on_green >= 40,
+        "the car did not stand through a green: {stood_on_green}"
+    );
+
+    // Clearing the box releases the yield on a later green.
+    app.world_mut().despawn(blocker);
+    assert!(
+        run_until(&mut app, 1500, |a| {
+            car_state(a, car).is_none_or(|(_, _, c)| c.lane != lane_r0)
+        }),
+        "the cleared box never released the approach"
+    );
+}
+
+/// An ambient car parked inside the box on a lane bound for a dead
+/// end — not for this junction — occupies it: the FCFS-registered
+/// stop-sign head stands at its stop line through its dwell instead
+/// of transferring and reverting at the lane end, which is what the
+/// occupied-exit check alone would produce.
+#[test]
+fn an_ambient_car_in_the_box_yields_the_stop_sign_head() {
+    let install = junction_install(0, 0);
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+
+    // Parked mid-box on road 1's forward lane (z ≈ 4.5, inside the
+    // 7 m zone); its downstream end is a dead end, so `bound_for`
+    // does not shield it from occupying the junction.
+    let occupant = spawn_follower(&mut app, lane(1, Side::Right), 0.5, 0.0);
+    let lane_r0 = lane(0, Side::Right);
+    let car = spawn_follower(&mut app, lane_r0, 18.0, 15.0);
+
+    let mut stood_at_line = false;
+    for _ in 0..240 {
+        app.update();
+        let (pos, speed, cur) = car_state(&mut app, car).expect("the yielded car despawned");
+        assert_eq!(cur.lane, lane_r0, "entered an occupied box");
+        assert!(
+            cur.along <= 24.0,
+            "held at the lane end instead of the stop line — the yield never ran: {cur:?}"
+        );
+        assert!(
+            pos.z < -5.0,
+            "past the stop line inside an occupied box: {pos:?}"
+        );
+        stood_at_line |= cur.along >= 23.0 && speed <= 1.0;
+    }
+    assert!(
+        stood_at_line,
+        "the yielded car never stood at its stop line"
+    );
+    assert!(
+        app.world().resource::<AmbientTraffic>().junctions.waiting() >= 1,
+        "the yielded head never registered in the FCFS queue"
+    );
+
+    // Clearing the box releases the head — its dwell long elapsed.
+    app.world_mut().despawn(occupant);
+    assert!(
+        run_until(&mut app, 240, |a| {
+            car_state(a, car).is_none_or(|(_, _, c)| c.lane != lane_r0)
+        }),
+        "the cleared box never released the stop-sign head"
+    );
+}

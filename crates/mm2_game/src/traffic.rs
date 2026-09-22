@@ -722,6 +722,15 @@ pub struct JunctionPolicy {
     /// participant would materialise inside it — the car holds at the
     /// lane end and retries instead (m).
     pub enter_clearance: f32,
+    /// Padding added to the farthest member end's distance from the
+    /// junction centre to size the occupancy zone [`junction_zone`]
+    /// reports (m) — the box a yielded approach waits on. Sized so a
+    /// car that just turned keeps occupying until its hull has left
+    /// the junction, not merely crossed the endpoint ring.
+    pub box_margin: f32,
+    /// Vertical band around the junction zone (m) — a car on an
+    /// overpass crossing above the junction does not occupy it.
+    pub box_max_rise: f32,
 }
 
 impl Default for JunctionPolicy {
@@ -735,6 +744,8 @@ impl Default for JunctionPolicy {
             approach_time: 1.0,
             decel: 9.0,
             enter_clearance: 6.0,
+            box_margin: 3.0,
+            box_max_rise: 3.0,
         }
     }
 }
@@ -775,6 +786,14 @@ pub enum JunctionGate {
 /// `AlwaysStop` ends are never admitted (unused on retail data).
 /// Queue keys are `Entity`s: junction admission is ephemeral
 /// per-world state, never a result or network identity.
+///
+/// F10-B.5 layers the box-yield on top of the rule gates: the caller
+/// reports whether the junction's occupancy zone ([`junction_zone`])
+/// holds a vehicle not bound for it, and [`Junctions::gate`] keeps an
+/// otherwise-admitted approach closed while it does. That is the
+/// F10-AC02 right-of-way leg the rules alone cannot express — the
+/// authored cycle decides *whose turn* it is, not whether the box is
+/// physically passable.
 #[derive(Default)]
 pub struct Junctions {
     /// Fixed-step clock — `advance_tick` runs once per driver tick, so
@@ -883,6 +902,14 @@ impl Junctions {
     /// never lands on an exact zero) at a standstill (`stopped`)
     /// registers a stop-sign car in the junction queue — registration
     /// is what makes the wait ordering first-come-first-served.
+    ///
+    /// `box_occupied` is the caller's junction-box occupancy report
+    /// (see [`junction_zone`]): an *admitted* approach — green member
+    /// or FCFS head — still closes while the box holds a vehicle the
+    /// rule cannot see (F10-AC02's right-of-way leg: a green light
+    /// does not make a blocked box passable). It is consulted only on
+    /// the two paths where a gated rule can open; `NeverStop`/
+    /// unruled ends keep their documented free flow regardless.
     pub fn gate(
         &mut self,
         graph: &NavGraph,
@@ -890,6 +917,7 @@ impl Junctions {
         car: Entity,
         at_line: bool,
         stopped: bool,
+        box_occupied: bool,
     ) -> JunctionGate {
         let Some((ix, road, rule)) = Self::approach(graph, lane) else {
             return JunctionGate::Open;
@@ -906,7 +934,7 @@ impl Junctions {
                     return JunctionGate::Open;
                 }
                 match self.green_member(ix, &members) {
-                    Some(green) if green == road => JunctionGate::Open,
+                    Some(green) if green == road && !box_occupied => JunctionGate::Open,
                     _ => JunctionGate::Closed,
                 }
             }
@@ -923,7 +951,7 @@ impl Junctions {
                             && self.tick.saturating_sub(*arrived) >= self.policy.stop_dwell_ticks
                     },
                 );
-                if admitted {
+                if admitted && !box_occupied {
                     JunctionGate::Open
                 } else {
                     JunctionGate::Closed
@@ -949,6 +977,85 @@ impl Junctions {
             !q.is_empty()
         });
     }
+}
+
+/// The junction's occupancy zone for the box-yield (F10-B.5): its
+/// centre (the authored `center`, falling back to the member-endpoint
+/// centroid when that is non-finite) and the XZ radius reaching the
+/// farthest member road's end position at the junction plus
+/// [`JunctionPolicy::box_margin`]. `None` only when neither a finite
+/// centre nor any member end exists — the caller then cannot form a
+/// box and yields nothing.
+///
+/// The member ends are the box boundary in the authored data: a car
+/// turning off an approach lands just past one and keeps occupying
+/// until it has driven the margin clear. A car still *bound* for the
+/// junction — waiting at or behind its own stop line — must never be
+/// counted as an occupant by the caller, or two competing approaches
+/// would hold each other forever; that exclusion is the caller's job
+/// because only it knows each blocker's destination.
+pub fn junction_zone(
+    graph: &NavGraph,
+    ix: u16,
+    policy: &JunctionPolicy,
+) -> Option<([f32; 3], f32)> {
+    let intersection = graph.intersections().get(ix as usize)?;
+    let mut ends: Vec<[f32; 3]> = Vec::new();
+    for &idx in &intersection.roads {
+        let Ok(road_idx) = u16::try_from(idx) else {
+            continue;
+        };
+        let Some(road) = graph.road(road_idx) else {
+            continue;
+        };
+        for a in road.arcs.iter().flatten() {
+            let arc = graph.arc(*a);
+            if arc.exit == ArcEnd::Intersection(ix) {
+                ends.push(arc.exit_point);
+            }
+            if arc.entry == ArcEnd::Intersection(ix) {
+                ends.push(arc.entry_point);
+            }
+        }
+    }
+    let center = if intersection.center.iter().all(|c| c.is_finite()) {
+        intersection.center
+    } else if !ends.is_empty() {
+        let mut c = [0.0f32; 3];
+        for p in &ends {
+            for a in 0..3 {
+                c[a] += p[a];
+            }
+        }
+        for v in &mut c {
+            *v /= ends.len() as f32;
+        }
+        c
+    } else {
+        return None;
+    };
+    let radius = ends
+        .iter()
+        .map(|p| {
+            let dx = p[0] - center[0];
+            let dz = p[2] - center[2];
+            dx * dx + dz * dz
+        })
+        .fold(0.0f32, f32::max)
+        .sqrt()
+        + policy.box_margin.max(0.0);
+    Some((center, radius))
+}
+
+/// Whether `pos` lies inside `zone` as [`junction_zone`] reports it:
+/// XZ within the radius and within [`JunctionPolicy::box_max_rise`]
+/// vertically, so a car crossing above or below on another road level
+/// does not occupy the junction.
+pub fn inside_junction_zone(pos: [f32; 3], zone: ([f32; 3], f32), policy: &JunctionPolicy) -> bool {
+    let (c, r) = zone;
+    let dx = pos[0] - c[0];
+    let dz = pos[2] - c[2];
+    dx * dx + dz * dz <= r * r && (pos[1] - c[1]).abs() <= policy.box_max_rise.max(0.0)
 }
 
 // ---------- stuck recovery (F10-B.3) ----------

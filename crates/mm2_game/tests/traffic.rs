@@ -782,6 +782,12 @@ fn connected_rule(intersection: u32, road_index: u32, rule: u16) -> RoadEnd {
 /// junction-connected ends — `r0_end` rules road 0's forward approach,
 /// `r1_start` rules road 1's backward approach.
 fn chain_with_rules(r0_end: u16, r1_start: u16) -> NavGraph {
+    chain_with_center([0.0, 0.0, 100.0], r0_end, r1_start)
+}
+
+/// `chain_with_rules` with a caller-authored junction centre — the
+/// occupancy zone's radius is measured against it.
+fn chain_with_center(center: [f32; 3], r0_end: u16, r1_start: u16) -> NavGraph {
     let r0 = road_full(
         0,
         &[[0.0, 0.0, 0.0], [0.0, 0.0, 100.0]],
@@ -801,7 +807,7 @@ fn chain_with_rules(r0_end: u16, r1_start: u16) -> NavGraph {
         vec![Intersection {
             id: 0,
             room: 1,
-            center: [0.0, 0.0, 100.0],
+            center,
             roads: vec![0, 1],
         }],
     ))
@@ -816,17 +822,29 @@ fn junction_gate_binds_the_authored_end_rule() {
     // NeverStop on both approaches: the gate is inert at any distance.
     let g = chain_with_rules(3, 3);
     let mut j = Junctions::default();
-    assert_eq!(j.gate(&g, r0, car(1), false, false), JunctionGate::Open);
-    assert_eq!(j.gate(&g, r1, car(2), true, true), JunctionGate::Open);
+    assert_eq!(
+        j.gate(&g, r0, car(1), false, false, false),
+        JunctionGate::Open
+    );
+    assert_eq!(
+        j.gate(&g, r1, car(2), true, true, false),
+        JunctionGate::Open
+    );
 
     // AlwaysStop never releases, however long the car stands.
     let g = chain_with_rules(2, 3);
     let mut j = Junctions::default();
-    assert_eq!(j.gate(&g, r0, car(1), false, false), JunctionGate::Closed);
+    assert_eq!(
+        j.gate(&g, r0, car(1), false, false, false),
+        JunctionGate::Closed
+    );
     for _ in 0..1000 {
         j.advance_tick();
     }
-    assert_eq!(j.gate(&g, r0, car(1), true, true), JunctionGate::Closed);
+    assert_eq!(
+        j.gate(&g, r0, car(1), true, true, false),
+        JunctionGate::Closed
+    );
 
     // An unconnected end carries no junction at all — the approach
     // lookup reports it rather than inventing a rule.
@@ -844,17 +862,26 @@ fn a_stop_sign_admits_the_first_arrival_after_its_dwell() {
 
     // Not at the line: closed, and not registered — a car that brakes
     // short of the stop takes no place in the queue.
-    assert_eq!(j.gate(&g, r0, car(1), false, false), JunctionGate::Closed);
+    assert_eq!(
+        j.gate(&g, r0, car(1), false, false, false),
+        JunctionGate::Closed
+    );
     assert_eq!(j.waiting(), 0);
 
     // A stands at its line and registers; the dwell still holds it.
     j.advance_tick();
-    assert_eq!(j.gate(&g, r0, car(1), true, true), JunctionGate::Closed);
+    assert_eq!(
+        j.gate(&g, r0, car(1), true, true, false),
+        JunctionGate::Closed
+    );
     assert_eq!(j.waiting(), 1);
 
     // B arrives on the other approach after A and queues behind it.
     j.advance_tick();
-    assert_eq!(j.gate(&g, r1, car(2), true, true), JunctionGate::Closed);
+    assert_eq!(
+        j.gate(&g, r1, car(2), true, true, false),
+        JunctionGate::Closed
+    );
     assert_eq!(j.waiting(), 2);
 
     // A's dwell elapses → A alone may go; B stays closed — FCFS is
@@ -862,18 +889,27 @@ fn a_stop_sign_admits_the_first_arrival_after_its_dwell() {
     for _ in 0..dwell {
         j.advance_tick();
     }
-    assert_eq!(j.gate(&g, r0, car(1), true, true), JunctionGate::Open);
-    assert_eq!(j.gate(&g, r1, car(2), true, true), JunctionGate::Closed);
+    assert_eq!(
+        j.gate(&g, r0, car(1), true, true, false),
+        JunctionGate::Open
+    );
+    assert_eq!(
+        j.gate(&g, r1, car(2), true, true, false),
+        JunctionGate::Closed
+    );
 
     // A departs: B heads the queue and its own dwell has long passed.
     j.depart(car(1));
-    assert_eq!(j.gate(&g, r1, car(2), true, true), JunctionGate::Open);
+    assert_eq!(
+        j.gate(&g, r1, car(2), true, true, false),
+        JunctionGate::Open
+    );
 
     // A stale entry never holds the queue — a recycled car's id is
     // dropped by `retain` against the live set.
     j.depart(car(2));
     assert_eq!(j.waiting(), 0);
-    j.gate(&g, r0, car(9), true, true);
+    j.gate(&g, r0, car(9), true, true, false);
     assert_eq!(j.waiting(), 1);
     j.retain(&std::collections::BTreeSet::from([car(1), car(2)]));
     assert_eq!(j.waiting(), 0);
@@ -899,19 +935,37 @@ fn a_traffic_light_cycles_one_member_road_at_a_time() {
         match j.green_road(&g, 0) {
             Some(0) => {
                 seen_green[0] = true;
-                assert_eq!(j.gate(&g, r0, car(1), true, true), JunctionGate::Open);
-                assert_eq!(j.gate(&g, r1, car(2), true, true), JunctionGate::Closed);
+                assert_eq!(
+                    j.gate(&g, r0, car(1), true, true, false),
+                    JunctionGate::Open
+                );
+                assert_eq!(
+                    j.gate(&g, r1, car(2), true, true, false),
+                    JunctionGate::Closed
+                );
             }
             Some(1) => {
                 seen_green[1] = true;
-                assert_eq!(j.gate(&g, r1, car(2), true, true), JunctionGate::Open);
-                assert_eq!(j.gate(&g, r0, car(1), true, true), JunctionGate::Closed);
+                assert_eq!(
+                    j.gate(&g, r1, car(2), true, true, false),
+                    JunctionGate::Open
+                );
+                assert_eq!(
+                    j.gate(&g, r0, car(1), true, true, false),
+                    JunctionGate::Closed
+                );
             }
             other => {
                 assert_eq!(other, None, "only member roads may hold green");
                 saw_all_red = true;
-                assert_eq!(j.gate(&g, r0, car(1), true, true), JunctionGate::Closed);
-                assert_eq!(j.gate(&g, r1, car(2), true, true), JunctionGate::Closed);
+                assert_eq!(
+                    j.gate(&g, r0, car(1), true, true, false),
+                    JunctionGate::Closed
+                );
+                assert_eq!(
+                    j.gate(&g, r1, car(2), true, true, false),
+                    JunctionGate::Closed
+                );
             }
         }
         j.advance_tick();
@@ -930,11 +984,14 @@ fn a_traffic_light_cycles_one_member_road_at_a_time() {
     let mut lit_open = 0;
     let mut lit_closed = 0;
     for _ in 0..30 {
-        match j.gate(&g, r0, car(1), true, true) {
+        match j.gate(&g, r0, car(1), true, true, false) {
             JunctionGate::Open => lit_open += 1,
             JunctionGate::Closed => lit_closed += 1,
         }
-        assert_eq!(j.gate(&g, r1, car(2), true, true), JunctionGate::Open);
+        assert_eq!(
+            j.gate(&g, r1, car(2), true, true, false),
+            JunctionGate::Open
+        );
         j.advance_tick();
     }
     assert!(lit_open > 0 && lit_closed > 0, "{lit_open}/{lit_closed}");
@@ -956,6 +1013,116 @@ fn junction_speed_brakes_to_the_stop_line_and_never_accelerates() {
     assert_eq!(junction_speed(0.05, 0.0, JunctionGate::Closed, dt, &p), 0.0);
     let v = junction_speed(3.0, -1.0, JunctionGate::Closed, dt, &p);
     assert!((v - (3.0 - 9.0 / 120.0)).abs() < 1.0e-6, "{v}");
+}
+
+// ---------- junction-box yield (F10-B.5) ----------
+
+/// `junction_zone` spans the farthest member end plus `box_margin`
+/// around the authored centre (endpoint-centroid fallback when the
+/// centre is non-finite), and `inside_junction_zone` bands it
+/// vertically — the occupancy region the yield consults.
+#[test]
+fn junction_zone_spans_member_ends_with_margin_and_rise() {
+    let p = JunctionPolicy::default();
+    // The standard chain authors every member end at the centre, so
+    // the zone is the margin alone.
+    let g = chain_with_rules(3, 3);
+    let (c, r) = junction_zone(&g, 0, &p).expect("a wired junction zones");
+    assert_eq!(c, [0.0, 0.0, 100.0]);
+    assert!((r - p.box_margin).abs() < 1.0e-6, "{r}");
+    assert!(inside_junction_zone([0.0, 0.0, 100.0], (c, r), &p));
+    assert!(!inside_junction_zone([0.0, 0.0, 104.5], (c, r), &p));
+    // Above the rise band the same XZ point does not occupy.
+    assert!(!inside_junction_zone([0.0, 4.0, 100.0], (c, r), &p));
+
+    // An offset centre measures the endpoint reach: member ends at
+    // z = 100 against a z = 50 centre → radius 50 + margin.
+    let g = chain_with_center([0.0, 0.0, 50.0], 3, 3);
+    let (c, r) = junction_zone(&g, 0, &p).unwrap();
+    assert!((r - (50.0 + p.box_margin)).abs() < 1.0e-6, "{r}");
+    assert!(inside_junction_zone([0.0, 0.0, 99.0], (c, r), &p));
+    assert!(!inside_junction_zone([0.0, 0.0, 104.0], (c, r), &p));
+
+    // A non-finite authored centre falls back to the endpoint
+    // centroid rather than zoning nothing.
+    let g = chain_with_center([f32::NAN, 0.0, f32::NAN], 3, 3);
+    let (c, _) = junction_zone(&g, 0, &p).unwrap();
+    assert_eq!(c, [0.0, 0.0, 100.0]);
+
+    // Out-of-range junctions zone nothing.
+    assert!(junction_zone(&g, 9, &p).is_none());
+}
+
+/// A green member's gate closes while the box is occupied and reopens
+/// when it clears — the authored cycle decides whose turn it is, not
+/// whether the box is passable (F10-AC02's right-of-way leg).
+#[test]
+fn a_green_member_yields_while_the_box_is_occupied() {
+    let g = chain_with_rules(1, 1);
+    let mut j = Junctions::default();
+    j.policy.green_ticks = 10;
+    j.policy.clear_ticks = 5;
+    let r0 = lane_id(0, Side::Right, 0);
+
+    let mut yielded = false;
+    let mut admitted = false;
+    for _ in 0..30 {
+        if j.green_road(&g, 0) == Some(0) {
+            assert_eq!(
+                j.gate(&g, r0, car(1), true, true, true),
+                JunctionGate::Closed
+            );
+            yielded = true;
+            assert_eq!(
+                j.gate(&g, r0, car(1), true, true, false),
+                JunctionGate::Open
+            );
+            admitted = true;
+        }
+        j.advance_tick();
+    }
+    assert!(yielded && admitted, "no green window for road 0 ran");
+}
+
+/// The FCFS head at a stop sign dwells, registers — and still yields
+/// to an occupied box; a `NeverStop` approach keeps its documented
+/// free flow through the same occupancy report.
+#[test]
+fn a_stop_sign_head_yields_but_a_never_stop_flows() {
+    let g = chain_with_rules(0, 0);
+    let mut j = Junctions::default();
+    let dwell = j.policy.stop_dwell_ticks;
+    let r0 = lane_id(0, Side::Right, 0);
+
+    j.advance_tick();
+    j.gate(&g, r0, car(1), true, true, false); // registers at the line
+    for _ in 0..dwell {
+        j.advance_tick();
+    }
+    assert_eq!(
+        j.gate(&g, r0, car(1), true, true, true),
+        JunctionGate::Closed,
+        "the admitted head must yield to the occupied box"
+    );
+    assert_eq!(
+        j.gate(&g, r0, car(1), true, true, false),
+        JunctionGate::Open
+    );
+
+    // Occupancy never gates a `NeverStop` end.
+    let g = chain_with_rules(3, 3);
+    let mut j = Junctions::default();
+    assert_eq!(
+        j.gate(&g, r0, car(1), false, false, true),
+        JunctionGate::Open
+    );
+    // Nor an `AlwaysStop` one — it was closed before and stays closed.
+    let g = chain_with_rules(2, 3);
+    let mut j = Junctions::default();
+    assert_eq!(
+        j.gate(&g, r0, car(1), true, true, false),
+        JunctionGate::Closed
+    );
 }
 
 /// The stuck window (F10-B.3): "cannot get anywhere", not "moved

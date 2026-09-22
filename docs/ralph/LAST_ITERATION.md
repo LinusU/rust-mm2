@@ -1,60 +1,66 @@
 # Last implementation iteration
 
-- Task ID and title: F10-B.4 — spawn occupied-space rejection
-  (F10-AC04's spawn leg; spec req 2's "cleared lanes" and req 6's
-  "avoid spawning cars inside the player"). Selected per the
-  selection policy's F10-B remainder: `draw_spawn` only tested the
-  player-distance annulus, so two planned directives could stack on
-  one spot and a maintainer refill could materialise inside a live
-  ambient car or a participant — opponents were never covered by the
-  player bubble at all.
-- Starting commit: `7e7ea4c17be1b87c5860e3678054a6c7f77698c4` on
+- Task ID and title: F10-B.5 — junction-box yield (the F10-AC02
+  right-of-way remainder called out in F10-B.2's open list: the
+  authored signal/FCFS rules decide *whose turn* it is, but nothing
+  stopped an admitted approach from driving into a physically
+  occupied box). Selected per the selection policy's named F10-B
+  remainder "box-yield/right-of-way/collision"; the yield leg is
+  this slice, collision fidelity stays open.
+- Starting commit: `de09b4765d3db6b5d418f083b473e6e8acc23b74` on
   `ralph/night`; tree was clean, previous external review verdict
-  pass (F10-B.3), so this is feature work, not a repair.
+  pass (F10-B.4), so this is feature work, not a repair.
 
 ## What changed
 
-- `mm2_game::traffic` — `SpawnPolicy` gains a designed
-  tangent-aligned exclusion box: `spawn_clearance` 5 m longitudinal
-  (about a car length — the materialising hull never overlaps),
-  `spawn_half_width` 2 m lateral (a car in the neighbouring lane
-  legitimately shares the road — an euclidean check would wrongly
-  veto adjacent-lane spawns), `spawn_max_rise` 3 m (an overpass does
-  not occupy). All designed values — the original's spawn-overlap
-  behaviour is unverified (UNK-12). New `spawn_occupied` evaluates
-  the box with the same tangent projection `corridor_gap` uses; a
-  degenerate tangent occupies nothing.
-- `draw_spawn` takes `occupied: &[[f32; 3]]` and returns the new
-  `SpawnDraw::Occupied` when the sampled box touches a point —
-  before the class pick, so a rejected spot never burns a roster
-  draw.
-- `plan_ambient` accumulates each placed directive's position into
-  the occupied set, so two planned cars keep `spawn_clearance` on a
-  shared lane; rejections exhaust `placement_attempts` and land in
-  `dropped` like annulus misses.
-- `mm2_app::traffic` — `maintain_ambient` builds the occupied set
-  from ambient cars surviving the recycle test plus every `Player`
-  participant (the same contract the obstruction sense reads —
-  local driver and AI opponents alike) and feeds each same-tick
-  placement into it, since Commands-deferred spawns are invisible
-  to the query. `AmbientTraffic::policy` is `pub` for test/evidence
-  binding, matching the `stuck_policy` precedent.
+- `mm2_game::traffic` — `JunctionPolicy` gains `box_margin` 3 m
+  (padding past the farthest member end so a car that just turned
+  keeps occupying until its hull is clear) and `box_max_rise` 3 m
+  (an overpass does not occupy). Both designed values — the
+  original's box geometry and yield behaviour are unverified
+  (UNK-12).
+- New `junction_zone` derives an occupancy zone from the authored
+  intersection: centre = authored `center` (endpoint centroid when
+  that is non-finite), XZ radius = farthest member road's end at
+  the junction + `box_margin`. `inside_junction_zone` tests XZ
+  radius plus the vertical band.
+- `Junctions::gate` takes `box_occupied` and closes an otherwise-
+  admitted approach while it holds — the green member of a traffic
+  light and the FCFS head of a stop-sign queue both yield. Only the
+  two paths where a gated rule can open consult it: `NeverStop`/
+  unruled ends keep their documented free flow, `AlwaysStop` was
+  closed before and stays closed.
+- `mm2_app::traffic` — `drive_ambient` pre-passes a `bound_for`
+  map (entity → the junction its lane approaches), then for each
+  gated approach reports the zone occupied iff a blocker (every
+  ambient car + every `Player` participant — the same snapshot the
+  corridor sense already builds) sits inside it and is *not* bound
+  for the same junction. That exclusion is the deadlock guard: a
+  car waiting at its own stop line can never hold the box, so two
+  competing approaches cannot freeze each other. Participants carry
+  no junction binding, so a parked player or AI opponent always
+  counts.
 
 ## Evidence
 
-- `cargo test -p mm2_game --test traffic` — 25 pass (+4:
-  `spawn_occupied_boxes_the_sample_tangent` — ahead/behind/lateral/
-  overpass/degenerate legs; `draw_spawn_rejects_occupied_space` —
-  fixture-wide box vetoes 8 draws, the same stream places under the
-  default box; `plan_keeps_same_lane_spawns_clear_of_each_other`;
-  `plan_drops_directives_past_a_lane_s_capacity` — a saturated lane
-  drops its overflow into `dropped`).
-- `cargo test -p mm2_app --test traffic` — 17 pass (+2:
-  `respawns_reject_space_a_live_car_occupies` and
-  `respawns_reject_space_a_participant_occupies` — each vetoes every
-  refill under a fixture-wide box (`spawned` frozen over 120
-  updates), then the default box refills again as the control that
-  the respawner itself still works).
+- `cargo test -p mm2_game --test traffic` — 28 pass (+3:
+  `junction_zone_spans_member_ends_with_margin_and_rise` — authored
+  centre, offset-centre radius, non-finite-centre centroid
+  fallback, vertical rejection, out-of-range junction;
+  `a_green_member_yields_while_the_box_is_occupied` — closed while
+  occupied, open on clear; `a_stop_sign_head_yields_but_a_never_
+  stop_flows` — the FCFS head past its dwell still yields,
+  `NeverStop` opens regardless, `AlwaysStop` stays closed). The 19
+  pre-existing `gate` callsites gained the sixth argument as
+  `false` — semantics unchanged.
+- `cargo test -p mm2_app --test traffic` — 19 pass (+2:
+  `a_participant_in_the_box_yields_the_green_approach` — a `Player`
+  parked inside the zone but outside the corridor/landing checks
+  holds a lit approach at its stop line through a green, reports
+  `junction_held`, and the car goes after despawn;
+  `an_ambient_car_in_the_box_yields_the_stop_sign_head` — a parked
+  ambient car bound for a dead end holds the admitted stop-sign
+  head at its line, release on despawn).
 - `cargo fmt --all -- --check` — PASS.
 - `cargo clippy --locked --workspace --all-targets --all-features
   -D warnings` — PASS.
@@ -62,27 +68,25 @@
 - Retail headless smoke (install `fnv1a64:e91e6cd4b2ae30d9`):
   - `--city sf --frames 600` → `status=pass … traf=16/16 sp=23
     rec=7 dead=0 uns=0 q=0 jq=5 stuck=0` — record unchanged.
-  - `--city london --frames 600` → `status=pass … traf=16/16 sp=21
-    rec=5 dead=0 uns=0 q=0 jq=3 stuck=0` — record unchanged.
-  - The initial plan now drops saturated draws honestly: sf spawns
-    12/16 at load, london 14/16 — the maintainer refills both to
-    target, exactly the designed behaviour.
-- One existing test adjusted for the new contract:
-  `plan_skips_non_finite_lane_geometry` bound its target (32 on two
-  100 m lanes) above the lanes' occupancy capacity; it now plans 12
-  so the geometry-rejection leg — not spawn saturation — is what the
-  test measures.
+  - `--city london --frames 600` → `status=pass … traf=16/16 sp=20
+    rec=4 dead=0 uns=0 q=0 jq=4 stuck=0` — small counter drift vs
+    the F10-B.4 record (`sp=21 rec=5 jq=3`): one approach now
+    stands at its line an extra green, shifting the recycle count.
+    Expected behaviour change, all 16 cars live, `stuck=0`.
 
 ## Still open
 
-- Exclusion-box constants are designed — original spawn-overlap
-  behaviour unverified (UNK-12). Static props/geometry are not
-  occupancy inputs (a spawn could still clip a prop).
-- F10-AC04's remaining leg: "preserve active interactions near any
-  player" is covered for the single local player by the bubble, but
-  multiplayer union-of-interest bubbles are F10-C scope.
-- F10-AC02 remainder: no yielding to crossing traffic inside the
-  box; F10-AC03: kinematic followers stop short, no collision
-  fidelity or lane-change passing. Signal-prop rendering,
-  rendered/GPU junction checks, original signal/spawn timing all
-  open.
+- Box geometry and yield policy are designed — original
+  right-of-way/box dimensions unverified (UNK-12). Occupancy reads
+  entity position points, not hulls; static props/world geometry
+  are not occupancy inputs.
+- Same-tick collision behaviour is approximate — a car already
+  committed to a turn is not swept out mid-transfer, and two
+  simultaneously released approaches can still converge inside the
+  box. F10-AC03 (player-collision fidelity, no lane-change
+  passing) stays open.
+- F10-AC02 remainder now narrows to queue-through-intersection
+  priority fidelity; AC05's fixed-seed soak still owes the new
+  behaviour; F10-C multiplayer union-of-interest, signal-prop
+  rendering, rendered/GPU junction checks, and original
+  signal/spawn timing all open.

@@ -61,6 +61,23 @@
 //! The planner and the maintainer share the check, so neither the
 //! initial plan nor a refill can stack a car on occupied road — while
 //! an adjacent lane or an overpass stays legitimately spawnable.
+//!
+//! F10-B.5 adds the junction-box yield (F10-AC02's right-of-way
+//! leg): the authored rule decides whose *turn* it is, not whether
+//! the box is passable, so an admitted approach — a green member or
+//! an FCFS head — still holds while the junction zone
+//! (`junction_zone`, authored centre + member-end radius) contains a
+//! vehicle not bound for that junction: a car that turned in and has
+//! not cleared, a crossing flow's occupant, or a participant parked
+//! inside. Cars bound for the junction are excluded — a car waiting
+//! at its own stop line is not "inside the box", or two competing
+//! approaches would hold each other forever. `NeverStop`/unruled
+//! approaches keep their documented free flow; their overlaps remain
+//! covered by the corridor sense and the landing clearance. Two
+//! approaches admitted on the same tick can still share the box —
+//! the yield is a bounded approximation over the same position
+//! snapshot the corridor sense reads, and the colliders resolve any
+//! residual overlap physically.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
@@ -70,13 +87,15 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_assets::Vfs;
 use mm2_formats::aimap::Aimap;
+use mm2_formats::bai::VehicleRule;
 use mm2_formats::veh::AiVehicleData;
 use mm2_game::{
     AmbientRoster, AmbientSpec, AuthorityRole, FollowPolicy, JunctionGate, Junctions, LaneAdvance,
     LaneCursor, LaneId, NavGraph, NavOverrides, NavRng, ObjectIdentity, Player, Session,
     SessionConfig, SessionEntity, SessionPhase, SpawnDirective, SpawnDraw, SpawnPolicy,
     StuckPolicy, StuckWindow, WorldMode, advance_lane_cursor, corridor_gap, draw_spawn,
-    eligible_lanes, follow_speed, junction_speed, plan_ambient,
+    eligible_lanes, follow_speed, inside_junction_zone, junction_speed, junction_zone,
+    plan_ambient,
 };
 use tracing::{info, warn};
 
@@ -488,6 +507,17 @@ pub fn drive_ambient(
     // distinguishing who it is.
     let mut blockers: Vec<(Entity, Vec3)> = players.iter().map(|(e, p)| (e, p.0)).collect();
     blockers.extend(cars.iter().map(|(e, _, p, _, _, _)| (e, p.0)));
+    // The junction each ambient car's current lane is bound for (the
+    // downstream end of its arc). The box-yield must not count a car
+    // as occupying the junction it is still approaching — a car
+    // waiting at or behind its own stop line is not inside the box,
+    // or two competing approaches would hold each other forever.
+    let bound_for: HashMap<Entity, u16> = cars
+        .iter()
+        .filter_map(|(e, c, ..)| {
+            Junctions::approach(&traffic.graph, c.cursor.lane).map(|(ix, _, _)| (e, ix))
+        })
+        .collect();
     let follow = FollowPolicy::default();
     let jpolicy = traffic.junctions.policy;
     let stuck_policy = traffic.stuck_policy;
@@ -537,12 +567,30 @@ pub fn drive_ambient(
         // otherwise never register, never open a stop-sign queue, and
         // never report held.
         let at_line = dist_to_stop <= jpolicy.stop_line_tolerance;
+        // Junction-box yield (F10-B.5): an otherwise-admitted gated
+        // approach still holds while the box contains a vehicle not
+        // bound for it — the green/FCFS turn does not make an
+        // occupied box passable. Only the rules whose gate can open
+        // consult it; `NeverStop`/unruled ends keep their free flow.
+        let box_occupied = match Junctions::approach(&traffic.graph, car.cursor.lane) {
+            Some((ix, _, Some(VehicleRule::TrafficLight | VehicleRule::StopSign))) => {
+                junction_zone(&traffic.graph, ix, &jpolicy).is_some_and(|zone| {
+                    blockers.iter().any(|(e, b)| {
+                        *e != entity
+                            && bound_for.get(e).copied() != Some(ix)
+                            && inside_junction_zone(b.to_array(), zone, &jpolicy)
+                    })
+                })
+            }
+            _ => false,
+        };
         let gate = traffic.junctions.gate(
             &traffic.graph,
             car.cursor.lane,
             entity,
             at_line,
             car.speed <= follow.held_speed,
+            box_occupied,
         );
         car.speed = junction_speed(car.speed, dist_to_stop, gate, dt, &jpolicy);
         if gate == JunctionGate::Closed && at_line && car.speed <= follow.held_speed {
