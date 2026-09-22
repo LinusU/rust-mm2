@@ -701,6 +701,19 @@ fn opt_i64(b: &TuneBlock, ctx: &str, name: &str) -> VehResult<Option<i64>> {
     }
 }
 
+/// Optional float scalar (same rules as [`req_f32`]); `None` when
+/// absent. A present-but-non-numeric value is a decode error, exactly
+/// like [`opt_i64`] — never silently equated with authored absence.
+fn opt_f32(b: &TuneBlock, ctx: &str, name: &str) -> VehResult<Option<f32>> {
+    match b.field(name) {
+        Some(f) => match f.values.first().and_then(|v| v.number) {
+            Some(n) => Ok(Some(n as f32)),
+            None => err(ctx, format!("field {name:?} has no numeric value")),
+        },
+        None => Ok(None),
+    }
+}
+
 // ---------- damage & recovery records (F05-A) ----------
 
 /// Structural problems [`VehCarDamage::validate`],
@@ -796,11 +809,12 @@ pub struct DamageEffect {
 ///
 /// One flat block per file: damage thresholds, two smoke-emitter
 /// pivots, the `TextelDamageRadius` decal extent and a flat
-/// [`DamageEffect`] particle spec. All 20 retail records carry the same
-/// field set; `MirrorPivot` appears on 7. The damage unit reads as
-/// impulse-scale — `MaxDamage` ranges 238k (`vpauditt`) to 3.28M
-/// (`vpsemi`) tracking vehicle mass — but the exact original
-/// accumulation semantics are unverified (UNK-13).
+/// [`DamageEffect`] particle spec. All 20 retail records carry the
+/// same 38-field set; 7 add `MirrorPivot` as a 39th field. The damage
+/// unit reads as impulse-scale — `MaxDamage` ranges 187.5k
+/// (`vpcoop`/`vpcoop2k`) to 3.28M (`vpsemi`) tracking vehicle mass —
+/// but the exact original accumulation semantics are unverified
+/// (UNK-13).
 #[derive(Debug, Clone)]
 pub struct VehCarDamage {
     /// `MaxDamage` — accumulated damage at which the vehicle is
@@ -810,24 +824,25 @@ pub struct VehCarDamage {
     /// retail record (the meter's yellow band / damaged-visual tier).
     pub med_damage: f32,
     /// `ImpactThreshold` — impacts at or below this do not damage
-    /// (1500 on every retail record).
+    /// (1500 on 19 of 20 retail records; `vpcaddie` authors 100).
     pub impact_threshold: f32,
     /// `RegenerateRate` — damage healed per second; 0 on every retail
     /// record (the C&R healing of DMG-4 would drive it elsewhere).
     pub regenerate_rate: f32,
     /// `TextelDamageRadius` — radius of the damage decal/deformation
-    /// around an impact point, metres (inferred).
+    /// around an impact point, metres (inferred). Retail authors
+    /// 0.4 (`vpcaddie`/`vpcentury`) to 20.0 (`vp4x4`/`vppanozgt`).
     pub textel_damage_radius: f32,
     /// `SmokeOffset` — first smoke-emitter pivot in car space.
     pub smoke_offset: [f32; 3],
     /// `SmokeOffset2` — second smoke-emitter pivot in car space.
     pub smoke_offset2: [f32; 3],
-    /// `DoublePivot` — 0 on every retail record (whether both pivots
-    /// emit — inferred).
+    /// `DoublePivot` — 1 on `vpddbus`, `vppanoz` and `vppanozgt`, 0
+    /// on the other 17 (whether both pivots emit — inferred).
     pub double_pivot: i64,
-    /// `MirrorPivot` — authored on 7 retail records (vpbus, vpcab,
-    /// vpcaddie, vpcoop, vpcop, vpddbus, vpsemi — the tall bodies),
-    /// 0 on all of them; semantics unverified.
+    /// `MirrorPivot` — authored on 7 retail records (`vpbullet`,
+    /// `vpbus`, `vpcaddie`, `vpcop`, `vpddbus`, `vpdune`,
+    /// `vpmustang99`), 0 on all of them; semantics unverified.
     pub mirror_pivot: Option<i64>,
     /// The embedded particle spec — flat fields sharing the root
     /// block, not a nested `BirthRule` sub-block.
@@ -980,17 +995,24 @@ impl VehCarDamage {
 /// all inferred from names, not recovered behaviour.
 #[derive(Debug, Clone)]
 pub struct VehStuck {
-    /// `Turn` — ~1.57 (≈ π/2) on most retail records.
+    /// `Turn` — angular threshold; ≈ π (3.141593) on 10 of 20 retail
+    /// records (`vpford` authors 3.098593), 1.57 on 6, and
+    /// `vpbus`/`vpcentury`/`vpddbus`/`vpsemi` carry other values.
     pub turn: f32,
-    /// `Rotation` — 0 on most retail records.
+    /// `Rotation` — 0 on every retail record.
     pub rotation: f32,
-    /// `Translation` — small linear threshold.
+    /// `Translation` — small linear threshold; ≈ 0.1 on every retail
+    /// record (`vpcoop` authors 0.164).
     pub translation: f32,
-    /// `TimeThresh` — seconds the stuck condition must persist.
+    /// `TimeThresh` — seconds the stuck condition must persist; 2.0
+    /// on 6 records, ~1.0 on the rest (`vpddbus` 1.1714).
     pub time_thresh: f32,
-    /// `PosThresh` — positional bound (metres, inferred).
+    /// `PosThresh` — positional bound (metres, inferred); 1.25 on
+    /// every retail record.
     pub pos_thresh: f32,
-    /// `MoveThresh` — movement bound under `PosThresh` (inferred).
+    /// `MoveThresh` — movement bound (inferred); 1.75 on every retail
+    /// record — above `PosThresh` everywhere, so it is not a
+    /// sub-bound of it.
     pub move_thresh: f32,
     /// Unknown/unmapped fields encountered while decoding.
     pub warnings: Vec<String>,
@@ -1048,7 +1070,7 @@ impl VehStuck {
 /// Fully decoded `vehGyro` tuning — the rollover-recovery gyro assist
 /// (`tune/vehicle/<vp_*>.vehgyro`, F05-A). `Drift`, `Spin180` and
 /// `Reverse180` are authored on every retail record; `Roll` and `Pitch`
-/// appear on 17 of 21 (absent on vpdune, vpford, vpmustang99 and
+/// appear on 17 of 21 (absent on vpbug, vpcab, vpford and
 /// vpvwcup_angel). The names read as assisted air/righting rotations —
 /// semantics unverified (UNK-13).
 #[derive(Debug, Clone)]
@@ -1089,8 +1111,8 @@ impl VehGyro {
             drift: req_f32(root, ctx, "Drift")?,
             spin180: req_f32(root, ctx, "Spin180")?,
             reverse180: req_f32(root, ctx, "Reverse180")?,
-            roll: root.f32("Roll"),
-            pitch: root.f32("Pitch"),
+            roll: opt_f32(root, ctx, "Roll")?,
+            pitch: opt_f32(root, ctx, "Pitch")?,
             warnings,
         })
     }

@@ -11,20 +11,20 @@ original-behavior claim.
 
 One flat `vehCarDamage` tune block per player vehicle. 20 records on
 retail — every listed car plus `vpvwcup`; `vpmoonrover` ships none
-(the undocumented secret car, UNK-3). All 20 carry the same 37 fields;
-`MirrorPivot` appears on 7 (vpbus, vpcab, vpcaddie, vpcoop, vpcop,
-vpddbus, vpsemi — the tall bodies).
+(the undocumented secret car, UNK-3). All 20 carry the same 38
+fields; 7 add a 39th, `MirrorPivot` — vpbullet, vpbus, vpcaddie,
+vpcop, vpddbus, vpdune, vpmustang99 (authored 0 on all seven).
 
 Damage model fields:
 
 | Field | Retail range | Reading |
 | --- | --- | --- |
-| `MaxDamage` | 238 750 (`vpauditt`) – 3 281 300 (`vpsemi`) | Accumulated bound at which the vehicle is destroyed — the DMG-1 meter's empty end. Tracks vehicle mass, so the unit is impulse-scale (**inferred**, UNK-13). |
-| `MedDamage` | 150 000 – 2 343 800 | Mid-tier bound; `MedDamage < MaxDamage` on every record (the meter's yellow band / damaged-visual tier). |
-| `ImpactThreshold` | 1500 on every record | Impacts at or below this do not damage — the authored floor that keeps resting contact, curb taps and suspension loads out of the accumulator (F05-AC01). |
+| `MaxDamage` | 187 500 (`vpcoop`/`vpcoop2k`) – 3 281 300 (`vpsemi`) | Accumulated bound at which the vehicle is destroyed — the DMG-1 meter's empty end. Tracks vehicle mass, so the unit is impulse-scale (**inferred**, UNK-13). |
+| `MedDamage` | 80 000 (`vpcoop`/`vpcoop2k`) – 2 343 800 (`vpsemi`) | Mid-tier bound; `MedDamage < MaxDamage` on every record (the meter's yellow band / damaged-visual tier). |
+| `ImpactThreshold` | 1500 on 19 records; 100 on `vpcaddie` | Impacts at or below this do not damage — the authored floor that keeps resting contact, curb taps and suspension loads out of the accumulator (F05-AC01). |
 | `RegenerateRate` | 0 on every record | Damage healed per second — the authored channel DMG-4's C&R healing would drive; no stock car regenerates. |
-| `TextelDamageRadius` | ~0.5 | Decal/deformation radius around an impact point (**inferred**). |
-| `SmokeOffset` / `SmokeOffset2` | car-space pivots | Two smoke-emitter attachment points; `DoublePivot` (0 everywhere) and `MirrorPivot` (0 where authored) gate their use (**inferred**). |
+| `TextelDamageRadius` | 0.4 (`vpcaddie`/`vpcentury`) – 20.0 (`vp4x4`/`vppanozgt`) | Decal/deformation radius around an impact point (**inferred**). |
+| `SmokeOffset` / `SmokeOffset2` | car-space pivots | Two smoke-emitter attachment points; `DoublePivot` (1 on vpddbus/vppanoz/vppanozgt, 0 elsewhere) and `MirrorPivot` (0 where authored) gate their use (**inferred**). |
 
 The remaining ~30 fields are a flat particle spec sharing the root
 block — the same vocabulary as `dgBangerData`'s `BirthRule`
@@ -46,12 +46,16 @@ MedAboveMax}`.
 ## `tune/vehicle/<id>.vehstuck`
 
 One flat `vehStuck` block — 20 retail records, uniform 6-field set:
-`Turn` (≈ π/2 on most), `Rotation` (0 on most), `Translation`,
-`TimeThresh`, `PosThresh`, `MoveThresh`. The names read as a stuck
-detector: an angular/linear test over a time window with position and
-movement bounds — all **inferred** from names; the original's test
-combination is unverified (UNK-13). Decoder:
-`VehStuck::from_tune`; `validate()` enforces non-negative
+`Turn` (≈ π, 3.141593, on 10 of 20 — `vpford` 3.098593; 1.57 on 6;
+`vpbus` 2.064593, `vpcentury`/`vpsemi` 2.0, `vpddbus` 0.74),
+`Rotation` (0 on all), `Translation` (≈ 0.1; `vpcoop` 0.164),
+`TimeThresh` (2.0 on 6 records, ~1.0 on the rest — `vpddbus`
+1.1714), `PosThresh` (1.25 on all) and `MoveThresh` (1.75 on all —
+above `PosThresh` on every record, so not a sub-bound of it). The
+names read as a stuck detector: an angular/linear test over a time
+window with position and movement bounds — all **inferred** from
+names; the original's test combination is unverified (UNK-13).
+Decoder: `VehStuck::from_tune`; `validate()` enforces non-negative
 time/position/movement bounds while allowing signed angular fields.
 
 ## `tune/vehicle/<id>.vehgyro`
@@ -59,10 +63,12 @@ time/position/movement bounds while allowing signed angular fields.
 One flat `vehGyro` block — 21 retail records (`vpvwcup_angel` ships
 one despite having no other damage records). `Drift`, `Spin180`,
 `Reverse180` on every record; `Roll` and `Pitch` on 17 of 21 (absent
-on vpdune, vpford, vpmustang99, vpvwcup_angel). The names read as
-assisted air-control/righting rates — semantics **inferred**
-(UNK-13). Decoder: `VehGyro::from_tune`; `Roll`/`Pitch` decode as
-`Option<f32>` — absent stays `None`, never an invented zero.
+on vpbug, vpcab, vpford, vpvwcup_angel; authored 0.0 where present).
+The names read as assisted air-control/righting rates — semantics
+**inferred** (UNK-13). Decoder: `VehGyro::from_tune`; `Roll`/`Pitch`
+decode as `Option<f32>` — absent stays `None` (never an invented
+zero), while a present-but-non-numeric value is a decode error, the
+same rule `MirrorPivot`'s optional integer follows.
 
 ## Breakaway parts (authored inventory)
 

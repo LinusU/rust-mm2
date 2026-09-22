@@ -409,8 +409,8 @@ fn aivehicledata_tolerates_absent_cg_and_flags_garbage() {
     assert!(AiVehicleData::from_tune(&tune).is_err());
 }
 
-/// Full `vehCarDamage` record — the retail field set (all 37 fields
-/// plus `MirrorPivot`, authored on 7 of 20 files).
+/// Full `vehCarDamage` record — the retail field set (the uniform
+/// 38 fields plus `MirrorPivot`, authored on 7 of 20 files).
 const CARDAMAGE: &str = "type: a\r\n\
 vehCarDamage {\r\n\
   MaxDamage 321300.000000\r\n\
@@ -575,7 +575,7 @@ fn vehcardamage_validate_flags_bad_ordering_and_values() {
 fn vehstuck_decodes_and_validates() {
     let tune = TuneFile::parse(STUCK).unwrap();
     let s = VehStuck::from_tune(&tune).unwrap();
-    // The authored value (1.570796) reads as π/2.
+    // 1.570796 is one of the authored retail values (6 of 20 records).
     assert!((s.turn - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
     assert_eq!(s.time_thresh, 1.0);
     assert_eq!(s.pos_thresh, 0.5);
@@ -625,6 +625,13 @@ fn vehgyro_decodes_optional_fields() {
     assert_eq!(g.roll, None);
     assert_eq!(g.pitch, None);
     assert!(g.warnings.is_empty(), "{:?}", g.warnings);
+
+    // A present-but-non-numeric optional field is a decode error —
+    // indistinguishable-from-absent is not acceptable (same rule as
+    // VehCarDamage's optional `MirrorPivot`).
+    let src = GYRO.replace("Roll 5.000000", "Roll fast");
+    let tune = TuneFile::parse(&src).unwrap();
+    assert!(VehGyro::from_tune(&tune).is_err());
 
     let tune = TuneFile::parse("vehStuck { Turn 1.0 }").unwrap();
     assert!(VehGyro::from_tune(&tune).is_err());

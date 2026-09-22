@@ -11,7 +11,8 @@
 //!
 //! - impacts at or below `ImpactThreshold` never damage (F05-AC01:
 //!   resting contact, curb taps and normal suspension loads must not
-//!   accumulate — the authored 1500 sits well above them);
+//!   accumulate — the authored floor is 1500 on 19 of 20 retail
+//!   records, 100 on `vpcaddie`);
 //! - damage is monotonic within a run except through `tick`
 //!   (`RegenerateRate`, 0 on every retail record — the DMG-4 C&R
 //!   healing mechanism's authored channel) or an explicit
@@ -36,14 +37,15 @@ use crate::config::{EventTableKind, SessionMode};
 /// model decoded from `tune/vehicle/<id>.vehcardamage`.
 ///
 /// The accumulating quantity is impulse-scale: retail `MaxDamage`
-/// values (238k on `vpauditt`, 3.28M on `vpsemi`) track vehicle mass,
-/// so the bound is an impulse integral, not a speed count (inferred —
-/// the original conversion is unverified, UNK-13). Callers feed the
-/// same impulse estimate the impact pipeline reports.
+/// values (187.5k on `vpcoop`/`vpcoop2k`, 3.28M on `vpsemi`) track
+/// vehicle mass, so the bound is an impulse integral, not a speed
+/// count (inferred — the original conversion is unverified, UNK-13).
+/// Callers feed the same impulse estimate the impact pipeline
+/// reports.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DamageSpec {
     /// `ImpactThreshold` — severities at or below this are ignored.
-    /// 1500 on every retail record.
+    /// 1500 on 19 of 20 retail records; `vpcaddie` authors 100.
     pub impact_threshold: f32,
     /// `MedDamage` — the damaged-band bound (meter yellow).
     pub med_damage: f32,
