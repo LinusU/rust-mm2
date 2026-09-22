@@ -983,6 +983,8 @@ fn driver(avoid_players: bool) -> OpponentDriver {
         stuck_pos: Vec3::ZERO,
         stuck_frames: 0,
         reanchors: 0,
+        catch_up_policy: mm2_game::CatchUpPolicy::default(),
+        catch_up: 0.0,
     }
 }
 
@@ -1620,5 +1622,87 @@ fn progressing_opponents_never_reanchor() {
     assert!(!counts.is_empty());
     for (e, n) in counts {
         assert_eq!(n, 0, "opponent {e:?} re-anchored while progressing");
+    }
+}
+
+/// F15-B.4 (designed, DSN-27): a driver trailing the leader lifts its
+/// demand ceiling by the disclosed bounded factor — observable on
+/// `driver.catch_up` and through `VehicleInput` — while a car at the
+/// front gets nothing, the local player is never a recipient, and no
+/// checkpoint progress is granted. The parked player supplies the
+/// deficit's other end first, then the lead: the assist measures the
+/// gap to whoever is actually ahead, AI or human.
+#[test]
+fn catch_up_lifts_a_trailing_opponents_demand() {
+    let tmp = roster_install("", &[]);
+    let mut app = event_app(event_config(), vfs_of(tmp.path()));
+    app.update();
+    let vpt = opponent_by_vehicle(&mut app, "vpt");
+    let heavy = opponent_by_vehicle(&mut app, "vpheavy");
+    let car = app
+        .world_mut()
+        .query_filtered::<Entity, With<PlayerVehicle>>()
+        .iter(app.world())
+        .next()
+        .unwrap();
+    assert!(
+        app.world().get::<OpponentDriver>(car).is_none(),
+        "the player is never a catch-up recipient"
+    );
+
+    // The countdown holds the field — and the assist: nobody races.
+    run(&mut app, 60);
+    for e in [vpt, heavy] {
+        assert_eq!(
+            app.world().get::<OpponentDriver>(e).unwrap().catch_up,
+            0.0,
+            "no assist before the race releases"
+        );
+    }
+
+    // Racing: the driving opponents lead the parked player — leaders
+    // are never lifted (the assist is one-directional by design).
+    run(&mut app, 200);
+    for e in [vpt, heavy] {
+        assert_eq!(
+            app.world().get::<OpponentDriver>(e).unwrap().catch_up,
+            0.0,
+            "the leader earns no assist"
+        );
+    }
+
+    // Teleport the player deep into the course: the swept segment
+    // clears all three gates through the shared `advance` validation
+    // but ends 20 m short of the finish trigger — the participant
+    // leads at ~3.3 gate units without resolving.
+    app.world_mut().get_mut::<Position>(car).unwrap().0 = Vec3::new(160.0, 0.5, COURSE_Z);
+    run(&mut app, 4);
+    let progress = app.world().get::<RaceProgress>(car).unwrap();
+    assert_eq!(progress.cleared_count(), 3, "the sweep earned the gates");
+    assert_eq!(progress.state, ParticipantState::Racing);
+
+    for e in [vpt, heavy] {
+        let driver = app.world().get::<OpponentDriver>(e).unwrap();
+        let policy = driver.catch_up_policy;
+        assert!(
+            driver.catch_up > 0.0 && driver.catch_up <= policy.assist_max,
+            "a trailing driver's bounded assist: {}",
+            driver.catch_up
+        );
+        assert_eq!(driver.reanchors, 0, "a demand lift is not a re-anchor");
+        // The lifted ceiling reaches the real input: `band.min(cap)`
+        // alone can never exceed the authored cap.
+        let input = app.world().get::<VehicleInput>(e).unwrap();
+        assert!(
+            input.throttle > driver.tuning.throttle_cap,
+            "assist lifts the authored cap {:?}: throttle {}",
+            driver.tuning,
+            input.throttle
+        );
+        // Progress is still earned through the triggers, never granted.
+        assert_eq!(
+            app.world().get::<RaceProgress>(e).unwrap().state,
+            ParticipantState::Racing
+        );
     }
 }

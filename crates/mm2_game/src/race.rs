@@ -789,3 +789,133 @@ pub fn relative_bearing(yaw: f32, from: Vec3, to: Vec3) -> f32 {
     let right = dx * cos - dz * sin;
     right.atan2(ahead)
 }
+
+// ---------- catch-up assist (F15-B.4) ----------
+
+/// Bounds on the disclosed opponent catch-up assist — the
+/// "rubber-band assistance" the F15 spec permits only when it is
+/// "explicit, observable, scoped by rules and not falsely recorded as
+/// physical racing". Every value is **designed** (DSN-27): whether the
+/// original assists trailing opponents at all is unverified (UNK-11),
+/// so this is an explicit policy, never a recovered rule.
+///
+/// Scope and direction are deliberate: the assist is one-directional —
+/// a *trailing* opponent's demand ceiling lifts toward `assist_max` as
+/// its course deficit grows, the leader's demand is never raised, and
+/// nobody is ever slowed below their authored tuning (no artificial
+/// leader penalty). Only AI opponents carry it — the local player is
+/// never assisted — and it applies only while the participant is
+/// racing: progress is still earned through the same swept-trigger
+/// validation, the assist just lets a trailing driver demand more of
+/// its own car. The driver's current factor is observable on
+/// `OpponentDriver::catch_up` and in the headless record's `cu=`
+/// field, so the assist is never mistaken for unaided pace.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CatchUpPolicy {
+    /// Course deficit, in gate units (see [`course_progress`]), at
+    /// which the assist saturates.
+    pub deficit_full: f32,
+    /// Largest absolute lift added to the authored throttle ceiling at
+    /// full deficit — `throttle_cap + assist`, still bounded by the
+    /// normalized input's `0..=1`. `corner_speed` scales by
+    /// `1 + assist` under the same factor: carried corner pace lifts
+    /// with the demand ceiling through one mechanism, not two.
+    pub assist_max: f32,
+}
+
+impl Default for CatchUpPolicy {
+    fn default() -> Self {
+        Self {
+            deficit_full: 2.0,
+            assist_max: 0.25,
+        }
+    }
+}
+
+/// Mean authored spacing between consecutive checkpoint centres — the
+/// reference leg length [`course_progress`] converts a distance to the
+/// current objective into a fraction of a gate with. `None` under two
+/// checkpoints or with no finite leg — the caller then falls back to
+/// the policy's `leg_ref`. An `Ordered` (circuit) definition already
+/// carries the lifted start-line copy closing the lap, so consecutive
+/// legs span the whole course.
+pub fn mean_gate_spacing(definition: &RaceDefinition) -> Option<f32> {
+    let mut sum = 0.0f32;
+    let mut legs = 0usize;
+    for w in definition.checkpoints.windows(2) {
+        let (a, b) = (w[0].center, w[1].center);
+        let d = (b.x - a.x).hypot(b.z - a.z);
+        if d.is_finite() && d > 1.0e-3 {
+            sum += d;
+            legs += 1;
+        }
+    }
+    (legs > 0).then(|| sum / legs as f32)
+}
+
+/// A participant's continuous course position in gate units
+/// (**designed**, DSN-27): banked gates — `lap × checkpoints + next`
+/// under `Ordered`, the cleared count under `AnyOrder` — plus the
+/// fraction of the current leg already covered, `1 − dist/ref`
+/// clamped to `[0, 1]`, where `dist` is the XZ distance to the same
+/// objective [`live_order`] tie-breaks on (`checkpoints[next]` under
+/// `Ordered`, the [`navigation_target`] objective under `AnyOrder`)
+/// and `ref` is the caller's resolved `leg_ref` (authored mean gate
+/// spacing, or the policy fallback). An out-of-range `next`, a
+/// missing objective, a non-finite position or a non-positive
+/// `leg_ref` contributes the banked count alone.
+///
+/// This is an assist/presentation measure only — results and
+/// progression read the ledger, never this number.
+pub fn course_progress(
+    definition: &RaceDefinition,
+    progress: &RaceProgress,
+    position: Vec3,
+    leg_ref: f32,
+) -> f32 {
+    let n = definition.checkpoints.len();
+    let (banked, target) = match definition.rule {
+        CheckpointRule::Ordered => {
+            let next = progress.next.min(n);
+            (
+                progress
+                    .lap
+                    .saturating_mul(n as u32)
+                    .saturating_add(next as u32),
+                definition.checkpoints.get(next).map(|c| c.center),
+            )
+        }
+        CheckpointRule::AnyOrder => (
+            progress.cleared_count() as u32,
+            navigation_target(definition, progress, None, position)
+                .and_then(|t| t.position(definition)),
+        ),
+    };
+    let mut score = banked as f32;
+    if let Some(c) = target
+        && leg_ref.is_finite()
+        && leg_ref > 1.0e-3
+        && position.is_finite()
+    {
+        let d = (c.x - position.x).hypot(c.z - position.z);
+        score += (1.0 - d / leg_ref).clamp(0.0, 1.0);
+    }
+    score
+}
+
+/// The disclosed assist factor for a participant `deficit` gates
+/// behind the leader (designed, DSN-27): `0` at or ahead of the lead,
+/// ramping linearly to [`CatchUpPolicy::assist_max`] at
+/// `deficit_full`. Garbage-safe — a non-finite deficit or a
+/// non-positive `deficit_full` assists nothing rather than dividing
+/// into NaN.
+pub fn catch_up_factor(deficit: f32, policy: &CatchUpPolicy) -> f32 {
+    if !deficit.is_finite() || deficit <= 0.0 {
+        return 0.0;
+    }
+    let full = policy.deficit_full;
+    if !full.is_finite() || full <= 0.0 {
+        return 0.0;
+    }
+    (deficit / full).clamp(0.0, 1.0) * policy.assist_max.max(0.0)
+}

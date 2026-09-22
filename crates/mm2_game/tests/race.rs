@@ -585,3 +585,176 @@ fn relative_bearing_is_signed_on_the_driver_frame() {
     // A coincident target reports 0, never NaN.
     assert_eq!(relative_bearing(0.0, at, at), 0.0);
 }
+
+// ---------- catch-up assist contract (F15-B.4, designed DSN-27) ----------
+
+/// The leg scale is the course's own authored spacing — the mean of
+/// consecutive gate centres — and `None` when nothing is measurable,
+/// so the caller falls back to a designed reference.
+#[test]
+fn mean_gate_spacing_averages_consecutive_gates() {
+    let def = any_order(
+        vec![
+            checkpoint(0.0, 0.0),
+            checkpoint(50.0, 0.0),
+            checkpoint(130.0, 0.0),
+        ],
+        None,
+    );
+    assert_eq!(mean_gate_spacing(&def), Some(65.0));
+
+    let one = any_order(vec![checkpoint(0.0, 0.0)], None);
+    assert_eq!(mean_gate_spacing(&one), None, "a lone gate has no leg");
+
+    // A coincident gate pair contributes nothing measurable.
+    let dup = any_order(vec![checkpoint(0.0, 0.0), checkpoint(0.0, 0.0)], None);
+    assert_eq!(mean_gate_spacing(&dup), None);
+}
+
+/// `Ordered`: the score banks `lap × gates + next` plus the covered
+/// fraction of the leg toward `checkpoints[next]` — so a follower
+/// trails the leader by exactly the deficit the factor reads.
+#[test]
+fn course_progress_ordered_banks_laps_and_the_leg_fraction() {
+    let def = ordered(
+        vec![
+            checkpoint(0.0, 0.0),
+            checkpoint(50.0, 0.0),
+            checkpoint(100.0, 0.0),
+        ],
+        2,
+    );
+    let mut p = RaceProgress::new(&def);
+    p.state = ParticipantState::Racing;
+
+    // Mid-leg toward gate 1: banked 1 (gate 0 cleared → next=1)... set
+    // the bookkeeping directly — the measure reads state, not motion.
+    p.next = 1;
+    let s = course_progress(&def, &p, Vec3::new(25.0, 0.0, 0.0), 50.0);
+    assert!((s - 1.5).abs() < 1e-4, "1 banked + half the leg: {s}");
+    // On the gate the whole leg is banked.
+    let s = course_progress(&def, &p, Vec3::new(50.0, 0.0, 0.0), 50.0);
+    assert!((s - 2.0).abs() < 1e-4, "on gate 1: {s}");
+
+    // Lap boundary: lap 1 banks all three gates of lap 0; a car 10 m
+    // short of the start-line copy adds 0.8 of the next leg.
+    p.lap = 1;
+    p.next = 0;
+    let s = course_progress(&def, &p, Vec3::new(-10.0, 0.0, 0.0), 50.0);
+    assert!((s - 3.8).abs() < 1e-4, "lap banked + 40/50 of the leg: {s}");
+
+    // A second participant a leg and a fraction further on leads by
+    // the deficit the assist ramps on: banked 3+2 + 0.8 = 5.8 vs 3.8.
+    let mut q = p.clone();
+    q.next = 2;
+    let leader = course_progress(&def, &q, Vec3::new(90.0, 0.0, 0.0), 50.0);
+    assert!((leader - s - 2.0).abs() < 1e-4, "leader − follower deficit");
+}
+
+/// `AnyOrder`: the score banks the cleared count plus the covered
+/// fraction toward the `navigation_target` objective — the same
+/// nearest remaining gate (then the armed finish) the arrow tracks.
+#[test]
+fn course_progress_any_order_banks_cleared_gates() {
+    let def = any_order(
+        vec![
+            checkpoint(0.0, 0.0),
+            checkpoint(50.0, 0.0),
+            checkpoint(100.0, 0.0),
+        ],
+        Some(checkpoint(150.0, 0.0)),
+    );
+    let mut p = RaceProgress::new(&def);
+    p.state = ParticipantState::Racing;
+    p.advance(&def, Vec3::new(-40.0, 0.0, 0.0));
+    p.advance(&def, Vec3::new(10.0, 0.0, 0.0)); // sweeps gate 0
+    assert_eq!(p.cleared_count(), 1);
+
+    // Gate 1 at x=50 is the nearest remaining objective — 20 m away
+    // banks 0.6 of a leg.
+    let s = course_progress(&def, &p, Vec3::new(30.0, 0.0, 0.0), 50.0);
+    assert!((s - 1.6).abs() < 1e-4, "1 cleared + 30/50 of the leg: {s}");
+
+    // Every gate cleared → the finish is the objective; standing on
+    // it banks the whole course.
+    for to in [Vec3::new(60.0, 0.0, 0.0), Vec3::new(110.0, 0.0, 0.0)] {
+        p.advance(&def, to);
+    }
+    assert_eq!(p.cleared_count(), 3);
+    let s = course_progress(&def, &p, Vec3::new(140.0, 0.0, 0.0), 50.0);
+    assert!(
+        (s - 3.8).abs() < 1e-4,
+        "3 cleared + 40/50 to the finish: {s}"
+    );
+}
+
+/// The measure stays finite on every degenerate input — an
+/// out-of-range `next`, a missing objective, a non-finite position or
+/// a dead `leg_ref` contributes the banked count alone.
+#[test]
+fn course_progress_degenerate_inputs_stay_finite() {
+    let def = ordered(vec![checkpoint(0.0, 0.0), checkpoint(50.0, 0.0)], 1);
+    let mut p = RaceProgress::new(&def);
+    p.state = ParticipantState::Racing;
+    p.next = 9; // ran past the gate list — no current objective; the
+    // banked count clamps to the definition's gate total.
+    let s = course_progress(&def, &p, Vec3::ZERO, 50.0);
+    assert_eq!(s, 2.0, "banked gates only: {s}");
+
+    p.next = 0;
+    for pos in [Vec3::NAN, Vec3::INFINITY] {
+        let s = course_progress(&def, &p, pos, 50.0);
+        assert_eq!(s, 0.0, "non-finite position → banked only: {s}");
+    }
+    for leg_ref in [0.0, -5.0, f32::NAN, f32::INFINITY] {
+        let s = course_progress(&def, &p, Vec3::new(25.0, 0.0, 0.0), leg_ref);
+        assert_eq!(s, 0.0, "dead leg_ref {leg_ref} → banked only: {s}");
+    }
+
+    // A definition with no checkpoints scores zero everywhere.
+    let empty = ordered(Vec::new(), 1);
+    assert_eq!(
+        course_progress(&empty, &p, Vec3::ZERO, 50.0),
+        0.0,
+        "nothing to bank"
+    );
+}
+
+/// The factor ramps from 0 at the lead to `assist_max` at
+/// `deficit_full` and clamps — one-directional: an at-or-ahead driver
+/// is never lifted and never slowed, and garbage in assists nothing.
+#[test]
+fn catch_up_factor_is_bounded_one_directional_and_safe() {
+    let policy = CatchUpPolicy::default();
+    assert_eq!(catch_up_factor(0.0, &policy), 0.0, "level with the lead");
+    assert_eq!(catch_up_factor(-3.0, &policy), 0.0, "leading earns nothing");
+    let half = catch_up_factor(1.0, &policy);
+    assert!(
+        (half - 0.125).abs() < 1e-4,
+        "half the deficit, half the lift: {half}"
+    );
+    assert_eq!(
+        catch_up_factor(policy.deficit_full, &policy),
+        policy.assist_max,
+        "saturates at the bound"
+    );
+    assert_eq!(
+        catch_up_factor(99.0, &policy),
+        policy.assist_max,
+        "past the bound stays at the bound"
+    );
+    for deficit in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        assert_eq!(catch_up_factor(deficit, &policy), 0.0);
+    }
+    // A dead policy cannot divide into NaN or lift anyone.
+    let dead = CatchUpPolicy {
+        deficit_full: 0.0,
+        assist_max: 1.0,
+    };
+    assert_eq!(catch_up_factor(5.0, &dead), 0.0);
+    let negative = CatchUpPolicy {
+        deficit_full: -1.0,
+        assist_max: 1.0,
+    };
+    assert_eq!(catch_up_factor(5.0, &negative), 0.0);
+}

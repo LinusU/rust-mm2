@@ -75,10 +75,11 @@ pub use props::{
     stamp_space_verts, walk_prop_rules, yawed_basis,
 };
 pub use race::{
-    Checkpoint, CheckpointRule, DEFAULT_CHECKPOINT_HEIGHT, DEFAULT_COUNTDOWN_TICKS, EventParams,
-    NavTarget, ParticipantState, ProgressOutcome, RACE_TICK_HZ, RaceDefinition, RaceError,
-    RacePhase, RaceProgress, RaceStart, RaceStarted, RaceState, TargetSelection, cycle_target,
-    live_order, navigation_target, relative_bearing,
+    CatchUpPolicy, Checkpoint, CheckpointRule, DEFAULT_CHECKPOINT_HEIGHT, DEFAULT_COUNTDOWN_TICKS,
+    EventParams, NavTarget, ParticipantState, ProgressOutcome, RACE_TICK_HZ, RaceDefinition,
+    RaceError, RacePhase, RaceProgress, RaceStart, RaceStarted, RaceState, TargetSelection,
+    catch_up_factor, course_progress, cycle_target, live_order, mean_gate_spacing,
+    navigation_target, relative_bearing,
 };
 pub use recovery::{
     GroundContact, RecoveryCause, RecoveryEvent, RecoveryPolicy, RecoveryVerdict, VehicleRecovery,

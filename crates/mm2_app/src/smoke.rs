@@ -450,30 +450,42 @@ pub fn headless_smoke(
             // (finished/timed out). Absent on runs without a roster so
             // older records stay bit-identical. `opp_rec` counts the
             // field's disclosed re-anchor teleports (F15-B.3) and only
-            // appears when one fired.
-            let (opp, opp_done, opp_rec) =
-                world_ecs
-                    .iter_entities()
-                    .fold((0usize, 0usize, 0usize), |(n, d, r), e| {
-                        let Some(driver) = e.get::<opponents::OpponentDriver>() else {
-                            return (n, d, r);
-                        };
-                        let resolved = e.get::<RaceProgress>().is_some_and(|p| {
-                            matches!(
-                                p.state,
-                                ParticipantState::Finished { .. }
-                                    | ParticipantState::TimedOut { .. }
-                            )
-                        });
-                        (n + 1, d + resolved as usize, r + driver.reanchors as usize)
+            // appears when one fired; `cu` counts drivers whose
+            // designed catch-up assist is currently lifting their
+            // demand ceiling (F15-B.4, DSN-27) — likewise only on
+            // activity, so an unassisted run stays identical.
+            let (opp, opp_done, opp_rec, opp_cu) = world_ecs.iter_entities().fold(
+                (0usize, 0usize, 0usize, 0usize),
+                |(n, d, r, c), e| {
+                    let Some(driver) = e.get::<opponents::OpponentDriver>() else {
+                        return (n, d, r, c);
+                    };
+                    let resolved = e.get::<RaceProgress>().is_some_and(|p| {
+                        matches!(
+                            p.state,
+                            ParticipantState::Finished { .. } | ParticipantState::TimedOut { .. }
+                        )
                     });
+                    (
+                        n + 1,
+                        d + resolved as usize,
+                        r + driver.reanchors as usize,
+                        c + usize::from(driver.catch_up > 0.0),
+                    )
+                },
+            );
             let opp = if opp > 0 {
                 let rec = if opp_rec > 0 {
                     format!(" opp_rec={opp_rec}")
                 } else {
                     String::new()
                 };
-                format!(" opp={opp_done}/{opp}{rec}")
+                let cu = if opp_cu > 0 {
+                    format!(" cu={opp_cu}")
+                } else {
+                    String::new()
+                };
+                format!(" opp={opp_done}/{opp}{rec}{cu}")
             } else {
                 String::new()
             };

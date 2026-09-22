@@ -1,200 +1,139 @@
-# Last iteration — impact-spark ledger repair (F05-B.8)
+# Last iteration — opponent catch-up assist (F15-B.4)
 
-Iteration 37 on `ralph/night`, continuing from `2dfbb03` (the
-F05-B.8 impact-sparks candidate — external review verdict **fail**:
-documentation defects only; the implementation, its tests and both
-retail headless records were independently verified). Task id stays
-`F05-B.8` — the impact-sparks leg of F05-B's remaining work.
-
-## Repair (iteration 37)
-
-Root cause — two ledger-vs-code mislabels in the iteration-36
-write-up:
-
-1. Three docs recorded `emit_sparks` as running in "`FixedUpdate`
-   with `collect_impacts` + `apply_impact_damage`". The code
-   schedules `(emit_sparks, advance_sparks).chain()` in `Update`
-   (`main.rs`, `smoke.rs`) and the producers run in `FixedLast`.
-   Harmless in practice — independent broadcast readers see every
-   buffered message — but the ledger must record the build as made
-   (the iteration-030 class of defect).
-2. `RadialBlast`'s second parameter was written `radius`
-   (`Vector3 *` in two places). mm2hook's recovered header
-   (`src/modules/effects/linespark.h`) declares
-   `RadialBlast(int count, Vector3 &position, Vector3 &velocity)` —
-   re-verified against the public source this iteration.
-
-Actions (doc/comment-only — no behavior change, so the iteration-36
-runtime evidence stands):
-
-- Schedule `FixedUpdate`→`Update` + producer slot `FixedLast`:
-  `docs/research/damage.md`, `docs/ralph/PLAN.md` (F05-B.8 row),
-  this file.
-- Parameter `radius`→`position` (and `Vector3 *`→`Vector3 &`):
-  `docs/research/damage.md`, `docs/ralph/PLAN.md` (selection
-  paragraph + F05-B.8 row), `docs/original-rules.md` (DSN-26 row),
-  this file, and the same wrong signature in the doc comments of
-  `crates/mm2_app/src/spark_fx.rs` and
-  `crates/mm2_game/src/effects.rs`.
-
-Verification: schedule re-checked against
-`crates/mm2_app/src/main.rs` (the `(emit_sparks, advance_sparks)`
-Update chain; `collect_impacts`/`apply_impact_damage` inside the
-FixedLast chain) and `crates/mm2_app/src/smoke.rs` (identical
-headless wiring); signature re-checked against mm2hook
-`linespark.h`. `cargo fmt --all -- --check`, `cargo clippy --locked
---workspace --all-targets --all-features -- -D warnings` and
-`cargo test --locked --workspace` re-run — see Evidence.
-
-## Iteration 36 record (labels corrected)
-
-Continuing from `1425c17` (the externally checked F05-B.7
-engine-impairment candidate — review verdict pass). Task id:
-`F05-B.8` — the impact-sparks leg of F05-B's remaining work (F05
-spec req 4: "apply documented damage consequences / effects").
+Iteration 38 on `ralph/night`, continuing from `68a7b99` (the
+externally checked F05-B.8 doc-repair candidate — review verdict
+**pass**). Task id: `F15-B.4` — the catch-up-assistance leg of
+F15-B's difficulty-effects scope (F15 spec req 4: difficulty must
+affect documented/tunable behavior; AC06: "difficulty changes have
+measured effects, with any catch-up assistance disclosed and tested";
+the spec permits rubber-banding only when it is "explicit,
+observable, scoped by rules and not falsely recorded as physical
+racing").
 
 ## Slice choice
 
-Of the F05-B remainder, the texel-damage + sparks line was recorded
-as blocked on "a contact-point feed that does not exist yet". That
-blocker was stale: `mm2_game::impact::ImpactEvent` already carries
-`point`/`normal`/`severity` and `collect_impacts` already fills them
-from the Avian manifolds — the feed exists and is deduplicated,
-bounded and generation-stamped. No new contact system was needed.
+Of the F15-B remainder, catch-up was the actionable piece: the
+spec's difficulty-effects requirement names it, `RaceProgress`
+already carries enough authoritative state to measure a deficit,
+`OpponentDriver` already carries authored tuning plus a disclosed
+assist counter (`reanchors`), and the smoke record already reports
+opponent fields conditionally. The other named remainders stay
+gated: `weirdPathfinding`/`distancePadding`/`cornerBrakingThreshold`
+consumption waits on semantics verification, `avoidOpponents`
+polarity is open (inert meanwhile), and AC06's measured-difficulty
+evidence leg needs the controlled amateur/pro comparison the
+parameter tail only partially enables.
 
-Between the two consumers, `asLineSparks` sparks are the actionable
-leg: mm2hook recovers a per-vehicle `asLineSparks* Sparks` on
-`vehCarDamage` fired from `ImpactCB` via
-`RadialBlast(count, Vector3 &position, Vector3 &velocity)`, and the
-install ships `texture/spark.tga` (8×8, the only spark-named
-texture). `TextelDamageRadius`/`ImpactsTable` stays open — its
-`fxTexelDamage` consumer and decal-vs-deformation semantics are
-unrecovered and it needs a real rendering decision, not just a feed.
-
-The exact emission shape (count, velocities, cadence, life, texture
-name) is unrecovered — `vehCarDamage::Update()` is a thunk and
-`SparkMultiplier` is runtime state no retail tune record authors —
-so the implemented policy is designed (DSN-26; UNK-13 stands).
+Whether the original rubber-bands trailing opponents at all is
+unverified (UNK-11) — nothing recovered pins down original catch-up
+semantics — so the entire policy is designed and recorded as
+DSN-27, not an original-behavior claim.
 
 ## What changed
 
-- `mm2_game::effects` (designed, DSN-26):
-  - `SparkPolicy` — `sparks_per_speed` 0.8, `min_burst` 2,
-    `max_burst` 16, `max_live` 128/vehicle, `speed` 7 ±3 m/s,
-    `spread` 0.8 rad, `life` 0.5 ±0.2 s, `length` 0.04 m,
-    `gravity` 9.8 m/s². `burst_count(severity)` returns 0 for
-    non-finite or non-positive severity.
-  - `VehicleSparks` — the per-vehicle rig (the `asLineSparks*`
-    counterpart), `NavRng` seeded from the `ObjectId` like
-    `VehicleSmoke`. `burst(point, outward, severity, live,
-    emitter)` spawns streaks at the authored contact point with
-    velocities = `outward` (the participant's own side of the
-    contact normal) + ±`spread` lateral jitter renormalized at
-    `speed` ±`speed_var`; a degenerate normal falls back to
-    straight up, `live >= max_live` truncates.
-  - `Spark` — `advance(dt)` integrates gravity/position and
-    reports expiry at `life` (garbage `dt` accrues nothing);
-    `streak()` is the speed-scaled length floored at `length`;
-    `alpha()` is a linear `1 − age/life` burn-down.
-- `mm2_app::spark_fx`:
-  - `spark_assets` — `spark.tga` through `city::load_image` (mod
-    overrides included) onto an unlit `AlphaMode::Add`
-    `StandardMaterial` (warm tint — the authored fleck has no
-    alpha, so black adds nothing and the per-spark alpha scales the
-    contribution). A missing texture warns and falls back to an
-    untextured additive material — the standard missing-texture
-    policy; emission continues.
-  - `emit_sparks` (`Update`, chained with `advance_sparks`) —
-    drains the `ImpactEvent` buffer as an independent broadcast
-    reader of the stream the `FixedLast` producers
-    `collect_impacts`/`apply_impact_damage` publish: one
-    burst per rigged local/AI participant at `event.point`,
-    rebound side = that participant's side of `event.normal`.
-    Remote participants skip (their authority renders its own,
-    F25+); a non-`Playing` frame drains without emitting; a
-    per-emitter local live count closes the deferred-spawn gap so
-    burst-heavy frames stay inside `max_live`. Each spark spawns a
-    session-stamped entity — velocity-aligned crossed quads
-    (width 0.03 m) in a per-spark cloned material.
-  - `advance_sparks` — reposes each streak along its live
-    velocity, writes the linear fade, despawns on expiry.
-  - `SparkFxReport` — `spk=<b>b/<e>e/<x>x` on the smoke record,
-    activity only; `SparkFx` resource is session-scoped (inserted
-    on load, removed on teardown; absent → nothing emits).
-- Wiring: `VehicleSparks` attached at player + opponent spawn
-  behind the same `def.damage` authored-presence gate as
-  `VehicleDamage`/`VehicleSmoke`, same seed domain; `SparkFxReport`
-  registered in the real app and headless smoke chains;
-  `drive_session` resets the report on teardown. The banger/bot/
-  menu/event/nav-overlay/opponents/profile/progression/race/
-  results/session/traffic test harnesses gained the one-line
-  `init_resource::<SparkFxReport>()` their `drive_session` chains
-  now require (the first workspace run caught two panics from its
-  absence).
+- `crates/mm2_game/src/race.rs` (+ `lib.rs` exports): the pure
+  catch-up contract.
+  - `CatchUpPolicy` — `deficit_full` 2.0 gates, `assist_max` 0.25;
+    both implementation choices, `pub` for test/evidence binding.
+  - `mean_gate_spacing` — mean authored spacing between consecutive
+    checkpoint centres (`None` under two gates / no finite leg).
+  - `course_progress` — a participant's continuous course position
+    in gate units: banked gates (`lap × gates + next` `Ordered`,
+    cleared count `AnyOrder`) plus the covered fraction of the leg
+    toward the same objective `live_order` tie-breaks on
+    (`checkpoints[next]` / `navigation_target`'s nearest remaining
+    gate or armed finish). Non-finite position, out-of-range `next`,
+    missing objective or dead `leg_ref` degrade to the banked count.
+  - `catch_up_factor` — 0 at/ahead of the lead, linear to
+    `assist_max` at `deficit_full`, NaN/garbage-safe.
+- `crates/mm2_app/src/opponents.rs`: `opponent_drive` resolves the
+  leader as the best `course_progress` across every
+  progress-carrying participant (p1 gains `Option<&RaceProgress>`)
+  — the human included — over one shared leg scale (`mean_gate_spacing`,
+  designed fallback `CATCH_UP_LEG_REF` = 80 m). A trailing AI
+  driver's demand ceiling lifts one-directionally —
+  `throttle_cap + assist` bounded 1.0, `corner_speed × (1 + assist)`
+  — on a per-frame tuning copy, never mutating the authored values.
+  `OpponentDriver` gains `catch_up_policy` and `catch_up` (the live
+  factor, zeroed on every non-driving path including the re-anchor
+  branch — kept distinct from `reanchors`: a lifted demand is not a
+  recovery). The player carries no `OpponentDriver` and is never a
+  recipient; nobody is ever slowed below authored tuning; progress
+  is still earned through the same swept-trigger validation.
+- `crates/mm2_app/src/smoke.rs`: `cu=<n>` counts drivers with
+  `catch_up > 0`, emitted on activity only like `opp_rec=` —
+  unassisted runs stay bit-identical.
 
 ## Tests
 
-- `mm2_game/tests/effects.rs` (+3): burst floor/scaling/ceiling +
-  garbage severity (`burst_count_scales_with_severity_and_clamps`);
-  determinism, distinct streams, contact-point birth, rebound
-  hemisphere, emitter, live bound, degenerate/NaN normals
-  (`bursts_are_deterministic_and_bounded`); gravity, streak,
-  alpha, expiry, garbage-dt (`spark_advance_falls_and_expires`).
-- `mm2_app/tests/spark_fx.rs` (new, 9): a reportable impact sparks
-  at the contact point; both rigged participants burst on their own
-  rebound sides; remote participant never sparks locally; unrigged
-  participant emits nothing; absent `SparkFx` emits nothing; stale
-  generations drain without emitting; streaks track velocity and
-  fade; sparks expire on `life`; the pool stays bounded under a
-  burst-heavy feed.
+- `tests/race.rs` +5 (26 total): `mean_gate_spacing` mean/degenerate
+  legs; ordered `course_progress` banking lap×gates+next plus the
+  leg fraction incl. a leader/follower deficit measure; any-order
+  cleared-count + nearest-objective fraction; degenerate inputs
+  (out-of-range `next`, non-finite position, dead `leg_ref`, empty
+  definition) stay finite; `catch_up_factor` ramp, saturation, and
+  garbage legs.
+- `tests/opponents.rs` +1 (32 total): production-path A/B — a
+  parked player teleported through the shared `advance` validation
+  leads at ~3.3 gate units; both trailing opponents report
+  `catch_up > 0` bounded by `assist_max` and their `VehicleInput`
+  exceeds the authored `throttle_cap` (impossible without the lift);
+  leaders and the countdown-locked field report `catch_up == 0`;
+  `reanchors` stays 0; no progress is granted; the player is never
+  a recipient.
 
-## Evidence
+## Gates
 
-Iteration 37 re-run (doc/comment-only diff):
-
-- `cargo fmt --all -- --check`: PASS.
+- `cargo fmt --all -- --check` — pass.
 - `cargo clippy --locked --workspace --all-targets --all-features
-  -- -D warnings`: PASS.
-- `cargo test --locked --workspace`: 63 suites, 0 failures.
+  -- -D warnings` — pass.
+- `cargo test --locked --workspace` — pass (63 suites, 0 failures).
 
-Iteration 36 (implementation candidate `2dfbb03`):
+## Evidence (retail `fnv1a64:e91e6cd4b2ae30d9`, dev build at `68a7b99+diff`)
 
-- `cargo fmt --all -- --check`: PASS.
-- `cargo clippy --locked --workspace --all-targets --all-features
-  -- -D warnings`: clean.
-- `cargo test --locked --workspace`: 63 suites, 0 failures
-  (mm2_game effects 14/14, mm2_app spark_fx 9/9).
-- Retail headless on the supplied install
-  (`fnv1a64:e91e6cd4b2ae30d9`), `--bot --frames 600`:
-  - SF vpbug scripted cruise: `status=pass … impacts=12
-    dmg=3a/0d/0r rej=3 dup=0 vsk=6a/0d/0r spk=6b/20e/18x` — bursts
-    on the six player-involved impacts (3 applied + 3 rejected
-    damage deliveries), every streak born and expired; all other
-    counters and the final pose bit-identical to the pre-change
-    record (sparks are presentation-only). Re-run identical.
-  - London scripted cruise: `… impacts=7 dmg=1a/0d/0r rej=4 dup=0
-    vsk=5a/0d/0r spk=5b/23e/23x` — same pattern, bit-identical
-    elsewhere.
+- `london --event circuit:0 --bot --headless --frames 2700`:
+  `status=pass race=Running lap=2/3 cp=2/6 results=0 pos=1/8
+  opp=0/7 opp_rec=1 cu=7` — the bot leads, all 7 opponents trail
+  and are assisted; `opp_rec=1` (vpcoop re-anchor) stays a distinct
+  counter.
+- `sf --event checkpoint:0 --bot --headless --frames 1500` (mid-race):
+  `race=Running cp=3/6 results=0 pos=5/7 opp=0/6 cu=5` — 5 of 6
+  opponents trail the leading opponent and are assisted; the leader
+  gets nothing (one-directional).
+- `sf --car vpbug --bot --headless --frames 600`: `status=pass
+  impacts=12 dmg=3a/0d/0r rej=3 dup=0 vsk=6a/0d/0r spk=6b/20e/18x`
+  — bit-identical to the F05-B.8 review record.
+- `london --bot --headless --frames 600`: `status=pass impacts=7
+  dmg=1a/0d/0r rej=4 dup=0 vsk=5a/0d/0r spk=5b/23e/23x` —
+  bit-identical. No `opp=`/`cu=` fields on roster-free runs.
 
-## Classification / open items
+`cu=` is evidence of the *designed* policy firing in the production
+path — not retail fidelity, and not a measured-difficulty A/B
+(AC06's remaining leg).
 
-- F05-B.8 is `implemented` (candidate) — external review of
-  `2dfbb03` rejected the candidate on the two doc mislabels above
-  (implementation, tests and retail records all verified by the
-  reviewer); iteration 37 repaired the labels. Re-candidate
-  pending external gates + review.
-- Classifications: the per-vehicle `asLineSparks` renderer and the
-  `ImpactCB`→`RadialBlast` call shape are recovered (mm2hook);
-  `spark.tga` is a recovered asset; every emission value, the
-  streak render and the texture *binding* are **designed**
-  (DSN-26); the original's burst semantics stay UNK-13.
-- Honest gaps: no GPU/operator view of the streaks (headless
-  counters only — the render path is unlit quads, verified by
-  transform/material assertions, not a screenshot); remote-skip is
-  synthetic (no networking); whether `spark.tga` is the texture
-  the original `Init` bound is unrecovered.
-- Still open in F05-B: `TextelDamageRadius`/`ImpactsTable` texel
-  damage (`fxTexelDamage` consumer + decal-vs-deformation
-  semantics unrecovered), damage-driven detachment if the original
-  uses it, C&R healing driver (DMG-4 — needs F27), replication
-  (F25+).
+## Disclosures and gaps
+
+- `cu=` reports the *live* assist: it zeroes when the session leaves
+  `Playing` (resolved/held drivers get zeroed input), so
+  end-of-race records show none. It is deliberately not a
+  cumulative counter — the `driver.catch_up` component is the
+  per-frame observable; a cumulative assist-seconds metric is a
+  possible later refinement.
+- `sf checkpoint:0`'s end-of-run `status=fail "fell through the
+  world"` is the pre-existing altitude-threshold trip: the car is
+  grounded (`wheels=4/4`, `cp=3/6`, still racing) but the course
+  descends >25 m below the spawn altitude. Same failure class noted
+  in iteration 11's records — unrelated to this slice (the player
+  is never assisted; the check compares final altitude to spawn).
+- F15-B's parent stays open: AC06's measured amateur-vs-pro
+  difficulty A/B, representative avoidance matrix, the remaining
+  authored-tail columns once semantics verify, `avoidOpponents`
+  polarity (decoded, inert).
+- Catch-up applies to AI opponents only and on authority-local
+  `opponent_drive`; remote participants (F25+) are untouched.
+
+Files: `crates/mm2_game/src/race.rs`, `crates/mm2_game/src/lib.rs`,
+`crates/mm2_game/tests/race.rs`, `crates/mm2_app/src/opponents.rs`,
+`crates/mm2_app/src/smoke.rs`, `crates/mm2_app/tests/opponents.rs`,
+`docs/original-rules.md`, `docs/ralph/PLAN.md`,
+`docs/ralph/LAST_ITERATION.md`.

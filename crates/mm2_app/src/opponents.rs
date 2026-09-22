@@ -194,6 +194,12 @@ const PANIC_GAP: f32 = 4.0;
 /// car is steered around, a moving one is trailed at the comfort gap.
 const CRAWL_SPEED: f32 = 3.0;
 
+/// Distance-to-objective scale (m) the catch-up course measure falls
+/// back to when a definition's own gate spacing cannot be measured —
+/// designed (DSN-27), near a typical city block's length so a
+/// participant a block behind banks roughly one gate unit of deficit.
+const CATCH_UP_LEG_REF: f32 = 80.0;
+
 /// Per-opponent controller state — a component on the vehicle so
 /// session teardown despawns it with everything else the session owns.
 /// Carries the authored [`OpponentSpec`] verbatim: the vehicle id (for
@@ -260,6 +266,16 @@ pub struct OpponentDriver {
     /// observable record of the disclosed teleport assist (surfaced
     /// in the smoke record as `opp_rec=`).
     pub reanchors: u32,
+    /// The catch-up policy this driver runs under (designed, DSN-27 —
+    /// see [`mm2_game::CatchUpPolicy`]). `pub` so tests and evidence
+    /// runs can bind different bounds without touching authored data.
+    pub catch_up_policy: mm2_game::CatchUpPolicy,
+    /// The catch-up assist currently applied — the gates-behind factor
+    /// in `0..=catch_up_policy.assist_max`, `0` while leading, level
+    /// or not racing. The observable the smoke record's `cu=` field
+    /// counts, kept distinct from `reanchors` on purpose: lifted
+    /// demand is not a recovery.
+    pub catch_up: f32,
 }
 
 impl OpponentDriver {
@@ -623,6 +639,8 @@ pub fn spawn_opponents(
                     stuck_pos: pos,
                     stuck_frames: 0,
                     reanchors: 0,
+                    catch_up_policy: mm2_game::CatchUpPolicy::default(),
+                    catch_up: 0.0,
                 },
                 vehicle_bundle(&def.config),
                 Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)),
@@ -889,7 +907,14 @@ pub fn opponent_drive(
             &RaceProgress,
             &mut OpponentDriver,
         )>,
-        Query<(Entity, &Player, &Position, &Rotation, &VehicleState)>,
+        Query<(
+            Entity,
+            &Player,
+            &Position,
+            &Rotation,
+            &VehicleState,
+            Option<&RaceProgress>,
+        )>,
     )>,
 ) {
     let race = race
@@ -899,7 +924,7 @@ pub fn opponent_drive(
     let traffic: Vec<Traffic> = set
         .p1()
         .iter()
-        .map(|(entity, player, pos, rot, vstate)| Traffic {
+        .map(|(entity, player, pos, rot, vstate, _)| Traffic {
             entity,
             control: player.control,
             pos: pos.0,
@@ -907,6 +932,25 @@ pub fn opponent_drive(
             speed: vstate.forward_speed,
         })
         .collect();
+    // F15-B.4 — the disclosed catch-up assist (designed, DSN-27). The
+    // leader is the best continuous course position among every
+    // progress-carrying participant — the human included, so a
+    // trailing field's lift is measured against whoever is actually
+    // ahead, not an AI-only shuffle. The leg scale is the course's
+    // own mean gate spacing; a degenerate definition falls back to
+    // the designed `CATCH_UP_LEG_REF`.
+    let leg_ref = race
+        .and_then(|r| mm2_game::mean_gate_spacing(&r.definition))
+        .unwrap_or(CATCH_UP_LEG_REF);
+    let leader = race.map(|r| {
+        set.p1()
+            .iter()
+            .filter_map(|(_, _, pos, _, _, progress)| progress.map(|p| (pos.0, p)))
+            .map(|(p_pos, progress)| {
+                mm2_game::course_progress(&r.definition, progress, p_pos, leg_ref)
+            })
+            .fold(f32::NEG_INFINITY, f32::max)
+    });
     for (entity, mut input, pos, rot, vehicle, vstate, progress, mut driver) in &mut set.p0() {
         if let Some((_, left)) = &mut driver.pass_ban {
             *left = left.saturating_sub(1);
@@ -934,6 +978,7 @@ pub fn opponent_drive(
             driver.stall_frames = 0;
             driver.stuck_frames = 0;
             driver.stuck_pos = pos.0;
+            driver.catch_up = 0.0;
             *input = VehicleInput::default();
             continue;
         };
@@ -996,6 +1041,7 @@ pub fn opponent_drive(
                 driver.stuck_frames = 0;
                 driver.stuck_pos = pose;
                 driver.reanchors += 1;
+                driver.catch_up = 0.0;
                 info!(
                     vehicle = %driver.spec.vehicle,
                     reanchors = driver.reanchors,
@@ -1107,7 +1153,26 @@ pub fn opponent_drive(
             }
         }
         let bearing = relative_bearing(yaw, pos.0, target);
-        let tuning = driver.tuning;
+        // F15-B.4 — disclosed catch-up (designed, DSN-27): a driver
+        // trailing the leader lifts its demand ceiling by the bounded
+        // factor — never the leader's, never the player's, and never
+        // progress itself, which still has to be earned through the
+        // same swept triggers. `driver.catch_up` is the observable
+        // the `cu=` record counts; it is not a re-anchor and stays
+        // out of `reanchors`.
+        let assist = match (race, leader) {
+            (Some(r), Some(l)) => mm2_game::catch_up_factor(
+                l - mm2_game::course_progress(&r.definition, progress, pos.0, leg_ref),
+                &driver.catch_up_policy,
+            ),
+            _ => 0.0,
+        };
+        driver.catch_up = assist;
+        let mut tuning = driver.tuning;
+        if assist > 0.0 {
+            tuning.throttle_cap = (tuning.throttle_cap + assist).min(1.0);
+            tuning.corner_speed *= 1.0 + assist;
+        }
         *input = scripted_input_tuned(
             &mut driver.recovery,
             bearing,
