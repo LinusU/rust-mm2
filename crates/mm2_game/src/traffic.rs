@@ -15,15 +15,15 @@
 //! [`plan_ambient`] draws an initial spawn set: the authored density
 //! fraction times a bounded vehicle budget, each draw picking a class
 //! through the cumulative table and a lane-position inside the spawn
-//! annulus (`min_player_distance`…`recycle_distance` of the bubble
-//! centre) over the routable vehicle lanes that survive the overrides
-//! (closed roads and pedestrian-only/disabled road sides are already
-//! excluded from the graph's arcs). A draw is also rejected when its
-//! exclusion box touches occupied space — a live car, a participant,
-//! or an earlier placement — so a spawn never materialises inside
-//! another vehicle (F10-AC04). Everything is seeded through
-//! [`NavRng`] — the same `(seed, content)` pair produces the same
-//! plan on every platform.
+//! annulus (`min_player_distance`…`recycle_distance` of the union of
+//! player interest areas — see [`in_spawn_band`]) over the routable
+//! vehicle lanes that survive the overrides (closed roads and
+//! pedestrian-only/disabled road sides are already excluded from the
+//! graph's arcs). A draw is also rejected when its exclusion box
+//! touches occupied space — a live car, a participant, or an earlier
+//! placement — so a spawn never materialises inside another vehicle
+//! (F10-AC04). Everything is seeded through [`NavRng`] — the same
+//! `(seed, content)` pair produces the same plan on every platform.
 //!
 //! This is *not* original traffic: the plan is spawn/despawn policy
 //! data for the ambient system F10-B/C fills in — no intersection
@@ -178,12 +178,14 @@ pub struct SpawnPolicy {
     /// Bound on simultaneously active ambient vehicles — the density
     /// fraction scales the target inside this cap.
     pub max_active: usize,
-    /// No spawn is placed within this distance of the player, in
-    /// metres — ambient cars materialising inside the view cone is the
-    /// failure this guards.
+    /// No spawn is placed within this distance of *any* player
+    /// interest area, in metres — ambient cars materialising inside
+    /// somebody's view cone is the failure this guards.
     pub min_player_distance: f32,
-    /// A vehicle beyond this distance from the player is recycled into
-    /// the spawn pool (the ambient bubble radius), in metres.
+    /// A vehicle beyond this distance from *every* player interest
+    /// area is recycled into the spawn pool (the ambient bubble
+    /// radius), in metres; a spawn must land inside at least one
+    /// interest area's radius.
     pub recycle_distance: f32,
     /// Bound on placement attempts per directive before the draw is
     /// dropped — keeps the planner finite when the player sits in the
@@ -272,22 +274,23 @@ pub struct AmbientPlan {
 /// pedestrian-only/disabled road sides, so `arc.is_some()` is the BAI
 /// ambient-classification test. Each of `target` draws picks a lane
 /// uniformly, a position along it, and a class through the roster's
-/// cumulative weights; placements outside the `[min_player_distance,
-/// recycle_distance]` annulus around `player_at` retry up to
-/// `policy.placement_attempts` times before the directive is dropped —
-/// the outer bound keeps the plan from populating road the recycler
-/// would collect on its first tick. Each placed directive also joins
-/// the occupied set later draws must keep `spawn_clearance` from, so
-/// two planned cars can never stack on the same spot. `player_at` may
-/// be a spawn pose, not a tracked position — the planner only needs
-/// the bubble centre.
+/// cumulative weights; placements outside the union of player interest
+/// areas ([`in_spawn_band`] — inside at least one area's
+/// `recycle_distance`, outside every area's `min_player_distance`)
+/// retry up to `policy.placement_attempts` times before the directive
+/// is dropped — the outer bound keeps the plan from populating road
+/// the recycler would collect on its first tick. Each placed directive
+/// also joins the occupied set later draws must keep `spawn_clearance`
+/// from, so two planned cars can never stack on the same spot. Entries
+/// of `interest` may be spawn poses, not tracked positions — the
+/// planner only needs the bubble centres.
 pub fn plan_ambient(
     graph: &NavGraph,
     overrides: &NavOverrides,
     roster: &AmbientRoster,
     seed: u64,
     density: f32,
-    player_at: [f32; 3],
+    interest: &[[f32; 3]],
     policy: &SpawnPolicy,
 ) -> AmbientPlan {
     let mut issues = Vec::new();
@@ -323,7 +326,7 @@ pub fn plan_ambient(
         }
         for _ in 0..policy.placement_attempts {
             match draw_spawn(
-                graph, overrides, &eligible, roster, &mut rng, player_at, &taken, policy,
+                graph, overrides, &eligible, roster, &mut rng, interest, &taken, policy,
             ) {
                 SpawnDraw::OutOfBand | SpawnDraw::Occupied => continue,
                 SpawnDraw::Placed(directive) => {
@@ -388,12 +391,12 @@ pub fn eligible_lanes(graph: &NavGraph, overrides: &NavOverrides) -> Vec<LaneId>
 pub enum SpawnDraw {
     /// A directive was placed.
     Placed(SpawnDirective),
-    /// The sampled position fell outside the spawn annulus — inside
-    /// `min_player_distance` of the player (a car must not materialise
-    /// next to them) or beyond `max_player_distance` (a placement past
-    /// the recycler's own radius would be despawned on the next tick,
-    /// so drawing it is pure churn). The caller retries on a fresh
-    /// lane sample.
+    /// The sampled position fell outside the union spawn band —
+    /// inside `min_player_distance` of some interest area (a car must
+    /// not materialise next to anybody) or beyond every area's
+    /// `recycle_distance` (a placement past the recycler's own radius
+    /// would be despawned on the next tick, so drawing it is pure
+    /// churn). The caller retries on a fresh lane sample.
     OutOfBand,
     /// The sampled position's exclusion box touched an occupied point
     /// — a live ambient car, a participant, or an earlier placement —
@@ -433,15 +436,49 @@ pub fn spawn_occupied(sample: &LaneSample, occupied: &[[f32; 3]], policy: &Spawn
     })
 }
 
+/// Whether `position` lies inside the union of player interest areas
+/// the spawn band declares (F10 spec req 2): within
+/// `policy.recycle_distance` of *at least one* interest point — inside
+/// somebody's bubble — and outside `policy.min_player_distance` of
+/// *every* one, so a car can never materialise next to anybody no
+/// matter which area admitted it. An empty `interest` set admits
+/// nothing: with no player there is no bubble to populate.
+pub fn in_spawn_band(position: [f32; 3], interest: &[[f32; 3]], policy: &SpawnPolicy) -> bool {
+    let min2 = policy.min_player_distance * policy.min_player_distance;
+    let max2 = policy.recycle_distance * policy.recycle_distance;
+    let mut inside_any = false;
+    for p in interest {
+        let d = [position[0] - p[0], position[1] - p[1], position[2] - p[2]];
+        let d2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+        if d2 < min2 {
+            return false;
+        }
+        inside_any |= d2 <= max2;
+    }
+    inside_any
+}
+
+/// Whether `position` is still inside somebody's bubble — within
+/// `policy.recycle_distance` of at least one interest point. The
+/// recycler collects a live car only when this returns `false` for
+/// the whole set, so a car parked beside a far-away player survives
+/// the local bubble leaving it (F10-AC04's "near any player" leg).
+pub fn within_interest(position: [f32; 3], interest: &[[f32; 3]], policy: &SpawnPolicy) -> bool {
+    let max2 = policy.recycle_distance * policy.recycle_distance;
+    interest.iter().any(|p| {
+        let d = [position[0] - p[0], position[1] - p[1], position[2] - p[2]];
+        d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= max2
+    })
+}
+
 /// One spawn-placement attempt — [`plan_ambient`] retries it
 /// `policy.placement_attempts` times per directive and the runtime
 /// recycler reuses it to top the population back up. Placements are
-/// drawn inside the `[min_player_distance, recycle_distance]` annulus
-/// `policy` declares around `player_at` — the population lives in the
-/// player's bubble, never on the far side of the city where the
-/// recycler would collect it immediately — and rejected when the
-/// sampled exclusion box touches a point `occupied` reports (live
-/// cars, participants, earlier placements).
+/// drawn inside the union of player interest areas ([`in_spawn_band`])
+/// — the population lives in *somebody's* bubble, never on the far
+/// side of the city where the recycler would collect it immediately —
+/// and rejected when the sampled exclusion box touches a point
+/// `occupied` reports (live cars, participants, earlier placements).
 #[allow(clippy::too_many_arguments)] // the draw threads the same plan state the planner/recycler share
 pub fn draw_spawn(
     graph: &NavGraph,
@@ -449,7 +486,7 @@ pub fn draw_spawn(
     eligible: &[LaneId],
     roster: &AmbientRoster,
     rng: &mut NavRng,
-    player_at: [f32; 3],
+    interest: &[[f32; 3]],
     occupied: &[[f32; 3]],
     policy: &SpawnPolicy,
 ) -> SpawnDraw {
@@ -457,13 +494,7 @@ pub fn draw_spawn(
     let l = graph.lane(lane).expect("eligible lanes exist");
     let along = rng.next_f32() * l.length;
     let sample = graph.sample_lane(lane, along).expect("a live lane samples");
-    let d = [
-        sample.position[0] - player_at[0],
-        sample.position[1] - player_at[1],
-        sample.position[2] - player_at[2],
-    ];
-    let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-    if !(policy.min_player_distance..=policy.recycle_distance).contains(&dist) {
+    if !in_spawn_band(sample.position, interest, policy) {
         return SpawnDraw::OutOfBand;
     }
     // Rejected before the class pick so an occupied spot never burns

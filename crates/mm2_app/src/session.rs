@@ -757,7 +757,10 @@ pub fn load_session_world(
             authored_density,
             owner,
             &mut session,
-            spawn.position,
+            // Load-time interest is the local spawn alone — every
+            // participant stages on the same grid, and the runtime
+            // maintainer rebuilds the union live each tick.
+            std::slice::from_ref(&spawn.position),
             &mut assets.meshes,
             &mut assets.images,
             &mut assets.materials,

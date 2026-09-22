@@ -834,6 +834,103 @@ fn a_parked_participant_holds_traffic_and_clearing_releases_it() {
     assert!(resumed, "the released car never resumed");
 }
 
+/// F10 spec req 2's union-of-interest leg at runtime: a remote
+/// player's bubble keeps ambient cars alive past the local player's
+/// recycle radius — a car beside a far-away participant is a live
+/// interaction (F10-AC04 "near any player"), not churn. The control
+/// run recycles the whole network when no second player covers it.
+#[test]
+fn a_remote_players_bubble_holds_traffic_the_local_player_left() {
+    let install = city_install();
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    assert!(!ambient_cars(&mut app).is_empty());
+
+    // A second player far south — every fixture lane sits inside its
+    // 400 m bubble (270–330 m away) yet past the local player's once
+    // the local teleports out.
+    app.world_mut().spawn((
+        Player {
+            id: PlayerId(90),
+            control: PlayerControl::Remote,
+        },
+        Position(Vec3::new(0.0, 0.0, -300.0)),
+    ));
+    teleport_player(&mut app, Vec3::new(0.0, 0.0, 2000.0));
+    run(&mut app, 4);
+    assert!(
+        !ambient_cars(&mut app).is_empty(),
+        "the remote player's bubble must keep the population alive"
+    );
+    assert_eq!(
+        app.world().resource::<AmbientTraffic>().recycled,
+        0,
+        "no car sits past every player's bubble"
+    );
+
+    // Control: the same departure with no second player recycles the
+    // whole network — the old single-bubble behaviour.
+    let install = city_install();
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    teleport_player(&mut app, Vec3::new(0.0, 0.0, 2000.0));
+    run(&mut app, 4);
+    assert!(
+        ambient_cars(&mut app).is_empty(),
+        "cars past the only bubble must recycle"
+    );
+    assert!(app.world().resource::<AmbientTraffic>().recycled > 0);
+}
+
+/// The union covers the draw too: with the local player gone, fresh
+/// cars materialise only inside the remote player's band — and never
+/// on the far side of the city where no player looks.
+#[test]
+fn respawns_draw_inside_a_remote_players_band() {
+    let install = city_install();
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    assert!(!ambient_cars(&mut app).is_empty());
+
+    app.world_mut().spawn((
+        Player {
+            id: PlayerId(90),
+            control: PlayerControl::Remote,
+        },
+        Position(Vec3::new(0.0, 0.0, -300.0)),
+    ));
+    teleport_player(&mut app, Vec3::new(0.0, 0.0, 2000.0));
+    // Remove the initial plan — refills can now come only from the
+    // remote player's band (the lanes sit 270–330 m from it).
+    for (e, _) in ambient_cars(&mut app) {
+        app.world_mut().despawn(e);
+    }
+    run(&mut app, 6);
+    let cars = ambient_cars(&mut app);
+    assert!(!cars.is_empty(), "the remote player's band must repopulate");
+    for (_, pos) in &cars {
+        let d = pos.distance(Vec3::new(0.0, 0.0, -300.0));
+        assert!(
+            (60.0..=400.0).contains(&d),
+            "spawn outside the remote band at {d} m: {pos:?}"
+        );
+    }
+    assert_eq!(
+        app.world().resource::<AmbientTraffic>().recycled,
+        0,
+        "the remote bubble holds the network — nothing was collectable"
+    );
+}
+
 /// The roster ships but `[Density] 0.0` authors the population off —
 /// manually spawned followers are then the only cars on the network,
 /// so the queue leg is deterministic.
@@ -1577,13 +1674,15 @@ fn respawns_reject_space_a_participant_occupies() {
     for (e, _) in ambient_cars(&mut app) {
         app.world_mut().entity_mut(e).despawn();
     }
-    // A bare participant standing mid-network.
+    // A bare participant standing south of the network — inside the
+    // union bubble and past every lane's 60 m exclusion, so draws
+    // reach the occupied-space check the box performs.
     app.world_mut().spawn((
         Player {
             id: PlayerId(94),
             control: PlayerControl::Ai,
         },
-        Position(Vec3::new(3.75, 0.0, 0.0)),
+        Position(Vec3::new(3.75, 0.0, -150.0)),
     ));
     {
         let mut t = app.world_mut().resource_mut::<AmbientTraffic>();
@@ -1605,10 +1704,6 @@ fn respawns_reject_space_a_participant_occupies() {
         "the default box must allow refills"
     );
 }
-
-// ---------------------------------------------------------------------------
-// F10-B.5 junction-box yield — an admitted approach waits on an occupied box
-// ---------------------------------------------------------------------------
 
 /// A participant parked in the junction box is invisible to the
 /// corridor sense (6.75 m lateral > the 2.4 m half-width) and to the

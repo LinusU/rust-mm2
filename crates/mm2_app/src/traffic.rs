@@ -10,8 +10,9 @@
 //! each car's [`LaneCursor`] along the authored network at its target
 //! speed — seeded legal-exit choices at intersections, rank-preserving
 //! lane transfers — and `maintain_ambient` recycles cars that run out
-//! of road or leave the player's bubble, respawning to the density
-//! target.
+//! of road or leave every player's bubble, respawning to the density
+//! target inside the union of player interest areas (F10 spec req 2 —
+//! designed composition, see `maintain_ambient`).
 //!
 //! Deliberately partial scope, per the F10 spec: ambient cars are
 //! **kinematic** lane followers — `AiVehicleData` authors no drivetrain
@@ -130,7 +131,7 @@ use mm2_game::{
     ObjectIdentity, Player, Session, SessionConfig, SessionEntity, SessionPhase, SignalAspect,
     SpawnDirective, SpawnDraw, SpawnPolicy, StuckPolicy, StuckWindow, WorldMode,
     advance_lane_cursor, corridor_gap, draw_spawn, eligible_lanes, follow_speed,
-    inside_junction_zone, junction_speed, junction_zone, plan_ambient,
+    inside_junction_zone, junction_speed, junction_zone, plan_ambient, within_interest,
 };
 use tracing::{debug, info, warn};
 
@@ -336,6 +337,13 @@ pub struct AmbientCar {
 /// the city aimap's `[Density]`, then `SessionConfig::densities`
 /// (implementation choice — the original layering is unverified,
 /// UNK-12).
+///
+/// `interest` is the load-time player interest area set — the spawn
+/// poses every `Player` participant starts from (all staged on the
+/// same grid, so the session caller passes the local spawn alone);
+/// the initial plan draws inside their union band. The runtime
+/// maintainer rebuilds the set live from every `Player` participant
+/// each tick.
 #[allow(clippy::too_many_arguments)] // session-load call site: assets + vfs + session all live here
 pub fn load_ambient_traffic(
     commands: &mut Commands,
@@ -345,7 +353,7 @@ pub fn load_ambient_traffic(
     authored_density: Option<f32>,
     owner: SessionEntity,
     session: &mut Session,
-    player_at: Vec3,
+    interest: &[Vec3],
     meshes: &mut Assets<Mesh>,
     images: &mut Assets<Image>,
     materials: &mut Assets<StandardMaterial>,
@@ -388,13 +396,14 @@ pub fn load_ambient_traffic(
         .or(setup.city_density)
         .unwrap_or(config.densities.traffic);
     let policy = SpawnPolicy::default();
+    let interest_set: Vec<[f32; 3]> = interest.iter().map(|p| p.to_array()).collect();
     let plan = plan_ambient(
         &build.graph,
         &setup.overrides,
         &setup.roster,
         config.seed,
         density,
-        player_at.to_array(),
+        &interest_set,
         &policy,
     );
 
@@ -1066,9 +1075,20 @@ pub fn knock_ambient(
 }
 
 /// Keep the population at the plan's target: despawn cars that left
-/// the player's bubble past `recycle_distance`, then draw fresh
-/// placements through the same [`draw_spawn`] the planner used —
-/// bounded per tick so a drained city cannot stall the frame.
+/// the union of player interest areas — beyond `recycle_distance` of
+/// *every* `Player` participant — then draw fresh placements through
+/// the same [`draw_spawn`] the planner used — bounded per tick so a
+/// drained city cannot stall the frame.
+///
+/// The interest set is every `Player` participant's position — the
+/// local driver, remote drivers and AI opponents alike (designed
+/// composition, F10 spec req 2): each participant can hold live
+/// interactions with ambient cars — corridor sensing, junction-box
+/// occupancy, collisions — so a car parked beside a far-away
+/// participant survives the local bubble leaving it (F10-AC04's
+/// "preserve active interactions near any player"). A respawn must
+/// land inside at least one area's band and outside every area's
+/// `min_player_distance` — it can never materialise next to anybody.
 ///
 /// F10-B.4 occupied-space rejection (F10-AC04): the draw sees the
 /// positions of every surviving ambient car and every `Player`
@@ -1083,7 +1103,6 @@ pub fn maintain_ambient(
     traffic: Option<ResMut<AmbientTraffic>>,
     vfs: Option<Res<mm2_game::Mm2Vfs>>,
     mut cars: Query<(Entity, &AmbientCar, &Position)>,
-    player: Query<&Position, With<mm2_game::PlayerVehicle>>,
     participants: Query<&Position, (With<Player>, Without<AmbientCar>)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
@@ -1103,18 +1122,22 @@ pub fn maintain_ambient(
     {
         return;
     }
-    let Some(player_at) = player.iter().next().map(|p| p.0) else {
+    // The union of player interest areas — every `Player` participant
+    // carries one (the local vehicle included). No players means no
+    // bubble to populate or collect against: freeze the population
+    // rather than despawning the city.
+    let interest: Vec<[f32; 3]> = participants.iter().map(|p| p.0.to_array()).collect();
+    if interest.is_empty() {
         return;
-    };
+    }
     let traffic = &mut *traffic;
 
-    let recycle2 = traffic.policy.recycle_distance * traffic.policy.recycle_distance;
     let mut active = 0usize;
     // Space the respawn draw must not materialise inside: every car
     // that survives the bubble test, plus every participant.
     let mut occupied: Vec<[f32; 3]> = Vec::new();
     for (entity, _, pos) in &mut cars {
-        if pos.0.distance_squared(player_at) > recycle2 {
+        if !within_interest(pos.0.to_array(), &interest, &traffic.policy) {
             traffic.recycled += 1;
             traffic.junctions.depart(entity);
             commands.entity(entity).despawn();
@@ -1123,7 +1146,7 @@ pub fn maintain_ambient(
             active += 1;
         }
     }
-    occupied.extend(participants.iter().map(|p| p.0.to_array()));
+    occupied.extend(interest.iter().copied());
     if active >= traffic.target || traffic.eligible.is_empty() {
         return;
     }
@@ -1141,7 +1164,7 @@ pub fn maintain_ambient(
             &traffic.eligible,
             &traffic.roster,
             &mut traffic.rng,
-            player_at.to_array(),
+            &interest,
             &occupied,
             &traffic.policy,
         ) {

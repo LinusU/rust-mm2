@@ -1,109 +1,103 @@
 # Last implementation iteration
 
-- Task ID and title: F10-B.7 — authored traffic-signal indicators
-  (the F10-B plan remainder's "signal-prop rendering" line). The BAI
-  `trafficLightOrigin`/`trafficLightAxis` road-end pairs were parsed
-  but unconsumed; this slice surfaces them as session-owned lamps
-  driven by the authoritative `Junctions` controller.
-- Starting commit: `76ce14d5e1d82ae542579added0825e013578eb6` on
+- Task ID and title: F10-B.8 — union of player interest areas for
+  ambient spawn/recycle (the F10-B plan remainder's "multiplayer
+  union-of-interest bubbles" line; F10 spec req 2 "use the union of
+  player interest areas in multiplayer", AC04's "preserve active
+  interactions near any player", the "two players far apart" edge).
+- Starting commit: `c5811a82f3c27105c36e56b6488df67dfc2d9d40` on
   `ralph/night`; tree was clean, previous external review verdict
-  pass (F10-B.6), so this is feature work, not a repair.
+  pass (F10-B.7), so this is feature work, not a repair.
 
 ## What changed
 
-- `mm2_game::nav` — `NavArc::exit_light: Option<NavSignal>` carries
-  the downstream end's authored marker per approach; `NavGraph::
-  signals: Vec<EndSignal>` (road, resolved junction, raw rule code,
-  verbatim `NavSignal { origin, axis }`) carries the *full* authored
-  head set. The distinction matters: an `mm2-inspect bai` census
-  proved arc-exit-only traversal covers just 522/650 lit ends on SF
-  and 440/828 on London — the rest sit on one-way upstream ends and
-  arc-less (pedestrian/tram-only) roads, and the original draws them
-  anyway (R3: lights render when the origin is nonzero). `nav_signal`
-  drops zero/non-finite origins and sanitises a non-finite axis to
-  zero; heads on unresolved ends list nowhere (none exist on the
-  retail cities).
-- `mm2_game::traffic` — `SignalAspect { Green, Red, Stop }` +
-  `Junctions::signal_aspect`: `gate`'s rule admission minus the
-  box-yield. A light member is green exactly while it holds the
-  phase (red through the all-red clearance); `NeverStop`/unruled and
-  non-member ends stay green; `StopSign` ends show `Stop` (the FCFS
-  admission cannot be read off a lamp); `AlwaysStop` stays red.
-- `mm2_app::traffic` — `TrafficSignal` component + one session-owned
-  indicator per authored head inside `SIGNAL_MAX_DISTANCE` (60 m,
-  designed sanity bound; `signals_dropped` counts outliers — 3 on
-  retail SF at up to 686 m). Shared `Sphere` mesh and three unlit
-  aspect materials (no `vasignalunit`/`vastopunit` geometry ships —
-  textures only, so the indicator is a designed presentation, not an
-  original claim). `drive_signals` runs after `maintain_ambient` in
-  every `FixedLast` chain (app, smoke, test harness), swapping the
-  material only on aspect change under the same authority/phase
-  gate as the driver. `AmbientTraffic::signals`/`signals_dropped`
-  counters; `sig=`/`sigd=` join the `traf=` smoke record (sig only
-  when nonzero, sigd only when nonzero).
-- `tools/mm2_inspect` — the `bai` audit gains the traffic-light
-  census (lit ends by rule, non-finite count, Y range, distance
-  outliers, unconnected count, arc coverage classification, a sample
-  coordinate) used to size this slice.
+- `mm2_game::traffic` — the spawn band is no longer a single circle
+  around `player_at`. `plan_ambient`/`draw_spawn` take
+  `interest: &[[f32; 3]]` — the position of every player interest
+  area — and two new public predicates carry the shared semantics:
+  - `in_spawn_band(position, interest, policy)`: inside *at least
+    one* area's `recycle_distance` AND outside *every* area's
+    `min_player_distance` — a car may live in anybody's bubble but can
+    never materialise next to anybody. Empty `interest` and
+    non-finite positions admit nothing.
+  - `within_interest(position, interest, policy)`: the matching
+    any-bubble survival test the recycler collects against.
+- `mm2_app::traffic::maintain_ambient` — builds the interest set live
+  each tick from every `Player` participant's `Position` (the local
+  vehicle carries `Player`, so the old `PlayerVehicle`-only query is
+  gone): local driver, remote drivers, AI opponents alike — designed
+  composition, since each participant can hold live interactions with
+  ambient cars (corridor sensing, junction-box occupancy, collision).
+  A car despawns only when past `recycle_distance` of *every*
+  participant; respawn draws run through the same union band. No
+  participants → the population freezes rather than draining (same
+  freeze the old no-`PlayerVehicle` early return gave).
+- `load_ambient_traffic` — `player_at: Vec3` → `interest: &[Vec3]`;
+  the session passes the local spawn alone at load (every participant
+  stages on the same grid), the maintainer rebuilds the union live.
+- `docs/original-rules.md` — UNK-12 gains the F10-B.8 runtime note:
+  interest composition (AI areas count) is a designed choice; the
+  original's interest-area model stays unverified.
 
 ## Evidence
 
-- `cargo test -p mm2_game --test traffic` — 31 pass (+3:
-  `exit_light_carries_the_authored_marker_verbatim` — verbatim
-  origin/axis on the arc, zero/non-finite origins → `None`,
-  non-finite axis → `[0;3]`; `signals_lists_every_lit_resolved_end`
-  — entry-only and arc-less lit ends list, unconnected lit end
-  skipped, member set still arcs-only;
-  `signal_aspect_follows_the_authoritative_phase` — 30-tick sweep:
-  green iff member holds phase, both red in clearance, rule-table
-  aspects, non-member fallback green).
-- `cargo test -p mm2_app --test traffic` — 25 pass (+3:
-  `authored_signals_spawn_at_their_origins_and_despawn_on_teardown`,
-  `signal_heads_track_the_junction_phase` — never two greens, each
-  member sees both aspects, all-red appears,
-  `a_wild_signal_origin_drops_and_stays_counted`).
+- `cargo test -p mm2_game --test traffic` — 33 pass (+2:
+  `spawn_band_is_the_union_of_player_interest_areas` — per-area
+  admission, a second area's `min_player_distance` vetoes a point
+  inside the first's band, empty/non-finite sets admit nothing,
+  `within_interest` any-bubble legs;
+  `plan_populates_through_any_interest_area` — a far-away area
+  covering no lanes still populates through the second area; an
+  empty interest set spawns nothing).
+- `cargo test -p mm2_app --test traffic` — 27 pass (+2:
+  `a_remote_players_bubble_holds_traffic_the_local_player_left` —
+  remote `Player` at z=−300, local teleported to z=2000: population
+  alive, `recycled=0`; control without the remote collects every car;
+  `respawns_draw_inside_a_remote_players_band` — after the local
+  leaves, refills materialise only inside the remote's 60–400 m band).
 - `cargo fmt --all -- --check` — PASS.
 - `cargo clippy --locked --workspace --all-targets
   --all-features -D warnings` — PASS.
-- `cargo test --locked --workspace` — PASS, 673 tests, 0 failures.
-- `mm2-inspect bai` (install `fnv1a64:e91e6cd4b2ae30d9`): SF 650 lit
-  connected ends (533 light-ruled + 117 other-rule), 3 beyond 60 m
-  (max 686.8 m); London 828 (519 + 309), max 39.7 m; arc-exit
-  coverage 522/440, entry-only 96/166, arc-less 32/222.
-- Retail headless smoke (same install):
-  - `--city sf --frames 600` → `status=pass … traf=16/16 sp=23
-    rec=7 dead=0 uns=0 q=0 jq=5 stuck=0 kn=1 sig=647 sigd=3` —
-    650 authored − 3 outliers, matching the census exactly.
-  - `--city london --frames 600` → `status=pass … traf=16/16
-    sp=20 rec=4 dead=0 uns=0 q=0 jq=4 stuck=0 kn=1 sig=828` —
-    all 828 authored heads spawn.
-  - `kn=1` and `jq=` hold their F10-B.6 values — the indicators add
-    no behaviour change to the driving path.
-- Rendered capture (local, not committed): `--city sf
-  --cam=-1799,36,-2374,40,-19 --frames 90 --screenshot` shows a
-  green lamp standing at the authored kerb-side anchor of a lit
-  junction approach on retail geometry.
+- `cargo test --locked --workspace` — PASS, 678 tests, 0 failures.
+- Retail headless smoke (install `fnv1a64:e91e6cd4b2ae30d9`):
+  - `--city sf --frames 600` → `status=pass … traf=16/16 sp=23 rec=7
+    dead=0 uns=0 q=0 jq=5 stuck=0 kn=1 sig=647 sigd=3` — bit-identical
+    to the F10-B.7 record (one player → one area, by construction).
+  - `--city london --frames 600` → `status=pass … traf=16/16 sp=20
+    rec=4 dead=0 uns=0 q=0 jq=4 stuck=0 kn=1 sig=828` — bit-identical.
+  - `--city sf --event checkpoint:0 --bot --frames 1200` →
+    `traf=3/3 sp=5 rec=2` under a spread opponent field (the union
+    holds cars near far-away opponents) — `status=fail` only on the
+    pre-existing, documented "fell through the world" SF sanity check
+    on this event (bot-limited, unrelated to this change).
+
+## Review-shaped repair folded in
+
+- `respawns_reject_space_a_participant_occupies` (F10-B.4's test)
+  parked its bare `Player` participant mid-network — under the union
+  that position legitimately vetoes *every* refill through the
+  min-distance leg before the occupied box is ever reached, which
+  would have silently re-scoped the test. The participant now stands
+  150 m south — inside the union, past every lane's exclusion — so
+  the widened exclusion box remains the rejecting mechanism the test
+  claims to prove.
 
 ## Still open
 
-- Everything visual about the indicator is designed, not original:
-  the unlit sphere at the authored anchor, the green/red/amber
-  aspect mapping, the 60 m outlier bound, and the stop-signed amber
-  choice. The original's signal-unit draw (no unit geometry ships;
-  `vasignalunit`/`vastopunit`/`s_trafficlightr`/`s_stoplight_f` are
-  textures only — the head may be drawn from PSDL junction geometry
-  or textured quads) and its exact state semantics are unverified
-  (UNK-12). `trafficLightAxis` is preserved verbatim but unused —
-  its convention is unverified.
-- Heads on ends no vehicle arc approaches (388 London / 128 SF)
-  show the non-member green fallback — physically plausible (they
-  govern no traffic) but not verified against the original.
-- AC02's signal leg is now presentation-covered but remains
-  behaviour-tested only through `gate` — no rendered/manual
-  observation of the phase change on retail. No signal-pole prop
-  model exists; a closer unit (pole + head) would need the axis
-  convention verified first.
+- Interest composition is designed: `PlayerControl::Ai` opponents
+  hold interest areas too (each can pen ambient cars). In a race the
+  union can span the whole route, so ambient density near the local
+  player dilutes across participants — bounded by `max_active`,
+  unverified against the original (UNK-12).
+- "Preserving relevant interactions" is still distance-only: a wreck
+  or queue outside *every* bubble is collected — no interaction
+  exemption (documented approximation).
+- Hysteresis remains implicit (spawn outer bound = recycle radius) —
+  a car hovering at the boundary is collected once, not flapped.
+- No multiplayer exists yet (F24+): the union is exercised through
+  `PlayerControl::Remote`/`Ai` participants in tests, not networked
+  clients.
 - F10-B remains active: queue-through-intersection priority,
-  multiplayer union-of-interest, collision fidelity vs AC03's full
-  checklist (player-hit feel, damage), original junction/spawn
-  timing (UNK-12), F10-AC evidence vs the spec, F10-C.
+  collision fidelity vs AC03's checklist (player-hit feel, damage),
+  original junction/spawn timing (UNK-12), signal-prop model fidelity,
+  F10-AC evidence vs the spec, F10-C.

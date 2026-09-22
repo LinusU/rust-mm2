@@ -301,7 +301,7 @@ fn plan_is_deterministic_and_seed_sensitive() {
         &r,
         42,
         0.5,
-        CLEAR,
+        &[CLEAR],
         &SpawnPolicy::default(),
     );
     let b = plan_ambient(
@@ -310,7 +310,7 @@ fn plan_is_deterministic_and_seed_sensitive() {
         &r,
         42,
         0.5,
-        CLEAR,
+        &[CLEAR],
         &SpawnPolicy::default(),
     );
     assert_eq!(a.spawns, b.spawns, "same seed must replay identically");
@@ -322,7 +322,7 @@ fn plan_is_deterministic_and_seed_sensitive() {
         &r,
         7,
         0.5,
-        CLEAR,
+        &[CLEAR],
         &SpawnPolicy::default(),
     );
     assert_ne!(a.spawns, c.spawns, "different seed, different draw");
@@ -336,14 +336,14 @@ fn plan_bounds_output_and_scales_with_density() {
         max_active: 10,
         ..SpawnPolicy::default()
     };
-    let full = plan_ambient(&g, &NavOverrides::default(), &r, 1, 1.0, CLEAR, &policy);
+    let full = plan_ambient(&g, &NavOverrides::default(), &r, 1, 1.0, &[CLEAR], &policy);
     assert_eq!(full.target, 10);
     assert_eq!(full.spawns.len(), 10);
     assert!(full.spawns.len() <= policy.max_active);
 
-    let half = plan_ambient(&g, &NavOverrides::default(), &r, 1, 0.5, CLEAR, &policy);
+    let half = plan_ambient(&g, &NavOverrides::default(), &r, 1, 0.5, &[CLEAR], &policy);
     assert_eq!(half.target, 5);
-    let off = plan_ambient(&g, &NavOverrides::default(), &r, 1, 0.0, CLEAR, &policy);
+    let off = plan_ambient(&g, &NavOverrides::default(), &r, 1, 0.0, &[CLEAR], &policy);
     assert_eq!(off.target, 0);
     assert!(off.spawns.is_empty());
 }
@@ -357,21 +357,21 @@ fn plan_honours_closed_roads_and_pedestrian_only_sides() {
     let g = two_roads();
     let mut overrides = NavOverrides::default();
     overrides.closed_roads.insert(0);
-    let plan = plan_ambient(&g, &overrides, &r, 9, 1.0, CLEAR, &policy);
+    let plan = plan_ambient(&g, &overrides, &r, 9, 1.0, &[CLEAR], &policy);
     assert_eq!(plan.eligible_lanes, 2, "only road 1's two lanes");
     assert!(plan.spawns.iter().all(|s| s.lane.road == 1));
 
     // Pedestrian-only sides never become routable arcs — the graph
     // withholds them, so the planner cannot pick them.
     let g = road1_pedestrian_only();
-    let plan = plan_ambient(&g, &NavOverrides::default(), &r, 9, 1.0, CLEAR, &policy);
+    let plan = plan_ambient(&g, &NavOverrides::default(), &r, 9, 1.0, &[CLEAR], &policy);
     assert_eq!(plan.eligible_lanes, 2, "only road 0's two lanes");
     assert!(plan.spawns.iter().all(|s| s.lane.road == 0));
 
     // Closing every road leaves the plan empty but well-formed.
     let mut overrides = NavOverrides::default();
     overrides.closed_roads.extend([0u16, 1u16]);
-    let plan = plan_ambient(&g, &overrides, &r, 9, 1.0, CLEAR, &policy);
+    let plan = plan_ambient(&g, &overrides, &r, 9, 1.0, &[CLEAR], &policy);
     assert!(plan.spawns.is_empty());
     assert!(
         plan.issues
@@ -388,7 +388,7 @@ fn plan_flags_unspawnable_and_empty_rosters() {
     // A class with no resolved tuning stays in the weight table; draws
     // landing on it spawn nothing and report once per id.
     let r = AmbientRoster::new(vec![spec("va_ghost", 1.0, false)]);
-    let plan = plan_ambient(&g, &NavOverrides::default(), &r, 3, 1.0, CLEAR, &policy);
+    let plan = plan_ambient(&g, &NavOverrides::default(), &r, 3, 1.0, &[CLEAR], &policy);
     assert!(plan.spawns.is_empty());
     assert_eq!(plan.unspawnable, plan.target);
     assert_eq!(
@@ -402,7 +402,15 @@ fn plan_flags_unspawnable_and_empty_rosters() {
 
     // Empty roster → EmptyRoster, no panic, no spawns.
     let empty = AmbientRoster::default();
-    let plan = plan_ambient(&g, &NavOverrides::default(), &empty, 3, 1.0, CLEAR, &policy);
+    let plan = plan_ambient(
+        &g,
+        &NavOverrides::default(),
+        &empty,
+        3,
+        1.0,
+        &[CLEAR],
+        &policy,
+    );
     assert!(plan.spawns.is_empty());
     assert!(
         plan.issues
@@ -427,7 +435,7 @@ fn plan_never_spawns_inside_the_player_bubble() {
         &r,
         5,
         1.0,
-        [10.0, 0.0, 50.0],
+        &[[10.0, 0.0, 50.0]],
         &policy,
     );
     assert!(plan.spawns.is_empty());
@@ -436,7 +444,7 @@ fn plan_never_spawns_inside_the_player_bubble() {
     // With a sane bubble every surviving spawn is outside it.
     let policy = SpawnPolicy::default();
     let player = [10.0, 0.0, 50.0];
-    let plan = plan_ambient(&g, &NavOverrides::default(), &r, 5, 1.0, player, &policy);
+    let plan = plan_ambient(&g, &NavOverrides::default(), &r, 5, 1.0, &[player], &policy);
     for s in &plan.spawns {
         let d = [
             s.sample.position[0] - player[0],
@@ -506,7 +514,7 @@ fn plan_skips_non_finite_lane_geometry() {
         &r,
         5,
         1.0,
-        CLEAR,
+        &[CLEAR],
         &SpawnPolicy {
             max_active: 12,
             ..SpawnPolicy::default()
@@ -651,13 +659,21 @@ fn plan_never_spawns_beyond_the_recycle_radius() {
     let policy = SpawnPolicy::default();
     // The whole network sits past 400 m — every attempt is out of
     // band, so the directives drop rather than spawning churn.
-    let plan = plan_ambient(&g, &NavOverrides::default(), &r, 5, 1.0, FAR_AWAY, &policy);
+    let plan = plan_ambient(
+        &g,
+        &NavOverrides::default(),
+        &r,
+        5,
+        1.0,
+        &[FAR_AWAY],
+        &policy,
+    );
     assert!(plan.spawns.is_empty());
     assert_eq!(plan.dropped, plan.target);
 
     // With lanes inside the annulus every placement respects both
     // bounds: never inside the bubble, never past the recycle radius.
-    let plan = plan_ambient(&g, &NavOverrides::default(), &r, 5, 1.0, CLEAR, &policy);
+    let plan = plan_ambient(&g, &NavOverrides::default(), &r, 5, 1.0, &[CLEAR], &policy);
     assert_eq!(plan.spawns.len(), plan.target);
     for s in &plan.spawns {
         let d = [
@@ -672,6 +688,78 @@ fn plan_never_spawns_beyond_the_recycle_radius() {
             s.sample.position
         );
     }
+}
+
+// ---------- union of player interest areas (F10-B.8, spec req 2) ----------
+
+/// The spawn band is the *union* of player interest areas: a position
+/// admits inside any one area's `[min_player_distance,
+/// recycle_distance]` annulus provided it also sits outside *every*
+/// area's `min_player_distance` — a car can never materialise next to
+/// anybody, no matter which area's bubble covered it. The recycler's
+/// `within_interest` is the matching any-bubble survival test.
+#[test]
+fn spawn_band_is_the_union_of_player_interest_areas() {
+    let policy = SpawnPolicy::default();
+    let a = [0.0, 0.0, 0.0];
+    let b = [350.0, 0.0, 0.0];
+
+    // Each area alone covers part of the space; the union covers both.
+    assert!(in_spawn_band([200.0, 0.0, 0.0], &[a], &policy));
+    assert!(in_spawn_band([200.0, 0.0, 0.0], &[a, b], &policy));
+    // 500 m out: past A's recycle radius, inside B's band — admitted
+    // by the union, not by the nearest single area.
+    assert!(!in_spawn_band([500.0, 0.0, 0.0], &[a], &policy));
+    assert!(in_spawn_band([500.0, 0.0, 0.0], &[a, b], &policy));
+    // Inside A's band yet 50 m from B: no area admits a spawn on
+    // another player's nose.
+    assert!(!in_spawn_band([300.0, 0.0, 0.0], &[a, b], &policy));
+    // Past every area's recycle radius, and an empty interest set,
+    // admit nothing.
+    assert!(!in_spawn_band([5000.0, 0.0, 0.0], &[a, b], &policy));
+    assert!(!in_spawn_band([200.0, 0.0, 0.0], &[], &policy));
+    // Non-finite positions never admit (defensive — lane vertices are
+    // raw f32 bits upstream of the sample).
+    assert!(!in_spawn_band([f32::NAN, 0.0, 0.0], &[a], &policy));
+
+    // The recycler collects only outside *every* bubble.
+    assert!(within_interest([200.0, 0.0, 0.0], &[a, b], &policy));
+    assert!(within_interest([500.0, 0.0, 0.0], &[a, b], &policy));
+    assert!(!within_interest([500.0, 0.0, 0.0], &[a], &policy));
+    assert!(!within_interest([0.0, 0.0, 0.0], &[], &policy));
+}
+
+/// Two players far apart: the first area's bubble covers no lane
+/// (every sample past its recycle radius), so the union populates
+/// entirely through the second area — the "two players far apart"
+/// edge case at plan level.
+#[test]
+fn plan_populates_through_any_interest_area() {
+    let g = two_roads();
+    let r = roster(&[("va_a", 1.0)]);
+    let policy = SpawnPolicy::default();
+    let plan = plan_ambient(
+        &g,
+        &NavOverrides::default(),
+        &r,
+        5,
+        1.0,
+        &[FAR_AWAY, CLEAR],
+        &policy,
+    );
+    assert_eq!(plan.spawns.len(), plan.target);
+    for s in &plan.spawns {
+        assert!(
+            in_spawn_band(s.sample.position, &[FAR_AWAY, CLEAR], &policy),
+            "spawn outside the union band: {:?}",
+            s.sample.position
+        );
+    }
+
+    // And with no players at all there is no bubble to populate.
+    let plan = plan_ambient(&g, &NavOverrides::default(), &r, 5, 1.0, &[], &policy);
+    assert!(plan.spawns.is_empty());
+    assert_eq!(plan.dropped, plan.target);
 }
 
 // ---------- obstruction sense + follow law (F10-B.1) ----------
@@ -1220,7 +1308,7 @@ fn draw_spawn_rejects_occupied_space() {
                 &eligible,
                 &r,
                 &mut rng,
-                CLEAR,
+                &[CLEAR],
                 &[[0.0, 0.0, 0.0]],
                 &wide,
             ),
@@ -1237,7 +1325,7 @@ fn draw_spawn_rejects_occupied_space() {
             &eligible,
             &r,
             &mut rng,
-            CLEAR,
+            &[CLEAR],
             &[[0.0, 0.0, 0.0]],
             &SpawnPolicy::default(),
         ),
@@ -1256,7 +1344,7 @@ fn plan_keeps_same_lane_spawns_clear_of_each_other() {
         max_active: 24,
         ..SpawnPolicy::default()
     };
-    let plan = plan_ambient(&g, &NavOverrides::default(), &r, 5, 1.0, CLEAR, &policy);
+    let plan = plan_ambient(&g, &NavOverrides::default(), &r, 5, 1.0, &[CLEAR], &policy);
     assert!(
         plan.spawns.len() >= 4,
         "the fixture should place several cars: {}",
@@ -1289,7 +1377,7 @@ fn plan_drops_directives_past_a_lane_s_capacity() {
         spawn_clearance: 500.0,
         ..SpawnPolicy::default()
     };
-    let plan = plan_ambient(&g, &NavOverrides::default(), &r, 5, 1.0, CLEAR, &policy);
+    let plan = plan_ambient(&g, &NavOverrides::default(), &r, 5, 1.0, &[CLEAR], &policy);
     assert_eq!(
         plan.spawns.len() + plan.dropped,
         plan.target,
