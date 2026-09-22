@@ -199,6 +199,7 @@ pub fn headless_smoke(
         .init_resource::<crate::stuck::StuckReport>()
         .init_resource::<crate::breakaway::BreakReport>()
         .init_resource::<crate::recovery::RecoveryReport>()
+        .init_resource::<crate::damage_fx::SmokeFxReport>()
         .init_resource::<mm2_game::ResultLedger>()
         .init_resource::<mm2_game::BangerPool>()
         .init_resource::<session::SessionControl>()
@@ -272,6 +273,14 @@ pub fn headless_smoke(
                 // reports the real resolved outcome.
                 crate::results::dev_finish_once,
                 opponents::opponent_drive,
+                // F05-B.6: authored engine smoke — the headless
+                // record's `ptx=` field reads the report. Assets are
+                // real (VFS `fxpt2` + quads); nothing rasterizes.
+                (
+                    crate::damage_fx::drive_smoke,
+                    crate::damage_fx::advance_smoke,
+                )
+                    .chain(),
                 // F16-B: the same result → profile consumption the
                 // windowed app runs — a bound profile in a headless
                 // evidence run must record identically.
@@ -612,6 +621,13 @@ pub fn headless_smoke(
             )
         })
         .unwrap_or_default();
+    // F05-B.6 smoke evidence: emitted/expired puff counts. Same
+    // presence rule — an undamaged run stays bit-identical.
+    let ptx_detail = world_ecs
+        .get_resource::<crate::damage_fx::SmokeFxReport>()
+        .filter(|r| r.emitted + r.expired > 0)
+        .map(|r| format!(" ptx={}e/{}x", r.emitted, r.expired))
+        .unwrap_or_default();
     // The dev `--traction` modifier is recorded when set so a wetness
     // run is self-describing; unmodified runs stay bit-identical.
     let traction_detail = config
@@ -628,7 +644,7 @@ pub fn headless_smoke(
         .unwrap_or_default();
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{nav_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{traction_detail}{profile_detail}{extra}",
+            "updates={frames} ticks={ticks} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s moved={moved:.0}m wheels={grounded_wheels}/{total} final=({x:.0},{y:.1},{z:.0}){race_detail}{nav_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{traction_detail}{profile_detail}{extra}",
             driver.as_str(),
             session.phase().name(),
             moved = pos.map(|p| (p - spawn_pos).length()).unwrap_or(f32::NAN),

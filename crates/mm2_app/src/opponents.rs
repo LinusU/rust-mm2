@@ -85,8 +85,8 @@ use mm2_assets::Vfs;
 use mm2_game::{
     BreakPartSpec, DamageSignals, DamageSpec, ObjectIdentity, OpponentRoster, OpponentRoute,
     OpponentSpec, ParticipantState, Player, PlayerControl, RaceDefinition, RaceProgress, RaceState,
-    RecoveryPolicy, Session, SessionEntity, StuckSpec, VehicleBreaks, VehicleDamage,
-    VehicleRecovery, VehicleStuck, relative_bearing,
+    RecoveryPolicy, Session, SessionEntity, SmokePolicy, StuckSpec, VehicleBreaks, VehicleDamage,
+    VehicleRecovery, VehicleSmoke, VehicleStuck, relative_bearing,
 };
 use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState, vehicle_bundle};
 use tracing::{info, warn};
@@ -638,6 +638,13 @@ pub fn spawn_opponents(
             commands
                 .entity(vehicle)
                 .insert(VehicleDamage::new(DamageSpec::from(d)));
+            // F05-B.6: the same authored smoke rig the player gets —
+            // seeded from the opponent's object id.
+            commands.entity(vehicle).insert(VehicleSmoke::new(
+                d,
+                SmokePolicy::default(),
+                (object.generation << 32) | object.slot as u64,
+            ));
         }
         // Same for the authored stuck thresholds (F05-B.2).
         if let Some(s) = &def.stuck {

@@ -13,6 +13,7 @@ pub mod banger;
 pub mod breakaway;
 pub mod config;
 pub mod damage;
+pub mod effects;
 pub mod ids;
 pub mod impact;
 pub mod nav;
@@ -43,6 +44,7 @@ pub use damage::{
     DISABLED_PENALTY_TICKS, DamageEvent, DamageSpec, DamageState, DamageTier, DamageVerdict,
     DisabledOutcome, VehicleDamage, disabled_outcome,
 };
+pub use effects::{ParticleSpec, SmokeEmitter, SmokePolicy, SmokePuff, VehicleSmoke};
 pub use ids::{AuthorityRole, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerId};
 pub use impact::{ImpactDedup, ImpactEvent, ImpactId, ImpactPolicy};
 pub use nav::{

@@ -35,8 +35,9 @@ use mm2_content::VehicleDef;
 use mm2_game::{
     BangerPool, BreakPartSpec, DEFAULT_ACTIVE_POOL, DamageSignals, DamageSpec, Mm2Vfs,
     ObjectIdentity, Player, PlayerControl, PlayerVehicle, RaceDefinition, RaceProgress, RaceState,
-    RecoveryPolicy, Session, SessionEntity, SessionMode, SessionPhase, StuckSpec, TargetSelection,
-    VehicleBreaks, VehicleDamage, VehicleRecovery, VehicleStuck, WorldMode,
+    RecoveryPolicy, Session, SessionEntity, SessionMode, SessionPhase, SmokePolicy, StuckSpec,
+    TargetSelection, VehicleBreaks, VehicleDamage, VehicleRecovery, VehicleSmoke, VehicleStuck,
+    WorldMode,
 };
 use mm2_vehicle::{TireConditions, VehicleConfig, vehicle_bundle};
 use tracing::{error, info, warn};
@@ -196,6 +197,7 @@ pub fn drive_session(
     mut stuck_report: ResMut<crate::stuck::StuckReport>,
     mut break_report: ResMut<crate::breakaway::BreakReport>,
     mut recovery_report: ResMut<crate::recovery::RecoveryReport>,
+    mut smoke_fx_report: ResMut<crate::damage_fx::SmokeFxReport>,
     mut spawn: ResMut<SpawnPoint>,
     menu: Option<Res<crate::menu::MenuShell>>,
     roots: Query<Entity, (With<SessionEntity>, Without<ChildOf>)>,
@@ -214,6 +216,7 @@ pub fn drive_session(
             stuck_report.reset();
             break_report.reset();
             recovery_report.reset();
+            smoke_fx_report.reset();
             spawn.trailers.clear();
             // Session-scoped resources die with the session: a race's
             // countdown/clock/progress, its reward/report view and the
@@ -225,6 +228,7 @@ pub fn drive_session(
             commands.remove_resource::<crate::nav_overlay::CityNav>();
             commands.remove_resource::<crate::traffic::AmbientTraffic>();
             commands.remove_resource::<mm2_content::SurfaceTables>();
+            commands.remove_resource::<crate::damage_fx::SmokeFx>();
             // `TireConditions` stays: it is a system input (the impact
             // filter and telemetry read `Res` every frame), and
             // `load_session_world` re-stamps it from the next session's
@@ -515,6 +519,19 @@ pub fn load_session_world(
     commands.insert_resource(TireConditions {
         traction: config.dev.traction.unwrap_or(1.0).max(0.0),
     });
+    // F05-B.6: the smoke sprite assets — resolved through the VFS
+    // like every texture; a missing `fxpt2` warns and emits
+    // untextured puffs, never sinks the session. Session-scoped:
+    // teardown removes it and the next load re-resolves.
+    commands.insert_resource(crate::damage_fx::SmokeFx {
+        assets: crate::damage_fx::smoke_assets(
+            &vfs.0,
+            &mut assets.meshes,
+            &mut assets.images,
+            &mut assets.materials,
+            SmokePolicy::default().atlas_tiles,
+        ),
+    });
     if world_ok {
         session
             .transition(SessionPhase::Ready)
@@ -681,6 +698,16 @@ pub fn load_session_world(
                 commands
                     .entity(vehicle)
                     .insert(VehicleDamage::new(DamageSpec::from(d)));
+                // F05-B.6: the authored engine-smoke rig rides with
+                // the damage spec — authored pivots + particle spec,
+                // designed emission policy (DSN-24). Seeded from the
+                // object id so the emission stream replays
+                // identically per spawn.
+                commands.entity(vehicle).insert(VehicleSmoke::new(
+                    d,
+                    SmokePolicy::default(),
+                    (vehicle_object.generation << 32) | vehicle_object.slot as u64,
+                ));
             }
             // Authored stuck thresholds — `vehstuck` decodes to the
             // spec the impact-armed detector runs against (F05-B.2).

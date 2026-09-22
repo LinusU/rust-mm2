@@ -1,109 +1,138 @@
-# Last iteration — water/out-of-bounds recovery
+# Last iteration — authored engine-smoke visual tier
 
-Iteration 33 on `ralph/night`, continuing from `97b4238` (the
-externally checked F05-B.4 gyro candidate — review verdict pass).
-Task id: `F05-B.5` — the spec's remaining safe-recovery leg
-("water/out-of-bounds recovery" in F05 req 5 / F05-AC05), following
-the established detector → bounded-event → `ResetVehicle` pattern
-(B.2 `vehstuck`, B.3 `dgbangerdata`, B.4 `vehgyro`).
+Iteration 34 on `ralph/night`, continuing from `0831d73` (the
+externally checked F05-B.5 water/OOB candidate — review verdict
+pass). Task id: `F05-B.6` — the smoke leg of F05-B's remaining
+"visual tiers" work (F05 spec req 4 / F05-AC02): authored emission
+pivots and the embedded `vehCarDamage` particle spec rendered as
+engine smoke while the vehicle is damaged.
 
 ## Slice choice
 
-The previous candidate is externally clean. Of the F05-B remainder —
-visual tiers, damage-driven detachment-if-original, impairment,
-water/OOB recovery, C&R healing, replication — water/OOB is the
-highest-value ready slice: it is the last unimplemented named
-recovery in spec req 5, it has real user-facing stakes (today a car
-that enters the Thames is stranded crawling at ~1 m/s forever, and a
-car that leaves the world falls until the smoke check fails), and it
-needs no blocked input (C&R healing wants the C&R mode, replication
-is F25+). It is also the only recovery leg with *no authored data*:
-the damage-family census (DMG-5..8) covers `vehcardamage`/`vehstuck`/
-`vehgyro` only, and DMG-2 covers destruction — so every bound is
-designed (DSN-23) and UNK-13 keeps the original's actual rules open.
+Of the F05-B remainder — visual tiers (smoke, `TextelDamageRadius`,
+pivot gates, sparks), damage-driven detachment-if-original,
+impairment, C&R healing, replication — the smoke tier is the
+highest-value ready slice: mm2hook's recovered `vehCarDamage`
+struct names the embedded spec `EngineSmokeRule` and carries the
+exact gate fields the authored records ship (`SmokeOffset`/
+`SmokeOffset2`, `DoublePivot`, `MirrorPivot`, `m_CurrentPivot`), so
+a large authored surface can be consumed faithfully while the
+genuinely-unrecovered `Update()` cadence stays a disclosed designed
+policy (DSN-24). Texel damage (`ImpactsTable`/`fxTexelDamage`) and
+`asLineSparks` need the contact-point feed that doesn't exist yet —
+deferred. Impairment is next-slice material: MM2Hook's `mm2.ini`
+`PhysicalEngineDamage` option documents the original coupling
+("damage affects engine torque … when the engine spews smoke" ⇒
+less acceleration/top speed), now recorded as a lead in
+`docs/research/damage.md`; its shape is still unrecovered.
 
 ## What changed
 
-- `mm2_game::recovery` (new contract module):
-  - `RecoveryPolicy` — designed bounds: `water_min_drag` 0.3 (splits
-    retail `deepwater` 0.5 from shallow `water` 0.119 — a pond stays
-    wadable under the F06-B.2 policy, the Thames drowns),
-    `submerge_dwell` 2.0 s (the escape window: a car that regains a
-    dry edge inside it keeps driving), `fall_margin` 50 m (sized past
-    retail drops — any real landing refreshes the anchor first).
-  - `GroundContact` — Airborne/Dry/Submerged, classified app-side
-    from `WheelState::surface_drag` (the same coefficient the wading
-    force reads) so the contract never borrows the wheel type.
-  - `VehicleRecovery` component — anchor = the last pose a grounded
-    wheel sat on a *dry* surface (water colliders are solid in this
-    engine: drowning is a surface class under the wheels, not a
-    missing floor); pre-anchored at spawn; all-wet contacts accrue
-    the dwell → `RecoveryCause::Submerged`; an airborne fall past the
-    margin below the anchor → `RecoveryCause::OutOfBounds`, latched
-    once per fall; a non-finite pose fires at once as
-    defence-in-depth (a NaN inside the physics step trips the wheel
-    raycast first — the detector only answers between-step writes).
-  - `RecoveryEvent` — bounded: a fresh dwell per fire, one per fall.
-- `mm2_app::recovery`: `track_recovery` (FixedLast, authority +
-  Playing gated — observe-only so pause just freezes the dwell)
-  advances every participant's detector; `resolve_recovery` answers
-  with `ResetVehicle` to the anchor — `Teleported`, so no checkpoint
-  sweep — with the session `SpawnPoint` as the no-anchor fallback.
-  Trailers re-seat at authored offsets (the `resolve_stuck`
-  pattern); an armed `VehicleStuck` episode disarms; remote
-  participants and `Disabled` wrecks are skipped (their authorities /
-  the damage outcome own them). **Recovery is not a repair** — damage
-  and detached parts persist; only the disabled outcome heals.
-- Spawn: `VehicleRecovery` attaches to the player vehicle (any def —
-  dev cars included) and every AI opponent, anchored at its spawn
-  pose. No authored gate exists to spawn against.
-- `mm2_app::smoke`: `rcv=<w>w/<f>f/<r>r` (submerged / out-of-bounds /
-  recovered) only when the pipeline saw activity — a dry-ground run
-  stays bit-identical. `drive_session` resets the report on teardown.
+- `mm2_game::effects` (new contract module):
+  - `ParticleSpec` — every `DamageEffect` field verbatim so
+    consumers bind authored values. Consumed this slice:
+    `PositionVar`, `Velocity`/`VelocityVar`, `Life`/`LifeVar`,
+    `Radius`/`RadiusVar`, `Drag`/`DragVar`, `DRadius`/`DRadiusVar`,
+    `DAlpha`/`DAlphaVar`, `Gravity`, `TexFrameStart`/`TexFrameEnd`,
+    `Color` (packed ARGB — retail decodes as `0xF6000000`-class
+    near-opaque black). Carried unconsumed and documented:
+    `Position`, `Mass`, `Damp`, `DRotation`, `InitialBlast`,
+    `SpewRate`/`SpewTimeLimit` (0 on all retail damage records — the
+    designed policy owns cadence), `BirthFlags`, `Height`,
+    `Intensity`.
+  - `SmokePolicy` — designed (DSN-24): emission is the damaged-tier
+    signal, 0 below `MedDamage` ramping 4 → 24 puffs/s at
+    `MaxDamage`; `max_live` 48/vehicle; `atlas_tiles` 2.
+  - `VehicleSmoke` component — authored pivot gate: `SmokeOffset`
+    always; `MirrorPivot != 0` derives a second pivot mirrored about
+    x (designed reading; all 7 retail values are 0); else non-zero
+    `SmokeOffset2` is the second pivot. `DoublePivot != 0` emits
+    every pivot per burst (vpddbus/vppanoz/vppanozgt — all carry
+    non-zero second pivots, measured); single-pivot rigs alternate
+    via the `m_CurrentPivot` cursor. Fractional burst accumulator +
+    per-emitter `NavRng` seeded by the vehicle's object id —
+    emission replays identically (replicable by construction).
+  - `SmokePuff` component — the entity is the particle; `advance`
+    integrates designed field readings (gravity as signed +Y rise,
+    exponential `Drag`, `DRadius` growth, byte-space `DAlpha` fade
+    of the `Color` alpha byte) and expires on authored `Life`.
+- `mm2_app::damage_fx`: `smoke_assets` resolves `texture/fxpt2`
+  through `city::load_image` (VFS + mod overrides like every
+  texture) — a measured 2×2 puff-tile atlas; `TexFrame` indexes its
+  tiles like mm2hook's `asSparkPos::TexCoordOffset` (designed
+  binding — the original's texture choice is unrecovered). One
+  UV-baked quad per tile + an unlit blended material cloned per puff
+  for independent alpha. `drive_smoke` emits per rigged participant
+  (`Remote` skipped — its authority renders its own; `is_playing`
+  gated), `advance_smoke` integrates, billboards to the active
+  camera, writes per-puff alpha and despawns the expired. `SmokeFx`
+  is session-scoped (inserted on load, removed on teardown);
+  `SmokeFxReport` feeds the `ptx=<e>e/<x>x` smoke field on activity
+  only — undamaged runs stay bit-identical.
+- Spawn: `VehicleSmoke` attaches to the player vehicle and every AI
+  opponent behind the same `def.damage` authored-presence gate as
+  `VehicleDamage` — authored absence stays smoke-free, never
+  fabricated.
 
 ## Tests
 
-- `mm2_game/tests/recovery.rs` (9): dry-contact anchoring; one fire
-  per dwell then a fresh dwell required; dry escape inside the
-  window; spawn-straight-onto-water fires with `landing: None`;
-  fall-past-margin fires once and latches until grounded; a legit
-  drop lands first and re-anchors; non-finite pose fires OOB at
-  once; `recovered` clears the episode and re-anchors; garbage dt
-  never accrues + zero-dwell edge.
-- `mm2_app/tests/recovery.rs` (11): deep-water dunk recovers to the
-  last dry anchor end-to-end (real wheel raycast onto a `drag` 0.5
-  collider) and stays done; shallow-water (0.119) wading never
-  starts the dwell; powering out inside the dwell escapes; falling
-  off the world recovers to the anchor; a legit big drop lands
-  instead of firing; recovery-is-not-a-repair (damage total
-  preserved); remote participant never tracked/resolved; `Disabled`
-  wreck skipped; stale-generation event ignored; recovery disarms an
-  armed stuck episode; trailer re-seats at its authored offset.
+- `mm2_game/tests/effects.rs` (11): spec carries authored fields
+  verbatim; pivot gate legs (two pivots / zero `SmokeOffset2` /
+  `MirrorPivot` wins / `DoublePivot` flag); rate gate + ramp +
+  degenerate spec; fractional accumulation + pivot alternation;
+  double-pivot emits all; live-bound truncation; deterministic
+  seeded puff draws inside authored ±var; atlas-frame clamp;
+  integrator readings; alpha byte fade; garbage-dt.
+- `mm2_app/tests/damage_fx.rs` (10): damaged car emits at authored
+  pivots in car space; intact car emits nothing; repair stops
+  emission and puffs expire; authored-life expiry + live pool
+  bound; remote participant emits nothing; pause freezes
+  emission/integration; missing `SmokeFx` no-ops; session stamp +
+  bounded frame; billboard follows the active camera; transform
+  and material alpha track the puff.
 
 ## Evidence
 
-- `cargo test --locked -p mm2_game --test recovery`: 9/9 pass.
-- `cargo test --locked -p mm2_app --test recovery`: 11/11 pass.
-- Quality gates: pending (fmt/clippy/`cargo test --workspace` run at
-  commit time; retail headless smoke on the supplied install below).
-- Retail headless smoke — sf/london cruises should show no `rcv=`
-  (the scripted driver never leaves dry ground → bit-identical); a
-  `--spawn` over the Thames exercises the submerged leg on real
-  content.
+- `cargo test -p mm2_game --test effects`: 11/11 pass.
+- `cargo test -p mm2_app --test damage_fx`: 10/10 pass.
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: clean.
+- `cargo fmt --all -- --check` + `cargo test --workspace`: clean —
+  61 suites, 0 failures.
+- Retail headless smoke on the supplied install
+  (`fnv1a64:e91e6cd4b2ae30d9`):
+  - Inactive leg (SF scripted cruise, vpbug): `status=pass
+    updates=600 ticks=1200 driver=scripted … dmg=3a/0d/0r` — no
+    `ptx=` field, run stays bit-identical to the pre-change
+    record (damage stays far under vpbug's 150k `MedDamage`).
+  - Active leg (SF, vpcoop `--spawn=-1316,60,381,0`, 6000
+    frames): `status=pass … impacts=162 dmg=21a/1d/1r brk=6d/6r
+    ptx=437e/437x` — the tumble run crossed the Mini's authored
+    80k `MedDamage` (once reaching `Disabled`), emitted 437
+    puffs through the authored `SmokeOffset`/`SmokeOffset2`
+    rig and expired all 437 inside their authored lifetimes.
+  - Intermediate runs (vpbug/vpcaddie/vpcoop pen-battering and
+    mid-air spawns at 1200–3000 frames) accumulated up to 11
+    applied impacts without crossing `MedDamage` — the
+    `severity × other_mass` impulse model needs heavy-target
+    or high-speed hits, so shallow prop hits alone cannot
+    reach the tier. Correctly reported as damage without a
+    `ptx=` field.
 
 ## Classification / open items
 
-- F05-B.5 is `implemented` (candidate) — pending external gates +
+- F05-B.6 is `implemented` (candidate) — pending external gates +
   review.
-- Classifications: the whole detector is **designed** (DSN-23) — no
-  authored record exists to decode. The original's water/OOB rules
-  (reset to shore? last checkpoint? in place? what submersion/OOB
-  tests?) stay UNK-13, explicitly open.
-- Honest gaps: no rendered/GPU proof of a recovery; the retail
-  Thames run exercises the detector headlessly; the non-finite arm
-  is unit-tested defence-in-depth, not a pipeline path (physics
-  raycasts panic on NaN first); a degenerate spawn straight onto
-  water loops recovery↔dwell by design (bounded, counter-visible).
-- Still open in F05-B: visual tiers (smoke pivots,
-  `TextelDamageRadius`, `DoublePivot`/`MirrorPivot`), damage-driven
-  detachment if original, impairment, C&R healing, replication.
+- Classifications: pivots/spec/texture-tile vocabulary authored;
+  emission gate, cadence, mirror reading, per-field integrator
+  readings, `fxpt2` binding and pool bound **designed** (DSN-24);
+  the original `vehCarDamage::Update()` is a binary thunk — its
+  cadence, pivot-switch timing and texture choice stay UNK-13.
+- Honest gaps: no rendered/GPU screenshot of the smoke (headless
+  proof only — entities/materials are real, nothing rasterizes);
+  impairment is documented-only (the `PhysicalEngineDamage` lead),
+  not implemented; remote-participant policy is compile-time only —
+  no networking exists.
+- Still open in F05-B: `TextelDamageRadius`/`ImpactsTable` texel
+  damage + `asLineSparks` sparks, damage-driven detachment if
+  original, impairment (smoke↔torque coupling lead), C&R healing,
+  replication.

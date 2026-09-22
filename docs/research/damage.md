@@ -366,12 +366,86 @@ policy end to end (the original's rules stay UNK-13):
   Remote participants' detectors belong to their authority (F25+);
   `Disabled` wrecks belong to the damage outcome.
 
+## Engine smoke visual tier (F05-B.6, designed gate — DSN-24)
+
+MM2Hook's recovered `vehCarDamage` struct names the embedded particle
+spec `EngineSmokeRule` and carries the pieces that consume it: the two
+authored pivots, a `m_CurrentPivot` alternation cursor, an
+`ImpactsTable[12]` + `fxTexelDamage` for texel damage, and
+`asLineSparks` for impact sparks. `vehCarDamage::Update()` is a binary
+thunk, so the emission gate and cadence are designed policy; the
+pivots, particle field values and atlas/tile vocabulary are authored.
+
+Implemented in `mm2_game::effects` + `mm2_app::damage_fx`:
+
+- **Pivots (authored + designed gate reading).** `SmokeOffset` always
+  emits. `MirrorPivot != 0` derives the second pivot by mirroring the
+  first about x = 0 (designed reading — all 7 retail `MirrorPivot`
+  fields author 0 anyway). Otherwise a non-zero `SmokeOffset2` is the
+  second pivot. `DoublePivot != 0` emits every pivot per burst
+  (`vpddbus`/`vppanoz`/`vppanozgt`); single-pivot rigs alternate via
+  the cursor.
+- **Spec (authored, verbatim).** `ParticleSpec` carries every
+  `DamageEffect` field. Consumed: `PositionVar`, `Velocity`(±var),
+  `Life`(±var), `Radius`(±var), `Drag`(±var), `DRadius`(±var),
+  `DAlpha`(±var), `Gravity`, `TexFrameStart`/`End`, `Color` (packed
+  ARGB — retail decodes as `0xF6000000`-class near-opaque black).
+  Carried unconsumed: `Position` (pivots own placement), `Mass`,
+  `Damp`, `DRotation` (0 on retail), `InitialBlast`, `SpewRate`/
+  `SpewTimeLimit` (driver fields — 0 on every retail damage record;
+  the designed policy owns cadence), `BirthFlags`, `Height`,
+  `Intensity`.
+- **Emission policy (designed).** Smoke is the damaged-tier signal:
+  rate 0 below `MedDamage`, ramping `rate_at_med` → `rate_at_max`
+  (4 → 24 puffs/s) to `MaxDamage`. Emission accumulates fractionally
+  per frame and draws per-puff jitter from a per-emitter `NavRng`
+  seeded by the vehicle's object id — replicable by construction.
+  `max_live` (48/vehicle) bounds the pool; expired puffs despawn on
+  their authored `Life`.
+- **Field readings (designed).** `Gravity` is a signed +Y rise rate
+  (authored 8.7–18 ⇒ smoke rises); `Drag` decays velocity
+  exponentially; `DRadius` grows the sprite; `DAlpha` drains the
+  `Color` alpha byte per second (retail ≈ −83 ⇒ ~3 s fade inside the
+  ~1.5 s life). These are defensible readings, not recovered
+  semantics — the original integrator is unrecovered.
+- **Sprite (implementation choice).** `texture/fxpt2` resolves
+  through the VFS — a measured 2×2 puff-tile atlas; `TexFrameStart`/
+  `TexFrameEnd` index its tiles like mm2hook's `asSparkPos::
+  TexCoordOffset`. One unlit, blended, camera-facing quad per puff,
+  tinted by `Color` with per-puff alpha. The texture binding itself
+  is designed — the original's atlas choice is unrecovered, but every
+  retail damage record authors frames inside a 2×2 tile space.
+- **Ownership (same family rules).** Emission rides whatever
+  `VehicleDamage` the entity carries; `PlayerControl::Remote` skips
+  (its authority renders its own), pause freezes emission and
+  integration, puffs stamp `SessionEntity` for teardown, and the
+  headless record reports `ptx=<emitted>e/<expired>x` on activity.
+
+Not implemented in this slice: `TextelDamageRadius` decals /
+`ImpactsTable` deformation, `asLineSparks` impact sparks, and
+impairment short of destruction (see the `PhysicalEngineDamage` lead
+below).
+
 ## Open questions
 
 - The original accumulation model: what quantity `MaxDamage`
   integrates (impact impulse? energy? a contact callback count?) and
   whether `ImpactThreshold` compares the same unit — UNK-13.
-- Whether `MedDamage` gates visual state, impairment or both.
+- Whether `MedDamage` gates visual state, impairment or both. The
+  implemented smoke gate (designed) keys on it; MM2Hook's
+  `mm2.ini` option `PhysicalEngineDamage` documents that damage
+  affects engine torque — "when the engine spews smoke" the vehicle
+  has "less acceleration and less top speed" — supporting a
+  smoke↔impairment coupling in the original, but its shape/values are
+  unrecovered (F05-B impairment leg, still open).
+- `TextelDamageRadius`'s consumer — mm2hook binds it to
+  `fxTexelDamage::ApplyDamage(position, maxDist)` driven by the
+  recovered `ImpactsTable[12]` of impact positions; decal projection
+  vs vertex deformation and the per-impact table's fill rules stay
+  unrecovered. `asLineSparks` impact sparks likewise.
+- `MirrorPivot` semantics — the implemented mirror-about-x reading
+  is designed; every retail value is 0, so no authored case
+  distinguishes readings yet.
 - Which parts detach at which damage level; whether break detachment
   is damage-driven or impact-driven (the implemented reading is
   impact-driven against `severity × part_mass`, DSN-21 — the authored
@@ -380,9 +454,15 @@ policy end to end (the original's rules stay UNK-13):
   unrecovered); fragment-vs-intact rig swap rules (intact-hide +
   spawned-fragment is implemented; whether the original swaps a
   damaged variant model is unrecovered).
-- `TextelDamageRadius`'s consumer (decal projection vs vertex
-  deformation), `DoublePivot`/`MirrorPivot` semantics, `Color`
-  packing, `Height`/`Intensity` roles in the effect spec.
+- `DoublePivot` semantics beyond the implemented emit-all-pivots
+  reading (designed — the three retail `DoublePivot` cars also carry
+  non-zero `SmokeOffset2`, so alternation-vs-parallel is the only
+  distinguishable leg); `Color` packing byte order (read as ARGB —
+  consistent on all retail values); `Height`/`Intensity` roles in
+  the effect spec; the original emission cadence, pivot switch
+  timing and whether `SpewRate`/`SpewTimeLimit`/`InitialBlast` ever
+  drive damage smoke (all 0 on retail damage records — the designed
+  policy owns cadence).
 - `.vehstuck`'s exact test combination — the implemented
   interpretation (impact anchor + hysteresis + tumbling leg + time
   window) is designed; `Rotation`/`Translation`'s roles are

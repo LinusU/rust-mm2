@@ -90,6 +90,7 @@ fn recovery_app(car_pos: Vec3) -> (App, Entity, ObjectId) {
         .init_resource::<DamageReport>()
         .init_resource::<StuckReport>()
         .init_resource::<RecoveryReport>()
+        .init_resource::<mm2_app::damage_fx::SmokeFxReport>()
         .init_resource::<mm2_app::breakaway::BreakReport>()
         .init_resource::<SessionControl>()
         .add_systems(FixedUpdate, advance_session_tick)

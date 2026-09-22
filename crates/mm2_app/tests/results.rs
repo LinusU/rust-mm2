@@ -119,6 +119,7 @@ fn results_app(
         .init_resource::<mm2_app::stuck::StuckReport>()
         .init_resource::<mm2_app::breakaway::BreakReport>()
         .init_resource::<mm2_app::recovery::RecoveryReport>()
+        .init_resource::<mm2_app::damage_fx::SmokeFxReport>()
         .init_resource::<ButtonInput<KeyCode>>()
         .add_message::<mm2_game::RaceStarted>()
         .add_systems(FixedUpdate, advance_session_tick)

@@ -18,9 +18,9 @@ use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use clap::Parser;
 use mm2_app::session::{ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
-    banger, breakaway, camera, car_visual, city, contracts, damage, input, menu, nav_overlay,
-    opponents, pause, profile, progression, race, recovery, results, scripted, session, smoke,
-    stuck, traffic,
+    banger, breakaway, camera, car_visual, city, contracts, damage, damage_fx, input, menu,
+    nav_overlay, opponents, pause, profile, progression, race, recovery, results, scripted,
+    session, smoke, stuck, traffic,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
@@ -809,6 +809,7 @@ fn main() {
     .init_resource::<stuck::StuckReport>()
     .init_resource::<breakaway::BreakReport>()
     .init_resource::<recovery::RecoveryReport>()
+    .init_resource::<damage_fx::SmokeFxReport>()
     .init_resource::<mm2_game::ResultLedger>()
     .init_resource::<mm2_game::BangerPool>()
     .init_resource::<SessionControl>()
@@ -951,6 +952,15 @@ fn main() {
     // writes `PlayerVehicle`, so no ordering is needed. Frozen during
     // captures like every other driver.
     .add_systems(Update, opponents::opponent_drive.run_if(not(capturing)))
+    // F05-B.6: authored engine smoke — emission reads the damage
+    // state the FixedLast systems leave, then the advance step
+    // integrates the puffs it just spawned. Own schedule slot (the
+    // main Update tuple is at Bevy's system count limit); no ordering
+    // requirement beyond `is_playing`, which both systems gate on.
+    .add_systems(
+        Update,
+        (damage_fx::drive_smoke, damage_fx::advance_smoke).chain(),
+    )
     // F16-B: drain authoritative results into the bound profile —
     // records finishes, grants rewards, saves on change. Inert without
     // an event or a bound profile.
