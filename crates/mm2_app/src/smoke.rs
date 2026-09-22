@@ -751,20 +751,24 @@ pub fn headless_smoke(
         )
     };
 
-    // Absent is only legitimate while the session is mid-teardown: a
-    // live phase (`Countdown`/`Playing`/`Paused`/`Results`) with no
-    // player vehicle is a live world with no driver — a defect, not a
-    // lifecycle window (AC02's mirror).
-    if player.is_none()
-        && matches!(
-            session.phase(),
-            SessionPhase::Countdown
-                | SessionPhase::Playing
-                | SessionPhase::Paused
-                | SessionPhase::Results
-        )
-    {
-        return record(SmokeStatus::Fail, detail(" no player vehicle"));
+    // Absent is only legitimate inside the transient teardown/rebuild
+    // window — `Unloading → Menu → Loading` — and only while a restart
+    // is actually in flight. A `Failed` cap means a reload parked on a
+    // load error (`load_session_world` runs on every `begin`, and
+    // `Failed` only leaves through a queued intent nothing issued), a
+    // `Menu` cap with nothing queued means the session parked (a
+    // rejected re-begin, a consumed quit), and a live phase with no
+    // player is a world with no driver — defects, not lifecycle
+    // windows (AC02's mirror).
+    if player.is_none() {
+        let control = world_ecs.resource::<session::SessionControl>();
+        if !absent_player_is_transient(session.phase(), control.quit || control.restart, restarts) {
+            let why = match session.phase() {
+                SessionPhase::Failed(m) => format!(" session failed: {m}"),
+                _ => " no player vehicle".to_string(),
+            };
+            return record(SmokeStatus::Fail, detail(&why));
+        }
     }
     // No player entity at the cap means the session was mid-teardown —
     // there is no pose to fault. With an entity present the check is
@@ -794,6 +798,25 @@ pub fn headless_smoke(
         return record(SmokeStatus::Fail, detail(" car never drove"));
     }
     record(SmokeStatus::Pass, detail(""))
+}
+
+/// Whether a missing player entity at the frame cap is a legitimate
+/// teardown/rebuild window rather than a defect. `Unloading` always is
+/// — the session is mid-despawn by definition. `Menu` counts only
+/// while a quit/restart intent is still queued: with nothing pending
+/// the session is parked there (a re-begin was rejected or already
+/// consumed), not passing through. `Loading` counts only once a
+/// re-begin bumped the generation — the first load never reaches the
+/// frame loop. Everything else is a defect: `Failed` parks until an
+/// intent arrives, `Ready` cannot outlive the update that enters it,
+/// and the live phases are worlds missing their driver.
+fn absent_player_is_transient(phase: &SessionPhase, teardown_queued: bool, restarts: u64) -> bool {
+    match phase {
+        SessionPhase::Unloading => true,
+        SessionPhase::Menu => teardown_queued,
+        SessionPhase::Loading => restarts > 0,
+        _ => false,
+    }
 }
 
 /// The record's `outcome=`/`place=` field: the local participant's
@@ -867,5 +890,44 @@ mod tests {
         // A generation with no results records no outcome at all —
         // the fallback must not reach back into a finished session.
         assert_eq!(result_outcome(&ledger, 3, Some(local)), "");
+    }
+
+    /// Regression for the review-flagged false pass: an absent player
+    /// at the frame cap is legitimate only inside the transient
+    /// teardown/rebuild window. Previously every phase outside the
+    /// live list passed, so a mid-run restart whose reload failed
+    /// (`load_session_world` → `Failed`, which only leaves through a
+    /// queued intent nothing issues on a dev/disabled restart)
+    /// reported `status=pass … phase=failed moved=none final=none`.
+    /// A `Menu` cap with no teardown intent queued is likewise parked
+    /// (a rejected re-begin leaves it there), not a lifecycle window.
+    #[test]
+    fn absent_player_is_transient_only_in_the_teardown_window() {
+        use mm2_game::SessionPhase::*;
+        // Inside the window: Unloading always; Menu only while a
+        // quit/restart intent is still queued; Loading only once the
+        // re-begin bumped the generation.
+        assert!(absent_player_is_transient(&Unloading, false, 0));
+        assert!(absent_player_is_transient(&Menu, true, 0));
+        assert!(absent_player_is_transient(&Loading, false, 1));
+        // Parked, not transient: a Menu cap with nothing queued, a
+        // first-load Loading (restarts still 0), a Ready that somehow
+        // outlived its update.
+        assert!(!absent_player_is_transient(&Menu, false, 0));
+        assert!(!absent_player_is_transient(&Menu, false, 1));
+        assert!(!absent_player_is_transient(&Loading, false, 0));
+        assert!(!absent_player_is_transient(&Ready, true, 0));
+        // The flagged defect: a Failed cap fails — even with a
+        // teardown intent queued, the session parked on a load error.
+        assert!(!absent_player_is_transient(
+            &Failed("load".into()),
+            false,
+            1
+        ));
+        assert!(!absent_player_is_transient(&Failed("load".into()), true, 1));
+        // The live phases were already covered by the old check.
+        for phase in [Countdown, Playing, Paused, Results] {
+            assert!(!absent_player_is_transient(&phase, true, 1));
+        }
     }
 }

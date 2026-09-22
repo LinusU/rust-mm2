@@ -51,6 +51,18 @@ matrix, remaining authored-tail columns, `avoidOpponents`
 polarity — catch-up landed as designed DSN-27),
 F11-C remainder, F16-C's AC01 process-level leg, or F10-B's
 remaining collision/queue-priority scope** — the
+latest iteration repaired the external review's blocking finding on
+the F00-C.1 candidate: its absent-player pass branch treated every
+non-live phase as a teardown window, so a mid-run restart whose
+reload failed (`load_session_world` → `Failed` on the second
+`begin`, which parks until an intent nothing issues) reported
+`status=pass … phase=failed moved=none final=none`. Absence now
+passes only inside the transient `Unloading → Menu → Loading`
+window and only while a teardown/re-begin is in flight
+(`absent_player_is_transient`: `Menu` requires a queued
+quit/restart intent, `Loading` requires the generation bump);
+a `Failed` cap fails with `session failed: <reason>` and a parked
+`Menu` with `no player vehicle`. Before that the
 latest iteration repaired a review-flagged evidence defect
 (F00-C.1): `headless_smoke` cached the `PlayerVehicle` entity, so
 a mid-run session restart (disabled → `RestartEvent`, the RACE-5/
