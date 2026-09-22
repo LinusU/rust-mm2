@@ -1,8 +1,32 @@
-# Last iteration — F18-A.1 weather/environment preset inventory
+# Last iteration — F18-A.1 weather/environment preset inventory (evidence repair)
 
-Iteration 42 on `ralph/night`, continuing from `881feee` (the F02-C.1
-roster controls matrix + reverse-band repair — external review verdict
-**pass**). This iteration picks up F18-A.1, the plan's listed
+Iteration 43 on `ralph/night`, continuing from `751485d` (the F18-A.1
+preset-inventory candidate — external review verdict **fail** on
+recorded-evidence defects only; the reviewer independently re-verified
+every implementation claim). This iteration repairs the stale counts the
+review flagged; no code changed.
+
+**Root cause:** draft counts survived into the permanent record after
+the real census was measured. The audit's own denominator was always
+correct (74 expected + 28 extras = 102); the docs said "22 per-city
+files", "38 extras"/"38 numbered `.cpvs` variants" and "+9 unit tests"
+where the measured values are 21 per-city files, 28 extras (23 `.cpvs`
+variants + 3 named `.ldef`s + `city/phys/j01.sky` +
+`sf082100.pvshist`) and 21 new `#[test]` functions. `751485d`'s commit
+message carries the same stale "38 numbered `.cpvs` variants" wording —
+the commit is the externally recorded candidate and is not rewritten;
+the correction lives here and in `docs/research/environment.md`.
+
+**Repair verification (re-measured, not copied):**
+`mm2-inspect weather /Users/linus/coding/rust-mm2/retail` → 74
+`expected` rows + 28 `extra` rows = 102/102 parsed, 0 issues,
+`--strict` exit 0; 23 of the 28 extras are `.cpvs` (11 london incl.
+`london_bad`, 12 sf incl. `sf082100`). `grep -c '#\[test\]'` over the
+six new modules → 3+5+3+5+3+2 = 21.
+
+Original iteration-42 record follows, with the corrected numbers.
+
+Iteration 42 picked up F18-A.1, the plan's listed
 weather/lighting preset-inventory slice: F01-B and F06-B deps are
 landed, and every stock environment file format is now parsed with an
 original-content audit behind it.
@@ -38,8 +62,9 @@ Six new pure parsers in `crates/mm2_formats` plus a new audit command:
 
 `tools/mm2_inspect` gains `weather <install> [--city] [--strict]`:
 census of all 102 discovered environment files (denominator never
-filtered — the 38 numbered `.cpvs` variants, named `.ldef`s,
-`city/phys/j01.sky` and `sf082100.*` are audited extras), per-file
+filtered — 74 expected + 28 audited extras: the 23 `.cpvs` variants,
+three named `.ldef`s, `city/phys/j01.sky` and `sf082100.pvshist`),
+per-file
 parse with measured stats, and cross-checks: `.sky` dome →
 `geometry/*.pkg`, `amb_<grid>.ldef` ↔ `texture/sky_<grid>.tex`
 (measured 32/32 name alignment — flagged inferred), `.ltNN` name ↔
@@ -75,7 +100,7 @@ stock retail `--strict` exits 0.
 
 ## Tests
 
-+9 unit tests across the six modules: retail-shape parses, wrong
++21 unit tests across the six modules: retail-shape parses, wrong
 arity/empty/non-numeric rejects, bad magic, oversized/truncated index
 tables, non-monotonic indices, truncated RLE runs, decompressed-output
 bound, unknown 2-bit codes + self-invisible detection, pvshist row

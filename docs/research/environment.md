@@ -7,10 +7,11 @@ the water plane, and the per-room light map. All files live under `city/`.
 
 Measured on the retail install (2026-09-22) by `mm2-inspect weather`:
 102 environment files discovered, 102 parsed, 0 failures, 0 issues —
-the audit's expected denominator is the 22 per-city files
-(`<stem>.sky`, `.lt00`–`.lt15`, `.cpvs`, `.pvshist`, `.water`, `.lmap`)
-× 2 cities plus the 32 shared `amb_*` `.ldef` files; the other 38 files
-are audited extras.
+the audit's expected denominator is the 21 per-city files
+(`<stem>.sky`, `.lt00`–`.lt15`, `.cpvs`, `.pvshist`, `.water`, `.lmap`
+= 1 + 16 + 4) × 2 cities plus the 32 shared `amb_*` `.ldef` files = 74
+expected; the other 28 files are audited extras (23 `.cpvs` variants,
+three named `.ldef`s, `city/phys/j01.sky`, `sf082100.pvshist`).
 
 Sources: R3 = community format docs (`angel-file-formats`), R4 = MM2Hook
 recovered structures (`lvlSky`, `cityTimeWeatherLighting`,
@@ -119,8 +120,9 @@ Retail measurements:
 | `sf.cpvs` | 1172 | 1171 | 293 | 2 |
 
 `lists == psdl.rooms + 1` holds for both base tables (1342/1341,
-1172/1171; list 0 reserved). Numbered `<stem>_N.cpvs` extras (11 london,
-12 sf) share the same shape with differing nonzero/self-visible counts —
+1172/1171; list 0 reserved). The 23 `.cpvs` variant extras (11 london
+incl. `london_bad`, 12 sf incl. `sf082100`) share the same shape with
+differing nonzero/self-visible counts —
 the fog/detail-variant hypothesis is measured data, not a recovered
 original rule; `london_254`/`sf_00`/`sf_254` author fewer lists than
 rooms + 1. A handful of authored rooms (1–14 per file) do not see
