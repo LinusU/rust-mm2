@@ -27,12 +27,18 @@
 //! - [`Screen::NewProfile`] is a text field rather than a row list:
 //!   `menu_input` routes `KeyboardInput.text` into it so driver names
 //!   are typed, not auto-generated.
+//! - [`Screen::Records`] is the bound driver's race-records view
+//!   (DRV-5's first leg): the persisted per-event finishes/best
+//!   results with city and race-type filters; an enabled record row
+//!   re-launches its event. The documented original's remaining sort
+//!   keys (Amateur/Pro Times, Pro Points — nothing persists points)
+//!   and Driver's Stats stay open in `docs/research/menu.md`.
 //!
 //! Deferred to later slices (honest gaps, not placeholders): per-event
 //! weather/time/density controls (needs F18's session-legal writers;
-//! RACE-3 `customizable`), original menu art and audio. The
-//! in-session overlays landed in their own modules — `crate::pause`,
-//! `crate::results`.
+//! RACE-3 `customizable`), Driver's Stats (no aggregate stats are
+//! persisted), original menu art and audio. The in-session overlays
+//! landed in their own modules — `crate::pause`, `crate::results`.
 
 use std::collections::BTreeMap;
 
@@ -129,6 +135,16 @@ pub enum Screen {
         /// The name being typed.
         name: String,
     },
+    /// The bound driver's persisted race records (DRV-5's first leg).
+    /// `city`/`table` are the active filters — `None` means "all";
+    /// they ride the screen like `NewProfile`'s buffer so Left/Right
+    /// cycle them in place.
+    Records {
+        /// City filter.
+        city: Option<String>,
+        /// Race-type filter.
+        table: Option<EventTableKind>,
+    },
 }
 
 /// What a row activation does. Actions are resolved at rebuild time —
@@ -148,6 +164,10 @@ pub enum Action {
     },
     /// Run an authored event.
     LaunchEvent(EventRef),
+    /// Cycle the Records screen's city filter (Left/Right or Activate).
+    RecordsCityFilter,
+    /// Cycle the Records screen's race-type filter.
+    RecordsTableFilter,
     /// Select a roster vehicle and open its paint list.
     PickVehicle {
         /// Catalog id.
@@ -473,14 +493,21 @@ impl MenuShell {
                 return effects;
             }
             MenuCommand::Left | MenuCommand::Right => {
-                if matches!(
-                    self.rows.get(self.focus).map(|r| &r.action),
-                    Some(Action::ToggleDifficulty)
-                ) {
-                    self.difficulty = match self.difficulty {
-                        Difficulty::Amateur => Difficulty::Professional,
-                        Difficulty::Professional => Difficulty::Amateur,
-                    };
+                let forward = cmd == MenuCommand::Right;
+                match self.rows.get(self.focus).map(|r| &r.action) {
+                    Some(Action::ToggleDifficulty) => {
+                        self.difficulty = match self.difficulty {
+                            Difficulty::Amateur => Difficulty::Professional,
+                            Difficulty::Professional => Difficulty::Amateur,
+                        };
+                    }
+                    Some(Action::RecordsCityFilter) => {
+                        self.cycle_record_filter(data, true, forward)
+                    }
+                    Some(Action::RecordsTableFilter) => {
+                        self.cycle_record_filter(data, false, forward)
+                    }
+                    _ => {}
                 }
             }
             MenuCommand::Back => {
@@ -540,6 +567,9 @@ impl MenuShell {
                     Difficulty::Professional => Difficulty::Amateur,
                 };
             }
+            // Activate on a filter row cycles forward, same as Right.
+            Action::RecordsCityFilter => self.cycle_record_filter(data, true, true),
+            Action::RecordsTableFilter => self.cycle_record_filter(data, false, true),
             Action::LaunchCruise { city } => {
                 self.launch(data, vfs, SessionMode::Cruise, city, effects)
             }
@@ -638,6 +668,40 @@ impl MenuShell {
             }
             Ok(None) => self.status = Some("profile create returned nothing".into()),
             Err(e) => self.status = Some(e.to_string()),
+        }
+    }
+
+    /// Cycle one of the Records screen's filters through `None` (all)
+    /// plus the values actually present in the bound driver's records.
+    /// `city` picks which filter; `forward` the direction — Left steps
+    /// back, Right and Activate step forward.
+    fn cycle_record_filter(&mut self, data: &MenuData, city: bool, forward: bool) {
+        let Some(bound) = &data.bound else { return };
+        let Screen::Records {
+            city: city_filter,
+            table: table_filter,
+        } = &mut self.screen
+        else {
+            return;
+        };
+        if city {
+            let mut choices: Vec<&str> = bound
+                .progress
+                .events
+                .iter()
+                .map(|r| r.key.city.as_str())
+                .collect();
+            choices.sort();
+            choices.dedup();
+            *city_filter = cycle_choice(&choices, city_filter.as_deref(), forward).map(Into::into);
+        } else {
+            // Authored table order, not lexicographic.
+            let choices: Vec<EventTableKind> = TABLE_KINDS
+                .iter()
+                .copied()
+                .filter(|k| bound.progress.events.iter().any(|r| r.key.table == *k))
+                .collect();
+            *table_filter = cycle_choice(&choices, *table_filter, forward);
         }
     }
 
@@ -776,17 +840,7 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                                 // restricted (progress can't persist).
                                 None => availability.of_unbound(&key),
                             };
-                            match avail {
-                                Some(a) if !a.unlocked => Err(format!(
-                                    "beat {} first",
-                                    a.blocked_by
-                                        .iter()
-                                        .map(|k| k.stem.as_str())
-                                        .collect::<Vec<_>>()
-                                        .join(", ")
-                                )),
-                                _ => Ok(()),
-                            }
+                            availability_reason(avail)
                         }
                     };
                     Row {
@@ -796,6 +850,11 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                     }
                 })
                 .collect()
+        }
+        Screen::Records { city, table } => {
+            let city = city.clone();
+            let table = *table;
+            record_rows(data, vfs, city.as_deref(), table)
         }
         Screen::Garage => garage_rows(shell, data),
         Screen::Paints { car } => paint_rows(shell, data, car),
@@ -866,6 +925,26 @@ fn root_rows(shell: &MenuShell, data: &mut MenuData, vfs: &Vfs) -> Vec<Row> {
                 Err("profile store unavailable (--no-profile or unwritable data dir)".to_string())
             },
             action: Action::Push(Screen::Profiles),
+        },
+        Row {
+            text: "Race Records".into(),
+            enabled: if data.bound.is_some() {
+                Ok(())
+            } else {
+                Err("no driver profile - records are kept per driver".to_string())
+            },
+            action: Action::Push(Screen::Records {
+                city: None,
+                table: None,
+            }),
+        },
+        // AC05's tracked capability: the original's stats screen has
+        // no persisted data to draw on yet, so the row names the gap
+        // rather than opening an empty page.
+        Row {
+            text: "Driver's Stats".into(),
+            enabled: Err("not implemented yet (menu audit: docs/research/menu.md)".to_string()),
+            action: Action::Quit, // unreachable while disabled
         },
         Row {
             text: format!(
@@ -952,17 +1031,7 @@ fn quick_race_row(data: &mut MenuData, vfs: &Vfs) -> Row {
         }
         mm2_content::EventStatus::Ready => {
             let profile = bound.as_ref().expect("a key implies a bound profile");
-            match availability.of(profile, &key) {
-                Some(a) if !a.unlocked => Err(format!(
-                    "beat {} first",
-                    a.blocked_by
-                        .iter()
-                        .map(|k| k.stem.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )),
-                _ => Ok(()),
-            }
+            availability_reason(availability.of(profile, &key))
         }
     };
     Row {
@@ -1122,6 +1191,206 @@ fn profile_rows(_shell: &MenuShell, data: &mut MenuData) -> Vec<Row> {
         action: Action::DriveProfileless,
     });
     rows
+}
+
+/// `current`'s next value through `None → choices[0] → … → None`,
+/// wrapping — `forward` walks the list, `!forward` walks it back. A
+/// `current` that is absent from `choices` behaves as `None`.
+fn cycle_choice<T: PartialEq + Copy>(
+    choices: &[T],
+    current: Option<T>,
+    forward: bool,
+) -> Option<T> {
+    let len = choices.len() + 1;
+    let pos = current
+        .and_then(|c| choices.iter().position(|v| *v == c))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let next = if forward {
+        (pos + 1) % len
+    } else {
+        (pos + len - 1) % len
+    };
+    (next > 0).then(|| choices[next - 1])
+}
+
+/// The gate check every event row shares — a locked event names the
+/// unbeaten prerequisites (`blocked_by`); no row in the availability
+/// table means nothing gates it.
+fn availability_reason(avail: Option<mm2_game::EventAvailability>) -> Result<(), String> {
+    match avail {
+        Some(a) if !a.unlocked => Err(format!(
+            "beat {} first",
+            a.blocked_by
+                .iter()
+                .map(|k| k.stem.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Race time from ticks — `42.9s` under a minute, `1:05.0` above.
+fn fmt_race_time(ticks: u64) -> String {
+    let secs = ticks as f32 / mm2_game::RACE_TICK_HZ as f32;
+    let mins = (secs / 60.0) as u64;
+    if mins == 0 {
+        format!("{secs:.1}s")
+    } else {
+        format!("{mins}:{:04.1}", secs % 60.0)
+    }
+}
+
+/// The Records screen (DRV-5's first leg): the bound driver's
+/// persisted per-event results. Two filter rows sit on top (city,
+/// race type) cycling through `all` plus the values actually present
+/// in the records; each record row shows its stored numbers and
+/// re-launches the event when it still resolves. The documented
+/// original's Amateur Times / Pro Times / Pro Points sort keys are
+/// not on the persisted record — the screen shows what is stored
+/// rather than fabricating columns (the remaining original-filter
+/// audit is `docs/research/menu.md`).
+fn record_rows(
+    data: &mut MenuData,
+    vfs: &Vfs,
+    city: Option<&str>,
+    table: Option<EventTableKind>,
+) -> Vec<Row> {
+    let Some(bound) = data.bound.clone() else {
+        // The root row is disabled without a bound driver; reaching
+        // this anyway gets the same honest row.
+        return vec![Row {
+            text: "no driver profile - records are kept per driver".into(),
+            enabled: Err("no driver profile - records are kept per driver".into()),
+            action: Action::Back,
+        }];
+    };
+    if bound.progress.events.is_empty() {
+        return vec![Row {
+            text: "no recorded results yet - finish an event".into(),
+            enabled: Err("no recorded results yet".into()),
+            action: Action::Back,
+        }];
+    }
+    let mut rows = vec![
+        Row {
+            text: format!("City: {}", city.unwrap_or("all")),
+            enabled: Ok(()),
+            action: Action::RecordsCityFilter,
+        },
+        Row {
+            text: format!("Race type: {}", table.map(table_name).unwrap_or("all")),
+            enabled: Ok(()),
+            action: Action::RecordsTableFilter,
+        },
+    ];
+    // Deterministic order — city, authored table order, stem — so a
+    // record's position never depends on finish chronology.
+    let mut records: Vec<&mm2_game::EventRecord> = bound
+        .progress
+        .events
+        .iter()
+        .filter(|r| city.is_none_or(|c| c == r.key.city))
+        .filter(|r| table.is_none_or(|t| t == r.key.table))
+        .collect();
+    records.sort_by(|a, b| {
+        let at = TABLE_KINDS
+            .iter()
+            .position(|k| *k == a.key.table)
+            .unwrap_or(usize::MAX);
+        let bt = TABLE_KINDS
+            .iter()
+            .position(|k| *k == b.key.table)
+            .unwrap_or(usize::MAX);
+        (&a.key.city, at, &a.key.stem).cmp(&(&b.key.city, bt, &b.key.stem))
+    });
+    if records.is_empty() {
+        rows.push(Row {
+            text: "no records match these filters".into(),
+            enabled: Err("no records match these filters".into()),
+            action: Action::Back,
+        });
+        return rows;
+    }
+    for record in records {
+        rows.push(record_row(data, vfs, &bound, record));
+    }
+    rows
+}
+
+/// One persisted result as a row. The recorded numbers always show —
+/// they are the screen's point; the row only enables (and thereby
+/// re-launches) when the event still resolves through the live
+/// catalog and clears the current gates. Gated, broken or absent
+/// events keep their records visible with the reason, like Quick
+/// Race's unresolvable-`last_event` leg.
+fn record_row(
+    data: &mut MenuData,
+    vfs: &Vfs,
+    bound: &PlayerProfile,
+    record: &mm2_game::EventRecord,
+) -> Row {
+    let key = &record.key;
+    let stats = format!(
+        "best {} place {} x{}{}",
+        record
+            .best_race_ticks
+            .map(fmt_race_time)
+            .unwrap_or_else(|| "-".into()),
+        record
+            .best_place
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".into()),
+        record.finishes,
+        match (record.beaten_amateur, record.beaten_professional) {
+            (true, true) => " [A+P]",
+            (true, false) => " [A]",
+            (false, true) => " [P]",
+            (false, false) => "",
+        },
+    );
+    let disabled = |reason: String| Row {
+        text: format!("{} ({}) - {stats}", key.stem, key.city),
+        enabled: Err(reason),
+        action: Action::Back, // unreachable while disabled
+    };
+    if key.table == EventTableKind::CrashCourse {
+        return disabled("crash course events are not loadable yet (F21)".into());
+    }
+    if let Err(reason) = data.city_loadable(vfs, &key.city) {
+        return disabled(reason);
+    }
+    let availability = data.availability_of(vfs, &key.city).clone();
+    let Some(event) = data
+        .catalog_of(vfs, &key.city)
+        .events
+        .iter()
+        .find(|e| e.event_ref.table == key.table && e.stem == key.stem)
+        .cloned()
+    else {
+        return disabled(format!(
+            "{} is not in the {} catalog any more",
+            key.stem, key.city
+        ));
+    };
+    let enabled = match &event.status {
+        mm2_content::EventStatus::Incomplete { missing } => {
+            Err(format!("incomplete: {}", missing.join(", ")))
+        }
+        mm2_content::EventStatus::Ready => availability_reason(availability.of(bound, key)),
+    };
+    Row {
+        text: format!(
+            "{} ({}) - {} #{} - {stats}",
+            key.stem,
+            key.city,
+            table_name(key.table),
+            event.event_ref.index,
+        ),
+        enabled,
+        action: Action::LaunchEvent(event.event_ref),
+    }
 }
 
 /// Marker for menu UI entities — persistent interface owned by the
@@ -1430,8 +1699,12 @@ pub fn menu_mouse(
         .as_ref()
         .is_some_and(|m| m.just_pressed(MouseButton::Right))
     {
-        // Right-click backs out from anywhere — the mouse's Esc.
+        // Right-click backs out from anywhere — the mouse's Esc. Stop
+        // here: falling through would also queue the hover FocusAt,
+        // which applies *after* the pop and clobbers the restored
+        // focus on the parent screen with a stale child row index.
         shell.pending.push(MenuCommand::Back);
+        return;
     }
     let Some(index) = pointer
         .rows
@@ -1468,6 +1741,7 @@ fn screen_title(screen: &Screen) -> String {
         Screen::Profiles => "Driver profiles - X deletes".to_string(),
         Screen::ConfirmDelete { label, .. } => format!("Delete {label}?"),
         Screen::NewProfile { .. } => "New driver".to_string(),
+        Screen::Records { .. } => "Race records".to_string(),
     }
 }
 
@@ -1557,6 +1831,8 @@ pub fn menu_present(
     }
     let footer = if matches!(shell.screen, Screen::NewProfile { .. }) {
         "Type a name | Enter create | Esc cancel"
+    } else if matches!(shell.screen, Screen::Records { .. }) {
+        "Enter race again | Left/Right cycle filters | Esc back"
     } else {
         "Up/Down move | Enter select | Esc back | X delete | click works"
     };

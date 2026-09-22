@@ -28,8 +28,8 @@ use mm2_app::session::{self, SelectedCar, SessionControl, SpawnPoint, TunedVehic
 use mm2_assets::Vfs;
 use mm2_game::{
     BangerPool, Difficulty, EventKey, EventTableKind, ImpactEvent, Mm2Vfs, PlayerVehicle,
-    ProfileKind, ProfileStore, ResultLedger, Session, SessionMode, SessionPhase, VehicleSelection,
-    advance_session_tick, despawn_session_entities,
+    ProfileId, ProfileKind, ProfileStore, ResultLedger, Session, SessionMode, SessionPhase,
+    VehicleSelection, advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::{VehicleConfig, VehiclePlugin};
 
@@ -545,6 +545,23 @@ fn click(app: &mut App, button: MouseButton) {
     app.world_mut()
         .resource_mut::<ButtonInput<MouseButton>>()
         .reset_all();
+}
+
+/// Write a recorded finish into a stored profile — the same
+/// `EventRecord` fields `record_session_results` produces from a real
+/// session, seeded so the menu reads persisted data.
+fn seed_record(
+    store: &ProfileStore,
+    id: &ProfileId,
+    key: EventKey,
+    ticks: u64,
+    place: Option<u32>,
+) {
+    let mut loaded = store.load(id).unwrap().profile;
+    loaded
+        .event_mut(key)
+        .record_finish(ticks, place, Difficulty::Amateur);
+    store.save(&mut loaded).unwrap();
 }
 
 fn menu_roots(app: &mut App) -> usize {
@@ -1524,5 +1541,383 @@ fn a_click_on_a_disabled_row_shows_its_reason() {
     assert_eq!(
         shell(&app).status.as_deref(),
         Some("not implemented yet (F23)"),
+    );
+}
+
+/// Regression for the F17-A.4 review quirk: a right-click over a row
+/// backs out — and must not also queue the hover `FocusAt`, which
+/// would apply *after* the pop and clobber the parent's restored
+/// focus with a stale child index.
+#[test]
+fn a_right_click_backs_out_without_clobbering_the_restored_focus() {
+    let tmp = install();
+    let mut app = menu_app(tmp.path(), None);
+    app.update();
+    spawn_window(&mut app);
+
+    // Descend into the city picker: Root's focus (the Events row)
+    // is saved on the back stack.
+    let events_index = shell(&app)
+        .rows
+        .iter()
+        .position(|r| r.text == "Events")
+        .expect("the root lists Events");
+    activate_row(&mut app, "Events");
+    assert!(matches!(shell(&app).screen, menu::Screen::EventCity));
+    lay_out_rows(&mut app);
+    cursor_to(&mut app, 200.0, row_y(1));
+    click(&mut app, MouseButton::Right);
+    assert!(matches!(shell(&app).screen, menu::Screen::Root));
+    assert_eq!(
+        shell(&app).focus,
+        events_index,
+        "Back restores the saved focus — the click must not hover-focus a root row"
+    );
+}
+
+/// DRV-5's first leg: the Records screen lists the bound driver's
+/// persisted results — best time, best place and finish count — and
+/// an enabled record row re-launches the same event through
+/// `Session::begin`.
+#[test]
+fn the_records_screen_shows_persisted_results_and_relaunches() {
+    let tmp = install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let alice = store
+        .create("Alice", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    // Two finishes on race0 — the best time keeps the faster run and
+    // the Amateur top-3 win sets the [A] beaten mark.
+    let key0 = || EventKey {
+        city: "testcity".into(),
+        table: EventTableKind::Checkpoint,
+        stem: "race0".into(),
+    };
+    seed_record(&store, &alice.id, key0(), 120 * 90 + 60, Some(1));
+    seed_record(&store, &alice.id, key0(), 120 * 95, Some(2));
+
+    let mut app = menu_app(tmp.path(), Some(store));
+    app.update();
+
+    // Unbound: the root row exists but explains itself.
+    let records = shell(&app)
+        .rows
+        .iter()
+        .find(|r| r.text == "Race Records")
+        .expect("the root lists Race Records");
+    assert!(
+        records
+            .enabled
+            .as_ref()
+            .unwrap_err()
+            .contains("no driver profile"),
+        "records are per-driver: {:?}",
+        records.enabled
+    );
+
+    // Bind Alice and open the screen.
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "Alice");
+    press(&mut app, KeyCode::Escape);
+    activate_row(&mut app, "Race Records");
+    assert!(matches!(shell(&app).screen, menu::Screen::Records { .. }));
+
+    let rows = &shell(&app).rows;
+    assert_eq!(rows[0].text, "City: all");
+    assert_eq!(rows[1].text, "Race type: all");
+    let race0 = &rows[2];
+    assert!(race0.text.contains("race0"), "{:?}", race0.text);
+    assert!(
+        race0.text.contains("1:30.5"),
+        "the best (lowest) time shows: {:?}",
+        race0.text
+    );
+    assert!(race0.text.contains("place 1"), "{:?}", race0.text);
+    assert!(
+        race0.text.contains("x2"),
+        "the finish count shows: {:?}",
+        race0.text
+    );
+    assert!(
+        race0.text.contains("[A]"),
+        "the Amateur beaten mark shows: {:?}",
+        race0.text
+    );
+    assert!(race0.enabled.is_ok(), "{:?}", race0.enabled);
+
+    // Activating re-runs the same authored event — no fake
+    // records-screen launch mode.
+    activate_row(&mut app, "race0");
+    assert!(
+        run_until(&mut app, 12, |a| matches!(
+            phase(a),
+            SessionPhase::Countdown | SessionPhase::Playing
+        )),
+        "race0 never launched: {:?}",
+        phase(&app)
+    );
+    match app.world().resource::<Session>().config() {
+        Some(cfg) => assert_eq!(
+            cfg.mode,
+            SessionMode::Event(mm2_game::EventRef {
+                city: "testcity".into(),
+                table: EventTableKind::Checkpoint,
+                index: 0,
+            })
+        ),
+        None => panic!("a launched session has a config"),
+    }
+}
+
+/// A record whose event no longer resolves — gated, incomplete or
+/// absent from the catalog — still lists with its stored numbers and
+/// the reason it cannot re-launch; records order deterministically
+/// (city, authored table order, stem) regardless of finish order.
+#[test]
+fn unresolvable_records_stay_listed_with_their_reasons() {
+    let tmp = install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let bob = store
+        .create("Bob", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    let key = |stem: &str, table: EventTableKind| EventKey {
+        city: "testcity".into(),
+        table,
+        stem: stem.into(),
+    };
+    // Seeded out of display order on purpose: the screen sorts.
+    seed_record(
+        &store,
+        &bob.id,
+        key("race99", EventTableKind::Checkpoint),
+        120 * 80,
+        Some(2),
+    );
+    seed_record(
+        &store,
+        &bob.id,
+        key("race3", EventTableKind::Checkpoint),
+        120 * 60,
+        Some(4),
+    );
+    seed_record(
+        &store,
+        &bob.id,
+        key("race2", EventTableKind::Checkpoint),
+        120 * 70,
+        Some(3),
+    );
+    seed_record(
+        &store,
+        &bob.id,
+        key("crash0", EventTableKind::CrashCourse),
+        120 * 50,
+        Some(1),
+    );
+
+    let mut app = menu_app(tmp.path(), Some(store));
+    app.update();
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "Bob");
+    press(&mut app, KeyCode::Escape);
+    activate_row(&mut app, "Race Records");
+
+    let rows = &shell(&app).rows;
+    let records: Vec<&menu::Row> = rows.iter().skip(2).collect();
+    assert_eq!(records.len(), 4);
+    // Checkpoint stems sort lexically; the Crash Course record sorts
+    // after the whole Checkpoint set by authored table order.
+    let order: Vec<&str> = records.iter().map(|r| r.text.as_str()).collect();
+    assert!(
+        order[0].contains("race2")
+            && order[1].contains("race3")
+            && order[2].contains("race99")
+            && order[3].contains("crash0"),
+        "deterministic order: {order:?}"
+    );
+    let by_stem = |stem: &str| records.iter().find(|r| r.text.contains(stem)).unwrap();
+    // race3 is gated by CHK-3 on the unbeaten first set — its record
+    // exists but the row names the gate.
+    assert!(
+        by_stem("race3")
+            .enabled
+            .as_ref()
+            .unwrap_err()
+            .contains("beat"),
+        "{:?}",
+        by_stem("race3").enabled
+    );
+    assert!(
+        by_stem("race2")
+            .enabled
+            .as_ref()
+            .unwrap_err()
+            .contains("incomplete"),
+        "{:?}",
+        by_stem("race2").enabled
+    );
+    assert!(
+        by_stem("race99")
+            .enabled
+            .as_ref()
+            .unwrap_err()
+            .contains("not in the testcity catalog"),
+        "{:?}",
+        by_stem("race99").enabled
+    );
+    assert!(
+        by_stem("crash0")
+            .enabled
+            .as_ref()
+            .unwrap_err()
+            .contains("crash course"),
+        "{:?}",
+        by_stem("crash0").enabled
+    );
+    // Disabled rows still show the stored numbers.
+    assert!(
+        by_stem("race3").text.contains("x1"),
+        "the finish count shows: {}",
+        by_stem("race3").text
+    );
+    // And activating one never launches.
+    activate_row(&mut app, "race3");
+    assert_eq!(phase(&app), SessionPhase::Menu);
+    assert!(shell(&app).status.is_some());
+}
+
+/// The filter rows cycle through `all` plus the values actually
+/// present in the records — narrowing and widening the list in
+/// place, no navigation. Left steps back, Right and Enter step
+/// forward.
+#[test]
+fn records_filters_narrow_and_widen_the_list() {
+    let tmp = install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let carol = store
+        .create("Carol", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    let key = |stem: &str, table: EventTableKind| EventKey {
+        city: "testcity".into(),
+        table,
+        stem: stem.into(),
+    };
+    seed_record(
+        &store,
+        &carol.id,
+        key("race0", EventTableKind::Checkpoint),
+        120 * 60,
+        Some(1),
+    );
+    // A Blitz record no mounted table row claims — it still filters
+    // and lists (disabled), like the Quick Race stale-event leg.
+    seed_record(
+        &store,
+        &carol.id,
+        key("blitz0", EventTableKind::Blitz),
+        120 * 45,
+        Some(1),
+    );
+
+    let mut app = menu_app(tmp.path(), Some(store));
+    app.update();
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "Carol");
+    press(&mut app, KeyCode::Escape);
+    activate_row(&mut app, "Race Records");
+    assert_eq!(shell(&app).rows.len(), 4);
+
+    // Race type: all → Checkpoint → Blitz → all, narrowing the list.
+    focus_row(&mut app, "Race type:");
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(shell(&app).rows[1].text, "Race type: Checkpoint");
+    let listed: Vec<&str> = shell(&app)
+        .rows
+        .iter()
+        .skip(2)
+        .map(|r| r.text.as_str())
+        .collect();
+    assert_eq!(listed.len(), 1);
+    assert!(listed[0].contains("race0"), "{listed:?}");
+
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(shell(&app).rows[1].text, "Race type: Blitz");
+    let listed: Vec<&str> = shell(&app)
+        .rows
+        .iter()
+        .skip(2)
+        .map(|r| r.text.as_str())
+        .collect();
+    assert_eq!(listed.len(), 1);
+    assert!(listed[0].contains("blitz0"), "{listed:?}");
+
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(shell(&app).rows[1].text, "Race type: all");
+    assert_eq!(shell(&app).rows.len(), 4);
+
+    // Left walks back — straight to the last value from `all`.
+    press(&mut app, KeyCode::ArrowLeft);
+    assert_eq!(shell(&app).rows[1].text, "Race type: Blitz");
+
+    // The city filter cycles the same way (one city in the records).
+    focus_row(&mut app, "City:");
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(shell(&app).rows[0].text, "City: testcity");
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(shell(&app).rows[0].text, "City: all");
+    // Enter on a filter row cycles forward, same as Right.
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(shell(&app).rows[0].text, "City: testcity");
+}
+
+/// Records are per-driver: a fresh profile opens the screen to the
+/// honest empty state, and Alice's records never leak into it.
+#[test]
+fn a_fresh_profile_opens_records_to_the_empty_state() {
+    let tmp = install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let alice = store
+        .create("Alice", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    store
+        .create("Bob", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    seed_record(
+        &store,
+        &alice.id,
+        EventKey {
+            city: "testcity".into(),
+            table: EventTableKind::Checkpoint,
+            stem: "race0".into(),
+        },
+        120 * 60,
+        Some(1),
+    );
+
+    let mut app = menu_app(tmp.path(), Some(store));
+    app.update();
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "Bob");
+    press(&mut app, KeyCode::Escape);
+    activate_row(&mut app, "Race Records");
+    let rows = &shell(&app).rows;
+    assert_eq!(rows.len(), 1, "no filter rows without records");
+    assert!(
+        rows[0]
+            .enabled
+            .as_ref()
+            .unwrap_err()
+            .contains("no recorded results"),
+        "{:?}",
+        rows[0].enabled
+    );
+    // Bob has no records and sees none of Alice's.
+    assert!(
+        !rows.iter().any(|r| r.text.contains("race0")),
+        "another driver's records must not show"
     );
 }
