@@ -230,6 +230,7 @@ pub fn drive_session(
             commands.remove_resource::<crate::nav_overlay::CityNav>();
             commands.remove_resource::<crate::traffic::AmbientTraffic>();
             commands.remove_resource::<mm2_content::SurfaceTables>();
+            commands.remove_resource::<crate::environment::EnvironmentReport>();
             commands.remove_resource::<crate::damage_fx::SmokeFx>();
             commands.remove_resource::<crate::spark_fx::SparkFx>();
             // `TireConditions` stays: it is a system input (the impact
@@ -410,21 +411,6 @@ pub fn load_session_world(
             if world_ok && let Some(nav) = crate::nav_overlay::load_city_nav(&vfs.0, &config) {
                 commands.insert_resource(nav);
             }
-            // City lighting.
-            commands.spawn((
-                owner,
-                DirectionalLight {
-                    illuminance: 15_000.0,
-                    shadow_maps_enabled: true,
-                    ..default()
-                },
-                Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, 0.6, -0.9, 0.0)),
-            ));
-            commands.insert_resource(GlobalAmbientLight {
-                color: Color::srgb(0.7, 0.75, 0.85),
-                brightness: 400.0,
-                affects_lightmapped_meshes: false,
-            });
         }
     }
     // Event mode: resolve the catalog event into the shared race
@@ -521,6 +507,30 @@ pub fn load_session_world(
                 world_ok = false;
             }
         }
+    }
+    // F18-A.2: the session's environment lighting — bound after the
+    // event resolution so an authored event's `EventParams::conditions`
+    // take precedence over the session's configured ones (RACE-2, the
+    // precedence `mm2_game::effective_conditions` encodes). A preset
+    // that cannot load spawns the fallback rig and reports it — an
+    // explicit diagnostic, never a silent default (F18-AC06).
+    if world_ok && let WorldMode::City { psdl } = &config.world {
+        let event_params = event_race.as_ref().map(|(def, ..)| &def.params);
+        let conditions = mm2_game::effective_conditions(&config, event_params);
+        let source = if event_params.is_some() {
+            crate::environment::ConditionsSource::Authored
+        } else {
+            crate::environment::ConditionsSource::Configured
+        };
+        let report = crate::environment::spawn_environment(
+            &mut commands,
+            &vfs.0,
+            psdl,
+            conditions,
+            source,
+            owner,
+        );
+        commands.insert_resource(report);
     }
     // A `--spawn` dev pose replaces whatever the world or authored
     // event slot chose — quarantined like `--cam`, never a session

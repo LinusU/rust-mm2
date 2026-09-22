@@ -165,6 +165,39 @@ pub struct LightSpec {
     pub color: [f32; 3],
 }
 
+impl LightSpec {
+    /// The direction from a lit surface *toward* this light, in authored
+    /// space — recovered from MM2Hook's `setLightDirectionInv` (R4), the
+    /// same math the original shading loop used:
+    ///
+    /// ```text
+    /// (−cos(heading)·cos(pitch), −sin(pitch), −sin(heading)·cos(pitch))
+    /// ```
+    ///
+    /// Sanity against retail: noon presets author pitch ≈ −1.0 →
+    /// to-light ≈ +Y (the sun overhead); morning/evening ≈ −0.2 (low
+    /// sun); `rainy-night` keys pitch +1.4 → the key shines from below
+    /// the horizon and contributes nothing to upward faces (the fills
+    /// do the work — the authored values mean it).
+    pub fn to_light_dir(&self) -> [f32; 3] {
+        let cp = self.pitch.cos();
+        [
+            -self.heading.cos() * cp,
+            -self.pitch.sin(),
+            -self.heading.sin() * cp,
+        ]
+    }
+
+    /// The direction the light *travels* — the negation of
+    /// [`to_light_dir`](Self::to_light_dir). Renderers whose light
+    /// direction is "where the rays point" (Bevy's `DirectionalLight`
+    /// forward axis) want this one.
+    pub fn travel_dir(&self) -> [f32; 3] {
+        let d = self.to_light_dir();
+        [-d[0], -d[1], -d[2]]
+    }
+}
+
 /// A decoded `.ltNN` record.
 #[derive(Debug, Clone)]
 pub struct LightingPreset {
@@ -353,6 +386,44 @@ mod tests {
         );
         assert_eq!(classify_preset_name("partly-cloudy-morning"), None);
         assert_eq!(classify_preset_name("clear"), None);
+    }
+
+    #[test]
+    fn recovered_light_direction() {
+        // `setLightDirectionInv` convention: to-light =
+        // (−cos h·cos p, −sin p, −sin h·cos p). Noon pitch −1.0 → the
+        // source sits overhead (+Y); travel direction is its negation.
+        let noon = LightSpec {
+            heading: -2.0,
+            pitch: -1.0,
+            color: [1.0; 3],
+        };
+        let d = noon.to_light_dir();
+        assert!(d[1] > 0.8, "noon to-light points up: {d:?}");
+        let t = noon.travel_dir();
+        assert!(t[1] < -0.8, "noon light travels downward: {t:?}");
+        for i in 0..3 {
+            assert!((d[i] + t[i]).abs() < 1e-6);
+        }
+        // Zero angles → to-light = (−1, 0, 0); unit length always.
+        let flat = LightSpec {
+            heading: 0.0,
+            pitch: 0.0,
+            color: [0.0; 3],
+        };
+        assert_eq!(flat.to_light_dir(), [-1.0, 0.0, 0.0]);
+        let up = LightSpec {
+            heading: 0.0,
+            pitch: 1.4,
+            color: [0.0; 3],
+        };
+        let du = up.to_light_dir();
+        let len = (du[0] * du[0] + du[1] * du[1] + du[2] * du[2]).sqrt();
+        assert!((len - 1.0).abs() < 1e-6, "unit vector: {du:?}");
+        assert!(
+            du[1] < 0.0,
+            "positive pitch puts the source below the horizon"
+        );
     }
 
     #[test]

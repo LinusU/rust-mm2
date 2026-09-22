@@ -30,7 +30,7 @@
 
 use bevy::prelude::*;
 
-use crate::config::{Densities, SessionConditions};
+use crate::config::{Densities, SessionConditions, SessionConfig};
 use crate::ids::PlayerId;
 use crate::result::ResultId;
 
@@ -216,6 +216,20 @@ impl Default for EventParams {
             car_type: 0,
         }
     }
+}
+
+/// The environment conditions a session actually runs under (F18-A):
+/// an event's authored [`EventParams::conditions`] take precedence
+/// while the event runs (RACE-2 — weather/time-of-day are part of the
+/// authored event definition); a cruise/dev session uses its own
+/// [`SessionConfig::conditions`]. Consumers (lighting F18-A.2,
+/// densities, precipitation later) resolve through here rather than
+/// picking a source themselves.
+pub fn effective_conditions(
+    config: &SessionConfig,
+    event: Option<&EventParams>,
+) -> SessionConditions {
+    event.map(|e| e.conditions).unwrap_or(config.conditions)
 }
 
 /// Everything the shared runtime needs to run one authored event.

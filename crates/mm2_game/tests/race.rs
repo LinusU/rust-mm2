@@ -758,3 +758,34 @@ fn catch_up_factor_is_bounded_one_directional_and_safe() {
     };
     assert_eq!(catch_up_factor(5.0, &negative), 0.0);
 }
+
+/// F18-A: an event's authored conditions take precedence over the
+/// session's configured ones while it runs; without an event the
+/// session's own conditions apply.
+#[test]
+fn effective_conditions_prefers_the_authored_event() {
+    let config = SessionConfig {
+        conditions: SessionConditions {
+            time_of_day: TimeOfDay::new(1).unwrap(),
+            weather: Weather::new(2).unwrap(),
+        },
+        ..SessionConfig::default()
+    };
+    assert_eq!(
+        effective_conditions(&config, None),
+        config.conditions,
+        "no event → the session's own conditions"
+    );
+    let authored = EventParams {
+        conditions: SessionConditions {
+            time_of_day: TimeOfDay::new(3).unwrap(),
+            weather: Weather::new(0).unwrap(),
+        },
+        ..EventParams::default()
+    };
+    assert_eq!(
+        effective_conditions(&config, Some(&authored)),
+        authored.conditions,
+        "authored event params win while the event runs"
+    );
+}

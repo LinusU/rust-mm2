@@ -175,6 +175,18 @@ struct Cli {
     #[arg(long)]
     restart: bool,
 
+    /// Weather selector for the session's conditions — the authored
+    /// 0-3 grid value (`clear`/`cloudy`/`foggy`/`rainy` on the measured
+    /// ltNN grid, WLD-21). Sets the cruise session's environment; an
+    /// authored event's own conditions take precedence (RACE-2).
+    #[arg(long, value_name = "0-3")]
+    weather: Option<u8>,
+
+    /// Time-of-day selector — the authored 0-3 grid value
+    /// (`morning`/`noon`/`evening`/`night` on the measured ltNN grid).
+    #[arg(long, value_name = "0-3")]
+    time_of_day: Option<u8>,
+
     /// Multiply every tire contact's grip by `f` for the session — an
     /// environment traction stand-in (wetness/ice) for evidence runs.
     /// `1.0` is unmodified; must be finite and non-negative.
@@ -295,6 +307,31 @@ fn main() {
         }
         None => None,
     };
+
+    // `--weather`/`--time-of-day` set the session's cruise conditions —
+    // session-legal selectors on the authored 0-3 grid (RACE-4). An
+    // authored event's own conditions take precedence while it runs
+    // (RACE-2), so the flags only feed the fallback there. Out-of-range
+    // selectors are usage errors, never a clamp.
+    let weather = match cli.weather.map(mm2_game::Weather::new).transpose() {
+        Ok(w) => w.unwrap_or_default(),
+        Err(e) => {
+            error!("invalid --weather: {e}");
+            std::process::exit(2);
+        }
+    };
+    let time_of_day = match cli.time_of_day.map(mm2_game::TimeOfDay::new).transpose() {
+        Ok(t) => t.unwrap_or_default(),
+        Err(e) => {
+            error!("invalid --time-of-day: {e}");
+            std::process::exit(2);
+        }
+    };
+    if cli.event.is_some() && (cli.weather.is_some() || cli.time_of_day.is_some()) {
+        warn!(
+            "--weather/--time-of-day set the cruise fallback; the event's authored conditions take precedence (RACE-2)"
+        );
+    }
 
     // One mounting policy shared with mm2-inspect: mods > loose install
     // files > archives. The VFS is always built — mods work in the dev
@@ -617,10 +654,11 @@ fn main() {
     };
 
     // The session's typed configuration (F01-A): world + mode +
-    // difficulty/conditions/densities/seed + vehicle + authority. Only
-    // `world`, `vehicle` and the `dev` overrides have runtime consumers
-    // today — the rest are the contract F11+ builds against. Developer
-    // tweaks stay quarantined in `dev`.
+    // difficulty/conditions/densities/seed + vehicle + authority.
+    // `world`, `vehicle`, `conditions` (F18-A.2 lighting) and the `dev`
+    // overrides have runtime consumers today — the rest are the
+    // contract F11+ builds against. Developer tweaks stay quarantined
+    // in `dev`.
     let session_config = SessionConfig {
         world: mode,
         mode: event_ref
@@ -629,6 +667,12 @@ fn main() {
         // The bound profile's rank supplies the difficulty unless
         // `--pro` overrides (DRV-2/3); no profile keeps Amateur.
         difficulty,
+        // The cruise/dev conditions fallback (F18-A) — an authored
+        // event's own conditions take precedence while it runs (RACE-2).
+        conditions: mm2_game::SessionConditions {
+            time_of_day,
+            weather,
+        },
         vehicle: VehicleSelection {
             id: selected.as_ref().map(|d| d.id.clone()),
             paint,
@@ -722,6 +766,8 @@ fn main() {
         && cli.vehicle_config.is_none()
         && cli.banger_pool.is_none()
         && cli.traction.is_none()
+        && cli.weather.is_none()
+        && cli.time_of_day.is_none()
         && !cli.pause
         && !cli.finish
         && !cli.restart

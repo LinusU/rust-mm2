@@ -1,140 +1,107 @@
-# Last iteration — F18-A.1 weather/environment preset inventory (evidence repair)
+# Last iteration — F18-A.2 preset→Bevy lighting binding + session-legal selection
 
-Iteration 43 on `ralph/night`, continuing from `751485d` (the F18-A.1
-preset-inventory candidate — external review verdict **fail** on
-recorded-evidence defects only; the reviewer independently re-verified
-every implementation claim). This iteration repairs the stale counts the
-review flagged; no code changed.
-
-**Root cause:** draft counts survived into the permanent record after
-the real census was measured. The audit's own denominator was always
-correct (74 expected + 28 extras = 102); the docs said "22 per-city
-files", "38 extras"/"38 numbered `.cpvs` variants" and "+9 unit tests"
-where the measured values are 21 per-city files, 28 extras (23 `.cpvs`
-variants + 3 named `.ldef`s + `city/phys/j01.sky` +
-`sf082100.pvshist`) and 21 new `#[test]` functions. `751485d`'s commit
-message carries the same stale "38 numbered `.cpvs` variants" wording —
-the commit is the externally recorded candidate and is not rewritten;
-the correction lives here and in `docs/research/environment.md`.
-
-**Repair verification (re-measured, not copied):**
-`mm2-inspect weather /Users/linus/coding/rust-mm2/retail` → 74
-`expected` rows + 28 `extra` rows = 102/102 parsed, 0 issues,
-`--strict` exit 0; 23 of the 28 extras are `.cpvs` (11 london incl.
-`london_bad`, 12 sf incl. `sf082100`). `grep -c '#\[test\]'` over the
-six new modules → 3+5+3+5+3+2 = 21.
-
-Original iteration-42 record follows, with the corrected numbers.
-
-Iteration 42 picked up F18-A.1, the plan's listed
-weather/lighting preset-inventory slice: F01-B and F06-B deps are
-landed, and every stock environment file format is now parsed with an
-original-content audit behind it.
+Iteration 44 on `ralph/night`, continuing from `f3af7cc` (the F18-A.1
+evidence-repair candidate — external review verdict **pass**, with
+non-blocking notes about `.lt` dispatch, saturating `ambient_packed`
+and unsupported-extra handling). TASKS.json offered the F18-A
+remainder; this slice binds the measured `.ltNN` presets to Bevy
+lighting through the production session path, adds session-legal
+weather/time-of-day selection, and keeps every unverified semantic
+explicit. F18-A stays **active** — `.sky` dome, fog, `.cpvs` PVS,
+precipitation/wetness/audio, menu pickers and condition replication
+are untouched (UNK-24, F18-B/C scope).
 
 ## What changed
 
-Six new pure parsers in `crates/mm2_formats` plus a new audit command:
+- `mm2_formats::lighting`: `LightSpec::to_light_dir()` /
+  `travel_dir()` — the R4-recovered `setLightDirectionInv` convention
+  (to-light = `(−cos h·cos p, −sin p, −sin h·cos p)`; Bevy's
+  `DirectionalLight` forward gets the negated travel direction).
+  Authored radians/colours are used verbatim — including
+  `rainy-night`'s pitch +1.4 key, which correctly shines from below
+  the horizon and contributes nothing upward.
+- `mm2_game::race::effective_conditions(config, event)` — the single
+  shared resolver: authored `EventParams::conditions` win while an
+  event runs (RACE-2), `SessionConfig::conditions` is the cruise/dev
+  fallback. Exported through `mm2_game::lib` for every future consumer
+  (densities, precipitation).
+- `mm2_app::environment` (new): `spawn_environment` runs inside
+  `load_session_world` *after* event resolution, picks
+  `city/<stem>.ltNN` on the measured `NN = tod*4 + weather` grid
+  (WLD-21), spawns three `DirectionalLight`s (authored colours
+  verbatim; key-only shadows — designed) and a `GlobalAmbientLight`
+  from the packed BGRA ambient. A missing/unparseable preset spawns
+  the pre-preset fixed rig and sets `EnvironmentReport.fallback` — an
+  explicit F18-AC06 diagnostic, never a silent default. Report +
+  entities are session-scoped (`SessionEntity`-stamped; report removed
+  in `drive_session`'s teardown arm). `session.rs` lost the hardcoded
+  city light block, which survives verbatim as the fallback rig.
+- Designed scales, disclosed in `environment.md` + ledger DSN-28:
+  uniform 15 000 lux per directional (authored colour carries relative
+  weight, like the original's per-channel diffuse contribution) and
+  `GlobalAmbientLight` brightness 2 000 anchored so a typical authored
+  day ambient lands near the previous fixed ambient.
+- CLI: `--weather`/`--time-of-day` accept the authored 0-3 selectors;
+  out-of-range exits 2 (`invalid --weather: weather selector 4 is
+  outside 0-3`). Both flags are excluded from `menu_mode` like every
+  session-shaping flag, and `--event` + either flag warns they only
+  feed the cruise fallback (authored conditions still win). Menu
+  weather/time pickers remain unimplemented (F17-A remainder).
+- Smoke: `env=ltNN(<name>|fallback)` on city-world records (absent on
+  dev world so those stay bit-identical).
 
-- `sky.rs` — `.sky` one-line dome record (`<model> <hatY> <yMul>
-  <rot>`); field names are R4-recovered `lvlSky` members, exact
-  4-token arity, finite-float validation.
-- `lighting.rs` — `.ltNN` presets on the shared `tune` grammar.
-  `LightingPreset` decodes `Key`/`Fill1`/`Fill2`
-  (`Heading`/`Pitch`/`Color`) + packed `Ambient`, classifies the
-  `<weather>-<tod>` block name, and maps it to the measured
-  `NN = tod×4 + weather` grid (`WeatherKind`, `TimeOfDay`,
-  `preset_index`, `LIGHTING_PRESET_COUNT`). Unknown fields and
-  off-grid names surface as validation issues.
-- `ldef.rs` — `.ldef` bake-source path + integer rows, preserved
-  verbatim (`texture_stem()` helper); semantics unrecovered.
-- `cpvs.rs` — `PVS0` room-visibility tables. Corrected against
-  reference code + retail bytes: `index_count − 1` lists, stored
-  indices are *compressed* end offsets (index 0 implicit), fill runs
-  count raw, literal runs count `control − 0x7F`. 2-bit-per-room
-  visibility uses the mm2hook `IsRoomVisible` layout (`byte r>>2`,
-  bits `2*(r&3)`) — verified 1340/1341 London rooms self-visible
-  where the doc-derived offset reading yielded 888. Bounded decode
-  (`MAX_LIST_BYTES = 8192`, `MAX_INDEX_COUNT = 1<<20`), `code`/
-  `is_visible`/`visible_rooms`, `validate()` → `CpvsIssue`.
-  `PvsHist` parses the `.pvshist` `from to weight` text table.
-- `water.rs` — `.water` level + integer room refs.
-- `lmap.rs` — `LMP0` + count + i32 entries, exact-length check.
+## Verification (this tree)
 
-`tools/mm2_inspect` gains `weather <install> [--city] [--strict]`:
-census of all 102 discovered environment files (denominator never
-filtered — 74 expected + 28 audited extras: the 23 `.cpvs` variants,
-three named `.ldef`s, `city/phys/j01.sky` and `sf082100.pvshist`),
-per-file
-parse with measured stats, and cross-checks: `.sky` dome →
-`geometry/*.pkg`, `amb_<grid>.ldef` ↔ `texture/sky_<grid>.tex`
-(measured 32/32 name alignment — flagged inferred), `.ltNN` name ↔
-file slot + 16/16 coverage, and `cpvs`/`lmap`/`pvshist`/`water` room
-references against `city/<stem>.psdl` (`lists == rooms + 1` on both
-base tables). Authored anomalies are notes/findings, not issues —
-stock retail `--strict` exits 0.
-
-## Measured retail facts now on record
-
-- `ltNN` grid resolves the `Weather`/`TimeofDay` column-order half of
-  UNK-1: tod = morning/noon/evening/night, weather =
-  clear/cloudy/foggy/rainy; every record's block name classifies to
-  its own file slot on all 32 files.
-- `.pvshist` is a `from to weight` text table (95,112 london /
-  105,022 sf rows, weights saturating at 255). The archive entry is
-  DAVE-compressed with ~1 MB trailing padding — storage detail
-  `inflate_entry` already handles; the parser takes text. First
-  attempt fed `vfs.read` output to a second `DeflateDecoder` and
-  failed "corrupt deflate stream" — root-caused to the double-inflate,
-  not the format.
-- `sf.lmap` authors 1125 entries vs 1171 PSDL rooms (authored
-  shortfall — note, not issue); entry 0 is a `0xCDCDCDCD` sentinel on
-  both cities, preserved verbatim.
-- `sf082100.{cpvs,pvshist}` is a near-duplicate variant (105,021 vs
-  105,022 rows); `london_254`/`sf_00`/`sf_254` author fewer CPVS lists
-  than `rooms + 1`.
-- `.water`: london −3.8 @ rooms 345/351/356; sf −1.9 @ 228/399/401.
-- `.ldef` integer pairs: only two signatures ship (`-2300 2600 /
-  500 -1800` on `_f` and named files; `-1500 1250 / 1500 -1250` on
-  `_l`). The dev `.tif` paths are provenance only — never resolve, not
-  redistributable.
-
-## Tests
-
-+21 unit tests across the six modules: retail-shape parses, wrong
-arity/empty/non-numeric rejects, bad magic, oversized/truncated index
-tables, non-monotonic indices, truncated RLE runs, decompressed-output
-bound, unknown 2-bit codes + self-invisible detection, pvshist row
-validation, non-finite level/angle and negative colour validation.
-
-## Gates
-
-- `cargo fmt --all -- --check` — pass.
+- `cargo fmt --all -- --check` — pass (after `cargo fmt --all`).
 - `cargo clippy --locked --workspace --all-targets --all-features --
-  -D warnings` — pass (one `collapsible_if` fix).
-- `cargo test --locked --workspace` — pass, 0 failures
-  (136 `mm2_formats` lib tests incl. new).
+  -D warnings` — pass (two lints fixed during the iteration:
+  `field_reassign_with_default` in the new `mm2_game` test,
+  `clone_on_copy` in `tests/environment.rs`).
+- `cargo test --locked --workspace` — pass, 64 suites / 0 failures.
+- Tests +6: `lighting.rs::recovered_light_direction` (noon source
+  overhead, travel = negation, zero-angle, unit length, positive pitch
+  below horizon); `mm2_game/tests/race.rs::
+  effective_conditions_prefers_the_authored_event`;
+  `mm2_app/tests/environment.rs` ×4 over a synthetic one-room city —
+  configured (2,0) binds `lt08` with authored colours/direction/
+  ambient, missing preset reports `ltNN(fallback)` + pre-preset rig,
+  authored event (1,2) binds `lt06` over configured (3,3),
+  off-schema `SepiaTone` counts as an issue not a fallback.
 
-## Evidence (retail `fnv1a64:e91e6cd4b2ae30d9`, 2026-09-22)
+## Retail evidence (fingerprinted install)
 
-- `mm2-inspect weather /Users/linus/coding/rust-mm2/retail`:
-  102/102 parsed, 0 unsupported, 0 failures, 0 issues; all 16/16 ltNN
-  slots per city; `psdl` cross-checks london 1341 / sf 1171 rooms;
-  `--strict` exit 0; `--city london --strict` exit 0.
+- Headless `smoke=` records through the real path: `sf --frames 60`
+  → `env=lt00(clear-morning)`; `sf --time-of-day 3 --weather 3` →
+  `env=lt15(rainy-night)`; `london --time-of-day 1 --weather 1` →
+  `env=lt05(cloudy-noon)` (`status=pass`, `wheels=4/4`).
+- Rendered captures on Metal/Apple M1 at frozen
+  `--cam=-747.5,42.4,275.0,179,-15`: `sf.lt00`/`lt06`/`lt15` produce
+  visibly different lighting (`status=pass`, PNGs inspected locally —
+  not committed).
+- Invalid selector: `--weather 4` → `invalid --weather` + exit 2.
+- Honest caveat recorded in `environment.md`: `rainy-night` renders
+  pastel-bright rather than dark — authored pastel fills +
+  grey-80 ambient + the below-horizon key, with no fog yet (`.ltNN`
+  authors no fog parameters; the fog/darkness semantics stay UNK-24).
+  That is authored data plus a deferred leg, not a selection bug.
 
-## Remaining gaps (open — F18-A parent stays active)
+## Ledger / docs
 
-- No runtime consumer: parsing is not rendering. `mm2_app` does not
-  yet bind `.ltNN`/`.sky`/`.cpvs` to lights/sky/PVS (UNK-24).
-- `.ldef` integer-pair semantics, `.lmap` value semantics, `.pvshist`
-  weight consumers, `.water` ref kind, `amb_*`/`sky_*` letter-grid
-  meanings all unverified (UNK-24).
-- Which numbered `.cpvs` variant a weather/fog setting selects is a
-  measured hypothesis, not a recovered rule.
-- F18 reqs 1–7 remain open: preset→Bevy mapping, precipitation,
-  surface wetness, session determinism, CLI/menu selection,
-  unsupported-combination policy.
+- `docs/research/environment.md`: new "Runtime consumption (F18-A.2)"
+  section (binding contract, designed scales, evidence, deferred
+  scope).
+- `docs/original-rules.md`: new DSN-28 (binding slice); WLD-21 gains a
+  consumption cross-ref; UNK-24 narrowed — `.ltNN` binding exists,
+  application-intensity semantics and everything else stay open.
+- `docs/ralph/PLAN.md`: F18-A.2 row added; F18-A row + header updated.
 
-Files: `crates/mm2_formats/src/{lib.rs,sky.rs,lighting.rs,ldef.rs,
-cpvs.rs,water.rs,lmap.rs}`, `tools/mm2_inspect/src/main.rs`,
-`docs/research/environment.md`, `docs/original-rules.md`,
-`docs/ralph/{PLAN.md,LAST_ITERATION.md}`.
+## Not done / blockers
+
+- `.sky` dome geometry/floats, any fog parameter, `.cpvs` variant
+  selection + PVS culling, `.ldef`/`.pvshist`/`.lmap`/`.water`
+  consumers, precipitation/wetness-traction/audio, authoritative
+  condition replication (F18 req 5), menu weather/time controls.
+- No original-executable comparison of the rendered presets (the
+  retail binary is not runnable here); direction convention rests on
+  R4's recovered formula + authored-value sanity, not side-by-side
+  capture.

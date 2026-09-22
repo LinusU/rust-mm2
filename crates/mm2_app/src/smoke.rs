@@ -545,6 +545,15 @@ pub fn headless_smoke(
             format!(" nav={}", s.strip_prefix("nav ").unwrap_or(&s))
         })
         .unwrap_or_default();
+    // F18-A.2 environment evidence: which `.ltNN` preset the session's
+    // effective conditions bound (`ltNN(<name>)`), or `ltNN(fallback)`
+    // when the preset could not load and the fallback rig spawned
+    // (F18-AC06's explicit diagnostic). Absent on the dev world so
+    // those records stay bit-identical.
+    let env_detail = world_ecs
+        .get_resource::<crate::environment::EnvironmentReport>()
+        .map(|r| format!(" env={}", r.smoke_detail()))
+        .unwrap_or_default();
     // F10-A.2 ambient evidence: live/target population plus the
     // recycler counters. Absent on worlds without a rostered aimap so
     // those records stay bit-identical.
@@ -745,7 +754,7 @@ pub fn headless_smoke(
     };
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks}{rs_detail} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{nav_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{traction_detail}{profile_detail}{extra}",
+            "updates={frames} ticks={ticks}{rs_detail} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{nav_detail}{env_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{traction_detail}{profile_detail}{extra}",
             driver.as_str(),
             session.phase().name(),
         )

@@ -16,6 +16,7 @@ pub mod damage;
 pub mod damage_fx;
 pub mod decals;
 pub mod dev_world;
+pub mod environment;
 pub mod input;
 pub mod menu;
 pub mod nav_overlay;

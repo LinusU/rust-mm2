@@ -193,3 +193,63 @@ stats; cross-checks:
 authored anomalies (self-invisible rooms, the sf lmap shortfall, the
 0xCDCDCDCD sentinel, dev-path sources) are notes/findings, so a stock
 retail install exits 0.
+
+## Runtime consumption (F18-A.2)
+
+The `.ltNN` presets now bind to Bevy lighting through the production
+session path — `mm2_app::environment::spawn_environment`, called from
+`load_session_world` *after* event resolution so an authored event's
+`EventParams::conditions` take precedence over the session's
+configured ones (RACE-2; the shared resolution point is
+`mm2_game::effective_conditions`). `SessionConfig::conditions` is the
+cruise/dev fallback, selected session-legally by `--weather` /
+`--time-of-day` (the authored 0-3 grid; out-of-range is a usage error,
+exit 2 — never a clamp). The menu path runs selector-0 defaults; menu
+weather/time controls are still unimplemented (F17-A remainder).
+
+Binding (per `docs/research/environment.md`'s recovered record):
+
+- `Key`/`Fill1`/`Fill2` → three `DirectionalLight`s. Directions use
+  R4's recovered `setLightDirectionInv` convention via
+  `LightSpec::to_light_dir`/`travel_dir` — to-light =
+  `(−cos h·cos p, −sin p, −sin h·cos p)`, the Bevy forward axis gets
+  the negated travel direction. Colours bind verbatim; only the key
+  casts shadows (designed — the fills stand in for bounce). The
+  unusual authored case is preserved: `rainy-night` keys pitch +1.4,
+  so the key shines from below the horizon and contributes nothing to
+  upward faces — the fills do the work.
+- `Ambient` → `GlobalAmbientLight` colour from the BGRA-packed i32.
+- Missing/unparseable preset → the pre-preset fixed rig (one
+  directional sun + fixed ambient) spawns and
+  `EnvironmentReport.fallback` is set — an explicit diagnostic
+  (F18-AC06), never a silent default. `EnvironmentReport` is
+  session-scoped (removed on teardown); light entities are
+  `SessionEntity`-stamped and despawn with the session. Smoke records
+  carry `env=ltNN(<name>|fallback)`.
+
+Designed (not authored) scales: a uniform 15 000 lux illuminance per
+directional light — the authored `Color` carries each light's relative
+weight, exactly as the original's per-channel diffuse contribution —
+and a fixed `GlobalAmbientLight::brightness` of 2 000 anchored so the
+typical authored day ambient (~30/255 lum) lands near the previous
+fixed ambient (~300 effective). Consequence to keep honest: authored
+night ambients are *brighter* than day ones (grey-80 vs 30-blue), and
+no fog exists yet (`.ltNN` authors none — the fog/darkness parameters
+live elsewhere, UNK-24), so `rainy-night` renders pastel-bright rather
+than dark. That is the authored data plus the deferred fog leg, not a
+preset-selection bug.
+
+Retail evidence (fingerprinted install, 2026-09-22): `sf.lt00` →
+`clear-morning`, `sf.lt06` → `foggy-noon`, `sf.lt15` → `rainy-night`,
+`london.lt05` → `cloudy-noon` bound through the real path
+(`environment lighting bound` log + `env=` smoke field); rendered
+captures at a frozen `--cam` show visibly different lighting per
+preset; `--weather 4` exits 2. Synthetic tests cover the slot map,
+authored-event precedence, the fallback report and validation-issue
+counting.
+
+Still not consumed (UNK-24 stays open): `.sky` dome geometry and its
+three floats, fog parameters of any source, `.cpvs` variant selection
+and PVS culling, `.ldef` rows, `.pvshist` weights, `.lmap` values,
+`.water`, precipitation/wetness/audio effects (F18-B/C scope), and
+authoritative network replication of conditions (F18 req 5).
