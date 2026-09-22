@@ -22,7 +22,7 @@ use mm2_formats::bai::Side;
 use mm2_game::{
     DevOverrides, EventRef, EventTableKind, ImpactEvent, LaneCursor, LaneId, LaneKind, Mm2Vfs,
     Player, PlayerControl, PlayerId, PlayerVehicle, Session, SessionConfig, SessionMode,
-    SessionPhase, SpawnPose, StuckWindow, WorldMode, advance_session_tick,
+    SessionPhase, SpawnPolicy, SpawnPose, StuckWindow, WorldMode, advance_session_tick,
     despawn_session_entities,
 };
 use mm2_vehicle::{VehicleConfig, VehiclePlugin};
@@ -1489,5 +1489,108 @@ fn a_signal_wait_shorter_than_the_window_never_recovers() {
         app.world().resource::<AmbientTraffic>().stuck,
         0,
         "a legitimate red wait counted as stuck"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// F10-B.4 spawn occupancy — refill draws reject occupied space (F10-AC04)
+// ---------------------------------------------------------------------------
+
+/// The maintainer's refill draw rejects space a live ambient car
+/// occupies: keep one parked car, drop the rest, and bind an
+/// exclusion box wider than the whole fixture so every draw must land
+/// occupied — deterministic proof of the rejection, not a hope that
+/// the seeded draw happens to sample near the blocker.
+#[test]
+fn respawns_reject_space_a_live_car_occupies() {
+    let install = city_install();
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    let cars = ambient_cars(&mut app);
+    assert!(!cars.is_empty(), "the plan must seed a population");
+    let (keeper, _) = cars[0];
+    for (e, _) in cars.iter().skip(1) {
+        app.world_mut().entity_mut(*e).despawn();
+    }
+    {
+        // Pin the keeper so it cannot dead-end out of the test, and
+        // widen the exclusion box past the fixture network.
+        let mut q = app.world_mut().query::<&mut AmbientCar>();
+        let mut car = q.get_mut(app.world_mut(), keeper).expect("keeper");
+        car.target_speed = 0.0;
+        car.speed = 0.0;
+        let mut t = app.world_mut().resource_mut::<AmbientTraffic>();
+        t.policy.spawn_clearance = 1.0e6;
+        t.policy.spawn_half_width = 1.0e6;
+        t.policy.spawn_max_rise = 1.0e6;
+    }
+    let spawned0 = app.world().resource::<AmbientTraffic>().spawned;
+    run(&mut app, 120);
+    let t = app.world().resource::<AmbientTraffic>();
+    assert_eq!(t.spawned, spawned0, "a draw landed in occupied space");
+    assert_eq!(
+        ambient_cars(&mut app).len(),
+        1,
+        "only the parked keeper remains"
+    );
+
+    // Control: the same session under the default box refills — the
+    // rejection above was the box, not a broken respawner.
+    app.world_mut().resource_mut::<AmbientTraffic>().policy = SpawnPolicy::default();
+    run(&mut app, 120);
+    assert!(
+        app.world().resource::<AmbientTraffic>().spawned > spawned0,
+        "the default box must allow refills"
+    );
+}
+
+/// The same rejection covers participant-occupied space — the
+/// `Player` + `Position` contract AI opponents and remote drivers
+/// share. With no ambient cars left, a parked participant's box
+/// still refuses every refill draw.
+#[test]
+fn respawns_reject_space_a_participant_occupies() {
+    let install = city_install();
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    assert!(
+        !ambient_cars(&mut app).is_empty(),
+        "the plan must seed a population"
+    );
+    for (e, _) in ambient_cars(&mut app) {
+        app.world_mut().entity_mut(e).despawn();
+    }
+    // A bare participant standing mid-network.
+    app.world_mut().spawn((
+        Player {
+            id: PlayerId(94),
+            control: PlayerControl::Ai,
+        },
+        Position(Vec3::new(3.75, 0.0, 0.0)),
+    ));
+    {
+        let mut t = app.world_mut().resource_mut::<AmbientTraffic>();
+        t.policy.spawn_clearance = 1.0e6;
+        t.policy.spawn_half_width = 1.0e6;
+        t.policy.spawn_max_rise = 1.0e6;
+    }
+    let spawned0 = app.world().resource::<AmbientTraffic>().spawned;
+    run(&mut app, 120);
+    let t = app.world().resource::<AmbientTraffic>();
+    assert_eq!(t.spawned, spawned0, "a draw landed in occupied space");
+    assert!(ambient_cars(&mut app).is_empty(), "no respawn may land");
+
+    // Same control: the default box refills again.
+    app.world_mut().resource_mut::<AmbientTraffic>().policy = SpawnPolicy::default();
+    run(&mut app, 120);
+    assert!(
+        app.world().resource::<AmbientTraffic>().spawned > spawned0,
+        "the default box must allow refills"
     );
 }

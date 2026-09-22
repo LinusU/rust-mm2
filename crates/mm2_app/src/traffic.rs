@@ -51,6 +51,16 @@
 //! recovery — the window sits far beyond the worst legitimate wait a
 //! signal or draining queue can impose, and the car leaves the world
 //! rather than teleporting through whatever pens it.
+//!
+//! F10-B.4 adds occupied-space rejection at spawn (F10-AC04's spawn
+//! leg): `draw_spawn` rejects a sample whose tangent-aligned
+//! exclusion box (`SpawnPolicy::spawn_clearance` longitudinal,
+//! `spawn_half_width` lateral, `spawn_max_rise` vertical — designed
+//! values, UNK-12) touches a live ambient car, a `Player`
+//! participant, or a spot an earlier draw claimed this tick/plan.
+//! The planner and the maintainer share the check, so neither the
+//! initial plan nor a refill can stack a car on occupied road — while
+//! an adjacent lane or an overpass stays legitimately spawnable.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
@@ -91,7 +101,9 @@ pub struct AmbientTraffic {
     roster: AmbientRoster,
     eligible: Vec<LaneId>,
     rng: NavRng,
-    policy: SpawnPolicy,
+    /// The spawn/recycle bounds this session runs under — `pub` so
+    /// tests and evidence runs can bind different distances.
+    pub policy: SpawnPolicy,
     /// Simultaneous population bound for this session's density
     /// (`density × policy.max_active`, the plan's `target`).
     pub target: usize,
@@ -642,6 +654,13 @@ pub fn drive_ambient(
 /// the player's bubble past `recycle_distance`, then draw fresh
 /// placements through the same [`draw_spawn`] the planner used —
 /// bounded per tick so a drained city cannot stall the frame.
+///
+/// F10-B.4 occupied-space rejection (F10-AC04): the draw sees the
+/// positions of every surviving ambient car and every `Player`
+/// participant — the local driver and AI opponents alike — and a
+/// sample whose exclusion box touches one is retried, never spawned.
+/// Each placement joins the set for the rest of the tick, so two
+/// deferred spawns in one refill pass cannot stack either.
 #[allow(clippy::too_many_arguments)] // Bevy system: respawning threads the same asset stores the session load does
 pub fn maintain_ambient(
     mut commands: Commands,
@@ -650,6 +669,7 @@ pub fn maintain_ambient(
     vfs: Option<Res<mm2_game::Mm2Vfs>>,
     mut cars: Query<(Entity, &AmbientCar, &Position)>,
     player: Query<&Position, With<mm2_game::PlayerVehicle>>,
+    participants: Query<&Position, (With<Player>, Without<AmbientCar>)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -675,15 +695,20 @@ pub fn maintain_ambient(
 
     let recycle2 = traffic.policy.recycle_distance * traffic.policy.recycle_distance;
     let mut active = 0usize;
+    // Space the respawn draw must not materialise inside: every car
+    // that survives the bubble test, plus every participant.
+    let mut occupied: Vec<[f32; 3]> = Vec::new();
     for (entity, _, pos) in &mut cars {
         if pos.0.distance_squared(player_at) > recycle2 {
             traffic.recycled += 1;
             traffic.junctions.depart(entity);
             commands.entity(entity).despawn();
         } else {
+            occupied.push(pos.0.to_array());
             active += 1;
         }
     }
+    occupied.extend(participants.iter().map(|p| p.0.to_array()));
     if active >= traffic.target || traffic.eligible.is_empty() {
         return;
     }
@@ -702,9 +727,10 @@ pub fn maintain_ambient(
             &traffic.roster,
             &mut traffic.rng,
             player_at.to_array(),
+            &occupied,
             &traffic.policy,
         ) {
-            SpawnDraw::OutOfBand => continue,
+            SpawnDraw::OutOfBand | SpawnDraw::Occupied => continue,
             SpawnDraw::Unspawnable(_) => {
                 traffic.unspawnable += 1;
                 break;
@@ -726,6 +752,10 @@ pub fn maintain_ambient(
                 {
                     traffic.spawned += 1;
                     active += 1;
+                    // Commands-deferred — later draws this tick cannot
+                    // see the new car through the query, so claim its
+                    // spot in the occupied set directly.
+                    occupied.push(directive.sample.position);
                 } else {
                     traffic.unspawnable += 1;
                 }

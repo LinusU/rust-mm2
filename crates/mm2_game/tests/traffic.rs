@@ -496,6 +496,8 @@ fn plan_skips_non_finite_lane_geometry() {
     );
 
     let r = roster(&[("va_a", 1.0)]);
+    // A bound under the two surviving lanes' occupancy capacity — the
+    // check under test is geometry rejection, not spawn saturation.
     let plan = plan_ambient(
         &build.graph,
         &NavOverrides::default(),
@@ -503,7 +505,10 @@ fn plan_skips_non_finite_lane_geometry() {
         5,
         1.0,
         CLEAR,
-        &SpawnPolicy::default(),
+        &SpawnPolicy {
+            max_active: 12,
+            ..SpawnPolicy::default()
+        },
     );
     assert_eq!(plan.eligible_lanes, 2, "only road 0's lanes survive");
     assert_eq!(plan.spawns.len(), plan.target);
@@ -987,4 +992,143 @@ fn stuck_window_resets_on_progress_and_expires_stationary() {
     let mut nan = StuckWindow::new([0.0, 0.0, 0.0]);
     assert!(!nan.tick([f32::NAN; 3], &policy));
     assert_eq!(nan.ticks, 0);
+}
+
+// ---------- spawn occupancy (F10-B.4: reject occupied space) ----------
+
+/// The exclusion box a draw carries: a point within `spawn_clearance`
+/// of the sampled tangent — ahead *or* behind — and inside the
+/// lateral/vertical bounds occupies the spot; a point in the
+/// neighbouring lane or on an overpass does not.
+#[test]
+fn spawn_occupied_boxes_the_sample_tangent() {
+    let p = SpawnPolicy::default(); // 5.0 along / 2.0 lateral / 3.0 rise
+    let sample = LaneSample {
+        position: [0.0, 0.0, 0.0],
+        tangent: [0.0, 0.0, 1.0],
+    };
+    // Same lane, inside the bound — both directions occupy.
+    assert!(spawn_occupied(&sample, &[[0.0, 0.0, 4.9]], &p));
+    assert!(spawn_occupied(&sample, &[[0.0, 0.0, -4.9]], &p));
+    // None of these touch the box.
+    for o in [
+        [0.0, 0.0, 5.1],   // past the longitudinal bound
+        [2.1, 0.0, 0.0],   // neighbouring lane
+        [0.0, 3.1, 0.0],   // overpass
+        [0.0, 0.0, -60.0], // far behind
+    ] {
+        assert!(!spawn_occupied(&sample, &[o], &p), "{o:?} must not occupy");
+    }
+    // A degenerate tangent orients no box.
+    let flat = LaneSample {
+        position: [0.0, 0.0, 0.0],
+        tangent: [0.0, 1.0, 0.0],
+    };
+    assert!(!spawn_occupied(&flat, &[[0.0, 0.0, 1.0]], &p));
+}
+
+/// A draw whose exclusion box touches an occupied point is rejected
+/// (`Occupied`) before the class pick; the same draw stream under the
+/// default box places — the fixture is not inherently unspawnable.
+#[test]
+fn draw_spawn_rejects_occupied_space() {
+    let g = two_roads();
+    let r = roster(&[("va_a", 1.0)]);
+    let eligible = eligible_lanes(&g, &NavOverrides::default());
+    // A box wider than the whole fixture: every sample lands occupied.
+    let wide = SpawnPolicy {
+        spawn_clearance: 500.0,
+        spawn_half_width: 500.0,
+        spawn_max_rise: 500.0,
+        ..SpawnPolicy::default()
+    };
+    let mut rng = NavRng::new(7);
+    for _ in 0..8 {
+        assert!(matches!(
+            draw_spawn(
+                &g,
+                &NavOverrides::default(),
+                &eligible,
+                &r,
+                &mut rng,
+                CLEAR,
+                &[[0.0, 0.0, 0.0]],
+                &wide,
+            ),
+            SpawnDraw::Occupied
+        ));
+    }
+    // The default box never touches the blocker point — it sits on
+    // the road centre, 3.75 m laterally from every lane sample.
+    let mut rng = NavRng::new(7);
+    assert!(matches!(
+        draw_spawn(
+            &g,
+            &NavOverrides::default(),
+            &eligible,
+            &r,
+            &mut rng,
+            CLEAR,
+            &[[0.0, 0.0, 0.0]],
+            &SpawnPolicy::default(),
+        ),
+        SpawnDraw::Placed(_)
+    ));
+}
+
+/// The plan's own placements join the occupied set: two directives
+/// sharing a lane keep `spawn_clearance` between them — the
+/// spawn-vs-spawn leg.
+#[test]
+fn plan_keeps_same_lane_spawns_clear_of_each_other() {
+    let g = two_roads();
+    let r = roster(&[("va_a", 1.0)]);
+    let policy = SpawnPolicy {
+        max_active: 24,
+        ..SpawnPolicy::default()
+    };
+    let plan = plan_ambient(&g, &NavOverrides::default(), &r, 5, 1.0, CLEAR, &policy);
+    assert!(
+        plan.spawns.len() >= 4,
+        "the fixture should place several cars: {}",
+        plan.spawns.len()
+    );
+    for (i, a) in plan.spawns.iter().enumerate() {
+        for b in &plan.spawns[i + 1..] {
+            if a.lane == b.lane {
+                let d = (a.along - b.along).abs();
+                assert!(
+                    d >= policy.spawn_clearance,
+                    "same-lane spawns {d} m apart: {a:?} vs {b:?}"
+                );
+            }
+        }
+    }
+}
+
+/// A saturated lane accepts only what fits: with an exclusion box
+/// covering a whole lane, at most one spawn survives per lane and the
+/// overflow drops — the occupancy rejection lands in `dropped`, not
+/// in stacked cars.
+#[test]
+fn plan_drops_directives_past_a_lane_s_capacity() {
+    // One road, two independent lanes (7.5 m apart, lateral bound 2 m).
+    let g = NavGraph::build(&bai(vec![road_x(0, 0.0, 0)])).graph;
+    let r = roster(&[("va_a", 1.0)]);
+    let policy = SpawnPolicy {
+        max_active: 6,
+        spawn_clearance: 500.0,
+        ..SpawnPolicy::default()
+    };
+    let plan = plan_ambient(&g, &NavOverrides::default(), &r, 5, 1.0, CLEAR, &policy);
+    assert_eq!(
+        plan.spawns.len() + plan.dropped,
+        plan.target,
+        "every directive is accounted: {:?}",
+        plan.spawns
+    );
+    // A 500 m box on a 100 m lane admits at most one car per lane —
+    // two lanes, never three cars.
+    assert!(plan.spawns.len() <= 2, "{:?}", plan.spawns);
+    assert!(plan.dropped > 0, "the overflow must drop");
 }

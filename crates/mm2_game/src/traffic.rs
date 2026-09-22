@@ -18,7 +18,10 @@
 //! annulus (`min_player_distance`…`recycle_distance` of the bubble
 //! centre) over the routable vehicle lanes that survive the overrides
 //! (closed roads and pedestrian-only/disabled road sides are already
-//! excluded from the graph's arcs). Everything is seeded through
+//! excluded from the graph's arcs). A draw is also rejected when its
+//! exclusion box touches occupied space — a live car, a participant,
+//! or an earlier placement — so a spawn never materialises inside
+//! another vehicle (F10-AC04). Everything is seeded through
 //! [`NavRng`] — the same `(seed, content)` pair produces the same
 //! plan on every platform.
 //!
@@ -186,6 +189,21 @@ pub struct SpawnPolicy {
     /// dropped — keeps the planner finite when the player sits in the
     /// only eligible pocket.
     pub placement_attempts: usize,
+    /// Longitudinal exclusion along the sampled tangent (m): a draw
+    /// landing within this distance of an occupied point's
+    /// ahead/behind projection is rejected — F10-AC04's "reject
+    /// occupied space" leg, so a materialising car never overlaps a
+    /// live hull or lands on a moving car's nose. Designed — about a
+    /// car length; the original's spawn-collision behaviour is
+    /// unverified (UNK-12).
+    pub spawn_clearance: f32,
+    /// Lateral exclusion half-width (m) — about a lane half-width, so
+    /// a car in the neighbouring lane never blocks a spawn it does not
+    /// physically overlap.
+    pub spawn_half_width: f32,
+    /// Vertical exclusion (m) — a car on an overpass above the spawn
+    /// point does not occupy it.
+    pub spawn_max_rise: f32,
 }
 
 impl Default for SpawnPolicy {
@@ -195,6 +213,9 @@ impl Default for SpawnPolicy {
             min_player_distance: 60.0,
             recycle_distance: 400.0,
             placement_attempts: 8,
+            spawn_clearance: 5.0,
+            spawn_half_width: 2.0,
+            spawn_max_rise: 3.0,
         }
     }
 }
@@ -230,8 +251,9 @@ pub struct AmbientPlan {
     pub eligible_lanes: usize,
     /// Initial spawn set — at most `target` entries.
     pub spawns: Vec<SpawnDirective>,
-    /// Directives dropped because every placement attempt landed inside
-    /// `policy.min_player_distance` of the player.
+    /// Directives dropped because every placement attempt landed
+    /// outside the spawn annulus or inside `spawn_clearance` of space
+    /// an earlier directive already claimed.
     pub dropped: usize,
     /// Draws that selected a class with no resolved tuning or fell off
     /// a non-closed weight table — the authored weight band stood, so
@@ -254,8 +276,11 @@ pub struct AmbientPlan {
 /// recycle_distance]` annulus around `player_at` retry up to
 /// `policy.placement_attempts` times before the directive is dropped —
 /// the outer bound keeps the plan from populating road the recycler
-/// would collect on its first tick. `player_at` may be a spawn pose,
-/// not a tracked position — the planner only needs the bubble centre.
+/// would collect on its first tick. Each placed directive also joins
+/// the occupied set later draws must keep `spawn_clearance` from, so
+/// two planned cars can never stack on the same spot. `player_at` may
+/// be a spawn pose, not a tracked position — the planner only needs
+/// the bubble centre.
 pub fn plan_ambient(
     graph: &NavGraph,
     overrides: &NavOverrides,
@@ -287,6 +312,10 @@ pub fn plan_ambient(
     let mut dropped = 0usize;
     let mut unspawnable = 0usize;
     let mut flagged: BTreeSet<&str> = BTreeSet::new();
+    // Space already claimed by this plan — each placed directive
+    // joins it so later draws keep `spawn_clearance` away rather than
+    // stacking two cars on one spot.
+    let mut taken: Vec<[f32; 3]> = Vec::with_capacity(target);
 
     'draws: for _ in 0..target {
         if eligible.is_empty() {
@@ -294,10 +323,13 @@ pub fn plan_ambient(
         }
         for _ in 0..policy.placement_attempts {
             match draw_spawn(
-                graph, overrides, &eligible, roster, &mut rng, player_at, policy,
+                graph, overrides, &eligible, roster, &mut rng, player_at, &taken, policy,
             ) {
-                SpawnDraw::OutOfBand => continue,
-                SpawnDraw::Placed(directive) => spawns.push(directive),
+                SpawnDraw::OutOfBand | SpawnDraw::Occupied => continue,
+                SpawnDraw::Placed(directive) => {
+                    taken.push(directive.sample.position);
+                    spawns.push(directive);
+                }
                 SpawnDraw::Unspawnable(class) => {
                     unspawnable += 1;
                     if let Some(class) = class {
@@ -363,10 +395,42 @@ pub enum SpawnDraw {
     /// so drawing it is pure churn). The caller retries on a fresh
     /// lane sample.
     OutOfBand,
+    /// The sampled position's exclusion box touched an occupied point
+    /// — a live ambient car, a participant, or an earlier placement —
+    /// so the draw is rejected rather than materialising a car inside
+    /// it. The caller retries on a fresh lane sample.
+    Occupied,
     /// The class draw selected an unspawnable row (`Some`) or fell off
     /// a non-closed weight table (`None`) — this slot produces nothing;
     /// the authored band is never rebalanced.
     Unspawnable(Option<usize>),
+}
+
+/// Whether `sample`'s exclusion box touches an occupied point — the
+/// "reject occupied space" test F10-AC04 names. The box is
+/// `±spawn_clearance` along the sampled tangent, `±spawn_half_width`
+/// lateral and `±spawn_max_rise` vertical: a same-lane neighbour
+/// within about a car length occupies, while a car in the adjacent
+/// lane or on an overpass does not. A degenerate tangent cannot
+/// orient a box, so it occupies nothing (consistent with
+/// [`corridor_gap`] sensing nothing).
+pub fn spawn_occupied(sample: &LaneSample, occupied: &[[f32; 3]], policy: &SpawnPolicy) -> bool {
+    let t = sample.tangent;
+    let n = (t[0] * t[0] + t[2] * t[2]).sqrt();
+    if n < 1.0e-6 {
+        return false;
+    }
+    let (fx, fz) = (t[0] / n, t[2] / n);
+    let along = policy.spawn_clearance.max(0.0);
+    let lateral = policy.spawn_half_width.max(0.0);
+    let rise = policy.spawn_max_rise.max(0.0);
+    occupied.iter().any(|o| {
+        let dx = o[0] - sample.position[0];
+        let dz = o[2] - sample.position[2];
+        (dx * fx + dz * fz).abs() <= along
+            && (dx * -fz + dz * fx).abs() <= lateral
+            && (o[1] - sample.position[1]).abs() <= rise
+    })
 }
 
 /// One spawn-placement attempt — [`plan_ambient`] retries it
@@ -375,7 +439,10 @@ pub enum SpawnDraw {
 /// drawn inside the `[min_player_distance, recycle_distance]` annulus
 /// `policy` declares around `player_at` — the population lives in the
 /// player's bubble, never on the far side of the city where the
-/// recycler would collect it immediately.
+/// recycler would collect it immediately — and rejected when the
+/// sampled exclusion box touches a point `occupied` reports (live
+/// cars, participants, earlier placements).
+#[allow(clippy::too_many_arguments)] // the draw threads the same plan state the planner/recycler share
 pub fn draw_spawn(
     graph: &NavGraph,
     overrides: &NavOverrides,
@@ -383,6 +450,7 @@ pub fn draw_spawn(
     roster: &AmbientRoster,
     rng: &mut NavRng,
     player_at: [f32; 3],
+    occupied: &[[f32; 3]],
     policy: &SpawnPolicy,
 ) -> SpawnDraw {
     let lane = *rng.pick(eligible).expect("eligible is non-empty");
@@ -397,6 +465,11 @@ pub fn draw_spawn(
     let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
     if !(policy.min_player_distance..=policy.recycle_distance).contains(&dist) {
         return SpawnDraw::OutOfBand;
+    }
+    // Rejected before the class pick so an occupied spot never burns
+    // a roster draw.
+    if spawn_occupied(&sample, occupied, policy) {
+        return SpawnDraw::Occupied;
     }
     match roster.pick(rng) {
         Some(class) if roster.spawnable(class) => {
