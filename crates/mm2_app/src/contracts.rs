@@ -95,6 +95,26 @@ pub(crate) fn deepest_contact(
     Some((contact.point, normal, (-contact.normal_speed).max(0.0)))
 }
 
+/// Estimated impulse of a contact on a struck entity (kg·m/s):
+/// approach speed × the striker's mass — the provisional quantity
+/// banger activation compares to the authored `ImpulseLimit2` (UNK-22)
+/// and the ambient handover compares to [`mm2_game::KnockPolicy`]. A
+/// striker without a resolvable mass counts as 1 kg — a light touch,
+/// not a hidden force.
+pub(crate) fn impulse_estimate(
+    striker: Entity,
+    severity: f32,
+    masses: &Query<&ComputedMass>,
+) -> f32 {
+    let mass = masses
+        .get(striker)
+        .map(|m| m.value())
+        .ok()
+        .filter(|m| m.is_finite() && *m > 0.0)
+        .unwrap_or(1.0);
+    severity * mass
+}
+
 /// The stable identity of a contact side: its collider's
 /// [`ObjectIdentity`], else its body's, else [`ObjectId::WORLD`].
 fn object_of(

@@ -822,7 +822,12 @@ fn main() {
             race::reanchor_teleported_participants,
             race::advance_race,
             // F10-A.2: lane-following runs after the solver step; the
-            // recycler reads the poses it leaves (drive → maintain).
+            // recycler reads the poses it leaves. The F10-B.6 handover
+            // reads the same contact edges the impact pipeline and the
+            // bangers consume, then runs before the driver so a knocked
+            // car is solver-owned from the tick it flips
+            // (knock → drive → maintain).
+            traffic::knock_ambient,
             traffic::drive_ambient,
             traffic::maintain_ambient,
         )

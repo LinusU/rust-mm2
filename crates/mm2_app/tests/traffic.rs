@@ -16,7 +16,7 @@ use bevy::time::TimeUpdateStrategy;
 use mm2_app::camera::CameraMode;
 use mm2_app::contracts::{self, ImpactFilter};
 use mm2_app::session::{self, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
-use mm2_app::traffic::{AmbientCar, AmbientTraffic};
+use mm2_app::traffic::{AmbientCar, AmbientDrive, AmbientTraffic};
 use mm2_assets::Vfs;
 use mm2_formats::bai::Side;
 use mm2_game::{
@@ -405,6 +405,7 @@ fn test_app(config: SessionConfig, vfs: Vfs) -> App {
             (
                 contracts::collect_impacts,
                 contracts::publish_vehicle_telemetry,
+                mm2_app::traffic::knock_ambient,
                 mm2_app::traffic::drive_ambient,
                 mm2_app::traffic::maintain_ambient,
             )
@@ -511,6 +512,7 @@ fn spawn_follower(app: &mut App, lane: LaneId, along: f32, target_speed: f32) ->
         .spawn((
             AmbientCar {
                 class: 0,
+                drive: mm2_app::traffic::AmbientDrive::Lane,
                 cursor: LaneCursor { lane, along },
                 target_speed,
                 speed: target_speed.max(0.0),
@@ -1734,5 +1736,262 @@ fn an_ambient_car_in_the_box_yields_the_stop_sign_head() {
             car_state(a, car).is_none_or(|(_, _, c)| c.lane != lane_r0)
         }),
         "the cleared box never released the stop-sign head"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// F10-B.6 collision handover — a hard hit flips the follower to dynamic
+// ---------------------------------------------------------------------------
+
+/// A heavy dynamic striker parked mid-lane is invisible to the
+/// corridor sense (only `Player`s and ambient cars are blockers), so
+/// the follower drives into it at full speed: the first contact's
+/// impulse estimate (~15 m/s × 1300 kg) clears `KnockPolicy` and the
+/// same entity flips to `RigidBody::Dynamic` with its lane cursor
+/// frozen — the solver owns the wreck from then on, and no duplicate
+/// body appears (the spec's "dynamic/kinematic handover" edge case;
+/// F10-AC03's collision-fidelity leg).
+#[test]
+fn a_hard_hit_hands_the_follower_to_dynamics() {
+    let install = junction_install(0, 0);
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+
+    let lane_r0 = lane(0, Side::Right);
+    let car = spawn_follower(&mut app, lane_r0, 10.0, 15.0);
+    // A 1300 kg striker resting mid-lane 4 m ahead of the follower.
+    let spot = {
+        let t = app.world().resource::<AmbientTraffic>();
+        let s = t
+            .graph()
+            .sample_lane(lane_r0, 14.0)
+            .expect("a live lane samples");
+        Vec3::from(s.position) + Vec3::Y * 0.55
+    };
+    let striker = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            Collider::cuboid(1.8, 1.1, 1.8),
+            Mass(1300.0),
+            CollisionEventsEnabled,
+            Position(spot),
+            Transform::from_translation(spot),
+        ))
+        .id();
+
+    assert!(
+        run_until(&mut app, 120, |a| {
+            a.world().resource::<AmbientTraffic>().knocked >= 1
+        }),
+        "the hard hit never knocked the follower"
+    );
+
+    let (drive, body, kick, cursor) = {
+        let mut q = app
+            .world_mut()
+            .query::<(Entity, &AmbientCar, &RigidBody, &LinearVelocity)>();
+        let (_, c, rb, lv) = q
+            .iter(app.world())
+            .find(|(e, ..)| *e == car)
+            .expect("the knocked car despawned");
+        assert!(matches!(rb, RigidBody::Dynamic), "stayed kinematic");
+        assert_eq!(c.drive, AmbientDrive::Knocked);
+        // Bounded energy: the kick adds at most the approach speed
+        // along the contact normal — nothing artificial.
+        assert!(
+            lv.0.is_finite() && lv.0.length() <= 35.0,
+            "unbounded kick velocity: {lv:?}"
+        );
+        (c.drive, *rb, lv.0, c.cursor)
+    };
+    let _ = (drive, body, kick);
+
+    // The lane driver never advances a knocked cursor again, while the
+    // solver keeps posing the same entity — no duplicate body.
+    run(&mut app, 60);
+    let (frozen, pos, still_dynamic) = {
+        let mut q = app
+            .world_mut()
+            .query::<(Entity, &AmbientCar, &Position, &RigidBody)>();
+        let (_, c, p, rb) = q
+            .iter(app.world())
+            .find(|(e, ..)| *e == car)
+            .expect("the wreck despawned");
+        (c.cursor, p.0, matches!(rb, RigidBody::Dynamic))
+    };
+    assert!(still_dynamic);
+    assert_eq!(frozen, cursor, "the lane driver re-posed a knocked car");
+    assert!(pos.is_finite(), "the solver diverged: {pos:?}");
+    let knocked = app
+        .world_mut()
+        .query::<&AmbientCar>()
+        .iter(app.world())
+        .filter(|c| c.drive == AmbientDrive::Knocked)
+        .count();
+    assert_eq!(knocked, 1, "a duplicate wreck appeared");
+
+    // The striker was physically shoved — the pair really collided.
+    let p = app
+        .world()
+        .get::<Position>(striker)
+        .expect("the striker despawned")
+        .0;
+    assert!(
+        p.distance(spot) > 0.3,
+        "the striker never felt the impact: {p:?}"
+    );
+}
+
+/// A 50 kg cone-mass striker only registers ~750 N·s of estimated
+/// impulse — under the designed 4000 floor — so the follower stays a
+/// kinematic lane follower and drives on (spec: a light touch must
+/// not hand over).
+#[test]
+fn a_light_touch_leaves_the_car_lane_following() {
+    let install = junction_install(0, 0);
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+
+    let lane_r0 = lane(0, Side::Right);
+    let car = spawn_follower(&mut app, lane_r0, 10.0, 15.0);
+    let spot = {
+        let t = app.world().resource::<AmbientTraffic>();
+        let s = t
+            .graph()
+            .sample_lane(lane_r0, 14.0)
+            .expect("a live lane samples");
+        Vec3::from(s.position) + Vec3::Y * 0.55
+    };
+    app.world_mut().spawn((
+        RigidBody::Dynamic,
+        Collider::cuboid(1.8, 1.1, 1.8),
+        Mass(50.0),
+        CollisionEventsEnabled,
+        Position(spot),
+        Transform::from_translation(spot),
+    ));
+
+    // ~9 s — long past the striker and several contact ticks.
+    run(&mut app, 90);
+    assert_eq!(
+        app.world().resource::<AmbientTraffic>().knocked,
+        0,
+        "a light touch knocked the follower"
+    );
+    let (drive, body, cur) = {
+        let mut q = app.world_mut().query::<(Entity, &AmbientCar, &RigidBody)>();
+        let (_, c, rb) = q
+            .iter(app.world())
+            .find(|(e, ..)| *e == car)
+            .expect("the car despawned");
+        (c.drive, *rb, c.cursor)
+    };
+    assert_eq!(drive, AmbientDrive::Lane);
+    assert!(matches!(body, RigidBody::Kinematic));
+    assert!(
+        cur.lane != lane_r0 || cur.along > 20.0,
+        "the car never drove past the light striker: {cur:?}"
+    );
+}
+
+/// A knocked wreck lying inside the junction box — its lane cursor
+/// still nominally bound for this junction — is not shielded by
+/// `bound_for` (only `Lane`-mode cars are) and so occupies the box:
+/// the green-lit approach stands at its stop line through a whole
+/// green until the wreck is removed (F10-AC03: a wreck remains a
+/// physical obstacle in the box).
+#[test]
+fn a_knocked_wreck_occupies_the_junction_box() {
+    let install = junction_install(1, 1);
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    {
+        let mut t = app.world_mut().resource_mut::<AmbientTraffic>();
+        t.junctions.policy.green_ticks = 120;
+        t.junctions.policy.clear_ticks = 60;
+    }
+
+    let lane_r0 = lane(0, Side::Right);
+    // The wreck: knocked on the approach lane, lying inside the 7 m
+    // zone but 6.75 m lateral of the approach corridor — only the
+    // box-yield sees it. Its cursor still points at this junction, so
+    // a `Lane`-mode car here would be bound_for-excluded; `Knocked`
+    // must not be.
+    let wreck_pos = Vec3::new(-3.0, 0.45, -3.0);
+    let wreck = app
+        .world_mut()
+        .spawn((
+            AmbientCar {
+                class: 0,
+                drive: AmbientDrive::Knocked,
+                cursor: LaneCursor {
+                    lane: lane_r0,
+                    along: 26.0,
+                },
+                target_speed: 0.0,
+                speed: 0.0,
+                stuck: StuckWindow::new(wreck_pos.to_array()),
+            },
+            RigidBody::Dynamic,
+            Collider::cuboid(1.8, 0.9, 3.2),
+            Mass(1200.0),
+            CollisionEventsEnabled,
+            Position(wreck_pos),
+            LinearVelocity::ZERO,
+            AngularVelocity::ZERO,
+            Transform::from_translation(wreck_pos),
+        ))
+        .id();
+    let car = spawn_follower(&mut app, lane_r0, 15.0, 15.0);
+
+    let mut stood_on_green = 0usize;
+    let mut held_seen = 0usize;
+    for _ in 0..300 {
+        app.update();
+        held_seen = held_seen.max(app.world().resource::<AmbientTraffic>().junction_held);
+        let green = {
+            let t = app.world().resource::<AmbientTraffic>();
+            t.junctions.green_road(t.graph(), 0)
+        };
+        let (pos, speed, cur) = car_state(&mut app, car).expect("the yielded car despawned");
+        assert_eq!(cur.lane, lane_r0, "entered an occupied box");
+        assert!(
+            pos.z < -5.0,
+            "past the stop line inside an occupied box: {pos:?}"
+        );
+        assert!(
+            cur.along <= 24.0,
+            "oscillating at the lane end — the yield never ran: {cur:?}"
+        );
+        if green == Some(0) && cur.along >= 23.0 && speed <= 1.0 {
+            stood_on_green += 1;
+        }
+    }
+    assert!(
+        held_seen >= 1,
+        "the yielded car never reported junction-held"
+    );
+    assert!(
+        stood_on_green >= 40,
+        "the car did not stand through a green: {stood_on_green}"
+    );
+
+    // Clearing the wreck releases the yield on a later green.
+    app.world_mut().despawn(wreck);
+    assert!(
+        run_until(&mut app, 1500, |a| {
+            car_state(a, car).is_none_or(|(_, _, c)| c.lane != lane_r0)
+        }),
+        "the cleared box never released the approach"
     );
 }

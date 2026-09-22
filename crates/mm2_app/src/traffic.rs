@@ -78,6 +78,23 @@
 //! the yield is a bounded approximation over the same position
 //! snapshot the corridor sense reads, and the colliders resolve any
 //! residual overlap physically.
+//!
+//! F10-B.6 adds the kinematic→dynamic handover (F10-AC03's collision
+//! leg — the spec's "transition to dynamic behaviour without
+//! duplicating bodies or injecting extreme energy"). [`knock_ambient`]
+//! is a third consumer of the solver's `CollisionStart` stream: a
+//! lane-following car struck by a contact whose impulse estimate
+//! (approach speed × striker mass — the same quantity banger
+//! activation gates on) reaches `KnockPolicy::min_impulse` flips to
+//! `RigidBody::Dynamic` on the same entity — same hull, same velocity
+//! — and leaves the lane system: `drive_ambient` never re-poses it,
+//! the FCFS queue releases it, and as a `Knocked` car it no longer
+//! counts as "bound for" its approach junction, so a wreck resting
+//! inside the box holds the yielded approaches like any other
+//! occupant. The recovery is the ordinary distance recycler — the
+//! wreck stays a physical obstacle until the player's bubble collects
+//! it (documented approximation; the original's crash behaviour is
+//! unverified, UNK-12).
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
@@ -90,16 +107,17 @@ use mm2_formats::aimap::Aimap;
 use mm2_formats::bai::VehicleRule;
 use mm2_formats::veh::AiVehicleData;
 use mm2_game::{
-    AmbientRoster, AmbientSpec, AuthorityRole, FollowPolicy, JunctionGate, Junctions, LaneAdvance,
-    LaneCursor, LaneId, NavGraph, NavOverrides, NavRng, ObjectIdentity, Player, Session,
-    SessionConfig, SessionEntity, SessionPhase, SpawnDirective, SpawnDraw, SpawnPolicy,
+    AmbientRoster, AmbientSpec, AuthorityRole, FollowPolicy, JunctionGate, Junctions, KnockPolicy,
+    LaneAdvance, LaneCursor, LaneId, NavGraph, NavOverrides, NavRng, ObjectIdentity, Player,
+    Session, SessionConfig, SessionEntity, SessionPhase, SpawnDirective, SpawnDraw, SpawnPolicy,
     StuckPolicy, StuckWindow, WorldMode, advance_lane_cursor, corridor_gap, draw_spawn,
     eligible_lanes, follow_speed, inside_junction_zone, junction_speed, junction_zone,
     plan_ambient,
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::car_visual::spawn_vehicle_model;
+use crate::contracts::{deepest_contact, impulse_estimate};
 
 /// A `va_*` class's runtime assets: render model plus the collider the
 /// bound (or, failing that, the tuning's authored `Size`) describes.
@@ -153,6 +171,13 @@ pub struct AmbientTraffic {
     /// The displacement-window policy the recovery runs under —
     /// `pub` so evidence runs and tests can bind a shorter window.
     pub stuck_policy: StuckPolicy,
+    /// Cars handed to dynamic bodies by a qualifying impact
+    /// (F10-B.6) — cumulative; the wrecks themselves stay active
+    /// population until the distance recycler collects them.
+    pub knocked: usize,
+    /// The impulse threshold the handover runs under — `pub` so
+    /// evidence runs and tests can bind a different gate.
+    pub knock_policy: KnockPolicy,
     /// The per-junction right-of-way/signal controller (F10-B.2) —
     /// session-scoped like the plan it polices.
     pub junctions: Junctions,
@@ -168,11 +193,26 @@ impl AmbientTraffic {
     }
 }
 
+/// How an ambient car is moving: a kinematic lane follower, or a
+/// dynamic body after a qualifying impact (F10-B.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AmbientDrive {
+    /// Lane-following — `drive_ambient` owns the pose every tick.
+    #[default]
+    Lane,
+    /// Knocked — Avian owns the pose. The car is an obstacle, not a
+    /// driver: no cursor advance, no gate, no stuck window; the
+    /// distance recycler collects it like any other car.
+    Knocked,
+}
+
 /// One ambient car on the network.
 #[derive(Component)]
 pub struct AmbientCar {
     /// Roster index the class draw selected.
     pub class: usize,
+    /// Whether the car lane-follows or lies where a collision left it.
+    pub drive: AmbientDrive,
     /// Position on the authored network (travel-direction distance).
     pub cursor: LaneCursor,
     /// The current road's effective speed — refreshed on every turn so
@@ -286,6 +326,8 @@ pub fn load_ambient_traffic(
         junction_held: 0,
         stuck: 0,
         stuck_policy: StuckPolicy::default(),
+        knocked: 0,
+        knock_policy: KnockPolicy::default(),
         junctions: Junctions::default(),
         issues: plan
             .issues
@@ -405,6 +447,21 @@ fn spawn_ambient_car(
     let yaw = (-tangent.x).atan2(-tangent.z);
     let pitch = tangent.y.clamp(-1.0, 1.0).asin();
     let rot = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
+    // Authored physicals ride the kinematic body already: they shape
+    // resting contact the same way, and the F10-B.6 handover only has
+    // to flip the body kind — the same convention `banger_bundle`
+    // uses for dormant props. The authored CG sits in the same
+    // vehicle-local space the bound verts and `size_collider`'s hull
+    // use; a degenerate/absent mass or CG falls back to sane defaults.
+    let mass = if tuning.mass.is_finite() && tuning.mass > 0.0 {
+        tuning.mass
+    } else {
+        1000.0
+    };
+    let cg = tuning
+        .cg
+        .filter(|c| c.iter().all(|v| v.is_finite()))
+        .unwrap_or([0.0, tuning.size[1] * 0.5, 0.0]);
     let entity = commands
         .spawn((
             owner,
@@ -412,6 +469,7 @@ fn spawn_ambient_car(
             role,
             AmbientCar {
                 class: directive.class,
+                drive: AmbientDrive::Lane,
                 cursor: LaneCursor {
                     lane: directive.lane,
                     along: directive.along,
@@ -422,8 +480,16 @@ fn spawn_ambient_car(
             },
             RigidBody::Kinematic,
             class.collider.clone(),
-            Friction::new(tuning.friction),
-            Restitution::new(tuning.elasticity),
+            (
+                Mass(mass),
+                CenterOfMass(Vec3::from(cg)),
+                // The striker usually enables the pair's events (the
+                // vehicle does), but wreck-vs-car and prop-fragment
+                // strikers need the flag on this side too.
+                CollisionEventsEnabled,
+                Friction::new(tuning.friction),
+                Restitution::new(tuning.elasticity),
+            ),
             Position(pos),
             Rotation(rot),
             LinearVelocity(tangent * directive.target_speed.max(0.0)),
@@ -507,15 +573,21 @@ pub fn drive_ambient(
     // distinguishing who it is.
     let mut blockers: Vec<(Entity, Vec3)> = players.iter().map(|(e, p)| (e, p.0)).collect();
     blockers.extend(cars.iter().map(|(e, _, p, _, _, _)| (e, p.0)));
-    // The junction each ambient car's current lane is bound for (the
-    // downstream end of its arc). The box-yield must not count a car
-    // as occupying the junction it is still approaching — a car
-    // waiting at or behind its own stop line is not inside the box,
-    // or two competing approaches would hold each other forever.
+    // The junction each lane-following ambient car's current lane is
+    // bound for (the downstream end of its arc). The box-yield must
+    // not count a car as occupying the junction it is still
+    // approaching — a car waiting at or behind its own stop line is
+    // not inside the box, or two competing approaches would hold each
+    // other forever. A `Knocked` car is not bound for anything: it is
+    // an obstacle wherever the collision left it, so a wreck inside
+    // the box legitimately occupies it.
     let bound_for: HashMap<Entity, u16> = cars
         .iter()
         .filter_map(|(e, c, ..)| {
-            Junctions::approach(&traffic.graph, c.cursor.lane).map(|(ix, _, _)| (e, ix))
+            (c.drive == AmbientDrive::Lane)
+                .then(|| Junctions::approach(&traffic.graph, c.cursor.lane))
+                .flatten()
+                .map(|(ix, _, _)| (e, ix))
         })
         .collect();
     let follow = FollowPolicy::default();
@@ -533,6 +605,12 @@ pub fn drive_ambient(
     for (entity, mut car, mut position, mut rotation, mut velocity, mut transform) in
         cars.iter_mut()
     {
+        // A knocked car is solver-owned: no cursor advance, no gate,
+        // no pose rewrite, no stuck window — the distance recycler
+        // collects it like any other car.
+        if car.drive == AmbientDrive::Knocked {
+            continue;
+        }
         let fwd = rotation.0 * Vec3::NEG_Z;
         let reach = follow.near + follow.lead * car.speed.max(0.0);
         let gap = corridor_gap(
@@ -696,6 +774,104 @@ pub fn drive_ambient(
     }
     traffic.queued = queued;
     traffic.junction_held = junction_held;
+}
+
+/// Kinematic→dynamic handover (F10-B.6): a third consumer of the
+/// solver's `CollisionStart` stream, alongside `collect_impacts` and
+/// `activate_bangers`. A lane-following car whose contact's impulse
+/// estimate — approach speed × striker mass, measured the same way
+/// banger activation measures it — reaches `KnockPolicy::min_impulse`
+/// becomes a dynamic body on the same entity: the hull, pose and lane
+/// velocity carry over unchanged (no duplicate body, no teleport) and
+/// at most the striker's approach speed is added along the contact
+/// normal — the energy the hit actually carried. The FCFS queue
+/// releases the car and `drive_ambient` never re-poses it: from the
+/// flip on, it is a wreck the other cars' corridor sense and the box
+/// yield treat as an obstacle, until the ordinary distance recycler
+/// collects it. Below-threshold touches leave the follower alone —
+/// a scrape or a light tap does not convert the car.
+///
+/// Drains under the same phase/authority gate as `drive_ambient`:
+/// edges buffered while paused never flush as a stale burst on
+/// resume, and a `Predicted` session never hands over locally.
+pub fn knock_ambient(
+    mut reader: MessageReader<CollisionStart>,
+    collisions: Collisions,
+    session: Res<Session>,
+    traffic: Option<ResMut<AmbientTraffic>>,
+    mut cars: Query<(&mut AmbientCar, &mut LinearVelocity)>,
+    masses: Query<&ComputedMass>,
+    mut commands: Commands,
+) {
+    let Some(mut traffic) = traffic else {
+        reader.read().for_each(drop);
+        return;
+    };
+    if !session.authority_role().is_authority()
+        || !matches!(
+            session.phase(),
+            SessionPhase::Countdown | SessionPhase::Playing
+        )
+    {
+        reader.read().for_each(drop);
+        return;
+    }
+    let policy = traffic.knock_policy;
+
+    // Decide first, mutate second — the decision pass only reads.
+    let mut kicks: Vec<(Entity, Vec3)> = Vec::new();
+    for event in reader.read() {
+        // Either side may be the ambient car; the other body is the
+        // striker. The manifold normal points from collider1 toward
+        // collider2, so `sign` turns it into the push direction on
+        // the car (same convention `activate_bangers` uses).
+        for (collider, striker, sign) in [
+            (
+                event.collider1,
+                event.body2.unwrap_or(event.collider2),
+                -1.0f32,
+            ),
+            (
+                event.collider2,
+                event.body1.unwrap_or(event.collider1),
+                1.0f32,
+            ),
+        ] {
+            let Ok((car, _)) = cars.get(collider) else {
+                continue;
+            };
+            if car.drive != AmbientDrive::Lane {
+                continue;
+            }
+            let Some((_, normal, severity)) =
+                deepest_contact(&collisions, event.collider1, event.collider2)
+            else {
+                continue;
+            };
+            if severity <= 0.0 {
+                continue;
+            }
+            if impulse_estimate(striker, severity, &masses) < policy.min_impulse {
+                continue;
+            }
+            kicks.push((collider, normal * sign * severity));
+        }
+    }
+
+    for (entity, kick) in kicks {
+        let Ok((mut car, mut linvel)) = cars.get_mut(entity) else {
+            continue;
+        };
+        if car.drive != AmbientDrive::Lane {
+            continue;
+        }
+        car.drive = AmbientDrive::Knocked;
+        linvel.0 += kick;
+        traffic.knocked += 1;
+        traffic.junctions.depart(entity);
+        commands.entity(entity).insert(RigidBody::Dynamic);
+        debug!(entity = ?entity, "ambient car knocked to dynamics");
+    }
 }
 
 /// Keep the population at the plan's target: despawn cars that left

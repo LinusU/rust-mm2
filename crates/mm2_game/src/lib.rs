@@ -75,9 +75,10 @@ pub use surface::{SurfaceMaterial, SurfaceState};
 pub use telemetry::{DamageSignals, VehicleTelemetry, WheelTelemetry};
 pub use traffic::{
     AmbientPlan, AmbientRoster, AmbientSpec, FollowPolicy, JunctionGate, JunctionPolicy, Junctions,
-    LaneAdvance, LaneCursor, SpawnDirective, SpawnDraw, SpawnPolicy, StuckPolicy, StuckWindow,
-    TrafficIssue, advance_lane_cursor, corridor_gap, draw_spawn, eligible_lanes, follow_speed,
-    inside_junction_zone, junction_speed, junction_zone, plan_ambient, spawn_occupied,
+    KnockPolicy, LaneAdvance, LaneCursor, SpawnDirective, SpawnDraw, SpawnPolicy, StuckPolicy,
+    StuckWindow, TrafficIssue, advance_lane_cursor, corridor_gap, draw_spawn, eligible_lanes,
+    follow_speed, inside_junction_zone, junction_speed, junction_zone, plan_ambient,
+    spawn_occupied,
 };
 
 /// What the app should do at startup.

@@ -52,7 +52,7 @@ use mm2_game::{
 use mm2_vehicle::StrikeBound;
 use tracing::{debug, warn};
 
-use crate::contracts::deepest_contact;
+use crate::contracts::{deepest_contact, impulse_estimate};
 
 /// One authored `BREAK<NN>` piece of a breakable prop — the parts the
 /// break transition turns into a fragment body: the chunk's render
@@ -245,20 +245,6 @@ struct Activation {
     estimate: f32,
     dir: Vec3,
     point: Vec3,
-}
-
-/// Estimated impulse of a contact on a dormant banger (kg·m/s):
-/// approach speed × the striker's mass — the provisional quantity
-/// `ImpulseLimit2` is compared against (UNK-22). A striker without a
-/// resolvable mass counts as 1 kg — a light touch, not a hidden force.
-fn impulse_estimate(striker: Entity, severity: f32, masses: &Query<&ComputedMass>) -> f32 {
-    let mass = masses
-        .get(striker)
-        .map(|m| m.value())
-        .ok()
-        .filter(|m| m.is_finite() && *m > 0.0)
-        .unwrap_or(1.0);
-    severity * mass
 }
 
 /// Claim one active-pool slot for a transition or fragment spawn.

@@ -222,7 +222,9 @@ pub fn headless_smoke(
                 race::advance_race,
                 // F10-A.2: ambient lane-following + recycle/respawn —
                 // the headless record's `traf=` field reads the state
-                // these leave behind.
+                // these leave behind. F10-B.6's handover runs before
+                // the driver (knock → drive → maintain).
+                crate::traffic::knock_ambient,
                 crate::traffic::drive_ambient,
                 crate::traffic::maintain_ambient,
             )
@@ -461,7 +463,7 @@ pub fn headless_smoke(
                 .iter_entities()
                 .filter(|e| e.get::<crate::traffic::AmbientCar>().is_some())
                 .count();
-            format!(
+            let mut s = format!(
                 " traf={}/{} sp={} rec={} dead={} uns={} q={} jq={} stuck={}",
                 active,
                 t.target,
@@ -472,7 +474,13 @@ pub fn headless_smoke(
                 t.queued,
                 t.junction_held,
                 t.stuck
-            )
+            );
+            // F10-B.6 handover count only when nonzero — records from
+            // knock-free runs stay bit-identical to earlier ones.
+            if t.knocked > 0 {
+                s.push_str(&format!(" kn={}", t.knocked));
+            }
+            s
         })
         .unwrap_or_default();
     // Banger evidence: how many bound placements exist and how the

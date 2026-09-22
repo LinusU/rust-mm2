@@ -1154,6 +1154,39 @@ impl StuckWindow {
     }
 }
 
+// ---------- collision handover (F10-B.6) ----------
+
+/// Bounds on the kinematic→dynamic handover a lane-following ambient
+/// car takes when a contact hits it hard enough (F10-B.6). All values
+/// are designed — the original's ambient collision behaviour is
+/// unverified (UNK-12 covers the ambient policy constants generally).
+///
+/// The gate is an impulse *estimate* — approach speed × striker mass,
+/// the same quantity banger activation compares to the authored
+/// `ImpulseLimit2` — so a real vehicle hit hands the car to the solver
+/// while a light brush, or a lane path scraping world geometry (a
+/// massless striker reads 1 kg), never does. The handover itself adds
+/// at most the striker's approach speed of velocity along the contact
+/// normal — the energy the impact actually carried, never a scaled-up
+/// kick — so "transition to dynamic behaviour without injecting
+/// extreme energy" (F10 req 4) holds by construction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KnockPolicy {
+    /// Impulse estimate (kg·m/s) at or above which contact with a
+    /// lane-following car flips it to a dynamic body. 4000 reads
+    /// ~3 m/s off a stock-mass striker and ~8 m/s off a light one —
+    /// a real hit, not a parking-lot nudge.
+    pub min_impulse: f32,
+}
+
+impl Default for KnockPolicy {
+    fn default() -> Self {
+        Self {
+            min_impulse: 4000.0,
+        }
+    }
+}
+
 /// The speed a closed gate allows at `dist_to_stop` metres before the
 /// stop line — a `decel`-limited ramp to a standstill at the line. An
 /// open gate imposes nothing (returns `speed`); the law never
