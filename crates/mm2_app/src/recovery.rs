@@ -72,17 +72,34 @@ impl RecoveryReport {
 /// is dry purchase; every grounded wheel at or above it is water; no
 /// grounded wheels is air. Unmarked colliders report `0.0` — ordinary
 /// ground by definition.
-fn ground_contact(state: &VehicleState, water_min_drag: f32) -> GroundContact {
+///
+/// The authored `.water` record (F18-A.6, [`crate::water::CityWater`])
+/// overlays both arms: a wheel contact inside a listed deadly room
+/// at/below its bound is water whatever the collider's `drag` says —
+/// the room is authored deadly, not the material — and a car under a
+/// listed room's bound with no contact at all (clipped through the
+/// plane) drowns rather than free-falls.
+fn ground_contact(
+    state: &VehicleState,
+    pos: Vec3,
+    water_min_drag: f32,
+    water: Option<&crate::water::CityWater>,
+) -> GroundContact {
     let mut grounded = false;
     let mut dry = false;
     for w in &state.wheels {
         if w.grounded {
             grounded = true;
-            dry |= w.surface_drag < water_min_drag;
+            let deadly = water.is_some_and(|water| water.is_deadly(w.contact_point));
+            dry |= w.surface_drag < water_min_drag && !deadly;
         }
     }
     if !grounded {
-        GroundContact::Airborne
+        if water.is_some_and(|water| water.is_deadly(pos)) {
+            GroundContact::Submerged
+        } else {
+            GroundContact::Airborne
+        }
     } else if dry {
         GroundContact::Dry
     } else {
@@ -116,6 +133,7 @@ type RecoveryVehicles<'w, 's> = Query<
 pub fn track_recovery(
     session: Res<Session>,
     time: Res<Time<Fixed>>,
+    water: Option<Res<crate::water::CityWater>>,
     mut vehicles: RecoveryVehicles,
     mut writer: MessageWriter<RecoveryEvent>,
     mut report: ResMut<RecoveryReport>,
@@ -128,6 +146,7 @@ pub fn track_recovery(
     let dt = time.delta_secs();
     let generation = session.generation();
     let tick = session.tick();
+    let water = water.as_deref();
     for (.., id, player, pos, rot, state, mut recovery, damage) in &mut vehicles {
         if player.is_some_and(|p| p.control == PlayerControl::Remote) {
             continue;
@@ -137,7 +156,7 @@ pub fn track_recovery(
         if damage.is_some_and(|d| d.condition() == DamageTier::Disabled) {
             continue;
         }
-        let contact = ground_contact(state, recovery.policy.water_min_drag);
+        let contact = ground_contact(state, pos.0, recovery.policy.water_min_drag, water);
         let (_, yaw, _) = rot.0.to_euler(EulerRot::YXZ);
         if let RecoveryVerdict::Recover { cause, landing } =
             recovery.observe(pos.0, yaw, contact, dt)

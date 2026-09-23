@@ -192,17 +192,41 @@ not part of the file format — the parser takes the inflated text.
 
 Parser: `mm2_formats::cpvs::PvsHist` (`rows: Vec<PvsHistRow>`).
 
-## `.water` — water level + room refs (verified format, inferred semantics)
+## `.water` — water level + deadly rooms (verified format; ref kind verified 2026-09-23)
 
 Text: first non-blank line is the water level (world Y), following
-lines are integer references (PSDL block/room ids per R3 — unverified).
+lines are integer references.
 
 - `city/london.water`: level −3.8, refs [345, 351, 356]
 - `city/sf.water`: level −1.9, refs [228, 399, 401]
 
-All refs are < the city's PSDL room count. Which consumer reads the
-level, and what the refs bound (water rooms? deadly volumes?), is
-unverified (UNK-24). Parser: `mm2_formats::water::WaterDef`.
+The refs are **1-based PSDL room ids** — the same space
+`PerimeterPoint.room`, `road_rooms` and the `.cpvs` lists use
+(measured: every ref resolves to a flat, attribute-less perimeter
+room sitting at the water plane — London's three cover Thames reaches
+at y = −4.0 under the −3.8 level, SF's cover ocean reaches at −2.0
+under −1.9; the 0-based reading lands SF's 401 on a road tunnel at
+y ≈ +30, which refutes it). The listed rooms carry no attributes of
+their own — they are perimeter-only volumes overlaying the water
+surface, not the water-textured fan rooms (42 water-textured rooms
+exist on SF alone, so the refs select *deadly* water regions, not
+every visible water plane).
+
+The mm2kiwi description ("the height of deadly water — if a vehicle
+goes below this height it sleeps with the fishes. Possibly a list of
+PSDL block ids can be listed for blocks that define deadly water at
+any height") is consistent with the shape, but a *global* below-level
+kill is refuted by the data: London authors real BAI traffic lanes at
+y ≈ −6.7…−22.1 (below-grade roads under the −3.8 level), and no BAI
+road routes through the referenced rooms. The original runtime
+consumer — which system reads the record, what "deadly" does, and how
+the room bounds compose with the level — stays unrecovered (UNK-24).
+The implemented consumer is a designed policy: `mm2_app::water`'s
+`CityWater` treats a point as exposed inside a listed room's authored
+XZ perimeter at/below `max(level, room-top)` and feeds
+`track_recovery`'s contact classification (DSN-34).
+
+Parser: `mm2_formats::water::WaterDef`.
 
 ## `.lmap` — per-room light map (verified format, semantics unrecovered)
 
@@ -242,7 +266,7 @@ authored anomalies (self-invisible rooms, the sf lmap shortfall, the
 0xCDCDCDCD sentinel, dev-path sources) are notes/findings, so a stock
 retail install exits 0.
 
-## Runtime consumption (F18-A.2/.3/.4/.5)
+## Runtime consumption (F18-A.2/.3/.4/.5/.6)
 
 The `.ltNN` presets bind to Bevy lighting and the `_fog.csv` row binds
 to Bevy fog through the production session path —
@@ -366,14 +390,32 @@ authored texture; frozen-`--cam` captures pitched up at the dome show
 the authored cloud/gradient textures on both cities (Metal/Apple M1,
 PNGs inspected).
 
+The `.water` record (F18-A.6) loads beside the PSDL into a
+session-scoped `mm2_app::water::CityWater` — the authored level plus
+each ref resolved to its room's XZ perimeter and a deadly bound of
+`max(level, room-top)`. `track_recovery` (F05-B.5) reads it as an
+overlay on the wheel-`drag` classification: a grounded wheel whose
+contact point is exposed counts as water whatever the collider's
+material says, and a car under a listed room's bound with no contact
+(clipped through the plane) accrues the submersion dwell instead of
+free-falling. Verified on retail (2026-09-23): both cities load
+`wtr=<level>/3r`, and a `--spawn` inside a listed room below the bound
+recovers through `rcv=<n>w/0f/<n>r` with `never grounded` — the
+overlay fires where no wheel contact exists. The designed parts —
+room-scoped bound, the `max(level, room-top)` elevated-water reading,
+contact-point exposure — are DSN-34; the original consumer stays
+unrecovered (UNK-24).
+
 Still not consumed (UNK-24 stays open): `.cpvs` variant selection
 (the numbered `<stem>_N` files — the base table now culls), `.ldef`
 rows, `.pvshist` weights, `.lmap` values,
-`.water`, precipitation/wetness/audio effects (F18-B/C scope), and
+precipitation/wetness/audio effects (F18-B/C scope), and
 authoritative network replication of conditions (F18 req 5). The
 dome's three `.sky` floats are bound under designed readings
 (world-height / vertical squash / radians-per-second) — the original's
 transform composition and rotation units are unverified. The fog
 curve's exact original shape (the linear reading is inferred), any
 per-weather `.cpvs` variant switching the recovered `lvlSky` may
-drive, and `sf_fog_orig.csv`'s role also stay open.
+drive, `.water`'s original consumer and exact room/level composition
+(the implemented overlay is designed), and `sf_fog_orig.csv`'s role
+also stay open.

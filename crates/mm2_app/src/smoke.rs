@@ -580,6 +580,21 @@ pub fn headless_smoke(
             }
         })
         .unwrap_or_default();
+    // F18-A.6 deadly-water evidence: the authored level and how many
+    // refs resolved to rooms (`wtr=<level>/<rooms>r`, plus `+Ns` when
+    // refs were skipped). Absent without a loaded record so dev-world
+    // and mod-city runs stay bit-identical.
+    let wtr_detail = world_ecs
+        .get_resource::<crate::water::CityWater>()
+        .map(|w| {
+            let skipped = if w.skipped() > 0 {
+                format!("+{}s", w.skipped())
+            } else {
+                String::new()
+            };
+            format!(" wtr={}/{}r{}", w.level(), w.room_count(), skipped)
+        })
+        .unwrap_or_default();
     // F10-A.2 ambient evidence: live/target population plus the
     // recycler counters. Absent on worlds without a rostered aimap so
     // those records stay bit-identical.
@@ -790,7 +805,7 @@ pub fn headless_smoke(
     };
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks}{rs_detail} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{nav_detail}{env_detail}{pvs_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{txl_detail}{traction_detail}{profile_detail}{extra}",
+            "updates={frames} ticks={ticks}{rs_detail} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{txl_detail}{traction_detail}{profile_detail}{extra}",
             driver.as_str(),
             session.phase().name(),
         )

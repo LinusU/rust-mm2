@@ -940,6 +940,86 @@ fn numbered_frames_load_as_a_texture_sequence() {
     assert!(load_image_sequence(&vfs, "s_missing").is_empty());
 }
 
+/// F18-A.6 helper: run `load_city` on `root`'s `city/test.psdl` and
+/// return the bound record — the VFS path the session uses.
+fn load_test_city(root: &std::path::Path) -> mm2_app::city::LoadedCity {
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(root, 0).unwrap();
+    let mut world = World::new();
+    let mut queue = CommandQueue::default();
+    let mut meshes: Assets<Mesh> = Assets::default();
+    let mut images: Assets<Image> = Assets::default();
+    let mut materials: Assets<StandardMaterial> = Assets::default();
+    let loaded = {
+        let mut commands = Commands::new(&mut queue, &world);
+        let mut session = mm2_game::Session::new();
+        load_city(
+            &mut commands,
+            &vfs,
+            "city/test.psdl",
+            &mut meshes,
+            &mut images,
+            &mut materials,
+            SessionEntity(1),
+            &mut session,
+        )
+        .expect("city loads")
+    };
+    queue.apply(&mut world);
+    loaded
+}
+
+/// F18-A.6: the sibling `city/<stem>.water` record binds over the
+/// loaded PSDL — refs are 1-based room ids, a ref past the room count
+/// is skipped rather than reinterpreted, and the record rides
+/// `LoadedCity` into the session.
+#[test]
+fn vfs_to_city_binds_the_water_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("city")).unwrap();
+    std::fs::create_dir_all(root.join("texture")).unwrap();
+    std::fs::write(root.join("city/test.psdl"), synthetic_psdl()).unwrap();
+    std::fs::write(
+        root.join("texture/test_road.png"),
+        include_bytes!("../../../assets/texture/dev_road.png"),
+    )
+    .unwrap();
+    std::fs::write(root.join("city/test.water"), "0.5\n1\n7\n").unwrap();
+
+    let loaded = load_test_city(root);
+    let water = loaded.water.expect("the .water record bound");
+    assert_eq!(water.level(), 0.5);
+    assert_eq!(water.room_ids().collect::<Vec<_>>(), vec![1]);
+    assert_eq!(water.skipped(), 1, "ref 7 resolves to no room");
+}
+
+/// Missing and unusable `.water` files never sink a loadable city —
+/// the session simply gets no `CityWater` and the wheel-`drag`
+/// classification (F05-B.5) still covers water materials.
+#[test]
+fn vfs_to_city_loads_without_a_water_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("city")).unwrap();
+    std::fs::create_dir_all(root.join("texture")).unwrap();
+    std::fs::write(root.join("city/test.psdl"), synthetic_psdl()).unwrap();
+    std::fs::write(
+        root.join("texture/test_road.png"),
+        include_bytes!("../../../assets/texture/dev_road.png"),
+    )
+    .unwrap();
+    assert!(load_test_city(root).water.is_none(), "no .water file");
+
+    // A malformed record parses to nothing rather than guessing.
+    std::fs::write(root.join("city/test.water"), "deep\n").unwrap();
+    assert!(load_test_city(root).water.is_none(), "unparseable level");
+
+    // A non-finite level is rejected even when it parses.
+    std::fs::write(root.join("city/test.water"), "NaN\n1\n").unwrap();
+    assert!(load_test_city(root).water.is_none(), "non-finite level");
+}
+
 /// Real-content validation: runs only when the gitignored `retail/` tree is
 /// present (user-supplied MM2 data). Skips silently otherwise.
 #[test]

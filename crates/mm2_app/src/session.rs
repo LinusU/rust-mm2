@@ -236,6 +236,7 @@ pub fn drive_session(
             commands.remove_resource::<crate::damage_fx::SmokeFx>();
             commands.remove_resource::<crate::spark_fx::SparkFx>();
             commands.remove_resource::<crate::pvs::CityPvs>();
+            commands.remove_resource::<crate::water::CityWater>();
             // `TireConditions` stays: it is a system input (the impact
             // filter and telemetry read `Res` every frame), and
             // `load_session_world` re-stamps it from the next session's
@@ -406,6 +407,14 @@ pub fn load_session_world(
                     if let Some(mut pvs) = loaded.pvs {
                         pvs.enabled = !config.dev.no_pvs;
                         commands.insert_resource(pvs);
+                    }
+                    // F18-A.6: the authored deadly-water record is
+                    // session-scoped like `CityPvs` — dev worlds and
+                    // cities without a usable `.water` get no
+                    // resource, so `track_recovery` falls back to the
+                    // wheel-`drag` classification alone.
+                    if let Some(water) = loaded.water {
+                        commands.insert_resource(water);
                     }
                     info!(report = %loaded.report, "city ready");
                 }

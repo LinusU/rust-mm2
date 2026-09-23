@@ -37,8 +37,9 @@ use mm2_formats::{
     pathset,
     pkg::{Pkg, PkgStrip, lod_split},
     proprules::{self, PropRuleSide},
-    psdl::{AttributeType, Psdl, RoomAttribute},
+    psdl::{AttributeType, Psdl, PsdlRoom, RoomAttribute},
     tex::TexFile,
+    water::{WaterDef, WaterIssue},
 };
 use mm2_game::{
     Banger, BangerDefinition, CityEntity, MAX_PATHSET_STAMPS, PropWalk, SIDEWALK_KERB_LIFT,
@@ -115,6 +116,17 @@ pub(crate) fn v3(p: [f32; 3]) -> Vec3 {
 #[inline]
 pub(crate) fn authored_z(z: f32) -> f32 {
     if MIRROR_Z { -z } else { z }
+}
+
+/// A room's containment polygon in authored (x, z) space — the
+/// perimeter's vertex indices resolved against the PSDL vertex pool,
+/// in order. Rooms with degenerate perimeters yield a polygon with
+/// fewer than three points, which `point_in_poly` never contains.
+pub(crate) fn room_poly(psdl: &Psdl, room: &PsdlRoom) -> Vec<(f32, f32)> {
+    room.perimeter
+        .iter()
+        .filter_map(|p| psdl.vertices.get(p.vertex as usize).map(|v| (v[0], v[2])))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -3266,6 +3278,10 @@ pub struct LoadedCity {
     /// The sibling `<stem>.cpvs` room-PVS table bound over the loaded
     /// PSDL's rooms, when the install ships one that parses (F18-A.5).
     pub pvs: Option<crate::pvs::CityPvs>,
+    /// The sibling `<stem>.water` deadly-water record bound over the
+    /// loaded PSDL's rooms, when the install ships one that parses
+    /// (F18-A.6).
+    pub water: Option<crate::water::CityWater>,
     /// Import statistics.
     pub report: CityReport,
 }
@@ -3661,11 +3677,61 @@ pub fn load_city(
             }
         });
 
+    // F18-A.6: the sibling `<stem>.water` deadly-water record — the
+    // file shape is verified; the refs resolve as 1-based PSDL room
+    // ids on retail (docs/research/environment.md). The original
+    // runtime consumer is unrecovered, so `CityWater`'s exposure rule
+    // is a designed policy scoped to the listed rooms — London's
+    // below-grade roads refute a global below-level kill. Missing or
+    // unparseable data yields no resource: the wheel-`drag`
+    // classification (F05-B.5) still covers the water materials.
+    let water = psdl_path
+        .strip_suffix(".psdl")
+        .map(|stem| format!("{stem}.water"))
+        .and_then(|path| match vfs.read_path(&path) {
+            Ok((bytes, res)) => match std::str::from_utf8(&bytes) {
+                Ok(text) => match WaterDef::parse(text) {
+                    Ok(def) => {
+                        let issues = def.validate();
+                        if issues.contains(&WaterIssue::NonFiniteLevel) {
+                            warn!(path = %res.logical, "water level is non-finite; deadly water off");
+                            return None;
+                        }
+                        for issue in &issues {
+                            warn!(path = %res.logical, ?issue, "water record issue");
+                        }
+                        let water = crate::water::CityWater::build(&def, &psdl);
+                        info!(
+                            path = %res.logical,
+                            level = water.level(),
+                            rooms = water.room_count(),
+                            skipped = water.skipped(),
+                            "deadly-water record loaded"
+                        );
+                        Some(water)
+                    }
+                    Err(e) => {
+                        warn!(path = %res.logical, error = %e, "water parse failed; deadly water off");
+                        None
+                    }
+                },
+                Err(e) => {
+                    warn!(path = %res.logical, error = %e, "water file is not utf-8; deadly water off");
+                    None
+                }
+            },
+            Err(e) => {
+                debug!(path = %path, error = %e, "no water record; deadly water off");
+                None
+            }
+        });
+
     Ok(LoadedCity {
         spawn: import.spawn,
         spawn_yaw: import.spawn_yaw,
         surfaces,
         pvs,
+        water,
         report,
     })
 }

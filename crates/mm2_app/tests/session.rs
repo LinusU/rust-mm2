@@ -488,6 +488,75 @@ fn restart_leaves_exactly_one_session() {
     );
 }
 
+/// F18-A.6: `CityWater` is session-scoped like `CityPvs` — a resource
+/// planted mid-session must not survive teardown into the next
+/// session (a city load inserts its own; the dev world inserts none).
+#[test]
+fn city_water_does_not_leak_across_restart() {
+    use mm2_formats::psdl::{PerimeterPoint, Psdl, PsdlRoom};
+    let psdl = Psdl {
+        target_size: 2,
+        vertices: vec![
+            [0.0, -4.0, 0.0],
+            [8.0, -4.0, 0.0],
+            [8.0, -4.0, 8.0],
+            [0.0, -4.0, 8.0],
+        ],
+        heights: Vec::new(),
+        textures: Vec::new(),
+        rooms: vec![PsdlRoom {
+            perimeter: (0..4)
+                .map(|k| PerimeterPoint { vertex: k, room: 0 })
+                .collect(),
+            attributes: Vec::new(),
+            unparsed_attributes: Vec::new(),
+        }],
+        room_flags: Vec::new(),
+        prop_rules: Vec::new(),
+        junction_count: 0,
+        bounds_min: [0.0; 3],
+        bounds_max: [0.0; 3],
+        bounds_center: [0.0; 3],
+        bounds_radius: 0.0,
+        paths: Vec::new(),
+    };
+    let water = mm2_app::water::CityWater::build(
+        &mm2_formats::water::WaterDef {
+            level: -3.8,
+            refs: vec![1],
+        },
+        &psdl,
+    );
+
+    let mut app = dev_app();
+    app.update();
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+    app.world_mut().insert_resource(water);
+    assert!(
+        app.world()
+            .get_resource::<mm2_app::water::CityWater>()
+            .is_some()
+    );
+
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::Backspace);
+    app.update();
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .clear();
+    assert!(
+        run_until(&mut app, 12, |a| phase_is(a, SessionPhase::Playing)),
+        "restart never returned to Playing"
+    );
+    assert!(
+        app.world()
+            .get_resource::<mm2_app::water::CityWater>()
+            .is_none(),
+        "a dev-world session must not inherit a stale CityWater"
+    );
+}
+
 /// AC01: quit also routes through teardown — the world despawns, the
 /// session reaches `Menu`, and the app is asked to exit.
 #[test]

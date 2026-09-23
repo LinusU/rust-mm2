@@ -35,3 +35,4 @@ pub mod spark_fx;
 pub mod stuck;
 pub mod texel_fx;
 pub mod traffic;
+pub mod water;

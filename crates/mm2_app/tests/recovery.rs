@@ -461,6 +461,150 @@ fn recovery_disarms_an_armed_stuck_episode() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// F18-A.6 — the authored `.water` deadly-room overlay
+// ---------------------------------------------------------------------------
+
+/// A `CityWater` bound over a synthetic one-room PSDL: room 1 covers
+/// authored `x ∈ [x0,x1], z ∈ [z0,z1]` as a flat plane at `room_y` and
+/// is the `.water` file's only ref — the Thames-room shape the retail
+/// refs describe (1-based room ids, level just above the plane).
+fn deadly_water(x: [f32; 2], z: [f32; 2], room_y: f32, level: f32) -> mm2_app::water::CityWater {
+    use mm2_formats::psdl::{PerimeterPoint, Psdl, PsdlRoom};
+    let psdl = Psdl {
+        target_size: 2,
+        vertices: vec![
+            [x[0], room_y, z[0]],
+            [x[1], room_y, z[0]],
+            [x[1], room_y, z[1]],
+            [x[0], room_y, z[1]],
+        ],
+        heights: Vec::new(),
+        textures: Vec::new(),
+        rooms: vec![PsdlRoom {
+            perimeter: (0..4)
+                .map(|k| PerimeterPoint { vertex: k, room: 0 })
+                .collect(),
+            attributes: Vec::new(),
+            unparsed_attributes: Vec::new(),
+        }],
+        room_flags: Vec::new(),
+        prop_rules: Vec::new(),
+        junction_count: 0,
+        bounds_min: [0.0; 3],
+        bounds_max: [0.0; 3],
+        bounds_center: [0.0; 3],
+        bounds_radius: 0.0,
+        paths: Vec::new(),
+    };
+    let def = mm2_formats::water::WaterDef {
+        level,
+        refs: vec![1],
+    };
+    mm2_app::water::CityWater::build(&def, &psdl)
+}
+
+/// A dragless slab inside a listed deadly room at/below its bound
+/// drowns even though `surface_drag` alone reads as ordinary ground —
+/// the room is authored deadly, not the material.
+#[test]
+fn a_dry_floor_inside_a_deadly_water_room_still_drowns() {
+    let (mut app, car, _object) = recovery_app(Vec3::new(0.0, 1.2, 0.0));
+    // Deadly room over x∈[45,75], z∈[-35,35] (symmetric z — the mirror
+    // is a no-op); bound = max(level 0.5, room top 0.0) = 0.5.
+    app.world_mut()
+        .insert_resource(deadly_water([45.0, 75.0], [-35.0, 35.0], 0.0, 0.5));
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::cuboid(20.0, 1.0, 20.0),
+        Position(Vec3::new(60.0, -0.5, 25.0)),
+        Transform::from_xyz(60.0, -0.5, 25.0),
+    ));
+    teleport(&mut app, car, Vec3::new(60.0, 1.0, 25.0));
+    run(&mut app, 80);
+    assert_eq!(report(&app).submerged, 1);
+    assert_eq!(report(&app).recovered, 1);
+}
+
+/// A deck above the bound inside the room's XZ perimeter stays dry —
+/// the bound still applies vertically, so a bridge over deadly water
+/// is not a kill.
+#[test]
+fn a_deck_above_the_bound_inside_a_deadly_room_stays_dry() {
+    let (mut app, car, _object) = recovery_app(Vec3::new(0.0, 1.2, 0.0));
+    app.world_mut()
+        .insert_resource(deadly_water([45.0, 75.0], [-35.0, 35.0], 0.0, 0.5));
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::cuboid(20.0, 1.0, 20.0),
+        Position(Vec3::new(60.0, 4.5, 25.0)),
+        Transform::from_xyz(60.0, 4.5, 25.0),
+    ));
+    teleport(&mut app, car, Vec3::new(60.0, 5.6, 25.0));
+    run(&mut app, 60);
+    assert_eq!(report(&app).submerged, 0);
+    assert_eq!(report(&app).recovered, 0);
+    assert!(
+        position(&app, car).y > 4.5,
+        "the car really stands on the deck, at {}",
+        position(&app, car).y
+    );
+}
+
+/// London's real BAI lanes run down to y ≈ −22 under the −3.8 level:
+/// the bound is scoped to the listed rooms, never global — a dragless
+/// floor below the level but outside every listed room is ordinary
+/// ground.
+#[test]
+fn a_below_grade_road_outside_the_rooms_never_drowns() {
+    let (mut app, car, _object) = recovery_app(Vec3::new(0.0, 1.2, 0.0));
+    let settled = position(&app, car);
+    app.world_mut()
+        .entity_mut(car)
+        .insert(VehicleRecovery::with_anchor(
+            RecoveryPolicy {
+                fall_margin: 30.0,
+                ..POLICY
+            },
+            settled,
+            SPAWN_YAW,
+        ));
+    app.world_mut()
+        .insert_resource(deadly_water([45.0, 75.0], [-35.0, 35.0], 0.0, 0.5));
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::cuboid(20.0, 1.0, 20.0),
+        Position(Vec3::new(-60.0, -6.5, 0.0)),
+        Transform::from_xyz(-60.0, -6.5, 0.0),
+    ));
+    teleport(&mut app, car, Vec3::new(-60.0, -5.0, 0.0));
+    run(&mut app, 60);
+    assert_eq!(report(&app).submerged, 0);
+    assert_eq!(report(&app).out_of_bounds, 0);
+    assert_eq!(report(&app).recovered, 0);
+    assert!(
+        position(&app, car).y < -5.0,
+        "the car really sits below the level, at {}",
+        position(&app, car).y
+    );
+}
+
+/// A car under a listed room's bound with no ground contact at all —
+/// clipped through the water plane — drowns on the dwell rather than
+/// falling forever or tripping the out-of-bounds leg.
+#[test]
+fn an_airborne_car_under_a_deadly_rooms_bound_drowns() {
+    let (mut app, car, _object) = recovery_app(Vec3::new(0.0, 1.2, 0.0));
+    // A deadly room over empty air — no collider anywhere under it.
+    app.world_mut()
+        .insert_resource(deadly_water([100.0, 120.0], [-15.0, 15.0], 0.0, 0.5));
+    teleport(&mut app, car, Vec3::new(110.0, -1.0, 0.0));
+    run(&mut app, 45); // ~0.75 s — past the 0.5 s dwell
+    assert_eq!(report(&app).submerged, 1);
+    assert_eq!(report(&app).out_of_bounds, 0);
+    assert_eq!(report(&app).recovered, 1);
+}
+
 #[test]
 fn a_trailer_rig_recovers_with_the_tractor() {
     // F05-AC05's articulated leg: the authored offsets seat the

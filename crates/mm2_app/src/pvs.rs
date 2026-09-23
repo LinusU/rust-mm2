@@ -38,7 +38,7 @@ use mm2_formats::psdl::Psdl;
 use mm2_game::PlayerVehicle;
 use tracing::warn;
 
-use crate::city::{authored_z, point_in_poly};
+use crate::city::{authored_z, point_in_poly, room_poly};
 
 /// A per-room render entity's authored room id (`Psdl::rooms` index + 1 —
 /// the same 1-based id the `.cpvs` lists and entity names use).
@@ -101,11 +101,7 @@ impl CityPvs {
             .rooms
             .iter()
             .map(|room| RoomCell {
-                poly: room
-                    .perimeter
-                    .iter()
-                    .filter_map(|p| psdl.vertices.get(p.vertex as usize).map(|v| (v[0], v[2])))
-                    .collect(),
+                poly: room_poly(psdl, room),
             })
             .collect();
         CityPvs {
