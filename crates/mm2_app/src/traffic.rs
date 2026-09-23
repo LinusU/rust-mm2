@@ -85,8 +85,9 @@
 //! duplicating bodies or injecting extreme energy"). [`knock_ambient`]
 //! is a third consumer of the solver's `CollisionStart` stream: a
 //! lane-following car struck by a contact whose impulse estimate
-//! (approach speed × striker mass — the same quantity banger
-//! activation gates on) reaches `KnockPolicy::min_impulse` flips to
+//! (approach speed × striker mass — banger activation weighs kinetic
+//! energy instead; this gate is a designed N·s threshold) reaches
+//! `KnockPolicy::min_impulse` flips to
 //! `RigidBody::Dynamic` on the same entity — same hull, same velocity
 //! — and leaves the lane system: `drive_ambient` never re-poses it,
 //! the FCFS queue releases it, and as a `Knocked` car it no longer
@@ -1056,8 +1057,9 @@ pub fn drive_ambient(
 /// Kinematic→dynamic handover (F10-B.6): a third consumer of the
 /// solver's `CollisionStart` stream, alongside `collect_impacts` and
 /// `activate_bangers`. A lane-following car whose contact's impulse
-/// estimate — approach speed × striker mass, measured the same way
-/// banger activation measures it — reaches `KnockPolicy::min_impulse`
+/// estimate — approach speed × striker mass, measured on the same
+/// deepest-contact severity banger activation measures — reaches
+/// `KnockPolicy::min_impulse`
 /// becomes a dynamic body on the same entity: the hull, pose and lane
 /// velocity carry over unchanged (no duplicate body, no teleport) and
 /// at most the striker's approach speed is added along the contact

@@ -280,9 +280,10 @@ verified original behaviour — every provisional point is still UNK-22.
   only deduplicated reportable ones. Approach speed is the deepest
   manifold contact's pre-solver `normal_speed` (shared
   `deepest_contact` helper with the impact pipeline). The provisional
-  estimate is `approach_speed × striker_mass` compared against
-  `ImpulseLimit2`; a qualifying edge flips `RigidBody` to dynamic once
-  and emits `BangerStateChanged`.
+  estimate is the striker's kinetic energy `½·m·v²` compared against
+  `ImpulseLimit2` (F04-C.5 — see the threshold census below); a
+  qualifying edge flips `RigidBody` to dynamic once and emits
+  `BangerStateChanged`.
 - **Post-solver momentum transfer (F04-C.4).** The activation runs
   *after* Avian's solver, so a dormant prop has already answered its
   contact as an infinite-mass static body — the wall-stop operators
@@ -590,13 +591,31 @@ channel (sf 5 927 total, london 6 271).
 Parsed, bound and provisionally simulated. Everything below is UNK-22:
 
 - What `ImpulseLimit2` is compared against (contact impulse? impact
-  speed × mass?) and what crossing it does — break vs. tip vs. nothing.
-  The implemented `approach_speed × striker_mass` estimate is a
-  stand-in; original evidence could change both the quantity and the
-  comparison. The post-activation exchange is likewise provisional:
-  F04-C.4's reduced-mass two-body transfer repairs the measured
-  static-wall defect (operator report 4 item 2) without touching the
-  authored gate, but the original's striker-prop momentum split is
+  speed? kinetic energy?) and what crossing it does — break vs. tip
+  vs. nothing. The implemented estimate is the striker's kinetic
+  energy `½·m_striker·v²` — a designed reading, not recovered
+  original semantics. The authored data constrains the answer hard
+  (operator report 4 item 3, F04-C.5): `ImpulseLimit2 ≈ Mass ×
+  {31.25, 500, 800, 2000, 85342}` across the placed-prop census, so
+  the compared quantity must be quadratic in speed for the ladder to
+  mean anything — under a linear `m·v` reading every
+  authored-breakable streetlight, telephone pole and tree needs
+  75–2400 m/s, while `½·m·v²` puts meters/cones at a crawl
+  (~0.5–2 m/s for a stock car), benches/dumpsters at ~4–9 m/s, poles
+  and trees at ~11–31 m/s, giant gantry signs at ~50–70 m/s, and
+  leaves the authored-immovable outliers (`sp_lightthames_l`,
+  `np_chinagate_l`, `np_ghirardelli_f`, the 1e30 bridges)
+  unreachable. Under the energy reading, breakability also
+  correlates with authored `BREAK<NN>` presence: every placed prop
+  carrying fragments is reachable, the high-limit props that are not
+  have `NumParts = 0`. The squared-suffix convention on the sibling
+  ICS fields (`Vel2`, `AngVel2`, `ForceLimit2`) is consistent with a
+  quadratic quantity but does not prove it; original evidence could
+  still change both the quantity and the comparison. The
+  post-activation exchange is likewise provisional: F04-C.4's
+  reduced-mass two-body transfer repairs the measured static-wall
+  defect (operator report 4 item 2) without touching the authored
+  gate, but the original's striker-prop momentum split is
   unrecovered.
 - Whether `NumParts` bounds runtime fragment spawning or is purely an
   authoring echo of the PKG's BREAK count — the implementation prepares

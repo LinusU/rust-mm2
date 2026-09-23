@@ -20,9 +20,12 @@
 //! What the original compares `ImpulseLimit2` against is unverified
 //! (UNK-22), as are the pool-reclaim order and the exact fragment
 //! semantics — those stay provisional policy here: the estimate is
-//! `approach_speed × striker_mass`, the applied kick leaves the prop at
-//! the striker's approach speed, and a prop whose PKG carries authored
-//! `BREAK<NN>` chunks shatters into them at activation. The active-pool
+//! the striker's kinetic energy `½·m·v²` (the authored limit ladder
+//! is quadratic in speed — a linear `m·v` estimate leaves every
+//! authored-breakable tree and pole unreachable), the applied kick
+//! leaves the prop at the transfer's launch speed, and a prop whose
+//! PKG carries authored `BREAK<NN>` chunks shatters into them at
+//! activation. The active-pool
 //! bound (32) is the R4-recovered `dgBangerActiveManager` size; spawned
 //! fragments count against it. `Settled`/`Broken` are terminal for the
 //! session: the recovered `dgHitBangerInstance` has no further
@@ -94,8 +97,9 @@ pub struct BangerDefinition {
     pub elasticity: f32,
     /// `ImpulseLimit2` — authored activation threshold; the quantity it
     /// is compared against is UNK-22, so [`Self::activates_on`] applies
-    /// the provisional estimate documented on the module. `0`
-    /// activates on any approaching contact; ≈1e30 never activates.
+    /// the provisional estimate documented on the module (the striker's
+    /// kinetic energy on the prop path). `0` activates on any
+    /// approaching contact; ≈1e30 never activates.
     pub impulse_limit2: f32,
     /// `Size` — the authored bound box's full extents (metres); the
     /// bound is `cg ± size/2`. Measured on retail: `cg.y = size.y/2`
@@ -158,11 +162,14 @@ impl BangerDefinition {
         }
     }
 
-    /// Provisional activation rule (UNK-22): `estimate` is the impact's
-    /// estimated impulse in kg·m/s (`approach_speed × striker_mass`);
-    /// the banger activates when it exceeds the authored limit. `0`
-    /// (most retail props) activates on any approaching contact; ≈1e30
-    /// (bridge gates, monuments) never activates.
+    /// Provisional activation rule (UNK-22): `estimate` is the
+    /// caller's impact measure — striker kinetic energy `½·m·v²` in
+    /// joules on the prop path (the authored limit ladder is quadratic
+    /// in speed; the vehicle breakaway rig keeps its own linear
+    /// reading under UNK-13); the banger activates when it exceeds
+    /// the authored limit. `0` (most retail props) activates on any
+    /// approaching contact; ≈1e30 (bridge gates, monuments) never
+    /// activates.
     pub fn activates_on(&self, estimate: f32) -> bool {
         estimate > self.impulse_limit2
     }
@@ -214,9 +221,9 @@ impl Banger {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BangerCause {
     /// An impact exceeded the authored activation threshold. Carries
-    /// the contact's approach speed (m/s) and the estimated impulse
-    /// (kg·m/s) that `ImpulseLimit2` was compared against — the
-    /// provisional UNK-22 quantity.
+    /// the contact's approach speed (m/s) and the impact measure
+    /// (joules — the striker's kinetic energy) that `ImpulseLimit2`
+    /// was compared against — the provisional UNK-22 quantity.
     Impact { severity: f32, estimate: f32 },
     /// The dynamic body fell asleep — it settles where it lies.
     Slept,

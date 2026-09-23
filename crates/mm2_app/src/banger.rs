@@ -11,8 +11,8 @@
 //! the same `CollisionStart` edges the impact pipeline consumes (a
 //! second, independent consumer — bangers need every approaching
 //! contact, not only the deduplicated reportable ones), measures the
-//! approach speed on the deepest manifold contact, estimates the
-//! impulse against the striker's mass and compares it to the authored
+//! approach speed on the deepest manifold contact, weighs the
+//! striker's kinetic energy and compares it to the authored
 //! `ImpulseLimit2` (provisional rule — the compared quantity is
 //! UNK-22). A qualifying edge flips the prop's `RigidBody` to dynamic
 //! once and replays the hit as a two-body transfer: the prop launches
@@ -57,7 +57,7 @@ use mm2_game::{
 use mm2_vehicle::StrikeBound;
 use tracing::{debug, warn};
 
-use crate::contracts::{deepest_contact, impulse_estimate};
+use crate::contracts::{deepest_contact, impact_energy};
 
 /// One authored `BREAK<NN>` piece of a breakable prop — the parts the
 /// break transition turns into a fragment body: the chunk's render
@@ -499,6 +499,7 @@ fn break_banger(
         }
     }
     debug!(
+        name = %parent_name,
         severity = a.severity,
         estimate = a.estimate,
         "banger shattered"
@@ -604,7 +605,7 @@ pub fn activate_bangers(
             if deepest.severity <= 0.0 {
                 continue;
             }
-            let estimate = impulse_estimate(striker, deepest.severity, &masses);
+            let estimate = impact_energy(striker, deepest.severity, &masses);
             if !banger.def.activates_on(estimate) {
                 continue;
             }
@@ -640,7 +641,7 @@ pub fn activate_bangers(
     // strikers can overlap one prop). A below-threshold overlap leaves
     // the prop dormant and — since the bound is not a world collider —
     // the vehicle passes through it visually; the authored limits make
-    // that a corner case (a cone's 8 500 vs a bus's ~5 000 kg striker
+    // that a corner case (a cone's 8 500 vs a bus's kinetic energy
     // fires at walking pace).
     let mut claimed: HashSet<Entity> = activations.iter().map(|a| a.entity).collect();
     for (entity, bound, position, rotation, linvel, angvel) in &strikers.p0() {
@@ -664,7 +665,7 @@ pub fn activate_bangers(
             if severity <= 0.0 {
                 continue;
             }
-            let estimate = impulse_estimate(entity, severity, &masses);
+            let estimate = impact_energy(entity, severity, &masses);
             if !banger.def.activates_on(estimate) {
                 continue;
             }

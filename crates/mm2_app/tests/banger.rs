@@ -4,9 +4,9 @@
 //! headless-app harness `tests/contracts.rs` uses.
 //!
 //! Threshold and fragment semantics are provisional (UNK-22): these
-//! tests pin the implemented rules — `approach_speed × striker_mass >
-//! ImpulseLimit2` and BREAK-chunk spawning on the activation edge —
-//! not verified original behaviour.
+//! tests pin the implemented rules — striker kinetic energy
+//! `½·m·v² > ImpulseLimit2` and BREAK-chunk spawning on the
+//! activation edge — not verified original behaviour.
 
 use std::path::Path;
 use std::time::Duration;
@@ -153,7 +153,7 @@ fn a_hard_impact_activates_then_settles_once() {
     let mut app = test_app_with(SessionAuthority::Local, 32);
     let (banger, object) =
         spawn_banger(&mut app, Vec3::new(0.0, 0.5, 0.0), banger_def("test", 0.0));
-    // 20 m/s of approach speed × 1000 kg is far above a zero limit.
+    // ~200 kJ of striker kinetic energy is far above a zero limit.
     spawn_striker(
         &mut app,
         Vec3::new(-6.0, 0.5, 0.0),
@@ -288,11 +288,16 @@ fn a_monument_limit_never_activates() {
 
 #[test]
 fn a_midrange_limit_discriminates_the_impact() {
-    // Same striker both runs: estimate ≈ severity × 1000. A limit above
-    // it leaves the prop dormant; below it activates.
+    // Same striker both runs: estimate ≈ ½·1000·v² ≈ 150 kJ at the
+    // ~17 m/s the slide leaves. A limit above it leaves the prop
+    // dormant; below it activates.
     let dormant_limit = {
         let mut app = test_app_with(SessionAuthority::Local, 32);
-        let (banger, _) = spawn_banger(&mut app, Vec3::new(0.0, 0.5, 0.0), banger_def("lim", 1e9));
+        let (banger, _) = spawn_banger(
+            &mut app,
+            Vec3::new(0.0, 0.5, 0.0),
+            banger_def("lim", 300_000.0),
+        );
         spawn_striker(
             &mut app,
             Vec3::new(-6.0, 0.5, 0.0),
@@ -305,7 +310,11 @@ fn a_midrange_limit_discriminates_the_impact() {
     assert_eq!(dormant_limit, BangerPhase::Dormant);
 
     let mut app = test_app_with(SessionAuthority::Local, 32);
-    let (banger, _) = spawn_banger(&mut app, Vec3::new(0.0, 0.5, 0.0), banger_def("lim", 100.0));
+    let (banger, _) = spawn_banger(
+        &mut app,
+        Vec3::new(0.0, 0.5, 0.0),
+        banger_def("lim", 100_000.0),
+    );
     spawn_striker(
         &mut app,
         Vec3::new(-6.0, 0.5, 0.0),
@@ -319,6 +328,61 @@ fn a_midrange_limit_discriminates_the_impact() {
             .count(),
         1
     );
+    assert_eq!(
+        app.world().get::<Banger>(banger).unwrap().phase,
+        BangerPhase::Active
+    );
+}
+
+#[test]
+fn an_authored_tree_limit_demands_speed_not_just_mass() {
+    // Operator report 4 item 3: retail authors `ImpulseLimit2 ≈ Mass ×
+    // 800` (sp_tree1_s: 2 000 000 on 1 000 kg), which a linear m·v
+    // estimate reads as a 2 000 m/s requirement for a 1 t striker —
+    // unreachable, so trees and poles never broke. The energy estimate
+    // puts the authored ladder back on the road: √(2·2e6/1e3) ≈ 63 m/s.
+    // The 20 m/s slide (~150 kJ) must leave it dormant; ~78 m/s
+    // (~3 MJ) must break it.
+    let dormant = {
+        let mut app = test_app_with(SessionAuthority::Local, 32);
+        let (banger, _) = spawn_banger(
+            &mut app,
+            Vec3::new(0.0, 0.5, 0.0),
+            banger_def("tree", 2_000_000.0),
+        );
+        spawn_striker(
+            &mut app,
+            Vec3::new(-6.0, 0.5, 0.0),
+            Vec3::new(20.0, 0.0, 0.0),
+        );
+        let events = run(&mut app, FRAMES_PER_SECOND * 3);
+        assert!(events.is_empty(), "~150 kJ is sub-limit: {events:?}");
+        app.world().get::<Banger>(banger).unwrap().phase
+    };
+    assert_eq!(dormant, BangerPhase::Dormant);
+
+    let mut app = test_app_with(SessionAuthority::Local, 32);
+    let (banger, object) = spawn_banger(
+        &mut app,
+        Vec3::new(0.0, 0.5, 0.0),
+        banger_def("tree", 2_000_000.0),
+    );
+    spawn_striker(
+        &mut app,
+        Vec3::new(-6.0, 0.5, 0.0),
+        Vec3::new(80.0, 0.0, 0.0),
+    );
+    let events = run(&mut app, FRAMES_PER_SECOND * 3);
+    let activations: Vec<_> = events
+        .iter()
+        .filter(|e| e.phase == BangerPhase::Active)
+        .collect();
+    assert_eq!(
+        activations.len(),
+        1,
+        "~3 MJ clears the authored tree limit: {events:?}"
+    );
+    assert_eq!(activations[0].object, object);
     assert_eq!(
         app.world().get::<Banger>(banger).unwrap().phase,
         BangerPhase::Active
@@ -528,18 +592,18 @@ fn spawn_brushing_bound_striker(app: &mut App, pos: Vec3, linvel: Vec3, angvel: 
 
 #[test]
 fn a_coincident_contact_and_bound_strike_charge_once() {
-    // Head-on clip at 5 m/s: the contact's impulse estimate
-    // (~5·1000) sits under the authored limit while the spinning
-    // bound's surface speed at the prop's centre (~7.8·1000) clears
-    // it. Without the fold the striker would keep the wall bounce AND
-    // lose the transfer share on top; with it the solver's push is
-    // returned and the striker pays J ≈ 375 once — it keeps ≈4.8 of
-    // its 5 m/s instead of rebounding to ≈−1.5.
+    // Head-on clip at 5 m/s: the contact's energy estimate
+    // (½·1000·~5² ≈ 12.5 kJ) sits under the authored limit while the
+    // spinning bound's surface speed at the prop's centre (~7.8 m/s →
+    // ~30 kJ) clears it. Without the fold the striker would keep the
+    // wall bounce AND lose the transfer share on top; with it the
+    // solver's push is returned and the striker pays J ≈ 375 once —
+    // it keeps ≈4.8 of its 5 m/s instead of rebounding to ≈−1.5.
     let mut app = test_app_with(SessionAuthority::Local, 32);
     let (banger, object) = spawn_banger(
         &mut app,
         Vec3::new(0.0, 0.5, 0.0),
-        banger_def("cone", 6500.0),
+        banger_def("cone", 20_000.0),
     );
     let striker = spawn_brushing_bound_striker(
         &mut app,

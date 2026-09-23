@@ -156,24 +156,42 @@ pub(crate) fn deepest_contact(
     })
 }
 
+/// The striker's resolved mass for an impact estimate: the authored
+/// `ComputedMass`, else a 1 kg fallback — a light touch, not a hidden
+/// force.
+fn striker_mass(striker: Entity, masses: &Query<&ComputedMass>) -> f32 {
+    masses
+        .get(striker)
+        .map(|m| m.value())
+        .ok()
+        .filter(|m| m.is_finite() && *m > 0.0)
+        .unwrap_or(1.0)
+}
+
 /// Estimated impulse of a contact on a struck entity (kg·m/s):
-/// approach speed × the striker's mass — the provisional quantity
-/// banger activation compares to the authored `ImpulseLimit2` (UNK-22)
-/// and the ambient handover compares to [`mm2_game::KnockPolicy`]. A
-/// striker without a resolvable mass counts as 1 kg — a light touch,
-/// not a hidden force.
+/// approach speed × the striker's mass — the quantity the ambient
+/// handover compares to the designed [`mm2_game::KnockPolicy`]
+/// threshold.
 pub(crate) fn impulse_estimate(
     striker: Entity,
     severity: f32,
     masses: &Query<&ComputedMass>,
 ) -> f32 {
-    let mass = masses
-        .get(striker)
-        .map(|m| m.value())
-        .ok()
-        .filter(|m| m.is_finite() && *m > 0.0)
-        .unwrap_or(1.0);
-    severity * mass
+    severity * striker_mass(striker, masses)
+}
+
+/// Kinetic energy the striker carries into a contact (joules):
+/// ½·m·v² — the provisional quantity banger activation compares to
+/// the authored `ImpulseLimit2` (UNK-22). A linear `m·v` estimate
+/// misreads the authored data: `ImpulseLimit2 ≈ Mass × 800` on nearly
+/// every retail prop (the exceptions scale the same way), which puts
+/// authored-breakable trees and poles 5–50× beyond any reachable
+/// impact (operator report 4 item 3). The speed-squared reading
+/// restores the authored ladder — meters and cones break at a crawl,
+/// poles and trees at speed, the authored-immovable records stay
+/// unreachable (docs/research/banger.md).
+pub(crate) fn impact_energy(striker: Entity, severity: f32, masses: &Query<&ComputedMass>) -> f32 {
+    0.5 * striker_mass(striker, masses) * severity * severity
 }
 
 /// The stable identity of a contact side: its collider's

@@ -1,102 +1,87 @@
-# Last iteration — F10-B.9 junction-interior crossing paths
+# Last iteration — F04-C.5 banger activation threshold reading
 
-Iteration 49 on `ralph/night`, continuing from the externally-passed
-F04-C.4 momentum-transfer candidate. Operator report 4's item 1 was next
-in the report's own order (items 4 and 2 landed earlier): ambient cars
-visibly teleport across intersections — the aggregate smoke counters
-could never see it, because a teleporting car still spawns, still moves,
-and never registers as stuck.
+Iteration 50 on `ralph/night`, continuing from the externally-passed
+F10-B.9 junction-crossing candidate. Operator report 4's item 3 was next:
+"trees and larger light poles cannot be broken at all." The report framed
+it as a research question — the INST placement channel binds no banger
+records, so unbreakable trees could have been correct fidelity. It is a
+real defect, but not the one the framing suspected.
 
 ## Root cause (measured, not guessed)
 
-`advance_lane_cursor` consumed the remaining approach-lane distance and
-set `cursor.along = 0` on the exit lane, so `sample_lane` placed the car
-on the far side of the junction — the interior distance between the
-lane extremities was skipped entirely.
+Binding is complete: INST places zero tree/pole names in either stock
+city, but trees, streetlights and poles reach the world through prop-rule
+stamping and `props.pathset` and already spawn as dormant bangers.
+`sp_tree1_s` is authored breakable — NumParts=5, BREAK01–05 chunks,
+fragment records.
 
-While building the `mm2-inspect nav --gaps` census to measure real
-junction gaps, a second latent defect surfaced: several SF lane curves
-(roads 111–116 and others, mostly `DIVIDED|FREEWAY`-flagged) are
-authored **vertex-reversed** relative to their road's section order —
-mixed orders within one side, at ordinary in-carriageway offsets, so
-storage order is an authoring artefact, not a direction marker. A
-reversed lane's travel-direction *end* sat a full road length from its
-exit junction: the raw census read a 92 m median / 1643 m max transfer
-chord on SF. `NavGraph::build` now normalizes every curve to section
-order (`orient_curve`), and the census reads sane junction boxes:
-medians ~20–26 m, max 87 m. Cars on those lanes were also traversing
-them geometrically backward before this fix.
+The gate was wrong. `impulse_estimate` compared `approach_speed ×
+striker_mass` to `ImpulseLimit2`. A census of every placed bound record
+shows `ImpulseLimit2 ≈ Mass × {31.25, 500, 800, 2000, 85342}` — a ladder
+quadratic in striker speed. Under the linear reading a 4 250 kg `vpbug`
+needed ~470 m/s for a tree and ~120 m/s for a streetlight — unreachable,
+which is exactly what the operator saw. Read as striker kinetic energy
+`½·m·v²` the same authored numbers form a coherent ladder: meters/cones
+at walking speed, benches/dumpsters ~5–9 m/s, poles/trees ~11–33 m/s,
+gantry props higher, and the authored-immovable outliers (`1e30` bridges,
+`sp_lightthames_l`) stay unreachable. Breakability under the energy
+reading correlates with authored BREAK<NN> fragment presence.
 
 ## What changed
 
-- `mm2_game::nav`: `CrossingPath` + `NavGraph::crossing_path` — a cubic
-  Hermite from the approach lane's travel-direction end pose to the
-  exit lane's start pose, chord-scaled tangents, resampled to a dense
-  polyline; `None` on coincident endpoints so direct transfers stay
-  direct. `orient_curve` normalization at build; shared
-  `sample_polyline` extraction.
-- `mm2_game::traffic`: `LaneCursor.crossing` (`Crossing` = path +
-  covered distance + destination); `LaneAdvance` reworked to
-  `Along/Entered/Crossing/Landed/DeadEnd`; `advance_lane_cursor`
-  commits a crossing only after the gate admits, traverses it
-  incrementally inside the same call, and still reports `Entered` when
-  one step spans the whole interior.
-- `mm2_app::traffic`: crossing traversal in `drive_ambient` (gate skip
-  while crossing, turn-speed cap, landing occupancy check,
-  `bound_for` keeps the approach junction so occupancy/right-of-way
-  survive the crossing); `crossings`/`jumps` counters and a
-  pose-continuity watchdog → `crx=`/`jmp=` smoke fields.
-- `mm2-inspect nav --gaps`: per-transfer chord/path-length census,
-  endpoint-to-centre distances, distribution buckets, worst outliers.
-- App test repaired: `a_traffic_light_admits_only_the_green_member_road`
-  now keys "crossed" on the crossing *commit* (`crossing.is_some()`),
-  not the lane-id change — the landing can fall in a later signal
-  phase.
+- `mm2_app::contracts`: `impact_energy` (`½·m·v²`) shares a new
+  `striker_mass` resolver with the retained linear `impulse_estimate`;
+  same 1 kg fallback for unresolved/invalid masses.
+- `mm2_app::banger`: both `activate_bangers` gates — the real manifold
+  path and the `StrikeBound` overlap path — feed `impact_energy` to
+  `activates_on`. `banger shattered`/`banger activated` debug lines now
+  name the prop.
+- Unchanged by design: `knock_ambient` keeps its designed linear
+  threshold; breakaway keeps its own `severity × part_mass` reading; the
+  F04-C.4 two-body momentum transfer, pool, fragment spawning, predicted
+  authority gating and placement-height behavior are untouched.
+- `mm2_game::banger`, `docs/research/banger.md`,
+  `docs/original-rules.md` (DSN-10/UNK-22) updated to describe the
+  energy reading as designed/provisional — justified by the authored
+  census, not claimed as recovered original semantics.
 
 ## Verification (this tree)
 
-- `cargo test --locked --workspace` — pass, all suites 0 failures
-  (mm2_game traffic 37, mm2_app traffic 28).
 - `cargo fmt --all -- --check` — pass.
 - `cargo clippy --locked --workspace --all-targets --all-features --
   -D warnings` — pass.
-- New tests: path endpoint continuity + monotonic no-jump samples,
-  commit-then-land semantics, whole-interior-in-one-step still reports
-  the commit, lane-rank preservation, reversed-vertex normalization,
-  and app-level `a_lane_follower_crosses_the_junction_interior_without_a_jump`
-  (car observed inside the junction box, max per-update move <1 m,
-  `crossings>=1`, `jumps=0`).
+- `cargo test --locked --workspace` — pass, all suites 0 failures;
+  `tests/banger.rs` 21/21 including the new
+  `an_authored_tree_limit_demands_speed_not_just_mass` (a 2e6 tree-class
+  limit dormant at ~20 m/s, active at ~80 m/s) plus retuned
+  energy-scale thresholds on the existing limit-sensitive tests.
 
 ## Retail evidence (fingerprinted install `fnv1a64:e91e6cd4b2ae30d9`)
 
-- `mm2 --city sf --headless --frames 3000` → `traf=16/16 sp=43 rec=27
-  dead=0 uns=0 q=0 jq=3 stuck=0 crx=59 jmp=0`
-- `mm2 --city london --headless --frames 3000` → `traf=16/16 sp=22
-  rec=6 dead=0 uns=0 q=0 jq=2 stuck=0 crx=68 jmp=0`
-
-59/68 committed crossings on sf/london with zero continuity-watchdog
-violations; spawn/recycle/dead-end/queue counters all healthy.
-Headless counters prove motion continuity, not rendered feel — no
-windowed/GPU playtest this iteration, no original-executable
-comparison (retail binary not runnable here).
-
-## Ledger / docs
-
-- `docs/research/bai.md`: vertex-reversed lane-curve quirk documented
-  with the measured before/after census numbers; `crossing_path` and
-  `nav --gaps` added to the graph/tooling description.
-- `docs/original-rules.md`: UNK-12 extended — F10-B.9 runtime note;
-  generated crossing geometry classified designed/implementation,
-  original interior paths unrecovered.
-- `docs/ralph/PLAN.md`: F10-B.9 task row; report 4 item 1 annotated
-  implemented/candidate.
+- `mm2 --city sf --headless --frames 1200` → `status=pass …
+  bng_ev=0a/1s/1b`; debug line `banger shattered
+  name=sp_lightstreet_rt_f severity=37.5 estimate=702303` — a 10 t
+  freeway streetlight pole with authored BREAK parts, priced at ~75 m/s
+  under the old reading (unreachable on that stretch) and ~12–17 m/s
+  under the new one. A knocked ambient car struck it mid-run.
+- `mm2 --city london --headless --frames 1500 --car vpbug
+  --spawn=510,5.5,-245,-51.7` → `status=pass peak=37.6m/s moved=178m
+  bng_ev=1a`; `banger activated prop=sp_can_royal_l severity=13.4
+  estimate=89736` — mid-tier activation on a junction crossing.
+- Below-limit behavior intact: repeated runs show dormant props still
+  stopping strikers (`bng_ev=0` at sub-threshold speeds).
 
 ## Not done / blockers
 
-- The original's junction-interior geometry/runtime semantics are
-  unrecovered (UNK-12) — the Hermite path is a disclosed
-  implementation choice, not a verified original rule.
-- No rendered playtest; the watchdog counts discontinuities but visual
-  smoothness inside the box is unobserved.
-- Operator report 4 remaining items: 3 (trees/large poles
-  breakability — research first), 5 (startup warn aggregation).
+- A named `sp_tree1_s` shatter was attempted ~12 times without success —
+  in-road trees sit inside junction fans behind kerb clutter or on
+  medians with ~25 m spacing, so the straight-line `hold` driver cannot
+  reach the ~22–31 m/s the class needs before the first trunk. This is
+  a staging limitation, not a code defect: the tree shares the pole's
+  code path, and the unit regression covers the 2e6 threshold in both
+  directions. A curved approach or a driver that can aim mid-run would
+  close the evidence gap.
+- The original's comparison quantity stays unrecovered (UNK-22) — the
+  energy reading is a designed stand-in selected by the authored-limit
+  census, not verified original behavior.
+- Operator report 4 remaining item: 5 (startup warn aggregation).
