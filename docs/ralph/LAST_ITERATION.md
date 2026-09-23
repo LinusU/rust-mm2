@@ -1,53 +1,54 @@
-# Last iteration — F04-C.5 review repair: impulse/energy doc drift
+# Last iteration — F10-B.10: startup WARN aggregation (operator report 4 item 5)
 
-Iteration 51 on `ralph/night`. External review of the F04-C.5 candidate
-(`80a6147`) returned one blocking finding: doc drift. The commit changed
-what banger activation compares `ImpulseLimit2` against (linear `v·m`
-estimate → striker kinetic energy `½·m·v²`), but four cross-references
-still asserted the knock/damage linear estimate is the *same* quantity
-banger activation uses:
+Iteration 52 on `ralph/night`. Selected the last open operator-report-4
+item: startup WARN spam. The report named the 154 `road N: no routable
+vehicle lanes` lines; the same failure mode existed in a second class
+found while verifying on retail.
 
-1. `crates/mm2_game/src/traffic.rs` — `KnockPolicy` rustdoc.
-2. `crates/mm2_game/src/damage.rs` — `DamageState::apply` rustdoc.
-3. `docs/research/damage.md` — the shared-contract paragraph.
-4. `docs/original-rules.md` — the UNK-12 row's F10-B.6 runtime note.
+## What changed
 
-## Root cause
+Two per-entry WARN classes, both expected authored-data anomalies
+already counted in existing report/summary fields:
 
-Narrow scope during F04-C.5: the implementation commit updated
-`contracts.rs`, the `mm2_app` module docs, `docs/research/banger.md` and
-the DSN-10/UNK-22 ledger rows, but missed the four places where
-*other* features (F10-B.6 knock handover, F05-B.1 damage) describe
-their own estimate by reference to banger activation. Verified by
-reading every `activates_on`/`impulse_estimate`/`impact_energy` call
-site and grepping for residual "shared with banger" claims — the list
-above was complete; `mm2_app::traffic`'s module docs already described
-the split correctly.
+1. `mm2_app::traffic::load_ambient_traffic` — every plan/nav issue
+   was `warn!`'d per entry. New `partition_nav_issues`
+   routes `NoVehicleLanes` (pedestrian/special/disabled roads — WLD-11;
+   154 london / 22 sf authored) to one `debug!` summary carrying the
+   count and the full road list. Every other plan/nav issue kind
+   (`UnresolvedEnd`, `DegenerateLane`, `NonFiniteLane`,
+   `LaneDistancesRecomputed`, all `TrafficIssue`s) keeps its individual
+   WARN — they are rare anomalies, not bulk authored data.
+2. `mm2_app::city::load_city` — `walk_prop_rules`'s per-entry issue
+   strings (64 on sf: the 0xx-encoded `road_rooms` records already
+   counted as `bad_refs`; london authors none) collapse into one
+   `debug!` line with count + the bounded list. Prop-rule *table*
+   diagnostics keep their WARN.
 
-## What changed (docs/rustdoc only — no code)
-
-All four now state the post-F04-C.5 split: the knock handover
-(`KnockPolicy::min_impulse`) and damage accumulation
-(`severity × striker_mass`) keep the linear estimate; banger activation
-gates on `½·m·v²`; what remains shared is the deepest-contact severity
-and the `striker_mass` resolution. UNK-22 stays open — the original's
-comparison quantity is still unrecovered.
+Nothing is dropped: `traffic.issues` still records every issue
+(`issues=` in the ambient `info!` unchanged — london `issues=154`),
+`report.proprule_issues`/`bad_refs`/`unreached` unchanged, and
+`mm2-inspect nav` / `mm2-inspect placement` still list every entry.
 
 ## Verification (this tree)
 
 - `cargo fmt --all -- --check` — pass.
 - `cargo clippy --locked --workspace --all-targets --all-features --
   -D warnings` — pass.
-- `cargo test --locked --workspace` — pass (doc-only diff; suite
-  counts unchanged from the F04-C.5 run, including `tests/banger.rs`
-  21/21).
+- `cargo test --locked --workspace` — pass, 64 suites, 0 failures;
+  +2 `mm2_app` unit tests for the partition (bulk class out, WARN list
+  ordered/complete, empty input).
+- Retail (`fnv1a64:e91e6cd4b2ae30d9`, `--headless --frames 60`): london
+  startup WARN lines 155 → 1 — the genuine `p_parkmeter_f.tex` mip
+  warning the report cited as buried; sf 87 → 1 (same line).
+  `RUST_LOG=mm2_app=debug` shows both summaries with correct counts
+  (london `count=154`, sf `count=22`, sf walk `count=64`).
 
 ## Not done / blockers
 
-- Carried from F04-C.5: a named `sp_tree1_s` shatter on retail was not
-  staged (~12 attempts; straight-line driver cannot reach 22–31 m/s
-  before the first trunk) — covered synthetically in both directions.
-- UNK-22 stays open: the energy reading is a designed stand-in
-  justified by the authored-limit census, not verified original
-  behavior.
-- Operator report 4 remaining item: 5 (startup warn aggregation).
+- None for this item — operator report 4 is now fully addressed
+  (items 1–5 implemented across F10-B.9, F04-C.4, F04-C.5, F03-C.3,
+  F10-B.10; all candidates pending external check).
+- Carried: UNK-22 (banger activation quantity), the named
+  `sp_tree1_s` retail shatter not yet staged, `vpmoonrover` launch
+  wander (open `drive` finding), vehicle handling remains
+  operator-owned.

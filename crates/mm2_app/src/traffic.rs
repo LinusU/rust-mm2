@@ -145,9 +145,9 @@ use mm2_formats::bai::VehicleRule;
 use mm2_formats::veh::AiVehicleData;
 use mm2_game::{
     AmbientRoster, AmbientSpec, AuthorityRole, FollowPolicy, JunctionGate, JunctionPolicy,
-    Junctions, KnockPolicy, LaneAdvance, LaneCursor, LaneId, NavGraph, NavOverrides, NavRng,
-    ObjectIdentity, Player, Session, SessionConfig, SessionEntity, SessionPhase, SignalAspect,
-    SpawnDirective, SpawnDraw, SpawnPolicy, StuckPolicy, StuckWindow, WorldMode,
+    Junctions, KnockPolicy, LaneAdvance, LaneCursor, LaneId, NavGraph, NavIssue, NavOverrides,
+    NavRng, ObjectIdentity, Player, Session, SessionConfig, SessionEntity, SessionPhase,
+    SignalAspect, SpawnDirective, SpawnDraw, SpawnPolicy, StuckPolicy, StuckWindow, WorldMode,
     advance_lane_cursor, corridor_gap, draw_spawn, eligible_lanes, follow_speed,
     inside_junction_zone, junction_speed, junction_zone, plan_ambient, within_interest,
 };
@@ -350,6 +350,22 @@ pub struct AmbientCar {
     pub stuck: StuckWindow,
 }
 
+/// Split nav-build issues for logging (operator report 4 item 5):
+/// `NoVehicleLanes` — expected authored data, one per pedestrian/
+/// special/disabled road — goes to the quiet road list the DEBUG
+/// summary counts; every rarer anomaly stays in the WARN list.
+fn partition_nav_issues(issues: &[NavIssue]) -> (Vec<usize>, Vec<&NavIssue>) {
+    let mut quiet = Vec::new();
+    let mut notable = Vec::new();
+    for i in issues {
+        match i {
+            NavIssue::NoVehicleLanes { road } => quiet.push(*road),
+            other => notable.push(other),
+        }
+    }
+    (quiet, notable)
+}
+
 /// Load the ambient setup for this session and spawn the initial plan.
 /// Returns the resource the caller inserts — `None` when the session
 /// is not authoritative, the world is not a city, or no layer authors
@@ -492,8 +508,26 @@ pub fn load_ambient_traffic(
         }
     }
     spawn_traffic_signals(commands, &mut traffic, owner);
-    for i in &traffic.issues {
+    // Operator report 4 item 5: `NoVehicleLanes` fires once per
+    // authored pedestrian/special/disabled road — expected data
+    // (WLD-11; retail london/sf carry ~150 of them), so per-road WARN
+    // lines bury genuine warnings. The class collapses into one DEBUG
+    // summary (every issue still lands in `traffic.issues`, counted
+    // by `issues=` below, and `mm2-inspect nav` lists them all);
+    // every other plan/nav issue kind still warns individually.
+    let (no_lane_roads, notable_nav) = partition_nav_issues(&build.issues);
+    for i in &plan.issues {
         warn!(issue = %i, "ambient issue");
+    }
+    for i in notable_nav {
+        warn!(issue = %i, "ambient issue");
+    }
+    if !no_lane_roads.is_empty() {
+        debug!(
+            count = no_lane_roads.len(),
+            roads = ?no_lane_roads,
+            "ambient: roads without routable vehicle lanes (authored pedestrian/special/disabled)"
+        );
     }
     info!(
         density,
@@ -1278,5 +1312,54 @@ pub fn maintain_ambient(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! F10-B.10 (operator report 4 item 5): the bulk `NoVehicleLanes`
+    //! class partitions out of the per-issue WARN list into one DEBUG
+    //! summary; rarer anomalies keep their individual warnings.
+
+    use mm2_formats::bai::{End, Side};
+    use mm2_game::{LaneKind, NavIssue};
+
+    use super::partition_nav_issues;
+
+    #[test]
+    fn no_vehicle_lanes_partition_out_of_the_warn_list() {
+        let issues = vec![
+            NavIssue::NoVehicleLanes { road: 7 },
+            NavIssue::UnresolvedEnd {
+                road: 1,
+                end: End::End,
+            },
+            NavIssue::NoVehicleLanes { road: 12 },
+            NavIssue::DegenerateLane {
+                road: 4,
+                side: Side::Left,
+                kind: LaneKind::Sidewalk,
+                index: 0,
+            },
+            NavIssue::NonFiniteLane {
+                road: 9,
+                side: Side::Right,
+                kind: LaneKind::Vehicle,
+                index: 2,
+            },
+        ];
+        let (quiet, notable) = partition_nav_issues(&issues);
+        assert_eq!(quiet, [7, 12], "only the bulk class is summarised");
+        assert_eq!(
+            notable,
+            [&issues[1], &issues[3], &issues[4]],
+            "every other kind keeps its own WARN, in order"
+        );
+    }
+
+    #[test]
+    fn an_empty_issue_list_partitions_empty() {
+        let (quiet, notable) = partition_nav_issues(&[]);
+        assert!(quiet.is_empty() && notable.is_empty());
     }
 }

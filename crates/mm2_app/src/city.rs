@@ -3420,8 +3420,21 @@ pub fn load_city(
                         report.proprule_issues += 1;
                     }
                     let walk = walk_prop_rules(&psdl, &defs, &rules);
-                    for issue in &walk.stats.issues {
-                        warn!(path = %defs_res.logical, %issue, "prop-rule walk issue");
+                    // Operator report 4 item 5: retail authors these
+                    // anomalies in bulk (64 entries on sf — encoded
+                    // `road_rooms` values), so per-entry WARN lines
+                    // bury genuine warnings. The classified counters
+                    // still land in
+                    // `report.proprule_issues` and the summary below;
+                    // the per-entry strings collapse into one DEBUG
+                    // line (and `mm2-inspect placement` lists them).
+                    if !walk.stats.issues.is_empty() {
+                        debug!(
+                            path = %defs_res.logical,
+                            count = walk.stats.issues.len(),
+                            issues = ?walk.stats.issues,
+                            "prop-rule walk issues (authored anomalies — counted below)"
+                        );
                     }
                     report.proprule_issues += walk.stats.issues.len();
                     report.proprule_rooms += walk.stats.rooms_stamped;
