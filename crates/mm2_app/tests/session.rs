@@ -526,6 +526,7 @@ fn city_water_does_not_leak_across_restart() {
             refs: vec![1],
         },
         &psdl,
+        None,
     );
 
     let mut app = dev_app();

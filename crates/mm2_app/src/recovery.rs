@@ -73,12 +73,13 @@ impl RecoveryReport {
 /// grounded wheels is air. Unmarked colliders report `0.0` — ordinary
 /// ground by definition.
 ///
-/// The authored `.water` record (F18-A.6, [`crate::water::CityWater`])
-/// overlays both arms: a wheel contact inside a listed deadly room
-/// at/below its bound is water whatever the collider's `drag` says —
-/// the room is authored deadly, not the material — and a car under a
-/// listed room's bound with no contact at all (clipped through the
-/// plane) drowns rather than free-falls.
+/// The authored `.water` record plus SDL water-surface marks
+/// (F18-A.6/.7, [`crate::water::CityWater`]) overlay both arms: a
+/// wheel contact inside a listed deadly room at/below its bound is
+/// water whatever the collider's `drag` says — the room is marked
+/// deadly, not the material — and a car under a listed room's bound
+/// with no contact at all (clipped through the plane) drowns rather
+/// than free-falls.
 fn ground_contact(
     state: &VehicleState,
     pos: Vec3,

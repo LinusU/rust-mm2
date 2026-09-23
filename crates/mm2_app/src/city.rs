@@ -37,7 +37,7 @@ use mm2_formats::{
     pathset,
     pkg::{Pkg, PkgStrip, lod_split},
     proprules::{self, PropRuleSide},
-    psdl::{AttributeType, Psdl, PsdlRoom, RoomAttribute},
+    psdl::{AttributeType, Psdl, PsdlRoom, RoomAttribute, texture_ref_index},
     tex::TexFile,
     water::{WaterDef, WaterIssue},
 };
@@ -451,11 +451,9 @@ enum TexState {
 /// Decode a `TextureRef` attribute: `n = data + 256 * subtype - 1`;
 /// raw 0 suppresses rendering and collision.
 fn decode_texture_ref(attr: &RoomAttribute) -> TexState {
-    let raw = attr.data.first().copied().unwrap_or(0) as usize + (attr.subtype as usize) * 256;
-    if raw == 0 {
-        TexState::Suppressed
-    } else {
-        TexState::Index(raw - 1)
+    match texture_ref_index(attr) {
+        Some(i) => TexState::Index(i),
+        None => TexState::Suppressed,
     }
 }
 
@@ -3650,9 +3648,11 @@ pub fn load_city(
     // format and `IsRoomVisible` semantics (docs/research/
     // environment.md). A missing table (mod cities may ship none) or a
     // corrupt one simply yields no `CityPvs` resource — the session
-    // renders unculled rather than guessing visibility. The `_NN`
-    // weather/detail variants are deliberately unselected: their
-    // selection rule is unrecovered (UNK-24).
+    // renders unculled rather than guessing visibility. The exe's
+    // loader opens exactly `city/<stem>.cpvs` (verified — a single
+    // `Open("city", stem, "cpvs")`, no suffix formatting), so the
+    // `_NN`/dated extras are bake-sweep artifacts, never runtime
+    // variants — none is selected here.
     let pvs = psdl_path
         .strip_suffix(".psdl")
         .map(|stem| format!("{stem}.cpvs"))
@@ -3677,11 +3677,13 @@ pub fn load_city(
             }
         });
 
-    // F18-A.6: the sibling `<stem>.water` deadly-water record — the
-    // file shape is verified; the refs resolve as 1-based PSDL room
-    // ids on retail (docs/research/environment.md). The original
-    // runtime consumer is unrecovered, so `CityWater`'s exposure rule
-    // is a designed policy scoped to the listed rooms — London's
+    // F18-A.6/.7: the sibling `<stem>.water` deadly-water record plus
+    // the loader's SDL marking — verified from the retail exe: refs
+    // resolve as 1-based PSDL room ids and each sets the same room
+    // flag the SDL pass marks on rooms whose first attribute is a
+    // TextureRef to a drowning-class surface
+    // (docs/research/environment.md). `CityWater`'s exposure shape is
+    // a designed policy scoped to the marked rooms — London's
     // below-grade roads refute a global below-level kill. Missing or
     // unparseable data yields no resource: the wheel-`drag`
     // classification (F05-B.5) still covers the water materials.
@@ -3700,7 +3702,8 @@ pub fn load_city(
                         for issue in &issues {
                             warn!(path = %res.logical, ?issue, "water record issue");
                         }
-                        let water = crate::water::CityWater::build(&def, &psdl);
+                        let water =
+                            crate::water::CityWater::build(&def, &psdl, surfaces.as_ref());
                         if water.room_count() == 0 {
                             warn!(
                                 path = %res.logical,
@@ -3713,6 +3716,7 @@ pub fn load_city(
                             path = %res.logical,
                             level = water.level(),
                             rooms = water.room_count(),
+                            sdl = water.sdl_rooms(),
                             skipped = water.skipped(),
                             "deadly-water record loaded"
                         );

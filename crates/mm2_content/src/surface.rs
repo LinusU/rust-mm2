@@ -21,7 +21,7 @@ use mm2_assets::{AssetsError, Resolved, Vfs};
 use mm2_formats::FormatError;
 use mm2_formats::materials::{MaterialMap, MaterialSet, NONE_PHYSICS};
 use mm2_formats::tex::frame_base_stem;
-use mm2_game::SurfaceMaterial;
+use mm2_game::{RecoveryPolicy, SurfaceMaterial};
 use mm2_vehicle::TireSurface;
 
 /// Cap applied to authored `elasticity` when it becomes an Avian
@@ -91,6 +91,32 @@ impl SurfaceTables {
         self.slot_of_stem(texture)
             .or_else(|| frame_base_stem(texture).and_then(|b| self.slot_of_stem(b)))
             .unwrap_or(SurfaceSlot::Unmapped)
+    }
+
+    /// Whether `texture` resolves to a drowning-class material:
+    /// authored `drag` at/above [`RecoveryPolicy::water_min_drag`]
+    /// (0.3) — retail `deepwater` (0.5) qualifies, `water` (0.119)
+    /// stays wadeable. This is the same boundary the wheel-drag
+    /// classification applies, so a surface cannot mark a room deadly
+    /// while reading dry to a parked car. `Default`/`Blank`/`Unmapped`
+    /// slots are dry.
+    ///
+    /// This is the texture-side half of the retail loader's SDL water
+    /// mark: the exe checks a per-texture class flag populated when
+    /// the material binds; that flag's exact derivation is unrecovered
+    /// (UNK-23), and `drag` is the only authored field that parts the
+    /// two liquid materials, so the inference is documented, not
+    /// claimed as the original test.
+    pub fn is_deadly_surface(&self, texture: &str) -> bool {
+        match self.slot_for(texture) {
+            SurfaceSlot::Material(i) => self
+                .set
+                .defs
+                .get(i as usize)
+                .and_then(|d| d.f32("drag"))
+                .is_some_and(|v| v >= RecoveryPolicy::default().water_min_drag),
+            _ => false,
+        }
     }
 
     /// One csv row: `None` when no row names `stem`.

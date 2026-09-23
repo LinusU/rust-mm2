@@ -580,19 +580,31 @@ pub fn headless_smoke(
             }
         })
         .unwrap_or_default();
-    // F18-A.6 deadly-water evidence: the authored level and how many
-    // refs resolved to rooms (`wtr=<level>/<rooms>r`, plus `+Ns` when
-    // refs were skipped). Absent without a loaded record so dev-world
-    // and mod-city runs stay bit-identical.
+    // F18-A.6/.7 deadly-water evidence: the authored level, how many
+    // `.water` refs resolved to rooms and how many rooms the SDL pass
+    // marked (`wtr=<level>/<refs>r`, plus `+Nsdl` for SDL marks and
+    // `+Ns` when refs were skipped). Absent without a loaded record so
+    // dev-world and mod-city runs stay bit-identical.
     let wtr_detail = world_ecs
         .get_resource::<crate::water::CityWater>()
         .map(|w| {
+            let sdl = if w.sdl_rooms() > 0 {
+                format!("+{}sdl", w.sdl_rooms())
+            } else {
+                String::new()
+            };
             let skipped = if w.skipped() > 0 {
                 format!("+{}s", w.skipped())
             } else {
                 String::new()
             };
-            format!(" wtr={}/{}r{}", w.level(), w.room_count(), skipped)
+            format!(
+                " wtr={}/{}r{}{}",
+                w.level(),
+                w.room_count() - w.sdl_rooms(),
+                sdl,
+                skipped
+            )
         })
         .unwrap_or_default();
     // F10-A.2 ambient evidence: live/target population plus the

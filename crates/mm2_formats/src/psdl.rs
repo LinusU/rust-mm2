@@ -97,6 +97,20 @@ pub struct RoomAttribute {
     pub data: Vec<u16>,
 }
 
+/// Decode a `TextureRef` attribute to its [`Psdl::textures`] index:
+/// `data + 256 * subtype - 1` (the subtype carries the index's high
+/// byte — the retail loader masks the attribute word's low 3 bits as
+/// the subtype). Raw 0 is the suppression sentinel, so it and an empty
+/// `data` yield `None`.
+///
+/// The retail city loader reads exactly this field of a room's *first*
+/// attribute to classify the room's surface (water marking); non-first
+/// attributes are bound to the geometry that follows them.
+pub fn texture_ref_index(attr: &RoomAttribute) -> Option<usize> {
+    let raw = attr.data.first().copied().unwrap_or(0) as usize + (attr.subtype as usize) * 256;
+    raw.checked_sub(1)
+}
+
 /// A single room (city block analogue) of the PSDL.
 #[derive(Debug, Clone)]
 pub struct PsdlRoom {
@@ -144,7 +158,11 @@ pub struct Psdl {
     /// Rooms. Note the file stores `n_rooms - 1` room records; index 0 is
     /// reserved by convention.
     pub rooms: Vec<PsdlRoom>,
-    /// Per-room flag bytes (see PSDL.md bit table).
+    /// Per-room flag bytes (see PSDL.md bit table). Bit positions match
+    /// mm2hook's recovered `RoomFlags` enum: `UnhitBanger` 0x01,
+    /// `Subterranean` 0x02, `Water` 0x04, `Road` 0x08, `Intersection`
+    /// 0x10, `SpecialBound` 0x20, `Warp` 0x40, `Instance` 0x80 — on
+    /// retail the six `.water`-referenced rooms carry 0x04.
     pub room_flags: Vec<u8>,
     /// Per-room prop-rule indices selecting `n{NN}left`/`n{NN}right`
     /// rows in the city's `proprules.csv` (see

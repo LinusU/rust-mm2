@@ -501,7 +501,7 @@ fn deadly_water(x: [f32; 2], z: [f32; 2], room_y: f32, level: f32) -> mm2_app::w
         level,
         refs: vec![1],
     };
-    mm2_app::water::CityWater::build(&def, &psdl)
+    mm2_app::water::CityWater::build(&def, &psdl, None)
 }
 
 /// A dragless slab inside a listed deadly room at/below its bound
