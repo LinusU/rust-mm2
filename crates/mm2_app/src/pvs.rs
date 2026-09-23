@@ -199,15 +199,18 @@ impl CityPvs {
 
 /// Per-frame PVS update: resolve the view's source room set and toggle
 /// [`Visibility`] on every [`CityRoom`]-tagged render entity. The view
-/// positions are the active camera's `Transform` — retail's
+/// positions are the active 3-D camera's `Transform` — retail's
 /// `Draw`/`FindRoomId` runs off the viewport, and the camera is a root
 /// entity so `Transform` is the same-frame world pose `chase_follow`
 /// just wrote — plus the player vehicle's physics `Position`, which
 /// keeps the room under the car a source (and is the only position a
-/// `--headless` run has).
+/// `--headless` run has). The query filters on [`Camera3d`] so a stray
+/// active 2-D camera (the menu's `MenuCamera` survives a transition
+/// frame) can never add a wrong source room — a wrong pick can only
+/// over-show anyway, but the world camera is the honest source.
 pub fn apply_city_pvs(
     pvs: Option<ResMut<CityPvs>>,
-    views: Query<(&Camera, &Transform)>,
+    views: Query<(&Camera, &Transform), With<Camera3d>>,
     player: Query<&Position, With<PlayerVehicle>>,
     mut rooms: Query<(&CityRoom, &mut Visibility)>,
     new_rooms: Query<(), Added<CityRoom>>,
@@ -421,6 +424,7 @@ mod tests {
             })
             .collect();
         app.world_mut().spawn((
+            Camera3d::default(),
             Camera {
                 is_active: true,
                 ..default()
@@ -442,6 +446,47 @@ mod tests {
         app.update();
         assert_eq!(vis(&mut app, e[1]), Visibility::Inherited);
         assert_eq!(vis(&mut app, e[0]), Visibility::Hidden);
+    }
+
+    /// A stray active 2-D camera (the menu's `MenuCamera` on a
+    /// transition frame) is not a view source — only `Camera3d`
+    /// contributes a room.
+    #[test]
+    fn system_ignores_2d_cameras() {
+        let mut app = App::new();
+        let psdl = grid_psdl(2);
+        app.insert_resource(CityPvs::build(self_visible_cpvs(2), &psdl));
+        app.add_systems(Update, apply_city_pvs);
+        let room1 = app
+            .world_mut()
+            .spawn((CityRoom(1), Visibility::Inherited))
+            .id();
+        let room2 = app
+            .world_mut()
+            .spawn((CityRoom(2), Visibility::Inherited))
+            .id();
+        // Active Camera2d sitting inside room 1's tile; the player is
+        // in room 2's. The 2-D camera must not union room 1 in.
+        app.world_mut().spawn((
+            Camera2d,
+            Camera {
+                is_active: true,
+                ..default()
+            },
+            Transform::from_translation(world(4.0, 3.0, 4.0)),
+        ));
+        app.world_mut()
+            .spawn((PlayerVehicle, Position(world(14.0, 3.0, 4.0))));
+        app.update();
+        assert_eq!(
+            *app.world().get::<Visibility>(room1).unwrap(),
+            Visibility::Hidden
+        );
+        assert_eq!(
+            *app.world().get::<Visibility>(room2).unwrap(),
+            Visibility::Inherited
+        );
+        assert_eq!(app.world().resource::<CityPvs>().source_room(), 2);
     }
 
     /// No camera at all falls back to the player vehicle's position —
