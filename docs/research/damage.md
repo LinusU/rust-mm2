@@ -139,9 +139,12 @@ Circuit, `FreeReset` for Cruise (designed — the help names no
 free-roam consequence).
 
 The severity→damage *conversion* is not recovered — `apply` consumes
-the same impulse estimate the impact pipeline reports
-(`approach_speed × striker_mass`, shared with banger activation) as a
-documented designed policy (UNK-13 stands).
+the linear impulse estimate the impact pipeline reports
+(`approach_speed × striker_mass`) as a documented designed policy
+(UNK-13 stands). Banger activation shares only the deepest-contact
+severity and striker-mass resolution: since F04-C.5 it gates on
+striker kinetic energy `½·m·v²` against `ImpulseLimit2` (DSN-10,
+docs/research/banger.md).
 
 ## Runtime application (F05-B.1)
 

@@ -145,9 +145,10 @@ impl DamageState {
         }
     }
 
-    /// Accumulate one impact severity (the impulse estimate the impact
-    /// pipeline reports — `approach_speed × striker_mass`, the same
-    /// quantity banger activation gates on). Severities that are
+    /// Accumulate one impact severity (the linear impulse estimate the
+    /// impact pipeline reports — `approach_speed × striker_mass`;
+    /// banger activation gates on striker kinetic energy `½·m·v²`
+    /// instead, F04-C.5). Severities that are
     /// non-finite, non-positive or at/below `impact_threshold` are
     /// rejected outright — a resting car, a curb tap and normal
     /// suspension loads never reach the accumulator (F05-AC01).

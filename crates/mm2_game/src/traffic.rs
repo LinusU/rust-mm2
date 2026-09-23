@@ -1346,11 +1346,14 @@ impl StuckWindow {
 /// are designed — the original's ambient collision behaviour is
 /// unverified (UNK-12 covers the ambient policy constants generally).
 ///
-/// The gate is an impulse *estimate* — approach speed × striker mass,
-/// the same quantity banger activation compares to the authored
-/// `ImpulseLimit2` — so a real vehicle hit hands the car to the solver
+/// The gate is a linear impulse *estimate* — approach speed × striker
+/// mass — so a real vehicle hit hands the car to the solver
 /// while a light brush, or a lane path scraping world geometry (a
-/// massless striker reads 1 kg), never does. The handover itself adds
+/// massless striker reads 1 kg), never does. Banger activation reads
+/// the same contact differently: since F04-C.5 it compares striker
+/// kinetic energy `½·m·v²` to the authored `ImpulseLimit2`
+/// (DSN-10/UNK-22); only the deepest-contact severity and the
+/// striker-mass resolution are shared. The handover itself adds
 /// at most the striker's approach speed of velocity along the contact
 /// normal — the energy the impact actually carried, never a scaled-up
 /// kick — so "transition to dynamic behaviour without injecting

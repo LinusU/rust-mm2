@@ -51,6 +51,16 @@ effects, representative avoidance matrix, authored-tail columns,
 `avoidOpponents` polarity), F11-C remainder, F16-C's AC01
 process-level leg, F10-B's remaining collision/queue-priority
 scope, F13-C, or the F18-A remainder)** — the latest iteration
+repaired the F04-C.5 candidate's external-review blocker: doc
+drift. Four cross-references still claimed the knock/damage
+linear `v·m` estimate is the same quantity banger activation
+gates on — false since the energy split. `KnockPolicy` and
+`DamageState::apply` rustdoc, `docs/research/damage.md`'s
+shared-contract paragraph and the UNK-12 F10-B.6 note now
+state the split (linear for knock/damage, `½·m·v²` for banger
+activation; only deepest-contact severity and striker-mass
+resolution shared). No implementation change. Before that the
+latest iteration
 repaired operator report 4 item 3 as F04-C.5: trees and large
 poles were never unbound (they stamp through prop rules and
 `props.pathset` as dormant bangers); the activation gate compared
