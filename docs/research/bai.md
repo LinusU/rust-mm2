@@ -169,14 +169,36 @@ Measured on `city/sf.bai` and `city/london.bai` (2026-09-21):
   pairs to 15016 and `race/sf/blitz0.aimap` (3) to 7977, with named
   probes (e.g. london `270→108`: 19 steps open → `Unreachable`
   closed) and zero closed-road traversals.
+- Per-curve vertex order is **not uniform** (measured 2026-09-24 on
+  `city/sf.bai`): individual lane curves are authored vertex-reversed
+  relative to their road's section order, with mixed orders inside a
+  single side — e.g. road 113's right side stores lanes 0–2
+  end→start while lane 3 and the whole left side run start→end. The
+  reversed curves sit at ordinary in-carriageway `+x` offsets beside
+  their unreversed siblings, so storage order is an authoring
+  artefact, not a direction or carriageway marker; `lateral_offset`
+  (zipped to sections) lands at sane values only under the flip.
+  `NavGraph::build` normalizes every curve to section order
+  (`orient_curve`: flip only when endpoints sit clearly closer to
+  the swapped section extremities; the authored distance row is
+  reversed and complemented to match). Without the flip, a reversed
+  lane's travel-direction *end* lies a full road length from its
+  exit junction — the raw `nav --gaps` census reported median
+  transfer chords of 92 m (max 1643 m) on SF; after normalization
+  the medians are ~20–26 m (a real junction box) with max 87 m.
 
 `mm2_game::nav` turns `Bai` into an immutable `NavGraph`: directed
 arcs, lane sampling, full-3D `nearest_lane` (bridge decks do not snap
 to ground lanes through horizontal proximity; PSDL-room hints
 disambiguate stacked geometry), legal exits per lane position,
 seeded exit choice, bounded deterministic A* routing with specific
-failure reasons, per-consumer `RouteCursor`s and a bounded
-`reachable_arcs` census walk. `mm2_content::nav`
+failure reasons, per-consumer `RouteCursor`s, a bounded
+`reachable_arcs` census walk, and `crossing_path` — a generated cubic
+Hermite through each junction interior between an approach lane's
+travel-direction end and the exit lane's start (implementation
+choice, F10-B.9; BAI carries no authored junction-interior geometry,
+so the original's runtime crossing path stays unverified — UNK-12).
+`mm2_content::nav`
 loads `city/<name>.bai` through the VFS and distils `city/<name>.aimap`
 into `NavOverrides` (zero-density `[Exceptions]` close roads to ambient
 routing; `[Speed Limit]` overrides base speeds). `mm2-inspect nav
@@ -185,5 +207,7 @@ probes (honouring aimap closures), the `--turns` ccw-delta/geometry
 reconciliation, `--aimap <logical>` to substitute an event aimap's
 overrides, `--routes n` for the directed-reachability census plus `n`
 seeded probes (chain-consistency and closed-road-traversal checks),
-and `--strict`. The app's `--nav`/`--nav-route` flags
+`--gaps` for the lane-transfer gap census (approach-end→exit-start
+chords, generated-path lengths, endpoint-to-centre distances), and
+`--strict`. The app's `--nav`/`--nav-route` flags
 draw the graph over the imported city through gizmos (F09-AC04).

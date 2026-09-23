@@ -284,6 +284,12 @@ enum Command {
         /// by intersection arity.
         #[arg(long)]
         turns: bool,
+        /// Junction-interior census: per legal lane transfer, the
+        /// lane-end→landing-lane-start gap a crossing must cover (the
+        /// distance a direct transfer would teleport), plus the
+        /// generated crossing path's length.
+        #[arg(long)]
+        gaps: bool,
         /// Exit nonzero when an expected graph fails to build or any
         /// issue is reported.
         #[arg(long)]
@@ -531,6 +537,7 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             routes,
             aimap,
             turns,
+            gaps,
             strict,
         } => nav(
             dir,
@@ -541,6 +548,7 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 routes: *routes,
                 aimap: aimap.as_deref(),
                 turns: *turns,
+                gaps: *gaps,
                 strict: *strict,
             },
         ),
@@ -1907,6 +1915,8 @@ struct NavOptions<'a> {
     aimap: Option<&'a str>,
     /// `--turns` reconciliation report.
     turns: bool,
+    /// `--gaps` junction-interior census.
+    gaps: bool,
     /// `--strict` failure gate.
     strict: bool,
 }
@@ -1924,8 +1934,10 @@ struct NavOptions<'a> {
 /// over authored exits plus `n` seeded `route_roads` probes, each
 /// checked for chain consistency and closed-road traversal.
 /// `--turns` reconciles every exit's geometric turn classification
-/// against the authored counterclockwise road-index delta. `--strict`
-/// fails on any load failure or issue.
+/// against the authored counterclockwise road-index delta. `--gaps`
+/// censuses the junction-interior distance every legal lane transfer
+/// spans — the measure of what a direct transfer teleports (F10-B.9).
+/// `--strict` fails on any load failure or issue.
 fn nav(
     dir: &Path,
     mods: Option<&Path>,
@@ -1939,6 +1951,7 @@ fn nav(
         routes,
         aimap,
         turns,
+        gaps,
         strict,
     } = *opts;
     let probe = match route {
@@ -2221,6 +2234,138 @@ fn nav(
                     "      {arity}-way Δccw={delta}: left={} straight={} right={}",
                     counts[0], counts[1], counts[2]
                 );
+            }
+        }
+
+        if gaps {
+            // Junction-interior census (F10-B.9): every legal lane
+            // transfer spans the distance between the approach lane's
+            // end and the landing lane's start — the gap a crossing
+            // path covers, and the distance a direct transfer would
+            // teleport. Counts are per lane×exit: an arc's lanes share
+            // exits but land on different lanes.
+            let mut chords: Vec<f32> = Vec::new();
+            let mut paths: Vec<f32> = Vec::new();
+            let mut ends: Vec<f32> = Vec::new();
+            let mut starts: Vec<f32> = Vec::new();
+            let mut direct = 0usize;
+            for lane in g.lanes() {
+                if lane.arc.is_none() {
+                    continue;
+                }
+                for exit in g.legal_exits(lane.id) {
+                    let Some(to) = g.transfer_lane(lane.id, exit.to) else {
+                        continue;
+                    };
+                    let centre = g.intersections()[exit.intersection as usize].center;
+                    let (Some(a), Some(b)) =
+                        (g.sample_lane(lane.id, lane.length), g.sample_lane(to, 0.0))
+                    else {
+                        continue;
+                    };
+                    let d = |p: [f32; 3]| {
+                        ((p[0] - centre[0]).powi(2)
+                            + (p[1] - centre[1]).powi(2)
+                            + (p[2] - centre[2]).powi(2))
+                        .sqrt()
+                    };
+                    ends.push(d(a.position));
+                    starts.push(d(b.position));
+                    match g.crossing_path(lane.id, to) {
+                        Some(p) => {
+                            let chord = ((b.position[0] - a.position[0]).powi(2)
+                                + (b.position[1] - a.position[1]).powi(2)
+                                + (b.position[2] - a.position[2]).powi(2))
+                            .sqrt();
+                            chords.push(chord);
+                            paths.push(p.length);
+                        }
+                        None => direct += 1,
+                    }
+                }
+            }
+            let stats = |v: &mut Vec<f32>| {
+                v.sort_by(f32::total_cmp);
+                if v.is_empty() {
+                    return "none".to_string();
+                }
+                format!(
+                    "min {:.1} median {:.1} p90 {:.1} max {:.1}",
+                    v[0],
+                    v[v.len() / 2],
+                    v[(v.len() * 9 / 10).min(v.len() - 1)],
+                    v[v.len() - 1],
+                )
+            };
+            println!(
+                "    gaps: {} crossings ({} coincident direct) — chord {}; path {}",
+                chords.len(),
+                direct,
+                stats(&mut chords),
+                stats(&mut paths),
+            );
+            println!(
+                "      endpoints to junction centre — approach-end {}; landing-start {}",
+                stats(&mut ends),
+                stats(&mut starts),
+            );
+            let mut buckets = [0usize; 6];
+            for &c in &chords {
+                buckets[match c {
+                    c if c < 10.0 => 0,
+                    c if c < 20.0 => 1,
+                    c if c < 40.0 => 2,
+                    c if c < 80.0 => 3,
+                    c if c < 160.0 => 4,
+                    _ => 5,
+                }] += 1;
+            }
+            println!(
+                "      chord buckets: <10m {} | 10-20 {} | 20-40 {} | 40-80 {} | 80-160 {} | >160 {}",
+                buckets[0], buckets[1], buckets[2], buckets[3], buckets[4], buckets[5],
+            );
+            // Worst outliers: which transfers span more than a block?
+            let mut worst: Vec<(f32, String)> = Vec::new();
+            for lane in g.lanes() {
+                if lane.arc.is_none() {
+                    continue;
+                }
+                for exit in g.legal_exits(lane.id) {
+                    let Some(to) = g.transfer_lane(lane.id, exit.to) else {
+                        continue;
+                    };
+                    let (Some(a), Some(b)) =
+                        (g.sample_lane(lane.id, lane.length), g.sample_lane(to, 0.0))
+                    else {
+                        continue;
+                    };
+                    let chord = ((b.position[0] - a.position[0]).powi(2)
+                        + (b.position[1] - a.position[1]).powi(2)
+                        + (b.position[2] - a.position[2]).powi(2))
+                    .sqrt();
+                    if chord > 60.0 {
+                        let arc = g.arc(lane.arc.unwrap());
+                        let to_arc = g.arc(exit.to);
+                        let centre = g.intersections()[exit.intersection as usize].center;
+                        worst.push((
+                            chord,
+                            format!(
+                                "road {} lane {:?} -> arc {:?} (road {}) via int {} turn {:?} d{:.2}\n         lane_end {:?} arc_exit {:?}\n         land_start {:?} arc_entry {:?} centre {:?}",
+                                arc.road, lane.id, exit.to, to_arc.road,
+                                exit.intersection, exit.turn, exit.heading_change,
+                                a.position.map(|v| v.round() as i32),
+                                arc.exit_point.map(|v| v.round() as i32),
+                                b.position.map(|v| v.round() as i32),
+                                to_arc.entry_point.map(|v| v.round() as i32),
+                                centre.map(|v| v.round() as i32),
+                            ),
+                        ));
+                    }
+                }
+            }
+            worst.sort_by(|a, b| b.0.total_cmp(&a.0));
+            for (c, s) in worst.iter().take(12) {
+                println!("      {c:7.1} m  {s}");
             }
         }
     }

@@ -1021,6 +1021,68 @@ fn zero_density_exceptions_close_roads_to_routing() {
     assert!(matches!(err, RouteError::Unreachable { .. }));
 }
 
+/// Retail quirk (measured on `city/sf.bai` 2026-09-24): several roads
+/// author individual lane curves vertex-reversed — the curve's last
+/// authored vertex sits at the road's *start* while the lane still
+/// belongs to its side's carriageway (sf roads 111-116, mixed orders
+/// inside one side). Storage order is authoring noise, so the graph
+/// normalizes it: a reversed curve samples and ranks like any other.
+#[test]
+fn authored_reversed_lane_vertices_normalize_to_section_order() {
+    let centre = [[0.0, 0.0, 0.0], [0.0, 0.0, 50.0], [0.0, 0.0, 100.0]];
+    let mut reversed = offset(&centre, 6.0, 0.0);
+    reversed.reverse();
+    let right = side(
+        0,
+        &[(3.75, offset(&centre, 3.75, 0.0)), (6.0, reversed)],
+        &[],
+        3,
+    );
+    let left = side(0, &[(-3.75, offset(&centre, -3.75, 0.0))], &[], 3);
+    let b = bai(
+        vec![road(
+            0,
+            &centre,
+            vec![1],
+            right,
+            left,
+            dead_end(),
+            dead_end(),
+        )],
+        Vec::new(),
+    );
+    let build = NavGraph::build(&b);
+    assert!(build.issues.is_empty(), "{:?}", build.issues);
+    let g = build.graph;
+    let l = lane(0, Side::Right, 1);
+    let nav = g.lane(l).unwrap();
+    // Vertices run in section order after the flip: first ≈ start.
+    assert!(approx(nav.vertices()[0], [6.0, 0.0, 0.0], 0.01));
+    assert!(approx(
+        *nav.vertices().last().unwrap(),
+        [6.0, 0.0, 100.0],
+        0.01
+    ));
+    // The offset is measured against matching sections — +6, not the
+    // drifted garbage an unflipped zip produces.
+    assert!(
+        (nav.lateral_offset - 6.0).abs() < 0.01,
+        "{}",
+        nav.lateral_offset
+    );
+    // Travel-direction sampling is uniform: s=0 is the road's start
+    // junction side and s=length its end — the pre-fix behaviour put
+    // the travel end a full road length from the exit junction.
+    let s0 = g.sample_lane(l, 0.0).unwrap();
+    let s1 = g.sample_lane(l, nav.length).unwrap();
+    assert!(approx(s0.position, [6.0, 0.0, 0.0], 0.01));
+    assert!(approx(s1.position, [6.0, 0.0, 100.0], 0.01));
+    assert!(s0.tangent[2] > 0.0, "forward arc drives +z: {s0:?}");
+    // Ranking sees it as the outer of the two right-side lanes.
+    let arc = g.arc(nav.arc.unwrap());
+    assert_eq!(arc.lanes.last().copied(), Some(l));
+}
+
 #[test]
 fn speed_limit_resolution_prefers_exception_then_default_then_base() {
     let aimap = Aimap {

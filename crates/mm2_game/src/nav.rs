@@ -35,6 +35,13 @@ use std::fmt;
 const GRID_CELL: f32 = 32.0;
 /// Half-angle of the cone classifying an exit as [`TurnKind::Straight`].
 const STRAIGHT_CONE: f32 = std::f32::consts::FRAC_PI_4;
+/// A lane-end↔lane-start gap smaller than this is a coincident
+/// endpoint (touching lanes), not a junction interior — the transfer
+/// lands directly instead of generating a crossing path (m).
+const CROSSING_MIN_GAP: f32 = 0.5;
+/// Target segment length when resampling a [`CrossingPath`]'s Hermite
+/// into a polyline (m).
+const CROSSING_STEP: f32 = 0.5;
 
 /// Direction an [`NavArc`] travels along its road, relative to the
 /// authored section order.
@@ -174,19 +181,21 @@ pub struct NavLane {
     pub edge_distance: Option<f32>,
     /// Curve length in metres.
     pub length: f32,
-    /// Curve vertices in storage order.
+    /// Curve vertices in normalized section order — authoring-time
+    /// reversed curves are flipped by `orient_curve` at build so
+    /// `points[i]` pairs with `sections[i]`.
     points: Vec<[f32; 3]>,
-    /// Cumulative distance at each vertex in storage order.
+    /// Cumulative distance at each vertex in section order.
     cum: Vec<f32>,
 }
 
 impl NavLane {
-    /// Curve vertices in authored section order.
+    /// Curve vertices in normalized section order.
     pub fn vertices(&self) -> &[[f32; 3]] {
         &self.points
     }
 
-    /// Cumulative distance at each vertex in authored section order.
+    /// Cumulative distance at each vertex in section order.
     pub fn distances(&self) -> &[f32] {
         &self.cum
     }
@@ -335,6 +344,35 @@ pub struct NavIntersection {
     pub center: [f32; 3],
     /// Connected roads in authored counterclockwise order.
     pub roads: Vec<u32>,
+}
+
+/// A generated path through a junction interior (F10-B.9).
+///
+/// BAI authors lane curves that stop at each road's junction boundary
+/// and no crossing curves between them — the original's traversal is
+/// unverified (UNK-12), so the graph synthesises the interior leg: a
+/// cubic Hermite from the outgoing lane's end pose to the incoming
+/// lane's start pose, resampled to a dense polyline so traversal is
+/// arc-length-metered like a lane. Endpoint tangent magnitudes scale
+/// with the chord, which reads as a rounded corner on a turn and a
+/// straight shot on a through movement. This is an implementation
+/// choice, not a recovered original rule.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CrossingPath {
+    /// Resampled polyline points, entry → landing.
+    points: Vec<[f32; 3]>,
+    /// Cumulative distance at each point.
+    cum: Vec<f32>,
+    /// Total path length in metres.
+    pub length: f32,
+}
+
+impl CrossingPath {
+    /// Polyline sample at `s` metres along the crossing (clamped) —
+    /// the same pose/tangent pair [`NavGraph::sample_lane`] reports.
+    pub fn sample(&self, s: f32) -> LaneSample {
+        sample_polyline(&self.points, &self.cum, s)
+    }
 }
 
 /// A problem found while building the graph. The graph stays usable:
@@ -902,8 +940,12 @@ impl NavGraph {
                         index: i as u16,
                         kind: LaneKind::Vehicle,
                     };
-                    let points = bside.lane_vertices.get(i).cloned().unwrap_or_default();
-                    let authored = bside.lane_distances.get(i).map(Vec::as_slice);
+                    let mut points = bside.lane_vertices.get(i).cloned().unwrap_or_default();
+                    let authored = orient_curve(
+                        &mut points,
+                        bside.lane_distances.get(i).map(Vec::as_slice),
+                        road,
+                    );
                     let edge = bside.edge_distances.get(i).copied();
                     let offset = lateral_offset(&points, road);
                     match push_lane(
@@ -911,7 +953,7 @@ impl NavGraph {
                         &mut lane_lookup,
                         id,
                         points,
-                        authored,
+                        authored.as_deref(),
                         edge,
                         offset,
                         ri,
@@ -929,8 +971,12 @@ impl NavGraph {
                         index: i as u16,
                         kind: LaneKind::Sidewalk,
                     };
-                    let points = bside.lane_vertices.get(curve).cloned().unwrap_or_default();
-                    let authored = bside.lane_distances.get(curve).map(Vec::as_slice);
+                    let mut points = bside.lane_vertices.get(curve).cloned().unwrap_or_default();
+                    let authored = orient_curve(
+                        &mut points,
+                        bside.lane_distances.get(curve).map(Vec::as_slice),
+                        road,
+                    );
                     let edge = bside.edge_distances.get(curve).copied();
                     let offset = lateral_offset(&points, road);
                     if push_lane(
@@ -938,7 +984,7 @@ impl NavGraph {
                         &mut lane_lookup,
                         id,
                         points,
-                        authored,
+                        authored.as_deref(),
                         edge,
                         offset,
                         ri,
@@ -960,12 +1006,14 @@ impl NavGraph {
                             index: i as u16,
                             kind,
                         };
-                        let offset = lateral_offset(points, road);
+                        let mut points = points.clone();
+                        orient_curve(&mut points, None, road);
+                        let offset = lateral_offset(&points, road);
                         if push_lane(
                             &mut lanes,
                             &mut lane_lookup,
                             id,
-                            points.clone(),
+                            points,
                             None,
                             None,
                             offset,
@@ -1320,6 +1368,63 @@ impl NavGraph {
         Some(sample)
     }
 
+    /// The path a lane transfer drives through the junction interior
+    /// (F10-B.9): a cubic Hermite from `from`'s lane-end pose to
+    /// `to`'s start pose — both sampled in travel direction — so the
+    /// car crosses the box instead of teleporting between the lane
+    /// extremities. `None` when either lane fails to sample, when the
+    /// endpoints are non-finite, or when the gap is a coincident
+    /// endpoint rather than a real interior ([`CROSSING_MIN_GAP`] —
+    /// the transfer lands directly in that case).
+    pub fn crossing_path(&self, from: LaneId, to: LaneId) -> Option<CrossingPath> {
+        let p0 = self.sample_lane(from, self.lane(from)?.length)?;
+        let p1 = self.sample_lane(to, 0.0)?;
+        if !p0.position.iter().all(|c| c.is_finite())
+            || !p0.tangent.iter().all(|c| c.is_finite())
+            || !p1.position.iter().all(|c| c.is_finite())
+            || !p1.tangent.iter().all(|c| c.is_finite())
+        {
+            return None;
+        }
+        let chord = dist(p0.position, p1.position);
+        if chord < CROSSING_MIN_GAP {
+            return None;
+        }
+        // Hermite endpoint derivatives = travel tangents × chord: the
+        // mid-curve stays inside the box on a turn and the path never
+        // bulges past a car length on a through movement.
+        let m0 = scale3(p0.tangent, chord);
+        let m1 = scale3(p1.tangent, chord);
+        let n = ((chord / CROSSING_STEP).ceil() as usize).clamp(16, 256);
+        let mut points = Vec::with_capacity(n + 1);
+        for i in 0..=n {
+            let t = i as f32 / n as f32;
+            let t2 = t * t;
+            let t3 = t2 * t;
+            let (h00, h10) = (2.0 * t3 - 3.0 * t2 + 1.0, t3 - 2.0 * t2 + t);
+            let (h01, h11) = (-2.0 * t3 + 3.0 * t2, t3 - t2);
+            points.push([
+                h00 * p0.position[0] + h10 * m0[0] + h01 * p1.position[0] + h11 * m1[0],
+                h00 * p0.position[1] + h10 * m0[1] + h01 * p1.position[1] + h11 * m1[1],
+                h00 * p0.position[2] + h10 * m0[2] + h01 * p1.position[2] + h11 * m1[2],
+            ]);
+        }
+        let mut cum = Vec::with_capacity(n + 1);
+        cum.push(0.0);
+        for i in 1..=n {
+            cum.push(cum[i - 1] + dist(points[i - 1], points[i]));
+        }
+        let length = *cum.last().unwrap_or(&0.0);
+        if !length.is_finite() || length < CROSSING_MIN_GAP {
+            return None;
+        }
+        Some(CrossingPath {
+            points,
+            cum,
+            length,
+        })
+    }
+
     /// Closest eligible lane to `point`, in full 3D — a lane on a
     /// bridge above the query never wins over one at the query's
     /// height, and [`LaneQuery::rooms`] can hard-filter by PSDL room
@@ -1584,6 +1689,43 @@ fn lane_offset(lanes: &[NavLane], lookup: &HashMap<u64, u32>, id: LaneId) -> f32
         .unwrap_or(0.0)
 }
 
+/// BAI curve vertex order is not uniform: on several SF roads (e.g.
+/// the divided/freeway-flagged roads 113/114/116 and road 111/112 —
+/// measured 2026-09-24) individual curves are authored end→start while
+/// sitting at ordinary in-carriageway offsets, so storage order is an
+/// authoring artefact, not a direction marker. Normalize every curve
+/// to section order so `NavLane::points[i]` pairs with `sections[i]`
+/// and `sample_lane`'s travel-direction mapping is uniform. A curve is
+/// flipped only when its endpoints sit clearly closer to the swapped
+/// section extremities; its authored distance row (stored in vertex
+/// order) is flipped and complemented about the total to match.
+/// Returns the distance row to hand `push_lane`.
+fn orient_curve<'a>(
+    points: &mut [[f32; 3]],
+    authored: Option<&'a [f32]>,
+    road: &mm2_formats::bai::Road,
+) -> Option<Vec<f32>> {
+    let keep = |a: Option<&'a [f32]>| a.map(|r| r.to_vec());
+    let (Some(&p0), Some(&pn), Some(s0), Some(sn)) = (
+        points.first(),
+        points.last(),
+        road.sections.first(),
+        road.sections.last(),
+    ) else {
+        return keep(authored);
+    };
+    let fwd = dist(p0, s0.origin) + dist(pn, sn.origin);
+    let rev = dist(p0, sn.origin) + dist(pn, s0.origin);
+    if rev >= fwd {
+        return keep(authored);
+    }
+    points.reverse();
+    authored.map(|a| {
+        let total = a.last().copied().unwrap_or(0.0);
+        a.iter().rev().map(|d| total - *d).collect()
+    })
+}
+
 /// Mean signed lateral offset of a curve from the road centre line,
 /// measured per section against the authored frame's `x_axis`.
 fn lateral_offset(points: &[[f32; 3]], road: &mm2_formats::bai::Road) -> f32 {
@@ -1771,25 +1913,35 @@ fn segment_tangent(points: &[[f32; 3]], i: usize) -> [f32; 3] {
 
 /// Piecewise-linear sample at storage-order distance `s` (clamped).
 fn sample_storage(lane: &NavLane, s: f32) -> LaneSample {
-    let s = s.clamp(0.0, lane.length);
-    let n = lane.points.len();
+    sample_polyline(&lane.points, &lane.cum, s)
+}
+
+/// Piecewise-linear sample of a polyline at distance `s` along it,
+/// clamped to its length — the shared traversal both authored lane
+/// curves and generated [`CrossingPath`]s sample through.
+fn sample_polyline(points: &[[f32; 3]], cum: &[f32], s: f32) -> LaneSample {
+    if points.len() < 2 || cum.len() != points.len() {
+        return LaneSample {
+            position: points.first().copied().unwrap_or([0.0; 3]),
+            tangent: [0.0; 3],
+        };
+    }
+    let length = *cum.last().unwrap_or(&0.0);
+    let s = s.clamp(0.0, length);
+    let n = points.len();
     // First index with cum[i+1] >= s, clamped to a real segment.
-    let i = lane
-        .cum
-        .partition_point(|&c| c < s)
-        .saturating_sub(1)
-        .min(n - 2);
-    let span = lane.cum[i + 1] - lane.cum[i];
+    let i = cum.partition_point(|&c| c < s).saturating_sub(1).min(n - 2);
+    let span = cum[i + 1] - cum[i];
     let t = if span > f32::EPSILON {
-        ((s - lane.cum[i]) / span).clamp(0.0, 1.0)
+        ((s - cum[i]) / span).clamp(0.0, 1.0)
     } else {
         0.0
     };
-    let a = lane.points[i];
-    let b = lane.points[i + 1];
+    let a = points[i];
+    let b = points[i + 1];
     LaneSample {
         position: add3(a, scale3(sub3(b, a), t)),
-        tangent: segment_tangent(&lane.points, i),
+        tangent: segment_tangent(points, i),
     }
 }
 

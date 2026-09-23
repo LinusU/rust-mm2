@@ -191,6 +191,36 @@ fn chain(lanes_per_side: usize) -> (NavGraph, Vec<NavIssue>) {
     (build.graph, build.issues)
 }
 
+/// Like `chain` but the roads stop short of the junction: road 0 ends
+/// at z=92 and road 1 starts at z=108 — an 8 m junction interior a
+/// transfer must physically cross (F10-B.9).
+fn gapped_chain(lanes_per_side: usize) -> (NavGraph, Vec<NavIssue>) {
+    let r0 = road_full(
+        0,
+        &[[0.0, 0.0, 0.0], [0.0, 0.0, 92.0]],
+        lanes_per_side,
+        dead_end(),
+        connected(0, 0),
+    );
+    let r1 = road_full(
+        1,
+        &[[0.0, 0.0, 108.0], [0.0, 0.0, 200.0]],
+        lanes_per_side,
+        connected(0, 1),
+        dead_end(),
+    );
+    let build = NavGraph::build(&bai_full(
+        vec![r0, r1],
+        vec![Intersection {
+            id: 0,
+            room: 1,
+            center: [0.0, 0.0, 100.0],
+            roads: vec![0, 1],
+        }],
+    ));
+    (build.graph, build.issues)
+}
+
 fn bai_full(roads: Vec<Road>, intersections: Vec<Intersection>) -> Bai {
     Bai {
         roads,
@@ -557,10 +587,7 @@ fn cursor_advances_then_turns_then_dead_ends() {
     assert!(issues.is_empty(), "{issues:?}");
     let overrides = NavOverrides::default();
     let mut rng = NavRng::new(42);
-    let mut cur = LaneCursor {
-        lane: lane_id(0, Side::Right, 0),
-        along: 90.0,
-    };
+    let mut cur = LaneCursor::new(lane_id(0, Side::Right, 0), 90.0);
 
     // Mid-lane: stays put, `along` is travel distance.
     assert_eq!(
@@ -571,10 +598,12 @@ fn cursor_advances_then_turns_then_dead_ends() {
     assert_eq!(cur.along, 95.0);
 
     // A step past the end turns onto road 1's forward lane and
-    // consumes the remainder there.
+    // consumes the remainder there. The fixture's lane ends coincide
+    // (chord 0), so no interior crossing generates — the transfer
+    // lands directly.
     assert_eq!(
         advance_lane_cursor(&g, &overrides, &mut cur, 10.0, &mut rng),
-        LaneAdvance::Turned
+        LaneAdvance::Landed
     );
     assert_eq!(cur.lane, lane_id(1, Side::Right, 0));
     assert_eq!(cur.along, 5.0);
@@ -592,10 +621,7 @@ fn cursor_faces_the_authored_travel_direction() {
     // Left side travels -z on these +z roads: the sampled pose must
     // face -z and advancing must move the car toward z=0.
     let left = lane_id(0, Side::Left, 0);
-    let mut cur = LaneCursor {
-        lane: left,
-        along: 10.0,
-    };
+    let mut cur = LaneCursor::new(left, 10.0);
     let before = g.sample_lane(left, cur.along).unwrap();
     assert!(before.tangent[2] < 0.0, "left side drives -z: {before:?}");
     assert_eq!(
@@ -617,10 +643,7 @@ fn cursor_never_enters_a_closed_road() {
     let mut overrides = NavOverrides::default();
     overrides.closed_roads.insert(1);
     let mut rng = NavRng::new(7);
-    let mut cur = LaneCursor {
-        lane: lane_id(0, Side::Right, 0),
-        along: 95.0,
-    };
+    let mut cur = LaneCursor::new(lane_id(0, Side::Right, 0), 95.0);
     // The only exit leads onto closed road 1 — the car stops instead.
     assert_eq!(
         advance_lane_cursor(&g, &overrides, &mut cur, 10.0, &mut rng),
@@ -635,15 +658,144 @@ fn cursor_keeps_its_lane_rank_across_a_turn() {
     let overrides = NavOverrides::default();
     let mut rng = NavRng::new(3);
     // Inner lane (rank 1 of 2) on road 0 → rank 1 on road 1.
-    let mut cur = LaneCursor {
-        lane: lane_id(0, Side::Right, 1),
-        along: 98.0,
-    };
+    let mut cur = LaneCursor::new(lane_id(0, Side::Right, 1), 98.0);
     assert_eq!(
         advance_lane_cursor(&g, &overrides, &mut cur, 10.0, &mut rng),
-        LaneAdvance::Turned
+        LaneAdvance::Landed
     );
     assert_eq!(cur.lane, lane_id(1, Side::Right, 1));
+}
+
+// ---------- junction-interior crossings (F10-B.9) ----------
+
+/// The generated interior path interpolates exactly between the
+/// approach lane's end pose and the landing lane's start pose, and its
+/// dense samples move monotonically — the continuity contract the
+/// junction box needs.
+#[test]
+fn crossing_path_bridges_the_lane_end_to_the_landing_start() {
+    let (g, issues) = gapped_chain(1);
+    assert!(issues.is_empty(), "{issues:?}");
+    let from = lane_id(0, Side::Right, 0);
+    let to = lane_id(1, Side::Right, 0);
+    let path = g.crossing_path(from, to).expect("an 8 m gap generates");
+    let a = g.sample_lane(from, g.lane(from).unwrap().length).unwrap();
+    let b = g.sample_lane(to, 0.0).unwrap();
+    let close = |p: [f32; 3], q: [f32; 3]| (0..3).all(|i| (p[i] - q[i]).abs() <= 0.05);
+    assert!(close(path.sample(0.0).position, a.position));
+    assert!(close(path.sample(path.length).position, b.position));
+    assert!(path.length >= 7.9, "the path covers the gap: {path:?}");
+    let dist = |p: [f32; 3], q: [f32; 3]| {
+        ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt()
+    };
+    let mut prev = path.sample(0.0).position;
+    let mut s = 0.25;
+    while s <= path.length {
+        let p = path.sample(s).position;
+        assert!(dist(p, prev) <= 0.26, "interior jump at s={s}");
+        assert!(
+            p[2] >= prev[2] - 0.01,
+            "the path regresses: {prev:?} -> {p:?}"
+        );
+        prev = p;
+        s += 0.25;
+    }
+}
+
+/// A lane end that opens into a real junction interior commits a
+/// [`Crossing`] — the cursor keeps the approach lane until the path
+/// runs out — then traverses it in bounded, continuous steps and
+/// lands on the rank-preserved lane.
+#[test]
+fn a_gapped_lane_end_commits_a_crossing_then_lands() {
+    let (g, issues) = gapped_chain(1);
+    assert!(issues.is_empty(), "{issues:?}");
+    let overrides = NavOverrides::default();
+    let mut rng = NavRng::new(42);
+    let mut cur = LaneCursor::new(lane_id(0, Side::Right, 0), 90.0);
+
+    // 4 m: 2 m of lane, then 2 m into the committed interior path.
+    assert_eq!(
+        advance_lane_cursor(&g, &overrides, &mut cur, 4.0, &mut rng),
+        LaneAdvance::Entered
+    );
+    let landing = cur.crossing.as_ref().expect("a crossing committed").landing;
+    assert_eq!(cur.lane, lane_id(0, Side::Right, 0));
+    assert_eq!(landing, lane_id(1, Side::Right, 0));
+
+    let dist = |p: [f32; 3], q: [f32; 3]| {
+        ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt()
+    };
+    let mut prev = cur.sample(&g).unwrap().position;
+    // Drive the interior in 1 m steps: `Crossing` while inside the
+    // box, `Landed` when the path runs out — and every pose moves at
+    // most the step (the teleport this replaces would jump ~6 m).
+    let mut landed = false;
+    for _ in 0..64 {
+        match advance_lane_cursor(&g, &overrides, &mut cur, 1.0, &mut rng) {
+            LaneAdvance::Landed => {
+                landed = true;
+            }
+            LaneAdvance::Crossing => {}
+            other => panic!("mid-interior step: {other:?}"),
+        }
+        let pos = cur.sample(&g).unwrap().position;
+        assert!(
+            dist(pos, prev) <= 1.01,
+            "pose discontinuity: {prev:?} -> {pos:?}"
+        );
+        prev = pos;
+        if landed {
+            break;
+        }
+    }
+    assert!(landed, "the crossing never completed");
+    assert_eq!(cur.lane, lane_id(1, Side::Right, 0));
+    assert!(cur.crossing.is_none());
+    // The car lands at the lane's start — z≈108 — having crossed the
+    // box instead of jumping between the extremities.
+    let at = cur.sample(&g).unwrap().position;
+    assert!((108.0..=112.0).contains(&at[2]), "{at:?}");
+}
+
+/// `Entered` is sticky: a single step that commits *and* completes a
+/// crossing still reports the commit, so the caller's queue-release
+/// bookkeeping cannot be swallowed by the landing.
+#[test]
+fn a_step_spanning_the_whole_interior_still_reports_the_commit() {
+    let (g, issues) = gapped_chain(1);
+    assert!(issues.is_empty(), "{issues:?}");
+    let overrides = NavOverrides::default();
+    let mut rng = NavRng::new(1);
+    let mut cur = LaneCursor::new(lane_id(0, Side::Right, 0), 90.0);
+    // One 30 m step covers the lane rest, the ~9 m interior and the
+    // start of the landing lane.
+    assert_eq!(
+        advance_lane_cursor(&g, &overrides, &mut cur, 30.0, &mut rng),
+        LaneAdvance::Entered
+    );
+    assert!(cur.crossing.is_none(), "the step landed already");
+    assert_eq!(cur.lane, lane_id(1, Side::Right, 0));
+    assert!(cur.along > 0.0);
+}
+
+/// Rank preservation holds across a generated interior too — the
+/// outer lane lands on the outer lane.
+#[test]
+fn a_crossing_preserves_lane_rank() {
+    let (g, issues) = gapped_chain(2);
+    assert!(issues.is_empty(), "{issues:?}");
+    let overrides = NavOverrides::default();
+    let mut rng = NavRng::new(3);
+    let mut cur = LaneCursor::new(lane_id(0, Side::Right, 1), 90.0);
+    assert_eq!(
+        advance_lane_cursor(&g, &overrides, &mut cur, 4.0, &mut rng),
+        LaneAdvance::Entered
+    );
+    assert_eq!(
+        cur.crossing.as_ref().unwrap().landing,
+        lane_id(1, Side::Right, 1)
+    );
 }
 
 // ---------- spawn annulus (F10-B.1: the recycler-radius bound) ----------

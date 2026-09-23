@@ -565,7 +565,7 @@ pub fn headless_smoke(
                 .filter(|e| e.get::<crate::traffic::AmbientCar>().is_some())
                 .count();
             let mut s = format!(
-                " traf={}/{} sp={} rec={} dead={} uns={} q={} jq={} stuck={}",
+                " traf={}/{} sp={} rec={} dead={} uns={} q={} jq={} stuck={} crx={} jmp={}",
                 active,
                 t.target,
                 t.spawned,
@@ -574,7 +574,9 @@ pub fn headless_smoke(
                 t.unspawnable,
                 t.queued,
                 t.junction_held,
-                t.stuck
+                t.stuck,
+                t.crossings,
+                t.jumps,
             );
             // F10-B.6 handover count only when nonzero — records from
             // knock-free runs stay bit-identical to earlier ones.

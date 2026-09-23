@@ -519,26 +519,81 @@ pub fn draw_spawn(
     }
 }
 
+/// A committed junction crossing (F10-B.9): the generated interior
+/// path plus progress along it. While a crossing is active the
+/// cursor's `lane` still names the *approach* lane — the transfer
+/// commits only when the path runs out, so a mid-box car reports the
+/// road it left, never a lane it has not reached.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Crossing {
+    /// Lane the crossing lands on — the seeded exit's rank-preserved
+    /// lane on the next arc.
+    pub landing: LaneId,
+    /// The generated interior path.
+    pub path: crate::nav::CrossingPath,
+    /// Distance travelled along the path (m).
+    pub along: f32,
+}
+
 /// A car's position on the authored network — lane plus
 /// travel-direction distance, the same convention
-/// [`crate::nav::RouteCursor::distance`] uses.
-/// [`NavGraph::sample_lane`] converts it to a world pose facing the
-/// authored travel direction.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// [`crate::nav::RouteCursor::distance`] uses, plus an in-flight
+/// junction [`Crossing`]. [`LaneCursor::sample`] converts it to a
+/// world pose facing the authored travel direction — continuous
+/// across the junction interior, where sampling the landing lane
+/// alone would teleport the car between the lane extremities.
+#[derive(Debug, Clone, PartialEq)]
 pub struct LaneCursor {
-    /// Lane the car is travelling on.
+    /// Lane the car is travelling on — the approach lane while a
+    /// `crossing` is active.
     pub lane: LaneId,
     /// Distance travelled along the lane.
     pub along: f32,
+    /// The junction interior being traversed, when the car has
+    /// committed to a transfer but not yet landed.
+    pub crossing: Option<Crossing>,
+}
+
+impl LaneCursor {
+    /// A cursor at `along` metres on `lane`, not crossing.
+    pub fn new(lane: LaneId, along: f32) -> Self {
+        Self {
+            lane,
+            along,
+            crossing: None,
+        }
+    }
+
+    /// The cursor's world pose: the crossing path while a junction
+    /// interior is being traversed, the lane curve otherwise.
+    pub fn sample(&self, graph: &NavGraph) -> Option<LaneSample> {
+        match &self.crossing {
+            Some(c) => Some(c.path.sample(c.along)),
+            None => graph.sample_lane(self.lane, self.along),
+        }
+    }
 }
 
 /// What [`advance_lane_cursor`] did with the step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaneAdvance {
-    /// Still on the same lane.
+    /// Still on the same lane — no junction involvement this step.
     Along,
-    /// Crossed into a new lane through an intersection exit.
-    Turned,
+    /// Traversed a junction interior — the car is inside the box.
+    Crossing,
+    /// Committed to a junction crossing this step: the car left the
+    /// approach lane and `cursor.crossing` holds the path and the
+    /// landing lane — or already landed when one step covered the
+    /// whole interior (`cursor.crossing` is then `None`). The caller
+    /// should check the landing for occupancy before letting the
+    /// transfer stand. `Entered` takes precedence over `Landed` so a
+    /// commit never goes unreported.
+    Entered,
+    /// Completed a transfer this step without committing a new
+    /// crossing — an earlier crossing ran out, or a coincident
+    /// endpoint needed no interior path — and the cursor now sits on
+    /// the landing lane.
+    Landed,
     /// No legal open exit — the car has run out of road.
     DeadEnd,
 }
@@ -548,9 +603,15 @@ pub enum LaneAdvance {
 /// close are excluded, so closed roads are never entered; a car
 /// already on one runs to its end and stops. Lane rank is preserved
 /// across the crossing ([`NavGraph::transfer_lane`]), matching the
-/// router's lane choice. `DeadEnd` means the car has run out of road —
-/// the caller despawns/recycles it; the intersection controller
-/// (F10-B) will later queue instead.
+/// router's lane choice.
+///
+/// A lane end that opens into a junction interior commits a
+/// [`Crossing`] instead of teleporting the cursor to the landing
+/// lane's start (F10-B.9): `ds` metres past the lane end flow into
+/// the generated interior path, the path's own length is consumed
+/// before the landing lane's, and the transfer only commits when the
+/// car physically reaches the far side. `DeadEnd` means the car has
+/// run out of road — the caller despawns/recycles it.
 pub fn advance_lane_cursor(
     graph: &NavGraph,
     overrides: &NavOverrides,
@@ -559,19 +620,42 @@ pub fn advance_lane_cursor(
     rng: &mut NavRng,
 ) -> LaneAdvance {
     let mut rest = ds.max(0.0);
-    let mut turned = false;
-    // Bound the crossing loop — a degenerate graph must terminate.
+    let mut result = LaneAdvance::Along;
+    // A crossing committed this call reports `Entered` even when the
+    // same step lands it — the commit bookkeeping (queue release,
+    // landing clearance) must not be swallowed by the landing's.
+    let mut committed = false;
+    // Bound the transfer loop — a degenerate graph must terminate.
     for _ in 0..64 {
+        if let Some(crossing) = &mut cursor.crossing {
+            // Inside the junction: the interior path consumes the
+            // step before the landing lane does.
+            let left = (crossing.path.length - crossing.along).max(0.0);
+            if rest < left {
+                crossing.along += rest;
+                return if committed {
+                    LaneAdvance::Entered
+                } else {
+                    LaneAdvance::Crossing
+                };
+            }
+            rest -= left;
+            cursor.lane = crossing.landing;
+            cursor.along = 0.0;
+            cursor.crossing = None;
+            result = LaneAdvance::Landed;
+            continue;
+        }
         let Some(lane) = graph.lane(cursor.lane) else {
             return LaneAdvance::DeadEnd;
         };
         let remaining = (lane.length - cursor.along).max(0.0);
         if rest < remaining {
             cursor.along += rest;
-            return if turned {
-                LaneAdvance::Turned
+            return if committed {
+                LaneAdvance::Entered
             } else {
-                LaneAdvance::Along
+                result
             };
         }
         rest -= remaining;
@@ -586,9 +670,23 @@ pub fn advance_lane_cursor(
         let Some(next) = graph.transfer_lane(cursor.lane, exit.to) else {
             return LaneAdvance::DeadEnd;
         };
-        cursor.lane = next;
-        cursor.along = 0.0;
-        turned = true;
+        match graph.crossing_path(cursor.lane, next) {
+            Some(path) => {
+                cursor.crossing = Some(Crossing {
+                    landing: next,
+                    path,
+                    along: 0.0,
+                });
+                committed = true;
+            }
+            // Coincident endpoints carry no interior — the transfer
+            // lands directly.
+            None => {
+                cursor.lane = next;
+                cursor.along = 0.0;
+                result = LaneAdvance::Landed;
+            }
+        }
     }
     LaneAdvance::DeadEnd
 }

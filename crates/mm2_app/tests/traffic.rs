@@ -503,7 +503,7 @@ fn car_state(app: &mut App, car: Entity) -> Option<(Vec3, f32, LaneCursor)> {
         .query::<(Entity, &AmbientCar, &Position)>()
         .iter(app.world())
         .find(|(e, _, _)| *e == car)
-        .map(|(_, c, p)| (p.0, c.speed, c.cursor))
+        .map(|(_, c, p)| (p.0, c.speed, c.cursor.clone()))
 }
 
 /// Spawn a bare lane follower — the `AmbientCar` component plus the
@@ -528,7 +528,7 @@ fn spawn_follower(app: &mut App, lane: LaneId, along: f32, target_speed: f32) ->
             AmbientCar {
                 class: 0,
                 drive: mm2_app::traffic::AmbientDrive::Lane,
-                cursor: LaneCursor { lane, along },
+                cursor: LaneCursor::new(lane, along),
                 target_speed,
                 speed: target_speed.max(0.0),
                 stuck: StuckWindow::new(pos.to_array()),
@@ -1276,7 +1276,12 @@ fn a_traffic_light_admits_only_the_green_member_road() {
                 continue;
             }
             match car_state(&mut app, car) {
-                Some((_, _, cur)) if cur.lane == approach => {}
+                // Still approaching = on the approach lane with no
+                // crossing committed. A committed crossing counts as
+                // crossed now: the gate admitted the car this tick,
+                // while the lane-id change only lands after the
+                // interior path completes — possibly phases later.
+                Some((_, _, cur)) if cur.lane == approach && cur.crossing.is_none() => {}
                 Some(_) => {
                     assert!(
                         green == Some(road) || prev_green == Some(road),
@@ -1293,6 +1298,53 @@ fn a_traffic_light_admits_only_the_green_member_road() {
         }
     }
     assert_eq!(crossed, [true, true], "both approaches must get a green");
+}
+
+/// F10-B.9 (operator report 4 item 1): a follower on a free-flow
+/// approach crosses the junction interior in continuous steps — the
+/// box is traversed, not teleported. `crossings` counts the commit
+/// and the `jumps` watchdog stays at zero.
+#[test]
+fn a_lane_follower_crosses_the_junction_interior_without_a_jump() {
+    let install = junction_install(3, 3); // NeverStop: free flow
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    let lane_r0 = lane(0, Side::Right);
+    let car = spawn_follower(&mut app, lane_r0, 10.0, 15.0);
+
+    // Watch the pose every update: the follower must be observed
+    // inside the box (z −4..4) on its crossing path, and every
+    // per-update move must stay within a driven step — the old
+    // transfer jumped the ~8 m interior in one tick.
+    let mut prev = car_state(&mut app, car).expect("the car despawned").0;
+    let (mut saw_inside, mut max_step) = (false, 0.0f32);
+    for _ in 0..600 {
+        app.update();
+        let Some((pos, _, cur)) = car_state(&mut app, car) else {
+            break;
+        };
+        max_step = max_step.max(pos.distance(prev));
+        prev = pos;
+        if cur.lane != lane_r0 {
+            break;
+        }
+        if cur.crossing.is_some() && (-4.0..=4.0).contains(&pos.z) {
+            saw_inside = true;
+        }
+    }
+    assert!(saw_inside, "the car never traversed the junction interior");
+    // Two fixed drive steps run per update at ≤15 m/s — a real move
+    // stays under a metre; the teleport would read ~8 m at once.
+    assert!(
+        max_step < 1.0,
+        "pose discontinuity: {max_step} m in one update"
+    );
+    let t = app.world().resource::<AmbientTraffic>();
+    assert!(t.crossings >= 1, "no committed crossing was recorded");
+    assert_eq!(t.jumps, 0, "the continuity watchdog counted a teleport");
 }
 
 /// A held red proves the gate closes, not just that greens admit:
@@ -1916,7 +1968,7 @@ fn a_hard_hit_hands_the_follower_to_dynamics() {
             lv.0.is_finite() && lv.0.length() <= 35.0,
             "unbounded kick velocity: {lv:?}"
         );
-        (c.drive, *rb, lv.0, c.cursor)
+        (c.drive, *rb, lv.0, c.cursor.clone())
     };
     let _ = (drive, body, kick);
 
@@ -1931,7 +1983,7 @@ fn a_hard_hit_hands_the_follower_to_dynamics() {
             .iter(app.world())
             .find(|(e, ..)| *e == car)
             .expect("the wreck despawned");
-        (c.cursor, p.0, matches!(rb, RigidBody::Dynamic))
+        (c.cursor.clone(), p.0, matches!(rb, RigidBody::Dynamic))
     };
     assert!(still_dynamic);
     assert_eq!(frozen, cursor, "the lane driver re-posed a knocked car");
@@ -2001,7 +2053,7 @@ fn a_light_touch_leaves_the_car_lane_following() {
             .iter(app.world())
             .find(|(e, ..)| *e == car)
             .expect("the car despawned");
-        (c.drive, *rb, c.cursor)
+        (c.drive, *rb, c.cursor.clone())
     };
     assert_eq!(drive, AmbientDrive::Lane);
     assert!(matches!(body, RigidBody::Kinematic));
@@ -2044,10 +2096,7 @@ fn a_knocked_wreck_occupies_the_junction_box() {
             AmbientCar {
                 class: 0,
                 drive: AmbientDrive::Knocked,
-                cursor: LaneCursor {
-                    lane: lane_r0,
-                    along: 26.0,
-                },
+                cursor: LaneCursor::new(lane_r0, 26.0),
                 target_speed: 0.0,
                 speed: 0.0,
                 stuck: StuckWindow::new(wreck_pos.to_array()),

@@ -97,6 +97,23 @@
 //! it (documented approximation; the original's crash behaviour is
 //! unverified, UNK-12).
 //!
+//! F10-B.9 drives the junction interior (operator report 4 item 1):
+//! BAI lane curves stop at each road's junction boundary, so a lane
+//! transfer that re-posed the car on the exit lane's start read on
+//! screen as a teleport across the box. [`advance_lane_cursor`] now
+//! commits a generated [`mm2_game::Crossing`] — a cubic Hermite
+//! between the lane-end pose and the landing lane's start pose,
+//! resampled to a dense polyline — and the car traverses it under the
+//! corner cap and the corridor sense like any other driven stretch.
+//! Committing releases the approach's FCFS slot; the box-yield then
+//! holds the next car until this one physically clears the junction
+//! (a mid-crossing car is an occupant, not an approach). A
+//! `traffic.jumps` watchdog counts pose discontinuities a lane
+//! follower could not have driven — the measure the report asked for,
+//! where spawn/recycle/stuck counts structurally cannot see a
+//! teleport. The crossing geometry is generated, not authored — an
+//! implementation choice under UNK-12.
+//!
 //! F10-B.7 renders the authored traffic signals: every BAI road end
 //! carries a `trafficLightOrigin`/`trafficLightAxis` pair (R3: lights
 //! render only when the origin is nonzero), surfaced on the nav graph
@@ -197,6 +214,14 @@ pub struct AmbientTraffic {
     /// The impulse threshold the handover runs under — `pub` so
     /// evidence runs and tests can bind a different gate.
     pub knock_policy: KnockPolicy,
+    /// Junction crossings committed this session (F10-B.9) — the
+    /// generated interior path is exercised iff this is nonzero.
+    pub crossings: usize,
+    /// Per-tick pose discontinuities a lane follower could not have
+    /// driven — the teleport the aggregate counters cannot see
+    /// (operator report 4 item 1). Must stay zero: every move a
+    /// follower makes is `speed × dt` along its lane or crossing.
+    pub jumps: usize,
     /// The per-junction right-of-way/signal controller (F10-B.2) —
     /// session-scoped like the plan it polices.
     pub junctions: Junctions,
@@ -435,6 +460,8 @@ pub fn load_ambient_traffic(
         knocked: 0,
         knock_policy: KnockPolicy::default(),
         junctions: Junctions::default(),
+        crossings: 0,
+        jumps: 0,
         signals: 0,
         signals_dropped: 0,
         signal_assets: SignalAssets::new(meshes, materials),
@@ -673,10 +700,7 @@ fn spawn_ambient_car(
             AmbientCar {
                 class: directive.class,
                 drive: AmbientDrive::Lane,
-                cursor: LaneCursor {
-                    lane: directive.lane,
-                    along: directive.along,
-                },
+                cursor: LaneCursor::new(directive.lane, directive.along),
                 target_speed: directive.target_speed,
                 speed: directive.target_speed.max(0.0),
                 stuck: StuckWindow::new(pos.to_array()),
@@ -783,11 +807,13 @@ pub fn drive_ambient(
     // not inside the box, or two competing approaches would hold each
     // other forever. A `Knocked` car is not bound for anything: it is
     // an obstacle wherever the collision left it, so a wreck inside
-    // the box legitimately occupies it.
+    // the box legitimately occupies it. Neither is a car mid-crossing
+    // (F10-B.9): committed to the box, it is an occupant of it — not
+    // an approach that may still hold.
     let bound_for: HashMap<Entity, u16> = cars
         .iter()
         .filter_map(|(e, c, ..)| {
-            (c.drive == AmbientDrive::Lane)
+            (c.drive == AmbientDrive::Lane && c.cursor.crossing.is_none())
                 .then(|| Junctions::approach(&traffic.graph, c.cursor.lane))
                 .flatten()
                 .map(|(ix, _, _)| (e, ix))
@@ -837,58 +863,70 @@ pub fn drive_ambient(
         // `AlwaysStop` close it, everything else opens it. A closed
         // gate brakes to the stop line and never lets the cursor past
         // it; a stopped stop-sign car registers in the FCFS queue.
-        let dist_to_stop = traffic
-            .graph
-            .lane(car.cursor.lane)
-            .map(|l| l.length - jpolicy.stop_inset - car.cursor.along)
-            .unwrap_or(f32::MAX);
-        // "At the line" is the policy tolerance, never an exact zero:
-        // the brake ramp decays `dist_to_stop` geometrically, so the
-        // f32 cursor asymptotes a hair short of the line and would
-        // otherwise never register, never open a stop-sign queue, and
-        // never report held.
-        let at_line = dist_to_stop <= jpolicy.stop_line_tolerance;
-        // Junction-box yield (F10-B.5): an otherwise-admitted gated
-        // approach still holds while the box contains a vehicle not
-        // bound for it — the green/FCFS turn does not make an
-        // occupied box passable. Only the rules whose gate can open
-        // consult it; `NeverStop`/unruled ends keep their free flow.
-        let box_occupied = match Junctions::approach(&traffic.graph, car.cursor.lane) {
-            Some((ix, _, Some(VehicleRule::TrafficLight | VehicleRule::StopSign))) => {
-                junction_zone(&traffic.graph, ix, &jpolicy).is_some_and(|zone| {
-                    blockers.iter().any(|(e, b)| {
-                        *e != entity
-                            && bound_for.get(e).copied() != Some(ix)
-                            && inside_junction_zone(b.to_array(), zone, &jpolicy)
+        //
+        // A car mid-crossing (F10-B.9) is committed: no gate, no stop
+        // line — it traverses the junction interior under the corner
+        // cap and the corridor sense alone.
+        let mut ds;
+        if car.cursor.crossing.is_some() {
+            car.speed = car.speed.min(follow.turn_speed);
+            ds = car.speed.max(0.0) * dt;
+        } else {
+            let dist_to_stop = traffic
+                .graph
+                .lane(car.cursor.lane)
+                .map(|l| l.length - jpolicy.stop_inset - car.cursor.along)
+                .unwrap_or(f32::MAX);
+            // "At the line" is the policy tolerance, never an exact
+            // zero: the brake ramp decays `dist_to_stop`
+            // geometrically, so the f32 cursor asymptotes a hair
+            // short of the line and would otherwise never register,
+            // never open a stop-sign queue, and never report held.
+            let at_line = dist_to_stop <= jpolicy.stop_line_tolerance;
+            // Junction-box yield (F10-B.5): an otherwise-admitted
+            // gated approach still holds while the box contains a
+            // vehicle not bound for it — the green/FCFS turn does not
+            // make an occupied box passable. Only the rules whose
+            // gate can open consult it; `NeverStop`/unruled ends keep
+            // their free flow.
+            let box_occupied = match Junctions::approach(&traffic.graph, car.cursor.lane) {
+                Some((ix, _, Some(VehicleRule::TrafficLight | VehicleRule::StopSign))) => {
+                    junction_zone(&traffic.graph, ix, &jpolicy).is_some_and(|zone| {
+                        blockers.iter().any(|(e, b)| {
+                            *e != entity
+                                && bound_for.get(e).copied() != Some(ix)
+                                && inside_junction_zone(b.to_array(), zone, &jpolicy)
+                        })
                     })
-                })
-            }
-            _ => false,
-        };
-        let gate = traffic.junctions.gate(
-            &traffic.graph,
-            car.cursor.lane,
-            entity,
-            at_line,
-            car.speed <= follow.held_speed,
-            box_occupied,
-        );
-        car.speed = junction_speed(car.speed, dist_to_stop, gate, dt, &jpolicy);
-        if gate == JunctionGate::Closed && at_line && car.speed <= follow.held_speed {
-            junction_held += 1;
-        }
-        let mut ds = car.speed.max(0.0) * dt;
-        if gate == JunctionGate::Closed {
-            // Inside the tolerance the residual is below the ramp's
-            // f32 resolution — close it outright so the car stands on
-            // the line; outside it, never step past the line.
-            ds = if at_line {
-                dist_to_stop.max(0.0)
-            } else {
-                ds.min(dist_to_stop)
+                }
+                _ => false,
             };
+            let gate = traffic.junctions.gate(
+                &traffic.graph,
+                car.cursor.lane,
+                entity,
+                at_line,
+                car.speed <= follow.held_speed,
+                box_occupied,
+            );
+            car.speed = junction_speed(car.speed, dist_to_stop, gate, dt, &jpolicy);
+            if gate == JunctionGate::Closed && at_line && car.speed <= follow.held_speed {
+                junction_held += 1;
+            }
+            ds = car.speed.max(0.0) * dt;
+            if gate == JunctionGate::Closed {
+                // Inside the tolerance the residual is below the
+                // ramp's f32 resolution — close it outright so the
+                // car stands on the line; outside it, never step past
+                // the line.
+                ds = if at_line {
+                    dist_to_stop.max(0.0)
+                } else {
+                    ds.min(dist_to_stop)
+                };
+            }
         }
-        let previous = car.cursor;
+        let previous = car.cursor.clone();
         let step = if ds > 0.0 {
             advance_lane_cursor(
                 &traffic.graph,
@@ -897,43 +935,71 @@ pub fn drive_ambient(
                 ds,
                 &mut traffic.rng,
             )
+        } else if car.cursor.crossing.is_some() {
+            LaneAdvance::Crossing
         } else {
             LaneAdvance::Along
         };
-        if step == LaneAdvance::DeadEnd {
-            traffic.dead_ends += 1;
-            traffic.junctions.depart(entity);
-            commands.entity(entity).despawn();
-            continue;
-        }
-        if step == LaneAdvance::Turned {
-            // Occupied-transfer check (F10-AC04's junction leg): a
-            // landing inside `enter_clearance` of a live blocker would
-            // materialise the car inside a junction queue — revert to
-            // the lane end and retry next tick.
-            let landing_occupied = traffic
-                .graph
-                .sample_lane(car.cursor.lane, car.cursor.along)
-                .is_some_and(|s| {
-                    let p = Vec3::from(s.position);
+        match step {
+            LaneAdvance::DeadEnd => {
+                traffic.dead_ends += 1;
+                traffic.junctions.depart(entity);
+                commands.entity(entity).despawn();
+                continue;
+            }
+            LaneAdvance::Entered => {
+                traffic.crossings += 1;
+                // Occupied-transfer check (F10-AC04's junction leg):
+                // a landing inside `enter_clearance` of a live
+                // blocker would materialise the car inside a junction
+                // queue — hold at the lane end and retry next tick.
+                // When one step covered the whole interior the car is
+                // already on the landing; the same check runs on the
+                // reached point.
+                let check = match &car.cursor.crossing {
+                    Some(c) => traffic
+                        .graph
+                        .sample_lane(c.landing, 0.0)
+                        .map(|s| s.position),
+                    None => car.cursor.sample(&traffic.graph).map(|s| s.position),
+                };
+                let landing_occupied = check.is_some_and(|p| {
+                    let p = Vec3::from(p);
                     blockers
                         .iter()
                         .any(|(e, b)| *e != entity && b.distance(p) < jpolicy.enter_clearance)
                 });
-            if landing_occupied {
-                car.cursor = previous;
-                car.speed = 0.0;
-            } else {
+                if landing_occupied {
+                    car.cursor = previous;
+                    car.speed = 0.0;
+                    traffic.crossings -= 1;
+                } else {
+                    // Committed to the box: the approach releases its
+                    // FCFS slot — the box-yield holds the next car
+                    // until this one physically clears the junction.
+                    traffic.junctions.depart(entity);
+                    // Corner braking stand-in: an intersection turn
+                    // is never taken at full road speed.
+                    car.speed = car.speed.min(follow.turn_speed);
+                    if car.cursor.crossing.is_none() {
+                        // Committed and landed inside one step — the
+                        // post-landing bookkeeping still applies.
+                        if let Some(road) = traffic.graph.road(car.cursor.lane.road) {
+                            car.target_speed = traffic.overrides.effective_speed(road);
+                        }
+                    }
+                }
+            }
+            LaneAdvance::Landed => {
                 traffic.junctions.depart(entity);
                 if let Some(road) = traffic.graph.road(car.cursor.lane.road) {
                     car.target_speed = traffic.overrides.effective_speed(road);
                 }
-                // Corner braking stand-in: an intersection turn is
-                // never taken at full road speed.
                 car.speed = car.speed.min(follow.turn_speed);
             }
+            LaneAdvance::Crossing | LaneAdvance::Along => {}
         }
-        let Some(sample) = traffic.graph.sample_lane(car.cursor.lane, car.cursor.along) else {
+        let Some(sample) = car.cursor.sample(&traffic.graph) else {
             traffic.dead_ends += 1;
             traffic.junctions.depart(entity);
             commands.entity(entity).despawn();
@@ -956,6 +1022,14 @@ pub fn drive_ambient(
         // itself and diverges — and a contact resolving against it
         // would see a phantom ~km/s impactor.
         velocity.0 = tangent * car.speed.max(0.0);
+        // Position-continuity watchdog (operator report 4 item 1): a
+        // lane follower only ever moves its own driven step — a
+        // displacement wider than that is a teleport the aggregate
+        // counters cannot see. Junction crossings must read zero.
+        let step_limit = car.speed.max(0.0) * dt * 2.0 + 1.0;
+        if pos.distance(position.0) > step_limit {
+            traffic.jumps += 1;
+        }
         position.0 = pos;
         rotation.0 = rot;
         *transform = Transform::from_translation(pos).with_rotation(rot);
