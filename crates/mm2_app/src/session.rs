@@ -527,12 +527,25 @@ pub fn load_session_world(
         } else {
             crate::environment::ConditionsSource::Configured
         };
-        let report = crate::environment::spawn_environment(
+        let mut report = crate::environment::spawn_environment(
             &mut commands,
             &vfs.0,
             psdl,
             conditions,
             source,
+            owner,
+        );
+        // F18-A.4: the `.sky` dome binds at the same effective slot —
+        // authored-event and customization precedence already resolved
+        // into `report.slot`.
+        report.sky = crate::environment::spawn_sky_dome(
+            &mut commands,
+            &vfs.0,
+            psdl,
+            report.slot,
+            &mut assets.meshes,
+            &mut assets.images,
+            &mut assets.materials,
             owner,
         );
         camera_fog = report.fog.bound.map(|f| f.distance_fog());

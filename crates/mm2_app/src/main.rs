@@ -18,8 +18,8 @@ use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use clap::Parser;
 use mm2_app::session::{ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
-    banger, breakaway, camera, car_visual, city, contracts, damage, damage_fx, input, menu,
-    nav_overlay, opponents, pause, profile, progression, race, recovery, results, scripted,
+    banger, breakaway, camera, car_visual, city, contracts, damage, damage_fx, environment, input,
+    menu, nav_overlay, opponents, pause, profile, progression, race, recovery, results, scripted,
     session, smoke, spark_fx, stuck, traffic,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
@@ -1045,6 +1045,15 @@ fn main() {
     .add_systems(
         Update,
         nav_overlay::draw_nav_overlay.run_if(resource_exists::<nav_overlay::CityNav>),
+    )
+    // F18-A.4: the `.sky` dome re-centres on the active camera and
+    // advances its authored rotation — after the camera systems so it
+    // uses this frame's pose.
+    .add_systems(
+        Update,
+        environment::drive_sky_dome
+            .after(camera::chase_follow)
+            .after(camera::free_fly),
     );
     if menu_mode {
         // The shell seeds from the same launch resolution a direct

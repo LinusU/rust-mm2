@@ -37,6 +37,10 @@ One line of text: `<model> <f1> <f2> <f3>`.
   names — recovered, not documented).
 - Parser: `mm2_formats::sky::SkyDef` — exact 4-token arity, finite
   floats validated.
+- The dome binds at runtime (F18-A.4): `spawn_sky_dome` resolves the
+  model through the VFS and draws it — see *Runtime consumption*
+  below for the transform/paint-job readings, which are designed
+  rather than recovered.
 
 ## `.ltNN` — time×weather lighting presets (verified on retail)
 
@@ -237,7 +241,7 @@ authored anomalies (self-invisible rooms, the sf lmap shortfall, the
 0xCDCDCDCD sentinel, dev-path sources) are notes/findings, so a stock
 retail install exits 0.
 
-## Runtime consumption (F18-A.2/A.3)
+## Runtime consumption (F18-A.2/.3/.4)
 
 The `.ltNN` presets bind to Bevy lighting and the `_fog.csv` row binds
 to Bevy fog through the production session path —
@@ -285,6 +289,26 @@ Binding (per `docs/research/environment.md`'s recovered record):
   .absent` names the reason (`missing`/`unparseable`/`no row for
   slot`/`degenerate`) — never a fabricated default. Table-level
   anomalies stay warnings in `fog.issues`.
+- `city/<stem>.sky` → the sky dome (F18-A.4): `spawn_sky_dome`
+  resolves `geometry/<model>.pkg` through the VFS and draws it at the
+  same effective slot — the dome's authored paint jobs are the same
+  `tod*4 + weather` grid (`sky_dome_l` job *i* textures run
+  `skylondon_{c,p,f,r}{a,n,d,m}_l` in slot order; `sky_dome` the
+  `sky_*_f` equivalents — measured on retail), so paint job
+  `slot % jobs` binds the preset's sky texture. The mesh is scaled
+  from its measured ~43 m extent to a designed 900 m radius, is
+  unlit/double-sided/fog-exempt (the authored texture is the sky's
+  final colour), re-centres on the active camera each frame and
+  rotates by `rotation_rate × dt` — `drive_sky_dome`. The field
+  readings are designed, not recovered (UNK-24): `HatYOffset` as the
+  dome's world height, `YMultiplier` as its vertical squash,
+  `RotationRate` as radians/second, camera-centring as the horizon
+  policy. Missing/unparseable `.sky`, a model the VFS cannot
+  provide, a non-finite transform field or an empty mesh → no dome +
+  `EnvironmentReport.sky.absent` naming the reason; the smoke field
+  shows ` sky=<model>:<texture>` or ` sky=none`. A missing dome
+  *texture* warns and draws the shared fallback material (the prop
+  policy).
 
 Designed (not authored) scales: a uniform 15 000 lux illuminance per
 directional light — the authored `Color` carries each light's relative
@@ -294,10 +318,10 @@ typical authored day ambient (~30/255 lum) lands near the previous
 fixed ambient (~300 effective). Consequence to keep honest: authored
 night ambients are *brighter* than day ones (grey-80 vs 30-blue), so a
 night preset still renders lighter than a real night inside the fog's
-near band — authored data, not a preset-selection bug. The sky itself
-is not fogged yet (no `.sky` dome is spawned — the clear colour stays
-a designed blue while geometry fogs to the authored colour, visibly
-mismatched on foggy presets until the dome leg lands).
+near band — authored data, not a preset-selection bug. The `.sky` dome
+is deliberately fog-exempt (`fog_enabled = false`) — it is the
+backdrop the fog fades toward, not a fogged object; whether the
+original fogs its dome is unrecovered (UNK-24).
 
 Retail evidence (fingerprinted install, 2026-09-22): `sf.lt00` →
 `clear-morning`, `sf.lt06` → `foggy-noon`, `sf.lt15` → `rainy-night`,
@@ -312,13 +336,20 @@ pair at sf `foggy-noon` (authored 10–120 m) vs `clear-noon`
 versus fully resolved. Synthetic tests cover the slot map,
 authored-event precedence, the fallback report, validation-issue
 counting, the fog row's camera binding, the authored-event fog
-precedence, and the missing/degenerate diagnostics.
+precedence, and the missing/degenerate diagnostics. Sky dome (same
+install, 2026-09-23): `env=… sky=sky_dome_l:skylondon_ca_l` on london
+and `sky=sky_dome:sky_ca_f` on sf — each slot-0 paint job binds its
+authored texture; frozen-`--cam` captures pitched up at the dome show
+the authored cloud/gradient textures on both cities (Metal/Apple M1,
+PNGs inspected).
 
-Still not consumed (UNK-24 stays open): `.sky` dome geometry and its
-three floats, `.cpvs` variant selection and PVS culling, `.ldef`
-rows, `.pvshist` weights, `.lmap` values, `.water`,
-precipitation/wetness/audio effects (F18-B/C scope), and
-authoritative network replication of conditions (F18 req 5). The fog
+Still not consumed (UNK-24 stays open): `.cpvs` variant selection and
+PVS culling, `.ldef` rows, `.pvshist` weights, `.lmap` values,
+`.water`, precipitation/wetness/audio effects (F18-B/C scope), and
+authoritative network replication of conditions (F18 req 5). The
+dome's three `.sky` floats are bound under designed readings
+(world-height / vertical squash / radians-per-second) — the original's
+transform composition and rotation units are unverified. The fog
 curve's exact original shape (the linear reading is inferred), any
 per-weather `.cpvs` variant switching the recovered `lvlSky` may
 drive, and `sf_fog_orig.csv`'s role also stay open.

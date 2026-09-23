@@ -2303,6 +2303,7 @@ fn pkg_to_parts(
     meshes: &mut Assets<Mesh>,
     missing_prims: &mut usize,
     offset: Vec3,
+    paint: usize,
 ) -> PropModel {
     let mut best: HashMap<String, (u8, &str)> = HashMap::new();
     for (name, _geo) in pkg.geometries() {
@@ -2319,7 +2320,11 @@ fn pkg_to_parts(
         if offset < 0 {
             return None;
         }
-        s.shaders.get(offset as usize)
+        // A section's shader offset indexes within the selected paint
+        // job — the same `paint * per_job + offset` convention
+        // `car_visual` uses for vehicle paints.
+        s.shaders
+            .get(paint.saturating_mul(s.shaders_per_paint_job.max(1) as usize) + offset as usize)
     };
 
     let mut out = Vec::new();
@@ -2385,6 +2390,21 @@ fn pkg_to_parts(
         collider: collision.into_collider(),
         fragments,
     }
+}
+
+/// One paint job's render parts of a PKG — the same geometry walk as
+/// [`pkg_to_parts`], but for a consumer that needs no collider or
+/// `BREAK<NN>` fragments (the `.sky` dome, F18-A.4, which selects its
+/// preset's paint job). `offset` is fixed verbatim: the dome's stance
+/// is its own transform, not a prop stamp point.
+pub(crate) fn pkg_paint_parts(
+    pkg: &Pkg,
+    mats: &mut MaterialCache<'_>,
+    meshes: &mut Assets<Mesh>,
+    missing_prims: &mut usize,
+    paint: usize,
+) -> Vec<(Handle<Mesh>, Handle<StandardMaterial>)> {
+    pkg_to_parts(pkg, mats, meshes, missing_prims, Vec3::ZERO, paint).parts
 }
 
 /// Emit one PKG strip into a builder; authored normals and UVs preserved.
@@ -2552,6 +2572,7 @@ impl<'a> PropCache<'a> {
             self.meshes,
             &mut self.missing_prims,
             offset,
+            0,
         );
         if model.parts.is_empty() {
             return None;

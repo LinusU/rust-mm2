@@ -11,7 +11,7 @@ use avian3d::prelude::*;
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
-use mm2_app::environment::{ConditionsSource, EnvironmentReport};
+use mm2_app::environment::{ConditionsSource, EnvironmentReport, SkyDome};
 use mm2_app::session::{self, SessionControl};
 use mm2_app::{camera, contracts};
 use mm2_assets::Vfs;
@@ -270,6 +270,7 @@ fn city_app(config: SessionConfig, vfs: Vfs) -> App {
             (
                 session::load_session_world.run_if(session::loading),
                 session::session_control_input,
+                mm2_app::environment::drive_sky_dome,
                 (
                     despawn_session_entities.run_if(session::unloading),
                     session::drive_session,
@@ -320,7 +321,10 @@ fn configured_conditions_bind_the_authored_preset() {
     assert_eq!(report.name.as_deref(), Some("clear-evening"));
     assert_eq!(report.source, ConditionsSource::Configured);
     assert!(!report.fallback);
-    assert_eq!(report.smoke_detail(), "lt08(clear-evening) fog=none");
+    assert_eq!(
+        report.smoke_detail(),
+        "lt08(clear-evening) fog=none sky=none"
+    );
 
     // Three authored lights: the key casts shadows, the fills do not.
     let all = lights(&mut app);
@@ -374,7 +378,7 @@ fn missing_preset_reports_the_fallback() {
     assert_eq!(report.path, "city/test.lt07");
     assert!(report.fallback);
     assert_eq!(report.name, None);
-    assert_eq!(report.smoke_detail(), "lt07(fallback) fog=none");
+    assert_eq!(report.smoke_detail(), "lt07(fallback) fog=none sky=none");
     // No `city/test_fog.csv` either — the absence is explicit, not a
     // silent default.
     assert!(report.fog.bound.is_none());
@@ -519,7 +523,7 @@ fn authored_fog_binds_onto_the_cameras() {
     assert_eq!(bound.start, 108.0);
     assert_eq!(bound.end, 908.0);
     assert_eq!(report.fog.absent, None);
-    assert_eq!(report.smoke_detail(), "lt08(fallback) fog=108-908");
+    assert_eq!(report.smoke_detail(), "lt08(fallback) fog=108-908 sky=none");
 
     let fogs = camera_fogs(&mut app);
     assert_eq!(fogs.len(), 2, "chase + free cameras both fogged");
@@ -579,6 +583,302 @@ fn degenerate_fog_row_binds_nothing() {
     assert!(report.fog.bound.is_none());
     assert_eq!(report.fog.absent, Some("degenerate"));
     assert_eq!(report.fog.issues, 1, "the DegenerateBand finding");
-    assert_eq!(report.smoke_detail(), "lt00(fallback) fog=none");
+    assert_eq!(report.smoke_detail(), "lt00(fallback) fog=none sky=none");
     assert!(camera_fogs(&mut app).is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// `.sky` dome (F18-A.4)
+// ---------------------------------------------------------------------------
+
+/// A PKG3 chunk: `FILE` + lp name + u32 length + payload.
+fn push_chunk(out: &mut Vec<u8>, name: &str, data: &[u8]) {
+    out.extend_from_slice(b"FILE");
+    push_lp(out, name);
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    out.extend_from_slice(data);
+}
+
+/// A minimal PKG3 dome: a two-triangle fan (radius 40 m, apex at
+/// y = 40) plus a `shaders` chunk of `paint_jobs` float-shader paint
+/// jobs naming `texture/dome_<i>`.
+fn dome_pkg(paint_jobs: u8) -> Vec<u8> {
+    let mut geo = Vec::new();
+    geo.extend_from_slice(&1u32.to_le_bytes()); // nSections
+    geo.extend_from_slice(&4u32.to_le_bytes()); // total vertices
+    geo.extend_from_slice(&6u32.to_le_bytes()); // total indices
+    geo.extend_from_slice(&1u32.to_le_bytes()); // nSections, again
+    geo.extend_from_slice(&0x112u32.to_le_bytes()); // fvf: XYZ|NORMAL|1 tex
+    geo.extend_from_slice(&1u16.to_le_bytes()); // nStrips
+    geo.extend_from_slice(&0u16.to_le_bytes()); // section flags
+    geo.extend_from_slice(&0i32.to_le_bytes()); // shader offset → job's shader 0
+    geo.extend_from_slice(&3i32.to_le_bytes()); // prim type: triangles
+    geo.extend_from_slice(&4u32.to_le_bytes()); // strip vertices
+    for (pos, uv) in [
+        ([0.0f32, 40.0, 0.0], [0.5f32, 0.0]),
+        ([-40.0, 0.0, 0.0], [0.0, 1.0]),
+        ([40.0, 0.0, 0.0], [1.0, 1.0]),
+        ([0.0, 0.0, 40.0], [0.5, 0.5]),
+    ] {
+        push_f32s(&mut geo, &pos);
+        push_f32s(&mut geo, &[0.0, 1.0, 0.0]);
+        push_f32s(&mut geo, &uv);
+    }
+    geo.extend_from_slice(&6u32.to_le_bytes()); // strip indices
+    for i in [0u16, 1, 2, 0, 2, 3] {
+        geo.extend_from_slice(&i.to_le_bytes());
+    }
+
+    let mut sh = Vec::new();
+    sh.extend_from_slice(&(paint_jobs as u32).to_le_bytes()); // type: float shaders, N jobs
+    sh.extend_from_slice(&1u32.to_le_bytes()); // shaders per paint job
+    for i in 0..paint_jobs {
+        push_lp(&mut sh, &format!("dome_{i}"));
+        push_f32s(&mut sh, &[1.0; 4]); // diffuse
+        push_f32s(&mut sh, &[0.2; 4]); // ambient
+        push_f32s(&mut sh, &[0.0; 4]); // specular
+        push_f32s(&mut sh, &[0.0; 4]); // emissive
+        push_f32s(&mut sh, &[8.0]); // shininess
+    }
+
+    let mut out = b"PKG3".to_vec();
+    push_chunk(&mut out, "testdome_h", &geo);
+    push_chunk(&mut out, "shaders", &sh);
+    out
+}
+
+/// A synthetic `.sky` + dome pkg for `city/test`: model `testdome`,
+/// `paint_jobs` paint jobs whose textures are `texture/dome_<i>.png`
+/// (`textures = false` synthesizes the missing-texture path).
+fn write_dome(d: &Path, paint_jobs: u8, textures: bool) {
+    write(d, "city/test.sky", "testdome 10 0.9 0.25\n");
+    write(d, "geometry/testdome.pkg", dome_pkg(paint_jobs));
+    if textures {
+        for i in 0..paint_jobs {
+            write(
+                d,
+                &format!("texture/dome_{i}.png"),
+                include_bytes!("../../../assets/texture/dev_road.png"),
+            );
+        }
+    }
+}
+
+/// The session's dome root — `(entity, angle, rate, y, transform)` —
+/// `None` when no dome spawned.
+fn the_dome(app: &mut App) -> Option<(Entity, f32, f32, f32, Transform)> {
+    app.world_mut()
+        .query::<(Entity, &SkyDome, &Transform)>()
+        .iter(app.world())
+        .map(|(e, d, t)| (e, d.angle, d.rotation_rate, d.y, *t))
+        .next()
+}
+
+/// A `.sky` whose model resolves binds a session-owned dome: the
+/// authored transform fields land on `SkyDome`/its scale, the slot's
+/// paint job selects the texture (slot 7 → job `7 % 2` = `dome_1`),
+/// the material is unlit/fog-exempt/double-sided, and the report names
+/// the binding.
+#[test]
+fn authored_sky_binds_a_session_dome() {
+    let tmp = city_install();
+    write_dome(tmp.path(), 2, true);
+    let config = city_config(mm2_game::SessionConditions {
+        time_of_day: TimeOfDay::new(1).unwrap(),
+        weather: Weather::new(3).unwrap(),
+    });
+    let mut app = city_app(config, vfs_of(tmp.path()));
+    app.update();
+    assert!(matches!(
+        app.world().resource::<Session>().phase(),
+        SessionPhase::Playing
+    ));
+
+    let report = app.world().resource::<EnvironmentReport>();
+    assert_eq!(report.slot, 7);
+    assert_eq!(report.sky.path, "city/test.sky");
+    assert_eq!(report.sky.model.as_deref(), Some("testdome"));
+    assert_eq!(report.sky.paint, Some(1));
+    assert_eq!(report.sky.texture.as_deref(), Some("dome_1"));
+    assert_eq!(report.sky.absent, None);
+    assert_eq!(
+        report.smoke_detail(),
+        "lt07(fallback) fog=none sky=testdome:dome_1"
+    );
+
+    // One session-stamped dome root: authored height/rotation on
+    // `SkyDome`, authored radius 40 → designed 900 m scale, Y squashed
+    // ×0.9.
+    let (dome_ent, _angle, rate, dome_y, xf) = the_dome(&mut app).expect("a dome spawned");
+    assert_eq!(rate, 0.25);
+    assert_eq!(dome_y, 10.0);
+    assert!((xf.scale.x - 22.5).abs() < 1e-3, "900 / authored-40");
+    assert!((xf.scale.y - 20.25).abs() < 1e-3, "squashed ×0.9");
+    assert!(
+        app.world().get::<SessionEntity>(dome_ent).is_some(),
+        "session-stamped for teardown"
+    );
+
+    // The render child carries the painted material — unlit,
+    // fog-exempt, double-sided — not a default StandardMaterial.
+    let mut parts = app
+        .world_mut()
+        .query::<(&ChildOf, &MeshMaterial3d<StandardMaterial>)>();
+    let mats: Vec<Handle<StandardMaterial>> = parts
+        .iter(app.world())
+        .filter(|(c, _)| c.parent() == dome_ent)
+        .map(|(_, m)| m.0.clone())
+        .collect();
+    assert_eq!(mats.len(), 1);
+    let materials = app.world().resource::<Assets<StandardMaterial>>();
+    let mat = materials.get(&mats[0]).unwrap();
+    assert!(mat.unlit);
+    assert!(!mat.fog_enabled);
+    assert!(mat.cull_mode.is_none());
+    assert!(mat.base_color_texture.is_some(), "dome_1 bound");
+}
+
+/// `drive_sky_dome` re-centres the dome on the active camera and
+/// advances the authored rotation — world Y stays `HatYOffset`.
+#[test]
+fn dome_follows_the_active_camera() {
+    let tmp = city_install();
+    write_dome(tmp.path(), 16, true);
+    let mut app = city_app(
+        city_config(SessionConditions::default()),
+        vfs_of(tmp.path()),
+    );
+    app.update(); // session loads, dome spawns
+
+    let mut cams = app.world_mut().query::<(&Camera, &mut Transform)>();
+    for (c, mut t) in cams.iter_mut(app.world_mut()) {
+        if c.is_active {
+            t.translation = Vec3::new(120.0, 40.0, -75.0);
+        }
+    }
+    app.update();
+
+    let (_e, angle, _rate, _y, xf) = the_dome(&mut app).expect("a dome spawned");
+    assert_eq!(xf.translation, Vec3::new(120.0, 10.0, -75.0));
+    assert!(
+        (angle - 0.25 / 60.0).abs() < 1e-4,
+        "one 60 Hz step of rate 0.25"
+    );
+    assert_eq!(xf.rotation, Quat::from_rotation_y(angle));
+}
+
+/// A city without a `.sky` spawns no dome and says so — never a
+/// fabricated backdrop.
+#[test]
+fn a_city_without_sky_reports_absent() {
+    let tmp = city_install();
+    let mut app = city_app(
+        city_config(SessionConditions::default()),
+        vfs_of(tmp.path()),
+    );
+    app.update();
+    let report = app.world().resource::<EnvironmentReport>();
+    assert_eq!(report.sky.path, "city/test.sky");
+    assert_eq!(report.sky.model, None);
+    assert_eq!(report.sky.absent, Some("missing"));
+    assert!(report.smoke_detail().ends_with(" sky=none"));
+    assert!(the_dome(&mut app).is_none());
+}
+
+/// A `.sky` outside the four-token grammar is unparseable — reported,
+/// never a default dome.
+#[test]
+fn an_unparseable_sky_reports_absent() {
+    let tmp = city_install();
+    write(tmp.path(), "city/test.sky", "dome 0 0.9\n");
+    let mut app = city_app(
+        city_config(SessionConditions::default()),
+        vfs_of(tmp.path()),
+    );
+    app.update();
+    let report = app.world().resource::<EnvironmentReport>();
+    assert_eq!(report.sky.absent, Some("unparseable"));
+    assert!(report.smoke_detail().ends_with(" sky=none"));
+}
+
+/// A `.sky` naming a model the VFS cannot provide is absent, not a
+/// substitute.
+#[test]
+fn an_unresolvable_dome_model_reports_absent() {
+    let tmp = city_install();
+    write(tmp.path(), "city/test.sky", "nodome 0 0.9 0.25\n");
+    let mut app = city_app(
+        city_config(SessionConditions::default()),
+        vfs_of(tmp.path()),
+    );
+    app.update();
+    let report = app.world().resource::<EnvironmentReport>();
+    assert_eq!(report.sky.model.as_deref(), Some("nodome"));
+    assert_eq!(report.sky.absent, Some("model unavailable"));
+    assert!(the_dome(&mut app).is_none());
+}
+
+/// A dome authoring fewer paint jobs than the 16-slot grid wraps the
+/// slot — a one-job dome always draws job 0 whatever the weather.
+#[test]
+fn a_dome_with_fewer_paint_jobs_wraps_the_slot() {
+    let tmp = city_install();
+    write_dome(tmp.path(), 1, true);
+    let config = city_config(mm2_game::SessionConditions {
+        time_of_day: TimeOfDay::new(3).unwrap(),
+        weather: Weather::new(2).unwrap(),
+    }); // slot 14 → paint 14 % 1 = 0
+    let mut app = city_app(config, vfs_of(tmp.path()));
+    app.update();
+    let report = app.world().resource::<EnvironmentReport>();
+    assert_eq!(report.sky.paint, Some(0));
+    assert_eq!(report.sky.texture.as_deref(), Some("dome_0"));
+    assert_eq!(report.sky.absent, None);
+}
+
+/// A dome texture the VFS cannot resolve draws the shared fallback
+/// material — warned — rather than vanishing.
+#[test]
+fn a_missing_dome_texture_draws_the_fallback() {
+    let tmp = city_install();
+    write_dome(tmp.path(), 1, false);
+    let mut app = city_app(
+        city_config(SessionConditions::default()),
+        vfs_of(tmp.path()),
+    );
+    app.update();
+    let report = app.world().resource::<EnvironmentReport>();
+    assert_eq!(report.sky.absent, None);
+    assert_eq!(report.sky.texture.as_deref(), Some("dome_0"));
+    let (dome_ent, ..) = the_dome(&mut app).expect("the dome still spawns");
+    let mut parts = app
+        .world_mut()
+        .query::<(&ChildOf, &MeshMaterial3d<StandardMaterial>)>();
+    let materials = app.world().resource::<Assets<StandardMaterial>>();
+    let mat = parts
+        .iter(app.world())
+        .filter(|(c, _)| c.parent() == dome_ent)
+        .filter_map(|(_, m)| materials.get(&m.0))
+        .next()
+        .expect("dome material");
+    assert!(mat.unlit);
+    assert!(mat.base_color_texture.is_none(), "shared fallback");
+}
+
+/// A non-finite `.sky` transform field is counted and degenerate — no
+/// dome.
+#[test]
+fn a_degenerate_sky_reports_absent() {
+    let tmp = city_install();
+    write(tmp.path(), "city/test.sky", "testdome 0 nan 0.25\n");
+    write(tmp.path(), "geometry/testdome.pkg", dome_pkg(1));
+    let mut app = city_app(
+        city_config(SessionConditions::default()),
+        vfs_of(tmp.path()),
+    );
+    app.update();
+    let report = app.world().resource::<EnvironmentReport>();
+    assert_eq!(report.sky.absent, Some("degenerate"));
+    assert_eq!(report.sky.issues, 1);
+    assert!(the_dome(&mut app).is_none());
 }

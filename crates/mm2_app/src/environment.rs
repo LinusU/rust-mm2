@@ -31,14 +31,16 @@
 //! missing/unparseable/degenerate fog table binds nothing with the
 //! reason recorded in [`FogReport::absent`].
 //!
-//! Deferred: `.sky` dome geometry, `.cpvs` PVS culling,
-//! `.lmap`/`.ldef` semantics — UNK-24.
+//! Deferred: `.cpvs` PVS culling, `.lmap`/`.ldef` semantics —
+//! UNK-24.
 
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 use mm2_assets::Vfs;
 use mm2_formats::fog::FogTable;
 use mm2_formats::lighting::{LightSpec, LightingPreset};
+use mm2_formats::pkg::Pkg;
+use mm2_formats::sky::SkyDef;
 use mm2_game::{SessionConditions, SessionEntity};
 use tracing::{info, warn};
 
@@ -89,6 +91,9 @@ pub struct EnvironmentReport {
     /// The session's authored fog binding (`city/<stem>_fog.csv` row
     /// `slot`), or the explicit reason none bound.
     pub fog: FogReport,
+    /// The session's `.sky` dome binding (F18-A.4), or the explicit
+    /// reason none spawned.
+    pub sky: SkyReport,
 }
 
 /// The authored fog row bound for the session, if any.
@@ -140,17 +145,71 @@ impl FogSpec {
     }
 }
 
+/// The session's `.sky` dome binding (F18-A.4), or the explicit reason
+/// none spawned. `Default` is the not-attempted state (non-city worlds
+/// never run the binding); it reports `sky=none`.
+#[derive(Debug, Clone, Default)]
+pub struct SkyReport {
+    /// Logical path the `.sky` was read from (or attempted at).
+    pub path: String,
+    /// The authored dome model name (`sky_dome_l`) — present whenever
+    /// the `.sky` parsed, even if its pkg did not.
+    pub model: Option<String>,
+    /// The paint job bound — the session's `tod*4 + weather` slot
+    /// modulo the dome's authored paint-job count (the designed
+    /// fallback for a dome authoring fewer than 16 jobs).
+    pub paint: Option<usize>,
+    /// The bound paint job's texture stem — the authored name whether
+    /// or not it resolved through the VFS.
+    pub texture: Option<String>,
+    /// `SkyDef::validate()` findings (warned; authored anomalies do not
+    /// block the dome).
+    pub issues: usize,
+    /// Why no dome spawned — `"missing"`, `"unparseable"`,
+    /// `"degenerate"`, `"model unavailable"`, `"model unparseable"` or
+    /// `"empty"` — `None` when spawned.
+    pub absent: Option<&'static str>,
+}
+
+/// The dome's rotating root: [`drive_sky_dome`] re-centres it on the
+/// active camera in XZ at the authored `HatYOffset` height and advances
+/// the authored rotation (F18-A.4).
+#[derive(Component)]
+pub struct SkyDome {
+    /// Accumulated dome yaw in radians (wraps at τ).
+    pub angle: f32,
+    /// Authored `RotationRate`, read as radians/second (designed — the
+    /// recovered `lvlSky` name fits but its units are unverified,
+    /// UNK-24).
+    pub rotation_rate: f32,
+    /// World-space dome-centre height — the authored `HatYOffset`,
+    /// unscaled.
+    pub y: f32,
+}
+
+/// World radius the authored ~43 m dome mesh is scaled to (designed —
+/// the `.sky` record carries no scale; 900 m sits inside the default
+/// 1 000 m camera far plane and past every authored fog band's end, so
+/// the dome backdrop never clips a building the player can still see).
+const SKY_DOME_RADIUS: f32 = 900.0;
+
 impl EnvironmentReport {
     /// The smoke record's `env=` field, e.g. `lt04(clear-noon)` or
     /// `lt07(fallback)`, followed by ` fog=<start>-<end>` when an
-    /// authored fog row bound or ` fog=none` when it did not.
+    /// authored fog row bound or ` fog=none` when it did not, then
+    /// ` sky=<model>:<texture>` when a `.sky` dome spawned or
+    /// ` sky=none` when it did not (F18-A.4).
     pub fn smoke_detail(&self) -> String {
         let tag = self.name.as_deref().unwrap_or("fallback");
         let fog = match &self.fog.bound {
             Some(f) => format!(" fog={}-{}", f.start, f.end),
             None => " fog=none".to_string(),
         };
-        format!("lt{:02}({tag}){fog}", self.slot)
+        let sky = match (&self.sky.model, &self.sky.texture) {
+            (Some(m), Some(t)) if self.sky.absent.is_none() => format!(" sky={m}:{t}"),
+            _ => " sky=none".to_string(),
+        };
+        format!("lt{:02}({tag}){fog}{sky}", self.slot)
     }
 }
 
@@ -234,6 +293,7 @@ pub fn spawn_environment(
             issues: 0,
             absent: None,
         },
+        sky: SkyReport::default(),
     };
 
     let preset = match vfs.read_path(&path) {
@@ -334,4 +394,214 @@ pub fn spawn_environment(
         }
     }
     report
+}
+
+// ---------------------------------------------------------------------------
+// `.sky` dome (F18-A.4)
+// ---------------------------------------------------------------------------
+
+/// The dome mesh's horizontal extent — the radius its authored verts
+/// reach from the origin — used to scale the ~43 m authored dome to
+/// [`SKY_DOME_RADIUS`].
+fn dome_extent(pkg: &Pkg) -> f32 {
+    let mut extent = 0.0f32;
+    for (_name, geo) in pkg.geometries() {
+        for section in &geo.sections {
+            for strip in &section.strips {
+                for v in &strip.vertices {
+                    extent = extent.max(v.position[0].hypot(v.position[2]));
+                }
+            }
+        }
+    }
+    extent
+}
+
+/// Bind the session's `.sky` dome (F18-A.4): `city/<stem>.sky` names a
+/// `geometry/<model>.pkg` dome mesh whose paint jobs are the same
+/// `tod*4 + weather` grid the `.ltNN` preset and `_fog.csv` row bind —
+/// measured on retail: `sky_dome_l`'s job *i* textures run
+/// `skylondon_{c,p,f,r}{a,n,d,m}_l` in slot order, `sky_dome`'s the
+/// `sky_*_f` equivalents (WLD-22). The dome spawns unlit, fog-free and
+/// double-sided — the authored texture is the sky's final colour, so
+/// the preset look comes from the texture selection rather than scene
+/// lighting — scaled to [`SKY_DOME_RADIUS`] and re-centred on the
+/// active camera each frame by [`drive_sky_dome`]. The original's
+/// transform semantics are unrecovered (UNK-24): `HatYOffset` is read
+/// as the dome's world-space height, `YMultiplier` as its vertical
+/// squash, `RotationRate` as radians/second, and camera-centring is
+/// the designed reading that keeps the authored horizon under the
+/// player at any distance.
+///
+/// Missing/unparseable content spawns nothing and records why — never
+/// a fabricated dome (F18-AC06); a missing dome *texture* warns and
+/// draws the shared fallback material, matching the prop policy.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_sky_dome(
+    commands: &mut Commands,
+    vfs: &Vfs,
+    psdl_path: &str,
+    slot: usize,
+    meshes: &mut Assets<Mesh>,
+    images: &mut Assets<Image>,
+    materials: &mut Assets<StandardMaterial>,
+    owner: SessionEntity,
+) -> SkyReport {
+    let base = psdl_path.strip_suffix(".psdl").unwrap_or(psdl_path);
+    let path = format!("{base}.sky");
+    let mut report = SkyReport {
+        path: path.clone(),
+        ..SkyReport::default()
+    };
+
+    let def = match vfs.read_path(&path) {
+        Ok((bytes, _)) => match SkyDef::parse(&String::from_utf8_lossy(&bytes)) {
+            Ok(d) => Some(d),
+            Err(e) => {
+                warn!(path = %path, error = %e, "sky definition failed to parse");
+                report.absent = Some("unparseable");
+                None
+            }
+        },
+        Err(e) => {
+            warn!(path = %path, error = %e, "sky definition unavailable");
+            report.absent = Some("missing");
+            None
+        }
+    };
+    let Some(def) = def else { return report };
+    report.model = Some(def.model.clone());
+    let issues = def.validate();
+    report.issues = issues.len();
+    for issue in &issues {
+        warn!(path = %path, issue = ?issue, "sky definition validation issue");
+    }
+    // A dome with a non-finite transform field cannot be placed —
+    // validate() already counted the offender.
+    if !def.hat_y_offset.is_finite()
+        || !def.y_multiplier.is_finite()
+        || !def.rotation_rate.is_finite()
+    {
+        warn!(path = %path, "sky dome transform is degenerate — no dome spawned");
+        report.absent = Some("degenerate");
+        return report;
+    }
+
+    let pkg = match vfs
+        .resolve_preferred(&format!("geometry/{}", def.model), &["pkg"])
+        .and_then(|r| vfs.read(&r).ok())
+        .map(|bytes| Pkg::parse(&bytes))
+    {
+        Some(Ok(p)) => Some(p),
+        Some(Err(e)) => {
+            warn!(model = %def.model, error = %e, "sky dome pkg failed to parse");
+            report.absent = Some("model unparseable");
+            None
+        }
+        None => {
+            warn!(model = %def.model, "sky dome pkg unavailable");
+            report.absent = Some("model unavailable");
+            None
+        }
+    };
+    let Some(pkg) = pkg else { return report };
+
+    // The preset slot selects the paint job (the measured 16-slot
+    // grid); a dome authoring fewer jobs wraps the slot, so a 4-job
+    // dome in weather order still selects its weather — a designed
+    // fallback, not a recovered rule.
+    let jobs = pkg
+        .shaders()
+        .map(|s| s.paint_jobs.max(1) as usize)
+        .unwrap_or(1);
+    let paint = slot % jobs;
+    report.paint = Some(paint);
+    report.texture = pkg.shaders().and_then(|s| {
+        s.shaders
+            .get(paint * s.shaders_per_paint_job.max(1) as usize)
+            .map(|s| s.texture.clone())
+    });
+
+    let extent = dome_extent(&pkg);
+    if !extent.is_finite() || extent <= 0.0 {
+        warn!(model = %def.model, "sky dome pkg has no extent — no dome spawned");
+        report.absent = Some("empty");
+        return report;
+    }
+    let scale = SKY_DOME_RADIUS / extent;
+
+    let mut mats = crate::city::MaterialCache::new(vfs, images, materials);
+    let mut missing_prims = 0usize;
+    let parts = crate::city::pkg_paint_parts(&pkg, &mut mats, meshes, &mut missing_prims, paint);
+    if missing_prims > 0 {
+        warn!(model = %def.model, missing_prims, "sky dome strips skipped");
+    }
+    for stem in mats.missing_textures() {
+        warn!(texture = %stem, "sky dome texture unavailable");
+    }
+    if parts.is_empty() {
+        warn!(model = %def.model, "sky dome pkg produced no geometry");
+        report.absent = Some("empty");
+        return report;
+    }
+
+    commands
+        .spawn((
+            owner,
+            SkyDome {
+                angle: 0.0,
+                rotation_rate: def.rotation_rate,
+                y: def.hat_y_offset,
+            },
+            Transform::from_translation(Vec3::Y * def.hat_y_offset).with_scale(Vec3::new(
+                scale,
+                scale * def.y_multiplier,
+                scale,
+            )),
+            Visibility::default(),
+            Name::new(format!("sky-{}", def.model)),
+        ))
+        .with_children(|p| {
+            for (mesh, mat) in parts {
+                let material = mats.adjusted(&mat, |m| {
+                    // The dome is the sky's final colour: unlit, exempt
+                    // from the session's distance fog, drawn either
+                    // side up, and never a shadow caster.
+                    m.unlit = true;
+                    m.fog_enabled = false;
+                    m.cull_mode = None;
+                });
+                p.spawn((
+                    owner,
+                    Mesh3d(mesh),
+                    MeshMaterial3d(material),
+                    bevy::light::NotShadowCaster,
+                ));
+            }
+        });
+    info!(path = %path, model = %def.model, paint, "sky dome bound");
+    report
+}
+
+/// Re-centre the dome on the active camera and advance its authored
+/// rotation (F18-A.4). A frame with no active camera — or a session
+/// with no dome — leaves it standing; the dome never teleports without
+/// a viewer.
+pub fn drive_sky_dome(
+    time: Res<Time>,
+    mut domes: Query<(&mut SkyDome, &mut Transform), Without<Camera>>,
+    cameras: Query<(&Camera, &Transform)>,
+) {
+    let focus = cameras
+        .iter()
+        .find(|(c, _)| c.is_active)
+        .map(|(_, t)| t.translation)
+        .filter(|p| p.is_finite());
+    for (mut dome, mut xf) in &mut domes {
+        dome.angle = (dome.angle + dome.rotation_rate * time.delta_secs()) % std::f32::consts::TAU;
+        if let Some(p) = focus {
+            xf.translation = Vec3::new(p.x, dome.y, p.z);
+        }
+        xf.rotation = Quat::from_rotation_y(dome.angle);
+    }
 }
