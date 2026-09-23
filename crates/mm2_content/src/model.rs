@@ -180,6 +180,11 @@ pub struct WheelVisual {
     pub radius: f32,
     /// Width measured the same way.
     pub width: f32,
+    /// Whether this wheel becomes a physics wheel. `twhl` parts that are
+    /// far smaller than the rig's real wheels (e.g. the vpcentury
+    /// trailer's 5 cm TWHL0/TWHL1 detail parts) are decoration only —
+    /// they still render at their authored position.
+    pub simulated: bool,
     /// Model part indices that belong to this wheel (the wheel itself plus
     /// linked fenders).
     pub parts: Vec<usize>,
@@ -390,6 +395,7 @@ pub fn build_model(pkg: &Pkg, mut mtx_for: impl FnMut(&str) -> Option<Mtx>) -> V
             origin,
             radius,
             width,
+            simulated: true,
             parts: vec![i],
         });
     }
@@ -400,6 +406,26 @@ pub fn build_model(pkg: &Pkg, mut mtx_for: impl FnMut(&str) -> Option<Mtx>) -> V
         ));
     }
     model.wheels.sort_by_key(|w| (w.trailer, w.index));
+
+    // Trailer `twhl` parts far smaller than the rig's real wheels are
+    // authored detail (landing gear, hardware), not wheels — they never
+    // reach the ground. Kept in `wheels` so the visual mount table stays
+    // aligned, but excluded from the physics rig.
+    let max_trailer_r = model
+        .wheels
+        .iter()
+        .filter(|w| w.trailer)
+        .map(|w| w.radius)
+        .fold(0.0f32, f32::max);
+    for w in &mut model.wheels {
+        if w.trailer && w.radius < max_trailer_r * 0.5 {
+            w.simulated = false;
+            warnings.push(format!(
+                "trailer wheel part twhl{} is decorative (r {:.3} m vs {:.3} m); excluded from the physics rig",
+                w.index, w.radius, max_trailer_r
+            ));
+        }
+    }
 
     // Link fenders to wheel indices.
     for (i, part) in model.parts.iter().enumerate() {
@@ -467,4 +493,89 @@ pub fn shader_for_paint(shaders: &PkgShaders, paint: usize, offset: i32) -> Opti
     }
     let idx = paint * shaders.shaders_per_paint_job as usize + offset as usize;
     shaders.shaders.get(idx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mm2_formats::pkg::{
+        PRIMTYPE_TRIANGLES, Pkg, PkgChunk, PkgFile, PkgGeometry, PkgSection, PkgStrip, PkgVertex,
+    };
+
+    /// One-section geometry chunk spanning the given y-extent.
+    fn tri_geo(y_half: f32) -> PkgGeometry {
+        let v = |x: f32, y: f32, z: f32| PkgVertex {
+            position: [x, y, z],
+            normal: Some([0.0, 1.0, 0.0]),
+            diffuse: None,
+            specular: None,
+            tex_coords: vec![[0.0, 0.0]],
+        };
+        PkgGeometry {
+            fvf: 0x112,
+            total_vertices: 3,
+            total_indices: 3,
+            sections_duplicate: 1,
+            sections: vec![PkgSection {
+                flags: 0,
+                shader_offset: -1,
+                strips: vec![PkgStrip {
+                    prim_type: PRIMTYPE_TRIANGLES,
+                    vertices: vec![
+                        v(-y_half, -y_half, 0.0),
+                        v(y_half, -y_half, 0.0),
+                        v(0.0, y_half, y_half),
+                    ],
+                    indices: vec![0, 1, 2],
+                }],
+            }],
+        }
+    }
+
+    fn pkg(chunks: &[(&str, f32)]) -> Pkg {
+        Pkg {
+            version: *b"PKG3",
+            files: chunks
+                .iter()
+                .map(|(name, r)| PkgFile {
+                    name: name.to_string(),
+                    data: PkgChunk::Geometry(tri_geo(*r)),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_degenerate_trailer_wheel_part_is_visual_only() {
+        // vpcentury-shaped trailer pkg: two real tandem wheels plus a
+        // 5 cm `twhl` detail part (landing-gear hardware authored under
+        // the wheel prefix).
+        let model = build_model(
+            &pkg(&[
+                ("TRAILER_H", 1.0),
+                ("TWHL0_H", 0.02),
+                ("TWHL1_H", 0.5),
+                ("TWHL2_H", 0.5),
+            ]),
+            |_| None,
+        );
+        let by_index = |i: usize| model.wheels.iter().find(|w| w.index == i).unwrap();
+        assert!(!by_index(0).simulated, "5 cm detail part is not a wheel");
+        assert!(by_index(1).simulated);
+        assert!(by_index(2).simulated);
+        assert!(
+            model.warnings.iter().any(|w| w.contains("decorative")),
+            "the exclusion is reported: {:?}",
+            model.warnings
+        );
+    }
+
+    #[test]
+    fn full_size_trailer_wheels_all_simulate() {
+        let model = build_model(
+            &pkg(&[("TWHL0_H", 0.5), ("TWHL1_H", 0.46), ("TWHL2_H", 0.46)]),
+            |_| None,
+        );
+        assert!(model.wheels.iter().all(|w| w.simulated));
+    }
 }

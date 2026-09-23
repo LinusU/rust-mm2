@@ -170,14 +170,20 @@ pub fn spawn_vehicle_model(
 
     // Physics wheel index within this model: ordinal among wheels of the
     // same class, matching the order `assemble` consumed them into
-    // `WheelGeom`/`WheelConfig`.
+    // `WheelGeom`/`WheelConfig`. Decorative trailer wheels (flagged
+    // `!simulated` by `build_model`) have no physics wheel — their mount
+    // is parked at `usize::MAX` so it just stays at the authored origin.
     let mut car_ord = 0usize;
     let mut trailer_ord = 0usize;
     let mut wheel_phys: Vec<usize> = Vec::with_capacity(model.wheels.len());
     for w in &model.wheels {
         if w.trailer {
-            wheel_phys.push(trailer_ord);
-            trailer_ord += 1;
+            if w.simulated {
+                wheel_phys.push(trailer_ord);
+                trailer_ord += 1;
+            } else {
+                wheel_phys.push(usize::MAX);
+            }
         } else {
             wheel_phys.push(car_ord);
             car_ord += 1;
@@ -355,6 +361,9 @@ pub fn spawn_trailer(
             .with_local_anchor2(Vec3::from(trailer.trailer_hitch))
             .with_swing_limits(-0.6, 0.6)
             .with_twist_limits(-0.15, 0.15),
+        // The hitched hulls touch at the anchor; the joint holds the rig
+        // together, so the contact would only fight it.
+        JointCollisionDisabled,
     ));
     let missing = spawn_vehicle_model(
         commands,

@@ -82,7 +82,8 @@ pub struct TrailerDef {
     pub car_hitch: [f32; 3],
     /// Anchor point on the trailer (trailer space).
     pub trailer_hitch: [f32; 3],
-    /// Trailer wheel geometry (positions/radii) in trailer space.
+    /// Simulated trailer wheel geometry (positions/radii) in trailer
+    /// space — decorative `twhl` detail parts are excluded.
     pub wheels: Vec<WheelGeom>,
 }
 
@@ -442,9 +443,14 @@ fn load_trailer(
     });
     let body_aabb = model.body_aabb.unwrap_or(([0.0; 3], [1.0, 1.0, 2.0]));
 
+    // Only `simulated` wheel visuals become physics wheels — decorative
+    // `twhl` detail parts (flagged in `build_model`) would otherwise add
+    // raycasts that can never reach the ground and dilute the per-wheel
+    // load the suspension rates are derived from.
     let wheel_geoms: Vec<WheelGeom> = model
         .wheels
         .iter()
+        .filter(|w| w.simulated)
         .map(|w| WheelGeom {
             index: w.index,
             origin: w.origin,
@@ -455,6 +461,8 @@ fn load_trailer(
     let Converted { config, report } =
         convert_trailer(id, t, &wheel_geoms, bound.as_ref(), body_aabb)
             .map_err(LoadError::Convert)?;
+    let mut report = report;
+    report.warnings.extend(model.warnings.iter().cloned());
 
     // Hitch anchors: authored offsets when present; fall back to the car's
     // rear bound edge and the trailer's front bound edge.
@@ -548,4 +556,50 @@ pub fn apply_handling_override(
     over.striker_points = imported.striker_points.clone();
     over.chassis_size = imported.chassis_size;
     Ok(over)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The override wins handling fields but the imported rig's wheel
+    /// positions/radii and collision geometry stay pinned — a tune file
+    /// must not move the physics wheels off the visual ones.
+    #[test]
+    fn override_replaces_handling_but_repins_the_rig() {
+        let mut imported = VehicleConfig::default();
+        imported.wheels[0].position = [9.0, 9.0, 9.0];
+        imported.wheels[0].radius = 0.99;
+        imported.collider_points = Some(vec![[1.0, 2.0, 3.0]]);
+        imported.chassis_size = [4.0, 5.0, 6.0];
+
+        let mut over = VehicleConfig {
+            mass: 2500.0,
+            ..VehicleConfig::default()
+        };
+        over.engine.peak_torque_nm = 999.0;
+        over.wheels[0].position = [-7.0, -7.0, -7.0];
+        over.wheels[0].radius = 0.11;
+        over.collider_points = Some(vec![[8.0, 8.0, 8.0]]);
+        over.chassis_size = [1.0, 1.0, 1.0];
+
+        let out = apply_handling_override(&imported, over).unwrap();
+        assert_eq!(out.mass, 2500.0);
+        assert_eq!(out.engine.peak_torque_nm, 999.0);
+        assert_eq!(out.wheels[0].position, [9.0, 9.0, 9.0]);
+        assert_eq!(out.wheels[0].radius, 0.99);
+        assert_eq!(out.collider_points, Some(vec![[1.0, 2.0, 3.0]]));
+        assert_eq!(out.chassis_size, [4.0, 5.0, 6.0]);
+    }
+
+    /// A wheel-count change needs a matching model — the override is
+    /// rejected, not silently misplacing wheels.
+    #[test]
+    fn a_wheel_count_mismatch_is_rejected() {
+        let imported = VehicleConfig::default();
+        let mut over = VehicleConfig::default();
+        over.wheels.pop();
+        let err = apply_handling_override(&imported, over).unwrap_err();
+        assert!(err.contains("wheels"), "{err}");
+    }
 }
