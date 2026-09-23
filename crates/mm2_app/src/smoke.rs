@@ -281,6 +281,14 @@ pub fn headless_smoke(
                     .chain(),
                 race::update_checkpoint_markers,
                 scripted::scripted_drive.run_if(resource_exists::<scripted::ScriptedDrive>),
+                // F18-A.5: the chase camera tracks the player headlessly
+                // so the authored room-PVS pass resolves a live source
+                // room exactly as the windowed run does — the record's
+                // `pvs=` field reports what it culled.
+                camera::chase_follow,
+                crate::pvs::apply_city_pvs
+                    .after(camera::chase_follow)
+                    .run_if(resource_exists::<crate::pvs::CityPvs>),
                 // `--finish` works headless too — the record still
                 // reports the real resolved outcome.
                 crate::results::dev_finish_once,
@@ -558,6 +566,20 @@ pub fn headless_smoke(
         .get_resource::<crate::environment::EnvironmentReport>()
         .map(|r| format!(" env={}", r.smoke_detail()))
         .unwrap_or_default();
+    // F18-A.5 PVS evidence: the resolved source room and how many
+    // room-tagged render entities the authored table culled
+    // (`pvs=<room>r/<culled>h/<tagged>`). Absent without a loaded table
+    // so dev-world/mod-city records stay bit-identical.
+    let pvs_detail = world_ecs
+        .get_resource::<crate::pvs::CityPvs>()
+        .map(|p| {
+            if p.enabled {
+                format!(" pvs={}r/{}h/{}", p.source_room(), p.culled, p.tagged)
+            } else {
+                " pvs=off".to_string()
+            }
+        })
+        .unwrap_or_default();
     // F10-A.2 ambient evidence: live/target population plus the
     // recycler counters. Absent on worlds without a rostered aimap so
     // those records stay bit-identical.
@@ -768,7 +790,7 @@ pub fn headless_smoke(
     };
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks}{rs_detail} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{nav_detail}{env_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{txl_detail}{traction_detail}{profile_detail}{extra}",
+            "updates={frames} ticks={ticks}{rs_detail} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{nav_detail}{env_detail}{pvs_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{txl_detail}{traction_detail}{profile_detail}{extra}",
             driver.as_str(),
             session.phase().name(),
         )

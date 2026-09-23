@@ -235,6 +235,7 @@ pub fn drive_session(
             commands.remove_resource::<crate::environment::EnvironmentReport>();
             commands.remove_resource::<crate::damage_fx::SmokeFx>();
             commands.remove_resource::<crate::spark_fx::SparkFx>();
+            commands.remove_resource::<crate::pvs::CityPvs>();
             // `TireConditions` stays: it is a system input (the impact
             // filter and telemetry read `Res` every frame), and
             // `load_session_world` re-stamps it from the next session's
@@ -350,6 +351,7 @@ pub fn load_session_world(
     mut spawn: ResMut<SpawnPoint>,
     mut active_profile: Option<ResMut<crate::profile::ActiveProfile>>,
     mut note: Option<ResMut<SessionNote>>,
+    pvs_enabled: Option<Res<crate::pvs::PvsEnabled>>,
 ) {
     // A session loading retires the last session's end-note — a
     // restart bypasses the menu, so a stale failure must not surface
@@ -395,6 +397,13 @@ pub fn load_session_world(
                     // refers to — session-scoped like `CityNav`.
                     if let Some(tables) = loaded.surfaces {
                         commands.insert_resource(tables);
+                    }
+                    // F18-A.5: the authored room-PVS table is
+                    // session-scoped like `CityNav`; `--no-pvs` maps to
+                    // retail's `EnablePVS(false)` (default enabled).
+                    if let Some(mut pvs) = loaded.pvs {
+                        pvs.enabled = pvs_enabled.map(|e| e.0).unwrap_or(true);
+                        commands.insert_resource(pvs);
                     }
                     info!(report = %loaded.report, "city ready");
                 }

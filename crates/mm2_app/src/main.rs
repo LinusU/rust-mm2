@@ -19,8 +19,8 @@ use clap::Parser;
 use mm2_app::session::{ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
     banger, breakaway, camera, car_visual, city, contracts, damage, damage_fx, environment, input,
-    menu, nav_overlay, opponents, pause, profile, progression, race, recovery, results, scripted,
-    session, smoke, spark_fx, stuck, texel_fx, traffic,
+    menu, nav_overlay, opponents, pause, profile, progression, pvs, race, recovery, results,
+    scripted, session, smoke, spark_fx, stuck, texel_fx, traffic,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
@@ -205,6 +205,12 @@ struct Cli {
     /// countdown, checkpoint and result path.
     #[arg(long)]
     bot: bool,
+
+    /// Disable the authored `.cpvs` room-PVS render culling (F18-A.5)
+    /// — the retail `cityLevel::EnablePVS(false)` counterpart and the
+    /// escape hatch for comparing culled vs unculled captures.
+    #[arg(long)]
+    no_pvs: bool,
 
     /// Draw the city's BAI navigation graph over the imported geometry
     /// (F09-B debug overlay): lane polylines, travel-direction
@@ -1053,10 +1059,15 @@ fn main() {
     )
     // F18-A.4: the `.sky` dome re-centres on the active camera and
     // advances its authored rotation — after the camera systems so it
-    // uses this frame's pose.
+    // uses this frame's pose. F18-A.5's room-PVS culling shares the
+    // slot for the same reason: it resolves the view room from the
+    // pose the camera systems just wrote.
     .add_systems(
         Update,
-        environment::drive_sky_dome
+        (
+            environment::drive_sky_dome,
+            pvs::apply_city_pvs.run_if(resource_exists::<pvs::CityPvs>),
+        )
             .after(camera::chase_follow)
             .after(camera::free_fly),
     );
@@ -1088,6 +1099,11 @@ fn main() {
     }
     if cli.bot {
         app.insert_resource(scripted::ScriptedDrive);
+    }
+    // F18-A.5: retail `EnablePVS` default-on; `--no-pvs` is the
+    // diagnostic off switch the session load reads.
+    if cli.no_pvs {
+        app.insert_resource(pvs::PvsEnabled(false));
     }
     if let Some(slot) = active_profile {
         app.insert_resource(slot);

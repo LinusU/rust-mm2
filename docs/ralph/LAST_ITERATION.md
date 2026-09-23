@@ -1,112 +1,88 @@
-# Last iteration — F05-B.9: impact texel damage
+# Last iteration — F18-A.5: authored room-PVS render culling
 
-Iteration 57 on `ralph/night`. Selected the F05-B remainder's texel
-damage leg — the direct follow-on of F02-C.4's `_dmg`↔clean pairing,
-which bound the clean skin but left `ApplyDamage`/`Reset`
-unimplemented. mm2hook recovers more of `fxTexelDamage` than the docs
-recorded (`src/modules/effects/texeldamage.{h,cpp}` +
-`vehicle/carmodel.{h,cpp}`), so the triangle/radius/barycentric
-mechanics are recovered; only the splat itself
-(`ApplyBirdPoopDamage`, a binary call) stays unrecovered → designed
-(DSN-32).
+Iteration on `ralph/night` (base 68f30bf). Selected the F18-A
+remainder's `.cpvs` leg — the format and `IsRoomVisible` semantics
+were already verified (WLD-23) and city meshes are emitted per
+`(room, texture)`, so authored room culling only needed a room tag
+and a source resolver. Investigated the F15-B opponent tail fields
+first (`avoidOpponents`/`weirdPathfinding`): mm2hook's recovered
+`OpponentData`/`RegisterRoute` clarify the vocabulary but the column
+polarity stays ambiguous between two plausible assignments — left
+documented, not guessed.
 
 ## What changed
 
-- `mm2_game::texel` (new): `TexelDamageMesh`/`TexelDamageTri`/
-  `TexelSplat` — `splats(point, radius, rng)` is the recovered
-  `ApplyDamage` loop: every tri with a vertex within
-  `TextelDamageRadius` of the car-space impact point earns one splat
-  at a random barycentric UV (three `frand()` draws normalized by
-  their sum; degenerate sums skipped). `TexelDamagePolicy` +
-  `splat_blit` is the designed splat — a 48 px probability-dithered
-  disc (`1 − d/r` + 0.1 edge floor, following mm2hook's debug
-  reimplementation) copying `_dmg` texels onto the per-vehicle
-  `current` clone, propagated down the shared mip chain and clipped
-  to bounds.
-- `mm2_app::texel_fx` (new): `TexelSlot` mirrors the recovered
-  `DamageTextures[]`/`CurrentShaders` triple (`clean`/`damage`/
-  `current` + cloned material); `TexelDamageRig` component carries
-  the authored radius, paired slots, the body-only car-space tri soup
-  and a per-vehicle `NavRng` seeded by object id (same domain as
-  smoke/sparks — recorded impacts replay identically, F05 req 6).
-  `apply_texel_damage` runs in `FixedLast` after
-  `apply_impact_damage`, reads the same deduplicated `ImpactEvent`
-  stream, same `is_playing`/authority/`Remote` gates, world point →
-  car space through the vehicle transform.
-- `MaterialCache::texel_binding` (city.rs): pairs a clean shader stem
-  with `<stem>_dmg` when it resolves, keeps an authored `_dmg` leg as
-  its own damage texture, and on an orphan `_dmg` (no clean stem)
-  reuses the bound texture for both sides — `gfxGetTexture` caches by
-  name in retail, so the same handle serves both rather than
-  double-loading. Clones `clean` into the writable `current`,
-  clones the material, binds `current`; non-4bpp formats warn and
-  stay unpaired.
-- `car_visual::spawn_vehicle_model` gains a
-  `texel_damage: Option<(&VehCarDamage, u64)>` leg: `PartRole::Body`
-  groups route through `TexelDamageBuilder::bind_group` (paired slot
-  → per-vehicle material + recorded tris; unpaired → shared
-  material), and `finish` inserts the rig only when at least one slot
-  paired — matching the authored-presence policy of
-  `VehicleDamage`/`VehicleSmoke`/`VehicleSparks`. Player and AI
-  opponents pass `Some`; ambient traffic and trailers pass `None`.
-- `damage::resolve_disabled` gained a `TexelRepair` SystemParam
-  (bundled to stay under the fn-system param limit); its three
-  `damage.reset()` repair sites — Cruise free reset, Circuit penalty
-  reset, AI reset — call `texel.reset(entity)`, re-blitting clean
-  over the clone. Plain reset/stuck/recovery is not a repair and
-  leaves the skin stamped (same rule as breakaway parts).
-- `TexelDamageReport` resource → `txl=<impacts>i/<splats>s/<resets>r`
-  in the headless record, emitted only on activity so impact-free
-  runs stay bit-identical; reset during `drive_session` teardown.
-  Registered in both the windowed app and the headless smoke app.
+- `mm2_app::pvs` (new): `CityRoom(u32)` component (authored room id =
+  `Psdl::rooms` index + 1), `PvsEnabled` resource mirroring retail
+  `sm_EnablePVS`, and `CityPvs` — the parsed `Cpvs` plus per-room
+  perimeter cells built from the loaded `Psdl`.
+- `apply_city_pvs` (Update, after the camera systems — windowed and
+  headless): resolves the union of rooms whose authored XZ perimeter
+  contains the active camera `Transform` or the player vehicle's
+  physics `Position` — retail `sdlPage16::PointInPerimeter` is the
+  same 2-D test, and `FindRoomId`'s `previousRoom` is a recovered
+  search hint, so a rescan gives the same answer without ordering
+  state. The source lists are decoded once on change and unioned —
+  stacked/overlapping rooms or a boundary-lagged chase camera can
+  only over-show, never hide an authored-visible room. The player leg
+  keeps the street under the car a source and is a headless run's
+  only position. `Visibility` is rewritten only when the source set
+  changed, the toggle flipped, or new `CityRoom` entities spawned
+  (`Added` — the first update precedes the deferred session spawns).
+- `city.rs`: every per-room render group spawns `CityRoom` +
+  explicit `Visibility::Inherited` (`Mesh3d` requires `Transform`
+  only — without it the cull query matches nothing, which the first
+  retail run caught: `pvs=687r/0h/0`); `load_city` resolves the
+  sibling `<stem>.cpvs` through the VFS — a missing/unparseable table
+  yields no `CityPvs` (unculled, logged, never fabricated), so mod
+  cities without one are unaffected. `authored_z`/`point_in_poly`
+  went `pub(crate)` for reuse.
+- `session.rs`: inserts `CityPvs` (honouring `PvsEnabled`) on city
+  load, removes it in `drive_session` teardown — session-scoped like
+  `CityNav`. Colliders are physics and never culled.
+- `main.rs`: `--no-pvs` CLI flag (retail's `EnablePVS(false)`
+  counterpart); `apply_city_pvs` registered behind
+  `resource_exists::<CityPvs>`.
+- `smoke.rs`: headless runs `chase_follow` + `apply_city_pvs` so the
+  camera path is exercised identically; the record gains
+  ` pvs=<room>r/<hidden>h/<tagged>` (` pvs=off` when disabled; absent
+  without a table — dev-world records stay bit-identical).
 
 ## Verification (this tree)
 
-- `cargo fmt --all -- --check`, `cargo clippy --workspace
-  --all-targets --all-features -- -D warnings`, `cargo test
-  --workspace` — all pass (the new `TexelDamageReport` param on
-  `resolve_disabled`/`drive_session` required adding the resource to
-  17 existing test harnesses).
-- Tests added: 8 `mm2_game` (radius filter, barycentric UV,
-  determinism, degenerate inputs, blit disc/floor/clipping/mips),
-  3 `mm2_app` (body-only rig build + per-vehicle texture/material
-  independence, impact stamps cloned pixels, `resolve_disabled`
-  repair restores clean pixels + counts), 1 city unit (clean/damage
-  pairing, orphan `_dmg` handle reuse, per-vehicle clones).
+- `cargo fmt --all -- --check`, `cargo clippy --locked --workspace
+  --all-targets --all-features -- -D warnings`, `cargo test --locked
+  --workspace` — all pass (67 suites, 0 failures).
+- Tests +5 (`pvs.rs`): tiled-room source resolution + culling,
+  overlapping-room list union, unresolved/disabled bypass + miss
+  counting, the full apply path (camera move re-applies,
+  `culled`/`tagged` counters), player-position fallback with no
+  camera.
 - Retail headless (install `fnv1a64:e91e6cd4b2ae30d9`):
-  - sf cruise vpbug `--frames 1800`:
-    `impacts=42 dmg=10a/0d/0r spk=15b/105e/105x txl=15i/2543s/0r`
-  - sf `circuit:0 --bot --frames 12000`:
-    `dmg=237a/4d/3r … txl=401i/64364s/3r` — the reset counter tracks
-    the three repairs exactly; every player impact (237 applied + 164
-    damage-threshold-rejected) stamped, consistent with the retail
-    `ImpactCB` feeding the table regardless of damage gating.
-- Rendered (local captures, not committed): vpbug
-  `--spawn=-1319.5,80,214` drops ~11 m nose-first —
-  `/tmp/txl-front.png` (front view) shows stamped cracks/dents on
-  hood, windshield and lamps while `/tmp/txl-dbg2.png` (same run,
-  rear view) stays clean — localized stamping, not a texture swap.
-  A light settle (`--spawn=-1319.5,69,214`,
-  `/tmp/txl-dbg-clean.png`) stamps the rear.
-
-## Corrections
-
-- The prior iteration's "22 of 25 parseable `vp*.pkg`" denominator is
-  corrected to 22 of 27 base files (excluding `_dash`/`_trailer`), and
-  vpdb731 + vpvw_dune join the no-`_dmg` exception list
-  (docs/research/pkg.md, DMG-9).
+  - sf `--frames 900 --spawn=-1319.5,80,214` → `pvs=982r/6378h/7324`,
+    the source room tracking the driven car.
+  - london `--frames 600` → `pvs=68r/7422h/8254`.
+- Rendered A/B (frozen `--cam`, Metal/Apple M1, ImageMagick AE; local
+  captures, not committed):
+  - same-command baseline: ~1.5 kpx noise.
+  - street level: 360 px over 3.7 MPX — capture noise, clean.
+  - 75 m aerial: ~28.6 kpx real difference, all in distant skyline
+    rooms the authored table marks invisible — the table's own
+    conservatism at a non-gameplay viewpoint; retail draws the same
+    holes from the same table.
+  - a camera embedded under the freeway (~6% diff) is likewise an
+    atypical position resolving an authored boundary.
 
 ## Not done / open
 
-- `ApplyBirdPoopDamage`'s original splat shape stays unrecovered —
-  the radial blit is designed (DSN-32, UNK-13). The `ImpactsTable`'s
-  fill rules (which participant feed it reads, queue depth) are
-  likewise unrecovered; the implementation feeds the deduplicated
-  `ImpactEvent` stream directly.
-- A rendered post-repair capture was not staged (repair is proven by
-  the `txl` reset counter tracking `dmg` repairs 1:1 plus the
-  pixel-restore test).
-- LOD note carried forward from F02-C.4: retail `Init` pairs only the
-  high-LOD body's shader slots; only the best LOD renders today, so
-  the uniform substitution is unobservable — revisit if LOD switching
-  lands.
+- `.cpvs` variant selection stays open (UNK-24): the numbered
+  `<stem>_N.cpvs` files' per-weather switching is a measured
+  hypothesis — the base table is consumed, variants are not
+  selected.
+- `FindRoomId`'s exact search order is unrecovered (thunk); the
+  rescan-union is a designed policy (DSN-33) that can only over-show.
+- Props/decals aren't `CityRoom`-scoped yet — only per-room city
+  render groups cull; a prop whose room is hidden stays drawn (same
+  conservatism direction as the union).
+- F15-B's opponent tail columns (`avoidOpponents` polarity) remain
+  unresolved — documented, not wired.

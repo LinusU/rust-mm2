@@ -32,6 +32,7 @@ use bevy::{
 use mm2_assets::{Resolved, Vfs};
 use mm2_content::surface::{SurfaceSlot, SurfaceTables};
 use mm2_formats::{
+    cpvs::Cpvs,
     inst::{self, InstPlacement},
     pathset,
     pkg::{Pkg, PkgStrip, lod_split},
@@ -112,7 +113,7 @@ pub(crate) fn v3(p: [f32; 3]) -> Vec3 {
 /// and facing tests work in. The Z mirror is its own inverse, so this is
 /// also the way in.
 #[inline]
-fn authored_z(z: f32) -> f32 {
+pub(crate) fn authored_z(z: f32) -> f32 {
     if MIRROR_Z { -z } else { z }
 }
 
@@ -1132,7 +1133,7 @@ impl EmitCtx<'_> {
 }
 
 /// Ray-cast point-in-polygon over the authored (x, z) perimeter.
-fn point_in_poly(p: (f32, f32), poly: &[(f32, f32)]) -> bool {
+pub(crate) fn point_in_poly(p: (f32, f32), poly: &[(f32, f32)]) -> bool {
     let mut inside = false;
     let n = poly.len();
     for i in 0..n {
@@ -3262,6 +3263,9 @@ pub struct LoadedCity {
     /// refers to. The session inserts them as a resource so consumers
     /// can resolve codes back to material names and fields.
     pub surfaces: Option<SurfaceTables>,
+    /// The sibling `<stem>.cpvs` room-PVS table bound over the loaded
+    /// PSDL's rooms, when the install ships one that parses (F18-A.5).
+    pub pvs: Option<crate::pvs::CityPvs>,
     /// Import statistics.
     pub report: CityReport,
 }
@@ -3354,6 +3358,12 @@ pub fn load_city(
         commands.spawn((
             CityEntity,
             owner,
+            // F18-A.5: the authored room id tags the group for the
+            // `.cpvs` PVS culling pass (`pvs::apply_city_pvs`) — and an
+            // explicit `Visibility` makes the tag queryable (`Mesh3d`
+            // requires `Transform` only).
+            crate::pvs::CityRoom(group.room as u32 + 1),
+            Visibility::Inherited,
             Mesh3d(meshes.add(builder.build())),
             MeshMaterial3d(material),
             Name::new(format!(
@@ -3620,10 +3630,42 @@ pub fn load_city(
     }
     info!(report = %report, "city import");
 
+    // F18-A.5: the sibling `<stem>.cpvs` room-PVS table — verified
+    // format and `IsRoomVisible` semantics (docs/research/
+    // environment.md). A missing table (mod cities may ship none) or a
+    // corrupt one simply yields no `CityPvs` resource — the session
+    // renders unculled rather than guessing visibility. The `_NN`
+    // weather/detail variants are deliberately unselected: their
+    // selection rule is unrecovered (UNK-24).
+    let pvs = psdl_path
+        .strip_suffix(".psdl")
+        .map(|stem| format!("{stem}.cpvs"))
+        .and_then(|path| match vfs.read_path(&path) {
+            Ok((bytes, res)) => match Cpvs::parse(&bytes) {
+                Ok(cpvs) => {
+                    info!(
+                        path = %res.logical,
+                        lists = cpvs.list_count(),
+                        "room PVS table loaded"
+                    );
+                    Some(crate::pvs::CityPvs::build(cpvs, &psdl))
+                }
+                Err(e) => {
+                    warn!(path = %res.logical, error = %e, "cpvs parse failed; PVS culling off");
+                    None
+                }
+            },
+            Err(e) => {
+                debug!(path = %path, error = %e, "no cpvs table; PVS culling off");
+                None
+            }
+        });
+
     Ok(LoadedCity {
         spawn: import.spawn,
         spawn_yaw: import.spawn_yaw,
         surfaces,
+        pvs,
         report,
     })
 }

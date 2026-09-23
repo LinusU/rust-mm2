@@ -172,7 +172,8 @@ rooms + 1. A handful of authored rooms (1–14 per file) do not see
 themselves — an authored anomaly the audit reports, not an issue.
 
 Parser: `mm2_formats::cpvs::Cpvs` (`decompress`, `code`, `is_visible`,
-`visible_rooms`, `validate` → `CpvsIssue`).
+`visible_rooms`, `validate` → `CpvsIssue`). Runtime consumer:
+`mm2_app::pvs` (F18-A.5 — see "Runtime consumption" below).
 
 ## `.pvshist` — PVS history (verified format, inferred semantics)
 
@@ -241,7 +242,7 @@ authored anomalies (self-invisible rooms, the sf lmap shortfall, the
 0xCDCDCDCD sentinel, dev-path sources) are notes/findings, so a stock
 retail install exits 0.
 
-## Runtime consumption (F18-A.2/.3/.4)
+## Runtime consumption (F18-A.2/.3/.4/.5)
 
 The `.ltNN` presets bind to Bevy lighting and the `_fog.csv` row binds
 to Bevy fog through the production session path —
@@ -309,6 +310,28 @@ Binding (per `docs/research/environment.md`'s recovered record):
   shows ` sky=<model>:<texture>` or ` sky=none`. A missing dome
   *texture* warns and draws the shared fallback material (the prop
   policy).
+- `city/<stem>.cpvs` → the authored room-PVS render culling
+  (F18-A.5), `mm2_app::pvs`. Retail `cityLevel` decompresses the
+  view room's list into a 512-byte buffer and `DrawRooms` gates each
+  room draw group on `IsRoomVisible` (`code != 0`); `sm_EnablePVS` is
+  the global toggle. Ours: every per-room render mesh is spawned
+  `CityRoom`-tagged (authored id = `rooms` index + 1), and
+  `apply_city_pvs` re-resolves the source set each frame — every room
+  whose authored XZ perimeter contains the active camera *or* the
+  player vehicle (retail `sdlPage16::PointInPerimeter` is the same 2-D
+  test; `FindRoomId`'s `previousRoom` hint is a search shortcut, not a
+  different answer) — and unions their decompressed lists, so a
+  stacked/overlapping or camera-lagged pick can only over-show, never
+  hide an authored-visible room. Disabled (`--no-pvs`, retail's
+  `EnablePVS(false)`), unresolved, or list-less sources bypass
+  entirely. A missing/unparseable `.cpvs` yields no `CityPvs` resource
+  — unculled, logged, never fabricated. Colliders are physics and
+  never culled. Smoke gains ` pvs=<room>r/<hidden>h/<tagged>` (or
+  ` pvs=off`); absent without a table. Known authored-table behaviour,
+  not a defect: elevated/non-gameplay viewpoints see rooms the table
+  marked invisible — identical captures at gameplay height differ only
+  by capture noise (AE ~1.5 kpx baseline vs ~28 kpx at a 75 m aerial,
+  all in distant skyline rooms).
 
 Designed (not authored) scales: a uniform 15 000 lux illuminance per
 directional light — the authored `Color` carries each light's relative
@@ -343,8 +366,9 @@ authored texture; frozen-`--cam` captures pitched up at the dome show
 the authored cloud/gradient textures on both cities (Metal/Apple M1,
 PNGs inspected).
 
-Still not consumed (UNK-24 stays open): `.cpvs` variant selection and
-PVS culling, `.ldef` rows, `.pvshist` weights, `.lmap` values,
+Still not consumed (UNK-24 stays open): `.cpvs` variant selection
+(the numbered `<stem>_N` files — the base table now culls), `.ldef`
+rows, `.pvshist` weights, `.lmap` values,
 `.water`, precipitation/wetness/audio effects (F18-B/C scope), and
 authoritative network replication of conditions (F18 req 5). The
 dome's three `.sky` floats are bound under designed readings
