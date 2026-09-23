@@ -110,8 +110,9 @@ const ROUTE_LOOP: f32 = 40.0;
 const FALLBACK_SPACING: f32 = 6.0;
 
 /// Spawn height above the authored slot position — the same settle
-/// margin the player gets before its hull-clearance lift.
-const SPAWN_LIFT: f32 = 0.25;
+/// margin the player gets before its hull-clearance lift. Shared with
+/// the scripted bot's re-anchor (`crate::scripted`).
+pub(crate) const SPAWN_LIFT: f32 = 0.25;
 
 /// Half-width of the brake corridor ahead (m) — about a car width:
 /// a car sharing our line counts, one in the neighbouring lane does
@@ -164,7 +165,8 @@ const PASS_BAN: u32 = 300;
 /// tolerates: a car that never leaves it is not progressing even while
 /// it rolls — the same displacement-over-speed test the pass stall
 /// uses. Generous enough that a crawling queue keeps resetting.
-const REANCHOR_DIST: f32 = 8.0;
+/// Shared with the scripted bot's re-anchor (`crate::scripted`).
+pub(crate) const REANCHOR_DIST: f32 = 8.0;
 /// Frames (60 Hz updates) inside the bubble before the bounded last
 /// resort fires — about 15 s, so the reverse-and-turn escapes (~3.5 s
 /// a cycle) and the pass stall/ban cycle get their turns first.
@@ -299,7 +301,7 @@ impl OpponentDriver {
 /// U-turning back to it. The incoming leg supplies the direction for
 /// interior points; point 0 has none, so its outgoing leg decides —
 /// anything already ahead of the first anchor skips it.
-fn point_reached(points: &[mm2_game::OpponentRoutePoint], i: usize, pos: Vec3) -> bool {
+pub(crate) fn point_reached(points: &[mm2_game::OpponentRoutePoint], i: usize, pos: Vec3) -> bool {
     let p = points[i].position;
     let dx = pos.x - p.x;
     let dz = pos.z - p.z;
@@ -315,24 +317,32 @@ fn point_reached(points: &[mm2_game::OpponentRoutePoint], i: usize, pos: Vec3) -
     len2 > 0.0 && (pos.x - p.x) * dir.x + (pos.z - p.z) * dir.z > 0.0
 }
 
+/// Whether a route's last point sits within [`ROUTE_LOOP`] of its
+/// first — the retail circuit pattern, where the lap structure lives
+/// in the race checkpoints and the route just keeps supplying
+/// waypoints by rejoining at the first anchor.
+pub(crate) fn route_is_closed(route: &OpponentRoute) -> bool {
+    let points = &route.points;
+    points.len() > 1 && {
+        let last = points.last().unwrap().position;
+        let first = points[0].position;
+        (last.x - first.x).hypot(last.z - first.z) <= ROUTE_LOOP
+    }
+}
+
 /// Advance the chase index past reached points and return the point to
 /// drive at. Returns the updated `next` and `Some(target)`; `None` when
 /// the route is complete — an open polyline's end means the opponent
 /// eases to a stop (its race progress is the checkpoints', not the
-/// route's). A closed route (last point near the first — the retail
-/// circuit pattern) rejoins at the first anchor so laps keep supplying
-/// targets; the bounded retry keeps a degenerate all-in-reach route
-/// from looping forever.
+/// route's). A closed route rejoins at the first anchor so laps keep
+/// supplying targets; the bounded retry keeps a degenerate all-in-reach
+/// route from looping forever.
 pub fn route_target(route: &OpponentRoute, mut next: usize, pos: Vec3) -> (usize, Option<Vec3>) {
     let points = &route.points;
     if points.is_empty() {
         return (next, None);
     }
-    let closed = points.len() > 1 && {
-        let last = points.last().unwrap().position;
-        let first = points[0].position;
-        (last.x - first.x).hypot(last.z - first.z) <= ROUTE_LOOP
-    };
+    let closed = route_is_closed(route);
     for _ in 0..2 {
         while next < points.len() && point_reached(points, next, pos) {
             next += 1;
@@ -467,11 +477,7 @@ pub fn reanchor_pose(
     if n == 1 {
         return (route.points[0].position, yaw);
     }
-    let closed = {
-        let last = route.points[n - 1].position;
-        let first = route.points[0].position;
-        (last.x - first.x).hypot(last.z - first.z) <= ROUTE_LOOP
-    };
+    let closed = route_is_closed(route);
     let leg_count = if closed { n } else { n - 1 };
     // Leg i runs points[i] → points[(i+1) % n]. The chased leg is
     // prev→next; `next == 0` means the car still approaches the first

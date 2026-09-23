@@ -45,7 +45,7 @@ use tracing::{error, info, warn};
 use crate::camera::{CameraMode, ChaseCamera, FreeCamera};
 use crate::car_visual::{self, WheelMount, WheelSpin};
 use crate::contracts::ImpactFilter;
-use crate::{city, dev_world, opponents, race};
+use crate::{city, dev_world, opponents, race, scripted};
 
 /// Where the player vehicle (re)spawns. `trailers` holds each spawned
 /// trailer's entity plus its car-space rest offset so a reset can place it
@@ -975,6 +975,21 @@ pub fn load_session_world(
             commands
                 .entity(vehicle)
                 .insert((RaceProgress::new(&def), TargetSelection::default()));
+            // F15-B.5: hand the scripted evidence bot the authored
+            // `.opp` driving line staged nearest its slot — its aim
+            // between gates then follows the course's own road geometry
+            // instead of a straight line that can leave elevated or
+            // depressed roads. Dormant unless `--bot` drives the car;
+            // session-owned like `RaceProgress` beside it.
+            if let Some(route) = scripted::pick_bot_route(&roster, spawn.position) {
+                commands
+                    .entity(vehicle)
+                    .insert(scripted::ScriptedRoute::new(
+                        route,
+                        spawn.position,
+                        spawn.yaw,
+                    ));
+            }
             // F15-A.2: the authored opponent lineup spawns as real
             // participants — own vehicles, own routes, AI control.
             opponents::spawn_opponents(
