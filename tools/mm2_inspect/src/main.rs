@@ -3378,10 +3378,15 @@ fn weather(
     use mm2_formats::ldef::Ldef;
     use mm2_formats::lighting::{LIGHTING_PRESET_COUNT, LightingPreset};
     use mm2_formats::lmap::Lmap;
+    use mm2_formats::psdl::{AttributeType, texture_ref_index};
     use mm2_formats::sky::SkyDef;
     use mm2_formats::water::WaterDef;
 
     let vfs = build_vfs(dir, mods)?;
+    // The SDL water-surface mark is a PSDL+materials property, so the
+    // tables load once up front; a broken/absent pair just skips the
+    // report (the materials audit owns its diagnosis).
+    let surface_tables = mm2_content::load_surface_tables(&vfs).ok().flatten();
     let stems: Vec<String> = match city {
         Some(c) => vec![c.to_ascii_lowercase()],
         None => mm2_content::EXPECTED_CITIES
@@ -3811,28 +3816,38 @@ fn weather(
             continue;
         };
         let pbytes = vfs.read(&pres)?;
-        let rooms = match Psdl::parse(&pbytes) {
-            Ok(p) => p.rooms.len(),
+        let psdl = match Psdl::parse(&pbytes) {
+            Ok(p) => p,
             Err(e) => {
                 println!("    note: {psdl_path} failed to parse: {e}");
                 continue;
             }
         };
+        let rooms = psdl.rooms.len();
         // `<stem>.cpvs` list count is `rooms + 1` on retail (list 0 is
         // reserved, lists 1..=rooms map to rooms 1..=rooms — mm2hook
         // IsRoomVisible convention, verified against 1340/1341 London
         // self-visible rooms).
         if let Some(cpvs_list) = cpvs_by_city.get(c) {
+            let base_name = format!("city/{c}.cpvs");
+            let base_tbl = cpvs_list.iter().find(|(p, _)| *p == base_name);
             for (path, cpvs) in cpvs_list {
-                let base = path.rsplit('/').next().unwrap_or(path) == format!("{c}.cpvs").as_str();
-                if base && cpvs.list_count() != rooms + 1 {
-                    issue(
-                        &mut issues_total,
-                        format!(
-                            "{path}: {} lists but {psdl_path} has {rooms} rooms (expected rooms+1)",
-                            cpvs.list_count()
-                        ),
-                    );
+                if *path == base_name {
+                    if cpvs.list_count() != rooms + 1 {
+                        issue(
+                            &mut issues_total,
+                            format!(
+                                "{path}: {} lists but {psdl_path} has {rooms} rooms (expected rooms+1)",
+                                cpvs.list_count()
+                            ),
+                        );
+                    }
+                } else if let Some((_, base)) = base_tbl {
+                    // Numbered/dated `.cpvs` extras — the exe opens
+                    // only `city/<stem>.cpvs`, so these are bake
+                    // artifacts; the measured relation to the base
+                    // table is evidence, not an issue.
+                    println!("    cpvs: {path} — {}", cpvs_relation(base, cpvs));
                 }
             }
         }
@@ -3873,6 +3888,27 @@ fn weather(
                 }
             }
         }
+        // The exe's second deadly-water source ("Water of Death(tm)
+        // [from SDL]"): rooms whose FIRST attribute is a TextureRef to
+        // a drowning-class surface — 42 on retail sf, 20 on london,
+        // disjoint from the `.water` refs.
+        if let Some(tables) = &surface_tables {
+            let sdl = psdl
+                .rooms
+                .iter()
+                .filter(|r| {
+                    r.attributes
+                        .first()
+                        .filter(|a| a.kind == AttributeType::TextureRef)
+                        .and_then(texture_ref_index)
+                        .and_then(|i| psdl.textures.get(i))
+                        .is_some_and(|t| tables.is_deadly_surface(t))
+                })
+                .count();
+            println!(
+                "    water: {c} — {sdl} SDL-marked room(s) (first attribute binds a drowning-class surface)"
+            );
+        }
         println!("    psdl: {psdl_path} — {rooms} rooms (cross-checked)");
     }
 
@@ -3890,6 +3926,43 @@ fn weather(
         .into());
     }
     Ok(())
+}
+
+/// How a non-base `.cpvs` table relates to the base table's decoded
+/// visibility: the per-list visible-room sets compared pairwise (a
+/// list missing past `list_count` reads as the empty set — rooms past
+/// a stored length are implicitly hidden). Retail measured relations
+/// (2026-09-23): `<stem>_8` and `london_bad` are identical, `_16`…
+/// `_255` are strict subsets (`sf082100` too — an earlier bake), `_0`/
+/// `_2`/`_4` strict supersets, and `_00`/`_254` are independent — a
+/// nested bake-parameter sweep, not runtime-selected variants.
+fn cpvs_relation(
+    base: &mm2_formats::cpvs::Cpvs,
+    variant: &mm2_formats::cpvs::Cpvs,
+) -> &'static str {
+    let n = base.list_count().max(variant.list_count());
+    let mut sub = true;
+    let mut sup = true;
+    for i in 0..n {
+        let v: BTreeSet<u32> = variant
+            .visible_rooms(i)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let b: BTreeSet<u32> = base
+            .visible_rooms(i)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        sub &= v.is_subset(&b);
+        sup &= b.is_subset(&v);
+    }
+    match (sub, sup) {
+        (true, true) => "identical to the base table",
+        (true, false) => "strict visibility subset of the base table",
+        (false, true) => "strict visibility superset of the base table",
+        (false, false) => "independent — neither subset nor superset of the base table",
+    }
 }
 
 /// Breakable/knockable object audit (F04-A.1): the expected denominator
