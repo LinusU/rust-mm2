@@ -549,8 +549,12 @@ from `asLineSparks`.
   are unrecovered.
 - `TextelDamageRadius`'s consumer — mm2hook binds it to
   `fxTexelDamage::ApplyDamage(position, maxDist)` driven by the
-  recovered `ImpactsTable[12]` of impact positions; decal projection
-  vs vertex deformation and the per-impact table's fill rules stay
+  recovered `ImpactsTable[12]` of impact positions. `fxTexelDamage::Init`
+  is recovered: the `_dmg`↔clean texture pairing (see
+  `docs/research/pkg.md`, DMG-9) — the undamaged binding is implemented —
+  while the impact-time blit mechanics (`DamageTris` barycentric texel
+  lookup, radial probability blit onto the cloned texture, `Reset`'s
+  clean-texture restore) and the per-impact table's fill rules stay
   unrecovered. The original `asLineSparks` burst semantics
   (count/velocity/cadence/texture binding) likewise — a designed
   radial-rebound policy is implemented (DSN-26).

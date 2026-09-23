@@ -34,6 +34,23 @@ e.g. wheel models referenced by a car body).
 Shader sets with per-shader texture references (the texture *names* that the
 VFS resolver later turns into `texture/<name>.tex` — or a mod override).
 
+Vehicle damage-state texture pairing (recovered via mm2hook's
+`fxTexelDamage::Init`, a `vehCarModel` member): a shader texture name ending
+in `_dmg` (at the last `_`, case-insensitive) is the damaged variant of the
+stem — the undamaged vehicle binds the clean stem when it resolves, and the
+`_dmg` texture is stashed per shader slot for impact-time texel blits. A
+failed clean lookup keeps the `_dmg` name. Damage-region body sections are
+*authored* bound to `_dmg` shaders: `vpbug` BODY_H sections 4–6 are the
+car's whole right half (`x>0`) bound to `vpbugyellow_{sd,ft,bk}_dmg`, and 22
+of 25 parseable retail `vp*.pkg` ship `_dmg`-bound BODY sections (vpbus the
+largest at 12 sections/6 slots; vpcop, vpmoonrover, vpmustang99 none). The
+pairing is symmetric — a clean `<stem>` shader pairs with `<stem>_dmg` as
+its damage texture when that file exists — so one `_dmg` file serves both
+halves of a symmetric body. The `ApplyDamage` blit mechanics (radius =
+`vehCarDamage`'s `TextelDamageRadius`, DMG-5) are unrecovered; only the
+clean-state binding is implemented (`MaterialCache::shader_material` —
+vehicle models only; prop PKGs bind names verbatim).
+
 ## Confidence
 
 - Chunk framing, FVF vertex fields, strip layout: **documented**

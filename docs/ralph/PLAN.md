@@ -40,15 +40,26 @@ Choose the highest-value ready small slice; repair current regressions before un
 
 **Next selected slice: F02-C remainder (per-car render leg —
 needs GPU captures; per-car override matrix), F05-B remainder
-(`TextelDamageRadius`/`ImpactsTable` texel damage — UNK-13;
-damage-driven detachment if original — UNK-13; C&R healing
-driver — needs F27's mode), F17-B remainder (needs F17-C's
-mode), F17-A remainder (per-event weather controls need F18;
-AC03 evidence leg), F15-B remainder (AC06's measured difficulty
-effects, representative avoidance matrix, authored-tail columns,
+(`TextelDamageRadius`/`ImpactsTable` texel damage — the
+`_dmg`↔clean pairing leg is now recovered and bound, the
+impact-blit mechanics stay UNK-13; damage-driven detachment if
+original — UNK-13; C&R healing driver — needs F27's mode),
+F17-B remainder (needs F17-C's mode), F17-A remainder
+(per-event weather controls need F18; AC03 evidence leg),
+F15-B remainder (AC06's measured difficulty effects,
+representative avoidance matrix, authored-tail columns,
 `avoidOpponents` polarity), F11-C remainder, F16-C's AC01
 process-level leg, F10-B's remaining collision/queue-priority
 scope, F13-C, or the F18-A remainder)** — the latest iteration
+implemented F02-C.4, resolving operator report 2 item 3 — the
+long-standing `vpbug` half-damaged render: vehicle body
+sections are authored bound to `<stem>_dmg` damage textures,
+and retail's `fxTexelDamage::Init` (recovered in mm2hook)
+binds the clean stem until damage is applied.
+`MaterialCache::shader_material` now applies that pairing for
+vehicle models; the defect was fleet-wide (22 of 25 parseable
+`vp*.pkg`) and identical-pose captures show vpbug/vpbus clean.
+Before that the latest iteration
 implemented F02-C.3, resolving the `vpmoonrover` launch finding:
 the retail `vehCarSim` carries exactly four `vehWheel` slots
 (mm2hook source — `whl4`/`whl5` are "back-back" visuals drawn as
@@ -1369,19 +1380,29 @@ rendered gameplay; outranks inference.
    strike/settle evidence as provisional, since what a vehicle can reach
    depends on where props actually sit.
 
-3. **Known long-standing vehicle texture defect (lower priority than 2).**
-   On `vpbug` the rear windscreen renders correct dark interior on its
-   left half and garbage pixels on the right, split by a hard vertical
-   seam, and the rear-right quarter panel is smeared and crumpled. The
-   operator states this has been present "since we first started
-   rendering the cars", and it appears identically in screenshots taken
-   at different commits, different map positions and different sessions
-   — so it is neither collision damage nor a regression from the recent
-   TEX decode work (`0300b21` palette-alpha variant, `cbdf026` mip
-   clamp). Do not spend an iteration bisecting recent commits for it.
-   Evidence: `/Users/linus/coding/rust-mm2-play/screenshots/` —
-   `1789920955999_cam_-340.4,2.0,-104.2,-136,-12.png` (earlier commit)
-   and `1789942678043_cam_828.2,7.0,-1038.7,51,-13.png` (at `561b8b7`).
+3. **Known long-standing vehicle texture defect — RESOLVED (iteration
+   56, F02-C.4).** Root cause was not parsing or decode: `vpbug.pkg`
+   authors the body in two halves — BODY_H sections 0/1/3 carry the left
+   half on `vpbugyellow_{sd,ft,bk}` while sections 4/5/6 carry the whole
+   right half (`x>0`) bound to `vpbugyellow_{sd,ft,bk}_dmg`, the
+   damage-state texture variants. We bound the `_dmg` textures verbatim,
+   so every clean car rendered its damage skin: the "garbage" right
+   windscreen was the authored cracked-glass damage texture and the
+   "smeared" quarter panel the dented variant, with the seam on the
+   authored centre split. MM2Hook's recovered `fxTexelDamage::Init`
+   (the `vehCarDamage::TextelDamageRadius` consumer) documents the
+   retail rule — a shader naming `<stem>_dmg` is the damaged variant;
+   the undamaged car binds the clean stem, the `_dmg` original is
+   stashed for per-impact texel blits, and a failed clean lookup keeps
+   `_dmg`. `MaterialCache::shader_material` now applies that pairing
+   (vehicle models only — prop PKGs bind verbatim, `fxTexelDamage` is a
+   `vehCarModel` mechanism). Fleet-wide defect: 22 of 25 parseable
+   retail `vp*.pkg` ship `_dmg`-bound BODY sections (vpbus 12 sections;
+   vpcop/vpmoonrover/vpmustang99 none). Verified by identical-pose
+   captures: vpbug paint 0/1 and vpbus render clean. Ledger DMG-9;
+   `docs/research/pkg.md` records the convention. The `_dmg`→clean
+   pairing is also the binding half of `TextelDamageRadius`'s consumer —
+   the impact-blit leg stays unrecovered (F05-B).
 
 ## Operator report 3 (2026-09-21, human play-test — PRIORITY)
 

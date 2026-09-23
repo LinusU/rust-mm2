@@ -2158,9 +2158,36 @@ impl<'a> MaterialCache<'a> {
     /// VFS (mods included), then applies the shader's tint/alpha. Distinct
     /// shader records get distinct material handles even when they share a
     /// texture, which is what makes paint-job selection work.
+    ///
+    /// Vehicle bodies ship damage-state texture pairs: a shader naming
+    /// `<stem>_dmg` is the damaged variant of `<stem>`, and the retail
+    /// renderer binds the clean stem until damage is applied
+    /// (`fxTexelDamage::Init`, recovered in mm2hook — see
+    /// `docs/research/pkg.md`). An undamaged car therefore resolves the
+    /// clean stem; the `_dmg` name stands when it does not resolve.
     pub fn shader_material(&mut self, s: &mm2_formats::pkg::PkgShader) -> Handle<StandardMaterial> {
-        let base = self.get(&s.texture);
+        let base = self.get(&self.clean_texture_stem(&s.texture));
         adjust_material(s, &base, self.materials).unwrap_or(base)
+    }
+
+    /// The clean-state stem of a shader texture name: `<stem>_dmg` →
+    /// `<stem>` when `texture/<stem>` resolves, else the name unchanged.
+    /// Mirrors the retail pairing — `strrchr(name, '_') == "_dmg"` →
+    /// strip → `gfxGetTexture` — where a failed clean lookup keeps the
+    /// authored `_dmg` texture.
+    fn clean_texture_stem<'n>(&self, name: &'n str) -> std::borrow::Cow<'n, str> {
+        let lower = name.to_ascii_lowercase();
+        match lower.strip_suffix("_dmg") {
+            Some(stem)
+                if self
+                    .vfs
+                    .resolve_preferred(&format!("texture/{stem}"), TEXTURE_EXTS)
+                    .is_some() =>
+            {
+                std::borrow::Cow::Owned(stem.to_string())
+            }
+            _ => std::borrow::Cow::Borrowed(name),
+        }
     }
 
     /// Material for a decal texture stem (F03-B.4): same VFS
@@ -3773,6 +3800,56 @@ mod tests {
         assert_eq!(p.asset_name(), None);
         p.name = "sp_tree1_s".to_string();
         assert_eq!(p.asset_name(), Some("sp_tree1_s"));
+    }
+
+    /// Retail damage-texture pairing (`fxTexelDamage::Init`, recovered in
+    /// mm2hook): a vehicle shader naming `<stem>_dmg` is the damaged
+    /// variant of `<stem>` — the undamaged car binds the clean stem when
+    /// it resolves, keeps the authored `_dmg` name when it does not, and
+    /// never touches other names. Vehicle bodies are authored with whole
+    /// damage-region sections bound to `_dmg` textures (the vpbug
+    /// right-half defect), so binding them verbatim renders a clean car
+    /// half-damaged.
+    #[test]
+    fn shader_material_binds_the_clean_stem_of_a_dmg_texture() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("texture")).unwrap();
+        for name in ["car_paint", "orphan_dmg"] {
+            std::fs::write(
+                root.join(format!("texture/{name}.png")),
+                include_bytes!("../../../assets/texture/dev_road.png"),
+            )
+            .unwrap();
+        }
+        let mut vfs = Vfs::new();
+        vfs.mount_dir(root, 0).unwrap();
+        let mut images: Assets<Image> = Assets::default();
+        let mut materials: Assets<StandardMaterial> = Assets::default();
+        let mut mats = MaterialCache::new(&vfs, &mut images, &mut materials);
+
+        let shader = |texture: &str| mm2_formats::pkg::PkgShader {
+            texture: texture.to_string(),
+            diffuse: [1.0; 4],
+            ambient: [1.0; 4],
+            specular: None,
+            emissive: [0.0; 4],
+            shininess: 0.0,
+        };
+
+        // `_dmg` shader with a resolvable clean stem → the clean texture.
+        let damaged = mats.shader_material(&shader("car_paint_dmg"));
+        assert_eq!(damaged, mats.get("car_paint"));
+
+        // `_dmg` shader whose clean stem is absent → the authored texture.
+        let orphan = mats.shader_material(&shader("orphan_dmg"));
+        assert_eq!(orphan, mats.get("orphan_dmg"));
+
+        // Neither name resolves → the authored `_dmg` stem is the miss.
+        let gone = mats.shader_material(&shader("gone_dmg"));
+        assert_eq!(gone, mats.fallback());
+        assert!(mats.missing_textures().contains("gone_dmg"));
+        assert!(!mats.missing_textures().contains("car_paint_dmg"));
     }
 
     #[test]
