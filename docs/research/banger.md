@@ -281,10 +281,30 @@ verified original behaviour — every provisional point is still UNK-22.
   manifold contact's pre-solver `normal_speed` (shared
   `deepest_contact` helper with the impact pipeline). The provisional
   estimate is `approach_speed × striker_mass` compared against
-  `ImpulseLimit2`; a qualifying edge flips `RigidBody` to dynamic once,
-  applies one impulse leaving the prop at the striker's approach speed
-  plus a spin kick derived from the authored `Size` bounds (solid-cuboid
-  inertia estimate), and emits `BangerStateChanged`.
+  `ImpulseLimit2`; a qualifying edge flips `RigidBody` to dynamic once
+  and emits `BangerStateChanged`.
+- **Post-solver momentum transfer (F04-C.4).** The activation runs
+  *after* Avian's solver, so a dormant prop has already answered its
+  contact as an infinite-mass static body — the wall-stop operators
+  reported on parking-meter-class props. The committed activation
+  therefore replays the hit as a two-body exchange: `ContactDetails`
+  reports the normal impulse the solver actually applied plus the
+  combined restitution, the transfer impulse is
+  `(1 + restitution) × approach_speed × reduced_mass` (reduced mass of
+  striker and authored prop `Mass`), the applied wall impulse is
+  returned to the striker in exchange for the transfer's striker share
+  (Δv = impulse / striker mass, directed along the applied normal —
+  glancing hits keep their deflection), and the prop launches at
+  `impulse / prop_mass` plus the spin kick derived from the authored
+  `Size` bounds (solid-cuboid inertia estimate, lever from the `CG`
+  centre). A `StrikeBound` overlap with no live manifold pays the same
+  share with `applied_impulse = 0` and the record's `Elasticity`; a
+  coincident contact+overlap folds the real solve data in rather than
+  charging twice. Unresolvable striker mass keeps the pre-transfer
+  launch and leaves the striker alone. Implementation choice under
+  UNK-22 — the original's exact exchange quantity is unrecovered, but
+  the measured symptom (static-wall response) is repaired without
+  tuning constants or touching `ImpulseLimit2`/`Elasticity` data paths.
 - **Pool.** `BangerPool.max_active = 32` — the R4-recovered
   `dgBangerActiveManager` size. At capacity the oldest activation
   (lowest `(activated_tick, object_slot)`) settles with
@@ -426,6 +446,21 @@ city/<city>.bai`) for placements lying on a road.
   the sunk row — the halved strike reach and the corrected kick
   changed which bollard the trajectory clips; still one activation
   plus one settle on the flat row).
+- **Momentum transfer (F04-C.4, same install, `hold` driver):**
+  the post-solver wall response is gone. London `vpbug
+  --spawn=0.4,5.5,-720,0 --frames 1500` through the
+  `sp_bollard_black_l` row (13.6 kg props): **before** the transfer
+  the same command recorded `moved=55m peak=17.4m/s
+  bng_ev=2a/1s/0b` — the car wall-stopped on the first bollard and
+  the `hold` driver wandered into a second; **after**,
+  `moved=124m peak=24.5m/s bng_ev=1a/0s/0b` — the car kept its speed
+  through the strike and drove on. SF `vpddbus
+  --spawn=-1641.6,36.7,410,0 --frames 800` over the `sp_cone_f`
+  cluster (10.6 kg): **before** `moved=46m peak=19.6m/s
+  bng_ev=2a/0s/0b` (stopped dead on the cones); **after**
+  `moved=99m peak=19.7m/s bng_ev=3a/1s/0b` — same speed, more than
+  twice the travel, a third bound-strike activation and a settle.
+  Same commands, same install, the only change is the transfer.
 - **Retracted claim:** an earlier record cited `vpbug
   --spawn 762,0.5,-424,0` activating the `sp_bollard_black_l` at
   (759.7, −427). It is not reproducible and was physically
@@ -558,7 +593,11 @@ Parsed, bound and provisionally simulated. Everything below is UNK-22:
   speed × mass?) and what crossing it does — break vs. tip vs. nothing.
   The implemented `approach_speed × striker_mass` estimate is a
   stand-in; original evidence could change both the quantity and the
-  comparison.
+  comparison. The post-activation exchange is likewise provisional:
+  F04-C.4's reduced-mass two-body transfer repairs the measured
+  static-wall defect (operator report 4 item 2) without touching the
+  authored gate, but the original's striker-prop momentum split is
+  unrecovered.
 - Whether `NumParts` bounds runtime fragment spawning or is purely an
   authoring echo of the PKG's BREAK count — the implementation prepares
   every collidable `BREAK<NN>` chunk regardless of `NumParts`, since the

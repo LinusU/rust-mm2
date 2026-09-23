@@ -208,6 +208,60 @@ fn a_hard_impact_activates_then_settles_once() {
     assert!(pos.x > 0.2, "the impact knocked the prop loose: {pos:?}");
 }
 
+/// Run until `object` fires `phase`, returning that frame's
+/// (striker, prop) velocities — the post-transfer state the momentum
+/// assertions read.
+fn velocities_at_activation(
+    app: &mut App,
+    object: ObjectId,
+    phase: BangerPhase,
+    striker: Entity,
+    banger: Entity,
+) -> Option<(Vec3, Vec3)> {
+    for _ in 0..FRAMES_PER_SECOND * 2 {
+        app.update();
+        let fired = drain_transitions(app)
+            .iter()
+            .any(|e| e.object == object && e.phase == phase);
+        if fired {
+            let s = app.world().get::<LinearVelocity>(striker).unwrap().0;
+            let p = app.world().get::<LinearVelocity>(banger).unwrap().0;
+            return Some((s, p));
+        }
+    }
+    None
+}
+
+#[test]
+fn a_light_prop_takes_only_its_momentum_share() {
+    // Operator report 4 item 2: a dormant prop answered its contact as
+    // an infinite-mass static body, so a parking meter bounced the car
+    // like a wall. The committed activation now replays the hit as a
+    // two-body transfer: J = (1+e)·v·μ. 1 t striker vs 40 kg prop at
+    // 20 m/s, e = 0.25 (authored 0.5 averaged with the striker's 0):
+    // J ≈ 960 kg·m/s — the striker keeps ~19 m/s and the prop launches
+    // ~24 m/s, faster than the approach it replaced.
+    let mut app = test_app_with(SessionAuthority::Local, 32);
+    let (banger, object) =
+        spawn_banger(&mut app, Vec3::new(0.0, 0.5, 0.0), banger_def("meter", 0.0));
+    let striker = spawn_striker(
+        &mut app,
+        Vec3::new(-6.0, 0.5, 0.0),
+        Vec3::new(20.0, 0.0, 0.0),
+    );
+
+    let (sv, pv) = velocities_at_activation(&mut app, object, BangerPhase::Active, striker, banger)
+        .expect("a qualifying impact activates the prop");
+    assert!(
+        sv.x > 15.0,
+        "momentum carries through a light prop (a static wall left ~−5): {sv:?}"
+    );
+    assert!(
+        pv.x > 20.0,
+        "the prop takes the transferred impulse, faster than the approach: {pv:?}"
+    );
+}
+
 #[test]
 fn a_monument_limit_never_activates() {
     let mut app = test_app_with(SessionAuthority::Local, 32);
@@ -408,10 +462,11 @@ fn a_strike_bound_overlap_activates_a_prop_the_hull_clears() {
         c => panic!("activation must name its impact, got {c:?}"),
     }
 
-    // The world hull never touched: the striker kept its speed and
+    // The world hull never touched: the striker paid only the
+    // transfer's share (~0.6 m/s on a 1 t striker vs a 40 kg prop) and
     // passed cleanly over where the prop stood.
     let pos = app.world().get::<Position>(striker).unwrap().0;
-    assert!(pos.x > 3.0, "nothing slowed the striker: {pos:?}");
+    assert!(pos.x > 3.0, "only the transfer share slowed it: {pos:?}");
     assert!(
         (pos.y - 1.4).abs() < 0.01,
         "the striker never fell or deflected: {pos:?}"
@@ -420,6 +475,99 @@ fn a_strike_bound_overlap_activates_a_prop_the_hull_clears() {
         app.world().get::<Banger>(banger).unwrap().phase,
         BangerPhase::Active
     );
+}
+
+#[test]
+fn a_bound_strike_charges_the_striker_its_momentum_share() {
+    // A pure bound overlap carries no manifold, so the transfer pays
+    // the striker's share here: J = (1+e)·v·μ with e the authored
+    // 0.5 → ≈577 kg·m/s ≈ −0.58 m/s on the 1 t striker, and the prop
+    // launches at J/m_p ≈ 14.4 m/s — faster than the 10 m/s approach.
+    let mut app = test_app_with(SessionAuthority::Local, 32);
+    let (banger, object) =
+        spawn_banger(&mut app, Vec3::new(0.0, 0.5, 0.0), banger_def("cone", 0.0));
+    let striker = spawn_bound_striker(
+        &mut app,
+        Vec3::new(-3.0, 1.4, 0.0),
+        Vec3::new(10.0, 0.0, 0.0),
+    );
+
+    let (sv, pv) = velocities_at_activation(&mut app, object, BangerPhase::Active, striker, banger)
+        .expect("the bound overlap activates the prop");
+    assert!(
+        sv.x > 7.0 && sv.x < 9.9,
+        "the striker pays its share — slowed, not stopped: {sv:?}"
+    );
+    assert!(
+        pv.x > 11.0,
+        "the prop launches at the transfer speed: {pv:?}"
+    );
+}
+
+/// A bound striker whose world hull also clips the prop — slowly
+/// enough that the contact pass scores below the authored limit while
+/// the bound's surface speed clears it. The fold must charge the
+/// transfer once: the wall push is returned, not paid twice.
+fn spawn_brushing_bound_striker(app: &mut App, pos: Vec3, linvel: Vec3, angvel: Vec3) -> Entity {
+    app.world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            // Hull dips low enough to touch the prop's top face.
+            Collider::cuboid(0.5, 0.8, 0.5),
+            StrikeBound(Collider::cuboid(0.9, 3.0, 0.9)),
+            Mass(1000.0),
+            GravityScale(0.0),
+            CollisionEventsEnabled,
+            Position(pos),
+            Transform::from_translation(pos),
+            LinearVelocity(linvel),
+            AngularVelocity(angvel),
+        ))
+        .id()
+}
+
+#[test]
+fn a_coincident_contact_and_bound_strike_charge_once() {
+    // Head-on clip at 5 m/s: the contact's impulse estimate
+    // (~5·1000) sits under the authored limit while the spinning
+    // bound's surface speed at the prop's centre (~7.8·1000) clears
+    // it. Without the fold the striker would keep the wall bounce AND
+    // lose the transfer share on top; with it the solver's push is
+    // returned and the striker pays J ≈ 375 once — it keeps ≈4.8 of
+    // its 5 m/s instead of rebounding to ≈−1.5.
+    let mut app = test_app_with(SessionAuthority::Local, 32);
+    let (banger, object) = spawn_banger(
+        &mut app,
+        Vec3::new(0.0, 0.5, 0.0),
+        banger_def("cone", 6500.0),
+    );
+    let striker = spawn_brushing_bound_striker(
+        &mut app,
+        Vec3::new(-1.2, 1.4, 0.0),
+        Vec3::new(5.0, 0.0, 0.0),
+        Vec3::new(0.0, 10.0, 0.0),
+    );
+
+    let (sv, pv) = velocities_at_activation(&mut app, object, BangerPhase::Active, striker, banger)
+        .expect("the bound overlap activates the prop");
+    assert!(
+        sv.x > 2.0,
+        "the striker pays the transfer once, not the wall plus a share: {sv:?}"
+    );
+    // The wall push and the transfer act on different axes here — the
+    // contact normal is +x while the bound's surface velocity carries
+    // −z. Returning the wall response must happen along its own axis:
+    // folding it into `dir` would kick the striker *toward* −z
+    // (≈−4.5), the same side the prop leaves on — momentum invented.
+    assert!(
+        sv.z > -1.0,
+        "the returned wall push keeps its own axis: {sv:?}"
+    );
+    // The prop launches along the bound's surface velocity — the
+    // spin's −z contribution carries it sideways, and the striker's
+    // +z recoil is the same exchange.
+    assert!(pv.length() > 5.0, "the prop takes the transfer: {pv:?}");
+    assert!(pv.z < -1.0, "the spin's surface velocity shows: {pv:?}");
 }
 
 #[test]

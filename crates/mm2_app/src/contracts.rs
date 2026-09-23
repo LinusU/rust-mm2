@@ -72,27 +72,88 @@ impl ImpactFilter {
     }
 }
 
-/// The deepest contact of a live pair: its world point, the manifold
-/// normal (pointing from `c1` toward `c2`) and the pre-solver approach
-/// speed (m/s, ≥ 0 while approaching). The impact pipeline and the
-/// banger activation walk the same manifold data so "the hit" means
-/// the same thing to both.
+/// The deepest contact of a live pair plus the solve data the banger
+/// transfer needs: the manifold normal (pointing from `c1` toward
+/// `c2`), the pre-solver approach speed (m/s, ≥ 0 while approaching),
+/// the combined restitution the solver used and the normal impulse it
+/// actually applied across the pair this step. The impact pipeline and
+/// the banger activation walk the same manifold data so "the hit"
+/// means the same thing to both.
+///
+/// All directional fields are expressed in the caller's `(c1, c2)`
+/// order, not the stored pair's: the contact graph keys edges in
+/// broad-phase order, so `pair.collider1` is not guaranteed to be the
+/// `c1` argument.
+pub(crate) struct ContactDetails {
+    /// World-space contact point of the deepest manifold point.
+    pub point: Vec3,
+    /// The deepest manifold's normal, `c1` → `c2`.
+    pub normal: Vec3,
+    /// Pre-solver approach speed along the normal (m/s, ≥ 0).
+    pub severity: f32,
+    /// The combined restitution the deepest manifold was solved with —
+    /// the pair's [`Restitution`] coefficients already combined.
+    pub restitution: f32,
+    /// Total normal impulse the solver applied across the pair's
+    /// manifolds this step (kg·m/s) — the response a dormant prop
+    /// already delivered as a static body.
+    pub applied_impulse: f32,
+    /// The deepest point's world lever on `c1`'s body (anchor relative
+    /// to its centre of mass).
+    pub anchor1: Vec3,
+    /// The deepest point's world lever on `c2`'s body.
+    pub anchor2: Vec3,
+}
+
+/// The deepest contact of a live pair, or `None` when the pair has no
+/// live manifold. See [`ContactDetails`] for what it carries.
 pub(crate) fn deepest_contact(
     collisions: &Collisions,
     c1: Entity,
     c2: Entity,
-) -> Option<(Vec3, Vec3, f32)> {
+) -> Option<ContactDetails> {
     let pair = collisions.get(c1, c2)?;
-    let (contact, normal) = pair
+    let applied_impulse: f32 = pair
         .manifolds
         .iter()
-        .filter_map(|m| m.find_deepest_contact().map(|c| (c, m.normal)))
+        .flat_map(|m| m.points.iter())
+        .map(|p| p.normal_impulse)
+        .sum();
+    let (contact, manifold) = pair
+        .manifolds
+        .iter()
+        .filter_map(|m| m.find_deepest_contact().map(|c| (c, m)))
         .max_by(|a, b| {
             a.0.penetration
                 .partial_cmp(&b.0.penetration)
                 .unwrap_or(std::cmp::Ordering::Equal)
         })?;
-    Some((contact.point, normal, (-contact.normal_speed).max(0.0)))
+    // Re-express the directional fields in argument order. `normal`
+    // points `collider1` → `collider2` and `anchor1`/`anchor2` ride on
+    // those bodies; `normal_speed` needs no flip — closing speed is
+    // symmetric (`(v2 − v1)·n` is invariant under swapping both).
+    let flipped = pair.collider1 == c2 && pair.collider2 == c1;
+    Some(ContactDetails {
+        point: contact.point,
+        normal: if flipped {
+            -manifold.normal
+        } else {
+            manifold.normal
+        },
+        severity: (-contact.normal_speed).max(0.0),
+        restitution: manifold.restitution,
+        applied_impulse,
+        anchor1: if flipped {
+            contact.anchor2
+        } else {
+            contact.anchor1
+        },
+        anchor2: if flipped {
+            contact.anchor1
+        } else {
+            contact.anchor2
+        },
+    })
 }
 
 /// Estimated impulse of a contact on a struck entity (kg·m/s):
@@ -175,9 +236,10 @@ pub fn collect_impacts(
         }
         // The deepest contact carries the point, normal and the
         // pre-solver approach speed — mass-independent severity.
-        let Some((point, normal, severity)) = deepest_contact(&collisions, c1, c2) else {
+        let Some(deepest) = deepest_contact(&collisions, c1, c2) else {
             continue;
         };
+        let (point, normal, severity) = (deepest.point, deepest.normal, deepest.severity);
         if severity < policy.min_severity {
             continue;
         }

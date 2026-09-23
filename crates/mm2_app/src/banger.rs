@@ -15,7 +15,12 @@
 //! impulse against the striker's mass and compares it to the authored
 //! `ImpulseLimit2` (provisional rule — the compared quantity is
 //! UNK-22). A qualifying edge flips the prop's `RigidBody` to dynamic
-//! once and applies one impulse plus the definition's spin kick.
+//! once and replays the hit as a two-body transfer: the prop launches
+//! at the mass-correct `(1+e)·v·μ` impulse over its authored mass, and
+//! the striker's share rewrites the wall impulse the solver already
+//! applied against the dormant static prop — a parking meter costs a
+//! car a little speed instead of bouncing it (operator report 4 item
+//! 2). The record's spin kick still applies.
 //! `BangerPool` bounds simultaneously active props at the recovered
 //! ×32, reclaiming oldest-first (reclaim order provisional).
 //!
@@ -247,6 +252,107 @@ struct Activation {
     estimate: f32,
     dir: Vec3,
     point: Vec3,
+    /// The striking body for the momentum transfer — the other contact
+    /// body on a contact edge, the bound owner on a bound strike.
+    striker: Option<Entity>,
+    /// The restitution the transfer uses: the contact manifold's
+    /// combined coefficient (which already folds in the authored
+    /// `Elasticity`) or the authored value on a bound-only strike.
+    restitution: f32,
+    /// The normal impulse the solver already applied against the
+    /// dormant (static) prop this step — the wall response the
+    /// striker correction rewrites. Zero on a pure bound strike.
+    applied_impulse: f32,
+    /// The striker→prop direction the applied impulse acted along —
+    /// the contact normal of the real contact. Equals `dir` on a
+    /// contact edge; on a bound strike with a coincident contact it
+    /// is the *contact's* normal, which can differ from the bound's
+    /// surface-velocity `dir` (a glancing touch must return its
+    /// lateral push, not become forward speed).
+    applied_dir: Vec3,
+    /// World lever from the striker's centre of mass to the contact —
+    /// the arm its share of the transfer twists on. `ZERO` on a pure
+    /// bound strike (no contact point exists to twist through).
+    striker_lever: Vec3,
+}
+
+/// The momentum-conserving split of one committed activation: the
+/// impulse the two bodies exchange and what it becomes on each side.
+/// Computed from the authored prop mass and the striker's computed
+/// mass — no free tuning constants.
+struct Transfer {
+    /// kg·m/s transferred striker → prop along `dir`: `(1+e)·v·μ`
+    /// with `μ` the reduced mass — the impulse the solver would have
+    /// applied had the prop been dynamic during the step.
+    impulse: f32,
+    /// The prop's launch speed (`impulse / prop_mass`).
+    launch: f32,
+    /// The striker's mass, kept for the correction divide.
+    striker_mass: f32,
+}
+
+/// The two-body transfer for one activation, or `None` when the
+/// striker's mass cannot be resolved (a static world sliver, an
+/// unstamped body) — the caller then keeps the pre-transfer launch at
+/// approach speed and skips the striker correction.
+fn resolve_transfer(
+    a: &Activation,
+    prop_mass: f32,
+    masses: &Query<&ComputedMass>,
+) -> Option<Transfer> {
+    let striker = a.striker?;
+    let m_s = masses
+        .get(striker)
+        .ok()
+        .map(|m| m.value())
+        .filter(|m| m.is_finite() && *m > 0.0)?;
+    let m_p = prop_mass.max(0.001);
+    let reduced = m_s * m_p / (m_s + m_p);
+    let impulse = (1.0 + a.restitution.max(0.0)) * a.severity * reduced;
+    Some(Transfer {
+        impulse,
+        launch: impulse / m_p,
+        striker_mass: m_s,
+    })
+}
+
+/// The mutable pieces the striker correction touches — `Without<Banger>`
+/// keeps it disjoint from the prop query (a banger striking another
+/// dormant banger keeps the solver's response unchanged).
+type StruckMut = (
+    &'static mut LinearVelocity,
+    Option<&'static mut AngularVelocity>,
+    Option<&'static ComputedAngularInertia>,
+    Option<&'static Rotation>,
+);
+
+/// Rewrite the striker's share of a committed activation to the
+/// two-body transfer. The dormant prop was static when the solver ran,
+/// so the striker received a wall response (`applied_impulse` along
+/// `applied_dir`); the correction returns that push and charges the
+/// transfer impulse along `dir` instead — on a bound-only strike where
+/// the solver applied nothing the whole share is taken here. The
+/// striker therefore always pays exactly `transfer.impulse` along the
+/// launch direction — light props barely cost it, heavy ones still
+/// resist — while any wall response along a different axis (a glancing
+/// touch) is returned rather than converted into `dir`.
+fn apply_striker_correction(
+    a: &Activation,
+    transfer: Option<&Transfer>,
+    struck: &mut Query<StruckMut, Without<Banger>>,
+) {
+    let (Some(entity), Some(transfer)) = (a.striker, transfer) else {
+        return;
+    };
+    let Ok((mut linvel, angvel, inertia, rotation)) = struck.get_mut(entity) else {
+        return;
+    };
+    let correction = a.applied_dir * a.applied_impulse - a.dir * transfer.impulse;
+    linvel.0 += correction / transfer.striker_mass;
+    if let (Some(mut angvel), Some(cai), Some(rot)) = (angvel, inertia, rotation) {
+        let torque = a.striker_lever.cross(correction);
+        angvel.0 += cai.rotated(rot.0).inverse().mul_vec3(torque);
+    }
 }
 
 /// Claim one active-pool slot for a transition or fragment spawn.
@@ -302,6 +408,7 @@ pub(crate) fn claim_slot(
 #[allow(clippy::too_many_arguments)]
 fn break_banger(
     a: &Activation,
+    launch: f32,
     pieces: &BangerPieces,
     owner: SessionEntity,
     parent_gt: &GlobalTransform,
@@ -343,7 +450,7 @@ fn break_banger(
         },
     });
 
-    let base_vel = a.dir * a.severity;
+    let base_vel = a.dir * launch;
     for piece in pieces.collidable() {
         if !claim_slot(occupied, tick, generation, pool, bangers, writer, commands) {
             debug!(
@@ -358,7 +465,7 @@ fn break_banger(
         let lever = a.point - (parent_pos + parent_rot * mirrored_cg(&piece.def));
         let ang = piece
             .def
-            .angular_kick(lever, a.dir * a.severity * piece.def.mass);
+            .angular_kick(lever, a.dir * launch * piece.def.mass);
         let transform = Transform::from_translation(parent_pos).with_rotation(parent_rot);
         let fragment = commands
             .spawn(banger_bundle(
@@ -423,15 +530,32 @@ fn banger_name(bangers: &Query<BangerMut>, entity: Entity) -> String {
 /// manifold: approach speed is the bound's surface velocity at the
 /// prop's centre, and the "contact point" is the prop's upwind face —
 /// the lever the spin kick needs.
+///
+/// Because this system runs after the solver, a dormant prop has
+/// already answered its contact as an infinite-mass static body — the
+/// wall response operators reported on parking-meter-class props.
+/// The committed activation therefore replays the hit as a two-body
+/// transfer (implementation choice): the striker correction in
+/// [`apply_striker_correction`] swaps the applied wall impulse for the
+/// mass-correct `(1+e)·v·μ` exchange the solver would have produced
+/// with a dynamic prop, and the prop launches at that impulse over
+/// its authored mass. Light props stop being walls without touching
+/// the authored `ImpulseLimit2` gate or adding feel constants.
 // Threads the same query the contact path mutates plus the read-only
 // striker/spatial-query params — the signature stays flat because the
-// decision list and pool accounting below must see one merged set.
+// decision list and pool accounting below must see one merged set. The
+// ParamSet splits bound-scan reads from striker-correction writes;
+// aliasing it doesn't shrink the real arity.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 pub fn activate_bangers(
     mut reader: MessageReader<CollisionStart>,
     collisions: Collisions,
     spatial: SpatialQuery,
-    strikers: Query<StrikerRef, Without<Banger>>,
+    mut strikers: ParamSet<(
+        Query<StrikerRef, Without<Banger>>,
+        Query<StruckMut, Without<Banger>>,
+    )>,
     mut session: ResMut<Session>,
     pool: Res<BangerPool>,
     mut bangers: Query<BangerMut>,
@@ -453,16 +577,18 @@ pub fn activate_bangers(
     // Decide first, mutate second: the decision pass only reads.
     let mut activations: Vec<Activation> = Vec::new();
     for event in reader.read() {
-        for (collider, striker, sign) in [
+        for (collider, striker, sign, striker_side) in [
             (
                 event.collider1,
                 event.body2.unwrap_or(event.collider2),
                 -1.0f32,
+                false,
             ),
             (
                 event.collider2,
                 event.body1.unwrap_or(event.collider1),
                 1.0f32,
+                true,
             ),
         ] {
             let Ok((_, identity, banger, _, _, _, _)) = bangers.get(collider) else {
@@ -471,25 +597,39 @@ pub fn activate_bangers(
             if banger.phase != BangerPhase::Dormant {
                 continue;
             }
-            let Some((point, normal, severity)) =
-                deepest_contact(&collisions, event.collider1, event.collider2)
+            let Some(deepest) = deepest_contact(&collisions, event.collider1, event.collider2)
             else {
                 continue;
             };
-            if severity <= 0.0 {
+            if deepest.severity <= 0.0 {
                 continue;
             }
-            let estimate = impulse_estimate(striker, severity, &masses);
+            let estimate = impulse_estimate(striker, deepest.severity, &masses);
             if !banger.def.activates_on(estimate) {
                 continue;
             }
             activations.push(Activation {
                 entity: collider,
                 object: identity.0,
-                severity,
+                severity: deepest.severity,
                 estimate,
-                dir: normal * sign,
-                point,
+                dir: deepest.normal * sign,
+                point: deepest.point,
+                striker: Some(striker),
+                restitution: deepest.restitution,
+                applied_impulse: deepest.applied_impulse,
+                // The wall impulse acted along this same normal — the
+                // launch direction and the applied direction coincide
+                // on a real contact edge.
+                applied_dir: deepest.normal * sign,
+                // `striker_side` records whether the striker is `c1`:
+                // the banger is collider1 on the first pass, collider2
+                // on the second.
+                striker_lever: if striker_side {
+                    deepest.anchor1
+                } else {
+                    deepest.anchor2
+                },
             });
         }
     }
@@ -503,7 +643,7 @@ pub fn activate_bangers(
     // that a corner case (a cone's 8 500 vs a bus's ~5 000 kg striker
     // fires at walking pace).
     let mut claimed: HashSet<Entity> = activations.iter().map(|a| a.entity).collect();
-    for (entity, bound, position, rotation, linvel, angvel) in &strikers {
+    for (entity, bound, position, rotation, linvel, angvel) in &strikers.p0() {
         if linvel.0 == Vec3::ZERO && angvel.0 == Vec3::ZERO {
             continue;
         }
@@ -533,6 +673,18 @@ pub fn activate_bangers(
             // `Size` is the bound's full extents (verified): half its
             // largest axis reaches from the bound's centre to a face.
             let reach = banger.def.size.iter().fold(0.0f32, |m, h| m.max(h.abs())) * 0.5;
+            // A bound strike can coincide with a real world-collider
+            // contact the contact pass scored below the authored limit:
+            // fold the solver's actual response into the transfer so
+            // the striker pays one impulse, not the wall plus a share.
+            // `deepest_contact` answers in argument order, so `normal`
+            // points striker→prop and `anchor1` is the striker's lever
+            // whichever side the pair stores.
+            let (restitution, applied_impulse, applied_dir, striker_lever) =
+                match deepest_contact(&collisions, entity, hit) {
+                    Some(d) => (d.restitution, d.applied_impulse, d.normal, d.anchor1),
+                    None => (banger.def.elasticity, 0.0, dir, Vec3::ZERO),
+                };
             activations.push(Activation {
                 entity: hit,
                 object: identity.0,
@@ -540,6 +692,11 @@ pub fn activate_bangers(
                 estimate,
                 dir,
                 point: centre - dir * reach,
+                striker: Some(entity),
+                restitution,
+                applied_impulse,
+                applied_dir,
+                striker_lever,
             });
         }
     }
@@ -558,17 +715,23 @@ pub fn activate_bangers(
         // `Dormant` re-check still holds: a reclaim cannot touch a
         // dormant prop, but a `CollisionStart` pair can name the same
         // entity twice.
-        if bangers
-            .get(a.entity)
-            .map(|(_, _, b, _, _, _, _)| b.phase != BangerPhase::Dormant)
-            .unwrap_or(true)
-        {
+        let Ok((_, _, banger, _, _, _, _)) = bangers.get(a.entity) else {
+            continue;
+        };
+        if banger.phase != BangerPhase::Dormant {
             continue;
         }
+        // The two-body transfer this activation commits to — `None`
+        // when the striker's mass cannot be resolved, which keeps the
+        // pre-transfer launch and leaves the striker alone.
+        let transfer = resolve_transfer(&a, banger.def.mass, &masses);
+        let launch = transfer.as_ref().map(|t| t.launch).unwrap_or(a.severity);
         match pieces.get(a.entity) {
             Ok((pieces, owner, gt)) if pieces.collidable().next().is_some() => {
+                apply_striker_correction(&a, transfer.as_ref(), &mut strikers.p1());
                 break_banger(
                     &a,
+                    launch,
                     pieces,
                     *owner,
                     gt,
@@ -607,13 +770,20 @@ pub fn activate_bangers(
             occupied -= 1;
             continue;
         }
-        // One impulse, one transition: the body goes dynamic and
-        // leaves at the striker's approach speed (bounded by the
-        // impact, not scaled by it), plus the record's spin kick —
-        // the lever runs from the body's centre of mass (the authored
-        // `CG`, the bound's centre), not the bound-base origin.
-        let impulse = a.dir * a.severity * banger.def.mass;
-        linvel.0 += a.dir * a.severity;
+        // One transfer, one transition: the striker's share lands first
+        // (rewriting the wall response this step's solver gave it), then
+        // the body goes dynamic and leaves at the transfer's launch
+        // speed — the mass-correct momentum, not a flat approach-speed
+        // kick — plus the record's spin kick. The lever runs from the
+        // body's centre of mass (the authored `CG`, the bound's
+        // centre), not the bound-base origin.
+        apply_striker_correction(&a, transfer.as_ref(), &mut strikers.p1());
+        let impulse = a.dir
+            * transfer
+                .as_ref()
+                .map(|t| t.impulse)
+                .unwrap_or(a.severity * banger.def.mass);
+        linvel.0 += a.dir * launch;
         angvel.0 += banger.def.angular_kick(
             a.point - (position.0 + rotation.0 * mirrored_cg(&banger.def)),
             impulse,

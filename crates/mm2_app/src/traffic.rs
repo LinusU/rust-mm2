@@ -1046,11 +1046,11 @@ pub fn knock_ambient(
             if car.drive != AmbientDrive::Lane {
                 continue;
             }
-            let Some((_, normal, severity)) =
-                deepest_contact(&collisions, event.collider1, event.collider2)
+            let Some(deepest) = deepest_contact(&collisions, event.collider1, event.collider2)
             else {
                 continue;
             };
+            let (normal, severity) = (deepest.normal, deepest.severity);
             if severity <= 0.0 {
                 continue;
             }
