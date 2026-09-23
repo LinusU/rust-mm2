@@ -32,4 +32,5 @@ pub mod session;
 pub mod smoke;
 pub mod spark_fx;
 pub mod stuck;
+pub mod texel_fx;
 pub mod traffic;

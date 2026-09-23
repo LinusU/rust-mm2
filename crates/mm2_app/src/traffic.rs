@@ -770,6 +770,8 @@ fn spawn_ambient_car(
         images,
         materials,
         entity,
+        // Ambient cars carry no `vehcardamage` — no texel rig.
+        None,
     );
     if !missing.is_empty() {
         warn!(class = %spec.id, "ambient: missing textures: {}", missing.join(", "));

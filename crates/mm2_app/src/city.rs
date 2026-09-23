@@ -2190,6 +2190,88 @@ impl<'a> MaterialCache<'a> {
         }
     }
 
+    /// The `_dmg`-pair binding for a vehicle shader (F05-B.9 — the
+    /// `CleanShaders`/`DamageTextures`/`CurrentShaders` slot state the
+    /// recovered `fxTexelDamage::Init` builds): `Some` when the
+    /// shader's texture pairs a damage variant — the authored
+    /// `<stem>_dmg` leg (clean stem resolved or not — a missing clean
+    /// keeps the `_dmg` texture, retail's failed-lookup path) or a
+    /// clean name whose `<stem>_dmg` resolves. `base` is the material
+    /// [`shader_material`](Self::shader_material) already produced; its
+    /// texture is cloned into this vehicle's writable `current` and a
+    /// cloned material binds it.
+    ///
+    /// `None` leaves `base` bound: no paired texture, a `base` without
+    /// a texture (fallback/missing), or a pixel format the splat blit
+    /// can't read. An absent `<stem>_dmg` is not a missing texture —
+    /// most shaders pair nothing — so it is not reported; an authored
+    /// `_dmg` name that fails to read warns.
+    pub fn texel_binding(
+        &mut self,
+        s: &mm2_formats::pkg::PkgShader,
+        base: &Handle<StandardMaterial>,
+    ) -> Option<crate::texel_fx::TexelSlot> {
+        let lower = s.texture.to_ascii_lowercase();
+        if lower.is_empty() {
+            return None;
+        }
+        let damage_stem = match lower.strip_suffix("_dmg") {
+            // The authored `_dmg` leg: the damage texture is the
+            // authored name itself.
+            Some(_) => lower.clone(),
+            // The clean leg pairs `<stem>_dmg` when it resolves —
+            // retail `Init` appends `_dmg` on this leg and simply
+            // records no damage texture on a miss.
+            None => {
+                let stem = format!("{lower}_dmg");
+                self.vfs
+                    .resolve_preferred(&format!("texture/{stem}"), TEXTURE_EXTS)
+                    .is_some()
+                    .then_some(stem)?
+            }
+        };
+        let clean_tex = self.materials.get(base)?.base_color_texture.clone()?;
+        let clean_img = self.images.get(&clean_tex)?.clone();
+        // The blit copies 4-byte pixels.
+        if !matches!(
+            clean_img.texture_descriptor.format,
+            TextureFormat::Rgba8UnormSrgb
+                | TextureFormat::Rgba8Unorm
+                | TextureFormat::Bgra8UnormSrgb
+                | TextureFormat::Bgra8Unorm
+        ) {
+            warn!(texture = %lower, "texel damage needs a 4bpp texture — off for this slot");
+            return None;
+        }
+        // The orphan `_dmg` leg binds the damage texture itself as
+        // clean — `gfxGetTexture` caches by name in retail, so the
+        // same handle serves both sides rather than double-loading.
+        let clean_stem = self.clean_texture_stem(&s.texture).to_ascii_lowercase();
+        let damage = if damage_stem == clean_stem {
+            clean_tex.clone()
+        } else {
+            let Some((damage_img, _)) = load_image(self.vfs, &damage_stem) else {
+                warn!(texture = %damage_stem, "damage texture failed to load — texel damage off for this slot");
+                return None;
+            };
+            if damage_img.texture_descriptor.format != clean_img.texture_descriptor.format {
+                warn!(texture = %damage_stem, "damage texture format mismatch — texel damage off for this slot");
+                return None;
+            }
+            self.images.add(damage_img)
+        };
+        let current = self.images.add(clean_img);
+        let mut material = self.materials.get(base)?.clone();
+        material.base_color_texture = Some(current.clone());
+        let material = self.materials.add(material);
+        Some(crate::texel_fx::TexelSlot {
+            material,
+            clean: clean_tex,
+            damage,
+            current,
+        })
+    }
+
     /// Material for a decal texture stem (F03-B.4): same VFS
     /// resolution and extension order as [`get`](Self::get), but TEX
     /// decodes honor palette alpha on every palette format (decal
@@ -3850,6 +3932,101 @@ mod tests {
         assert_eq!(gone, mats.fallback());
         assert!(mats.missing_textures().contains("gone_dmg"));
         assert!(!mats.missing_textures().contains("car_paint_dmg"));
+    }
+
+    /// F05-B.9 — the slot binding `fxTexelDamage::Init` builds: a
+    /// `_dmg`-paired shader gets a per-vehicle material whose texture is
+    /// a writable clone of the clean image, plus the damage-texture
+    /// handle the splats read. Unpaired or textureless shaders bind
+    /// `None` — the shared material stays.
+    #[test]
+    fn texel_binding_pairs_dmg_variants_into_a_per_vehicle_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("texture")).unwrap();
+        for name in ["car_paint", "car_paint_dmg", "orphan_dmg", "solo"] {
+            std::fs::write(
+                root.join(format!("texture/{name}.png")),
+                include_bytes!("../../../assets/texture/dev_road.png"),
+            )
+            .unwrap();
+        }
+        let mut vfs = Vfs::new();
+        vfs.mount_dir(root, 0).unwrap();
+        let mut images: Assets<Image> = Assets::default();
+        let mut materials: Assets<StandardMaterial> = Assets::default();
+        let mut mats = MaterialCache::new(&vfs, &mut images, &mut materials);
+
+        let shader = |texture: &str| mm2_formats::pkg::PkgShader {
+            texture: texture.to_string(),
+            diffuse: [1.0; 4],
+            ambient: [1.0; 4],
+            specular: None,
+            emissive: [0.0; 4],
+            shininess: 0.0,
+        };
+
+        // The authored `_dmg` leg: base binds the clean stem; the slot
+        // clones it into `current` and keeps `car_paint_dmg` as `damage`.
+        // `mats` borrows the stores, so handles are collected while it
+        // lives and pixel assertions run after it drops.
+        let (slot, a, b) = {
+            let base = mats.shader_material(&shader("car_paint_dmg"));
+            let clean_tex = mats
+                .materials
+                .get(&base)
+                .unwrap()
+                .base_color_texture
+                .clone()
+                .unwrap();
+            let slot = mats
+                .texel_binding(&shader("car_paint_dmg"), &base)
+                .expect("a _dmg-paired shader produces a slot");
+            assert_eq!(slot.clean, clean_tex, "reset source is the clean image");
+            assert_ne!(slot.current, slot.clean, "current is a writable clone");
+            assert_ne!(slot.damage, slot.clean);
+            assert_ne!(slot.material, base, "the slot material is per-vehicle");
+            assert_eq!(
+                mats.materials
+                    .get(&slot.material)
+                    .unwrap()
+                    .base_color_texture,
+                Some(slot.current.clone()),
+            );
+
+            // The clean leg: `solo_dmg` is absent → no slot.
+            let solo = mats.shader_material(&shader("solo"));
+            assert!(mats.texel_binding(&shader("solo"), &solo).is_none());
+
+            // The orphan leg: `orphan_dmg` has no clean stem — the
+            // authored texture is both clean and damage (retail's
+            // failed-lookup path).
+            let orphan = mats.shader_material(&shader("orphan_dmg"));
+            let orphan_slot = mats
+                .texel_binding(&shader("orphan_dmg"), &orphan)
+                .expect("an orphan _dmg still produces a slot");
+            assert_eq!(orphan_slot.clean, orphan_slot.damage);
+
+            // A missing-texture shader (fallback base) pairs nothing.
+            let gone = mats.shader_material(&shader("gone_dmg"));
+            assert!(mats.texel_binding(&shader("gone_dmg"), &gone).is_none());
+
+            // Two vehicles damage independently — each call clones.
+            let a = mats
+                .texel_binding(&shader("car_paint_dmg"), &base)
+                .expect("slot");
+            let b = mats
+                .texel_binding(&shader("car_paint_dmg"), &base)
+                .expect("slot");
+            (slot, a, b)
+        };
+        assert_ne!(a.current, b.current);
+        assert_ne!(a.material, b.material);
+        // The clone starts bit-identical to the clean texture.
+        assert_eq!(
+            images.get(&slot.current).unwrap().data,
+            images.get(&slot.clean).unwrap().data,
+        );
     }
 
     #[test]

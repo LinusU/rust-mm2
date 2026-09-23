@@ -213,6 +213,7 @@ pub fn resolve_disabled(
     mut breaks: Query<&mut VehicleBreaks>,
     mut break_visuals: Query<(&BreakPartVisual, &mut Visibility, &ChildOf)>,
     mut break_report: ResMut<BreakReport>,
+    mut texel: crate::texel_fx::TexelRepair,
     mut commands: Commands,
 ) {
     if !session.is_playing() || !session.authority_role().is_authority() {
@@ -294,6 +295,10 @@ pub fn resolve_disabled(
                                 &mut commands,
                             ) as u64;
                         }
+                        // F05-B.9: repair also clears the skin —
+                        // `fxTexelDamage::Reset` re-blits the clean
+                        // texture over the car's clone.
+                        texel.reset(entity);
                         report.recovered += 1;
                     }
                     DisabledOutcome::PenaltyReset => {
@@ -322,6 +327,7 @@ pub fn resolve_disabled(
                                 &mut commands,
                             ) as u64;
                         }
+                        texel.reset(entity);
                         report.recovered += 1;
                     }
                 }
@@ -347,6 +353,7 @@ pub fn resolve_disabled(
                         &mut commands,
                     ) as u64;
                 }
+                texel.reset(entity);
                 report.recovered += 1;
             }
             // Remote participants resolve under their own authority —

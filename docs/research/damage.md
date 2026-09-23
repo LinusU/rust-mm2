@@ -530,9 +530,62 @@ per-vehicle renderer and the impact feed.
   record's `spk=<b>b/<e>e/<x>x` field, emitted only on activity so
   impact-free runs stay bit-identical.
 
-`TextelDamageRadius`/`ImpactsTable` texel damage remains
-unconsumed — its consumer is `fxTexelDamage`, a separate system
-from `asLineSparks`.
+`TextelDamageRadius`/`ImpactsTable` texel damage is consumed by
+`fxTexelDamage` — implemented next (F05-B.9, below).
+
+## Texel damage (F05-B.9, recovered mechanics + designed splat — DSN-32)
+
+MM2Hook recovers `fxTexelDamage` as a `vehCarModel` member fed by
+`vehCarDamage`'s `ImpactsTable`/`TextelDamageRadius`. `Init` (the
+F02-C.4 pairing — `MaterialCache::shader_material`/`texel_binding`)
+stashes the `_dmg` texture per shader slot (`DamageTextures[]`) and
+clones the clean texture as the car's writable render texture
+(`CurrentShaders`). This slice implements the two runtime calls:
+
+- **`ApplyDamage(position, maxDist)` (recovered).** The body's
+  damage-capable triangles are walked; every triangle with a vertex
+  within `maxDist` — the authored `TextelDamageRadius`, car space —
+  of the impact point earns one splat at a random barycentric
+  point's UV (three `frand()` draws normalized by their sum). The
+  recovered loop skips slots with no `DamageTextures[]` entry — the
+  builder folds that in by only recording tris on paired slots.
+  Implemented as `mm2_game::texel::TexelDamageMesh::splats`
+  (deterministic per-vehicle `NavRng` seeded by object id — same
+  domain as smoke/sparks, F05 req 6) feeding
+  `mm2_app::texel_fx::apply_texel_damage`, which runs on the same
+  deduplicated `ImpactEvent` stream as `apply_impact_damage` with
+  the same `is_playing`/authority/`Remote` gates and the impact's
+  world point mapped into car space through the vehicle transform.
+- **Splat shape (designed — DSN-32).** `ApplyBirdPoopDamage` is an
+  unrecovered binary call; mm2hook's debug reimplementation stamps a
+  48 px radius disc with a `1 − d/r` write probability lifted by a
+  0.1 edge floor. `texel::splat_blit` follows it — a
+  probability-dithered copy of the `_dmg` texture onto the
+  per-vehicle clone at the picked UV, repeated down the shared mip
+  chain (radius halving per level) and clipped to each image's
+  bounds. UNK-13 stands for the original splat and the
+  `ImpactsTable`'s fill rules.
+- **`Reset` (recovered).** Repair re-blits the clean texture over
+  the clone — `resolve_disabled`'s three `damage.reset()` sites
+  (Cruise free reset, Circuit penalty reset, AI reset) call
+  `TexelRepair::reset`, so the skin clears with the mechanical
+  state. A plain reset/stuck/recovery is not a repair and leaves
+  the skin stamped — same rule as detached parts.
+- **Scope.** The rig builds only for vehicles carrying an authored
+  `vehcardamage` whose body shader slots pair a `_dmg` texture —
+  player and AI opponents; ambient traffic and trailers spawn
+  `None` (their damage path is a different class in retail too).
+  Body parts only contribute triangles and bindings — wheels,
+  breakaways, lights and glows keep their shared materials.
+- **Evidence.** `TexelDamageReport` counts impacts applied, splats
+  written and resets — the headless record's
+  `txl=<impacts>i/<splats>s/<resets>r` field, emitted only on
+  activity so impact-free runs stay bit-identical. Retail sf
+  circuit:0 `--bot`: `txl=401i/64364s/3r` against
+  `dmg=237a/4d/3r` — resets track repairs exactly, and every player
+  impact (applied or damage-threshold-rejected) stamped. Rendered
+  captures (local, not committed): a nose-first landing stamps the
+  hood/windshield/lamps while the same car's rear stays clean.
 
 ## Open questions
 
@@ -549,13 +602,14 @@ from `asLineSparks`.
   are unrecovered.
 - `TextelDamageRadius`'s consumer — mm2hook binds it to
   `fxTexelDamage::ApplyDamage(position, maxDist)` driven by the
-  recovered `ImpactsTable[12]` of impact positions. `fxTexelDamage::Init`
-  is recovered: the `_dmg`↔clean texture pairing (see
-  `docs/research/pkg.md`, DMG-9) — the undamaged binding is implemented —
-  while the impact-time blit mechanics (`DamageTris` barycentric texel
-  lookup, radial probability blit onto the cloned texture, `Reset`'s
-  clean-texture restore) and the per-impact table's fill rules stay
-  unrecovered. The original `asLineSparks` burst semantics
+  recovered `ImpactsTable[12]` of impact positions — is now
+  implemented (F05-B.9): the recovered radius test, per-triangle
+  barycentric UV pick and `Reset` clean-texture restore are in
+  `mm2_game::texel`/`mm2_app::texel_fx`; the splat shape
+  (`ApplyBirdPoopDamage`) and the table's fill rules stay
+  unrecovered — the radial blit is designed (DSN-32, UNK-13). The
+  `_dmg`↔clean pairing itself is `docs/research/pkg.md`, DMG-9. The
+  original `asLineSparks` burst semantics
   (count/velocity/cadence/texture binding) likewise — a designed
   radial-rebound policy is implemented (DSN-26).
 - `MirrorPivot` semantics — the implemented mirror-about-x reading

@@ -28,6 +28,7 @@ pub mod session;
 pub mod stuck;
 pub mod surface;
 pub mod telemetry;
+pub mod texel;
 pub mod traffic;
 
 pub use banger::{
@@ -94,6 +95,7 @@ pub use session::{
 pub use stuck::{StuckEvent, StuckSpec, StuckVerdict, VehicleStuck};
 pub use surface::{SurfaceMaterial, SurfaceState};
 pub use telemetry::{DamageSignals, VehicleTelemetry, WheelTelemetry};
+pub use texel::{TexelDamageMesh, TexelDamagePolicy, TexelDamageTri, TexelSplat};
 pub use traffic::{
     AmbientPlan, AmbientRoster, AmbientSpec, Crossing, FollowPolicy, JunctionGate, JunctionPolicy,
     Junctions, KnockPolicy, LaneAdvance, LaneCursor, SignalAspect, SpawnDirective, SpawnDraw,

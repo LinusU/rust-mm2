@@ -72,6 +72,7 @@ fn test_app(config: SessionConfig, frame_secs: f64) -> App {
         .init_resource::<mm2_app::recovery::RecoveryReport>()
         .init_resource::<mm2_app::damage_fx::SmokeFxReport>()
         .init_resource::<mm2_app::spark_fx::SparkFxReport>()
+        .init_resource::<mm2_app::texel_fx::TexelDamageReport>()
         .init_resource::<SessionControl>()
         .init_resource::<SessionNote>()
         .init_resource::<PauseMenu>()

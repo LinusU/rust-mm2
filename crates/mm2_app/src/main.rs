@@ -20,7 +20,7 @@ use mm2_app::session::{ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, 
 use mm2_app::{
     banger, breakaway, camera, car_visual, city, contracts, damage, damage_fx, environment, input,
     menu, nav_overlay, opponents, pause, profile, progression, race, recovery, results, scripted,
-    session, smoke, spark_fx, stuck, traffic,
+    session, smoke, spark_fx, stuck, texel_fx, traffic,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
@@ -867,6 +867,7 @@ fn main() {
     .init_resource::<recovery::RecoveryReport>()
     .init_resource::<damage_fx::SmokeFxReport>()
     .init_resource::<spark_fx::SparkFxReport>()
+    .init_resource::<texel_fx::TexelDamageReport>()
     .init_resource::<mm2_game::ResultLedger>()
     .init_resource::<mm2_game::BangerPool>()
     .init_resource::<SessionControl>()
@@ -882,6 +883,10 @@ fn main() {
             // stream (apply → outcome) — independent consumers of the
             // solver's edge stream like the bangers below.
             damage::apply_impact_damage,
+            // F05-B.9: the same deduplicated stream feeds each rig's
+            // `ImpactsTable`→`ApplyDamage` — the skin splats the tick
+            // the hit lands — the headless record's `txl=` field.
+            texel_fx::apply_texel_damage,
             // F05-B.2: `vehstuck` detection arms off the same deduped
             // impact stream damage reads — before `resolve_disabled`
             // so a wreck the outcome is about to repair/reset never

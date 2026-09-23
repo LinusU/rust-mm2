@@ -201,6 +201,7 @@ pub fn headless_smoke(
         .init_resource::<crate::recovery::RecoveryReport>()
         .init_resource::<crate::damage_fx::SmokeFxReport>()
         .init_resource::<crate::spark_fx::SparkFxReport>()
+        .init_resource::<crate::texel_fx::TexelDamageReport>()
         .init_resource::<mm2_game::ResultLedger>()
         .init_resource::<mm2_game::BangerPool>()
         .init_resource::<session::SessionControl>()
@@ -228,6 +229,9 @@ pub fn headless_smoke(
                 // F05-B.1: impact→damage apply + disabled outcome — the
                 // headless record's `dmg=` field reads the report.
                 damage::apply_impact_damage,
+                // F05-B.9: texel splats off the same stream — the
+                // headless record's `txl=` field reads the report.
+                crate::texel_fx::apply_texel_damage,
                 // F05-B.2: `vehstuck` detection + in-place recovery —
                 // the headless record's `vsk=` field reads the report.
                 crate::stuck::track_stuck,
@@ -711,6 +715,14 @@ pub fn headless_smoke(
         .filter(|r| r.bursts + r.emitted + r.expired > 0)
         .map(|r| format!(" spk={}b/{}e/{}x", r.bursts, r.emitted, r.expired))
         .unwrap_or_default();
+    // F05-B.9 texel evidence: splatting impacts/splat stamps/repairs.
+    // Same presence rule — an impact-free or unpaired-texture run
+    // stays bit-identical.
+    let txl_detail = world_ecs
+        .get_resource::<crate::texel_fx::TexelDamageReport>()
+        .filter(|r| r.impacts + r.splats + r.resets > 0)
+        .map(|r| format!(" txl={}i/{}s/{}r", r.impacts, r.splats, r.resets))
+        .unwrap_or_default();
     // The dev `--traction` modifier is recorded when set so a wetness
     // run is self-describing; unmodified runs stay bit-identical.
     let traction_detail = config
@@ -756,7 +768,7 @@ pub fn headless_smoke(
     };
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks}{rs_detail} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{nav_detail}{env_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{traction_detail}{profile_detail}{extra}",
+            "updates={frames} ticks={ticks}{rs_detail} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{nav_detail}{env_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{txl_detail}{traction_detail}{profile_detail}{extra}",
             driver.as_str(),
             session.phase().name(),
         )

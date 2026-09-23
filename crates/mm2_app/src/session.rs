@@ -199,6 +199,7 @@ pub fn drive_session(
     mut recovery_report: ResMut<crate::recovery::RecoveryReport>,
     mut smoke_fx_report: ResMut<crate::damage_fx::SmokeFxReport>,
     mut spark_fx_report: ResMut<crate::spark_fx::SparkFxReport>,
+    mut texel_report: ResMut<crate::texel_fx::TexelDamageReport>,
     mut spawn: ResMut<SpawnPoint>,
     menu: Option<Res<crate::menu::MenuShell>>,
     roots: Query<Entity, (With<SessionEntity>, Without<ChildOf>)>,
@@ -219,6 +220,7 @@ pub fn drive_session(
             recovery_report.reset();
             smoke_fx_report.reset();
             spark_fx_report.reset();
+            texel_report.reset();
             spawn.trailers.clear();
             // Session-scoped resources die with the session: a race's
             // countdown/clock/progress, its reward/report view and the
@@ -816,6 +818,14 @@ pub fn load_session_world(
                 &mut assets.images,
                 &mut assets.materials,
                 vehicle,
+                // F05-B.9: the authored record also gates the texel
+                // rig — same seed domain as smoke/sparks.
+                def.damage.as_ref().map(|d| {
+                    (
+                        d,
+                        (vehicle_object.generation << 32) | vehicle_object.slot as u64,
+                    )
+                }),
             );
             if !missing.is_empty() {
                 warn!(car = %def.id, "missing textures: {}", missing.join(", "));

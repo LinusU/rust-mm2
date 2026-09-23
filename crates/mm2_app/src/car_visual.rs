@@ -124,7 +124,9 @@ fn group_material(
 }
 
 /// Spawn one mesh entity per `MeshGroup` of the part's best LOD under
-/// `parent`, baking `recenter` into the geometry.
+/// `parent`, baking `recenter` into the geometry. `texel` is the
+/// accumulating damage rig — passed for `Body` parts only, matching
+/// the recovered `fxTexelDamage::Init` binding over the high-LOD body.
 // Bevy spawn helpers thread `Commands` plus the several `Assets<T>`
 // stores the meshes, images and materials live in; bundling them behind
 // a context struct would only move the same borrows one level down.
@@ -138,8 +140,14 @@ fn spawn_groups(
     mats: &mut MaterialCache<'_>,
     meshes: &mut Assets<Mesh>,
     glow: bool,
+    mut texel: Option<&mut crate::texel_fx::TexelDamageBuilder>,
 ) {
     let recenter = part.recenter.map(Vec3::from);
+    // The transform a raw vertex rides to reach car space: the group
+    // bakes `−recenter` into its positions and the node sits at
+    // `attach` — the offset `TexelDamageTri` positions carry.
+    let car_offset =
+        part.origin.map(Vec3::from).unwrap_or(Vec3::ZERO) - recenter.unwrap_or(Vec3::ZERO);
     let Some(groups) = part.best_nonempty_lod().or_else(|| part.best_lod()) else {
         return;
     };
@@ -149,6 +157,10 @@ fn spawn_groups(
         }
         let mesh = meshes.add(group_mesh(g, recenter));
         let mat = group_material(model, paint, g.shader_offset, mats, glow);
+        let mat = match texel.as_deref_mut() {
+            Some(builder) => builder.bind_group(mats, model, paint, g, car_offset, mat),
+            None => mat,
+        };
         commands
             .entity(parent)
             .with_child((Mesh3d(mesh), MeshMaterial3d(mat)));
@@ -157,6 +169,13 @@ fn spawn_groups(
 
 /// Spawn all renderable parts of `model` under `root` (the physics body).
 /// Returns texture stems that failed to resolve.
+///
+/// `texel_damage` carries the authored `vehcardamage` record and the
+/// spawn's deterministic seed: with it, `Body` parts bound to
+/// `_dmg`-paired shader slots render through a per-vehicle cloned
+/// texture and `root` gains a [`crate::texel_fx::TexelDamageRig`]
+/// (F05-B.9). `None` — ambient traffic, trailers — spawns the shared
+/// bindings only.
 // Bevy spawn helpers thread `Commands` plus the several `Assets<T>`
 // stores the meshes, images and materials live in; bundling them behind
 // a context struct would only move the same borrows one level down.
@@ -170,8 +189,10 @@ pub fn spawn_vehicle_model(
     images: &mut Assets<Image>,
     materials: &mut Assets<StandardMaterial>,
     root: Entity,
+    texel_damage: Option<(&mm2_formats::veh::VehCarDamage, u64)>,
 ) -> Vec<String> {
     let mut mats = MaterialCache::new(vfs, images, materials);
+    let mut texel = texel_damage.map(|(d, seed)| crate::texel_fx::TexelDamageBuilder::new(d, seed));
 
     // Physics wheel index within this model: ordinal among `simulated`
     // wheels of the same class, matching the order `assemble` consumed
@@ -245,7 +266,9 @@ pub fn spawn_vehicle_model(
             .spawn((WheelSpin, Transform::IDENTITY, Visibility::Visible))
             .id();
         commands.entity(mount).add_child(spin);
-        spawn_groups(commands, spin, model, paint, part, &mut mats, meshes, false);
+        spawn_groups(
+            commands, spin, model, paint, part, &mut mats, meshes, false, None,
+        );
         mounts[pi] = Some(mount);
     }
 
@@ -279,14 +302,18 @@ pub fn spawn_vehicle_model(
                             ))
                             .id();
                         commands.entity(mount).add_child(node);
-                        spawn_groups(commands, node, model, paint, part, &mut mats, meshes, false);
+                        spawn_groups(
+                            commands, node, model, paint, part, &mut mats, meshes, false, None,
+                        );
                     }
                     None => {
                         let node = commands
                             .spawn((Transform::from_translation(attach), Visibility::Visible))
                             .id();
                         commands.entity(root).add_child(node);
-                        spawn_groups(commands, node, model, paint, part, &mut mats, meshes, false);
+                        spawn_groups(
+                            commands, node, model, paint, part, &mut mats, meshes, false, None,
+                        );
                     }
                 }
             }
@@ -300,7 +327,9 @@ pub fn spawn_vehicle_model(
                 commands
                     .entity(node)
                     .insert(crate::breakaway::BreakPartVisual::of(part, local));
-                spawn_groups(commands, node, model, paint, part, &mut mats, meshes, false);
+                spawn_groups(
+                    commands, node, model, paint, part, &mut mats, meshes, false, None,
+                );
             }
             role => {
                 let glow = match role {
@@ -331,9 +360,21 @@ pub fn spawn_vehicle_model(
                     &mut mats,
                     meshes,
                     glow.is_some(),
+                    // `fxTexelDamage` binds the high-LOD body only —
+                    // lights/glows and other parts keep shared bindings.
+                    matches!(role, PartRole::Body)
+                        .then(|| texel.as_mut())
+                        .flatten(),
                 );
             }
         }
+    }
+
+    // The rig lands only when at least one body slot paired a `_dmg`
+    // texture — the same authored-presence policy as the other damage
+    // components, one level down.
+    if let Some(rig) = texel.and_then(|b| b.finish()) {
+        commands.entity(root).insert(rig);
     }
 
     mats.missing_textures().iter().cloned().collect()
@@ -397,6 +438,8 @@ pub fn spawn_trailer(
         images,
         materials,
         entity,
+        // Trailers carry no `vehcardamage` — no texel rig.
+        None,
     );
     (entity, missing)
 }

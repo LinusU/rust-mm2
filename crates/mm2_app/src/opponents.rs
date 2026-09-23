@@ -700,7 +700,19 @@ pub fn spawn_opponents(
                 yaw,
             ));
         let missing = car_visual::spawn_vehicle_model(
-            commands, vfs, &def.model, 0, meshes, images, materials, vehicle,
+            commands,
+            vfs,
+            &def.model,
+            0,
+            meshes,
+            images,
+            materials,
+            vehicle,
+            // F05-B.9: the authored record gates the texel rig —
+            // same seed domain as the opponent's smoke/sparks.
+            def.damage
+                .as_ref()
+                .map(|d| (d, (object.generation << 32) | object.slot as u64)),
         );
         if !missing.is_empty() {
             warn!(car = %def.id, "opponent missing textures: {}", missing.join(", "));

@@ -42,14 +42,18 @@ stem — the undamaged vehicle binds the clean stem when it resolves, and the
 failed clean lookup keeps the `_dmg` name. Damage-region body sections are
 *authored* bound to `_dmg` shaders: `vpbug` BODY_H sections 4–6 are the
 car's whole right half (`x>0`) bound to `vpbugyellow_{sd,ft,bk}_dmg`, and 22
-of 25 parseable retail `vp*.pkg` ship `_dmg`-bound BODY sections (vpbus the
-largest at 12 sections/6 slots; vpcop, vpmoonrover, vpmustang99 none). The
+of 27 base retail `vp*.pkg` (excluding `_dash`/`_trailer` variants) ship
+`_dmg`-bound BODY sections (vpbus the largest at 12 sections/6 slots;
+vpcop, vpdb731, vpmoonrover, vpmustang99, vpvw_dune none). The
 pairing is symmetric — a clean `<stem>` shader pairs with `<stem>_dmg` as
 its damage texture when that file exists — so one `_dmg` file serves both
-halves of a symmetric body. The `ApplyDamage` blit mechanics (radius =
-`vehCarDamage`'s `TextelDamageRadius`, DMG-5) are unrecovered; only the
-clean-state binding is implemented (`MaterialCache::shader_material` —
-vehicle models only; prop PKGs bind names verbatim).
+halves of a symmetric body. `ApplyDamage`'s radius/triangle/barycentric
+mechanics (radius = `vehCarDamage`'s `TextelDamageRadius`, DMG-5) are
+recovered and implemented (`mm2_game::texel` + `mm2_app::texel_fx`,
+F05-B.9); the splat shape itself (`ApplyBirdPoopDamage`, a binary call)
+stays unrecovered — the implemented radial blit is designed (DSN-32).
+The clean-state binding is `MaterialCache::shader_material` —
+vehicle models only; prop PKGs bind names verbatim.
 
 ## Confidence
 
