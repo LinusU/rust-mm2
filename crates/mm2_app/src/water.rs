@@ -33,7 +33,9 @@
 //!   still applies vertically.
 //!
 //! A missing or unparseable `.water`, a non-finite level, or refs that
-//! resolve to no rooms simply yield no resource — the F05-B.5
+//! resolve to no rooms simply yield no resource — `load_city` drops an
+//! all-unresolvable record like a missing one, so a present
+//! `CityWater` always lists at least one deadly room. The F05-B.5
 //! surface-`drag` classification still covers the ordinary water
 //! materials, so the failure direction is "no authored escalation",
 //! never a fabricated kill zone. The resource is session-scoped like

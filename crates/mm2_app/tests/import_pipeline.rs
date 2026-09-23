@@ -1020,6 +1020,37 @@ fn vfs_to_city_loads_without_a_water_record() {
     assert!(load_test_city(root).water.is_none(), "non-finite level");
 }
 
+/// A record whose refs all fail to resolve binds nothing — the
+/// documented failure policy treats it like a missing record rather
+/// than inserting a `CityWater` with zero deadly rooms.
+#[test]
+fn vfs_to_city_rejects_a_water_record_with_no_resolvable_refs() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("city")).unwrap();
+    std::fs::create_dir_all(root.join("texture")).unwrap();
+    std::fs::write(root.join("city/test.psdl"), synthetic_psdl()).unwrap();
+    std::fs::write(
+        root.join("texture/test_road.png"),
+        include_bytes!("../../../assets/texture/dev_road.png"),
+    )
+    .unwrap();
+
+    // 0, past-the-end and negative refs all resolve to no room.
+    std::fs::write(root.join("city/test.water"), "0.5\n0\n7\n-2\n").unwrap();
+    assert!(
+        load_test_city(root).water.is_none(),
+        "all refs unresolvable -> no resource"
+    );
+
+    // A record authoring no refs at all is the same empty binding.
+    std::fs::write(root.join("city/test.water"), "0.5\n").unwrap();
+    assert!(
+        load_test_city(root).water.is_none(),
+        "no refs -> no resource"
+    );
+}
+
 /// Real-content validation: runs only when the gitignored `retail/` tree is
 /// present (user-supplied MM2 data). Skips silently otherwise.
 #[test]

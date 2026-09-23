@@ -3701,6 +3701,14 @@ pub fn load_city(
                             warn!(path = %res.logical, ?issue, "water record issue");
                         }
                         let water = crate::water::CityWater::build(&def, &psdl);
+                        if water.room_count() == 0 {
+                            warn!(
+                                path = %res.logical,
+                                skipped = water.skipped(),
+                                "water refs resolved no rooms; deadly water off"
+                            );
+                            return None;
+                        }
                         info!(
                             path = %res.logical,
                             level = water.level(),
