@@ -4243,6 +4243,8 @@ fn car(
                     "origin": w.origin,
                     "radius": w.radius,
                     "width": w.width,
+                    "simulated": w.simulated,
+                    "follows": w.follows,
                 })).collect::<Vec<_>>(),
             },
             "damage": def.damage.as_ref().map(|d| serde_json::json!({
@@ -4344,8 +4346,15 @@ fn car(
             );
         }
         for w in &def.model.wheels {
+            let role = if w.simulated {
+                "simulated".to_string()
+            } else if let Some(r) = w.follows {
+                format!("follows whl{r}")
+            } else {
+                "decorative".to_string()
+            };
             println!(
-                "  wheel visual {} trailer={} origin {:?} r {:.3} w {:.3} parts {:?}",
+                "  wheel visual {} trailer={} {role} origin {:?} r {:.3} w {:.3} parts {:?}",
                 w.index, w.trailer, w.origin, w.radius, w.width, w.parts
             );
         }

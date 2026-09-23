@@ -39,8 +39,7 @@
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
 **Next selected slice: F02-C remainder (per-car render leg —
-needs GPU captures; per-car override matrix; `vpmoonrover`
-launch investigation), F05-B remainder
+needs GPU captures; per-car override matrix), F05-B remainder
 (`TextelDamageRadius`/`ImpactsTable` texel damage — UNK-13;
 damage-driven detachment if original — UNK-13; C&R healing
 driver — needs F27's mode), F17-B remainder (needs F17-C's
@@ -50,6 +49,21 @@ effects, representative avoidance matrix, authored-tail columns,
 `avoidOpponents` polarity), F11-C remainder, F16-C's AC01
 process-level leg, F10-B's remaining collision/queue-priority
 scope, F13-C, or the F18-A remainder)** — the latest iteration
+implemented F02-C.3, resolving the `vpmoonrover` launch finding:
+the retail `vehCarSim` carries exactly four `vehWheel` slots
+(mm2hook source — `whl4`/`whl5` are "back-back" visuals drawn as
+`whl2`/`whl3` + a stored offset), so `build_model` now flags
+`whl` index ≥ 4 as `!simulated` followers (`WheelVisual.follows`)
+and `assemble` emits only the four physics wheels; the follower
+mounts copy the reference wheel's live droop/steer/spin plus the
+authored offset. The residual weirdness is authored — the Moon
+Rover's `CenterOfGravity` sits behind the physics rear axle, so
+it rests nose-up on its tail (a `--clearance` failure that is
+the retail rig's own equilibrium) and launches weakly; community
+docs report the original misbehaves too. `vpcentury` takes the
+same rule for its tandem axle and passes every leg. Still open
+on F02-C: per-car render captures, per-car override matrix.
+Before that the latest iteration
 implemented F02-C.2: `drive_probe` gained the missing acceptance
 legs — per-car `--drop` landing, roster-wide `--city … --clearance`
 spawn/reset checks on real road colliders (trailers included via
@@ -64,9 +78,7 @@ trailer counted two 5 cm `TWHL` detail parts as physics wheels
 visuals stay parked at the authored origin). Retail evidence:
 `--drop` 21/21 land upright and drive away; `--clearance` 21/21
 clean on sf and london (trailers 4/4, hitch gap 0.00); override
-causality measured on vpbug (power, grip, mass). Still open on
-F02-C: per-car render captures, per-car override matrix, the
-moonrover launch finding. Before that the latest iteration
+causality measured on vpbug (power, grip, mass). Before that the latest iteration
 implemented F18-A.4: the `.sky` dome now binds through the
 production session path — `city/<stem>.sky` resolves its authored
 `geometry/<model>.pkg` dome, the session's `tod*4 + weather` slot
@@ -172,8 +184,10 @@ fingerprinted retail install: 21/21 expected stock validated
 (`--strict` exit 2 on two disclosed warnings), 21/21 inside the
 handling envelope, 21/21 `status=pass` + `wheels=N/N` through
 the app path on sf, and 20/21 control checks clean with
-`vpmoonrover`'s wandering 6 m/s launch recorded as an open
-`drive` finding. The matrix's first run caught a real defect —
+`vpmoonrover`'s weak launch recorded as a `drive` finding
+(resolved in F02-C.3 as authored behaviour on the retail
+four-wheel rig — it still fails the launch bar, now for
+documented reasons). The matrix's first run caught a real defect —
 reverse was unbounded (vpbug measured -45.6 m/s): the drivetrain
 torqued through `reverse_ratio` while the upshift selector and
 RPM tracking ran the forward gearbox, so a held brake backed the
@@ -1703,9 +1717,10 @@ mask them.
 | F01-C | implemented | F01-B | `mm2_app::session` module drives the lifecycle in the real app: `load_session_world` (was `Startup` `setup`, moved to lib + gated on `Loading`), `session_control_input` (`Esc` quit→teardown→exit, `Backspace` restart — no menus exist yet, F17), `drive_session` (`Unloading` waits for observable despawn → clears `ImpactFilter` (new `reset()`: dedup map is `Entity`-keyed and the next session may recycle entities; ids/evidence counters restart per session) + `SpawnPoint.trailers` → `Menu` → `begin` or `AppExit`), chained after `despawn_session_entities`. `docs/architecture.md` gained the ownership/scheduling/plugin-attach section (AC06); README controls updated. 5 new integration tests run the production systems headlessly: restart leaves exactly one session (AC01), quit→Menu→AppExit, failed load keeps no player sim + retries/quits (AC02), impact ids/counters restart per session, fixed-tick driving is update-rate independent (AC03). Windowed `--frames 60` dev-world smoke and retail `--city sf --headless` smoke both pass unchanged. Candidate pending external check. |
 | F02-A | implemented | F00-B, F01-B | `VehicleCatalog::scan` + `EXPECTED_STOCK_ROSTER` + `stock_audit_failures` + `mm2-inspect cars/validate-cars` exist and ran on retail install tonight (21/21 ready, 8 audited extras). Candidate pending external check; deps not yet checked. |
 | F02-B | implemented | F02-A | `mm2_content::convert`, handling measurement (`analysis.rs`, drive probe), recent steering/gearbox/levelling fixes. Candidate; gap list still owed by F02-A audit. |
-| F02-C | active | F02-B | Split: C.1 (roster coverage matrix + the reverse-band repair it caught — implemented below), C.2 (probe legs + the two trailer fixes they caught — implemented below). Remaining: per-car render leg (GPU captures), per-car override matrix (causality measured on vpbug only), `vpmoonrover` launch investigation (open finding). |
+| F02-C | active | F02-B | Split: C.1 (roster coverage matrix + the reverse-band repair it caught — implemented below), C.2 (probe legs + the two trailer fixes they caught — implemented below), C.3 (`vpmoonrover` launch finding resolved — four-`vehWheel` architecture + back-back followers — implemented below). Remaining: per-car render leg (GPU captures), per-car override matrix (causality measured on vpbug only). |
 | F02-C.1 | implemented | F02-B | Stock-roster coverage matrix + reverse-band repair. `drive_probe --controls`: launch → brake → held-brake reverse → `ResetVehicle` → finiteness through the production sim, per ready car. Reverse repair: no gear selection while reversing, RPM through `reverse_ratio`, band-top limiter at `upshift_rpm` — vpbug was -45.6 m/s, now -13.6 at its authored ~13.4; regression test `reverse_speed_stays_bounded_at_the_reverse_gear` (+1 mm2_vehicle). Retail (`fnv1a64:e91e6cd4b2ae30d9`, 2026-09-22): 29 ids discovered, 21/21 expected stock ready+validated (2 warnings: vpcentury hitch fallbacks, vpford 4/5 paints), 8 unlisted extras fail with reasons (denominator intact), `handling --strict` exit 0, 21/21 app-path `status=pass` `wheels=N/N`, 20/21 controls ok — `vpmoonrover` FAIL(drive) recorded open. `docs/vehicle-coverage.md` publishes the matrix + open legs; `docs/vehicle-handling.md` gains the reverse paragraph. Candidate pending external check. |
 | F02-C.2 | implemented | F02-C.1 | Probe legs + the trailer repairs they caught. `drive_probe` gains `--drop` (per-car landing: released airborne, grounded/upright/drive-away/finite), `--city <c> --clearance` (roster on real city colliders: every wheel grounded + zero hull contacts at spawn and after `ResetVehicle`, trailers spawned through production `spawn_trailer` reported separately with hitch-anchor gap), `--config`/`--dump-config` (TOML override through the same `apply_handling_override` as `--vehicle-config`, wheel-count mismatch rejected). Clearance caught two real defects, both fixed: the `vpsemi` tractor/trailer hulls held a standing contact at the coincident hitch anchors (hitch joint now carries `JointCollisionDisabled`; regression test `tests/trailer.rs`), and `vpcentury`'s trailer counted two 5 cm `TWHL` detail parts as wheels (`WheelVisual.simulated` flag in `build_model`; `load_trailer` filters them, visual mounts stay parked; warnings surface through `def.report`). Moon rover needed an adaptive settle (the probe's ~1.5 m spawn drop wallows >6 s before grounding clean). Retail (same fingerprint): `--drop` 21/21 ok (air 0.88–0.92 s, up 1.00, drive-away, finite); `--clearance` 21/21 ok on sf AND london (trailers 4/4 wheels, hitch gap 0.00 spawn+reset); override causality on vpbug — half power 5.4→5.8 s/59.1→47.0 m/s, half longitudinal grip 5.4→9.4 s accel + stop 8.2→14.5 m, 2× mass 5.4→23.6 s, wheel-count mismatch rejected. `apply_handling_override` gains 2 unit tests (rig re-pin, wheel-count rejection). `docs/vehicle-coverage.md` updated. Candidate pending external check. |
+| F02-C.3 | implemented | F02-C.2 | `vpmoonrover` launch finding resolved as a conversion defect, not a physics one. The retail `vehCarSim` carries exactly four `vehWheel` slots (front L/R, back L/R — mm2hook `vehCarSim::Init`: `whl4`/`whl5` pivots are only recorded as `BackBack*WheelPosDiff` vs `GetWheel(2/3)` centres, and `vehCarModel::Draw` renders them as the reference wheel's matrix + offset). Our 6-corner rig was statically indeterminate — porpoising, 131° drift, ~6 m/s. `WheelVisual` gains `follows: Option<usize>`; `build_model` flags `whl` index ≥ 4 as `!simulated` followers of `whl(N−2)` with a load warning; `assemble` emits only simulated wheels into `WheelGeom`/`WheelConfig` (trailer path already filtered); `spawn_vehicle_model` mounts a follower on the reference wheel's physics index with the authored car-space offset (`WheelMount.follow_offset`), so it copies live droop/steer/spin — `usize::MAX` parked mounts unchanged. `drive_probe` gains `--trace` (4 Hz telemetry: speed, vy, height, pitch, gear, rpm, up-axis, heading, angular velocity, per-wheel grounded/traction/suspension). Retail (`fnv1a64:e91e6cd4b2ae30d9`): moonrover now rides its authored statics — `CenterOfGravity` +0.4 m rearward puts CoM behind the physics rear axle → rests nose-up on its tail (clearance FAIL on sf/london is the retail rig's equilibrium, documented), `--drop` ok, `--controls` still FAIL(drive) at ~1 m/s launch (cut test vehicle; community docs report the original misbehaves — "rear end levitates" matches follower wheels floating at the pitched-down tail); `vpcentury` (the other 6-wheel model) passes drop/controls/clearance on both cities — launch wheelie transient (0-100 4.7→6.9 s), then straight at 54 m/s; `validate-cars` 21/21; roster accel otherwise unchanged. Regression test `wheels_beyond_four_are_back_back_followers`; `docs/vehicle-handling.md` gains the four-wheel convention; `docs/vehicle-coverage.md` updated. Pre-existing note: `vppanozgt` shows ~160° heading drift at top speed in the accel probe — committed behaviour (authored `.vehgyro` drift relief), unaffected by this change (its rig is 4 wheels throughout). Candidate pending external check. |
 | F03-A | implemented | F00-B, F01-A | INST + PSDL placement parsed. Split: A.1 (`.pathset` parser + audit — implemented below), A.2 (prop-rule tables — implemented below). `.opp`/race `.csv` waypoints parsed under F11-A. Every discovered placement-source grammar now has a parser; remaining unmapped sources are feature-deferred: `.cpvs`/`.ldef` → F18, `audio_pathsets/` → F07/F08, PSDL `paths` records preserved raw (semantics unknown). |
 | F03-A.1 | implemented | F00-B, F01-A | `mm2_formats::pathset`: PTH1 parser measured on all 101 retail files — named paths of attributed points, kinds 0 single/1 directed-pairs/2 line-strip, quarter-metre spacing; per-point attribute word + `current_path`/`selection` cursors preserved raw (inferred dev-tool state, UNK-20). `Pathset::validate()`: unknown kind, odd directed-pair count, non-finite point, out-of-range cursor, empty name — zero issues on retail (66 empty paths are authored data, not flagged). `mm2-inspect pathset <install> [--city] [--strict]`: denominator = every discovered `.pathset` (101 — no filtering): 98 parse, 3 authored truncations fail (`race/london/{blitz10,blitz11,london_bridge_blitz10}.pathset`); name cross-check resolves `geometry/<n>.pkg`/`texture/<n>.*` with `PREFIX:` state decorations stripped and `PATHnn` labels skipped — 120/126 names resolve, 6 dead refs all in `city/phys/` + `bak/` files; `--strict` exits 2. `scan` recognizes `.pathset`. `docs/research/pathset.md` + ledger WLD-12/UNK-20. Candidate pending external check. |
 | F03-A.2 | implemented | F03-A.1 | `mm2_formats::proprules`: `PropDefs`/`PropRules`/`PropGroups`/`PropLodStats` parsers + `validate()` — `n{NN}left`/`n{NN}right` rules → `PropRule::rule_key()` byte/side split. `mm2-inspect proprules <install> [--city] [--strict]`: expected = `city/<stock>/{propdefs,proprules,props}.csv`, denominator = every discovered `city/**` prop-rule CSV incl `.csv.txt` exports + `geometry/props.csv` (different LOD schema). Cross-checks: rule refs → sibling defs, def file refs + group names → `geometry/<n>.pkg`, LOD rows → `geometry/<name>`, PSDL `prop_rule` bytes → defined rule numbers. Retail: 16/16 parse; byte↔rule link verified (WLD-14); 48 issues — 41 phys `*_m` + 3 phys group dead refs, `sp_bollard_pedsafe_l`, `va_garbagetruck.pkg`, rule 205 ×2; `--strict` exits 2. docs/research/proprules.md + WLD-14/UNK-21. Runtime stamping unwired — perimeter-walk semantics unverified (UNK-21). Candidate pending external check. |

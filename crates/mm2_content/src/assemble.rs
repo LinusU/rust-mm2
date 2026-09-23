@@ -339,11 +339,13 @@ fn load_vehicle_impl(
 
     let body_aabb = model.body_aabb.unwrap_or(([0.0; 3], [1.0, 1.0, 2.0]));
 
-    // Wheel geometry for the physics rig.
+    // Wheel geometry for the physics rig — only `simulated` wheels: the
+    // retail carsim carries four physics wheels, so `whl4`+ parts are
+    // visual followers (flagged in `build_model`), not extra corners.
     let wheel_geoms: Vec<WheelGeom> = model
         .wheels
         .iter()
-        .filter(|w| !w.trailer)
+        .filter(|w| !w.trailer && w.simulated)
         .map(|w| WheelGeom {
             index: w.index,
             origin: w.origin,

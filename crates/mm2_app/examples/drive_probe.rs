@@ -68,6 +68,7 @@ fn main() {
     let controls = args.iter().any(|a| a == "--controls");
     let drop_leg = args.iter().any(|a| a == "--drop");
     let clearance = args.iter().any(|a| a == "--clearance");
+    let trace = args.iter().any(|a| a == "--trace");
     let config_path = args
         .iter()
         .position(|a| a == "--config")
@@ -249,7 +250,7 @@ fn main() {
             }
         };
         let cfg = effective_config(&def, config_path.as_deref());
-        let accel = probe_acceleration(&cfg);
+        let accel = probe_acceleration(&cfg, trace);
         let corner: Vec<String> = [10.0f32, 20.0, 30.0, 40.0]
             .iter()
             .map(|v| format!("{:.2}@{:.0}", probe_corner_g(&cfg, *v), v))
@@ -404,7 +405,7 @@ struct AccelProbe {
     heading_drift: f32,
 }
 
-fn probe_acceleration(cfg: &VehicleConfig) -> AccelProbe {
+fn probe_acceleration(cfg: &VehicleConfig, trace: bool) -> AccelProbe {
     let (mut app, car) = headless(cfg.clone());
     settle(&mut app, car);
 
@@ -419,11 +420,52 @@ fn probe_acceleration(cfg: &VehicleConfig) -> AccelProbe {
             ..default()
         },
     );
-    for _ in 0..seconds * HZ {
+    for i in 0..seconds * HZ {
         app.update();
-        speeds.push(app.world().get::<VehicleState>(car).unwrap().forward_speed);
+        let st = app.world().get::<VehicleState>(car).unwrap();
+        speeds.push(st.forward_speed);
         let heading = app.world().get::<Rotation>(car).unwrap().0 * Vec3::NEG_Z;
         drift = drift.max(heading.x.atan2(-heading.z).abs());
+        if trace && i % (HZ / 4) == 0 {
+            let wheels: String = st
+                .wheels
+                .iter()
+                .map(|w| {
+                    format!(
+                        "{}{}{:.0}N/{:+.0}%",
+                        if w.grounded { 'g' } else { '-' },
+                        if w.traction_demand.abs() > 1.0 {
+                            '!'
+                        } else {
+                            ' '
+                        },
+                        w.suspension_force,
+                        w.traction_demand * 100.0,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            let rot = app.world().get::<Rotation>(car).unwrap().0;
+            let pos = app.world().get::<Position>(car).unwrap().0;
+            let lvel = app.world().get::<LinearVelocity>(car).unwrap().0;
+            let avel = app.world().get::<AngularVelocity>(car).unwrap().0;
+            println!(
+                "  t={:>5.2} v={:>5.1} vy={:>5.2} y={:>5.2} pitch={:>5.2} g{} rpm={:>4.0} up={:>4.2} hd={:>5.0}° av=({:>4.1},{:>4.1},{:>4.1}) {}",
+                i as f32 / HZ as f32,
+                st.forward_speed,
+                lvel.y,
+                pos.y,
+                (rot * Vec3::NEG_Z).y.asin(),
+                st.gear,
+                st.rpm,
+                (rot * Vec3::Y).y,
+                heading.x.atan2(-heading.z).to_degrees(),
+                avel.x,
+                avel.y,
+                avel.z,
+                wheels,
+            );
+        }
     }
 
     let top = speeds.iter().copied().fold(0.0f32, f32::max);

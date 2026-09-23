@@ -876,7 +876,11 @@ pub fn load_session_world(
             for (i, w) in vehicle_cfg.wheels.iter().enumerate() {
                 let mount = commands
                     .spawn((
-                        WheelMount { vehicle, index: i },
+                        WheelMount {
+                            vehicle,
+                            index: i,
+                            follow_offset: Vec3::ZERO,
+                        },
                         Transform::from_translation(Vec3::from(w.position)),
                     ))
                     .id();

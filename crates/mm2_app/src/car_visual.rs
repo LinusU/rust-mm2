@@ -28,6 +28,11 @@ pub struct WheelMount {
     pub vehicle: Entity,
     /// Index into `VehicleConfig::wheels`.
     pub index: usize,
+    /// Car-space offset added to the mount's position — nonzero on
+    /// "back-back" follower wheels (`whl4`/`whl5`), which copy the
+    /// referenced physics wheel's suspension/steer/spin shifted by the
+    /// authored offset between the two wheels.
+    pub follow_offset: Vec3,
 }
 
 /// Rolling-rotation node, child of a [`WheelMount`].
@@ -168,37 +173,54 @@ pub fn spawn_vehicle_model(
 ) -> Vec<String> {
     let mut mats = MaterialCache::new(vfs, images, materials);
 
-    // Physics wheel index within this model: ordinal among wheels of the
-    // same class, matching the order `assemble` consumed them into
-    // `WheelGeom`/`WheelConfig`. Decorative trailer wheels (flagged
-    // `!simulated` by `build_model`) have no physics wheel — their mount
-    // is parked at `usize::MAX` so it just stays at the authored origin.
+    // Physics wheel index within this model: ordinal among `simulated`
+    // wheels of the same class, matching the order `assemble` consumed
+    // them into `WheelGeom`/`WheelConfig`. `!simulated` wheels have no
+    // physics wheel: a follower (`whl4`/`whl5` back-back wheels) mounts
+    // onto its reference wheel's physics index plus the authored offset
+    // between the pair, and a parked decorative part gets `usize::MAX`
+    // so it just stays at the authored origin.
     let mut car_ord = 0usize;
     let mut trailer_ord = 0usize;
-    let mut wheel_phys: Vec<usize> = Vec::with_capacity(model.wheels.len());
-    for w in &model.wheels {
-        if w.trailer {
-            if w.simulated {
-                wheel_phys.push(trailer_ord);
+    let mut wheel_phys = vec![usize::MAX; model.wheels.len()];
+    for (wi, w) in model.wheels.iter().enumerate() {
+        if w.simulated {
+            let ord = if w.trailer {
+                let o = trailer_ord;
                 trailer_ord += 1;
+                o
             } else {
-                wheel_phys.push(usize::MAX);
-            }
-        } else {
-            wheel_phys.push(car_ord);
-            car_ord += 1;
+                let o = car_ord;
+                car_ord += 1;
+                o
+            };
+            wheel_phys[wi] = ord;
         }
+    }
+    let mut follow_offsets = vec![Vec3::ZERO; model.wheels.len()];
+    for (wi, w) in model.wheels.iter().enumerate() {
+        let Some(reference) = w.follows else { continue };
+        let Some((ri, ref_wheel)) = model
+            .wheels
+            .iter()
+            .enumerate()
+            .find(|(_, r)| r.trailer == w.trailer && r.index == reference && r.simulated)
+        else {
+            continue;
+        };
+        wheel_phys[wi] = wheel_phys[ri];
+        follow_offsets[wi] = Vec3::from(w.origin) - Vec3::from(ref_wheel.origin);
     }
 
     // Pass 1: wheel mounts + spin nodes. Fenders may precede their wheel
     // in part order, so mounts must exist before anything links to them.
     // `mounts` is indexed by model-part index.
     let mut mounts: Vec<Option<Entity>> = vec![None; model.parts.len()];
-    // model-part index → (wheel-visual index, physics wheel index)
-    let mut part_wheel: Vec<Option<usize>> = vec![None; model.parts.len()];
+    // model-part index → (physics wheel index, follow offset)
+    let mut part_wheel: Vec<Option<(usize, Vec3)>> = vec![None; model.parts.len()];
     for (wi, w) in model.wheels.iter().enumerate() {
         for &pi in &w.parts {
-            part_wheel[pi] = Some(wheel_phys[wi]);
+            part_wheel[pi] = Some((wheel_phys[wi], follow_offsets[wi]));
         }
     }
     for (pi, part) in model.parts.iter().enumerate() {
@@ -206,12 +228,13 @@ pub fn spawn_vehicle_model(
             continue;
         }
         let attach = part.origin.map(Vec3::from).unwrap_or(Vec3::ZERO);
-        let phys_idx = part_wheel[pi].unwrap_or(0);
+        let (phys_idx, follow_offset) = part_wheel[pi].unwrap_or((0, Vec3::ZERO));
         let mount = commands
             .spawn((
                 WheelMount {
                     vehicle: root,
                     index: phys_idx,
+                    follow_offset,
                 },
                 Transform::from_translation(attach),
                 Visibility::Visible,
@@ -403,7 +426,7 @@ pub fn update_wheel_visuals(
         } else {
             suspension.travel
         };
-        xf.translation = Vec3::from(wheel.position) + Vec3::NEG_Y * drop;
+        xf.translation = Vec3::from(wheel.position) + mount.follow_offset + Vec3::NEG_Y * drop;
         let steer = if wheel.steered {
             state.steer_angle * wheel.steer_scale
         } else {

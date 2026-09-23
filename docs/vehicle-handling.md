@@ -27,6 +27,20 @@ behind the adaptations.
 - "Ground" means the plane the contact patches settle on once the springs
   have taken the car's weight — not the model origin. `HandlingMetrics`
   solves for it; nothing should assume it is `y = 0`.
+- **A car has at most four physics wheels.** The retail `vehCarSim`
+  carries exactly four `vehWheel` slots (front-left/right,
+  back-left/right — verified in mm2hook's `vehCarSim::Init`); wheel parts
+  `whl4`/`whl5` are "back-back" visuals the original draws as the
+  `whl2`/`whl3` matrix plus a stored offset. `build_model` therefore
+  flags `whl` index ≥ 4 as `!simulated` followers of `whl(N−2)`
+  (`WheelVisual::follows`); the parts stay in the visual model and copy
+  the reference wheel's droop, steer and spin, but add no suspension,
+  tire or load-sharing corner. Simulating them independently makes the
+  rig statically indeterminate — the Moon Rover's rear-biased
+  `CenterOfGravity` then tripsods and porpoises. Trailer `twhl` parts use
+  the decorative-radius rule instead; the retail trailer wheel binding
+  beyond four is unrecovered (mm2hook has `TrailerBackBack*PosDiff`
+  fields but no stock trailer exercises them).
 
 ## What comes across directly
 

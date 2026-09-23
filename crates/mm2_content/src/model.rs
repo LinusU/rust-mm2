@@ -183,8 +183,16 @@ pub struct WheelVisual {
     /// Whether this wheel becomes a physics wheel. `twhl` parts that are
     /// far smaller than the rig's real wheels (e.g. the vpcentury
     /// trailer's 5 cm TWHL0/TWHL1 detail parts) are decoration only —
-    /// they still render at their authored position.
+    /// they still render at their authored position. Wheels beyond index
+    /// 3 are visual followers (see `follows`): the retail `vehCarSim`
+    /// only ever carries four `vehWheel` physics wheels.
     pub simulated: bool,
+    /// For a non-simulated follower wheel, the index of the physics wheel
+    /// whose suspension/steer/spin this visual copies — `whl4`/`whl5`
+    /// shadow `whl2`/`whl3` ("back-back" wheels), the same pairing the
+    /// retail car model draws. `None` for simulated wheels and parked
+    /// decorative parts.
+    pub follows: Option<usize>,
     /// Model part indices that belong to this wheel (the wheel itself plus
     /// linked fenders).
     pub parts: Vec<usize>,
@@ -396,6 +404,7 @@ pub fn build_model(pkg: &Pkg, mut mtx_for: impl FnMut(&str) -> Option<Mtx>) -> V
             radius,
             width,
             simulated: true,
+            follows: None,
             parts: vec![i],
         });
     }
@@ -423,6 +432,27 @@ pub fn build_model(pkg: &Pkg, mut mtx_for: impl FnMut(&str) -> Option<Mtx>) -> V
             warnings.push(format!(
                 "trailer wheel part twhl{} is decorative (r {:.3} m vs {:.3} m); excluded from the physics rig",
                 w.index, w.radius, max_trailer_r
+            ));
+        }
+    }
+
+    // The retail `vehCarSim` carries exactly four `vehWheel` slots
+    // (front-left/right, back-left/right). `whl4`/`whl5` parts are
+    // "back-back" wheels the car model draws as `whl(N-2)`'s matrix plus
+    // a fixed offset — they copy the reference wheel's suspension, steer
+    // and spin but add no force. Simulating them as independent corners
+    // makes a 6-wheel rig statically indeterminate (the Moon Rover's
+    // rear-biased CoM then tripsods and porpoises), so they follow their
+    // reference wheel instead. Trailer `twhl` parts keep the radius
+    // heuristic above: the retail trailer wheel binding is unrecovered.
+    for w in &mut model.wheels {
+        if !w.trailer && w.index >= 4 && w.simulated {
+            let reference = w.index - 2;
+            w.simulated = false;
+            w.follows = Some(reference);
+            warnings.push(format!(
+                "wheel part whl{} is a back-back follower of whl{reference}; excluded from the physics rig",
+                w.index
             ));
         }
     }
@@ -577,5 +607,44 @@ mod tests {
             |_| None,
         );
         assert!(model.wheels.iter().all(|w| w.simulated));
+    }
+
+    #[test]
+    fn wheels_beyond_four_are_back_back_followers() {
+        // vpmoonrover-shaped pkg: the retail carsim carries four
+        // vehWheel slots, so whl4/whl5 shadow whl2/whl3 visually and add
+        // no physics corner.
+        let model = build_model(
+            &pkg(&[
+                ("BODY_H", 1.0),
+                ("WHL0_H", 0.39),
+                ("WHL1_H", 0.39),
+                ("WHL2_H", 0.39),
+                ("WHL3_H", 0.39),
+                ("WHL4_H", 0.39),
+                ("WHL5_H", 0.39),
+            ]),
+            |_| None,
+        );
+        let by_index = |i: usize| {
+            model
+                .wheels
+                .iter()
+                .find(|w| !w.trailer && w.index == i)
+                .unwrap()
+        };
+        for i in 0..4 {
+            assert!(by_index(i).simulated, "whl{i} is a physics wheel");
+        }
+        for i in [4, 5] {
+            let w = by_index(i);
+            assert!(!w.simulated, "whl{i} adds no physics corner");
+            assert_eq!(w.follows, Some(i - 2), "whl{i} shadows whl{}", i - 2);
+        }
+        assert!(
+            model.warnings.iter().any(|w| w.contains("follower")),
+            "the exclusion is reported: {:?}",
+            model.warnings
+        );
     }
 }
