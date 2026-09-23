@@ -7,7 +7,8 @@
 //! `FindRoomId(position, previousRoom)`: the recovered signature takes
 //! the view position plus the last room as a hint; the body is a thunk,
 //! so its exact search order is unknown. `sm_EnablePVS` is the retail
-//! global toggle — [`PvsEnabled`]/`--no-pvs` is ours.
+//! global toggle — `--no-pvs` (`SessionConfig::dev.no_pvs`, read at
+//! session load) is ours.
 //!
 //! The lookup here is a designed policy over the *verified* list
 //! semantics (DSN, not an original-rules claim):
@@ -43,17 +44,6 @@ use crate::city::{authored_z, point_in_poly};
 /// the same 1-based id the `.cpvs` lists and entity names use).
 #[derive(Component, Debug, Clone, Copy)]
 pub struct CityRoom(pub u32);
-
-/// CLI toggle mirroring retail `sm_EnablePVS` (`--no-pvs` inserts
-/// `false`); absent ⇒ enabled, matching the retail default.
-#[derive(Resource, Debug, Clone, Copy)]
-pub struct PvsEnabled(pub bool);
-
-impl Default for PvsEnabled {
-    fn default() -> Self {
-        PvsEnabled(true)
-    }
-}
 
 /// One room's containment shape: the authored perimeter polygon in
 /// (x, authored-z) space.

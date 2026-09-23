@@ -515,6 +515,16 @@ pub struct DevOverrides {
     /// not a continuous run of the first, so it IS in
     /// `record_eligibility` — results it produces never record.
     pub restart: bool,
+    /// `--no-pvs`: disable the authored `.cpvs` room-PVS render culling
+    /// (F18-A.5) — the retail `cityLevel::EnablePVS(false)` counterpart
+    /// and the escape hatch for comparing culled vs unculled captures.
+    /// Render-only — it cannot change a run's outcome — so like
+    /// `--cam`/`--nav`/`--pause` it stays out of `record_eligibility`.
+    /// It lives here rather than as an app-level resource so the flag
+    /// reaches the session through the config: the headless smoke path
+    /// builds its own app and has no other channel (the resource-based
+    /// wiring left `--headless --no-pvs` silently on).
+    pub no_pvs: bool,
 }
 
 /// Configuration of the `--nav` debug overlay: draw the city's BAI

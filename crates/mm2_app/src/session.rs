@@ -351,7 +351,6 @@ pub fn load_session_world(
     mut spawn: ResMut<SpawnPoint>,
     mut active_profile: Option<ResMut<crate::profile::ActiveProfile>>,
     mut note: Option<ResMut<SessionNote>>,
-    pvs_enabled: Option<Res<crate::pvs::PvsEnabled>>,
 ) {
     // A session loading retires the last session's end-note — a
     // restart bypasses the menu, so a stale failure must not surface
@@ -399,10 +398,13 @@ pub fn load_session_world(
                         commands.insert_resource(tables);
                     }
                     // F18-A.5: the authored room-PVS table is
-                    // session-scoped like `CityNav`; `--no-pvs` maps to
-                    // retail's `EnablePVS(false)` (default enabled).
+                    // session-scoped like `CityNav`; `--no-pvs`
+                    // (`config.dev.no_pvs`) maps to retail's
+                    // `EnablePVS(false)` (default enabled). Carrying the
+                    // flag in the config is what lets the headless
+                    // smoke's own app see it.
                     if let Some(mut pvs) = loaded.pvs {
-                        pvs.enabled = pvs_enabled.map(|e| e.0).unwrap_or(true);
+                        pvs.enabled = !config.dev.no_pvs;
                         commands.insert_resource(pvs);
                     }
                     info!(report = %loaded.report, "city ready");

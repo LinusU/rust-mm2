@@ -693,6 +693,7 @@ fn main() {
             pause: cli.pause,
             finish: cli.finish,
             restart: cli.restart,
+            no_pvs: cli.no_pvs,
         },
         // Any mounted mod makes records/unlocks ineligible — a result
         // under modded content is not comparable to stock (designed
@@ -777,6 +778,7 @@ fn main() {
         && !cli.pause
         && !cli.finish
         && !cli.restart
+        && !cli.no_pvs
         && !cli.nav
         && cli.nav_route.is_none()
         && !cli.bot;
@@ -1100,11 +1102,9 @@ fn main() {
     if cli.bot {
         app.insert_resource(scripted::ScriptedDrive);
     }
-    // F18-A.5: retail `EnablePVS` default-on; `--no-pvs` is the
-    // diagnostic off switch the session load reads.
-    if cli.no_pvs {
-        app.insert_resource(pvs::PvsEnabled(false));
-    }
+    // F18-A.5: `--no-pvs` reaches the session through
+    // `SessionConfig::dev` (retail `EnablePVS` default-on) — the same
+    // channel the headless smoke's own app reads.
     if let Some(slot) = active_profile {
         app.insert_resource(slot);
     }
