@@ -3261,6 +3261,16 @@ pub fn spawn_event_pathsets(
 // Orchestration
 // ---------------------------------------------------------------------------
 
+/// The loaded world's lowest authored vertex — the PSDL bounding-box
+/// minimum (`Psdl::bounds_min.y`). Session-scoped like [`crate::pvs::CityPvs`]:
+/// dev worlds and a non-finite authored bound get no resource. It is the
+/// honest "below the world" line for evidence runs — a spawn-relative
+/// threshold false-fails on sessions that legitimately descend (retail
+/// `sf/circuit0`'s route bottoms ~28 m under its start grid, and
+/// London's subway reaches −22 under a street-level spawn).
+#[derive(bevy::prelude::Resource, Debug, Clone, Copy, PartialEq)]
+pub struct WorldFloor(pub f32);
+
 /// Result of loading a city: where to put the player, the surface
 /// identity space and the import report for diagnostics.
 pub struct LoadedCity {
@@ -3268,6 +3278,9 @@ pub struct LoadedCity {
     pub spawn: Vec3,
     /// Heading along the road at the spawn point.
     pub spawn_yaw: f32,
+    /// The authored bounding-box minimum — the world's floor. `None`
+    /// when the file carries a non-finite bound.
+    pub floor: Option<WorldFloor>,
     /// The loaded surface tables, when the install carries them — the
     /// index space `SurfaceMaterial::Authored` on the city colliders
     /// refers to. The session inserts them as a resource so consumers
@@ -3738,9 +3751,18 @@ pub fn load_city(
             }
         });
 
+    // The authored bounding-box minimum is the loaded world's floor —
+    // evidence runs compare the end-of-run pose against it rather than
+    // a spawn-relative threshold. A non-finite bound yields no floor,
+    // never a clamped guess.
+    let floor = psdl.bounds_min[1]
+        .is_finite()
+        .then_some(WorldFloor(psdl.bounds_min[1]));
+
     Ok(LoadedCity {
         spawn: import.spawn,
         spawn_yaw: import.spawn_yaw,
+        floor,
         surfaces,
         pvs,
         water,

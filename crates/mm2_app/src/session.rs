@@ -237,6 +237,7 @@ pub fn drive_session(
             commands.remove_resource::<crate::spark_fx::SparkFx>();
             commands.remove_resource::<crate::pvs::CityPvs>();
             commands.remove_resource::<crate::water::CityWater>();
+            commands.remove_resource::<crate::city::WorldFloor>();
             // `TireConditions` stays: it is a system input (the impact
             // filter and telemetry read `Res` every frame), and
             // `load_session_world` re-stamps it from the next session's
@@ -415,6 +416,13 @@ pub fn load_session_world(
                     // wheel-`drag` classification alone.
                     if let Some(water) = loaded.water {
                         commands.insert_resource(water);
+                    }
+                    // The authored world floor (`Psdl::bounds_min.y`)
+                    // is session-scoped the same way — the smoke
+                    // runner's below-world verdict reads it; sessions
+                    // without a bound keep the spawn-relative line.
+                    if let Some(floor) = loaded.floor {
+                        commands.insert_resource(floor);
                     }
                     info!(report = %loaded.report, "city ready");
                 }

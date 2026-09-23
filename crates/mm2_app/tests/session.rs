@@ -558,6 +558,42 @@ fn city_water_does_not_leak_across_restart() {
     );
 }
 
+/// `WorldFloor` is session-scoped like `CityPvs`/`CityWater` — a city
+/// load inserts the authored bound, teardown removes it, and the dev
+/// world must not inherit a stale floor (the smoke runner falls back
+/// to a spawn-relative line when none is bound).
+#[test]
+fn world_floor_does_not_leak_across_restart() {
+    let mut app = dev_app();
+    app.update();
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+    app.world_mut()
+        .insert_resource(mm2_app::city::WorldFloor(-60.0));
+    assert!(
+        app.world()
+            .get_resource::<mm2_app::city::WorldFloor>()
+            .is_some()
+    );
+
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::Backspace);
+    app.update();
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .clear();
+    assert!(
+        run_until(&mut app, 12, |a| phase_is(a, SessionPhase::Playing)),
+        "restart never returned to Playing"
+    );
+    assert!(
+        app.world()
+            .get_resource::<mm2_app::city::WorldFloor>()
+            .is_none(),
+        "a dev-world session must not inherit a stale WorldFloor"
+    );
+}
+
 /// AC01: quit also routes through teardown — the world despawns, the
 /// session reaches `Menu`, and the app is asked to exit.
 #[test]

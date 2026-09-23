@@ -5,11 +5,160 @@
 //! data, explicit failure for a requested-but-missing city, and report
 //! records whose kinds stay distinguishable.
 
+use std::path::Path;
+
+use bevy::prelude::Vec3;
 use mm2_app::session::SelectedCar;
 use mm2_app::smoke::{self, SmokeRecord, SmokeStatus};
 use mm2_assets::Vfs;
-use mm2_game::{DevOverrides, SessionConfig, WorldMode};
+use mm2_game::{DevOverrides, SessionConfig, SpawnPose, WorldMode};
 use mm2_vehicle::VehicleConfig;
+
+fn write(dir: &Path, rel: &str, contents: impl AsRef<[u8]>) {
+    let p = dir.join(rel);
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(p, contents).unwrap();
+}
+
+fn push_lp(out: &mut Vec<u8>, s: &str) {
+    out.push(s.len() as u8 + 1);
+    out.extend_from_slice(s.as_bytes());
+    out.push(0);
+}
+
+fn push_f32s(out: &mut Vec<u8>, v: &[f32]) {
+    for f in v {
+        out.extend_from_slice(&f.to_le_bytes());
+    }
+}
+
+/// A one-room city whose drivable road sits at y=0 while its authored
+/// bounding box reaches −60 — the shape that exposed the spawn-relative
+/// "fell through the world" verdict on retail `sf/circuit0` (route
+/// bottom ~28 m under the start grid) and London's −22 subway.
+fn descending_psdl() -> Vec<u8> {
+    let mut d = Vec::new();
+    d.extend_from_slice(b"PSD0");
+    d.extend_from_slice(&2u32.to_le_bytes()); // target_size
+    let verts: &[[f32; 3]] = &[
+        [-5., 0., 0.],
+        [-3., 0., 0.],
+        [3., 0., 0.],
+        [5., 0., 0.], // road section 0: sw_l, rl, rr, sw_r
+        [-5., 0., 20.],
+        [-3., 0., 20.],
+        [3., 0., 20.],
+        [5., 0., 20.], // road section 1
+    ];
+    d.extend_from_slice(&(verts.len() as u32).to_le_bytes());
+    for v in verts {
+        push_f32s(&mut d, v);
+    }
+    let heights = [0.15f32];
+    d.extend_from_slice(&(heights.len() as u32).to_le_bytes());
+    push_f32s(&mut d, &heights);
+    d.extend_from_slice(&2u32.to_le_bytes()); // texture table stores count + 1
+    push_lp(&mut d, "test_road");
+    d.extend_from_slice(&2u32.to_le_bytes()); // nRooms
+    d.extend_from_slice(&0u32.to_le_bytes()); // junctions
+    let attr_words: Vec<u16> = vec![
+        0x0a << 3,
+        1,    // texture ref → textures[0]
+        0x00, // counted road: 2 sections, 8 vertex indices
+        2,
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+    ];
+    let mut room = Vec::new();
+    room.extend_from_slice(&4u32.to_le_bytes()); // nPerimeter
+    room.extend_from_slice(&(attr_words.len() as u32).to_le_bytes());
+    for v in [0u16, 1, 2, 3] {
+        room.extend_from_slice(&v.to_le_bytes());
+        room.extend_from_slice(&0u16.to_le_bytes()); // neighbour room
+    }
+    for w in &attr_words {
+        room.extend_from_slice(&w.to_le_bytes());
+    }
+    d.extend_from_slice(&room);
+    d.extend_from_slice(&[0u8; 2]); // room flags (nRooms entries)
+    d.extend_from_slice(&[0u8; 2]); // prop rules
+    push_f32s(&mut d, &[-5., -60., 0.]); // bounds min — deep authored floor
+    push_f32s(&mut d, &[5., 6., 20.]); // bounds max
+    push_f32s(&mut d, &[0., -27., 10.]); // bounds centre
+    push_f32s(&mut d, &[70.]); // radius
+    d.extend_from_slice(&0u32.to_le_bytes()); // nPaths
+    d
+}
+
+fn descending_install() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(d, "city/test.psdl", descending_psdl());
+    write(
+        d,
+        "texture/test_road.png",
+        include_bytes!("../../../assets/texture/dev_road.png"),
+    );
+    tmp
+}
+
+/// Regression for the "fell through the world" verdict: the end-of-run
+/// pose must compare to the loaded world's authored floor, not to a
+/// spawn-relative line — a session that legitimately descends below its
+/// spawn is not a world fall. Staged by dev-spawning the car 40 m over
+/// a city whose authored bounds reach −60: it drops onto the road,
+/// grounds, and drives off the edge into recovery loops — every pose
+/// it can end in sits ~40 m below the spawn yet far above the −85
+/// below-world line. The spawn-relative check failed this run; the
+/// authored floor does not.
+#[test]
+fn descending_below_spawn_is_not_a_world_fall() {
+    let install = descending_install();
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(install.path(), 0).unwrap();
+    let config = SessionConfig {
+        world: WorldMode::City {
+            psdl: "city/test.psdl".into(),
+        },
+        dev: DevOverrides {
+            spawn: Some(SpawnPose {
+                position: Vec3::new(0.0, 40.0, 10.0),
+                yaw: 0.0,
+            }),
+            ..DevOverrides::default()
+        },
+        ..SessionConfig::default()
+    };
+    let rec = smoke::headless_smoke(
+        &config,
+        vfs,
+        SelectedCar {
+            def: None,
+            paint: 0,
+        },
+        &VehicleConfig::default(),
+        600,
+        smoke::Driver::Hold,
+        None,
+    );
+    assert_eq!(
+        rec.status,
+        SmokeStatus::Pass,
+        "a descent inside the authored bounds must pass: {}",
+        rec.line()
+    );
+    assert!(
+        !rec.line().contains("fell through"),
+        "expected no below-world verdict: {}",
+        rec.line()
+    );
+}
 
 /// The dev world must start with no original data at all — an empty VFS —
 /// and the car must settle and drive.

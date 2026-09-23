@@ -27,7 +27,7 @@ use mm2_game::{
 use mm2_vehicle::vehicle::{VehicleInput, VehicleState};
 use mm2_vehicle::{VehicleConfig, VehiclePlugin};
 
-use crate::{camera, contracts, damage, opponents, race, scripted, session};
+use crate::{camera, city, contracts, damage, opponents, race, scripted, session};
 
 /// Engine commit embedded by `build.rs` — reports stay versioned by the
 /// exact code that produced them.
@@ -855,8 +855,18 @@ pub fn headless_smoke(
     if !saw_grounded {
         return record(SmokeStatus::Fail, detail(" never grounded"));
     }
+    // "Below the world" is the loaded world's authored floor — the
+    // PSDL bounding-box minimum — minus the margin, when the session
+    // carries a `WorldFloor`. A spawn-relative line false-fails on
+    // sessions that legitimately descend: retail `sf/circuit0`'s route
+    // bottoms ~28 m under its start grid, and London's subway reaches
+    // −22 under a street-level spawn. Sessions with no world bound
+    // (the flat dev world) keep the spawn-relative line.
+    let below_world = world_ecs
+        .get_resource::<city::WorldFloor>()
+        .map_or(spawn_pos.y - 25.0, |floor| floor.0 - 25.0);
     if let Some(p) = pos
-        && p.y < spawn_pos.y - 25.0
+        && p.y < below_world
     {
         return record(SmokeStatus::Fail, detail(" fell through the world"));
     }

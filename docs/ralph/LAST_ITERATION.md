@@ -1,113 +1,75 @@
-# Last iteration — F18-A.7: SDL deadly-water marking + environment research closure
+# Last iteration — F00-C.2: authored-floor below-world check in the smoke runner
 
-Feature iteration on `ralph/night` (baseline 3cb3453, external review
-of the F18-A.6 repair passed). Selected the F18-A remainder: the last
-open research questions (`.cpvs` variant selection, the `.water`
-"[from SDL]" source) and the one missing consumer they implied.
+Repair iteration on `ralph/night` (baseline d7dc8df, external review of
+F18-A.7 passed). Selected a defect the previous iteration's evidence run
+surfaced, ahead of the queued feature slices per the repair-first
+selection policy.
 
-## Evidence gathered (retail Midtown2.exe + data)
+## The defect
 
-- **`.cpvs` variants are bake sweeps, not runtime files.**
-  `cityLevel::Load` opens exactly one PVS stream —
-  `datAssetManager::Open("city", stem, "cpvs")` at VA 0x4440BE; the
-  `"cpvs"` string at 0x5C485C is a bare extension and no `%s_%d`
-  numbered-name construction exists in the loader. Measured on the
-  data: `sf_8`/`london_8`/`london_bad` are byte-identical to the base
-  tables, and the numbered files nest
-  `_0 ⊋ _2 ⊋ _4 ⊋ _8=base ⊋ _16 ⊋ _32 ⊋ _64 ⊋ _128 ⊋ _255` (per-list
-  visible-room sets; larger N = stricter occlusion, far-room
-  visibility survives — not distance cuts). `_00`/`_254` are
-  independent tables, `sf082100` a strict subset (earlier bake). The
-  shipped table is the N=8 bake.
-- **`.pvshist` is bake-tool data** — no `pvshist` reference exists in
-  the exe's strings or loader (negative evidence, string-search only).
-- **`.lmap` is runtime-loaded** — `wrong lightmap version` /
-  `room count mismatch` diagnostics sit in the city loader. The i32
-  values' semantics stay open (UNK-24); still unconsumed.
-- **Deadly water has two exe-verified sources.** `cityLevel::Load`
-  logs `"Room %d has Water of Death(tm)"` from `[from .water file]`
-  (each ref bounds-checks `0 < ref < nRooms` and sets the room's
-  runtime water flag — mm2hook `RoomFlags::Water` = 0x4; the six
-  retail ref rooms already carry 0x4 in stored `room_flags`) and
-  `[from SDL]` (a room whose FIRST attribute is a `TextureRef` to a
-  liquid-class texture is marked). `GetWaterLevel` returns the one
-  authored level; the kill is `flagged && pos.y < level`. The
-  per-texture class flag is populated at material bind and its exact
-  derivation is unrecovered — measured on retail it lands exactly on
-  `deepwater`-mapped surfaces (42 sf `s_ocean` rooms, 20 london
-  `s_thames`); `water`-mapped `s_water`/`s_pond` (drag 0.119) never
-  mark.
+`headless_smoke`'s below-world verdict compared the end-of-run pose to
+`spawn_pos.y - 25`. That line is wrong on any session that legitimately
+descends: retail `sf circuit:0 --bot --headless --frames 6000` failed
+`fell through the world` while the car was racing normally — `cp=2/9`,
+`wheels=4/4`, `final=(-2107,17.1,-52)` — because the authored course
+bottoms at y=15.85, ~28 m under the ~43.5 start grid. London's subway
+reaches −22 under street level, the same trap. The false verdict masked
+the run's actual outcome (a scripted-driver stall) and would mask any
+genuine race evidence on descending courses.
 
 ## What changed
 
-- `mm2_formats::psdl`: `texture_ref_index` (the shared
-  `data + 256*subtype − 1` TextureRef decode — `city.rs`'s
-  `decode_texture_ref` now delegates) and the recovered `RoomFlags`
-  bit names documented on `Psdl::room_flags`.
-- `mm2_content::surface`: `SurfaceTables::is_deadly_surface` — a
-  texture resolves to a drowning-class material when its authored
-  `drag` meets `RecoveryPolicy::water_min_drag` (0.3): retail
-  `deepwater` 0.5 qualifies, `water` 0.119 stays wadeable — the same
-  boundary the wheel classifier applies, and it reproduces the
-  retail mark set exactly. Documented as inference (the class-flag
-  derivation is unrecovered), not a claimed original test.
-- `mm2_app::water`: `CityWater::build` gains a `surfaces` parameter
-  and appends SDL marks — rooms whose first attribute is a
-  `TextureRef` to `is_deadly_surface`, bound at the authored `level`
-  verbatim (the verified global bound; refs keep their designed
-  `max(level, room-top)`). A room already ref'd isn't double-marked.
-  `sdl_rooms()` reports the split.
-- `mm2_app::city`: `load_city` passes `surfaces.as_ref()` into
-  `CityWater::build`; the info log gains `sdl=`; the `.cpvs` comment
-  now records the verified single-file load.
-- `mm2_app::smoke`: `wtr=<level>/<refs>r(+<n>sdl)(+<n>s)` — the
-  ref/SDL split is recorded like the exe logs it.
-- `mm2-inspect weather`: each non-base `.cpvs` is classified against
-  the base table's decoded visibility (identical / strict subset /
-  strict superset / independent — note lines, never issues), and each
-  city reports its SDL-marked room count.
-- Docs: `environment.md` records all four findings + the audit's new
-  checks; `original-rules.md` WLD-23 rewritten with the exe-verified
-  marking/load facts, DSN-34 extended (marking verified; exposure
-  shape and the elevated-ref bound stay designed), UNK-24 narrowed
-  (`.lmap` values, `.ldef` pairs, letter grid, dome fogging and
-  `sf_fog_orig.csv` remain open).
+- `mm2_app::city`: new `WorldFloor(pub f32)` — the session-scoped
+  authored floor, `Psdl::bounds_min.y` when finite; absent on dev worlds
+  and non-finite bounds. `LoadedCity` carries it as `floor`.
+- `mm2_app::session`: `load_session_world` inserts `WorldFloor` after a
+  city load; `despawn_session_entities` removes it on teardown (same
+  lifecycle as `CityPvs`/`CityWater`).
+- `mm2_app::smoke`: the verdict is `p.y < floor - 25` when a
+  `WorldFloor` is bound, `spawn_pos.y - 25` otherwise. SF's authored
+  −2.15 yields a −27.15 line; the failing endpoint at y=17.1 is 44 m
+  above it. Implementation choice — an evidence-runner threshold, not a
+  claimed original rule; the finite-pose and never-grounded checks are
+  unchanged.
 
 ## Tests
 
-+5 in `water.rs`: first-attribute `TextureRef`→deepwater marks at the
-level bound; shallow `water` never marks; a non-first `TextureRef` is
-ignored; a ref+SDL room keeps its elevated ref bound (dedup); absent
-surface tables skip the SDL pass while refs still apply. Existing
-`build` callers pass `None` (unchanged behaviour).
++2 in `crates/mm2_app`:
+
+- `tests/smoke.rs::descending_below_spawn_is_not_a_world_fall` — a
+  synthetic one-room city (road at y=0, authored bounds to −60) with a
+  dev spawn at y=40: the car drops, grounds, drives off the edge into a
+  recovery loop and ends `final=(-0,-0.1,-2)`, ~40 m under spawn — pass
+  under the authored floor, fail under the old spawn-relative line.
+- `tests/session.rs::world_floor_does_not_leak_across_restart` — a
+  planted `WorldFloor` does not survive `Backspace` teardown into a
+  dev-world session (the smoke then falls back to spawn-relative).
 
 ## Verification (this tree)
 
-- `cargo test -p mm2_app water` — 9/9 pass, incl. all five new SDL
-  tests; `import_pipeline` water tests still pass.
-- Retail headless (fingerprinted install): sf → `wtr=-1.9/3r+42sdl`,
-  london → `wtr=-3.8/3r+20sdl`; `deadly-water record loaded … sdl=42`
-  / `sdl=20` in the load logs.
-- `mm2-inspect weather <retail>` — 105/105 parsed, 0 issues; all 23
-  variant relations printed (matching the measured chain above) and
-  `water: sf — 42 SDL-marked room(s)` / `london — 20`.
+- `cargo test -p mm2_app --test smoke --test session` — 19/19 pass.
+- Retail (`fnv1a64:e91e6cd4b2ae30d9`):
+  `mm2 --mm2-path <retail> --city sf --event circuit:0 --bot --headless
+  --frames 6000` → `status=pass updates=6000 race=Running cp=2/9
+  lap=1/3 pos=4/5 opp=0/4 opp_rec=5 final=(-2107,17.1,-52)` (was
+  `status=fail … fell through the world` at the same endpoint).
 - Gates (2026-09-23, this tree): `cargo fmt --all -- --check` clean;
-  `cargo clippy --workspace --all-targets --all-features --
-  -D warnings` clean; `cargo test --workspace` — 67 suites, 0
+  `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings` clean; `cargo test --locked --workspace` — 67 suites, 0
   failures.
 
 ## Not done / open
 
-- The per-texture liquid-class derivation the exe's SDL pass reads is
-  unrecovered; `is_deadly_surface`'s drag threshold reproduces the
-  retail set but is inference. UNK-24 keeps `.lmap` value semantics,
-  `.ldef` pairs, the `amb_*`/`sky_*` letter grid, dome fogging and
-  `sf_fog_orig.csv`.
-- `.water`-absent cities get no `CityWater` even though the original
-  would still SDL-mark rooms — documented design choice (the authored
-  level is the bound; no record, no level to bind).
-- The room-scoped exposure overlay (point-in-perimeter + bound) and
-  the `max(level, room-top)` elevated-ref bound remain designed
-  policy (DSN-34); the marking set and level bound are verified.
-- The exploratory `pvs_probe.rs` measurement file is deleted; its
-  findings live in the audit + docs instead.
+- The `status=pass` is a physics/session-integrity verdict, not a
+  circuit-completion claim: the scripted player still stalls between
+  gates 1→2 — it leaves the elevated road on the descent (gate 2 at
+  y=37.8, car ends at y=17.1 ~155 m past it in x) and loops through 7
+  fall/recovery cycles at `cp=2/9` after 6000 frames. Route-following
+  on descending/elevated courses is the real F14-B/F15-B remainder this
+  repair exposes; `opp=0/4 opp_rec=5` shows the authored opponent field
+  running with 5 disclosed re-anchors but no finishers at the cap.
+- F15-B.4's record of `sf checkpoint:0` failing `fell through the
+  world` was the same defect class — expected to pass on re-run; not
+  re-measured this iteration.
+- The 25 m margin below the authored floor is an implementation choice;
+  no original-game analog is claimed.
