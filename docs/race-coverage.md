@@ -3,14 +3,16 @@
 F13-C.1's published account of what the authored Checkpoint catalog
 actually does under the production headless runtime — measured, not
 claimed — plus F13-C.2's stationary-control and first Professional
-legs, F13-C.4's complete Professional matrix and F13-C.5's
-Professional hold legs.
+legs, F13-C.4's complete Professional matrix, F13-C.5's
+Professional hold legs and F13-C.6's deep-course extended-budget
+probe.
 Every number below comes off the fingerprinted retail install
 (`fnv1a64:e91e6cd4b2ae30d9`, read-only): the audits and the scripted/
 hold matrix at commit `1791df0`, the parked legs and first
 professional legs at commit `a7d2797`, the full Professional matrix
 at commit `11af1ea`, the Professional hold legs at commit `7fb6cf6`
-(docs-only over `11af1ea` — identical code); all runs on 2026-09-24
+and the deep-budget legs at commit `feccdc4` (both docs-only over
+`11af1ea` — identical code); all runs on 2026-09-24
 on Apple M1 / Metal. The
 synthetic legs are the `mm2_app` / `mm2_game` test suites.
 
@@ -48,7 +50,8 @@ control; every `pro-*` leg below — the C.2 scripted legs, the C.4
 scripted/parked matrix and the C.5 hold legs — ran `--pro`.
 Raw per-leg logs plus `results.txt` stay local, uncommitted per the
 large-capture rule: C.4 in `/tmp/mm2-pro-matrix/`, C.5 in
-`/tmp/mm2-pro-hold/` (each leg log stamps the code commit it ran).
+`/tmp/mm2-pro-hold/`, C.6 in `/tmp/mm2-pro-deep/` (each leg log stamps
+the code commit it ran).
 
 The smoke record fields used below: `phase` (session state at frame
 cap), `cp=cleared/total` (local participant), `results` (result-ledger
@@ -396,6 +399,63 @@ wrecking (cp ≤2); sf-8's `cp=1/8` at `moved=37 m` reads like the
 parked legs' disclosed opponent-shove crossings rather than driven
 progress — the other nine moved 105–589 m.
 
+## Deep-course extended-budget legs (F13-C.6)
+
+The matrices' disclosed residual was that the deep London/SF
+non-finishes could be *budget*-bound: on 11 events the parked-Pro
+field's leader never passed 3 gates inside the 197 s budget. This leg
+re-runs exactly those events — london-3/4/5/6/9/10 and
+sf-6/7/9/10/11 — at `--frames 24000` (~394 s simulated, 2× the
+matrix budget), `--parked --pro`, commit `feccdc4` (docs-only over
+`7fb6cf6` — code-identical to `11af1ea`, stamped in every leg log).
+**11/11 `status=pass`, rc 0.** Raw logs + `results.txt` local at
+`/tmp/mm2-pro-deep/`.
+
+`omax` is the deepest gate any opponent banked; `Σc` sums every
+opponent's banked gates; `rec` is the field's escape+re-anchor count
+(`opp_rec=`). The 197 s column is the C.4 parked leg.
+
+| event | omax 197→394 s | Σc 197→394 s | rec 197→394 s |
+| --- | --- | --- | --- |
+| london-3 | 2 → 3 | 9 → 11 | 17 → 36 |
+| london-4 | 2 → 5 | 2 → 5 | 35 → 82 |
+| london-5 | 2 → 2 | 4 → 4 | 26 → 41 |
+| london-6 | 2 → 3 | 10 → 13 | 21 → 44 |
+| london-9 | 3 → 3 | 16 → 17 | 20 → 55 |
+| london-10 | 3 → 4 | 12 → 18 | 13 → 37 |
+| sf-6 | 3 → 6 | 12 → 16 | 5 → 18 |
+| sf-7 | 2 → 3 | 12 → 16 | 10 → 30 |
+| sf-9 | 2 → 2 | 9 → 9 | 18 → 60 |
+| sf-10 | 3 → 3 | 18 → 18 | 8 → 15 |
+| sf-11 | 3 → 3 | 17 → 17 | 7 → 12 |
+
+**The stalls are predominantly controller-bound, not budget-bound.**
+Doubling the simulated budget produced zero additional finishes
+(`opp=0` everywhere, `results=0`) while the field's re-anchor count
+went 160 → 380 (+138%) against summed gate clears 121 → 144 (+19%) —
+the extra 197 s bought recovery churn, not progress. The leader
+advanced on 6 of 11 events (london-4's 2→5 of 6 the largest move) and
+plateaued on 5. sf-6 is the one near-finish: `vpauditt` banked all 6
+checkpoints — the finish trigger arms at full clearance (RACE-7) —
+and was still racing toward it at cap. Budget is a real but secondary
+factor; the binding constraint on the deep courses is opponent driving
+competence (escape/re-anchor churn), which is the F15-B residual, not
+something a longer run fixes.
+
+**Parked-control anomalies scale with budget, unchanged in kind.**
+london-4's disclosed punt loop continued at the same rate (209 → 461
+falls + recoveries, `rcv=0w/461f/461r`, `wheels=4/4`); the same
+spawn-edge fall loop now shows on london-5 (`rcv=0w/348f/348r`, was
+122f at 197 s), sf-9 (43 → 172f) and sf-11 (49f+7w → 304f+7w) — all
+present at the lower budget at proportionally lower counts, the parked
+car being a standing target for field contact near spawn. london-3's
+parked car took `cp=1/6` at `moved=110 m` — the disclosed
+opponent-shove mechanism (sf-0/sf-8) driven further by sustained
+contact — plus 17 water recoveries (`rcv=17w`) and 10 ambient deaths
+in the same spawn-adjacent pileup. Physics health: `dropped` ≤218
+(london-3's pileup; ≤80 sf-9, else 0), `peak` ≤12.8 m/s — a shoved
+parked car, no spikes.
+
 ## Anomalies kept visible
 
 - **Physics step drops under contention:** `dropped=` counts physics
@@ -470,11 +530,16 @@ progress — the other nine moved 105–589 m.
   `peak=30.1 m/s`). The scripted driver's pace there (cp=4/8 at cap)
   is a driving-quality question, not a physics defect.
 - The parked control is stationary, not physics-frozen — the field
-  shoves it (sf-0 `cp=1/6` on contact push-through; `moved` up to
-  8 m). That is correct swept-trigger behavior, disclosed.
-- ~100-200 s/event budget leaves genuinely-long races unresolved;
-  opponent non-finishes on deep courses are budget- and
-  controller-skill-bound, not proven impossible.
+  shoves it (sf-0 `cp=1/6` on contact push-through; `moved` 1–8 m on
+  the amateur legs, ≤29 m at Pro, 110 m on london-3's doubled-budget
+  leg — all contact displacement, `peak` ≤12.8 m/s). That is correct
+  swept-trigger behavior, disclosed.
+- The 197 s/event matrix budget was probed at 394 s on the 11
+  deepest-stalling events (F13-C.6): zero added finishes, field
+  re-anchors +138% against +19% banked gates — the deep-course
+  non-finishes are predominantly controller-skill-bound (the F15-B
+  residual), not merely budget-bound. Longer budgets remain untested
+  beyond 394 s and original-fidelity pacing is unverified.
 - Blitz (F12), Circuit (F14), Crash Course (F21) rows are audited for
   structure only; their runtime matrices belong to those features.
 - No original-fidelity claim: engine self-metrics only. Difficulty,
