@@ -960,8 +960,11 @@ pub struct Junctions {
     waiting: BTreeMap<u16, VecDeque<(Entity, u64)>>,
     /// Junctions a car committed to since the last `advance_tick` —
     /// treated as occupied by the gated rules for the rest of the
-    /// tick (F10-B.11).
-    entered: BTreeSet<u16>,
+    /// tick (F10-B.11). Keyed by the committing car: a rolled-back
+    /// transfer sheds only its own claim, never another car's on the
+    /// same junction — on a mixed-rule junction a free-flow car can
+    /// enter and roll back over a gated car's live claim in one tick.
+    entered: BTreeSet<(u16, Entity)>,
 }
 
 /// Per-junction signal-phase desynchronisation, in ticks — a fixed
@@ -1085,7 +1088,7 @@ impl Junctions {
         let Some((ix, road, rule)) = Self::approach(graph, lane) else {
             return JunctionGate::Open;
         };
-        let occupied = box_occupied || self.entered.contains(&ix);
+        let occupied = box_occupied || self.entered(ix);
         match rule {
             None | Some(VehicleRule::NeverStop) => JunctionGate::Open,
             Some(VehicleRule::AlwaysStop) => JunctionGate::Closed,
@@ -1124,7 +1127,7 @@ impl Junctions {
         }
     }
 
-    /// Record that a car committed to `ix`'s interior this tick
+    /// Record that `car` committed to `ix`'s interior this tick
     /// (F10-B.11) — the same-tick half of the box yield. The caller's
     /// occupancy snapshot is taken before any car drives, so a second
     /// eligible car evaluated after the commit would read the box
@@ -1133,20 +1136,27 @@ impl Junctions {
     /// and held off by the snapshot instead. `advance_tick` clears
     /// the set; [`Junctions::release`] undoes a commit the caller
     /// rolled back (a landing the transfer rejected).
-    pub fn commit(&mut self, ix: u16) {
-        self.entered.insert(ix);
+    ///
+    /// The claim belongs to `car`: a junction can carry one claim per
+    /// car in a tick — a free-flow end never consults the record, so
+    /// it can commit over a gated car's live claim — and a rollback
+    /// sheds only the rolling-back car's own.
+    pub fn commit(&mut self, ix: u16, car: Entity) {
+        self.entered.insert((ix, car));
     }
 
-    /// Whether a car committed to `ix` since the last `advance_tick`
+    /// Whether any car committed to `ix` since the last `advance_tick`
     /// (diagnostics/tests).
     pub fn entered(&self, ix: u16) -> bool {
-        self.entered.contains(&ix)
+        self.entered.iter().any(|&(j, _)| j == ix)
     }
 
-    /// Undo a same-tick [`Junctions::commit`] — the transfer was
-    /// rolled back, so the box is not in fact claimed.
-    pub fn release(&mut self, ix: u16) {
-        self.entered.remove(&ix);
+    /// Undo `car`'s same-tick [`Junctions::commit`] — the transfer was
+    /// rolled back, so the box is not in fact claimed by it. Only the
+    /// caller's own claim is shed; another car's commit on `ix` this
+    /// tick is untouched.
+    pub fn release(&mut self, ix: u16, car: Entity) {
+        self.entered.remove(&(ix, car));
     }
 
     /// The aspect a signal on `road`'s approach into `ix` displays

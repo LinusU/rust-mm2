@@ -558,6 +558,32 @@ fn spawn_follower(app: &mut App, lane: LaneId, along: f32, target_speed: f32) ->
         .id()
 }
 
+/// Park a knocked wreck at `pos` — `drive_ambient` never re-poses it,
+/// it counts as a blocker for the corridor and landing checks, and
+/// being bound for nothing it would occupy a junction zone it sat
+/// inside. Kinematic so it stays where the test puts it.
+fn spawn_wreck(app: &mut App, pos: Vec3) -> Entity {
+    app.world_mut()
+        .spawn((
+            AmbientCar {
+                class: 0,
+                drive: AmbientDrive::Knocked,
+                cursor: LaneCursor::new(lane(0, Side::Right), 0.0),
+                target_speed: 0.0,
+                speed: 0.0,
+                stuck: StuckWindow::new(pos.to_array()),
+            },
+            RigidBody::Kinematic,
+            Collider::cuboid(1.8, 0.9, 3.2),
+            Position(pos),
+            Rotation(Quat::IDENTITY),
+            LinearVelocity::ZERO,
+            AngularVelocity::ZERO,
+            Transform::from_translation(pos),
+        ))
+        .id()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1334,6 +1360,97 @@ fn a_same_tick_second_arrival_waits_for_the_committed_crossing() {
         "both eligible cars must take the junction — no deadlock"
     );
     assert_eq!(shared, 1, "two cars shared the junction interior at once");
+}
+
+/// F10-B.11 review regression — a *mixed-rule* junction, the common
+/// retail case: a `NeverStop` car's gate never consults the same-tick
+/// record, so it can enter and roll back (a permanently blocked
+/// landing) over a gated car's live claim in one drive tick. The
+/// rollback must shed only its own claim — a junction-keyed release
+/// strips the gated car's and re-opens the box for a third car
+/// evaluated later that tick.
+///
+/// Choreography: A and C sit on parallel lanes of the signal member
+/// road (identical speed profiles → same-tick lane end), B is re-armed
+/// at its `NeverStop` lane end before every update so it enters and
+/// rolls back on whichever drive tick A commits. One fixed step per
+/// update makes that coverage exact, and spawn order fixes the
+/// in-tick evaluation order A → B → C. B's landing lanes are blocked
+/// by wrecks parked above the zone's vertical band — inside the
+/// landing clearance sphere, outside the occupancy zone, so the box
+/// itself reads empty to the gated approaches.
+#[test]
+fn a_rolled_back_free_flow_entry_keeps_the_committed_claim() {
+    // TrafficLight on road 0's approach, NeverStop on road 1's.
+    let install = two_lane_install(1, 3);
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    // One 120 Hz drive tick per update: the per-update re-arm below
+    // then covers every drive tick, not every other one.
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+        1.0 / 120.0,
+    )));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    {
+        // A quick cycle keeps the window bounded: two-second greens,
+        // half-second all-red.
+        let mut t = app.world_mut().resource_mut::<AmbientTraffic>();
+        t.junctions.policy.green_ticks = 120;
+        t.junctions.policy.clear_ticks = 60;
+    }
+
+    let lanes = [lane_at(0, Side::Right, 0), lane_at(0, Side::Right, 1)];
+    let b_lane = lane_at(1, Side::Left, 1);
+    let a = spawn_follower(&mut app, lanes[0], 20.0, 15.0);
+    // B on the far left lane: standing at its line it sits >8 m off
+    // A's and C's road-1 landings, so it never shadows them.
+    let b = spawn_follower(&mut app, b_lane, 20.0, 15.0);
+    let c = spawn_follower(&mut app, lanes[1], 20.0, 15.0);
+    // Road 0's left lanes are where B's transfer lands (along=0 sits
+    // at z=−4): a wreck above each landing point blocks the transfer
+    // forever without occupying the box.
+    spawn_wreck(&mut app, Vec3::new(-2.5, 5.5, -4.0));
+    spawn_wreck(&mut app, Vec3::new(-6.0, 5.5, -4.0));
+
+    let lane_end = {
+        let t = app.world().resource::<AmbientTraffic>();
+        t.graph().lane(b_lane).expect("a live lane").length
+    };
+    let mut crossed = [false; 2];
+    let mut shared = 0usize;
+    for _ in 0..3600 {
+        // Re-arm B a hair short of its lane end at entry speed — it
+        // enters and rolls back on this update's drive tick, so its
+        // rollback always lands inside A's commit tick.
+        if let Some(mut car) = app.world_mut().get_mut::<AmbientCar>(b) {
+            car.cursor = LaneCursor::new(b_lane, lane_end - 0.01);
+            car.speed = 8.0;
+        }
+        app.update();
+        let mut inside = 0;
+        for (i, (car, ln)) in [(a, lanes[0]), (c, lanes[1])].iter().enumerate() {
+            let Some((_, _, cur)) = car_state(&mut app, *car) else {
+                continue;
+            };
+            inside += usize::from(cur.crossing.is_some());
+            crossed[i] |= cur.crossing.is_some() || cur.lane != *ln;
+        }
+        shared = shared.max(inside);
+        if crossed == [true, true] {
+            break;
+        }
+    }
+    assert_eq!(
+        crossed,
+        [true, true],
+        "both eligible cars must take the junction — no deadlock"
+    );
+    assert_eq!(
+        shared, 1,
+        "a rolled-back free-flow entry stripped the committed car's claim"
+    );
 }
 
 /// Authored `TrafficLight` on both junction approaches: the two-member

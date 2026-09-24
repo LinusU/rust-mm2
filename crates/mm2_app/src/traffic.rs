@@ -84,7 +84,9 @@
 //! the rest of the tick — gated approaches read the claim as an
 //! occupied box — and `advance_tick` sheds it once the car is
 //! physically inside and the snapshot sees it. A rolled-back commit
-//! (a rejected landing) releases the claim immediately. Unruled
+//! (a rejected landing) releases its own claim immediately — never
+//! another car's: on a mixed-rule junction a free-flow car can roll
+//! back over a gated car's live claim in the same tick. Unruled
 //! approaches never consult the record — same authored free flow.
 //!
 //! F10-B.6 adds the kinematic→dynamic handover (F10-AC03's collision
@@ -1000,6 +1002,9 @@ pub fn drive_ambient(
                 // snapshots and cannot see a same-tick commit.
                 let entered_ix =
                     Junctions::approach(&traffic.graph, previous.lane).map(|(ix, _, _)| ix);
+                if let Some(ix) = entered_ix {
+                    traffic.junctions.commit(ix, entity);
+                }
                 // Occupied-transfer check (F10-AC04's junction leg):
                 // a landing inside `enter_clearance` of a live
                 // blocker would materialise the car inside a junction
@@ -1024,13 +1029,15 @@ pub fn drive_ambient(
                     car.cursor = previous;
                     car.speed = 0.0;
                     traffic.crossings -= 1;
+                    // Shed only *this* car's claim: on a mixed-rule
+                    // junction a free-flow car never consults the
+                    // record, so it can roll back over another car's
+                    // live commit — a junction-keyed release would
+                    // strip that claim and re-open the box this tick.
                     if let Some(ix) = entered_ix {
-                        traffic.junctions.release(ix);
+                        traffic.junctions.release(ix, entity);
                     }
                 } else {
-                    if let Some(ix) = entered_ix {
-                        traffic.junctions.commit(ix);
-                    }
                     // Committed to the box: the approach releases its
                     // FCFS slot — the box-yield holds the next car
                     // until this one physically clears the junction.

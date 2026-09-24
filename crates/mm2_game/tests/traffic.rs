@@ -1245,7 +1245,9 @@ fn a_traffic_light_cycles_one_member_road_at_a_time() {
 /// read the box empty — `commit` claims the junction for the rest of
 /// the tick, `release` undoes a rolled-back transfer, and
 /// `advance_tick` sheds the record once the physical box-yield sees
-/// the car.
+/// the car. Claims are keyed by the committing car: a rollback sheds
+/// only its own — on a mixed-rule junction a free-flow car can enter
+/// and roll back over a gated car's live claim in one tick.
 #[test]
 fn a_committed_entry_holds_the_box_for_the_rest_of_the_tick() {
     // StopSign on both approaches into the same junction.
@@ -1272,16 +1274,29 @@ fn a_committed_entry_holds_the_box_for_the_rest_of_the_tick() {
         JunctionGate::Open
     );
     j.depart(car(1));
-    j.commit(0);
+    j.commit(0, car(1));
     assert!(j.entered(0));
     assert_eq!(
         j.gate(&g, r1, car(2), true, true, false),
         JunctionGate::Closed
     );
 
-    // A rolled-back commit — the landing check rejected it — frees
-    // the box at once.
-    j.release(0);
+    // A free-flow car can commit over a live claim — its gate never
+    // consults the record — and then roll back: the release sheds
+    // only its own claim, so car(1)'s still holds the box. Releasing
+    // a junction the caller never claimed is likewise a no-op.
+    j.commit(0, car(3));
+    j.release(0, car(3));
+    j.release(0, car(9));
+    assert!(j.entered(0));
+    assert_eq!(
+        j.gate(&g, r1, car(2), true, true, false),
+        JunctionGate::Closed
+    );
+
+    // The owner's own rolled-back commit — the landing check
+    // rejected it — frees the box at once.
+    j.release(0, car(1));
     assert!(!j.entered(0));
     assert_eq!(
         j.gate(&g, r1, car(2), true, true, false),
@@ -1289,7 +1304,7 @@ fn a_committed_entry_holds_the_box_for_the_rest_of_the_tick() {
     );
 
     // The record never outlives the tick it was taken in.
-    j.commit(0);
+    j.commit(0, car(1));
     j.advance_tick();
     assert!(!j.entered(0));
     assert_eq!(
@@ -1317,7 +1332,7 @@ fn a_committed_entry_closes_a_green_approach_and_not_free_flow() {
         j.gate(&g, r0, car(1), false, false, false),
         JunctionGate::Open
     );
-    j.commit(0);
+    j.commit(0, car(1));
     assert_eq!(
         j.gate(&g, r0, car(2), false, false, false),
         JunctionGate::Closed
