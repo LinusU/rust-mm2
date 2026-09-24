@@ -2,10 +2,12 @@
 
 F13-C.1's published account of what the authored Checkpoint catalog
 actually does under the production headless runtime — measured, not
-claimed. Every number below comes off the fingerprinted retail install
-(`fnv1a64:e91e6cd4b2ae30d9`, read-only) at commit `1791df0`; the
-audits and the runtime matrix were run on 2026-09-24 on Apple M1 /
-Metal. The synthetic legs are the `mm2_app` / `mm2_game` test suites.
+claimed — plus F13-C.2's stationary-control and Professional legs.
+Every number below comes off the fingerprinted retail install
+(`fnv1a64:e91e6cd4b2ae30d9`, read-only): the audits and the scripted/
+hold matrix at commit `1791df0`, the parked/professional legs at
+commit `a7d2797`; all runs on 2026-09-24 on Apple M1 / Metal. The
+synthetic legs are the `mm2_app` / `mm2_game` test suites.
 
 These records prove the engine executes the authored data — roster,
 course, results, recovery — end to end. They do **not** prove
@@ -25,15 +27,19 @@ mm2-inspect event <install> --city <c> --event checkpoint:<row>   # single-event
 # production runtime leg — full session: world load, authored roster,
 # countdown, checkpoint progress, results, restart machinery
 mm2 --mm2-path <install> --city <london|sf> --event checkpoint:<i> \
-    [--bot] --headless --frames 12000
+    [--bot | --parked] [--pro] --headless --frames 12000
 ```
 
 `--bot` drives the scripted route-following driver (F15-B.5);
-without it the `Hold` driver runs (settles ≤2 s, then holds full
-throttle — it drives blind, it is *not* a parked car). Each run is
-12000 app updates ≈ 197 s of simulation at the 120 Hz physics step.
-Both legs ran at the default Amateur difficulty; Professional rosters
-are audited structurally but not driven in this matrix.
+`--parked` holds the handbrake all session — the stationary control
+(F13-C.2), measuring what the opponents do with no competing local
+driver; with neither flag the `Hold` driver runs (settles ≤2 s, then
+holds full throttle — it drives blind, it is *not* parked).
+`--pro` selects the event's authored Professional parameter block and
+aimap variant (RACE-11); the default is Amateur. Each run is 12000
+app updates ≈ 197 s of simulation at the 120 Hz physics step.
+The scripted/hold legs below ran Amateur; the parked legs are Amateur
+and the `pro-bot` legs Professional as labelled.
 
 The smoke record fields used below: `phase` (session state at frame
 cap), `cp=cleared/total` (local participant), `results` (result-ledger
@@ -148,21 +154,70 @@ velocity spike (collision impulse artifact; the final pose stayed
 finite and `status=pass` held). Its hold leg restart-looped (rs=13,
 countdown) — the fast blind start wrecks before steering matters.
 
+## Stationary-control and Professional legs (F13-C.2)
+
+Two gaps the matrix left open: the `Hold` leg drives blind at full
+throttle (no true stationary control), and Professional rosters were
+audited but never driven. F13-C.2 adds the `--parked` driver — the
+local participant holds its handbrake on the grid for the whole
+session — and ran both new legs on the retail install at commit
+`a7d2797`, `--frames 12000`.
+
+**Parked control (Amateur)** — the events where opponents finished
+in the C.1 matrix, re-run with the local participant stationary. The
+parked car never drives itself (`peak` ≤4.7 m/s is impact shove, not
+drive — the field physically pushes it; `moved` 1–8 m is the same
+contact displacement plus the spawn settle):
+
+| event | local cp / moved | results | opponents resolved |
+| --- | --- | --- | --- |
+| london-0 | 0/5, 2 m | 3 | 3/4 finished |
+| london-2 | 0/4, 5 m | 0 | 0/7 (omax 4) |
+| sf-0 | 1/6, 8 m | 4 | 4/6 finished |
+| sf-2 | 0/9, 4 m | 1 | 1/6 finished |
+| sf-3 | 0/6, 2 m | 2 | 2/5 finished |
+| sf-4 | 0/7, 1 m | 1 | 1/5 finished |
+| sf-5 | 0/6, 6 m | 0 | 0/5 (omax 5) |
+
+All 7 `status=pass`, `pos=` last on every leg, `dup=0`. The control
+sharpens AC04: **opponents finish with ledger results while the local
+participant contributes nothing** — 11 finishes across 5 events,
+including sf-3 where the scripted leg's local win had masked the
+field. The one `cp=1/6` (sf-0) is the parked car being shoved through
+a checkpoint trigger by opponent contact — a pushed crossing is a
+real crossing, so the count is honest, not a driver artifact.
+
+**Professional scripted legs** — the first Pro runtime rows:
+
+| event | outcome | field | conditions |
+| --- | --- | --- | --- |
+| sf-0 | `finished place=6/7`, 5 opp finished | vpcaddie+vpbug — Pro wires `6opp 6rt` cleanly (the `6opp/7tbl` mismatch is amateur-only) | lt01 cloudy-morning |
+| sf-3 | `finished place=1/7`, 0/6 resolved | vpvwcup/vpbullet/vpauditt | lt06 foggy-noon |
+| london-0 | playing at cap, `cp=3/5`, `rs=2` | vpcoop2k ×6 | lt01 cloudy-morning |
+
+Pro measurably selects different authored content — different rosters
+(sf-3's amateur `vpbug`-heavy field becomes `vpvwcup`/`vpauditt`),
+different environment presets (sf-0 lt00→lt01, sf-3 lt05→lt06), and
+on sf-0 a field that beats the scripted driver (place 6 of 7 vs the
+amateur field the same driver matched). london-0's two restarts are
+the scripted driver wrecking under authored damage → `RestartEvent`,
+not a session defect.
+
 ## Anomalies kept visible
 
 - **Physics step drops under contention:** `dropped=` counts physics
-  substeps skipped under load — park-sf-4 55917, bot-sf-8 53955,
-  park-london-9 53155, bot-sf-4 16348 (the player *still won* that
-  one), bot-sf-7 13535, park-london-5 4914. Simulation stays finite
+  substeps skipped under load — hold-sf-4 55917, bot-sf-8 53955,
+  hold-london-9 53155, bot-sf-4 16348 (the player *still won* that
+  one), bot-sf-7 13535, hold-london-5 4914. Simulation stays finite
   and correct; the drops mean effective sim rate sagged below 120 Hz
   on those runs. bot-sf-8 also logged a transient `peak=17070 m/s`
   velocity spike (collision-impulse artifact; pose stayed finite).
-- **End-of-run grounding:** `wheels=0/4` on park-london-4 and
-  park-sf-4 (car ended propped/airborne), 2/4 bot-sf-2, 3/4
-  park-sf-7 — disclosed poses, not crashers.
+- **End-of-run grounding:** `wheels=0/4` on hold-london-4 and
+  hold-sf-4 (car ended propped/airborne), 2/4 bot-sf-2, 3/4
+  hold-sf-7 — disclosed poses, not crashers.
 - **London late-catalog grind:** even uncontaminated, london 4-11
   opponents top out at 2-5 gates in ~197 s with heavy escape/re-anchor
-  use (park-london-4: 137 escapes / 31 reanchors across 7 cars) — the
+  use (hold-london-4: 137 escapes / 31 reanchors across 7 cars) — the
   deep-city courses beat the opponent controller's current skill.
   Whether that matches retail difficulty is **unknown** — a F15-B
   residual, not excused here.
@@ -174,17 +229,24 @@ countdown) — the fast blind start wrecks before steering matters.
 
 - **F13-AC01** (discoverable + deps load): `events` 24/24 ready,
   `race-defs` 48/48 built, `opponents` all rosters wired; every row
-  ran the production session to `status=pass`. **Structural + runtime
-  legs done; Professional runtime leg not driven.**
+  ran the production session to `status=pass`. Structural + Amateur
+  runtime legs done; **Professional runtime legs started (3/24 events
+  driven scripted at Pro — sf-0/sf-3/london-0 above), full Pro matrix
+  open.**
 - **F13-AC02** (ordering/crossing rules): AnyOrder freedom verified
   (CHK-1); 36 race tests cover high-speed/wrong-height/repeat
   crossings, teleport/reset segment invalidation, timeout edge ticks.
 - **F13-AC03** (independent progress): per-participant `opps=` rows
   diverge live; `ordered_multi_lap_participants_stay_independent`,
-  `a_non_local_resolution_does_not_end_the_local_race` cover it.
-- **F13-AC04** (opponents start/progress/finish): **demonstrated** —
-  opponent finishes on 7 events, progress on all uninterrupted legs,
-  results compare against real participants (`pos=` vs full field).
+  `a_non_local_resolution_does_not_end_the_local_race` cover it —
+  sharpened by the parked legs: the local participant's progress and
+  the field's results are fully independent (a stationary local earns
+  nothing while opponents resolve).
+- **F13-AC04** (opponents start/progress/finish): **demonstrated,
+  control leg included** — opponent finishes on 7 amateur events
+  (london-0/2, sf-0/2/3/4/5), and 11 finishes across 5 events under a
+  *stationary* local participant; results compare against real
+  participants (`pos=` vs full field, parked = last).
 - **F13-AC05** (restart/recovery don't bypass): restart rebuilds the
   generation (25-cycle soak, `dup=0`, results scoped per generation);
   synthetic `restart_removes_the_race_resource`,
@@ -194,18 +256,19 @@ countdown) — the fast blind start wrecks before steering matters.
 - **F13-AC06** (catalog matrix): **this document** — 24/24 rows
   attempted, 48/48 legs `status=pass` (sf-8 scripted leg a ~24-min
   wall-clock outlier), finishes and stalls reported per event per
-  driver.
+  driver; plus the C.2 parked-control legs and the first Pro rows.
 
 ## Residuals / honest limits
 
-- Amateur difficulty only — Professional rosters are structurally
-  audited, not driven.
+- Professional coverage is partial: 3 scripted Pro legs (sf-0/sf-3,
+  london-0) — the remaining 21 events' Pro rosters are structurally
+  audited, not driven; no Pro hold/parked legs yet.
 - sf-8's scripted leg is a wall-clock outlier (~24 min at ~8-12
   updates/s under load) with the matrix's worst dropped-step count —
   performance there is a real question, not yet diagnosed.
-- The `Hold` leg is a blind full-throttle driver, not a parked
-  control — a true stationary-player isolation leg would need a new
-  driver mode.
+- The parked control is stationary, not physics-frozen — the field
+  shoves it (sf-0 `cp=1/6` on contact push-through; `moved` up to
+  8 m). That is correct swept-trigger behavior, disclosed.
 - ~100-200 s/event budget leaves genuinely-long races unresolved;
   opponent non-finishes on deep courses are budget- and
   controller-skill-bound, not proven impossible.

@@ -1,64 +1,62 @@
-# Last iteration — F13-C.1: Checkpoint-catalog runtime matrix + honest outcome field
+# Last iteration — F13-C.2: parked stationary-control driver + first Professional legs
 
-Task slice on `ralph/night` (baseline `55017f8`, the reviewed F02-C.5
-commit). Selected the F13-C remainder — the spec's last open leg is
-"validate the full catalog and playable races with actual opponents":
-the runtime pieces (progress, results, opponents, restart) already
-existed with synthetic coverage, so the highest-value slice was the
-catalog-level behavioral matrix on the real install, not another
-rewrite.
+Task slice on `ralph/night` (baseline `598e672`, the externally checked
+F13-C.1 commit). Selected the F13-C remainder's two named evidence gaps
+from the passed review: no true stationary-player control (the `Hold`
+leg drives blind at full throttle) and Professional rosters audited but
+never driven. One small code change unlocks both.
 
 ## What changed
 
-`crates/mm2_app/src/smoke.rs` (commit `1791df0`):
+Commit `a7d2797` — `crates/mm2_app/src/{input,smoke,main}.rs`,
+`tests/smoke.rs`, `README.md`:
 
-- **Smoke `outcome=`/`place=` could borrow another participant's
-  result.** `result_outcome`'s fallback surfaced the field leader's
-  ledger entry when the local participant was still racing — observed
-  live on `sf checkpoint:0` reporting `cp=2/6 pos=7/7` *and*
-  `outcome=finished place=1`. The record now resolves the result by
-  local participant identity and omits the field when the local
-  driver hasn't resolved; opponent finishes remain visible via
-  `opp=`/`opps=`. Unit regression coverage for the leader-fallback
-  case rides along.
+- **`Driver::Parked` / `--parked`** (conflicts `--bot`): a
+  `input::ParkedDrive` resource gates `parked_drive`, which writes
+  `VehicleInput { handbrake: 1.0, .. }` on the player vehicle every
+  frame — the foot brake is the reverse throttle once stopped, so the
+  handbrake is the parked state. Same resource-gated pattern as
+  `ScriptedDrive`, identical in the windowed app and headless smoke
+  (chained after the scripted driver so a test holding both markers
+  stays deterministic).
+- The dev-world `car never drove` verdict is inert under Parked — a
+  driver that never requests motion cannot fail it legitimately;
+  `moved=`/`peak=` staying at zero *is* the parked evidence. Records
+  name the leg `driver=parked`.
+- Test: `dev_world_parked_driver_stays_parked` — pass + `driver=parked`
+  + `peak<5` + `moved<5` where `Hold` drives off.
 
 ## Verification
 
-Evidence on the fingerprinted retail install
-(`fnv1a64:e91e6cd4b2ae30d9`, read-only), Apple M1 / Metal, commit
-`1791df0`, 2026-09-24 — full write-up in `docs/race-coverage.md`:
+Retail install `fnv1a64:e91e6cd4b2ae30d9` (read-only), Apple M1,
+`--frames 12000` headless, commit `a7d2797`, 2026-09-24 — published in
+`docs/race-coverage.md`:
 
-- **Structural legs:** `mm2-inspect events` — 45 rows/city, all 24
-  Checkpoint rows `ready`; `race-defs` — 64 builds/city, 0 failed;
-  `opponents` — 271 + 246 slots wired, `--strict` exits 2 on 79
-  authored anomalies (77 orphan `.opp` routes, sf/race0 `6opp/7tbl`,
-  stunt0 dead ref) — disclosed, not filtered.
-- **Runtime matrix:** 48 legs = 24 events × scripted/`Hold` drivers,
-  `--headless --frames 12000`, Amateur. **48 `status=pass`** — the
-  sf-8 scripted leg was a wall-clock outlier (~24 min at ~8-12
-  updates/s under load; `dropped=53955`, one transient 17 km/s
-  velocity spike, finite pose).
-- **Opponents race:** 18 opponent finishes with ledger results across
-  7 events (london-0/2, sf-0/2/3/4/5); progress on every
-  uninterrupted generation; 3 local finishes (london-0 place 3,
-  sf-3/sf-4 place 1).
-- **Restart soak:** restart loops up to `rs=25` (hold london-10) with
-  `dup=0` — the authored damage→restart path exercised hard with no
-  result duplication; countdown-loop rows (scripted london-6/8, hold
-  sf-8) are driver wrecks, kept in the table.
+- **Parked control (Amateur), 7/7 `status=pass`** on the events where
+  C.1 saw opponent finishes — local `cp=0` on 6 of 7, `pos=` last
+  everywhere, `dup=0`: london-0 `opp=3/4 F`, sf-0 `opp=4/6 F`,
+  sf-2 `1/6 F`, sf-3 `2/5 F`, sf-4 `1/5 F`; london-2/sf-5 progressed
+  (omax 4/5) without finishing. **11 opponent finishes with ledger
+  results while the local participant contributed nothing** — the AC04
+  control leg. sf-0's `cp=1/6`/`moved=8m` is the parked car shoved
+  through a trigger by opponent contact — a pushed crossing is a real
+  crossing, disclosed.
+- **Professional scripted legs (3):** sf-0 `finished place=6/7` behind
+  5 opponent finishes (pro `vpcaddie`/`vpbug` field, `env=lt01`; Pro
+  wires `6opp 6rt` clean — the `6opp/7tbl` anomaly is amateur-only),
+  sf-3 `finished place=1` (`vpvwcup`/`vpbullet`/`vpauditt`, `lt06`),
+  london-0 `rs=2` still racing at cap (`vpcoop2k` ×6) — Pro measurably
+  selects different authored rosters and conditions vs Amateur.
 - **Gates:** `cargo fmt --all -- --check` clean; `cargo clippy
   --locked --workspace --all-targets --all-features -- -D warnings`
-  clean; `cargo test --locked --workspace` green at `1791df0`.
+  clean; `cargo test --locked --workspace` green at `a7d2797`.
 
 ## Not done / open
 
-- Amateur difficulty only; Professional rosters audited, not driven.
-- `Hold` drives blind at full throttle — not a parked control; a true
-  stationary-player leg needs a new driver mode.
-- London 4-11 opponents grind (omax 2-5 gates, heavy escapes) even
-  uncontaminated — F15-B skill residual; retail-difficulty comparison
-  unverified.
-- Physics-step drops under contention on five runs (max `dropped`
-  55917); three end-of-run cars not fully grounded — disclosed in the
-  matrix.
-- No original-fidelity claim: engine self-metrics only.
+- Professional coverage partial: 3 scripted Pro legs; the other 21
+  events' Pro runtime + all Pro hold/parked legs open.
+- The parked control is stationary, not physics-frozen — the field
+  shoves it (`moved` up to 8 m, `peak` 4.7 m/s impact-only).
+- sf-8's ~8-12 updates/s CPU-bound leg undiagnosed; deep-course budgets
+  and any retail-fidelity comparison remain open (engine self-metrics
+  only).
