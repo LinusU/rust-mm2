@@ -40,8 +40,12 @@ holds full throttle — it drives blind, it is *not* parked).
 `--pro` selects the event's authored Professional parameter block and
 aimap variant (RACE-11); the default is Amateur. Each run is 12000
 app updates ≈ 197 s of simulation at the 120 Hz physics step.
-The scripted/hold legs below ran Amateur; the parked legs are Amateur
-and the `pro-bot` legs Professional as labelled.
+The Amateur legs are the C.1 scripted/hold matrix and the C.2 parked
+control; every `pro-*` leg below — the C.2 scripted legs, the C.4
+scripted/parked matrix and the C.5 hold legs — ran `--pro`.
+Raw per-leg logs plus `results.txt` stay local, uncommitted per the
+large-capture rule: C.4 in `/tmp/mm2-pro-matrix/`, C.5 in
+`/tmp/mm2-pro-hold/` (each leg log stamps the code commit it ran).
 
 The smoke record fields used below: `phase` (session state at frame
 cap), `cp=cleared/total` (local participant), `results` (result-ledger
@@ -266,14 +270,17 @@ authored `.aimap_p` rosters and parameter blocks — no load failure,
 panic, or sanity-trip. Every roster resolved and spawned (4–7
 opponents per event, authored sizes vary).
 
-**Opponents finish at Pro with the local participant parked.** 16
+**Opponents finish at Pro with the local participant parked.** 13
 opponent finishes with ledger results across 5 events while the local
 car contributes nothing: london-0 (5/6), london-2 (2/7), sf-0 (4/6),
-sf-2 (1/7 — a `vpford` earning all 9 gates), sf-3 (1/6). Versus the
-amateur parked legs' 11 finishes across the same-shape events, the
-Pro field finishes at the same rate on london-0/sf-0 and slower
-elsewhere — authored tuning and roster differences, measured not
-fidelity-verified.
+sf-2 (1/7 — a `vpford` earning all 9 gates), sf-3 (1/6). (16 counting
+both driver legs — london-0's scripted leg added 3 opponent finishes
+while the local scripted driver raced to place 4; the parked-only
+count is 13.) Versus the amateur parked legs, the Pro field finishes
+more often on london-0 (5/6 vs 3/4) and london-2 (2/7 vs 0/7),
+matches on sf-0 (4/6), sf-2 (1/7 vs 1/6) and sf-5 (0/5), and finishes
+less often on sf-3 (1/6 vs 2/5) and sf-4 (0/5 vs 1/5) — authored
+tuning and roster differences, measured not fidelity-verified.
 
 **The scripted driver finishes 3 events at Pro**: london-0 `place=4`
 behind three opponent finishes, london-2 `place=1`, sf-3 `place=1`.
@@ -351,8 +358,9 @@ across all 48 legs.
 - **F13-AC04** (opponents start/progress/finish): **demonstrated,
   control leg included at both difficulties** — opponent finishes on
   7 amateur events (london-0/2, sf-0/2/3/4/5), 11 finishes across 5
-  events under a *stationary* local participant; at Professional, 16
-  opponent finishes across 5 events under the parked control and 3
+  events under a *stationary* local participant; at Professional, 13
+  opponent finishes across 5 events under the parked control (16
+  across both driver legs — london-0's scripted leg added 3) and 3
   local scripted finishes (london-0 place 4, london-2/sf-3 place 1);
   results compare against real participants (`pos=` vs full field,
   parked = last).
