@@ -50,8 +50,15 @@ F11-C remainder, F16-C's AC01
 process-level leg, F10-B's remaining collision-fidelity
 scope, F13-C, the F18-A remainder, or the F07-B remainder
 (ambient engines/siren/scrape + audible
-evidence))** — the latest iteration landed F07-B.5: the
-authored clutch sample on committed drivetrain changes —
+evidence))** — the latest iteration repaired the F07-B.5
+external review's doc finding, no code change:
+`docs/original-rules.md` gained DSN-40 recording the
+`GearWatch`/committed-`(gear, direction)` clutch trigger
+(one voice per committed change, first sight silent, remote
+skipped, `MAX_CLUTCH_VOICES` 8, `aud=` `/Nc`) and UNK-25's
+clutch clause now records the designed binding instead of
+"unbound". Before that the latest iteration landed F07-B.5:
+the authored clutch sample on committed drivetrain changes —
 `clutch_voices` keeps a `GearWatch` of the last
 `(gear, direction)` on every `VehicleAudio` car and plays
 the cardata `clutch wave name` at `clutch volume` when the
