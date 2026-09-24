@@ -3,6 +3,7 @@
 //! synthetic BAI fixtures — straight, curved, one-way, intersection,
 //! dead-end and multilevel cases (F09-AC01/AC03/AC05/AC06).
 
+use bevy::prelude::Vec3;
 use mm2_formats::aimap::Aimap;
 use mm2_formats::bai::{
     Bai, Culling, END_FILL, Intersection, Road, RoadEnd, RoadSection, RoadSide,
@@ -1102,4 +1103,216 @@ fn speed_limit_resolution_prefers_exception_then_default_then_base() {
     let road = &g.roads()[0];
     assert_eq!(bare.effective_speed(road), road.base_speed);
     assert_eq!(o.effective_speed(road), 20.0);
+}
+
+// ---------- F15-B.6: route densification ----------
+
+fn waypoint(x: f32, y: f32, z: f32) -> OpponentRoutePoint {
+    OpponentRoutePoint {
+        position: Vec3::new(x, y, z),
+        brake: 0.0,
+        forward_offset: 0.0,
+        side_offset: 0.0,
+        target_speed: 0.0,
+        speed_start: 0.0,
+        side_start: 0.0,
+    }
+}
+
+/// A U-shaped network: road0 climbs +z at x=0, road1 crosses the top
+/// +x, road2 descends −z at x=60. The straight line between the two
+/// road bottoms crosses ~50 m of lane-less block interior — the same
+/// shape as the sf circuit:0 hillside leg.
+fn u_shape() -> Bai {
+    let c0 = [[0.0, 0.0, 0.0], [0.0, 0.0, 100.0]];
+    let c1 = [[0.0, 0.0, 100.0], [60.0, 0.0, 100.0]];
+    let c2 = [[60.0, 0.0, 100.0], [60.0, 0.0, 0.0]];
+    let zroad = |c: &[[f32; 3]]| {
+        (
+            side(0, &[(3.75, offset(c, 3.75, 0.0))], &[], 2),
+            side(0, &[(-3.75, offset(c, -3.75, 0.0))], &[], 2),
+        )
+    };
+    let (r0r, r0l) = zroad(&c0);
+    let (r2r, r2l) = zroad(&c2);
+    bai(
+        vec![
+            road(0, &c0, vec![1], r0r, r0l, dead_end(), connected(0, 0)),
+            road(
+                1,
+                &c1,
+                vec![1],
+                side(0, &[(3.75, offset(&c1, 0.0, -3.75))], &[], 2),
+                side(0, &[(-3.75, offset(&c1, 0.0, 3.75))], &[], 2),
+                connected(0, 1),
+                connected(1, 0),
+            ),
+            road(2, &c2, vec![1], r2r, r2l, connected(1, 1), dead_end()),
+        ],
+        vec![
+            intersection(0, [0.0, 0.0, 100.0], &[0, 1]),
+            intersection(1, [60.0, 0.0, 100.0], &[1, 2]),
+        ],
+    )
+}
+
+#[test]
+fn route_candidates_enters_the_goalward_direction() {
+    // From the south arm hugging its *left* lane — the nearer snap —
+    // to the east arm. The single-entry `route` seeds only the
+    // backward arc, which dead-ends; the candidate search seeds both
+    // directions and reaches the goal going forward.
+    let g = NavGraph::build(&cross(1)).graph;
+    let opts = RouteOptions::default();
+    let err = g
+        .route([-4.5, 0.0, -20.0], [20.0, 0.0, -2.0], &opts)
+        .unwrap_err();
+    assert!(matches!(err, RouteError::Unreachable { .. }), "{err}");
+    let r = g
+        .route_candidates([-4.5, 0.0, -20.0], [20.0, 0.0, -2.0], &opts)
+        .unwrap();
+    let roads: Vec<u16> = r.steps.iter().map(|a| g.arc(*a).road).collect();
+    assert_eq!(roads, vec![0, 1]);
+    assert_eq!(g.arc(r.steps[0]).dir, TravelDir::Forward);
+    // The reported start hit is on the forward (right-side) lane even
+    // though the backward lane snapped nearer.
+    assert_eq!(r.start.lane.side, Side::Right);
+}
+
+#[test]
+fn route_candidates_prefers_the_near_level() {
+    // The stacked fixture: the ground point still enters the ground
+    // road and the bridge point the bridge — a farther lane's arc only
+    // wins when its path is shorter by more than its extra snap cost.
+    let cg = [[0.0, 0.0, -20.0], [0.0, 0.0, 20.0]];
+    let cb = [[0.0, 10.0, -20.0], [0.0, 10.0, 20.0]];
+    let mk = |id: u16, c: &[[f32; 3]], room: u16| {
+        road(
+            id,
+            c,
+            vec![room],
+            side(0, &[(3.75, offset(c, 3.75, 0.0))], &[], 2),
+            side(0, &[(-3.75, offset(c, -3.75, 0.0))], &[], 2),
+            dead_end(),
+            dead_end(),
+        )
+    };
+    let g = NavGraph::build(&bai(vec![mk(0, &cg, 1), mk(1, &cb, 2)], Vec::new())).graph;
+    // Ground point → ground goal: the bridge lane's trivial one-arc
+    // "route" must not win just because it exists — the seed snap cost
+    // keeps the start on the level the query point actually sits.
+    let r = g
+        .route_candidates(
+            [0.0, 0.0, -10.0],
+            [0.0, 0.0, 10.0],
+            &RouteOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(g.arc(r.steps[0]).road, 0);
+    assert!(r.start.distance < 8.0);
+}
+
+#[test]
+fn route_path_samples_the_lane_walk() {
+    let g = NavGraph::build(&u_shape()).graph;
+    let r = g
+        .route_candidates(
+            [0.0, 0.0, 10.0],
+            [60.0, 0.0, 10.0],
+            &RouteOptions::default(),
+        )
+        .unwrap();
+    let pts = g.route_path(&r, 8.0);
+    assert!(pts.len() > 3, "the U walk samples many lane points");
+    // The path starts near the query's snapped start and ends at its
+    // snapped goal — the anchors themselves are the caller's.
+    assert!(pts.first().unwrap().distance(Vec3::new(0.0, 0.0, 10.0)) < 12.0);
+    assert!(pts.last().unwrap().distance(Vec3::new(60.0, 0.0, 10.0)) < 12.0);
+    // No teleports: consecutive samples stay within a lane step plus a
+    // junction chord.
+    for w in pts.windows(2) {
+        assert!(w[0].distance(w[1]) < 30.0, "{:?} → {:?}", w[0], w[1]);
+    }
+    // And it travels the top street rather than the straight leg.
+    assert!(pts.iter().any(|p| p.z > 60.0));
+}
+
+#[test]
+fn densify_route_keeps_corridor_legs_verbatim() {
+    let g = NavGraph::build(&straight()).graph;
+    let route = OpponentRoute {
+        points: vec![waypoint(0.0, 0.0, 10.0), waypoint(0.0, 0.0, 90.0)],
+    };
+    let d = g.densify_route(&route, false, &RouteOptions::default());
+    assert_eq!(d, route);
+}
+
+#[test]
+fn densify_route_repaths_legs_off_the_road() {
+    let g = NavGraph::build(&u_shape()).graph;
+    let a = waypoint(0.0, 0.0, 10.0);
+    let b = waypoint(60.0, 0.0, 10.0);
+    let route = OpponentRoute {
+        points: vec![a.clone(), b.clone()],
+    };
+    let d = g.densify_route(&route, false, &RouteOptions::default());
+    // The authored anchors stay verbatim at the ends — gate binding is
+    // unchanged — while the interior is lane geometry.
+    assert_eq!(d.points.first().unwrap(), &a);
+    assert_eq!(d.points.last().unwrap(), &b);
+    assert!(d.points.len() > 2, "lane samples fill the leg");
+    let on_lane = LaneQuery::vehicles(4.0);
+    for p in &d.points[1..d.points.len() - 1] {
+        assert!(
+            g.nearest_lane(p.position.into(), &on_lane).is_some(),
+            "inserted point off the network: {:?}",
+            p.position
+        );
+        // Inserted points are never staging records.
+        assert_eq!(p.brake, 0.0);
+    }
+    // The path takes the top street, not the straight line.
+    assert!(d.points.iter().any(|p| p.position.z > 60.0));
+}
+
+#[test]
+fn densify_route_wrap_leg_keeps_the_loop_closed() {
+    // A closed out-and-back: both legs leave the corridor, and the
+    // loop still ends exactly on the first anchor so the circuit
+    // convention (last ≈ first) survives.
+    let g = NavGraph::build(&u_shape()).graph;
+    let a = waypoint(0.0, 0.0, 10.0);
+    let b = waypoint(60.0, 0.0, 10.0);
+    let route = OpponentRoute {
+        points: vec![a.clone(), b.clone(), a.clone()],
+    };
+    let d = g.densify_route(&route, true, &RouteOptions::default());
+    assert_eq!(d.points.first().unwrap().position, a.position);
+    assert_eq!(d.points.last().unwrap().position, a.position);
+    assert!(d.points.len() > 3);
+}
+
+#[test]
+fn densify_route_keeps_unroutable_legs_authored() {
+    // Two parallel strips with no shared intersection — the anchors
+    // sit on roads that cannot connect, so the authored leg stands.
+    let a = [[0.0, 0.0, 0.0], [0.0, 0.0, 50.0]];
+    let bpts = [[100.0, 0.0, 0.0], [100.0, 0.0, 50.0]];
+    let mk = |id: u16, c: &[[f32; 3]]| {
+        road(
+            id,
+            c,
+            vec![1],
+            side(0, &[(3.75, offset(c, 3.75, 0.0))], &[], 2),
+            side(0, &[(-3.75, offset(c, -3.75, 0.0))], &[], 2),
+            dead_end(),
+            dead_end(),
+        )
+    };
+    let g = NavGraph::build(&bai(vec![mk(0, &a), mk(1, &bpts)], Vec::new())).graph;
+    let route = OpponentRoute {
+        points: vec![waypoint(0.0, 0.0, 25.0), waypoint(100.0, 0.0, 25.0)],
+    };
+    let d = g.densify_route(&route, false, &RouteOptions::default());
+    assert_eq!(d, route);
 }

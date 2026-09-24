@@ -26,6 +26,8 @@
 //! T-junction) the straightest exit is returned as a documented
 //! fallback rather than inventing connectivity.
 
+use crate::opponent::{OpponentRoute, OpponentRoutePoint};
+use bevy::prelude::Vec3;
 use mm2_formats::aimap::Aimap;
 use mm2_formats::bai::{AmbientType, Bai, End, Side, VehicleRule};
 use std::collections::{BTreeSet, BinaryHeap, HashMap};
@@ -1430,8 +1432,17 @@ impl NavGraph {
     /// height, and [`LaneQuery::rooms`] can hard-filter by PSDL room
     /// when stacked lanes are genuinely ambiguous.
     pub fn nearest_lane(&self, point: [f32; 3], query: &LaneQuery) -> Option<LaneHit> {
-        let mut best: Option<LaneHit> = None;
-        let mut best_d2 = query.max_distance * query.max_distance;
+        self.lane_hits(point, query).into_iter().next()
+    }
+
+    /// Every eligible lane within `query.max_distance` of `point`,
+    /// nearest first — the candidate set [`nearest_lane`] picks its
+    /// winner from. [`NavGraph::route_candidates`] consumes this when
+    /// a query point sits on a road whose direction the snap alone
+    /// cannot choose.
+    pub fn lane_hits(&self, point: [f32; 3], query: &LaneQuery) -> Vec<LaneHit> {
+        let max_d2 = query.max_distance * query.max_distance;
+        let mut hits = Vec::new();
         for idx in self.grid.candidates(point, query.max_distance) {
             let lane = &self.lanes[idx as usize];
             if let Some(kind) = query.kind
@@ -1452,16 +1463,16 @@ impl NavGraph {
                 continue;
             };
             let d2 = dist2(hit.point, point);
-            if d2 <= best_d2 {
-                best_d2 = d2;
-                best = Some(LaneHit {
+            if d2 <= max_d2 {
+                hits.push(LaneHit {
                     lane: lane.id,
                     distance: d2.sqrt(),
                     ..hit
                 });
             }
         }
-        best
+        hits.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+        hits
     }
 
     /// Bounded A* route between two world points. Both ends snap to
@@ -1484,25 +1495,102 @@ impl NavGraph {
         let goal = self
             .nearest_lane(to, &query)
             .ok_or(RouteError::NoGoalLane)?;
-        let start_arc = self.lane(start.lane).and_then(|l| l.arc);
-        let goal_arc = self.lane(goal.lane).and_then(|l| l.arc);
-        let (Some(start_arc), Some(goal_arc)) = (start_arc, goal_arc) else {
-            return Err(RouteError::NoStartLane);
-        };
+        self.route_search(&[start], &[goal], to, options)
+    }
 
+    /// Bounded A* route like [`NavGraph::route`], but both endpoints
+    /// may enter through *any* routable lane plausibly under the query
+    /// point rather than the single nearest one: the candidate set is
+    /// every lane within [`ENTRY_TOLERANCE`] of the nearest snap — a
+    /// road's whole carriageway, so both travel directions compete on
+    /// a two-way street — and each candidate arc is seeded at its snap
+    /// distance, so the winning path is measured from where the point
+    /// actually sits. The direction leading to the goal wins instead
+    /// of whichever side snapped a hair closer; a lane a level or a
+    /// block away only wins when its path beats the plausible entries
+    /// by more than its extra snap distance.
+    ///
+    /// [`NavGraph::densify_route`] uses this because sparse `.opp`
+    /// anchors land on arbitrary spots of a road — the nearest-lane
+    /// snap alone picks the travel direction essentially at random.
+    pub fn route_candidates(
+        &self,
+        from: [f32; 3],
+        to: [f32; 3],
+        options: &RouteOptions,
+    ) -> Result<Route, RouteError> {
+        let query = LaneQuery::vehicles(options.max_snap);
+        let starts = self.lane_hits(from, &query);
+        if starts.is_empty() {
+            return Err(RouteError::NoStartLane);
+        }
+        let goals = self.lane_hits(to, &query);
+        if goals.is_empty() {
+            return Err(RouteError::NoGoalLane);
+        }
+        let plausible = |hits: &[LaneHit]| -> Vec<LaneHit> {
+            let nearest = hits[0].distance;
+            hits.iter()
+                .filter(|h| h.distance <= nearest + ENTRY_TOLERANCE)
+                .cloned()
+                .collect()
+        };
+        self.route_search(&plausible(&starts), &plausible(&goals), to, options)
+    }
+
+    /// The shared A* body behind [`NavGraph::route`] and
+    /// [`NavGraph::route_candidates`]. Every distinct arc owning a
+    /// `starts` lane is seeded at that lane's snap distance; the first
+    /// `goals` arc popped wins. Deterministic — tie-breaks fall on
+    /// [`ArcId`] as in [`NavGraph::route`].
+    fn route_search(
+        &self,
+        starts: &[LaneHit],
+        goals: &[LaneHit],
+        to: [f32; 3],
+        options: &RouteOptions,
+    ) -> Result<Route, RouteError> {
         let mut came: HashMap<ArcId, ArcId> = HashMap::new();
         let mut g: HashMap<ArcId, f32> = HashMap::new();
         let mut heap: BinaryHeap<QueueEntry> = BinaryHeap::new();
-        g.insert(start_arc, 0.0);
-        heap.push(QueueEntry {
-            cost: heuristic(self.arc(start_arc).exit_point, to),
-            arc: start_arc,
-        });
+        for hit in starts {
+            if let Some(arc) = self.lane(hit.lane).and_then(|l| l.arc) {
+                let e = g.entry(arc).or_insert(f32::INFINITY);
+                if hit.distance < *e {
+                    *e = hit.distance;
+                }
+            }
+        }
+        if g.is_empty() {
+            return Err(RouteError::NoStartLane);
+        }
+        for (&arc, &cost) in &g {
+            heap.push(QueueEntry {
+                cost: cost + heuristic(self.arc(arc).exit_point, to),
+                arc,
+            });
+        }
+        let goal_arcs: BTreeSet<ArcId> = goals
+            .iter()
+            .filter_map(|h| self.lane(h.lane).and_then(|l| l.arc))
+            .collect();
+        if goal_arcs.is_empty() {
+            return Err(RouteError::NoGoalLane);
+        }
+
         let mut expanded = 0usize;
-        let mut found = false;
+        let mut found: Option<ArcId> = None;
         while let Some(QueueEntry { arc, .. }) = heap.pop() {
-            if arc == goal_arc {
-                found = true;
+            // A seeded arc that is also a goal arc only answers the
+            // query outright when the goal lies ahead of the start in
+            // travel direction — accepting it otherwise would claim a
+            // route that drives the lane backwards. An arc reached
+            // through `came` (looped back onto itself, or a non-seed
+            // arrival) is always a real answer.
+            if goal_arcs.contains(&arc)
+                && (came.contains_key(&arc) || self.forward_on_arc(starts, goals, arc))
+            {
+                found = Some(arc);
                 break;
             }
             expanded += 1;
@@ -1526,22 +1614,49 @@ impl NavGraph {
                 }
             }
         }
-        if !found {
+        let Some(goal_arc) = found else {
             return Err(RouteError::Unreachable { expanded });
-        }
+        };
 
+        // Walk the predecessor chain back to whichever seeded arc
+        // reached the goal — seed arcs carry no `came` entry, and the
+        // chain strictly decreases `g`, so the walk always terminates.
         let mut steps = vec![goal_arc];
-        while steps.last() != Some(&start_arc) {
-            steps.push(came[steps.last().unwrap()]);
+        while let Some(&prev) = came.get(steps.last().unwrap()) {
+            steps.push(prev);
         }
         steps.reverse();
+        let start_arc = steps[0];
+        let hit_on = |hits: &[LaneHit], arc: ArcId| -> LaneHit {
+            hits.iter()
+                .filter(|h| self.lane(h.lane).and_then(|l| l.arc) == Some(arc))
+                .min_by(|a, b| a.distance.total_cmp(&b.distance))
+                .cloned()
+                .expect("a routed arc owns at least one candidate lane")
+        };
         let length = steps.iter().map(|a| self.arc(*a).length.max(0.0)).sum();
         Ok(Route {
-            start,
-            goal,
+            start: hit_on(starts, start_arc),
+            goal: hit_on(goals, goal_arc),
             steps,
             length,
         })
+    }
+
+    /// Same-arc sanity for [`route_search`]: a candidate start arc
+    /// that is also a goal arc answers the query directly only when
+    /// the goal's snap lies ahead of the start's along the travel
+    /// direction (within a centimetre of slack for equal snaps).
+    /// `None` on either side fails the check — a hit with no lane on
+    /// the arc cannot be the one that reached it.
+    fn forward_on_arc(&self, starts: &[LaneHit], goals: &[LaneHit], arc: ArcId) -> bool {
+        let s = |hits: &[LaneHit]| -> Option<f32> {
+            hits.iter()
+                .filter(|h| self.lane(h.lane).and_then(|l| l.arc) == Some(arc))
+                .min_by(|a, b| a.distance.total_cmp(&b.distance))
+                .map(|h| self.travel_distance(h.lane, h.along))
+        };
+        matches!((s(starts), s(goals)), (Some(a), Some(b)) if b >= a - 1e-3)
     }
 
     /// Route probe between two BAI road indices — the shared helper
@@ -1672,7 +1787,172 @@ impl NavGraph {
         let pick = ((to_arc.lanes.len() - 1) as f32 * rank).round() as usize;
         to_arc.lanes.get(pick).copied()
     }
+
+    /// Sample `route` into world positions every `step` metres of
+    /// lane, following each step arc in travel direction and bridging
+    /// arc boundaries with the junction-interior [`crossing_path`].
+    /// Lane choice follows [`transfer_lane`]'s rank-preserving rule —
+    /// the same lane-keeping [`advance_cursor`] applies live. The
+    /// first step starts at `route.start`'s snap point and the last
+    /// ends at `route.goal`'s, so the path covers exactly the routed
+    /// portion between the query endpoints.
+    ///
+    /// This is the route-planning side of F15's route/control split:
+    /// the polyline is *where to drive*, not how.
+    pub fn route_path(&self, route: &Route, step: f32) -> Vec<Vec3> {
+        let step = step.max(1.0);
+        let mut out: Vec<Vec3> = Vec::new();
+        let n = route.steps.len();
+        let mut lane = route.start.lane;
+        for (i, &arc_id) in route.steps.iter().enumerate() {
+            if i > 0 {
+                lane = self
+                    .transfer_lane(lane, arc_id)
+                    .or_else(|| self.arc(arc_id).lanes.first().copied())
+                    .unwrap_or(lane);
+            }
+            let Some(l) = self.lane(lane) else { continue };
+            let mut s0 = 0.0;
+            let mut s1 = l.length;
+            if i == 0 {
+                s0 = self.travel_distance(lane, route.start.along);
+            }
+            if i == n - 1 {
+                s1 = self.travel_distance(lane, route.goal.along);
+            }
+            if s1 > s0 {
+                let mut s = s0;
+                loop {
+                    if let Some(p) = self.sample_lane(lane, s) {
+                        out.push(Vec3::from(p.position));
+                    }
+                    if s >= s1 {
+                        break;
+                    }
+                    s = (s + step).min(s1);
+                }
+            }
+            // The lane ends at the junction boundary; the crossing
+            // path carries the path through the junction interior to
+            // the next arc's lane start.
+            if let Some(&next_arc) = route.steps.get(i + 1)
+                && let Some(next_lane) = self
+                    .transfer_lane(lane, next_arc)
+                    .or_else(|| self.arc(next_arc).lanes.first().copied())
+                && let Some(path) = self.crossing_path(lane, next_lane)
+            {
+                out.extend(path.points.iter().skip(1).map(|p| Vec3::from(*p)));
+            }
+        }
+        out
+    }
+
+    /// Re-express a sparse authored driving line in road geometry the
+    /// physics world can actually carry (F15-B.6, building on F09's
+    /// shared graph). `.opp` anchors sit 40–200 m apart and are route
+    /// *intent* — the straight polyline is not claimed to be the
+    /// driven line (retail's own opponent control is unverified; the
+    /// anchors are verified course records). The authored anchors are
+    /// kept verbatim so gate binding and checkpoint semantics are
+    /// unchanged; what changes is the path *between* them:
+    ///
+    /// - A leg whose straight line stays within [`ROUTE_CORRIDOR`] of
+    ///   a routable vehicle lane already follows the road network —
+    ///   it keeps its authored line.
+    /// - A leg leaving the corridor (crossing a block, diving off an
+    ///   elevated road) is replaced by the [`route_candidates`] path
+    ///   sampled along its lanes — the `sf circuit:0` Telegraph Hill
+    ///   case, where the authored straight line crosses bungalow
+    ///   rooftops and the drivable course is the L-shaped street
+    ///   around the block.
+    /// - When no route connects the endpoints the authored leg stands
+    ///   — the anchor may sit off the network entirely (a gate in a
+    ///   park), and a wrong guess is worse than the authored intent.
+    ///
+    /// `closed` marks the circuit convention (last anchor near the
+    /// first): the wrap leg is densified too and the first anchor is
+    /// re-emitted at the tail so the loop keeps closing on it.
+    pub fn densify_route(
+        &self,
+        route: &OpponentRoute,
+        closed: bool,
+        options: &RouteOptions,
+    ) -> OpponentRoute {
+        let n = route.points.len();
+        if n < 2 {
+            return route.clone();
+        }
+        let legs = if closed { n } else { n - 1 };
+        let mut out: Vec<OpponentRoutePoint> = Vec::with_capacity(n);
+        out.push(route.points[0].clone());
+        for leg in 0..legs {
+            let a = &route.points[leg];
+            let b = &route.points[(leg + 1) % n];
+            if self.leg_leaves_corridor(a.position, b.position)
+                && let Ok(r) = self.route_candidates(a.position.into(), b.position.into(), options)
+            {
+                for p in self.route_path(&r, DENSIFY_STEP) {
+                    // Interior samples only — the endpoints are the
+                    // authored anchors themselves.
+                    if p.distance(a.position) > DENSIFY_STEP
+                        && p.distance(b.position) > DENSIFY_STEP
+                    {
+                        out.push(OpponentRoutePoint {
+                            position: p,
+                            // An inserted point is never a staging
+                            // record — `brake` carries a heading only
+                            // on authored rows.
+                            brake: 0.0,
+                            ..b.clone()
+                        });
+                    }
+                }
+            }
+            let dest = (leg + 1) % n;
+            // The wrap leg's destination is already the emitted head —
+            // re-emit it so the densified loop still closes on the
+            // first anchor instead of a lane sample up to `max_snap`
+            // away from it.
+            if dest != 0 || out.last().is_some_and(|p| p.position != b.position) {
+                out.push(b.clone());
+            }
+        }
+        OpponentRoute { points: out }
+    }
+
+    /// Whether the straight leg `a`→`b` departs the road corridor —
+    /// any sample along it (endpoints included: an off-network anchor
+    /// means the approach leg needs routing too) sitting further than
+    /// [`ROUTE_CORRIDOR`] from every routable vehicle lane.
+    fn leg_leaves_corridor(&self, a: Vec3, b: Vec3) -> bool {
+        let query = LaneQuery::vehicles(ROUTE_CORRIDOR);
+        let d = b - a;
+        let len = d.length();
+        let steps = (len / CORRIDOR_STEP).ceil().max(1.0) as usize;
+        (0..=steps).any(|i| {
+            let p = a + d * (i as f32 / steps as f32);
+            self.nearest_lane(p.into(), &query).is_none()
+        })
+    }
 }
+
+/// Extra snap distance (m) beyond the nearest hit that still counts
+/// as "the road the point sits on" for [`NavGraph::route_candidates`]
+/// — sized to a wide multi-lane carriageway so both directions of the
+/// same road compete, without letting a neighbouring block's lanes
+/// pretend to be the endpoint.
+const ENTRY_TOLERANCE: f32 = 12.0;
+/// How close (m) a straight route leg must stay to routable vehicle
+/// lanes to count as already following the road network — roughly a
+/// wide road's half-width plus a sidewalk, so an authored line hugging
+/// a boulevard keeps its authored shape while a leg crossing a block
+/// interior is re-pathed.
+const ROUTE_CORRIDOR: f32 = 14.0;
+/// Sampling step (m) along a leg for the corridor test.
+const CORRIDOR_STEP: f32 = 8.0;
+/// Spacing (m) between lane samples [`NavGraph::densify_route`]
+/// inserts on a re-pathed leg.
+const DENSIFY_STEP: f32 = 8.0;
 
 fn dir_index(dir: TravelDir) -> usize {
     match dir {

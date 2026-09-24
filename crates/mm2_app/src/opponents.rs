@@ -83,10 +83,11 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_assets::Vfs;
 use mm2_game::{
-    BreakPartSpec, DamageSignals, DamageSpec, ObjectIdentity, OpponentRoster, OpponentRoute,
-    OpponentSpec, ParticipantState, Player, PlayerControl, RaceDefinition, RaceProgress, RaceState,
-    RecoveryPolicy, Session, SessionEntity, SmokePolicy, SparkPolicy, StuckSpec, VehicleBreaks,
-    VehicleDamage, VehicleRecovery, VehicleSmoke, VehicleSparks, VehicleStuck, relative_bearing,
+    BreakPartSpec, DamageSignals, DamageSpec, NavGraph, ObjectIdentity, OpponentRoster,
+    OpponentRoute, OpponentSpec, ParticipantState, Player, PlayerControl, RaceDefinition,
+    RaceProgress, RaceState, RecoveryPolicy, RouteOptions, Session, SessionEntity, SmokePolicy,
+    SparkPolicy, StuckSpec, VehicleBreaks, VehicleDamage, VehicleRecovery, VehicleSmoke,
+    VehicleSparks, VehicleStuck, relative_bearing,
 };
 use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState, vehicle_bundle};
 use tracing::{info, warn};
@@ -204,13 +205,21 @@ const CATCH_UP_LEG_REF: f32 = 80.0;
 
 /// Per-opponent controller state — a component on the vehicle so
 /// session teardown despawns it with everything else the session owns.
-/// Carries the authored [`OpponentSpec`] verbatim: the vehicle id (for
-/// diagnostics), the raw parameter tail, and the resolved route being
-/// chased.
+/// Carries the authored [`OpponentSpec`] verbatim (vehicle id, raw
+/// parameter tail, authored route record) plus [`OpponentDriver::route`]
+/// — the driving line actually chased, which session load may have
+/// re-pathed through the road graph (F15-B.6).
 #[derive(Component, Debug, Clone)]
 pub struct OpponentDriver {
     /// The authored lineup entry this participant was spawned from.
     pub spec: OpponentSpec,
+    /// The route the driver chases — the authored `.opp` line verbatim
+    /// when no road graph was bound at session load, else
+    /// [`NavGraph::densify_route`]'s re-pathed copy: authored anchors
+    /// kept verbatim with lane-sampled points spliced between them on
+    /// legs whose straight line leaves the road corridor. `None` when
+    /// the entry resolved no route at all.
+    pub route: Option<OpponentRoute>,
     /// Control-law tuning resolved from the authored parameter tail at
     /// spawn (F15-B.2): `maxThrottle` → the throttle ceiling, the
     /// corner-speed multiplier → the corner-brake engage speed.
@@ -554,6 +563,19 @@ pub fn reanchor_pose(
     }
 }
 
+/// The driving line a participant chases: `route` verbatim when no
+/// road graph was bound at session load, else
+/// [`NavGraph::densify_route`]'s re-pathed copy (F15-B.6). Ambient
+/// closures are deliberately *not* applied — an aimap `[Exceptions]`
+/// row forbids ambient traffic on a road, it does not remove the road
+/// from a race course the `.opp` anchors route through.
+pub fn driving_route(route: &OpponentRoute, nav: Option<&NavGraph>) -> OpponentRoute {
+    match nav {
+        Some(g) => g.densify_route(route, route_is_closed(route), &RouteOptions::default()),
+        None => route.clone(),
+    }
+}
+
 /// Spawn every roster entry that loads as a real participant: its own
 /// authored vehicle (opponent tuning preferred), a session-minted
 /// `ObjectId`/`PlayerId`, `PlayerControl::Ai`, the session's authority
@@ -575,6 +597,7 @@ pub fn spawn_opponents(
     session: &mut Session,
     player_pos: Vec3,
     player_yaw: f32,
+    nav: Option<&NavGraph>,
 ) -> usize {
     for issue in &roster.issues {
         warn!(issue = %issue, "opponent roster issue");
@@ -594,11 +617,13 @@ pub fn spawn_opponents(
             }
         };
         let (mut pos, yaw) = spawn_pose(definition, i, spec, player_pos, player_yaw);
+        // The chased line is the authored route re-pathed through the
+        // road graph where one is bound — `spec` itself stays verbatim.
+        let route = spec.route.as_ref().map(|r| driving_route(r, nav));
         // First chase index along the authored facing — early anchors
         // behind the staged heading are left for the next pass, not
         // chased off the spawn line.
-        let next = spec
-            .route
+        let next = route
             .as_ref()
             .map(|r| initial_route_index(r, pos, yaw))
             .unwrap_or(0);
@@ -628,6 +653,7 @@ pub fn spawn_opponents(
                 RaceProgress::new(definition),
                 OpponentDriver {
                     spec: spec.clone(),
+                    route,
                     tuning: ScriptedTuning {
                         throttle_cap: drive_params.max_throttle.unwrap_or(1.0).clamp(0.0, 1.0),
                         corner_speed: ScriptedTuning::DEFAULT.corner_speed
@@ -982,7 +1008,7 @@ pub fn opponent_drive(
         );
         let target = if !session.is_playing() || locked || !racing {
             None
-        } else if let Some(route) = &driver.spec.route {
+        } else if let Some(route) = &driver.route {
             let (next, target) = route_target(route, driver.next, pos.0);
             driver.next = next;
             target
@@ -1019,7 +1045,7 @@ pub fn opponent_drive(
                 driver.stuck_frames += 1;
             }
             if driver.stuck_frames >= REANCHOR_FRAMES
-                && let Some(route) = driver.spec.route.clone()
+                && let Some(route) = driver.route.clone()
             {
                 let gates: Vec<mm2_game::Checkpoint> = race
                     .map(|r| {

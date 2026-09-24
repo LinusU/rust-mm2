@@ -971,6 +971,7 @@ fn driver(avoid_players: bool) -> OpponentDriver {
             params: vec![],
             route: None,
         },
+        route: None,
         tuning: ScriptedTuning::DEFAULT,
         avoid_players,
         next: 0,

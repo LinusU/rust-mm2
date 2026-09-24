@@ -1,62 +1,97 @@
-# Last iteration — repair: F15-B.5 external-review doc findings
+# Last iteration — F15-B.6: navigation-backed `.opp` route densification
 
-Doc-drift repair on `ralph/night` (baseline `df5d6c9`; external review of
-the F15-B.5 candidate **failed** on two false statements in the committed
-record — both doc-only). No implementation change: the review confirmed
-the slice's code, tests and retail reproduction as sound, so the smallest
-real defect was the record itself.
+Task slice on `ralph/night` (baseline `2070fb2`; previous external review
+of the F15-B.5 doc-repair passed with no blocking findings). Selected the
+highest-value ready work: the `sf circuit:0` p3→p4 descent wall F15-B.5
+recorded as its open remainder — it stalled both the routed scripted
+player (`cp=2/9`, 21 recoveries) and the AI field (`opp_rec=5`).
 
-## Root cause
+## Root cause — route fidelity, not physics
 
-Iteration 16's committed record misreported two facts:
+F15-B.5's record guessed "steep-slope/collider fidelity". Instrumented
+probing disproved that:
 
-1. **Wrong test count.** `PLAN.md`'s F15-B.5 row and `LAST_ITERATION.md`
-   claimed `Tests +5` in `crates/mm2_app/tests/bot.rs`; the diff added 11
-   `#[test]` fns (7 → 18 — the "18 total" figure was right). Verified:
-   `git show f79f48f:crates/mm2_app/tests/bot.rs | grep -c '#\[test\]'`
-   → 7, working tree → 18.
-2. **Misdescribed bind condition.** `LAST_ITERATION.md` said
-   `load_session_world` binds `ScriptedRoute` "when `ScriptedDrive` is
-   present" and the PLAN row said "when `--bot` runs". The code at
-   `crates/mm2_app/src/session.rs:984` inserts it unconditionally in
-   every event session whose roster resolved a route — no `ScriptedDrive`
-   check exists; it is dormant without `--bot` because `scripted_drive`
-   is resource-gated, exactly as the code comment already stated. Chose
-   the doc correction over gating the insert (review offered either; the
-   unconditional bind is harmless and the comment was already truthful).
+- The `.opp` p3→p4 straight line crosses Telegraph Hill *through* two
+  rows of bungalows: raycast profiles show a ~7 m step up onto roof
+  terraces at y≈40.5/46.4 while the adjacent street runs at y≈33 and
+  the bottom street at y≈18.9. A 33 m/s jump attempt still wedged on a
+  prop wall — the line is undrivable at any speed.
+- A direct physics probe drove the real street (BAI road 340, an
+  L-shaped descent around the block) at ~40 m/s with no drama.
+- Every retail `.opp` is sparse (8–20 anchors/lap, legs of 40–200 m) —
+  the polyline is course *intent*, not a literal centreline.
+
+So the fix derives the driven line from the authored road graph between
+anchors rather than chasing the straight polyline.
 
 ## What changed
 
-- `docs/ralph/PLAN.md` F15-B.5 row: `Tests +5` → `Tests +11`
-  (`tests/bot.rs` 7→18); bind description corrected to "every event
-  session whose roster resolved a route — dormant without `--bot`".
-- `docs/ralph/PLAN.md` next-slice preamble: this repair recorded.
-- This file rewritten for the repair iteration.
+`crates/mm2_game/src/nav.rs`:
+
+- `lane_hits()` — every eligible lane snap, nearest-first;
+  `nearest_lane()` now picks its head.
+- `route_candidates()` + shared `route_search()` — multi-entry A*:
+  every lane within `ENTRY_TOLERANCE` (12 m) of the nearest snap seeds
+  its arc at snap cost, so both directions of a carriageway compete
+  without neighbouring roads pretending to be the endpoint.
+  `forward_on_arc()` rejects a same-arc goal lying *behind* the start
+  in travel direction. On the real leg the search resolves a single
+  258 m `road 340 Backward` arc vs the old single-snap 699 m uphill
+  detour.
+- `route_path()` — samples routed arcs in travel direction via
+  `transfer_lane` rank preservation + `crossing_path` junction chords.
+- `densify_route()` — a leg leaving `ROUTE_CORRIDOR` (14 m) of every
+  vehicle lane is re-pathed at `DENSIFY_STEP` (8 m); authored anchors
+  stay verbatim (gate binding/checkpoint semantics unchanged); closed
+  routes densify the wrap leg and re-emit the head anchor; unroutable
+  legs keep the authored line rather than inventing geometry.
+
+`crates/mm2_app/src/opponents.rs` / `session.rs`:
+
+- `OpponentDriver.route` carries the derived driving line; `spec` stays
+  authored verbatim. `driving_route()` applies `densify_route` with
+  `RouteOptions::default` — the event aimap's `[Exceptions]` ambient
+  closures are deliberately *not* consumed (they forbid ambient traffic
+  on a road; they don't remove a road from a race course —
+  implementation choice).
+- `load_session_world` builds the city's `NavGraph` once per event
+  (~2 ms measured on sf.bai) and densifies the bot's `ScriptedRoute`
+  plus every opponent route; a failed/absent graph leaves routes
+  verbatim.
 
 ## Verification
 
-- Facts re-verified against the tree: the `session.rs` insert site has no
-  `ScriptedDrive` check; the 7→18 test growth confirmed by the commands
-  above.
-- Gates (2026-09-24, this tree; doc-only diff, run anyway for a clean
-  candidate record): `cargo fmt --all -- --check` clean;
+- Tests +7 (`crates/mm2_game/tests/nav.rs` 25→32): goalward-direction
+  entry where single-snap `route()` dead-ends, stacked-level snap
+  preference, lane-walk sampling incl. junction chords, corridor-leg
+  verbatim, off-road re-path, closed-wrap re-emission, unroutable-leg
+  verbatim. One test-constructor field added in
+  `crates/mm2_app/tests/opponents.rs`.
+- Retail (`fnv1a64:e91e6cd4b2ae30d9`, headless):
+  `sf circuit:0 --bot --frames 9000` → `status=pass cp=4/9 lap=2/3
+  pos=1/5 opp_rec=4` — the player completes lap 1 (pre-slice:
+  `cp=2/9` + 21 recoveries wedged on the hill). An instrumented run
+  under the candidate code showed all four opponents clearing gates
+  (2/4/3/2) vs the old shared wall.
+- London regression: `london circuit:0 --bot --frames 1500` →
+  `status=pass cp=3/6 pos=5/8 opp_rec=1` — one gate behind the
+  reviewer's pre-slice `cp=4/6 pos=1/8`; a densified-line pacing
+  delta, not a stall. At 9000f one opponent finished (`opp=1/7`).
+- Gates (this tree): `cargo fmt --all -- --check` clean;
   `cargo clippy --workspace --all-targets --all-features -- -D warnings`
   clean; `cargo test --workspace` — 67 suites, 0 failures.
 
 ## Not done / open
 
-- F15-B.5's technical remainder stands unchanged: the `p3→p4` hillside
-  descent on `sf circuit:0` is not drivable — the car slides ~15 m off
-  the line's crown into a parallel ditch and grinds at ~1–2 m/s through
-  disclosed re-anchors; the AI field shares the wall (`opp=0/4
-  opp_rec=5`). Next blocker is steep-slope/collider fidelity
-  (F14-B/F15-B physics or city-collider task), not routing.
-- Review parity note (non-blocking): scripted-player re-anchors are
-  disclosed via `info!` + `ScriptedRoute::reanchors` only — the smoke
-  record has no field like opponent `opp_rec=`. A `p_rec=`-style field
-  would be a small ready follow-up.
-- Iteration-16 dev-trace claims (per-gate `offd<5`, landing `offd≈1`,
-  the ditch-grind description) remain post-hoc unverifiable — they came
-  from per-tick instrumentation; the end-of-run record and the 6
-  disclosed re-anchor log lines are consistent but do not prove the
-  intermediate values.
+- F15-B parent's remaining items stand: AC06 measured-difficulty leg,
+  representative avoidance matrix, authored-tail columns
+  (`weirdPathfinding`/`distancePadding`/`cornerBrakingThreshold`),
+  `avoidOpponents` polarity.
+- The scripted re-anchor disclosure gap noted by review stands:
+  `p_rec=`-style field still absent (re-anchors are `info!` +
+  `ScriptedRoute::reanchors` only).
+- GPU/rendered output not exercised — headless physics evidence only.
+- Whether retail opponents actually route on the BAI network between
+  `.opp` anchors is unverified (plausible inference from the sparse
+  data + authored road graph; the densified line is our implementation
+  choice, recorded as such).

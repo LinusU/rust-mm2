@@ -972,6 +972,33 @@ pub fn load_session_world(
     // can own the release (one `RaceStarted`, one unlock — AC03).
     match event_race {
         Some((def, roster, rewards, availability, _aimap)) => {
+            // F15-B.6: the road graph re-paths sparse `.opp` legs that
+            // leave the street corridor — `.opp` anchors are course
+            // intent, and the retail straight line is not the driven
+            // line (sf circuit:0's p3→p4 crosses Telegraph Hill
+            // rooftops where the drivable course is the L-shaped
+            // street around the block). A failed/absent graph leaves
+            // every route verbatim rather than sinking the session.
+            let nav = match &config.world {
+                WorldMode::City { psdl } => {
+                    let stem = std::path::Path::new(psdl)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(psdl.as_str());
+                    match mm2_content::load_nav_graph(&vfs.0, stem) {
+                        Ok(b) => Some(b.graph),
+                        Err(e) => {
+                            warn!(
+                                error = %e,
+                                "nav graph failed to load — opponent routes stay verbatim"
+                            );
+                            None
+                        }
+                    }
+                }
+                WorldMode::DevWorld => None,
+            };
+            let nav = nav.as_ref();
             commands
                 .entity(vehicle)
                 .insert((RaceProgress::new(&def), TargetSelection::default()));
@@ -985,7 +1012,7 @@ pub fn load_session_world(
                 commands
                     .entity(vehicle)
                     .insert(scripted::ScriptedRoute::new(
-                        route,
+                        opponents::driving_route(&route, nav),
                         spawn.position,
                         spawn.yaw,
                     ));
@@ -1004,6 +1031,7 @@ pub fn load_session_world(
                 &mut session,
                 spawn.position,
                 spawn.yaw,
+                nav,
             );
             race::spawn_checkpoint_markers(
                 &mut commands,
