@@ -74,11 +74,18 @@
 //! at its own stop line is not "inside the box", or two competing
 //! approaches would hold each other forever. `NeverStop`/unruled
 //! approaches keep their documented free flow; their overlaps remain
-//! covered by the corridor sense and the landing clearance. Two
-//! approaches admitted on the same tick can still share the box —
-//! the yield is a bounded approximation over the same position
-//! snapshot the corridor sense reads, and the colliders resolve any
-//! residual overlap physically.
+//! covered by the corridor sense and the landing clearance.
+//!
+//! F10-B.11 closes the same-tick hole in that yield: the blocker and
+//! bound-for sets are frame-start snapshots, so a second eligible car
+//! evaluated after another car's commit in the same tick used to read
+//! the box empty and take the interior alongside it. A commit now
+//! claims its junction in the controller ([`Junctions::commit`]) for
+//! the rest of the tick — gated approaches read the claim as an
+//! occupied box — and `advance_tick` sheds it once the car is
+//! physically inside and the snapshot sees it. A rolled-back commit
+//! (a rejected landing) releases the claim immediately. Unruled
+//! approaches never consult the record — same authored free flow.
 //!
 //! F10-B.6 adds the kinematic→dynamic handover (F10-AC03's collision
 //! leg — the spec's "transition to dynamic behaviour without
@@ -986,6 +993,13 @@ pub fn drive_ambient(
             }
             LaneAdvance::Entered => {
                 traffic.crossings += 1;
+                // The junction this commit entered (F10-B.11): claimed
+                // for the rest of the tick so a second eligible car
+                // evaluated later this tick cannot take the box
+                // alongside it — `blockers`/`bound_for` are frame-start
+                // snapshots and cannot see a same-tick commit.
+                let entered_ix =
+                    Junctions::approach(&traffic.graph, previous.lane).map(|(ix, _, _)| ix);
                 // Occupied-transfer check (F10-AC04's junction leg):
                 // a landing inside `enter_clearance` of a live
                 // blocker would materialise the car inside a junction
@@ -1010,7 +1024,13 @@ pub fn drive_ambient(
                     car.cursor = previous;
                     car.speed = 0.0;
                     traffic.crossings -= 1;
+                    if let Some(ix) = entered_ix {
+                        traffic.junctions.release(ix);
+                    }
                 } else {
+                    if let Some(ix) = entered_ix {
+                        traffic.junctions.commit(ix);
+                    }
                     // Committed to the box: the approach releases its
                     // FCFS slot — the box-yield holds the next car
                     // until this one physically clears the junction.

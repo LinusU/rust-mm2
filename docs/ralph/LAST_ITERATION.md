@@ -1,77 +1,106 @@
-# Last iteration — F13-C.6: deep-course extended-budget probe + C.5 review-finding repairs
+# Last iteration — F10-B.11: same-tick junction-entry arbitration + C.6 review-finding repairs
 
-Task slice on `ralph/night` (baseline `b96f5c1`, the externally
-checked F13-C.5 commit). Selected the named F13-C remainder — the
-deep-course budget question — plus two C.5-review doc repairs
-(committed separately as `feccdc4`). No production code changed.
+Task slice on `ralph/night` (baseline `e3e2875`, the externally
+checked F13-C.6 commit). Selected the F10-B "queue-through-
+intersection priority" remainder's same-tick half — plus three
+C.6-review doc repairs (committed separately as `e72304f`).
 
-## What ran
+## What changed
 
-Retail install `fnv1a64:e91e6cd4b2ae30d9` (read-only), Apple M1, code
-commit `feccdc4` (docs-only over `7fb6cf6` — identical code, stamped
-in every leg log). Every event whose C.4 parked-Pro leader topped out
-at ≤3 gates inside the ~197 s budget re-ran at 2× budget — 11 legs,
-each `mm2 --mm2-path <install> --city <london|sf> --event
-checkpoint:<i> --parked --pro --headless --frames 24000` (~394 s sim):
+The junction box-yield's occupancy report (`blockers`/`bound_for`)
+is a frame-start snapshot: a second eligible car evaluated *after*
+another car's crossing commit in the same drive tick read the box
+empty, and both took the interior at once. The window is real
+wherever two gated approaches admit simultaneously — the parallel
+lanes of a green member road are the sharpest case.
 
-- **11/11 `status=pass`, exit 0.** Full comparison table in
-  `docs/race-coverage.md` §F13-C.6; raw logs + `results.txt` local at
-  `/tmp/mm2-pro-deep/` (large-capture rule).
-- **Zero added finishes** (`opp=0`, `results=0` on all 11 legs) —
-  doubling the budget bought recovery churn, not progress: field
-  re-anchors 180 → 430 (+139%) against summed banked gates
-  121 → 144 (+19%).
-- The leader advanced on 6 of 11 events (london-4's 2→5 of 6 the
-  largest move) and plateaued on 5 (london-5/9, sf-9/10/11). sf-6's
-  `vpauditt` banked all 6 checkpoints — the finish trigger arms at
-  full clearance (RACE-7) — and was still racing to it at cap: the
-  closest a deep-course opponent has come to resolving.
-- **Verdict: predominantly controller-skill-bound, not
-  budget-bound.** The deep-course residual's next lever is opponent
-  driving competence (F15-B), not longer runs. Budgets beyond ~394 s
-  remain untested.
-- Parked-control anomalies scale with budget, unchanged in kind:
-  london-4's punt loop 209 → 461 falls (`rcv=0w/461f/461r`); the same
-  spawn-edge fall loop disclosed on london-5 (122 → 348f), sf-9
-  (43 → 172f), sf-11 (49f+7w → 304f+7w). london-3's parked car took
-  `cp=1/6` at `moved=110 m` — the disclosed opponent-shove mechanism
-  driven further — plus `rcv=17w` water recoveries and `dead=10`
-  ambient cars in the spawn-adjacent pileup.
-- Physics health: `dropped` ≤218 (london-3's pileup; ≤80 sf-9, else
-  0); `peak` ≤12.8 m/s — a shoved parked car, no spikes.
+- `mm2_game::traffic::Junctions` gains a per-tick
+  `entered: BTreeSet<u16>`. `gate` reads
+  `occupied = box_occupied || entered.contains(ix)` on exactly the
+  two paths a gated rule can open (green member, FCFS head) —
+  `NeverStop`/unruled ends keep authored free flow and never
+  consult the record. `commit(ix)` claims the junction,
+  `release(ix)` undoes a rolled-back transfer, `entered(ix)`
+  exposes the state to tests/diagnostics, and `advance_tick`
+  clears the set once the next tick's physical box-yield sees the
+  committed car.
+- `mm2_app::traffic::drive_ambient`: on `LaneAdvance::Entered` the
+  junction index comes off the previous lane; the existing landing
+  occupancy check runs first — a rejected landing reverts the
+  cursor, zeroes speed, decrements `crossings`, *and* releases the
+  claim; a passing landing commits the claim, then departs the
+  FCFS slot as before.
 
-## Review-finding repairs (commit `feccdc4`)
+This is a designed approximation, disclosed: the claim serializes
+the box at tick granularity — a car already rolling when the gate
+closes stands at its lane end mid-green rather than sharing the
+box. That is consistent with the existing per-car box
+serialization (a one-tick-earlier arriver already won this), not a
+claim about original arbitration (UNK-12 stays open).
 
-Both C.5-review doc findings repaired:
+## Tests
 
-- `race-coverage.md` C.5's sf-2 hold row was transcribed `cp=1/9`;
-  the raw record says `cp=2/9` — fixed (the row's other cells were
-  already correct).
-- The "cleared early gates on 9 events" claim understated the raw
-  logs: 10 hold legs carry `cp>0`. PLAN.md's C.5 row now says 10 and
-  discloses sf-8's `cp=1` at `moved=37 m` as reading like the parked
-  legs' opponent-shove crossings rather than driven progress (the
-  other nine moved 105–589 m); `race-coverage.md`'s C.5 narrative
-  gained the same sentence so the count is derivable from the doc.
+- `mm2_game` +2: `a_committed_entry_holds_the_box_for_the_rest_of_
+  the_tick` (commit closes the now-front FCFS car on an empty
+  snapshot; `release` re-admits immediately; `advance_tick` sheds
+  the record) and `a_committed_entry_closes_a_green_approach_and_
+  not_free_flow` (a commit closes a green approach mid-phase while
+  a `NeverStop` end stays open).
+- `mm2_app` +1: `a_same_tick_second_arrival_waits_for_the_
+  committed_crossing` — two cars on parallel lanes of one signal
+  member reach the lane end in the same tick (identical speed
+  profiles make the same-tick arrival deterministic); at most one
+  committed crossing is ever active and both eventually take the
+  junction. **Verified to fail without the record** (`shared=2` —
+  both cars in the box at once). The BAI fixture gained a
+  parameterized lane-offset variant (`bai_with_lane_offsets`) so a
+  road can carry two driving lanes; the existing single-lane bytes
+  are unchanged.
 
-## Gates
+## Gates + retail sanity
 
-Docs-only iteration — no code edited; the exercised binary is
-`feccdc4`, code-identical to the externally checked `7fb6cf6`. Gates
-run explicitly on the candidate tree (all three, not just the test
-phase): `cargo fmt --all -- --check` clean, `cargo clippy --locked
+`cargo fmt --all -- --check` clean, `cargo clippy --locked
 --workspace --all-targets --all-features -- -D warnings` clean,
-`cargo test --locked --workspace` green (all suites, 0 failures). The
-11 retail legs above exercised the production session path end to end
-at 2× the matrix budget.
+`cargo test --locked --workspace` green (all suites, 0 failures;
+mm2_game traffic 39, mm2_app traffic 29).
+
+Retail install `fnv1a64:e91e6cd4b2ae30d9` (read-only), Apple M1,
+`--headless --frames 3000` against the B.9 baseline:
+
+- sf: `traf=16/16 sp=43 rec=27 dead=0 uns=0 q=0 jq=3 stuck=0 crx=59
+  jmp=0 kn=1 sig=647 sigd=3` — bit-identical to B.9.
+- london: `traf=16/16 sp=22 rec=6 dead=0 uns=0 q=0 jq=3 stuck=0
+  crx=66 jmp=0 sig=828` — vs B.9's `jq=2 crx=68`: the expected
+  deterministic signature of a same-tick pair now serializing (one
+  more held-approach observation, two fewer in-window commits).
+  No new stuck/dead/dead-end counters; `jmp=0` in both cities.
+
+## Review-finding repairs (commit `e72304f`)
+
+All three C.6-review findings repaired, each verified against the
+raw `/tmp/mm2-pro-deep/` records:
+
+- The published aggregate `160 → 380 (+138%)` did not reconcile —
+  the raw `opp_rec` sums and the doc's own table give
+  `180 → 430 (+139%)`. Fixed in `race-coverage.md`,
+  `LAST_ITERATION.md`, and `PLAN.md`.
+- The `rec`/`opp_rec` gloss claimed "escape+re-anchor count" —
+  `smoke.rs` sums only `driver.reanchors`; escapes are the
+  separate per-opponent `e` field. Gloss corrected.
+- The anomalies bullet named only london-3's `moved=110 m` as
+  exceeding the Pro matrix's ≤29 m bound; london-5 (58 m) and
+  london-9 (30 m) exceed it too — all three now named.
 
 ## Not done / open
 
-- Longer budgets beyond ~394 s remain untested; original-fidelity
-  comparisons (retail difficulty, pacing, AI competence) stay
-  unverified — engine self-metrics only.
-- F13-C stays `active`; its remaining row is the original-fidelity
-  comparison.
-- The skill-bound verdict points at F15-B's remainders
-  (`unkFlag`/`cornerBrakingThreshold`/`weirdPathfinding` — research-
-  gated) as the deep-course lever.
+- Same-tick claims are tick-granular serialization — a designed
+  approximation; original junction arbitration, timings and
+  queueing discipline remain unverified (UNK-12).
+- F10-B stays `active`: collision fidelity vs AC03's full
+  checklist (player-hit feel, damage), original spawn/junction
+  timing and interior-crossing geometry, signal-prop model
+  fidelity, and the F10-AC evidence legs remain.
+- Box occupancy is still point-based (hull extents excluded);
+  props/static geometry don't occupy the box.
+- No rendered/manual playtest evidence this slice — headless and
+  synthetic coverage only.

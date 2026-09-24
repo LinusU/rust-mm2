@@ -72,6 +72,17 @@ fn bai_with_rules(r0_end: u16, r1_start: u16) -> Vec<u8> {
 /// marker. The axis authors a fixed `[0,1,0]` whenever a light
 /// exists; its convention is unverified and the runtime ignores it.
 fn bai_with_lights(r0_end: (u16, Option<[f32; 3]>), r1_start: (u16, Option<[f32; 3]>)) -> Vec<u8> {
+    bai_with_lane_offsets(&[3.75], r0_end, r1_start)
+}
+
+/// `bai_with_lights` parameterized on the per-side lane offsets —
+/// extra driving lanes sit inside the sidewalk band (8.5·side), which
+/// stays the outermost curve.
+fn bai_with_lane_offsets(
+    lanes: &[f32],
+    r0_end: (u16, Option<[f32; 3]>),
+    r1_start: (u16, Option<[f32; 3]>),
+) -> Vec<u8> {
     let mut d = Vec::new();
     d.extend_from_slice(b"CAI1");
     d.extend_from_slice(&1u16.to_le_bytes());
@@ -90,23 +101,25 @@ fn bai_with_lights(r0_end: (u16, Option<[f32; 3]>), r1_start: (u16, Option<[f32;
         d.extend_from_slice(&1u16.to_le_bytes()); // room 1
         d.extend_from_slice(&7.5f32.to_le_bytes()); // half_width
         d.extend_from_slice(&15.0f32.to_le_bytes()); // base_speed
+        let curves = lanes.len() + 1; // driving lanes + one sidewalk
         for side in [1f32, -1f32] {
-            for n in [1u16, 0, 0, 1, 0] {
+            for n in [lanes.len() as u16, 0, 0, 1, 0] {
                 // lanes, trams, trains, sidewalks, ambientTypes
                 d.extend_from_slice(&n.to_le_bytes());
             }
-            for _ in 0..2 {
+            for _ in 0..curves {
                 for s in [0f32, (z1 - z0).abs()] {
                     d.extend_from_slice(&s.to_le_bytes());
                 }
             }
-            for e in [5.0f32, 9.5] {
-                d.extend_from_slice(&e.to_le_bytes());
+            for off in lanes.iter().copied().chain([8.5]) {
+                let edge = if off == 8.5 { 9.5 } else { off + 1.25 };
+                d.extend_from_slice(&edge.to_le_bytes());
             }
             d.extend_from_slice(&[0xCDu8; 40]);
-            for off in [3.75f32 * side, 8.5f32 * side] {
+            for off in lanes.iter().copied().chain([8.5]) {
                 for z in [z0, z1] {
-                    push_v3(d, [off, 0.0, z]);
+                    push_v3(d, [off * side, 0.0, z]);
                 }
             }
             for z in [z0, z1] {
@@ -1097,12 +1110,40 @@ fn junction_install(r0_end: u16, r1_start: u16) -> tempfile::TempDir {
     tmp
 }
 
+/// `junction_install` with two driving lanes per side — the
+/// same-tick-arrival test needs parallel lanes of one member road so
+/// two cars can be rolling through an open gate at once.
+fn two_lane_install(r0_end: u16, r1_start: u16) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(d, "city/test.psdl", synthetic_psdl());
+    write(
+        d,
+        "city/test.bai",
+        bai_with_lane_offsets(&[2.5, 6.0], (r0_end, None), (r1_start, None)),
+    );
+    write(d, "city/test.aimap", density0_aimap());
+    ambient_assets(d, "va_test_a");
+    ambient_assets(d, "va_test_b");
+    tmp
+}
+
 /// The fixture's single vehicle lane of a road side.
 fn lane(road: u16, side: Side) -> LaneId {
     LaneId {
         road,
         side,
         index: 0,
+        kind: LaneKind::Vehicle,
+    }
+}
+
+/// Vehicle lane `index` of a road side (inner→outer).
+fn lane_at(road: u16, side: Side, index: u16) -> LaneId {
+    LaneId {
+        road,
+        side,
+        index,
         kind: LaneKind::Vehicle,
     }
 }
@@ -1236,6 +1277,63 @@ fn a_queued_follower_reaches_the_line_and_takes_its_turn() {
         a_crossed < b_crossed,
         "the queue served out of order: {a_crossed}/{b_crossed}"
     );
+}
+
+/// F10-B.11 app-side: two cars on parallel lanes of the same member
+/// road roll through the same signal green at identical speed —
+/// they reach the lane end in the same drive tick. The
+/// blocker/bound-for snapshots are frame-start, so without the
+/// same-tick entry record the second car reads an empty box and both
+/// commit to the interior at once. The box serialises them: at most
+/// one committed crossing is ever active, and the held car still
+/// takes the junction once the box clears.
+#[test]
+fn a_same_tick_second_arrival_waits_for_the_committed_crossing() {
+    let install = two_lane_install(1, 1); // TrafficLight on both roads
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+
+    // Both on road 0's parallel right lanes — the same signal member,
+    // so a single green admits both at once. Same `along` and target
+    // speed give identical cursor motion: whenever they reach the
+    // lane end (rolling through a green, or leaving the stop line
+    // together when a held red clears) they commit the same tick.
+    let lanes = [lane_at(0, Side::Right, 0), lane_at(0, Side::Right, 1)];
+    let cars = [
+        spawn_follower(&mut app, lanes[0], 20.0, 15.0),
+        spawn_follower(&mut app, lanes[1], 20.0, 15.0),
+    ];
+
+    let mut crossed = [false; 2];
+    let mut shared = 0usize;
+    for _ in 0..3600 {
+        app.update();
+        let mut inside = 0;
+        for (i, (car, ln)) in cars.iter().zip(lanes).enumerate() {
+            let Some((_, _, cur)) = car_state(&mut app, *car) else {
+                continue;
+            };
+            if cur.crossing.is_some() {
+                inside += 1;
+            }
+            // "Took the junction" = committed a crossing or landed on
+            // the exit lane — the lane id only changes on landing.
+            crossed[i] |= cur.crossing.is_some() || cur.lane != ln;
+        }
+        shared = shared.max(inside);
+        if crossed == [true, true] {
+            break;
+        }
+    }
+    assert_eq!(
+        crossed,
+        [true, true],
+        "both eligible cars must take the junction — no deadlock"
+    );
+    assert_eq!(shared, 1, "two cars shared the junction interior at once");
 }
 
 /// Authored `TrafficLight` on both junction approaches: the two-member

@@ -1239,6 +1239,98 @@ fn a_traffic_light_cycles_one_member_road_at_a_time() {
     assert!(lit_open > 0 && lit_closed > 0, "{lit_open}/{lit_closed}");
 }
 
+/// F10-B.11: the same-tick half of the box yield. The caller's
+/// occupancy report is a frame-start snapshot, so a second eligible
+/// car evaluated after another car's commit in the same tick would
+/// read the box empty — `commit` claims the junction for the rest of
+/// the tick, `release` undoes a rolled-back transfer, and
+/// `advance_tick` sheds the record once the physical box-yield sees
+/// the car.
+#[test]
+fn a_committed_entry_holds_the_box_for_the_rest_of_the_tick() {
+    // StopSign on both approaches into the same junction.
+    let g = chain_with_rules(0, 0);
+    let mut j = Junctions::default();
+    let dwell = j.policy.stop_dwell_ticks;
+    let r0 = lane_id(0, Side::Right, 0);
+    let r1 = lane_id(1, Side::Left, 0);
+
+    // Both approaches stand at their lines and register.
+    j.advance_tick();
+    j.gate(&g, r0, car(1), true, true, false);
+    j.gate(&g, r1, car(2), true, true, false);
+    assert_eq!(j.waiting(), 2);
+    for _ in 0..dwell {
+        j.advance_tick();
+    }
+
+    // The head is admitted and commits — its FCFS slot releases and
+    // the box is claimed for the rest of the tick, so the now-front
+    // car stays closed even with an empty snapshot.
+    assert_eq!(
+        j.gate(&g, r0, car(1), true, true, false),
+        JunctionGate::Open
+    );
+    j.depart(car(1));
+    j.commit(0);
+    assert!(j.entered(0));
+    assert_eq!(
+        j.gate(&g, r1, car(2), true, true, false),
+        JunctionGate::Closed
+    );
+
+    // A rolled-back commit — the landing check rejected it — frees
+    // the box at once.
+    j.release(0);
+    assert!(!j.entered(0));
+    assert_eq!(
+        j.gate(&g, r1, car(2), true, true, false),
+        JunctionGate::Open
+    );
+
+    // The record never outlives the tick it was taken in.
+    j.commit(0);
+    j.advance_tick();
+    assert!(!j.entered(0));
+    assert_eq!(
+        j.gate(&g, r1, car(2), true, true, false),
+        JunctionGate::Open
+    );
+}
+
+/// The signal leg of the same rule: a road holding green admits until
+/// a car commits to the box this tick — the commit, not the phase,
+/// closes the second car — while an unruled end keeps its authored
+/// free flow and never consults the record.
+#[test]
+fn a_committed_entry_closes_a_green_approach_and_not_free_flow() {
+    let g = chain_with_rules(1, 1);
+    let mut j = Junctions::default();
+    j.policy.green_ticks = 10;
+    j.policy.clear_ticks = 5;
+    let r0 = lane_id(0, Side::Right, 0);
+
+    while j.green_road(&g, 0) != Some(0) {
+        j.advance_tick();
+    }
+    assert_eq!(
+        j.gate(&g, r0, car(1), false, false, false),
+        JunctionGate::Open
+    );
+    j.commit(0);
+    assert_eq!(
+        j.gate(&g, r0, car(2), false, false, false),
+        JunctionGate::Closed
+    );
+
+    // NeverStop on both ends: the claim never binds a free-flow rule.
+    let free = chain_with_rules(3, 3);
+    assert_eq!(
+        j.gate(&free, r0, car(3), false, false, false),
+        JunctionGate::Open
+    );
+}
+
 #[test]
 fn junction_speed_brakes_to_the_stop_line_and_never_accelerates() {
     let p = JunctionPolicy::default();

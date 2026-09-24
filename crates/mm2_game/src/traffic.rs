@@ -939,6 +939,14 @@ pub enum SignalAspect {
 /// F10-AC02 right-of-way leg the rules alone cannot express — the
 /// authored cycle decides *whose turn* it is, not whether the box is
 /// physically passable.
+///
+/// F10-B.11 closes the same-tick hole in that yield: the caller's
+/// occupancy report is a frame-start snapshot, so a second eligible
+/// car evaluated after another car commits to the interior in the
+/// same tick would read the box empty and take it alongside. A
+/// commit claims the junction ([`Junctions::commit`]) for the rest of
+/// the tick — the record hands off to the physical box-yield once the
+/// car is really inside — and `advance_tick` clears it.
 #[derive(Default)]
 pub struct Junctions {
     /// Fixed-step clock — `advance_tick` runs once per driver tick, so
@@ -950,6 +958,10 @@ pub struct Junctions {
     /// Junction index → FIFO of `(car, arrival tick)` standing at its
     /// stop-signed approaches.
     waiting: BTreeMap<u16, VecDeque<(Entity, u64)>>,
+    /// Junctions a car committed to since the last `advance_tick` —
+    /// treated as occupied by the gated rules for the rest of the
+    /// tick (F10-B.11).
+    entered: BTreeSet<u16>,
 }
 
 /// Per-junction signal-phase desynchronisation, in ticks — a fixed
@@ -958,9 +970,12 @@ const PHASE_SPREAD: u64 = 137;
 
 impl Junctions {
     /// Advance the controller clock — call once per drive tick, under
-    /// the same phase gate the driver runs.
+    /// the same phase gate the driver runs. Sheds the same-tick entry
+    /// records ([`Junctions::commit`]): the cars they describe are now
+    /// physically inside and the caller's box-yield report sees them.
     pub fn advance_tick(&mut self) {
         self.tick += 1;
+        self.entered.clear();
     }
 
     /// The controller's current tick (diagnostics/tests).
@@ -1055,6 +1070,9 @@ impl Junctions {
     /// does not make a blocked box passable). It is consulted only on
     /// the two paths where a gated rule can open; `NeverStop`/
     /// unruled ends keep their documented free flow regardless.
+    /// A junction [`Junctions::commit`]ted to earlier in the same
+    /// tick counts as occupied — the snapshot cannot see a commit
+    /// that happened after it was taken (F10-B.11).
     pub fn gate(
         &mut self,
         graph: &NavGraph,
@@ -1067,6 +1085,7 @@ impl Junctions {
         let Some((ix, road, rule)) = Self::approach(graph, lane) else {
             return JunctionGate::Open;
         };
+        let occupied = box_occupied || self.entered.contains(&ix);
         match rule {
             None | Some(VehicleRule::NeverStop) => JunctionGate::Open,
             Some(VehicleRule::AlwaysStop) => JunctionGate::Closed,
@@ -1079,7 +1098,7 @@ impl Junctions {
                     return JunctionGate::Open;
                 }
                 match self.green_member(ix, &members) {
-                    Some(green) if green == road && !box_occupied => JunctionGate::Open,
+                    Some(green) if green == road && !occupied => JunctionGate::Open,
                     _ => JunctionGate::Closed,
                 }
             }
@@ -1096,13 +1115,38 @@ impl Junctions {
                             && self.tick.saturating_sub(*arrived) >= self.policy.stop_dwell_ticks
                     },
                 );
-                if admitted && !box_occupied {
+                if admitted && !occupied {
                     JunctionGate::Open
                 } else {
                     JunctionGate::Closed
                 }
             }
         }
+    }
+
+    /// Record that a car committed to `ix`'s interior this tick
+    /// (F10-B.11) — the same-tick half of the box yield. The caller's
+    /// occupancy snapshot is taken before any car drives, so a second
+    /// eligible car evaluated after the commit would read the box
+    /// empty; the record closes the gated approaches for the rest of
+    /// the tick, and next tick the committed car is physically inside
+    /// and held off by the snapshot instead. `advance_tick` clears
+    /// the set; [`Junctions::release`] undoes a commit the caller
+    /// rolled back (a landing the transfer rejected).
+    pub fn commit(&mut self, ix: u16) {
+        self.entered.insert(ix);
+    }
+
+    /// Whether a car committed to `ix` since the last `advance_tick`
+    /// (diagnostics/tests).
+    pub fn entered(&self, ix: u16) -> bool {
+        self.entered.contains(&ix)
+    }
+
+    /// Undo a same-tick [`Junctions::commit`] — the transfer was
+    /// rolled back, so the box is not in fact claimed.
+    pub fn release(&mut self, ix: u16) {
+        self.entered.remove(&ix);
     }
 
     /// The aspect a signal on `road`'s approach into `ix` displays
