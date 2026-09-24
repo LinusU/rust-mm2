@@ -1195,6 +1195,24 @@ fn smoke_test(
         return;
     }
     if let Some(path) = st.screenshot.take() {
+        // The `landed` check below sees *any* file at the target — a
+        // capture from an earlier run would pass on stale pixels while
+        // this run's screenshot is still in flight. Clear it first so
+        // only this run's write can satisfy the check.
+        if let Err(e) = smoke::clear_stale_screenshot(&path) {
+            println!(
+                "{}",
+                record(
+                    smoke::SmokeStatus::Fail,
+                    format!("cannot clear screenshot target {}: {e}", path.display()),
+                )
+                .line()
+            );
+            exit.write(AppExit::from_code(
+                smoke::SmokeStatus::Fail.exit_code() as u8
+            ));
+            return;
+        }
         commands
             .spawn(Screenshot::primary_window())
             .observe(save_to_disk(path.clone()));

@@ -13,6 +13,7 @@
 //! windowed app runs; a load failure lands in `Failed` and reports
 //! `status=fail`, never a silent roam.
 
+use std::path::Path;
 use std::time::Duration;
 
 use avian3d::prelude::*;
@@ -76,6 +77,20 @@ impl SmokeStatus {
             Self::Fail => 3,
             Self::Unavailable => 4,
         }
+    }
+}
+
+/// Clear a previous capture at `path` so a later write is the only
+/// thing a "file landed" check can see — a file already at the target
+/// would satisfy it on stale pixels before this run's screenshot is
+/// even written. `NotFound` is the expected case (a fresh target); any
+/// other error means the target cannot be made fresh and the caller
+/// must fail rather than risk reporting a stale capture as this run's.
+pub fn clear_stale_screenshot(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
     }
 }
 
@@ -1184,5 +1199,32 @@ mod tests {
         for phase in [Countdown, Playing, Paused, Results] {
             assert!(!absent_player_is_transient(&phase, true, 1));
         }
+    }
+
+    /// A reused `--screenshot` path must not pass the capture wait on
+    /// the previous run's file: the runner clears the target before
+    /// requesting the new capture so the `landed` check can only see
+    /// this run's write. Regression: a pre-existing file reported
+    /// `status=pass bytes=<stale>` and exited while the fresh
+    /// screenshot was still in flight.
+    #[test]
+    fn a_stale_capture_is_cleared_before_the_new_request() {
+        let dir = std::env::temp_dir().join(format!("mm2-smoke-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("capture.png");
+        std::fs::write(&target, b"stale pixels").unwrap();
+        clear_stale_screenshot(&target).unwrap();
+        assert!(
+            !target.exists(),
+            "the stale file survived — the wait would pass on it"
+        );
+        // A fresh target is the expected case — never an error.
+        clear_stale_screenshot(&target).unwrap();
+        // A target in a missing directory is likewise fresh.
+        clear_stale_screenshot(&dir.join("absent/capture.png")).unwrap();
+        // An uncleanable target (a directory at the path) fails rather
+        // than risking a stale pass.
+        assert!(clear_stale_screenshot(&dir).is_err());
+        std::fs::remove_dir(&dir).unwrap();
     }
 }
