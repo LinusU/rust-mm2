@@ -197,6 +197,26 @@ pub const REANCHOR_CLEAR: f32 = 8.0;
 /// Vertical band (m) the clearance applies within — a car on the
 /// street below an elevated leg does not block a landing on it.
 const REANCHOR_CLEAR_Y: f32 = 4.0;
+
+/// The occupancy leg of a re-anchor `blocked` test (F15-B.10): `p` is
+/// occupied when it sits within [`REANCHOR_CLEAR`] in XZ and inside
+/// the `REANCHOR_CLEAR_Y` band of any position in `occupied` — the
+/// frame-start participant snapshot (the re-anchoring car's own spot
+/// included, so a car beached on the line does not teleport back onto
+/// itself) plus the poses earlier same-frame re-anchors claimed. Both
+/// re-anchor call sites — `opponent_drive` and the scripted player's
+/// — run this same predicate so the two bounded recoveries hold one
+/// clearance contract; the check is positional and applies whatever
+/// the authored avoid flags say.
+pub fn reanchor_occupied(p: Vec3, occupied: impl IntoIterator<Item = Vec3>) -> bool {
+    occupied.into_iter().any(|c| {
+        (p.y - c.y).abs() < REANCHOR_CLEAR_Y && {
+            let dx = p.x - c.x;
+            let dz = p.z - c.z;
+            dx * dx + dz * dz < REANCHOR_CLEAR * REANCHOR_CLEAR
+        }
+    })
+}
 /// Base gap (m) the follower keeps behind a blocker.
 const FOLLOW_GAP: f32 = 6.0;
 /// Extra follow gap per m/s of *closing* speed (~0.5 s of travel).
@@ -508,8 +528,9 @@ pub fn initial_route_index(route: &OpponentRoute, pos: Vec3, yaw: f32) -> usize 
 /// candidate is disallowed — the caller builds it from the race
 /// definition's un-cleared checkpoint cylinders for this participant
 /// (XZ radius) plus any further landing constraints the recovery
-/// requires, e.g. the participant-occupancy clearance `opponent_drive`
-/// adds (F15-B.10).
+/// requires — both callers add the participant-occupancy clearance
+/// [`reanchor_occupied`] (F15-B.10/B.11); the scripted player adds a
+/// ground probe too.
 pub fn reanchor_pose(
     route: &OpponentRoute,
     next: usize,
@@ -1115,17 +1136,10 @@ pub fn opponent_drive(
                 // (F15-B.10). The check is positional, not avoidance:
                 // it applies whatever the authored avoid flags say.
                 let occupied = |p: Vec3| {
-                    traffic
-                        .iter()
-                        .map(|t| t.pos)
-                        .chain(claimed.iter().copied())
-                        .any(|c| {
-                            (p.y - c.y).abs() < REANCHOR_CLEAR_Y && {
-                                let dx = p.x - c.x;
-                                let dz = p.z - c.z;
-                                dx * dx + dz * dz < REANCHOR_CLEAR * REANCHOR_CLEAR
-                            }
-                        })
+                    reanchor_occupied(
+                        p,
+                        traffic.iter().map(|t| t.pos).chain(claimed.iter().copied()),
+                    )
                 };
                 let (mut pose, ryaw) = reanchor_pose(&route, driver.next, pos.0, yaw, |p| {
                     gates.iter().any(|g| {

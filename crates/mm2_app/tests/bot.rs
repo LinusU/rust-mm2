@@ -9,6 +9,7 @@ use std::time::Duration;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
+use mm2_app::opponents::{REANCHOR_CLEAR, reanchor_pose};
 use mm2_app::race;
 use mm2_app::scripted::{self, ScriptedBot, ScriptedDrive, ScriptedRoute};
 use mm2_app::session::{self, SessionControl};
@@ -16,9 +17,10 @@ use mm2_app::{camera, contracts};
 use mm2_assets::Vfs;
 use mm2_game::{
     Checkpoint, CheckpointRule, EventRef, EventTableKind, ImpactEvent, Mm2Vfs, OpponentRoster,
-    OpponentRoute, OpponentRoutePoint, OpponentSpec, ParticipantState, PlayerVehicle,
-    RaceDefinition, RacePhase, RaceProgress, RaceStarted, RaceState, ResultLedger, Session,
-    SessionConfig, SessionMode, SessionOutcome, advance_session_tick, despawn_session_entities,
+    OpponentRoute, OpponentRoutePoint, OpponentSpec, ParticipantState, Player, PlayerControl,
+    PlayerVehicle, RaceDefinition, RacePhase, RaceProgress, RaceStarted, RaceState, ResultLedger,
+    Session, SessionConfig, SessionMode, SessionOutcome, advance_session_tick,
+    despawn_session_entities,
 };
 use mm2_vehicle::{VehicleConfig, VehicleInput, VehiclePlugin};
 
@@ -1014,6 +1016,148 @@ fn falling_bot_reanchors_after_bounded_recoveries() {
             .unwrap()
             .cleared_count(),
         banked,
+        "the teleport itself banked nothing"
+    );
+}
+
+/// The scripted player's re-anchor holds the same occupancy leg
+/// `opponent_drive` does (F15-B.11): a `Player`-marked participant
+/// parked on the pose the walk-back would claim pushes the real
+/// landing further back along the route until it clears
+/// [`REANCHOR_CLEAR`] — the evidence driver never teleports onto
+/// another car.
+#[test]
+fn penned_bot_reanchor_lands_clear_of_a_parked_participant() {
+    let tmp = routed_install();
+    let mut app = bot_app(event_config(EventTableKind::Checkpoint), vfs_of(tmp.path()));
+    app.update();
+    let car = car(&mut app);
+    assert!(
+        app.world().get::<ScriptedRoute>(car).is_some(),
+        "the roster route bound onto the player"
+    );
+
+    // The same off-route pocket the bounded-recovery test uses.
+    let y = app.world().get::<Position>(car).unwrap().0.y;
+    for (center, size) in [
+        (Vec3::new(148.0, y + 1.0, 150.0), Vec3::new(0.4, 3.0, 8.0)),
+        (Vec3::new(152.0, y + 1.0, 150.0), Vec3::new(0.4, 3.0, 8.0)),
+        (Vec3::new(150.0, y + 1.0, 148.0), Vec3::new(8.0, 3.0, 0.4)),
+        (Vec3::new(150.0, y + 1.0, 152.0), Vec3::new(8.0, 3.0, 0.4)),
+    ] {
+        app.world_mut().spawn((
+            RigidBody::Static,
+            Collider::cuboid(size.x, size.y, size.z),
+            Transform::from_translation(center),
+        ));
+    }
+    app.world_mut().get_mut::<Position>(car).unwrap().0 = Vec3::new(150.0, y, 150.0);
+    app.world_mut()
+        .get_mut::<Transform>(car)
+        .unwrap()
+        .translation = Vec3::new(150.0, y, 150.0);
+    app.world_mut()
+        .entity_mut(car)
+        .insert(mm2_vehicle::Teleported);
+
+    // Wait for the release and a few pinned frames so the chase index
+    // settles — it can only advance and nothing banks while penned, so
+    // every input the arm reads is stable from here.
+    let mut racing = false;
+    for _ in 0..600 {
+        app.update();
+        if matches!(
+            app.world().get::<RaceProgress>(car).unwrap().state,
+            ParticipantState::Racing
+        ) {
+            racing = true;
+            break;
+        }
+    }
+    assert!(racing, "the countdown never released");
+    run(&mut app, 30);
+
+    // Reproduce the walk-back with only the gate leg to find the pose
+    // it would claim, then park a participant on it — a `Player` +
+    // `Position` pair is exactly what the occupancy snapshot reads.
+    let (route, next, pos, yaw, gates) = {
+        let rs = app.world().get::<ScriptedRoute>(car).unwrap();
+        let pos = app.world().get::<Position>(car).unwrap().0;
+        let fwd = app.world().get::<Rotation>(car).unwrap().0 * Vec3::NEG_Z;
+        let race = app.world().resource::<RaceState>();
+        let progress = app.world().get::<RaceProgress>(car).unwrap();
+        let gates: Vec<Checkpoint> = progress
+            .remaining()
+            .filter_map(|i| race.definition.checkpoints.get(i))
+            .copied()
+            .collect();
+        (
+            rs.route.clone(),
+            rs.next,
+            pos,
+            (-fwd.x).atan2(-fwd.z),
+            gates,
+        )
+    };
+    let (claim, _) = reanchor_pose(&route, next, pos, yaw, |p| {
+        gates.iter().any(|g| {
+            let dx = p.x - g.center.x;
+            let dz = p.z - g.center.z;
+            dx * dx + dz * dz < g.radius * g.radius
+        })
+    });
+    let blocker_id = app.world_mut().resource_mut::<Session>().mint_player_id();
+    let blocker = app
+        .world_mut()
+        .spawn((
+            Player {
+                id: blocker_id,
+                control: PlayerControl::Ai,
+            },
+            Position(claim),
+        ))
+        .id();
+
+    // The arm still fires inside the same bounded window, but the
+    // landing must not be the claimed spot.
+    let mut fired = false;
+    for _ in 0..1400 {
+        app.update();
+        if app.world().get::<ScriptedRoute>(car).unwrap().reanchors > 0 {
+            fired = true;
+            break;
+        }
+    }
+    assert!(
+        fired,
+        "the bounded re-anchor never fired for a penned player"
+    );
+
+    run(&mut app, 3);
+    let pose = app.world().get::<Position>(car).unwrap().0;
+    let blocker_at = app.world().get::<Position>(blocker).unwrap().0;
+    let rot = app.world().get::<Rotation>(car).unwrap().0;
+    assert!((rot * Vec3::Y).y > 0.99, "re-anchor lands upright: {rot:?}");
+    let dxz = (pose.x - blocker_at.x).hypot(pose.z - blocker_at.z);
+    assert!(
+        dxz >= REANCHOR_CLEAR - 0.5,
+        "the landing must keep the clearance off the parked participant: {pose:?} vs {blocker_at:?}"
+    );
+    let rs = app.world().get::<ScriptedRoute>(car).unwrap();
+    let on_line = rs.route.points.windows(2).any(|w| {
+        let (a, b) = (w[0].position, w[1].position);
+        let ab = b - a;
+        let t = ((pose - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0);
+        let p = a + ab * t;
+        (p.x - pose.x).hypot(p.z - pose.z) < 2.0
+    });
+    assert!(on_line, "re-anchored back onto the route line: {pose:?}");
+    assert_eq!(
+        app.world()
+            .get::<RaceProgress>(car)
+            .unwrap()
+            .cleared_count(),
+        0,
         "the teleport itself banked nothing"
     );
 }

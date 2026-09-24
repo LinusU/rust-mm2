@@ -26,15 +26,15 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_game::{
     CheckpointRule, ObjectId, ObjectIdentity, OpponentRoster, OpponentRoute, ParticipantState,
-    PlayerVehicle, RaceDefinition, RaceProgress, RaceState, RecoveryEvent, Session,
+    Player, PlayerVehicle, RaceDefinition, RaceProgress, RaceState, RecoveryEvent, Session,
     relative_bearing,
 };
 use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState};
 use tracing::info;
 
 use crate::opponents::{
-    REANCHOR_DIST, REANCHOR_FRAMES, SPAWN_LIFT, initial_route_index, point_reached, reanchor_pose,
-    route_is_closed,
+    REANCHOR_DIST, REANCHOR_FRAMES, SPAWN_LIFT, initial_route_index, point_reached,
+    reanchor_occupied, reanchor_pose, route_is_closed,
 };
 
 /// Presence enables the scripted driver: `--bot` inserts it, and
@@ -551,11 +551,21 @@ pub fn scripted_drive(
         ),
         With<PlayerVehicle>,
     >,
+    participants: Query<&Position, With<Player>>,
 ) {
     let race = race
         .as_deref()
         .filter(|r| !r.is_stale(session.generation()));
     let locked = race.is_some_and(|r| r.input_locked());
+    // The frame-start participant snapshot the re-anchor's occupancy
+    // leg reads — every `Player`-marked participant (the scripted car
+    // itself included, so a beached one does not teleport back onto
+    // itself), the same set `opponent_drive`'s `traffic` holds
+    // (F15-B.11 parity).
+    let occupants: Vec<Vec3> = participants.iter().map(|p| p.0).collect();
+    // Poses a re-anchor already claimed this frame — the snapshot
+    // predates the loop and cannot see a same-frame teleport.
+    let mut claimed: Vec<Vec3> = Vec::new();
     // Drain once per frame — recovery events are rare and per-object.
     let mut recovery_hits: Vec<ObjectId> = Vec::new();
     if let Some(reader) = recoveries_in.as_mut() {
@@ -617,7 +627,9 @@ pub fn scripted_drive(
             // for the bubble to fill, but the car is metres under the
             // line throughout). The swept segment breaks, so the jump
             // banks nothing, and the walk-back keeps the landing out of
-            // un-cleared triggers.
+            // un-cleared triggers, off occupied participant poses
+            // (F15-B.11 parity with `opponent_drive`) and over ground
+            // the probe can see.
             if session.authority_role().is_authority() && pos.0.is_finite() {
                 if pos.0.distance(rs.reanchor_pos) >= REANCHOR_DIST {
                     rs.reanchor_pos = pos.0;
@@ -663,12 +675,24 @@ pub fn scripted_drive(
                                 .is_some()
                         })
                     };
+                    // The same occupancy leg `opponent_drive` holds
+                    // (F15-B.11 parity with F15-B.10): the landing keeps
+                    // REANCHOR_CLEAR of every participant — the scripted
+                    // car's own stuck spot included — and of poses a
+                    // re-anchor already claimed this frame.
+                    let occupied = |p: Vec3| {
+                        reanchor_occupied(
+                            p,
+                            occupants.iter().copied().chain(claimed.iter().copied()),
+                        )
+                    };
                     let (mut pose, ryaw) = reanchor_pose(&rs.route, rs.next, pos.0, yaw, |p| {
                         gates.iter().any(|g| {
                             let dx = p.x - g.center.x;
                             let dz = p.z - g.center.z;
                             dx * dx + dz * dz < g.radius * g.radius
                         }) || !supported(p)
+                            || occupied(p)
                     });
                     // The same hull clearance the spawn applies.
                     let hull_min_y = vehicle
@@ -693,6 +717,7 @@ pub fn scripted_drive(
                     rs.offroute_frames = 0;
                     rs.recoveries = 0;
                     rs.reanchors += 1;
+                    claimed.push(pose);
                     info!(
                         reanchors = rs.reanchors,
                         "scripted player re-anchored onto its route after a bounded stuck"
