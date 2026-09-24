@@ -305,6 +305,37 @@ pub enum CardataIssue {
     },
 }
 
+impl std::fmt::Display for CardataIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DeclaredVsParsed {
+                context,
+                declared,
+                parsed,
+            } => write!(
+                f,
+                "{context}: declared {declared} but {parsed} row(s) parsed"
+            ),
+            Self::NonFinite {
+                context,
+                field,
+                line,
+            } => write!(f, "{context}: non-finite {field} (line {line})"),
+            Self::DegenerateRange {
+                context,
+                field,
+                line,
+            } => write!(f, "{context}: degenerate {field} range (line {line})"),
+            Self::BinaryNameField { context, len, line } => {
+                write!(f, "{context}: {len}-byte binary name field (line {line})")
+            }
+            Self::ContentAfterTerminator { context, lines } => {
+                write!(f, "{context}: {lines} line(s) after ENDOFDATA")
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CSV machinery: these files are positional, so lines become cell lists
 // and labels are matched on the first cell, case-insensitively (authored

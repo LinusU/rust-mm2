@@ -34,6 +34,26 @@ pub fn riff_form_type(data: &[u8]) -> Option<[u8; 4]> {
     Some(data[8..12].try_into().unwrap())
 }
 
+/// A wave's lookup stem: basename minus `.wav`, minus a `.<n>k` rate
+/// suffix (`vwhorn.22k.wav` → `vwhorn`), lower-cased. Cardata references
+/// carry neither directory nor suffix — retail ships the same sample at
+/// 11 kHz and 22 kHz under parallel `aud/audNN/` directories, so callers
+/// resolve a cardata name by matching this stem.
+pub fn lookup_stem(logical: &str) -> String {
+    let base = logical.rsplit('/').next().unwrap_or(logical);
+    let stem = base.rsplit_once('.').map(|(s, _)| s).unwrap_or(base);
+    let stem = stem
+        .rsplit_once('.')
+        .and_then(|(s, sfx)| {
+            (sfx.len() >= 2
+                && sfx.ends_with(['k', 'K'])
+                && sfx[..sfx.len() - 1].bytes().all(|b| b.is_ascii_digit()))
+            .then_some(s)
+        })
+        .unwrap_or(stem);
+    stem.to_ascii_lowercase()
+}
+
 /// The `fmt ` chunk: how the payload bytes decode.
 #[derive(Debug, Clone)]
 pub struct WaveFormat {
@@ -421,6 +441,18 @@ mod tests {
         assert!((w.duration_secs() - 0.1).abs() < 1e-6);
         assert!(w.validate().is_empty());
         assert_eq!(w.samples_i16().unwrap()[0], 0x1111);
+    }
+
+    #[test]
+    fn lookup_stem_strips_dir_extension_and_rate_suffix() {
+        assert_eq!(lookup_stem("aud/aud22/horns/vwhorn.22k.wav"), "vwhorn");
+        assert_eq!(lookup_stem("aud/aud11/vwhorn.11k.wav"), "vwhorn");
+        assert_eq!(lookup_stem("aud/aud11/tireskid1_ps1.wav"), "tireskid1_ps1");
+        assert_eq!(lookup_stem("aud/aud11/VWHORN.WAV"), "vwhorn");
+        // A dotted name that is not a rate suffix keeps its stem.
+        assert_eq!(lookup_stem("aud/aud11/foo.bar.wav"), "foo.bar");
+        // A bare name (no directory) works too — cardata refs carry none.
+        assert_eq!(lookup_stem("vwhorn"), "vwhorn");
     }
 
     #[test]

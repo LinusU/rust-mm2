@@ -21,7 +21,7 @@ use std::path::Path;
 
 use mm2_assets::Vfs;
 use mm2_formats::cardata::{self, CardataBody, CardataIssue};
-use mm2_formats::wav::{Wav, riff_form_type};
+use mm2_formats::wav::{Wav, lookup_stem, riff_form_type};
 
 /// Everything the audit measures, kept separate from printing so tests
 /// can exercise it on synthetic installs.
@@ -87,25 +87,6 @@ fn expected_riff_form(ext: &str) -> Option<&'static [u8; 4]> {
         "bnd" => Some(b"DMBD"),
         _ => None,
     }
-}
-
-/// A wave's lookup stem: basename minus `.wav`, minus a `.<n>k` rate
-/// suffix (`vwidle.22k.wav` → `vwidle`). Retail ships the same sample at
-/// 11 kHz and 22 kHz under parallel directories; cardata references
-/// carry neither suffix.
-fn wave_stem(logical: &str) -> String {
-    let base = logical.rsplit('/').next().unwrap_or(logical);
-    let stem = base.rsplit_once('.').map(|(s, _)| s).unwrap_or(base);
-    let stem = stem
-        .rsplit_once('.')
-        .and_then(|(s, sfx)| {
-            (sfx.len() >= 2
-                && sfx.ends_with(['k', 'K'])
-                && sfx[..sfx.len() - 1].bytes().all(|b| b.is_ascii_digit()))
-            .then_some(s)
-        })
-        .unwrap_or(stem);
-    stem.to_ascii_lowercase()
 }
 
 fn kind_name(kind: cardata::CardataKind) -> &'static str {
@@ -228,7 +209,7 @@ pub fn audit(vfs: &Vfs) -> AudioReport {
                     .unwrap_or("")
                     .to_string();
                 *r.wave_dirs.entry(dir).or_default() += 1;
-                stems.insert(wave_stem(logical));
+                stems.insert(lookup_stem(logical));
                 match Wav::parse(&bytes) {
                     Ok(w) => {
                         r.waves += 1;
@@ -572,12 +553,12 @@ mod tests {
 
     #[test]
     fn stem_strips_rate_suffix() {
-        assert_eq!(wave_stem("aud/aud22/vwidle.22k.wav"), "vwidle");
-        assert_eq!(wave_stem("aud/aud11/vwidle.11k.wav"), "vwidle");
-        assert_eq!(wave_stem("aud/aud11/tireskid1_ps1.wav"), "tireskid1_ps1");
-        assert_eq!(wave_stem("aud/aud11/VWHORN.WAV"), "vwhorn");
+        assert_eq!(lookup_stem("aud/aud22/vwidle.22k.wav"), "vwidle");
+        assert_eq!(lookup_stem("aud/aud11/vwidle.11k.wav"), "vwidle");
+        assert_eq!(lookup_stem("aud/aud11/tireskid1_ps1.wav"), "tireskid1_ps1");
+        assert_eq!(lookup_stem("aud/aud11/VWHORN.WAV"), "vwhorn");
         // A dotted name that is not a rate suffix keeps its stem.
-        assert_eq!(wave_stem("aud/aud11/foo.bar.wav"), "foo.bar");
+        assert_eq!(lookup_stem("aud/aud11/foo.bar.wav"), "foo.bar");
     }
 
     #[test]

@@ -13,13 +13,14 @@
 use std::path::PathBuf;
 
 use avian3d::prelude::*;
+use bevy::audio::AddAudioSource;
 use bevy::prelude::*;
 use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use clap::Parser;
 use mm2_app::session::{ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
-    banger, breakaway, camera, car_visual, city, contracts, damage, damage_fx, environment, input,
-    menu, nav_overlay, opponents, pause, profile, progression, pvs, race, recovery, results,
+    audio, banger, breakaway, camera, car_visual, city, contracts, damage, damage_fx, environment,
+    input, menu, nav_overlay, opponents, pause, profile, progression, pvs, race, recovery, results,
     scripted, session, smoke, spark_fx, stuck, texel_fx, traffic,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
@@ -174,6 +175,14 @@ struct Cli {
     /// record-ineligible). One-shot.
     #[arg(long)]
     restart: bool,
+
+    /// Press the local vehicle's authored horn once on the first
+    /// `Playing` frame (diagnostic aid — exercises the F07 voice path
+    /// in a `--frames` capture where live input is frozen; the record's
+    /// `aud=` field reports presses, voices and attached sinks).
+    /// Headless runs count the voice but never attach a sink.
+    #[arg(long)]
+    horn: bool,
 
     /// Weather selector for the session's conditions — the authored
     /// 0-3 grid value (`clear`/`cloudy`/`foggy`/`rainy` on the measured
@@ -702,6 +711,7 @@ fn main() {
             finish: cli.finish,
             restart: cli.restart,
             no_pvs: cli.no_pvs,
+            horn: cli.horn,
         },
         // Any mounted mod makes records/unlocks ineligible — a result
         // under modded content is not comparable to stock (designed
@@ -788,6 +798,7 @@ fn main() {
         && !cli.pause
         && !cli.finish
         && !cli.restart
+        && !cli.horn
         && !cli.no_pvs
         && !cli.nav
         && cli.nav_route.is_none()
@@ -887,6 +898,12 @@ fn main() {
     .init_resource::<damage_fx::SmokeFxReport>()
     .init_resource::<spark_fx::SparkFxReport>()
     .init_resource::<texel_fx::TexelDamageReport>()
+    // F07-A.2: decoded-PCM audio — `PcmAudio` registers with the
+    // `AudioPlugin` DefaultPlugins brings; voices spawn as entities and
+    // teardown owns them (`aud=` on the smoke record).
+    .init_resource::<audio::AudioReport>()
+    .add_message::<audio::HornRequest>()
+    .add_audio_source::<audio::PcmAudio>()
     .init_resource::<mm2_game::ResultLedger>()
     .init_resource::<mm2_game::BangerPool>()
     .init_resource::<SessionControl>()
@@ -1067,6 +1084,22 @@ fn main() {
         Update,
         (spark_fx::emit_sparks, spark_fx::advance_sparks).chain(),
     )
+    // F07-A.2: authored-horn voices — live input is frozen during a
+    // capture like every other input, while `--horn` stays ungated so
+    // a capture run can still fire it. `horn_voices` drains requests a
+    // frame later at worst (message double-buffering); sink counting
+    // and pause sync are pure phase/sink mirrors after the driver.
+    .add_systems(
+        Update,
+        (
+            audio::horn_input.run_if(not(capturing)),
+            audio::dev_horn_once,
+            audio::horn_voices,
+            audio::count_sinks,
+            audio::sync_audio_pause.after(session::drive_session),
+            audio::reset_audio_report.run_if(session::unloading),
+        ),
+    )
     // F16-B: drain authoritative results into the bound profile —
     // records finishes, grants rewards, saves on change. Inert without
     // an event or a bound profile.
@@ -1195,9 +1228,17 @@ fn smoke_test(
     mut commands: Commands,
     mut st: ResMut<SmokeTest>,
     session: Res<Session>,
+    aud: Option<Res<audio::AudioReport>>,
     mut exit: MessageWriter<AppExit>,
 ) {
     let world = st.world.clone();
+    // F07-A.2: a `--horn` capture reports its voice path — `s` counting
+    // the sinks the output device attached (0 means the mixer never
+    // saw the voice, an honest no-device report).
+    let aud_detail = aud
+        .filter(|r| r.active())
+        .map(|r| format!(" aud={}h/{}v/{}s", r.horns, r.voices, r.sunk))
+        .unwrap_or_default();
     let record = |status: smoke::SmokeStatus, detail: String| smoke::SmokeRecord {
         kind: smoke::KIND_VISUAL,
         world: world.clone(),
@@ -1250,7 +1291,10 @@ fn smoke_test(
                 "{}",
                 record(
                     smoke::SmokeStatus::Pass,
-                    format!("frames=done screenshot={} bytes={bytes}", path.display()),
+                    format!(
+                        "frames=done screenshot={} bytes={bytes}{aud_detail}",
+                        path.display()
+                    ),
                 )
                 .line()
             );
@@ -1273,7 +1317,7 @@ fn smoke_test(
     }
     println!(
         "{}",
-        record(smoke::SmokeStatus::Pass, "frames=done".into()).line()
+        record(smoke::SmokeStatus::Pass, format!("frames=done{aud_detail}"),).line()
     );
     exit.write(AppExit::Success);
 }

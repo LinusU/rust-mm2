@@ -533,6 +533,13 @@ pub struct DevOverrides {
     /// builds its own app and has no other channel (the resource-based
     /// wiring left `--headless --no-pvs` silently on).
     pub no_pvs: bool,
+    /// `--horn`: press the local vehicle's authored horn once on the
+    /// first `Playing` frame (evidence/diagnostic runs — how a
+    /// `--frames` capture with frozen live input exercises the F07
+    /// voice path; never a session-legal parameter). Audio output
+    /// cannot change a run's outcome, so like `--pause`/`--cam` this
+    /// stays out of `record_eligibility`.
+    pub horn: bool,
 }
 
 /// Configuration of the `--nav` debug overlay: draw the city's BAI

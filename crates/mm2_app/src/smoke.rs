@@ -227,6 +227,9 @@ pub fn headless_smoke(
         .init_resource::<crate::damage_fx::SmokeFxReport>()
         .init_resource::<crate::spark_fx::SparkFxReport>()
         .init_resource::<crate::texel_fx::TexelDamageReport>()
+        .init_resource::<crate::audio::AudioReport>()
+        .init_resource::<Assets<crate::audio::PcmAudio>>()
+        .add_message::<crate::audio::HornRequest>()
         .init_resource::<mm2_game::ResultLedger>()
         .init_resource::<mm2_game::BangerPool>()
         .init_resource::<session::SessionControl>()
@@ -321,6 +324,17 @@ pub fn headless_smoke(
                 // `--finish` works headless too — the record still
                 // reports the real resolved outcome.
                 crate::results::dev_finish_once,
+                // F07-A.2: the authored-horn voice path — the record's
+                // `aud=` field reads the report. No AudioPlugin runs
+                // here, so voices spawn and are counted but never
+                // attach a sink (`sunk` stays 0 — honest headless
+                // evidence of the request→voice half only).
+                crate::audio::horn_input,
+                crate::audio::dev_horn_once,
+                crate::audio::horn_voices,
+                crate::audio::count_sinks,
+                crate::audio::sync_audio_pause,
+                crate::audio::reset_audio_report.run_if(session::unloading),
                 opponents::opponent_drive,
                 // F05-B.6: authored engine smoke — the headless
                 // record's `ptx=` field reads the report. Assets are
@@ -925,6 +939,31 @@ pub fn headless_smoke(
         .filter(|r| r.impacts + r.splats + r.resets > 0)
         .map(|r| format!(" txl={}i/{}s/{}r", r.impacts, r.splats, r.resets))
         .unwrap_or_default();
+    // F07-A.2 audio evidence: horn presses / voices spawned / sinks the
+    // device attached, plus `+Nd` bound-drops and `+Nx` resolve/decode
+    // failures when nonzero. Activity-gated — a quiet run stays
+    // bit-identical, and headless `0s` honestly reports that no output
+    // device ever saw the voice.
+    let aud_detail = world_ecs
+        .get_resource::<crate::audio::AudioReport>()
+        .filter(|r| r.active())
+        .map(|r| {
+            let dropped = if r.dropped > 0 {
+                format!("+{}d", r.dropped)
+            } else {
+                String::new()
+            };
+            let failed = if r.failed > 0 {
+                format!("+{}x", r.failed)
+            } else {
+                String::new()
+            };
+            format!(
+                " aud={}h/{}v/{}s{dropped}{failed}",
+                r.horns, r.voices, r.sunk
+            )
+        })
+        .unwrap_or_default();
     // The dev `--traction` modifier is recorded when set so a wetness
     // run is self-describing; unmodified runs stay bit-identical.
     let traction_detail = config
@@ -974,7 +1013,7 @@ pub fn headless_smoke(
     // (DRV-2/DRV-3) and aimap variant (RACE-11) selected its content.
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{txl_detail}{traction_detail}{profile_detail}{extra}",
+            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{txl_detail}{aud_detail}{traction_detail}{profile_detail}{extra}",
             driver.as_str(),
             config.difficulty.as_str(),
             session.phase().name(),

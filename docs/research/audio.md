@@ -10,7 +10,14 @@ fully decoded:
 3 extras (.bat), 0 failures, 0 issues, 35 quirks, 1 finding, 1 dead ref
 ```
 
-No audio is *played* yet — this is the format/discovery layer (F07-A.1).
+F07-A.2 adds the first runtime consumer: the local vehicle's authored
+horn (`Horn wave name` row) resolves through `aud22`-preferred stem
+lookup, decodes through the bounded PCM parser, and plays through Bevy's
+mixer on ENTER (documented default, CTL-1). Voices are session-owned,
+bounded, despawned on completion and paused with the session. Whether
+the original holds the horn for the keypress duration or retriggers it
+is still unverified — the press fires one clip, a designed choice. The
+engine/impact/surface/siren families remain unparsed at runtime and
 DirectMusic is recognized but not decoded (F08). Everything below is
 measured data structure; runtime semantics are unverified unless noted.
 
@@ -205,8 +212,11 @@ min time in range,…` headers) plus `aud/dmusic/csv_files` (5). Three
   for the same table slot.
 - `default_impacts` force→sample selection and the category↔banger
   binding (`AudioId` is 0 everywhere).
-- `flags` word on the horn row (always 0 on retail).
-- Whether `aud11` variants ever serve non-speech references.
+- `flags` word on the horn row (always 0 on retail); also whether the
+  original holds the horn for the press duration or retriggers it —
+  the runtime fires one authored clip per press as a designed policy.
+- Whether `aud11` variants ever serve non-speech references (the
+  runtime `WaveBank` prefers `aud22` on a stem tie — designed choice).
 - Siren `next index` wrap/entry semantics beyond the obvious chain.
 - DirectMusic segment/style/band playback (F08) and the `csv_files`
   cue tables.

@@ -6,6 +6,7 @@
 use mm2_assets::Vfs;
 use mm2_formats::banger::BangerData;
 use mm2_formats::bnd::BndFile;
+use mm2_formats::cardata::{self, CarAudio, CardataBody};
 use mm2_formats::mtx::Mtx;
 use mm2_formats::pkg::Pkg;
 use mm2_formats::tune::TuneFile;
@@ -55,6 +56,13 @@ pub struct VehicleDef {
     /// `damage`/`stuck`/`gyro`; the census's dead fragments and
     /// record-less chunks are documented authored gaps, REC-1).
     pub breaks: Vec<BreakPart>,
+    /// `aud/cardata/{player,opponent}/<id>.csv` — the authored per-vehicle
+    /// audio table (F07-A): horn + clutch bindings and the RPM-faded
+    /// engine sample rows. `None` when the record does not resolve or
+    /// does not decode; the vehicle still loads — the audio runtime
+    /// treats `None` as "no authored audio" and reports it rather than
+    /// fabricating bindings (same absence policy as `damage`).
+    pub audio: Option<CarAudio>,
     /// Conversion audit trail.
     pub report: ConversionReport,
     /// Resolved logical paths used for each dependency.
@@ -171,7 +179,7 @@ pub fn load_vehicle(vfs: &Vfs, id: &str, paint: usize) -> Result<VehicleDef, Loa
     let logical = format!("tune/vehicle/{id}.vehcarsim");
     let (bytes, src) = read(vfs, &logical, id, "tuning")?;
     let tune = parse_tune(&bytes, id, &logical)?;
-    load_vehicle_impl(vfs, id, paint, tune, vec![src])
+    load_vehicle_impl(vfs, id, paint, tune, vec![src], "player")
 }
 
 /// Load a catalog vehicle for AI opponent use (F15-A.2).
@@ -206,18 +214,21 @@ pub fn load_opponent(vfs: &Vfs, id: &str, paint: usize) -> Result<VehicleDef, Lo
         tune_sources.push(src);
         tune.root.merge_overlay(&opp.root);
     }
-    load_vehicle_impl(vfs, id, paint, tune, tune_sources)
+    load_vehicle_impl(vfs, id, paint, tune, tune_sources, "opponent")
 }
 
 /// Shared loader behind [`load_vehicle`]/[`load_opponent`]: `id` owns
 /// every dependency except the `.vehcarsim`, which arrives pre-parsed
 /// (opponent loads merge the `_opp` override over the base document).
+/// `cardata_side` selects `aud/cardata/{player,opponent}/<id>.csv` —
+/// retail ships both grammars with different row layouts.
 fn load_vehicle_impl(
     vfs: &Vfs,
     id: &str,
     paint: usize,
     tune: TuneFile,
     tune_sources: Vec<String>,
+    cardata_side: &str,
 ) -> Result<VehicleDef, LoadError> {
     let mut sources = tune_sources;
 
@@ -280,6 +291,10 @@ fn load_vehicle_impl(
     {
         damage_warnings.push(w);
     }
+
+    // Authored audio table (F07-A) — same optional-record policy as the
+    // damage files: absent → `None`, resolved-but-unusable → warning.
+    let audio = load_car_audio(vfs, id, cardata_side, &mut sources, &mut damage_warnings);
 
     // Geometry — required.
     let logical = format!("geometry/{id}.pkg");
@@ -419,9 +434,49 @@ fn load_vehicle_impl(
         stuck,
         gyro,
         breaks,
+        audio,
         report,
         sources,
     })
+}
+
+/// Resolve and parse `aud/cardata/<side>/<id>.csv`. `None` when the
+/// record does not resolve; a resolved file that fails to parse or
+/// yields a non-car grammar warns instead of sinking the load, and a
+/// parsed body's diagnostics/`validate()` issues surface as warnings
+/// while the body itself is kept (findings never drop authored data).
+fn load_car_audio(
+    vfs: &Vfs,
+    id: &str,
+    side: &str,
+    sources: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) -> Option<CarAudio> {
+    let logical = format!("aud/cardata/{side}/{id}.csv");
+    let (bytes, src) = read_opt(vfs, &logical)?;
+    sources.push(src);
+    let file = match cardata::parse(&logical, &bytes) {
+        Ok(f) => f,
+        Err(e) => {
+            warnings.push(format!("{logical}: {e}"));
+            return None;
+        }
+    };
+    match file.body {
+        CardataBody::Car(car) => {
+            for d in &car.diagnostics {
+                warnings.push(format!("{logical}: {d}"));
+            }
+            for i in car.validate() {
+                warnings.push(format!("{logical}: {i}"));
+            }
+            Some(car)
+        }
+        _ => {
+            warnings.push(format!("{logical}: not a car audio table"));
+            None
+        }
+    }
 }
 
 fn load_trailer(
@@ -603,5 +658,65 @@ mod tests {
         over.wheels.pop();
         let err = apply_handling_override(&imported, over).unwrap_err();
         assert!(err.contains("wheels"), "{err}");
+    }
+
+    const CAR_CSV: &[u8] = b"Horn wave name,Horn volume,flags,Num Engine Samples,clutch wave name,clutch volume\nTESTHORN,0.9,0,1,REVERSE,0.5\nEngine wave name,a,b\nTESTENG,0.1,0.2\n";
+
+    fn cardata_vfs(logical: &str, bytes: &[u8]) -> (tempfile::TempDir, Vfs) {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(logical);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+        let mut vfs = Vfs::new();
+        vfs.mount_dir(tmp.path(), 0).unwrap();
+        (tmp, vfs)
+    }
+
+    /// `aud/cardata/<side>/<id>.csv` loads per side, recorded as a
+    /// source, with parse findings surfaced as warnings.
+    #[test]
+    fn car_audio_loads_from_the_side_dir() {
+        let (_tmp, vfs) = cardata_vfs("aud/cardata/player/vpx.csv", CAR_CSV);
+        let (mut sources, mut warnings) = (Vec::new(), Vec::new());
+        let audio = load_car_audio(&vfs, "vpx", "player", &mut sources, &mut warnings).unwrap();
+        assert_eq!(audio.horn.name, "TESTHORN");
+        assert_eq!(audio.horn.volume, 0.9);
+        assert_eq!(audio.engine_samples.len(), 1);
+        assert!(
+            sources
+                .iter()
+                .any(|s| s.starts_with("aud/cardata/player/vpx.csv")),
+            "{sources:?}"
+        );
+        // The authored count (1) matches the parsed rows — no issue.
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        // The opponent side reads its own directory.
+        let (_tmp, vfs) = cardata_vfs("aud/cardata/opponent/vpx.csv", CAR_CSV);
+        let (mut sources, mut warnings) = (Vec::new(), Vec::new());
+        assert!(load_car_audio(&vfs, "vpx", "opponent", &mut sources, &mut warnings).is_some());
+    }
+
+    /// Absent → `None` quietly; resolved-but-unusable → `None` + a
+    /// warning — findings never sink the vehicle load.
+    #[test]
+    fn car_audio_absence_and_misuse_are_soft() {
+        let (_tmp, vfs) = cardata_vfs("tune/nothing.txt", b"x");
+        let (mut sources, mut warnings) = (Vec::new(), Vec::new());
+        assert!(load_car_audio(&vfs, "vpx", "player", &mut sources, &mut warnings).is_none());
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        // A file classifying as a non-car grammar (the name contains
+        // `impact`) warns rather than handing back a wrong body.
+        let (_tmp, vfs) = cardata_vfs("aud/cardata/player/vpimpact.csv", CAR_CSV);
+        let (mut sources, mut warnings) = (Vec::new(), Vec::new());
+        assert!(load_car_audio(&vfs, "vpimpact", "player", &mut sources, &mut warnings).is_none());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+
+        // A resolved file that cannot parse warns the same way.
+        let (_tmp, vfs) = cardata_vfs("aud/cardata/player/vpy.csv", b"garbage\n");
+        let (mut sources, mut warnings) = (Vec::new(), Vec::new());
+        assert!(load_car_audio(&vfs, "vpy", "player", &mut sources, &mut warnings).is_none());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
     }
 }

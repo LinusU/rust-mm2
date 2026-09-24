@@ -36,8 +36,8 @@ use mm2_game::{
     BangerPool, BreakPartSpec, DEFAULT_ACTIVE_POOL, DamageSignals, DamageSpec, Mm2Vfs,
     ObjectIdentity, Player, PlayerControl, PlayerVehicle, RaceDefinition, RaceProgress, RaceState,
     RecoveryPolicy, Session, SessionEntity, SessionMode, SessionPhase, SmokePolicy, SparkPolicy,
-    StuckSpec, TargetSelection, VehicleBreaks, VehicleDamage, VehicleRecovery, VehicleSmoke,
-    VehicleSparks, VehicleStuck, WorldMode,
+    StuckSpec, TargetSelection, VehicleAudio, VehicleBreaks, VehicleDamage, VehicleRecovery,
+    VehicleSmoke, VehicleSparks, VehicleStuck, WorldMode,
 };
 use mm2_vehicle::{TireConditions, VehicleConfig, vehicle_bundle};
 use tracing::{error, info, warn};
@@ -235,6 +235,7 @@ pub fn drive_session(
             commands.remove_resource::<crate::environment::EnvironmentReport>();
             commands.remove_resource::<crate::damage_fx::SmokeFx>();
             commands.remove_resource::<crate::spark_fx::SparkFx>();
+            commands.remove_resource::<crate::audio::WaveBank>();
             commands.remove_resource::<crate::pvs::CityPvs>();
             commands.remove_resource::<crate::water::CityWater>();
             commands.remove_resource::<crate::city::WorldFloor>();
@@ -625,6 +626,12 @@ pub fn load_session_world(
             &mut assets.materials,
         ),
     });
+    // F07-A.2: the session's wave stem index — cardata sample names
+    // resolve through it into decoded `PcmAudio` voices. Session-scoped
+    // like the effect banks: teardown removes it and the next load
+    // re-indexes, so a mod set that changed between sessions can never
+    // leave a stale stem map.
+    commands.insert_resource(crate::audio::WaveBank::index(&vfs.0));
     if world_ok {
         session
             .transition(SessionPhase::Ready)
@@ -822,6 +829,15 @@ pub fn load_session_world(
                 commands
                     .entity(vehicle)
                     .insert(VehicleStuck::new(StuckSpec::from(s)));
+            }
+            // Authored audio bindings (F07-A.2): the cardata table
+            // verbatim — `horn_voices` resolves its stems through the
+            // session's `WaveBank`. Same absence policy as damage: no
+            // record, no component.
+            if let Some(a) = &def.audio {
+                commands
+                    .entity(vehicle)
+                    .insert(VehicleAudio { spec: a.clone() });
             }
             // Authored breakaway inventory (F05-B.3): only
             // `dgbangerdata`-backed BREAK chunks make a rig, so a car
