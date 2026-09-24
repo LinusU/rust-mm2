@@ -205,6 +205,59 @@ fn dev_world_headless_smoke_passes_without_mm2_data() {
     );
 }
 
+/// The parked driver (F13-C.2) is the stationary control leg: it holds
+/// the handbrake and never requests motion, so a dev-world run must
+/// still pass the load/grounded/finite criteria while `moved`/`peak`
+/// stay at zero where the `Hold` driver drives off. The "car never
+/// drove" verdict only applies to drivers that request motion — a
+/// parked car reporting it would be a false failure of a correct run.
+#[test]
+fn dev_world_parked_driver_stays_parked() {
+    let vfs = Vfs::new();
+    let rec = smoke::headless_smoke(
+        &SessionConfig::default(),
+        vfs,
+        SelectedCar {
+            def: None,
+            paint: 0,
+        },
+        &VehicleConfig::default(),
+        600,
+        smoke::Driver::Parked,
+        None,
+    );
+    assert_eq!(
+        rec.status,
+        SmokeStatus::Pass,
+        "a parked run still meets load/grounded/finite: {}",
+        rec.line()
+    );
+    let line = rec.line();
+    assert!(
+        line.contains("driver=parked"),
+        "record names the parked driver: {line}"
+    );
+    let field = |prefix: &str, suffix: &str| -> f32 {
+        line.split_whitespace()
+            .find_map(|kv| {
+                kv.strip_prefix(prefix)
+                    .and_then(|v| v.strip_suffix(suffix))
+                    .and_then(|v| v.parse().ok())
+            })
+            .unwrap_or(f32::NAN)
+    };
+    let peak = field("peak=", "m/s");
+    let moved = field("moved=", "m");
+    assert!(
+        peak < 5.0,
+        "the parked driver never requests drive — peak {peak} m/s in {line}"
+    );
+    assert!(
+        moved < 5.0,
+        "the parked car stays at spawn (settle drop aside) — moved {moved} m in {line}"
+    );
+}
+
 /// A mid-run session restart is a legitimate lifecycle event — a
 /// `RestartEvent` disabled outcome, a Backspace/results-row restart or
 /// the `--restart` dev override all travel the same production

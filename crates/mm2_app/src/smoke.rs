@@ -130,6 +130,12 @@ pub enum Driver {
     /// sessions can reach a finish/result instead of running straight
     /// off the course.
     Scripted,
+    /// The stationary control (`--parked`): holds the handbrake for the
+    /// whole session through the production `VehicleInput` path, so an
+    /// event run measures what the opponents do with no competing local
+    /// driver — the isolation leg `Hold` (blind full throttle) cannot
+    /// provide.
+    Parked,
 }
 
 impl Driver {
@@ -138,6 +144,7 @@ impl Driver {
         match self {
             Self::Hold => "hold",
             Self::Scripted => "scripted",
+            Self::Parked => "parked",
         }
     }
 }
@@ -150,10 +157,13 @@ impl Driver {
 /// throttle — the smoke exercises input → simulation → telemetry, not
 /// just spawning. The `Scripted` driver inserts [`ScriptedDrive`] and
 /// lets `scripted_drive` steer at the live objective instead; it owns
-/// the input from the first update. Dev-world criteria require the car
-/// to actually drive; a city only has to load, keep the car finite and
-/// grounded (props may legitimately block its path — `moved=` reports
-/// how far it got either way).
+/// the input from the first update. The `Parked` driver inserts
+/// [`crate::input::ParkedDrive`] so `parked_drive` holds the handbrake —
+/// the stationary control leg. Dev-world criteria require the car to
+/// actually drive under a driver that requests motion (Parked is
+/// exempt — its evidence is the car staying put); a city only has to
+/// load, keep the car finite and grounded (props may legitimately block
+/// its path — `moved=` reports how far it got either way).
 ///
 /// Event sessions honor the countdown's input lock (throttle stays zero
 /// until `RaceStarted`'s release) and report `race=`/`cp=` evidence.
@@ -296,6 +306,10 @@ pub fn headless_smoke(
                     .chain(),
                 race::update_checkpoint_markers,
                 scripted::scripted_drive.run_if(resource_exists::<scripted::ScriptedDrive>),
+                // F13-C.2: the parked control owns `VehicleInput` under
+                // `--parked` — the same resource-gated pattern
+                // `ScriptedDrive` holds for `--bot`.
+                crate::input::parked_drive.run_if(resource_exists::<crate::input::ParkedDrive>),
                 // F18-A.5: the chase camera tracks the player headlessly
                 // so the authored room-PVS pass resolves a live source
                 // room exactly as the windowed run does — the record's
@@ -331,6 +345,9 @@ pub fn headless_smoke(
         );
     if driver == Driver::Scripted {
         app.insert_resource(scripted::ScriptedDrive);
+    }
+    if driver == Driver::Parked {
+        app.insert_resource(crate::input::ParkedDrive);
     }
     if let Some(profile) = profile {
         app.insert_resource(profile);
@@ -377,10 +394,12 @@ pub fn headless_smoke(
         // slot), which is how a legitimate restart once reported
         // `final=(NaN,NaN,NaN)` as a "non-finite pose".
         let player = player_query.iter(app.world()).next();
-        // The `Hold` driver writes input directly; `Scripted` is owned
-        // by `scripted_drive` inside the update. Either way the
-        // countdown lock must not be bypassed (AC03) — `scripted_drive`
-        // gates on it the same way `vehicle_input` does.
+        // The `Hold` driver writes input directly; `Scripted`/`Parked`
+        // are owned by `scripted_drive`/`parked_drive` inside the
+        // update. Either way the countdown lock must not be bypassed
+        // (AC03) — `scripted_drive` gates on it the same way
+        // `vehicle_input` does (`parked_drive` writes only a held
+        // handbrake, which cannot launch the car).
         if driver == Driver::Hold {
             let driving = {
                 let session = app.world().resource::<Session>();
@@ -935,9 +954,13 @@ pub fn headless_smoke(
         return record(SmokeStatus::Fail, detail(" fell through the world"));
     }
     // The dev world is flat and empty ahead of spawn — a healthy car must
-    // be able to drive. A city can legitimately wall the car in, so its
-    // bar is load + finite + grounded only.
-    if matches!(&config.world, WorldMode::DevWorld)
+    // be able to drive *when its driver requests motion*. `Parked` never
+    // does (it is the stationary control leg), so the check is inert for
+    // it: the parked evidence is `moved=`/`peak=` staying at zero. A city
+    // can legitimately wall the car in, so its bar is load + finite +
+    // grounded only.
+    if driver != Driver::Parked
+        && matches!(&config.world, WorldMode::DevWorld)
         && !matches!(&config.mode, mm2_game::SessionMode::Event(_))
         && peak_speed < 5.0
     {

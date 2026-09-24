@@ -206,6 +206,14 @@ struct Cli {
     #[arg(long)]
     bot: bool,
 
+    /// Stationary control: the player vehicle holds its handbrake for
+    /// the whole session — it never races, so an event run measures what
+    /// the opponents do with no competing local driver (the isolation
+    /// leg `--bot`'s driving and the default driver's blind full
+    /// throttle cannot provide). Works windowed too.
+    #[arg(long, conflicts_with = "bot")]
+    parked: bool,
+
     /// Disable the authored `.cpvs` room-PVS render culling (F18-A.5)
     /// — the retail `cityLevel::EnablePVS(false)` counterpart and the
     /// escape hatch for comparing culled vs unculled captures.
@@ -745,6 +753,8 @@ fn main() {
             cli.frames.unwrap_or(600),
             if cli.bot {
                 smoke::Driver::Scripted
+            } else if cli.parked {
+                smoke::Driver::Parked
             } else {
                 smoke::Driver::Hold
             },
@@ -781,7 +791,8 @@ fn main() {
         && !cli.no_pvs
         && !cli.nav
         && cli.nav_route.is_none()
-        && !cli.bot;
+        && !cli.bot
+        && !cli.parked;
     if cli.menu && !menu_mode {
         warn!("--menu ignored: a session-shaping flag requested a direct launch");
     }
@@ -973,13 +984,20 @@ fn main() {
             )
                 .chain(),
             input::vehicle_input.run_if(not(capturing)),
-            // The scripted driver owns `VehicleInput` while `--bot` is
-            // on — scheduled after the keyboard mapping so it wins
+            // The evidence drivers own `VehicleInput` while their flag
+            // is on — scheduled after the keyboard mapping so they win
             // deterministically, and frozen during a capture like every
-            // other input.
-            scripted::scripted_drive
+            // other input. The parked control is chained after the
+            // scripted one so a world holding both markers stays
+            // deterministic (the CLI flags conflict, so that can only
+            // come from a test).
+            (
+                scripted::scripted_drive.run_if(resource_exists::<scripted::ScriptedDrive>),
+                input::parked_drive.run_if(resource_exists::<input::ParkedDrive>),
+            )
+                .chain()
                 .after(input::vehicle_input)
-                .run_if(not(capturing).and_then(resource_exists::<scripted::ScriptedDrive>)),
+                .run_if(not(capturing)),
             race::nav_target_input.run_if(not(capturing)),
             camera::toggle_camera.run_if(not(capturing)),
             camera::chase_follow,
@@ -1101,6 +1119,9 @@ fn main() {
     }
     if cli.bot {
         app.insert_resource(scripted::ScriptedDrive);
+    }
+    if cli.parked {
+        app.insert_resource(input::ParkedDrive);
     }
     // F18-A.5: `--no-pvs` reaches the session through
     // `SessionConfig::dev` (retail `EnablePVS` default-on) — the same

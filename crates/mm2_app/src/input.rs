@@ -11,6 +11,33 @@ use mm2_vehicle::VehicleInput;
 
 use crate::camera::CameraMode;
 
+/// Presence enables the parked driver: `--parked` inserts it, and
+/// [`parked_drive`] owns the player vehicle's [`VehicleInput`] while it
+/// exists. A resource (not a CLI argument threaded everywhere) so both
+/// the windowed app and the headless smoke gate the same system — the
+/// same contract [`crate::scripted::ScriptedDrive`] holds for `--bot`.
+#[derive(Resource, Debug, Default, Clone, Copy)]
+pub struct ParkedDrive;
+
+/// The stationary evidence driver (F13-C.2): writes the parked input —
+/// handbrake held, no throttle/steering — every frame. Scheduled `after`
+/// [`vehicle_input`], so while `--parked` is on it deterministically owns
+/// the input exactly like the scripted driver owns it under `--bot`.
+///
+/// "Parked" means the local participant never races: it stays on the
+/// grid (a handbrake, not the brake pedal — the pedal is the reverse
+/// throttle once stopped) so an event session measures what the
+/// *opponents* do without a competing local driver — the control leg a
+/// blind full-throttle `Hold` run cannot provide.
+pub fn parked_drive(mut vehicles: Query<&mut VehicleInput, With<PlayerVehicle>>) {
+    for mut vi in &mut vehicles {
+        *vi = VehicleInput {
+            handbrake: 1.0,
+            ..default()
+        };
+    }
+}
+
 /// Fill `VehicleInput` on the player vehicle from keyboard and the first
 /// connected gamepad (gamepad axes take precedence when non-neutral).
 pub fn vehicle_input(

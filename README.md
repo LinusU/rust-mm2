@@ -139,6 +139,9 @@ cargo run -- --mm2-path <dir> --city london --event blitz:0 --headless --bot
 #   --bot steers at the live race objective (nav target / next ordered
 #   gate) instead of holding throttle straight — event completions go
 #   through the real checkpoint/finish/result path. Works windowed too.
+cargo run -- --mm2-path <dir> --city london --event blitz:0 --headless --parked
+#   --parked holds the handbrake all session — the stationary control
+#   leg: what the opponents do with no competing local driver.
 
 # visual smoke — real render path, windowed; the screenshot is awaited
 # (pass is reported only once the file actually lands):
