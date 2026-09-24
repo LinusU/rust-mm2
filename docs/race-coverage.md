@@ -412,8 +412,10 @@ matrix budget), `--parked --pro`, commit `feccdc4` (docs-only over
 `/tmp/mm2-pro-deep/`.
 
 `omax` is the deepest gate any opponent banked; `Σc` sums every
-opponent's banked gates; `rec` is the field's escape+re-anchor count
-(`opp_rec=`). The 197 s column is the C.4 parked leg.
+opponent's banked gates; `rec` is the field's re-anchor teleport count
+(`opp_rec=` — escapes are the separate per-opponent `e` field in the
+`opps=` rows, not part of this sum). The 197 s column is the C.4 parked
+leg.
 
 | event | omax 197→394 s | Σc 197→394 s | rec 197→394 s |
 | --- | --- | --- | --- |
@@ -432,7 +434,7 @@ opponent's banked gates; `rec` is the field's escape+re-anchor count
 **The stalls are predominantly controller-bound, not budget-bound.**
 Doubling the simulated budget produced zero additional finishes
 (`opp=0` everywhere, `results=0`) while the field's re-anchor count
-went 160 → 380 (+138%) against summed gate clears 121 → 144 (+19%) —
+went 180 → 430 (+139%) against summed gate clears 121 → 144 (+19%) —
 the extra 197 s bought recovery churn, not progress. The leader
 advanced on 6 of 11 events (london-4's 2→5 of 6 the largest move) and
 plateaued on 5. sf-6 is the one near-finish: `vpauditt` banked all 6
@@ -531,12 +533,15 @@ parked car, no spikes.
   is a driving-quality question, not a physics defect.
 - The parked control is stationary, not physics-frozen — the field
   shoves it (sf-0 `cp=1/6` on contact push-through; `moved` 1–8 m on
-  the amateur legs, ≤29 m at Pro, 110 m on london-3's doubled-budget
-  leg — all contact displacement, `peak` ≤12.8 m/s). That is correct
+  the amateur legs, ≤29 m at Pro, and 30–110 m on three doubled-budget
+  legs — london-3's 110 m shove plus london-5 (58 m) and london-9
+  (30 m), where the disclosed spawn-edge fall loops also displace the
+  end pose — all contact/recovery displacement, `peak` ≤12.8 m/s).
+  That is correct
   swept-trigger behavior, disclosed.
 - The 197 s/event matrix budget was probed at 394 s on the 11
   deepest-stalling events (F13-C.6): zero added finishes, field
-  re-anchors +138% against +19% banked gates — the deep-course
+  re-anchors +139% against +19% banked gates — the deep-course
   non-finishes are predominantly controller-skill-bound (the F15-B
   residual), not merely budget-bound. Longer budgets remain untested
   beyond 394 s and original-fidelity pacing is unverified.

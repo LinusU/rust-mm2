@@ -19,7 +19,7 @@ checkpoint:<i> --parked --pro --headless --frames 24000` (~394 s sim):
   `/tmp/mm2-pro-deep/` (large-capture rule).
 - **Zero added finishes** (`opp=0`, `results=0` on all 11 legs) —
   doubling the budget bought recovery churn, not progress: field
-  re-anchors 160 → 380 (+138%) against summed banked gates
+  re-anchors 180 → 430 (+139%) against summed banked gates
   121 → 144 (+19%).
 - The leader advanced on 6 of 11 events (london-4's 2→5 of 6 the
   largest move) and plateaued on 5 (london-5/9, sf-9/10/11). sf-6's
