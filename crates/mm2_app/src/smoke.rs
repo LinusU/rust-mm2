@@ -500,22 +500,43 @@ pub fn headless_smoke(
             // designed catch-up assist is currently lifting their
             // demand ceiling (F15-B.4, DSN-27) — likewise only on
             // activity, so an unassisted run stays identical.
+            // `opps=` (F15-B.7, spec req 6) is the per-opponent
+            // breakdown in authored roster order — progress, stuck
+            // duration and recovery actions per driver, so a soak no
+            // longer needs out-of-tree instrumentation to say *which*
+            // cars cleared their gates.
+            let ordered = r.definition.rule == mm2_game::CheckpointRule::Ordered;
+            let mut rows: Vec<OppRow> = Vec::new();
             let (opp, opp_done, opp_rec, opp_cu) = world_ecs.iter_entities().fold(
                 (0usize, 0usize, 0usize, 0usize),
-                |(n, d, r, c), e| {
+                |(n, d, rec, c), e| {
                     let Some(driver) = e.get::<opponents::OpponentDriver>() else {
-                        return (n, d, r, c);
+                        return (n, d, rec, c);
                     };
-                    let resolved = e.get::<RaceProgress>().is_some_and(|p| {
-                        matches!(
-                            p.state,
-                            ParticipantState::Finished { .. } | ParticipantState::TimedOut { .. }
-                        )
+                    let progress = e.get::<RaceProgress>();
+                    let resolved = progress.and_then(|p| match p.state {
+                        ParticipantState::Finished { .. } => Some('F'),
+                        ParticipantState::TimedOut { .. } => Some('T'),
+                        _ => None,
+                    });
+                    rows.push(OppRow {
+                        index: driver.index,
+                        vehicle: driver.spec.vehicle.as_str(),
+                        cleared: progress.map_or(0, |p| p.cleared_count()),
+                        lap: if ordered {
+                            progress.map(|p| (p.lap + 1).min(r.definition.laps))
+                        } else {
+                            None
+                        },
+                        resolved,
+                        escapes: driver.recovery.escapes,
+                        reanchors: driver.reanchors,
+                        stuck: driver.stuck_peak,
                     });
                     (
                         n + 1,
-                        d + resolved as usize,
-                        r + driver.reanchors as usize,
+                        d + usize::from(resolved.is_some()),
+                        rec + driver.reanchors as usize,
                         c + usize::from(driver.catch_up > 0.0),
                     )
                 },
@@ -531,7 +552,10 @@ pub fn headless_smoke(
                 } else {
                     String::new()
                 };
-                format!(" opp={opp_done}/{opp}{rec}{cu}")
+                format!(
+                    " opp={opp_done}/{opp}{rec}{cu}{}",
+                    opponent_detail(&mut rows)
+                )
             } else {
                 String::new()
             };
@@ -548,6 +572,26 @@ pub fn headless_smoke(
                 opp,
             )
         });
+    // F15-B.5 scripted-player evidence: the bounded re-anchor
+    // teleports (`r`) and three-point escapes (`e`) the `--bot` driver
+    // took this session — the per-player counterpart of `opp_rec=`,
+    // previously `info!`-only. On activity only, so a clean run stays
+    // bit-identical.
+    let p_rec_detail = {
+        let reanchors = player
+            .and_then(|e| world_ecs.get::<scripted::ScriptedRoute>(e))
+            .map(|r| r.reanchors)
+            .unwrap_or(0);
+        let escapes = player
+            .and_then(|e| world_ecs.get::<scripted::ScriptedBot>(e))
+            .map(|b| b.escapes)
+            .unwrap_or(0);
+        if reanchors + escapes > 0 {
+            format!(" p_rec={reanchors}r/{escapes}e")
+        } else {
+            String::new()
+        }
+    };
     // `--nav` evidence: the graph + overrides loaded through the real
     // session path (`dev.nav_overlay` on the session config).
     let nav_detail = world_ecs
@@ -817,7 +861,7 @@ pub fn headless_smoke(
     };
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks}{rs_detail} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{txl_detail}{traction_detail}{profile_detail}{extra}",
+            "updates={frames} ticks={ticks}{rs_detail} driver={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{txl_detail}{traction_detail}{profile_detail}{extra}",
             driver.as_str(),
             session.phase().name(),
         )
@@ -901,6 +945,70 @@ fn absent_player_is_transient(phase: &SessionPhase, teardown_queued: bool, resta
     }
 }
 
+/// One opponent's row in the `opps=` field (F15 req 6): which roster
+/// slot and vehicle, how much of the course it earned, and what the
+/// bounded recovery machinery did for it.
+struct OppRow<'a> {
+    /// Authored roster slot — a vehicle that failed to load keeps its
+    /// slot skipped, so the printed index still names the lineup entry.
+    index: usize,
+    /// Authored vehicle id.
+    vehicle: &'a str,
+    /// Gates cleared (`RaceProgress::cleared_count` — per-lap under
+    /// `Ordered`, total under `AnyOrder`).
+    cleared: usize,
+    /// Lap in progress under `Ordered` (`lap + 1` clamped, the same
+    /// convention as the record's `lap=` field); `None` on AnyOrder.
+    lap: Option<u32>,
+    /// `F` finished / `T` timed out; `None` while still racing.
+    resolved: Option<char>,
+    /// Three-point reverse-and-turn escapes attempted (`ScriptedBot`).
+    escapes: u32,
+    /// Bounded re-anchor teleports (DSN-14).
+    reanchors: u32,
+    /// Longest continuous spell inside one displacement bubble, in
+    /// update frames (`OpponentDriver::stuck_peak`) — the stuck
+    /// duration, surviving window resets and re-anchors.
+    stuck: u32,
+}
+
+/// The `opps=` record field — one row per spawned opponent in authored
+/// roster order: `<slot>:<vehicle>/<cleared>c[/<lap>l][/F|/T]`
+/// followed by the recovery counters when nonzero (`<escapes>e`,
+/// `<reanchors>r`, `<stuck>w` — `w` counts update frames inside the
+/// stuck bubble). Recovery subfields only print on activity so a
+/// clean run stays short; rows sort by roster slot so entity-archetype
+/// order cannot scramble the report.
+fn opponent_detail(rows: &mut [OppRow]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    rows.sort_by_key(|r| r.index);
+    let mut s = String::from(" opps=");
+    for (i, r) in rows.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&format!("{}:{}/{}c", r.index, r.vehicle, r.cleared));
+        if let Some(l) = r.lap {
+            s.push_str(&format!("/{l}l"));
+        }
+        if let Some(res) = r.resolved {
+            s.push_str(&format!("/{res}"));
+        }
+        if r.escapes > 0 {
+            s.push_str(&format!("/{}e", r.escapes));
+        }
+        if r.reanchors > 0 {
+            s.push_str(&format!("/{}r", r.reanchors));
+        }
+        if r.stuck > 0 {
+            s.push_str(&format!("/{}w", r.stuck));
+        }
+    }
+    s
+}
+
 /// The record's `outcome=`/`place=` field: the local participant's
 /// result and its place in the ledger's standings for the *current*
 /// session generation (F13-B). The ledger outlives one session —
@@ -972,6 +1080,66 @@ mod tests {
         // A generation with no results records no outcome at all —
         // the fallback must not reach back into a finished session.
         assert_eq!(result_outcome(&ledger, 3, Some(local)), "");
+    }
+
+    /// `opps=` (F15-B.7): one row per spawned opponent in authored
+    /// roster order — progress, the resolved marker, and the recovery
+    /// counters only when they fired. This is the field that replaced
+    /// out-of-tree instrumentation for "which cars cleared their
+    /// gates" (F15 req 6).
+    #[test]
+    fn opponent_detail_reports_progress_and_recovery_per_slot() {
+        let mut rows = vec![
+            // Deliberately out of order: entity iteration order is
+            // archetype order; the record must sort by roster slot.
+            OppRow {
+                index: 2,
+                vehicle: "vpanoz",
+                cleared: 0,
+                lap: Some(1),
+                resolved: None,
+                escapes: 0,
+                reanchors: 2,
+                stuck: 1040,
+            },
+            OppRow {
+                index: 0,
+                vehicle: "vpcoop",
+                cleared: 4,
+                lap: Some(2),
+                resolved: None,
+                escapes: 1,
+                reanchors: 0,
+                stuck: 0,
+            },
+            OppRow {
+                index: 1,
+                vehicle: "vpbug",
+                cleared: 9,
+                lap: Some(3),
+                resolved: Some('F'),
+                escapes: 0,
+                reanchors: 0,
+                stuck: 24,
+            },
+        ];
+        assert_eq!(
+            opponent_detail(&mut rows),
+            " opps=0:vpcoop/4c/2l/1e,1:vpbug/9c/3l/F/24w,2:vpanoz/0c/1l/2r/1040w"
+        );
+        // An AnyOrder row carries no lap; a timeout marks `T`.
+        let mut timed_out = vec![OppRow {
+            index: 0,
+            vehicle: "vpbug",
+            cleared: 3,
+            lap: None,
+            resolved: Some('T'),
+            escapes: 0,
+            reanchors: 0,
+            stuck: 0,
+        }];
+        assert_eq!(opponent_detail(&mut timed_out), " opps=0:vpbug/3c/T");
+        assert_eq!(opponent_detail(&mut []), "");
     }
 
     /// Regression for the review-flagged false pass: an absent player

@@ -315,6 +315,7 @@ fn input_law_recovers_from_stuck() {
     for _ in 0..90 {
         scripted::scripted_input(&mut bot, 0.5, 0.2, true);
     }
+    assert_eq!(bot.escapes, 1, "the triggered escape is counted");
     let reversing = scripted::scripted_input(&mut bot, 0.5, 0.0, true);
     assert_eq!(reversing.brake, 1.0);
     assert_eq!(reversing.throttle, 0.0);

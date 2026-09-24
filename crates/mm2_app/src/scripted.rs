@@ -62,6 +62,10 @@ pub struct ScriptedBot {
     /// recovery so a car that keeps failing tries the other side —
     /// the nav line can't see walls, so escapes are blind guesses.
     pub recovery_side: f32,
+    /// Three-point escapes fired this session — the observable count
+    /// of the bounded recovery the law attempts (F15 req 6's tracked
+    /// recovery actions; the smoke record surfaces it per driver).
+    pub escapes: u32,
 }
 
 impl Default for ScriptedBot {
@@ -71,6 +75,7 @@ impl Default for ScriptedBot {
             reverse_frames: 0,
             turn_frames: 0,
             recovery_side: 1.0,
+            escapes: 0,
         }
     }
 }
@@ -458,6 +463,7 @@ pub fn scripted_input_tuned(
             bot.reverse_frames = REVERSE_FRAMES;
             bot.turn_frames = TURN_FRAMES;
             bot.recovery_side = -bot.recovery_side;
+            bot.escapes += 1;
         }
     } else {
         bot.stuck_frames = 0;
@@ -678,7 +684,10 @@ pub fn scripted_drive(
                         yaw: ryaw,
                     });
                     rs.next = initial_route_index(&rs.route, pose, ryaw);
-                    *bot = ScriptedBot::default();
+                    *bot = ScriptedBot {
+                        escapes: bot.escapes,
+                        ..ScriptedBot::default()
+                    };
                     rs.reanchor_pos = pose;
                     rs.reanchor_frames = 0;
                     rs.offroute_frames = 0;

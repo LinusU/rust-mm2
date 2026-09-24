@@ -966,6 +966,7 @@ fn nearest_blocker_reads_only_the_corridor_ahead() {
 /// tuning, no committed pass — only `avoid_players` varies.
 fn driver(avoid_players: bool) -> OpponentDriver {
     OpponentDriver {
+        index: 0,
         spec: OpponentSpec {
             vehicle: "vpt".into(),
             params: vec![],
@@ -984,6 +985,7 @@ fn driver(avoid_players: bool) -> OpponentDriver {
         pass_ban: None,
         stuck_pos: Vec3::ZERO,
         stuck_frames: 0,
+        stuck_peak: 0,
         reanchors: 0,
         catch_up_policy: mm2_game::CatchUpPolicy::default(),
         catch_up: 0.0,
@@ -1512,6 +1514,16 @@ fn permanently_stuck_opponent_reanchors_and_resumes() {
         app.update();
         let d = app.world().get::<OpponentDriver>(vpt).unwrap();
         if d.reanchors > 0 {
+            assert!(
+                d.stuck_peak >= REANCHOR_FRAMES,
+                "the spent window is the recorded stuck duration: {}",
+                d.stuck_peak
+            );
+            assert!(
+                d.recovery.escapes >= 1,
+                "the penned car counted its failed blind escapes: {}",
+                d.recovery.escapes
+            );
             fired_at = Some(u);
             break;
         }
@@ -1599,6 +1611,13 @@ fn reanchor_dispatches_through_the_production_reset_path() {
     // The window restarted at the landing pose — a fresh small count
     // while the car accelerates away, not the spent budget.
     assert!(d.stuck_frames < 60, "stuck_frames={}", d.stuck_frames);
+    // The peak survives the reset — the session's longest stuck spell
+    // stays on the record even though the live window re-anchored.
+    assert!(
+        d.stuck_peak >= REANCHOR_FRAMES,
+        "stuck_peak={}",
+        d.stuck_peak
+    );
     let after = app.world().get::<Position>(vpt).unwrap().0;
     assert!(
         (after.z - COURSE_Z).abs() < 2.0 && after.x < before.x + 4.0,
@@ -1620,10 +1639,21 @@ fn progressing_opponents_never_reanchor() {
     run(&mut app, 1200); // past the budget — both cars finish inside it
 
     let mut q = app.world_mut().query::<(Entity, &OpponentDriver)>();
-    let counts: Vec<(Entity, u32)> = q.iter(app.world()).map(|(e, d)| (e, d.reanchors)).collect();
+    let counts: Vec<(Entity, u32, u32)> = q
+        .iter(app.world())
+        .map(|(e, d)| (e, d.reanchors, d.stuck_peak))
+        .collect();
     assert!(!counts.is_empty());
-    for (e, n) in counts {
+    for (e, n, peak) in counts {
         assert_eq!(n, 0, "opponent {e:?} re-anchored while progressing");
+        // The stuck measure is live — a moving car's bubble re-seats
+        // every REANCHOR_DIST of travel, so its peak is a small
+        // positive count, nowhere near the bound.
+        assert!(peak > 0, "opponent {e:?} never left a bubble reading");
+        assert!(
+            peak < REANCHOR_FRAMES,
+            "opponent {e:?} peaked at {peak} while progressing"
+        );
     }
 }
 

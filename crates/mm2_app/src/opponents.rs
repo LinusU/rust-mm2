@@ -211,6 +211,11 @@ const CATCH_UP_LEG_REF: f32 = 80.0;
 /// re-pathed through the road graph (F15-B.6).
 #[derive(Component, Debug, Clone)]
 pub struct OpponentDriver {
+    /// This participant's index in the authored roster — the slot the
+    /// lineup entry occupied, kept so evidence (the smoke record's
+    /// `opps=` field) names the authored slot even when a neighbour's
+    /// vehicle failed to load and its slot was skipped.
+    pub index: usize,
     /// The authored lineup entry this participant was spawned from.
     pub spec: OpponentSpec,
     /// The route the driver chases — the authored `.opp` line verbatim
@@ -273,6 +278,13 @@ pub struct OpponentDriver {
     /// car should be driving — at [`REANCHOR_FRAMES`] the bounded
     /// re-anchor fires (F15-B.3, AC03).
     pub stuck_frames: u32,
+    /// The largest `stuck_frames` count ever reached — the longest
+    /// continuous spell inside one displacement bubble (F15 req 6's
+    /// stuck duration). A progressing car's window re-seats every
+    /// [`REANCHOR_DIST`] of travel, so its peak stays a handful of
+    /// frames; a penned one runs to [`REANCHOR_FRAMES`]. Unlike
+    /// `stuck_frames` it survives the window reset and a re-anchor.
+    pub stuck_peak: u32,
     /// Re-anchors this participant has taken this session — the
     /// observable record of the disclosed teleport assist (surfaced
     /// in the smoke record as `opp_rec=`).
@@ -652,6 +664,7 @@ pub fn spawn_opponents(
                 DamageSignals::default(),
                 RaceProgress::new(definition),
                 OpponentDriver {
+                    index: i,
                     spec: spec.clone(),
                     route,
                     tuning: ScriptedTuning {
@@ -670,6 +683,7 @@ pub fn spawn_opponents(
                     pass_ban: None,
                     stuck_pos: pos,
                     stuck_frames: 0,
+                    stuck_peak: 0,
                     reanchors: 0,
                     catch_up_policy: mm2_game::CatchUpPolicy::default(),
                     catch_up: 0.0,
@@ -1043,6 +1057,7 @@ pub fn opponent_drive(
                 driver.stuck_frames = 0;
             } else {
                 driver.stuck_frames += 1;
+                driver.stuck_peak = driver.stuck_peak.max(driver.stuck_frames);
             }
             if driver.stuck_frames >= REANCHOR_FRAMES
                 && let Some(route) = driver.route.clone()
@@ -1077,7 +1092,10 @@ pub fn opponent_drive(
                     yaw: ryaw,
                 });
                 driver.next = initial_route_index(&route, pose, ryaw);
-                driver.recovery = ScriptedBot::default();
+                driver.recovery = ScriptedBot {
+                    escapes: driver.recovery.escapes,
+                    ..ScriptedBot::default()
+                };
                 driver.pass_entity = None;
                 driver.pass_side = 0.0;
                 driver.clear_frames = 0;

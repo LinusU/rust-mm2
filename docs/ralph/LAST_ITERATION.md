@@ -1,82 +1,70 @@
-# Last iteration — F15-B.6: navigation-backed `.opp` route densification
+# Last iteration — F15-B.7: per-opponent progress/recovery disclosure
 
-Task slice on `ralph/night` (baseline `2070fb2`; previous external review
-of the F15-B.5 doc-repair passed with no blocking findings). Selected the
-highest-value ready work: the `sf circuit:0` p3→p4 descent wall F15-B.5
-recorded as its open remainder — it stalled both the routed scripted
-player (`cp=2/9`, 21 recoveries) and the AI field (`opp_rec=5`).
-
-## Root cause — route fidelity, not physics
-
-F15-B.5's record guessed "steep-slope/collider fidelity". Instrumented
-probing disproved that:
-
-- The `.opp` p3→p4 straight line crosses Telegraph Hill *through* two
-  rows of bungalows: raycast profiles show a ~7 m step up onto roof
-  terraces at y≈40.5/46.4 while the adjacent street runs at y≈33 and
-  the bottom street at y≈18.9. A 33 m/s jump attempt still wedged on a
-  prop wall — the line is undrivable at any speed.
-- A direct physics probe drove the real street (BAI road 340, an
-  L-shaped descent around the block) at ~40 m/s with no drama.
-- Every retail `.opp` is sparse (8–20 anchors/lap, legs of 40–200 m) —
-  the polyline is course *intent*, not a literal centreline.
-
-So the fix derives the driven line from the authored road graph between
-anchors rather than chasing the straight polyline.
+Task slice on `ralph/night` (baseline `824defd`; the F15-B.6 external
+review passed with no blocking findings). Selected the reviewer's named
+verification gap: F15-B.6's "all four opponents clear gates (2/4/3/2)"
+evidence came from temporary instrumentation removed before commit —
+the committed smoke record could not say *which* opponents progressed
+or what the recovery machinery did for them (F15 spec req 6). This
+slice makes that evidence reproducible from committed code.
 
 ## What changed
 
-`crates/mm2_game/src/nav.rs`:
+`crates/mm2_app/src/scripted.rs`:
 
-- `lane_hits()` — every eligible lane snap, nearest-first;
-  `nearest_lane()` now picks its head.
-- `route_candidates()` + shared `route_search()` — multi-entry A*:
-  every lane within `ENTRY_TOLERANCE` (12 m) of the nearest snap seeds
-  its arc at snap cost, so both directions of a carriageway compete
-  without neighbouring roads pretending to be the endpoint.
-  `forward_on_arc()` rejects a same-arc goal lying *behind* the start
-  in travel direction. On the real leg the search resolves a single
-  258 m `road 340 Backward` arc vs the old single-snap 699 m uphill
-  detour.
-- `route_path()` — samples routed arcs in travel direction via
-  `transfer_lane` rank preservation + `crossing_path` junction chords.
-- `densify_route()` — a leg leaving `ROUTE_CORRIDOR` (14 m) of every
-  vehicle lane is re-pathed at `DENSIFY_STEP` (8 m); authored anchors
-  stay verbatim (gate binding/checkpoint semantics unchanged); closed
-  routes densify the wrap leg and re-emit the head anchor; unroutable
-  legs keep the authored line rather than inventing geometry.
+- `ScriptedBot.escapes` — counted each time the two-phase
+  reverse-and-turn escape fires.
+- The scripted player's route re-anchor preserves `escapes` across its
+  `ScriptedBot` reset (previously dropped by
+  `*bot = ScriptedBot::default()`).
 
-`crates/mm2_app/src/opponents.rs` / `session.rs`:
+`crates/mm2_app/src/opponents.rs`:
 
-- `OpponentDriver.route` carries the derived driving line; `spec` stays
-  authored verbatim. `driving_route()` applies `densify_route` with
-  `RouteOptions::default` — the event aimap's `[Exceptions]` ambient
-  closures are deliberately *not* consumed (they forbid ambient traffic
-  on a road; they don't remove a road from a race course —
-  implementation choice).
-- `load_session_world` builds the city's `NavGraph` once per event
-  (~2 ms measured on sf.bai) and densifies the bot's `ScriptedRoute`
-  plus every opponent route; a failed/absent graph leaves routes
-  verbatim.
+- `OpponentDriver.index` — the authored roster slot; a skipped vehicle
+  load does not renumber the field.
+- `OpponentDriver.stuck_peak` — the longest continuous spell inside one
+  displacement bubble. A cumulative total was implemented first and
+  rejected: a moving car's bubble re-seats every `REANCHOR_DIST` of
+  travel, so a cumulative count approaches the race duration regardless
+  of health. The peak is the meaningful signal — a progressing car
+  peaks at a handful of frames, a penned one at `REANCHOR_FRAMES` —
+  and it survives both the displacement-window reset and the re-anchor.
+- The opponent re-anchor now preserves `recovery.escapes` the same way.
+
+`crates/mm2_app/src/smoke.rs`:
+
+- `opps=` — one row per spawned opponent sorted by authored roster slot:
+  `<slot>:<vehicle>/<cleared>c[/<lap>l][/F|/T][/<escapes>e][/<reanchors>r][/<stuck>w]`.
+  `cleared` is `RaceProgress::cleared_count` (per-lap under `Ordered`),
+  `lap` uses the record's `lap+1` convention, `w` counts update frames
+  inside the displacement bubble. Recovery subfields print only when
+  nonzero.
+- `p_rec=<reanchors>r/<escapes>e` — the scripted player's bounded
+  recovery counters (previously `info!`-only), printed only on activity.
+- A run with no opponents or no recovery activity emits a bit-identical
+  record.
 
 ## Verification
 
-- Tests +7 (`crates/mm2_game/tests/nav.rs` 25→32): goalward-direction
-  entry where single-snap `route()` dead-ends, stacked-level snap
-  preference, lane-walk sampling incl. junction chords, corridor-leg
-  verbatim, off-road re-path, closed-wrap re-emission, unroutable-leg
-  verbatim. One test-constructor field added in
-  `crates/mm2_app/tests/opponents.rs`.
+- Tests +1 (`smoke::opponent_detail_reports_progress_and_recovery_per_slot`
+  — roster-slot sorting over out-of-order entity collection, AnyOrder
+  no-lap, `T` timeout, empty roster) plus new assertions in four
+  existing tests: the penned-car end-to-end asserts the peak reached
+  `REANCHOR_FRAMES` with counted escapes, the dispatch-path test asserts
+  the peak survives the reset while `stuck_frames` restarts, the
+  progressing-field test asserts peaks stay small-but-live, and the bot
+  escape test counts the fired escape.
 - Retail (`fnv1a64:e91e6cd4b2ae30d9`, headless):
-  `sf circuit:0 --bot --frames 9000` → `status=pass cp=4/9 lap=2/3
-  pos=1/5 opp_rec=4` — the player completes lap 1 (pre-slice:
-  `cp=2/9` + 21 recoveries wedged on the hill). An instrumented run
-  under the candidate code showed all four opponents clearing gates
-  (2/4/3/2) vs the old shared wall.
-- London regression: `london circuit:0 --bot --frames 1500` →
-  `status=pass cp=3/6 pos=5/8 opp_rec=1` — one gate behind the
-  reviewer's pre-slice `cp=4/6 pos=1/8`; a densified-line pacing
-  delta, not a stall. At 9000f one opponent finished (`opp=1/7`).
+  - `sf circuit:0 --bot --frames 9000` → `status=pass cp=4/9 lap=2/3
+    pos=1/5 opp_rec=4 cu=4` with
+    `opps=0:vpbug/6c/1l/13e/3r/900w,1:vpbug/6c/1l/4e/697w,2:vpbug/0c/2l/10e/872w,3:vpbug/6c/1l/15e/1r/900w`
+    `p_rec=3r/2e` — `opp_rec` (4) equals the rows' `r` sum (3+1); slot 2
+    wrapped to lap 2 while two penned cars show exactly
+    `REANCHOR_FRAMES` peaks and slot 1 freed itself short of the bound.
+  - `london circuit:0 --bot --frames 1500` → `status=pass cp=3/6
+    pos=5/8 opp_rec=1` — identical headline to the pre-slice regression
+    disclosure (the slice is observability-only) with all seven slots
+    reporting progress and `p_rec=0r/1e`.
 - Gates (this tree): `cargo fmt --all -- --check` clean;
   `cargo clippy --workspace --all-targets --all-features -- -D warnings`
   clean; `cargo test --workspace` — 67 suites, 0 failures.
@@ -87,11 +75,12 @@ anchors rather than chasing the straight polyline.
   representative avoidance matrix, authored-tail columns
   (`weirdPathfinding`/`distancePadding`/`cornerBrakingThreshold`),
   `avoidOpponents` polarity.
-- The scripted re-anchor disclosure gap noted by review stands:
-  `p_rec=`-style field still absent (re-anchors are `info!` +
-  `ScriptedRoute::reanchors` only).
+- The `w` field measures update frames inside the displacement bubble,
+  not wall time; opponent recovery behavior itself is unchanged by this
+  slice and remains a designed policy, not verified original.
+- The London pacing regression stands (`cp=3/6` vs the pre-densification
+  `cp=4/6`); this slice did not attempt to address it.
 - GPU/rendered output not exercised — headless physics evidence only.
 - Whether retail opponents actually route on the BAI network between
-  `.opp` anchors is unverified (plausible inference from the sparse
-  data + authored road graph; the densified line is our implementation
-  choice, recorded as such).
+  `.opp` anchors remains an unverified inference (the densified line is
+  our implementation choice, recorded as such).
