@@ -13,8 +13,9 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::opponents::{
-    Blocker, OpponentDriver, REANCHOR_FRAMES, Traffic, apply_gap_brake, initial_route_index,
-    nearest_blocker, opponent_drive, pick_pass_side, reanchor_pose, route_target, spawn_pose,
+    Blocker, OpponentDriver, REANCHOR_CLEAR, REANCHOR_FRAMES, Traffic, apply_gap_brake,
+    initial_route_index, nearest_blocker, opponent_drive, pick_pass_side, reanchor_pose,
+    route_target, spawn_pose,
 };
 use mm2_app::scripted::{ScriptedBot, ScriptedTuning};
 use mm2_app::session::{self, SessionControl};
@@ -2022,4 +2023,324 @@ fn session_difficulty_measures_on_track() {
         "the difficulty switch must measure on track: \
          amateur x={amateur_x:.1} vs professional x={pro_x:.1}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// F15-B.10 — the spec's representative avoidance matrix, production path
+// ---------------------------------------------------------------------------
+
+/// Edge: a faster car behind a bus — a *moving* slower blocker, not a
+/// parked one. The corridor commits the pass on closing speed and the
+/// follower must actually get past: the position order swaps while the
+/// pass aim visibly leaves the lane line, instead of queueing behind
+/// the bus until the frame cap (AC03's bounded response on live
+/// traffic). The bus is a roster slot on the same lane staged ahead
+/// with a low authored `maxThrottle` — a bus, not a wall.
+#[test]
+fn a_faster_car_passes_a_slower_moving_blocker() {
+    let tmp = roster_install_rows(
+        "vpt race0-a-0.opp 1.0 0 50.0 0.7 1 1 1 1 0 1.0\n\
+         vpheavy race0-a-1.opp 0.15 0 50.0 0.7 1 1 1 1 0 1.0\n",
+        &[(
+            "race0-a-1.opp",
+            opp_file(&[
+                [125.0, 0.0, COURSE_Z],
+                [140.0, 0.0, COURSE_Z],
+                [165.0, 0.0, COURSE_Z],
+                [180.0, 0.0, COURSE_Z],
+            ]),
+        )],
+    );
+    let mut app = event_app(event_config(), vfs_of(tmp.path()));
+    app.update();
+    let vpt = opponent_by_vehicle(&mut app, "vpt");
+    let bus = opponent_by_vehicle(&mut app, "vpheavy");
+    let bus_obj = app.world().get::<ObjectIdentity>(bus).unwrap().0;
+
+    // The bus is ahead at the release — the follower has to earn the
+    // position swap on track.
+    run(&mut app, 240);
+    let behind_at_start = app.world().get::<Position>(vpt).unwrap().0.x
+        < app.world().get::<Position>(bus).unwrap().0.x;
+    assert!(behind_at_start, "the bus must start ahead");
+
+    let mut max_dev = 0.0f32;
+    let mut impacts = Vec::new();
+    let mut finished = false;
+    for _ in 0..900 {
+        app.update();
+        impacts.extend(drain_impacts(&mut app));
+        let v = app.world().get::<Position>(vpt).unwrap().0;
+        max_dev = max_dev.max((v.z - COURSE_Z).abs());
+        if matches!(
+            app.world().get::<RaceProgress>(vpt).unwrap().state,
+            ParticipantState::Finished { .. }
+        ) {
+            finished = true;
+            break;
+        }
+    }
+    assert!(finished, "the faster car never finished — stuck behind?");
+    let v = app.world().get::<Position>(vpt).unwrap().0;
+    let b = app.world().get::<Position>(bus).unwrap().0;
+    assert!(
+        v.x > b.x + 2.0,
+        "the position order must swap on track: vpt {v:?} vs bus {b:?}"
+    );
+    assert!(
+        max_dev > 0.5,
+        "a real overtake leaves the lane line: max |z-{COURSE_Z}| = {max_dev}"
+    );
+    // A shove-through is not an overtake: the bus was never bulldozed
+    // hard enough to count as the pass mechanism (minor rubs are the
+    // corridor's business, a sustained push is not).
+    let hard_contacts = impacts
+        .iter()
+        .filter(|e| e.participants.0 == bus_obj || e.participants.1 == bus_obj)
+        .count();
+    assert!(
+        hard_contacts <= 2,
+        "the pass must not be a sustained shove: {hard_contacts} bus impacts"
+    );
+    assert!(
+        !matches!(
+            app.world().get::<RaceProgress>(bus).unwrap().state,
+            ParticipantState::Finished { .. }
+        ),
+        "the slow bus finishing first would mean no overtake happened"
+    );
+}
+
+/// Edge: an overturned opponent. A car flipped onto its roof cannot
+/// drive, but it is not lost — `vehicle_self_right` (the authored
+/// `assists.self_right_delay` window) flops it back onto its wheels in
+/// place and the route chase resumes from there. In-place recovery,
+/// not the disclosed teleport: `reanchors` stays 0, and the upended
+/// spell banks nothing.
+#[test]
+fn an_overturned_opponent_self_rights_and_resumes() {
+    let tmp = roster_install("", &[]);
+    let mut app = event_app(event_config(), vfs_of(tmp.path()));
+    app.update();
+    let vpt = opponent_by_vehicle(&mut app, "vpt");
+
+    // Roll the car onto its roof during the countdown — in place, so
+    // the flip itself sweeps no gate — and stop it dead.
+    let flipped =
+        app.world().get::<Rotation>(vpt).unwrap().0 * Quat::from_rotation_z(std::f32::consts::PI);
+    assert!(
+        (flipped * Vec3::Y).y < -0.5,
+        "the flip really puts the roof down"
+    );
+    app.world_mut().get_mut::<Rotation>(vpt).unwrap().0 = flipped;
+    app.world_mut().get_mut::<Transform>(vpt).unwrap().rotation = flipped;
+    app.world_mut().get_mut::<LinearVelocity>(vpt).unwrap().0 = Vec3::ZERO;
+    app.world_mut().get_mut::<AngularVelocity>(vpt).unwrap().0 = Vec3::ZERO;
+    app.world_mut()
+        .entity_mut(vpt)
+        .insert(mm2_vehicle::Teleported);
+
+    // The authored 2 s self-right delay must right it well inside the
+    // 15 s re-anchor window — the in-place recovery gets its turn
+    // first, and it happens even though the countdown may still hold.
+    let mut righted_at = None;
+    for u in 0..400 {
+        app.update();
+        let up = app.world().get::<Rotation>(vpt).unwrap().0 * Vec3::Y;
+        if up.y > 0.9 {
+            righted_at = Some(u);
+            break;
+        }
+    }
+    assert!(
+        righted_at.is_some_and(|u| u < REANCHOR_FRAMES),
+        "the upended car never self-righted"
+    );
+    assert_eq!(
+        app.world().get::<OpponentDriver>(vpt).unwrap().reanchors,
+        0,
+        "self-righting is in-place — no disclosed teleport was needed"
+    );
+    assert_eq!(
+        app.world()
+            .get::<RaceProgress>(vpt)
+            .unwrap()
+            .cleared_count(),
+        0,
+        "the upended spell banked no gate"
+    );
+
+    // And the recovery is real: the car drives the route on and
+    // finishes through the same swept-trigger validation.
+    run(&mut app, 1000);
+    let progress = app.world().get::<RaceProgress>(vpt).unwrap();
+    assert!(
+        matches!(progress.state, ParticipantState::Finished { .. }),
+        "the righted opponent resumes and finishes: {:?} cleared {}/3",
+        progress.state,
+        progress.cleared_count()
+    );
+}
+
+/// Edge: a junction miss. A car carried past a turn must rejoin the
+/// polyline — `point_reached`'s perpendicular-plane rule may mark the
+/// missed anchor passed (chase forward, never U-turn) or the chase may
+/// bend back to it; either way the miss is a bounded rejoin, not a
+/// dead-end. The route bends +z after x=110; the teleport drops the
+/// car past the corner on the old line's extension. The one gate and
+/// the finish live on the far leg, so any rejoin style sweeps them.
+#[test]
+fn a_junction_miss_rejoins_the_route() {
+    let tmp = roster_install_rows(
+        "vpt race0-a-0.opp 0.90 0 50.0 0.7 1 1 1 1 0 1.0\n\
+         vpheavy race0-a-1.opp 0.80 0 50.0 0.7 1 1 1 1 0 1.0\n",
+        &[
+            (
+                "race0-a-0.opp",
+                opp_file(&[
+                    [70.0, 0.0, 140.0],
+                    [110.0, 0.0, 140.0],
+                    [115.0, 0.0, 165.0],
+                    [185.0, 0.0, 170.0],
+                ]),
+            ),
+            (
+                "race0waypoints.csv",
+                format!(
+                    "{WAYPOINTS}{}{}{}",
+                    waypoint_row(60.0, COURSE_Z),
+                    waypoint_row(170.0, 170.0),
+                    waypoint_row(185.0, 170.0),
+                ),
+            ),
+        ],
+    );
+    let mut app = event_app(event_config(), vfs_of(tmp.path()));
+    app.update();
+    let vpt = opponent_by_vehicle(&mut app, "vpt");
+
+    run(&mut app, 280);
+    let y = app.world().get::<Position>(vpt).unwrap().0.y;
+    app.world_mut().get_mut::<Position>(vpt).unwrap().0 = Vec3::new(135.0, y, COURSE_Z);
+    app.world_mut()
+        .get_mut::<Transform>(vpt)
+        .unwrap()
+        .translation = Vec3::new(135.0, y, COURSE_Z);
+    app.world_mut()
+        .entity_mut(vpt)
+        .insert(mm2_vehicle::Teleported);
+
+    run(&mut app, 1000);
+    let pos = app.world().get::<Position>(vpt).unwrap().0;
+    let progress = app.world().get::<RaceProgress>(vpt).unwrap();
+    assert!(
+        matches!(progress.state, ParticipantState::Finished { .. }),
+        "the missed junction must be rejoined, not abandoned: {:?} cleared {}/1 at {pos:?}",
+        progress.state,
+        progress.cleared_count()
+    );
+    assert_eq!(
+        app.world().get::<OpponentDriver>(vpt).unwrap().reanchors,
+        0,
+        "the route chase itself rejoins — no re-anchor was needed"
+    );
+}
+
+/// Edge: competing recovery positions. Two cars penned in adjacent
+/// pockets fill their stuck budgets on the same frame and both project
+/// onto the same route spot — the `claimed`/`occupied` walk keeps the
+/// second landing [`REANCHOR_CLEAR`] off the first instead of
+/// teleporting them into each other.
+#[test]
+fn competing_reanchors_land_clear_of_each_other() {
+    // Both routes run the same z=60 line — far from the z=140 gates so
+    // only occupancy, never a pending trigger, can space the landings —
+    // with different row-0 stagings so the grid spawn does not overlap.
+    let tmp = roster_install_rows(
+        "vpt race0-a-0.opp 0.90 0 50.0 0.7 1 1 1 1 0 1.0\n\
+         vpheavy race0-a-1.opp 0.80 0 50.0 0.7 1 1 1 1 0 1.0\n",
+        &[
+            (
+                "race0-a-0.opp",
+                opp_file(&[[70.0, 0.0, 60.0], [140.0, 0.0, 60.0], [180.0, 0.0, 60.0]]),
+            ),
+            (
+                "race0-a-1.opp",
+                opp_file(&[[76.0, 0.0, 60.0], [140.0, 0.0, 60.0], [184.0, 0.0, 60.0]]),
+            ),
+        ],
+    );
+    let mut app = event_app(event_config(), vfs_of(tmp.path()));
+    app.update();
+    let vpt = opponent_by_vehicle(&mut app, "vpt");
+    let vpheavy = opponent_by_vehicle(&mut app, "vpheavy");
+
+    // Two 4×4 m pockets sharing the x walls — each under the 8 m
+    // displacement bubble so both windows fill together. Same x, so
+    // both cars project to the same leg point: without the occupancy
+    // check they would claim the same landing.
+    let y = app.world().get::<Position>(vpt).unwrap().0.y;
+    for cx in [131.8f32, 136.2] {
+        app.world_mut().spawn((
+            RigidBody::Static,
+            Collider::cuboid(0.4, 3.0, 12.0),
+            Transform::from_translation(Vec3::new(cx, y + 1.0, 120.0)),
+        ));
+    }
+    for cz in [113.9f32, 118.1, 119.9, 124.1] {
+        app.world_mut().spawn((
+            RigidBody::Static,
+            Collider::cuboid(8.0, 3.0, 0.4),
+            Transform::from_translation(Vec3::new(134.0, y + 1.0, cz)),
+        ));
+    }
+    for (e, z) in [(vpt, 116.0f32), (vpheavy, 122.0)] {
+        app.world_mut().get_mut::<Position>(e).unwrap().0 = Vec3::new(134.0, y, z);
+        app.world_mut().get_mut::<Transform>(e).unwrap().translation = Vec3::new(134.0, y, z);
+        app.world_mut()
+            .entity_mut(e)
+            .insert(mm2_vehicle::Teleported);
+    }
+
+    let mut anchored = [false; 2];
+    for _ in 0..1400 {
+        app.update();
+        anchored = [
+            app.world().get::<OpponentDriver>(vpt).unwrap().reanchors > 0,
+            app.world()
+                .get::<OpponentDriver>(vpheavy)
+                .unwrap()
+                .reanchors
+                > 0,
+        ];
+        if anchored[0] && anchored[1] {
+            break;
+        }
+    }
+    assert!(
+        anchored[0] && anchored[1],
+        "both penned cars must re-anchor: {anchored:?}"
+    );
+
+    // Give the dispatched teleports their pipeline frames.
+    run(&mut app, 3);
+    let a = app.world().get::<Position>(vpt).unwrap().0;
+    let b = app.world().get::<Position>(vpheavy).unwrap().0;
+    assert!(
+        (a.z - 60.0).abs() < 3.0 && (b.z - 60.0).abs() < 3.0,
+        "both land back on the route line: {a:?} {b:?}"
+    );
+    assert!(
+        a.distance(b) >= REANCHOR_CLEAR - 0.5,
+        "competing recoveries must not land interpenetrating: {a:?} vs {b:?}"
+    );
+    for e in [vpt, vpheavy] {
+        let rot = app.world().get::<Rotation>(e).unwrap().0;
+        assert!((rot * Vec3::Y).y > 0.99, "the landing is upright: {rot:?}");
+        assert_eq!(
+            app.world().get::<RaceProgress>(e).unwrap().cleared_count(),
+            0,
+            "the disclosed teleports banked nothing"
+        );
+    }
 }

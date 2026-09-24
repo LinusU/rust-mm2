@@ -52,9 +52,12 @@
 //!   [`REANCHOR_FRAMES`] without [`REANCHOR_DIST`] of displacement: a
 //!   `ResetVehicle` teleport back onto the chased route leg, walked
 //!   back out of un-cleared checkpoint triggers so the assist cannot
-//!   bank a gate it never drove. `OpponentDriver::reanchors` counts
-//!   each one and the smoke record reports the field total; designed
-//!   policy (DSN-14), not a verified original rule.
+//!   bank a gate it never drove, and kept [`REANCHOR_CLEAR`] off every
+//!   participant — including poses claimed by another re-anchor in the
+//!   same frame — so competing recoveries cannot land interpenetrating
+//!   (F15-B.10). `OpponentDriver::reanchors` counts each one and the
+//!   smoke record reports the field total; designed policy (DSN-14),
+//!   not a verified original rule.
 //!
 //! Opponents are *not* clones of the player car: each roster entry
 //! loads its own authored vehicle id through
@@ -182,6 +185,18 @@ const REANCHOR_BACK: f32 = 4.0;
 /// this the landing point stands wherever the walk reached and the
 /// normal crossing rules apply (disclosed, not silently unbounded).
 const REANCHOR_WALK: f32 = 60.0;
+/// XZ clearance (m) a re-anchor landing keeps from every participant
+/// and from poses already claimed by a re-anchor this frame (F15-B.10,
+/// the spec's competing-recovery-positions edge): two cars penned in
+/// one pocket otherwise project to the same leg point and teleport
+/// onto each other — a disclosed recovery that lands interpenetrating
+/// solves out as a launch, not a recovery. Sized past a long vehicle's
+/// half-length; the walk-back consumes the same [`REANCHOR_WALK`]
+/// budget, so a route jammed solid still lands bounded (disclosed).
+pub const REANCHOR_CLEAR: f32 = 8.0;
+/// Vertical band (m) the clearance applies within — a car on the
+/// street below an elevated leg does not block a landing on it.
+const REANCHOR_CLEAR_Y: f32 = 4.0;
 /// Base gap (m) the follower keeps behind a blocker.
 const FOLLOW_GAP: f32 = 6.0;
 /// Extra follow gap per m/s of *closing* speed (~0.5 s of travel).
@@ -490,9 +505,11 @@ pub fn initial_route_index(route: &OpponentRoute, pos: Vec3, yaw: f32) -> usize 
 /// Returns `(position, yaw)` — upright facing down-leg. The caller adds
 /// the spawn's hull clearance to `y`; the polyline's authored heights
 /// are interpolated along the walked legs. `blocked` reports whether a
-/// candidate sits inside an un-cleared checkpoint cylinder (XZ radius);
-/// the caller builds it from the race definition and this participant's
-/// progress.
+/// candidate is disallowed — the caller builds it from the race
+/// definition's un-cleared checkpoint cylinders for this participant
+/// (XZ radius) plus any further landing constraints the recovery
+/// requires, e.g. the participant-occupancy clearance `opponent_drive`
+/// adds (F15-B.10).
 pub fn reanchor_pose(
     route: &OpponentRoute,
     next: usize,
@@ -1023,6 +1040,11 @@ pub fn opponent_drive(
             })
             .fold(f32::NEG_INFINITY, f32::max)
     });
+    // Poses a re-anchor has already claimed this frame. The `traffic`
+    // snapshot predates the loop, so it cannot see a same-frame
+    // teleport — without this, two cars whose windows expire together
+    // (a shared pen, a pileup) both land on the same projected spot.
+    let mut claimed: Vec<Vec3> = Vec::new();
     for (entity, mut input, pos, rot, vehicle, vstate, progress, mut driver) in &mut set.p0() {
         if let Some((_, left)) = &mut driver.pass_ban {
             *left = left.saturating_sub(1);
@@ -1085,12 +1107,32 @@ pub fn opponent_drive(
                             .collect()
                     })
                     .unwrap_or_default();
+                // The landing also keeps REANCHOR_CLEAR of every
+                // participant (the stuck car's own spot included —
+                // beached on the line it should not teleport back onto
+                // itself) and of poses other re-anchors claimed this
+                // frame — the spec's competing-recovery-positions edge
+                // (F15-B.10). The check is positional, not avoidance:
+                // it applies whatever the authored avoid flags say.
+                let occupied = |p: Vec3| {
+                    traffic
+                        .iter()
+                        .map(|t| t.pos)
+                        .chain(claimed.iter().copied())
+                        .any(|c| {
+                            (p.y - c.y).abs() < REANCHOR_CLEAR_Y && {
+                                let dx = p.x - c.x;
+                                let dz = p.z - c.z;
+                                dx * dx + dz * dz < REANCHOR_CLEAR * REANCHOR_CLEAR
+                            }
+                        })
+                };
                 let (mut pose, ryaw) = reanchor_pose(&route, driver.next, pos.0, yaw, |p| {
                     gates.iter().any(|g| {
                         let dx = p.x - g.center.x;
                         let dz = p.z - g.center.z;
                         dx * dx + dz * dz < g.radius * g.radius
-                    })
+                    }) || occupied(p)
                 });
                 // The same hull clearance the spawn applies.
                 let hull_min_y = vehicle
@@ -1118,6 +1160,7 @@ pub fn opponent_drive(
                 driver.stuck_pos = pose;
                 driver.reanchors += 1;
                 driver.catch_up = 0.0;
+                claimed.push(pose);
                 info!(
                     vehicle = %driver.spec.vehicle,
                     reanchors = driver.reanchors,
