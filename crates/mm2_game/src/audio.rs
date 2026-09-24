@@ -11,7 +11,10 @@
 //! windows is still inferred, not recovered (UNK-25).
 
 use bevy::prelude::*;
-use mm2_formats::cardata::{CarAudio, EngineSample, ImpactCategory, ImpactSample, ImpactTable};
+use mm2_formats::cardata::{
+    CarAudio, EngineSample, ImpactCategory, ImpactSample, ImpactTable, SkidSample, SurfaceEntry,
+    is_sample_sentinel,
+};
 
 use crate::nav::NavRng;
 
@@ -241,6 +244,208 @@ pub fn pick_impact<'a>(
     })
 }
 
+// ---------------------------------------------------------------------------
+// F07-B.4: surface skid/rolling loops — `default_surface*.csv` rows
+// resolved to mix parameters.
+// ---------------------------------------------------------------------------
+
+/// The unit a surface entry's skid bands trigger on — read off the
+/// verbatim `skid wave` header. The two authored schemas disagree
+/// in-column: the dry/wet files band `min slippage,max slippage` while
+/// the ice files band `min speed,max speed` (per *variant*, both
+/// sides — UNK-25; which quantity the original feeds either unit is
+/// unrecovered).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkidUnit {
+    /// `min slippage,max slippage` — a 0..1 fraction of the tire's
+    /// limit (see [`tire_slippage`] for the designed quantity fed in).
+    Slippage,
+    /// `min speed,max speed` — a contact speed, fed the wheel's
+    /// `|vel_long|` m/s (designed reading).
+    Speed,
+}
+
+/// A `surface wave` row's rolling loop resolved to mix parameters.
+/// Only the canonical `max speed` schema resolves — the divisor layout
+/// (ice files) carries `surface vol divisor`/`surface pitch divisor`
+/// columns instead of a speed window, so its rolling loop returns
+/// `None` rather than a guessed mapping, the same policy
+/// [`EngineLoopSpec::from_row`] applies to divisor-schema rows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RollingSpec {
+    /// `max speed` — the speed at which the envelope saturates.
+    pub max_speed: f32,
+    /// `min surface volume` — gain at rest.
+    pub min_volume: f32,
+    /// `max surface volume` — gain at `max speed`.
+    pub max_volume: f32,
+    /// `min surface pitch` — playback speed at rest.
+    pub min_pitch: f32,
+    /// `max surface pitch` — playback speed at `max speed`.
+    pub max_pitch: f32,
+}
+
+impl RollingSpec {
+    /// The loop's mixer state at `speed` (the car's `|forward_speed|`,
+    /// m/s — the designed quantity, UNK-25): volume and pitch
+    /// interpolate their authored min→max across `0..max speed` and
+    /// saturate past it. A non-finite speed silences the loop.
+    pub fn mix(&self, speed: f32) -> EngineMix {
+        if !speed.is_finite() {
+            return EngineMix {
+                volume: 0.0,
+                speed: 1.0,
+            };
+        }
+        let f = window_progress(speed.abs(), 0.0, self.max_speed);
+        EngineMix {
+            volume: (self.min_volume + (self.max_volume - self.min_volume) * f).max(0.0),
+            speed: (self.min_pitch + (self.max_pitch - self.min_pitch) * f).clamp(0.01, 16.0),
+        }
+    }
+}
+
+/// A surface entry's skid envelope + band trigger unit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SkidSpec {
+    /// `min skid volume` — gain at a band's low edge.
+    pub min_volume: f32,
+    /// `max skid volume` — gain at a band's high edge.
+    pub max_volume: f32,
+    /// Which quantity the entry's bands compare (authored header unit).
+    pub unit: SkidUnit,
+}
+
+/// One resolved skid pick: the covering band plus the gain the
+/// `min,max skid volume` envelope computes inside it.
+#[derive(Debug, Clone, Copy)]
+pub struct SkidPick<'a> {
+    /// The band's index in `entry.skids` — voice slots key off it.
+    pub band: usize,
+    /// The selected band row (name + band range).
+    pub sample: &'a SkidSample,
+    /// Playback gain inside `min,max skid volume`.
+    pub volume: f32,
+}
+
+impl SkidSpec {
+    /// The band covering `q` (a slippage fraction or wheel speed per
+    /// [`SkidSpec::unit`]); `None` below every band — authored silence,
+    /// not an error. The gain interpolates `min,max skid volume` across
+    /// the covering band's own range (designed reading, UNK-25).
+    pub fn pick<'a>(&self, bands: &'a [SkidSample], q: f32) -> Option<SkidPick<'a>> {
+        if !q.is_finite() {
+            return None;
+        }
+        let (band, sample) = bands
+            .iter()
+            .enumerate()
+            .find(|(_, s)| s.min.is_finite() && s.max.is_finite() && q >= s.min && q <= s.max)?;
+        let progress = window_progress(q, sample.min, sample.max);
+        Some(SkidPick {
+            band,
+            sample,
+            volume: (self.min_volume + (self.max_volume - self.min_volume) * progress).max(0.0),
+        })
+    }
+}
+
+/// A `surface wave` row resolved to its two mix halves — the rolling
+/// loop and the skid envelope — each independently `None` when its
+/// part of the row cannot answer (sentinel name, missing schema
+/// columns, unclassifiable skid unit).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SurfaceSpec {
+    /// Rolling-loop envelope (`surface wave` + `max speed` schema).
+    pub rolling: Option<RollingSpec>,
+    /// Skid envelope + unit (`min,max skid volume` + the `skid wave`
+    /// header's unit column).
+    pub skid: Option<SkidSpec>,
+}
+
+impl SurfaceSpec {
+    /// Resolve one authored surface row. A `NOSOUND` rolling name or a
+    /// schema without the `max speed` window leaves `rolling` empty;
+    /// an absent/unclassifiable `skid wave` header or empty band list
+    /// leaves `skid` empty. Non-finite cells reject their half — a bad
+    /// row degrades that half to silence, never a guessed value.
+    pub fn from_entry(entry: &SurfaceEntry) -> Self {
+        let rolling = (|| {
+            if is_sample_sentinel(&entry.name) {
+                return None;
+            }
+            let spec = RollingSpec {
+                max_speed: entry.column("max speed")?,
+                min_volume: entry.column("min surface volume")?,
+                max_volume: entry.column("max surface volume")?,
+                min_pitch: entry.column("min surface pitch")?,
+                max_pitch: entry.column("max surface pitch")?,
+            };
+            [
+                spec.max_speed,
+                spec.min_volume,
+                spec.max_volume,
+                spec.min_pitch,
+                spec.max_pitch,
+            ]
+            .iter()
+            .all(|v| v.is_finite())
+            .then_some(spec)
+        })();
+        let skid = (|| {
+            if entry.skids.is_empty() {
+                return None;
+            }
+            let unit = entry.skid_columns.iter().find_map(|c| {
+                let c = c.to_ascii_lowercase();
+                if c.contains("slippage") {
+                    Some(SkidUnit::Slippage)
+                } else if c.contains("speed") {
+                    Some(SkidUnit::Speed)
+                } else {
+                    None
+                }
+            })?;
+            let spec = SkidSpec {
+                min_volume: entry.column("min skid volume")?,
+                max_volume: entry.column("max skid volume")?,
+                unit,
+            };
+            [spec.min_volume, spec.max_volume]
+                .iter()
+                .all(|v| v.is_finite())
+                .then_some(spec)
+        })();
+        SurfaceSpec { rolling, skid }
+    }
+}
+
+/// The designed quantity fed to `min slippage` bands (UNK-25): the
+/// larger of the tire's longitudinal over-demand (`traction_demand` —
+/// the fraction of its grip limit the controller asked for) and its
+/// lateral utilization (`|slip angle| / peak slip angle`), clamped to
+/// `0..=1` so utilization saturates at the authored limit the bands
+/// domain. The arcade tire model has no wheel-speed state, so there is
+/// no measured slip ratio to read; this is the closest "how far past
+/// the tire's limit" quantity the sim publishes — a handbrake slide
+/// reads high on the lateral term, a burnout on the longitudinal, and
+/// a brake held at rest reads ~0 (its demand is zero while `vel_long`
+/// is zero), which is what keeps AC03's no-squeal legs silent.
+/// Non-finite inputs read as 0 rather than poisoning the pick.
+pub fn tire_slippage(traction_demand: f32, slip_angle: f32, peak_slip_angle: f32) -> f32 {
+    let long = if traction_demand.is_finite() {
+        traction_demand.abs()
+    } else {
+        0.0
+    };
+    let lat = if slip_angle.is_finite() && peak_slip_angle.is_finite() && peak_slip_angle > 0.0 {
+        (slip_angle / peak_slip_angle).abs()
+    } else {
+        0.0
+    };
+    long.max(lat).clamp(0.0, 1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,5 +634,115 @@ mod tests {
         let bad = ImpactTable::parse(bad).unwrap();
         let cat = impact_category(&bad, 0).unwrap();
         assert_eq!(pick_impact(cat, 1.0, &mut rng).unwrap().volume, 0.5);
+    }
+
+    // -------------------------------------------------------------------
+    // F07-B.4: surface skid/rolling interpretation.
+    // -------------------------------------------------------------------
+
+    /// The retail `default_surfacedry.csv` shape: entry 0 is the
+    /// NOSOUND default surface with three slippage-banded skids, entry
+    /// 2 a rolling loop with one band.
+    const SURFACE_DRY: &[u8] = b"Tunnel sound index\n0\nsurface wave,max speed,min surface volume,max surface volume,min surface pitch,max surface pitch,min skid volume,max skid volume,num skid samples\nNOSOUND,125,0,0,0,0,0.5,0.88,3\nskid wave,min slippage,max slippage\ntireskid1,0.55,0.65\ntireskid2,0.65,0.75\ntireskid3,0.75,1\nsurface wave,max speed,min surface volume,max surface volume,min surface pitch,max surface pitch,min skid volume,max skid volume,num skid samples\nROLL,25,0.35,0.75,0.85,1.25,0.5,0.72,1\nskid wave,min slippage,max slippage\nROLLSKID,0.25,1\n";
+
+    /// The retail `default_surfaceice.csv` shape: the 12-column divisor
+    /// layout whose bands key on speed instead of slippage.
+    const SURFACE_ICE: &[u8] = b"tunnel sound index\n5\nsurface wave,min surface volume,max surface volume,surface vol divisor,min surface pitch,max surface pitch,surface pitch divisor,min skid volume,max skid volume,skid vol divisor,num skid samples,for tunnels\nSNOW,0.88,0.88,2,0.85,2,30,0.5,0.88,2,1,0\nskid wave ,min speed,max speed\nSNOWSKID,0,1000\n";
+
+    fn entries(data: &[u8]) -> mm2_formats::cardata::SurfaceTable {
+        mm2_formats::cardata::SurfaceTable::parse(data).unwrap()
+    }
+
+    #[test]
+    fn the_canonical_schema_resolves_both_halves() {
+        let t = entries(SURFACE_DRY);
+        let e0 = SurfaceSpec::from_entry(&t.surfaces[0]);
+        // NOSOUND authors no rolling loop; the skid half still reads.
+        assert!(e0.rolling.is_none());
+        let skid = e0.skid.unwrap();
+        assert_eq!(skid.unit, SkidUnit::Slippage);
+        assert_eq!((skid.min_volume, skid.max_volume), (0.5, 0.88));
+        let e1 = SurfaceSpec::from_entry(&t.surfaces[1]);
+        let rolling = e1.rolling.unwrap();
+        assert_eq!(rolling.max_speed, 25.0);
+        assert_eq!((rolling.min_pitch, rolling.max_pitch), (0.85, 1.25));
+    }
+
+    #[test]
+    fn the_divisor_schema_skips_rolling_but_keeps_speed_bands() {
+        let t = entries(SURFACE_ICE);
+        let spec = SurfaceSpec::from_entry(&t.surfaces[0]);
+        // No `max speed` column — the rolling half cannot resolve a
+        // speed window, so it is skipped like a divisor-schema engine
+        // row rather than driven by a guessed divisor formula.
+        assert!(spec.rolling.is_none());
+        let skid = spec.skid.unwrap();
+        assert_eq!(skid.unit, SkidUnit::Speed);
+        assert!(skid.pick(&t.surfaces[0].skids, 40.0).is_some());
+    }
+
+    #[test]
+    fn an_unclassifiable_skid_header_resolves_no_skid_half() {
+        let data = b"surface wave,max speed,min surface volume,max surface volume,min surface pitch,max surface pitch,min skid volume,max skid volume,num skid samples\nR,125,0.1,0.9,0.8,1.2,0.5,0.9,1\nskid wave,min flex,max flex\nK,0,1\n";
+        let t = entries(data);
+        let spec = SurfaceSpec::from_entry(&t.surfaces[0]);
+        assert!(spec.rolling.is_some());
+        assert!(spec.skid.is_none());
+    }
+
+    #[test]
+    fn the_slip_band_selects_and_the_floor_stays_silent() {
+        let t = entries(SURFACE_DRY);
+        let spec = SurfaceSpec::from_entry(&t.surfaces[0]).skid.unwrap();
+        let pick = spec.pick(&t.surfaces[0].skids, 0.6).unwrap();
+        assert_eq!((pick.band, pick.sample.name.as_str()), (0, "tireskid1"));
+        assert!((0.5..=0.88).contains(&pick.volume));
+        let top = spec.pick(&t.surfaces[0].skids, 0.9).unwrap();
+        assert_eq!(top.sample.name, "tireskid3");
+        // Below the softest band: authored silence. A non-finite
+        // quantity picks nothing rather than poisoning the mix.
+        assert!(spec.pick(&t.surfaces[0].skids, 0.3).is_none());
+        assert!(spec.pick(&t.surfaces[0].skids, f32::NAN).is_none());
+    }
+
+    #[test]
+    fn the_skid_gain_interpolates_inside_the_covering_band() {
+        let t = entries(SURFACE_DRY);
+        let spec = SurfaceSpec::from_entry(&t.surfaces[0]).skid.unwrap();
+        let lo = spec.pick(&t.surfaces[0].skids, 0.55).unwrap().volume;
+        let hi = spec.pick(&t.surfaces[0].skids, 0.65).unwrap().volume;
+        assert!(
+            (lo - 0.5).abs() < 1e-5 && (hi - 0.88).abs() < 1e-5,
+            "{lo}/{hi}"
+        );
+    }
+
+    #[test]
+    fn rolling_mix_ramps_volume_and_pitch_with_speed() {
+        let t = entries(SURFACE_DRY);
+        let spec = SurfaceSpec::from_entry(&t.surfaces[1]).rolling.unwrap();
+        let rest = spec.mix(0.0);
+        assert_eq!(rest.volume, 0.35);
+        assert_eq!(rest.speed, 0.85);
+        let top = spec.mix(25.0);
+        assert_eq!(top.volume, 0.75);
+        assert_eq!(top.speed, 1.25);
+        // Saturates past `max speed` — reverse reads the same |speed|.
+        assert_eq!(spec.mix(-80.0).volume, 0.75);
+        assert_eq!(spec.mix(f32::NAN).volume, 0.0);
+    }
+
+    #[test]
+    fn tire_slippage_is_the_larger_utilization_saturated_at_one() {
+        // Longitudinal over-demand and lateral utilization compete.
+        assert_eq!(tire_slippage(0.7, 0.05, 0.16), 0.7);
+        assert!((tire_slippage(0.2, 0.12, 0.16) - 0.75).abs() < 1e-5);
+        // Over-limit demand saturates at the band domain's top.
+        assert_eq!(tire_slippage(1.4, 0.0, 0.16), 1.0);
+        // A held brake at rest demands nothing — no squeal.
+        assert_eq!(tire_slippage(0.0, 0.0, 0.16), 0.0);
+        // Non-finite inputs and a degenerate peak read as 0.
+        assert_eq!(tire_slippage(f32::NAN, f32::INFINITY, 0.16), 0.0);
+        assert_eq!(tire_slippage(0.0, 0.5, 0.0), 0.0);
     }
 }

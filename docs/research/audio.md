@@ -181,17 +181,19 @@ reads the player-side file (the local listener's authored mix).
 
 ### Surface tables — `cardata/{player,opponent}/default_surface{dry,ice,wet}.csv`
 
-`Tunnel sound index` (0 on dry/wet, **5** on ice in both dirs — meaning
-unverified), then one entry per surface index (positional; which index
-maps to which material is unverified):
+`Tunnel sound index` (0 on dry and on opponent wet, **5** on ice —
+and on the player wet file — meaning unverified), then one entry per
+surface index (positional; the material `sound` class is the only
+authored selector, a designed binding — UNK-25). The schema split is
+per **variant**, not per side (verified on both dirs, 2026-09-24):
 
-- Opponent schema (9 columns): `max speed`, rolling volume/pitch bands,
-  skid volume band, `num skid samples`; skid bands keyed
-  `min slippage,max slippage`.
-- Player schema (12 columns): adds `vol divisor`/`pitch divisor` fields
-  and a `for tunnels` flag; skid bands keyed `min speed,max speed` — a
-  different unit than the opponent files claim for the same slot
-  (authored inconsistency, preserved).
+- Dry/wet schema (9–10 columns): `max speed`, rolling volume/pitch
+  windows, skid volume band, `num skid samples` (opponent wet adds
+  `for tunnels`); skid bands keyed `min slippage,max slippage`.
+- Ice schema (12 columns): `surface vol divisor`/`surface pitch
+  divisor`/`skid vol divisor` fields instead of a `max speed` window,
+  plus `for tunnels`; skid bands keyed `min speed,max speed` — a
+  different trigger unit for the same table slot.
 
 `ENDOFDATA` terminator. Dry/wet tables carry a `skidflagstone` reference
 that resolves to **no** wave stem — the one dead reference on retail.

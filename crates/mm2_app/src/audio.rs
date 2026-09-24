@@ -53,9 +53,21 @@
 //! `frequency` weights the pick and the authored volume range supplies
 //! the gain. Voices are spatial emitters at the impact point for
 //! everyone but the local player, whose impacts stay non-spatial like
-//! its engine rig (DSN-37). Skids, ambient engines, the clutch trigger
-//! and siren programs remain F07-B work; the opponent-side impact
-//! table's divergent `WALL` bands and the `flags` word remain UNK-25.
+//! its engine rig (DSN-37).
+//!
+//! F07-B.4 adds the surface rig: every `Vehicle` car resolves its
+//! grounded wheels through [`SurfaceTables`] — `SurfaceMaterial` → the
+//! material's authored `sound` class → a row of the session's
+//! [`SurfaceAudio`] (the player-side `default_surfacedry.csv`; the
+//! weather→variant binding is unverified). The loudest covering
+//! `skid wave` band and the loudest `surface wave` rolling loop each
+//! earn lazily-spawned `PlaybackMode::Loop` voices, mixed from
+//! [`tire_slippage`] (designed quantity — longitudinal over-demand or
+//! lateral utilization, UNK-25) and `|forward_speed|` respectively.
+//! A held brake at rest and airborne wheels resolve nothing
+//! (F07-AC03). Ambient engines, the clutch trigger, siren programs
+//! and the scrape semantics remain F07-B/C work; the opponent-side
+//! tables' divergent values and the `flags` word remain UNK-25.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -72,12 +84,13 @@ use tracing::warn;
 
 use avian3d::prelude::{ComputedMass, Mass};
 use mm2_assets::Vfs;
-use mm2_formats::cardata::{self, CardataBody, ImpactTable};
+use mm2_content::SurfaceTables;
+use mm2_formats::cardata::{self, CardataBody, ImpactTable, SurfaceTable};
 use mm2_formats::wav::{FORMAT_PCM, Wav, lookup_stem};
 use mm2_game::{
     Banger, EngineLoopSpec, EngineMix, ImpactEvent, Mm2Vfs, NavRng, ObjectId, ObjectIdentity,
-    Player, PlayerControl, PlayerVehicle, Session, SessionEntity, SessionPhase, VehicleAudio,
-    impact_category, pick_impact,
+    Player, PlayerControl, PlayerVehicle, Session, SessionEntity, SessionPhase, SkidUnit,
+    SurfaceMaterial, SurfaceSpec, VehicleAudio, impact_category, pick_impact, tire_slippage,
 };
 use mm2_vehicle::{Vehicle, VehicleState};
 
@@ -115,6 +128,28 @@ const MAX_IMPACT_VOICES: usize = 12;
 /// but `WALL` bands two orders of magnitude smaller — an authored
 /// inconsistency recorded under UNK-25, not a second binding).
 const IMPACT_TABLE: &str = "aud/cardata/player/default_impacts.csv";
+/// The surface table the session reads: the player-side
+/// `default_surfacedry.csv` — the local listener's authored mix
+/// (designed choice: which weather selector binds the wet/ice
+/// variants is unverified — UNK-25; dry is the neutral default).
+const SURFACE_TABLE: &str = "aud/cardata/player/default_surfacedry.csv";
+/// Skid band voices one car's rig will hold — retail tops out at 3
+/// authored bands per entry; the cap bounds a giant mod table
+/// (designed bound, same contract as `MAX_ENGINE_VOICES`).
+const MAX_SKID_VOICES: usize = 4;
+/// Cars one session will give a surface rig — the same bound the
+/// engine rigs take (designed, F07-B.4). Cars past it report once
+/// and stay silent.
+const MAX_SURFACE_RIGS: usize = 16;
+/// Frames a different surface entry must hold before a rig rebuilds
+/// its voices — a car straddling a surface boundary can't churn
+/// attach/detach every frame (designed debounce).
+const SURFACE_DWELL: u8 = 4;
+/// Below this `|forward_speed|` a car authors no rolling noise — a
+/// parked car on grass does not hum (designed gate; the authored
+/// `min surface volume` is the moving car's floor, not a parked
+/// drone). Matches the sim's low-speed clamp epsilon.
+const ROLL_MIN_SPEED: f32 = 0.5;
 
 /// A decoded, playback-ready wave: normalized interleaved f32 samples
 /// plus the authored rate/channel shape. Produced only by
@@ -345,6 +380,53 @@ impl ImpactAudio {
     }
 }
 
+/// Session-scoped surface table (F07-B.4): the parsed player-side
+/// `default_surfacedry.csv` plus every row's resolved
+/// [`SurfaceSpec`], computed once at load so the drive loop stays a
+/// numeric read. Inserted by `load_session_world` when the table
+/// resolves and parses — same absence policy as [`ImpactAudio`]:
+/// absent/malformed warns once and inserts nothing rather than
+/// fabricating a surface row.
+#[derive(Resource)]
+pub struct SurfaceAudio {
+    /// The authored rows — band lists live on `surfaces[i].skids`.
+    table: SurfaceTable,
+    /// `SurfaceSpec::from_entry` per row, parallel to
+    /// `table.surfaces` (the index space `sound_index` produces).
+    specs: Vec<SurfaceSpec>,
+}
+
+impl SurfaceAudio {
+    /// Resolve and parse [`SURFACE_TABLE`] through the VFS; `None`
+    /// (with a warn) when the file is absent, the grammar rejects it
+    /// or it parses as a different cardata kind.
+    pub fn load(vfs: &Vfs) -> Option<Self> {
+        let bytes = match vfs.read_logical(SURFACE_TABLE) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("audio: {SURFACE_TABLE}: {e}");
+                return None;
+            }
+        };
+        match cardata::parse(SURFACE_TABLE, &bytes) {
+            Ok(file) => match file.body {
+                CardataBody::Surfaces(table) => Some(Self {
+                    specs: table.surfaces.iter().map(SurfaceSpec::from_entry).collect(),
+                    table,
+                }),
+                other => {
+                    warn!("audio: {SURFACE_TABLE} parsed as {other:?} — no surface table");
+                    None
+                }
+            },
+            Err(e) => {
+                warn!("audio: {SURFACE_TABLE}: {e}");
+                None
+            }
+        }
+    }
+}
+
 /// Variant preference for one stem — `(tree tier, declared rate kHz)`.
 fn wave_rank(logical: &str) -> (u32, u32) {
     let tier = if logical.starts_with("aud/aud22/") {
@@ -383,6 +465,10 @@ pub enum VoiceKind {
     Engine,
     /// One `default_impacts.csv` sample a deduplicated impact spawned.
     Impact,
+    /// One `skid wave` band loop of a surface rig (F07-B.4).
+    Skid,
+    /// One `surface wave` rolling loop of a surface rig (F07-B.4).
+    Rolling,
 }
 
 /// Marker on a vehicle whose engine rig was built — set once whether
@@ -405,6 +491,70 @@ pub struct EngineVoice {
     pub spec: EngineLoopSpec,
     /// The mixer state [`engine_drive`] last computed.
     pub mix: EngineMix,
+}
+
+/// Per-car surface voice state (F07-B.4): which `sound`-index entries
+/// the skid and rolling halves are committed to, plus the voice slots
+/// of the committed entry. Band loops are spawned lazily — a `skid
+/// wave` row's voice exists only once that band has covered — and an
+/// entry rebuild waits for the new entry to hold [`SURFACE_DWELL`]
+/// frames, so a car straddling a surface boundary can't churn sink
+/// attach/detach every frame. Voices are children of the car like the
+/// engine rig's, so they despawn with it and ride its transform.
+#[derive(Component, Default)]
+pub struct SurfaceRig {
+    /// The committed skid entry (`sound` index into the table) —
+    /// `None` until a band first covers.
+    skid_entry: Option<u16>,
+    /// `(entry, consecutive frames)` a different winning entry has
+    /// held — the dwell counter for the swap.
+    skid_pending: Option<(u16, u8)>,
+    /// One slot per committed-entry band, capped at
+    /// [`MAX_SKID_VOICES`]. `tried` stops a resolve/decode failure
+    /// re-warning every frame.
+    skid_slots: Vec<SkidSlot>,
+    /// The committed rolling entry, `None` until a rolling surface
+    /// first resolves under a moving car.
+    rolling_entry: Option<u16>,
+    /// Same dwell counter for the rolling half.
+    rolling_pending: Option<(u16, u8)>,
+    /// Whether the committed rolling sample was attempted (success or
+    /// counted failure — never retried per frame).
+    rolling_tried: bool,
+    /// The rolling voice entity, when spawned.
+    rolling_voice: Option<Entity>,
+    /// [`MAX_SURFACE_RIGS`] refused this car a rig — counted once.
+    muted: bool,
+}
+
+/// One band's voice slot inside a committed skid entry.
+#[derive(Default)]
+struct SkidSlot {
+    /// The band's sample was attempted (spawn or counted failure).
+    tried: bool,
+    /// The spawned band-loop voice.
+    voice: Option<Entity>,
+}
+
+/// A looping surface voice — a skid band or a rolling loop, a child
+/// of the car like [`EngineVoice`]. `mix` is rewritten every drive
+/// pass whether or not a sink exists, which is what headless runs and
+/// tests read for evidence.
+#[derive(Component)]
+pub struct SurfaceVoice {
+    /// Which half of the surface row this voice plays.
+    pub role: SurfaceRole,
+    /// The mixer state [`surface_voices`] last computed.
+    pub mix: EngineMix,
+}
+
+/// Which half of a committed surface entry a [`SurfaceVoice`] plays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceRole {
+    /// The `skid wave` band at this index in the committed entry.
+    Skid(usize),
+    /// The entry's `surface wave` rolling loop.
+    Rolling,
 }
 
 /// A horn actuation intent — written by [`horn_input`] (live input) and
@@ -435,12 +585,26 @@ pub struct AudioReport {
     pub rigs: u64,
     /// Impact voices spawned this session (a subset of `voices`).
     pub impacts: u64,
+    /// Skid band voices whose last computed mix is audible — a gauge
+    /// rewritten every drive pass, not a cumulative count (F07-B.4).
+    pub skids: u64,
+    /// Rolling-loop voices whose last computed mix is audible — the
+    /// same gauge for the rolling half.
+    pub rolling: u64,
 }
 
 impl AudioReport {
     /// Any activity worth reporting (`aud=` stays absent otherwise).
     pub fn active(&self) -> bool {
-        self.horns + self.voices + self.dropped + self.failed + self.loops + self.rigs > 0
+        self.horns
+            + self.voices
+            + self.dropped
+            + self.failed
+            + self.loops
+            + self.rigs
+            + self.skids
+            + self.rolling
+            > 0
     }
 
     pub fn reset(&mut self) {
@@ -850,7 +1014,358 @@ pub fn engine_drive(
     }
 }
 
-/// Keep the mixer's ear on the active 3-D camera (F07-B.2, spec req
+/// Fresh band slots for a committed skid entry — capped at
+/// [`MAX_SKID_VOICES`], the overflow counted once per commit rather
+/// than re-dropped every frame.
+fn skid_slots(audio: &SurfaceAudio, idx: u16, report: &mut AudioReport) -> Vec<SkidSlot> {
+    let bands = audio
+        .table
+        .surfaces
+        .get(idx as usize)
+        .map(|e| e.skids.len())
+        .unwrap_or(0);
+    let overflow = bands.saturating_sub(MAX_SKID_VOICES);
+    if overflow > 0 {
+        report.dropped += overflow as u64;
+    }
+    (0..bands.min(MAX_SKID_VOICES))
+        .map(|_| SkidSlot::default())
+        .collect()
+}
+
+/// Push a computed mix onto whichever sink the device attached — a
+/// plain sink for the player's own rig, [`SpatialAudioSink`] for
+/// everyone else's (the apply half of `engine_drive`'s contract).
+fn push_mix(mix: EngineMix, sink: Option<Mut<AudioSink>>, spatial: Option<Mut<SpatialAudioSink>>) {
+    if let Some(mut s) = sink {
+        s.set_volume(Volume::Linear(mix.volume));
+        s.set_speed(mix.speed);
+    }
+    if let Some(mut s) = spatial {
+        s.set_volume(Volume::Linear(mix.volume));
+        s.set_speed(mix.speed);
+    }
+}
+
+/// Wheel contact → surface voices (F07-B.4, spec req 3). Every
+/// `Vehicle` car resolves its grounded wheels against the session's
+/// [`SurfaceTables`] — `SurfaceMaterial` → the material's authored
+/// `sound` class → the [`SurfaceAudio`] row — and voices the loudest
+/// result per role:
+///
+/// - **Skid**: per grounded wheel the designed [`tire_slippage`]
+///   quantity (UNK-25 — tire-limit utilization saturating at one)
+///   picks a `skid wave` band of that wheel's entry; `min speed`
+///   units read `|vel_long|` instead. The loudest covering band wins.
+///   A held brake at rest demands nothing (its force is
+///   `vel_long`-scaled) and an airborne wheel has no contact — the
+///   F07-AC03 legs stay silent by construction, not by a gate.
+/// - **Rolling**: the loudest `surface wave` loop under a moving car
+///   (`|forward_speed|` ≥ [`ROLL_MIN_SPEED`], so a parked car on grass
+///   does not hum), mixed by the authored `max speed` window.
+///
+/// Band loops spawn lazily per committed entry and idle at volume 0
+/// rather than churning attach/detach (the engine rig's policy); a
+/// different winning entry rebuilds only after holding
+/// [`SURFACE_DWELL`] frames. Non-player cars are spatial emitters at
+/// the car's transform under [`ENGINE_SPATIAL_SCALE`]; the local
+/// player's stay non-spatial (DSN-37). Cars past [`MAX_SURFACE_RIGS`]
+/// report once and stay silent. Ungated by phase like `engine_drive`
+/// — voices only exist inside a live session and `sync_audio_pause`
+/// holds the sinks.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)] // Bevy system — the borrows are the contract.
+pub fn surface_voices(
+    mut commands: Commands,
+    session: Res<Session>,
+    surface_audio: Option<Res<SurfaceAudio>>,
+    tables: Option<Res<SurfaceTables>>,
+    vfs: Option<Res<Mm2Vfs>>,
+    bank: Option<ResMut<WaveBank>>,
+    mut waves: ResMut<Assets<PcmAudio>>,
+    mut report: ResMut<AudioReport>,
+    mut cars: Query<(
+        Entity,
+        &Vehicle,
+        &VehicleState,
+        Option<&mut SurfaceRig>,
+        Has<PlayerVehicle>,
+    )>,
+    collider_surfaces: Query<&SurfaceMaterial>,
+    mut voices: Query<(
+        &mut SurfaceVoice,
+        Option<&mut AudioSink>,
+        Option<&mut SpatialAudioSink>,
+    )>,
+    rigs: Query<(), With<SurfaceRig>>,
+) {
+    report.skids = 0;
+    report.rolling = 0;
+    let (Some(audio), Some(tables), Some(vfs), Some(mut bank)) = (surface_audio, tables, vfs, bank)
+    else {
+        // No authored surface data (or no session world yet) — a wheel
+        // cannot resolve a surface row, so nothing plays.
+        return;
+    };
+    let generation = session.generation();
+    let mut live_rigs = rigs.iter().count();
+    for (car, vehicle, state, rig_slot, player) in &mut cars {
+        // The loudest covering skid band and rolling loop across the
+        // grounded wheels — `(sound index, band, gain)` / `(index, _)`.
+        let mut skid_win: Option<(u16, usize, f32)> = None;
+        let mut roll_win: Option<(u16, f32)> = None;
+        let moving = state.forward_speed.abs() > ROLL_MIN_SPEED;
+        for (i, w) in state.wheels.iter().enumerate() {
+            if !w.grounded {
+                continue;
+            }
+            let material = w
+                .contact_entity
+                .and_then(|e| collider_surfaces.get(e).ok())
+                .copied()
+                .unwrap_or_default();
+            let Some(idx) = tables.sound_index(material) else {
+                continue;
+            };
+            let (Some(spec), Some(entry)) = (
+                audio.specs.get(idx as usize),
+                audio.table.surfaces.get(idx as usize),
+            ) else {
+                continue;
+            };
+            if let Some(skid) = spec.skid {
+                let q = match skid.unit {
+                    SkidUnit::Slippage => {
+                        let peak = vehicle
+                            .config
+                            .wheels
+                            .get(i)
+                            .and_then(|c| c.tires.as_ref())
+                            .map_or(vehicle.config.tires.peak_slip_angle, |t| t.peak_slip_angle);
+                        tire_slippage(w.traction_demand, w.slip_angle, peak)
+                    }
+                    SkidUnit::Speed => w.vel_long.abs(),
+                };
+                if let Some(pick) =
+                    skid.pick(&entry.skids[..entry.skids.len().min(MAX_SKID_VOICES)], q)
+                    && skid_win.is_none_or(|(.., g)| pick.volume > g)
+                {
+                    skid_win = Some((idx, pick.band, pick.volume));
+                }
+            }
+            if moving && let Some(rolling) = spec.rolling {
+                let gain = rolling.mix(state.forward_speed).volume;
+                if roll_win.is_none_or(|(_, g)| gain > g) {
+                    roll_win = Some((idx, gain));
+                }
+            }
+        }
+        if skid_win.is_none() && roll_win.is_none() && rig_slot.is_none() {
+            // Never resolved a surface — no rig to silence either.
+            continue;
+        }
+        let Some(mut rig) = rig_slot else {
+            // First resolution — bound the session's rig count. A
+            // muted marker keeps the refusal counted once.
+            if live_rigs >= MAX_SURFACE_RIGS {
+                report.dropped += 1;
+                warn!("audio: surface rig bound reached, {car:?} stays silent");
+                commands.entity(car).insert(SurfaceRig {
+                    muted: true,
+                    ..Default::default()
+                });
+            } else {
+                live_rigs += 1;
+                commands.entity(car).insert(SurfaceRig::default());
+            }
+            continue;
+        };
+        if rig.muted {
+            continue;
+        }
+
+        // -- skid half: commit the winning entry (dwell-gated swap),
+        //    lazily build the winning band's voice, mix every slot.
+        match (rig.skid_entry, skid_win) {
+            (_, None) => {}
+            (None, Some((idx, ..))) => {
+                rig.skid_entry = Some(idx);
+                rig.skid_slots = skid_slots(&audio, idx, &mut report);
+                rig.skid_pending = None;
+            }
+            (Some(c), Some((idx, ..))) if c == idx => rig.skid_pending = None,
+            (Some(_), Some((idx, ..))) => {
+                match &mut rig.skid_pending {
+                    Some((p, n)) if *p == idx => *n += 1,
+                    _ => rig.skid_pending = Some((idx, 1)),
+                }
+                if rig.skid_pending.is_some_and(|(_, n)| n >= SURFACE_DWELL) {
+                    for slot in &mut rig.skid_slots {
+                        if let Some(v) = slot.voice.take() {
+                            commands.entity(v).despawn();
+                        }
+                    }
+                    rig.skid_entry = Some(idx);
+                    rig.skid_slots = skid_slots(&audio, idx, &mut report);
+                    rig.skid_pending = None;
+                }
+            }
+        }
+        let winning = skid_win.filter(|(idx, ..)| Some(*idx) == rig.skid_entry);
+        if let Some(idx) = rig.skid_entry {
+            if let Some((_, band, ..)) = winning
+                && let Some(slot) = rig.skid_slots.get_mut(band)
+                && !slot.tried
+            {
+                slot.tried = true;
+                let name = audio.table.surfaces[idx as usize].skids[band].name.clone();
+                match bank.load(&vfs.0, &mut waves, &name) {
+                    Ok(handle) => {
+                        let v = commands
+                            .spawn((
+                                AudioVoice {
+                                    kind: VoiceKind::Skid,
+                                },
+                                SurfaceVoice {
+                                    role: SurfaceRole::Skid(band),
+                                    mix: EngineMix {
+                                        volume: 0.0,
+                                        speed: 1.0,
+                                    },
+                                },
+                                SessionEntity(generation),
+                                ChildOf(car),
+                                Transform::default(),
+                                AudioPlayer(handle),
+                                PlaybackSettings {
+                                    mode: PlaybackMode::Loop,
+                                    volume: Volume::Linear(0.0),
+                                    spatial: !player,
+                                    spatial_scale: (!player)
+                                        .then(|| SpatialScale::new(ENGINE_SPATIAL_SCALE)),
+                                    ..Default::default()
+                                },
+                            ))
+                            .id();
+                        slot.voice = Some(v);
+                        report.voices += 1;
+                    }
+                    Err(e) => {
+                        report.failed += 1;
+                        warn!("audio: {e}");
+                    }
+                }
+            }
+            for (b, slot) in rig.skid_slots.iter().enumerate() {
+                let target = winning
+                    .filter(|(_, band, _)| *band == b)
+                    .map(|(.., g)| g)
+                    .unwrap_or(0.0);
+                if let Some(v) = slot.voice
+                    && let Ok((mut voice, sink, spatial)) = voices.get_mut(v)
+                {
+                    voice.mix = EngineMix {
+                        volume: target,
+                        speed: 1.0,
+                    };
+                    if target > 0.0 {
+                        report.skids += 1;
+                    }
+                    push_mix(voice.mix, sink, spatial);
+                }
+            }
+        }
+
+        // -- rolling half: the same commit/dwell/lazy-voice shape.
+        match (rig.rolling_entry, roll_win) {
+            (_, None) => {}
+            (None, Some((idx, _))) => {
+                rig.rolling_entry = Some(idx);
+                rig.rolling_tried = false;
+                rig.rolling_pending = None;
+            }
+            (Some(c), Some((idx, _))) if c == idx => rig.rolling_pending = None,
+            (Some(_), Some((idx, _))) => {
+                match &mut rig.rolling_pending {
+                    Some((p, n)) if *p == idx => *n += 1,
+                    _ => rig.rolling_pending = Some((idx, 1)),
+                }
+                if rig.rolling_pending.is_some_and(|(_, n)| n >= SURFACE_DWELL) {
+                    if let Some(v) = rig.rolling_voice.take() {
+                        commands.entity(v).despawn();
+                    }
+                    rig.rolling_entry = Some(idx);
+                    rig.rolling_tried = false;
+                    rig.rolling_pending = None;
+                }
+            }
+        }
+        if let Some(idx) = rig.rolling_entry {
+            let playing = roll_win.is_some_and(|(w, _)| w == idx);
+            if playing && !rig.rolling_tried {
+                rig.rolling_tried = true;
+                let name = audio.table.surfaces[idx as usize].name.clone();
+                match bank.load(&vfs.0, &mut waves, &name) {
+                    Ok(handle) => {
+                        let v = commands
+                            .spawn((
+                                AudioVoice {
+                                    kind: VoiceKind::Rolling,
+                                },
+                                SurfaceVoice {
+                                    role: SurfaceRole::Rolling,
+                                    mix: EngineMix {
+                                        volume: 0.0,
+                                        speed: 1.0,
+                                    },
+                                },
+                                SessionEntity(generation),
+                                ChildOf(car),
+                                Transform::default(),
+                                AudioPlayer(handle),
+                                PlaybackSettings {
+                                    mode: PlaybackMode::Loop,
+                                    volume: Volume::Linear(0.0),
+                                    spatial: !player,
+                                    spatial_scale: (!player)
+                                        .then(|| SpatialScale::new(ENGINE_SPATIAL_SCALE)),
+                                    ..Default::default()
+                                },
+                            ))
+                            .id();
+                        rig.rolling_voice = Some(v);
+                        report.voices += 1;
+                    }
+                    Err(e) => {
+                        report.failed += 1;
+                        warn!("audio: {e}");
+                    }
+                }
+            }
+            if let Some(v) = rig.rolling_voice
+                && let Ok((mut voice, sink, spatial)) = voices.get_mut(v)
+            {
+                voice.mix = if playing {
+                    audio.specs[idx as usize].rolling.map_or(
+                        EngineMix {
+                            volume: 0.0,
+                            speed: 1.0,
+                        },
+                        |r| r.mix(state.forward_speed),
+                    )
+                } else {
+                    EngineMix {
+                        volume: 0.0,
+                        speed: 1.0,
+                    }
+                };
+                if voice.mix.volume > 0.0 {
+                    report.rolling += 1;
+                }
+                push_mix(voice.mix, sink, spatial);
+            }
+        }
+    }
+}
 /// 5): `toggle_camera` flips `Camera::is_active` between the session's
 /// chase and free cameras, and Bevy wants exactly one
 /// [`SpatialListener`] — this inserts it on the active camera and

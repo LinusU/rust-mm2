@@ -14,15 +14,17 @@ use bevy::audio::{AudioPlayer, PlaybackMode, PlaybackSettings, SpatialListener};
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 use mm2_app::audio::{
-    self, AudioReport, AudioVoice, EngineVoice, HornRequest, ImpactAudio, PcmAudio, VoiceKind,
-    WaveBank, decode_wave,
+    self, AudioReport, AudioVoice, EngineVoice, HornRequest, ImpactAudio, PcmAudio, SurfaceAudio,
+    SurfaceRig, SurfaceRole, SurfaceVoice, VoiceKind, WaveBank, decode_wave,
 };
 use mm2_assets::Vfs;
+use mm2_content::SurfaceTables;
 use mm2_formats::cardata::CarAudio;
+use mm2_formats::materials::{MaterialMap, MaterialSet};
 use mm2_game::{
     Banger, BangerDefinition, DevOverrides, ImpactEvent, ImpactId, Mm2Vfs, ObjectId,
     ObjectIdentity, Player, PlayerControl, PlayerVehicle, Session, SessionConfig, SessionEntity,
-    SessionPhase, SurfaceState, VehicleAudio, despawn_session_entities,
+    SessionPhase, SurfaceMaterial, SurfaceState, VehicleAudio, despawn_session_entities,
 };
 use mm2_vehicle::{VehicleConfig, VehicleState, vehicle_bundle};
 
@@ -1089,4 +1091,409 @@ fn an_absent_table_degrades_to_silence() {
     write_impact(&mut app, car, ObjectId::WORLD, 30.0);
     app.update();
     assert!(impact_voices(&mut app).is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// F07-B.4: grounded-wheel contact → bounded skid/rolling loop voices.
+// The session `SurfaceAudio` holds the authored
+// `default_surfacedry.csv`; a collider's `SurfaceMaterial` → the
+// material's `sound` class picks the row, `tire_slippage`/`|vel_long|`
+// picks the band and `|forward_speed|` mixes the rolling loop.
+// ---------------------------------------------------------------------------
+
+/// The surface fixture: a player-side `default_surfacedry.csv` whose
+/// row 0 is the `_default` road (NOSOUND rolling + two slippage bands)
+/// and row 1 is `grass` (a rolling loop + one wide band), plus every
+/// wave they name — at distinguishing sample rates so a voice's
+/// resolved asset identifies its authored row.
+fn surface_dir() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    for (stem, rate) in [
+        ("roadskid1", 22050),
+        ("roadskid2", 32000),
+        ("grassskid", 11025),
+        ("rollwave", 48000),
+    ] {
+        write(
+            d,
+            &format!("aud/aud22/surfaces/{stem}.22k.wav"),
+            &pcm_wav(rate, 220),
+        );
+    }
+    write(
+        d,
+        "aud/cardata/player/default_surfacedry.csv",
+        b"Tunnel sound index\n0\n\
+surface wave,max speed,min surface volume,max surface volume,min surface pitch,max surface pitch,min skid volume,max skid volume,num skid samples\n\
+NOSOUND,125,0,0,0,0,0.5,0.88,2\n\
+skid wave,min slippage,max slippage\n\
+ROADSKID1,0.5,0.75\n\
+ROADSKID2,0.75,1\n\
+surface wave,max speed,min surface volume,max surface volume,min surface pitch,max surface pitch,min skid volume,max skid volume,num skid samples\n\
+ROLLWAVE,25,0.35,0.75,0.85,1.25,0.5,0.72,1\n\
+skid wave,min slippage,max slippage\n\
+GRASSSKID,0.25,1\n",
+    );
+    tmp
+}
+
+/// `_default` → row 0, `grass` → row 1 — the `sound` class wiring
+/// `SurfaceTables::sound_index` reads.
+fn surface_tables() -> SurfaceTables {
+    let set = MaterialSet::parse("mtl _default {\n    sound: 0\n}\nmtl grass {\n    sound: 1\n}\n")
+        .unwrap();
+    let map = MaterialMap::parse("texture,physics\n").unwrap();
+    SurfaceTables { set, map }
+}
+
+/// The audio slice of the production app for surface voices: a
+/// `Playing` session, the mounted fixture VFS, the session `WaveBank`,
+/// `SurfaceAudio` (loaded through the production path), the material
+/// tables the collider marks read, and `surface_voices` on Update like
+/// the live schedules wire it.
+fn surface_app(dir: &Path) -> App {
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(dir, 0).unwrap();
+    let bank = WaveBank::index(&vfs);
+
+    let mut session = Session::new();
+    session.begin(SessionConfig::default()).unwrap();
+    session.transition(SessionPhase::Ready).unwrap();
+    session.transition(SessionPhase::Playing).unwrap();
+    // Production inserts the resource only when the authored table
+    // loads — an absent record leaves none and degrades to silence.
+    let table = SurfaceAudio::load(&vfs);
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_plugins(AssetPlugin::default())
+        .insert_resource(session)
+        .insert_resource(Mm2Vfs(vfs))
+        .insert_resource(bank)
+        .insert_resource(surface_tables())
+        .init_resource::<Assets<PcmAudio>>()
+        .init_resource::<AudioReport>()
+        .add_systems(Update, audio::surface_voices);
+    if let Some(table) = table {
+        app.insert_resource(table);
+    }
+    app.finish();
+    app.cleanup();
+    app
+}
+
+/// A drivable car like `load_session_world`/`spawn_opponents` stamps
+/// (`local` carries `PlayerVehicle`), plus the collider entity whose
+/// `SurfaceMaterial` the wheel contacts report.
+fn surface_car(app: &mut App, local: bool, material: SurfaceMaterial) -> (Entity, Entity) {
+    let generation = app.world().resource::<Session>().generation();
+    let collider = app.world_mut().spawn(material).id();
+    let mut car = app.world_mut().spawn((
+        vehicle_bundle(&VehicleConfig::default()),
+        SessionEntity(generation),
+        Transform::default(),
+    ));
+    if local {
+        car.insert(PlayerVehicle);
+    }
+    (car.id(), collider)
+}
+
+/// Point every wheel at `collider` with the given telemetry — the
+/// fields `surface_voices` reads, written on the sim state like the
+/// tire model does.
+fn set_contact(app: &mut App, car: Entity, contact: Option<Entity>, speed: f32, slip: f32) {
+    let mut state = app.world_mut().get_mut::<VehicleState>(car).unwrap();
+    state.forward_speed = speed;
+    for w in &mut state.wheels {
+        w.grounded = contact.is_some();
+        w.contact_entity = contact;
+        w.slip_angle = slip;
+        w.vel_long = speed;
+    }
+}
+
+/// `(role, resolved sample rate, spatial, parent)` for every live
+/// surface voice — the rate identifies the authored row through the
+/// fixture's distinguishing waves.
+fn surface_voices(app: &mut App) -> Vec<(SurfaceRole, u32, bool, Entity)> {
+    let world = app.world_mut();
+    let mut q = world.query::<(
+        &SurfaceVoice,
+        &AudioPlayer<PcmAudio>,
+        &PlaybackSettings,
+        &ChildOf,
+    )>();
+    let mut out: Vec<_> = q
+        .iter(world)
+        .map(|(v, p, s, c)| {
+            let rate = world
+                .resource::<Assets<PcmAudio>>()
+                .get(&p.0)
+                .unwrap()
+                .sample_rate
+                .get();
+            (v.role, rate, s.spatial, c.parent())
+        })
+        .collect();
+    out.sort_by_key(|(role, rate, ..)| {
+        (
+            *rate,
+            match role {
+                SurfaceRole::Skid(b) => *b as u32,
+                SurfaceRole::Rolling => u32::MAX,
+            },
+        )
+    });
+    out
+}
+
+fn surface_mix(app: &mut App, role: SurfaceRole) -> (f32, f32) {
+    app.world_mut()
+        .query::<&SurfaceVoice>()
+        .iter(app.world())
+        .find(|v| v.role == role)
+        .map(|v| (v.mix.volume, v.mix.speed))
+        .unwrap_or((0.0, 0.0))
+}
+
+#[test]
+fn a_sliding_wheel_voices_the_covering_skid_band() {
+    let dir = surface_dir();
+    let mut app = surface_app(dir.path());
+    let (car, road) = surface_car(&mut app, true, SurfaceMaterial::Unspecified);
+    // A lateral slide at 0.6 utilization lands the `_default` row's
+    // first authored band (0.5–0.75).
+    set_contact(&mut app, car, Some(road), 8.0, 0.6 * 0.16);
+    app.update(); // resolve → rig
+    app.update(); // commit the entry + spawn the band voice
+    app.update(); // the voice's first computed mix
+
+    let voices = surface_voices(&mut app);
+    assert_eq!(
+        voices,
+        [(SurfaceRole::Skid(0), 22050, false, car)],
+        "the covering band's own wave — non-spatial for the local car"
+    );
+    // progress 0.4 across the band interpolates min→max skid volume.
+    let (volume, speed) = surface_mix(&mut app, SurfaceRole::Skid(0));
+    assert!((volume - 0.652).abs() < 1e-3, "{volume}");
+    assert_eq!(speed, 1.0);
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.skids, r.rolling, r.voices, r.failed), (1, 0, 1, 0));
+
+    // The voice rides the car (despawns with it) and carries the
+    // session stamp teardown owns.
+    let world = app.world_mut();
+    let (mode, session_entity) = world
+        .query::<(&PlaybackSettings, &SessionEntity)>()
+        .iter(world)
+        .next()
+        .map(|(s, e)| (s.mode, e.0))
+        .unwrap();
+    assert!(matches!(mode, PlaybackMode::Loop));
+    assert_eq!(
+        session_entity,
+        app.world().resource::<Session>().generation()
+    );
+}
+
+#[test]
+fn a_held_brake_at_rest_and_airborne_wheels_stay_silent() {
+    // F07-AC03's two legs. A parked car fully on the brakes: the wheels
+    // are grounded and contacting a real surface, but demand nothing —
+    // no band covers and the roll gate is closed.
+    let dir = surface_dir();
+    let mut app = surface_app(dir.path());
+    let (car, grass) = surface_car(&mut app, true, SurfaceMaterial::Authored(1));
+    set_contact(&mut app, car, Some(grass), 0.0, 0.0);
+    for _ in 0..4 {
+        app.update();
+    }
+    assert_eq!(voices(&mut app), 0);
+    assert_eq!(
+        app.world_mut()
+            .query_filtered::<Entity, With<SurfaceRig>>()
+            .iter(app.world())
+            .count(),
+        0,
+        "nothing resolved → no rig was ever built"
+    );
+
+    // Airborne at full lock and hard demand: no contact means no
+    // surface row — the telemetry cannot reach a pick.
+    set_contact(&mut app, car, None, 20.0, 0.9);
+    {
+        let mut state = app.world_mut().get_mut::<VehicleState>(car).unwrap();
+        for w in &mut state.wheels {
+            w.traction_demand = 1.2;
+        }
+    }
+    for _ in 0..4 {
+        app.update();
+    }
+    assert_eq!(voices(&mut app), 0);
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.voices, r.failed, r.skids, r.rolling), (0, 0, 0, 0));
+}
+
+#[test]
+fn a_moving_car_rolls_the_authored_surface_loop() {
+    let dir = surface_dir();
+    let mut app = surface_app(dir.path());
+    let (car, grass) = surface_car(&mut app, true, SurfaceMaterial::Authored(1));
+    let (ai, _) = surface_car(&mut app, false, SurfaceMaterial::Authored(1));
+    for c in [car, ai] {
+        set_contact(&mut app, c, Some(grass), 10.0, 0.0);
+    }
+    for _ in 0..3 {
+        app.update();
+    }
+
+    let mut voices = surface_voices(&mut app);
+    voices.sort_by_key(|(.., parent)| *parent != car);
+    assert_eq!(
+        voices,
+        [
+            (SurfaceRole::Rolling, 48000, false, car),
+            (SurfaceRole::Rolling, 48000, true, ai)
+        ],
+        "the AI car's loop is a spatial emitter, the local car's is not"
+    );
+    // 10 m/s across the authored 0–25 window: f=0.4 → volume 0.35→0.75,
+    // pitch 0.85→1.25.
+    let (volume, speed) = surface_mix(&mut app, SurfaceRole::Rolling);
+    assert!((volume - 0.51).abs() < 1e-3, "{volume}");
+    assert!((speed - 1.01).abs() < 1e-3, "{speed}");
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.rolling, r.skids, r.failed), (2, 0, 0));
+}
+
+#[test]
+fn a_surface_switch_rebuilds_the_skid_after_the_dwell() {
+    let dir = surface_dir();
+    let mut app = surface_app(dir.path());
+    let (car, road) = surface_car(&mut app, true, SurfaceMaterial::Unspecified);
+    let grass = app.world_mut().spawn(SurfaceMaterial::Authored(1)).id();
+
+    set_contact(&mut app, car, Some(road), 8.0, 0.6 * 0.16);
+    for _ in 0..3 {
+        app.update();
+    }
+    assert_eq!(
+        surface_voices(&mut app),
+        [(SurfaceRole::Skid(0), 22050, false, car)]
+    );
+
+    // Sliding onto grass keeps the road voice (idled at 0) until the
+    // new entry has held the dwell, then the grass band replaces it.
+    set_contact(&mut app, car, Some(grass), 8.0, 0.6 * 0.16);
+    for _ in 0..3 {
+        app.update();
+    }
+    let voices = surface_voices(&mut app);
+    assert!(
+        voices
+            .iter()
+            .any(|v| matches!(v.0, SurfaceRole::Skid(_)) && v.1 == 22050),
+        "inside the dwell the committed road band still owns the slot: {voices:?}"
+    );
+
+    for _ in 0..3 {
+        app.update();
+    }
+    let voices = surface_voices(&mut app);
+    assert_eq!(
+        voices,
+        [
+            (SurfaceRole::Skid(0), 11025, false, car),
+            (SurfaceRole::Rolling, 48000, false, car)
+        ],
+        "the grass band's own wave replaced the road skid; the rolling \
+         loop joined once the car was moving on grass"
+    );
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.skids, r.rolling, r.failed), (1, 1, 0));
+}
+
+#[test]
+fn an_unresolvable_surface_and_an_absent_table_stay_silent() {
+    // A collider whose material index the table cannot answer.
+    let dir = surface_dir();
+    let mut app = surface_app(dir.path());
+    let (car, collider) = surface_car(&mut app, true, SurfaceMaterial::Authored(9));
+    set_contact(&mut app, car, Some(collider), 8.0, 0.6 * 0.16);
+    for _ in 0..4 {
+        app.update();
+    }
+    assert_eq!(voices(&mut app), 0);
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.voices, r.failed), (0, 0), "no fabricated row");
+
+    // No authored table at all — `load` refuses and the system idles.
+    let dir = fixture_dir();
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(dir.path(), 0).unwrap();
+    assert!(SurfaceAudio::load(&vfs).is_none());
+    let mut app = surface_app(dir.path());
+    assert!(app.world().get_resource::<SurfaceAudio>().is_none());
+    let (car, grass) = surface_car(&mut app, true, SurfaceMaterial::Authored(1));
+    set_contact(&mut app, car, Some(grass), 8.0, 0.6 * 0.16);
+    for _ in 0..4 {
+        app.update();
+    }
+    assert_eq!(voices(&mut app), 0);
+    assert_eq!(app.world().resource::<AudioReport>().voices, 0);
+}
+
+#[test]
+fn the_surface_rig_bound_caps_resolving_cars() {
+    let dir = surface_dir();
+    let mut app = surface_app(dir.path());
+    let grass = app.world_mut().spawn(SurfaceMaterial::Authored(1)).id();
+    // Twenty cars all rolling-and-sliding on grass: sixteen rigs build,
+    // four report the bound once and stay muted.
+    for i in 0..20 {
+        let (car, _) = surface_car(&mut app, i == 0, SurfaceMaterial::Authored(1));
+        set_contact(&mut app, car, Some(grass), 8.0, 0.6 * 0.16);
+    }
+    for _ in 0..3 {
+        app.update();
+    }
+    {
+        let r = app.world().resource::<AudioReport>();
+        assert_eq!(r.dropped, 4, "MAX_SURFACE_RIGS refused four cars");
+        assert_eq!(r.failed, 0);
+        assert_eq!((r.skids, r.rolling), (16, 16));
+    }
+    // Sixteen rigs × (one skid band + one rolling loop).
+    assert_eq!(surface_voices(&mut app).len(), 32);
+
+    app.update();
+    assert_eq!(
+        app.world().resource::<AudioReport>().dropped,
+        4,
+        "the muted marker reports once, not per frame"
+    );
+}
+
+#[test]
+fn teardown_sweeps_surface_voices_with_the_session() {
+    let dir = surface_dir();
+    let mut app = surface_app(dir.path());
+    let (car, grass) = surface_car(&mut app, true, SurfaceMaterial::Authored(1));
+    set_contact(&mut app, car, Some(grass), 8.0, 0.6 * 0.16);
+    for _ in 0..3 {
+        app.update();
+    }
+    assert!(!surface_voices(&mut app).is_empty());
+
+    // The production teardown sweeps `SessionEntity` roots on Unloading
+    // — every surface voice is one (AC06's restart leg).
+    app.world_mut()
+        .run_system_once(despawn_session_entities)
+        .unwrap();
+    app.update();
+    assert_eq!(voices(&mut app), 0);
 }

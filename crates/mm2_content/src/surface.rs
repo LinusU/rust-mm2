@@ -227,6 +227,26 @@ impl SurfaceTables {
             .unwrap_or(0.0)
     }
 
+    /// The authored `sound` class of a collider's `SurfaceMaterial` —
+    /// the positional index into the session's
+    /// `default_surface*.csv` table (the material→row binding is a
+    /// designed reading: `sound` is the only selector the authored data
+    /// names, UNK-25; F07-B.4). `Authored(i)` reads its material def's
+    /// `sound` field; `Unspecified` reads the `_default` block's —
+    /// unmarked colliders inherit the fallback material's class the
+    /// same way they inherit its physics. `None` when the index space
+    /// cannot answer (missing `_default`, out-of-range or absent
+    /// `sound` field) — the wheel simply resolves no surface row.
+    pub fn sound_index(&self, material: SurfaceMaterial) -> Option<u16> {
+        let def = match material {
+            SurfaceMaterial::Authored(i) => self.set.defs.get(i as usize)?,
+            SurfaceMaterial::Unspecified => self.set.default_def()?,
+        };
+        def.vec_i64("sound", 1)
+            .and_then(|v| v.first().copied())
+            .and_then(|s| u16::try_from(s).ok())
+    }
+
     /// [`contact_restitution`](Self::contact_restitution) for a
     /// collider's `SurfaceMaterial`: `Authored(i)` carries its
     /// material's scaled coefficient; `Unspecified` carries none — an

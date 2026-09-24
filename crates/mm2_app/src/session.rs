@@ -237,6 +237,7 @@ pub fn drive_session(
             commands.remove_resource::<crate::spark_fx::SparkFx>();
             commands.remove_resource::<crate::audio::WaveBank>();
             commands.remove_resource::<crate::audio::ImpactAudio>();
+            commands.remove_resource::<crate::audio::SurfaceAudio>();
             commands.remove_resource::<crate::pvs::CityPvs>();
             commands.remove_resource::<crate::water::CityWater>();
             commands.remove_resource::<crate::city::WorldFloor>();
@@ -639,6 +640,13 @@ pub fn load_session_world(
     // that does not resolve or parse yields no resource, not a
     // fabricated category.
     if let Some(table) = crate::audio::ImpactAudio::load(&vfs.0, session.generation()) {
+        commands.insert_resource(table);
+    }
+    // F07-B.4: the authored surface table — the player-side
+    // `default_surfacedry.csv` the wheel-contact picks read through.
+    // Same absence policy: a table that does not resolve or parse
+    // yields no resource, not a fabricated surface row.
+    if let Some(table) = crate::audio::SurfaceAudio::load(&vfs.0) {
         commands.insert_resource(table);
     }
     if world_ok {

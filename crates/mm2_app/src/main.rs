@@ -1110,6 +1110,9 @@ fn main() {
             // the same despawn ordering as the rigs (a struck car dying
             // mid-update must not queue voice reads on it).
             audio::impact_voices.after(session::drive_session),
+            // F07-B.4: wheel contact → skid/rolling loop voices — the
+            // same despawn ordering for the same reason.
+            audio::surface_voices.after(session::drive_session),
             // F07-B.2: the spatial listener follows whichever camera is
             // active — after the toggle so a mode switch moves the ear
             // the same frame, and after the session driver for the

@@ -20,6 +20,13 @@ use crate::racedata::TableDiagnostic;
 /// Sample-name cells that mean "no sample" rather than a wave lookup.
 const SENTINELS: &[&str] = &["", "nosound", "endofdata", "false", "none", "nothing"];
 
+/// Whether `name` is an authored "no sample" sentinel (`NOSOUND`,
+/// `ENDOFDATA`, `FALSE`, empty, …) rather than a wave stem —
+/// case-insensitive, the same test [`CardataBody::wave_names`] applies.
+pub fn is_sample_sentinel(name: &str) -> bool {
+    SENTINELS.contains(&name.trim().to_ascii_lowercase().as_str())
+}
+
 /// Which `aud/cardata`/`aud/ambient` grammar a path carries, derived
 /// from the logical name alone (same role as
 /// `racefiles::classify_race_file`).
@@ -216,7 +223,7 @@ impl CardataBody {
     pub fn wave_names(&self) -> Vec<&str> {
         fn keep(name: &str) -> Option<&str> {
             let t = name.trim();
-            (!SENTINELS.contains(&t.to_ascii_lowercase().as_str())).then_some(t)
+            (!is_sample_sentinel(t)).then_some(t)
         }
         let mut out: Vec<&str> = Vec::new();
         match self {
@@ -1054,11 +1061,15 @@ impl ImpactTable {
 /// banded skid samples.
 ///
 /// Two authored column layouts exist and both are preserved verbatim:
-/// the opponent files use a 9-column row (`max speed` … `num skid
-/// samples`), the player files a 12-column row with `divisor` fields and
-/// a `for tunnels` flag. Skid bands are `min slippage,max slippage` in
-/// the opponent schema and `min speed,max speed` in the player schema —
-/// values are stored positionally and the header row is kept so callers
+/// the dry/wet files (both sides) use a `max speed`-window row
+/// (`min,max surface volume`/`pitch`, `min,max skid volume`, `num skid
+/// samples`, sometimes `for tunnels`) whose skid bands key on
+/// `min slippage,max slippage`; the ice files (again both sides) use a
+/// 12-column `divisor`/`for tunnels` layout whose skid bands key on
+/// `min speed,max speed` — a different trigger unit for the same table
+/// slot. The split is per *variant*, not per side: the player dry/wet
+/// files carry the slippage schema just like the opponent ones.
+/// Values are stored positionally and the header row is kept so callers
 /// see which unit the band claims.
 #[derive(Debug, Clone)]
 pub struct SurfaceTable {

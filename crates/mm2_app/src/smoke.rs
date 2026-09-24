@@ -345,6 +345,10 @@ pub fn headless_smoke(
                     // F07-B.3: deduplicated impacts → bounded one-shot
                     // voices — same despawn ordering as the rigs.
                     crate::audio::impact_voices.after(session::drive_session),
+                    // F07-B.4: wheel contact → skid/rolling loop
+                    // voices — the mix computes on the components, so
+                    // the record's `aud=` k/g gauges read it headless.
+                    crate::audio::surface_voices.after(session::drive_session),
                     crate::audio::audio_listener.after(session::drive_session),
                     crate::audio::count_sinks,
                     crate::audio::sync_audio_pause,
@@ -982,8 +986,15 @@ pub fn headless_smoke(
             } else {
                 String::new()
             };
+            // F07-B.4: skid/rolling loop voices currently audible —
+            // gauges like `a`, appended only when nonzero.
+            let surface = if r.skids + r.rolling > 0 {
+                format!("/{}k/{}g", r.skids, r.rolling)
+            } else {
+                String::new()
+            };
             format!(
-                " aud={}h/{}v/{}s/{}l/{}a/{}r{impacts}{dropped}{failed}",
+                " aud={}h/{}v/{}s/{}l/{}a/{}r{impacts}{surface}{dropped}{failed}",
                 r.horns, r.voices, r.sunk, r.loops, r.audible, r.rigs
             )
         })

@@ -1,80 +1,91 @@
-# Last iteration — F07-B.3: impact one-shot voices
+# Last iteration — F07-B.4: surface skid/rolling loop voices
 
-Iteration 39 on `ralph/night` (baseline `eec3f62`, the F07-B.2
-opponent-rig/spatial-listener leg — externally checked clean).
-Selected the next F07-B remainder slice: consume the deduplicated
-`ImpactEvent` stream through the authored `default_impacts.csv` table.
-F07 is *not* complete — skids, ambient engines, clutch, sirens, scrape
-semantics and audible capture remain open.
+Iteration 40 on `ralph/night` (baseline `21cc9f8`, the F07-B.3
+impact-voices leg — externally checked clean). Selected the next
+F07-B remainder slice: connect the authored `default_surface*.csv`
+tables to wheel-contact/slip telemetry with bounded skid and rolling
+loop playback (spec req 3, F07-AC03 legs). F07 is *not* complete —
+ambient engines, clutch, sirens, scrape semantics and audible capture
+remain open.
 
 ## What landed
 
-- `mm2_game::banger::BangerDefinition.audio_id` — the authored
-  `AudioId` column carried verbatim (it was parsed and dropped before).
-  0 on every retail record, so retail props all read the id-0 `WALL`
-  category — the binding is unverified (UNK-25), kept so impact audio
-  and mods see the authored value.
-- `mm2_game::audio` — `impact_category(table, audio_id)` resolves the
-  authored `ID` category with an id-0 fallback (`None` when the table
-  has no id-0 either — a data failure, not a guess), and
-  `pick_impact(category, force, rng)` filters `min,max force` bands,
-  weights covering samples by `frequency` (all-zero → uniform draw so
-  authored silence is never manufactured) and draws the gain inside
-  `min,max volume` (non-finite bounds read as their counterpart, both
-  bad → 1.0, clamped ≥ 0). A force below every band returns `None` —
-  authored silence, not an error.
-- `mm2_app::audio::ImpactAudio` — session resource: parsed
-  `ImpactTable` + generation-seeded `NavRng`. `load_session_world`
-  resolves `aud/cardata/player/default_impacts.csv` through the VFS;
-  absent/malformed warns once and inserts nothing (same absence policy
-  as every authored record). Removed by `drive_session` teardown. The
-  player-side file is the binding — the opponent file authors `WALL`
-  bands two orders of magnitude smaller in-column, an authored
-  inconsistency the runtime does not normalize.
-- `mm2_app::audio::impact_voices` — runs after `session::drive_session`
-  in both schedules (same despawn ordering as the rigs). Per event:
-  stale generations skipped; non-`Playing` drains without emitting.
-  Each *vehicle* participant earns one voice — remote participants
-  skipped (their authority's client owns the sound, same skip every
-  F05 consumer applies), non-vehicle participants earn none. Force =
-  `severity × striker mass` — `ComputedMass` → `Mass` → config mass,
-  each source validated before falling through (a not-yet-computed
-  `Mass(0)` can't collapse the pick to a 1 kg touch — caught by the
-  test suite, fixed this iteration). Voices are bounded
-  `MAX_IMPACT_VOICES` 12 one-shots (`PlaybackMode::Despawn`,
-  `SessionEntity`-swept), spatial emitters at `ImpactEvent.point`
-  under `ENGINE_SPATIAL_SCALE` for everyone but the local player
-  (non-spatial, DSN-37 anchor). `AudioReport.impacts` counts spawned
-  voices; `aud=` gains `<impacts>i` only when nonzero — impact-free
-  records stay bit-identical.
+- `mm2_formats::cardata` — exported `is_sample_sentinel` (the same
+  `NOSOUND`/`ENDOFDATA`/… test `wave_names` applies); the `SurfaceTable`
+  doc comment corrected: the schema split is per **variant**, not per
+  side — dry/wet files on both sides band `min slippage,max slippage`
+  under a `max speed` window, ice files on both sides use the
+  12-column divisor layout with `min speed,max speed` bands (verified
+  by direct `mm2aud.ar` extraction; AUD-6 and the research doc
+  corrected — an earlier reading had it per side).
+- `mm2_game::audio` — `SkidUnit::{Slippage,Speed}` (the `skid wave`
+  header's unit column decides the trigger), `RollingSpec::mix`
+  (authored `min,max surface volume`/`pitch` interpolated over
+  `0..max speed`, reverse reads `|speed|`, non-finite silences),
+  `SkidSpec::pick` (first covering `min,max` band interpolates
+  `min,max skid volume` inside it; below every band = authored
+  silence), `SurfaceSpec::from_entry` (rolling resolves only on the
+  canonical `max speed` schema — divisor rows return `None` rather
+  than a guessed formula, same policy as `EngineLoopSpec`; each half
+  independently `None` on sentinel/missing/unclassifiable fields),
+  `tire_slippage` (designed trigger quantity — `max(|traction_demand|,
+  |slip_angle|/peak_slip_angle)` clamped 0..1; the arcade tire model
+  has no wheel-speed state, so this is the closest "past the tire's
+  limit" measure the sim publishes — UNK-25).
+- `mm2_content::SurfaceTables::sound_index` — `SurfaceMaterial` → the
+  material's authored `sound` field → a positional table row
+  (`Authored(i)` reads def *i*, `Unspecified` reads `_default`;
+  missing/out-of-range/`None`-valued → `None`). Designed binding:
+  `sound` is the only selector the authored data names (UNK-25).
+- `mm2_app::audio` — session `SurfaceAudio` resource
+  (`aud/cardata/player/default_surfacedry.csv`; absent/malformed warns
+  and inserts nothing — the weather→variant binding is unverified so
+  dry is the sole runtime table), `SurfaceRig`/`SurfaceVoice`/
+  `SurfaceRole` components, `VoiceKind::{Skid,Rolling}`, and
+  `surface_voices` after `session::drive_session` in both schedules:
+  per grounded wheel the contact entity's `SurfaceMaterial` resolves a
+  row; `slippage` rows read `tire_slippage`, `speed` rows read
+  `|vel_long|`; the loudest covering skid band and loudest rolling
+  loop (`|forward_speed|` ≥ `ROLL_MIN_SPEED` 0.5) win. Loop voices
+  spawn lazily per committed entry and idle at volume 0 (the engine
+  rig's no-churn policy); a different winning entry rebuilds only
+  after holding `SURFACE_DWELL` 4 frames. Bounded `MAX_SKID_VOICES` 4
+  bands per entry, `MAX_SURFACE_RIGS` 16 cars (refusals muted-marked,
+  counted once). Children of the car + `SessionEntity`-swept; spatial
+  for non-local cars, non-spatial for the player (DSN-37). Headless
+  reports `aud=` `/<skids>k/<rolling>g` gauges when nonzero.
+- `mm2_app::session` — `SurfaceAudio::load` on world build, removed at
+  teardown; `mm2_app::main`/`smoke` schedule the system.
 
-All three semantic picks (category binding, force quantity, per-side
-emission) are designed readings classified under UNK-25 — the only
-selectors the authored data itself names.
+A held brake at rest and airborne wheels resolve nothing — AC03's
+legs are silent by construction (no demand → no covering band; no
+contact → no row), not by a special-case gate.
 
 ## Tests
 
-`mm2_game` +4 — `AudioId`→category selection + id-0 fallback + no-id-0
-`None`; force-band selection + sub-floor authored silence; frequency
-weighting (zero-frequency row never wins while a weighted row stands;
-all-zero weights draw uniformly); volume draw inside the authored
-range + non-finite bound sanitization.
+`mm2_game` +7 — canonical schema resolves both halves; divisor schema
+skips rolling but keeps speed bands; unclassifiable skid header → no
+skid half; band selection + sub-floor authored silence; gain
+interpolation inside the covering band; rolling volume/pitch ramp +
+reverse-speed `|v|` + non-finite; `tire_slippage` utilization/saturate/
+brake-at-rest/non-finite legs.
 
-`mm2_app` (`tests/audio.rs`, +9 → 29 total) — wall impact picks the
-authored band, `Despawn` mode, authored volume range, non-spatial
-local voice at the impact point; 30 m/s picks the huge band's own
-sample; sub-floor touch is silent; struck prop's `AudioId` 7 selects
-its category (and only the car side voices); a two-car impact voices
-each side at its own impulse (local non-spatial, AI spatial);
-remote/non-vehicle/stale-generation events produce nothing;
-`MAX_IMPACT_VOICES` 12 caps a 20-event pile-up with 8 counted drops;
-absent table degrades to silence; teardown sweeps the voice.
+`mm2_app` (`tests/audio.rs`, +7 → 36 total) — sliding wheel voices the
+covering band's own wave at the interpolated gain (`Loop`, child of
+car, non-spatial local); AC03: grounded wheels at rest on grass and
+airborne full-lock wheels spawn nothing and build no rig; moving car
+rolls the authored loop (local non-spatial, AI spatial emitter, mix
+ramped by speed); road→grass switch keeps the road band through the
+dwell then rebuilds on the grass entry (rolling loop joins);
+unresolvable material index and absent table stay silent with no
+fabricated row; `MAX_SURFACE_RIGS` 16 caps 20 resolving cars (4 muted,
+counted once); teardown sweeps the voices.
 
 ## Gates
 
 `cargo fmt --all -- --check` clean; `cargo clippy --locked --workspace
 --all-targets --all-features -- -D warnings` clean; `cargo test
---locked --workspace` green — 68 suites, 1067 tests, 0 failures.
+--locked --workspace` green — 68 suites, 1081 tests, 0 failures.
 `Cargo.lock` unchanged.
 
 ## Retail evidence
@@ -83,28 +94,30 @@ absent table degrades to silence; teardown sweeps the voice.
 headless:  mm2 --mm2-path retail --event circuit:0 --city london
            --bot --headless --frames 3000
            → status=pass, impacts=212,
-             aud=0h/30v/0s/18l/17a/8r/12i+125d
+             aud=0h/70v/0s/18l/17a/8r/12i/8k/1g+125d
 ```
 
-`fnv1a64:e91e6cd4b2ae30d9`. The bot race produced 212 deduplicated
-impact events; the voice bound held 12 live one-shots (`12i`, part of
-`30v` = 18 loops + 12 impacts) and counted 125 bound-drops (`+125d`) —
-the bound and drop counter working under real load, not a cap never
-reached. Headless `0s` is honest: no output device attaches, so
-`PlaybackMode::Despawn` voices never self-clean and the bound simply
-stays saturated — a windowed run is where clip-end despawn and sink
-attach are exercised (F07-C scope).
+`default_surfacedry.csv` resolved and parsed on the real install (no
+warnings); the surface rigs produced 40 voices across the 8-car field
+(70v total = 18 engine loops + 12 impacts + 40 surface) with `8k`
+skid-band and `1g` rolling voices audible at the report tick — the
+authored `sound`-class → row → wave chain live on retail data.
+Headless `0s` is honest: no output device attaches; sink attach is
+windowed/F07-C scope.
 
 ## Not done / open
 
-- F07-B continues: surface skid/rolling bands (two schemas disagree on
-  the trigger column), ambient-traffic engines (`AmbientEngine`
-  grammar), clutch sample trigger, siren programs, sustained-scrape
-  semantics (the dedup cooldown bounds repeats but AC04's
-  sustained-scrape leg is not separately evidenced), AC02's scripted
-  drive sequence, AC05 audible capture.
-- The category binding (`AudioId`→`ID`), force quantity
-  (`severity × mass`) and per-side emission rule are designed readings
-  — the original's are unrecovered (UNK-25, DSN-38 discloses each).
+- F07-B continues: ambient-traffic engines (`AmbientEngine` grammar),
+  clutch sample trigger, siren programs, sustained-scrape semantics
+  (AC04's second leg), AC02's scripted drive sequence, AC05 audible
+  capture, weather→{dry,wet,ice} variant binding (dry bound
+  unconditionally).
+- Designed readings under UNK-25/DSN-39: the material `sound`→row
+  binding, the `tire_slippage` skid quantity, `|vel_long|` for
+  speed-banded rows, the rolling `|forward_speed|` mix, dry-as-default
+  variant, `ROLL_MIN_SPEED`/`SURFACE_DWELL`/voice bounds.
+- The ice divisor-schema rolling formula is unresolved — no
+  `max speed` window exists to interpolate, so those rows roll silent
+  rather than guessing (their `min speed` skid bands do resolve).
 - No audible A/B against the original; headless `0s` reports no output
   device honestly (F07-C scope).
