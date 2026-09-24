@@ -3,12 +3,15 @@
 F13-C.1's published account of what the authored Checkpoint catalog
 actually does under the production headless runtime — measured, not
 claimed — plus F13-C.2's stationary-control and first Professional
-legs and F13-C.4's complete Professional matrix.
+legs, F13-C.4's complete Professional matrix and F13-C.5's
+Professional hold legs.
 Every number below comes off the fingerprinted retail install
 (`fnv1a64:e91e6cd4b2ae30d9`, read-only): the audits and the scripted/
 hold matrix at commit `1791df0`, the parked legs and first
 professional legs at commit `a7d2797`, the full Professional matrix
-at commit `11af1ea`; all runs on 2026-09-24 on Apple M1 / Metal. The
+at commit `11af1ea`, the Professional hold legs at commit `7fb6cf6`
+(docs-only over `11af1ea` — identical code); all runs on 2026-09-24
+on Apple M1 / Metal. The
 synthetic legs are the `mm2_app` / `mm2_game` test suites.
 
 These records prove the engine executes the authored data — roster,
@@ -315,6 +318,81 @@ artifact (a parked car cannot dodge).
 legs do not recur at Pro. No velocity spike anywhere: peak ≤34.2 m/s
 across all 48 legs.
 
+## Professional hold-driver legs — 24 events (F13-C.5)
+
+The third driver at Pro: `Hold` settles ≤2 s, then holds full
+throttle with no steering — it *drives* blind, so it is a field
+participant that happens to be a bad driver, not a control. All 24
+legs at commit `7fb6cf6` (code-identical to `11af1ea`), `--pro`,
+`--frames 12000`. **24/24 `status=pass`, rc 0** — the Professional
+matrix is now complete: 72 legs = 24 events × scripted + parked +
+hold.
+
+### London (`world=city/london.psdl`, Professional, hold)
+
+| event | phase, cp, results, opp | P-F, rs, omax |
+| --- | --- | --- |
+| 0 | playing 1/5 r4 4/6 | –, rs0, omax5 |
+| 1 | playing 1/7 r0 0/6 | –, rs0, omax7 |
+| 2 | playing 0/4 r0 0/7 | –, rs5, omax1 |
+| 3 | playing 0/6 r0 0/7 | –, rs17, omax0 |
+| 4 | playing 0/6 r0 0/7 | –, rs0, omax5 |
+| 5 | playing 0/3 r0 0/7 | –, rs0, omax2 |
+| 6 | playing 0/8 r0 0/7 | –, rs0, omax3 |
+| 7 | playing 0/8 r0 0/6 | –, rs0, omax5 |
+| 8 | playing 1/9 r0 0/6 | –, rs8, omax1 |
+| 9 | **countdown** 0/5 r0 0/7 | –, rs9, omax0 |
+| 10 | playing 0/8 r0 0/6 | –, rs25, omax0 |
+| 11 | playing 1/6 r0 0/6 | –, rs0, omax3 |
+
+### San Francisco (`world=city/sf.psdl`, Professional, hold)
+
+| event | phase, cp, results, opp | P-F, rs, omax |
+| --- | --- | --- |
+| 0 | playing 2/6 r4 4/6 | –, rs0, omax6 |
+| 1 | playing 2/8 r0 0/6 | –, rs9, omax2 |
+| 2 | playing 1/9 r1 1/7 | –, rs0, omax9 |
+| 3 | playing 1/6 r2 2/6 | –, rs0, omax6 |
+| 4 | playing 2/7 r1 1/5 | –, rs0, omax7 |
+| 5 | playing 0/6 r0 0/5 | –, rs0, omax6 |
+| 6 | playing 0/6 r0 0/4 | –, rs0, omax3 |
+| 7 | playing 0/4 r0 0/6 | –, rs0, omax2 |
+| 8 | playing 1/8 r0 0/6 | –, rs0, omax5 |
+| 9 | playing 0/10 r0 0/6 | –, rs0, omax5 |
+| 10 | playing 0/5 r0 0/6 | –, rs0, omax3 |
+| 11 | playing 0/11 r0 0/6 | –, rs6, omax0 |
+
+### What the hold legs add
+
+**The field finishes around a blind driver too.** 12 opponent
+finishes with ledger results across 5 events while the hold car raced
+and never resolved (london-0 4/6, sf-0 4/6, sf-2 1/7, sf-3 2/6,
+sf-4 1/5). The amateur hold legs produced 12 across 7 events
+(london-0 2, london-2 2, sf-0 3, sf-2 2, sf-3 1, sf-4 1, sf-5 1) —
+per event the Pro field finished more often on london-0/sf-0/sf-3,
+less on london-2/sf-2/sf-5, level on sf-4; authored roster and tuning
+differences, measured not fidelity-verified.
+
+**The blind driver wrecks hardest.** Restart counts are the worst of
+the three drivers — london-10 rs25 (matching amateur hold's 25 on the
+same event), london-3 rs17, london-9 rs9 (still `Countdown` at cap —
+same class as amateur sf-8's rs13 and Pro scripted sf-10's rs6),
+london-8 rs8, sf-1 rs9, sf-11 rs6. Every one is a driver outcome —
+the same events' parked legs show the field progressing regardless.
+london-4 repeats its parked-leg anomaly verbatim: the hold car on the
+elevated spawn gets punted over the edge and recovered
+`rcv=0w/209f/209r`, ending `wheels=4/4` — the loop is the spawn
+ground's, not the driver's.
+
+**Record honesty holds at the extremes.** `dup=0` wherever the
+results/damage pipeline ran; on london-3/london-9 the whole `dmg=`…
+`txl=` tail is absent because `impacts=0` — the activity gating keeps
+idle generations bit-identical, and `results=0` means there was
+nothing to duplicate. `wheels=0/4` on london-9 (never left countdown)
+and london-11, `3/4` on london-2 — disclosed end poses. `dropped`
+≤21; `peak` ≤48.6 m/s (london-2 — a blind full-throttle car down a
+hill; bounded, no spikes).
+
 ## Anomalies kept visible
 
 - **Physics step drops under contention:** `dropped=` counts physics
@@ -343,9 +421,9 @@ across all 48 legs.
 - **F13-AC01** (discoverable + deps load): `events` 24/24 ready,
   `race-defs` 48/48 built, `opponents` all rosters wired; every row
   ran the production session to `status=pass`. Structural + Amateur
-  runtime legs done; **Professional runtime legs complete at
-  scripted+parked (48/48 `status=pass` — the C.4 matrix above); Pro
-  hold legs remain open.**
+  runtime legs done; **Professional runtime legs complete at all
+  three drivers (72/72 `status=pass` — the C.4 scripted+parked
+  matrix plus the C.5 hold legs).**
 - **F13-AC02** (ordering/crossing rules): AnyOrder freedom verified
   (CHK-1); 36 race tests cover high-speed/wrong-height/repeat
   crossings, teleport/reset segment invalidation, timeout edge ticks.
@@ -373,13 +451,14 @@ across all 48 legs.
 - **F13-AC06** (catalog matrix): **this document** — 24/24 rows
   attempted, 48/48 amateur legs `status=pass` (sf-8's ~24-min
   wall-clock outlier was a physics defect, bounded in F13-C.3 — ~70 s
-  on re-run), 48/48 professional legs `status=pass` (C.4); finishes
+  on re-run), 72/72 professional legs `status=pass` (C.4
+  scripted+parked, C.5 hold); finishes
   and stalls reported per event per driver per difficulty.
 
 ## Residuals / honest limits
 
-- Professional coverage now spans the full catalog scripted + parked
-  (C.4, 48/48 pass); Pro `hold`-driver legs remain open, and the
+- Professional coverage now spans the full catalog at all three
+  drivers (C.4 scripted + parked, C.5 hold — 72/72 pass); the
   scripted legs' divergent outcomes vs the a7d2797 first legs are
   disclosed in the C.4 section.
 - sf-8's ~24-min wall-clock outlier was a hypervelocity-fragment
