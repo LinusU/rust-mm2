@@ -27,11 +27,28 @@ formula reads the fade-in window as a `0→1` envelope ramp, fade-out as
 envelope (a loop outside its band is silent, not parked at its authored
 minimum) and speed interpolating `Min Pitch→Max Pitch` across the pitch
 window — all inferred, not recovered (UNK-25/DSN-36). Divisor-schema
-rows carry no RPM windows and are skipped with a counted warning. The
-impact/surface/siren families remain unparsed at runtime, the clutch
-binding has no consumer, and DirectMusic is recognized but not decoded
-(F08). Everything below is measured data structure; runtime semantics
-are unverified unless noted.
+rows carry no RPM windows and are skipped with a counted warning.
+
+F07-B.2 extends the rig to every `VehicleAudio` car: opponents now
+spawn with the component (the opponent-side cardata record
+`load_opponent` already resolved, same absence policy as the player)
+and each builds its `PlaybackMode::Loop` voices, bounded by
+`MAX_ENGINE_RIGS` 16 per session. Non-player loops are
+`PlaybackSettings::spatial` emitters heard through a single
+`SpatialListener` that `audio_listener` keeps on the active `Camera3d`
+(chase↔free moves the ear the same frame); the player's own rig stays
+non-spatial — the local car anchors the mix. Rodio's spatial panner is
+inverse-square attenuation plus left/right ear pan; the designed
+`ENGINE_SPATIAL_SCALE` 0.25 puts a 4 m opponent at ~full authored
+volume, a 5–15 m pack clearly audible and a 50 m straggler near
+silence — the original's attenuation model and listener placement are
+unrecovered (UNK-25). Retail `london circuit:0 --bot --headless
+--frames 3000`: `aud=0h/18v/0s/18l/17a/8r` — 8 rigs, 18 loops, 17
+audible mid-drive, honest 0 sinks headless. The impact/surface/siren
+families remain unparsed at runtime, the clutch binding has no
+consumer, and DirectMusic is recognized but not decoded (F08).
+Everything below is measured data structure; runtime semantics are
+unverified unless noted.
 
 ## Waves (`aud/aud11`, `aud/aud22`)
 

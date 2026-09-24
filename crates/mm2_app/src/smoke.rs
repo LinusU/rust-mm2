@@ -324,19 +324,29 @@ pub fn headless_smoke(
                 // `--finish` works headless too — the record still
                 // reports the real resolved outcome.
                 crate::results::dev_finish_once,
-                // F07-A.2/B.1: the authored-horn voice path plus the
-                // engine loop rig — the record's `aud=` field reads the
-                // report. No AudioPlugin runs here, so voices spawn and
-                // are counted but never attach a sink (`sunk` stays 0 —
+                // F07-A.2/B.1/B.2: the authored-horn voice path plus
+                // the engine loop rigs and the camera listener — the
+                // record's `aud=` field reads the report. No
+                // AudioPlugin runs here, so voices spawn and are
+                // counted but never attach a sink (`sunk` stays 0 —
                 // honest headless evidence of the request→voice half
                 // only; the mix still computes on the components).
-                crate::audio::horn_input,
-                crate::audio::dev_horn_once,
-                crate::audio::horn_voices,
-                (crate::audio::engine_rigs, crate::audio::engine_drive).chain(),
-                crate::audio::count_sinks,
-                crate::audio::sync_audio_pause,
-                crate::audio::reset_audio_report.run_if(session::unloading),
+                (
+                    crate::audio::horn_input,
+                    crate::audio::dev_horn_once,
+                    crate::audio::horn_voices,
+                    // `.after(drive_session)` — rig/listener commands
+                    // must not queue on cars or cameras
+                    // `despawn_session_entities` just killed this
+                    // update (the unload chain flushes first).
+                    (crate::audio::engine_rigs, crate::audio::engine_drive)
+                        .chain()
+                        .after(session::drive_session),
+                    crate::audio::audio_listener.after(session::drive_session),
+                    crate::audio::count_sinks,
+                    crate::audio::sync_audio_pause,
+                    crate::audio::reset_audio_report.run_if(session::unloading),
+                ),
                 opponents::opponent_drive,
                 // F05-B.6: authored engine smoke — the headless
                 // record's `ptx=` field reads the report. Assets are
@@ -941,12 +951,12 @@ pub fn headless_smoke(
         .filter(|r| r.impacts + r.splats + r.resets > 0)
         .map(|r| format!(" txl={}i/{}s/{}r", r.impacts, r.splats, r.resets))
         .unwrap_or_default();
-    // F07-A.2/B.1 audio evidence: horn presses / voices spawned / sinks
-    // the device attached / engine loops live / loops audible at record
-    // time, plus `+Nd` bound-drops and `+Nx` resolve/decode failures
-    // when nonzero. Activity-gated — an audio-free run stays
-    // bit-identical, and headless `0s` honestly reports that no output
-    // device ever saw the voice.
+    // F07-A.2/B.1/B.2 audio evidence: horn presses / voices spawned /
+    // sinks the device attached / engine loops live / loops audible at
+    // record time / engine rigs built, plus `+Nd` bound-drops and `+Nx`
+    // resolve/decode failures when nonzero. Activity-gated — an
+    // audio-free run stays bit-identical, and headless `0s` honestly
+    // reports that no output device ever saw the voice.
     let aud_detail = world_ecs
         .get_resource::<crate::audio::AudioReport>()
         .filter(|r| r.active())
@@ -962,8 +972,8 @@ pub fn headless_smoke(
                 String::new()
             };
             format!(
-                " aud={}h/{}v/{}s/{}l/{}a{dropped}{failed}",
-                r.horns, r.voices, r.sunk, r.loops, r.audible
+                " aud={}h/{}v/{}s/{}l/{}a/{}r{dropped}{failed}",
+                r.horns, r.voices, r.sunk, r.loops, r.audible, r.rigs
             )
         })
         .unwrap_or_default();

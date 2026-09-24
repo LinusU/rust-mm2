@@ -1099,7 +1099,20 @@ fn main() {
             audio::horn_input.run_if(not(capturing)),
             audio::dev_horn_once,
             audio::horn_voices,
-            (audio::engine_rigs, audio::engine_drive).chain(),
+            // `.after(drive_session)` — rig/listener commands must not
+            // queue on cars or cameras `despawn_session_entities` just
+            // killed in the same update (the unload chain flushes
+            // before this ordering edge).
+            (audio::engine_rigs, audio::engine_drive)
+                .chain()
+                .after(session::drive_session),
+            // F07-B.2: the spatial listener follows whichever camera is
+            // active — after the toggle so a mode switch moves the ear
+            // the same frame, and after the session driver for the
+            // same despawn reason as the rigs.
+            audio::audio_listener
+                .after(camera::toggle_camera)
+                .after(session::drive_session),
             audio::count_sinks,
             audio::sync_audio_pause.after(session::drive_session),
             audio::reset_audio_report.run_if(session::unloading),

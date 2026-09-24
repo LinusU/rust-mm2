@@ -90,8 +90,8 @@ use mm2_game::{
     BreakPartSpec, DamageSignals, DamageSpec, NavGraph, ObjectIdentity, OpponentRoster,
     OpponentRoute, OpponentSpec, ParticipantState, Player, PlayerControl, RaceDefinition,
     RaceProgress, RaceState, RecoveryPolicy, RouteOptions, Session, SessionEntity, SmokePolicy,
-    SparkPolicy, StuckSpec, VehicleBreaks, VehicleDamage, VehicleRecovery, VehicleSmoke,
-    VehicleSparks, VehicleStuck, relative_bearing,
+    SparkPolicy, StuckSpec, VehicleAudio, VehicleBreaks, VehicleDamage, VehicleRecovery,
+    VehicleSmoke, VehicleSparks, VehicleStuck, relative_bearing,
 };
 use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState, vehicle_bundle};
 use tracing::{info, warn};
@@ -773,6 +773,15 @@ pub fn spawn_opponents(
             commands
                 .entity(vehicle)
                 .insert(VehicleStuck::new(StuckSpec::from(s)));
+        }
+        // And the authored audio bindings (F07-B.2): the opponent-side
+        // cardata table — `engine_rigs` resolves its stems through the
+        // session's `WaveBank` into spatial loop voices. Same absence
+        // policy as the player: no record, no component.
+        if let Some(a) = &def.audio {
+            commands
+                .entity(vehicle)
+                .insert(VehicleAudio { spec: a.clone() });
         }
         // And the authored breakaway inventory (F05-B.3): only
         // `dgbangerdata`-backed BREAK chunks, so authoredless cars

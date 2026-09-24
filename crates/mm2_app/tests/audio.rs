@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use bevy::audio::{AudioPlayer, PlaybackMode, PlaybackSettings};
+use bevy::audio::{AudioPlayer, PlaybackMode, PlaybackSettings, SpatialListener};
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 use mm2_app::audio::{
@@ -408,6 +408,22 @@ fn player(app: &mut App) -> Entity {
         .unwrap()
 }
 
+/// Spawn a second drivable car without `PlayerVehicle` — the entity
+/// shape `spawn_opponents` produces for a cardata-backed roster car.
+fn spawn_opponent_car(app: &mut App, rows: &str) -> Entity {
+    let generation = app.world().resource::<Session>().generation();
+    app.world_mut()
+        .spawn((
+            VehicleAudio {
+                spec: engine_car_audio(rows),
+            },
+            VehicleState::new(&VehicleConfig::default()),
+            SessionEntity(generation),
+            Transform::default(),
+        ))
+        .id()
+}
+
 #[test]
 fn engine_rig_spawns_one_loop_voice_per_drivable_row() {
     let dir = engine_dir();
@@ -530,6 +546,164 @@ fn a_car_without_authored_audio_builds_no_rig() {
     assert_eq!(engine_voices(&mut app).len(), 0);
     let r = app.world().resource::<AudioReport>();
     assert_eq!((r.loops, r.voices, r.failed), (0, 0, 0));
+}
+
+// ---------------------------------------------------------------------------
+// F07-B.2: opponent rigs are spatial emitters; the player's rig stays
+// non-spatial; the listener rides the active 3-D camera.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn opponent_rigs_are_spatial_and_the_players_is_not() {
+    let dir = engine_dir();
+    let mut app = engine_app(
+        dir.path(),
+        "EIDLE,0.55,0.835,1,800,2500,7000,0.85,2,1,7000\n",
+    );
+    spawn_opponent_car(
+        &mut app,
+        "EMID,0.55,0.85,500,4000,7000,11000,1,2.25,500,11000\n",
+    );
+    app.update();
+
+    let world = app.world_mut();
+    let mut q = world.query_filtered::<(&PlaybackSettings, &ChildOf), With<EngineVoice>>();
+    let (mut player_cfg, mut opp_cfg) = (None, None);
+    for (settings, child) in q.iter(world) {
+        let slot = if world.get::<PlayerVehicle>(child.parent()).is_some() {
+            &mut player_cfg
+        } else {
+            &mut opp_cfg
+        };
+        *slot = Some((settings.spatial, settings.spatial_scale.is_some()));
+    }
+    assert_eq!(
+        player_cfg,
+        Some((false, false)),
+        "the local car anchors the mix — no spatial attenuation"
+    );
+    assert_eq!(
+        opp_cfg,
+        Some((true, true)),
+        "opponent emitters are spatial with the designed scale"
+    );
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.rigs, r.loops, r.voices), (2, 2, 2));
+    assert_eq!(r.failed, 0);
+}
+
+#[test]
+fn opponent_loops_mix_off_their_own_rpm() {
+    let dir = engine_dir();
+    // Both cars carry only the high-band row: audible at 6000 rpm,
+    // silent at the 900 rpm idle.
+    let row = "EHIGH,0.55,0.91,3000,8000,15000,15000,0.65,2.25,3000,12000\n";
+    let mut app = engine_app(dir.path(), row);
+    let opponent = spawn_opponent_car(&mut app, row);
+    app.update();
+
+    let mut voices = app.world_mut().query::<(&EngineVoice, &ChildOf)>();
+    let mixes: Vec<bool> = voices
+        .iter(app.world())
+        .map(|(v, c)| (world_is_player(app.world(), c.parent()), v.mix.volume > 0.0))
+        .map(|(_, audible)| audible)
+        .collect();
+    assert_eq!(mixes, [false, false], "both cars idle below the band");
+
+    app.world_mut()
+        .get_mut::<VehicleState>(opponent)
+        .unwrap()
+        .rpm = 6000.0;
+    app.update();
+
+    let mut voices = app.world_mut().query::<(&EngineVoice, &ChildOf)>();
+    let mut seen = (false, false);
+    for (v, c) in voices.iter(app.world()) {
+        if world_is_player(app.world(), c.parent()) {
+            seen.0 = v.mix.volume > 0.0;
+        } else {
+            seen.1 = v.mix.volume > 0.0;
+        }
+    }
+    assert_eq!(
+        seen,
+        (false, true),
+        "the opponent's band opened off its own rpm while the player idles"
+    );
+    assert_eq!(app.world().resource::<AudioReport>().audible, 1);
+}
+
+fn world_is_player(world: &World, entity: Entity) -> bool {
+    world.get::<PlayerVehicle>(entity).is_some()
+}
+
+#[test]
+fn the_rig_bound_caps_silent_cars() {
+    let dir = engine_dir();
+    let mut app = engine_app(
+        dir.path(),
+        "EIDLE,0.55,0.835,1,800,2500,7000,0.85,2,1,7000\n",
+    );
+    // The player rig plus twenty opponents: sixteen rigs build, five
+    // cars report the bound and stay silent — once, not every frame.
+    for _ in 0..20 {
+        spawn_opponent_car(&mut app, "EIDLE,0.55,0.835,1,800,2500,7000,0.85,2,1,7000\n");
+    }
+    app.update();
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(r.rigs, 16);
+    assert_eq!(r.dropped, 5);
+    assert_eq!(r.loops, 16);
+
+    app.update();
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(
+        (r.rigs, r.dropped, r.loops),
+        (16, 5, 16),
+        "no re-warn churn"
+    );
+}
+
+#[test]
+fn the_listener_follows_the_active_3d_camera() {
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
+    app.add_systems(Update, audio::audio_listener);
+    let chase = app
+        .world_mut()
+        .spawn((
+            Camera3d::default(),
+            Camera {
+                is_active: true,
+                ..default()
+            },
+        ))
+        .id();
+    let free = app
+        .world_mut()
+        .spawn((
+            Camera3d::default(),
+            Camera {
+                is_active: false,
+                ..default()
+            },
+        ))
+        .id();
+
+    app.update();
+    assert!(
+        app.world().get::<SpatialListener>(chase).is_some(),
+        "the active camera is the ear"
+    );
+    assert!(app.world().get::<SpatialListener>(free).is_none());
+
+    // A mode switch (the `C` toggle's effect on `Camera::is_active`)
+    // moves the listener the same frame rather than doubling it.
+    app.world_mut().get_mut::<Camera>(chase).unwrap().is_active = false;
+    app.world_mut().get_mut::<Camera>(free).unwrap().is_active = true;
+    app.update();
+    assert!(app.world().get::<SpatialListener>(chase).is_none());
+    assert!(app.world().get::<SpatialListener>(free).is_some());
 }
 
 #[test]

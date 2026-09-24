@@ -20,16 +20,27 @@
 //! plays non-spatial at the authored volume.
 //!
 //! F07-B.1 adds the engine rig: each drivable `Engine wave name` row
-//! spawns one looping voice as a child of the player vehicle, and
+//! spawns one looping voice as a child of the vehicle, and
 //! [`engine_drive`] re-mixes every loop's volume/pitch from the sim's
 //! engine RPM through the authored fade windows (`mm2_game`'s
 //! [`EngineLoopSpec`] — the interpretation is inferred, UNK-25).
-//! Voices are children so they despawn with their car and already sit
-//! at its transform for the spatial leg; they loop at volume 0 outside
-//! their RPM band rather than attaching/detaching. Impacts, skids,
-//! opponent/ambient engines and the spatial mix remain F07-B work;
-//! which side's cardata a horn should read for opponents, the clutch
-//! sample's trigger, `flags` and the aud11 variants remain UNK-25.
+//! Voices are children so they despawn with their car and sit at its
+//! transform; they loop at volume 0 outside their RPM band rather than
+//! attaching/detaching.
+//!
+//! F07-B.2 extends the rig to every `VehicleAudio` car (opponents now
+//! spawn with the component) and puts the mix in space: non-player
+//! loops are [`PlaybackSettings::spatial`] emitters heard through a
+//! single [`SpatialListener`] that [`audio_listener`] keeps on the
+//! active 3-D camera — chase, free or cockpit all hear the field from
+//! their own viewpoint. The player's own rig stays non-spatial: the
+//! local car *is* the listener's anchor, so its engine does not fade
+//! with camera distance (designed policy, DSN-37 — Bevy/rodio spatial
+//! is inverse-square plus stereo panning, scaled by
+//! [`ENGINE_SPATIAL_SCALE`]). Impacts, skids, ambient engines and the
+//! clutch sample's trigger remain F07-B work; which side's cardata a
+//! horn should read for opponents, `flags` and the aud11 variants
+//! remain UNK-25.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -37,7 +48,8 @@ use std::time::Duration;
 
 use bevy::audio::{
     AudioPlayer, AudioSink, AudioSinkPlayback, ChannelCount, Decodable, PlaybackMode,
-    PlaybackSettings, Sample, SampleRate, Source, SpatialAudioSink, Volume,
+    PlaybackSettings, Sample, SampleRate, Source, SpatialAudioSink, SpatialListener, SpatialScale,
+    Volume,
 };
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
@@ -64,6 +76,17 @@ const MAX_HORN_VOICES: usize = 8;
 /// authored rows; the cap keeps a malformed giant table from flooding
 /// the mixer (designed bound, same contract as `MAX_HORN_VOICES`).
 const MAX_ENGINE_VOICES: usize = 8;
+/// Engine rigs one session will build — retail rosters top out around
+/// a dozen participants; the cap bounds total voice count against a
+/// mod roster fielding hundreds of `VehicleAudio` cars (designed
+/// bound, F07-B.2). Cars past it report once and stay silent.
+const MAX_ENGINE_RIGS: usize = 16;
+/// Position scale applied to spatial engine emitters (F07-B.2,
+/// designed — DSN-37). Rodio's spatial panner attenuates per ear by
+/// `min(1, 1/d²)` over the scaled distance, so 0.25 reads a car 4 m
+/// off at ~full authored volume, a racing pack (5–15 m) clearly
+/// audible, and a 50 m straggler near silence.
+const ENGINE_SPATIAL_SCALE: f32 = 0.25;
 
 /// A decoded, playback-ready wave: normalized interleaved f32 samples
 /// plus the authored rate/channel shape. Produced only by
@@ -332,12 +355,14 @@ pub struct AudioReport {
     /// Engine loops whose last computed mix is audible — a gauge
     /// rewritten every drive pass, not a cumulative count.
     pub audible: u64,
+    /// Engine rigs built this session (one per `VehicleAudio` car).
+    pub rigs: u64,
 }
 
 impl AudioReport {
     /// Any activity worth reporting (`aud=` stays absent otherwise).
     pub fn active(&self) -> bool {
-        self.horns + self.voices + self.dropped + self.failed + self.loops > 0
+        self.horns + self.voices + self.dropped + self.failed + self.loops + self.rigs > 0
     }
 
     pub fn reset(&mut self) {
@@ -454,14 +479,17 @@ fn horn_volume(v: f32) -> f32 {
     if v.is_finite() && v >= 0.0 { v } else { 1.0 }
 }
 
-/// Build the local player's engine rig: one [`PlaybackMode::Loop`]
-/// voice per `Engine wave name` row that resolves both a fade-window
-/// spec and a wave, parented to the car so it despawns with it and
-/// sits at its transform for the spatial leg. Player-only — opponent
-/// and ambient engines need the spatial+listener leg before more
-/// voices are worth spawning (F07-B). A row that cannot drive (no
+/// Build engine rigs on every `VehicleAudio` car: one
+/// [`PlaybackMode::Loop`] voice per `Engine wave name` row that
+/// resolves both a fade-window spec and a wave, parented to the car so
+/// it despawns with it and rides its transform as the emitter.
+/// Non-player rigs (race opponents — ambient traffic carries no
+/// `VehicleAudio`) are spatial emitters heard through the camera
+/// listener; the player's own rig stays non-spatial because the local
+/// car anchors the mix (DSN-37). A row that cannot drive (no
 /// fade-window schema) or cannot decode is counted and warned, never
-/// silently skipped.
+/// silently skipped; cars past [`MAX_ENGINE_RIGS`] report once and
+/// stay silent rather than flooding the mixer.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)] // Bevy system signature — the filtered query is the system's real input
 pub fn engine_rigs(
     mut commands: Commands,
@@ -470,7 +498,8 @@ pub fn engine_rigs(
     bank: Option<ResMut<WaveBank>>,
     mut waves: ResMut<Assets<PcmAudio>>,
     mut report: ResMut<AudioReport>,
-    cars: Query<(Entity, &VehicleAudio), (With<PlayerVehicle>, Without<EngineRig>)>,
+    cars: Query<(Entity, &VehicleAudio, Has<PlayerVehicle>), Without<EngineRig>>,
+    rigs: Query<(), With<EngineRig>>,
 ) {
     if cars.is_empty() {
         return;
@@ -480,7 +509,14 @@ pub fn engine_rigs(
         // frame rather than stamping a half-built rig.
         return;
     };
-    for (car, audio) in &cars {
+    let mut live_rigs = rigs.iter().count();
+    for (car, audio, player) in &cars {
+        if live_rigs >= MAX_ENGINE_RIGS {
+            report.dropped += 1;
+            warn!("audio: engine rig bound reached, {car:?} stays silent");
+            commands.entity(car).insert(EngineRig);
+            continue;
+        }
         let mut spawned = 0usize;
         for (i, row) in audio.spec.engine_samples.iter().enumerate() {
             if spawned >= MAX_ENGINE_VOICES {
@@ -520,6 +556,9 @@ pub fn engine_rigs(
                             // real mix — a sink attaching between spawn
                             // and the first drive tick plays nothing.
                             volume: Volume::Linear(0.0),
+                            spatial: !player,
+                            spatial_scale: (!player)
+                                .then(|| SpatialScale::new(ENGINE_SPATIAL_SCALE)),
                             ..Default::default()
                         },
                     ));
@@ -534,21 +573,29 @@ pub fn engine_rigs(
             }
         }
         commands.entity(car).insert(EngineRig);
+        live_rigs += 1;
+        report.rigs += 1;
     }
 }
 
 /// Re-mix every engine loop from its parent vehicle's RPM and apply it
-/// to the sink once the device attaches one. Ungated by phase: voices
-/// only exist inside a live session, `Paused` sinks are held by
+/// to whichever sink the device attached (plain for the player rig,
+/// [`SpatialAudioSink`] for opponent emitters). Ungated by phase:
+/// voices only exist inside a live session, `Paused` sinks are held by
 /// [`sync_audio_pause`], and `Countdown`/`Results` legitimately keep
-/// the engine sounding — the car is live, just not drivable.
+/// the engines sounding — the cars are live, just not drivable.
 pub fn engine_drive(
     mut report: ResMut<AudioReport>,
     cars: Query<&VehicleState>,
-    mut voices: Query<(&ChildOf, &mut EngineVoice, Option<&mut AudioSink>)>,
+    mut voices: Query<(
+        &ChildOf,
+        &mut EngineVoice,
+        Option<&mut AudioSink>,
+        Option<&mut SpatialAudioSink>,
+    )>,
 ) {
     report.audible = 0;
-    for (parent, mut voice, sink) in &mut voices {
+    for (parent, mut voice, sink, spatial) in &mut voices {
         let Ok(state) = cars.get(parent.parent()) else {
             // The car despawned and the cascade has not flushed — the
             // voice dies with it; leave the last computed mix.
@@ -561,6 +608,37 @@ pub fn engine_drive(
         if let Some(mut sink) = sink {
             sink.set_volume(Volume::Linear(voice.mix.volume));
             sink.set_speed(voice.mix.speed);
+        }
+        if let Some(mut sink) = spatial {
+            sink.set_volume(Volume::Linear(voice.mix.volume));
+            sink.set_speed(voice.mix.speed);
+        }
+    }
+}
+
+/// Keep the mixer's ear on the active 3-D camera (F07-B.2, spec req
+/// 5): `toggle_camera` flips `Camera::is_active` between the session's
+/// chase and free cameras, and Bevy wants exactly one
+/// [`SpatialListener`] — this inserts it on the active camera and
+/// strips it from the inactive one, so a mode switch moves the ear
+/// with the view rather than doubling listeners or leaving it on a
+/// camera the session is about to despawn. `Camera3d`-filtered so a
+/// menu `Camera2d` surviving a transition frame can't become the ear
+/// (the same guard `apply_city_pvs` applies to source rooms). With no
+/// active 3-D camera the field simply has no listener.
+pub fn audio_listener(
+    mut commands: Commands,
+    cams: Query<(Entity, &Camera, Has<SpatialListener>), With<Camera3d>>,
+) {
+    for (entity, cam, listening) in &cams {
+        match (cam.is_active, listening) {
+            (true, false) => {
+                commands.entity(entity).insert(SpatialListener::default());
+            }
+            (false, true) => {
+                commands.entity(entity).remove::<SpatialListener>();
+            }
+            _ => {}
         }
     }
 }
