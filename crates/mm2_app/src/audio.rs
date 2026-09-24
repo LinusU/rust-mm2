@@ -65,9 +65,19 @@
 //! [`tire_slippage`] (designed quantity — longitudinal over-demand or
 //! lateral utilization, UNK-25) and `|forward_speed|` respectively.
 //! A held brake at rest and airborne wheels resolve nothing
-//! (F07-AC03). Ambient engines, the clutch trigger, siren programs
-//! and the scrape semantics remain F07-B/C work; the opponent-side
-//! tables' divergent values and the `flags` word remain UNK-25.
+//! (F07-AC03).
+//!
+//! F07-B.5 voices the authored clutch sample: [`clutch_voices`] keeps a
+//! [`GearWatch`] of the last `(gear, direction)` on every
+//! `VehicleAudio` car and plays the cardata `clutch wave name` at
+//! `clutch volume` when the committed pair changes — retail cars
+//! author `REVERSE`, the trucks `TRUCKGEARSHIFT` (which transitions
+//! the original voices is unverified, UNK-25 — the designed trigger is
+//! one one-shot per committed drivetrain change, so a multi-gear jump
+//! is a single actuation and the first observed state is not a shift).
+//! Ambient engines, siren programs and the scrape semantics remain
+//! F07-B/C work; the opponent-side tables' divergent values and the
+//! `flags` word remain UNK-25.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -92,7 +102,7 @@ use mm2_game::{
     Player, PlayerControl, PlayerVehicle, Session, SessionEntity, SessionPhase, SkidUnit,
     SurfaceMaterial, SurfaceSpec, VehicleAudio, impact_category, pick_impact, tire_slippage,
 };
-use mm2_vehicle::{Vehicle, VehicleState};
+use mm2_vehicle::{DriveDirection, Vehicle, VehicleState};
 
 /// Decode bound: samples (per channel-interleaved count) beyond this
 /// are refused — retail waves top out under ~2.5 M samples; the cap
@@ -150,6 +160,11 @@ const SURFACE_DWELL: u8 = 4;
 /// `min surface volume` is the moving car's floor, not a parked
 /// drone). Matches the sim's low-speed clamp epsilon.
 const ROLL_MIN_SPEED: f32 = 0.5;
+/// Live one-shot clutch voices the mixer will hold at once — a field
+/// of cars shifting in the same frame past this is counted and dropped
+/// rather than stacking voices (designed bound, same contract as
+/// [`MAX_HORN_VOICES`]).
+const MAX_CLUTCH_VOICES: usize = 8;
 
 /// A decoded, playback-ready wave: normalized interleaved f32 samples
 /// plus the authored rate/channel shape. Produced only by
@@ -469,6 +484,9 @@ pub enum VoiceKind {
     Skid,
     /// One `surface wave` rolling loop of a surface rig (F07-B.4).
     Rolling,
+    /// One `clutch wave name` one-shot a committed gear/direction
+    /// change spawned (F07-B.5).
+    Clutch,
 }
 
 /// Marker on a vehicle whose engine rig was built — set once whether
@@ -557,6 +575,21 @@ pub enum SurfaceRole {
     Rolling,
 }
 
+/// The last drivetrain state [`clutch_voices`] observed on this car —
+/// the shift trigger's dedup. A voice is earned only when the
+/// committed `(gear, direction)` pair differs from the cached one;
+/// first sight inserts the watch without a voice (a spawned car has
+/// not "shifted into" its initial gear), and the watch updates even
+/// while not `Playing` so a countdown or reset change never flushes
+/// as a stale clunk.
+#[derive(Component)]
+pub struct GearWatch {
+    /// `VehicleState::gear` at the last observation.
+    gear: usize,
+    /// `VehicleState::direction` at the last observation.
+    direction: DriveDirection,
+}
+
 /// A horn actuation intent — written by [`horn_input`] (live input) and
 /// `dev_horn_once` (`--horn` evidence runs, where capture freezes input
 /// upstream), consumed by [`horn_voices`]. One message = one press.
@@ -591,6 +624,9 @@ pub struct AudioReport {
     /// Rolling-loop voices whose last computed mix is audible — the
     /// same gauge for the rolling half.
     pub rolling: u64,
+    /// Clutch voices spawned this session — a subset of `voices`
+    /// (F07-B.5).
+    pub clutch: u64,
 }
 
 impl AudioReport {
@@ -604,6 +640,7 @@ impl AudioReport {
             + self.rigs
             + self.skids
             + self.rolling
+            + self.clutch
             > 0
     }
 
@@ -699,7 +736,7 @@ pub fn horn_voices(
                     AudioPlayer(handle),
                     PlaybackSettings {
                         mode: PlaybackMode::Despawn,
-                        volume: Volume::Linear(horn_volume(car.spec.horn.volume)),
+                        volume: Volume::Linear(authored_volume(car.spec.horn.volume)),
                         ..Default::default()
                     },
                 ));
@@ -717,7 +754,7 @@ pub fn horn_voices(
 /// Authored volume sanitized for the mixer — a non-finite or negative
 /// cardata value binds 1.0 rather than poisoning the sink (the parse
 /// anomaly is already surfaced at load; designed guard).
-fn horn_volume(v: f32) -> f32 {
+fn authored_volume(v: f32) -> f32 {
     if v.is_finite() && v >= 0.0 { v } else { 1.0 }
 }
 
@@ -872,6 +909,113 @@ pub fn impact_voices(
                     report.failed += 1;
                     warn!("audio: {e}");
                 }
+            }
+        }
+    }
+}
+
+/// Committed drivetrain change → authored clutch one-shot (F07-B.5,
+/// spec req 2's shift/reverse leg). Every `VehicleAudio` car carries a
+/// [`GearWatch`] of the last observed `(gear, direction)`; a differing
+/// pair plays the cardata `clutch wave name` at `clutch volume` —
+/// retail's shift/reverse clunk (`REVERSE` on the cars,
+/// `TRUCKGEARSHIFT` on the trucks). Which exact transitions the
+/// original voices is unverified (UNK-25); the designed trigger is one
+/// one-shot per committed change — a multi-gear jump the selector
+/// takes in one step is a single clutch actuation, first sight is not
+/// a shift, and the watch updates while not `Playing` so a buffered
+/// change never flushes as a stale clunk (the `impact_voices` drain
+/// contract applied to state rather than a message stream).
+///
+/// A remote participant's clutch belongs to its own client — watched
+/// but never voiced, the same skip every F05/F07 consumer applies. A
+/// sentinel or empty clutch name is authored silence, not a failure;
+/// a name that resolves no wave counts `failed` per change (the same
+/// per-event semantics horn presses and impact picks apply — a mod's
+/// broken binding warns on each shift rather than once at load).
+/// Voices are `PlaybackMode::Despawn` children of the car — they ride
+/// its transform for the clip and sweep with the session; non-local
+/// cars emit spatially under [`ENGINE_SPATIAL_SCALE`], the local
+/// player's stays non-spatial (DSN-37). Live voices bound at
+/// [`MAX_CLUTCH_VOICES`].
+#[allow(clippy::too_many_arguments, clippy::type_complexity)] // Bevy system — the borrows are the contract.
+pub fn clutch_voices(
+    mut commands: Commands,
+    session: Res<Session>,
+    vfs: Option<Res<Mm2Vfs>>,
+    mut bank: Option<ResMut<WaveBank>>,
+    mut waves: ResMut<Assets<PcmAudio>>,
+    mut report: ResMut<AudioReport>,
+    mut cars: Query<(
+        Entity,
+        &VehicleAudio,
+        &VehicleState,
+        Option<&Player>,
+        Option<&mut GearWatch>,
+    )>,
+    voices: Query<&AudioVoice>,
+) {
+    let generation = session.generation();
+    let playing = session.is_playing();
+    let mut live = voices
+        .iter()
+        .filter(|v| v.kind == VoiceKind::Clutch)
+        .count();
+    for (car, audio, state, player, watch) in &mut cars {
+        let Some(mut w) = watch else {
+            commands.entity(car).insert(GearWatch {
+                gear: state.gear,
+                direction: state.direction,
+            });
+            continue;
+        };
+        if w.gear == state.gear && w.direction == state.direction {
+            continue;
+        }
+        w.gear = state.gear;
+        w.direction = state.direction;
+        if !playing
+            || player.is_some_and(|p| p.control == PlayerControl::Remote)
+            || cardata::is_sample_sentinel(&audio.spec.clutch.name)
+        {
+            continue;
+        }
+        let (Some(vfs), Some(bank)) = (vfs.as_deref(), bank.as_deref_mut()) else {
+            // No mounted content or no session bank: the shift was
+            // observed, nothing can resolve — degrades to silence like
+            // an absent authored record.
+            continue;
+        };
+        if live >= MAX_CLUTCH_VOICES {
+            report.dropped += 1;
+            continue;
+        }
+        match bank.load(&vfs.0, &mut waves, &audio.spec.clutch.name) {
+            Ok(handle) => {
+                let local = player.is_some_and(|p| p.control == PlayerControl::Local);
+                commands.spawn((
+                    AudioVoice {
+                        kind: VoiceKind::Clutch,
+                    },
+                    SessionEntity(generation),
+                    ChildOf(car),
+                    Transform::default(),
+                    AudioPlayer(handle),
+                    PlaybackSettings {
+                        mode: PlaybackMode::Despawn,
+                        volume: Volume::Linear(authored_volume(audio.spec.clutch.volume)),
+                        spatial: !local,
+                        spatial_scale: (!local).then(|| SpatialScale::new(ENGINE_SPATIAL_SCALE)),
+                        ..Default::default()
+                    },
+                ));
+                report.voices += 1;
+                report.clutch += 1;
+                live += 1;
+            }
+            Err(e) => {
+                report.failed += 1;
+                warn!("audio: {e}");
             }
         }
     }

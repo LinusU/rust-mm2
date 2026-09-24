@@ -49,8 +49,27 @@ F15-B remainder (`unkFlag`/`cornerBrakingThreshold`/
 F11-C remainder, F16-C's AC01
 process-level leg, F10-B's remaining collision-fidelity
 scope, F13-C, the F18-A remainder, or the F07-B remainder
-(ambient engines/clutch/siren/scrape + audible
-evidence))** — the latest iteration landed F07-B.4: surface
+(ambient engines/siren/scrape + audible
+evidence))** — the latest iteration landed F07-B.5: the
+authored clutch sample on committed drivetrain changes —
+`clutch_voices` keeps a `GearWatch` of the last
+`(gear, direction)` on every `VehicleAudio` car and plays
+the cardata `clutch wave name` at `clutch volume` when the
+pair changes (retail cars author `REVERSE`, the trucks
+`TRUCKGEARSHIFT`; designed trigger — one one-shot per
+committed change, a multi-gear jump is one actuation,
+first sight is not a shift, remote cars and sentinel
+names stay silent, bounded `MAX_CLUTCH_VOICES` 8,
+`PlaybackMode::Despawn` children of the car, spatial for
+non-local, UNK-25). Retail `london circuit:0 --bot`:
+`aud=0h/78v/0s/18l/17a/8r/12i/8c/8k/1g+438d` — 8 clutch
+voices spawned (`REVERSE` resolved for the whole 8-car
+field, zero `+x` failures); the `+d` growth over B.4's
++125 is honest bound-refusal reporting — headless
+one-shots never despawn, so every committed shift past
+the 8-voice bound counts once (the same semantics the
+impact bound reports). Before that the latest iteration
+landed F07-B.4: surface
 skid/rolling loop voices off grounded wheel contacts — the
 session loads the player-side `default_surfacedry.csv` into
 `SurfaceAudio` (absent/malformed → no resource), each wheel's

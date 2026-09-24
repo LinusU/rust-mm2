@@ -10,12 +10,12 @@
 
 use std::path::Path;
 
-use bevy::audio::{AudioPlayer, PlaybackMode, PlaybackSettings, SpatialListener};
+use bevy::audio::{AudioPlayer, PlaybackMode, PlaybackSettings, SpatialListener, Volume};
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 use mm2_app::audio::{
-    self, AudioReport, AudioVoice, EngineVoice, HornRequest, ImpactAudio, PcmAudio, SurfaceAudio,
-    SurfaceRig, SurfaceRole, SurfaceVoice, VoiceKind, WaveBank, decode_wave,
+    self, AudioReport, AudioVoice, EngineVoice, GearWatch, HornRequest, ImpactAudio, PcmAudio,
+    SurfaceAudio, SurfaceRig, SurfaceRole, SurfaceVoice, VoiceKind, WaveBank, decode_wave,
 };
 use mm2_assets::Vfs;
 use mm2_content::SurfaceTables;
@@ -26,7 +26,7 @@ use mm2_game::{
     ObjectIdentity, Player, PlayerControl, PlayerVehicle, Session, SessionConfig, SessionEntity,
     SessionPhase, SurfaceMaterial, SurfaceState, VehicleAudio, despawn_session_entities,
 };
-use mm2_vehicle::{VehicleConfig, VehicleState, vehicle_bundle};
+use mm2_vehicle::{DriveDirection, VehicleConfig, VehicleState, vehicle_bundle};
 
 /// A minimal 16-bit mono PCM RIFF/WAVE at `rate` with `frames` frames.
 fn pcm_wav(rate: u32, frames: usize) -> Vec<u8> {
@@ -1491,6 +1491,310 @@ fn teardown_sweeps_surface_voices_with_the_session() {
 
     // The production teardown sweeps `SessionEntity` roots on Unloading
     // — every surface voice is one (AC06's restart leg).
+    app.world_mut()
+        .run_system_once(despawn_session_entities)
+        .unwrap();
+    app.update();
+    assert_eq!(voices(&mut app), 0);
+}
+
+// ---------------------------------------------------------------------------
+// F07-B.5: committed gear/direction changes → authored clutch one-shot.
+// `GearWatch` dedups the trigger: first sight is not a shift, one voice
+// per committed `(gear, direction)` change, remote/sentinel legs stay
+// silent.
+// ---------------------------------------------------------------------------
+
+/// A fixture install with the one wave the clutch binding names.
+fn clutch_dir() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "aud/aud22/clutch/gearclunk.22k.wav",
+        &pcm_wav(22050, 220),
+    );
+    tmp
+}
+
+/// A cardata horn row authoring clutch `stem` at `vol` — no engine
+/// rows, so the parsed table carries only the horn + clutch bindings.
+fn clutch_car_audio(stem: &str, vol: f32) -> CarAudio {
+    let csv = format!(
+        "Horn wave name,Horn volume,flags,Num Engine Samples,clutch wave name,clutch volume\nTESTHORN,0.9,0,0,{stem},{vol}\n"
+    );
+    CarAudio::parse(csv.as_bytes()).unwrap()
+}
+
+/// The audio slice of the production app for clutch voices: a
+/// `Playing` session, the mounted fixture VFS, the session `WaveBank`
+/// and `clutch_voices` on Update like the live schedules wire it.
+fn clutch_app(dir: &Path) -> App {
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(dir, 0).unwrap();
+    let bank = WaveBank::index(&vfs);
+
+    let mut session = Session::new();
+    session.begin(SessionConfig::default()).unwrap();
+    session.transition(SessionPhase::Ready).unwrap();
+    session.transition(SessionPhase::Playing).unwrap();
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_plugins(AssetPlugin::default())
+        .insert_resource(session)
+        .insert_resource(Mm2Vfs(vfs))
+        .insert_resource(bank)
+        .init_resource::<Assets<PcmAudio>>()
+        .init_resource::<AudioReport>()
+        .add_systems(Update, audio::clutch_voices);
+    app.finish();
+    app.cleanup();
+    app
+}
+
+/// A drivable car like `spawn_test_car` stamps, plus the cardata
+/// binding and session ownership `load_session_world` adds.
+fn clutch_car(app: &mut App, control: PlayerControl, spec: CarAudio) -> Entity {
+    let generation = app.world().resource::<Session>().generation();
+    let (_, car) = spawn_test_car(app, control, 1300.0);
+    app.world_mut()
+        .entity_mut(car)
+        .insert((VehicleAudio { spec }, SessionEntity(generation)));
+    car
+}
+
+/// `(spatial, parent)` for every live clutch voice.
+fn clutch_voice_list(app: &mut App) -> Vec<(bool, Entity)> {
+    let world = app.world_mut();
+    let mut q = world.query::<(&AudioVoice, &PlaybackSettings, &ChildOf)>();
+    let mut out: Vec<_> = q
+        .iter(world)
+        .filter(|(v, ..)| v.kind == VoiceKind::Clutch)
+        .map(|(_, s, c)| (s.spatial, c.parent()))
+        .collect();
+    out.sort_by_key(|(_, p)| p.index());
+    out
+}
+
+#[test]
+fn a_gear_change_voices_the_authored_clutch() {
+    let dir = clutch_dir();
+    let mut app = clutch_app(dir.path());
+    let car = clutch_car(
+        &mut app,
+        PlayerControl::Local,
+        clutch_car_audio("gearclunk", 0.7),
+    );
+    let ai = clutch_car(
+        &mut app,
+        PlayerControl::Ai,
+        clutch_car_audio("gearclunk", 0.7),
+    );
+
+    // First sight is not a shift — the watch lands silently.
+    app.update();
+    assert!(app.world().get::<GearWatch>(car).is_some());
+    assert_eq!(voices(&mut app), 0);
+
+    app.world_mut().get_mut::<VehicleState>(car).unwrap().gear = 1;
+    app.world_mut().get_mut::<VehicleState>(ai).unwrap().gear = 1;
+    app.update();
+
+    // Two voices, one per car; the local player's anchors the mix
+    // non-spatially, the AI car's is a spatial emitter (DSN-37).
+    let mut list = clutch_voice_list(&mut app);
+    list.sort_by_key(|(_, p)| *p != car);
+    assert_eq!(list, [(false, car), (true, ai)]);
+    let world = app.world_mut();
+    let (kind, player, settings, session_entity) = world
+        .query::<(
+            &AudioVoice,
+            &AudioPlayer<PcmAudio>,
+            &PlaybackSettings,
+            &SessionEntity,
+        )>()
+        .iter(world)
+        .next()
+        .map(|(v, p, s, e)| (v.kind, p.0.clone(), *s, e.0))
+        .unwrap();
+    assert_eq!(kind, VoiceKind::Clutch);
+    assert!(matches!(settings.mode, PlaybackMode::Despawn));
+    assert_eq!(settings.volume, Volume::Linear(0.7));
+    assert_eq!(
+        session_entity,
+        app.world().resource::<Session>().generation()
+    );
+    let waves = app.world().resource::<Assets<PcmAudio>>();
+    assert_eq!(waves.get(&player).unwrap().sample_rate.get(), 22050);
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.clutch, r.voices, r.failed), (2, 2, 0));
+}
+
+#[test]
+fn a_multi_gear_jump_and_an_unchanged_gear_do_not_retrigger() {
+    let dir = clutch_dir();
+    let mut app = clutch_app(dir.path());
+    let car = clutch_car(
+        &mut app,
+        PlayerControl::Local,
+        clutch_car_audio("gearclunk", 0.7),
+    );
+    app.update();
+
+    // The selector committing 0 → 3 in one step is a single clutch
+    // actuation — one voice, not three.
+    app.world_mut().get_mut::<VehicleState>(car).unwrap().gear = 3;
+    app.update();
+    assert_eq!(clutch_voice_list(&mut app).len(), 1);
+
+    // Holding the gear produces nothing further.
+    app.update();
+    assert_eq!(clutch_voice_list(&mut app).len(), 1);
+    assert_eq!(app.world().resource::<AudioReport>().clutch, 1);
+}
+
+#[test]
+fn a_reverse_engagement_voices_the_clutch() {
+    let dir = clutch_dir();
+    let mut app = clutch_app(dir.path());
+    let car = clutch_car(
+        &mut app,
+        PlayerControl::Local,
+        clutch_car_audio("gearclunk", 0.7),
+    );
+    app.update();
+
+    app.world_mut()
+        .get_mut::<VehicleState>(car)
+        .unwrap()
+        .direction = DriveDirection::Reverse;
+    app.update();
+    assert_eq!(clutch_voice_list(&mut app).len(), 1);
+
+    // Back out of reverse is a second committed change.
+    app.world_mut()
+        .get_mut::<VehicleState>(car)
+        .unwrap()
+        .direction = DriveDirection::Forward;
+    app.update();
+    assert_eq!(clutch_voice_list(&mut app).len(), 2);
+    assert_eq!(app.world().resource::<AudioReport>().clutch, 2);
+}
+
+#[test]
+fn a_remote_car_shifts_silently() {
+    let dir = clutch_dir();
+    let mut app = clutch_app(dir.path());
+    let car = clutch_car(
+        &mut app,
+        PlayerControl::Remote,
+        clutch_car_audio("gearclunk", 0.7),
+    );
+    app.update();
+
+    app.world_mut().get_mut::<VehicleState>(car).unwrap().gear = 1;
+    app.update();
+    // The remote car's audio belongs to its own client — the watch
+    // still advanced, so no voice flushes later either.
+    assert_eq!(voices(&mut app), 0);
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.clutch, r.failed), (0, 0));
+}
+
+#[test]
+fn a_sentinel_clutch_is_silence_and_a_missing_wave_reports() {
+    let dir = clutch_dir();
+    let mut app = clutch_app(dir.path());
+    let quiet = clutch_car(
+        &mut app,
+        PlayerControl::Local,
+        clutch_car_audio("NOSOUND", 0.7),
+    );
+    let broken = clutch_car(
+        &mut app,
+        PlayerControl::Local,
+        clutch_car_audio("nosuchstem", 0.7),
+    );
+    app.update();
+
+    for car in [quiet, broken] {
+        app.world_mut().get_mut::<VehicleState>(car).unwrap().gear = 1;
+    }
+    app.update();
+    // Authored silence is not a failure; an unresolvable stem counts
+    // once per change.
+    assert_eq!(voices(&mut app), 0);
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.clutch, r.voices, r.failed), (0, 0, 1));
+}
+
+#[test]
+fn the_clutch_voice_bound_caps_a_field_shift() {
+    let dir = clutch_dir();
+    let mut app = clutch_app(dir.path());
+    let mut cars = Vec::new();
+    for _ in 0..10 {
+        cars.push(clutch_car(
+            &mut app,
+            PlayerControl::Ai,
+            clutch_car_audio("gearclunk", 0.7),
+        ));
+    }
+    app.update(); // watches land
+    for car in cars {
+        app.world_mut().get_mut::<VehicleState>(car).unwrap().gear = 1;
+    }
+    app.update();
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(r.clutch, 8, "MAX_CLUTCH_VOICES bounds the burst");
+    assert_eq!(r.dropped, 2);
+    assert_eq!(clutch_voice_list(&mut app).len(), 8);
+}
+
+#[test]
+fn a_paused_shift_is_observed_not_voiced() {
+    let dir = clutch_dir();
+    let mut app = clutch_app(dir.path());
+    let car = clutch_car(
+        &mut app,
+        PlayerControl::Local,
+        clutch_car_audio("gearclunk", 0.7),
+    );
+    app.update();
+
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Paused)
+        .unwrap();
+    app.world_mut().get_mut::<VehicleState>(car).unwrap().gear = 1;
+    app.update();
+    assert_eq!(voices(&mut app), 0, "a paused session voices nothing");
+
+    // Resuming does not flush the buffered change as a stale clunk —
+    // the watch already committed it.
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Playing)
+        .unwrap();
+    app.update();
+    assert_eq!(voices(&mut app), 0);
+    assert_eq!(app.world().resource::<AudioReport>().clutch, 0);
+}
+
+#[test]
+fn teardown_sweeps_clutch_voices_with_the_session() {
+    let dir = clutch_dir();
+    let mut app = clutch_app(dir.path());
+    let car = clutch_car(
+        &mut app,
+        PlayerControl::Local,
+        clutch_car_audio("gearclunk", 0.7),
+    );
+    app.update();
+    app.world_mut().get_mut::<VehicleState>(car).unwrap().gear = 1;
+    app.update();
+    assert_eq!(clutch_voice_list(&mut app).len(), 1);
+
     app.world_mut()
         .run_system_once(despawn_session_entities)
         .unwrap();
