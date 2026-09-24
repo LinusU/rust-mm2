@@ -335,6 +335,13 @@ pub fn headless_smoke(
                     crate::audio::horn_input,
                     crate::audio::dev_horn_once,
                     crate::audio::horn_voices,
+                    // F07-B.7: `SIREN_FLAG` car presses toggle the
+                    // authored siren program, then the drive keeps the
+                    // voice on the machine's current sample — the
+                    // record's `aud=` w/y fields read it headless.
+                    (crate::audio::siren_toggle, crate::audio::siren_drive)
+                        .chain()
+                        .after(session::drive_session),
                     // `.after(drive_session)` — rig/listener commands
                     // must not queue on cars or cameras
                     // `despawn_session_entities` just killed this
@@ -1021,8 +1028,15 @@ pub fn headless_smoke(
             } else {
                 String::new()
             };
+            // F07-B.7: siren loop voices spawned / programs currently
+            // active — spawned like `i`/`c`, live a gauge like `n`.
+            let sirens = if r.sirens + r.siren_live > 0 {
+                format!("/{}w/{}y", r.sirens, r.siren_live)
+            } else {
+                String::new()
+            };
             format!(
-                " aud={}h/{}v/{}s/{}l/{}a/{}r{impacts}{clutch}{surface}{ambient}{dropped}{failed}",
+                " aud={}h/{}v/{}s/{}l/{}a/{}r{impacts}{clutch}{surface}{ambient}{sirens}{dropped}{failed}",
                 r.horns, r.voices, r.sunk, r.loops, r.audible, r.rigs
             )
         })

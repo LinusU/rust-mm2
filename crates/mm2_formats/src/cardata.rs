@@ -493,7 +493,12 @@ fn check_range(
 pub struct CarAudio {
     /// Horn sample name + volume.
     pub horn: NamedVolume,
-    /// Authored `flags` word on the horn row (0 on retail).
+    /// Authored `flags` word on the horn row — a per-vehicle bitmask,
+    /// not always 0: retail authors `4` on `vpcop`, `1` on `vpbus`,
+    /// `2` on `vpcentury` and `8` on `vpddbus`/`vpsemi` (player and
+    /// opponent cardata alike). Bit `4` marks the siren-capable
+    /// vehicle; the other bits' meanings are unrecovered
+    /// (AUD-10/UNK-25).
     pub flags: i64,
     /// `Num Engine Samples` — the authored count for the second table.
     pub declared_engine_samples: usize,
@@ -1296,10 +1301,10 @@ impl SurfaceTable {
 // ---------------------------------------------------------------------------
 
 /// A siren program: an optional explosion sample plus named sequences of
-/// `(play time, next index)` steps forming a state machine. Step indices
-/// are authored references into the same sample's step list (retail
-/// tables index their own steps, not across samples — unverified beyond
-/// the authored values).
+/// `(play time, next index)` steps forming a state machine. Authored
+/// `next index` values reference *sample* positions in the program —
+/// retail tables cross samples (london's pair ping-pongs 0↔1; sf's
+/// four-sample chain ends `1.3,0` back at the first).
 #[derive(Debug, Clone)]
 pub struct SirenProgram {
     /// `Explosion sample` binding when present (player-city sirens
@@ -1418,8 +1423,8 @@ impl SirenProgram {
     }
 
     /// Sanity issues: non-finite times and negative step indices. (No
-    /// upper bound is enforced — whether authored indices index the
-    /// owning sample's steps or a merged runtime table is unverified.)
+    /// upper bound is enforced — authored indices reference samples in
+    /// the same program, and all retail values are in range.)
     pub fn validate(&self) -> Vec<CardataIssue> {
         let mut issues = Vec::new();
         if let Some(e) = &self.explosion {

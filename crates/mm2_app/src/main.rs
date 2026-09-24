@@ -1099,6 +1099,13 @@ fn main() {
             audio::horn_input.run_if(not(capturing)),
             audio::dev_horn_once,
             audio::horn_voices,
+            // F07-B.7: a `SIREN_FLAG` car's presses toggle its authored
+            // siren program, then the drive keeps the voice on the
+            // machine's current sample — the same despawn ordering as
+            // the rigs.
+            (audio::siren_toggle, audio::siren_drive)
+                .chain()
+                .after(session::drive_session),
             // `.after(drive_session)` — rig/listener commands must not
             // queue on cars or cameras `despawn_session_entities` just
             // killed in the same update (the unload chain flushes

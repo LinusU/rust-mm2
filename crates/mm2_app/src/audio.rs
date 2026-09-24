@@ -82,10 +82,23 @@
 //! [`MAX_AMBIENT_VOICES`]), and [`ambient_engine_drive`] re-mixes
 //! pitch through the authored speed bands off the car's
 //! `LinearVelocity` — the same component lane followers and knocked
-//! wrecks both publish. Siren programs and the scrape semantics
-//! remain F07-B/C work; the ambient tables' application semantics
+//! wrecks both publish. The ambient tables' application semantics
 //! (which cars bind which table, how speed maps to pitch) are a
 //! designed reading under UNK-25.
+//!
+//! F07-B.7 voices the authored siren programs: the session's
+//! [`SirenAudio`] resolves `aud/cardata/player/<city>policesiren.csv`
+//! for the local car and `aud/cardata/opponent/policesiren.csv` for
+//! opponents — the same split the retail exe's hardcoded
+//! `sfpolicesiren`/`londonpolicesiren`/`policesiren` names imply
+//! (AUD-10). A horn-row `flags` bit 4 car (`vpcop` on retail) owns a
+//! [`Siren`] toggle: [`siren_toggle`] turns each horn-control press
+//! into program start/stop (designed, DSN-42 — the original trigger
+//! is unverified, UNK-25) and [`siren_drive`] walks the authored
+//! `(play time, next index)` chain off the session's fixed tick,
+//! holding one `PlaybackMode::Loop` voice on the current sample.
+//! Sustained-scrape semantics and the weather→surface-variant binding
+//! remain F07-B/C work.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -103,13 +116,13 @@ use tracing::warn;
 use avian3d::prelude::{ComputedMass, LinearVelocity, Mass};
 use mm2_assets::Vfs;
 use mm2_content::SurfaceTables;
-use mm2_formats::cardata::{self, CardataBody, ImpactTable, SurfaceTable};
+use mm2_formats::cardata::{self, CardataBody, ImpactTable, SurfaceTable, is_sample_sentinel};
 use mm2_formats::wav::{FORMAT_PCM, Wav, lookup_stem};
 use mm2_game::{
     AmbientAudio, AmbientEngineSpec, Banger, EngineLoopSpec, EngineMix, ImpactEvent, Mm2Vfs,
-    NavRng, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerVehicle, Session, SessionEntity,
-    SessionPhase, SkidUnit, SurfaceMaterial, SurfaceSpec, VehicleAudio, impact_category,
-    pick_impact, tire_slippage,
+    NavRng, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerVehicle, SIREN_FLAG, Session,
+    SessionEntity, SessionPhase, SirenPlayback, SirenSpec, SirenTransition, SkidUnit,
+    SurfaceMaterial, SurfaceSpec, VehicleAudio, impact_category, pick_impact, tire_slippage,
 };
 use mm2_vehicle::{DriveDirection, Vehicle, VehicleState};
 
@@ -181,6 +194,11 @@ const MAX_CLUTCH_VOICES: usize = 8;
 /// with the old body (designed bound, same contract as
 /// [`MAX_ENGINE_RIGS`]).
 const MAX_AMBIENT_VOICES: usize = 32;
+/// Siren programs active at once (F07-B.7) — each active [`Siren`]
+/// holds at most one loop voice, so this also bounds live siren
+/// voices. Presses past it count a drop and leave the car unsounded
+/// (designed bound, same contract as [`MAX_HORN_VOICES`]).
+const MAX_SIRENS: usize = 8;
 
 /// A decoded, playback-ready wave: normalized interleaved f32 samples
 /// plus the authored rate/channel shape. Produced only by
@@ -304,6 +322,12 @@ pub fn decode_wave(bytes: &[u8]) -> Result<PcmAudio, String> {
 pub struct WaveBank {
     /// Lookup stem → logical wave path.
     stems: HashMap<String, String>,
+    /// Stems under an `aud/*/sirens/` directory — the subtree the
+    /// retail executable's `sirens\%s` format string scopes siren
+    /// samples to (AUD-10). Siren resolution prefers this map so a
+    /// same-named wave outside `sirens/` can never shadow an authored
+    /// siren; a stem absent from it falls back to the global map.
+    siren_stems: HashMap<String, String>,
     /// Logical path → decoded asset (handles outlive the bank; the
     /// asset store is app-global).
     cache: HashMap<String, Handle<PcmAudio>>,
@@ -316,6 +340,7 @@ impl WaveBank {
     /// path — deterministic for any mount set.
     pub fn index(vfs: &Vfs) -> Self {
         let mut stems: HashMap<String, String> = HashMap::new();
+        let mut siren_stems: HashMap<String, String> = HashMap::new();
         for logical in vfs.list() {
             if !(logical.starts_with("aud/") && logical.ends_with(".wav")) {
                 continue;
@@ -329,11 +354,24 @@ impl WaveBank {
                 }
             };
             if better {
-                stems.insert(stem, logical);
+                stems.insert(stem.clone(), logical.clone());
+            }
+            if logical.contains("/sirens/") {
+                let better = match siren_stems.get(&stem) {
+                    None => true,
+                    Some(cur) => {
+                        let (new, old) = (wave_rank(&logical), wave_rank(cur));
+                        new > old || (new == old && logical < *cur)
+                    }
+                };
+                if better {
+                    siren_stems.insert(stem, logical);
+                }
             }
         }
         WaveBank {
             stems,
+            siren_stems,
             ..Default::default()
         }
     }
@@ -352,15 +390,46 @@ impl WaveBank {
             .get(&stem)
             .cloned()
             .ok_or_else(|| format!("no wave matches stem {stem:?}"))?;
-        if let Some(h) = self.cache.get(&logical) {
+        self.load_path(vfs, waves, &logical)
+    }
+
+    /// Resolve a *siren program* sample name: the `sirens/` subtree
+    /// wins when it ships the stem — the `sirens\%s` scope the retail
+    /// executable's strings name (AUD-10) — and the global index is
+    /// the fallback for a stem shipped outside it (e.g. the flat
+    /// `aud11` variants).
+    pub fn load_siren(
+        &mut self,
+        vfs: &Vfs,
+        waves: &mut Assets<PcmAudio>,
+        name: &str,
+    ) -> Result<Handle<PcmAudio>, String> {
+        let stem = name.to_ascii_lowercase();
+        let logical = self
+            .siren_stems
+            .get(&stem)
+            .or_else(|| self.stems.get(&stem))
+            .cloned()
+            .ok_or_else(|| format!("no wave matches siren stem {stem:?}"))?;
+        self.load_path(vfs, waves, &logical)
+    }
+
+    /// Decode (or fetch from cache) one logical wave path.
+    fn load_path(
+        &mut self,
+        vfs: &Vfs,
+        waves: &mut Assets<PcmAudio>,
+        logical: &str,
+    ) -> Result<Handle<PcmAudio>, String> {
+        if let Some(h) = self.cache.get(logical) {
             return Ok(h.clone());
         }
         let bytes = vfs
-            .read_logical(&logical)
+            .read_logical(logical)
             .map_err(|e| format!("{logical}: {e}"))?;
         let audio = decode_wave(&bytes).map_err(|e| format!("{logical}: {e}"))?;
         let h = waves.add(audio);
-        self.cache.insert(logical, h.clone());
+        self.cache.insert(logical.to_string(), h.clone());
         Ok(h)
     }
 }
@@ -458,6 +527,88 @@ impl SurfaceAudio {
     }
 }
 
+/// The player-side siren program path — `aud/cardata/player/
+/// <city>policesiren.csv`. The city is keyed by the PSDL stem, the
+/// same convention the exe's hardcoded `sfpolicesiren`/
+/// `londonpolicesiren` strings name (AUD-10); a mod city resolves its
+/// own table or gets none — never another city's.
+fn player_siren_path(city: &str) -> String {
+    format!("aud/cardata/player/{city}policesiren.csv")
+}
+
+/// The opponent-side siren program path — `aud/cardata/opponent/
+/// policesiren.csv`, shared by every city on retail.
+const OPPONENT_SIREN_PATH: &str = "aud/cardata/opponent/policesiren.csv";
+
+/// Resolve and parse one siren table; `None` (with a warn) when the
+/// file is absent, the grammar rejects it, it parses as a different
+/// cardata kind, or the program authors no samples — the same absence
+/// policy every authored record applies, never a fabricated program.
+fn load_siren_program(vfs: &Vfs, path: &str) -> Option<SirenSpec> {
+    let bytes = match vfs.read_logical(path) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("audio: {path}: {e}");
+            return None;
+        }
+    };
+    match cardata::parse(path, &bytes) {
+        Ok(file) => match file.body {
+            CardataBody::Sirens(program) => match SirenSpec::from_program(&program) {
+                Some(spec) => Some(spec),
+                None => {
+                    warn!("audio: {path} authors no siren samples — no program");
+                    None
+                }
+            },
+            other => {
+                warn!("audio: {path} parsed as {other:?} — no siren program");
+                None
+            }
+        },
+        Err(e) => {
+            warn!("audio: {path}: {e}");
+            None
+        }
+    }
+}
+
+/// Session-scoped siren programs (F07-B.7): the player-side
+/// `<city>policesiren.csv` and the shared `opponent/policesiren.csv`,
+/// resolved at load, plus the seeded draw the step picks share —
+/// generation-seeded like [`ImpactAudio`]'s, so a replayed session
+/// repeats the same program. Inserted by `load_session_world` when at
+/// least one side resolves; a city with no authored program (or a
+/// dev world) yields no resource and flagged cars report their
+/// presses as failed instead of playing a substitute.
+#[derive(Resource)]
+pub struct SirenAudio {
+    /// The city program [`PlayerVehicle`] cars read.
+    pub player: Option<SirenSpec>,
+    /// The shared program opponent cars read.
+    pub opponent: Option<SirenSpec>,
+    /// Deterministic draw stream for step picks.
+    rng: NavRng,
+}
+
+impl SirenAudio {
+    /// Load both programs through the VFS; `city` is the session's
+    /// PSDL stem (`london`, `sf`, a mod city) or `None` for a non-city
+    /// world, which has no player-side table by design.
+    pub fn load(vfs: &Vfs, generation: u64, city: Option<&str>) -> Option<Self> {
+        let player = city.and_then(|c| load_siren_program(vfs, &player_siren_path(c)));
+        let opponent = load_siren_program(vfs, OPPONENT_SIREN_PATH);
+        if player.is_none() && opponent.is_none() {
+            return None;
+        }
+        Some(SirenAudio {
+            player,
+            opponent,
+            rng: NavRng::new(generation),
+        })
+    }
+}
+
 /// Variant preference for one stem — `(tree tier, declared rate kHz)`.
 fn wave_rank(logical: &str) -> (u32, u32) {
     let tier = if logical.starts_with("aud/aud22/") {
@@ -506,6 +657,9 @@ pub enum VoiceKind {
     /// An ambient-traffic engine loop an `AmbientAudio` car carries
     /// (F07-B.6).
     AmbientEngine,
+    /// One siren-program sample loop a [`Siren`] car is playing
+    /// (F07-B.7).
+    Siren,
 }
 
 /// Marker on a vehicle whose engine rig was built — set once whether
@@ -630,9 +784,57 @@ pub struct AmbientEngineVoice {
     pub mix: EngineMix,
 }
 
+/// An active siren program on a flagged car (F07-B.7). [`siren_toggle`]
+/// inserts it when a `SIREN_FLAG` car's horn control is pressed and
+/// removes it on the next press (the designed press-to-toggle reading,
+/// DSN-42 — the original's trigger is unverified, UNK-25) or when the
+/// program's authored chain ends. [`siren_drive`] advances the machine
+/// off the session's fixed tick — a pause or a pre-`Playing` phase
+/// freezes the program where it stands, matching the sink hold — and
+/// keeps one `PlaybackMode::Loop` voice on the current sample: a child
+/// of the car so it despawns with it and rides its transform (spatial
+/// for non-local cars, non-spatial on the player's — the DSN-37
+/// anchor rule).
+#[derive(Component)]
+pub struct Siren {
+    /// Program position the drive loop advances.
+    pub play: SirenPlayback,
+    /// Session tick the machine last consumed — the program clock is
+    /// the fixed-step clock, not wall time, so a replayed session
+    /// repeats the same switch frames and a paused one holds.
+    last_tick: u64,
+    /// The loop voice playing `play.sample`, when it resolved.
+    voice: Option<Entity>,
+    /// `play.sample`'s resolve was attempted this visit — success
+    /// leaves `voice` set, a sentinel means authored silence and a
+    /// failure was counted; all three stay off the resolve path until
+    /// the next `Switch`.
+    resolved: bool,
+    /// Stems that failed to resolve this activation — a bad sample
+    /// warns once per activation, then plays silent for its dwell.
+    failed_stems: Vec<String>,
+}
+
+impl Siren {
+    /// Enter `spec`'s program at the authored first sample — `None`
+    /// when the program has no usable first step. The activation path
+    /// for the horn toggle now and opponent AI later (F20).
+    pub fn activate(spec: &SirenSpec, rng: &mut NavRng, tick: u64) -> Option<Self> {
+        SirenPlayback::start(spec, rng).map(|play| Siren {
+            play,
+            last_tick: tick,
+            voice: None,
+            resolved: false,
+            failed_stems: Vec::new(),
+        })
+    }
+}
+
 /// A horn actuation intent — written by [`horn_input`] (live input) and
 /// `dev_horn_once` (`--horn` evidence runs, where capture freezes input
-/// upstream), consumed by [`horn_voices`]. One message = one press.
+/// upstream), consumed by [`horn_voices`] (unflagged cars → horn
+/// voices) and [`siren_toggle`] (`SIREN_FLAG` cars → program toggles).
+/// One message = one press.
 #[derive(Message)]
 pub struct HornRequest;
 
@@ -674,6 +876,12 @@ pub struct AudioReport {
     /// gauge rewritten every drive pass, not a cumulative count
     /// (F07-B.6).
     pub ambient_live: u64,
+    /// Siren loop voices spawned this session — a subset of `voices`;
+    /// each authored program switch respawns one (F07-B.7).
+    pub sirens: u64,
+    /// Siren programs currently active — a gauge rewritten every
+    /// drive pass, not a cumulative count (F07-B.7).
+    pub siren_live: u64,
 }
 
 impl AudioReport {
@@ -690,6 +898,8 @@ impl AudioReport {
             + self.clutch
             + self.ambient
             + self.ambient_live
+            + self.sirens
+            + self.siren_live
             > 0
     }
 
@@ -743,6 +953,11 @@ pub fn dev_horn_once(
 /// through the [`WaveBank`] and spawn one bounded one-shot voice per
 /// press. Player-only for now — opponent/ambient horn wiring (and the
 /// spatial mix) is F07-B.
+///
+/// A car whose horn-row `flags` carry [`SIREN_FLAG`] is skipped here:
+/// its presses belong to [`siren_toggle`] — the flag modifies the horn
+/// control's behavior, so a siren-capable car toggles its program
+/// rather than sounding the authored horn sample (designed, DSN-42).
 #[allow(clippy::too_many_arguments)]
 pub fn horn_voices(
     mut commands: Commands,
@@ -760,13 +975,17 @@ pub fn horn_voices(
         return;
     }
     report.horns += pending as u64;
+    let Some(car) = cars.iter().next() else {
+        return;
+    };
+    if car.spec.flags & SIREN_FLAG != 0 {
+        // Siren-capable: `siren_toggle` owns these presses.
+        return;
+    }
     let (Some(vfs), Some(mut bank)) = (vfs, bank) else {
         // No mounted content or no session world: presses are counted,
         // nothing can resolve.
         report.failed += pending as u64;
-        return;
-    };
-    let Some(car) = cars.iter().next() else {
         return;
     };
     let mut live = voices.iter().filter(|v| v.kind == VoiceKind::Horn).count();
@@ -805,6 +1024,250 @@ pub fn horn_voices(
 /// anomaly is already surfaced at load; designed guard).
 fn authored_volume(v: f32) -> f32 {
     if v.is_finite() && v >= 0.0 { v } else { 1.0 }
+}
+
+/// The siren half of the horn control (F07-B.7): each [`HornRequest`]
+/// press on a `SIREN_FLAG` player car toggles its [`Siren`] — the
+/// designed press-to-toggle reading of the horn-row flag (DSN-42; the
+/// original's trigger is unverified, UNK-25). On: [`SirenPlayback::start`]
+/// enters the role's program at the authored first sample and
+/// [`siren_drive`] voices it the same update. Off: the component and
+/// its loop voice die together. A press on a flagged car with no
+/// resolved program counts and warns like a failed horn resolve —
+/// never a substitute sound — and presses past [`MAX_SIRENS`] drop.
+pub fn siren_toggle(
+    mut commands: Commands,
+    mut requests: MessageReader<HornRequest>,
+    session: Res<Session>,
+    mut siren_audio: Option<ResMut<SirenAudio>>,
+    mut report: ResMut<AudioReport>,
+    cars: Query<(Entity, &VehicleAudio, Option<&Siren>), With<PlayerVehicle>>,
+    sirens: Query<(), With<Siren>>,
+) {
+    let pending = requests.read().count();
+    if pending == 0 {
+        return;
+    }
+    let Some((car, audio, current)) = cars.iter().next() else {
+        return;
+    };
+    if audio.spec.flags & SIREN_FLAG == 0 {
+        return;
+    }
+    let mut active = current.is_some();
+    // The voice the active component owns — tracked locally because a
+    // same-frame off→on cycle must not despawn the *new* activation's
+    // (not yet spawned) voice or double-despawn the old one's.
+    let mut voice = current.and_then(|s| s.voice);
+    let mut live = sirens.iter().count();
+    for _ in 0..pending {
+        if active {
+            if let Some(v) = voice.take() {
+                commands.entity(v).despawn();
+            }
+            commands.entity(car).remove::<Siren>();
+            active = false;
+            continue;
+        }
+        if live >= MAX_SIRENS {
+            report.dropped += 1;
+            warn!("audio: siren bound reached, {car:?} stays silent");
+            continue;
+        }
+        let Some(audio) = siren_audio.as_deref_mut() else {
+            // The session resolved no siren table at all.
+            report.failed += 1;
+            warn!("audio: {car:?} is siren-flagged but no siren program loaded");
+            continue;
+        };
+        // The toggle is the player's control — the player-side program
+        // drives the start (field borrow keeps `rng` disjoint).
+        let Some(spec) = audio.player.as_ref() else {
+            report.failed += 1;
+            warn!("audio: {car:?} is siren-flagged but the city ships no program");
+            continue;
+        };
+        match Siren::activate(spec, &mut audio.rng, session.tick()) {
+            Some(siren) => {
+                commands.entity(car).insert(siren);
+                active = true;
+                live += 1;
+            }
+            None => {
+                // An empty program start — the resolve already warned.
+                report.failed += 1;
+            }
+        }
+    }
+}
+
+/// Spawn (or mark silent) the loop voice for `siren`'s current program
+/// sample. A sentinel name is authored silence; a resolve/decode
+/// failure warns once per stem per activation and stays silent for the
+/// step's dwell; a success replaces `siren.voice` with a
+/// `PlaybackMode::Loop` child of the car.
+#[allow(clippy::too_many_arguments)] // the spawn bundle threads the shared stores through
+fn resolve_siren_sample(
+    commands: &mut Commands,
+    session: &Session,
+    vfs: &Vfs,
+    bank: &mut WaveBank,
+    waves: &mut Assets<PcmAudio>,
+    report: &mut AudioReport,
+    car: Entity,
+    player: bool,
+    siren: &mut Siren,
+    spec: &SirenSpec,
+) {
+    siren.resolved = true;
+    let Some(sample) = spec.samples.get(siren.play.sample) else {
+        return;
+    };
+    if is_sample_sentinel(&sample.name) {
+        return;
+    }
+    match bank.load_siren(vfs, waves, &sample.name) {
+        Ok(handle) => {
+            let voice = commands
+                .spawn((
+                    AudioVoice {
+                        kind: VoiceKind::Siren,
+                    },
+                    SessionEntity(session.generation()),
+                    ChildOf(car),
+                    Transform::default(),
+                    AudioPlayer(handle),
+                    PlaybackSettings {
+                        mode: PlaybackMode::Loop,
+                        volume: Volume::Linear(authored_volume(sample.volume)),
+                        // Non-local sirens are world emitters; the
+                        // player's own siren stays non-spatial — the
+                        // same DSN-37 anchor rule the engine rig uses.
+                        spatial: !player,
+                        spatial_scale: (!player).then(|| SpatialScale::new(ENGINE_SPATIAL_SCALE)),
+                        ..Default::default()
+                    },
+                ))
+                .id();
+            siren.voice = Some(voice);
+            report.voices += 1;
+            report.sirens += 1;
+        }
+        Err(e) => {
+            let stem = sample.name.to_ascii_lowercase();
+            if !siren.failed_stems.contains(&stem) {
+                siren.failed_stems.push(stem);
+                report.failed += 1;
+                warn!("audio: {e}");
+            }
+        }
+    }
+}
+
+/// Advance every active [`Siren`] off the session's fixed-step clock
+/// and keep its voice on the sample the machine landed on (F07-B.7).
+/// The program clock is `Session::tick` × the fixed timestep: real
+/// playback time while `Playing`, frozen through `Paused`/
+/// `Countdown`/`Results` like the sinks [`sync_audio_pause`] holds —
+/// and identical across replays. A `Switch` respawns the loop on the
+/// new sample; `End` (a malformed program's only exit — retail chains
+/// cycle) deactivates like a second press. With no [`SirenAudio`]
+/// resource — mid-teardown — active sirens deactivate rather than
+/// stepping blind.
+#[allow(clippy::too_many_arguments)] // Bevy system — the borrows are the contract.
+pub fn siren_drive(
+    mut commands: Commands,
+    session: Res<Session>,
+    time: Res<Time<Fixed>>,
+    vfs: Option<Res<Mm2Vfs>>,
+    bank: Option<ResMut<WaveBank>>,
+    mut waves: ResMut<Assets<PcmAudio>>,
+    siren_audio: Option<ResMut<SirenAudio>>,
+    mut report: ResMut<AudioReport>,
+    mut cars: Query<(Entity, &mut Siren, Has<PlayerVehicle>)>,
+) {
+    report.siren_live = 0;
+    if cars.is_empty() {
+        return;
+    }
+    let (Some(vfs), Some(mut bank), Some(mut siren_audio)) = (vfs, bank, siren_audio) else {
+        // The session's audio world is gone (teardown window): the
+        // voices die with the despawn sweep; drop the state components
+        // so nothing advances against a missing table.
+        for (car, mut siren, _) in &mut cars {
+            if let Some(v) = siren.voice.take() {
+                commands.entity(v).despawn();
+            }
+            commands.entity(car).remove::<Siren>();
+        }
+        return;
+    };
+    let tick = session.tick();
+    let step = time.timestep().as_secs_f32();
+    let siren_audio = &mut *siren_audio;
+    for (car, mut siren, player) in &mut cars {
+        // Field borrow, not `spec()` — `rng` stays disjoint-mutably
+        // borrowable while the program is read.
+        let spec = if player {
+            siren_audio.player.as_ref()
+        } else {
+            siren_audio.opponent.as_ref()
+        };
+        let Some(spec) = spec else {
+            // The car's role has no program — it can only have gotten
+            // here through a spec that later vanished; deactivate.
+            if let Some(v) = siren.voice.take() {
+                commands.entity(v).despawn();
+            }
+            commands.entity(car).remove::<Siren>();
+            continue;
+        };
+        let dt = tick.saturating_sub(siren.last_tick) as f32 * step;
+        siren.last_tick = tick;
+        if !siren.resolved {
+            resolve_siren_sample(
+                &mut commands,
+                &session,
+                &vfs.0,
+                &mut bank,
+                &mut waves,
+                &mut report,
+                car,
+                player,
+                &mut siren,
+                spec,
+            );
+        }
+        match siren.play.advance(spec, dt, &mut siren_audio.rng) {
+            SirenTransition::Hold => {}
+            SirenTransition::Switch(_) => {
+                if let Some(v) = siren.voice.take() {
+                    commands.entity(v).despawn();
+                }
+                siren.resolved = false;
+                resolve_siren_sample(
+                    &mut commands,
+                    &session,
+                    &vfs.0,
+                    &mut bank,
+                    &mut waves,
+                    &mut report,
+                    car,
+                    player,
+                    &mut siren,
+                    spec,
+                );
+            }
+            SirenTransition::End => {
+                if let Some(v) = siren.voice.take() {
+                    commands.entity(v).despawn();
+                }
+                commands.entity(car).remove::<Siren>();
+                continue;
+            }
+        }
+        report.siren_live += 1;
+    }
 }
 
 /// Deduplicated impact → one-shot voices (F07-B.3, spec req 4). Each

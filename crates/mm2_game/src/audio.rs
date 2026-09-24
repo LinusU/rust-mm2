@@ -12,8 +12,8 @@
 
 use bevy::prelude::*;
 use mm2_formats::cardata::{
-    AmbientEngine, CarAudio, EngineSample, ImpactCategory, ImpactSample, ImpactTable, SkidSample,
-    SpeedBand, SurfaceEntry, is_sample_sentinel,
+    AmbientEngine, CarAudio, EngineSample, ImpactCategory, ImpactSample, ImpactTable, NamedVolume,
+    SirenProgram, SirenStep, SkidSample, SpeedBand, SurfaceEntry, is_sample_sentinel,
 };
 
 use crate::nav::NavRng;
@@ -570,6 +570,189 @@ pub fn tire_slippage(traction_demand: f32, slip_angle: f32, peak_slip_angle: f32
     long.max(lat).clamp(0.0, 1.0)
 }
 
+/// The horn-row `flags` bit marking a siren-capable vehicle — the only
+/// authored link between a car and the city `*policesiren.csv`
+/// program (AUD-10: retail authors `4` on `vpcop` alone, both sides;
+/// `1`/`2`/`8` appear on `vpbus`/`vpcentury`/`vpddbus`/`vpsemi` with
+/// no recovered meaning). Which control transition the original binds
+/// the program to is unverified (UNK-25); the runtime's designed
+/// reading is press-to-toggle on the horn control (DSN-42).
+pub const SIREN_FLAG: i64 = 4;
+
+/// Transitions one [`SirenPlayback::advance`] may take before giving
+/// up — a malformed chain of non-positive `play time`s would otherwise
+/// spin forever inside a single update (designed guard; no retail
+/// program reaches it).
+const MAX_SIREN_HOPS: usize = 16;
+
+/// One program sample resolved for playback — the authored name,
+/// sanitized volume and verbatim step table. Steps index back into the
+/// *program* (see [`SirenPlayback`]), so a spec never reorders or
+/// filters `samples`.
+#[derive(Debug, Clone)]
+pub struct SirenSampleSpec {
+    /// Sample name — verbatim authored reference (a sentinel stays a
+    /// sentinel; the voice layer reads it as authored silence).
+    pub name: String,
+    /// Authored volume — absent (the opponent file authors none) or
+    /// non-finite/negative sanitizes to 1.0 like the horn.
+    pub volume: f32,
+    /// `(play time, next index)` steps in authored order.
+    pub steps: Vec<SirenStep>,
+}
+
+/// A resolved siren program — the runtime half of
+/// [`mm2_formats::cardata::SirenProgram`] (F07-B.7).
+#[derive(Debug, Clone)]
+pub struct SirenSpec {
+    /// The `Explosion sample` binding, carried verbatim — no verified
+    /// consumer exists yet (what the original fires it on is
+    /// unrecovered, UNK-25).
+    pub explosion: Option<NamedVolume>,
+    /// Program samples in authored order; `next index` values are
+    /// authored positions in this list.
+    pub samples: Vec<SirenSampleSpec>,
+}
+
+impl SirenSpec {
+    /// Resolve a parsed program; `None` when it authors no samples —
+    /// an explosion-only file has nothing to drive (and its lone
+    /// binding has no consumer yet anyway).
+    pub fn from_program(program: &SirenProgram) -> Option<Self> {
+        if program.samples.is_empty() {
+            return None;
+        }
+        Some(SirenSpec {
+            explosion: program.explosion.clone(),
+            samples: program
+                .samples
+                .iter()
+                .map(|s| SirenSampleSpec {
+                    name: s.name.clone(),
+                    volume: s
+                        .volume
+                        .filter(|v| v.is_finite() && *v >= 0.0)
+                        .unwrap_or(1.0),
+                    steps: s.steps.clone(),
+                })
+                .collect(),
+        })
+    }
+}
+
+/// What [`SirenPlayback::advance`] did this call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SirenTransition {
+    /// Still inside the current step.
+    Hold,
+    /// Moved to the program sample at this index — the caller swaps
+    /// the playing loop.
+    Switch(usize),
+    /// The authored chain ended (`next index` outside the program, or
+    /// a sample with no usable step): the siren deactivates. No retail
+    /// program authors an out-of-range target — all three cycle
+    /// forever — so this fires only on malformed data (designed guard,
+    /// UNK-25).
+    End,
+}
+
+/// One running activation of a siren program — where the machine
+/// sits. A designed reading of the authored `(play time, next index)`
+/// grammar (DSN-42/UNK-25): entering a sample picks one of its steps
+/// at seeded random (multiple steps are the authored timing/branch
+/// variety — sf's four same-target rows exist to vary the dwell), the
+/// sample loops for `play time` seconds, then the machine jumps to
+/// the sample `next index` names. An out-of-range index ends the
+/// program.
+#[derive(Debug, Clone, Copy)]
+pub struct SirenPlayback {
+    /// Program sample currently looping (index into
+    /// [`SirenSpec::samples`]).
+    pub sample: usize,
+    /// The picked step of `sample` (index into its `steps`).
+    pub step: usize,
+    /// Seconds left on the picked step.
+    pub remaining: f32,
+}
+
+/// Pick a step of `sample` at seeded random — `None` on an empty step
+/// list. Seeded through the session's [`NavRng`] like the impact
+/// draws, so a replayed session repeats the same program.
+fn pick_step<'a>(sample: &'a SirenSampleSpec, rng: &mut NavRng) -> Option<(usize, &'a SirenStep)> {
+    if sample.steps.is_empty() {
+        None
+    } else {
+        let i = (rng.next_u64() % sample.steps.len() as u64) as usize;
+        Some((i, &sample.steps[i]))
+    }
+}
+
+/// A step's authored `play time` sanitized: non-finite or negative
+/// reads as 0 (an immediate transition), never a negative countdown
+/// or a NaN freeze.
+fn step_time(t: f32) -> f32 {
+    if t.is_finite() && t > 0.0 { t } else { 0.0 }
+}
+
+impl SirenPlayback {
+    /// Enter the program at sample 0 — the authored first sequence is
+    /// the entry point (designed; which index the original starts on
+    /// is unverified, UNK-25). `None` on an empty program or a first
+    /// sample with no steps.
+    pub fn start(spec: &SirenSpec, rng: &mut NavRng) -> Option<Self> {
+        let sample = spec.samples.first()?;
+        let (step, picked) = pick_step(sample, rng)?;
+        Some(SirenPlayback {
+            sample: 0,
+            step,
+            remaining: step_time(picked.play_time),
+        })
+    }
+
+    /// Tick the machine `dt` seconds. A step expiring jumps to the
+    /// sample its picked step's `next index` names; an index outside
+    /// the program — or a target sample with no step to pick — ends
+    /// the siren ([`SirenTransition::End`]). A non-finite or negative
+    /// `dt` ticks nothing; zero-time steps chain inside the call,
+    /// bounded by [`MAX_SIREN_HOPS`] so a malformed cycle ends the
+    /// program rather than spinning.
+    pub fn advance(&mut self, spec: &SirenSpec, dt: f32, rng: &mut NavRng) -> SirenTransition {
+        if dt.is_finite() && dt > 0.0 {
+            self.remaining -= dt;
+        }
+        if self.remaining > 0.0 {
+            return SirenTransition::Hold;
+        }
+        let mut hops = 0usize;
+        loop {
+            let Some(sample) = spec.samples.get(self.sample) else {
+                return SirenTransition::End;
+            };
+            let Some(step) = sample.steps.get(self.step) else {
+                return SirenTransition::End;
+            };
+            let next = step.next_index;
+            if next < 0 || next as usize >= spec.samples.len() {
+                return SirenTransition::End;
+            }
+            let next = next as usize;
+            let Some((step_idx, picked)) = pick_step(&spec.samples[next], rng) else {
+                return SirenTransition::End;
+            };
+            self.sample = next;
+            self.step = step_idx;
+            self.remaining += step_time(picked.play_time);
+            hops += 1;
+            if self.remaining > 0.0 {
+                return SirenTransition::Switch(self.sample);
+            }
+            if hops >= MAX_SIREN_HOPS {
+                return SirenTransition::End;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -944,5 +1127,153 @@ mod tests {
         assert!(spec.bands.is_empty());
         assert_eq!(spec.mix(12.0).volume, 1.0);
         assert_eq!(spec.mix(12.0).speed, 1.0);
+    }
+
+    // -- Siren programs ------------------------------------------------
+
+    /// The retail `aud/cardata/player/sfpolicesiren.csv`, verbatim.
+    const SF_SIREN: &[u8] = b"Explosion sample,volume\r\nexplosion,0.95\r\nSample name,\r\npolice2sirenloop,0.95\r\nplay time,next index\r\n4.45,1\r\nplay time,next index\r\n2.65,1\r\nplay time,next index\r\n5.25,1\r\nplay time,next index\r\n4.15,1\r\nSample name,\r\npolice2hilowloop,0.95\r\nplay time,next index\r\n1.25,0\r\nplay time,next index\r\n2.31,0\r\nplay time,next index\r\n2,0\r\nplay time,next index\r\n3,2\r\nSample name,\r\npolice1fastsirenloop,0.95\r\nplay time,next index\r\n4.45,3\r\nplay time,next index\r\n1.65,3\r\nplay time,next index\r\n2.35,3\r\nplay time,next index\r\n0.25,3\r\nSample name,\r\npolice1whailerloop,0.95\r\nplay time,next index\r\n1,2\r\nplay time,next index\r\n0.65,2\r\nplay time,next index\r\n0.15,2\r\nplay time,next index\r\n1.3,0\r\n";
+
+    /// The retail `aud/cardata/player/londonpolicesiren.csv`, verbatim.
+    const LONDON_SIREN: &[u8] = b"Explosion sample,volume\r\nexplosion,0.95\r\nSample name,\r\nsiren_london,0.95\r\nplay time,next index\r\n15,1\r\nSample name,\r\nsiren_london2,0.95\r\nplay time,next index\r\n15,0\r\n";
+
+    /// The retail `aud/cardata/opponent/policesiren.csv`, verbatim —
+    /// three samples, every `next index` in range: a closed cycle the
+    /// siren walks until the caller stops it.
+    const OPP_SIREN: &[u8] = b"Sample name,\r\npolice1fastsirenloop,\r\nplay time,next index\r\n4.45,1\r\nplay time,next index\r\n2.65,2\r\nplay time,next index\r\n5.25,2\r\nplay time,next index\r\n4.15,1\r\nSample name,\r\npolice2hilowloop,\r\nplay time,next index\r\n2.31,2\r\nplay time,next index\r\n1.25,0\r\nSample name,\r\npolice1whailerloop,\r\nplay time,next index\r\n1.11,1\r\nplay time,next index\r\n2,0\r\nplay time,next index\r\n1.5,0\r\n";
+
+    fn siren(data: &[u8]) -> SirenSpec {
+        let f = mm2_formats::cardata::parse("aud/cardata/player/xpolicesiren.csv", data).unwrap();
+        let mm2_formats::cardata::CardataBody::Sirens(p) = f.body else {
+            panic!("expected sirens body");
+        };
+        SirenSpec::from_program(&p).unwrap()
+    }
+
+    #[test]
+    fn the_siren_spec_resolves_the_authored_programs() {
+        let sf = siren(SF_SIREN);
+        assert_eq!(sf.samples.len(), 4);
+        assert_eq!(sf.samples[0].name, "police2sirenloop");
+        assert_eq!(sf.samples[0].volume, 0.95);
+        assert_eq!(sf.samples[0].steps.len(), 4);
+        assert_eq!(sf.explosion.as_ref().unwrap().name, "explosion");
+        let london = siren(LONDON_SIREN);
+        assert_eq!(london.samples.len(), 2);
+        // The opponent file authors three samples and no volumes —
+        // the volumes sanitize to 1.0 and there is no explosion row.
+        let opp = siren(OPP_SIREN);
+        assert_eq!(opp.samples.len(), 3);
+        assert_eq!(opp.samples[2].name, "police1whailerloop");
+        assert_eq!(opp.samples[0].volume, 1.0);
+        assert!(opp.explosion.is_none());
+        // An explosion-only program has nothing to drive.
+        let boom_only = mm2_formats::cardata::parse(
+            "aud/cardata/player/xpolicesiren.csv",
+            b"Explosion sample,volume\nexplosion,0.95\n",
+        )
+        .unwrap();
+        let mm2_formats::cardata::CardataBody::Sirens(p) = boom_only.body else {
+            panic!("expected sirens body");
+        };
+        assert!(SirenSpec::from_program(&p).is_none());
+    }
+
+    #[test]
+    fn the_siren_machine_walks_the_authored_chain() {
+        let spec = siren(LONDON_SIREN);
+        let mut rng = NavRng::new(7);
+        let mut play = SirenPlayback::start(&spec, &mut rng).unwrap();
+        assert_eq!(play.sample, 0);
+        assert_eq!(play.remaining, 15.0);
+        // Inside the step: partial dt holds; expiry switches to the
+        // authored target and carries the overshoot.
+        assert_eq!(play.advance(&spec, 10.0, &mut rng), SirenTransition::Hold);
+        assert_eq!(
+            play.advance(&spec, 6.0, &mut rng),
+            SirenTransition::Switch(1)
+        );
+        assert_eq!(play.remaining, 14.0);
+        // london ping-pongs 1 → 0 → 1 forever — no authored end.
+        assert_eq!(
+            play.advance(&spec, 15.0, &mut rng),
+            SirenTransition::Switch(0)
+        );
+        assert_eq!(
+            play.advance(&spec, 15.0, &mut rng),
+            SirenTransition::Switch(1)
+        );
+    }
+
+    #[test]
+    fn the_opponent_program_cycles_forever_until_stopped() {
+        // Every authored `next index` in the retail opponent file is in
+        // range, so playback never ends on its own — the caller's
+        // toggle/teardown is what stops it.
+        let spec = siren(OPP_SIREN);
+        let mut rng = NavRng::new(3);
+        let mut play = SirenPlayback::start(&spec, &mut rng).unwrap();
+        for _ in 0..64 {
+            assert_ne!(play.advance(&spec, 3.0, &mut rng), SirenTransition::End);
+        }
+    }
+
+    #[test]
+    fn an_out_of_range_next_index_ends_the_program() {
+        // Synthetic malformed data: a `next index` past the last
+        // sample ends the program rather than indexing out of bounds.
+        let spec = siren(
+            b"Sample name,\nloop_a,1\nplay time,next index\n1,1\nSample name,\nloop_b,1\nplay time,next index\n1,7\n",
+        );
+        let mut rng = NavRng::new(5);
+        let mut play = SirenPlayback::start(&spec, &mut rng).unwrap();
+        // 1.5 s past a 1 s step lands inside the target's dwell (the
+        // banked overshoot leaves 0.5); the target's `next index` 7 is
+        // out of range, so its expiry ends the program.
+        assert_eq!(
+            play.advance(&spec, 1.5, &mut rng),
+            SirenTransition::Switch(1)
+        );
+        assert_eq!(play.advance(&spec, 1.5, &mut rng), SirenTransition::End);
+        // A negative index ends the same way.
+        let spec = siren(b"Sample name,\nloop_a,1\nplay time,next index\n1,-1\n");
+        let mut play = SirenPlayback::start(&spec, &mut rng).unwrap();
+        assert_eq!(play.advance(&spec, 2.0, &mut rng), SirenTransition::End);
+    }
+
+    #[test]
+    fn a_siren_program_survives_malformed_steps() {
+        // A zero-time self-cycle would spin forever without the hop
+        // bound — the machine ends instead of hanging the update.
+        let spec = siren(b"Sample name,\nloop_a,1\nplay time,next index\n0,0\n");
+        let mut rng = NavRng::new(1);
+        let mut play = SirenPlayback::start(&spec, &mut rng).unwrap();
+        assert_eq!(play.remaining, 0.0);
+        assert_eq!(play.advance(&spec, 0.016, &mut rng), SirenTransition::End);
+        // A non-finite dt ticks nothing at all.
+        let spec = siren(LONDON_SIREN);
+        let mut play = SirenPlayback::start(&spec, &mut rng).unwrap();
+        assert_eq!(
+            play.advance(&spec, f32::NAN, &mut rng),
+            SirenTransition::Hold
+        );
+        assert_eq!(play.advance(&spec, -5.0, &mut rng), SirenTransition::Hold);
+        assert_eq!(play.remaining, 15.0);
+    }
+
+    #[test]
+    fn a_flagged_car_is_the_siren_binding() {
+        // `flags` is authored on the horn row — the only place the
+        // data names a per-vehicle siren marker (AUD-10).
+        let car = CarAudio::parse(
+            b"Horn wave name,Horn volume,flags,Num Engine Samples,clutch wave name,clutch volume\nH,0.9,4,1,C,0.5\nEngine wave name,a,b\nE,0.1,0.2\n",
+        )
+        .unwrap();
+        assert_ne!(car.flags & SIREN_FLAG, 0);
+        let plain = CarAudio::parse(
+            b"Horn wave name,Horn volume,flags,Num Engine Samples,clutch wave name,clutch volume\nH,0.9,0,1,C,0.5\nEngine wave name,a,b\nE,0.1,0.2\n",
+        )
+        .unwrap();
+        assert_eq!(plain.flags & SIREN_FLAG, 0);
     }
 }

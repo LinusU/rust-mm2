@@ -238,6 +238,7 @@ pub fn drive_session(
             commands.remove_resource::<crate::audio::WaveBank>();
             commands.remove_resource::<crate::audio::ImpactAudio>();
             commands.remove_resource::<crate::audio::SurfaceAudio>();
+            commands.remove_resource::<crate::audio::SirenAudio>();
             commands.remove_resource::<crate::pvs::CityPvs>();
             commands.remove_resource::<crate::water::CityWater>();
             commands.remove_resource::<crate::city::WorldFloor>();
@@ -648,6 +649,25 @@ pub fn load_session_world(
     // yields no resource, not a fabricated surface row.
     if let Some(table) = crate::audio::SurfaceAudio::load(&vfs.0) {
         commands.insert_resource(table);
+    }
+    // F07-B.7: the authored siren programs — the player side keys off
+    // the session city's PSDL stem (`london` → `londonpolicesiren.csv`,
+    // the naming the exe's hardcoded pair implies), the opponent side
+    // is the shared `policesiren.csv`. A dev world or a mod city with
+    // no authored program yields no resource — flagged cars then count
+    // their presses as failed rather than sounding a substitute.
+    let siren_city = match &config.world {
+        WorldMode::City { psdl } => Some(
+            std::path::Path::new(psdl)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(psdl.as_str()),
+        ),
+        WorldMode::DevWorld => None,
+    };
+    if let Some(programs) = crate::audio::SirenAudio::load(&vfs.0, session.generation(), siren_city)
+    {
+        commands.insert_resource(programs);
     }
     if world_ok {
         session

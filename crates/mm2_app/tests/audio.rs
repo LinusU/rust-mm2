@@ -16,18 +16,18 @@ use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 use mm2_app::audio::{
     self, AmbientEngineVoice, AmbientRig, AudioReport, AudioVoice, EngineVoice, GearWatch,
-    HornRequest, ImpactAudio, PcmAudio, SurfaceAudio, SurfaceRig, SurfaceRole, SurfaceVoice,
-    VoiceKind, WaveBank, decode_wave,
+    HornRequest, ImpactAudio, PcmAudio, Siren, SirenAudio, SurfaceAudio, SurfaceRig, SurfaceRole,
+    SurfaceVoice, VoiceKind, WaveBank, decode_wave,
 };
 use mm2_assets::Vfs;
 use mm2_content::SurfaceTables;
-use mm2_formats::cardata::{AmbientEngine, CarAudio};
+use mm2_formats::cardata::{AmbientEngine, CarAudio, SirenStep};
 use mm2_formats::materials::{MaterialMap, MaterialSet};
 use mm2_game::{
     AmbientAudio, AmbientEngineSpec, Banger, BangerDefinition, DevOverrides, ImpactEvent, ImpactId,
-    Mm2Vfs, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerVehicle, Session, SessionConfig,
-    SessionEntity, SessionPhase, SurfaceMaterial, SurfaceState, VehicleAudio,
-    despawn_session_entities,
+    Mm2Vfs, NavRng, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerVehicle, Session,
+    SessionConfig, SessionEntity, SessionPhase, SirenSampleSpec, SirenSpec, SurfaceMaterial,
+    SurfaceState, VehicleAudio, advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::{DriveDirection, VehicleConfig, VehicleState, vehicle_bundle};
 
@@ -2068,6 +2068,479 @@ fn teardown_sweeps_ambient_voices_with_the_session() {
     ambient_car(&mut app, ambient_spec("testamb"));
     app.update();
     assert_eq!(ambient_voice_list(&mut app).len(), 1);
+
+    app.world_mut()
+        .run_system_once(despawn_session_entities)
+        .unwrap();
+    app.update();
+    assert_eq!(voices(&mut app), 0);
+}
+
+// ---------------------------------------------------------------------------
+// F07-B.7: siren programs — a SIREN_FLAG car's horn-control presses toggle the
+// authored *policesiren.csv program; siren_drive walks the (play time, next
+// index) chain off the session tick with one loop voice per sample.
+// ---------------------------------------------------------------------------
+
+/// A cardata horn row naming `stem` with authored `flags`.
+fn flagged_car_audio(stem: &str, flags: i64) -> CarAudio {
+    let csv = format!(
+        "Horn wave name,Horn volume,flags,Num Engine Samples,clutch wave name,clutch volume\n{stem},0.9,{flags},1,REV,0.5\nEngine wave name,a,b\nENG,0.1,0.2\n"
+    );
+    CarAudio::parse(csv.as_bytes()).unwrap()
+}
+
+/// The retail tree shape: two `sirens/` player samples, one opponent
+/// sample that ships only the flat `aud11` copy (the scoped lookup
+/// falls back to the global stem index for it), a two-sample ping-pong
+/// city program and a one-sample opponent program.
+fn siren_dir() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(d, "aud/aud22/sirens/wail_a.22k.wav", &pcm_wav(22050, 220));
+    write(d, "aud/aud22/sirens/wail_b.22k.wav", &pcm_wav(22050, 220));
+    write(d, "aud/aud22/horns/testhorn.22k.wav", &pcm_wav(22050, 220));
+    write(d, "aud/aud11/yelp.11k.wav", &pcm_wav(11025, 110));
+    write(
+        d,
+        "aud/cardata/player/testcitypolicesiren.csv",
+        b"Explosion sample,volume\nexplosion,0.95\nSample name,\nwail_a,0.9\nplay time,next index\n0.05,1\nSample name,\nwail_b,0.8\nplay time,next index\n0.05,0\n",
+    );
+    write(
+        d,
+        "aud/cardata/opponent/policesiren.csv",
+        b"Sample name,\nyelp,\nplay time,next index\n60,0\n",
+    );
+    tmp
+}
+
+/// A siren program written over the fixture cardata path. `steps` is
+/// `(sample name, [(play time, next index)])` in authored order.
+fn write_siren_table(dir: &Path, path: &str, samples: &[(&str, &[(f32, i64)])]) {
+    let mut csv = String::new();
+    for (name, steps) in samples {
+        csv.push_str(&format!("Sample name,\n{name},0.9\n"));
+        for (t, next) in *steps {
+            csv.push_str(&format!("play time,next index\n{t},{next}\n"));
+        }
+    }
+    write(dir, path, csv.as_bytes());
+}
+
+/// A lone `Siren` state as a future AI/system activation would stamp
+/// it — `Siren::activate` is the single entry point.
+fn active_siren(spec: &SirenSpec, seed: u64) -> Siren {
+    let mut rng = NavRng::new(seed);
+    Siren::activate(spec, &mut rng, 0).unwrap()
+}
+
+fn opponent_siren_spec() -> SirenSpec {
+    SirenSpec {
+        explosion: None,
+        samples: vec![SirenSampleSpec {
+            name: "yelp".into(),
+            volume: 1.0,
+            steps: vec![SirenStep {
+                play_time: 60.0,
+                next_index: 0,
+                line: 1,
+            }],
+        }],
+    }
+}
+
+/// The audio slice a siren-flagged player sees: session `Playing`, the
+/// fixture VFS/bank, the loaded `testcity` + opponent programs and the
+/// chained press→toggle→drive systems `main` schedules. Ticks are
+/// stepped by hand (`advance_session_tick` counts fixed steps while
+/// `Playing`) so the program clock is exact in the test.
+fn siren_app(dir: &Path, flags: i64) -> App {
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(dir, 0).unwrap();
+    let bank = WaveBank::index(&vfs);
+    let programs = SirenAudio::load(&vfs, 1, Some("testcity"));
+
+    let mut session = Session::new();
+    session.begin(SessionConfig::default()).unwrap();
+    session.transition(SessionPhase::Ready).unwrap();
+    session.transition(SessionPhase::Playing).unwrap();
+    let generation = session.generation();
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_plugins(AssetPlugin::default())
+        .insert_resource(Time::<Fixed>::from_hz(120.0))
+        .insert_resource(session)
+        .insert_resource(Mm2Vfs(vfs))
+        .insert_resource(bank)
+        .init_resource::<Assets<PcmAudio>>()
+        .init_resource::<AudioReport>()
+        .add_message::<HornRequest>()
+        .add_systems(
+            Update,
+            (audio::horn_voices, audio::siren_toggle, audio::siren_drive).chain(),
+        );
+    if let Some(p) = programs {
+        app.insert_resource(p);
+    }
+    app.world_mut().spawn((
+        PlayerVehicle,
+        VehicleAudio {
+            spec: flagged_car_audio("testhorn", flags),
+        },
+        SessionEntity(generation),
+        Transform::default(),
+    ));
+    app.finish();
+    app.cleanup();
+    app
+}
+
+/// Step the session clock `n` fixed ticks (n/120 s of program time).
+fn tick(app: &mut App, n: u64) {
+    for _ in 0..n {
+        app.world_mut()
+            .run_system_once(advance_session_tick)
+            .unwrap();
+    }
+}
+
+#[test]
+fn siren_tables_load_per_city_and_role() {
+    let dir = siren_dir();
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(dir.path(), 0).unwrap();
+    // The city stem keys the player file; the opponent file is shared.
+    let sa = SirenAudio::load(&vfs, 1, Some("testcity")).unwrap();
+    let player = sa.player.as_ref().unwrap();
+    assert_eq!(player.samples.len(), 2);
+    assert_eq!(player.samples[0].name, "wail_a");
+    assert_eq!(player.explosion.as_ref().unwrap().name, "explosion");
+    let opponent = sa.opponent.as_ref().unwrap();
+    assert_eq!(opponent.samples.len(), 1);
+    assert_eq!(opponent.samples[0].name, "yelp");
+    // A city shipping no table leaves the player side empty — never
+    // another city's program — while the shared side still loads.
+    let sa = SirenAudio::load(&vfs, 1, Some("nocity")).unwrap();
+    assert!(sa.player.is_none());
+    assert!(sa.opponent.is_some());
+    // And neither side resolving yields no resource at all.
+    let empty = tempfile::tempdir().unwrap();
+    let mut vfs2 = Vfs::new();
+    vfs2.mount_dir(empty.path(), 0).unwrap();
+    assert!(SirenAudio::load(&vfs2, 1, Some("testcity")).is_none());
+}
+
+#[test]
+fn a_flagged_press_toggles_the_authored_program() {
+    let dir = siren_dir();
+    let mut app = siren_app(dir.path(), 4);
+    let car = player(&mut app);
+
+    app.world_mut().write_message(HornRequest);
+    app.update();
+    // The press counted as a horn-control press but spawned no horn
+    // voice — the flag routes it to the siren toggle.
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.horns, r.sirens, r.siren_live), (1, 1, 1));
+    assert_eq!(r.failed, 0);
+    assert!(app.world().get::<Siren>(car).is_some());
+    // One loop voice on the authored first sample, the player's own
+    // non-spatial anchor (DSN-37) at the authored volume.
+    let world = app.world_mut();
+    let (kind, parent, settings, session_entity) = world
+        .query::<(&AudioVoice, &ChildOf, &PlaybackSettings, &SessionEntity)>()
+        .iter(world)
+        .next()
+        .map(|(v, p, s, e)| (v.kind, p.parent(), (s.mode, s.spatial, s.volume), e.0))
+        .unwrap();
+    assert_eq!(kind, VoiceKind::Siren);
+    assert_eq!(parent, car);
+    assert!(matches!(settings.0, PlaybackMode::Loop));
+    assert!(!settings.1);
+    assert_eq!(settings.2, Volume::Linear(0.9));
+    assert_eq!(
+        session_entity,
+        app.world().resource::<Session>().generation()
+    );
+
+    // Second press: the toggle releases — component and voice die.
+    app.world_mut().write_message(HornRequest);
+    app.update();
+    assert!(app.world().get::<Siren>(car).is_none());
+    assert_eq!(voices(&mut app), 0);
+    assert_eq!(app.world().resource::<AudioReport>().siren_live, 0);
+
+    // Third press starts a fresh activation.
+    app.world_mut().write_message(HornRequest);
+    app.update();
+    assert!(app.world().get::<Siren>(car).is_some());
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.horns, r.sirens, r.siren_live), (3, 2, 1));
+}
+
+#[test]
+fn an_unflagged_car_keeps_the_ordinary_horn() {
+    let dir = siren_dir();
+    let mut app = siren_app(dir.path(), 0);
+    app.world_mut().write_message(HornRequest);
+    app.update();
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.horns, r.sirens, r.siren_live), (1, 0, 0));
+    assert_eq!(voices(&mut app), 1);
+    let world = app.world_mut();
+    let kind = world
+        .query::<&AudioVoice>()
+        .iter(world)
+        .next()
+        .unwrap()
+        .kind;
+    assert_eq!(kind, VoiceKind::Horn);
+    let car = player(&mut app);
+    assert!(app.world().get::<Siren>(car).is_none());
+}
+
+#[test]
+fn the_drive_walks_the_authored_chain_on_the_session_tick() {
+    let dir = siren_dir();
+    let mut app = siren_app(dir.path(), 4);
+    let car = player(&mut app);
+    app.world_mut().write_message(HornRequest);
+    app.update();
+
+    let siren = app.world().get::<Siren>(car).unwrap();
+    assert_eq!(siren.play.sample, 0);
+    let first_voice = {
+        let world = app.world_mut();
+        world
+            .query_filtered::<Entity, With<AudioVoice>>()
+            .iter(world)
+            .next()
+            .unwrap()
+    };
+
+    // Six ticks = 0.05 s — the authored step time; seven leaves the
+    // machine landed on sample 1.
+    tick(&mut app, 7);
+    app.update();
+    let siren = app.world().get::<Siren>(car).unwrap();
+    assert_eq!(
+        siren.play.sample, 1,
+        "the authored next index moved the program"
+    );
+    let second_voice = {
+        let world = app.world_mut();
+        world
+            .query_filtered::<Entity, With<AudioVoice>>()
+            .iter(world)
+            .next()
+            .unwrap()
+    };
+    assert_ne!(
+        first_voice, second_voice,
+        "a switch respawns the loop voice"
+    );
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.sirens, r.siren_live, r.voices), (2, 1, 2));
+
+    // The ping-pong returns to sample 0 on the next expiry.
+    tick(&mut app, 7);
+    app.update();
+    assert_eq!(app.world().get::<Siren>(car).unwrap().play.sample, 0);
+    assert_eq!(app.world().resource::<AudioReport>().sirens, 3);
+}
+
+#[test]
+fn the_program_holds_while_the_session_tick_is_frozen() {
+    let dir = siren_dir();
+    let mut app = siren_app(dir.path(), 4);
+    let car = player(&mut app);
+    app.world_mut().write_message(HornRequest);
+    app.update();
+    tick(&mut app, 3);
+    app.update();
+    let before = app.world().get::<Siren>(car).unwrap().play.remaining;
+
+    // No ticks → no program time: a paused session's frozen clock
+    // holds the step exactly where it was.
+    app.update();
+    app.update();
+    let after = app.world().get::<Siren>(car).unwrap().play.remaining;
+    assert_eq!(before, after);
+    assert_eq!(app.world().get::<Siren>(car).unwrap().play.sample, 0);
+}
+
+#[test]
+fn a_missing_siren_wave_warns_once_per_activation() {
+    let dir = siren_dir();
+    // Neither program sample ships a wave.
+    write_siren_table(
+        dir.path(),
+        "aud/cardata/player/testcitypolicesiren.csv",
+        &[("ghost_a", &[(0.02, 1)]), ("ghost_b", &[(0.02, 0)])],
+    );
+    let mut app = siren_app(dir.path(), 4);
+    app.world_mut().write_message(HornRequest);
+    app.update();
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.sirens, r.failed, r.siren_live), (0, 1, 1));
+    assert_eq!(voices(&mut app), 0);
+
+    // The chain keeps walking — the second stem fails too — but a
+    // revisit of the first does not re-warn.
+    tick(&mut app, 4);
+    app.update();
+    assert_eq!(app.world().resource::<AudioReport>().failed, 2);
+    tick(&mut app, 4);
+    app.update();
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(r.failed, 2, "the failed stem is not re-counted on revisit");
+    assert_eq!(r.siren_live, 1, "the program still runs, silently");
+}
+
+#[test]
+fn a_sentinel_siren_sample_is_authored_silence() {
+    let dir = siren_dir();
+    write_siren_table(
+        dir.path(),
+        "aud/cardata/player/testcitypolicesiren.csv",
+        &[("NOSOUND", &[(0.02, 1)]), ("wail_a", &[(0.02, 0)])],
+    );
+    let mut app = siren_app(dir.path(), 4);
+    app.world_mut().write_message(HornRequest);
+    app.update();
+    // The sentinel sample voices nothing and is not a failure.
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.sirens, r.failed, r.siren_live), (0, 0, 1));
+    assert_eq!(voices(&mut app), 0);
+    // The authored chain still advances into the voiced sample.
+    tick(&mut app, 4);
+    app.update();
+    assert_eq!(app.world().resource::<AudioReport>().sirens, 1);
+    assert_eq!(voices(&mut app), 1);
+}
+
+#[test]
+fn a_flagged_press_without_a_program_reports_failed() {
+    let dir = siren_dir();
+    std::fs::remove_file(
+        dir.path()
+            .join("aud/cardata/player/testcitypolicesiren.csv"),
+    )
+    .unwrap();
+    let mut app = siren_app(dir.path(), 4);
+    // The shared opponent table still resolved, so the resource
+    // exists — the *player* side is the absent one.
+    assert!(app.world().resource::<SirenAudio>().player.is_none());
+    app.world_mut().write_message(HornRequest);
+    app.update();
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.horns, r.sirens, r.failed), (1, 0, 1));
+    let car = player(&mut app);
+    assert!(app.world().get::<Siren>(car).is_none());
+    assert_eq!(voices(&mut app), 0);
+}
+
+#[test]
+fn a_malformed_siren_table_is_no_program_not_a_substitute() {
+    let dir = siren_dir();
+    // A car-audio table under the siren path parses as the wrong kind —
+    // it must not substitute the opponent program or another file.
+    write(
+        dir.path(),
+        "aud/cardata/player/testcitypolicesiren.csv",
+        b"Horn wave name,Horn volume,flags,Num Engine Samples,clutch wave name,clutch volume\nH,0.9,4,1,C,0.5\nEngine wave name,a,b\nE,0.1,0.2\n",
+    );
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(dir.path(), 0).unwrap();
+    let sa = SirenAudio::load(&vfs, 1, Some("testcity")).unwrap();
+    assert!(sa.player.is_none());
+    assert!(sa.opponent.is_some(), "the good side still loads");
+
+    let mut app = siren_app(dir.path(), 4);
+    app.world_mut().write_message(HornRequest);
+    app.update();
+    assert_eq!(app.world().resource::<AudioReport>().failed, 1);
+}
+
+#[test]
+fn an_opponent_siren_is_a_spatial_child_voice() {
+    let dir = siren_dir();
+    let mut app = siren_app(dir.path(), 4);
+    let spec = opponent_siren_spec();
+    let generation = app.world().resource::<Session>().generation();
+    let opp = app
+        .world_mut()
+        .spawn((
+            VehicleAudio {
+                spec: flagged_car_audio("testhorn", 4),
+            },
+            active_siren(&spec, 1),
+            SessionEntity(generation),
+            Transform::default(),
+        ))
+        .id();
+    app.update();
+
+    let world = app.world_mut();
+    let (_, parent, settings) = world
+        .query::<(&AudioVoice, &ChildOf, &PlaybackSettings)>()
+        .iter(world)
+        .find(|(v, ..)| v.kind == VoiceKind::Siren)
+        .map(|(v, p, s)| (v.kind, p.parent(), (s.mode, s.spatial)))
+        .unwrap();
+    assert_eq!(parent, opp);
+    assert!(matches!(settings.0, PlaybackMode::Loop));
+    assert!(settings.1, "a non-local siren is a world emitter");
+    // The opponent program's `yelp` ships only the flat aud11 copy —
+    // the scoped lookup fell back to the global stem index.
+    let world = app.world_mut();
+    let handle = world
+        .query::<(&AudioVoice, &AudioPlayer<PcmAudio>)>()
+        .iter(world)
+        .find(|(v, ..)| v.kind == VoiceKind::Siren)
+        .map(|(_, p)| p.0.clone())
+        .unwrap();
+    let waves = app.world().resource::<Assets<PcmAudio>>();
+    assert_eq!(waves.get(&handle).unwrap().sample_rate.get(), 11025);
+}
+
+#[test]
+fn the_siren_bound_drops_past_max_sirens() {
+    let dir = siren_dir();
+    let mut app = siren_app(dir.path(), 4);
+    let spec = opponent_siren_spec();
+    let generation = app.world().resource::<Session>().generation();
+    for i in 0..8u64 {
+        app.world_mut().spawn((
+            VehicleAudio {
+                spec: flagged_car_audio("testhorn", 4),
+            },
+            active_siren(&spec, i + 1),
+            SessionEntity(generation),
+            Transform::default(),
+        ));
+    }
+    app.update();
+    assert_eq!(app.world().resource::<AudioReport>().siren_live, 8);
+
+    // The ninth activation — the player's own press — is refused.
+    app.world_mut().write_message(HornRequest);
+    app.update();
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(r.dropped, 1);
+    let car = player(&mut app);
+    assert!(app.world().get::<Siren>(car).is_none());
+    assert_eq!(app.world().resource::<AudioReport>().siren_live, 8);
+}
+
+#[test]
+fn teardown_sweeps_siren_voices_with_the_session() {
+    let dir = siren_dir();
+    let mut app = siren_app(dir.path(), 4);
+    app.world_mut().write_message(HornRequest);
+    app.update();
+    assert_eq!(voices(&mut app), 1);
 
     app.world_mut()
         .run_system_once(despawn_session_entities)

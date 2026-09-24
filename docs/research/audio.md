@@ -86,9 +86,33 @@ spawned over the run — it tracks `sp`, the spawn count; n = loops
 audible at record — the live fleet; `0s` stays honest: no output
 device headless). Which classes the original binds, what it feeds the
 bands and whether it pitches the ambient loop at all are unrecovered
-(DSN-41/UNK-25). Siren programs, sustained-scrape semantics and the
+(DSN-41/UNK-25). Sustained-scrape semantics and the
 weather→{dry,wet,ice} surface-variant binding remain F07-B/C work,
 and DirectMusic is recognized but not decoded (F08).
+
+F07-B.7 adds the siren-program consumer: the session resolves
+`aud/cardata/player/<psdl-stem>policesiren.csv` (the city-keyed naming
+the exe's `sfpolicesiren`/`londonpolicesiren` strings imply) and the
+shared `aud/cardata/opponent/policesiren.csv` into a `SirenAudio`
+resource — absent or malformed warns once and leaves that side
+programless, never substituted. A car whose horn row carries
+`flags & 4` toggles the authored program on each `HornRequest` press
+(press-to-toggle is the designed reading; the original's trigger —
+hold vs toggle vs pursuit state — is unverified, UNK-25) and never
+plays its horn sample. `SirenPlayback` enters at sample 0, draws one
+step per entry through the seeded `NavRng`, dwells the authored
+`play time` on the session's fixed tick (pause freezes the program)
+and follows `next index` to the next *sample* — retail programs all
+cycle; a negative/out-of-range target, an empty sample or a
+non-finite `dt` ends it, `MAX_SIREN_HOPS` bounds a zero-time chain.
+Each activation owns one `PlaybackMode::Loop` voice, respawned on
+every authored switch — non-spatial for the local player, spatial
+otherwise (DSN-37), `SessionEntity`-swept, `MAX_SIRENS` 8 with `+Nd`
+drops. Stems prefer the `aud/*/sirens/` subtree (the exe's
+`sirens\%s` scope) then the global bank; a sentinel is authored
+silence and an unresolvable stem warns once per activation while the
+program walks on. The `Explosion sample` binding is carried with no
+consumer (F20). `aud=` gains `/<n>w/<n>y` when nonzero (DSN-42).
 Everything below is measured data structure; runtime semantics are
 unverified unless noted.
 
@@ -223,10 +247,20 @@ that resolves to **no** wave stem — the one dead reference on retail.
 
 ### Siren programs — `cardata/{player,opponent}/*policesiren.csv`
 
-`Explosion wave name` row (player files only), then `Sample name`
-sequences of `play time,next index` steps — a tiny state machine
-chaining siren loops; retail repeats the header before *every* step.
-sf: 4 sequences/16 steps; london: 2/2.
+`Explosion sample` row (player files only — no recovered consumer),
+then `Sample name` sequences of `play time,next index` steps — a
+tiny state machine chaining siren loops; retail repeats the header
+before *every* step. Player files are city-keyed
+(`sfpolicesiren.csv`/`londonpolicesiren.csv` — both names appear in
+the exe alongside the shared opponent `policesiren` and a
+`sirens\%s` wave-path format); sf: 4 samples/16 steps, london: 2/2,
+opponent: 3 samples looping. `next index` targets are *sample*
+positions and every retail value is in range — the authored programs
+never terminate. Binding is the horn-row `flags` bitmask: `vpcop`
+alone authors `4` (`vpbus` 1, `vpcentury` 2, `vpddbus`/`vpsemi` 8 —
+the fire truck's horn slot is literally `FIRETRUCKSIREN`, suggesting
+the bits pick the horn control's behavior family; only bit 4 is
+bound so far — DSN-42/AUD-10).
 
 ### Ambient engines/horns — `cardata/ambient/*_{engine,horn}.csv`
 
@@ -306,12 +340,20 @@ min time in range,…` headers) plus `aud/dmusic/csv_files` (5). Three
   bands — both designed readings (the original's selector, force
   quantity and per-side emission rule are unrecovered); the opponent
   file's divergent `WALL` bands have no consumer yet.
-- `flags` word on the horn row (always 0 on retail); also whether the
-  original holds the horn for the press duration or retriggers it —
-  the runtime fires one authored clip per press as a designed policy.
+- `flags` word on the horn row — bit `4` (`vpcop`) now binds the
+  siren program (DSN-42); `1`/`2`/`8` on vpbus/vpcentury/vpddbus/
+  vpsemi have no recovered meaning; also whether the original holds
+  the horn for the press duration or retriggers it — the runtime
+  fires one authored clip per press as a designed policy.
 - Whether `aud11` variants ever serve non-speech references (the
-  runtime `WaveBank` prefers `aud22` on a stem tie — designed choice).
-- Siren `next index` wrap/entry semantics beyond the obvious chain.
+  runtime `WaveBank` prefers `aud22` on a stem tie, siren stems the
+  `aud/*/sirens/` subtree first — both designed choices).
+- Siren runtime semantics: the authored `play time`/`next index`
+  chain is consumed, but the original's trigger (press-to-toggle is
+  designed), its pick among a sample's authored steps, the
+  `Explosion sample` consumer and program termination (all retail
+  programs cycle; runtime ends defensively on malformed targets)
+  stay unverified.
 - DirectMusic segment/style/band playback (F08) and the `csv_files`
   cue tables.
 - `spchdata`/`creaturedata` grammars (F08).
