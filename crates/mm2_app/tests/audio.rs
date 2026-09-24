@@ -14,7 +14,8 @@ use bevy::audio::{AudioPlayer, PlaybackMode, PlaybackSettings};
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 use mm2_app::audio::{
-    self, AudioReport, AudioVoice, HornRequest, PcmAudio, VoiceKind, WaveBank, decode_wave,
+    self, AudioReport, AudioVoice, EngineVoice, HornRequest, PcmAudio, VoiceKind, WaveBank,
+    decode_wave,
 };
 use mm2_assets::Vfs;
 use mm2_formats::cardata::CarAudio;
@@ -22,6 +23,7 @@ use mm2_game::{
     DevOverrides, Mm2Vfs, PlayerVehicle, Session, SessionConfig, SessionEntity, SessionPhase,
     VehicleAudio, despawn_session_entities,
 };
+use mm2_vehicle::{VehicleConfig, VehicleState};
 
 /// A minimal 16-bit mono PCM RIFF/WAVE at `rate` with `frames` frames.
 fn pcm_wav(rate: u32, frames: usize) -> Vec<u8> {
@@ -74,9 +76,10 @@ fn car_audio(stem: &str) -> CarAudio {
 /// The audio slice of the production app: session already `Playing`
 /// (the load path needs the whole render/mesh stack; the horn systems
 /// only read `is_playing`/`generation`), the mounted fixture VFS, the
-/// session `WaveBank`, and the same Update systems `main`/`headless`
-/// schedule. One `PlayerVehicle` carries `VehicleAudio` like
-/// `load_session_world` stamps it.
+/// session `WaveBank`, and the horn-side Update systems
+/// `main`/`headless` schedule. One `PlayerVehicle` carries
+/// `VehicleAudio` like `load_session_world` stamps it. The engine rig
+/// systems are exercised by [`engine_app`] below.
 fn horn_app(dir: &Path, dev_horn: bool) -> App {
     let mut vfs = Vfs::new();
     vfs.mount_dir(dir, 0).unwrap();
@@ -315,6 +318,242 @@ fn bank_prefers_the_22k_variant() {
     // The stem match is case- and suffix-insensitive.
     let h2 = bank.load(&vfs, &mut waves, "testhorn").unwrap();
     assert_eq!(h, h2, "the decode cache dedupes repeated loads");
+}
+
+// ---------------------------------------------------------------------------
+// F07-B.1: engine loop rig — authored fade-window rows → looping voices
+// re-mixed from the sim's RPM.
+// ---------------------------------------------------------------------------
+
+/// `vpbug`-shaped values for one canonical fade-window row.
+const FADE_VALUES: &str = "0.55,0.835,1,800,2500,7000,0.85,2,1,7000";
+
+/// A cardata table whose engine rows ride the canonical fade-window
+/// header; `rows` are `name,values` lines appended verbatim.
+fn engine_car_audio(rows: &str) -> CarAudio {
+    let csv = format!(
+        "Horn wave name,Horn volume,flags,Num Engine Samples,clutch wave name,clutch volume\nTESTHORN,0.9,0,4,REV,0.5\nEngine wave name,Min Volume,Max Volume,fade in start RPM,fade in end RPM,fade out start RPM,fade out end RPM,Min Pitch,Max Pitch,Pitch shift start RPM,Pitch shift end RPM\n{rows}"
+    );
+    CarAudio::parse(csv.as_bytes()).unwrap()
+}
+
+/// The four vpbug-analogue rows plus their waves on the fixture tree.
+fn engine_dir() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    for stem in ["eidle", "edrive", "emid", "ehigh"] {
+        write(
+            d,
+            &format!("aud/aud22/engines/{stem}.22k.wav"),
+            &pcm_wav(22050, 220),
+        );
+    }
+    tmp
+}
+
+const ENGINE_ROWS: &str = "EIDLE,0.55,0.835,1,800,2500,7000,0.85,2,1,7000\nEDRIVE,0.55,0.9,500,2800,6500,10000,0.6,2.5,500,12000\nEMID,0.55,0.85,500,4000,7000,11000,1,2.25,500,11000\nEHIGH,0.55,0.91,3000,8000,15000,15000,0.65,2.25,3000,12000\n";
+
+/// Like [`horn_app`] but with the engine rig systems and a
+/// `VehicleState`-carrying player — the entity `load_session_world`
+/// produces for a cardata-backed car.
+fn engine_app(dir: &Path, rows: &str) -> App {
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(dir, 0).unwrap();
+    let bank = WaveBank::index(&vfs);
+
+    let mut session = Session::new();
+    session.begin(SessionConfig::default()).unwrap();
+    session.transition(SessionPhase::Ready).unwrap();
+    session.transition(SessionPhase::Playing).unwrap();
+    let generation = session.generation();
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_plugins(AssetPlugin::default())
+        .insert_resource(session)
+        .insert_resource(Mm2Vfs(vfs))
+        .insert_resource(bank)
+        .init_resource::<Assets<PcmAudio>>()
+        .init_resource::<AudioReport>()
+        .add_systems(Update, (audio::engine_rigs, audio::engine_drive).chain());
+    app.world_mut().spawn((
+        PlayerVehicle,
+        VehicleAudio {
+            spec: engine_car_audio(rows),
+        },
+        VehicleState::new(&VehicleConfig::default()),
+        SessionEntity(generation),
+        Transform::default(),
+    ));
+    app.finish();
+    app.cleanup();
+    app
+}
+
+fn engine_voices(app: &mut App) -> Vec<(usize, f32, f32)> {
+    let mut v: Vec<_> = app
+        .world_mut()
+        .query::<&EngineVoice>()
+        .iter(app.world())
+        .map(|v| (v.row, v.mix.volume, v.mix.speed))
+        .collect();
+    v.sort_by_key(|(row, _, _)| *row);
+    v
+}
+
+fn player(app: &mut App) -> Entity {
+    app.world_mut()
+        .query_filtered::<Entity, With<PlayerVehicle>>()
+        .single(app.world())
+        .unwrap()
+}
+
+#[test]
+fn engine_rig_spawns_one_loop_voice_per_drivable_row() {
+    let dir = engine_dir();
+    let mut app = engine_app(dir.path(), ENGINE_ROWS);
+    app.update();
+
+    let car = player(&mut app);
+    let generation = app.world().resource::<Session>().generation();
+    let world = app.world_mut();
+    let mut voices = world.query::<(
+        &AudioVoice,
+        &EngineVoice,
+        &AudioPlayer<PcmAudio>,
+        &PlaybackSettings,
+        &ChildOf,
+        &SessionEntity,
+    )>();
+    let all: Vec<_> = voices.iter(world).collect();
+    assert_eq!(all.len(), 4);
+    for (voice, _, _, settings, child_of, session_entity) in &all {
+        assert_eq!(voice.kind, VoiceKind::Engine);
+        assert!(matches!(settings.mode, PlaybackMode::Loop));
+        assert_eq!(settings.volume, bevy::audio::Volume::Linear(0.0));
+        // The voice is the car's child — it despawns with it — and
+        // still carries the session stamp every voice reports.
+        assert_eq!(child_of.parent(), car);
+        assert_eq!(session_entity.0, generation);
+    }
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(r.loops, 4);
+    assert_eq!(r.voices, 4);
+    assert_eq!(r.failed, 0);
+    // The default-config car idles at 900 rpm: the high loop's band
+    // (3000+) is silent, the other three are fading in — the mix ran.
+    assert_eq!(r.audible, 3);
+    let mixes = engine_voices(&mut app);
+    assert_eq!(mixes[3].1, 0.0, "row 3 (high) below its band");
+    assert!(mixes[0].1 > 0.8, "idle at max volume");
+}
+
+#[test]
+fn engine_mix_tracks_the_sim_rpm() {
+    let dir = engine_dir();
+    let mut app = engine_app(dir.path(), ENGINE_ROWS);
+    app.update();
+    let idle_mixes = engine_voices(&mut app);
+
+    // Drive the sim state, not the component: the next frame re-mixes
+    // every loop off the new RPM through the production system.
+    let car = player(&mut app);
+    app.world_mut().get_mut::<VehicleState>(car).unwrap().rpm = 6000.0;
+    app.update();
+    let mixes = engine_voices(&mut app);
+
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(r.audible, 4, "every band overlaps at 6000 rpm");
+    for (i, (before, after)) in idle_mixes.iter().zip(&mixes).enumerate() {
+        assert!(
+            after.2 > before.2,
+            "row {i} pitch rises with rpm: {} -> {}",
+            before.2,
+            after.2
+        );
+    }
+    // The idle loop is deep in fade-out while the high loop has
+    // swelled — a crossfade, not a volume shift.
+    assert!(mixes[0].1 < idle_mixes[0].1, "idle fading");
+    assert!(mixes[3].1 > 0.5, "high loop inside its band");
+}
+
+#[test]
+fn unusable_rows_and_missing_waves_report_without_sinking_the_rig() {
+    let dir = engine_dir();
+    // EBAD is short a tail (no fade values to resolve) and EMISS names
+    // a stem nothing ships — both count once at rig build while the
+    // good rows still spawn.
+    let rows = format!("EIDLE,{FADE_VALUES}\nEBAD,0.5,0.9\nEMISS,{FADE_VALUES}\n");
+    let mut app = engine_app(dir.path(), &rows);
+    app.update();
+
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(r.loops, 1);
+    assert_eq!(r.failed, 2);
+    assert_eq!(engine_voices(&mut app).len(), 1);
+
+    // The rig marker means the failures report once — a later update
+    // must not re-attempt the same rows.
+    app.update();
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(r.loops, 1);
+    assert_eq!(r.failed, 2);
+}
+
+#[test]
+fn the_engine_voice_bound_caps_giant_tables() {
+    let dir = engine_dir();
+    // Ten authored rows against the one resolved stem — the bound
+    // keeps eight and counts the rest refused.
+    let rows = (0..10)
+        .map(|_| format!("EIDLE,{FADE_VALUES}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut app = engine_app(dir.path(), &rows);
+    app.update();
+
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(r.loops, 8);
+    assert_eq!(r.dropped, 2);
+    assert_eq!(engine_voices(&mut app).len(), 8);
+}
+
+#[test]
+fn a_car_without_authored_audio_builds_no_rig() {
+    let dir = engine_dir();
+    let mut app = engine_app(dir.path(), ENGINE_ROWS);
+    let car = player(&mut app);
+    app.world_mut().entity_mut(car).remove::<VehicleAudio>();
+    app.update();
+
+    assert_eq!(engine_voices(&mut app).len(), 0);
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.loops, r.voices, r.failed), (0, 0, 0));
+}
+
+#[test]
+fn teardown_despawns_engine_voices_with_the_car() {
+    let dir = engine_dir();
+    let mut app = engine_app(dir.path(), ENGINE_ROWS);
+    app.update();
+    assert_eq!(engine_voices(&mut app).len(), 4);
+
+    // The production teardown sweeps session roots; the voices are the
+    // car's children and cascade with it (F07-AC06's restart leg).
+    app.world_mut()
+        .run_system_once(despawn_session_entities)
+        .unwrap();
+    app.update();
+    assert_eq!(engine_voices(&mut app).len(), 0);
+    assert_eq!(
+        app.world_mut()
+            .query_filtered::<Entity, With<PlayerVehicle>>()
+            .iter(app.world())
+            .count(),
+        0,
+        "the car itself is gone"
+    );
 }
 
 #[test]

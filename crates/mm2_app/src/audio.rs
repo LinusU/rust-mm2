@@ -17,10 +17,19 @@
 //!
 //! The first wired driver is the authored horn (CTL-1's ENTER): the
 //! cardata `Horn wave name` resolves through the VFS stem index and
-//! plays non-spatial at the authored volume. Engine loops, impacts,
-//! skids and spatial voices are F07-B work; which side's cardata a
-//! horn should read for opponents and how `flags`/the aud11 variants
-//! are consumed remain UNK-25.
+//! plays non-spatial at the authored volume.
+//!
+//! F07-B.1 adds the engine rig: each drivable `Engine wave name` row
+//! spawns one looping voice as a child of the player vehicle, and
+//! [`engine_drive`] re-mixes every loop's volume/pitch from the sim's
+//! engine RPM through the authored fade windows (`mm2_game`'s
+//! [`EngineLoopSpec`] — the interpretation is inferred, UNK-25).
+//! Voices are children so they despawn with their car and already sit
+//! at its transform for the spatial leg; they loop at volume 0 outside
+//! their RPM band rather than attaching/detaching. Impacts, skids,
+//! opponent/ambient engines and the spatial mix remain F07-B work;
+//! which side's cardata a horn should read for opponents, the clutch
+//! sample's trigger, `flags` and the aud11 variants remain UNK-25.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,7 +45,11 @@ use tracing::warn;
 
 use mm2_assets::Vfs;
 use mm2_formats::wav::{FORMAT_PCM, Wav, lookup_stem};
-use mm2_game::{Mm2Vfs, PlayerVehicle, Session, SessionEntity, SessionPhase, VehicleAudio};
+use mm2_game::{
+    EngineLoopSpec, EngineMix, Mm2Vfs, PlayerVehicle, Session, SessionEntity, SessionPhase,
+    VehicleAudio,
+};
+use mm2_vehicle::VehicleState;
 
 /// Decode bound: samples (per channel-interleaved count) beyond this
 /// are refused — retail waves top out under ~2.5 M samples; the cap
@@ -47,6 +60,10 @@ const MAX_DECODE_SAMPLES: usize = 8 * 1024 * 1024;
 /// press is counted and dropped rather than stacking voices (F07's
 /// bounded-voices requirement; designed bound).
 const MAX_HORN_VOICES: usize = 8;
+/// Engine loops one vehicle's rig will spawn — retail tops out at 4
+/// authored rows; the cap keeps a malformed giant table from flooding
+/// the mixer (designed bound, same contract as `MAX_HORN_VOICES`).
+const MAX_ENGINE_VOICES: usize = 8;
 
 /// A decoded, playback-ready wave: normalized interleaved f32 samples
 /// plus the authored rate/channel shape. Produced only by
@@ -265,6 +282,30 @@ pub struct AudioVoice {
 pub enum VoiceKind {
     /// The cardata horn sample.
     Horn,
+    /// One `Engine wave name` loop of a vehicle's engine rig.
+    Engine,
+}
+
+/// Marker on a vehicle whose engine rig was built — set once whether
+/// or not any row produced a voice, so a car whose rows all fail
+/// reports once instead of retrying (and re-warning) every frame.
+#[derive(Component)]
+pub struct EngineRig;
+
+/// One looping voice bound to an authored `Engine wave name` row, a
+/// child of the vehicle so it despawns with the car and rides its
+/// transform for the spatial leg. `mix` is rewritten every drive tick
+/// whether or not a sink exists — headless runs carry the computed
+/// mixer state on the component, which is what tests and the smoke
+/// record read.
+#[derive(Component)]
+pub struct EngineVoice {
+    /// Index into the parent's `VehicleAudio::spec.engine_samples`.
+    pub row: usize,
+    /// The resolved fade-window spec, captured at rig build.
+    pub spec: EngineLoopSpec,
+    /// The mixer state [`engine_drive`] last computed.
+    pub mix: EngineMix,
 }
 
 /// A horn actuation intent — written by [`horn_input`] (live input) and
@@ -282,16 +323,21 @@ pub struct AudioReport {
     pub voices: u64,
     /// Voices the output device attached a sink to (0 headless/no-device).
     pub sunk: u64,
-    /// Presses refused by the live-voice bound.
+    /// Presses/loops refused by a voice bound.
     pub dropped: u64,
     /// Resolves/decodes that failed this session.
     pub failed: u64,
+    /// Engine loop voices spawned this session (a subset of `voices`).
+    pub loops: u64,
+    /// Engine loops whose last computed mix is audible — a gauge
+    /// rewritten every drive pass, not a cumulative count.
+    pub audible: u64,
 }
 
 impl AudioReport {
     /// Any activity worth reporting (`aud=` stays absent otherwise).
     pub fn active(&self) -> bool {
-        self.horns + self.voices + self.dropped + self.failed > 0
+        self.horns + self.voices + self.dropped + self.failed + self.loops > 0
     }
 
     pub fn reset(&mut self) {
@@ -406,6 +452,117 @@ pub fn horn_voices(
 /// anomaly is already surfaced at load; designed guard).
 fn horn_volume(v: f32) -> f32 {
     if v.is_finite() && v >= 0.0 { v } else { 1.0 }
+}
+
+/// Build the local player's engine rig: one [`PlaybackMode::Loop`]
+/// voice per `Engine wave name` row that resolves both a fade-window
+/// spec and a wave, parented to the car so it despawns with it and
+/// sits at its transform for the spatial leg. Player-only — opponent
+/// and ambient engines need the spatial+listener leg before more
+/// voices are worth spawning (F07-B). A row that cannot drive (no
+/// fade-window schema) or cannot decode is counted and warned, never
+/// silently skipped.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)] // Bevy system signature — the filtered query is the system's real input
+pub fn engine_rigs(
+    mut commands: Commands,
+    session: Res<Session>,
+    vfs: Option<Res<Mm2Vfs>>,
+    bank: Option<ResMut<WaveBank>>,
+    mut waves: ResMut<Assets<PcmAudio>>,
+    mut report: ResMut<AudioReport>,
+    cars: Query<(Entity, &VehicleAudio), (With<PlayerVehicle>, Without<EngineRig>)>,
+) {
+    if cars.is_empty() {
+        return;
+    }
+    let (Some(vfs), Some(mut bank)) = (vfs, bank) else {
+        // No mounted content or no session world yet — retry next
+        // frame rather than stamping a half-built rig.
+        return;
+    };
+    for (car, audio) in &cars {
+        let mut spawned = 0usize;
+        for (i, row) in audio.spec.engine_samples.iter().enumerate() {
+            if spawned >= MAX_ENGINE_VOICES {
+                report.dropped += 1;
+                warn!("audio: engine rig full, dropping row {:?}", row.name);
+                continue;
+            }
+            let Some(spec) = EngineLoopSpec::from_row(row) else {
+                report.failed += 1;
+                warn!(
+                    "audio: engine sample {:?} has no fade-window schema — skipped",
+                    row.name
+                );
+                continue;
+            };
+            match bank.load(&vfs.0, &mut waves, &row.name) {
+                Ok(handle) => {
+                    commands.spawn((
+                        AudioVoice {
+                            kind: VoiceKind::Engine,
+                        },
+                        EngineVoice {
+                            row: i,
+                            spec,
+                            mix: EngineMix {
+                                volume: 0.0,
+                                speed: 1.0,
+                            },
+                        },
+                        SessionEntity(session.generation()),
+                        ChildOf(car),
+                        Transform::default(),
+                        AudioPlayer(handle),
+                        PlaybackSettings {
+                            mode: PlaybackMode::Loop,
+                            // Silent until `engine_drive` computes the
+                            // real mix — a sink attaching between spawn
+                            // and the first drive tick plays nothing.
+                            volume: Volume::Linear(0.0),
+                            ..Default::default()
+                        },
+                    ));
+                    spawned += 1;
+                    report.voices += 1;
+                    report.loops += 1;
+                }
+                Err(e) => {
+                    report.failed += 1;
+                    warn!("audio: {e}");
+                }
+            }
+        }
+        commands.entity(car).insert(EngineRig);
+    }
+}
+
+/// Re-mix every engine loop from its parent vehicle's RPM and apply it
+/// to the sink once the device attaches one. Ungated by phase: voices
+/// only exist inside a live session, `Paused` sinks are held by
+/// [`sync_audio_pause`], and `Countdown`/`Results` legitimately keep
+/// the engine sounding — the car is live, just not drivable.
+pub fn engine_drive(
+    mut report: ResMut<AudioReport>,
+    cars: Query<&VehicleState>,
+    mut voices: Query<(&ChildOf, &mut EngineVoice, Option<&mut AudioSink>)>,
+) {
+    report.audible = 0;
+    for (parent, mut voice, sink) in &mut voices {
+        let Ok(state) = cars.get(parent.parent()) else {
+            // The car despawned and the cascade has not flushed — the
+            // voice dies with it; leave the last computed mix.
+            continue;
+        };
+        voice.mix = voice.spec.mix(state.rpm);
+        if voice.mix.volume > 0.0 {
+            report.audible += 1;
+        }
+        if let Some(mut sink) = sink {
+            sink.set_volume(Volume::Linear(voice.mix.volume));
+            sink.set_speed(voice.mix.speed);
+        }
+    }
 }
 
 /// Count voices the output device has attached a sink to — the

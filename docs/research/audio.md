@@ -16,10 +16,22 @@ lookup, decodes through the bounded PCM parser, and plays through Bevy's
 mixer on ENTER (documented default, CTL-1). Voices are session-owned,
 bounded, despawned on completion and paused with the session. Whether
 the original holds the horn for the keypress duration or retriggers it
-is still unverified — the press fires one clip, a designed choice. The
-engine/impact/surface/siren families remain unparsed at runtime and
-DirectMusic is recognized but not decoded (F08). Everything below is
-measured data structure; runtime semantics are unverified unless noted.
+is still unverified — the press fires one clip, a designed choice.
+
+F07-B.1 adds the engine rig: every `Engine wave name` row resolving the
+canonical fade-window schema spawns a looping voice parented to the
+player car, re-mixed each frame off `VehicleState.rpm` — the sim's
+drivetrain-derived engine RPM (gear- and direction-aware). The designed
+formula reads the fade-in window as a `0→1` envelope ramp, fade-out as
+`1→0`, volume interpolating `Min Volume→Max Volume` over the combined
+envelope (a loop outside its band is silent, not parked at its authored
+minimum) and speed interpolating `Min Pitch→Max Pitch` across the pitch
+window — all inferred, not recovered (UNK-25/DSN-36). Divisor-schema
+rows carry no RPM windows and are skipped with a counted warning. The
+impact/surface/siren families remain unparsed at runtime, the clutch
+binding has no consumer, and DirectMusic is recognized but not decoded
+(F08). Everything below is measured data structure; runtime semantics
+are unverified unless noted.
 
 ## Waves (`aud/aud11`, `aud/aud22`)
 
@@ -204,9 +216,12 @@ min time in range,…` headers) plus `aud/dmusic/csv_files` (5). Three
 
 ## Open semantics
 
-- Engine table application: which RPM/quantity drives the fade windows
-  (vehicle `tune` RPM vs wheel speed vs throttle), and what the
-  `Volume divisor`/`Pitch divisor`/`vol inverse RPM` schema computes.
+- Engine table application: whether the original computes the same
+  envelope/pitch formula the runtime's designed reading uses and which
+  quantity it consumes (implemented: sim drivetrain RPM — DSN-36); what
+  the `Volume divisor`/`Pitch divisor`/`vol inverse RPM` schema
+  computes; and what drives the `clutch wave name` binding (a reverse
+  loop, a shift blip — unbound).
 - `Tunnel sound index` semantics (0 vs 5, why only ice differs).
 - Skid-band trigger unit — the two schemas claim `slippage` and `speed`
   for the same table slot.

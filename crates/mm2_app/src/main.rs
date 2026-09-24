@@ -1084,17 +1084,22 @@ fn main() {
         Update,
         (spark_fx::emit_sparks, spark_fx::advance_sparks).chain(),
     )
-    // F07-A.2: authored-horn voices — live input is frozen during a
-    // capture like every other input, while `--horn` stays ungated so
-    // a capture run can still fire it. `horn_voices` drains requests a
-    // frame later at worst (message double-buffering); sink counting
-    // and pause sync are pure phase/sink mirrors after the driver.
+    // F07-A.2/B.1: authored-horn voices plus the engine loop rig —
+    // live input is frozen during a capture like every other input,
+    // while `--horn` stays ungated so a capture run can still fire it.
+    // `horn_voices` drains requests a frame later at worst (message
+    // double-buffering); the rig builds once a `VehicleAudio` car
+    // exists and its loops re-mix every frame off the sim's RPM —
+    // ungated during captures because they track simulation state, not
+    // input. Sink counting and pause sync are pure phase/sink mirrors
+    // after the drivers.
     .add_systems(
         Update,
         (
             audio::horn_input.run_if(not(capturing)),
             audio::dev_horn_once,
             audio::horn_voices,
+            (audio::engine_rigs, audio::engine_drive).chain(),
             audio::count_sinks,
             audio::sync_audio_pause.after(session::drive_session),
             audio::reset_audio_report.run_if(session::unloading),
@@ -1232,12 +1237,18 @@ fn smoke_test(
     mut exit: MessageWriter<AppExit>,
 ) {
     let world = st.world.clone();
-    // F07-A.2: a `--horn` capture reports its voice path — `s` counting
+    // F07-A.2/B.1: the capture reports its voice path — `s` counting
     // the sinks the output device attached (0 means the mixer never
-    // saw the voice, an honest no-device report).
+    // saw the voice, an honest no-device report), `l` the engine loops
+    // spawned and `a` the ones audible at record time.
     let aud_detail = aud
         .filter(|r| r.active())
-        .map(|r| format!(" aud={}h/{}v/{}s", r.horns, r.voices, r.sunk))
+        .map(|r| {
+            format!(
+                " aud={}h/{}v/{}s/{}l/{}a",
+                r.horns, r.voices, r.sunk, r.loops, r.audible
+            )
+        })
         .unwrap_or_default();
     let record = |status: smoke::SmokeStatus, detail: String| smoke::SmokeRecord {
         kind: smoke::KIND_VISUAL,

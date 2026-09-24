@@ -324,14 +324,16 @@ pub fn headless_smoke(
                 // `--finish` works headless too — the record still
                 // reports the real resolved outcome.
                 crate::results::dev_finish_once,
-                // F07-A.2: the authored-horn voice path — the record's
-                // `aud=` field reads the report. No AudioPlugin runs
-                // here, so voices spawn and are counted but never
-                // attach a sink (`sunk` stays 0 — honest headless
-                // evidence of the request→voice half only).
+                // F07-A.2/B.1: the authored-horn voice path plus the
+                // engine loop rig — the record's `aud=` field reads the
+                // report. No AudioPlugin runs here, so voices spawn and
+                // are counted but never attach a sink (`sunk` stays 0 —
+                // honest headless evidence of the request→voice half
+                // only; the mix still computes on the components).
                 crate::audio::horn_input,
                 crate::audio::dev_horn_once,
                 crate::audio::horn_voices,
+                (crate::audio::engine_rigs, crate::audio::engine_drive).chain(),
                 crate::audio::count_sinks,
                 crate::audio::sync_audio_pause,
                 crate::audio::reset_audio_report.run_if(session::unloading),
@@ -939,9 +941,10 @@ pub fn headless_smoke(
         .filter(|r| r.impacts + r.splats + r.resets > 0)
         .map(|r| format!(" txl={}i/{}s/{}r", r.impacts, r.splats, r.resets))
         .unwrap_or_default();
-    // F07-A.2 audio evidence: horn presses / voices spawned / sinks the
-    // device attached, plus `+Nd` bound-drops and `+Nx` resolve/decode
-    // failures when nonzero. Activity-gated — a quiet run stays
+    // F07-A.2/B.1 audio evidence: horn presses / voices spawned / sinks
+    // the device attached / engine loops live / loops audible at record
+    // time, plus `+Nd` bound-drops and `+Nx` resolve/decode failures
+    // when nonzero. Activity-gated — an audio-free run stays
     // bit-identical, and headless `0s` honestly reports that no output
     // device ever saw the voice.
     let aud_detail = world_ecs
@@ -959,8 +962,8 @@ pub fn headless_smoke(
                 String::new()
             };
             format!(
-                " aud={}h/{}v/{}s{dropped}{failed}",
-                r.horns, r.voices, r.sunk
+                " aud={}h/{}v/{}s/{}l/{}a{dropped}{failed}",
+                r.horns, r.voices, r.sunk, r.loops, r.audible
             )
         })
         .unwrap_or_default();
