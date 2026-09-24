@@ -262,6 +262,14 @@ impl Difficulty {
             Self::Professional => &row.professional,
         }
     }
+
+    /// Stable lowercase token for evidence records (`diff=`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Amateur => "amateur",
+            Self::Professional => "professional",
+        }
+    }
 }
 
 /// A time-of-day selector. Authored values are 0-3 (WLD-4); the

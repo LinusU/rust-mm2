@@ -11,7 +11,7 @@ use bevy::prelude::Vec3;
 use mm2_app::session::SelectedCar;
 use mm2_app::smoke::{self, SmokeRecord, SmokeStatus};
 use mm2_assets::Vfs;
-use mm2_game::{DevOverrides, SessionConfig, SpawnPose, WorldMode};
+use mm2_game::{DevOverrides, Difficulty, SessionConfig, SpawnPose, WorldMode};
 use mm2_vehicle::VehicleConfig;
 
 fn write(dir: &Path, rel: &str, contents: impl AsRef<[u8]>) {
@@ -185,6 +185,13 @@ fn dev_world_headless_smoke_passes_without_mm2_data() {
     );
     assert!(rec.line().starts_with("smoke=headless-physics"));
     assert!(rec.line().contains("world=dev-world"));
+    // Run-config disclosure (F15-B.9): the record names the difficulty
+    // that selected the session's authored content — default Amateur.
+    assert!(
+        rec.line().contains("diff=amateur"),
+        "record names the session difficulty: {}",
+        rec.line()
+    );
     // The session clock ran on the fixed step: ~2 ticks per 60 Hz update
     // at the 120 Hz timestep, minus the clock priming update (F01-AC03).
     let ticks: u64 = rec
@@ -251,6 +258,45 @@ fn dev_world_headless_smoke_follows_player_across_restart() {
     assert!(
         line.contains("final=("),
         "the live player should have a pose at the cap: {line}"
+    );
+}
+
+/// The `diff=` field reflects the configured difficulty, not a fixed
+/// label — a Professional-configured run records `diff=professional`.
+#[test]
+fn record_names_the_configured_difficulty() {
+    let vfs = Vfs::new();
+    let config = SessionConfig {
+        difficulty: Difficulty::Professional,
+        ..SessionConfig::default()
+    };
+    let rec = smoke::headless_smoke(
+        &config,
+        vfs,
+        SelectedCar {
+            def: None,
+            paint: 0,
+        },
+        &VehicleConfig::default(),
+        600,
+        smoke::Driver::Hold,
+        None,
+    );
+    assert_eq!(
+        rec.status,
+        SmokeStatus::Pass,
+        "expected pass, got: {}",
+        rec.line()
+    );
+    assert!(
+        rec.line().contains("diff=professional"),
+        "record names the configured difficulty: {}",
+        rec.line()
+    );
+    assert!(
+        !rec.line().contains("diff=amateur"),
+        "no amateur label on a professional run: {}",
+        rec.line()
     );
 }
 

@@ -21,7 +21,7 @@ use mm2_app::session::{self, SessionControl};
 use mm2_app::{camera, contracts, race};
 use mm2_assets::Vfs;
 use mm2_game::{
-    EventRef, EventTableKind, ImpactEvent, Mm2Vfs, ObjectIdentity, OpponentRoute,
+    Difficulty, EventRef, EventTableKind, ImpactEvent, Mm2Vfs, ObjectIdentity, OpponentRoute,
     OpponentRoutePoint, OpponentSpec, ParticipantState, Player, PlayerControl, PlayerVehicle,
     RaceDefinition, RaceProgress, RaceStarted, RaceState, ResultLedger, Session, SessionConfig,
     SessionEntity, SessionMode, SessionPhase, advance_session_tick, despawn_session_entities,
@@ -1872,4 +1872,154 @@ fn catch_up_lifts_a_trailing_opponents_demand() {
             ParticipantState::Racing
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// F15-B.9 — measured difficulty effects (AC06)
+// ---------------------------------------------------------------------------
+
+/// The session difficulty selects which authored lineup an event
+/// fields — Amateur reads `<stem>.aimap`, Professional `<stem>.aimap_p`
+/// (RACE-11) — through the production `load_session_world` →
+/// `event_aimap` → `opponent_roster` → `load_opponent` path. The
+/// variants here differ in roster order, vehicle assignment, tuning
+/// tail and route geometry, so the pick is observable on the spawned
+/// field, not just in the parsed records.
+#[test]
+fn session_difficulty_fields_the_authored_variant() {
+    let tmp = roster_install_rows(
+        "vpt race0-a-0.opp 0.55 0 50.0 0.7 1 1 1 1 0 1.0\nvpheavy race0-a-1.opp 0.60 0 50.0 0.7 1 1 1 1 0 1.0\n",
+        &[
+            (
+                "race0.aimap_p",
+                aimap_with_opponents(
+                    "vpheavy race0-p-0.opp 1.00 0 50.0 0.7 1 1 1 1 0 1.0\nvpt race0-p-1.opp 0.95 0 50.0 0.7 1 1 1 1 0 1.0\n",
+                ),
+            ),
+            (
+                "race0-p-0.opp",
+                opp_file(&[
+                    [70.0, 0.0, 152.0],
+                    [110.0, 0.0, 152.0],
+                    [140.0, 0.0, 152.0],
+                    [165.0, 0.0, 152.0],
+                    [180.0, 0.0, 152.0],
+                ]),
+            ),
+            (
+                "race0-p-1.opp",
+                opp_file(&[
+                    [70.0, 0.0, 158.0],
+                    [110.0, 0.0, 158.0],
+                    [140.0, 0.0, 158.0],
+                    [165.0, 0.0, 158.0],
+                    [180.0, 0.0, 158.0],
+                ]),
+            ),
+        ],
+    );
+
+    // (roster slot, vehicle, bound throttle cap, first authored route
+    // point's z — the lane offset proves which `.opp` variant bound).
+    let lineup = |difficulty: Difficulty| {
+        let mut app = event_app(
+            SessionConfig {
+                difficulty,
+                ..event_config()
+            },
+            vfs_of(tmp.path()),
+        );
+        app.update();
+        let mut rows: Vec<(usize, String, f32, f32)> = app
+            .world_mut()
+            .query::<&OpponentDriver>()
+            .iter(app.world())
+            .map(|d| {
+                (
+                    d.index,
+                    d.spec.vehicle.clone(),
+                    d.tuning.throttle_cap,
+                    d.spec.route.as_ref().unwrap().points[0].position.z,
+                )
+            })
+            .collect();
+        rows.sort_by_key(|r| r.0);
+        rows
+    };
+
+    assert_eq!(
+        lineup(Difficulty::Amateur),
+        vec![
+            (0, "vpt".to_string(), 0.55, 140.0),
+            (1, "vpheavy".to_string(), 0.60, 146.0),
+        ],
+        "amateur binds <stem>.aimap — its own vehicles, tails and -a- routes"
+    );
+    assert_eq!(
+        lineup(Difficulty::Professional),
+        vec![
+            (0, "vpheavy".to_string(), 1.0, 152.0),
+            (1, "vpt".to_string(), 0.95, 158.0),
+        ],
+        "professional binds <stem>.aimap_p — a different authored field"
+    );
+}
+
+/// AC06's measured-effects leg: the same car chases the same lane
+/// geometry in both sessions, and the only difference is which aimap
+/// variant the session difficulty selected — amateur's authored
+/// `maxThrottle` 0.55 against professional's 1.00. The professional
+/// field covers measurably more road at a fixed tick: the difficulty
+/// switch is a measured change through the production drive path, not
+/// a label. Both runs read `catch_up == 0` — a lone opponent leads the
+/// parked player, so the delta is authored tuning, never the
+/// disclosed assist (DSN-27).
+#[test]
+fn session_difficulty_measures_on_track() {
+    let tmp = roster_install_rows(
+        "vpt race0-a-0.opp 0.55 0 50.0 0.7 1 1 1 1 0 1.0\n",
+        &[
+            (
+                "race0.aimap_p",
+                aimap_with_opponents("vpt race0-p-0.opp 1.00 0 50.0 0.7 1 1 1 1 0 1.0\n"),
+            ),
+            (
+                "race0-p-0.opp",
+                opp_file(&[
+                    [70.0, 0.0, 140.0],
+                    [110.0, 0.0, 140.0],
+                    [140.0, 0.0, 140.0],
+                    [165.0, 0.0, 140.0],
+                    [180.0, 0.0, 140.0],
+                ]),
+            ),
+        ],
+    );
+
+    let driven = |difficulty: Difficulty| {
+        let mut app = event_app(
+            SessionConfig {
+                difficulty,
+                ..event_config()
+            },
+            vfs_of(tmp.path()),
+        );
+        app.update();
+        let vpt = opponent_by_vehicle(&mut app, "vpt");
+        run(&mut app, 480);
+        let driver = app.world().get::<OpponentDriver>(vpt).unwrap();
+        assert_eq!(
+            driver.catch_up, 0.0,
+            "a lone leader earns no assist — the measured delta is authored tuning"
+        );
+        app.world().get::<Position>(vpt).unwrap().0.x
+    };
+
+    let amateur_x = driven(Difficulty::Amateur);
+    let pro_x = driven(Difficulty::Professional);
+    assert!(
+        pro_x - amateur_x > 10.0,
+        "the difficulty switch must measure on track: \
+         amateur x={amateur_x:.1} vs professional x={pro_x:.1}"
+    );
 }
