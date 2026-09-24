@@ -33,7 +33,7 @@ pub mod traffic;
 
 pub use banger::{
     Banger, BangerCause, BangerDefinition, BangerPhase, BangerPool, BangerStateChanged,
-    DEFAULT_ACTIVE_POOL,
+    DEFAULT_ACTIVE_POOL, MAX_BANGER_ANGULAR_SPEED, MAX_BANGER_LINEAR_SPEED,
 };
 pub use breakaway::{BreakPartSpec, BreakPartState, PartDetached, VehicleBreaks};
 pub use config::{

@@ -1,62 +1,79 @@
-# Last iteration — F13-C.2: parked stationary-control driver + first Professional legs
+# Last iteration — F13-C.3: sf-8 hypervelocity banger cascade diagnosed and bounded
 
-Task slice on `ralph/night` (baseline `598e672`, the externally checked
-F13-C.1 commit). Selected the F13-C remainder's two named evidence gaps
-from the passed review: no true stationary-player control (the `Hold`
-leg drives blind at full throttle) and Professional rosters audited but
-never driven. One small code change unlocks both.
+Task slice on `ralph/night` (baseline `6ab6325`, the externally checked
+F13-C.2 commit). Selected the named F13-C remainder: the scripted sf-8
+leg that ran ~8-12 updates/s, recorded `dropped=53955` and a transient
+`peak=17070 m/s`, and (reproduced this iteration) ended
+`status=fail — fell through the world` after ~9 min for 1200 frames.
 
-## What changed
+## Diagnosis (retail `fnv1a64:e91e6cd4b2ae30d9`, instrumented run)
 
-Commit `a7d2797` — `crates/mm2_app/src/{input,smoke,main}.rs`,
-`tests/smoke.rs`, `README.md`:
+The leg is not merely slow — it is a physics energy explosion:
 
-- **`Driver::Parked` / `--parked`** (conflicts `--bot`): a
-  `input::ParkedDrive` resource gates `parked_drive`, which writes
-  `VehicleInput { handbrake: 1.0, .. }` on the player vehicle every
-  frame — the foot brake is the reverse throttle once stopped, so the
-  handbrake is the parked state. Same resource-gated pattern as
-  `ScriptedDrive`, identical in the windowed app and headless smoke
-  (chained after the scripted driver so a test holding both markers
-  stays deterministic).
-- The dev-world `car never drove` verdict is inert under Parked — a
-  driver that never requests motion cannot fail it legitimately;
-  `moved=`/`peak=` staying at zero *is* the parked evidence. Records
-  name the leg `driver=parked`.
-- Test: `dev_world_parked_driver_stays_parked` — pass + `driver=parked`
-  + `peak<5` + `moved<5` where `Hold` drives off.
+- Frame diagnostics (`MM2_SMOKE_DIAG`, now a permanent env-gated
+  instrumentation block in `smoke.rs`) show the cascade onset at
+  ~f797: `CollisionStart` jumps to 10-25k/frame, dormant bangers burn
+  5953→120 in ~10 frames, frame times hit 1-2 s. Process footprint
+  reached ~19 GB of `MALLOC_SMALL` (76M live nodes) — Avian's
+  `store_contact_impulses`/`warm_start` dominating `sample` profiles.
+- Per-body velocity tracing shows the amplifier: fragment
+  `sp_lightstreet_f-break01` goes 158→10077 m/s in one frame, then
+  `*-breakNN` fragments across the city reach ~4×10⁶ m/s and tunnel
+  block-wide per substep, breaking props wherever they land.
+- Mechanism: `BangerDefinition::angular_kick` divides torque by a
+  cuboid inertia estimate that is tiny on small break pieces → huge ω
+  → a later contact's `normal_speed` reads the ω×r surface velocity as
+  approach speed → `resolve_transfer` launches the struck prop's
+  pieces at ~that magnitude → exponential across generations. A ~4M
+  m/s fragment hitting the car produced the recorded 17070 m/s peak
+  and the below-world fail.
+
+## Fix (implementation choice — the records carry no speed limit)
+
+- `mm2_game::banger`: `MAX_BANGER_LINEAR_SPEED = 200 m/s`,
+  `MAX_BANGER_ANGULAR_SPEED = 60 rad/s` next to `DEFAULT_ACTIVE_POOL`.
+  A legitimate transfer launch cannot exceed ~(1+e)·striker speed
+  (~180 m/s for the fastest stock car); the caps only clip runaway.
+- `banger_bundle` (mm2_app): every banger body — dormant, activated,
+  fragment, breakaway piece — now carries Avian `MaxLinearSpeed` /
+  `MaxAngularSpeed`. The integrator clamps solver-body velocity every
+  substep and writes the clamped value back.
+- Write-side clamps so components never hold absurd values between
+  frames (constraint prep reads them pre-clamp): `angular_kick`
+  clamps its output, `activate_bangers` clamps `severity` at
+  `Activation` construction on both the contact and bound-strike
+  paths (bounding the authored-limit estimate, the transfer impulse —
+  hence the striker payment — and the recorded cause), and clamps the
+  written `launch` at its single use site.
+- Regression tests (`tests/banger.rs`): the bundle stamps the caps; a
+  body spawned at 5000 m/s / 10⁶ rad/s is clamped within a frame; a
+  hypervelocity striker overlapping a dormant prop activates it but
+  the launched prop stays bounded (the transfer can no longer
+  propagate the spike to the next generation).
 
 ## Verification
 
-Retail install `fnv1a64:e91e6cd4b2ae30d9` (read-only), Apple M1,
-`--frames 12000` headless, commit `a7d2797`, 2026-09-24 — published in
-`docs/race-coverage.md`:
-
-- **Parked control (Amateur), 7/7 `status=pass`** on the events where
-  C.1 saw opponent finishes — local `cp=0` on 6 of 7, `pos=` last
-  everywhere, `dup=0`: london-0 `opp=3/4 F`, sf-0 `opp=4/6 F`,
-  sf-2 `1/6 F`, sf-3 `2/5 F`, sf-4 `1/5 F`; london-2/sf-5 progressed
-  (omax 4/5) without finishing. **11 opponent finishes with ledger
-  results while the local participant contributed nothing** — the AC04
-  control leg. sf-0's `cp=1/6`/`moved=8m` is the parked car shoved
-  through a trigger by opponent contact — a pushed crossing is a real
-  crossing, disclosed.
-- **Professional scripted legs (3):** sf-0 `finished place=6/7` behind
-  5 opponent finishes (pro `vpcaddie`/`vpbug` field, `env=lt01`; Pro
-  wires `6opp 6rt` clean — the `6opp/7tbl` anomaly is amateur-only),
-  sf-3 `finished place=1` (`vpvwcup`/`vpbullet`/`vpauditt`, `lt06`),
-  london-0 `rs=2` still racing at cap (`vpcoop2k` ×6) — Pro measurably
-  selects different authored rosters and conditions vs Amateur.
-- **Gates:** `cargo fmt --all -- --check` clean; `cargo clippy
-  --locked --workspace --all-targets --all-features -- -D warnings`
-  clean; `cargo test --locked --workspace` green at `a7d2797`.
+- sf-8 scripted, 12000 frames: **70 s wall** (was ~9 min for 1200
+  frames at the failure point), `status=pass`, `peak=30.1 m/s`,
+  `dropped=0`, `wheels=4/4`, `bng=5941d/13a/4s/3b` (3 props broken —
+  normal), `impacts=333`, race progressing `cp=4/8`, `pos=1/7`. Zero
+  bodies exceeded 150 m/s in the diagnostic run.
+- Gates: `cargo fmt --all -- --check` clean; `cargo clippy --locked
+  --workspace --all-targets --all-features -- -D warnings` clean;
+  `cargo test --locked --workspace` green (64 suites).
 
 ## Not done / open
 
-- Professional coverage partial: 3 scripted Pro legs; the other 21
-  events' Pro runtime + all Pro hold/parked legs open.
-- The parked control is stationary, not physics-frozen — the field
-  shoves it (`moved` up to 8 m, `peak` 4.7 m/s impact-only).
-- sf-8's ~8-12 updates/s CPU-bound leg undiagnosed; deep-course budgets
-  and any retail-fidelity comparison remain open (engine self-metrics
-  only).
+- The Professional matrix remainder is unchanged: 21 events undriven
+  scripted at Pro, no Pro hold/parked legs. sf-8 no longer blocks the
+  runtime legs' cost.
+- The scripted driver's sf-8 pace is a driving-quality question
+  (re-anchors, cp=4/8 at cap), not a physics defect.
+- Vehicles carry no speed cap — the observed car spike was fragment
+  blowback, now bounded at the source; other runaway paths (e.g.
+  opponent recovery) are unguarded and unproven either way.
+- Transient post-solve velocity spikes can still exceed the cap for
+  the remainder of a single substep (the solve runs after the clamp);
+  they re-clamp next substep and can no longer compound.
+- Deep London/SF non-finishes, opponent skill vs retail, and any
+  retail-fidelity comparison remain open (engine self-metrics only).

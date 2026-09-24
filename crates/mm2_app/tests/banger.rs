@@ -24,9 +24,9 @@ use mm2_app::session::{self, SelectedCar, SessionControl, SpawnPoint, TunedVehic
 use mm2_assets::Vfs;
 use mm2_game::{
     AuthorityRole, Banger, BangerCause, BangerDefinition, BangerPhase, BangerPool,
-    BangerStateChanged, CityEntity, ImpactEvent, Mm2Vfs, ObjectId, ObjectIdentity, Session,
-    SessionAuthority, SessionConfig, SessionEntity, SessionPhase, WorldMode, advance_session_tick,
-    despawn_session_entities,
+    BangerStateChanged, CityEntity, ImpactEvent, MAX_BANGER_ANGULAR_SPEED, MAX_BANGER_LINEAR_SPEED,
+    Mm2Vfs, ObjectId, ObjectIdentity, Session, SessionAuthority, SessionConfig, SessionEntity,
+    SessionPhase, WorldMode, advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::{StrikeBound, VehicleConfig, VehiclePlugin, vehicle_bundle};
 
@@ -1734,4 +1734,111 @@ fn stamped_props_rest_their_bound_base_on_the_path_point() {
     let i = aabb_of(&mut app, "prop-centred-collider");
     assert!((i.min.y + 0.5).abs() < 0.05, "INST stays verbatim: {i:?}");
     assert!((i.max.y - 0.5).abs() < 0.05, "{i:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Solver-level speed bounds (F13-C sf-8 cascade): the records carry no
+// speed limit, and before `MaxLinearSpeed`/`MaxAngularSpeed` rode the
+// bundle a fragment's spin kick could inflate a later contact's
+// `normal_speed`, which `resolve_transfer` then launched the next
+// prop's pieces at — compounding to ~4×10⁶ m/s and tunneling the city.
+// The caps bound every substep's entry velocity and the write-side
+// clamps keep our own launches/kicks inside it. Bounds are an
+// implementation choice.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn banger_bodies_carry_solver_speed_bounds() {
+    let mut app = test_app_with(SessionAuthority::Local, 32);
+    let (banger, _) = spawn_banger(&mut app, Vec3::new(0.0, 0.5, 0.0), banger_def("cap", 0.0));
+    assert_eq!(
+        app.world().get::<MaxLinearSpeed>(banger).unwrap().0,
+        MAX_BANGER_LINEAR_SPEED
+    );
+    assert_eq!(
+        app.world().get::<MaxAngularSpeed>(banger).unwrap().0,
+        MAX_BANGER_ANGULAR_SPEED
+    );
+}
+
+#[test]
+fn a_runaway_banger_velocity_is_clamped() {
+    let mut app = test_app_with(SessionAuthority::Local, 32);
+    let (banger, _) = spawn_banger(&mut app, Vec3::new(0.0, 0.5, 0.0), banger_def("cap", 0.0));
+    // The pathological state the sf-8 cascade produced, applied
+    // directly: a fragment-class body already moving/spinning orders
+    // of magnitude past any real launch.
+    app.world_mut().entity_mut(banger).insert((
+        RigidBody::Dynamic,
+        LinearVelocity(Vec3::new(0.0, 0.0, 5_000.0)),
+        AngularVelocity(Vec3::new(0.0, 1.0e6, 0.0)),
+    ));
+
+    // The solver body spawns through deferred commands on the
+    // `RigidBody` change, so the first update publishes the raw
+    // velocity; every update after it must read clamped.
+    app.update();
+    for _ in 0..10 {
+        app.update();
+        let v = app.world().get::<LinearVelocity>(banger).unwrap().0;
+        let w = app.world().get::<AngularVelocity>(banger).unwrap().0;
+        assert!(v.is_finite(), "linear velocity went non-finite: {v:?}");
+        assert!(w.is_finite(), "angular velocity went non-finite: {w:?}");
+        // A free-sliding body answers no deep contact solve, so the
+        // substep clamp is the bound the write-back publishes.
+        assert!(
+            v.length() <= MAX_BANGER_LINEAR_SPEED + 1e-3,
+            "linear runaway must clamp to the cap: {v:?}"
+        );
+        assert!(
+            w.length() <= MAX_BANGER_ANGULAR_SPEED + 1e-3,
+            "angular runaway must clamp to the cap: {w:?}"
+        );
+    }
+}
+
+#[test]
+fn a_hypervelocity_striker_cannot_launch_a_prop_past_the_bound() {
+    // The cascade's contact path directly: a fragment-class banger
+    // carrying the runaway state sf-8 produced touches a dormant prop.
+    // The clamps bound both the stored velocity and the transfer's
+    // severity reading, so the prop launches near the cap instead of
+    // inheriting ~10⁵ m/s and firing the next generation.
+    let mut app = test_app_with(SessionAuthority::Local, 32);
+    // Overlapping on spawn: the contact exists on the first substep,
+    // before any post-solve deflection can carry the striker away.
+    let (striker, _) = spawn_banger(&mut app, Vec3::new(-0.6, 0.5, 0.0), banger_def("frag", 0.0));
+    app.world_mut().entity_mut(striker).insert((
+        RigidBody::Dynamic,
+        LinearVelocity(Vec3::new(5_000.0, 0.0, 0.0)),
+        AngularVelocity(Vec3::new(0.0, 0.0, 1.0e6)),
+    ));
+    let (b, object_b) = spawn_banger(&mut app, Vec3::new(0.0, 0.5, 0.0), banger_def("b", 0.0));
+
+    let mut b_activated = false;
+    let mut max_b_v = 0.0f32;
+    for _ in 0..FRAMES_PER_SECOND {
+        app.update();
+        b_activated |= drain_transitions(&mut app)
+            .iter()
+            .any(|e| e.object == object_b && e.phase == BangerPhase::Active);
+        for entity in [striker, b] {
+            let v = app.world().get::<LinearVelocity>(entity).unwrap().0;
+            let w = app.world().get::<AngularVelocity>(entity).unwrap().0;
+            assert!(v.is_finite(), "non-finite velocity: {v:?}");
+            assert!(w.is_finite(), "non-finite spin: {w:?}");
+        }
+        max_b_v = max_b_v.max(app.world().get::<LinearVelocity>(b).unwrap().0.length());
+    }
+
+    assert!(b_activated, "the contact still activates the dormant prop");
+    // The launched prop's velocity is the transfer's output — bounded
+    // by the launch clamp plus at most one substep's post-clamp solve
+    // impulse. The striker may carry a transient solve spike of its
+    // own (re-clamped next substep); what must never happen is the
+    // *prop* inheriting the runaway.
+    assert!(
+        max_b_v <= MAX_BANGER_LINEAR_SPEED * 2.0,
+        "transfer stayed bounded, got |v_b|={max_b_v}"
+    );
 }

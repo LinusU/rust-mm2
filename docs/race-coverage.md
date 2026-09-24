@@ -146,13 +146,23 @@ leg. The loop itself is also positive evidence: 25 clean restart
 cycles with `dup=0` — no result duplication, no stale progress
 (AC05's restart leg, exercised hard).
 
-**Wall-clock + physics caveat (sf-8).** The scripted sf-8 leg passed
-but needed ~24 min wall — the event is CPU-bound (6 opponents +
-dense authored traffic) at ~8-12 updates/s, and recorded the
-matrix's worst `dropped=53955` plus a transient `peak=17070 m/s`
-velocity spike (collision impulse artifact; the final pose stayed
-finite and `status=pass` held). Its hold leg restart-looped (rs=13,
-countdown) — the fast blind start wrecks before steering matters.
+**Wall-clock + physics caveat (sf-8) — resolved (F13-C.3).** The
+scripted sf-8 leg originally passed but needed ~24 min wall and
+recorded the matrix's worst `dropped=53955` plus a transient
+`peak=17070 m/s` spike. Reproduction with instrumentation showed a
+physics defect, not mere load: fragment angular kicks (tiny cuboid
+inertia → huge ω) inflated the next contact's approach speed via the
+ω×r term, and the banger transfer launched each successive
+generation of fragments at that magnitude — ~4×10⁶ m/s within ~10
+frames. Hypervelocity fragments tunneled city-wide, breaking 3915
+props and flooding the solver; fragment blowback produced the car's
+17070 m/s spike and a below-world fail. Banger bodies now carry
+linear/angular speed caps and the activation severity/launch are
+clamped. Re-run: **~70 s wall**, `status=pass`, `peak=30.1 m/s`,
+`dropped=0`, 3 props broken, race progressing `cp=4/8 pos=1/7`. The
+caps are an implementation choice — authored records carry no speed
+limit. Its hold leg restart-looping (rs=13, countdown) is unchanged —
+the fast blind start wrecks before steering matters.
 
 ## Stationary-control and Professional legs (F13-C.2)
 
@@ -206,12 +216,13 @@ not a session defect.
 ## Anomalies kept visible
 
 - **Physics step drops under contention:** `dropped=` counts physics
-  substeps skipped under load — hold-sf-4 55917, bot-sf-8 53955,
-  hold-london-9 53155, bot-sf-4 16348 (the player *still won* that
-  one), bot-sf-7 13535, hold-london-5 4914. Simulation stays finite
-  and correct; the drops mean effective sim rate sagged below 120 Hz
-  on those runs. bot-sf-8 also logged a transient `peak=17070 m/s`
-  velocity spike (collision-impulse artifact; pose stayed finite).
+  substeps skipped under load — hold-sf-4 55917, hold-london-9 53155,
+  bot-sf-4 16348 (the player *still won* that one), bot-sf-7 13535,
+  hold-london-5 4914. Simulation stays finite and correct; the drops
+  mean effective sim rate sagged below 120 Hz on those runs. The
+  worst offender, bot-sf-8's 53955 + `peak=17070 m/s`, was a real
+  hypervelocity-fragment defect — diagnosed and bounded in F13-C.3;
+  it no longer appears on re-run.
 - **End-of-run grounding:** `wheels=0/4` on hold-london-4 and
   hold-sf-4 (car ended propped/airborne), 2/4 bot-sf-2, 3/4
   hold-sf-7 — disclosed poses, not crashers.
@@ -254,18 +265,21 @@ not a session defect.
   crossing tests; recovery-penalty fidelity remains a F05/F15
   research item.
 - **F13-AC06** (catalog matrix): **this document** — 24/24 rows
-  attempted, 48/48 legs `status=pass` (sf-8 scripted leg a ~24-min
-  wall-clock outlier), finishes and stalls reported per event per
-  driver; plus the C.2 parked-control legs and the first Pro rows.
+  attempted, 48/48 legs `status=pass` (sf-8's ~24-min wall-clock
+  outlier was a physics defect, bounded in F13-C.3 — ~70 s on re-run),
+  finishes and stalls reported per event per driver; plus the C.2
+  parked-control legs and the first Pro rows.
 
 ## Residuals / honest limits
 
 - Professional coverage is partial: 3 scripted Pro legs (sf-0/sf-3,
   london-0) — the remaining 21 events' Pro rosters are structurally
   audited, not driven; no Pro hold/parked legs yet.
-- sf-8's scripted leg is a wall-clock outlier (~24 min at ~8-12
-  updates/s under load) with the matrix's worst dropped-step count —
-  performance there is a real question, not yet diagnosed.
+- sf-8's ~24-min wall-clock outlier was a hypervelocity-fragment
+  cascade — diagnosed and bounded in F13-C.3 (banger speed caps +
+  clamped activation severity; re-run ~70 s, `dropped=0`,
+  `peak=30.1 m/s`). The scripted driver's pace there (cp=4/8 at cap)
+  is a driving-quality question, not a physics defect.
 - The parked control is stationary, not physics-frozen — the field
   shoves it (sf-0 `cp=1/6` on contact push-through; `moved` up to
   8 m). That is correct swept-trigger behavior, disclosed.

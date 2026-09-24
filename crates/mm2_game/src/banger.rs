@@ -42,6 +42,24 @@ use crate::ids::ObjectId;
 /// [`crate::banger`] systems reclaim oldest-activated first.
 pub const DEFAULT_ACTIVE_POOL: usize = 32;
 
+/// Solver-level speed bound carried by every banger body, m/s
+/// (implementation choice — the records carry no speed limit). A
+/// legitimate transfer launch cannot exceed ~(1+e)·striker speed —
+/// under ~180 m/s even for the fastest stock car — so 200 only clips
+/// solver runaway like the sf-8 fragment cascade, where a
+/// spin-inflated contact severity fed the transfer and compounded to
+/// ~4×10⁶ m/s across break-piece generations.
+pub const MAX_BANGER_LINEAR_SPEED: f32 = 200.0;
+
+/// Angular companion of [`MAX_BANGER_LINEAR_SPEED`], rad/s — also the
+/// bound [`BangerDefinition::angular_kick`] clamps to. The kick's
+/// cuboid inertia estimate is tiny on small break pieces, so a real
+/// hit can produce ω far past 10⁵ rad/s; that spin then re-enters a
+/// later contact's `normal_speed` as inflated approach speed —
+/// the cross-generation amplifier the sf-8 cascade rode. ~10 rev/s is
+/// already a visual blur on a prop.
+pub const MAX_BANGER_ANGULAR_SPEED: f32 = 60.0;
+
 /// Lifecycle of one bound banger placement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BangerPhase {
@@ -189,7 +207,10 @@ impl BangerDefinition {
             m * (dims.x * dims.x + dims.y * dims.y) / 12.0,
         );
         let torque = lever.cross(impulse);
-        let w = torque / inertia;
+        // Bound the kick: the cuboid inertia shrinks quadratically on
+        // small pieces, and an unbounded spin re-enters a later
+        // contact's approach speed as free energy (sf-8 cascade).
+        let w = (torque / inertia).clamp_length_max(MAX_BANGER_ANGULAR_SPEED);
         if w.is_finite() { w } else { Vec3::ZERO }
     }
 }

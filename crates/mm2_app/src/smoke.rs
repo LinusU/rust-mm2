@@ -375,6 +375,7 @@ pub fn headless_smoke(
     // `rs=` rather than mistaking the fresh session for the first.
     let initial_generation = app.world().resource::<Session>().generation();
 
+    let diag = std::env::var_os("MM2_SMOKE_DIAG").is_some();
     let settle = frames.min(120);
     let mut saw_grounded = false;
     let mut grounded_wheels = 0usize;
@@ -421,7 +422,81 @@ pub fn headless_smoke(
                 };
             }
         }
+        let t0 = std::time::Instant::now();
         app.update();
+        if diag {
+            let mut q = app.world_mut().query::<(
+                Entity,
+                &LinearVelocity,
+                Option<&Position>,
+                Option<&Name>,
+                Has<Banger>,
+                Has<mm2_vehicle::vehicle::Vehicle>,
+            )>();
+            let mut top: Vec<(f32, Entity, String, Vec3, bool, bool)> = q
+                .iter(app.world())
+                .filter(|(_, v, _, _, _, _)| v.0.length() > 150.0)
+                .map(|(e, v, p, n, b, veh)| {
+                    (
+                        v.0.length(),
+                        e,
+                        n.map(|x| x.to_string()).unwrap_or_default(),
+                        p.map(|p| p.0).unwrap_or(Vec3::ZERO),
+                        b,
+                        veh,
+                    )
+                })
+                .collect();
+            top.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            for (s, e, n, p, b, veh) in top.iter().take(5) {
+                eprintln!("FAST f={f} e={e:?} name={n} |v|={s:.0} pos={p:?} bng={b} veh={veh}");
+            }
+        }
+        if diag && (f % 50 == 0 || t0.elapsed() > Duration::from_millis(100)) {
+            let ents = app.world().entity_count();
+            let (ap, sp, edges) = app
+                .world()
+                .get_resource::<ContactGraph>()
+                .map(|g| {
+                    (
+                        g.iter_active().count(),
+                        g.iter_sleeping().count(),
+                        g.edges.edge_count(),
+                    )
+                })
+                .unwrap_or((0, 0, 0));
+            let cs = app
+                .world()
+                .get_resource::<Messages<CollisionStart>>()
+                .map(|m| m.len())
+                .unwrap_or(0);
+            let ce = app
+                .world()
+                .get_resource::<Messages<CollisionEnd>>()
+                .map(|m| m.len())
+                .unwrap_or(0);
+            let bangers = {
+                let mut q = app.world_mut().query::<&Banger>();
+                let mut c = [0usize; 4];
+                for b in q.iter(app.world()) {
+                    c[match b.phase {
+                        BangerPhase::Dormant => 0,
+                        BangerPhase::Active => 1,
+                        BangerPhase::Settled => 2,
+                        BangerPhase::Broken => 3,
+                    }] += 1;
+                }
+                c
+            };
+            eprintln!(
+                "diag f={f} dt={:?} ents={ents} pairs={ap}+{sp} edges={edges} cstart={cs} cend={ce} bng={}/{}/{}/{}",
+                t0.elapsed(),
+                bangers[0],
+                bangers[1],
+                bangers[2],
+                bangers[3]
+            );
+        }
         for e in app
             .world_mut()
             .resource_mut::<Messages<BangerStateChanged>>()

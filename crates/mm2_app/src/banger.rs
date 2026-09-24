@@ -52,7 +52,8 @@ use mm2_assets::Vfs;
 use mm2_formats::banger::BangerData;
 use mm2_game::{
     AuthorityRole, Banger, BangerCause, BangerDefinition, BangerPhase, BangerPool,
-    BangerStateChanged, CityEntity, ObjectId, ObjectIdentity, Session, SessionEntity,
+    BangerStateChanged, CityEntity, MAX_BANGER_ANGULAR_SPEED, MAX_BANGER_LINEAR_SPEED, ObjectId,
+    ObjectIdentity, Session, SessionEntity,
 };
 use mm2_vehicle::StrikeBound;
 use tracing::{debug, warn};
@@ -198,19 +199,28 @@ pub fn banger_bundle(
         ObjectIdentity(object),
         role,
         banger,
-        RigidBody::Static,
-        collider,
-        // Authored physicals ride the dormant collider already: they
-        // shape resting contact the same way and the activation only
-        // has to flip the body kind.
-        Mass(def.mass),
-        CenterOfMass(mirrored_cg(&def)),
-        Friction::new(def.friction),
-        Restitution::new(def.elasticity),
-        // The striker usually enables the pair's events (the vehicle
-        // does), but banger-vs-banger and non-vehicle strikers need
-        // the flag on this side too.
-        CollisionEventsEnabled,
+        (
+            RigidBody::Static,
+            collider,
+            // Authored physicals ride the dormant collider already:
+            // they shape resting contact the same way and the
+            // activation only has to flip the body kind.
+            Mass(def.mass),
+            CenterOfMass(mirrored_cg(&def)),
+            Friction::new(def.friction),
+            Restitution::new(def.elasticity),
+            // The striker usually enables the pair's events (the
+            // vehicle does), but banger-vs-banger and non-vehicle
+            // strikers need the flag on this side too.
+            CollisionEventsEnabled,
+            // Solver-level speed bounds (the records carry none): the
+            // integrator clamps every substep and writes the clamped
+            // velocity back, so neither the transfer launch nor the
+            // spin kick can compound into the hypervelocity cascade
+            // sf-8 hit.
+            MaxLinearSpeed(MAX_BANGER_LINEAR_SPEED),
+            MaxAngularSpeed(MAX_BANGER_ANGULAR_SPEED),
+        ),
         transform,
         Visibility::Visible,
         Name::new(name),
@@ -602,17 +612,23 @@ pub fn activate_bangers(
             else {
                 continue;
             };
-            if deepest.severity <= 0.0 {
+            // The manifold's approach speed includes surface spin and
+            // can read a transient solver spike — bound it to the
+            // banger speed cap so the authored-limit estimate, the
+            // transfer impulse and the launch all see a physical
+            // approach (sf-8 cascade amplifier).
+            let severity = deepest.severity.min(MAX_BANGER_LINEAR_SPEED);
+            if severity <= 0.0 {
                 continue;
             }
-            let estimate = impact_energy(striker, deepest.severity, &masses);
+            let estimate = impact_energy(striker, severity, &masses);
             if !banger.def.activates_on(estimate) {
                 continue;
             }
             activations.push(Activation {
                 entity: collider,
                 object: identity.0,
-                severity: deepest.severity,
+                severity,
                 estimate,
                 dir: deepest.normal * sign,
                 point: deepest.point,
@@ -661,7 +677,9 @@ pub fn activate_bangers(
             // `cg.y = size.y/2`), not the bound-base origin.
             let centre = bpos.0 + brot.0 * mirrored_cg(&banger.def);
             let surface = linvel.0 + angvel.0.cross(centre - position.0);
-            let severity = surface.length();
+            // Same bound as the contact path: a transiently-spiked
+            // striker must not read as a city-breaking approach.
+            let severity = surface.length().min(MAX_BANGER_LINEAR_SPEED);
             if severity <= 0.0 {
                 continue;
             }
@@ -726,7 +744,14 @@ pub fn activate_bangers(
         // when the striker's mass cannot be resolved, which keeps the
         // pre-transfer launch and leaves the striker alone.
         let transfer = resolve_transfer(&a, banger.def.mass, &masses);
-        let launch = transfer.as_ref().map(|t| t.launch).unwrap_or(a.severity);
+        // Bound the written velocity itself: `launch` covers the
+        // transfer path and `severity` the mass-less fallback, and
+        // either can still read a transient solver spike.
+        let launch = transfer
+            .as_ref()
+            .map(|t| t.launch)
+            .unwrap_or(a.severity)
+            .min(MAX_BANGER_LINEAR_SPEED);
         match pieces.get(a.entity) {
             Ok((pieces, owner, gt)) if pieces.collidable().next().is_some() => {
                 apply_striker_correction(&a, transfer.as_ref(), &mut strikers.p1());
