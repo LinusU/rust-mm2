@@ -1,82 +1,64 @@
-# Last iteration — F02-C.5: per-car render leg + override matrix + AC06 re-run
+# Last iteration — F13-C.1: Checkpoint-catalog runtime matrix + honest outcome field
 
-Task slice on `ralph/night` (baseline `8bae423`, the reviewed
-F15-B.11 commit). Selected the F02-C remainder — the two named open
-legs in `docs/vehicle-coverage.md` (per-car rendered-output evidence
-for F02-AC03, per-car override causality for F02-AC04) plus the AC06
-startup-path re-run — the highest-priority ready slice, with GPU
-available on this machine and all instruments already in-tree.
+Task slice on `ralph/night` (baseline `55017f8`, the reviewed F02-C.5
+commit). Selected the F13-C remainder — the spec's last open leg is
+"validate the full catalog and playable races with actual opponents":
+the runtime pieces (progress, results, opponents, restart) already
+existed with synthetic coverage, so the highest-value slice was the
+catalog-level behavioral matrix on the real install, not another
+rewrite.
 
 ## What changed
 
-`crates/mm2_app/src/smoke.rs` + `crates/mm2_app/src/main.rs`:
+`crates/mm2_app/src/smoke.rs` (commit `1791df0`):
 
-- **Stale-screenshot false pass fixed.** `smoke_test`'s capture-wait
-  treated any non-empty file at the `--screenshot` target as this
-  run's write — a reused path reported `status=pass` on the previous
-  image while the fresh save was still in flight (observed live while
-  staging the render leg: `pass` with stale byte count, then
-  "Failed to send screenshot: sending on a closed channel" during
-  teardown). New `smoke::clear_stale_screenshot` removes the target
-  before the `Screenshot` request — `NotFound` is the expected case,
-  any other error fails the run rather than risking a stale pass.
-  Regression test `a_stale_capture_is_cleared_before_the_new_request`
-  (existing file cleared; fresh target ok; uncleanable target errors).
+- **Smoke `outcome=`/`place=` could borrow another participant's
+  result.** `result_outcome`'s fallback surfaced the field leader's
+  ledger entry when the local participant was still racing — observed
+  live on `sf checkpoint:0` reporting `cp=2/6 pos=7/7` *and*
+  `outcome=finished place=1`. The record now resolves the result by
+  local participant identity and omits the field when the local
+  driver hasn't resolved; opponent finishes remain visible via
+  `opp=`/`opps=`. Unit regression coverage for the leader-fallback
+  case rides along.
 
 ## Verification
 
 Evidence on the fingerprinted retail install
-(`fnv1a64:e91e6cd4b2ae30d9`, read-only), Apple M1 / Metal, this
-commit + the patch above, 2026-09-24:
+(`fnv1a64:e91e6cd4b2ae30d9`, read-only), Apple M1 / Metal, commit
+`1791df0`, 2026-09-24 — full write-up in `docs/race-coverage.md`:
 
-- **Render leg (F02-AC03):** all 21 ready cars captured through the
-  production app — one pinned waterfront spawn, one fixed free cam:
-  `mm2 --mm2-path <install> --city sf --car <id>
-  --spawn=-141.9,1.5,-608.5,115 --cam=-144.9,7.0,-588.5,-8.5,-15
-  --frames 120 --screenshot screenshots/f02c-render/<id>.png`.
-  **21/21 `smoke=visual status=pass`**, every PNG inspected — the
-  named car renders recognisably at default paint on real SF
-  geometry; `vpcentury`/`vpsemi` draw hitched trailers; `vpmoonrover`
-  shows its authored nose-up stance; `vpcoop`/`vpcoop2k` and
-  `vpbug`/`vpvwcup` are distinct models, not re-textures. Captures
-  local under `screenshots/f02c-render/` (gitignored — original
-  content stays out of the public tree).
-- **Override matrix (F02-AC04):** per car, the dumped `VehicleConfig`
-  TOML edited twice through the same `apply_handling_override` the
-  app's `--vehicle-config` uses — `peak_torque_nm`+`max_power_w`
-  halved → accel probe; every `longitudinal_grip` halved →
-  `--controls` brake leg. **Every car's measurement moves on both
-  legs.** Saturated cells recorded, not argued away:
-  `vpbullet`/`vppanoz` launches are traction-limited (0-100 parity —
-  `--trace` diverges mid-launch: 47.8→38.9 m/s at t=8, 72.5→64.6 at
-  t=14); seven cars' top speeds are rev-limited not power-limited
-  (<1% delta); `vpbus` no longer reaches 100 km/h under the halved
-  engine (−24% top); `vpmoonrover`'s top collapses 12.9→1.6 m/s (its
-  stop leg is unsuitable — brakes from ~1 m/s); `vpcentury` stops
-  *shorter* under halved grip (24.2→13.7 m; 0.75× lands at 11.2 m —
-  non-monotonic wheel-lock interplay, mechanism unverified, flagged
-  for the handling owner — no retuning done).
-- **Baseline drift disclosed + corrected:** the dynamic table's
-  `vpcentury`/`vpmoonrover` stop cells predated F02-C.3's 6→4 wheel
-  rig — re-measured at 2.3 s/24.2 m and 0.1 s/0.1 m; all other cells
-  unchanged.
-- **AC06 re-run:** `sf` + `london` headless `status=pass` (120
-  updates each); unknown `--car` exits 2 with `unknown vehicle id
-  "nonexistent" (see --list-cars)`; the shipped `checker-override`
-  mod mounts at VFS priority 300 and renders — a dev-world capture
-  shows its magenta checkerboard road.
-- Gates: `cargo fmt --all -- --check` clean; `cargo clippy --locked
-  --workspace --all-targets --all-features -- -D warnings` clean;
-  `cargo test --locked --workspace` green (incl. the new smoke test).
+- **Structural legs:** `mm2-inspect events` — 45 rows/city, all 24
+  Checkpoint rows `ready`; `race-defs` — 64 builds/city, 0 failed;
+  `opponents` — 271 + 246 slots wired, `--strict` exits 2 on 79
+  authored anomalies (77 orphan `.opp` routes, sf/race0 `6opp/7tbl`,
+  stunt0 dead ref) — disclosed, not filtered.
+- **Runtime matrix:** 48 legs = 24 events × scripted/`Hold` drivers,
+  `--headless --frames 12000`, Amateur. **48 `status=pass`** — the
+  sf-8 scripted leg was a wall-clock outlier (~24 min at ~8-12
+  updates/s under load; `dropped=53955`, one transient 17 km/s
+  velocity spike, finite pose).
+- **Opponents race:** 18 opponent finishes with ledger results across
+  7 events (london-0/2, sf-0/2/3/4/5); progress on every
+  uninterrupted generation; 3 local finishes (london-0 place 3,
+  sf-3/sf-4 place 1).
+- **Restart soak:** restart loops up to `rs=25` (hold london-10) with
+  `dup=0` — the authored damage→restart path exercised hard with no
+  result duplication; countdown-loop rows (scripted london-6/8, hold
+  sf-8) are driver wrecks, kept in the table.
+- **Gates:** `cargo fmt --all -- --check` clean; `cargo clippy
+  --locked --workspace --all-targets --all-features -- -D warnings`
+  clean; `cargo test --locked --workspace` green at `1791df0`.
 
 ## Not done / open
 
-- F02-C residual disclosures (in `docs/vehicle-coverage.md`):
-  left/right + teleport verbs measured only at the shared synthetic
-  level; non-default paints not rendered (21 default-paint captures,
-  not all ~90 variants); `vpcentury`'s non-monotonic brake leg needs
-  a mechanism answer from the handling owner.
-- Render evidence is one fixed spawn/camera on SF — no London render
-  matrix, no night/weather variants, no moving-car capture.
-- Override numbers are this engine's instruments, not original-game
-  comparisons — no original-binary reference exists on this machine.
+- Amateur difficulty only; Professional rosters audited, not driven.
+- `Hold` drives blind at full throttle — not a parked control; a true
+  stationary-player leg needs a new driver mode.
+- London 4-11 opponents grind (omax 2-5 gates, heavy escapes) even
+  uncontaminated — F15-B skill residual; retail-difficulty comparison
+  unverified.
+- Physics-step drops under contention on five runs (max `dropped`
+  55917); three end-of-run cars not fully grounded — disclosed in the
+  matrix.
+- No original-fidelity claim: engine self-metrics only.
