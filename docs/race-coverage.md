@@ -2,11 +2,13 @@
 
 F13-C.1's published account of what the authored Checkpoint catalog
 actually does under the production headless runtime — measured, not
-claimed — plus F13-C.2's stationary-control and Professional legs.
+claimed — plus F13-C.2's stationary-control and first Professional
+legs and F13-C.4's complete Professional matrix.
 Every number below comes off the fingerprinted retail install
 (`fnv1a64:e91e6cd4b2ae30d9`, read-only): the audits and the scripted/
-hold matrix at commit `1791df0`, the parked/professional legs at
-commit `a7d2797`; all runs on 2026-09-24 on Apple M1 / Metal. The
+hold matrix at commit `1791df0`, the parked legs and first
+professional legs at commit `a7d2797`, the full Professional matrix
+at commit `11af1ea`; all runs on 2026-09-24 on Apple M1 / Metal. The
 synthetic legs are the `mm2_app` / `mm2_game` test suites.
 
 These records prove the engine executes the authored data — roster,
@@ -197,7 +199,9 @@ field. The one `cp=1/6` (sf-0) is the parked car being shoved through
 a checkpoint trigger by opponent contact — a pushed crossing is a
 real crossing, so the count is honest, not a driver artifact.
 
-**Professional scripted legs** — the first Pro runtime rows:
+**Professional scripted legs** — the first Pro runtime rows (commit
+`a7d2797`; superseded as evidence by the uniform C.4 matrix below —
+the banger-cap fix in between legitimately moved trajectories):
 
 | event | outcome | field | conditions |
 | --- | --- | --- | --- |
@@ -212,6 +216,97 @@ on sf-0 a field that beats the scripted driver (place 6 of 7 vs the
 amateur field the same driver matched). london-0's two restarts are
 the scripted driver wrecking under authored damage → `RestartEvent`,
 not a session defect.
+
+## Professional runtime matrix — 24 events × 2 drivers (F13-C.4)
+
+All 48 legs at commit `11af1ea`, `--pro`, `--frames 12000`, on the
+same retail install: every event scripted (`--bot`) **and** parked
+(`--parked` — the stationary control). `P-F` = local finish, `oF` =
+opponents reaching `Finished` with a ledger result, `omax` = deepest
+gate any opponent reached. **48/48 `status=pass`, rc 0.**
+
+### London (`world=city/london.psdl`, Professional)
+
+| event | scripted: phase, cp, results, opp | scripted: P-F, rs, omax | parked: cp, results, opp | parked: moved, omax |
+| --- | --- | --- | --- | --- |
+| 0 | results 5/5 r4 3/6 | **4th**, rs0, omax5 | 0/5 r5 5/6 | 2 m, omax5 |
+| 1 | playing 0/7 r0 0/6 | –, rs5, omax0 | 0/7 r0 0/6 | 11 m, omax7 |
+| 2 | results 4/4 r1 0/7 | **1st**, rs0, omax3 | 0/4 r2 2/7 | 5 m, omax4 |
+| 3 | playing 1/6 r0 0/7 | –, rs8, omax1 | 0/6 r0 0/7 | 19 m, omax2 |
+| 4 | playing 0/6 r0 0/7 | –, rs2, omax0 | 0/6 r0 0/7 | 5 m, omax2 |
+| 5 | playing 0/3 r0 0/7 | –, rs1, omax0 | 0/3 r0 0/7 | 9 m, omax2 |
+| 6 | playing 0/8 r0 0/7 | –, rs5, omax1 | 0/8 r0 0/7 | 4 m, omax2 |
+| 7 | playing 1/8 r0 0/6 | –, rs0, omax5 | 0/8 r0 0/6 | 10 m, omax5 |
+| 8 | playing 2/9 r0 0/6 | –, rs1, omax4 | 0/9 r0 0/6 | 29 m, omax4 |
+| 9 | playing 0/5 r0 0/7 | –, rs3, omax1 | 0/5 r0 0/7 | 3 m, omax3 |
+| 10 | playing 2/8 r0 0/6 | –, rs2, omax2 | 0/8 r0 0/6 | 3 m, omax3 |
+| 11 | playing 4/6 r0 0/6 | –, rs0, omax3 | 0/6 r0 0/6 | 5 m, omax4 |
+
+### San Francisco (`world=city/sf.psdl`, Professional)
+
+| event | scripted: phase, cp, results, opp | scripted: P-F, rs, omax | parked: cp, results, opp | parked: moved, omax |
+| --- | --- | --- | --- | --- |
+| 0 | playing 2/6 r0 0/6 | –, rs1, omax2 | 1/6 r4 4/6 | 8 m, omax6 |
+| 1 | playing 2/8 r0 0/6 | –, rs1, omax2 | 0/8 r0 0/6 | 3 m, omax7 |
+| 2 | playing 1/9 r0 0/7 | –, rs1, omax2 | 0/9 r1 1/7 | 1 m, omax9 |
+| 3 | results 6/6 r1 0/6 | **1st**, rs0, omax5 | 0/6 r1 1/6 | 9 m, omax6 |
+| 4 | playing 5/7 r0 0/5 | –, rs1, omax5 | 0/7 r0 0/5 | 14 m, omax7 |
+| 5 | playing 2/6 r0 0/5 | –, rs1, omax2 | 0/6 r0 0/5 | 6 m, omax5 |
+| 6 | playing 3/6 r0 0/4 | –, rs0, omax3 | 0/6 r0 0/4 | 5 m, omax3 |
+| 7 | playing 2/4 r0 0/6 | –, rs0, omax2 | 0/4 r0 0/6 | 3 m, omax2 |
+| 8 | playing 6/8 r0 0/6 | –, rs0, omax5 | 1/8 r0 0/6 | 22 m, omax5 |
+| 9 | playing 0/10 r0 0/6 | –, rs1, omax0 | 0/10 r0 0/6 | 6 m, omax2 |
+| 10 | **countdown** 0/5 r0 0/6 | –, rs6, omax0 | 0/5 r0 0/6 | 3 m, omax3 |
+| 11 | playing 2/11 r0 0/6 | –, rs1, omax2 | 0/11 r0 0/6 | 9 m, omax3 |
+
+### What the Pro matrix shows
+
+**The whole catalog runs at Professional.** 48/48 legs pass with the
+authored `.aimap_p` rosters and parameter blocks — no load failure,
+panic, or sanity-trip. Every roster resolved and spawned (4–7
+opponents per event, authored sizes vary).
+
+**Opponents finish at Pro with the local participant parked.** 16
+opponent finishes with ledger results across 5 events while the local
+car contributes nothing: london-0 (5/6), london-2 (2/7), sf-0 (4/6),
+sf-2 (1/7 — a `vpford` earning all 9 gates), sf-3 (1/6). Versus the
+amateur parked legs' 11 finishes across the same-shape events, the
+Pro field finishes at the same rate on london-0/sf-0 and slower
+elsewhere — authored tuning and roster differences, measured not
+fidelity-verified.
+
+**The scripted driver finishes 3 events at Pro**: london-0 `place=4`
+behind three opponent finishes, london-2 `place=1`, sf-3 `place=1`.
+At amateur the same driver won sf-3/sf-4 and placed 3rd on london-0 —
+Pro is measurably harder for it (sf-0's `place=6/7` finish in the
+a7d2797 leg became `cp=2/6` at cap here; london-0's at-cap `rs=2` leg
+became a `place=4` finish — the F13-C.3 banger caps moved both
+trajectories, and both directions are honest evidence of the same
+machinery).
+
+**Restart contamination at Pro matches the amateur pattern.** The
+scripted driver wreck-loops on london-1 (rs5), london-3 (rs8),
+london-6 (rs5) and sf-10 (rs6 — still in `Countdown` at cap, same
+class as the amateur sf-8/london-10 hold loops): authored damage →
+`RestartEvent` before the scripted line is learned. Every `rs>0` row
+is a driver outcome; the parked legs on the same events show the
+field progressing regardless (omax 2–7).
+
+**The parked car is an honest stationary control.** `cp=0` on 22 of
+24 legs; sf-0 `cp=1/6` and sf-8 `cp=1/8` are the same opponent-shove
+through a trigger measured at amateur — real crossings, disclosed.
+`peak` ≤10.3 m/s and `moved` ≤29 m are contact displacement, not
+drive. london-4's parked leg is the outlier worth naming: the spawn
+sits on elevated ground (y≈4.9) and field contact repeatedly punts
+the stationary car over the edge — `rcv=209f/209r` shows the recovery
+anchor catching every fall and the car ending `wheels=4/4` 5 m from
+spawn. The machinery holds; the frequency is the control's own
+artifact (a parked car cannot dodge).
+
+**Physics health stays clean under the F13-C.3 caps.** Worst
+`dropped=` is 345 (sf-3 scripted); the amateur matrix's 16k–56k drop
+legs do not recur at Pro. No velocity spike anywhere: peak ≤34.2 m/s
+across all 48 legs.
 
 ## Anomalies kept visible
 
@@ -241,9 +336,9 @@ not a session defect.
 - **F13-AC01** (discoverable + deps load): `events` 24/24 ready,
   `race-defs` 48/48 built, `opponents` all rosters wired; every row
   ran the production session to `status=pass`. Structural + Amateur
-  runtime legs done; **Professional runtime legs started (3/24 events
-  driven scripted at Pro — sf-0/sf-3/london-0 above), full Pro matrix
-  open.**
+  runtime legs done; **Professional runtime legs complete at
+  scripted+parked (48/48 `status=pass` — the C.4 matrix above); Pro
+  hold legs remain open.**
 - **F13-AC02** (ordering/crossing rules): AnyOrder freedom verified
   (CHK-1); 36 race tests cover high-speed/wrong-height/repeat
   crossings, teleport/reset segment invalidation, timeout edge ticks.
@@ -254,10 +349,13 @@ not a session defect.
   the field's results are fully independent (a stationary local earns
   nothing while opponents resolve).
 - **F13-AC04** (opponents start/progress/finish): **demonstrated,
-  control leg included** — opponent finishes on 7 amateur events
-  (london-0/2, sf-0/2/3/4/5), and 11 finishes across 5 events under a
-  *stationary* local participant; results compare against real
-  participants (`pos=` vs full field, parked = last).
+  control leg included at both difficulties** — opponent finishes on
+  7 amateur events (london-0/2, sf-0/2/3/4/5), 11 finishes across 5
+  events under a *stationary* local participant; at Professional, 16
+  opponent finishes across 5 events under the parked control and 3
+  local scripted finishes (london-0 place 4, london-2/sf-3 place 1);
+  results compare against real participants (`pos=` vs full field,
+  parked = last).
 - **F13-AC05** (restart/recovery don't bypass): restart rebuilds the
   generation (25-cycle soak, `dup=0`, results scoped per generation);
   synthetic `restart_removes_the_race_resource`,
@@ -265,16 +363,17 @@ not a session defect.
   crossing tests; recovery-penalty fidelity remains a F05/F15
   research item.
 - **F13-AC06** (catalog matrix): **this document** — 24/24 rows
-  attempted, 48/48 legs `status=pass` (sf-8's ~24-min wall-clock
-  outlier was a physics defect, bounded in F13-C.3 — ~70 s on re-run),
-  finishes and stalls reported per event per driver; plus the C.2
-  parked-control legs and the first Pro rows.
+  attempted, 48/48 amateur legs `status=pass` (sf-8's ~24-min
+  wall-clock outlier was a physics defect, bounded in F13-C.3 — ~70 s
+  on re-run), 48/48 professional legs `status=pass` (C.4); finishes
+  and stalls reported per event per driver per difficulty.
 
 ## Residuals / honest limits
 
-- Professional coverage is partial: 3 scripted Pro legs (sf-0/sf-3,
-  london-0) — the remaining 21 events' Pro rosters are structurally
-  audited, not driven; no Pro hold/parked legs yet.
+- Professional coverage now spans the full catalog scripted + parked
+  (C.4, 48/48 pass); Pro `hold`-driver legs remain open, and the
+  scripted legs' divergent outcomes vs the a7d2797 first legs are
+  disclosed in the C.4 section.
 - sf-8's ~24-min wall-clock outlier was a hypervelocity-fragment
   cascade — diagnosed and bounded in F13-C.3 (banger speed caps +
   clamped activation severity; re-run ~70 s, `dropped=0`,
