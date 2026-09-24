@@ -63,9 +63,32 @@ unverified), `frequency` weights the covering samples and the authored
 `min,max volume` draws the gain. Below every band is authored silence,
 not an error. Non-local voices are spatial emitters at the impact
 point under `ENGINE_SPATIAL_SCALE`; the local player's hits stay
-non-spatial (DSN-37). `aud=` gains `<impacts>i` when nonzero. Skids,
-ambient engines, the clutch trigger and siren programs remain F07-B/C
-work, and DirectMusic is recognized but not decoded (F08).
+non-spatial (DSN-37). `aud=` gains `<impacts>i` when nonzero.
+
+F07-B.6 adds the ambient-traffic consumer: `mm2_app::traffic` resolves
+each `va_*` class's `aud/cardata/ambient/<id>_engine.csv` — falling
+back to `default_engine.csv`, a designed binding (UNK-25; only
+`va_bus_f`/`va_ddbus_l`/`va_diesels_s`/`va_smallsuv_s` match a stock
+roster id exactly, so `va_sedan_s`/`va_garbagetruck`/`va_pickup_f`'s
+tables are dead data under it) — and stamps the resolved
+`AmbientEngineSpec` on every spawned car as `AmbientAudio`.
+`ambient_engine_rigs` builds one `PlaybackMode::Loop` spatial child
+voice per car (`MAX_AMBIENT_VOICES` 32, `AmbientRig` marker so a
+failed resolve warns once and a recycled body re-attempts), and
+`ambient_engine_drive` re-mixes pitch off the parent's
+`LinearVelocity` magnitude through the authored bands — first
+covering band in file order wins (the authored `0–500` catch-all
+would otherwise shadow the tight bands), an uncovered speed reads the
+nearest band's edge. `engine volume` is constant — a stopped car
+idles at the same gain. Retail headless: `london --frames 1500` →
+`aud=…/20e/16n`, `sf --frames 1500` → `aud=…/34e/16n` (e = voices
+spawned over the run — it tracks `sp`, the spawn count; n = loops
+audible at record — the live fleet; `0s` stays honest: no output
+device headless). Which classes the original binds, what it feeds the
+bands and whether it pitches the ambient loop at all are unrecovered
+(DSN-41/UNK-25). Siren programs, sustained-scrape semantics and the
+weather→{dry,wet,ice} surface-variant binding remain F07-B/C work,
+and DirectMusic is recognized but not decoded (F08).
 Everything below is measured data structure; runtime semantics are
 unverified unless noted.
 
@@ -208,9 +231,19 @@ sf: 4 sequences/16 steps; london: 2/2.
 ### Ambient engines/horns — `cardata/ambient/*_{engine,horn}.csv`
 
 Ambient traffic audio: one engine sample with speed bands
-(`min speed,max speed` → volume/pitch ranges), horn clips with honk
+(`min speed,max speed` → `engine min pitch,engine max pitch` ranges;
+the tight piecewise bands precede a `0–500` catch-all carrying an
+extreme pitch range, ~24.6 on `va_sedan_s`), horn clips with honk
 sequences (`num honks` + per-honk durations). `default_engine`/`_horn`
-plus per-ambient-type files (`va_bus_f_*`, …).
+plus per-ambient-type files: 7 engine tables (`va_bus_f`,
+`va_ddbus_l`, `va_diesels_s`, `va_garbagetruck`, `va_pickup_f`,
+`va_sedan_s`, `va_smallsuv_s`) and 8 horn tables (`va_compact_s` adds
+one). Naming quirk: the
+roster id is `va_sedans_s` but the authored table is
+`va_sedan_s_engine.csv`, and `va_garbagetruck`/`va_pickup_f` are
+rostered in neither stock city — under exact-match resolution those
+three engine tables are dead data and their classes read the default
+(runtime binding: F07-B.6, DSN-41).
 
 ### Object audio — `aud/ambient/*.csv` + `cardata/ambient/subwaycar.csv`
 

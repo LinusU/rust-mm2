@@ -353,6 +353,15 @@ pub fn headless_smoke(
                     // voices — the mix computes on the components, so
                     // the record's `aud=` k/g gauges read it headless.
                     crate::audio::surface_voices.after(session::drive_session),
+                    // F07-B.6: ambient engine tables → looping voices —
+                    // the record's `aud=` e/n fields read the mix the
+                    // same headless way.
+                    (
+                        crate::audio::ambient_engine_rigs,
+                        crate::audio::ambient_engine_drive,
+                    )
+                        .chain()
+                        .after(session::drive_session),
                     crate::audio::audio_listener.after(session::drive_session),
                     crate::audio::count_sinks,
                     crate::audio::sync_audio_pause,
@@ -962,10 +971,11 @@ pub fn headless_smoke(
         .filter(|r| r.impacts + r.splats + r.resets > 0)
         .map(|r| format!(" txl={}i/{}s/{}r", r.impacts, r.splats, r.resets))
         .unwrap_or_default();
-    // F07-A.2/B.1/B.2/B.3/B.5 audio evidence: horn presses / voices
-    // spawned / sinks the device attached / engine loops live / loops
-    // audible at record time / engine rigs built, plus `/Ni` impact
-    // voices, `/Nc` clutch one-shots and `+Nd` bound-drops / `+Nx`
+    // F07-A.2/B.1/B.2/B.3/B.5/B.6 audio evidence: horn presses /
+    // voices spawned / sinks the device attached / engine loops live /
+    // loops audible at record time / engine rigs built, plus `/Ni`
+    // impact voices, `/Nc` clutch one-shots, `/Ne` `/Nn` ambient
+    // engine voices spawned/audible and `+Nd` bound-drops / `+Nx`
     // resolve/decode failures when nonzero. Activity-gated — an
     // audio-free run stays bit-identical, and headless `0s` honestly
     // reports that no output device ever saw the voice.
@@ -1004,8 +1014,15 @@ pub fn headless_smoke(
             } else {
                 String::new()
             };
+            // F07-B.6: ambient engine voices spawned / currently
+            // audible — spawned like `i`/`c`, audible a gauge like `a`.
+            let ambient = if r.ambient + r.ambient_live > 0 {
+                format!("/{}e/{}n", r.ambient, r.ambient_live)
+            } else {
+                String::new()
+            };
             format!(
-                " aud={}h/{}v/{}s/{}l/{}a/{}r{impacts}{clutch}{surface}{dropped}{failed}",
+                " aud={}h/{}v/{}s/{}l/{}a/{}r{impacts}{clutch}{surface}{ambient}{dropped}{failed}",
                 r.horns, r.voices, r.sunk, r.loops, r.audible, r.rigs
             )
         })

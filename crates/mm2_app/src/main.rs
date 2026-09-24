@@ -1116,6 +1116,11 @@ fn main() {
             // F07-B.4: wheel contact → skid/rolling loop voices — the
             // same despawn ordering for the same reason.
             audio::surface_voices.after(session::drive_session),
+            // F07-B.6: ambient cars' resolved engine tables → bounded
+            // looping voices — the same despawn ordering.
+            (audio::ambient_engine_rigs, audio::ambient_engine_drive)
+                .chain()
+                .after(session::drive_session),
             // F07-B.2: the spatial listener follows whichever camera is
             // active — after the toggle so a mode switch moves the ear
             // the same frame, and after the session driver for the

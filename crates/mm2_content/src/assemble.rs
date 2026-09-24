@@ -6,7 +6,7 @@
 use mm2_assets::Vfs;
 use mm2_formats::banger::BangerData;
 use mm2_formats::bnd::BndFile;
-use mm2_formats::cardata::{self, CarAudio, CardataBody};
+use mm2_formats::cardata::{self, AmbientEngine, CarAudio, CardataBody};
 use mm2_formats::mtx::Mtx;
 use mm2_formats::pkg::Pkg;
 use mm2_formats::tune::TuneFile;
@@ -574,6 +574,37 @@ pub fn ambient_vehicle(vfs: &Vfs, id: &str) -> Result<AmbientVehicle, LoadError>
         model,
         bound,
     })
+}
+
+/// The ambient engine table one `va_*` class binds (F07-B.6):
+/// `aud/cardata/ambient/<id>_engine.csv` when the class authors its
+/// own, else `default_engine.csv` — the authored shared table the
+/// per-class files override (designed fallback: which classes the
+/// original routes to the default is unverified, UNK-25; the filenames
+/// are the only binding the data names — retail rosters cover only
+/// `va_bus_f`/`va_ddbus_l`/`va_diesels_s`/`va_smallsuv_s` exactly, the
+/// rest read the default). `Ok(None)` when neither resolves — authored
+/// silence, not a failure (the class still spawns noteless); `Err`
+/// when a resolved file is malformed or parses as another cardata
+/// kind — a content defect the caller reports, never a silent
+/// substitution.
+pub fn ambient_engine_audio(vfs: &Vfs, id: &str) -> Result<Option<AmbientEngine>, String> {
+    for logical in [
+        format!("aud/cardata/ambient/{id}_engine.csv"),
+        "aud/cardata/ambient/default_engine.csv".to_string(),
+    ] {
+        let Some((bytes, _)) = read_opt(vfs, &logical) else {
+            continue;
+        };
+        return match cardata::parse(&logical, &bytes) {
+            Ok(file) => match file.body {
+                CardataBody::AmbientEngine(table) => Ok(Some(table)),
+                other => Err(format!("{logical}: parsed as {other:?}")),
+            },
+            Err(e) => Err(format!("{logical}: {e}")),
+        };
+    }
+    Ok(None)
 }
 
 /// Convenience: catalog scan + vehicle load in one call.

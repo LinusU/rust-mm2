@@ -12,8 +12,8 @@
 
 use bevy::prelude::*;
 use mm2_formats::cardata::{
-    CarAudio, EngineSample, ImpactCategory, ImpactSample, ImpactTable, SkidSample, SurfaceEntry,
-    is_sample_sentinel,
+    AmbientEngine, CarAudio, EngineSample, ImpactCategory, ImpactSample, ImpactTable, SkidSample,
+    SpeedBand, SurfaceEntry, is_sample_sentinel,
 };
 
 use crate::nav::NavRng;
@@ -420,6 +420,130 @@ impl SurfaceSpec {
     }
 }
 
+// ---------------------------------------------------------------------------
+// F07-B.6: ambient-traffic engine loops — `aud/cardata/ambient/*_engine.csv`
+// resolved to a single loop's mix parameters.
+// ---------------------------------------------------------------------------
+
+/// An ambient-traffic engine table resolved to mix parameters: one
+/// loop at the authored `engine volume`, pitch-shifted through the
+/// authored `min speed,max speed` → `min pitch,max pitch` bands by the
+/// car's speed. Designed reading (UNK-25 — the original's application
+/// is unrecovered): the first covering band in authored order wins.
+/// Retail authors tight piecewise bands ahead of a `0–500` catch-all
+/// (`default_engine.csv`, `va_sedan_s_engine.csv`), so authored order
+/// is the only reading under which the tight bands are reachable at
+/// all; a speed no band covers evaluates the *nearest* band at its
+/// edge (ties prefer the earlier row, so the catch-all's authored
+/// pitch extremes never win over a tight band).
+#[derive(Debug, Clone)]
+pub struct AmbientEngineSpec {
+    /// The authored sample name (cardata reference — no dir/suffix).
+    pub name: String,
+    /// `engine volume`, verbatim from the table.
+    pub volume: f32,
+    /// Authored speed bands in file order.
+    pub bands: Vec<SpeedBand>,
+}
+
+/// The ambient engine table bound to a spawned ambient car
+/// (`mm2_app::traffic` stamps it from the class's resolved assets —
+/// `aud/cardata/ambient/<id>_engine.csv` or the authored default, a
+/// designed fallback UNK-25 leaves open). Absent when neither table
+/// resolves, the table is malformed, or its sample is authored
+/// silence — consumers treat a missing `AmbientAudio` as "no authored
+/// engine note" like a missing `VehicleAudio`.
+#[derive(Component, Debug, Clone)]
+pub struct AmbientAudio {
+    /// The resolved mix spec.
+    pub spec: AmbientEngineSpec,
+}
+
+impl AmbientEngineSpec {
+    /// Resolve an authored ambient engine table — `None` when the
+    /// sample name is a sentinel (`NOSOUND`/`NOTHING`/…), which is
+    /// authored silence rather than a resolution failure. Bands with
+    /// non-finite cells are dropped (the parse diagnostics already
+    /// surfaced them); a table with no usable bands still resolves —
+    /// its loop just never pitch-shifts.
+    pub fn from_table(table: &AmbientEngine) -> Option<Self> {
+        if is_sample_sentinel(&table.sample.name) {
+            return None;
+        }
+        Some(AmbientEngineSpec {
+            name: table.sample.name.clone(),
+            volume: table.sample.volume,
+            bands: table
+                .ranges
+                .iter()
+                .filter(|b| {
+                    [b.min_speed, b.max_speed, b.min_pitch, b.max_pitch]
+                        .iter()
+                        .all(|v| v.is_finite())
+                })
+                .cloned()
+                .collect(),
+        })
+    }
+
+    /// The loop's mixer state at `speed` (m/s — the car's surface
+    /// velocity magnitude; lane followers publish it through
+    /// `LinearVelocity` the same as a knocked wreck does). The first
+    /// covering band in authored order supplies the pitch window;
+    /// failing that, the nearest band's edge (window progress clamps
+    /// the authored range, so a below/above-range speed reads the
+    /// edge pitch — never the catch-all's extreme row while a tight
+    /// band ties nearer). The authored `engine volume` is constant —
+    /// the table authors no speed→volume term, so a stopped car
+    /// idles at the same gain a moving one runs at; a non-finite or
+    /// negative authored volume sanitizes to 1.0 like the horn.
+    /// A non-finite speed silences the loop.
+    pub fn mix(&self, speed: f32) -> EngineMix {
+        if !speed.is_finite() {
+            return EngineMix {
+                volume: 0.0,
+                speed: 1.0,
+            };
+        }
+        let volume = if self.volume.is_finite() && self.volume >= 0.0 {
+            self.volume
+        } else {
+            1.0
+        };
+        let speed = speed.abs();
+        let band = self
+            .bands
+            .iter()
+            .enumerate()
+            .find(|(_, b)| speed >= b.min_speed && speed <= b.max_speed)
+            .or_else(|| {
+                self.bands.iter().enumerate().min_by(|(ia, a), (ib, b)| {
+                    let da = if speed < a.min_speed {
+                        a.min_speed - speed
+                    } else {
+                        speed - a.max_speed
+                    };
+                    let db = if speed < b.min_speed {
+                        b.min_speed - speed
+                    } else {
+                        speed - b.max_speed
+                    };
+                    da.total_cmp(&db).then(ia.cmp(ib))
+                })
+            })
+            .map(|(_, b)| b);
+        let speed_factor = band.map_or(1.0, |b| {
+            (b.min_pitch
+                + (b.max_pitch - b.min_pitch) * window_progress(speed, b.min_speed, b.max_speed))
+            .clamp(0.01, 16.0)
+        });
+        EngineMix {
+            volume,
+            speed: speed_factor,
+        }
+    }
+}
+
 /// The designed quantity fed to `min slippage` bands (UNK-25): the
 /// larger of the tire's longitudinal over-demand (`traction_demand` —
 /// the fraction of its grip limit the controller asked for) and its
@@ -744,5 +868,81 @@ mod tests {
         // Non-finite inputs and a degenerate peak read as 0.
         assert_eq!(tire_slippage(f32::NAN, f32::INFINITY, 0.16), 0.0);
         assert_eq!(tire_slippage(0.0, 0.5, 0.0), 0.0);
+    }
+
+    // -------------------------------------------------------------------
+    // F07-B.6: ambient engine speed-band interpretation.
+    // -------------------------------------------------------------------
+
+    /// The retail `aud/cardata/ambient/va_sedan_s_engine.csv` shape:
+    /// tight piecewise bands then the `0–500` catch-all with an extreme
+    /// authored max pitch.
+    const AMBIENT: &[u8] = b"Engine sample,engine volume,,\nENGINEFERRARI1,0.97,,\nmin speed,max speed,min pitch,max pitch\n0,15,0.27,1\n15,35,1,1.25\n35,500,1.25,1.5\n0,500,0.27,24.603\n";
+
+    fn ambient() -> AmbientEngine {
+        AmbientEngine::parse(AMBIENT).unwrap()
+    }
+
+    #[test]
+    fn ambient_engine_resolves_sample_volume_and_bands() {
+        let table = ambient();
+        assert_eq!(table.ranges.len(), 4);
+        let spec = AmbientEngineSpec::from_table(&table).unwrap();
+        assert_eq!(spec.name, "ENGINEFERRARI1");
+        assert_eq!(spec.volume, 0.97);
+        assert_eq!(spec.bands.len(), 4);
+    }
+
+    #[test]
+    fn the_first_covering_band_beats_the_catch_all() {
+        let spec = AmbientEngineSpec::from_table(&ambient()).unwrap();
+        // 10 m/s sits inside both band 0 (0–15 → 0.27–1.0) and the
+        // catch-all (0–500 → 0.27–24.603): authored order picks the
+        // tight band — the only reading under which it is reachable.
+        let mix = spec.mix(10.0);
+        let expect = 0.27 + (1.0 - 0.27) * (10.0 / 15.0);
+        assert!((mix.speed - expect).abs() < 1e-5, "{mix:?}");
+        // 100 m/s is inside band 2 (35–500 → 1.25–1.5) and the
+        // catch-all — the tight band still wins, so the extreme
+        // authored 24.603 never interpolates in normal driving.
+        let mix = spec.mix(100.0);
+        assert!((1.25..=1.5).contains(&mix.speed), "{mix:?}");
+        assert_eq!(mix.volume, 0.97);
+    }
+
+    #[test]
+    fn an_uncovered_speed_clamps_to_the_nearest_tight_edge() {
+        let spec = AmbientEngineSpec::from_table(&ambient()).unwrap();
+        // Past every band: bands 2 and the catch-all tie at distance
+        // 100 — the earlier authored row wins, so the edge pitch is the
+        // tight band's 1.5, not the catch-all's 24.603.
+        assert_eq!(spec.mix(600.0).speed, 1.5);
+        // The input is a velocity magnitude — a negative read is its
+        // absolute speed, so −5 lands inside band 0 like +5 does.
+        let neg = spec.mix(-5.0).speed;
+        assert!((neg - (0.27 + 0.73 * (5.0 / 15.0))).abs() < 1e-5, "{neg}");
+        // Non-finite speed is silence, never a NaN sink.
+        let m = spec.mix(f32::NAN);
+        assert_eq!(m.volume, 0.0);
+        assert_eq!(m.speed, 1.0);
+    }
+
+    #[test]
+    fn sentinel_samples_and_bad_authored_cells_degrade_honestly() {
+        let quiet = AmbientEngine::parse(
+            b"Engine sample,engine volume,,\nNOSOUND,0.5,,\nmin speed,max speed,min pitch,max pitch\n0,10,1,1\n",
+        )
+        .unwrap();
+        assert!(AmbientEngineSpec::from_table(&quiet).is_none());
+        // A non-finite authored volume sanitizes to 1.0; a table whose
+        // bands are all unusable still loops at unity pitch.
+        let odd = AmbientEngine::parse(
+            b"Engine sample,engine volume,,\nE,1e999,,\nmin speed,max speed,min pitch,max pitch\n1e999,10,1,1\n",
+        )
+        .unwrap();
+        let spec = AmbientEngineSpec::from_table(&odd).unwrap();
+        assert!(spec.bands.is_empty());
+        assert_eq!(spec.mix(12.0).volume, 1.0);
+        assert_eq!(spec.mix(12.0).speed, 1.0);
     }
 }

@@ -75,9 +75,17 @@
 //! the original voices is unverified, UNK-25 — the designed trigger is
 //! one one-shot per committed drivetrain change, so a multi-gear jump
 //! is a single actuation and the first observed state is not a shift).
-//! Ambient engines, siren programs and the scrape semantics remain
-//! F07-B/C work; the opponent-side tables' divergent values and the
-//! `flags` word remain UNK-25.
+//! F07-B.6 voices ambient traffic: `mm2_app::traffic` stamps the
+//! class's resolved `*_engine.csv` table on each spawned car as
+//! [`AmbientAudio`], [`ambient_engine_rigs`] turns it into one
+//! [`PlaybackMode::Loop`] spatial child voice per car (bounded by
+//! [`MAX_AMBIENT_VOICES`]), and [`ambient_engine_drive`] re-mixes
+//! pitch through the authored speed bands off the car's
+//! `LinearVelocity` — the same component lane followers and knocked
+//! wrecks both publish. Siren programs and the scrape semantics
+//! remain F07-B/C work; the ambient tables' application semantics
+//! (which cars bind which table, how speed maps to pitch) are a
+//! designed reading under UNK-25.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -92,15 +100,16 @@ use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use tracing::warn;
 
-use avian3d::prelude::{ComputedMass, Mass};
+use avian3d::prelude::{ComputedMass, LinearVelocity, Mass};
 use mm2_assets::Vfs;
 use mm2_content::SurfaceTables;
 use mm2_formats::cardata::{self, CardataBody, ImpactTable, SurfaceTable};
 use mm2_formats::wav::{FORMAT_PCM, Wav, lookup_stem};
 use mm2_game::{
-    Banger, EngineLoopSpec, EngineMix, ImpactEvent, Mm2Vfs, NavRng, ObjectId, ObjectIdentity,
-    Player, PlayerControl, PlayerVehicle, Session, SessionEntity, SessionPhase, SkidUnit,
-    SurfaceMaterial, SurfaceSpec, VehicleAudio, impact_category, pick_impact, tire_slippage,
+    AmbientAudio, AmbientEngineSpec, Banger, EngineLoopSpec, EngineMix, ImpactEvent, Mm2Vfs,
+    NavRng, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerVehicle, Session, SessionEntity,
+    SessionPhase, SkidUnit, SurfaceMaterial, SurfaceSpec, VehicleAudio, impact_category,
+    pick_impact, tire_slippage,
 };
 use mm2_vehicle::{DriveDirection, Vehicle, VehicleState};
 
@@ -165,6 +174,13 @@ const ROLL_MIN_SPEED: f32 = 0.5;
 /// rather than stacking voices (designed bound, same contract as
 /// [`MAX_HORN_VOICES`]).
 const MAX_CLUTCH_VOICES: usize = 8;
+/// Ambient-traffic engine loops live at once (F07-B.6) — ambient
+/// fleets run dozens of cars, so the bound caps mixer load rather
+/// than mirroring a roster size. Cars past it report once and stay
+/// silent; a recycled car gets a fresh shot since its marker died
+/// with the old body (designed bound, same contract as
+/// [`MAX_ENGINE_RIGS`]).
+const MAX_AMBIENT_VOICES: usize = 32;
 
 /// A decoded, playback-ready wave: normalized interleaved f32 samples
 /// plus the authored rate/channel shape. Produced only by
@@ -487,6 +503,9 @@ pub enum VoiceKind {
     /// One `clutch wave name` one-shot a committed gear/direction
     /// change spawned (F07-B.5).
     Clutch,
+    /// An ambient-traffic engine loop an `AmbientAudio` car carries
+    /// (F07-B.6).
+    AmbientEngine,
 }
 
 /// Marker on a vehicle whose engine rig was built — set once whether
@@ -590,6 +609,27 @@ pub struct GearWatch {
     direction: DriveDirection,
 }
 
+/// Marker on an ambient car whose engine voice was attempted — set
+/// once whether the resolve spawned a voice or failed, so a car whose
+/// sample cannot decode reports once instead of retrying (and
+/// re-warning) every frame. Despawns with the car, so a recycled
+/// body re-attempts its class's sample (F07-B.6).
+#[derive(Component)]
+pub struct AmbientRig;
+
+/// An ambient car's looping engine voice — a child of the car like
+/// [`EngineVoice`], so it despawns with it and rides its transform as
+/// the spatial emitter. `mix` is rewritten every drive tick whether or
+/// not a sink exists — headless runs carry the computed mixer state on
+/// the component, which is what tests and the smoke record read.
+#[derive(Component)]
+pub struct AmbientEngineVoice {
+    /// The resolved table spec, captured at rig build.
+    pub spec: AmbientEngineSpec,
+    /// The mixer state [`ambient_engine_drive`] last computed.
+    pub mix: EngineMix,
+}
+
 /// A horn actuation intent — written by [`horn_input`] (live input) and
 /// `dev_horn_once` (`--horn` evidence runs, where capture freezes input
 /// upstream), consumed by [`horn_voices`]. One message = one press.
@@ -627,6 +667,13 @@ pub struct AudioReport {
     /// Clutch voices spawned this session — a subset of `voices`
     /// (F07-B.5).
     pub clutch: u64,
+    /// Ambient-traffic engine voices spawned this session — a subset
+    /// of `voices` (F07-B.6).
+    pub ambient: u64,
+    /// Ambient engine loops whose last computed mix is audible — a
+    /// gauge rewritten every drive pass, not a cumulative count
+    /// (F07-B.6).
+    pub ambient_live: u64,
 }
 
 impl AudioReport {
@@ -641,6 +688,8 @@ impl AudioReport {
             + self.skids
             + self.rolling
             + self.clutch
+            + self.ambient
+            + self.ambient_live
             > 0
     }
 
@@ -1155,6 +1204,126 @@ pub fn engine_drive(
             sink.set_volume(Volume::Linear(voice.mix.volume));
             sink.set_speed(voice.mix.speed);
         }
+    }
+}
+
+/// Build ambient engine voices on every `AmbientAudio` car: one
+/// [`PlaybackMode::Loop`] voice resolving the table's authored sample,
+/// parented to the car so it despawns with it and rides its transform
+/// as the spatial emitter — ambient cars are never the local listener
+/// anchor, so every one is a world emitter under
+/// [`ENGINE_SPATIAL_SCALE`] (F07-B.6; DSN-37's anchor rule does not
+/// apply to traffic). Live ambient loops bound at
+/// [`MAX_AMBIENT_VOICES`]: a car past it counts one drop and keeps
+/// its [`AmbientRig`] marker so it never re-warns, while a recycled
+/// body re-attempts. A failed resolve/decode counts once per car
+/// (the marker prevents a per-frame warn); a missing `AmbientAudio`
+/// is authored silence upstream and never reaches this system.
+///
+/// Retries while no VFS/bank exists like `engine_rigs` — a half-built
+/// rig is never stamped.
+#[allow(clippy::too_many_arguments)] // Bevy system — the borrows are the contract.
+pub fn ambient_engine_rigs(
+    mut commands: Commands,
+    session: Res<Session>,
+    vfs: Option<Res<Mm2Vfs>>,
+    bank: Option<ResMut<WaveBank>>,
+    mut waves: ResMut<Assets<PcmAudio>>,
+    mut report: ResMut<AudioReport>,
+    cars: Query<(Entity, &AmbientAudio), Without<AmbientRig>>,
+    voices: Query<&AudioVoice>,
+) {
+    if cars.is_empty() {
+        return;
+    }
+    let (Some(vfs), Some(mut bank)) = (vfs, bank) else {
+        // No mounted content or no session world yet — retry next
+        // frame rather than stamping a half-built rig.
+        return;
+    };
+    let mut live = voices
+        .iter()
+        .filter(|v| v.kind == VoiceKind::AmbientEngine)
+        .count();
+    for (car, audio) in &cars {
+        if live >= MAX_AMBIENT_VOICES {
+            report.dropped += 1;
+            warn!("audio: ambient engine bound reached, {car:?} stays silent");
+            commands.entity(car).insert(AmbientRig);
+            continue;
+        }
+        match bank.load(&vfs.0, &mut waves, &audio.spec.name) {
+            Ok(handle) => {
+                commands.spawn((
+                    AudioVoice {
+                        kind: VoiceKind::AmbientEngine,
+                    },
+                    AmbientEngineVoice {
+                        spec: audio.spec.clone(),
+                        mix: EngineMix {
+                            volume: 0.0,
+                            speed: 1.0,
+                        },
+                    },
+                    SessionEntity(session.generation()),
+                    ChildOf(car),
+                    Transform::default(),
+                    AudioPlayer(handle),
+                    PlaybackSettings {
+                        mode: PlaybackMode::Loop,
+                        // Silent until `ambient_engine_drive` computes
+                        // the real mix — a sink attaching between
+                        // spawn and the first drive tick plays nothing.
+                        volume: Volume::Linear(0.0),
+                        spatial: true,
+                        spatial_scale: Some(SpatialScale::new(ENGINE_SPATIAL_SCALE)),
+                        ..Default::default()
+                    },
+                ));
+                report.voices += 1;
+                report.ambient += 1;
+                live += 1;
+            }
+            Err(e) => {
+                report.failed += 1;
+                warn!("audio: {e}");
+            }
+        }
+        commands.entity(car).insert(AmbientRig);
+    }
+}
+
+/// Re-mix every ambient engine loop from its parent car's
+/// `LinearVelocity` magnitude and apply it to whichever sink the
+/// device attached (F07-B.6). Lane followers publish their surface
+/// velocity through the same component knocked wrecks do, so the
+/// drive needs no drive-state branch — a wreck sliding to a stop
+/// winds its note down on its own. Ungated by phase like
+/// `engine_drive`: voices only exist inside a live session,
+/// `sync_audio_pause` holds the sinks, and countdown ambience keeps
+/// the street sounding.
+pub fn ambient_engine_drive(
+    mut report: ResMut<AudioReport>,
+    cars: Query<&LinearVelocity>,
+    mut voices: Query<(
+        &ChildOf,
+        &mut AmbientEngineVoice,
+        Option<&mut AudioSink>,
+        Option<&mut SpatialAudioSink>,
+    )>,
+) {
+    report.ambient_live = 0;
+    for (parent, mut voice, sink, spatial) in &mut voices {
+        let Ok(vel) = cars.get(parent.parent()) else {
+            // The car despawned and the cascade has not flushed — the
+            // voice dies with it; leave the last computed mix.
+            continue;
+        };
+        voice.mix = voice.spec.mix(vel.length());
+        if voice.mix.volume > 0.0 {
+            report.ambient_live += 1;
+        }
+        push_mix(voice.mix, sink, spatial);
     }
 }
 

@@ -10,21 +10,24 @@
 
 use std::path::Path;
 
+use avian3d::prelude::LinearVelocity;
 use bevy::audio::{AudioPlayer, PlaybackMode, PlaybackSettings, SpatialListener, Volume};
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 use mm2_app::audio::{
-    self, AudioReport, AudioVoice, EngineVoice, GearWatch, HornRequest, ImpactAudio, PcmAudio,
-    SurfaceAudio, SurfaceRig, SurfaceRole, SurfaceVoice, VoiceKind, WaveBank, decode_wave,
+    self, AmbientEngineVoice, AmbientRig, AudioReport, AudioVoice, EngineVoice, GearWatch,
+    HornRequest, ImpactAudio, PcmAudio, SurfaceAudio, SurfaceRig, SurfaceRole, SurfaceVoice,
+    VoiceKind, WaveBank, decode_wave,
 };
 use mm2_assets::Vfs;
 use mm2_content::SurfaceTables;
-use mm2_formats::cardata::CarAudio;
+use mm2_formats::cardata::{AmbientEngine, CarAudio};
 use mm2_formats::materials::{MaterialMap, MaterialSet};
 use mm2_game::{
-    Banger, BangerDefinition, DevOverrides, ImpactEvent, ImpactId, Mm2Vfs, ObjectId,
-    ObjectIdentity, Player, PlayerControl, PlayerVehicle, Session, SessionConfig, SessionEntity,
-    SessionPhase, SurfaceMaterial, SurfaceState, VehicleAudio, despawn_session_entities,
+    AmbientAudio, AmbientEngineSpec, Banger, BangerDefinition, DevOverrides, ImpactEvent, ImpactId,
+    Mm2Vfs, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerVehicle, Session, SessionConfig,
+    SessionEntity, SessionPhase, SurfaceMaterial, SurfaceState, VehicleAudio,
+    despawn_session_entities,
 };
 use mm2_vehicle::{DriveDirection, VehicleConfig, VehicleState, vehicle_bundle};
 
@@ -1794,6 +1797,277 @@ fn teardown_sweeps_clutch_voices_with_the_session() {
     app.world_mut().get_mut::<VehicleState>(car).unwrap().gear = 1;
     app.update();
     assert_eq!(clutch_voice_list(&mut app).len(), 1);
+
+    app.world_mut()
+        .run_system_once(despawn_session_entities)
+        .unwrap();
+    app.update();
+    assert_eq!(voices(&mut app), 0);
+}
+
+// ---------------------------------------------------------------------------
+// F07-B.6: ambient-traffic engine loops — the resolved `*_engine.csv`
+// table → one bounded spatial loop per `AmbientAudio` car, pitched
+// through the authored speed bands off `LinearVelocity`.
+// ---------------------------------------------------------------------------
+
+/// A `default_engine.csv`-shaped table: two tight bands ahead of the
+/// authored `0–500` catch-all — the overlap retail relies on.
+fn ambient_table(sample: &str) -> String {
+    format!(
+        "Engine sample,engine volume,,\r\n{sample},0.9,,\r\nmin speed,max speed,engine min pitch,engine max pitch\r\n0,15,0.5,1.0\r\n15,40,1.0,1.4\r\n0,500,0.5,4.0\r\n"
+    )
+}
+
+/// The resolved spec for a table naming `sample`.
+fn ambient_spec(sample: &str) -> AmbientEngineSpec {
+    let table = AmbientEngine::parse(ambient_table(sample).as_bytes()).unwrap();
+    AmbientEngineSpec::from_table(&table).unwrap()
+}
+
+/// The ambient stem's wave plus per-class and default tables on the
+/// fixture tree — `va_sedan` authors its own, every other class falls
+/// to the default.
+fn ambient_dir() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(d, "aud/aud22/ambient/testamb.22k.wav", &pcm_wav(22050, 220));
+    write(d, "aud/aud22/ambient/defnote.22k.wav", &pcm_wav(22050, 220));
+    write(
+        d,
+        "aud/cardata/ambient/va_sedan_engine.csv",
+        ambient_table("TESTAMB").as_bytes(),
+    );
+    write(
+        d,
+        "aud/cardata/ambient/default_engine.csv",
+        ambient_table("DEFNOTE").as_bytes(),
+    );
+    tmp
+}
+
+/// The audio slice ambient cars see: session `Playing`, the fixture
+/// VFS and bank, and the chained rig/drive pair `main` schedules.
+fn ambient_app(dir: &Path) -> App {
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(dir, 0).unwrap();
+    let bank = WaveBank::index(&vfs);
+
+    let mut session = Session::new();
+    session.begin(SessionConfig::default()).unwrap();
+    session.transition(SessionPhase::Ready).unwrap();
+    session.transition(SessionPhase::Playing).unwrap();
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_plugins(AssetPlugin::default())
+        .insert_resource(session)
+        .insert_resource(Mm2Vfs(vfs))
+        .insert_resource(bank)
+        .init_resource::<Assets<PcmAudio>>()
+        .init_resource::<AudioReport>()
+        .add_systems(
+            Update,
+            (audio::ambient_engine_rigs, audio::ambient_engine_drive).chain(),
+        );
+    app.finish();
+    app.cleanup();
+    app
+}
+
+/// One ambient car as `spawn_ambient_car` leaves it: the resolved
+/// table, a session stamp and `LinearVelocity` — no render model or
+/// collider is needed to exercise the audio systems.
+fn ambient_car(app: &mut App, spec: AmbientEngineSpec) -> Entity {
+    let generation = app.world().resource::<Session>().generation();
+    app.world_mut()
+        .spawn((
+            AmbientAudio { spec },
+            LinearVelocity::ZERO,
+            SessionEntity(generation),
+            Transform::default(),
+        ))
+        .id()
+}
+
+fn ambient_voice_list(app: &mut App) -> Vec<Entity> {
+    let mut v: Vec<_> = app
+        .world_mut()
+        .query_filtered::<Entity, With<AmbientEngineVoice>>()
+        .iter(app.world())
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn ambient_table_resolution_prefers_the_class_file_then_the_default() {
+    let dir = ambient_dir();
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(dir.path(), 0).unwrap();
+
+    let own = mm2_content::ambient_engine_audio(&vfs, "va_sedan")
+        .unwrap()
+        .unwrap();
+    assert_eq!(own.sample.name, "TESTAMB");
+    // A class with no authored file reads the shared default table.
+    let shared = mm2_content::ambient_engine_audio(&vfs, "va_taxi")
+        .unwrap()
+        .unwrap();
+    assert_eq!(shared.sample.name, "DEFNOTE");
+    // Neither file resolving is authored silence, not an error.
+    std::fs::remove_file(dir.path().join("aud/cardata/ambient/default_engine.csv")).unwrap();
+    assert!(
+        mm2_content::ambient_engine_audio(&vfs, "va_taxi")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn a_malformed_ambient_table_errors_instead_of_falling_back() {
+    let dir = ambient_dir();
+    // A broken per-class file is a content defect — it must not
+    // silently substitute the default and voice the wrong note.
+    write(
+        dir.path(),
+        "aud/cardata/ambient/va_sedan_engine.csv",
+        b"not a table at all",
+    );
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(dir.path(), 0).unwrap();
+    assert!(mm2_content::ambient_engine_audio(&vfs, "va_sedan").is_err());
+}
+
+#[test]
+fn a_sentinel_ambient_sample_is_authored_silence() {
+    let table = AmbientEngine::parse(ambient_table("NOSOUND").as_bytes()).unwrap();
+    assert!(AmbientEngineSpec::from_table(&table).is_none());
+}
+
+#[test]
+fn an_ambient_car_spawns_one_spatial_looping_voice() {
+    let dir = ambient_dir();
+    let mut app = ambient_app(dir.path());
+    let car = ambient_car(&mut app, ambient_spec("testamb"));
+    app.update();
+
+    let generation = app.world().resource::<Session>().generation();
+    let (kind, mix, mode, spatial, parent, entity_gen) = {
+        let world = app.world_mut();
+        let mut q = world.query::<(
+            &AudioVoice,
+            &AmbientEngineVoice,
+            &AudioPlayer<PcmAudio>,
+            &PlaybackSettings,
+            &ChildOf,
+            &SessionEntity,
+        )>();
+        let all: Vec<_> = q.iter(world).collect();
+        assert_eq!(all.len(), 1);
+        let (voice, amb_voice, _, settings, child_of, session_entity) = all[0];
+        (
+            voice.kind,
+            amb_voice.mix,
+            settings.mode,
+            settings.spatial,
+            child_of.parent(),
+            session_entity.0,
+        )
+    };
+    assert_eq!(kind, VoiceKind::AmbientEngine);
+    assert!(matches!(mode, PlaybackMode::Loop));
+    assert!(spatial, "an ambient car is a world emitter");
+    assert_eq!(parent, car);
+    assert_eq!(entity_gen, generation);
+    // The resolved wave is the fixture's own clip; the authored
+    // constant volume drives the loop at rest.
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.ambient, r.voices, r.failed), (1, 1, 0));
+    assert_eq!(r.ambient_live, 1);
+    assert_eq!(mix.volume, 0.9);
+    assert_eq!(mix.speed, 0.5, "band 0's low-edge pitch");
+    assert!(app.world().get::<AmbientRig>(car).is_some());
+}
+
+#[test]
+fn the_ambient_mix_follows_the_authored_speed_bands() {
+    let dir = ambient_dir();
+    let mut app = ambient_app(dir.path());
+    let car = ambient_car(&mut app, ambient_spec("testamb"));
+    app.update();
+
+    let mix_speed = |app: &mut App, v: Vec3| -> f32 {
+        *app.world_mut().get_mut::<LinearVelocity>(car).unwrap() = LinearVelocity(v);
+        app.update();
+        app.world_mut()
+            .query::<&AmbientEngineVoice>()
+            .single(app.world())
+            .unwrap()
+            .mix
+            .speed
+    };
+    // Inside band 0 the catch-all is shadowed — authored order wins.
+    assert_eq!(
+        mix_speed(&mut app, Vec3::new(0.0, 0.0, 10.0)),
+        0.5 + 0.5 * (10.0 / 15.0)
+    );
+    // Band 1 owns the mid range; a reverse velocity reads as speed.
+    let forward = mix_speed(&mut app, Vec3::new(0.0, 0.0, -20.0));
+    assert_eq!(forward, 1.0 + 0.4 * (5.0 / 25.0));
+    // Above the tight bands only the catch-all covers.
+    assert_eq!(
+        mix_speed(&mut app, Vec3::new(0.0, 0.0, 100.0)),
+        0.5 + 3.5 * (100.0 / 500.0)
+    );
+    // Volume never changes — the table authors no speed→volume term.
+    let v = app
+        .world_mut()
+        .query::<&AmbientEngineVoice>()
+        .single(app.world())
+        .unwrap()
+        .mix
+        .volume;
+    assert_eq!(v, 0.9);
+}
+
+#[test]
+fn an_unresolvable_ambient_sample_fails_once_per_car() {
+    let dir = ambient_dir();
+    let mut app = ambient_app(dir.path());
+    let car = ambient_car(&mut app, ambient_spec("nosuchstem"));
+    app.update();
+
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.ambient, r.voices, r.failed), (0, 0, 1));
+    assert!(ambient_voice_list(&mut app).is_empty());
+    // The rig marker suppresses a per-frame retry and re-warn.
+    assert!(app.world().get::<AmbientRig>(car).is_some());
+    app.update();
+    assert_eq!(app.world().resource::<AudioReport>().failed, 1);
+}
+
+#[test]
+fn the_ambient_voice_bound_caps_the_fleet() {
+    let dir = ambient_dir();
+    let mut app = ambient_app(dir.path());
+    for _ in 0..34 {
+        ambient_car(&mut app, ambient_spec("testamb"));
+    }
+    app.update();
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(r.ambient, 32, "MAX_AMBIENT_VOICES bounds the fleet");
+    assert_eq!(r.dropped, 2);
+    assert_eq!(ambient_voice_list(&mut app).len(), 32);
+}
+
+#[test]
+fn teardown_sweeps_ambient_voices_with_the_session() {
+    let dir = ambient_dir();
+    let mut app = ambient_app(dir.path());
+    ambient_car(&mut app, ambient_spec("testamb"));
+    app.update();
+    assert_eq!(ambient_voice_list(&mut app).len(), 1);
 
     app.world_mut()
         .run_system_once(despawn_session_entities)

@@ -166,10 +166,16 @@ use crate::car_visual::spawn_vehicle_model;
 use crate::contracts::{deepest_contact, impulse_estimate};
 
 /// A `va_*` class's runtime assets: render model plus the collider the
-/// bound (or, failing that, the tuning's authored `Size`) describes.
+/// bound (or, failing that, the tuning's authored `Size`) describes,
+/// and the resolved ambient engine table (F07-B.6) when the class has
+/// one — `None` keeps the class's cars noteless like an absent record.
 struct AmbientClass {
     model: mm2_content::VehicleModel,
     collider: Collider,
+    /// `aud/cardata/ambient/<id>_engine.csv` (or the authored default),
+    /// resolved to mix parameters. `None` on absent/malformed tables or
+    /// a sentinel sample — authored silence, never a spawn blocker.
+    audio: Option<mm2_game::AmbientEngineSpec>,
 }
 
 /// Session-scoped ambient-traffic state: the merged roster, the nav
@@ -645,6 +651,9 @@ pub fn drive_signals(
 /// Resolve a class's assets once and cache the outcome. A class whose
 /// model or collider cannot be produced caches `None` — it counts
 /// unspawnable like a tuning-less row rather than retrying every tick.
+/// The ambient engine table resolves alongside (F07-B.6): a malformed
+/// resolved file warns once per class, an absent/sentinel one is
+/// authored silence — neither blocks the spawn.
 fn class_assets(vfs: &Vfs, spec: &AmbientSpec) -> Option<AmbientClass> {
     let loaded = mm2_content::ambient_vehicle(vfs, &spec.id).ok()?;
     let collider = loaded
@@ -654,9 +663,26 @@ fn class_assets(vfs: &Vfs, spec: &AmbientSpec) -> Option<AmbientClass> {
             Collider::convex_hull(b.verts.iter().map(|v| Vec3::from(*v)).collect::<Vec<_>>())
         })
         .unwrap_or_else(|| size_collider(spec.tuning.as_ref()));
+    let audio = match mm2_content::ambient_engine_audio(vfs, &spec.id) {
+        Ok(Some(table)) => {
+            for d in &table.diagnostics {
+                warn!(class = %spec.id, diagnostic = %d, "ambient: engine table diagnostic");
+            }
+            for issue in table.validate() {
+                warn!(class = %spec.id, issue = %issue, "ambient: engine table validation issue");
+            }
+            mm2_game::AmbientEngineSpec::from_table(&table)
+        }
+        Ok(None) => None,
+        Err(e) => {
+            warn!(class = %spec.id, "ambient: engine table malformed — {e}");
+            None
+        }
+    };
     Some(AmbientClass {
         model: loaded.model,
         collider,
+        audio,
     })
 }
 
@@ -770,6 +796,15 @@ fn spawn_ambient_car(
             Visibility::Visible,
         ))
         .id();
+    // F07-B.6: the class's resolved ambient engine table rides the
+    // car — `ambient_engine_rigs` turns it into a bounded looping
+    // voice; a noteless class (absent/malformed table or sentinel
+    // sample) stamps nothing, matching "no authored engine note".
+    if let Some(spec) = &class.audio {
+        commands
+            .entity(entity)
+            .insert(mm2_game::AmbientAudio { spec: spec.clone() });
+    }
     let missing = spawn_vehicle_model(
         commands,
         vfs,
