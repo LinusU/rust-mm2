@@ -19,6 +19,7 @@ use mm2_formats::psdl::Psdl;
 use mm2_formats::tex::TexFile;
 use mm2_formats::{FormatError, inst};
 
+mod audio;
 mod bind;
 mod event;
 mod inventory;
@@ -446,6 +447,22 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Audit audio content (F07-A.1): census every `aud/**` file; decode
+    /// each `.wav` through the production RIFF/WAVE parser with a format
+    /// census; parse `aud/cardata`/`aud/ambient` tables through the
+    /// production cardata grammars; classify DirectMusic RIFF containers
+    /// by form word; and cross-check referenced sample names against the
+    /// discovered wave stems and vehicle cardata against the tune
+    /// roster.
+    Audio {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Exit nonzero on any parse failure or validation issue.
+        /// Dead wave references, coverage gaps and authored quirks
+        /// (binary name prefixes) are findings, not failures.
+        #[arg(long)]
+        strict: bool,
+    },
     /// Versioned content inventory: expected/discovered/accepted/
     /// rejected/unverified counts per content family, fingerprinted by
     /// engine commit and resolved-path provenance.
@@ -575,6 +592,7 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Weather { dir, city, strict } => {
             weather(dir, cli.mods.as_deref(), city.as_deref(), *strict)
         }
+        Command::Audio { dir, strict } => audio::run(dir, cli.mods.as_deref(), *strict),
         Command::Inventory { dir, json, strict } => {
             inventory_cmd(dir, cli.mods.as_deref(), *json, *strict)
         }

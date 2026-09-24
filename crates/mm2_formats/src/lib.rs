@@ -9,6 +9,7 @@ pub mod aimap;
 pub mod bai;
 pub mod banger;
 pub mod bnd;
+pub mod cardata;
 pub mod cpvs;
 pub mod crashdata;
 pub mod dave;
@@ -34,6 +35,7 @@ pub mod tex;
 pub mod tune;
 pub mod veh;
 pub mod water;
+pub mod wav;
 pub mod waypoints;
 
 pub use reader::Reader;

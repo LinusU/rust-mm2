@@ -619,8 +619,10 @@ fn placement(vfs: &Vfs, paths: &[String]) -> Family {
     f
 }
 
-/// `aud/<family>/` — presence of the retail audio directories; no decoder
-/// exists so every file is unverified.
+/// `aud/<family>/` — presence of the retail audio directories. Content
+/// is verified by the dedicated `audio` audit (waves decode, cardata
+/// tables parse); the inventory still counts per-file records as
+/// unverified since no runtime consumer exists.
 fn audio(paths: &[String]) -> Family {
     let mut f = Family::new("audio families");
     f.expected = EXPECTED_AUDIO_FAMILIES.len();
@@ -656,8 +658,7 @@ fn audio(paths: &[String]) -> Family {
             .join(", ")
     ));
     f.notes.push(
-        "no audio decoder exists; presence of a family is accepted, all file content unverified"
-            .into(),
+        "audited by `mm2-inspect audio`: .wav files decode, aud/cardata + aud/ambient tables parse, DirectMusic containers classify by RIFF form; spchdata/creaturedata tables stay unparsed (F08) — no runtime consumer yet".into(),
     );
     f
 }
