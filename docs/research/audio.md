@@ -44,9 +44,28 @@ volume, a 5–15 m pack clearly audible and a 50 m straggler near
 silence — the original's attenuation model and listener placement are
 unrecovered (UNK-25). Retail `london circuit:0 --bot --headless
 --frames 3000`: `aud=0h/18v/0s/18l/17a/8r` — 8 rigs, 18 loops, 17
-audible mid-drive, honest 0 sinks headless. The impact/surface/siren
-families remain unparsed at runtime, the clutch binding has no
-consumer, and DirectMusic is recognized but not decoded (F08).
+audible mid-drive, honest 0 sinks headless.
+
+F07-B.3 adds the impact consumer: the session loads the player-side
+`default_impacts.csv` into an `ImpactAudio` resource (absent/malformed
+→ no resource, warned once, never fabricated) and `impact_voices`
+consumes the deduplicated `ImpactEvent` stream. Each *vehicle*
+participant of an event earns one bounded one-shot
+(`MAX_IMPACT_VOICES` 12, `PlaybackMode::Despawn`, `SessionEntity`
+lifecycle) — a remote participant's voice belongs to its own client, a
+non-vehicle participant earns none. The struck side's
+`dgBangerData.AudioId` selects the category `ID` (anything unmatched —
+which is every retail record, all `AudioId` 0 — reads the id-0 `WALL`
+catch-all; the binding is designed, UNK-25), `severity × striker mass`
+picks the `min force,max force` band (the same impulse estimate the
+knock pipeline weighs — whether the original weighs this quantity is
+unverified), `frequency` weights the covering samples and the authored
+`min,max volume` draws the gain. Below every band is authored silence,
+not an error. Non-local voices are spatial emitters at the impact
+point under `ENGINE_SPATIAL_SCALE`; the local player's hits stay
+non-spatial (DSN-37). `aud=` gains `<impacts>i` when nonzero. Skids,
+ambient engines, the clutch trigger and siren programs remain F07-B/C
+work, and DirectMusic is recognized but not decoded (F08).
 Everything below is measured data structure; runtime semantics are
 unverified unless noted.
 
@@ -152,8 +171,13 @@ engine-sample column count minus one).
 `min volume,max volume,min force,max force,frequency`. 24 categories /
 28 samples per file, `ENDOFDATA` terminator. Category names are banger
 stems (`WALL`, `LIGHTPOLE`, …); `dgBangerData.AudioId` is 0 on every
-retail record, so the category↔prop binding is by name category at best
-— mechanism unverified.
+retail record, so the runtime binds `AudioId`→category `ID` with an
+id-0 (`WALL`) catch-all — a designed reading of the only selector the
+data names, unverified (UNK-25). The two files diverge in-column: the
+opponent table authors `WALL` bands two orders of magnitude below the
+player table's (e.g. `2–500–1500` vs `1000–8000–20000` force ranges) —
+an authored inconsistency the runtime does not normalize; the session
+reads the player-side file (the local listener's authored mix).
 
 ### Surface tables — `cardata/{player,opponent}/default_surface{dry,ice,wet}.csv`
 
@@ -242,8 +266,11 @@ min time in range,…` headers) plus `aud/dmusic/csv_files` (5). Three
 - `Tunnel sound index` semantics (0 vs 5, why only ice differs).
 - Skid-band trigger unit — the two schemas claim `slippage` and `speed`
   for the same table slot.
-- `default_impacts` force→sample selection and the category↔banger
-  binding (`AudioId` is 0 everywhere).
+- `default_impacts` semantics: the runtime binds `AudioId`→`ID` with an
+  id-0 fallback and weighs `severity × striker mass` against the force
+  bands — both designed readings (the original's selector, force
+  quantity and per-side emission rule are unrecovered); the opponent
+  file's divergent `WALL` bands have no consumer yet.
 - `flags` word on the horn row (always 0 on retail); also whether the
   original holds the horn for the press duration or retriggers it —
   the runtime fires one authored clip per press as a designed policy.

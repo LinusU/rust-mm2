@@ -49,6 +49,7 @@ fn part(name: &str, limit: f32) -> BreakPartSpec {
             size: [0.8, 0.4, 1.2],
             cg: [0.0, 0.2, 0.0],
             num_parts: 0,
+            audio_id: 0,
         },
     }
 }

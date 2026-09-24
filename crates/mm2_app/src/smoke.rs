@@ -342,6 +342,9 @@ pub fn headless_smoke(
                     (crate::audio::engine_rigs, crate::audio::engine_drive)
                         .chain()
                         .after(session::drive_session),
+                    // F07-B.3: deduplicated impacts → bounded one-shot
+                    // voices — same despawn ordering as the rigs.
+                    crate::audio::impact_voices.after(session::drive_session),
                     crate::audio::audio_listener.after(session::drive_session),
                     crate::audio::count_sinks,
                     crate::audio::sync_audio_pause,
@@ -951,12 +954,13 @@ pub fn headless_smoke(
         .filter(|r| r.impacts + r.splats + r.resets > 0)
         .map(|r| format!(" txl={}i/{}s/{}r", r.impacts, r.splats, r.resets))
         .unwrap_or_default();
-    // F07-A.2/B.1/B.2 audio evidence: horn presses / voices spawned /
-    // sinks the device attached / engine loops live / loops audible at
-    // record time / engine rigs built, plus `+Nd` bound-drops and `+Nx`
-    // resolve/decode failures when nonzero. Activity-gated — an
-    // audio-free run stays bit-identical, and headless `0s` honestly
-    // reports that no output device ever saw the voice.
+    // F07-A.2/B.1/B.2/B.3 audio evidence: horn presses / voices
+    // spawned / sinks the device attached / engine loops live / loops
+    // audible at record time / engine rigs built, plus `/Ni` impact
+    // voices and `+Nd` bound-drops / `+Nx` resolve/decode failures when
+    // nonzero. Activity-gated — an audio-free run stays bit-identical,
+    // and headless `0s` honestly reports that no output device ever
+    // saw the voice.
     let aud_detail = world_ecs
         .get_resource::<crate::audio::AudioReport>()
         .filter(|r| r.active())
@@ -971,8 +975,15 @@ pub fn headless_smoke(
             } else {
                 String::new()
             };
+            // F07-B.3: impact voices spawned — appended only when
+            // nonzero so impact-free records stay bit-identical.
+            let impacts = if r.impacts > 0 {
+                format!("/{}i", r.impacts)
+            } else {
+                String::new()
+            };
             format!(
-                " aud={}h/{}v/{}s/{}l/{}a/{}r{dropped}{failed}",
+                " aud={}h/{}v/{}s/{}l/{}a/{}r{impacts}{dropped}{failed}",
                 r.horns, r.voices, r.sunk, r.loops, r.audible, r.rigs
             )
         })

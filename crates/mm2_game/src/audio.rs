@@ -11,7 +11,9 @@
 //! windows is still inferred, not recovered (UNK-25).
 
 use bevy::prelude::*;
-use mm2_formats::cardata::{CarAudio, EngineSample};
+use mm2_formats::cardata::{CarAudio, EngineSample, ImpactCategory, ImpactSample, ImpactTable};
+
+use crate::nav::NavRng;
 
 /// The authored per-vehicle audio table attached to a spawned vehicle —
 /// `aud/cardata/{player,opponent}/<id>.csv` verbatim (F07-A.2).
@@ -147,6 +149,98 @@ impl EngineLoopSpec {
     }
 }
 
+/// Resolve a `default_impacts.csv` category for a struck object: the
+/// authored `AudioId` selects the `Banger name` section by its `ID`
+/// column; an id no section carries — and anything with no banger
+/// record at all — falls back to id 0 (retail's `WALL`, the generic
+/// car-impact set). `None` when the table has no id-0 section either
+/// (a table that cannot answer an impact is a data failure the caller
+/// counts, never a guessed category). Whether the original binds
+/// `AudioId`→`ID` this way is unverified (UNK-25) — but it is the only
+/// binding the authored data itself names, and retail props author
+/// `AudioId` 0 everywhere, so on retail every struck prop reads the
+/// `WALL` set regardless.
+pub fn impact_category(table: &ImpactTable, audio_id: i64) -> Option<&ImpactCategory> {
+    table
+        .categories
+        .iter()
+        .find(|c| c.id == audio_id)
+        .or_else(|| table.categories.iter().find(|c| c.id == 0))
+}
+
+/// One resolved impact pick: the authored sample plus the playback
+/// volume drawn inside its `min volume,max volume` range.
+#[derive(Debug, Clone, Copy)]
+pub struct ImpactPick<'a> {
+    /// The selected sample row (name + authored bands).
+    pub sample: &'a ImpactSample,
+    /// The volume the mixer should play at, drawn from the authored
+    /// range by `rng` (sanitized: a non-finite or inverted bound reads
+    /// as its counterpart, both bad reads as 1.0).
+    pub volume: f32,
+}
+
+/// Pick one sample inside `category` for a hit of `force` (the app's
+/// impact measure — `severity × striker mass`, the designed reading
+/// UNK-25 labels): every sample whose `min force,max force` band
+/// covers the force competes, `frequency` weights the draw, and the
+/// pick's volume range supplies the playback volume. `None` when no
+/// band covers — a sub-floor touch is authored silent, not an error.
+pub fn pick_impact<'a>(
+    category: &'a ImpactCategory,
+    force: f32,
+    rng: &mut NavRng,
+) -> Option<ImpactPick<'a>> {
+    let covering: Vec<&ImpactSample> = category
+        .samples
+        .iter()
+        .filter(|s| {
+            s.min_force.is_finite()
+                && s.max_force.is_finite()
+                && force >= s.min_force
+                && force <= s.max_force
+        })
+        .collect();
+    if covering.is_empty() {
+        return None;
+    }
+    let weight_of = |s: &ImpactSample| {
+        if s.frequency.is_finite() {
+            s.frequency.max(0.0)
+        } else {
+            0.0
+        }
+    };
+    let total: f32 = covering.iter().map(|s| weight_of(s)).sum();
+    // `frequency` is the authored selection weight; a table where every
+    // covering row weights 0 falls back to a uniform draw so authored
+    // silence is never manufactured.
+    let pick = if total > 0.0 {
+        let mut draw = rng.next_f32() * total;
+        covering
+            .iter()
+            .copied()
+            .find(|s| {
+                draw -= weight_of(s);
+                draw <= 0.0
+            })
+            .unwrap_or(covering[0])
+    } else {
+        *rng.pick(&covering).unwrap_or(&covering[0])
+    };
+    let (lo, hi) = (pick.min_volume, pick.max_volume);
+    let volume = match (lo.is_finite(), hi.is_finite()) {
+        (true, true) => lo + (hi - lo) * rng.next_f32(),
+        (true, false) => lo,
+        (false, true) => hi,
+        (false, false) => 1.0,
+    };
+    Some(ImpactPick {
+        sample: pick,
+        volume: volume.max(0.0),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,5 +343,91 @@ mod tests {
         let data = b"Horn wave name,Horn volume,flags,Num Engine Samples,clutch wave name,clutch volume\nH,0.9,0,1,C,0.5\nEngine wave name,Min Volume,Max Volume,fade in start RPM,fade in end RPM,fade out start RPM,fade out end RPM,Min Pitch,Max Pitch,Pitch shift start RPM,Pitch shift end RPM\nE,1e999,0.9,1,800,2500,7000,0.85,2,1,7000\n";
         let bad = CarAudio::parse(data).unwrap();
         assert!(EngineLoopSpec::from_row(&bad.engine_samples[0]).is_none());
+    }
+
+    // -------------------------------------------------------------------
+    // F07-B.3: impact category/band/frequency/volume interpretation.
+    // -------------------------------------------------------------------
+
+    /// A small authored `default_impacts.csv`: id-0 WALL with two
+    /// force bands, id-7 LIGHT with one, the `ENDOFDATA` terminator.
+    const IMPACTS: &[u8] = b"***\nBanger name,Num samples,ID\nWALL,2,0\nsample name,min volume,max volume,min force,max force,frequency\nSOFT,0.5,0.6,1000,8000,1.0\nHUGE,0.9,1.0,8000,999999,1.0\n***\nBanger name,Num samples,ID\nLIGHT,1,7\nsample name,min volume,max volume,min force,max force,frequency\nPROP,0.4,0.4,0,999999,1.0\n***\nBanger name,Num samples,ID\nENDOFDATA,0,0\n";
+
+    fn impacts() -> ImpactTable {
+        ImpactTable::parse(IMPACTS).unwrap()
+    }
+
+    #[test]
+    fn the_audio_id_selects_the_authored_category() {
+        let table = impacts();
+        assert_eq!(impact_category(&table, 7).unwrap().name, "LIGHT");
+        assert_eq!(impact_category(&table, 0).unwrap().name, "WALL");
+        // An id no record carries — and a struck world body — fall to
+        // the id-0 catch-all rather than a fabricated category.
+        assert_eq!(impact_category(&table, 42).unwrap().name, "WALL");
+        // A table with no id-0 section cannot answer at all.
+        let orphan = b"***\nBanger name,Num samples,ID\nLIGHT,1,7\nPROP,0.4,0.4,0,999999,1.0\n***\nBanger name,Num samples,ID\nENDOFDATA,0,0\n";
+        let orphan = ImpactTable::parse(orphan).unwrap();
+        assert!(impact_category(&orphan, 3).is_none());
+    }
+
+    #[test]
+    fn the_force_band_selects_and_the_floor_stays_silent() {
+        let table = impacts();
+        let wall = impact_category(&table, 0).unwrap();
+        let mut rng = NavRng::new(1);
+        assert_eq!(
+            pick_impact(wall, 3900.0, &mut rng).unwrap().sample.name,
+            "SOFT"
+        );
+        assert_eq!(
+            pick_impact(wall, 39000.0, &mut rng).unwrap().sample.name,
+            "HUGE"
+        );
+        // Below the softest band: authored silence, not an error.
+        assert!(pick_impact(wall, 500.0, &mut rng).is_none());
+    }
+
+    #[test]
+    fn frequency_weights_the_covering_samples() {
+        // Both rows cover every force; the zero-frequency row must
+        // never win while any weighted row stands.
+        let data = b"***\nBanger name,Num samples,ID\nWALL,2,0\nsample name,min volume,max volume,min force,max force,frequency\nRARE,0.5,0.6,0,999999,0.0\nCOMMON,0.5,0.6,0,999999,1.0\n***\nBanger name,Num samples,ID\nENDOFDATA,0,0\n";
+        let table = ImpactTable::parse(data).unwrap();
+        let cat = impact_category(&table, 0).unwrap();
+        let mut rng = NavRng::new(7);
+        for _ in 0..32 {
+            assert_eq!(
+                pick_impact(cat, 1.0, &mut rng).unwrap().sample.name,
+                "COMMON"
+            );
+        }
+        // All-zero weights draw uniformly instead of manufacturing
+        // silence — every sample stays reachable.
+        let flat = b"***\nBanger name,Num samples,ID\nWALL,2,0\nsample name,min volume,max volume,min force,max force,frequency\nA,0.5,0.6,0,999999,0.0\nB,0.5,0.6,0,999999,0.0\n***\nBanger name,Num samples,ID\nENDOFDATA,0,0\n";
+        let flat = ImpactTable::parse(flat).unwrap();
+        let cat = impact_category(&flat, 0).unwrap();
+        let mut rng = NavRng::new(7);
+        let seen: std::collections::HashSet<String> = (0..32)
+            .map(|_| pick_impact(cat, 1.0, &mut rng).unwrap().sample.name.clone())
+            .collect();
+        assert_eq!(seen.len(), 2, "uniform draw reaches both rows");
+    }
+
+    #[test]
+    fn the_volume_draw_stays_inside_the_authored_range() {
+        let table = impacts();
+        let wall = impact_category(&table, 0).unwrap();
+        let mut rng = NavRng::new(3);
+        for _ in 0..32 {
+            let pick = pick_impact(wall, 3900.0, &mut rng).unwrap();
+            assert!((0.5..=0.6).contains(&pick.volume), "{pick:?}");
+        }
+        // An inverted or non-finite bound reads as its counterpart,
+        // never a negative or NaN gain.
+        let bad = b"***\nBanger name,Num samples,ID\nWALL,1,0\nsample name,min volume,max volume,min force,max force,frequency\nX,1e999,0.5,0,999999,1.0\n***\nBanger name,Num samples,ID\nENDOFDATA,0,0\n";
+        let bad = ImpactTable::parse(bad).unwrap();
+        let cat = impact_category(&bad, 0).unwrap();
+        assert_eq!(pick_impact(cat, 1.0, &mut rng).unwrap().volume, 0.5);
     }
 }

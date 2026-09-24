@@ -14,16 +14,17 @@ use bevy::audio::{AudioPlayer, PlaybackMode, PlaybackSettings, SpatialListener};
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 use mm2_app::audio::{
-    self, AudioReport, AudioVoice, EngineVoice, HornRequest, PcmAudio, VoiceKind, WaveBank,
-    decode_wave,
+    self, AudioReport, AudioVoice, EngineVoice, HornRequest, ImpactAudio, PcmAudio, VoiceKind,
+    WaveBank, decode_wave,
 };
 use mm2_assets::Vfs;
 use mm2_formats::cardata::CarAudio;
 use mm2_game::{
-    DevOverrides, Mm2Vfs, PlayerVehicle, Session, SessionConfig, SessionEntity, SessionPhase,
-    VehicleAudio, despawn_session_entities,
+    Banger, BangerDefinition, DevOverrides, ImpactEvent, ImpactId, Mm2Vfs, ObjectId,
+    ObjectIdentity, Player, PlayerControl, PlayerVehicle, Session, SessionConfig, SessionEntity,
+    SessionPhase, SurfaceState, VehicleAudio, despawn_session_entities,
 };
-use mm2_vehicle::{VehicleConfig, VehicleState};
+use mm2_vehicle::{VehicleConfig, VehicleState, vehicle_bundle};
 
 /// A minimal 16-bit mono PCM RIFF/WAVE at `rate` with `frames` frames.
 fn pcm_wav(rate: u32, frames: usize) -> Vec<u8> {
@@ -746,4 +747,346 @@ fn decode_wave_reports_unsupported_and_unbounded() {
     // Degenerate rates/channels error rather than div-by-zero later.
     let zero = pcm_wav(0, 4);
     assert!(decode_wave(&zero).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// F07-B.3: deduplicated impacts → bounded one-shot voices. The session
+// `ImpactAudio` holds the authored `default_impacts.csv`; the struck
+// side's `AudioId` selects the category, `severity × striker mass`
+// picks the force band.
+// ---------------------------------------------------------------------------
+
+/// A fixture install: three decodable waves at distinguishing rates
+/// plus the authored impact table that names them.
+fn impact_dir() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(d, "aud/aud22/impacts/soft.22k.wav", &pcm_wav(22050, 220));
+    write(d, "aud/aud22/impacts/huge.22k.wav", &pcm_wav(48000, 220));
+    write(d, "aud/aud22/impacts/prop.22k.wav", &pcm_wav(11025, 110));
+    write(
+        d,
+        "aud/cardata/player/default_impacts.csv",
+        b"***\nBanger name,Num samples,ID\nWALL,2,0\nsample name,min volume,max volume,min force,max force,frequency\nSOFT,0.5,0.6,1000,8000,1.0\nHUGE,0.9,1.0,8000,999999,1.0\n***\nBanger name,Num samples,ID\nLIGHT,1,7\nsample name,min volume,max volume,min force,max force,frequency\nPROP,0.4,0.4,0,999999,1.0\n***\nBanger name,Num samples,ID\nENDOFDATA,0,0\n",
+    );
+    tmp
+}
+
+/// The audio slice of the production app for impact voices: a `Playing`
+/// session, the mounted fixture VFS, the session `WaveBank` +
+/// `ImpactAudio` (loaded through the production path), and the
+/// `impact_voices` system on Update like the live schedules wire it.
+fn impact_app(dir: &Path) -> App {
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(dir, 0).unwrap();
+    let bank = WaveBank::index(&vfs);
+
+    let mut session = Session::new();
+    session.begin(SessionConfig::default()).unwrap();
+    session.transition(SessionPhase::Ready).unwrap();
+    session.transition(SessionPhase::Playing).unwrap();
+    let generation = session.generation();
+    // Production inserts the resource only when the authored table
+    // loads — an absent record leaves none and degrades to silence.
+    let table = ImpactAudio::load(&vfs, generation);
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_plugins(AssetPlugin::default())
+        .insert_resource(session)
+        .insert_resource(Mm2Vfs(vfs))
+        .insert_resource(bank)
+        .init_resource::<Assets<PcmAudio>>()
+        .init_resource::<AudioReport>()
+        .add_message::<ImpactEvent>()
+        .add_systems(Update, audio::impact_voices);
+    if let Some(table) = table {
+        app.insert_resource(table);
+    }
+    app.finish();
+    app.cleanup();
+    app
+}
+
+/// Mint a session object id off the live allocator so participants
+/// read as session objects, then attach `bundle` to its entity.
+fn spawn_object(app: &mut App, bundle: impl Bundle) -> (ObjectId, Entity) {
+    let id = app.world_mut().resource_mut::<Session>().mint_object_id();
+    let entity = app.world_mut().spawn((ObjectIdentity(id), bundle)).id();
+    (id, entity)
+}
+
+/// A drivable car like `load_session_world`/`spawn_opponents` stamps:
+/// `Vehicle` + `Mass` through the bundle, the session identity and the
+/// driver role the spatial rule reads.
+fn spawn_test_car(app: &mut App, control: PlayerControl, mass: f32) -> (ObjectId, Entity) {
+    let config = VehicleConfig {
+        mass,
+        ..VehicleConfig::default()
+    };
+    let player_id = app.world_mut().resource_mut::<Session>().mint_player_id();
+    spawn_object(
+        app,
+        (
+            Player {
+                id: player_id,
+                control,
+            },
+            vehicle_bundle(&config),
+        ),
+    )
+}
+
+fn write_impact(app: &mut App, a: ObjectId, b: ObjectId, severity: f32) {
+    let generation = app.world().resource::<Session>().generation();
+    app.world_mut().write_message(ImpactEvent {
+        id: ImpactId(1),
+        generation,
+        tick: 0,
+        participants: (a, b),
+        point: Vec3::new(1.0, 2.0, 3.0),
+        normal: Vec3::Y,
+        severity,
+        surface: SurfaceState::default(),
+    });
+}
+
+/// `(kind, sample_rate, spatial)` for every live voice.
+fn impact_voices(app: &mut App) -> Vec<(VoiceKind, u32, bool)> {
+    let world = app.world_mut();
+    let mut q = world.query::<(&AudioVoice, &AudioPlayer<PcmAudio>, &PlaybackSettings)>();
+    let mut out: Vec<_> = q
+        .iter(world)
+        .map(|(v, p, s)| {
+            let rate = world
+                .resource::<Assets<PcmAudio>>()
+                .get(&p.0)
+                .unwrap()
+                .sample_rate
+                .get();
+            (v.kind, rate, s.spatial)
+        })
+        .collect();
+    out.sort_by_key(|(_, rate, _)| *rate);
+    out
+}
+
+#[test]
+fn a_wall_impact_picks_the_authored_band() {
+    let dir = impact_dir();
+    let mut app = impact_app(dir.path());
+    // 1300 kg default-mass car (VehicleConfig::default): 3 m/s →
+    // force 3900 lands SOFT's 1000–8000 band.
+    let (car, _) = spawn_test_car(&mut app, PlayerControl::Local, 1300.0);
+    write_impact(&mut app, car, ObjectId::WORLD, 3.0);
+    app.update();
+
+    let voices = impact_voices(&mut app);
+    assert_eq!(voices, [(VoiceKind::Impact, 22050, false)]);
+    let world = app.world_mut();
+    let (_, settings, transform) = world
+        .query::<(&AudioVoice, &PlaybackSettings, &Transform)>()
+        .iter(world)
+        .next()
+        .map(|(v, s, t)| (v.kind, *s, *t))
+        .unwrap();
+    assert!(matches!(settings.mode, PlaybackMode::Despawn));
+    assert!(!settings.spatial, "the local player's hits anchor the mix");
+    let volume = settings.volume.to_linear();
+    assert!(
+        (0.5..=0.6).contains(&volume),
+        "volume drawn inside the authored range: {volume}"
+    );
+    assert_eq!(transform.translation, Vec3::new(1.0, 2.0, 3.0));
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.impacts, r.voices, r.failed), (1, 1, 0));
+
+    // 30 m/s → 39 000 lands HUGE's band — a different authored sample.
+    write_impact(&mut app, car, ObjectId::WORLD, 30.0);
+    app.update();
+    let voices = impact_voices(&mut app);
+    assert!(
+        voices.contains(&(VoiceKind::Impact, 48000, false)),
+        "the huge band resolves its own sample: {voices:?}"
+    );
+}
+
+#[test]
+fn a_sub_floor_touch_is_authored_silent() {
+    let dir = impact_dir();
+    let mut app = impact_app(dir.path());
+    let (car, _) = spawn_test_car(&mut app, PlayerControl::Local, 1300.0);
+    // 0.5 m/s × 1300 kg = 650 — below SOFT's authored 1000 floor.
+    write_impact(&mut app, car, ObjectId::WORLD, 0.5);
+    app.update();
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.impacts, r.voices, r.failed), (0, 0, 0));
+    assert!(impact_voices(&mut app).is_empty());
+}
+
+#[test]
+fn the_struck_props_audio_id_selects_its_category() {
+    let dir = impact_dir();
+    let mut app = impact_app(dir.path());
+    let (car, _) = spawn_test_car(&mut app, PlayerControl::Local, 1300.0);
+    let (prop, _) = spawn_object(
+        &mut app,
+        Banger::new(BangerDefinition {
+            name: "sp_testprop".into(),
+            mass: 40.0,
+            friction: 0.9,
+            elasticity: 0.5,
+            impulse_limit2: 0.0,
+            size: [0.5, 0.5, 0.5],
+            cg: [0.0, 0.0, 0.0],
+            num_parts: 0,
+            audio_id: 7,
+        }),
+    );
+    write_impact(&mut app, car, prop, 3.0);
+    app.update();
+    // The prop's AudioId 7 lands the LIGHT category → PROP's 11 kHz
+    // sample — and only the car's side voices (the prop is no vehicle).
+    assert_eq!(impact_voices(&mut app), [(VoiceKind::Impact, 11025, false)]);
+}
+
+#[test]
+fn a_two_vehicle_impact_voices_each_side_at_its_own_impulse() {
+    let dir = impact_dir();
+    let mut app = impact_app(dir.path());
+    let (local, _) = spawn_test_car(&mut app, PlayerControl::Local, 1300.0);
+    let (ai, _) = spawn_test_car(&mut app, PlayerControl::Ai, 3000.0);
+    // 3 m/s: the 1300 kg car reads force 3900 → SOFT (22 kHz); the
+    // 3000 kg car reads 9000 → HUGE (48 kHz) — per-car impulse, not a
+    // shared pick.
+    write_impact(&mut app, local, ai, 3.0);
+    app.update();
+    let voices = impact_voices(&mut app);
+    assert_eq!(
+        voices,
+        [
+            (VoiceKind::Impact, 22050, false),
+            (VoiceKind::Impact, 48000, true)
+        ],
+        "the AI car's voice is a spatial emitter at the contact"
+    );
+    assert_eq!(app.world().resource::<AudioReport>().impacts, 2);
+}
+
+#[test]
+fn a_remote_participant_spawns_no_voice() {
+    let dir = impact_dir();
+    let mut app = impact_app(dir.path());
+    let (remote, _) = spawn_test_car(&mut app, PlayerControl::Remote, 1300.0);
+    write_impact(&mut app, remote, ObjectId::WORLD, 30.0);
+    app.update();
+    // The remote car's audio belongs to its own client — nothing
+    // plays here, nothing counts as a failure.
+    assert!(impact_voices(&mut app).is_empty());
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.impacts, r.failed), (0, 0));
+}
+
+#[test]
+fn events_without_a_vehicle_participant_stay_silent() {
+    let dir = impact_dir();
+    let mut app = impact_app(dir.path());
+    let (prop_a, _) = spawn_object(
+        &mut app,
+        Banger::new(BangerDefinition {
+            name: "sp_a".into(),
+            mass: 40.0,
+            friction: 0.9,
+            elasticity: 0.5,
+            impulse_limit2: 0.0,
+            size: [0.5, 0.5, 0.5],
+            cg: [0.0, 0.0, 0.0],
+            num_parts: 0,
+            audio_id: 7,
+        }),
+    );
+    // A knocked prop meeting the world: no striker car, no authored
+    // car-audio sample — the event is consumed without a voice.
+    write_impact(&mut app, prop_a, ObjectId::WORLD, 30.0);
+    app.update();
+    assert!(impact_voices(&mut app).is_empty());
+    assert_eq!(app.world().resource::<AudioReport>().impacts, 0);
+}
+
+#[test]
+fn the_impact_voice_bound_caps_pile_ups() {
+    let dir = impact_dir();
+    let mut app = impact_app(dir.path());
+    let (car, _) = spawn_test_car(&mut app, PlayerControl::Local, 1300.0);
+    for i in 0..20u64 {
+        let generation = app.world().resource::<Session>().generation();
+        app.world_mut().write_message(ImpactEvent {
+            id: ImpactId(i + 1),
+            generation,
+            tick: 0,
+            participants: (car, ObjectId::WORLD),
+            point: Vec3::ZERO,
+            normal: Vec3::Y,
+            severity: 3.0,
+            surface: SurfaceState::default(),
+        });
+    }
+    app.update();
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(r.impacts, 12, "MAX_IMPACT_VOICES bounds the pile-up");
+    assert_eq!(r.dropped, 8);
+    assert_eq!(impact_voices(&mut app).len(), 12);
+}
+
+#[test]
+fn a_stale_generation_event_is_skipped() {
+    let dir = impact_dir();
+    let mut app = impact_app(dir.path());
+    let (car, _) = spawn_test_car(&mut app, PlayerControl::Local, 1300.0);
+    let generation = app.world().resource::<Session>().generation();
+    app.world_mut().write_message(ImpactEvent {
+        id: ImpactId(1),
+        generation: generation + 1,
+        tick: 0,
+        participants: (car, ObjectId::WORLD),
+        point: Vec3::ZERO,
+        normal: Vec3::Y,
+        severity: 30.0,
+        surface: SurfaceState::default(),
+    });
+    app.update();
+    assert!(impact_voices(&mut app).is_empty());
+    assert_eq!(app.world().resource::<AudioReport>().impacts, 0);
+}
+
+#[test]
+fn teardown_sweeps_impact_voices_with_the_session() {
+    let dir = impact_dir();
+    let mut app = impact_app(dir.path());
+    let (car, _) = spawn_test_car(&mut app, PlayerControl::Local, 1300.0);
+    write_impact(&mut app, car, ObjectId::WORLD, 3.0);
+    app.update();
+    assert_eq!(impact_voices(&mut app).len(), 1);
+
+    // The production teardown sweeps `SessionEntity` roots on
+    // Unloading — the free-standing voice is one (AC06's restart leg).
+    app.world_mut()
+        .run_system_once(despawn_session_entities)
+        .unwrap();
+    app.update();
+    assert!(impact_voices(&mut app).is_empty());
+}
+
+#[test]
+fn an_absent_table_degrades_to_silence() {
+    let dir = fixture_dir(); // waves only — no impact table
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(dir.path(), 0).unwrap();
+    assert!(ImpactAudio::load(&vfs, 1).is_none());
+    let mut app = impact_app(dir.path());
+    assert!(app.world().get_resource::<ImpactAudio>().is_none());
+    let (car, _) = spawn_test_car(&mut app, PlayerControl::Local, 1300.0);
+    write_impact(&mut app, car, ObjectId::WORLD, 30.0);
+    app.update();
+    assert!(impact_voices(&mut app).is_empty());
 }

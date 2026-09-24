@@ -1106,6 +1106,10 @@ fn main() {
             (audio::engine_rigs, audio::engine_drive)
                 .chain()
                 .after(session::drive_session),
+            // F07-B.3: deduplicated impacts → bounded one-shot voices —
+            // the same despawn ordering as the rigs (a struck car dying
+            // mid-update must not queue voice reads on it).
+            audio::impact_voices.after(session::drive_session),
             // F07-B.2: the spatial listener follows whichever camera is
             // active — after the toggle so a mode switch moves the ear
             // the same frame, and after the session driver for the

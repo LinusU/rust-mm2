@@ -37,10 +37,25 @@
 //! local car *is* the listener's anchor, so its engine does not fade
 //! with camera distance (designed policy, DSN-37 — Bevy/rodio spatial
 //! is inverse-square plus stereo panning, scaled by
-//! [`ENGINE_SPATIAL_SCALE`]). Impacts, skids, ambient engines and the
-//! clutch sample's trigger remain F07-B work; which side's cardata a
-//! horn should read for opponents, `flags` and the aud11 variants
-//! remain UNK-25.
+//! [`ENGINE_SPATIAL_SCALE`]).
+//!
+//! F07-B.3 consumes the deduplicated [`ImpactEvent`] stream: each
+//! event's *vehicle* participants each earn one bounded one-shot at the
+//! contact point (a remote participant's voice belongs to its own
+//! client, the same skip every F05 system applies). The sample comes
+//! from the session's [`ImpactAudio`] — the player-side
+//! `default_impacts.csv` — resolved through [`impact_category`] and
+//! [`pick_impact`] (`mm2_game`): the struck side's `dgBangerData`
+//! `AudioId` selects the authored `ID` category (everything else,
+//! including all retail props at `AudioId` 0, reads the `WALL`
+//! catch-all), `severity × striker mass` — the same impulse estimate
+//! the knock pipeline weighs — selects the `min,max force` band,
+//! `frequency` weights the pick and the authored volume range supplies
+//! the gain. Voices are spatial emitters at the impact point for
+//! everyone but the local player, whose impacts stay non-spatial like
+//! its engine rig (DSN-37). Skids, ambient engines, the clutch trigger
+//! and siren programs remain F07-B work; the opponent-side impact
+//! table's divergent `WALL` bands and the `flags` word remain UNK-25.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -55,13 +70,16 @@ use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use tracing::warn;
 
+use avian3d::prelude::{ComputedMass, Mass};
 use mm2_assets::Vfs;
+use mm2_formats::cardata::{self, CardataBody, ImpactTable};
 use mm2_formats::wav::{FORMAT_PCM, Wav, lookup_stem};
 use mm2_game::{
-    EngineLoopSpec, EngineMix, Mm2Vfs, PlayerVehicle, Session, SessionEntity, SessionPhase,
-    VehicleAudio,
+    Banger, EngineLoopSpec, EngineMix, ImpactEvent, Mm2Vfs, NavRng, ObjectId, ObjectIdentity,
+    Player, PlayerControl, PlayerVehicle, Session, SessionEntity, SessionPhase, VehicleAudio,
+    impact_category, pick_impact,
 };
-use mm2_vehicle::VehicleState;
+use mm2_vehicle::{Vehicle, VehicleState};
 
 /// Decode bound: samples (per channel-interleaved count) beyond this
 /// are refused — retail waves top out under ~2.5 M samples; the cap
@@ -87,6 +105,16 @@ const MAX_ENGINE_RIGS: usize = 16;
 /// off at ~full authored volume, a racing pack (5–15 m) clearly
 /// audible, and a 50 m straggler near silence.
 const ENGINE_SPATIAL_SCALE: f32 = 0.25;
+/// Live one-shot impact voices the mixer will hold at once — a pile-up
+/// beyond this is counted and dropped rather than stacking voices
+/// (F07-AC04's bounded-voices requirement; designed bound).
+const MAX_IMPACT_VOICES: usize = 12;
+/// The impact table the session reads: the player-side
+/// `default_impacts.csv` — the local listener's authored mix
+/// (designed choice: the opponent file authors the same categories
+/// but `WALL` bands two orders of magnitude smaller — an authored
+/// inconsistency recorded under UNK-25, not a second binding).
+const IMPACT_TABLE: &str = "aud/cardata/player/default_impacts.csv";
 
 /// A decoded, playback-ready wave: normalized interleaved f32 samples
 /// plus the authored rate/channel shape. Produced only by
@@ -271,6 +299,52 @@ impl WaveBank {
     }
 }
 
+/// Session-scoped impact table + selection stream (F07-B.3): the
+/// parsed player-side `default_impacts.csv` plus the seeded draw the
+/// band/frequency picks share. Inserted by `load_session_world` when
+/// the table resolves and parses — a missing or malformed table
+/// degrades to no resource (warned once, never fabricated), the same
+/// absence policy every authored record applies. The draw is seeded
+/// per session generation like the spark/texel rigs seed per object,
+/// so a replayed session repeats the same picks.
+#[derive(Resource)]
+pub struct ImpactAudio {
+    /// The authored categories in authored order.
+    table: ImpactTable,
+    /// Deterministic draw stream for band/volume picks.
+    rng: NavRng,
+}
+
+impl ImpactAudio {
+    /// Resolve and parse [`IMPACT_TABLE`] through the VFS; `None` (with
+    /// a warn) when the file is absent or the grammar rejects it.
+    pub fn load(vfs: &Vfs, generation: u64) -> Option<Self> {
+        let bytes = match vfs.read_logical(IMPACT_TABLE) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("audio: {IMPACT_TABLE}: {e}");
+                return None;
+            }
+        };
+        match cardata::parse(IMPACT_TABLE, &bytes) {
+            Ok(file) => match file.body {
+                CardataBody::Impacts(table) => Some(Self {
+                    table,
+                    rng: NavRng::new(generation),
+                }),
+                other => {
+                    warn!("audio: {IMPACT_TABLE} parsed as {other:?} — no impact table");
+                    None
+                }
+            },
+            Err(e) => {
+                warn!("audio: {IMPACT_TABLE}: {e}");
+                None
+            }
+        }
+    }
+}
+
 /// Variant preference for one stem — `(tree tier, declared rate kHz)`.
 fn wave_rank(logical: &str) -> (u32, u32) {
     let tier = if logical.starts_with("aud/aud22/") {
@@ -307,6 +381,8 @@ pub enum VoiceKind {
     Horn,
     /// One `Engine wave name` loop of a vehicle's engine rig.
     Engine,
+    /// One `default_impacts.csv` sample a deduplicated impact spawned.
+    Impact,
 }
 
 /// Marker on a vehicle whose engine rig was built — set once whether
@@ -357,6 +433,8 @@ pub struct AudioReport {
     pub audible: u64,
     /// Engine rigs built this session (one per `VehicleAudio` car).
     pub rigs: u64,
+    /// Impact voices spawned this session (a subset of `voices`).
+    pub impacts: u64,
 }
 
 impl AudioReport {
@@ -477,6 +555,162 @@ pub fn horn_voices(
 /// anomaly is already surfaced at load; designed guard).
 fn horn_volume(v: f32) -> f32 {
     if v.is_finite() && v >= 0.0 { v } else { 1.0 }
+}
+
+/// Deduplicated impact → one-shot voices (F07-B.3, spec req 4). Each
+/// event's *vehicle* participants each earn a voice: the original
+/// drives impact audio off the car's own impact callback, so a
+/// two-car crash sounds once per car, each at its own impulse. A
+/// remote participant belongs to its authority's client — the same
+/// skip every F05 consumer applies. A participant that is not a
+/// vehicle (a knocked prop meeting the world, banger-on-banger)
+/// produces no voice — the authored table is car-audio data and there
+/// is no striker to weigh.
+///
+/// Per striker: the *other* side's `dgBangerData` `AudioId` selects the
+/// authored category (`ID` column; anything without a record falls to
+/// the id-0 `WALL` catch-all — binding designed, UNK-25), the impulse
+/// `severity × striker mass` picks the `min,max force` band (the same
+/// estimate `impulse_estimate` feeds the knock pipeline; whether the
+/// original weighs this quantity is unverified), `frequency` weights
+/// the covering samples and the authored volume range draws the gain —
+/// all through `mm2_game`'s [`pick_impact`] on the session's seeded
+/// [`ImpactAudio`]. The voice is a spatial emitter at the impact
+/// point for everyone but the local player (DSN-37 anchor), bounded
+/// by [`MAX_IMPACT_VOICES`] so a pile-up counts drops instead of
+/// stacking voices; a sub-floor force resolves no band and stays
+/// authored-silent. Events on a stale generation are skipped; while
+/// not `Playing` the reader drains without emitting (spark_fx's
+/// contract — a buffered stale impact never flushes sound into a
+/// pause or the next session).
+#[allow(clippy::too_many_arguments)] // Bevy system — the borrows are the contract.
+pub fn impact_voices(
+    mut commands: Commands,
+    mut reader: MessageReader<ImpactEvent>,
+    session: Res<Session>,
+    table: Option<ResMut<ImpactAudio>>,
+    vfs: Option<Res<Mm2Vfs>>,
+    bank: Option<ResMut<WaveBank>>,
+    mut waves: ResMut<Assets<PcmAudio>>,
+    mut report: ResMut<AudioReport>,
+    identities: Query<(Entity, &ObjectIdentity, Option<&Player>)>,
+    cars: Query<(Option<&Vehicle>, Option<&ComputedMass>, Option<&Mass>)>,
+    bangers: Query<&Banger>,
+    voices: Query<&AudioVoice>,
+) {
+    if !session.is_playing() {
+        reader.read().for_each(drop);
+        return;
+    }
+    let (Some(mut table), Some(vfs), Some(mut bank)) = (table, vfs, bank) else {
+        // No authored table (or no session world yet): the stream is
+        // still consumed next frame — an absent record degrades to
+        // silence rather than fabricating a category.
+        return;
+    };
+    // Disjoint field borrows (`&table.table` vs `&mut table.rng`) do
+    // not split through `ResMut`'s Deref — reborrow the inner struct.
+    let table = &mut *table;
+    let generation = session.generation();
+    let index: HashMap<ObjectId, (Entity, Option<PlayerControl>)> = identities
+        .iter()
+        .map(|(entity, id, player)| (id.0, (entity, player.map(|p| p.control))))
+        .collect();
+    let mut live = voices
+        .iter()
+        .filter(|v| v.kind == VoiceKind::Impact)
+        .count();
+    for event in reader.read() {
+        if event.generation != generation {
+            continue;
+        }
+        for side in 0..2 {
+            let (me, other) = if side == 0 {
+                (event.participants.0, event.participants.1)
+            } else {
+                (event.participants.1, event.participants.0)
+            };
+            let Some(&(entity, control)) = index.get(&me) else {
+                continue;
+            };
+            if control == Some(PlayerControl::Remote) {
+                continue;
+            }
+            let Ok((vehicle, computed, mass)) = cars.get(entity) else {
+                continue;
+            };
+            let Some(vehicle) = vehicle else {
+                continue;
+            };
+            // The struck side's authored selector — its banger record's
+            // `AudioId`; world geometry and recordless bodies read the
+            // id-0 catch-all.
+            let audio_id = index
+                .get(&other)
+                .and_then(|(e, _)| bangers.get(*e).ok())
+                .map(|b| b.def.audio_id)
+                .unwrap_or(0);
+            // The designed force quantity: approach speed × the
+            // striker's resolved mass (computed → authored → config),
+            // matching `impulse_estimate`'s contract. Each source is
+            // checked before the fallback — a not-yet-computed
+            // `Mass(0)` must fall through to the config mass, not
+            // collapse the pick to a 1 kg touch.
+            let valid = |m: f32| (m.is_finite() && m > 0.0).then_some(m);
+            let striker_mass = computed
+                .and_then(|m| valid(m.value()))
+                .or_else(|| mass.and_then(|m| valid(m.0)))
+                .or_else(|| valid(vehicle.config.mass))
+                .unwrap_or(1.0);
+            let force = event.severity * striker_mass;
+            let Some(category) = impact_category(&table.table, audio_id) else {
+                // The table cannot answer this selector at all — a
+                // data failure, counted once per event side.
+                report.failed += 1;
+                warn!("audio: no impact category for AudioId {audio_id}");
+                continue;
+            };
+            let Some(pick) = pick_impact(category, force, &mut table.rng) else {
+                // No band covers the force — authored silence for a
+                // sub-floor touch, not a failure.
+                continue;
+            };
+            if live >= MAX_IMPACT_VOICES {
+                report.dropped += 1;
+                continue;
+            }
+            match bank.load(&vfs.0, &mut waves, &pick.sample.name) {
+                Ok(handle) => {
+                    // The local player's hits anchor the mix
+                    // non-spatially like its engine rig (DSN-37);
+                    // everyone else is a world emitter at the contact.
+                    let spatial = control != Some(PlayerControl::Local);
+                    commands.spawn((
+                        AudioVoice {
+                            kind: VoiceKind::Impact,
+                        },
+                        SessionEntity(generation),
+                        Transform::from_translation(event.point),
+                        AudioPlayer(handle),
+                        PlaybackSettings {
+                            mode: PlaybackMode::Despawn,
+                            volume: Volume::Linear(pick.volume),
+                            spatial,
+                            spatial_scale: spatial.then(|| SpatialScale::new(ENGINE_SPATIAL_SCALE)),
+                            ..Default::default()
+                        },
+                    ));
+                    report.voices += 1;
+                    report.impacts += 1;
+                    live += 1;
+                }
+                Err(e) => {
+                    report.failed += 1;
+                    warn!("audio: {e}");
+                }
+            }
+        }
+    }
 }
 
 /// Build engine rigs on every `VehicleAudio` car: one

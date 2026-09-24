@@ -42,6 +42,7 @@ fn banger_def(name: &str, impulse_limit2: f32) -> BangerDefinition {
         size: [0.5, 0.5, 0.5],
         cg: [0.0, 0.0, 0.0],
         num_parts: 0,
+        audio_id: 0,
     }
 }
 
@@ -938,6 +939,7 @@ fn piece_def(name: &str, mass: f32) -> BangerDefinition {
         size: [0.2, 0.2, 0.2],
         cg: [0.0, 0.1, 0.0],
         num_parts: 0,
+        audio_id: 0,
     }
 }
 

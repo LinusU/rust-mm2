@@ -236,6 +236,7 @@ pub fn drive_session(
             commands.remove_resource::<crate::damage_fx::SmokeFx>();
             commands.remove_resource::<crate::spark_fx::SparkFx>();
             commands.remove_resource::<crate::audio::WaveBank>();
+            commands.remove_resource::<crate::audio::ImpactAudio>();
             commands.remove_resource::<crate::pvs::CityPvs>();
             commands.remove_resource::<crate::water::CityWater>();
             commands.remove_resource::<crate::city::WorldFloor>();
@@ -632,6 +633,14 @@ pub fn load_session_world(
     // re-indexes, so a mod set that changed between sessions can never
     // leave a stale stem map.
     commands.insert_resource(crate::audio::WaveBank::index(&vfs.0));
+    // F07-B.3: the authored impact table — the player-side
+    // `default_impacts.csv` the deduplicated impact stream picks
+    // through. Same absence policy as every authored record: a table
+    // that does not resolve or parse yields no resource, not a
+    // fabricated category.
+    if let Some(table) = crate::audio::ImpactAudio::load(&vfs.0, session.generation()) {
+        commands.insert_resource(table);
+    }
     if world_ok {
         session
             .transition(SessionPhase::Ready)

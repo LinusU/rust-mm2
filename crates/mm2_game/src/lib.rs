@@ -32,7 +32,9 @@ pub mod telemetry;
 pub mod texel;
 pub mod traffic;
 
-pub use audio::{EngineLoopSpec, EngineMix, VehicleAudio};
+pub use audio::{
+    EngineLoopSpec, EngineMix, ImpactPick, VehicleAudio, impact_category, pick_impact,
+};
 pub use banger::{
     Banger, BangerCause, BangerDefinition, BangerPhase, BangerPool, BangerStateChanged,
     DEFAULT_ACTIVE_POOL, MAX_BANGER_ANGULAR_SPEED, MAX_BANGER_LINEAR_SPEED,

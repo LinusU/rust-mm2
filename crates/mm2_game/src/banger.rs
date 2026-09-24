@@ -134,6 +134,12 @@ pub struct BangerDefinition {
     /// chunks the prop's PKG actually contains (the two agree on every
     /// standalone retail record — the audit cross-checks them).
     pub num_parts: i64,
+    /// `AudioId` — the authored impact-sound selector: the
+    /// `default_impacts.csv` category `ID` this prop claims when struck
+    /// (0 on every retail record, so retail props all read the id-0
+    /// `WALL` category — the binding itself is unverified, UNK-25).
+    /// Kept verbatim so impact audio and mods read the authored value.
+    pub audio_id: i64,
 }
 
 /// Fallback mass for records whose `Mass` is non-finite or
@@ -177,6 +183,7 @@ impl BangerDefinition {
             size: clean(data.size),
             cg: clean(data.cg),
             num_parts: data.num_parts,
+            audio_id: data.audio_id,
         }
     }
 
