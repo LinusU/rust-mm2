@@ -963,8 +963,8 @@ fn nearest_blocker_reads_only_the_corridor_ahead() {
 }
 
 /// A bare driver for the sense-gate tests: authored spec, default
-/// tuning, no committed pass — only `avoid_players` varies.
-fn driver(avoid_players: bool) -> OpponentDriver {
+/// tuning, no committed pass — only the avoid flags vary.
+fn driver(avoid_players: bool, avoid_opponents: bool) -> OpponentDriver {
     OpponentDriver {
         index: 0,
         spec: OpponentSpec {
@@ -975,6 +975,8 @@ fn driver(avoid_players: bool) -> OpponentDriver {
         route: None,
         tuning: ScriptedTuning::DEFAULT,
         avoid_players,
+        avoid_opponents,
+        look_ahead: 75.0,
         next: 0,
         recovery: ScriptedBot::default(),
         pass_entity: None,
@@ -992,13 +994,14 @@ fn driver(avoid_players: bool) -> OpponentDriver {
     }
 }
 
-/// The authored `avoidPlayers` flag gates which participant classes
-/// the corridor sees (F15-B.2): an opponent that does not avoid
-/// players drives through a parked human car as if it were not there.
-/// `avoidOpponents` stays inert — AI participants are sensed
-/// regardless of what the tail authors (retail ≈ universal 0).
+/// The authored avoid flags gate which participant classes the
+/// corridor sees (F15-B.2/B.8): an opponent that does not avoid
+/// players drives through a parked human car as if it were not there,
+/// and an authored-0 `avoidOpponents` makes fellow AI transparent the
+/// same way — 59% of retail rows author exactly that (documented
+/// polarity, R3/R4).
 #[test]
-fn authored_avoid_players_gates_the_corridor() {
+fn authored_avoid_flags_gate_the_corridor() {
     let me = Entity::from_raw_u32(0).unwrap();
     let pos = Vec3::ZERO;
     let fwd = Vec3::NEG_Z;
@@ -1008,13 +1011,13 @@ fn authored_avoid_players_gates_the_corridor() {
     ai.control = PlayerControl::Ai;
     let all = [human, ai];
 
-    // Sensing players: the nearer human car blocks.
-    let aware = driver(true);
+    // Sensing both classes: the nearer human car blocks.
+    let aware = driver(true, true);
     let b = nearest_blocker(me, pos, fwd, reach, &all, |t| aware.senses(t));
     assert_eq!(b.unwrap().entity, human.entity);
 
     // avoidPlayers off: the human is transparent, the AI blocks.
-    let deaf = driver(false);
+    let deaf = driver(false, true);
     let b = nearest_blocker(me, pos, fwd, reach, &all, |t| deaf.senses(t));
     assert_eq!(b.unwrap().entity, ai.entity);
     assert!(
@@ -1022,11 +1025,18 @@ fn authored_avoid_players_gates_the_corridor() {
         "a driver that does not avoid players sees nobody in a human-only lane"
     );
 
-    // AI is sensed regardless: `avoidOpponents` is bound but inert.
+    // avoidOpponents off: the AI is transparent, the human blocks.
+    let feral = driver(true, false);
+    let b = nearest_blocker(me, pos, fwd, reach, &all, |t| feral.senses(t));
+    assert_eq!(b.unwrap().entity, human.entity);
     assert!(
-        nearest_blocker(me, pos, fwd, reach, &all[1..], |t| deaf.senses(t)).is_some(),
-        "an authored-0 avoidOpponents must not blind the driver to AI"
+        nearest_blocker(me, pos, fwd, reach, &all[1..], |t| feral.senses(t)).is_none(),
+        "an authored-0 avoidOpponents blinds the driver to AI"
     );
+
+    // Both off: nothing is sensed at all.
+    let blind = driver(false, false);
+    assert!(nearest_blocker(me, pos, fwd, reach, &all, |t| blind.senses(t)).is_none());
 }
 
 #[test]
@@ -1250,12 +1260,14 @@ fn checkpoint_markers_track_the_local_participant() {
 
 /// The authored tail reaches the driver through the production roster
 /// path: `maxThrottle` clamps to the input ceiling, the corner-speed
-/// column multiplies the corner-brake floor and `avoidPlayers` gates
-/// the corridor — `None` columns take the `RegisterRoute` defaults.
+/// column multiplies the corner-brake floor, the look-ahead column sets
+/// the corridor reach, and `avoidPlayers`/`avoidOpponents` gate the
+/// corridor's classes — `None` columns take the `RegisterRoute`
+/// defaults.
 #[test]
 fn authored_tail_binds_the_driver_tuning() {
     let tmp = roster_install_rows(
-        "vpt race0-a-0.opp 0.90 0 50.0 0.7 1 1 1 0 0 1.5\nvpheavy race0-a-1.opp 0.80 0 50.0 0.7 1 1 1 1 0 2.0\n",
+        "vpt race0-a-0.opp 0.90 0 50.0 0.7 1 1 0 1 0 1.5\nvpheavy race0-a-1.opp 0.80 0 120.0 0.7 1 1 1 0 0 2.0\n",
         &[],
     );
     let mut app = event_app(event_config(), vfs_of(tmp.path()));
@@ -1271,14 +1283,21 @@ fn authored_tail_binds_the_driver_tuning() {
     );
     assert!(
         !d.avoid_players,
-        "authored avoidPlayers=0 gates human sensing off"
+        "authored avoidPlayers=0 (col 6) gates human sensing off"
     );
+    assert!(d.avoid_opponents, "authored avoidOpponents=1 (col 7)");
+    assert_eq!(d.look_ahead, 50.0, "col 2 binds the corridor reach");
 
     let heavy = opponent_by_vehicle(&mut app, "vpheavy");
     let d = app.world().get::<OpponentDriver>(heavy).unwrap();
     assert!((d.tuning.throttle_cap - 0.8).abs() < 1e-6);
     assert!((d.tuning.corner_speed - ScriptedTuning::DEFAULT.corner_speed * 2.0).abs() < 1e-4);
     assert!(d.avoid_players);
+    assert!(
+        !d.avoid_opponents,
+        "authored avoidOpponents=0 (col 7) gates AI sensing off"
+    );
+    assert_eq!(d.look_ahead, 120.0);
 }
 
 /// The same car on the same lane shape differs only in authored
@@ -1310,13 +1329,13 @@ fn authored_max_throttle_measures_on_track() {
     );
 }
 
-/// `avoidPlayers` gates the corridor through the full driving system:
-/// with the local car parked mid-lane, an authored-1 driver commits a
-/// pass and drives around without contact; the authored-0 twin never
-/// senses it and collides head-on.
+/// `avoidPlayers` (tail column 6) gates the corridor through the full
+/// driving system: with the local car parked mid-lane, an authored-1
+/// driver commits a pass and drives around without contact; the
+/// authored-0 twin never senses it and collides head-on.
 #[test]
 fn authored_avoid_players_decides_the_parked_player() {
-    for (tail, expect_contact) in [("1 1 1 1 0", false), ("1 1 1 0 0", true)] {
+    for (tail, expect_contact) in [("1 1 1 1 0", false), ("1 1 0 1 0", true)] {
         let tmp = roster_install_rows(
             &format!("vpt race0-a-0.opp 0.90 0 50.0 0.7 {tail} 1.0\n"),
             &[],
@@ -1358,6 +1377,122 @@ fn authored_avoid_players_decides_the_parked_player() {
         assert!(
             p.x > 115.0 && max_dev > 0.5,
             "the sensing driver slips past the parked car off the lane line: pos={p:?} max_dev={max_dev}"
+        );
+    }
+}
+
+/// `avoidOpponents` (tail column 7) gates AI sensing through the full
+/// driving system: a route-less roster slot parked mid-lane is an
+/// authored fellow opponent — the authored-1 driver commits a pass and
+/// slips around it; the authored-0 twin never senses it and collides
+/// head-on.
+#[test]
+fn authored_avoid_opponents_decides_the_parked_ai() {
+    for (tail, expect_contact) in [("1 1 1 1 0", false), ("1 1 1 0 0", true)] {
+        let tmp = roster_install_rows(
+            &format!(
+                "vpt race0-a-0.opp 0.90 0 50.0 0.7 {tail} 1.0\n\
+                 vpheavy race0-a-dead.opp 0.80 0 50.0 0.7 1 1 1 1 0 1.0\n"
+            ),
+            &[],
+        );
+        let mut app = event_app(event_config(), vfs_of(tmp.path()));
+        app.update();
+        let vpt = opponent_by_vehicle(&mut app, "vpt");
+        // `vpheavy`'s `.opp` resolves nowhere — the roster keeps the
+        // slot but it has no route, so `opponent_drive` holds it still:
+        // a parked fellow opponent, not a driven one.
+        let parked = opponent_by_vehicle(&mut app, "vpheavy");
+        assert!(
+            app.world()
+                .get::<OpponentDriver>(parked)
+                .unwrap()
+                .route
+                .is_none(),
+            "the dead .opp reference leaves the slot route-less"
+        );
+        let parked_obj = app.world().get::<ObjectIdentity>(parked).unwrap().0;
+
+        run(&mut app, 240);
+        app.world_mut().get_mut::<Position>(parked).unwrap().0 = Vec3::new(110.0, 0.0, COURSE_Z);
+
+        let mut impacts = Vec::new();
+        let mut max_dev = 0.0f32;
+        for _ in 0..460 {
+            app.update();
+            impacts.extend(drain_impacts(&mut app));
+            let p = app.world().get::<Position>(vpt).unwrap().0;
+            max_dev = max_dev.max((p.z - COURSE_Z).abs());
+        }
+        let hit = impacts
+            .iter()
+            .any(|e| e.participants.0 == parked_obj || e.participants.1 == parked_obj);
+        assert_eq!(
+            hit, expect_contact,
+            "avoidOpponents tail {tail}: contact with the parked AI = {hit}"
+        );
+        if expect_contact {
+            continue;
+        }
+        let p = app.world().get::<Position>(vpt).unwrap().0;
+        assert!(
+            p.x > 115.0 && max_dev > 0.5,
+            "the sensing driver slips past the parked AI off the lane line: pos={p:?} max_dev={max_dev}"
+        );
+    }
+}
+
+/// The authored look-ahead distance (tail column 2) sets how far out
+/// the corridor senses: an authored-150 driver commits its pass while
+/// the parked blocker is still ~90 m away; the authored-30 twin does
+/// not react inside the same window — the blocker has not entered its
+/// corridor yet. The blocker is a route-less roster slot (a parked
+/// fellow opponent), not the local car — teleporting the player this
+/// far ahead sweeps the finish trigger and ends the session.
+#[test]
+fn authored_look_ahead_sets_the_sensing_distance() {
+    for (lookahead, expect_dev) in [(150.0f32, true), (30.0, false)] {
+        let tmp = roster_install_rows(
+            &format!(
+                "vpt race0-a-0.opp 0.90 0 {lookahead} 0.7 1 1 1 1 0 1.0\n\
+                 vpheavy race0-a-dead.opp 0.80 0 50.0 0.7 1 1 1 1 0 1.0\n"
+            ),
+            &[],
+        );
+        let mut app = event_app(event_config(), vfs_of(tmp.path()));
+        app.update();
+        let vpt = opponent_by_vehicle(&mut app, "vpt");
+        let parked = opponent_by_vehicle(&mut app, "vpheavy");
+        assert!(
+            app.world()
+                .get::<OpponentDriver>(parked)
+                .unwrap()
+                .route
+                .is_none(),
+            "the dead .opp reference leaves the slot route-less"
+        );
+
+        run(&mut app, 240);
+        // Park the route-less car ~90 m ahead of vpt on its lane —
+        // inside a 150 m corridor, outside a 30 m one.
+        let vx = app.world().get::<Position>(vpt).unwrap().0.x;
+        app.world_mut().get_mut::<Position>(parked).unwrap().0 =
+            Vec3::new(vx + 90.0, 0.0, COURSE_Z);
+
+        // 90 frames ≈ 25–35 m of travel — short enough that the 30 m
+        // corridor cannot reach the blocker inside the window.
+        let mut deviated = false;
+        for _ in 0..90 {
+            app.update();
+            let p = app.world().get::<Position>(vpt).unwrap().0;
+            if (p.z - COURSE_Z).abs() > 0.5 {
+                deviated = true;
+                break;
+            }
+        }
+        assert_eq!(
+            deviated, expect_dev,
+            "look-ahead {lookahead}: pass commit inside 90 frames = {deviated}"
         );
     }
 }

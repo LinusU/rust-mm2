@@ -29,20 +29,21 @@
 //!   merge would cut back across its nose. Static geometry (walls,
 //!   props) is deliberately not sensed here; a hit the pass cannot
 //!   make stays the recovery law's job.
-//! - **Authored tuning (F15-B.2).** The `[Opponent]` row's ten-value
-//!   parameter tail — the documented `aiVehiclePhysics::RegisterRoute`
-//!   behavioral vocabulary (mm2hook `OpponentData`, R4; the
-//!   column-to-field mapping is inferred — UNK-11/RACE-14) — resolves
-//!   at spawn into a per-driver [`ScriptedTuning`] and corridor sense
-//!   mask: `maxThrottle` ceilings the car's throttle demand, the
-//!   corner-speed multiplier scales the corner-brake engage speed,
-//!   and the `avoidPlayers` flag gates whether the corridor senses
-//!   human participants at all (an unsensed class is fully
-//!   transparent). `avoidOpponents` binds but stays inert — retail
-//!   authors it ≈ universally 0, so consuming it under the inferred
-//!   mapping would blind the field to itself; `avoidTraffic`/
-//!   `avoidProps` bind but stay inert — no ambient-traffic class
-//!   exists (F10) and the corridor never sensed props; the remaining
+//! - **Authored tuning (F15-B.2/B.8).** The `[Opponent]` row's
+//!   ten-value parameter tail — the documented
+//!   `aiVehiclePhysics::RegisterRoute` behavioral vocabulary (R3's
+//!   published column table + mm2hook's recovered signature, R4;
+//!   ledger RACE-14) — resolves at spawn into a per-driver
+//!   [`ScriptedTuning`] and corridor sense mask: `maxThrottle`
+//!   ceilings the car's throttle demand, the corner-speed multiplier
+//!   scales the corner-brake engage speed, the look-ahead distance
+//!   sets the corridor's reach, and the authored `avoidPlayers`/
+//!   `avoidOpponents` flags gate whether the corridor senses human or
+//!   AI participants at all (an unsensed class is fully transparent —
+//!   59% of retail rows author `avoidOpponents=0`, so stock opponents
+//!   genuinely do not dodge each other). `avoidTraffic`/`avoidProps`
+//!   bind but stay inert — ambient cars are not `Player`
+//!   participants and the corridor never sensed props; the remaining
 //!   columns stay decoded-but-unconsumed pending verified semantics.
 //! - **Bounded re-anchor (F15-B.3).** A car the escapes and pass
 //!   machinery cannot free — penned, hull-beached with unloaded wheels
@@ -123,10 +124,10 @@ const BLOCK_HALF_WIDTH: f32 = 2.4;
 /// far lane must be empty at commit, not just the corridor, so a
 /// pass cannot aim into traffic the corridor never saw.
 const PASS_SCAN: f32 = 7.0;
-/// Corridor reach at a standstill (m); grows with speed.
-const BLOCK_NEAR: f32 = 14.0;
-/// Added corridor reach per m/s — look ahead ~1.4 s of travel.
-const BLOCK_LEAD: f32 = 1.4;
+/// Obstacle-sensing reach (m) when the authored tail supplies no
+/// look-ahead distance — `RegisterRoute`'s `someDistancePadding`
+/// default (R4). Authored rows carry their own (retail 50–150).
+const LOOK_AHEAD_DEFAULT: f32 = 75.0;
 /// Lateral shift applied to the aim point to drive around a blocker —
 /// just over a car width.
 const PASS_OFFSET: f32 = 3.6;
@@ -232,12 +233,21 @@ pub struct OpponentDriver {
     /// throttle, base corner speed — i.e. the pre-tail behavior.
     pub tuning: ScriptedTuning,
     /// Whether the corridor senses human participants — authored
-    /// `avoidPlayers` (default on). Other AI opponents are always
-    /// sensed: retail authors `avoidOpponents` ≈ universally 0, so
-    /// consuming it under the inferred mapping would blind every
-    /// stock opponent to the rest of the field — bound on the spec,
-    /// inert until the flag's order/polarity is verified.
+    /// `avoidPlayers`, column 6 (default on, the `RegisterRoute`
+    /// default). Retail authors 0 on 75% of rows — most stock
+    /// opponents do not dodge the player.
     pub avoid_players: bool,
+    /// Whether the corridor senses fellow AI opponents — authored
+    /// `avoidOpponents`, column 7 (default on). 59% of retail rows
+    /// author 0 — the field does not dodge itself on those rows
+    /// (documented polarity, R3/R4).
+    pub avoid_opponents: bool,
+    /// The corridor's obstacle-sensing reach (m) — authored
+    /// `Look Ahead Distance`, column 2 ([`LOOK_AHEAD_DEFAULT`] when
+    /// the column is absent; a designed reading of the documented
+    /// name, R3). Feeds both the brake corridor and the pass hold
+    /// window.
+    pub look_ahead: f32,
     /// Index of the route point currently being chased.
     pub next: usize,
     /// Bounded stuck-recovery state machine — the same three-point
@@ -303,14 +313,13 @@ pub struct OpponentDriver {
 
 impl OpponentDriver {
     /// Whether the authored avoid flags let the corridor sense `t` —
-    /// human participants under `avoidPlayers`; AI participants always
-    /// (`avoidOpponents` is bound but inert — see
-    /// [`mm2_game::OpponentDriveParams::avoid_opponents`]) (F15-B.2).
-    /// An unsensed class is fully transparent: no pass, no brake, no
-    /// ban — the authored lineup drives through it.
+    /// human participants under `avoidPlayers`, AI under
+    /// `avoidOpponents` (F15-B.2/B.8). An unsensed class is fully
+    /// transparent: no pass, no brake, no ban — the authored lineup
+    /// drives through it.
     pub fn senses(&self, t: &Traffic) -> bool {
         match t.control {
-            PlayerControl::Ai => true,
+            PlayerControl::Ai => self.avoid_opponents,
             _ => self.avoid_players,
         }
     }
@@ -673,6 +682,11 @@ pub fn spawn_opponents(
                             * drive_params.corner_speed_multiplier.unwrap_or(1.0).max(0.0),
                     },
                     avoid_players: drive_params.avoid_players.unwrap_or(true),
+                    avoid_opponents: drive_params.avoid_opponents.unwrap_or(true),
+                    look_ahead: drive_params
+                        .distance_padding
+                        .filter(|d| d.is_finite() && *d > 0.0)
+                        .unwrap_or(LOOK_AHEAD_DEFAULT),
                     next,
                     recovery: ScriptedBot::default(),
                     pass_entity: None,
@@ -1116,7 +1130,10 @@ pub fn opponent_drive(
             driver.stuck_pos = pos.0;
             driver.stuck_frames = 0;
         }
-        let reach = BLOCK_NEAR + vstate.forward_speed.max(0.0) * BLOCK_LEAD;
+        // The corridor reach is the authored look-ahead distance
+        // (F15-B.8) — how far ahead this driver senses obstacles, not
+        // a speed-scaled sightline.
+        let reach = driver.look_ahead;
         // A banned blocker — one whose abandoned pass is still on its
         // cooldown — is fully transparent: no aim, no brake. That is
         // what lets the fallback actually push or slip past instead

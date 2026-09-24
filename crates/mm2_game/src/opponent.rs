@@ -12,8 +12,9 @@
 //! unverified (ledger UNK-11) and nothing here interprets them. The
 //! ten-value `[Opponent]` parameter tail decodes through
 //! [`OpponentSpec::drive_params`] into the driving-behavior vocabulary
-//! mm2hook documents (`OpponentData`/`RegisterRoute`, R4) — a
-//! documented-but-inferred mapping kept beside the raw values, not a
+//! the community format reference and mm2hook document (R3/R4 — the
+//! flag-column order is documented, the float semantics corroborated
+//! by `RegisterRoute` defaults) — kept beside the raw values, not a
 //! replacement for them. Problems that do not prevent building
 //! the roster (a dead `.opp` reference, a wired count that disagrees
 //! with the table row) are [`OpponentIssue`]s on the roster — they are
@@ -100,12 +101,21 @@ pub struct OpponentSpec {
 }
 
 /// The `[Opponent]` parameter tail decoded into the driving-behavior
-/// vocabulary mm2hook recovers for it (`OpponentData` +
-/// `aiVehiclePhysics::RegisterRoute`, R4 — documented, not
-/// original-verified; ledger UNK-11/RACE-14). The column-to-field
-/// assignment is inferred from the recovered parameter names plus the
-/// retail value distributions (536 rows measured): every column's
-/// authored range matches the corresponding `RegisterRoute` default.
+/// vocabulary documented for it (ledger RACE-14). The column order is
+/// **documented**, not just inferred: the community format reference
+/// (angel-file-formats `AIMAP.md`, R3) publishes the same ten columns
+/// and mm2hook's recovered `aiVehiclePhysics::RegisterRoute` signature
+/// (R4) lists the flag arguments in exactly the tail's flag-column
+/// order (`unkFlag, avoidTraffic, avoidProps, avoidPlayers,
+/// avoidOpponents, weirdPathfinding` ↔ columns 1, 4–8). The float
+/// columns corroborate by their `RegisterRoute` defaults: `maxThrottle`
+/// 1.0 sits in column 0's 0.57–1.00, `cornerBrakingThreshold` 0.7 at
+/// column 3's ~0.7 centre, `someDistancePadding` 75 inside column 2's
+/// 50–150, `cornerSpeedMultiplier` 2.0 inside column 9's 0.89–2.29 —
+/// 537 retail rows measured. An earlier inference had the flag block
+/// shifted one column later; that assignment is superseded (it put a
+/// 43%-set "unused" flag on ordinary rows and made `avoidOpponents`
+/// ~never authored — both anomalies resolve under this order).
 ///
 /// Columns the tail is too short to supply (`stunt0`'s single-value
 /// row, malformed rows) stay `None` — consumers resolve their own
@@ -117,38 +127,46 @@ pub struct OpponentDriveParams {
     /// the low end far more often than professional ones — the
     /// authored difficulty dial.
     pub max_throttle: Option<f32>,
-    /// Column 1 — a 0/1 flag (set only on london `crash6`/`race12`
-    /// rows on retail): `weirdPathfinding`/`unkFlag` candidate. Bound,
-    /// unconsumed — no pathfinding variant exists to switch.
-    pub weird_pathfinding: Option<bool>,
-    /// Column 2 — a distance in metres (retail 50–150):
-    /// `someDistancePadding` (default 75)/`TurnRadius` candidate.
-    /// Bound, unconsumed — which distance it pads is unverified.
-    pub distance_padding: Option<f32>,
-    /// Column 3 — corner braking factor (retail 0.07–1.0, centred
-    /// ~0.7): `cornerBrakingThreshold` (default 0.7)/
-    /// `TurnSpeedMultiplier` candidate. Bound, unconsumed — its exact
-    /// threshold semantics are unverified.
-    pub corner_brake: Option<f32>,
-    /// Column 4 — a 0/1 flag, purpose unknown. Bound, unconsumed.
+    /// Column 1 — a 0/1 flag the format reference calls
+    /// unknown/unused (RegisterRoute's `unkFlag`). Retail authors it on
+    /// only 3 rows — the same rows that set `weirdPathfinding`
+    /// (london `crash6`/`race12`). Bound, unconsumed.
     pub unused_flag: Option<bool>,
-    /// Column 5 — `avoidTraffic`: sense ambient traffic. Bound but
-    /// inert — no ambient-traffic class exists yet (F10 scope).
+    /// Column 2 — the obstacle look-ahead distance in metres (retail
+    /// 50–150; the format reference's "Look Ahead Distance", feeding
+    /// RegisterRoute's `someDistancePadding` = 75 default). Consumed as
+    /// the avoidance corridor's reach — a designed reading of the
+    /// documented name; the original's exact use is unrecovered.
+    pub distance_padding: Option<f32>,
+    /// Column 3 — `cornerBrakingThreshold` (RegisterRoute default 0.7;
+    /// retail 0.07–1.0 centred ~0.7). The documented semantics are a
+    /// brake-demand floor: the original skips braking when the corner's
+    /// required brake power falls below it. Bound, unconsumed — our
+    /// control law's corner brake is a binary engage, not a continuous
+    /// demand, so there is no faithful quantity to compare yet.
+    pub corner_brake: Option<f32>,
+    /// Column 4 — `avoidTraffic`: sense ambient traffic. Bound but
+    /// inert — ambient cars are not `Player` participants, so the
+    /// corridor never sees the class (F10 scope).
     pub avoid_traffic: Option<bool>,
-    /// Column 6 — `avoidProps`: sense props. Bound but inert — the
+    /// Column 5 — `avoidProps`: sense props. Bound but inert — the
     /// corridor senses participants only.
     pub avoid_props: Option<bool>,
-    /// Column 7 — `avoidPlayers`: sense human participants (local and
+    /// Column 6 — `avoidPlayers`: sense human participants (local and
     /// remote). `false` makes the player transparent to the corridor.
+    /// Retail authors both values (25% set) — real per-driver variance.
     pub avoid_players: Option<bool>,
-    /// Column 8 — `avoidOpponents`: sense other AI opponents. Bound
-    /// but **inert**: retail authors it ≈ universally 0, so consuming
-    /// it under this inferred mapping would make every stock opponent
-    /// blind to the rest of the field — either the original genuinely
-    /// never avoids AI, or the flag order/polarity here is wrong. Held
-    /// unverified until it can be measured; the corridor senses AI
-    /// participants unconditionally meanwhile.
+    /// Column 7 — `avoidOpponents`: sense other AI opponents. `false`
+    /// makes fellow AI transparent to the corridor — 59% of retail
+    /// rows author exactly that (documented polarity: 1 = avoid), so
+    /// stock opponents genuinely do not dodge each other. Consumed.
     pub avoid_opponents: Option<bool>,
+    /// Column 8 — `weirdPathfinding`/`BadPathfinding` (RegisterRoute
+    /// default false): the format reference reports "unusual and
+    /// sometimes broken" pathfinding. Retail sets it on only 3 rows —
+    /// london `crash6`'s follow car and `race12`. Bound, unconsumed —
+    /// no alternate pathfinding mode exists to switch to.
+    pub weird_pathfinding: Option<bool>,
     /// Column 9 — `cornerSpeedMultiplier` (RegisterRoute default 2.0):
     /// how much corner speed the driver carries. Retail 0.89–2.29;
     /// professional rows author the high end (>2.0).
@@ -170,14 +188,14 @@ impl OpponentSpec {
         let flag = |i: usize| num(i).map(|v| v != 0.0);
         OpponentDriveParams {
             max_throttle: num(0),
-            weird_pathfinding: flag(1),
+            unused_flag: flag(1),
             distance_padding: num(2),
             corner_brake: num(3),
-            unused_flag: flag(4),
-            avoid_traffic: flag(5),
-            avoid_props: flag(6),
-            avoid_players: flag(7),
-            avoid_opponents: flag(8),
+            avoid_traffic: flag(4),
+            avoid_props: flag(5),
+            avoid_players: flag(6),
+            avoid_opponents: flag(7),
+            weird_pathfinding: flag(8),
             corner_speed_multiplier: num(9),
         }
     }
