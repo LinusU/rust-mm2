@@ -1036,17 +1036,25 @@ fn opponent_detail(rows: &mut [OppRow]) -> String {
 /// place scope to `generation`: an in-process restart's stale results
 /// must not re-rank the live record. A participant with several
 /// results in the generation (a retried event) reports the
-/// best-ranked one, matching `place_of_in`. When the car is not a
-/// participant the field still names the generation's leading result.
+/// best-ranked one, matching `place_of_in`.
+///
+/// The field names the *local* participant's result or nothing: a
+/// participant still racing must not borrow the field leader's
+/// outcome — `outcome=finished place=1` beside a mid-race `cp=` reads
+/// as a win the record never observed. Only when the car is not a
+/// participant at all does the field fall back to the generation's
+/// leading result.
 fn result_outcome(
     ledger: &mm2_game::ResultLedger,
     generation: u64,
     local: Option<mm2_game::PlayerId>,
 ) -> String {
     let standings = ledger.standings_in(generation);
-    local
-        .and_then(|id| standings.iter().copied().find(|s| s.id.participant == id))
-        .or_else(|| standings.first().copied())
+    let result = match local {
+        Some(id) => standings.iter().copied().find(|s| s.id.participant == id),
+        None => standings.first().copied(),
+    };
+    result
         .map(|s| match ledger.place_of_in(generation, s.id.participant) {
             Some(place) => format!(" outcome={} place={}", s.outcome.name(), place),
             None => format!(" outcome={}", s.outcome.name()),
@@ -1100,6 +1108,32 @@ mod tests {
         // A generation with no results records no outcome at all —
         // the fallback must not reach back into a finished session.
         assert_eq!(result_outcome(&ledger, 3, Some(local)), "");
+    }
+
+    /// A *racing* local participant must not borrow the leader's
+    /// result: `outcome=finished` beside a mid-race `cp=` reads as a
+    /// win nobody recorded (observed on retail `sf checkpoint:0` —
+    /// `cp=2/6 pos=7/7 phase=playing outcome=finished place=1` while
+    /// four opponents had resolved and the player had not). Only a
+    /// non-participant car gets the leader fallback.
+    #[test]
+    fn a_racing_participant_reports_no_outcome() {
+        let local = PlayerId(0);
+        let mut ledger = mm2_game::ResultLedger::default();
+        ledger.record(result(1, 1, 0, 50)).unwrap();
+        ledger.record(result(1, 2, 0, 60)).unwrap();
+
+        assert_eq!(
+            result_outcome(&ledger, 1, Some(local)),
+            "",
+            "the local participant has no result — the leader's must not print"
+        );
+        // No local participant at all: the leading result still names
+        // the field (the documented non-participant fallback).
+        assert_eq!(
+            result_outcome(&ledger, 1, None),
+            " outcome=finished place=1"
+        );
     }
 
     /// `opps=` (F15-B.7): one row per spawned opponent in authored
