@@ -351,7 +351,7 @@ hold.
 | --- | --- | --- |
 | 0 | playing 2/6 r4 4/6 | –, rs0, omax6 |
 | 1 | playing 2/8 r0 0/6 | –, rs9, omax2 |
-| 2 | playing 1/9 r1 1/7 | –, rs0, omax9 |
+| 2 | playing 2/9 r1 1/7 | –, rs0, omax9 |
 | 3 | playing 1/6 r2 2/6 | –, rs0, omax6 |
 | 4 | playing 2/7 r1 1/5 | –, rs0, omax7 |
 | 5 | playing 0/6 r0 0/5 | –, rs0, omax6 |
@@ -391,7 +391,10 @@ idle generations bit-identical, and `results=0` means there was
 nothing to duplicate. `wheels=0/4` on london-9 (never left countdown)
 and london-11, `3/4` on london-2 — disclosed end poses. `dropped`
 ≤21; `peak` ≤48.6 m/s (london-2 — a blind full-throttle car down a
-hill; bounded, no spikes).
+hill; bounded, no spikes). Ten legs banked at least one gate before
+wrecking (cp ≤2); sf-8's `cp=1/8` at `moved=37 m` reads like the
+parked legs' disclosed opponent-shove crossings rather than driven
+progress — the other nine moved 105–589 m.
 
 ## Anomalies kept visible
 
