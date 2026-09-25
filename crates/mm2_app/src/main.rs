@@ -20,8 +20,8 @@ use clap::Parser;
 use mm2_app::session::{ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
     audio, banger, breakaway, camera, car_visual, city, contracts, damage, damage_fx, environment,
-    input, menu, nav_overlay, opponents, pause, profile, progression, pvs, race, recovery, results,
-    scripted, sequence, session, smoke, spark_fx, stuck, texel_fx, traffic,
+    hudmap, input, menu, nav_overlay, opponents, pause, profile, progression, pvs, race, recovery,
+    results, scripted, sequence, session, smoke, spark_fx, stuck, texel_fx, traffic,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
@@ -158,6 +158,14 @@ struct Cli {
     /// is how the pause overlay gets rendered). Meaningless headless.
     #[arg(long, conflicts_with = "headless")]
     pause: bool,
+
+    /// Pause the session once it reaches `Playing` with the
+    /// full-screen HUD map up (diagnostic aid — how a capture renders
+    /// HUD-4's Q pause map while live input is frozen; render-only like
+    /// `--pause`). Headless it lands on the record's `map=` field
+    /// instead of a screen.
+    #[arg(long, conflicts_with = "pause")]
+    pause_map: bool,
 
     /// Sweep the local participant through an event session's remaining
     /// triggers — one gate per update — until the run resolves to the
@@ -725,6 +733,7 @@ fn main() {
             banger_pool: cli.banger_pool,
             traction,
             pause: cli.pause,
+            pause_map: cli.pause_map,
             finish: cli.finish,
             restart: cli.restart,
             restart_at: cli.restart_at,
@@ -816,6 +825,7 @@ fn main() {
         && cli.weather.is_none()
         && cli.time_of_day.is_none()
         && !cli.pause
+        && !cli.pause_map
         && !cli.finish
         && !cli.restart
         && cli.restart_at.is_none()
@@ -1008,6 +1018,11 @@ fn main() {
                 // deliberately ungated by `capturing`: putting a
                 // capture into pause is exactly what it is for.
                 pause::dev_pause_once,
+                // `--pause-map` does the same with HUD-4's full-screen
+                // map up — ungated like `--pause`, a capture is the
+                // point. Ahead of the driver so the intent is consumed
+                // this frame.
+                hudmap::dev_pause_map_once,
                 // `--finish` sweeps the local participant through the
                 // remaining race triggers — deliberately ungated by
                 // `capturing` for the same reason: a capture is how the
@@ -1063,6 +1078,12 @@ fn main() {
             update_hud,
         ),
     )
+    // F22-A.1: the HUD map tracks every frame — eased zoom and a
+    // rotating map should animate through pause/countdown alike, and a
+    // `--pause-map` capture needs it live while input is frozen
+    // (ungated like `chase_follow`). Own schedule slot: the main
+    // Update tuple is at Bevy's system count limit.
+    .add_systems(Update, hudmap::drive_hud_map.after(session::drive_session))
     // Pause owns the keyboard while `Paused`: `pause_input` runs after
     // `session_control_input` (which ignores `Paused` — Esc while
     // paused is resume, not quit) and before `drive_session` (so the
@@ -1073,6 +1094,17 @@ fn main() {
     .add_systems(
         Update,
         (
+            // F22-A.1/HUD-4: the map owns TAB/E/F while `Playing` and
+            // Q both ways through its full-screen pause — chained
+            // ahead of `pause_input` so the Q/Esc that closes a
+            // pause-map is never re-read as a menu resume/back, and
+            // the pause intent it queues lands on `drive_session` the
+            // same update.
+            hudmap::hudmap_input
+                .after(session::session_control_input)
+                .before(pause::pause_input)
+                .before(session::drive_session)
+                .run_if(not(capturing)),
             pause::pause_input
                 .after(session::session_control_input)
                 .before(session::drive_session)
@@ -1427,7 +1459,9 @@ fn update_hud(
     vehicles: Query<&mm2_game::VehicleTelemetry, With<PlayerVehicle>>,
     progress: Query<(Option<&mm2_game::Player>, &mm2_game::RaceProgress), With<PlayerVehicle>>,
     participants: Query<(&mm2_game::Player, &mm2_game::RaceProgress, &Position)>,
-    cameras: Query<(&Camera, &Transform)>,
+    // The HUD map's own camera never counts as "the" camera — same
+    // filter `retarget_hud`/`active_cam_pose` apply (F22-A.1).
+    cameras: Query<(&Camera, &Transform), Without<hudmap::HudMapCamera>>,
 ) {
     for mut text in &mut err {
         *text = match session.phase() {
@@ -1586,7 +1620,10 @@ type HudNodes = Or<(
 /// first camera and disappears in free-camera mode.
 fn retarget_hud(
     mut commands: Commands,
-    cameras: Query<(Entity, &Camera)>,
+    // The HUD map camera is active while a view is up — it renders
+    // only the map layer, so the HUD must never retarget onto it
+    // (F22-A.1).
+    cameras: Query<(Entity, &Camera), Without<hudmap::HudMapCamera>>,
     ui: Query<(Entity, Option<&UiTargetCamera>), HudNodes>,
 ) {
     let Some((active, _)) = cameras.iter().find(|(_, c)| c.is_active) else {
@@ -1601,7 +1638,9 @@ fn retarget_hud(
 
 /// The active camera's pose as `x,y,z,yaw,pitch` (angles in degrees) — the
 /// exact value `--cam` accepts, so a screenshot's view can be reproduced.
-fn active_cam_pose(cameras: &Query<(&Camera, &Transform)>) -> Option<String> {
+fn active_cam_pose(
+    cameras: &Query<(&Camera, &Transform), Without<hudmap::HudMapCamera>>,
+) -> Option<String> {
     let (_, xf) = cameras.iter().find(|(c, _)| c.is_active)?;
     let (yaw, pitch, _) = xf.rotation.to_euler(EulerRot::YXZ);
     let p = xf.translation;
@@ -1624,7 +1663,7 @@ const SCREENSHOT_DIR: &str = "screenshots";
 /// after the time and the camera pose it was taken from.
 fn screenshot_input(
     keys: Res<ButtonInput<KeyCode>>,
-    cameras: Query<(&Camera, &Transform)>,
+    cameras: Query<(&Camera, &Transform), Without<hudmap::HudMapCamera>>,
     mut commands: Commands,
 ) {
     let modifier = keys.any_pressed([

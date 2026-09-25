@@ -15,6 +15,7 @@ pub mod breakaway;
 pub mod config;
 pub mod damage;
 pub mod effects;
+pub mod hudmap;
 pub mod ids;
 pub mod impact;
 pub mod nav;
@@ -56,6 +57,7 @@ pub use effects::{
     ParticleSpec, SmokeEmitter, SmokePolicy, SmokePuff, Spark, SparkPolicy, VehicleSmoke,
     VehicleSparks,
 };
+pub use hudmap::{HudMap, MapOrientation, MapView};
 pub use ids::{AuthorityRole, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerId};
 pub use impact::{ImpactDedup, ImpactEvent, ImpactId, ImpactPolicy};
 pub use nav::{

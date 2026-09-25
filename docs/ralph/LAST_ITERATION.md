@@ -1,4 +1,110 @@
-# Last iteration — F14-C.1 mid-race restart + authored-edge Circuit legs (iteration 59)
+# Last iteration — F22-A.1 authored in-race HUD minimap (iteration 60)
+
+Iteration 60 on `ralph/night` (baseline `e452468`, F14-C.1 — external
+verify + review green at `e452468`; fourth iteration of run
+`20260925T144723`). One piece: F22-A's first child — the authored
+in-race HUD minimap on original data.
+
+## Task selection
+
+No failing gate or open review finding to repair — the F14-C.1
+review passed with verification gaps only (all disclosed, none
+blocking). Auditing the plan's ready candidates found F22-A's deps
+(F01-A/F02-B/F11-B) satisfied, and the minimap slice proved
+unusually well-evidenced: HUD-4 is a documented rule (help:
+"Displaying a Map of the City"), the retail exe carries the
+`mmHudMap` class with `hudmap_%s.pkg`/`hudmap_{square,tri}`/
+`IOID_MAP`/`MAPORIENT`/`FMAP` references, mm2hook (R4) recovers the
+class's member layout, and the authored payload is fully present —
+`geometry/hudmap_{sf,london}.pkg` tiles authored in *world-space XZ*
+(spanning the city extent → world→map alignment is identity),
+flat-XZ marker meshes with authored `*_DOT` paints, and
+`tune/{sf,london}.mmhudmap` carrying the layout/zoom/icon-scale/
+ocean-color fields. Chosen over F19-A (pedestrians), whose formats
+(`.anim`/`.skel`/`.mod`) have no parsers yet — a heavier reverse-
+engineering slice. F22-A's parent stays `active`: the race-HUD
+instrument remainder is open scope.
+
+## What landed
+
+- `mm2_formats::hudmap` — `HudMapSpec` parser over the shared tune
+  grammar (spaced field names tokenize a qualifier word into the
+  values; `Approach Rate`/`Ocean Color` consume it). +5 tests.
+- `mm2_game::hudmap` — `HudMap` session resource:
+  `MapView::{Inset,Large,Off}` (TAB's cycle), `MapOrientation`,
+  authored zoom pair eased at the authored `Approach` rate,
+  fullscreen flag, generation staleness. +6 tests.
+- `mm2_app::hudmap` — session-owned spawn of the authored tiles and
+  marker pool under a dedicated orthographic `Camera3d` on its own
+  `RenderLayers`; per-frame binding of player/opponent positions,
+  checkpoint cleared-state colors, `navigation_target` highlight,
+  unlock-gated finish marker; `hudmap_input` for TAB/E/F/Q; the
+  `map=` smoke detail. Q opens the fullscreen map and pauses only
+  under `SessionAuthority::allows_pause`, replacing (not overlaying)
+  the pause menu; `E`/`Q` stay free-camera-owned in that mode.
+- `WorldCamera3d` filter alias — the map camera is an *active*
+  `Camera3d`, so every "the active camera" pick now excludes it:
+  `audio_listener` (fixes the multiple-`SpatialListener` warnings the
+  first screenshot run emitted), `apply_city_pvs`, `drive_sky_dome`,
+  `retarget_hud`, `update_hud`/`active_cam_pose`/`screenshot_input`,
+  and damage billboards.
+- `--pause-map` dev override for the fullscreen-map smoke leg
+  (record-ineligible like the other dev flags).
+- `MaterialCache::unlit_copy` — marker paints render unlit.
+
+## Evidence
+
+- Synthetic: `tests/hudmap.rs` +4 — authored bind on a synthetic
+  install (hand-built PKG3 tile/marker bytes), `absent:` reporting
+  on a city with no map content, dev-world records carry no `map=`
+  field, fullscreen pause-map record.
+- Retail headless (`fnv1a64:e91e6cd4b2ae30d9`, Apple M1):
+  `sf --city sf` → `map=inset/north/z1195/hudmap_sf.pkg/6t/1m`;
+  `london` → `4t/1m`; `sf circuit:0 --bot` → `14m` (player + 4
+  opponents + 9 gate dots); `sf --pause-map` → `phase=paused`,
+  `map=…/z1574/fs/…` (mid-ease toward the authored 1581 extent).
+- Windowed screenshots: `--city sf --frames 90 --screenshot`
+  renders the authored SF tiles inset bottom-right; `--pause-map`
+  renders the fullscreen map over the paused world. Captures local
+  (`/tmp/map_sf.png`, `/tmp/map_fs_sf.png`).
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --workspace
+--all-targets --all-features -- -D warnings` clean; `cargo test
+--workspace` all suites green.
+
+## Classification
+
+Authored-content consumption with documented controls — the tune
+parse, world-space tiles, marker models and TAB/E/F/Q behavior are
+verified/documented (HUD-4). Presentation readings are designed
+(DSN-46): the second inset view's layout, `ZoomIn==0` start
+semantics, icon-scale interpolation, palette→marker bindings and
+the camera-yaw rotation reading; the mmHudMap Cull/Draw bodies stay
+unrecovered (UNK-26). No complete-HUD-parity claim: F22-A's
+instrument remainder is open.
+
+## Remaining open items
+
+- F22-A stays `active`: HUD-1/HUD-2 dashboard/race instruments over
+  the dev line; AC02/AC03 coordinate/marker-correctness legs beyond
+  the smoke checks (authored-position → map-pixel verification) are
+  the natural next slices.
+- The named remainder list stands unchanged: F05-B (UNK-13/F27/
+  F25+), F11-C (review judgment), F13-C (original-fidelity
+  comparison), F17-B (needs F17-C's mode), F14-C (F15-B-gated
+  completability + UNK-11), F18-A (→ F18-B/C), F17-A AC03
+  (interactive), F16-C AC01 (interactive finish), F10-B AC03
+  (manual), F07-B (no output device).
+- Cosmetic: the dev `--pause-map` fires on the first `Playing`
+  frame, before `VehicleTelemetry` attaches, so the HUD shows its
+  `loading…` line under that leg — a dev-flag artifact only; real
+  Q pauses mid-drive with telemetry present.
+
+---
+
+# Iteration 59 — F14-C.1 mid-race restart + authored-edge Circuit legs (iteration 59)
 
 Iteration 59 on `ralph/night` (baseline `424cca6`, F14-B.2 — external
 verify + review green at `424cca6`; third iteration of run

@@ -506,6 +506,12 @@ pub struct DevOverrides {
     /// still a legal gameplay state, so like `--cam`/`--nav` this stays
     /// out of `record_eligibility`.
     pub pause: bool,
+    /// `--pause-map`: pause the session once it reaches `Playing` *with
+    /// the full-screen HUD map up* (evidence/diagnostic runs — how a
+    /// `--frames`/`--screenshot` capture renders HUD-4's Q pause map
+    /// while live input is frozen; never a session-legal parameter).
+    /// Render-only like `--pause`: out of `record_eligibility`.
+    pub pause_map: bool,
     /// `--finish`: sweep the local participant through the remaining
     /// race triggers — one gate per update — until the run resolves to
     /// the results screen (evidence/diagnostic runs: how a

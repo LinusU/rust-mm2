@@ -34,7 +34,7 @@
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
-use mm2_game::{Session, SessionEntity, SessionPhase};
+use mm2_game::{HudMap, Session, SessionEntity, SessionPhase};
 
 use crate::menu::{MenuCommand, MenuShell};
 use crate::session::SessionControl;
@@ -253,8 +253,21 @@ pub fn pause_present(
     session: Res<Session>,
     mut pause: ResMut<PauseMenu>,
     menu_shell: Option<Res<MenuShell>>,
+    hudmap: Option<Res<HudMap>>,
     roots: Query<Entity, (With<PauseUi>, Without<ChildOf>)>,
 ) {
+    // F22-A.1/HUD-4: Q's full-screen map *replaces* the pause overlay —
+    // while it is up the dimmed rows must not draw over the map. If the
+    // map somehow closes with the session still `Paused`, `dirty`
+    // redraws the rows it hid.
+    let map_open = hudmap.is_some_and(|m| !m.is_stale(session.generation()) && m.fullscreen);
+    if map_open {
+        for root in &roots {
+            commands.entity(root).despawn();
+        }
+        pause.dirty = true;
+        return;
+    }
     if !matches!(session.phase(), SessionPhase::Paused) {
         for root in &roots {
             commands.entity(root).despawn();

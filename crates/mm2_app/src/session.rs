@@ -242,6 +242,12 @@ pub fn drive_session(
             commands.remove_resource::<crate::pvs::CityPvs>();
             commands.remove_resource::<crate::water::CityWater>();
             commands.remove_resource::<crate::city::WorldFloor>();
+            // The HUD map pair dies with the session like `CityNav`
+            // (F22-A.1) — the entities it serves are `SessionEntity`
+            // stamped, so the restart that removes them also drops the
+            // state/report.
+            commands.remove_resource::<crate::hudmap::HudMapReport>();
+            commands.remove_resource::<mm2_game::HudMap>();
             // `TireConditions` stays: it is a system input (the impact
             // filter and telemetry read `Res` every frame), and
             // `load_session_world` re-stamps it from the next session's
@@ -613,6 +619,31 @@ pub fn load_session_world(
         );
         camera_fog = report.fog.bound.map(|f| f.distance_fog());
         commands.insert_resource(report);
+    }
+    // F22-A.1: the authored HUD minimap (HUD-4) — city sessions only,
+    // session-scoped like `CityPvs`. The tune spec, world-space tiles
+    // and marker set bind together; a city without them records
+    // `absent` on the report rather than drawing a substitute.
+    if world_ok && let WorldMode::City { psdl } = &config.world {
+        let (report, map) = crate::hudmap::spawn_hud_map(
+            &mut commands,
+            &vfs.0,
+            psdl,
+            event_race.as_ref().map(|(def, ..)| def),
+            event_race
+                .as_ref()
+                .map(|(_, roster, ..)| roster.entries.len())
+                .unwrap_or(0),
+            &mut assets.meshes,
+            &mut assets.images,
+            &mut assets.materials,
+            owner,
+            session.generation(),
+        );
+        commands.insert_resource(report);
+        if let Some(map) = map {
+            commands.insert_resource(map);
+        }
     }
     // A `--spawn` dev pose replaces whatever the world or authored
     // event slot chose — quarantined like `--cam`, never a session

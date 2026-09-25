@@ -14,6 +14,7 @@ pub mod cpvs;
 pub mod crashdata;
 pub mod dave;
 pub mod fog;
+pub mod hudmap;
 pub mod info;
 pub mod inst;
 pub mod ldef;

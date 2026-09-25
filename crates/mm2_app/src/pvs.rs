@@ -206,7 +206,9 @@ impl CityPvs {
 /// over-show anyway, but the world camera is the honest source.
 pub fn apply_city_pvs(
     pvs: Option<ResMut<CityPvs>>,
-    views: Query<(&Camera, &Transform), With<Camera3d>>,
+    // The HUD map camera parks high over the player — never a source
+    // room (F22-A.1).
+    views: Query<(&Camera, &Transform), crate::hudmap::WorldCamera3d>,
     player: Query<&Position, With<PlayerVehicle>>,
     mut rooms: Query<(&CityRoom, &mut Visibility)>,
     new_rooms: Query<(), Added<CityRoom>>,

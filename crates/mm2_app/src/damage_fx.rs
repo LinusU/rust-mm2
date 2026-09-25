@@ -209,7 +209,9 @@ pub fn advance_smoke(
         &mut Transform,
         &MeshMaterial3d<StandardMaterial>,
     )>,
-    cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    // Billboards face the view the player sees through — the HUD
+    // map's top-down camera is not that view (F22-A.1).
+    cameras: Query<(&Camera, &GlobalTransform), crate::hudmap::WorldCamera3d>,
 ) {
     if !session.is_playing() {
         return;

@@ -590,7 +590,9 @@ pub fn spawn_sky_dome(
 pub fn drive_sky_dome(
     time: Res<Time>,
     mut domes: Query<(&mut SkyDome, &mut Transform), Without<Camera>>,
-    cameras: Query<(&Camera, &Transform)>,
+    // The HUD map's orthographic camera is not the viewer the dome
+    // follows (F22-A.1).
+    cameras: Query<(&Camera, &Transform), Without<crate::hudmap::HudMapCamera>>,
 ) {
     let focus = cameras
         .iter()

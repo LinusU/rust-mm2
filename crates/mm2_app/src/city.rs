@@ -2181,6 +2181,19 @@ impl<'a> MaterialCache<'a> {
         adjust_material(s, &base, self.materials).unwrap_or(base)
     }
 
+    /// A copy of `base` flattened for flat top-down reads — the HUD
+    /// map's tiles and markers (F22-A.1) are authored artwork under an
+    /// orthographic camera, not lit geometry: unlit, double-sided.
+    pub(crate) fn unlit_copy(
+        &mut self,
+        base: &Handle<StandardMaterial>,
+    ) -> Handle<StandardMaterial> {
+        let mut m = self.materials.get(base).cloned().unwrap_or_default();
+        m.unlit = true;
+        m.cull_mode = None;
+        self.materials.add(m)
+    }
+
     /// The clean-state stem of a shader texture name: `<stem>_dmg` →
     /// `<stem>` when `texture/<stem>` resolves, else the name unchanged.
     /// Mirrors the retail pairing — `strrchr(name, '_') == "_dmg"` →

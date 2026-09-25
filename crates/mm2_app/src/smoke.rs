@@ -304,6 +304,12 @@ pub fn headless_smoke(
             (
                 session::load_session_world.run_if(session::loading),
                 session::session_control_input,
+                // F22-A.1/HUD-4: the map's controls run in the headless
+                // app too — `ButtonInput`/`CameraMode` exist here, so a
+                // test driving key state exercises the same path.
+                crate::hudmap::hudmap_input
+                    .after(session::session_control_input)
+                    .before(session::drive_session),
                 (
                     despawn_session_entities.run_if(session::unloading),
                     // `--restart` queues the session's own restart
@@ -314,6 +320,10 @@ pub fn headless_smoke(
                     // session-clock tick, so a run can bank real
                     // progress before the teardown it exercises.
                     session::dev_restart_at,
+                    // `--pause-map` puts the first `Playing` frame
+                    // into the pause map — the `map=` field reports
+                    // the full-screen state headless.
+                    crate::hudmap::dev_pause_map_once,
                     session::drive_session,
                 )
                     .chain(),
@@ -338,6 +348,10 @@ pub fn headless_smoke(
                 crate::pvs::apply_city_pvs
                     .after(camera::chase_follow)
                     .run_if(resource_exists::<crate::pvs::CityPvs>),
+                // F22-A.1: the map driver runs headless too — the
+                // eased zoom/marker bookkeeping advances on the same
+                // systems the record's `map=` field reports.
+                crate::hudmap::drive_hud_map.after(session::drive_session),
                 // `--finish` works headless too — the record still
                 // reports the real resolved outcome.
                 crate::results::dev_finish_once,
@@ -834,6 +848,20 @@ pub fn headless_smoke(
             )
         })
         .unwrap_or_default();
+    // F22-A.1 HUD map evidence: `<view>/<orient>/z<zoom>` state plus
+    // tile/marker counts (`inset/north/z1195/…/4t/13m`), or
+    // `absent:<why>` when the city had no usable authored map content.
+    // Inserted only on city sessions — the dev world gets no report,
+    // so those records stay bit-identical.
+    let map_detail = world_ecs
+        .get_resource::<crate::hudmap::HudMapReport>()
+        .map(|r| {
+            format!(
+                " map={}",
+                r.smoke_detail(world_ecs.get_resource::<mm2_game::HudMap>())
+            )
+        })
+        .unwrap_or_default();
     // F10-A.2 ambient evidence: live/target population plus the
     // recycler counters. Absent on worlds without a rostered aimap so
     // those records stay bit-identical.
@@ -1145,7 +1173,7 @@ pub fn headless_smoke(
     // (DRV-2/DRV-3) and aimap variant (RACE-11) selected its content.
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{extra}",
+            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{extra}",
             driver.as_str(),
             config.difficulty.as_str(),
             session.phase().name(),

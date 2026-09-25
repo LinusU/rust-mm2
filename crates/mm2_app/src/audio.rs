@@ -2206,7 +2206,9 @@ pub fn surface_voices(
 /// active 3-D camera the field simply has no listener.
 pub fn audio_listener(
     mut commands: Commands,
-    cams: Query<(Entity, &Camera, Has<SpatialListener>), With<Camera3d>>,
+    // The HUD map camera is an active `Camera3d` while a view is up —
+    // it's a second render pass, not an ear (F22-A.1).
+    cams: Query<(Entity, &Camera, Has<SpatialListener>), crate::hudmap::WorldCamera3d>,
 ) {
     for (entity, cam, listening) in &cams {
         match (cam.is_active, listening) {
