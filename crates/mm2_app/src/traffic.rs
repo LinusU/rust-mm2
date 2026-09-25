@@ -107,6 +107,15 @@
 //! it (documented approximation; the original's crash behaviour is
 //! unverified, UNK-12).
 //!
+//! F10-B.12 makes the handover itself momentum-conserving (same
+//! implementation choice F04-C.4 took for bangers): the solver
+//! already answered the contact against the car as an infinite-mass
+//! body, so the committed flip replays it as a two-body transfer —
+//! the wreck leaves at the mass-correct `(1+e)·v·μ` launch through
+//! its contact lever, and the striker's share rewrites the wall
+//! impulse it was charged this step. One exchange, one charge: no
+//! flat approach-speed kick compounding on top of the wall response.
+//!
 //! F10-B.9 drives the junction interior (operator report 4 item 1):
 //! BAI lane curves stop at each road's junction boundary, so a lane
 //! transfer that re-posed the car on the exit lane's start read on
@@ -154,16 +163,19 @@ use mm2_formats::bai::VehicleRule;
 use mm2_formats::veh::AiVehicleData;
 use mm2_game::{
     AmbientRoster, AmbientSpec, AuthorityRole, FollowPolicy, JunctionGate, JunctionPolicy,
-    Junctions, KnockPolicy, LaneAdvance, LaneCursor, LaneId, NavGraph, NavIssue, NavOverrides,
-    NavRng, ObjectIdentity, Player, Session, SessionConfig, SessionEntity, SessionPhase,
-    SignalAspect, SpawnDirective, SpawnDraw, SpawnPolicy, StuckPolicy, StuckWindow, WorldMode,
-    advance_lane_cursor, corridor_gap, draw_spawn, eligible_lanes, follow_speed,
+    Junctions, KnockPolicy, LaneAdvance, LaneCursor, LaneId, MAX_BANGER_LINEAR_SPEED, NavGraph,
+    NavIssue, NavOverrides, NavRng, ObjectIdentity, Player, Session, SessionConfig, SessionEntity,
+    SessionPhase, SignalAspect, SpawnDirective, SpawnDraw, SpawnPolicy, StuckPolicy, StuckWindow,
+    WorldMode, advance_lane_cursor, corridor_gap, draw_spawn, eligible_lanes, follow_speed,
     inside_junction_zone, junction_speed, junction_zone, plan_ambient, within_interest,
 };
 use tracing::{debug, info, warn};
 
 use crate::car_visual::spawn_vehicle_model;
-use crate::contracts::{deepest_contact, impulse_estimate};
+use crate::contracts::{
+    StruckMut, Transfer, angular_share, deepest_contact, impulse_estimate, resolve_transfer,
+    write_striker_correction,
+};
 
 /// A `va_*` class's runtime assets: render model plus the collider the
 /// bound (or, failing that, the tuning's authored `Size`) describes,
@@ -1152,6 +1164,47 @@ pub fn drive_ambient(
     traffic.junction_held = junction_held;
 }
 
+/// One pending handover decided off a contact edge, before any
+/// mutation: who flips, what velocity it leaves with, and what the
+/// same exchange owes the striking body.
+struct Knock {
+    /// The lane follower handing over.
+    entity: Entity,
+    /// Push direction on the car (the manifold normal in its order).
+    dir: Vec3,
+    /// The Δv the hit writes along `dir` — the transfer's mass-correct
+    /// launch, or the pre-transfer approach-speed fallback when either
+    /// mass cannot be resolved.
+    launch: f32,
+    /// The Δp the car received (`dir` × this) — feeds the
+    /// contact-lever spin share.
+    impulse: f32,
+    /// The measured pre-solver closing speed — with the car's own
+    /// `dir` speed it reconstructs the striker's approach component,
+    /// which the striker correction's velocity target needs.
+    severity: f32,
+    /// World lever from the car's centre of mass to the contact.
+    lever: Vec3,
+    /// The striking body — the other contact body.
+    striker: Entity,
+    /// The striker's world lever to the same contact.
+    striker_lever: Vec3,
+    /// The committed two-body transfer — `None` when either mass
+    /// cannot be resolved: the launch stays at approach speed and no
+    /// correction is written.
+    transfer: Option<Transfer>,
+}
+
+/// The struck car's mutable pieces in `knock_ambient` — `StruckMut`'s
+/// shape plus the lane state the handover flips.
+type KnockedCarMut = (
+    &'static mut AmbientCar,
+    &'static mut LinearVelocity,
+    &'static mut AngularVelocity,
+    Option<&'static ComputedAngularInertia>,
+    Option<&'static Rotation>,
+);
+
 /// Kinematic→dynamic handover (F10-B.6): a third consumer of the
 /// solver's `CollisionStart` stream, alongside `collect_impacts` and
 /// `activate_bangers`. A lane-following car whose contact's impulse
@@ -1159,24 +1212,42 @@ pub fn drive_ambient(
 /// deepest-contact severity banger activation measures — reaches
 /// `KnockPolicy::min_impulse`
 /// becomes a dynamic body on the same entity: the hull, pose and lane
-/// velocity carry over unchanged (no duplicate body, no teleport) and
-/// at most the striker's approach speed is added along the contact
-/// normal — the energy the hit actually carried. The FCFS queue
-/// releases the car and `drive_ambient` never re-poses it: from the
-/// flip on, it is a wreck the other cars' corridor sense and the box
-/// yield treat as an obstacle, until the ordinary distance recycler
-/// collects it. Below-threshold touches leave the follower alone —
-/// a scrape or a light tap does not convert the car.
+/// velocity carry over unchanged (no duplicate body, no teleport). The
+/// FCFS queue releases the car and `drive_ambient` never re-poses it:
+/// from the flip on, it is a wreck the other cars' corridor sense and
+/// the box yield treat as an obstacle, until the ordinary distance
+/// recycler collects it. Below-threshold touches leave the follower
+/// alone — a scrape or a light tap does not convert the car.
+///
+/// F10-B.12: the flip itself replays the hit as a two-body transfer —
+/// the solver just answered the contact against the car as an
+/// infinite-mass body, so the striker's component along the push is
+/// rewritten to the share the real `(1+e)·v·μ` exchange leaves it
+/// (the shared `contracts` transfer banger activation runs): the
+/// wreck leaves at the mass-correct launch speed through its contact
+/// lever, the striker keeps its share, and the contact impulse is
+/// charged exactly once. The striker correction is a velocity target,
+/// not a returned impulse: Avian's recorded `total_impulse`
+/// accumulates penetration-recovery and restitution passes and
+/// over-reports the striker's actual Δv, so the code reconstructs the
+/// approach component from the measured severity instead. A
+/// lane-follower striker takes no correction — the lane driver owns
+/// its velocity — which also keeps a follower-follower edge from
+/// charging the exchange twice. When a mass cannot be resolved the
+/// car keeps the pre-transfer approach-speed launch and no correction
+/// is written.
 ///
 /// Drains under the same phase/authority gate as `drive_ambient`:
 /// edges buffered while paused never flush as a stale burst on
 /// resume, and a `Predicted` session never hands over locally.
+#[allow(clippy::too_many_arguments)] // Bevy system: the decision threads cars, strikers and masses
 pub fn knock_ambient(
     mut reader: MessageReader<CollisionStart>,
     collisions: Collisions,
     session: Res<Session>,
     traffic: Option<ResMut<AmbientTraffic>>,
-    mut cars: Query<(&mut AmbientCar, &mut LinearVelocity)>,
+    mut cars: Query<KnockedCarMut>,
+    mut strikers: Query<StruckMut, Without<AmbientCar>>,
     masses: Query<&ComputedMass>,
     mut commands: Commands,
 ) {
@@ -1196,58 +1267,161 @@ pub fn knock_ambient(
     let policy = traffic.knock_policy;
 
     // Decide first, mutate second — the decision pass only reads.
-    let mut kicks: Vec<(Entity, Vec3)> = Vec::new();
+    let mut knocks: Vec<Knock> = Vec::new();
     for event in reader.read() {
+        let (c1, c2) = (event.collider1, event.collider2);
+        let Some(deepest) = deepest_contact(&collisions, c1, c2) else {
+            continue;
+        };
+        // Same bound banger activation applies: the manifold's
+        // approach speed can read a transient solver spike — clamp it
+        // so the gate, the transfer impulse and the launch all see a
+        // physical approach.
+        let severity = deepest.severity.min(MAX_BANGER_LINEAR_SPEED);
+        if severity <= 0.0 {
+            continue;
+        }
         // Either side may be the ambient car; the other body is the
         // striker. The manifold normal points from collider1 toward
         // collider2, so `sign` turns it into the push direction on
-        // the car (same convention `activate_bangers` uses).
-        for (collider, striker, sign) in [
+        // the car (same convention `activate_bangers` uses). The
+        // anchors swap with the side: `lever` is the car's contact
+        // arm, `striker_lever` the other body's.
+        for (collider, striker, sign, lever, striker_lever) in [
             (
-                event.collider1,
-                event.body2.unwrap_or(event.collider2),
+                c1,
+                event.body2.unwrap_or(c2),
                 -1.0f32,
+                deepest.anchor1,
+                deepest.anchor2,
             ),
             (
-                event.collider2,
-                event.body1.unwrap_or(event.collider1),
+                c2,
+                event.body1.unwrap_or(c1),
                 1.0f32,
+                deepest.anchor2,
+                deepest.anchor1,
             ),
         ] {
-            let Ok((car, _)) = cars.get(collider) else {
+            let Ok((car, ..)) = cars.get(collider) else {
                 continue;
             };
             if car.drive != AmbientDrive::Lane {
                 continue;
             }
-            let Some(deepest) = deepest_contact(&collisions, event.collider1, event.collider2)
-            else {
-                continue;
-            };
-            let (normal, severity) = (deepest.normal, deepest.severity);
-            if severity <= 0.0 {
-                continue;
-            }
             if impulse_estimate(striker, severity, &masses) < policy.min_impulse {
                 continue;
             }
-            kicks.push((collider, normal * sign * severity));
+            let dir = deepest.normal * sign;
+            let struck_mass = masses
+                .get(collider)
+                .ok()
+                .map(|m| m.value())
+                .filter(|m| m.is_finite() && *m > 0.0);
+            let transfer = struck_mass.and_then(|m| {
+                resolve_transfer(Some(striker), severity, deepest.restitution, m, &masses)
+            });
+            // Bound the written velocity itself: `launch` covers the
+            // transfer path and `severity` the mass-less fallback.
+            let launch = transfer
+                .as_ref()
+                .map(|t| t.launch)
+                .unwrap_or(severity)
+                .min(MAX_BANGER_LINEAR_SPEED);
+            knocks.push(Knock {
+                entity: collider,
+                dir,
+                launch,
+                impulse: transfer
+                    .as_ref()
+                    .map(|t| t.impulse)
+                    .unwrap_or(severity * struck_mass.unwrap_or(1.0)),
+                severity,
+                lever,
+                striker,
+                striker_lever,
+                transfer,
+            });
         }
     }
 
-    for (entity, kick) in kicks {
-        let Ok((mut car, mut linvel)) = cars.get_mut(entity) else {
+    // Cars this pass already flipped: on a follower-follower edge the
+    // other side's own launch *is* its share of the exchange, so the
+    // striker correction must not charge it again.
+    let mut handed_over: Vec<Entity> = Vec::new();
+    for knock in knocks {
+        // The car's velocity along the push direction before its
+        // launch — the striker correction's velocity target needs it.
+        // A later edge can name a car an earlier edge already flipped
+        // — the `Lane` re-check is the dedup.
+        let struck_pre = {
+            let Ok((mut car, mut linvel, mut angvel, inertia, rotation)) =
+                cars.get_mut(knock.entity)
+            else {
+                continue;
+            };
+            if car.drive != AmbientDrive::Lane {
+                continue;
+            }
+            car.drive = AmbientDrive::Knocked;
+            let struck_pre = linvel.0.dot(knock.dir);
+            linvel.0 += knock.dir * knock.launch;
+            angvel.0 += angular_share(knock.lever, knock.dir * knock.impulse, inertia, rotation);
+            struck_pre
+        };
+        handed_over.push(knock.entity);
+        traffic.knocked += 1;
+        traffic.junctions.depart(knock.entity);
+        commands.entity(knock.entity).insert(RigidBody::Dynamic);
+        debug!(entity = ?knock.entity, "ambient car knocked to dynamics");
+
+        let Some(transfer) = knock.transfer.as_ref() else {
             continue;
         };
-        if car.drive != AmbientDrive::Lane {
-            continue;
+        // The striker keeps its share of the exchange: its velocity
+        // along the push direction becomes its approach component
+        // (`severity` = the pair's pre-solver closing speed) minus the
+        // transferred impulse over its mass. Write the velocity target
+        // rather than returning the manifold's recorded impulse —
+        // `total_impulse` accumulates penetration-recovery and
+        // restitution passes, so on a kinematic pair it over-reports
+        // the wall response the striker actually took and charging it
+        // back would inject energy. A lane-follower striker takes no
+        // correction: `drive_ambient` owns its velocity — which also
+        // keeps a follower-follower edge from charging the exchange
+        // twice (the other side's own launch is its share).
+        let target = struck_pre + knock.severity - transfer.impulse / transfer.striker_mass;
+        if let Ok((linvel, angvel, inertia, rotation)) = strikers.get_mut(knock.striker) {
+            let delta = knock.dir * (target - linvel.0.dot(knock.dir)) * transfer.striker_mass;
+            write_striker_correction(
+                delta,
+                transfer.striker_mass,
+                knock.striker_lever,
+                linvel,
+                angvel,
+                inertia,
+                rotation,
+            );
+        } else if let Ok((striker_car, linvel, angvel, inertia, rotation)) =
+            cars.get_mut(knock.striker)
+        {
+            // Only an already-dynamic wreck takes the correction — a
+            // lane follower's velocity is owned by `drive_ambient`,
+            // and a car this pass already flipped already took its
+            // share as its launch.
+            if striker_car.drive == AmbientDrive::Knocked && !handed_over.contains(&knock.striker) {
+                let delta = knock.dir * (target - linvel.0.dot(knock.dir)) * transfer.striker_mass;
+                write_striker_correction(
+                    delta,
+                    transfer.striker_mass,
+                    knock.striker_lever,
+                    linvel,
+                    Some(angvel),
+                    inertia,
+                    rotation,
+                );
+            }
         }
-        car.drive = AmbientDrive::Knocked;
-        linvel.0 += kick;
-        traffic.knocked += 1;
-        traffic.junctions.depart(entity);
-        commands.entity(entity).insert(RigidBody::Dynamic);
-        debug!(entity = ?entity, "ambient car knocked to dynamics");
     }
 }
 

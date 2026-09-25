@@ -549,6 +549,10 @@ fn spawn_follower(app: &mut App, lane: LaneId, along: f32, target_speed: f32) ->
             },
             RigidBody::Kinematic,
             Collider::cuboid(1.8, 0.9, 3.2),
+            // The production spawn shape: authored mass and the event
+            // flag the handover and the transfer math read.
+            Mass(1200.0),
+            CollisionEventsEnabled,
             Position(pos),
             Rotation(rot),
             LinearVelocity::ZERO,
@@ -2141,13 +2145,16 @@ fn a_hard_hit_hands_the_follower_to_dynamics() {
     let lane_r0 = lane(0, Side::Right);
     let car = spawn_follower(&mut app, lane_r0, 10.0, 15.0);
     // A 1300 kg striker resting mid-lane 4 m ahead of the follower.
-    let spot = {
+    let (spot, travel) = {
         let t = app.world().resource::<AmbientTraffic>();
         let s = t
             .graph()
             .sample_lane(lane_r0, 14.0)
             .expect("a live lane samples");
-        Vec3::from(s.position) + Vec3::Y * 0.55
+        (
+            Vec3::from(s.position) + Vec3::Y * 0.55,
+            Vec3::from(s.tangent).normalize_or(Vec3::NEG_Z),
+        )
     };
     let striker = app
         .world_mut()
@@ -2178,15 +2185,46 @@ fn a_hard_hit_hands_the_follower_to_dynamics() {
             .expect("the knocked car despawned");
         assert!(matches!(rb, RigidBody::Dynamic), "stayed kinematic");
         assert_eq!(c.drive, AmbientDrive::Knocked);
-        // Bounded energy: the kick adds at most the approach speed
-        // along the contact normal — nothing artificial.
         assert!(
             lv.0.is_finite() && lv.0.length() <= 35.0,
             "unbounded kick velocity: {lv:?}"
         );
         (c.drive, *rb, lv.0, c.cursor.clone())
     };
-    let _ = (drive, body, kick);
+    let _ = (drive, body);
+
+    // F10-B.12: the handover is a momentum-conserving transfer, not a
+    // wall response plus a free kick. The 1200 kg follower at 15 m/s
+    // carries all the momentum in; splitting the exchange at the
+    // inelastic common velocity (~`m·v/(m_s+m_w)` = 7.2 m/s) slows the
+    // wreck to its share while the striker correction rewrites the
+    // ~15 m/s the kinematic shove gave the block up to the same share
+    // — one `(1+e)·v·μ` impulse charged exactly once. The app runs two
+    // fixed steps per update,
+    // so the read sees one solver step after the write: ground
+    // pushout and contact friction scrub a little more off the fresh
+    // dynamic wreck. Assert the physical ranges — the exact share is
+    // proved by `a_light_striker_shares_the_exchange_not_its_speed`.
+    let striker_v = app
+        .world()
+        .get::<LinearVelocity>(striker)
+        .expect("the striker despawned")
+        .0
+        .dot(travel);
+    let wreck_v = kick.dot(travel);
+    assert!(
+        wreck_v > 1.0 && wreck_v < 10.0,
+        "the wreck kept neither its speed nor its share: {wreck_v}"
+    );
+    assert!(
+        striker_v > 1.0 && striker_v < 11.0,
+        "the striker kept the wall response instead of its share: {striker_v}"
+    );
+    let momentum = 1200.0 * wreck_v + 1300.0 * striker_v;
+    assert!(
+        momentum <= 1200.0 * 15.0 * 1.05 && momentum > 0.0,
+        "the exchange injected momentum: {momentum}"
+    );
 
     // The lane driver never advances a knocked cursor again, while the
     // solver keeps posing the same entity — no duplicate body.
@@ -2211,6 +2249,13 @@ fn a_hard_hit_hands_the_follower_to_dynamics() {
         .filter(|c| c.drive == AmbientDrive::Knocked)
         .count();
     assert_eq!(knocked, 1, "a duplicate wreck appeared");
+    // The handover fires once: 60 more ticks of the wreck resting
+    // against or re-touching the striker add no further flips.
+    assert_eq!(
+        app.world().resource::<AmbientTraffic>().knocked,
+        1,
+        "a repeated contact edge re-knocked the wreck"
+    );
 
     // The striker was physically shoved — the pair really collided.
     let p = app
@@ -2221,6 +2266,103 @@ fn a_hard_hit_hands_the_follower_to_dynamics() {
     assert!(
         p.distance(spot) > 0.3,
         "the striker never felt the impact: {p:?}"
+    );
+}
+
+/// A light striker cannot yeet a heavy parked car at its own speed:
+/// the transfer splits the exchange — a 400 kg block sliding into a
+/// parked 1200 kg follower hands over only its momentum share, so the
+/// wreck leaves at the inelastic common velocity (~`m_s·v/(m_s+m_w)`)
+/// and the striker keeps the same speed instead of stopping dead
+/// against an infinite-mass wall plus a free approach-speed kick on
+/// the car (F10-B.12; F10-AC03's "no extreme energy injection" leg).
+#[test]
+fn a_light_striker_shares_the_exchange_not_its_speed() {
+    let install = junction_install(0, 0);
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+
+    let lane_r0 = lane(0, Side::Right);
+    // Parked follower mid-lane — the striker does the moving.
+    let car = spawn_follower(&mut app, lane_r0, 15.0, 0.0);
+    let (spot, travel) = {
+        let t = app.world().resource::<AmbientTraffic>();
+        let s = t
+            .graph()
+            .sample_lane(lane_r0, 10.0)
+            .expect("a live lane samples");
+        (
+            Vec3::from(s.position) + Vec3::Y * 0.55,
+            Vec3::from(s.tangent).normalize_or(Vec3::NEG_Z),
+        )
+    };
+    let striker = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            Collider::cuboid(1.8, 1.1, 1.8),
+            Mass(400.0),
+            CollisionEventsEnabled,
+            Position(spot),
+            LinearVelocity(travel * 25.0),
+            AngularVelocity::ZERO,
+            Transform::from_translation(spot),
+        ))
+        .id();
+
+    // The striker's speed the update before the flip is the momentum
+    // baseline — friction bleeds a little on the slide in.
+    let mut pre_speed = 0.0f32;
+    let mut knocked = false;
+    for _ in 0..240 {
+        app.update();
+        if app.world().resource::<AmbientTraffic>().knocked >= 1 {
+            knocked = true;
+            break;
+        }
+        pre_speed = app
+            .world()
+            .get::<LinearVelocity>(striker)
+            .map(|v| v.0.dot(travel))
+            .unwrap_or(0.0);
+    }
+    assert!(knocked, "the sliding striker never knocked the parked car");
+    assert!(
+        pre_speed > 15.0,
+        "the striker never got up to speed: {pre_speed}"
+    );
+
+    let wreck_v = app
+        .world()
+        .get::<LinearVelocity>(car)
+        .expect("the wreck despawned")
+        .0
+        .dot(travel);
+    let striker_v = app
+        .world()
+        .get::<LinearVelocity>(striker)
+        .expect("the striker despawned")
+        .0
+        .dot(travel);
+    let common = 400.0 * pre_speed / (400.0 + 1200.0);
+    // The wreck launches at its transfer share — under the old flat
+    // kick it would have left at ~`pre_speed`.
+    assert!(
+        (wreck_v - common).abs() < 2.5 && wreck_v < 0.6 * pre_speed,
+        "the wreck took the striker's speed instead of its share: {wreck_v} (pre {pre_speed})"
+    );
+    // And the striker keeps its share rather than bouncing off a wall.
+    assert!(
+        (striker_v - common).abs() < 2.5,
+        "the striker stopped against a wall response: {striker_v} (common {common})"
+    );
+    let momentum = 1200.0 * wreck_v + 400.0 * striker_v;
+    assert!(
+        (momentum - 400.0 * pre_speed).abs() / (400.0 * pre_speed) < 0.25,
+        "the exchange did not conserve momentum: {momentum}"
     );
 }
 

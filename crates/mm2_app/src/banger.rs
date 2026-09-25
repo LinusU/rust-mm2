@@ -58,7 +58,10 @@ use mm2_game::{
 use mm2_vehicle::StrikeBound;
 use tracing::{debug, warn};
 
-use crate::contracts::{deepest_contact, impact_energy};
+use crate::contracts::{
+    StruckMut, Transfer, deepest_contact, impact_energy, resolve_transfer, striker_correction,
+    write_striker_correction,
+};
 
 /// One authored `BREAK<NN>` piece of a breakable prop — the parts the
 /// break transition turns into a fragment body: the chunk's render
@@ -286,56 +289,6 @@ struct Activation {
     striker_lever: Vec3,
 }
 
-/// The momentum-conserving split of one committed activation: the
-/// impulse the two bodies exchange and what it becomes on each side.
-/// Computed from the authored prop mass and the striker's computed
-/// mass — no free tuning constants.
-struct Transfer {
-    /// kg·m/s transferred striker → prop along `dir`: `(1+e)·v·μ`
-    /// with `μ` the reduced mass — the impulse the solver would have
-    /// applied had the prop been dynamic during the step.
-    impulse: f32,
-    /// The prop's launch speed (`impulse / prop_mass`).
-    launch: f32,
-    /// The striker's mass, kept for the correction divide.
-    striker_mass: f32,
-}
-
-/// The two-body transfer for one activation, or `None` when the
-/// striker's mass cannot be resolved (a static world sliver, an
-/// unstamped body) — the caller then keeps the pre-transfer launch at
-/// approach speed and skips the striker correction.
-fn resolve_transfer(
-    a: &Activation,
-    prop_mass: f32,
-    masses: &Query<&ComputedMass>,
-) -> Option<Transfer> {
-    let striker = a.striker?;
-    let m_s = masses
-        .get(striker)
-        .ok()
-        .map(|m| m.value())
-        .filter(|m| m.is_finite() && *m > 0.0)?;
-    let m_p = prop_mass.max(0.001);
-    let reduced = m_s * m_p / (m_s + m_p);
-    let impulse = (1.0 + a.restitution.max(0.0)) * a.severity * reduced;
-    Some(Transfer {
-        impulse,
-        launch: impulse / m_p,
-        striker_mass: m_s,
-    })
-}
-
-/// The mutable pieces the striker correction touches — `Without<Banger>`
-/// keeps it disjoint from the prop query (a banger striking another
-/// dormant banger keeps the solver's response unchanged).
-type StruckMut = (
-    &'static mut LinearVelocity,
-    Option<&'static mut AngularVelocity>,
-    Option<&'static ComputedAngularInertia>,
-    Option<&'static Rotation>,
-);
-
 /// Rewrite the striker's share of a committed activation to the
 /// two-body transfer. The dormant prop was static when the solver ran,
 /// so the striker received a wall response (`applied_impulse` along
@@ -345,7 +298,9 @@ type StruckMut = (
 /// striker therefore always pays exactly `transfer.impulse` along the
 /// launch direction — light props barely cost it, heavy ones still
 /// resist — while any wall response along a different axis (a glancing
-/// touch) is returned rather than converted into `dir`.
+/// touch) is returned rather than converted into `dir`. The shared
+/// math lives in `contracts` — the ambient-traffic handover runs the
+/// same rewrite.
 fn apply_striker_correction(
     a: &Activation,
     transfer: Option<&Transfer>,
@@ -354,15 +309,18 @@ fn apply_striker_correction(
     let (Some(entity), Some(transfer)) = (a.striker, transfer) else {
         return;
     };
-    let Ok((mut linvel, angvel, inertia, rotation)) = struck.get_mut(entity) else {
+    let Ok((linvel, angvel, inertia, rotation)) = struck.get_mut(entity) else {
         return;
     };
-    let correction = a.applied_dir * a.applied_impulse - a.dir * transfer.impulse;
-    linvel.0 += correction / transfer.striker_mass;
-    if let (Some(mut angvel), Some(cai), Some(rot)) = (angvel, inertia, rotation) {
-        let torque = a.striker_lever.cross(correction);
-        angvel.0 += cai.rotated(rot.0).inverse().mul_vec3(torque);
-    }
+    write_striker_correction(
+        striker_correction(a.applied_dir, a.applied_impulse, a.dir, transfer.impulse),
+        transfer.striker_mass,
+        a.striker_lever,
+        linvel,
+        angvel,
+        inertia,
+        rotation,
+    );
 }
 
 /// Claim one active-pool slot for a transition or fragment spawn.
@@ -743,7 +701,13 @@ pub fn activate_bangers(
         // The two-body transfer this activation commits to — `None`
         // when the striker's mass cannot be resolved, which keeps the
         // pre-transfer launch and leaves the striker alone.
-        let transfer = resolve_transfer(&a, banger.def.mass, &masses);
+        let transfer = resolve_transfer(
+            a.striker,
+            a.severity,
+            a.restitution,
+            banger.def.mass,
+            &masses,
+        );
         // Bound the written velocity itself: `launch` covers the
         // transfer path and `severity` the mass-less fallback, and
         // either can still read a transient solver spike.

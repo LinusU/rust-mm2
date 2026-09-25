@@ -1,4 +1,108 @@
-# Last iteration — F11-C.2 handoff-doc repair (iteration 48)
+# Last iteration — F10-B.12 momentum-correct collision handover (iteration 49)
+
+Iteration 49 on `ralph/night` (baseline `63ffb20`, F11-C.2 doc repair —
+external verify + review green). One coherent slice of the F10-B
+collision-fidelity remainder: `knock_ambient` carried the same
+double-energy defect F04-C.4 fixed for bangers — the solver answers a
+kinematic traffic car as infinite mass (the striker takes a wall
+response), then the handover added a free approach-speed kick on top.
+The flip now replays the hit as a two-body transfer.
+
+## Task selection
+
+No failing gate or review finding to repair. Among the listed
+remainders, F10-B's collision-fidelity scope was the ready one: the
+scrape leg of F07-B has no authored sample to bind (car audio tables
+carry horn/clutch/engine rows only — confirmed via the VFS), F15-B's
+fields are research-gated, F17-B needs F17-C's mode, F16-C's AC01 leg
+needs an interactive finish. The defect itself was already visible in
+B.6's code.
+
+## What landed
+
+- `crates/mm2_app/src/contracts.rs` — the banger transfer math
+  extracted for reuse: `Transfer`/`resolve_transfer`
+  (`(1+e)·v·μ` impulse, launch = J/m_struck, `None` when the striker
+  mass cannot be resolved), the `StruckMut` query tuple,
+  `angular_share` (contact-lever Δω), `striker_correction` /
+  `write_striker_correction`.
+- `crates/mm2_app/src/banger.rs` — consumes the shared helpers
+  unchanged (24/24 banger tests pass).
+- `crates/mm2_app/src/traffic.rs` — `knock_ambient` rewritten
+  decide-then-apply: a `Knock` record per qualifying edge (deepest
+  contact, push direction from the manifold normal on either collider
+  side, bounded launch, impulse, both levers, transfer); the apply
+  pass flips `Lane`→`Knocked` on the same entity (`Lane` re-check
+  dedups multi-edge hits), writes the mass-correct launch plus the
+  contact-lever spin, inserts `RigidBody::Dynamic`, departs the
+  junction, counts `traffic.knocked` → the `kn=` smoke field.
+- Striker correction is a **velocity target**, not a returned
+  impulse: instrumentation showed Avian's recorded `total_impulse`
+  accumulating penetration-recovery and restitution passes (13641 /
+  22929 recorded vs ~9800 / 19500 actual Δv·m), so the striker's
+  push-direction component is rewritten to
+  `struck_pre + severity − J/m_s` — conserving by construction. A
+  lane-follower striker takes no correction (`drive_ambient` owns its
+  velocity) and a striker this pass already flipped is skipped, so a
+  follower-follower edge never charges the exchange twice; unresolved
+  masses keep the approach-speed launch with no correction.
+- Same authority/phase gate and reader drain as `drive_ambient` — no
+  predicted-session handover, no stale burst after pause.
+
+## Evidence
+
+Synthetic tests (`cargo test -p mm2_app --test traffic` 31/31,
+`--test banger` 24/24):
+
+- `a_hard_hit_hands_the_follower_to_dynamics` extended — the wreck
+  slows to its share range instead of the old dead-stop, the striker
+  is rewritten to its share instead of the ~15 m/s wall match, a
+  no-injection momentum bound holds, and exactly one flip occurs
+  across 60 re-contacting ticks (same entity, dynamic, frozen cursor).
+- `a_light_striker_shares_the_exchange_not_its_speed` (new) — a
+  400 kg block into a parked 1200 kg car leaves both at the ~6 m/s
+  inelastic common velocity with momentum conserved — the exact-share
+  leg.
+- `a_light_touch_leaves_the_car_lane_following` — sub-threshold
+  contacts stay kinematic (unchanged).
+- Fixture followers now carry production `Mass`/
+  `CollisionEventsEnabled`.
+
+Retail headless (install `fnv1a64:e91e6cd4b2ae30d9`, read-only):
+
+- sf `--headless --frames 3000` → `traf=16/16 sp=41 rec=25 dead=0
+  uns=0 q=0 jq=2 stuck=0 crx=56 jmp=0 kn=4 sig=647 sigd=3` — four real
+  handovers, all counters finite.
+- london `--headless --frames 1200 --spawn 0.4,5.5,-720,0` → `…
+  crx=33 kn=2` — two real handovers on the flat-road spawn.
+- london `--headless --frames 3000` plain → kn=0 (the Hold driver
+  grounds out on props at 95 m — no handover exercised; honestly
+  recorded, not filtered).
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --workspace
+--all-targets --all-features -- -D warnings` clean; `cargo test
+--workspace` — all 69 suites green.
+
+## Classification
+
+Implementation choice end to end — the original's ambient crash
+response is unverified (UNK-12). The transfer math is the designed
+two-body exchange shared with banger activation; no original-behavior
+claim.
+
+## Remaining open items
+
+- F10-B stays active: AC03's player-hit feel/damage legs, original
+  junction/spawn timing and crossing geometry (UNK-12), signal-prop
+  model fidelity.
+- Single-point impulse pair rather than per-contact impulses; no
+  rendered/manual evidence of the handover.
+
+---
+
+# Iteration 48 — F11-C.2 handoff-doc repair
 
 External review of iteration 47's candidate `6aab29d` (F11-C.2)
 returned one blocking finding: a stale recorded test-count

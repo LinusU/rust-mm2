@@ -194,6 +194,113 @@ pub(crate) fn impact_energy(striker: Entity, severity: f32, masses: &Query<&Comp
     0.5 * striker_mass(striker, masses) * severity * severity
 }
 
+// ---------- post-solver momentum transfer ----------
+
+/// The momentum-conserving split of one committed post-solver hit.
+/// Both consumers — banger activation and the ambient-traffic
+/// handover — run after the solver has already answered the contact
+/// against a struck body that was static or kinematic during the
+/// step, so the solver's own response is not the exchange this
+/// carries: it is the `(1+e)·v·μ` impulse the solver *would* have
+/// produced with a dynamic target, computed from the struck body's
+/// authored mass and the striker's computed mass — no free tuning
+/// constants.
+pub(crate) struct Transfer {
+    /// kg·m/s transferred striker → struck along the push direction.
+    pub impulse: f32,
+    /// The struck body's launch speed (`impulse / struck_mass`).
+    pub launch: f32,
+    /// The striker's resolved mass, kept for the correction divide.
+    pub striker_mass: f32,
+}
+
+/// The two-body transfer for one committed hit, or `None` when the
+/// striker's mass cannot be resolved (a static world sliver, an
+/// unstamped body) — the caller then keeps the pre-transfer launch at
+/// approach speed and skips the striker correction.
+pub(crate) fn resolve_transfer(
+    striker: Option<Entity>,
+    severity: f32,
+    restitution: f32,
+    struck_mass: f32,
+    masses: &Query<&ComputedMass>,
+) -> Option<Transfer> {
+    let striker = striker?;
+    let m_s = masses
+        .get(striker)
+        .ok()
+        .map(|m| m.value())
+        .filter(|m| m.is_finite() && *m > 0.0)?;
+    let m_p = struck_mass.max(0.001);
+    let reduced = m_s * m_p / (m_s + m_p);
+    let impulse = (1.0 + restitution.max(0.0)) * severity * reduced;
+    Some(Transfer {
+        impulse,
+        launch: impulse / m_p,
+        striker_mass: m_s,
+    })
+}
+
+/// The mutable pieces a striker correction touches. The callsite's
+/// `Without<…>` filter keeps it disjoint from the struck body's own
+/// query (a dormant banger striking another dormant banger keeps the
+/// solver's response unchanged; a lane-following striker's velocity
+/// is owned by the ambient driver, not the correction).
+pub(crate) type StruckMut = (
+    &'static mut LinearVelocity,
+    Option<&'static mut AngularVelocity>,
+    Option<&'static ComputedAngularInertia>,
+    Option<&'static Rotation>,
+);
+
+/// The Δω an impulse `impulse` applied at world lever `lever` gives a
+/// body whose angular inertia resolves — `Vec3::ZERO` when it does
+/// not. The contact-lever share, no tuning constants.
+pub(crate) fn angular_share(
+    lever: Vec3,
+    impulse: Vec3,
+    inertia: Option<&ComputedAngularInertia>,
+    rotation: Option<&Rotation>,
+) -> Vec3 {
+    match (inertia, rotation) {
+        (Some(cai), Some(rot)) => cai.rotated(rot.0).inverse().mul_vec3(lever.cross(impulse)),
+        _ => Vec3::ZERO,
+    }
+}
+
+/// The correction Δp a committed transfer gives the striker: return
+/// the wall impulse the solver charged it (`applied_dir` ×
+/// `applied_impulse` — zero when the pair never solved this step)
+/// and charge the real exchange impulse along `dir` instead. The
+/// striker therefore always pays exactly `impulse` along the push
+/// direction, while a glancing touch's lateral wall response is
+/// returned rather than converted into `dir`.
+pub(crate) fn striker_correction(
+    applied_dir: Vec3,
+    applied_impulse: f32,
+    dir: Vec3,
+    impulse: f32,
+) -> Vec3 {
+    applied_dir * applied_impulse - dir * impulse
+}
+
+/// Write a correction Δp onto a resolved striker: linear Δv = Δp/m
+/// plus the contact-lever angular share when inertia resolves.
+pub(crate) fn write_striker_correction(
+    delta_p: Vec3,
+    striker_mass: f32,
+    lever: Vec3,
+    mut linvel: Mut<LinearVelocity>,
+    angvel: Option<Mut<AngularVelocity>>,
+    inertia: Option<&ComputedAngularInertia>,
+    rotation: Option<&Rotation>,
+) {
+    linvel.0 += delta_p / striker_mass;
+    if let Some(mut angvel) = angvel {
+        angvel.0 += angular_share(lever, delta_p, inertia, rotation);
+    }
+}
+
 /// The stable identity of a contact side: its collider's
 /// [`ObjectIdentity`], else its body's, else [`ObjectId::WORLD`].
 fn object_of(
