@@ -11,15 +11,17 @@ use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::camera::CameraMode;
 use mm2_app::contracts::{self, ImpactFilter};
+use mm2_app::hudmap;
 use mm2_app::pause::{self, PauseMenu, PauseUi};
 use mm2_app::results::{self, ResultsMenu};
 use mm2_app::session::{
     self, ErrorText, Hud, SelectedCar, SessionControl, SessionNote, SpawnPoint, TunedVehicle,
 };
 use mm2_assets::Vfs;
+use mm2_formats::hudmap::HudMapSpec;
 use mm2_game::{
-    BangerPool, DEFAULT_ACTIVE_POOL, DamageSignals, DevOverrides, ImpactEvent, ImpactId, Mm2Vfs,
-    ObjectId, ObjectIdentity, PlayerVehicle, Session, SessionAuthority, SessionConfig,
+    BangerPool, DEFAULT_ACTIVE_POOL, DamageSignals, DevOverrides, HudMap, ImpactEvent, ImpactId,
+    Mm2Vfs, ObjectId, ObjectIdentity, PlayerVehicle, Session, SessionAuthority, SessionConfig,
     SessionEntity, SessionPhase, SpawnPose, WorldMode, advance_session_tick,
     despawn_session_entities,
 };
@@ -91,6 +93,14 @@ fn test_app(config: SessionConfig, frame_secs: f64) -> App {
             (
                 session::load_session_world.run_if(session::loading),
                 session::session_control_input,
+                // F22-A.1: same map/pause ordering as the binary — the
+                // map's controls run ahead of `pause_input` so the
+                // Q/Esc that closes a pause-map is never re-read as a
+                // menu key, and its pause intent lands the same update.
+                hudmap::hudmap_input
+                    .after(session::session_control_input)
+                    .before(pause::pause_input)
+                    .before(session::drive_session),
                 // Same ordering contract as the binary: pause owns
                 // `Paused`, running between the intent reader (which
                 // ignores `Paused`) and the driver.
@@ -104,6 +114,7 @@ fn test_app(config: SessionConfig, frame_secs: f64) -> App {
                 (
                     despawn_session_entities.run_if(session::unloading),
                     pause::dev_pause_once,
+                    hudmap::dev_pause_map_once,
                     results::dev_finish_once,
                     session::drive_session,
                 )
@@ -399,6 +410,148 @@ fn dev_pause_pauses_once_at_playing() {
         phase_is(&mut app, SessionPhase::Playing),
         "the one-shot must not re-fire after a resume"
     );
+}
+
+/// A `HudMapSpec` in the authored shape — the regression tests below
+/// only drive `HudMap::fullscreen`, but `HudMap::new` needs a real
+/// spec (every field required by the parser).
+fn hudmap_spec() -> HudMapSpec {
+    HudMapSpec::parse(
+        "type: a\nmmHudMap {\n  Size 0.21 0.25\n  Pos 0.78 0.75\n  ZoomIn 0\n  Approach Rate 1.2\n  ZoomInDist 577\n  ZoomOutDist 1195\n  IconScaleMin 34\n  IconScaleMax 52\n  ZoomInDistFS 786\n  ZoomOutDistFS 1581\n  IconScaleMinFS 15\n  IconScaleMaxFS 18\n  Ocean Color 0.084 0.7 0.94\n}\n",
+    )
+    .unwrap()
+}
+
+/// F22-A.1/HUD-4: while the full-screen pause map replaces the pause
+/// overlay, the hidden menu is input-dead — arrows cannot drift the
+/// unseen focus, `Enter` cannot activate a row, and Backspace cannot
+/// resume into a covered-over live session. Only the map's own Q/Esc
+/// get through (handled by `hudmap_input` ahead of `pause_input`), and
+/// they close straight back to play.
+#[test]
+fn pause_map_owns_the_keys_while_the_menu_is_hidden() {
+    let mut app = dev_app();
+    app.update();
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+    // A bound city session carries this state; the dev world has none,
+    // so the test plants what `load_session_world` would have.
+    let generation = app.world().resource::<Session>().generation();
+    app.world_mut()
+        .insert_resource(HudMap::new(hudmap_spec(), generation));
+
+    // Q opens the full-screen pause map — the same pause intent Esc
+    // queues, so the session lands `Paused` with the overlay hidden.
+    press_key(&mut app, KeyCode::KeyQ);
+    assert!(
+        phase_is(&mut app, SessionPhase::Paused),
+        "Q should pause into the full-screen map, got {:?}",
+        app.world().resource::<Session>().phase()
+    );
+    assert!(app.world().resource::<HudMap>().fullscreen);
+    assert_eq!(
+        pause_rows(&mut app),
+        0,
+        "the map replaces the pause overlay"
+    );
+
+    // Every menu key is dead while the map is up: the focus cannot
+    // drift to Restart/Quit, `Enter` activates nothing, Backspace does
+    // not resume — the phase and the map must not move.
+    for key in [
+        KeyCode::ArrowDown,
+        KeyCode::ArrowDown,
+        KeyCode::ArrowUp,
+        KeyCode::Enter,
+        KeyCode::Space,
+        KeyCode::Backspace,
+        KeyCode::KeyW,
+    ] {
+        press_key(&mut app, key);
+    }
+    assert!(
+        phase_is(&mut app, SessionPhase::Paused),
+        "menu keys reached the hidden pause rows: {:?}",
+        app.world().resource::<Session>().phase()
+    );
+    assert!(app.world().resource::<HudMap>().fullscreen);
+    assert_eq!(
+        app.world().resource::<PauseMenu>().focus,
+        0,
+        "the hidden focus must not drift"
+    );
+    {
+        let control = app.world().resource::<SessionControl>();
+        assert!(
+            !control.quit && !control.restart && !control.pause,
+            "no session intent may leak through the map"
+        );
+    }
+
+    // Q closes the map straight back to play — and the pause keypress
+    // is not re-read as anything else in the same update.
+    press_key(&mut app, KeyCode::KeyQ);
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+    assert!(!app.world().resource::<HudMap>().fullscreen);
+}
+
+/// The full-screen map only lives inside its pause: if the flag is up
+/// while the session is `Playing` and no pause intent is pending — a
+/// rejected intent, or any path that skipped the close arm — the next
+/// update drops it rather than leaving the order-1 map camera over
+/// live gameplay with no key that closes it.
+#[test]
+fn fullscreen_map_clears_itself_outside_pause() {
+    let mut app = dev_app();
+    app.update();
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+    let generation = app.world().resource::<Session>().generation();
+    let mut map = HudMap::new(hudmap_spec(), generation);
+    map.fullscreen = true;
+    app.world_mut().insert_resource(map);
+
+    app.update();
+    assert!(
+        !app.world().resource::<HudMap>().fullscreen,
+        "a full-screen map over a Playing session must self-clear"
+    );
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+}
+
+/// MP-6: `--pause-map` on a non-pausable authority must not fire —
+/// queuing the intent would be rejected by `drive_session`, leaving the
+/// map full-screen over a session that is still `Playing`.
+#[test]
+fn pause_map_dev_override_respects_pause_authority() {
+    let mut app = test_app(
+        SessionConfig {
+            authority: SessionAuthority::Host,
+            dev: DevOverrides {
+                pause_map: true,
+                ..DevOverrides::default()
+            },
+            ..SessionConfig::default()
+        },
+        1.0 / 60.0,
+    );
+    // The bound-map state the dev flag looks for — planted before the
+    // first frame so the gate, not resource timing, is what is tested.
+    let generation = app.world().resource::<Session>().generation();
+    app.world_mut()
+        .insert_resource(HudMap::new(hudmap_spec(), generation));
+
+    for _ in 0..10 {
+        app.update();
+    }
+    assert!(
+        phase_is(&mut app, SessionPhase::Playing),
+        "a host session never pauses, got {:?}",
+        app.world().resource::<Session>().phase()
+    );
+    assert!(
+        !app.world().resource::<HudMap>().fullscreen,
+        "--pause-map must not leave the map full-screen"
+    );
+    assert!(!app.world().resource::<SessionControl>().pause);
 }
 
 /// AC01: a restart through the real spawn/teardown path leaves exactly

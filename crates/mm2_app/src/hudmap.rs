@@ -19,7 +19,11 @@
 //!   and Q opens the full-screen *pause* map — it queues the session's
 //!   pause intent under the same `allows_pause` authority gate as Esc
 //!   (single player only). While that pause is up, Q/Esc close the map
-//!   straight back to play and the pause-menu overlay stays hidden.
+//!   straight back to play and the pause-menu overlay stays hidden and
+//!   input-dead (`pause_input` gates on the open map). The map only
+//!   lives inside its pause: leaving `Paused` by any path — or a queued
+//!   pause intent that never landed — clears `fullscreen`, so it can
+//!   never sit over live gameplay with no key that closes it.
 //!   [`dev_pause_map_once`] is the quarantined `--pause-map` dev
 //!   override for capture runs (input is frozen there).
 //! - [`drive_hud_map`] tracks the local player under the camera, eases
@@ -534,14 +538,15 @@ pub fn hudmap_input(
         }
         _ => {}
     }
-    // The full-screen map only lives inside its pause — any other exit
-    // (resume row, restart, teardown) drops it too.
-    if map.fullscreen
-        && !matches!(
-            session.phase(),
-            SessionPhase::Playing | SessionPhase::Paused
-        )
-    {
+    // The full-screen map only lives inside its pause — the Q/Esc arm
+    // above clears it on the way out, and any other exit from `Paused`
+    // (restart, teardown, a queued pause intent `drive_session`
+    // rejected) drops it here so the order-1 map camera can never sit
+    // over live gameplay with no key that closes it. A `control.pause`
+    // still queued this update is the one exception: the `Playing` arm
+    // and `dev_pause_map_once` set the flag the same frame they queue
+    // the intent, and `drive_session` consumes it later in the update.
+    if map.fullscreen && !matches!(session.phase(), SessionPhase::Paused) && !control.pause {
         map.fullscreen = false;
     }
 }
@@ -550,8 +555,10 @@ pub fn hudmap_input(
 /// the full-screen pause map on the first `Playing` frame — how a
 /// `--frames`/`--screenshot` capture renders the pause map while live
 /// input is frozen. Render-only like `--pause`: out of
-/// `record_eligibility`. One-shot; a session with no bound map keeps it
-/// unfired.
+/// `record_eligibility`. Same MP-6 gate as the Q key — on an authority
+/// that cannot pause it never fires, so the map can never be left
+/// full-screen over a session that is still `Playing`. One-shot; a
+/// session with no bound (or stale) map keeps it unfired.
 pub fn dev_pause_map_once(
     session: Res<Session>,
     map: Option<ResMut<HudMap>>,
@@ -562,8 +569,11 @@ pub fn dev_pause_map_once(
         return;
     }
     if session.is_playing()
-        && session.config().is_some_and(|c| c.dev.pause_map)
+        && session
+            .config()
+            .is_some_and(|c| c.dev.pause_map && c.authority.allows_pause())
         && let Some(mut map) = map
+        && !map.is_stale(session.generation())
     {
         *fired = true;
         map.fullscreen = true;

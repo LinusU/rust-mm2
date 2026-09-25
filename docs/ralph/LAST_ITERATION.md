@@ -1,4 +1,85 @@
-# Last iteration — F22-A.1 authored in-race HUD minimap (iteration 60)
+# Last iteration — F22-A.1 review repair: pause-map input leak (iteration 61)
+
+Iteration 61 on `ralph/night` (baseline `4ea8638`, F22-A.1 — external
+verify green but review **failed**; fifth iteration of run
+`20260925T144723`). One piece: the F22-A.1 review's single blocking
+finding plus its two minor same-class items.
+
+## Task selection
+
+The external review rejected `4ea8638` with one blocking finding: while
+`Paused` with `HudMap.fullscreen`, the visually-hidden pause menu stayed
+input-live — `pause_input` gated on `phase == Paused` alone, so
+`Enter`/`Space` activated the invisibly-focused row (Resume → `Playing`
+leaves the order-1 map camera covering live gameplay with no `Playing`
+input path that closes it; an invisibly-drifted focus could fire
+Restart/Quit), and Backspace/gamepad East/Start resumed through
+`MenuCommand::Back` into the same stuck state. The same missing exit
+invariant let `dev_pause_map_once` strand `fullscreen` on a
+non-pausable authority (`drive_session` rejects the intent, the map
+stays up over `Playing`). Repair precedes new feature work per the
+plan's regression-first policy.
+
+## What landed
+
+- `pause_input` (`mm2_app::pause`) early-returns while a non-stale
+  `HudMap.fullscreen` holds — the map *replaces* the overlay, so the
+  hidden rows take no input; `hudmap_input` (scheduled ahead) still
+  owns the map's Q/Esc close.
+- `hudmap_input`'s exit invariant tightened: `fullscreen` survives only
+  in `Paused`, or while a `control.pause` intent is still queued in the
+  same update (the flag is set alongside the intent; `drive_session`
+  consumes it later in the update). Any other state — `Playing` after a
+  rejected intent or a resume, teardown phases — clears it next frame,
+  so the map camera can never strand over live gameplay.
+- `dev_pause_map_once` gained the same MP-6 `allows_pause` gate the Q
+  key carries plus a staleness check — a non-pausable authority never
+  fires it. `dev_pause_once` gained the same gate (the
+  `SessionControl::pause` contract already documents the intent as
+  produced only for a pausable authority).
+- `tests/session.rs`'s harness now schedules `hudmap_input` and
+  `dev_pause_map_once` in the same slots the binary uses, and gained
+  +3 regression tests (14 → 17):
+  - `pause_map_owns_the_keys_while_the_menu_is_hidden` — Q opens the
+    pause map (`Paused`, `fullscreen`, zero overlay rows), then
+    arrows/W/Enter/Space/Backspace are all inert (phase stays `Paused`,
+    `fullscreen` holds, `PauseMenu.focus` stays 0, no intent leaks);
+    Q closes straight to `Playing`.
+  - `fullscreen_map_clears_itself_outside_pause` — `fullscreen` up on a
+    `Playing` session with no pending intent self-clears next update.
+  - `pause_map_dev_override_respects_pause_authority` — `--pause-map`
+    under `SessionAuthority::Host` never fires: `Playing` holds,
+    `fullscreen` stays false, no pause intent queued.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked --workspace
+--all-targets --all-features -- -D warnings` clean; `cargo test
+--locked --workspace` — 70 suites, 0 failures (tests/session.rs 17/17,
+tests/hudmap.rs 4/4 unchanged green).
+
+## Classification
+
+Implementation repair only — no original-behavior claim changes
+(DSN-46/UNK-26 stand as recorded). The review's minor doc note is also
+corrected in the iteration-60 entry: `--pause-map` is deliberately
+*out of* `record_eligibility` (render-only, consistent with
+`--pause`/`--cam`), not "record-ineligible".
+
+## Remaining open items
+
+- F22-A stays `active` — unchanged open scope: HUD-1/HUD-2 race
+  instruments, AC02 map-pixel correctness, AC03 live marker-binding
+  verification, and gamepad bindings for the map controls (none exist —
+  that is F23 rebind scope).
+- The review's other verification gaps remain open: the windowed
+  captures were not re-rendered, and no retail leg was re-run this
+  iteration — nothing in this diff touches tile/marker binding, so the
+  `4ea8638` retail evidence stands unmodified.
+
+---
+
+# Iteration 60 — F22-A.1 authored in-race HUD minimap (iteration 60)
 
 Iteration 60 on `ralph/night` (baseline `e452468`, F14-C.1 — external
 verify + review green at `e452468`; fourth iteration of run
@@ -49,7 +130,9 @@ instrument remainder is open scope.
   `retarget_hud`, `update_hud`/`active_cam_pose`/`screenshot_input`,
   and damage billboards.
 - `--pause-map` dev override for the fullscreen-map smoke leg
-  (record-ineligible like the other dev flags).
+  (render-only — deliberately out of `record_eligibility`, like
+  `--pause`/`--cam`; corrected from "record-ineligible" per the
+  external review's doc note).
 - `MaterialCache::unlit_copy` — marker paints render unlit.
 
 ## Evidence

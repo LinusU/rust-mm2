@@ -8,7 +8,10 @@
 //!
 //! - [`pause_input`] owns every key while `Paused` — arrow/D-pad/stick
 //!   focus, `Enter`/`Space`/South activate, `Esc`/Backspace/East/Start
-//!   resume. It is scheduled between `session_control_input` (which
+//!   resume — except while HUD-4's full-screen pause map is up: the map
+//!   *replaces* the overlay, `hudmap_input` owns its Q/Esc ahead of this
+//!   system, and `pause_input` takes nothing so no key can reach the
+//!   hidden rows. It is scheduled between `session_control_input` (which
 //!   ignores `Paused`) and `drive_session`, so the `Esc` press that
 //!   entered pause can never be re-read as a resume in the same
 //!   update, and a resume press can't be re-read as a pause.
@@ -129,8 +132,17 @@ pub fn pause_input(
     mut control: ResMut<SessionControl>,
     mut pause: ResMut<PauseMenu>,
     menu_shell: Option<Res<MenuShell>>,
+    hudmap: Option<Res<HudMap>>,
 ) {
     if !matches!(session.phase(), SessionPhase::Paused) {
+        return;
+    }
+    // F22-A.1/HUD-4: while the full-screen pause map is up it replaces
+    // this overlay, so the hidden rows must take no input — an unseen
+    // `Enter` would activate whichever row last held focus and a drifted
+    // focus could fire Restart/Quit from a screen that looks like a
+    // map. `hudmap_input` (scheduled ahead) owns the map's Q/Esc close.
+    if hudmap.is_some_and(|m| !m.is_stale(session.generation()) && m.fullscreen) {
         return;
     }
     let rows = pause_rows(menu_shell.is_some());
@@ -226,7 +238,9 @@ pub fn sync_physics_pause(session: Res<Session>, time: Option<ResMut<Time<Physic
 /// pause intent on the first `Playing` frame. A capture freezes live
 /// input, so without this the overlay could never be rendered. It is a
 /// one-shot — a session resumed or restarted afterwards stays
-/// un-paused until Esc is pressed again.
+/// un-paused until Esc is pressed again. It carries the same MP-6
+/// `allows_pause` gate as the Esc path: on a non-pausable authority it
+/// never fires, so no rejected intent is queued.
 pub fn dev_pause_once(
     session: Res<Session>,
     mut control: ResMut<SessionControl>,
@@ -236,7 +250,9 @@ pub fn dev_pause_once(
         return;
     }
     if matches!(session.phase(), SessionPhase::Playing)
-        && session.config().is_some_and(|c| c.dev.pause)
+        && session
+            .config()
+            .is_some_and(|c| c.dev.pause && c.authority.allows_pause())
     {
         *fired = true;
         control.pause = true;
