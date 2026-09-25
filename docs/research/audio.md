@@ -132,6 +132,32 @@ surface audio rather than a mislabeled dry one. Retail headless:
 `sf --weather 3` → `surf=wet` marker on the smoke record (`env=lt03
 (rainy-morning)` confirms the same slot bound); `--weather 0` emits no
 marker (DSN-43).
+
+F07-B.9 adds the F07-AC02 evidence driver (`--seq`, `mm2_app::sequence`):
+a staged `idle → accelerate → coast → brake → reverse` input program
+through the production `VehicleInput` path — the same resource-gated
+driver pattern `ScriptedDrive`/`ParkedDrive` hold, not a second audio
+system. It banks one `SeqSample` per stage boundary (RPM, gear,
+direction, forward speed, the loudest engine loop's computed
+volume/pitch mix, the stage's clutch one-shot delta off `AudioReport`)
+and the smoke record prints the rows as `seq=`. The AC's "shift" leg
+has no stage of its own — the gearbox is automatic, so committed
+`(gear, direction)` changes land inside `accelerate`/`coast` and the
+`brake → reverse` hand-off and show as the per-stage `+Nc` clutch
+deltas. Stage timers run only while `Playing` and not
+countdown-locked (the `scripted_drive` gate), a session-generation
+change resets the program and clears its samples, and runs without
+`--seq` emit a bit-identical record. Retail headless legs (vpbug,
+`fnv1a64:e91e6cd4b2ae30d9`): dev-world `seq=idle:750r/F0/-0.0m/
+0.82v/0.97p,acc:4840r/F4/24.8m/0.90v/1.32p+4c,coast:3324r/F3/12.3m/
+0.90v/1.07p+1c,brake:1272r/R0/0.2m/0.83v/1.07p+3c,rev:5817r/R0/-13.4m/
+0.90v/1.48p`; sf `seq=idle:750r/F0/0.4m/0.82v/0.97p,acc:4897r/F5/
+34.6m/0.90v/1.32p+5c,coast:750r/F0/0.2m/0.82v/0.97p+3c,brake:750r/
+F0/0.2m/0.82v/0.97p,rev:5814r/R0/-13.5m/0.90v/1.48p` — the engine mix
+volume/pitch and clutch counts follow the drivetrain through every
+stage. The program is an implementation/evidence choice — it makes no
+original-behavior claim, and headless `0s` still reports no output
+device (F07-AC05 stays open).
 Everything below is measured data structure; runtime semantics are
 unverified unless noted.
 

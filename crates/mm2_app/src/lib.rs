@@ -30,6 +30,7 @@ pub mod race;
 pub mod recovery;
 pub mod results;
 pub mod scripted;
+pub mod sequence;
 pub mod session;
 pub mod smoke;
 pub mod spark_fx;

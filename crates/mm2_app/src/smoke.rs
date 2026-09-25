@@ -136,6 +136,11 @@ pub enum Driver {
     /// driver — the isolation leg `Hold` (blind full throttle) cannot
     /// provide.
     Parked,
+    /// The staged audio driver (`--seq`): the F07-AC02 idle →
+    /// accelerate → coast → brake → reverse program through the
+    /// production `VehicleInput` path, banking a per-stage
+    /// drivetrain/engine-mix/clutch sample the record prints as `seq=`.
+    Sequence,
 }
 
 impl Driver {
@@ -145,6 +150,7 @@ impl Driver {
             Self::Hold => "hold",
             Self::Scripted => "scripted",
             Self::Parked => "parked",
+            Self::Sequence => "sequence",
         }
     }
 }
@@ -313,6 +319,13 @@ pub fn headless_smoke(
                 // `--parked` — the same resource-gated pattern
                 // `ScriptedDrive` holds for `--bot`.
                 crate::input::parked_drive.run_if(resource_exists::<crate::input::ParkedDrive>),
+                // F07-AC02: `--seq`'s staged input program owns
+                // `VehicleInput` the same way — after `clutch_voices`
+                // so a stage boundary attributes the same frame's
+                // clutch one-shot to the stage that produced it.
+                crate::sequence::sequence_drive
+                    .after(crate::audio::clutch_voices)
+                    .run_if(resource_exists::<crate::sequence::SequenceDrive>),
                 // F18-A.5: the chase camera tracks the player headlessly
                 // so the authored room-PVS pass resolves a live source
                 // room exactly as the windowed run does — the record's
@@ -401,6 +414,9 @@ pub fn headless_smoke(
     }
     if driver == Driver::Parked {
         app.insert_resource(crate::input::ParkedDrive);
+    }
+    if driver == Driver::Sequence {
+        app.insert_resource(crate::sequence::SequenceDrive::default());
     }
     if let Some(profile) = profile {
         app.insert_resource(profile);
@@ -1070,6 +1086,24 @@ pub fn headless_smoke(
     } else {
         String::new()
     };
+    // F07-AC02: the `--seq` driver's banked stage-boundary samples —
+    // `idle:…r/F0/…m/…v/…p acc:…` one entry per completed stage, with
+    // `+Nc` clutch one-shots the stage produced. Only a Sequence run
+    // carries the resource, so every other driver's record stays
+    // bit-identical.
+    let seq_detail = world_ecs
+        .get_resource::<crate::sequence::SequenceDrive>()
+        .filter(|s| !s.samples.is_empty())
+        .map(|s| {
+            let rows = s
+                .samples
+                .iter()
+                .map(|sample| sample.format())
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(" seq={rows}")
+        })
+        .unwrap_or_default();
     // Pose fields: `none` while no player entity exists — the run ended
     // inside the teardown/rebuild window, a lifecycle state rather than
     // a missing pose. With an entity present, a missing or non-finite
@@ -1098,7 +1132,7 @@ pub fn headless_smoke(
     // (DRV-2/DRV-3) and aimap variant (RACE-11) selected its content.
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{extra}",
+            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{extra}",
             driver.as_str(),
             config.difficulty.as_str(),
             session.phase().name(),

@@ -142,6 +142,11 @@ cargo run -- --mm2-path <dir> --city london --event blitz:0 --headless --bot
 cargo run -- --mm2-path <dir> --city london --event blitz:0 --headless --parked
 #   --parked holds the handbrake all session — the stationary control
 #   leg: what the opponents do with no competing local driver.
+cargo run -- --mm2-path <dir> --dev-world --car vpbug --headless --seq --frames 2200
+#   --seq runs the staged idle → accelerate → coast → brake → reverse
+#   audio evidence program (F07-AC02): the record's seq= field reports
+#   the per-stage rpm/gear/speed, loudest engine-loop mix and clutch
+#   one-shot counts. Works windowed too.
 
 # visual smoke — real render path, windowed; the screenshot is awaited
 # (pass is reported only once the file actually lands):

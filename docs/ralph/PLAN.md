@@ -49,8 +49,32 @@ F15-B remainder (`unkFlag`/`cornerBrakingThreshold`/
 F11-C remainder, F16-C's AC01
 process-level leg, F10-B's remaining collision-fidelity
 scope, F13-C, the F18-A remainder, or the F07-B remainder
-(scrape + scripted/audible
-evidence))** — the latest iteration landed F07-B.8:
+(scrape + audible
+evidence))** — the latest iteration landed F07-B.9,
+the F07-AC02 scripted evidence driver: `--seq` inserts a
+`SequenceDrive` resource and `sequence_drive` owns the
+player's `VehicleInput` through a staged `idle → accelerate
+→ coast → brake → reverse` program (same resource-gated
+pattern `ScriptedDrive`/`ParkedDrive` hold, scheduled after
+`vehicle_input` and `clutch_voices`), banking one
+`SeqSample` per stage boundary — RPM/gear/direction/forward
+speed, the loudest engine loop's computed `EngineMix`
+(volume/pitch), and the stage's clutch one-shot delta off
+`AudioReport` — printed as the record's `seq=` field
+(`idle:750r/F0/-0.0m/0.82v/0.97p,…` rows; runs without
+`--seq` stay bit-identical). The AC's "shift" leg has no
+stage — the gearbox is automatic, so committed
+`(gear, direction)` changes land inside accelerate/coast
+and the brake→reverse hand-off as the `+Nc` deltas. Stage
+timers run only while `Playing` and not countdown-locked;
+a session-generation change resets program and samples.
+`Driver::Sequence` joins the smoke CLI, `--seq` wires the
+windowed path too. Retail headless (vpbug): dev-world
+`acc` reached F4/24.8 m/s with 4 clutch events, `rev` held
+R0 at −13.4 m/s; sf `acc` reached F5/34.6 m/s with 5.
+Implementation/evidence choice — no original-behavior
+claim; headless `0s` stays honest, AC05 unclaimed.
+Before that the latest iteration landed F07-B.8:
 weather-bound surface-table variants — the exe carries
 `%s_surfacedry`/`%s_surfacewet` + `default_*` and **no**
 `surfaceice` string (the shipped ice tables are dead authored

@@ -21,7 +21,7 @@ use mm2_app::session::{ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, 
 use mm2_app::{
     audio, banger, breakaway, camera, car_visual, city, contracts, damage, damage_fx, environment,
     input, menu, nav_overlay, opponents, pause, profile, progression, pvs, race, recovery, results,
-    scripted, session, smoke, spark_fx, stuck, texel_fx, traffic,
+    scripted, sequence, session, smoke, spark_fx, stuck, texel_fx, traffic,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
@@ -222,6 +222,15 @@ struct Cli {
     /// throttle cannot provide). Works windowed too.
     #[arg(long, conflicts_with = "bot")]
     parked: bool,
+
+    /// Staged audio-sequence driver (F07-AC02): the player vehicle
+    /// runs a scripted idle → accelerate → coast → brake → reverse
+    /// program through the production input path, and the headless
+    /// record's `seq=` field reports the per-stage drivetrain,
+    /// engine-mix and clutch evidence. An evidence driver, not a
+    /// gameplay feature. Works windowed too.
+    #[arg(long, conflicts_with_all = ["bot", "parked"])]
+    seq: bool,
 
     /// Disable the authored `.cpvs` room-PVS render culling (F18-A.5)
     /// — the retail `cityLevel::EnablePVS(false)` counterpart and the
@@ -765,6 +774,8 @@ fn main() {
                 smoke::Driver::Scripted
             } else if cli.parked {
                 smoke::Driver::Parked
+            } else if cli.seq {
+                smoke::Driver::Sequence
             } else {
                 smoke::Driver::Hold
             },
@@ -803,7 +814,8 @@ fn main() {
         && !cli.nav
         && cli.nav_route.is_none()
         && !cli.bot
-        && !cli.parked;
+        && !cli.parked
+        && !cli.seq;
     if cli.menu && !menu_mode {
         warn!("--menu ignored: a session-shaping flag requested a direct launch");
     }
@@ -1084,6 +1096,20 @@ fn main() {
         Update,
         (spark_fx::emit_sparks, spark_fx::advance_sparks).chain(),
     )
+    // F07-AC02: `--seq`'s staged input program owns `VehicleInput`
+    // like the other evidence drivers — after the keyboard mapping so
+    // it wins deterministically, and after `clutch_voices` so a stage
+    // boundary attributes the same frame's clutch one-shot to the
+    // stage that produced it. Own schedule slot: the main Update
+    // tuple is at Bevy's system count limit.
+    .add_systems(
+        Update,
+        sequence::sequence_drive
+            .after(input::vehicle_input)
+            .after(audio::clutch_voices)
+            .run_if(resource_exists::<sequence::SequenceDrive>)
+            .run_if(not(capturing)),
+    )
     // F07-A.2/B.1: authored-horn voices plus the engine loop rig —
     // live input is frozen during a capture like every other input,
     // while `--horn` stays ungated so a capture run can still fire it.
@@ -1195,6 +1221,9 @@ fn main() {
     }
     if cli.parked {
         app.insert_resource(input::ParkedDrive);
+    }
+    if cli.seq {
+        app.insert_resource(sequence::SequenceDrive::default());
     }
     // F18-A.5: `--no-pvs` reaches the session through
     // `SessionConfig::dev` (retail `EnablePVS` default-on) — the same
