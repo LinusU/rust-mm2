@@ -300,7 +300,9 @@ struct Activation {
 /// resist — while any wall response along a different axis (a glancing
 /// touch) is returned rather than converted into `dir`. The shared
 /// math lives in `contracts` — the ambient-traffic handover runs the
-/// same rewrite.
+/// same rewrite — and its `write_striker_correction` clamps the
+/// striker's post-write spin at `MAX_BANGER_ANGULAR_SPEED` write-side,
+/// the same bound `banger_bundle` stamps solver-side.
 fn apply_striker_correction(
     a: &Activation,
     transfer: Option<&Transfer>,

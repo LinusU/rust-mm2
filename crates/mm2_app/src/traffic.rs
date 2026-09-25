@@ -118,14 +118,19 @@
 //!
 //! F10-B.13 bounds the wreck the flip leaves behind and names its
 //! striker: the spawned body now carries the solver-side
-//! `MaxLinearSpeed`/`MaxAngularSpeed` every banger body gets (inert
-//! on a lane follower, binding once it is dynamic) and the
-//! contact-lever spin write clamps at `MAX_BANGER_ANGULAR_SPEED`, so
-//! a transient spike cannot leave a wreck whose spin inflates a later
-//! contact's `normal_speed` reading. Each handover also counts its
-//! striker's class — `Player` participant, ambient car, or anything
-//! else — into `kns=` on the smoke record, so a soak can say whether
-//! a *participant* ever struck a car (AC03's damage leg).
+//! `MaxLinearSpeed`/`MaxAngularSpeed` every banger body gets
+//! (non-binding on a lane follower, binding once it is dynamic) and
+//! the contact-lever spin write clamps at `MAX_BANGER_ANGULAR_SPEED`,
+//! so a transient spike cannot leave a wreck whose spin inflates a
+//! later contact's `normal_speed` reading. Each handover also counts
+//! its striker's class — `Player` participant, ambient car, or
+//! anything else — into `kns=` on the smoke record, so a soak can say
+//! whether a *participant* ever struck a car (AC03's damage leg).
+//! F10-B.14 puts the same write-side spin bound on the striker's
+//! correction inside the shared `write_striker_correction` — the
+//! banger path's strikers included — and covers the same-tick pileup
+//! edge: two strikers reaching one lane car in a single drain produce
+//! one flip, not two.
 //!
 //! F10-B.9 drives the junction interior (operator report 4 item 1):
 //! BAI lane curves stop at each road's junction boundary, so a lane
@@ -826,12 +831,13 @@ fn spawn_ambient_car(
                 Restitution::new(tuning.elasticity),
                 // Solver-level speed bounds, the same bound
                 // `banger_bundle` stamps (the records carry none):
-                // inert while the car is kinematic — `drive_ambient`
-                // owns its velocity at lane speeds far under the cap —
-                // but once an impact flips the body dynamic they keep
-                // a fast-spinning wreck from feeding an inflated
-                // `normal_speed` back into a later contact (the sf-8
-                // cascade class F13-C.3 bounded).
+                // non-binding while the car is kinematic — Avian's
+                // `clamp_velocities` covers kinematic solver bodies
+                // too, but `drive_ambient` prescribes lane speeds far
+                // under the cap — and once an impact flips the body
+                // dynamic they keep a fast-spinning wreck from feeding
+                // an inflated `normal_speed` back into a later contact
+                // (the sf-8 cascade class F13-C.3 bounded).
                 MaxLinearSpeed(MAX_BANGER_LINEAR_SPEED),
                 MaxAngularSpeed(MAX_BANGER_ANGULAR_SPEED),
             ),
@@ -1282,7 +1288,10 @@ type KnockedCarMut = (
 /// solver-side `MaxLinearSpeed`/`MaxAngularSpeed` stamped at spawn —
 /// the same bounds banger bodies get, so a transient spike cannot
 /// leave a wreck whose inflated spin re-enters a later contact's
-/// `normal_speed` reading.
+/// `normal_speed` reading. F10-B.14 extends the same write-side
+/// bound to the striker: the shared `write_striker_correction` clamps
+/// the correction's post-write spin too (a `Player` striker carries
+/// no solver bound — the write clamp is its only one).
 ///
 /// Drains under the same phase/authority gate as `drive_ambient`:
 /// edges buffered while paused never flush as a stale burst on

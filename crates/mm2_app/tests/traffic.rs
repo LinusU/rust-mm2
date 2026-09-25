@@ -11,6 +11,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use avian3d::prelude::*;
+use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::camera::CameraMode;
@@ -2591,6 +2592,11 @@ fn a_wreck_striker_counts_as_ambient() {
         Collider::cuboid(1.8, 0.9, 3.2),
         Mass(1200.0),
         CollisionEventsEnabled,
+        // The production wreck's solver bounds — a flipped lane car
+        // keeps the `MaxLinearSpeed`/`MaxAngularSpeed` its spawn
+        // stamped (F10-B.13).
+        MaxLinearSpeed(mm2_game::MAX_BANGER_LINEAR_SPEED),
+        MaxAngularSpeed(mm2_game::MAX_BANGER_ANGULAR_SPEED),
         Position(spot),
         Rotation(rot),
         LinearVelocity(travel * 15.0),
@@ -2622,6 +2628,179 @@ fn a_wreck_striker_counts_as_ambient() {
     };
     assert_eq!(drive, AmbientDrive::Knocked);
     assert!(matches!(body, RigidBody::Dynamic));
+}
+
+/// Two strikers reaching one lane car in the same tick produce one
+/// handover, not two (F10-B.14's same-tick pileup edge): the decide
+/// pass records both edges while the car is still `Lane`, the apply
+/// pass's `Lane` re-check lets the first flip win, and the second
+/// striker keeps its solver wall response — the wreck takes a single
+/// transfer's launch and the record counts one knock with one
+/// striker class.
+#[test]
+fn a_same_tick_pileup_flips_the_car_once() {
+    let install = junction_install(0, 0);
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+
+    let lane_r0 = lane(0, Side::Right);
+    // The driving follower does the approaching: two strikers rest
+    // side by side across its path with their front faces at the same
+    // lane-along, so the car's front reaches both in the same solver
+    // step and both edges land in one `knock_ambient` drain.
+    let car = spawn_follower(&mut app, lane_r0, 10.0, 15.0);
+    let (spot, travel) = {
+        let t = app.world().resource::<AmbientTraffic>();
+        let s = t
+            .graph()
+            .sample_lane(lane_r0, 14.0)
+            .expect("a live lane samples");
+        (
+            Vec3::from(s.position) + Vec3::Y * 0.55,
+            Vec3::from(s.tangent).normalize_or(Vec3::NEG_Z),
+        )
+    };
+    let lateral = Vec3::new(-travel.z, 0.0, travel.x);
+    let mut strikers = Vec::new();
+    for dx in [-0.7f32, 0.7] {
+        let pos = spot + lateral * dx;
+        strikers.push(
+            app.world_mut()
+                .spawn((
+                    RigidBody::Dynamic,
+                    Collider::cuboid(1.2, 1.1, 1.8),
+                    Mass(1300.0),
+                    CollisionEventsEnabled,
+                    Position(pos),
+                    Transform::from_translation(pos),
+                ))
+                .id(),
+        );
+    }
+
+    // Prove the staging really is same-tick: both pairs' contact
+    // begins on the same update, and the flip lands in that update's
+    // drain.
+    let mut first_touch = [usize::MAX; 2];
+    let mut knocked_at = usize::MAX;
+    for update in 0..240 {
+        app.update();
+        for (i, striker) in strikers.iter().enumerate() {
+            if first_touch[i] == usize::MAX {
+                let striker = *striker;
+                let touching = app
+                    .world_mut()
+                    .run_system_once(move |c: Collisions| c.contains(striker, car))
+                    .expect("the collisions query runs");
+                if touching {
+                    first_touch[i] = update;
+                }
+            }
+        }
+        if app.world().resource::<AmbientTraffic>().knocked >= 1 {
+            knocked_at = update;
+            break;
+        }
+    }
+    assert_eq!(
+        first_touch[0], first_touch[1],
+        "the strikers did not contact on the same tick: {first_touch:?}"
+    );
+    assert_ne!(
+        knocked_at,
+        usize::MAX,
+        "the same-tick pileup never knocked the car"
+    );
+    // The contact pair marks touching a fixed step before the
+    // `CollisionStart` edge drains, so the flip can lag the shared
+    // touch update by one — both edges lag together into one drain.
+    assert!(
+        knocked_at >= first_touch[0] && knocked_at <= first_touch[0] + 1,
+        "the flip did not land in the drain the edges arrived in: \
+         touch {first_touch:?} knock {knocked_at}"
+    );
+
+    let traffic = app.world().resource::<AmbientTraffic>();
+    assert_eq!(
+        traffic.knocked, 1,
+        "a second same-tick edge re-knocked the wreck"
+    );
+    // Exactly one striker class is charged — both blocks are `x`.
+    assert_eq!(traffic.knocked_by_other, 1);
+    assert_eq!(traffic.knocked_by_participant, 0);
+    assert_eq!(traffic.knocked_by_ambient, 0);
+
+    // One flip: the wreck is the same entity, dynamic, carrying a
+    // single transfer's launch — a double handover would roughly
+    // double it (the `a_hard_hit` band).
+    let (drive, body, kick) = {
+        let mut q = app
+            .world_mut()
+            .query::<(Entity, &AmbientCar, &RigidBody, &LinearVelocity)>();
+        let (_, c, rb, lv) = q
+            .iter(app.world())
+            .find(|(e, ..)| *e == car)
+            .expect("the knocked car despawned");
+        (c.drive, *rb, lv.0)
+    };
+    assert_eq!(drive, AmbientDrive::Knocked);
+    assert!(matches!(body, RigidBody::Dynamic));
+    let wreck_v = kick.dot(travel);
+    assert!(
+        wreck_v > 1.0 && wreck_v < 11.0,
+        "the wreck took more than one transfer's launch: {wreck_v}"
+    );
+
+    // Exactly one striker was corrected: the winning edge rewrote its
+    // striker to the exchange share while the losing edge — dropped
+    // at the apply pass's `Lane` re-check — keeps the faster
+    // kinematic wall shove the solver gave it. Two corrected
+    // strikers would share the low band; two uncorrected would share
+    // the high one.
+    let speeds: Vec<f32> = strikers
+        .iter()
+        .map(|striker| {
+            app.world()
+                .get::<LinearVelocity>(*striker)
+                .expect("a striker despawned")
+                .0
+                .dot(travel)
+        })
+        .collect();
+    let (min, max) = (
+        speeds.iter().copied().fold(f32::INFINITY, f32::min),
+        speeds.iter().copied().fold(f32::NEG_INFINITY, f32::max),
+    );
+    for (i, v) in speeds.iter().enumerate() {
+        assert!(v.is_finite(), "striker {i} diverged: {speeds:?}");
+    }
+    assert!(
+        min > 1.0 && min < 11.0,
+        "no striker holds the corrected exchange share: {speeds:?}"
+    );
+    assert!(
+        max - min > 4.0,
+        "both strikers took the same response — no winner/loser split: {speeds:?}"
+    );
+
+    // Re-contacts against the resting wreck add no further flips.
+    run(&mut app, 60);
+    assert_eq!(
+        app.world().resource::<AmbientTraffic>().knocked,
+        1,
+        "a repeated contact edge re-knocked the wreck"
+    );
+    assert!(
+        app.world()
+            .get::<Position>(car)
+            .expect("the wreck despawned")
+            .0
+            .is_finite(),
+        "the solver diverged on the pileup"
+    );
 }
 
 /// A knocked wreck lying inside the junction box — its lane cursor

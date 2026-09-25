@@ -18,8 +18,9 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_game::{
-    AuthorityRole, DamageSignals, ImpactDedup, ImpactEvent, ImpactId, ImpactPolicy, ObjectId,
-    ObjectIdentity, Session, SurfaceMaterial, SurfaceState, VehicleTelemetry, WheelTelemetry,
+    AuthorityRole, DamageSignals, ImpactDedup, ImpactEvent, ImpactId, ImpactPolicy,
+    MAX_BANGER_ANGULAR_SPEED, ObjectId, ObjectIdentity, Session, SurfaceMaterial, SurfaceState,
+    VehicleTelemetry, WheelTelemetry,
 };
 use mm2_vehicle::surface::TireConditions;
 use mm2_vehicle::vehicle::{Vehicle, VehicleState};
@@ -285,7 +286,13 @@ pub(crate) fn striker_correction(
 }
 
 /// Write a correction Δp onto a resolved striker: linear Δv = Δp/m
-/// plus the contact-lever angular share when inertia resolves.
+/// plus the contact-lever angular share when inertia resolves. The
+/// post-write spin clamps at `MAX_BANGER_ANGULAR_SPEED` — the same
+/// bound `banger_bundle`/`spawn_ambient_car` stamp solver-side — so a
+/// transient spike cannot leave the striker spinning fast enough to
+/// inflate a later contact's `normal_speed` reading. A striker
+/// without the solver bound (a `Player` vehicle carries none) gets
+/// its only clamp here.
 pub(crate) fn write_striker_correction(
     delta_p: Vec3,
     striker_mass: f32,
@@ -298,6 +305,7 @@ pub(crate) fn write_striker_correction(
     linvel.0 += delta_p / striker_mass;
     if let Some(mut angvel) = angvel {
         angvel.0 += angular_share(lever, delta_p, inertia, rotation);
+        angvel.0 = angvel.0.clamp_length_max(MAX_BANGER_ANGULAR_SPEED);
     }
 }
 
@@ -490,5 +498,107 @@ pub fn publish_vehicle_telemetry(
             wheels,
             damage: damage.copied().unwrap_or_default(),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! F10-B.14: the shared striker correction bounds its spin write
+    //! write-side, not only solver-side — a striker without a stamped
+    //! `MaxAngularSpeed` (a `Player` vehicle carries none) gets its
+    //! only clamp here.
+
+    use super::*;
+
+    /// One striker entity with a unit angular inertia — the query
+    /// tuple is exactly the [`StruckMut`] shape the callsites hand
+    /// over.
+    fn striker(world: &mut World, spin: Vec3) -> Entity {
+        world
+            .spawn((
+                LinearVelocity::ZERO,
+                AngularVelocity(spin),
+                ComputedAngularInertia::new(Vec3::ONE),
+                Rotation(Quat::IDENTITY),
+            ))
+            .id()
+    }
+
+    #[test]
+    fn a_huge_correction_share_clamps_at_the_banger_bound() {
+        let mut world = World::new();
+        let striker = striker(&mut world, Vec3::ZERO);
+        let mut q = world.query::<(
+            &mut LinearVelocity,
+            &mut AngularVelocity,
+            &ComputedAngularInertia,
+            &Rotation,
+        )>();
+        let (linvel, angvel, inertia, rotation) =
+            q.get_mut(&mut world, striker).expect("the striker spawned");
+        // lever x̂ × Δp ŷ·1e6 at a unit inertia → Δω ẑ·1e6 rad/s —
+        // far over any physical spin.
+        write_striker_correction(
+            Vec3::Y * 1.0e6,
+            1.0,
+            Vec3::X,
+            linvel,
+            Some(angvel),
+            Some(inertia),
+            Some(rotation),
+        );
+        let angvel = world
+            .get::<AngularVelocity>(striker)
+            .expect("the striker despawned");
+        assert!(
+            (angvel.0.length() - MAX_BANGER_ANGULAR_SPEED).abs() < 1e-3,
+            "the write left an unbounded spin: {:?}",
+            angvel.0
+        );
+        assert!(
+            angvel.0.z > 0.0,
+            "the clamp lost the share's direction: {:?}",
+            angvel.0
+        );
+        // The angular bound does not touch the linear leg.
+        assert_eq!(
+            world.get::<LinearVelocity>(striker).unwrap().0,
+            Vec3::Y * 1.0e6
+        );
+    }
+
+    #[test]
+    fn an_under_bound_share_lands_verbatim_and_counts_the_prior_spin() {
+        let mut world = World::new();
+        let calm = striker(&mut world, Vec3::ZERO);
+        // Already spinning at 55 rad/s: the same 30 rad/s share would
+        // total 85 unclamped — the bound covers the post-write total,
+        // matching what solver-side `MaxAngularSpeed` enforces.
+        let wound = striker(&mut world, Vec3::Z * 55.0);
+        let mut q = world.query::<(
+            &mut LinearVelocity,
+            &mut AngularVelocity,
+            &ComputedAngularInertia,
+            &Rotation,
+        )>();
+        for (entity, expected) in [(calm, 30.0f32), (wound, MAX_BANGER_ANGULAR_SPEED)] {
+            let (linvel, angvel, inertia, rotation) =
+                q.get_mut(&mut world, entity).expect("the striker spawned");
+            // lever x̂ × Δp ŷ·30 at a unit inertia → Δω ẑ·30 rad/s.
+            write_striker_correction(
+                Vec3::Y * 30.0,
+                1.0,
+                Vec3::X,
+                linvel,
+                Some(angvel),
+                Some(inertia),
+                Some(rotation),
+            );
+            let spin = world.get::<AngularVelocity>(entity).unwrap().0;
+            assert!(
+                (spin.z - expected).abs() < 1e-3 && spin.xy().length() < 1e-3,
+                "spin {spin:?} is not the expected {expected} rad/s along z"
+            );
+        }
     }
 }

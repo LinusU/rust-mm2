@@ -1,4 +1,118 @@
-# Last iteration — F10-B.13 wreck bound + striker-class disclosure (iteration 50)
+# Last iteration — F10-B.14 striker-correction spin bound + same-tick pileup coverage (iteration 51)
+
+Iteration 51 on `ralph/night` (baseline `3515105`, F10-B.13 —
+external verify + review green). One coherent slice of the F10-B
+AC03 remainder, repairing the two actionable gaps the B.13 review
+named on the same handover: the unclamped striker-correction spin
+write (pre-existing on the banger path too) and the untested
+same-tick pileup edge.
+
+## Task selection
+
+No failing gate or review *finding* to repair — the B.13 review
+passed with verification gaps, two of them actionable code gaps in
+the same system: (a) `write_striker_correction`'s
+`angular_share` write was unclamped on both the banger and ambient
+striker paths — and on the ambient path a `Player` striker carries
+*no* solver-side `MaxAngularSpeed` at all, so the write was
+genuinely unbounded there, not merely write-side-unbounded; (b) the
+same-tick pileup edge (two strikers, one lane car) was untested. The
+remaining candidates were unchanged-blocked: F05-B detachment is
+UNK-13 research, F17-B needs F27's mode, F15-B fields are
+research-gated, F16-C's AC01 leg needs an interactive finish,
+F11-C's remainder is a review judgment, F13-C's is original-fidelity
+comparison, F18-A's remainder is F18-B/C scope, F07-B's scrape leg
+has no authored sample and its AC05 needs an output device.
+
+## What landed
+
+- `crates/mm2_app/src/contracts.rs` — `write_striker_correction`
+  now clamps the striker's post-write angular velocity at
+  `MAX_BANGER_ANGULAR_SPEED`, the same bound the solver-side
+  `MaxAngularSpeed` stamps on banger and ambient bodies. One shared
+  write-side bound covers all three callsites: the banger
+  `apply_striker_correction`, the ambient non-car striker, and the
+  ambient wreck striker. Linear writes untouched.
+- `crates/mm2_app/src/traffic.rs`, `banger.rs` — doc comments
+  record the bound; the spawn comment's "inert while kinematic" is
+  corrected to *non-binding*: verified in avian3d 0.7 source that
+  `clamp_velocities` iterates every `SolverBody` including
+  `IS_KINEMATIC`-flagged ones (the B.13 review's unverified
+  dependency question — inconsequential either way at ~15 m/s lane
+  speeds vs the 200/60 caps).
+- `tests/traffic.rs` — the wreck fixture in
+  `a_wreck_striker_counts_as_ambient` now carries the production
+  wreck's solver bounds (the review's fixture-shape nit).
+- `contracts.rs` gains a `#[cfg(test)]` module (+2 unit tests) for
+  the shared write; `tests/traffic.rs` gains the pileup test (+1).
+
+## Evidence
+
+Synthetic tests:
+
+- `a_huge_correction_share_clamps_at_the_banger_bound` (new) — a
+  10⁶ rad/s share writes 60.0 rad/s in the share's direction, and
+  the linear leg is untouched. Non-vacuous: the unclamped value
+  would read ~10⁶.
+- `an_under_bound_share_lands_verbatim_and_counts_the_prior_spin`
+  (new) — a 30 rad/s share lands verbatim on a calm striker, while
+  a striker already at 55 rad/s clamps its *total* at the bound —
+  matching solver-side `MaxAngularSpeed` semantics.
+- `a_same_tick_pileup_flips_the_car_once` (new, integration) — two
+  strikers resting side by side across a driving follower's path;
+  the `Collisions` graph proves both pairs' contact begins on the
+  same update (the `CollisionStart` drain lags one fixed step for
+  both). Asserted: `knocked == 1`, exactly one `x` class charged,
+  the same entity `Knocked` + `Dynamic` carrying a single
+  transfer's launch (~5–9 m/s band, not ~2×), and the
+  winner/loser split — the corrected striker holds its exchange
+  share (~6 m/s) while the dropped edge's striker keeps the faster
+  kinematic wall shove (~14 m/s), so `max − min > 4`. 60 further
+  ticks of resting re-contact add no flip.
+
+Retail headless (install `fnv1a64:e91e6cd4b2ae30d9`, read-only,
+this commit's binary):
+
+- sf `--headless --frames 3000` → `status=pass traf=16/16 sp=41
+  rec=25 dead=0 stuck=0 crx=56 jmp=0 kn=4 kns=2p/2a/0x
+  dmg=23a/0d/0r` — **bit-identical to B.13's record**: the bound
+  never engaged at ordinary speeds (inert by design; it only caps
+  the transient-spike class).
+- london `--headless --frames 1200 --spawn 0.4,5.5,-720,0` →
+  `status=pass … crx=33 kn=2 kns=0p/0a/2x` — bit-identical.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` — all 69 suites green
+(tests/traffic.rs 33 → 34, mm2_app lib 49 → 51, tests/banger.rs
+24/24 unchanged).
+
+## Classification
+
+Implementation choice end to end — the bound is the designed
+banger convention extended write-side to the shared correction;
+the pileup dedup is the existing decide-then-apply design under
+test. The original's ambient crash response stays unverified
+(UNK-12).
+
+## Remaining open items
+
+- F10-B stays active: AC03's "player-hit feel" leg is manual
+  evidence (no rendered/interactive capture this run). Original
+  junction/spawn timing and crossing geometry (UNK-12) and
+  signal-prop model fidelity remain.
+- The striker-correction *linear* write stays unclamped (a bounded
+  velocity target on the ambient path, transfer-math-bounded on
+  the banger path) — same shape as before, disclosed not changed.
+- Same-tick edge covers two strikers on one car; the symmetric
+  one-striker-two-cars and three-plus pileups share the mechanism
+  (each edge decided independently, apply re-checks `Lane`).
+
+---
+
+# Iteration 50 — F10-B.13 wreck bound + striker-class disclosure
 
 Iteration 50 on `ralph/night` (baseline `10f26dfb`, F10-B.12 —
 external verify + review green). One coherent slice of the F10-B
