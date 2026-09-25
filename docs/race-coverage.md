@@ -693,7 +693,7 @@ progress; `res`/`opp` = ledger entries / opponents resolved.
 | circuit2 | 5/13 lap1/4 r0 0/6 | 0/6 | 10 (0) | 0/6 | 9 (0) | deepest all-physical run: `vpmustang99` `10c/13`, no laps yet |
 | circuit3 | 4/11 lap1/4 r0 0/4 | 2/4 | 7 (5) | 2/4 | 8 (5) | field laps mid-course |
 | circuit4 | 10/18 lap1/4 r0 0/5 | 0/5 | 15 (5) | 0/5 | 14 (8) | scripted `cp=10/18` — deepest local leg; opponents deep (`15c/18`) but no laps; local `56f`/`58f` fall churn |
-| circuit5 | 3/9 lap1/4 r0 0/7 | 2/7 | 8 (10) | 4/7 | 5 (11) | one opponent completes *two* laps parked (`3l`); parked `rcv=222f` — a new spawn-edge fall loop (london-4 amateur class) |
+| circuit5 | 3/9 lap1/4 r0 0/7 | 2/7 | 8 (10) | 4/7 | 5 (11) | one opponent completes *two* laps parked (`3l`); `rcv` fall loops on both legs — scripted `132f`, parked `222f` — a new spawn-edge class (london-4 amateur) |
 | circuit6 | 1/9 lap1/4 r0 0/6 | 1/6 | 4 (21) | 1/6 | 5 (17) | one `vpdb7` lap-0 banked mostly by arc (`11d` cumulative) |
 | circuit7 | 2/11 lap1/4 r0 0/6 | 0/6 | 5 (0) | 0/6 | 5 (0) | pack holds at the g5 bind verbatim — amateur v3's leader completion does not recur; `0d`, traversal-bound |
 | circuit8 | 5/23 lap1/2 r0 0/4 | 0/4 | 11 (11) | 0/4 | 10 (17) | scripted `moved=1628 m` on the 23-gate course |
@@ -727,11 +727,14 @@ wins — Pro is harder for it too, consistent with the checkpoint
 matrix.
 
 **Route credit is honest, not generous.** `/Nd` activity appears on
-14 of 20 events and stays `0d` exactly where the field never reaches
-the first missed bind — london-2 (g0 ~700 m arc), london-5 (g2
-~1050 m), sf-7 (g5 ~985 m) — the traversal residuals are unchanged
-because the model earns by driving and cannot invent progress. The
-extreme is sf-1: not an authored-miss event, yet 5–6 of 7 Pro
+14 of 20 events; six events stay `0d`. Three are the authored-miss
+residuals where the field never reaches the first missed bind —
+london-2 (g0 ~700 m arc), london-5 (g2 ~1050 m), sf-7 (g5 ~985 m).
+The other three are all-physical mid-course stalls where the field
+is still racing but no route-derived clear was ever earned
+(london-7, sf-2, sf-9). Either way the traversal residuals are
+unchanged because the model earns by driving and cannot invent
+progress. The extreme is sf-1: not an authored-miss event, yet 5–6 of 7 Pro
 opponents complete lap 0 banked `8–10d` of 10 gates each — the field
 drives the full course but the cars' actual poses thread almost none
 of the cylinders (corner-cutting/avoidance deviations vs the ~7–19 m
@@ -742,13 +745,18 @@ sf-6's one lap-0 banked `11d` cumulative.
 **The parked control stays honest.** `cp=0` on all 20 parked legs;
 `moved` ≤53 m and `peak` ≤15.6 m/s are contact/recovery displacement.
 Fall-churn anomalies recur/extend: london-8 `58f` on both legs
-(deterministic spawn-edge churn, driver-independent), sf-5 parked
-`rcv=222f` (new — the london-4-amateur class of elevated-spawn punt
-loops), london-6's Thames punt loop now tags the scripted leg too
+(deterministic spawn-edge churn, driver-independent), sf-5 carries
+the loop on *both* legs — scripted `rcv=0w/132f`, parked `rcv=222f`
+(new — the london-4-amateur class of elevated-spawn punt loops),
+london-6's Thames punt loop now tags the scripted leg too
 (`243w`/`239w` — the restored-course field flows past and through
-whatever sits at the start junction). sf-9 logs the matrix's only
+whatever sits at the start junction). Lesser `rcv` fall churn
+(≤20f per leg, spawn-adjacent) also shows on london-4/5, sf-1/3/6/7.
+sf-9 logs the matrix's only
 `dropped` (105/112) and the worst `peak` 35.1 m/s — disclosed, still
-`status=pass`.
+`status=pass`. Disclosed end poses: `wheels=0/4` on the sf-0
+scripted leg, `3/4` on london-5 scripted, `1/4` on sf-7 parked —
+all `status=pass`.
 
 ## Pre-fix vs post-fix per event
 
