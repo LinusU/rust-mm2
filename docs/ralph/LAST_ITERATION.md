@@ -1,4 +1,106 @@
-# Last iteration — F14-A.4 Professional Circuit matrix (iteration 55)
+# Last iteration — F14-A.5 Professional Circuit hold legs (iteration 56)
+
+Iteration 56 on `ralph/night` (baseline `6ea22d7`, F14-A.4 —
+external verify + review green). Two pieces: the review's flagged
+doc findings (re-verified; the confirmed subset repaired) and the
+F14-A remainder's last named driver leg — the Professional
+hold-driver legs, the F13-C.5 pattern applied to the Circuit
+catalog.
+
+## Task selection
+
+The A.4 review passed with verification gaps; the actionable ones
+were checked against the retained logs before any edit:
+
+1. Two lap cells flagged as miscounts — **re-verified accurate**:
+   london-3-parked's opps row reads `2l,2l,2l,1l,2l,2l` = 5/6 and
+   sf-3-bot reads `1l,1l,2l,2l` = 2/4, exactly as published. Left
+   unchanged; the reviewer's "actual" values do not match the
+   retained evidence in `/tmp/mm2-circuit-matrix-pro/`.
+2. Anomaly disclosure thinner than the F13-C.5 precedent —
+   confirmed, repaired: sf-5's scripted leg `rcv=0w/132f` named
+   alongside parked's `222f`; end-pose `wheels=0/4` (sf-0-bot),
+   `3/4` (london-5-bot), `1/4` (sf-7-parked) disclosed; lesser
+   spawn-adjacent `rcv` churn covered.
+3. The `0d`-phrasing — confirmed, tightened: six events are `0d`,
+   the three authored-miss residuals (london-2/5, sf-7) plus three
+   all-physical stalls (london-7, sf-2, sf-9) the sentence omitted.
+4. Repair commit `86bae3e`.
+
+Then the highest-value ready slice: the Professional Circuit
+hold-driver legs — the one driver leg the A.4 handoff named open,
+mirroring F13-C.5's Checkpoint hold legs. All other candidates
+stayed unchanged-blocked (F05-B UNK-13 / F27 / F25+, F17-B needs
+F17-C, F15-B research-gated, F16-C interactive finish, F11-C review
+judgment, F13-C original-fidelity comparison, F18-A → F18-B/C
+scope, F07-B no authored sample/output device, F10-B manual
+player-hit leg, F17-A deferred consumers).
+
+## What landed
+
+- Doc repair (commit `86bae3e`): the confirmed findings above; the
+  two flagged cells stand on re-verification.
+- F14-A.5 (docs + evidence only — no code change): 20 legs = 20
+  cataloged Circuit events × the blind `Hold` driver (no driver
+  flag — settles ≤2 s, then full throttle, no steering) at `--pro
+  --frames 12000`, retail `fnv1a64:e91e6cd4b2ae30d9`, every log
+  stamping `commit=6ea22d7` (code-identical to `86bae3e`; the delta
+  is docs-only). Published in `docs/race-coverage.md`; raw logs in
+  `/tmp/mm2-circuit-matrix-pro-hold/` (uncommitted per the
+  large-capture rule).
+
+## Evidence
+
+**20/20 `rc=0 status=pass`, `dup=0`** (~27 min wall, ≤102 s/leg).
+The Professional Circuit matrix is complete at 60 legs = 20 events
+× scripted + parked + hold. Headline outcomes:
+
+- **Second Professional finish**: london-0 again — `vpcoop2k`
+  slot 2 `6c/4l/F`, `results=1`, `phase=playing`, `pos=8/8` — a
+  *different* finisher than the scripted leg's slot 0; the
+  once-only ledger + local-races-on semantics hold under the third
+  driver. The hold car never resolves anywhere.
+- Multi-lap on 7/20 hold legs (london-0/1/3, sf-0/1/3/5) vs 10
+  under scripted/parked; london-0's whole field laps again (15
+  completions).
+- Spawn-edge classes driver-independent: london-8 `58f` identical
+  on all three drivers, sf-4 56f/58f/58f; sf-5's loop scales with
+  the driver (132f/222f/100f).
+- Blind-driver hazards: london-2 `rcv=328w/5f` — the worst Thames
+  loop of the matrix (240w scripted, 223w parked); london-6 `185w`;
+  london-4 `dropped=493` — worst Circuit leg to date (prior:
+  amateur sf-4's 261); sf-8 `peak=64.8 m/s` / `moved` 607 m;
+  sf-2 `wheels=3/4` end pose.
+- Traversal residuals unchanged: london-2/5 and the sf-7 pack
+  `0d`, zero laps under every driver.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` — all 69 suites green (run before
+the repair commit; the iteration's changes are docs-only).
+
+## Classification
+
+Runtime matrix is original-content validation evidence
+(fingerprinted install, authored `.aimap_p` data) — `status=pass`
+legs are smoke records, not completability claims. No
+original-fidelity assertion; no rendered/manual leg this iteration.
+
+## Remaining open items
+
+- F14-A stays active pending external review; AC04/AC05/AC06
+  promotion stays open. The Pro driver-leg matrix is now complete
+  (60 legs) — the hold-legs gap the A.4 handoff named is closed.
+- Traversal-skill residuals at Pro: london-2/5, sf-7 pack, london-6
+  gate-1, sf-9 gate-4 — F15-B controller class.
+- sf-5/london-8/sf-4 spawn-edge fall loops and london-2/6 Thames
+  punt collateral remain disclosed anomalies (driver-independent).
+
+---
+
+# Iteration 55 — F14-A.4 Professional Circuit matrix
 
 Iteration 55 on `ralph/night` (baseline `4a1db5a`, F14-A.3 — external
 verify + review green). Two pieces: the review's flagged doc repair

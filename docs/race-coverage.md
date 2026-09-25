@@ -567,7 +567,7 @@ parked car, no spikes.
 - No original-fidelity claim: engine self-metrics only. Difficulty,
   pacing and AI competence vs retail are unverified.
 
-# Circuit (F14) matrix — F14-A.2 Amateur legs + F14-A.4 Professional legs
+# Circuit (F14) matrix — F14-A.2 Amateur legs + F14-A.4/A.5 Professional legs
 
 ## Denominator and instruments
 
@@ -758,6 +758,89 @@ sf-9 logs the matrix's only
 scripted leg, `3/4` on london-5 scripted, `1/4` on sf-7 parked —
 all `status=pass`.
 
+## Professional hold-driver legs — 20 events (F14-A.5)
+
+The third driver at Pro: `Hold` settles ≤2 s, then holds full
+throttle with no steering — it *drives* blind, so it is a field
+participant that happens to be a bad driver, not a control. All 20
+legs on the binary stamped `commit=6ea22d7` in every leg log
+(code-identical to `86bae3e` — the delta is docs-only), `--pro`,
+`--frames 12000`, retail `fnv1a64:e91e6cd4b2ae30d9`, logs in
+`/tmp/mm2-circuit-matrix-pro-hold/` (~27 min wall, ≤102 s/leg).
+**20/20 `rc=0 status=pass`, `dup=0`** — the Professional Circuit
+matrix is now complete at 60 legs = 20 events × scripted + parked +
+hold.
+
+Columns: `phase, cp, lap, res, opp` is the local participant's end
+state plus ledger entries / opponents resolved; `laps` = opponents
+that completed ≥1 lap (`Nl` ≥2); `omax (d)` = deepest opponent gate
+and summed route-derived clears, as in the scripted/parked table.
+
+### London (Professional, hold)
+
+| event | phase, cp, lap, res, opp | laps | omax (d) | note |
+|---|---|---|---|---|
+| circuit0 | playing 2/6 lap1/4 r1 1/7 | **7/7** | 6 (1) | **second Pro resolution**: `vpcoop2k` slot 2 finishes `6c/4l/F` while the blind local raced on (`phase=playing`, `pos=8/8`) — a different finisher than the scripted leg's slot 0; whole field laps again (15 lap completions) |
+| circuit1 | playing 0/8 lap1/2 r0 0/6 | 4/6 | 7 (9) | field laps again — one car one gate from lap 0 (`7c/8`) |
+| circuit2 | playing 0/12 lap1/2 r0 0/6 | 0/6 | 0 (0) | authored-miss + traversal stall verbatim; hold car `rcv=328w/5f` — the worst Thames loop of the matrix (scripted 240w, parked 223w): a blind-throttle car re-enters the punt path |
+| circuit3 | playing 2/9 lap1/4 r0 0/6 | 1/6 | 6 (6) | one lap-0 completion |
+| circuit4 | playing 1/11 lap1/4 r0 0/5 | 0/5 | 7 (2) | `dropped=493` — the matrix's worst physics-step drops; `rcv=15f` |
+| circuit5 | playing 1/6 lap1/4 r0 0/4 | 0/4 | 2 (0) | authored-miss stall at the g2 bind — `0d`, field never arrives |
+| circuit6 | playing 0/14 lap1/4 r0 0/7 | 0/7 | 1 (0) | gate-1 plateau verbatim; Thames punt collateral `rcv=185w` (scripted 243w, parked 239w), `opp_rec=47` |
+| circuit7 | playing 0/10 lap1/4 r0 0/6 | 0/6 | 4 (0) | field mid-course, all physical |
+| circuit8 | playing 0/12 lap1/4 r0 0/6 | 0/6 | 5 (2) | local `58f` fall churn again — identical on all three drivers, spawn-edge class confirmed driver-independent |
+| circuit9 | playing 0/22 lap1/2 r0 0/6 | 0/6 | 2 (0) | plateau persists — traversal residual |
+
+### San Francisco (Professional, hold)
+
+| event | phase, cp, lap, res, opp | laps | omax (d) | note |
+|---|---|---|---|---|
+| circuit0 | playing 2/9 lap1/4 r0 0/4 | 1/4 | 7 (6) | one lap-0 completion; blind `peak` 41.9 m/s |
+| circuit1 | playing 0/10 lap1/4 r0 0/7 | 5/7 | 7 (52) | route-credit extreme recurs: 5 of 7 lap 0 almost wholly by arc (`52d` summed) |
+| circuit2 | playing 0/13 lap1/4 r0 0/6 | 0/6 | 9 (0) | deepest all-physical run holds; blind `peak` 51.7 m/s, `moved` 585 m, `wheels=3/4` end pose |
+| circuit3 | playing 0/11 lap1/4 r0 0/4 | 3/4 | 9 (6) | three lap-0 completions — best non-london-0 field of the leg set |
+| circuit4 | playing 0/18 lap1/4 r0 0/5 | 0/5 | 13 (5) | opponents deep (`13c/18`) but no laps; local `58f` churn again |
+| circuit5 | playing 0/9 lap1/4 r0 0/7 | 6/7 | 6 (16) | near-whole field laps; `rcv=100f` — the spawn-edge loop's third driver (scripted 132f, parked 222f) |
+| circuit6 | playing 1/9 lap1/4 r0 0/6 | 0/6 | 7 (15) | field reaches 7/9, no laps this leg |
+| circuit7 | playing 2/11 lap1/4 r0 0/6 | 0/6 | 5 (0) | pack holds at the g5 bind verbatim — `0d`, `opp_rec=45` churn |
+| circuit8 | playing 0/23 lap1/2 r0 0/4 | 0/4 | 7 (9) | blind `peak` **64.8 m/s** `moved` 607 m — the matrix's highest speed (a full-throttle car down the 23-gate course; bounded, no result) |
+| circuit9 | playing 1/14 lap1/2 r0 0/6 | 0/6 | 4 (0) | `4c` plateau persists, all physical |
+
+### What the hold legs add
+
+**The field resolves around a blind driver too.** london-0 produced
+the matrix's second Professional finish — `vpcoop2k` slot 2
+`6c/4l/F`, `results=1`, `phase=playing` — with a different car
+winning than under the scripted leg (slot 0): the once-only ledger
+resolution and the local-races-on semantics hold under the third
+driver. The hold car itself never resolves anywhere (all 20 legs
+`phase=playing`) — blind full throttle is a participant, not a
+contender, and the field races around it.
+
+**Multi-lap racing survives the worst local driver.** Opponents
+completed ≥1 lap on 7 of 20 hold legs (london-0/1/3, sf-0/1/3/5) vs
+10 under scripted/parked — the scripted legs' london-4/6 and sf-6
+completions did not recur under hold. london-0's whole 7-car field
+lapped again (15 completions, three cars reaching the final lap
+including the finisher).
+
+**The spawn-edge classes are driver-independent.** london-8's `58f`
+now reads *identically* across scripted, parked and hold legs and
+sf-4's near-identically (56f/58f/58f) — deterministic ground/spawn
+geometry, not a driving outcome. sf-5's loop scales with the driver
+(132f scripted / 222f parked / 100f hold). london-2's Thames
+collateral is worst under hold (`rcv=328w/5f` — the blind car keeps
+re-entering the punt zone; london-6 `185w` likewise).
+
+**Record honesty holds at the extremes.** `dup=0` on all 20 legs;
+`results=1` total — no inflated finishes. Worst `dropped`: london-4
+493 — the worst across all Circuit legs to date (prior: amateur
+sf-4's 261). Worst `peak`: sf-8 64.8
+m/s — blind full throttle for 607 m; bounded, still `status=pass`.
+`wheels=3/4` end pose on sf-2; all other legs `4/4`. The traversal
+residuals are unchanged — london-2/5 and the sf-7 pack stayed `0d`
+with `0` laps under every driver.
+
 ## Pre-fix vs post-fix per event
 
 `omax`/`omin` = best/worst opponent gates cleared; `cp` = the local
@@ -831,12 +914,13 @@ participant's gates (`x/total`); `res` = results-ledger entries;
   production session to `status=pass` ×2 drivers.
 - **F14-AC06** (representative matrix): this section — 20/20 events ×
   {scripted, parked} at Amateur, pre- and post-repair published, plus
-  the same 40 legs at Professional (F14-A.4, above) with the authored
-  `.aimap_p` rosters/lap counts, the stall classes named, and the
-  first Professional opponent finish (london-0). `status=pass` is a
+  the same 40 legs at Professional (F14-A.4) with the authored
+  `.aimap_p` rosters/lap counts and 20 Professional hold-driver legs
+  (F14-A.5) — 60 Pro legs total — the stall classes named, and two
+  Professional opponent finishes (london-0, scripted + hold).
+  `status=pass` is a
   smoke-record outcome; field plateaus are disclosed per event above,
-  not smoothed into a completability claim. Hold-driver legs remain
-  open.
+  not smoothed into a completability claim.
 - **Residual classes (open, not claimed as done)**:
   (a) authored `.opp` lines missing gate cylinders (london-2/4/5,
   sf-7) — **addressed by DSN-45**: route-bound Ordered AI progress

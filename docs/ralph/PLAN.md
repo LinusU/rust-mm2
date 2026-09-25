@@ -39,8 +39,8 @@
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
 **Next selected slice: the F14-A remainder
-(Professional hold-driver legs — the C.5-pattern leg still open;
-AC04/AC05/AC06 promotion), F05-B remainder
+(AC04/AC05/AC06 promotion — all three Professional driver legs now
+run, 60 legs; traversal residuals are the F15-B class), F05-B remainder
 (texel damage implemented in B.9;
 damage-driven detachment if original — UNK-13; C&R healing driver —
 needs F27's mode; replication — F25+),
@@ -52,7 +52,22 @@ F11-C remainder, F16-C's AC01
 process-level leg, F10-B's remaining AC03 checklist scope
 (player-hit feel leg — manual), F13-C, the F18-A remainder, or the F07-B remainder
 (scrape + audible
-evidence))** — the latest iteration landed F14-A.4, the
+evidence))** — the latest iteration landed F14-A.5, the
+Professional Circuit hold-driver legs: 20 legs = 20 cataloged
+events × the blind `Hold` driver at `--pro --frames 12000` on the
+fingerprinted retail install, **20/20 `rc=0 status=pass`, `dup=0`**,
+completing the Pro matrix at 60 legs (scripted + parked + hold).
+A second Professional finish resolved on london-0 (`vpcoop2k` slot
+2 `6c/4l/F`, `results=1`, `phase=playing` — a different winner than
+the scripted leg's slot 0); opponents lapped on 7/20 events;
+london-8/sf-4's `58f` churn proved driver-independent; london-2's
+Thames collateral worst under hold (`328w`). The same iteration
+repaired the F14-A.4 review's doc findings: the two flagged lap
+cells re-verified *accurate* against the retained logs (left
+unchanged), while the confirmed gaps — sf-5's scripted `132f` loop,
+three non-`4/4` end-pose wheels counts, and the `0d`-phrasing that
+omitted london-7/sf-2/sf-9's all-physical stalls — were corrected
+in `86bae3e`. Before that the latest iteration landed F14-A.4, the
 Professional Circuit runtime matrix: 40 legs = 20 cataloged events ×
 {scripted `--bot`, parked control} at `--pro --frames 12000` on the
 fingerprinted retail install, **40/40 `rc=0 status=pass`, `dup=0`**.
