@@ -855,8 +855,16 @@ pub fn headless_smoke(
             );
             // F10-B.6 handover count only when nonzero — records from
             // knock-free runs stay bit-identical to earlier ones.
+            // F10-B.13 `kns=` breaks the count down by striker class:
+            // `p` a `Player` participant (local or AI), `a` another
+            // ambient car, `x` anything else (prop, fragment, world
+            // body) — so a soak can say whether a participant ever
+            // struck a car, which `kn=` alone cannot.
             if t.knocked > 0 {
-                s.push_str(&format!(" kn={}", t.knocked));
+                s.push_str(&format!(
+                    " kn={} kns={}p/{}a/{}x",
+                    t.knocked, t.knocked_by_participant, t.knocked_by_ambient, t.knocked_by_other
+                ));
             }
             // F10-B.7 authored signal indicators — `sig` only when
             // any spawned (a BAI without authored light origins stays

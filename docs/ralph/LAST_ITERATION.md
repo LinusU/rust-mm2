@@ -1,4 +1,120 @@
-# Last iteration — F10-B.12 momentum-correct collision handover (iteration 49)
+# Last iteration — F10-B.13 wreck bound + striker-class disclosure (iteration 50)
+
+Iteration 50 on `ralph/night` (baseline `10f26dfb`, F10-B.12 —
+external verify + review green). One coherent slice of the F10-B
+AC03 remainder, repairing the two verification gaps the B.12
+review named on the same handover: the wreck's unbounded spin and
+the record's inability to say who struck each handover.
+
+## Task selection
+
+No failing gate or review *finding* to repair — the B.12 review
+passed with verification gaps. Two of those gaps were actionable
+code gaps in the same system: (a) the wreck's contact-lever
+`angular_share` write was unclamped and flipped ambient cars
+carried no solver speed bound — unlike banger bodies, which clamp
+60 rad/s write-side and solver-side — so a transient spike could
+leave a fast-spinning wreck whose spin fed later
+`normal_speed` readings (the sf-8 cascade class); (b) `kn=` could
+not say whether a participant ever struck a car, which is exactly
+what AC03's checklist asks. The remaining candidates were
+unchanged-blocked: F05-B's detachment is UNK-13 research, F17-B
+needs F17-C's mode, F15-B's fields are research-gated, F16-C's
+AC01 leg needs an interactive finish, F11-C's remainder is a
+review judgment, F13-C's remainder is original-fidelity
+comparison, F18-A's remainder is F18-B/C scope, F07-B's scrape
+leg has no authored sample and its AC05 needs an output device.
+
+## What landed
+
+- `crates/mm2_app/src/traffic.rs` — `spawn_ambient_car` stamps
+  `MaxLinearSpeed(MAX_BANGER_LINEAR_SPEED)` /
+  `MaxAngularSpeed(MAX_BANGER_ANGULAR_SPEED)` (the bounds every
+  banger body carries; inert while kinematic — `drive_ambient`
+  owns the ~15 m/s lane velocity — binding once the body flips
+  dynamic). `knock_ambient`'s wreck spin write now clamps at
+  `MAX_BANGER_ANGULAR_SPEED` — bounded write-side *and*
+  solver-side like `angular_kick`/`banger_bundle`. The
+  striker-correction path keeps B.12's banger parity (its share
+  pre-exists unclamped there).
+- The same system counts each handover's striker class —
+  `knocked_by_participant` (`Player` marker, local or AI) /
+  `knocked_by_ambient` (`AmbientCar`, lane follower or wreck) /
+  `knocked_by_other` (banger bodies, break fragments, world-side
+  bodies) — into the smoke record's new `kns=Np/Na/Nx` field,
+  emitted only when `knocked > 0` (knock-free records stay
+  bit-identical).
+- `crates/mm2_app/src/smoke.rs` — the `kns=` field beside `kn=`.
+- `tests/traffic.rs` — the fixture app now wires
+  `damage::apply_impact_damage` (+ `DamageEvent` message) in
+  production order after `collect_impacts`, and fixture followers
+  carry the production spawn's solver bounds.
+
+## Evidence
+
+Synthetic tests (`cargo test -p mm2_app --test traffic` 31 → 33):
+
+- `a_participant_striker_takes_damage_and_names_the_class` (new) —
+  the session's *real* player vehicle (stamped with authored-style
+  `VehicleDamage` bounds; the fixture car loads no
+  `vehcardamage`) slides into a parked follower: the car flips
+  once (`knocked_by_participant == 1`, `RigidBody::Dynamic`,
+  solver bounds present on the wreck), an `ImpactEvent` emits,
+  and the striker's damage accrues `severity × follower mass`
+  through the production `collect_impacts → apply_impact_damage`
+  chain — AC03's "player-hit … damage" leg proved end to end,
+  not just through generic block strikers.
+- `a_wreck_striker_counts_as_ambient` (new) — a sliding dynamic
+  wreck flips a queued follower and counts `a`: pile-ups and
+  player hits now read differently on the record.
+- `a_light_striker_shares_the_exchange_not_its_speed` extended —
+  the plain block striker asserts `x` (other).
+
+Retail headless (install `fnv1a64:e91e6cd4b2ae30d9`, read-only):
+
+- sf `--headless --frames 3000` → `status=pass … kn=4
+  kns=2p/2a/0x … dmg=23a/0d/0r` — the same four handovers B.12
+  recorded, now attributed: **two participant strikes** (the Hold
+  driver's own hits, damage applied through the pipeline) and two
+  ambient-car strikes.
+- london `--headless --frames 1200 --spawn 0.4,5.5,-720,0` →
+  `status=pass … kn=2 kns=0p/0a/2x` — both `x` class: neither a
+  participant nor an ambient car (banger bodies and break
+  fragments are the remaining class).
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` — all 69 suites green
+(tests/traffic.rs 33/33 incl. the 2 new tests, tests/banger.rs
+24/24 unchanged).
+
+## Classification
+
+Implementation choice end to end — the bounds are the designed
+banger convention extended to ambient wrecks, the class
+disclosure is evidence plumbing; the original's ambient crash
+response stays unverified (UNK-12).
+
+## Remaining open items
+
+- F10-B stays active: AC03's "player-hit feel" leg is manual
+  evidence (no rendered/interactive capture this run); the damage
+  leg now has synthetic + retail-counter evidence. Original
+  junction/spawn timing and crossing geometry (UNK-12) and
+  signal-prop model fidelity remain.
+- The striker-correction angular share pre-exists unclamped on
+  the banger path too (bounded solver-side there) — left
+  untouched for B.12 parity; a shared write-side clamp is a
+  follow-up candidate if a cascade ever measures through it.
+- Same-tick pileup edge (two strikers, one lane car) remains
+  untested — the first flip wins, the second keeps its solver
+  wall response; bounded by decide-then-apply, not exercised.
+
+---
+
+# Iteration 49 — F10-B.12 momentum-correct collision handover
 
 Iteration 49 on `ralph/night` (baseline `63ffb20`, F11-C.2 doc repair —
 external verify + review green). One coherent slice of the F10-B

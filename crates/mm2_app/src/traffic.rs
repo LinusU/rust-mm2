@@ -116,6 +116,17 @@
 //! impulse it was charged this step. One exchange, one charge: no
 //! flat approach-speed kick compounding on top of the wall response.
 //!
+//! F10-B.13 bounds the wreck the flip leaves behind and names its
+//! striker: the spawned body now carries the solver-side
+//! `MaxLinearSpeed`/`MaxAngularSpeed` every banger body gets (inert
+//! on a lane follower, binding once it is dynamic) and the
+//! contact-lever spin write clamps at `MAX_BANGER_ANGULAR_SPEED`, so
+//! a transient spike cannot leave a wreck whose spin inflates a later
+//! contact's `normal_speed` reading. Each handover also counts its
+//! striker's class — `Player` participant, ambient car, or anything
+//! else — into `kns=` on the smoke record, so a soak can say whether
+//! a *participant* ever struck a car (AC03's damage leg).
+//!
 //! F10-B.9 drives the junction interior (operator report 4 item 1):
 //! BAI lane curves stop at each road's junction boundary, so a lane
 //! transfer that re-posed the car on the exit lane's start read on
@@ -163,11 +174,12 @@ use mm2_formats::bai::VehicleRule;
 use mm2_formats::veh::AiVehicleData;
 use mm2_game::{
     AmbientRoster, AmbientSpec, AuthorityRole, FollowPolicy, JunctionGate, JunctionPolicy,
-    Junctions, KnockPolicy, LaneAdvance, LaneCursor, LaneId, MAX_BANGER_LINEAR_SPEED, NavGraph,
-    NavIssue, NavOverrides, NavRng, ObjectIdentity, Player, Session, SessionConfig, SessionEntity,
-    SessionPhase, SignalAspect, SpawnDirective, SpawnDraw, SpawnPolicy, StuckPolicy, StuckWindow,
-    WorldMode, advance_lane_cursor, corridor_gap, draw_spawn, eligible_lanes, follow_speed,
-    inside_junction_zone, junction_speed, junction_zone, plan_ambient, within_interest,
+    Junctions, KnockPolicy, LaneAdvance, LaneCursor, LaneId, MAX_BANGER_ANGULAR_SPEED,
+    MAX_BANGER_LINEAR_SPEED, NavGraph, NavIssue, NavOverrides, NavRng, ObjectIdentity, Player,
+    Session, SessionConfig, SessionEntity, SessionPhase, SignalAspect, SpawnDirective, SpawnDraw,
+    SpawnPolicy, StuckPolicy, StuckWindow, WorldMode, advance_lane_cursor, corridor_gap,
+    draw_spawn, eligible_lanes, follow_speed, inside_junction_zone, junction_speed, junction_zone,
+    plan_ambient, within_interest,
 };
 use tracing::{debug, info, warn};
 
@@ -239,6 +251,17 @@ pub struct AmbientTraffic {
     /// (F10-B.6) — cumulative; the wrecks themselves stay active
     /// population until the distance recycler collects them.
     pub knocked: usize,
+    /// Handovers whose striker was a `Player` participant — the local
+    /// driver or an AI opponent (F10-B.13). The record names the
+    /// class because AC03's collision leg is about *participant*
+    /// hits specifically; `knocked` alone cannot say who struck.
+    pub knocked_by_participant: usize,
+    /// Handovers whose striker was another ambient car — a lane
+    /// follower or an already-knocked wreck sliding into a queue.
+    pub knocked_by_ambient: usize,
+    /// Handovers whose striker was anything else — a banger body, a
+    /// break fragment, a world-side body.
+    pub knocked_by_other: usize,
     /// The impulse threshold the handover runs under — `pub` so
     /// evidence runs and tests can bind a different gate.
     pub knock_policy: KnockPolicy,
@@ -502,6 +525,9 @@ pub fn load_ambient_traffic(
         stuck: 0,
         stuck_policy: StuckPolicy::default(),
         knocked: 0,
+        knocked_by_participant: 0,
+        knocked_by_ambient: 0,
+        knocked_by_other: 0,
         knock_policy: KnockPolicy::default(),
         junctions: Junctions::default(),
         crossings: 0,
@@ -798,6 +824,16 @@ fn spawn_ambient_car(
                 CollisionEventsEnabled,
                 Friction::new(tuning.friction),
                 Restitution::new(tuning.elasticity),
+                // Solver-level speed bounds, the same bound
+                // `banger_bundle` stamps (the records carry none):
+                // inert while the car is kinematic — `drive_ambient`
+                // owns its velocity at lane speeds far under the cap —
+                // but once an impact flips the body dynamic they keep
+                // a fast-spinning wreck from feeding an inflated
+                // `normal_speed` back into a later contact (the sf-8
+                // cascade class F13-C.3 bounded).
+                MaxLinearSpeed(MAX_BANGER_LINEAR_SPEED),
+                MaxAngularSpeed(MAX_BANGER_ANGULAR_SPEED),
             ),
             Position(pos),
             Rotation(rot),
@@ -1237,6 +1273,17 @@ type KnockedCarMut = (
 /// car keeps the pre-transfer approach-speed launch and no correction
 /// is written.
 ///
+/// F10-B.13: the handover counts its striker's class
+/// (`knocked_by_participant`/`_ambient`/`_other` — a `Player`
+/// participant, another ambient car, or anything else) so the record
+/// can say *who* struck each wreck, and bounds the wreck's own spin:
+/// the contact-lever `angular_share` write is clamped at
+/// `MAX_BANGER_ANGULAR_SPEED` and the flipped body carries the
+/// solver-side `MaxLinearSpeed`/`MaxAngularSpeed` stamped at spawn —
+/// the same bounds banger bodies get, so a transient spike cannot
+/// leave a wreck whose inflated spin re-enters a later contact's
+/// `normal_speed` reading.
+///
 /// Drains under the same phase/authority gate as `drive_ambient`:
 /// edges buffered while paused never flush as a stale burst on
 /// resume, and a `Predicted` session never hands over locally.
@@ -1248,6 +1295,7 @@ pub fn knock_ambient(
     traffic: Option<ResMut<AmbientTraffic>>,
     mut cars: Query<KnockedCarMut>,
     mut strikers: Query<StruckMut, Without<AmbientCar>>,
+    players: Query<(), With<Player>>,
     masses: Query<&ComputedMass>,
     mut commands: Commands,
 ) {
@@ -1367,10 +1415,27 @@ pub fn knock_ambient(
             let struck_pre = linvel.0.dot(knock.dir);
             linvel.0 += knock.dir * knock.launch;
             angvel.0 += angular_share(knock.lever, knock.dir * knock.impulse, inertia, rotation);
+            // Write-side spin bound (the solver-side `MaxAngularSpeed`
+            // clamps the integration too): an unbounded lever share
+            // would leave the wreck spinning fast enough to inflate a
+            // later contact's approach-speed reading — the same
+            // cascade amplifier the banger bound closes.
+            angvel.0 = angvel.0.clamp_length_max(MAX_BANGER_ANGULAR_SPEED);
             struck_pre
         };
         handed_over.push(knock.entity);
         traffic.knocked += 1;
+        // Name the striker's class for the record (F10-B.13): a
+        // `Player` participant, another ambient car (lane follower or
+        // already-knocked wreck), or anything else — a banger body, a
+        // break fragment, a world-side body.
+        if players.contains(knock.striker) {
+            traffic.knocked_by_participant += 1;
+        } else if cars.get(knock.striker).is_ok() {
+            traffic.knocked_by_ambient += 1;
+        } else {
+            traffic.knocked_by_other += 1;
+        }
         traffic.junctions.depart(knock.entity);
         commands.entity(knock.entity).insert(RigidBody::Dynamic);
         debug!(entity = ?knock.entity, "ambient car knocked to dynamics");

@@ -20,10 +20,10 @@ use mm2_app::traffic::{AmbientCar, AmbientDrive, AmbientTraffic, TrafficSignal};
 use mm2_assets::Vfs;
 use mm2_formats::bai::{Side, VehicleRule};
 use mm2_game::{
-    DevOverrides, EventRef, EventTableKind, ImpactEvent, LaneCursor, LaneId, LaneKind, Mm2Vfs,
-    Player, PlayerControl, PlayerId, PlayerVehicle, Session, SessionConfig, SessionMode,
-    SessionPhase, SignalAspect, SpawnPolicy, SpawnPose, StuckWindow, WorldMode,
-    advance_session_tick, despawn_session_entities,
+    DamageEvent, DamageSpec, DevOverrides, EventRef, EventTableKind, ImpactEvent, LaneCursor,
+    LaneId, LaneKind, Mm2Vfs, ObjectIdentity, Player, PlayerControl, PlayerId, PlayerVehicle,
+    Session, SessionConfig, SessionMode, SessionPhase, SignalAspect, SpawnPolicy, SpawnPose,
+    StuckWindow, VehicleDamage, WorldMode, advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::{VehicleConfig, VehiclePlugin};
 
@@ -416,6 +416,7 @@ fn test_app(config: SessionConfig, vfs: Vfs) -> App {
         .add_plugins(TransformPlugin)
         .add_plugins(VehiclePlugin)
         .add_message::<ImpactEvent>()
+        .add_message::<DamageEvent>()
         .init_resource::<ButtonInput<KeyCode>>()
         .init_resource::<ImpactFilter>()
         .init_resource::<mm2_app::damage::DamageReport>()
@@ -432,6 +433,10 @@ fn test_app(config: SessionConfig, vfs: Vfs) -> App {
             FixedLast,
             (
                 contracts::collect_impacts,
+                // Same consumer ordering main.rs runs: the deduped
+                // impact stream feeds damage before the handover
+                // reads the same solver edges.
+                mm2_app::damage::apply_impact_damage,
                 contracts::publish_vehicle_telemetry,
                 mm2_app::traffic::knock_ambient,
                 mm2_app::traffic::drive_ambient,
@@ -549,10 +554,14 @@ fn spawn_follower(app: &mut App, lane: LaneId, along: f32, target_speed: f32) ->
             },
             RigidBody::Kinematic,
             Collider::cuboid(1.8, 0.9, 3.2),
-            // The production spawn shape: authored mass and the event
-            // flag the handover and the transfer math read.
+            // The production spawn shape: authored mass, the event
+            // flag the handover and the transfer math read, and the
+            // solver speed bounds the flipped wreck runs under
+            // (F10-B.13).
             Mass(1200.0),
             CollisionEventsEnabled,
+            MaxLinearSpeed(mm2_game::MAX_BANGER_LINEAR_SPEED),
+            MaxAngularSpeed(mm2_game::MAX_BANGER_ANGULAR_SPEED),
             Position(pos),
             Rotation(rot),
             LinearVelocity::ZERO,
@@ -2364,6 +2373,13 @@ fn a_light_striker_shares_the_exchange_not_its_speed() {
         (momentum - 400.0 * pre_speed).abs() / (400.0 * pre_speed) < 0.25,
         "the exchange did not conserve momentum: {momentum}"
     );
+    // F10-B.13: a plain dynamic body striker — no `Player`, no
+    // `AmbientCar` — counts in the `x` class.
+    let traffic = app.world().resource::<AmbientTraffic>();
+    assert_eq!(traffic.knocked, 1);
+    assert_eq!(traffic.knocked_by_other, 1);
+    assert_eq!(traffic.knocked_by_participant, 0);
+    assert_eq!(traffic.knocked_by_ambient, 0);
 }
 
 /// A 50 kg cone-mass striker only registers ~750 N·s of estimated
@@ -2419,6 +2435,193 @@ fn a_light_touch_leaves_the_car_lane_following() {
         cur.lane != lane_r0 || cur.along > 20.0,
         "the car never drove past the light striker: {cur:?}"
     );
+}
+
+/// F10-AC03's damage leg end to end: the session's real *player*
+/// vehicle — `Player` + `ObjectIdentity` + a dynamic collider body —
+/// striking a parked lane follower flips it like any striker, the
+/// same solver edge feeds the deduplicated impact stream, and the
+/// striker's `VehicleDamage` accrues `severity × other_mass`. The
+/// handover also counts the striker's class: `kns=` `p`, which `kn=`
+/// alone could not name (F10-B.13).
+#[test]
+fn a_participant_striker_takes_damage_and_names_the_class() {
+    let install = junction_install(0, 0);
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+
+    // The spawned player vehicle carries no `vehcardamage` in this
+    // fixture (`SelectedCar::def` is None), so stamp authored-style
+    // bounds — the same shape `load_session_world` inserts for a
+    // stock car.
+    let player = app
+        .world_mut()
+        .query_filtered::<Entity, With<PlayerVehicle>>()
+        .single(app.world())
+        .expect("one player vehicle");
+    app.world_mut()
+        .entity_mut(player)
+        .insert(VehicleDamage::new(DamageSpec {
+            impact_threshold: 1500.0,
+            med_damage: 80_000.0,
+            max_damage: 187_500.0,
+            regenerate_rate: 0.0,
+        }));
+
+    let lane_r0 = lane(0, Side::Right);
+    // A parked follower mid-lane — minted an identity like the
+    // production spawn so the pair resolves as two named
+    // participants rather than player-vs-world.
+    let car = spawn_follower(&mut app, lane_r0, 15.0, 0.0);
+    let car_id = app.world_mut().resource_mut::<Session>().mint_object_id();
+    app.world_mut()
+        .entity_mut(car)
+        .insert(ObjectIdentity(car_id));
+
+    // Slide the player in down-lane at ~20 m/s — the same strike the
+    // synthetic block strikers deliver.
+    let (spot, travel) = {
+        let t = app.world().resource::<AmbientTraffic>();
+        let s = t
+            .graph()
+            .sample_lane(lane_r0, 9.0)
+            .expect("a live lane samples");
+        (
+            Vec3::from(s.position) + Vec3::Y * 0.55,
+            Vec3::from(s.tangent).normalize_or(Vec3::NEG_Z),
+        )
+    };
+    teleport_player(&mut app, spot);
+    app.world_mut()
+        .get_mut::<LinearVelocity>(player)
+        .expect("player velocity")
+        .0 = travel * 20.0;
+
+    assert!(
+        run_until(&mut app, 90, |a| {
+            a.world().resource::<AmbientTraffic>().knocked >= 1
+        }),
+        "the sliding player never knocked the parked car"
+    );
+    let traffic = app.world().resource::<AmbientTraffic>();
+    assert_eq!(traffic.knocked, 1);
+    assert_eq!(
+        traffic.knocked_by_participant, 1,
+        "the player striker did not count as a participant"
+    );
+    assert_eq!(traffic.knocked_by_ambient, 0);
+    assert_eq!(traffic.knocked_by_other, 0);
+
+    // The same edge fed the impact stream: the striker accrued
+    // `severity × follower mass` against its authored bounds.
+    assert!(
+        app.world().resource::<ImpactFilter>().emitted >= 1,
+        "the strike emitted no impact event"
+    );
+    assert!(
+        app.world()
+            .resource::<mm2_app::damage::DamageReport>()
+            .applied
+            >= 1,
+        "the strike applied no damage"
+    );
+    let total = app
+        .world()
+        .get::<VehicleDamage>(player)
+        .expect("player damage")
+        .total();
+    assert!(
+        total > 1500.0,
+        "the participant took no damage from the hit: {total}"
+    );
+
+    // The flipped wreck keeps the spawn-stamped solver bounds and
+    // stays one dynamic body on the same entity.
+    let wreck = app.world().entity(car);
+    assert!(wreck.get::<MaxLinearSpeed>().is_some());
+    assert!(wreck.get::<MaxAngularSpeed>().is_some());
+    assert!(matches!(wreck.get::<RigidBody>(), Some(RigidBody::Dynamic)));
+}
+
+/// A knocked wreck sliding into a queued lane car flips it too — and
+/// the striker classifies as ambient, not participant (the `kns=`
+/// `a` leg): a pile-up and a player hit now read differently on the
+/// record (F10-B.13).
+#[test]
+fn a_wreck_striker_counts_as_ambient() {
+    let install = junction_install(0, 0);
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+
+    let lane_r0 = lane(0, Side::Right);
+    let car = spawn_follower(&mut app, lane_r0, 15.0, 0.0);
+    // A wreck already dynamic — the shape a handover leaves —
+    // sliding down-lane into the parked follower.
+    let (spot, rot, travel) = {
+        let t = app.world().resource::<AmbientTraffic>();
+        let s = t
+            .graph()
+            .sample_lane(lane_r0, 9.0)
+            .expect("a live lane samples");
+        let tangent = Vec3::from(s.tangent).normalize_or(Vec3::NEG_Z);
+        let yaw = (-tangent.x).atan2(-tangent.z);
+        let pitch = tangent.y.clamp(-1.0, 1.0).asin();
+        (
+            Vec3::from(s.position) + Vec3::Y * 0.55,
+            Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0),
+            tangent,
+        )
+    };
+    app.world_mut().spawn((
+        AmbientCar {
+            class: 0,
+            drive: AmbientDrive::Knocked,
+            cursor: LaneCursor::new(lane_r0, 9.0),
+            target_speed: 0.0,
+            speed: 0.0,
+            stuck: StuckWindow::new(spot.to_array()),
+        },
+        RigidBody::Dynamic,
+        Collider::cuboid(1.8, 0.9, 3.2),
+        Mass(1200.0),
+        CollisionEventsEnabled,
+        Position(spot),
+        Rotation(rot),
+        LinearVelocity(travel * 15.0),
+        AngularVelocity::ZERO,
+        Transform::from_translation(spot).with_rotation(rot),
+    ));
+
+    assert!(
+        run_until(&mut app, 90, |a| {
+            a.world().resource::<AmbientTraffic>().knocked >= 1
+        }),
+        "the sliding wreck never knocked the parked car"
+    );
+    let traffic = app.world().resource::<AmbientTraffic>();
+    assert_eq!(traffic.knocked, 1);
+    assert_eq!(
+        traffic.knocked_by_ambient, 1,
+        "the wreck striker did not count as ambient"
+    );
+    assert_eq!(traffic.knocked_by_participant, 0);
+    assert_eq!(traffic.knocked_by_other, 0);
+    let (drive, body) = {
+        let mut q = app.world_mut().query::<(Entity, &AmbientCar, &RigidBody)>();
+        let (_, c, rb) = q
+            .iter(app.world())
+            .find(|(e, ..)| *e == car)
+            .expect("the struck car despawned");
+        (c.drive, *rb)
+    };
+    assert_eq!(drive, AmbientDrive::Knocked);
+    assert!(matches!(body, RigidBody::Dynamic));
 }
 
 /// A knocked wreck lying inside the junction box — its lane cursor
