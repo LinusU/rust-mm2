@@ -58,17 +58,16 @@ authored sample/output device, F10-B disclosed edge gaps).
 
 Synthetic tests:
 
-- `tests/race.rs` 34 → 35 (+9 new route tests net of the resync
-  addition): bind/measure, authored-line-miss credit, no
-  double-counting a triggered gate, closed-route lap wrap, Ordered
-  gate order, open-route first-traversal bound, route-less/AnyOrder
-  non-binding, state transitions, and the boundary-crossing re-anchor
-  resync.
-- `tests/opponents.rs` +2 production-path integration: a route-less
-  Ordered opponent binds no line; an authored route that misses a
-  gate cylinder still earns ordered progress through the real
+- `tests/race.rs` 28 → 35 (+7 new route tests): negative pre-wrap
+  measure, authored-line-miss credit, no double-counting a triggered
+  gate, closed-route lap wrap, AnyOrder non-binding, open-route
+  first-traversal bound, and the boundary-crossing re-anchor resync.
+- `tests/opponents.rs` 40 → 42 (+2 production-path integration): a
+  route-less Ordered opponent binds no line; an authored route that
+  misses a gate cylinder still earns ordered progress through the real
   `load_session_world` → roster → `opponent_drive` → `advance_race`
-  path on a synthetic VFS install.
+  path on a synthetic VFS install. Nine new tests across the two
+  suites.
 
 Retail (`fnv1a64:e91e6cd4b2ae30d9`, this work-tree's binary — logs in
 `/tmp/mm2-circuit-matrix-v3/`, published in `docs/race-coverage.md`'s
