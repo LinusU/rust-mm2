@@ -1,4 +1,24 @@
-# Last iteration — F11-C.2: catalog-wide deep event audit (`event --all`)
+# Last iteration — F11-C.2 handoff-doc repair (iteration 48)
+
+External review of iteration 47's candidate `6aab29d` (F11-C.2)
+returned one blocking finding: a stale recorded test-count
+baseline. This file and PLAN.md's F11-C.2 row claimed the
+`mm2_inspect` suite went 12 → 15; the actual suite went 27 → 30
+(`event.rs` module 7 → 10). Root cause: the baseline was copied
+from F11-C.1's commit-time count ("5 → 12", correct at `1720a53`),
+but ~113 commits landed between C.1 and C.2 and grew the suite to
+27. The `+3` delta and the `30/30` gates line were already right.
+
+Repair (docs-only, no code touched): corrected both claims to
+`27 → 30`. Verified by recounting `#[test]` at base `93db26b`
+(27 total / 7 in `event.rs`) and at `6aab29d` (30 total / 10 in
+`event.rs`); `cargo test --locked -p mm2_inspect` re-run below.
+
+The iteration-47 record follows, unchanged and still accurate.
+
+---
+
+# Iteration 47 — F11-C.2: catalog-wide deep event audit (`event --all`)
 
 Iteration 47 on `ralph/night` (baseline `93db26b`, F07-B.9 scripted
 drive-sequence evidence — external verify + review green). One
@@ -47,7 +67,8 @@ evidence run.
 
 ## Evidence
 
-Synthetic tests (`tools/mm2_inspect` suite, 12 → 15):
+Synthetic tests (`tools/mm2_inspect` suite, 27 → 30; `event.rs`
+7 → 10):
 
 - `sweep_reports_every_cataloged_event` — all three authored rows of
   the synthetic install appear in row order; the fully-wired row is
