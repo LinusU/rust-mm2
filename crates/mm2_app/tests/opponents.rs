@@ -266,6 +266,84 @@ fn event_config() -> SessionConfig {
     }
 }
 
+/// A `race/testcity/` Circuit event: `circuit0` (2 opponents, NumLaps
+/// 2), the dev-lane course as the closed route, an authored `cir0`
+/// grid and two opponents chasing closed `.opp` loops — the roster +
+/// Ordered + laps combination F14-AC05's restart leg needs.
+fn circuit_install() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(
+        d,
+        "race/testcity/mmcircuitdata.csv",
+        format!("{MM_HEADER}\nnone,0,0,0,2,0,0.1,0.0,2,50,1,0,0,0,2,0,0.2,0.0,2,40,1\n"),
+    );
+    write(
+        d,
+        "race/testcity/circuit0.aimap",
+        aimap_with_opponents(
+            "vpt circuit0-a-0.opp 0.90 0 50.0 0.7 1 1 1 1 0 1.0\n\
+             vpheavy circuit0-a-1.opp 0.80 0 50.0 0.7 1 1 1 1 0 1.0\n",
+        ),
+    );
+    write(
+        d,
+        "race/testcity/circuit0waypoints.csv",
+        format!(
+            "{WAYPOINTS}{}{}{}{}",
+            waypoint_row(60.0, COURSE_Z), // start line — the lifted copy closes each lap
+            waypoint_row(110.0, COURSE_Z),
+            waypoint_row(140.0, COURSE_Z),
+            waypoint_row(165.0, COURSE_Z),
+        ),
+    );
+    // Authored grid — player + two opponent slots, `a = 0` (no
+    // heading, the retail `cir6` shape): facing derives off the course.
+    write(
+        d,
+        "race/testcity/cir0_strtpnts",
+        "60,0,140,0,0,0,0,0,0,\n56,0,144,0,0,0,0,0,0,\n52,0,148,0,0,0,0,0,0,\n",
+    );
+    // Closed loops down and back along the lane — each last anchor
+    // lands within `ROUTE_LOOP` of its first.
+    write(
+        d,
+        "race/testcity/circuit0-a-0.opp",
+        opp_file(&[
+            [70.0, 0.0, 140.0],
+            [180.0, 0.0, 140.0],
+            [180.0, 0.0, 146.0],
+            [70.0, 0.0, 146.0],
+            [72.0, 0.0, 140.0],
+        ]),
+    );
+    write(
+        d,
+        "race/testcity/circuit0-a-1.opp",
+        opp_file(&[
+            [70.0, 0.0, 146.0],
+            [180.0, 0.0, 146.0],
+            [180.0, 0.0, 140.0],
+            [70.0, 0.0, 140.0],
+            [72.0, 0.0, 146.0],
+        ]),
+    );
+    write_car(d, "vpt", 1000.0, None);
+    write_car(d, "vpheavy", 3000.0, None);
+    tmp
+}
+
+fn circuit_config() -> SessionConfig {
+    SessionConfig {
+        mode: SessionMode::Event(EventRef {
+            city: "testcity".into(),
+            table: EventTableKind::Circuit,
+            index: 0,
+        }),
+        ..SessionConfig::default()
+    }
+}
+
 /// The headless_smoke system set plus `opponent_drive` — the real
 /// session/race drivers on a minimal app.
 fn event_app(config: SessionConfig, vfs: Vfs) -> App {
@@ -904,6 +982,158 @@ fn restart_respawns_the_lineup() {
             "the reached row-0 anchor is skipped — the chase starts on the first leg"
         );
     }
+}
+
+/// F14-AC05's Ordered leg: a mid-race restart on a lapped, rostered
+/// circuit restores grid, counters, clocks and event objects exactly
+/// once — banked lap/gate/route credit clears, the lineup respawns on
+/// its authored slots, the race clock and each `RouteGateLine`'s
+/// high-water mark reset with the generation, the markers restamp and
+/// the ledger stays generation-scoped.
+#[test]
+fn restart_restores_the_circuit_grid_counters_and_objects() {
+    let tmp = circuit_install();
+    let mut app = event_app(circuit_config(), vfs_of(tmp.path()));
+    app.update();
+    assert_eq!(phase(&app), SessionPhase::Countdown);
+
+    // Spawn-time chase indices — the grid state the restart must
+    // restore (keyed by roster index, not entity: teardown mints new).
+    let mut initial_next = std::collections::BTreeMap::new();
+    for e in opponents(&mut app) {
+        let d = app.world().get::<OpponentDriver>(e).unwrap();
+        initial_next.insert(d.index, d.next);
+    }
+
+    // Let the field bank real progress — gates cleared, laps run,
+    // route arc grown, the race clock ticking.
+    run(&mut app, 1600);
+    assert!(
+        matches!(
+            app.world().resource::<RaceState>().phase,
+            mm2_game::RacePhase::Running
+        ),
+        "the restart must cut a live race"
+    );
+    let banked: Vec<(u32, usize, u32, u32)> = opponents(&mut app)
+        .into_iter()
+        .map(|e| {
+            let p = app.world().get::<RaceProgress>(e).unwrap();
+            (p.lap, p.cleared_count(), p.crossings, p.route_clears)
+        })
+        .collect();
+    assert!(
+        banked
+            .iter()
+            .any(|(lap, cleared, x, d)| *lap > 0 || *cleared > 0 || *x > 0 || *d > 0),
+        "generation 1 banked no progress to restore: {banked:?}"
+    );
+
+    app.world_mut().resource_mut::<SessionControl>().restart = true;
+    let mut reached = false;
+    for _ in 0..30 {
+        app.update();
+        if phase(&app) == SessionPhase::Countdown
+            && app.world().resource::<Session>().generation() == 2
+        {
+            reached = true;
+            break;
+        }
+    }
+    assert!(reached, "restart never returned to Countdown");
+
+    // The race resource is the new session's: countdown from full,
+    // clock at zero, generation 2.
+    let race = app.world().resource::<RaceState>();
+    assert_eq!(race.generation, 2, "race belongs to the new session");
+    assert!(matches!(race.phase, mm2_game::RacePhase::Countdown { .. }));
+    assert_eq!(race.clock, 0, "the old race clock must not survive");
+    let gates = race.definition.checkpoints.len();
+
+    // The grid: same lineup once, fresh ownership, authored slots,
+    // zeroed counters, the route bind re-anchored at the spawn.
+    let opps = opponents(&mut app);
+    assert_eq!(opps.len(), 2, "lineup respawned exactly once");
+    for e in opps {
+        assert_eq!(
+            app.world().get::<SessionEntity>(e).unwrap().0,
+            2,
+            "fresh generation owns the respawned opponents"
+        );
+        let p = app.world().get::<RaceProgress>(e).unwrap();
+        assert!(matches!(p.state, ParticipantState::AwaitingStart));
+        assert_eq!(
+            (
+                p.lap,
+                p.next,
+                p.cleared_count(),
+                p.crossings,
+                p.route_clears
+            ),
+            (0, 0, 0, 0, 0),
+            "banked lap/gate/route credit must reset: {p:?}"
+        );
+        let d = app.world().get::<OpponentDriver>(e).unwrap();
+        assert_eq!(
+            d.next, initial_next[&d.index],
+            "the chase index restored to its spawn value"
+        );
+        let pos = app.world().get::<Position>(e).unwrap().0;
+        let slot = app.world().resource::<RaceState>().definition.start_slots[d.index + 1].position;
+        assert!(
+            (pos.x - slot.x).abs() < 3.0 && (pos.z - slot.z).abs() < 3.0,
+            "opponent {} back on its authored grid slot, got {pos:?}",
+            d.index
+        );
+        let route = d.route.as_ref().expect("circuit route resolved");
+        let line = app
+            .world()
+            .get::<RouteGateLine>(e)
+            .expect("an Ordered roster entry carries the route bind");
+        let fresh = RouteGateLine::bind(
+            route,
+            &app.world().resource::<RaceState>().definition.checkpoints,
+            line.is_closed(),
+            pos,
+            d.next,
+        )
+        .expect("the same bind the spawn ran");
+        assert_eq!(
+            line.arc_high, fresh.arc_high,
+            "the route-credit high-water rebinds at the grid, not mid-course"
+        );
+    }
+
+    // The player sits back on authored slot 0 — the whole grid is
+    // restored, not just the AI half.
+    let car = app
+        .world_mut()
+        .query_filtered::<Entity, With<PlayerVehicle>>()
+        .iter(app.world())
+        .next()
+        .unwrap();
+    let pos = app.world().get::<Position>(car).unwrap().0;
+    assert!(
+        (pos.x - 60.0).abs() < 3.0 && (pos.z - COURSE_Z).abs() < 3.0,
+        "player back on the authored start line, got {pos:?}"
+    );
+
+    // Event objects restamped once: one marker per Ordered gate, no
+    // finish trigger, nothing from generation 1 left behind.
+    let markers = app
+        .world_mut()
+        .query_filtered::<Entity, With<race::CheckpointMarker>>()
+        .iter(app.world())
+        .count();
+    assert_eq!(markers, gates, "gate markers respawned exactly once");
+
+    // The ledger keeps generation-1 results — they just do not belong
+    // to this race.
+    let ledger = app.world().resource::<ResultLedger>();
+    assert!(
+        ledger.standings_in(2).is_empty(),
+        "a stale result must not rank into generation 2"
+    );
 }
 
 fn phase(app: &App) -> SessionPhase {

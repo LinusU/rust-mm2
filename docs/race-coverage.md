@@ -911,7 +911,39 @@ participant's gates (`x/total`); `res` = results-ledger entries;
 
 - **F14-AC01** (discoverable + deps load): `race-defs` builds 10/10
   cataloged rows per city at both difficulties; all 20 ran the
-  production session to `status=pass` ×2 drivers.
+  production session to `status=pass` ×3 drivers (×2 at Amateur).
+- **F14-AC02** (a complete valid lap counts once; misses/reverse/
+  repeats/teleports do not): contract legs in `tests/race.rs` —
+  swept high-speed and wrong-height non-crossings, repeated
+  crossings counting once, `Teleported`/`ResetVehicle` breaking the
+  swept segment — plus `dup=0` on every leg of both matrices; the
+  Ordered rule itself (closing gate counts once per completed
+  sequence) covered by the A.1 contract tests.
+- **F14-AC03** (multi-lap + multi-participant independence,
+  consistent ordering): `ordered_multi_lap_participants_stay_independent_and_order`
+  + `live_order_tracks_progress_and_locks_finished_places` +
+  `standings`/`place_of` generation-scoped tests; the matrices show
+  multi-lap fields staying independent (16/18 completions on
+  london-0's 7-car Pro field) with two Professional opponent
+  finishes minting exactly one ledger result each while the local
+  raced on.
+- **F14-AC04** (a real original circuit raced against opponents):
+  authored `.aimap`/`.aimap_p` rosters spawn per-vehicle AI
+  participants that drive `.opp` routes and earn Ordered progress
+  through the shared `advance_race` validation — opponents lapped
+  on 10/20 Pro events, `vpcoop2k` finished london-0 at Pro under
+  two different local drivers (scripted slot 0, hold slot 2).
+- **F14-AC05** (restart restores grid, counters, clocks, objects
+  without duplication): `restart_restores_the_circuit_grid_counters_and_objects`
+  (tests/opponents.rs) — a lapped, rostered, gridded circuit event
+  banked mid-race then restarted through the production
+  teardown/reload: race re-minted (`generation=2`, `Countdown`,
+  `clock=0`), lineup respawned once on authored slots with zeroed
+  lap/gate/route-credit counters, chase indices and `RouteGateLine`
+  high-waters rebind at the spawn, markers restamp once,
+  `standings_in(2)` stays empty. AnyOrder legs were already covered
+  by `restart_respawns_the_lineup` + `restart_rebuilds_the_event_session`
+  + `restarting_the_event_respawns_its_overlay_once`.
 - **F14-AC06** (representative matrix): this section — 20/20 events ×
   {scripted, parked} at Amateur, pre- and post-repair published, plus
   the same 40 legs at Professional (F14-A.4) with the authored

@@ -1,4 +1,87 @@
-# Last iteration — F14-A.5 Professional Circuit hold legs (iteration 56)
+# Last iteration — F14-A.6 circuit restart leg + AC promotion (iteration 57)
+
+Iteration 57 on `ralph/night` (baseline `86bae3e`, F14-A.4 repair —
+external verify + review green at `6ea22d7`; this is the first
+iteration of run `20260925T144723`, whose counter restarted at 001).
+Two pieces: preserve the interrupted iteration-56 work that sat
+uncommitted in the tree, then the F14-A remainder's last named
+open item — the AC04/AC05/AC06 promotion.
+
+## Task selection
+
+Iteration 56 died mid-handoff: the doc-repair commit `86bae3e`
+landed but the completed F14-A.5 evidence write-up (LAST_ITERATION,
+PLAN, race-coverage hold tables) was never committed. Committed
+verbatim as `204373d` — the write-up was complete and internally
+consistent; nothing was regenerated.
+
+No failing gate or open review finding remained after `86bae3e`
+(the A.4 review passed with verification gaps — all addressed).
+The plan's named top candidate is the F14-A remainder: with all
+three Professional driver legs banked, the only un-evidenced AC was
+AC05's *Ordered* leg — every existing restart test covered
+AnyOrder/checkpoint events, nothing covered a lapped, rostered
+circuit's counters (laps, `RouteGateLine` high-waters, chase
+indices). Every other candidate stays blocked as iteration 56
+recorded (F05-B UNK-13 / F27 / F25+, F17-B needs F17-C, F15-B
+research-gated, F16-C interactive finish, F11-C review judgment,
+F13-C original-fidelity comparison, F18-A → F18-B/C scope, F07-B
+no authored sample/output device, F10-B manual player-hit leg,
+F17-A AC03 interactive).
+
+## What landed
+
+- `204373d` — the preserved F14-A.5 docs (see the entry below).
+- `restart_restores_the_circuit_grid_counters_and_objects`
+  (`tests/opponents.rs` 42 → 43): a synthetic `mmcircuitdata` event
+  (NumLaps 2, 2-car roster, authored `cir0` grid, closed `.opp`
+  loops) rides the real `load_session_world` → `opponent_drive` →
+  `advance_race` path. The field banks mid-race progress
+  (`RacePhase::Running`, gates/lap/route credit non-zero), then
+  `SessionControl.restart` drives the production teardown/reload
+  and generation 2 asserts each AC05 clause: `RaceState` re-minted
+  (`generation=2`, `Countdown`, `clock=0`); the lineup respawned
+  exactly once on authored slots `index+1` under `SessionEntity(2)`;
+  `RaceProgress` zeroed (lap/next/cleared/crossings/route_clears);
+  `OpponentDriver.next` restored to its spawn-time value per roster
+  index; each `RouteGateLine.arc_high` equal to a fresh `bind` at
+  the respawned pose; the player back on authored slot 0; one
+  marker per Ordered gate; `standings_in(2)` empty.
+- F14-A promotion recorded honestly: parent row → `implemented`
+  (candidate), A.5 + A.6 table rows, the race-coverage AC mapping
+  now lists all six ACs with their evidence, and the residuals the
+  task does not close stay named (`[Exceptions]`/density consumers
+  F15/F10; traversal stalls F15-B; original-fidelity comparisons
+  unverified — matrices are smoke records, not completability).
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` all suites green (69 test
+binaries, including `tests/opponents.rs` 43/43). No production
+code changed — one test file plus docs.
+
+## Classification
+
+Synthetic integration evidence only (the AC05 leg exercises the
+production session/race/teardown systems on a synthetic install).
+No retail-data, rendered or audio legs this iteration; no
+original-fidelity claim.
+
+## Remaining open items
+
+- F14-A is `implemented` pending external review; the F15-B/F10
+  residuals it names are other tasks' scope, not closure blockers.
+- The whole named remainder list from iteration 56 stands
+  unchanged: every candidate is research-gated, mode-blocked,
+  manual/interactive or needs an output device. Next pick should
+  re-derive from the selection-policy list rather than looping on
+  F14.
+
+---
+
+# Iteration 56 — F14-A.5 Professional Circuit hold legs
 
 Iteration 56 on `ralph/night` (baseline `6ea22d7`, F14-A.4 —
 external verify + review green). Two pieces: the review's flagged
