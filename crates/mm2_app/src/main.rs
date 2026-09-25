@@ -19,9 +19,10 @@ use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use clap::Parser;
 use mm2_app::session::{ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
-    audio, banger, breakaway, camera, car_visual, city, contracts, damage, damage_fx, environment,
-    hudmap, input, menu, nav_overlay, opponents, pause, profile, progression, pvs, race, recovery,
-    results, scripted, sequence, session, smoke, spark_fx, stuck, texel_fx, traffic,
+    audio, banger, breakaway, camera, car_visual, city, contracts, damage, damage_fx, dash,
+    environment, hudmap, input, menu, nav_overlay, opponents, pause, profile, progression, pvs,
+    race, recovery, results, scripted, sequence, session, smoke, spark_fx, stuck, texel_fx,
+    traffic,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
@@ -166,6 +167,13 @@ struct Cli {
     /// instead of a screen.
     #[arg(long, conflicts_with = "pause")]
     pause_map: bool,
+
+    /// Start in the authored cockpit/dash view (diagnostic aid — how a
+    /// `--frames`/`--screenshot` capture renders the F22-B.1 interior;
+    /// render-only like `--cam`). Falls back to the chase camera when
+    /// the vehicle carries no `camPovCS` record.
+    #[arg(long, conflicts_with = "cam")]
+    cockpit: bool,
 
     /// Sweep the local participant through an event session's remaining
     /// triggers — one gate per update — until the run resolves to the
@@ -739,6 +747,7 @@ fn main() {
             restart_at: cli.restart_at,
             no_pvs: cli.no_pvs,
             horn: cli.horn,
+            cockpit: cli.cockpit,
         },
         // Any mounted mod makes records/unlocks ineligible — a result
         // under modded content is not comparable to stock (designed
@@ -911,6 +920,8 @@ fn main() {
     .init_resource::<car_visual::HeadlightsOn>()
     .insert_resource(if cam_start.is_some() {
         CameraMode::Free
+    } else if cli.cockpit {
+        CameraMode::Cockpit
     } else {
         CameraMode::Chase
     })
@@ -1057,9 +1068,14 @@ fn main() {
                 .after(input::vehicle_input)
                 .run_if(not(capturing)),
             race::nav_target_input.run_if(not(capturing)),
-            camera::toggle_camera.run_if(not(capturing)),
-            camera::chase_follow,
-            camera::free_fly.run_if(not(capturing)),
+            (
+                camera::toggle_camera.run_if(not(capturing)),
+                camera::chase_follow,
+                camera::free_fly.run_if(not(capturing)),
+                dash::drive_dash,
+                dash::sync_dash_visibility,
+                dash::cockpit_look.run_if(not(capturing)),
+            ),
             reset_input,
             debug_toggle,
             screenshot_input,

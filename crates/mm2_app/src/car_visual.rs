@@ -75,7 +75,7 @@ pub struct Trailer {
 
 /// Convert a [`MeshGroup`] into a Bevy mesh, baking the optional recenter
 /// offset (translation only — normals are unaffected).
-fn group_mesh(g: &MeshGroup, recenter: Option<Vec3>) -> Mesh {
+pub(crate) fn group_mesh(g: &MeshGroup, recenter: Option<Vec3>) -> Mesh {
     let mut positions = g.positions.clone();
     if let Some(c) = recenter {
         for p in &mut positions {
@@ -100,7 +100,7 @@ fn group_mesh(g: &MeshGroup, recenter: Option<Vec3>) -> Mesh {
 }
 
 /// Material for a mesh group under the selected paint job.
-fn group_material(
+pub(crate) fn group_material(
     model: &VehicleModel,
     paint: usize,
     offset: usize,

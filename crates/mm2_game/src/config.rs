@@ -555,6 +555,12 @@ pub struct DevOverrides {
     /// cannot change a run's outcome, so like `--pause`/`--cam` this
     /// stays out of `record_eligibility`.
     pub horn: bool,
+    /// `--cockpit`: start the session in the authored `camPovCS`
+    /// cockpit/dash view (evidence/diagnostic runs — how a `--frames`
+    /// `--screenshot` capture renders the F22-B.1 interior while live
+    /// input is frozen; render-only like `--pause`). Falls back to the
+    /// chase camera when the car carries no cockpit record.
+    pub cockpit: bool,
 }
 
 /// Configuration of the `--nav` debug overlay: draw the city's BAI

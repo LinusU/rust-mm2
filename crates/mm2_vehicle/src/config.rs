@@ -360,6 +360,13 @@ pub struct VehicleConfig {
     /// Whether this body is a towed trailer (no drivetrain expected).
     #[serde(default)]
     pub trailer: bool,
+    /// Authored top speed, m/s (`vehCarSim.Trans.High`) — the speedo
+    /// needle's full-scale value (`mmDashView::MaxSpeed` binds to the
+    /// carsim rather than the dash file). `None` for unauthored rigs
+    /// (dev car, trailers) — presentation consumers must not fabricate
+    /// one.
+    #[serde(default)]
+    pub top_speed_mps: Option<f32>,
 }
 
 impl Default for VehicleConfig {
@@ -463,6 +470,7 @@ impl Default for VehicleConfig {
             },
             gyro: None,
             trailer: false,
+            top_speed_mps: None,
         }
     }
 }

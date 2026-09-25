@@ -1,3 +1,101 @@
+# Last iteration — F22-B.1: authored cockpit/dashboard view (iteration 62)
+
+Iteration 62 on `ralph/night` (baseline `1d3b069`, F22-A.1 review
+repair — external verify + review green; sixth iteration of run
+`20260925T144723`). One coherent slice: the authored cockpit and
+dashboard instrument view, which covers the F22-A remainder's HUD-1
+instrument leg by *binding the original dashboard content* rather than
+drawing over the dev telemetry line.
+
+## Task selection
+
+No failing gate or review finding to repair. The review's open items
+named the F22-A remainder (HUD-1/HUD-2 instruments, AC02/AC03 map
+legs) as next. Discovery showed every stock `vp*` ships a complete
+authored dash rig — `_dash.pkg` geometry, `_dash.asnode` gauge
+calibration, `_dash.campovcs` camera — so the cockpit/instrument slice
+(F22-B.1, opening F22-B) subsumes the HUD-1 instrument leg with
+authored content. The AC02 pixel-alignment and AC03 live-marker legs
+of F22-A stay open by plan.
+
+## What landed
+
+- `mm2_formats::dash` — `DashSpec` (`_dash.asnode`: `DashPos`,
+  `RoofPos`, `WheelPos`, per-gauge `*Offset`/`*PivotOffset`,
+  `*RotMin/Max` sweep radians, `WheelFact`) and `PovCamSpec`
+  (`_dash.campovcs`: `Offset`/`ReverseOffset`/`TrackTo`/`Pitch`, FOV,
+  near/far), sparse-record tolerant, wrong-block rejecting.
+- `VehicleConfig::top_speed_mps` — authored `vehCarSim.Trans.High`
+  (mph→m/s); dev cars/trailers `None`, presentation never fabricates.
+- `mm2_app::dash` — `spawn_dash` loads the three records
+  independently (camera needs `camPovCS`; cluster needs asnode+pkg),
+  spawns the authored parts as vehicle children via the shared
+  `build_model`/`group_mesh`/`group_material` path, and emits a
+  `DashReport` (`dash=<n>p/<cam|nocam>` smoke field). `drive_dash`
+  drives needles off `VehicleState`/`VehicleDamage` using the authored
+  sweeps (speedo full-scale `top_speed_mps`, tach redline), rolls the
+  wheel by `steer_angle/lock × WheelFact`, and — the recovered
+  mechanism — the `gear_indicator` quad's paint-job table is
+  repurposed as gear slots (shader 4 names `R`,`N`,`One`…`Six`,`D` on
+  every sampled stock dash), so the engaged gear swaps the quad's
+  material (`GearGlyph`) rather than sliding a strip; an earlier
+  slide-strip reading was falsified by the retail capture and
+  retracted. `sync_dash_visibility` flips direct vehicle children
+  between exterior and cockpit sets (descendants propagate).
+- `camera.rs` — `CameraMode::Cockpit`; `C` cycles
+  Chase→Cockpit→Free marker-driven (`ChaseCamera`/`CockpitCamera`/
+  `FreeCamera`), skipping a mode whose camera never spawned and never
+  writing `is_active` on unmarked cameras — the A.1 review's
+  map-camera blink wart is repaired. `V` is the dash toggle (the
+  documented `D` conflicts with enhanced WASD steering — DSN-48);
+  numpad 4/6/2/8 drive the authored-anchored look, `Numpad2` swaps in
+  `ReverseOffset` (magnitudes designed, DSN-49). `--cockpit` selects
+  it at spawn, falling back to chase when no authored camera exists.
+- Session integration — the rig spawns/teardowns with the player
+  vehicle; `DashReport` is a session resource removed on unload.
+- `mm2-inspect` gained `tex --ascii`/`--ppm` and `pkg --verts` —
+  the inspection legs that recovered the gear-slot mechanism.
+
+## Evidence
+
+- Parsers: 4 unit tests (retail-shaped records, sparse tolerance,
+  wrong-block rejection). Runtime: `tests/dash.rs` 7 tests — absence
+  policy, needle/wheel/gear drive, visibility split, marker-driven
+  cycle incl. absent-cockpit skip, cockpit binding, numpad look.
+- Retail headless (`fnv1a64:e91e6cd4b2ae30d9`, read-only): sf `vpbug`
+  and london `vpbug` + sf `vpbus` all report `dash=11p/cam` —
+  11 mesh parts bound plus the authored cockpit camera, on a second
+  archetype and both cities.
+- Retail windowed: `--cockpit --frames 90 --screenshot` renders the
+  authored interior (wheel left-of-centre, readable speedo, fascia,
+  roof card, exterior hidden, inset map alive); the gear window now
+  reads `1` under `D1` (was `R` before the material-swap fix).
+- Gates: `cargo fmt --all -- --check` clean; `cargo clippy --workspace
+  --all-targets --all-features -- -D warnings` clean; `cargo test
+  --workspace` all suites green.
+
+## Classification
+
+Instrument bindings verified against authored data; composition
+(`*Offset` semantics) and `N`/`D` slot triggers remain designed/
+unrecovered — recorded as DSN-47/48/49 and UNK-27/28 in
+`docs/original-rules.md`; HUD-1/HUD-3 rows updated with the asset
+evidence and deviations.
+
+## Remaining open items
+
+- F22-B stays active: mirror (BACKSPACE), occlusion handling, and the
+  chase-near/far pair split (Free currently occupies that slot —
+  documented deviation) remain.
+- F22-A remainder: AC02/AC03 map legs and HUD-2 race instruments
+  (checkpoint list/laps/place/stopwatch over the dev line) stay open.
+- `N`/`D` gear slots have no trigger in our sim (no neutral state;
+  `D` reachable only via the table clamp past gear 6).
+- Cockpit look glance magnitudes and `WheelFact` units are designed
+  readings pending original recovery.
+
+---
+
 # Last iteration — F22-A.1 review repair: pause-map input leak (iteration 61)
 
 Iteration 61 on `ralph/night` (baseline `4ea8638`, F22-A.1 — external

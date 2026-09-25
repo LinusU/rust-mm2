@@ -248,6 +248,9 @@ pub fn drive_session(
             // state/report.
             commands.remove_resource::<crate::hudmap::HudMapReport>();
             commands.remove_resource::<mm2_game::HudMap>();
+            // Same for the cockpit rig's spawn report (F22-B.1) — the
+            // dash subtree itself is `SessionEntity`-stamped.
+            commands.remove_resource::<crate::dash::DashReport>();
             // `TireConditions` stays: it is a system input (the impact
             // filter and telemetry read `Res` every frame), and
             // `load_session_world` re-stamps it from the next session's
@@ -835,7 +838,7 @@ pub fn load_session_world(
         free_cam,
         free_xf,
     ));
-    if let Some(fog) = camera_fog {
+    if let Some(fog) = camera_fog.clone() {
         free_cam_ent.insert(fog);
     }
 
@@ -978,6 +981,30 @@ pub fn load_session_world(
             if !missing.is_empty() {
                 warn!(car = %def.id, "missing textures: {}", missing.join(", "));
             }
+            // F22-B.1: the authored cockpit rig — `_dash.pkg` interior
+            // geometry, `_dash.asnode` gauge calibration and the
+            // `camPovCS` eye position. Each record gates independently;
+            // a car without them simply has no cockpit (HUD-1/HUD-3).
+            let dash_report = crate::dash::spawn_dash(
+                &mut commands,
+                &vfs.0,
+                &def.id,
+                selected.paint,
+                &mut assets.meshes,
+                &mut assets.images,
+                &mut assets.materials,
+                vehicle,
+                owner,
+                *cam_mode,
+                camera_fog,
+            );
+            // `--cockpit` on a car with no authored `camPovCS` has no
+            // camera to bind — fall back to Chase rather than leaving
+            // the mode pointing at nothing.
+            if *cam_mode == CameraMode::Cockpit && !dash_report.cockpit {
+                commands.insert_resource(CameraMode::Chase);
+            }
+            commands.insert_resource(dash_report);
             if let Some(trailer) = &def.trailer {
                 let car_xf = Transform::from_translation(spawn.position)
                     .with_rotation(Quat::from_rotation_y(spawn.yaw));

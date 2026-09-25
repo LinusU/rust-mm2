@@ -12,6 +12,7 @@ pub mod bnd;
 pub mod cardata;
 pub mod cpvs;
 pub mod crashdata;
+pub mod dash;
 pub mod dave;
 pub mod fog;
 pub mod hudmap;

@@ -795,6 +795,11 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
         assists,
         gyro,
         trailer: false,
+        // `mmDashView`'s gauge full-scales bind to the carsim, not the
+        // dash record — the speedo's MaxSpeed is the authored top-gear
+        // top speed (HUD-1/F22-B.1; inferred binding, DSN-47).
+        top_speed_mps: (sim.trans.high_mph > 0.0 && sim.trans.high_mph.is_finite())
+            .then_some(sim.trans.high_mph * MPH_TO_MPS),
     };
 
     Ok(Converted { config, report })

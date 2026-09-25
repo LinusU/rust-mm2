@@ -14,8 +14,21 @@ pub enum CameraMode {
     /// Smooth follow behind the player vehicle.
     #[default]
     Chase,
+    /// Authored `camPovCS` cockpit/dash view (HUD-3; F22-B.1).
+    Cockpit,
     /// Free-fly debug camera.
     Free,
+}
+
+impl CameraMode {
+    /// `C` cycle order: Chase → Cockpit → Free → Chase (HUD-3).
+    fn next(self) -> Self {
+        match self {
+            Self::Chase => Self::Cockpit,
+            Self::Cockpit => Self::Free,
+            Self::Free => Self::Chase,
+        }
+    }
 }
 
 /// Chase camera tuning on the camera entity.
@@ -68,22 +81,78 @@ impl Default for FreeCamera {
     }
 }
 
-/// Toggle chase ↔ free with `C`; also swaps `is_active` so only one renders.
+/// The recognised session cameras — each `Camera` carries at most one
+/// of the three markers; unmarked cameras belong to other systems.
+type SessionCameras<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut Camera,
+        Option<&'static ChaseCamera>,
+        Option<&'static crate::dash::CockpitCamera>,
+        Option<&'static FreeCamera>,
+    ),
+>;
+
+/// `C` cycles the HUD-3 view chain (Chase → Cockpit → Free — Free is a
+/// dev extension beyond the authored chase/cockpit pair, DSN-48);
+/// `V` is the dashboard toggle — it jumps straight into or out of the
+/// cockpit view. (The original's dash key was `D`, but enhanced input
+/// put steering on `A`/`D` — the binding moves, the behavior stays;
+/// HUD-3, DSN-48.) A mode whose camera was never spawned (no authored
+/// `camPovCS`) is skipped so the key never dead-ends on a black screen.
+///
+/// Activation is marker-driven: each `Camera` carries exactly one of
+/// `ChaseCamera`/`CockpitCamera`/`FreeCamera`, and only the matching
+/// one is enabled. Cameras carrying none of them (the HUD-map camera,
+/// overlays) are left to their own owners — previously a `C` press
+/// flipped the map camera's `is_active` for a frame.
 pub fn toggle_camera(
     keys: Res<ButtonInput<KeyCode>>,
     mut mode: ResMut<CameraMode>,
-    mut cams: Query<(&mut Camera, Option<&ChaseCamera>)>,
+    mut cams: SessionCameras,
     mut cursor: Query<&mut CursorOptions>,
 ) {
-    if !keys.just_pressed(KeyCode::KeyC) {
+    let have = |m: CameraMode, cams: &SessionCameras| -> bool {
+        cams.iter().any(|(_, c, p, f)| match m {
+            CameraMode::Chase => c.is_some(),
+            CameraMode::Cockpit => p.is_some(),
+            CameraMode::Free => f.is_some(),
+        })
+    };
+    let next = if keys.just_pressed(KeyCode::KeyC) {
+        let mut m = mode.next();
+        for _ in 0..3 {
+            if have(m, &cams) {
+                break;
+            }
+            m = m.next();
+        }
+        m
+    } else if keys.just_pressed(KeyCode::KeyV) {
+        match *mode {
+            CameraMode::Cockpit => CameraMode::Chase,
+            _ if have(CameraMode::Cockpit, &cams) => CameraMode::Cockpit,
+            _ => return,
+        }
+    } else {
+        return;
+    };
+    if next == *mode {
         return;
     }
-    *mode = match *mode {
-        CameraMode::Chase => CameraMode::Free,
-        CameraMode::Free => CameraMode::Chase,
-    };
-    for (mut cam, chase) in &mut cams {
-        cam.is_active = (*mode == CameraMode::Chase) == chase.is_some();
+    *mode = next;
+    for (mut cam, chase, pov, free) in &mut cams {
+        let active = match *mode {
+            CameraMode::Chase => chase.is_some(),
+            CameraMode::Cockpit => pov.is_some(),
+            CameraMode::Free => free.is_some(),
+        };
+        // Only claim the recognised session cameras — an unmarked one
+        // (map, UI) is owned elsewhere.
+        if chase.is_some() || pov.is_some() || free.is_some() {
+            cam.is_active = active;
+        }
     }
     for mut opts in &mut cursor {
         let free = *mode == CameraMode::Free;

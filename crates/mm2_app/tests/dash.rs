@@ -1,0 +1,448 @@
+//! F22-B.1 cockpit/dashboard synthetic coverage: needle/wheel/gear drive
+//! mapping from authoritative vehicle state, the cockpit-vs-exterior
+//! visibility split, marker-based camera cycling (including the map
+//! camera staying untouched) and the authored-data absence gate.
+
+use bevy::ecs::world::CommandQueue;
+use bevy::prelude::*;
+use bevy::time::TimeUpdateStrategy;
+use mm2_app::camera::{CameraMode, ChaseCamera, FreeCamera, toggle_camera};
+use mm2_app::dash::{
+    CockpitCamera, CockpitPart, DashNode, DashRole, GearGlyph, cockpit_look, drive_dash,
+    spawn_dash, sync_dash_visibility,
+};
+use mm2_app::hudmap::HudMapCamera;
+use mm2_assets::Vfs;
+use mm2_game::{PlayerVehicle, Session, SessionConfig, SessionEntity, SessionPhase};
+use mm2_vehicle::{DriveDirection, Vehicle, VehicleConfig, VehicleState};
+use std::time::Duration;
+
+fn test_config() -> VehicleConfig {
+    let mut c = VehicleConfig {
+        top_speed_mps: Some(50.0),
+        ..Default::default()
+    };
+    c.engine.redline_rpm = 6000.0;
+    c.engine.idle_rpm = 800.0;
+    c.steering.low_speed_max_angle = 0.5;
+    c
+}
+
+fn playing_session() -> Session {
+    let mut s = Session::new();
+    s.begin(SessionConfig::default()).unwrap();
+    s.transition(SessionPhase::Ready).unwrap();
+    s.transition(SessionPhase::Countdown).unwrap();
+    s.transition(SessionPhase::Playing).unwrap();
+    s
+}
+
+fn base_app() -> App {
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / 60.0,
+        )))
+        .init_resource::<ButtonInput<KeyCode>>()
+        .insert_resource(CameraMode::Chase)
+        .insert_resource(playing_session());
+    app
+}
+
+fn spawn_player(app: &mut App, config: &VehicleConfig, state: VehicleState) -> Entity {
+    app.world_mut()
+        .spawn((
+            PlayerVehicle,
+            Vehicle {
+                config: config.clone(),
+            },
+            state,
+            Visibility::Visible,
+        ))
+        .id()
+}
+
+fn press(app: &mut App, key: KeyCode) {
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(key);
+    app.update();
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .reset_all();
+}
+
+fn z_angle(q: Quat) -> f32 {
+    let (_, _, z) = q.to_euler(EulerRot::XYZ);
+    z
+}
+
+#[test]
+fn needles_track_authoritative_state() {
+    let mut app = base_app();
+    app.add_systems(Update, drive_dash);
+    let config = test_config();
+    let mut state = VehicleState::new(&config);
+    state.forward_speed = 25.0; // half the authored top speed
+    state.rpm = 3000.0; // half redline
+    let player = spawn_player(&mut app, &config, state);
+
+    let speedo = app
+        .world_mut()
+        .spawn((
+            DashNode {
+                role: DashRole::Speed { min: 0.0, max: 3.6 },
+            },
+            Transform::default(),
+        ))
+        .id();
+    let tach = app
+        .world_mut()
+        .spawn((
+            DashNode {
+                role: DashRole::Tach {
+                    min: -0.1,
+                    max: 5.0,
+                },
+            },
+            Transform::default(),
+        ))
+        .id();
+    let dmg = app
+        .world_mut()
+        .spawn((
+            DashNode {
+                role: DashRole::Damage { min: 0.0, max: 3.0 },
+            },
+            Transform::default(),
+        ))
+        .id();
+    app.update();
+
+    let w = app.world();
+    let s = z_angle(w.get::<Transform>(speedo).unwrap().rotation);
+    let t = z_angle(w.get::<Transform>(tach).unwrap().rotation);
+    let d = z_angle(w.get::<Transform>(dmg).unwrap().rotation);
+    assert!((s - 1.8).abs() < 1e-5, "speedo half-sweep, got {s}");
+    assert!((t - 2.45).abs() < 1e-5, "tach half-sweep, got {t}");
+    // No authored damage record → needle parked at min, not fabricated.
+    assert_eq!(d, 0.0);
+
+    // Full-scale pins at the authored max.
+    app.world_mut()
+        .get_mut::<VehicleState>(player)
+        .unwrap()
+        .forward_speed = 75.0; // beyond top speed → clamps
+    app.update();
+    let rot = app.world().get::<Transform>(speedo).unwrap().rotation;
+    // 3.6 rad > π wraps in euler space — compare quaternions instead.
+    assert!(rot.angle_between(Quat::from_rotation_z(3.6)) < 1e-4);
+}
+
+#[test]
+fn wheel_and_gear_follow_the_sim() {
+    let mut app = base_app();
+    app.add_systems(Update, drive_dash);
+    let config = test_config();
+    let mut state = VehicleState::new(&config);
+    state.steer_angle = 0.25; // half of the 0.5 rad lock
+    state.direction = DriveDirection::Forward;
+    state.gear = 2;
+    spawn_player(&mut app, &config, state);
+
+    let wheel = app
+        .world_mut()
+        .spawn((
+            DashNode {
+                role: DashRole::Wheel { factor: 0.9 },
+            },
+            Transform::default(),
+        ))
+        .id();
+    // Gear glyph: authored slot table R, N, One…Six, D (9 materials).
+    app.init_resource::<Assets<StandardMaterial>>();
+    let mut mats = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+    let glyph_mats: Vec<Handle<StandardMaterial>> = (0..9)
+        .map(|_| mats.add(StandardMaterial::default()))
+        .collect();
+    let gear = app
+        .world_mut()
+        .spawn((
+            GearGlyph {
+                materials: glyph_mats.clone(),
+                slot: usize::MAX,
+            },
+            MeshMaterial3d(glyph_mats[0].clone()),
+        ))
+        .id();
+    app.update();
+
+    let w = app.world();
+    let rot = z_angle(w.get::<Transform>(wheel).unwrap().rotation);
+    // 0.5 of lock × 0.9 half-turns × π, negative for right-hand steer.
+    let want = -(0.25f32 / 0.5) * 0.9 * std::f32::consts::PI;
+    assert!((rot - want).abs() < 1e-5, "wheel roll {rot} vs {want}");
+
+    let glyph = w.get::<GearGlyph>(gear).unwrap();
+    assert_eq!(glyph.slot, 4); // forward gear 2 (0-based) → slot 4 ('Three')
+    let bound = w.get::<MeshMaterial3d<StandardMaterial>>(gear).unwrap();
+    assert_eq!(bound.0, glyph_mats[4]);
+
+    // Reverse binds slot 0 ('R').
+    let mut st = app
+        .world_mut()
+        .query_filtered::<&mut VehicleState, With<PlayerVehicle>>()
+        .single_mut(app.world_mut())
+        .unwrap();
+    st.direction = DriveDirection::Reverse;
+    app.update();
+    let glyph = app.world().get::<GearGlyph>(gear).unwrap();
+    assert_eq!(glyph.slot, 0);
+    let bound = app
+        .world()
+        .get::<MeshMaterial3d<StandardMaterial>>(gear)
+        .unwrap();
+    assert_eq!(bound.0, glyph_mats[0]);
+}
+
+#[test]
+fn camera_cycle_uses_markers_and_skips_absent_cockpit() {
+    let mut app = base_app();
+    app.add_systems(Update, toggle_camera);
+    let chase = app
+        .world_mut()
+        .spawn((
+            Camera3d::default(),
+            Camera {
+                is_active: true,
+                ..default()
+            },
+            ChaseCamera::default(),
+        ))
+        .id();
+    let free = app
+        .world_mut()
+        .spawn((
+            Camera3d::default(),
+            Camera::default(),
+            FreeCamera::default(),
+        ))
+        .id();
+    // A stray camera with no session marker — the HUD-map case: its
+    // is_active is owned by its own system and must not be touched.
+    let map = app
+        .world_mut()
+        .spawn((
+            Camera3d::default(),
+            Camera {
+                is_active: true,
+                ..default()
+            },
+            HudMapCamera,
+        ))
+        .id();
+
+    // C skips Cockpit (no CockpitCamera exists) → Free.
+    press(&mut app, KeyCode::KeyC);
+    assert_eq!(*app.world().resource::<CameraMode>(), CameraMode::Free);
+    assert!(!app.world().get::<Camera>(chase).unwrap().is_active);
+    assert!(app.world().get::<Camera>(free).unwrap().is_active);
+    assert!(app.world().get::<Camera>(map).unwrap().is_active);
+
+    press(&mut app, KeyCode::KeyC);
+    assert_eq!(*app.world().resource::<CameraMode>(), CameraMode::Chase);
+    assert!(app.world().get::<Camera>(chase).unwrap().is_active);
+
+    // V with no cockpit cam is a no-op.
+    press(&mut app, KeyCode::KeyV);
+    assert_eq!(*app.world().resource::<CameraMode>(), CameraMode::Chase);
+}
+
+#[test]
+fn camera_cycle_binds_the_cockpit() {
+    let mut app = base_app();
+    app.add_systems(Update, toggle_camera);
+    let chase = app
+        .world_mut()
+        .spawn((
+            Camera3d::default(),
+            Camera {
+                is_active: true,
+                ..default()
+            },
+            ChaseCamera::default(),
+        ))
+        .id();
+    let cockpit = app
+        .world_mut()
+        .spawn((
+            Camera3d::default(),
+            Camera::default(),
+            CockpitCamera {
+                offset: Vec3::new(0.0, 1.19, -0.55),
+                reverse_offset: Some(Vec3::new(0.0, 1.7, 0.75)),
+                pitch: 0.0,
+                look_yaw: 0.0,
+            },
+        ))
+        .id();
+
+    // V jumps straight into the cockpit view.
+    press(&mut app, KeyCode::KeyV);
+    assert_eq!(*app.world().resource::<CameraMode>(), CameraMode::Cockpit);
+    assert!(app.world().get::<Camera>(cockpit).unwrap().is_active);
+    assert!(!app.world().get::<Camera>(chase).unwrap().is_active);
+
+    // V again leaves it; C from Chase reaches Cockpit too.
+    press(&mut app, KeyCode::KeyV);
+    assert_eq!(*app.world().resource::<CameraMode>(), CameraMode::Chase);
+    press(&mut app, KeyCode::KeyC);
+    assert_eq!(*app.world().resource::<CameraMode>(), CameraMode::Cockpit);
+    assert!(app.world().get::<Camera>(cockpit).unwrap().is_active);
+}
+
+#[test]
+fn cockpit_view_splits_visibility() {
+    let mut app = base_app();
+    app.add_systems(Update, sync_dash_visibility);
+    let config = test_config();
+    let player = spawn_player(&mut app, &config, VehicleState::new(&config));
+
+    let exterior = app
+        .world_mut()
+        .spawn((Visibility::Visible, Transform::default()))
+        .id();
+    let interior = app
+        .world_mut()
+        .spawn((Visibility::Visible, CockpitPart, Transform::default()))
+        .id();
+    app.world_mut().entity_mut(player).add_child(exterior);
+    app.world_mut().entity_mut(player).add_child(interior);
+
+    // Chase: everything visible.
+    app.update();
+    assert_eq!(
+        *app.world().get::<Visibility>(exterior).unwrap(),
+        Visibility::Visible
+    );
+
+    *app.world_mut().resource_mut::<CameraMode>() = CameraMode::Cockpit;
+    app.update();
+    assert_eq!(
+        *app.world().get::<Visibility>(exterior).unwrap(),
+        Visibility::Hidden
+    );
+    assert_eq!(
+        *app.world().get::<Visibility>(interior).unwrap(),
+        Visibility::Visible
+    );
+
+    *app.world_mut().resource_mut::<CameraMode>() = CameraMode::Chase;
+    app.update();
+    assert_eq!(
+        *app.world().get::<Visibility>(exterior).unwrap(),
+        Visibility::Visible
+    );
+}
+
+#[test]
+fn numpad_look_glances_and_reverses() {
+    let mut app = base_app();
+    *app.world_mut().resource_mut::<CameraMode>() = CameraMode::Cockpit;
+    app.add_systems(Update, cockpit_look);
+    let cam = app
+        .world_mut()
+        .spawn((
+            CockpitCamera {
+                offset: Vec3::new(0.0, 1.19, -0.55),
+                reverse_offset: Some(Vec3::new(0.0, 1.7, 0.75)),
+                pitch: 0.0,
+                look_yaw: 0.0,
+            },
+            Transform::from_translation(Vec3::new(0.0, 1.19, -0.55)),
+        ))
+        .id();
+
+    // Held numpad-4 eases the view left.
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::Numpad4);
+    for _ in 0..30 {
+        app.update();
+    }
+    let yaw = app.world().get::<CockpitCamera>(cam).unwrap().look_yaw;
+    assert!(yaw > 1.3, "look_yaw eased toward +π/2, got {yaw}");
+
+    // Releasing returns to the authored pose.
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .reset_all();
+    for _ in 0..30 {
+        app.update();
+    }
+    let c = app.world().get::<CockpitCamera>(cam).unwrap();
+    assert!(
+        c.look_yaw.abs() < 0.1,
+        "released look eases home, got {}",
+        c.look_yaw
+    );
+
+    // Numpad-2 rides the authored ReverseOffset.
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::Numpad2);
+    app.update();
+    let xf = app.world().get::<Transform>(cam).unwrap();
+    assert_eq!(xf.translation, Vec3::new(0.0, 1.7, 0.75));
+}
+
+#[test]
+fn spawn_dash_reports_absent_without_authored_records() {
+    // No mounted content at all: every authored gate misses and the
+    // report says why instead of a fabricated dash appearing.
+    let mut app = base_app();
+    app.init_resource::<Assets<Mesh>>()
+        .init_resource::<Assets<Image>>()
+        .init_resource::<Assets<StandardMaterial>>();
+    let vehicle = app
+        .world_mut()
+        .spawn((PlayerVehicle, Visibility::Visible))
+        .id();
+    let vfs = Vfs::new();
+
+    let report = app
+        .world_mut()
+        .resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
+                world.resource_scope(|world, mut materials: Mut<Assets<StandardMaterial>>| {
+                    let mut queue = CommandQueue::default();
+                    let report = {
+                        let mut commands = Commands::new(&mut queue, world);
+                        spawn_dash(
+                            &mut commands,
+                            &vfs,
+                            "nonexistent_car",
+                            0,
+                            &mut meshes,
+                            &mut images,
+                            &mut materials,
+                            vehicle,
+                            SessionEntity(1),
+                            CameraMode::Chase,
+                            None,
+                        )
+                    };
+                    queue.apply(world);
+                    report
+                })
+            })
+        });
+
+    assert_eq!(report.absent.as_deref(), Some("missing-spec+pkg"));
+    assert!(!report.cockpit);
+    assert_eq!(report.parts, 0);
+    let mut q = app
+        .world_mut()
+        .query_filtered::<Entity, With<CockpitPart>>();
+    assert_eq!(q.iter(app.world()).count(), 0);
+}

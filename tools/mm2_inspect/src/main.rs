@@ -81,6 +81,12 @@ enum Command {
         dir: PathBuf,
         /// Logical path of the texture.
         logical: String,
+        /// Also print a luminance ASCII preview of level 0.
+        #[arg(long)]
+        ascii: bool,
+        /// Write level 0 as a binary PPM image to this path.
+        #[arg(long)]
+        ppm: Option<PathBuf>,
     },
     /// Parse and describe a PKG object.
     Pkg {
@@ -88,6 +94,9 @@ enum Command {
         dir: PathBuf,
         /// Logical path of the package.
         logical: String,
+        /// Also dump per-section vertex positions/UVs.
+        #[arg(long)]
+        verts: bool,
     },
     /// Parse and describe a PSDL city file.
     Psdl {
@@ -508,8 +517,17 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::List { dir, prefix } => list(dir, cli.mods.as_deref(), prefix.as_deref()),
         Command::Resolve { dir, logical } => resolve(dir, cli.mods.as_deref(), logical),
         Command::Lookup { dir, stem } => lookup(dir, cli.mods.as_deref(), stem),
-        Command::Tex { dir, logical } => tex(dir, cli.mods.as_deref(), logical),
-        Command::Pkg { dir, logical } => pkg(dir, cli.mods.as_deref(), logical),
+        Command::Tex {
+            dir,
+            logical,
+            ascii,
+            ppm,
+        } => tex(dir, cli.mods.as_deref(), logical, *ascii, ppm.as_deref()),
+        Command::Pkg {
+            dir,
+            logical,
+            verts,
+        } => pkg(dir, cli.mods.as_deref(), logical, *verts),
         Command::Psdl { dir, logical } => psdl(dir, cli.mods.as_deref(), logical),
         Command::Dump { dir, logical } => dump(dir, cli.mods.as_deref(), logical),
         Command::Cars { dir } => cars(dir, cli.mods.as_deref()),
@@ -876,7 +894,13 @@ fn lookup(dir: &Path, mods: Option<&Path>, stem: &str) -> Result<(), Box<dyn std
     }
 }
 
-fn tex(dir: &Path, mods: Option<&Path>, logical: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn tex(
+    dir: &Path,
+    mods: Option<&Path>,
+    logical: &str,
+    ascii: bool,
+    ppm: Option<&Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let vfs = build_vfs(dir, mods)?;
     let (bytes, r) = vfs.read_path(logical)?;
     let tex = TexFile::parse(&bytes).map_err(|e| attach(&r, e))?;
@@ -897,10 +921,55 @@ fn tex(dir: &Path, mods: Option<&Path>, logical: &str) -> Result<(), Box<dyn std
             level.data.len()
         );
     }
+    if ascii {
+        let Some(rgba) = tex.decode_rgba(0) else {
+            println!("  (no decodable level 0)");
+            return Ok(());
+        };
+        let (w, h) = (tex.header.width as usize, tex.header.height as usize);
+        let mut lum = vec![0u32; w * h];
+        let mut peak = 1u32;
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                let l = (rgba[i] as u32 + rgba[i + 1] as u32 + rgba[i + 2] as u32) / 3;
+                lum[y * w + x] = l;
+                peak = peak.max(l);
+            }
+        }
+        const RAMP: &[u8] = b" .:-=+*#%@";
+        for y in 0..h {
+            let mut line = String::with_capacity(w);
+            for x in 0..w {
+                let l = lum[y * w + x];
+                line.push(RAMP[(l * 9 / peak.max(1)).min(9) as usize] as char);
+            }
+            println!("{line}");
+        }
+    }
+    if let Some(path) = ppm {
+        let Some(rgba) = tex.decode_rgba(0) else {
+            return Err("no decodable level 0".into());
+        };
+        let mut out = Vec::with_capacity(rgba.len());
+        out.extend_from_slice(
+            format!("P6\n{} {}\n255\n", tex.header.width, tex.header.height).as_bytes(),
+        );
+        for px in rgba.as_chunks::<4>().0 {
+            out.extend_from_slice(&px[..3]);
+        }
+        std::fs::write(path, &out)?;
+        println!("  wrote {}", path.display());
+    }
     Ok(())
 }
 
-fn pkg(dir: &Path, mods: Option<&Path>, logical: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn pkg(
+    dir: &Path,
+    mods: Option<&Path>,
+    logical: &str,
+    verts: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let vfs = build_vfs(dir, mods)?;
     let (bytes, r) = vfs.read_path(logical)?;
     let pkg = Pkg::parse(&bytes).map_err(|e| attach(&r, e))?;
@@ -913,13 +982,13 @@ fn pkg(dir: &Path, mods: Option<&Path>, logical: &str) -> Result<(), Box<dyn std
     for file in &pkg.files {
         match &file.data {
             PkgChunk::Geometry(g) => {
-                let verts: usize = g
+                let vcount: usize = g
                     .sections
                     .iter()
                     .flat_map(|s| &s.strips)
                     .map(|s| s.vertices.len())
                     .sum();
-                let indices: usize = g
+                let icount: usize = g
                     .sections
                     .iter()
                     .flat_map(|s| &s.strips)
@@ -929,10 +998,24 @@ fn pkg(dir: &Path, mods: Option<&Path>, logical: &str) -> Result<(), Box<dyn std
                     "  {:20} geometry: {} sections, {} verts, {} indices, fvf={:#x}",
                     file.name,
                     g.sections.len(),
-                    verts,
-                    indices,
+                    vcount,
+                    icount,
                     g.fvf
                 );
+                if verts {
+                    for (si, sec) in g.sections.iter().enumerate() {
+                        for strip in &sec.strips {
+                            for (vi, v) in strip.vertices.iter().enumerate() {
+                                println!(
+                                    "    s{si} v{vi}: pos {:?} uv {:?} shader {}",
+                                    v.position,
+                                    v.tex_coords.first().copied(),
+                                    sec.shader_offset
+                                );
+                            }
+                        }
+                    }
+                }
             }
             PkgChunk::Shaders(s) => println!(
                 "  {:20} shaders: {} paint jobs x {} shaders",

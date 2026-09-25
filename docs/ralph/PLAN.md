@@ -58,7 +58,28 @@ process-level leg (interactive finish), F10-B's remaining AC03 checklist scope
 (scrape + audible
 evidence — no output device), or the research-gated F15-B remainder
 (`unkFlag`/`cornerBrakingThreshold`/`weirdPathfinding` consumption —
-semantics unverified))** — the latest iteration repaired the F22-A.1
+semantics unverified))** — the latest iteration landed F22-B.1,
+opening the F22-B parent: the authored cockpit/dashboard view —
+`mm2_formats::dash` parses `tune/<car>_dash.asnode` (cluster/gauge
+calibration) and `tune/camera/<car>_dash.campovcs` (the authored
+`camPovCS` eye); `mm2_app::dash` spawns the authored `_dash.pkg`
+cluster, roof card, needles, gear indicator and wheel as vehicle
+children plus the authored cockpit camera, drives the instruments off
+authoritative `Vehicle`/`VehicleState`/`VehicleDamage` telemetry
+(speedo full-scale bound to `Trans.High` via the new
+`VehicleConfig::top_speed_mps`), splits exterior/interior visibility
+under `CameraMode::Cockpit`, and reports `dash=` in the smoke record;
+`camera.rs` gained marker-driven `C` cycling (Chase→Cockpit→Free,
+skipping absent cameras — the map camera can no longer blink on a
+press, repairing the A.1 review wart), `V` as the dash toggle (the
+documented `D` conflicts with enhanced WASD steering — DSN-48), and
+numpad cockpit look incl. the authored `ReverseOffset` back-look. The
+gear-indicator mechanism was recovered from the pkg itself: its
+paint-job table is repurposed as gear slots (`R`, `N`, `One`…`Six`,
+`D` glyph textures), so the engaged gear swaps the quad's material
+rather than sliding a strip. Verified headlessly on both cities and
+two car archetypes plus windowed screenshots. Before that it repaired
+the F22-A.1
 external review's blocking finding (the hidden pause menu stayed
 input-live under the fullscreen pause map — `pause_input` now gates
 on a held `HudMap.fullscreen`, `fullscreen` clears unless the session
@@ -2500,7 +2521,8 @@ mask them.
 | F21-C | queued | F21-B | — |
 | F22-A | active | F01-A, F02-B, F11-B | Split into A.1 (authored in-race HUD minimap — implemented below); the race-HUD instrument remainder (HUD-1/HUD-2's dashboard/race set over the dev telemetry line) stays open. Dev HUD (speed/gear/RPM/grounded/cam pose) exists. |
 | F22-A.1 | implemented | F01-A, F02-B, F11-B | Authored in-race HUD minimap (HUD-4/CTL-1). Recovery first: the exe carries an `mmHudMap` class loading `hudmap_%s.pkg` + `hudmap_{square,tri}` markers and `IOID_MAP`/`MAPORIENT`/`MAPRES`/`FMAP` controls; `geometry/hudmap_{sf,london}.pkg` sections are authored *world-space XZ* quads textured `s_*map*` (sf span −2315…485 × −2800…1632 — the city extent, so world→map alignment is identity); the markers are authored flat in XZ (tri ~16×28 m nose −Z; square ~14×14 m with authored `*_DOT` paint jobs); `tune/{sf,london}.mmhudmap` is the authored `mmHudMap` tune (`Size`/`Pos` window fractions, `ZoomIn`/`Approach`/`ZoomInDist`/`ZoomOutDist`, `IconScale{Min,Max}`, fullscreen equivalents, `Ocean` color). Landed: `mm2_formats::hudmap` (`HudMapSpec` parser over the tune grammar — the spaced-name fields tokenize as `Approach`/`Ocean` with a qualifier word in the values); `mm2_game::hudmap` (`HudMap` session state — `MapView::{Inset,Large,Off}`, `MapOrientation`, authored zoom pairs + approach-rate easing, fullscreen flag, generation staleness); `mm2_app::hudmap` (session-owned spawn of the authored tiles/markers under a dedicated ortho camera on its own `RenderLayers`, per-frame binding to participants/`RaceProgress`/`navigation_target`, `hudmap_input` for TAB/E/F/Q, `WorldCamera3d` filter alias excluding the map cam from every "the active camera" pick — audio listener, PVS source, sky dome, HUD retarget, billboards). Controls per HUD-4: TAB cycles Inset→Large→Off (the two-view ordering is designed — original geometry/layout unrecovered), E toggles the authored zoom pair, F toggles rotation, Q opens the fullscreen map *and* pauses under `allows_pause` only, replacing the pause overlay (pause rows suppressed while it is up); E/Q stay free-camera-owned there. Markers: player tri + opponent tri pool, checkpoint squares (uncleared bright / cleared dark per HUD-4, the authored DOT paint indices), `navigation_target` highlight, finish revealed only once unlocked. Lifecycle: bound only on city sessions with usable authored content (`HudMapReport` records spec/pkg/tiles/markers; `absent:<reason>` otherwise), torn down with the session. Smoke: ` map=<view>/<orient>/z<zoom>[/fs]/<pkg>/<tiles>t/<markers>m` on city records; dev-world records omit the field (bit-identical). Tests: formats +5, game +6, app tests/hudmap.rs +4 (synthetic-install bind, absent-content report, dev-world field absence, fullscreen pause record). Retail legs (`fnv1a64:e91e6cd4b2ae30d9`): sf `--city sf` → `map=inset/north/z1195/hudmap_sf.pkg/6t/1m`; london → `…/hudmap_london.pkg/4t/1m`; sf `circuit:0 --bot` → `14m` (1 player + 4 opponents + 9 gate dots); `--pause-map` → `phase=paused`, `map=…/z1574/fs/…` (mid-ease toward authored 1581). Windowed screenshots: inset map renders bottom-right with authored tiles; fullscreen map covers the paused world. Review repair (iter 61): `pause_input` now early-returns while a non-stale `fullscreen` map holds (the hidden pause rows were input-live behind the map — Enter/arrows/Backspace could activate an unseen row or resume into a covered-over session); the `hudmap_input` exit invariant clears `fullscreen` whenever the session is not `Paused` with a pause intent pending, and `dev_pause_map_once`/`dev_pause_once` carry the same MP-6 `allows_pause` gate as Esc/Q. tests/session.rs harness schedules the map systems like the binary, +3 regression tests. Candidate pending external check. |
-| F22-B | queued | F22-A | Chase + free cameras exist; no cockpit/mirror/occlusion handling. |
+| F22-B.1 | implemented | F22-A | Authored cockpit/dashboard view (HUD-1/HUD-3). Every stock `vp*` ships `geometry/<id>_dash.pkg` (flat quad parts in a shared cluster space: `dash`/`roof`/`speed_needle`/`tach_needle`/`damage_needle`/`gear_indicator`/`wheel`), `tune/<id>_dash.asnode` (`DashPos`/`RoofPos`/`WheelPos`, per-gauge `*Offset`/`*PivotOffset`, `*RotMin/Max` sweeps, `WheelFact`) and `tune/camera/<id>_dash.campovcs` (`camPovCS`: `Offset`/`ReverseOffset`/`TrackTo`/`Pitch`/FOV/near/far). Landed: `mm2_formats::dash` (`DashSpec`/`PovCamSpec` parsers over the tune grammar); `VehicleConfig::top_speed_mps` from authored `Trans.High` (mph→m/s; dev cars/trailers `None`); `mm2_app::dash` (`spawn_dash` — independent authored gates: camera needs `camPovCS`, cluster needs `asnode`+`pkg`, absence degrades to `absent:<why>`; `drive_dash` — needles by authored sweep radians against `top_speed_mps`/redline/damage fraction, wheel `steer/lock × WheelFact`, gear glyph by material swap across the pkg's repurposed paint-job slots `R,N,One…Six,D` — the recovered mechanism; `sync_dash_visibility` cockpit/exterior split; `cockpit_look` numpad glances + `ReverseOffset` back-look); `camera.rs` — `CameraMode::Cockpit`, marker-driven cycling that skips absent modes and never touches unmarked cameras, `V` dash toggle (`D` is steer-right under enhanced WASD — DSN-48); `DevOverrides::cockpit`/`--cockpit` flag with chase fallback; smoke `dash=<n>p/<cam|nocam>`. Evidence: sf/london `vpbug`+`vpbus` headless `dash=11p/cam`, windowed cockpit captures (gear window reads the engaged gear), 7 synthetic tests. Composition and `N`/`D` triggers remain designed/unrecovered (DSN-47/49, UNK-27/28). |
+| F22-B | active | F22-A | Split into B.1 (authored cockpit/dash view — implemented below); the mirror/occlusion remainder stays open. |
 | F22-C | queued | F22-B | — |
 | F23-A | queued | F01-A, F16-A | Fixed keyboard + gamepad mapping in `input.rs`; no rebind/settings persistence. |
 | F23-B | queued | F23-A | — |

@@ -15,6 +15,7 @@ pub mod city;
 pub mod contracts;
 pub mod damage;
 pub mod damage_fx;
+pub mod dash;
 pub mod decals;
 pub mod dev_world;
 pub mod environment;
