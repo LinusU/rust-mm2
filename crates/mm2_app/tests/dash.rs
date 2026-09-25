@@ -7,14 +7,15 @@ use bevy::ecs::world::CommandQueue;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::camera::{CameraMode, ChaseCamera, FreeCamera, toggle_camera};
+use mm2_app::car_visual::{GlowKind, GlowPart, HeadlightsOn, update_glows};
 use mm2_app::dash::{
-    CockpitCamera, CockpitPart, DashNode, DashRole, GearGlyph, cockpit_look, drive_dash,
-    spawn_dash, sync_dash_visibility,
+    CockpitCamera, CockpitHidden, CockpitPart, DashNode, DashRole, GearGlyph, cockpit_look,
+    drive_dash, spawn_dash, sync_dash_visibility,
 };
 use mm2_app::hudmap::HudMapCamera;
 use mm2_assets::Vfs;
 use mm2_game::{PlayerVehicle, Session, SessionConfig, SessionEntity, SessionPhase};
-use mm2_vehicle::{DriveDirection, Vehicle, VehicleConfig, VehicleState};
+use mm2_vehicle::{DriveDirection, Vehicle, VehicleConfig, VehicleInput, VehicleState};
 use std::time::Duration;
 
 fn test_config() -> VehicleConfig {
@@ -345,6 +346,149 @@ fn cockpit_view_splits_visibility() {
     );
 }
 
+/// The split only ever restores what it hid: a node another system
+/// already `Hidden` — the detached-breakaway-panel case — stays down in
+/// every mode, `GlowPart` carriers stay `update_glows`' business, and a
+/// lit lamp never wins inside the cockpit (the binary orders the split
+/// after the glow owner for exactly that).
+#[test]
+fn cockpit_split_respects_other_visibility_owners() {
+    let mut app = base_app();
+    app.init_resource::<HeadlightsOn>();
+    // The binary's order: the glow owner writes, the split reconciles.
+    app.add_systems(Update, (update_glows, sync_dash_visibility).chain());
+    let config = test_config();
+    let mut state = VehicleState::new(&config);
+    state.direction = DriveDirection::Forward;
+    let player = spawn_player(&mut app, &config, state);
+    app.world_mut()
+        .entity_mut(player)
+        .insert(VehicleInput::default());
+
+    // An ordinary exterior panel, a node another system already hid
+    // (the detached-breakaway case), and an unlit brake glow.
+    let panel = app
+        .world_mut()
+        .spawn((Visibility::Visible, Transform::default()))
+        .id();
+    let detached = app
+        .world_mut()
+        .spawn((Visibility::Hidden, Transform::default()))
+        .id();
+    let brake = app
+        .world_mut()
+        .spawn((
+            GlowPart(GlowKind::Brake),
+            Visibility::Hidden,
+            Transform::default(),
+        ))
+        .id();
+    for child in [panel, detached, brake] {
+        app.world_mut().entity_mut(player).add_child(child);
+    }
+
+    // Chase: the sweep must not re-show what it does not own — the
+    // detached panel rendered on top of its fragment before.
+    app.update();
+    assert_eq!(
+        *app.world().get::<Visibility>(panel).unwrap(),
+        Visibility::Visible
+    );
+    for e in [detached, brake] {
+        assert_eq!(
+            *app.world().get::<Visibility>(e).unwrap(),
+            Visibility::Hidden,
+            "an owner-hidden node must stay hidden in default Chase"
+        );
+    }
+
+    // Cockpit: the panel earns the split's tag; the owner-hidden nodes
+    // do not.
+    *app.world_mut().resource_mut::<CameraMode>() = CameraMode::Cockpit;
+    app.update();
+    assert!(app.world().get::<CockpitHidden>(panel).is_some());
+    assert!(app.world().get::<CockpitHidden>(detached).is_none());
+    assert!(app.world().get::<CockpitHidden>(brake).is_none());
+    for e in [panel, detached, brake] {
+        assert_eq!(
+            *app.world().get::<Visibility>(e).unwrap(),
+            Visibility::Hidden
+        );
+    }
+
+    // A lit lamp mid-cockpit still loses to the split — the owner wrote
+    // `Visible`, the split hides it after.
+    app.world_mut()
+        .get_mut::<VehicleInput>(player)
+        .unwrap()
+        .brake = 1.0;
+    app.update();
+    assert_eq!(
+        *app.world().get::<Visibility>(brake).unwrap(),
+        Visibility::Hidden,
+        "a lit brake glow stays hidden inside the cockpit"
+    );
+    app.world_mut()
+        .get_mut::<VehicleInput>(player)
+        .unwrap()
+        .brake = 0.0;
+
+    // Back in Chase: only the tagged panel comes back — the detached
+    // node and the unlit glow keep their owners' Hidden.
+    *app.world_mut().resource_mut::<CameraMode>() = CameraMode::Chase;
+    app.update();
+    assert_eq!(
+        *app.world().get::<Visibility>(panel).unwrap(),
+        Visibility::Visible
+    );
+    assert!(app.world().get::<CockpitHidden>(panel).is_none());
+    for e in [detached, brake] {
+        assert_eq!(
+            *app.world().get::<Visibility>(e).unwrap(),
+            Visibility::Hidden,
+            "an owner-hidden node must never be re-shown on exit"
+        );
+    }
+
+    // And the glow's owner still owns it — braking relights the quad.
+    app.world_mut()
+        .get_mut::<VehicleInput>(player)
+        .unwrap()
+        .brake = 1.0;
+    app.update();
+    assert_eq!(
+        *app.world().get::<Visibility>(brake).unwrap(),
+        Visibility::Visible
+    );
+}
+
+/// With no recognised session camera at all — the menu phase, an empty
+/// world — `C` must not drift `CameraMode`: the old loop settled on an
+/// arbitrary step, which could leave a later session's mode pointing at
+/// a camera that does not exist.
+#[test]
+fn camera_cycle_without_session_cameras_is_a_no_op() {
+    let mut app = base_app();
+    app.add_systems(Update, toggle_camera);
+    // An unmarked camera (the HUD-map case) does not count — its
+    // is_active is owned elsewhere.
+    app.world_mut().spawn((Camera3d::default(), HudMapCamera));
+
+    *app.world_mut().resource_mut::<CameraMode>() = CameraMode::Cockpit;
+    press(&mut app, KeyCode::KeyC);
+    assert_eq!(
+        *app.world().resource::<CameraMode>(),
+        CameraMode::Cockpit,
+        "a press with zero marked cameras must not drift the mode"
+    );
+    press(&mut app, KeyCode::KeyC);
+    assert_eq!(*app.world().resource::<CameraMode>(), CameraMode::Cockpit);
+
+    *app.world_mut().resource_mut::<CameraMode>() = CameraMode::Chase;
+    press(&mut app, KeyCode::KeyC);
+    assert_eq!(*app.world().resource::<CameraMode>(), CameraMode::Chase);
+}
+
 #[test]
 fn numpad_look_glances_and_reverses() {
     let mut app = base_app();
@@ -423,6 +567,7 @@ fn spawn_dash_reports_absent_without_authored_records() {
                             &vfs,
                             "nonexistent_car",
                             0,
+                            None,
                             &mut meshes,
                             &mut images,
                             &mut materials,

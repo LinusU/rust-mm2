@@ -233,8 +233,13 @@ pub fn detach_breaks(
 
                 // Hide the intact representation — it is exactly the
                 // geometry the fragment picks up, so nothing doubles.
+                // This `Hidden` is now ours: drop any claim the cockpit
+                // visibility split holds on the node, so leaving
+                // `CameraMode::Cockpit` never re-shows the panel next to
+                // its fragment.
                 if let Ok((_, _, mut vis, _)) = visuals.get_mut(node) {
                     *vis = Visibility::Hidden;
+                    commands.entity(node).remove::<crate::dash::CockpitHidden>();
                 }
 
                 // Spawn the fragment body at the detached mesh's own

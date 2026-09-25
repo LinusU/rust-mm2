@@ -1073,7 +1073,11 @@ fn main() {
                 camera::chase_follow,
                 camera::free_fly.run_if(not(capturing)),
                 dash::drive_dash,
-                dash::sync_dash_visibility,
+                // After the glow-quad owner: the split's cockpit hide
+                // keeps the last word over a lit lamp, and outside the
+                // cockpit it restores only what it tagged, so ordering
+                // the two cannot fight over an unlit one.
+                dash::sync_dash_visibility.after(car_visual::update_glows),
                 dash::cockpit_look.run_if(not(capturing)),
             ),
             reset_input,

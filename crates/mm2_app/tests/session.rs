@@ -9,7 +9,7 @@ use avian3d::prelude::*;
 use bevy::ecs::query::QueryFilter;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
-use mm2_app::camera::CameraMode;
+use mm2_app::camera::{CameraMode, ChaseCamera};
 use mm2_app::contracts::{self, ImpactFilter};
 use mm2_app::hudmap;
 use mm2_app::pause::{self, PauseMenu, PauseUi};
@@ -997,4 +997,38 @@ fn fixed_tick_driving_is_update_rate_independent() {
     assert!((v60 - v30).abs() < 1e-3, "speeds diverged: {v60} vs {v30}");
     // Sanity: the car actually drove, not two identically parked states.
     assert!(v60 > 5.0, "the drive probe should be moving ({v60} m/s)");
+}
+
+/// F22-B.1 review repair: `CameraMode::Cockpit` held at load — a
+/// `--cockpit` launch, or a mode persisted across a reload into a
+/// dashless car — must not leave zero active cameras. The effective
+/// mode resolves before the session cameras spawn, so the load lands
+/// on Chase with the chase camera active (the dev car carries no
+/// authored `camPovCS`, and the `None`-def arm never runs
+/// `spawn_dash`).
+#[test]
+fn cockpit_without_authored_camera_falls_back_to_an_active_chase() {
+    let mut app = dev_app();
+    *app.world_mut().resource_mut::<CameraMode>() = CameraMode::Cockpit;
+    app.update();
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+    assert_eq!(
+        *app.world().resource::<CameraMode>(),
+        CameraMode::Chase,
+        "no authored camPovCS exists — the mode falls back at load"
+    );
+    let chase = single::<With<ChaseCamera>>(&mut app);
+    assert!(
+        app.world().get::<Camera>(chase).unwrap().is_active,
+        "the fallback leaves the chase camera active — something renders"
+    );
+    let active = {
+        let world = app.world_mut();
+        world
+            .query::<&Camera>()
+            .iter(world)
+            .filter(|c| c.is_active)
+            .count()
+    };
+    assert_eq!(active, 1, "exactly one session camera renders");
 }

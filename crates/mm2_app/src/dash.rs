@@ -40,13 +40,17 @@ use bevy::prelude::*;
 
 use mm2_assets::Vfs;
 use mm2_content::model::{ModelPart, VehicleModel, build_model};
-use mm2_formats::{dash::DashSpec, mtx::Mtx, pkg::Pkg};
+use mm2_formats::{
+    dash::{DashSpec, PovCamSpec},
+    mtx::Mtx,
+    pkg::Pkg,
+};
 use mm2_game::{PlayerVehicle, Session, SessionEntity, SessionPhase, VehicleDamage};
 use mm2_vehicle::{DriveDirection, Vehicle, VehicleState};
 
 use crate::{
     camera::CameraMode,
-    car_visual::{group_material, group_mesh},
+    car_visual::{GlowPart, group_material, group_mesh},
     city::MaterialCache,
 };
 
@@ -73,6 +77,15 @@ pub struct CockpitCamera {
 /// direct child of the vehicle.
 #[derive(Component)]
 pub struct CockpitPart;
+
+/// A vehicle child `sync_dash_visibility` hid for the cockpit view.
+/// The tag is the split's ownership claim: only tagged children are
+/// restored when the mode leaves Cockpit — a child another system hid
+/// (a detached `BreakPartVisual`, an unlit `GlowPart`) is never tagged,
+/// and an owner that hides a tagged child drops the tag so the split
+/// never re-shows it.
+#[derive(Component)]
+pub struct CockpitHidden;
 
 /// Root of the authored dash cluster (`DashPos`-anchored).
 #[derive(Component)]
@@ -152,13 +165,24 @@ fn read_text(vfs: &Vfs, logical: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
+/// Read and parse `tune/camera/<car>_dash.campovcs`, when the record
+/// exists — the authored `camPovCS` eye [`spawn_dash`] binds. Resolved
+/// ahead of the session cameras so `CameraMode::Cockpit` can fall back
+/// before any camera spawns inactive (a dashless car, the dev car or a
+/// `Cockpit` mode persisted across a reload has no camera otherwise).
+pub fn load_pov_cam(vfs: &Vfs, car: &str) -> Option<PovCamSpec> {
+    read_text(vfs, &format!("tune/camera/{car}_dash.campovcs"))
+        .and_then(|t| PovCamSpec::parse(&t).ok())
+}
+
 fn v3(f: Option<[f32; 3]>) -> Vec3 {
     f.map(Vec3::from).unwrap_or(Vec3::ZERO)
 }
 
 /// Load and spawn the authored cockpit rig under `vehicle`.
 ///
-/// Three independent authored gates: the camera needs `camPovCS`, the
+/// Three independent authored gates: the camera needs the `camPovCS`
+/// record (`pov`, resolved by the caller — see [`load_pov_cam`]), the
 /// cluster needs both the `_dash.asnode` placement record and the
 /// `_dash.pkg` geometry. Missing pieces degrade the report rather than
 /// fabricating a stand-in — a car with only the camera record still
@@ -169,6 +193,7 @@ pub fn spawn_dash(
     vfs: &Vfs,
     car: &str,
     paint: usize,
+    pov: Option<PovCamSpec>,
     meshes: &mut Assets<Mesh>,
     images: &mut Assets<Image>,
     materials: &mut Assets<StandardMaterial>,
@@ -179,8 +204,6 @@ pub fn spawn_dash(
 ) -> DashReport {
     let mut report = DashReport::default();
 
-    let pov = read_text(vfs, &format!("tune/camera/{car}_dash.campovcs"))
-        .and_then(|t| mm2_formats::dash::PovCamSpec::parse(&t).ok());
     let spec =
         read_text(vfs, &format!("tune/{car}_dash.asnode")).and_then(|t| DashSpec::parse(&t).ok());
     let model = vfs
@@ -410,32 +433,65 @@ fn spawn_part_meshes(
 
 /// Cockpit visibility split: while `CameraMode::Cockpit` is active the
 /// exterior children of the player vehicle hide and the authored
-/// cockpit subtrees show; every other mode inverts that. Only direct
-/// children are flipped — visibility propagates down each subtree —
-/// and the check is a write-on-diff sweep so freshly spawned children
-/// are caught even when the mode never changed (`--cockpit` at spawn).
+/// cockpit subtrees show; every other mode restores the split.
+///
+/// The restore side only touches what this system hid: a non-cockpit
+/// child this sweep turns `Hidden` earns a [`CockpitHidden`] tag, and a
+/// non-cockpit frame restores `Visible` on tagged children alone. A
+/// child already `Hidden` when the sweep reaches it — a detached
+/// `BreakPartVisual` node, an unlit `GlowPart` — belongs to its owner
+/// and is left alone, so the default Chase sweep can never re-show a
+/// detached panel on top of its fragment. `GlowPart` carriers are never
+/// tagged at all: `update_glows` rewrites them from vehicle state every
+/// frame, so they need no restore (the schedule orders this system
+/// after it, so a lit lamp stays hidden inside the cockpit). A system
+/// that takes over a tagged child's `Hidden` — `detach_breaks` does —
+/// removes the tag, transferring ownership.
+///
+/// Only direct children are flipped — visibility propagates down each
+/// subtree — and the check is a write-on-diff sweep so freshly spawned
+/// children are caught even when the mode never changed (`--cockpit`
+/// at spawn).
 pub fn sync_dash_visibility(
+    mut commands: Commands,
     mode: Res<CameraMode>,
     players: Query<&Children, With<PlayerVehicle>>,
     cockpits: Query<(), With<CockpitPart>>,
+    glows: Query<(), With<GlowPart>>,
+    hidden: Query<(), With<CockpitHidden>>,
     mut vis: Query<&mut Visibility>,
 ) {
     let cockpit = *mode == CameraMode::Cockpit;
     for children in &players {
         for child in children.iter() {
-            let want = if cockpits.get(child).is_ok() {
-                cockpit
-            } else {
-                !cockpit
+            let Ok(mut v) = vis.get_mut(child) else {
+                continue;
             };
-            if let Ok(mut v) = vis.get_mut(child) {
-                let next = if want {
+            if cockpits.get(child).is_ok() {
+                // The dash subtree is wholly this system's.
+                let next = if cockpit {
                     Visibility::Visible
                 } else {
                     Visibility::Hidden
                 };
                 if *v != next {
                     *v = next;
+                }
+            } else if cockpit {
+                // Exterior under the cockpit view: hide whatever is
+                // showing, tagging it so leaving the mode can tell this
+                // `Hidden` from one an owner wrote.
+                if *v != Visibility::Hidden {
+                    *v = Visibility::Hidden;
+                    if glows.get(child).is_err() {
+                        commands.entity(child).insert(CockpitHidden);
+                    }
+                }
+            } else if hidden.get(child).is_ok() {
+                // Restore only what this system hid.
+                commands.entity(child).remove::<CockpitHidden>();
+                if *v != Visibility::Visible {
+                    *v = Visibility::Visible;
                 }
             }
         }

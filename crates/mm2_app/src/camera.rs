@@ -128,6 +128,14 @@ pub fn toggle_camera(
             }
             m = m.next();
         }
+        // No recognised session camera exists for any mode — the menu
+        // phase or an empty world. Cycling would only drift the mode
+        // (the loop settles on an arbitrary step) away from whatever
+        // cameras a later session spawns, and the activation pass below
+        // is a no-op either way.
+        if !have(m, &cams) {
+            return;
+        }
         m
     } else if keys.just_pressed(KeyCode::KeyV) {
         match *mode {

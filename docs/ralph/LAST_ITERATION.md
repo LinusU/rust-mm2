@@ -1,4 +1,111 @@
-# Last iteration — F22-B.1: authored cockpit/dashboard view (iteration 62)
+# Last iteration — F22-B.1 review repair: visibility-ownership + dead-camera fallback (iteration 63)
+
+Iteration 63 on `ralph/night` (baseline `2a13e23`, F22-B.1 — external
+verify green but review **failed**; seventh iteration of run
+`20260925T144723`). One piece: the review's two blocking findings —
+both correctness defects in the same slice.
+
+## Task selection
+
+The external review rejected `2a13e23` with two blocking findings;
+repair precedes new feature work per the plan's regression-first
+policy.
+
+1. **`sync_dash_visibility` clobbered `Hidden` states it did not own.**
+   Every non-Cockpit frame (i.e. every frame in default Chase) it wrote
+   `Visibility::Visible` onto all non-`CockpitPart` direct vehicle
+   children. Two ownership collisions: `BreakPartVisual` nodes are
+   hidden once by `detach_breaks` and restored by `restore_rig` — the
+   sweep re-showed a detached panel *attached* to the car while its
+   fragment body also rendered (a permanent double-render regression of
+   F05-B.3 needing no cockpit interaction); and `GlowPart` nodes are
+   rewritten every frame by `update_glows`, which the sweep fought with
+   ambiguous ordering (an unlit glow could render permanently).
+2. **The Cockpit→Chase fallback never activated a camera.** With
+   `CameraMode::Cockpit` in effect at `load_session_world`, chase and
+   free cameras spawn `is_active:false`; if no `camPovCS` bound
+   (dashless car, or the `None`-def arm where `spawn_dash` never ran —
+   dev world, unauthored rig, or a `Cockpit` mode persisted across a
+   session reload), the fallback only inserted `CameraMode::Chase` —
+   nothing set `is_active` anywhere, so zero 3D cameras rendered until
+   the user pressed `C` twice. The same review arm noted a menu-phase
+   `C` press drifted the mode through `toggle_camera`'s `have()`-loop
+   instead of being a no-op.
+
+## What landed
+
+- `dash.rs` — new `CockpitHidden` tag component. `sync_dash_visibility`
+  now hides non-cockpit children under Cockpit mode as before but
+  *tags* each node it turns `Hidden` (`GlowPart` carriers excepted —
+  `update_glows` re-derives them from vehicle state every frame, so
+  they never need restoring) and, in every other mode, restores
+  `Visible` on **tagged children only**. A node already `Hidden` when
+  the sweep reaches it is never tagged — its `Hidden` belongs to its
+  owner and the sweep leaves it alone.
+- `breakaway.rs` — `detach_breaks` removes `CockpitHidden` when it
+  hides a node: the detach claims the `Hidden`, so leaving Cockpit
+  mode can never re-show a panel that detached mid-cockpit.
+- `main.rs` — `sync_dash_visibility.after(car_visual::update_glows)`:
+  the split's cockpit hide deterministically wins over a lit lamp's
+  `Visible` write, and outside Cockpit the split only restores its own
+  tags, so the two systems cannot fight over an unlit glow.
+- `session.rs` — the effective camera mode resolves **before** the
+  session cameras spawn: `load_pov_cam` (new `dash.rs` helper — the
+  `camPovCS` read `spawn_dash` used to do internally, now shared) is
+  probed first, and `CameraMode::Cockpit` with no authored record falls
+  back to `Chase` while the chase camera still spawns — so it is the
+  active one. Covers `--cockpit` on a dashless car, the dev car/`None`
+  arm, and a `Cockpit` mode persisted across reload. `spawn_dash`
+  takes the pre-resolved `pov`; the dead post-spawn fallback is gone.
+- `camera.rs` — `toggle_camera`'s `C` press returns early when zero
+  marked session cameras exist (menu phase / empty world) instead of
+  settling on an arbitrary step and drifting the mode.
+
+## Gates
+
+- `cargo test -p mm2_app --test dash` — 9/9 (+2:
+  `cockpit_split_respects_other_visibility_owners` — owner-hidden nodes
+  never re-shown, glows stay `update_glows`' business incl. a lit lamp
+  losing inside the cockpit; `camera_cycle_without_session_cameras_is_a_no_op`).
+- `cargo test -p mm2_app --test breakaway` — 12/12 (+1:
+  `detached_panels_stay_hidden_across_cockpit_cycles` — real
+  `detach_breaks` reclaim exercised mid-cockpit through the production
+  impact pipeline).
+- `cargo test -p mm2_app --test session` — 18/18 (+1:
+  `cockpit_without_authored_camera_falls_back_to_an_active_chase` —
+  mode held as Cockpit at load lands Chase with the chase camera
+  active, exactly one camera rendering).
+- `cargo fmt --all -- --check` clean; `cargo clippy --workspace
+  --all-targets --all-features -- -D warnings` clean; `cargo test
+  --workspace` all suites green (71 result lines, 0 failures).
+- Retail headless (`fnv1a64:e91e6cd4b2ae30d9`, read-only):
+  `sf --headless --frames 300` → `dash=11p/cam`, `status=pass` —
+  the production path still binds the full authored rig.
+
+## Classification
+
+Implementation repair only — no original-behavior claim changes
+(DSN-47/48/49, UNK-27/28 stand). The `CockpitHidden` ownership model
+and the pre-spawn mode resolution are implementation choices; the
+review's suggested fix shape ("mark hidden-by-sync and only restore
+those" / "resolve the effective mode before spawning the session
+cameras") is what landed.
+
+## Remaining open items
+
+- F22-B stays `active` — unchanged open scope: mirror (BACKSPACE),
+  occlusion handling, the chase-near/far pair split, plus the review's
+  unverified legs (retail `dash=` counts on london/vpbus, windowed
+  cockpit captures — not re-rendered this iteration; the sf/vpbug
+  headless leg above re-confirms `11p/cam` through the repaired path).
+- F22-A remainder: AC02/AC03 map legs and HUD-2 race instruments stay
+  open.
+- `N`/`D` gear slots have no trigger in our sim; look magnitudes and
+  `WheelFact` units are designed readings pending original recovery.
+
+---
+
+# Iteration 62 — F22-B.1 authored cockpit/dashboard view (iteration 62)
 
 Iteration 62 on `ralph/night` (baseline `1d3b069`, F22-A.1 review
 repair — external verify + review green; sixth iteration of run

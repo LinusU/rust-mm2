@@ -637,3 +637,76 @@ fn a_part_with_no_render_node_cannot_detach() {
         "no node, no detach — the inconsistency stays visible in the rig"
     );
 }
+
+/// F22-B.1 review repair: the cockpit visibility split must never
+/// re-show a node the detach path owns. A panel detached under the
+/// default Chase mode stays hidden (it used to reappear one frame
+/// later, on top of its own fragment), and a panel detached *inside*
+/// the cockpit view keeps its `Hidden` after the mode leaves — the
+/// detach claims the node by dropping the split's `CockpitHidden` tag.
+#[test]
+fn detached_panels_stay_hidden_across_cockpit_cycles() {
+    use mm2_app::camera::CameraMode;
+    use mm2_app::dash::CockpitHidden;
+
+    let (mut app, _car, object, nodes) = break_app(
+        vec![part("break0", LIMIT), part("break1", LIMIT * 10.0)],
+        Vec3::new(0.0, 1.2, 0.0),
+        BangerPool::default(),
+    );
+    app.insert_resource(CameraMode::Chase);
+    app.add_systems(Update, mm2_app::dash::sync_dash_visibility);
+
+    // break0 detaches in default Chase.
+    write_impact(&mut app, 1, object, ObjectId::WORLD, 6.0);
+    app.update();
+    assert_eq!(report(&app).detached, 1);
+    run(&mut app, 3);
+    assert_eq!(
+        *app.world().get::<Visibility>(nodes[0]).unwrap(),
+        Visibility::Hidden,
+        "the sweep must not re-show a detached panel in Chase"
+    );
+    assert_eq!(
+        *app.world().get::<Visibility>(nodes[1]).unwrap(),
+        Visibility::Visible
+    );
+
+    // Cockpit: the intact panel hides under the split's tag; the
+    // already-detached one stays its owner's — untagged.
+    *app.world_mut().resource_mut::<CameraMode>() = CameraMode::Cockpit;
+    app.update();
+    assert_eq!(
+        *app.world().get::<Visibility>(nodes[1]).unwrap(),
+        Visibility::Hidden
+    );
+    assert!(app.world().get::<CockpitHidden>(nodes[1]).is_some());
+    assert!(app.world().get::<CockpitHidden>(nodes[0]).is_none());
+
+    // break1 detaches inside the cockpit view: the detach claims the
+    // node's Hidden and drops the split's tag.
+    write_impact(&mut app, 2, object, ObjectId::WORLD, 60.0);
+    app.update();
+    assert_eq!(report(&app).detached, 2);
+    assert!(
+        app.world().get::<CockpitHidden>(nodes[1]).is_none(),
+        "the detach owns the node's Hidden now"
+    );
+    assert_eq!(
+        *app.world().get::<Visibility>(nodes[1]).unwrap(),
+        Visibility::Hidden
+    );
+
+    // Leaving the mode restores neither detached node.
+    *app.world_mut().resource_mut::<CameraMode>() = CameraMode::Chase;
+    app.update();
+    run(&mut app, 3);
+    for node in &nodes {
+        assert_eq!(
+            *app.world().get::<Visibility>(*node).unwrap(),
+            Visibility::Hidden,
+            "a detached panel stays hidden after the cockpit cycle"
+        );
+        assert!(app.world().get::<CockpitHidden>(*node).is_none());
+    }
+}

@@ -782,6 +782,24 @@ pub fn load_session_world(
         },
     ));
 
+    // Resolve the effective camera mode before the session cameras
+    // spawn: `CameraMode::Cockpit` exists only while an authored
+    // `camPovCS` binds. Without one — a dashless car, the dev car, or a
+    // `Cockpit` mode persisted across a session reload — no camera
+    // would ever activate (`--cockpit` or a menu-phase `C` press left
+    // the mode pointing at nothing: zero active cameras, dead render),
+    // so the mode falls back to Chase *here*.
+    let pov = selected
+        .def
+        .as_ref()
+        .and_then(|def| crate::dash::load_pov_cam(&vfs.0, &def.id));
+    let cam_mode = if *cam_mode == CameraMode::Cockpit && pov.is_none() {
+        commands.insert_resource(CameraMode::Chase);
+        CameraMode::Chase
+    } else {
+        *cam_mode
+    };
+
     // Cameras. The chase boom is sized to the selected vehicle so a city
     // bus and a roadster are both framed sensibly.
     let chase = match &selected.def {
@@ -800,7 +818,7 @@ pub fn load_session_world(
         owner,
         Camera3d::default(),
         Camera {
-            is_active: *cam_mode == CameraMode::Chase,
+            is_active: cam_mode == CameraMode::Chase,
             ..default()
         },
         chase,
@@ -832,7 +850,7 @@ pub fn load_session_world(
         owner,
         Camera3d::default(),
         Camera {
-            is_active: *cam_mode == CameraMode::Free,
+            is_active: cam_mode == CameraMode::Free,
             ..default()
         },
         free_cam,
@@ -990,20 +1008,15 @@ pub fn load_session_world(
                 &vfs.0,
                 &def.id,
                 selected.paint,
+                pov,
                 &mut assets.meshes,
                 &mut assets.images,
                 &mut assets.materials,
                 vehicle,
                 owner,
-                *cam_mode,
+                cam_mode,
                 camera_fog,
             );
-            // `--cockpit` on a car with no authored `camPovCS` has no
-            // camera to bind — fall back to Chase rather than leaving
-            // the mode pointing at nothing.
-            if *cam_mode == CameraMode::Cockpit && !dash_report.cockpit {
-                commands.insert_resource(CameraMode::Chase);
-            }
             commands.insert_resource(dash_report);
             if let Some(trailer) = &def.trailer {
                 let car_xf = Transform::from_translation(spawn.position)
