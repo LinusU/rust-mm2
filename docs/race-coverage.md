@@ -30,6 +30,7 @@ mm2-inspect events <install>        # catalog denominator, per-row status, refer
 mm2-inspect race-defs <install>     # race-definition build per event × difficulty
 mm2-inspect opponents <install> [--strict]   # roster wiring vs .opp route records
 mm2-inspect event <install> --city <c> --event checkpoint:<row>   # single-event deps
+mm2-inspect event <install> --all [--city <c>] [--strict]         # the deep check on every row
 
 # production runtime leg — full session: world load, authored roster,
 # countdown, checkpoint progress, results, restart machinery
@@ -86,6 +87,19 @@ dropped**). The audits:
     table authors 7 (`6opp/7tbl` — one authored slot has no route);
   - `race/sf/stunt0.aimap`: 1 dead route ref in an extra (non-catalog)
     file.
+- `event --all` (F11-C.2, this slice's commit): the per-event deep
+  check run on **all 90 cataloged rows** — 45/city, every one `ready`,
+  0 incomplete, 0 failed records, 0 failed `RaceDefinition`/
+  `OpponentRoster` builds at either difficulty. `--strict` exits 2 on
+  **96 authored anomalies**, none new in kind: the same 77 orphan
+  `.opp` routes and the `sf/race0` 6-vs-7 mismatch, plus 18
+  record-level diagnostics the catalog-wide audits count but don't
+  attribute per row — the `AmbDenisty` header misspelling on 8
+  `crash*Ndata{,_p}.csv` files, a missing `Filename` header label on
+  6 of them (london `crash8` + sf `crash4`/`crash9` pairs), and 4
+  short rows (8 fields of 9) skipped in london's `exam1_1.csv` — a
+  `crash3` (midterm) waypoint file whose skipped tail rows are
+  authored data, disclosed not repaired.
 
 ## Runtime matrix — 24 events × 2 drivers
 

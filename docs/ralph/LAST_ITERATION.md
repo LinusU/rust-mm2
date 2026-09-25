@@ -1,118 +1,106 @@
-# Last iteration — F07-B.9: scripted drive-sequence evidence (AC02)
+# Last iteration — F11-C.2: catalog-wide deep event audit (`event --all`)
 
-Iteration 46 on `ralph/night` (baseline `93d79cc`, F07-B.8
-weather-bound surface tables — external verify + review green). One
-coherent slice of the F07-B remainder: a reproducible scripted
-driving sequence through the production input/audio paths, producing
-the drivetrain/audio evidence F07-AC02 asks for.
+Iteration 47 on `ralph/night` (baseline `93db26b`, F07-B.9 scripted
+drive-sequence evidence — external verify + review green). One
+coherent slice of the F11-C remainder: the catalog-wide strict-audit
+evidence leg the plan owed, backed by a small tooling change so the
+whole catalog runs through the single-event deep check in one
+command.
 
 ## Task selection
 
-No failing gate or review finding to repair. F07-B's remaining
-candidates were sustained-scrape semantics (AC04's second leg — still
-no authored scrape sample to bind, entirely designed policy), the
-AC05 audible capture (needs a real output device/windowed session —
-not available headless), and the AC02 scripted sequence. AC02 won:
-it produces concrete drivetrain→audio evidence through the real
-`VehicleInput`/`VehicleState`/`EngineMix`/`AudioReport` pipeline on
-both the dev world and a retail city, device-independently.
+No failing gate or review finding to repair (F07-B.9 review passed,
+verification gaps only). Among the listed remainders, F11-C's
+run-and-record leg was the ready one: the other candidates are
+research-gated (F15-B's `unkFlag`/`cornerBrakingThreshold` fields,
+F18-A's `.ldef`/`.lmap` semantics under UNK-24, F05-B's detachment
+rule under UNK-13), blocked on missing features (F17-B → F17-C,
+F16-C's AC01 process leg → an interactive finish — scripted-driver
+results are deliberately ineligible), blocked on an audio output
+device (F07-AC05), or entirely designed policy (F07-B's scrape leg
+has no authored sample to bind). F11-C won because the per-event
+deep audit existed but had only ever been run on single rows — the
+catalog-wide leg needed one small production change plus the retail
+evidence run.
 
 ## What landed
 
-- `mm2_app::sequence` (new) — `SequenceDrive` resource + the
-  `sequence_drive` system: a staged `idle → accelerate → coast →
-  brake → reverse` input program written through the production
-  `VehicleInput` component, the same resource-gated driver pattern
-  `ScriptedDrive`/`ParkedDrive` use. Fixed stage timers (idle 3 s,
-  accel 7 s, coast 4 s, reverse 5 s); the brake stage ends when the
-  car reaches the drivetrain's own `≤ 0.25 m/s` nearly-stopped band
-  (bounded 10 s — a penned car still reaches reverse rather than
-  stalling the program). One `SeqSample` banks at every stage
-  boundary: RPM, gear, direction, forward speed, the loudest engine
-  loop's computed `EngineMix` volume/pitch (the same fields
-  `engine_drive` writes — headless runs carry them on the component,
-  no sink needed), and the stage's clutch one-shot delta off
-  `AudioReport::clutch`. The AC's "shift" leg has no stage of its own
-  — the gearbox is automatic, so committed `(gear, direction)`
-  changes land inside accelerate/coast and the brake→reverse hand-off
-  and show as the per-stage `+Nc` deltas. Stage timers run only while
-  `Playing` and not countdown-locked (the same gate `scripted_drive`
-  honors); a session-generation change resets the program and clears
-  its samples so a restart never mixes two sessions.
-- `mm2_app::smoke` — `Driver::Sequence` variant; the record gains
-  ` seq=` with comma-joined stage rows
-  (`acc:4840r/F4/24.8m/0.90v/1.32p+4c`). Runs without `--seq`, or a
-  program that banked no samples, emit a bit-identical record.
-- `mm2` CLI — `--seq` flag (conflicts with `--bot`/`--parked`), wired
-  in the windowed schedule too; `sequence_drive` sits in its own
-  `add_systems` call ordered after `vehicle_input` and
-  `clutch_voices` (so a boundary sample attributes a same-frame shift
-  to the stage that produced it) — the main Update tuple was at
-  Bevy's system-config size limit.
-- `README.md` — the `--seq` evidence command documented alongside
-  `--bot`/`--parked`.
-
-## Docs
-
-`docs/research/audio.md` — F07-B.9 runtime paragraph with both retail
-`seq=` records. `docs/ralph/PLAN.md` updated. No `original-rules.md`
-row: the program is an evidence driver, not a game rule — classified
-implementation/evidence choice with no original-behavior claim.
+- `tools/mm2_inspect/src/event.rs` — `CitySweep` + `sweep()`: run
+  `inspect_event`'s full dependency-closure check on every cataloged
+  event in a city (per-record deep parse incl. the aimap/pathset
+  records the catalog scan leaves `Unparsed`, `RaceDefinition` and
+  `OpponentRoster` builds at both difficulties, wired vehicle ids
+  cross-checked against `VehicleCatalog`). The vehicle catalog is
+  scanned once per run and shared — `inspect_event` now takes the id
+  set instead of rescanning per row. `CitySweep::failures()`
+  aggregates the same conditions `EventReport::failures()` reports
+  per event plus table errors and an empty catalog.
+- `mm2-inspect event` CLI — `--all` sweeps the whole catalog
+  (`--city` restricts it to one stem; without `--all`, `--city` and
+  `--event` stay required as before, and `--event` conflicts with
+  `--all`). Output: table statuses, one line per event
+  (`ready`/`incomplete`, record count, `defs ok/ok`, `rosters
+  ok+Ni`), indented per-event failure detail, then a per-city
+  summary carrying the extras count.
+- `docs/race-coverage.md` — `--all` added to the instrument list and
+  the sweep's retail numbers recorded in the denominator section.
 
 ## Evidence
 
-Synthetic tests (device-independent, `tests/sequence.rs`, +4):
+Synthetic tests (`tools/mm2_inspect` suite, 12 → 15):
 
-- countdown lock holds the program (no input writes, no stage burn);
-- a mid-run session restart resets stage/samples (generation-scoped);
-- stage boundaries bank exact drivetrain mix and per-stage clutch
-  deltas (component-level attribution through a synthetic engine
-  rig + `WaveBank`);
-- the program drives the real dev-world physics end-to-end —
-  settle → upshift run → coast-down → stop → reverse, samples banked
-  in order.
+- `sweep_reports_every_cataloged_event` — all three authored rows of
+  the synthetic install appear in row order; the fully-wired row is
+  clean, the two record-less rows are `incomplete` and named in the
+  strict failure list — the denominator is never filtered;
+- `sweep_surfaces_a_record_failure` — a malformed `circuit0.aimap`
+  lands under `circuit:0` in the sweep failures;
+- `sweep_empty_catalog_is_a_failure` — a city with no race data
+  reports the empty catalog as a failure, not silence.
 
-Retail (`fnv1a64:e91e6cd4b2ae30d9`, vpbug, headless):
+Retail run-and-record (`fnv1a64:e91e6cd4b2ae30d9`, read-only
+install, this commit's binary):
 
-- dev world `--seq --frames 2200`:
-  `seq=idle:750r/F0/-0.0m/0.82v/0.97p,acc:4840r/F4/24.8m/0.90v/1.32p+4c,
-  coast:3324r/F3/12.3m/0.90v/1.07p+1c,brake:1272r/R0/0.2m/0.83v/1.07p+3c,
-  rev:5817r/R0/-13.4m/0.90v/1.48p` — idle band, four upshifts on the
-  throttle run, coast downshift, the brake→reverse hand-off voicing
-  the direction change, then a held reverse band at −13.4 m/s.
-- sf `--seq --frames 2400`:
-  `seq=idle:750r/F0/0.4m/0.82v/0.97p,acc:4897r/F5/34.6m/0.90v/1.32p+5c,
-  coast:750r/F0/0.2m/0.82v/0.97p+3c,brake:750r/F0/0.2m/0.82v/0.97p,
-  rev:5814r/R0/-13.5m/0.90v/1.48p` — five upshifts on a real-city
-  throttle run (the car met props mid-coast — honest staged evidence
-  on authored geometry, impacts counted separately in the record).
-
-`aud=` reports the clutch voices under the bound (`8c` + `+Nd` honest
-bound-refusals on a headless run, the same semantics B.5 disclosed).
+- `mm2-inspect event <install> --all` — **90/90 cataloged events
+  `ready`** (45/city), 0 incomplete, 0 failed records, 0 failed
+  `RaceDefinition`/`OpponentRoster` builds at either difficulty.
+- `--strict` exits 2 on **96 authored anomalies**, all previously
+  disclosed classes: 77 orphan `.opp` route records (46 amateur +
+  31 professional), the `sf/race0` aimap 6-vs-7 table mismatch, and
+  18 per-record diagnostics the catalog-wide audits count but don't
+  attribute per row — 8 `AmbDenisty` header misspells, 6 omitted
+  `Filename` labels (london `crash8` + sf `crash4`/`crash9` data
+  pairs), and 4 short rows (8 of 9 fields) skipped in london's
+  `exam1_1.csv` (a `crash3` midterm waypoint file — authored data,
+  disclosed not repaired).
+- Sibling legs re-run the same commit: `events --strict` rc 0,
+  `race-defs --strict` rc 0 (64 defs built per city, 26 crash-course
+  rows `unsupported` by design), `opponents --strict` rc 2 on the
+  same 79 authored anomalies.
 
 ## Gates
 
-`cargo fmt --all -- --check` clean; `cargo clippy --workspace
---all-targets --all-features -- -D warnings` clean; `cargo test
---workspace` — 69 test-result summaries, 0 failures (sequence suite
-4/4).
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` — all suites green (mm2_inspect
+30/30 incl. the 3 new sweep tests).
 
 ## Classification
 
-Implementation/evidence choice end to end: the stage table, timer
-bounds, stopped-speed hand-off (mirroring the drivetrain's own 0.25
-m/s edge) and the sample schema are ours — the program demonstrates
-the rig answers the drivetrain; it claims nothing about the
-original's audio beyond the already-ledgered designed readings
-(DSN-36/DSN-40). Headless `0s` reports no output device; no audible
-capture was performed — F07-AC05 stays open.
+Implementation choice end to end — the sweep is an audit view over
+the existing deep check; it makes no original-behavior claim. The
+retail numbers are original-content validation evidence (named
+fingerprint, full denominator, failures enumerated not filtered).
 
 ## Remaining open items
 
-- F07-B continues: sustained-scrape semantics (AC04's second leg) and
-  the AC05 audible/offline-mix capture. AC02 now has staged retail
-  evidence but stays candidate until external review checks the diff.
-- UNK-25 unchanged: surface selection state, `%s` stem content,
-  `Tunnel sound index`, divisor-schema rolling formula, siren trigger
-  semantics.
-- No windowed/sink-attach leg was run this iteration.
+- F11-C stays active: AC02–AC05 rest on the landed runtime slices'
+  test evidence (swept triggers, countdown/restart lifecycle,
+  once-only ledger results) — promotion of those ACs is a review
+  judgment, not new work this slice. AC06's "loaded" leg is the
+  `mm2 --event` headless smoke records (F13-C matrix).
+- The 96 strict findings are authored retail anomalies — they stay
+  visible under `--strict` rather than being whitelisted away.
+- F07-B continues: sustained-scrape semantics (no authored scrape
+  sample — entirely designed) and the AC05 audible capture (needs a
+  real output device).

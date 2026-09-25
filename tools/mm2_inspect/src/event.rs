@@ -7,6 +7,10 @@
 //! `CatalogEvent → OpponentRoster` builds at both difficulties, and a
 //! cross-check of wired vehicle ids against the vehicle catalog.
 //!
+//! `--all` sweeps the whole catalog through the same deep check
+//! (F11-AC01/AC06): every authored row in every discovered race city,
+//! one line each, `--city` restricting the sweep to one stem.
+//!
 //! The command reports rather than hides: an incomplete event still
 //! prints its full record inventory so the missing piece is visible.
 //! `--strict` exits nonzero on an incomplete event, a failed record or
@@ -212,6 +216,16 @@ fn check_record(vfs: &Vfs, rec: &mm2_content::EventRecord) -> RecordCheck {
     check
 }
 
+/// The vehicle catalog's id set — scanned once and shared across a
+/// sweep so a 90-event audit does not rescan the tune roster per row.
+fn vehicle_ids(vfs: &Vfs) -> BTreeSet<String> {
+    VehicleCatalog::scan(vfs)
+        .entries
+        .iter()
+        .map(|e| e.id.clone())
+        .collect()
+}
+
 /// Inspect one event: catalog-scan the city, look up the row, and
 /// validate its dependency closure. `Err` when no authored row exists
 /// for the ref — a lookup failure, distinct from a found-but-incomplete
@@ -234,12 +248,74 @@ pub fn inspect(
             "no authored event row for {table:?}:{index} in {city}"
         ));
     };
-    Ok(inspect_event(vfs, event))
+    Ok(inspect_event(vfs, event, &vehicle_ids(vfs)))
+}
+
+/// One city's catalog-wide deep audit: every authored row through the
+/// same per-event check [`inspect`] performs.
+#[derive(Debug)]
+pub struct CitySweep {
+    /// City stem scanned.
+    pub city: String,
+    /// Per-table parse status — a failed table claims no rows, so its
+    /// events simply never appear; the error is reported here.
+    pub tables: Vec<mm2_content::EventTableStatus>,
+    /// Every cataloged event's report, in catalog order.
+    pub events: Vec<EventReport>,
+    /// Discovered record stems no table row claims (counted for the
+    /// denominator; `events`/`aimap` audits them in detail).
+    pub extras: usize,
+    /// Catalog-level problems that are not one event's fault.
+    pub diagnostics: Vec<String>,
+}
+
+impl CitySweep {
+    /// Everything `--strict` fails on: a missing/malformed table, an
+    /// empty catalog, and every per-event failure [`EventReport`]
+    /// reports. Diagnostics stay notes, matching `events`.
+    pub fn failures(&self) -> Vec<String> {
+        let mut failures = Vec::new();
+        if self.events.is_empty() {
+            failures.push("event catalog is empty".to_string());
+        }
+        for t in &self.tables {
+            if let Some(e) = &t.error {
+                failures.push(format!("{} — {e}", t.logical));
+            }
+        }
+        for ev in &self.events {
+            let table = format!("{:?}", ev.event_ref.table).to_lowercase();
+            for f in ev.failures() {
+                failures.push(format!(
+                    "{}:{} ({}) — {f}",
+                    table, ev.event_ref.index, ev.stem
+                ));
+            }
+        }
+        failures
+    }
+}
+
+/// Deep-check every cataloged event in one city. The vehicle catalog
+/// is supplied by the caller so a multi-city sweep scans it once.
+pub fn sweep(vfs: &Vfs, city: &str, vehicle_ids: &BTreeSet<String>) -> CitySweep {
+    let catalog = mm2_content::EventCatalog::scan(vfs, &city.to_ascii_lowercase());
+    CitySweep {
+        city: catalog.city.clone(),
+        tables: catalog.tables.clone(),
+        events: catalog
+            .events
+            .iter()
+            .map(|e| inspect_event(vfs, e, vehicle_ids))
+            .collect(),
+        extras: catalog.extras.len(),
+        diagnostics: catalog.diagnostics.clone(),
+    }
 }
 
 /// The report body — separated from ref lookup so tests can drive it
 /// with a catalog they built themselves.
-fn inspect_event(vfs: &Vfs, event: &CatalogEvent) -> EventReport {
+fn inspect_event(vfs: &Vfs, event: &CatalogEvent, vehicle_ids: &BTreeSet<String>) -> EventReport {
     let records = event.records.iter().map(|r| check_record(vfs, r)).collect();
 
     let mut wired: BTreeSet<String> = BTreeSet::new();
@@ -252,8 +328,6 @@ fn inspect_event(vfs: &Vfs, event: &CatalogEvent) -> EventReport {
         audit_roster(vfs, event, Difficulty::Professional, &mut wired),
     ];
 
-    let vehicles = VehicleCatalog::scan(vfs);
-    let vehicle_ids: BTreeSet<&str> = vehicles.entries.iter().map(|e| e.id.as_str()).collect();
     let unresolved_vehicles = wired
         .iter()
         .filter(|id| !vehicle_ids.contains(id.as_str()))
@@ -412,16 +486,120 @@ fn print_report(report: &EventReport) {
     }
 }
 
-/// `mm2-inspect event <dir> --city <stem> --event <table>:<row>`.
+/// Compact per-build mark for the sweep table (`ok`/`unsup`/`FAILED`).
+fn build_mark(build: &RaceDefBuild) -> &'static str {
+    match build {
+        RaceDefBuild::Built(_) => "ok",
+        RaceDefBuild::Unsupported => "unsup",
+        RaceDefBuild::Failed(_) => "FAILED",
+    }
+}
+
+/// Compact per-roster mark: `ok`, `ok+Ni` (built with issues),
+/// `unsup` or `FAILED`.
+fn roster_mark(build: &RosterBuild) -> String {
+    match build {
+        RosterBuild::Built(s) if s.issues.is_empty() => "ok".to_string(),
+        RosterBuild::Built(s) => format!("ok+{}i", s.issues.len()),
+        RosterBuild::Unsupported => "unsup".to_string(),
+        RosterBuild::Failed(_) => "FAILED".to_string(),
+    }
+}
+
+/// Print a sweep in the same style as the other catalog-wide audits:
+/// one line per event with its deep-check outcome, failure detail
+/// lines indented under it, then a per-city summary.
+fn print_sweep(sweep: &CitySweep) {
+    println!("== event sweep: {} ==", sweep.city);
+    for t in &sweep.tables {
+        match &t.error {
+            Some(e) => println!("  {:<30} ERROR: {e}", t.logical),
+            None => println!(
+                "  {:<30} {:>2} rows ({} row diagnostics)",
+                t.logical, t.rows, t.diagnostics
+            ),
+        }
+    }
+    for ev in &sweep.events {
+        let table = format!("{:?}", ev.event_ref.table).to_lowercase();
+        let status = match &ev.status {
+            EventStatus::Ready => "ready".to_string(),
+            EventStatus::Incomplete { missing } => {
+                format!("incomplete ({})", missing.join(", "))
+            }
+        };
+        println!(
+            "  {:<10} {:>2} {:<12} {:<24} {:>2} records   defs {}/{}   rosters {}/{}",
+            table,
+            ev.event_ref.index,
+            ev.stem,
+            status,
+            ev.records.len(),
+            build_mark(&ev.defs[0]),
+            build_mark(&ev.defs[1]),
+            roster_mark(&ev.rosters[0]),
+            roster_mark(&ev.rosters[1]),
+        );
+        for f in ev.failures() {
+            println!("       failure: {f}");
+        }
+    }
+    let ready = sweep.events.iter().filter(|e| e.status.is_ready()).count();
+    println!(
+        "  {}: {} events — {} ready, {} incomplete, {} strict failures ({} extra stems not cataloged)",
+        sweep.city,
+        sweep.events.len(),
+        ready,
+        sweep.events.len() - ready,
+        sweep.failures().len(),
+        sweep.extras,
+    );
+    for d in &sweep.diagnostics {
+        println!("  note: {d}");
+    }
+    println!();
+}
+
+/// `mm2-inspect event <dir> --city <stem> --event <table>:<row>`
+/// inspects one row; `--all` sweeps every cataloged event (`--city`
+/// restricts the sweep to one stem).
 pub fn run(
     dir: &Path,
     mods: Option<&Path>,
-    city: &str,
-    event_spec: &str,
+    city: Option<&str>,
+    event_spec: Option<&str>,
+    all: bool,
     strict: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (table, index) = parse_event_spec(event_spec)?;
     let vfs = build_vfs(dir, mods)?;
+    if all {
+        let ids = vehicle_ids(&vfs);
+        let mut failures = Vec::new();
+        for city in crate::race_cities(&vfs, city) {
+            let report = sweep(&vfs, &city, &ids);
+            print_sweep(&report);
+            failures.extend(
+                report
+                    .failures()
+                    .into_iter()
+                    .map(|f| format!("{city}: {f}")),
+            );
+        }
+        if strict && !failures.is_empty() {
+            return Err(format!("strict event sweep: {} failures", failures.len()).into());
+        }
+        return Ok(());
+    }
+    let (city, spec) = match (city, event_spec) {
+        (Some(c), Some(s)) => (c, s),
+        // clap enforces the pair; this is the defensive leg.
+        _ => {
+            return Err(
+                "--event <table>:<row> and --city <stem> are required without --all".into(),
+            );
+        }
+    };
+    let (table, index) = parse_event_spec(spec)?;
     let report = inspect(&vfs, city, table, index)?;
     print_report(&report);
     let failures = report.failures();
@@ -644,5 +822,63 @@ mod tests {
                 .any(|r| r.logical == "race/london/crash0a.csv")
         );
         assert!(report.failures().is_empty());
+    }
+
+    #[test]
+    fn sweep_reports_every_cataloged_event() {
+        let dir = synthetic_install();
+        let vfs = vfs_of(dir.path());
+        let ids = vehicle_ids(&vfs);
+        let sweep = sweep(&vfs, "london", &ids);
+        // All three authored rows appear, in row order — complete or
+        // not, none are filtered out of the denominator.
+        assert_eq!(sweep.events.len(), 3);
+        assert_eq!(
+            sweep
+                .events
+                .iter()
+                .map(|e| e.event_ref.index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        // Row 0 is fully wired; rows 1–2 author no records on disk.
+        assert!(sweep.events[0].failures().is_empty());
+        assert!(!sweep.events[1].status.is_ready());
+        assert!(!sweep.events[2].status.is_ready());
+        // The sweep's strict surface names the incomplete rows.
+        let failures = sweep.failures();
+        assert!(failures.iter().any(|f| f.contains("circuit:1")));
+        assert!(failures.iter().any(|f| f.contains("circuit:2")));
+    }
+
+    #[test]
+    fn sweep_surfaces_a_record_failure() {
+        let dir = synthetic_install();
+        write(dir.path(), "race/london/circuit0.aimap", "[[[not a section");
+        let vfs = vfs_of(dir.path());
+        let ids = vehicle_ids(&vfs);
+        let sweep = sweep(&vfs, "london", &ids);
+        assert!(
+            sweep
+                .failures()
+                .iter()
+                .any(|f| f.contains("circuit:0") && f.contains("circuit0.aimap"))
+        );
+    }
+
+    #[test]
+    fn sweep_empty_catalog_is_a_failure() {
+        let dir = synthetic_install();
+        let vfs = vfs_of(dir.path());
+        let ids = vehicle_ids(&vfs);
+        // The install carries no `race/sf/` data at all.
+        let sweep = sweep(&vfs, "sf", &ids);
+        assert!(sweep.events.is_empty());
+        assert!(
+            sweep
+                .failures()
+                .iter()
+                .any(|f| f.contains("catalog is empty"))
+        );
     }
 }

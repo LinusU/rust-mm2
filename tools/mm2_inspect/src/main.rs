@@ -182,26 +182,34 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
-    /// Inspect one selected event: resolve a `<table>:<row>` row through
-    /// the production catalog and validate its whole dependency closure —
+    /// Inspect one selected event (`--event <table>:<row>`) or sweep
+    /// the whole catalog (`--all`): resolve rows through the production
+    /// catalog and validate each event's whole dependency closure —
     /// every attributed record (aimap/pathset deep-parsed), the
-    /// `RaceDefinition` and `OpponentRoster` builds at both difficulties,
-    /// and wired vehicle ids cross-checked against the vehicle catalog.
+    /// `RaceDefinition` and `OpponentRoster` builds at both
+    /// difficulties, and wired vehicle ids cross-checked against the
+    /// vehicle catalog.
     Event {
         /// Path to the MM2 installation directory.
         dir: PathBuf,
-        /// City stem the event lives in (`london`, `sf`).
-        #[arg(long)]
-        city: String,
+        /// City stem the event lives in (`london`, `sf`). With `--all`,
+        /// restricts the sweep; default sweeps every discovered race
+        /// city.
+        #[arg(long, required_unless_present = "all")]
+        city: Option<String>,
         /// Event reference: `<table>:<row>` — same vocabulary as
         /// `mm2 --event` (`checkpoint`/`race`, `blitz`, `circuit`,
         /// `crash`/`crashcourse`).
+        #[arg(long, required_unless_present = "all", conflicts_with = "all")]
+        event: Option<String>,
+        /// Sweep every cataloged event through the deep audit, printing
+        /// a one-line outcome per event plus the strict-failure detail.
         #[arg(long)]
-        event: String,
+        all: bool,
         /// Exit nonzero on an incomplete event, a failed record or
         /// reference, a record validation issue, a failed production
         /// build, a roster issue, or a wired vehicle id outside the
-        /// catalog.
+        /// catalog. With `--all`, on any failure across the sweep.
         #[arg(long)]
         strict: bool,
     },
@@ -536,8 +544,16 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             dir,
             city,
             event: spec,
+            all,
             strict,
-        } => event::run(dir, cli.mods.as_deref(), city, spec, *strict),
+        } => event::run(
+            dir,
+            cli.mods.as_deref(),
+            city.as_deref(),
+            spec.as_deref(),
+            *all,
+            *strict,
+        ),
         Command::Opponents { dir, city, strict } => {
             opponents(dir, cli.mods.as_deref(), city.as_deref(), *strict)
         }
