@@ -1075,7 +1075,7 @@ pub fn load_session_world(
                 commands
                     .entity(vehicle)
                     .insert(scripted::ScriptedRoute::new(
-                        opponents::driving_route(&route, nav),
+                        opponents::driving_route(&route, nav, &def.checkpoints),
                         spawn.position,
                         spawn.yaw,
                     ));

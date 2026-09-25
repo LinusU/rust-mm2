@@ -559,7 +559,143 @@ parked car, no spikes.
   non-finishes are predominantly controller-skill-bound (the F15-B
   residual), not merely budget-bound. Longer budgets remain untested
   beyond 394 s and original-fidelity pacing is unverified.
-- Blitz (F12), Circuit (F14), Crash Course (F21) rows are audited for
-  structure only; their runtime matrices belong to those features.
+- Blitz (F12) and Crash Course (F21) rows are audited for structure
+  only; their runtime matrices belong to those features. Circuit (F14)
+  coverage is the section below.
 - No original-fidelity claim: engine self-metrics only. Difficulty,
   pacing and AI competence vs retail are unverified.
+
+# Circuit (F14) matrix — iteration 53 / F14-A.2
+
+## Denominator and instruments
+
+The authored Circuit table is **10 events per city**
+(`circuit0..9` in both `race/london/` and `race/sf/`, every row
+`ready` under the production `CatalogEvent → RaceDefinition` builder at
+Amateur and Professional; `circuit10`/`circuit11` exist on disk as
+extra stems — circuit11 has `.opp`/`.pathset` but no `.aimap` — and are
+kept visible as uncataloged extras, outside this denominator).
+
+- Driver legs: scripted (`--bot`) and the parked control (`--parked`),
+  Amateur only, `--frames 12000` (~197 s at 60 Hz).
+- Command shape: `mm2 --mm2-path <install> --city <c> --event
+  circuit:<i> --<driver> --headless --frames 12000`.
+- Content: retail install `fnv1a64:e91e6cd4b2ae30d9`, Apple M1.
+- Two runs exist. **v1** (`/tmp/mm2-circuit-matrix/`) ran at commit
+  `0fe4787` and surfaced the stall signature. **v2**
+  (`/tmp/mm2-circuit-matrix-v2/`) ran the same binary work-tree rebuilt
+  with the F14-A.2 `densify_route` gate-coverage repair — every v2 log
+  still stamps `commit=0fe478719d…` because the fix was uncommitted at
+  run time; the code under test is `0fe4787` + the uncommitted repair.
+  All times wall-clock on a shared M1; `status=pass` means the smoke
+  record completed cleanly, **not** that the race was completable.
+
+## What the matrix shows
+
+40/40 legs `rc=0`, `status=pass`, `dup=0` at both versions. The
+pre-fix analysis read **uniform field-wide plateaus at a fixed gate
+index** on 7 of 20 events — every opponent clearing exactly the same
+number of gates is a geometry/binding signature, not driving skill.
+Two distinct root causes:
+
+1. **`densify_route` re-paths could drop gate coverage** (london-6,
+   london-9, sf-9): where a long authored `.opp` leg left the road
+   corridor the nav re-path produced a drivable detour that no longer
+   crossed a checkpoint cylinder the authored segment crossed
+   (london-6 gate 0: authored line crosses at 4.7 m inside r10 on a
+   flyover whose banger-dressed ramp has no routable BAI lanes; the
+   re-path detoured around the block and missed by ~198 m). With the
+   F14-A.2 repair, a re-path that abandons authored gate coverage is
+   rejected per leg; the verbatim segment stands instead.
+2. **Authored `.opp` lines themselves miss gate cylinders**
+   (london-2, london-4, london-5, sf-7): verbatim misses of 11–120 m
+   against radii of 7–19, uniform across every `-a-*`/`-p-*` route of
+   the event's roster. Physical `Checkpoint::crossed` cannot fire on a
+   line that never enters the cylinder — so either the original bound
+   AI Ordered progress to route position rather than trigger sweeps,
+   or it crossed these gates by wander. That is an **unverified
+   original rule** (UNK-11 class) and stays open for F14/F15; it is
+   deliberately not patched here.
+
+## Pre-fix vs post-fix per event
+
+`omax`/`omin` = best/worst opponent gates cleared; `cp` = the local
+participant's gates (`x/total`); `res` = results-ledger entries;
+`orec` = field re-anchors; `rcv` = local recovery counts (`w`=water,
+`f`=fall). Bot legs list the scripted participant's `cp` first.
+
+### London (10 events)
+
+| event | v1 bot cp | v1 omax | v2 bot cp | v2 omax | v2 note |
+|---|---|---|---|---|---|
+| circuit0 | 1/6 `lap3/3` | 6 + **4 finishes** | 1/6 `lap3/3` | 6 + **4 finishes** | unchanged — the one fully-working Circuit: field resolves, ledger `res=4` both legs |
+| circuit1 | 0/8 | 6 | 0/8 | 6 | field reaches gate6, no finish at 12000f; bot 0c |
+| circuit2 | 0/12 | **0 all-six** | 0/12 | **0 all-six** | verbatim miss g0 (11.1 m vs r7) — authored-miss class, unchanged; parked `rcv=251w` punt-into-Thames churn persists |
+| circuit3 | 3/9 | 8 | 3/9 | 8 | field deep (8/9 gates), no finish at budget |
+| circuit4 | 3/11 | 7 | 3/11 | **9** | verbatim misses g0 (16 m) + g9 (32 m); v2 parked field reaches gate9 — plateau deepened to the authored-miss bound |
+| circuit5 | 2/6 | **2 all-four** | 2/6 | **2 all-four** | verbatim miss g2 (36.4 m vs r11) — authored-miss class |
+| circuit6 | 0/14 | **0 all-six** | 1/14 | **1 all-six** | **the repaired event**: gate 0 now crossed by every opponent; stall moved to gate 1 — traversal churn, not coverage (see below) |
+| circuit7 | 2/10 | 3 | 2/10 | 5 | field mid-course both versions |
+| circuit8 | 2/12 | 5 | 2/12 | 6 | field mid-course both versions |
+| circuit9 | 1/22 | **1 all-six** | 1/22 | **1 all-six** | coverage restored (driven line now reaches every gate) but the 1c plateau persists — physical-traversal residual |
+
+### San Francisco (10 events)
+
+| event | v1 bot cp | v1 omax | v2 bot cp | v2 omax | v2 note |
+|---|---|---|---|---|---|
+| circuit0 | 7/9 `lap2/3` | 5 | 7/9 `lap2/3` | 6 | field racing deep |
+| circuit1 | 2/10 | 4 | 2/10 | 9 | field mid-course |
+| circuit2 | 3/13 | 10 | **9/13** | 9 | scripted leg improved markedly (was 3/13) |
+| circuit3 | 7/11 | 7 | 7/11 | 9 | field mid-course |
+| circuit4 | 4/18 | 9 | 4/18 | 10 | field mid-course |
+| circuit5 | 3/9 | 7 | 3/9 | 7 | spread `0–7` — divergent field |
+| circuit6 | 2/9 | 6 | 2/9 | 7 | field mid-course |
+| circuit7 | 5/11 | **5 all-six** | 5/11 | **5 all-six** | verbatim misses g5 (34 m), g6 (120 m), g7 (63 m) — authored-miss class |
+| circuit8 | 3/23 | 5 | 3/23 | 5 | 23-gate course, field at gate ~5 |
+| circuit9 | 4/14 | **4 all-six** | 4/14 | **4 all-six** | coverage restored, plateau persists at gate ~4 — traversal residual |
+
+## Anomalies kept visible (Circuit)
+
+- **Post-fix london-6**: all six opponents bank exactly 1c — the
+  coverage repair works end-to-end (gate 0 went from un-crossable to
+  cleared by the whole field). The new plateau sits at gate 1 with
+  heavy escape/re-anchor churn (`orec` 29–30, per-opponent stuck peaks
+  445–900 s) and the parked control logs `rcv=294w` — the restored
+  course now flows traffic past the parked grid car and punts it into
+  the Thames repeatedly (v1: `5w`). A 2400-frame rendered pass shows
+  the flyover span over water the course demands; the residual reads
+  as traversal difficulty (F15-B controller-skill class), **not** a
+  remaining route-coverage defect — the driven line now passes within
+  4.7 m of all 14 gates.
+- **london-2 parked `rcv=251w/10f`** (v1: 241w): stalled-field
+  collateral — the whole field pinned at gate 0 keeps punting the
+  stationary car into the river.
+- **sf-7 field `rcv` fall churn** (bot `17f`, parked `21f`): elevated
+  spawn-area falls on the stalled field, same disclosed class as the
+  checkpoint matrix's spawn-edge loops.
+- **End-pose `wheels=0/4`** on four scripted legs (london-1/2,
+  sf-1/9) and modest `dropped` on two (london-4 159, sf-4 261) —
+  disclosed poses and physics-step drops, all `status=pass`.
+- **lap counters can exceed cleared gates** (e.g. london-1 `0c/2l`,
+  london-0 `1c/3l`): opponent lap accounting advances with route
+  progress, not gate clears — consistent with route-derived opponent
+  progress being the plausible original model, and further motivation
+  for the open F14/F15 question.
+
+## Evidence → F14 acceptance
+
+- **F14-AC01** (discoverable + deps load): `race-defs` builds 10/10
+  cataloged rows per city at both difficulties; all 20 ran the
+  production session to `status=pass` ×2 drivers.
+- **F14-AC06** (representative matrix): this section — 20/20 events ×
+  {scripted, parked} at Amateur, pre- and post-repair published, with
+  the stall classes named. `status=pass` is a smoke-record outcome;
+  field plateaus are disclosed per event above, not smoothed into a
+  completability claim. Professional and hold-driver legs remain open.
+- **Residual classes (open, not claimed as done)**:
+  (a) authored `.opp` lines missing gate cylinders (london-2/4/5,
+  sf-7) — needs the route-derived-progress decision under UNK-11;
+  (b) traversal stalls past restored coverage (london-6 @1,
+  london-9 @1, sf-9 @4) — opponent controller skill, F15-B class;
+  (c) opponent deep-course pace generally — no Circuit finish reached
+  except london-0's four.

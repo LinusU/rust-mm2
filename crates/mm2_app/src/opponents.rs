@@ -627,10 +627,21 @@ pub fn reanchor_pose(
 /// [`NavGraph::densify_route`]'s re-pathed copy (F15-B.6). Ambient
 /// closures are deliberately *not* applied — an aimap `[Exceptions]`
 /// row forbids ambient traffic on a road, it does not remove the road
-/// from a race course the `.opp` anchors route through.
-pub fn driving_route(route: &OpponentRoute, nav: Option<&NavGraph>) -> OpponentRoute {
+/// from a race course the `.opp` anchors route through. `gates` are
+/// the race's checkpoint triggers: a re-path that abandons a gate the
+/// authored leg crossed is rejected so the course stays crossable.
+pub fn driving_route(
+    route: &OpponentRoute,
+    nav: Option<&NavGraph>,
+    gates: &[mm2_game::Checkpoint],
+) -> OpponentRoute {
     match nav {
-        Some(g) => g.densify_route(route, route_is_closed(route), &RouteOptions::default()),
+        Some(g) => g.densify_route(
+            route,
+            route_is_closed(route),
+            gates,
+            &RouteOptions::default(),
+        ),
         None => route.clone(),
     }
 }
@@ -678,7 +689,10 @@ pub fn spawn_opponents(
         let (mut pos, yaw) = spawn_pose(definition, i, spec, player_pos, player_yaw);
         // The chased line is the authored route re-pathed through the
         // road graph where one is bound — `spec` itself stays verbatim.
-        let route = spec.route.as_ref().map(|r| driving_route(r, nav));
+        let route = spec
+            .route
+            .as_ref()
+            .map(|r| driving_route(r, nav, &definition.checkpoints));
         // First chase index along the authored facing — early anchors
         // behind the staged heading are left for the next pass, not
         // chased off the spawn line.

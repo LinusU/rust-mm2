@@ -1868,14 +1868,24 @@ impl NavGraph {
     /// - When no route connects the endpoints the authored leg stands
     ///   — the anchor may sit off the network entirely (a gate in a
     ///   park), and a wrong guess is worse than the authored intent.
+    /// - A re-path that drops a checkpoint the authored segment
+    ///   crossed is rejected wholesale: the drivable detour may run
+    ///   blocks away from a trigger that sits off the routable
+    ///   network (the `london circuit:6` flyover gate — its ramp is a
+    ///   breakable-dressed climb the BAI does not route), and an
+    ///   un-crossable gate stalls every Ordered participant on it.
     ///
     /// `closed` marks the circuit convention (last anchor near the
     /// first): the wrap leg is densified too and the first anchor is
     /// re-emitted at the tail so the loop keeps closing on it.
+    /// `gates` are the race's checkpoint triggers — only their
+    /// coverage constrains the re-path, so passing an empty slice
+    /// keeps the previous behaviour.
     pub fn densify_route(
         &self,
         route: &OpponentRoute,
         closed: bool,
+        gates: &[crate::race::Checkpoint],
         options: &RouteOptions,
     ) -> OpponentRoute {
         let n = route.points.len();
@@ -1891,20 +1901,33 @@ impl NavGraph {
             if self.leg_leaves_corridor(a.position, b.position)
                 && let Ok(r) = self.route_candidates(a.position.into(), b.position.into(), options)
             {
-                for p in self.route_path(&r, DENSIFY_STEP) {
-                    // Interior samples only — the endpoints are the
-                    // authored anchors themselves.
-                    if p.distance(a.position) > DENSIFY_STEP
-                        && p.distance(b.position) > DENSIFY_STEP
-                    {
-                        out.push(OpponentRoutePoint {
-                            position: p,
-                            // An inserted point is never a staging
-                            // record — `brake` carries a heading only
-                            // on authored rows.
-                            brake: 0.0,
-                            ..b.clone()
-                        });
+                let samples: Vec<Vec3> = self.route_path(&r, DENSIFY_STEP);
+                let chain: Vec<Vec3> = std::iter::once(a.position)
+                    .chain(samples.iter().copied())
+                    .chain(std::iter::once(b.position))
+                    .collect();
+                let covered =
+                    |g: &crate::race::Checkpoint| chain.windows(2).any(|w| g.crossed(w[0], w[1]));
+                let preserves_gates = gates
+                    .iter()
+                    .filter(|g| g.crossed(a.position, b.position))
+                    .all(covered);
+                if preserves_gates {
+                    for p in samples {
+                        // Interior samples only — the endpoints are the
+                        // authored anchors themselves.
+                        if p.distance(a.position) > DENSIFY_STEP
+                            && p.distance(b.position) > DENSIFY_STEP
+                        {
+                            out.push(OpponentRoutePoint {
+                                position: p,
+                                // An inserted point is never a staging
+                                // record — `brake` carries a heading only
+                                // on authored rows.
+                                brake: 0.0,
+                                ..b.clone()
+                            });
+                        }
                     }
                 }
             }

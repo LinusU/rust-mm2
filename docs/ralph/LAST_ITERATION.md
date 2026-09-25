@@ -1,4 +1,161 @@
-# Last iteration — F10-B.15 multi-edge collision accounting repair (iteration 52)
+# Last iteration — F14-A.2 Circuit runtime matrix + densify gate-coverage repair (iteration 53)
+
+Iteration 53 on `ralph/night` (baseline `0fe4787`, F10-B.15 —
+external verify + review green). Two coupled pieces: the F14-A
+remainder — the representative-playability runtime matrix over the
+complete authored Circuit catalog — and one bounded repair the
+matrix's own analysis surfaced (`densify_route` re-paths could
+abandon checkpoint coverage the authored `.opp` line had, stalling
+whole Ordered fields at cp 0).
+
+## Task selection
+
+No failing gate or review finding to repair — the B.15 review passed
+with verification gaps. Among ready candidates, the Circuit matrix
+was the only major race family with zero runtime evidence (Blitz has
+F12-C's, Checkpoint the F13-C matrix), and F14-A names the AC06
+representative-playability leg as its remaining work. Circuits also
+exercise `CheckpointRule::Ordered`, lap counting and start-line reuse
+that the any-order matrix never touched. Remaining candidates stayed
+unchanged-blocked (F05-B UNK-13, F15-B research-gated, F16-C
+interactive finish, F11-C review judgment, F13-C original-fidelity
+comparison, F18-A → F18-B/C scope, F07-B no authored sample/output
+device, F10-B.15's disclosed 4-car-chain gap — test-only, lower
+value).
+
+## What landed
+
+### The matrix (20 events × 2 drivers, Amateur, `--frames 12000`)
+
+- Denominator: `mm-inspect events` — **20 cataloged Circuit rows**
+  (10 London `circuit0..9`, 10 SF `circuit0..9`), all `ready`.
+  `circuit10`/`circuit11` rows are uncataloged extras, kept visible
+  not counted.
+- 40 legs, scripted `--bot` + stationary `--parked` per event, the
+  F13-C command pattern. Results + per-leg logs local in
+  `/tmp/mm2-circuit-matrix/` (pre-fix) and `/tmp/mm2-circuit-matrix-v2/`
+  (post-fix); each log stamps its commit. Published in
+  `docs/race-coverage.md`'s new Circuit section.
+
+### The repair — `densify_route` gate coverage
+
+Analysis found uniform field-wide plateaus — every opponent (and the
+scripted player) stalling at the same gate index on several events.
+Tracing london `circuit:6` (all 6 opponents + player at cp 0,
+repeated re-anchors, a rendered capture showing the field jammed at
+the start junction) isolated it: gate 0 sits on a flyover whose ramp
+is dressed with breakable construction bangers and not covered by
+routable BAI lanes; the authored `.opp` leg crosses the cylinder at
+4.7 m (r10), but the nav re-path — `leg_leaves_corridor` →
+`route_candidates` — detoured ~500 m around the block and missed the
+trigger by **198 m**. Every Ordered participant required a physical
+crossing it could never make.
+
+- `crates/mm2_game/src/nav.rs` — `densify_route` gains a
+  `gates: &[Checkpoint]` parameter: a re-path that drops a trigger
+  the authored segment crossed (`Checkpoint::crossed` over the
+  authored a→b and every consecutive pair of a → lane samples → b)
+  is rejected and the authored leg stands — the same fallback
+  unroutable legs already used. Re-paths that preserve coverage —
+  including ones that newly cross a gate the authored line missed —
+  still replace the leg.
+- `crates/mm2_app/src/opponents.rs`/`session.rs` —
+  `driving_route(route, nav, gates)`; both callers pass the event's
+  `RaceDefinition.checkpoints` (opponent roster + scripted bot
+  route).
+- `docs/original-rules.md` — DSN-44 records the constraint as an
+  implementation choice (the original never densifies; the route is
+  the AI course, UNK-11).
+- `tests/nav.rs` — +2: a re-path that would drop the authored-crossed
+  gate keeps the leg verbatim; a re-path that still crosses the gate
+  densifies and the published line still crosses it. 34/34 nav tests
+  green.
+
+Retail verification of the repair (this commit's binary, install
+`fnv1a64:e91e6cd4b2ae30d9`): london `circuit:6 --bot --frames 3000`
+— driven-route min distance to every gate ≤ 4.7 m (was 198 m at gate
+0); `cp=1/14`, three opponents banking `1c` within 50 s, banger
+impacts registering where the field smashes the ramp barriers —
+vs everyone parked at `0c/900w` before.
+
+### Post-fix matrix (v2, same 40-leg pattern)
+
+The rebuilt work-tree binary reran all 40 legs (logs stamp the
+`0fe4787` base commit — the repair was uncommitted at run time;
+disclosed in `docs/race-coverage.md`). **40/40 `rc=0 status=pass`,
+`dup=0`.** Verified outcomes:
+
+- **london-6**: every opponent `0c → 1c` — gate 0 crossed by the whole
+  field. Plateau moved to gate 1 with heavy escape/re-anchor churn;
+  the restored course flows the field past the parked control and
+  punts it into the Thames (`rcv 5w → 294w`). Residual reads as
+  traversal difficulty past restored coverage (F15-B class), not a
+  coverage defect — driven line ≤ 4.7 m of all 14 gates.
+- **london-9 / sf-9**: coverage restored on the driven lines, but the
+  uniform plateaus persist (`1c`/`4c` all-six) — same traversal
+  residual class, disclosed per event.
+- **london-4 parked**: field `7c → 9c` — a kept re-path now crosses a
+  gate the authored line missed; the stall lands on the authored-miss
+  gate 9 (32 m vs r11).
+- **sf-2 scripted**: `cp 3/13 → 9/13` — densification improvement.
+- **Authored-miss events unchanged**: london-2 @0c, london-5 @2c,
+  sf-7 @5c — verbatim routes can't gain coverage, as designed.
+- Minor disclosures: `wheels=0/4` end poses on four scripted legs;
+  `dropped` 159/261 on two; london-2 parked `rcv=251w` unchanged.
+
+## The second defect class (identified, not repaired)
+
+Four events plateau *even verbatim*: the authored `.opp` line itself
+never enters some gate cylinders — measured min distances
+london-2 gate0 11 m vs r7, london-4 gate0 16 m vs r11 + gate9 32 m,
+london-5 gate2 36 m, sf-7 gates5/6/7 34/120/63 m — uniform across
+every `-a-*`/`-p-*` route of the event. Original opponents following
+these lines could not have physically crossed either, so the
+original's AI progress accounting must be route-derived rather than
+trigger-based (inference under UNK-11 — unverified). Repairing it
+means deciding how AI Ordered progress is bound to the driven route
+(gate→route-position binding, per-lap, per-opponent) — a separate
+coherent task recorded as the next F14/F15 candidate, not bundled
+into this slice.
+
+London-2 additionally showed the parked control car water-recovered
+241× (`rcv=241w/19f`) — the stalled field punts it into the Thames
+repeatedly; collateral of the same stall, kept visible.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` — all suites green
+(tests/nav.rs 32 → 34).
+
+## Classification
+
+The densify constraint is an implementation choice (DSN-44). The
+matrix is original-content validation evidence (fingerprinted
+install, authored data) — `status=pass` smoke records only; several
+events remain visibly uncompletable under the current AI-progress
+model, disclosed not claimed. The second defect's original rule is
+inference under UNK-11, not verified.
+
+## Remaining open items
+
+- F14-A/F14-C stay open: AC04 real-Circuit-with-opponents is now
+  evidenced for the courses whose routes cover their gates; the four
+  route-miss events need the AI-progress model task first.
+- Opponent Ordered progress model: bind gates to route positions
+  (per-opponent, per-lap) so authored lines that never thread a
+  cylinder still produce honest progress — or find and verify the
+  original's actual rule.
+- The scripted `--bot` driver still aims straight at the next gate —
+  it cannot climb off-network ramps a human would; its cp counts are
+  a controller limit, not course feasibility.
+- Re-anchor counts stay high on penned fields — recovery is bounded
+  and disclosed, not a course fix.
+
+---
+
+# Iteration 52 — F10-B.15 multi-edge collision accounting repair
 
 Iteration 52 on `ralph/night` (baseline `1a5b521`, F10-B.14 —
 external verify + review green). One coherent slice of the F10-B

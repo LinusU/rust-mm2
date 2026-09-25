@@ -1243,7 +1243,7 @@ fn densify_route_keeps_corridor_legs_verbatim() {
     let route = OpponentRoute {
         points: vec![waypoint(0.0, 0.0, 10.0), waypoint(0.0, 0.0, 90.0)],
     };
-    let d = g.densify_route(&route, false, &RouteOptions::default());
+    let d = g.densify_route(&route, false, &[], &RouteOptions::default());
     assert_eq!(d, route);
 }
 
@@ -1255,7 +1255,7 @@ fn densify_route_repaths_legs_off_the_road() {
     let route = OpponentRoute {
         points: vec![a.clone(), b.clone()],
     };
-    let d = g.densify_route(&route, false, &RouteOptions::default());
+    let d = g.densify_route(&route, false, &[], &RouteOptions::default());
     // The authored anchors stay verbatim at the ends — gate binding is
     // unchanged — while the interior is lane geometry.
     assert_eq!(d.points.first().unwrap(), &a);
@@ -1286,7 +1286,7 @@ fn densify_route_wrap_leg_keeps_the_loop_closed() {
     let route = OpponentRoute {
         points: vec![a.clone(), b.clone(), a.clone()],
     };
-    let d = g.densify_route(&route, true, &RouteOptions::default());
+    let d = g.densify_route(&route, true, &[], &RouteOptions::default());
     assert_eq!(d.points.first().unwrap().position, a.position);
     assert_eq!(d.points.last().unwrap().position, a.position);
     assert!(d.points.len() > 3);
@@ -1313,6 +1313,59 @@ fn densify_route_keeps_unroutable_legs_authored() {
     let route = OpponentRoute {
         points: vec![waypoint(0.0, 0.0, 25.0), waypoint(100.0, 0.0, 25.0)],
     };
-    let d = g.densify_route(&route, false, &RouteOptions::default());
+    let d = g.densify_route(&route, false, &[], &RouteOptions::default());
     assert_eq!(d, route);
+}
+
+#[test]
+fn densify_route_rejects_repaths_that_drop_a_gate_the_leg_crossed() {
+    // The authored leg cuts the U's interior — off-corridor, so the
+    // router would normally send it over the top street. A gate on the
+    // authored line keeps the leg verbatim: a drivable detour that no
+    // longer crosses the trigger stalls every Ordered participant on
+    // it (the `london circuit:6` flyover case).
+    let g = NavGraph::build(&u_shape()).graph;
+    let a = waypoint(0.0, 0.0, 10.0);
+    let b = waypoint(60.0, 0.0, 10.0);
+    let route = OpponentRoute {
+        points: vec![a.clone(), b.clone()],
+    };
+    let gate = Checkpoint {
+        center: Vec3::new(30.0, 0.0, 10.0),
+        radius: 5.0,
+        height: 4.0,
+        heading_deg: 0.0,
+        require_direction: false,
+    };
+    let d = g.densify_route(&route, false, &[gate], &RouteOptions::default());
+    assert_eq!(d, route, "the authored leg crosses the gate — keep it");
+}
+
+#[test]
+fn densify_route_keeps_repaths_that_still_cross_the_gate() {
+    // A gate hugging the leg's end anchor: the authored segment
+    // crosses it and so does the re-path's final approach, so the
+    // detour stands — coverage is preserved rather than merely
+    // asserted of the authored line.
+    let g = NavGraph::build(&u_shape()).graph;
+    let a = waypoint(0.0, 0.0, 10.0);
+    let b = waypoint(60.0, 0.0, 10.0);
+    let route = OpponentRoute {
+        points: vec![a.clone(), b.clone()],
+    };
+    let gate = Checkpoint {
+        center: Vec3::new(58.0, 0.0, 12.0),
+        radius: 8.0,
+        height: 4.0,
+        heading_deg: 0.0,
+        require_direction: false,
+    };
+    let d = g.densify_route(&route, false, &[gate], &RouteOptions::default());
+    assert!(d.points.len() > 2, "the covered re-path still densifies");
+    // And the published line still crosses the trigger.
+    let pts: Vec<Vec3> = d.points.iter().map(|p| p.position).collect();
+    assert!(
+        pts.windows(2)
+            .any(|w| gate.crossed(w[0], w[1]) || gate.crossed(w[1], w[0]))
+    );
 }
