@@ -310,6 +310,10 @@ pub fn headless_smoke(
                     // intent on the first `Playing` frame — evidence
                     // for the production teardown/begin lifecycle.
                     session::dev_restart_once,
+                    // `--restart-at` is the same intent deferred to a
+                    // session-clock tick, so a run can bank real
+                    // progress before the teardown it exercises.
+                    session::dev_restart_at,
                     session::drive_session,
                 )
                     .chain(),

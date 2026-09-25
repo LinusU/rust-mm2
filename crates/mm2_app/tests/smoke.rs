@@ -314,6 +314,149 @@ fn dev_world_headless_smoke_follows_player_across_restart() {
     );
 }
 
+fn record_field_u64(line: &str, prefix: &str) -> u64 {
+    line.split_whitespace()
+        .find_map(|kv| kv.strip_prefix(prefix).and_then(|v| v.parse().ok()))
+        .unwrap_or(u64::MAX)
+}
+
+/// `--restart-at` is the delayed form of `--restart`: the intent
+/// queues on the first `Playing` frame where the session clock has
+/// reached the configured fixed tick, so a run banks real Playing
+/// ticks before the teardown — which is what distinguishes a
+/// mid-race restart leg from a just-spawned one. The record reports
+/// the *current* generation's clock as `ticks=`, so a restart at
+/// tick 600 inside a 600-update run (~1200 ticks available) leaves
+/// generation 2 only the remainder — a tick-0 `--restart` would
+/// leave ~1190 instead.
+#[test]
+fn restart_at_defers_the_restart_to_the_configured_tick() {
+    let vfs = Vfs::new();
+    let config = SessionConfig {
+        dev: DevOverrides {
+            restart_at: Some(600),
+            ..DevOverrides::default()
+        },
+        ..SessionConfig::default()
+    };
+    let rec = smoke::headless_smoke(
+        &config,
+        vfs,
+        SelectedCar {
+            def: None,
+            paint: 0,
+        },
+        &VehicleConfig::default(),
+        600,
+        smoke::Driver::Hold,
+        None,
+    );
+    assert_eq!(
+        rec.status,
+        SmokeStatus::Pass,
+        "expected pass, got: {}",
+        rec.line()
+    );
+    let line = rec.line();
+    assert!(
+        line.contains("rs=1"),
+        "the delayed restart still counts once: {line}"
+    );
+    let ticks = record_field_u64(&line, "ticks=");
+    assert!(
+        (1..900).contains(&ticks),
+        "a mid-run restart leaves generation 2 only the remaining ticks, got {ticks} in {line}"
+    );
+    assert!(
+        line.contains("phase=playing"),
+        "the restarted session should be live again at the cap: {line}"
+    );
+}
+
+/// The delayed restart is one-shot per process like `--restart`:
+/// generation 2's clock reaches the threshold again on any longer
+/// run, so a missing latch would count `rs=2`.
+#[test]
+fn restart_at_fires_once_not_once_per_generation() {
+    let vfs = Vfs::new();
+    let config = SessionConfig {
+        dev: DevOverrides {
+            restart_at: Some(60),
+            ..DevOverrides::default()
+        },
+        ..SessionConfig::default()
+    };
+    let rec = smoke::headless_smoke(
+        &config,
+        vfs,
+        SelectedCar {
+            def: None,
+            paint: 0,
+        },
+        &VehicleConfig::default(),
+        600,
+        smoke::Driver::Hold,
+        None,
+    );
+    assert_eq!(
+        rec.status,
+        SmokeStatus::Pass,
+        "expected pass, got: {}",
+        rec.line()
+    );
+    let line = rec.line();
+    assert!(
+        line.contains("rs=1"),
+        "generation 2 crosses the threshold too — one-shot latch must hold: {line}"
+    );
+    assert!(
+        !line.contains("rs=2"),
+        "the scheduled restart must not refire in generation 2: {line}"
+    );
+}
+
+/// A threshold the run never reaches must never restart — the gate
+/// is the session clock, not mere `Playing`.
+#[test]
+fn restart_at_beyond_the_run_never_fires() {
+    let vfs = Vfs::new();
+    let config = SessionConfig {
+        dev: DevOverrides {
+            restart_at: Some(1_000_000),
+            ..DevOverrides::default()
+        },
+        ..SessionConfig::default()
+    };
+    let rec = smoke::headless_smoke(
+        &config,
+        vfs,
+        SelectedCar {
+            def: None,
+            paint: 0,
+        },
+        &VehicleConfig::default(),
+        600,
+        smoke::Driver::Hold,
+        None,
+    );
+    assert_eq!(
+        rec.status,
+        SmokeStatus::Pass,
+        "expected pass, got: {}",
+        rec.line()
+    );
+    let line = rec.line();
+    assert!(
+        !line.contains(" rs="),
+        "no restart happened — the record must not claim one: {line}"
+    );
+    let ticks = record_field_u64(&line, "ticks=");
+    assert!(
+        ticks >= 1000,
+        "600 updates ≈ 1200 Playing ticks; got {ticks} in {line}"
+    );
+}
+
 /// The `diff=` field reflects the configured difficulty, not a fixed
 /// label — a Professional-configured run records `diff=professional`.
 #[test]

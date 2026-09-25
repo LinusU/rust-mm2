@@ -523,6 +523,15 @@ pub struct DevOverrides {
     /// not a continuous run of the first, so it IS in
     /// `record_eligibility` — results it produces never record.
     pub restart: bool,
+    /// `--restart-at`: like `restart` but deferred until the session
+    /// clock reaches the given fixed-step count — the delay lets an
+    /// event bank real progress (gates cleared, laps, race ticks)
+    /// before the teardown, which is the leg that proves the restart
+    /// lifecycle resets it rather than just rebuilding a fresh spawn
+    /// (evidence/diagnostic runs — never a session-legal parameter).
+    /// One-shot per process; record-ineligible for the same reason
+    /// `restart` is.
+    pub restart_at: Option<u64>,
     /// `--no-pvs`: disable the authored `.cpvs` room-PVS render culling
     /// (F18-A.5) — the retail `cityLevel::EnablePVS(false)` counterpart
     /// and the escape hatch for comparing culled vs unculled captures.

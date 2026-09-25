@@ -176,6 +176,14 @@ struct Cli {
     #[arg(long)]
     restart: bool,
 
+    /// Queue the session's restart intent once the session clock
+    /// reaches `ticks` fixed steps (120 Hz — the `smoke` record's
+    /// `ticks=` field): a delayed `--restart` for evidence legs that
+    /// need real race progress banked before the teardown. The
+    /// restarted run is record-ineligible. One-shot.
+    #[arg(long, value_name = "ticks")]
+    restart_at: Option<u64>,
+
     /// Press the local vehicle's authored horn once on the first
     /// `Playing` frame (diagnostic aid — exercises the F07 voice path
     /// in a `--frames` capture where live input is frozen; the record's
@@ -719,6 +727,7 @@ fn main() {
             pause: cli.pause,
             finish: cli.finish,
             restart: cli.restart,
+            restart_at: cli.restart_at,
             no_pvs: cli.no_pvs,
             horn: cli.horn,
         },
@@ -809,6 +818,7 @@ fn main() {
         && !cli.pause
         && !cli.finish
         && !cli.restart
+        && cli.restart_at.is_none()
         && !cli.horn
         && !cli.no_pvs
         && !cli.nav
@@ -1009,6 +1019,10 @@ fn main() {
                 // take. Ahead of the driver so the intent is consumed
                 // this frame.
                 session::dev_restart_once,
+                // `--restart-at` queues the same intent once the
+                // session clock reaches its tick — the delayed leg
+                // that lets a run bank race progress before teardown.
+                session::dev_restart_at,
                 session::drive_session,
             )
                 .chain(),

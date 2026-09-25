@@ -589,6 +589,8 @@ pub fn record_eligibility(config: &SessionConfig) -> Result<(), Ineligible> {
         Err(Ineligible::DevOverride("finish"))
     } else if dev.restart {
         Err(Ineligible::DevOverride("restart"))
+    } else if dev.restart_at.is_some() {
+        Err(Ineligible::DevOverride("restart-at"))
     } else {
         Ok(())
     }

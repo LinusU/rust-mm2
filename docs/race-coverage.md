@@ -925,7 +925,17 @@ participant's gates (`x/total`); `res` = results-ledger entries;
   closing gate's cylinder banks nothing, an overlapping
   last-gate/line pair banks the lap exactly once, a last-lap tie
   records both finishes deterministically, and a `ResetVehicle`
-  jump over the line still owes the crossing.
+  jump over the line still owes the crossing. F14-C.1 repeats the
+  finish-line-spawn leg on authored geometry: `sf circuit:0
+  --parked --spawn=<waypoint row-0 centre>` dwells the car inside
+  the authored closing-gate cylinder (radius 11, +0.5 lift) for
+  all 3600 frames (`final` ~2 m from spawn) and banks `cp=0/9
+  lap=1/3 results=0` while the field races a lap — dwelling inside
+  the not-yet-`next` volume grants nothing on retail data either.
+  The same iteration's `--finish` leg resolved a retail Ordered
+  event end-to-end: `sf circuit:0` → `phase=results`, `cp=9/9
+  lap=3/3 outcome=finished place=1`, `results=1` — a dev-swept
+  (record-ineligible) resolution, not a driven finish.
 - **F14-AC03** (multi-lap + multi-participant independence,
   consistent ordering): `ordered_multi_lap_participants_stay_independent_and_order`
   + `live_order_tracks_progress_and_locks_finished_places` +
@@ -950,7 +960,16 @@ participant's gates (`x/total`); `res` = results-ledger entries;
   high-waters rebind at the spawn, markers restamp once,
   `standings_in(2)` stays empty. AnyOrder legs were already covered
   by `restart_respawns_the_lineup` + `restart_rebuilds_the_event_session`
-  + `restarting_the_event_respawns_its_overlay_once`.
+  + `restarting_the_event_respawns_its_overlay_once`. F14-C.1 adds
+  the *mid-race* retail leg the tick-0 `--restart` could not reach:
+  `--restart-at 7200` queues the restart once the session clock has
+  banked ~60 s of Playing. sf `circuit:0 --bot` restarted once
+  (`rs=1`) with gen-1's `cp=4/9` destroyed (control leg at the same
+  wall point) and generation 2 re-racing to `cp=2/9 lap=2/3`,
+  `dup=0`; london `circuit:0` same shape — `rs=1`, gen-2
+  `cp=1/6 lap=3/3`, and a generation-scoped opponent finish
+  (`vpcoop` slot 1 `6c/3l/F`, `results=1`) while the local raced
+  on — the ledger mints the current generation's results only.
 - **F14-AC06** (representative matrix): this section — 20/20 events ×
   {scripted, parked} at Amateur, pre- and post-repair published, plus
   the same 40 legs at Professional (F14-A.4) with the authored

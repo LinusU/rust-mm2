@@ -333,6 +333,32 @@ pub fn dev_restart_once(
     }
 }
 
+/// `--restart-at TICK` (quarantined `DevOverrides`, evidence runs
+/// only): the delayed form of [`dev_restart_once`] — queues the
+/// session's restart intent on the first `Playing` frame where the
+/// session clock has reached `restart_at` fixed ticks (120 Hz, the
+/// `smoke` record's `ticks=` unit). The deferral is the point: an
+/// event run at tick 0 has nothing banked, so `--restart` can only
+/// prove the teardown/rebuild mechanics, not that a *mid-race*
+/// restart resets progress. This override lets a leg bank real gates,
+/// laps and race ticks first, then takes the same production
+/// `Unloading → Menu → begin` path. One-shot: generation 2's clock
+/// would reach the threshold too, so the latch keeps it running.
+pub fn dev_restart_at(
+    session: Res<Session>,
+    mut control: ResMut<SessionControl>,
+    mut fired: Local<bool>,
+) {
+    if *fired {
+        return;
+    }
+    let at = session.config().and_then(|c| c.dev.restart_at);
+    if session.is_playing() && at.is_some_and(|at| session.tick() >= at) {
+        *fired = true;
+        control.restart = true;
+    }
+}
+
 /// The asset collections world spawning writes into.
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct AssetStores<'w> {

@@ -1,4 +1,110 @@
-# Last iteration — F14-B.2 Ordered lap-validation edge legs + F14-B promotion (iteration 58)
+# Last iteration — F14-C.1 mid-race restart + authored-edge Circuit legs (iteration 59)
+
+Iteration 59 on `ralph/night` (baseline `424cca6`, F14-B.2 — external
+verify + review green at `424cca6`; third iteration of run
+`20260925T144723`). One piece: F14-C's unblocked evidence scope — a
+mid-race Ordered restart on retail circuits plus the authored-data
+finish-line-spawn edge leg.
+
+## Task selection
+
+No failing gate or open review finding to repair — the F14-B.2
+review passed with verification gaps only (all disclosed, none
+blocking). The plan's named next slice is F14-C's unblocked legs:
+catalog/multi-lap/opponent/restart evidence on retail content —
+its traversal-stall completability claims stay gated on F15-B's
+research. Auditing the named scope found two real gaps in the
+existing evidence: every restart leg fired at tick ~0 (`--restart`
+queues the intent on the first `Playing` frame), so nothing had
+shown the teardown/rebuild resetting *banked* race progress; and
+the B.2 edge tests are all synthetic — no leg had exercised an
+exploit-negative case against an authored gate volume. A third
+gap: no leg had driven a retail Ordered event to `Results` through
+the production `advance_race` at all (matrices cap at 12000
+frames; the scripted driver stalls before finishing most
+circuits).
+
+## What landed
+
+- `DevOverrides::restart_at: Option<u64>` (mm2_game `config.rs`) +
+  `record_eligibility` arm (`Ineligible::DevOverride("restart-at")`)
+  + CLI `--restart-at <ticks>` (120 Hz session-clock units — the
+  record's `ticks=` field) + `dev_restart_at` system scheduled next
+  to `dev_restart_once` in the windowed and headless `Update`
+  chains, ahead of `drive_session`. Same one-shot latch, same
+  production `Unloading → Menu → begin` path — the deferral is the
+  only difference. Tests: +3 `tests/smoke.rs`
+  (`restart_at_defers_the_restart_to_the_configured_tick` — gen-2
+  `ticks=` proves the restart fired mid-run, not at spawn;
+  `restart_at_fires_once_not_once_per_generation` — gen-2 crossing
+  the threshold does not refire; `restart_at_beyond_the_run_never_
+  fires`) + the `record_eligibility` arm in `tests/progression.rs`.
+- Retail legs (`fnv1a64:e91e6cd4b2ae30d9`, Apple M1, headless):
+  - Control: `sf circuit:0 --bot --frames 4000` → `cp=4/9 lap=1/3`
+    at `ticks=7640` — the banked-progress baseline the restart
+    interrupts.
+  - `sf circuit:0 --bot --restart-at 7200 --frames 12000` → `rs=1`,
+    gen-2 `ticks=16076` re-racing `cp=2/9 lap=2/3 pos=1/5`,
+    `dup=0`, roster respawned once — the teardown at ~60 s banked
+    playing time destroyed gen-1's 4 gates and rebuilt a fresh,
+    separately-counted generation.
+  - `london circuit:0 --bot --restart-at 7200 --frames 12000` →
+    `rs=1`, gen-2 `ticks=16076`, `cp=1/6 lap=3/3`, and **a
+    generation-scoped opponent finish**: `vpcoop` slot 1 resolved
+    `6c/3l/F` minting `results=1` while the local raced lap 3 —
+    the ledger is generation-scoped (gen-1's banking does not
+    contaminate it) and the session stays `Running` while the
+    field races on.
+  - `sf circuit:0 --parked --spawn=-1689.286,44.974,-62.809
+    --frames 3600` → the finish-line-spawn edge on authored
+    geometry: the car dwells inside circuit0's closing-gate
+    cylinder (waypoint row 0, radius 11, +0.5 lift) the entire run
+    (`final` ~2 m from spawn, `peak=0.1`) and banks `cp=0/9
+    lap=1/3 results=0` while the field races a lap — dwelling
+    inside the not-yet-`next` volume grants nothing.
+  - `sf circuit:0 --finish --frames 4000` → `phase=results`,
+    `cp=9/9 lap=3/3 outcome=finished place=1`, `results=1` at
+    `ticks=53`: the dev sweeper drove the full 9-gate × 3-lap
+    Ordered sequence through production `advance_race` — the
+    lifted row-0 start-line copy armed and banked as the closing
+    gate each lap on authored data; the 4 opponents stayed
+    unresolved (`opp=0/4`, `still racing` under DSN-11). Dev-flag
+    run — record-ineligible by construction (`finish` is in
+    `record_eligibility`).
+
+## Gates
+
+`cargo test -p mm2_app --test smoke` +3 green;
+`cargo test -p mm2_game --test progression` green. Full
+fmt/clippy/test gate results in the commit.
+
+## Classification
+
+The `--restart-at` plumbing is an evidence-runner capability
+(implementation choice; `record-ineligible` like `--restart`/
+`--finish`/`--spawn`). The retail legs are original-content
+runtime evidence: the Ordered lap model and teardown semantics
+stay designed/UNK-11 — what they demonstrate is the implementation
+behaving to its contract on authored geometry, not that the
+original game did the same.
+
+## Remaining open items
+
+- F14-C stays open (deps F15-B for the completability claims):
+  traversal-stall legs (london-2/5/6/9, sf-7/9) remain the F15-B
+  controller class; original-fidelity of Ordered accounting is
+  UNK-11; the `--finish` leg is a dev-swept resolution, not a
+  driven completion — no local circuit finish exists yet.
+- The whole named remainder list from iterations 56–58 stands
+  unchanged: F05-B (UNK-13/F27/F25+), F11-C (promotion = external
+  review judgment), F13-C (original-fidelity comparison), F17-B
+  (needs F17-C's mode), F18-A (→ F18-B/C), F17-A AC03
+  (interactive), F16-C AC01 (interactive finish), F10-B AC03
+  (manual), F07-B (no output device).
+
+---
+
+# Iteration 58 — F14-B.2 Ordered lap-validation edge legs + F14-B promotion (iteration 58)
 
 Iteration 58 on `ralph/night` (baseline `6f62159`, F14-A.6 — external
 verify + review green at `6f62159`; second iteration of run

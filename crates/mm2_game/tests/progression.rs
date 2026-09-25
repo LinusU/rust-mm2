@@ -403,6 +403,12 @@ fn record_eligibility_gates_dev_and_modded_sessions() {
         record_eligibility(&config),
         Err(Ineligible::DevOverride("restart"))
     );
+    config.dev.restart = false;
+    config.dev.restart_at = Some(600);
+    assert_eq!(
+        record_eligibility(&config),
+        Err(Ineligible::DevOverride("restart-at"))
+    );
 }
 
 /// DRV-6's other half: a run under player-customized conditions is not
