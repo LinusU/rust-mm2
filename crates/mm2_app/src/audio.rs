@@ -58,8 +58,11 @@
 //! F07-B.4 adds the surface rig: every `Vehicle` car resolves its
 //! grounded wheels through [`SurfaceTables`] — `SurfaceMaterial` → the
 //! material's authored `sound` class → a row of the session's
-//! [`SurfaceAudio`] (the player-side `default_surfacedry.csv`; the
-//! weather→variant binding is unverified). The loudest covering
+//! [`SurfaceAudio`] (the player-side `default_surface<variant>.csv`;
+//! F07-B.8 binds the variant off the session weather — `rainy` →
+//! `wet`, else `dry`, designed DSN-43; the exe never references
+//! `surfaceice` so the authored ice tables are dead data, AUD-11).
+//! The loudest covering
 //! `skid wave` band and the loudest `surface wave` rolling loop each
 //! earn lazily-spawned `PlaybackMode::Loop` voices, mixed from
 //! [`tire_slippage`] (designed quantity — longitudinal over-demand or
@@ -97,8 +100,7 @@
 //! is unverified, UNK-25) and [`siren_drive`] walks the authored
 //! `(play time, next index)` chain off the session's fixed tick,
 //! holding one `PlaybackMode::Loop` voice on the current sample.
-//! Sustained-scrape semantics and the weather→surface-variant binding
-//! remain F07-B/C work.
+//! Sustained-scrape semantics remain F07-B/C work.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -122,7 +124,8 @@ use mm2_game::{
     AmbientAudio, AmbientEngineSpec, Banger, EngineLoopSpec, EngineMix, ImpactEvent, Mm2Vfs,
     NavRng, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerVehicle, SIREN_FLAG, Session,
     SessionEntity, SessionPhase, SirenPlayback, SirenSpec, SirenTransition, SkidUnit,
-    SurfaceMaterial, SurfaceSpec, VehicleAudio, impact_category, pick_impact, tire_slippage,
+    SurfaceMaterial, SurfaceSpec, SurfaceVariant, VehicleAudio, Weather, impact_category,
+    pick_impact, tire_slippage,
 };
 use mm2_vehicle::{DriveDirection, Vehicle, VehicleState};
 
@@ -160,11 +163,29 @@ const MAX_IMPACT_VOICES: usize = 12;
 /// but `WALL` bands two orders of magnitude smaller — an authored
 /// inconsistency recorded under UNK-25, not a second binding).
 const IMPACT_TABLE: &str = "aud/cardata/player/default_impacts.csv";
-/// The surface table the session reads: the player-side
-/// `default_surfacedry.csv` — the local listener's authored mix
-/// (designed choice: which weather selector binds the wet/ice
-/// variants is unverified — UNK-25; dry is the neutral default).
-const SURFACE_TABLE: &str = "aud/cardata/player/default_surfacedry.csv";
+/// The probe order for the session's surface table (F07-B.8): the
+/// exe's `%s_surface<variant>` format string ahead of
+/// `default_surface<variant>` (AUD-11 — what `%s` binds is inferred:
+/// the vehicle stem, the same per-name convention the `%s_engine`/
+/// `%s_horn` ambient strings use; no `%s_surface*` file ships on
+/// retail, so the default always resolves there). Only `dry`/`wet`
+/// variants exist — the exe never references `surfaceice`, making the
+/// authored ice tables dead data (AUD-11). Both candidate paths read
+/// the player side: the local listener's authored mix (DSN-39).
+fn surface_table_paths(variant: SurfaceVariant, vehicle: Option<&str>) -> Vec<String> {
+    let mut paths = Vec::with_capacity(2);
+    if let Some(id) = vehicle {
+        paths.push(format!(
+            "aud/cardata/player/{id}_surface{}.csv",
+            variant.suffix()
+        ));
+    }
+    paths.push(format!(
+        "aud/cardata/player/default_surface{}.csv",
+        variant.suffix()
+    ));
+    paths
+}
 /// Skid band voices one car's rig will hold — retail tops out at 3
 /// authored bands per entry; the cap bounds a giant mod table
 /// (designed bound, same contract as `MAX_ENGINE_VOICES`).
@@ -480,12 +501,16 @@ impl ImpactAudio {
     }
 }
 
-/// Session-scoped surface table (F07-B.4): the parsed player-side
-/// `default_surfacedry.csv` plus every row's resolved
+/// Session-scoped surface table (F07-B.4/B.8): the parsed player-side
+/// `default_surface<variant>.csv` — or the `<vehicle>_surface
+/// <variant>` override when a mod authors one (AUD-11's `%s_` probe,
+/// vehicle-stem reading inferred) — plus every row's resolved
 /// [`SurfaceSpec`], computed once at load so the drive loop stays a
-/// numeric read. Inserted by `load_session_world` when the table
-/// resolves and parses — same absence policy as [`ImpactAudio`]:
-/// absent/malformed warns once and inserts nothing rather than
+/// numeric read. `variant` is the session weather's pick
+/// ([`SurfaceVariant::for_weather`] — designed, DSN-43). Inserted by
+/// `load_session_world` when a table on the probe chain resolves and
+/// parses — same absence policy as [`ImpactAudio`]: a probe chain
+/// that resolves nothing warns once and inserts nothing rather than
 /// fabricating a surface row.
 #[derive(Resource)]
 pub struct SurfaceAudio {
@@ -494,35 +519,63 @@ pub struct SurfaceAudio {
     /// `SurfaceSpec::from_entry` per row, parallel to
     /// `table.surfaces` (the index space `sound_index` produces).
     specs: Vec<SurfaceSpec>,
+    /// Which table variant the session's weather bound.
+    pub variant: SurfaceVariant,
+    /// The logical path that resolved — evidence for the smoke record
+    /// and for which probe step won.
+    pub path: String,
 }
 
 impl SurfaceAudio {
-    /// Resolve and parse [`SURFACE_TABLE`] through the VFS; `None`
-    /// (with a warn) when the file is absent, the grammar rejects it
-    /// or it parses as a different cardata kind.
-    pub fn load(vfs: &Vfs) -> Option<Self> {
-        let bytes = match vfs.read_logical(SURFACE_TABLE) {
-            Ok(b) => b,
-            Err(e) => {
-                warn!("audio: {SURFACE_TABLE}: {e}");
-                return None;
+    /// Resolve the session's surface table: `weather` picks the
+    /// variant ([`SurfaceVariant::for_weather`], designed DSN-43) and
+    /// `vehicle` (the player car's catalog id, when it has one) leads
+    /// the per-name probe (AUD-11). A per-vehicle file that is absent
+    /// probes silently — stock ships none, so its absence is ordinary —
+    /// while one that exists but is unparseable or the wrong cardata
+    /// kind warns and falls through to the shared `default_` — the
+    /// authored baseline every installation carries; a `default_` that
+    /// fails the same way warns and yields no resource. The other
+    /// variant is never a substitute — a rainy session with no wet
+    /// table gets no surface audio rather than a dry table mislabeled
+    /// as wet.
+    pub fn load(vfs: &Vfs, weather: Weather, vehicle: Option<&str>) -> Option<Self> {
+        let variant = SurfaceVariant::for_weather(weather);
+        let paths = surface_table_paths(variant, vehicle);
+        let (last, specific) = paths.split_last().expect("the default always probes");
+        for path in specific {
+            if vfs.resolve(path).is_none() {
+                continue;
             }
-        };
-        match cardata::parse(SURFACE_TABLE, &bytes) {
-            Ok(file) => match file.body {
-                CardataBody::Surfaces(table) => Some(Self {
-                    specs: table.surfaces.iter().map(SurfaceSpec::from_entry).collect(),
-                    table,
-                }),
-                other => {
-                    warn!("audio: {SURFACE_TABLE} parsed as {other:?} — no surface table");
-                    None
-                }
-            },
+            match Self::load_path(vfs, path, variant) {
+                Ok(table) => return Some(table),
+                Err(e) => warn!("audio: {e}"),
+            }
+        }
+        match Self::load_path(vfs, last, variant) {
+            Ok(table) => Some(table),
             Err(e) => {
-                warn!("audio: {SURFACE_TABLE}: {e}");
+                warn!("audio: {e}");
                 None
             }
+        }
+    }
+
+    /// Read and parse one candidate path; `Err` carries a formatted
+    /// reason (absent, malformed or the wrong cardata kind).
+    fn load_path(vfs: &Vfs, path: &str, variant: SurfaceVariant) -> Result<Self, String> {
+        let bytes = vfs.read_logical(path).map_err(|e| format!("{path}: {e}"))?;
+        match cardata::parse(path, &bytes) {
+            Ok(file) => match file.body {
+                CardataBody::Surfaces(table) => Ok(Self {
+                    specs: table.surfaces.iter().map(SurfaceSpec::from_entry).collect(),
+                    variant,
+                    path: path.to_string(),
+                    table,
+                }),
+                other => Err(format!("{path} parsed as {other:?} — no surface table")),
+            },
+            Err(e) => Err(format!("{path}: {e}")),
         }
     }
 }

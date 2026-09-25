@@ -35,7 +35,8 @@ pub mod traffic;
 pub use audio::{
     AmbientAudio, AmbientEngineSpec, EngineLoopSpec, EngineMix, ImpactPick, RollingSpec,
     SIREN_FLAG, SirenPlayback, SirenSampleSpec, SirenSpec, SirenTransition, SkidPick, SkidSpec,
-    SkidUnit, SurfaceSpec, VehicleAudio, impact_category, pick_impact, tire_slippage,
+    SkidUnit, SurfaceSpec, SurfaceVariant, VehicleAudio, impact_category, pick_impact,
+    tire_slippage,
 };
 pub use banger::{
     Banger, BangerCause, BangerDefinition, BangerPhase, BangerPool, BangerStateChanged,

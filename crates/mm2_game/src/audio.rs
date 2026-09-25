@@ -16,6 +16,7 @@ use mm2_formats::cardata::{
     SirenProgram, SirenStep, SkidSample, SpeedBand, SurfaceEntry, is_sample_sentinel,
 };
 
+use crate::config::Weather;
 use crate::nav::NavRng;
 
 /// The authored per-vehicle audio table attached to a spawned vehicle —
@@ -417,6 +418,45 @@ impl SurfaceSpec {
                 .then_some(spec)
         })();
         SurfaceSpec { rolling, skid }
+    }
+}
+
+/// Which `default_surface<variant>.csv` the session binds (F07-B.8).
+///
+/// The retail executable's surface-table strings are exactly
+/// `%s_surfacedry`/`default_surfacedry` and `%s_surfacewet`/
+/// `default_surfacewet` (AUD-11 — a per-name probe ahead of the shared
+/// default, `%s` inferred as the vehicle stem like the `%s_engine`/
+/// `%s_horn` family). It never references `surfaceice` — no `ice`
+/// string exists in the binary — so the authored ice tables are dead
+/// data the runtime mirrors by having no `Ice` variant at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceVariant {
+    /// `default_surfacedry.csv` — the neutral table.
+    Dry,
+    /// `default_surfacewet.csv` — the precipitation table.
+    Wet,
+}
+
+impl SurfaceVariant {
+    /// The `surface<suffix>` file stem this variant reads.
+    pub fn suffix(self) -> &'static str {
+        match self {
+            Self::Dry => "dry",
+            Self::Wet => "wet",
+        }
+    }
+
+    /// The session's weather selector → table variant (designed,
+    /// DSN-43 — the original's selection rule is unrecovered, UNK-25):
+    /// the authored selector names are clear/cloudy/foggy/rainy
+    /// (WLD-21) and `rainy` is the only precipitation state, so it
+    /// alone binds the wet table.
+    pub fn for_weather(weather: Weather) -> Self {
+        match weather.get() {
+            3 => Self::Wet,
+            _ => Self::Dry,
+        }
     }
 }
 
@@ -1259,6 +1299,25 @@ mod tests {
         );
         assert_eq!(play.advance(&spec, -5.0, &mut rng), SirenTransition::Hold);
         assert_eq!(play.remaining, 15.0);
+    }
+
+    #[test]
+    fn rainy_is_the_only_wet_surface_variant() {
+        // DSN-43: clear/cloudy/foggy bind the dry table; `rainy` —
+        // the lone precipitation selector (WLD-21) — binds wet. The
+        // ice variant has no binding at all: the exe never references
+        // it (AUD-11).
+        for w in 0..=2 {
+            assert_eq!(
+                SurfaceVariant::for_weather(Weather::new(w).unwrap()),
+                SurfaceVariant::Dry,
+                "selector {w}"
+            );
+        }
+        assert_eq!(
+            SurfaceVariant::for_weather(Weather::new(3).unwrap()),
+            SurfaceVariant::Wet
+        );
     }
 
     #[test]

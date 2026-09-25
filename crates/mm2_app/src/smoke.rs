@@ -1041,6 +1041,14 @@ pub fn headless_smoke(
             )
         })
         .unwrap_or_default();
+    // F07-B.8 surface-variant evidence: `surf=wet` when the session's
+    // effective weather bound the wet table (or a per-vehicle
+    // override of it). Dry/absent stays bit-identical.
+    let surf_detail = world_ecs
+        .get_resource::<crate::audio::SurfaceAudio>()
+        .filter(|s| s.variant == mm2_game::SurfaceVariant::Wet)
+        .map(|_| " surf=wet".to_string())
+        .unwrap_or_default();
     // The dev `--traction` modifier is recorded when set so a wetness
     // run is self-describing; unmodified runs stay bit-identical.
     let traction_detail = config
@@ -1090,7 +1098,7 @@ pub fn headless_smoke(
     // (DRV-2/DRV-3) and aimap variant (RACE-11) selected its content.
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{txl_detail}{aud_detail}{traction_detail}{profile_detail}{extra}",
+            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{extra}",
             driver.as_str(),
             config.difficulty.as_str(),
             session.phase().name(),

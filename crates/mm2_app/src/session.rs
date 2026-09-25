@@ -542,21 +542,24 @@ pub fn load_session_world(
             }
         }
     }
-    // F18-A.2: the session's environment lighting — bound after the
-    // event resolution so an authored event's `EventParams::conditions`
-    // take precedence over the session's configured ones (RACE-2, the
-    // precedence `mm2_game::effective_conditions` encodes). A preset
-    // that cannot load spawns the fallback rig and reports it — an
+    // The session's effective weather/time-of-day — resolved once so
+    // the environment preset (F18-A.2) and the surface-audio variant
+    // (F07-B.8) read the same pick: player customization > authored
+    // event params > the configured fallback (RACE-2/3/4, the
+    // precedence `mm2_game::effective_conditions` encodes).
+    let session_conditions =
+        mm2_game::effective_conditions(&config, event_race.as_ref().map(|(def, ..)| &def.params));
+    // F18-A.2: the session's environment lighting. A preset that
+    // cannot load spawns the fallback rig and reports it — an
     // explicit diagnostic, never a silent default (F18-AC06).
     // F18-A.3: the same call resolves the authored fog row; its
     // `DistanceFog` is attached to the session's cameras below.
     let mut camera_fog: Option<bevy::pbr::DistanceFog> = None;
     if world_ok && let WorldMode::City { psdl } = &config.world {
-        let event_params = event_race.as_ref().map(|(def, ..)| &def.params);
-        let conditions = mm2_game::effective_conditions(&config, event_params);
+        let conditions = session_conditions;
         let source = if config.customization.is_some() {
             crate::environment::ConditionsSource::Customized
-        } else if event_params.is_some() {
+        } else if event_race.is_some() {
             crate::environment::ConditionsSource::Authored
         } else {
             crate::environment::ConditionsSource::Configured
@@ -643,11 +646,18 @@ pub fn load_session_world(
     if let Some(table) = crate::audio::ImpactAudio::load(&vfs.0, session.generation()) {
         commands.insert_resource(table);
     }
-    // F07-B.4: the authored surface table — the player-side
-    // `default_surfacedry.csv` the wheel-contact picks read through.
-    // Same absence policy: a table that does not resolve or parse
-    // yields no resource, not a fabricated surface row.
-    if let Some(table) = crate::audio::SurfaceAudio::load(&vfs.0) {
+    // F07-B.4/B.8: the authored surface table — the player-side
+    // `default_surface<variant>.csv` the wheel-contact picks read
+    // through, the variant bound off the session's effective weather
+    // (designed, DSN-43) with the exe's `%s_` per-vehicle probe ahead
+    // of the shared default (AUD-11). Same absence policy: a probe
+    // chain that resolves nothing yields no resource, not a
+    // fabricated surface row.
+    if let Some(table) = crate::audio::SurfaceAudio::load(
+        &vfs.0,
+        session_conditions.weather,
+        config.vehicle.id.as_deref(),
+    ) {
         commands.insert_resource(table);
     }
     // F07-B.7: the authored siren programs — the player side keys off

@@ -27,7 +27,8 @@ use mm2_game::{
     AmbientAudio, AmbientEngineSpec, Banger, BangerDefinition, DevOverrides, ImpactEvent, ImpactId,
     Mm2Vfs, NavRng, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerVehicle, Session,
     SessionConfig, SessionEntity, SessionPhase, SirenSampleSpec, SirenSpec, SurfaceMaterial,
-    SurfaceState, VehicleAudio, advance_session_tick, despawn_session_entities,
+    SurfaceState, SurfaceVariant, VehicleAudio, Weather, advance_session_tick,
+    despawn_session_entities,
 };
 use mm2_vehicle::{DriveDirection, VehicleConfig, VehicleState, vehicle_bundle};
 
@@ -1104,30 +1105,11 @@ fn an_absent_table_degrades_to_silence() {
 // picks the band and `|forward_speed|` mixes the rolling loop.
 // ---------------------------------------------------------------------------
 
-/// The surface fixture: a player-side `default_surfacedry.csv` whose
-/// row 0 is the `_default` road (NOSOUND rolling + two slippage bands)
-/// and row 1 is `grass` (a rolling loop + one wide band), plus every
-/// wave they name — at distinguishing sample rates so a voice's
-/// resolved asset identifies its authored row.
-fn surface_dir() -> tempfile::TempDir {
-    let tmp = tempfile::tempdir().unwrap();
-    let d = tmp.path();
-    for (stem, rate) in [
-        ("roadskid1", 22050),
-        ("roadskid2", 32000),
-        ("grassskid", 11025),
-        ("rollwave", 48000),
-    ] {
-        write(
-            d,
-            &format!("aud/aud22/surfaces/{stem}.22k.wav"),
-            &pcm_wav(rate, 220),
-        );
-    }
-    write(
-        d,
-        "aud/cardata/player/default_surfacedry.csv",
-        b"Tunnel sound index\n0\n\
+/// The authored dry table rows — the retail `default_surfacedry.csv`
+/// 10-column schema. Row 0 is the `_default` road (NOSOUND rolling +
+/// two slippage bands), row 1 `grass` (a rolling loop + one wide
+/// band).
+const DRY_TABLE: &[u8] = b"Tunnel sound index\n0\n\
 surface wave,max speed,min surface volume,max surface volume,min surface pitch,max surface pitch,min skid volume,max skid volume,num skid samples\n\
 NOSOUND,125,0,0,0,0,0.5,0.88,2\n\
 skid wave,min slippage,max slippage\n\
@@ -1136,8 +1118,44 @@ ROADSKID2,0.75,1\n\
 surface wave,max speed,min surface volume,max surface volume,min surface pitch,max surface pitch,min skid volume,max skid volume,num skid samples\n\
 ROLLWAVE,25,0.35,0.75,0.85,1.25,0.5,0.72,1\n\
 skid wave,min slippage,max slippage\n\
-GRASSSKID,0.25,1\n",
-    );
+GRASSSKID,0.25,1\n";
+
+/// The wet table — same schema as dry (AUD-6), distinct sample names
+/// so a resolved voice identifies which variant bound.
+const WET_TABLE: &[u8] = b"Tunnel sound index\n0\n\
+surface wave,max speed,min surface volume,max surface volume,min surface pitch,max surface pitch,min skid volume,max skid volume,num skid samples\n\
+NOSOUND,125,0,0,0,0,0.5,0.88,2\n\
+skid wave,min slippage,max slippage\n\
+WETSKID,0.5,0.75\n\
+WETSKID,0.75,1\n\
+surface wave,max speed,min surface volume,max surface volume,min surface pitch,max surface pitch,min skid volume,max skid volume,num skid samples\n\
+WETROLL,25,0.35,0.75,0.85,1.25,0.5,0.72,1\n\
+skid wave,min slippage,max slippage\n\
+WETSKID,0.25,1\n";
+
+/// The surface fixture: both player-side surface variants
+/// (`default_surfacedry.csv`/`default_surfacewet.csv`) plus every wave
+/// they name — at distinguishing sample rates so a voice's resolved
+/// asset identifies its authored row and table.
+fn surface_dir() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    for (stem, rate) in [
+        ("roadskid1", 22050),
+        ("roadskid2", 32000),
+        ("grassskid", 11025),
+        ("rollwave", 48000),
+        ("wetskid", 8000),
+        ("wetroll", 16000),
+    ] {
+        write(
+            d,
+            &format!("aud/aud22/surfaces/{stem}.22k.wav"),
+            &pcm_wav(rate, 220),
+        );
+    }
+    write(d, "aud/cardata/player/default_surfacedry.csv", DRY_TABLE);
+    write(d, "aud/cardata/player/default_surfacewet.csv", WET_TABLE);
     tmp
 }
 
@@ -1156,6 +1174,12 @@ fn surface_tables() -> SurfaceTables {
 /// tables the collider marks read, and `surface_voices` on Update like
 /// the live schedules wire it.
 fn surface_app(dir: &Path) -> App {
+    surface_app_for(dir, Weather::default(), None)
+}
+
+/// `surface_app` with the session's weather selector and player
+/// vehicle id the production `SurfaceAudio::load` reads (F07-B.8).
+fn surface_app_for(dir: &Path, weather: Weather, vehicle: Option<&str>) -> App {
     let mut vfs = Vfs::new();
     vfs.mount_dir(dir, 0).unwrap();
     let bank = WaveBank::index(&vfs);
@@ -1166,7 +1190,7 @@ fn surface_app(dir: &Path) -> App {
     session.transition(SessionPhase::Playing).unwrap();
     // Production inserts the resource only when the authored table
     // loads — an absent record leaves none and degrades to silence.
-    let table = SurfaceAudio::load(&vfs);
+    let table = SurfaceAudio::load(&vfs, weather, vehicle);
 
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
@@ -1438,7 +1462,7 @@ fn an_unresolvable_surface_and_an_absent_table_stay_silent() {
     let dir = fixture_dir();
     let mut vfs = Vfs::new();
     vfs.mount_dir(dir.path(), 0).unwrap();
-    assert!(SurfaceAudio::load(&vfs).is_none());
+    assert!(SurfaceAudio::load(&vfs, Weather::default(), None).is_none());
     let mut app = surface_app(dir.path());
     assert!(app.world().get_resource::<SurfaceAudio>().is_none());
     let (car, grass) = surface_car(&mut app, true, SurfaceMaterial::Authored(1));
@@ -1499,6 +1523,137 @@ fn teardown_sweeps_surface_voices_with_the_session() {
         .unwrap();
     app.update();
     assert_eq!(voices(&mut app), 0);
+}
+
+// ---------------------------------------------------------------------------
+// F07-B.8: the session's effective weather binds the surface-table
+// variant — `rainy` → `default_surfacewet.csv`, every other authored
+// selector → `default_surfacedry.csv` (designed, DSN-43; the exe
+// carries only the dry/wet strings — `surfaceice` is dead data,
+// AUD-11). A `<vehicle>_surface<variant>` file probes ahead of the
+// shared default (the exe's `%s_` format, stem binding inferred).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rainy_weather_binds_the_wet_surface_table() {
+    let dir = surface_dir();
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(dir.path(), 0).unwrap();
+    let rainy = Weather::new(3).unwrap();
+    let audio = SurfaceAudio::load(&vfs, rainy, None).unwrap();
+    assert_eq!(audio.variant, SurfaceVariant::Wet);
+    assert_eq!(audio.path, "aud/cardata/player/default_surfacewet.csv");
+
+    // End to end: a rolling grass contact voices the wet table's
+    // authored samples — the wet rolling loop (rate 16000) and wet
+    // skid band (rate 8000), not the dry row's (48000/11025).
+    let mut app = surface_app_for(dir.path(), rainy, None);
+    let (car, grass) = surface_car(&mut app, true, SurfaceMaterial::Authored(1));
+    set_contact(&mut app, car, Some(grass), 8.0, 0.6 * 0.16);
+    for _ in 0..3 {
+        app.update();
+    }
+    let vs = surface_voices(&mut app);
+    assert!(
+        vs.iter()
+            .any(|(role, rate, ..)| *role == SurfaceRole::Rolling && *rate == 16000),
+        "wet rolling loop: {vs:?}"
+    );
+    assert!(
+        vs.iter()
+            .any(|(role, rate, ..)| matches!(role, SurfaceRole::Skid(_)) && *rate == 8000),
+        "wet skid band: {vs:?}"
+    );
+}
+
+#[test]
+fn dry_weathers_bind_the_dry_surface_table() {
+    let dir = surface_dir();
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(dir.path(), 0).unwrap();
+    for w in 0..=2u8 {
+        let audio = SurfaceAudio::load(&vfs, Weather::new(w).unwrap(), None).unwrap();
+        assert_eq!(audio.variant, SurfaceVariant::Dry, "selector {w}");
+        assert_eq!(audio.path, "aud/cardata/player/default_surfacedry.csv");
+    }
+}
+
+#[test]
+fn a_per_vehicle_surface_table_wins_over_the_default() {
+    let dir = surface_dir();
+    // A mod-style per-vehicle override authors its own rolling wave —
+    // the `%s_surface<variant>` probe the exe's strings imply.
+    write(
+        dir.path(),
+        "aud/aud22/surfaces/carroll.22k.wav",
+        &pcm_wav(30000, 220),
+    );
+    write(
+        dir.path(),
+        "aud/cardata/player/testcar_surfacewet.csv",
+        b"Tunnel sound index\n0\n\
+surface wave,max speed,min surface volume,max surface volume,min surface pitch,max surface pitch,min skid volume,max skid volume,num skid samples\n\
+NOSOUND,125,0,0,0,0,0.5,0.88,1\n\
+skid wave,min slippage,max slippage\n\
+WETSKID,0.5,1\n\
+surface wave,max speed,min surface volume,max surface volume,min surface pitch,max surface pitch,min skid volume,max skid volume,num skid samples\n\
+CARROLL,25,0.35,0.75,0.85,1.25,0.5,0.72,1\n\
+skid wave,min slippage,max slippage\n\
+WETSKID,0.25,1\n",
+    );
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(dir.path(), 0).unwrap();
+    let rainy = Weather::new(3).unwrap();
+    let audio = SurfaceAudio::load(&vfs, rainy, Some("testcar")).unwrap();
+    assert_eq!(audio.variant, SurfaceVariant::Wet);
+    assert_eq!(audio.path, "aud/cardata/player/testcar_surfacewet.csv");
+
+    // And its authored sample is the one that resolves end to end.
+    let mut app = surface_app_for(dir.path(), rainy, Some("testcar"));
+    let (car, grass) = surface_car(&mut app, true, SurfaceMaterial::Authored(1));
+    set_contact(&mut app, car, Some(grass), 8.0, 0.6 * 0.16);
+    for _ in 0..3 {
+        app.update();
+    }
+    let vs = surface_voices(&mut app);
+    assert!(
+        vs.iter()
+            .any(|(role, rate, ..)| *role == SurfaceRole::Rolling && *rate == 30000),
+        "per-vehicle rolling loop: {vs:?}"
+    );
+}
+
+#[test]
+fn a_malformed_vehicle_table_falls_through_to_the_default() {
+    let dir = surface_dir();
+    write(
+        dir.path(),
+        "aud/cardata/player/testcar_surfacewet.csv",
+        b"this is not a cardata file",
+    );
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(dir.path(), 0).unwrap();
+    let audio = SurfaceAudio::load(&vfs, Weather::new(3).unwrap(), Some("testcar")).unwrap();
+    assert_eq!(audio.variant, SurfaceVariant::Wet);
+    assert_eq!(audio.path, "aud/cardata/player/default_surfacewet.csv");
+}
+
+#[test]
+fn a_missing_wet_table_is_no_substitute_for_dry() {
+    // Only the dry table ships: a rainy session gets no surface audio
+    // rather than the dry table standing in for the wet — the same
+    // absence policy every authored record applies.
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "aud/cardata/player/default_surfacedry.csv",
+        DRY_TABLE,
+    );
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(tmp.path(), 0).unwrap();
+    assert!(SurfaceAudio::load(&vfs, Weather::new(3).unwrap(), None).is_none());
+    // The same tree under a dry selector binds normally.
+    assert!(SurfaceAudio::load(&vfs, Weather::new(0).unwrap(), None).is_some());
 }
 
 // ---------------------------------------------------------------------------

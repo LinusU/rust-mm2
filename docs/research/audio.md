@@ -86,9 +86,8 @@ spawned over the run — it tracks `sp`, the spawn count; n = loops
 audible at record — the live fleet; `0s` stays honest: no output
 device headless). Which classes the original binds, what it feeds the
 bands and whether it pitches the ambient loop at all are unrecovered
-(DSN-41/UNK-25). Sustained-scrape semantics and the
-weather→{dry,wet,ice} surface-variant binding remain F07-B/C work,
-and DirectMusic is recognized but not decoded (F08).
+(DSN-41/UNK-25). Sustained-scrape semantics remain F07-B/C work, and
+DirectMusic is recognized but not decoded (F08).
 
 F07-B.7 adds the siren-program consumer: the session resolves
 `aud/cardata/player/<psdl-stem>policesiren.csv` (the city-keyed naming
@@ -113,6 +112,26 @@ drops. Stems prefer the `aud/*/sirens/` subtree (the exe's
 silence and an unresolvable stem warns once per activation while the
 program walks on. The `Explosion sample` binding is carried with no
 consumer (F20). `aud=` gains `/<n>w/<n>y` when nonzero (DSN-42).
+
+F07-B.8 binds the surface-table variant to the session's effective
+weather: the exe carries `%s_surfacedry`/`%s_surfacewet` formats plus
+the `default_surface{dry,wet}` names and **no** `surfaceice` string at
+all, so the shipped `default_surfaceice.csv` files are dead authored
+data under every recovered binding (AUD-11). `SurfaceVariant` maps
+`rainy` (selector 3) → wet and every other authored selector → dry — a
+designed reading: the exe's strings prove the two variants are
+runtime-selected but not which state selects wet (UNK-25). The
+session resolves the effective weather once through the shared
+`effective_conditions` resolver (customization > authored event >
+configured defaults — the same conditions that bind `env=ltNN` and
+fog), probes `aud/cardata/player/<vehicle>_surface<variant>.csv` ahead
+of the shared `default_` (the `%s_` format the exe carries; the stem
+binding is inferred — stock ships no per-vehicle file), and never
+substitutes across variants: a rainy session with no wet table gets no
+surface audio rather than a mislabeled dry one. Retail headless:
+`sf --weather 3` → `surf=wet` marker on the smoke record (`env=lt03
+(rainy-morning)` confirms the same slot bound); `--weather 0` emits no
+marker (DSN-43).
 Everything below is measured data structure; runtime semantics are
 unverified unless noted.
 
@@ -244,6 +263,14 @@ per **variant**, not per side (verified on both dirs, 2026-09-24):
 
 `ENDOFDATA` terminator. Dry/wet tables carry a `skidflagstone` reference
 that resolves to **no** wave stem — the one dead reference on retail.
+
+The exe's strings name exactly two runtime variants —
+`%s_surfacedry`/`default_surfacedry` and `%s_surfacewet`/
+`default_surfacewet` (a `%s_`-prefixed probe ahead of the `default_`
+fallback) — and contain **no** `surfaceice` string anywhere, so the
+shipped ice tables are dead authored data under every recovered
+binding (AUD-11). Which session state selects wet is unrecovered; the
+runtime's rainy→wet mapping is designed (DSN-43, UNK-25).
 
 ### Siren programs — `cardata/{player,opponent}/*policesiren.csv`
 
