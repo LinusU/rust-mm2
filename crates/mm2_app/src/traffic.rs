@@ -1235,6 +1235,13 @@ struct Knock {
     /// cannot be resolved: the launch stays at approach speed and no
     /// correction is written.
     transfer: Option<Transfer>,
+    /// The car's velocity along `dir` the instant before its launch,
+    /// captured in the flip pass — the striker correction's velocity
+    /// target needs it and the correction pass runs after every flip,
+    /// so it cannot be re-read there. `None` until this knock's car
+    /// actually hands over; an edge the apply pass's `Lane` re-check
+    /// drops never sets it and owes no striker debit.
+    struck_pre: Option<f32>,
 }
 
 /// The struck car's mutable pieces in `knock_ambient` — `StruckMut`'s
@@ -1274,8 +1281,7 @@ type KnockedCarMut = (
 /// over-reports the striker's actual Δv, so the code reconstructs the
 /// approach component from the measured severity instead. A
 /// lane-follower striker takes no correction — the lane driver owns
-/// its velocity — which also keeps a follower-follower edge from
-/// charging the exchange twice. When a mass cannot be resolved the
+/// its velocity. When a mass cannot be resolved the
 /// car keeps the pre-transfer approach-speed launch and no correction
 /// is written.
 ///
@@ -1292,6 +1298,20 @@ type KnockedCarMut = (
 /// bound to the striker: the shared `write_striker_correction` clamps
 /// the correction's post-write spin too (a `Player` striker carries
 /// no solver bound — the write clamp is its only one).
+///
+/// F10-B.15: flips and striker corrections run as two passes — a
+/// striker that is itself a lane car is `Knocked` before its
+/// striker-side debts are charged, whatever the edge order — and the
+/// correction compounds per striker instead of re-targeting per edge:
+/// the striker's first committed edge writes the velocity target
+/// (returns the wall and pays the exchange in one step), every later
+/// edge is a pure `-dir · J` debit so one striker striking two cars
+/// pays both transfers instead of having its second write erase the
+/// first's payment. A striker this pass itself flipped starts from
+/// its post-flip launch — a kinematic–kinematic edge charged it no
+/// wall — so its striker edges owe only the pure debit: a same-tick
+/// daisy chain carries the momentum debt through rather than the last
+/// car launching free.
 ///
 /// Drains under the same phase/authority gate as `drive_ambient`:
 /// edges buffered while paused never flush as a stale burst on
@@ -1398,41 +1418,48 @@ pub fn knock_ambient(
                 striker,
                 striker_lever,
                 transfer,
+                struck_pre: None,
             });
         }
     }
 
-    // Cars this pass already flipped: on a follower-follower edge the
-    // other side's own launch *is* its share of the exchange, so the
-    // striker correction must not charge it again.
-    let mut handed_over: Vec<Entity> = Vec::new();
-    for knock in knocks {
+    // Flip pass first, corrections second (F10-B.15): a striker that
+    // is itself a lane car this pass flips must be `Knocked` by the
+    // time its striker-side debts are charged, regardless of edge
+    // order, so the two passes cannot interleave.
+    //
+    // `handed_over` — cars this pass flipped, recorded as
+    // `(car, its edge's striker)` — and `corrected` — strikers that
+    // already took a correction — shape the second pass: a striker
+    // owes each committed transfer independently (one striker plowing
+    // through two cars pays both), except on the follower-follower
+    // edge where the striker is the same pair's other side — its own
+    // launch there already *is* its share.
+    let mut handed_over: Vec<(Entity, Entity)> = Vec::new();
+    let mut corrected: Vec<Entity> = Vec::new();
+    for knock in &mut knocks {
         // The car's velocity along the push direction before its
         // launch — the striker correction's velocity target needs it.
         // A later edge can name a car an earlier edge already flipped
         // — the `Lane` re-check is the dedup.
-        let struck_pre = {
-            let Ok((mut car, mut linvel, mut angvel, inertia, rotation)) =
-                cars.get_mut(knock.entity)
-            else {
-                continue;
-            };
-            if car.drive != AmbientDrive::Lane {
-                continue;
-            }
-            car.drive = AmbientDrive::Knocked;
-            let struck_pre = linvel.0.dot(knock.dir);
-            linvel.0 += knock.dir * knock.launch;
-            angvel.0 += angular_share(knock.lever, knock.dir * knock.impulse, inertia, rotation);
-            // Write-side spin bound (the solver-side `MaxAngularSpeed`
-            // clamps the integration too): an unbounded lever share
-            // would leave the wreck spinning fast enough to inflate a
-            // later contact's approach-speed reading — the same
-            // cascade amplifier the banger bound closes.
-            angvel.0 = angvel.0.clamp_length_max(MAX_BANGER_ANGULAR_SPEED);
-            struck_pre
+        let Ok((mut car, mut linvel, mut angvel, inertia, rotation)) = cars.get_mut(knock.entity)
+        else {
+            continue;
         };
-        handed_over.push(knock.entity);
+        if car.drive != AmbientDrive::Lane {
+            continue;
+        }
+        car.drive = AmbientDrive::Knocked;
+        knock.struck_pre = Some(linvel.0.dot(knock.dir));
+        linvel.0 += knock.dir * knock.launch;
+        angvel.0 += angular_share(knock.lever, knock.dir * knock.impulse, inertia, rotation);
+        // Write-side spin bound (the solver-side `MaxAngularSpeed`
+        // clamps the integration too): an unbounded lever share
+        // would leave the wreck spinning fast enough to inflate a
+        // later contact's approach-speed reading — the same
+        // cascade amplifier the banger bound closes.
+        angvel.0 = angvel.0.clamp_length_max(MAX_BANGER_ANGULAR_SPEED);
+        handed_over.push((knock.entity, knock.striker));
         traffic.knocked += 1;
         // Name the striker's class for the record (F10-B.13): a
         // `Player` participant, another ambient car (lane follower or
@@ -1448,15 +1475,18 @@ pub fn knock_ambient(
         traffic.junctions.depart(knock.entity);
         commands.entity(knock.entity).insert(RigidBody::Dynamic);
         debug!(entity = ?knock.entity, "ambient car knocked to dynamics");
+    }
 
-        let Some(transfer) = knock.transfer.as_ref() else {
+    for knock in &knocks {
+        let (Some(struck_pre), Some(transfer)) = (knock.struck_pre, knock.transfer.as_ref()) else {
             continue;
         };
         // The striker keeps its share of the exchange: its velocity
         // along the push direction becomes its approach component
-        // (`severity` = the pair's pre-solver closing speed) minus the
-        // transferred impulse over its mass. Write the velocity target
-        // rather than returning the manifold's recorded impulse —
+        // (`struck_pre` + `severity` reconstructs the pair's
+        // pre-solver closing) minus the transferred impulse over its
+        // mass. Write the velocity target rather than returning the
+        // manifold's recorded impulse —
         // `total_impulse` accumulates penetration-recovery and
         // restitution passes, so on a kinematic pair it over-reports
         // the wall response the striker actually took and charging it
@@ -1464,9 +1494,32 @@ pub fn knock_ambient(
         // correction: `drive_ambient` owns its velocity — which also
         // keeps a follower-follower edge from charging the exchange
         // twice (the other side's own launch is its share).
+        //
+        // F10-B.15: the target write is only the striker's *first*
+        // debit this drain — it returns the wall response the solver
+        // charged along `dir` and pays the exchange in one step.
+        // Every later edge of the same striker is a pure impulse
+        // debit (`-dir · J`): a second target write along a shared
+        // direction would erase the first edge's payment — the
+        // striker would pay one share while both struck cars launch,
+        // injecting the other transfer outright. The same pure debit
+        // applies when the striker is a car this pass itself flipped
+        // on a *different* pair: its post-flip velocity is already
+        // its free post-exchange state (a kinematic–kinematic edge
+        // charged it no wall), so a same-tick daisy chain carries
+        // the debt through instead of the last car launching free.
+        // The one case still owed nothing is the follower-follower
+        // edge where the striker's own flip came off this same pair:
+        // its struck-side launch already is its share of the exchange.
         let target = struck_pre + knock.severity - transfer.impulse / transfer.striker_mass;
+        let debit = knock.dir * -transfer.impulse;
         if let Ok((linvel, angvel, inertia, rotation)) = strikers.get_mut(knock.striker) {
-            let delta = knock.dir * (target - linvel.0.dot(knock.dir)) * transfer.striker_mass;
+            let delta = if corrected.contains(&knock.striker) {
+                debit
+            } else {
+                corrected.push(knock.striker);
+                knock.dir * (target - linvel.0.dot(knock.dir)) * transfer.striker_mass
+            };
             write_striker_correction(
                 delta,
                 transfer.striker_mass,
@@ -1480,11 +1533,24 @@ pub fn knock_ambient(
             cars.get_mut(knock.striker)
         {
             // Only an already-dynamic wreck takes the correction — a
-            // lane follower's velocity is owned by `drive_ambient`,
-            // and a car this pass already flipped already took its
-            // share as its launch.
-            if striker_car.drive == AmbientDrive::Knocked && !handed_over.contains(&knock.striker) {
-                let delta = knock.dir * (target - linvel.0.dot(knock.dir)) * transfer.striker_mass;
+            // lane follower's velocity is owned by `drive_ambient`.
+            // A wreck not handed over this pass is a free dynamic
+            // body whose first debit is the wall-returning target
+            // write like any striker. A car this pass itself flipped
+            // owes the pure debit when its flip came off a *different*
+            // pair, and nothing at all on the same pair — its
+            // struck-side launch there already was its share.
+            if striker_car.drive == AmbientDrive::Knocked
+                && !handed_over.contains(&(knock.striker, knock.entity))
+            {
+                let delta = if corrected.contains(&knock.striker)
+                    || handed_over.iter().any(|&(car, _)| car == knock.striker)
+                {
+                    debit
+                } else {
+                    corrected.push(knock.striker);
+                    knock.dir * (target - linvel.0.dot(knock.dir)) * transfer.striker_mass
+                };
                 write_striker_correction(
                     delta,
                     transfer.striker_mass,

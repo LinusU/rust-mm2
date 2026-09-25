@@ -1,4 +1,136 @@
-# Last iteration — F10-B.14 striker-correction spin bound + same-tick pileup coverage (iteration 51)
+# Last iteration — F10-B.15 multi-edge collision accounting repair (iteration 52)
+
+Iteration 52 on `ralph/night` (baseline `1a5b521`, F10-B.14 —
+external verify + review green). One coherent slice of the F10-B
+AC03 remainder, repairing the multi-edge defect found while
+working the two symmetric edges the B.14 review disclosed
+untested (one striker → two cars; a daisy chain / 3+ pileup).
+
+## Task selection
+
+No failing gate or review *finding* to repair — the B.14 review
+passed with verification gaps, two of them actionable coverage
+gaps in the same system: the one-striker-two-cars drain and the
+3+ pileup. While studying `knock_ambient`'s per-edge striker
+corrections a real defect surfaced: corrections are *velocity
+targets* along the push direction, so a striker's second edge in
+one drain rewrote the target and erased the first edge's payment
+— both struck cars launched while the striker paid once
+(momentum injection). Relatedly, a striker the same pass itself
+flipped was skipped outright, so a same-tick daisy chain's last
+car launched uncharged. That repair plus the disclosed edge
+coverage is this slice. The remaining candidates were
+unchanged-blocked (F05-B UNK-13, F17-B needs F27/F17-C, F15-B
+research-gated, F16-C interactive finish, F11-C review judgment,
+F13-C original-fidelity comparison, F18-A → F18-B/C scope, F07-B
+no authored sample/output device).
+
+## What landed
+
+- `crates/mm2_app/src/traffic.rs` — `knock_ambient`'s apply is
+  now two passes. The flip pass is unchanged semantically (the
+  `Lane` re-check still dedups multi-edge hits; each car flips at
+  most once) but now also records `Knock.struck_pre` — the struck
+  car's velocity along `dir` the instant before its launch — and
+  appends `(car, its edge's striker)` to `handed_over`. The new
+  correction pass compounds per striker: the striker's *first*
+  committed edge writes the wall-returning velocity target
+  (`struck_pre + severity − J/m_s`), and every later edge of the
+  same striker is a pure `−dir·J` impulse debit — a second target
+  write along a shared direction would erase the first edge's
+  payment. A car this pass flipped on a *different* pair owes the
+  pure debit from its post-flip velocity (the kinematic–kinematic
+  edge charged it no wall), while the follower-follower *mutual*
+  pair — where the striker is the same pair's other side — still
+  owes nothing: its struck-side launch already is its share.
+  `handed_over` therefore keys on the pair, not just the entity.
+- Avian 0.7 source confirmed the topology assumption behind the
+  design: the broad phase *does* create kinematic–kinematic pairs
+  for moved proxies (only the solver skips solving them), so a
+  lane car really can be a striker, and the mutual-pair edge
+  really does produce both orientations in one drain.
+- `tests/traffic.rs` — new `spawn_shaped_follower` helper
+  (caller-chosen hull width and mass) +4 integration tests;
+  `two_lane_install`'s parallel lanes stage the side-by-side
+  contacts.
+
+## Evidence
+
+Synthetic tests (`cargo test -p mm2_app --test traffic` 34 → 38):
+
+- `one_striker_pays_both_cars_it_flips` (new) — a wide 2600 kg
+  block sliding down the gap between two parked followers'
+  lanes contacts both on the same update (proven through the
+  `Collisions` graph): `knocked == 2`, `kns x == 2`, the striker
+  reads ≈7 m/s — both transfers paid; a per-edge target write
+  would leave it ≈14 having paid one. Both wrecks `Knocked` +
+  `Dynamic` and launched (>6 m/s).
+- `a_same_tick_chain_charges_the_middle_car` (new) — a 6 m-wide
+  driving follower's front face reaches a striker block and a
+  light (200 kg) parked neighbour on the same step; the
+  neighbour's mass puts the mutual `B←C` orientation under the
+  impulse floor, so B's only flip edge is the block's and the
+  pair that flips it can never alias the pair it strikes:
+  `knocked == 2`, `kns x=1 a=1`, B debited past its own launch
+  (~0.9 m/s vs ~2.7 uncorrected), C launched (~6 m/s, the corner
+  contact's normal splits it lateral/forward), the block
+  target-corrected (~4.8 m/s exchange share).
+- `a_mutual_follower_edge_charges_the_exchange_once` (new) — a
+  driving follower clipping a parked neighbour flips *both* on
+  the same pair (`kns a=2`); the exchange splits (~7–8 m/s
+  shares) and the mover is not debited a second time — the
+  same-pair skip this rework had to preserve.
+- `a_same_tick_three_striker_pileup_flips_the_car_once` (new) —
+  B.14's edge extended to three strikers: `knocked == 1`, one
+  `x` charge, single-transfer wreck launch, one corrected
+  striker + two uncorrected wall-shove losers
+  (`sorted[1,2] − sorted[0] > 4`).
+
+Retail headless (install `fnv1a64:e91e6cd4b2ae30d9`, read-only,
+this commit's binary):
+
+- sf `--headless --frames 3000` → `status=pass traf=16/16 sp=41
+  rec=25 dead=0 stuck=0 crx=56 jmp=0 kn=4 kns=2p/2a/0x
+  dmg=23a/0d/0r` — **bit-identical to B.14/B.13** (the staged
+  multi-edge drains do not occur in this cruise; the repair only
+  engages when they do).
+- london `--headless --frames 1200 --spawn 0.4,5.5,-720,0` →
+  `status=pass … crx=33 kn=2 kns=0p/0a/2x` — bit-identical.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` — all 69 suites green
+(tests/traffic.rs 34 → 38, tests/banger.rs 24/24 unchanged,
+mm2_app lib 51/51 unchanged).
+
+## Classification
+
+Implementation choice end to end — the compounding correction is
+the designed transfer accounting extended across a striker's
+edges in one drain; the original's ambient crash response stays
+unverified (UNK-12).
+
+## Remaining open items
+
+- F10-B stays active: AC03's "player-hit feel" leg is manual
+  evidence (no rendered/interactive capture this run). Original
+  junction/spawn timing and crossing geometry (UNK-12) and
+  signal-prop model fidelity remain.
+- A striker's *dropped* edge (its knock loses the `Lane`
+  re-check) still owes nothing — the pre-existing first-flip-wins
+  semantics, bounded and momentum-losing rather than injecting.
+- Multi-edge coverage exercises one striker → two cars and a
+  dynamic→lane→lane chain; a three-car chain A→B→C→D where the
+  middle two are both strikers is geometrically stageable but was
+  not separately asserted (same code path, longer chain).
+- The striker-correction *linear* write stays unclamped (bounded
+  velocity target) — same shape as before, disclosed not changed.
+
+---
+
+# Iteration 51 — F10-B.14 striker-correction spin bound + same-tick pileup coverage
 
 Iteration 51 on `ralph/night` (baseline `3515105`, F10-B.13 —
 external verify + review green). One coherent slice of the F10-B
