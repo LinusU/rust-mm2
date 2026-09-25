@@ -87,11 +87,11 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_assets::Vfs;
 use mm2_game::{
-    BreakPartSpec, DamageSignals, DamageSpec, NavGraph, ObjectIdentity, OpponentRoster,
-    OpponentRoute, OpponentSpec, ParticipantState, Player, PlayerControl, RaceDefinition,
-    RaceProgress, RaceState, RecoveryPolicy, RouteOptions, Session, SessionEntity, SmokePolicy,
-    SparkPolicy, StuckSpec, VehicleAudio, VehicleBreaks, VehicleDamage, VehicleRecovery,
-    VehicleSmoke, VehicleSparks, VehicleStuck, relative_bearing,
+    BreakPartSpec, CheckpointRule, DamageSignals, DamageSpec, NavGraph, ObjectIdentity,
+    OpponentRoster, OpponentRoute, OpponentSpec, ParticipantState, Player, PlayerControl,
+    RaceDefinition, RaceProgress, RaceState, RecoveryPolicy, RouteGateLine, RouteOptions, Session,
+    SessionEntity, SmokePolicy, SparkPolicy, StuckSpec, VehicleAudio, VehicleBreaks, VehicleDamage,
+    VehicleRecovery, VehicleSmoke, VehicleSparks, VehicleStuck, relative_bearing,
 };
 use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState, vehicle_bundle};
 use tracing::{info, warn};
@@ -238,6 +238,13 @@ const CRAWL_SPEED: f32 = 3.0;
 /// designed (DSN-27), near a typical city block's length so a
 /// participant a block behind banks roughly one gate unit of deficit.
 const CATCH_UP_LEG_REF: f32 = 80.0;
+
+/// Lateral corridor (m) around the chased route leg inside which a
+/// pose still earns route arc for the [`RouteGateLine`] high-water —
+/// a committed pass or a reverse-and-turn escape stays inside it, a
+/// car punted onto a parallel street does not (designed, DSN-45).
+/// Route credit cannot accumulate off the line.
+const ROUTE_ARC_LATERAL: f32 = 25.0;
 
 /// Per-opponent controller state — a component on the vehicle so
 /// session teardown despawns it with everything else the session owns.
@@ -700,6 +707,20 @@ pub fn spawn_opponents(
             .as_ref()
             .map(|r| initial_route_index(r, pos, yaw))
             .unwrap_or(0);
+        // Ordered progress for AI participants is route-bound
+        // (DSN-45, UNK-11): each gate binds at the driven line's
+        // closest-approach arc, so a course whose `.opp` line never
+        // threads a cylinder still earns by driving the line — the
+        // authored-miss defect class the F14-A.2 matrix named.
+        // AnyOrder stays trigger-bound; a route-less entry binds
+        // nothing.
+        let route_line = (definition.rule == CheckpointRule::Ordered)
+            .then(|| {
+                route.as_ref().and_then(|r| {
+                    RouteGateLine::bind(r, &definition.checkpoints, route_is_closed(r), pos, next)
+                })
+            })
+            .flatten();
         // The same hull clearance the player spawn applies: the
         // collider's lowest point off the ground plus a settle margin.
         let hull_min_y = def
@@ -820,6 +841,11 @@ pub fn spawn_opponents(
                 pos,
                 yaw,
             ));
+        // Route-bound Ordered progress (DSN-45) — only present on
+        // Circuit definitions with a resolvable route.
+        if let Some(line) = route_line {
+            commands.entity(vehicle).insert(line);
+        }
         let missing = car_visual::spawn_vehicle_model(
             commands,
             vfs,
@@ -1039,6 +1065,7 @@ pub fn opponent_drive(
             &VehicleState,
             &RaceProgress,
             &mut OpponentDriver,
+            Option<&mut RouteGateLine>,
         )>,
         Query<(
             Entity,
@@ -1089,7 +1116,9 @@ pub fn opponent_drive(
     // teleport — without this, two cars whose windows expire together
     // (a shared pen, a pileup) both land on the same projected spot.
     let mut claimed: Vec<Vec3> = Vec::new();
-    for (entity, mut input, pos, rot, vehicle, vstate, progress, mut driver) in &mut set.p0() {
+    for (entity, mut input, pos, rot, vehicle, vstate, progress, mut driver, mut line) in
+        &mut set.p0()
+    {
         if let Some((_, left)) = &mut driver.pass_ban {
             *left = left.saturating_sub(1);
             if *left == 0 {
@@ -1104,6 +1133,20 @@ pub fn opponent_drive(
             None
         } else if let Some(route) = &driver.route {
             let (next, target) = route_target(route, driver.next, pos.0);
+            if let Some(line) = &mut line {
+                // Route-bound Ordered progress (DSN-45): a wrap of the
+                // chase index completes a traversal, and the pose's
+                // projection inside the chased leg's corridor grows
+                // the high-water arc `advance_route` reads. The
+                // lateral gate keeps punts off the line from earning.
+                if line.is_closed() && next < driver.next {
+                    line.wrap();
+                }
+                let (arc, lateral) = line.measure(route, next, pos.0);
+                if lateral <= ROUTE_ARC_LATERAL {
+                    line.arc_high = line.arc_high.max(arc);
+                }
+            }
             driver.next = next;
             target
         } else {
@@ -1184,7 +1227,14 @@ pub fn opponent_drive(
                     position: pose,
                     yaw: ryaw,
                 });
-                driver.next = initial_route_index(&route, pose, ryaw);
+                let resync_next = initial_route_index(&route, pose, ryaw);
+                // The walk-back can land a closed-route car across
+                // the route boundary — resync the traversal count so
+                // the teleport cannot bank arc it did not drive.
+                if let Some(line) = &mut line {
+                    line.reanchor(&route, driver.next, pos.0, resync_next, pose);
+                }
+                driver.next = resync_next;
                 driver.recovery = ScriptedBot {
                     escapes: driver.recovery.escapes,
                     ..ScriptedBot::default()

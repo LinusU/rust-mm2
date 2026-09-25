@@ -1,4 +1,138 @@
-# Last iteration — F14-A.2 Circuit runtime matrix + densify gate-coverage repair (iteration 53)
+# Last iteration — F14-A.3 route-bound Ordered AI progress (iteration 54)
+
+Iteration 54 on `ralph/night` (baseline `8b615cf`, F14-A.2 — external
+verify + review green). One coherent slice of the F14-A remainder:
+the second defect class the A.2 matrix disclosed — authored `.opp`
+lines that physically drive near a course but never enter one or more
+checkpoint cylinders (london `circuit:2`/`4`/`5`, sf `circuit:7`;
+measured misses ~11–120 m) — which stalls a trigger-only Ordered
+field at that gate index forever.
+
+## Task selection
+
+No failing gate or review finding to repair — the A.2 review passed
+with verification gaps and explicitly names the authored-miss /
+UNK-11 question as open. The A.2 analysis's own inference — original
+AI Ordered progress must be route-derived, not trigger-bound — was
+recorded as the next F14/F15 candidate, so this is it. Remaining
+candidates stayed unchanged-blocked (F05-B UNK-13, F15-B
+research-gated, F16-C interactive finish, F11-C review judgment,
+F13-C original-fidelity comparison, F18-A → F18-B/C scope, F07-B no
+authored sample/output device, F10-B disclosed edge gaps).
+
+## What landed
+
+- `mm2_game::race` — `RouteGateLine`: binds every gate to its
+  closest-approach arc on the driven polyline, re-based to the spawn
+  arc, clamped non-decreasing in authored order so the Ordered
+  sequence is always earnable by driving the line (a gate's physical
+  crossing can never precede its bind — the bind *is* the line's
+  closest approach). `measure` projects a pose onto the chased leg
+  (absolute arc + lateral distance); `wrap()` counts a traversal per
+  closed-route chase-index wrap; `reanchor()` walks the traversal
+  count down at a stuck-recovery landing until the landing reads at
+  or below the stuck pose's own measure — a walk-back that crosses
+  the route boundary cannot bank arc the car did not drive.
+- `RaceProgress::advance_route` — Ordered-only credit: banks the next
+  required gate once the driver's high-water arc passes its bound;
+  closed routes offset gate bounds by `lap × loop_len`; open routes
+  bind their first traversal only (no retail lapped event ships an
+  open route — disclosed bound, not a measured hole). Physical
+  `advance` keeps full trigger authority and wins wherever the car
+  really crosses — a triggered gate never double-counts;
+  `route_clears` tallies route-derived clears separately.
+- `mm2_app` — `spawn_opponents` binds a `RouteGateLine` per `Ordered`
+  roster entry with a resolved route (player and `AnyOrder`
+  participants never carry one; a route-less entry binds nothing);
+  `opponent_drive` grows `arc_high` only while the pose projects
+  within `ROUTE_ARC_LATERAL` (25 m) of the chased leg — a car punted
+  onto a parallel road earns nothing — and resyncs traversals on the
+  re-anchor landing; `advance_race` applies `advance_route` to bound
+  participants; the smoke `opps=` row suffixes `/Nd` when
+  route-derived clears occurred.
+- `docs/original-rules.md` — DSN-45 records the designed policy; the
+  original's own AI Ordered accounting stays UNK-11 (unverified), and
+  the re-anchor resync is named in the entry.
+
+## Evidence
+
+Synthetic tests:
+
+- `tests/race.rs` 34 → 35 (+9 new route tests net of the resync
+  addition): bind/measure, authored-line-miss credit, no
+  double-counting a triggered gate, closed-route lap wrap, Ordered
+  gate order, open-route first-traversal bound, route-less/AnyOrder
+  non-binding, state transitions, and the boundary-crossing re-anchor
+  resync.
+- `tests/opponents.rs` +2 production-path integration: a route-less
+  Ordered opponent binds no line; an authored route that misses a
+  gate cylinder still earns ordered progress through the real
+  `load_session_world` → roster → `opponent_drive` → `advance_race`
+  path on a synthetic VFS install.
+
+Retail (`fnv1a64:e91e6cd4b2ae30d9`, this work-tree's binary — logs in
+`/tmp/mm2-circuit-matrix-v3/`, published in `docs/race-coverage.md`'s
+v3 section): the four authored-miss events × {`--bot`, `--parked`},
+Amateur `--frames 12000`, **8/8 `rc=0 status=pass`**.
+
+- **london-4 parked**: two opponents complete lap 0 (`0c/2l`,
+  `/2d` each) — the first opponent lap completions on an
+  authored-miss event; the missed g0/g9 bank by route arc.
+- **sf-7** both legs: one opponent completes lap 0 (`2c`/`5c` on
+  `2l`, `/10d`); the pack holds the v2 `5c` plateau at gate 5's
+  ~985 m bind — the leader crosses, the rest never reach it.
+- **london-2** (gate-0 bind ~700 m) and **london-5** (gate-2 bind
+  ~1050 m): `0d` on every opponent both legs — the high-water arc
+  never reaches the first missed gate's bound under permanent
+  spawn-pile-up churn (`opp_rec` 12–33, stuck peaks to 900w). These
+  fold into the traversal-skill residual class (F15-B), honestly —
+  the model earns by driving and cannot invent progress.
+- `results=0` on every leg — no inflated finishes; physical
+  crossings still count as `crossings` (`7c/0d` rows exist — cars
+  that wander into cylinders).
+
+Offline bind probe (temporary diagnostic, removed): retail `.opp`
+routes of all four events produce sensible projected gate arcs —
+confirms the binds exist and the london-2/5 `0d` outcome is "field
+never arrives", not "line never bound".
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` — all 63 suites green
+(tests/race.rs 35, tests/opponents.rs integration +2).
+
+## Classification
+
+DSN-45 is a designed policy end to end: bind geometry, the 25 m
+corridor, traversal accounting, the re-anchor resync, open-route
+first-traversal bound, and the separate `route_clears` tally are all
+implementation choices. The original's AI Ordered accounting is
+unverified (UNK-11) — `2l` opponent lap rows that pre-date this model
+in the v2 logs are consistent with route-derived progress being the
+plausible original rule, but nothing here verifies it. Player and
+`AnyOrder` progress remain trigger-bound; `status=pass` legs are
+smoke records, not completability claims.
+
+## Remaining open items
+
+- F14-A stays active: AC04/AC05/AC06 legs and Professional/hold
+  coverage remain open; the authored-miss defect class is addressed
+  at the progress-model level while the traversal stalls it exposed
+  (london-2/5, sf-7 pack) move to the F15-B controller class.
+- UNK-11's Ordered-progress clause stays open — the designed model
+  satisfies the "must produce honest progress" constraint, not the
+  original-rule question.
+- Open-route Ordered laps past the first traversal still need
+  physical crossings (no retail lapped event ships an open route —
+  disclosed bound).
+- The scripted `--bot` player still cannot climb off-network ramps;
+  its cp counts are a controller limit, not course feasibility.
+
+---
+
+# Iteration 53 — F14-A.2 Circuit runtime matrix + densify gate-coverage repair
 
 Iteration 53 on `ralph/night` (baseline `0fe4787`, F10-B.15 —
 external verify + review green). Two coupled pieces: the F14-A

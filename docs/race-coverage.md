@@ -614,8 +614,40 @@ Two distinct root causes:
    line that never enters the cylinder — so either the original bound
    AI Ordered progress to route position rather than trigger sweeps,
    or it crossed these gates by wander. That is an **unverified
-   original rule** (UNK-11 class) and stays open for F14/F15; it is
-   deliberately not patched here.
+   original rule** (UNK-11 class). Iteration 54 (F14-A.3) implemented
+   a designed route-bound binding for it — see the v3 rerun below —
+   while the original's own accounting stays unknown.
+
+## Post-route-credit rerun (v3 — F14-A.3)
+
+**v3** (`/tmp/mm2-circuit-matrix-v3/`) reran the four authored-miss
+events × {`--bot`, `--parked`} at Amateur `--frames 12000` on the same
+retail install with DSN-45 live — each Ordered opponent carries a
+`RouteGateLine` binding every gate to its closest-approach arc on the
+*driven* route, and `advance_race` banks the next required gate once
+the driver's corridor-checked high-water arc passes the bound (player
+and `AnyOrder` progress stay trigger-bound; route-derived clears count
+separately as `/Nd`). All 8 legs `rc=0 status=pass`.
+
+| event | leg | v2 plateau | v3 outcome |
+|---|---|---|---|
+| london circuit2 | bot + parked | 0c all-six | 0c all-six, **0 route clears** — gate 0's route bind sits ~700 m of driven arc in, and the field's permanent spawn pile-up never gets there (`opp_rec` 28–33, stuck peaks 900w, parked `rcv=203w`) — traversal-bound, not progress-bound |
+| london circuit4 | bot | 9c omax | field 3–7c, one `/1d` — the missed g0/g9 banks by arc on the leader |
+| london circuit4 | parked | 9c omax | **two opponents complete lap 0** (`0c/2l`, `/2d` each) — first opponent lap completions on an authored-miss event |
+| london circuit5 | bot + parked | 2c all-four | 2c all-four, **0 route clears** — the field stalls short of gate 2's ~1050 m bind (heavy escape churn); traversal-bound |
+| sf circuit7 | bot + parked | 5c all-six | **one opponent completes lap 0** (`2c`/`5c` on `2l`, `/10d`); the pack holds the v2 5c plateau at gate 5's ~985 m bind — the leader crosses, the rest do not reach it |
+
+Read: the binding produces honest progress wherever the driven arc
+reaches it — three opponents banked lap-0 completions across london-4
+and sf-7 that physical triggers alone could never produce (the missed
+gates clear by route arc; `/Nd` counts only route-derived clears — the
+other gates cleared by real crossings as cars wandered into
+cylinders). The two unchanged events are honest traversal residuals:
+`0d` means the high-water arc never reached the first missed gate's
+bound — the model earns by driving and cannot invent progress for a
+field that churns at the start. `results=0` on every leg — no
+inflated finishes. Whether the original accounts AI Ordered progress
+this way remains UNK-11; this is the designed reading.
 
 ## Pre-fix vs post-fix per event
 
@@ -679,8 +711,9 @@ participant's gates (`x/total`); `res` = results-ledger entries;
 - **lap counters can exceed cleared gates** (e.g. london-1 `0c/2l`,
   london-0 `1c/3l`): opponent lap accounting advances with route
   progress, not gate clears — consistent with route-derived opponent
-  progress being the plausible original model, and further motivation
-  for the open F14/F15 question.
+  progress being the plausible original model. F14-A.3's `RouteGateLine`
+  is that model designed; v3 legs show `2l` rows on london-4/sf-7 whose
+  lap-0 gates banked part-physically, part by route arc (`/Nd`).
 
 ## Evidence → F14 acceptance
 
@@ -694,8 +727,13 @@ participant's gates (`x/total`); `res` = results-ledger entries;
   completability claim. Professional and hold-driver legs remain open.
 - **Residual classes (open, not claimed as done)**:
   (a) authored `.opp` lines missing gate cylinders (london-2/4/5,
-  sf-7) — needs the route-derived-progress decision under UNK-11;
-  (b) traversal stalls past restored coverage (london-6 @1,
-  london-9 @1, sf-9 @4) — opponent controller skill, F15-B class;
+  sf-7) — **addressed by DSN-45**: route-bound Ordered AI progress
+  implemented in F14-A.3, v3 rerun shows lap-0 opponent completions on
+  london-4 and sf-7; london-2/5 remain because their fields never
+  reach the bind arcs — which folds them into class (b), and the
+  original's own accounting stays UNK-11;
+  (b) traversal stalls past restored coverage (london-2 @gate0-bind,
+  london-5 @gate2-bind, london-6 @1, london-9 @1, sf-9 @4, sf-7 pack
+  @gate5-bind) — opponent controller skill, F15-B class;
   (c) opponent deep-course pace generally — no Circuit finish reached
   except london-0's four.

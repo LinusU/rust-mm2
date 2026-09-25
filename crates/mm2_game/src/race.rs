@@ -32,6 +32,7 @@ use bevy::prelude::*;
 
 use crate::config::{Densities, SessionConditions, SessionConfig};
 use crate::ids::PlayerId;
+use crate::opponent::OpponentRoute;
 use crate::result::ResultId;
 
 /// The fixed-step rate the shared race clock counts at — the
@@ -469,6 +470,12 @@ pub struct RaceProgress {
     /// Total trigger crossings that cleared something — evidence for
     /// HUD/debugging.
     pub crossings: u32,
+    /// Gates credited by driven-route position rather than a physical
+    /// trigger crossing ([`Self::advance_route`] through a
+    /// [`RouteGateLine`] binding — designed, UNK-11). Kept distinct
+    /// from `crossings` so evidence can tell a banked cylinder from a
+    /// route-derived clear.
+    pub route_clears: u32,
     /// Previous step's position; `None` breaks the swept segment so a
     /// spawn, teleport or reset cannot count the jump as a crossing.
     last_position: Option<Vec3>,
@@ -493,6 +500,7 @@ impl RaceProgress {
             next: 0,
             lap: 0,
             crossings: 0,
+            route_clears: 0,
             last_position: None,
         }
     }
@@ -603,9 +611,282 @@ impl RaceProgress {
         }
         ProgressOutcome::Racing
     }
+
+    /// Feed the participant's route-bound progress (designed —
+    /// UNK-11; see [`RouteGateLine`]): under `Ordered`, the next
+    /// required gate credits once the driven route's high-water arc
+    /// has passed the gate's bound position — `lap × loop_len` ahead
+    /// for a closed route. An open route only binds its first
+    /// traversal, so Ordered laps past one still need physical
+    /// crossings (no retail lapped event ships one).
+    ///
+    /// Only a `Racing` participant earns, and only in authored order —
+    /// the same contract [`advance`](Self::advance) enforces. This is
+    /// not a substitute for the physical rule: the local player never
+    /// carries the binding, and `advance` keeps crediting genuine
+    /// crossings — route credit fills in what the authored driving
+    /// line itself never reaches.
+    pub fn advance_route(
+        &mut self,
+        definition: &RaceDefinition,
+        line: &RouteGateLine,
+    ) -> ProgressOutcome {
+        if self.state != ParticipantState::Racing
+            || definition.rule != CheckpointRule::Ordered
+            || !line.arc_high.is_finite()
+        {
+            return ProgressOutcome::Racing;
+        }
+        let n = definition.checkpoints.len();
+        while self.next < n
+            && let Some(&rel) = line.gate_rel.get(self.next)
+        {
+            let base = if line.closed {
+                self.lap as f32 * line.loop_len
+            } else if self.lap == 0 {
+                0.0
+            } else {
+                break;
+            };
+            if line.arc_high < line.spawn_arc + base + rel {
+                break;
+            }
+            self.cleared[self.next] = true;
+            self.route_clears += 1;
+            self.next += 1;
+            if self.next == n {
+                self.lap += 1;
+                if self.lap >= definition.laps {
+                    return ProgressOutcome::Finished;
+                }
+                self.next = 0;
+                self.cleared.fill(false);
+            }
+        }
+        ProgressOutcome::Racing
+    }
 }
 
-/// What the navigation arrow points at (RACE-6): an un-cleared
+/// An `Ordered` event's gates bound to positions along one
+/// participant's driven route — the route-derived progress model for
+/// AI opponents (designed, DSN-45 — UNK-11).
+///
+/// Why this exists: `Ordered` progress is a *physical* contract —
+/// `Checkpoint::crossed` must see the car's swept segment inside the
+/// cylinder — but a retail `.opp` line is the AI's course, not a gate
+/// tour: on four cataloged Circuit events the authored line itself
+/// never enters some gate cylinders (measured misses 11–120 m, the
+/// F14-A.2 matrix), so a physical-crossing binding stalls the whole
+/// Ordered field at one gate index forever. How the original accounts
+/// AI progress is unverified (UNK-11); the matrix evidence supports
+/// route-derived accounting rather than trigger-bound.
+///
+/// The binding is per-opponent and per-lap. Each gate projects onto
+/// the driven polyline's closest leg point, an absolute arc position;
+/// relative to the spawn arc and wrapped into `0..loop_len` on a
+/// closed route, then clamped non-decreasing in authored order so the
+/// Ordered sequence is always earnable by driving the line. The
+/// driver's high-water arc ([`Self::arc_high`]) only grows while the
+/// pose projects inside the chased leg's lateral corridor — progress
+/// is earned by driving the line: a re-anchor teleport lands behind
+/// the water mark, and a car punted off the leg earns nothing.
+///
+/// A component on the opponent entity (session-owned like
+/// [`RaceProgress`]). Only AI opponents carry it, and only on
+/// `Ordered` definitions — the local player's progress stays
+/// trigger-bound, and `AnyOrder` keeps its physical rule.
+#[derive(Component, Debug, Clone)]
+pub struct RouteGateLine {
+    /// Arc position (XZ metres) of each route point — `point_arc[i]`
+    /// is where leg `i` starts; leg `i` runs `points[i] →
+    /// points[(i+1) % n]`.
+    point_arc: Vec<f32>,
+    /// Each gate's arc position relative to [`Self::spawn_arc`],
+    /// monotonic non-decreasing in authored order (wrapped into
+    /// `0..loop_len` on a closed route, clamped ≥ 0 on an open one).
+    gate_rel: Vec<f32>,
+    /// Arc length of one traversal — a closed route's wrap leg
+    /// included; an open route's total length (its bounds only ever
+    /// live in traversal 0).
+    loop_len: f32,
+    /// Whether the driven line rejoins itself (`route_is_closed`):
+    /// gate bounds repeat `lap × loop_len` apart on a closed route.
+    closed: bool,
+    /// The spawn pose's absolute arc — the coordinate origin
+    /// `gate_rel` is measured from, so progress is earned from the
+    /// staged start rather than the file's first anchor.
+    spawn_arc: f32,
+    /// Furthest absolute arc reached — the high-water mark route
+    /// credit measures against. Monotonic: a knock backward keeps the
+    /// earned position (a banked gate stays banked exactly like a
+    /// physically cleared one), and it only grows inside the chased
+    /// leg's lateral corridor.
+    pub arc_high: f32,
+    /// Closed-route traversals the chase index has completed —
+    /// `route_target` wraps `next` to 0 once per traversal.
+    traversals: u32,
+}
+
+impl RouteGateLine {
+    /// Bind `gates` to the route `pos` chases — `next` is the spawn's
+    /// initial chase index (the `OpponentDriver::next` convention) and
+    /// `closed` what `route_is_closed` reports for the same route.
+    /// `None` for fewer than two anchors, an empty gate list, or a
+    /// degenerate zero-length line — an unbound participant stays
+    /// trigger-bound.
+    pub fn bind(
+        route: &OpponentRoute,
+        gates: &[Checkpoint],
+        closed: bool,
+        pos: Vec3,
+        next: usize,
+    ) -> Option<Self> {
+        let n = route.points.len();
+        if n < 2 || gates.is_empty() {
+            return None;
+        }
+        let leg_count = if closed { n } else { n - 1 };
+        let xz = |a: Vec3, b: Vec3| (b.x - a.x).hypot(b.z - a.z);
+        let mut point_arc = Vec::with_capacity(n);
+        point_arc.push(0.0f32);
+        for i in 1..n {
+            point_arc.push(
+                point_arc[i - 1] + xz(route.points[i - 1].position, route.points[i].position),
+            );
+        }
+        let loop_len = if closed {
+            point_arc[n - 1] + xz(route.points[n - 1].position, route.points[0].position)
+        } else {
+            point_arc[n - 1]
+        };
+        if !loop_len.is_finite() || loop_len < 1e-3 {
+            return None;
+        }
+        let mut line = Self {
+            point_arc,
+            gate_rel: Vec::with_capacity(gates.len()),
+            loop_len,
+            closed,
+            spawn_arc: 0.0,
+            arc_high: 0.0,
+            traversals: 0,
+        };
+        line.spawn_arc = line.measure(route, next, pos).0;
+        line.arc_high = line.spawn_arc;
+        // Each gate binds at the polyline's closest approach in XZ —
+        // the point a route-following driver gets nearest it.
+        for g in gates {
+            let mut best = (f32::MAX, 0.0f32);
+            for i in 0..leg_count {
+                let a = route.points[i].position;
+                let b = route.points[(i + 1) % n].position;
+                let (dx, dz) = (b.x - a.x, b.z - a.z);
+                let len = dx.hypot(dz);
+                let t = if len > 1e-3 {
+                    (((g.center.x - a.x) * dx + (g.center.z - a.z) * dz) / (len * len))
+                        .clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let miss = (a.x + dx * t - g.center.x).hypot(a.z + dz * t - g.center.z);
+                if miss < best.0 {
+                    best = (miss, line.point_arc[i] + t * len);
+                }
+            }
+            let mut rel = best.1 - line.spawn_arc;
+            rel = if line.closed {
+                rel.rem_euclid(line.loop_len)
+            } else {
+                rel.max(0.0)
+            };
+            if let Some(&prev) = line.gate_rel.last() {
+                rel = rel.max(prev);
+            }
+            line.gate_rel.push(rel);
+        }
+        Some(line)
+    }
+
+    /// The pose's absolute route arc — the chased-leg convention
+    /// `reanchor_pose` documents: `next == 0` on a closed route
+    /// projects onto the wrap leg, one traversal *behind* the chased
+    /// first anchor (so a staged pose reads negative before the first
+    /// wrap); `next == 0` on an open route and `next >= n` clamp onto
+    /// the first/last leg. Returns `(arc, lateral)` — the XZ miss
+    /// distance from the leg, so the caller can refuse arc credit to
+    /// a pose off the line.
+    pub fn measure(&self, route: &OpponentRoute, next: usize, pos: Vec3) -> (f32, f32) {
+        let n = route.points.len();
+        if n < 2 {
+            return (self.arc_high, f32::MAX);
+        }
+        let leg_count = if self.closed { n } else { n - 1 };
+        let leg = match next {
+            0 if self.closed => leg_count - 1,
+            0 => 0,
+            i => (i - 1).min(leg_count - 1),
+        };
+        let a = route.points[leg].position;
+        let b = route.points[(leg + 1) % n].position;
+        let (dx, dz) = (b.x - a.x, b.z - a.z);
+        let len = dx.hypot(dz);
+        let (along, lateral) = if len > 1e-3 {
+            let along = (((pos.x - a.x) * dx + (pos.z - a.z) * dz) / len).clamp(0.0, len);
+            let px = a.x + dx / len * along;
+            let pz = a.z + dz / len * along;
+            (along, (pos.x - px).hypot(pos.z - pz))
+        } else {
+            (0.0, (pos.x - a.x).hypot(pos.z - a.z))
+        };
+        let base = if self.closed {
+            (self.traversals as f32 - f32::from(next == 0)) * self.loop_len
+        } else {
+            0.0
+        };
+        (base + self.point_arc[leg] + along, lateral)
+    }
+
+    /// Whether the bound route rejoins itself — gate bounds repeat
+    /// per traversal on a closed route only.
+    pub fn is_closed(&self) -> bool {
+        self.closed
+    }
+
+    /// Record a wrap of the chase index — `route_target` returned to
+    /// the first anchor after consuming the line. Route bookkeeping
+    /// lives here so the driver cannot desynchronize the traversal
+    /// count from the arc measure.
+    pub fn wrap(&mut self) {
+        self.traversals += 1;
+    }
+
+    /// Re-anchor resync (the `reanchor_pose` walk-back can land a
+    /// closed-route car across the route boundary, and the driver's
+    /// chase index is rebuilt from the landing): walk the traversal
+    /// count down until the landing reads at or below the pre-anchor
+    /// position's own measure — a walk-back only decreases polyline
+    /// position within a traversal, so a landing that reads *ahead*
+    /// of it under the old count crossed the boundary backward and
+    /// sits one traversal earlier. A recovery teleport can never bank
+    /// route arc the car did not drive; an over-decrement only delays
+    /// future credit, never grants it.
+    pub fn reanchor(
+        &mut self,
+        route: &OpponentRoute,
+        from_next: usize,
+        from: Vec3,
+        next: usize,
+        pos: Vec3,
+    ) {
+        if !self.closed {
+            return;
+        }
+        let bound = self.measure(route, from_next, from).0;
+        while self.traversals > 0 && self.measure(route, next, pos).0 > bound {
+            self.traversals -= 1;
+        }
+    }
+}
 /// checkpoint gate, or the finish trigger once every gate is cleared
 /// (the finish is what remains — RACE-7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

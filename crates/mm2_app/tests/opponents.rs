@@ -24,8 +24,9 @@ use mm2_assets::Vfs;
 use mm2_game::{
     Difficulty, EventRef, EventTableKind, ImpactEvent, Mm2Vfs, ObjectIdentity, OpponentRoute,
     OpponentRoutePoint, OpponentSpec, ParticipantState, Player, PlayerControl, PlayerVehicle,
-    RaceDefinition, RaceProgress, RaceStarted, RaceState, ResultLedger, Session, SessionConfig,
-    SessionEntity, SessionMode, SessionPhase, advance_session_tick, despawn_session_entities,
+    RaceDefinition, RaceProgress, RaceStarted, RaceState, ResultLedger, RouteGateLine, Session,
+    SessionConfig, SessionEntity, SessionMode, SessionPhase, advance_session_tick,
+    despawn_session_entities,
 };
 use mm2_vehicle::{Vehicle, VehicleConfig, VehicleInput, VehiclePlugin};
 
@@ -2343,4 +2344,171 @@ fn competing_reanchors_land_clear_of_each_other() {
             "the disclosed teleports banked nothing"
         );
     }
+}
+
+/// DSN-45 route-bound Ordered progress (UNK-11 — original AI progress
+/// semantics unverified): an authored `.opp` line legally misses a
+/// gate cylinder — this course's middle gate sits 30 m off the
+/// authored lane — and a trigger-only binding stalls the field at
+/// that gate forever (the authored-miss defect class the F14-A.2
+/// matrix measured on london-2/4/5 and sf-7). Binding the Ordered
+/// gates to the driven route's arc covers the miss while physical
+/// crossings still bank the gates the car does sweep; the
+/// route-derived clears are counted separately so evidence can tell
+/// the two apart.
+#[test]
+fn ordered_route_credit_covers_a_gate_the_authored_line_misses() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(
+        d,
+        "race/testcity/mmcircuitdata.csv",
+        format!("{MM_HEADER}\nnone,0,0,0,1,0,0.1,0.0,1,50,1,0,0,0,1,0,0.2,0.0,1,40,1\n"),
+    );
+    write(
+        d,
+        "race/testcity/circuit0.aimap",
+        aimap_with_opponents("vpt circuit0-a-0.opp 0.90 0 50.0 0.7 1 1 1 1 0 1.0\n"),
+    );
+    // Ordered needs ≥4 rows: the start line plus three course gates —
+    // the definition re-arms a lifted copy of the line as the lap's
+    // last gate.
+    write(
+        d,
+        "race/testcity/circuit0waypoints.csv",
+        format!(
+            "{WAYPOINTS}{}{}{}{}",
+            waypoint_row(60.0, COURSE_Z),
+            waypoint_row(110.0, COURSE_Z),
+            waypoint_row(140.0, COURSE_Z),
+            waypoint_row(165.0, COURSE_Z),
+        ),
+    );
+    // The authored line swerves 30 m around the middle gate — its
+    // closest approach misses the 15 m cylinder by ~19 m — then
+    // rejoins: the authored-miss shape the matrix measured.
+    write(
+        d,
+        "race/testcity/circuit0-a-0.opp",
+        opp_file(&[
+            [70.0, 0.0, 140.0],
+            [110.0, 0.0, 140.0],
+            [140.0, 0.0, 170.0],
+            [165.0, 0.0, 140.0],
+            [180.0, 0.0, 140.0],
+        ]),
+    );
+    write_car(d, "vpt", 1000.0, None);
+    let config = SessionConfig {
+        mode: SessionMode::Event(EventRef {
+            city: "testcity".into(),
+            table: EventTableKind::Circuit,
+            index: 0,
+        }),
+        ..SessionConfig::default()
+    };
+    let mut app = event_app(config, vfs_of(tmp.path()));
+    app.update();
+    let vpt = opponent_by_vehicle(&mut app, "vpt");
+    assert!(
+        app.world().get::<RouteGateLine>(vpt).is_some(),
+        "an Ordered opponent with a route binds the gate line"
+    );
+    let car = app
+        .world_mut()
+        .query_filtered::<Entity, With<PlayerVehicle>>()
+        .iter(app.world())
+        .next()
+        .unwrap();
+    assert!(
+        app.world().get::<RouteGateLine>(car).is_none(),
+        "the local player stays trigger-bound — no route line"
+    );
+
+    // ~25 s: the ~137 m route is drivable well inside that at the
+    // pace the existing integration legs measure.
+    run(&mut app, 1600);
+    let progress = app.world().get::<RaceProgress>(vpt).unwrap();
+    assert!(
+        matches!(progress.state, ParticipantState::Finished { .. }),
+        "route credit must carry the car past the missed gate — state={:?} cleared={} crossings={} route_clears={}",
+        progress.state,
+        progress.cleared_count(),
+        progress.crossings,
+        progress.route_clears,
+    );
+    // Every banked gate is exactly one source: the four Ordered gates
+    // (three course plus the re-armed line) split across physical
+    // crossings and route-derived clears with no double count.
+    assert_eq!(
+        progress.crossings + progress.route_clears,
+        4,
+        "crossings={} + route_clears={} must equal the lap's four gates",
+        progress.crossings,
+        progress.route_clears,
+    );
+    assert!(
+        progress.route_clears >= 1,
+        "the missed-gate/lapped-line clears come from the route binding"
+    );
+    assert!(
+        progress.crossings >= 1,
+        "the dead-centre first gate still banks as a real crossing"
+    );
+}
+
+/// The binding is per-participant and only ever exists where a route
+/// does: an Ordered roster entry whose `.opp` never shipped resolves
+/// `route: None` (an `UnresolvedRoute` issue, not a build failure) and
+/// binds no gate line — it stays trigger-bound and earns nothing.
+#[test]
+fn ordered_route_less_opponent_binds_no_gate_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(
+        d,
+        "race/testcity/mmcircuitdata.csv",
+        format!("{MM_HEADER}\nnone,0,0,0,1,0,0.1,0.0,1,50,1,0,0,0,1,0,0.2,0.0,1,40,1\n"),
+    );
+    // The roster references an `.opp` the install does not ship.
+    write(
+        d,
+        "race/testcity/circuit0.aimap",
+        aimap_with_opponents("vpt circuit0-a-9.opp 0.90 0 50.0 0.7 1 1 1 1 0 1.0\n"),
+    );
+    write(
+        d,
+        "race/testcity/circuit0waypoints.csv",
+        format!(
+            "{WAYPOINTS}{}{}{}{}",
+            waypoint_row(60.0, COURSE_Z),
+            waypoint_row(110.0, COURSE_Z),
+            waypoint_row(140.0, COURSE_Z),
+            waypoint_row(165.0, COURSE_Z),
+        ),
+    );
+    write_car(d, "vpt", 1000.0, None);
+    let config = SessionConfig {
+        mode: SessionMode::Event(EventRef {
+            city: "testcity".into(),
+            table: EventTableKind::Circuit,
+            index: 0,
+        }),
+        ..SessionConfig::default()
+    };
+    let mut app = event_app(config, vfs_of(tmp.path()));
+    app.update();
+    let vpt = opponent_by_vehicle(&mut app, "vpt");
+    assert!(
+        app.world().get::<RouteGateLine>(vpt).is_none(),
+        "no route → no route-bound progress model"
+    );
+    run(&mut app, 400);
+    let progress = app.world().get::<RaceProgress>(vpt).unwrap();
+    assert_eq!(
+        progress.cleared_count(),
+        0,
+        "route credit cannot fabricate gates"
+    );
+    assert_eq!(progress.route_clears, 0);
 }

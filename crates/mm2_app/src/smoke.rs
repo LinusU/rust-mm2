@@ -710,6 +710,7 @@ pub fn headless_smoke(
                         escapes: driver.recovery.escapes,
                         reanchors: driver.reanchors,
                         stuck: driver.stuck_peak,
+                        route_clears: progress.map_or(0, |p| p.route_clears),
                     });
                     (
                         n + 1,
@@ -1254,15 +1255,20 @@ struct OppRow<'a> {
     /// update frames (`OpponentDriver::stuck_peak`) — the stuck
     /// duration, surviving window resets and re-anchors.
     stuck: u32,
+    /// Gates credited by driven-route position rather than a trigger
+    /// crossing (`RaceProgress::route_clears`, DSN-45) — disclosure
+    /// that the Ordered progress was route-derived, not physical.
+    route_clears: u32,
 }
 
 /// The `opps=` record field — one row per spawned opponent in authored
 /// roster order: `<slot>:<vehicle>/<cleared>c[/<lap>l][/F|/T]`
 /// followed by the recovery counters when nonzero (`<escapes>e`,
-/// `<reanchors>r`, `<stuck>w` — `w` counts update frames inside the
-/// stuck bubble). Recovery subfields only print on activity so a
-/// clean run stays short; rows sort by roster slot so entity-archetype
-/// order cannot scramble the report.
+/// `<reanchors>r`, `<stuck>w`, `<route_clears>d` — `w` counts update
+/// frames inside the stuck bubble, `d` the route-derived clears).
+/// Recovery subfields only print on activity so a clean run stays
+/// short; rows sort by roster slot so entity-archetype order cannot
+/// scramble the report.
 fn opponent_detail(rows: &mut [OppRow]) -> String {
     if rows.is_empty() {
         return String::new();
@@ -1288,6 +1294,9 @@ fn opponent_detail(rows: &mut [OppRow]) -> String {
         }
         if r.stuck > 0 {
             s.push_str(&format!("/{}w", r.stuck));
+        }
+        if r.route_clears > 0 {
+            s.push_str(&format!("/{}d", r.route_clears));
         }
     }
     s
@@ -1419,6 +1428,7 @@ mod tests {
                 escapes: 0,
                 reanchors: 2,
                 stuck: 1040,
+                route_clears: 0,
             },
             OppRow {
                 index: 0,
@@ -1429,6 +1439,7 @@ mod tests {
                 escapes: 1,
                 reanchors: 0,
                 stuck: 0,
+                route_clears: 0,
             },
             OppRow {
                 index: 1,
@@ -1439,11 +1450,12 @@ mod tests {
                 escapes: 0,
                 reanchors: 0,
                 stuck: 24,
+                route_clears: 3,
             },
         ];
         assert_eq!(
             opponent_detail(&mut rows),
-            " opps=0:vpcoop/4c/2l/1e,1:vpbug/9c/3l/F/24w,2:vpanoz/0c/1l/2r/1040w"
+            " opps=0:vpcoop/4c/2l/1e,1:vpbug/9c/3l/F/24w/3d,2:vpanoz/0c/1l/2r/1040w"
         );
         // An AnyOrder row carries no lap; a timeout marks `T`.
         let mut timed_out = vec![OppRow {
@@ -1455,6 +1467,7 @@ mod tests {
             escapes: 0,
             reanchors: 0,
             stuck: 0,
+            route_clears: 0,
         }];
         assert_eq!(opponent_detail(&mut timed_out), " opps=0:vpbug/3c/T");
         assert_eq!(opponent_detail(&mut []), "");

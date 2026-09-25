@@ -825,3 +825,270 @@ fn effective_conditions_prefers_the_player_customization() {
         "and they apply on a cruise"
     );
 }
+
+fn route(points: &[[f32; 3]]) -> OpponentRoute {
+    OpponentRoute {
+        points: points
+            .iter()
+            .map(|p| OpponentRoutePoint {
+                position: Vec3::new(p[0], p[1], p[2]),
+                brake: 0.0,
+                forward_offset: 0.0,
+                side_offset: 0.0,
+                target_speed: 0.0,
+                speed_start: 0.0,
+                side_start: 0.0,
+            })
+            .collect(),
+    }
+}
+
+/// DSN-45 route credit (UNK-11 unverified original semantics): an
+/// authored `.opp` polyline can legally miss a gate cylinder — the
+/// authored line misses this gate by 30 m, well past the 15 m radius.
+/// The car's physical sweep never earns the gate, but its route-bound
+/// arc position does, and the credit is counted separately so evidence
+/// can tell route-derived clears from trigger crossings.
+#[test]
+fn route_binding_credits_a_gate_the_line_misses() {
+    let route = route(&[[0.0, 0.0, 0.0], [100.0, 0.0, 0.0], [200.0, 0.0, 0.0]]);
+    let def = ordered(vec![checkpoint(100.0, 30.0)], 1);
+    let spawn = route.points[0].position;
+    let mut line = RouteGateLine::bind(&route, &def.checkpoints, false, spawn, 1).unwrap();
+    let mut progress = RaceProgress::new(&def);
+    progress.state = ParticipantState::Racing;
+    // The physical sweep passes 30 m from the cylinder: no trigger.
+    assert_eq!(
+        progress.advance(&def, Vec3::new(95.0, 0.0, 0.0)),
+        ProgressOutcome::Racing
+    );
+    assert_eq!(
+        progress.advance(&def, Vec3::new(105.0, 0.0, 0.0)),
+        ProgressOutcome::Racing
+    );
+    assert_eq!(progress.cleared_count(), 0);
+    assert_eq!(progress.crossings, 0);
+    // The route arc has carried the car past the gate's bind position.
+    line.arc_high = 150.0;
+    assert_eq!(
+        progress.advance_route(&def, &line),
+        ProgressOutcome::Finished
+    );
+    assert_eq!(progress.cleared_count(), 1);
+    assert_eq!(progress.route_clears, 1);
+    assert_eq!(progress.crossings, 0, "no cylinder was ever crossed");
+}
+
+/// A gate the car actually crosses still banks once — the physical
+/// crossing wins first and the route pass that remains racing-credit
+/// eligible cannot double-count it.
+#[test]
+fn route_credit_never_double_counts_a_triggered_gate() {
+    let route = route(&[[0.0, 0.0, 0.0], [100.0, 0.0, 0.0], [200.0, 0.0, 0.0]]);
+    let def = ordered(vec![checkpoint(100.0, 0.0)], 1);
+    let mut line =
+        RouteGateLine::bind(&route, &def.checkpoints, false, route.points[0].position, 1).unwrap();
+    let mut progress = RaceProgress::new(&def);
+    progress.state = ParticipantState::Racing;
+    // Physically cross the cylinder.
+    assert_eq!(
+        progress.advance(&def, Vec3::new(95.0, 0.0, 0.0)),
+        ProgressOutcome::Racing
+    );
+    assert_eq!(
+        progress.advance(&def, Vec3::new(105.0, 0.0, 0.0)),
+        ProgressOutcome::Finished
+    );
+    line.arc_high = 150.0;
+    // `advance` does not flip the lifecycle itself — the rule
+    // authority does — so the same-step route pass sees next == len
+    // and banks nothing extra.
+    assert_eq!(progress.advance_route(&def, &line), ProgressOutcome::Racing);
+    assert_eq!(progress.cleared_count(), 1);
+    assert_eq!(progress.crossings, 1);
+    assert_eq!(progress.route_clears, 0, "the trigger already earned it");
+}
+
+/// Closed-route lap structure: the start-line gate binds behind the
+/// spawn, so its relative bind wraps to the far end of the traversal —
+/// lap 1 needs a full loop, lap 2 binds against the second traversal.
+#[test]
+fn route_credit_wraps_laps_on_a_closed_route() {
+    // Same square the wrapped-route-target test uses (loop 400 m).
+    let route = route(&[
+        [0.0, 0.0, 0.0],
+        [100.0, 0.0, 0.0],
+        [100.0, 0.0, 100.0],
+        [0.0, 0.0, 100.0],
+        [0.0, 0.0, 10.0],
+    ]);
+    let def = ordered(
+        vec![
+            checkpoint(50.0, 0.0),
+            checkpoint(100.0, 50.0),
+            checkpoint(50.0, 100.0),
+            checkpoint(0.0, 50.0),
+        ],
+        2,
+    );
+    let mut line =
+        RouteGateLine::bind(&route, &def.checkpoints, true, route.points[0].position, 1).unwrap();
+    let mut progress = RaceProgress::new(&def);
+    progress.state = ParticipantState::Racing;
+    // Mid-loop: only the first two gates have been reached.
+    line.arc_high = 200.0;
+    assert_eq!(progress.advance_route(&def, &line), ProgressOutcome::Racing);
+    assert_eq!(progress.cleared_count(), 2);
+    // Lap 1 completes at the wrap; lap 2's binds sit a traversal out.
+    line.arc_high = 400.0;
+    assert_eq!(progress.advance_route(&def, &line), ProgressOutcome::Racing);
+    assert_eq!(progress.lap, 1);
+    assert_eq!(progress.cleared_count(), 0, "the new lap re-arms the gates");
+    line.arc_high = 560.0;
+    assert_eq!(progress.advance_route(&def, &line), ProgressOutcome::Racing);
+    assert_eq!(progress.cleared_count(), 2);
+    // Finishing needs the second full traversal.
+    line.arc_high = 800.0;
+    assert_eq!(
+        progress.advance_route(&def, &line),
+        ProgressOutcome::Finished
+    );
+    assert_eq!(progress.route_clears, 8);
+}
+
+/// A car staged just behind the wrap-leg's chase point measures a
+/// negative arc; gates re-based from that spawn still need the car to
+/// drive to them — the spawn itself cannot bank a gate it sits next
+/// to on the far side of the wrap.
+#[test]
+fn route_measure_is_negative_behind_a_closed_route_origin() {
+    let route = route(&[
+        [0.0, 0.0, 0.0],
+        [100.0, 0.0, 0.0],
+        [100.0, 0.0, 100.0],
+        [0.0, 0.0, 100.0],
+        [0.0, 0.0, 10.0],
+    ]);
+    let gates = vec![
+        checkpoint(50.0, 0.0),
+        checkpoint(100.0, 50.0),
+        checkpoint(50.0, 100.0),
+        checkpoint(0.0, 50.0),
+    ];
+    // Chasing point 0 while still on the wrap leg: arc reads negative.
+    let mut line = RouteGateLine::bind(&route, &gates, true, Vec3::new(0.0, 0.0, 5.0), 0).unwrap();
+    let (arc, lateral) = line.measure(&route, 0, Vec3::new(0.0, 0.0, 5.0));
+    assert!(arc < 0.0, "behind point 0 measures negative, got {arc}");
+    assert!(lateral < f32::EPSILON);
+    // Gate 3's cylinder is 45 m behind the car's own line of travel —
+    // its bind wraps to traversal end (350), so an arc of 0 cannot
+    // bank it; the car must drive the loop.
+    assert!(arc < 350.0);
+    let def = ordered(gates, 1);
+    let mut progress = RaceProgress::new(&def);
+    progress.state = ParticipantState::Racing;
+    progress.advance(&def, Vec3::new(0.0, 0.0, 6.0));
+    line.arc_high = arc;
+    assert_eq!(progress.advance_route(&def, &line), ProgressOutcome::Racing);
+    assert_eq!(progress.cleared_count(), 0);
+    assert_eq!(progress.route_clears, 0);
+}
+
+/// Bounds the traversal provision cannot stretch: an open route earns
+/// exactly the traversals the driven polyline covers. A two-lap event
+/// on an open route can bank lap 1 but never invents a second
+/// traversal — the participant stays racing instead of fabricating a
+/// finish (the residual the open-route disclosure covers).
+#[test]
+fn route_credit_cannot_invent_a_second_open_traversal() {
+    let route = route(&[[0.0, 0.0, 0.0], [100.0, 0.0, 0.0], [200.0, 0.0, 0.0]]);
+    let def = ordered(vec![checkpoint(150.0, 30.0)], 2);
+    let mut line =
+        RouteGateLine::bind(&route, &def.checkpoints, false, route.points[0].position, 1).unwrap();
+    let mut progress = RaceProgress::new(&def);
+    progress.state = ParticipantState::Racing;
+    line.arc_high = 400.0;
+    assert_eq!(progress.advance_route(&def, &line), ProgressOutcome::Racing);
+    assert_eq!(progress.lap, 1);
+    assert_eq!(progress.cleared_count(), 0);
+    line.arc_high = 10_000.0;
+    assert_eq!(progress.advance_route(&def, &line), ProgressOutcome::Racing);
+    assert_eq!(progress.lap, 1, "no second traversal exists to bind to");
+    assert_eq!(progress.route_clears, 1);
+}
+
+/// Route credit only exists for Ordered progress: an AnyOrder
+/// participant carrying a line anyway (belt-and-braces — the app only
+/// binds them to Ordered opponents) gets nothing from it.
+#[test]
+fn route_credit_does_not_apply_to_any_order() {
+    let route = route(&[[0.0, 0.0, 0.0], [100.0, 0.0, 0.0]]);
+    let gates = vec![checkpoint(50.0, 30.0)];
+    let def = any_order(gates.clone(), None);
+    let mut line = RouteGateLine::bind(&route, &gates, false, route.points[0].position, 1).unwrap();
+    let mut progress = RaceProgress::new(&def);
+    progress.state = ParticipantState::Racing;
+    line.arc_high = 200.0;
+    assert_eq!(progress.advance_route(&def, &line), ProgressOutcome::Racing);
+    assert_eq!(progress.cleared_count(), 0);
+    assert_eq!(progress.route_clears, 0);
+    // And a participant still on the grid earns nothing either.
+    let mut waiting = RaceProgress::new(&def);
+    waiting.advance_route(&def, &line);
+    assert_eq!(waiting.cleared_count(), 0);
+}
+
+/// Recovery desync (DSN-45): the stuck-recovery walk-back can land a
+/// closed-route car across the route boundary while the chase index
+/// is rebuilt from the landing — without a resync the traversal count
+/// stays one lap ahead and `arc_high` inflates by a full loop,
+/// banking gates the car never drove. `reanchor` walks the count
+/// down until the landing reads at or below the stuck pose's own
+/// measure; an ordinary in-traversal landing resyncs to nothing.
+#[test]
+fn reanchor_resyncs_a_boundary_crossing_walk_back() {
+    // The same 400 m square; legs run 100/100/100/90/10.
+    let route = route(&[
+        [0.0, 0.0, 0.0],
+        [100.0, 0.0, 0.0],
+        [100.0, 0.0, 100.0],
+        [0.0, 0.0, 100.0],
+        [0.0, 0.0, 10.0],
+    ]);
+    let gates = vec![checkpoint(50.0, 0.0)];
+    let mut line = RouteGateLine::bind(&route, &gates, true, route.points[0].position, 1).unwrap();
+    // One honest wrap and ~50 m earned into traversal 1.
+    line.wrap();
+    line.arc_high = 450.0;
+    // The car sits stuck just past the route start (leg 0, ~40 m in)
+    // and the walk-back lands it across the boundary near the route
+    // end, chasing the last anchor.
+    let stuck = Vec3::new(40.0, 0.0, 0.0);
+    let landing = Vec3::new(0.0, 0.0, 90.0);
+    line.reanchor(&route, 1, stuck, 4, landing);
+    let (arc, _) = line.measure(&route, 4, landing);
+    assert!(
+        arc <= 440.0 + f32::EPSILON,
+        "the landing must not read ahead of the stuck pose (440), got {arc}"
+    );
+    // Resynced to traversal 0, the landing reads 310 — the earned
+    // high-water is untouched and nothing past it can bank.
+    assert!(
+        (arc - 310.0).abs() < 0.5,
+        "landing reads as traversal-0 arc 310, got {arc}"
+    );
+
+    // An ordinary re-anchor inside a traversal changes nothing: the
+    // landing already reads below the stuck pose, no decrement.
+    let mut line2 = RouteGateLine::bind(&route, &gates, true, route.points[0].position, 1).unwrap();
+    line2.wrap();
+    line2.arc_high = 600.0;
+    let stuck2 = Vec3::new(100.0, 0.0, 50.0); // leg 1, abs ~550
+    let landing2 = Vec3::new(100.0, 0.0, 30.0); // same leg, walked back
+    line2.reanchor(&route, 2, stuck2, 2, landing2);
+    let (arc2, _) = line2.measure(&route, 2, landing2);
+    assert!(
+        (arc2 - 530.0).abs() < 0.5,
+        "an in-traversal landing keeps traversal 1: 400 + 130 = 530, got {arc2}"
+    );
+}

@@ -46,8 +46,8 @@ use mm2_assets::Vfs;
 use mm2_game::{
     Checkpoint, CheckpointRule, Difficulty, EventRef, ParticipantState, Player, PlayerControl,
     ProgressOutcome, RACE_TICK_HZ, RaceDefinition, RacePhase, RaceProgress, RaceStarted, RaceState,
-    ResultLedger, Session, SessionEntity, SessionOutcome, SessionPhase, SessionResult,
-    TargetSelection, cycle_target, navigation_target, relative_bearing,
+    ResultLedger, RouteGateLine, Session, SessionEntity, SessionOutcome, SessionPhase,
+    SessionResult, TargetSelection, cycle_target, navigation_target, relative_bearing,
 };
 use mm2_vehicle::Teleported;
 use tracing::warn;
@@ -296,7 +296,12 @@ pub fn advance_race(
     mut session: ResMut<Session>,
     mut ledger: ResMut<ResultLedger>,
     mut started: MessageWriter<RaceStarted>,
-    mut participants: Query<(&Player, &Position, &mut RaceProgress)>,
+    mut participants: Query<(
+        &Player,
+        &Position,
+        &mut RaceProgress,
+        Option<&RouteGateLine>,
+    )>,
 ) {
     let Some(mut race) = race else {
         return;
@@ -319,7 +324,7 @@ pub fn advance_race(
                 return;
             }
             race.phase = RacePhase::Running;
-            for (_, _, mut progress) in &mut participants {
+            for (_, _, mut progress, _) in &mut participants {
                 if progress.state == ParticipantState::AwaitingStart {
                     progress.state = ParticipantState::Racing;
                 }
@@ -341,7 +346,7 @@ pub fn advance_race(
             race.clock += 1;
             let mut pending = false;
             let mut local_resolved = false;
-            for (player, position, mut progress) in &mut participants {
+            for (player, position, mut progress, line) in &mut participants {
                 // AwaitingStart during Running counts as pending: the
                 // race cannot complete with a participant that never
                 // started. Finished participants are done.
@@ -352,7 +357,18 @@ pub fn advance_race(
                 if !matches!(progress.state, ParticipantState::Racing) {
                     continue;
                 }
-                if progress.advance(&race.definition, position.0) == ProgressOutcome::Finished {
+                let mut outcome = progress.advance(&race.definition, position.0);
+                // Route-bound Ordered progress (DSN-45): an AI
+                // participant whose authored line never threads a
+                // gate's cylinder still earns it by driving past the
+                // bound route position — physical crossings credit
+                // first wherever the line does thread it.
+                if outcome == ProgressOutcome::Racing
+                    && let Some(line) = line
+                {
+                    outcome = progress.advance_route(&race.definition, line);
+                }
+                if outcome == ProgressOutcome::Finished {
                     let id = session.mint_result_id(player.id);
                     let result = SessionResult {
                         id: id.clone(),
@@ -390,7 +406,7 @@ pub fn advance_race(
                 .time_limit_ticks
                 .is_some_and(|limit| race.clock >= u64::from(limit))
             {
-                for (player, _, mut progress) in &mut participants {
+                for (player, _, mut progress, _) in &mut participants {
                     if matches!(
                         progress.state,
                         ParticipantState::Racing | ParticipantState::AwaitingStart
