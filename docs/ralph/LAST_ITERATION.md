@@ -1,4 +1,105 @@
-# Last iteration — F14-A.3 route-bound Ordered AI progress (iteration 54)
+# Last iteration — F14-A.4 Professional Circuit matrix (iteration 55)
+
+Iteration 55 on `ralph/night` (baseline `4a1db5a`, F14-A.3 — external
+verify + review green). Two pieces: the review's flagged doc repair
+(the F14-A.3 test-count claim) and the F14-A remainder's named-open
+Professional leg — the same scripted+parked matrix shape the Amateur
+catalog ran in A.2 and the Checkpoint catalog ran in F13-C.4.
+
+## Task selection
+
+The A.3 review passed with one repairable finding: the handoff docs
+claimed `tests/race.rs 34 → 35 (+9)` where the verified diff is
+28 → 35 (+7 in `tests/race.rs`, +2 in `tests/opponents.rs` — 9 only
+across both suites). Repaired first (commit `e43ee20`), then the
+highest-value ready slice: the Professional Circuit legs the A.2/3
+reviews and `docs/race-coverage.md` explicitly named open. Every
+other candidate stayed unchanged-blocked (F05-B UNK-13 / F27 / F25+,
+F17-B needs F17-C, F15-B research-gated, F16-C interactive finish,
+F11-C review judgment, F13-C original-fidelity comparison, F18-A →
+F18-B/C scope, F07-B no authored sample/output device, F10-B manual
+player-hit leg, F17-A deferred consumers).
+
+## What landed
+
+- Doc repair (commit `e43ee20`): LAST_ITERATION.md and PLAN.md now
+  state `tests/race.rs` 28 → 35 (+7) and `tests/opponents.rs` 40 → 42
+  (+2), nine new tests across both suites — matching the external
+  review's verified numbers.
+- F14-A.4 (docs + evidence only — no code change): the Professional
+  Circuit matrix, 40 legs = 20 cataloged events × {scripted `--bot`,
+  parked control} at `--pro --frames 12000`, retail
+  `fnv1a64:e91e6cd4b2ae30d9`, binary built at `e43ee20` (docs-only
+  delta on `4a1db5a`; all 40 logs stamp it). Published in
+  `docs/race-coverage.md`'s new Professional section; raw logs in
+  `/tmp/mm2-circuit-matrix-pro/` (uncommitted per the large-capture
+  rule).
+
+## Evidence
+
+**40/40 `rc=0 status=pass`, `dup=0` on every leg** (~54 min wall
+total, ≤106 s/leg). Headline outcomes:
+
+- Pro measurably selects authored `.aimap_p` rosters + parameter
+  blocks: `diff=professional` on every leg, distinct lineups
+  (london-0 fields 7 `vpcoop2k` vs amateur's 7 `vpcoop`), distinct
+  `NumLaps` (london `*/4` vs `*/3` except c1/c2/c9 `*/2`; sf `*/4`
+  except c8/c9 `*/2`).
+- **First Professional circuit finish**: london-0 scripted leg — a
+  `vpcoop2k` banks all 4 laps (`6c/4l/F`, `results=1`, `opp=1/7`)
+  while the local raced on (`phase=playing` — remote resolution ends
+  nothing). The whole 7-car field laps there (16/18 completions
+  across the two legs; four cars reached lap 4).
+- Multi-lap churn on 10/20 events: sf-0 all-four opponents complete
+  lap 0 scripted; sf-1 5–6/7; london-1 3–4/6; london-3 5/6; sf-5 one
+  car completes *two* laps (parked). Scripted driver never finishes
+  at Pro (best london-0 `lap3/4`) — authored Pro is measurably
+  harder, consistent with the checkpoint matrix.
+- First catalog-wide run with DSN-45 route credit live: `/Nd` on
+  14/20 events; sf-1 is the extreme (5–6/7 opponents bank lap 0 with
+  `8–10d` of 10 gates — the driven path threads almost no cylinders,
+  progress nearly all route-derived — disclosed, not smoothed).
+  `0d` exactly where fields never reach the binds: london-2 (g0
+  ~700 m), london-5 (g2 ~1050 m), sf-7 pack (g5 ~985 m) — traversal
+  residuals unchanged, the model cannot invent progress.
+- Parked control honest: `cp=0` all 20 legs, `moved` ≤53 m contact
+  displacement, `peak` ≤15.6 m/s.
+- Anomalies disclosed per event: london-8 `58f` on both legs,
+  sf-5 parked `rcv=222f` (new spawn-edge fall loop), london-6 Thames
+  punt on both legs (`243w`/`239w`), sf-9 the matrix's only
+  `dropped` (105/112) + `peak` 35.1 m/s.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` — all 69 suites green (run on the
+doc-repair commit before the legs; the iteration's own changes are
+docs-only).
+
+## Classification
+
+Runtime matrix is original-content validation evidence
+(fingerprinted install, authored `.aimap_p` data) — `status=pass`
+legs are smoke records, not completability claims. No
+original-fidelity assertion: roster/lap-count differences are
+authored-difficulty measurements, and original pacing/AI competence
+stays unverified. No rendered/manual leg this iteration.
+
+## Remaining open items
+
+- F14-A stays active: Professional hold-driver legs (the F13-C.5
+  pattern) are the remaining driver leg; AC04/AC05/AC06 promotion
+  stays open pending external review of this evidence.
+- Traversal-skill residuals at Pro: london-2/5, sf-7 pack, london-6
+  gate-1, sf-9 gate-4 — F15-B controller class.
+- sf-5 parked `222f` joins the spawn-edge fall-loop class
+  (london-4-amateur's `209f`); london-6's Thames punt collateral now
+  reaches the scripted leg.
+
+---
+
+# Iteration 54 — F14-A.3 route-bound Ordered AI progress
 
 Iteration 54 on `ralph/night` (baseline `8b615cf`, F14-A.2 — external
 verify + review green). One coherent slice of the F14-A remainder:

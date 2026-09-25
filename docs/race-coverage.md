@@ -5,7 +5,9 @@ actually does under the production headless runtime — measured, not
 claimed — plus F13-C.2's stationary-control and first Professional
 legs, F13-C.4's complete Professional matrix, F13-C.5's
 Professional hold legs and F13-C.6's deep-course extended-budget
-probe.
+probe — plus the Circuit (F14) Amateur matrix with its two
+post-repair reruns and the Professional legs, in the section at the
+bottom.
 Every number below comes off the fingerprinted retail install
 (`fnv1a64:e91e6cd4b2ae30d9`, read-only): the audits and the scripted/
 hold matrix at commit `1791df0`, the parked legs and first
@@ -565,7 +567,7 @@ parked car, no spikes.
 - No original-fidelity claim: engine self-metrics only. Difficulty,
   pacing and AI competence vs retail are unverified.
 
-# Circuit (F14) matrix — iteration 53 / F14-A.2
+# Circuit (F14) matrix — F14-A.2 Amateur legs + F14-A.4 Professional legs
 
 ## Denominator and instruments
 
@@ -649,6 +651,105 @@ field that churns at the start. `results=0` on every leg — no
 inflated finishes. Whether the original accounts AI Ordered progress
 this way remains UNK-11; this is the designed reading.
 
+## Professional legs — 20 events × 2 drivers (F14-A.4)
+
+The same matrix shape at the authored Professional block: every
+cataloged event × scripted (`--bot`) + parked control at `--pro`,
+`--frames 12000`, commit `e43ee20` (docs-only delta on `4a1db5a`;
+all 40 logs stamp it), retail `fnv1a64:e91e6cd4b2ae30d9`, logs in
+`/tmp/mm2-circuit-matrix-pro/`. **40/40 `rc=0 status=pass`, `dup=0`
+on every leg.** This is also the first catalog-wide run with DSN-45
+route credit live — the v3 Amateur rerun covered only the four
+authored-miss events, so `/Nd` columns below are the first
+route-derived-clear accounting for the other sixteen.
+
+`laps` = opponents that completed ≥1 lap (each `opps` row's `Nl`
+display ≥2 — cleared counts are per-lap, so `0c/2l` is a completed
+lap 0, not a stall); `d` = route-derived clears summed over the
+field; `omax` = deepest gate any opponent reached on the lap in
+progress; `res`/`opp` = ledger entries / opponents resolved.
+
+### London (Professional)
+
+| event | scripted: cp, lap, res, opp | laps | omax (d) | parked: laps | omax (d) | note |
+|---|---|---|---|---|---|---|
+| circuit0 | 1/6 lap3/4 r1 1/7 | **7/7** | 6 (2) | **7/7** | 5 (2) | **the only Pro resolution + the deepest field**: `vpcoop2k` slot 0 finishes all 4 laps (`6c/4l/F`) while the local races on; 16/18 lap completions across the legs, four cars reached the final lap |
+| circuit1 | 1/8 lap1/2 r0 0/6 | 3/6 | 7 (9) | 4/6 | 7 (10) | two more opponents one gate from lap 0 (`7c/8`) |
+| circuit2 | 0/12 lap1/2 r0 0/6 | 0/6 | 0 (0) | 0/6 | 0 (0) | authored-miss + traversal stall verbatim; Thames churn — bot `rcv=240w/19f`, parked `223w/18f` |
+| circuit3 | 1/9 lap2/4 r0 0/6 | 5/6 | 5 (5) | 5/6 | 5 (3) | field laps (one lap each); scripted reached lap 2/4 |
+| circuit4 | 7/11 lap1/4 r0 0/5 | 1/5 | 7 (4) | 0/5 | 9 (3) | one lap-0 completion scripted; parked field reaches authored-miss g9 (`9c/2d` on `vpdb7`) — amateur v3's two completions don't recur |
+| circuit5 | 2/6 lap1/4 r0 0/4 | 0/4 | 2 (0) | 0/4 | 2 (0) | authored-miss stall at the g2 bind — `0d`, field never arrives |
+| circuit6 | 1/14 lap1/4 r0 0/7 | 1/7 | 1 (1) | 0/7 | 1 (0) | gate-1 plateau (six of seven `1c`) + one lap-0 completion scripted; Thames punt collateral now hits the scripted leg too — `rcv=243w`/`239w` |
+| circuit7 | 4/10 lap1/4 r0 0/6 | 0/6 | 4 (0) | 0/6 | 3 (0) | field mid-course, all physical |
+| circuit8 | 2/12 lap1/4 r0 0/6 | 0/6 | 5 (2) | 0/6 | 5 (2) | local `58f` fall churn on *both* legs (spawn-edge class) |
+| circuit9 | 1/22 lap1/2 r0 0/6 | 0/6 | 6 (2) | 0/6 | 3 (1) | plateau persists — traversal residual |
+
+### San Francisco (Professional)
+
+| event | scripted: cp, lap, res, opp | laps | omax (d) | parked: laps | omax (d) | note |
+|---|---|---|---|---|---|---|
+| circuit0 | 2/9 lap2/4 r0 0/4 | **4/4** | 3 (8) | 3/4 | 8 (5) | whole field laps scripted; parked `vpcaddie` one gate from lap 0 (`8c/9`) |
+| circuit1 | 6/10 lap1/4 r0 0/7 | 5/7 | 4 (51) | 6/7 | 4 (56) | **route-credit extreme**: the field completes lap 0 banked almost entirely by arc (`8–10d` per opponent on a 10-gate course) — the driven path threads almost no cylinders |
+| circuit2 | 5/13 lap1/4 r0 0/6 | 0/6 | 10 (0) | 0/6 | 9 (0) | deepest all-physical run: `vpmustang99` `10c/13`, no laps yet |
+| circuit3 | 4/11 lap1/4 r0 0/4 | 2/4 | 7 (5) | 2/4 | 8 (5) | field laps mid-course |
+| circuit4 | 10/18 lap1/4 r0 0/5 | 0/5 | 15 (5) | 0/5 | 14 (8) | scripted `cp=10/18` — deepest local leg; opponents deep (`15c/18`) but no laps; local `56f`/`58f` fall churn |
+| circuit5 | 3/9 lap1/4 r0 0/7 | 2/7 | 8 (10) | 4/7 | 5 (11) | one opponent completes *two* laps parked (`3l`); parked `rcv=222f` — a new spawn-edge fall loop (london-4 amateur class) |
+| circuit6 | 1/9 lap1/4 r0 0/6 | 1/6 | 4 (21) | 1/6 | 5 (17) | one `vpdb7` lap-0 banked mostly by arc (`11d` cumulative) |
+| circuit7 | 2/11 lap1/4 r0 0/6 | 0/6 | 5 (0) | 0/6 | 5 (0) | pack holds at the g5 bind verbatim — amateur v3's leader completion does not recur; `0d`, traversal-bound |
+| circuit8 | 5/23 lap1/2 r0 0/4 | 0/4 | 11 (11) | 0/4 | 10 (17) | scripted `moved=1628 m` on the 23-gate course |
+| circuit9 | 4/14 lap1/2 r0 0/6 | 0/6 | 4 (0) | 0/6 | 4 (0) | `4c` all-six plateau persists; only nonzero `dropped` legs (105/112), peak 35.1 m/s |
+
+### What the Pro legs show
+
+**The whole catalog runs at Professional.** Pro selects the authored
+`.aimap_p` rosters and parameter blocks measurably: `diff=professional`
+on every leg, distinct opponent lineups (london-0 fields 7 `vpcoop2k`
+vs amateur's 7 `vpcoop`; sf-2 runs `vpford`/`vpauditt`/`vpmustang99`),
+distinct lap counts (london `lap*/4` vs amateur `*/3` on circuit0/3–8;
+`*/2` on circuit1/2/9 — matching the authored `NumLaps` table:
+3am/4pro except c1,c2 2/2, c9 3/2; sf `*/4` except c8/c9 `*/2`).
+
+**Multi-lap racing is real at Pro, not just gate churn.** Opponents
+complete ≥1 lap on 10 of 20 events — london-0's whole 7-car field
+laps (16/18 lap completions across the legs, three cars on the final
+lap at cap), sf-0's all-four field laps scripted, sf-1's 5–6 of 7,
+sf-5 one car two laps. Per-participant laps advance independently
+(spreads like london-0 `4l/4l/4l/3l/4l/2l/2l`), the once-only
+`F` resolution mints exactly one ledger result, and a remote finish
+ends nothing local (`phase=playing` on london-0 scripted — correct
+per F13-A.1). Exactly one `results=` entry across 40 legs — no
+inflated finishes. Amateur london-0 resolved 4 opponents per leg at
+the same budget: the extra authored lap plus Pro tuning measurably
+slows field resolution — authored-difficulty evidence, not a defect.
+The scripted driver never finishes a Pro circuit either (best:
+london-0 `lap3/4`, sf-4 `cp=10/18`) where amateur produced scripted
+wins — Pro is harder for it too, consistent with the checkpoint
+matrix.
+
+**Route credit is honest, not generous.** `/Nd` activity appears on
+14 of 20 events and stays `0d` exactly where the field never reaches
+the first missed bind — london-2 (g0 ~700 m arc), london-5 (g2
+~1050 m), sf-7 (g5 ~985 m) — the traversal residuals are unchanged
+because the model earns by driving and cannot invent progress. The
+extreme is sf-1: not an authored-miss event, yet 5–6 of 7 Pro
+opponents complete lap 0 banked `8–10d` of 10 gates each — the field
+drives the full course but the cars' actual poses thread almost none
+of the cylinders (corner-cutting/avoidance deviations vs the ~7–19 m
+radii), so progress is nearly all route-derived. london-4's parked
+field reaches authored-miss gate 9 by the same mechanism (`9c/2d`);
+sf-6's one lap-0 banked `11d` cumulative.
+
+**The parked control stays honest.** `cp=0` on all 20 parked legs;
+`moved` ≤53 m and `peak` ≤15.6 m/s are contact/recovery displacement.
+Fall-churn anomalies recur/extend: london-8 `58f` on both legs
+(deterministic spawn-edge churn, driver-independent), sf-5 parked
+`rcv=222f` (new — the london-4-amateur class of elevated-spawn punt
+loops), london-6's Thames punt loop now tags the scripted leg too
+(`243w`/`239w` — the restored-course field flows past and through
+whatever sits at the start junction). sf-9 logs the matrix's only
+`dropped` (105/112) and the worst `peak` 35.1 m/s — disclosed, still
+`status=pass`.
+
 ## Pre-fix vs post-fix per event
 
 `omax`/`omin` = best/worst opponent gates cleared; `cp` = the local
@@ -721,10 +822,13 @@ participant's gates (`x/total`); `res` = results-ledger entries;
   cataloged rows per city at both difficulties; all 20 ran the
   production session to `status=pass` ×2 drivers.
 - **F14-AC06** (representative matrix): this section — 20/20 events ×
-  {scripted, parked} at Amateur, pre- and post-repair published, with
-  the stall classes named. `status=pass` is a smoke-record outcome;
-  field plateaus are disclosed per event above, not smoothed into a
-  completability claim. Professional and hold-driver legs remain open.
+  {scripted, parked} at Amateur, pre- and post-repair published, plus
+  the same 40 legs at Professional (F14-A.4, above) with the authored
+  `.aimap_p` rosters/lap counts, the stall classes named, and the
+  first Professional opponent finish (london-0). `status=pass` is a
+  smoke-record outcome; field plateaus are disclosed per event above,
+  not smoothed into a completability claim. Hold-driver legs remain
+  open.
 - **Residual classes (open, not claimed as done)**:
   (a) authored `.opp` lines missing gate cylinders (london-2/4/5,
   sf-7) — **addressed by DSN-45**: route-bound Ordered AI progress
