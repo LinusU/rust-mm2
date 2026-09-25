@@ -596,6 +596,359 @@ fn ordered_multi_lap_participants_stay_independent_and_order() {
     assert_eq!(ledger.place_of(pl), Some(2));
 }
 
+/// A small closed Ordered course in the shape `gates_for` produces for
+/// a retail circuit: course gates in authored order at x = 0 and
+/// x = 100, then the lifted start-line copy closing each lap at
+/// x = 200 (WPT-2).
+fn ordered_def(countdown: u32, laps: u32) -> RaceDefinition {
+    RaceDefinition {
+        checkpoints: vec![cp(0.0, 0.0), cp(100.0, 0.0), cp(200.0, 0.0)],
+        finish: None,
+        rule: CheckpointRule::Ordered,
+        laps,
+        time_limit_ticks: None,
+        params: mm2_game::EventParams::default(),
+        countdown_ticks: countdown,
+        start_slots: Vec::new(),
+    }
+}
+
+/// F14-AC02 Ordered missed-gate leg (spec edge "skipped gate"): a
+/// swept crossing only counts against the gate the sequence is
+/// waiting on — driving through a later gate while an earlier one is
+/// outstanding banks nothing, and the skipped gate still has to be
+/// visited before the lap can complete.
+#[test]
+fn ordered_skipped_gate_clears_nothing_until_revisited_in_order() {
+    let def = ordered_def(0, 1);
+    let mut app = race_app(event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(-50.0, 0.0, 0.0));
+    run(&mut app, 2); // release + anchor
+    let drive = |app: &mut App, to: Vec3| {
+        set_position(app, car, to);
+        run(app, 1);
+    };
+
+    // Bypass gate 0 on the z=50 lane and sweep straight through
+    // gate 1's cylinder — it is not `next`, so nothing banks.
+    drive(&mut app, Vec3::new(-50.0, 0.0, 50.0));
+    drive(&mut app, Vec3::new(45.0, 0.0, 50.0));
+    drive(&mut app, Vec3::new(45.0, 0.0, 0.0));
+    drive(&mut app, Vec3::new(95.0, 0.0, 0.0));
+    let p = progress(&app, car);
+    assert_eq!(p.next, 0, "gate 1 cannot clear while gate 0 is owed");
+    assert_eq!(p.cleared_count(), 0, "the skipped crossing must not bank");
+    assert_eq!(
+        p.crossings, 0,
+        "a crossing against a non-required gate is not even a crossing"
+    );
+
+    // Gate 0 clears in order; the earlier drive-through was not
+    // banked, so gate 1 still has to be visited.
+    drive(&mut app, Vec3::new(45.0, 0.0, 0.0));
+    drive(&mut app, Vec3::new(-10.0, 0.0, 0.0));
+    assert_eq!(progress(&app, car).next, 1);
+    drive(&mut app, Vec3::new(45.0, 0.0, 0.0));
+    drive(&mut app, Vec3::new(95.0, 0.0, 0.0));
+    assert_eq!(progress(&app, car).next, 2, "gate 1 needed a second visit");
+
+    // The closing line completes the lap — once, with exactly one
+    // result.
+    drive(&mut app, Vec3::new(215.0, 0.0, 0.0));
+    assert!(matches!(
+        progress(&app, car).state,
+        ParticipantState::Finished { .. }
+    ));
+    assert_eq!(progress(&app, car).crossings, 3);
+    assert_eq!(app.world().resource::<ResultLedger>().len(), 1);
+}
+
+/// F14-AC02's "repeated finish hits" and "backward" legs under
+/// `Ordered`: the start line is each lap's *last* gate, so crossing it
+/// — repeatedly, in either direction — while course gates are still
+/// owed banks nothing.
+#[test]
+fn ordered_finish_line_is_inert_until_it_is_next() {
+    let def = ordered_def(0, 2);
+    let mut app = race_app(event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(-50.0, 0.0, 0.0));
+    run(&mut app, 2); // release + anchor
+    let drive = |app: &mut App, to: Vec3| {
+        set_position(app, car, to);
+        run(app, 1);
+    };
+
+    // Reach past the line on the bypass lane, then hammer it back and
+    // forth: it is not `next`, so every sweep is inert.
+    for to in [
+        Vec3::new(-50.0, 0.0, 50.0),
+        Vec3::new(230.0, 0.0, 50.0),
+        Vec3::new(230.0, 0.0, 0.0),
+        Vec3::new(170.0, 0.0, 0.0),
+        Vec3::new(230.0, 0.0, 0.0),
+        Vec3::new(170.0, 0.0, 0.0),
+    ] {
+        drive(&mut app, to);
+    }
+    let p = progress(&app, car);
+    assert_eq!(p.lap, 0, "an early line crossing cannot bank a lap");
+    assert_eq!(p.cleared_count(), 0);
+    assert_eq!(p.crossings, 0);
+    assert_eq!(p.next, 0);
+    assert_eq!(p.state, ParticipantState::Racing);
+
+    // Running the course properly banks the lap — once — and the lap
+    // counter cannot wind backward through the line.
+    let lap = |app: &mut App| {
+        for to in [
+            Vec3::new(230.0, 0.0, 50.0),
+            Vec3::new(45.0, 0.0, 50.0),
+            Vec3::new(45.0, 0.0, 0.0),
+            Vec3::new(-10.0, 0.0, 0.0),
+            Vec3::new(45.0, 0.0, 0.0),
+            Vec3::new(95.0, 0.0, 0.0),
+            Vec3::new(215.0, 0.0, 0.0),
+        ] {
+            drive(app, to);
+        }
+    };
+    lap(&mut app);
+    assert_eq!(progress(&app, car).lap, 1, "lap 1 banks on the line");
+    assert_eq!(progress(&app, car).next, 0, "the sequence re-wrapped");
+    lap(&mut app);
+    assert!(matches!(
+        progress(&app, car).state,
+        ParticipantState::Finished { .. }
+    ));
+    assert_eq!(app.world().resource::<ResultLedger>().len(), 1);
+}
+
+/// Spec edge "finish-line spawn": a participant staged *inside* the
+/// closing gate's cylinder — exactly where a circuit grid sits —
+/// banks nothing at release or while moving within the volume, and
+/// the lap still requires every course gate in order.
+#[test]
+fn ordered_spawn_inside_the_line_grants_nothing() {
+    let def = ordered_def(0, 1);
+    let mut app = race_app(event_config(), def.clone());
+    // Staged dead centre on the start/finish line: inside the last
+    // gate's trigger from the first tick.
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(200.0, 0.0, 0.0));
+    run(&mut app, 2); // release + anchor inside the cylinder
+    let drive = |app: &mut App, to: Vec3| {
+        set_position(app, car, to);
+        run(app, 1);
+    };
+
+    // Moving around inside the closing gate's volume while it is not
+    // `next` banks nothing — no lap from the spawn.
+    for to in [
+        Vec3::new(190.0, 0.0, 0.0),
+        Vec3::new(210.0, 0.0, 0.0),
+        Vec3::new(200.0, 0.0, 0.0),
+    ] {
+        drive(&mut app, to);
+    }
+    let p = progress(&app, car);
+    assert_eq!(p.lap, 0);
+    assert_eq!(p.cleared_count(), 0);
+    assert_eq!(p.crossings, 0, "dwelling in the line is not a crossing");
+
+    // Leave, run the course gates, and the return trip across the line
+    // banks the lap exactly once.
+    for to in [
+        Vec3::new(230.0, 0.0, 50.0),
+        Vec3::new(45.0, 0.0, 50.0),
+        Vec3::new(45.0, 0.0, 0.0),
+        Vec3::new(-10.0, 0.0, 0.0),
+        Vec3::new(45.0, 0.0, 0.0),
+        Vec3::new(95.0, 0.0, 0.0),
+        Vec3::new(205.0, 0.0, 0.0),
+    ] {
+        drive(&mut app, to);
+    }
+    assert!(matches!(
+        progress(&app, car).state,
+        ParticipantState::Finished { .. }
+    ));
+    assert_eq!(progress(&app, car).lap, 1);
+    assert_eq!(app.world().resource::<ResultLedger>().len(), 1);
+}
+
+/// Spec edge "overlapping start/finish volumes": where the closing
+/// line's cylinder overlaps the last course gate's, one segment
+/// through the overlap banks the lap *once* — the wrap consumes both
+/// gates in order and cannot count the same crossing twice.
+#[test]
+fn ordered_overlapping_closing_gate_banks_one_lap_once() {
+    // The line's cylinder overlaps the last course gate's — 8 m apart
+    // with 15 m radii.
+    let mut def = ordered_def(0, 1);
+    def.checkpoints[2] = cp(108.0, 0.0);
+    let mut app = race_app(event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(-50.0, 0.0, 0.0));
+    run(&mut app, 2); // release + anchor
+    let drive = |app: &mut App, to: Vec3| {
+        set_position(app, car, to);
+        run(app, 1);
+    };
+
+    drive(&mut app, Vec3::new(10.0, 0.0, 0.0));
+    assert_eq!(progress(&app, car).next, 1);
+    // One segment sweeps gate 1 and the overlapping line in order —
+    // physically crossing both is a genuine traversal, and the lap
+    // banks exactly once off it.
+    drive(&mut app, Vec3::new(140.0, 0.0, 0.0));
+    let p = progress(&app, car);
+    assert_eq!(p.lap, 1, "the overlap banks one lap, not two");
+    assert_eq!(p.crossings, 3, "three gates cleared, three crossings");
+    assert!(matches!(p.state, ParticipantState::Finished { .. }));
+    // Re-sweeping the overlap after resolving cannot mint again.
+    drive(&mut app, Vec3::new(10.0, 0.0, 0.0));
+    drive(&mut app, Vec3::new(140.0, 0.0, 0.0));
+    assert_eq!(app.world().resource::<ResultLedger>().len(), 1);
+}
+
+/// Spec edge "last-lap tie" (F14-AC03): two participants crossing the
+/// line on the same tick of their final lap both record — the
+/// standings break the shared race clock by `PlayerId`, so the result
+/// order is deterministic rather than query order.
+#[test]
+fn ordered_last_lap_tie_records_both_deterministically() {
+    let def = ordered_def(0, 1);
+    let mut app = race_app(event_config(), def.clone());
+    let (a, pa) = spawn_participant(&mut app, &def, Vec3::new(-50.0, 0.0, -2.0));
+    let (b, pb) = spawn_participant(&mut app, &def, Vec3::new(-50.0, 0.0, 2.0));
+    app.world_mut().get_mut::<Player>(b).unwrap().control = PlayerControl::Remote;
+    run(&mut app, 2); // release + anchor
+    let drive = |app: &mut App, e: Entity, z: f32, to: Vec3| {
+        set_position(app, e, Vec3::new(to.x, to.y, z));
+        run(app, 1);
+    };
+
+    // Both clear the course gates on parallel lanes, then cross the
+    // line on the same update.
+    drive(&mut app, a, -2.0, Vec3::new(10.0, 0.0, 0.0));
+    drive(&mut app, a, -2.0, Vec3::new(90.0, 0.0, 0.0));
+    drive(&mut app, b, 2.0, Vec3::new(10.0, 0.0, 0.0));
+    drive(&mut app, b, 2.0, Vec3::new(90.0, 0.0, 0.0));
+    drive(&mut app, a, -2.0, Vec3::new(150.0, 0.0, 0.0));
+    drive(&mut app, b, 2.0, Vec3::new(150.0, 0.0, 0.0));
+    set_position(&mut app, a, Vec3::new(215.0, 0.0, -2.0));
+    set_position(&mut app, b, Vec3::new(215.0, 0.0, 2.0));
+    run(&mut app, 1);
+
+    let (ta, tb) = (
+        match &progress(&app, a).state {
+            ParticipantState::Finished { race_ticks, .. } => *race_ticks,
+            _ => panic!("a not finished"),
+        },
+        match &progress(&app, b).state {
+            ParticipantState::Finished { race_ticks, .. } => *race_ticks,
+            _ => panic!("b not finished"),
+        },
+    );
+    assert_eq!(ta, tb, "a genuine last-lap tie shares the race clock");
+    assert_eq!(race(&app).phase, RacePhase::Complete);
+    let ledger = app.world().resource::<ResultLedger>();
+    assert_eq!(ledger.len(), 2, "both tied finishes record");
+    let order: Vec<PlayerId> = ledger
+        .standings()
+        .iter()
+        .map(|r| r.id.participant)
+        .collect();
+    let mut expected = vec![pa, pb];
+    expected.sort();
+    assert_eq!(order, expected, "the tie resolves by participant id");
+}
+
+/// Spec edge "reset on finish" (F14-AC02): clearing every course gate
+/// and then resetting *past* the closing line sweeps its cylinder
+/// through the production `ResetVehicle` jump — which banks nothing,
+/// and the line still has to be physically re-crossed.
+#[test]
+fn ordered_reset_over_the_line_still_owes_the_crossing() {
+    let def = ordered_def(0, 1);
+    let mut app = race_app(event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(-50.0, 0.0, 0.0));
+    run(&mut app, 2); // release + anchor
+    let drive = |app: &mut App, to: Vec3| {
+        set_position(app, car, to);
+        run(app, 1);
+    };
+
+    drive(&mut app, Vec3::new(10.0, 0.0, 0.0));
+    drive(&mut app, Vec3::new(90.0, 0.0, 0.0));
+    assert_eq!(progress(&app, car).next, 2, "only the line is owed");
+
+    // The reset's jump sweeps the closing gate's cylinder on the way
+    // to 400 — the broken segment must not bank the lap.
+    app.world_mut().write_message(ResetVehicle {
+        entity: Some(car),
+        position: Vec3::new(400.0, 0.0, 0.0),
+        yaw: 0.0,
+    });
+    run(&mut app, 3);
+    let p = progress(&app, car);
+    assert_eq!(p.lap, 0, "the reset jump cannot bank the finish");
+    assert_eq!(p.next, 2, "the line is still owed");
+    assert!(matches!(p.state, ParticipantState::Racing));
+    assert_eq!(app.world().resource::<ResultLedger>().len(), 0);
+
+    // Driving back across it completes the lap — once.
+    drive(&mut app, Vec3::new(300.0, 0.0, 0.0));
+    drive(&mut app, Vec3::new(210.0, 0.0, 0.0));
+    assert!(matches!(
+        progress(&app, car).state,
+        ParticipantState::Finished { .. }
+    ));
+    assert_eq!(app.world().resource::<ResultLedger>().len(), 1);
+}
+
+/// Spec edge "DNF participant" plus requirement 4's bounded result
+/// handling: an opponent that never resolves does not hold the race
+/// hostage — the local finish still ends the session with exactly the
+/// local result banked and the drifter unplaced.
+#[test]
+fn an_unresolved_participant_does_not_block_the_local_result() {
+    let def = ordered_def(0, 1);
+    let mut app = race_app(event_config(), def.clone());
+    // An opponent parked off the course — it never earns a gate.
+    let (stuck, ps) = spawn_participant(&mut app, &def, Vec3::new(600.0, 0.0, 600.0));
+    app.world_mut().get_mut::<Player>(stuck).unwrap().control = PlayerControl::Remote;
+    let (car, pl) = spawn_participant(&mut app, &def, Vec3::new(-50.0, 0.0, 0.0));
+    run(&mut app, 2); // release + anchor
+    let drive = |app: &mut App, to: Vec3| {
+        set_position(app, car, to);
+        run(app, 1);
+    };
+
+    for to in [
+        Vec3::new(10.0, 0.0, 0.0),
+        Vec3::new(90.0, 0.0, 0.0),
+        Vec3::new(215.0, 0.0, 0.0),
+    ] {
+        drive(&mut app, to);
+    }
+    assert!(matches!(
+        progress(&app, car).state,
+        ParticipantState::Finished { .. }
+    ));
+    assert_eq!(
+        phase(&app),
+        SessionPhase::Results,
+        "the local finish resolves the session"
+    );
+    // The race itself stays Running for the unresolved field — but
+    // the ledger already holds the bounded outcome.
+    assert_eq!(race(&app).phase, RacePhase::Running);
+    assert_eq!(progress(&app, stuck).state, ParticipantState::Racing);
+    let ledger = app.world().resource::<ResultLedger>();
+    assert_eq!(ledger.len(), 1, "only the resolved participant records");
+    assert_eq!(ledger.place_of_in(1, pl), Some(1));
+    assert_eq!(ledger.place_of_in(1, ps), None, "the drifter is unplaced");
+}
+
 /// AC03 pause: the race clock and progress freeze with the session and
 /// resume deterministically.
 #[test]

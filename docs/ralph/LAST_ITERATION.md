@@ -1,4 +1,99 @@
-# Last iteration — F14-A.6 circuit restart leg + AC promotion (iteration 57)
+# Last iteration — F14-B.2 Ordered lap-validation edge legs + F14-B promotion (iteration 58)
+
+Iteration 58 on `ralph/night` (baseline `6f62159`, F14-A.6 — external
+verify + review green at `6f62159`; second iteration of run
+`20260925T144723`). One piece: the F14-B parent's remaining
+implementation scope — the Ordered edge cases from the spec's edge
+list, which every existing negative leg covered only under
+`AnyOrder`.
+
+## Task selection
+
+No failing gate or open review finding to repair — the F14-A.6
+external review passed with verification gaps only (all disclosed
+residuals stay open under F15-B/UNK-11 as recorded). With F14-A
+closed at `6f62159`, F14-B became the plan's next ready slice. Its
+named scope audited against the tree: B.1's live running order
+landed long ago (`live_order`/`pos=`/DSN-13), participant ranking
+came from F13-B.1's standings, the HUD already carries HUD-2's
+Circuit instrument set (`lap x/y`, checkpoint count, place,
+stopwatch), and the opponent hooks landed across F14-A.3–.5. What
+remained was lap-validation edge coverage under `Ordered` — the
+spec's "finish-line spawn; overlapping start/finish volumes;
+skipped gate; last-lap tie; DNF participant; reset on finish" list.
+
+## What landed
+
+- `tests/race.rs` 36 → 43 (+7), all through the production
+  `advance_race`/`reanchor_teleported_participants` path on a
+  synthetic closed course in the retail shape (course gates in
+  authored order + the lifted start-line copy last, WPT-2):
+  - `ordered_skipped_gate_clears_nothing_until_revisited_in_order`
+    — sweeping gate 1 while gate 0 is owed banks nothing, not even
+    a `crossings` tick; the skipped gate must be re-visited.
+  - `ordered_finish_line_is_inert_until_it_is_next` — repeated
+    both-direction line sweeps before its turn bank no lap (AC02's
+    "repeated finish hits" + "backward" legs under Ordered).
+  - `ordered_spawn_inside_the_line_grants_nothing` — staged dead
+    centre on the closing gate, dwell + movement inside the volume
+    banks nothing (the "finish-line spawn" edge).
+  - `ordered_overlapping_closing_gate_banks_one_lap_once` — one
+    segment through an overlapping last-gate/line pair banks the
+    lap once; post-finish re-sweeps mint nothing ("overlapping
+    start/finish volumes").
+  - `ordered_last_lap_tie_records_both_deterministically` — two
+    shared-clock final-lap finishes both record; standings break
+    the tie by `PlayerId`.
+  - `ordered_reset_over_the_line_still_owes_the_crossing` — the
+    production `ResetVehicle` jump sweeping the closing gate banks
+    nothing; the line must be physically re-crossed ("reset on
+    finish").
+  - `an_unresolved_participant_does_not_block_the_local_result` —
+    a never-resolving opponent keeps the race `Running`, but the
+    local finish still reaches `Results` with exactly the local
+    result banked and the drifter unplaced ("DNF participant" +
+    req 4's bounded result handling).
+- F14-B promoted to `implemented` (candidate): all four named items
+  now carry evidence — lap validation (the `Ordered` swept-sequence
+  contract + these edge legs), participant ranking (B.1 +
+  F13-B.1), HUD instruments (HUD-2's Circuit set in `update_hud`),
+  opponent hooks (roster spawn/drive + DSN-45 route-bound progress,
+  retail 60-leg Pro matrix). F14-C's catalog/exploit legs stay
+  open and still dep on research-gated F15-B.
+
+## Gates
+
+`cargo test --locked -p mm2_app --test race` — 43/43 green (all 7
+new legs pass on the unchanged `Ordered` contract; the slice is
+evidence-only, no production delta). `cargo fmt --all -- --check`
+clean; clippy/test full-suite results below in the Gates section of
+the commit (run at checkpoint).
+
+## Classification
+
+Synthetic integration evidence only — the Ordered edge legs drive
+the production race driver with deterministic `Position` segments.
+No retail-data, rendered or audio legs this iteration; no
+original-fidelity claim (the Ordered accounting model stays
+designed/UNK-11).
+
+## Remaining open items
+
+- F14-C stays queued: catalog validation + multi-lap/opponent/
+  restart evidence on retail content; its F15-B dep is still
+  research-gated (`unkFlag`/`cornerBrakingThreshold`/
+  `weirdPathfinding` semantics unverified; traversal stalls on
+  london-2/5 + sf-7 pack are the F15-B controller class).
+- The whole named remainder list from iterations 56–57 stands
+  unchanged: F05-B (UNK-13/F27/F25+), F11-C (promotion = external
+  review judgment), F13-C (original-fidelity comparison), F17-B
+  (needs F17-C's mode), F18-A (→ F18-B/C), F17-A AC03 (interactive),
+  F16-C AC01 (interactive finish), F10-B AC03 (manual), F07-B (no
+  output device).
+
+---
+
+# Iteration 57 — F14-A.6 circuit restart leg + AC promotion (iteration 57)
 
 Iteration 57 on `ralph/night` (baseline `86bae3e`, F14-A.4 repair —
 external verify + review green at `6ea22d7`; this is the first

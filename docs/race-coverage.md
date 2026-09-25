@@ -918,7 +918,14 @@ participant's gates (`x/total`); `res` = results-ledger entries;
   crossings counting once, `Teleported`/`ResetVehicle` breaking the
   swept segment — plus `dup=0` on every leg of both matrices; the
   Ordered rule itself (closing gate counts once per completed
-  sequence) covered by the A.1 contract tests.
+  sequence) covered by the A.1 contract tests, and the Ordered
+  edge legs landed in F14-B.2: a skipped gate banks nothing until
+  re-visited in order, the closing line is inert to
+  repeated/backward sweeps until it is `next`, a spawn inside the
+  closing gate's cylinder banks nothing, an overlapping
+  last-gate/line pair banks the lap exactly once, a last-lap tie
+  records both finishes deterministically, and a `ResetVehicle`
+  jump over the line still owes the crossing.
 - **F14-AC03** (multi-lap + multi-participant independence,
   consistent ordering): `ordered_multi_lap_participants_stay_independent_and_order`
   + `live_order_tracks_progress_and_locks_finished_places` +
