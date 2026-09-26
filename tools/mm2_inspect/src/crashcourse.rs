@@ -90,6 +90,9 @@ fn print_lesson(lesson: &CrashLesson) {
         if let Some(e) = &table.error {
             println!("      FAILED: {e}");
         }
+        for d in &table.diagnostics {
+            println!("      note: {d}");
+        }
         for s in &table.sub_events {
             let link = s.resolved.clone().unwrap_or_else(|| "UNRESOLVED".into());
             let timed = if s.timed() {

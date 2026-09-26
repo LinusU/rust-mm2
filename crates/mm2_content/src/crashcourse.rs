@@ -102,7 +102,9 @@ pub enum LessonObjective {
     /// `7` — maneuver lessons (`slalom`, `oneeighty`, `reverse180`,
     /// london `exam1_2`/`exam1_3`/`final2`).
     Maneuver,
-    /// `8` — braking lessons (`stop`, sf `exam1_2`).
+    /// `8` — braking lessons (`stop`, sf `exam1_2`); both retail rows
+    /// also carry `numopp`=1 and their lessons wire a `vpford`
+    /// opponent, like the follow family.
     Stop,
     /// `9` — the map lesson (london `map`).
     Map,
@@ -201,6 +203,11 @@ pub struct LessonTable {
     pub columns: Vec<String>,
     /// Sub-event rows in authored order.
     pub sub_events: Vec<LessonSubEvent>,
+    /// Non-fatal parse notes from `CrashDataFile::diagnostics` (header
+    /// quirks, skipped malformed rows) — surfaced so a dropped row can
+    /// never silently shrink the audit. Informational, not a strict
+    /// failure.
+    pub diagnostics: Vec<mm2_formats::racedata::TableDiagnostic>,
     /// The record was expected but failed to resolve/parse.
     pub error: Option<String>,
 }
@@ -237,7 +244,8 @@ pub struct AimapWiring {
     /// `[CopChaseDistance]` pursuit radius when authored (sf `crash5`
     /// only on retail).
     pub cop_chase_distance: Option<f32>,
-    /// `[Exceptions]` road overrides (sf `crash12` wires 10).
+    /// `[Exceptions]` road overrides (sf `crash1`/`crash2`/`crash4`/
+    /// `crash12` each wire the same ten-road block; london none).
     pub exceptions: usize,
     /// `[Ambient Types/Density]` roster rows.
     pub ambient_types: usize,
@@ -328,11 +336,13 @@ pub fn crash_lesson(vfs: &Vfs, catalog: &EventCatalog, event: &CatalogEvent) -> 
             logical: rec.logical.clone(),
             columns: Vec::new(),
             sub_events: Vec::new(),
+            diagnostics: Vec::new(),
             error: None,
         };
         match &rec.content {
             RecordContent::CrashData(file) => {
                 table.columns = file.columns.clone();
+                table.diagnostics = file.diagnostics.clone();
                 table.sub_events = file
                     .rows
                     .iter()

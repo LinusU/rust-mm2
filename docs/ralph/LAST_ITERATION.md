@@ -1,3 +1,71 @@
+# Last iteration — F21-A.1 review repair: falsified retail measurements (iteration 73)
+
+Iteration 73 on `ralph/night` (baseline `88ff7ac`, F21-A.1 — external
+verify green but review `fail` on three falsified measured-data
+claims in the committed research doc; eighteenth iteration of run
+`20260925T144723`). Doc/audit-surface repair only — no evaluator or
+runtime work.
+
+## Root cause
+
+The F21-A.1 research doc recorded tail/aimap correlations that did
+not match the committed tool's own output on the same install:
+
+1. "sf `crash12` wires 10 `[Exceptions]` road overrides — the only
+   lesson with any" — false: sf `crash1`, `crash2`, `crash4` and
+   `crash12` each wire an *identical* ten-road block (roads 10–19,
+   `1.0 35.0`) in both `.aimap` and `.aimap_p`; london wires none.
+2. "All other tail cells are 0 on retail" — false: `tail[1]`=1 on
+   london `crash4` `map` and sf `crash4` `oneeighty` rows (4 rows,
+   `[0,1,0,0,0,0]`).
+3. The `tail[3]`/`tail[4]` bullet misattributed the sf
+   `stop`/`exam1_2` rows — they carry `tail[2]`=1 (the `numopp`
+   position), which extends the numopp↔wired-opponent correlation to
+   the e8 stop family (sf `crash6`/`crash7` both wire `vpford`).
+   `tail[3]` is set on only three sf rows (`crash10` `follow`
+   amateur, `crash11` `exam1_3` both difficulties); `tail[4]`/
+   `tail[5]` are 0 on every retail row.
+
+## Actions
+
+- `docs/research/crashcourse.md`: rewrote the observed-correlation
+  bullets from the audit output (with the `tail[k]` = extras index =
+  file column k+5 convention stated), corrected the Exceptions bullet
+  to the four-lesson identical block, and updated the open-questions
+  tail line. `docs/original-rules.md` CC-7 and the
+  `AimapWiring::exceptions`/`LessonObjective::Stop` doc comments
+  corrected the same misattributions.
+- Closed the review's first verification gap: `LessonTable` now
+  carries `CrashDataFile::diagnostics` and the audit prints them as
+  `note:` lines, so a malformed authored row can no longer silently
+  shrink the audit. Diagnostics stay informational — retail headers
+  legitimately carry quirks (`AmbDenisty`, omitted `Filename`) and
+  zero rows drop on retail.
+
+## Gates
+
+- `cargo test -p mm2_content --test crashcourse` — 6/6 (+1:
+  diagnostics visibility over a misspelled header plus a dropped
+  malformed row).
+- `cargo fmt --all -- --check` clean; `cargo clippy --locked
+  --workspace --all-targets --all-features -- -D warnings` clean;
+  `cargo test --locked --workspace` green.
+- Re-ran `mm2-inspect crash-course <retail> --strict`
+  (`fnv1a64:e91e6cd4b2ae30d9`, read-only): exit 0, both cities 13/13
+  `ready`; the corrected doc was written from this output and the
+  four sf `[Exceptions]` blocks were diffed — identical.
+
+## Remaining open items
+
+- F21-A stays `active`; UNK-35 unchanged (runtime semantics, `Event`
+  dispatch, `Checkpoints`, `tail[1]`/`tail[3]` meaning, pro/amateur
+  param divergence).
+- `Aimap::validate` issues remain per-lesson informational prints
+  outside the strict denominator (authored-quirk warnings).
+- F21-B/F21-C stay queued; F21-AC02..AC05 evidence still pending.
+
+---
+
 # Last iteration — F21-A.1 the Crash Course lesson catalog audit (iteration 72)
 
 Iteration 72 on `ralph/night` (baseline `b1ba2a1`, F22-A.6 — external
@@ -68,8 +136,10 @@ codes or crash-specific aimap wiring — this iteration adds that layer
 
 - sf `crash6` (stop) wires a scripted `vpford` opponent —
   corroborating the `numopp`=1 tail correlation on its row.
-- sf `crash12` wires 10 `[Exceptions]` road overrides; sf `crash5`
-  owns the only authored `[CopChaseDistance]` (150).
+- sf `crash1`/`crash2`/`crash4`/`crash12` wire an identical ten-road
+  `[Exceptions]` block (corrected in iteration 73 — the original
+  entry presented it as crash12-only); sf `crash5` owns the only
+  authored `[CopChaseDistance]` (150).
 - The `Event` code belongs to the row, not the filename: london
   `exam1_2`=7 (maneuver) vs sf `exam1_2`=8 (stop); london
   `exam1_3`=7 vs sf `exam1_3`=2 (follow).

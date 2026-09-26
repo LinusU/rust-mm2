@@ -56,17 +56,34 @@ header cells verbatim (`CrashDataFile::columns`) — they are the only
 in-file evidence for the tail meanings — and preserves the tail
 values raw (`CrashDataRow::extra`).
 
-Observed correlations (inferred, not verified):
+Observed correlations (inferred, not verified). `tail[k]` below is
+the k-th value after `AmbDensity` (file column k+5); header names
+drift per file, so a name is only claimed where the file that sets
+the value also authors one.
 
-- `tail[0]` (`Misc`/`cornerspeed`): nonzero only on `Event 4` rows —
-  `corner` 40, london `exam1_1` 40, sf `final` 50. A speed or target
-  for the cornering family.
-- `tail[2]` (`numopp` on london `crash6`): 1 on every `Event 2`
-  (follow) row — matches the single `[Opponent]` lead car those
-  lessons wire.
-- `tail[3]`/`tail[4]` (`chkflags`…): 1 on a handful of sf rows
-  (`crash10`/`crash11` follow rows) and `stop`/`exam1_2`.
-- All other tail cells are 0 on retail.
+- `tail[0]` (`Misc` on london `crash1`, sf `crash2`/`crash12`;
+  `cornerspeed` on london `crash6`): nonzero only on `Event 4` rows —
+  40 on london's pair (`crash1` `corner`, `crash3` `exam1_1`), 50 on
+  all three sf `Event 4` rows (`crash2` `corner0waypoints`, `crash3`
+  `exam1_1`, `crash12` `final`). A speed or target for the cornering
+  family.
+- `tail[1]`: 1 on exactly four rows — london `crash4` `map` and sf
+  `crash4` `oneeighty`, both difficulties (`[0,1,0,0,0,0]`). No file
+  that sets it names the column (london `crash6`'s header calls this
+  position `chkflags` but its own rows carry 0), and the e9/e7
+  pairing defeats a family reading — meaning unknown.
+- `tail[2]` (`numopp` per london `crash6`'s header): 1 on every
+  `Event 2` (follow) row *and* on both sf `Event 8` (stop) rows —
+  `crash6` `stop`, `crash7` `exam1_2`. Every lesson containing a
+  `numopp`=1 row wires exactly one `[Opponent]` lead car (the sf stop
+  rows wire `vpford`). The converse does not hold — london `crash3`
+  and `crash11` wire an opponent with no `numopp` row (their
+  sub-events are e4/e7) — so the flag marks the sub-event that uses
+  the wired car, not the lesson's wiring alone.
+- `tail[3]` (unnamed on every file that sets it): 1 on three sf rows
+  — `crash10` `follow` amateur only (the `_p` row authors 0) and
+  `crash11` `exam1_3` on both difficulties.
+- `tail[4]`/`tail[5]` are 0 on every retail row.
 
 ## The `Event` column — inferred decode
 
@@ -104,8 +121,14 @@ code belongs to the row, not the filename.
   `crash10` 14 police over `vpauditt`/`vpdb7`/`vpmustang99`;
   london `crash11` 5; sf `crash5` 14 `vpcop` plus the only authored
   `[CopChaseDistance]` (150); sf `crash7` 6 `vpcop`.
-- **Exceptions**: sf `crash12` wires 10 `[Exceptions]` road
-  overrides — the only lesson with any.
+- **Exceptions**: four sf lessons — `crash1` (slalom), `crash2`
+  (corner), `crash4` (oneeighty) and `crash12` (final) — wire an
+  identical ten-road `[Exceptions]` block (roads 10–19, `1.0 35.0`)
+  in both difficulty aimaps. No other lesson in either city authors
+  any, and no event-family pattern explains the set (sf `crash3`'s
+  cornering `exam1_1` and `crash9`'s `reverse180` wire none). A
+  shared cordon around a reused course block is the plausible reading
+  — inferred.
 
 ## Retail audit result (2026-09-26)
 
@@ -120,7 +143,9 @@ attribution: london 26, sf 23 — counted and printed, not filtered.
 - The `Event` enum's real semantics (UNK-35): does the runtime
   switch on it for evaluator behaviour, and do codes 1/6 exist in
   any build?
-- Tail-column semantics beyond the `Misc`/`numopp` correlations.
+- Tail-column semantics: `Misc`/`cornerspeed` is corner-family-bound
+  and `numopp` tracks the sub-events that consume a wired opponent,
+  but `tail[1]`/`tail[3]` have no family reading yet.
 - Whether `Checkpoints` (1 on every retail row) names waypoint gates
   or something else.
 - Instruction/subtitle/audio linkage — no authored reference in

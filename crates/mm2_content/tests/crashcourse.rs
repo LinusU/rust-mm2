@@ -231,6 +231,52 @@ fn incomplete_and_unresolved_lessons_report_not_fail() {
 }
 
 #[test]
+fn table_parse_diagnostics_stay_visible_on_the_lesson() {
+    let d = tempfile::tempdir().unwrap();
+    let dir = d.path();
+    write(
+        dir,
+        "race/london/mmcrashdata.csv",
+        &format!("{MM_HEADER}\nlesson1,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,1\n"),
+    );
+    write(dir, "race/london/crash0.aimap", "[Opponent]\n0\n");
+    write(dir, "race/london/crash0.aimap_p", "[Opponent]\n0\n");
+    // The AmbDenisty misspelling plus a malformed row the parser drops:
+    // both must stay visible on the lesson view — a skipped row can
+    // never silently shrink the audit.
+    write(
+        dir,
+        "race/london/crash0data.csv",
+        "Filename,Event,Checkpoints,TimeLimit,AmbDenisty,extra,extra,extra,extra,etra,\n\
+         ok,1,1,10,0,0,0,0,0,0,0\n\
+         bad,1\n",
+    );
+    write(
+        dir,
+        "race/london/crash0data_p.csv",
+        &format!("{CRASHDATA}ok,1,1,9,0,0,0,0,0,0,0\n"),
+    );
+    write(dir, "race/london/ok.csv", WAYPOINTS);
+    let (_vfs, course) = course(d.path());
+    let lesson = &course.lessons[0];
+    let table = &lesson.tables[0];
+    assert_eq!(table.sub_events.len(), 1);
+    assert!(
+        table
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("AmbDenisty"))
+    );
+    assert!(
+        table
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("skipping row"))
+    );
+    assert!(lesson.tables[1].diagnostics.is_empty());
+}
+
+#[test]
 fn a_missing_course_table_yields_no_lessons() {
     let d = tempfile::tempdir().unwrap();
     write(
