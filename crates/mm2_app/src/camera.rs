@@ -472,6 +472,7 @@ pub fn chase_follow(
     time: Res<Time>,
     mode: Res<CameraMode>,
     spatial: Option<SpatialQuery>,
+    spawn: Option<Res<crate::session::SpawnPoint>>,
     mut cams: Query<(&ChaseCamera, &mut Transform, &mut Projection)>,
     vehicle: Query<(Entity, &GlobalTransform, &LinearVelocity), With<PlayerVehicle>>,
 ) {
@@ -530,7 +531,21 @@ pub fn chase_follow(
             if len > 1e-3
                 && let Ok(d) = Dir3::new(seg)
             {
-                let filter = SpatialQueryFilter::from_excluded_entities([veh_ent]);
+                // The player's own rig never occludes itself: a towed
+                // trailer sits between the cab and the authored boom
+                // (vpsemi's `_near` anchor lands *inside* its trailer
+                // box), so counting it would park the camera in the
+                // hitch gap or behind the trailer's rear wall. Other
+                // vehicles' trailers still occlude like any world
+                // object (designed reading — UNK-36).
+                let filter = SpatialQueryFilter::from_excluded_entities(
+                    std::iter::once(veh_ent).chain(
+                        spawn
+                            .as_deref()
+                            .into_iter()
+                            .flat_map(|s| s.trailers.iter().map(|(e, _)| *e)),
+                    ),
+                );
                 if let Some(hit) = spatial.cast_ray(look, d, len, true, &filter) {
                     next = look + d * (hit.distance - OCCLUSION_MARGIN).max(OCCLUSION_FLOOR);
                 }

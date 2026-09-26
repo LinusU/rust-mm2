@@ -160,6 +160,20 @@ impl fmt::Display for DashReport {
 const LOOK_SIDE: f32 = std::f32::consts::FRAC_PI_2;
 const LOOK_LERP: f32 = 10.0;
 
+/// Upper bound for the cockpit camera's authored `CameraNear`
+/// (designed cap — UNK-37). Four `_dash.campovcs` records on retail
+/// (`vpsemi`, `vpcentury`, `vpcoop2k`, `vpvw_dune`) author `3.0`, which
+/// clips the whole interior cluster — it sits ~1 m ahead of the eye —
+/// leaving a bare windshield view despite the dash pkg shipping
+/// calibrated needles and a wheel that clearly exist to be seen. The
+/// original almost certainly renders the interior with a different
+/// clip (separate pass or a clamped plane); the exact handling is
+/// unrecovered, so we cap at 0.5 m — past every authored dash
+/// placement — rather than dropping the interior for four cars. The
+/// authored value still reaches the mirror camera, where a high clip
+/// usefully hides the vehicle's own bodywork.
+const COCKPIT_NEAR_CAP: f32 = 0.5;
+
 fn read_text(vfs: &Vfs, logical: &str) -> Option<String> {
     let (bytes, _) = vfs.read_path(logical).ok()?;
     Some(String::from_utf8_lossy(&bytes).into_owned())
@@ -240,7 +254,7 @@ pub fn spawn_dash(
                 },
                 Projection::Perspective(PerspectiveProjection {
                     fov: p.camera_fov.unwrap_or(60.0).to_radians(),
-                    near: p.camera_near.unwrap_or(0.1).max(0.01),
+                    near: p.camera_near.unwrap_or(0.1).clamp(0.01, COCKPIT_NEAR_CAP),
                     far: p.camera_far.unwrap_or(600.0).max(1.0),
                     ..default()
                 }),

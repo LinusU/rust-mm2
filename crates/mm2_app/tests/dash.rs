@@ -14,6 +14,7 @@ use mm2_app::dash::{
 };
 use mm2_app::hudmap::HudMapCamera;
 use mm2_assets::Vfs;
+use mm2_formats::dash::PovCamSpec;
 use mm2_game::{PlayerVehicle, Session, SessionConfig, SessionEntity, SessionPhase};
 use mm2_vehicle::{DriveDirection, Vehicle, VehicleConfig, VehicleInput, VehicleState};
 use std::time::Duration;
@@ -637,4 +638,79 @@ fn spawn_dash_reports_absent_without_authored_records() {
         .world_mut()
         .query_filtered::<Entity, With<CockpitPart>>();
     assert_eq!(q.iter(app.world()).count(), 0);
+}
+
+/// Four retail `_dash.campovcs` records author `CameraNear 3.0`, which
+/// would clip the entire interior cluster (~1 m ahead of the eye) into
+/// a bare windshield view. The cockpit camera caps the authored near
+/// plane at the designed 0.5 m bound (UNK-37); smaller authored values
+/// pass through untouched.
+#[test]
+fn cockpit_near_clip_is_capped_for_the_interior() {
+    fn pov(near: f32) -> PovCamSpec {
+        PovCamSpec {
+            type_tag: None,
+            offset: Some([0.0, 1.6, 0.7]),
+            reverse_offset: None,
+            pitch: Some(0.0),
+            track_to: None,
+            camera_fov: Some(56.0),
+            camera_near: Some(near),
+            camera_far: Some(1330.0),
+            extra_fields: Vec::new(),
+        }
+    }
+    fn spawn_with(near: f32) -> App {
+        let mut app = base_app();
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<Assets<StandardMaterial>>();
+        let vehicle = app
+            .world_mut()
+            .spawn((PlayerVehicle, Visibility::Visible))
+            .id();
+        let vfs = Vfs::new();
+        app.world_mut()
+            .resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+                world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
+                    world.resource_scope(|world, mut materials: Mut<Assets<StandardMaterial>>| {
+                        let mut queue = CommandQueue::default();
+                        {
+                            let mut commands = Commands::new(&mut queue, world);
+                            spawn_dash(
+                                &mut commands,
+                                &vfs,
+                                "nonexistent_car",
+                                0,
+                                Some(pov(near)),
+                                &mut meshes,
+                                &mut images,
+                                &mut materials,
+                                vehicle,
+                                SessionEntity(1),
+                                CameraMode::Cockpit,
+                                None,
+                            );
+                        }
+                        queue.apply(world);
+                    })
+                })
+            });
+        app
+    }
+
+    for (authored, want) in [(3.0_f32, 0.5_f32), (0.1, 0.1)] {
+        let mut app = spawn_with(authored);
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&Projection, With<CockpitCamera>>();
+        let Projection::Perspective(p) = q.single(app.world()).unwrap() else {
+            panic!("cockpit camera keeps a perspective projection");
+        };
+        assert!(
+            (p.near - want).abs() < 1e-4,
+            "authored near {authored} → {want}, got {}",
+            p.near
+        );
+    }
 }

@@ -1,4 +1,93 @@
-# Last iteration — F22-B.3: authored chase near/far rigs (iteration 74)
+# Last iteration — F22-B.4: trailer occlusion + cockpit near-clip repairs, AC05 captures (iteration 75)
+
+Iteration 75 on `ralph/night` (baseline `ba1005e`, F22-B.3 — external
+verify + review green, no blocking findings; twentieth iteration of
+run `20260925T144723`). One coherent slice: the F22-AC05
+atypical-vehicle framing leg, which surfaced two real camera defects
+on trailered/interior content plus the three non-blocking review
+nits folded in.
+
+## Task selection
+
+F22-B was `active` with F22-AC05 (camera transitions, wall proximity,
+mirrors and reset *visually inspected on atypical vehicle sizes*) open
+and the review naming three gaps worth closing while adjacent: the
+claimed `sized`-fallback and far-mode-input tests did not exist, and
+the towed-trailer/occlusion interaction was untested. Exercising the
+trailered stock cars on retail found real breakage, so the slice
+became: fix + test + capture.
+
+## Findings and actions
+
+- **Own trailer counted as an occluder (fixed).** vpsemi's authored
+  `_near` boom anchor (`Offset` z=7.73, rest ≈8.7 m) lands *inside*
+  its ~14 m trailer box (trailer front ≈2.25 m behind the cab origin),
+  so the `CollideType` ray hit the trailer and parked the camera in
+  the hitch gap — the near view rendered a close-up of the cab's rear
+  wall, and the far view (`Offset` z=19.5, past the trailer) clamped
+  behind the trailer's rear face. `chase_follow` now builds the
+  exclusion set from `SpawnPoint.trailers` in addition to the player
+  entity: the player's own rig never occludes itself, other vehicles'
+  trailers still do. Designed reading — the original's occluder set is
+  unrecovered (UNK-36). Verified: vpsemi near now frames the cab over
+  the flatbed deck, far shows the whole rig.
+- **`camPovCS` `CameraNear 3.0` clipped whole interiors (fixed).**
+  Four `_dash.campovcs` records (`vpsemi`, `vpcentury`, `vpcoop2k`,
+  `vpvw_dune`) author a 3.0 m near plane while their interior cluster
+  sits ~1 m ahead of the eye — the verbatim binding rendered a bare
+  windshield with no dash at all. The cockpit camera now caps the
+  authored near at a designed 0.5 m (every authored cluster lies
+  closer); the authored value still reaches the mirror camera, where
+  the high clip usefully hides the towed rig. UNK-37 — whether the
+  original clamps, renders the interior in a separate pass, or truly
+  hides those four dashes is unrecovered. Verified: vpsemi/vpcentury
+  cockpits now render their full authored clusters.
+- **Review's missing test legs added for real**: `tests/camtrack.rs`
+  gains `drive_views_steer_and_free_detaches` (Chase/Cockpit/ChaseFar
+  all write throttle; Free zeroes — the B.3 gate change now covered),
+  `sized_lens_drives_the_fallback_boom` (chassis-derived offset,
+  0–60 m/s window, `authored=false`, converged boom = rest), plus the
+  trailer legs `own_trailer_is_not_an_occluder` /
+  `other_trailer_still_occludes`.
+- `docs/original-rules.md`: UNK-36 extended (own-rig exclusion),
+  new UNK-37 (`camPovCS` `CameraNear` semantics), HUD-3 row updated.
+
+## Evidence
+
+- `cargo test -p mm2_app --test camtrack` — 13/13 (+4).
+- `cargo test -p mm2_app --test dash` — 11/11 (+1: authored 3.0 → 0.5
+  cap, authored 0.1 passthrough).
+- Retail windowed captures (Apple Silicon/Metal, `/tmp/f22b4/`,
+  local-only): sf vpsemi near/far **before** (cab-rear wall; trailer
+  rear wall) and **after** (cab over flatbed deck; whole rig);
+  vpsemi+vpcentury `--cockpit` after (full dashes rendered);
+  vpbus near+far, vpcentury near, vpmoonrover near; vpsemi `--mirror`
+  strip; dev-world `vpbug` pull-in at the z=200 perimeter wall
+  (`cam …,199.3` vs the ~200.2 unconstrained boom).
+- Retail headless unchanged in shape: sf vpsemi `trk=near+far`
+  `dash=11p/cam`, `status=pass`.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --locked --workspace` — green.
+
+## Classification / remaining open items
+
+- F22-B stays `active`: AC05's transition/reset legs and the
+  multi-resolution sweep (F22-C scope) remain open; UNK-36/UNK-37 hold
+  the unrecovered semantics honestly.
+- The near view inside a trailer volume relies on backface culling of
+  the trailer's own walls — an open flatbed renders its deck and the
+  cab correctly; a *closed* box trailer might show dark interior
+  faces. No closed-box stock trailer exists to check (vpsemi/vpcentury
+  are the only trailered roster cars), but a mod could ship one.
+
+---
+
+
 
 Iteration 74 on `ralph/night` (baseline `6426bd2`, F21-A.1 review
 repair — external verify + review green, no blocking findings;

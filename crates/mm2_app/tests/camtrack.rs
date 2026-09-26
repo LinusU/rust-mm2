@@ -11,9 +11,12 @@ use mm2_app::camera::{
     toggle_camera,
 };
 use mm2_app::dash::CockpitCamera;
+use mm2_app::input::vehicle_input;
+use mm2_app::session::SpawnPoint;
 use mm2_assets::Vfs;
 use mm2_formats::camtrack::TrackCamSpec;
-use mm2_game::PlayerVehicle;
+use mm2_game::{PlayerVehicle, Session, SessionConfig, SessionPhase};
+use mm2_vehicle::VehicleInput;
 use std::time::Duration;
 
 const NEAR_TEXT: &str = "type: a\ncamTrackCS {\n  Offset 0.0 1.0 4.0\n  CollideType 1\n  MinMaxOn 1\n  MinDist 3.5\n  MaxDist 5.0\n  MinSpeed 0.0\n  MaxSpeed 20.0\n  TrackTo 0.0 1.7 0.0\n  BlendTime 1.2\n  CameraFOV 70.0\n  CameraNear 0.5\n  CameraFar 600.0\n}\n";
@@ -347,6 +350,163 @@ fn collide_type_zero_ignores_occluder() {
         xf.translation.z > 3.0,
         "CollideType 0 keeps the authored boom, z={}",
         xf.translation.z
+    );
+}
+
+/// The player's own trailer is part of the rig, not an occluder: a
+/// trailered vehicle's boom anchor can sit *inside* the trailer box
+/// (vpsemi's `_near` does on retail), so counting the trailer would
+/// park the camera in the hitch gap.
+#[test]
+fn own_trailer_is_not_an_occluder() {
+    let mut app = physics_app();
+    app.add_systems(Update, chase_follow);
+    spawn_vehicle(&mut app, Vec3::ZERO, Vec3::ZERO);
+    // A trailer box straddling the boom ray (front face at z=3, well
+    // inside the authored 4.12 m rest boom).
+    let trailer = app
+        .world_mut()
+        .spawn((
+            RigidBody::Static,
+            Collider::cuboid(4.0, 4.0, 4.0),
+            Transform::from_xyz(0.0, 2.0, 5.0),
+        ))
+        .id();
+    app.insert_resource(SpawnPoint {
+        position: Vec3::ZERO,
+        yaw: 0.0,
+        trailers: vec![(trailer, Vec3::new(0.0, -0.2, 8.0))],
+    });
+    let cam = spawn_chase(
+        &mut app,
+        ChaseCamera {
+            near: near_lens(),
+            far: None,
+            smoothness: 60.0,
+        },
+        true,
+    );
+    for _ in 0..120 {
+        app.update();
+    }
+    let xf = app.world().get::<Transform>(cam).unwrap();
+    assert!(
+        xf.translation.z > 3.4,
+        "own trailer excluded: boom reaches the authored anchor, z={}",
+        xf.translation.z
+    );
+}
+
+/// A trailer that is *not* the player's own still occludes like any
+/// world object — the exclusion is scoped to the local rig.
+#[test]
+fn other_trailer_still_occludes() {
+    let mut app = physics_app();
+    app.add_systems(Update, chase_follow);
+    spawn_vehicle(&mut app, Vec3::ZERO, Vec3::ZERO);
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::cuboid(4.0, 4.0, 4.0),
+        Transform::from_xyz(0.0, 2.0, 5.0),
+    ));
+    // SpawnPoint exists but lists no trailer for this entity.
+    app.insert_resource(SpawnPoint {
+        position: Vec3::ZERO,
+        yaw: 0.0,
+        trailers: Vec::new(),
+    });
+    let cam = spawn_chase(
+        &mut app,
+        ChaseCamera {
+            near: near_lens(),
+            far: None,
+            smoothness: 60.0,
+        },
+        true,
+    );
+    for _ in 0..120 {
+        app.update();
+    }
+    let xf = app.world().get::<Transform>(cam).unwrap();
+    assert!(
+        xf.translation.z < 3.0,
+        "unregistered trailer still pulls the boom in, z={}",
+        xf.translation.z
+    );
+}
+
+/// Every drive view steers — the F22-B.3 gate widened from `Chase` to
+/// every non-Free mode, and ChaseFar must keep throttle/steering live
+/// (a `C` press into the far lens must not strand the driver).
+#[test]
+fn drive_views_steer_and_free_detaches() {
+    let mut session = Session::new();
+    session.begin(SessionConfig::default()).unwrap();
+    session.transition(SessionPhase::Ready).unwrap();
+    session.transition(SessionPhase::Playing).unwrap();
+
+    let mut app = base_app(CameraMode::ChaseFar);
+    app.insert_resource(session)
+        .add_systems(Update, vehicle_input);
+    let car = app
+        .world_mut()
+        .spawn((PlayerVehicle, VehicleInput::default()))
+        .id();
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyW);
+
+    for mode in [CameraMode::Chase, CameraMode::Cockpit, CameraMode::ChaseFar] {
+        *app.world_mut().resource_mut::<CameraMode>() = mode;
+        app.update();
+        assert_eq!(
+            app.world().get::<VehicleInput>(car).unwrap().throttle,
+            1.0,
+            "{mode:?} is a drive view"
+        );
+    }
+    *app.world_mut().resource_mut::<CameraMode>() = CameraMode::Free;
+    app.update();
+    assert_eq!(
+        app.world().get::<VehicleInput>(car).unwrap().throttle,
+        0.0,
+        "Free detaches driving input"
+    );
+}
+
+/// The designed size-derived lens is what a record-less vehicle gets:
+/// chassis-derived rest boom, 0–60 m/s window toward `rest + 3.6`,
+/// no collision flag and `authored = false` so `trk=` reports `sized`.
+#[test]
+fn sized_lens_drives_the_fallback_boom() {
+    let lens = ChaseLens::sized(2.0, 4.5);
+    let offset = Vec3::new(0.0, 2.0 * 0.55 + 1.4, 4.5 * 0.85 + 3.5);
+    assert!((lens.offset - offset).length() < 1e-5);
+    let rest = lens.offset.length();
+    assert!((lens.dist_max - (rest + 3.6)).abs() < 1e-5);
+    assert_eq!((lens.speed_min, lens.speed_max), (0.0, 60.0));
+    assert!(!lens.collide && !lens.authored);
+
+    let mut app = base_app(CameraMode::Chase);
+    app.add_systems(Update, chase_follow);
+    spawn_vehicle(&mut app, Vec3::ZERO, Vec3::ZERO);
+    let cam = spawn_chase(
+        &mut app,
+        ChaseCamera {
+            near: lens,
+            far: None,
+            smoothness: 30.0,
+        },
+        true,
+    );
+    for _ in 0..240 {
+        app.update();
+    }
+    let xf = app.world().get::<Transform>(cam).unwrap();
+    assert!(
+        (xf.translation.length() - rest).abs() < 0.15,
+        "sized lens converges to its rest boom, got {}",
+        xf.translation.length()
     );
 }
 
