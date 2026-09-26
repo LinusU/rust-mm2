@@ -79,6 +79,7 @@ fn test_app(config: SessionConfig, frame_secs: f64) -> App {
         .init_resource::<SessionNote>()
         .init_resource::<PauseMenu>()
         .init_resource::<ResultsMenu>()
+        .init_resource::<mm2_app::camera::RearView>()
         .add_systems(FixedUpdate, advance_session_tick)
         .add_systems(
             FixedLast,
@@ -93,6 +94,12 @@ fn test_app(config: SessionConfig, frame_secs: f64) -> App {
             (
                 session::load_session_world.run_if(session::loading),
                 session::session_control_input,
+                // F22-B.2: the binary's mirror toggle — Backspace must
+                // reach `RearView`, not the restart intent, in every
+                // phase the harness exercises — and the strip's
+                // `is_active` follows like the binary's driver does.
+                mm2_app::camera::mirror_input,
+                mm2_app::camera::drive_mirror,
                 // F22-A.1: same map/pause ordering as the binary — the
                 // map's controls run ahead of `pause_input` so the
                 // Q/Esc that closes a pause-map is never re-read as a
@@ -456,7 +463,9 @@ fn pause_map_owns_the_keys_while_the_menu_is_hidden() {
 
     // Every menu key is dead while the map is up: the focus cannot
     // drift to Restart/Quit, `Enter` activates nothing, Backspace does
-    // not resume — the phase and the map must not move.
+    // not resume — and, since F22-B.2 gave it to the rear-view mirror,
+    // it must not toggle that either — the phase and the map must not
+    // move.
     for key in [
         KeyCode::ArrowDown,
         KeyCode::ArrowDown,
@@ -472,6 +481,10 @@ fn pause_map_owns_the_keys_while_the_menu_is_hidden() {
         phase_is(&mut app, SessionPhase::Paused),
         "menu keys reached the hidden pause rows: {:?}",
         app.world().resource::<Session>().phase()
+    );
+    assert!(
+        !app.world().resource::<mm2_app::camera::RearView>().0,
+        "Backspace while Paused must not reach the mirror toggle"
     );
     assert!(app.world().resource::<HudMap>().fullscreen);
     assert_eq!(
@@ -565,7 +578,11 @@ fn restart_leaves_exactly_one_session() {
 
     let car = single::<With<PlayerVehicle>>(&mut app);
     let bodies = count::<With<RigidBody>>(&mut app);
-    assert_eq!(count::<With<Camera3d>>(&mut app), 2, "chase + free");
+    assert_eq!(
+        count::<With<Camera3d>>(&mut app),
+        3,
+        "chase + free + mirror"
+    );
     assert_eq!(count::<With<Hud>>(&mut app), 1);
     assert_eq!(count::<With<ErrorText>>(&mut app), 1);
     let active = {
@@ -586,12 +603,14 @@ fn restart_leaves_exactly_one_session() {
         .trailers
         .push((dummy, Vec3::ZERO));
 
-    // Drive the restart through the real key path: Backspace latches the
-    // intent, then the input is cleared (no InputPlugin runs here, so
-    // `just_pressed` would otherwise persist into the next session).
+    // Drive the restart through the real key path: F4 latches the
+    // intent (the documented original binding — CTL-1; Backspace is
+    // the F22-B.2 mirror now), then the input is cleared (no
+    // InputPlugin runs here, so `just_pressed` would otherwise persist
+    // into the next session).
     app.world_mut()
         .resource_mut::<ButtonInput<KeyCode>>()
-        .press(KeyCode::Backspace);
+        .press(KeyCode::F4);
     app.update();
     app.world_mut()
         .resource_mut::<ButtonInput<KeyCode>>()
@@ -618,7 +637,7 @@ fn restart_leaves_exactly_one_session() {
 
     // One session's worth of entities, all owned by generation 2.
     assert_eq!(count::<With<PlayerVehicle>>(&mut app), 1);
-    assert_eq!(count::<With<Camera3d>>(&mut app), 2);
+    assert_eq!(count::<With<Camera3d>>(&mut app), 3);
     assert_eq!(count::<With<Hud>>(&mut app), 1);
     assert_eq!(count::<With<ErrorText>>(&mut app), 1);
     assert_eq!(count::<With<RigidBody>>(&mut app), bodies);
@@ -694,7 +713,7 @@ fn city_water_does_not_leak_across_restart() {
 
     app.world_mut()
         .resource_mut::<ButtonInput<KeyCode>>()
-        .press(KeyCode::Backspace);
+        .press(KeyCode::F4);
     app.update();
     app.world_mut()
         .resource_mut::<ButtonInput<KeyCode>>()
@@ -730,7 +749,7 @@ fn world_floor_does_not_leak_across_restart() {
 
     app.world_mut()
         .resource_mut::<ButtonInput<KeyCode>>()
-        .press(KeyCode::Backspace);
+        .press(KeyCode::F4);
     app.update();
     app.world_mut()
         .resource_mut::<ButtonInput<KeyCode>>()
@@ -1031,4 +1050,53 @@ fn cockpit_without_authored_camera_falls_back_to_an_active_chase() {
             .count()
     };
     assert_eq!(active, 1, "exactly one session camera renders");
+}
+
+/// F22-B.2: restart moved to the documented `F4` binding (CTL-1);
+/// `Backspace` now belongs to the rear-view mirror and must not latch
+/// the restart intent while `Playing` — it flips `RearView`, and the
+/// strip camera (spawned under the player by the production load path)
+/// activates through `drive_mirror`. The toggle is session-agnostic
+/// like `CameraMode`: the restarted session's fresh strip camera
+/// picks it back up.
+#[test]
+fn f4_restarts_and_backspace_is_the_mirror() {
+    use mm2_app::camera::MirrorCamera;
+
+    let mut app = dev_app();
+    app.update();
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+    let mirror_cam = single::<With<MirrorCamera>>(&mut app);
+    assert!(
+        !app.world().get::<Camera>(mirror_cam).unwrap().is_active,
+        "the strip starts inactive"
+    );
+
+    // Backspace toggles the mirror, never the session.
+    press_key(&mut app, KeyCode::Backspace);
+    assert!(app.world().resource::<mm2_app::camera::RearView>().0);
+    // The harness leaves the input reader and `drive_mirror` unordered
+    // like the binary — the strip can settle a frame late.
+    app.update();
+    assert!(
+        app.world().get::<Camera>(mirror_cam).unwrap().is_active,
+        "drive_mirror activated the strip"
+    );
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+    assert!(!app.world().resource::<SessionControl>().restart);
+
+    // F4 drives the restart through the same teardown/reload cycle the
+    // old Backspace binding rode.
+    press_key(&mut app, KeyCode::F4);
+    assert!(
+        run_until(&mut app, 12, |a| phase_is(a, SessionPhase::Playing)),
+        "F4 restart never returned to Playing"
+    );
+    assert_eq!(app.world().resource::<Session>().generation(), 2);
+    app.update(); // the fresh strip settles like above
+    let mirror_cam = single::<With<MirrorCamera>>(&mut app);
+    assert!(
+        app.world().get::<Camera>(mirror_cam).unwrap().is_active,
+        "the new session's strip camera re-arms from `RearView`"
+    );
 }

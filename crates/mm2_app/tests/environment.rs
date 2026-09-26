@@ -498,8 +498,10 @@ fn off_schema_fields_count_as_issues_not_fallback() {
 }
 
 /// The authored `city/<stem>_fog.csv` row for the session's slot binds
-/// a linear `DistanceFog` on both 3D cameras — colour and clip
+/// a linear `DistanceFog` on all three 3D cameras — colour and clip
 /// distances verbatim — and the report records the binding (F18-A.3).
+/// The F22-B.2 mirror strip fogs too: an unfogged rear view would
+/// read as a different weather slot through the glass.
 #[test]
 fn authored_fog_binds_onto_the_cameras() {
     let tmp = city_install();
@@ -527,7 +529,7 @@ fn authored_fog_binds_onto_the_cameras() {
     assert_eq!(report.smoke_detail(), "lt08(fallback) fog=108-908 sky=none");
 
     let fogs = camera_fogs(&mut app);
-    assert_eq!(fogs.len(), 2, "chase + free cameras both fogged");
+    assert_eq!(fogs.len(), 3, "chase + free + mirror cameras fogged");
     for fog in &fogs {
         let FogFalloff::Linear { start, end } = fog.falloff.clone() else {
             panic!("authored distances bind as a linear falloff");

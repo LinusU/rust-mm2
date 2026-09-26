@@ -451,7 +451,13 @@ fn spawn_part_meshes(
 /// Only direct children are flipped — visibility propagates down each
 /// subtree — and the check is a write-on-diff sweep so freshly spawned
 /// children are caught even when the mode never changed (`--cockpit`
-/// at spawn).
+/// at spawn). The F22-B.2 mirror strip is the one exemption: it is a
+/// camera, not a panel — `drive_mirror` owns its render gate
+/// (`is_active`), and a windshield mirror must keep reflecting while
+/// the cockpit view is up.
+// The filter queries can't fold into one ParamSet — each is a read over
+// the same component set — so the arg count is intrinsic to the sweep.
+#[allow(clippy::too_many_arguments)]
 pub fn sync_dash_visibility(
     mut commands: Commands,
     mode: Res<CameraMode>,
@@ -459,11 +465,15 @@ pub fn sync_dash_visibility(
     cockpits: Query<(), With<CockpitPart>>,
     glows: Query<(), With<GlowPart>>,
     hidden: Query<(), With<CockpitHidden>>,
+    mirrors: Query<(), With<crate::camera::MirrorCamera>>,
     mut vis: Query<&mut Visibility>,
 ) {
     let cockpit = *mode == CameraMode::Cockpit;
     for children in &players {
         for child in children.iter() {
+            if mirrors.get(child).is_ok() {
+                continue;
+            }
             let Ok(mut v) = vis.get_mut(child) else {
                 continue;
             };

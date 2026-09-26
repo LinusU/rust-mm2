@@ -63,10 +63,11 @@ Controls:
 | A,D / ←,→    | steer                         |
 | Space        | handbrake                     |
 | R            | reset vehicle to spawn        |
-| C            | toggle chase / free camera    |
+| C            | cycle chase / cockpit / free camera |
+| Backspace    | toggle the rear-view mirror strip |
 | X / Z        | cycle nav-arrow target (in a race) |
 | F1           | toggle physics debug gizmos   |
-| Backspace    | restart the session           |
+| F4           | restart the session           |
 | Esc          | quit (teardown → menu, or exit when launched direct) |
 | Cmd/Ctrl+P   | save a screenshot to `screenshots/` |
 | WASD+mouse   | fly (in free-camera mode)     |

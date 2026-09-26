@@ -247,6 +247,10 @@ pub fn headless_smoke(
         .init_resource::<Assets<Image>>()
         .init_resource::<Assets<StandardMaterial>>()
         .insert_resource(camera::CameraMode::Chase)
+        // F22-B.2: `--mirror` reaches the headless app through the
+        // config, like `no_pvs` — the `mir=` record field reports the
+        // strip camera's real state.
+        .insert_resource(camera::RearView(config.dev.mirror))
         .insert_resource(session::SpawnPoint {
             position: Vec3::new(0.0, 1.5, 0.0),
             yaw: 0.0,
@@ -304,6 +308,10 @@ pub fn headless_smoke(
             (
                 session::load_session_world.run_if(session::loading),
                 session::session_control_input,
+                // F22-B.2: BACKSPACE → RearView toggle — `ButtonInput`
+                // exists here, so a test driving key state exercises
+                // the same path.
+                camera::mirror_input,
                 // F22-A.1/HUD-4: the map's controls run in the headless
                 // app too — `ButtonInput`/`CameraMode` exist here, so a
                 // test driving key state exercises the same path.
@@ -345,6 +353,10 @@ pub fn headless_smoke(
                 // room exactly as the windowed run does — the record's
                 // `pvs=` field reports what it culled.
                 camera::chase_follow,
+                // F22-B.2: the mirror strip's `is_active` tracks
+                // `RearView`/mode here too — the record's `mir=` field
+                // reports what the headless camera state settled to.
+                camera::drive_mirror,
                 crate::pvs::apply_city_pvs
                     .after(camera::chase_follow)
                     .run_if(resource_exists::<crate::pvs::CityPvs>),
@@ -869,6 +881,24 @@ pub fn headless_smoke(
         .get_resource::<crate::dash::DashReport>()
         .map(|r| format!(" dash={r}"))
         .unwrap_or_default();
+    // F22-B.2 mirror evidence, on-activity only like `surf=wet`:
+    // `mir=on` when the strip camera renders, `mir=armed` when the
+    // toggle is up but nothing renders (no player vehicle, or the dev
+    // Free camera suppressing it) — an armed-but-inactive strip is a
+    // discrepancy worth printing, never a silent pass.
+    let mir_detail = if world_ecs
+        .get_resource::<crate::camera::RearView>()
+        .is_some_and(|r| r.0)
+    {
+        let active = world_ecs
+            .iter_entities()
+            .filter(|e| e.get::<crate::camera::MirrorCamera>().is_some())
+            .filter_map(|e| e.get::<Camera>())
+            .any(|c| c.is_active);
+        format!(" mir={}", if active { "on" } else { "armed" })
+    } else {
+        String::new()
+    };
     // F10-A.2 ambient evidence: live/target population plus the
     // recycler counters. Absent on worlds without a rostered aimap so
     // those records stay bit-identical.
@@ -1180,7 +1210,7 @@ pub fn headless_smoke(
     // (DRV-2/DRV-3) and aimap variant (RACE-11) selected its content.
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{extra}",
+            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{mir_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{extra}",
             driver.as_str(),
             config.difficulty.as_str(),
             session.phase().name(),

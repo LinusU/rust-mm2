@@ -175,6 +175,13 @@ struct Cli {
     #[arg(long, conflicts_with = "cam")]
     cockpit: bool,
 
+    /// Start with the rear-view mirror strip up (diagnostic aid — how a
+    /// `--frames`/`--screenshot` capture renders the F22-B.2 mirror
+    /// while live input is frozen; render-only like `--cam`). Headless
+    /// it lands on the record's `mir=` field instead of a screen.
+    #[arg(long)]
+    mirror: bool,
+
     /// Sweep the local participant through an event session's remaining
     /// triggers — one gate per update — until the run resolves to the
     /// results screen (diagnostic aid: how a `--frames`/`--screenshot`
@@ -748,6 +755,7 @@ fn main() {
             no_pvs: cli.no_pvs,
             horn: cli.horn,
             cockpit: cli.cockpit,
+            mirror: cli.mirror,
         },
         // Any mounted mod makes records/unlocks ineligible — a result
         // under modded content is not comparable to stock (designed
@@ -840,6 +848,7 @@ fn main() {
         && cli.restart_at.is_none()
         && !cli.horn
         && !cli.no_pvs
+        && !cli.mirror
         && !cli.nav
         && cli.nav_route.is_none()
         && !cli.bot
@@ -925,6 +934,9 @@ fn main() {
     } else {
         CameraMode::Chase
     })
+    // F22-B.2: `--mirror` arms the rear-view strip from spawn — the
+    // capture path for it while live input is frozen.
+    .insert_resource(camera::RearView(cli.mirror))
     .add_plugins(VehiclePlugin)
     .add_message::<ImpactEvent>()
     .add_message::<DamageEvent>()
@@ -1070,6 +1082,10 @@ fn main() {
             race::nav_target_input.run_if(not(capturing)),
             (
                 camera::toggle_camera.run_if(not(capturing)),
+                // F22-B.2: BACKSPACE toggles the mirror strip in the
+                // live phases — same frozen-input gate as every other
+                // control.
+                camera::mirror_input.run_if(not(capturing)),
                 camera::chase_follow,
                 camera::free_fly.run_if(not(capturing)),
                 dash::drive_dash,
@@ -1101,9 +1117,17 @@ fn main() {
     // F22-A.1: the HUD map tracks every frame — eased zoom and a
     // rotating map should animate through pause/countdown alike, and a
     // `--pause-map` capture needs it live while input is frozen
-    // (ungated like `chase_follow`). Own schedule slot: the main
-    // Update tuple is at Bevy's system count limit.
-    .add_systems(Update, hudmap::drive_hud_map.after(session::drive_session))
+    // (ungated like `chase_follow`). F22-B.2's mirror strip follows
+    // the same contract — a `--mirror` capture needs it live too.
+    // Own schedule slot: the main Update tuple is at Bevy's system
+    // count limit.
+    .add_systems(
+        Update,
+        (
+            hudmap::drive_hud_map.after(session::drive_session),
+            camera::drive_mirror.after(session::drive_session),
+        ),
+    )
     // Pause owns the keyboard while `Paused`: `pause_input` runs after
     // `session_control_input` (which ignores `Paused` — Esc while
     // paused is resume, not quit) and before `drive_session` (so the

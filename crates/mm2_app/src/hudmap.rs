@@ -99,10 +99,14 @@ pub struct HudMapCamera;
 
 /// Query filter for systems that pick "the" world camera
 /// (`audio_listener`, `apply_city_pvs`, damage billboards, …): the map
-/// camera is an *active* `Camera3d` while any view is up, so every
-/// such pick must exclude it or the map cam becomes the listener /
-/// PVS source / billboard-facing view.
-pub type WorldCamera3d = (With<Camera3d>, Without<HudMapCamera>);
+/// camera and the F22-B.2 mirror strip are *active* `Camera3d`s while
+/// up, so every such pick must exclude them or the secondary view
+/// becomes the listener / PVS source / billboard-facing view.
+pub type WorldCamera3d = (
+    With<Camera3d>,
+    Without<HudMapCamera>,
+    Without<crate::camera::MirrorCamera>,
+);
 
 /// One world-space map tile (`hudmap_<city>.pkg` section) — spawned at
 /// the authored pose and never moved.

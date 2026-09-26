@@ -1,4 +1,115 @@
-# Last iteration — F22-B.1 review repair: world-space camera consumers (iteration 64)
+# Last iteration — F22-B.2 rear-view mirror strip + F4 restart (iteration 65)
+
+Iteration 65 on `ralph/night` (baseline `33607dc`, F22-B.1 — external
+verify + review green; ninth iteration of run `20260925T144723`,
+resuming the truncated iteration-009 session that ended mid-exploration
+with an empty diff). One coherent slice: the documented `BACKSPACE`
+rear-view mirror (HUD-3/CTL-1), which also frees the dev build's
+borrowed restart binding to its documented `F4` key.
+
+## Task selection
+
+No failing gate or review finding — iteration 009's review passed on an
+empty candidate (the session was truncated before implementation), so
+the open F22-B remainder stands. The mirror slice is the smallest
+complete piece of that remainder: it binds a documented control
+(BACKSPACE rearview, F4 restart — both CTL-1/HUD-3) while the original's
+mirror presentation stays honestly unrecovered (UNK-29). Occlusion
+handling and the chase-near/far pair remain open in F22-B.
+
+## What landed
+
+- `camera.rs` — `MirrorCamera` component + `RearView(bool)` resource +
+  `spawn_mirror` + `mirror_input` + `drive_mirror`. The strip is a
+  rearward `Camera3d` (`order 2`, over the world view and map inset)
+  parented to the player vehicle — pitch/roll move the view like a
+  windshield mirror, and session teardown/reset can never strand it.
+  Eye: authored `camPovCS` `Offset` when the car carries one (the seat
+  position a real mirror reflects from), else a designed
+  `chassis_size.y × 0.55` fallback; FOV/near/far bind the authored
+  record with designed fallbacks. `drive_mirror` writes `is_active`
+  from `RearView` (suppressed under `CameraMode::Free`) and maintains a
+  top-centre `Viewport` strip (⅓ × ⅛ of the physical window,
+  write-on-diff) — DSN-50. `mirror_input` toggles on BACKSPACE in
+  `Playing`/`Countdown` only, so pause/results/menu overlays keep the
+  key for Back. `RearView` is session-agnostic like `CameraMode`: a
+  restart respawns the strip camera armed.
+- `hudmap.rs` — `WorldCamera3d` now excludes `MirrorCamera`: the strip
+  can never become the audio listener, PVS source, sky-dome anchor,
+  billboard-facing view or HUD `cam` pose readout.
+- `dash.rs` — `sync_dash_visibility` skips `MirrorCamera` children
+  (Bevy auto-inserts `Visibility` on `Camera3d`; the split would have
+  claimed and hidden it under Cockpit). The strip renders over the
+  cockpit view; `is_active`, not `Visibility`, is its render gate.
+- `session.rs` — `session_control_input` binds restart to `F4` (the
+  documented original binding, CTL-1); `load_session_world` spawns the
+  strip under the player vehicle carrying the same `DistanceFog` as
+  the other cameras (an unfogged rear view would read as a different
+  weather slot).
+- `config.rs`/`main.rs` — `DevOverrides::mirror` + `--mirror` (arms
+  `RearView` at spawn — the capture path while `--frames` freezes live
+  input); render-only like `--pause`/`--cam`, deliberately out of
+  `record_eligibility`, and counted for menu-mode/direct-launch.
+  `drive_mirror` runs ungated by `capturing` like `drive_hud_map`.
+- `smoke.rs` — headless app schedules `mirror_input`/`drive_mirror`,
+  seeds `RearView` from the config, and records `mir=on|armed`
+  on-activity only (off records stay bit-identical); `armed` without
+  `on` is a printed discrepancy, never a silent pass.
+
+## Gates
+
+- `cargo test -p mm2_app --test mirror` — 7/7 new: overlay phases keep
+  the key, Playing/Countdown toggle, Free-camera suppression,
+  `WorldCamera3d` exclusion + `active_cam_pose` still reporting the
+  forward camera, authored `PovCamSpec` eye/FOV/clips vs designed
+  fallback, rearward yaw, and the cockpit-visibility exemption.
+- `cargo test -p mm2_app --test session` — 19/19 (+1:
+  `f4_restarts_and_backspace_is_the_mirror` — BACKSPACE toggles
+  `RearView` and never queues restart; F4 drives the full
+  Unloading→Menu→Loading cycle and the respawned strip re-arms).
+- `cargo test -p mm2_app --test environment` — 17/17 (the fogged-camera
+  count honestly moved 2→3: the strip binds the authored fog row too).
+- `cargo fmt --all -- --check` clean; `cargo clippy --locked
+  --workspace --all-targets --all-features -- -D warnings` clean (one
+  targeted `too_many_arguments` allow on `sync_dash_visibility` — the
+  filter-query count is intrinsic); `cargo test --locked --workspace`
+  all suites green.
+- Retail headless (`fnv1a64:e91e6cd4b2ae30d9`, read-only):
+  `sf --headless --mirror --frames 200` → `status=pass`, `mir=on`,
+  `dash=11p/cam`, `pvs=687r/5932h/7324` unchanged.
+- Retail windowed (Apple Silicon, Metal): `--city sf --mirror
+  --frames 90 --screenshot` renders the top-centre strip showing the
+  rearward view (flush top edge, under the HUD telemetry line) while
+  the HUD `cam` pose still reports the forward chase camera.
+  Capture is local (`/tmp/f22b2-mirror-sf.png`, not committed).
+
+## Classification
+
+BACKSPACE-mirror and F4-restart bindings are documented original
+controls (HUD-3/CTL-1). The strip's geometry, the un-mirrored
+projection, the fallback eye and the Free-camera suppression are
+designed readings — DSN-50; the original's mirror presentation is
+UNK-29. `docs/original-rules.md` updated (HUD-3 row, DSN-50, UNK-29);
+README controls table corrected (`C` cycle description, BACKSPACE→
+mirror, F4→restart).
+
+## Remaining open items
+
+- F22-B stays `active` — the mirror leg lands; still open: camera
+  obstacle/occlusion handling, the chase-near/far pair split (Free
+  occupies the documented Chase-Far slot — DSN-48), plus prior
+  unverified legs (retail `dash=` counts on london/vpbus).
+- F22-AC05's visual legs are only partially met: the strip is verified
+  on `vpbug` only; atypical vehicle sizes, wall proximity and reset
+  transitions still need manual capture passes.
+- A true mirror needs a flipped projection or clip-plane reflection —
+  the strip is a plain rearward camera (designed, UNK-29).
+- F22-A remainder: AC02/AC03 map legs and HUD-2 race instruments stay
+  open.
+
+---
+
+# Iteration 64 — F22-B.1 review repair: world-space camera consumers
 
 Iteration 64 on `ralph/night` (baseline `01c78a2`, F22-B.1 review
 repair — external verify green but review **failed**; eighth iteration

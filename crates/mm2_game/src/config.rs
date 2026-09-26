@@ -524,7 +524,7 @@ pub struct DevOverrides {
     /// `Playing` frame (evidence/diagnostic runs — how a headless
     /// `--frames` run exercises the production
     /// `Unloading → Menu → begin` teardown path, the same lifecycle a
-    /// disabled-in-Blitz/Checkpoint restart or a Backspace restart
+    /// disabled-in-Blitz/Checkpoint restart or an `F4` restart
     /// takes; never a session-legal parameter). The second session is
     /// not a continuous run of the first, so it IS in
     /// `record_eligibility` — results it produces never record.
@@ -561,6 +561,12 @@ pub struct DevOverrides {
     /// input is frozen; render-only like `--pause`). Falls back to the
     /// chase camera when the car carries no cockpit record.
     pub cockpit: bool,
+    /// `--mirror`: start the session with the rear-view mirror strip up
+    /// (evidence/diagnostic runs — how a `--frames`/`--screenshot`
+    /// capture renders the F22-B.2 mirror while live input is frozen;
+    /// render-only like `--pause`). It only re-aims a camera, so like
+    /// `--pause`/`--cam` it stays out of `record_eligibility`.
+    pub mirror: bool,
 }
 
 /// Configuration of the `--nav` debug overlay: draw the city's BAI

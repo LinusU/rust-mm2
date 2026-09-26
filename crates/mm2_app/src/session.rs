@@ -12,9 +12,10 @@
 //!   Quit/Resume rows take it from there), quits a
 //!   `Countdown`/`Failed` one (tears down, then exits — or returns to
 //!   the menu when a `MenuShell` resource is running, F17-A.1), and
-//!   `Backspace` restarts the session with the same config. `Paused`
-//!   and `Results` are absent: `pause_input`/`results_input` own the
-//!   keyboard there (Esc is resume/continue).
+//!   `F4` restarts the session with the same config (the documented
+//!   original binding, CTL-1 — `Backspace` is the F22-B.2 mirror).
+//!   `Paused` and `Results` are absent: `pause_input`/`results_input`
+//!   own the keyboard there (Esc is resume/continue).
 //! - `despawn_session_entities` (mm2_game, scheduled while `Unloading`)
 //!   removes every session-owned root; [`drive_session`] waits for the
 //!   world to be observably empty, clears session-scoped caches
@@ -120,8 +121,10 @@ pub fn unloading(session: Res<Session>) -> bool {
     matches!(session.phase(), SessionPhase::Unloading)
 }
 
-/// `Esc` (or a gamepad `Start`) asks to pause, `Backspace` asks to
-/// restart. Intents are only read from the phases a session can sit in
+/// `Esc` (or a gamepad `Start`) asks to pause, `F4` asks to restart —
+/// the documented original binding (CTL-1); `Backspace` belongs to the
+/// rear-view mirror now (F22-B.2). Intents are only read from the
+/// phases a session can sit in
 /// — while `Loading`, `Unloading` or `Menu` the driver is already
 /// working and input is ignored. `Paused` and `Results` are
 /// deliberately absent: `pause_input`/`results_input` own the keyboard
@@ -161,7 +164,7 @@ pub fn session_control_input(
             control.quit = true;
         }
     }
-    if keys.just_pressed(KeyCode::Backspace) {
+    if keys.just_pressed(KeyCode::F4) {
         control.restart = true;
     }
 }
@@ -917,6 +920,24 @@ pub fn load_session_world(
             spawn.position,
             spawn.yaw,
         ));
+
+    // F22-B.2: every player vehicle carries the rear-view mirror strip
+    // camera (HUD-3/CTL-1 `BACKSPACE`) — presentation, not authored
+    // content, so no record gates it. The eye rides at the authored
+    // `camPovCS` seat position when the car has one; the fallback is a
+    // designed seat height off the chassis size.
+    crate::camera::spawn_mirror(
+        &mut commands,
+        pov.as_ref(),
+        selected
+            .def
+            .as_ref()
+            .map(|d| Vec3::new(0.0, d.config.chassis_size[1] * 0.55, -0.3))
+            .unwrap_or(Vec3::new(0.0, 1.2, -0.3)),
+        vehicle,
+        owner,
+        camera_fog.clone(),
+    );
 
     match &selected.def {
         // Imported stock vehicle: the model carries the visuals.
