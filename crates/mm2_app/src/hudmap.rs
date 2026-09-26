@@ -82,8 +82,10 @@ const LARGE_VIEW_SCALE: f32 = 1.9;
 /// over the authored palette).
 const TRI_PAINT_PLAYER: usize = 5;
 /// Pool of `hudmap_tri` paint jobs opponents cycle through — every
-/// authored paint except the player's and the near-black navy.
-const TRI_PAINT_OPPONENTS: &[usize] = &[4, 1, 3, 6, 7, 8, 2, 9];
+/// authored paint except the player's and the near-black navy. Shared
+/// with `oppind`'s in-world arrows so an opponent's indicator and map
+/// tri agree on colour (both pools bind in entity order).
+pub(crate) const TRI_PAINT_OPPONENTS: &[usize] = &[4, 1, 3, 6, 7, 8, 2, 9];
 /// `hudmap_square` paint jobs (authored order red/blue/green/grey/
 /// yellow/finish/gold/bank/hideout) bound to marker roles — designed
 /// picks matching HUD-4's bright/dark/highlight vocabulary.
@@ -185,8 +187,9 @@ impl HudMapReport {
 }
 
 /// The marker mesh's authored XZ extent — the bounding square's side —
-/// so `IconScale` can scale it to a world extent.
-fn authored_extent(pkg: &Pkg) -> f32 {
+/// so `IconScale` can scale it to a world extent. `oppind` measures
+/// the same extent for its in-world arrow scale.
+pub(crate) fn authored_extent(pkg: &Pkg) -> f32 {
     let mut r = 0.0f32;
     for (_name, geo) in pkg.geometries() {
         for section in &geo.sections {
@@ -217,8 +220,10 @@ fn top_vertex_y(pkg: &Pkg) -> f32 {
 }
 
 /// One paint job's material out of a marker PKG, flattened for the
-/// top-down map read ([`MaterialCache::unlit_copy`]).
-fn paint_material(
+/// top-down map read ([`MaterialCache::unlit_copy`] — unlit and
+/// double-sided, which is also what `oppind`'s camera-facing arrows
+/// need).
+pub(crate) fn paint_material(
     pkg: &Pkg,
     paint: usize,
     mats: &mut MaterialCache<'_>,
@@ -231,7 +236,10 @@ fn paint_material(
     Some(mats.unlit_copy(&base))
 }
 
-fn read_pkg(vfs: &Vfs, logical: &str) -> Option<Pkg> {
+/// Read-and-parse one authored PKG through the VFS; `None` on either
+/// failure with the cause logged — shared with `oppind`, which binds
+/// the same marker package in-world.
+pub(crate) fn read_pkg(vfs: &Vfs, logical: &str) -> Option<Pkg> {
     vfs.read_path(logical)
         .ok()
         .map(|(bytes, _)| bytes)

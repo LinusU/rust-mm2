@@ -251,6 +251,9 @@ pub fn headless_smoke(
         // config, like `no_pvs` — the `mir=` record field reports the
         // strip camera's real state.
         .insert_resource(camera::RearView(config.dev.mirror))
+        // F22-A.2: the opponent-indicator toggle — session-agnostic,
+        // on by designed default like the windowed app.
+        .init_resource::<crate::oppind::OpponentIndicators>()
         .insert_resource(session::SpawnPoint {
             position: Vec3::new(0.0, 1.5, 0.0),
             yaw: 0.0,
@@ -437,6 +440,16 @@ pub fn headless_smoke(
                 // windowed app runs — a bound profile in a headless
                 // evidence run must record identically.
                 crate::progression::record_session_results,
+            ),
+        )
+        // F22-A.2: `I` toggles `OpponentIndicators` and the pool
+        // rebinds headless too — own slot: the big Update tuple is at
+        // Bevy's arity limit (same split the windowed app makes).
+        .add_systems(
+            Update,
+            (
+                crate::oppind::indicator_input,
+                crate::oppind::drive_opponent_indicators.after(session::drive_session),
             ),
         );
     if driver == Driver::Scripted {
@@ -899,6 +912,24 @@ pub fn headless_smoke(
     } else {
         String::new()
     };
+    // F22-A.2 opponent-indicator evidence: `<on|off>/<pool>m/<bound>b`
+    // or `absent:<why>` — `bound` counts live opponents even while the
+    // toggle hides the markers, so the field shows demand vs pool.
+    // Event sessions only; cruise/dev-world records stay bit-identical.
+    let ind_detail = world_ecs
+        .get_resource::<crate::oppind::OppIndReport>()
+        .map(|r| {
+            format!(
+                " ind={}",
+                r.smoke_detail(
+                    &world_ecs
+                        .get_resource::<crate::oppind::OpponentIndicators>()
+                        .copied()
+                        .unwrap_or_default()
+                )
+            )
+        })
+        .unwrap_or_default();
     // F10-A.2 ambient evidence: live/target population plus the
     // recycler counters. Absent on worlds without a rostered aimap so
     // those records stay bit-identical.
@@ -1210,7 +1241,7 @@ pub fn headless_smoke(
     // (DRV-2/DRV-3) and aimap variant (RACE-11) selected its content.
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{mir_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{extra}",
+            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{mir_detail}{ind_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{extra}",
             driver.as_str(),
             config.difficulty.as_str(),
             session.phase().name(),

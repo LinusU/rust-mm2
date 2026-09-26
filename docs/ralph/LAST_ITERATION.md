@@ -1,4 +1,140 @@
-# Last iteration — F22-B.2 review repair: HUD retarget excludes the strip (iteration 66)
+# Last iteration — F22-A.2 opponent indicators (iteration 67)
+
+Iteration 67 on `ralph/night` (baseline `f64e2a3`, F22-B.2 review
+repair — external verify + review green; twelfth iteration of run
+`20260925T144723`). One coherent slice: the documented `I` opponent
+indicator (HUD-3/CTL-1) — the smallest complete piece of the F22-A
+race-HUD remainder.
+
+## Task selection
+
+No failing gate or review finding — iteration 66's repair passed
+external review (`verdict: pass`), so the queue reopens. The F22-A
+remainder was named the likely next slice: HUD-2's race instruments
+over the developer telemetry line and the two documented HUD-3
+controls still unbound (`H` HUD, `I` opponent indicator). The
+indicator is the smallest self-contained piece of that remainder —
+one control, one instrument — while the compass arrow/checkpoint
+list/lap/place/stopwatch presentation and the `H` HUD toggle stay
+open in the F22-A parent.
+
+## What landed
+
+- `mm2_app::oppind` (new) — the indicator module:
+  - `OpponentIndicators(bool)` — session-agnostic toggle resource
+    (same lifecycle contract as `RearView`): a restart respawns the
+    pool and the drive system re-applies the driver's choice. On by
+    designed default (DSN-51 — the original's start state is
+    unrecovered).
+  - `OppIndReport` — session-scoped load report: `markers` (pool
+    slots = authored roster size), `bound` (live opponents bound on
+    the last drive pass — counts demand even while toggled off),
+    `absent:<why>` (`missing-pkg`/`unparseable-pkg`/`empty-pkg`).
+    Inserted only by event sessions; cruise/dev-world records stay
+    bit-identical.
+  - `spawn_opponent_indicators` — event-arm spawn sized to
+    `roster.entries.len()`, every marker `SessionEntity`-stamped.
+    Marker geometry/materials bind the authored
+    `geometry/hudmap_tri.pkg` through the VFS — a missing or
+    unparseable package records `absent`, never a substitute mesh —
+    scaled from its measured authored extent to a designed in-world
+    size (1.5 m), painted per-slot from the shared
+    `TRI_PAINT_OPPONENTS` authored palette so an opponent's arrow
+    matches its minimap tri (both pools bind in entity order).
+  - `indicator_input` — `I` toggles in `Playing`/`Countdown` only, so
+    pause/results/menu overlays keep the key (the same contract
+    `mirror_input` holds for BACKSPACE).
+  - `drive_opponent_indicators` — rebinds the pool every frame to
+    live non-local `Player` participants (`control != Local` — AI
+    today, remote drivers once F25 exists; never ambient traffic,
+    never the local car), sorted by entity. Each marker rides the
+    opponent's authored collider/`chassis_size` roof plus a designed
+    gap — per-car height, so tall vehicles clear it — stands the flat
+    tri upright apex-down, and yaw-faces the active `WorldCamera3d`
+    camera (map and mirror cameras can never be the facing source).
+    Despawned or vehicle-less participants free their slot the same
+    update — no marker can hover over a stale or invalid opponent
+    (AC03's stale-participant leg for this instrument). Runs ungated
+    by `capturing`, like `drive_mirror`, so `--frames`/`--screenshot`
+    runs render the markers.
+- `hudmap.rs` — `read_pkg`, `authored_extent`, `paint_material` and
+  `TRI_PAINT_OPPONENTS` promoted to `pub(crate)`; `oppind` binds the
+  same authored content rather than duplicating the loaders.
+- `session.rs` — the event arm spawns the pool after
+  `spawn_opponents` and inserts the report; teardown removes
+  `OppIndReport` with the other session-scoped reports (the markers
+  die via `SessionEntity` like the rest of the rig).
+- `main.rs` — `init_resource::<OpponentIndicators>`,
+  `indicator_input` gated `not(capturing)` beside `mirror_input`,
+  `drive_opponent_indicators` ungated in the
+  after-`drive_session` slot.
+- `smoke.rs` — the headless app gets the same resource + systems
+  (own schedule slot — the big Update tuple is at Bevy's system-arity
+  limit; the windowed app already splits this way for the map/mirror
+  drivers) and records ` ind=<on|off>/<pool>m/<bound>b` or
+  `absent:<why>` on event sessions only.
+
+## Gates
+
+- `cargo test -p mm2_app --test oppind` — 5/5 new:
+  `i_toggles_only_in_the_live_phases` (Menu/Paused/Results keep the
+  key; Countdown/Playing toggle), `markers_ride_only_live_opponents`
+  (two opponents on a two-slot pool — per-car heights from the
+  dev chassis roof vs an authored 3 m hull; local car never marked;
+  `Remote` control binds; despawn frees the slot same update;
+  vehicle-drop unbinds; toggle-off hides all while `bound` still
+  reports demand), `missing_tri_package_reports_absent`,
+  `event_session_reports_the_bound_pool` (synthetic
+  `race/testcity/` checkpoint event wiring one `vpt` opponent +
+  authored tri through the real `headless_smoke` pipeline →
+  `ind=on/1m/1b`), `dev_world_has_no_indicator_field`.
+- `cargo fmt --all -- --check` clean; `cargo clippy --locked
+  --workspace --all-targets --all-features -- -D warnings` clean;
+  `cargo test --locked --workspace` all suites green (oppind.rs +5,
+  0 failures).
+- Retail headless (`fnv1a64:e91e6cd4b2ae30d9`, read-only):
+  `--city sf --event checkpoint:0 --headless --frames 200` →
+  `status=pass`, `ind=on/6m/6b`, `pos=3/7` — six authored opponents
+  bound over the full field; roster warnings preserved verbatim
+  (aimap wires 6, table authors 7).
+- Retail windowed (Apple M1, Metal): `--city sf --event checkpoint:0
+  --frames 100 --screenshot` renders the countdown grid with a
+  painted down-pointing arrow over each visible staged opponent
+  (paint 4 orange over the left car, paint 1 blue over the right).
+  Capture is local (`/tmp/f22a2-ind-sf.png`, not committed).
+
+## Classification
+
+The `I` toggle is a documented original control (HUD-3/CTL-1). The
+indicator's *presentation* is unrecovered — the documentation records
+only the toggle — so the arrow shape/extent (1.5 m), the
+collider-roof + 0.6 m lift, the authored-palette mapping and the
+on-by-default start state are designed readings (DSN-51, UNK-30).
+What is original-scope: the instrument binds authored
+`hudmap_tri.pkg` content through the VFS and covers every non-local
+participant. `docs/original-rules.md` updated (HUD-3 row, DSN-51,
+UNK-30); README controls table adds the `I` row.
+
+## Remaining open items
+
+- F22-A stays `active` — the race-HUD remainder is still the dev
+  telemetry line plus this slice: HUD-2's compass arrow, checkpoint
+  list, lap record, place indicator, stopwatch/countdown instruments
+  and the documented `H` HUD toggle stay open, alongside AC01–AC03's
+  evidence legs.
+- The indicator presentation (DSN-51/UNK-30) needs original
+  verification — no retail indicator captures exist to compare
+  against; the authored `hudmap_tri` reuse is a designed reading,
+  not a recovered fact.
+- `ind=bound` covers `PlayerControl::Remote` by construction but no
+  remote participants exist yet (F25 groundwork only).
+- Atypical vehicle sizes still need the manual capture passes
+  recorded under F22-AC05 — the per-car roof math is tested
+  synthetically but uninspected on `vpbus`/`vpsemi`.
+
+---
+
+# Iteration 66 — F22-B.2 review repair: HUD retarget excludes the strip (iteration 66)
 
 Iteration 66 on `ralph/night` (baseline `9817490`, F22-B.2 — external
 verify green but review **failed**; eleventh iteration of run

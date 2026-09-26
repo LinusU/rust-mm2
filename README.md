@@ -65,6 +65,7 @@ Controls:
 | R            | reset vehicle to spawn        |
 | C            | cycle chase / cockpit / free camera |
 | Backspace    | toggle the rear-view mirror strip |
+| I            | toggle opponent indicators (in a race) |
 | X / Z        | cycle nav-arrow target (in a race) |
 | F1           | toggle physics debug gizmos   |
 | F4           | restart the session           |

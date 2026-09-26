@@ -20,8 +20,8 @@ use clap::Parser;
 use mm2_app::session::{ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
     audio, banger, breakaway, camera, car_visual, city, contracts, damage, damage_fx, dash,
-    environment, hudmap, input, menu, nav_overlay, opponents, pause, profile, progression, pvs,
-    race, recovery, results, scripted, sequence, session, smoke, spark_fx, stuck, texel_fx,
+    environment, hudmap, input, menu, nav_overlay, oppind, opponents, pause, profile, progression,
+    pvs, race, recovery, results, scripted, sequence, session, smoke, spark_fx, stuck, texel_fx,
     traffic,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
@@ -937,6 +937,9 @@ fn main() {
     // F22-B.2: `--mirror` arms the rear-view strip from spawn — the
     // capture path for it while live input is frozen.
     .insert_resource(camera::RearView(cli.mirror))
+    // F22-A.2: the opponent-indicator toggle — session-agnostic like
+    // `RearView`, on by designed default (HUD-3's `I` flips it).
+    .init_resource::<oppind::OpponentIndicators>()
     .add_plugins(VehiclePlugin)
     .add_message::<ImpactEvent>()
     .add_message::<DamageEvent>()
@@ -1086,6 +1089,9 @@ fn main() {
                 // live phases — same frozen-input gate as every other
                 // control.
                 camera::mirror_input.run_if(not(capturing)),
+                // F22-A.2: `I` toggles the opponent indicators — same
+                // frozen-input gate and live-phase contract.
+                oppind::indicator_input.run_if(not(capturing)),
                 camera::chase_follow,
                 camera::free_fly.run_if(not(capturing)),
                 dash::drive_dash,
@@ -1126,6 +1132,9 @@ fn main() {
         (
             hudmap::drive_hud_map.after(session::drive_session),
             camera::drive_mirror.after(session::drive_session),
+            // F22-A.2: the indicator pool rebinds ungated too — a
+            // `--frames`/`--screenshot` run needs the markers live.
+            oppind::drive_opponent_indicators.after(session::drive_session),
         ),
     )
     // Pause owns the keyboard while `Paused`: `pause_input` runs after

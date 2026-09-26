@@ -251,6 +251,9 @@ pub fn drive_session(
             // state/report.
             commands.remove_resource::<crate::hudmap::HudMapReport>();
             commands.remove_resource::<mm2_game::HudMap>();
+            // Same for the opponent-indicator report (F22-A.2) — the
+            // marker pool itself is `SessionEntity`-stamped.
+            commands.remove_resource::<crate::oppind::OppIndReport>();
             // Same for the cockpit rig's spawn report (F22-B.1) — the
             // dash subtree itself is `SessionEntity`-stamped.
             commands.remove_resource::<crate::dash::DashReport>();
@@ -1221,6 +1224,21 @@ pub fn load_session_world(
                 &def,
                 owner,
             );
+            // F22-A.2: the documented opponent indicator (HUD-3/CTL-1
+            // `I`) — a session-owned marker pool sized to the authored
+            // roster, bound per-frame to live non-local participants
+            // only. Authored `hudmap_tri` content through the VFS;
+            // `absent` on the report when it cannot bind.
+            let oppind_report = crate::oppind::spawn_opponent_indicators(
+                &mut commands,
+                &vfs.0,
+                roster.entries.len(),
+                &mut assets.meshes,
+                &mut assets.images,
+                &mut assets.materials,
+                owner,
+            );
+            commands.insert_resource(oppind_report);
             race::spawn_nav_arrow(&mut commands, owner);
             race::spawn_race_warning(&mut commands, owner);
             race::spawn_countdown_banner(&mut commands, owner);
