@@ -8,11 +8,13 @@ use std::time::Duration;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
+use mm2_app::navarrow::{
+    NavArrow, NavArrowSprites, nav_target_input, spawn_nav_arrow, update_nav_arrow,
+};
 use mm2_app::race::{
     COUNTDOWN_GO_TICKS, CountdownBanner, CountdownBannerText, LOW_TIME_BRIGHT, LOW_TIME_DIM,
-    LOW_TIME_TICKS, LowTimeWarning, NAV_AHEAD, NAV_BEHIND, NavArrow, advance_race,
-    nav_target_input, reanchor_teleported_participants, spawn_countdown_banner, spawn_nav_arrow,
-    spawn_race_warning, update_countdown_banner, update_nav_arrow, update_race_warning,
+    LOW_TIME_TICKS, LowTimeWarning, advance_race, reanchor_teleported_participants,
+    spawn_countdown_banner, spawn_race_warning, update_countdown_banner, update_race_warning,
 };
 use mm2_app::session::{self, SessionControl};
 use mm2_game::{
@@ -23,6 +25,110 @@ use mm2_game::{
     live_order,
 };
 use mm2_vehicle::{ResetVehicle, Teleported, Vehicle, VehicleConfig, VehicleState};
+
+/// The smallest faithful `hudarrow01` fixture: one flat XZ triangle
+/// (tip −Z, the authored up-at-bearing-0 direction) with the authored
+/// two-paint-job layout naming two texture stems.
+fn arrow_pkg() -> Vec<u8> {
+    let fvf: u32 = 0x112; // XYZ + NORMAL + 1 uv set
+    let mut geo = Vec::new();
+    geo.extend_from_slice(&1u32.to_le_bytes()); // sections
+    geo.extend_from_slice(&3u32.to_le_bytes()); // total verts
+    geo.extend_from_slice(&3u32.to_le_bytes()); // total indices
+    geo.extend_from_slice(&1u32.to_le_bytes()); // sections duplicate
+    geo.extend_from_slice(&fvf.to_le_bytes());
+    geo.extend_from_slice(&1u16.to_le_bytes()); // strips
+    geo.extend_from_slice(&0u16.to_le_bytes()); // flags
+    geo.extend_from_slice(&0i32.to_le_bytes()); // shader_offset
+    geo.extend_from_slice(&3i32.to_le_bytes()); // prim_type triangles
+    geo.extend_from_slice(&3u32.to_le_bytes()); // n_vertices
+    for (p, uv) in [
+        ([-0.5f32, 0.0, 0.7], [0.2f32, 0.8]),
+        ([0.5, 0.0, 0.7], [0.8, 0.8]),
+        ([0.0, 0.0, -1.0], [0.5, 0.05]),
+    ] {
+        for f in p {
+            geo.extend_from_slice(&f.to_le_bytes());
+        }
+        for n in [0.0f32, -1.0, 0.0] {
+            geo.extend_from_slice(&n.to_le_bytes());
+        }
+        for f in uv {
+            geo.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+    geo.extend_from_slice(&3u32.to_le_bytes()); // n_indices
+    for i in [0u16, 1, 2] {
+        geo.extend_from_slice(&i.to_le_bytes());
+    }
+
+    let mut shaders = Vec::new();
+    shaders.extend_from_slice(&2u32.to_le_bytes()); // 2 paint jobs
+    shaders.extend_from_slice(&1u32.to_le_bytes()); // shaders per job
+    for stem in ["arr_a", "arr_b"] {
+        shaders.push(stem.len() as u8 + 1);
+        shaders.extend_from_slice(stem.as_bytes());
+        shaders.push(0);
+        for f in [1.0f32, 1.0, 1.0, 1.0] {
+            shaders.extend_from_slice(&f.to_le_bytes());
+        } // diffuse
+        for f in [1.0f32, 1.0, 1.0, 1.0] {
+            shaders.extend_from_slice(&f.to_le_bytes());
+        } // ambient
+        for f in [0.0f32, 0.0, 0.0, 1.0] {
+            shaders.extend_from_slice(&f.to_le_bytes());
+        } // specular
+        for f in [0.0f32, 0.0, 0.0, 1.0] {
+            shaders.extend_from_slice(&f.to_le_bytes());
+        } // emissive
+        shaders.extend_from_slice(&0.0f32.to_le_bytes()); // shininess
+    }
+
+    let mut pkg = b"PKG3".to_vec();
+    for (name, payload) in [("H", geo), ("shaders", shaders)] {
+        pkg.extend_from_slice(b"FILE");
+        pkg.push(name.len() as u8 + 1);
+        pkg.extend_from_slice(name.as_bytes());
+        pkg.push(0);
+        pkg.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        pkg.extend_from_slice(&payload);
+    }
+    pkg
+}
+
+/// A minimal uncompressed 32bpp TGA — top-left origin, solid fill.
+fn tga32(w: u16, h: u16, [r, g, b]: [u8; 3]) -> Vec<u8> {
+    let mut t = vec![0u8; 18];
+    t[2] = 2;
+    t[12..14].copy_from_slice(&w.to_le_bytes());
+    t[14..16].copy_from_slice(&h.to_le_bytes());
+    t[16] = 32;
+    t[17] = 0x28;
+    for _ in 0..(w as usize * h as usize) {
+        t.extend_from_slice(&[b, g, r, 255]); // BGRA
+    }
+    t
+}
+
+/// The synthetic install the arrow binds: `hudarrow01.pkg` plus the
+/// two `arr_*` tiles its paint jobs name.
+fn arrow_mount() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path().join("geometry");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("hudarrow01.pkg"), arrow_pkg()).unwrap();
+    let d = tmp.path().join("texture");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("arr_a.tga"), tga32(8, 8, [0, 200, 60])).unwrap();
+    std::fs::write(d.join("arr_b.tga"), tga32(8, 8, [230, 200, 0])).unwrap();
+    tmp
+}
+
+fn vfs_of(dir: &std::path::Path) -> mm2_assets::Vfs {
+    let mut vfs = mm2_assets::Vfs::new();
+    vfs.mount_dir(dir, 0).unwrap();
+    vfs
+}
 
 fn cp(x: f32, z: f32) -> Checkpoint {
     Checkpoint {
@@ -105,6 +211,7 @@ fn race_app(config: SessionConfig, def: RaceDefinition) -> App {
         .init_resource::<mm2_app::spark_fx::SparkFxReport>()
         .init_resource::<mm2_app::texel_fx::TexelDamageReport>()
         .init_resource::<ButtonInput<KeyCode>>()
+        .init_resource::<Assets<Image>>()
         .add_message::<RaceStarted>()
         .add_message::<ResetVehicle>()
         .add_systems(FixedUpdate, advance_session_tick)
@@ -128,14 +235,33 @@ fn race_app(config: SessionConfig, def: RaceDefinition) -> App {
                     .chain(),
             ),
         )
-        // The production spawn path stamps the needle with the owning
-        // session generation — do the same so teardown tests exercise it.
-        .add_systems(Startup, |mut commands: Commands, session: Res<Session>| {
-            let owner = SessionEntity(session.generation());
-            spawn_nav_arrow(&mut commands, owner);
-            spawn_race_warning(&mut commands, owner);
-            spawn_countdown_banner(&mut commands, owner);
-        });
+        // The production spawn path stamps the arrow with the owning
+        // session generation — do the same so teardown tests exercise
+        // it. The arrow binds the authored package through the VFS, so
+        // the harness mounts the smallest faithful fixture.
+        .add_systems(
+            Startup,
+            |mut commands: Commands, session: Res<Session>, mut images: ResMut<Assets<Image>>| {
+                let owner = SessionEntity(session.generation());
+                let tmp = arrow_mount();
+                let vfs = vfs_of(tmp.path());
+                let report = spawn_nav_arrow(
+                    &mut commands,
+                    &vfs,
+                    &mut images,
+                    owner,
+                    EventTableKind::Checkpoint,
+                );
+                assert!(
+                    report.absent.is_none(),
+                    "the synthetic arrow mount binds: {:?}",
+                    report.absent
+                );
+                commands.insert_resource(report);
+                spawn_race_warning(&mut commands, owner);
+                spawn_countdown_banner(&mut commands, owner);
+            },
+        );
     app.finish();
     app.cleanup();
     app
@@ -1291,9 +1417,9 @@ fn restart_from_results_rebegins_the_session() {
     );
 }
 
-/// The one session-owned needle, read back as
-/// `(rotation, visibility, color)`.
-fn arrow(app: &mut App) -> (Rot2, Visibility, Color) {
+/// The one session-owned arrow, read back as
+/// `(rotation, visibility, shown sprite)`.
+fn arrow(app: &mut App) -> (Rot2, Visibility, Handle<Image>) {
     let entity = {
         let world = app.world_mut();
         world
@@ -1305,8 +1431,16 @@ fn arrow(app: &mut App) -> (Rot2, Visibility, Color) {
     (
         app.world().get::<UiTransform>(entity).unwrap().rotation,
         *app.world().get::<Visibility>(entity).unwrap(),
-        app.world().get::<BackgroundColor>(entity).unwrap().0,
+        app.world().get::<ImageNode>(entity).unwrap().image.clone(),
     )
+}
+
+/// The bound ahead/behind sprite pair the spawn picked.
+fn arrow_sprites(app: &mut App) -> (Handle<Image>, Handle<Image>) {
+    let world = app.world_mut();
+    let mut q = world.query_filtered::<&NavArrowSprites, With<NavArrow>>();
+    let s = q.single(world).unwrap();
+    (s.ahead.clone(), s.behind.clone())
 }
 
 /// Simulate one key press through `ButtonInput` the way winit would
@@ -1324,9 +1458,9 @@ fn end_press(app: &mut App, key: KeyCode) {
     keys.clear();
 }
 
-/// RACE-6 through the production systems: the needle tracks the
-/// nearest un-cleared gate, rotates to the signed bearing, and turns
-/// yellow when the target is behind the car.
+/// RACE-6 through the production systems: the arrow tracks the
+/// nearest un-cleared gate, rotates to the signed bearing, and swaps
+/// to the authored yellow tile when the target is behind the car.
 #[test]
 fn arrow_tracks_the_live_objective() {
     // Gates on the Z axis: gate 0 dead ahead (−Z), gate 1 behind.
@@ -1338,26 +1472,28 @@ fn arrow_tracks_the_live_objective() {
     let (car, _) = spawn_participant(&mut app, &def, Vec3::new(0.0, 0.0, 0.0));
     run(&mut app, 3);
 
-    let (rot, vis, color) = arrow(&mut app);
+    let (ahead, behind) = arrow_sprites(&mut app);
+    assert_ne!(ahead, behind, "the authored pair bound as two sprites");
+    let (rot, vis, shown) = arrow(&mut app);
     assert_eq!(vis, Visibility::Visible);
     assert!(
         rot.as_radians().abs() < 1e-3,
-        "gate 0 is dead ahead — needle up: {}",
+        "gate 0 is dead ahead — arrow up: {}",
         rot.as_radians()
     );
-    assert_eq!(color, NAV_AHEAD, "ahead target is green");
+    assert_eq!(shown, ahead, "ahead target shows the family's tile");
 
     // Sweep gate 0: the arrow retargets to gate 1, which now sits
-    // dead behind — yellow needle pointing back (RACE-6).
+    // dead behind — the authored yellow tile pointing back (RACE-6).
     set_position(&mut app, car, Vec3::new(0.0, 0.0, -200.0));
     run(&mut app, 2);
     assert!(progress(&app, car).is_cleared(0));
-    let (rot, vis, color) = arrow(&mut app);
+    let (rot, vis, shown) = arrow(&mut app);
     assert_eq!(vis, Visibility::Visible);
-    assert_eq!(color, NAV_BEHIND, "the remaining gate is behind");
+    assert_eq!(shown, behind, "the remaining gate is behind");
     assert!(
         rot.as_radians().abs() > std::f32::consts::FRAC_PI_2,
-        "needle points back: {}",
+        "arrow points back: {}",
         rot.as_radians()
     );
 }
@@ -1403,7 +1539,7 @@ fn arrow_pick_cycles_through_input() {
     assert_eq!(picked(&app), Some(2), "a dead race ignores cycling");
 }
 
-/// The needle is already live while the race counts down — the
+/// The arrow is already live while the race counts down — the
 /// original's arrow works before the start too (RACE-6 names no
 /// phase gate).
 #[test]
@@ -1425,7 +1561,7 @@ fn arrow_is_live_during_countdown() {
 }
 
 /// HUD-2 scopes the compass arrow to Blitz/Checkpoint — an `Ordered`
-/// (Circuit) race never shows the needle.
+/// (Circuit) race never shows the arrow.
 #[test]
 fn ordered_race_shows_no_arrow() {
     let def = RaceDefinition {
@@ -1438,7 +1574,7 @@ fn ordered_race_shows_no_arrow() {
     assert_eq!(arrow(&mut app).1, Visibility::Hidden);
 }
 
-/// Once every gate is cleared the needle points at the armed finish
+/// Once every gate is cleared  the arrow points at the armed finish
 /// trigger; a resolved participant and a complete race hide it, and
 /// session teardown despawns it (AC05 — nothing stale survives).
 #[test]
@@ -1464,7 +1600,7 @@ fn arrow_arms_the_finish_then_cleans_up() {
         rot.as_radians()
     );
 
-    // Cross the finish — the participant resolves and the needle hides.
+    // Cross the finish — the participant resolves and the arrow hides.
     set_position(&mut app, car, Vec3::new(520.0, 0.0, 0.0));
     run(&mut app, 1);
     assert!(matches!(
@@ -1473,7 +1609,7 @@ fn arrow_arms_the_finish_then_cleans_up() {
     ));
     assert_eq!(arrow(&mut app).1, Visibility::Hidden);
 
-    // Teardown removes the session-owned needle with the rest.
+    // Teardown removes the session-owned arrow with the rest.
     app.world_mut().resource_mut::<SessionControl>().restart = true;
     let mut reached = false;
     for _ in 0..12 {

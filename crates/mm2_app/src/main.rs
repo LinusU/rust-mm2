@@ -20,9 +20,9 @@ use clap::Parser;
 use mm2_app::session::{SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
     audio, banger, breakaway, camera, car_visual, city, contracts, damage, damage_fx, dash,
-    environment, hud, hudmap, input, menu, nav_overlay, oppind, opponents, pause, profile,
-    progression, pvs, race, racetime, recovery, results, scripted, sequence, session, smoke,
-    spark_fx, stuck, texel_fx, traffic,
+    environment, hud, hudmap, input, menu, nav_overlay, navarrow, oppind, opponents, pause,
+    profile, progression, pvs, race, racetime, recovery, results, scripted, sequence, session,
+    smoke, spark_fx, stuck, texel_fx, traffic,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
@@ -1096,7 +1096,7 @@ fn main() {
                 .chain()
                 .after(input::vehicle_input)
                 .run_if(not(capturing)),
-            race::nav_target_input.run_if(not(capturing)),
+            navarrow::nav_target_input.run_if(not(capturing)),
             (
                 camera::toggle_camera.run_if(not(capturing)),
                 // F22-B.2: BACKSPACE toggles the mirror strip in the
@@ -1130,7 +1130,7 @@ fn main() {
             city::animate_textures,
             (
                 race::update_checkpoint_markers,
-                race::update_nav_arrow,
+                navarrow::update_nav_arrow,
                 race::update_race_warning,
                 race::update_countdown_banner,
             ),

@@ -260,6 +260,9 @@ pub fn drive_session(
             // Same for the race timer's report (F22-A.4) — the row
             // itself is `SessionEntity`-stamped.
             commands.remove_resource::<crate::racetime::RaceTimerReport>();
+            // Same for the nav arrow's report (F22-A.5) — the node
+            // itself is `SessionEntity`-stamped.
+            commands.remove_resource::<crate::navarrow::NavArrowReport>();
             // `TireConditions` stays: it is a system input (the impact
             // filter and telemetry read `Res` every frame), and
             // `load_session_world` re-stamps it from the next session's
@@ -1242,7 +1245,21 @@ pub fn load_session_world(
                 owner,
             );
             commands.insert_resource(oppind_report);
-            race::spawn_nav_arrow(&mut commands, owner);
+            let key = event_key.clone().expect("an event setup carries its key");
+            // F22-A.5: the RACE-6 compass arrow binds the authored
+            // `hudarrow*` package for the event's family (green
+            // Checkpoint/Circuit, red Blitz, violet Crash Course) —
+            // rasterized into the ahead/behind sprite pair the
+            // original's two paint jobs carry. `absent` on the report
+            // when the authored content cannot bind.
+            let arrow_report = crate::navarrow::spawn_nav_arrow(
+                &mut commands,
+                &vfs.0,
+                &mut assets.images,
+                owner,
+                key.table,
+            );
+            commands.insert_resource(arrow_report);
             race::spawn_race_warning(&mut commands, owner);
             race::spawn_countdown_banner(&mut commands, owner);
             // F22-A.4: the authored race timer (HUD-2's
@@ -1256,8 +1273,8 @@ pub fn load_session_world(
             // F16-B: the event's reward + availability surface —
             // consumed by `record_session_results` while the session
             // lives, removed by teardown so a following cruise never
-            // sees it.
-            let key = event_key.clone().expect("an event setup carries its key");
+            // sees it. (`key` was cloned out above for the HUD
+            // spawns.)
             // A `--event` launch bypasses the menu that enforces
             // availability (F17-A.1) — surface a still-locked event
             // honestly rather than pretending the profile selected it.

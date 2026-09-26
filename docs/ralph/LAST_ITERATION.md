@@ -1,3 +1,128 @@
+# Last iteration — F22-A.5 the authored nav arrow (iteration 70)
+
+Iteration 70 on `ralph/night` (baseline `3e0126d`, F22-A.4 — external
+verify + review green; fifteenth iteration of run `20260925T144723`).
+One coherent slice: HUD-2's compass arrow — the `mmArrow` the
+recovered `mmHUD` layout owns — bound to the installation's own
+`hudarrow*` package geometry and `s_hudarrow_*` tiles instead of the
+dev needle/diamond stand-in.
+
+## Task selection
+
+No failing gate or review finding — iteration 69's review passed
+(`verdict: pass`, no blocking findings), so the queue reopens. Of the
+F22-A remainder (HUD-2 race instruments), the arrow is the
+self-contained leg: while auditing the archive for the still-open
+checkpoint/lap/place tiles, retail shipped the answer to the needle —
+`geometry/hudarrow{01,_blitz01,_cc01}.pkg` are flat-XZ chevron meshes
+with exactly two paint jobs apiece (a family tile —
+`s_hudarrow_green`/`_red`/`_violet` — then the shared
+`s_hudarrow_yellow`), the authored ahead/behind colour pair RACE-6
+documents; `mmHUD` names `mmArrow` its owner. The `race_*` labels
+(`_chk`/`_lap`/`_opp`/`_rec`) fail the current TGA reader (alpha-masked
+variant) — recovery deferred — so the checkpoint/lap/place instruments
+stay open in the parent.
+
+## What landed
+
+- `mm2_app::navarrow` (new) — the arrow code moved out of `race.rs`,
+  mirroring the `racetime`/`oppind` module precedent. `spawn_nav_arrow`
+  selects the package by `EventTableKind` (`hudarrow_blitz01` on Blitz,
+  `hudarrow_cc01` on Crash Course — already correct though CC sessions
+  still can't reach runtime — `hudarrow01` otherwise), reads the pkg
+  through `hudmap::read_pkg`, resolves each paint job's texture stem
+  through `city::load_image` (VFS-preferred, so mods can substitute
+  `png`/`ktx2`/`tex`), and CPU-rasterizes each of the first two paint
+  jobs into an 80 px RGBA sprite: top-down projection of the flat XZ
+  chevron, mesh origin (the authored pivot — the tail sits at the
+  origin, the tip points −Z) centred on the canvas, per-pixel `y`
+  ordering, texture-space fill via the same
+  `paint * shaders_per_paint_job + shader_offset` indexing `city.rs`
+  uses (negative offsets untextured, non-triangle strips skipped).
+  Any failure aborts the whole spawn with `absent:<missing-pkg /
+  unparseable-pkg / no-shaders / missing-texture / undecodable-texture /
+  no-geometry>` — no substitute art, no half-bound node. One paint job
+  still binds (behind reuses ahead's sprite).
+- `update_nav_arrow` — same live contract on the authored sprites:
+  `UiTransform` rotation = the signed bearing to the active target,
+  `ImageNode` swaps ahead/behind across the ±90° line; hidden under
+  `Ordered` rules, stale generations, `Complete`/resolved states,
+  missing race state, and the `H` gate — while `NavArrowReport`
+  (`stem`, `facing` ahead/behind/off) keeps recording like `tmr=`'s
+  `display`. `nav_target_input` moved here unchanged (X forward, Z
+  back — DSN-8's WASD departure).
+- `session.rs` — the event arm hoists the event key so
+  `spawn_nav_arrow` sees the family; teardown removes
+  `NavArrowReport` (entities die via `SessionEntity`).
+- `smoke.rs` — ` arr=<stem>/<ahead|behind|off>` or `absent:<why>`
+  appended after `tmr=` on event sessions only; cruise/dev-world
+  records stay bit-identical.
+- Deleted: `NavArrowPart`, `NAV_AHEAD`/`NAV_BEHIND`, the two
+  node-drawn children — the authored art replaces the stand-in.
+
+## Gates
+
+- `cargo test -p mm2_app --test navarrow` — 15/15 new: full binding
+  (`SessionEntity` root, both sprites stored, `arr=hudarrow01/ahead`),
+  every `absent` cause (missing/unparseable pkg, no-shaders,
+  missing/undecodable texture, no-geometry), the Blitz/CC/Checkpoint
+  package pick, rasterizer coverage (opaque tip pixel, transparent
+  margin, tint preserved), single-paint reuse, bearing→rotation and
+  ahead/behind swap with `facing` record, released-state and `H`-gate
+  hiding while the report keeps composing, `SessionEntity` teardown,
+  synthetic-event `headless_smoke` legs (`arr=hudarrow01/ahead`,
+  `arr=absent:missing-pkg`), dev-world field absence.
+- `cargo test -p mm2_app --test race` — 43/43 (the bearing/target
+  cycling legs now drive the real binding through a synthetic
+  `hudarrow01.pkg` + `s_hudarrow_*` mount — the same
+  `test_arrow_install`/`write_test_pkg` fixture family the smoke tests
+  use); `tests/hud.rs` 8/8 (the stub swaps `NavArrowPart` for
+  `ImageNode`).
+- `cargo fmt --all -- --check` clean; `cargo clippy --locked
+  --workspace --all-targets --all-features -- -D warnings` clean;
+  `cargo test --locked --workspace` all suites green.
+- Retail headless (`fnv1a64:e91e6cd4b2ae30d9`, read-only):
+  `--city sf --event checkpoint:0 --headless --frames 200` →
+  `status=pass`, `arr=hudarrow01/ahead` beside `tmr=22g/0:00:33`;
+  `--city london --event blitz:0` → `arr=hudarrow_blitz01/ahead`
+  beside `tmr=22g/0:24:66` (the family-variant package picks on
+  authored data). The first run of this leg exposed a gap: the
+  headless app never scheduled `update_nav_arrow`, so `arr=` read
+  `off` — fixed (same after-`drive_session` slot as the timer) and
+  the smoke test tightened to reject a `off` facing on a live race.
+- Retail windowed (Apple M1, Metal): `--city sf --event checkpoint:0
+  --frames 150 --screenshot` renders the authored green chevron at
+  top-centre pointing at the first gate, over the `GO!` field with
+  the `0:00:23` timer row under it and the opponent indicators live
+  (`/tmp/f22a5-arrow-sf.png`, local, not committed).
+
+## Classification
+
+The instrument is a documented original member of `mmHUD` (HUD-2 +
+mm2hook's `mmArrow`) and the artwork + ahead/behind colour pairing is
+verified retail content — the two-paint layout *is* the documented
+green/yellow flip (family tile ahead, shared yellow behind). What
+stays designed (DSN-8, UNK-33): the on-screen size and top-centre
+slot (kept from the dev needle), the 80 px canvas, sprite
+rasterization itself (the original likely draws the mesh directly —
+no `mmArrow` draw body recovered), and whether the original rotates
+about the authored origin or a centroid. `docs/original-rules.md`
+updated (RACE-6, HUD-2, DSN-8, DSN-52 refs, UNK-33).
+
+## Remaining open items
+
+- F22-A stays `active` — HUD-2's remaining instruments: checkpoint
+  list, lap record, place indicator (the `race_*` tiles — alpha-masked
+  TGAs the current reader rejects; recovering that variant is a
+  prerequisite), plus AC01–AC03/AC06 evidence legs.
+- UNK-33 needs a retail-original capture or a recovered `mmArrow`
+  body — our on-screen size/position/pivot are designed readings; the
+  windowed capture verifies *our* rendering, not the original's.
+- The `race_*` TGA variant (alpha-masked) needs format support
+  before the remaining instruments can bind their labels.
+
+---
+
 # Last iteration — F22-A.4 the authored race timer (iteration 69)
 
 Iteration 69 on `ralph/night` (baseline `cf78496`, F22-A.3 — external

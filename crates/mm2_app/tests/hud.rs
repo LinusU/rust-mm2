@@ -17,10 +17,9 @@ use mm2_app::camera::CameraMode;
 use mm2_app::dash::{self, CockpitPart};
 use mm2_app::hud::{self, HudVisible};
 use mm2_app::hudmap::{HudMapCamera, HudMapReport};
+use mm2_app::navarrow::{NavArrow, NavArrowSprites};
 use mm2_app::oppind::{OppIndReport, OppIndicator, OpponentIndicators};
-use mm2_app::race::{
-    CountdownBanner, CountdownBannerText, LOW_TIME_TICKS, LowTimeWarning, NavArrow, NavArrowPart,
-};
+use mm2_app::race::{CountdownBanner, CountdownBannerText, LOW_TIME_TICKS, LowTimeWarning};
 use mm2_app::session::{self, SelectedCar};
 use mm2_app::smoke::{self, SmokeStatus};
 use mm2_assets::Vfs;
@@ -222,7 +221,7 @@ fn the_race_instruments_hide_with_the_layer() {
     app.add_systems(
         Update,
         (
-            mm2_app::race::update_nav_arrow,
+            mm2_app::navarrow::update_nav_arrow,
             mm2_app::race::update_countdown_banner,
             mm2_app::race::update_race_warning,
         ),
@@ -253,12 +252,15 @@ fn the_race_instruments_hide_with_the_layer() {
         .spawn((
             SessionEntity(generation),
             NavArrow,
+            NavArrowSprites {
+                ahead: Handle::default(),
+                behind: Handle::default(),
+            },
             UiTransform::default(),
+            ImageNode::default(),
             Visibility::Hidden,
         ))
         .id();
-    app.world_mut()
-        .spawn((NavArrowPart, BackgroundColor(Color::WHITE)));
     let warning = app
         .world_mut()
         .spawn((

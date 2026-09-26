@@ -239,7 +239,7 @@ type HudNodes = Or<(
     With<crate::pause::PauseUi>,
     With<crate::results::ResultsUi>,
     With<crate::race::CountdownBanner>,
-    With<crate::race::NavArrow>,
+    With<crate::navarrow::NavArrow>,
     With<crate::race::LowTimeWarning>,
     With<crate::racetime::RaceTimer>,
 )>;

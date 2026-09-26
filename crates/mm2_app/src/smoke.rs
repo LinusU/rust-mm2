@@ -458,6 +458,9 @@ pub fn headless_smoke(
                 // F22-A.4: the timer composes headless too — the
                 // `tmr=` field reads the report it maintains.
                 crate::racetime::update_race_timer.after(session::drive_session),
+                // F22-A.5: the arrow tracks its target headless too —
+                // the `arr=` field reads the report's `facing`.
+                crate::navarrow::update_nav_arrow.after(session::drive_session),
             ),
         );
     if driver == Driver::Scripted {
@@ -959,6 +962,14 @@ pub fn headless_smoke(
         .get_resource::<crate::racetime::RaceTimerReport>()
         .map(|r| format!(" tmr={}", r.smoke_detail()))
         .unwrap_or_default();
+    // F22-A.5 nav-arrow evidence: `<pkg stem>/<ahead|behind|off>`
+    // while bound — `facing` keeps recording under the `H` gate like
+    // `tmr=`'s `display` — or `absent:<why>` when the authored
+    // `hudarrow*` package never bound. Event sessions only.
+    let arr_detail = world_ecs
+        .get_resource::<crate::navarrow::NavArrowReport>()
+        .map(|r| format!(" arr={}", r.smoke_detail()))
+        .unwrap_or_default();
     // F10-A.2 ambient evidence: live/target population plus the
     // recycler counters. Absent on worlds without a rostered aimap so
     // those records stay bit-identical.
@@ -1270,7 +1281,7 @@ pub fn headless_smoke(
     // (DRV-2/DRV-3) and aimap variant (RACE-11) selected its content.
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{mir_detail}{ind_detail}{hud_detail}{tmr_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{extra}",
+            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{mir_detail}{ind_detail}{hud_detail}{tmr_detail}{arr_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{extra}",
             driver.as_str(),
             config.difficulty.as_str(),
             session.phase().name(),
