@@ -1,3 +1,111 @@
+# Last iteration — F21-A.1 the Crash Course lesson catalog audit (iteration 72)
+
+Iteration 72 on `ralph/night` (baseline `b1ba2a1`, F22-A.6 — external
+verify + review green, no blocking findings; seventeenth iteration of
+run `20260925T144723`). One coherent slice: F21-A's first audit leg —
+an independently audited Crash Course lesson catalog for both cities
+(structural, not playable — see Classification).
+
+## Task selection
+
+No failing gate or blocking review finding, so the highest-value ready
+slice from the plan: F21-A was `queued` with all dependencies
+(F02-B/F11-B/F16-B) landed. Its spec demands a course/lesson catalog
+with prerequisites, start conditions, vehicles, props, objectives,
+limits, feedback and rewards before evaluators are built. The generic
+`mm2-inspect event` audit already validated record closure, but no
+course-oriented view existed for stages, sub-event tables, objective
+codes or crash-specific aimap wiring — this iteration adds that layer
+(DSN-55) and defers evaluators/instruction flow/retry to F21-B.
+
+## What landed
+
+- `mm2_content::crashcourse` (new): `CourseCatalog::scan` views the
+  shared `EventCatalog`'s CrashCourse events as lessons —
+  `LessonStage` (the authored `lesson`/`midtrm`/`final` tags), both
+  `mmcrashdata` param blocks verbatim, `data.csv`/`data_p.csv`
+  `LessonTable`s split Amateur/Professional (inferred `_p`), each row
+  a `LessonSubEvent` carrying the raw `Event` code plus the inferred
+  `LessonObjective` decode (measured correlation — unknown codes stay
+  `Unknown(n)`), `Filename` waypoint links resolved through the VFS,
+  own-stem aimap per difficulty distilled to police/vehicle ids +
+  `.opp` route resolution (case-insensitive) + chase
+  distance/exceptions/ambient counts, `<object>_crash<N>` extras
+  re-attributed per lesson (unclaimed extras counted), `crash,N`
+  rewards attached.
+- `mm2_formats::crashdata`: retains the authored header cells
+  (`columns`) — the only in-file tail-column evidence.
+- `mm2-inspect crash-course <install> [--city] [--strict]`: audits
+  every lesson per city; strict fails on empty catalog, incomplete
+  events, unresolved links, missing/empty difficulty tables, aimap
+  errors, dead `.opp` wires, or wired vehicle ids outside
+  `VehicleCatalog`.
+- `docs/research/crashcourse.md`: the measured file layout, `Event`
+  decode table, tail-column correlations and open questions.
+- `docs/original-rules.md`: CC-7 (inferred lesson composition),
+  DSN-55 (catalog layer), UNK-35 (runtime semantics).
+
+## Gates
+
+- `cargo test -p mm2_formats crashdata` — 6/6.
+- `cargo test -p mm2_content --test crashcourse` — 5/5: stage parse,
+  the full objective enum (incl. 1/6 staying `Unknown`), a complete
+  synthetic lesson (tables split, link + `.opp` resolution, wiring,
+  override attribution, extras denied), incomplete + unresolved-link
+  reporting, the empty-catalog denominator.
+- `cargo test -p mm2_inspect crashcourse` — 3/3: clean course, an
+  unknown-vehicle wire flagged by the cross-check, a table-less city.
+- `cargo fmt --all -- --check` clean; `cargo clippy --locked
+  --workspace --all-targets --all-features -- -D warnings` clean;
+  `cargo test --locked --workspace` green.
+- Retail audit (`fnv1a64:e91e6cd4b2ae30d9`, read-only):
+  `mm2-inspect crash-course <retail>` → both cities 13/13 lessons
+  `ready`, 0 unresolved links, 0 dead `.opp` wires, 0 vehicles
+  outside the catalog, rewards at `crash3/7/11/12` matching CC-6;
+  london 26 + sf 23 unclaimed extras counted, not filtered.
+
+## Retail findings (new)
+
+- sf `crash6` (stop) wires a scripted `vpford` opponent —
+  corroborating the `numopp`=1 tail correlation on its row.
+- sf `crash12` wires 10 `[Exceptions]` road overrides; sf `crash5`
+  owns the only authored `[CopChaseDistance]` (150).
+- The `Event` code belongs to the row, not the filename: london
+  `exam1_2`=7 (maneuver) vs sf `exam1_2`=8 (stop); london
+  `exam1_3`=7 vs sf `exam1_3`=2 (follow).
+- `data_p` tables author tighter limits/higher density and, on sf
+  `crash9`, a different waypoint file (`reverse180_p.csv`).
+- Professional `mmcrashdata` rows author different tod/weather than
+  Amateur on several lessons (london `crash6`/`crash9`, sf
+  `crash5`/`crash9`…) — deliberate harder conditions or revision
+  drift (UNK-35).
+
+## Classification
+
+Everything verified-original here is *data presence and correlation*
+(CC-7's structure, the reward bindings, the aimap wiring). The
+`Event`-code→family map and the `_p`=Professional/`_crash<N>`
+attribution are inferred (recorded, not claimed as recovered); the
+catalog layer itself is an implementation choice (DSN-55). No lesson
+is playable: evaluators, instruction flow, retry and reward
+consumption remain future work — structural catalog success is
+explicitly not lesson execution.
+
+## Remaining open items
+
+- F21-A stays `active`: prerequisites/start conditions exist as data
+  (CC-3's gating already lands in `AvailabilityTable`), but the
+  environment-prop runtime binding, instruction/voice/subtitle
+  linkage (location unrecovered — UNK-35) and evaluator semantics are
+  open.
+- UNK-35 covers the `Event` dispatch, tail-column semantics, the
+  `Checkpoints` column's meaning (1 everywhere), pass/fail criteria
+  and the pro/amateur param divergence.
+- F21-B (evaluators + session flow) and F21-C (validation) remain
+  queued.
+
+---
+
 # Last iteration — F22-A.6 the race standings cluster (iteration 71)
 
 Iteration 71 on `ralph/night` (baseline `f24fa53`, F22-A.5 — external

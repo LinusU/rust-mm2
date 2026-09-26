@@ -21,6 +21,7 @@ use mm2_formats::{FormatError, inst};
 
 mod audio;
 mod bind;
+mod crashcourse;
 mod event;
 mod inventory;
 mod placement;
@@ -219,6 +220,26 @@ enum Command {
         /// reference, a record validation issue, a failed production
         /// build, a roster issue, or a wired vehicle id outside the
         /// catalog. With `--all`, on any failure across the sweep.
+        #[arg(long)]
+        strict: bool,
+    },
+    /// Crash Course audit (F21-A): every `mmcrashdata.csv` row as a
+    /// lesson — authored tag/stage, `crash<N>data{,_p}.csv` sub-events
+    /// with their `Event`-code decode and waypoint links, own-stem
+    /// aimap wiring (police/opponent lead cars), `<object>_crash<N>`
+    /// override records, rewards, and wired vehicle ids cross-checked
+    /// against the vehicle catalog.
+    CrashCourse {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Restrict to one city stem (default: every discovered
+        /// `race/<city>/` directory).
+        #[arg(long)]
+        city: Option<String>,
+        /// Exit nonzero on an empty course catalog, an incomplete
+        /// event, an unresolved filename link, a missing/empty
+        /// difficulty table, an aimap error, a dead `.opp` wire, or a
+        /// wired vehicle id outside the vehicle catalog.
         #[arg(long)]
         strict: bool,
     },
@@ -572,6 +593,9 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             *all,
             *strict,
         ),
+        Command::CrashCourse { dir, city, strict } => {
+            crashcourse::run(dir, cli.mods.as_deref(), city.as_deref(), *strict)
+        }
         Command::Opponents { dir, city, strict } => {
             opponents(dir, cli.mods.as_deref(), city.as_deref(), *strict)
         }

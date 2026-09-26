@@ -14,6 +14,7 @@ pub mod assemble;
 pub mod availability;
 pub mod catalog;
 pub mod convert;
+pub mod crashcourse;
 pub mod damage;
 pub mod events;
 pub mod expect;
@@ -37,6 +38,10 @@ pub use catalog::{
 pub use convert::{
     ConversionReport, ConvertInput, Converted, Provenance, ReportEntry, WheelGeom, convert,
     convert_trailer,
+};
+pub use crashcourse::{
+    AimapWiring, CourseCatalog, CrashLesson, LessonObjective, LessonStage, LessonSubEvent,
+    LessonTable, LessonTableRole, WiredOpponent, crash_lesson,
 };
 pub use damage::{DamageAudit, RecordCheck, VehicleDamageAssets};
 pub use events::{

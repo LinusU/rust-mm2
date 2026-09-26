@@ -218,7 +218,7 @@ fn check_record(vfs: &Vfs, rec: &mm2_content::EventRecord) -> RecordCheck {
 
 /// The vehicle catalog's id set — scanned once and shared across a
 /// sweep so a 90-event audit does not rescan the tune roster per row.
-fn vehicle_ids(vfs: &Vfs) -> BTreeSet<String> {
+pub(crate) fn vehicle_ids(vfs: &Vfs) -> BTreeSet<String> {
     VehicleCatalog::scan(vfs)
         .entries
         .iter()

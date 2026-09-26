@@ -53,6 +53,12 @@ pub struct CrashDataRow {
 pub struct CrashDataFile {
     /// One entry per sub-event row, in authored order.
     pub rows: Vec<CrashDataRow>,
+    /// The authored header cells, verbatim (trimmed). Kept because the
+    /// tail names are the only in-file evidence for the tail columns'
+    /// meaning — `cornerspeed`/`chkflags`/`numopp` (london `crash6`)
+    /// and `Misc` (sf `crash2`/`crash12`, london `crash1`) name real
+    /// columns while most files author only `extra`/`etra`.
+    pub columns: Vec<String>,
     /// Recoverable problems (malformed rows).
     pub diagnostics: Vec<TableDiagnostic>,
 }
@@ -183,7 +189,11 @@ impl CrashDataFile {
                 line,
             });
         }
-        Ok(CrashDataFile { rows, diagnostics })
+        Ok(CrashDataFile {
+            rows,
+            columns: cols.iter().map(|c| c.to_string()).collect(),
+            diagnostics,
+        })
     }
 }
 
@@ -203,6 +213,11 @@ mod tests {
         assert_eq!(f.rows[0].event, 0);
         assert_eq!(f.rows[0].time_limit, 26.0);
         assert_eq!(f.rows[1].extra, vec![0, 0, 1, 0, 0, 0]);
+        // The authored header cells are retained — the only in-file
+        // evidence for the tail columns' names.
+        assert_eq!(f.columns[0], "Filename");
+        assert_eq!(f.columns[5], "extra");
+        assert_eq!(f.columns[9], "etra");
     }
 
     #[test]
