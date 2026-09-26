@@ -587,17 +587,23 @@ pub fn spawn_sky_dome(
 /// rotation (F18-A.4). A frame with no active camera — or a session
 /// with no dome — leaves it standing; the dome never teleports without
 /// a viewer.
+///
+/// The focus is the camera's `GlobalTransform`: the authored cockpit
+/// camera is a *child* of the vehicle, so its local `Transform` is the
+/// car-space eye offset — reading it would park the dome near the
+/// world origin wherever the car is (F22-B.1). The HUD map's
+/// orthographic camera is not the viewer the dome follows (F22-A.1),
+/// and only `Camera3d` views count — a stray menu `Camera2d` is never
+/// the world view.
 pub fn drive_sky_dome(
     time: Res<Time>,
     mut domes: Query<(&mut SkyDome, &mut Transform), Without<Camera>>,
-    // The HUD map's orthographic camera is not the viewer the dome
-    // follows (F22-A.1).
-    cameras: Query<(&Camera, &Transform), Without<crate::hudmap::HudMapCamera>>,
+    cameras: Query<(&Camera, &GlobalTransform), crate::hudmap::WorldCamera3d>,
 ) {
     let focus = cameras
         .iter()
         .find(|(c, _)| c.is_active)
-        .map(|(_, t)| t.translation)
+        .map(|(_, t)| t.translation())
         .filter(|p| p.is_finite());
     for (mut dome, mut xf) in &mut domes {
         dome.angle = (dome.angle + dome.rotation_rate * time.delta_secs()) % std::f32::consts::TAU;

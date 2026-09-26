@@ -740,7 +740,9 @@ fn authored_sky_binds_a_session_dome() {
 }
 
 /// `drive_sky_dome` re-centres the dome on the active camera and
-/// advances the authored rotation — world Y stays `HatYOffset`.
+/// advances the authored rotation — world Y stays `HatYOffset`. The
+/// read is the propagated `GlobalTransform`: a moved `Transform` lands
+/// in the dome's focus one update later.
 #[test]
 fn dome_follows_the_active_camera() {
     let tmp = city_install();
@@ -750,6 +752,7 @@ fn dome_follows_the_active_camera() {
         vfs_of(tmp.path()),
     );
     app.update(); // session loads, dome spawns
+    let angle0 = the_dome(&mut app).expect("a dome spawned").1;
 
     let mut cams = app.world_mut().query::<(&Camera, &mut Transform)>();
     for (c, mut t) in cams.iter_mut(app.world_mut()) {
@@ -757,15 +760,64 @@ fn dome_follows_the_active_camera() {
             t.translation = Vec3::new(120.0, 40.0, -75.0);
         }
     }
-    app.update();
+    app.update(); // PostUpdate propagates the moved pose
+    app.update(); // the dome follows it
 
-    let (_e, angle, _rate, _y, xf) = the_dome(&mut app).expect("a dome spawned");
+    let (_e, angle, rate, _y, xf) = the_dome(&mut app).expect("a dome spawned");
     assert_eq!(xf.translation, Vec3::new(120.0, 10.0, -75.0));
     assert!(
-        (angle - 0.25 / 60.0).abs() < 1e-4,
-        "one 60 Hz step of rate 0.25"
+        (angle - (angle0 + 2.0 * rate / 60.0)).abs() < 1e-4,
+        "two more 60 Hz steps of the authored rate, got {angle}"
     );
     assert_eq!(xf.rotation, Quat::from_rotation_y(angle));
+}
+
+/// A camera *parented* to the vehicle — the authored cockpit camera's
+/// shape — still re-centres the dome on its world pose. The child's
+/// `Transform` is the car-space eye offset, so a `Transform` read
+/// would park the dome near the world origin however far the car
+/// drove (the F22-B.1 review finding).
+#[test]
+fn dome_follows_a_vehicle_child_camera() {
+    let tmp = city_install();
+    write_dome(tmp.path(), 16, true);
+    let mut app = city_app(
+        city_config(SessionConditions::default()),
+        vfs_of(tmp.path()),
+    );
+    app.update(); // session loads, dome spawns
+
+    // The session's own cameras step aside — the test camera is the
+    // only active view, parented to a vehicle stand-in parked far
+    // from the origin.
+    let mut cams = app.world_mut().query::<&mut Camera>();
+    for mut c in cams.iter_mut(app.world_mut()) {
+        c.is_active = false;
+    }
+    let vehicle = app
+        .world_mut()
+        .spawn(Transform::from_translation(Vec3::new(120.0, 5.0, -75.0)))
+        .id();
+    let cam = app
+        .world_mut()
+        .spawn((
+            Camera3d::default(),
+            Camera {
+                is_active: true,
+                ..default()
+            },
+            Transform::from_translation(Vec3::new(0.0, 1.2, -0.5)),
+        ))
+        .id();
+    app.world_mut().entity_mut(vehicle).add_child(cam);
+    app.update(); // PostUpdate propagates the child's world pose
+    app.update(); // `drive_sky_dome` reads it
+
+    let (_e, _angle, _rate, _y, xf) = the_dome(&mut app).expect("a dome spawned");
+    // World eye pose (120, 6.2, -75.5) → dome x/z recentered, y stays
+    // the authored `HatYOffset`; the car-local read would have parked
+    // it at (0, 10, -0.5).
+    assert_eq!(xf.translation, Vec3::new(120.0, 10.0, -75.5));
 }
 
 /// A city without a `.sky` spawns no dome and says so — never a

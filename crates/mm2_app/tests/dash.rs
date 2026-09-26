@@ -6,7 +6,7 @@
 use bevy::ecs::world::CommandQueue;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
-use mm2_app::camera::{CameraMode, ChaseCamera, FreeCamera, toggle_camera};
+use mm2_app::camera::{CameraMode, ChaseCamera, FreeCamera, active_cam_pose, toggle_camera};
 use mm2_app::car_visual::{GlowKind, GlowPart, HeadlightsOn, update_glows};
 use mm2_app::dash::{
     CockpitCamera, CockpitHidden, CockpitPart, DashNode, DashRole, GearGlyph, cockpit_look,
@@ -538,6 +538,52 @@ fn numpad_look_glances_and_reverses() {
     app.update();
     let xf = app.world().get::<Transform>(cam).unwrap();
     assert_eq!(xf.translation, Vec3::new(0.0, 1.7, 0.75));
+}
+
+/// `active_cam_pose` feeds the HUD `cam` readout and the screenshot
+/// filename — the `--cam` round-trip contract. A camera *parented* to
+/// the vehicle (the authored cockpit camera) must report its world
+/// pose: its `Transform` is the car-space eye offset, and reading it
+/// would print that offset instead of the pose `--cam` reproduces.
+#[test]
+fn cam_pose_reports_a_child_cameras_world_pose() {
+    let mut app = base_app();
+    app.add_plugins(TransformPlugin);
+    let vehicle = app
+        .world_mut()
+        .spawn((
+            PlayerVehicle,
+            Transform::from_translation(Vec3::new(500.0, 10.0, -300.0)),
+        ))
+        .id();
+    let eye = Vec3::new(0.0, 1.2, -0.5);
+    let cam = app
+        .world_mut()
+        .spawn((
+            Camera3d::default(),
+            Camera {
+                is_active: true,
+                ..default()
+            },
+            CockpitCamera {
+                offset: eye,
+                reverse_offset: None,
+                pitch: 0.0,
+                look_yaw: 0.0,
+            },
+            Transform::from_translation(eye),
+        ))
+        .id();
+    app.world_mut().entity_mut(vehicle).add_child(cam);
+    app.update(); // PostUpdate propagates the child's world pose
+
+    let mut cams = app
+        .world_mut()
+        .query_filtered::<(&Camera, &GlobalTransform), mm2_app::hudmap::WorldCamera3d>();
+    let pose = active_cam_pose(&cams.query(app.world()));
+    // The world eye pose — a `Transform` read would have printed the
+    // car-local offset "0.0,1.2,-0.5,0,0" instead.
+    assert_eq!(pose.as_deref(), Some("500.0,11.2,-300.5,0,0"));
 }
 
 #[test]

@@ -195,20 +195,22 @@ impl CityPvs {
 
 /// Per-frame PVS update: resolve the view's source room set and toggle
 /// [`Visibility`] on every [`CityRoom`]-tagged render entity. The view
-/// positions are the active 3-D camera's `Transform` — retail's
-/// `Draw`/`FindRoomId` runs off the viewport, and the camera is a root
-/// entity so `Transform` is the same-frame world pose `chase_follow`
-/// just wrote — plus the player vehicle's physics `Position`, which
-/// keeps the room under the car a source (and is the only position a
-/// `--headless` run has). The query filters on [`Camera3d`] so a stray
-/// active 2-D camera (the menu's `MenuCamera` survives a transition
-/// frame) can never add a wrong source room — a wrong pick can only
-/// over-show anyway, but the world camera is the honest source.
+/// position is the active 3-D camera's `GlobalTransform` — retail's
+/// `Draw`/`FindRoomId` runs off the viewport, and the world pose is
+/// the propagated one (one frame stale: the cockpit camera is a child
+/// of the vehicle, so its `Transform` is the car-local eye offset, not
+/// a source position) — plus the player vehicle's physics `Position`,
+/// which keeps the room under the car a source (and is the only
+/// position a `--headless` run has). The query filters on [`Camera3d`]
+/// so a stray active 2-D camera (the menu's `MenuCamera` survives a
+/// transition frame) can never add a wrong source room — a wrong pick
+/// can only over-show anyway, but the world camera is the honest
+/// source.
 pub fn apply_city_pvs(
     pvs: Option<ResMut<CityPvs>>,
     // The HUD map camera parks high over the player — never a source
     // room (F22-A.1).
-    views: Query<(&Camera, &Transform), crate::hudmap::WorldCamera3d>,
+    views: Query<(&Camera, &GlobalTransform), crate::hudmap::WorldCamera3d>,
     player: Query<&Position, With<PlayerVehicle>>,
     mut rooms: Query<(&CityRoom, &mut Visibility)>,
     new_rooms: Query<(), Added<CityRoom>>,
@@ -221,7 +223,7 @@ pub fn apply_city_pvs(
         views
             .iter()
             .find(|(cam, _)| cam.is_active)
-            .map(|(_, xf)| xf.translation),
+            .map(|(_, xf)| xf.translation()),
     );
     // The player's room is a source too (see module docs): a chase
     // camera that lagged across a boundary can never cull the street
@@ -421,6 +423,9 @@ mod tests {
                     .id()
             })
             .collect();
+        // `apply_city_pvs` reads the camera's world pose —
+        // `GlobalTransform`, set directly: this bare app runs no
+        // transform propagation.
         app.world_mut().spawn((
             Camera3d::default(),
             Camera {
@@ -428,6 +433,7 @@ mod tests {
                 ..default()
             },
             Transform::from_translation(world(4.0, 3.0, 4.0)),
+            GlobalTransform::from(Transform::from_translation(world(4.0, 3.0, 4.0))),
         ));
         app.update();
         let vis = |app: &mut App, e: Entity| *app.world().get::<Visibility>(e).unwrap();
@@ -438,12 +444,68 @@ mod tests {
         assert_eq!((pvs.culled, pvs.tagged), (2, 3));
         // Move the camera into room 2's tile → the set re-applies.
         app.world_mut()
-            .query::<&mut Transform>()
+            .query::<&mut GlobalTransform>()
             .iter_mut(app.world_mut())
-            .for_each(|mut t| t.translation = world(14.0, 3.0, 4.0));
+            .for_each(|mut t| {
+                *t = Transform::from_translation(world(14.0, 3.0, 4.0)).into();
+            });
         app.update();
         assert_eq!(vis(&mut app, e[1]), Visibility::Inherited);
         assert_eq!(vis(&mut app, e[0]), Visibility::Hidden);
+    }
+
+    /// A camera *parented* to the vehicle — the authored cockpit
+    /// camera's shape — still resolves the room under its world pose.
+    /// The child's `Transform` is the car-space eye offset, so a
+    /// `Transform` read would resolve a bogus room near the origin
+    /// (over-show only — the player's `Position` stays a correct
+    /// source — but wrong). The parent is a plain stand-in without
+    /// `PlayerVehicle` so the camera is the only source position and
+    /// the wrong read cannot hide behind the player fallback.
+    #[test]
+    fn system_uses_a_child_cameras_world_pose() {
+        let mut app = App::new();
+        app.add_plugins(TransformPlugin);
+        let psdl = grid_psdl(3);
+        app.insert_resource(CityPvs::build(self_visible_cpvs(3), &psdl));
+        app.add_systems(Update, apply_city_pvs);
+        let e: Vec<Entity> = (1..=3u32)
+            .map(|r| {
+                app.world_mut()
+                    .spawn((CityRoom(r), Visibility::Inherited))
+                    .id()
+            })
+            .collect();
+        // The vehicle stand-in sits in room 2's tile; its camera child
+        // carries only the authored eye offset locally — propagation
+        // (PostUpdate) lifts that into the world pose the read needs.
+        let vehicle = app
+            .world_mut()
+            .spawn(Transform::from_translation(world(14.0, 1.0, 4.0)))
+            .id();
+        let cam = app
+            .world_mut()
+            .spawn((
+                Camera3d::default(),
+                Camera {
+                    is_active: true,
+                    ..default()
+                },
+                Transform::from_translation(Vec3::new(0.0, 1.2, -0.5)),
+            ))
+            .id();
+        app.world_mut().entity_mut(vehicle).add_child(cam);
+        app.update(); // PostUpdate propagates the child's world pose
+        app.update(); // the read sees it
+        let vis = |app: &mut App, e: Entity| *app.world().get::<Visibility>(e).unwrap();
+        assert_eq!(
+            vis(&mut app, e[1]),
+            Visibility::Inherited,
+            "the room under the vehicle's world position is the source"
+        );
+        assert_eq!(vis(&mut app, e[0]), Visibility::Hidden);
+        assert_eq!(vis(&mut app, e[2]), Visibility::Hidden);
+        assert_eq!(app.world().resource::<CityPvs>().source_room(), 2);
     }
 
     /// A stray active 2-D camera (the menu's `MenuCamera` on a

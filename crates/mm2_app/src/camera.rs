@@ -173,6 +173,34 @@ pub fn toggle_camera(
     }
 }
 
+/// The active world camera's pose as `x,y,z,yaw,pitch` (angles in
+/// degrees) — the exact value `--cam` accepts, so a screenshot's view
+/// can be reproduced.
+///
+/// Reads [`GlobalTransform`]: the authored cockpit camera is a *child*
+/// of the vehicle, so its local `Transform` is the car-space eye
+/// offset — not the world pose the HUD `cam` readout, screenshot
+/// filenames and the `--cam` round-trip contract need (the damage
+/// billboards' camera query is the same precedent). The propagated
+/// pose is one frame stale at worst.
+pub fn active_cam_pose(
+    cameras: &Query<(&Camera, &GlobalTransform), crate::hudmap::WorldCamera3d>,
+) -> Option<String> {
+    let (_, xf) = cameras.iter().find(|(c, _)| c.is_active)?;
+    let xf = xf.compute_transform();
+    let (yaw, pitch, _) = xf.rotation.to_euler(EulerRot::YXZ);
+    let p = xf.translation;
+    Some(format!(
+        "{:.1},{:.1},{:.1},{:.0},{:.0}",
+        p.x,
+        p.y,
+        p.z,
+        // `+ 0.0` turns a rounded −0 into 0.
+        yaw.to_degrees().round() + 0.0,
+        pitch.to_degrees().round() + 0.0
+    ))
+}
+
 /// Smooth follow: position eased toward a speed-stretched boom, look at the
 /// vehicle with a slight velocity lead.
 pub fn chase_follow(

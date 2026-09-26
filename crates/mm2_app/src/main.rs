@@ -1243,10 +1243,13 @@ fn main() {
         nav_overlay::draw_nav_overlay.run_if(resource_exists::<nav_overlay::CityNav>),
     )
     // F18-A.4: the `.sky` dome re-centres on the active camera and
-    // advances its authored rotation — after the camera systems so it
-    // uses this frame's pose. F18-A.5's room-PVS culling shares the
-    // slot for the same reason: it resolves the view room from the
-    // pose the camera systems just wrote.
+    // advances its authored rotation. F18-A.5's room-PVS culling
+    // shares the slot. Both read the active camera's `GlobalTransform`
+    // — the cockpit camera is a child of the vehicle, so its
+    // `Transform` is the car-local eye offset, not the world pose.
+    // Propagation runs in PostUpdate, so the pose is one frame stale;
+    // the player `Position` source keeps the room under the car
+    // covered regardless.
     .add_systems(
         Update,
         (
@@ -1480,8 +1483,10 @@ fn update_hud(
     progress: Query<(Option<&mm2_game::Player>, &mm2_game::RaceProgress), With<PlayerVehicle>>,
     participants: Query<(&mm2_game::Player, &mm2_game::RaceProgress, &Position)>,
     // The HUD map's own camera never counts as "the" camera — same
-    // filter `retarget_hud`/`active_cam_pose` apply (F22-A.1).
-    cameras: Query<(&Camera, &Transform), Without<hudmap::HudMapCamera>>,
+    // filter `retarget_hud`/`active_cam_pose` apply (F22-A.1) — and
+    // the pose read is `GlobalTransform`: the cockpit camera is a
+    // child of the vehicle, so its `Transform` is car-local.
+    cameras: Query<(&Camera, &GlobalTransform), hudmap::WorldCamera3d>,
 ) {
     for mut text in &mut err {
         *text = match session.phase() {
@@ -1613,7 +1618,7 @@ fn update_hud(
         format!("D{}", veh.gear + 1)
     };
     let grounded = veh.wheels.iter().filter(|w| w.grounded).count();
-    let cam = active_cam_pose(&cameras).unwrap_or_default();
+    let cam = camera::active_cam_pose(&cameras).unwrap_or_default();
     let nav_text = nav.map_or_else(String::new, |n| {
         format!("  {}", nav_overlay::hud_summary(&n))
     });
@@ -1656,25 +1661,6 @@ fn retarget_hud(
     }
 }
 
-/// The active camera's pose as `x,y,z,yaw,pitch` (angles in degrees) — the
-/// exact value `--cam` accepts, so a screenshot's view can be reproduced.
-fn active_cam_pose(
-    cameras: &Query<(&Camera, &Transform), Without<hudmap::HudMapCamera>>,
-) -> Option<String> {
-    let (_, xf) = cameras.iter().find(|(c, _)| c.is_active)?;
-    let (yaw, pitch, _) = xf.rotation.to_euler(EulerRot::YXZ);
-    let p = xf.translation;
-    Some(format!(
-        "{:.1},{:.1},{:.1},{:.0},{:.0}",
-        p.x,
-        p.y,
-        p.z,
-        // `+ 0.0` turns a rounded −0 into 0.
-        yaw.to_degrees().round() + 0.0,
-        pitch.to_degrees().round() + 0.0
-    ))
-}
-
 /// Directory (relative to the working directory, gitignored) that
 /// Cmd/Ctrl+P screenshots are saved to.
 const SCREENSHOT_DIR: &str = "screenshots";
@@ -1683,7 +1669,7 @@ const SCREENSHOT_DIR: &str = "screenshots";
 /// after the time and the camera pose it was taken from.
 fn screenshot_input(
     keys: Res<ButtonInput<KeyCode>>,
-    cameras: Query<(&Camera, &Transform), Without<hudmap::HudMapCamera>>,
+    cameras: Query<(&Camera, &GlobalTransform), hudmap::WorldCamera3d>,
     mut commands: Commands,
 ) {
     let modifier = keys.any_pressed([
@@ -1702,7 +1688,7 @@ fn screenshot_input(
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis());
-    let cam = active_cam_pose(&cameras).unwrap_or_default();
+    let cam = camera::active_cam_pose(&cameras).unwrap_or_default();
     let path = PathBuf::from(SCREENSHOT_DIR).join(format!("{secs}_cam_{cam}.png"));
     commands
         .spawn(Screenshot::primary_window())

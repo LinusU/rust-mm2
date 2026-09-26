@@ -1,4 +1,119 @@
-# Last iteration — F22-B.1 review repair: visibility-ownership + dead-camera fallback (iteration 63)
+# Last iteration — F22-B.1 review repair: world-space camera consumers (iteration 64)
+
+Iteration 64 on `ralph/night` (baseline `01c78a2`, F22-B.1 review
+repair — external verify green but review **failed**; eighth iteration
+of run `20260925T144723`). One piece: the review's single blocking
+finding — every "active camera" world-space consumer read the cockpit
+camera's car-local `Transform` as if it were world-space.
+
+## Task selection
+
+Repair precedes feature work per the regression-first policy. The
+iteration-007 external review rejected `01c78a2` with one blocking
+finding: `CockpitCamera` spawns as a child of the player vehicle
+(`dash.rs`), so its `Transform` is the authored eye offset
+(~(0,1.19,-0.55) m), but three consumers read `&Transform` as a world
+pose:
+
+1. `environment::drive_sky_dome` re-centred the 900 m dome on that
+   local offset — under `CameraMode::Cockpit` the dome parked near the
+   world origin permanently, so the cockpit view this slice adds
+   rendered a clear-colour sky across most of each city.
+2. `active_cam_pose` (the HUD `cam` readout and screenshot filenames)
+   reported car-local coordinates, breaking the documented contract
+   that a screenshot's pose round-trips into `--cam`.
+3. `apply_city_pvs` resolved the local offset as a bogus extra source
+   position near origin — over-show only (the player `Position` stays
+   a correct source), but wrong.
+
+The review's suggested fix: read the active camera's `GlobalTransform`
+— `damage_fx`'s billboard query is the precedent — plus a regression
+test that a vehicle-child active camera feeds the world pose to these
+paths.
+
+## What landed
+
+- `camera.rs` — `active_cam_pose` moved here from `main.rs` (the bin
+  target was unreachable from `tests/`); it now reads
+  `GlobalTransform::compute_transform()` and takes the
+  `crate::hudmap::WorldCamera3d` filter in its signature.
+- `environment.rs` — `drive_sky_dome` reads the active camera's
+  `GlobalTransform::translation()`; the pick tightened from
+  `Without<HudMapCamera>` to `WorldCamera3d` (a stray active menu
+  `Camera2d` on a transition frame is never the world view).
+- `pvs.rs` — `apply_city_pvs` reads `GlobalTransform::translation()`
+  for the view source (its `Camera3d` filter was already right).
+- `main.rs` — `update_hud` and `screenshot_input` queries switched to
+  `(&Camera, &GlobalTransform)` + `WorldCamera3d` and call
+  `camera::active_cam_pose`; the bin-local helper is gone. The
+  schedule comment is corrected: the propagated pose is one frame
+  stale at worst, and the player `Position` source still covers the
+  room under the car.
+- All other camera consumers audited clean: `damage_fx` billboards
+  already read `GlobalTransform`; `audio_listener` follows `is_active`
+  (the cockpit camera gets `SpatialListener` automatically);
+  `chase_follow`/`free_fly`/`cockpit_look` write `Transform` on their
+  own entities correctly; `retarget_hud`/`drive_hud_map` touch no
+  camera transform.
+
+## Gates
+
+- `cargo test -p mm2_app --lib pvs` — 7/7 (+1:
+  `system_uses_a_child_cameras_world_pose` — a `Camera3d` parented to
+  a vehicle stand-in resolves the room under the parent's world pose
+  through real `TransformPlugin` propagation; the local-offset read
+  would land near origin and never reach it).
+- `cargo test -p mm2_app --test dash` — 10/10 (+1:
+  `cam_pose_reports_a_child_cameras_world_pose` — the propagated
+  vehicle-child camera reports `500.0,11.2,-300.5,0,0`, the world eye
+  pose, not the local offset).
+- `cargo test -p mm2_app --test environment` — 17/17 (+1:
+  `dome_follows_a_vehicle_child_camera` — the dome re-centres on the
+  child camera's propagated world pose; the existing
+  `dome_follows_the_active_camera` updated for the one-frame
+  propagation latency).
+- `cargo fmt --all -- --check` clean; `cargo clippy --locked
+  --workspace --all-targets --all-features -- -D warnings` clean;
+  `cargo test --locked --workspace` — 71 result lines, 0 failures.
+- Retail headless (`fnv1a64:e91e6cd4b2ae30d9`, read-only):
+  `sf --headless --frames 300` → `status=pass`, `dash=11p/cam`,
+  `pvs=687r/5932h/7324` — bit-identical PVS resolution; the production
+  path still binds the full authored rig.
+- Retail windowed (Apple M1, Metal): `--cockpit
+  --spawn=-1300,63.5,250,0 --frames 90 --screenshot` renders the
+  authored sky dome (clouds) 1.3 km from the origin — the exact
+  scenario the finding described — with the HUD reporting the
+  world-space `cam -1300.1,64.8,250.3,2,5` pose (the `--cam`
+  round-trip restored), the authored dash/gear glyph/minimap intact.
+  Capture is local (`/tmp/cockpit_far.png`, not committed).
+
+## Classification
+
+Implementation repair only — no original-behavior claim changes
+(DSN-47/48/49, UNK-27/28 stand). Reading `GlobalTransform` for
+world-space consumers and tightening the camera picks to
+`WorldCamera3d` are implementation choices; the review's suggested
+fix shape is what landed.
+
+## Remaining open items
+
+- F22-B stays `active` — unchanged open scope: mirror (BACKSPACE),
+  occlusion handling, the chase-near/far pair split, plus the review's
+  unverified legs (retail `dash=` counts on london/vpbus — not re-run
+  this iteration; the sf/vpbug headless and windowed cockpit legs
+  above are fresh evidence for this diff).
+- F22-A remainder: AC02/AC03 map legs and HUD-2 race instruments stay
+  open.
+- `N`/`D` gear slots have no trigger in our sim; look magnitudes and
+  `WheelFact` units are designed readings pending original recovery.
+- Minor pre-existing wart unchanged: `DevOverrides::cockpit` is dead
+  plumbing in the headless app (hardcodes `CameraMode::Chase`) — the
+  windowed `--cockpit` path exercised above is the flag's evidence
+  leg.
+
+---
+
+# Iteration 63 — F22-B.1 review repair: visibility-ownership + dead-camera fallback (iteration 63)
 
 Iteration 63 on `ralph/night` (baseline `2a13e23`, F22-B.1 — external
 verify green but review **failed**; seventh iteration of run
