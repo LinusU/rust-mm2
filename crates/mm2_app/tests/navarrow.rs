@@ -269,6 +269,91 @@ fn arrow_pkg(paints: u32) -> Vec<u8> {
     pkg
 }
 
+/// One flat-XZ triangle chunk's geometry payload — the same encoding
+/// `arrow_pkg` writes, reusable under any chunk name.
+fn tri_chunk(verts: [[f32; 3]; 3]) -> Vec<u8> {
+    let mut geo = Vec::new();
+    geo.extend_from_slice(&1u32.to_le_bytes()); // sections
+    geo.extend_from_slice(&3u32.to_le_bytes()); // total verts
+    geo.extend_from_slice(&3u32.to_le_bytes()); // total indices
+    geo.extend_from_slice(&1u32.to_le_bytes());
+    geo.extend_from_slice(&0x112u32.to_le_bytes()); // fvf
+    geo.extend_from_slice(&1u16.to_le_bytes()); // strips
+    geo.extend_from_slice(&0u16.to_le_bytes()); // flags
+    geo.extend_from_slice(&0i32.to_le_bytes()); // shader_offset
+    geo.extend_from_slice(&3i32.to_le_bytes()); // prim_type triangles
+    geo.extend_from_slice(&3u32.to_le_bytes()); // n_vertices
+    for p in verts {
+        push_f32s(&mut geo, &p);
+        push_f32s(&mut geo, &[0.0, -1.0, 0.0]); // normal
+        push_f32s(&mut geo, &[0.5, 0.5]); // uv
+    }
+    geo.extend_from_slice(&3u32.to_le_bytes()); // n_indices
+    for i in [0u16, 1, 2] {
+        geo.extend_from_slice(&i.to_le_bytes());
+    }
+    geo
+}
+
+fn shader_table(paints: u32) -> Vec<u8> {
+    let mut shaders = Vec::new();
+    shaders.extend_from_slice(&paints.to_le_bytes());
+    shaders.extend_from_slice(&1u32.to_le_bytes()); // shaders per job
+    for n in 0..paints {
+        push_lp(&mut shaders, &format!("arr_{n}"));
+        push_f32s(&mut shaders, &[1.0; 4]); // diffuse
+        push_f32s(&mut shaders, &[1.0; 4]); // ambient
+        push_f32s(&mut shaders, &[0.0, 0.0, 0.0, 1.0]); // specular
+        push_f32s(&mut shaders, &[0.0, 0.0, 0.0, 1.0]); // emissive
+        push_f32s(&mut shaders, &[0.0]); // shininess
+    }
+    shaders
+}
+
+/// A package whose strip indices reach past its vertex table — the
+/// corrupt/hostile-mod case the rasterizer must reject rather than
+/// index out of bounds.
+fn arrow_pkg_bad_index() -> Vec<u8> {
+    let mut geo = tri_chunk([[-0.5, 0.0, 0.7], [0.5, 0.0, 0.7], [0.0, 0.0, -1.0]]);
+    // Rewrite the three indices in place — vertex 7 does not exist.
+    let n = geo.len();
+    for (k, i) in [0u16, 1, 7].iter().enumerate() {
+        geo[n - 6 + k * 2..n - 4 + k * 2].copy_from_slice(&i.to_le_bytes());
+    }
+    let mut pkg = b"PKG3".to_vec();
+    for (name, payload) in [("H", geo), ("shaders", shader_table(2))] {
+        pkg.extend_from_slice(b"FILE");
+        push_lp(&mut pkg, name);
+        pkg.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        pkg.extend_from_slice(&payload);
+    }
+    pkg
+}
+
+/// A multi-chunk package: an `arrow_l` low-LOD copy plus an
+/// `arrow_shadow` stand-in alongside the full-detail `arrow_h` — only
+/// the best-LOD drawable chunk may rasterize (`city.rs` `pkg_to_parts`
+/// parity). The `_l`/`_shadow` triangles are sized to cover the whole
+/// canvas, so any over-draw would paint the corner pixel the authored
+/// arrow leaves clear.
+fn arrow_pkg_lod() -> Vec<u8> {
+    let arrow = [[-0.5f32, 0.0, 0.7], [0.5, 0.0, 0.7], [0.0, 0.0, -1.0]];
+    let cover = [[-4.0f32, -0.2, 4.0], [4.0, -0.2, 4.0], [0.0, -0.2, -4.0]];
+    let mut pkg = b"PKG3".to_vec();
+    for (name, payload) in [
+        ("arrow_l", tri_chunk(cover)),
+        ("arrow_shadow", tri_chunk(cover)),
+        ("arrow_h", tri_chunk(arrow)),
+        ("shaders", shader_table(2)),
+    ] {
+        pkg.extend_from_slice(b"FILE");
+        push_lp(&mut pkg, name);
+        pkg.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        pkg.extend_from_slice(&payload);
+    }
+    pkg
+}
+
 /// The synthetic install the arrow binds: `geometry/hudarrow01.pkg`
 /// plus the `arr_0`/`arr_1` tiles its two paint jobs name.
 fn arrow_mount(dir: &Path) {
@@ -442,6 +527,51 @@ fn missing_texture_reports_absent() {
     assert_eq!(report(&app).absent, Some("missing-texture"));
     let mut q = app.world_mut().query_filtered::<(), With<NavArrow>>();
     assert_eq!(q.iter(app.world()).count(), 0);
+}
+
+/// A strip whose index table reaches past its vertex count reports
+/// `bad-index` — the corrupt or hostile-mod package fails the spawn
+/// through the same `absent:` path instead of panicking inside the
+/// rasterizer.
+#[test]
+fn out_of_range_indices_report_bad_index() {
+    let mut app = arrow_app();
+    let tmp = tempfile::tempdir().unwrap();
+    write(tmp.path(), "geometry/hudarrow01.pkg", arrow_pkg_bad_index());
+    write(tmp.path(), "texture/arr_0.tga", tga32(8, 8, [0, 200, 60]));
+    write(tmp.path(), "texture/arr_1.tga", tga32(8, 8, [230, 200, 0]));
+    let vfs = vfs_of(tmp.path());
+    spawn_arrow(&mut app, &vfs, EventTableKind::Checkpoint);
+    assert_eq!(report(&app).absent, Some("bad-index"));
+    assert_eq!(report(&app).smoke_detail(), "absent:bad-index");
+    let mut q = app.world_mut().query_filtered::<(), With<NavArrow>>();
+    assert_eq!(q.iter(app.world()).count(), 0, "no half-bound node");
+}
+
+/// Only the best-LOD chunk of each stem rasterizes — a multi-chunk
+/// mod substitute cannot overlay its `_l`/`shadow` stand-ins on the
+/// authored shape (`city.rs` `pkg_to_parts` parity).
+#[test]
+fn best_lod_chunk_rasterizes_alone() {
+    let mut app = arrow_app();
+    let tmp = tempfile::tempdir().unwrap();
+    write(tmp.path(), "geometry/hudarrow01.pkg", arrow_pkg_lod());
+    write(tmp.path(), "texture/arr_0.tga", tga32(8, 8, [0, 200, 60]));
+    write(tmp.path(), "texture/arr_1.tga", tga32(8, 8, [230, 200, 0]));
+    let vfs = vfs_of(tmp.path());
+    spawn_arrow(&mut app, &vfs, EventTableKind::Checkpoint);
+    assert_eq!(report(&app).absent, None);
+
+    let (ahead, _) = sprites(&mut app);
+    let (w, data) = sprite_pixels(&app, &ahead);
+    // The `_l` and `_shadow` triangles cover the canvas corner — if
+    // either rasterized, this pixel would be opaque.
+    assert_eq!(px(data, w, 0, 0)[3], 0, "only `arrow_h` drew");
+    assert_eq!(
+        px(data, w, w / 2, w / 2)[..3],
+        [0, 200, 60],
+        "the full-detail chunk still samples its tile"
+    );
 }
 
 // ---------------------------------------------------------------------------

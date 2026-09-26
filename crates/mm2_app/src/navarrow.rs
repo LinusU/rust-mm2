@@ -45,7 +45,7 @@ use bevy::image::ImageSampler;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use mm2_assets::Vfs;
-use mm2_formats::pkg::{Pkg, PkgShader};
+use mm2_formats::pkg::{Pkg, PkgShader, lod_split};
 use mm2_game::{
     EventTableKind, ParticipantState, RacePhase, RaceProgress, RaceState, Session, SessionEntity,
     TargetSelection, cycle_target, navigation_target, relative_bearing,
@@ -134,7 +134,7 @@ pub struct NavArrowReport {
     pub sprites: usize,
     /// Why nothing bound: `missing-pkg`, `unparseable-pkg`,
     /// `no-shaders`, `missing-texture`, `undecodable-texture`,
-    /// `no-geometry`.
+    /// `no-geometry`, `bad-index`.
     pub absent: Option<&'static str>,
     /// Which way the arrow faces on the last drive pass — kept live
     /// even while the `H` gate hides the node, so the field shows
@@ -234,10 +234,33 @@ fn rasterize_paint(
     };
     let spj = shaders.shaders_per_paint_job.max(1) as usize;
 
+    // Rasterize the same chunks `city.rs` `pkg_to_parts` would draw:
+    // the best-LOD chunk per stem (a package can carry `_l`/`_m`/`_h`
+    // variants whose triangles would overlay), with shadow/damage
+    // stand-ins excluded. The authored `hudarrow*` packages ship a
+    // single chunk; the filter matters for mod substitutes.
+    let mut best: HashMap<String, (u8, &str)> = HashMap::new();
+    for (name, _geo) in pkg.geometries() {
+        let (stem, rank) = lod_split(name);
+        let entry = best.entry(stem).or_insert((rank, name));
+        if rank > entry.0 {
+            *entry = (rank, name);
+        }
+    }
+    let drawable = |name: &str| {
+        let (stem, _) = lod_split(name);
+        !stem.contains("shadow")
+            && !stem.contains("dmg")
+            && best.get(&stem).map(|(_, n)| *n) == Some(name)
+    };
+
     // The authored radius maps to the canvas half-extent so the whole
     // mesh fits and the origin stays dead centre.
     let mut radius = 0.0f32;
-    for (_name, geo) in pkg.geometries() {
+    for (name, geo) in pkg.geometries() {
+        if !drawable(name) {
+            continue;
+        }
         for section in &geo.sections {
             for strip in &section.strips {
                 for v in &strip.vertices {
@@ -257,7 +280,10 @@ fn rasterize_paint(
     let mut depth = vec![f32::NEG_INFINITY; canvas * canvas];
     let mut covered = false;
 
-    for (_name, geo) in pkg.geometries() {
+    for (name, geo) in pkg.geometries() {
+        if !drawable(name) {
+            continue;
+        }
         for section in &geo.sections {
             // The production convention (`city.rs` `shader_at`): a
             // section's shader offset indexes within the paint job —
@@ -286,6 +312,13 @@ fn rasterize_paint(
                     continue;
                 }
                 for t in strip.indices.as_chunks::<3>().0 {
+                    // File-supplied indices index the strip's own
+                    // vertex table — a corrupt or hostile pkg (the VFS
+                    // mounts mod overrides above stock) must fail the
+                    // spawn, not panic inside it.
+                    if t.iter().any(|i| *i as usize >= strip.vertices.len()) {
+                        return Err("bad-index");
+                    }
                     rasterize_tri(
                         &mut px,
                         &mut depth,
@@ -327,6 +360,9 @@ fn rasterize_paint(
 /// up at bearing 0). `w` double-duty as the winding-insensitive
 /// inside test and the `y`/`uv` interpolant; `depth` keeps the
 /// topmost authored `y` per pixel.
+// The fill genuinely needs the canvas buffer, depth buffer, geometry
+// and sampling state as separate borrows — splitting them into a
+// struct would only obscure the pixel loop.
 #[allow(clippy::too_many_arguments)]
 fn rasterize_tri(
     px: &mut [u8],
