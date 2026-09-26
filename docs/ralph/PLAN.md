@@ -58,7 +58,20 @@ process-level leg (interactive finish), F10-B's remaining AC03 checklist scope
 (scrape + audible
 evidence — no output device), or the research-gated F15-B remainder
 (`unkFlag`/`cornerBrakingThreshold`/`weirdPathfinding` consumption —
-semantics unverified))** — the latest iteration landed F22-B.2
+semantics unverified))** — the latest iteration repaired the F22-B.2
+review's single blocking finding (iteration 66): `retarget_hud` was
+the last "the active camera" consumer without the `WorldCamera3d`
+filter, so under `CameraMode::Cockpit` with the strip armed the
+first-active pick landed on the `MirrorCamera` deterministically
+(the strip spawns ahead of the cockpit camera) and pinned the HUD,
+pause, results and countdown roots into the ⅓×⅛ strip. The system
+moved to `mm2_app::camera` (the bin target is unreachable from
+`tests/` — the `active_cam_pose` precedent), takes the
+`WorldCamera3d` filter, and `the_strip_is_never_the_hud_target`
+reproduces the production spawn order and asserts the UI roots ride
+the cockpit camera — mutation-checked to fail against the old
+filter. A windowed `--mirror --cockpit` capture closes the review's
+unverified-combination gap. Before that it landed F22-B.2
 (iteration 65, resuming the truncated iteration-009 session): the
 documented `BACKSPACE` rear-view mirror (HUD-3/CTL-1) as a rearward
 `MirrorCamera` parented to the player vehicle at the authored

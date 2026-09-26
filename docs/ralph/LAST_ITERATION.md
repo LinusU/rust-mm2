@@ -1,4 +1,94 @@
-# Last iteration — F22-B.2 rear-view mirror strip + F4 restart (iteration 65)
+# Last iteration — F22-B.2 review repair: HUD retarget excludes the strip (iteration 66)
+
+Iteration 66 on `ralph/night` (baseline `9817490`, F22-B.2 — external
+verify green but review **failed**; eleventh iteration of run
+`20260925T144723`). One piece: the review's single blocking finding —
+`retarget_hud` was the one "the active camera" consumer still missing
+the `WorldCamera3d` filter.
+
+## Task selection
+
+Repair precedes feature work per the regression-first policy. The
+iteration-010 external review rejected `9817490` with one blocking
+finding: `retarget_hud` picked the active camera with
+`Query<(Entity, &Camera), Without<HudMapCamera>>`, leaving the
+`MirrorCamera` an eligible pick. Under `CameraMode::Cockpit` with
+`RearView(true)` — the combination `dash.rs`'s visibility exemption
+exists to support — the strip spawns ahead of the cockpit camera
+(`load_session_world` parents it to the vehicle before `spawn_dash`
+runs), so the first-active pick lands on it deterministically and
+pins the `Hud`, `ErrorText`, `PauseUi`, `ResultsUi` and
+`CountdownBanner` roots into the ⅓×⅛ top strip and off the main
+view. Chase mode escaped only by spawn-order luck. The review's
+suggested fix: apply `hudmap::WorldCamera3d` (same one-line shape as
+the F22-B.1 repair's other picks) plus a regression test that the HUD
+target stays on the world camera while the strip is active in Cockpit
+mode.
+
+## What landed
+
+- `camera.rs` — `retarget_hud` + the `HudNodes` set moved here from
+  the `mm2` bin target (the bin is unreachable from `tests/` — the
+  same reason `active_cam_pose` moved in the F22-B.1 repair) and the
+  camera query now takes `crate::hudmap::WorldCamera3d`: the strip
+  and the map camera are never the UI target, and a stray menu
+  `Camera2d` can't be picked either. The doc comment records the
+  spawn-order mechanism that made the unfiltered pick deterministic.
+- `main.rs` — schedules `camera::retarget_hud`; the local copy and
+  its `HudNodes` alias are gone; the `update_hud` comment is updated
+  to the new path.
+- `pause.rs`/`results.rs` — doc references repointed at
+  `camera::retarget_hud` (prose only).
+- `tests/mirror.rs` — `the_strip_is_never_the_hud_target` reproduces
+  the defective combination: Cockpit mode + armed strip + production
+  spawn order (strip first, then the `CockpitCamera`), HUD/
+  `ErrorText`/`CountdownBanner` roots live. Asserts the strip stays
+  active (the hazardous pick exists) and every UI root's
+  `UiTargetCamera` is the cockpit camera. Mutation-checked: with the
+  old `Without<HudMapCamera>` filter the test fails, pinning
+  `UiTargetCamera` to the strip entity.
+
+## Gates
+
+- `cargo test -p mm2_app --test mirror` — 8/8 (+1 above).
+- `cargo fmt --all -- --check` clean; `cargo clippy --locked
+  --workspace --all-targets --all-features -- -D warnings` clean;
+  `cargo test --locked --workspace` all suites green (72 result
+  lines, 0 failures).
+- Retail headless (`fnv1a64:e91e6cd4b2ae30d9`, read-only):
+  `sf --headless --mirror --frames 200` → `status=pass`, `mir=on`,
+  `dash=11p/cam`, `pvs=687r/5932h/7324` — unchanged record.
+- Retail windowed (Apple M1, Metal): `--city sf --mirror --cockpit
+  --frames 90 --screenshot` renders the authored cockpit (dash,
+  wheel, windshield) full-window with the rearward strip at
+  top-centre, the HUD telemetry line on the main view at top-left
+  and the map inset bottom-right — the exact combination the finding
+  described, now with the UI on the right camera. Capture is local
+  (`/tmp/f22b2-fix-mirror-cockpit.png`, not committed).
+
+## Classification
+
+Implementation repair only — no original-behavior claim changes
+(DSN-50, UNK-29 stand). The `WorldCamera3d` pick is the same
+implementation choice as the F22-B.1 repair's other consumers; the
+review's suggested fix shape is what landed.
+
+## Remaining open items
+
+- F22-B stays `active` — unchanged open scope: camera
+  obstacle/occlusion handling, the chase-near/far pair split (Free
+  occupies the documented Chase-Far slot — DSN-48), plus prior
+  unverified legs (retail `dash=` counts on london/vpbus; atypical
+  vehicle sizes, wall proximity and reset transitions still need
+  manual capture passes).
+- A true mirror needs a flipped projection or clip-plane reflection —
+  the strip is a plain rearward camera (designed, UNK-29).
+- F22-A remainder: AC02/AC03 map legs and HUD-2 race instruments stay
+  open.
+
+---
+
+# Iteration 65 — F22-B.2 rear-view mirror strip + F4 restart (iteration 65)
 
 Iteration 65 on `ralph/night` (baseline `33607dc`, F22-B.1 — external
 verify + review green; ninth iteration of run `20260925T144723`,

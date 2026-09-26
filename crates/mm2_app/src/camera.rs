@@ -226,6 +226,43 @@ pub fn active_cam_pose(
     ))
 }
 
+/// The root UI nodes pinned to the active camera — the HUD plus the
+/// pause/results overlays, which share the session's render target.
+type HudNodes = Or<(
+    With<crate::session::Hud>,
+    With<crate::session::ErrorText>,
+    With<crate::pause::PauseUi>,
+    With<crate::results::ResultsUi>,
+    With<crate::race::CountdownBanner>,
+)>;
+
+/// Keep the HUD on whichever world camera is active — UI otherwise
+/// stays on the first camera and disappears in free-camera mode.
+///
+/// The pick goes through [`crate::hudmap::WorldCamera3d`] like every
+/// other "the active camera" consumer (F22-B.1): the HUD-map camera
+/// renders only the map layer and the F22-B.2 mirror strip is a
+/// *second* active `Camera3d` while armed — and it spawns ahead of
+/// the cockpit camera (`load_session_world` parents it to the
+/// vehicle before `spawn_dash` runs), so a first-active pick without
+/// the filter lands on the strip deterministically under
+/// `CameraMode::Cockpit` and shrinks the HUD, pause menu, results
+/// screen and countdown banner into the ⅓×⅛ top strip.
+pub fn retarget_hud(
+    mut commands: Commands,
+    cameras: Query<(Entity, &Camera), crate::hudmap::WorldCamera3d>,
+    ui: Query<(Entity, Option<&UiTargetCamera>), HudNodes>,
+) {
+    let Some((active, _)) = cameras.iter().find(|(_, c)| c.is_active) else {
+        return;
+    };
+    for (node, target) in &ui {
+        if target.is_none_or(|t| t.0 != active) {
+            commands.entity(node).insert(UiTargetCamera(active));
+        }
+    }
+}
+
 /// Smooth follow: position eased toward a speed-stretched boom, look at the
 /// vehicle with a slight velocity lead.
 pub fn chase_follow(

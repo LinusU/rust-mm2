@@ -1099,7 +1099,7 @@ fn main() {
             reset_input,
             debug_toggle,
             screenshot_input,
-            retarget_hud,
+            camera::retarget_hud,
             car_visual::update_wheel_visuals,
             car_visual::update_glows,
             car_visual::toggle_headlights,
@@ -1507,8 +1507,8 @@ fn update_hud(
     progress: Query<(Option<&mm2_game::Player>, &mm2_game::RaceProgress), With<PlayerVehicle>>,
     participants: Query<(&mm2_game::Player, &mm2_game::RaceProgress, &Position)>,
     // The HUD map's own camera never counts as "the" camera — same
-    // filter `retarget_hud`/`active_cam_pose` apply (F22-A.1) — and
-    // the pose read is `GlobalTransform`: the cockpit camera is a
+    // filter `camera::retarget_hud`/`active_cam_pose` apply (F22-A.1) —
+    // and the pose read is `GlobalTransform`: the cockpit camera is a
     // child of the vehicle, so its `Transform` is car-local.
     cameras: Query<(&Camera, &GlobalTransform), hudmap::WorldCamera3d>,
 ) {
@@ -1652,36 +1652,6 @@ fn update_hud(
             rpm = veh.rpm,
             total = veh.wheels.len(),
         ));
-    }
-}
-
-/// The root UI nodes pinned to the active camera — the HUD plus the
-/// pause/results overlays, which share the session's render target.
-type HudNodes = Or<(
-    With<Hud>,
-    With<ErrorText>,
-    With<pause::PauseUi>,
-    With<results::ResultsUi>,
-    With<race::CountdownBanner>,
-)>;
-
-/// Keep the HUD on whichever camera is active — UI otherwise stays on the
-/// first camera and disappears in free-camera mode.
-fn retarget_hud(
-    mut commands: Commands,
-    // The HUD map camera is active while a view is up — it renders
-    // only the map layer, so the HUD must never retarget onto it
-    // (F22-A.1).
-    cameras: Query<(Entity, &Camera), Without<hudmap::HudMapCamera>>,
-    ui: Query<(Entity, Option<&UiTargetCamera>), HudNodes>,
-) {
-    let Some((active, _)) = cameras.iter().find(|(_, c)| c.is_active) else {
-        return;
-    };
-    for (node, target) in &ui {
-        if target.is_none_or(|t| t.0 != active) {
-            commands.entity(node).insert(UiTargetCamera(active));
-        }
     }
 }
 

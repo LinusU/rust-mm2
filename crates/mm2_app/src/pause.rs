@@ -24,7 +24,7 @@
 //! - [`pause_present`] draws the overlay while `Paused`. The tree is
 //!   `SessionEntity`-stamped — quitting from pause is cleaned by the
 //!   normal session teardown — and carries [`PauseUi`] so
-//!   `retarget_hud` keeps it on the live camera.
+//!   `camera::retarget_hud` keeps it on the live camera.
 //! - [`dev_pause_once`] is the `--pause` dev override: it pauses the
 //!   first `Playing` frame so a `--frames`/`--screenshot` capture
 //!   (which freezes live input) can render the overlay.
@@ -116,7 +116,7 @@ impl Default for PauseMenu {
 
 /// Marker for pause-overlay entities — session-owned (the tree also
 /// carries `SessionEntity`), and part of the `HudNodes` set
-/// `retarget_hud` keeps on the active camera.
+/// `camera::retarget_hud` keeps on the active camera.
 #[derive(Component)]
 pub struct PauseUi;
 
@@ -262,7 +262,7 @@ pub fn dev_pause_once(
 /// (Re)draw the pause overlay while `Paused` and despawn it otherwise.
 /// The root is `SessionEntity`-stamped so quit/restart teardown removes
 /// it with the session even if a redraw race were possible, and the
-/// whole tree carries [`PauseUi`] so `retarget_hud` follows the active
+/// whole tree carries [`PauseUi`] so `camera::retarget_hud` follows the active
 /// camera (chase/free) the same way the HUD does.
 pub fn pause_present(
     mut commands: Commands,

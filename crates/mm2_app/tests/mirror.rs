@@ -210,6 +210,78 @@ fn the_strip_is_never_the_world_camera() {
     assert_eq!(pose.as_deref(), Some("10.0,5.0,0.0,0,0"));
 }
 
+/// `camera::retarget_hud` is the remaining "the active camera" pick:
+/// under `CameraMode::Cockpit` with the mirror armed the strip is
+/// active (keeping it live over the cockpit view is the whole point
+/// of the `sync_dash_visibility` exemption) *and* precedes the
+/// cockpit camera in spawn order — `load_session_world` parents it to
+/// the vehicle before `spawn_dash` runs — so a first-active pick
+/// without `WorldCamera3d` lands on the strip deterministically and
+/// pins the HUD, pause menu, results screen and countdown banner
+/// inside the ⅓×⅛ top strip.
+#[test]
+fn the_strip_is_never_the_hud_target() {
+    use mm2_app::camera::retarget_hud;
+    use mm2_app::dash::CockpitCamera;
+    use mm2_app::race::CountdownBanner;
+    use mm2_app::session::{ErrorText, Hud};
+
+    let mut app = base_app(SessionPhase::Playing);
+    app.add_systems(Update, retarget_hud);
+    *app.world_mut().resource_mut::<CameraMode>() = CameraMode::Cockpit;
+    *app.world_mut().resource_mut::<RearView>() = RearView(true);
+
+    // Production spawn order: the strip is parented to the vehicle
+    // first, then `spawn_dash` adds the cockpit camera — so the strip
+    // is the elder active `Camera3d`.
+    let strip = app
+        .world_mut()
+        .spawn((
+            MirrorCamera,
+            Camera3d::default(),
+            Camera {
+                is_active: true,
+                ..default()
+            },
+        ))
+        .id();
+    let cockpit = app
+        .world_mut()
+        .spawn((
+            CockpitCamera {
+                offset: Vec3::new(0.4, 1.19, -0.55),
+                reverse_offset: None,
+                pitch: 0.0,
+                look_yaw: 0.0,
+            },
+            Camera3d::default(),
+            Camera {
+                is_active: true,
+                ..default()
+            },
+        ))
+        .id();
+    let nodes: Vec<Entity> = [
+        app.world_mut().spawn(Hud).id(),
+        app.world_mut().spawn(ErrorText).id(),
+        app.world_mut().spawn(CountdownBanner).id(),
+    ]
+    .into();
+
+    app.update(); // drive_mirror re-arms the strip; retarget_hud picks
+    assert!(
+        app.world().get::<Camera>(strip).unwrap().is_active,
+        "the armed strip is live for this check — the hazardous pick exists"
+    );
+    for node in nodes {
+        assert_eq!(
+            app.world().get::<UiTargetCamera>(node).map(|t| t.0),
+            Some(cockpit),
+            "the UI must ride the world view, not the mirror strip"
+        );
+    }
+}
+
 /// The cockpit/exterior split must never own the strip: under
 /// `Cockpit` a `Hidden` camera renders nothing — the windshield mirror
 /// would die inside the view it is most useful in — so the sweep skips

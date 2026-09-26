@@ -102,7 +102,7 @@ impl Default for ResultsMenu {
 
 /// Marker for results-overlay entities — session-owned (the tree also
 /// carries `SessionEntity`), and part of the `HudNodes` set
-/// `retarget_hud` keeps on the active camera.
+/// `camera::retarget_hud` keeps on the active camera.
 #[derive(Component)]
 pub struct ResultsUi;
 
@@ -248,7 +248,7 @@ fn participant_name(player: &Player, opponent: Option<&OpponentDriver>) -> Strin
 /// (Re)draw the results overlay while `Results` and despawn it
 /// otherwise. The root is `SessionEntity`-stamped so teardown removes
 /// it with the session, and the whole tree carries [`ResultsUi`] so
-/// `retarget_hud` follows the active camera like the HUD and pause
+/// `camera::retarget_hud` follows the active camera like the HUD and pause
 /// overlay do.
 #[allow(clippy::too_many_arguments)]
 pub fn results_present(
