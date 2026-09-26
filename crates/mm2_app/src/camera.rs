@@ -228,12 +228,20 @@ pub fn active_cam_pose(
 
 /// The root UI nodes pinned to the active camera — the HUD plus the
 /// pause/results overlays, which share the session's render target.
+/// Every HUD-layer instrument belongs here: without a
+/// `UiTargetCamera`, a root falls back to the *highest-order*
+/// primary-window camera — the F22-B.2 mirror strip (order 2) — so
+/// an unlisted instrument renders inside the strip viewport (or
+/// nowhere) whenever it is armed.
 type HudNodes = Or<(
     With<crate::session::Hud>,
     With<crate::session::ErrorText>,
     With<crate::pause::PauseUi>,
     With<crate::results::ResultsUi>,
     With<crate::race::CountdownBanner>,
+    With<crate::race::NavArrow>,
+    With<crate::race::LowTimeWarning>,
+    With<crate::racetime::RaceTimer>,
 )>;
 
 /// Keep the HUD on whichever world camera is active — UI otherwise

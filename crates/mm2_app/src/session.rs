@@ -257,6 +257,9 @@ pub fn drive_session(
             // Same for the cockpit rig's spawn report (F22-B.1) — the
             // dash subtree itself is `SessionEntity`-stamped.
             commands.remove_resource::<crate::dash::DashReport>();
+            // Same for the race timer's report (F22-A.4) — the row
+            // itself is `SessionEntity`-stamped.
+            commands.remove_resource::<crate::racetime::RaceTimerReport>();
             // `TireConditions` stays: it is a system input (the impact
             // filter and telemetry read `Res` every frame), and
             // `load_session_world` re-stamps it from the next session's
@@ -1242,6 +1245,14 @@ pub fn load_session_world(
             race::spawn_nav_arrow(&mut commands, owner);
             race::spawn_race_warning(&mut commands, owner);
             race::spawn_countdown_banner(&mut commands, owner);
+            // F22-A.4: the authored race timer (HUD-2's
+            // stopwatch/countdown pair — `mmHUD`'s `mmTimer`s) —
+            // binds the authored `digitac_*`/`digi_colon` glyph set
+            // through the VFS; `absent` on the report when it cannot
+            // bind.
+            let timer_report =
+                crate::racetime::spawn_race_timer(&mut commands, &vfs.0, &mut assets.images, owner);
+            commands.insert_resource(timer_report);
             // F16-B: the event's reward + availability surface —
             // consumed by `record_session_results` while the session
             // lives, removed by teardown so a following cruise never

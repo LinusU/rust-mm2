@@ -21,8 +21,8 @@ use mm2_app::session::{SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
     audio, banger, breakaway, camera, car_visual, city, contracts, damage, damage_fx, dash,
     environment, hud, hudmap, input, menu, nav_overlay, oppind, opponents, pause, profile,
-    progression, pvs, race, recovery, results, scripted, sequence, session, smoke, spark_fx, stuck,
-    texel_fx, traffic,
+    progression, pvs, race, racetime, recovery, results, scripted, sequence, session, smoke,
+    spark_fx, stuck, texel_fx, traffic,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
@@ -1152,6 +1152,9 @@ fn main() {
             // F22-A.2: the indicator pool rebinds ungated too — a
             // `--frames`/`--screenshot` run needs the markers live.
             oppind::drive_opponent_indicators.after(session::drive_session),
+            // F22-A.4: the authored race timer composes off the same
+            // ungated pass so `--frames` captures see real state.
+            racetime::update_race_timer.after(session::drive_session),
         ),
     )
     // Pause owns the keyboard while `Paused`: `pause_input` runs after

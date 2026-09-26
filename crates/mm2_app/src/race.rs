@@ -741,7 +741,10 @@ pub fn spawn_race_warning(commands: &mut Commands, owner: SessionEntity) {
         BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
         Node {
             position_type: PositionType::Absolute,
-            top: Val::Px(108.0),
+            // Under the authored race timer (F22-A.4), which ends
+            // ~160 px — the 108 px slot the warning used to take now
+            // sits inside the timer plate.
+            top: Val::Px(170.0),
             left: Val::Percent(50.0),
             margin: UiRect::left(Val::Px(-62.0)),
             padding: UiRect::axes(Val::Px(8.0), Val::Px(2.0)),

@@ -1,4 +1,121 @@
-# Last iteration — F22-A.3 the `H` HUD toggle (iteration 68)
+# Last iteration — F22-A.4 the authored race timer (iteration 69)
+
+Iteration 69 on `ralph/night` (baseline `cf78496`, F22-A.3 — external
+verify + review green; fourteenth iteration of run `20260925T144723`).
+One coherent slice: HUD-2's stopwatch/countdown pair — the `mmTimer`
+instruments the recovered `mmHUD` layout owns — rendered from the
+installation's own `digitac_*`/`digi_colon` glyph art instead of the
+dev telemetry line's text field.
+
+## Task selection
+
+No failing gate or review finding — iteration 68's review passed
+(`verdict: pass`, no blocking findings), so the queue reopens. Of the
+F22-A remainder (HUD-2 race instruments), the timer is the
+self-contained leg: the recovered `mmHUD` layout names the
+stopwatch/countdown `mmTimer` pair explicitly, the install ships the
+exact glyph artwork (`digitac_0..9` + `_half`, `digi_colon` +
+`_half`), and `RaceState` already exposes `clock`/`time_remaining`
+with pause/finish freeze semantics. The checkpoint list, lap record
+and place instruments — the `race_*` label tiles' consumers — stay
+open in the parent.
+
+## What landed
+
+- `mm2_app::racetime` (new) — `spawn_race_timer` (event-arm spawn in
+  `load_session_world`): binds all 22 authored stems through
+  `city::load_image` — VFS-preferred so mods can substitute
+  `png`/`ktx2`/`tex` — into a `TimerDigits` bank on the row root; any
+  miss aborts the whole spawn (`absent:missing-glyphs`, `glyphs`
+  counts how far it got — never a substitute glyph or half-bound
+  row). `update_race_timer` recomposes the row every frame off the
+  authoritative clock: `time_remaining` while a timed (Blitz)
+  definition runs, `clock` otherwise — armed through `Countdown`
+  (full limit or `0:00:00`), dark on `Complete`/stale generations,
+  `H`-gated like every `mmHUD` member while `RaceTimerReport.display`
+  keeps composing so `tmr=` records demand (the `ind=` `bound`
+  precedent). Runs ungated by `capturing` like `drive_mirror`.
+- Presentation — designed reading (DSN-53; the original layout is
+  UNK-32): a top-centre row at 96 px under the nav arrow, laid out
+  `m:ss:hh` — full digits for minutes/seconds, the authored half-size
+  set for centiseconds, `digi_colon` separators, leading-zero
+  suppression on minutes capped at `999:59:99`, on a translucent
+  plate tinted to the colon tile's own authored background
+  (`digi_colon` is an opaque-panel image, so its tile reads as plate).
+  `LOW TIME` moved from 108 px to 170 px — its old slot sits inside
+  the plate.
+- `camera.rs` — `HudNodes` gained `RaceTimer` plus a repair folded in
+  while reading the retarget: `NavArrow` and `LowTimeWarning` were
+  never in the set, so they fell back to `DefaultUiCamera`'s
+  max-order primary-window pick — the mirror strip (order 2) — and
+  rendered inside it (or nowhere) whenever it was armed. Every
+  HUD-layer root now rides the active world camera.
+- `session.rs` — event arm spawns + inserts `RaceTimerReport`;
+  teardown removes it (the row dies via `SessionEntity` like the rest
+  of the rig).
+- `smoke.rs` — `update_race_timer` scheduled in the same slot as
+  `drive_opponent_indicators`; the record appends
+  ` tmr=<glyphs>g/<m:ss:hh|off>` or `absent:<why>` on event sessions
+  only — cruise/dev-world records stay bit-identical.
+
+## Gates
+
+- `cargo test -p mm2_app --test racetime` — 13/13 new: `m:ss:hh` slot
+  composition incl. the `999:59:99` cap, full-set binding
+  (`22g`, `SessionEntity`-stamped row, 9 slots), partial/missing sets
+  report `absent` with no row, untimed count-up (`0:06:25` at 750
+  ticks with per-slot image assertions), timed count-down
+  (`0:40:00`), countdown arming, `Complete`/stale/cruise release,
+  `H` hides the row while `display` keeps composing, synthetic-event
+  `headless_smoke` legs (`tmr=22g/…` and `tmr=absent:missing-glyphs`),
+  dev-world field absence.
+- `cargo fmt --all -- --check` clean; `cargo clippy --locked
+  --workspace --all-targets --all-features -- -D warnings` clean;
+  `cargo test --locked --workspace` all suites green.
+- Retail headless (`fnv1a64:e91e6cd4b2ae30d9`, read-only):
+  `--city sf --event checkpoint:0 --headless --frames 200` →
+  `status=pass`, `tmr=22g/0:00:33` — the display matches the
+  authoritative `ticks=40` exactly (40 × 5/6 = 33 cs); `+ --no-hud`
+  → same record plus `hud=off`, `tmr=` still composing.
+- Retail windowed (Apple M1, Metal): checkpoint `--frames 400` shows
+  `0:04:44` agreeing with the telemetry line's `4.4s`; blitz
+  `--frames 120` shows the countdown banner `1` beside the armed
+  `0:30:00` deadline; `--cockpit` shows `0:02:73` retargeted to the
+  cockpit camera; `--mirror` parks the strip over the nav-arrow band
+  with the timer just under its edge (documented overlap — the strip
+  is a world-camera-order-2 viewport, so band instruments it covers
+  clip under it; same as the nav arrow pre-change). Captures local
+  (`/tmp/f22a4-*.png`, not committed).
+
+## Classification
+
+The instrument itself is a documented original member of `mmHUD`
+(HUD-2 + mm2hook's `mmTimer` pair) and the glyph art is verified
+retail content; the composed layout — position, `m:ss:hh` fielding,
+zero suppression, plate — is a designed reading (DSN-53) because no
+retail capture or recovered draw body pins it (UNK-32, including the
+`race_*` label tiles' real placement and whether the original shows
+two timers at once). The retarget repair is an implementation fix —
+no original-behavior claim. `docs/original-rules.md` updated (HUD-2
+row + DSN-53/UNK-32).
+
+## Remaining open items
+
+- F22-A stays `active` — HUD-2's remaining instruments: checkpoint
+  list, lap record, place indicator (the `race_*` label tiles' real
+  consumers) over the dev line, plus AC01–AC03/AC06 evidence legs.
+- UNK-32 needs retail captures or a recovered `mmTimer` draw body —
+  position/padding/dual-timer semantics are designed readings.
+- Mirror-strip overlap: UI targeted to the world camera renders under
+  the strip's order-2 pass in its band (pre-existing; nav arrow
+  suffers it too). An overlay-order camera or strip-below-instruments
+  layout is future designed work.
+- The armed countdown leg (`GO!` flash under a live timer) and
+  timeout-at-zero edge renders are unverified visually.
+
+---
+
+# Iteration 68 — F22-A.3 the `H` HUD toggle (iteration 68)
 
 Iteration 68 on `ralph/night` (baseline `507abf8`, F22-A.2 — external
 verify + review green; thirteenth iteration of run `20260925T144723`).
