@@ -1,4 +1,104 @@
-# Last iteration — F22-A.2 opponent indicators (iteration 67)
+# Last iteration — F22-A.3 the `H` HUD toggle (iteration 68)
+
+Iteration 68 on `ralph/night` (baseline `507abf8`, F22-A.2 — external
+verify + review green; thirteenth iteration of run `20260925T144723`).
+One coherent slice: the documented `H` toggle (HUD-3/CTL-1) over the
+whole driving-HUD layer — the last unbound HUD-3 control and the
+smallest remaining piece of the F22-A race-HUD remainder.
+
+## Task selection
+
+No failing gate or review finding — iteration 67's review passed
+(`verdict: pass`, no blocking findings), so the queue reopens. Of the
+F22-A remainder (HUD-2 race instruments + `H`), the toggle is the
+self-contained leg: mm2hook recovery shows `mmHUD` is one node owning
+`mmHudMap` (which draws the opponent indicators), `mmArrow`, the
+stopwatch/countdown `mmTimer`s, `mmDashView` and `mmCRHUD`, with
+`Enable`/`Disable`/`Toggle` — so `H` is a master gate over the whole
+layer, not a dev-text switch. The authored race instruments
+(checkpoint list, lap, place, stopwatch) stay open in the parent.
+
+## What landed
+
+- `mm2_app::hud` (new) — `HudVisible(bool)` session-agnostic toggle
+  resource (designed on by default — the same lifecycle contract
+  `RearView`/`OpponentIndicators` hold: a restart respawns the
+  session-owned HUD entities while the driver's choice survives),
+  `hud_input` (`H` in `Playing`/`Countdown` only — pause/results/menu
+  overlays keep the key), and `update_hud` moved here from the bin
+  target so tests reach it. The telemetry line writes `Hidden` under
+  the gate; `ErrorText` is excluded (a load-failure surface, not a
+  driving instrument).
+- Per-driver gating (state keeps computing, only rendering is
+  suppressed): `race.rs` nav arrow / countdown banner / low-time
+  warning write `Hidden`; `hudmap.rs` parks the map camera unless the
+  *fullscreen pause map* is up — a menu surface, deliberately outside
+  the gate; `oppind.rs` hides the marker pool; `dash.rs` folds `hud.0`
+  into the cockpit split so the dash cluster goes dark while the
+  cockpit *camera* keeps rendering (`is_active` is a camera's only
+  render gate). The rear-view strip stays independent — a camera,
+  not an instrument.
+- `config.rs`/`main.rs` — `DevOverrides::no_hud` + `--no-hud`
+  (render-only like `--mirror`, excluded from `record_eligibility`);
+  `init_resource::<HudVisible>` seeded from the override in the
+  windowed app and headless smoke.
+- `smoke.rs` — `hud=off` appends to the record only when the gate is
+  off; default records stay bit-identical.
+- Visibility-propagation fixes the retail capture exposed: `dash.rs`
+  pivot/holder nodes and `car_visual.rs` wheel-spin/fender nodes now
+  spawn `Visibility::Inherited` — Bevy's explicit `Visible` overrides
+  a `Hidden` ancestor, so the authored subtrees ignored both the new
+  HUD gate and (for wheels/fenders) the existing cockpit split.
+
+## Gates
+
+- `cargo test -p mm2_app --test hud` — 8/8 new: phase gating
+  (Menu/Paused/Results keep `H`), gate survives session teardown,
+  indicator markers / map camera / instrument line / dash cluster /
+  race instruments each hide with the layer, `hud=off` records.
+- `cargo fmt --all -- --check` clean; `cargo clippy --workspace
+  --all-targets --all-features -- -D warnings` clean; `cargo test
+  --workspace` all suites green (0 failures).
+- Retail headless (`fnv1a64:e91e6cd4b2ae30d9`, read-only):
+  `--city sf --event checkpoint:0 --headless --frames 200` →
+  `status=pass`, record identical to baseline (no `hud=` field);
+  `+ --no-hud` → same record plus `hud=off`, all other fields
+  (`map=inset/…`, `ind=on/6m/6b`, `dash=11p/cam`) preserved.
+- Retail windowed (Apple M1, Metal): `--cockpit --no-hud` renders the
+  bare windshield — dash cluster, telemetry, minimap, indicators and
+  banner all suppressed while the authored cockpit camera stays live;
+  `--cockpit` alone renders the full cluster + HUD layer;
+  `--pause-map --no-hud` renders the fullscreen authored map under the
+  gate. Captures local (`/tmp/f22a3-*.png`, not committed).
+
+## Classification
+
+The `H` binding is a documented original control (HUD-3/CTL-1) and
+`mmHUD`'s recovered membership fixes the scope — the whole driving-HUD
+layer including the map, indicators and dash view (DSN-52 records the
+designed reading that each driver suppresses rendering rather than one
+root flipping). UNK-31 records the still-open semantics: whether the
+original suppresses the rear-view mirror or the fullscreen pause map,
+whether the toggle persists across sessions, and the original start
+state. `docs/original-rules.md` updated (HUD-3 row + DSN-52/UNK-31,
+plus the DSN-51/UNK-30 rows A.2 referenced but never added); README
+controls table gains the `H` row.
+
+## Remaining open items
+
+- F22-A stays `active` — HUD-2's authored race instruments remain:
+  checkpoint list, lap record, place indicator, stopwatch, countdown
+  presentation refinement, plus AC01–AC03's evidence legs.
+- F22-B stays `active` — camera occlusion handling, the
+  chase-near/far split, and the unresolved original mirror semantics
+  (UNK-29).
+- UNK-31's original-semantics legs need retail captures — mirror and
+  pause-map behavior under `H` are designed readings, not recovered
+  facts.
+
+---
+
+# Iteration 67 — F22-A.2 opponent indicators (iteration 67)
 
 Iteration 67 on `ralph/night` (baseline `f64e2a3`, F22-B.2 review
 repair — external verify + review green; twelfth iteration of run

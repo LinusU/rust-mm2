@@ -95,6 +95,7 @@ fn race_app(config: SessionConfig, def: RaceDefinition) -> App {
         })
         .init_resource::<ResultLedger>()
         .init_resource::<SessionControl>()
+        .init_resource::<mm2_app::hud::HudVisible>()
         .init_resource::<mm2_app::contracts::ImpactFilter>()
         .init_resource::<mm2_app::damage::DamageReport>()
         .init_resource::<mm2_app::stuck::StuckReport>()

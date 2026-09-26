@@ -45,6 +45,7 @@ fn base_app() -> App {
             1.0 / 60.0,
         )))
         .init_resource::<ButtonInput<KeyCode>>()
+        .init_resource::<mm2_app::hud::HudVisible>()
         .insert_resource(CameraMode::Chase)
         .insert_resource(playing_session());
     app

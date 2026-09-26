@@ -545,10 +545,12 @@ pub fn nav_target_input(
 /// so `+` bearing = right), green while the target is in the forward
 /// half-plane and yellow behind (RACE-6). Hidden whenever there is no
 /// live target — no race, a stale/complete race, an `Ordered`
-/// definition, or a participant already resolved.
+/// definition, or a participant already resolved — and while the `H`
+/// HUD gate is off (the arrow is an `mmHUD` instrument, F22-A.3).
 pub fn update_nav_arrow(
     race: Option<Res<RaceState>>,
     session: Res<Session>,
+    hud: Res<crate::hud::HudVisible>,
     players: Query<(&Position, &Rotation, &RaceProgress, &TargetSelection)>,
     mut arrow: Query<(&mut UiTransform, &mut Visibility), With<NavArrow>>,
     mut parts: Query<&mut BackgroundColor, With<NavArrowPart>>,
@@ -576,11 +578,11 @@ pub fn update_nav_arrow(
     });
     for (mut ui, mut vis) in &mut arrow {
         match target {
-            Some(bearing) => {
+            Some(bearing) if hud.0 => {
                 *vis = Visibility::Visible;
                 ui.rotation = Rot2::radians(bearing);
             }
-            None => *vis = Visibility::Hidden,
+            _ => *vis = Visibility::Hidden,
         }
     }
     let color = match target {
@@ -658,10 +660,12 @@ pub fn spawn_countdown_banner(commands: &mut Commands, owner: SessionEntity) {
 /// only `GO!`), or a session phase where the cue does not belong —
 /// `GO!` is a `Playing`-phase flash, so it cannot linger under the
 /// pause or results overlays even when the frozen race clock still
-/// sits inside the window.
+/// sits inside the window. While the `H` HUD gate is off the cue
+/// keeps computing but stays hidden (F22-A.3).
 pub fn update_countdown_banner(
     race: Option<Res<RaceState>>,
     session: Res<Session>,
+    hud: Res<crate::hud::HudVisible>,
     mut banner: Query<&mut Visibility, With<CountdownBanner>>,
     mut text: Query<(&mut Text, &mut TextColor), With<CountdownBannerText>>,
 ) {
@@ -678,7 +682,7 @@ pub fn update_countdown_banner(
             _ => None,
         });
     for mut vis in &mut banner {
-        *vis = if cue.is_some() {
+        *vis = if cue.is_some() && hud.0 {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -754,9 +758,12 @@ pub fn spawn_race_warning(commands: &mut Commands, owner: SessionEntity) {
 /// every [`LOW_TIME_FLASH_TICKS`] of remaining time. Hidden whenever
 /// no timed race is live — stale or `Complete` races, countdowns,
 /// untimed definitions, or an already-resolved local participant.
+/// While the `H` HUD gate is off the pulse keeps computing but stays
+/// hidden (F22-A.3).
 pub fn update_race_warning(
     race: Option<Res<RaceState>>,
     session: Res<Session>,
+    hud: Res<crate::hud::HudVisible>,
     participants: Query<(&Player, &RaceProgress)>,
     mut warning: Query<(&mut Visibility, &mut TextColor), With<LowTimeWarning>>,
 ) {
@@ -776,7 +783,7 @@ pub fn update_race_warning(
     };
     for (mut vis, mut color) in &mut warning {
         match remaining {
-            Some(t) if t <= LOW_TIME_TICKS => {
+            Some(t) if t <= LOW_TIME_TICKS && hud.0 => {
                 *vis = Visibility::Visible;
                 let phase = ((LOW_TIME_TICKS - t) / LOW_TIME_FLASH_TICKS) % 2;
                 color.0 = if phase == 0 {

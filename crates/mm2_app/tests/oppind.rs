@@ -34,6 +34,7 @@ fn oppind_app() -> App {
     let mut app = App::new();
     app.init_resource::<Session>()
         .init_resource::<OpponentIndicators>()
+        .init_resource::<mm2_app::hud::HudVisible>()
         .init_resource::<Assets<Mesh>>()
         .init_resource::<Assets<Image>>()
         .init_resource::<Assets<StandardMaterial>>()

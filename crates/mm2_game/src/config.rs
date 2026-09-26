@@ -567,6 +567,14 @@ pub struct DevOverrides {
     /// render-only like `--pause`). It only re-aims a camera, so like
     /// `--pause`/`--cam` it stays out of `record_eligibility`.
     pub mirror: bool,
+    /// `--no-hud`: start the session with the driving-HUD layer
+    /// switched off — the state the documented `H` toggle produces
+    /// (evidence/diagnostic runs — how a `--frames`/`--screenshot`
+    /// capture renders the F22-A.3 HUD-off view while live input is
+    /// frozen; render-only like `--pause`). It only gates presentation,
+    /// so like `--pause`/`--mirror` it stays out of
+    /// `record_eligibility`.
+    pub no_hud: bool,
 }
 
 /// Configuration of the `--nav` debug overlay: draw the city's BAI

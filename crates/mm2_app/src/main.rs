@@ -17,19 +17,19 @@ use bevy::audio::AddAudioSource;
 use bevy::prelude::*;
 use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use clap::Parser;
-use mm2_app::session::{ErrorText, Hud, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
+use mm2_app::session::{SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
     audio, banger, breakaway, camera, car_visual, city, contracts, damage, damage_fx, dash,
-    environment, hudmap, input, menu, nav_overlay, oppind, opponents, pause, profile, progression,
-    pvs, race, recovery, results, scripted, sequence, session, smoke, spark_fx, stuck, texel_fx,
-    traffic,
+    environment, hud, hudmap, input, menu, nav_overlay, oppind, opponents, pause, profile,
+    progression, pvs, race, recovery, results, scripted, sequence, session, smoke, spark_fx, stuck,
+    texel_fx, traffic,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
 use mm2_game::{
     BangerStateChanged, CameraPose, DamageEvent, DevOverrides, ImpactEvent, Mm2Vfs, PartDetached,
     PlayerVehicle, RaceStarted, RecoveryEvent, Session, SessionConfig, SessionPhase, StuckEvent,
-    VehicleSelection, WorldMode, advance_session_tick, despawn_session_entities, ordinal,
+    VehicleSelection, WorldMode, advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::{ResetVehicle, VehicleConfig, VehicleDebugEnabled, VehiclePlugin};
 use tracing::{error, info, warn};
@@ -181,6 +181,15 @@ struct Cli {
     /// it lands on the record's `mir=` field instead of a screen.
     #[arg(long)]
     mirror: bool,
+
+    /// Start with the driving HUD switched off — the state the
+    /// documented `H` toggle produces (diagnostic aid — how a
+    /// `--frames`/`--screenshot` capture renders the F22-A.3 HUD-off
+    /// view while live input is frozen; render-only like `--cam`).
+    /// Headless it lands on the record's `hud=` field instead of a
+    /// screen.
+    #[arg(long)]
+    no_hud: bool,
 
     /// Sweep the local participant through an event session's remaining
     /// triggers — one gate per update — until the run resolves to the
@@ -756,6 +765,7 @@ fn main() {
             horn: cli.horn,
             cockpit: cli.cockpit,
             mirror: cli.mirror,
+            no_hud: cli.no_hud,
         },
         // Any mounted mod makes records/unlocks ineligible — a result
         // under modded content is not comparable to stock (designed
@@ -849,6 +859,7 @@ fn main() {
         && !cli.horn
         && !cli.no_pvs
         && !cli.mirror
+        && !cli.no_hud
         && !cli.nav
         && cli.nav_route.is_none()
         && !cli.bot
@@ -940,6 +951,9 @@ fn main() {
     // F22-A.2: the opponent-indicator toggle — session-agnostic like
     // `RearView`, on by designed default (HUD-3's `I` flips it).
     .init_resource::<oppind::OpponentIndicators>()
+    // F22-A.3: the HUD master gate — session-agnostic like the other
+    // instrument toggles; `--no-hud` starts it off for captures.
+    .insert_resource(hud::HudVisible(!cli.no_hud))
     .add_plugins(VehiclePlugin)
     .add_message::<ImpactEvent>()
     .add_message::<DamageEvent>()
@@ -1092,6 +1106,9 @@ fn main() {
                 // F22-A.2: `I` toggles the opponent indicators — same
                 // frozen-input gate and live-phase contract.
                 oppind::indicator_input.run_if(not(capturing)),
+                // F22-A.3: `H` toggles the driving-HUD layer — same
+                // contract again.
+                hud::hud_input.run_if(not(capturing)),
                 camera::chase_follow,
                 camera::free_fly.run_if(not(capturing)),
                 dash::drive_dash,
@@ -1117,7 +1134,7 @@ fn main() {
                 race::update_race_warning,
                 race::update_countdown_banner,
             ),
-            update_hud,
+            hud::update_hud,
         ),
     )
     // F22-A.1: the HUD map tracks every frame — eased zoom and a
@@ -1497,171 +1514,6 @@ fn smoke_test(
         record(smoke::SmokeStatus::Pass, format!("frames=done{aud_detail}"),).line()
     );
     exit.write(AppExit::Success);
-}
-
-/// HUD line: speed, gear/direction, RPM, grounded wheels — read from the
-/// `VehicleTelemetry` snapshot, the presentation-side contract, not the
-/// mutable simulation state.
-// Bevy systems thread one parameter per borrowed resource/query; the
-// HUD legitimately reads several.
-#[allow(clippy::too_many_arguments)]
-fn update_hud(
-    session: Res<Session>,
-    race: Option<Res<mm2_game::RaceState>>,
-    nav: Option<Res<nav_overlay::CityNav>>,
-    ledger: Res<mm2_game::ResultLedger>,
-    mut hud: Query<&mut Text, (With<Hud>, Without<ErrorText>)>,
-    mut err: Query<&mut Text, (With<ErrorText>, Without<Hud>)>,
-    vehicles: Query<&mm2_game::VehicleTelemetry, With<PlayerVehicle>>,
-    progress: Query<(Option<&mm2_game::Player>, &mm2_game::RaceProgress), With<PlayerVehicle>>,
-    participants: Query<(&mm2_game::Player, &mm2_game::RaceProgress, &Position)>,
-    // The HUD map's own camera never counts as "the" camera — same
-    // filter `camera::retarget_hud`/`active_cam_pose` apply (F22-A.1) —
-    // and the pose read is `GlobalTransform`: the cockpit camera is a
-    // child of the vehicle, so its `Transform` is car-local.
-    cameras: Query<(&Camera, &GlobalTransform), hudmap::WorldCamera3d>,
-) {
-    for mut text in &mut err {
-        *text = match session.phase() {
-            SessionPhase::Failed(m) => Text::new(format!("world failed to load:\n{m}")),
-            _ => Text::new(""),
-        };
-    }
-    let hz = mm2_game::RACE_TICK_HZ as f32;
-    // The local participant's terminal state, rendered once the race is
-    // over — the finish carries its recorded race-clock time and its
-    // place in the ledger's standings (UI-5's "placing + total time",
-    // F13-B). The ledger outlives one session, so the place scopes to
-    // the current generation — a finished restart's stale results must
-    // not re-rank the live race. `TimedOut` participants rank but show
-    // no place — a DNF banner is clearer than an ordinal.
-    let participant_count = participants.iter().count();
-    let outcome = |id: Option<mm2_game::PlayerId>, state: Option<&mm2_game::ParticipantState>| {
-        let placing = id
-            .and_then(|id| ledger.place_of_in(session.generation(), id))
-            .map(|p| match participant_count {
-                n if n > 1 => format!(" {} of {n}", ordinal(p)),
-                _ => format!(" {}", ordinal(p)),
-            })
-            .unwrap_or_default();
-        match state {
-            Some(mm2_game::ParticipantState::Finished { race_ticks, .. }) => {
-                format!("  FINISHED{placing}  {:.1}s", *race_ticks as f32 / hz)
-            }
-            Some(mm2_game::ParticipantState::TimedOut { .. }) => "  OUT OF TIME".to_string(),
-            _ => "  FINISHED".to_string(),
-        }
-    };
-    // The local participant's identity for the live place indicator —
-    // the PlayerVehicle's `Player`, or any `Local`-controlled
-    // participant if the vehicle entity is not a participant.
-    let local_id = progress
-        .iter()
-        .next()
-        .and_then(|(p, _)| p.map(|p| p.id))
-        .or_else(|| {
-            participants
-                .iter()
-                .find(|(p, _, _)| p.control == mm2_game::PlayerControl::Local)
-                .map(|(p, _, _)| p.id)
-        });
-    let race_text = race
-        .filter(|r| !r.is_stale(session.generation()))
-        .map(|r| {
-            // A resolved local driver ends the session at `Results`
-            // (UI-5) even while other participants' progress keeps the
-            // race itself `Running` — the outcome text wins either way.
-            if *session.phase() == SessionPhase::Results {
-                let (id, state) = progress
-                    .iter()
-                    .next()
-                    .map(|(p, progress)| (p.map(|p| p.id), &progress.state))
-                    .unzip();
-                return outcome(id.flatten(), state);
-            }
-            // HUD-2's place indicator: the live running order (DSN-13).
-            // Only a competitive field gets one — a lone participant
-            // has no placing to show.
-            let order = mm2_game::live_order(
-                &r.definition,
-                participants
-                    .iter()
-                    .map(|(p, prog, pos)| (p.id, prog, pos.0)),
-            );
-            let place = if order.len() > 1 {
-                local_id
-                    .and_then(|id| order.iter().position(|p| *p == id))
-                    .map(|i| format!("  {} of {}", ordinal(i as u32 + 1), order.len()))
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
-            match r.phase {
-                mm2_game::RacePhase::Countdown { remaining } => {
-                    format!("  GET READY {:.0}{place}", (remaining as f32 / hz).ceil())
-                }
-                mm2_game::RacePhase::Running => {
-                    let cleared = progress.iter().next().map_or(0, |(_, p)| p.cleared_count());
-                    let lap = progress.iter().next().map_or(0, |(_, p)| p.lap + 1);
-                    // A timed event counts down the same authoritative race
-                    // clock the deadline is judged on (AC04); untimed races
-                    // show elapsed.
-                    let clock = match r.time_remaining() {
-                        Some(t) => format!("  time {:.1}s", t as f32 / hz),
-                        None => format!("  {:.1}s", r.clock as f32 / hz),
-                    };
-                    if r.definition.rule == mm2_game::CheckpointRule::Ordered {
-                        format!(
-                            "  lap {lap}/{}  cp {cleared}/{}{place}{clock}",
-                            r.definition.laps,
-                            r.definition.checkpoints.len(),
-                        )
-                    } else {
-                        format!(
-                            "  cp {cleared}/{}{place}{clock}",
-                            r.definition.checkpoints.len()
-                        )
-                    }
-                }
-                mm2_game::RacePhase::Complete => {
-                    let (id, state) = progress
-                        .iter()
-                        .next()
-                        .map(|(p, progress)| (p.map(|p| p.id), &progress.state))
-                        .unzip();
-                    outcome(id.flatten(), state)
-                }
-            }
-        })
-        .unwrap_or_default();
-    let Ok(veh) = vehicles.single() else {
-        for mut text in &mut hud {
-            *text = Text::new(match session.phase() {
-                SessionPhase::Failed(_) => String::new(),
-                SessionPhase::Playing => "no vehicle".to_string(),
-                _ => format!("loading…{race_text}"),
-            });
-        }
-        return;
-    };
-    let speed = veh.linear_velocity.length() * 3.6;
-    let dir = if veh.reverse {
-        "R".to_string()
-    } else {
-        format!("D{}", veh.gear + 1)
-    };
-    let grounded = veh.wheels.iter().filter(|w| w.grounded).count();
-    let cam = camera::active_cam_pose(&cameras).unwrap_or_default();
-    let nav_text = nav.map_or_else(String::new, |n| {
-        format!("  {}", nav_overlay::hud_summary(&n))
-    });
-    for mut text in &mut hud {
-        *text = Text::new(format!(
-            "{speed:5.1} km/h  {dir}  {rpm:4.0} rpm  wheels {grounded}/{total}  cam {cam}{race_text}{nav_text}",
-            rpm = veh.rpm,
-            total = veh.wheels.len(),
-        ));
-    }
 }
 
 /// Directory (relative to the working directory, gitignored) that

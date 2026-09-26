@@ -654,11 +654,15 @@ type MapMarkers<'w, 's> = Query<
 /// Per-frame map driver: camera placement/framing, zoom easing, marker
 /// tracking and gate-dot colouring. Runs on every update — the eased
 /// zoom and a rotating map should track through pause and countdown
-/// alike.
+/// alike. The `H` HUD gate suppresses the corner views with the rest
+/// of the layer (F22-A.3 — `mmHudMap` is an `mmHUD` member); the
+/// full-screen *pause* map is a menu surface, not a driving
+/// instrument, so it stays up under `Paused` even then.
 #[allow(clippy::too_many_arguments)]
 pub fn drive_hud_map(
     time: Res<Time>,
     session: Res<Session>,
+    hud: Res<crate::hud::HudVisible>,
     map: Option<ResMut<HudMap>>,
     report: Option<Res<HudMapReport>>,
     race: Option<Res<RaceState>>,
@@ -701,7 +705,9 @@ pub fn drive_hud_map(
             cam.is_active = false;
             continue;
         };
-        cam.is_active = map.visible();
+        // The corner views are HUD instruments — off with the layer —
+        // while `fullscreen` is the pause overlay's surface and exempt.
+        cam.is_active = map.visible() && (hud.0 || map.fullscreen);
         if !cam.is_active {
             continue;
         }

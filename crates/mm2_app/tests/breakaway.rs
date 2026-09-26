@@ -655,6 +655,7 @@ fn detached_panels_stay_hidden_across_cockpit_cycles() {
         BangerPool::default(),
     );
     app.insert_resource(CameraMode::Chase);
+    app.init_resource::<mm2_app::hud::HudVisible>();
     app.add_systems(Update, mm2_app::dash::sync_dash_visibility);
 
     // break0 detaches in default Chase.

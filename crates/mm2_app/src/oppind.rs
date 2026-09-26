@@ -200,6 +200,7 @@ pub fn indicator_input(
 /// mirror strip are never the facing source.
 pub fn drive_opponent_indicators(
     indicators: Res<OpponentIndicators>,
+    hud: Res<crate::hud::HudVisible>,
     mut report: Option<ResMut<OppIndReport>>,
     participants: Query<(Entity, &Player, &GlobalTransform, &Vehicle)>,
     cameras: Query<(&Camera, &GlobalTransform), crate::hudmap::WorldCamera3d>,
@@ -233,7 +234,11 @@ pub fn drive_opponent_indicators(
     let mut iter = opponents.iter();
     for (mut xf, mut vis) in &mut markers {
         match iter.next() {
-            Some((_, pos, lift)) if indicators.0 => {
+            // The `H` gate suppresses the markers with the rest of the
+            // layer (F22-A.3 — the original draws its indicators from
+            // inside `mmHUD`'s `mmHudMap`); `bound` above still counts
+            // live demand while either toggle is off.
+            Some((_, pos, lift)) if indicators.0 && hud.0 => {
                 xf.translation = *pos + Vec3::Y * *lift;
                 // Yaw toward the view on the ground plane only; a
                 // degenerate same-point camera keeps the last heading.

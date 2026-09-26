@@ -262,8 +262,12 @@ pub fn spawn_vehicle_model(
             ))
             .id();
         commands.entity(root).add_child(mount);
+        // `Inherited`: an unconditional `Visible` would override the
+        // mount's `Hidden` — the cockpit split hides mounts under the
+        // cockpit view (F22-A.3 exposed the same leak on the dash
+        // subtree; every interior node follows its root's gate).
         let spin = commands
-            .spawn((WheelSpin, Transform::IDENTITY, Visibility::Visible))
+            .spawn((WheelSpin, Transform::IDENTITY, Visibility::Inherited))
             .id();
         commands.entity(mount).add_child(spin);
         spawn_groups(
@@ -295,10 +299,14 @@ pub fn spawn_vehicle_model(
                             .find(|w| !w.trailer && w.index == n)
                             .map(|w| Vec3::from(w.origin))
                             .unwrap_or(Vec3::ZERO);
+                        // Under the mount the fender inherits its
+                        // gate (a pinned `Visible` would leak past
+                        // the mount's `Hidden` — same class as the
+                        // dash-subtree repair in F22-A.3).
                         let node = commands
                             .spawn((
                                 Transform::from_translation(attach - wheel_origin),
-                                Visibility::Visible,
+                                Visibility::Inherited,
                             ))
                             .id();
                         commands.entity(mount).add_child(node);

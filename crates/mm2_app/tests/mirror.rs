@@ -46,6 +46,7 @@ fn base_app(phase: SessionPhase) -> App {
             1.0 / 60.0,
         )))
         .init_resource::<ButtonInput<KeyCode>>()
+        .init_resource::<mm2_app::hud::HudVisible>()
         .insert_resource(CameraMode::Chase)
         .insert_resource(RearView::default())
         .insert_resource(session_at(phase))

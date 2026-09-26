@@ -328,12 +328,17 @@ pub fn spawn_dash(
                     // paint-job gear slots (`GearGlyph`).
                     _ => (cluster, Vec3::ZERO, Vec3::ZERO, None),
                 };
+                // `Inherited`, not `Visible`: an unconditional
+                // `Visible` would override the cluster root's
+                // `Hidden` (F22-A.3's `H` gate and the cockpit split
+                // both write only the root) — the subtree must
+                // propagate it.
                 let pivot_node = commands
                     .spawn((
                         owner,
                         CockpitPart,
                         Transform::from_translation(node_pos),
-                        Visibility::Visible,
+                        Visibility::Inherited,
                     ))
                     .id();
                 commands.entity(parent).add_child(pivot_node);
@@ -392,12 +397,14 @@ fn spawn_part_meshes(
     let Some(groups) = part.best_lod() else {
         return 0;
     };
+    // `Inherited` like the pivot above: the subtree follows the
+    // root's gate instead of overriding it.
     let holder = commands
         .spawn((
             owner,
             CockpitPart,
             Transform::from_translation(child_off),
-            Visibility::Visible,
+            Visibility::Inherited,
         ))
         .id();
     commands.entity(parent).add_child(holder);
@@ -455,12 +462,19 @@ fn spawn_part_meshes(
 /// camera, not a panel — `drive_mirror` owns its render gate
 /// (`is_active`), and a windshield mirror must keep reflecting while
 /// the cockpit view is up.
+///
+/// The `H` HUD gate suppresses the cockpit subtrees too (F22-A.3 —
+/// `mmDashView` is an `mmHUD` member): the cockpit *camera* keeps
+/// rendering the windshield view — `is_active` is a camera's only
+/// render gate — while the cluster goes dark. `H` off outside Cockpit
+/// changes nothing: the split was already hiding these parts.
 // The filter queries can't fold into one ParamSet — each is a read over
 // the same component set — so the arg count is intrinsic to the sweep.
 #[allow(clippy::too_many_arguments)]
 pub fn sync_dash_visibility(
     mut commands: Commands,
     mode: Res<CameraMode>,
+    hud: Res<crate::hud::HudVisible>,
     players: Query<&Children, With<PlayerVehicle>>,
     cockpits: Query<(), With<CockpitPart>>,
     glows: Query<(), With<GlowPart>>,
@@ -479,7 +493,7 @@ pub fn sync_dash_visibility(
             };
             if cockpits.get(child).is_ok() {
                 // The dash subtree is wholly this system's.
-                let next = if cockpit {
+                let next = if cockpit && hud.0 {
                     Visibility::Visible
                 } else {
                     Visibility::Hidden

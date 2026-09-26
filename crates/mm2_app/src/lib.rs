@@ -19,6 +19,7 @@ pub mod dash;
 pub mod decals;
 pub mod dev_world;
 pub mod environment;
+pub mod hud;
 pub mod hudmap;
 pub mod input;
 pub mod menu;

@@ -66,6 +66,7 @@ Controls:
 | C            | cycle chase / cockpit / free camera |
 | Backspace    | toggle the rear-view mirror strip |
 | I            | toggle opponent indicators (in a race) |
+| H            | toggle the driving HUD (map, indicators, dash, race cues) |
 | X / Z        | cycle nav-arrow target (in a race) |
 | F1           | toggle physics debug gizmos   |
 | F4           | restart the session           |

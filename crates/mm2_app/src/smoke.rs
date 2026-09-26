@@ -254,6 +254,9 @@ pub fn headless_smoke(
         // F22-A.2: the opponent-indicator toggle — session-agnostic,
         // on by designed default like the windowed app.
         .init_resource::<crate::oppind::OpponentIndicators>()
+        // F22-A.3: the HUD master gate — `--no-hud` starts it off like
+        // the windowed app; the `hud=` field reports the off state.
+        .insert_resource(crate::hud::HudVisible(!config.dev.no_hud))
         .insert_resource(session::SpawnPoint {
             position: Vec3::new(0.0, 1.5, 0.0),
             yaw: 0.0,
@@ -445,10 +448,12 @@ pub fn headless_smoke(
         // F22-A.2: `I` toggles `OpponentIndicators` and the pool
         // rebinds headless too — own slot: the big Update tuple is at
         // Bevy's arity limit (same split the windowed app makes).
+        // F22-A.3's `H` toggle shares the slot.
         .add_systems(
             Update,
             (
                 crate::oppind::indicator_input,
+                crate::hud::hud_input,
                 crate::oppind::drive_opponent_indicators.after(session::drive_session),
             ),
         );
@@ -930,6 +935,18 @@ pub fn headless_smoke(
             )
         })
         .unwrap_or_default();
+    // F22-A.3 HUD-gate evidence, on-activity only like `surf=wet`:
+    // `hud=off` when the layer is suppressed (`--no-hud`, or a `H`
+    // press a test drove through `ButtonInput`) — the default-on state
+    // prints nothing so every existing record stays bit-identical.
+    let hud_detail = if world_ecs
+        .get_resource::<crate::hud::HudVisible>()
+        .is_some_and(|h| !h.0)
+    {
+        " hud=off".to_string()
+    } else {
+        String::new()
+    };
     // F10-A.2 ambient evidence: live/target population plus the
     // recycler counters. Absent on worlds without a rostered aimap so
     // those records stay bit-identical.
@@ -1241,7 +1258,7 @@ pub fn headless_smoke(
     // (DRV-2/DRV-3) and aimap variant (RACE-11) selected its content.
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{mir_detail}{ind_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{extra}",
+            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{mir_detail}{ind_detail}{hud_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{extra}",
             driver.as_str(),
             config.difficulty.as_str(),
             session.phase().name(),
