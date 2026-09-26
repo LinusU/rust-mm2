@@ -561,6 +561,12 @@ pub struct DevOverrides {
     /// input is frozen; render-only like `--pause`). Falls back to the
     /// chase camera when the car carries no cockpit record.
     pub cockpit: bool,
+    /// `--far`: start the session on the authored `_far.camtrackcs`
+    /// chase lens (evidence/diagnostic runs — how a `--frames`/
+    /// `--screenshot` capture renders the F22-B.3 far view while live
+    /// input is frozen; render-only like `--cockpit`). Falls back to
+    /// the near lens when the car carries no far record.
+    pub far: bool,
     /// `--mirror`: start the session with the rear-view mirror strip up
     /// (evidence/diagnostic runs — how a `--frames`/`--screenshot`
     /// capture renders the F22-B.2 mirror while live input is frozen;

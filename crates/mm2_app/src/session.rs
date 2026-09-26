@@ -257,6 +257,8 @@ pub fn drive_session(
             // Same for the cockpit rig's spawn report (F22-B.1) — the
             // dash subtree itself is `SessionEntity`-stamped.
             commands.remove_resource::<crate::dash::DashReport>();
+            // Same for the chase-rig lens report (F22-B.3).
+            commands.remove_resource::<crate::camera::TrackReport>();
             // Same for the race timer's report (F22-A.4) — the row
             // itself is `SessionEntity`-stamped.
             commands.remove_resource::<crate::racetime::RaceTimerReport>();
@@ -799,43 +801,72 @@ pub fn load_session_world(
 
     // Resolve the effective camera mode before the session cameras
     // spawn: `CameraMode::Cockpit` exists only while an authored
-    // `camPovCS` binds. Without one — a dashless car, the dev car, or a
-    // `Cockpit` mode persisted across a session reload — no camera
-    // would ever activate (`--cockpit` or a menu-phase `C` press left
-    // the mode pointing at nothing: zero active cameras, dead render),
-    // so the mode falls back to Chase *here*.
+    // `camPovCS` binds and `CameraMode::ChaseFar` only while an
+    // authored `_far.camtrackcs` binds. Without the record — a
+    // dashless/dev car, or a mode persisted across a session reload —
+    // no camera would ever activate (`--cockpit` or a menu-phase `C`
+    // press left the mode pointing at nothing: zero active cameras,
+    // dead render), so the mode falls back to Chase *here*.
     let pov = selected
         .def
         .as_ref()
         .and_then(|def| crate::dash::load_pov_cam(&vfs.0, &def.id));
-    let cam_mode = if *cam_mode == CameraMode::Cockpit && pov.is_none() {
-        commands.insert_resource(CameraMode::Chase);
-        CameraMode::Chase
-    } else {
-        *cam_mode
-    };
+    let tracks = selected
+        .def
+        .as_ref()
+        .map(|def| crate::camera::load_track_cams(&vfs.0, &def.id));
 
-    // Cameras. The chase boom is sized to the selected vehicle so a city
-    // bus and a roadster are both framed sensibly.
+    // Cameras. The chase rig binds the authored `camTrackCS` lenses
+    // when the records exist — near/far are per-vehicle authored views
+    // (HUD-3) — and falls back to a boom sized to the chassis so a
+    // city bus and a roadster are both framed sensibly.
     let chase = match &selected.def {
         Some(def) => {
             let [_w, h, d] = def.config.chassis_size;
+            let near = tracks
+                .as_ref()
+                .and_then(|t| t.near.as_ref())
+                .map(crate::camera::ChaseLens::authored)
+                .unwrap_or_else(|| crate::camera::ChaseLens::sized(h, d));
+            let far = tracks
+                .as_ref()
+                .and_then(|t| t.far.as_ref())
+                .map(crate::camera::ChaseLens::authored);
             ChaseCamera {
-                distance: d * 0.85 + 3.5,
-                height: h * 0.55 + 1.4,
-                look_height: h * 0.45,
+                near,
+                far,
                 ..default()
             }
         }
         None => ChaseCamera::default(),
     };
+    if selected.def.is_some() {
+        // F22-B.3 evidence (`trk=` on the smoke record): which lenses
+        // bound authored records vs the designed fallback.
+        commands.insert_resource(crate::camera::TrackReport {
+            near_authored: tracks.as_ref().is_some_and(|t| t.near.is_some()),
+            far_authored: tracks.as_ref().is_some_and(|t| t.far.is_some()),
+        });
+    }
+    let resolved = match *cam_mode {
+        CameraMode::Cockpit if pov.is_none() => CameraMode::Chase,
+        CameraMode::ChaseFar if chase.far.is_none() => CameraMode::Chase,
+        m => m,
+    };
+    if resolved != *cam_mode {
+        commands.insert_resource(resolved);
+    }
+    let cam_mode = resolved;
     let mut chase_cam = commands.spawn((
         owner,
         Camera3d::default(),
         Camera {
-            is_active: cam_mode == CameraMode::Chase,
+            is_active: matches!(cam_mode, CameraMode::Chase | CameraMode::ChaseFar),
             ..default()
         },
+        // The active lens authors the projection — a far-view reload
+        // starts on the far FOV rather than waiting a frame.
+        Projection::Perspective(chase.lens(cam_mode).projection()),
         chase,
         Transform::from_translation(spawn.position + Vec3::new(0.0, 4.0, 9.0)),
     ));

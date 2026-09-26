@@ -246,7 +246,19 @@ pub fn headless_smoke(
         .init_resource::<Assets<Mesh>>()
         .init_resource::<Assets<Image>>()
         .init_resource::<Assets<StandardMaterial>>()
-        .insert_resource(camera::CameraMode::Chase)
+        // `--cockpit`/`--far`/`--cam` view selection reaches the
+        // headless app through the config like `dev.mirror` — the
+        // record's `cam` pose then proves the authored interior eye /
+        // far chase lens, not a claim.
+        .insert_resource(if config.dev.camera.is_some() {
+            camera::CameraMode::Free
+        } else if config.dev.cockpit {
+            camera::CameraMode::Cockpit
+        } else if config.dev.far {
+            camera::CameraMode::ChaseFar
+        } else {
+            camera::CameraMode::Chase
+        })
         // F22-B.2: `--mirror` reaches the headless app through the
         // config, like `no_pvs` — the `mir=` record field reports the
         // strip camera's real state.
@@ -908,6 +920,14 @@ pub fn headless_smoke(
         .get_resource::<crate::dash::DashReport>()
         .map(|r| format!(" dash={r}"))
         .unwrap_or_default();
+    // F22-B.3 chase-rig evidence: which lenses bound authored
+    // `camTrackCS` records (`near+far`/`near`/`far`) vs the designed
+    // size fallback (`sized`). Inserted only when a stock vehicle
+    // spawned — dev-world records stay bit-identical.
+    let trk_detail = world_ecs
+        .get_resource::<crate::camera::TrackReport>()
+        .map(|r| format!(" trk={}", r.smoke_detail()))
+        .unwrap_or_default();
     // F22-B.2 mirror evidence, on-activity only like `surf=wet`:
     // `mir=on` when the strip camera renders, `mir=armed` when the
     // toggle is up but nothing renders (no player vehicle, or the dev
@@ -1293,7 +1313,7 @@ pub fn headless_smoke(
     // (DRV-2/DRV-3) and aimap variant (RACE-11) selected its content.
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{mir_detail}{ind_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{extra}",
+            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{extra}",
             driver.as_str(),
             config.difficulty.as_str(),
             session.phase().name(),

@@ -175,6 +175,13 @@ struct Cli {
     #[arg(long, conflicts_with = "cam")]
     cockpit: bool,
 
+    /// Start on the authored `_far.camtrackcs` chase lens (diagnostic
+    /// aid — how a `--frames`/`--screenshot` capture renders the F22-B.3
+    /// far view; render-only like `--cam`). Falls back to the chase
+    /// camera's near lens when the vehicle carries no far record.
+    #[arg(long, conflicts_with_all = ["cam", "cockpit"])]
+    far: bool,
+
     /// Start with the rear-view mirror strip up (diagnostic aid — how a
     /// `--frames`/`--screenshot` capture renders the F22-B.2 mirror
     /// while live input is frozen; render-only like `--cam`). Headless
@@ -764,6 +771,7 @@ fn main() {
             no_pvs: cli.no_pvs,
             horn: cli.horn,
             cockpit: cli.cockpit,
+            far: cli.far,
             mirror: cli.mirror,
             no_hud: cli.no_hud,
         },
@@ -942,6 +950,8 @@ fn main() {
         CameraMode::Free
     } else if cli.cockpit {
         CameraMode::Cockpit
+    } else if cli.far {
+        CameraMode::ChaseFar
     } else {
         CameraMode::Chase
     })

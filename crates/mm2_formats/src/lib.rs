@@ -9,6 +9,7 @@ pub mod aimap;
 pub mod bai;
 pub mod banger;
 pub mod bnd;
+pub mod camtrack;
 pub mod cardata;
 pub mod cpvs;
 pub mod crashdata;

@@ -1,3 +1,104 @@
+# Last iteration — F22-B.3: authored chase near/far rigs (iteration 74)
+
+Iteration 74 on `ralph/night` (baseline `6426bd2`, F21-A.1 review
+repair — external verify + review green, no blocking findings;
+nineteenth iteration of run `20260925T144723`). One coherent slice:
+the documented HUD-3 camera chain's missing third view — authored
+`camTrackCS` near/far chase rigs bound per vehicle.
+
+## Task selection
+
+No failing gate or blocking review finding, so the highest-value
+ready slice from the plan: F22-B was `active` with its
+"occlusion handling and chase-near/far pair remainder" open.
+Investigation found the plan's HUD-3 wording documents
+`C` = Chase Near → Cockpit → Chase Far while the code cycled
+Chase → Cockpit → Free (Free occupying the documented far slot —
+the DSN-48 deviation), and that every stock `vp*` authors
+`tune/camera/<id>_{near,far}.camtrackcs` (`camTrackCS` records;
+mm2hook recovers `camTrackCS : camCarCS` with `Offset`, `TrackTo`,
+`MinDist`/`MaxDist`/`MinMaxOn`, `MinSpeed`/`MaxSpeed`, `CollideType`,
+FOV/near/far and approach/steer/hill dynamics fields). The data and
+the documented chain both existed — only the binding was missing.
+
+## Actions
+
+- `mm2_formats::camtrack`: `TrackCamSpec` parser over the shared
+  tune grammar — optional `type:` tag preserved, known scalar/vec
+  fields decoded, sparse records tolerated, malformed/short vectors
+  treated absent, wrong root block rejected, unknown fields retained
+  for diagnostics.
+- `mm2_app::camera`: `CameraMode::ChaseFar`; `ChaseLens` carrying the
+  authored boom (`Offset` length = rest distance), `TrackTo` aim,
+  `MinDist`/`MaxDist` bounds, `MinSpeed..MaxSpeed` window,
+  `CollideType` flag and authored FOV/near/far, plus an `authored`
+  flag; `ChaseLens::sized` is the designed chassis-size fallback;
+  `load_track_cams` binds `tune/camera/<car>_{near,far}.camtrackcs`
+  through the VFS; `TrackReport` surfaces `trk=near+far|near|far|
+  sized` on the smoke record (stock sessions only — dev-world
+  records stay bit-identical).
+- `C` now runs the documented Chase-Near → Cockpit → Chase-Far chain
+  marker-driven (Chase-Far skipped when no far record exists); Free
+  is appended after the chain as the dev extension — the DSN-48
+  stand-in deviation is repaired. `V` still enters/leaves Cockpit.
+- `chase_follow` serves both chase modes off the active lens:
+  authored offset + `TrackTo` aim + velocity look-ahead, speed-window
+  boom extension toward `MaxDist` (designed reading), authored
+  projection bound per lens, and `CollideType != 0` ray-cast
+  occlusion pull-in excluding the player (0.25 m margin / 0.05 m
+  floor designed — UNK-36). Approach/steer/hill/reverse fields parse
+  but stay unbound pending UNK-36 recovery.
+- `session.rs`: loads both records, builds authored lenses or the
+  sized near fallback (never a fabricated far lens), inserts/removes
+  `TrackReport`, resolves invalid persisted modes (Cockpit without
+  `camPovCS`, ChaseFar without a far record → Chase) and spawns the
+  chase camera on the active lens's projection.
+- `input.rs`: the driving gate ran on `CameraMode::Chase` only —
+  cockpit couldn't steer. Now every non-Free mode drives (chase,
+  cockpit, far); only Free detaches input.
+- `DevOverrides::far` + `--far` select Chase-Far at spawn
+  (conflicts `--cam`/`--cockpit`, render-only, out of
+  `record_eligibility`).
+- `docs/original-rules.md`: HUD-3 row and DSN-48 corrected to the
+  real chain; new DSN-56 (rig binding + designed readings) and
+  UNK-36 (unrecovered `camTrackCS` dynamics semantics).
+
+## Evidence
+
+- `cargo test -p mm2_formats camtrack` — 4/4 (full record, wrong
+  root, short-vector absence, sparse tolerance).
+- `cargo test -p mm2_app --test camtrack` — 9/9 (chain order incl.
+  far-skip and absent-camera no-op, lens binding + authored
+  projection, speed-window extension, occlusion pull-in and
+  disabled-path, sized fallback, far-mode input, smoke `trk=`
+  shapes).
+- Retail headless (`fnv1a64` install, read-only): sf `vpbug`
+  `trk=near+far` `dash=11p/cam`; london `vpbus` `trk=near+far`;
+  sf `--far` headless pass.
+- Windowed captures: sf near vs `--far` frames show the authored
+  booms differ (far pulls back/up, pitch −10 vs +4 on the HUD `cam`
+  readout); cockpit capture unaffected.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean (exit 0, silent).
+- `cargo clippy --workspace --all-targets --all-features --
+  -D warnings` — clean (exit 0).
+- `cargo test --workspace` — green: every suite ok, 0 failures,
+  through the final doc-tests.
+
+## Classification / remaining open items
+
+- Authored-side verified: both `camTrackCS` records exist per stock
+  vehicle and bind through the VFS (`trk=near+far` on retail).
+- Designed readings (UNK-36): speed-window semantics + units, the
+  occlusion margin/floor, the `TrackTo` frame reading, and every
+  unbound approach/steer/hill/reverse field.
+- F22-B stays `active`: F22-AC05 atypical-vehicle framing/
+  transition validation and the remaining spec legs are still open.
+
+---
+
 # Last iteration — F21-A.1 review repair: falsified retail measurements (iteration 73)
 
 Iteration 73 on `ralph/night` (baseline `88ff7ac`, F21-A.1 — external

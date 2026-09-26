@@ -49,15 +49,18 @@ pub fn vehicle_input(
     race: Option<Res<RaceState>>,
     windows: Query<&Window>,
 ) {
-    // Driving controls are active only in chase-cam driving mode, with a
-    // playing session and a focused window. Anything else writes a zeroed
-    // input so the car rolls to a stop instead of holding stale controls.
+    // Driving controls are active in every drive view — the chase
+    // lenses and the cockpit (HUD-3's three views are all drive views);
+    // only Free (fly camera) detaches input, with a playing session and
+    // a focused window. Anything else writes a zeroed input so the car
+    // rolls to a stop instead of holding stale controls.
     // A race countdown locks input the same way (AC03) — the session is
     // already `Countdown` in the normal flow, but `input_locked` also
     // covers a race resource that outlives its gate.
     let race_locked = race.is_some_and(|r| r.input_locked() && !r.is_stale(session.generation()));
     let focused = windows.iter().all(|w| w.focused);
-    let driving = *cam_mode == CameraMode::Chase && session.is_playing() && focused && !race_locked;
+    let driving =
+        !matches!(*cam_mode, CameraMode::Free) && session.is_playing() && focused && !race_locked;
     if !driving {
         for mut vi in &mut vehicles {
             *vi = VehicleInput::default();

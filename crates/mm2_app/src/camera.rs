@@ -1,61 +1,243 @@
 //! Chase and free/debug cameras, independent of vehicle simulation.
 
-use avian3d::prelude::LinearVelocity;
+use avian3d::prelude::{LinearVelocity, SpatialQuery, SpatialQueryFilter};
 use bevy::{
     camera::Viewport,
     input::mouse::MouseMotion,
     prelude::*,
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
-use mm2_formats::dash::PovCamSpec;
+use mm2_assets::Vfs;
+use mm2_formats::{camtrack::TrackCamSpec, dash::PovCamSpec};
 use mm2_game::{PlayerVehicle, Session, SessionEntity, SessionPhase};
 
 /// Active camera mode.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CameraMode {
-    /// Smooth follow behind the player vehicle.
+    /// Chase-near: smooth follow on the vehicle's near lens
+    /// (`_near.camtrackcs` when authored, HUD-3).
     #[default]
     Chase,
     /// Authored `camPovCS` cockpit/dash view (HUD-3; F22-B.1).
     Cockpit,
-    /// Free-fly debug camera.
+    /// Chase-far: the vehicle's authored `_far.camtrackcs` lens
+    /// (HUD-3). The slot exists only while a record bound — the
+    /// `C` chain skips it otherwise.
+    ChaseFar,
+    /// Free-fly debug camera — a dev extension appended after the
+    /// documented near → cockpit → far chain (HUD-3, DSN-48).
     Free,
 }
 
 impl CameraMode {
-    /// `C` cycle order: Chase → Cockpit → Free → Chase (HUD-3).
+    /// `C` cycle order: Chase Near → Cockpit → Chase Far → Free →
+    /// Chase (HUD-3 documents the first three; Free is the dev
+    /// extension, DSN-48).
     fn next(self) -> Self {
         match self {
             Self::Chase => Self::Cockpit,
-            Self::Cockpit => Self::Free,
+            Self::Cockpit => Self::ChaseFar,
+            Self::ChaseFar => Self::Free,
             Self::Free => Self::Chase,
         }
     }
 }
 
-/// Chase camera tuning on the camera entity.
+/// One `camTrackCS` chase view distilled for the controller — the
+/// authored near or far rig, or a designed size-derived fallback when
+/// the vehicle ships no record. `offset`/`aim` are car-space: `+Z` is
+/// rearward (vehicle forward is `−Z`), `+Y` up.
+#[derive(Debug, Clone)]
+pub struct ChaseLens {
+    /// `Offset` — boom anchor; its length is the rest distance.
+    pub offset: Vec3,
+    /// `TrackTo` — the point the camera aims at.
+    pub aim: Vec3,
+    /// `MinDist`/`MaxDist` — boom-length bounds in metres. `MaxDist` is
+    /// also the extension target the speed window drives toward; the
+    /// authored `MinMaxOn` gate is folded in: unbounded records simply
+    /// produce no clamp.
+    pub dist_min: f32,
+    pub dist_max: f32,
+    /// `MinSpeed`/`MaxSpeed` — vehicle planar-speed window (m/s) across
+    /// which the boom extends from its rest length to `dist_max`
+    /// (designed reading; the record's approach-rate fields stay
+    /// verbatim in the spec).
+    pub speed_min: f32,
+    pub speed_max: f32,
+    /// `CollideType` nonzero: the boom pulls in front of world
+    /// geometry that would occlude the car.
+    pub collide: bool,
+    /// `CameraFOV`/`CameraNear`/`CameraFar` — projection.
+    pub fov_deg: f32,
+    /// `CameraNear`.
+    pub clip_near: f32,
+    /// `CameraFar`.
+    pub clip_far: f32,
+    /// Whether the values came from an authored record (smoke `trk=`
+    /// provenance — a sized fallback never claims authored data).
+    pub authored: bool,
+}
+
+impl ChaseLens {
+    /// Distill an authored `camTrackCS` record. Missing fields take
+    /// designed defaults — a sparse record still binds.
+    pub fn authored(spec: &TrackCamSpec) -> Self {
+        let offset = spec
+            .offset
+            .map(Vec3::from)
+            .unwrap_or(Vec3::new(0.0, 1.8, 5.0));
+        let rest = offset.length();
+        let min_max_on = spec.min_max_on.is_some_and(|v| v != 0.0);
+        Self {
+            offset,
+            aim: spec
+                .track_to
+                .map(Vec3::from)
+                .unwrap_or(Vec3::new(0.0, 1.0, 0.0)),
+            dist_min: if min_max_on {
+                spec.min_dist.unwrap_or(0.0).max(0.0)
+            } else {
+                0.0
+            },
+            // The cap never shrinks the rest boom — `MaxDist` is the
+            // extension target, not a shrink-to bound.
+            dist_max: spec.max_dist.unwrap_or(rest).max(rest),
+            speed_min: spec.min_speed.unwrap_or(0.0).max(0.0),
+            speed_max: spec.max_speed.unwrap_or(0.0).max(0.0),
+            collide: spec.collide_type.is_some_and(|c| c != 0.0),
+            fov_deg: spec.camera_fov.unwrap_or(70.0),
+            clip_near: spec.camera_near.unwrap_or(0.5).max(0.01),
+            clip_far: spec.camera_far.unwrap_or(600.0).max(1.0),
+            authored: true,
+        }
+    }
+
+    /// Designed boom sized from the chassis (`h`/`d` metres) — the
+    /// pre-authored fallback for a vehicle without records. Mirrors the
+    /// retired constants: rest boom `d*0.85 + 3.5` back, `h*0.55 + 1.4`
+    /// up, aim `h*0.45`, and the 0.06 m-of-boom-per-m/s stretch now
+    /// expressed as a 0–60 m/s window toward `rest + 3.6`.
+    pub fn sized(h: f32, d: f32) -> Self {
+        let offset = Vec3::new(0.0, h * 0.55 + 1.4, d * 0.85 + 3.5);
+        Self {
+            offset,
+            aim: Vec3::new(0.0, h * 0.45, 0.0),
+            dist_min: 0.0,
+            dist_max: offset.length() + 3.6,
+            speed_min: 0.0,
+            speed_max: 60.0,
+            collide: false,
+            fov_deg: PerspectiveProjection::default().fov.to_degrees(),
+            clip_near: PerspectiveProjection::default().near,
+            clip_far: PerspectiveProjection::default().far,
+            authored: false,
+        }
+    }
+
+    /// The perspective projection this lens asks for.
+    pub fn projection(&self) -> PerspectiveProjection {
+        PerspectiveProjection {
+            fov: self.fov_deg.to_radians(),
+            near: self.clip_near.max(0.01),
+            far: self.clip_far.max(1.0),
+            ..default()
+        }
+    }
+}
+
+/// The authored chase-lens pair for one vehicle — `_near` and `_far`
+/// `camTrackCS` records resolved through the VFS. An absent record
+/// stays `None`: the far slot is authored-only, never fabricated.
+pub struct TrackCams {
+    /// `tune/camera/<car>_near.camtrackcs`.
+    pub near: Option<TrackCamSpec>,
+    /// `tune/camera/<car>_far.camtrackcs`.
+    pub far: Option<TrackCamSpec>,
+}
+
+/// Read both authored chase-lens records for `car`.
+pub fn load_track_cams(vfs: &Vfs, car: &str) -> TrackCams {
+    let read = |suffix: &str| {
+        vfs.read_path(&format!("tune/camera/{car}_{suffix}.camtrackcs"))
+            .ok()
+            .and_then(|(bytes, _)| TrackCamSpec::parse(&String::from_utf8_lossy(&bytes)).ok())
+    };
+    TrackCams {
+        near: read("near"),
+        far: read("far"),
+    }
+}
+
+/// Smoke-record report of which chase lenses bound authored records
+/// (F22-B.3). Inserted only when a stock vehicle def is selected so
+/// dev-world records stay bit-identical.
+#[derive(Resource, Default, Debug)]
+pub struct TrackReport {
+    /// `_near.camtrackcs` bound (vs the designed size fallback).
+    pub near_authored: bool,
+    /// `_far.camtrackcs` bound — this also gates the `C`-chain far slot.
+    pub far_authored: bool,
+}
+
+impl TrackReport {
+    /// `near+far` / `near` / `far` / `sized`.
+    pub fn smoke_detail(&self) -> String {
+        match (self.near_authored, self.far_authored) {
+            (true, true) => "near+far".into(),
+            (true, false) => "near".into(),
+            (false, true) => "far".into(),
+            (false, false) => "sized".into(),
+        }
+    }
+}
+
+/// Chase camera rig on the camera entity: the near lens plus an
+/// optional far lens. A vehicle without authored records gets a
+/// designed size-derived near lens and no far slot.
 #[derive(Component)]
 pub struct ChaseCamera {
-    /// Distance behind the vehicle at rest, metres.
-    pub distance: f32,
-    /// Height above the vehicle, metres.
-    pub height: f32,
-    /// Extra distance per m/s of speed.
-    pub speed_stretch: f32,
-    /// Position smoothing (1/s).
+    /// Chase-near lens (`CameraMode::Chase`).
+    pub near: ChaseLens,
+    /// Chase-far lens (`CameraMode::ChaseFar`) — `Some` only when the
+    /// vehicle's `_far.camtrackcs` bound.
+    pub far: Option<ChaseLens>,
+    /// Position smoothing (1/s) — designed tracking lag; the authored
+    /// approach/dynamics fields stay unparsed for a later leg.
     pub smoothness: f32,
-    /// Look-ahead point height above vehicle origin.
-    pub look_height: f32,
+}
+
+impl ChaseCamera {
+    /// The lens the given mode drives — `ChaseFar` falls back to the
+    /// near lens rather than a missing camera.
+    pub fn lens(&self, mode: CameraMode) -> &ChaseLens {
+        match mode {
+            CameraMode::ChaseFar => self.far.as_ref().unwrap_or(&self.near),
+            _ => &self.near,
+        }
+    }
 }
 
 impl Default for ChaseCamera {
     fn default() -> Self {
         Self {
-            distance: 7.5,
-            height: 3.0,
-            speed_stretch: 0.06,
+            near: ChaseLens {
+                offset: Vec3::new(0.0, 3.0, 7.5),
+                aim: Vec3::new(0.0, 1.0, 0.0),
+                dist_min: 0.0,
+                // 7.5²+3² rest ≈ 8.08; +3.6 keeps the old 0.06/m/s
+                // stretch inside the 0–60 m/s window.
+                dist_max: 11.68,
+                speed_min: 0.0,
+                speed_max: 60.0,
+                collide: false,
+                fov_deg: PerspectiveProjection::default().fov.to_degrees(),
+                clip_near: PerspectiveProjection::default().near,
+                clip_far: PerspectiveProjection::default().far,
+                authored: false,
+            },
+            far: None,
             smoothness: 6.0,
-            look_height: 1.0,
         }
     }
 }
@@ -119,13 +301,14 @@ type SessionCameras<'w, 's> = Query<
     ),
 >;
 
-/// `C` cycles the HUD-3 view chain (Chase → Cockpit → Free — Free is a
-/// dev extension beyond the authored chase/cockpit pair, DSN-48);
-/// `V` is the dashboard toggle — it jumps straight into or out of the
-/// cockpit view. (The original's dash key was `D`, but enhanced input
-/// put steering on `A`/`D` — the binding moves, the behavior stays;
-/// HUD-3, DSN-48.) A mode whose camera was never spawned (no authored
-/// `camPovCS`) is skipped so the key never dead-ends on a black screen.
+/// `C` cycles the HUD-3 view chain — Chase Near → Cockpit → Chase Far,
+/// with the dev Free camera appended (DSN-48); `V` is the dashboard
+/// toggle — it jumps straight into or out of the cockpit view. (The
+/// original's dash key was `D`, but enhanced input put steering on
+/// `A`/`D` — the binding moves, the behavior stays; HUD-3, DSN-48.) A
+/// mode whose camera was never spawned (no authored `camPovCS`, no
+/// `_far.camtrackcs` lens) is skipped so the key never dead-ends on a
+/// black screen.
 ///
 /// Activation is marker-driven: each `Camera` carries exactly one of
 /// `ChaseCamera`/`CockpitCamera`/`FreeCamera`, and only the matching
@@ -141,13 +324,16 @@ pub fn toggle_camera(
     let have = |m: CameraMode, cams: &SessionCameras| -> bool {
         cams.iter().any(|(_, c, p, f)| match m {
             CameraMode::Chase => c.is_some(),
+            // The far slot is authored-only: a chase rig without a
+            // `_far` lens has no second view to activate.
+            CameraMode::ChaseFar => c.is_some_and(|c| c.far.is_some()),
             CameraMode::Cockpit => p.is_some(),
             CameraMode::Free => f.is_some(),
         })
     };
     let next = if keys.just_pressed(KeyCode::KeyC) {
         let mut m = mode.next();
-        for _ in 0..3 {
+        for _ in 0..4 {
             if have(m, &cams) {
                 break;
             }
@@ -177,7 +363,7 @@ pub fn toggle_camera(
     *mode = next;
     for (mut cam, chase, pov, free) in &mut cams {
         let active = match *mode {
-            CameraMode::Chase => chase.is_some(),
+            CameraMode::Chase | CameraMode::ChaseFar => chase.is_some(),
             CameraMode::Cockpit => pov.is_some(),
             CameraMode::Free => free.is_some(),
         };
@@ -272,30 +458,87 @@ pub fn retarget_hud(
     }
 }
 
-/// Smooth follow: position eased toward a speed-stretched boom, look at the
-/// vehicle with a slight velocity lead.
+/// Occlusion pull-in margin — the boom stops this far short of the
+/// wall the ray found, and never lands closer than the floor to the
+/// aim point. Designed constants (the record carries no margin).
+const OCCLUSION_MARGIN: f32 = 0.25;
+const OCCLUSION_FLOOR: f32 = 0.05;
+
+/// Smooth follow on the active chase lens: the boom eases toward its
+/// authored anchor extended across the speed window, the projection
+/// follows the lens's `CameraFOV`/`CameraNear`/`CameraFar`, and
+/// `CollideType` pulls the camera in front of occluding geometry.
 pub fn chase_follow(
     time: Res<Time>,
     mode: Res<CameraMode>,
-    mut cams: Query<(&ChaseCamera, &mut Transform)>,
-    vehicle: Query<(&GlobalTransform, &LinearVelocity), With<PlayerVehicle>>,
+    spatial: Option<SpatialQuery>,
+    mut cams: Query<(&ChaseCamera, &mut Transform, &mut Projection)>,
+    vehicle: Query<(Entity, &GlobalTransform, &LinearVelocity), With<PlayerVehicle>>,
 ) {
-    if *mode != CameraMode::Chase {
+    if !matches!(*mode, CameraMode::Chase | CameraMode::ChaseFar) {
         return;
     }
-    let Ok((veh_xf, vel)) = vehicle.single() else {
+    let Ok((veh_ent, veh_xf, vel)) = vehicle.single() else {
         return;
     };
     let veh_pos = veh_xf.translation();
     let veh_rot = veh_xf.rotation();
-    let planar_speed = (vel.x * vel.x + vel.z * vel.z).sqrt();
-    for (cam, mut xf) in &mut cams {
-        let back = veh_rot * Vec3::Z; // vehicle forward is -Z
-        let dist = cam.distance + planar_speed * cam.speed_stretch;
-        let target = veh_pos + back * dist + Vec3::Y * cam.height;
+    let planar_speed = vel.x.hypot(vel.z);
+    for (cam, mut xf, mut proj) in &mut cams {
+        let lens = cam.lens(*mode);
+        // The lens owns the projection — write-on-diff so toggling
+        // near↔far swaps the authored FOV/clips without churning change
+        // detection every frame.
+        let want = lens.projection();
+        let stale = match &*proj {
+            Projection::Perspective(p) => {
+                p.fov != want.fov || p.near != want.near || p.far != want.far
+            }
+            _ => true,
+        };
+        if stale {
+            *proj = Projection::Perspective(want);
+        }
+
+        let look = veh_pos + veh_rot * lens.aim + vel.0 * 0.05;
+        let rest = lens.offset.length();
+        let frac = if lens.speed_max > lens.speed_min {
+            ((planar_speed - lens.speed_min) / (lens.speed_max - lens.speed_min)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let dist = (rest + frac * (lens.dist_max - rest))
+            .clamp(lens.dist_min.min(rest), lens.dist_max.max(lens.dist_min));
+        let dir = if rest > 1e-3 {
+            lens.offset / rest
+        } else {
+            Vec3::Z
+        };
+        let target = veh_pos + veh_rot * (dir * dist);
         let t = 1.0 - (-cam.smoothness * time.delta_secs()).exp();
-        xf.translation = xf.translation.lerp(target, t);
-        xf.look_at(veh_pos + Vec3::Y * cam.look_height + vel.0 * 0.05, Vec3::Y);
+        let mut next = xf.translation.lerp(target, t);
+
+        // CollideType: clamp the smoothed position in front of whatever
+        // would occlude the car. Clamping the *smoothed* candidate —
+        // not the far target — keeps the pull-in immediate (no lagging
+        // through a wall) while expansion still eases back out.
+        if lens.collide
+            && let Some(spatial) = &spatial
+        {
+            let seg = next - look;
+            let len = seg.length();
+            if len > 1e-3
+                && let Ok(d) = Dir3::new(seg)
+            {
+                let filter = SpatialQueryFilter::from_excluded_entities([veh_ent]);
+                if let Some(hit) = spatial.cast_ray(look, d, len, true, &filter) {
+                    next = look + d * (hit.distance - OCCLUSION_MARGIN).max(OCCLUSION_FLOOR);
+                }
+            }
+        }
+
+        xf.translation = next;
+        xf.look_at(look, Vec3::Y);
     }
 }
 
