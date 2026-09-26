@@ -1,3 +1,122 @@
+# Last iteration — F22-A.6 the race standings cluster (iteration 71)
+
+Iteration 71 on `ralph/night` (baseline `f24fa53`, F22-A.5 — external
+verify + review green, no blocking findings; sixteenth iteration of
+run `20260925T144723`). One coherent slice: HUD-2's remaining
+instruments — the checkpoint list, laps record and place indicator —
+bound to the authored `digitac_*_half` glyph set, plus the three
+non-blocking review findings on F22-A.5's rasterizer.
+
+## Task selection
+
+Review passed with three verification gaps worth folding in while
+adjacent: unguarded file-supplied strip indices (panic risk on a
+hostile mod pkg), no best-LOD chunk dedupe (`pkg_to_parts` parity),
+and a missing why-comment on `rasterize_tri`'s targeted allow. The
+named F22-A remainder was the checkpoint list/lap/place instruments —
+previously gated on a false premise: iteration 70 recorded the
+`race_*` tiles as "alpha-masked TGAs the reader rejects". Direct
+inspection this iteration proved both halves wrong: they are plain
+24bpp TGA 2.0 files that decode cleanly through `city::load_image`,
+and their content is menu/results artwork ("Laps", "Opponents",
+"Race Records", "Select Vehicle" panels) — not in-race instrument
+labels. The authored digit path the timer already binds
+(`digitac_*_half`) is the right art for compact standings readouts.
+
+## What landed
+
+- `mm2_app::racestat` (new) — `spawn_race_stats` binds all ten
+  authored `digitac_*_half` stems through `city::load_image` (any
+  miss → `absent:missing-glyphs`, never a half-bound cluster or
+  substitute art) and spawns a `SessionEntity`-stamped top-right
+  translucent-plate column: `PLACE n/total` (the local participant's
+  `live_order` standing; hidden while the field is a single
+  participant — the `pos=` contract), `LAP n/total` (spawned only for
+  `Ordered` definitions; a resolved participant parks at
+  `laps/laps`), `CHECKPOINTS` listing every authored gate's 1-based
+  index in the authored digits (cleared dims, the armed objective —
+  `next` under `Ordered`, the arrow's `navigation_target` pick
+  honouring `TargetSelection` under `AnyOrder` — lights warm), and a
+  `FIN` entry under AnyOrder-with-finish that arms once every gate
+  clears. `update_race_stats` reads `RaceState`/`RaceProgress`/
+  `live_order`/`navigation_target` — authoritative state only, no
+  parallel counters — and hides on `Complete`, stale generation,
+  no-race and under the `H` gate while `RaceStatReport` keeps
+  composing demand like `tmr=`'s `display`.
+- Wiring: `lib.rs` module export; `session.rs` event-arm spawn +
+  teardown `remove_resource`; `smoke.rs` appends ` sta=<glyphs>g/
+  p<n>of<m>/l<n>of<m>/c<n>of<m>` (`-` per idle instrument) or
+  `absent:<why>` on event sessions only — cruise/dev-world records
+  stay bit-identical — and schedules `update_race_stats` after
+  `drive_session` headless; `main.rs` same ungated slot so
+  `--frames`/`--screenshot` captures see live state; `camera.rs`
+  `HudNodes` retargets `RaceStats` to the active world camera.
+- navarrow review repairs: strip indices are bounds-checked before
+  the vertex-table index (`absent:bad-index` rather than a panic);
+  the rasterizer now picks the best-LOD chunk per stem via
+  `lod_split` and skips `shadow`/`dmg` stems, matching
+  `city.rs::pkg_to_parts`; the `too_many_arguments` allow carries its
+  why-comment.
+
+## Gates
+
+- `cargo test -p mm2_app --test navarrow` — 17/17 (+2: bad-index
+  regression, best-LOD/shadow exclusion over a multi-chunk fixture).
+- `cargo test -p mm2_app --test racestat` — 18/18: slot composition,
+  full/partial/missing glyph binding (no half-bound cluster), the
+  Ordered/AnyOrder spawn shapes (lap row and `FIN` scoping), live
+  place off `live_order` through real `advance` crossings, cleared/
+  armed/pending gate tints, `FIN` arming, `Complete`/stale/cruise
+  release, the `H` gate hiding while the report composes,
+  `SessionEntity` teardown, synthetic-event `sta=` legs through the
+  real `headless_smoke` pipeline, dev-world field absence.
+- `cargo fmt --all -- --check` clean; `cargo clippy --locked
+  --workspace --all-targets --all-features -- -D warnings` clean;
+  `cargo test --locked --workspace` green.
+- Retail headless (`fnv1a64:e91e6cd4b2ae30d9`, read-only):
+  `--city sf --event checkpoint:0 --frames 200` →
+  `sta=10g/p3of7/-/c0of6` beside `pos=3/7`/`cp=0/6` in the dev
+  telemetry — the instrument agrees with the authoritative line;
+  `--city london --event blitz:0` → `sta=10g/-/-/c0of3` (solo blitz
+  field hides the place row correctly);
+  `--city sf --event circuit:0` → `sta=10g/p5of5/l1of3/c0of9` beside
+  `lap=1/3`/`pos=5/5`/`cp=0/9` — the Ordered lap row on authored data.
+- Retail windowed (Apple M1, Metal): `--city sf --event checkpoint:0
+  --frames 150 --screenshot` renders the top-right cluster — `PLACE
+  3/7`, `CHECKPOINTS 1..6`, `FIN` — in the authored green digits beside
+  the arrow/timer/indicators (`/tmp/f22a6_stats.png`, local, not
+  committed).
+
+## Classification
+
+The instruments are documented original members of `mmHUD` (HUD-2)
+and the digit artwork is verified retail content. Everything about
+*composition* is designed (DSN-54/UNK-34): cluster placement
+(top-right, opposite the authored map inset), the dev-font
+`PLACE`/`LAP`/`CHECKPOINTS`/`FIN` labels (no authored label art was
+identified — the `race_*` tiles are menu panels, not instrument
+labels), the `n/total` pair form, per-gate index list (vs any
+remaining-count form the original might have drawn), and the
+cleared/armed tints. `docs/original-rules.md` updated: HUD-2,
+DSN-54, UNK-34, plus the `race_*` correction propagated into
+DSN-53/UNK-32.
+
+## Remaining open items
+
+- F22-A stays `active` — every HUD-2 instrument now has an authored-
+  art binding, but F22-AC01–AC06 acceptance evidence is still
+  partial (multi-leg retail runs over `H`/`I`/restart interactions),
+  and every instrument's original presentation is unrecovered
+  (UNK-30..34 — designed readings all).
+- UNK-34 needs a retail-original capture or recovered draw bodies to
+  pin the real standings layout — our cluster verifies our own
+  rendering, not the original's.
+- The armed-gate tint is legible but subtle against the authored
+  green digits — worth revisiting if a retail capture shows a
+  stronger cue.
+
+---
+
 # Last iteration — F22-A.5 the authored nav arrow (iteration 70)
 
 Iteration 70 on `ralph/night` (baseline `3e0126d`, F22-A.4 — external

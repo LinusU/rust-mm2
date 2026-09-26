@@ -263,6 +263,9 @@ pub fn drive_session(
             // Same for the nav arrow's report (F22-A.5) — the node
             // itself is `SessionEntity`-stamped.
             commands.remove_resource::<crate::navarrow::NavArrowReport>();
+            // Same for the standings cluster's report (F22-A.6) — the
+            // root itself is `SessionEntity`-stamped.
+            commands.remove_resource::<crate::racestat::RaceStatReport>();
             // `TireConditions` stays: it is a system input (the impact
             // filter and telemetry read `Res` every frame), and
             // `load_session_world` re-stamps it from the next session's
@@ -1270,6 +1273,19 @@ pub fn load_session_world(
             let timer_report =
                 crate::racetime::spawn_race_timer(&mut commands, &vfs.0, &mut assets.images, owner);
             commands.insert_resource(timer_report);
+            // F22-A.6: the remaining HUD-2 instruments — place
+            // indicator, laps record (`Ordered`) and the checkpoint
+            // list — bound to the authored `digitac_*_half` glyphs
+            // through the same VFS path; `absent` on the report when
+            // they cannot bind.
+            let stat_report = crate::racestat::spawn_race_stats(
+                &mut commands,
+                &vfs.0,
+                &mut assets.images,
+                owner,
+                &def,
+            );
+            commands.insert_resource(stat_report);
             // F16-B: the event's reward + availability surface —
             // consumed by `record_session_results` while the session
             // lives, removed by teardown so a following cruise never
