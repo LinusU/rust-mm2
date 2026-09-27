@@ -1,5 +1,131 @@
-# Last iteration — F18-B.4: wheel surface particles
-# (iteration 84)
+# Last iteration — F18-B.5: environmental pre-race commentary cues
+# (iteration 85)
+
+Iteration 85 on `ralph/night` (baseline `c0517af` — the F18-B.4 docs
+commit; external verify + review green; thirtieth iteration of run
+`20260925T144723`). One coherent slice: the `aud/spchdata`
+commentary grammar is recovered and its environmental
+`WEATHER`/`TIMEOFDAY` pre-race cue families now bind and sequence
+through the session audio path.
+
+## Task selection
+
+The plan's F18-B row named "`wearain` commentary cues" as the next
+leg. Retail carries the full system: `aud/spchdata` ships 526 cue
+CSVs (`al1..al6`, `as1/as2/as4/as5`, `ccs`, `ccl` speaker dirs plus
+`sf`/`london` announcer registries) and the exe names the whole
+binding — `aud\spchdata\as%d`/`\al%d`, `%s_prerace`, the
+`WEATHER`/`TIMEOFDAY`/`PRERACE`/`FINALCHECKPOINT`/`RESULTS*`/
+`UNLOCK*`/`CNR*`/`BULLSHIT` section headers, the
+`weaclr`/`weacldy`/`weafog`/`wearain` + `timemorn`/`timenoon`/
+`timeeve`/`timenight` prerace stems and `nospeech`. The cue grammar
+(`<prefix>,<end>,<add>[,extra]` under `X header,,` sections → waves
+`<speaker><prefix><NN>`) measures cleanly against the corpus — every
+row fits `int,int[,int]` — so the environmental leg is a recovered
+data binding; the draw shape/cadence are designed readings
+(DSN-63, UNK-25).
+
+## Findings and actions
+
+- **`mm2_formats::spchdata`** (new) — `CueTable`/`CueSection`/
+  `CueRow`/`AnnouncerIndex`: the `Name prefix/type header,end sufix
+  value,sufix add value` column header, `X header,,` section
+  markers, `<prefix>,<end>,<add>[,extra…]` rows with the C&R fourth
+  column and `AL1\AL1ROBROB`-style qualified prefixes preserved;
+  `sf.csv`/`london.csv` registries parse `Num announcers`/`prefix`
+  (5/`AS`, 6/`AL`). Malformed rows, rows outside sections, missing
+  headers, duplicate sections and non-positive/negative ranges all
+  diagnose; `ccl/cc_cpoint_indexinfo.csv` (a third bare-index
+  grammar) is diagnosed, not force-fit.
+- **`mm2_game::audio`** — `prerace_weather_stem`/`prerace_tod_stem`
+  (the exe-ordered selector→stem maps, matching the measured `.ltNN`
+  grid — documented binding, not designed), `draw_speaker` (1-based
+  over the authored count — the `as3` gap stays a real draw gap),
+  `draw_cue_suffix` (`add + 1 + rng % end` — the designed reading;
+  `add` is 0 on every live retail weather/time row),
+  `cue_wave_stem` (flat: `<speaker><prefix><NN>`;
+  separator-qualified prefixes name their own leaf — the C&R
+  shape).
+- **`mm2_app::audio`** — `CommentaryAudio` session resource (bound
+  in `load_session_world` off the shared `effective_conditions`
+  pick; dev worlds bind none), `CommentaryVoice`,
+  `VoiceKind::Commentary`, `AudioReport.commentary`, and
+  `commentary_voices` (Update after `drive_session`, both
+  schedules): resolves the registry → speaker → `<stem>_prerace`
+  table → section → first row → suffix → wave chain once on the
+  first `Countdown`/`Playing` frame, then sequences the ≤2 decoded
+  clips as `SessionEntity`-stamped `PlaybackMode::Despawn`
+  one-shots — each after the prior clip's decoded duration +
+  `COMMENTARY_GAP` 0.25 s (cadence designed). Every miss counts
+  `failed` once, never retried, never substituted (F18-AC06); all
+  draws ride one `COMMENTARY_DOMAIN`-separated `NavRng` off the
+  session seed (req-5 deterministic leg). `PcmAudio::duration()`
+  added for sequencing.
+- **`session.rs`** — inserts `CommentaryAudio` beside
+  `WeatherAudio`; teardown removes it, the entity sweep reclaims
+  stamped voices.
+- **`smoke.rs`** — `aud=` gains `/<n>q` only when a cue spawned;
+  misses surface through shared `+Nx` — quiet records stay
+  bit-identical.
+- **`mm2_formats/src/lib.rs`, `mm2_game/src/lib.rs`** — module
+  exposure only.
+
+## Evidence
+
+- `cargo test -p mm2_formats` — spchdata legs: weather/time
+  sections, C&R qualified prefixes + fourth-column preservation,
+  bare-index diagnostic, malformed/orphan/missing-header/
+  undrawable-range diagnostics, both registries.
+- `cargo test -p mm2_game` — stem maps, speaker/suffix draws,
+  flat vs qualified `cue_wave_stem` (`al1robrob05` pin).
+- `cargo test -p mm2_app --test audio` — 85/85 incl. the F18-B.5
+  suite: dev-world none, city bind through the production
+  `load_session_world` path, missing registry/table/wave counted
+  once with no substitution, seeded replay, weather-before-time
+  ordering, teardown sweep.
+- Retail (`fnv1a64:e91e6cd4b2ae30d9`, headless):
+  - sf `--weather 3 --time-of-day 1` → `aud=…/2q` — both
+    environmental cues resolved and played.
+  - london `--weather 2 --time-of-day 3` → `aud=…/1q+2d+1x` — the
+    draw landed `al5`: its `weafog_prerace.csv` authors `WEAFOG`
+    while the archive ships `al5weasfog01/02` — a genuine authored
+    gap, counted once and never substituted; `timenight` still
+    played. (Companion quirk verified: every `weacldy` table
+    authors `WEACLD`; `as3` is a real draw gap inside SF's `5`.)
+  - sf `checkpoint:0` event → `aud=…/2q` inside the countdown
+    window on the event's authored clear-morning conditions.
+  - `sunk=0` throughout — headless has no output device; the `q`
+    counts prove resolve→spawn, not audibility.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --workspace` — all suites green.
+
+## Classification / remaining open items
+
+- Verified data: the cue-table/registry grammars, section names,
+  stem lists, wave inventory, the exe's directory/format strings,
+  the `as3` gap and the `al5` `weafog`/`weasfog` authored mismatch.
+- Designed (DSN-63): the suffix-draw shape (`add + 1 + rng % end`),
+  the 1-based speaker draw, weather-before-time sequencing,
+  duration + 0.25 s cadence, `COMMENTARY_VOLUME` 1.0, the
+  `COMMENTARY_DOMAIN` stream split.
+- Unknown (UNK-25): the original's speaker-pick, `add`/fourth-column
+  semantics, cue cadence, gap-draw behavior, and every
+  non-prerace section's trigger (`PRERACE`/`RESULTS*`/`UNLOCK*`/
+  `CNR*`/`BULLSHIT` — F08 scope).
+- No audible-output or playtest evidence — headless proves
+  resolve→spawn→despawn; F18-AC05's audio leg stays open.
+- F18-B stays `active`: non-prerace cue sections, wetness
+  presentation beyond particles, and weather-state replication
+  (req 5 network leg → F24+) remain.
+
+---
+
+# Prior iterations
 
 Iteration 84 on `ralph/night` (baseline `d26dc0d` — the F18-B.3 docs
 commit; external verify + review green; twenty-ninth iteration of run

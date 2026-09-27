@@ -191,8 +191,34 @@ time) while dry sessions emit nothing. Retail
 `aud=0h/58v/0s/4l/4a/1r/4i/8c/1k/0g/31e/16n/2m/1t+22d` — both beds
 resolved and one clap fired inside the delay window, `0s` still
 honestly reporting no output device; `--weather 0` emits no `m`/`t`
-fields. The `al*wearain*`/`as*wearain*` commentary cues remain
-unbound.
+fields.
+
+**Commentary (F18-B.5):** the `aud/spchdata` cue grammar below now
+parses (`mm2_formats::spchdata`) and its environmental `WEATHER`/
+`TIMEOFDAY` prerace families are runtime-bound (DSN-63). A
+session-scoped `CommentaryAudio` reads `aud/spchdata/<city>.csv` and
+the shared `effective_conditions` pick — the selector grid is
+documented (the exe's `weaclr`/`weacldy`/`weafog`/`wearain` +
+`timemorn`/`timenoon`/`timeeve`/`timenight` string block matches the
+measured `.ltNN` order) — so `.selector` maps onto
+`<stem>_prerace` tables. One `COMMENTARY_DOMAIN`-separated `NavRng`
+draws the speaker index once, then per cue a suffix inside the
+authored `1..=end` range with `add` applied (the designed draw
+reading — `add` is 0 on every live retail weather/time row);
+`commentary_voices` sequences the decoded clips as bounded
+`SessionEntity`-stamped `Despawn` one-shots (`VoiceKind::Commentary`),
+each after the prior clip's decoded duration + `COMMENTARY_GAP`
+0.25 s (cadence designed). Every miss — absent registry, table-less
+speaker, missing section, undrawable range, unresolvable wave —
+counts `AudioReport.failed` once and plays nothing, never
+substituted (F18-AC06); `aud=` gains `/<n>q` only when a cue
+spawned. Retail (`fnv1a64:e91e6cd4b2ae30d9`, headless): sf
+`--weather 3 --time-of-day 1` → `aud=…/2q`; london
+`--weather 2 --time-of-day 3` → `1q+1x` — the draw landed `al5`,
+whose authored `WEAFOG` prefix has no shipped wave (see below),
+counted and never replaced while `timenight` still played; sf
+`checkpoint:0` event → `2q` inside countdown on the event's authored
+conditions. The non-prerace sections stay unbound (F08).
 Everything below is measured data structure; runtime semantics are
 unverified unless noted.
 
@@ -213,10 +239,11 @@ order + offsets preserved):
 
 240 902 980 bytes of PCM, ≈ 10 235 s total. Layout:
 
-- `aud/aud11/{al1..al6, as1..as5, ccl, ccs}` — 1 831 files, plus 226 at
-  the root. Filenames carry a rate suffix (`*.11k.wav`); `al*`/`as*`
-  look like speech/voice lines (the `spchdata` CSVs below appear to be
-  their cue tables — inferred).
+- `aud/aud11/{al1..al6, as1,as2,as4,as5, ccl, ccs}` — 1 831 files, plus
+  226 at the root. Filenames carry a rate suffix (`*.11k.wav`);
+  `al*`/`as*`/`cc*` are the speech lines the `spchdata` cue tables
+  name — verified, `## Speech cue tables` below. `as3` exists in
+  neither tree: an authored gap inside SF's `Num announcers 5`.
 - `aud/aud22/{amb3d, creature3d, engines, horns, impacts, sirens,
   surfaces, suspension}` — 292 files plus 88 at the root, `*.22k.wav`
   rate suffixes. These are the samples the cardata tables reference.
@@ -390,6 +417,46 @@ The audit verifies every member resolves.
 - `player/suspensionaudio.csv`, `player/tirewobble.csv`: single-row
   band tables (suspension thump / wobble samples).
 
+## Speech cue tables (`aud/spchdata`)
+
+526 text CSVs — the last large formerly-unparsed audio corpus — now
+parsed by `mm2_formats::spchdata` (F18-B.5, AUD-12). The exe names
+the whole chain: `aud\spchdata`, `aud\spchdata\as%d`/`\al%d`
+(SF / London announcer indices), `\ccs`/`\ccl` (crash-course
+SF / London), `%s_prerace`, the section headers `WEATHER` /
+`TIMEOFDAY` / `PRERACE` / `FINALCHECKPOINT` / `FINALLAP` /
+`RACEPROGRESS` / `RESULTS*` / `UNLOCK*` / `VEHICLEPRERACE` /
+`VEHICLEENDRACE` / `DAMAGEPENALTY` / `CNRLONDON` /
+`CNRSANFRANCISCO` / `BULLSHIT`, the prerace stems `weaclr` /
+`weacldy` / `weafog` / `wearain` / `timemorn` / `timenoon` /
+`timeeve` / `timenight`, `.11K`, and `nospeech`. Two schemas:
+
+- **Cue tables** `<speaker>/<table>.csv` — a column header
+  `Name prefix/type header,end sufix value,sufix add value`, then
+  `<NAME> header,,` section markers whose rows are
+  `<prefix>,<end>,<add>[,extra…]`. A cue row names a wave
+  `<speaker><prefix><NN>` — `as1` + `WEARAIN` + `02` →
+  `aud/aud11/as1/as1wearain02.11k.wav` — with `NN` inside the
+  authored `1..=end` range. C&R rows add a fourth numeric column and
+  author speaker-qualified prefixes (`AL1\AL1ROBROB` →
+  `al1robrobNN`); `add`/`extra` semantics are unrecovered.
+- **City registries** `aud/spchdata/<city>.csv` (sf + london) —
+  `Num announcers` then `prefix` pairs (`5`/`AS`, `6`/`AL`) naming
+  the `as%d`/`al%d` speaker dirs. Speaker dirs present:
+  `al1..al6`, `as1/as2/as4/as5`, `ccs`, `ccl` — `as3` sits inside
+  SF's authored count but ships no tables or waves (an authored
+  draw gap).
+
+Measured authored quirks kept verbatim, never normalized: `al5`'s
+`weafog_prerace.csv` authors `WEAFOG` but ships `al5weasfog01/02`
+waves — a dead cue family on that one speaker; every
+`weacldy_prerace.csv` authors `WEACLD` (the wave stems match the
+row, not the filename); `ccl/cc_cpoint_indexinfo.csv` is a
+third bare-index grammar (`Crash Course Index`/`Past Index`) the
+parser diagnoses rather than force-fits. The non-prerace sections'
+triggers — `RESULTS`, `UNLOCK`, C&R progress — stay unbound
+(F08 scope).
+
 ## Cross-checks (retail)
 
 - **160 distinct sample names** referenced by parsed tables; **159
@@ -406,11 +473,13 @@ The audit verifies every member resolves.
 
 ## Deferred (F08 scope)
 
-552 text CSVs stay unparsed: `aud/spchdata/**` (526 — speech cue tables
-for the `al*`/`as*`/`cc*` wave trees) and `aud/creaturedata/**` (21 —
-ped/ambient voice tables; verified plain text: `Min speed,Max speed,
-min time in range,…` headers) plus `aud/dmusic/csv_files` (5). Three
-`.bat` work files (`renshit.bat` etc.) are extras.
+`aud/spchdata/**` (526) now parses — `## Speech cue tables`; only the
+environmental prerace families are runtime-bound, the event/result/
+C&R cue sections stay unbound. Still unparsed: `aud/creaturedata/**`
+(21 — ped/ambient voice tables; verified plain text:
+`Min speed,Max speed,min time in range,…` headers) plus
+`aud/dmusic/csv_files` (5). Three `.bat` work files (`renshit.bat`
+etc.) are extras.
 
 ## Open semantics
 
@@ -433,6 +502,13 @@ min time in range,…` headers) plus `aud/dmusic/csv_files` (5). Three
   vpsemi have no recovered meaning; also whether the original holds
   the horn for the press duration or retriggers it — the runtime
   fires one authored clip per press as a designed policy.
+- `spchdata` draw semantics: the cue-table grammar parses and the
+  `WEATHER`/`TIMEOFDAY` prerace families bind (DSN-63), but the
+  original's speaker-index draw, `sufix add`/fourth-column semantics,
+  suffix-draw shape, cue cadence/sequencing and gap-draw behavior
+  (e.g. `as3`, `al5weafog`) are unrecovered; every non-prerace
+  section's trigger (`PRERACE`/`FINALCHECKPOINT`/`RESULTS*`/
+  `UNLOCK*`/`CNR*`/`BULLSHIT`) stays unknown.
 - Whether `aud11` variants ever serve non-speech references (the
   runtime `WaveBank` prefers `aud22` on a stem tie, siren stems the
   `aud/*/sirens/` subtree first — both designed choices).
