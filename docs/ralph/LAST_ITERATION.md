@@ -101,8 +101,11 @@ approximation, so the consumer is a designed reading of authored inputs
 - Unknown (UNK-40): the original `asParticles` integrator, anchor,
   coverage policy, atlas layout and presentation; `snow`'s runtime
   binding.
-- **No rendered screenshot or playtest of rain exists** — evidence is
-  headless counts only; F18-AC03's visual leg stays open.
+- A headless capture (`--weather 3 --cam=-1319,67,255,180,-12
+  --frames 90 --screenshot`, retail sf — reproducible, kept local)
+  shows faint droplet streaks around the camera: the quads render.
+  **No playtest or parity comparison against the original exists** —
+  F18-AC03's visual leg stays open.
 - F18-B stays `active`: precipitation audio hooks (`wearain` —
   F07/F08 scope), wetness presentation beyond particles, and condition
   replication (req 5's network leg is F24+) remain.

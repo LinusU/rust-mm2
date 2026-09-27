@@ -492,9 +492,11 @@ integrator, flipbook sweep, atlas tiling and anchor are designed
 readings — the original `asParticles` runtime is unrecovered
 (UNK-40). `ppt=<name>:<e>e/<x>x[+Nc+Nl+ut]` evidences it on the
 smoke record; a failed bind records `ppt=<name>!<diag>` instead of
-degrading silently (F18-AC06). No rendered screenshot or playtest
-capture of rain exists yet — the bound/emitted counts are the only
-current evidence.
+degrading silently (F18-AC06). A headless visual capture
+(`--weather 3 --cam=-1319,67,255,180,-12 --frames 90 --screenshot`,
+retail sf, 2026-09-27) shows faint droplet streaks around the camera —
+the quads render and anchor — but no playtest or side-by-side against
+the original exists; presentation parity stays unverified (UNK-40).
 
 Still not consumed (UNK-24 stays open): `.ldef` rows, `.lmap` values
 (runtime-loaded by the original — see above — but unbound here),
