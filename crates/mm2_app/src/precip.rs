@@ -161,7 +161,10 @@ pub fn precip_session(
     for w in &parsed.warnings {
         warn!(path = %path, note = %w, "precipitation rule note");
     }
-    let spec = ParticleSpec::from(&parsed.rule);
+    // `From<&StandaloneBirthRule>` keeps the `tune/effects/` superset
+    // fields authored — weather rules carry none, so retail rain/snow
+    // convert identically; a mod that adds `Damp`/`Color` sees them.
+    let spec = ParticleSpec::from(&parsed);
     let assets = precip_assets(vfs, name, &spec, meshes, images, materials, &mut report);
     let rig = Precipitation::new(spec, seed);
     (report, Some(PrecipFx { assets }), Some(rig))
@@ -210,7 +213,8 @@ fn precip_assets(
 
 /// Anchor the emitter on the active `Camera3d` view — the same
 /// `WorldCamera3d` pick the sky dome and smoke billboards follow.
-fn camera_focus(
+/// `crate::wheel_fx` reads the same focus for its spawn billboards.
+pub(crate) fn camera_focus(
     cameras: &Query<(&Camera, &GlobalTransform), crate::hudmap::WorldCamera3d>,
 ) -> Option<Vec3> {
     cameras

@@ -233,6 +233,7 @@ pub fn headless_smoke(
         .init_resource::<crate::damage_fx::SmokeFxReport>()
         .init_resource::<crate::spark_fx::SparkFxReport>()
         .init_resource::<crate::precip::PrecipReport>()
+        .init_resource::<crate::wheel_fx::WheelFxReport>()
         .init_resource::<crate::texel_fx::TexelDamageReport>()
         .init_resource::<crate::audio::AudioReport>()
         .init_resource::<Assets<crate::audio::PcmAudio>>()
@@ -448,6 +449,7 @@ pub fn headless_smoke(
                     crate::audio::sync_audio_pause,
                     crate::audio::reset_audio_report.run_if(session::unloading),
                     crate::precip::reset_precip_report.run_if(session::unloading),
+                    crate::wheel_fx::reset_wheel_fx_report.run_if(session::unloading),
                 ),
                 opponents::opponent_drive,
                 // F05-B.6: authored engine smoke — the headless
@@ -498,6 +500,18 @@ pub fn headless_smoke(
         .add_systems(
             Update,
             (crate::precip::emit_precip, crate::precip::advance_precip).chain(),
+        )
+        // F18-B.4: authored wheel surface particles compose headless
+        // too — the `wfx=` field reads the report the emit/advance
+        // pair maintains; own slot for the same arity split. Assets
+        // are real (VFS `ptx_wheel` + quads); nothing rasterizes.
+        .add_systems(
+            Update,
+            (
+                crate::wheel_fx::emit_wheel_fx,
+                crate::wheel_fx::advance_wheel_fx,
+            )
+                .chain(),
         );
     if driver == Driver::Scripted {
         app.insert_resource(scripted::ScriptedDrive);
@@ -1221,6 +1235,37 @@ pub fn headless_smoke(
             })
         })
         .unwrap_or_default();
+    // F18-B.4 wheel-particle evidence: `wfx=<r>r/<e>e/<x>x` — rules
+    // loaded of the eight the index table names, puffs emitted and
+    // expired, plus `+Nd` pool-bound discards, `+Nf` rule misses and
+    // `+ut` for an unresolved `ptx_wheel` atlas. Activity/anomaly
+    // gated — a run with every rule bound, the atlas resolved and no
+    // emission stays bit-identical.
+    let wfx_detail = world_ecs
+        .get_resource::<crate::wheel_fx::WheelFxReport>()
+        .filter(|r| {
+            r.emitted + r.expired + r.dropped + r.failed as u64 > 0
+                || !r.texture
+                || r.loaded < mm2_game::PTX_RULE_NAMES.len()
+        })
+        .map(|r| {
+            let dropped = if r.dropped > 0 {
+                format!("+{}d", r.dropped)
+            } else {
+                String::new()
+            };
+            let failed = if r.failed > 0 {
+                format!("+{}f", r.failed)
+            } else {
+                String::new()
+            };
+            let untex = if r.texture { "" } else { "+ut" };
+            format!(
+                " wfx={}r/{}e/{}x{dropped}{failed}{untex}",
+                r.loaded, r.emitted, r.expired
+            )
+        })
+        .unwrap_or_default();
     // F05-B.9 texel evidence: splatting impacts/splat stamps/repairs.
     // Same presence rule — an impact-free or unpaired-texture run
     // stays bit-identical.
@@ -1386,7 +1431,7 @@ pub fn headless_smoke(
     // (DRV-2/DRV-3) and aimap variant (RACE-11) selected its content.
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{extra}",
+            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{extra}",
             driver.as_str(),
             config.difficulty.as_str(),
             session.phase().name(),

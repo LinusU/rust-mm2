@@ -109,6 +109,49 @@ impl MaterialDef {
     pub fn text(&self, name: &str) -> Option<&str> {
         self.field(name)?.values.first().map(String::as_str)
     }
+
+    /// Typed `ptxindex` + `ptxthreshold` pair — the material's two
+    /// wheel-particle channels. Both fields must be present with
+    /// exactly two values each; a non-integral index or a non-finite
+    /// threshold reads `None` — the same shapes
+    /// [`MaterialSet::validate`] flags as `BadFieldValue`, so "no
+    /// authored channels" vs "malformed" stays distinguishable there.
+    pub fn ptx(&self) -> Option<PtxChannels> {
+        let idx = self.field("ptxindex")?;
+        let thr = self.field("ptxthreshold")?;
+        if idx.values.len() != 2 || thr.values.len() != 2 {
+            return None;
+        }
+        let mut index = [0i64; 2];
+        for (v, slot) in idx.values.iter().zip(&mut index) {
+            *slot = v.parse().ok()?;
+        }
+        let mut threshold = [0.0f32; 2];
+        for (v, slot) in thr.values.iter().zip(&mut threshold) {
+            let v: f32 = v.parse().ok()?;
+            if !v.is_finite() {
+                return None;
+            }
+            *slot = v;
+        }
+        Some(PtxChannels { index, threshold })
+    }
+}
+
+/// The authored `ptxindex`/`ptxthreshold` pair — two wheel-particle
+/// channels. `ptxindex` is a positional index into the retail
+/// `ptx_wheel` effect-name table (`dirt`, `dust`, `grass`, `leaf`,
+/// `smoke`, `snow`, `splash`, `rock` — the contiguous exe string
+/// block; `-1` leaves the slot dark). `ptxthreshold` gates each
+/// channel's emission; what quantity the original runtime compares it
+/// against is unrecovered (UNK-23), so the values are preserved
+/// verbatim and the runtime applies its documented designed reading.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PtxChannels {
+    /// `ptxindex` — two positional effect selectors; `-1` = off.
+    pub index: [i64; 2],
+    /// `ptxthreshold` — per-channel emission gate, one per index slot.
+    pub threshold: [f32; 2],
 }
 
 /// A parsed `.mtl` file: material definitions in authored order.
@@ -381,9 +424,18 @@ impl MaterialSet {
                         let bad = match known {
                             "effect" => f.values.len() != 1,
                             "sound" => def.vec_i64(known, 1).is_none() || f.values.len() != 1,
-                            "ptxindex" | "ptxthreshold" => {
+                            // Same shapes `MaterialDef::ptx` refuses:
+                            // indices are integral selectors, thresholds
+                            // finite floats — two values each on retail.
+                            "ptxindex" => {
                                 f.values.len() != 2
-                                    || f.values.iter().any(|v| v.parse::<f64>().is_err())
+                                    || f.values.iter().any(|v| v.parse::<i64>().is_err())
+                            }
+                            "ptxthreshold" => {
+                                f.values.len() != 2
+                                    || f.values.iter().any(|v| {
+                                        v.parse::<f32>().map(|x| !x.is_finite()).unwrap_or(true)
+                                    })
                             }
                             _ => f.values.len() != 1 || def.f32(known).is_none(),
                         };
@@ -695,6 +747,55 @@ mtl foo {
                 .count(),
             9
         );
+    }
+
+    #[test]
+    fn ptx_accessor_reads_the_authored_channels() {
+        let set = MaterialSet::parse(MTL).unwrap();
+        assert_eq!(
+            set.defs[0].ptx(),
+            Some(PtxChannels {
+                index: [-1, -1],
+                threshold: [0.25, 0.5],
+            })
+        );
+        assert_eq!(
+            set.defs[1].ptx(),
+            Some(PtxChannels {
+                index: [4, -1],
+                threshold: [0.25, 0.5],
+            })
+        );
+    }
+
+    #[test]
+    fn ptx_accessor_rejects_malformed_channels() {
+        for (idx, thr) in [
+            ("1", "0.25 0.5"),          // wrong index count
+            ("1 2 3", "0.25 0.5"),      // extra index value
+            ("1.5 2", "0.25 0.5"),      // non-integral index
+            ("-1 -1", "0.25"),          // wrong threshold count
+            ("-1 -1", "0.25 nan"),      // non-finite threshold
+            ("-1 -1", "0.25 infinity"), // non-finite threshold
+            ("-1 -1", "0.25 nope"),     // non-numeric threshold
+        ] {
+            let input = format!("mtl x {{\n  ptxindex: {idx}\n  ptxthreshold: {thr}\n}}\n");
+            let set = MaterialSet::parse(&input).unwrap();
+            assert_eq!(
+                set.defs[0].ptx(),
+                None,
+                "ptxindex {idx:?} / ptxthreshold {thr:?} must not decode"
+            );
+            assert!(
+                set.validate()
+                    .iter()
+                    .any(|i| matches!(i, MaterialIssue::BadFieldValue { .. })),
+                "validate must flag ptxindex {idx:?} / ptxthreshold {thr:?}"
+            );
+        }
+        // Missing fields read None the same way.
+        let set = MaterialSet::parse("mtl x {\n  friction: 1\n}\n").unwrap();
+        assert_eq!(set.defs[0].ptx(), None);
     }
 
     const CSV: &str = "\

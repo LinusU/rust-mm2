@@ -183,10 +183,33 @@ const STANDALONE_OPTIONAL: &[&str] = &[
 /// A decoded standalone `tune/<name>.asbirthrule` file — one root
 /// `asBirthRule`/`BirthRule` block, with non-fatal decode notes kept
 /// separate so a caller can surface them without rejecting the spec.
+///
+/// The `tune/effects/` records author a superset of the embedded
+/// `dgBangerData` vocabulary — the exe's second field-name block lists
+/// `Damp`/`DampVar`/`Height`/`Intensity` (and the files a `Color` word)
+/// alongside the base grammar. Those five ride this wrapper rather
+/// than [`BirthRule`] so the embedded decode keeps its strict required
+/// set unchanged.
 #[derive(Debug, Clone)]
 pub struct StandaloneBirthRule {
     /// The decoded rule.
     pub rule: BirthRule,
+    /// `Damp` — authored by the effects records; semantics unrecovered
+    /// (the exe names it but no consumer is decoded). `0.0` when
+    /// absent.
+    pub damp: f32,
+    /// `DampVar` — variance on `damp`. `0.0` when absent.
+    pub damp_var: f32,
+    /// `Height` — authored by the effects records (`2.0` on smoke and
+    /// splash, `0` elsewhere); semantics unrecovered.
+    pub height: f32,
+    /// `Intensity` — `1.0` on every retail record; semantics
+    /// unrecovered.
+    pub intensity: f32,
+    /// `Color` — packed tint word the effects records author (`-1` =
+    /// no tint on most; smoke/splash carry coloured values). `-1` when
+    /// absent.
+    pub color: i64,
     /// Unrecognised fields and other non-fatal notes.
     pub warnings: Vec<String>,
 }
@@ -215,7 +238,23 @@ impl BirthRule {
         }
         let mut warnings = Vec::new();
         let rule = Self::decode(root, CTX, &mut warnings, true)?;
-        Ok(StandaloneBirthRule { rule, warnings })
+        // The `tune/effects/` superset fields — optional on standalone
+        // records, absent on every weather rule. Present-but-malformed
+        // still errors (same strictness as every optional field).
+        let damp = opt_f32(root, CTX, "Damp", 0.0)?;
+        let damp_var = opt_f32(root, CTX, "DampVar", 0.0)?;
+        let height = opt_f32(root, CTX, "Height", 0.0)?;
+        let intensity = opt_f32(root, CTX, "Intensity", 0.0)?;
+        let color = opt_i64(root, CTX, "Color")?.unwrap_or(-1);
+        Ok(StandaloneBirthRule {
+            rule,
+            damp,
+            damp_var,
+            height,
+            intensity,
+            color,
+            warnings,
+        })
     }
 
     fn from_block(b: &TuneBlock, ctx: &str, warnings: &mut Vec<String>) -> BangerResult<Self> {
@@ -231,38 +270,41 @@ impl BirthRule {
         warnings: &mut Vec<String>,
         standalone: bool,
     ) -> BangerResult<Self> {
-        unknown_fields(
-            b,
-            ctx,
-            &[
-                "Position",
-                "PositionVar",
-                "Velocity",
-                "VelocityVar",
-                "Life",
-                "LifeVar",
-                "Mass",
-                "MassVar",
-                "Radius",
-                "RadiusVar",
-                "Drag",
-                "DragVar",
-                "DRadius",
-                "DRadiusVar",
-                "DAlpha",
-                "DAlphaVar",
-                "DRotation",
-                "DRotationVar",
-                "InitialBlast",
-                "SpewRate",
-                "SpewTimeLimit",
-                "Gravity",
-                "TexFrameStart",
-                "TexFrameEnd",
-                "BirthFlags",
-            ],
-            warnings,
-        );
+        // The effects-directory records extend the base grammar with
+        // five more fields the exe's second field-name block lists —
+        // known on the standalone path, still unrecognised (and
+        // warned) on embedded `dgBangerData` specs.
+        let mut known = vec![
+            "Position",
+            "PositionVar",
+            "Velocity",
+            "VelocityVar",
+            "Life",
+            "LifeVar",
+            "Mass",
+            "MassVar",
+            "Radius",
+            "RadiusVar",
+            "Drag",
+            "DragVar",
+            "DRadius",
+            "DRadiusVar",
+            "DAlpha",
+            "DAlphaVar",
+            "DRotation",
+            "DRotationVar",
+            "InitialBlast",
+            "SpewRate",
+            "SpewTimeLimit",
+            "Gravity",
+            "TexFrameStart",
+            "TexFrameEnd",
+            "BirthFlags",
+        ];
+        if standalone {
+            known.extend(["Damp", "DampVar", "Height", "Intensity", "Color"]);
+        }
+        unknown_fields(b, ctx, &known, warnings);
         let f32_field = |name: &str| -> BangerResult<f32> {
             if standalone && STANDALONE_OPTIONAL.contains(&name) {
                 opt_f32(b, ctx, name, 0.0)
@@ -902,14 +944,54 @@ mod tests {
     }
 
     #[test]
-    fn standalone_warns_on_unknown_fields() {
-        // The `tune/effects/` vocabulary (Damp/Height/Intensity/Color)
-        // is not the embedded BirthRule set — noted, not rejected.
+    fn standalone_captures_the_effects_superset_fields() {
+        // `tune/effects/*.asbirthrule` authors `Damp`/`DampVar`/
+        // `Height`/`Intensity`/`Color` alongside the base grammar —
+        // all ten retail records carry them.
         let f = BirthRule::parse_file(&RAIN_FILE.replace(
             "    BirthFlags 8 \n}",
-            "    BirthFlags 8 \n    Height 0 \n    Intensity 1 \n    Color -1 \n}",
+            "    BirthFlags 8 \n    Damp 0.5 \n    DampVar 0.1 \n    Height 2 \n    Intensity 1 \n    Color -251989786 \n}",
         ))
         .unwrap();
-        assert_eq!(f.warnings.len(), 3);
+        assert_eq!(f.damp, 0.5);
+        assert_eq!(f.damp_var, 0.1);
+        assert_eq!(f.height, 2.0);
+        assert_eq!(f.intensity, 1.0);
+        // Retail authors the tint as a packed decimal word
+        // (smoke.asbirthrule carries exactly this value).
+        assert_eq!(f.color, -251989786);
+        assert!(f.warnings.is_empty());
+    }
+
+    #[test]
+    fn standalone_defaults_absent_effects_fields() {
+        let f = BirthRule::parse_file(RAIN_FILE).unwrap();
+        assert_eq!(f.damp, 0.0);
+        assert_eq!(f.damp_var, 0.0);
+        assert_eq!(f.height, 0.0);
+        assert_eq!(f.intensity, 0.0);
+        assert_eq!(f.color, -1, "absent Color reads as no-tint");
+    }
+
+    #[test]
+    fn standalone_rejects_a_malformed_effects_field() {
+        let err = BirthRule::parse_file(&RAIN_FILE.replace(
+            "    BirthFlags 8 \n}",
+            "    BirthFlags 8 \n    Color fast \n}",
+        ))
+        .unwrap_err();
+        assert!(err.message.contains("Color"));
+    }
+
+    #[test]
+    fn standalone_warns_on_unknown_fields() {
+        // Fields outside the base + effects grammar are still noted,
+        // not rejected.
+        let f = BirthRule::parse_file(&RAIN_FILE.replace(
+            "    BirthFlags 8 \n}",
+            "    BirthFlags 8 \n    Foo 1 \n    Bar 2 \n}",
+        ))
+        .unwrap();
+        assert_eq!(f.warnings.len(), 2);
     }
 }

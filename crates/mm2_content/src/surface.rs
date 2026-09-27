@@ -19,7 +19,7 @@ use std::fmt;
 use bevy::prelude::Resource;
 use mm2_assets::{AssetsError, Resolved, Vfs};
 use mm2_formats::FormatError;
-use mm2_formats::materials::{MaterialMap, MaterialSet, NONE_PHYSICS};
+use mm2_formats::materials::{MaterialMap, MaterialSet, NONE_PHYSICS, PtxChannels};
 use mm2_formats::tex::frame_base_stem;
 use mm2_game::{RecoveryPolicy, SurfaceMaterial};
 use mm2_vehicle::TireSurface;
@@ -245,6 +245,26 @@ impl SurfaceTables {
         def.vec_i64("sound", 1)
             .and_then(|v| v.first().copied())
             .and_then(|s| u16::try_from(s).ok())
+    }
+
+    /// The authored wheel-particle channels of a collider's
+    /// `SurfaceMaterial` — the `ptxindex`/`ptxthreshold` pair
+    /// (F18-B.4): `Authored(i)` reads its material def; `Unspecified`
+    /// reads the `_default` block's channels, the same inheritance the
+    /// `sound` class applies. `None` when the index space cannot
+    /// answer (missing `_default`, out-of-range index, absent or
+    /// malformed fields — the same shapes [`MaterialDef::ptx`] and
+    /// `MaterialSet::validate` treat as bad data): the wheel emits no
+    /// surface effect, like an authored `-1 -1`. What quantity the
+    /// thresholds gate in the original runtime is unrecovered
+    /// (UNK-23); the runtime's designed reading lives in
+    /// `mm2_app::wheel_fx`.
+    pub fn ptx_channels(&self, material: SurfaceMaterial) -> Option<PtxChannels> {
+        let def = match material {
+            SurfaceMaterial::Authored(i) => self.set.defs.get(i as usize)?,
+            SurfaceMaterial::Unspecified => self.set.default_def()?,
+        };
+        def.ptx()
     }
 
     /// [`contact_restitution`](Self::contact_restitution) for a

@@ -22,7 +22,7 @@ use mm2_app::{
     audio, banger, breakaway, camera, car_visual, city, contracts, damage, damage_fx, dash,
     environment, hud, hudmap, input, menu, nav_overlay, navarrow, oppind, opponents, pause, precip,
     profile, progression, pvs, race, racestat, racetime, recovery, results, scripted, sequence,
-    session, smoke, spark_fx, stuck, texel_fx, traffic,
+    session, smoke, spark_fx, stuck, texel_fx, traffic, wheel_fx,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
@@ -1000,6 +1000,7 @@ fn main() {
     .init_resource::<damage_fx::SmokeFxReport>()
     .init_resource::<spark_fx::SparkFxReport>()
     .init_resource::<precip::PrecipReport>()
+    .init_resource::<wheel_fx::WheelFxReport>()
     .init_resource::<texel_fx::TexelDamageReport>()
     // F07-A.2: decoded-PCM audio — `PcmAudio` registers with the
     // `AudioPlugin` DefaultPlugins brings; voices spawn as entities and
@@ -1266,6 +1267,16 @@ fn main() {
         Update,
         (precip::emit_precip, precip::advance_precip).chain(),
     )
+    // F18-B.4: authored wheel surface particles — grounded-wheel
+    // contacts resolve their `ptxindex` channels through the surface
+    // tables and emit the session's loaded `tune/effects` specs, then
+    // the advance step integrates the puffs it just spawned. Own
+    // schedule slot like the other FX pairs; the `is_playing` gate
+    // keeps the unload sweep ahead of any rig commands.
+    .add_systems(
+        Update,
+        (wheel_fx::emit_wheel_fx, wheel_fx::advance_wheel_fx).chain(),
+    )
     // F07-AC02: `--seq`'s staged input program owns `VehicleInput`
     // like the other evidence drivers — after the keyboard mapping so
     // it wins deterministically, and after `clutch_voices` so a stage
@@ -1342,6 +1353,8 @@ fn main() {
             // F18-B.2: the precipitation evidence counters clear on
             // teardown like the audio report's.
             precip::reset_precip_report.run_if(session::unloading),
+            // F18-B.4: same for the wheel-effect report.
+            wheel_fx::reset_wheel_fx_report.run_if(session::unloading),
         ),
     )
     // F16-B: drain authoritative results into the bound profile —

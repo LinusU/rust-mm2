@@ -55,8 +55,9 @@ pub use damage::{
     DisabledOutcome, ImpairmentPolicy, VehicleDamage, disabled_outcome,
 };
 pub use effects::{
-    PRECIP_MAX_LIVE, ParticleSpec, PrecipDrop, Precipitation, SmokeEmitter, SmokePolicy, SmokePuff,
-    Spark, SparkPolicy, VehicleSmoke, VehicleSparks,
+    PRECIP_MAX_LIVE, PTX_ATLAS_TILES, PTX_RULE_NAMES, ParticleSpec, PrecipDrop, Precipitation,
+    SmokeEmitter, SmokePolicy, SmokePuff, Spark, SparkPolicy, VehicleSmoke, VehicleSparks,
+    WheelDraw, WheelEmission, WheelPtx, WheelPtxPolicy, WheelPuff,
 };
 pub use hudmap::{HudMap, MapOrientation, MapView};
 pub use ids::{AuthorityRole, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerId};

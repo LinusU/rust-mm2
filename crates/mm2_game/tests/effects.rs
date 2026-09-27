@@ -7,13 +7,15 @@
 //! the bottom: burst sizing, deterministic draws, the live bound and
 //! the streak integrator — all designed policy (DSN-26).
 
-use bevy::prelude::Vec3;
+use bevy::prelude::{Entity, Vec3};
 use mm2_formats::banger::BirthRule;
+use mm2_formats::materials::PtxChannels;
 use mm2_formats::tune::TuneFile;
 use mm2_formats::veh::VehCarDamage;
 use mm2_game::{
-    DamageSpec, PRECIP_MAX_LIVE, ParticleSpec, Precipitation, SmokePolicy, SmokePuff, Spark,
-    SparkPolicy, VehicleSmoke, VehicleSparks,
+    DamageSpec, PRECIP_MAX_LIVE, PTX_RULE_NAMES, ParticleSpec, Precipitation, SmokePolicy,
+    SmokePuff, Spark, SparkPolicy, VehicleSmoke, VehicleSparks, WheelDraw, WheelPtx,
+    WheelPtxPolicy, WheelPuff,
 };
 
 /// A `vehCardamage` fixture shaped like the retail records — two
@@ -731,4 +733,424 @@ fn precip_drop_alpha_drifts_and_clamps() {
     assert!((d.alpha() - 0.5).abs() < 1e-5);
     d.age = 1.0;
     assert_eq!(d.alpha(), 0.0, "the drift clamps, not wraps");
+}
+
+// ---------------------------------------------------------------------
+// F18-B.4: the wheel-surface rig — `ptxindex`/`ptxthreshold` gating,
+// `InitialBlast` edge bursts, `SpewRate` while-held emission, the
+// per-vehicle bound and the puff integrator. The gate quantity and
+// comparisons are designed policy (DSN-62/UNK-23); these tests pin
+// the contract.
+// ---------------------------------------------------------------------
+
+/// A `tune/effects/`-shaped rule — self-authored values standing in
+/// for the retail `dust` record (which stays out of git): a pure
+/// `InitialBlast` burst (`SpewRate 0`), authored extras included.
+const DUST_RULE: &str = "type: a\n\
+asBirthRule {\n\
+  Position -1310.000000 11.000000 -462.000000\n\
+  PositionVar 0.500000 0.200000 0.500000\n\
+  Velocity 0.200000 0.400000 0.200000\n\
+  VelocityVar 0.200000 0.000000 0.200000\n\
+  Life 3.000000\n\
+  LifeVar 0.000000\n\
+  Mass 0.100000\n\
+  MassVar 0.000000\n\
+  Radius 0.300000\n\
+  RadiusVar 0.100000\n\
+  Drag 0.100000\n\
+  DragVar 0.000000\n\
+  Damp 0.500000\n\
+  DampVar 0.100000\n\
+  DRadius 0.050000\n\
+  DRadiusVar 0.000000\n\
+  DAlpha 0.000000\n\
+  DAlphaVar 0.000000\n\
+  DRotation -1.000000\n\
+  DRotationVar 0.500000\n\
+  InitialBlast 64\n\
+  SpewRate 0.000000\n\
+  SpewTimeLimit 0.000000\n\
+  Gravity -9.000000\n\
+  TexFrameStart 2\n\
+  TexFrameEnd 5\n\
+  BirthFlags 0\n\
+  Height 0.000000\n\
+  Intensity 1.000000\n\
+  Color -1\n\
+}\n";
+
+/// A spew-style rule — `InitialBlast` plus a `SpewRate` while the
+/// gate holds (shaped like retail `smoke`/`splash`).
+const SPEW_RULE: &str = "type: a\n\
+asBirthRule {\n\
+  PositionVar 0.000000 0.000000 0.000000\n\
+  Velocity 0.000000 1.000000 0.000000\n\
+  VelocityVar 0.000000 0.000000 0.000000\n\
+  Life 1.000000\n\
+  LifeVar 0.000000\n\
+  Mass 0.000000\n\
+  MassVar 0.000000\n\
+  Radius 0.200000\n\
+  RadiusVar 0.000000\n\
+  Drag 0.000000\n\
+  DragVar 0.000000\n\
+  Damp 0.000000\n\
+  DampVar 0.000000\n\
+  DRadius 0.000000\n\
+  DRadiusVar 0.000000\n\
+  DAlpha 0.000000\n\
+  DAlphaVar 0.000000\n\
+  DRotation 0.000000\n\
+  DRotationVar 0.000000\n\
+  InitialBlast 4\n\
+  SpewRate 60.000000\n\
+  SpewTimeLimit 0.000000\n\
+  Gravity 0.000000\n\
+  TexFrameStart 0\n\
+  TexFrameEnd 0\n\
+  BirthFlags 0\n\
+  Height 0.000000\n\
+  Intensity 1.000000\n\
+  Color -16777216\n\
+}\n";
+
+fn dust_spec() -> ParticleSpec {
+    ParticleSpec::from(&BirthRule::parse_file(DUST_RULE).unwrap())
+}
+
+fn spew_spec() -> ParticleSpec {
+    ParticleSpec::from(&BirthRule::parse_file(SPEW_RULE).unwrap())
+}
+
+/// The channel pair a material like retail `grass` authors — slot 0
+/// dust at 0.25, slot 1 (grass rule) at 0.5.
+fn grass_channels() -> PtxChannels {
+    PtxChannels {
+        index: [1, 2],
+        threshold: [0.25, 0.5],
+    }
+}
+
+/// `spec_of` resolver over a sparse per-index table, like the
+/// session's `WheelFx` resource.
+fn spec_table() -> Vec<Option<ParticleSpec>> {
+    let mut specs: Vec<Option<ParticleSpec>> = vec![None; PTX_RULE_NAMES.len()];
+    specs[1] = Some(dust_spec());
+    specs[4] = Some(spew_spec());
+    specs
+}
+
+fn table_lookup<'a>(
+    specs: &'a [Option<ParticleSpec>],
+) -> impl Fn(i64) -> Option<&'a ParticleSpec> + 'a {
+    move |i| specs.get(i as usize).and_then(|s| s.as_ref())
+}
+
+const WHEEL_ORIGIN: Vec3 = Vec3::new(10.0, 0.5, -4.0);
+
+/// The shared draw input — dt, gate quantity, channel pair and live
+/// count vary; the wheel is always slot 0 at `WHEEL_ORIGIN` with an
+/// up normal owned by a placeholder emitter.
+fn draw_of<'a, 's>(
+    dt: f32,
+    q: f32,
+    channels: Option<PtxChannels>,
+    spec_of: &'s dyn Fn(i64) -> Option<&'a ParticleSpec>,
+    live: usize,
+) -> WheelDraw<'a, 's> {
+    WheelDraw {
+        dt,
+        q,
+        channels,
+        spec_of,
+        origin: WHEEL_ORIGIN,
+        normal: Vec3::Y,
+        live,
+        emitter: Entity::PLACEHOLDER,
+    }
+}
+
+/// The recovered index table is positional: the exe's contiguous
+/// string block after `ptx_wheel`.
+#[test]
+fn ptx_rule_names_match_the_retail_string_table() {
+    assert_eq!(
+        PTX_RULE_NAMES,
+        [
+            "dirt", "dust", "grass", "leaf", "smoke", "snow", "splash", "rock"
+        ]
+    );
+}
+
+/// `From<&StandaloneBirthRule>` keeps the effects-superset fields the
+/// base `From<&BirthRule>` conversion reads as inert defaults.
+#[test]
+fn standalone_spec_carries_the_effects_extras() {
+    let s = dust_spec();
+    assert_eq!(s.damp, 0.5);
+    assert_eq!(s.damp_var, 0.1);
+    assert_eq!(s.height, 0.0);
+    assert_eq!(s.intensity, 1.0);
+    assert_eq!(s.color, -1);
+    let s = spew_spec();
+    assert_eq!(s.color, -16777216);
+    // The base-rule conversion still reads them inert — weather rules
+    // cannot author the superset.
+    let base = ParticleSpec::from(&BirthRule::parse_file(SPEW_RULE).unwrap().rule);
+    assert_eq!(base.color, -1);
+    assert_eq!(base.intensity, 0.0);
+}
+
+/// Below the authored threshold a channel is dark; crossing it fires
+/// the authored `InitialBlast` once, then a `SpewRate 0` channel goes
+/// quiet while the gate holds.
+#[test]
+fn wheel_ptx_threshold_gates_and_blasts_once() {
+    let specs = spec_table();
+    let spec_of = table_lookup(&specs);
+    let mut rig = WheelPtx::new(WheelPtxPolicy::default(), 42, 4);
+    let ch = grass_channels();
+    // Below slot 0's 0.25 gate — nothing.
+    let e = rig.draw(0, draw_of(1.0 / 60.0, 0.1, Some(ch), &spec_of, 0));
+    assert_eq!(e.puffs.len(), 0);
+    // Crossing 0.25 fires the dust blast (64) — slot 1's 0.5 gate is
+    // still closed.
+    let e = rig.draw(0, draw_of(1.0 / 60.0, 0.3, Some(ch), &spec_of, 0));
+    assert_eq!(e.puffs.len(), 64);
+    assert_eq!(e.dropped, 0);
+    // Held open with SpewRate 0 — no re-fire.
+    for _ in 0..10 {
+        let e = rig.draw(0, draw_of(1.0 / 60.0, 0.3, Some(ch), &spec_of, 64));
+        assert!(e.puffs.is_empty());
+    }
+}
+
+/// A strict-`>` gate keeps a threshold-0 channel (retail `water`'s
+/// authored `0 0`) dark while the wheel does no tire work.
+#[test]
+fn wheel_ptx_threshold_zero_still_needs_work() {
+    let mut specs = spec_table();
+    specs[6] = Some(spew_spec()); // "splash" slot
+    let spec_of = table_lookup(&specs);
+    let water = PtxChannels {
+        index: [-1, 6],
+        threshold: [0.0, 0.0],
+    };
+    let mut rig = WheelPtx::new(WheelPtxPolicy::default(), 42, 4);
+    for _ in 0..10 {
+        let e = rig.draw(0, draw_of(1.0 / 60.0, 0.0, Some(water), &spec_of, 0));
+        assert!(e.puffs.is_empty(), "q == 0 never opens a 0-gate");
+    }
+    let e = rig.draw(0, draw_of(1.0 / 60.0, 0.01, Some(water), &spec_of, 0));
+    assert_eq!(e.puffs.len(), 5, "any work opens it — blast 4 + carry");
+}
+
+/// While the gate holds, `SpewRate` accumulates whole puffs.
+#[test]
+fn wheel_ptx_spews_while_held() {
+    let specs = spec_table();
+    let spec_of = table_lookup(&specs);
+    let road = PtxChannels {
+        index: [4, -1],
+        threshold: [0.25, 0.5],
+    };
+    let mut rig = WheelPtx::new(WheelPtxPolicy::default(), 42, 4);
+    // Crossing edge: blast 4 + first spew carry (60/s × 1/60 = 1).
+    let e = rig.draw(0, draw_of(1.0 / 60.0, 0.4, Some(road), &spec_of, 0));
+    assert_eq!(e.puffs.len(), 5);
+    // Held: one puff per frame at 60/s.
+    let e = rig.draw(0, draw_of(1.0 / 60.0, 0.4, Some(road), &spec_of, 5));
+    assert_eq!(e.puffs.len(), 1);
+}
+
+/// A slot whose `ptxindex` has no loaded rule stays dark; `-1` is the
+/// authored "off".
+#[test]
+fn wheel_ptx_missing_rule_and_dark_slots_emit_nothing() {
+    let specs = spec_table();
+    let spec_of = table_lookup(&specs);
+    let mut rig = WheelPtx::new(WheelPtxPolicy::default(), 42, 4);
+    // grass slot 1 (index 2 — "grass" rule not loaded) stays dark;
+    // index 9 is outside the table entirely.
+    let ch = PtxChannels {
+        index: [2, 9],
+        threshold: [0.0, 0.0],
+    };
+    let e = rig.draw(0, draw_of(1.0 / 60.0, 1.0, Some(ch), &spec_of, 0));
+    assert!(e.puffs.is_empty());
+    // No channels resolved at all — same darkness.
+    let e = rig.draw(0, draw_of(1.0 / 60.0, 1.0, None, &spec_of, 0));
+    assert!(e.puffs.is_empty());
+}
+
+/// The per-vehicle pool bound cuts a burst and reports the discard —
+/// overflow is dropped, never backlogged.
+#[test]
+fn wheel_ptx_pool_bound_drops_overflow() {
+    let specs = spec_table();
+    let spec_of = table_lookup(&specs);
+    let policy = WheelPtxPolicy {
+        max_live: 10,
+        ..WheelPtxPolicy::default()
+    };
+    let mut rig = WheelPtx::new(policy, 42, 4);
+    let ch = grass_channels();
+    let e = rig.draw(0, draw_of(1.0 / 60.0, 0.3, Some(ch), &spec_of, 0));
+    assert_eq!(e.puffs.len(), 10, "the pool caps the 64-blast");
+    assert_eq!(e.dropped, 54);
+    // A nearly-full pool emits only its headroom.
+    let mut rig = WheelPtx::new(policy, 42, 4);
+    let e = rig.draw(0, draw_of(1.0 / 60.0, 0.3, Some(ch), &spec_of, 8));
+    assert_eq!(e.puffs.len(), 2);
+    assert_eq!(e.dropped, 62);
+}
+
+/// `release` (the airborne edge) closes the gates; a reground on the
+/// same surface re-fires `InitialBlast`.
+#[test]
+fn wheel_ptx_reground_re_fires_the_blast() {
+    let specs = spec_table();
+    let spec_of = table_lookup(&specs);
+    let mut rig = WheelPtx::new(WheelPtxPolicy::default(), 42, 4);
+    let ch = grass_channels();
+    let args = |rig: &mut WheelPtx| {
+        rig.draw(0, draw_of(1.0 / 60.0, 0.3, Some(ch), &spec_of, 0))
+            .puffs
+            .len()
+    };
+    assert_eq!(args(&mut rig), 64);
+    assert_eq!(args(&mut rig), 0);
+    rig.release(0); // airborne
+    assert_eq!(args(&mut rig), 64, "reground re-arms the burst");
+}
+
+/// A surface change rebinds the channel — the new surface's own
+/// blast, not carried state.
+#[test]
+fn wheel_ptx_surface_change_rebinds() {
+    let specs = spec_table();
+    let spec_of = table_lookup(&specs);
+    let mut rig = WheelPtx::new(WheelPtxPolicy::default(), 42, 4);
+    let grass = grass_channels();
+    let road = PtxChannels {
+        index: [4, -1],
+        threshold: [0.25, 0.5],
+    };
+    let draw = |rig: &mut WheelPtx, ch: PtxChannels| {
+        rig.draw(0, draw_of(1.0 / 60.0, 0.3, Some(ch), &spec_of, 0))
+            .puffs
+            .len()
+    };
+    assert_eq!(draw(&mut rig, grass), 64);
+    assert_eq!(draw(&mut rig, grass), 0);
+    // Grass → road: the smoke rule's own blast (4) + first carry.
+    assert_eq!(draw(&mut rig, road), 5);
+}
+
+/// Equal seeds replay identical puff streams; different seeds drift.
+#[test]
+fn wheel_ptx_emission_is_seeded() {
+    let specs = spec_table();
+    let spec_of = table_lookup(&specs);
+    let ch = grass_channels();
+    let burst = |seed: u64| {
+        let mut rig = WheelPtx::new(WheelPtxPolicy::default(), seed, 4);
+        rig.draw(0, draw_of(1.0 / 60.0, 0.3, Some(ch), &spec_of, 0))
+            .puffs
+    };
+    let (a, b, c) = (burst(7), burst(7), burst(8));
+    assert_eq!(a.len(), b.len());
+    for (pa, pb) in a.iter().zip(&b) {
+        assert_eq!(pa.position, pb.position);
+        assert_eq!(pa.velocity, pb.velocity);
+        assert_eq!(pa.life, pb.life);
+    }
+    assert!(a.iter().zip(&c).any(|(pa, pc)| pa.position != pc.position));
+}
+
+/// A garbage `dt` is a no-op — the gate state is untouched.
+#[test]
+fn wheel_ptx_garbage_dt_emits_nothing() {
+    let specs = spec_table();
+    let spec_of = table_lookup(&specs);
+    let mut rig = WheelPtx::new(WheelPtxPolicy::default(), 42, 4);
+    let ch = grass_channels();
+    for dt in [0.0, -1.0, f32::NAN] {
+        let e = rig.draw(0, draw_of(dt, 0.3, Some(ch), &spec_of, 0));
+        assert!(e.puffs.is_empty());
+    }
+    // And the edge still fires on the first real frame.
+    let e = rig.draw(0, draw_of(1.0 / 60.0, 0.3, Some(ch), &spec_of, 0));
+    assert_eq!(e.puffs.len(), 64);
+}
+
+/// Puffs draw at the contact point inside the authored `± PositionVar`
+/// envelope, velocities inside `± VelocityVar`; the authored
+/// `Position` leftover never reaches them.
+#[test]
+fn wheel_puffs_draw_at_the_contact_inside_the_authored_envelopes() {
+    let specs = spec_table();
+    let spec_of = table_lookup(&specs);
+    let mut rig = WheelPtx::new(WheelPtxPolicy::default(), 42, 4);
+    let ch = grass_channels();
+    let e = rig.draw(0, draw_of(1.0 / 60.0, 0.3, Some(ch), &spec_of, 0));
+    for p in &e.puffs {
+        let rel = p.position - WHEEL_ORIGIN;
+        assert!(rel.x.abs() <= 0.5 + 1e-4, "{p:?}");
+        assert!(rel.y.abs() <= 0.2 + 1e-4, "{p:?}");
+        assert!(rel.z.abs() <= 0.5 + 1e-4, "{p:?}");
+        assert!((p.velocity.x - 0.2).abs() <= 0.2 + 1e-4, "{p:?}");
+        assert!((p.velocity.y - 0.4).abs() <= 1e-4, "{p:?}");
+        assert!((p.velocity.z - 0.2).abs() <= 0.2 + 1e-4, "{p:?}");
+        // The authored Position leftover (−1310,11,−462) is ignored.
+        assert!(p.position.distance(WHEEL_ORIGIN) < 2.0, "{p:?}");
+        assert_eq!(p.frame_start, 2);
+        assert_eq!(p.frame_end, 5);
+        assert_eq!(p.emitter, Entity::PLACEHOLDER);
+    }
+}
+
+/// The integrator: authored `Gravity` accelerates, `Drag` decays,
+/// `DRadius` grows, `DRotation` rolls; `Life` bounds the puff; the
+/// frame sweeps the authored range.
+#[test]
+fn wheel_puff_advances_and_expires() {
+    let mut p = WheelPuff {
+        emitter: Entity::PLACEHOLDER,
+        position: Vec3::new(0.0, 0.5, 0.0),
+        velocity: Vec3::new(0.0, 1.0, 0.0),
+        age: 0.0,
+        life: 1.0,
+        radius: 0.3,
+        d_radius: 0.5,
+        drag: 0.1,
+        gravity: -9.0,
+        d_alpha: 0.0,
+        rotation: 0.0,
+        d_rotation: -1.0,
+        frame_start: 2,
+        frame_end: 5,
+        color: -1,
+        intensity: 1.0,
+    };
+    assert!(p.advance(0.1));
+    assert!((p.velocity.y - 0.1).abs() < 1e-3, "{p:?}");
+    assert!(p.position.y > 0.5);
+    assert!((p.radius - 0.35).abs() < 1e-5);
+    assert!((p.rotation + 0.1).abs() < 1e-5);
+    while p.advance(0.1) {}
+    assert!(p.age >= p.life);
+    // Flipbook over the authored range.
+    let mut q = p.clone();
+    q.age = 0.0;
+    q.life = 1.0;
+    assert_eq!(q.frame(), 2);
+    q.age = 0.75;
+    assert_eq!(q.frame(), 5);
+    // Color -1 = opaque white; Intensity scales the alpha.
+    q.age = 0.0;
+    assert_eq!(q.alpha(), 1.0);
+    q.intensity = 0.5;
+    assert!((q.alpha() - 0.5).abs() < 1e-5);
 }

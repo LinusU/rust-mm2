@@ -19,7 +19,8 @@
 
 use bevy::prelude::*;
 
-use mm2_formats::banger::BirthRule;
+use mm2_formats::banger::{BirthRule, StandaloneBirthRule};
+use mm2_formats::materials::PtxChannels;
 use mm2_formats::veh::{DamageEffect, VehCarDamage};
 
 use crate::damage::DamageSpec;
@@ -115,6 +116,25 @@ impl From<&BirthRule> for ParticleSpec {
             intensity: 0.0,
             color: -1,
         }
+    }
+}
+
+/// A standalone `tune/<name>.asbirthrule` shares the embedded spec's
+/// base vocabulary; `tune/effects/` records additionally author the
+/// `Damp`/`DampVar`/`Height`/`Intensity`/`Color` superset
+/// (`StandaloneBirthRule`'s extras), so this conversion keeps them
+/// authored where [`From<&BirthRule>`] reads them as inert defaults.
+/// Weather rules carry none of the extras, so both conversions agree
+/// on `tune/rain.asbirthrule`/`tune/snow.asbirthrule`.
+impl From<&StandaloneBirthRule> for ParticleSpec {
+    fn from(s: &StandaloneBirthRule) -> Self {
+        let mut spec = Self::from(&s.rule);
+        spec.damp = s.damp;
+        spec.damp_var = s.damp_var;
+        spec.height = s.height;
+        spec.intensity = s.intensity;
+        spec.color = s.color;
+        spec
     }
 }
 
@@ -807,5 +827,399 @@ impl PrecipDrop {
     /// (designed; retail authors `DAlpha` 0 so drops stay opaque).
     pub fn alpha(&self) -> f32 {
         (1.0 + self.d_alpha * self.age).clamp(0.0, 1.0)
+    }
+}
+
+// ---------------------------------------------------------------------
+// Wheel surface particles (F18-B.4) — `materials.mtl`'s `ptxindex` /
+// `ptxthreshold` pair selecting `tune/effects/<name>.asbirthrule`
+// specs drawn onto the `ptx_wheel` atlas.
+// ---------------------------------------------------------------------
+
+/// The retail `ptx_wheel` effect-name table — the positional index
+/// space `materials.mtl`'s `ptxindex` field selects, recovered as a
+/// contiguous string block in `Midtown2.exe` immediately after the
+/// `ptx_wheel` atlas name (docs/research/materials.md). Index → rule
+/// file is `tune/effects/<name>.asbirthrule`; indexes outside this
+/// table have no authored rule.
+pub const PTX_RULE_NAMES: [&str; 8] = [
+    "dirt", "dust", "grass", "leaf", "smoke", "snow", "splash", "rock",
+];
+
+/// `texture/ptx_wheel` is a measured 8×8 tile atlas (64 tiles) — the
+/// authored `TexFrame*` indexes select its tiles, unlike `fxpt2`'s
+/// 2×2 smoke sheet.
+pub const PTX_ATLAS_TILES: u32 = 8;
+
+/// Determinism domain for the wheel rigs — XORs the vehicle seed so
+/// their streams cannot coincide with the session's precipitation
+/// (`NavRng::new(seed)`) or weather-audio (`WEATHER_AUDIO_DOMAIN`)
+/// draws.
+const WHEEL_PTX_DOMAIN: u64 = 0x7074_785f_7768_656c;
+
+/// Designed emission policy for wheel surface particles (DSN-62).
+/// The `ptxindex`/`ptxthreshold` pair and the `tune/effects/*` specs
+/// are authored data; what the original runtime fed `ptxthreshold` is
+/// unrecovered (UNK-23), so the gate quantity, the strict-`>`
+/// comparison, the pool bound and the atlas grid here are ours.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WheelPtxPolicy {
+    /// Live-puff bound per vehicle — designed (F18-AC03's bounded
+    /// leg: sliding wheels can never flood the world).
+    pub max_live: usize,
+    /// Tiles across the `ptx_wheel` atlas — [`PTX_ATLAS_TILES`].
+    pub atlas_tiles: u32,
+}
+
+impl Default for WheelPtxPolicy {
+    fn default() -> Self {
+        Self {
+            max_live: 128,
+            atlas_tiles: PTX_ATLAS_TILES,
+        }
+    }
+}
+
+impl WheelPtxPolicy {
+    /// Clamp an authored frame index into the atlas's tile space.
+    pub fn tile(&self, frame: i64) -> i64 {
+        frame.clamp(0, (self.atlas_tiles * self.atlas_tiles) as i64 - 1)
+    }
+}
+
+/// Per-wheel channel state inside [`WheelPtx`]: the surface the two
+/// `ptxindex` slots are bound to plus each slot's gate/spew cursors.
+/// The rng is one stream per wheel (slots draw in order) seeded per
+/// (vehicle, wheel) so streams never alias across cars.
+#[derive(Debug)]
+struct WheelChannels {
+    /// The `PtxChannels` this wheel's contact surface resolved to —
+    /// any change rebinds both slots (a new surface is a new
+    /// activation).
+    bound: Option<PtxChannels>,
+    /// Slot gate state last step — rising edges fire `InitialBlast`.
+    open: [bool; 2],
+    /// Seconds the slot's gate has been held — `SpewTimeLimit` reads
+    /// per activation.
+    held_for: [f32; 2],
+    /// Fractional `SpewRate` carry per slot.
+    acc: [f32; 2],
+    /// `InitialBlast` draws still owed per slot.
+    blast: [i64; 2],
+    rng: NavRng,
+}
+
+impl WheelChannels {
+    fn new(seed: u64) -> Self {
+        Self {
+            bound: None,
+            open: [false; 2],
+            held_for: [0.0; 2],
+            acc: [0.0; 2],
+            blast: [0; 2],
+            rng: NavRng::new(seed),
+        }
+    }
+
+    /// Close both gates without forgetting the bound surface — the
+    /// airborne/no-contact edge of the wheel, so a reground on the
+    /// same surface still re-fires `InitialBlast`.
+    fn release(&mut self) {
+        self.open = [false; 2];
+        self.held_for = [0.0; 2];
+        self.acc = [0.0; 2];
+        self.blast = [0; 2];
+    }
+
+    fn jitter(&mut self, v: f32, var: f32) -> f32 {
+        v + (self.rng.next_f32() * 2.0 - 1.0) * var
+    }
+
+    fn jitter3(&mut self, v: Vec3, var: Vec3) -> Vec3 {
+        Vec3::new(
+            self.jitter(v.x, var.x),
+            self.jitter(v.y, var.y),
+            self.jitter(v.z, var.z),
+        )
+    }
+
+    /// Draw one puff for `spec` at the wheel's contact point —
+    /// `PositionVar` jitters around it, `Velocity`/`VelocityVar` in a
+    /// frame whose +Y is the contact normal (the authored velocity is
+    /// near-straight-up on every retail rule). The authored
+    /// `Position` mean is ignored: the effects records carry
+    /// authoring-space leftovers (e.g. `smoke` at −1310,11,−462 in
+    /// world units — a fixed SF offset, not a local pivot).
+    fn puff(
+        &mut self,
+        spec: &ParticleSpec,
+        policy: &WheelPtxPolicy,
+        origin: Vec3,
+        normal: Vec3,
+        emitter: Entity,
+    ) -> WheelPuff {
+        let normal = normal.try_normalize().unwrap_or(Vec3::Y);
+        let frame = Quat::from_rotation_arc(Vec3::Y, normal);
+        WheelPuff {
+            emitter,
+            position: origin + frame * self.jitter3(Vec3::ZERO, spec.position_var),
+            velocity: frame * self.jitter3(spec.velocity, spec.velocity_var),
+            age: 0.0,
+            life: self.jitter(spec.life, spec.life_var).max(0.01),
+            radius: self.jitter(spec.radius, spec.radius_var).max(0.0),
+            d_radius: self.jitter(spec.d_radius, spec.d_radius_var),
+            drag: self.jitter(spec.drag, spec.drag_var),
+            gravity: spec.gravity,
+            d_alpha: self.jitter(spec.d_alpha, spec.d_alpha_var),
+            rotation: 0.0,
+            d_rotation: self.jitter(spec.d_rotation, spec.d_rotation_var),
+            frame_start: policy.tile(spec.tex_frame_start),
+            frame_end: policy
+                .tile(spec.tex_frame_end)
+                .max(policy.tile(spec.tex_frame_start)),
+            color: spec.color,
+            intensity: spec.intensity.max(0.0),
+        }
+    }
+}
+
+/// One step of input [`WheelPtx::draw`] consumes for a grounded wheel
+/// — grouped as a parameter object so the emission contract is a
+/// named shape rather than a nine-slot call.
+pub struct WheelDraw<'a, 's> {
+    /// Step length in seconds — a non-positive/non-finite `dt` is a
+    /// no-op (pause-safe).
+    pub dt: f32,
+    /// The designed gate quantity the authored `ptxthreshold`
+    /// compares against — the wheel's `tire_slippage` utilization
+    /// (0..1, the same measure skid audio consumes; UNK-23 stands for
+    /// the original quantity). Strict `>`: a threshold-0 channel
+    /// (retail `water` authors `0 0`) still needs nonzero tire work,
+    /// so a parked wheel reads `q = 0` and stays dark.
+    pub q: f32,
+    /// The `PtxChannels` the wheel's contact surface resolved to this
+    /// frame (`None` = the surface table cannot answer — both slots
+    /// dark, like an authored `-1 -1`).
+    pub channels: Option<PtxChannels>,
+    /// Resolves a `ptxindex` slot to the session's loaded authored
+    /// spec; `None` (missing rule or out-of-table index) keeps the
+    /// slot dark — the miss was already counted when the rules bound.
+    /// The resolver borrow (`'s`) is deliberately shorter than the
+    /// spec-table borrow (`'a`) it reads through.
+    pub spec_of: &'s dyn Fn(i64) -> Option<&'a ParticleSpec>,
+    /// The wheel's contact point and normal, world space.
+    pub origin: Vec3,
+    /// See `origin`.
+    pub normal: Vec3,
+    /// The vehicle's live puff count — bounds the per-vehicle pool.
+    pub live: usize,
+    /// The vehicle entity — pool accounting, the same convention
+    /// [`SmokePuff`] uses.
+    pub emitter: Entity,
+}
+
+/// What [`WheelPtx::draw`] produced for one wheel this step.
+#[derive(Debug, Default)]
+pub struct WheelEmission {
+    /// Puffs to spawn (each [`WheelPuff`]'s `emitter` is the vehicle).
+    pub puffs: Vec<WheelPuff>,
+    /// Puffs the per-vehicle pool bound discarded — burst/spill
+    /// overflow is dropped, never backlogged (the same policy
+    /// [`Precipitation::draw`] applies).
+    pub dropped: usize,
+}
+
+/// Component: a vehicle's wheel-particle rig (F18-B.4) — one channel
+/// pair per wheel mirroring `VehicleState.wheels`, seeded per
+/// (vehicle, wheel) so emission replays identically (F18 req 5).
+/// The app feeds grounded wheels [`PtxChannels`] resolved through
+/// `SurfaceTables` plus a designed gate quantity; the authored
+/// `tune/effects/<name>.asbirthrule` specs live in the session's
+/// `WheelFx` resource, referenced by index.
+#[derive(Component)]
+pub struct WheelPtx {
+    /// Emission policy — designed (DSN-62).
+    pub policy: WheelPtxPolicy,
+    /// Channel state parallel to `VehicleState.wheels`.
+    wheels: Vec<WheelChannels>,
+}
+
+impl WheelPtx {
+    /// `seed` must be session-stable (the vehicle's object id);
+    /// `wheel_count` mirrors `VehicleState.wheels.len()`.
+    pub fn new(policy: WheelPtxPolicy, seed: u64, wheel_count: usize) -> Self {
+        Self {
+            policy,
+            wheels: (0..wheel_count)
+                .map(|w| {
+                    WheelChannels::new(seed.wrapping_add(WHEEL_PTX_DOMAIN).wrapping_add(w as u64))
+                })
+                .collect(),
+        }
+    }
+
+    /// Close `wheel`'s gates — call for airborne wheels (or wheels
+    /// past the channel array) so a reground re-fires `InitialBlast`
+    /// even on the same surface.
+    pub fn release(&mut self, wheel: usize) {
+        if let Some(w) = self.wheels.get_mut(wheel) {
+            w.release();
+        }
+    }
+
+    /// Advance one grounded wheel and emit its due puffs — the
+    /// [`WheelDraw`] docs carry the per-field contract.
+    pub fn draw(&mut self, wheel: usize, d: WheelDraw<'_, '_>) -> WheelEmission {
+        let mut out = WheelEmission::default();
+        if !(d.dt.is_finite() && d.dt > 0.0) {
+            return out;
+        }
+        let Some(ch) = self.wheels.get_mut(wheel) else {
+            return out;
+        };
+        if ch.bound != d.channels {
+            ch.bound = d.channels;
+            ch.release();
+        }
+        let mut room = self.policy.max_live.saturating_sub(d.live);
+        for slot in 0..2 {
+            let Some(channels) = ch.bound else { break };
+            let index = channels.index[slot];
+            let spec = (index >= 0).then(|| (d.spec_of)(index)).flatten();
+            let Some(spec) = spec else {
+                // Dark slot — gate held closed (the release shape) so
+                // a later load/surface can't edge-fire stale state.
+                if ch.open[slot] {
+                    ch.open[slot] = false;
+                    ch.held_for[slot] = 0.0;
+                    ch.acc[slot] = 0.0;
+                    ch.blast[slot] = 0;
+                }
+                continue;
+            };
+            let open = d.q > channels.threshold[slot];
+            if open && !ch.open[slot] {
+                ch.blast[slot] = spec.initial_blast.max(0);
+            }
+            ch.open[slot] = open;
+            if !open {
+                ch.held_for[slot] = 0.0;
+                ch.acc[slot] = 0.0;
+                ch.blast[slot] = 0;
+                continue;
+            }
+            ch.held_for[slot] += d.dt;
+            if spec.spew_rate > 0.0
+                && (spec.spew_time_limit <= 0.0 || ch.held_for[slot] <= spec.spew_time_limit)
+            {
+                ch.acc[slot] += spec.spew_rate * d.dt;
+            }
+            let blast_due = ch.blast[slot].max(0) as usize;
+            let spew_due = ch.acc[slot].floor() as usize;
+            ch.blast[slot] = 0;
+            ch.acc[slot] -= spew_due as f32;
+            let want = blast_due + spew_due;
+            let emit = want.min(room);
+            out.dropped += want - emit;
+            room -= emit;
+            for _ in 0..emit {
+                out.puffs
+                    .push(ch.puff(spec, &self.policy, d.origin, d.normal, d.emitter));
+            }
+        }
+        out
+    }
+}
+
+/// Component: one live wheel-surface puff — the entity itself is the
+/// particle, like [`SmokePuff`]. [`WheelPuff::advance`] integrates
+/// the authored fields; the render side owns the `ptx_wheel` atlas
+/// tile, camera-facing transform and tint.
+#[derive(Component, Debug, Clone)]
+pub struct WheelPuff {
+    /// The vehicle entity that emitted this puff — pool accounting.
+    pub emitter: Entity,
+    /// World-space position — integrated each step.
+    pub position: Vec3,
+    /// World-space velocity — `Gravity`/`Drag` shape it.
+    pub velocity: Vec3,
+    pub age: f32,
+    pub life: f32,
+    /// Sprite half-extent in metres — `Radius + DRadius·age` drawn.
+    pub radius: f32,
+    /// `DRadius` — authored per-second growth.
+    pub d_radius: f32,
+    /// `Drag` — authored velocity decay coefficient.
+    pub drag: f32,
+    /// `Gravity` — authored signed vertical acceleration (+Y rise on
+    /// retail `smoke`, −Y fall on `dust`).
+    pub gravity: f32,
+    /// `DAlpha` — authored alpha-byte drift per second.
+    pub d_alpha: f32,
+    /// Roll accumulated from `DRotation`.
+    pub rotation: f32,
+    /// `DRotation` — authored roll rate.
+    pub d_rotation: f32,
+    /// Atlas-tile bounds — the authored `TexFrame*` range clamped to
+    /// `ptx_wheel`'s tile space at emission.
+    pub frame_start: i64,
+    /// See `frame_start`.
+    pub frame_end: i64,
+    /// Packed authored `Color` word — alpha byte is the initial alpha
+    /// (`-1` = `0xFFFFFFFF`, opaque white).
+    pub color: i64,
+    /// `Intensity` — authored alpha scale (1.0 on every retail rule).
+    pub intensity: f32,
+}
+
+impl WheelPuff {
+    /// Integrate one step — the same designed reading
+    /// [`SmokePuff::advance`] applies: `Gravity` accelerates
+    /// vertically, `Drag` decays velocity exponentially, `DRadius`
+    /// grows the sprite, `DRotation` rolls it, age accrues. Returns
+    /// `false` past `life` — the caller despawns. The authored `Damp`
+    /// is carried in the spec but unconsumed (semantics unrecovered);
+    /// a non-positive/non-finite `dt` accrues nothing.
+    pub fn advance(&mut self, dt: f32) -> bool {
+        if dt.is_finite() && dt > 0.0 {
+            self.velocity.y += self.gravity * dt;
+            self.velocity *= (-self.drag * dt).exp();
+            self.position += self.velocity * dt;
+            self.radius += self.d_radius * dt;
+            self.rotation += self.d_rotation * dt;
+            self.age += dt;
+        }
+        self.age < self.life
+    }
+
+    /// The atlas tile at the current age — the authored
+    /// `TexFrameStart..=TexFrameEnd` range sweeps as a flipbook over
+    /// `life` (designed, the [`PrecipDrop::frame`] reading; the
+    /// original's frame semantics are unrecovered, UNK-40).
+    pub fn frame(&self) -> i64 {
+        let span = self.frame_end - self.frame_start + 1;
+        if span <= 1 {
+            return self.frame_start;
+        }
+        let frac = (self.age / self.life).clamp(0.0, 1.0);
+        self.frame_start + ((frac * span as f32) as i64).min(span - 1)
+    }
+
+    /// Sprite alpha in 0..1 — the `SmokePuff` byte-space reading:
+    /// `Color`'s alpha byte plus `DAlpha`/second scaled by the
+    /// authored `Intensity`, clamped (designed).
+    pub fn alpha(&self) -> f32 {
+        let a0 = ((self.color as u32 >> 24) & 0xff) as f32;
+        ((a0 + self.d_alpha * self.age) * self.intensity / 255.0).clamp(0.0, 1.0)
+    }
+
+    /// RGB tint in 0..1 — `Color`'s low three bytes (`-1` = white).
+    pub fn rgb(&self) -> [f32; 3] {
+        let c = self.color as u32;
+        [
+            ((c >> 16) & 0xff) as f32 / 255.0,
+            ((c >> 8) & 0xff) as f32 / 255.0,
+            (c & 0xff) as f32 / 255.0,
+        ]
     }
 }

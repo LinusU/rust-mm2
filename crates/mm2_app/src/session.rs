@@ -243,6 +243,11 @@ pub fn drive_session(
             // `SessionEntity`-stamped and chain-despawn.
             commands.remove_resource::<crate::precip::PrecipFx>();
             commands.remove_resource::<mm2_game::Precipitation>();
+            // F18-B.4: the wheel-effect table dies with the session —
+            // the puffs themselves are `SessionEntity`-stamped and
+            // chain-despawn; the report resets on unload like the
+            // other evidence counters.
+            commands.remove_resource::<crate::wheel_fx::WheelFx>();
             commands.remove_resource::<crate::audio::WaveBank>();
             commands.remove_resource::<crate::audio::ImpactAudio>();
             commands.remove_resource::<crate::audio::SurfaceAudio>();
@@ -811,6 +816,21 @@ pub fn load_session_world(
     if let Some(rig) = precip_rig {
         commands.insert_resource(rig);
     }
+    // F18-B.4: authored wheel surface particles — `materials.mtl`'s
+    // `ptxindex`/`ptxthreshold` channels select `tune/effects/<name>
+    // .asbirthrule` specs (the index space is the exe's `ptx_wheel`
+    // string table) drawn onto `texture/ptx_wheel`. The rules and the
+    // atlas resolve through the VFS now so a missing record counts
+    // `failed` once at bind time rather than per frame (F18-AC06);
+    // slots whose index loads nothing stay dark — never substituted.
+    let (wheel_fx_report, wheel_fx) = crate::wheel_fx::wheel_fx_session(
+        &vfs.0,
+        &mut assets.meshes,
+        &mut assets.images,
+        &mut assets.materials,
+    );
+    commands.insert_resource(wheel_fx_report);
+    commands.insert_resource(wheel_fx);
     // F07-A.2: the session's wave stem index — cardata sample names
     // resolve through it into decoded `PcmAudio` voices. Session-scoped
     // like the effect banks: teardown removes it and the next load
