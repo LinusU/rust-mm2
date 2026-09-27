@@ -1,5 +1,86 @@
-# Last iteration — F18-B.5: environmental pre-race commentary cues
-# (iteration 85)
+# Last iteration — F18-B.5 review repair: the cue-suffix overflow
+# (iteration 86)
+
+Iteration 86 on `ralph/night` (baseline `4d64682` — the F18-B.5 docs
+commit; external verify green, the review returned one blocking
+finding; thirty-first iteration of run `20260925T144723`). One scoped
+repair: `draw_cue_suffix` could panic on authored `end`/`add` windows
+overflowing `i64`.
+
+## Task selection
+
+The F18-B.5 candidate `4d64682` failed external review on one
+blocking finding: `draw_cue_suffix` summed `add + 1 + rng % end` on
+verbatim `i64` fields, so a modded or corrupt
+`aud/spchdata/*_prerace.csv` authoring values near the `i64` edge
+(`WEARAIN,3,9223372036854775807`) overflows — a panic under dev/test
+overflow checks, a wrapped bogus stem in release — reachable through
+`resolve_commentary` at session start, against the module's
+diagnose-not-panic contract for authored data. Repairing that defect
+was this iteration's only work.
+
+## Findings and actions
+
+- `mm2_game::audio` — `draw_cue_suffix` now returns `None` when
+  `end <= 0` *or* the window top `add + end` overflows `i64` (with
+  `end >= 1` the `checked_add` covers `add + 1` too, so the summed
+  suffix is provably in range for every draw). The decline happens
+  before the rng draw is consumed, so an undrawable row counts
+  `failed` downstream exactly like a non-positive `end` and never
+  shifts the seeded stream the drawable rows replay.
+- `mm2_formats::spchdata` — `CueTable::validate` flags the same
+  shape (`end > 0`, `add + end` overflow) as an advisory diagnostic,
+  matching the draw's verdict the way the `end <= 0`/`add < 0` legs
+  already do.
+
+## Evidence
+
+- `cargo test -p mm2_formats spchdata` — 11/11 incl. the new
+  `validate_flags_an_unrepresentable_sufix_range`.
+- `cargo test -p mm2_game audio` — 33/33 incl. the new
+  `an_unrepresentable_cue_window_is_undrawable_not_a_panic`
+  (i64-edge windows → `None` with no panic and no draw consumed; a
+  representable `i64::MAX`-topping window still lands in-window).
+- `cargo test -p mm2_app --test audio` — 86/86 incl. the new
+  `an_overflowing_sufix_range_counts_failed_not_panics` (a
+  `WEARAIN,3,<i64::MAX>` fixture through the production
+  `resolve_commentary` path counts `failed` once and the time cue
+  still plays — the reviewer's reachable panic path).
+- Retail re-run (`fnv1a64:e91e6cd4b2ae30d9`, london headless
+  `--weather 2 --time-of-day 3 --frames 1200`):
+  `aud=0h/46v/0s/4l/4a/1r/8i/8c/1k/1g/20e/16n/1q+13d+1x` — the `al5`
+  `WEAFOG` authored miss still counts `+1x`, `timenight` still plays
+  (`1q`). The `+Nd` term is the ambient-voice bound count and scales
+  with traffic exposure/run length — `13d` at 1200 frames vs the
+  iteration-85 entry's `+2d` and audio.md's bare `+1x` are the same
+  record shape at different run lengths, not a regression.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --workspace` — all suites green (exit 0).
+
+## Classification / remaining open items
+
+- No original-rule claim changes: the draw stays the designed
+  `add + 1 + rng % end` (DSN-63); the overflow decline is a
+  robustness bound on unrepresentable authored input, not a
+  recovered rule.
+- Review minors addressed: the PLAN inventory line now reads `538
+  VFS entries — 526 CSVs + 12 speaker-dir entries` (measured via
+  `mm2-inspect list`); the `1q+2d+1x`/`1q+1x` record difference is
+  documented above as `+Nd` run-length variance. The
+  validate-not-invoked cosmetic note stands — `resolve_commentary`
+  reads the table's parse diagnostics directly; `validate` remains
+  the audit-side advisory.
+- All F18-B.5 open items stand: AC02/AC04/AC05 unclaimed, F18-B stays
+  `active`.
+
+---
+
+# Prior iterations
 
 Iteration 85 on `ralph/night` (baseline `c0517af` — the F18-B.4 docs
 commit; external verify + review green; thirtieth iteration of run
