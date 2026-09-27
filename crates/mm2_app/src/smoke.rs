@@ -1254,12 +1254,16 @@ pub fn headless_smoke(
         .filter(|s| s.variant == mm2_game::SurfaceVariant::Wet)
         .map(|_| " surf=wet".to_string())
         .unwrap_or_default();
-    // The dev `--traction` modifier is recorded when set so a wetness
-    // run is self-describing; unmodified runs stay bit-identical.
-    let traction_detail = config
-        .dev
-        .traction
-        .map(|t| format!(" traction={t}"))
+    // The session's effective environment traction modifier is
+    // recorded when non-default — whether the writer was the weather
+    // wetness factor (F18-B.1) or the dev `--traction` pin — so a wet
+    // or pinned run is self-describing; an explicit `--traction` pin
+    // also records (it may be *overriding* wetness back to dry).
+    // `1.0` unmodified runs stay bit-identical.
+    let traction_detail = world_ecs
+        .get_resource::<mm2_vehicle::TireConditions>()
+        .filter(|t| t.traction != 1.0 || config.dev.traction.is_some())
+        .map(|t| format!(" traction={}", t.traction))
         .unwrap_or_default();
     // A bound driver profile is recorded so a run under persisted
     // selections is self-describing; absent without one, keeping

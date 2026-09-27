@@ -464,8 +464,11 @@ themselves are exe-verified.
 
 Still not consumed (UNK-24 stays open): `.ldef` rows, `.lmap` values
 (runtime-loaded by the original — see above — but unbound here),
-precipitation/wetness/audio effects (F18-B/C scope), and authoritative
-network replication of conditions (F18 req 5). `.pvshist` is
+precipitation particles (F18-B scope — wetness traction itself landed
+in F18-B.1: `Weather::traction_factor` maps `rainy` to a designed
+0.8 session-wide `TireConditions` modifier, DSN-59/UNK-39), remaining
+audio effects, and authoritative network replication of conditions
+(F18 req 5). `.pvshist` is
 bake-tool data (no exe reference), and the numbered `.cpvs` files are
 bake sweeps — neither needs a consumer. The dome's three `.sky`
 floats are bound under designed readings (world-height / vertical

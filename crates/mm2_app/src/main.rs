@@ -260,9 +260,10 @@ struct Cli {
     #[arg(long, value_name = "0-3")]
     time_of_day: Option<u8>,
 
-    /// Multiply every tire contact's grip by `f` for the session — an
-    /// environment traction stand-in (wetness/ice) for evidence runs.
-    /// `1.0` is unmodified; must be finite and non-negative.
+    /// Multiply every tire contact's grip by `f` for the session — pins
+    /// the environment traction modifier outright, overriding the
+    /// weather-derived wetness factor (so `--traction 1` dries a rainy
+    /// session). Must be finite and non-negative.
     #[arg(long, value_name = "f")]
     traction: Option<f32>,
 
@@ -392,9 +393,9 @@ fn main() {
     };
 
     // `--traction f` pins the session's environment traction modifier —
-    // a wetness stand-in quarantined in DevOverrides (UNK-1/F18 owns the
-    // session-legal writer). A negative or non-finite multiplier is a
-    // usage error, never a clamp.
+    // quarantined in DevOverrides and *overriding* the session-legal
+    // wetness writer (F18-B.1's weather→traction factor). A negative or
+    // non-finite multiplier is a usage error, never a clamp.
     let traction = match cli.traction {
         Some(f) if f.is_finite() && f >= 0.0 => Some(f),
         Some(_) => {

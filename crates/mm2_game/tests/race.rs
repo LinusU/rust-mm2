@@ -827,6 +827,26 @@ fn effective_conditions_prefers_the_player_customization() {
     );
 }
 
+/// F18-B.1: `rainy` — the only authored precipitation state (WLD-21) —
+/// is the sole selector that wets the tire contact; every other
+/// selector is unmodified (designed mapping, DSN-59; the original's
+/// scale is unrecovered, UNK-39).
+#[test]
+fn only_rainy_weather_wets_the_tires() {
+    for w in 0..=3 {
+        let factor = Weather::new(w).unwrap().traction_factor();
+        if w == 3 {
+            assert_eq!(factor, WET_TRACTION);
+            assert!(
+                (0.0..1.0).contains(&factor),
+                "wet grip is a real reduction, not a stall"
+            );
+        } else {
+            assert_eq!(factor, 1.0, "selector {w} is dry");
+        }
+    }
+}
+
 fn route(points: &[[f32; 3]]) -> OpponentRoute {
     OpponentRoute {
         points: points

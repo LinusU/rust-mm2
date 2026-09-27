@@ -739,13 +739,21 @@ pub fn load_session_world(
     commands.insert_resource(BangerPool {
         max_active: config.dev.banger_pool.unwrap_or(DEFAULT_ACTIVE_POOL),
     });
-    // The session's environment traction modifier (F06-B): `--traction`
-    // is a quarantined dev override like `--banger-pool`; every real
-    // session drives unmodified (`1.0`) until F18's weather work owns a
-    // session-legal writer. Re-stamped on every load, so it survives
-    // teardown without leaking a stale value.
+    // The session's environment traction modifier (F06-B, F18-B.1):
+    // the effective weather selector's designed wetness factor —
+    // `rainy` scales every tire contact, symmetric across player,
+    // opponents and trailers on the shared tire path — resolved from
+    // the same `effective_conditions` pick the lighting/fog and the
+    // wet surface-audio table read. `--traction` stays a quarantined
+    // dev pin *over* the weather factor for evidence runs (a `1.0`
+    // pin dries a rainy session). Re-stamped on every load, so it
+    // survives teardown without leaking a stale value.
     commands.insert_resource(TireConditions {
-        traction: config.dev.traction.unwrap_or(1.0).max(0.0),
+        traction: config
+            .dev
+            .traction
+            .unwrap_or_else(|| session_conditions.weather.traction_factor())
+            .max(0.0),
     });
     // F05-B.6: the smoke sprite assets — resolved through the VFS
     // like every texture; a missing `fxpt2` warns and emits

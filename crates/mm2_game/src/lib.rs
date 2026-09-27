@@ -48,7 +48,7 @@ pub use config::{
     CameraPose, ConfigError, Densities, DevOverrides, Difficulty, EventRef, EventTableKind,
     NavOverlay, RaceCustomization, SelectorError, SessionAuthority, SessionConditions,
     SessionConfig, SessionCustomization, SessionMode, SpawnPose, TimeOfDay, VehicleSelection,
-    Weather,
+    WET_TRACTION, Weather,
 };
 pub use damage::{
     DISABLED_PENALTY_TICKS, DamageEvent, DamageSpec, DamageState, DamageTier, DamageVerdict,

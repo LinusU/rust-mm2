@@ -35,8 +35,8 @@ pub struct SurfaceState {
     pub material: SurfaceMaterial,
     /// Traction multiplier the environment applies on top of the
     /// material's authored grip (wetness, ice, …). `1.0` means
-    /// *unmodified* — no modifier is applied today; F06 wires authored
-    /// materials and weather into this field.
+    /// *unmodified*; the session's weather selector writes the modifier
+    /// through `Weather::traction_factor` (F18-B.1, designed — UNK-39).
     pub traction: f32,
 }
 

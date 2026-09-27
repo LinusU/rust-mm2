@@ -65,11 +65,12 @@ impl Default for TireSurface {
 /// (F06 spec req 2: base material and environment modifier stay
 /// separate terms, multiplied once into one effective coefficient).
 ///
-/// `traction = 1.0` is *unmodified* and the default. Today the only
-/// non-default writer is a quarantined dev/diagnostic override — which
-/// authored weather selector means which wetness is unverified (UNK-1),
-/// so the F18 weather work owns the production writer. Read-only inside
-/// the physics loop; session-scoped like the other world inputs.
+/// `traction = 1.0` is *unmodified* and the default. Two writers exist
+/// above this crate: the session's effective weather selector through a
+/// designed wetness factor (F18-B.1 — `rainy` wets the road; the
+/// original's scale is unrecovered, UNK-39), and a quarantined
+/// dev/diagnostic pin that overrides it. Read-only inside the physics
+/// loop; session-scoped like the other world inputs.
 #[derive(Resource, Debug, Clone, Copy, PartialEq)]
 pub struct TireConditions {
     /// Environment grip multiplier applied to every tire contact.

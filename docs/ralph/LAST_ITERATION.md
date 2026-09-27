@@ -1,4 +1,102 @@
-# Last iteration — F17-A.7: Circuit laps/opponents options (iteration 79)
+# Last iteration — F18-B.1: weather→traction wetness (iteration 80)
+
+Iteration 80 on `ralph/night` (baseline `88b447a`, F17-A.7 — external
+verify + review green, non-blocking warts only; twenty-fifth
+iteration of run `20260925T144723`). One coherent slice: F18-B's
+weather→traction leg — the session's effective weather selector now
+writes the environment traction modifier, so authored/menu/configured
+rain wets every tire contact.
+
+## Task selection
+
+The F17-A.7 review passed with non-blocking warts only — none failing.
+The plan's named list offered the F18-A remainder "→ F18-B/C scope":
+F18-B spec req 3 wants surface wetness connected to F06 traction, and
+the codebase already carried the whole path as a dev-only stand-in —
+`--traction` pinned `TireConditions.traction` while the doc comment
+explicitly deferred the session-legal writer to F18. The slice is one
+small change: a designed `Weather::traction_factor` mapping plus the
+session writer, riding the same `effective_conditions` pick the
+lighting/fog/dome/wet-audio bindings already resolve. Precipitation
+particles (req 2) are a deliberately separate, larger render slice.
+
+## Findings and actions
+
+- **`mm2_game::config`** — `Weather::traction_factor()` + `WET_TRACTION
+  = 0.8` (designed, DSN-59): `rainy` (selector 3 — the only authored
+  precipitation state, WLD-21) wets the road; every other selector is
+  dry `1.0`, matching the single-wet-state rule
+  `SurfaceVariant::for_weather` applies to the audio tables (DSN-43).
+  No authored wet-grip data exists — the `surface{dry,wet}` CSVs are
+  audio bindings (AUD-11) — so the original's rule stays unrecovered
+  (UNK-39).
+- **`mm2_app::session`** — `TireConditions` is stamped from
+  `session_conditions.weather.traction_factor()`, with
+  `dev.traction` kept as a quarantined pin *over* the factor (a `1.0`
+  pin dries a rainy session; `Ineligible::DevOverride` unchanged).
+  Player, opponents and trailers share the factor symmetrically —
+  one tire path, one session resource.
+- **`mm2_app::smoke`** — `traction=<f>` now records the *effective*
+  modifier when non-default or explicitly pinned (previously it only
+  echoed the dev flag); unmodified runs stay bit-identical.
+- **Docs** — `DevOverrides::traction`, `--traction` help,
+  `TireConditions` and `SurfaceState` comments updated (the dev flag
+  is no longer the only writer); ledger gains DSN-59 + UNK-39;
+  DSN-28's stale "wetness unconsumed" tail corrected;
+  `environment.md`'s open list updated. The F17-A.7 row's `RaceRule`
+  naming slip (`CheckpointRule` has exactly `AnyOrder`/`Ordered`) is
+  fixed in PLAN.md/LAST_ITERATION.md per the review's wart note.
+
+## Evidence
+
+- `cargo test --locked -p mm2_game --test race` — +1
+  (`only_rainy_weather_wets_the_tires`: selector census, `0 <
+  WET_TRACTION < 1`).
+- `cargo test --locked -p mm2_app --test environment` — 20/20, +3
+  (`rainy_weather_wets_the_session_tires`: configured rainy →
+  `WET_TRACTION`, foggy → `1.0`;
+  `authored_rainy_event_wets_the_session_tires`: the authored row's
+  Weather=3 beats configured dry through `effective_conditions`;
+  `the_traction_pin_overrides_weather_wetness`: pin → 0.4, `1.0` pin
+  → dry).
+- Retail (`fnv1a64:e91e6cd4b2ae30d9`, sf headless `--frames 60`):
+  `--weather 3` cruise → `env=lt03(rainy-morning) surf=wet
+  traction=0.8`; `checkpoint:4 --pro` (authored rainy-noon) →
+  `env=lt07(rainy-noon) surf=wet traction=0.8`; the same event's
+  authored foggy amateur block → `env=lt06(foggy-noon)` with neither
+  field; `--weather 0` cruise records neither — dry runs stay
+  bit-identical.
+- Sim-level causality was already covered
+  (`mm2_vehicle/tests/surface.rs::a_wet_environment_limits_delivered_drive_force`
+  drives the same `TireConditions` resource the session now writes).
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --locked --workspace` — green, all suites.
+
+## Classification / remaining open items
+
+- Designed (DSN-59): rainy-only mapping, the `0.8` factor, pin-over-
+  weather precedence, symmetric application via the shared
+  `TireConditions` term.
+- Unknown (UNK-39): whether the original scales grip by weather at
+  all, its per-selector factor, material composition, and opponent/
+  traffic symmetry.
+- Authored rainy events stay record-eligible (authored conditions are
+  the default run); customized rain remains `Ineligible::Customized`.
+- F18-B stays `active`: precipitation particles (req 2 — covered/
+  interior handling needs a declared approximation), precipitation
+  audio hooks and condition replication (req 5's network leg is
+  F24+) remain. No rendered rain-visual claim is made — this slice is
+  physics-only; the wet *look* is unchanged beyond the authored
+  `.ltNN`/fog/dome bindings that already selected on the same slot.
+
+---
+
+# Prior iterations
 
 Iteration 79 on `ralph/night` (baseline `b183907`, F22-A.7 review
 repair — external verify + review green, no blocking findings;
@@ -32,8 +130,8 @@ and the number of opponents`), not an invented feature.
   than built).
 - **`mm2_game::race`** — `apply_race_picks(&mut def, &mut roster,
   picks)` rewrites `RaceDefinition::laps` only on
-  `CheckpointRule::Ordered` definitions (Blitz `AnyOrder`/`RaceRule`
-  untouched — `NumLaps` is meaningless there, UNK-5), truncates
+  `CheckpointRule::Ordered` definitions (the Blitz/Checkpoint
+  `AnyOrder` rule untouched — `NumLaps` is meaningless there, UNK-5), truncates
   `OpponentRoster.entries` to `min(picks.opponents, wired aimap
   count)` — a file-order prefix, never fabricated opponents — and
   syncs `definition.params.opponents`. `RacePicksReport` names what
@@ -103,8 +201,6 @@ and the number of opponents`), not an invented feature.
   Race options and the AC03 interactive evidence leg remain.
 
 ---
-
-# Prior iterations
 
 Iteration 78 on `ralph/night` (baseline `8b8455f`, F22-A.7 — external
 verify + review green, no blocking findings; twenty-third iteration of

@@ -16,11 +16,12 @@ use mm2_app::session::{self, SessionControl};
 use mm2_app::{camera, contracts};
 use mm2_assets::Vfs;
 use mm2_game::{
-    Densities, EventRef, EventTableKind, ImpactEvent, Mm2Vfs, RaceStarted, ResultLedger, Session,
-    SessionConditions, SessionConfig, SessionCustomization, SessionEntity, SessionMode,
-    SessionPhase, TimeOfDay, Weather, WorldMode, advance_session_tick, despawn_session_entities,
+    Densities, DevOverrides, EventRef, EventTableKind, ImpactEvent, Mm2Vfs, RaceStarted,
+    ResultLedger, Session, SessionConditions, SessionConfig, SessionCustomization, SessionEntity,
+    SessionMode, SessionPhase, TimeOfDay, WET_TRACTION, Weather, WorldMode, advance_session_tick,
+    despawn_session_entities,
 };
-use mm2_vehicle::{VehicleConfig, VehiclePlugin};
+use mm2_vehicle::{TireConditions, VehicleConfig, VehiclePlugin};
 
 fn write(dir: &Path, rel: &str, contents: impl AsRef<[u8]>) {
     let p = dir.join(rel);
@@ -188,10 +189,15 @@ const WAYPOINTS: &str = "x,y,z,a,poly count,frane rate,state changes,texture cha
 /// An event overlay for the city: one checkpoint row authoring
 /// `TimeofDay=1`/`Weather=2` (slot 6) at amateur difficulty.
 fn write_event(d: &Path) {
+    write_event_weather(d, 2);
+}
+
+/// `write_event` with a caller-chosen amateur `Weather` column.
+fn write_event_weather(d: &Path, weather: u8) {
     write(
         d,
         "race/test/mmracedata.csv",
-        format!("{MM_HEADER}\nnone,0,1,2,0,0,0.1,0.0,1,50,1,0,0,0,0,0,0.2,0.0,1,40,1\n"),
+        format!("{MM_HEADER}\nnone,0,1,{weather},0,0,0.1,0.0,1,50,1,0,0,0,0,0,0.2,0.0,1,40,1\n"),
     );
     write(d, "race/test/race0.aimap", "#\n");
     write(
@@ -475,6 +481,117 @@ fn customized_event_conditions_take_precedence() {
     assert_eq!(report.name.as_deref(), Some("rainy-night"));
     assert_eq!(report.source, ConditionsSource::Customized);
     assert!(!report.fallback);
+}
+
+/// F18-B.1: the effective weather selector drives the session's
+/// environment traction modifier — `rainy` wets every tire contact
+/// (designed `WET_TRACTION`, DSN-59) while every other selector leaves
+/// the dry `1.0` unmodified.
+#[test]
+fn rainy_weather_wets_the_session_tires() {
+    let tmp = city_install();
+    let mut rainy = city_app(
+        city_config(mm2_game::SessionConditions {
+            time_of_day: TimeOfDay::new(1).unwrap(),
+            weather: Weather::new(3).unwrap(),
+        }),
+        vfs_of(tmp.path()),
+    );
+    rainy.update();
+    assert_eq!(
+        rainy.world().resource::<TireConditions>().traction,
+        WET_TRACTION,
+        "rainy wets every tire contact"
+    );
+
+    let mut dry = city_app(
+        city_config(mm2_game::SessionConditions {
+            time_of_day: TimeOfDay::new(1).unwrap(),
+            weather: Weather::new(2).unwrap(),
+        }),
+        vfs_of(tmp.path()),
+    );
+    dry.update();
+    assert_eq!(
+        dry.world().resource::<TireConditions>().traction,
+        1.0,
+        "foggy is not precipitation — the dry modifier stands"
+    );
+}
+
+/// F18-B.1: an authored rainy event wets the session through the same
+/// `effective_conditions` precedence the lighting binds — the authored
+/// row (`Weather=3` amateur) beats the configured dry selectors.
+#[test]
+fn authored_rainy_event_wets_the_session_tires() {
+    let tmp = city_install();
+    write_event_weather(tmp.path(), 3);
+    let config = SessionConfig {
+        mode: SessionMode::Event(EventRef {
+            city: "test".into(),
+            table: EventTableKind::Checkpoint,
+            index: 0,
+        }),
+        conditions: mm2_game::SessionConditions {
+            time_of_day: TimeOfDay::new(0).unwrap(),
+            weather: Weather::new(0).unwrap(),
+        },
+        ..city_config(SessionConditions::default())
+    };
+    let mut app = city_app(config, vfs_of(tmp.path()));
+    app.update();
+    assert_eq!(
+        app.world().resource::<TireConditions>().traction,
+        WET_TRACTION,
+        "the authored row's rainy weather wets the event session"
+    );
+}
+
+/// F18-B.1: the quarantined `--traction` pin owns the modifier when
+/// set — it overrides the weather factor both ways (a `1.0` pin dries
+/// a rainy session for an evidence run).
+#[test]
+fn the_traction_pin_overrides_weather_wetness() {
+    let tmp = city_install();
+    let rainy = || {
+        city_config(mm2_game::SessionConditions {
+            time_of_day: TimeOfDay::new(1).unwrap(),
+            weather: Weather::new(3).unwrap(),
+        })
+    };
+    let mut pinned = city_app(
+        SessionConfig {
+            dev: DevOverrides {
+                traction: Some(0.4),
+                ..DevOverrides::default()
+            },
+            ..rainy()
+        },
+        vfs_of(tmp.path()),
+    );
+    pinned.update();
+    assert_eq!(
+        pinned.world().resource::<TireConditions>().traction,
+        0.4,
+        "the pin replaces the wet factor outright"
+    );
+
+    let mut dried = city_app(
+        SessionConfig {
+            dev: DevOverrides {
+                traction: Some(1.0),
+                ..DevOverrides::default()
+            },
+            ..rainy()
+        },
+        vfs_of(tmp.path()),
+    );
+    dried.update();
+    assert_eq!(
+        dried.world().resource::<TireConditions>().traction,
+        1.0,
+        "a 1.0 pin dries the rainy session"
+    );
 }
 
 /// A preset that parses but carries off-schema fields still binds —

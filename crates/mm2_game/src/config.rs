@@ -340,7 +340,31 @@ impl Weather {
     pub fn name(self) -> &'static str {
         ["clear", "cloudy", "foggy", "rainy"][self.0 as usize]
     }
+
+    /// The environment grip multiplier this selector applies to every
+    /// tire contact (F18-B.1 — designed, DSN-59; the original's
+    /// weather→wetness scale is unrecovered, UNK-39). `rainy` is the
+    /// only authored precipitation state (WLD-21), so it alone wets the
+    /// road — the same single-wet-state rule
+    /// [`SurfaceVariant::for_weather`](crate::audio::SurfaceVariant::for_weather)
+    /// applies to the surface-audio tables (DSN-43); every other
+    /// selector is dry (`1.0`, unmodified).
+    pub fn traction_factor(self) -> f32 {
+        match self.get() {
+            3 => WET_TRACTION,
+            _ => 1.0,
+        }
+    }
 }
+
+/// Grip multiplier under `rainy` weather (F18-B.1 — designed, DSN-59):
+/// wet asphalt keeps ~80 % of its dry grip. Chosen milder than the
+/// authored material spread (grass/water sit far lower) so rain reads
+/// as loose, not icy — the original's wet factor is unrecovered
+/// (UNK-39). Applied through `mm2_vehicle::TireConditions`, not the
+/// authored material table, so a weather change never rewrites
+/// collider data.
+pub const WET_TRACTION: f32 = 0.8;
 
 /// A condition selector outside the authored 0-3 range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -528,10 +552,10 @@ pub struct DevOverrides {
     /// session-legal parameter).
     pub banger_pool: Option<usize>,
     /// `--traction` fixed environment traction multiplier applied to
-    /// every tire contact: a wetness/ice stand-in for evidence runs
-    /// (the authored weather→wetness mapping is UNK-1, so no
-    /// session-legal parameter drives this yet — F18 owns the real
-    /// writer). `None`/`1.0` is unmodified.
+    /// every tire contact: pins the session's modifier outright for
+    /// evidence runs — it *overrides* the weather-derived wetness
+    /// factor (F18-B.1), so `--traction 1.0` dries a rainy session.
+    /// `None` leaves the session-legal writer in charge.
     pub traction: Option<f32>,
     /// `--pause`: pause the session once it reaches `Playing`
     /// (evidence/diagnostic runs — a `--frames`/`--screenshot` capture
