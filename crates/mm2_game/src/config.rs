@@ -538,6 +538,14 @@ pub struct DevOverrides {
     /// One-shot per process; record-ineligible for the same reason
     /// `restart` is.
     pub restart_at: Option<u64>,
+    /// `--reset-at`: emit the `R`-key reset bundle once the session
+    /// clock reaches the given fixed-step count — the scheduled form
+    /// of the player-vehicle reset for `--frames`/`--screenshot`
+    /// capture legs that need a mid-run `ResetVehicle` teleport while
+    /// live input is frozen (evidence/diagnostic runs — never a
+    /// session-legal parameter). One-shot; like `finish`/`restart` it
+    /// changes the run's course, so it IS in `record_eligibility`.
+    pub reset_at: Option<u64>,
     /// `--no-pvs`: disable the authored `.cpvs` room-PVS render culling
     /// (F18-A.5) — the retail `cityLevel::EnablePVS(false)` counterpart
     /// and the escape hatch for comparing culled vs unculled captures.
@@ -567,6 +575,15 @@ pub struct DevOverrides {
     /// input is frozen; render-only like `--cockpit`). Falls back to
     /// the near lens when the car carries no far record.
     pub far: bool,
+    /// `--cam-cycle-at`: advance the documented `C` view chain once
+    /// when the session clock reaches the given fixed-step count —
+    /// how a `--frames`/`--screenshot` capture inspects a mid-drive
+    /// camera transition while live input is frozen
+    /// (evidence/diagnostic runs — never a session-legal parameter).
+    /// Render-only like `--cockpit`/`--far`/`--mirror`: it re-aims a
+    /// camera and cannot change a run's outcome, so it stays out of
+    /// `record_eligibility`.
+    pub cam_cycle_at: Option<u64>,
     /// `--mirror`: start the session with the rear-view mirror strip up
     /// (evidence/diagnostic runs — how a `--frames`/`--screenshot`
     /// capture renders the F22-B.2 mirror while live input is frozen;

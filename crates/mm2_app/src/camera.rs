@@ -205,6 +205,15 @@ pub struct ChaseCamera {
     /// Position smoothing (1/s) — designed tracking lag; the authored
     /// approach/dynamics fields stay unparsed for a later leg.
     pub smoothness: f32,
+    /// Last vehicle position the boom tracked. A jump the frame's
+    /// delta cannot explain — a `ResetVehicle` teleport (`R`, a
+    /// water/stuck/disabled recovery, a scripted re-anchor) or a
+    /// return to a chase mode after the car drove on under another
+    /// view — must snap the boom rather than lerp a straight line
+    /// across the world through whatever stands between the two poses
+    /// (reset transitions, spec req 5; designed — UNK-36). `None`
+    /// until the first tracked frame, which always snaps.
+    pub last_pos: Option<Vec3>,
 }
 
 impl ChaseCamera {
@@ -238,6 +247,7 @@ impl Default for ChaseCamera {
             },
             far: None,
             smoothness: 6.0,
+            last_pos: None,
         }
     }
 }
@@ -301,6 +311,66 @@ type SessionCameras<'w, 's> = Query<
     ),
 >;
 
+/// Does a session camera exist for `mode`? The far slot is
+/// authored-only: a chase rig without a `_far` lens has no second
+/// view to activate.
+fn have_mode(m: CameraMode, cams: &SessionCameras) -> bool {
+    cams.iter().any(|(_, c, p, f)| match m {
+        CameraMode::Chase => c.is_some(),
+        CameraMode::ChaseFar => c.is_some_and(|c| c.far.is_some()),
+        CameraMode::Cockpit => p.is_some(),
+        CameraMode::Free => f.is_some(),
+    })
+}
+
+/// The `C`-chain successor that is actually spawned, skipping modes
+/// whose camera never bound. `None` when no recognised session camera
+/// exists at all (the menu phase or an empty world) — cycling there
+/// would only drift the mode away from whatever cameras a later
+/// session spawns.
+fn next_available(mode: CameraMode, cams: &SessionCameras) -> Option<CameraMode> {
+    let mut m = mode.next();
+    for _ in 0..4 {
+        if have_mode(m, cams) {
+            return Some(m);
+        }
+        m = m.next();
+    }
+    None
+}
+
+/// The activation pass a mode switch performs: each recognised
+/// session camera renders only while its mode is live, and Free
+/// grabs/hides the cursor. Cameras carrying none of the three markers
+/// (map, UI) are owned elsewhere and never touched.
+fn activate_mode(
+    mode: CameraMode,
+    cams: &mut SessionCameras,
+    cursor: &mut Query<&mut CursorOptions>,
+) {
+    for (mut cam, chase, pov, free) in cams.iter_mut() {
+        let active = match mode {
+            CameraMode::Chase | CameraMode::ChaseFar => chase.is_some(),
+            CameraMode::Cockpit => pov.is_some(),
+            CameraMode::Free => free.is_some(),
+        };
+        // Only claim the recognised session cameras — an unmarked one
+        // (map, UI) is owned elsewhere.
+        if chase.is_some() || pov.is_some() || free.is_some() {
+            cam.is_active = active;
+        }
+    }
+    for mut opts in cursor.iter_mut() {
+        let free = mode == CameraMode::Free;
+        opts.grab_mode = if free {
+            CursorGrabMode::Locked
+        } else {
+            CursorGrabMode::None
+        };
+        opts.visible = !free;
+    }
+}
+
 /// `C` cycles the HUD-3 view chain — Chase Near → Cockpit → Chase Far,
 /// with the dev Free camera appended (DSN-48); `V` is the dashboard
 /// toggle — it jumps straight into or out of the cockpit view. (The
@@ -321,37 +391,15 @@ pub fn toggle_camera(
     mut cams: SessionCameras,
     mut cursor: Query<&mut CursorOptions>,
 ) {
-    let have = |m: CameraMode, cams: &SessionCameras| -> bool {
-        cams.iter().any(|(_, c, p, f)| match m {
-            CameraMode::Chase => c.is_some(),
-            // The far slot is authored-only: a chase rig without a
-            // `_far` lens has no second view to activate.
-            CameraMode::ChaseFar => c.is_some_and(|c| c.far.is_some()),
-            CameraMode::Cockpit => p.is_some(),
-            CameraMode::Free => f.is_some(),
-        })
-    };
     let next = if keys.just_pressed(KeyCode::KeyC) {
-        let mut m = mode.next();
-        for _ in 0..4 {
-            if have(m, &cams) {
-                break;
-            }
-            m = m.next();
+        match next_available(*mode, &cams) {
+            Some(m) => m,
+            None => return,
         }
-        // No recognised session camera exists for any mode — the menu
-        // phase or an empty world. Cycling would only drift the mode
-        // (the loop settles on an arbitrary step) away from whatever
-        // cameras a later session spawns, and the activation pass below
-        // is a no-op either way.
-        if !have(m, &cams) {
-            return;
-        }
-        m
     } else if keys.just_pressed(KeyCode::KeyV) {
         match *mode {
             CameraMode::Cockpit => CameraMode::Chase,
-            _ if have(CameraMode::Cockpit, &cams) => CameraMode::Cockpit,
+            _ if have_mode(CameraMode::Cockpit, &cams) => CameraMode::Cockpit,
             _ => return,
         }
     } else {
@@ -361,26 +409,38 @@ pub fn toggle_camera(
         return;
     }
     *mode = next;
-    for (mut cam, chase, pov, free) in &mut cams {
-        let active = match *mode {
-            CameraMode::Chase | CameraMode::ChaseFar => chase.is_some(),
-            CameraMode::Cockpit => pov.is_some(),
-            CameraMode::Free => free.is_some(),
-        };
-        // Only claim the recognised session cameras — an unmarked one
-        // (map, UI) is owned elsewhere.
-        if chase.is_some() || pov.is_some() || free.is_some() {
-            cam.is_active = active;
-        }
+    activate_mode(next, &mut cams, &mut cursor);
+}
+
+/// `--cam-cycle-at TICK` (quarantined `DevOverrides`, evidence runs
+/// only): advance the documented `C` chain once — the same
+/// successor/activation logic [`toggle_camera`] runs for the key —
+/// when the session clock reaches `cam_cycle_at` fixed ticks (120 Hz,
+/// the `smoke` record's `ticks=` unit). A `--frames`/`--screenshot`
+/// capture freezes live input, so this is how a mid-drive view
+/// transition gets inspected on real content. Render-only like
+/// `--cockpit`/`--far`: it re-aims a camera and cannot change a run's
+/// outcome, so it stays out of `record_eligibility`. One-shot.
+pub fn dev_cam_cycle_at(
+    session: Res<Session>,
+    mut mode: ResMut<CameraMode>,
+    mut cams: SessionCameras,
+    mut cursor: Query<&mut CursorOptions>,
+    mut fired: Local<bool>,
+) {
+    if *fired {
+        return;
     }
-    for mut opts in &mut cursor {
-        let free = *mode == CameraMode::Free;
-        opts.grab_mode = if free {
-            CursorGrabMode::Locked
-        } else {
-            CursorGrabMode::None
-        };
-        opts.visible = !free;
+    let at = session.config().and_then(|c| c.dev.cam_cycle_at);
+    if session.is_playing()
+        && at.is_some_and(|at| session.tick() >= at)
+        && let Some(next) = next_available(*mode, &cams)
+    {
+        *fired = true;
+        if next != *mode {
+            *mode = next;
+            activate_mode(next, &mut cams, &mut cursor);
+        }
     }
 }
 
@@ -464,6 +524,17 @@ pub fn retarget_hud(
 const OCCLUSION_MARGIN: f32 = 0.25;
 const OCCLUSION_FLOOR: f32 = 0.05;
 
+/// Apparent vehicle speed (m/s) beyond which the boom concludes the
+/// car teleported — a `ResetVehicle` reset/recovery jump or a re-entry
+/// to a chase mode after the car drove on under another view — and
+/// snaps instead of sweeping a straight line across the world through
+/// whatever stands between the two poses. Compared as a rate so a
+/// render hitch's long delta still legitimately covers more ground;
+/// ~80 m/s is the fastest authored top speed (vppanozgt `Trans.High`
+/// 180 mph), so the margin is wide. Designed — the original's
+/// reset/transition camera behavior is unrecovered (UNK-36).
+const BOOM_SNAP_SPEED: f32 = 120.0;
+
 /// Smooth follow on the active chase lens: the boom eases toward its
 /// authored anchor extended across the speed window, the projection
 /// follows the lens's `CameraFOV`/`CameraNear`/`CameraFar`, and
@@ -473,7 +544,7 @@ pub fn chase_follow(
     mode: Res<CameraMode>,
     spatial: Option<SpatialQuery>,
     spawn: Option<Res<crate::session::SpawnPoint>>,
-    mut cams: Query<(&ChaseCamera, &mut Transform, &mut Projection)>,
+    mut cams: Query<(&mut ChaseCamera, &mut Transform, &mut Projection)>,
     vehicle: Query<(Entity, &GlobalTransform, &LinearVelocity), With<PlayerVehicle>>,
 ) {
     if !matches!(*mode, CameraMode::Chase | CameraMode::ChaseFar) {
@@ -485,7 +556,16 @@ pub fn chase_follow(
     let veh_pos = veh_xf.translation();
     let veh_rot = veh_xf.rotation();
     let planar_speed = vel.x.hypot(vel.z);
-    for (cam, mut xf, mut proj) in &mut cams {
+    for (mut cam, mut xf, mut proj) in &mut cams {
+        // A jump the frame delta cannot explain — a reset teleport or
+        // a stale tracker after another camera mode ran — snaps to the
+        // target: lerping would sweep the view across the world
+        // through walls. A lens swap is *not* a jump (the vehicle
+        // didn't move), so near↔far stays a smooth boom transition.
+        let jumped = cam
+            .last_pos
+            .is_none_or(|p| veh_pos.distance(p) > BOOM_SNAP_SPEED * time.delta_secs());
+        cam.last_pos = Some(veh_pos);
         let lens = cam.lens(*mode);
         // The lens owns the projection — write-on-diff so toggling
         // near↔far swaps the authored FOV/clips without churning change
@@ -517,7 +597,11 @@ pub fn chase_follow(
         };
         let target = veh_pos + veh_rot * (dir * dist);
         let t = 1.0 - (-cam.smoothness * time.delta_secs()).exp();
-        let mut next = xf.translation.lerp(target, t);
+        let mut next = if jumped {
+            target
+        } else {
+            xf.translation.lerp(target, t)
+        };
 
         // CollideType: clamp the smoothed position in front of whatever
         // would occlude the car. Clamping the *smoothed* candidate —

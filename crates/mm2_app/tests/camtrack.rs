@@ -7,15 +7,15 @@ use avian3d::prelude::{Collider, Gravity, LinearVelocity, PhysicsPlugins, RigidB
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::camera::{
-    CameraMode, ChaseCamera, ChaseLens, FreeCamera, TrackReport, chase_follow, load_track_cams,
-    toggle_camera,
+    CameraMode, ChaseCamera, ChaseLens, FreeCamera, TrackReport, chase_follow, dev_cam_cycle_at,
+    load_track_cams, toggle_camera,
 };
 use mm2_app::dash::CockpitCamera;
 use mm2_app::input::vehicle_input;
 use mm2_app::session::SpawnPoint;
 use mm2_assets::Vfs;
 use mm2_formats::camtrack::TrackCamSpec;
-use mm2_game::{PlayerVehicle, Session, SessionConfig, SessionPhase};
+use mm2_game::{DevOverrides, PlayerVehicle, Session, SessionConfig, SessionPhase};
 use mm2_vehicle::VehicleInput;
 use std::time::Duration;
 
@@ -250,6 +250,7 @@ fn speed_window_extends_boom() {
             near: near_lens(),
             far: None,
             smoothness: 30.0,
+            ..Default::default()
         },
         true,
     );
@@ -301,6 +302,7 @@ fn collide_type_pulls_boom_in() {
             near: near_lens(),
             far: None,
             smoothness: 60.0,
+            ..Default::default()
         },
         true,
     );
@@ -339,6 +341,7 @@ fn collide_type_zero_ignores_occluder() {
             near: ChaseLens::authored(&spec),
             far: None,
             smoothness: 60.0,
+            ..Default::default()
         },
         true,
     );
@@ -383,6 +386,7 @@ fn own_trailer_is_not_an_occluder() {
             near: near_lens(),
             far: None,
             smoothness: 60.0,
+            ..Default::default()
         },
         true,
     );
@@ -421,6 +425,7 @@ fn other_trailer_still_occludes() {
             near: near_lens(),
             far: None,
             smoothness: 60.0,
+            ..Default::default()
         },
         true,
     );
@@ -496,6 +501,7 @@ fn sized_lens_drives_the_fallback_boom() {
             near: lens,
             far: None,
             smoothness: 30.0,
+            ..Default::default()
         },
         true,
     );
@@ -533,6 +539,304 @@ fn load_track_cams_binds_what_ships() {
 
     let t = load_track_cams(&vfs, "vpnone");
     assert!(t.near.is_none() && t.far.is_none());
+}
+
+/// A jump the frame delta cannot explain — the `R` reset's
+/// `ResetVehicle` teleport, a water/stuck/disabled recovery or a
+/// scripted re-anchor — snaps the boom to the new target on the next
+/// tracked frame. Lerping would sweep the view in a straight line
+/// across the world through whatever stands between the two poses
+/// (AC05's reset leg).
+#[test]
+fn teleport_snaps_the_boom() {
+    let mut app = base_app(CameraMode::Chase);
+    app.add_systems(Update, chase_follow);
+    let car = spawn_vehicle(&mut app, Vec3::ZERO, Vec3::ZERO);
+    let cam = spawn_chase(
+        &mut app,
+        ChaseCamera {
+            near: near_lens(),
+            far: None,
+            ..Default::default()
+        },
+        true,
+    );
+    for _ in 0..30 {
+        app.update();
+    }
+
+    // Reset-style teleport 200 m out: the propagated pose reaches the
+    // tracker one update after the write.
+    app.world_mut()
+        .get_mut::<Transform>(car)
+        .unwrap()
+        .translation = Vec3::new(200.0, 0.0, 0.0);
+    app.update();
+    app.update();
+
+    let xf = app.world().get::<Transform>(cam).unwrap();
+    let expect = Vec3::new(200.0, 0.0, 0.0) + near_lens().offset;
+    assert!(
+        xf.translation.distance(expect) < 0.05,
+        "boom snapped onto the new anchor, got {:?}",
+        xf.translation
+    );
+}
+
+/// Motion under the rate still eases — an in-place-scale hop (the
+/// upright recovery's ~decimetre) keeps the smoothing rather than
+/// snapping, so the threshold only fires on real teleports.
+#[test]
+fn small_displacements_stay_smooth() {
+    let mut app = base_app(CameraMode::Chase);
+    app.add_systems(Update, chase_follow);
+    let car = spawn_vehicle(&mut app, Vec3::ZERO, Vec3::ZERO);
+    let cam = spawn_chase(
+        &mut app,
+        ChaseCamera {
+            near: near_lens(),
+            far: None,
+            ..Default::default()
+        },
+        true,
+    );
+    for _ in 0..30 {
+        app.update();
+    }
+    let settled = app.world().get::<Transform>(cam).unwrap().translation;
+
+    app.world_mut()
+        .get_mut::<Transform>(car)
+        .unwrap()
+        .translation = Vec3::new(0.0, 0.0, -1.5);
+    app.update();
+    app.update();
+
+    let xf = app.world().get::<Transform>(cam).unwrap();
+    let expect = Vec3::new(0.0, 0.0, -1.5) + near_lens().offset;
+    assert!(
+        xf.translation.distance(expect) > 0.5,
+        "a 1.5 m hop eases instead of snapping, got {:?}",
+        xf.translation
+    );
+    assert!(
+        xf.translation.distance(settled) > 0.02,
+        "the boom still tracks the hop, got {:?} vs {:?}",
+        xf.translation,
+        settled
+    );
+}
+
+/// Re-entering a chase mode after the car drove on under another
+/// view: the tracker went stale while `chase_follow` was gated out,
+/// so the first chase frame reads the whole displacement as one jump
+/// and snaps — the same fix that covers resets, exercised through the
+/// mode-transition leg (AC05).
+#[test]
+fn mode_reentry_snaps_the_stale_boom() {
+    let mut app = base_app(CameraMode::Chase);
+    app.add_systems(Update, chase_follow);
+    let car = spawn_vehicle(&mut app, Vec3::ZERO, Vec3::ZERO);
+    let cam = spawn_chase(
+        &mut app,
+        ChaseCamera {
+            near: near_lens(),
+            far: None,
+            ..Default::default()
+        },
+        true,
+    );
+    for _ in 0..30 {
+        app.update();
+    }
+
+    // Drive on under Cockpit: the chase pass is gated out while the
+    // car covers 80 m.
+    *app.world_mut().resource_mut::<CameraMode>() = CameraMode::Cockpit;
+    app.world_mut()
+        .get_mut::<Transform>(car)
+        .unwrap()
+        .translation = Vec3::new(80.0, 0.0, 0.0);
+    for _ in 0..3 {
+        app.update();
+    }
+
+    *app.world_mut().resource_mut::<CameraMode>() = CameraMode::Chase;
+    app.update();
+    let xf = app.world().get::<Transform>(cam).unwrap();
+    let expect = Vec3::new(80.0, 0.0, 0.0) + near_lens().offset;
+    assert!(
+        xf.translation.distance(expect) < 0.05,
+        "re-entry snapped onto the car, got {:?}",
+        xf.translation
+    );
+}
+
+/// The near→far lens swap is *not* a jump — the vehicle didn't move,
+/// so the boom eases between the two authored anchors. Snapping there
+/// would jolt every `C` press into ChaseFar.
+#[test]
+fn lens_transition_stays_smooth() {
+    let mut app = base_app(CameraMode::Chase);
+    app.add_systems(Update, chase_follow);
+    spawn_vehicle(&mut app, Vec3::ZERO, Vec3::ZERO);
+    let cam = spawn_chase(
+        &mut app,
+        ChaseCamera {
+            near: near_lens(),
+            far: Some(far_lens()),
+            smoothness: 6.0,
+            ..Default::default()
+        },
+        true,
+    );
+    for _ in 0..30 {
+        app.update();
+    }
+
+    *app.world_mut().resource_mut::<CameraMode>() = CameraMode::ChaseFar;
+    app.update();
+    let xf = app.world().get::<Transform>(cam).unwrap();
+    let far_target = far_lens().offset;
+    assert!(
+        xf.translation.distance(far_target) > 0.5,
+        "near→far eases across the lens swap, got {:?}",
+        xf.translation
+    );
+    assert!(
+        xf.translation.distance(near_lens().offset) > 0.02,
+        "and it is already moving toward the far anchor, got {:?}",
+        xf.translation
+    );
+}
+
+/// A rig's first tracked frame always snaps — there is no history to
+/// ease from, so the boom starts on the authored anchor rather than
+/// gliding in from wherever the camera spawned.
+#[test]
+fn first_track_lands_on_the_boom() {
+    let mut app = base_app(CameraMode::Chase);
+    app.add_systems(Update, chase_follow);
+    spawn_vehicle(&mut app, Vec3::new(500.0, 0.0, 500.0), Vec3::ZERO);
+    let cam = spawn_chase(
+        &mut app,
+        ChaseCamera {
+            near: near_lens(),
+            far: None,
+            ..Default::default()
+        },
+        true,
+    );
+    app.update();
+    app.update();
+    let xf = app.world().get::<Transform>(cam).unwrap();
+    let expect = Vec3::new(500.0, 0.0, 500.0) + near_lens().offset;
+    assert!(
+        xf.translation.distance(expect) < 0.05,
+        "first tracked frame lands on the anchor, got {:?}",
+        xf.translation
+    );
+}
+
+/// A `Playing` session with a camera override the harness drives —
+/// `dev_cam_cycle_at` reads the config out of the resource like every
+/// session-scoped override.
+fn playing_session(cam_cycle_at: Option<u64>) -> Session {
+    let mut session = Session::new();
+    session
+        .begin(SessionConfig {
+            dev: DevOverrides {
+                cam_cycle_at,
+                ..DevOverrides::default()
+            },
+            ..SessionConfig::default()
+        })
+        .unwrap();
+    session.transition(SessionPhase::Ready).unwrap();
+    session.transition(SessionPhase::Playing).unwrap();
+    session
+}
+
+/// `--cam-cycle-at` walks the same successor/activation path a `C`
+/// press takes — once, at its session tick — so a frozen-input
+/// capture can inspect a mid-drive transition (AC05).
+#[test]
+fn cam_cycle_at_advances_the_chain_at_its_tick() {
+    let mut app = base_app(CameraMode::Chase);
+    app.insert_resource(playing_session(Some(0)));
+    app.add_systems(Update, dev_cam_cycle_at);
+    let chase = spawn_chase(
+        &mut app,
+        ChaseCamera {
+            near: near_lens(),
+            far: Some(far_lens()),
+            ..Default::default()
+        },
+        true,
+    );
+    let pov = app
+        .world_mut()
+        .spawn((
+            Camera3d::default(),
+            Camera::default(),
+            CockpitCamera {
+                offset: Vec3::ZERO,
+                reverse_offset: None,
+                pitch: 0.0,
+                look_yaw: 0.0,
+            },
+        ))
+        .id();
+
+    app.update();
+    assert_eq!(
+        *app.world().resource::<CameraMode>(),
+        CameraMode::Cockpit,
+        "the chain advanced once at its tick"
+    );
+    assert!(!app.world().get::<Camera>(chase).unwrap().is_active);
+    assert!(app.world().get::<Camera>(pov).unwrap().is_active);
+
+    // One-shot: a later update does not cycle again.
+    app.update();
+    assert_eq!(*app.world().resource::<CameraMode>(), CameraMode::Cockpit);
+}
+
+/// The scheduled cycle honours the same absent-camera skip the key
+/// does — no cockpit and no far lens means Chase → Free.
+#[test]
+fn cam_cycle_at_skips_modes_without_cameras() {
+    let mut app = base_app(CameraMode::Chase);
+    app.insert_resource(playing_session(Some(0)));
+    app.add_systems(Update, dev_cam_cycle_at);
+    let chase = spawn_chase(&mut app, ChaseCamera::default(), true);
+    let free = app
+        .world_mut()
+        .spawn((
+            Camera3d::default(),
+            Camera::default(),
+            FreeCamera::default(),
+        ))
+        .id();
+
+    app.update();
+    assert_eq!(*app.world().resource::<CameraMode>(), CameraMode::Free);
+    assert!(!app.world().get::<Camera>(chase).unwrap().is_active);
+    assert!(app.world().get::<Camera>(free).unwrap().is_active);
+}
+
+/// The gate is the session clock, not mere `Playing`: a threshold the
+/// run has not reached leaves the view alone.
+#[test]
+fn cam_cycle_at_before_its_tick_is_inert() {
+    let mut app = base_app(CameraMode::Chase);
+    app.insert_resource(playing_session(Some(1)));
+    app.add_systems(Update, dev_cam_cycle_at);
+    let chase = spawn_chase(&mut app, ChaseCamera::default(), true);
+
+    app.update();
+    assert_eq!(*app.world().resource::<CameraMode>(), CameraMode::Chase);
+    assert!(app.world().get::<Camera>(chase).unwrap().is_active);
 }
 
 #[test]

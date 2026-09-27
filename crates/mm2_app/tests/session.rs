@@ -25,7 +25,7 @@ use mm2_game::{
     SessionEntity, SessionPhase, SpawnPose, WorldMode, advance_session_tick,
     despawn_session_entities,
 };
-use mm2_vehicle::{Vehicle, VehicleConfig, VehicleInput, VehiclePlugin, VehicleState};
+use mm2_vehicle::{Teleported, Vehicle, VehicleConfig, VehicleInput, VehiclePlugin, VehicleState};
 
 /// A headless app wired exactly like the binary's session path: real
 /// world spawning, teardown and contract pipeline, minus the window and
@@ -123,6 +123,10 @@ fn test_app(config: SessionConfig, frame_secs: f64) -> App {
                     pause::dev_pause_once,
                     hudmap::dev_pause_map_once,
                     results::dev_finish_once,
+                    // F22-B.5: same ordering as the binary — the
+                    // scheduled `R`-reset bundle lands ahead of the
+                    // driver.
+                    session::dev_reset_at,
                     session::drive_session,
                 )
                     .chain(),
@@ -1098,5 +1102,111 @@ fn f4_restarts_and_backspace_is_the_mirror() {
     assert!(
         app.world().get::<Camera>(mirror_cam).unwrap().is_active,
         "the new session's strip camera re-arms from `RearView`"
+    );
+}
+
+/// F22-B.5: `--reset-at` emits the `R`-key reset bundle at its
+/// session tick — the player teleports back to the spawn point
+/// through the production `ResetVehicle` path (`Teleported` stamped)
+/// mid-run, with the session still `Playing` afterwards.
+#[test]
+fn reset_at_teleports_the_player_back_to_spawn() {
+    let config = SessionConfig {
+        dev: DevOverrides {
+            reset_at: Some(600),
+            ..DevOverrides::default()
+        },
+        ..SessionConfig::default()
+    };
+    let mut app = test_app(config, 1.0 / 60.0);
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    let car = single::<With<PlayerVehicle>>(&mut app);
+    // Drive off the spawn while the flag's tick is still far away —
+    // the fixed-step sim reads `VehicleInput` directly.
+    app.world_mut()
+        .get_mut::<VehicleInput>(car)
+        .unwrap()
+        .throttle = 1.0;
+
+    // 600 session ticks at 120 Hz is ~300 updates of driving — plenty
+    // of distance to prove the teleport rather than a parked car.
+    assert!(
+        run_until(&mut app, 400, |a| a
+            .world()
+            .get::<Teleported>(car)
+            .is_some()),
+        "the scheduled reset never landed"
+    );
+    let pos = app.world().get::<Transform>(car).unwrap().translation;
+    assert!(
+        pos.distance(Vec3::new(0.0, 1.5, 0.0)) < 3.0,
+        "the reset put the car back on the spawn point, got {pos:?}"
+    );
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+}
+
+/// A threshold the run never reaches never resets — the gate is the
+/// session clock like `--restart-at`, not mere `Playing`.
+#[test]
+fn reset_at_beyond_the_run_never_fires() {
+    let config = SessionConfig {
+        dev: DevOverrides {
+            reset_at: Some(u64::MAX),
+            ..DevOverrides::default()
+        },
+        ..SessionConfig::default()
+    };
+    let mut app = test_app(config, 1.0 / 60.0);
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    let car = single::<With<PlayerVehicle>>(&mut app);
+    app.world_mut()
+        .get_mut::<VehicleInput>(car)
+        .unwrap()
+        .throttle = 1.0;
+    for _ in 0..200 {
+        app.update();
+    }
+    let pos = app.world().get::<Transform>(car).unwrap().translation;
+    assert!(
+        pos.distance(Vec3::new(0.0, 1.5, 0.0)) > 5.0,
+        "control leg: the car actually left the spawn, still at {pos:?}"
+    );
+    assert!(
+        app.world().get::<Teleported>(car).is_none(),
+        "an unreached threshold must not teleport"
+    );
+}
+
+/// The reset bundle re-seats every trailer at its authored car-space
+/// offset under the spawn yaw — one `ResetVehicle` for the player and
+/// one per trailer, the same messages the `R` key emits.
+#[test]
+fn spawn_resets_reseats_the_whole_rig() {
+    let mut world = World::new();
+    let player = world.spawn_empty().id();
+    let trailer = world.spawn_empty().id();
+    let spawn = SpawnPoint {
+        position: Vec3::new(10.0, 1.0, -5.0),
+        yaw: std::f32::consts::FRAC_PI_2,
+        trailers: vec![(trailer, Vec3::new(0.0, -0.5, 8.0))],
+    };
+    let msgs = session::spawn_resets(&spawn, Some(player));
+    assert_eq!(msgs.len(), 2, "player + one trailer");
+    assert_eq!(msgs[0].entity, Some(player));
+    assert_eq!(msgs[0].position, Vec3::new(10.0, 1.0, -5.0));
+    assert_eq!(msgs[0].yaw, std::f32::consts::FRAC_PI_2);
+    assert_eq!(msgs[1].entity, Some(trailer));
+    // yaw π/2 maps the +Z rest offset onto +X.
+    let want = Vec3::new(18.0, 0.5, -5.0);
+    assert!(
+        (msgs[1].position - want).length() < 1e-4,
+        "trailer offset rotated by the spawn yaw, got {:?}",
+        msgs[1].position
     );
 }

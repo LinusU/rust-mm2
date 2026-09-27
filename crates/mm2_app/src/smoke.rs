@@ -346,6 +346,10 @@ pub fn headless_smoke(
                     // session-clock tick, so a run can bank real
                     // progress before the teardown it exercises.
                     session::dev_restart_at,
+                    // `--reset-at` emits the `R`-key reset bundle at
+                    // its tick — the scheduled teleport leg a headless
+                    // record exercises too.
+                    session::dev_reset_at,
                     // `--pause-map` puts the first `Playing` frame
                     // into the pause map — the `map=` field reports
                     // the full-screen state headless.
@@ -366,6 +370,10 @@ pub fn headless_smoke(
                 crate::sequence::sequence_drive
                     .after(crate::audio::clutch_voices)
                     .run_if(resource_exists::<crate::sequence::SequenceDrive>),
+                // `--cam-cycle-at` walks the documented C chain once
+                // at its tick here too — the same capture leg as the
+                // windowed run.
+                camera::dev_cam_cycle_at,
                 // F18-A.5: the chase camera tracks the player headlessly
                 // so the authored room-PVS pass resolves a live source
                 // room exactly as the windowed run does — the record's

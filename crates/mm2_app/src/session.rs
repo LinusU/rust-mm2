@@ -40,7 +40,7 @@ use mm2_game::{
     StuckSpec, TargetSelection, VehicleAudio, VehicleBreaks, VehicleDamage, VehicleRecovery,
     VehicleSmoke, VehicleSparks, VehicleStuck, WorldMode,
 };
-use mm2_vehicle::{TireConditions, VehicleConfig, vehicle_bundle};
+use mm2_vehicle::{ResetVehicle, TireConditions, VehicleConfig, vehicle_bundle};
 use tracing::{error, info, warn};
 
 use crate::camera::{CameraMode, ChaseCamera, FreeCamera};
@@ -382,6 +382,56 @@ pub fn dev_restart_at(
     if session.is_playing() && at.is_some_and(|at| session.tick() >= at) {
         *fired = true;
         control.restart = true;
+    }
+}
+
+/// The `R`-key reset bundle: teleport the player vehicle to the spawn
+/// point and re-seat every spawned trailer at its car-space offset —
+/// the same [`ResetVehicle`] path the water/stuck/disabled recoveries
+/// and scripted re-anchors take (`Teleported` breaks race segments,
+/// and `camera::chase_follow` snaps the boom on the jump). Shared by
+/// `reset_input` and [`dev_reset_at`] so the key and the scheduled
+/// flag emit identical messages.
+pub fn spawn_resets(spawn: &SpawnPoint, player: Option<Entity>) -> Vec<ResetVehicle> {
+    let rot = Quat::from_rotation_y(spawn.yaw);
+    let mut msgs = Vec::with_capacity(spawn.trailers.len() + 1);
+    msgs.push(ResetVehicle {
+        entity: player,
+        position: spawn.position,
+        yaw: spawn.yaw,
+    });
+    msgs.extend(spawn.trailers.iter().map(|(entity, offset)| ResetVehicle {
+        entity: Some(*entity),
+        position: spawn.position + rot * *offset,
+        yaw: spawn.yaw,
+    }));
+    msgs
+}
+
+/// `--reset-at TICK` (quarantined `DevOverrides`, evidence runs
+/// only): emit the `R`-key reset bundle once the session clock
+/// reaches `reset_at` fixed ticks (120 Hz, the `smoke` record's
+/// `ticks=` unit). A `--frames`/`--screenshot` capture freezes live
+/// input, so this is how a mid-run `ResetVehicle` teleport gets
+/// exercised on real content — the reset-transition camera leg.
+/// One-shot; unlike the `R` key itself the scheduled teleport is a
+/// dev-timed intervention, so `record_eligibility` names `reset-at`.
+pub fn dev_reset_at(
+    session: Res<Session>,
+    spawn: Res<SpawnPoint>,
+    player: Query<Entity, With<PlayerVehicle>>,
+    mut resets: MessageWriter<ResetVehicle>,
+    mut fired: Local<bool>,
+) {
+    if *fired {
+        return;
+    }
+    let at = session.config().and_then(|c| c.dev.reset_at);
+    if session.is_playing() && at.is_some_and(|at| session.tick() >= at) {
+        *fired = true;
+        for msg in spawn_resets(&spawn, player.iter().next()) {
+            resets.write(msg);
+        }
     }
 }
 

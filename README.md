@@ -150,6 +150,12 @@ cargo run -- --mm2-path <dir> --dev-world --car vpbug --headless --seq --frames 
 #   audio evidence program (F07-AC02): the record's seq= field reports
 #   the per-stage rpm/gear/speed, loudest engine-loop mix and clutch
 #   one-shot counts. Works windowed too.
+cargo run -- --mm2-path <dir> --city sf --car vpbug --headless --reset-at 1100
+#   --reset-at <ticks> fires the `R` reset bundle (player + trailers)
+#   once at that session tick — the scheduled reset leg for
+#   frozen-input captures (record-ineligible).
+#   --cam-cycle-at <ticks> walks the documented `C` view chain once at
+#   its tick — the scheduled camera-transition leg (render-only).
 
 # visual smoke — real render path, windowed; the screenshot is awaited
 # (pass is reported only once the file actually lands):

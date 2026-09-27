@@ -223,6 +223,23 @@ struct Cli {
     #[arg(long, value_name = "ticks")]
     restart_at: Option<u64>,
 
+    /// Teleport the player vehicle (and any trailer) back to the
+    /// spawn point once the session clock reaches `ticks` fixed
+    /// steps — the scheduled form of the `R` reset key for
+    /// `--frames`/`--screenshot` captures where live input is frozen
+    /// (diagnostic aid for the reset-transition camera leg; the run
+    /// is record-ineligible). One-shot.
+    #[arg(long, value_name = "ticks")]
+    reset_at: Option<u64>,
+
+    /// Advance the documented `C` view chain once when the session
+    /// clock reaches `ticks` fixed steps — how a
+    /// `--frames`/`--screenshot` capture inspects a mid-drive camera
+    /// transition while live input is frozen. Render-only like
+    /// `--far`/`--cockpit`. One-shot.
+    #[arg(long, value_name = "ticks")]
+    cam_cycle_at: Option<u64>,
+
     /// Press the local vehicle's authored horn once on the first
     /// `Playing` frame (diagnostic aid — exercises the F07 voice path
     /// in a `--frames` capture where live input is frozen; the record's
@@ -768,10 +785,12 @@ fn main() {
             finish: cli.finish,
             restart: cli.restart,
             restart_at: cli.restart_at,
+            reset_at: cli.reset_at,
             no_pvs: cli.no_pvs,
             horn: cli.horn,
             cockpit: cli.cockpit,
             far: cli.far,
+            cam_cycle_at: cli.cam_cycle_at,
             mirror: cli.mirror,
             no_hud: cli.no_hud,
         },
@@ -1088,6 +1107,10 @@ fn main() {
                 // session clock reaches its tick — the delayed leg
                 // that lets a run bank race progress before teardown.
                 session::dev_restart_at,
+                // `--reset-at` emits the same `R`-key reset bundle at
+                // its tick — ahead of the driver so this frame's
+                // fixed step already runs from the teleported pose.
+                session::dev_reset_at,
                 session::drive_session,
             )
                 .chain(),
@@ -1119,6 +1142,10 @@ fn main() {
                 // F22-A.3: `H` toggles the driving-HUD layer — same
                 // contract again.
                 hud::hud_input.run_if(not(capturing)),
+                // `--cam-cycle-at` walks the same C chain once at its
+                // tick — deliberately ungated like `chase_follow`: a
+                // frozen-input capture is what it is for.
+                camera::dev_cam_cycle_at,
                 camera::chase_follow,
                 camera::free_fly.run_if(not(capturing)),
                 dash::drive_dash,
@@ -1580,18 +1607,8 @@ fn reset_input(
     if !session.is_playing() || !keys.just_pressed(KeyCode::KeyR) {
         return;
     }
-    let rot = Quat::from_rotation_y(spawn.yaw);
-    writer.write(ResetVehicle {
-        entity: player.iter().next(),
-        position: spawn.position,
-        yaw: spawn.yaw,
-    });
-    for (entity, offset) in &spawn.trailers {
-        writer.write(ResetVehicle {
-            entity: Some(*entity),
-            position: spawn.position + rot * *offset,
-            yaw: spawn.yaw,
-        });
+    for msg in session::spawn_resets(&spawn, player.iter().next()) {
+        writer.write(msg);
     }
 }
 

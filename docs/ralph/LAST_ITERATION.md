@@ -1,4 +1,120 @@
-# Last iteration — F22-B.4: trailer occlusion + cockpit near-clip repairs, AC05 captures (iteration 75)
+# Last iteration — F22-B.5: boom snap on teleport + scheduled reset/camera-cycle evidence (iteration 76)
+
+Iteration 76 on `ralph/night` (baseline `1c75ed8`, F22-B.4 — external
+verify + review green, no blocking findings; twenty-first iteration of
+run `20260925T144723`). One coherent slice: the F22-AC05
+transition/reset legs — the chase boom now snaps on implausible
+displacement, and two scheduled dev overrides let a frozen-input
+capture exercise a reset and a `C` transition through the production
+paths.
+
+## Task selection
+
+F22-B stays `active`; the plan's open legs were the transition/reset
+side of AC05 (atypical-vehicle framing landed in B.4). Reading the
+camera code showed `chase_follow` lerping unconditionally — an `R`
+reset, recovery or mode re-entry swept the view through the world —
+and no capture-time control existed to trigger either while input is
+frozen. The slice became: snap fix + shared reset/chain bundles +
+scheduled evidence flags + captures.
+
+## Findings and actions
+
+- **Boom never snapped on teleports (fixed).** Every `chase_follow`
+  frame lerped toward the boom target, so a `ResetVehicle` teleport
+  (`R`, `dev_reset_at`), a water/stuck/disabled recovery or a scripted
+  re-anchor sent the camera gliding in a straight line across the map
+  — through walls, props and the city itself. `ChaseCamera` now keeps
+  `last_pos` and snaps to the new anchor when one frame's displacement
+  exceeds `BOOM_SNAP_SPEED × dt` (120 m/s — designed above every
+  authored top speed, below any real teleport). The same check covers
+  mode re-entry: the tracker goes stale while `chase_follow` is gated
+  out, so the first chase frame after a far-away stint under
+  Cockpit/Free snaps instead of flying back across the city. Ordinary
+  motion, the decimetre-scale upright hop and the near↔far lens swap
+  still ease — the vehicle doesn't move on a lens swap, so no jump
+  registers. A rig's first tracked frame snaps too (no history to ease
+  from), landing on the authored anchor rather than gliding in from
+  the camera's spawn point. Designed policy — original transition
+  semantics unrecovered (UNK-36).
+- **`R` and the scheduled reset share one bundle.** The `R` key's
+  inline player+trailer message construction moved to
+  `session::spawn_resets` (player at `SpawnPoint`, every trailer at
+  `spawn + yaw × authored_offset`); `DevOverrides::reset_at` /
+  `--reset-at <ticks>` fires it once when the session clock reaches
+  the tick while `Playing` — the production `ResetVehicle`/
+  `Teleported` path verbatim, so race progress re-anchors identically.
+  Record-ineligible (`Ineligible::DevOverride("reset-at")`): a
+  dev-scheduled teleport changes the run's course like
+  `--finish`/`--restart-at`; the `R` key stays legal play.
+- **`--cam-cycle-at <ticks>` walks the real `C` chain once.**
+  `toggle_camera`'s successor/activation rules factored into
+  `chain_next`/`activate_view` shared with `dev_cam_cycle_at` — the
+  scheduled leg takes the exact chain the key presses
+  (Chase→Cockpit→ChaseFar→Free, absent cameras skipped). Render-only;
+  stays out of `record_eligibility` like `--cockpit`/`--far`.
+- Both overrides are `DevOverrides` evidence aids scheduled before
+  `drive_session`/`chase_follow` in the windowed and headless chains,
+  like `--restart-at`.
+
+## Evidence
+
+- `cargo test -p mm2_app --test camtrack` — 21/21 (+8):
+  `teleport_snaps_the_boom` (200 m jump → boom on the anchor in one
+  tracked frame), `small_displacements_stay_smooth` (1.5 m hop eases,
+  no snap), `mode_reentry_snaps_the_stale_boom` (80 m driven under
+  Cockpit → snap on re-entry), `lens_transition_stays_smooth` (near→far
+  is not a jump), `first_track_lands_on_the_boom`, and three
+  `cam_cycle_at_*` legs (chain advance + one-shot latch, absent-camera
+  skip, pre-tick inert).
+- `cargo test -p mm2_app --test session` — 22/22 (+3):
+  `reset_at_teleports_the_player_back_to_spawn` (production
+  `ResetVehicle`/`Teleported` path fires at its tick, session still
+  `Playing`), `reset_at_beyond_the_run_never_fires`,
+  `spawn_resets_reseats_the_whole_rig` (yaw-rotated trailer offsets).
+- `cargo test -p mm2_game --test progression` — 19/19 (+2 arms:
+  `reset_at` → `DevOverride("reset-at")`, `cam_cycle_at` → eligible).
+- Retail headless `--seq --reset-at` records (the evidence drivers do
+  run headless — the large-displacement leg):
+  - sf `vpsemi --reset-at 720 --frames 800` vs control: accelerate
+    stage net 13.5 m vs 21.9 m, peak 13.6 vs 22.3 m/s, gearbox held at
+    F1 vs F3 +3 clutch — the teleport cut the drive mid-accelerate.
+  - sf `vpbug --reset-at 1100 --frames 700`: `peak=30.5m/s` then
+    `moved=3m final=(-1319,66.0,223)` — ~150 m of driving erased back
+    to the spawn line.
+- Retail windowed captures (Apple Silicon/Metal, `/tmp/f22b5/`,
+  local-only): sf `vpsemi --seq --reset-at 1150` frames 565/585 — the
+  rig's downhill creep (19.0 km/h, wheels 0/4 mid-bump) resets to
+  2.9 km/h grounded at the spawn line, boom on the authored near
+  anchor; `vpbug --reset-at 1100` frames 540/575 vs a no-reset control
+  at 575 shows the same re-anchor. `vpsemi --seq --cam-cycle-at 800`
+  frames 430/700 — the scheduled `C` lands the authored cockpit
+  mid-run (dash cluster, CB mic, wheel) and holds it one-shot.
+  Caveat: under `--frames`, live input *and* the evidence drivers are
+  frozen, so windowed reset displacement is only the car's ~5–10 m
+  neutral creep — the big-teleport leg is the headless record above.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean (one reformat applied).
+- `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --locked --workspace` — green, all suites.
+
+## Classification / remaining open items
+
+- F22-B stays `active`: the multi-resolution sweep (F22-C scope) and
+  the recovered-runtime semantics (UNK-36 `camTrackCS` dynamics,
+  UNK-37 `camPovCS` `CameraNear`) stay open; AC05's interactive
+  wall-proximity/mirror legs on atypical sizes still owe hands-on
+  inspection beyond the capture legs landed.
+- The snap threshold is a designed constant (120 m/s), not derived
+  per-vehicle — documented as such; original transition semantics
+  unrecovered.
+
+---
+
+
 
 Iteration 75 on `ralph/night` (baseline `ba1005e`, F22-B.3 — external
 verify + review green, no blocking findings; twentieth iteration of
