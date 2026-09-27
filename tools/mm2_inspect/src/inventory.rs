@@ -729,7 +729,7 @@ fn pedestrians(paths: &[String]) -> Family {
     }
     f.unverified = archetypes.len() + clips;
     f.notes.push(format!(
-        "{clips} pedanim_* animation clips discovered; no .anim/.mod/.skel parser exists — presence of the required file set is accepted, content unverified"
+        "{clips} pedanim_* animation clips discovered; the definition-side formats (.skel/.csv/.remap/.rays/.anim/.shaders) are deep-parsed by `mm2-inspect peds` (F19-A.1) — .mod meshes are not decoded yet and no runtime consumer exists, so records stay unverified"
     ));
     f
 }

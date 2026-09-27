@@ -24,6 +24,7 @@ mod bind;
 mod crashcourse;
 mod event;
 mod inventory;
+mod peds;
 mod placement;
 
 /// Extensions the texture pipeline tries, in preference order — the same
@@ -501,6 +502,20 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Audit pedestrian rigs (F19-A.1): census every `anim/**` file;
+    /// deep-parse skeletons, state models, remaps, rays, animation
+    /// clips and shader tables; cross-check clip references, frame
+    /// windows and channel widths against the rigs. `.mod` meshes are
+    /// inventoried but not decoded yet.
+    Peds {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Exit nonzero on any parse failure, cross-check issue or
+        /// missing expected archetype. Authored quirks and
+        /// unreferenced clips are reported but do not fail strict.
+        #[arg(long)]
+        strict: bool,
+    },
     /// Versioned content inventory: expected/discovered/accepted/
     /// rejected/unverified counts per content family, fingerprinted by
     /// engine commit and resolved-path provenance.
@@ -651,6 +666,7 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             weather(dir, cli.mods.as_deref(), city.as_deref(), *strict)
         }
         Command::Audio { dir, strict } => audio::run(dir, cli.mods.as_deref(), *strict),
+        Command::Peds { dir, strict } => peds::run(dir, cli.mods.as_deref(), *strict),
         Command::Inventory { dir, json, strict } => {
             inventory_cmd(dir, cli.mods.as_deref(), *json, *strict)
         }

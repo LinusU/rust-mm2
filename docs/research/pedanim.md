@@ -1,0 +1,137 @@
+# Pedestrian rig files (`anim/`)
+
+Format notes for the pedestrian model/animation corpus, measured on a
+retail install (`fnv1a64:e91e6cd4b2ae30d9`) 2026-09-28. Parsers live in
+`mm2_formats::ped` (+ `pkg::PkgShaders::parse`); the audit is
+`mm2-inspect peds`.
+
+## Corpus census
+
+- 4 expected archetypes: `pedmodel_{man,manw,woman,womanw}` — each ships
+  `.mod`, `.skel`, `.csv`, `.rays`, `.shaders`; `woman` additionally
+  ships `.remap` (the only remap on retail).
+- `pedmodel_wolf.skel` — a 26-bone dog/wolf rig with no companion files
+  (partial archetype; no `.mod`, no states — nothing on retail
+  references it).
+- 67 `pedanim_*.anim` files: 66 parse as binary clips (34 `man` + 33
+  `wom` names on disk, minus the misfit); `pedanim_manantrnch.anim` is a
+  104-byte ASCII scene list (`4` + `"Banks"/"Pipeline"/"Sun"/"Peds"`
+  rows), not a clip — an authored scratch file.
+- Non-content: `anim/cvs/*` metadata (3 files + a dir entry),
+  `anim/grog.bat` (a `mod/skel/anim` converter driver script), and the
+  extensionless `anim/pedmodel_woman` — a second ASCII scene list.
+
+## `.skel` — skeleton (ASCII, recovered)
+
+```
+NumBones 19
+bone root {
+	offset 0.000570 1.147210 -0.000000
+	bone spine { … }
+}
+```
+
+`NumBones <n>` header, then a recursive `bone <name> { offset x y z
+…children }` tree (tab-indented, CRLF). All four ped rigs are the same
+19-bone humanoid: `root → spine → {neck → head, clavicle_{r,l} →
+shoulder → elbow → wrist}` and `root → pelvis → {hip,knee,ankle}_{l,r}`.
+The wolf rig is 26 bones (`neck1/neck2`, `tail1..4`, `foot_{l,r}`).
+Offsets read as bind-pose local translations (inferred from the tree
+shape — e.g. `root` stands ~1.147 m up). `NumBones` matches the parsed
+count on all 5 files.
+
+## `pedmodel_*.csv` — animation state model (ASCII, recovered)
+
+```
+# anim name,mma name,first frame,last frame,Y AXIS Offset,Y AXIS DISTANCE,X AXIS Offset,X AXIS DISTANCE,default next[
+STAND,pedanim_manstand,1,30,0,0,0,0,STAND
+STAND_WALK,pedanim_manst2w,1,4,0,0.281,0,0,WALK
+```
+
+9 cells: state name, clip stem (`anim/<stem>.anim`), 1-based first/last
+frame window, Y/X offset+distance floats (unrecovered semantics —
+locomotion bookkeeping; `Y AXIS DISTANCE` correlates with per-cycle
+forward travel), default-next state name. Each of the 4 CSVs authors
+the same 24-state machine (STAND/STAND2, WALK, RUN, BACKUP, ANTIC,
+dive-left/right, ground recovery, transitions between them — the
+authored header documents the `from_to` transition convention). All
+authored state names and clip stems resolve on retail. The window's
+`last frame` equals `frames` or `frames + 1` on every row — a
+consistent authored off-by-one (36 rows are `+1`), never more.
+
+## `.remap` — bone remap (ASCII, recovered shape / unknown purpose)
+
+`pedmodel_woman.remap` only:
+
+```
+17
+1 3 2 5 4 7 6 9 8 11 10 13 12 15 14 17 16
+```
+
+A count line then that many indices. 17 entries against a 19-bone rig;
+the pairwise swaps read like a channel reorder (the woman rig lists
+`clavicle_l` before `clavicle_r` where `man` lists `_r` first) —
+consistent with retargeting clips across differently ordered rigs, but
+unverified (UNK-41).
+
+## `.rays` — unknown payload (ASCII, recovered shape)
+
+```
+19
+0.177000 0.095000 0.053000 2 7
+… 19 rows of <f32 f32 f32 i32 i32> …
+3 2 0 3 3 3 0 0 3 3 0 0 8 6 8 0 8 0 0
+… integer grid, 19 ints per row …
+```
+
+`n` (= bone count) + `n` vector/int/int rows + a grid of integer rows
+(48 on man/woman, 24 on manw/womanw — the `*w` variants ship a half-size
+grid). Grid values are small ints (0–17). Name suggests collision/skin
+rays; semantics unrecovered (UNK-41).
+
+## `.anim` — binary clip (measured grammar)
+
+```
+u32 reserved      ; 0 on all retail clips
+u32 frames
+u32 floatsPerFrame; 60 on all retail clips
+f32 motionHint    ; correlates with locomotion speed — see below
+u8  kind          ; 1 on all retail clips
+f32 samples[frames * floatsPerFrame]
+```
+
+Strict grammar — exact byte fit, no trailer. 60 floats/frame = 20 XYZ
+triples against a 19-bone rig (channel order and the 20th triple are
+unrecovered — likely per-bone rotations plus a root channel, inferred).
+`motionHint` tracks authored travel: man walk 1.552, run 2.970; woman
+walk 1.087 matches its csv `Y AXIS DISTANCE` exactly; negative on
+back-up clips; 0 on stands. Reads like per-clip locomotion speed or
+cycle distance — unverified (UNK-41). Largest clip: 53 frames / 3180
+floats.
+
+## `pedmodel_*.shaders` — standalone PKG shader chunk (verified)
+
+Byte-for-byte the PKG `shaders` chunk grammar: `u32` type word (low 7
+bits = paint jobs, bit 7 = byte colours), `u32` shaders-per-paint-job,
+then `jobs × per` records. All four retail files: float shaders, empty
+texture names, exact fit (man 48×18, manw 24×17, woman 48×17,
+womanw 24×16). Parsed by `mm2_formats::pkg::PkgShaders::parse`.
+
+## `.mod` — ASCII mesh (inventoried, not decoded — F19-A.2)
+
+Large ASCII files (`verts`/`normals`/`colors`/`tex1s` counts, `v`/`n`/
+`c`/`t1`/`t2`/`ts`/`tt` records, `mtl` material blocks with
+`adjuncts`/`primitives`/`tri`/`adj`/`stp` rows or a `packets` variant,
+trailing `mtxv`/`mtxn` matrix lists). ~46–60 KB each; two authoring
+dialects observed (flat adjuncts vs packets).
+
+## Cross-checks that hold on retail (`mm2-inspect peds`)
+
+- Every state-model clip stem resolves to a present `.anim`; no missing
+  references.
+- Referenced clips carry `floatsPerFrame == 3 × (bones + 1)` on all 4
+  complete rigs.
+- `.rays` row count == `NumBones` on all 4.
+- All 66 binary clips parse; 18 are unreferenced by every state model
+  (dive/ground/run-back variants — preserved, reported).
+- `--strict` exits 0 on the retail corpus.

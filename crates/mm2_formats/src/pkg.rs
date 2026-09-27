@@ -456,6 +456,25 @@ fn read_vertex(r: &mut Reader<'_>, fvf: u32) -> Result<PkgVertex, FormatError> {
     })
 }
 
+impl PkgShaders {
+    /// Parse a standalone `.shaders` file (`anim/pedmodel_*.shaders`) —
+    /// the same binary grammar as a PKG `shaders` chunk: a shader-type
+    /// word (low 7 bits = paint-job count, bit 7 selects byte colours),
+    /// a shaders-per-paint-job count, then that many shader records.
+    /// Measured byte-exact on the four retail pedestrian files.
+    pub fn parse(bytes: &[u8]) -> Result<Self, FormatError> {
+        let mut r = Reader::new(bytes);
+        let shaders = parse_shaders(&mut r)?;
+        if !r.rest().is_empty() {
+            return Err(FormatError::parse(
+                r.pos(),
+                format!("{} trailing byte(s) after shader records", r.rest().len()),
+            ));
+        }
+        Ok(shaders)
+    }
+}
+
 fn parse_shaders(r: &mut Reader<'_>) -> Result<PkgShaders, FormatError> {
     let shader_type = r.u32()?;
     let shaders_per_paint_job = r.u32()?;
@@ -659,6 +678,31 @@ mod tests {
         assert_eq!(shaders.paint_jobs, 1);
         assert_eq!(shaders.shaders[0].texture, "mytex");
         assert_eq!(shaders.shaders[0].diffuse[0], 1.0);
+    }
+
+    #[test]
+    fn parses_standalone_shaders_file() {
+        // `anim/pedmodel_*.shaders` shape: type word (48 paint jobs),
+        // 18 shaders per paint job, float shader records.
+        let mut s = Vec::new();
+        s.extend_from_slice(&48u32.to_le_bytes());
+        s.extend_from_slice(&18u32.to_le_bytes());
+        for _ in 0..48 * 18 {
+            s.push(0); // empty texture name
+            for c in [0.5f32; 16] {
+                s.extend_from_slice(&c.to_le_bytes());
+            }
+            s.extend_from_slice(&12.0f32.to_le_bytes());
+        }
+        let sh = PkgShaders::parse(&s).unwrap();
+        assert_eq!(sh.paint_jobs, 48);
+        assert_eq!(sh.shaders_per_paint_job, 18);
+        assert_eq!(sh.shaders.len(), 864);
+        assert!(sh.shaders[0].texture.is_empty());
+        assert_eq!(sh.shaders[0].shininess, 12.0);
+        // Trailing bytes are rejected on a standalone file.
+        s.push(0);
+        assert!(PkgShaders::parse(&s).is_err());
     }
 
     #[test]

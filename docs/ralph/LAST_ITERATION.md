@@ -1,3 +1,112 @@
+# Last iteration — F19-A.1 pedestrian-rig definition parsers +
+# `mm2-inspect peds` (iteration 87)
+
+Iteration 87 on `ralph/night` (baseline `4353f1e` — the F18-B.5
+review-repair docs commit; external verify + review green; thirty-second
+iteration of run `20260925T144723`). One coherent slice: the `anim/`
+pedestrian corpus's definition-side formats are recovered, parsed and
+cross-checked through the VFS; runtime import stays open.
+
+## Task selection
+
+No failing gate or review finding to repair — F18-B.5 passed external
+review with zero blocking findings. From the ready set, F19-A was the
+highest-value unblocked feature (deps F00-B/F01-B/F09-B all satisfied;
+pedestrians are the largest untouched single-player content family, and
+F17-A's deferred ped-density consumer rides on it). F19-A is broad, so
+it is split — this iteration is A.1, the audit-first definition slice
+(the same shape as F10-A.1/F21-A.1/F07-A.1): recover and parse the
+`.skel`/`.csv`/`.remap`/`.rays`/`.anim`/`.shaders` grammars, cross-check
+them, report the corpus honestly. `.mod` mesh decode, clip sampling and
+any runtime spawning are deliberately deferred to A.2+.
+
+## What landed
+
+- `mm2_formats::ped` (new module, pure parsers):
+  - `PedSkel` — `NumBones <n>` header + recursive
+    `bone <name> { offset x y z … }` tree; malformed directives, bad
+    offsets, unclosed/unbalanced blocks all degrade to
+    `TableDiagnostic`; `validate()` reports declared-vs-actual count
+    mismatches, duplicate bone names and non-finite offsets. Bone depth
+    is bounded (64).
+  - `PedStates` — the `pedmodel_*.csv` 9-cell state model (`#` comments
+    skipped); `validate()` flags duplicate state names, invalid frame
+    windows, dangling `next` links and non-finite floats.
+  - `PedRemap` — count + whitespace-separated indices (the single
+    retail file ships 17); count mismatches and negative indices
+    validate.
+  - `PedRays` — count, `count` `f3 + i2` rows, then the integer grid
+    (width checked against the count); semantics unknown, preserved.
+  - `PedAnim` — strict binary grammar measured byte-exact on all 66
+    retail clips: `u32 reserved, u32 frames, u32 floatsPerFrame,
+    f32 motionHint, u8 kind` then `frames × fpf` LE f32 samples;
+    `frames × fpf` is bounded (1M floats) so a hostile header cannot
+    force a huge allocation; trailing bytes are an error. `validate()`
+    reports unexpected reserved/kind, empty clips, non-multiple-of-3
+    frame sizes and the first non-finite sample.
+- `mm2_formats::pkg::PkgShaders::parse` — standalone `.shaders` files
+  reuse the existing PKG shader-chunk parser (measured: the four retail
+  files are exactly that grammar, float shaders, empty texture names),
+  plus a strict trailing-byte check.
+- `mm2-inspect peds <install> [--strict]` — censuses `anim/`,
+  deep-parses every archetype member, and cross-checks: state-model
+  clip stems resolve to discovered `.anim` files, authored frame
+  windows vs clip length (`frames + 1` overshoots report as authored
+  quirks — 36 rows on retail, never more), clip `floatsPerFrame ==
+  3 × (bones + 1)`, `.rays` count vs `NumBones`, remap validity, and
+  the EXPECTED_PEDS roster. Partial/extra archetypes (`pedmodel_wolf`)
+  and authored misfits (the ASCII scene lists `pedanim_manantrnch.anim`
+  and the extensionless `anim/pedmodel_woman`, `grog.bat`, `anim/cvs/*`)
+  are reported, not failed. `--strict` exits nonzero on failures,
+  issues and missing expected archetypes — quirks stay non-fatal.
+- `mm2-inspect inventory` pedestrian note updated: the definition-side
+  formats are now parsed by `peds`; `.mod` remains undecoded, and
+  records stay `unverified` until a runtime consumer exists.
+- `docs/research/pedanim.md` (new) — measured grammars, corpus census,
+  cross-check results. Ledger: PED-1 (verified_original corpus/grammar
+  facts) + UNK-41 (`.rays`/`.remap`/`.anim` channel semantics,
+  `motionHint`, csv offset/distance columns, window inclusivity,
+  transition timing — all unrecovered).
+
+## Evidence
+
+- `cargo test -p mm2_formats` — 230 green incl. 15 new `ped` tests +
+  the standalone `PkgShaders` test (synthetic fixtures; malformed,
+  truncated, oversized and ragged inputs all covered).
+- `cargo test -p mm2_inspect` — +4 `peds` tests over synthetic VFS
+  installs (complete archetype, off-by-one window quirk, misfit clip,
+  orphan clip, missing clip, channel-width mismatch, `.rays`/`.skel`
+  count mismatch, truncated clip failure, nested/extra records).
+- Retail (`fnv1a64:e91e6cd4b2ae30d9`): `mm2-inspect peds` — 91 `anim/`
+  files, 66 clips parsed (1342 frames), 18 unreferenced reported,
+  5 archetypes (4 complete 19-bone rigs with 24 states each, wolf
+  partial → quirk), shaders byte-exact (48×18 / 24×17 / 48×17 /
+  24×16), zero issues, zero failures; `--strict` exits 0.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --workspace` — all suites green (exit 0).
+
+## Classification / remaining open items
+
+- Original-data claim: grammar + corpus facts only (PED-1,
+  verified_original against the named fingerprint). All runtime
+  semantics are UNK-41 — nothing claims the original's channel order,
+  transition timing or `.rays`/`.remap` purpose.
+- This is a parser + audit slice: no Bevy assembly, no sampling, no
+  spawning — F19-A stays `active` (`.mod` decode, sampling/blending,
+  bind verification, pause/unload legs all open). F19-B (movement,
+  density, reactions) and F17-A's ped-density consumer remain blocked
+  on it.
+- The `peds` audit does not fail strict on the two authored ASCII
+  misfits — they are quirks; a genuinely broken binary clip still
+  counts as a failure.
+
+---
+
 # Last iteration — F18-B.5 review repair: the cue-suffix overflow
 # (iteration 86)
 
