@@ -355,6 +355,21 @@ impl Weather {
             _ => 1.0,
         }
     }
+
+    /// The standalone `asBirthRule` particle spec this selector binds
+    /// (F18-B.2 — designed binding, DSN-60): `tune/<name>.asbirthrule`
+    /// plus its `texture/ptx_<name>` sprite atlas — the `ptx_%s`
+    /// particle-texture format is exe-verified. `rainy` → `rain`, the
+    /// only authored precipitation state (WLD-21); every other
+    /// selector returns `None`. `tune/snow.asbirthrule` ships in the
+    /// same form but no retail selector names it — it stays unbound.
+    /// The original's selector→rule binding is unrecovered (UNK-40).
+    pub fn precipitation(self) -> Option<&'static str> {
+        match self.get() {
+            3 => Some("rain"),
+            _ => None,
+        }
+    }
 }
 
 /// Grip multiplier under `rainy` weather (F18-B.1 — designed, DSN-59):

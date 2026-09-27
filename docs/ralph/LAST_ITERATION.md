@@ -1,5 +1,115 @@
-# Last iteration — F18-B.1 review repair: traction-pin record
-# eligibility (iteration 81)
+# Last iteration — F18-B.2: authored precipitation particles
+# (iteration 82)
+
+Iteration 82 on `ralph/night` (baseline `b05f9a0` — the F18-B.1 review
+repair; external verify + review green; twenty-seventh iteration of run
+`20260925T144723`). One coherent slice: F18-B's spec-req-2 precipitation
+leg — the authored `tune/*.asbirthrule` particle definitions now drive a
+bounded, deterministic, camera-relative precipitation rig on the shared
+effective-conditions pick.
+
+## Task selection
+
+The plan's F18-B row named precipitation particles as the next split.
+The retail install ships authored `asBirthRule` records
+(`tune/rain.asbirthrule` — `Velocity 2,-35,0 ±2,5,2`, `PositionVar
+25,0,25`, `Life 1`, `Radius .5±.1`, `SpewRate 200`, `Gravity -9.8`,
+`TexFrame 0..15`, `BirthFlags 8`; `tune/snow.asbirthrule` —
+`Velocity 0,-1,0`, `Life 1`, `Radius .06±.02`, `DRotation -2±5`,
+`SpewRate 150`, `Gravity -6.8`, `TexFrame 5..7`) plus a measured 64×64
+paletted `texture/ptx_rain.tex` card sheet — real authored data, not an
+invented effect. The spec names covered-interior handling as a declared
+approximation, so the consumer is a designed reading of authored inputs
+(UNK-40 keeps the original `asParticles` runtime unrecovered).
+
+## Findings and actions
+
+- **`mm2_formats::banger`** — `BirthRule::parse_file` /
+  `StandaloneBirthRule`: standalone records accept `asBirthRule` or
+  `BirthRule` roots with an optional `type:` header, and default the
+  fields these files omit (`Position`, the `D*` deltas, `LifeVar` —
+  now decoded where present) to 0. The embedded `dgBangerData` decode
+  keeps its strict required-field expectations; vehicle damage files
+  are unaffected.
+- **`mm2_game::config`** — `Weather::precipitation()`: `rainy` (3)
+  → `"rain"`, every other selector → `None` (designed binding, DSN-60;
+  `snow` stays parsed-but-unbound — no shipped selector names it).
+- **`mm2_game::effects`** — `ParticleSpec` (distilled authored spec),
+  `Precipitation` (session rig: seeded `NavRng` → deterministic stream;
+  `SpewRate` draws inside `SpewTimeLimit` with sub-frame carry,
+  `InitialBlast` credited on the first tick even at `SpewRate 0`, live
+  bound `SpewRate × (Life+LifeVar)` + margin clamped to
+  `PRECIP_MAX_LIVE` 4096) and `PrecipDrop` (designed integrator:
+  `Gravity` accel, `Drag` exponential decay, `DRadius`/`DRotation`/
+  `DAlpha` rates, authored `TexFrame` flipbook sweep).
+- **`mm2_app::precip`** — VFS binding (`tune/<name>.asbirthrule` +
+  `texture/ptx_<name>`) off `effective_conditions` in
+  `load_session_world`; per-tile UV quads on a
+  `ceil(√(TexFrameEnd+1))²` atlas space (4×4 on retail `ptx_rain`) via
+  `damage_fx::tile_quad` (now crate-visible); `emit_precip`/
+  `advance_precip` chained in Update on both windowed and headless
+  paths. The emitter anchors on the active `Camera3d` with the
+  authored `PositionVar` jitter around it (drops stay world-anchored);
+  a 64 m upward probe suppresses sheltered spawns (`covered` — the
+  spec's declared approximation); a swept segment+radius probe despawns
+  drops on world contact (`landed` — nothing passes through the road).
+  Billboards face the camera with `DRotation` roll; alpha drifts per
+  drop on cloned materials.
+- **Diagnostics** — a named rule that cannot resolve/read/parse marks
+  `PrecipReport.absent` (`rule unavailable`/`unreadable`/`unparseable`)
+  rather than silently running dry; a missing atlas warns and emits
+  untextured drops (`+ut`). Resources are session-scoped
+  (`SessionEntity`-stamped drops, `PrecipFx`/`Precipitation` removed on
+  teardown, counters reset via `reset_precip_report` — `drive_session`
+  stays inside Bevy's 16-param system limit).
+- **Smoke** — `ppt=<name>:<emitted>e/<expired>x[+Nc+Nl+ut]` /
+  `ppt=<name>!<diag>`; dry sessions record no `ppt=` field.
+
+## Evidence
+
+- `cargo test --locked -p mm2_formats` — banger unit tests +6 (rain/
+  snow retail-shaped parses, non-particle root, missing-required,
+  malformed-optional, unknown-field warnings); embedded decode tests
+  unchanged.
+- `cargo test --locked -p mm2_game` — effects +10, race +1 (selector
+  map; spec mapping, rate/carry, bound incl. degenerate clamp, spew
+  limit, initial blast, envelope/determinism, integrator, flipbook,
+  alpha).
+- `cargo test --locked -p mm2_app --test precip` — 8/8: authored bind,
+  dry-none, missing/unparseable diagnostics, bounded camera-relative
+  emission + conservation, contact-landed + life-expired legs, cover
+  suppression, restart rebind.
+- Retail (`fnv1a64:e91e6cd4b2ae30d9`, sf headless `--frames 300`):
+  `--weather 3` cruise → `env=lt03(rainy-morning) ...
+  ppt=rain:525e/0x+475c+522l surf=wet traction=0.8` (rule + atlas
+  resolved, emission bounded, ~half the ±25 m envelope sheltered at
+  the downtown spawn, drops landing on contact before expiry);
+  `--weather 0` records no `ppt=` field — dry runs stay bit-identical.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --workspace --all-targets --all-features --
+  -D warnings` — clean (`Finished dev profile`, exit 0).
+- `cargo test --workspace` — all suites green, exit 0.
+
+## Classification / remaining open items
+
+- Designed (DSN-60): the selector→rule binding, camera-anchor shape,
+  emitter envelope, cover/contact approximation, atlas grid derivation,
+  integrator and presentation.
+- Unknown (UNK-40): the original `asParticles` integrator, anchor,
+  coverage policy, atlas layout and presentation; `snow`'s runtime
+  binding.
+- **No rendered screenshot or playtest of rain exists** — evidence is
+  headless counts only; F18-AC03's visual leg stays open.
+- F18-B stays `active`: precipitation audio hooks (`wearain` —
+  F07/F08 scope), wetness presentation beyond particles, and condition
+  replication (req 5's network leg is F24+) remain.
+
+---
+
+# Prior iterations
 
 Iteration 81 on `ralph/night` (baseline `bc7fee0` — the F18-B.1
 candidate; external verify green, review verdict **fail** on one
@@ -64,8 +174,6 @@ violated). Repair before any new feature work.
   network leg is F24+) remain.
 
 ---
-
-# Prior iterations
 
 Iteration 80 on `ralph/night` (baseline `88b447a`, F17-A.7 — external
 verify + review green, non-blocking warts only; twenty-fifth

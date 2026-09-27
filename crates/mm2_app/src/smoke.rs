@@ -232,6 +232,7 @@ pub fn headless_smoke(
         .init_resource::<crate::recovery::RecoveryReport>()
         .init_resource::<crate::damage_fx::SmokeFxReport>()
         .init_resource::<crate::spark_fx::SparkFxReport>()
+        .init_resource::<crate::precip::PrecipReport>()
         .init_resource::<crate::texel_fx::TexelDamageReport>()
         .init_resource::<crate::audio::AudioReport>()
         .init_resource::<Assets<crate::audio::PcmAudio>>()
@@ -442,6 +443,7 @@ pub fn headless_smoke(
                     crate::audio::count_sinks,
                     crate::audio::sync_audio_pause,
                     crate::audio::reset_audio_report.run_if(session::unloading),
+                    crate::precip::reset_precip_report.run_if(session::unloading),
                 ),
                 opponents::opponent_drive,
                 // F05-B.6: authored engine smoke — the headless
@@ -485,6 +487,13 @@ pub fn headless_smoke(
                 // too — the `sta=` field reads the report it keeps.
                 crate::racestat::update_race_stats.after(session::drive_session),
             ),
+        )
+        // F18-B.2: authored precipitation composes headless too —
+        // the `ppt=` field reads the report the emitter/advance pair
+        // maintains; own slot for the same arity split.
+        .add_systems(
+            Update,
+            (crate::precip::emit_precip, crate::precip::advance_precip).chain(),
         );
     if driver == Driver::Scripted {
         app.insert_resource(scripted::ScriptedDrive);
@@ -1175,6 +1184,39 @@ pub fn headless_smoke(
         .filter(|r| r.bursts + r.emitted + r.expired > 0)
         .map(|r| format!(" spk={}b/{}e/{}x", r.bursts, r.emitted, r.expired))
         .unwrap_or_default();
+    // F18-B.2 precipitation evidence: `ppt=<name>:<e>e/<x>x` on a
+    // bound session — emitted/expired drop counts with `+Nc`
+    // cover-suppressed spawns, `+Nl` world-contact despawn and `+ut`
+    // for an unresolved `ptx_<name>` atlas appended when nonzero. A
+    // bound record that could not load records `ppt=<name>!<diag>`;
+    // a non-precipitating session binds nothing and stays
+    // bit-identical.
+    let ppt_detail = world_ecs
+        .get_resource::<crate::precip::PrecipReport>()
+        .and_then(|r| {
+            r.bound.map(|name| {
+                if let Some(diag) = r.absent {
+                    format!(" ppt={name}!{diag}")
+                } else {
+                    let covered = if r.covered > 0 {
+                        format!("+{}c", r.covered)
+                    } else {
+                        String::new()
+                    };
+                    let landed = if r.landed > 0 {
+                        format!("+{}l", r.landed)
+                    } else {
+                        String::new()
+                    };
+                    let untex = if r.texture { "" } else { "+ut" };
+                    format!(
+                        " ppt={name}:{}e/{}x{covered}{landed}{untex}",
+                        r.emitted, r.expired
+                    )
+                }
+            })
+        })
+        .unwrap_or_default();
     // F05-B.9 texel evidence: splatting impacts/splat stamps/repairs.
     // Same presence rule — an impact-free or unpaired-texture run
     // stays bit-identical.
@@ -1325,7 +1367,7 @@ pub fn headless_smoke(
     // (DRV-2/DRV-3) and aimap variant (RACE-11) selected its content.
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{extra}",
+            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{extra}",
             driver.as_str(),
             config.difficulty.as_str(),
             session.phase().name(),

@@ -462,13 +462,48 @@ exposure, and `is_deadly_surface`'s drag-threshold approximation of
 the unrecovered class flag — are DSN-34; the marking semantics
 themselves are exe-verified.
 
+The authored precipitation data landed in F18-B.2 (DSN-60/UNK-40).
+The retail install ships two standalone particle specs —
+`tune/rain.asbirthrule` (`Velocity 2,-35,0` `±2,5,2`,
+`PositionVar 25,0,25`, `Life 1`, `Radius 0.5±0.1`, `SpewRate 200`,
+`Gravity -9.8`, `TexFrame 0..15`, `BirthFlags 8`, `InitialBlast 0`)
+and `tune/snow.asbirthrule` (`Velocity 0,-1,0`, `Life 1`,
+`Radius 0.06±0.02`, `DRotation -2±5`, `SpewRate 150`, `Gravity -6.8`,
+`TexFrame 5..7`, `BirthFlags 0`) plus `tune/effects/snow.asbirthrule`
+— parsed by `BirthRule::parse_file`, which accepts the `asBirthRule`/
+`BirthRule` root, an optional `type:` line and the omitted
+`Position`/`D*` fields these records leave out. The paired texture is
+`texture/ptx_rain.tex`, a measured 64×64 paletted 4×4-tile sheet; the
+exe carries `ptx_%s`/`asParticles::SetTexture`/`Blast`/`Cull` strings
+(the name-pairing shape, not the runtime). `Weather::precipitation`
+binds only `rainy` → `"rain"` — designed; `snow` stays parsed but
+unbound since no selector names it. `mm2_game::effects::Precipitation`
+is the session rig: `SpewRate` whole drops/s inside `SpewTimeLimit`,
+`InitialBlast` credited on the first tick, live bound
+`SpewRate × (Life + LifeVar)` + margin clamped to
+`PRECIP_MAX_LIVE` 4096, jitter seeded from `SessionConfig::seed`.
+`mm2_app::precip` anchors the emitter on the active `Camera3d`,
+suppresses candidates whose 64 m upward probe hits world geometry
+(the declared covered-interior approximation — F18 req 2's
+covered-roads edge), kills drops whose swept segment hits a collider
+plus radius (the landed contact leg), and renders camera-facing
+blended quads on a `ceil(√(TexFrameEnd+1))²` tile space. The
+integrator, flipbook sweep, atlas tiling and anchor are designed
+readings — the original `asParticles` runtime is unrecovered
+(UNK-40). `ppt=<name>:<e>e/<x>x[+Nc+Nl+ut]` evidences it on the
+smoke record; a failed bind records `ppt=<name>!<diag>` instead of
+degrading silently (F18-AC06). No rendered screenshot or playtest
+capture of rain exists yet — the bound/emitted counts are the only
+current evidence.
+
 Still not consumed (UNK-24 stays open): `.ldef` rows, `.lmap` values
 (runtime-loaded by the original — see above — but unbound here),
-precipitation particles (F18-B scope — wetness traction itself landed
-in F18-B.1: `Weather::traction_factor` maps `rainy` to a designed
-0.8 session-wide `TireConditions` modifier, DSN-59/UNK-39), remaining
-audio effects, and authoritative network replication of conditions
-(F18 req 5). `.pvshist` is
+precipitation audio hooks (the install's `wearain`/rain-interior
+waves — F07/F08 scope; the particle leg landed in F18-B.2 above and
+wetness traction in F18-B.1: `Weather::traction_factor` maps `rainy`
+to a designed 0.8 session-wide `TireConditions` modifier,
+DSN-59/UNK-39), remaining audio effects, and authoritative network
+replication of conditions (F18 req 5). `.pvshist` is
 bake-tool data (no exe reference), and the numbered `.cpvs` files are
 bake sweeps — neither needs a consumer. The dome's three `.sky`
 floats are bound under designed readings (world-height / vertical

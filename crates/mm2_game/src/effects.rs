@@ -19,6 +19,7 @@
 
 use bevy::prelude::*;
 
+use mm2_formats::banger::BirthRule;
 use mm2_formats::veh::{DamageEffect, VehCarDamage};
 
 use crate::damage::DamageSpec;
@@ -73,6 +74,48 @@ pub struct ParticleSpec {
     /// Packed authored `Color` word — retail decodes as high-alpha
     /// ARGB (e.g. `0xF6000000`, near-opaque black smoke).
     pub color: i64,
+}
+
+/// The standalone `tune/<name>.asbirthrule` record shares the embedded
+/// spec's vocabulary minus the `vehCarDamage` extras — the fields it
+/// cannot author read as their inert defaults: no damping
+/// (`damp`/`damp_var`), no emitter `height`/`intensity`, and
+/// `Color -1` (the effects-file spelling of "no tint" — opaque white).
+impl From<&BirthRule> for ParticleSpec {
+    fn from(r: &BirthRule) -> Self {
+        Self {
+            position: r.position.into(),
+            position_var: r.position_var.into(),
+            velocity: r.velocity.into(),
+            velocity_var: r.velocity_var.into(),
+            life: r.life,
+            life_var: r.life_var,
+            mass: r.mass,
+            mass_var: r.mass_var,
+            radius: r.radius,
+            radius_var: r.radius_var,
+            drag: r.drag,
+            drag_var: r.drag_var,
+            damp: 0.0,
+            damp_var: 0.0,
+            d_radius: r.d_radius,
+            d_radius_var: r.d_radius_var,
+            d_alpha: r.d_alpha,
+            d_alpha_var: r.d_alpha_var,
+            d_rotation: r.d_rotation,
+            d_rotation_var: r.d_rotation_var,
+            initial_blast: r.initial_blast,
+            spew_rate: r.spew_rate,
+            spew_time_limit: r.spew_time_limit,
+            gravity: r.gravity,
+            tex_frame_start: r.tex_frame_start,
+            tex_frame_end: r.tex_frame_end,
+            birth_flags: r.birth_flags,
+            height: 0.0,
+            intensity: 0.0,
+            color: -1,
+        }
+    }
 }
 
 impl From<&DamageEffect> for ParticleSpec {
@@ -589,5 +632,180 @@ impl Spark {
     /// recovered struct carries no authored spark fade).
     pub fn alpha(&self) -> f32 {
         (1.0 - self.age / self.life).clamp(0.0, 1.0)
+    }
+}
+
+/// Hard ceiling on live precipitation drops — the authored
+/// `SpewRate`/`Life` pair derives the working bound, clamped to this
+/// so a degenerate record can never flood the world (F18-AC03).
+pub const PRECIP_MAX_LIVE: usize = 4096;
+
+/// Resource: the session's precipitation rig — one bounded emitter
+/// driven off the standalone `tune/<name>.asbirthrule` spec the
+/// effective weather selector binds (F18-B.2). Unlike the vehicle
+/// rigs the emitter is session-owned, so it is a resource, not a
+/// component; the app supplies the camera-relative emitter point each
+/// step and renders what this emits.
+#[derive(Resource)]
+pub struct Precipitation {
+    /// The distilled authored spec (the standalone `asBirthRule`).
+    pub spec: ParticleSpec,
+    /// Live-drop bound — authored `SpewRate × (Life + LifeVar)` rounded
+    /// up plus spawn margin, clamped to [`PRECIP_MAX_LIVE`].
+    pub max_live: usize,
+    rng: NavRng,
+    /// Fractional spew carry — accumulates `SpewRate·dt` (seeded with
+    /// `InitialBlast`) to whole drops.
+    acc: f32,
+    /// Seconds the emitter has run — `SpewTimeLimit` authors the
+    /// cutoff (0 = unlimited).
+    emitted_for: f32,
+}
+
+impl Precipitation {
+    /// `seed` must be session-stable (the session config seed) so the
+    /// emission stream replays identically — replicable by
+    /// construction (F18 req 5's deterministic leg).
+    pub fn new(spec: ParticleSpec, seed: u64) -> Self {
+        let bound = spec.initial_blast.max(0) as f32
+            + spec.spew_rate.max(0.0) * (spec.life + spec.life_var).max(0.0);
+        let max_live = ((bound.ceil() as usize) + 8).min(PRECIP_MAX_LIVE);
+        let acc = spec.initial_blast.max(0) as f32;
+        Self {
+            spec,
+            max_live,
+            rng: NavRng::new(seed),
+            acc,
+            emitted_for: 0.0,
+        }
+    }
+
+    /// Whole drops to emit this step — `SpewRate` per second while
+    /// `SpewTimeLimit` permits (0 = unlimited), plus any `InitialBlast`
+    /// still credited (a burst on the record, not the steady stream —
+    /// it fires even when the rate is 0), bounded by the pool ceiling
+    /// on top of `live`. A non-positive or non-finite `dt` emits
+    /// nothing.
+    pub fn draw(&mut self, dt: f32, live: usize) -> usize {
+        if !(dt.is_finite() && dt > 0.0) {
+            return 0;
+        }
+        self.emitted_for += dt;
+        let spewing = self.spec.spew_rate > 0.0
+            && (self.spec.spew_time_limit <= 0.0 || self.emitted_for <= self.spec.spew_time_limit);
+        if spewing {
+            self.acc += self.spec.spew_rate * dt;
+        }
+        let n = self.acc.floor() as usize;
+        self.acc -= n as f32;
+        n.min(self.max_live.saturating_sub(live))
+    }
+
+    /// One authored-spec drop around `origin` — the emitter point the
+    /// app supplies (its camera-relative anchor); `Position`/
+    /// `PositionVar` jitter applies around it through this rig's
+    /// deterministic stream.
+    pub fn drop(&mut self, origin: Vec3) -> PrecipDrop {
+        let spec = self.spec.clone();
+        PrecipDrop {
+            position: origin + spec.position + self.jitter3(Vec3::ZERO, spec.position_var),
+            velocity: self.jitter3(spec.velocity, spec.velocity_var),
+            age: 0.0,
+            life: self.jitter(spec.life, spec.life_var).max(0.01),
+            radius: self.jitter(spec.radius, spec.radius_var).max(0.0),
+            d_radius: self.jitter(spec.d_radius, spec.d_radius_var),
+            drag: self.jitter(spec.drag, spec.drag_var),
+            gravity: spec.gravity,
+            d_alpha: self.jitter(spec.d_alpha, spec.d_alpha_var),
+            rotation: 0.0,
+            d_rotation: self.jitter(spec.d_rotation, spec.d_rotation_var),
+            frame_start: spec.tex_frame_start,
+            frame_end: spec.tex_frame_end,
+        }
+    }
+
+    /// Uniform `v ± var` draw on this rig's stream.
+    fn jitter(&mut self, v: f32, var: f32) -> f32 {
+        v + (self.rng.next_f32() * 2.0 - 1.0) * var
+    }
+
+    fn jitter3(&mut self, v: Vec3, var: Vec3) -> Vec3 {
+        Vec3::new(
+            self.jitter(v.x, var.x),
+            self.jitter(v.y, var.y),
+            self.jitter(v.z, var.z),
+        )
+    }
+}
+
+/// Component: one live precipitation drop — the entity itself is the
+/// particle, like [`SmokePuff`]. [`PrecipDrop::advance`] integrates
+/// the authored fields; the render side owns the atlas tile, the
+/// camera-facing transform and contact despawn.
+#[derive(Component, Debug, Clone)]
+pub struct PrecipDrop {
+    /// World-space position — integrated each step.
+    pub position: Vec3,
+    /// World-space velocity — `Gravity` accelerates it each step.
+    pub velocity: Vec3,
+    pub age: f32,
+    pub life: f32,
+    /// Sprite half-extent in metres — `Radius + DRadius·age` drawn.
+    pub radius: f32,
+    /// `DRadius` — authored per-second growth.
+    pub d_radius: f32,
+    /// `Drag` — authored velocity decay coefficient.
+    pub drag: f32,
+    /// `Gravity` — authored signed vertical acceleration.
+    pub gravity: f32,
+    /// `DAlpha` — authored alpha drift per second (0 on retail).
+    pub d_alpha: f32,
+    /// Roll accumulated from `DRotation` (authored on snow; rain
+    /// authors none).
+    pub rotation: f32,
+    /// `DRotation` — authored roll rate.
+    pub d_rotation: f32,
+    /// The authored `TexFrameStart`/`TexFrameEnd` flipbook bounds.
+    pub frame_start: i64,
+    pub frame_end: i64,
+}
+
+impl PrecipDrop {
+    /// Integrate one step — the field readings are designed (mm2hook
+    /// recovers no per-particle integrator for this spec), the same
+    /// reading [`SmokePuff::advance`] applies: `Gravity` accelerates
+    /// vertically, `Drag` decays velocity exponentially, `DRadius`
+    /// grows the sprite, `DRotation` rolls it, age accrues. Returns
+    /// `false` past `life` — the caller despawns. A non-positive/
+    /// non-finite `dt` accrues nothing.
+    pub fn advance(&mut self, dt: f32) -> bool {
+        if dt.is_finite() && dt > 0.0 {
+            self.velocity.y += self.gravity * dt;
+            self.velocity *= (-self.drag * dt).exp();
+            self.position += self.velocity * dt;
+            self.radius += self.d_radius * dt;
+            self.rotation += self.d_rotation * dt;
+            self.age += dt;
+        }
+        self.age < self.life
+    }
+
+    /// The atlas tile at the current age — the authored
+    /// `TexFrameStart..=TexFrameEnd` range sweeps as a flipbook over
+    /// `life` (designed reading; the original's frame semantics are
+    /// unrecovered, UNK-40). A degenerate range pins the start tile.
+    pub fn frame(&self) -> i64 {
+        let span = self.frame_end - self.frame_start + 1;
+        if span <= 1 {
+            return self.frame_start;
+        }
+        let frac = (self.age / self.life).clamp(0.0, 1.0);
+        self.frame_start + ((frac * span as f32) as i64).min(span - 1)
+    }
+
+    /// Sprite alpha in 0..1 — full alpha drifted by `DAlpha·age`
+    /// (designed; retail authors `DAlpha` 0 so drops stay opaque).
+    pub fn alpha(&self) -> f32 {
+        (1.0 + self.d_alpha * self.age).clamp(0.0, 1.0)
     }
 }

@@ -20,7 +20,7 @@ use clap::Parser;
 use mm2_app::session::{SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
     audio, banger, breakaway, camera, car_visual, city, contracts, damage, damage_fx, dash,
-    environment, hud, hudmap, input, menu, nav_overlay, navarrow, oppind, opponents, pause,
+    environment, hud, hudmap, input, menu, nav_overlay, navarrow, oppind, opponents, pause, precip,
     profile, progression, pvs, race, racestat, racetime, recovery, results, scripted, sequence,
     session, smoke, spark_fx, stuck, texel_fx, traffic,
 };
@@ -999,6 +999,7 @@ fn main() {
     .init_resource::<recovery::RecoveryReport>()
     .init_resource::<damage_fx::SmokeFxReport>()
     .init_resource::<spark_fx::SparkFxReport>()
+    .init_resource::<precip::PrecipReport>()
     .init_resource::<texel_fx::TexelDamageReport>()
     // F07-A.2: decoded-PCM audio — `PcmAudio` registers with the
     // `AudioPlugin` DefaultPlugins brings; voices spawn as entities and
@@ -1257,6 +1258,14 @@ fn main() {
         Update,
         (spark_fx::emit_sparks, spark_fx::advance_sparks).chain(),
     )
+    // F18-B.2: authored precipitation — the emitter anchors on the
+    // active camera, the cover probe suppresses sheltered spawns and
+    // the advance step sweeps contacts so drops land instead of
+    // passing through the world. Own slot like the other FX pairs.
+    .add_systems(
+        Update,
+        (precip::emit_precip, precip::advance_precip).chain(),
+    )
     // F07-AC02: `--seq`'s staged input program owns `VehicleInput`
     // like the other evidence drivers — after the keyboard mapping so
     // it wins deterministically, and after `clutch_voices` so a stage
@@ -1325,6 +1334,9 @@ fn main() {
             audio::count_sinks,
             audio::sync_audio_pause.after(session::drive_session),
             audio::reset_audio_report.run_if(session::unloading),
+            // F18-B.2: the precipitation evidence counters clear on
+            // teardown like the audio report's.
+            precip::reset_precip_report.run_if(session::unloading),
         ),
     )
     // F16-B: drain authoritative results into the bound profile —

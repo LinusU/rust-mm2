@@ -238,6 +238,11 @@ pub fn drive_session(
             commands.remove_resource::<crate::environment::EnvironmentReport>();
             commands.remove_resource::<crate::damage_fx::SmokeFx>();
             commands.remove_resource::<crate::spark_fx::SparkFx>();
+            // F18-B.2: the precipitation rig and its render assets die
+            // with the session too — the drops themselves are
+            // `SessionEntity`-stamped and chain-despawn.
+            commands.remove_resource::<crate::precip::PrecipFx>();
+            commands.remove_resource::<mm2_game::Precipitation>();
             commands.remove_resource::<crate::audio::WaveBank>();
             commands.remove_resource::<crate::audio::ImpactAudio>();
             commands.remove_resource::<crate::audio::SurfaceAudio>();
@@ -778,6 +783,30 @@ pub fn load_session_world(
             &mut assets.materials,
         ),
     });
+    // F18-B.2: authored precipitation — the same effective weather
+    // pick the lighting/fog/traction legs read binds the
+    // `tune/<name>.asbirthrule` record through the VFS (designed
+    // selector→rule binding, DSN-60). A selector naming nothing —
+    // every non-rainy session — returns no fx/rig; a named record
+    // that cannot resolve or parse marks the report's `absent`
+    // instead of silently degrading to dry (F18-AC06). The rig is
+    // seeded from the session config so the emission stream replays
+    // identically on restart (F18 req 5).
+    let (precip_report, precip_fx, precip_rig) = crate::precip::precip_session(
+        &vfs.0,
+        session_conditions.weather,
+        config.seed,
+        &mut assets.meshes,
+        &mut assets.images,
+        &mut assets.materials,
+    );
+    commands.insert_resource(precip_report);
+    if let Some(fx) = precip_fx {
+        commands.insert_resource(fx);
+    }
+    if let Some(rig) = precip_rig {
+        commands.insert_resource(rig);
+    }
     // F07-A.2: the session's wave stem index — cardata sample names
     // resolve through it into decoded `PcmAudio` voices. Session-scoped
     // like the effect banks: teardown removes it and the next load

@@ -91,6 +91,31 @@ fn req_vec3(b: &TuneBlock, ctx: &str, name: &str) -> BangerResult<[f32; 3]> {
     }
 }
 
+/// Optional scalar: absent reads `default`, present-but-non-numeric is
+/// still an error — silently defaulting a malformed authored value
+/// would hide it.
+fn opt_f32(b: &TuneBlock, ctx: &str, name: &str, default: f32) -> BangerResult<f32> {
+    match b.field(name) {
+        Some(f) => match f.values.first().and_then(|v| v.number) {
+            Some(n) => Ok(n as f32),
+            None => err(ctx, format!("field {name:?} has no numeric value")),
+        },
+        None => Ok(default),
+    }
+}
+
+/// Optional vec3: absent reads `default`, present-but-malformed is an
+/// error for the same reason [`opt_f32`] is strict.
+fn opt_vec3(b: &TuneBlock, ctx: &str, name: &str, default: [f32; 3]) -> BangerResult<[f32; 3]> {
+    match b.field(name) {
+        Some(_) => match b.vec3(name) {
+            Some(v) => Ok(v),
+            None => err(ctx, format!("malformed vec3 field {name:?}")),
+        },
+        None => Ok(default),
+    }
+}
+
 fn unknown_fields(b: &TuneBlock, ctx: &str, known: &[&str], warnings: &mut Vec<String>) {
     for name in b.field_names() {
         if !known.contains(&name) {
@@ -115,6 +140,10 @@ pub struct BirthRule {
     pub velocity: [f32; 3],
     pub velocity_var: [f32; 3],
     pub life: f32,
+    /// `LifeVar` — absent on every embedded retail record (previously
+    /// an unrecognised-field warning); authored by the standalone
+    /// `.asbirthrule` files, where it reads 0 on retail anyway.
+    pub life_var: f32,
     pub mass: f32,
     pub mass_var: f32,
     pub radius: f32,
@@ -136,8 +165,72 @@ pub struct BirthRule {
     pub birth_flags: i64,
 }
 
+/// `BirthRule` fields a standalone `.asbirthrule` file may omit —
+/// `tune/rain.asbirthrule` authors none of them (verified on retail);
+/// they read as their inert defaults rather than failing the parse.
+/// Embedded `dgBangerData` specs author every field on retail, so the
+/// embedded decode keeps them required.
+const STANDALONE_OPTIONAL: &[&str] = &[
+    "Position",
+    "DRadius",
+    "DRadiusVar",
+    "DAlpha",
+    "DAlphaVar",
+    "DRotation",
+    "DRotationVar",
+];
+
+/// A decoded standalone `tune/<name>.asbirthrule` file — one root
+/// `asBirthRule`/`BirthRule` block, with non-fatal decode notes kept
+/// separate so a caller can surface them without rejecting the spec.
+#[derive(Debug, Clone)]
+pub struct StandaloneBirthRule {
+    /// The decoded rule.
+    pub rule: BirthRule,
+    /// Unrecognised fields and other non-fatal notes.
+    pub warnings: Vec<String>,
+}
+
 impl BirthRule {
+    /// Decode a standalone `tune/<name>.asbirthrule` file — the
+    /// weather/effect particle spec the runtime binds by name
+    /// (`tune/rain.asbirthrule`, `tune/snow.asbirthrule` on retail). The
+    /// root block may spell itself `asBirthRule` or `BirthRule` (both
+    /// occur in shipped data); a `type:` header line is optional.
+    pub fn parse_file(text: &str) -> BangerResult<StandaloneBirthRule> {
+        const CTX: &str = "asBirthRule";
+        let file = TuneFile::parse(text).map_err(|e| BangerError {
+            context: CTX.into(),
+            message: e.to_string(),
+        })?;
+        let root = &file.root;
+        if root.name != "asBirthRule" && root.name != "BirthRule" {
+            return err(
+                CTX,
+                format!(
+                    "root block {:?} is not a particle spec (expected asBirthRule)",
+                    root.name
+                ),
+            );
+        }
+        let mut warnings = Vec::new();
+        let rule = Self::decode(root, CTX, &mut warnings, true)?;
+        Ok(StandaloneBirthRule { rule, warnings })
+    }
+
     fn from_block(b: &TuneBlock, ctx: &str, warnings: &mut Vec<String>) -> BangerResult<Self> {
+        Self::decode(b, ctx, warnings, false)
+    }
+
+    /// Shared field decode. `standalone` relaxes the
+    /// [`STANDALONE_OPTIONAL`] set to their defaults — the embedded
+    /// `dgBangerData` path keeps every field required.
+    fn decode(
+        b: &TuneBlock,
+        ctx: &str,
+        warnings: &mut Vec<String>,
+        standalone: bool,
+    ) -> BangerResult<Self> {
         unknown_fields(
             b,
             ctx,
@@ -147,6 +240,7 @@ impl BirthRule {
                 "Velocity",
                 "VelocityVar",
                 "Life",
+                "LifeVar",
                 "Mass",
                 "MassVar",
                 "Radius",
@@ -169,24 +263,36 @@ impl BirthRule {
             ],
             warnings,
         );
+        let f32_field = |name: &str| -> BangerResult<f32> {
+            if standalone && STANDALONE_OPTIONAL.contains(&name) {
+                opt_f32(b, ctx, name, 0.0)
+            } else {
+                req_f32(b, ctx, name)
+            }
+        };
         Ok(BirthRule {
-            position: req_vec3(b, ctx, "Position")?,
+            position: if standalone {
+                opt_vec3(b, ctx, "Position", [0.0; 3])?
+            } else {
+                req_vec3(b, ctx, "Position")?
+            },
             position_var: req_vec3(b, ctx, "PositionVar")?,
             velocity: req_vec3(b, ctx, "Velocity")?,
             velocity_var: req_vec3(b, ctx, "VelocityVar")?,
             life: req_f32(b, ctx, "Life")?,
+            life_var: opt_f32(b, ctx, "LifeVar", 0.0)?,
             mass: req_f32(b, ctx, "Mass")?,
             mass_var: req_f32(b, ctx, "MassVar")?,
             radius: req_f32(b, ctx, "Radius")?,
             radius_var: req_f32(b, ctx, "RadiusVar")?,
             drag: req_f32(b, ctx, "Drag")?,
             drag_var: req_f32(b, ctx, "DragVar")?,
-            d_radius: req_f32(b, ctx, "DRadius")?,
-            d_radius_var: req_f32(b, ctx, "DRadiusVar")?,
-            d_alpha: req_f32(b, ctx, "DAlpha")?,
-            d_alpha_var: req_f32(b, ctx, "DAlphaVar")?,
-            d_rotation: req_f32(b, ctx, "DRotation")?,
-            d_rotation_var: req_f32(b, ctx, "DRotationVar")?,
+            d_radius: f32_field("DRadius")?,
+            d_radius_var: f32_field("DRadiusVar")?,
+            d_alpha: f32_field("DAlpha")?,
+            d_alpha_var: f32_field("DAlphaVar")?,
+            d_rotation: f32_field("DRotation")?,
+            d_rotation_var: f32_field("DRotationVar")?,
             initial_blast: req_i64(b, ctx, "InitialBlast")?,
             spew_rate: req_f32(b, ctx, "SpewRate")?,
             spew_time_limit: req_f32(b, ctx, "SpewTimeLimit")?,
@@ -732,5 +838,78 @@ mod tests {
         // No pkg at any split → owns itself.
         assert_eq!(geometry_owner("vpeagle_whl1", has), "vpeagle_whl1");
         assert_eq!(geometry_owner("default", has), "default");
+    }
+
+    /// The retail `tune/rain.asbirthrule` grammar verbatim — notably no
+    /// `Position` and none of the `D*` delta fields the embedded
+    /// `dgBangerData` decode requires.
+    const RAIN_FILE: &str = "type: a\nasBirthRule {\n    PositionVar 25 0 25\n    Velocity 2 -35 0\n    VelocityVar 2 5 2\n    Life 1 \n    LifeVar 0 \n    Mass 0.3 \n    MassVar 0.2 \n    Radius 0.5 \n    RadiusVar 0.1 \n    Drag 0.01 \n    DragVar 0.01 \n    InitialBlast 0 \n    SpewRate 200 \n    SpewTimeLimit 0 \n    Gravity -9.8 \n    TexFrameStart 0 \n    TexFrameEnd 15 \n    BirthFlags 8 \n}\n";
+
+    /// The retail `tune/snow.asbirthrule` grammar — no `type:` header.
+    const SNOW_FILE: &str = "asBirthRule {\n    PositionVar 15 10 10\n    Velocity 0 -1 0\n    VelocityVar 1 1 1\n    Life 1 \n    LifeVar 0 \n    Mass 0.2 \n    MassVar 0.3 \n    Radius 0.06 \n    RadiusVar 0.02 \n    Drag 0.01 \n    DragVar 0.01 \n    DRadius 0 \n    DRadiusVar 0 \n    DAlpha 0 \n    DAlphaVar 0 \n    DRotation -2 \n    DRotationVar 5 \n    InitialBlast 0 \n    SpewRate 150 \n    SpewTimeLimit 0 \n    Gravity -6.8 \n    TexFrameStart 5 \n    TexFrameEnd 7 \n    BirthFlags 0 \n}\n";
+
+    #[test]
+    fn parses_standalone_rain_rule() {
+        let f = BirthRule::parse_file(RAIN_FILE).unwrap();
+        assert_eq!(f.rule.position, [0.0; 3], "absent Position defaults");
+        assert_eq!(f.rule.position_var, [25.0, 0.0, 25.0]);
+        assert_eq!(f.rule.velocity, [2.0, -35.0, 0.0]);
+        assert_eq!(f.rule.spew_rate, 200.0);
+        assert_eq!(f.rule.life, 1.0);
+        assert_eq!(f.rule.tex_frame_start, 0);
+        assert_eq!(f.rule.tex_frame_end, 15);
+        assert_eq!(f.rule.birth_flags, 8);
+        // The unauthored delta fields default to their inert zeros.
+        assert_eq!(f.rule.d_radius, 0.0);
+        assert_eq!(f.rule.d_alpha, 0.0);
+        assert_eq!(f.rule.d_rotation, 0.0);
+        assert!(f.warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_standalone_snow_rule() {
+        let f = BirthRule::parse_file(SNOW_FILE).unwrap();
+        assert_eq!(f.rule.position_var, [15.0, 10.0, 10.0]);
+        assert_eq!(f.rule.d_rotation, -2.0);
+        assert_eq!(f.rule.d_rotation_var, 5.0);
+        assert_eq!(f.rule.tex_frame_start, 5);
+        assert_eq!(f.rule.tex_frame_end, 7);
+        assert!(f.warnings.is_empty());
+    }
+
+    #[test]
+    fn standalone_rejects_a_non_particle_root() {
+        let err = BirthRule::parse_file("type: a\nvehCarSim {\n  Mass 1\n}\n").unwrap_err();
+        assert!(err.message.contains("expected asBirthRule"));
+    }
+
+    #[test]
+    fn standalone_rejects_a_missing_required_field() {
+        let err = BirthRule::parse_file(&RAIN_FILE.replace("    SpewRate 200 \n", "")).unwrap_err();
+        assert!(err.message.contains("SpewRate"));
+    }
+
+    #[test]
+    fn standalone_rejects_a_malformed_optional_field() {
+        // An optional field that IS present must still parse as a
+        // number — defaulting it would hide authored corruption.
+        let err = BirthRule::parse_file(&RAIN_FILE.replace(
+            "    BirthFlags 8 \n}",
+            "    BirthFlags 8 \n    DRotation fast \n}",
+        ))
+        .unwrap_err();
+        assert!(err.message.contains("DRotation"));
+    }
+
+    #[test]
+    fn standalone_warns_on_unknown_fields() {
+        // The `tune/effects/` vocabulary (Damp/Height/Intensity/Color)
+        // is not the embedded BirthRule set — noted, not rejected.
+        let f = BirthRule::parse_file(&RAIN_FILE.replace(
+            "    BirthFlags 8 \n}",
+            "    BirthFlags 8 \n    Height 0 \n    Intensity 1 \n    Color -1 \n}",
+        ))
+        .unwrap();
+        assert_eq!(f.warnings.len(), 3);
     }
 }

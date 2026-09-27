@@ -847,6 +847,23 @@ fn only_rainy_weather_wets_the_tires() {
     }
 }
 
+/// F18-B.2: the same selector binds the standalone `asbirthrule` name —
+/// `rainy` → `tune/rain.asbirthrule` + `texture/ptx_rain` (designed
+/// binding, DSN-60). Every other selector precipitates nothing, and the
+/// authored `snow` record stays unbound — no selector names it
+/// (UNK-40).
+#[test]
+fn only_rainy_weather_binds_a_precipitation_rule() {
+    for w in 0..=3 {
+        let bound = Weather::new(w).unwrap().precipitation();
+        if w == 3 {
+            assert_eq!(bound, Some("rain"));
+        } else {
+            assert_eq!(bound, None, "selector {w} precipitates nothing");
+        }
+    }
+}
+
 fn route(points: &[[f32; 3]]) -> OpponentRoute {
     OpponentRoute {
         points: points

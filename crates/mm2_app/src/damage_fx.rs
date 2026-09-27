@@ -101,8 +101,9 @@ pub fn smoke_assets(
 /// A 1×1 quad in the XY plane facing +Z, UVs baked to `tile` of an
 /// `n×n` atlas (tile 0 = top-left, row-major — the measured `fxpt`
 /// layout; v=0 is the image's top row, so the quad's +Y edge binds
-/// the tile's top).
-fn tile_quad(tile: u32, n: u32) -> Mesh {
+/// the tile's top). Shared with the precipitation sprites — the
+/// authored `ptx_*` atlases tile the same way.
+pub(crate) fn tile_quad(tile: u32, n: u32) -> Mesh {
     let col = (tile % n) as f32;
     let row = (tile / n) as f32;
     let n = n as f32;
