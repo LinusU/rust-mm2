@@ -616,6 +616,7 @@ pub fn cockpit_look(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
+    windows: Query<&Window>,
     mode: Res<CameraMode>,
     session: Res<Session>,
     mut cams: Query<(&mut CockpitCamera, &mut Transform)>,
@@ -623,13 +624,23 @@ pub fn cockpit_look(
     if *mode != CameraMode::Cockpit || !matches!(session.phase(), SessionPhase::Playing) {
         return;
     }
-    let stick = pads
-        .iter()
-        .next()
-        .map(|p| p.right_stick())
-        .unwrap_or(Vec2::ZERO);
+    // An unfocused window counts as released input — gilrs keeps
+    // reporting pad state while alt-tabbed where the numpad's keys
+    // could never arrive, so the held glance eases home like a
+    // release rather than freezing mid-look.
+    let focused = crate::input::windows_focused(&windows);
+    let stick = if focused {
+        pads.iter()
+            .next()
+            .map(|p| p.right_stick())
+            .unwrap_or(Vec2::ZERO)
+    } else {
+        Vec2::ZERO
+    };
     for (mut cam, mut xf) in &mut cams {
-        let (yaw, back) = if keys.pressed(KeyCode::Numpad2) || stick.y < -LOOK_STICK {
+        let (yaw, back) = if !focused {
+            (0.0, false)
+        } else if keys.pressed(KeyCode::Numpad2) || stick.y < -LOOK_STICK {
             (std::f32::consts::PI, true)
         } else if keys.pressed(KeyCode::Numpad4) || stick.x < -LOOK_STICK {
             (LOOK_SIDE, false)

@@ -1,4 +1,91 @@
-# Last iteration — F22-A.7: designed in-session gamepad map (iteration 77)
+# Last iteration — F22-A.7 review repair: pad controls share the window-focus gate (iteration 78)
+
+Iteration 78 on `ralph/night` (baseline `8b8455f`, F22-A.7 — external
+verify + review green, no blocking findings; twenty-third iteration of
+run `20260925T144723`). One coherent slice: the review's non-blocking
+wart — pad button edges bypassed the window-focus check
+`vehicle_input`/`horn_input` carry — repaired through the shared
+`control_just_pressed` gate plus the held glance stick.
+
+## Task selection
+
+The F22-A.7 review passed with two non-blocking warts; the actionable
+one was the focus asymmetry: gilrs-style backends deliver pad input
+while the window is unfocused where the OS never delivers keys, so a
+pad edge (e.g. `North` reset) could fire during `Playing` while
+alt-tabbed — a context keys never had. The review's suggested
+remediation was a shared focus gate on `control_just_pressed`
+consumers; that is exactly this change. (The other wart — a stray
+`EOF`/`)` heredoc artifact in commit `8b8455f`'s message — is already
+committed and externally checked; history is not rewritten.) A third
+minor note, the F22-A parent row enumerating only `A.1…A.6`, is fixed
+in PLAN.md.
+
+## Findings and actions
+
+- **`control_just_pressed` owns the gate.** The shared helper gained a
+  `windows: &Query<&Window>` parameter and ANDs `windows_focused` onto
+  the key-or-pad edge, so an unfocused window makes the *control*
+  inert — device-agnostic, matching `vehicle_input`'s "unfocused
+  zeroes everything" contract. `windows_focused` (extracted from the
+  `windows.iter().all(|w| w.focused)` idiom `vehicle_input`/`horn_input`
+  already wrote inline) treats zero windows as focused, so headless
+  runs and the windowless test harnesses are unchanged.
+- **Every consumer threads the query through:** `toggle_camera`,
+  `mirror_input`, `hud_input`, `indicator_input`, `nav_target_input`,
+  `hudmap_input`, `reset_input`, and `horn_input` — whose own inline
+  `&& focused` was dropped now that the helper carries it (its
+  `Playing` gate stays).
+- **`cockpit_look`'s held stick reads released while unfocused.** The
+  one non-edge pad input in the map: an alt-tab mid-glance eases home
+  like a release instead of freezing mid-look, and resumes if the
+  stick is still held on refocus.
+- **Left alone deliberately:** the overlay pad rows (`pause.rs`,
+  `results.rs`, `menu.rs`, `session_control_input`'s `Start`) predate
+  the A.7 map, are overlay-owned, and their effects are menu
+  navigation/pause — the review scoped the wart to `control_just_pressed`
+  consumers. `hudmap_input`'s `Q`/`Esc` pause-map keys are key-only
+  (no pad binding exists) so they needed no change.
+
+## Evidence
+
+- `cargo test --locked -p mm2_app` targeted suites — all green:
+  session 25/25 (+1 `unfocused_window_gates_the_pad_map` — under a
+  spawned `Window{focused:false}` a pad `North` reset, a pad `East`
+  mirror toggle and a synthetic `R` edge are all inert; after refocus
+  the mirror toggles and the reset lands through the production
+  `Teleported` path), dash 13/13 (+1 `pad_look_releases_while_unfocused`
+  — a held left-stick glance eases home across the focus loss and
+  resumes on refocus), plus input 3/3, camtrack 22/22, mirror 9/9,
+  hud 9/9, oppind 6/6, race 44/44, audio 70/70 unchanged.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean (one hudmap reflow applied).
+- `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --locked --workspace` — green, all suites (session 25,
+  dash 13, input 3, camtrack 22, mirror 9, hud 9, oppind 6, race 44,
+  audio 70 + the rest of the workspace).
+
+## Classification / remaining open items
+
+- Designed policy (DSN-57 extension, recorded in the ledger row): pad
+  input shares the keyboard's effective focus contract — no original
+  behavior claim, the original's pad handling is unrecovered.
+- F22-A/F22-B stay `active`: AC06's multi-resolution/clipped-UI sweep
+  and real-hardware pad playtest remain the open manual legs; a real
+  unfocused-window pad press is unexercised (all evidence is the
+  synthetic `Window{focused:false}` component + bevy's documented
+  mocking surface — gilrs delivering input unfocused is documented
+  backend behavior, observed in review/source only).
+- Overlay pad rows (pause/results/menu `just_pressed` reads) keep the
+  theoretical same asymmetry — navigation while alt-tabbed — but were
+  deliberately out of scope: pre-existing surface, overlay-owned keys
+  don't have a focus gate either, and a pause/menu cursor move while
+  unfocused is benign.
+
+---
 
 Iteration 77 on `ralph/night` (baseline `6e65da3`, F22-B.5 — external
 verify + review green, no blocking findings; twenty-second iteration

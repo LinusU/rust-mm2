@@ -68,6 +68,7 @@ impl Default for HudVisible {
 pub fn hud_input(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
+    windows: Query<&Window>,
     session: Res<Session>,
     mut hud: ResMut<HudVisible>,
 ) {
@@ -77,7 +78,13 @@ pub fn hud_input(
     ) {
         return;
     }
-    if crate::input::control_just_pressed(&keys, &pads, KeyCode::KeyH, crate::input::pad::HUD) {
+    if crate::input::control_just_pressed(
+        &keys,
+        &pads,
+        &windows,
+        KeyCode::KeyH,
+        crate::input::pad::HUD,
+    ) {
         hud.0 = !hud.0;
     }
 }

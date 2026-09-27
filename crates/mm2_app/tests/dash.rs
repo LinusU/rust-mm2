@@ -602,6 +602,71 @@ fn pad_stick_glances_and_reverses() {
     assert_eq!(xf.translation, Vec3::new(0.0, 1.19, -0.55));
 }
 
+/// The pad's held glance shares the keyboard's effective contract: an
+/// unfocused window reads released input, so a glance held while
+/// alt-tabbing eases home rather than freezing mid-look — and resumes
+/// if the stick is still held on refocus.
+#[test]
+fn pad_look_releases_while_unfocused() {
+    let mut app = base_app();
+    *app.world_mut().resource_mut::<CameraMode>() = CameraMode::Cockpit;
+    app.add_systems(Update, cockpit_look);
+    let cam = app
+        .world_mut()
+        .spawn((
+            CockpitCamera {
+                offset: Vec3::new(0.0, 1.19, -0.55),
+                reverse_offset: None,
+                pitch: 0.0,
+                look_yaw: 0.0,
+            },
+            Transform::from_translation(Vec3::new(0.0, 1.19, -0.55)),
+        ))
+        .id();
+    app.world_mut().spawn(Gamepad::default());
+    let set_stick = |app: &mut App, x: f32, y: f32| {
+        let mut pads = app.world_mut().query::<&mut Gamepad>();
+        for mut pad in pads.iter_mut(app.world_mut()) {
+            pad.analog_mut().set(GamepadAxis::RightStickX, x);
+            pad.analog_mut().set(GamepadAxis::RightStickY, y);
+        }
+    };
+
+    // Focused: the held stick eases the glance in.
+    set_stick(&mut app, -1.0, 0.0);
+    for _ in 0..60 {
+        app.update();
+    }
+    let yaw = app.world().get::<CockpitCamera>(cam).unwrap().look_yaw;
+    assert!(yaw > 1.2, "held stick eased toward +π/2, got {yaw}");
+
+    // Alt-tab mid-glance: the look eases home like a release even
+    // though the pad still reports the stick held.
+    let window = app
+        .world_mut()
+        .spawn(Window {
+            focused: false,
+            ..default()
+        })
+        .id();
+    for _ in 0..60 {
+        app.update();
+    }
+    let yaw = app.world().get::<CockpitCamera>(cam).unwrap().look_yaw;
+    assert!(
+        yaw.abs() < 0.1,
+        "unfocused eases home like a release, got {yaw}"
+    );
+
+    // Refocus with the stick still held: the glance resumes.
+    app.world_mut().get_mut::<Window>(window).unwrap().focused = true;
+    for _ in 0..60 {
+        app.update();
+    }
+    let yaw = app.world().get::<CockpitCamera>(cam).unwrap().look_yaw;
+    assert!(yaw > 1.2, "refocus resumes the held glance, got {yaw}");
+}
+
 /// `active_cam_pose` feeds the HUD `cam` readout and the screenshot
 /// filename — the `--cam` round-trip contract. A camera *parented* to
 /// the vehicle (the authored cockpit camera) must report its world

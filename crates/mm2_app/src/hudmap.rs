@@ -507,6 +507,7 @@ pub fn spawn_hud_map(
 pub fn hudmap_input(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
+    windows: Query<&Window>,
     cam_mode: Res<CameraMode>,
     mut session: ResMut<Session>,
     mut control: ResMut<SessionControl>,
@@ -526,13 +527,15 @@ pub fn hudmap_input(
     let free_cam = *cam_mode == CameraMode::Free;
     match *session.phase() {
         SessionPhase::Playing => {
-            if control_just_pressed(&keys, &pads, KeyCode::Tab, pad::MAP_VIEW) {
+            if control_just_pressed(&keys, &pads, &windows, KeyCode::Tab, pad::MAP_VIEW) {
                 map.cycle_view();
             }
-            if !free_cam && control_just_pressed(&keys, &pads, KeyCode::KeyE, pad::MAP_ZOOM) {
+            if !free_cam
+                && control_just_pressed(&keys, &pads, &windows, KeyCode::KeyE, pad::MAP_ZOOM)
+            {
                 map.toggle_zoom();
             }
-            if control_just_pressed(&keys, &pads, KeyCode::KeyF, pad::MAP_ROTATE) {
+            if control_just_pressed(&keys, &pads, &windows, KeyCode::KeyF, pad::MAP_ROTATE) {
                 map.toggle_orientation();
             }
             if !free_cam

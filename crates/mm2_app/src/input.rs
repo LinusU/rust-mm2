@@ -53,17 +53,30 @@ pub mod pad {
     pub const TARGET_NEXT: GamepadButton = GamepadButton::RightTrigger;
 }
 
+/// Every window focused — headless runs own none and count as
+/// focused. The OS never delivers a key press to an unfocused window,
+/// but gilrs-style backends keep reporting pad state regardless, so
+/// every pad-fed control gates on this to share the keyboard's
+/// effective contract.
+pub fn windows_focused(windows: &Query<&Window>) -> bool {
+    windows.iter().all(|w| w.focused)
+}
+
 /// One in-session control on either device: the documented key OR its
-/// designed [`pad`] binding. Menus keep their own pad row, so these
-/// only ever fire where the matching system already gates the key —
-/// the pad adds a finger, never a new context.
+/// designed [`pad`] binding — inert while a window is unfocused (the
+/// pad's edges would otherwise fire where the key's never could).
+/// Menus keep their own pad row, so these only ever fire where the
+/// matching system already gates the key — the pad adds a finger,
+/// never a new context.
 pub fn control_just_pressed(
     keys: &ButtonInput<KeyCode>,
     pads: &Query<&Gamepad>,
+    windows: &Query<&Window>,
     key: KeyCode,
     button: GamepadButton,
 ) -> bool {
-    keys.just_pressed(key) || pads.iter().next().is_some_and(|p| p.just_pressed(button))
+    windows_focused(windows)
+        && (keys.just_pressed(key) || pads.iter().next().is_some_and(|p| p.just_pressed(button)))
 }
 
 /// Presence enables the parked driver: `--parked` inserts it, and
@@ -113,7 +126,7 @@ pub fn vehicle_input(
     // already `Countdown` in the normal flow, but `input_locked` also
     // covers a race resource that outlives its gate.
     let race_locked = race.is_some_and(|r| r.input_locked() && !r.is_stale(session.generation()));
-    let focused = windows.iter().all(|w| w.focused);
+    let focused = windows_focused(&windows);
     let driving =
         !matches!(*cam_mode, CameraMode::Free) && session.is_playing() && focused && !race_locked;
     if !driving {
@@ -172,12 +185,15 @@ pub fn vehicle_input(
 pub fn reset_input(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
+    windows: Query<&Window>,
     session: Res<Session>,
     spawn: Res<SpawnPoint>,
     player: Query<Entity, With<PlayerVehicle>>,
     mut writer: MessageWriter<ResetVehicle>,
 ) {
-    if !session.is_playing() || !control_just_pressed(&keys, &pads, KeyCode::KeyR, pad::RESET) {
+    if !session.is_playing()
+        || !control_just_pressed(&keys, &pads, &windows, KeyCode::KeyR, pad::RESET)
+    {
         return;
     }
     for msg in session::spawn_resets(&spawn, player.iter().next()) {

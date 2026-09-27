@@ -980,10 +980,13 @@ pub fn horn_input(
     windows: Query<&Window>,
     mut requests: MessageWriter<HornRequest>,
 ) {
-    let focused = windows.iter().all(|w| w.focused);
-    if crate::input::control_just_pressed(&keys, &pads, KeyCode::Enter, crate::input::pad::HORN)
-        && session.is_playing()
-        && focused
+    if crate::input::control_just_pressed(
+        &keys,
+        &pads,
+        &windows,
+        KeyCode::Enter,
+        crate::input::pad::HORN,
+    ) && session.is_playing()
     {
         requests.write(HornRequest);
     }

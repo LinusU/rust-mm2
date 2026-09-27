@@ -558,14 +558,15 @@ pub fn spawn_nav_arrow(
 pub fn nav_target_input(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
+    windows: Query<&Window>,
     session: Res<Session>,
     race: Option<Res<RaceState>>,
     mut players: Query<(&Position, &RaceProgress, &mut TargetSelection)>,
 ) {
     use crate::input::{control_just_pressed, pad};
-    let dir = if control_just_pressed(&keys, &pads, KeyCode::KeyX, pad::TARGET_NEXT) {
+    let dir = if control_just_pressed(&keys, &pads, &windows, KeyCode::KeyX, pad::TARGET_NEXT) {
         1
-    } else if control_just_pressed(&keys, &pads, KeyCode::KeyZ, pad::TARGET_PREV) {
+    } else if control_just_pressed(&keys, &pads, &windows, KeyCode::KeyZ, pad::TARGET_PREV) {
         -1
     } else {
         return;

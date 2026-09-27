@@ -390,17 +390,18 @@ fn activate_mode(
 pub fn toggle_camera(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
+    windows: Query<&Window>,
     mut mode: ResMut<CameraMode>,
     mut cams: SessionCameras,
     mut cursor: Query<&mut CursorOptions>,
 ) {
     use crate::input::pad;
-    let next = if control_just_pressed(&keys, &pads, KeyCode::KeyC, pad::CAMERA) {
+    let next = if control_just_pressed(&keys, &pads, &windows, KeyCode::KeyC, pad::CAMERA) {
         match next_available(*mode, &cams) {
             Some(m) => m,
             None => return,
         }
-    } else if control_just_pressed(&keys, &pads, KeyCode::KeyV, pad::COCKPIT) {
+    } else if control_just_pressed(&keys, &pads, &windows, KeyCode::KeyV, pad::COCKPIT) {
         match *mode {
             CameraMode::Cockpit => CameraMode::Chase,
             _ if have_mode(CameraMode::Cockpit, &cams) => CameraMode::Cockpit,
@@ -757,6 +758,7 @@ pub fn spawn_mirror(
 pub fn mirror_input(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
+    windows: Query<&Window>,
     session: Res<Session>,
     mut mirror: ResMut<RearView>,
 ) {
@@ -766,7 +768,13 @@ pub fn mirror_input(
     ) {
         return;
     }
-    if control_just_pressed(&keys, &pads, KeyCode::Backspace, crate::input::pad::MIRROR) {
+    if control_just_pressed(
+        &keys,
+        &pads,
+        &windows,
+        KeyCode::Backspace,
+        crate::input::pad::MIRROR,
+    ) {
         mirror.0 = !mirror.0;
     }
 }

@@ -177,6 +177,7 @@ pub fn spawn_opponent_indicators(
 pub fn indicator_input(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
+    windows: Query<&Window>,
     session: Res<Session>,
     mut indicators: ResMut<OpponentIndicators>,
 ) {
@@ -189,6 +190,7 @@ pub fn indicator_input(
     if crate::input::control_just_pressed(
         &keys,
         &pads,
+        &windows,
         KeyCode::KeyI,
         crate::input::pad::INDICATORS,
     ) {

@@ -1268,6 +1268,54 @@ fn pad_north_resets_the_player_to_spawn() {
     assert!(phase_is(&mut app, SessionPhase::Playing));
 }
 
+/// The review's pad-focus wart (F22-AC06 follow-up): gilrs-style
+/// backends deliver pad input while the window is unfocused where the
+/// OS would never deliver a key — the shared `control_just_pressed`
+/// gate makes an unfocused window inert for both devices, and the
+/// controls answer again after refocus.
+#[test]
+fn unfocused_window_gates_the_pad_map() {
+    let mut app = dev_app();
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    let car = single::<With<PlayerVehicle>>(&mut app);
+    app.world_mut().spawn(Gamepad::default());
+    let window = app
+        .world_mut()
+        .spawn(Window {
+            focused: false,
+            ..default()
+        })
+        .id();
+
+    // While unfocused the pad's reset/mirror edges — and the key's,
+    // the gate sits on the control not the device — are all inert.
+    pad_press(&mut app, GamepadButton::North);
+    pad_press(&mut app, GamepadButton::East);
+    press_key(&mut app, KeyCode::KeyR);
+    assert!(
+        app.world().get::<Teleported>(car).is_none(),
+        "an unfocused pad must not reset the car"
+    );
+    assert!(
+        !app.world().resource::<mm2_app::camera::RearView>().0,
+        "an unfocused pad must not toggle the mirror"
+    );
+
+    // Refocus and both devices answer again — the reset lands through
+    // the same production `Teleported` path `pad_north_*` proves.
+    app.world_mut().get_mut::<Window>(window).unwrap().focused = true;
+    pad_press(&mut app, GamepadButton::East);
+    assert!(app.world().resource::<mm2_app::camera::RearView>().0);
+    pad_press(&mut app, GamepadButton::North);
+    assert!(
+        run_until(&mut app, 10, |a| a.world().get::<Teleported>(car).is_some()),
+        "the refocused pad reset never landed"
+    );
+}
+
 /// The reset bundle re-seats every trailer at its authored car-space
 /// offset under the spawn yaw — one `ResetVehicle` for the player and
 /// one per trailer, the same messages the `R` key emits.
