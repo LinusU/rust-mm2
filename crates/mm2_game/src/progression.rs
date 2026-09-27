@@ -583,7 +583,11 @@ pub fn record_eligibility(config: &SessionConfig) -> Result<(), Ineligible> {
         Err(Ineligible::DevOverride("spawn"))
     } else if dev.banger_pool.is_some() {
         Err(Ineligible::DevOverride("banger-pool"))
-    } else if dev.traction.is_some_and(|t| t != 1.0) {
+    } else if dev.traction.is_some() {
+        // No value-based exemption is possible: `Some(1.0)` is not a
+        // guaranteed no-op — it dries a session whose effective
+        // weather is rainy (F18-B.1), and this config-only gate cannot
+        // see the event's authored weather.
         Err(Ineligible::DevOverride("traction"))
     } else if dev.finish {
         Err(Ineligible::DevOverride("finish"))

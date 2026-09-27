@@ -555,7 +555,10 @@ pub struct DevOverrides {
     /// every tire contact: pins the session's modifier outright for
     /// evidence runs — it *overrides* the weather-derived wetness
     /// factor (F18-B.1), so `--traction 1.0` dries a rainy session.
-    /// `None` leaves the session-legal writer in charge.
+    /// `None` leaves the session-legal writer in charge. Never
+    /// session-legal: any pin — `1.0` included, since it is
+    /// physics-active wherever the effective weather wets the road —
+    /// is `Ineligible::DevOverride`.
     pub traction: Option<f32>,
     /// `--pause`: pause the session once it reaches `Playing`
     /// (evidence/diagnostic runs — a `--frames`/`--screenshot` capture

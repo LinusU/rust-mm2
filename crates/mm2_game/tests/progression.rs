@@ -388,6 +388,15 @@ fn record_eligibility_gates_dev_and_modded_sessions() {
         record_eligibility(&config),
         Err(Ineligible::DevOverride("traction"))
     );
+    // `Some(1.0)` is not a guaranteed no-op: it dries a session whose
+    // effective weather is rainy (F18-B.1), and `record_eligibility`
+    // is config-only — it cannot see the event's authored weather, so
+    // the pin's presence alone is ineligible (F18-B.1 review repair).
+    config.dev.traction = Some(1.0);
+    assert_eq!(
+        record_eligibility(&config),
+        Err(Ineligible::DevOverride("traction"))
+    );
     config.dev.traction = None;
     config.dev.spawn = Some(SpawnPose {
         position: Vec3::ZERO,

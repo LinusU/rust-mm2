@@ -1,4 +1,71 @@
-# Last iteration — F18-B.1: weather→traction wetness (iteration 80)
+# Last iteration — F18-B.1 review repair: traction-pin record
+# eligibility (iteration 81)
+
+Iteration 81 on `ralph/night` (baseline `bc7fee0` — the F18-B.1
+candidate; external verify green, review verdict **fail** on one
+blocking finding; twenty-sixth iteration of run `20260925T144723`).
+One coherent slice: repair the review's record-integrity blocker —
+close the `dev.traction = Some(1.0)` eligibility hole F18-B.1 opened.
+
+## Task selection
+
+The F18-B.1 external review's single blocking finding:
+`record_eligibility` (`mm2_game::progression`) exempted a traction
+pin via `dev.traction.is_some_and(|t| t != 1.0)`. That carve-out was
+sound only while `TireConditions` read `dev.traction.unwrap_or(1.0)`
+— i.e. while `Some(1.0)` was a guaranteed no-op. F18-B.1 made it
+physics-active: on a session whose effective weather is rainy the pin
+dries the tires 0.8 → 1.0 while the run stays record-eligible, so
+`--traction 1` on authored `checkpoint:4 --pro` (rainy-noon) would
+record a dry-grip result as a default-conditions run (DRV-6
+violated). Repair before any new feature work.
+
+## Findings and actions
+
+- **`mm2_game::progression::record_eligibility`** — the arm is now
+  `dev.traction.is_some()` unconditionally. No value-based exemption
+  can be correct at this gate: it is config-only and cannot see the
+  event's authored weather, and a `1.0` pin on a dry session is a
+  bit-identical run anyway, so nothing of value is lost.
+- **`mm2_game::config::DevOverrides::traction`** — doc now states any
+  pin (`1.0` included, since it is physics-active wherever the
+  effective weather wets the road) is `Ineligible::DevOverride`.
+- **Ledger** — DSN-59's "keeps its `Ineligible::DevOverride`
+  exclusion" claim was false for the `1.0` case; corrected to record
+  the unconditional rejection and why.
+- **Regression test** —
+  `record_eligibility_gates_dev_and_modded_sessions` gains the
+  `Some(1.0)` leg asserting `Err(Ineligible::DevOverride("traction"))`.
+
+## Evidence
+
+- `cargo test --locked -p mm2_game --test progression` — 19/19; the
+  new `Some(1.0)` leg pins `Err(Ineligible::DevOverride("traction"))`.
+- `record_eligibility` is the only consumption point
+  (`mm2_app::progression::record_session_results` calls it for the
+  ledger drain) — no parallel value-based carve-out exists.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings` — clean (`Finished dev profile`).
+- `cargo test --locked --workspace` — 80 suites, all `0 failed`.
+
+## Classification / remaining open items
+
+- F18-B.1 stays `implemented` (candidate) pending external re-check;
+  the review's non-blocking notes stand — no rendered wet-driving
+  evidence, symmetric opponent/trailer application by construction,
+  and a `--traction 1` pin on a dry run still records `traction=1`
+  (disclosed, harmless).
+- F18-B stays `active`: precipitation particles (req 2),
+  precipitation audio hooks and condition replication (req 5's
+  network leg is F24+) remain.
+
+---
+
+# Prior iterations
 
 Iteration 80 on `ralph/night` (baseline `88b447a`, F17-A.7 — external
 verify + review green, non-blocking warts only; twenty-fifth
@@ -33,7 +100,9 @@ particles (req 2) are a deliberately separate, larger render slice.
 - **`mm2_app::session`** — `TireConditions` is stamped from
   `session_conditions.weather.traction_factor()`, with
   `dev.traction` kept as a quarantined pin *over* the factor (a `1.0`
-  pin dries a rainy session; `Ineligible::DevOverride` unchanged).
+  pin dries a rainy session; `Ineligible::DevOverride` unchanged —
+  wrong: the `!= 1.0` carve-out let a pinned-dry rainy race record;
+  corrected in iteration 81 to reject any pin).
   Player, opponents and trailers share the factor symmetrically —
   one tire path, one session resource.
 - **`mm2_app::smoke`** — `traction=<f>` now records the *effective*
@@ -93,10 +162,6 @@ particles (req 2) are a deliberately separate, larger render slice.
   F24+) remain. No rendered rain-visual claim is made — this slice is
   physics-only; the wet *look* is unchanged beyond the authored
   `.ltNN`/fog/dome bindings that already selected on the same slot.
-
----
-
-# Prior iterations
 
 Iteration 79 on `ralph/night` (baseline `b183907`, F22-A.7 review
 repair — external verify + review green, no blocking findings;
