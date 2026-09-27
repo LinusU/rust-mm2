@@ -163,6 +163,40 @@ fn write_rain(d: &Path) {
     .unwrap();
 }
 
+/// A minimal 16-bit mono PCM RIFF/WAVE — the F18-B.3 ambience leg's
+/// authored stems (tests/audio.rs carries the same self-contained
+/// helper; each `tests/` file is a crate).
+fn pcm_wav(rate: u32, frames: usize) -> Vec<u8> {
+    let mut fmt = Vec::new();
+    fmt.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    fmt.extend_from_slice(&1u16.to_le_bytes()); // mono
+    fmt.extend_from_slice(&rate.to_le_bytes());
+    fmt.extend_from_slice(&(rate * 2).to_le_bytes());
+    fmt.extend_from_slice(&2u16.to_le_bytes()); // block align
+    fmt.extend_from_slice(&16u16.to_le_bytes());
+    let pcm = vec![0x20u8; frames * 2];
+    let mut body = Vec::from(&b"WAVE"[..]);
+    body.extend_from_slice(b"fmt ");
+    body.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+    body.extend_from_slice(&fmt);
+    body.extend_from_slice(b"data");
+    body.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+    body.extend_from_slice(&pcm);
+    let mut out = Vec::from(&b"RIFF"[..]);
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&body);
+    out
+}
+
+/// The precipitation ambience's authored stems — `rainexterior`/
+/// `raininterior`/`thunder` under the bank's preferred aud22 tier,
+/// the exe-verified names `WeatherAudio` resolves.
+fn write_rain_audio(d: &Path) {
+    for stem in ["rainexterior", "raininterior", "thunder"] {
+        write(d, &format!("aud/aud22/{stem}.22k.wav"), pcm_wav(22050, 220));
+    }
+}
+
 fn vfs_of(dir: &Path) -> Vfs {
     let mut vfs = Vfs::new();
     vfs.mount_dir(dir, 0).unwrap();
@@ -213,6 +247,8 @@ fn city_app(config: mm2_game::SessionConfig, vfs: Vfs) -> App {
         .init_resource::<mm2_app::damage_fx::SmokeFxReport>()
         .init_resource::<mm2_app::spark_fx::SparkFxReport>()
         .init_resource::<PrecipReport>()
+        .init_resource::<mm2_app::audio::AudioReport>()
+        .init_resource::<Assets<mm2_app::audio::PcmAudio>>()
         .init_resource::<mm2_app::texel_fx::TexelDamageReport>()
         .init_resource::<ResultLedger>()
         .init_resource::<SessionControl>()
@@ -240,6 +276,10 @@ fn city_app(config: mm2_game::SessionConfig, vfs: Vfs) -> App {
                 session::session_control_input,
                 (precip::emit_precip, precip::advance_precip).chain(),
                 precip::reset_precip_report.run_if(session::unloading),
+                // F18-B.3: the precipitation ambience drive — the
+                // production `load_session_world` binds `WeatherAudio`
+                // off the same effective-weather pick.
+                mm2_app::audio::weather_voices.after(session::drive_session),
                 (
                     despawn_session_entities.run_if(session::unloading),
                     session::drive_session,
@@ -485,4 +525,76 @@ fn restart_reloads_the_precipitation_rig() {
         .filter(|(_, o)| o.0 != 2)
         .count();
     assert_eq!(stale, 0, "gen-1 drops survived the restart");
+}
+
+/// F18-B.3's production binding leg: `load_session_world` inserts the
+/// `WeatherAudio` ambience resource off the same effective-weather
+/// pick the particle rig reads — the beds resolve through the
+/// session WaveBank on the drive system's first pass — and a dry
+/// session binds nothing. Teardown removes the resource with the
+/// session (the voice entities are `SessionEntity`-stamped).
+#[test]
+fn rainy_weather_binds_the_authored_ambience() {
+    let tmp = city_install();
+    write_rain(tmp.path());
+    write_rain_audio(tmp.path());
+    let mut app = city_app(city_config(3), vfs_of(tmp.path()));
+    for _ in 0..10 {
+        app.update();
+    }
+    assert!(playing(&mut app));
+
+    let ambience = app
+        .world()
+        .get_resource::<mm2_app::audio::WeatherAudio>()
+        .expect("a rainy session binds the ambience resource");
+    assert_eq!(ambience.name, "rain");
+    let report = app.world().resource::<mm2_app::audio::AudioReport>();
+    assert_eq!(report.weather, 2, "both authored beds spawned");
+    assert_eq!(report.failed, 0);
+
+    // A dry selector on the same install binds nothing — no resource,
+    // no voices, no field activity.
+    let mut dry = city_app(city_config(0), vfs_of(tmp.path()));
+    for _ in 0..10 {
+        dry.update();
+    }
+    assert!(playing(&mut dry));
+    assert!(
+        dry.world()
+            .get_resource::<mm2_app::audio::WeatherAudio>()
+            .is_none(),
+        "a dry session carries no ambience binding"
+    );
+    assert_eq!(
+        dry.world()
+            .resource::<mm2_app::audio::AudioReport>()
+            .weather,
+        0
+    );
+
+    // Teardown takes the binding and the voices with the session.
+    app.world_mut().resource_mut::<SessionControl>().restart = true;
+    for _ in 0..60 {
+        app.update();
+        if playing(&mut app) {
+            break;
+        }
+    }
+    assert!(playing(&mut app), "restart never returned to Playing");
+    assert_eq!(app.world().resource::<Session>().generation(), 2);
+    // Generation 2 re-bound its own ambience — and every live weather
+    // voice carries its stamp.
+    assert!(
+        app.world()
+            .get_resource::<mm2_app::audio::WeatherAudio>()
+            .is_some()
+    );
+    let stale = app
+        .world_mut()
+        .query::<(&mm2_app::audio::WeatherVoice, &SessionEntity)>()
+        .iter(app.world())
+        .filter(|(_, o)| o.0 != 2)
+        .count();
+    assert_eq!(stale, 0, "gen-1 bed voices survived the restart");
 }

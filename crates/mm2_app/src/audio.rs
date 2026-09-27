@@ -101,6 +101,18 @@
 //! `(play time, next index)` chain off the session's fixed tick,
 //! holding one `PlaybackMode::Loop` voice on the current sample.
 //! Sustained-scrape semantics remain F07-B/C work.
+//!
+//! F18-B.3 voices the session's precipitation itself: a rainy
+//! effective-weather pick (the same `Weather::precipitation` binding
+//! the particle rig reads, DSN-60) inserts [`WeatherAudio`], and
+//! [`weather_voices`] lazily resolves the authored
+//! `<name>exterior`/`<name>interior` bed loops plus `thunder` the
+//! exe's `Rainexterior`/`Raininterior`/`Thunder` strings name. The
+//! beds crossfade on a shelter probe off the active camera (the
+//! particle emitter's declared cover approximation, designed —
+//! UNK-25) and the claps fire on a seeded schedule adopting the
+//! `13.0`/`15.0` constants the exe stores beside the stems
+//! (positional attribution inferred, designed).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -115,7 +127,7 @@ use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use tracing::warn;
 
-use avian3d::prelude::{ComputedMass, LinearVelocity, Mass};
+use avian3d::prelude::{ComputedMass, LinearVelocity, Mass, SpatialQuery};
 use mm2_assets::Vfs;
 use mm2_content::SurfaceTables;
 use mm2_formats::cardata::{self, CardataBody, ImpactTable, SurfaceTable, is_sample_sentinel};
@@ -662,6 +674,120 @@ impl SirenAudio {
     }
 }
 
+/// The authored bed stems a precipitation selector binds (F18-B.3):
+/// the exe's `Rainexterior`/`Raininterior`/`Thunder` strings sit in
+/// one block beside the floats `0.65`, `0.85`, `13.0`, `15.0` and
+/// `1.0`, read as the weather-audio struct's constants (positional
+/// attribution is an inference — the designed volumes/delays below
+/// adopt those values rather than inventing others; the original's
+/// mix/trigger semantics are unrecovered, UNK-25).
+fn weather_stem(name: &str, suffix: &str) -> String {
+    format!("{name}{suffix}")
+}
+
+/// Bed-loop volume while the listener sits in the open — the `0.85`
+/// constant adjacent to the stems, designed adoption (see above).
+const RAIN_EXTERIOR_VOLUME: f32 = 0.85;
+/// Bed-loop volume while the listener is sheltered — the `0.65`
+/// constant, same provenance.
+const RAIN_INTERIOR_VOLUME: f32 = 0.65;
+/// Thunder one-shot gain — the `1.0` constant, same provenance.
+const THUNDER_VOLUME: f32 = 1.0;
+/// Seeded clap-delay bounds in seconds — the `13.0`/`15.0` constants,
+/// same provenance.
+const THUNDER_MIN_DELAY: f32 = 13.0;
+const THUNDER_MAX_DELAY: f32 = 15.0;
+/// Exterior↔interior crossfade rate (per second) — designed; no
+/// original value is recoverable.
+const RAIN_CROSSFADE_PER_SEC: f32 = 4.0;
+/// Live thunder one-shots the session will hold at once — claps are
+/// seconds apart, so the bound is a contract, not a real constraint
+/// (designed, like every other voice bound here).
+const MAX_THUNDER_VOICES: usize = 4;
+/// Domain separation for the thunder schedule's `NavRng` — the precip
+/// rig seeds `NavRng::new(seed)` directly, so this stream gets its own
+/// mix of the session seed instead of replaying the drop jitter's
+/// draw order (designed).
+const WEATHER_AUDIO_DOMAIN: u64 = 0x7765_6120_6175_6469;
+
+/// Session-scoped precipitation ambience (F18-B.3): inserted by
+/// `load_session_world` when the shared effective-weather pick names a
+/// precipitation spec — the same `Weather::precipitation()` binding
+/// the particle rig reads (DSN-60). Carries no decoded waves: the
+/// beds' `<name>exterior`/`<name>interior` and `thunder` stems resolve
+/// through the session [`WaveBank`] on the drive system's first pass,
+/// like every other lazy voice build. `None` on a non-precipitating
+/// session, so a dry run carries no ambience state at all.
+#[derive(Resource)]
+pub struct WeatherAudio {
+    /// The bound precipitation name (`"rain"` on retail).
+    pub name: &'static str,
+    /// Each bed's resolve was attempted (spawn or counted failure —
+    /// never retried per frame).
+    exterior_tried: bool,
+    interior_tried: bool,
+    /// The resolved thunder clip, `Some` once its stem decoded.
+    thunder_tried: bool,
+    thunder: Option<Handle<PcmAudio>>,
+    /// Exterior↔interior crossfade position, 0 = fully exposed.
+    interior_mix: f32,
+    /// Playing-phase seconds accumulated for the thunder schedule.
+    elapsed: f32,
+    /// `elapsed` at which the next clap fires.
+    next_thunder: f32,
+    /// Seeded draw stream for the clap delays.
+    rng: NavRng,
+}
+
+impl WeatherAudio {
+    /// Bind the weather selector's precipitation ambience; `None` when
+    /// it names no spec (every dry session). The seeded schedule draws
+    /// the first clap delay here so a restart replays identically.
+    pub fn bind(weather: Weather, seed: u64) -> Option<Self> {
+        let name = weather.precipitation()?;
+        let mut rng = NavRng::new(seed.wrapping_add(WEATHER_AUDIO_DOMAIN));
+        let next_thunder = Self::draw_delay(&mut rng);
+        Some(Self {
+            name,
+            exterior_tried: false,
+            interior_tried: false,
+            thunder_tried: false,
+            thunder: None,
+            interior_mix: 0.0,
+            elapsed: 0.0,
+            next_thunder,
+            rng,
+        })
+    }
+
+    fn draw_delay(rng: &mut NavRng) -> f32 {
+        THUNDER_MIN_DELAY + rng.next_f32() * (THUNDER_MAX_DELAY - THUNDER_MIN_DELAY)
+    }
+}
+
+/// One precipitation bed loop — the `<name>exterior`/`<name>interior`
+/// voice [`weather_voices`] spawned. `mix` is rewritten every drive
+/// pass whether or not a sink exists — headless runs carry the
+/// computed mixer state on the component, which is what tests and the
+/// smoke record read (the [`EngineVoice`]/[`SurfaceVoice`] contract).
+#[derive(Component)]
+pub struct WeatherVoice {
+    /// Which authored stem this bed plays.
+    pub role: WeatherRole,
+    /// The mixer state [`weather_voices`] last computed (speed is
+    /// always 1.0 — the authored clips are untempoed beds).
+    pub mix: EngineMix,
+}
+
+/// Which half of the precipitation bed a [`WeatherVoice`] plays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeatherRole {
+    /// The `<name>exterior` open-air bed.
+    Exterior,
+    /// The `<name>interior` sheltered bed.
+    Interior,
+}
+
 /// Variant preference for one stem — `(tree tier, declared rate kHz)`.
 fn wave_rank(logical: &str) -> (u32, u32) {
     let tier = if logical.starts_with("aud/aud22/") {
@@ -713,6 +839,12 @@ pub enum VoiceKind {
     /// One siren-program sample loop a [`Siren`] car is playing
     /// (F07-B.7).
     Siren,
+    /// One precipitation bed loop (`<name>exterior`/`<name>interior`)
+    /// the session's [`WeatherAudio`] crossfades (F18-B.3).
+    Weather,
+    /// One `thunder` clap the session's [`WeatherAudio`] schedule
+    /// spawned (F18-B.3).
+    Thunder,
 }
 
 /// Marker on a vehicle whose engine rig was built — set once whether
@@ -935,6 +1067,16 @@ pub struct AudioReport {
     /// Siren programs currently active — a gauge rewritten every
     /// drive pass, not a cumulative count (F07-B.7).
     pub siren_live: u64,
+    /// Precipitation bed voices spawned this session — a subset of
+    /// `voices` (F18-B.3); at most one exterior + one interior.
+    pub weather: u64,
+    /// Thunder clap voices spawned this session — a subset of
+    /// `voices` (F18-B.3).
+    pub thunder: u64,
+    /// Whether the shelter probe last held the bed at interior — a
+    /// gauge rewritten every drive pass, not a cumulative count
+    /// (F18-B.3).
+    pub interior: bool,
 }
 
 impl AudioReport {
@@ -953,6 +1095,9 @@ impl AudioReport {
             + self.ambient_live
             + self.sirens
             + self.siren_live
+            + self.weather
+            + self.thunder
+            + self.interior as u64
             > 0
     }
 
@@ -1847,6 +1992,186 @@ pub fn ambient_engine_drive(
             report.ambient_live += 1;
         }
         push_mix(voice.mix, sink, spatial);
+    }
+}
+
+/// Precipitation ambience (F18-B.3, spec req 3's weather→audio leg):
+/// the session's [`WeatherAudio`] lazily resolves the authored
+/// `<name>exterior`/`<name>interior` bed stems and `thunder` through
+/// the [`WaveBank`], then drives a coverage crossfade and the seeded
+/// clap schedule.
+///
+/// - **Beds**: one `PlaybackMode::Loop` non-spatial voice per resolved
+///   bed stem — an ambient bed anchored on the listener like the local
+///   car's own rig (DSN-37) — spawned `SessionEntity`-stamped so
+///   teardown sweeps them. A stem that resolves nothing counts one
+///   `failed` (never retried, never substituted — F18-AC06).
+/// - **Coverage**: the listener rides the active `Camera3d`
+///   ([`audio_listener`]), so the same upward probe the particle
+///   emitter declares (`crate::precip::COVER_PROBE` — a designed
+///   approximation of the original's interior pick, UNK-25/UNK-40)
+///   reads shelter off the camera's position: covered pulls
+///   `interior_mix` toward 1, exposed toward 0, at
+///   [`RAIN_CROSSFADE_PER_SEC`]. The bed volumes are the crossfaded
+///   authored-constant reads [`RAIN_EXTERIOR_VOLUME`]/
+///   [`RAIN_INTERIOR_VOLUME`]. An unresolved half simply stays silent.
+/// - **Thunder**: while `Playing`, `elapsed` accumulates frame time;
+///   crossing `next_thunder` spawns a bounded
+///   (`MAX_THUNDER_VOICES`) `PlaybackMode::Despawn` one-shot and
+///   redraws the delay from the session-seeded stream — a replayed
+///   session repeats the same schedule. Non-spatial like the beds.
+///   The original's trigger (a schedule at all, and its bounds) is
+///   unrecovered — the delays adopt the `13.0`/`15.0` constants the
+///   exe stores beside the stems (designed, see `WeatherAudio`).
+///
+/// Ungated by phase like `engine_drive` — voices only exist inside a
+/// live session and `sync_audio_pause` holds the sinks; the clap
+/// schedule alone gates on `is_playing` so a pause/countdown banks no
+/// elapsed time.
+#[allow(clippy::too_many_arguments)] // Bevy system — the borrows are the contract.
+pub fn weather_voices(
+    mut commands: Commands,
+    session: Res<Session>,
+    time: Res<Time>,
+    weather: Option<ResMut<WeatherAudio>>,
+    vfs: Option<Res<Mm2Vfs>>,
+    bank: Option<ResMut<WaveBank>>,
+    mut waves: ResMut<Assets<PcmAudio>>,
+    mut report: ResMut<AudioReport>,
+    spatial: Option<SpatialQuery>,
+    cameras: Query<(&Camera, &GlobalTransform), crate::hudmap::WorldCamera3d>,
+    mut beds: Query<(&mut WeatherVoice, Option<&mut AudioSink>)>,
+    voices: Query<&AudioVoice>,
+) {
+    let (Some(mut weather), Some(vfs), Some(mut bank)) = (weather, vfs, bank) else {
+        return;
+    };
+    // `ResMut` derefs borrow the whole resource — reborrow so the two
+    // `tried` flags can be held disjointly through the loop below.
+    let weather = &mut *weather;
+    let generation = session.generation();
+    // The lazy bed build — the ambient-rig pattern without a host car:
+    // each stem resolves once, spawning its loop at volume 0 until the
+    // mix below computes the real level.
+    for (role, stem, tried) in [
+        (
+            WeatherRole::Exterior,
+            weather_stem(weather.name, "exterior"),
+            &mut weather.exterior_tried,
+        ),
+        (
+            WeatherRole::Interior,
+            weather_stem(weather.name, "interior"),
+            &mut weather.interior_tried,
+        ),
+    ] {
+        if *tried {
+            continue;
+        }
+        *tried = true;
+        match bank.load(&vfs.0, &mut waves, &stem) {
+            Ok(handle) => {
+                commands.spawn((
+                    AudioVoice {
+                        kind: VoiceKind::Weather,
+                    },
+                    WeatherVoice {
+                        role,
+                        mix: EngineMix {
+                            volume: 0.0,
+                            speed: 1.0,
+                        },
+                    },
+                    SessionEntity(generation),
+                    AudioPlayer(handle),
+                    PlaybackSettings {
+                        mode: PlaybackMode::Loop,
+                        volume: Volume::Linear(0.0),
+                        ..Default::default()
+                    },
+                ));
+                report.voices += 1;
+                report.weather += 1;
+            }
+            Err(e) => {
+                report.failed += 1;
+                warn!("audio: {e}");
+            }
+        }
+    }
+    // The thunder clip resolves once the same way; a missing stem
+    // counts and never retries.
+    if !weather.thunder_tried {
+        weather.thunder_tried = true;
+        match bank.load(&vfs.0, &mut waves, "thunder") {
+            Ok(handle) => weather.thunder = Some(handle),
+            Err(e) => {
+                report.failed += 1;
+                warn!("audio: {e}");
+            }
+        }
+    }
+    // Coverage — the listener's camera decides shelter. No active
+    // world camera or no physics yet keeps the last mix rather than
+    // snapping to exposed.
+    if let Some((sq, focus)) = spatial.as_ref().and_then(|sq| {
+        cameras
+            .iter()
+            .find(|(cam, _)| cam.is_active)
+            .map(|(_, xf)| (sq, xf.translation()))
+            .filter(|(_, p)| p.is_finite())
+    }) {
+        let covered = sq
+            .cast_ray(focus, Dir3::Y, crate::precip::COVER_PROBE, true, &default())
+            .is_some();
+        report.interior = covered;
+        let target = if covered { 1.0 } else { 0.0 };
+        let step = RAIN_CROSSFADE_PER_SEC * time.delta_secs();
+        weather.interior_mix += (target - weather.interior_mix).clamp(-step, step);
+    }
+    let mix = weather.interior_mix;
+    for (mut bed, sink) in &mut beds {
+        let level = match bed.role {
+            WeatherRole::Exterior => (1.0 - mix) * RAIN_EXTERIOR_VOLUME,
+            WeatherRole::Interior => mix * RAIN_INTERIOR_VOLUME,
+        };
+        bed.mix = EngineMix {
+            volume: level,
+            speed: 1.0,
+        };
+        push_mix(bed.mix, sink, None);
+    }
+    // The clap schedule — seeded delays, bounded concurrent voices.
+    if session.is_playing() {
+        weather.elapsed += time.delta_secs();
+        if weather.elapsed >= weather.next_thunder
+            && let Some(handle) = weather.thunder.clone()
+        {
+            if voices
+                .iter()
+                .filter(|v| v.kind == VoiceKind::Thunder)
+                .count()
+                >= MAX_THUNDER_VOICES
+            {
+                report.dropped += 1;
+            } else {
+                commands.spawn((
+                    AudioVoice {
+                        kind: VoiceKind::Thunder,
+                    },
+                    SessionEntity(generation),
+                    AudioPlayer(handle),
+                    PlaybackSettings {
+                        mode: PlaybackMode::Despawn,
+                        volume: Volume::Linear(THUNDER_VOLUME),
+                        ..Default::default()
+                    },
+                ));
+                report.voices += 1;
+                report.thunder += 1;
+            }
+            weather.next_thunder = weather.elapsed + WeatherAudio::draw_delay(&mut weather.rng);
+        }
     }
 }
 

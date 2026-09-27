@@ -41,7 +41,10 @@ fn texture_stem(name: &str) -> String {
 /// Upward cover-probe distance in metres — a spawn candidate whose
 /// sky is blocked within this reach counts as covered. Reads bridges,
 /// tunnels and interiors; documented approximation (F18-B req 2).
-const COVER_PROBE: f32 = 64.0;
+/// `crate::audio` reads the same reach for the precipitation beds'
+/// interior/exterior crossfade — one declared approximation serves
+/// the visual and the audio leg.
+pub(crate) const COVER_PROBE: f32 = 64.0;
 
 /// Atlas tiles a spec may address before the quad set is clamped — a
 /// degenerate `TexFrameEnd` bounds to an 8×8 sheet, not to memory.

@@ -439,6 +439,10 @@ pub fn headless_smoke(
                     )
                         .chain()
                         .after(session::drive_session),
+                    // F18-B.3: the precipitation bed crossfade + the
+                    // seeded thunder schedule run headless too — the
+                    // record's `aud=` m/t fields read them.
+                    crate::audio::weather_voices.after(session::drive_session),
                     crate::audio::audio_listener.after(session::drive_session),
                     crate::audio::count_sinks,
                     crate::audio::sync_audio_pause,
@@ -1282,8 +1286,23 @@ pub fn headless_smoke(
             } else {
                 String::new()
             };
+            // F18-B.3: precipitation bed voices spawned / thunder
+            // claps spawned — `i` marks the bed crossfade held at
+            // interior at record time. A named-but-unresolved stem
+            // surfaces through the shared `+Nf` failure counter, never
+            // a silent dry run.
+            let weather = if r.weather + r.thunder > 0 {
+                format!(
+                    "/{}m/{}t{}",
+                    r.weather,
+                    r.thunder,
+                    if r.interior { "i" } else { "" }
+                )
+            } else {
+                String::new()
+            };
             format!(
-                " aud={}h/{}v/{}s/{}l/{}a/{}r{impacts}{clutch}{surface}{ambient}{sirens}{dropped}{failed}",
+                " aud={}h/{}v/{}s/{}l/{}a/{}r{impacts}{clutch}{surface}{ambient}{sirens}{weather}{dropped}{failed}",
                 r.horns, r.voices, r.sunk, r.loops, r.audible, r.rigs
             )
         })

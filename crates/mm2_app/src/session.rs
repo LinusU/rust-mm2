@@ -247,6 +247,10 @@ pub fn drive_session(
             commands.remove_resource::<crate::audio::ImpactAudio>();
             commands.remove_resource::<crate::audio::SurfaceAudio>();
             commands.remove_resource::<crate::audio::SirenAudio>();
+            // F18-B.3: the precipitation ambience binding dies with
+            // the session like the other audio state — its voices are
+            // `SessionEntity`-stamped and chain-despawn.
+            commands.remove_resource::<crate::audio::WeatherAudio>();
             commands.remove_resource::<crate::pvs::CityPvs>();
             commands.remove_resource::<crate::water::CityWater>();
             commands.remove_resource::<crate::city::WorldFloor>();
@@ -853,6 +857,18 @@ pub fn load_session_world(
     if let Some(programs) = crate::audio::SirenAudio::load(&vfs.0, session.generation(), siren_city)
     {
         commands.insert_resource(programs);
+    }
+    // F18-B.3: the session's precipitation ambience — the same
+    // `effective_conditions` pick the particle rig and the wet
+    // surface table read names the `<name>exterior`/`<name>interior`
+    // bed stems (exe-verified `Rainexterior`/`Raininterior`/
+    // `Thunder`); a dry selector binds nothing. `weather_voices`
+    // resolves the stems lazily through the WaveBank above — the
+    // resource carries the binding and the seeded clap schedule.
+    if let Some(ambience) =
+        crate::audio::WeatherAudio::bind(session_conditions.weather, config.seed)
+    {
+        commands.insert_resource(ambience);
     }
     if world_ok {
         session

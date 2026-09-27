@@ -9,15 +9,17 @@
 //! windowed `--horn` smoke record.
 
 use std::path::Path;
+use std::time::Duration;
 
-use avian3d::prelude::LinearVelocity;
+use avian3d::prelude::{Collider, Gravity, LinearVelocity, PhysicsPlugins};
 use bevy::audio::{AudioPlayer, PlaybackMode, PlaybackSettings, SpatialListener, Volume};
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
+use bevy::time::TimeUpdateStrategy;
 use mm2_app::audio::{
     self, AmbientEngineVoice, AmbientRig, AudioReport, AudioVoice, EngineVoice, GearWatch,
     HornRequest, ImpactAudio, PcmAudio, Siren, SirenAudio, SurfaceAudio, SurfaceRig, SurfaceRole,
-    SurfaceVoice, VoiceKind, WaveBank, decode_wave,
+    SurfaceVoice, VoiceKind, WaveBank, WeatherAudio, WeatherRole, WeatherVoice, decode_wave,
 };
 use mm2_assets::Vfs;
 use mm2_content::SurfaceTables;
@@ -2740,6 +2742,281 @@ fn teardown_sweeps_siren_voices_with_the_session() {
     app.world_mut().write_message(HornRequest);
     app.update();
     assert_eq!(voices(&mut app), 1);
+
+    app.world_mut()
+        .run_system_once(despawn_session_entities)
+        .unwrap();
+    app.update();
+    assert_eq!(voices(&mut app), 0);
+}
+
+// ---------------------------------------------------------------------------
+// F18-B.3: precipitation ambience — the authored `<name>exterior`/
+// `<name>interior` beds crossfaded on the shelter probe plus the seeded
+// `thunder` clap schedule, driven through `weather_voices` on a synthetic
+// install. The `load_session_world` binding leg lives in `tests/precip.rs`
+// alongside the particle rig's.
+// ---------------------------------------------------------------------------
+
+/// The retail rain tree: the two beds and the clap under the bank's
+/// preferred aud22 tier. `stems` chooses which are present so the
+/// failure leg can withhold one.
+fn weather_dir(stems: &[&str]) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    for stem in stems {
+        write(
+            tmp.path(),
+            &format!("aud/aud22/{stem}.22k.wav"),
+            &pcm_wav(22050, 220),
+        );
+    }
+    tmp
+}
+
+const RAIN_STEMS: &[&str] = &["rainexterior", "raininterior", "thunder"];
+
+/// The weather-audio slice of the production app: a `Playing` session,
+/// the fixture WaveBank, the `WeatherAudio` resource
+/// `load_session_world` inserts for a precipitating selector, one
+/// active world camera (the listener's anchor — the same pick the
+/// production systems make) and real physics for the shelter probe.
+/// Fixed 1/60 s updates make the crossfade and the clap schedule
+/// deterministic.
+fn weather_app(dir: &Path, weather: u8, seed: u64) -> App {
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(dir, 0).unwrap();
+    let bank = WaveBank::index(&vfs);
+
+    let mut session = Session::new();
+    session.begin(SessionConfig::default()).unwrap();
+    session.transition(SessionPhase::Ready).unwrap();
+    session.transition(SessionPhase::Playing).unwrap();
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_plugins(AssetPlugin::default())
+        .add_plugins(bevy::mesh::MeshPlugin)
+        .add_plugins(PhysicsPlugins::default())
+        .add_plugins(TransformPlugin)
+        .insert_resource(Gravity(Vec3::NEG_Y * 9.81))
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / 60.0,
+        )))
+        .insert_resource(session)
+        .insert_resource(Mm2Vfs(vfs))
+        .insert_resource(bank)
+        .init_resource::<Assets<PcmAudio>>()
+        .init_resource::<AudioReport>()
+        .add_systems(
+            Update,
+            (
+                audio::weather_voices,
+                audio::count_sinks,
+                audio::sync_audio_pause,
+            ),
+        );
+    if let Some(ambience) = WeatherAudio::bind(Weather::new(weather).unwrap(), seed) {
+        app.insert_resource(ambience);
+    }
+    app.world_mut()
+        .spawn((Camera3d::default(), Transform::from_xyz(0.0, 1.0, 0.0)));
+    app.finish();
+    app.cleanup();
+    app
+}
+
+/// `(role, mix)` of every live bed voice.
+fn bed_mixes(app: &mut App) -> Vec<(WeatherRole, f32)> {
+    let mut v: Vec<_> = app
+        .world_mut()
+        .query::<&WeatherVoice>()
+        .iter(app.world())
+        .map(|b| (b.role, b.mix.volume))
+        .collect();
+    v.sort_by_key(|(role, _)| *role as u8);
+    v
+}
+
+/// A non-precipitating selector binds no ambience at all — the
+/// resource `load_session_world` inserts is `None`, so a dry session
+/// carries no bed state, no schedule and no `aud=` field activity.
+#[test]
+fn dry_weather_binds_no_ambience() {
+    for selector in [0u8, 1, 2] {
+        assert!(
+            WeatherAudio::bind(Weather::new(selector).unwrap(), 7).is_none(),
+            "selector {selector} bound a bed"
+        );
+    }
+}
+
+/// A rainy session resolves both authored bed stems into looping
+/// session-stamped voices — the exterior bed at its authored-constant
+/// level while the listener sits in the open — and `thunder` resolves
+/// without a clap inside its minimum delay.
+#[test]
+fn a_rainy_session_binds_the_authored_rain_beds() {
+    let dir = weather_dir(RAIN_STEMS);
+    let mut app = weather_app(dir.path(), 3, 7);
+    app.update();
+    app.update();
+
+    let generation = app.world().resource::<Session>().generation();
+    let world = app.world_mut();
+    let mut voices = world.query::<(
+        &AudioVoice,
+        &WeatherVoice,
+        &PlaybackSettings,
+        &SessionEntity,
+    )>();
+    let all: Vec<_> = voices.iter(world).collect();
+    assert_eq!(all.len(), 2, "one bed per resolved stem");
+    for (voice, _, settings, stamp) in &all {
+        assert_eq!(voice.kind, VoiceKind::Weather);
+        assert!(matches!(settings.mode, PlaybackMode::Loop));
+        assert_eq!(stamp.0, generation);
+    }
+    let report = app.world().resource::<AudioReport>();
+    assert_eq!(report.weather, 2);
+    assert_eq!(report.failed, 0);
+
+    // Exposed listener: the mix settles at the exterior level.
+    for _ in 0..30 {
+        app.update();
+    }
+    let mixes = bed_mixes(&mut app);
+    assert_eq!(mixes.len(), 2);
+    assert!(
+        (mixes[0].1 - 0.85).abs() < 1e-3,
+        "exposed exterior bed at its level: {:?}",
+        mixes
+    );
+    assert_eq!(mixes[1].1, 0.0, "interior bed silent in the open");
+    assert!(!app.world().resource::<AudioReport>().interior);
+}
+
+/// The shelter probe: a roof over the active camera swings the
+/// crossfade to the interior bed; removing it eases back. The
+/// interior level is deliberately below the exterior's — the authored
+/// constants the exe stores beside the stems (DSN-61).
+#[test]
+fn the_shelter_probe_crossfades_to_the_interior_bed() {
+    let dir = weather_dir(RAIN_STEMS);
+    let mut app = weather_app(dir.path(), 3, 7);
+    for _ in 0..10 {
+        app.update();
+    }
+
+    // A roof 8 m over the camera — inside the 64 m probe reach.
+    app.world_mut().spawn((
+        Collider::cuboid(60.0, 0.5, 60.0),
+        Transform::from_xyz(0.0, 9.0, 0.0),
+    ));
+    for _ in 0..60 {
+        app.update();
+    }
+    let mixes = bed_mixes(&mut app);
+    assert!(
+        (mixes[1].1 - 0.65).abs() < 1e-3,
+        "sheltered interior bed at its level: {mixes:?}"
+    );
+    assert!(mixes[0].1 < 1e-3, "exterior bed faded out: {mixes:?}");
+    assert!(app.world().resource::<AudioReport>().interior);
+
+    // Lifting the roof eases the mix home — no latch, no snap.
+    let mut roofs = app.world_mut().query_filtered::<Entity, With<Collider>>();
+    let roof = roofs.single(app.world()).unwrap();
+    app.world_mut().entity_mut(roof).despawn();
+    for _ in 0..60 {
+        app.update();
+    }
+    let mixes = bed_mixes(&mut app);
+    assert!(
+        (mixes[0].1 - 0.85).abs() < 1e-3,
+        "exterior bed restored: {mixes:?}"
+    );
+    assert!(!app.world().resource::<AudioReport>().interior);
+}
+
+/// A stem the install does not ship counts one `failed` and never
+/// retries — the resolved half still plays, and nothing is
+/// substituted (F18-AC06).
+#[test]
+fn a_missing_bed_stem_counts_failed_once() {
+    // No `raininterior` — and no `thunder` either, so both misses
+    // count exactly once across the run.
+    let dir = weather_dir(&["rainexterior"]);
+    let mut app = weather_app(dir.path(), 3, 7);
+    for _ in 0..30 {
+        app.update();
+    }
+    let report = app.world().resource::<AudioReport>();
+    assert_eq!(report.weather, 1, "the resolved bed still spawned");
+    assert_eq!(report.failed, 2, "interior + thunder each counted once");
+    // Under a roof the one-sided bed simply goes quiet — no
+    // substitute voice.
+    app.world_mut().spawn((
+        Collider::cuboid(60.0, 0.5, 60.0),
+        Transform::from_xyz(0.0, 9.0, 0.0),
+    ));
+    for _ in 0..60 {
+        app.update();
+    }
+    let mixes = bed_mixes(&mut app);
+    assert_eq!(mixes.len(), 1);
+    assert!(mixes[0].1 < 1e-3, "exterior faded with no interior bed");
+    assert_eq!(app.world().resource::<AudioReport>().failed, 2);
+}
+
+/// The clap schedule is seeded: the first `thunder` voice lands inside
+/// the authored-constant delay window, and a second app on the same
+/// seed fires on the identical update — the F18 req-5 deterministic
+/// leg for the audio half.
+#[test]
+fn thunder_fires_on_the_seeded_schedule() {
+    let dir = weather_dir(RAIN_STEMS);
+    // `app.update()` is 1/60 s: the 13–15 s window lands the first
+    // clap on update [780, 900).
+    let first_clap = |app: &mut App| -> usize {
+        for i in 1..=960 {
+            app.update();
+            if app.world().resource::<AudioReport>().thunder > 0 {
+                return i;
+            }
+        }
+        0
+    };
+    let mut a = weather_app(dir.path(), 3, 42);
+    let mut b = weather_app(dir.path(), 3, 42);
+    let (fa, fb) = (first_clap(&mut a), first_clap(&mut b));
+    assert!(
+        (780..=900).contains(&fa),
+        "first clap inside the window: {fa}"
+    );
+    assert_eq!(fa, fb, "same seed, same clap schedule");
+
+    // The voice is a bounded despawn one-shot stamped to the session.
+    let world = a.world_mut();
+    let clap = world
+        .query::<(&AudioVoice, &PlaybackSettings, &SessionEntity)>()
+        .iter(world)
+        .find(|(v, ..)| v.kind == VoiceKind::Thunder)
+        .map(|(_, s, e)| (s.mode, e.0))
+        .expect("a thunder voice");
+    assert!(matches!(clap.0, PlaybackMode::Despawn));
+    assert_eq!(clap.1, a.world().resource::<Session>().generation());
+}
+
+/// The beds and any in-flight clap are `SessionEntity`-stamped — the
+/// production teardown sweep takes them with the session.
+#[test]
+fn teardown_sweeps_the_weather_voices() {
+    let dir = weather_dir(RAIN_STEMS);
+    let mut app = weather_app(dir.path(), 3, 7);
+    for _ in 0..10 {
+        app.update();
+    }
+    assert!(voices(&mut app) >= 2);
 
     app.world_mut()
         .run_system_once(despawn_session_entities)

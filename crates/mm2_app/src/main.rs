@@ -1324,6 +1324,11 @@ fn main() {
             (audio::ambient_engine_rigs, audio::ambient_engine_drive)
                 .chain()
                 .after(session::drive_session),
+            // F18-B.3: precipitation bed crossfade + the seeded
+            // thunder schedule — the same despawn ordering; the mix
+            // computes on the voice components, so headless runs read
+            // it like the other rigs.
+            audio::weather_voices.after(session::drive_session),
             // F07-B.2: the spatial listener follows whichever camera is
             // active — after the toggle so a mode switch moves the ear
             // the same frame, and after the session driver for the
