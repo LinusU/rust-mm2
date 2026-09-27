@@ -143,8 +143,9 @@ impl CueTable {
     }
 
     /// Semantic checks beyond the parse grammar: duplicated section
-    /// names, empty prefixes, non-positive draw ranges and negative
-    /// offsets. Purely advisory — the consumer decides what to skip.
+    /// names, empty prefixes, non-positive draw ranges, negative
+    /// offsets and `end`/`add` pairs whose draw window overflows
+    /// `i64`. Purely advisory — the consumer decides what to skip.
     pub fn validate(&self) -> Vec<TableDiagnostic> {
         let mut out = Vec::new();
         for (i, section) in self.sections.iter().enumerate() {
@@ -179,6 +180,18 @@ impl CueTable {
                         message: format!(
                             "cue row {} has a negative sufix add value {}",
                             row.prefix, row.add
+                        ),
+                    });
+                }
+                // The draw lands inside `add + 1 ..= add + end`; a
+                // window whose top overflows `i64` is undrawable —
+                // the same verdict the consumer's draw returns.
+                if row.end > 0 && row.add.checked_add(row.end).is_none() {
+                    out.push(TableDiagnostic {
+                        line: row.line,
+                        message: format!(
+                            "cue row {} has an unrepresentable sufix range (end {} add {})",
+                            row.prefix, row.end, row.add
                         ),
                     });
                 }
@@ -430,6 +443,18 @@ mod tests {
         let table = CueTable::parse(text).unwrap();
         let issues = table.validate();
         assert_eq!(issues.len(), 4); // zero end, negative add, empty prefix, dup section
+    }
+
+    #[test]
+    fn validate_flags_an_unrepresentable_sufix_range() {
+        // A modded row can author `end`/`add` up to the i64 edge; a
+        // window whose top overflows is undrawable and must surface
+        // as an advisory diagnostic, like the other bad-range legs.
+        let text = "Name prefix/type header,end sufix value,sufix add value\nWEATHER header,,\nBIG,3,9223372036854775807\nTOP,9223372036854775807,1\nEDGE,5,9223372036854775802\n";
+        let table = CueTable::parse(text).unwrap();
+        let issues = table.validate();
+        assert_eq!(issues.len(), 2, "{issues:?}"); // BIG + TOP; EDGE's top fits i64
+        assert!(issues.iter().all(|i| i.message.contains("sufix range")));
     }
 
     #[test]

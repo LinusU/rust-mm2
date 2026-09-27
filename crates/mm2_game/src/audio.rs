@@ -830,14 +830,19 @@ pub fn draw_speaker(announcers: u32, rng: &mut NavRng) -> Option<u32> {
 /// designed reading of the authored `end sufix value`/`sufix add
 /// value` pair (UNK-25): `end` tops a 1-based draw range, `add`
 /// offsets it verbatim (`0` on every live retail weather/time row).
-/// `None` on a non-positive `end` — an undrawable row, not a zero
-/// suffix.
+/// `None` on a non-positive `end` or an `add`/`end` window that
+/// cannot fit `i64` — a modded table's `9223372036854775807`-scale
+/// fields are undrawable, never an overflow panic.
 pub fn draw_cue_suffix(end: i64, add: i64, rng: &mut NavRng) -> Option<i64> {
-    if end <= 0 {
-        None
-    } else {
-        Some(add + 1 + (rng.next_u64() % end as u64) as i64)
+    // `add + end` is the window's top (draws land `add + 1 ..=
+    // add + end`); with `end >= 1` its checked_add also covers
+    // `add + 1`, so the unchecked sum below is provably in range.
+    // An unrepresentable row declines before drawing, so it never
+    // shifts the seeded stream the drawable rows consume.
+    if end <= 0 || add.checked_add(end).is_none() {
+        return None;
     }
+    Some(add + 1 + (rng.next_u64() % end as u64) as i64)
 }
 
 /// The wave stem a drawn cue names — `<speaker><prefix><NN>` with a
@@ -1460,6 +1465,29 @@ mod tests {
         }
         assert_eq!(draw_cue_suffix(0, 0, &mut rng), None);
         assert_eq!(draw_cue_suffix(-2, 0, &mut rng), None);
+    }
+
+    #[test]
+    fn an_unrepresentable_cue_window_is_undrawable_not_a_panic() {
+        // Modded/corrupt tables author `end`/`add` verbatim — a
+        // window whose top `add + end` overflows i64 must degrade to
+        // `None` (counted failed downstream), never panic under
+        // overflow checks, and must not consume a stream draw.
+        let mut rng = NavRng::new(7);
+        let mut pristine = NavRng::new(7);
+        assert_eq!(draw_cue_suffix(3, i64::MAX, &mut rng), None);
+        assert_eq!(draw_cue_suffix(i64::MAX, 1, &mut rng), None);
+        assert_eq!(draw_cue_suffix(i64::MAX, i64::MAX, &mut rng), None);
+        // The undrawable rows burned no draw — the next drawable row
+        // sees the same stream an untouched one does.
+        assert_eq!(
+            draw_cue_suffix(3, 0, &mut rng),
+            draw_cue_suffix(3, 0, &mut pristine)
+        );
+        // A representable edge window still draws inside
+        // `add + 1 ..= add + end`.
+        let s = draw_cue_suffix(5, i64::MAX - 5, &mut rng).unwrap();
+        assert!((i64::MAX - 4..=i64::MAX).contains(&s));
     }
 
     #[test]

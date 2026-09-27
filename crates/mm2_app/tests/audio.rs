@@ -3300,6 +3300,34 @@ fn a_missing_wave_counts_and_is_never_substituted() {
     assert!(played.iter().all(|(_, s, ..)| s.contains("timenoon")));
 }
 
+/// A modded table whose `end`/`add` window overflows i64 resolves to
+/// an undrawable range — one counted failure through the production
+/// resolve path, never an overflow panic — and the other cue family
+/// still plays.
+#[test]
+fn an_overflowing_sufix_range_counts_failed_not_panics() {
+    let dir = commentary_dir();
+    for speaker in ["as1", "as2"] {
+        write(
+            dir.path(),
+            &format!("aud/spchdata/{speaker}/wearain_prerace.csv"),
+            format!(
+                "Name prefix/type header,end sufix value,sufix add value\nWEATHER header,,\nWEARAIN,3,{}\n",
+                i64::MAX
+            )
+            .as_bytes(),
+        );
+    }
+    let mut app = commentary_app(dir.path(), 7, SessionPhase::Playing);
+    for _ in 0..90 {
+        app.update();
+    }
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(r.failed, 1, "the overflowing weather cue is undrawable");
+    assert_eq!(r.commentary, 1, "the time cue still plays");
+    assert_eq!(commentary_voices(&mut app).len(), 1);
+}
+
 /// The speaker and suffix draws ride the seeded stream — two sessions
 /// on one seed play identical stems, in identical order.
 #[test]
