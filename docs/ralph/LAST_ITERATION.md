@@ -1,5 +1,128 @@
-# Last iteration — F18-B.3: precipitation ambience
-# (iteration 83)
+# Last iteration — F18-B.4: wheel surface particles
+# (iteration 84)
+
+Iteration 84 on `ralph/night` (baseline `d26dc0d` — the F18-B.3 docs
+commit; external verify + review green; twenty-ninth iteration of run
+`20260925T144723`). One coherent slice: the `ptxindex`/`ptxthreshold`
+leg of F18-B req 3 — authored surface materials now select up to two
+wheel-particle effect channels that emit at grounded wheel contacts.
+
+## Task selection
+
+The plan's F18-B row named "surface-effect legs beyond the DSN-43 wet
+table". `materials.mtl` authors `ptxindex`/`ptxthreshold` pairs on all
+eight materials with no consumer (UNK-23); the exe carries a
+contiguous `dirt,dust,grass,leaf,smoke,snow,splash,rock` string block
+immediately after the `ptx_wheel` atlas name plus a `tune/effects`
+directory string — retail ships all eight `tune/effects/*.asbirthrule`
+rules and a measured 8×8-tile `ptx_wheel` sheet. The index space is
+thus recovered data (every authored pair lands coherently:
+`water` `-1 6` → splash, `grass` `1 2` → dust+grass); the trigger
+quantity/cadence are not, so the runtime is a designed reading
+(DSN-62, UNK-23 stands).
+
+## Findings and actions
+
+- **`mm2_formats::banger`** — `StandaloneBirthRule` now captures the
+  effects-file superset fields `Damp`/`DampVar`/`Height`/`Intensity`/
+  `Color` (previously warned-and-discarded; `Color` authors a packed
+  decimal word — `smoke` `-251989786`, `splash` `-331546`, `-1` =
+  opaque white elsewhere). The standalone `known` list covers them;
+  embedded `dgBangerData` decode is unchanged.
+- **`mm2_formats::materials`** — `MaterialDef::ptx()` →
+  `PtxChannels{index[2],threshold[2]}`: integral indexes and finite
+  thresholds; `validate()` rejects the same malformed shapes the
+  accessor refuses so the two can never disagree.
+- **`mm2_content::surface`** — `SurfaceTables::ptx_channels(material)`:
+  authored indexes read their own def, `SurfaceMaterial::Unspecified`
+  reads `_default`, unresolvable → `None`.
+- **`mm2_game::effects`** — `PTX_RULE_NAMES` (the recovered table),
+  `PTX_ATLAS_TILES` 8, `WheelPtxPolicy{max_live:128}` (F18-AC03),
+  `WheelPtx`/`WheelChannels`/`WheelDraw`/`WheelEmission`/`WheelPuff`.
+  Per-(vehicle, wheel) `NavRng` streams domain-separated by
+  `WHEEL_PTX_DOMAIN` — deterministic per session seed (req 5's leg).
+  Each channel gates on the wheel's `tire_slippage` utilization — the
+  same measure skid audio reads — strict `>` vs `ptxthreshold`, so
+  `water`'s authored `0 0` still demands nonzero tire work (a parked
+  wheel stays dark). `InitialBlast` credits on each rising gate edge
+  (reground re-fires it), `SpewRate` accumulates inside
+  `SpewTimeLimit`, surface change rebinds, airborne closes gates.
+  `Damp`/`Height` ride the spec unconsumed (semantics unrecovered).
+- **`mm2_app::wheel_fx`** — session bind resolves all eight
+  `tune/effects/<name>.asbirthrule` rules through the VFS into
+  `ParticleSpec`s (each miss counts `WheelFxReport.failed` once, stays
+  dark, never substituted — F18-AC06) and builds the `ptx_wheel`
+  sprite quads (missing atlas → `+ut`, untextured emission continues).
+  `emit_wheel_fx`/`advance_wheel_fx` run windowed + headless: grounded
+  local wheels only (remote/unidentified cars stay dark), puffs spawn
+  `SessionEntity`-stamped at the contact point, `Velocity` rotated
+  onto the contact normal (the records' `Position` means are authoring
+  leftovers — `smoke` carries a fixed world offset), `PositionVar`
+  jitters around the contact, billboarded tiles flipbook over
+  `TexFrame*`, `Color` alpha + `DAlpha` + `Intensity` drive alpha.
+- **`session.rs`** — `load_session_world` inserts `WheelFx` +
+  `WheelFxReport`; teardown removes the resource and the entity sweep
+  reclaims the puffs; `reset_wheel_fx_report` clears counters on
+  unload.
+- **`smoke.rs`** — `wfx=<r>r/<e>e/<x>x[+Nd+Nf+ut]`, printed only on
+  activity/anomaly — quiet runs stay bit-identical.
+
+## Evidence
+
+- `cargo test -p mm2_app --test wheel_fx` — 15/15: eight-rule bind,
+  authored-table channel resolution, `_default` fallback on unmarked
+  contacts, threshold gating incl. threshold-0 parked-dark, dual-channel
+  emission at the contact, missing rule/atlas diagnostics, restart
+  rebind + sweep, remote/unidentified suppression, deterministic
+  replay, pool bound + expiry conservation.
+- `cargo test -p mm2_game --test effects` — 37/37: gate/blast/reground/
+  rebind/seeded determinism/pool-bound legs plus integrator, flipbook
+  and alpha; `ptx_rule_names_match_the_retail_string_table` pins the
+  index table.
+- Retail (`fnv1a64:e91e6cd4b2ae30d9`, headless `--frames 600`):
+  - sf cruise → `wfx=8r/318e/192x+849d` — cobblestone `4 7`
+    smoke+rock channels emit under the Hold driver's slip.
+  - sf Golden Gate Park grass `--spawn=-1706,50,336,0` (`s_grass`
+    room) → `wfx=8r/386e/262x+8702d` — `1 2` dust+grass live; the
+    drops are the 128-puff bound discarding 64-burst blasts.
+  - london Thames `--spawn=-80,2,805,0` → *no* `wfx=` field —
+    `deepwater` authors `-1 -1` and stays dark through real wading
+    (`rcv=3w` confirms water contact).
+  - `s_water`/`s_pond`/`s_flower` sit in the PSDL texture tables but
+    are referenced by no room attribute (probe-scanned both cities) —
+    `water`/`sand`/`dirt`/`wood` have no stock-city-reachable surface;
+    the splash channel is test-verified only.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --workspace` — all suites green.
+
+## Classification / remaining open items
+
+- Verified data: the index→name table (exe string block + authored
+  pairs), the rule files, the 8×8 atlas, the field grammar.
+- Designed (DSN-62): `tire_slippage` as the gate quantity, strict `>`,
+  blast-on-edge/spew-while-held cadence, the 128/vehicle bound, the
+  contact-point + contact-normal emission frame, billboard/flipbook/
+  tint presentation.
+- Unknown (UNK-23): the original's trigger quantity, emission cadence
+  and whether `Damp`/`Height`/`Intensity` feed it — only the field
+  names and values are evidenced.
+- No visual capture or playtest — headless `--frames` runs freeze
+  input so a slipping car can't be screenshot; emission evidence is
+  the `wfx=` counters (spawn→advance→expire path exercised; billboards
+  share the proven precip/damage quad path). F18-AC02's visual leg
+  stays open.
+- F18-B stays `active`: `wearain` cues, wetness presentation beyond
+  particles, and weather-state replication (req 5 network leg → F24+)
+  remain.
+
+---
+
+# Prior iterations
 
 Iteration 83 on `ralph/night` (baseline `8f3e740` — the F18-B.2
 candidate; external verify + review green; twenty-eighth iteration of

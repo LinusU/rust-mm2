@@ -59,7 +59,40 @@ UNK-23):
   specifiers: which wheel-level particle effects play over the surface
   and at what slip thresholds. Values seen: `-1` (none), `1`, `2`,
   `4`, `5`, `6`, `7` in the first slot; `-1`, `2`, `5`, `6`, `7` in
-  the second. The particle index space is unrecovered.
+  the second. The index space is recovered (2026-09-27): `Midtown2.exe`
+  carries a contiguous positional string table immediately after the
+  `ptx_wheel` atlas name — `dirt`, `dust`, `grass`, `leaf`, `smoke`,
+  `snow`, `splash`, `rock` (`mm2_game::PTX_RULE_NAMES`). Each name
+  binds `tune/effects/<name>.asbirthrule` (the exe's `tune/effects`
+  string evidences the directory; all eight rules ship on retail) and
+  sprites from `texture/ptx_wheel` — a measured 8×8-tile (64-frame)
+  sheet. The authored pairs land on coherent effects: `water` `-1 6`
+  → splash, `grass` `1 2` → dust+grass, `sand` `1 5` → dust+snow,
+  `_default`/`cobblestone` `4 …` → smoke (+ rock `7` on cobblestone).
+  `ptxthreshold`'s runtime semantics — what quantity it is compared
+  against and the emission cadence — remain unrecovered (UNK-23); the
+  implemented gate is a designed reading (DSN-62).
+
+Retail `ptxindex`/`ptxthreshold` values (install
+`fnv1a64:e91e6cd4b2ae30d9`):
+
+| material | ptxindex | ptxthreshold | channels |
+| --- | --- | --- | --- |
+| deepwater | -1 -1 | 0.25 0.5 | (none) |
+| _default | 4 -1 | 0.25 0.5 | smoke |
+| grass | 1 2 | 0.25 0.5 | dust, grass |
+| water | -1 6 | 0 0 | splash |
+| dirt | -1 -1 | 0.25 0.5 | (none) |
+| sand | 1 5 | 0.25 0.5 | dust, snow |
+| cobblestone | 4 7 | 0.25 0.3 | smoke, rock |
+| wood | -1 -1 | 0.25 0.5 | (none) |
+
+Reachability note: on both retail PSDLs only `cobblestone`, `grass`
+and `deepwater` are bound to room attributes; `water` (`s_water` is in
+sf's texture table but referenced by no room attribute), `sand`
+(`s_flower`), `dirt` and `wood` have no reachable collider surface on
+either stock city — their channels serve bound materials outside the
+texture map or mod content.
 
 Retail values:
 
@@ -255,5 +288,75 @@ This is an *implementation choice*, not verified original behavior:
 how the original combines `friction`/`elasticity`/`drag` with tire
 parameters is unknown (UNK-23), `_default`-as-divisor is a
 convenient normalization, and the restitution cap is a conservative
-scaling — none are discovered rules. `sound`, `effect`,
-`width`/`height`/`depth` and `ptx*` still have no runtime consumer.
+scaling — none are discovered rules. `sound` and `effect` still have
+no runtime consumer; `ptxindex`/`ptxthreshold` gained one in F18-B.4
+below.
+
+## Wheel-particle consumption (implemented, F18-B.4 — designed
+semantics, DSN-62)
+
+`MaterialDef::ptx()` exposes the pair as a typed `PtxChannels` (two
+integral indexes, two finite thresholds — validation rejects the same
+malformed shapes the accessor refuses), and
+`SurfaceTables::ptx_channels(material)` resolves a wheel contact's
+`SurfaceMaterial` to it: authored indexes read their own def,
+`Unspecified` reads `_default`, an unresolvable material yields none.
+
+`mm2_game::effects` owns the runtime contract. `PTX_RULE_NAMES` is the
+recovered index→name table; `tune/effects/<name>.asbirthrule` decodes
+through `BirthRule::parse_file`, whose `StandaloneBirthRule` now also
+captures the effects-file superset fields `Damp`/`DampVar`/`Height`/
+`Intensity`/`Color` (previously parsed-and-discarded; `Color` authors a
+packed decimal ARGB-ish word — retail `smoke` carries `-251989786`,
+`splash` `-331546`, the rest `-1` = opaque white). `Damp`/`Height`
+ride the spec but stay unconsumed by the rig — their semantics are
+unrecovered; `Color`'s alpha byte is the puff's initial alpha plus the
+authored `DAlpha` drift, `Intensity` scales it, and the low three
+bytes tint (the `SmokePuff` byte-space reading).
+`WheelPtx` is the per-vehicle rig: one `WheelChannels` per wheel, its
+`NavRng` seeded per (vehicle, wheel) under the `WHEEL_PTX_DOMAIN`
+domain separation so emission replays identically per session seed
+(F18 req 5's deterministic leg). Each of the two authored channels
+gates on the wheel's `tire_slippage` utilization — the same 0..1
+measure the skid/rolling audio consumes — with a strict `>`
+comparison against `ptxthreshold`, so a `0` threshold still demands
+nonzero tire work and a parked wheel stays dark even on `water`.
+`InitialBlast` credits on each rising gate edge (a reground re-fires
+it); `SpewRate` accumulates while the gate holds, bounded by
+`SpewTimeLimit`; live puffs bound at `WheelPtxPolicy::max_live` 128 per
+vehicle (F18-AC03). A surface change rebinds both channels; a wheel
+leaving contact closes its gates.
+
+`mm2_app::wheel_fx` binds the session state in `load_session_world`:
+every `PTX_RULE_NAMES` slot resolves its rule through the VFS into a
+`ParticleSpec` (a missing/unreadable/unparseable rule counts
+`WheelFxReport.failed` once and stays dark — never substituted,
+F18-AC06), and `texture/ptx_wheel` builds the sprite quads on the
+measured 8×8 grid (a missing atlas flags `texture=false` and emits
+untextured puffs). `emit_wheel_fx`/`advance_wheel_fx` run on both the
+windowed and headless smoke paths: each grounded local-car wheel feeds
+its `SurfaceMaterial` (remote/unidentified cars never emit), puffs
+spawn `SessionEntity`-stamped at the contact point with the authored
+`Velocity` frame rotated onto the contact normal — the effects
+records' `Position` means are authoring leftovers (`smoke` authors a
+fixed world-space SF offset) so `PositionVar` jitters around the
+contact — integrate `Gravity`/`Drag`/`DRadius`/`DRotation`/`DAlpha`,
+and render as camera-facing atlas tiles tinted by the authored
+`Color`/`Intensity`. Teardown removes the resource and sweeps the
+puffs; `reset_wheel_fx_report` clears the counters on unload. The
+smoke record gains `wfx=<r>r/<e>e/<x>x[+Nd+Nf+ut]`, printed only on
+activity/anomaly.
+
+Retail evidence (install `fnv1a64:e91e6cd4b2ae30d9`, headless
+`--frames 600`, 2026-09-27): sf cruise → `wfx=8r/318e/192x+849d`
+(cobblestone smoke+rock under the Hold driver's launch slip); sf
+Golden Gate Park grass (`--spawn=-1706,50,336,0` — room 4, `s_grass`)
+→ `wfx=8r/386e/262x+8702d` (dust+grass channels live; the drop count
+is the 128-puff pool bound working against `dust`'s burst-heavy
+authored rates); london Thames drop (`--spawn=-80,2,805,0`,
+`deepwater` `-1 -1`) records no `wfx=` field at all — the dark
+surface emits nothing even while the car wades between submersion
+recoveries. The `water` splash channel is unreachable on the stock
+PSDLs (see above) — its behavior is integration-test evidence, not
+retail-observed. No playtest or original-parity comparison exists;
+the trigger quantity is a designed reading (UNK-23).
