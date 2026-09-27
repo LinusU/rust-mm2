@@ -975,12 +975,16 @@ pub fn reset_audio_report(mut report: ResMut<AudioReport>) {
 /// [`dev_horn_once`].
 pub fn horn_input(
     keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<&Gamepad>,
     session: Res<Session>,
     windows: Query<&Window>,
     mut requests: MessageWriter<HornRequest>,
 ) {
     let focused = windows.iter().all(|w| w.focused);
-    if keys.just_pressed(KeyCode::Enter) && session.is_playing() && focused {
+    if crate::input::control_just_pressed(&keys, &pads, KeyCode::Enter, crate::input::pad::HORN)
+        && session.is_playing()
+        && focused
+    {
         requests.write(HornRequest);
     }
 }

@@ -165,6 +165,20 @@ fn release_enter(app: &mut App) {
         .reset_all();
 }
 
+/// One pad-button edge through the first pad's `digital_mut` (bevy's
+/// documented gamepad mocking surface) — `press_enter`'s pad twin.
+fn pad_press(app: &mut App, button: GamepadButton) {
+    let mut pads = app.world_mut().query::<&mut Gamepad>();
+    for mut pad in pads.iter_mut(app.world_mut()) {
+        pad.digital_mut().press(button);
+    }
+    app.update();
+    let mut pads = app.world_mut().query::<&mut Gamepad>();
+    for mut pad in pads.iter_mut(app.world_mut()) {
+        pad.digital_mut().reset_all();
+    }
+}
+
 #[test]
 fn enter_press_spawns_the_authored_horn_voice() {
     let dir = fixture_dir();
@@ -225,6 +239,36 @@ fn horn_press_needs_a_playing_session() {
     release_enter(&mut app);
     assert_eq!(report(&app).0, 0);
     assert_eq!(voices(&mut app), 0);
+}
+
+/// F22-AC06 pad leg (designed `input::pad` map): `LeftThumb` fires the
+/// same `HornRequest` Enter owns — one press, one authored voice — and
+/// shares Enter's `is_playing` gate.
+#[test]
+fn pad_left_thumb_fires_the_authored_horn() {
+    let dir = fixture_dir();
+    let mut app = horn_app(dir.path(), false);
+    app.world_mut().spawn(Gamepad::default());
+    pad_press(&mut app, GamepadButton::LeftThumb);
+    app.update(); // the request may be drained a frame after it is written
+
+    let (horns, v, sunk, failed) = report(&app);
+    assert_eq!((horns, v, sunk, failed), (1, 1, 0, 0));
+    assert_eq!(voices(&mut app), 1);
+
+    // The phase gate is shared: back the session off to Menu and the
+    // pad press is inert like the key.
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Unloading)
+        .unwrap();
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Menu)
+        .unwrap();
+    pad_press(&mut app, GamepadButton::LeftThumb);
+    app.update();
+    assert_eq!(report(&app).0, 1, "no second horn outside Playing");
 }
 
 #[test]

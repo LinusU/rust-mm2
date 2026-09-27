@@ -159,6 +159,10 @@ impl fmt::Display for DashReport {
 /// magnitudes are designed; only the offsets are authored (DSN-49).
 const LOOK_SIDE: f32 = std::f32::consts::FRAC_PI_2;
 const LOOK_LERP: f32 = 10.0;
+/// Right-stick deflection that counts as a glance direction
+/// (designed — the pad look is a digital glance like the numpad's,
+/// not an analog pan; UNK-30-adjacent, original pad map unrecovered).
+const LOOK_STICK: f32 = 0.5;
 
 /// Upper bound for the cockpit camera's authored `CameraNear`
 /// (designed cap — UNK-37). Four `_dash.campovcs` records on retail
@@ -603,12 +607,15 @@ pub fn drive_dash(
     }
 }
 
-/// Numpad cockpit look (HUD-3): 4/6 glance sideways, 8 forward, 2
-/// looks back through the authored `ReverseOffset`. Held, not latched
-/// — releasing returns to the authored eye pose.
+/// Numpad/right-stick cockpit look (HUD-3): 4/6 glance sideways, 8
+/// forward, 2 looks back through the authored `ReverseOffset`; the pad
+/// maps the same directions onto the right stick (designed threshold —
+/// the original's pad layout is unrecovered). Held, not latched —
+/// releasing returns to the authored eye pose.
 pub fn cockpit_look(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<&Gamepad>,
     mode: Res<CameraMode>,
     session: Res<Session>,
     mut cams: Query<(&mut CockpitCamera, &mut Transform)>,
@@ -616,12 +623,17 @@ pub fn cockpit_look(
     if *mode != CameraMode::Cockpit || !matches!(session.phase(), SessionPhase::Playing) {
         return;
     }
+    let stick = pads
+        .iter()
+        .next()
+        .map(|p| p.right_stick())
+        .unwrap_or(Vec2::ZERO);
     for (mut cam, mut xf) in &mut cams {
-        let (yaw, back) = if keys.pressed(KeyCode::Numpad2) {
+        let (yaw, back) = if keys.pressed(KeyCode::Numpad2) || stick.y < -LOOK_STICK {
             (std::f32::consts::PI, true)
-        } else if keys.pressed(KeyCode::Numpad4) {
+        } else if keys.pressed(KeyCode::Numpad4) || stick.x < -LOOK_STICK {
             (LOOK_SIDE, false)
-        } else if keys.pressed(KeyCode::Numpad6) {
+        } else if keys.pressed(KeyCode::Numpad6) || stick.x > LOOK_STICK {
             (-LOOK_SIDE, false)
         } else {
             (0.0, false)

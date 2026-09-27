@@ -542,6 +542,66 @@ fn numpad_look_glances_and_reverses() {
     assert_eq!(xf.translation, Vec3::new(0.0, 1.7, 0.75));
 }
 
+/// F22-AC06 pad leg (designed `input::pad` map): the right stick drives
+/// the same digital glances the numpad owns — down looks back through
+/// the authored `ReverseOffset`, left/right glance sideways, neutral
+/// eases home. `analog_mut` is bevy's documented axis-mocking surface.
+#[test]
+fn pad_stick_glances_and_reverses() {
+    let mut app = base_app();
+    *app.world_mut().resource_mut::<CameraMode>() = CameraMode::Cockpit;
+    app.add_systems(Update, cockpit_look);
+    let cam = app
+        .world_mut()
+        .spawn((
+            CockpitCamera {
+                offset: Vec3::new(0.0, 1.19, -0.55),
+                reverse_offset: Some(Vec3::new(0.0, 1.7, 0.75)),
+                pitch: 0.0,
+                look_yaw: 0.0,
+            },
+            Transform::from_translation(Vec3::new(0.0, 1.19, -0.55)),
+        ))
+        .id();
+    app.world_mut().spawn(Gamepad::default());
+    let set_stick = |app: &mut App, x: f32, y: f32| {
+        let mut pads = app.world_mut().query::<&mut Gamepad>();
+        for mut pad in pads.iter_mut(app.world_mut()) {
+            pad.analog_mut().set(GamepadAxis::RightStickX, x);
+            pad.analog_mut().set(GamepadAxis::RightStickY, y);
+        }
+    };
+
+    // Stick down rides the authored ReverseOffset like Numpad2.
+    set_stick(&mut app, 0.0, -1.0);
+    app.update();
+    let xf = app.world().get::<Transform>(cam).unwrap();
+    assert_eq!(xf.translation, Vec3::new(0.0, 1.7, 0.75));
+
+    // Stick left eases toward the +π/2 glance like Numpad4.
+    set_stick(&mut app, -1.0, 0.0);
+    for _ in 0..120 {
+        app.update();
+    }
+    let yaw = app.world().get::<CockpitCamera>(cam).unwrap().look_yaw;
+    assert!(yaw > 1.2, "left stick eased toward +π/2, got {yaw}");
+
+    // Neutral returns to the authored pose; a sub-threshold deflection
+    // never reaches the look.
+    set_stick(&mut app, 0.2, 0.0);
+    for _ in 0..30 {
+        app.update();
+    }
+    let c = app.world().get::<CockpitCamera>(cam).unwrap();
+    assert!(
+        c.look_yaw.abs() < 0.1,
+        "neutral eases home, got {}",
+        c.look_yaw
+    );
+    let xf = app.world().get::<Transform>(cam).unwrap();
+    assert_eq!(xf.translation, Vec3::new(0.0, 1.19, -0.55));
+}
+
 /// `active_cam_pose` feeds the HUD `cam` readout and the screenshot
 /// filename — the `--cam` round-trip contract. A camera *parented* to
 /// the vehicle (the authored cockpit camera) must report its world

@@ -53,6 +53,26 @@ fn press(app: &mut App, key: KeyCode) {
         .reset_all();
 }
 
+/// The first connected pad: one `Gamepad` entity whose `digital_mut`
+/// bevy documents as the mocking surface for gamepad input.
+fn spawn_pad(app: &mut App) {
+    app.world_mut().spawn(Gamepad::default());
+}
+
+/// One pad-button edge, `press`-equivalent: press for exactly one
+/// update, then `reset_all` ends it like the event loop would.
+fn pad_press(app: &mut App, button: GamepadButton) {
+    let mut pads = app.world_mut().query::<&mut Gamepad>();
+    for mut pad in pads.iter_mut(app.world_mut()) {
+        pad.digital_mut().press(button);
+    }
+    app.update();
+    let mut pads = app.world_mut().query::<&mut Gamepad>();
+    for mut pad in pads.iter_mut(app.world_mut()) {
+        pad.digital_mut().reset_all();
+    }
+}
+
 fn spawn_vehicle(app: &mut App, pos: Vec3, vel: Vec3) -> Entity {
     app.world_mut()
         .spawn((
@@ -180,6 +200,46 @@ fn chain_orders_all_four_views() {
             CameraMode::Chase
         ]
     );
+}
+
+/// F22-AC06 pad leg (designed `input::pad` map): the right stick click
+/// walks the same `C` chain, and `West` is the `V` cockpit toggle —
+/// the pad shares the key's path verbatim.
+#[test]
+fn pad_walks_the_same_chain() {
+    let mut app = base_app(CameraMode::Chase);
+    app.add_systems(Update, toggle_camera);
+    spawn_chase(&mut app, ChaseCamera::default(), true);
+    app.world_mut().spawn((
+        Camera3d::default(),
+        Camera::default(),
+        CockpitCamera {
+            offset: Vec3::ZERO,
+            reverse_offset: None,
+            pitch: 0.0,
+            look_yaw: 0.0,
+        },
+    ));
+    app.world_mut().spawn((
+        Camera3d::default(),
+        Camera::default(),
+        FreeCamera::default(),
+    ));
+    spawn_pad(&mut app);
+
+    // No far lens: the chain reads Chase → Cockpit → Free like C does.
+    pad_press(&mut app, GamepadButton::RightThumb);
+    assert_eq!(*app.world().resource::<CameraMode>(), CameraMode::Cockpit);
+    pad_press(&mut app, GamepadButton::RightThumb);
+    assert_eq!(*app.world().resource::<CameraMode>(), CameraMode::Free);
+    pad_press(&mut app, GamepadButton::RightThumb);
+    assert_eq!(*app.world().resource::<CameraMode>(), CameraMode::Chase);
+
+    // `West` is the V shortcut: straight into the cockpit and back.
+    pad_press(&mut app, GamepadButton::West);
+    assert_eq!(*app.world().resource::<CameraMode>(), CameraMode::Cockpit);
+    pad_press(&mut app, GamepadButton::West);
+    assert_eq!(*app.world().resource::<CameraMode>(), CameraMode::Chase);
 }
 
 /// The active lens owns the boom and the projection.

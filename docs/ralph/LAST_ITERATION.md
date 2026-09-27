@@ -1,4 +1,120 @@
-# Last iteration — F22-B.5: boom snap on teleport + scheduled reset/camera-cycle evidence (iteration 76)
+# Last iteration — F22-A.7: designed in-session gamepad map (iteration 77)
+
+Iteration 77 on `ralph/night` (baseline `6e65da3`, F22-B.5 — external
+verify + review green, no blocking findings; twenty-second iteration
+of run `20260925T144723`). One coherent slice: F22-AC06's bindings
+leg — every in-session control the documented keys own now answers to
+a designed gamepad binding through the same production systems, with
+synthetic pad coverage through bevy's documented mocking surface.
+
+## Task selection
+
+F22-A/F22-B stay `active`; AC06 (keyboard/gamepad bindings + scaling,
+no accidental driving in free-camera mode) had only the keyboard half
+and three analog drive axes covered — every toggle/cycle leg was
+keyboard-only, untestable for a pad and unbindable in the windowed
+app. The plan names the remaining manual legs (multi-resolution
+sweep, original `camTrackCS`/`camPovCS` semantics, hands-on
+wall/mirror inspection) as open; the bindings leg was the actionable
+one. F23's full controls/options scope (rebinding, dead zones,
+persistence, navigation) is a separate feature — this slice is only
+the designed in-session map AC06 asks about, and the original's pad
+layout is unrecovered (MM2HELP's joystick topics are documented but
+not transcribed; no decompiler locally), so every binding is DSN-57,
+never a claimed original map.
+
+## Findings and actions
+
+- **`input::pad` names the map; `control_just_pressed` shares the
+  key's gate.** One `pub mod pad` in `input.rs` holds the designed
+  bindings: `RightThumb`=`C` camera cycle, `West`=`V` cockpit toggle,
+  `East`=BACKSPACE mirror, `North`=`R` reset, `LeftThumb`=ENTER horn,
+  `Select`=TAB map view, `DPadLeft`/`DPadRight`=`E`/`F` map
+  zoom/rotate, `DPadUp`/`DPadDown`=`H`/`I` HUD/indicators,
+  `LeftTrigger`/`RightTrigger` (the bumpers — the analog `*Trigger2`s
+  stay on brake/throttle)=`Z`/`X` nav-target cycle, right stick =
+  numpad cockpit glances at a designed 0.5 threshold. The pre-existing
+  drive legs (`LeftStickX` steer, `RT2`/`LT2` analog throttle/brake,
+  `South` handbrake) keep their precedence rules — non-neutral axes
+  outrank held keys.
+- **The pad ORs into each owning system, never a second context.**
+  `control_just_pressed(keys, pads, key, button)` returns the
+  documented key's edge OR the first connected pad's `just_pressed`
+  — wired inside `toggle_camera` (C/V), `mirror_input`, `hud_input`,
+  `indicator_input`, `nav_target_input` (X/Z), `hudmap_input`
+  (TAB/E/F incl. the free-camera E/Q ownership split),
+  `horn_input` and `reset_input`. Every existing phase gate —
+  Playing/Countdown-only toggles, overlay key ownership,
+  `allows_pause`, `Free`-camera detach — applies to the pad
+  identically; menus keep their own pad row (South select/East
+  back/West delete — West/East in menus never reach the cockpit/
+  mirror toggles because those systems don't run there).
+- **`input::reset_input` owns the `R` reset now.** The reader moved
+  out of `main` into `input.rs` so both devices share
+  `session::spawn_resets` verbatim — one implementation, scheduled
+  identically in the windowed chain.
+- **`dash::cockpit_look` rides the right stick.** `stick.y < −0.5`
+  looks back through the authored `ReverseOffset`, `±x` glances
+  sideways with the same exponential ease the numpad owns — held,
+  not latched.
+
+## Evidence
+
+- New `tests/input.rs` 3/3: `pad_axes_drive_the_player` (analog
+  steer/throttle/brake, South handbrake, non-neutral stick outranks a
+  held key), `free_camera_detaches_the_pad` (maxed axes write a zeroed
+  `VehicleInput` under `CameraMode::Free` — AC06's no-accidental-
+  driving leg — and read again back in a drive view),
+  `non_playing_phase_zeroes_the_pad` (Paused clears a held trigger).
+- `camtrack` 22/22 (+1 `pad_walks_the_same_chain` — RightThumb walks
+  Chase→Cockpit→Free→Chase, West shortcuts cockpit↔chase through the
+  production `toggle_camera`).
+- `mirror` 9/9 (+1 `pad_east_toggles_the_strip_while_driving` —
+  toggles in Playing, inert in Menu/Paused/Results).
+- `hud` 9/9 (+1 `pad_dpad_up_toggles_the_layer` — off/on in Playing,
+  owned by the pause phase).
+- `oppind` 6/6 (+1 `pad_dpad_down_toggles_the_indicators` — arms in
+  Countdown, toggles in Playing, inert in Paused).
+- `race` 44/44 (+1 `arrow_pick_cycles_through_the_pad` — bumpers walk
+  `TargetSelection` forward/back with wrap).
+- `session` 24/24 (+2 `pad_buttons_drive_the_map_controls` — Select
+  view cycle + DPad zoom/rotate through `hudmap_input`;
+  `pad_north_resets_the_player_to_spawn` — North emits the production
+  `spawn_resets` bundle and the teleport lands via `Teleported`,
+  identical to `R`/`--reset-at`).
+- `dash` 12/12 (+1 `pad_stick_glances_and_reverses` — stick down rides
+  the authored `ReverseOffset`, left eases toward +π/2, sub-threshold
+  deflection never reaches the look; the harness's pinned 60 Hz
+  `ManualDuration` clock makes the eased asserts deterministic).
+- `audio` 70/70 (+1 `pad_left_thumb_fires_the_authored_horn` — one
+  press spawns the authored `HornRequest` voice; the Menu phase gate
+  is shared).
+- Retail headless sanity (`fnv1a64:e91e6cd4b2ae30d9`): sf cruise
+  `status=pass` — no pad means identical records; the bindings are
+  additive input, not sim state.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --locked --workspace` — green, all suites.
+
+## Classification / remaining open items
+
+- F22-A/F22-B stay `active`: AC06's multi-resolution/clipped-UI sweep
+  and real-hardware pad playtest are manual legs this iteration did
+  not run; the map is DSN-57 designed — original pad bindings
+  unrecovered (MM2HELP joystick topics not yet transcribed).
+- F23 (persistent rebinding, dead zones/sensitivity, transmission,
+  accessibility) is untouched scope — this slice adds no settings,
+  no rebind layer and no menu pad navigation changes.
+- The right-stick glance threshold (0.5) and first-pad-wins rule are
+  designed constants; hot-plug/focus-loss device behavior is F23's.
+
+---
+
+
 
 Iteration 76 on `ralph/night` (baseline `1c75ed8`, F22-B.4 — external
 verify + review green, no blocking findings; twenty-first iteration of
@@ -49,7 +165,7 @@ scheduled evidence flags + captures.
   `--finish`/`--restart-at`; the `R` key stays legal play.
 - **`--cam-cycle-at <ticks>` walks the real `C` chain once.**
   `toggle_camera`'s successor/activation rules factored into
-  `chain_next`/`activate_view` shared with `dev_cam_cycle_at` — the
+  `next_available`/`activate_mode` shared with `dev_cam_cycle_at` — the
   scheduled leg takes the exact chain the key presses
   (Chase→Cockpit→ChaseFar→Free, absent cameras skipped). Render-only;
   stays out of `record_eligibility` like `--cockpit`/`--far`.

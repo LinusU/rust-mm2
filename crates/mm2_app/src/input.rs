@@ -7,9 +7,64 @@
 
 use bevy::prelude::*;
 use mm2_game::{PlayerVehicle, RaceState, Session};
-use mm2_vehicle::VehicleInput;
+use mm2_vehicle::{ResetVehicle, VehicleInput};
 
 use crate::camera::CameraMode;
+use crate::session::{self, SpawnPoint};
+
+/// The designed in-session pad map (F22-AC06's bindings leg; the
+/// gamepad-only leg F23 req 4 asks for). The original's pad button
+/// layout is unrecovered — MM2HELP's joystick/gamepad topics are
+/// documented but not yet transcribed into the rules ledger — so
+/// these are designed assignments over the same controls the
+/// documented keys drive (HUD-3/CTL-1), not a claimed original map.
+/// Every binding is additive: the key keeps working, the first
+/// connected pad answers — the same first-pad rule
+/// [`vehicle_input`] uses for steering. The fullscreen pause map
+/// (`Q`), headlights (`L`), the `F1`/`F4` debug keys and the
+/// fly-camera axes stay keyboard-only: `Start` is already the
+/// menu-owned pause and no designed button is left that doesn't
+/// collide with a driving control.
+pub mod pad {
+    use bevy::prelude::GamepadButton;
+    /// Cycle the HUD-3 camera chain (`C`) — right stick click.
+    pub const CAMERA: GamepadButton = GamepadButton::RightThumb;
+    /// Cockpit/dash toggle (`V`).
+    pub const COCKPIT: GamepadButton = GamepadButton::West;
+    /// Rear-view mirror strip (BACKSPACE).
+    pub const MIRROR: GamepadButton = GamepadButton::East;
+    /// Reset the vehicle to spawn (`R`).
+    pub const RESET: GamepadButton = GamepadButton::North;
+    /// Horn (`ENTER`; the siren toggle on `SIREN_FLAG` cars).
+    pub const HORN: GamepadButton = GamepadButton::LeftThumb;
+    /// Cycle the corner map's views (`TAB`).
+    pub const MAP_VIEW: GamepadButton = GamepadButton::Select;
+    /// Map zoom (`E`).
+    pub const MAP_ZOOM: GamepadButton = GamepadButton::DPadLeft;
+    /// Map orientation (`F`).
+    pub const MAP_ROTATE: GamepadButton = GamepadButton::DPadRight;
+    /// Driving-HUD master gate (`H`).
+    pub const HUD: GamepadButton = GamepadButton::DPadUp;
+    /// Opponent indicators (`I`).
+    pub const INDICATORS: GamepadButton = GamepadButton::DPadDown;
+    /// Nav-arrow target backward (`Z`).
+    pub const TARGET_PREV: GamepadButton = GamepadButton::LeftTrigger;
+    /// Nav-arrow target forward (`X`).
+    pub const TARGET_NEXT: GamepadButton = GamepadButton::RightTrigger;
+}
+
+/// One in-session control on either device: the documented key OR its
+/// designed [`pad`] binding. Menus keep their own pad row, so these
+/// only ever fire where the matching system already gates the key —
+/// the pad adds a finger, never a new context.
+pub fn control_just_pressed(
+    keys: &ButtonInput<KeyCode>,
+    pads: &Query<&Gamepad>,
+    key: KeyCode,
+    button: GamepadButton,
+) -> bool {
+    keys.just_pressed(key) || pads.iter().next().is_some_and(|p| p.just_pressed(button))
+}
 
 /// Presence enables the parked driver: `--parked` inserts it, and
 /// [`parked_drive`] owns the player vehicle's [`VehicleInput`] while it
@@ -108,5 +163,24 @@ pub fn vehicle_input(
 
     for mut vi in &mut vehicles {
         *vi = input;
+    }
+}
+
+/// `R` / [`pad::RESET`] resets the player vehicle (and any trailer) to
+/// the spawn point. Driving-phase only: a reset while `Paused` would
+/// teleport the car under the overlay.
+pub fn reset_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<&Gamepad>,
+    session: Res<Session>,
+    spawn: Res<SpawnPoint>,
+    player: Query<Entity, With<PlayerVehicle>>,
+    mut writer: MessageWriter<ResetVehicle>,
+) {
+    if !session.is_playing() || !control_just_pressed(&keys, &pads, KeyCode::KeyR, pad::RESET) {
+        return;
+    }
+    for msg in session::spawn_resets(&spawn, player.iter().next()) {
+        writer.write(msg);
     }
 }

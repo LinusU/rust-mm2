@@ -67,6 +67,7 @@ impl Default for HudVisible {
 /// `mirror_input` holds for BACKSPACE.
 pub fn hud_input(
     keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<&Gamepad>,
     session: Res<Session>,
     mut hud: ResMut<HudVisible>,
 ) {
@@ -76,7 +77,7 @@ pub fn hud_input(
     ) {
         return;
     }
-    if keys.just_pressed(KeyCode::KeyH) {
+    if crate::input::control_just_pressed(&keys, &pads, KeyCode::KeyH, crate::input::pad::HUD) {
         hud.0 = !hud.0;
     }
 }

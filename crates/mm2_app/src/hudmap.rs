@@ -506,11 +506,13 @@ pub fn spawn_hud_map(
 /// double-read as a menu resume.
 pub fn hudmap_input(
     keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<&Gamepad>,
     cam_mode: Res<CameraMode>,
     mut session: ResMut<Session>,
     mut control: ResMut<SessionControl>,
     map: Option<ResMut<HudMap>>,
 ) {
+    use crate::input::{control_just_pressed, pad};
     let Some(mut map) = map else { return };
     if map.is_stale(session.generation()) {
         return;
@@ -518,17 +520,19 @@ pub fn hudmap_input(
     // In the dev free camera `E`/`Q` are the vertical axes
     // (`camera::free_fly`) — the map yields them there rather than
     // double-binding both meanings on one key. The chase camera, where
-    // the documented controls live, keeps them.
+    // the documented controls live, keeps them. The pad's zoom
+    // (DPadLeft) yields under the same gate: free-fly keeps its own
+    // meaning for the key's device family either way.
     let free_cam = *cam_mode == CameraMode::Free;
     match *session.phase() {
         SessionPhase::Playing => {
-            if keys.just_pressed(KeyCode::Tab) {
+            if control_just_pressed(&keys, &pads, KeyCode::Tab, pad::MAP_VIEW) {
                 map.cycle_view();
             }
-            if !free_cam && keys.just_pressed(KeyCode::KeyE) {
+            if !free_cam && control_just_pressed(&keys, &pads, KeyCode::KeyE, pad::MAP_ZOOM) {
                 map.toggle_zoom();
             }
-            if keys.just_pressed(KeyCode::KeyF) {
+            if control_just_pressed(&keys, &pads, KeyCode::KeyF, pad::MAP_ROTATE) {
                 map.toggle_orientation();
             }
             if !free_cam

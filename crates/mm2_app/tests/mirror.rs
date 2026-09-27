@@ -67,6 +67,20 @@ fn press(app: &mut App, key: KeyCode) {
         .reset_all();
 }
 
+/// One pad-button edge through the first pad's `digital_mut` (bevy's
+/// documented gamepad mocking surface), `press`-equivalent.
+fn pad_press(app: &mut App, button: GamepadButton) {
+    let mut pads = app.world_mut().query::<&mut Gamepad>();
+    for mut pad in pads.iter_mut(app.world_mut()) {
+        pad.digital_mut().press(button);
+    }
+    app.update();
+    let mut pads = app.world_mut().query::<&mut Gamepad>();
+    for mut pad in pads.iter_mut(app.world_mut()) {
+        pad.digital_mut().reset_all();
+    }
+}
+
 fn spawn_strip(app: &mut App) -> Entity {
     app.world_mut()
         .spawn((
@@ -126,6 +140,38 @@ fn the_key_stays_with_the_overlay_phases() {
             "Backspace reached the mirror toggle in {phase:?}"
         );
         assert!(!app.world().get::<Camera>(strip).unwrap().is_active);
+    }
+}
+
+/// F22-AC06 pad leg (designed `input::pad` map): `East` is the
+/// BACKSPACE toggle — and it holds the same live-phase contract, so
+/// the overlay phases keep the button for their own owners.
+#[test]
+fn pad_east_toggles_the_strip_while_driving() {
+    let mut app = base_app(SessionPhase::Playing);
+    app.world_mut().spawn(Gamepad::default());
+    let strip = spawn_strip(&mut app);
+
+    pad_press(&mut app, GamepadButton::East);
+    assert!(app.world().resource::<RearView>().0);
+    assert!(app.world().get::<Camera>(strip).unwrap().is_active);
+
+    pad_press(&mut app, GamepadButton::East);
+    assert!(!app.world().resource::<RearView>().0);
+    assert!(!app.world().get::<Camera>(strip).unwrap().is_active);
+
+    for phase in [
+        SessionPhase::Menu,
+        SessionPhase::Paused,
+        SessionPhase::Results,
+    ] {
+        let mut app = base_app(phase.clone());
+        app.world_mut().spawn(Gamepad::default());
+        pad_press(&mut app, GamepadButton::East);
+        assert!(
+            !app.world().resource::<RearView>().0,
+            "East reached the mirror toggle in {phase:?}"
+        );
     }
 }
 

@@ -11,6 +11,8 @@ use mm2_assets::Vfs;
 use mm2_formats::{camtrack::TrackCamSpec, dash::PovCamSpec};
 use mm2_game::{PlayerVehicle, Session, SessionEntity, SessionPhase};
 
+use crate::input::control_just_pressed;
+
 /// Active camera mode.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CameraMode {
@@ -387,16 +389,18 @@ fn activate_mode(
 /// flipped the map camera's `is_active` for a frame.
 pub fn toggle_camera(
     keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<&Gamepad>,
     mut mode: ResMut<CameraMode>,
     mut cams: SessionCameras,
     mut cursor: Query<&mut CursorOptions>,
 ) {
-    let next = if keys.just_pressed(KeyCode::KeyC) {
+    use crate::input::pad;
+    let next = if control_just_pressed(&keys, &pads, KeyCode::KeyC, pad::CAMERA) {
         match next_available(*mode, &cams) {
             Some(m) => m,
             None => return,
         }
-    } else if keys.just_pressed(KeyCode::KeyV) {
+    } else if control_just_pressed(&keys, &pads, KeyCode::KeyV, pad::COCKPIT) {
         match *mode {
             CameraMode::Cockpit => CameraMode::Chase,
             _ if have_mode(CameraMode::Cockpit, &cams) => CameraMode::Cockpit,
@@ -752,6 +756,7 @@ pub fn spawn_mirror(
 /// moved to `F4`, the documented original binding (CTL-1).
 pub fn mirror_input(
     keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<&Gamepad>,
     session: Res<Session>,
     mut mirror: ResMut<RearView>,
 ) {
@@ -761,7 +766,7 @@ pub fn mirror_input(
     ) {
         return;
     }
-    if keys.just_pressed(KeyCode::Backspace) {
+    if control_just_pressed(&keys, &pads, KeyCode::Backspace, crate::input::pad::MIRROR) {
         mirror.0 = !mirror.0;
     }
 }

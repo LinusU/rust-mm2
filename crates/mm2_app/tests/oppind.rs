@@ -58,6 +58,20 @@ fn press_key(app: &mut App, key: KeyCode) {
         .clear();
 }
 
+/// One pad-button edge through the first pad's `digital_mut` (bevy's
+/// documented gamepad mocking surface), `press_key`-equivalent.
+fn pad_press(app: &mut App, button: GamepadButton) {
+    let mut pads = app.world_mut().query::<&mut Gamepad>();
+    for mut pad in pads.iter_mut(app.world_mut()) {
+        pad.digital_mut().press(button);
+    }
+    app.update();
+    let mut pads = app.world_mut().query::<&mut Gamepad>();
+    for mut pad in pads.iter_mut(app.world_mut()) {
+        pad.digital_mut().reset_all();
+    }
+}
+
 fn transition(app: &mut App, to: SessionPhase) {
     app.world_mut()
         .resource_mut::<Session>()
@@ -244,6 +258,31 @@ fn i_toggles_only_in_the_live_phases() {
     transition(&mut app, SessionPhase::Results);
     press_key(&mut app, KeyCode::KeyI);
     assert!(app.world().resource::<OpponentIndicators>().0);
+}
+
+/// F22-AC06 pad leg (designed `input::pad` map): `DPadDown` is the `I`
+/// toggle — same live-phase contract as the key.
+#[test]
+fn pad_dpad_down_toggles_the_indicators() {
+    let mut app = oppind_app();
+    app.world_mut().spawn(Gamepad::default());
+
+    transition(&mut app, SessionPhase::Loading);
+    transition(&mut app, SessionPhase::Ready);
+    transition(&mut app, SessionPhase::Countdown);
+    pad_press(&mut app, GamepadButton::DPadDown);
+    assert!(!app.world().resource::<OpponentIndicators>().0);
+
+    transition(&mut app, SessionPhase::Playing);
+    pad_press(&mut app, GamepadButton::DPadDown);
+    assert!(app.world().resource::<OpponentIndicators>().0);
+
+    transition(&mut app, SessionPhase::Paused);
+    pad_press(&mut app, GamepadButton::DPadDown);
+    assert!(
+        app.world().resource::<OpponentIndicators>().0,
+        "DPadDown while Paused must not reach the indicator toggle"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -79,7 +79,14 @@ value `--cam` accepts — and screenshots carry it in their file name, so any
 view can be reproduced exactly.
 
 A connected gamepad works too: left stick steers, right trigger throttles,
-left trigger brakes.
+left trigger brakes, South handbrakes. The pad also mirrors the in-session
+keys (a designed map — the original's pad layout is unrecovered): right
+stick click cycles the camera, West toggles the cockpit, East the mirror,
+Y/North resets, left stick click honks, Select cycles the map view, the
+dpad drives HUD up / indicators down / map zoom left / map rotate right,
+the bumpers cycle the nav-arrow target, and the right stick glances in
+the cockpit. The fullscreen pause map (`Q`), headlights (`L`), the
+F-keys and the fly-camera controls stay keyboard-only.
 
 ### With an MM2 installation
 

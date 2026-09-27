@@ -557,13 +557,15 @@ pub fn spawn_nav_arrow(
 /// is allowed while the race counts down: the arrow is already live.
 pub fn nav_target_input(
     keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<&Gamepad>,
     session: Res<Session>,
     race: Option<Res<RaceState>>,
     mut players: Query<(&Position, &RaceProgress, &mut TargetSelection)>,
 ) {
-    let dir = if keys.just_pressed(KeyCode::KeyX) {
+    use crate::input::{control_just_pressed, pad};
+    let dir = if control_just_pressed(&keys, &pads, KeyCode::KeyX, pad::TARGET_NEXT) {
         1
-    } else if keys.just_pressed(KeyCode::KeyZ) {
+    } else if control_just_pressed(&keys, &pads, KeyCode::KeyZ, pad::TARGET_PREV) {
         -1
     } else {
         return;

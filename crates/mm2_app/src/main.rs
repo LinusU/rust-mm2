@@ -28,10 +28,10 @@ use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
 use mm2_game::{
     BangerStateChanged, CameraPose, DamageEvent, DevOverrides, ImpactEvent, Mm2Vfs, PartDetached,
-    PlayerVehicle, RaceStarted, RecoveryEvent, Session, SessionConfig, SessionPhase, StuckEvent,
-    VehicleSelection, WorldMode, advance_session_tick, despawn_session_entities,
+    RaceStarted, RecoveryEvent, Session, SessionConfig, SessionPhase, StuckEvent, VehicleSelection,
+    WorldMode, advance_session_tick, despawn_session_entities,
 };
-use mm2_vehicle::{ResetVehicle, VehicleConfig, VehicleDebugEnabled, VehiclePlugin};
+use mm2_vehicle::{VehicleConfig, VehicleDebugEnabled, VehiclePlugin};
 use tracing::{error, info, warn};
 
 use camera::CameraMode;
@@ -1156,7 +1156,7 @@ fn main() {
                 dash::sync_dash_visibility.after(car_visual::update_glows),
                 dash::cockpit_look.run_if(not(capturing)),
             ),
-            reset_input,
+            input::reset_input,
             debug_toggle,
             screenshot_input,
             camera::retarget_hud,
@@ -1592,24 +1592,6 @@ fn screenshot_input(
     commands
         .spawn(Screenshot::primary_window())
         .observe(save_to_disk(path));
-}
-
-/// `R` resets the player vehicle (and any trailer) to the spawn point.
-/// Driving-phase only: a reset while `Paused` would teleport the car
-/// under the overlay.
-fn reset_input(
-    keys: Res<ButtonInput<KeyCode>>,
-    session: Res<Session>,
-    spawn: Res<SpawnPoint>,
-    player: Query<Entity, With<PlayerVehicle>>,
-    mut writer: MessageWriter<ResetVehicle>,
-) {
-    if !session.is_playing() || !keys.just_pressed(KeyCode::KeyR) {
-        return;
-    }
-    for msg in session::spawn_resets(&spawn, player.iter().next()) {
-        writer.write(msg);
-    }
 }
 
 /// `F1` toggles vehicle physics debug gizmos.

@@ -176,6 +176,7 @@ pub fn spawn_opponent_indicators(
 /// contract `mirror_input` holds for BACKSPACE.
 pub fn indicator_input(
     keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<&Gamepad>,
     session: Res<Session>,
     mut indicators: ResMut<OpponentIndicators>,
 ) {
@@ -185,7 +186,12 @@ pub fn indicator_input(
     ) {
         return;
     }
-    if keys.just_pressed(KeyCode::KeyI) {
+    if crate::input::control_just_pressed(
+        &keys,
+        &pads,
+        KeyCode::KeyI,
+        crate::input::pad::INDICATORS,
+    ) {
         indicators.0 = !indicators.0;
     }
 }

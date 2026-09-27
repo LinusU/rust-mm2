@@ -21,9 +21,9 @@ use mm2_assets::Vfs;
 use mm2_formats::hudmap::HudMapSpec;
 use mm2_game::{
     BangerPool, DEFAULT_ACTIVE_POOL, DamageSignals, DevOverrides, HudMap, ImpactEvent, ImpactId,
-    Mm2Vfs, ObjectId, ObjectIdentity, PlayerVehicle, Session, SessionAuthority, SessionConfig,
-    SessionEntity, SessionPhase, SpawnPose, WorldMode, advance_session_tick,
-    despawn_session_entities,
+    MapOrientation, MapView, Mm2Vfs, ObjectId, ObjectIdentity, PlayerVehicle, Session,
+    SessionAuthority, SessionConfig, SessionEntity, SessionPhase, SpawnPose, WorldMode,
+    advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::{Teleported, Vehicle, VehicleConfig, VehicleInput, VehiclePlugin, VehicleState};
 
@@ -94,6 +94,9 @@ fn test_app(config: SessionConfig, frame_secs: f64) -> App {
             (
                 session::load_session_world.run_if(session::loading),
                 session::session_control_input,
+                // The binary's `R`-reset reader — pad North reaches the
+                // same `spawn_resets` bundle (F22-AC06's designed map).
+                mm2_app::input::reset_input,
                 // F22-B.2: the binary's mirror toggle — Backspace must
                 // reach `RearView`, not the restart intent, in every
                 // phase the harness exercises — and the strip's
@@ -193,6 +196,20 @@ fn press_key(app: &mut App, key: KeyCode) {
     app.world_mut()
         .resource_mut::<ButtonInput<KeyCode>>()
         .reset_all();
+}
+
+/// One pad-button edge through the first pad's `digital_mut` (bevy's
+/// documented gamepad mocking surface), `press_key`-equivalent.
+fn pad_press(app: &mut App, button: GamepadButton) {
+    let mut pads = app.world_mut().query::<&mut Gamepad>();
+    for mut pad in pads.iter_mut(app.world_mut()) {
+        pad.digital_mut().press(button);
+    }
+    app.update();
+    let mut pads = app.world_mut().query::<&mut Gamepad>();
+    for mut pad in pads.iter_mut(app.world_mut()) {
+        pad.digital_mut().reset_all();
+    }
 }
 
 fn physics_paused(app: &mut App) -> bool {
@@ -509,6 +526,35 @@ fn pause_map_owns_the_keys_while_the_menu_is_hidden() {
     press_key(&mut app, KeyCode::KeyQ);
     assert!(phase_is(&mut app, SessionPhase::Playing));
     assert!(!app.world().resource::<HudMap>().fullscreen);
+}
+
+/// F22-AC06 pad leg (designed `input::pad` map): `Select` is the TAB
+/// view cycle and `DPadLeft`/`DPadRight` the `E`/`F` map toggles —
+/// the same `hudmap_input` arms the keys use.
+#[test]
+fn pad_buttons_drive_the_map_controls() {
+    let mut app = dev_app();
+    app.update();
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+    let generation = app.world().resource::<Session>().generation();
+    app.world_mut()
+        .insert_resource(HudMap::new(hudmap_spec(), generation));
+    app.world_mut().spawn(Gamepad::default());
+
+    pad_press(&mut app, GamepadButton::Select);
+    assert_eq!(app.world().resource::<HudMap>().view, MapView::Large);
+    pad_press(&mut app, GamepadButton::Select);
+    assert_eq!(app.world().resource::<HudMap>().view, MapView::Off);
+    pad_press(&mut app, GamepadButton::Select);
+    assert_eq!(app.world().resource::<HudMap>().view, MapView::Inset);
+
+    pad_press(&mut app, GamepadButton::DPadLeft);
+    assert!(app.world().resource::<HudMap>().zoomed_in);
+    pad_press(&mut app, GamepadButton::DPadRight);
+    assert_eq!(
+        app.world().resource::<HudMap>().orientation,
+        MapOrientation::Rotating
+    );
 }
 
 /// The full-screen map only lives inside its pause: if the flag is up
@@ -1181,6 +1227,45 @@ fn reset_at_beyond_the_run_never_fires() {
         app.world().get::<Teleported>(car).is_none(),
         "an unreached threshold must not teleport"
     );
+}
+
+/// F22-AC06 pad leg (designed `input::pad` map): `North` is the `R`
+/// reset — the pad press emits the production `spawn_resets` bundle
+/// and the teleport lands through `vehicle_reset` (`Teleported`)
+/// exactly like the key and `--reset-at`.
+#[test]
+fn pad_north_resets_the_player_to_spawn() {
+    let mut app = dev_app();
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    let car = single::<With<PlayerVehicle>>(&mut app);
+    app.world_mut()
+        .get_mut::<VehicleInput>(car)
+        .unwrap()
+        .throttle = 1.0;
+    for _ in 0..120 {
+        app.update();
+    }
+    let pos = app.world().get::<Transform>(car).unwrap().translation;
+    assert!(
+        pos.distance(Vec3::new(0.0, 1.5, 0.0)) > 5.0,
+        "control leg: the car actually left the spawn, still at {pos:?}"
+    );
+
+    app.world_mut().spawn(Gamepad::default());
+    pad_press(&mut app, GamepadButton::North);
+    assert!(
+        run_until(&mut app, 10, |a| a.world().get::<Teleported>(car).is_some()),
+        "the pad reset never landed"
+    );
+    let pos = app.world().get::<Transform>(car).unwrap().translation;
+    assert!(
+        pos.distance(Vec3::new(0.0, 1.5, 0.0)) < 3.0,
+        "the pad reset put the car back on the spawn point, got {pos:?}"
+    );
+    assert!(phase_is(&mut app, SessionPhase::Playing));
 }
 
 /// The reset bundle re-seats every trailer at its authored car-space

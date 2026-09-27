@@ -76,6 +76,20 @@ fn press(app: &mut App, key: KeyCode) {
         .reset_all();
 }
 
+/// One pad-button edge through the first pad's `digital_mut` (bevy's
+/// documented gamepad mocking surface), `press`-equivalent.
+fn pad_press(app: &mut App, button: GamepadButton) {
+    let mut pads = app.world_mut().query::<&mut Gamepad>();
+    for mut pad in pads.iter_mut(app.world_mut()) {
+        pad.digital_mut().press(button);
+    }
+    app.update();
+    let mut pads = app.world_mut().query::<&mut Gamepad>();
+    for mut pad in pads.iter_mut(app.world_mut()) {
+        pad.digital_mut().reset_all();
+    }
+}
+
 fn transition(app: &mut App, to: SessionPhase) {
     app.world_mut()
         .resource_mut::<Session>()
@@ -146,6 +160,27 @@ fn h_toggles_only_in_the_live_phases() {
     transition(&mut app, SessionPhase::Results);
     press(&mut app, KeyCode::KeyH);
     assert!(app.world().resource::<HudVisible>().0);
+}
+
+/// F22-AC06 pad leg (designed `input::pad` map): `DPadUp` is the `H`
+/// toggle — and it holds the same live-phase contract, so the overlay
+/// phases keep the button.
+#[test]
+fn pad_dpad_up_toggles_the_layer() {
+    let mut app = hud_app(SessionPhase::Playing);
+    app.world_mut().spawn(Gamepad::default());
+
+    pad_press(&mut app, GamepadButton::DPadUp);
+    assert!(!app.world().resource::<HudVisible>().0);
+    pad_press(&mut app, GamepadButton::DPadUp);
+    assert!(app.world().resource::<HudVisible>().0);
+
+    transition(&mut app, SessionPhase::Paused);
+    pad_press(&mut app, GamepadButton::DPadUp);
+    assert!(
+        app.world().resource::<HudVisible>().0,
+        "DPadUp while Paused must not reach the HUD gate"
+    );
 }
 
 // ---------------------------------------------------------------------------

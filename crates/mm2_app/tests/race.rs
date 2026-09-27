@@ -1458,6 +1458,21 @@ fn end_press(app: &mut App, key: KeyCode) {
     keys.clear();
 }
 
+/// One pad-button edge through the first pad's `digital_mut` (bevy's
+/// documented gamepad mocking surface) — press for one update, then
+/// `reset_all` ends it like the event loop would.
+fn pad_press(app: &mut App, button: GamepadButton) {
+    let mut pads = app.world_mut().query::<&mut Gamepad>();
+    for mut pad in pads.iter_mut(app.world_mut()) {
+        pad.digital_mut().press(button);
+    }
+    app.update();
+    let mut pads = app.world_mut().query::<&mut Gamepad>();
+    for mut pad in pads.iter_mut(app.world_mut()) {
+        pad.digital_mut().reset_all();
+    }
+}
+
 /// RACE-6 through the production systems: the arrow tracks the
 /// nearest un-cleared gate, rotates to the signed bearing, and swaps
 /// to the authored yellow tile when the target is behind the car.
@@ -1537,6 +1552,31 @@ fn arrow_pick_cycles_through_input() {
     run(&mut app, 1);
     end_press(&mut app, KeyCode::KeyX);
     assert_eq!(picked(&app), Some(2), "a dead race ignores cycling");
+}
+
+/// F22-AC06 pad leg (designed `input::pad` map): the bumpers carry the
+/// same cycle — `RightTrigger` steps forward like `X`, `LeftTrigger`
+/// back like `Z`, edge-triggered through the same system.
+#[test]
+fn arrow_pick_cycles_through_the_pad() {
+    let def = RaceDefinition {
+        checkpoints: vec![cp(-100.0, 0.0), cp(0.0, 0.0), cp(100.0, 0.0)],
+        finish: None,
+        ..any_order_def(0)
+    };
+    let mut app = race_app(event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(0.0, 0.0, -50.0));
+    app.world_mut().spawn(Gamepad::default());
+    run(&mut app, 3);
+    let picked = |app: &App| app.world().get::<TargetSelection>(car).unwrap().picked;
+    assert_eq!(picked(&app), None, "no pick until the player chooses");
+
+    pad_press(&mut app, GamepadButton::RightTrigger);
+    assert_eq!(picked(&app), Some(2), "RT steps forward like X");
+    pad_press(&mut app, GamepadButton::RightTrigger);
+    assert_eq!(picked(&app), Some(0), "forward cycling wraps");
+    pad_press(&mut app, GamepadButton::LeftTrigger);
+    assert_eq!(picked(&app), Some(2), "LT steps backward like Z");
 }
 
 /// The arrow is already live while the race counts down — the
