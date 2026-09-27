@@ -499,13 +499,17 @@ the quads render and anchor — but no playtest or side-by-side against
 the original exists; presentation parity stays unverified (UNK-40).
 
 Still not consumed (UNK-24 stays open): `.ldef` rows, `.lmap` values
-(runtime-loaded by the original — see above — but unbound here),
-precipitation audio hooks (the install's `wearain`/rain-interior
-waves — F07/F08 scope; the particle leg landed in F18-B.2 above and
-wetness traction in F18-B.1: `Weather::traction_factor` maps `rainy`
-to a designed 0.8 session-wide `TireConditions` modifier,
-DSN-59/UNK-39), remaining audio effects, and authoritative network
-replication of conditions (F18 req 5). `.pvshist` is
+(runtime-loaded by the original — see above — but unbound here), the
+`wearain` commentary-cue wave families and remaining audio effects,
+and authoritative network replication of conditions (F18 req 5). The
+precipitation bed/thunder leg landed in F18-B.3 — `WeatherAudio`
+resolves `rainexterior`/`raininterior`/`thunder` through the session
+`WaveBank`, crossfades the beds on the shared 64 m shelter probe and
+schedules seeded claps, all designed readings of the exe's adjacent
+`0.65`/`0.85`/`13.0`/`15.0`/`1.0` constants (DSN-61/UNK-25; the
+particle leg landed in F18-B.2 above and wetness traction in F18-B.1:
+`Weather::traction_factor` maps `rainy` to a designed 0.8 session-wide
+`TireConditions` modifier, DSN-59/UNK-39). `.pvshist` is
 bake-tool data (no exe reference), and the numbered `.cpvs` files are
 bake sweeps — neither needs a consumer. The dome's three `.sky`
 floats are bound under designed readings (world-height / vertical

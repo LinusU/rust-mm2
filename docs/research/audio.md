@@ -158,6 +158,41 @@ volume/pitch and clutch counts follow the drivetrain through every
 stage. The program is an implementation/evidence choice — it makes no
 original-behavior claim, and headless `0s` still reports no output
 device (F07-AC05 stays open).
+
+F18-B.3 adds the precipitation ambience consumer: when the shared
+`effective_conditions` pick names a precipitation spec (the same
+`Weather::precipitation` binding the particle rig reads — `rainy` →
+`"rain"`, DSN-60), `load_session_world` inserts a session-scoped
+`WeatherAudio` and `weather_voices` lazily resolves the authored
+`<name>exterior`/`<name>interior` bed stems plus `thunder` through the
+session `WaveBank` — the `Rainexterior`/`Raininterior`/`Thunder` stems
+the exe's string block names, shipped on retail as
+`aud/aud{11,22}/{rainexterior,raininterior,thunder}.*k.wav` (F18's
+req-4 audio leg). The beds spawn as `PlaybackMode::Loop` voices at
+volume 0 and the system re-mixes them every update: a 64 m upward
+probe from the active `WorldCamera3d` camera — the same
+`precip::COVER_PROBE` the drop emitter reads — decides sheltered, and
+`interior_mix` eases toward sheltered at `RAIN_CROSSFADE_PER_SEC` so
+the exterior bed fades to the interior under a roof and back outside.
+Thunder draws seeded delays off the session seed (a domain-separated
+`NavRng`, so a restart replays the same claps — F18 req 5's
+deterministic leg), spawning `PlaybackMode::Despawn` one-shots bounded
+`MAX_THUNDER_VOICES` 4, Playing-phase only. All voices are
+`SessionEntity`-stamped; `drive_session` removes the resource on
+teardown. The designed values adopt the exe block's adjacent floats —
+exterior `0.85`, interior `0.65`, thunder `1.0`, delay `13.0`–`15.0` s
+— as an inferred positional reading, not recovered semantics: the
+original trigger, mix and interior selection are unrecovered
+(DSN-61/UNK-25). A named-but-missing stem counts `AudioReport.failed`
+once and is never retried or substituted (F18-AC06); `aud=` gains
+`/<n>m/<n>t[i]` when weather audio is live (`i` = sheltered at record
+time) while dry sessions emit nothing. Retail
+(`fnv1a64:e91e6cd4b2ae30d9`, sf headless `--weather 3 --frames 1200`):
+`aud=0h/58v/0s/4l/4a/1r/4i/8c/1k/0g/31e/16n/2m/1t+22d` — both beds
+resolved and one clap fired inside the delay window, `0s` still
+honestly reporting no output device; `--weather 0` emits no `m`/`t`
+fields. The `al*wearain*`/`as*wearain*` commentary cues remain
+unbound.
 Everything below is measured data structure; runtime semantics are
 unverified unless noted.
 

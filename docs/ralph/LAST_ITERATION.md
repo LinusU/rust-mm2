@@ -1,5 +1,98 @@
-# Last iteration — F18-B.2: authored precipitation particles
-# (iteration 82)
+# Last iteration — F18-B.3: precipitation ambience
+# (iteration 83)
+
+Iteration 83 on `ralph/night` (baseline `8f3e740` — the F18-B.2
+candidate; external verify + review green; twenty-eighth iteration of
+run `20260925T144723`). One coherent slice: F18-B's spec-req-4
+precipitation *audio* leg — the authored `rainexterior`/`raininterior`/
+`thunder` waves now drive session-scoped bed loops and seeded thunder
+claps off the same effective-weather pick the particle rig reads.
+
+## Task selection
+
+The plan's F18-B row named precipitation audio hooks (`wearain`/interior
+waves) as the next split. The retail install ships all three stems under
+`aud/aud{11,22}` and the exe carries a `Rainexterior`/`Raininterior`/
+`Thunder` string block beside the floats `0.65`, `0.85`, `13.0`, `15.0`,
+`1.0` — authored data plus a parameter block, not an invented effect.
+The original's runtime semantics are unrecovered (UNK-25), so the
+consumer is a designed reading adopting those constants; the `wearain`
+commentary-cue families stay unbound.
+
+## Findings and actions
+
+- **`mm2_app::audio`** — `WeatherAudio` (session-scoped resource
+  `load_session_world` inserts when `Weather::precipitation` names a
+  spec; `None` on dry), `WeatherVoice`/`WeatherRole` bed components,
+  `VoiceKind::{Weather,Thunder}`, and `AudioReport` fields
+  `weather`/`thunder`/`interior`. `weather_voices` lazily resolves the
+  `<name>exterior`/`<name>interior`/`<name>`-adjacent `thunder` stems
+  through the session `WaveBank` (resolve once, `failed` counted once,
+  never retried or substituted — F18-AC06), spawns the beds as
+  `PlaybackMode::Loop` voices at volume 0, and re-mixes them every
+  update: `interior_mix` eases toward sheltered at
+  `RAIN_CROSSFADE_PER_SEC` 4.0 under the same `precip::COVER_PROBE` 64 m
+  upward cast from the active `WorldCamera3d` the drop emitter reads
+  (the declared covered-interior approximation; no camera or no physics
+  holds the last mix rather than snapping). Thunder draws `13.0`–`15.0`
+  s delays from a domain-separated `NavRng` (restart-deterministic — the
+  precip rig owns the bare seed stream), `Playing`-phase only, bounded
+  `MAX_THUNDER_VOICES` 4, `PlaybackMode::Despawn` `SessionEntity`
+  one-shots. The adopted constants are an inferred positional reading of
+  the exe's adjacent floats — exterior `0.85`, interior `0.65`, thunder
+  `1.0` — not recovered semantics.
+- **`mm2_app::precip`** — `COVER_PROBE` is now `pub(crate)` so the bed
+  crossfade and the drop emitter share one shelter distance instead of
+  duplicating the constant.
+- **`mm2_app::session`** — `load_session_world` inserts `WeatherAudio`
+  after the siren block; `drive_session`'s teardown removes it.
+- **`main.rs`/`smoke.rs`** — `weather_voices` runs
+  `.after(session::drive_session)` on both paths; `aud=` gains
+  `/<n>m/<n>t[i]` only when weather audio is live (`i` = sheltered at
+  record time) — dry records stay bit-identical.
+
+## Evidence
+
+- `cargo test -p mm2_app --test audio` — 76/76 (+5): dry binds none,
+  rainy binds both beds exposed at the exterior level, shelter-probe
+  crossfade swings to the interior bed and back, a missing stem counts
+  `failed` once with no substitution, the seeded clap lands inside the
+  13–15 s window identically across same-seed apps, teardown sweeps all
+  voices.
+- `cargo test -p mm2_app --test precip` — 9/9 (+1 production leg):
+  `load_session_world` binds `WeatherAudio` on a rainy session and
+  spawns both beds, a dry session binds no resource, a restart rebinds
+  generation 2 with no stale voices.
+- Retail (`fnv1a64:e91e6cd4b2ae30d9`, sf headless `--weather 3
+  --frames 1200`): `aud=0h/58v/0s/4l/4a/1r/4i/8c/1k/0g/31e/16n/2m/1t
+  +22d` — both authored beds resolved, one clap fired inside the delay
+  window, `0s` still honestly reports no output device attached.
+  `--weather 0 --frames 300` records no `m`/`t` fields — dry runs stay
+  bit-identical.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --workspace` — all suites green.
+
+## Classification / remaining open items
+
+- Designed (DSN-61): the adopted constants, the shelter-probe interior
+  selection, the crossfade rate, the clap schedule and the voice bound.
+- Unknown (UNK-25): the original's bed trigger/mix, interior selection
+  and thunder semantics — only the stem names and the adjacent float
+  block are evidenced; the `wearain` cue families remain unbound.
+- No audible-output device, no playtest, no original parity comparison —
+  F18-AC05's audio leg stays open.
+- F18-B stays `active`: wetness presentation beyond particles,
+  `wearain` cues, and condition replication (req 5's network leg is
+  F24+) remain.
+
+---
+
+# Prior iterations
 
 Iteration 82 on `ralph/night` (baseline `b05f9a0` — the F18-B.1 review
 repair; external verify + review green; twenty-seventh iteration of run
