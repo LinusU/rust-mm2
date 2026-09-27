@@ -458,6 +458,7 @@ fn customized_event_conditions_take_precedence() {
                 weather: Weather::new(3).unwrap(),
             },
             densities: Densities::DEFAULT,
+            race: None,
         }),
         ..city_config(SessionConditions::default())
     };

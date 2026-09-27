@@ -276,6 +276,45 @@ fn install() -> tempfile::TempDir {
     tmp
 }
 
+/// The checkpoint install plus one Circuit event — `circuit0` authors
+/// `Opponents` 2 / `NumLaps` 2, wires two `vpt` opponents on closed
+/// `.opp` loops and ships the >= 4 waypoint rows an Ordered course
+/// needs. The RACE-3 race-shape options tests drive it.
+fn circuit_install() -> tempfile::TempDir {
+    let tmp = install();
+    let d = tmp.path();
+    write(
+        d,
+        "race/testcity/mmcircuitdata.csv",
+        format!("{MM_HEADER}\nnone,0,0,0,2,0,0.1,0.0,2,50,1,0,0,0,2,0,0.2,0.0,2,40,1\n"),
+    );
+    write(
+        d,
+        "race/testcity/circuit0.aimap",
+        "[Opponent]\n2\n\
+         vpt circuit0-a-0.opp 0.90 0 50.0 0.7 1 1 1 1 0 1.0\n\
+         vpt circuit0-a-1.opp 0.80 0 50.0 0.7 1 1 1 1 0 1.0\n",
+    );
+    write(
+        d,
+        "race/testcity/circuit0waypoints.csv",
+        format!(
+            "{WAYPOINTS}60,0,140,0,15,0,0,0,\n110,0,140,0,15,0,0,0,\n140,0,140,0,15,0,0,0,\n165,0,140,0,15,0,0,0,\n"
+        ),
+    );
+    // Closed loops down and back along the lane.
+    let opp = |z: f32, back_z: f32| {
+        format!(
+            "x,y,z,brake,forward offset,side offset,target speed,speed start,side start\n\
+             70,0,{z},0,0,0,0,0,0\n180,0,{z},0,0,0,0,0,0\n180,0,{back_z},0,0,0,0,0,0\n\
+             70,0,{back_z},0,0,0,0,0,0\n72,0,{z},0,0,0,0,0,0\n"
+        )
+    };
+    write(d, "race/testcity/circuit0-a-0.opp", opp(140.0, 146.0));
+    write(d, "race/testcity/circuit0-a-1.opp", opp(146.0, 140.0));
+    tmp
+}
+
 /// A headless app wired like the binary's menu mode: parked session,
 /// the menu resources and the production session/menu systems, minus
 /// the window.
@@ -2175,4 +2214,189 @@ fn cruise_options_launch_a_customized_session() {
         .expect("changed picks ride the session config");
     assert_eq!(picks.conditions.weather.get(), 1);
     assert_eq!(picks.conditions.time_of_day.get(), 0);
+}
+
+/// Bind Alice with `circuit0` beaten and navigate to its event list —
+/// the shared preamble every race-shape test below drives. The store
+/// dir returns with the app so the bound `ProfileStore`'s files stay
+/// on disk.
+fn beaten_circuit_options(tmp: &tempfile::TempDir) -> (App, tempfile::TempDir) {
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let alice = store
+        .create("Alice", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    // `Opponents`/`NumLaps` read the difficulty's authored block —
+    // Amateur here: 2 opponents, 2 laps.
+    seed_record(
+        &store,
+        &alice.id,
+        EventKey {
+            city: "testcity".into(),
+            table: EventTableKind::Circuit,
+            stem: "circuit0".into(),
+        },
+        120 * 60,
+        Some(1),
+    );
+
+    let mut app = menu_app(tmp.path(), Some(store));
+    app.update();
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "Alice");
+    press(&mut app, KeyCode::Escape);
+    activate_row(&mut app, "Events");
+    activate_row(&mut app, "testcity");
+    activate_row(&mut app, "Circuit");
+    (app, store_dir)
+}
+
+/// RACE-3's Circuit parenthetical (F17-A.7): a beaten Circuit event's
+/// options screen carries the Laps and Opponents rows every other
+/// table's screen lacks — both seeded from the authored
+/// `NumLaps`/`Opponents` block.
+#[test]
+fn circuit_options_carry_authored_laps_and_opponents() {
+    let tmp = circuit_install();
+    let (mut app, _store_dir) = beaten_circuit_options(&tmp);
+
+    activate_row(&mut app, "options");
+    let texts: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
+    assert_eq!(
+        texts,
+        vec![
+            "Weather: clear",
+            "Time of day: morning",
+            "Traffic density: 10%",
+            "Laps: 2",
+            "Opponents: 2",
+            "Start race",
+        ]
+    );
+}
+
+/// The race-shape rows cycle inside their bounds: laps wrap
+/// `1..=CUSTOMIZE_LAP_MAX` (the designed upper bound — authored laps
+/// run 2-4, CIR-5) and opponents wrap `0..=` the authored roster count
+/// — the aimap is the opponent source, so the picker cannot offer a
+/// lineup the event does not wire.
+#[test]
+fn circuit_laps_and_opponents_rows_cycle_in_bounds() {
+    let tmp = circuit_install();
+    let (mut app, _store_dir) = beaten_circuit_options(&tmp);
+    activate_row(&mut app, "options");
+
+    focus_row(&mut app, "Laps:");
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(shell(&app).rows[3].text, "Laps: 3");
+    for _ in 0..(mm2_game::CUSTOMIZE_LAP_MAX - 3) {
+        press(&mut app, KeyCode::ArrowRight);
+    }
+    assert_eq!(
+        shell(&app).rows[3].text,
+        format!("Laps: {}", mm2_game::CUSTOMIZE_LAP_MAX),
+        "the picker tops out at the designed bound"
+    );
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(shell(&app).rows[3].text, "Laps: 1", "the top wraps to 1");
+    press(&mut app, KeyCode::ArrowLeft);
+    assert_eq!(
+        shell(&app).rows[3].text,
+        format!("Laps: {}", mm2_game::CUSTOMIZE_LAP_MAX),
+        "and the bottom wraps back up"
+    );
+
+    focus_row(&mut app, "Opponents:");
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(
+        shell(&app).rows[4].text,
+        "Opponents: 0",
+        "past the authored count wraps to a solo race"
+    );
+    press(&mut app, KeyCode::ArrowLeft);
+    assert_eq!(shell(&app).rows[4].text, "Opponents: 2");
+    press(&mut app, KeyCode::ArrowLeft);
+    assert_eq!(shell(&app).rows[4].text, "Opponents: 1");
+}
+
+/// Changed race-shape picks ride the launched session's
+/// `customization.race` and land on the built definition/roster
+/// (laps on the Ordered definition, opponents on the wired lineup) —
+/// a customized run stays record-ineligible (DRV-6).
+#[test]
+fn circuit_customized_launch_carries_the_race_picks() {
+    let tmp = circuit_install();
+    let (mut app, _store_dir) = beaten_circuit_options(&tmp);
+    activate_row(&mut app, "options");
+
+    focus_row(&mut app, "Laps:");
+    press(&mut app, KeyCode::ArrowRight); // 2 → 3
+    focus_row(&mut app, "Opponents:");
+    press(&mut app, KeyCode::ArrowLeft); // 2 → 1
+    activate_row(&mut app, "Start race");
+    assert!(
+        run_until(&mut app, 12, |a| matches!(
+            phase(a),
+            SessionPhase::Countdown | SessionPhase::Playing
+        )),
+        "the customized circuit never launched: {:?}",
+        phase(&app)
+    );
+
+    let config = app
+        .world()
+        .resource::<Session>()
+        .config()
+        .expect("a launched session has a config")
+        .clone();
+    let picks = config
+        .customization
+        .expect("changed picks ride the session config");
+    assert_eq!(
+        picks.race,
+        Some(mm2_game::RaceCustomization {
+            laps: 3,
+            opponents: 1
+        })
+    );
+    assert_eq!(
+        mm2_game::record_eligibility(&config),
+        Err(mm2_game::Ineligible::Customized)
+    );
+    let race = app.world().resource::<mm2_game::RaceState>();
+    assert_eq!(race.definition.laps, 3, "the picked lap count bound");
+    assert_eq!(
+        race.definition.params.opponents, 1,
+        "the param tracks the applied roster"
+    );
+}
+
+/// A visit that returns the race-shape rows to their authored seeds
+/// launches a default run — the picks equal the seed, so DRV-6 record
+/// eligibility survives the round trip.
+#[test]
+fn circuit_options_returned_to_seed_launch_a_default_run() {
+    let tmp = circuit_install();
+    let (mut app, _store_dir) = beaten_circuit_options(&tmp);
+    activate_row(&mut app, "options");
+
+    focus_row(&mut app, "Laps:");
+    press(&mut app, KeyCode::ArrowRight);
+    press(&mut app, KeyCode::ArrowLeft); // 2 → 3 → 2
+    focus_row(&mut app, "Opponents:");
+    press(&mut app, KeyCode::ArrowLeft);
+    press(&mut app, KeyCode::ArrowRight); // 2 → 1 → 2
+    activate_row(&mut app, "Start race");
+    assert!(run_until(&mut app, 12, |a| matches!(
+        phase(a),
+        SessionPhase::Countdown | SessionPhase::Playing
+    )));
+
+    let config = app
+        .world()
+        .resource::<Session>()
+        .config()
+        .expect("a launched session has a config");
+    assert!(config.customization.is_none());
+    assert_eq!(mm2_game::record_eligibility(config), Ok(()));
 }

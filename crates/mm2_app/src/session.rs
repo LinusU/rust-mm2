@@ -567,7 +567,24 @@ pub fn load_session_world(
         match race::event_race_setup(&vfs.0, event_ref, config.difficulty) {
             Ok(setup) => {
                 event_key = Some(setup.key);
-                let def = setup.definition;
+                let mut def = setup.definition;
+                let mut roster = setup.roster;
+                // RACE-3's Circuit parenthetical (UI-2): the player's
+                // laps + opponents picks rewrite the built setup
+                // before anything consumes it — grid slots, the
+                // minimap's opponent pool and the HUD laps readout
+                // all follow the effective counts. A session whose
+                // picks equal the authored row never sets
+                // `customization` at all (DRV-6).
+                if let Some(picks) = config.customization.and_then(|c| c.race) {
+                    let applied = mm2_game::apply_race_picks(&mut def, &mut roster, picks);
+                    info!(
+                        laps = ?applied.laps,
+                        opponents = applied.opponents,
+                        opponents_clamped = applied.opponents_clamped,
+                        "race-shape picks applied"
+                    );
+                }
                 // The player slot overrides the world's roam spawn; an
                 // event without slots keeps the roam spawn.
                 if let Some(slot) = def.start_slots.get(mm2_content::PLAYER_SLOT) {
@@ -624,13 +641,7 @@ pub fn load_session_world(
                         "event pathset overlay stamped"
                     );
                 }
-                event_race = Some((
-                    def,
-                    setup.roster,
-                    setup.rewards,
-                    setup.availability,
-                    setup.aimap,
-                ));
+                event_race = Some((def, roster, setup.rewards, setup.availability, setup.aimap));
             }
             Err(e) => {
                 error!(error = %e, event = ?event_ref, "event failed to load");

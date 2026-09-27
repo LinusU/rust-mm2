@@ -87,6 +87,9 @@ impl SessionConfig {
         self.densities.validate()?;
         if let Some(c) = &self.customization {
             c.densities.validate()?;
+            if c.race.is_some_and(|r| r.laps == 0) {
+                return Err(ConfigError::ZeroLaps);
+            }
         }
         if let WorldMode::City { psdl } = &self.world
             && psdl.trim().is_empty()
@@ -119,6 +122,10 @@ pub enum ConfigError {
     EmptyCityPath,
     /// A vehicle id that is present but blank.
     EmptyVehicleId,
+    /// A customized `laps` pick of zero — an Ordered race needs at
+    /// least one lap (`RaceError::NoLaps`); the options picker starts
+    /// at 1 so this only rejects a hand-built config.
+    ZeroLaps,
 }
 
 impl std::fmt::Display for ConfigError {
@@ -129,6 +136,7 @@ impl std::fmt::Display for ConfigError {
             }
             Self::EmptyCityPath => write!(f, "city world has an empty logical path"),
             Self::EmptyVehicleId => write!(f, "vehicle id is empty"),
+            Self::ZeroLaps => write!(f, "customized laps of zero"),
         }
     }
 }
@@ -374,6 +382,32 @@ pub struct SessionCustomization {
     pub conditions: SessionConditions,
     /// Picked densities — `traffic` drives ambient traffic today.
     pub densities: Densities,
+    /// Picked race shape — RACE-3's Circuit parenthetical (laps +
+    /// opponents, UI-2). `Some` only on sessions launched from a
+    /// Circuit event's options screen; Blitz/Checkpoint events and
+    /// cruise carry `None` because the documented options do not offer
+    /// the rows there. Applied to the built definition/roster by
+    /// [`apply_race_picks`](crate::race::apply_race_picks) at session
+    /// load — both counts are concrete picks seeded from the authored
+    /// row, so a `Some` applies verbatim.
+    pub race: Option<RaceCustomization>,
+}
+
+/// The laps + opponents picks a beaten Circuit event's options screen
+/// carries (RACE-3's parenthetical, UI-2). Concrete counts — the menu
+/// seeds both from the authored `NumLaps`/`Opponents` row so an
+/// untouched visit sets no customization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RaceCustomization {
+    /// Ordered-rule lap count. Must be at least 1 (an Ordered race
+    /// with zero laps is a `RaceError::NoLaps` definition); the
+    /// options picker bounds the top end at
+    /// [`CUSTOMIZE_LAP_MAX`](crate::race::CUSTOMIZE_LAP_MAX).
+    pub laps: u32,
+    /// Opponent count — `0` races alone. The pick is bounded by the
+    /// wired roster at apply time: the aimap is the opponent source,
+    /// so a count beyond the authored lineup cannot fabricate slots.
+    pub opponents: u32,
 }
 
 /// Ambient population densities, authored per event as 0-1 fractions

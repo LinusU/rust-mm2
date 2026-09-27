@@ -37,20 +37,19 @@
 //! - [`Screen::Customize`] is the condition-options screen (UI-2):
 //!   weather, time-of-day and traffic density — the authored option
 //!   fields with runtime consumers today (lighting F18-A.2, ambient
-//!   traffic F10). Cruise offers it unconditionally (RACE-4); an event
-//!   offers it once its own record is beaten — RACE-3's
-//!   `EventAvailability::customizable`. Picks ride the screen seeded
-//!   from the session's defaults and launch through
+//!   traffic F10) — plus the laps/opponents race-shape rows on Circuit
+//!   events (RACE-3's parenthetical). Cruise offers it unconditionally
+//!   (RACE-4); an event offers it once its own record is beaten —
+//!   RACE-3's `EventAvailability::customizable`. Picks ride the screen
+//!   seeded from the session's defaults and launch through
 //!   `SessionConfig::customization`; an unchanged pick set launches a
 //!   default run so DRV-6 record eligibility is unaffected by a visit.
 //!
 //! Deferred to later slices (honest gaps, not placeholders):
-//! pedestrian/cop density and Circuit laps/opponents options (no
-//! consumers for the first pair — F19/F20 — and laps/opponents sit in
-//! DRV-6's explicit exclusion list), Quick Race customization,
-//! Driver's Stats (no aggregate stats are persisted), original menu
-//! art and audio. The in-session overlays landed in their own modules
-//! — `crate::pause`, `crate::results`.
+//! pedestrian/cop density options (no consumers — F19/F20), Quick
+//! Race customization, Driver's Stats (no aggregate stats are
+//! persisted), original menu art and audio. The in-session overlays
+//! landed in their own modules — `crate::pause`, `crate::results`.
 
 use std::collections::BTreeMap;
 
@@ -61,9 +60,9 @@ use mm2_assets::Vfs;
 use mm2_content::{EventCatalog, VehicleCatalog, VehicleDef};
 use mm2_game::{
     AvailabilityTable, Densities, Difficulty, EventRef, EventTableKind, GarageTable,
-    MAX_NAME_CHARS, Mm2Vfs, PlayerProfile, ProfileId, ProfileStore, ProfileSummary, Session,
-    SessionConditions, SessionConfig, SessionCustomization, SessionMode, SessionPhase, TimeOfDay,
-    VehicleSelection, Weather, WorldMode,
+    MAX_NAME_CHARS, Mm2Vfs, PlayerProfile, ProfileId, ProfileStore, ProfileSummary,
+    RaceCustomization, Session, SessionConditions, SessionConfig, SessionCustomization,
+    SessionMode, SessionPhase, TimeOfDay, VehicleSelection, Weather, WorldMode,
 };
 use tracing::{info, warn};
 
@@ -173,10 +172,16 @@ pub enum Screen {
         /// (ambient traffic consumes it); `pedestrians` rides the
         /// seed untouched pending its F19 consumer.
         densities: Densities,
+        /// Working race-shape picks — `Some` only on Circuit events
+        /// (RACE-3's laps + opponents parenthetical), seeded from the
+        /// authored `NumLaps`/`Opponents` row.
+        race: Option<RaceCustomization>,
         /// The session's default conditions for this target.
         seed_conditions: SessionConditions,
         /// The session's default densities for this target.
         seed_densities: Densities,
+        /// The session's default race shape — `None` off Circuit rows.
+        seed_race: Option<RaceCustomization>,
     },
 }
 
@@ -225,6 +230,11 @@ pub enum Action {
     CycleTimeOfDay,
     /// Cycle the Customize screen's traffic-density pick.
     CycleTrafficDensity,
+    /// Cycle the Customize screen's laps pick (Circuit rows only).
+    CycleLaps,
+    /// Cycle the Customize screen's opponent-count pick (Circuit rows
+    /// only, bounded by the authored roster size).
+    CycleOpponents,
     /// Launch the session the Customize screen configures.
     LaunchCustomize,
     /// Select a roster vehicle and open its paint list.
@@ -620,14 +630,18 @@ impl MenuShell {
             | Action::RecordsTableFilter
             | Action::CycleWeather
             | Action::CycleTimeOfDay
-            | Action::CycleTrafficDensity) => self.adjust_with(data, &action, true),
+            | Action::CycleTrafficDensity
+            | Action::CycleLaps
+            | Action::CycleOpponents) => self.adjust_with(data, &action, true),
             Action::LaunchCustomize => {
                 let Screen::Customize {
                     target,
                     conditions,
                     densities,
+                    race,
                     seed_conditions,
                     seed_densities,
+                    seed_race,
                 } = &self.screen
                 else {
                     return;
@@ -642,10 +656,13 @@ impl MenuShell {
                 // Picks that match the session's defaults launch a
                 // default run — a visit that changed nothing is not a
                 // customized run (DRV-6 eligibility).
-                let customization = (conditions != seed_conditions || densities != seed_densities)
+                let customization = (conditions != seed_conditions
+                    || densities != seed_densities
+                    || race != seed_race)
                     .then_some(SessionCustomization {
                         conditions: *conditions,
                         densities: *densities,
+                        race: *race,
                     });
                 self.launch(data, vfs, mode, city, customization, effects);
             }
@@ -787,6 +804,27 @@ impl MenuShell {
                     densities.traffic = step_density(densities.traffic, forward);
                 }
             }
+            Action::CycleLaps => {
+                if let Screen::Customize {
+                    race: Some(race), ..
+                } = &mut self.screen
+                {
+                    race.laps = step_bounded(race.laps, 1, mm2_game::CUSTOMIZE_LAP_MAX, forward);
+                }
+            }
+            Action::CycleOpponents => {
+                // The picker cannot offer more opponents than the
+                // event authors — the aimap is the roster's source, so
+                // the authored count is the top of the range.
+                if let Screen::Customize {
+                    race: Some(race),
+                    seed_race: Some(seed),
+                    ..
+                } = &mut self.screen
+                {
+                    race.opponents = step_bounded(race.opponents, 0, seed.opponents, forward);
+                }
+            }
             _ => {}
         }
     }
@@ -911,8 +949,10 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                             target: CustomizeTarget::Cruise { city: city.clone() },
                             conditions: SessionConditions::default(),
                             densities: Densities::DEFAULT,
+                            race: None,
                             seed_conditions: SessionConditions::default(),
                             seed_densities: Densities::DEFAULT,
+                            seed_race: None,
                         }),
                     },
                 ]
@@ -1013,13 +1053,14 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
             target,
             conditions,
             densities,
+            race,
             ..
         } => {
             let start = match target {
                 CustomizeTarget::Cruise { .. } => "Start cruise",
                 CustomizeTarget::Event { .. } => "Start race",
             };
-            vec![
+            let mut rows = vec![
                 Row {
                     text: format!("Weather: {}", conditions.weather.name()),
                     enabled: Ok(()),
@@ -1035,12 +1076,27 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                     enabled: Ok(()),
                     action: Action::CycleTrafficDensity,
                 },
-                Row {
-                    text: start.to_string(),
+            ];
+            // RACE-3's parenthetical: Circuit options additionally
+            // carry laps + opponents rows.
+            if let Some(race) = race {
+                rows.push(Row {
+                    text: format!("Laps: {}", race.laps),
                     enabled: Ok(()),
-                    action: Action::LaunchCustomize,
-                },
-            ]
+                    action: Action::CycleLaps,
+                });
+                rows.push(Row {
+                    text: format!("Opponents: {}", race.opponents),
+                    enabled: Ok(()),
+                    action: Action::CycleOpponents,
+                });
+            }
+            rows.push(Row {
+                text: start.to_string(),
+                enabled: Ok(()),
+                action: Action::LaunchCustomize,
+            });
+            rows
         }
         Screen::Garage => garage_rows(shell, data),
         Screen::Paints { car } => paint_rows(shell, data, car),
@@ -1428,16 +1484,16 @@ fn options_row(
     // rather than fabricating defaults — the event's own build would
     // reject the same values at load.
     let (gate, seed) = match gate {
-        Ok(()) => match authored_seed(e.race_params(difficulty)) {
-            Some(seed) => (Ok(()), seed),
-            None => (
-                Err("authored conditions are out of range".to_string()),
-                (SessionConditions::default(), Densities::DEFAULT),
+        Ok(()) => match authored_seed(e.race_params(difficulty), e.event_ref.table) {
+            Ok(seed) => (Ok(()), seed),
+            Err(reason) => (
+                Err(reason),
+                (SessionConditions::default(), Densities::DEFAULT, None),
             ),
         },
         Err(reason) => (
             Err(reason),
-            (SessionConditions::default(), Densities::DEFAULT),
+            (SessionConditions::default(), Densities::DEFAULT, None),
         ),
     };
     Row {
@@ -1450,27 +1506,65 @@ fn options_row(
             },
             conditions: seed.0,
             densities: seed.1,
+            race: seed.2,
             seed_conditions: seed.0,
             seed_densities: seed.1,
+            seed_race: seed.2,
         }),
     }
 }
 
 /// Read an authored parameter block into the customization seed —
 /// the same distillation `event_params` performs (selector 0-3,
-/// density 0..=1), `None` when a value sits outside the authored
-/// ranges so the row disables instead of guessing.
-fn authored_seed(p: &mm2_formats::racedata::RaceParams) -> Option<(SessionConditions, Densities)> {
-    let conditions = SessionConditions {
-        time_of_day: TimeOfDay::new(u8::try_from(p.time_of_day).ok()?).ok()?,
-        weather: Weather::new(u8::try_from(p.weather).ok()?).ok()?,
-    };
+/// density 0..=1) plus RACE-3's Circuit parenthetical (`NumLaps`/
+/// `Opponents` seed the race-shape rows; every other table offers
+/// none). `Err` names the field group a value falls outside of, so
+/// the row disables with a reason instead of guessing.
+fn authored_seed(
+    p: &mm2_formats::racedata::RaceParams,
+    table: EventTableKind,
+) -> Result<(SessionConditions, Densities, Option<RaceCustomization>), String> {
+    let bad = |field| format!("authored {field} is out of range");
     let densities = Densities {
         traffic: p.ambient,
         pedestrians: p.peds,
     };
-    densities.validate().ok()?;
-    Some((conditions, densities))
+    let conditions = SessionConditions {
+        time_of_day: u8::try_from(p.time_of_day)
+            .ok()
+            .and_then(|v| TimeOfDay::new(v).ok())
+            .ok_or_else(|| bad("conditions"))?,
+        weather: u8::try_from(p.weather)
+            .ok()
+            .and_then(|v| Weather::new(v).ok())
+            .ok_or_else(|| bad("conditions"))?,
+    };
+    densities.validate().map_err(|_| bad("conditions"))?;
+    let race = match table {
+        EventTableKind::Circuit => Some(RaceCustomization {
+            laps: u32::try_from(p.num_laps)
+                .ok()
+                .filter(|&n| n >= 1)
+                .ok_or_else(|| bad("laps"))?,
+            opponents: u32::try_from(p.opponents).map_err(|_| bad("opponents"))?,
+        }),
+        _ => None,
+    };
+    Ok((conditions, densities, race))
+}
+
+/// Step a count one place in `forward`'s direction inside
+/// `lo..=hi`, wrapping — the laps/opponents picker's range walk
+/// (1..=`CUSTOMIZE_LAP_MAX`, 0..=authored count).
+fn step_bounded(current: u32, lo: u32, hi: u32, forward: bool) -> u32 {
+    debug_assert!(lo <= hi);
+    let len = hi - lo + 1;
+    let pos = current.clamp(lo, hi) - lo;
+    if forward {
+        lo + (pos + 1) % len
+    } else {
+        lo + (pos + len - 1) % len
+    }
 }
 
 /// Step a 0-3 selector one place in `forward`'s direction, wrapping.

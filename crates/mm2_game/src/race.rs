@@ -30,9 +30,9 @@
 
 use bevy::prelude::*;
 
-use crate::config::{Densities, SessionConditions, SessionConfig};
+use crate::config::{Densities, RaceCustomization, SessionConditions, SessionConfig};
 use crate::ids::PlayerId;
-use crate::opponent::OpponentRoute;
+use crate::opponent::{OpponentRoster, OpponentRoute};
 use crate::result::ResultId;
 
 /// The fixed-step rate the shared race clock counts at — the
@@ -237,6 +237,62 @@ pub fn effective_conditions(
         .map(|c| c.conditions)
         .or_else(|| event.map(|e| e.conditions))
         .unwrap_or(config.conditions)
+}
+
+/// Upper bound of the options screen's laps picker — RACE-3's Circuit
+/// parenthetical (UI-2). Designed: the original's option range is
+/// unrecovered and authored `NumLaps` runs 2–4 (CIR-5), so ten keeps
+/// the pick generous without inviting absurd races. The constant
+/// bounds the picker only; [`apply_race_picks`] applies whatever
+/// count it is handed verbatim.
+pub const CUSTOMIZE_LAP_MAX: u32 = 10;
+
+/// What [`apply_race_picks`] actually bound — the picks are requests;
+/// the rule kind and the wired roster decide what lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RacePicksReport {
+    /// The lap count bound — `Some` on [`CheckpointRule::Ordered`]
+    /// definitions, `None` on every other rule (a laps pick is
+    /// meaningless there and ignored, never clamped).
+    pub laps: Option<u32>,
+    /// The opponent count after the wired-roster bound.
+    pub opponents: u32,
+    /// The pick exceeded the wired roster — the aimap is the opponent
+    /// source, so extra picks cannot fabricate slots.
+    pub opponents_clamped: bool,
+}
+
+/// Apply the player's RACE-3 race-shape picks (the beaten Circuit
+/// event's laps + opponents options) to a built event setup — the
+/// writer F17-A.6 deferred until this consumption existed.
+///
+/// `laps` rewrites [`RaceDefinition::laps`] on `Ordered` definitions
+/// and is ignored on the others (their constant authored `NumLaps`
+/// never bound — `UNK-5`). `opponents` keeps the first N authored
+/// roster entries in file order — which rows the original fields for
+/// a reduced count is unrecovered, so prefix order is the
+/// deterministic designed reading — and syncs
+/// [`EventParams::opponents`] to the applied count so every consumer
+/// reads the same field size. `SessionConfig::validate` rejects a
+/// `laps` of zero upstream; the writer applies its input verbatim.
+pub fn apply_race_picks(
+    definition: &mut RaceDefinition,
+    roster: &mut OpponentRoster,
+    picks: RaceCustomization,
+) -> RacePicksReport {
+    let laps = (definition.rule == CheckpointRule::Ordered).then(|| {
+        definition.laps = picks.laps;
+        picks.laps
+    });
+    let wired = roster.entries.len() as u32;
+    let opponents = picks.opponents.min(wired);
+    roster.entries.truncate(opponents as usize);
+    definition.params.opponents = opponents;
+    RacePicksReport {
+        laps,
+        opponents,
+        opponents_clamped: picks.opponents > wired,
+    }
 }
 
 /// Everything the shared runtime needs to run one authored event.

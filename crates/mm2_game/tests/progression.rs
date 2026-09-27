@@ -447,6 +447,7 @@ fn record_eligibility_refuses_customized_conditions() {
             weather: Weather::new(3).unwrap(),
         },
         densities: Densities::DEFAULT,
+        race: None,
     });
     assert_eq!(record_eligibility(&config), Err(Ineligible::Customized));
 }

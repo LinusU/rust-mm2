@@ -46,8 +46,9 @@ pub use banger::{
 pub use breakaway::{BreakPartSpec, BreakPartState, PartDetached, VehicleBreaks};
 pub use config::{
     CameraPose, ConfigError, Densities, DevOverrides, Difficulty, EventRef, EventTableKind,
-    NavOverlay, SelectorError, SessionAuthority, SessionConditions, SessionConfig,
-    SessionCustomization, SessionMode, SpawnPose, TimeOfDay, VehicleSelection, Weather,
+    NavOverlay, RaceCustomization, SelectorError, SessionAuthority, SessionConditions,
+    SessionConfig, SessionCustomization, SessionMode, SpawnPose, TimeOfDay, VehicleSelection,
+    Weather,
 };
 pub use damage::{
     DISABLED_PENALTY_TICKS, DamageEvent, DamageSpec, DamageState, DamageTier, DamageVerdict,
@@ -87,11 +88,12 @@ pub use props::{
     yawed_basis,
 };
 pub use race::{
-    CatchUpPolicy, Checkpoint, CheckpointRule, DEFAULT_CHECKPOINT_HEIGHT, DEFAULT_COUNTDOWN_TICKS,
-    EventParams, NavTarget, ParticipantState, ProgressOutcome, RACE_TICK_HZ, RaceDefinition,
-    RaceError, RacePhase, RaceProgress, RaceStart, RaceStarted, RaceState, RouteGateLine,
-    TargetSelection, catch_up_factor, course_progress, cycle_target, effective_conditions,
-    live_order, mean_gate_spacing, navigation_target, relative_bearing,
+    CUSTOMIZE_LAP_MAX, CatchUpPolicy, Checkpoint, CheckpointRule, DEFAULT_CHECKPOINT_HEIGHT,
+    DEFAULT_COUNTDOWN_TICKS, EventParams, NavTarget, ParticipantState, ProgressOutcome,
+    RACE_TICK_HZ, RaceDefinition, RaceError, RacePhase, RacePicksReport, RaceProgress, RaceStart,
+    RaceStarted, RaceState, RouteGateLine, TargetSelection, apply_race_picks, catch_up_factor,
+    course_progress, cycle_target, effective_conditions, live_order, mean_gate_spacing,
+    navigation_target, relative_bearing,
 };
 pub use recovery::{
     GroundContact, RecoveryCause, RecoveryEvent, RecoveryPolicy, RecoveryVerdict, VehicleRecovery,

@@ -22,11 +22,11 @@ use mm2_app::session::{self, SessionControl};
 use mm2_app::{camera, contracts, race};
 use mm2_assets::Vfs;
 use mm2_game::{
-    Difficulty, EventRef, EventTableKind, ImpactEvent, Mm2Vfs, ObjectIdentity, OpponentRoute,
-    OpponentRoutePoint, OpponentSpec, ParticipantState, Player, PlayerControl, PlayerVehicle,
-    RaceDefinition, RaceProgress, RaceStarted, RaceState, ResultLedger, RouteGateLine, Session,
-    SessionConfig, SessionEntity, SessionMode, SessionPhase, advance_session_tick,
-    despawn_session_entities,
+    Densities, Difficulty, EventRef, EventTableKind, ImpactEvent, Mm2Vfs, ObjectIdentity,
+    OpponentRoute, OpponentRoutePoint, OpponentSpec, ParticipantState, Player, PlayerControl,
+    PlayerVehicle, RaceCustomization, RaceDefinition, RaceProgress, RaceStarted, RaceState,
+    ResultLedger, RouteGateLine, Session, SessionConditions, SessionConfig, SessionCustomization,
+    SessionEntity, SessionMode, SessionPhase, advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::{Vehicle, VehicleConfig, VehicleInput, VehiclePlugin};
 
@@ -1134,6 +1134,72 @@ fn restart_restores_the_circuit_grid_counters_and_objects() {
         ledger.standings_in(2).is_empty(),
         "a stale result must not rank into generation 2"
     );
+}
+
+/// F17-A.7's session leg (RACE-3's Circuit parenthetical): a launched
+/// `SessionCustomization::race` applies after the authored setup
+/// builds — the effective definition takes the picked lap count and
+/// the roster shrinks to the picked prefix before opponents spawn.
+#[test]
+fn circuit_race_picks_apply_to_the_session_definition_and_roster() {
+    let tmp = circuit_install();
+    let config = SessionConfig {
+        customization: Some(SessionCustomization {
+            conditions: SessionConditions::default(),
+            densities: Densities::DEFAULT,
+            race: Some(RaceCustomization {
+                laps: 5,
+                opponents: 1,
+            }),
+        }),
+        ..circuit_config()
+    };
+    let mut app = event_app(config, vfs_of(tmp.path()));
+    app.update();
+    assert_eq!(phase(&app), SessionPhase::Countdown);
+
+    let race = app.world().resource::<RaceState>();
+    assert_eq!(race.definition.laps, 5, "the picked lap count bound");
+    assert_eq!(
+        race.definition.params.opponents, 1,
+        "the param tracks the applied count"
+    );
+    let opps = opponents(&mut app);
+    assert_eq!(opps.len(), 1, "the picked prefix spawns");
+    let d = app.world().get::<OpponentDriver>(opps[0]).unwrap();
+    assert_eq!(
+        d.spec.vehicle, "vpt",
+        "the kept entry is the authored first"
+    );
+}
+
+/// The same picks never fabricate roster entries — a count beyond the
+/// authored `[Opponent]` block clamps to the wired lineup.
+#[test]
+fn circuit_race_picks_never_exceed_the_wired_roster() {
+    let tmp = circuit_install();
+    let config = SessionConfig {
+        customization: Some(SessionCustomization {
+            conditions: SessionConditions::default(),
+            densities: Densities::DEFAULT,
+            race: Some(RaceCustomization {
+                laps: 3,
+                opponents: 9,
+            }),
+        }),
+        ..circuit_config()
+    };
+    let mut app = event_app(config, vfs_of(tmp.path()));
+    app.update();
+    assert_eq!(phase(&app), SessionPhase::Countdown);
+
+    let race = app.world().resource::<RaceState>();
+    assert_eq!(race.definition.laps, 3);
+    assert_eq!(
+        race.definition.params.opponents, 2,
+        "clamped to the aimap's rows"
+    );
+    assert_eq!(opponents(&mut app).len(), 2, "no opponent is fabricated");
 }
 
 fn phase(app: &App) -> SessionPhase {

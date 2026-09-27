@@ -1,4 +1,110 @@
-# Last iteration — F22-A.7 review repair: pad controls share the window-focus gate (iteration 78)
+# Last iteration — F17-A.7: Circuit laps/opponents options (iteration 79)
+
+Iteration 79 on `ralph/night` (baseline `b183907`, F22-A.7 review
+repair — external verify + review green, no blocking findings;
+twenty-fourth iteration of run `20260925T144723`). One coherent
+slice: the Circuit leg F17-A.6 deferred — RACE-3's parenthetical
+laps + opponents options on a beaten Circuit event's options screen,
+carried through `SessionCustomization::race` onto the built event
+setup.
+
+## Task selection
+
+The plan's first-named slice is F14-C's unblocked legs, but its
+remaining completability claims are gated on F15-B's unresolved
+opponent research and the catalog-validation legs are a multi-source
+audit — not one coherent small change. F17-A.6's own row names the
+Circuit laps/opponents options as deferred pending "authored writers";
+the authored data (`NumLaps`, `Opponents`, the `[Opponent]` aimap
+roster) is all parsed and wired today, so the missing piece was one
+focused change: a `RaceCustomization` pick, the writer applying it to
+the built event, and the Circuit-only menu rows. It is a documented
+original capability (RACE-3: `…weather, time of day, traffic density,
+pedestrian density, cop density; for Circuit races the number of laps
+and the number of opponents`), not an invented feature.
+
+## Findings and actions
+
+- **`mm2_game::config`** — `SessionCustomization.race:
+  Option<RaceCustomization{laps, opponents}>`; `SessionConfig::validate`
+  rejects `laps == 0` as the new `ConfigError::ZeroLaps` (a zero-lap
+  Ordered race can never advance — rejected at the boundary rather
+  than built).
+- **`mm2_game::race`** — `apply_race_picks(&mut def, &mut roster,
+  picks)` rewrites `RaceDefinition::laps` only on
+  `CheckpointRule::Ordered` definitions (Blitz `AnyOrder`/`RaceRule`
+  untouched — `NumLaps` is meaningless there, UNK-5), truncates
+  `OpponentRoster.entries` to `min(picks.opponents, wired aimap
+  count)` — a file-order prefix, never fabricated opponents — and
+  syncs `definition.params.opponents`. `RacePicksReport` names what
+  bound (incl. `opponents_clamped`). `CUSTOMIZE_LAP_MAX = 10` is the
+  designed picker ceiling (authored Circuits write 2–4, CIR-5; the
+  original's range is unrecovered).
+- **`mm2_app::session::load_session_world`** — applies the picks
+  between `event_race_setup` and `event_race` storage, before grid,
+  HUD, minimap and session consumers read the setup.
+- **`mm2_app::menu`** — `Screen::Customize` carries `race`/`seed_race`
+  (`Some` only on `EventTableKind::Circuit`); `authored_seed` parses
+  `NumLaps`/`Opponents` from the selected difficulty's authored block
+  and refuses to fabricate on out-of-range values (row disabled with
+  the reason). `Laps:`/`Opponents:` rows cycle `1..=CUSTOMIZE_LAP_MAX`
+  and `0..=authored` via `CycleLaps`/`CycleOpponents` + `step_bounded`;
+  `LaunchCustomize` folds `race != seed_race` into the same
+  picks-differ-from-seed rule as conditions/densities, so an unchanged
+  Circuit visit still launches a record-eligible default run and any
+  changed pick is `Ineligible::Customized` (DRV-6).
+- **Ledger** — DSN-58 records the designed semantics (lap bound,
+  prefix truncation, roster cap); UNK-38 records what is unrecovered
+  (original picker range, whether opponents could exceed the authored
+  count, which entries a reduced pick fields, persistence across
+  difficulty switches); DSN-29's deferred note updated;
+  `docs/research/menu.md`'s UI-2 row updated.
+
+## Evidence
+
+- `cargo test --locked -p mm2_game --test race` — green (+3: Ordered
+  laps rewrite + `EventParams.opponents` sync, `AnyOrder` untouched,
+  roster truncation + clamp) plus config zero-laps validation.
+- `cargo test --locked -p mm2_app --test opponents` — green (+2:
+  `circuit_race_picks_apply_to_the_session_definition_and_roster`,
+  `circuit_race_picks_never_exceed_the_wired_roster` — picked laps
+  land on `RaceState.definition`, the picked prefix spawns, a pick
+  beyond the wired aimap count clamps).
+- `cargo test --locked -p mm2_app --test menu` — green (+4:
+  authored-seeded `Laps`/`Opponents` rows on the beaten Circuit
+  event, wrap-bounded cycling, a changed launch carrying
+  `customization.race` through to the built `RaceState.definition`,
+  a returned-to-seed visit launching `customization: None` +
+  record-eligible).
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --workspace --all-targets --all-features -- -D
+  warnings` — clean (the authored-seed tuple return refactored to a
+  `Result` for `type_complexity`; `field_reassign_with_default` in
+  the new zero-laps test fixed by constructing `SessionConfig`
+  directly).
+- `cargo test --workspace` — green, every suite.
+
+## Classification / remaining open items
+
+- Original requirement (documented, RACE-3/UI-2): laps + opponents
+  options exist on a beaten Circuit event — implemented.
+- Designed (DSN-58): `1..=10` laps ceiling, `0..=authored` opponents
+  cap, file-order prefix truncation, `laps == 0` boundary rejection,
+  text row presentation.
+- Unknown (UNK-38): the original's picker ranges, whether a pick
+  could exceed the authored roster, which entries a reduced pick
+  fields, and persistence across difficulty switches.
+- Not claimed: retail/original-content evidence (all fixtures are
+  synthetic), a manual UI playtest, original opponent-AI semantics
+  (UNK-11). F17-A stays `active` — ped/cop density consumers, Quick
+  Race options and the AC03 interactive evidence leg remain.
+
+---
+
+# Prior iterations
 
 Iteration 78 on `ralph/night` (baseline `8b8455f`, F22-A.7 — external
 verify + review green, no blocking findings; twenty-third iteration of

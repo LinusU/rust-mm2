@@ -804,6 +804,7 @@ fn effective_conditions_prefers_the_player_customization() {
         customization: Some(SessionCustomization {
             conditions: customized,
             densities: Densities::DEFAULT,
+            race: None,
         }),
         ..SessionConfig::default()
     };
@@ -1091,4 +1092,116 @@ fn reanchor_resyncs_a_boundary_crossing_walk_back() {
         (arc2 - 530.0).abs() < 0.5,
         "an in-traversal landing keeps traversal 1: 400 + 130 = 530, got {arc2}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// F17-A.7 race-shape picks — RACE-3's Circuit laps + opponents options
+// ---------------------------------------------------------------------------
+
+fn roster(vehicles: &[&str]) -> OpponentRoster {
+    OpponentRoster {
+        entries: vehicles
+            .iter()
+            .map(|v| OpponentSpec {
+                vehicle: v.to_string(),
+                params: Vec::new(),
+                route: None,
+            })
+            .collect(),
+        issues: Vec::new(),
+    }
+}
+
+/// An Ordered (Circuit) definition takes the picked lap count
+/// verbatim; the report names what bound.
+#[test]
+fn race_picks_rewrite_ordered_laps() {
+    let mut def = ordered(vec![checkpoint(0.0, 0.0), checkpoint(50.0, 0.0)], 2);
+    let mut r = roster(&["vpt", "vpheavy"]);
+    def.params.opponents = 2;
+
+    let applied = apply_race_picks(
+        &mut def,
+        &mut r,
+        RaceCustomization {
+            laps: 5,
+            opponents: 1,
+        },
+    );
+    assert_eq!(def.laps, 5);
+    assert_eq!(applied.laps, Some(5));
+    assert_eq!(r.entries.len(), 1);
+    assert_eq!(
+        r.entries[0].vehicle, "vpt",
+        "the pick keeps the authored prefix"
+    );
+    assert_eq!(
+        def.params.opponents, 1,
+        "the param tracks the applied count"
+    );
+    assert_eq!(applied.opponents, 1);
+    assert!(!applied.opponents_clamped);
+}
+
+/// A non-Ordered definition ignores the laps pick — `NumLaps` never
+/// bound there (UNK-5) — while the opponents pick still applies.
+#[test]
+fn race_picks_ignore_laps_off_ordered() {
+    let mut def = any_order(vec![checkpoint(0.0, 0.0)], None);
+    let mut r = roster(&["vpt"]);
+
+    let applied = apply_race_picks(
+        &mut def,
+        &mut r,
+        RaceCustomization {
+            laps: 4,
+            opponents: 0,
+        },
+    );
+    assert_eq!(applied.laps, None, "AnyOrder has no laps to rewrite");
+    assert_eq!(def.laps, 1, "the authored value is untouched");
+    assert!(r.entries.is_empty());
+    assert_eq!(def.params.opponents, 0);
+}
+
+/// A pick beyond the wired roster clamps to it — the aimap is the
+/// opponent source, so extra picks cannot fabricate slots — and the
+/// report says so.
+#[test]
+fn race_picks_clamp_to_the_wired_roster() {
+    let mut def = ordered(vec![checkpoint(0.0, 0.0)], 2);
+    let mut r = roster(&["vpt", "vpheavy"]);
+    def.params.opponents = 2;
+
+    let applied = apply_race_picks(
+        &mut def,
+        &mut r,
+        RaceCustomization {
+            laps: 2,
+            opponents: 9,
+        },
+    );
+    assert_eq!(r.entries.len(), 2, "no opponent is fabricated");
+    assert_eq!(applied.opponents, 2);
+    assert!(applied.opponents_clamped);
+    assert_eq!(def.params.opponents, 2);
+}
+
+/// `SessionConfig::validate` rejects a zero-lap customization — an
+/// Ordered race with zero laps is a `RaceError::NoLaps` definition, so
+/// the pick fails at the boundary rather than mid-load.
+#[test]
+fn zero_laps_customization_fails_validation() {
+    let config = SessionConfig {
+        customization: Some(SessionCustomization {
+            conditions: SessionConditions::default(),
+            densities: Densities::DEFAULT,
+            race: Some(RaceCustomization {
+                laps: 0,
+                opponents: 1,
+            }),
+        }),
+        ..SessionConfig::default()
+    };
+    assert_eq!(config.validate(), Err(ConfigError::ZeroLaps));
 }
