@@ -36,7 +36,8 @@ pub mod traffic;
 pub use audio::{
     AmbientAudio, AmbientEngineSpec, EngineLoopSpec, EngineMix, ImpactPick, RollingSpec,
     SIREN_FLAG, SirenPlayback, SirenSampleSpec, SirenSpec, SirenTransition, SkidPick, SkidSpec,
-    SkidUnit, SurfaceSpec, SurfaceVariant, VehicleAudio, impact_category, pick_impact,
+    SkidUnit, SurfaceSpec, SurfaceVariant, VehicleAudio, cue_wave_stem, draw_cue_suffix,
+    draw_speaker, impact_category, pick_impact, prerace_tod_stem, prerace_weather_stem,
     tire_slippage,
 };
 pub use banger::{

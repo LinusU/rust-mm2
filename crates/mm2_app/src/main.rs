@@ -1340,6 +1340,10 @@ fn main() {
             // computes on the voice components, so headless runs read
             // it like the other rigs.
             audio::weather_voices.after(session::drive_session),
+            // F18-B.5: the environmental commentary queue — the same
+            // despawn ordering; one-shots resolve and play inside the
+            // pre-race window.
+            audio::commentary_voices.after(session::drive_session),
             // F07-B.2: the spatial listener follows whichever camera is
             // active — after the toggle so a mode switch moves the ear
             // the same frame, and after the session driver for the

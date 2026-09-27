@@ -34,6 +34,7 @@ pub mod racefiles;
 pub mod reader;
 pub mod rewards;
 pub mod sky;
+pub mod spchdata;
 pub mod tex;
 pub mod tune;
 pub mod veh;

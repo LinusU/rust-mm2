@@ -444,6 +444,9 @@ pub fn headless_smoke(
                     // seeded thunder schedule run headless too — the
                     // record's `aud=` m/t fields read them.
                     crate::audio::weather_voices.after(session::drive_session),
+                    // F18-B.5: the environmental commentary queue —
+                    // the record's `aud=` q field reads its count.
+                    crate::audio::commentary_voices.after(session::drive_session),
                     crate::audio::audio_listener.after(session::drive_session),
                     crate::audio::count_sinks,
                     crate::audio::sync_audio_pause,
@@ -1346,8 +1349,17 @@ pub fn headless_smoke(
             } else {
                 String::new()
             };
+            // F18-B.5: commentary cue voices spawned — the same
+            // activity-gated append; a registry/table/wave that
+            // resolves nothing surfaces through the shared `+Nx`
+            // failure counter, never a silent dry run.
+            let commentary = if r.commentary > 0 {
+                format!("/{}q", r.commentary)
+            } else {
+                String::new()
+            };
             format!(
-                " aud={}h/{}v/{}s/{}l/{}a/{}r{impacts}{clutch}{surface}{ambient}{sirens}{weather}{dropped}{failed}",
+                " aud={}h/{}v/{}s/{}l/{}a/{}r{impacts}{clutch}{surface}{ambient}{sirens}{weather}{commentary}{dropped}{failed}",
                 r.horns, r.voices, r.sunk, r.loops, r.audible, r.rigs
             )
         })

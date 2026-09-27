@@ -113,8 +113,22 @@
 //! UNK-25) and the claps fire on a seeded schedule adopting the
 //! `13.0`/`15.0` constants the exe stores beside the stems
 //! (positional attribution inferred, designed).
+//!
+//! F18-B.5 voices the session's environmental pre-race commentary:
+//! every city session inserts [`CommentaryAudio`], which binds the
+//! city's `aud/spchdata/<city>.csv` announcer registry and the
+//! `<stem>_prerace` cue tables the effective weather/time-of-day
+//! selectors name (the exe's `aud\spchdata\as%d`/`al%d` +
+//! `%s_prerace` strings; `weaclr`/`weacldy`/`weafog`/`wearain`,
+//! `timemorn`/`timenoon`/`timeeve`/`timenight`).
+//! [`commentary_voices`] resolves the registry, draws one speaker
+//! from the seeded stream, resolves each cue's drawn wave through
+//! the [`WaveBank`], then plays the queue as bounded
+//! `PlaybackMode::Despawn` one-shots during `Countdown`/`Playing`.
+//! A cue family or wave that resolves nothing counts `failed` once
+//! and plays nothing — never substituted (F18-AC06).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -131,13 +145,15 @@ use avian3d::prelude::{ComputedMass, LinearVelocity, Mass, SpatialQuery};
 use mm2_assets::Vfs;
 use mm2_content::SurfaceTables;
 use mm2_formats::cardata::{self, CardataBody, ImpactTable, SurfaceTable, is_sample_sentinel};
+use mm2_formats::spchdata::{AnnouncerIndex, CueTable};
 use mm2_formats::wav::{FORMAT_PCM, Wav, lookup_stem};
 use mm2_game::{
     AmbientAudio, AmbientEngineSpec, Banger, EngineLoopSpec, EngineMix, ImpactEvent, Mm2Vfs,
     NavRng, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerVehicle, SIREN_FLAG, Session,
-    SessionEntity, SessionPhase, SirenPlayback, SirenSpec, SirenTransition, SkidUnit,
-    SurfaceMaterial, SurfaceSpec, SurfaceVariant, VehicleAudio, Weather, impact_category,
-    pick_impact, tire_slippage,
+    SessionConditions, SessionEntity, SessionPhase, SirenPlayback, SirenSpec, SirenTransition,
+    SkidUnit, SurfaceMaterial, SurfaceSpec, SurfaceVariant, VehicleAudio, Weather, cue_wave_stem,
+    draw_cue_suffix, draw_speaker, impact_category, pick_impact, prerace_tod_stem,
+    prerace_weather_stem, tire_slippage,
 };
 use mm2_vehicle::{DriveDirection, Vehicle, VehicleState};
 
@@ -250,6 +266,12 @@ impl PcmAudio {
     /// Whole frames in the clip.
     fn frames(&self) -> usize {
         self.samples.len() / usize::from(self.channels.get())
+    }
+
+    /// Clip length in seconds — what the commentary sequencer waits
+    /// between queued cues.
+    pub fn duration(&self) -> f32 {
+        self.frames() as f32 / self.sample_rate.get() as f32
     }
 }
 
@@ -808,6 +830,89 @@ fn wave_rank(logical: &str) -> (u32, u32) {
     (tier, rate)
 }
 
+/// Seconds between queued commentary cues — a designed sequencing
+/// gap; the original's cue cadence is unrecovered (UNK-25).
+const COMMENTARY_GAP: f32 = 0.25;
+/// Commentary one-shot gain — authored level, same policy as the
+/// authored horn/impact plays (designed; the original's speech mix
+/// is unrecovered, UNK-25).
+const COMMENTARY_VOLUME: f32 = 1.0;
+/// Domain separation for the commentary `NavRng` — the thunder
+/// schedule, precip jitter and wheel-effect streams each hold their
+/// own mix of the session seed, so this draw can never alias another
+/// system's replay (designed, same contract as
+/// [`WEATHER_AUDIO_DOMAIN`]).
+const COMMENTARY_DOMAIN: u64 = 0x7370_6368_6461_7461;
+/// The `header` section the weather table binds — the exe's cue-type
+/// string.
+const WEATHER_SECTION: &str = "WEATHER";
+/// The `header` section the time-of-day table binds — same block.
+const TOD_SECTION: &str = "TIMEOFDAY";
+
+/// Session-scoped environmental commentary (F18-B.5): inserted by
+/// `load_session_world` on every city session — the bound registry
+/// path plus the two `<stem>_prerace` cue tables the effective
+/// selectors name. `commentary_voices` lazily resolves the registry
+/// and each cue's drawn wave once inside the pre-race window, then
+/// sequences the decoded clips. Dev worlds and cities with no
+/// `spchdata` registry carry no resource — no cue is ever fabricated
+/// (F18-AC06).
+#[derive(Resource)]
+pub struct CommentaryAudio {
+    /// `aud/spchdata/<city>.csv` — the announcer registry.
+    registry: String,
+    /// `(section, table stem)` pairs the session plays, weather then
+    /// time-of-day (the exe's cue-block order).
+    cues: [(&'static str, &'static str); 2],
+    /// The registry→speaker→cue→wave resolve ran (each failure
+    /// counted once — never retried per frame).
+    resolved: bool,
+    /// Decoded one-shots awaiting their slot, in authored order —
+    /// bounded at the authored cue count by construction.
+    queue: VecDeque<(String, Handle<PcmAudio>)>,
+    /// Pre-race seconds accumulated (`Countdown`/`Playing` only).
+    elapsed: f32,
+    /// `elapsed` the next queued cue may start at — the first cue
+    /// fires on the first live frame; later ones wait out the
+    /// previous clip plus [`COMMENTARY_GAP`].
+    next_at: f32,
+    /// Seeded draw stream — the speaker index and each cue's suffix
+    /// draw ride it, so a replayed session hears the same announcer
+    /// and the same lines.
+    rng: NavRng,
+}
+
+impl CommentaryAudio {
+    /// Bind the session's environmental cues; `city` is the PSDL stem
+    /// (`sf`, `london`, a mod city) or `None` for a dev world — no
+    /// registry, no commentary. The cue pair is the shared
+    /// `effective_conditions` pick, so the commentary names the same
+    /// weather the lighting/ambience already committed to.
+    pub fn bind(city: Option<&str>, conditions: SessionConditions, seed: u64) -> Option<Self> {
+        Some(Self {
+            registry: format!("aud/spchdata/{}.csv", city?),
+            cues: [
+                (WEATHER_SECTION, prerace_weather_stem(conditions.weather)),
+                (TOD_SECTION, prerace_tod_stem(conditions.time_of_day)),
+            ],
+            resolved: false,
+            queue: VecDeque::new(),
+            elapsed: 0.0,
+            next_at: 0.0,
+            rng: NavRng::new(seed.wrapping_add(COMMENTARY_DOMAIN)),
+        })
+    }
+}
+
+/// A spawned commentary one-shot — the wave stem is kept on the
+/// component for the smoke record and tests (headless runs cannot
+/// hear the clip, but the stem proves which authored cue played).
+#[derive(Component)]
+pub struct CommentaryVoice {
+    /// The resolved bank stem (`as1wearain02`).
+    pub stem: String,
+}
+
 /// One playing/queued sound entity. Despawns with its session via
 /// [`SessionEntity`]; one-shots additionally self-despawn at clip end
 /// through [`PlaybackMode::Despawn`].
@@ -845,6 +950,9 @@ pub enum VoiceKind {
     /// One `thunder` clap the session's [`WeatherAudio`] schedule
     /// spawned (F18-B.3).
     Thunder,
+    /// One `spchdata` cue the session's [`CommentaryAudio`] queue
+    /// spawned (F18-B.5).
+    Commentary,
 }
 
 /// Marker on a vehicle whose engine rig was built — set once whether
@@ -1077,6 +1185,9 @@ pub struct AudioReport {
     /// gauge rewritten every drive pass, not a cumulative count
     /// (F18-B.3).
     pub interior: bool,
+    /// Commentary cue voices spawned this session — a subset of
+    /// `voices` (F18-B.5); at most one per bound cue family.
+    pub commentary: u64,
 }
 
 impl AudioReport {
@@ -1098,6 +1209,7 @@ impl AudioReport {
             + self.weather
             + self.thunder
             + self.interior as u64
+            + self.commentary
             > 0
     }
 
@@ -2171,6 +2283,167 @@ pub fn weather_voices(
                 report.thunder += 1;
             }
             weather.next_thunder = weather.elapsed + WeatherAudio::draw_delay(&mut weather.rng);
+        }
+    }
+}
+
+/// Environmental pre-race commentary (F18-B.5): the session's
+/// [`CommentaryAudio`] resolves its registry → speaker → cue → wave
+/// chain once inside the pre-race window, then plays the queued
+/// clips as `PlaybackMode::Despawn` one-shots — `SessionEntity`-
+/// stamped so teardown sweeps any still-playing voice.
+///
+/// The resolve runs on the first `Countdown`/`Playing` frame —
+/// commentary is a pre-race binding, so the clock only ticks inside
+/// that window; a session that never reaches it resolves nothing.
+/// Order: the `aud/spchdata/<city>.csv` registry authors `Num
+/// announcers` + `prefix`, one seeded draw picks the speaker dir
+/// (`as1`…), each bound `<stem>_prerace.csv` yields its `WEATHER`/
+/// `TIMEOFDAY` section's first row, and a second seeded draw picks
+/// the wave suffix inside the authored `1..=end` range — two clips
+/// at most, weather before time-of-day (the exe's cue order).
+///
+/// Every resolve step that fails — missing registry, a speaker dir
+/// that ships no tables (SF's authored `as3` gap), a missing
+/// section, a missing or undecodable wave — counts one `failed` and
+/// plays nothing: no substitute cue, no re-draw, no invented line
+/// (F18-AC06). Non-spatial one-shots like the other listener-side
+/// voices (DSN-37); the sequencing gap between clips is designed —
+/// the original's cadence and its handling of the `as3` gap are
+/// unrecovered (UNK-25).
+#[allow(clippy::too_many_arguments)] // Bevy system — the borrows are the contract.
+pub fn commentary_voices(
+    mut commands: Commands,
+    session: Res<Session>,
+    time: Res<Time>,
+    commentary: Option<ResMut<CommentaryAudio>>,
+    vfs: Option<Res<Mm2Vfs>>,
+    bank: Option<ResMut<WaveBank>>,
+    mut waves: ResMut<Assets<PcmAudio>>,
+    mut report: ResMut<AudioReport>,
+) {
+    let (Some(mut commentary), Some(vfs), Some(mut bank)) = (commentary, vfs, bank) else {
+        return;
+    };
+    let commentary = &mut *commentary;
+    if !matches!(
+        session.phase(),
+        SessionPhase::Countdown | SessionPhase::Playing
+    ) {
+        return;
+    }
+    commentary.elapsed += time.delta_secs();
+    if !commentary.resolved {
+        commentary.resolved = true;
+        resolve_commentary(commentary, &vfs.0, &mut bank, &mut waves, &mut report);
+    }
+    // Sequencing — the first cue fires immediately; each later one
+    // waits out the previous clip's duration plus the gap.
+    if commentary.elapsed >= commentary.next_at
+        && let Some((stem, handle)) = commentary.queue.pop_front()
+    {
+        let clip_secs = waves.get(&handle).map(|w| w.duration()).unwrap_or(0.0);
+        commands.spawn((
+            AudioVoice {
+                kind: VoiceKind::Commentary,
+            },
+            CommentaryVoice { stem },
+            SessionEntity(session.generation()),
+            AudioPlayer(handle),
+            PlaybackSettings {
+                mode: PlaybackMode::Despawn,
+                volume: Volume::Linear(COMMENTARY_VOLUME),
+                ..Default::default()
+            },
+        ));
+        report.voices += 1;
+        report.commentary += 1;
+        commentary.next_at = commentary.elapsed + clip_secs + COMMENTARY_GAP;
+    }
+}
+
+/// The one-shot registry→speaker→cue→wave resolve
+/// [`commentary_voices`] performs on its first live frame. Each
+/// failure warns and counts `failed` once; a successful wave enters
+/// the queue in authored cue order.
+fn resolve_commentary(
+    commentary: &mut CommentaryAudio,
+    vfs: &Vfs,
+    bank: &mut WaveBank,
+    waves: &mut Assets<PcmAudio>,
+    report: &mut AudioReport,
+) {
+    let fail = |report: &mut AudioReport, msg: String| {
+        report.failed += 1;
+        warn!("audio: {msg}");
+    };
+    // Registry — `aud/spchdata/<city>.csv` authors the speaker count
+    // and the `AS`/`AL` dir prefix.
+    let index = vfs
+        .read_logical(&commentary.registry)
+        .map_err(|e| format!("{}: {e}", commentary.registry))
+        .and_then(|bytes| {
+            AnnouncerIndex::parse(&String::from_utf8_lossy(&bytes))
+                .map_err(|e| format!("{}: {e}", commentary.registry))
+        });
+    let index = match index {
+        Ok(index) => index,
+        Err(e) => {
+            fail(report, e);
+            return;
+        }
+    };
+    for d in &index.diagnostics {
+        warn!("audio: {}:{}: {}", commentary.registry, d.line, d.message);
+    }
+    let Some(d) = draw_speaker(index.announcers, &mut commentary.rng) else {
+        fail(
+            report,
+            format!(
+                "{} authors {} announcers — no speaker",
+                commentary.registry, index.announcers
+            ),
+        );
+        return;
+    };
+    let speaker = format!("{}{d}", index.prefix.to_lowercase());
+    for (section_name, stem) in commentary.cues {
+        let path = format!("aud/spchdata/{speaker}/{stem}_prerace.csv");
+        let bytes = match vfs.read_logical(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                fail(report, format!("{path}: {e}"));
+                continue;
+            }
+        };
+        let table = match CueTable::parse(&String::from_utf8_lossy(&bytes)) {
+            Ok(t) => t,
+            Err(e) => {
+                fail(report, format!("{path}: {e}"));
+                continue;
+            }
+        };
+        for d in &table.diagnostics {
+            warn!("audio: {path}:{}: {}", d.line, d.message);
+        }
+        let Some(row) = table.section(section_name).and_then(|s| s.rows.first()) else {
+            fail(report, format!("{path} authors no {section_name} cue"));
+            continue;
+        };
+        let Some(suffix) = draw_cue_suffix(row.end, row.add, &mut commentary.rng) else {
+            fail(
+                report,
+                format!(
+                    "{path} cue {} has an undrawable range (end {} add {})",
+                    row.prefix, row.end, row.add
+                ),
+            );
+            continue;
+        };
+        let wave = cue_wave_stem(&speaker, &row.prefix, suffix);
+        match bank.load(vfs, waves, &wave) {
+            Ok(handle) => commentary.queue.push_back((wave, handle)),
+            Err(e) => fail(report, format!("{path} cue {wave}: {e}")),
         }
     }
 }

@@ -16,7 +16,7 @@ use mm2_formats::cardata::{
     SirenProgram, SirenStep, SkidSample, SpeedBand, SurfaceEntry, is_sample_sentinel,
 };
 
-use crate::config::Weather;
+use crate::config::{TimeOfDay, Weather};
 use crate::nav::NavRng;
 
 /// The authored per-vehicle audio table attached to a spawned vehicle —
@@ -793,6 +793,70 @@ impl SirenPlayback {
     }
 }
 
+/// The `<stem>_prerace.csv` cue table a weather selector binds
+/// (F18-B.5): the exe's string block carries the four stems in
+/// authored order — `weaclr weacldy weafog wearain` — adjacent to the
+/// time-of-day four and the `nospeech` flag, and that order matches
+/// the measured `.ltNN` selector grid (WLD-21), so the index maps
+/// verbatim (documented binding, not a designed guess).
+pub fn prerace_weather_stem(weather: Weather) -> &'static str {
+    ["weaclr", "weacldy", "weafog", "wearain"][weather.get() as usize]
+}
+
+/// The `<stem>_prerace.csv` cue table a time-of-day selector binds —
+/// the exe block's `timemorn timenoon timeeve timenight`, in the same
+/// selector order as [`prerace_weather_stem`] (documented binding).
+pub fn prerace_tod_stem(tod: TimeOfDay) -> &'static str {
+    ["timemorn", "timenoon", "timeeve", "timenight"][tod.get() as usize]
+}
+
+/// Draw a speaker index inside the authored `Num announcers` domain —
+/// 1-based, matching the `as%d`/`al%d` directory numbering. `None` on
+/// a zero count. Seeded through the session [`NavRng`] like every
+/// other draw, so a replayed session hears the same announcer. The
+/// draw covers the authored count verbatim: SF's `5` includes `as3`,
+/// which ships no tables or waves — the authored gap resolves as
+/// counted misses downstream, never a re-draw (the original's pick
+/// and its behaviour on the gap are both unrecovered, UNK-25).
+pub fn draw_speaker(announcers: u32, rng: &mut NavRng) -> Option<u32> {
+    if announcers == 0 {
+        None
+    } else {
+        Some(1 + (rng.next_u64() % u64::from(announcers)) as u32)
+    }
+}
+
+/// The wave suffix a cue row draws — `add + 1 + rng % end`, the
+/// designed reading of the authored `end sufix value`/`sufix add
+/// value` pair (UNK-25): `end` tops a 1-based draw range, `add`
+/// offsets it verbatim (`0` on every live retail weather/time row).
+/// `None` on a non-positive `end` — an undrawable row, not a zero
+/// suffix.
+pub fn draw_cue_suffix(end: i64, add: i64, rng: &mut NavRng) -> Option<i64> {
+    if end <= 0 {
+        None
+    } else {
+        Some(add + 1 + (rng.next_u64() % end as u64) as i64)
+    }
+}
+
+/// The wave stem a drawn cue names — `<speaker><prefix><NN>` with a
+/// zero-padded two-digit suffix (the authored `*01`… naming),
+/// lowercased so the result matches the bank's lookup stem (the wave
+/// filename minus its `.<n>k.wav` tail). A prefix already carrying a
+/// separator is speaker-qualified — the C&R tables author
+/// `AL1\AL1ROBROB` for `aud/aud11/al1/al1robrobNN` — so only its last
+/// segment is the stem and the speaker is not prepended.
+pub fn cue_wave_stem(speaker: &str, prefix: &str, suffix: i64) -> String {
+    let leaf = prefix.rsplit(['\\', '/']).next().unwrap_or(prefix);
+    let stem = if prefix.contains(['\\', '/']) {
+        format!("{leaf}{suffix:02}")
+    } else {
+        format!("{speaker}{prefix}{suffix:02}")
+    };
+    stem.to_ascii_lowercase()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1334,5 +1398,79 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plain.flags & SIREN_FLAG, 0);
+    }
+
+    // -----------------------------------------------------------------
+    // F18-B.5: environmental prerace commentary cues — the exe-ordered
+    // `<stem>_prerace` tables, the speaker/suffix draws and the wave
+    // stem the bank resolves.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn prerace_stems_follow_the_exe_order() {
+        // The `.ltNN` selector grid (WLD-21) and the exe string block
+        // agree: weather 0..3 → weaclr/weacldy/weafog/wearain,
+        // time-of-day 0..3 → timemorn/timenoon/timeeve/timenight.
+        let weathers = ["weaclr", "weacldy", "weafog", "wearain"];
+        let tods = ["timemorn", "timenoon", "timeeve", "timenight"];
+        for i in 0..=3u8 {
+            assert_eq!(
+                prerace_weather_stem(Weather::new(i).unwrap()),
+                weathers[i as usize]
+            );
+            assert_eq!(
+                prerace_tod_stem(TimeOfDay::new(i).unwrap()),
+                tods[i as usize]
+            );
+        }
+    }
+
+    #[test]
+    fn the_speaker_draw_covers_the_authored_count() {
+        // 1-based over `Num announcers`; seeded, so a replay repeats
+        // the pick; a zero count draws nothing.
+        let mut rng = NavRng::new(11);
+        let mut seen = [false; 7];
+        for _ in 0..200 {
+            let d = draw_speaker(6, &mut rng).unwrap();
+            assert!((1..=6).contains(&d));
+            seen[d as usize] = true;
+        }
+        assert!(seen[1..].iter().all(|s| *s), "unseen slots: {seen:?}");
+        assert_eq!(draw_speaker(0, &mut rng), None);
+        // Determinism: the same seed repeats the same pick.
+        let a = draw_speaker(5, &mut NavRng::new(42));
+        let b = draw_speaker(5, &mut NavRng::new(42));
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn the_cue_suffix_draw_stays_inside_the_authored_range() {
+        // `end` tops the 1-based range; `add` offsets verbatim.
+        let mut rng = NavRng::new(5);
+        for _ in 0..200 {
+            let s = draw_cue_suffix(3, 0, &mut rng).unwrap();
+            assert!((1..=3).contains(&s));
+        }
+        // `add` shifts the whole window (the C&R/RACELAPS shape).
+        let mut rng = NavRng::new(5);
+        for _ in 0..200 {
+            let s = draw_cue_suffix(10, 8, &mut rng).unwrap();
+            assert!((9..=18).contains(&s));
+        }
+        assert_eq!(draw_cue_suffix(0, 0, &mut rng), None);
+        assert_eq!(draw_cue_suffix(-2, 0, &mut rng), None);
+    }
+
+    #[test]
+    fn the_cue_wave_stem_matches_the_authored_naming() {
+        // `as1` + `WEARAIN` + `02` → the bank stem `as1wearain02`
+        // (`aud/aud11/as1/as1wearain02.11k.wav`).
+        assert_eq!(cue_wave_stem("as1", "WEARAIN", 2), "as1wearain02");
+        assert_eq!(cue_wave_stem("AL6", "weafog", 12), "al6weafog12");
+        // Speaker-qualified C&R prefixes flatten to the wave stem —
+        // `AL1\AL1ROBROB` names `aud/aud11/al1/al1robrob05` itself, so
+        // the speaker is not prepended twice.
+        assert_eq!(cue_wave_stem("al1", "AL1\\AL1ROBROB", 5), "al1robrob05");
     }
 }

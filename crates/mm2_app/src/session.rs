@@ -256,6 +256,10 @@ pub fn drive_session(
             // the session like the other audio state — its voices are
             // `SessionEntity`-stamped and chain-despawn.
             commands.remove_resource::<crate::audio::WeatherAudio>();
+            // F18-B.5: the commentary binding dies with the session
+            // like the ambience — its voices are `SessionEntity`-
+            // stamped and chain-despawn.
+            commands.remove_resource::<crate::audio::CommentaryAudio>();
             commands.remove_resource::<crate::pvs::CityPvs>();
             commands.remove_resource::<crate::water::CityWater>();
             commands.remove_resource::<crate::city::WorldFloor>();
@@ -889,6 +893,17 @@ pub fn load_session_world(
         crate::audio::WeatherAudio::bind(session_conditions.weather, config.seed)
     {
         commands.insert_resource(ambience);
+    }
+    // F18-B.5: the session's environmental pre-race commentary — the
+    // same effective-conditions pick names the `WEATHER`/`TIMEOFDAY`
+    // `<stem>_prerace` cue tables the city's `spchdata` registry
+    // scopes to a seeded speaker draw. `commentary_voices` resolves
+    // the chain lazily inside the pre-race window; a dev world binds
+    // nothing.
+    if let Some(commentary) =
+        crate::audio::CommentaryAudio::bind(siren_city, session_conditions, config.seed)
+    {
+        commands.insert_resource(commentary);
     }
     if world_ok {
         session

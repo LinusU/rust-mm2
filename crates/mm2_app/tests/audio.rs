@@ -17,9 +17,10 @@ use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::audio::{
-    self, AmbientEngineVoice, AmbientRig, AudioReport, AudioVoice, EngineVoice, GearWatch,
-    HornRequest, ImpactAudio, PcmAudio, Siren, SirenAudio, SurfaceAudio, SurfaceRig, SurfaceRole,
-    SurfaceVoice, VoiceKind, WaveBank, WeatherAudio, WeatherRole, WeatherVoice, decode_wave,
+    self, AmbientEngineVoice, AmbientRig, AudioReport, AudioVoice, CommentaryAudio,
+    CommentaryVoice, EngineVoice, GearWatch, HornRequest, ImpactAudio, PcmAudio, Siren, SirenAudio,
+    SurfaceAudio, SurfaceRig, SurfaceRole, SurfaceVoice, VoiceKind, WaveBank, WeatherAudio,
+    WeatherRole, WeatherVoice, decode_wave,
 };
 use mm2_assets::Vfs;
 use mm2_content::SurfaceTables;
@@ -28,9 +29,9 @@ use mm2_formats::materials::{MaterialMap, MaterialSet};
 use mm2_game::{
     AmbientAudio, AmbientEngineSpec, Banger, BangerDefinition, DevOverrides, ImpactEvent, ImpactId,
     Mm2Vfs, NavRng, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerVehicle, Session,
-    SessionConfig, SessionEntity, SessionPhase, SirenSampleSpec, SirenSpec, SurfaceMaterial,
-    SurfaceState, SurfaceVariant, VehicleAudio, Weather, advance_session_tick,
-    despawn_session_entities,
+    SessionConditions, SessionConfig, SessionEntity, SessionPhase, SirenSampleSpec, SirenSpec,
+    SurfaceMaterial, SurfaceState, SurfaceVariant, TimeOfDay, VehicleAudio, Weather,
+    advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::{DriveDirection, VehicleConfig, VehicleState, vehicle_bundle};
 
@@ -3023,4 +3024,331 @@ fn teardown_sweeps_the_weather_voices() {
         .unwrap();
     app.update();
     assert_eq!(voices(&mut app), 0);
+}
+
+// ---------------------------------------------------------------------------
+// F18-B.5: environmental pre-race commentary — the `spchdata`
+// registry → speaker → cue table → wave chain, sequenced one-shots
+// inside the pre-race window.
+// ---------------------------------------------------------------------------
+
+/// Noon + rainy — the effective-conditions pick the fixture's tables
+/// serve (`timenoon_prerace` + `wearain_prerace`).
+fn commentary_conditions() -> SessionConditions {
+    SessionConditions {
+        time_of_day: TimeOfDay::new(1).unwrap(),
+        weather: Weather::new(3).unwrap(),
+    }
+}
+
+/// A retail-shaped `spchdata` tree: the sf registry authoring two
+/// announcers (SF's real five includes the table-less `as3` gap —
+/// two exercises the same miss leg for less fixture), both speaker
+/// dirs shipping the wearain/timenoon tables and every wave the
+/// drawn suffixes can name. One-second clips so the sequencing gap
+/// is measurable at 1/60 s updates.
+fn commentary_dir() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(
+        d,
+        "aud/spchdata/sf.csv",
+        b"\nNum announcers\n2\nprefix\nAS\n",
+    );
+    for speaker in ["as1", "as2"] {
+        write(
+            d,
+            &format!("aud/spchdata/{speaker}/wearain_prerace.csv"),
+            b"Name prefix/type header,end sufix value,sufix add value\nWEATHER header,,\nWEARAIN,3,0\n",
+        );
+        write(
+            d,
+            &format!("aud/spchdata/{speaker}/timenoon_prerace.csv"),
+            b"Name prefix/type header,end sufix value,sufix add value\nTIMEOFDAY header,,\nTIMENOON,2,0\n",
+        );
+        for stem in [
+            format!("{speaker}wearain01"),
+            format!("{speaker}wearain02"),
+            format!("{speaker}wearain03"),
+            format!("{speaker}timenoon01"),
+            format!("{speaker}timenoon02"),
+        ] {
+            write(
+                d,
+                &format!("aud/aud22/{speaker}/{stem}.22k.wav"),
+                &pcm_wav(22050, 22050),
+            );
+        }
+    }
+    tmp
+}
+
+/// The commentary slice of the production app: a session parked at
+/// `phase`, the fixture WaveBank, the `CommentaryAudio` resource
+/// `load_session_world` inserts for a city session (`sf`'s authored
+/// `aud/spchdata/sf.csv` registry), fixed 1/60 s updates and the one
+/// system the Update schedules run.
+fn commentary_app(dir: &Path, seed: u64, phase: SessionPhase) -> App {
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(dir, 0).unwrap();
+    let bank = WaveBank::index(&vfs);
+
+    let mut session = Session::new();
+    session.begin(SessionConfig::default()).unwrap();
+    session.transition(SessionPhase::Ready).unwrap();
+    match phase {
+        SessionPhase::Ready => {}
+        SessionPhase::Countdown => {
+            session.transition(SessionPhase::Countdown).unwrap();
+        }
+        SessionPhase::Playing => {
+            session.transition(SessionPhase::Countdown).unwrap();
+            session.transition(SessionPhase::Playing).unwrap();
+        }
+        _ => unreachable!("test phases stop at Playing"),
+    }
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_plugins(AssetPlugin::default())
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / 60.0,
+        )))
+        .insert_resource(session)
+        .insert_resource(Mm2Vfs(vfs))
+        .insert_resource(bank)
+        .init_resource::<Assets<PcmAudio>>()
+        .init_resource::<AudioReport>()
+        .add_systems(Update, audio::commentary_voices);
+    if let Some(commentary) = CommentaryAudio::bind(Some("sf"), commentary_conditions(), seed) {
+        app.insert_resource(commentary);
+    }
+    app.finish();
+    app.cleanup();
+    app
+}
+
+/// Sorted `(stamp, stem, kind, mode)` of every spawned commentary voice.
+fn commentary_voices(app: &mut App) -> Vec<(u64, String, VoiceKind, PlaybackMode)> {
+    let mut v: Vec<_> = app
+        .world_mut()
+        .query::<(
+            &SessionEntity,
+            &CommentaryVoice,
+            &AudioVoice,
+            &PlaybackSettings,
+        )>()
+        .iter(app.world())
+        .map(|(e, c, v, s)| (e.0, c.stem.clone(), v.kind, s.mode))
+        .collect();
+    v.sort_by(|a, b| a.1.cmp(&b.1));
+    v
+}
+
+/// A Playing city session resolves the registry, draws one speaker
+/// and plays both authored cues — weather before time-of-day — as
+/// session-stamped despawn one-shots.
+#[test]
+fn a_city_session_plays_the_authored_weather_and_time_cues() {
+    let dir = commentary_dir();
+    let mut app = commentary_app(dir.path(), 7, SessionPhase::Playing);
+    // 1 s clips + a 0.25 s gap at 1/60 s updates — ~80 updates play
+    // the whole queue.
+    for _ in 0..90 {
+        app.update();
+    }
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(r.commentary, 2, "weather + time-of-day cues");
+    assert_eq!(r.failed, 0);
+    let generation = app.world().resource::<Session>().generation();
+    let played = commentary_voices(&mut app);
+    assert_eq!(played.len(), 2);
+    for (stamp, stem, kind, mode) in &played {
+        assert_eq!(*stamp, generation);
+        assert_eq!(*kind, VoiceKind::Commentary);
+        assert!(matches!(mode, PlaybackMode::Despawn));
+        assert!(stem.starts_with("as"), "a drawn speaker dir: {stem}");
+    }
+    // One cue family each — the drawn suffix stays inside the
+    // authored ranges (wearain 1..=3, timenoon 1..=2).
+    let mut kinds: Vec<&str> = played
+        .iter()
+        .map(|(_, s, ..)| {
+            if s.contains("wearain") {
+                "wearain"
+            } else if s.contains("timenoon") {
+                "timenoon"
+            } else {
+                s.as_str()
+            }
+        })
+        .collect();
+    kinds.sort();
+    assert_eq!(kinds, ["timenoon", "wearain"]);
+}
+
+/// Commentary is a pre-race binding: parked at `Ready` nothing
+/// resolves; `Countdown` opens the window and the queue plays.
+#[test]
+fn commentary_waits_for_the_pre_race_window() {
+    let dir = commentary_dir();
+    let mut app = commentary_app(dir.path(), 7, SessionPhase::Ready);
+    for _ in 0..10 {
+        app.update();
+    }
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.commentary, r.failed, r.voices), (0, 0, 0));
+
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Countdown)
+        .unwrap();
+    app.update();
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(
+        r.commentary, 1,
+        "the first cue fires on the window's first frame"
+    );
+    assert_eq!(r.failed, 0);
+}
+
+/// The queue sequences, not stacks: cue two waits out the first
+/// clip's decoded duration plus the gap rather than speaking over it.
+#[test]
+fn the_second_cue_waits_for_the_first_clip() {
+    let dir = commentary_dir();
+    let mut app = commentary_app(dir.path(), 7, SessionPhase::Playing);
+    app.update();
+    assert_eq!(app.world().resource::<AudioReport>().commentary, 1);
+    // ~1 s clip + 0.25 s gap at 1/60 s: still one voice at 70 updates.
+    for _ in 0..70 {
+        app.update();
+    }
+    assert_eq!(app.world().resource::<AudioReport>().commentary, 1);
+    for _ in 0..60 {
+        app.update();
+    }
+    assert_eq!(app.world().resource::<AudioReport>().commentary, 2);
+}
+
+/// A city with no `spchdata` registry counts one failure — once,
+/// never per frame — and plays nothing.
+#[test]
+fn a_missing_registry_counts_once_and_never_retries() {
+    let dir = commentary_dir();
+    std::fs::remove_file(dir.path().join("aud/spchdata/sf.csv")).unwrap();
+    let mut app = commentary_app(dir.path(), 7, SessionPhase::Playing);
+    for _ in 0..30 {
+        app.update();
+    }
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(r.failed, 1);
+    assert_eq!((r.commentary, r.voices), (0, 0));
+}
+
+/// A drawn speaker whose dir ships no tables (SF's authored `as3`
+/// gap) counts each bound cue's miss and substitutes nothing.
+#[test]
+fn an_authored_speaker_gap_counts_each_cue() {
+    let dir = commentary_dir();
+    // Find the seed that lands the speaker draw on `as2`, then strip
+    // as2's tables — the authored-gap shape.
+    let mut gap_seed = None;
+    for seed in 0..40 {
+        let mut probe = commentary_app(dir.path(), seed, SessionPhase::Playing);
+        probe.update();
+        let played = commentary_voices(&mut probe);
+        if played.iter().any(|(_, s, ..)| s.starts_with("as2")) {
+            gap_seed = Some(seed);
+            break;
+        }
+    }
+    let seed = gap_seed.expect("some seed draws as2");
+    std::fs::remove_dir_all(dir.path().join("aud/spchdata/as2")).unwrap();
+    let mut app = commentary_app(dir.path(), seed, SessionPhase::Playing);
+    for _ in 0..90 {
+        app.update();
+    }
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(r.failed, 2, "both bound cue tables are absent");
+    assert_eq!((r.commentary, r.voices), (0, 0));
+}
+
+/// A cue whose table resolves but whose wave does not counts one
+/// failure and stays silent — the other family still plays; nothing
+/// is substituted.
+#[test]
+fn a_missing_wave_counts_and_is_never_substituted() {
+    let dir = commentary_dir();
+    for speaker in ["as1", "as2"] {
+        for n in 1..=3 {
+            std::fs::remove_file(
+                dir.path()
+                    .join(format!("aud/aud22/{speaker}/{speaker}wearain0{n}.22k.wav")),
+            )
+            .unwrap();
+        }
+    }
+    let mut app = commentary_app(dir.path(), 7, SessionPhase::Playing);
+    for _ in 0..90 {
+        app.update();
+    }
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(r.failed, 1, "the weather cue's wave resolve failed");
+    assert_eq!(r.commentary, 1, "the time cue still plays");
+    let played = commentary_voices(&mut app);
+    assert!(played.iter().all(|(_, s, ..)| s.contains("timenoon")));
+}
+
+/// The speaker and suffix draws ride the seeded stream — two sessions
+/// on one seed play identical stems, in identical order.
+#[test]
+fn the_cue_draw_replays_identically_for_the_same_seed() {
+    let dir = commentary_dir();
+    let played = |seed: u64| {
+        let mut app = commentary_app(dir.path(), seed, SessionPhase::Playing);
+        for _ in 0..90 {
+            app.update();
+        }
+        commentary_voices(&mut app)
+            .into_iter()
+            .map(|(_, stem, ..)| stem)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(played(42), played(42));
+    // And the pick really is a draw: across seeds both authored
+    // speakers get heard (the registry authors two).
+    let mut speakers: std::collections::BTreeSet<String> = Default::default();
+    for seed in 0..20 {
+        for stem in played(seed) {
+            speakers.insert(stem[..3].to_string());
+        }
+    }
+    assert!(speakers.contains("as1") && speakers.contains("as2"));
+}
+
+/// The queue's voices are `SessionEntity`-stamped — the production
+/// teardown sweep takes any still-playing cue with the session.
+#[test]
+fn teardown_sweeps_commentary_voices() {
+    let dir = commentary_dir();
+    let mut app = commentary_app(dir.path(), 7, SessionPhase::Playing);
+    for _ in 0..90 {
+        app.update();
+    }
+    assert!(commentary_voices(&mut app).len() == 2);
+
+    app.world_mut()
+        .run_system_once(despawn_session_entities)
+        .unwrap();
+    app.update();
+    assert_eq!(voices(&mut app), 0);
+}
+
+/// A dev world binds no commentary — `load_session_world` passes no
+/// city for a non-city mode and the resource is simply absent, so
+/// the session carries no speech state at all.
+#[test]
+fn a_dev_world_binds_no_commentary() {
+    assert!(CommentaryAudio::bind(None, commentary_conditions(), 7).is_none());
 }
