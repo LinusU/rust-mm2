@@ -357,6 +357,15 @@ pub struct PedAnimator {
     target: Option<usize>,
 }
 
+/// Authored 1-based frame number → 0-based `u32` index, saturating at
+/// both ends: a hostile csv (`i64::MIN`, or a window beyond
+/// `u32::MAX`) must neither overflow the rebasing subtraction nor
+/// truncate into a wrong-but-in-range window. `PedStates::validate`
+/// already reports such rows as issues.
+fn authored_window_frame(authored: i64) -> u32 {
+    authored.saturating_sub(1).clamp(0, u32::MAX as i64) as u32
+}
+
 impl PedAnimator {
     /// Build an animator over `states`, parked at `start`'s first frame.
     /// `fps` is the frame-stepping rate ([`PED_STATE_FPS`] is the
@@ -378,8 +387,8 @@ impl PedAnimator {
                 name: s.name.clone(),
                 clip: s.anim.clone(),
                 // Authored 1-based inclusive → 0-based frame indices.
-                first_frame: (s.first_frame - 1).max(0) as u32,
-                last_frame: (s.last_frame - 1).max(0) as u32,
+                first_frame: authored_window_frame(s.first_frame),
+                last_frame: authored_window_frame(s.last_frame),
                 y_offset: s.y_offset,
                 y_distance: s.y_distance,
                 x_offset: s.x_offset,
@@ -770,6 +779,32 @@ bone root {
         let t = a.tick(0.1, 4);
         assert_eq!(a.current().name, "B");
         assert_eq!(t.entered, Some(1));
+    }
+
+    #[test]
+    fn animator_saturates_hostile_frame_windows() {
+        // csv frame fields parse as i64 — authored extremes must
+        // saturate into the u32 window, not overflow the 1→0 rebase
+        // (`i64::MIN - 1`) or truncate through an `as u32` cast.
+        let states = csv(&format!(
+            "A,ca,{},{},0,0,0,0,A\nB,cb,{},5,0,0,0,0,B\n",
+            i64::MIN,
+            i64::MAX,
+            i64::MAX
+        ));
+        assert!(!states.validate().is_empty());
+        let mut a = PedAnimator::new(&states, "A", 30.0).unwrap();
+        assert_eq!(a.states()[0].first_frame, 0);
+        assert_eq!(a.states()[0].last_frame, u32::MAX);
+        assert_eq!(a.states()[1].first_frame, u32::MAX);
+        assert_eq!(a.states()[1].last_frame, 4);
+        // Stepping clamps the saturated window against the real clip.
+        assert_eq!(a.tick(0.05, 2), PedTick::default());
+        let t = a.tick(0.05, 2);
+        assert_eq!(t.boundaries, 1);
+        assert_eq!(t.entered, None);
+        assert_eq!(a.current().name, "A");
+        assert!(a.frame().is_finite());
     }
 
     #[test]

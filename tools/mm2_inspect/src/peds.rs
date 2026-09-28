@@ -391,11 +391,15 @@ pub fn audit(vfs: &Vfs) -> PedsReport {
             }
             // Sample the window's endpoints and midpoint (0-based,
             // clamped against the actual clip length — this also covers
-            // the authored `frames + 1` overshoot rows).
-            if let Some(Ok(rig)) = &rig {
-                let hi = clip.frames as i64 - 1;
-                let first = (st.first_frame - 1).clamp(0, hi);
-                let last = (st.last_frame - 1).clamp(first, hi);
+            // the authored `frames + 1` overshoot rows). A zero-frame
+            // clip skips the leg — `validate()` already reported it as
+            // `EmptyClip`.
+            if let Some(Ok(rig)) = &rig
+                && let Some(hi) = clip.frames.checked_sub(1)
+            {
+                let hi = i64::from(hi);
+                let first = st.first_frame.saturating_sub(1).clamp(0, hi);
+                let last = st.last_frame.saturating_sub(1).clamp(first, hi);
                 for f in [first, (first + last) / 2, last] {
                     match rig.sample(clip, f as f32) {
                         Ok(p) if p.is_finite() => r.poses_sampled += 1,
@@ -804,6 +808,49 @@ mtxn 1 1 1
                 .any(|i| i.contains("floats/frame") && i.contains("xwalk"))
         );
         assert!(r.issues.iter().any(|i| i.contains("non-finite pose")));
+    }
+
+    #[test]
+    fn audit_degrades_zero_frame_clips_and_extreme_windows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        write_arch(d, "pedmodel_man");
+        // A grammar-valid zero-frame clip referenced by a state — the
+        // EmptyClip issue stands, but the pose-sampling leg must skip
+        // it rather than panic on `clamp(0, -1)`.
+        write(d, "anim/xzero.anim", &clip(0, 12));
+        // i64 extremes in the authored window must saturate instead of
+        // overflowing the 1→0 rebase (`i64::MIN - 1`).
+        write(
+            d,
+            "anim/pedmodel_man.csv",
+            format!(
+                "S,xstand,1,2,0,0,0,0,S\nZ,xzero,1,2,0,0,0,0,Z\n\
+                 E,xstand,{},{},0,0,0,0,E\n",
+                i64::MIN,
+                i64::MAX
+            )
+            .as_bytes(),
+        );
+        let r = audit(&vfs_of(d));
+        assert!(
+            r.issues.iter().any(|i| i.contains("zero frames")),
+            "{:?}",
+            r.issues
+        );
+        assert!(
+            r.issues.iter().any(|i| i.contains("outside 1..=")),
+            "{:?}",
+            r.issues
+        );
+        assert!(
+            r.issues.iter().any(|i| i.contains("exceeds clip frames")),
+            "{:?}",
+            r.issues
+        );
+        // S + E still sample against xstand (3 each); Z contributes none.
+        assert_eq!(r.poses_sampled, 6);
+        assert!(r.failures.is_empty());
     }
 
     #[test]

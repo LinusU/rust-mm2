@@ -1,3 +1,89 @@
+# Last iteration — F19-A.3 review repair: zero-frame clip + hostile
+# window bounds (iteration 91)
+
+Iteration 91 on `ralph/night` (baseline `2fb4157` — the F19-A.3
+commit; external verify green, the review returned two blocking
+findings; thirty-sixth iteration of run `20260925T144723`). One
+scoped repair: the new pose-sampling code could panic or silently
+mis-clamp on grammar-valid hostile input — a `frames=0` clip
+referenced by a state row, and csv-authored `i64` frame extremes.
+
+## Task selection
+
+The F19-A.3 candidate failed external review on two blocking
+findings, both in the iteration's own new code:
+
+1. `tools/mm2_inspect/src/peds.rs` — the sampling leg computed
+   `hi = clip.frames as i64 - 1`, so a parsed-but-empty clip
+   (`frames=0`, which `PedAnim::parse` accepts and `validate()`
+   already reports as `EmptyClip`) reached `clamp(0, -1)` and panicked
+   `min > max`, aborting the whole audit. The reviewer reproduced it
+   on the candidate build with a synthetic install (exit 101).
+2. `peds.rs` (`st.first_frame - 1`, `st.last_frame - 1`) and
+   `PedAnimator::new` in `mm2_game::ped` (`(s.first_frame - 1).max(0)
+   as u32`) — rebasing the unbounded authored `i64` fields subtracts
+   1 (overflow-panic on `i64::MIN` in debug builds) and the `as u32`
+   cast truncates authored values past `u32::MAX` into
+   wrong-but-in-range windows.
+
+Repairing both was this iteration's only work.
+
+## Findings and actions
+
+- `peds.rs` — the sampling leg now guards on
+  `clip.frames.checked_sub(1)`: a zero-frame clip skips sampling
+  entirely (its `EmptyClip` is already an issue from `validate()`),
+  and the authored window fields saturate via `saturating_sub(1)`
+  before clamping into `[0, hi]`.
+- `mm2_game::ped` — new `authored_window_frame()` helper:
+  `saturating_sub(1).clamp(0, u32::MAX as i64) as u32`, so
+  `i64::MIN`/`i64::MAX` csv rows saturate to `0`/`u32::MAX` instead of
+  overflowing or truncating (`PedStates::validate` already reports
+  such rows as issues).
+- Regression tests:
+  - `peds.rs::audit_degrades_zero_frame_clips_and_extreme_windows` —
+    synthetic install with a `frames=0` clip referenced by a state
+    row plus an `i64::MIN..i64::MAX` window row: audit completes,
+    `zero frames`/`outside 1..=`/`exceeds clip frames` issues reported,
+    `poses_sampled` still counts the two good windows.
+  - `ped.rs::animator_saturates_hostile_frame_windows` —
+    `PedAnimator::new` over `i64::MIN`/`i64::MAX` fields: window
+    saturates to `0..=u32::MAX`, construction never panics, ticking
+    clamps the window against the real clip length.
+- Binary-level repro of the reviewer's case: synthetic install with
+  `anim/pedanim_xzero.anim` (frames=0, fpf=12) + a state row
+  referencing it + an `i64::MIN..i64::MAX` row →
+  `mm2-inspect peds <dir> --strict` exits 2 with the EmptyClip and
+  window issues enumerated (was: exit 101 panic at peds.rs:397).
+
+## Evidence
+
+- `cargo test -p mm2_game ped` — 13/13 incl. the new regression test.
+- `cargo test -p mm2_inspect peds` — 6/6 incl. the new regression
+  test.
+- Retail (`fnv1a64:e91e6cd4b2ae30d9`): `mm2-inspect peds --strict`
+  exits 0 — output identical to the F19-A.3 run (91 files, 66 clips,
+  1342 frames, 288 pose samples, 18 unreferenced, quirk list
+  unchanged).
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --locked --workspace` — all suites green (exit 0).
+
+## Classification / remaining open items
+
+- No original-rule claim changes; both fixes are robustness bounds on
+  hostile-but-grammar-valid input, not recovered rules.
+- All F19-A.3 open items stand: domain-types slice only — no `.mod`
+  geometry assembly, skinning, spawning; F19-A stays `active`;
+  F19-AC02..AC06 remain unclaimed. UNK-41 stepping/blend timing still
+  unrecovered.
+
+---
+
 # Last iteration — F19-A.3 pedestrian animation sampling + authored
 # state stepping (iteration 90)
 
