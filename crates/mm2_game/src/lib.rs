@@ -20,6 +20,7 @@ pub mod ids;
 pub mod impact;
 pub mod nav;
 pub mod opponent;
+pub mod ped;
 pub mod profile;
 pub mod progression;
 pub mod props;
@@ -72,6 +73,10 @@ pub use nav::{
 pub use opponent::{
     OpponentDriveParams, OpponentIssue, OpponentRoster, OpponentRoute, OpponentRoutePoint,
     OpponentSpec,
+};
+pub use ped::{
+    PED_STATE_FPS, PedAnimError, PedAnimState, PedAnimator, PedBonePose, PedPose, PedRig,
+    PedRigBone, PedRigError, PedSampleError, PedTick,
 };
 pub use profile::{
     EventKey, EventRecord, MAX_NAME_CHARS, PROFILE_SCHEMA_VERSION, PlayerProfile, ProfileError,

@@ -9,9 +9,14 @@
 //! - `.csv` — ASCII state model: `#`-comment header, then rows of
 //!   `state,clip,first_frame,last_frame,y_offset,y_distance,x_offset,
 //!   x_distance,next` (9 cells). Column names come from the authored
-//!   header comment (`anim name,mma name,first frame,…`); the offset /
-//!   distance semantics are unrecovered and the values are preserved
-//!   verbatim.
+//!   header comment (`anim name,mma name,first frame,…`). The
+//!   `* OFFSET`/`* DISTANCE` columns are authored per-window travel
+//!   bookkeeping along the forward/lateral axes — chained transition
+//!   rows accumulate the prior `DISTANCE` into the next `OFFSET` on
+//!   retail (man `STAND_WALK` 0.281 + `WALK` 1.409 → `WALK_STAND`
+//!   1.69; the dive chain carries ±2.2 m laterally). mm2hook names the
+//!   pair `FSpeed`/`LSpeed` on `pedAnimationSequence`; they feed the
+//!   movement controller, not pose sampling.
 //! - `.remap` — ASCII bone remap: a count line then that many integer
 //!   indices. Retail ships exactly one (`pedmodel_woman.remap`, 17
 //!   entries); its purpose is unknown — preserved verbatim.
@@ -22,12 +27,16 @@
 //! - `.anim` — binary clip: `u32` reserved (0), `u32` frame count,
 //!   `u32` floats per frame, `f32` motion hint, `u8` kind (1), then
 //!   `frames * floats_per_frame` little-endian `f32` samples. Every
-//!   retail clip carries 60 floats per frame — 20 XYZ triples against
-//!   the 19-bone rigs (channel order and the extra triple are
-//!   unrecovered). The header float tracks the state table's authored
-//!   Y-axis travel on several clips (man walk ≈ 1.55, run ≈ 2.97;
-//!   woman walk matches `1.087` exactly) — a plausible locomotion-speed
-//!   hint, but its exact semantics are unknown.
+//!   retail clip carries 60 floats per frame — one XYZ root
+//!   translation plus 19 Euler rotation triples, one per bone in
+//!   `.skel` pre-order (measured on retail: the root channel's Z
+//!   travel equals the state table's authored `Y AXIS DISTANCE`, and
+//!   the standing pose's mirrored L/R arm rotations land on the
+//!   clavicle/elbow pairs; the runtime composition lives in
+//!   `mm2_game::ped`). The header float tracks the state table's
+//!   authored Y-axis travel on several clips (man walk ≈ 1.55, run
+//!   ≈ 2.97; woman walk matches `1.087` exactly) — a plausible
+//!   locomotion-speed hint, but its exact semantics are unknown.
 //!
 //! `pedmodel_*.shaders` is a standalone copy of the PKG shader-chunk
 //! grammar — parse it with [`crate::pkg::PkgShaders::parse`].
@@ -308,13 +317,21 @@ pub struct PedState {
     pub first_frame: i64,
     /// Last clip frame — equals `frames` or `frames + 1` on retail.
     pub last_frame: i64,
-    /// `Y AXIS Offset` column — semantics unrecovered.
+    /// `Y AXIS Offset` column — accumulated forward travel at window
+    /// entry: chained rows carry the prior `Y AXIS DISTANCE` (man
+    /// `WALK` `0.281` → `WALK_STAND` `1.69` = 0.281 + 1.409).
     pub y_offset: f32,
-    /// `Y AXIS DISTANCE` column — semantics unrecovered.
+    /// `Y AXIS DISTANCE` column — authored forward travel across the
+    /// window in metres: measured equal to the clip's root-channel Z
+    /// travel on retail (man walk `1.409` vs a measured −1.410 drift,
+    /// man run `2.854` vs −2.8535). mm2hook names the corresponding
+    /// `pedAnimationSequence` field `FSpeed`.
     pub y_distance: f32,
-    /// `X AXIS Offset` column — semantics unrecovered.
+    /// `X AXIS Offset` column — accumulated lateral position at window
+    /// entry (dive chains carry `±2.2`).
     pub x_offset: f32,
-    /// `X AXIS DISTANCE` column — semantics unrecovered.
+    /// `X AXIS DISTANCE` column — authored lateral travel across the
+    /// window, metres (±2.2 on the dive rows; mm2hook's `LSpeed`).
     pub x_distance: f32,
     /// `default next` column — the state chained after this one.
     pub next: String,
@@ -674,8 +691,8 @@ pub struct PedAnim {
     pub reserved: u32,
     /// Frame count.
     pub frames: u32,
-    /// Floats stored per frame (60 on retail — 20 XYZ channel triples
-    /// against the 19-bone rigs; channel order is unrecovered).
+    /// Floats stored per frame (60 on retail — one XYZ root translation
+    /// plus one Euler rotation triple per bone, in `.skel` pre-order).
     pub floats_per_frame: u32,
     /// Header float — tracks authored travel speed on locomotion clips
     /// (walk ≈ 1.55, run ≈ 2.97 on man); exact semantics unknown.
@@ -735,7 +752,8 @@ impl PedAnim {
     }
 
     /// `floats_per_frame` read as XYZ triples per channel — 20 on
-    /// retail (19 bones + one extra channel). `None` when the frame
+    /// retail (one root translation + 19 bone rotations). `None` when
+    /// the frame
     /// size is not a multiple of 3.
     pub fn channels(&self) -> Option<u32> {
         self.floats_per_frame

@@ -1,3 +1,121 @@
+# Last iteration — F19-A.3 pedestrian animation sampling + authored
+# state stepping (iteration 90)
+
+Iteration 90 on `ralph/night` (baseline `c0011ee` — the F19-A.2
+review-repair commit; external verify + review green; thirty-fifth
+iteration of run `20260925T144723`). One coherent slice: F19-A req 2's
+domain leg — `.anim` clip sampling onto the skeleton and stepping the
+authored csv state machine, both as reusable `mm2_game` domain types
+with synthetic-fixture tests. Runtime assembly/spawning stays deferred.
+
+## Task selection
+
+No failing gate or review finding to repair — F19-A.2's repair passed
+external review with zero blocking findings. The plan's F19-A row named
+"req 2 — animation sampling/blending, authored-state stepping,
+synthetic skeletal fixtures" as the remaining non-runtime leg, so this
+iteration is A.3. It required recovering what A.1 left unknown: the
+`.anim` channel layout and the rotation convention.
+
+## What landed
+
+- Format recovery (measured on retail, cross-checked against R3's
+  `Pedestrian_animations.md` and mm2hook's `crAnimFrame`/`crBone`/
+  `Matrix34` sources):
+  - `.anim` frame = channel 0 root **world translation** (stands ~1.147
+    m in idle; its −Z drift equals the state row's `Y AXIS DISTANCE`
+    to ~1 mm on man walk/run) + one Euler rotation triple per bone in
+    `.skel` pre-order — verified by the standing pose's mirrored L/R
+    values landing on the `clavicle/shoulder/elbow/wrist_{r,l}` pairs.
+  - Euler composition is the AGE `Matrix34` order `Rx·Ry·Rz`
+    (`GetEulers` extracts exactly that product) = glam's
+    `EulerRot::XYZEx`. Under this order the dive clips' end poses land
+    prone along the dive direction; intrinsic-XYZ puts them
+    perpendicular. The Blender importer's conversion is a Z-up fudge —
+    not copied.
+  - csv `* OFFSET`/`* DISTANCE` columns are forward/lateral per-window
+    travel bookkeeping — chained rows accumulate (`0.281 + 1.409 →
+    WALK_STAND` 1.69; dive chains carry ±2.2 m lateral). mm2hook names
+    them `pedAnimationSequence.FSpeed`/`LSpeed`.
+- `mm2_game::ped` (new module — domain types, no ECS):
+  - `PedRig::from_skel` — flattens the hierarchy pre-order (the channel
+    order); `PedRigError` on empty/multi-root rigs.
+  - `PedRig::sample(clip, frame)` — fractional frame, lerping raw
+    channel floats (mm2hook `crAnimFrame::Blend` shape), clamped into
+    `0..frames`; `PedSampleError` on empty clips/ragged-or-narrow
+    channel widths (trailing extras are tolerated).
+  - `PedRig::world_transforms` — FK over bind offsets + clip rotations.
+  - `PedPose::lerp` — translation lerp + slerp pose blending.
+  - `PedAnimator` — the authored state machine: 1-based authored
+    windows → 0-based indices, `last_frame` clamped against the actual
+    clip (the authored `frames+1` overshoot rows are honoured, not
+    out-of-bounds), `default next` chains by name, self-loops wrap
+    keeping sub-frame phase, `request(target)` enters the authored
+    `{CUR}_{TGT}` transition state at its first frame or switches
+    directly when none exists (designed — DSN-64), unknown targets are
+    refused, non-finite/`<=0` dt is inert, a per-state guard bounds
+    degenerate empty-window chains.
+  - `PED_STATE_FPS` = 30 — designed default; the original's stepping
+    rate is unrecovered (UNK-41).
+- `mm2-inspect peds` — exercises the production sampler over every
+  authored state window (first/mid/clamped-last frames): poses must be
+  finite, counted into a new `pose samples` report field; sampler
+  errors and non-finite poses are issues. Rig-construction failures on
+  parsed `.skel`s are issues too.
+- `docs/research/pedanim.md` — the `.anim` section now records the
+  recovered layout/Euler convention/evidence; the csv section records
+  the measured offset/distance semantics; cross-checks list the
+  pose-sampling leg.
+- `docs/original-rules.md` — PED-1 narrowed (layout + columns
+  recovered), UNK-41 narrowed (`.rays`/`.remap`/`motionHint` quantity,
+  window inclusivity and stepping/blend timing remain open), DSN-64
+  records the designed playback policies.
+- `mm2_formats::ped` doc comments updated — no parser behaviour change.
+
+## Evidence
+
+- `cargo test -p mm2_game ped` — 12/12 new tests green: pre-order
+  flatten + bind-pose FK accumulation, channel→bone mapping (a rotated
+  parent swings its child's world offset), the fixed-axis XYZ Euler
+  order pinned against `Rz·Ry·Rx`, fractional-frame channel lerp,
+  frame clamping + empty/narrow/wide clip errors, window stepping +
+  self-loop wrap with phase, `{CUR}_{TGT}` transition routing, direct
+  switch without an authored transition, the `frames+1` overshoot
+  clamp, unknown-target/idle-dt refusal, constructor errors, pose
+  lerp.
+- `cargo test -p mm2_inspect peds` — 5/5 incl. the new legs
+  (`poses_sampled == 6` on the fixture, NaN channel → `non-finite
+  pose` issue).
+- Retail (`fnv1a64:e91e6cd4b2ae30d9`): `mm2-inspect peds --strict`
+  exits 0 — 66 clips, 288 pose samples across the 96 authored windows
+  (4 rigs × 24 states), zero issues, quirk list unchanged.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --workspace` — all suites green (exit 0).
+
+## Classification / remaining open items
+
+- Recovered (measured, verified_original): the `.anim` channel layout,
+  the `Rx·Ry·Rz` Euler composition, the csv travel columns. Designed
+  (DSN-64): `PED_STATE_FPS`, immediate-request transition policy,
+  `frames+1` clamping, phase-preserving loop wrap.
+- Still UNK-41: `.rays`/`.remap` semantics, `motionHint`'s exact
+  quantity, whether authored windows are inclusive (the +1 rows),
+  the original's stepping rate/interruption/blend timing.
+- Domain-types slice only: no `.mod` geometry assembly, no skinning,
+  no Bevy entity/mesh path, no spawning — F19-A stays `active`;
+  F19-AC02..AC06 remain unclaimed. Sampling tests verify transforms
+  on independent synthetic fixtures, not rendered output.
+- F19-A.2 review minors still open: duplicate-row overwrites, `mtl`
+  integer-field degradation, `prim_check` line 0, `tangents:`
+  assumption.
+
+---
+
 # Last iteration — F19-A.2 review repair: `PedMod` carve-range panic
 # (iteration 89)
 

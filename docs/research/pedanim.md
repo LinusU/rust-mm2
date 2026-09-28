@@ -49,9 +49,15 @@ STAND_WALK,pedanim_manst2w,1,4,0,0.281,0,0,WALK
 ```
 
 9 cells: state name, clip stem (`anim/<stem>.anim`), 1-based first/last
-frame window, Y/X offset+distance floats (unrecovered semantics —
-locomotion bookkeeping; `Y AXIS DISTANCE` correlates with per-cycle
-forward travel), default-next state name. Each of the 4 CSVs authors
+frame window, Y/X offset+distance floats (measured: forward/lateral
+travel bookkeeping per window — `DISTANCE` equals the clip's
+root-channel Z/X travel (man walk `1.409` vs a measured −1.410 drift;
+run `2.854` vs −2.8535), and chained rows carry the prior `DISTANCE`
+into the next `OFFSET` (0.281 + 1.409 = `WALK_STAND`'s 1.69; the dive
+chain carries ±2.2 m laterally). mm2hook's recovered
+`pedAnimationSequence` names the pair `FSpeed`/`LSpeed` — movement
+input for the controller, not pose data), default-next state name.
+Each of the 4 CSVs authors
 the same 24-state machine (STAND/STAND2, WALK, RUN, BACKUP, ANTIC,
 dive-left/right, ground recovery, transitions between them — the
 authored header documents the `from_to` transition convention). All
@@ -100,14 +106,44 @@ u8  kind          ; 1 on all retail clips
 f32 samples[frames * floatsPerFrame]
 ```
 
-Strict grammar — exact byte fit, no trailer. 60 floats/frame = 20 XYZ
-triples against a 19-bone rig (channel order and the 20th triple are
-unrecovered — likely per-bone rotations plus a root channel, inferred).
+Strict grammar — exact byte fit, no trailer. Frame layout recovered
+(measured on retail, matching R3 `Pedestrian_animations.md`'s type-1
+channel and mm2hook's `crAnimFrame`/`crBone` layout):
+
+- channel 0 (`floats[0..3]`): the **root bone's world-space
+  translation** — it stands ~1.147 m up in idle clips and drifts along
+  −Z through locomotion windows; the walk clip's total Z travel equals
+  the state row's `Y AXIS DISTANCE` to ~1 mm.
+- channels 1..`NumBones` (`floats[3+3i .. 3+3i+3]`): **bone `i`'s local
+  Euler rotation in radians**, in `.skel` pre-order — verified by the
+  standing pose's mirrored left/right values landing exactly on the
+  `clavicle/shoulder/elbow/wrist_{r,l}` channel pairs.
+- Euler composition is the AGE `Matrix34` convention `Rx·Ry·Rz`
+  (row-vector form — `Matrix34::GetEulers` extracts `X = atan2(m12,
+  m22)`, `Y = asin(−m02)`, `Z = atan2(m01, m00)`, exactly that
+  product), i.e. `Quat::from_euler(EulerRot::XYZEx, x, y, z)` in
+  column-vector terms: fixed-axis X first, then Y, then Z. Under this
+  order the dive clips' end poses land the body prone along the dive
+  direction; the intrinsic-XYZ reading leaves it perpendicular.
+  Note the Blender `io_scene_angelstudios` importer maps these floats
+  differently — its conversion is already fudged for Blender's Z-up
+  space and must not be copied.
+- Non-root bones carry no translation channel: their local translation
+  is always the `.skel` bind `offset`. Frames interpolate by lerping
+  the raw channel floats — mm2hook's `crAnimFrame::Blend(fraction,
+  first, second)` is precisely that buffer shape (call sites
+  unrecovered).
+
 `motionHint` tracks authored travel: man walk 1.552, run 2.970; woman
 walk 1.087 matches its csv `Y AXIS DISTANCE` exactly; negative on
-back-up clips; 0 on stands. Reads like per-clip locomotion speed or
-cycle distance — unverified (UNK-41). Largest clip: 53 frames / 3180
-floats.
+back-up clips; 0 on stands. Close to per-window root travel on most
+clips but off ~10% on man walk/run — a plausible per-loop distance
+hint, possibly stale; unverified (UNK-41). Largest clip: 53 frames /
+3180 floats.
+
+The runtime sampler/state-stepper lives in `mm2_game::ped`
+(`PedRig::sample`, `PedAnimator`); playback rate and transition
+policies there are designed, not recovered (DSN-64).
 
 ## `pedmodel_*.shaders` — standalone PKG shader chunk (verified)
 
@@ -190,7 +226,9 @@ optional 4th `packet` header int (UNK-41).
 - Every state-model clip stem resolves to a present `.anim`; no missing
   references.
 - Referenced clips carry `floatsPerFrame == 3 × (bones + 1)` on all 4
-  complete rigs.
+  complete rigs, and every authored state window samples to finite
+  poses through `mm2_game::ped::PedRig` (the audit exercises
+  first/mid/clamped-last frames per window).
 - `.rays` row count == `NumBones` on all 4.
 - All 66 binary clips parse; 18 are unreferenced by every state model
   (dive/ground/run-back variants — preserved, reported).

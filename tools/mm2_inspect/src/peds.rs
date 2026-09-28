@@ -80,6 +80,9 @@ pub struct PedsReport {
     pub clips: usize,
     /// Total frames across parsed clips.
     pub clip_frames: u64,
+    /// Window frames the [`mm2_game::ped::PedRig`] sampler evaluated
+    /// cleanly (first/mid/clamped-last per authored state window).
+    pub poses_sampled: u64,
     /// Per-archetype rows, sorted by stem.
     pub archetypes: Vec<Archetype>,
     /// Parsed clips no state model references.
@@ -337,6 +340,11 @@ pub fn audit(vfs: &Vfs) -> PedsReport {
     // State model → clip cross-checks.
     for (stem, model) in &state_models {
         let bones = skels.get(stem).map(|s| s.bone_count());
+        // F19-A.3: exercise the runtime sampler over authored windows.
+        let rig = skels.get(stem).map(mm2_game::ped::PedRig::from_skel);
+        if let Some(Err(e)) = &rig {
+            r.issues.push(format!("anim/{stem}.skel: {e}"));
+        }
         for st in &model.states {
             let logical = format!("anim/{}.anim", st.anim);
             let Some(clip) = clips.get(&st.anim) else {
@@ -381,6 +389,23 @@ pub fn audit(vfs: &Vfs) -> PedsReport {
                     (bones + 1) * 3
                 ));
             }
+            // Sample the window's endpoints and midpoint (0-based,
+            // clamped against the actual clip length — this also covers
+            // the authored `frames + 1` overshoot rows).
+            if let Some(Ok(rig)) = &rig {
+                let hi = clip.frames as i64 - 1;
+                let first = (st.first_frame - 1).clamp(0, hi);
+                let last = (st.last_frame - 1).clamp(first, hi);
+                for f in [first, (first + last) / 2, last] {
+                    match rig.sample(clip, f as f32) {
+                        Ok(p) if p.is_finite() => r.poses_sampled += 1,
+                        Ok(_) => r
+                            .issues
+                            .push(format!("{logical}: non-finite pose at frame {}", f + 1)),
+                        Err(e) => r.issues.push(format!("{logical}: frame {}: {e}", f + 1)),
+                    }
+                }
+            }
         }
     }
 
@@ -413,10 +438,11 @@ pub fn print_report(r: &PedsReport) {
         r.files, r.dirs
     );
     println!(
-        "clips: {} parsed ({} frames total), {} unreferenced",
+        "clips: {} parsed ({} frames total), {} unreferenced, {} pose samples",
         r.clips,
         r.clip_frames,
-        r.unreferenced.len()
+        r.unreferenced.len(),
+        r.poses_sampled
     );
     println!("\narchetypes:");
     for a in &r.archetypes {
@@ -665,6 +691,7 @@ mtxn 1 1 1
         assert!(a.missing.is_empty());
         assert!(r.issues.is_empty());
         assert!(r.failures.is_empty());
+        assert_eq!(r.poses_sampled, 6); // 2 states × 3 sampled frames
         assert_eq!(r.missing_expected.len(), EXPECTED_PEDS.len() - 1);
     }
 
@@ -764,6 +791,10 @@ mtxn 1 1 1
         );
         // Clip with wrong channel width for the 3-bone rig.
         write(d, "anim/xwalk.anim", &clip(3, 15));
+        // A NaN channel value must surface as an issue, not a panic.
+        let mut bad = clip(2, 12);
+        bad[17..21].copy_from_slice(&f32::NAN.to_le_bytes());
+        write(d, "anim/xstand.anim", &bad);
         let r = audit(&vfs_of(d));
         assert!(r.issues.iter().any(|i| i.contains("missing clip")));
         assert!(r.issues.iter().any(|i| i.contains("exceeds clip frames")));
@@ -772,6 +803,7 @@ mtxn 1 1 1
                 .iter()
                 .any(|i| i.contains("floats/frame") && i.contains("xwalk"))
         );
+        assert!(r.issues.iter().any(|i| i.contains("non-finite pose")));
     }
 
     #[test]
