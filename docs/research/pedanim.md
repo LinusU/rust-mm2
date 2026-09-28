@@ -153,7 +153,7 @@ then `jobs × per` records. All four retail files: float shaders, empty
 texture names, exact fit (man 48×18, manw 24×17, woman 48×17,
 womanw 24×16). Parsed by `mm2_formats::pkg::PkgShaders::parse`.
 
-## `.mod` — ASCII skinned mesh (recovered, F19-A.2)
+## `.mod` — ASCII skinned mesh (recovered, F19-A.2; binding F19-A.4)
 
 ~46–60 KB ASCII; `version: 1.09` on all four retail files. A ten-field
 count header (`verts`/`normals`/`colors`/`tex1s`/`tex2s`/`tangents`/
@@ -207,7 +207,20 @@ Measured invariants (all four files):
   `verts`/`normals` — they partition the vertex/normal arrays
   contiguously by bone. Packet `adj` matrix slots resolve through the
   packet `mtx` list to the same bone `mtxv` assigns: the two
-  skinning records agree 100% on retail.
+  skinning records agree 100% on retail (all 1946 adjuncts — man 248,
+  manw 279, woman 696, womanw 723 — including every adjunct's `mtxn`
+  normal bucket).
+- `v` rows are **bone-local**, not model-space: every authored vertex
+  lies within ~0.55 m of the origin while the rig stands ~1.15–1.8 m
+  tall. Applying `T_world(bone) · v` at the bind pose — the bone being
+  the `mtxv` bucket (or the packet `mtx` slot's entry) — reassembles
+  each mesh as a feet-on-the-ground standing figure (man y ≈ 0–2.0,
+  ankles at ~0.01, head ~1.82; woman y ≈ 0–1.87). Rigid skinning is
+  therefore the posed bone transform applied directly — no inverse-bind
+  matrix, matching the AGE `crModel`/`crBone` convention.
+- The flat dialect's adjuncts bind through `mtxv` alone (no
+  per-adjunct slot exists) — the vertex's bucket index *is* the bone
+  in `.skel` pre-order. `mtxn` binds normals the same way.
 - `materials:` == `mtl` blocks == `.shaders` shaders-per-paint-job
   (man 18, manw 17, woman 17, womanw 16) — R3 documents the group order
   must match the shader order.
@@ -216,10 +229,10 @@ Measured invariants (all four files):
   `tangents:` are 0 and `t2`/`ts`/`tt` never appear.
 
 Unrecovered: whether `mtxv` is authoritative over packet `mtx` lists
-or vice versa (they agree), how flat-dialect adjuncts bind to bones —
-with no per-adjunct slot, the `mtxv` partition is the only skinning
-data — `stp` rows (seen in R3 docs, absent on retail), and the
-optional 4th `packet` header int (UNK-41).
+or vice versa (they agree on every retail adjunct, so the question is
+moot on stock data — `mm2_game::ped::PedSkin` prefers the packet slot
+and falls back to `mtxv`), `stp` rows (seen in R3 docs, absent on
+retail), and the optional 4th `packet` header int (UNK-41).
 
 ## Cross-checks that hold on retail (`mm2-inspect peds`)
 
@@ -230,6 +243,10 @@ optional 4th `packet` header int (UNK-41).
   poses through `mm2_game::ped::PedRig` (the audit exercises
   first/mid/clamped-last frames per window).
 - `.rays` row count == `NumBones` on all 4.
+- Every parsed `.mod` assembles into a `mm2_game::ped::PedSkin` against
+  its own rig, deforms to a plausible feet-on-the-ground standing figure
+  at the bind pose, and deforms to finite world geometry at every
+  sampled state-window pose (292 deform samples: 4 bind + 288 window).
 - All 66 binary clips parse; 18 are unreferenced by every state model
   (dive/ground/run-back variants — preserved, reported).
 - `--strict` exits 0 on the retail corpus.

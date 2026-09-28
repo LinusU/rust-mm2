@@ -1,3 +1,121 @@
+# Last iteration — F19-A.4 `.mod` skin assembly + pose-driven deform
+# (iteration 92)
+
+Iteration 92 on `ralph/night` (baseline `fb81714` — the F19-A.3
+review-repair commit; external verify + review green; thirty-seventh
+iteration of run `20260925T144723`). One coherent slice: the missing
+link between the parsed `.mod` meshes and the sampled poses —
+assembling `pedmodel_*.mod` geometry against the rig and deforming it
+over sampled world transforms, plus the audit legs that exercise both
+on retail. This is the domain-type leg of AC02's "assembled meshes
+over the sampled poses"; rendered output still does not exist.
+
+## Task selection
+
+No failing gate or review finding to repair — the F19-A.3 repair
+passed external review with zero blocking findings. The plan's F19-A
+row names AC02's need for "assembled meshes over the sampled poses,
+not just domain types" as the remaining non-runtime leg, so this
+iteration is A.4. It required recovering what A.2 left unknown: the
+flat-dialect adjunct→bone binding and the vertex coordinate frame.
+
+## What landed
+
+- Format recovery (measured on retail `fnv1a64:e91e6cd4b2ae30d9` via
+  `mm2-inspect dump` + a Python bind-pose reconstruction):
+  - `.mod` `v` rows are **bone-local**: every authored vertex lies
+    within ~0.55 m of the origin while the rig stands ~1.15–1.8 m
+    tall; a model-space reading would need inverse-bind matrices the
+    format does not carry.
+  - `T_world(bone) · v` at the bind pose reassembles each mesh as a
+    feet-on-the-ground standing figure — man y ≈ 0–2.0 (ankles ~0.01,
+    head ~1.82), woman y ≈ 0–1.87 — so rigid skinning applies the
+    posed bone transform directly (AGE `crModel`/`crBone`
+    convention).
+  - The vertex→bone map is the `mtxv` per-matrix contiguous count row
+    over the `v` array in `.skel` pre-order — the flat dialect's only
+    binding record. Packet `adj` slots resolve through their packet's
+    `mtx` list to the same bone, and `mtxn` partitions normals the
+    same way: both records agree on all 1946 retail adjuncts
+    (man 248, manw 279, woman 696, womanw 723 — script-verified).
+- `mm2_game::ped`:
+  - `PedSkin::from_mod(m, rig)` — assembles both dialects into
+    corner-indexed geometry: `PedCorner` (bone + bone-local
+    pos/normal + colour/UVs, authored order — flat adjuncts then each
+    packet's), `PedSkinMtl` (authored shading fields + a contiguous
+    slice of the triangle list), `orphan_tris` for primitives no
+    material group claims. Packet adjuncts bind via their `mtx` slot
+    (`mtxv` fallback), flat adjuncts via `mtxv` alone. Out-of-range
+    vert/normal/matrix-slot/bone indices are `PedSkinError`s;
+    oob-triangle drops, strip primitives (winding unrecovered,
+    UNK-41), out-of-range colour/tex indices, orphan primitives and
+    `mtxn`-bucket disagreements are recorded `issues` — nothing is
+    silently reshaped.
+  - `PedSkin::deform(world)` — rigid skinning over the sampled world
+    transforms (`pos' = t + r·v`, `n' = r·n`); `PedDeformError` on a
+    short transform slice or non-finite bone transform.
+- `mm2_formats::ped` — `PedMod::validate` gained the `mtxn`↔binding
+  agreement cross-check (issue when a normal's `mtxn` bucket differs
+  from its corner's bone).
+- `mm2-inspect peds` — assembles every parsed `.mod` against its own
+  rig (`skins` report field), deforms at the bind pose (must be
+  finite and pass a plausible-standing-figure y-range check), then
+  deforms at every sampled state-window pose (`skin_samples` field).
+  Assembly errors, non-finite output and implausible bind shapes are
+  all issues — `--strict` fails on them.
+- `docs/research/pedanim.md` — the `.mod` section records the
+  bone-local vertex measurement and the `mtxv`/`mtxn` binding
+  semantics; the flat-dialect binding item leaves UNK-41.
+- `docs/original-rules.md` — PED-1 records the recovered `.mod`
+  skinning under `verified_original`.
+
+## Evidence
+
+- `cargo test --locked -p mm2_game ped` — 20/20 incl. 7 new:
+  flat-dialect assembly + bind deform, packet-dialect assembly + bind
+  deform, rotated-bone corner sweep (parent rotation swings the
+  corner about the bone), invalid matrix-slot/bone/unbound-vertex
+  errors, non-finite transform + short-input `deform` errors, `mtxn`
+  disagreement recorded as an issue.
+- `cargo test --locked -p mm2_inspect peds` — 8/8 incl. 2 new:
+  `audit_assembles_and_deforms_skins` (packet + flat fixtures through
+  the full audit — 14 samples, zero issues — plus a bone-9 `mtx`
+  entry surfacing as an assembly issue) and
+  `audit_flags_a_non_standing_bind_shape` (a vertex far above the
+  skeleton → "not a plausible standing figure" issue).
+- Retail (`fnv1a64:e91e6cd4b2ae30d9`): `mm2-inspect peds --strict`
+  exits 0 — `skins: 4 assembled, 292 deform samples` (4 bind-pose +
+  288 window-pose), all four `.mod` meshes assemble and deform to
+  finite plausible geometry over every authored window; quirk list
+  unchanged.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --locked --workspace` — all suites green (exit 0).
+
+## Classification / remaining open items
+
+- Recovered (measured, verified_original): bone-local `.mod` verts,
+  `mtxv`/`mtxn` contiguous bone partitions, packet `mtx`↔`mtxv`
+  agreement, direct-transform rigid skinning. Still UNK-41:
+  `mtxv`-vs-`mtx` authority (moot on retail — they agree), `stp`
+  rows, the optional 4th `packet` int, strip winding (strips are
+  counted-not-expanded — none exist on retail), `.rays`/`.remap`/
+  `motionHint`, window inclusivity, stepping/blend timing.
+- Domain-types slice only: no Bevy mesh/skinning path, no spawning,
+  no nav/reaction/audio/reset — F19-A stays `active`; F19-AC02..AC06
+  remain unclaimed (AC02's rendered-evidence leg in particular — the
+  deform is verified geometrically on synthetic fixtures and through
+  the retail audit's finiteness/shape checks, not on screen).
+- F19-A.2 review minors still open: duplicate-row overwrites, `mtl`
+  integer-field degradation, `prim_check` line 0, `tangents:`
+  assumption.
+
+---
+
 # Last iteration — F19-A.3 review repair: zero-frame clip + hostile
 # window bounds (iteration 91)
 

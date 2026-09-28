@@ -83,6 +83,11 @@ pub struct PedsReport {
     /// Window frames the [`mm2_game::ped::PedRig`] sampler evaluated
     /// cleanly (first/mid/clamped-last per authored state window).
     pub poses_sampled: u64,
+    /// `.mod` meshes that assembled into [`mm2_game::ped::PedSkin`]s.
+    pub skins: usize,
+    /// Deform calls that produced finite skinned geometry — the bind
+    /// pose plus every cleanly sampled window frame.
+    pub skin_samples: u64,
     /// Per-archetype rows, sorted by stem.
     pub archetypes: Vec<Archetype>,
     /// Parsed clips no state model references.
@@ -171,6 +176,7 @@ pub fn audit(vfs: &Vfs) -> PedsReport {
     let mut referenced: BTreeSet<String> = BTreeSet::new();
     let mut skels: BTreeMap<String, PedSkel> = BTreeMap::new();
     let mut state_models: BTreeMap<String, PedStates> = BTreeMap::new();
+    let mut mods: BTreeMap<String, PedMod> = BTreeMap::new();
     for (stem, files) in &members {
         let expected = EXPECTED_PEDS.contains(&stem.as_str());
         let mut a = Archetype {
@@ -329,6 +335,7 @@ pub fn audit(vfs: &Vfs) -> PedsReport {
                             per
                         ));
                     }
+                    mods.insert(stem.clone(), m);
                 }
                 Err(e) => r.failures.push((format!("anim/{stem}.mod"), e)),
             }
@@ -337,14 +344,73 @@ pub fn audit(vfs: &Vfs) -> PedsReport {
         r.archetypes.push(a);
     }
 
+    // Runtime rigs for every parsed skeleton — built once per stem so
+    // a `.skel` with no state model is still exercised.
+    let mut rigs: BTreeMap<String, Result<mm2_game::ped::PedRig, mm2_game::ped::PedRigError>> =
+        BTreeMap::new();
+    for (stem, s) in &skels {
+        let rig = mm2_game::ped::PedRig::from_skel(s);
+        if let Err(e) = &rig {
+            r.issues.push(format!("anim/{stem}.skel: {e}"));
+        }
+        rigs.insert(stem.clone(), rig);
+    }
+
+    // F19-A.4: assemble each `.mod` into a `PedSkin` against its rig
+    // and deform it at the bind pose — bone-local verts must land as a
+    // plausible standing figure (the measured retail shape: feet at
+    // ground, ~1.9–2.0 m tall). `mm2_game`'s constants bound the
+    // sanity check.
+    let mut skins: BTreeMap<String, mm2_game::ped::PedSkin> = BTreeMap::new();
+    for (stem, m) in &mods {
+        match rigs.get(stem) {
+            Some(Ok(rig)) => match mm2_game::ped::PedSkin::from_mod(m, rig) {
+                Ok(skin) => {
+                    for i in &skin.issues {
+                        r.issues.push(format!("anim/{stem}.mod: {i}"));
+                    }
+                    match skin.deform(&rig.world_transforms(&rig.bind_pose())) {
+                        Ok(d) if d.is_finite() => {
+                            let ys = d.positions.iter().map(|p| p.y);
+                            let (min_y, max_y) = (
+                                ys.clone().fold(f32::INFINITY, f32::min),
+                                ys.fold(f32::NEG_INFINITY, f32::max),
+                            );
+                            let span = max_y - min_y;
+                            if !(0.5..=5.0).contains(&span) || !(-0.5..=0.75).contains(&min_y) {
+                                r.issues.push(format!(
+                                    "anim/{stem}.mod: bind-pose skin spans y {min_y:.2}..{max_y:.2} — \
+                                     not a plausible standing figure"
+                                ));
+                            }
+                            r.skin_samples += 1;
+                        }
+                        Ok(_) => r
+                            .issues
+                            .push(format!("anim/{stem}.mod: non-finite bind-pose skin")),
+                        Err(e) => r
+                            .issues
+                            .push(format!("anim/{stem}.mod: bind-pose deform: {e}")),
+                    }
+                    r.skins += 1;
+                    skins.insert(stem.clone(), skin);
+                }
+                Err(e) => r
+                    .issues
+                    .push(format!("anim/{stem}.mod: skin assembly failed: {e}")),
+            },
+            Some(Err(_)) => {} // rig error already reported
+            None => r.issues.push(format!(
+                "anim/{stem}.mod: no parseable skeleton to bind the skin against"
+            )),
+        }
+    }
+
     // State model → clip cross-checks.
     for (stem, model) in &state_models {
         let bones = skels.get(stem).map(|s| s.bone_count());
         // F19-A.3: exercise the runtime sampler over authored windows.
-        let rig = skels.get(stem).map(mm2_game::ped::PedRig::from_skel);
-        if let Some(Err(e)) = &rig {
-            r.issues.push(format!("anim/{stem}.skel: {e}"));
-        }
+        let rig = rigs.get(stem).map(|r| r.as_ref());
         for st in &model.states {
             let logical = format!("anim/{}.anim", st.anim);
             let Some(clip) = clips.get(&st.anim) else {
@@ -402,7 +468,23 @@ pub fn audit(vfs: &Vfs) -> PedsReport {
                 let last = st.last_frame.saturating_sub(1).clamp(first, hi);
                 for f in [first, (first + last) / 2, last] {
                     match rig.sample(clip, f as f32) {
-                        Ok(p) if p.is_finite() => r.poses_sampled += 1,
+                        Ok(p) if p.is_finite() => {
+                            r.poses_sampled += 1;
+                            // F19-A.4: deform the assembled skin over
+                            // the same sampled pose.
+                            if let Some(skin) = skins.get(stem) {
+                                match skin.deform(&rig.world_transforms(&p)) {
+                                    Ok(d) if d.is_finite() => r.skin_samples += 1,
+                                    Ok(_) => r.issues.push(format!(
+                                        "{logical}: non-finite skin at frame {}",
+                                        f + 1
+                                    )),
+                                    Err(e) => r
+                                        .issues
+                                        .push(format!("{logical}: frame {} skin: {e}", f + 1)),
+                                }
+                            }
+                        }
                         Ok(_) => r
                             .issues
                             .push(format!("{logical}: non-finite pose at frame {}", f + 1)),
@@ -447,6 +529,10 @@ pub fn print_report(r: &PedsReport) {
         r.clip_frames,
         r.unreferenced.len(),
         r.poses_sampled
+    );
+    println!(
+        "skins: {} assembled, {} deform samples",
+        r.skins, r.skin_samples
     );
     println!("\narchetypes:");
     for a in &r.archetypes {
@@ -622,7 +708,7 @@ primitives: 2
 matrices: 3
 
 v	0.0	0.0	0.0
-v	1.0	0.0	0.0
+v	0.0	-1.0	0.0
 v	0.0	1.0	0.0
 n	0.0	0.0	1.0
 n	0.0	0.0	1.0
@@ -869,5 +955,111 @@ mtxn 1 1 1
                 .any(|i| i.contains("rays") && i.contains("3 bones"))
         );
         assert!(r.failures.iter().any(|(p, _)| p.contains("xwalk")));
+    }
+
+    /// A minimal flat-dialect `.mod` for the same 3-bone rig — global
+    /// `adj`/`tri` lists bound through `mtxv`/`mtxn`.
+    const MOD_FLAT: &str = "\
+version: 1.09
+verts: 3
+normals: 3
+colors: 1
+tex1s: 1
+tex2s: 0
+tangents: 0
+materials: 2
+adjuncts: 3
+primitives: 2
+matrices: 3
+
+v	0.0	0.0	0.0
+v	0.0	-1.0	0.0
+v	0.0	1.0	0.0
+n	0.0	0.0	1.0
+n	0.0	0.0	1.0
+n	0.0	0.0	1.0
+c	1.0	1.0	1.0	1.0
+t1	0.5	0.5
+
+mtl Test1:SKIN {
+	adjuncts:	2
+	primitives:	1
+	textures:	0
+	illum: diffuse
+}
+
+mtl Test1:HAIR {
+	adjuncts:	1
+	primitives:	1
+	textures:	0
+	illum: diffuse
+}
+
+adj	0	0	0	0	0
+adj	1	1	0	0	0
+adj	2	2	0	0	0
+tri	0	1	0
+tri	1	2	2
+
+mtxv 1 1 1
+mtxn 1 1 1
+";
+
+    #[test]
+    fn audit_assembles_and_deforms_skins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        write_arch(d, "pedmodel_man"); // packet dialect
+        // A flat-dialect archetype on the same rig shape.
+        write(d, "anim/pedmodel_woman.skel", SKEL.as_bytes());
+        write(d, "anim/pedmodel_woman.csv", CSV.as_bytes());
+        write(d, "anim/pedmodel_woman.rays", RAYS.as_bytes());
+        write(d, "anim/pedmodel_woman.shaders", &shaders());
+        write(d, "anim/pedmodel_woman.mod", MOD_FLAT.as_bytes());
+
+        let r = audit(&vfs_of(d));
+        assert_eq!(r.skins, 2);
+        // Each: 1 bind-pose deform + 2 states × 3 window frames.
+        assert_eq!(r.skin_samples, 14);
+        assert!(r.issues.is_empty(), "{:?}", r.issues);
+
+        // A `.mod` bound off the rig is an issue, not a panic.
+        write(
+            d,
+            "anim/pedmodel_man.mod",
+            MOD.replace("mtx 2", "mtx 9").as_bytes(),
+        );
+        let r = audit(&vfs_of(d));
+        assert_eq!(r.skins, 1);
+        assert!(
+            r.issues
+                .iter()
+                .any(|i| i.contains("skin assembly failed") && i.contains("bone 9")),
+            "{:?}",
+            r.issues
+        );
+    }
+
+    #[test]
+    fn audit_flags_a_non_standing_bind_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        write_arch(d, "pedmodel_man");
+        // Verts hovering far above their bones — e.g. authored
+        // model-space read as bone-local — fail the bind-pose check.
+        write(
+            d,
+            "anim/pedmodel_man.mod",
+            MOD.replace("v\t0.0\t-1.0\t0.0", "v\t0.0\t7.0\t0.0")
+                .as_bytes(),
+        );
+        let r = audit(&vfs_of(d));
+        assert!(
+            r.issues
+                .iter()
+                .any(|i| i.contains("not a plausible standing figure")),
+            "{:?}",
+            r.issues
+        );
     }
 }

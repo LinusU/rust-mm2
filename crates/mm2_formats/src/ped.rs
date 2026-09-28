@@ -1486,6 +1486,60 @@ impl PedMod {
             prim_check(&p.primitives, p.adjuncts.len(), &mut out);
         }
 
+        // `mtxn` partitions the normals array by the same per-matrix
+        // rule — every adjunct's normal should land in the bucket of
+        // the bone its corner rides (the packet `mtx` slot, else the
+        // vert's `mtxv` bucket). Measured: 100% agreement across all
+        // 1946 retail adjuncts.
+        let mtxn_partition: Option<Vec<i64>> = {
+            let sum: i64 = self.matrix_normals.iter().sum();
+            (!self.matrix_normals.is_empty()
+                && self.matrix_normals.iter().all(|&v| v >= 0)
+                && sum == self.normals.len() as i64)
+                .then(|| {
+                    self.matrix_normals
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(b, &n)| std::iter::repeat_n(b as i64, n as usize))
+                        .collect()
+                })
+        };
+        if let Some(np) = &mtxn_partition {
+            let normal_bone = |a: &PedModAdj| {
+                usize::try_from(a.normal)
+                    .ok()
+                    .and_then(|n| np.get(n).copied())
+            };
+            let check = |a: &PedModAdj, corner: Option<i64>, out: &mut Vec<TableDiagnostic>| {
+                if let (Some(b), Some(nb)) = (corner, normal_bone(a))
+                    && b != nb
+                {
+                    out.push(TableDiagnostic {
+                        line: a.line,
+                        message: format!(
+                            "adjunct normal {} in `mtxn` bone {nb} but its corner rides bone {b}",
+                            a.normal
+                        ),
+                    });
+                }
+            };
+            for a in &self.adjuncts {
+                let corner = usize::try_from(a.vert)
+                    .ok()
+                    .and_then(|v| mtxv_partition.as_ref().and_then(|p| p.get(v).copied()));
+                check(a, corner, &mut out);
+            }
+            for p in &self.packets {
+                for a in &p.adjuncts {
+                    let corner = a
+                        .matrix
+                        .and_then(|s| usize::try_from(s).ok())
+                        .and_then(|s| p.matrices.get(s).copied());
+                    check(a, corner, &mut out);
+                }
+            }
+        }
+
         // Material bookkeeping: dialect fields, texture rows, illum,
         // declared primitives vs the owned data.
         for mtl in &self.materials {
