@@ -1,3 +1,76 @@
+# Last iteration — F19-A.2 review repair: `PedMod` carve-range panic
+# (iteration 89)
+
+Iteration 89 on `ralph/night` (baseline `f8a4b23` — the F19-A.2
+commit; external verify green, the review returned one blocking
+finding; thirty-fourth iteration of run `20260925T144723`). One
+scoped repair: `PedMod::validate()` could panic on a packet-dialect
+`.mod` whose material `packets:` counts overrun the actual packet
+list.
+
+## Task selection
+
+The F19-A.2 candidate `f8a4b23` failed external review on one
+blocking finding: the per-material range carving advanced `pkt_at`
+by the declared `packets:` count but clamped only the range *end* —
+once `pkt_at` exceeded `packets.len()`, a later material's
+`packet_range` came out inverted (start > end) and
+`self.packets[mtl.packet_range.clone()]` in `validate()` panicked
+(`range start index 5 out of range for slice of length 1` on the
+reviewer's two-`mtl` repro). `mm2-inspect peds` calls `validate()`
+per `.mod`, so one malformed or modded mesh would abort the whole
+audit instead of counting as an issue — and the iteration's "no
+panic path" claim was false. Repairing that defect was this
+iteration's only work.
+
+## Findings and actions
+
+- `mm2_formats::ped` — the carve now clamps *both* range ends:
+  `adj_at.min(len)..end.min(len)` for `adjunct_range`,
+  `primitive_range` and `packet_range`. The consumption cursors
+  still advance by the declared counts, so downstream materials get
+  empty clamped ranges rather than overlapping ones, and the
+  existing `claimed_*`-vs-actual coverage checks report the
+  overrun exactly as before.
+- Regression test `mod_validate_reports_overdeclared_material_counts`
+  reproduces the reviewer's shape in both dialects: packet — `mtl A`
+  declares `packets: 5` against 2 real packets (`validate()` reports
+  "materials claim 6 packets but 2 exist", no panic); flat — `mtl A`
+  declares `adjuncts: 9`/`primitives: 9` against 4/2 records
+  (`claim 10 … but 4/2 exist`, empty `4..4`/`2..2` carve for `mtl
+  B`).
+
+## Evidence
+
+- `cargo test -p mm2_formats ped` — 32 green incl. the new
+  regression test.
+- `mm2-inspect peds <retail> --strict` — exit 0, output identical to
+  the F19-A.2 run (man 117v/230p/18m packets, manw 128v/260p/17m,
+  woman 123v/232p/17m flat, womanw 127v/241p/16m, wolf quirk
+  intact).
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --workspace` — all suites green (exit 0).
+
+## Classification / remaining open items
+
+- No original-rule claim changes; the clamp is a robustness bound on
+  malformed declared counts, not a recovered rule.
+- Review minors not addressed this iteration (non-blocking, recorded
+  for a future pass): silent overwrites on duplicate `mtxv`/`mtxn`/
+  `mtx`/`illum`/`textures` rows, silently-`None` malformed `mtl`
+  integer fields, `prim_check` reporting line 0, the `tangents:`
+  split-vs-sum assumption (documented as inferred).
+- All other F19-A.2 open items stand: parser + audit slice only —
+  no geometry assembly, skinning or spawning; F19-A stays `active`;
+  F19-AC02..AC06 remain unclaimed.
+
+---
+
 # Last iteration — F19-A.2 `.mod` pedestrian mesh decode (iteration 88)
 
 Iteration 88 on `ralph/night` (baseline `e01d429` — the F19-A.1 commit;

@@ -1143,26 +1143,28 @@ impl PedMod {
 
         // Carve per-material slices. Flat groups consume the shared
         // lists in authored order; packet groups consume packet blocks.
-        // Ranges clamp to the data; validate() reports overruns.
+        // Both range ends clamp to the data (a declared-count overrun
+        // must not leave an inverted range that later indexing panics
+        // on); validate() reports overruns.
         let mut adj_at = 0usize;
         let mut prim_at = 0usize;
         let mut pkt_at = 0usize;
         for mtl in &mut m.materials {
             if let Some(n) = mtl.adjuncts {
                 let end = adj_at.saturating_add(n.max(0) as usize);
-                mtl.adjunct_range = adj_at..end.min(m.adjuncts.len());
+                mtl.adjunct_range = adj_at.min(m.adjuncts.len())..end.min(m.adjuncts.len());
                 adj_at = end;
             }
             if let Some(n) = mtl.primitives
                 && mtl.adjuncts.is_some()
             {
                 let end = prim_at.saturating_add(n.max(0) as usize);
-                mtl.primitive_range = prim_at..end.min(m.primitives.len());
+                mtl.primitive_range = prim_at.min(m.primitives.len())..end.min(m.primitives.len());
                 prim_at = end;
             }
             if let Some(n) = mtl.packets {
                 let end = pkt_at.saturating_add(n.max(0) as usize);
-                mtl.packet_range = pkt_at..end.min(m.packets.len());
+                mtl.packet_range = pkt_at.min(m.packets.len())..end.min(m.packets.len());
                 pkt_at = end;
             }
         }
@@ -2466,5 +2468,44 @@ packet 0 0 1 {
         assert!(v.iter().any(|i| i.message.contains("neither")));
         // The flat adjunct does not carry a matrix field.
         assert_eq!(m.adjuncts[0].matrix, None);
+    }
+
+    #[test]
+    fn mod_validate_reports_overdeclared_material_counts() {
+        // A material declaring more packets than the file holds once
+        // left later materials an inverted carve range that validate()
+        // panicked on. Now the carve clamps both ends and the overrun
+        // is a reported issue.
+        let m = PedMod::parse(&MOD_PACKETS.replacen("packets:\t1", "packets:\t5", 1)).unwrap();
+        assert_eq!(m.materials[0].packet_range, 0..2);
+        assert_eq!(m.materials[1].packet_range, 2..2);
+        let v = m.validate();
+        assert!(
+            v.iter()
+                .any(|i| i.message.contains("claim 6 packets but 2 exist")),
+            "{v:?}"
+        );
+
+        // The shared-list carves clamp the same way.
+        let m = PedMod::parse(
+            &MOD_FLAT
+                .replacen("adjuncts:\t3", "adjuncts:\t9", 1)
+                .replacen("primitives:\t1", "primitives:\t9", 1),
+        )
+        .unwrap();
+        assert_eq!(m.materials[0].adjunct_range, 0..4);
+        assert_eq!(m.materials[1].adjunct_range, 4..4);
+        assert_eq!(m.materials[1].primitive_range, 2..2);
+        let v = m.validate();
+        assert!(
+            v.iter()
+                .any(|i| i.message.contains("claim 10 adjuncts but 4 exist")),
+            "{v:?}"
+        );
+        assert!(
+            v.iter()
+                .any(|i| i.message.contains("claim 10 primitives but 2 exist")),
+            "{v:?}"
+        );
     }
 }
