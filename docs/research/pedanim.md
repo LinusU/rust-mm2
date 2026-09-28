@@ -117,13 +117,73 @@ then `jobs × per` records. All four retail files: float shaders, empty
 texture names, exact fit (man 48×18, manw 24×17, woman 48×17,
 womanw 24×16). Parsed by `mm2_formats::pkg::PkgShaders::parse`.
 
-## `.mod` — ASCII mesh (inventoried, not decoded — F19-A.2)
+## `.mod` — ASCII skinned mesh (recovered, F19-A.2)
 
-Large ASCII files (`verts`/`normals`/`colors`/`tex1s` counts, `v`/`n`/
-`c`/`t1`/`t2`/`ts`/`tt` records, `mtl` material blocks with
-`adjuncts`/`primitives`/`tri`/`adj`/`stp` rows or a `packets` variant,
-trailing `mtxv`/`mtxn` matrix lists). ~46–60 KB each; two authoring
-dialects observed (flat adjuncts vs packets).
+~46–60 KB ASCII; `version: 1.09` on all four retail files. A ten-field
+count header (`verts`/`normals`/`colors`/`tex1s`/`tex2s`/`tangents`/
+`materials`/`adjuncts`/`primitives`/`matrices`), then resource lists
+(`v`/`n`/`c`/`t1`/`t2`/`ts`/`tt` rows), `mtl <name> { … }` shader
+groups, the geometry itself, and trailing `mtxv`/`mtxn` matrix-count
+rows. Two authoring dialects exist on retail:
+
+```
+# packet dialect — pedmodel_man, pedmodel_manw
+mtl Businessman1:SKIN {
+	packets:	5          # this group owns packets[i..i+5]
+	primitives:	44         # sum of owned packets' tri count
+	textures:	1
+	texture:	0 BEARD64
+	illum: diffuse
+	ambient/diffuse/specular: r g b
+}
+packet 15 24 2 {           # declared adjuncts / tris / matrices
+	adj	v n c t1 t2 slot   # slot indexes this packet's mtx list
+	tri	a b c              # indexes the packet's own adjuncts
+	mtx 0 1                # bone matrix indices (< matrices:)
+}
+mtxv 1 2 …                 # per-matrix contiguous vertex counts
+mtxn 1 2 …                 # same partition for normals
+
+# flat dialect — pedmodel_woman, pedmodel_womanw
+mtl A:SKIN {
+	adjuncts:	3        # this group's slice of the global adj list
+	primitives:	1        # slice of the global tri list
+	…
+}
+adj	v n c t1 t2            # five fields — no matrix slot
+tri	a b c                  # indexes the global adjunct list
+```
+
+Adjuncts pair a vertex with a normal plus colour/tex indices — they are
+the skinned face-corners, shared between triangles.
+
+Measured invariants (all four files):
+
+- `adjuncts:` == `normals:` == the number of *distinct* (vertex,
+  normal) tuples across all `adj` rows. Flat-dialect rows are all
+  distinct, so the header equals the row count (696/723); packet
+  dialect shares corners (manw: 279 rows → 252 distinct).
+- `matrices:` == skeleton `NumBones` (19 on the four humanoids).
+- `primitives:` == total `tri` rows; per-material
+  `packets:`/`adjuncts:`/`primitives:` exactly partition the packet
+  blocks / global adjunct / triangle lists in order.
+- `mtxv`/`mtxn` have exactly `matrices` entries and sum to
+  `verts`/`normals` — they partition the vertex/normal arrays
+  contiguously by bone. Packet `adj` matrix slots resolve through the
+  packet `mtx` list to the same bone `mtxv` assigns: the two
+  skinning records agree 100% on retail.
+- `materials:` == `mtl` blocks == `.shaders` shaders-per-paint-job
+  (man 18, manw 17, woman 17, womanw 16) — R3 documents the group order
+  must match the shader order.
+- `colors:` is 1 on all four (every adjunct's `c` index is 0); `t1`
+  carries real per-adjunct UV indices (≤ tex1s−1); `tex2s:`/
+  `tangents:` are 0 and `t2`/`ts`/`tt` never appear.
+
+Unrecovered: whether `mtxv` is authoritative over packet `mtx` lists
+or vice versa (they agree), how flat-dialect adjuncts bind to bones —
+with no per-adjunct slot, the `mtxv` partition is the only skinning
+data — `stp` rows (seen in R3 docs, absent on retail), and the
+optional 4th `packet` header int (UNK-41).
 
 ## Cross-checks that hold on retail (`mm2-inspect peds`)
 

@@ -1,3 +1,92 @@
+# Last iteration — F19-A.2 `.mod` pedestrian mesh decode (iteration 88)
+
+Iteration 88 on `ralph/night` (baseline `e01d429` — the F19-A.1 commit;
+external verify + review green; thirty-third iteration of run
+`20260925T144723`). One coherent slice: the `pedmodel_*.mod` ASCII
+skinned meshes are decoded, validated and cross-checked through the
+same audit path; runtime consumption stays open.
+
+## Task selection
+
+No failing gate or review finding to repair — F19-A.1 passed external
+review with zero blocking findings. The plan's F19-A row named `.mod`
+mesh decode as A.2, the next leg. Direct measurement plus the R3
+`Pedestrian_model.md` reference recovered two retail dialects, so this
+iteration adds the parser, folds it into `mm2-inspect peds`, and
+records the measured invariants. Geometry assembly, skinning and
+spawning are deliberately deferred.
+
+## What landed
+
+- `mm2_formats::ped::PedMod` + `PedModDialect` (pure parser): the
+  `version:` header, ten declared counts, `v`/`n`/`c`/`t1`/`t2`/`ts`/
+  `tt` resource lists, `mtl <name> { … }` shader groups
+  (`packets:`/`adjuncts:`/`primitives:`/`textures:`/`texture:`/
+  `illum:`/`ambient`/`diffuse`/`specular`), `packet { adj tri mtx }`
+  blocks, flat `adj`/`tri` lists, and `mtxv`/`mtxn` matrix-count
+  trailers. Two dialects: **packet** (`pedmodel_man`/`manw` — six-field
+  adjuncts whose last field indexes the packet's own `mtx` bone list)
+  and **flat** (`pedmodel_woman`/`womanw` — five-field adjuncts in one
+  global list partitioned to materials by declared count). Unknown
+  records, non-integer fields, unclosed blocks and truncated input all
+  degrade to `TableDiagnostic`s — no panic path.
+- `PedMod::validate()` — every declared header count vs actual,
+  per-packet and per-material declared counts vs owned data, adjunct
+  vertex/normal/colour/uv index bounds (empty lists accept index 0 —
+  retail `tex2s: 0` shape), `tri` index bounds, packet `mtx` entries
+  vs `matrices:`, adjunct matrix-slot bounds, `mtxv`/`mtxn` entry
+  counts vs `matrices:` and partition sums vs verts/normals, material
+  ownership coverage of the shared lists (no orphaned packets or
+  adjuncts), mixed-dialect files, unknown `illum` values, texture-row
+  counts, and two measured retail invariants: `adjuncts:` ==
+  `normals:` == distinct (vertex, normal) tuples, and packet
+  adjunct→bone bindings agreeing with the `mtxv` vertex partition.
+- `mm2-inspect peds` — every discovered `.mod` is deep-parsed; the
+  archetype line reports `.mod <verts>v/<prims>p/<materials>m
+  (packets|flat)`; diagnostics and validate issues count as issues,
+  parse failures as failures; cross-checks `matrices:` vs the parsed
+  skeleton's `NumBones` and `mtl` count vs `.shaders`
+  shaders-per-paint-job.
+- `mm2-inspect inventory` note and `docs/research/pedanim.md` updated
+  — the `.mod` section now records the grammar, both dialects and the
+  measured invariants instead of "inventoried, not decoded".
+
+## Evidence
+
+- `cargo test -p mm2_formats ped` — 31 green incl. 6 new `PedMod`
+  tests (packet + flat dialect fixtures, missing version rejection,
+  malformed-record diagnostics, index/partition validation, packet
+  declared-count/slot/`mtxv`-agreement errors, mixed dialect).
+- `cargo test -p mm2_inspect peds` — 5 green incl. a new audit test
+  (`.mod` field extraction, skeleton/matrix mismatch → issue,
+  unparseable mesh → failure, material/shader-count gap → issue).
+- Retail (`fnv1a64:e91e6cd4b2ae30d9`): `mm2-inspect peds` — all four
+  `.mod` files parse with zero issues: `pedmodel_man` 117v/230p/18m
+  (packets), `pedmodel_manw` 128v/260p/17m, `pedmodel_woman`
+  123v/232p/17m (flat), `pedmodel_womanw` 127v/241p/16m. The rest of
+  the report is unchanged (91 files, 66 clips, wolf quirk, authored
+  `frames+1` quirks); `--strict` exits 0.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --workspace` — all suites green (exit 0).
+
+## Classification / remaining open items
+
+- Original-data claim: grammar + invariants measured against the named
+  fingerprint (PED-1); the flat-dialect bone-binding mechanism,
+  `mtxv`-vs-`mtx` authority, `stp` rows and the optional 4th packet
+  int stay UNK-41.
+- Parser + audit slice only: no geometry assembly, no skinning, no
+  sampling, no spawning — F19-A stays `active`; F19-AC02..AC06 remain
+  unclaimed. A clean audit is not evidence of runtime pedestrian
+  fidelity.
+
+---
+
 # Last iteration — F19-A.1 pedestrian-rig definition parsers +
 # `mm2-inspect peds` (iteration 87)
 

@@ -9,13 +9,15 @@
 //! - `pedmodel_*.rays` records + integer grids ([`PedRays`]),
 //! - `pedanim_*.anim` binary clips ([`PedAnim`]),
 //! - `pedmodel_*.shaders` via the shared PKG shader grammar
-//!   ([`PkgShaders`]).
+//!   ([`PkgShaders`]),
+//! - `pedmodel_*.mod` ASCII skinned meshes ([`PedMod`]) — both the
+//!   flat adjunct-list dialect and the packet dialect.
 //!
-//! Cross-checks: skeleton bone count vs `.rays` row count and clip
-//! channel width, state-model clip references vs discovered `pedanim_*`
-//! files, authored frame windows vs clip length, and the expected
-//! archetype roster ([`EXPECTED_PEDS`]). The ASCII `.mod` meshes are
-//! inventoried but not decoded yet (F19-A.2).
+//! Cross-checks: skeleton bone count vs `.rays` row count, clip
+//! channel width and `.mod` matrix count, `.mod` material count vs
+//! `.shaders` per-paint-job count, state-model clip references vs
+//! discovered `pedanim_*` files, authored frame windows vs clip
+//! length, and the expected archetype roster ([`EXPECTED_PEDS`]).
 //!
 //! `--strict` exits nonzero on parse failures, issues and missing
 //! expected archetypes. Authored quirks — the `pedmodel_wolf` partial
@@ -27,7 +29,7 @@ use std::path::Path;
 
 use mm2_assets::Vfs;
 use mm2_content::{EXPECTED_PEDS, PED_REQUIRED_EXTS};
-use mm2_formats::ped::{PedAnim, PedRays, PedRemap, PedSkel, PedStates};
+use mm2_formats::ped::{PedAnim, PedMod, PedModDialect, PedRays, PedRemap, PedSkel, PedStates};
 use mm2_formats::pkg::PkgShaders;
 
 /// Per-archetype audit row.
@@ -53,8 +55,16 @@ pub struct Archetype {
     pub paint_jobs: Option<u32>,
     /// `.shaders` materials per paint job.
     pub shaders_per_paint_job: Option<u32>,
-    /// `.mod` mesh present (content not decoded — F19-A.2).
+    /// `.mod` mesh present.
     pub has_mod: bool,
+    /// `.mod` vertex count (parsed).
+    pub mod_verts: Option<usize>,
+    /// `.mod` primitive count (parsed).
+    pub mod_primitives: Option<usize>,
+    /// `.mod` material-group count.
+    pub mod_materials: Option<usize>,
+    /// `.mod` geometry dialect.
+    pub mod_dialect: Option<PedModDialect>,
     /// Required companion extensions not discovered.
     pub missing: Vec<&'static str>,
 }
@@ -281,6 +291,45 @@ pub fn audit(vfs: &Vfs) -> PedsReport {
                     .push((format!("anim/{stem}.shaders"), e.to_string())),
             }
         }
+        if let Some(b) = files.get("mod") {
+            match std::str::from_utf8(b)
+                .map_err(|e| format!("not UTF-8 text: {e}"))
+                .and_then(|t| PedMod::parse(t).map_err(|e| e.to_string()))
+            {
+                Ok(m) => {
+                    a.mod_verts = Some(m.verts.len());
+                    a.mod_primitives = Some(m.primitive_count());
+                    a.mod_materials = Some(m.materials.len());
+                    a.mod_dialect = Some(m.dialect());
+                    for d in &m.diagnostics {
+                        r.issues.push(format!("anim/{stem}.mod: {d}"));
+                    }
+                    for d in m.validate() {
+                        r.issues.push(format!("anim/{stem}.mod: {d}"));
+                    }
+                    if let (Some(mtx), Some(bones)) = (m.declared.matrices, a.bones)
+                        && mtx != bones as i64
+                    {
+                        r.issues.push(format!(
+                            "anim/{stem}.mod: declares {mtx} matrices against a {bones}-bone skeleton"
+                        ));
+                    }
+                    // R3: the material-group order must match the
+                    // `.shaders` per-paint-job order — so the counts
+                    // must agree.
+                    if let Some(per) = a.shaders_per_paint_job
+                        && per as usize != m.materials.len()
+                    {
+                        r.issues.push(format!(
+                            "anim/{stem}.mod: {} material groups against {} shaders per paint job",
+                            m.materials.len(),
+                            per
+                        ));
+                    }
+                }
+                Err(e) => r.failures.push((format!("anim/{stem}.mod"), e)),
+            }
+        }
         a.has_mod = files.contains_key("mod");
         r.archetypes.push(a);
     }
@@ -372,6 +421,21 @@ pub fn print_report(r: &PedsReport) {
     println!("\narchetypes:");
     for a in &r.archetypes {
         let tag = if a.expected { "" } else { " (extra)" };
+        let mod_desc = match (a.has_mod, a.mod_verts) {
+            (true, Some(v)) => format!(
+                "{}v/{}p/{}m ({})",
+                v,
+                a.mod_primitives.unwrap_or(0),
+                a.mod_materials.unwrap_or(0),
+                match a.mod_dialect {
+                    Some(PedModDialect::Packets) => "packets",
+                    Some(PedModDialect::Flat) => "flat",
+                    _ => "mixed",
+                }
+            ),
+            (true, None) => "present (failed)".to_string(),
+            _ => "absent".to_string(),
+        };
         println!(
             "  {}{}: {} bones (declared {:?}), {} states, {} rays ({}-row grid), \
              remap {}, {} paint jobs x {} shaders, .mod {}{}",
@@ -389,11 +453,7 @@ pub fn print_report(r: &PedsReport) {
             a.shaders_per_paint_job
                 .map(|n| n.to_string())
                 .unwrap_or("-".into()),
-            if a.has_mod {
-                "present (undecoded)"
-            } else {
-                "absent"
-            },
+            mod_desc,
             if a.missing.is_empty() {
                 String::new()
             } else {
@@ -516,13 +576,74 @@ mod tests {
         s
     }
 
+    /// A minimal packet-dialect `.mod`: 3 verts/3 normals, 2 materials
+    /// (matching the 2-shader fixture above), 2 packets, 3 matrices.
+    const MOD: &str = "\
+version: 1.09
+verts: 3
+normals: 3
+colors: 1
+tex1s: 1
+tex2s: 0
+tangents: 0
+materials: 2
+adjuncts: 3
+primitives: 2
+matrices: 3
+
+v	0.0	0.0	0.0
+v	1.0	0.0	0.0
+v	0.0	1.0	0.0
+n	0.0	0.0	1.0
+n	0.0	0.0	1.0
+n	0.0	0.0	1.0
+c	1.0	1.0	1.0	1.0
+t1	0.5	0.5
+
+mtl Test1:SKIN {
+	packets:	1
+	primitives:	1
+	textures:	0
+	illum: diffuse
+	ambient:	0.4 0.3 0.2
+	diffuse:	0.7 0.6 0.5
+	specular:	0.8 0.7 0.6
+}
+
+mtl Test1:HAIR {
+	packets:	1
+	primitives:	1
+	textures:	0
+	illum: diffuse
+	ambient:	0.1 0.0 0.0
+	diffuse:	0.4 0.1 0.1
+	specular:	0.6 0.4 0.4
+}
+
+packet 2 1 2 {
+	adj	0	0	0	0	0	0
+	adj	1	1	0	0	0	1
+	tri	0	1	0
+	mtx 0 1
+}
+
+packet 1 1 1 {
+	adj	2	2	0	0	0	0
+	tri	0	0	0
+	mtx 2
+}
+
+mtxv 1 1 1
+mtxn 1 1 1
+";
+
     /// A complete synthetic archetype: 3 bones, fpf = (3+1)*3 = 12.
     fn write_arch(dir: &Path, stem: &str) {
         write(dir, &format!("anim/{stem}.skel"), SKEL.as_bytes());
         write(dir, &format!("anim/{stem}.csv"), CSV.as_bytes());
         write(dir, &format!("anim/{stem}.rays"), RAYS.as_bytes());
         write(dir, &format!("anim/{stem}.shaders"), &shaders());
-        write(dir, &format!("anim/{stem}.mod"), b"ascii mesh\n");
+        write(dir, &format!("anim/{stem}.mod"), MOD.as_bytes());
         write(dir, "anim/xstand.anim", &clip(2, 12));
         write(dir, "anim/xwalk.anim", &clip(3, 12));
     }
@@ -545,6 +666,56 @@ mod tests {
         assert!(r.issues.is_empty());
         assert!(r.failures.is_empty());
         assert_eq!(r.missing_expected.len(), EXPECTED_PEDS.len() - 1);
+    }
+
+    #[test]
+    fn audit_reports_mod_and_flags_mismatches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        write_arch(d, "pedmodel_man");
+        let r = audit(&vfs_of(d));
+        let a = &r.archetypes[0];
+        assert_eq!(a.mod_verts, Some(3));
+        assert_eq!(a.mod_primitives, Some(2));
+        assert_eq!(a.mod_materials, Some(2));
+        assert_eq!(a.mod_dialect, Some(PedModDialect::Packets));
+        assert!(r.issues.is_empty(), "{:?}", r.issues);
+
+        // Skeleton/matrix disagreement and a material/shader-count gap.
+        write(
+            d,
+            "anim/pedmodel_man.mod",
+            MOD.replace("matrices: 3", "matrices: 9").as_bytes(),
+        );
+        let r = audit(&vfs_of(d));
+        assert!(
+            r.issues
+                .iter()
+                .any(|i| i.contains("9 matrices") && i.contains("3-bone"))
+        );
+
+        // An unparseable mesh is a failure.
+        write(d, "anim/pedmodel_man.mod", b"\xFF\xFE not text");
+        let r = audit(&vfs_of(d));
+        assert!(r.failures.iter().any(|(p, _)| p.ends_with(".mod")));
+
+        // Material groups ≠ shaders-per-paint-job is an issue.
+        write(
+            d,
+            "anim/pedmodel_man.mod",
+            MOD.replace("materials: 2", "materials: 1")
+                .replace(
+                    "mtl Test1:HAIR {\n\tpackets:\t1\n\tprimitives:\t1\n\ttextures:\t0\n\tillum: diffuse\n\tambient:\t0.1 0.0 0.0\n\tdiffuse:\t0.4 0.1 0.1\n\tspecular:\t0.6 0.4 0.4\n}\n\n",
+                    "",
+                )
+                .as_bytes(),
+        );
+        let r = audit(&vfs_of(d));
+        assert!(
+            r.issues
+                .iter()
+                .any(|i| i.contains("material groups") && i.contains("shaders"))
+        );
     }
 
     #[test]
