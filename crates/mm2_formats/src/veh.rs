@@ -66,6 +66,74 @@ fn req_f32(b: &TuneBlock, ctx: &str, name: &str) -> VehResult<f32> {
     }
 }
 
+/// Required scalar that must be a finite number — for records whose
+/// values feed simulation math directly with no `validate()` gate
+/// (`vehCarSim`, `vehTrailer`, `aiVehicleData`). `f64: FromStr` accepts
+/// `nan`/`inf`/`-inf` and an overflowing literal like `1e999` parses to
+/// `inf`; a non-finite scalar propagates NaN into `clamp` bounds (panic)
+/// or into physics state. The `vehCarDamage`/`vehStuck`/`vehGyro`
+/// decoders keep the verbatim [`req_f32`]: they decode non-finite
+/// values deliberately and report them through `validate()`'s
+/// `check_f32`.
+fn req_finite_f32(b: &TuneBlock, ctx: &str, name: &str) -> VehResult<f32> {
+    match b.field(name) {
+        Some(f) => match f.values.first().and_then(|v| v.number) {
+            Some(n) if (n as f32).is_finite() => Ok(n as f32),
+            Some(n) => err(ctx, format!("field {name:?} value {n} is not finite")),
+            None => err(ctx, format!("field {name:?} has no numeric value")),
+        },
+        None => err(ctx, format!("missing required field {name:?}")),
+    }
+}
+
+/// Optional scalar under the same rule as [`req_finite_f32`]: `None`
+/// when absent, a decode error when present-but-non-numeric or
+/// non-finite — matching [`opt_i64`]'s "never silently equated with
+/// authored absence".
+fn opt_finite_f32(b: &TuneBlock, ctx: &str, name: &str) -> VehResult<Option<f32>> {
+    match b.field(name) {
+        Some(f) => match f.values.first().and_then(|v| v.number) {
+            Some(n) if (n as f32).is_finite() => Ok(Some(n as f32)),
+            Some(n) => err(ctx, format!("field {name:?} value {n} is not finite")),
+            None => err(ctx, format!("field {name:?} has no numeric value")),
+        },
+        None => Ok(None),
+    }
+}
+
+/// Required `vec3` of finite numbers for the validate-less records —
+/// same boundary as [`req_finite_f32`]. `aiVehicleData.Size` feeds the
+/// traffic CG fallback; a NaN component there poisons the solver
+/// without ever panicking.
+fn req_finite_vec3(b: &TuneBlock, ctx: &str, name: &str) -> VehResult<[f32; 3]> {
+    match b.vec3(name) {
+        Some(v) if v.iter().all(|c| c.is_finite()) => Ok(v),
+        Some(v) => err(ctx, format!("field {name:?} value {v:?} is not finite")),
+        None => err(ctx, format!("missing or malformed vec3 field {name:?}")),
+    }
+}
+
+/// Most permissive authored gear count a conversion will honor: retail
+/// authors at most 6 and no real gearbox approaches this — past it the
+/// count is corrupt data, not a transmission. Without the bound,
+/// `AutoNumGears 1e12` saturates through `as u32` to `u32::MAX` and the
+/// conversion layer requests a ~17 GB `Vec::with_capacity`.
+const MAX_GEARS: f32 = 32.0;
+
+/// `n` must already be finite (the finite readers above); the bound is
+/// the second half of the check, kept separate so the error can name
+/// the authored value rather than a saturated cast.
+fn gear_count(n: f32, ctx: &str, name: &str) -> VehResult<u32> {
+    if n > MAX_GEARS {
+        err(
+            ctx,
+            format!("field {name:?} gear count {n} exceeds plausibility bound {MAX_GEARS}"),
+        )
+    } else {
+        Ok(n as u32)
+    }
+}
+
 fn req_vec3(b: &TuneBlock, ctx: &str, name: &str) -> VehResult<[f32; 3]> {
     match b.vec3(name) {
         Some(v) => Ok(v),
@@ -248,25 +316,25 @@ pub struct VehCarSim {
 
 fn decode_wheel(b: &TuneBlock, ctx: &str, warnings: &mut Vec<String>) -> VehResult<VehWheel> {
     let w = VehWheel {
-        suspension_extent: req_f32(b, ctx, "SuspensionExtent")?,
-        suspension_limit: req_f32(b, ctx, "SuspensionLimit")?,
-        suspension_factor: req_f32(b, ctx, "SuspensionFactor")?,
-        suspension_damp_coef: req_f32(b, ctx, "SuspensionDampCoef")?,
-        steering_limit: req_f32(b, ctx, "SteeringLimit")?,
-        steering_offset: b.f32("SteeringOffset").unwrap_or(0.0),
-        brake_coef: req_f32(b, ctx, "BrakeCoef")?,
-        handbrake_coef: b.f32("HandbrakeCoef").unwrap_or(0.0),
-        camber_limit: b.f32("CamberLimit"),
-        wobble_limit: b.f32("WobbleLimit"),
-        tire_disp_limit_long: req_f32(b, ctx, "TireDispLimitLong")?,
-        tire_damp_coef_long: req_f32(b, ctx, "TireDampCoefLong")?,
-        tire_drag_coef_long: req_f32(b, ctx, "TireDragCoefLong")?,
-        tire_disp_limit_lat: req_f32(b, ctx, "TireDispLimitLat")?,
-        tire_damp_coef_lat: req_f32(b, ctx, "TireDampCoefLat")?,
-        tire_drag_coef_lat: req_f32(b, ctx, "TireDragCoefLat")?,
-        optimum_slip_percent: req_f32(b, ctx, "OptimumSlipPercent")?,
-        static_fric: req_f32(b, ctx, "StaticFric")?,
-        sliding_fric: req_f32(b, ctx, "SlidingFric")?,
+        suspension_extent: req_finite_f32(b, ctx, "SuspensionExtent")?,
+        suspension_limit: req_finite_f32(b, ctx, "SuspensionLimit")?,
+        suspension_factor: req_finite_f32(b, ctx, "SuspensionFactor")?,
+        suspension_damp_coef: req_finite_f32(b, ctx, "SuspensionDampCoef")?,
+        steering_limit: req_finite_f32(b, ctx, "SteeringLimit")?,
+        steering_offset: opt_finite_f32(b, ctx, "SteeringOffset")?.unwrap_or(0.0),
+        brake_coef: req_finite_f32(b, ctx, "BrakeCoef")?,
+        handbrake_coef: opt_finite_f32(b, ctx, "HandbrakeCoef")?.unwrap_or(0.0),
+        camber_limit: opt_finite_f32(b, ctx, "CamberLimit")?,
+        wobble_limit: opt_finite_f32(b, ctx, "WobbleLimit")?,
+        tire_disp_limit_long: req_finite_f32(b, ctx, "TireDispLimitLong")?,
+        tire_damp_coef_long: req_finite_f32(b, ctx, "TireDampCoefLong")?,
+        tire_drag_coef_long: req_finite_f32(b, ctx, "TireDragCoefLong")?,
+        tire_disp_limit_lat: req_finite_f32(b, ctx, "TireDispLimitLat")?,
+        tire_damp_coef_lat: req_finite_f32(b, ctx, "TireDampCoefLat")?,
+        tire_drag_coef_lat: req_finite_f32(b, ctx, "TireDragCoefLat")?,
+        optimum_slip_percent: req_finite_f32(b, ctx, "OptimumSlipPercent")?,
+        static_fric: req_finite_f32(b, ctx, "StaticFric")?,
+        sliding_fric: req_finite_f32(b, ctx, "SlidingFric")?,
     };
     unknown_fields(
         b,
@@ -297,26 +365,30 @@ fn decode_wheel(b: &TuneBlock, ctx: &str, warnings: &mut Vec<String>) -> VehResu
     Ok(w)
 }
 
-fn decode_end_train(b: &TuneBlock, ctx: &str, warnings: &mut Vec<String>) -> VehEndTrain {
+fn decode_end_train(
+    b: &TuneBlock,
+    ctx: &str,
+    warnings: &mut Vec<String>,
+) -> VehResult<VehEndTrain> {
     unknown_fields(
         b,
         ctx,
         &["AngInertia", "BrakeDynamicCoef", "BrakeStaticCoef"],
         warnings,
     );
-    VehEndTrain {
-        ang_inertia: b.f32("AngInertia"),
-        brake_dynamic_coef: b.f32("BrakeDynamicCoef"),
-        brake_static_coef: b.f32("BrakeStaticCoef"),
-    }
+    Ok(VehEndTrain {
+        ang_inertia: opt_finite_f32(b, ctx, "AngInertia")?,
+        brake_dynamic_coef: opt_finite_f32(b, ctx, "BrakeDynamicCoef")?,
+        brake_static_coef: opt_finite_f32(b, ctx, "BrakeStaticCoef")?,
+    })
 }
 
-fn decode_axle(b: &TuneBlock, ctx: &str, warnings: &mut Vec<String>) -> VehAxle {
+fn decode_axle(b: &TuneBlock, ctx: &str, warnings: &mut Vec<String>) -> VehResult<VehAxle> {
     unknown_fields(b, ctx, &["TorqueCoef", "DampCoef"], warnings);
-    VehAxle {
-        torque_coef: b.f32("TorqueCoef").unwrap_or(0.0),
-        damp_coef: b.f32("DampCoef").unwrap_or(0.0),
-    }
+    Ok(VehAxle {
+        torque_coef: opt_finite_f32(b, ctx, "TorqueCoef")?.unwrap_or(0.0),
+        damp_coef: opt_finite_f32(b, ctx, "DampCoef")?.unwrap_or(0.0),
+    })
 }
 
 impl VehCarSim {
@@ -332,14 +404,25 @@ impl VehCarSim {
         let ctx = "vehCarSim";
         let mut warnings = Vec::new();
 
-        let mass = req_f32(root, ctx, "Mass")?;
-        let inertia_box = req_vec3(root, ctx, "InertiaBox")?;
-        let center_of_gravity = root.vec3("CenterOfGravity").unwrap_or_else(|| {
-            warnings.push("vehCarSim: CenterOfGravity missing, using [0, -0.1, 0]".into());
-            [0.0, -0.1, 0.0]
-        });
+        let mass = req_finite_f32(root, ctx, "Mass")?;
+        let inertia_box = req_finite_vec3(root, ctx, "InertiaBox")?;
+        let center_of_gravity = match opt_finite_vec3(root, ctx, "CenterOfGravity", &mut warnings) {
+            Some(v) => v,
+            None => {
+                if root.field("CenterOfGravity").is_none() {
+                    warnings.push("vehCarSim: CenterOfGravity missing, using [0, -0.1, 0]".into());
+                }
+                [0.0, -0.1, 0.0]
+            }
+        };
         let drivetrain_type = match root.field("DrivetrainType") {
             Some(f) => match f.values.first().and_then(|v| v.number) {
+                Some(n) if !n.is_finite() => {
+                    warnings.push(format!(
+                        "vehCarSim: non-finite DrivetrainType {n}, assuming RWD"
+                    ));
+                    DrivetrainType::Rwd
+                }
                 Some(n) => match DrivetrainType::from_i32(n as i64) {
                     Some(d) => d,
                     None => {
@@ -366,11 +449,16 @@ impl VehCarSim {
                     &mut warnings,
                 );
                 VehAero {
-                    drag: b.f32("Drag").unwrap_or(0.0),
-                    down: b.f32("Down").unwrap_or(0.0),
-                    ang_c_damp: b.vec3("AngCDamp"),
-                    ang_vel_damp: b.vec3("AngVelDamp"),
-                    ang_vel2_damp: b.vec3("AngVel2Damp"),
+                    drag: opt_finite_f32(b, "vehCarSim.Aero", "Drag")?.unwrap_or(0.0),
+                    down: opt_finite_f32(b, "vehCarSim.Aero", "Down")?.unwrap_or(0.0),
+                    ang_c_damp: opt_finite_vec3(b, "vehCarSim.Aero", "AngCDamp", &mut warnings),
+                    ang_vel_damp: opt_finite_vec3(b, "vehCarSim.Aero", "AngVelDamp", &mut warnings),
+                    ang_vel2_damp: opt_finite_vec3(
+                        b,
+                        "vehCarSim.Aero",
+                        "AngVel2Damp",
+                        &mut warnings,
+                    ),
                 }
             }
             None => {
@@ -400,12 +488,12 @@ impl VehCarSim {
             &mut warnings,
         );
         let engine = VehEngine {
-            max_horsepower: req_f32(engine_b, "vehCarSim.Engine", "MaxHorsePower")?,
-            idle_rpm: req_f32(engine_b, "vehCarSim.Engine", "IdleRPM")?,
-            opt_rpm: req_f32(engine_b, "vehCarSim.Engine", "OptRPM")?,
-            max_rpm: req_f32(engine_b, "vehCarSim.Engine", "MaxRPM")?,
-            gcl: engine_b.f32("GCL"),
-            ang_inertia: engine_b.f32("AngInertia"),
+            max_horsepower: req_finite_f32(engine_b, "vehCarSim.Engine", "MaxHorsePower")?,
+            idle_rpm: req_finite_f32(engine_b, "vehCarSim.Engine", "IdleRPM")?,
+            opt_rpm: req_finite_f32(engine_b, "vehCarSim.Engine", "OptRPM")?,
+            max_rpm: req_finite_f32(engine_b, "vehCarSim.Engine", "MaxRPM")?,
+            gcl: opt_finite_f32(engine_b, "vehCarSim.Engine", "GCL")?,
+            ang_inertia: opt_finite_f32(engine_b, "vehCarSim.Engine", "AngInertia")?,
         };
 
         let trans_b = req_block(root, ctx, "Trans")?;
@@ -426,17 +514,27 @@ impl VehCarSim {
             ],
             &mut warnings,
         );
+        let trans_ctx = "vehCarSim.Trans";
         let trans = VehTrans {
-            manual_num_gears: trans_b.f32("ManualNumGears").unwrap_or(0.0).max(0.0) as u32,
-            auto_num_gears: req_f32(trans_b, "vehCarSim.Trans", "AutoNumGears")?.max(1.0) as u32,
-            reverse_mph: req_f32(trans_b, "vehCarSim.Trans", "Reverse")?,
-            low_mph: req_f32(trans_b, "vehCarSim.Trans", "Low")?,
-            high_mph: req_f32(trans_b, "vehCarSim.Trans", "High")?,
-            gear_bias: trans_b.f32("GearBias").unwrap_or(0.5),
-            upshift_bias: trans_b.f32("UpshiftBias").unwrap_or(0.05),
-            downshift_bias_min: trans_b.f32("DownshiftBiasMin").unwrap_or(0.05),
-            downshift_bias_max: trans_b.f32("DownshiftBiasMax").unwrap_or(0.3),
-            gear_change_time: trans_b.f32("GearChangeTime").unwrap_or(0.8),
+            manual_num_gears: match opt_finite_f32(trans_b, trans_ctx, "ManualNumGears")? {
+                Some(v) => gear_count(v.max(0.0), trans_ctx, "ManualNumGears")?,
+                None => 0,
+            },
+            auto_num_gears: gear_count(
+                req_finite_f32(trans_b, trans_ctx, "AutoNumGears")?.max(1.0),
+                trans_ctx,
+                "AutoNumGears",
+            )?,
+            reverse_mph: req_finite_f32(trans_b, trans_ctx, "Reverse")?,
+            low_mph: req_finite_f32(trans_b, trans_ctx, "Low")?,
+            high_mph: req_finite_f32(trans_b, trans_ctx, "High")?,
+            gear_bias: opt_finite_f32(trans_b, trans_ctx, "GearBias")?.unwrap_or(0.5),
+            upshift_bias: opt_finite_f32(trans_b, trans_ctx, "UpshiftBias")?.unwrap_or(0.05),
+            downshift_bias_min: opt_finite_f32(trans_b, trans_ctx, "DownshiftBiasMin")?
+                .unwrap_or(0.05),
+            downshift_bias_max: opt_finite_f32(trans_b, trans_ctx, "DownshiftBiasMax")?
+                .unwrap_or(0.3),
+            gear_change_time: opt_finite_f32(trans_b, trans_ctx, "GearChangeTime")?.unwrap_or(0.8),
         };
 
         let wheel_front = decode_wheel(
@@ -452,16 +550,20 @@ impl VehCarSim {
 
         let drivetrain = root
             .block("Drivetrain")
-            .map(|b| decode_end_train(b, "vehCarSim.Drivetrain", &mut warnings));
+            .map(|b| decode_end_train(b, "vehCarSim.Drivetrain", &mut warnings))
+            .transpose()?;
         let freetrain = root
             .block("Freetrain")
-            .map(|b| decode_end_train(b, "vehCarSim.Freetrain", &mut warnings));
+            .map(|b| decode_end_train(b, "vehCarSim.Freetrain", &mut warnings))
+            .transpose()?;
         let axle_front = root
             .block("AxleFront")
-            .map(|b| decode_axle(b, "vehCarSim.AxleFront", &mut warnings));
+            .map(|b| decode_axle(b, "vehCarSim.AxleFront", &mut warnings))
+            .transpose()?;
         let axle_back = root
             .block("AxleBack")
-            .map(|b| decode_axle(b, "vehCarSim.AxleBack", &mut warnings));
+            .map(|b| decode_axle(b, "vehCarSim.AxleBack", &mut warnings))
+            .transpose()?;
 
         unknown_fields(
             root,
@@ -493,12 +595,12 @@ impl VehCarSim {
             mass,
             inertia_box,
             center_of_gravity,
-            bound_friction: root.f32("BoundFriction"),
-            bound_elasticity: root.f32("BoundElasticity"),
+            bound_friction: opt_finite_f32(root, ctx, "BoundFriction")?,
+            bound_elasticity: opt_finite_f32(root, ctx, "BoundElasticity")?,
             drivetrain_type,
-            sss_value: root.f32("SSSValue"),
-            sss_threshold: root.f32("SSSThreshold"),
-            car_friction_handling: root.f32("CarFrictionHandling"),
+            sss_value: opt_finite_f32(root, ctx, "SSSValue")?,
+            sss_threshold: opt_finite_f32(root, ctx, "SSSThreshold")?,
+            car_friction_handling: opt_finite_f32(root, ctx, "CarFrictionHandling")?,
             aero,
             engine,
             trans,
@@ -543,25 +645,26 @@ impl VehTrailer {
         let root = &file.root;
         let ctx = "vehTrailer";
         let mut warnings = Vec::new();
-        let inertia_box = root.vec3("InertiaBox").unwrap_or([1.0, 1.0, 1.0]);
-        let car_hitch_offset = root.vec3("CarHitchOffset");
-        let trailer_hitch_offset = root.vec3("TrailerHitchOffset");
-        if car_hitch_offset.is_none() {
+        let inertia_box =
+            opt_finite_vec3(root, ctx, "InertiaBox", &mut warnings).unwrap_or([1.0, 1.0, 1.0]);
+        let car_hitch_offset = opt_finite_vec3(root, ctx, "CarHitchOffset", &mut warnings);
+        let trailer_hitch_offset = opt_finite_vec3(root, ctx, "TrailerHitchOffset", &mut warnings);
+        if car_hitch_offset.is_none() && root.field("CarHitchOffset").is_none() {
             warnings.push(
                 "vehTrailer: CarHitchOffset missing; conversion must derive a fallback".into(),
             );
         }
-        if trailer_hitch_offset.is_none() {
+        if trailer_hitch_offset.is_none() && root.field("TrailerHitchOffset").is_none() {
             warnings.push(
                 "vehTrailer: TrailerHitchOffset missing; conversion must derive a fallback".into(),
             );
         }
         let t = VehTrailer {
-            mass: req_f32(root, ctx, "Mass")?,
+            mass: req_finite_f32(root, ctx, "Mass")?,
             inertia_box,
             car_hitch_offset,
             trailer_hitch_offset,
-            center_of_gravity: root.vec3("CenterOfGravity"),
+            center_of_gravity: opt_finite_vec3(root, ctx, "CenterOfGravity", &mut warnings),
             wheel_front: decode_wheel(
                 req_block(root, ctx, "WheelFront")?,
                 "vehTrailer.WheelFront",
@@ -608,9 +711,13 @@ pub struct AsNode {
 impl AsNode {
     pub fn from_tune(file: TuneFile) -> Self {
         let root = &file.root;
+        // A non-finite threshold is meaningless to the steering-assist
+        // math downstream; treat it as unauthored so the conversion
+        // layer's documented fallback applies. The raw tune file is
+        // retained for inspection.
         AsNode {
-            speed_base_low: root.f32("SpeedBaseLow"),
-            speed_base_hi: root.f32("SpeedBaseHi"),
+            speed_base_low: root.f32("SpeedBaseLow").filter(|v| v.is_finite()),
+            speed_base_hi: root.f32("SpeedBaseHi").filter(|v| v.is_finite()),
             raw: file,
         }
     }
@@ -673,6 +780,27 @@ fn opt_vec3(b: &TuneBlock, ctx: &str, name: &str, warnings: &mut Vec<String>) ->
             ));
             None
         }
+    }
+}
+
+/// [`opt_vec3`] for the validate-less records: a decoded vector with a
+/// non-finite component is reported and treated as absent rather than
+/// propagated into physics state. (`aiVehicleData.MaxAng` keeps the
+/// verbatim [`opt_vec3`] — retail `va_garbagetruck` authors a NaN
+/// component that is preserved by design.)
+fn opt_finite_vec3(
+    b: &TuneBlock,
+    ctx: &str,
+    name: &str,
+    warnings: &mut Vec<String>,
+) -> Option<[f32; 3]> {
+    match opt_vec3(b, ctx, name, warnings) {
+        Some(v) if v.iter().all(|c| c.is_finite()) => Some(v),
+        Some(v) => {
+            warnings.push(format!("{ctx}: {name} is not finite ({v:?}), ignored"));
+            None
+        }
+        None => None,
     }
 }
 
@@ -1220,19 +1348,19 @@ impl AiVehicleData {
         );
 
         Ok(AiVehicleData {
-            mass: req_f32(root, ctx, "Mass")?,
-            size: req_vec3(root, ctx, "Size")?,
+            mass: req_finite_f32(root, ctx, "Mass")?,
+            size: req_finite_vec3(root, ctx, "Size")?,
             max_ang,
-            elasticity: req_f32(root, ctx, "Elasticity")?,
-            friction: req_f32(root, ctx, "Friction")?,
-            max_damage: req_f32(root, ctx, "MaxDamage")?,
-            ptx_thresh: req_f32(root, ctx, "PtxThresh")?,
-            spring: req_f32(root, ctx, "Spring")?,
-            damping: req_f32(root, ctx, "Damping")?,
-            limit: req_f32(root, ctx, "Limit")?,
-            rubber_spring: req_f32(root, ctx, "RubberSpring")?,
-            rubber_damp: req_f32(root, ctx, "RubberDamp")?,
-            cg: opt_vec3(root, ctx, "CG", &mut warnings),
+            elasticity: req_finite_f32(root, ctx, "Elasticity")?,
+            friction: req_finite_f32(root, ctx, "Friction")?,
+            max_damage: req_finite_f32(root, ctx, "MaxDamage")?,
+            ptx_thresh: req_finite_f32(root, ctx, "PtxThresh")?,
+            spring: req_finite_f32(root, ctx, "Spring")?,
+            damping: req_finite_f32(root, ctx, "Damping")?,
+            limit: req_finite_f32(root, ctx, "Limit")?,
+            rubber_spring: req_finite_f32(root, ctx, "RubberSpring")?,
+            rubber_damp: req_finite_f32(root, ctx, "RubberDamp")?,
+            cg: opt_finite_vec3(root, ctx, "CG", &mut warnings),
             warnings,
         })
     }

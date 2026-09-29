@@ -178,6 +178,112 @@ fn vehcarsim_decodes_typed_fields() {
 }
 
 #[test]
+fn vehcarsim_rejects_non_finite_scalars() {
+    // `SteeringLimit nan` used to decode verbatim and reach convert(),
+    // where it panicked inside `f32::clamp` as a NaN max bound.
+    let src = CARSIM.replace("SteeringLimit 0.4\r\n", "SteeringLimit nan\r\n");
+    let tune = TuneFile::parse(&src).unwrap();
+    let e = VehCarSim::from_tune(&tune).unwrap_err();
+    assert!(e.to_string().contains("SteeringLimit"), "{e}");
+
+    // Same rule on a root-level required scalar.
+    let src = CARSIM.replace("Mass 1000.000000", "Mass inf");
+    let tune = TuneFile::parse(&src).unwrap();
+    let e = VehCarSim::from_tune(&tune).unwrap_err();
+    assert!(e.to_string().contains("Mass"), "{e}");
+
+    // An authored-but-non-finite optional scalar is a decode error too,
+    // not a silently-applied default.
+    let src = CARSIM.replace("SteeringOffset 0.25", "SteeringOffset nan");
+    let tune = TuneFile::parse(&src).unwrap();
+    let e = VehCarSim::from_tune(&tune).unwrap_err();
+    assert!(e.to_string().contains("SteeringOffset"), "{e}");
+}
+
+#[test]
+fn vehcarsim_bounds_gear_counts() {
+    // `AutoNumGears 1e12`/`inf` used to saturate through `as u32` to
+    // u32::MAX; convert() then sized a ~17 GB allocation off it. The
+    // count is bounded at decode and the error names the field.
+    for bad in ["1e12", "inf", "400"] {
+        let src = CARSIM.replace("AutoNumGears 6", &format!("AutoNumGears {bad}"));
+        let tune = TuneFile::parse(&src).unwrap();
+        let e = VehCarSim::from_tune(&tune).unwrap_err();
+        assert!(e.to_string().contains("AutoNumGears"), "{bad}: {e}");
+    }
+
+    // ManualNumGears gets the same bound.
+    let src = CARSIM.replace("ManualNumGears 7", "ManualNumGears 1e9");
+    let tune = TuneFile::parse(&src).unwrap();
+    let e = VehCarSim::from_tune(&tune).unwrap_err();
+    assert!(e.to_string().contains("ManualNumGears"), "{e}");
+
+    // An authored zero keeps the existing normalize-to-1, and the bound
+    // admits generous-but-real transmissions.
+    let src = CARSIM.replace("AutoNumGears 6", "AutoNumGears 0");
+    let tune = TuneFile::parse(&src).unwrap();
+    let sim = VehCarSim::from_tune(&tune).unwrap();
+    assert_eq!(sim.trans.auto_num_gears, 1);
+    let src = CARSIM.replace("AutoNumGears 6", "AutoNumGears 10");
+    let tune = TuneFile::parse(&src).unwrap();
+    let sim = VehCarSim::from_tune(&tune).unwrap();
+    assert_eq!(sim.trans.auto_num_gears, 10);
+}
+
+#[test]
+fn vehcarsim_vec3_fields_must_be_finite() {
+    let src = CARSIM.replace("InertiaBox 2.0 2.0 3.0", "InertiaBox 2.0 nan 3.0");
+    let tune = TuneFile::parse(&src).unwrap();
+    let e = VehCarSim::from_tune(&tune).unwrap_err();
+    assert!(e.to_string().contains("InertiaBox"), "{e}");
+
+    // A non-finite optional vector is reported and treated as absent,
+    // never propagated into physics state.
+    let src = CARSIM.replace(
+        "CenterOfGravity 0.0 -0.1 0.0",
+        "CenterOfGravity 0.0 -inf 0.0",
+    );
+    let tune = TuneFile::parse(&src).unwrap();
+    let sim = VehCarSim::from_tune(&tune).unwrap();
+    assert_eq!(sim.center_of_gravity, [0.0, -0.1, 0.0]);
+    assert!(
+        sim.warnings.iter().any(|w| w.contains("CenterOfGravity")),
+        "{:?}",
+        sim.warnings
+    );
+}
+
+#[test]
+fn aivehicledata_rejects_non_finite_scalars() {
+    // `Size nan` used to decode verbatim and poison the traffic CG
+    // fallback; MaxAng's retail NaN is the documented exception (see
+    // aivehicledata_decodes_msvc_non_finite_literals).
+    let src = AIVEHICLE.replace(
+        "Size 1.838961 1.122816 4.286561",
+        "Size nan 1.122816 4.286561",
+    );
+    let tune = TuneFile::parse(&src).unwrap();
+    let e = AiVehicleData::from_tune(&tune).unwrap_err();
+    assert!(e.to_string().contains("Size"), "{e}");
+
+    let src = AIVEHICLE.replace("Elasticity 0.9100000", "Elasticity inf");
+    let tune = TuneFile::parse(&src).unwrap();
+    let e = AiVehicleData::from_tune(&tune).unwrap_err();
+    assert!(e.to_string().contains("Elasticity"), "{e}");
+
+    // A non-finite CG is reported and falls back like an absent one.
+    let src = AIVEHICLE.replace("CG 0.000026 0.819497 0.170570", "CG 0.000026 nan 0.170570");
+    let tune = TuneFile::parse(&src).unwrap();
+    let data = AiVehicleData::from_tune(&tune).unwrap();
+    assert_eq!(data.cg, None);
+    assert!(
+        data.warnings.iter().any(|w| w.contains("CG")),
+        "{:?}",
+        data.warnings
+    );
+}
+
+#[test]
 fn vehcarsim_rejects_missing_required_fields() {
     // Missing Engine block entirely.
     let tune = TuneFile::parse(
