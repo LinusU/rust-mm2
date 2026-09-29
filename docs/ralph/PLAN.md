@@ -2563,6 +2563,118 @@ F15-B.4's catch-up assist) are downstream of handling — not an
 opponent-AI or routing defect. Do not widen the re-anchor recovery to
 mask them.
 
+## Operator report 5 (2026-09-28, process finding — PRIORITY)
+
+**Provenance, stated plainly:** unlike reports 1-4, this is **not** a
+play-test observation of rendered gameplay. It is an operator-directed
+process finding, derived by auditing this loop's own review corpus
+(`runs/*/NNN/review.json`) across three runs. Treat the enumerated
+instances as verified — each was found and written up by a reviewer that
+had the code in front of it — but do not attribute the *conclusion* to
+rendered gameplay.
+
+### The finding
+
+**Unchecked arithmetic on authored numbers is a recurring defect class,
+not a series of unrelated oversights.** Sixteen instances have been
+raised by review: **7 as blocking rejections** and **9 disclosed and
+passed as non-blocking warts**. They span from the Mac Studio era to the
+current run, and three of them occurred in consecutive iterations of the
+same subsystem — the same `-1`-on-a-parsed-count shape was repaired in
+one module and reintroduced in the next.
+
+Blocking rejections, oldest first:
+
+| task | site | shape |
+|---|---|---|
+| F03-B | `stamp_line_strip`, `mm2_app/src/city.rs` | authored segment length never constrained by the parser |
+| F16-B | `crash_gate`, `mm2_content/src/availability.rs` | `3 * (n-1) + 1` unchecked u32 on a `midtrm<N>` tag |
+| F10-A.1 | `plan_ambient`, `mm2_game/src/traffic.rs` | NaN lane length reaches `f32::clamp` |
+| F18-B | `draw_cue_suffix`, `mm2_game/src/audio.rs` | `add + 1 + (rng % end)` i64 overflow |
+| F19-A.2 | `PedMod::validate`, `mm2_formats/src/ped.rs:1510` | over-declared count carves an inverted range, slice panics |
+| F19-A.3 | `tools/mm2_inspect/src/peds.rs:396` | `frames = 0` gives `clamp(0, -1)` |
+| F19-A.3 | `peds.rs:397`, `mm2_game/src/ped.rs:381` | `first_frame - 1` on `i64::MIN`; `as u32` truncates silently |
+
+Disclosed but passed, including: `allocate_id`'s `max + 1`
+(`profile.rs:583`), `EventRecord.finishes += 1`, `rasterize_tri`'s
+unchecked `strip.vertices[i]`, `step_bounded`'s modulo-by-zero on an
+authored `Opponents` of `u32::MAX`, non-finite BAI data outside
+lane/tram/train curves, physics raycasts that panic on NaN inside the
+step, and `resolve_commentary` never invoking `CueTable::validate`.
+
+### Why the gate cannot see it
+
+`tools/verify.sh` runs the workspace suite plus retail data, and **retail
+data is well-formed**. Every authored number in the shipped install is in
+range. So this class is invisible to the external gate by construction —
+each instance has been caught only by a reviewer reading the code
+adversarially, and the ones that slipped through as "non-blocking" are
+still live. Counting green gates as evidence of robust authored-data
+handling is therefore unsound, and several ledger rows currently read
+that way.
+
+### What to do
+
+Treat authored-number entry points as **one audited class**, not as
+individual bugs to fix when a reviewer happens to find them. Sweep for
+the shapes:
+
+- `- 1` or `+ 1` applied to a count, index or frame parsed from a file
+- `as u32` / `as usize` casts on authored integers that can truncate
+- ranges carved from declared counts (clamp **both** ends)
+- divisors, moduli and array indices sourced from file data
+- `f32`/`f64` fields used without `is_finite()` before comparison,
+  `clamp`, or physics entry
+
+Prefer one shared, tested helper per shape over scattered fixes, so the
+next module reuses it instead of re-deriving it.
+
+### What must NOT be done
+
+- **Do not silently coerce malformed data.** The repo convention is
+  diagnose-not-panic: an out-of-range authored value must be *reported*
+  as a diagnostic or issue and the row treated as unusable. Blanket
+  `unwrap_or(0)`, saturating defaults or `.min(len)` that quietly
+  produces a plausible-but-wrong value is worse than the panic, because
+  it converts a loud failure into a silent one. Three modules already
+  state this contract in their own doc comments and then violate it.
+- **Do not close this by fixing only the seven blocked sites.** The nine
+  disclosed ones are the same defect and are still reachable.
+- **Do not widen the retail-data gate to cover it.** Retail data cannot
+  exercise these paths; malformed-input coverage belongs in unit and
+  fixture tests.
+
+### Evidence this invalidates
+
+No rendered evidence is affected. What is weakened is every claim that a
+parser or consumer "degrades malformed input to diagnostics" — at least
+three such claims (in `F19-A.2`'s `LAST_ITERATION`, the `spchdata`
+module's own `malformed_rows_are_diagnostics_not_panics` test name, and
+`PedMod`'s docs) were demonstrably false when written. Re-check that
+assertion wherever the ledger makes it, rather than assuming it holds.
+
+### Note on the commits around this report
+
+Two things about the surrounding history, so the next reviewer is not
+misled:
+
+1. The commit immediately **below** this report (`d11f8e7`, F19-A.4 ped
+   `.mod` skin assembly) was committed by an interrupted iteration whose
+   `verify.sh` hit the launcher's one-hour timeout; the launcher then died
+   with `[Errno 1] Operation not permitted` on its kill path. That commit
+   therefore **passed neither the external gate nor review**. It is
+   deliberately left below the last-checked marker so it is re-verified
+   inside the next candidate rather than promoted unexamined.
+2. This report plus the companion audit in
+   `docs/research/authored-numbers.md` are the only commits **above**
+   `d11f8e7`. They are operator-injected documentation, not agent work,
+   carry no code, were not produced by the iteration under review, and
+   should not count against the candidate.
+
+The verify timeout has been raised to 7200s. Recent durations were
+2080-2690s with one outlier at 3463s, so the previous 3600s bound had no
+usable headroom against a suite that grows every iteration.
+
 ## Task table
 
 | Task | Status | Dependencies | Evidence / reason / next action |
