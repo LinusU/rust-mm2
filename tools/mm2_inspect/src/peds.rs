@@ -1041,6 +1041,39 @@ mtxn 1 1 1
     }
 
     #[test]
+    fn audit_survives_hostile_mod_partition_counts() {
+        // `mtxv`/`mtxn` counts are full-range authored i64s — a hostile
+        // row once overflow-panicked `PedMod::validate`'s summation
+        // (audit path) and the bucket cursor in `PedSkin::from_mod`.
+        // The audit must report the mismatch and carry on.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        write_arch(d, "pedmodel_man");
+        write(
+            d,
+            "anim/pedmodel_man.mod",
+            MOD_FLAT
+                .replace("mtxv 1 1 1", "mtxv 1 9223372036854775807 1")
+                .as_bytes(),
+        );
+        let r = audit(&vfs_of(d));
+        assert!(
+            r.issues.iter().any(|i| i.contains("mtxv sums to")),
+            "{:?}",
+            r.issues
+        );
+        // The flat-dialect skin still assembles — verts 1..=2 saturate
+        // into bone 1's bucket — but `mtxn` now disagrees with the
+        // corner binding, which is a recorded issue too.
+        assert_eq!(r.skins, 1);
+        assert!(
+            r.issues.iter().any(|i| i.contains("mtxn")),
+            "{:?}",
+            r.issues
+        );
+    }
+
+    #[test]
     fn audit_flags_a_non_standing_bind_shape() {
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();

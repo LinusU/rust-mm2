@@ -1405,10 +1405,12 @@ impl PedMod {
         // describe the same skinning, and on retail they agree exactly,
         // so a disagreement means corrupt data.
         let mtxv_partition: Option<Vec<i64>> = {
-            let sum: i64 = self.matrix_verts.iter().sum();
+            // Counts are full-range authored i64s — sum in i128 so a
+            // hostile row cannot overflow the check itself.
+            let sum: i128 = self.matrix_verts.iter().map(|&v| v as i128).sum();
             (!self.matrix_verts.is_empty()
                 && self.matrix_verts.iter().all(|&v| v >= 0)
-                && sum == self.verts.len() as i64)
+                && sum == self.verts.len() as i128)
                 .then(|| {
                     self.matrix_verts
                         .iter()
@@ -1492,10 +1494,10 @@ impl PedMod {
         // vert's `mtxv` bucket). Measured: 100% agreement across all
         // 1946 retail adjuncts.
         let mtxn_partition: Option<Vec<i64>> = {
-            let sum: i64 = self.matrix_normals.iter().sum();
+            let sum: i128 = self.matrix_normals.iter().map(|&v| v as i128).sum();
             (!self.matrix_normals.is_empty()
                 && self.matrix_normals.iter().all(|&v| v >= 0)
-                && sum == self.normals.len() as i64)
+                && sum == self.normals.len() as i128)
                 .then(|| {
                     self.matrix_normals
                         .iter()
@@ -1602,8 +1604,12 @@ impl PedMod {
 
         // Ownership coverage: the declared per-material counts must
         // exactly partition the shared lists — no orphans, no overrun.
-        let claimed_packets: i64 = self.materials.iter().filter_map(|m| m.packets).sum();
-        if claimed_packets != self.packets.len() as i64 {
+        let claimed_packets: i128 = self
+            .materials
+            .iter()
+            .filter_map(|m| m.packets.map(i128::from))
+            .sum();
+        if claimed_packets != self.packets.len() as i128 {
             out.push(TableDiagnostic {
                 line: 1,
                 message: format!(
@@ -1612,8 +1618,12 @@ impl PedMod {
                 ),
             });
         }
-        let claimed_adj: i64 = self.materials.iter().filter_map(|m| m.adjuncts).sum();
-        if claimed_adj != self.adjuncts.len() as i64 {
+        let claimed_adj: i128 = self
+            .materials
+            .iter()
+            .filter_map(|m| m.adjuncts.map(i128::from))
+            .sum();
+        if claimed_adj != self.adjuncts.len() as i128 {
             out.push(TableDiagnostic {
                 line: 1,
                 message: format!(
@@ -1622,13 +1632,13 @@ impl PedMod {
                 ),
             });
         }
-        let claimed_prims: i64 = self
+        let claimed_prims: i128 = self
             .materials
             .iter()
             .filter(|m| m.adjuncts.is_some())
-            .filter_map(|m| m.primitives)
+            .filter_map(|m| m.primitives.map(i128::from))
             .sum();
-        if claimed_prims != self.primitives.len() as i64 {
+        if claimed_prims != self.primitives.len() as i128 {
             out.push(TableDiagnostic {
                 line: 1,
                 message: format!(
@@ -1657,8 +1667,8 @@ impl PedMod {
                     message: format!("{name} contains a negative count"),
                 });
             }
-            let sum: i64 = list.iter().sum();
-            if sum != total as i64 {
+            let sum: i128 = list.iter().map(|&v| v as i128).sum();
+            if sum != total as i128 {
                 out.push(TableDiagnostic {
                     line: 1,
                     message: format!("{name} sums to {sum}, expected {total}"),
@@ -2577,6 +2587,53 @@ packet 0 0 1 {
         assert!(
             v.iter()
                 .any(|i| i.message.contains("claim 10 primitives but 2 exist")),
+            "{v:?}"
+        );
+    }
+
+    #[test]
+    fn mod_validate_survives_unbounded_authored_counts() {
+        // `mtxv`/`mtxn` counts and `mtl` claim fields are full-range
+        // authored i64s (`parse_int_list` accepts the lot): hostile
+        // values must produce diagnostics, not an overflow panic in a
+        // summation — overflow-checks are on in dev/test builds, so
+        // reaching the asserts at all is the regression.
+        let m = PedMod::parse(
+            &MOD_FLAT
+                .replace("mtxv 2 1", "mtxv 1 9223372036854775807 1")
+                .replace("mtxn 2 1", "mtxn 9223372036854775807 9223372036854775807")
+                .replacen("adjuncts:\t3", "adjuncts:\t9223372036854775807", 1)
+                .replacen("primitives:\t1", "primitives:\t9223372036854775807", 1),
+        )
+        .unwrap();
+        let v = m.validate();
+        assert!(
+            v.iter().any(|i| i.message.contains("mtxv sums to")),
+            "{v:?}"
+        );
+        assert!(
+            v.iter().any(|i| i.message.contains("mtxn sums to")),
+            "{v:?}"
+        );
+        // i64::MAX + the second material's 1 — the sum must not wrap.
+        assert!(
+            v.iter().any(|i| i.message.contains("adjuncts but 4 exist")),
+            "{v:?}"
+        );
+        assert!(
+            v.iter()
+                .any(|i| i.message.contains("primitives but 2 exist")),
+            "{v:?}"
+        );
+
+        // The packet dialect's `packets:` claim sum overflows the same
+        // way.
+        let m =
+            PedMod::parse(&MOD_PACKETS.replacen("packets:\t1", "packets:\t9223372036854775807", 1))
+                .unwrap();
+        let v = m.validate();
+        assert!(
+            v.iter().any(|i| i.message.contains("packets but 2 exist")),
             "{v:?}"
         );
     }

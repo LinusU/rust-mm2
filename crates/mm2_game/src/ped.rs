@@ -250,7 +250,7 @@ impl PedRig {
             0.0
         };
         let i0 = f.floor() as u32;
-        let i1 = (i0 + 1).min(clip.frames - 1);
+        let i1 = i0.saturating_add(1).min(clip.frames - 1);
         let t = f - i0 as f32;
         let (Some(f0), Some(f1)) = (clip.frame(i0), clip.frame(i1)) else {
             return Err(PedSampleError::EmptyClip);
@@ -732,7 +732,12 @@ fn matrix_bucket(partition: &[i64], index: i64) -> Option<u32> {
     }
     let mut at = 0i64;
     for (bone, &count) in partition.iter().enumerate() {
-        at += count;
+        // `count` is a full-range authored i64: a hostile row can push
+        // the cursor past i64::MAX. Saturating still buckets correctly —
+        // `index` is always an already-range-checked resource index
+        // (< i64::MAX), so the first bucket whose running total reaches
+        // saturation does own every not-yet-claimed index.
+        at = at.saturating_add(count);
         if index < at {
             return Some(bone as u32);
         }
@@ -1623,6 +1628,25 @@ mtxn 1 1 1
         assert!(joined.contains("strip primitives"), "{joined}");
         assert!(joined.contains("outside every material group"), "{joined}");
         assert!(joined.contains("mtxn"), "{joined}");
+    }
+
+    #[test]
+    fn skin_buckets_indices_past_a_saturating_mtxv_count() {
+        // `mtxv`/`mtxn` counts are full-range authored i64s: a huge
+        // entry must saturate the bucket cursor, not overflow it —
+        // overflow panics under `overflow-checks` and wraps to a
+        // wrong-but-in-range bone in release.
+        let m = MOD_FLAT
+            .replace("mtxv 1 1 1", "mtxv 1 9223372036854775807 1")
+            .replace("mtxn 1 1 1", "mtxn 1 9223372036854775807 1");
+        let s = skin(&m);
+        assert!(s.issues.is_empty(), "{:?}", s.issues);
+        // Vert 0 stays in bone 0's bucket; verts 1 and 2 land in
+        // bone 1's enormous span, so bone 2's bucket is never reached.
+        // The `mtxn` partition agrees, so no mismatch is recorded.
+        assert_eq!(s.corners()[0].bone, 0);
+        assert_eq!(s.corners()[1].bone, 1);
+        assert_eq!(s.corners()[2].bone, 1);
     }
 
     #[test]

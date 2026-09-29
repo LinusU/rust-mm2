@@ -57,6 +57,24 @@ obvious candidate — `PedSkin::deform`'s `world[c.bone as usize]` — found it 
 gated by `world.len() < self.bones_needed` plus a finite-transform check, so nothing is
 reported there, but it needs its own pass once it lands.
 
+**Follow-up (post-landing, F19-A.4 review).** That pass happened at review: the new
+`matrix_bucket` (`crates/mm2_game/src/ped.rs`) accumulated the full-range authored
+`mtxv`/`mtxn` counts with a plain `at += count` — overflow-panic under
+`overflow-checks`, wrong-but-in-range bone binding in release. The cursor now
+saturates (`at = at.saturating_add(count)`), which still buckets every in-range
+index correctly: `index` is always an already-range-checked resource index, so the
+first bucket whose running total saturates owns every not-yet-claimed index. The
+same class in pre-existing `PedMod::validate` — six `iter().sum()` accumulations
+over authored i64s (the `mtxv`/`mtxn` partition pre-checks, the three
+`claimed_*` material-count sums, and the trailer `sums to` check) — is repaired
+alongside it by accumulating in `i128`, keeping the diagnostics' printed totals
+exact. `mm2-inspect peds` no longer panics on `mtxv 1 9223372036854775807 1`.
+Tests: `skin_buckets_indices_past_a_saturating_mtxv_count` (`mm2_game::ped`),
+`mod_validate_survives_unbounded_authored_counts` (`mm2_formats::ped`),
+`audit_survives_hostile_mod_partition_counts` (`mm2_inspect::peds`). The rest of
+the F19-A.4 ped code still wants a dedicated sweep pass; only the summation class
+has been checked.
+
 ---
 
 ## Confirmed reachable
