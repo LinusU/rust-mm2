@@ -60,6 +60,11 @@ pub struct OpponentRoute {
     pub points: Vec<OpponentRoutePoint>,
 }
 
+/// XZ spread (m) below which a multi-anchor route carries no driveable
+/// line — retail routes span hundreds of metres; under a millimetre
+/// every leg is degenerate.
+const ROUTE_DEGENERATE_XZ: f32 = 1e-3;
+
 impl OpponentRoute {
     /// Total polyline length in metres (3-D segment lengths).
     pub fn length(&self) -> f32 {
@@ -78,6 +83,29 @@ impl OpponentRoute {
         self.points
             .first()
             .and_then(|p| (p.brake != 0.0).then_some(p.brake))
+    }
+
+    /// Whether the authored line carries a driveable extent: every
+    /// anchor finite and, once at least two anchors exist, some pair
+    /// separated in XZ. A route whose anchors all sit on one XZ point —
+    /// an all-coincident file, an all-zeros placeholder, a vertical
+    /// stack — has only zero-length legs, so a drive along it parks on
+    /// the point and a recovery walk-back has no leg to step along; a
+    /// non-finite anchor poisons every leg touching it. The roster
+    /// reports a failure here as [`OpponentIssue::DegenerateRoute`]
+    /// rather than wiring the line. A single-anchor route is kept: it
+    /// drives to its point and stops, which is real authored content.
+    pub fn drivable(&self) -> bool {
+        let pts = &self.points;
+        if !pts.iter().all(|p| p.position.is_finite()) {
+            return false;
+        }
+        if pts.len() < 2 {
+            return true;
+        }
+        let a = pts[0].position;
+        pts.iter()
+            .any(|p| (p.position.x - a.x).hypot(p.position.z - a.z) > ROUTE_DEGENERATE_XZ)
     }
 }
 
@@ -253,6 +281,15 @@ pub enum OpponentIssue {
         /// The record's basename.
         name: String,
     },
+    /// The referenced `.opp` parses but carries no driveable line —
+    /// non-finite anchors, or every anchor on one XZ point so no leg
+    /// has length. The authored slot is kept and the entry fields no
+    /// route, exactly like [`OpponentIssue::UnresolvedRoute`]: driving
+    /// it would park the car on a point and hang the recovery walk.
+    DegenerateRoute {
+        /// The referenced basename.
+        name: String,
+    },
 }
 
 impl fmt::Display for OpponentIssue {
@@ -277,6 +314,9 @@ impl fmt::Display for OpponentIssue {
             ),
             Self::UnreferencedRoute { name } => {
                 write!(f, "route record {name} is wired to no opponent")
+            }
+            Self::DegenerateRoute { name } => {
+                write!(f, "opponent route {name} carries no driveable line")
             }
         }
     }

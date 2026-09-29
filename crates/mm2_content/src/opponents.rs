@@ -204,7 +204,15 @@ pub fn opponent_roster_from_aimap(
                             expected: tag,
                         });
                     }
-                    Some(distill_route(file))
+                    let route = distill_route(file);
+                    if route.drivable() {
+                        Some(route)
+                    } else {
+                        issues.push(OpponentIssue::DegenerateRoute {
+                            name: row.waypoints.clone(),
+                        });
+                        None
+                    }
                 }
                 RecordContent::Failed(reason) => {
                     issues.push(OpponentIssue::RouteFailed {

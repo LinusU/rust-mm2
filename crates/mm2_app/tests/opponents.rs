@@ -1898,6 +1898,48 @@ fn reanchor_pose_handles_degenerate_routes() {
     assert_eq!((pose, yaw), (Vec3::new(9.0, 1.0, 9.0), 0.7));
 }
 
+/// A closed route whose anchors all sit on one XZ point has only
+/// zero-length legs: `walked` can never reach `REANCHOR_WALK` and the
+/// `!closed` escape is off, so before the step cap the walk cycled the
+/// legs forever (authored-numbers audit finding 1). The roster rejects
+/// the shape at distillation; the walk still bounds it — and keeps
+/// bounding it when every landing is `blocked` too.
+#[test]
+fn reanchor_pose_bounds_a_collapsed_closed_route() {
+    let collapsed = route(&[
+        [50.0, 0.0, 60.0],
+        [50.0, 1.5, 60.0],
+        [50.0, 3.0, 60.0],
+        [50.0, 0.0, 60.0],
+    ]);
+    assert!(
+        !collapsed.drivable(),
+        "a vertical stack carries no driveable line"
+    );
+    let (pose, _) = reanchor_pose(&collapsed, 0, Vec3::new(50.0, 0.0, 60.0), 0.7, |_| true);
+    assert!(pose.is_finite(), "bounded landing: {pose:?}");
+    let (pose, _) = reanchor_pose(&collapsed, 2, Vec3::new(50.0, 0.5, 60.0), 0.7, |_| false);
+    assert!(pose.is_finite(), "bounded landing: {pose:?}");
+}
+
+/// Non-finite anchors make every leg-length comparison false — the
+/// same never-progress shape as the collapsed route, through the
+/// `blocked` retry loop this time. The walk terminates and never
+/// hands back a non-finite pose; a non-finite input pose returns
+/// verbatim like the empty route does.
+#[test]
+fn reanchor_pose_bounds_a_nonfinite_route() {
+    let mut r = route(&[[0.0, 0.0, 0.0], [100.0, 0.0, 0.0], [50.0, 0.0, 50.0]]);
+    r.points[1].position = Vec3::new(f32::NAN, 0.0, 0.0);
+    assert!(!r.drivable(), "a NaN anchor poisons the line");
+    let (pose, _) = reanchor_pose(&r, 2, Vec3::new(50.0, 0.0, 10.0), 0.0, |_| true);
+    assert!(pose.is_finite(), "{pose:?}");
+
+    let nan = Vec3::new(f32::NAN, 0.0, 0.0);
+    let (pose, yaw) = reanchor_pose(&r, 0, nan, 0.3, |_| false);
+    assert!(pose.x.is_nan() && yaw == 0.3, "the input stands: {pose:?}");
+}
+
 /// The penned-opponent bound end to end (F15-B.3, AC03): `vpt` is
 /// teleported into a walled pocket off its lane where no escape can
 /// progress — the displacement window spends its budget and the

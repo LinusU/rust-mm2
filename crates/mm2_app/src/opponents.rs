@@ -185,6 +185,16 @@ const REANCHOR_BACK: f32 = 4.0;
 /// this the landing point stands wherever the walk reached and the
 /// normal crossing rules apply (disclosed, not silently unbounded).
 const REANCHOR_WALK: f32 = 60.0;
+/// Hard bound on steps (leg traversals plus blocked retries) one
+/// re-anchor walk may take. A legitimate walk spends one step per leg
+/// traversed and one per rejected landing — tens, not thousands — but
+/// a closed route of zero-length legs (every authored anchor on one
+/// XZ point) never advances `walked`, and a non-finite anchor makes
+/// every comparison false: both shapes would otherwise cycle the legs
+/// forever (authored-numbers audit finding 1). The cap lands the car
+/// on the degenerate pose the walk reached — bounded, and the roster
+/// reports such a route at distillation instead of wiring it.
+const REANCHOR_MAX_STEPS: usize = 16384;
 /// XZ clearance (m) a re-anchor landing keeps from every participant
 /// and from poses already claimed by a re-anchor this frame (F15-B.10,
 /// the spec's competing-recovery-positions edge): two cars penned in
@@ -546,11 +556,12 @@ pub fn reanchor_pose(
     blocked: impl Fn(Vec3) -> bool,
 ) -> (Vec3, f32) {
     let n = route.points.len();
-    if n == 0 {
+    if n == 0 || !pos.is_finite() {
         return (pos, yaw);
     }
     if n == 1 {
-        return (route.points[0].position, yaw);
+        let p = route.points[0].position;
+        return if p.is_finite() { (p, yaw) } else { (pos, yaw) };
     }
     let closed = route_is_closed(route);
     let leg_count = if closed { n } else { n - 1 };
@@ -597,11 +608,16 @@ pub fn reanchor_pose(
     // Walk backward along the polyline: REANCHOR_BACK for clearance,
     // then the same stride while the candidate sits inside an
     // un-cleared trigger — bounded by REANCHOR_WALK and, for an open
-    // route, the start point.
+    // route, the start point. The step cap ends the walk on degenerate
+    // or non-finite input instead of cycling the legs forever; a
+    // non-finite candidate is never handed back — the input pose stands
+    // in as the documented "walk reached nowhere" landing.
     let mut remaining = REANCHOR_BACK;
     let mut walked = 0.0f32;
+    let mut steps = 0usize;
     loop {
-        while remaining > 0.0 {
+        while remaining > 0.0 && steps < REANCHOR_MAX_STEPS {
+            steps += 1;
             if remaining <= d {
                 d -= remaining;
                 walked += remaining;
@@ -622,7 +638,15 @@ pub fn reanchor_pose(
             }
         }
         let pose = point_on(leg, d);
-        if !blocked(pose) || walked >= REANCHOR_WALK || (leg == 0 && d <= 0.0 && !closed) {
+        if !pose.is_finite() {
+            return (pos, yaw);
+        }
+        if remaining > 0.0
+            || steps >= REANCHOR_MAX_STEPS
+            || !blocked(pose)
+            || walked >= REANCHOR_WALK
+            || (leg == 0 && d <= 0.0 && !closed)
+        {
             return (pose, facing(leg, yaw));
         }
         remaining = REANCHOR_BACK;

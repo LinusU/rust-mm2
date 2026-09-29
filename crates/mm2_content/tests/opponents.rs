@@ -236,6 +236,66 @@ fn a_dead_route_ref_keeps_the_authored_slot() {
 }
 
 #[test]
+fn a_degenerate_route_is_reported_not_wired() {
+    // Two `.opp` shapes with no driveable line: every anchor on one XZ
+    // point (a closed zero-leg loop the recovery walk cannot step
+    // along) and a NaN anchor. Both keep their authored slot but field
+    // no route — the `UnresolvedRoute` convention.
+    let collapsed =
+        format!("{OPP_HEADER}5,0,5,0,0,0,15.5,0,0\n5,0,5,0,0,0,15.5,0,0\n5,0,5,0,0,0,15.5,0,0\n");
+    let nonfinite =
+        format!("{OPP_HEADER}0,0,0,0,0,0,15.5,0,0\nnan,0,0,0,0,0,15.5,0,0\n9,0,9,0,0,0,15.5,0,0\n");
+    let (_t, catalog, vfs) = install(
+        2,
+        0,
+        &[
+            (
+                "race0.aimap",
+                aimap_with_opponents(
+                    &(opp_row("vpfoo", "race0-a-0.opp", "0.9")
+                        + &opp_row("vpbar", "race0-a-1.opp", "0.8")),
+                ),
+            ),
+            ("race0-a-0.opp", collapsed),
+            ("race0-a-1.opp", nonfinite),
+        ],
+    );
+    let roster = opponent_roster(&vfs, event(&catalog, 0), Difficulty::Amateur).unwrap();
+
+    assert_eq!(roster.entries.len(), 2, "authored slots are kept");
+    assert!(roster.entries.iter().all(|e| e.route.is_none()));
+    assert_eq!(
+        roster.issues,
+        [
+            OpponentIssue::DegenerateRoute {
+                name: "race0-a-0.opp".into()
+            },
+            OpponentIssue::DegenerateRoute {
+                name: "race0-a-1.opp".into()
+            },
+        ],
+        "{:?}",
+        roster.issues
+    );
+
+    // A one-point route is still real authored content — it drives to
+    // its anchor and stops.
+    let (_t, catalog, vfs) = install(
+        1,
+        0,
+        &[
+            (
+                "race0.aimap",
+                aimap_with_opponents(&opp_row("vpfoo", "race0-a-0.opp", "0.9")),
+            ),
+            ("race0-a-0.opp", opp_file(&[[5.0, 0.0, 5.0]])),
+        ],
+    );
+    let roster = opponent_roster(&vfs, event(&catalog, 0), Difficulty::Amateur).unwrap();
+    assert!(roster.entries[0].route.is_some(), "{:?}", roster.issues);
+}
+
+#[test]
 fn count_mismatch_is_an_issue_not_an_error() {
     // The `sf/race0` shape (RACE-11): the table authors 7 amateur
     // opponents but the aimap wires 6 — and the orphaned seventh route
