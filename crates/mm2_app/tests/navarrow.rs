@@ -529,12 +529,14 @@ fn missing_texture_reports_absent() {
     assert_eq!(q.iter(app.world()).count(), 0);
 }
 
-/// A strip whose index table reaches past its vertex count reports
-/// `bad-index` — the corrupt or hostile-mod package fails the spawn
-/// through the same `absent:` path instead of panicking inside the
-/// rasterizer.
+/// A strip whose index table reaches past its vertex count fails the
+/// spawn through the `absent:` path instead of panicking inside the
+/// rasterizer. The pkg parser now range-checks triangle indices and
+/// degrades the chunk to `Raw`, so the instrument reports
+/// `no-geometry`; the rasterizer's own `bad-index` guard stays as the
+/// belt under a hand-built `PkgStrip`.
 #[test]
-fn out_of_range_indices_report_bad_index() {
+fn out_of_range_indices_report_no_geometry() {
     let mut app = arrow_app();
     let tmp = tempfile::tempdir().unwrap();
     write(tmp.path(), "geometry/hudarrow01.pkg", arrow_pkg_bad_index());
@@ -542,8 +544,8 @@ fn out_of_range_indices_report_bad_index() {
     write(tmp.path(), "texture/arr_1.tga", tga32(8, 8, [230, 200, 0]));
     let vfs = vfs_of(tmp.path());
     spawn_arrow(&mut app, &vfs, EventTableKind::Checkpoint);
-    assert_eq!(report(&app).absent, Some("bad-index"));
-    assert_eq!(report(&app).smoke_detail(), "absent:bad-index");
+    assert_eq!(report(&app).absent, Some("no-geometry"));
+    assert_eq!(report(&app).smoke_detail(), "absent:no-geometry");
     let mut q = app.world_mut().query_filtered::<(), With<NavArrow>>();
     assert_eq!(q.iter(app.world()).count(), 0, "no half-bound node");
 }

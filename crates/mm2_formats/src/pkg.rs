@@ -309,7 +309,14 @@ fn parse_chunk(name: &str, r: &mut Reader<'_>, raw: &[u8]) -> Result<PkgChunk, F
     Ok(match classify(name) {
         ChunkKind::Geometry => match parse_geometry(r) {
             Ok(g) => PkgChunk::Geometry(g),
-            Err(_) => PkgChunk::Raw(raw.to_vec()),
+            Err(e) => {
+                tracing::warn!(
+                    chunk = %name,
+                    %e,
+                    "PKG geometry chunk failed to parse; preserving as raw"
+                );
+                PkgChunk::Raw(raw.to_vec())
+            }
         },
         ChunkKind::Shaders => PkgChunk::Shaders(parse_shaders(r)?),
         ChunkKind::Offset => PkgChunk::Offset(r.vec3()?),
@@ -403,6 +410,26 @@ fn parse_geometry(r: &mut Reader<'_>) -> Result<PkgGeometry, FormatError> {
             let mut indices = Vec::with_capacity(n_indices);
             for _ in 0..n_indices {
                 indices.push(r.u16()?);
+            }
+            // Indices address the strip's own vertex table. A triangle
+            // list carrying an out-of-range index would panic or
+            // silently mis-shape every consumer downstream (prop
+            // trimesh collider, `compute_normals`, vehicle parts) — the
+            // `.bnd` parser rejects the same shape at parse. Other
+            // prim types' index semantics are unobserved, so only the
+            // interpreted kind is checked.
+            if prim_type == PRIMTYPE_TRIANGLES
+                && let Some((at, &bad)) = indices
+                    .iter()
+                    .enumerate()
+                    .find(|&(_, &i)| i as usize >= n_vertices)
+            {
+                return Err(FormatError::InvalidValue {
+                    offset: r.pos() - (n_indices - at) * 2,
+                    field: "indices",
+                    value: bad as u64,
+                    reason: "triangle index out of range for the strip's vertex count",
+                });
             }
             strips.push(PkgStrip {
                 prim_type,
@@ -712,6 +739,34 @@ mod tests {
             Pkg::parse(&data),
             Err(FormatError::BadMagic { .. })
         ));
+    }
+
+    #[test]
+    fn out_of_range_triangle_indices_degrade_to_raw() {
+        // The fixture authors indices 0,1,2 over 3 vertices; patching
+        // the last to 3 indexes one past the strip's vertex table —
+        // every consumer would panic or silently mis-shape on it, so
+        // the chunk degrades to preserved-raw (audits report those as
+        // `partial`) instead of fabricating bad geometry.
+        let mut geo = geometry_chunk(FVF_XYZ);
+        let n = geo.len();
+        geo[n - 2] = 3;
+        let data = pkg3(&[("BODY_H", geo)]);
+        let pkg = Pkg::parse(&data).unwrap();
+        assert!(matches!(pkg.files[0].data, PkgChunk::Raw(_)));
+
+        // The same strip under a non-triangle prim type stays verbatim
+        // — its index semantics are unobserved and uninterpreted.
+        let mut geo = geometry_chunk(FVF_XYZ);
+        let n = geo.len();
+        geo[n - 2] = 9;
+        // primType sits after the section header (nStrips u16, flags
+        // u16, shaderOffset i32) at a fixed offset in the fixture.
+        let prim_at = 20 + 8;
+        geo[prim_at..prim_at + 4].copy_from_slice(&4i32.to_le_bytes());
+        let data = pkg3(&[("BODY_H", geo)]);
+        let pkg = Pkg::parse(&data).unwrap();
+        assert!(matches!(pkg.files[0].data, PkgChunk::Geometry(_)));
     }
 
     #[test]
