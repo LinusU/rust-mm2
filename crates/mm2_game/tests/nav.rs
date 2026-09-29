@@ -488,6 +488,41 @@ fn unresolved_end_degrades_to_dead_end() {
     assert_eq!(build.graph.arc(f).exit, ArcEnd::DeadEnd);
 }
 
+/// An intersection road-list naming a road that does not exist must
+/// degrade to a `NavIssue`, not panic the component census' union-find
+/// (authored-numbers audit finding 2 — `Bai::validate` reports the
+/// same shape but nothing gates the build on it).
+#[test]
+fn a_dangling_intersection_road_is_an_issue_not_a_panic() {
+    let centre = [[0.0, 0.0, -30.0], [0.0, 0.0, -4.0]];
+    let r0 = road(
+        0,
+        &centre,
+        vec![1],
+        side(0, &[(3.75, offset(&centre, 3.75, 0.0))], &[], 2),
+        side(0, &[(-3.75, offset(&centre, -3.75, 0.0))], &[], 2),
+        dead_end(),
+        connected(0, 0),
+    );
+    // One road, but the intersection claims roads 0 and 5.
+    let b = bai(vec![r0], vec![intersection(0, [0.0; 3], &[0, 5])]);
+    let build = NavGraph::build(&b);
+    assert!(
+        build.issues.iter().any(|i| matches!(
+            i,
+            NavIssue::DanglingIntersectionRoad {
+                intersection: 0,
+                road: 5
+            }
+        )),
+        "{:?}",
+        build.issues
+    );
+    // The surviving road still builds its arcs; the dangling index
+    // welded nothing.
+    assert_eq!(build.graph.stats().vehicle_arcs, 2);
+}
+
 #[test]
 fn routes_cross_intersections_and_respect_direction() {
     // road0 south arm → int → road1 east arm (one-way, forward only).

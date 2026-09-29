@@ -435,6 +435,18 @@ pub enum NavIssue {
         /// BAI road index.
         road: usize,
     },
+    /// An intersection's road list names a road outside the file —
+    /// `Bai::validate` reports the same shape as
+    /// `BaiIssue::DanglingIntersectionRoad`, but nothing gates the
+    /// build on it, and a `find` over the union table would panic.
+    /// The reference is skipped rather than welding unrelated
+    /// components together.
+    DanglingIntersectionRoad {
+        /// Intersection index.
+        intersection: usize,
+        /// Raw authored reference.
+        road: u32,
+    },
 }
 
 impl fmt::Display for NavIssue {
@@ -475,6 +487,9 @@ impl fmt::Display for NavIssue {
             ),
             NavIssue::NoVehicleLanes { road } => {
                 write!(f, "road {road}: no routable vehicle lanes")
+            }
+            NavIssue::DanglingIntersectionRoad { intersection, road } => {
+                write!(f, "intersection {intersection}: missing road {road}")
             }
         }
     }
@@ -1177,10 +1192,25 @@ impl NavGraph {
         }
 
         // Weakly connected components over roads sharing intersections.
+        // Authored indices are untrusted: `Bai::validate` would call
+        // them DanglingIntersectionRoad, but nothing gates the build on
+        // it — an out-of-range index would panic inside `find` rather
+        // than degrade, so skip the pair and report the file's own
+        // shape instead of welding components.
         let mut parent: Vec<usize> = (0..bai.roads.len()).collect();
-        for int in &bai.intersections {
+        for (ii, int) in bai.intersections.iter().enumerate() {
+            for &r in &int.roads {
+                if r as usize >= bai.roads.len() {
+                    issues.push(NavIssue::DanglingIntersectionRoad {
+                        intersection: ii,
+                        road: r,
+                    });
+                }
+            }
             for w in int.roads.windows(2) {
-                union(&mut parent, w[0] as usize, w[1] as usize);
+                if (w[0] as usize) < bai.roads.len() && (w[1] as usize) < bai.roads.len() {
+                    union(&mut parent, w[0] as usize, w[1] as usize);
+                }
             }
         }
         stats.components = (0..bai.roads.len())
