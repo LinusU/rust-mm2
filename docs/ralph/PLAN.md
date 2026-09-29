@@ -88,7 +88,21 @@ by design (their `validate()` reports non-finite values) and
 degradations, `validate-cars` 21/21, `handling` all 21 in envelope,
 `traffic` 23+23 ambients decode, `nav`/`opponents` issue counts
 unchanged. Findings 5, 6, 8, 10, 11 stay open in the audit doc.
-Candidate pending external check. Before that it repaired the F18-B.1
+Iter 001's candidate failed external review on one blocking finding:
+`mm2_game::ped::matrix_bucket` (F19-A.4 code, co-landed in the same
+range) summed the full-range authored `mtxv`/`mtxn` counts with a plain
+`+=` — overflow-panic under `overflow-checks`, wrong-but-in-range bone
+binding in release — masked in-tree only because `PedMod::validate`'s
+own pre-existing `iter().sum()`s panic first on the audit path. Iter
+002 repaired both: the bucket cursor saturates (correct for every
+reachable input — `index` is always a pre-range-checked resource
+index), and `PedMod::validate`'s six authored-`i64` accumulations
+(the two partition pre-checks, the three `claimed_*` material sums,
+the trailer `sums to` check) now sum in `i128` so the diagnostics
+stay exact. `mm2-inspect peds` on `mtxv 1 9223372036854775807 1` went
+from exit-101 panic to a reported `mtxv sums to 9223372036854775809`
+issue; retail `peds --strict` unchanged (`skins: 4 assembled, 292
+deform samples`). Candidate pending external check. Before that it repaired the F18-B.1
 candidate's external-review blocker: `record_eligibility` exempted a
 `dev.traction` pin of exactly `1.0`, sound only while the pin was a
 no-op — F18-B.1 made `Some(1.0)` physics-active (it dries a session

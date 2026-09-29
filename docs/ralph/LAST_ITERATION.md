@@ -1,3 +1,83 @@
+# Last iteration — review repair: unbounded authored `mtxv`/`mtxn` sums
+# in the ped code (iteration 002, run 20260929T174954)
+
+Review-repair iteration on `ralph/night` (baseline `52359c9` — the
+iteration-001 authored-numbers hardening; external verify green, review
+**failed** with one blocking finding). One scoped repair: the same
+unchecked-arithmetic-on-authored-numbers class the iteration was fixing
+survived inside the F19-A.4 ped code it co-landed with.
+
+## Finding and root cause
+
+External review (task F19-A) found `matrix_bucket` in
+`crates/mm2_game/src/ped.rs` accumulating the full-range authored `i64`
+counts from `mtxv`/`mtxn` rows with a plain `at += count` — a hostile
+`.mod` (`mtxv 1 9223372036854775807 1`) overflow-panics under
+`overflow-checks` and wraps to a wrong-but-in-range bone binding in
+release, contradicting `PedSkin`'s documented "errors or recorded
+issues, never silently reshaped" contract. In-tree it was masked only
+because `mm2-inspect peds` calls `PedMod::validate()` first, whose own
+pre-existing `iter().sum()` accumulations over the same authored counts
+panic on the same input (reproduced by the reviewer: exit 101,
+"attempt to add with overflow").
+
+## Actions
+
+- `mm2_game::ped::matrix_bucket` — the cursor now saturates
+  (`at = at.saturating_add(count)`). Correct for every reachable input:
+  both call sites pass an already-range-checked resource index
+  (< `i64::MAX`), so the first bucket whose running total saturates owns
+  every not-yet-claimed index.
+- `mm2_formats::ped::PedMod::validate` — all six `iter().sum()`
+  accumulations over authored `i64`s now sum in `i128` (the `mtxv` and
+  `mtxn` partition pre-checks, the `claimed_packets`/`claimed_adj`/
+  `claimed_prims` material-claim sums, and the trailer `sums to`
+  check). `i128` keeps the diagnostics' printed totals exact rather
+  than reporting a saturated `i64::MAX`.
+- `docs/research/authored-numbers.md` — the coverage-gap note records
+  the post-landing pass, the defect, and the fix shape; the rest of the
+  F19-A.4 ped code is still flagged as wanting a dedicated sweep.
+
+## Evidence
+
+- `cargo test -p mm2_formats ped` — 24/24 incl. new
+  `mod_validate_survives_unbounded_authored_counts` (hostile
+  `mtxv`/`mtxn` + `adjuncts:`/`primitives:`/`packets:` claims →
+  diagnostics, no panic, sums not wrapped).
+- `cargo test -p mm2_game ped` — 21/21 incl. new
+  `skin_buckets_indices_past_a_saturating_mtxv_count` (verts past the
+  huge count bucket correctly; `mtxn` agreement kept).
+- `cargo test -p mm2_inspect peds` — 9/9 incl. new
+  `audit_survives_hostile_mod_partition_counts` (synthetic install,
+  flat-dialect hostile `mtxv` → audit completes, issue recorded, skin
+  still assembles).
+- Binary-level repro of the reviewer's case: synthetic install with
+  `mtxv 1 9223372036854775807 1` → `mm2-inspect peds <dir> --strict`
+  exits 2 reporting `mtxv sums to 9223372036854775809, expected 3` and
+  the `mtxn` disagreement (was: exit 101 panic in `PedMod::validate`).
+- Retail (`fnv1a64:e91e6cd4b2ae30d9`): `mm2-inspect peds --strict`
+  exits 0 — `skins: 4 assembled, 292 deform samples`, quirk/issue lists
+  identical to the F19-A.4 run.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --locked --workspace` — all suites green (exit 0).
+
+## Classification / remaining open items
+
+- Implementation choice throughout — robustness bounds on
+  hostile-but-grammar-valid input; no original-behavior claim.
+- All prior open items stand: authored-numbers findings 5, 6, 8, 10, 11
+  remain open; F19-A stays `active` (F19-AC02..AC06 unclaimed — this
+  slice is still domain-types/audit only, no rendered evidence); the
+  F19-A.4 ped code beyond the summation class still wants a sweep pass;
+  F19-A.2 review minors still open.
+
+---
+
 # Last iteration — authored-numbers hardening: four panic/hang-class
 # findings from operator report 5 (iteration 001, run 20260929T174954)
 
