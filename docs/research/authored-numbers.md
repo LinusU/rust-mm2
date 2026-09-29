@@ -33,6 +33,21 @@ regression tests first; finding 2 is one line away from a test, because
 `crates/mm2_formats/src/bai.rs:1105` already *constructs* the exact `Bai` that triggers
 it.
 
+**Status (post-sweep iteration on `ralph/night`).** Findings 1, 2, 3, 4,
+7 and 9 are fixed and covered by regression tests; the per-finding
+`Status` lines below name the change. Findings 5, 6, 8, 10 and 11 remain
+open. One deliberate deviation from a suggested fix shape: finding 7's
+plausibility bound landed in `veh.rs` decode (`gear_count` /
+`MAX_GEARS`), not in `convert()` — the decode boundary keeps the
+authored value in the error message instead of a saturated `u32::MAX`,
+and it bounds `ManualNumGears`'s identical cast for free. The
+`vehCarDamage`/`vehStuck`/`vehGyro` records keep verbatim readers by
+design: they decode non-finite values and report them through
+`validate()` (`check_f32`/`DamageIssue::NonFinite`), so the new finite
+readers (`req_finite_f32`, `opt_finite_f32`, `req_finite_vec3`,
+`opt_finite_vec3`) apply only to the validate-less records
+(`vehCarSim`, `vehTrailer`, `aiVehicleData`, `asNode`).
+
 **Coverage gap — concurrent writer.** While this sweep ran, a separate autonomous
 iteration was editing the same checkout and added ~1067 uncommitted lines of F19-A.4
 skinned-`.mod` work to `crates/mm2_game/src/ped.rs`, `crates/mm2_formats/src/ped.rs` and
@@ -76,6 +91,7 @@ with `let len = |i| { let (a, b) = geom(i); (b.x - a.x).hypot(b.z - a.z) };` (`:
   * `reanchor_pose`'s own doc (`:597-599`): the walk is "**bounded** by `REANCHOR_WALK` and, for an open route, the start point".
   * And the class *was* anticipated elsewhere: `route_target`'s doc (`:410-411`) says "the bounded retry keeps a degenerate all-in-reach route from looping forever", and `crates/mm2_game/src/traffic.rs:628` caps its transfer walk with `for _ in 0..64` / "a degenerate graph must terminate". The same input is handled at two neighbouring sites and unhandled here.
 * **Fix shape (diagnose-not-panic).** Cap the walk by leg count as well as by distance (an iteration bound like `traffic.rs:628`'s), and — the real fix — reject the route at distillation: raise an `OpponentIssue` for a route whose total XZ length is ~0 or whose anchors are non-finite, so the roster reports the `.opp` unusable and the opponent is not spawned. Do **not** silently substitute the first anchor and carry on; that hides an `.opp` the modder needs to fix.
+* **Status: fixed.** `REANCHOR_MAX_STEPS` bounds the walk in `reanchor_pose`, which also returns the input pose rather than a non-finite candidate; `OpponentRoute::drivable` (`mm2_game::opponent`) rejects non-finite/XZ-collapsed routes at distillation into `OpponentIssue::DegenerateRoute`, keeping the authored slot with no wired route. Tests: `reanchor_pose_bounds_a_collapsed_closed_route`, `reanchor_pose_bounds_a_nonfinite_route` (`mm2_app/tests/opponents.rs`), `a_degenerate_route_is_reported_not_wired` (`mm2_content/tests/opponents.rs`).
 
 ### 2. `crates/mm2_game/src/nav.rs:1183` (panic lands at `nav.rs:2289`) — unguarded union-find over authored `.bai` road indices
 
@@ -100,6 +116,7 @@ fn find(parent: &mut Vec<usize>, i: usize) -> usize {
   * `nav.rs:862-866`: "Structural problems are reported in `NavBuild::issues`; **the graph itself is always produced**, degrading bad ends to dead ends and bad lanes out of their arcs rather than inventing connectivity."
   * `crates/mm2_content/src/nav.rs:42-44`: "Structural problems inside the file are reported on `NavBuild::issues`, **never hidden**."
 * **Fix shape.** Skip a pair whose either index is `>= bai.roads.len()` and push a `NavIssue::DanglingIntersectionRoad { intersection, road }` so the component census reports the file as unusable. Do **not** clamp or `%`-wrap the index: that silently welds unrelated road components together and makes `stats.components` a plausible lie.
+* **Status: fixed.** Exactly the suggested shape — `NavIssue::DanglingIntersectionRoad` plus bounds-checked `union` calls; valid arcs still build. Test: `a_dangling_intersection_road_is_an_issue_not_a_panic` (`mm2_game/tests/nav.rs`).
 
 ### 3. `crates/mm2_app/src/city.rs:2573-2580` (`emit_strip`) — authored PKG triangle indices reach `Collider::trimesh` and `compute_normals` unchecked
 
@@ -120,6 +137,7 @@ for t in strip.indices.as_chunks::<3>().0 {
 * **Doc contradiction.** `crates/mm2_app/src/navarrow.rs:314-320` walks the *same* `PkgStrip` data and guards it explicitly: "File-supplied indices index the strip's own vertex table — a corrupt or hostile pkg (the VFS mounts mod overrides above stock) **must fail the spawn, not panic inside it**" → `return Err("bad-index")`, with a test at `crates/mm2_app/tests/navarrow.rs:533`. `navarrow.rs:237` even says it rasterizes "the same chunks `city.rs` `pkg_to_parts` would draw" — the production builder is the one missing the check.
 * **Same missing check, milder sibling — `crates/mm2_content/src/model.rs:261-262.`** `g.indices.extend(t.iter().map(|&i| base + i as u32))` does the identical unchecked widening for *vehicle* PKG parts. It is not a panic today only because `model.rs:249` pushes `v.normal.unwrap_or([0.0, 1.0, 0.0])` for every vertex, so `car_visual.rs:92` always finds matching normal/position lengths and never reaches `compute_normals`, and the vehicle collider comes from the `.bnd`/AABB convex hull rather than the mesh. Result: a silently mis-shaped car body. There are exactly three PKG-strip consumers in the tree (`city.rs:2488`, `model.rs:240`, `navarrow.rs:309`) and only the last one checks — which is the argument for fixing it once in `pkg.rs::parse_geometry`.
 * **Fix shape.** Add the range check to `parse_geometry` so every consumer inherits it, returning `FormatError::InvalidValue` for the strip; or reject the strip in `emit_strip` and count it into the existing `missing_prims` report. Do **not** `.min(vertices.len()-1)` the index — that yields a silently mis-shaped collider the player drives into.
+* **Status: fixed.** `parse_geometry` range-checks each `PRIMTYPE_TRIANGLES` index against the strip's vertex count (the only prim type observed on retail and the only one consumers interpret); the error degrades the chunk to `PkgChunk::Raw` — the module's documented corrupt-geometry path — now with a `tracing::warn!` naming the reason, and `mm2-inspect scan` reports such chunks as `partial`. Test: `out_of_range_triangle_indices_degrade_to_raw` (`mm2_formats::pkg`).
 
 ### 4. `crates/mm2_content/src/convert.rs:588` — NaN `SteeringLimit` becomes a `clamp` bound
 
@@ -134,6 +152,7 @@ let high_angle = (low_angle * (1.0 - sim.wheel_front.steering_offset * 0.8))
 * **Reachability.** Established, and *before* the validate gate: `crates/mm2_content/src/assemble.rs:382` calls `convert(&input)`; only at `:383` does it run `config.validate()`. `assemble::load_by_id`/`load_vehicle` run at startup (`crates/mm2_app/src/main.rs:627`, `:646`, `:1656`), from the car picker (`crates/mm2_app/src/menu.rs:892`), for opponents (`crates/mm2_app/src/opponents.rs:685`) and in the audit tool (`tools/mm2_inspect/src/main.rs:4397`, `:4696`).
 * **Severity.** `assert!` inside `f32::clamp` — **panics in debug and release**, and aborts `mm2-inspect`'s vehicle audit on the very file it was asked to diagnose.
 * **Fix shape.** `convert()` already returns `Result<_, String>`; reject the vehicle naming `SteeringLimit`. Better: make `req_f32`/`opt_f32` in `veh.rs` reject non-finite numbers the way `check_f32` already does for the damage block, so every `.veh` float inherits it — that single change also covers findings 7 and 9. Do **not** substitute a default: a car whose steering limit silently became `0.35` is a wrong-but-drivable car.
+* **Status: fixed.** With a boundary refinement: `vehCarDamage`/`vehStuck`/`vehGyro` deliberately decode non-finite values verbatim so `validate()` can report them (`DamageIssue::NonFinite`, and an existing test asserts `MedDamage NaN` decodes) — tightening `req_f32` globally would have broken that contract. Instead the validate-less records (`vehCarSim`, `vehTrailer`, `aiVehicleData`, `asNode`) read through new finite readers (`req_finite_f32`, `opt_finite_f32`, `req_finite_vec3`, `opt_finite_vec3`). Tests: `vehcarsim_rejects_non_finite_scalars`, `vehcarsim_vec3_fields_must_be_finite`, `aivehicledata_rejects_non_finite_scalars` (`mm2_formats/tests/vehicle_formats.rs`).
 
 ### 5. `crates/mm2_app/src/session.rs:609`, `:620-624`, `:1096` — a non-finite authored start-slot pose reaches the player's rigid body
 
@@ -191,6 +210,7 @@ for i in 0..n_gears { … }
 * **Reachability.** Established — same `assemble` → `convert` path as finding 4, again *before* `config.validate()`.
 * **Severity.** `Vec::with_capacity(4_294_967_295)` for `f32` requests ~17 GB; Rust allocation failure **aborts the process** (no unwind, no diagnostic). If it succeeds on a large machine, the loop runs 4.3 billion iterations of `powf`. Both profiles.
 * **Fix shape.** Cap at a documented plausibility bound (retail authors ≤ 6) and `Err` out of `convert()` naming `AutoNumGears`. Do **not** silently `.min(6)`: a 6-speed config invented for a car whose file says 400 is a wrong-but-drivable car.
+* **Status: fixed.** Bounded at decode instead of in `convert()`: `MAX_GEARS = 32` + `gear_count` reject `AutoNumGears`/`ManualNumGears` above the bound with the authored value in the error (a saturated `u32::MAX` would name nothing), and `req_finite_f32` rejects `nan`/`inf` before the cast. `convert()`'s `Vec::with_capacity(n_gears)` now sees a count ≤ 32. Test: `vehcarsim_bounds_gear_counts` (`mm2_formats/tests/vehicle_formats.rs`).
 
 ### 8. `crates/mm2_game/src/effects.rs:369` and `:823` — `end - start + 1` on raw authored `i64` flipbook bounds
 
@@ -230,6 +250,7 @@ Restitution::new(tuning.elasticity),                 // :830  unchecked
 * **Severity.** Silent wrong value / solver poisoning. **Not** a panic — these are kinematic ambient bodies, and `assert_components_finite` (see finding 5) covers `Position`/`LinearVelocity`/`AngularVelocity`, not `CenterOfMass`.
 * **Doc contradiction.** The comment immediately above (`traffic.rs:798`) claims "a degenerate/absent mass or CG falls back to **sane defaults**" — which the `Size`-derived branch and the two neighbouring material fields do not honour.
 * **Fix shape.** Give `AiVehicleData` a `validate()` and make `load_tuning` a real gate that reports the record unusable — or, upstream, the `veh.rs` `req_f32` finiteness fix from finding 4, which covers this too. Note `banger.rs`'s `BangerDefinition::from_record` (`crates/mm2_game/src/banger.rs:155-187`) is the model: it launders every authored value at a single boundary.
+* **Status: fixed** via the finding-4 fix — `AiVehicleData` now reads every required scalar through `req_finite_f32` and `Size` through `req_finite_vec3`, so a record carrying them fails decode in `load_tuning` and is reported rather than laundered into `CenterOfMass`; a non-finite `CG` warns and falls back like an absent one. `MaxAng` intentionally keeps the verbatim `opt_vec3`: retail `va_garbagetruck` ships a NaN there that is preserved by design (tested by `aivehicledata_decodes_msvc_non_finite_literals`).
 
 ### 10. `crates/mm2_formats/src/crashdata.rs:184-185` — authored integer columns round-tripped through `f32`, then saturating-cast
 

@@ -60,7 +60,35 @@ process-level leg (interactive finish), F10-B's remaining AC03 checklist scope
 (scrape + audible
 evidence — no output device), or the research-gated F15-B remainder
 (`unkFlag`/`cornerBrakingThreshold`/`weirdPathfinding` consumption —
-semantics unverified))** — the latest iteration repaired the F18-B.1
+semantics unverified))** — the latest iteration (run 20260929T174954,
+iter 001) repaired the authored-numbers audit's highest-severity
+findings — operator report 5's defect class,
+`docs/research/authored-numbers.md` findings 1, 2, 3 and the shared
+4+7+9 root cause (all panic/hang in both build profiles): `reanchor_pose`
+gained a hard step cap (`REANCHOR_MAX_STEPS`) so an XZ-collapsed or
+non-finite closed `.opp` route can no longer spin the fixed-update
+schedule forever, and `OpponentRoute::drivable` reports such routes at
+distillation as `OpponentIssue::DegenerateRoute` (slot kept, no route
+wired) instead of letting recovery hang; `NavGraph::build` reports
+out-of-range `Intersection::roads` references as
+`NavIssue::DanglingIntersectionRoad` and unions only in-range pairs —
+the union-find panic is gone; `pkg.rs` `parse_geometry` range-checks
+`PRIMTYPE_TRIANGLES` strip indices so a corrupt index degrades the chunk
+to a logged `PkgChunk::Raw` rather than panicking `Collider::trimesh` or
+`compute_normals`; and the validate-less tune records (`vehCarSim`,
+`vehTrailer`, `aiVehicleData`, `asNode`) read through new finite-checked
+helpers (`req_finite_f32`/`opt_finite_f32`/`req_finite_vec3`/
+`opt_finite_vec3`) plus a `MAX_GEARS = 32` bound on the
+`AutoNumGears`/`ManualNumGears` casts — closing the NaN `SteeringLimit`
+clamp panic, the `Size`-NaN `CenterOfMass` poison and the `1e12`-gears
+~17 GB allocation. The damage/stuck/gyro records keep verbatim readers
+by design (their `validate()` reports non-finite values) and
+`va_garbagetruck`'s `MaxAng` NaN is still preserved. Retail audit
+(`fnv1a64:e91e6cd4b2ae30d9`): `scan` produces zero new raw-chunk
+degradations, `validate-cars` 21/21, `handling` all 21 in envelope,
+`traffic` 23+23 ambients decode, `nav`/`opponents` issue counts
+unchanged. Findings 5, 6, 8, 10, 11 stay open in the audit doc.
+Candidate pending external check. Before that it repaired the F18-B.1
 candidate's external-review blocker: `record_eligibility` exempted a
 `dev.traction` pin of exactly `1.0`, sound only while the pin was a
 no-op — F18-B.1 made `Some(1.0)` physics-active (it dries a session

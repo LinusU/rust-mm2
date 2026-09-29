@@ -1,3 +1,129 @@
+# Last iteration — authored-numbers hardening: four panic/hang-class
+# findings from operator report 5 (iteration 001, run 20260929T174954)
+
+First implementation iteration of run `20260929T174954` on `ralph/night`
+(baseline `dc8d847` — operator report 5 plus its companion static sweep,
+`docs/research/authored-numbers.md`). One coherent slice: repair the
+audit findings that panic or hang in **both** build profiles — the four
+the sweep itself ranked first (findings 1, 2, 3) plus the shared
+tune-scalar root cause behind findings 4, 7 and 9.
+
+## Task selection
+
+Operator report 5 is marked PRIORITY: unchecked arithmetic on authored
+numbers is a recurring defect class (16 review findings, 7 blocking)
+that the external gate structurally cannot see because retail data is
+well-formed. The companion sweep enumerates 11 confirmed-reachable
+instances; findings 1–4 are the ones it names "worth turning into
+regression tests first" since each panics or hangs in both profiles.
+This iteration fixes those plus findings 7 and 9, which share finding
+4's root cause (un-validated tune scalar readers). Findings 5, 6, 8,
+10, 11 remain open — documented in the audit doc, not silently dropped.
+
+## What landed
+
+- **Finding 1** — `reanchor_pose` (`mm2_app::opponents`) could spin
+  forever on a closed `.opp` route whose every leg has zero XZ length:
+  `walked` never advanced and the open-route escape was disabled. The
+  walk now carries `REANCHOR_MAX_STEPS` (16,384) in addition to
+  `REANCHOR_WALK`, a non-finite candidate pose is never returned (the
+  input pose stands in), and `n == 1` no longer hands back a non-finite
+  anchor. Upstream, `OpponentRoute::drivable` (`mm2_game::opponent`)
+  reports a non-finite or XZ-collapsed route at distillation as
+  `OpponentIssue::DegenerateRoute` — the authored roster slot is kept
+  with no wired route, same convention as `UnresolvedRoute`.
+- **Finding 2** — `NavGraph::build` ran union-find over authored
+  `Intersection::roads` indices with no range check (`Bai::validate`
+  could report it, but nothing gated the build on validation). A
+  dangling reference is now reported as
+  `NavIssue::DanglingIntersectionRoad { intersection, road }` — the
+  same shape `BaiIssue` uses — and only in-range pairs are unioned.
+- **Finding 3** — `pkg.rs`'s `parse_geometry` capped index *counts* but
+  never checked an index against the strip's vertex table, so a corrupt
+  index panicked `Collider::trimesh`/`compute_normals` or silently
+  mis-shaped the mesh. `PRIMTYPE_TRIANGLES` strips (the only kind
+  observed on retail and the only one consumers interpret) are now
+  range-checked; a bad index fails the chunk, which degrades to the
+  documented `PkgChunk::Raw` preserve — now logged via `tracing::warn!`
+  with the parse error, and counted as `partial` by `mm2-inspect scan`.
+- **Findings 4, 7, 9** — the validate-less tune records (`vehCarSim`,
+  `vehTrailer`, `aiVehicleData`, `asNode`) read scalars/vec3s verbatim:
+  `SteeringLimit nan` reached `f32::clamp` as a NaN bound (panic in both
+  profiles), `AutoNumGears 1e12`/`inf` saturated `as u32` into a ~17 GB
+  `Vec::with_capacity`, and `aiVehicleData.Size` NaN poisoned the
+  traffic `CenterOfMass` fallback. New finite readers in `veh.rs` —
+  `req_finite_f32`, `opt_finite_f32`, `req_finite_vec3`,
+  `opt_finite_vec3` — decode-error or warn-and-fall-back on non-finite
+  values; `MAX_GEARS = 32` + `gear_count` bound both gear counts at
+  decode, naming the authored value in the error. The
+  `vehCarDamage`/`vehStuck`/`vehGyro` records deliberately keep verbatim
+  readers — their `validate()` reports non-finite values — and
+  `aiVehicleData.MaxAng` keeps `opt_vec3` so retail `va_garbagetruck`'s
+  authored NaN is still preserved.
+- `docs/research/authored-numbers.md` — per-finding `Status: fixed`
+  lines plus the boundary refinement rationale.
+
+Deviation from the audit's suggested shape for finding 7: the
+plausibility bound sits in `veh.rs` decode rather than `convert()` —
+the decode boundary reports the authored value (not a saturated
+`u32::MAX`) and covers `ManualNumGears`'s identical cast for free.
+
+## Evidence
+
+Synthetic tests (new legs in parentheses):
+
+- `mm2_app/tests/opponents.rs` — `reanchor_pose_bounds_a_collapsed_closed_route`,
+  `reanchor_pose_bounds_a_nonfinite_route` (+2; suite 47/47).
+- `mm2_content/tests/opponents.rs` — `a_degenerate_route_is_reported_not_wired` (+1; 10/10).
+- `mm2_game/tests/nav.rs` — `a_dangling_intersection_road_is_an_issue_not_a_panic` (+1; 35/35).
+- `mm2_formats::pkg` — `out_of_range_triangle_indices_degrade_to_raw` (+1; 7/7).
+- `mm2_formats/tests/vehicle_formats.rs` —
+  `vehcarsim_rejects_non_finite_scalars`, `vehcarsim_bounds_gear_counts`,
+  `vehcarsim_vec3_fields_must_be_finite`,
+  `aivehicledata_rejects_non_finite_scalars` (+4; 24/24).
+
+Retail audits (`fnv1a64:e91e6cd4b2ae30d9`, read-only install, this
+tree's `mm2-inspect`):
+
+- `scan` — **zero** "geometry chunk failed to parse" warnings: no retail
+  PKG carries an out-of-range triangle index; the ~33 pre-existing
+  `partial` entries are unchanged (non-geometry raw chunks).
+- `validate-cars` — 21/21 stock vehicles ok, same warning set as before
+  (hitch fallbacks, paint-count mismatch, engine-sample row counts).
+- `handling` — all 21 vehicles within the arcade envelope, unchanged.
+- `traffic` — 23/23 + 23/23 ambient `aivehicledata` decode on both
+  cities, including `va_garbagetruck`'s preserved `MaxAng` NaN.
+- `nav` / `opponents` — same pre-existing issue counts; zero new
+  `DegenerateRoute` or `DanglingIntersectionRoad` findings.
+
+## Gates
+
+`cargo fmt --all -- --check`, `cargo clippy --locked --workspace
+--all-targets --all-features -- -D warnings`, `cargo test --locked
+--workspace` — all green on the committed tree (one navarrow test
+expectation shifted to `no-geometry` after the parse-level check
+moved first; the `bad-index` rasterizer guard stays as
+defence-in-depth).
+
+## Classification
+
+Implementation choice throughout — every change hardens malformed-input
+handling and makes no original-behavior claim. Findings 1/2/3 had doc
+comments claiming bounded/diagnostic behavior that the code did not
+deliver; the fixes make those claims true. The gear bound (32 vs retail
+≤ 6) and step cap (16,384) are designed limits, documented as such.
+
+## Remaining open items
+
+- Audit findings 5, 6, 8, 10, 11 remain open (`authored-numbers.md`):
+  non-finite race start slots (`RaceDefinition::validate` gap), the
+  `props.rs:796` `+1` overflow on a saturated prop-offset cast, the
+  `effects.rs` `end - start + 1` flipbook overflow, the `crashdata.rs`
+  integer-via-`f32` columns, and `CameraFOV` range. Each is diagnosed
+  in the doc with a suggested fix shape.
+- Everything here is candidate-level: unit/synthetic evidence plus
+  retail audit runs, pending external gate + review.
+
 # Last iteration — F19-A.4 `.mod` skin assembly + pose-driven deform
 # (iteration 92)
 
