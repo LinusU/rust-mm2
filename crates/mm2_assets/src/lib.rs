@@ -14,6 +14,7 @@
 //! escape the virtual root (`..`, absolute paths) is rejected.
 
 mod error;
+pub mod fingerprint;
 mod manifest;
 mod mount;
 mod source;

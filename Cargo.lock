@@ -3870,6 +3870,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mm2_net"
+version = "0.0.0"
+dependencies = [
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "mm2_vehicle"
 version = "0.0.0"
 dependencies = [

@@ -130,7 +130,7 @@ pub fn build(
         skipped_archives: mount.skipped.clone(),
         mods: mount.mods.iter().map(|m| m.id.clone()).collect(),
         logical_paths: paths.len(),
-        fingerprint: fingerprint(vfs),
+        fingerprint: mm2_assets::fingerprint::catalog(vfs),
         families,
     })
 }
@@ -152,48 +152,6 @@ pub fn strict_failures(report: &Report) -> Vec<String> {
         }
     }
     out
-}
-
-// ---------------------------------------------------------------------------
-// Fingerprint
-// ---------------------------------------------------------------------------
-
-const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-
-fn fnv(h: u64, bytes: impl AsRef<[u8]>) -> u64 {
-    bytes
-        .as_ref()
-        .iter()
-        .fold(h, |h, b| h.wrapping_mul(FNV_PRIME) ^ u64::from(*b))
-}
-
-/// FNV-1a-64 over every resolved logical path, its provenance and the
-/// winning source's file size. Deterministic for a given catalog; not a
-/// content hash (bytes are not read).
-fn fingerprint(vfs: &Vfs) -> String {
-    let mut h = FNV_OFFSET;
-    let mut size_cache: BTreeMap<PathBuf, u64> = BTreeMap::new();
-    for logical in vfs.list() {
-        h = fnv(h, &logical);
-        let Some(r) = vfs.resolve(&logical) else {
-            continue;
-        };
-        h = fnv(h, r.source.path.to_string_lossy().as_bytes());
-        if let Some(off) = r.source.archive_offset {
-            h = fnv(h, (off as u64).to_le_bytes());
-        }
-        if let Some(label) = &r.source.label {
-            h = fnv(h, label);
-        }
-        let size = size_cache.entry(r.source.path.clone()).or_insert_with(|| {
-            std::fs::metadata(&r.source.path)
-                .map(|m| m.len())
-                .unwrap_or(0)
-        });
-        h = fnv(h, size.to_le_bytes());
-    }
-    format!("fnv1a64:{h:016x}")
 }
 
 // ---------------------------------------------------------------------------

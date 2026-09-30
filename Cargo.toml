@@ -9,6 +9,7 @@ members = [
     "crates/mm2_content",
     "crates/mm2_formats",
     "crates/mm2_game",
+    "crates/mm2_net",
     "crates/mm2_vehicle",
     "tools/mm2_inspect",
 ]

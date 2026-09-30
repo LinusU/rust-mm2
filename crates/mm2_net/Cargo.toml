@@ -1,0 +1,9 @@
+[package]
+name = "mm2_net"
+description = "Engine-to-engine networking protocol and transport for the MM2-inspired engine"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true

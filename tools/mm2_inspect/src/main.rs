@@ -529,6 +529,14 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Print the content fingerprints the multiplayer handshake compares:
+    /// the structural catalog fingerprint (resolved paths + provenance)
+    /// and the gameplay fingerprint (resolved bytes of tuning, bounds,
+    /// geometry, city and event data — cosmetic families excluded).
+    Fingerprint {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -669,6 +677,18 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Peds { dir, strict } => peds::run(dir, cli.mods.as_deref(), *strict),
         Command::Inventory { dir, json, strict } => {
             inventory_cmd(dir, cli.mods.as_deref(), *json, *strict)
+        }
+        Command::Fingerprint { dir } => {
+            let vfs = build_vfs(dir, cli.mods.as_deref())?;
+            let gameplay = mm2_content::fingerprint::gameplay(&vfs)?;
+            println!("catalog  : {}", mm2_assets::fingerprint::catalog(&vfs));
+            println!(
+                "gameplay : {} ({} files, {} bytes)",
+                gameplay.display(),
+                gameplay.files,
+                gameplay.bytes
+            );
+            Ok(())
         }
     }
 }

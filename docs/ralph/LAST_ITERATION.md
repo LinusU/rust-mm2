@@ -1,3 +1,114 @@
+# Last iteration — F24-A.1: multiplayer protocol foundation —
+# transport decision, framed wire protocol, content fingerprints,
+# loopback handshake (iteration 008, run 20260929T174954)
+
+Implementation iteration on `ralph/night` (baseline `679083f` — the
+iteration-007 clippy repair; external verify green, review **pass**
+with verification gaps only, no blocking findings). One coherent
+slice: the first leg of F24-A — every queued task F24→F27 plus the
+deferred replication legs in F05-B/F10-C sit behind it, and all of
+F24-A's deps (F01-B checked, F02-A implemented) are satisfied.
+
+## Task selection
+
+No failing gate or review finding to repair — iteration 007 passed
+with non-blocking residuals only (verbatim vertex reads, `.bnd`
+families outside `build_model`, a narrow derived-width corner, doc
+slips — all disclosed). The selection-policy list's candidates are
+mostly gated (F14-C completability needs F15-B traversal research;
+F05-B/F17-B/F18-A remainders need C&R/replication modes; F07-B needs
+an audio device; F16-C's process leg needs interactive play) or
+evidence-only (F11-C names no new runtime work). F24-A is the
+highest-value *ready* task in TASKS.json: it roots the entire
+multiplayer subtree. Scoped to A.1 — transport choice, protocol IDs,
+authority boundary and content fingerprints — per the spec's own
+"do not implement this whole document" rule; lobby/readiness and the
+app wiring are F24-B.
+
+## What landed
+
+- `crates/mm2_net` (new crate, no project-local deps): `frame` — a
+  `u32le` length-prefixed codec bounded by `MAX_FRAME` (256 KiB)
+  checked *before* allocation; `proto` — `PROTOCOL_VERSION` 1, strict
+  LE message codec (`Hello`/`Accept`/`Reject`, capped strings, hard
+  errors on unknown tags/truncation/trailing bytes), and `admit`, the
+  pure compatibility gate (exact version + gameplay-fingerprint
+  match); `conn` — blocking `std::net` TCP wrapper plus the
+  `send_hello`/`accept_hello` handshake pair (a refused peer gets a
+  named `Reject`, not a dropped socket) and `listen_loopback`
+  (`127.0.0.1:0` only — no public bind exists).
+- `mm2_assets::fingerprint` — the FNV-1a-64 helper and the
+  provenance+size catalog fingerprint moved here from `mm2_inspect`
+  so the handshake and the auditor share one implementation. The
+  inventory's retail value is bit-identical (`fnv1a64:e91e6cd4b2ae30d9`
+  — verified by re-running the command, not just the unit test).
+- `mm2_content::fingerprint::gameplay` — FNV-1a-64 over the resolved
+  *bytes* of every gameplay-relevant logical path (`tune/`, `bound/`,
+  `geometry/`, `race/`, `anim/`, `players/`, and `city/` minus the
+  visual-only `.sky`/`.ldef`/`.lmap`/`.cpvs`/`.pvs`/`.pvshist`/`.ltNN`
+  records). `path ‖ len ‖ bytes` per file, so edits, retargets and
+  deletions all move it while texture/audio/menu-art changes cannot.
+- `mm2-inspect fingerprint <dir>` — prints both fingerprints with the
+  gameplay denominator (files + bytes hashed).
+- `docs/research/net.md` — the transport decision record: TCP
+  control plane on `std::net` (no async runtime in the tree; the
+  lobby is low-rate request/response), blocking sockets + threads
+  keeping the crate Bevy-free so a headless host needs no window/GPU;
+  the per-tick dataplane is deliberately deferred to F25 (UDP
+  candidate, decided with the replication design); loopback-only
+  bind policy; auth/encryption deferred to maintained crates, not
+  hand-rolled. `docs/architecture.md` gained the `mm2_net` boundary
+  rule.
+
+## Evidence
+
+- `mm2_net` 13 tests green: real `127.0.0.1` socket pairs through the
+  production helpers — accept round-trip, `VersionMismatch` and
+  `ContentMismatch` rejects reaching *both* ends, non-Hello first
+  frame → `Malformed` reject delivered to the peer, oversize frame
+  refused before allocation, truncated/empty reads → `UnexpectedEof`,
+  strict decode errors (bad tag/code, over-cap string, non-UTF-8,
+  trailing bytes).
+- `mm2_content` fingerprint tests green: classifier table,
+  cosmetic-only change invariance (texture + `ldef` edits), gameplay
+  edit/deletion sensitivity, mod-override sensitivity.
+- Retail (`fnv1a64:e91e6cd4b2ae30d9`, read-only): `fingerprint`
+  reports `catalog fnv1a64:e91e6cd4b2ae30d9` (unchanged by the
+  refactor) and `gameplay fnv1a64:612016d26bd31b59` over **5,593**
+  files / 28.8 MB in well under a second. Live mod legs: a texture
+  override mod moves the catalog fingerprint (`…2bf7a274…`) while the
+  gameplay fingerprint and its denominator stay identical — the
+  AC02 cosmetic leg; a `tune/` mod moves the gameplay fingerprint
+  (`…62a401dc…`, 5,594 files) — the AC02 gameplay leg.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --locked --workspace` — all suites green (exit 0),
+  incl. mm2_net's 13 and mm2_content's 4 new legs.
+
+## Classification / remaining open items
+
+- Implementation choice throughout — `PROTOCOL_VERSION`, the frame
+  format, `MAX_FRAME`, the fingerprint classifier and the transport
+  are designed, not recovered original behavior (DirectPlay interop
+  is a spec non-goal).
+- Authority boundary for A.1 is documentation + handshake direction
+  (host decides); the per-message authority split lands with the
+  message set it constrains in F24-B.
+- Evidence is same-process loopback — not multi-process, LAN or
+  Internet. AC01 (host + two clients + lobby), AC04 (disconnect/host
+  loss UX), AC05 (headless dedicated bind) and AC06's scope matrix all
+  stay open for F24-B/F24-C.
+- `Hello.driver`/`build` are carried but have no lobby consumer yet;
+  the gameplay fingerprint is computed on demand (a per-session cache
+  can come with the consumer). No app/menu wiring — there is no
+  multiplayer menu row to fake.
+
+---
+
 # Last iteration — external-gate repair: clippy 1.98 `redundant_closure`
 # in `mm2_content::model` (iteration 007, run 20260929T174954)
 

@@ -18,6 +18,7 @@ pub mod crashcourse;
 pub mod damage;
 pub mod events;
 pub mod expect;
+pub mod fingerprint;
 pub mod garage;
 pub mod model;
 pub mod nav;

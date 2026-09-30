@@ -95,6 +95,11 @@ Dependency rules:
 - `mm2_app` is the only place where everything is allowed to meet. Bevy
   conversion of parsed formats (TEX → `Image`, PSDL/PKG → `Mesh`) lives here,
   not in the parser crates.
+- `mm2_net` is the engine-to-engine transport: framed TCP, the handshake
+  and wire message types. It depends on nothing project-local — protocol
+  fields are opaque u64s/strings, and the Bevy bridge lives in `mm2_app`
+  (F24-B). Socket code does not belong in `mm2_game`'s domain layer.
+  See `docs/research/net.md`.
 
 ## The logical asset pipeline
 

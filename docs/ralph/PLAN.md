@@ -40,7 +40,12 @@
 
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
-**Next selected slice: F14-C's unblocked legs
+**Next selected slice: F24-B's first leg (host/join
+wiring through `mm2_net` — listen socket on a host thread,
+`SessionConfig`-driven join, lobby roster scaffolding — now
+unblocked by A.1), the F24-A remainder (session/roster fields the
+lobby needs, evaluated as B lands), F29-A (consumer audit — deps
+satisfied), F14-C's unblocked legs
 (the catalog-validation and multi-lap/opponent/restart legs —
 F14-B + F15-B deps; the traversal-stall completability claims stay
 gated on F15-B's research), the F05-B remainder
@@ -3019,7 +3024,8 @@ usable headroom against a suite that grows every iteration.
 | F23-A | queued | F01-A, F16-A | Fixed keyboard + gamepad mapping in `input.rs`; no rebind/settings persistence. |
 | F23-B | queued | F23-A | — |
 | F23-C | queued | F23-B | — |
-| F24-A | queued | F01-B, F02-A | No networking; transport choice deferred to F24 per ARCHITECTURE.md. |
+| F24-A | active | F01-B, F02-A | Split: A.1 (transport decision + framed protocol + content fingerprints + loopback handshake — implemented below). Remaining A scope is evaluated as F24-B lands real consumers: session fields the lobby needs (player/roster negotiation), any additional handshake legs, and promotion of the protocol contract. |
+| F24-A.1 | implemented | F01-B, F02-A | `crates/mm2_net`: `frame` (u32le length prefix, `MAX_FRAME` 256 KiB checked before alloc), `proto` (`PROTOCOL_VERSION` 1, strict LE `Hello`/`Accept`/`Reject` codec, `admit` = exact version + gameplay-fingerprint gate), `conn` (blocking `std::net` TCP, `send_hello`/`accept_hello` — refused peers get a named `Reject`, `listen_loopback` binds `127.0.0.1:0` only). `mm2_assets::fingerprint` — FNV-1a-64 + catalog fingerprint moved out of `mm2_inspect` (retail value bit-identical `fnv1a64:e91e6cd4b2ae30d9` re-verified). `mm2_content::fingerprint::gameplay` — byte hash over gameplay families (`tune/`, `bound/`, `geometry/`, `race/`, `anim/`, `players/`, `city/` minus `.sky`/`.ldef`/`.lmap`/`.cpvs`/`.pvs`/`.pvshist`/`.ltNN`). `mm2-inspect fingerprint` exposes both. `docs/research/net.md` records the transport decision (TCP control plane, dataplane deferred to F25, loopback-first bind, no hand-rolled crypto). Tests: 13 mm2_net incl. loopback accept/version/content/malformed/oversize legs + 4 mm2_content classifier/invariance legs. Retail mod legs: texture override → gameplay fp unchanged; tune mod → moved. AC02's gate semantics evidenced; AC01/AC04/AC05/AC06 stay open for F24-B/C. Candidate pending external check. |
 | F24-B | queued | F24-A | — |
 | F24-C | queued | F24-B | — |
 | F25-A | queued | F02-B, F24-B | — |
