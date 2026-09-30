@@ -16,14 +16,19 @@
 //! - [`conn`] — blocking TCP streams behind `std::net`, with the
 //!   client/server handshake helpers. Loopback listeners are the
 //!   default for tests; LAN binding is the caller's explicit choice.
+//! - [`lobby`] — the session lobby driver: [`Host`] accepts and gates
+//!   peers on its own threads, mints roster slots, tracks readiness and
+//!   reports join/leave/ready transitions as events; [`Client`] is the
+//!   joining side.
 //!
-//! Scope deliberately ends at the session handshake. Lobby state,
-//! vehicle-state replication and the gameplay dataplane are F24-B/F25
-//! work on top of this layer. See `docs/research/net.md` for the
-//! transport decision record.
+//! Scope deliberately ends at the lobby: session advertisement
+//! (city/mode/settings), start/cancel, vehicle-state replication and the
+//! gameplay dataplane are later F24-B/F25 work on top of this layer. See
+//! `docs/research/net.md` for the transport decision record.
 
 mod conn;
 mod frame;
+mod lobby;
 mod proto;
 
 pub use conn::{
@@ -31,7 +36,10 @@ pub use conn::{
     send_hello_within,
 };
 pub use frame::{MAX_FRAME, read_frame, write_frame};
-pub use proto::{Hello, Message, PROTOCOL_VERSION, ProtoError, RejectCode};
+pub use lobby::{Client, Host, HostConfig, HostEvent, LeaveCause};
+pub use proto::{
+    Hello, MAX_PLAYERS, Message, PROTOCOL_VERSION, ProtoError, RejectCode, RosterEntry,
+};
 
 /// Every failure mode of this layer: transport I/O, frame bounds, wire
 /// decoding and a peer that refused us — or that we refused.

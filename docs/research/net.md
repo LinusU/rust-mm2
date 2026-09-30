@@ -88,12 +88,58 @@ Two fingerprints, different jobs:
   state affecting sim), its family joins the set and the fingerprint's
   meaning moves with `PROTOCOL_VERSION`.
 
+## Lobby channel (F24-B.1)
+
+`mm2_net::lobby` adds the host/join driver on top of the handshake:
+
+```
+client → Hello                     host   → Accept | Reject
+       ← Welcome { player_id }            → Roster { entries } (broadcast)
+       → SetReady { ready } | Leave
+```
+
+- `Host` owns the listener and a single event loop; the loop is the
+  only roster mutator. Three thread kinds feed it one channel: an
+  accept thread (blocking `listener.accept`), a short-lived handshake
+  thread per accepted conn (the gate runs under `HANDSHAKE_TIMEOUT`, so
+  a stalled peer never blocks accepts), and a reader thread per
+  admitted player forwarding `SetReady`/`Leave` and socket death.
+- The roster is a `BTreeMap<u16, Slot>`; ids mint monotonically from 1
+  and are never recycled (0 is reserved for the host player at the app
+  layer). `Welcome` carries the assigned slot; `Roster` is a complete
+  snapshot, not a delta, rebroadcast after every join/leave/ready
+  change — receivers replace wholesale, so no ordering hazards.
+- Bounds: `MAX_PLAYERS = 8` on the wire roster (MP-1's documented
+  TCP/IP ceiling) and on the encode/decode of `Roster`; `max_clients`
+  in `HostConfig` is the runtime seat count (default 8 — a host that is
+  itself a player should pass 7); `MAX_PENDING` caps in-flight
+  handshakes so a connect flood drops at the accept boundary instead of
+  spawning unbounded threads. A full roster rejects with
+  `RejectCode::LobbyFull` *before* `Accept`, so a refused client sees a
+  named reason through the normal handshake verdict.
+- Post-handshake discipline: a client may send only `SetReady`/`Leave`;
+  anything else drops it as `LeaveCause::Malformed`. A dead socket is
+  `Lost`; `Leave` is `Quit` — `Client::leave` half-closes and drains so
+  a quit isn't RST'd into looking like a drop. Established-lobby writes
+  carry `WRITE_TIMEOUT` (10 s) so a peer that stops reading is dropped
+  rather than freezing a broadcast.
+- `Host::shutdown`/`Drop` closes every peer socket (waking the reader
+  threads), self-connects to wake the blocking accept, and joins the
+  loop. Clients observe the lobby's death as a failed `recv`.
+
+Deliberately *not* here: session advertisement (city/mode/settings a
+client joins into — needs `SessionConfig`, which `mm2_net` may not see;
+the `mm2_app` bridge maps it), start/cancel, vehicle/paint negotiation,
+late-join into a running session, host migration, and the per-tick
+dataplane (F25).
+
 ## Evidence level
 
 Same-process loopback: `mm2_net` tests bind `127.0.0.1:0` and run real
-client/server socket pairs through the production handshake helpers —
-accept, version reject, content reject, malformed-first-frame reject,
-oversize frame refused before allocation, truncated reads, the default
-deadline installed by both helpers, and silent-peer stall legs on both
-sides of the handshake. This is *not* multi-process, LAN or Internet
-evidence; F24-C owns that matrix.
+client/server socket pairs through the production helpers — handshake
+accept/version/content/malformed/oversize/truncation/silent-peer legs
+plus lobby legs: slot assignment, multi-client roster broadcast, ready
+rebroadcast, quit-vs-drop causes, fresh ids on rejoin, lobby-full and
+incompatible-peer rejection, out-of-turn-message drops, handshake-flood
+bounding and host-shutdown disconnect. This is *not* multi-process, LAN
+or Internet evidence; F24-C owns that matrix.

@@ -14,9 +14,19 @@ pub const PROTOCOL_VERSION: u16 = 1;
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
 
+/// Roster ceiling: MP-1 (documented — `help:Types of Multiplayer
+/// Connections`, `help:Multiplayer Screen`) puts TCP/IP play at up to 8
+/// players total. The wire keeps the bound so a hostile roster payload
+/// cannot claim an unbounded crowd.
+pub const MAX_PLAYERS: u8 = 8;
+
 const TAG_HELLO: u8 = 0x01;
 const TAG_ACCEPT: u8 = 0x02;
 const TAG_REJECT: u8 = 0x03;
+const TAG_WELCOME: u8 = 0x04;
+const TAG_ROSTER: u8 = 0x05;
+const TAG_SET_READY: u8 = 0x06;
+const TAG_LEAVE: u8 = 0x07;
 
 /// The first message a client sends: identity plus the compatibility
 /// evidence the host checks.
@@ -44,6 +54,23 @@ pub enum RejectCode {
     ContentMismatch = 2,
     /// The first frame was not a well-formed `Hello`.
     Malformed = 3,
+    /// The roster was already at capacity when the peer handshook.
+    LobbyFull = 4,
+}
+
+/// One roster entry — the lobby's view of a connected driver. Player ids
+/// are host-minted `u16` slots; `0` is reserved for the host player at the
+/// app layer, so wire ids start at 1.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RosterEntry {
+    /// Host-assigned slot.
+    pub player_id: u16,
+    /// Display name from the peer's `Hello`.
+    pub driver: String,
+    /// Build identifier from the peer's `Hello` (diagnostic).
+    pub build: String,
+    /// Whether the peer has marked itself ready to start.
+    pub ready: bool,
 }
 
 /// One wire message.
@@ -60,6 +87,26 @@ pub enum Message {
         /// Human-readable detail.
         message: String,
     },
+    /// Host → client slot assignment, sent right after `Accept`.
+    Welcome {
+        /// The roster slot the client now owns.
+        player_id: u16,
+    },
+    /// Host → every client: the complete roster after any change. The
+    /// roster is authoritative state, not a delta — receivers replace
+    /// theirs wholesale.
+    Roster {
+        /// Every connected player, in slot order.
+        players: Vec<RosterEntry>,
+    },
+    /// Client → host: toggle this player's readiness flag.
+    SetReady {
+        /// The new readiness state.
+        ready: bool,
+    },
+    /// Client → host: a clean quit. Distinguishes a deliberate leave from
+    /// a dropped connection on the wire.
+    Leave,
 }
 
 /// A wire-decode failure on a well-framed payload.
@@ -83,6 +130,12 @@ pub enum ProtoError {
     /// Bytes left over after the message's last field.
     #[error("{0} trailing bytes")]
     Trailing(usize),
+    /// A bool field carried a byte other than 0 or 1.
+    #[error("invalid bool byte {0}")]
+    InvalidBool(u8),
+    /// A roster declared more than [`MAX_PLAYERS`] entries.
+    #[error("roster declares {0} players, bound is {MAX_PLAYERS}")]
+    OversizeRoster(u8),
 }
 
 impl RejectCode {
@@ -95,6 +148,7 @@ impl RejectCode {
             1 => Ok(Self::VersionMismatch),
             2 => Ok(Self::ContentMismatch),
             3 => Ok(Self::Malformed),
+            4 => Ok(Self::LobbyFull),
             other => Err(ProtoError::BadRejectCode(other)),
         }
     }
@@ -128,6 +182,14 @@ impl<'a> Cursor<'a> {
 
     fn u64(&mut self) -> Result<u64, ProtoError> {
         Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+
+    fn bool(&mut self) -> Result<bool, ProtoError> {
+        match self.u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            other => Err(ProtoError::InvalidBool(other)),
+        }
     }
 
     fn string(&mut self) -> Result<String, ProtoError> {
@@ -176,6 +238,28 @@ impl Message {
                 out.push(code.to_u8());
                 put_string(&mut out, message)?;
             }
+            Self::Welcome { player_id } => {
+                out.push(TAG_WELCOME);
+                out.extend_from_slice(&player_id.to_le_bytes());
+            }
+            Self::Roster { players } => {
+                out.push(TAG_ROSTER);
+                if players.len() > MAX_PLAYERS as usize {
+                    return Err(ProtoError::OversizeRoster(players.len() as u8));
+                }
+                out.push(players.len() as u8);
+                for p in players {
+                    out.extend_from_slice(&p.player_id.to_le_bytes());
+                    out.push(p.ready as u8);
+                    put_string(&mut out, &p.driver)?;
+                    put_string(&mut out, &p.build)?;
+                }
+            }
+            Self::SetReady { ready } => {
+                out.push(TAG_SET_READY);
+                out.push(*ready as u8);
+            }
+            Self::Leave => out.push(TAG_LEAVE),
         }
         Ok(out)
     }
@@ -195,6 +279,27 @@ impl Message {
                 code: RejectCode::from_u8(cur.u8()?)?,
                 message: cur.string()?,
             },
+            TAG_WELCOME => Self::Welcome {
+                player_id: cur.u16()?,
+            },
+            TAG_ROSTER => {
+                let count = cur.u8()?;
+                if count > MAX_PLAYERS {
+                    return Err(ProtoError::OversizeRoster(count));
+                }
+                let mut players = Vec::with_capacity(count as usize);
+                for _ in 0..count {
+                    players.push(RosterEntry {
+                        player_id: cur.u16()?,
+                        ready: cur.bool()?,
+                        driver: cur.string()?,
+                        build: cur.string()?,
+                    });
+                }
+                Self::Roster { players }
+            }
+            TAG_SET_READY => Self::SetReady { ready: cur.bool()? },
+            TAG_LEAVE => Self::Leave,
             tag => return Err(ProtoError::BadTag(tag)),
         };
         cur.finish()?;
@@ -246,6 +351,25 @@ mod tests {
                 code: RejectCode::ContentMismatch,
                 message: "content differs".to_string(),
             },
+            Message::Welcome { player_id: 3 },
+            Message::Roster {
+                players: vec![
+                    RosterEntry {
+                        player_id: 1,
+                        driver: "driver one".to_string(),
+                        build: "test".to_string(),
+                        ready: false,
+                    },
+                    RosterEntry {
+                        player_id: 2,
+                        driver: "driver two".to_string(),
+                        build: "test".to_string(),
+                        ready: true,
+                    },
+                ],
+            },
+            Message::SetReady { ready: true },
+            Message::Leave,
         ] {
             let bytes = msg.encode().unwrap();
             assert_eq!(Message::decode(&bytes).unwrap(), msg);
@@ -283,6 +407,33 @@ mod tests {
         assert!(matches!(
             Message::decode(&[TAG_REJECT, 99]),
             Err(ProtoError::BadRejectCode(99))
+        ));
+        // A roster declaring more than the player ceiling.
+        assert!(matches!(
+            Message::decode(&[TAG_ROSTER, MAX_PLAYERS + 1]),
+            Err(ProtoError::OversizeRoster(9))
+        ));
+        // A bool field byte other than 0/1.
+        assert!(matches!(
+            Message::decode(&[TAG_SET_READY, 2]),
+            Err(ProtoError::InvalidBool(2))
+        ));
+    }
+
+    #[test]
+    fn an_oversize_roster_does_not_encode() {
+        let players = vec![
+            RosterEntry {
+                player_id: 0,
+                driver: "d".to_string(),
+                build: "b".to_string(),
+                ready: false,
+            };
+            MAX_PLAYERS as usize + 1
+        ];
+        assert!(matches!(
+            Message::Roster { players }.encode(),
+            Err(ProtoError::OversizeRoster(9))
         ));
     }
 

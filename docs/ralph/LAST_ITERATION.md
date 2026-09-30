@@ -1,3 +1,106 @@
+# Last iteration — F24-B.1: the `mm2_net` lobby driver — host accept
+# loop, slot roster, readiness, leave/drop lifecycle (iteration 010,
+# run 20260929T174954)
+
+Implementation iteration on `ralph/night` (baseline `a8e2108` — the
+iteration-009 handshake-deadline repair; external verify green, review
+**pass** with verification gaps only, no blocking findings). One
+coherent slice: the first leg of F24-B — the plan's named "listen
+socket on a host thread + lobby roster scaffolding", now unblocked by
+A.1.
+
+## Task selection
+
+No failing gate or review finding to repair. Iteration-009's residual
+gaps (same-process loopback only, write-side frame bound, self-reported
+fingerprint, Err-path deadline retention) are documented limitations,
+not defects — none is repairable without the F24-C multi-process matrix
+or a bigger protocol step. F24-B is the highest-value ready task; the
+remaining plan candidates are still gated (F14-C needs F15-B research;
+F05-B/F17-B/F18-A need C&R or replication; F07-B needs an audio device)
+or evidence-only. Scoped to B.1: host/join + roster scaffolding at the
+wire level. Session advertisement (`SessionConfig` cannot enter
+`mm2_net` — the dependency rule keeps the crate project-free, so the
+mapping belongs to the `mm2_app` bridge), vehicle/paint negotiation,
+start/cancel, late-join, the Bevy bridge and the headless dedicated
+binary (AC05) are later B legs.
+
+## What landed
+
+- `mm2_net::lobby` — `Host`: an accept thread forwards conns; a
+  per-conn handshake thread runs the gate under `HANDSHAKE_TIMEOUT` and
+  hands the conn back over the channel (a stalled peer never blocks
+  accepts; in-flight handshakes capped by `MAX_PENDING = 8`, a flood
+  drops at the door); one reader thread per player forwards
+  `SetReady`/`Leave` and socket death. The single host loop owns the
+  roster: mints `u16` slot ids monotonically from 1 (never recycled; 0
+  reserved for the host player app-side), answers `Accept`+`Welcome`
+  or `Reject{LobbyFull}` *after* the capacity check, applies ready
+  changes, reaps gone peers, and rebroadcasts the complete `Roster`
+  snapshot after every change. `HostEvent::{Joined, Left, ReadyChanged,
+  JoinFailed}` is the consumer surface; `LeaveCause::{Quit, Lost,
+  Malformed}` distinguishes clean quits, drops and protocol violations.
+- `Client`: `join` (connect + `send_hello` + a bounded `Welcome` wait),
+  `set_ready`, `send`, `recv`, `set_timeout`, and `leave` — which
+  sends `Leave`, half-closes and drains briefly, because a socket
+  dropped with unread inbound data resets and a deliberate quit would
+  otherwise read as `Lost`.
+- `proto`: `Welcome{player_id}`, `Roster{players}` (≤`MAX_PLAYERS`=8 —
+  MP-1's documented TCP/IP ceiling — enforced on encode and decode),
+  `SetReady{ready}` (strict bool byte), `Leave`; `RejectCode::LobbyFull`.
+- `conn`: `accept_hello_within` factored into `recv_hello_within`
+  (receive+gate+reject, no `Accept`) so the host loop can interpose the
+  seat check before accepting — the public helpers' contract is
+  unchanged. `Conn::writer` returns a `try_clone`d `Writer` (send +
+  `disconnect` + `set_write_timeout`); `shutdown_write` backs `leave`.
+
+## Repair found in test
+
+`leave()` originally sent `Leave` and dropped the socket — the tests
+caught it reporting `Lost`: an unread roster sat in the client's
+receive buffer, so close produced RST and the host's reader errored
+before seeing the queued `Leave`. The drain-on-quit above is the fix;
+the cause distinction is now reliable, not best-effort.
+
+## Evidence
+
+- `mm2_net` 16→27 tests, all real loopback socket pairs/threads: slot
+  assignment + self-in-roster, two-client grown-roster broadcast to
+  incumbent and newcomer, ready rebroadcast to everyone, `Quit` vs
+  `Lost` causes, fresh id on rejoin (no stale-id reuse), lobby-full
+  reject via the normal handshake verdict, incompatible peer never
+  rostered, out-of-turn message drops the peer, handshake-flood refusal
+  at the door, host shutdown disconnects clients.
+- Same-process loopback only — AC01 (multi-process lobby), AC04
+  (disconnect UX), AC05 (headless dedicated binary), AC06 (scope
+  matrix) stay open for F24-B/C.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean (after one rustfmt reflow).
+- `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --locked --workspace` — all suites green (exit 0),
+  mm2_net 27/27.
+
+## Classification / remaining open items
+
+- Implementation choice throughout — the lobby protocol, thread layout,
+  slot ids and bounds are designed. `MAX_PLAYERS=8` pins MP-1's
+  documented ceiling; whether a host-as-player spends a seat is a
+  `HostConfig::max_clients` decision (default 8 = dedicated host).
+- Remaining B scope per PLAN.md: session advertisement, vehicle/paint
+  negotiation, start/cancel, late-join, the `mm2_app` bridge, headless
+  dedicated hosting, disconnect UX. No game-menu row exists to wire.
+- Known limits, disclosed: broadcast writes bounded at 10 s (a reader
+  that stalls mid-frame is dropped as `Lost`, not detected as
+  malicious); the pending cap is a count, not a rate limiter; a host
+  that `Accept`s then never sends `Welcome` stalls `join` for
+  `HANDSHAKE_TIMEOUT` then errors — bounded; handshake flooding past
+  `MAX_PENDING` is dropped silently (the peer sees a closed socket).
+
+---
+
 # Last iteration — external-review repair: bound the F24-A.1
 # handshake helpers (iteration 009, run 20260929T174954)
 

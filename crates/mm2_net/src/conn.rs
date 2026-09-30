@@ -16,6 +16,7 @@ use crate::frame::{read_frame, write_frame};
 use crate::proto::{Hello, Message, PROTOCOL_VERSION, RejectCode, admit};
 
 /// One framed TCP connection.
+#[derive(Debug)]
 pub struct Conn {
     stream: TcpStream,
     peer: SocketAddr,
@@ -38,6 +39,30 @@ impl Conn {
     /// Where this connection's peer lives.
     pub fn peer_addr(&self) -> SocketAddr {
         self.peer
+    }
+
+    /// Wrap an already-accepted stream — the accept thread's hand-off to
+    /// the host loop.
+    pub(crate) fn from_stream(stream: TcpStream) -> io::Result<Self> {
+        let peer = stream.peer_addr()?;
+        Ok(Self { stream, peer })
+    }
+
+    /// A second handle on the same socket for the sending side. The lobby
+    /// host keeps a `Writer` per player so the event loop can broadcast
+    /// while a reader thread owns the `Conn` for `recv`.
+    pub fn writer(&self) -> io::Result<Writer> {
+        Ok(Writer {
+            stream: self.stream.try_clone()?,
+        })
+    }
+
+    /// Half-close the send side: we are done writing, but keep reading
+    /// until the peer closes. A socket dropped with unread inbound data
+    /// resets (RST), so a clean shutdown must drain rather than just
+    /// drop.
+    pub(crate) fn shutdown_write(&self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Write);
     }
 
     /// Bound how long `recv`/`send` may block. The handshake helpers
@@ -134,6 +159,23 @@ pub fn accept_hello_within(
     gameplay_fingerprint: u64,
     deadline: Duration,
 ) -> Result<Hello, NetError> {
+    let hello = recv_hello_within(conn, gameplay_fingerprint, deadline)?;
+    conn.send(&Message::Accept)?;
+    conn.set_timeout(None)?;
+    Ok(hello)
+}
+
+/// The receive-and-gate half of [`accept_hello_within`]: reads the peer's
+/// first frame under `deadline`, applies the compatibility gate and sends
+/// a `Reject` on refusal — but on success sends **nothing** and leaves the
+/// deadline installed. The lobby host uses this so the roster-capacity
+/// check happens *before* `Accept` goes out: the host loop answers
+/// `Accept`/`Reject` itself once it knows there is a slot.
+pub(crate) fn recv_hello_within(
+    conn: &mut Conn,
+    gameplay_fingerprint: u64,
+    deadline: Duration,
+) -> Result<Hello, NetError> {
     conn.set_timeout(Some(deadline))?;
     let hello = match conn.recv() {
         Ok(Message::Hello(h)) => h,
@@ -148,11 +190,7 @@ pub fn accept_hello_within(
         Err(e) => return Err(e),
     };
     match admit(&hello, gameplay_fingerprint) {
-        Ok(()) => {
-            conn.send(&Message::Accept)?;
-            conn.set_timeout(None)?;
-            Ok(hello)
-        }
+        Ok(()) => Ok(hello),
         Err((code, message)) => {
             send_reject(conn, code, &message);
             Err(NetError::Rejected { code, message })
@@ -166,6 +204,35 @@ fn send_reject(conn: &mut Conn, code: RejectCode, message: &str) {
         code,
         message: message.to_string(),
     });
+}
+
+/// The write half of a connection, cloned from the same socket —
+/// [`Conn::writer`]. Only the owner sends on it, so frames cannot
+/// interleave.
+pub struct Writer {
+    stream: TcpStream,
+}
+
+impl Writer {
+    /// Send one protocol message.
+    pub fn send(&mut self, msg: &Message) -> Result<(), NetError> {
+        write_frame(&mut self.stream, &msg.encode()?)
+    }
+
+    /// Bound how long `send` may block. Socket options are shared with the
+    /// owning `Conn`, so the handshake deadline already bounds the first
+    /// post-handshake writes; the host installs a fresh bound once the
+    /// session clears `Conn`'s timeouts.
+    pub fn set_write_timeout(&self, timeout: Option<Duration>) -> Result<(), NetError> {
+        self.stream.set_write_timeout(timeout)?;
+        Ok(())
+    }
+
+    /// Forcibly close the socket — a blocked `recv` on the peer's reader
+    /// thread (or our own) wakes with an error. Used for host teardown.
+    pub fn disconnect(&self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+    }
 }
 
 /// Compose a `Hello` at the current protocol version.
