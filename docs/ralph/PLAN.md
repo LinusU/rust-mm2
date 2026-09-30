@@ -88,6 +88,26 @@ by design (their `validate()` reports non-finite values) and
 degradations, `validate-cars` 21/21, `handling` all 21 in envelope,
 `traffic` 23+23 ambients decode, `nav`/`opponents` issue counts
 unchanged. Findings 5, 6, 8, 10, 11 stay open in the audit doc.
+Iter 003 (run 20260929T174954) closed those last five: finding 5 —
+`RaceDefinition::validate` rejects non-finite gate centers/headings and
+non-finite start-slot positions/yaws as `NonFiniteGate`/`NonFiniteStart`
+through the existing `RaceBuildError` path; finding 6 —
+`walk_prop_rules` skips non-finite/negative prop defs with a bounded
+`stats.issues` line and counts placements in `f64` bounded by `maxUse`
+before any cast, plus `PropDefs::validate` gained
+`PropRuleIssue::NonFiniteField`; finding 8 — a shared `flipbook_span`
+(`checked_sub`/`checked_add`) backs smoke, precipitation and wheel-puff
+frame windows, `puff`/`drop`/`frame` return `Option` so an
+unrepresentable authored window declines *before* consuming seeded RNG
+(counted as `undrawable`, surfaced as `+Nu` in the headless record);
+finding 10 — Crash Course `Event`/`Checkpoints` and the integer tail
+parse as `i64` with diagnostics (`TimeLimit`/`AmbDensity` now diagnose
+non-finite too); finding 11 — `drawable_fov` bounds `CameraFOV` to
+`(0, 180)°`, `camera_fov_deg()` reads an undrawable value as unauthored
+so the designed lens stands in, and the loaders warn per `validate()`
+issue. All eleven findings of the audit are now repaired with
+regression tests; the speculative list (S1–S5) and the F19-A.4 sweep
+caveat remain as recorded.
 Iter 001's candidate failed external review on one blocking finding:
 `mm2_game::ped::matrix_bucket` (F19-A.4 code, co-landed in the same
 range) summed the full-range authored `mtxv`/`mtxn` counts with a plain

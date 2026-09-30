@@ -33,10 +33,12 @@ regression tests first; finding 2 is one line away from a test, because
 `crates/mm2_formats/src/bai.rs:1105` already *constructs* the exact `Bai` that triggers
 it.
 
-**Status (post-sweep iteration on `ralph/night`).** Findings 1, 2, 3, 4,
-7 and 9 are fixed and covered by regression tests; the per-finding
-`Status` lines below name the change. Findings 5, 6, 8, 10 and 11 remain
-open. One deliberate deviation from a suggested fix shape: finding 7's
+**Status (post-sweep iterations on `ralph/night`).** All eleven
+findings are fixed and covered by regression tests; the per-finding
+`Status` lines below name the change. Findings 5, 6, 8, 10 and 11 were
+closed in the second repair iteration; the speculative list (S1–S5) and
+the F19-A.4 follow-up caveat below remain as recorded. One deliberate
+deviation from a suggested fix shape: finding 7's
 plausibility bound landed in `veh.rs` decode (`gear_count` /
 `MAX_GEARS`), not in `convert()` — the decode boundary keeps the
 authored value in the error message instead of a saturated `u32::MAX`,
@@ -192,6 +194,7 @@ Transform::from_translation(spawn.position)
   * `crates/mm2_content/src/race_def.rs:340-344` (`RaceDefBuild::Failed`): "The producer rejected the event — … an **out-of-range authored parameter**, too few waypoint rows, or a definition that failed validation." A non-finite start point is exactly that, and is neither rejected nor reported.
   * `crates/mm2_app/src/session.rs:30-31`: "a failed load can never leave a live player simulation (AC02)." A NaN slot is not a failed load; it produces a live NaN-posed simulation.
 * **Fix shape.** Add `start_slots[*].position`/`yaw_deg` and `checkpoints[*].center` finiteness to `RaceDefinition::validate` so the existing `RaceBuildError` path reports the event unusable. Do **not** zero or clamp the coordinate — a car silently teleported to the origin is a wrong-but-plausible race.
+* **Status: fixed.** `RaceDefinition::validate` gained two variants — `RaceError::NonFiniteGate` (a checkpoint or finish `center`/`heading_deg` non-finite) and `RaceError::NonFiniteStart` (a start slot's `position` or authored `yaw_deg` non-finite) — and the producer's existing `definition.validate()?` (`race_def.rs:162`) turns either into a `RaceBuildError::Invalid`, so the event reports unusable instead of spawning a NaN-posed body. Test: `definition_validation_rejects_non_finite_authored_values` (`mm2_game/tests/race.rs`).
 
 ### 6. `crates/mm2_game/src/props.rs:796` — `+ 1` on a saturated `f32 → u64` cast of an authored prop offset
 
@@ -211,6 +214,7 @@ let want = if def.start <= curb_len {
   * `MAX_PROP_RULE_STAMPS`'s doc (`props.rs:96-99`): "a hostile table could request `maxUse` placements at near-zero `distance`; **overflow is counted, not silently dropped**." At near-zero `distance` the *count itself* overflows before the budget is consulted.
   * The correct pattern is in the same file: `path_stamp_sites` (`props.rs:1023`) does `let want = (f64::from(len) / f64::from(spacing)).ceil() as usize; let take = want.min(left);` — widened to `f64`, and **no `+ 1` after the saturating cast**. `crates/mm2_app/src/city.rs:3986` is a test named `a_hostile_segment_is_capped_instead_of_hanging` covering that sibling.
 * **Fix shape.** Add `!def.start.is_finite() || def.start < 0.0` to the `props.rs:791` reject list and raise the existing `PropRuleIssue::NegativeStart` (plus a new non-finite issue) into `walk.stats.issues` so the row is reported unusable; then compute the count in `f64` like `path_stamp_sites` does.
+* **Status: fixed.** Both halves landed. `walk_prop_rules` skips a def with non-finite `start`/`distance`/`lerp_min`/`lerp_max`, negative `start` or non-positive `distance`, and pushes a bounded `stats.issues` line naming the def and the values — before any arithmetic. The count is now computed in `f64`, bounded by `maxUse` *before* the truncating cast (`want.min(stamps_left)` unchanged), so a hostile span is measured against the budget instead of overflowing `+ 1` on a saturated cast. Upstream, `PropDefs::validate` gained `PropRuleIssue::NonFiniteField` naming `start`/`distance`/`minLerp`/`maxLerp` with the authored value verbatim; the `NegativeStart`/`NonPositiveDistance` comparisons stay finite-only so a NaN is not double-reported as both. Tests: `propdefs_non_finite_fields_are_named` (`mm2_formats::proprules`), `hostile_propdefs_skip_and_report_instead_of_stamping_nan` (`mm2_game::props`).
 
 ### 7. `crates/mm2_content/src/convert.rs:519` + `:530-531` — uncapped `AutoNumGears` sizes an allocation and a loop
 
@@ -249,6 +253,7 @@ let span = self.frame_end - self.frame_start + 1;
 * **Severity.** Debug: integer-overflow panic on the first particle. Release: wraps, and the drawn tile is a wrong-but-in-range value after `policy.tile()` clamps it.
 * **Doc contradiction.** `crates/mm2_game/src/audio.rs:838-845` is the *already-repaired* instance of this exact shape, and its doc now promises: "`None` on a non-positive `end` or an `add`/`end` window that cannot fit `i64` — a modded table's `9223372036854775807`-scale fields are undrawable, **never an overflow panic**." The two `effects.rs` siblings were not brought along. (`effects.rs:1205`, `WheelPuff::frame`, *is* safe — but only incidentally, because its bounds went through `WheelPtxPolicy::tile`.)
 * **Fix shape.** Mirror `draw_cue_suffix`: reject the window with `checked_sub`/`checked_add` and treat the spec as undrawable, surfacing it on the existing `PrecipReport`/smoke report. Clamping the *spec* would be a silent coercion; clamping is only correct at the final atlas lookup.
+* **Status: fixed.** A shared `flipbook_span(start, end)` (`checked_sub` + `checked_add`) now backs all three sites. `VehicleSmoke::puff` and `Precipitation::drop` return `Option` — a window that cannot fit `i64` declines *before* drawing on the seeded RNG, so deterministic streams stay aligned; `PrecipDrop::frame` returns `Option<i64>` (`None` = undrawable). `WheelPuff::frame` was already safe-by-policy (`tile`-clamped bounds) and now shares the helper, pinning the start tile on a hand-built hostile pair. `SmokeFxReport`/`PrecipReport` gained `undrawable` counters surfaced in the headless record as `+Nu`; an inverted window still pins the start tile rather than declining. Tests: `unrepresentable_flipbook_windows_decline_without_drawing`, `precip_drop_frame_sweeps_the_authored_tiles` (extended), `precip_declines_an_unrepresentable_flipbook_window` (`mm2_game/tests/effects.rs`).
 
 ### 9. `crates/mm2_app/src/traffic.rs:807` (and `:742`) — the CG fallback is derived from an unchecked authored `Size`
 
@@ -287,6 +292,7 @@ checkpoints: checkpoints as i64,                                          // :18
 * **Severity.** Silent truncation / silent misdecode. No panic in either profile; nothing allocates or indexes on it. Listed because it degrades the audit tool's own output — the one place meant to *report* the defect.
 * **Doc/test contradiction.** `crashdata.rs:67-72`: "Malformed rows are skipped and recorded in `diagnostics`", and the test at `crashdata.rs:267` is named `malformed_rows_are_diagnostics_not_panics`. The *panic* half holds; the *diagnostic* half does not for these cells. The sibling table parser does it right: `crates/mm2_formats/src/racedata.rs:98-119` parses integer columns with `parse::<i64>()` and pushes a `TableDiagnostic` on failure.
 * **Fix shape.** Parse `Event`/`Checkpoints` with `parse::<i64>()` like `racedata.rs` and diagnose + skip the row. (`TimeLimit`/`AmbDensity` on `:152-153` likewise accept `nan`/`inf`; every consumer traced is a `> 0.0` test or a `{:.2}` print, so they are not findings — but the same `is_finite()` diagnostic would make the doc claim true.)
+* **Status: fixed.** `Event`/`Checkpoints` parse through a shared `int_cell` (`parse::<i64>()` → `TableDiagnostic` on failure) — a fractional, `nan` or out-of-range cell is now a diagnosed skip, and signed extremes decode verbatim. `TimeLimit`/`AmbDensity` parse through a shared `num_cell` that additionally diagnoses non-finite values, taking up the parenthetical suggestion. Tests: `integer_columns_reject_non_integral_cells`, `non_finite_decimal_cells_are_diagnostics` (`mm2_formats::crashdata`).
 
 ### 11. `crates/mm2_app/src/camera.rs:111`, `:735` and `crates/mm2_app/src/dash.rs:260` — authored `CameraFOV` reaches the projection with no range or finiteness check
 
@@ -300,6 +306,7 @@ fov: p.camera_fov.unwrap_or(60.0).to_radians(),                            // da
 * **Guarded?** No — and the asymmetry is the point. The neighbouring fields on the *same struct literals* are guarded: `camera_near … .max(0.01)` / `.clamp(0.01, COCKPIT_NEAR_CAP)` and `camera_far … .max(1.0)`, and `COCKPIT_NEAR_CAP` carries a 13-line comment about defending against a bad authored `CameraNear`. `fov` got no such treatment.
 * **Severity.** Silent wrong value / dead render, **not** a panic: `fov == 0` gives an `inf` clip matrix, `fov >= π` inverts the projection, `fov == NaN` gives a NaN matrix. No assert fires — glam's `glam_assert`/`debug-glam-assert` features are not enabled anywhere in the workspace, and bevy's only panic nearby (`bevy_camera-0.19.1/src/projection.rs:390`) is driven by viewport size and pre-guarded. Outcome: a cockpit or chase view that renders nothing on a car whose dash cluster otherwise binds fine. The same shape applies to `DashSpec`'s `wheel_fact`, `speed_rot`/`rpm_rot`/`damage_rot` (`dash.rs:568/573/580/585`) — also non-finite-capable, also NaN transforms, no panic.
 * **Fix shape.** Reject a non-finite or out-of-range `CameraFOV` in a `validate()` on the spec and fall back to the *designed* lens (`ChaseLens::sized`) with a warning naming the file, rather than building a degenerate projection. A silent `.clamp(1.0, 179.0)` would hide a mod authoring the field in radians.
+* **Status: fixed.** `camtrack::drawable_fov` (shared, `pub(crate)`) bounds `CameraFOV` to the open `(0, 180)` degree interval — finite required, so `nan`/`inf` are out. `TrackCamSpec` and `PovCamSpec` each gained `camera_fov_deg()` (reads an undrawable value as *unauthored*, so the designed `FOV`/`60°` default stands in) and `validate()`; `load_track_cams` and `load_pov_cam` warn each issue with the file path, matching the `for issue in spec.validate()` pattern used by the other loaders. The raw field stays verbatim — a mod with `CameraFOV` in radians is reported, not silently repaired. Tests: `undrawable_camera_fov_is_named_and_reads_unauthored` (`mm2_formats::camtrack`), `undrawable_authored_fov_falls_back_to_the_designed_lens` (`mm2_app` `camtrack`/`mirror`/`dash` test files).
 
 ---
 
@@ -428,8 +435,8 @@ per-source failure the way the parse errors immediately around them are.
 | 1 | walk is "bounded", "disclosed, not silently unbounded" | `opponents.rs:184-187`, `:193-196`, `:597-599` | infinite loop on a degenerate closed route |
 | 2 | "the graph itself is always produced"; "never hidden" | `nav.rs:862-866`; `mm2_content/src/nav.rs:42-44` | index-OOB panic; `BaiIssue::DanglingIntersectionRoad` exists but is not consulted |
 | 3 | a hostile pkg "must fail the spawn, not panic inside it" | `navarrow.rs:314-320` (+ test `navarrow.rs:533`) | honoured in the rasteriser, not in the production builder `city.rs:2573` |
-| 5 | "Reject a definition that would behave oddly at runtime"; "out-of-range authored parameter" rejected; "a failed load can never leave a live player simulation (AC02)" | `race.rs:361`; `race_def.rs:340-344`; `session.rs:30-31` | non-finite start slot passes `validate()` and spawns a live NaN-posed body |
-| 6 | "a hostile def is measured against the budget instead of walked"; "overflow is counted, not silently dropped" | `props.rs:791-794`, `:96-99` | the count itself overflows before the budget applies |
-| 8 | "a modded table's `9223372036854775807`-scale fields are undrawable, never an overflow panic" | `audio.rs:838-845` (the repaired sibling) | the two `effects.rs` instances of the same shape were not repaired |
-| 9 | "a degenerate/absent mass or CG falls back to sane defaults" | `traffic.rs:798` | the `Size`-derived CG fallback, `friction` and `elasticity` do not |
-| 10 | "Malformed rows are skipped and recorded in `diagnostics`" + test `malformed_rows_are_diagnostics_not_panics` | `crashdata.rs:67-72`, `:267` | `nan`/`inf`/fractional `Event`/`Checkpoints` are silently coerced, not diagnosed |
+| 5 | "Reject a definition that would behave oddly at runtime"; "out-of-range authored parameter" rejected; "a failed load can never leave a live player simulation (AC02)" | `race.rs:361`; `race_def.rs:340-344`; `session.rs:30-31` | ~~non-finite start slot passes `validate()`~~ **resolved** — `NonFiniteGate`/`NonFiniteStart` reject it |
+| 6 | "a hostile def is measured against the budget instead of walked"; "overflow is counted, not silently dropped" | `props.rs:791-794`, `:96-99` | ~~the count itself overflows before the budget applies~~ **resolved** — f64 count bounded by `maxUse` before the cast |
+| 8 | "a modded table's `9223372036854775807`-scale fields are undrawable, never an overflow panic" | `audio.rs:838-845` (the repaired sibling) | ~~the two `effects.rs` instances of the same shape were not repaired~~ **resolved** — shared `flipbook_span` |
+| 9 | "a degenerate/absent mass or CG falls back to sane defaults" | `traffic.rs:798` | ~~the `Size`-derived CG fallback, `friction` and `elasticity` do not~~ **resolved** — `req_finite_f32`/`req_finite_vec3` gate the record at decode |
+| 10 | "Malformed rows are skipped and recorded in `diagnostics`" + test `malformed_rows_are_diagnostics_not_panics` | `crashdata.rs:67-72`, `:267` | ~~`nan`/`inf`/fractional `Event`/`Checkpoints` are silently coerced~~ **resolved** — `int_cell`/`num_cell` diagnose and skip |

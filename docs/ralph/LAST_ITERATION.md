@@ -1,3 +1,122 @@
+# Last iteration — authored-numbers sweep, second half: findings 5, 6,
+# 8, 10, 11 (iteration 003, run 20260929T174954)
+
+Implementation iteration on `ralph/night` (baseline `d9e3b8f` — the
+iteration-002 repair and notes; external verify green, review **pass**
+with no blocking findings). One coherent slice: close the five
+remaining confirmed findings in `docs/research/authored-numbers.md`
+(operator report 5's defect class — unchecked arithmetic on authored
+numbers).
+
+## Task selection
+
+No failing gate or review finding to repair — iteration 002's candidate
+passed external review with verification gaps only. The audit doc's
+five still-open confirmed findings were the highest-value ready work:
+each has a traced reachability path and a recorded fix shape, and
+closing them completes the sweep rather than leaving a tail of known
+defects. The speculative list (S1–S5) was deliberately not acted on —
+it is explicitly not verified enough.
+
+## What landed
+
+- **Finding 5** (`race.rs` / `race_def.rs`) —
+  `RaceDefinition::validate` gained `RaceError::NonFiniteGate` (a
+  checkpoint or finish `center`/`heading_deg` non-finite) and
+  `RaceError::NonFiniteStart` (a start slot's `position` or authored
+  `yaw_deg` non-finite). The producer's existing
+  `definition.validate()?` (`race_def.rs:162`) routes either into
+  `RaceBuildError::Invalid`, so a `nan`/`1e999` start-points row fails
+  the load instead of spawning a live NaN-posed body (the debug-profile
+  Avian `assert_components_finite` panic the audit traced).
+- **Finding 6** (`props.rs` / `proprules.rs`) — `walk_prop_rules` now
+  skips a def with non-finite `start`/`distance`/`lerp_min`/`lerp_max`,
+  negative `start` or non-positive `distance`, pushing a bounded
+  `stats.issues` line naming the def and values before any arithmetic.
+  The placement count is computed in `f64` and bounded by `maxUse`
+  *before* the truncating cast — the old `… as u64) + 1` overflowed on
+  a saturated cast (release wrapped to `want = 0`, silently deleting
+  every prop on that side). `PropDefs::validate` gained
+  `PropRuleIssue::NonFiniteField` naming the field and authored value;
+  the pre-existing `NegativeStart`/`NonPositiveDistance` comparisons
+  stay finite-only so a NaN is not misreported as both.
+- **Finding 8** (`effects.rs` + app consumers) — shared
+  `flipbook_span(start, end)` (`checked_sub` + `checked_add`) backs all
+  three sites. `VehicleSmoke::puff` and `Precipitation::drop` now
+  return `Option` — a window that cannot fit `i64`
+  (`TexFrameStart i64::MIN`, `TexFrameEnd i64::MAX`) declines *before*
+  drawing on the seeded RNG, preserving deterministic stream alignment;
+  `PrecipDrop::frame` returns `Option<i64>`. `WheelPuff::frame` was
+  already safe-by-policy and shares the helper, pinning the start tile
+  on a hand-built hostile pair. `SmokeFxReport`/`PrecipReport` gained
+  `undrawable` counters, surfaced in the headless record as `+Nu`. An
+  inverted-but-representable window still pins the start tile.
+- **Finding 10** (`crashdata.rs`) — `Event`, `Checkpoints` and the
+  integer tail columns now parse through `int_cell`
+  (`parse::<i64>()` → `TableDiagnostic` + row skip), matching
+  `racedata.rs`: `2.7`, `nan`, `1e30` are diagnosed instead of silently
+  truncated/saturated (`nan → 0` used to decode to a valid-looking
+  `Jump` objective). `TimeLimit`/`AmbDensity` gained an `is_finite`
+  diagnostic via `num_cell`, taking up the audit's parenthetical.
+- **Finding 11** (`camtrack.rs` / `dash.rs` + app consumers) —
+  `camtrack::drawable_fov` bounds `CameraFOV` to the open `(0, 180)`
+  degree interval (finite required). `TrackCamSpec` and `PovCamSpec`
+  gained `camera_fov_deg()` — an undrawable authored value reads as
+  *unauthored* so the designed lens stands in (chase 70°, cockpit and
+  mirror 60°) — plus `validate()`; `load_track_cams` and `load_pov_cam`
+  `warn!` each issue with the file path, matching the existing loader
+  pattern. The raw field stays verbatim — reported, not clamped.
+
+## Evidence
+
+- `mm2_formats` 244 unit tests + 24 vehicle-format integration tests
+  green, incl. `propdefs_non_finite_fields_are_named`,
+  `integer_columns_reject_non_integral_cells`,
+  `non_finite_decimal_cells_are_diagnostics`,
+  `undrawable_camera_fov_is_named_and_reads_unauthored`.
+- `mm2_game` suites green, incl.
+  `definition_validation_rejects_non_finite_authored_values`,
+  `hostile_propdefs_skip_and_report_instead_of_stamping_nan`,
+  `unrepresentable_flipbook_windows_decline_without_drawing`,
+  `precip_declines_an_unrepresentable_flipbook_window` and the extended
+  `precip_drop_frame_sweeps_the_authored_tiles`.
+- `mm2_app` all suites green, incl. the three
+  `undrawable_authored_fov_falls_back_to_the_designed_lens` legs
+  (chase/cockpit/mirror) and the updated `Option`-typed smoke/precip
+  call sites.
+- Retail audits on `fnv1a64:e91e6cd4b2ae30d9` (read-only):
+  `race-defs --strict` exits 0 — 45 sf events, 64 defs built, 0 failed
+  builds (the new gate rejects no retail event);
+  `crash-course --strict` exits 0 — 13/13 lessons ready (the `i64`
+  columns parse every retail row clean);
+  `proprules --strict` exits 2 on the same 48 pre-existing issues —
+  zero new `NonFiniteField` diagnostics (the gate adds no false
+  positives on stock data).
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --workspace` — all suites green. Caveat: this machine
+  intermittently stalls test binaries in dyld startup (0 CPU, never
+  reaches `main`); six stalled binaries were rerun individually and
+  every suite passed. Environment flake, not a code failure.
+
+## Classification / remaining open items
+
+- Implementation choice throughout — robustness bounds on
+  hostile-but-grammar-valid input; no original-behavior claim. Camera
+  FOV fallbacks are the designed lenses, explicitly not authored
+  provenance.
+- All eleven confirmed findings in `docs/research/authored-numbers.md`
+  are now `Status: fixed` with named tests. Still open there: the S1–S5
+  speculative list, and the F19-A.4 ped code outside the summation
+  class still wants a dedicated sweep.
+- No GPU/rendered/audio/network evidence this slice; none claimed.
+
+---
+
 # Last iteration — review repair: unbounded authored `mtxv`/`mtxn` sums
 # in the ped code (iteration 002, run 20260929T174954)
 
