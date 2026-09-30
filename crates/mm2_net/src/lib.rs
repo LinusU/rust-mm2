@@ -21,10 +21,11 @@
 //!   reports join/leave/ready transitions as events; [`Client`] is the
 //!   joining side.
 //!
-//! Scope deliberately ends at the lobby: session advertisement
-//! (city/mode/settings), start/cancel, vehicle-state replication and the
-//! gameplay dataplane are later F24-B/F25 work on top of this layer. See
-//! `docs/research/net.md` for the transport decision record.
+//! Scope deliberately ends at the lobby: the session advertisement the
+//! lobby carries is an opaque blob (the `mm2_app` bridge owns the
+//! `SessionConfig` mapping); start/cancel, vehicle-state replication and
+//! the gameplay dataplane are later F24-B/F25 work on top of this layer.
+//! See `docs/research/net.md` for the transport decision record.
 
 mod conn;
 mod frame;
@@ -38,7 +39,8 @@ pub use conn::{
 pub use frame::{MAX_FRAME, read_frame, write_frame};
 pub use lobby::{Client, Host, HostConfig, HostEvent, LeaveCause};
 pub use proto::{
-    Hello, MAX_PLAYERS, Message, PROTOCOL_VERSION, ProtoError, RejectCode, RosterEntry,
+    Hello, MAX_PLAYERS, MAX_SESSION_PARAMS, Message, PROTOCOL_VERSION, ProtoError, RejectCode,
+    RosterEntry, SessionAdvertisement,
 };
 
 /// Every failure mode of this layer: transport I/O, frame bounds, wire

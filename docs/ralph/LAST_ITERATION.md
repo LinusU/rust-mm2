@@ -1,3 +1,120 @@
+# Last iteration — F24-B.2: session advertisement on the wire, the
+# `mm2_app` SessionConfig bridge, the headless `mm2-host` binary
+# (iteration 012, run 20260929T174954)
+
+Implementation iteration on `ralph/night` (baseline `75cc858` — the
+iteration-011 lobby-leak repair; external verify green, review **pass**
+with verification gaps only, no blocking findings). One coherent slice:
+the plan's named next leg of F24-B — session advertisement — landed
+end-to-end so it arrives with a real consumer instead of a dead wire
+field.
+
+## Task selection
+
+No failing gate or review finding to repair — iteration 011 passed with
+verification gaps only (same-process loopback, unbounded channels,
+no rate limit — all disclosed F24-C scope). The plan named "F24-B's
+second leg (session advertisement — the `mm2_app` bridge mapping
+`SessionConfig` ↔ wire fields, vehicle/paint pick + validation, or
+start/cancel)". I scoped it to the advertisement + bridge + consumer:
+advertising a session nobody can receive is a dead field, so the slice
+includes the headless dedicated binary the spec's AC05 wants — which is
+also the only way to exercise the advertisement in a separate process.
+Vehicle/paint negotiation, start/cancel and join gating stay open as
+F24-B legs three and four.
+
+## What landed
+
+- `mm2_net::proto` — `Message::Session` carrying
+  `SessionAdvertisement { summary, params }`: a `MAX_STRING`-bounded
+  display line plus an opaque blob bounded by `MAX_SESSION_PARAMS`
+  (4 KiB) enforced on encode (`OversizeSessionParams`) and decode. The
+  wire crate stays project-free — it ships the blob; it never parses
+  cities, modes or settings.
+- `mm2_net::lobby` — `Host::set_session` stores and rebroadcasts the
+  advertisement to every connected peer; a newcomer receives
+  Welcome → Session (if set) → Roster, so its first roster never
+  precedes the session it belongs to; a peer whose session write fails
+  is disconnected (`writer.disconnect()`, the iteration-011 discipline)
+  and the corrected roster rebroadcasts; a client sending `Session` is
+  out-of-turn and dropped as `Malformed` by the existing discipline.
+  `broadcast_roster` generalized into a `broadcast` helper shared by
+  both sends. `Host::recv` added — one call returning the peer event
+  plus the message that accompanied it, for CLI/REPL consumers.
+- `mm2_app::net` (new module; `mm2_app` is the only crate where
+  `mm2_game` and `mm2_net` may meet) — `SessionConfig` ↔
+  `SessionAdvertisement`: params is bounded serde JSON of the
+  session-legal fields (world/mode/difficulty/conditions/densities/
+  customization/seed), and a human-readable `summary` line.
+  `DevOverrides` are refused outright (`DevOverrides` error) rather than
+  silently dropped; `authority`, `vehicle` and `mods_active` never
+  serialize — a joining peer stamps `Remote` plus its own local state.
+  Decode validates enum discriminants,
+  weather/time-of-day selector ranges, density ranges and race event
+  refs.
+- `mm2-host` — a second `mm2_app` binary, the first real consumer and
+  the AC05 binary leg: headless (no window, audio or GPU), mounts the
+  VFS (`--mm2-path` + `--mod`, or `--dev-world` for no-install runs),
+  computes the gameplay fingerprint, binds `--bind` (default
+  `127.0.0.1:47700`), advertises a `SessionConfig` built from
+  `--city/--mode/--difficulty/--vehicle/--paint/--seed/--name`, then
+  serves the lobby, printing `listening=<addr> fingerprint=… seed=…
+  session="…"` once and one `event=` line per lobby event for harness
+  consumption.
+
+## Evidence
+
+- `mm2_net` 29 → 34 tests, real loopback sockets: session round-trip,
+  oversize params refused on encode and decode, newcomer receives
+  Session before its first Roster, session change rebroadcasts to all
+  peers, a newcomer sees only the latest replacement, a sessionless
+  lobby sends none, oversized refused before the wire.
+- `mm2_app::net` 7 tests: config round-trip, malformed JSON, wrong
+  authority both directions, out-of-range selectors and densities,
+  oversized params, `DevOverrides` quarantine (dev-tuned config
+  serializes identically to clean).
+- `tests/net_host.rs` — the multi-process leg: spawns the built
+  `mm2-host` (`CARGO_BIN_EXE_mm2-host`) as a separate OS process with
+  `--dev-world`, reads its `listening=` line, joins two `Client`s,
+  asserts the advertised session summary + params decode on both, the
+  fingerprint echo in `Hello` acceptance, the two-entry roster and a
+  quit reaching the host's event loop. This is partial AC01/AC05
+  evidence: a *separate* host process serving real joins, configured
+  bind, no window/audio — but the clients still share the test process,
+  so it is not the full AC01 topology, and not LAN/Internet (AC06).
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean (after one rustfmt reflow).
+- `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings` — clean (one `field_reassign_with_default` fixed).
+- `cargo test --locked --workspace` — all suites green (exit 0):
+  mm2_net 34/34, mm2_app 59/59 (incl. the 7 `net::` legs),
+  `tests/net_host.rs` 1/1 in ~1.9 s with `mm2-host` as a separate
+  process.
+
+## Notes
+
+- Environment quirk worth recording: while a *previous* `cargo test`
+  invocation was still churning through test binaries in the
+  background, newly spawned child processes (the test's `mm2-host`
+  child, and once a plain-parent spawn) intermittently stalled in
+  `_dyld_start` with `com.apple.netsrc` control fds — an exec-time
+  security-evaluation stall on this machine, not a code defect. After
+  killing the stale pipeline, the identical binary runs instantly and
+  the test passes in ~1.8 s. Consequence: never run two cargo pipelines
+  concurrently on this box (which is already the shared-worktree rule).
+- The advertisement is informational: a peer already in the lobby is
+  not re-validated against a changed session's settings — session
+  negotiation/validation is a later leg; the handshake fingerprint
+  remains the only compatibility gate.
+- `Host::recv` exists for `mm2-host`; the Bevy-side bridge (AC05's
+  in-app leg) is unstarted. The mm2 bin's main window path is
+  unaffected — `mm2_app` gained a module and a bin, no scheduling
+  changes.
+
+---
+
 # Last iteration — external-review repair: close the F24-B.1 lobby
 # drop/zombie leaks and bound `max_clients` (iteration 011, run
 # 20260929T174954)

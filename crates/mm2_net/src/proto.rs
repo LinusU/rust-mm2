@@ -27,6 +27,27 @@ const TAG_WELCOME: u8 = 0x04;
 const TAG_ROSTER: u8 = 0x05;
 const TAG_SET_READY: u8 = 0x06;
 const TAG_LEAVE: u8 = 0x07;
+const TAG_SESSION: u8 = 0x08;
+
+/// Byte cap on a [`SessionAdvertisement`]'s opaque `params` field — the
+/// `mm2_app` bridge's serialized session config is a few hundred bytes,
+/// so 4 KiB is far above need while still trivially bounded.
+pub const MAX_SESSION_PARAMS: usize = 4096;
+
+/// What the lobby is configured to run — host → clients, opaque to the
+/// wire. `mm2_net` knows nothing about cities, modes or settings: the
+/// `mm2_app` bridge owns the `params` encoding and both peers decode it
+/// with identical code at an identical [`PROTOCOL_VERSION`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionAdvertisement {
+    /// One-line display summary for lobby UIs/CLIs
+    /// (`"sf, cruise, amateur"`).
+    pub summary: String,
+    /// The engine's own encoding of the session parameters — bounded by
+    /// [`MAX_SESSION_PARAMS`]; the lobby bounds and carries it but never
+    /// parses it.
+    pub params: Vec<u8>,
+}
 
 /// The first message a client sends: identity plus the compatibility
 /// evidence the host checks.
@@ -92,6 +113,11 @@ pub enum Message {
         /// The roster slot the client now owns.
         player_id: u16,
     },
+    /// Host → clients: the session this lobby is configured to run.
+    /// Broadcast to everyone when the host sets it and sent to each
+    /// newcomer between `Welcome` and the roster — like `Roster` it is a
+    /// complete snapshot, not a delta, so receivers replace wholesale.
+    Session(SessionAdvertisement),
     /// Host → every client: the complete roster after any change. The
     /// roster is authoritative state, not a delta — receivers replace
     /// theirs wholesale.
@@ -136,6 +162,10 @@ pub enum ProtoError {
     /// A roster declared more than [`MAX_PLAYERS`] entries.
     #[error("roster declares {0} players, bound is {MAX_PLAYERS}")]
     OversizeRoster(u8),
+    /// A session advertisement's `params` field declared more than
+    /// [`MAX_SESSION_PARAMS`] bytes.
+    #[error("session params declare {0} bytes, bound is {MAX_SESSION_PARAMS}")]
+    OversizeSessionParams(usize),
 }
 
 impl RejectCode {
@@ -242,6 +272,15 @@ impl Message {
                 out.push(TAG_WELCOME);
                 out.extend_from_slice(&player_id.to_le_bytes());
             }
+            Self::Session(ad) => {
+                out.push(TAG_SESSION);
+                put_string(&mut out, &ad.summary)?;
+                if ad.params.len() > MAX_SESSION_PARAMS {
+                    return Err(ProtoError::OversizeSessionParams(ad.params.len()));
+                }
+                out.extend_from_slice(&(ad.params.len() as u16).to_le_bytes());
+                out.extend_from_slice(&ad.params);
+            }
             Self::Roster { players } => {
                 out.push(TAG_ROSTER);
                 if players.len() > MAX_PLAYERS as usize {
@@ -282,6 +321,17 @@ impl Message {
             TAG_WELCOME => Self::Welcome {
                 player_id: cur.u16()?,
             },
+            TAG_SESSION => {
+                let summary = cur.string()?;
+                let len = cur.u16()? as usize;
+                if len > MAX_SESSION_PARAMS {
+                    return Err(ProtoError::OversizeSessionParams(len));
+                }
+                Self::Session(SessionAdvertisement {
+                    summary,
+                    params: cur.take(len)?.to_vec(),
+                })
+            }
             TAG_ROSTER => {
                 let count = cur.u8()?;
                 if count > MAX_PLAYERS {
@@ -352,6 +402,14 @@ mod tests {
                 message: "content differs".to_string(),
             },
             Message::Welcome { player_id: 3 },
+            Message::Session(SessionAdvertisement {
+                summary: "sf, cruise, amateur".to_string(),
+                params: vec![1, 2, 3, 4],
+            }),
+            Message::Session(SessionAdvertisement {
+                summary: String::new(),
+                params: Vec::new(),
+            }),
             Message::Roster {
                 players: vec![
                     RosterEntry {
@@ -413,6 +471,15 @@ mod tests {
             Message::decode(&[TAG_ROSTER, MAX_PLAYERS + 1]),
             Err(ProtoError::OversizeRoster(9))
         ));
+        // Session params declaring more than the bound.
+        let mut bad_session = vec![TAG_SESSION];
+        bad_session.extend_from_slice(&1u16.to_le_bytes()); // summary len
+        bad_session.push(b's');
+        bad_session.extend_from_slice(&(MAX_SESSION_PARAMS as u16 + 1).to_le_bytes());
+        assert!(matches!(
+            Message::decode(&bad_session),
+            Err(ProtoError::OversizeSessionParams(4097))
+        ));
         // A bool field byte other than 0/1.
         assert!(matches!(
             Message::decode(&[TAG_SET_READY, 2]),
@@ -434,6 +501,18 @@ mod tests {
         assert!(matches!(
             Message::Roster { players }.encode(),
             Err(ProtoError::OversizeRoster(9))
+        ));
+    }
+
+    #[test]
+    fn an_oversize_session_does_not_encode() {
+        let msg = Message::Session(SessionAdvertisement {
+            summary: "s".to_string(),
+            params: vec![0; MAX_SESSION_PARAMS + 1],
+        });
+        assert!(matches!(
+            msg.encode(),
+            Err(ProtoError::OversizeSessionParams(4097))
         ));
     }
 

@@ -25,6 +25,7 @@ pub mod input;
 pub mod menu;
 pub mod nav_overlay;
 pub mod navarrow;
+pub mod net;
 pub mod oppind;
 pub mod opponents;
 pub mod pause;

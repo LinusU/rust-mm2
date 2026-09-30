@@ -36,6 +36,7 @@ mm2_formats = { path = "crates/mm2_formats" }
 mm2_assets = { path = "crates/mm2_assets" }
 mm2_content = { path = "crates/mm2_content" }
 mm2_game = { path = "crates/mm2_game" }
+mm2_net = { path = "crates/mm2_net" }
 mm2_vehicle = { path = "crates/mm2_vehicle" }
 
 # Keep dev (test/profile) builds fast enough to iterate on.

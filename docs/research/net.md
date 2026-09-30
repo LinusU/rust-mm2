@@ -94,9 +94,13 @@ Two fingerprints, different jobs:
 
 ```
 client → Hello                     host   → Accept | Reject
-       ← Welcome { player_id }            → Roster { entries } (broadcast)
-       → SetReady { ready } | Leave
+       ← Welcome { player_id }            → Session { summary, params }?
+       ← Roster { entries }               → SetReady { ready } | Leave
+                                          → Session | Roster (broadcast)
 ```
+
+`Session` is sent to a newcomer only when the host has advertised one,
+always before its first `Roster` (see "Session advertisement" below).
 
 - `Host` owns the listener and a single event loop; the loop is the
   only roster mutator. Three thread kinds feed it one channel: an
@@ -134,19 +138,50 @@ client → Hello                     host   → Accept | Reject
   threads), self-connects to wake the blocking accept, and joins the
   loop. Clients observe the lobby's death as a failed `recv`.
 
-Deliberately *not* here: session advertisement (city/mode/settings a
-client joins into — needs `SessionConfig`, which `mm2_net` may not see;
-the `mm2_app` bridge maps it), start/cancel, vehicle/paint negotiation,
-late-join into a running session, host migration, and the per-tick
-dataplane (F25).
+### Session advertisement
+
+*Implementation choice.* `Message::Session` carries a
+`SessionAdvertisement { summary, params }`: a bounded display line plus a
+bounded opaque blob (`MAX_SESSION_PARAMS = 4 KiB`). `mm2_net` deliberately
+does not interpret it — the transport ships the blob; the owner that
+built the session (today `mm2_app`, see `mm2_app::net`) defines its
+encoding. The host owns the advertisement: `Host::set_session` replaces
+it and rebroadcasts to every connected peer; a newcomer gets
+Welcome → Session (if set) → Roster, so its first roster never precedes
+the session it belongs to. A peer whose session write fails is
+disconnected and the corrected roster is rebroadcast. A client sending
+`Session` is out-of-turn and dropped like any other host-only message.
+The advertisement is informational only — a peer already in the lobby is
+not re-validated against a new session's settings; the handshake
+fingerprint remains the only compatibility gate.
+
+### Dedicated host
+
+`mm2-host` (a second `mm2_app` binary) is the first consumer: a headless
+host process that mounts the VFS (`--mm2-path`, `--mod`), computes the
+gameplay fingerprint, binds a configured address (`--bind`, default
+loopback), advertises one `SessionConfig` built from its CLI flags
+(`--city`, `--mode`, `--difficulty`, `--vehicle`, `--paint`, `--seed`,
+`--name`, `--dev-world`), and prints one `loop event` line per lobby
+event for harness consumption. No window, audio or GPU is required —
+that is the F24-AC05 binary leg, exercised so far only on loopback.
+
+Deliberately *not* here: start/cancel, vehicle/paint negotiation,
+session-content join gating, late-join into a running session, host
+migration, and the per-tick dataplane (F25).
 
 ## Evidence level
 
-Same-process loopback: `mm2_net` tests bind `127.0.0.1:0` and run real
-client/server socket pairs through the production helpers — handshake
+Mixed loopback. `mm2_net` tests bind `127.0.0.1:0` and run real
+client/server socket pairs in one process — handshake
 accept/version/content/malformed/oversize/truncation/silent-peer legs
 plus lobby legs: slot assignment, multi-client roster broadcast, ready
 rebroadcast, quit-vs-drop causes, fresh ids on rejoin, lobby-full and
 incompatible-peer rejection, out-of-turn-message drops, handshake-flood
-bounding and host-shutdown disconnect. This is *not* multi-process, LAN
-or Internet evidence; F24-C owns that matrix.
+bounding, session ordering/rebroadcast and host-shutdown disconnect.
+`mm2_app`'s `net_host` test additionally runs the `mm2-host` binary as a
+separate OS process with two in-process clients joining it — partial
+F24-AC01/AC05 evidence (separate host process, configured bind, no
+window/audio; clients still share the test process). This is *not*
+fully separate-process, LAN or Internet evidence; F24-C owns that
+matrix.

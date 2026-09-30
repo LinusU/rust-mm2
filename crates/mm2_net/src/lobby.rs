@@ -22,16 +22,17 @@
 //! types stay in `mm2_game` — the wire carries opaque fields only.
 
 use std::collections::BTreeMap;
+use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvError, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crate::NetError;
 use crate::conn::{Conn, HANDSHAKE_TIMEOUT, Writer, listen_loopback, recv_hello_within};
-use crate::proto::{Hello, MAX_PLAYERS, Message, RejectCode, RosterEntry};
+use crate::proto::{Hello, MAX_PLAYERS, Message, RejectCode, RosterEntry, SessionAdvertisement};
 
 /// Cap on connections mid-handshake. A connect flood drops at the accept
 /// boundary rather than spawning unbounded threads; each in-flight
@@ -177,6 +178,36 @@ impl Host {
         self.addr
     }
 
+    /// Advertise (or replace) the session this lobby will run. The
+    /// advertisement is broadcast to every connected player and sent to
+    /// each newcomer between `Welcome` and the roster, so a client always
+    /// sees the current session alongside its first roster. A payload
+    /// the wire cannot carry is refused here rather than silently
+    /// dropped by the loop.
+    ///
+    /// What the advertisement *says* is the consumer's business — the
+    /// `mm2_app` bridge maps `SessionConfig` onto the opaque `params`
+    /// blob; the lobby only bounds and carries it.
+    pub fn set_session(&self, session: SessionAdvertisement) -> Result<(), NetError> {
+        Message::Session(session.clone()).encode()?;
+        self.control
+            .send(LoopMsg::SetSession(session))
+            .map_err(|_| {
+                NetError::Io(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "host loop is not running",
+                ))
+            })?;
+        Ok(())
+    }
+
+    /// Wait for the next lobby event, unbounded — for consumers that
+    /// live entirely on lobby traffic (the dedicated host). `Err` means
+    /// the loop is gone.
+    pub fn recv(&self) -> Result<HostEvent, RecvError> {
+        self.events.recv()
+    }
+
     /// Wait for the next lobby event, at most `timeout`.
     pub fn recv_timeout(&self, timeout: Duration) -> Result<HostEvent, RecvTimeoutError> {
         self.events.recv_timeout(timeout)
@@ -292,6 +323,8 @@ enum LoopMsg {
     PeerMessage { id: u16, msg: Message },
     /// Reader thread → loop: the player's socket ended.
     PeerGone { id: u16, cause: LeaveCause },
+    /// `Host::set_session` — the session this lobby advertises.
+    SetSession(SessionAdvertisement),
     /// `Host::shutdown`.
     Shutdown,
 }
@@ -341,6 +374,9 @@ fn run(
     };
 
     let mut players: BTreeMap<u16, Slot> = BTreeMap::new();
+    // The session this lobby advertises; `None` until the consumer sets
+    // one — clients then simply never see a `Session` message.
+    let mut session: Option<SessionAdvertisement> = None;
     let mut pending = 0usize;
     // Wire ids mint from 1; 0 is reserved for the host player at the app
     // layer so the wire roster and the displayed roster share numbering.
@@ -401,6 +437,14 @@ fn run(
                 {
                     continue;
                 }
+                // A newcomer always sees the current session before its
+                // first roster. A dead write here drops the conn
+                // silently, like a failed `Welcome` above.
+                if let Some(ad) = &session
+                    && writer.send(&Message::Session(ad.clone())).is_err()
+                {
+                    continue;
+                }
                 if conn.set_timeout(None).is_err() {
                     continue;
                 }
@@ -440,6 +484,14 @@ fn run(
                 }
             }
             LoopMsg::PeerMessage { .. } => {}
+            LoopMsg::SetSession(ad) => {
+                session = Some(ad.clone());
+                // Removals under the session send change the roster too —
+                // survivors get the corrected snapshot after the ad.
+                if !broadcast(&mut players, &Message::Session(ad), &events) {
+                    broadcast_roster(&mut players, &events);
+                }
+            }
             LoopMsg::PeerGone { id, cause } => {
                 if let Some(slot) = players.remove(&id) {
                     // The reporting reader already exited, but removal
@@ -479,12 +531,38 @@ fn alloc_id(players: &BTreeMap<u16, Slot>, next_id: &mut u16) -> u16 {
     }
 }
 
-/// Send the complete roster to every player. A failed write means the
-/// peer is gone: disconnect it (waking its reader thread, which is still
-/// blocked in `recv` on the same socket — otherwise the thread, the fd
-/// and the client's dead-but-open connection all leak), drop it as
-/// `Lost` and rebuild — each pass removes at least one player, so the
-/// resend loop terminates.
+/// Send `msg` to every player once. A failed write means the peer is
+/// gone: disconnect it (waking its reader thread, which is still blocked
+/// in `recv` on the same socket — otherwise the thread, the fd and the
+/// client's dead-but-open connection all leak) and drop it as `Lost`.
+/// Returns `true` when every player received the message; on `false` the
+/// roster changed and callers whose message no longer fits should resend
+/// a corrected snapshot (`broadcast_roster` does this for `Roster`
+/// itself).
+fn broadcast(players: &mut BTreeMap<u16, Slot>, msg: &Message, events: &Sender<HostEvent>) -> bool {
+    let mut failed = Vec::new();
+    for (id, slot) in players.iter_mut() {
+        if slot.writer.send(msg).is_err() {
+            failed.push(*id);
+        }
+    }
+    for id in &failed {
+        if let Some(slot) = players.remove(id) {
+            slot.writer.disconnect();
+            let _ = events.send(HostEvent::Left {
+                id: *id,
+                driver: slot.driver,
+                cause: LeaveCause::Lost,
+            });
+        }
+    }
+    failed.is_empty()
+}
+
+/// Send the complete roster to every player, rebuilt and resent after
+/// each removal — a survivor must never see a snapshot still listing a
+/// departed peer. Each pass removes at least one player, so the resend
+/// loop terminates.
 fn broadcast_roster(players: &mut BTreeMap<u16, Slot>, events: &Sender<HostEvent>) {
     loop {
         let msg = Message::Roster {
@@ -498,24 +576,8 @@ fn broadcast_roster(players: &mut BTreeMap<u16, Slot>, events: &Sender<HostEvent
                 })
                 .collect(),
         };
-        let mut failed = Vec::new();
-        for (id, slot) in players.iter_mut() {
-            if slot.writer.send(&msg).is_err() {
-                failed.push(*id);
-            }
-        }
-        if failed.is_empty() {
+        if broadcast(players, &msg, events) {
             return;
-        }
-        for id in failed {
-            if let Some(slot) = players.remove(&id) {
-                slot.writer.disconnect();
-                let _ = events.send(HostEvent::Left {
-                    id,
-                    driver: slot.driver,
-                    cause: LeaveCause::Lost,
-                });
-            }
         }
     }
 }
@@ -940,5 +1002,94 @@ mod tests {
         // The client's socket is dead: its next read errors instead of
         // idling on a lobby that no longer exists.
         assert!(alice.recv().is_err());
+    }
+
+    fn ad(tag: &str) -> SessionAdvertisement {
+        SessionAdvertisement {
+            summary: format!("summary {tag}"),
+            params: format!("params {tag}").into_bytes(),
+        }
+    }
+
+    #[test]
+    fn a_newcomer_sees_the_session_before_its_first_roster() {
+        let host = host();
+        host.set_session(ad("one")).unwrap();
+        let mut alice = join(host.addr(), "alice");
+        host.recv_timeout(WAIT).unwrap(); // Joined
+
+        match alice.recv().unwrap() {
+            Message::Session(got) => assert_eq!(got, ad("one")),
+            other => panic!("expected Session, got {other:?}"),
+        }
+        assert_eq!(recv_roster(&mut alice, 1).len(), 1);
+    }
+
+    #[test]
+    fn a_session_change_rebroadcasts_to_everyone() {
+        let host = host();
+        let mut alice = join(host.addr(), "alice");
+        let mut bob = join(host.addr(), "bob");
+        host.recv_timeout(WAIT).unwrap();
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut alice, 2);
+        recv_roster(&mut bob, 2);
+
+        host.set_session(ad("two")).unwrap();
+        for client in [&mut alice, &mut bob] {
+            match client.recv().unwrap() {
+                Message::Session(got) => assert_eq!(got, ad("two")),
+                other => panic!("expected Session, got {other:?}"),
+            }
+        }
+
+        // Replacement, not accumulation: a third advertisement lands
+        // alone, and a newcomer sees only the latest.
+        host.set_session(ad("three")).unwrap();
+        match alice.recv().unwrap() {
+            Message::Session(got) => assert_eq!(got, ad("three")),
+            other => panic!("expected Session, got {other:?}"),
+        }
+        let mut carol = join(host.addr(), "carol");
+        match carol.recv().unwrap() {
+            Message::Session(got) => assert_eq!(got, ad("three")),
+            other => panic!("expected Session, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_lobby_without_a_session_sends_none() {
+        let host = host();
+        let mut alice = join(host.addr(), "alice");
+        // No `Session` was ever set — the first message is the roster.
+        match alice.recv().unwrap() {
+            Message::Roster { .. } => {}
+            other => panic!("expected Roster, got {other:?}"),
+        }
+    }
+
+    /// `set_session` checks the payload against the wire bound before
+    /// handing it to the loop — an over-cap params blob is a caller
+    /// error, not a broadcast that silently fails every player.
+    #[test]
+    fn an_oversize_session_is_refused_before_the_wire() {
+        let host = host();
+        let ad = SessionAdvertisement {
+            summary: "s".to_string(),
+            params: vec![0; crate::MAX_SESSION_PARAMS + 1],
+        };
+        match host.set_session(ad) {
+            Err(NetError::Proto(crate::proto::ProtoError::OversizeSessionParams(n))) => {
+                assert_eq!(n, crate::MAX_SESSION_PARAMS + 1);
+            }
+            other => panic!("expected OversizeSessionParams, got {other:?}"),
+        }
+        // The loop never saw the bad payload: a join right after gets
+        // only its roster, no Session.
+        let mut alice = join(host.addr(), "alice");
+        match alice.recv().unwrap() {
+            Message::Roster { .. } => {}
+            other => panic!("expected Roster, got {other:?}"),
+        }
     }
 }

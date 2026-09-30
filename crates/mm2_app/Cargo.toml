@@ -10,6 +10,10 @@ default-run = "mm2"
 name = "mm2"
 path = "src/main.rs"
 
+[[bin]]
+name = "mm2-host"
+path = "src/bin/mm2_host.rs"
+
 [dependencies]
 avian3d.workspace = true
 bevy = { version = "0.19", features = ["tga", "bevy_audio"] }
@@ -18,7 +22,10 @@ mm2_assets.workspace = true
 mm2_content.workspace = true
 mm2_formats.workspace = true
 mm2_game.workspace = true
+mm2_net.workspace = true
 mm2_vehicle.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
