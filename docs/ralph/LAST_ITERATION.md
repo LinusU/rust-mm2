@@ -1,3 +1,51 @@
+# Last iteration — external-gate repair: clippy 1.98 `redundant_closure`
+# in `mm2_content::model` (iteration 007, run 20260929T174954)
+
+Repair iteration on `ralph/night` (baseline `5085e54` — the
+iteration-006 `.mtx` magnitude-bound notes). External verify on that
+candidate **failed** (exit 101,
+`external_code_gate_failed_or_interrupted`).
+
+## Root cause
+
+Environment drift, not a logic defect: `rust-toolchain.toml` pins
+`channel = "stable"`, and the installed stable floated from 1.97.1
+(the run's gate toolchain) to 1.98.1 before the external verify ran.
+Clippy 1.98's `redundant_closure` fires on two `model.rs` closures the
+iteration-006 gate run accepted:
+
+- `model.rs:376` — `.filter(|c| usable3(c))` (the wheel geometry-centre
+  gate);
+- `model.rs:542` — `.filter_map(|p| usable_aabb(p))` (the body-bound
+  pass).
+
+## Repair
+
+Applied clippy's own suggestions verbatim — `.filter(usable3)` and
+`.filter_map(&mut usable_aabb)` (`&mut` because the closure is `FnMut`
+over `bound_warned`/`warnings` and is reused by the rest-parts pass at
+line ~567). No semantic change; behaviour stays covered by the existing
+`model::tests` legs and `dash::overflowing_dash_mtx_origin_reads_unauthored`.
+
+## Gates (rustc/clippy 1.98.1)
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --locked --workspace` — all suites green (exit 0).
+
+## Notes
+
+- The floating `stable` channel means external verify can run a newer
+  clippy than the in-iteration gate did; new-lint failures of this shape
+  can recur. Whether to pin the toolchain is a repo policy decision —
+  not changed here.
+- Iteration-006's substantive claims are unchanged; this was a lint-only
+  repair. No new test leg — the change is mechanical, and the covering
+  tests are unchanged and green.
+
+---
+
 # Last iteration — authored-numbers robustness: magnitude-bound the
 # `.mtx`/pkg-geometry family at `build_model` (iteration 006, run
 # 20260929T174954)

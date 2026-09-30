@@ -12,8 +12,10 @@
   loose files. Read-only; not in git. `mm2-inspect list` resolves 13,389
   logical paths through the VFS (counted 2026-09-20). `MM2_GAME_DIR` is
   not set; the path is passed explicitly as `<dir>`/`--mm2-path`.
-- Toolchain: rustc 1.97.1 stable (`rust-toolchain.toml`: stable +
-  rustfmt/clippy), macOS arm64 (Apple Silicon), Cargo workspace locked
+- Toolchain: `rust-toolchain.toml` pins `channel = "stable"` +
+  rustfmt/clippy — the channel *floats*: 1.97.1 at run start, 1.98.1
+  from iteration 007's external verify onward (its newer lints gate
+  too). macOS arm64 (Apple Silicon), Cargo workspace locked
   (`Cargo.lock` committed). bevy 0.19 (default-features off, `tga` only —
   no `bevy_audio`), avian3d 0.7.
 - Capabilities: build/clippy/test all warm in `target/`. GPU/wgpu not yet
@@ -158,6 +160,12 @@ transforms through `drive_dash`. Retail audit: all 819 `.mtx` records
 (9,828 components, city props included), zero flagged, max `|v|` =
 2566.79 — nothing authored rejected; `validate-cars` 21/21 and
 `handling` unchanged. Candidate pending external check.
+Iter 007 (same run) was a repair-only iteration: 006's candidate failed
+external verify because the floating `stable` toolchain reached clippy
+1.98.1, whose `redundant_closure` fires on two `model.rs` closures the
+1.97.1 gate accepted — both collapsed to the suggested
+`filter(usable3)`/`filter_map(&mut usable_aabb)` forms with no semantic
+change; all gates green on 1.98.1. Candidate pending external check.
 Iter 001's candidate failed external review on one blocking finding:
 `mm2_game::ped::matrix_bucket` (F19-A.4 code, co-landed in the same
 range) summed the full-range authored `mtxv`/`mtxn` counts with a plain
