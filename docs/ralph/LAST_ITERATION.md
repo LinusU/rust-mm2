@@ -1,4 +1,116 @@
 # Last iteration — authored-numbers robustness: magnitude-bound the
+# `.mtx`/pkg-geometry family at `build_model` (iteration 006, run
+# 20260929T174954)
+
+Implementation iteration on `ralph/night` (baseline `5b9f6f0` — the
+iteration-005 camera/dash magnitude-bound slice; external verify green,
+review **pass** with no blocking findings). One coherent slice: close
+the iteration-005 review's flagged residual — the `USABLE_BOUND` gate
+reached `.mtx` data only at the dash consumer's `part.origin` read, the
+hostile-origin path was untested, and every other `build_model`
+consumer (vehicle part attach points, wheel origins, `WheelGeom`
+physics conversion, `body_aabb`) still bound `.mtx` fields verbatim.
+
+## Task selection
+
+The review named three residuals in this family: `part.origin` bounded
+at the dash consumer only, the same-shaped overflow reachable through
+vehicle part/wheel origins, and no test leg through a hostile `.mtx`
+origin at all. `Mtx::parse` has exactly two call sites
+(`mm2_content::assemble` and `mm2_app::dash`), and both funnel into
+`build_model` — the sole producer of `ModelPart.origin`,
+`ModelPart.pivot`, `WheelVisual.origin` and `body_aabb` — so gating at
+the producer covers every downstream composition (`pivot + offset`,
+wheel-position `WheelGeom` math, the AABB translation) with one gate
+rather than a per-consumer sweep. Same defect shape as iteration 005,
+sibling record family, same fix contract.
+
+## What landed
+
+- `mm2_formats::mtx` — `Mtx::validate()` names each unusable field
+  (`bounds_min`/`bounds_max`/`pivot`/`origin`) through the shared
+  `vec_issue` helper, distinguishing "is not finite" from "exceeds the
+  usable bound ±1e6". Raw fields stay verbatim — reported, not
+  repaired. `camtrack`'s `USABLE_BOUND`/`usable3` docs now record the
+  `.mtx` family sharing the bound.
+- `mm2_content::model::build_model` — the central gate. Per part:
+  `m.validate()` issues push into `model.warnings` (drained by the
+  loaders); `part.origin` binds only when `usable3`, else reads
+  unauthored (`None` = authored in place); `part.pivot` binds only
+  when usable *and* non-zero as before. The wheel rig reads the
+  already-gated `part.origin`, gates `wheel_radius`/`wheel_width`
+  against `usable_f32`, gates the in-place-recentre target and the
+  measured y/x extents (hostile pkg vertices can no longer inflate
+  `radius`/`width`), and takes the geometry-centre fallback — itself
+  gated — with a warning distinguishing "no mtx" from "unusable mtx".
+  `body_aabb` excludes a part whose measured bound is unusable (one
+  warning per part across the BODY/rest passes) instead of letting a
+  `3e38` vertex inflate the bound the convert path centres mass on.
+- `mm2_app::dash::spawn_dash` — drains `model.warnings` to `warn!` so
+  the diagnostics the producer records actually surface.
+
+## Evidence
+
+- `mm2_formats` green, incl.
+  `mtx::validate_names_unusable_fields_verbatim` (per-field naming,
+  distinct finite/bound messages, verbatim retention).
+- `mm2_content` green, incl.
+  `model::unusable_mtx_fields_read_unauthored` (3e38 origin → `None`,
+  inf pivot → `None`, wheel falls back to the geometry centre, all
+  four fields + the fallback named in warnings),
+  `model::usable_mtx_fields_bind_verbatim` (origin/pivot/wheel-centre
+  bind verbatim, no warnings),
+  `model::unusable_geometry_measurements_read_unauthored` (3e38 vertex
+  cloud → geometry-centre `[0;3]`, designed radius floor, `body_aabb`
+  excluded).
+- `mm2_app` green, incl.
+  `dash::overflowing_dash_mtx_origin_reads_unauthored` — the missing
+  leg the review named: a synthetic `_dash.pkg` + `_dash.asnode` +
+  hostile `.mtx` records through the real VFS; the needle's `3.4e38`
+  origin and the wheel's `2e6` origin both read unauthored (nodes at
+  the authored offsets), a rewritten usable `0.05` origin binds
+  verbatim on respawn, and every `CockpitPart` transform stays finite
+  through `drive_dash`.
+- Retail audit (`fnv1a64:e91e6cd4b2ae30d9`, read-only): all **819**
+  `.mtx` records across the DAVE archives scanned component-wise
+  (9,828 `f32`s — every record in every archive, not just vehicles) —
+  zero non-finite, max `|v|` = `2566.79` (a `bl_*` city prop bound) →
+  the `1e6` bound rejects nothing authored. No loose `.mtx` files
+  outside the archives.
+- `mm2-inspect validate-cars` — 21/21 stock vehicles `ok`, warnings
+  identical to the pre-change set (audio row counts, paint counts,
+  back-back followers); `mm2-inspect handling` — all 21 within the
+  arcade envelope, so the wheel-rig derivation is unchanged on stock.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --locked --workspace` — all suites green (exit 0).
+
+## Classification / remaining open items
+
+- Implementation choice throughout — `USABLE_BOUND` is a designed
+  overflow guard shared by the camera/dash and `.mtx` families, not a
+  recovered original limit. Sincere mods under ±1e6 still bind
+  verbatim.
+- Semantic widening: a finite `.mtx` field beyond ±1e6 now reads
+  unauthored where it previously bound verbatim — the intended
+  contract; `validate` names the field and loaders warn.
+- No GPU/rendered/audio/network evidence this slice; none claimed —
+  finiteness verified on component values in headless Bevy worlds.
+- Still open: `authored-numbers.md` S1–S5 speculative list, the
+  F19-A.4 ped sweep caveat; `PovCamSpec::track_to` and
+  `DashSpec::gear_pivot_offset` remain validate-only (disclosed).
+  `ModelPart.pivot` is gated at the producer but currently has no
+  downstream reader — stored for future consumers. `.bnd` bound data
+  and other record families outside `build_model` keep verbatim
+  readers — a wider sweep is not claimed.
+
+---
+
+# Last iteration — authored-numbers robustness: magnitude-bound the
 # camera/dash spec family (iteration 005, run 20260929T174954)
 
 Implementation iteration on `ralph/night` (baseline `6c3823e` — the

@@ -42,7 +42,16 @@ the F19-A.4 follow-up caveat below remain as recorded. A third pass
 field in the `camTrackCS`/`camPovCS`/`asNode` family, and a fourth
 (iteration 005) hardened it from component-finite to a designed
 magnitude bound (`USABLE_BOUND`) — see the finding-11 follow-up
-notes. One deliberate
+notes. A fifth (iteration 006) carried the same bound to the
+`.mtx`/pkg-geometry family at `build_model`, the sole producer of
+`ModelPart.origin`/`pivot`, `WheelVisual.origin` and `body_aabb`:
+`Mtx::validate()` names each unusable field, gated fields read
+unauthored, and hostile pkg vertex measurements (wheel extents,
+geometry-centre fallbacks, body bounds) are excluded the same way.
+Retail audit: all 819 `.mtx` records (9,828 components across every
+archive, city props included) — zero non-finite, max `|v|` = 2566.79,
+so the bound rejects nothing authored. `.bnd` bound data and record
+families outside `build_model` keep verbatim readers. One deliberate
 deviation from a suggested fix shape: finding 7's
 plausibility bound landed in `veh.rs` decode (`gear_count` /
 `MAX_GEARS`), not in `convert()` — the decode boundary keeps the

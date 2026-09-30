@@ -138,6 +138,26 @@ family is `CameraFar 1330`) behind `usable_f32`/`usable3`/`usable1`/
 stay verbatim, and `CameraFOV` keeps its tighter drawable bound.
 Retail re-scan: 4,550 tokens, none beyond the bound — nothing authored
 rejected. Candidate pending external check.
+Iter 006 (same run) extended the bound to the `.mtx`/pkg-geometry
+family at its sole producer. The iteration-005 review flagged that
+`part.origin` was gated only at the dash consumer — vehicle part/wheel
+origins, `WheelGeom` conversion and `body_aabb` still bound `.mtx`
+fields verbatim, and the hostile-origin path had no test leg. Both
+`Mtx::parse` call sites funnel into `build_model`, so the gate landed
+there: `Mtx::validate()` names each unusable field (finite vs
+beyond-bound), `part.origin`/`part.pivot` bind only when `usable3`,
+the wheel rig gates the authored origin, `wheel_radius`/`wheel_width`,
+the in-place recentre target and measured extents (hostile pkg
+vertices covered too), and `body_aabb` excludes unusable measured
+bounds — every case warned, never silently repaired, raw fields
+verbatim. `spawn_dash` drains `model.warnings`. Tests: per-field
+naming + verbatim retention, unauthored reads with the geometry-centre
+fallback, verbatim binding inside the bound, and the review's missing
+leg — a hostile `.mtx` origin through the real VFS dash path, finite
+transforms through `drive_dash`. Retail audit: all 819 `.mtx` records
+(9,828 components, city props included), zero flagged, max `|v|` =
+2566.79 — nothing authored rejected; `validate-cars` 21/21 and
+`handling` unchanged. Candidate pending external check.
 Iter 001's candidate failed external review on one blocking finding:
 `mm2_game::ped::matrix_bucket` (F19-A.4 code, co-landed in the same
 range) summed the full-range authored `mtxv`/`mtxn` counts with a plain
