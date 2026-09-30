@@ -488,3 +488,53 @@ fn undrawable_authored_fov_falls_back_to_the_designed_lens() {
         }
     }
 }
+
+/// The rest of the authored `camPovCS` record reads unauthored on
+/// non-finite values the same way: a `nan` `Offset` takes the designed
+/// fallback eye instead of a NaN transform, and `nan` clips take the
+/// designed near/far rather than sinking through `.max` into a 1 m
+/// far plane.
+#[test]
+fn non_finite_authored_pov_fields_fall_back() {
+    let mut app = base_app(SessionPhase::Playing);
+    let vehicle = app.world_mut().spawn(PlayerVehicle).id();
+    let pov = PovCamSpec {
+        offset: Some([f32::NAN, 1.19, -0.55]),
+        camera_near: Some(f32::NAN),
+        camera_far: Some(f32::INFINITY),
+        ..PovCamSpec::default()
+    };
+    let strip = {
+        let mut queue = CommandQueue::default();
+        let strip = {
+            let mut commands = Commands::new(&mut queue, app.world_mut());
+            spawn_mirror(
+                &mut commands,
+                Some(&pov),
+                Vec3::new(0.0, 9.9, 9.9),
+                vehicle,
+                SessionEntity(1),
+                None,
+            )
+        };
+        queue.apply(app.world_mut());
+        strip
+    };
+    let w = app.world();
+    assert_eq!(
+        w.get::<Transform>(strip).unwrap().translation,
+        Vec3::new(0.0, 9.9, 9.9),
+        "non-finite Offset reads unauthored — the fallback eye stands in"
+    );
+    match w.get::<Projection>(strip).unwrap() {
+        Projection::Perspective(p) => {
+            assert!(
+                (p.near - 0.1).abs() < 1e-6,
+                "nan near → 0.1, got {}",
+                p.near
+            );
+            assert!((p.far - 600.0).abs() < 1e-6, "inf far → 600, got {}", p.far);
+        }
+        other => panic!("expected perspective, got {other:?}"),
+    }
+}

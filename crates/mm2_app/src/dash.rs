@@ -197,8 +197,13 @@ pub fn load_pov_cam(vfs: &Vfs, car: &str) -> Option<PovCamSpec> {
     Some(spec)
 }
 
+/// Authored `[f32; 3]` → `Vec3`; a non-finite component reads as
+/// unauthored (`Vec3::ZERO`) — the record's `validate` names the
+/// field instead of repairing it (the `camera_fov_deg` contract).
 fn v3(f: Option<[f32; 3]>) -> Vec3 {
-    f.map(Vec3::from).unwrap_or(Vec3::ZERO)
+    f.filter(|v| v.iter().all(|c| c.is_finite()))
+        .map(Vec3::from)
+        .unwrap_or(Vec3::ZERO)
 }
 
 /// Load and spawn the authored cockpit rig under `vehicle`.
@@ -226,8 +231,13 @@ pub fn spawn_dash(
 ) -> DashReport {
     let mut report = DashReport::default();
 
-    let spec =
-        read_text(vfs, &format!("tune/{car}_dash.asnode")).and_then(|t| DashSpec::parse(&t).ok());
+    let dash_path = format!("tune/{car}_dash.asnode");
+    let spec = read_text(vfs, &dash_path).and_then(|t| DashSpec::parse(&t).ok());
+    if let Some(spec) = &spec {
+        for issue in spec.validate() {
+            warn!(path = %dash_path, issue = %issue, "asnode spec issue");
+        }
+    }
     let model = vfs
         .read_path(&format!("geometry/{car}_dash.pkg"))
         .ok()
@@ -240,18 +250,21 @@ pub fn spawn_dash(
             })
         });
 
-    let eye = pov.as_ref().map(|p| v3(p.offset)).unwrap_or(Vec3::ZERO);
+    let eye = pov
+        .as_ref()
+        .map(|p| v3(p.offset_vec()))
+        .unwrap_or(Vec3::ZERO);
     let active = cam_mode == CameraMode::Cockpit;
 
     if let Some(p) = &pov {
-        let pitch = p.pitch.unwrap_or(0.0);
+        let pitch = p.pitch_rad().unwrap_or(0.0);
         let cam = commands
             .spawn((
                 owner,
                 CockpitPart,
                 CockpitCamera {
                     offset: eye,
-                    reverse_offset: p.reverse_offset.map(Vec3::from),
+                    reverse_offset: p.reverse_offset_vec().map(Vec3::from),
                     pitch,
                     look_yaw: 0.0,
                 },
@@ -264,8 +277,11 @@ pub fn spawn_dash(
                     // `camera_fov_deg` reads an undrawable `CameraFOV`
                     // as unauthored — the designed 60° stands in.
                     fov: p.camera_fov_deg().unwrap_or(60.0).to_radians(),
-                    near: p.camera_near.unwrap_or(0.1).clamp(0.01, COCKPIT_NEAR_CAP),
-                    far: p.camera_far.unwrap_or(600.0).max(1.0),
+                    near: p
+                        .camera_near_m()
+                        .unwrap_or(0.1)
+                        .clamp(0.01, COCKPIT_NEAR_CAP),
+                    far: p.camera_far_m().unwrap_or(600.0).max(1.0),
                     ..default()
                 }),
                 Transform::from_translation(eye).with_rotation(Quat::from_rotation_x(pitch)),
@@ -304,7 +320,12 @@ pub fn spawn_dash(
                 ))
                 .id();
             commands.entity(vehicle).add_child(roof_root);
-            let rot = |r: Option<(f32, f32)>| r.unwrap_or((0.0, 0.0));
+            // A non-finite authored sweep reads unauthored — the
+            // needle parks at (0, 0) instead of rotating to NaN.
+            let rot = |r: Option<(f32, f32)>| {
+                r.filter(|(a, b)| a.is_finite() && b.is_finite())
+                    .unwrap_or((0.0, 0.0))
+            };
             let (speed_min, speed_max) = rot(spec.speed_rot);
             let (rpm_min, rpm_max) = rot(spec.rpm_rot);
             let (dmg_min, dmg_max) = rot(spec.damage_rot);
@@ -343,7 +364,7 @@ pub fn spawn_dash(
                         pivot + v3(spec.wheel_pos) + v3(spec.wheel_pivot_offset),
                         -(pivot + v3(spec.wheel_pivot_offset)),
                         Some(DashRole::Wheel {
-                            factor: spec.wheel_fact.unwrap_or(1.0),
+                            factor: spec.wheel_fact.filter(|f| f.is_finite()).unwrap_or(1.0),
                         }),
                     ),
                     "roof" => (roof_root, Vec3::ZERO, Vec3::ZERO, None),

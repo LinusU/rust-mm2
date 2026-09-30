@@ -622,6 +622,77 @@ fn undrawable_authored_fov_falls_back_to_the_designed_lens() {
     assert_eq!(ChaseLens::authored(&spec).fov_deg, 92.5);
 }
 
+/// The rest of the authored record follows the same contract — every
+/// consumed field reads through the spec's finite-checked accessors,
+/// so a `nan`/`inf` `Offset`/`TrackTo` can never poison the boom into
+/// a NaN transform, a `nan` `CameraFar` cannot sink through `.max(1.0)`
+/// into a 1 m far plane, and a `nan` flag reads off rather than
+/// silently `!= 0.0` truthy. `validate` names each field for the
+/// loader warning; the raw record stays verbatim.
+#[test]
+fn non_finite_authored_fields_fall_back_to_the_designed_boom() {
+    let mut spec = TrackCamSpec::parse(NEAR_TEXT).unwrap();
+    spec.offset = Some([0.0, f32::NAN, 4.0]);
+    spec.track_to = Some([f32::INFINITY, 1.7, 0.0]);
+    spec.min_dist = Some(f32::NAN);
+    spec.max_dist = Some(f32::NEG_INFINITY);
+    spec.min_speed = Some(f32::NAN);
+    spec.max_speed = Some(f32::INFINITY);
+    spec.camera_near = Some(f32::NAN);
+    spec.camera_far = Some(f32::INFINITY);
+    spec.collide_type = Some(f32::NAN);
+    spec.min_max_on = Some(f32::NAN);
+    let lens = ChaseLens::authored(&spec);
+    let rest = Vec3::new(0.0, 1.8, 5.0).length();
+    assert_eq!(
+        lens.offset,
+        Vec3::new(0.0, 1.8, 5.0),
+        "non-finite Offset reads unauthored — the designed boom stands in"
+    );
+    assert_eq!(lens.aim, Vec3::new(0.0, 1.0, 0.0));
+    assert_eq!(lens.dist_min, 0.0);
+    assert_eq!(lens.dist_max, rest);
+    assert_eq!(lens.speed_min, 0.0);
+    assert_eq!(lens.speed_max, 0.0);
+    assert!(!lens.collide);
+    assert_eq!(lens.clip_near, 0.5);
+    assert_eq!(lens.clip_far, 600.0);
+    let p = lens.projection();
+    assert!(p.fov.is_finite() && p.near.is_finite() && p.far.is_finite());
+
+    // An astronomical-but-finite Offset overflows the boom's rest
+    // length to `inf` — that reads unauthored too.
+    let mut spec = TrackCamSpec::parse(NEAR_TEXT).unwrap();
+    spec.offset = Some([3e38, 3e38, 3e38]);
+    assert_eq!(
+        ChaseLens::authored(&spec).offset,
+        Vec3::new(0.0, 1.8, 5.0),
+        "an Offset whose length overflows f32 still reads unauthored"
+    );
+
+    // And the tracker never produces a NaN transform from it.
+    let mut app = base_app(CameraMode::Chase);
+    app.add_systems(Update, chase_follow);
+    spawn_vehicle(&mut app, Vec3::ZERO, Vec3::ZERO);
+    let cam = spawn_chase(
+        &mut app,
+        ChaseCamera {
+            near: lens,
+            far: None,
+            ..Default::default()
+        },
+        true,
+    );
+    for _ in 0..60 {
+        app.update();
+    }
+    let xf = app.world().get::<Transform>(cam).unwrap();
+    assert!(
+        xf.translation.is_finite() && xf.rotation.is_finite(),
+        "boom from a hostile spec stays finite, got {xf:?}"
+    );
+}
+
 /// A jump the frame delta cannot explain — the `R` reset's
 /// `ResetVehicle` teleport, a water/stuck/disabled recovery or a
 /// scripted re-anchor — snaps the boom to the new target on the next

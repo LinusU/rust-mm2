@@ -119,6 +119,26 @@ pub(crate) fn drawable_fov(f: f32) -> bool {
     f.is_finite() && f > 0.0 && f < 180.0
 }
 
+/// Every component finite — the gate for authored vectors that feed
+/// transforms and camera math (`Offset`, `TrackTo`, the `_dash.asnode`
+/// placements). Shared by the `camTrackCS`, `camPovCS` and `asNode`
+/// decoders.
+pub(crate) fn finite3(v: &[f32; 3]) -> bool {
+    v.iter().all(|c| c.is_finite())
+}
+
+/// A scalar field reads `Some` only when authored *and* finite —
+/// `nan`/`inf`/overflowing literals read as unauthored so consumers
+/// take their designed defaults; [`validate`](TrackCamSpec::validate)
+/// names the field instead of repairing it.
+fn finite1(v: Option<f32>) -> Option<f32> {
+    v.filter(|f| f.is_finite())
+}
+
+fn finite_vec(v: Option<[f32; 3]>) -> Option<[f32; 3]> {
+    v.filter(finite3)
+}
+
 fn vec3(block: &crate::tune::TuneBlock, name: &str) -> Option<[f32; 3]> {
     let f = block.field_ci(name)?;
     let mut v = [0.0; 3];
@@ -204,10 +224,102 @@ impl TrackCamSpec {
         self.camera_fov.filter(|&f| drawable_fov(f))
     }
 
-    /// Record-level problems a loader should reject the spec for —
-    /// reported, never silently repaired.
+    /// `Offset` when authored *and* finite — a `nan`/`inf` component
+    /// would poison the boom's rest length (and through it the whole
+    /// chase transform), so it reads unauthored instead. The raw field
+    /// stays verbatim; [`Self::validate`] names it.
+    pub fn offset_vec(&self) -> Option<[f32; 3]> {
+        finite_vec(self.offset)
+    }
+
+    /// `TrackTo` when authored *and* finite — see [`Self::offset_vec`].
+    pub fn track_to_vec(&self) -> Option<[f32; 3]> {
+        finite_vec(self.track_to)
+    }
+
+    /// `MinDist`/`MaxDist`/`MinSpeed`/`MaxSpeed`/`CameraNear`/
+    /// `CameraFar` when authored *and* finite — the non-finite reads
+    /// that a `.max()` sink would silently coerce (a `nan`
+    /// `CameraFar` becomes a 1 m far plane) instead read unauthored.
+    /// [`Self::validate`] names the field.
+    pub fn min_dist_m(&self) -> Option<f32> {
+        finite1(self.min_dist)
+    }
+
+    /// [`Self::min_dist_m`] for `MaxDist`.
+    pub fn max_dist_m(&self) -> Option<f32> {
+        finite1(self.max_dist)
+    }
+
+    /// [`Self::min_dist_m`] for `MinSpeed`.
+    pub fn min_speed_mps(&self) -> Option<f32> {
+        finite1(self.min_speed)
+    }
+
+    /// [`Self::min_dist_m`] for `MaxSpeed`.
+    pub fn max_speed_mps(&self) -> Option<f32> {
+        finite1(self.max_speed)
+    }
+
+    /// [`Self::min_dist_m`] for `CameraNear`.
+    pub fn camera_near_m(&self) -> Option<f32> {
+        finite1(self.camera_near)
+    }
+
+    /// [`Self::min_dist_m`] for `CameraFar`.
+    pub fn camera_far_m(&self) -> Option<f32> {
+        finite1(self.camera_far)
+    }
+
+    /// `CollideType` as the authored gate: nonzero *and* finite. A
+    /// `nan` flag reads `!= 0.0` — true — so the unguarded read would
+    /// silently enable the occlusion pull-in; a non-finite value reads
+    /// unauthored (off) and [`Self::validate`] names it.
+    pub fn collides(&self) -> bool {
+        finite1(self.collide_type).is_some_and(|c| c != 0.0)
+    }
+
+    /// `MinMaxOn` as the authored gate on the `MinDist`/`MaxDist`
+    /// clamp — same non-finite rule as [`Self::collides`].
+    pub fn min_max_gated(&self) -> bool {
+        finite1(self.min_max_on).is_some_and(|v| v != 0.0)
+    }
+
+    /// Record-level problems a loader should report — every typed
+    /// field must be finite or absent (`CameraFOV` additionally must
+    /// sit inside the drawable range). Reported, never silently
+    /// repaired: the raw fields stay verbatim on the record.
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
+        for (name, v) in [("Offset", self.offset), ("TrackTo", self.track_to)] {
+            if let Some(v) = v
+                && !finite3(&v)
+            {
+                issues.push(format!("{name} {v:?} is not finite"));
+            }
+        }
+        for (name, v) in [
+            ("CollideType", self.collide_type),
+            ("MinMaxOn", self.min_max_on),
+            ("TrackBreak", self.track_break),
+            ("MinDist", self.min_dist),
+            ("MaxDist", self.max_dist),
+            ("MinSpeed", self.min_speed),
+            ("MaxSpeed", self.max_speed),
+            ("LookAbove", self.look_above),
+            ("LookAt", self.look_at),
+            ("VertOffset", self.vert_offset),
+            ("BlendTime", self.blend_time),
+            ("BlendGoal", self.blend_goal),
+            ("CameraNear", self.camera_near),
+            ("CameraFar", self.camera_far),
+        ] {
+            if let Some(v) = v
+                && !v.is_finite()
+            {
+                issues.push(format!("{name} {v} is not finite"));
+            }
+        }
         if let Some(f) = self.camera_fov
             && !drawable_fov(f)
         {
@@ -299,5 +411,69 @@ mod tests {
         let s = TrackCamSpec::parse("type: a\ncamTrackCS {\n  CameraNear 0.5\n}\n").unwrap();
         assert_eq!(s.camera_fov_deg(), None);
         assert!(s.validate().is_empty());
+    }
+
+    /// The rest of the typed schema follows the `camera_fov_deg`
+    /// contract: a `nan`/`inf` value stays verbatim on the record, is
+    /// named by `validate`, and reads unauthored through the field
+    /// accessors — a `nan` boom `Offset` never reaches the chase
+    /// transform, and a `nan` flag reads off rather than silently
+    /// `!= 0.0` truthy.
+    #[test]
+    fn non_finite_fields_are_named_and_read_unauthored() {
+        let s = TrackCamSpec::parse(
+            "type: a\ncamTrackCS {\n  Offset 0.0 nan 4.0\n  TrackTo inf 1.0 0.0\n  CollideType nan\n  MinMaxOn nan\n  TrackBreak inf\n  MinDist -inf\n  MaxDist 1e999\n  MinSpeed nan\n  MaxSpeed inf\n  LookAbove nan\n  LookAt inf\n  VertOffset nan\n  BlendTime -inf\n  BlendGoal nan\n  CameraNear nan\n  CameraFar inf\n}\n",
+        )
+        .unwrap();
+        // Verbatim on the record — reported, not repaired.
+        assert!(s.offset.unwrap()[1].is_nan());
+        assert_eq!(s.offset_vec(), None);
+        assert_eq!(s.track_to_vec(), None);
+        assert!(!s.collides(), "nan CollideType must not read as on");
+        assert!(!s.min_max_gated(), "nan MinMaxOn must not read as on");
+        assert_eq!(s.min_dist_m(), None);
+        assert_eq!(s.max_dist_m(), None);
+        assert_eq!(s.min_speed_mps(), None);
+        assert_eq!(s.max_speed_mps(), None);
+        assert_eq!(s.camera_near_m(), None);
+        assert_eq!(s.camera_far_m(), None);
+        let issues = s.validate();
+        let named: Vec<&str> = issues
+            .iter()
+            .map(|i| i.split(' ').next().unwrap())
+            .collect();
+        for name in [
+            "Offset",
+            "TrackTo",
+            "CollideType",
+            "MinMaxOn",
+            "TrackBreak",
+            "MinDist",
+            "MaxDist",
+            "MinSpeed",
+            "MaxSpeed",
+            "LookAbove",
+            "LookAt",
+            "VertOffset",
+            "BlendTime",
+            "BlendGoal",
+            "CameraNear",
+            "CameraFar",
+        ] {
+            assert!(named.contains(&name), "{name} not named: {issues:?}");
+        }
+
+        // Finite authored values still bind verbatim.
+        let s = TrackCamSpec::parse(NEAR).unwrap();
+        assert!(s.validate().is_empty());
+        assert_eq!(s.offset_vec().unwrap(), [0.0, 1.0, 4.06]);
+        assert_eq!(s.track_to_vec().unwrap(), [0.0, 1.7, 0.0]);
+        assert!(s.collides() && s.min_max_gated());
+        assert_eq!(s.min_dist_m(), Some(3.95));
+        assert_eq!(s.max_dist_m(), Some(5.3));
+        assert_eq!(s.min_speed_mps(), Some(0.0));
+        assert_eq!(s.max_speed_mps(), Some(15.35));
+        assert_eq!(s.camera_near_m(), Some(0.5));
+        assert_eq!(s.camera_far_m(), Some(600.0));
     }
 }

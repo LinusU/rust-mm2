@@ -83,37 +83,45 @@ pub struct ChaseLens {
 
 impl ChaseLens {
     /// Distill an authored `camTrackCS` record. Missing fields take
-    /// designed defaults — a sparse record still binds.
+    /// designed defaults — a sparse record still binds. Every field
+    /// reads through the spec's finite-checked accessors (a `nan`/
+    /// `inf` authored value reads unauthored and `validate` names it):
+    /// a non-finite `Offset` would poison the rest length into a NaN
+    /// boom, and a `nan` `CameraFar` through a `.max(1.0)` sink would
+    /// silently clamp the far plane to a metre.
     pub fn authored(spec: &TrackCamSpec) -> Self {
         let offset = spec
-            .offset
+            .offset_vec()
             .map(Vec3::from)
+            // An astronomical-but-finite anchor can still overflow the
+            // length into `inf` — that reads unauthored too.
+            .filter(|v| v.length().is_finite())
             .unwrap_or(Vec3::new(0.0, 1.8, 5.0));
         let rest = offset.length();
-        let min_max_on = spec.min_max_on.is_some_and(|v| v != 0.0);
+        let min_max_on = spec.min_max_gated();
         Self {
             offset,
             aim: spec
-                .track_to
+                .track_to_vec()
                 .map(Vec3::from)
                 .unwrap_or(Vec3::new(0.0, 1.0, 0.0)),
             dist_min: if min_max_on {
-                spec.min_dist.unwrap_or(0.0).max(0.0)
+                spec.min_dist_m().unwrap_or(0.0).max(0.0)
             } else {
                 0.0
             },
             // The cap never shrinks the rest boom — `MaxDist` is the
             // extension target, not a shrink-to bound.
-            dist_max: spec.max_dist.unwrap_or(rest).max(rest),
-            speed_min: spec.min_speed.unwrap_or(0.0).max(0.0),
-            speed_max: spec.max_speed.unwrap_or(0.0).max(0.0),
-            collide: spec.collide_type.is_some_and(|c| c != 0.0),
+            dist_max: spec.max_dist_m().unwrap_or(rest).max(rest),
+            speed_min: spec.min_speed_mps().unwrap_or(0.0).max(0.0),
+            speed_max: spec.max_speed_mps().unwrap_or(0.0).max(0.0),
+            collide: spec.collides(),
             // `camera_fov_deg` reads an undrawable `CameraFOV`
             // (non-finite or outside `(0, 180)`) as unauthored — the
             // designed 70° stands in, `validate` reports the record.
             fov_deg: spec.camera_fov_deg().unwrap_or(70.0),
-            clip_near: spec.camera_near.unwrap_or(0.5).max(0.01),
-            clip_far: spec.camera_far.unwrap_or(600.0).max(1.0),
+            clip_near: spec.camera_near_m().unwrap_or(0.5).max(0.01),
+            clip_far: spec.camera_far_m().unwrap_or(600.0).max(1.0),
             authored: true,
         }
     }
@@ -726,7 +734,7 @@ pub fn spawn_mirror(
     fog: Option<bevy::pbr::DistanceFog>,
 ) -> Entity {
     let eye = pov
-        .and_then(|p| p.offset)
+        .and_then(|p| p.offset_vec())
         .map(Vec3::from)
         .unwrap_or(fallback_eye);
     let cam = commands
@@ -747,8 +755,8 @@ pub fn spawn_mirror(
                     .and_then(|p| p.camera_fov_deg())
                     .unwrap_or(60.0)
                     .to_radians(),
-                near: pov.and_then(|p| p.camera_near).unwrap_or(0.1).max(0.01),
-                far: pov.and_then(|p| p.camera_far).unwrap_or(600.0).max(1.0),
+                near: pov.and_then(|p| p.camera_near_m()).unwrap_or(0.1).max(0.01),
+                far: pov.and_then(|p| p.camera_far_m()).unwrap_or(600.0).max(1.0),
                 ..default()
             }),
             // Vehicle forward is -Z: a π yaw looks out the rear.

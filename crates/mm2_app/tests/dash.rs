@@ -903,3 +903,238 @@ fn undrawable_authored_fov_falls_back_to_the_designed_lens() {
         );
     }
 }
+
+fn push_lp(out: &mut Vec<u8>, s: &str) {
+    out.push(s.len() as u8 + 1);
+    out.extend_from_slice(s.as_bytes());
+    out.push(0);
+}
+
+/// A minimal `_dash.pkg`: one single-triangle geometry chunk per
+/// named part (`speed_needle_h`, `wheel_h`) plus a one-paint untextured
+/// shader table — enough for `build_model` + `spawn_dash` to bind the
+/// two `DashRole` nodes.
+fn dash_pkg() -> Vec<u8> {
+    let geo = |offset_z: f32| {
+        let mut g = Vec::new();
+        g.extend_from_slice(&1u32.to_le_bytes()); // n_sections
+        g.extend_from_slice(&3u32.to_le_bytes()); // total vertices
+        g.extend_from_slice(&3u32.to_le_bytes()); // total indices
+        g.extend_from_slice(&0u32.to_le_bytes()); // sections_duplicate
+        g.extend_from_slice(&0x002u32.to_le_bytes()); // fvf = XYZ
+        g.extend_from_slice(&1u16.to_le_bytes()); // n_strips
+        g.extend_from_slice(&0u16.to_le_bytes()); // flags
+        g.extend_from_slice(&0i32.to_le_bytes()); // shader_offset
+        g.extend_from_slice(&3i32.to_le_bytes()); // prim_type = triangles
+        g.extend_from_slice(&3u32.to_le_bytes());
+        for v in [
+            [0.0, 0.0, offset_z],
+            [0.1, 0.0, offset_z],
+            [0.0, 0.1, offset_z],
+        ] {
+            for f in v {
+                g.extend_from_slice(&f.to_le_bytes());
+            }
+        }
+        g.extend_from_slice(&3u32.to_le_bytes());
+        for i in [0u16, 1, 2] {
+            g.extend_from_slice(&i.to_le_bytes());
+        }
+        g
+    };
+    let mut shaders = Vec::new();
+    shaders.extend_from_slice(&1u32.to_le_bytes()); // 1 paint job
+    shaders.extend_from_slice(&1u32.to_le_bytes()); // 1 shader per job
+    push_lp(&mut shaders, ""); // untextured
+    // diffuse + ambient + specular + emissive color4f, then shininess.
+    for f in [
+        0.9f32, 0.8, 0.2, 1.0, // diffuse
+        1.0, 1.0, 1.0, 1.0, // ambient
+        0.0, 0.0, 0.0, 1.0, // specular
+        0.0, 0.0, 0.0, 1.0, // emissive
+        0.0, // shininess
+    ] {
+        shaders.extend_from_slice(&f.to_le_bytes());
+    }
+    let mut pkg = b"PKG3".to_vec();
+    for (name, payload) in [
+        ("speed_needle_h", geo(0.0)),
+        ("wheel_h", geo(0.2)),
+        ("shaders", shaders),
+    ] {
+        pkg.extend_from_slice(b"FILE");
+        push_lp(&mut pkg, name);
+        pkg.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        pkg.extend_from_slice(&payload);
+    }
+    pkg
+}
+
+/// The rest of the authored `camPovCS` record reads unauthored on
+/// non-finite values: a `nan` `Offset`/`ReverseOffset`/`Pitch` would
+/// poison the cockpit camera transform, and `nan` `CameraNear`/
+/// `CameraFar` sink through the `.clamp`/`.max` sinks into a broken
+/// projection. The finite accessors leave the designed reading.
+#[test]
+fn non_finite_authored_pov_fields_fall_back() {
+    let mut app = base_app();
+    app.init_resource::<Assets<Mesh>>()
+        .init_resource::<Assets<Image>>()
+        .init_resource::<Assets<StandardMaterial>>();
+    let vehicle = app
+        .world_mut()
+        .spawn((PlayerVehicle, Visibility::Visible))
+        .id();
+    let vfs = Vfs::new();
+    let pov = PovCamSpec {
+        offset: Some([f32::NAN, 1.19, -0.55]),
+        reverse_offset: Some([0.0, f32::INFINITY, 0.75]),
+        pitch: Some(f32::NAN),
+        camera_near: Some(f32::NAN),
+        camera_far: Some(f32::INFINITY),
+        ..PovCamSpec::default()
+    };
+    app.world_mut()
+        .resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
+                world.resource_scope(|world, mut materials: Mut<Assets<StandardMaterial>>| {
+                    let mut queue = CommandQueue::default();
+                    {
+                        let mut commands = Commands::new(&mut queue, world);
+                        spawn_dash(
+                            &mut commands,
+                            &vfs,
+                            "nonexistent_car",
+                            0,
+                            Some(pov),
+                            &mut meshes,
+                            &mut images,
+                            &mut materials,
+                            vehicle,
+                            SessionEntity(1),
+                            CameraMode::Cockpit,
+                            None,
+                        );
+                    }
+                    queue.apply(world);
+                })
+            })
+        });
+
+    let mut q = app
+        .world_mut()
+        .query_filtered::<(&CockpitCamera, &Transform, &Projection), With<CockpitCamera>>();
+    let (cam, xf, proj) = q.single(app.world()).unwrap();
+    assert_eq!(cam.offset, Vec3::ZERO, "nan Offset reads unauthored");
+    assert_eq!(cam.pitch, 0.0, "nan Pitch reads unauthored (level)");
+    assert_eq!(
+        cam.reverse_offset, None,
+        "inf ReverseOffset reads unauthored"
+    );
+    assert!(xf.translation.is_finite() && xf.rotation.is_finite());
+    match proj {
+        Projection::Perspective(p) => {
+            assert!(
+                (p.near - 0.1).abs() < 1e-6,
+                "nan near → 0.1, got {}",
+                p.near
+            );
+            assert!((p.far - 600.0).abs() < 1e-6, "inf far → 600, got {}", p.far);
+        }
+        other => panic!("expected perspective, got {other:?}"),
+    }
+}
+
+/// A hostile `_dash.asnode` — `nan`/`inf` placements, needle sweeps and
+/// wheel factor — is named by `DashSpec::validate` and reads unauthored
+/// through the spawn path: the cluster anchors at the eye, the needle
+/// parks at `(0, 0)`, the wheel factor defaults to 1.0, and every
+/// spawned transform stays finite through `drive_dash`.
+#[test]
+fn hostile_asnode_reads_unauthored() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("tune")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("geometry")).unwrap();
+    std::fs::write(
+        tmp.path().join("tune/x_dash.asnode"),
+        "type: a\nasNode {\n  DashPos nan -0.6 -0.78\n  WheelPos 0.0 inf 0.0\n  SpeedRotMin 0.0\n  SpeedRotMax nan\n  WheelFact inf\n}\n",
+    )
+    .unwrap();
+    std::fs::write(tmp.path().join("geometry/x_dash.pkg"), dash_pkg()).unwrap();
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(tmp.path(), 0).unwrap();
+
+    let mut app = base_app();
+    app.init_resource::<Assets<Mesh>>()
+        .init_resource::<Assets<Image>>()
+        .init_resource::<Assets<StandardMaterial>>()
+        .add_systems(Update, drive_dash);
+    let config = test_config();
+    let mut state = VehicleState::new(&config);
+    state.forward_speed = 25.0;
+    state.steer_angle = 0.25;
+    state.direction = DriveDirection::Forward;
+    let vehicle = spawn_player(&mut app, &config, state);
+
+    let report = app
+        .world_mut()
+        .resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
+                world.resource_scope(|world, mut materials: Mut<Assets<StandardMaterial>>| {
+                    let mut queue = CommandQueue::default();
+                    let report = {
+                        let mut commands = Commands::new(&mut queue, world);
+                        spawn_dash(
+                            &mut commands,
+                            &vfs,
+                            "x",
+                            0,
+                            None,
+                            &mut meshes,
+                            &mut images,
+                            &mut materials,
+                            vehicle,
+                            SessionEntity(1),
+                            CameraMode::Cockpit,
+                            None,
+                        )
+                    };
+                    queue.apply(world);
+                    report
+                })
+            })
+        });
+    assert_eq!(report.parts, 2, "both authored parts bound: {report}");
+
+    // The needle sweep and wheel factor read unauthored.
+    let mut q = app.world_mut().query::<&DashNode>();
+    let mut saw_speed = false;
+    let mut saw_wheel = false;
+    for node in q.iter(app.world()) {
+        match &node.role {
+            DashRole::Speed { min, max } => {
+                saw_speed = true;
+                assert_eq!((*min, *max), (0.0, 0.0), "nan sweep → parked");
+            }
+            DashRole::Wheel { factor } => {
+                saw_wheel = true;
+                assert_eq!(*factor, 1.0, "inf WheelFact → designed 1.0");
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_speed && saw_wheel);
+
+    // Every spawned cockpit transform is finite, and stays finite once
+    // the needles drive off live vehicle state.
+    app.update();
+    let mut q = app
+        .world_mut()
+        .query_filtered::<&Transform, With<CockpitPart>>();
+    for t in q.iter(app.world()) {
+        assert!(
+            t.translation.is_finite() && t.rotation.is_finite(),
+            "hostile asnode produced a non-finite transform: {t:?}"
+        );
+    }
+}
