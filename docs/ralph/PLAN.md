@@ -108,6 +108,21 @@ so the designed lens stands in, and the loaders warn per `validate()`
 issue. All eleven findings of the audit are now repaired with
 regression tests; the speculative list (S1–S5) and the F19-A.4 sweep
 caveat remain as recorded.
+Iter 004 (same run) closed the review-flagged residual of that sweep:
+the finding-11 contract (`validate()` names the field, a non-finite
+value reads unauthored, raw stays verbatim) now covers every consumed
+field in the camera/dash record family — `TrackCamSpec` gained
+finite-checked accessors for the boom `Offset`/`TrackTo`, the
+`CollideType`/`MinMaxOn` flags (a `nan` flag read `!= 0.0` truthy
+before), the dist/speed windows and `CameraNear`/`CameraFar`;
+`PovCamSpec` gained `offset_vec`/`reverse_offset_vec`/`pitch_rad` and
+clip accessors (`nan` survives `f32::clamp`; a `nan CameraFar` was a
+1 m far plane); `DashSpec` gained its first `validate()` and
+`spawn_dash` finite-filters every placement, needle sweep and
+`WheelFact`. A finite-but-overflowing `Offset` (`3e38` — length `inf`)
+reads unauthored too. Retail: all 119 authored camera/dash records
+scanned, zero non-finite tokens — the gates reject nothing authored.
+Candidate pending external check.
 Iter 001's candidate failed external review on one blocking finding:
 `mm2_game::ped::matrix_bucket` (F19-A.4 code, co-landed in the same
 range) summed the full-range authored `mtxv`/`mtxn` counts with a plain

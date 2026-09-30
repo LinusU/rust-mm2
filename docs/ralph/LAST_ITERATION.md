@@ -1,3 +1,103 @@
+# Last iteration — authored-numbers robustness: finite-gate the rest
+# of the camera/dash spec family (iteration 004, run 20260929T174954)
+
+Implementation iteration on `ralph/night` (baseline `01fad8f` — the
+iteration-003 sweep completion; external verify green, review **pass**
+with no blocking findings). One coherent slice: extend the finding-11
+"non-finite reads unauthored + `validate()` names it" contract to every
+remaining consumed field in the `camTrackCS`/`camPovCS`/`asNode` record
+family — the exact residual the iteration-003 review flagged
+(`DashSpec`'s `wheel_fact`/`speed_rot`/`rpm_rot`/`damage_rot`) plus the
+same-shaped fields it implies.
+
+## Task selection
+
+No failing gate or review finding to repair. The queued TASKS work
+carries active dependencies, and the iteration-003 review's
+verification gaps named one concrete residual: `CameraFOV` was the only
+finite-gated field — the other NaN/Infinity-capable fields on the same
+records still reached transforms, projections, boom math and dashboard
+rotations raw. `nan` survives `f32::clamp`/`f32::max` sinks (a `nan`
+`CameraFar` became a 1 m far plane), a `nan` boolean-like flag
+(`CollideType`, `MinMaxOn`) reads `!= 0.0` — silently *on* — and a
+`nan` `Offset`/`TrackTo` poisons the whole chase transform.
+
+## What landed
+
+- `mm2_formats::camtrack` — shared `finite3`/`finite1`/`finite_vec`
+  helpers; `TrackCamSpec` gained `offset_vec`, `track_to_vec`,
+  `collides`, `min_max_gated`, `min_dist_m`/`max_dist_m`,
+  `min_speed_mps`/`max_speed_mps`, `camera_near_m`/`camera_far_m` — all
+  reading `Some`/`true` only when authored *and* finite. `validate()`
+  now names every non-finite typed field (`Offset`, `TrackTo`,
+  `CollideType`, `MinMaxOn`, `TrackBreak`, `MinDist`, `MaxDist`,
+  `MinSpeed`, `MaxSpeed`, `LookAbove`, `LookAt`, `VertOffset`,
+  `BlendTime`, `BlendGoal`, `CameraNear`, `CameraFar`), keeping
+  `CameraFOV`'s drawable-range report.
+- `mm2_formats::dash` — `PovCamSpec` gained `offset_vec`,
+  `reverse_offset_vec`, `pitch_rad`, `camera_near_m`, `camera_far_m`
+  and a matching `validate()` extension (`Offset`, `ReverseOffset`,
+  `TrackTo`, `Pitch`, `CameraNear`, `CameraFar`). `DashSpec` gained its
+  first `validate()` — the eleven `*Pos`/`*Offset` placement vectors,
+  `WheelFact`, and the three `*RotMin`/`*RotMax` needle sweeps.
+- `mm2_app::camera` — `ChaseLens::authored` reads every field through
+  the accessors; an astronomical-but-finite `Offset` whose derived
+  length overflows also reads unauthored. `spawn_mirror` reads the pov
+  eye and clips through the same accessors.
+- `mm2_app::dash` — `load_pov_cam` already warned; `spawn_dash` now
+  warns each `DashSpec::validate` issue with the file path, `v3`/`rot`
+  finite-filter every placement and sweep (a non-finite sweep parks the
+  needle at `(0, 0)`), `wheel_fact` reads through `.filter`, and the
+  cockpit camera binds `offset_vec`/`reverse_offset_vec`/`pitch_rad`/
+  `camera_near_m`/`camera_far_m`.
+
+## Evidence
+
+- `mm2_formats` 247 unit tests green, incl.
+  `camtrack::non_finite_fields_are_named_and_read_unauthored`,
+  `dash::dash_spec_non_finite_fields_are_named`,
+  `dash::pov_cam_spec_non_finite_fields_read_unauthored` — each asserts
+  verbatim retention, `validate()` naming, unauthored reads and
+  finite-authored verbatim binding.
+- `mm2_app` suites green, incl.
+  `camtrack::non_finite_authored_fields_fall_back_to_the_designed_boom`
+  (hostile spec → designed boom `(0, 1.8, 5)`/aim `(0, 1, 0)`, finite
+  projection and `chase_follow` steps; a `3e38` offset whose length
+  overflows also falls back), `dash::non_finite_authored_pov_fields_fall_back`,
+  `dash::hostile_asnode_reads_unauthored` (a synthetic `_dash.pkg` +
+  hostile `_dash.asnode` mounts through the real VFS path; both parts
+  bind, sweeps park, `WheelFact` defaults to 1.0, and every spawned
+  transform stays finite through `drive_dash`),
+  `mirror::non_finite_authored_pov_fields_fall_back`.
+- Retail audit (`fnv1a64:e91e6cd4b2ae30d9`, read-only): all 119
+  authored camera/dash records (49 `camtrackcs`, 47 `campovcs`, 23
+  `_dash.asnode`) dumped via `mm2-inspect dump` and scanned — **zero**
+  non-finite or f32-overflowing numeric tokens in 4,550 fields, so the
+  new gates reject nothing authored.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --locked --workspace` — all 82 suites green (exit 0).
+
+## Classification / remaining open items
+
+- Implementation choice throughout — robustness bounds on
+  hostile-but-grammar-valid input; no original-behavior claim. The
+  designed defaults (boom, eye, clips, parked needle, `WheelFact` 1.0)
+  are documented as designed.
+- No GPU/rendered/audio/network evidence this slice; none claimed —
+  projection/transform finiteness verified on component values in
+  headless Bevy worlds.
+- Still open in `authored-numbers.md`: the S1–S5 speculative list and
+  the F19-A.4 ped sweep caveat. `PovCamSpec::track_to` is validated
+  (kept verbatim) but still has no consumer — blend semantics
+  unrecovered.
+
+---
+
 # Last iteration — authored-numbers sweep, second half: findings 5, 6,
 # 8, 10, 11 (iteration 003, run 20260929T174954)
 
