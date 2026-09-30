@@ -58,6 +58,15 @@ The gate (`proto::admit`): exact `PROTOCOL_VERSION` match, and exact
 `gameplay_fingerprint` match. Mismatches reject with a named reason —
 version drift and content drift are distinguishable to the UI.
 
+Blocking sockets need a bound or a peer that completes TCP and then
+goes silent hangs the handshake forever. `send_hello`/`accept_hello`
+install `HANDSHAKE_TIMEOUT` (10 s — designed, far above what two small
+frames need) before any I/O and clear it once the session is
+established, since the control channel may then idle between requests;
+`*_within` variants take an explicit bound for callers and tests that
+need a different one. The F24-B accept loop therefore never waits on a
+single peer indefinitely.
+
 ## Content fingerprints
 
 Two fingerprints, different jobs:
@@ -84,5 +93,7 @@ Two fingerprints, different jobs:
 Same-process loopback: `mm2_net` tests bind `127.0.0.1:0` and run real
 client/server socket pairs through the production handshake helpers —
 accept, version reject, content reject, malformed-first-frame reject,
-oversize frame refused before allocation, truncated reads. This is
-*not* multi-process, LAN or Internet evidence; F24-C owns that matrix.
+oversize frame refused before allocation, truncated reads, the default
+deadline installed by both helpers, and silent-peer stall legs on both
+sides of the handshake. This is *not* multi-process, LAN or Internet
+evidence; F24-C owns that matrix.

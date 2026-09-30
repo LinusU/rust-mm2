@@ -26,7 +26,10 @@ mod conn;
 mod frame;
 mod proto;
 
-pub use conn::{Conn, accept_hello, hello, listen_loopback, send_hello};
+pub use conn::{
+    Conn, HANDSHAKE_TIMEOUT, accept_hello, accept_hello_within, hello, listen_loopback, send_hello,
+    send_hello_within,
+};
 pub use frame::{MAX_FRAME, read_frame, write_frame};
 pub use proto::{Hello, Message, PROTOCOL_VERSION, ProtoError, RejectCode};
 

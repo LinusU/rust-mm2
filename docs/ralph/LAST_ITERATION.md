@@ -1,3 +1,76 @@
+# Last iteration — external-review repair: bound the F24-A.1
+# handshake helpers (iteration 009, run 20260929T174954)
+
+Repair iteration on `ralph/night` (baseline `9fd61282` — the F24-A.1
+candidate; external verify green, review **fail** on one blocking
+finding).
+
+## Root cause
+
+The iteration-008 review found `conn.rs`'s `set_timeout` doc claimed
+"the handshake sets this so a stalled peer cannot hang a join forever",
+but neither `send_hello` nor `accept_hello` set any timeout —
+`Conn::connect`/`Conn::accept` produce plain blocking sockets with no
+deadline, so a peer that completes TCP and then idles hangs
+`accept_hello`'s `recv` forever (and a silent host hangs `send_hello`
+symmetrically) — an indefinite, remotely triggerable block on the
+primary path F24-B's accept loop would have trusted. Every conn test
+masked it by setting a 10 s timeout on both ends itself, so the
+no-deadline default was never exercised. Implementation defect, not a
+capability gap.
+
+## Repair
+
+Followed the review's first option — make the doc's contract true:
+
+- `HANDSHAKE_TIMEOUT = 10 s` (designed bound: `Hello` out + verdict
+  back is two small frames; generous even on a slow link).
+- `send_hello`/`accept_hello` install it via `set_timeout` before any
+  I/O and clear it (`None`) on `Ok` — an established control channel
+  may idle between requests. On `Err` the deadline stays installed; a
+  failed handshake's connection is expected to be dropped.
+- `send_hello_within`/`accept_hello_within` (exported) take an
+  explicit bound — the extension point for callers needing a different
+  one, and how tests exercise enforcement without waiting 10 s.
+- `docs/research/net.md` records the bound and the contract.
+
+## Regression legs (mm2_net 13 → 16, all real loopback socket pairs)
+
+- `the_handshake_helpers_install_the_default_deadline` — the missing
+  no-deadline leg: a new `pair_untimed` harness pre-sets **no**
+  timeout, so `read_timeout() == Some(HANDSHAKE_TIMEOUT)` observed on
+  both ends after a failed handshake pins that the helpers installed
+  it (not the test).
+- `a_silent_client_cannot_stall_accept_hello` — client holds the
+  socket open, sends nothing; `accept_hello_within` at 150 ms returns
+  `NetError::Io` (WouldBlock/TimedOut) instead of hanging.
+- `a_silent_host_cannot_stall_send_hello` — symmetric leg.
+- `matching_peers_complete_the_handshake` now asserts
+  read/write timeouts are `None` on both ends after `Ok` — the
+  established-session clear is pinned too.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean (after one rustfmt reflow).
+- `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --locked --workspace` — all suites green (exit 0),
+  mm2_net 16/16.
+
+## Notes
+
+- API surface added: `HANDSHAKE_TIMEOUT`, `send_hello_within`,
+  `accept_hello_within` — `mm2_net` still has no production consumers.
+- The review's other verification gaps stand unchanged: same-process
+  loopback only (AC01/AC04/AC05/AC06 remain F24-B/C work), outgoing
+  frames bounded only by `u32::MAX` on the write side (encode cannot
+  exceed ~520 B today), fingerprint is self-reported not adversarial.
+- The minor rustdoc nit from the same review (`[`PROTOCOL_VERSION`]`
+  link in `mm2_content::fingerprint` wrapping a whole sentence) was
+  left as-is — cosmetic, non-blocking, outside this repair's scope.
+
+---
+
 # Last iteration — F24-A.1: multiplayer protocol foundation —
 # transport decision, framed wire protocol, content fingerprints,
 # loopback handshake (iteration 008, run 20260929T174954)

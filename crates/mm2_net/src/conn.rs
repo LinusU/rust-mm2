@@ -40,9 +40,12 @@ impl Conn {
         self.peer
     }
 
-    /// Bound how long `recv`/`send` may block. The handshake sets this so
-    /// a stalled peer cannot hang a join forever; an established session
-    /// clears it (`None`) since the control channel is allowed to idle.
+    /// Bound how long `recv`/`send` may block. The handshake helpers
+    /// install [`HANDSHAKE_TIMEOUT`] so a stalled peer cannot hang a
+    /// join forever, and clear it (`None`) once the session is
+    /// established — the control channel is then allowed to idle
+    /// between requests. Callers may set their own bound for later
+    /// phases (e.g. a lobby wait).
     pub fn set_timeout(&self, timeout: Option<Duration>) -> Result<(), NetError> {
         self.stream.set_read_timeout(timeout)?;
         self.stream.set_write_timeout(timeout)?;
@@ -67,27 +70,71 @@ pub fn listen_loopback() -> io::Result<TcpListener> {
     TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
 }
 
+/// Designed upper bound on one handshake exchange: `Hello` out, the
+/// verdict back — two small frames, so even a slow link finishes far
+/// inside it. The handshake helpers install this deadline on entry, so
+/// a peer that completes the TCP handshake and then goes silent stalls
+/// a join for this long rather than forever.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Client side of the handshake: send our `Hello` and wait for the
-/// host's verdict. `Ok(())` means accepted; `Err(NetError::Rejected)`
-/// carries the host's reason. `hello.protocol` is the client's claim —
-/// callers pass [`PROTOCOL_VERSION`]; tests pass something else to
-/// exercise the gate.
+/// host's verdict, bounded by [`HANDSHAKE_TIMEOUT`]. `Ok(())` means
+/// accepted; `Err(NetError::Rejected)` carries the host's reason.
+/// `hello.protocol` is the client's claim — callers pass
+/// [`PROTOCOL_VERSION`]; tests pass something else to exercise the
+/// gate.
 pub fn send_hello(conn: &mut Conn, hello: &Hello) -> Result<(), NetError> {
-    conn.send(&Message::Hello(hello.clone()))?;
-    match conn.recv()? {
-        Message::Accept => Ok(()),
-        Message::Reject { code, message } => Err(NetError::Rejected { code, message }),
-        _ => Err(NetError::Unexpected("expected Accept or Reject")),
+    send_hello_within(conn, hello, HANDSHAKE_TIMEOUT)
+}
+
+/// [`send_hello`] with an explicit deadline — for callers that need a
+/// bound other than [`HANDSHAKE_TIMEOUT`], and for tests, which use a
+/// short one rather than waiting out the default.
+///
+/// The deadline is installed before any I/O; on `Ok` it is cleared so
+/// the established control channel may idle, and on `Err` it is left
+/// installed — a failed handshake's connection is expected to be
+/// dropped.
+pub fn send_hello_within(
+    conn: &mut Conn,
+    hello: &Hello,
+    deadline: Duration,
+) -> Result<(), NetError> {
+    conn.set_timeout(Some(deadline))?;
+    let verdict = conn
+        .send(&Message::Hello(hello.clone()))
+        .and_then(|()| conn.recv());
+    let verdict = match verdict {
+        Ok(Message::Accept) => Ok(()),
+        Ok(Message::Reject { code, message }) => Err(NetError::Rejected { code, message }),
+        Ok(_) => Err(NetError::Unexpected("expected Accept or Reject")),
+        Err(e) => Err(e),
+    };
+    if verdict.is_ok() {
+        conn.set_timeout(None)?;
     }
+    verdict
 }
 
 /// Host side of the handshake: read the peer's first frame, apply the
-/// compatibility gate and answer. Returns the peer's `Hello` on
-/// acceptance — the lobby keeps the driver name and build for the
-/// roster. A failure still answers the peer with `Reject` when the
-/// reason is a protocol/content mismatch, so a refused client sees a
-/// reason rather than a dropped socket.
+/// compatibility gate and answer, bounded by [`HANDSHAKE_TIMEOUT`].
+/// Returns the peer's `Hello` on acceptance — the lobby keeps the
+/// driver name and build for the roster. A failure still answers the
+/// peer with `Reject` when the reason is a protocol/content mismatch,
+/// so a refused client sees a reason rather than a dropped socket.
 pub fn accept_hello(conn: &mut Conn, gameplay_fingerprint: u64) -> Result<Hello, NetError> {
+    accept_hello_within(conn, gameplay_fingerprint, HANDSHAKE_TIMEOUT)
+}
+
+/// [`accept_hello`] with an explicit deadline — same contract as
+/// [`send_hello_within`]: installed before any I/O, cleared on `Ok`,
+/// left installed on `Err`.
+pub fn accept_hello_within(
+    conn: &mut Conn,
+    gameplay_fingerprint: u64,
+    deadline: Duration,
+) -> Result<Hello, NetError> {
+    conn.set_timeout(Some(deadline))?;
     let hello = match conn.recv() {
         Ok(Message::Hello(h)) => h,
         Ok(_) => {
@@ -103,6 +150,7 @@ pub fn accept_hello(conn: &mut Conn, gameplay_fingerprint: u64) -> Result<Hello,
     match admit(&hello, gameplay_fingerprint) {
         Ok(()) => {
             conn.send(&Message::Accept)?;
+            conn.set_timeout(None)?;
             Ok(hello)
         }
         Err((code, message)) => {
@@ -139,8 +187,11 @@ mod tests {
     const TIMEOUT: Duration = Duration::from_secs(10);
 
     /// Run `host` on a loopback listener thread and `client` on a fresh
-    /// connection; returns the client thread's result.
-    fn pair<H, C, R>(host: H, client: C) -> R
+    /// connection; returns the client thread's result. `backstop` is a
+    /// safety timeout applied to both ends so a broken test cannot hang
+    /// the suite — legs exercising the handshake's own deadline
+    /// management pass `None` and must not pre-set one themselves.
+    fn pair_with<H, C, R>(backstop: Option<Duration>, host: H, client: C) -> R
     where
         H: FnOnce(Conn) + Send + 'static,
         C: FnOnce(Conn) -> R + Send + 'static,
@@ -152,33 +203,163 @@ mod tests {
         let host_thread = thread::spawn(move || {
             ready.send(()).unwrap();
             let conn = Conn::accept(&listener).unwrap();
-            conn.set_timeout(Some(TIMEOUT)).unwrap();
+            conn.set_timeout(backstop).unwrap();
             host(conn);
         });
         wait.recv().unwrap();
         let conn = Conn::connect(addr).unwrap();
-        conn.set_timeout(Some(TIMEOUT)).unwrap();
+        conn.set_timeout(backstop).unwrap();
         let out = client(conn);
         host_thread.join().unwrap();
         out
     }
 
+    fn pair<H, C, R>(host: H, client: C) -> R
+    where
+        H: FnOnce(Conn) + Send + 'static,
+        C: FnOnce(Conn) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        pair_with(Some(TIMEOUT), host, client)
+    }
+
+    /// The no-deadline leg: sockets start unbounded, so only the
+    /// handshake helpers themselves can bound the exchange.
+    fn pair_untimed<H, C, R>(host: H, client: C) -> R
+    where
+        H: FnOnce(Conn) + Send + 'static,
+        C: FnOnce(Conn) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        pair_with(None, host, client)
+    }
+
     #[test]
     fn matching_peers_complete_the_handshake() {
-        let result = pair(
+        let result: Result<(), NetError> = pair(
             |mut conn| {
                 let hello = accept_hello(&mut conn, 0xaaaa).unwrap();
                 assert_eq!(hello.driver, "driver one");
                 assert_eq!(hello.protocol, PROTOCOL_VERSION);
+                // Established session: the deadline is cleared so the
+                // control channel may idle.
+                assert_eq!(conn.stream.read_timeout().unwrap(), None);
+                assert_eq!(conn.stream.write_timeout().unwrap(), None);
             },
             |mut conn| {
                 send_hello(
                     &mut conn,
                     &hello("build".to_string(), "driver one".to_string(), 0xaaaa),
-                )
+                )?;
+                assert_eq!(conn.stream.read_timeout().unwrap(), None);
+                assert_eq!(conn.stream.write_timeout().unwrap(), None);
+                Ok(())
             },
         );
         result.unwrap();
+    }
+
+    #[test]
+    fn the_handshake_helpers_install_the_default_deadline() {
+        // Neither socket has a timeout before the handshake runs —
+        // `pair_untimed` sets none. After a *failed* handshake the
+        // helpers' default deadline is what remains installed.
+        pair_untimed(
+            |mut conn| {
+                let err = accept_hello(&mut conn, 0xaaaa).unwrap_err();
+                assert!(matches!(
+                    err,
+                    NetError::Rejected {
+                        code: RejectCode::VersionMismatch,
+                        ..
+                    }
+                ));
+                assert_eq!(conn.stream.read_timeout().unwrap(), Some(HANDSHAKE_TIMEOUT));
+                assert_eq!(
+                    conn.stream.write_timeout().unwrap(),
+                    Some(HANDSHAKE_TIMEOUT)
+                );
+            },
+            |mut conn| {
+                let err = send_hello(
+                    &mut conn,
+                    &Hello {
+                        protocol: PROTOCOL_VERSION + 1,
+                        gameplay_fingerprint: 0xaaaa,
+                        build: "build".to_string(),
+                        driver: "d".to_string(),
+                    },
+                )
+                .unwrap_err();
+                assert!(matches!(
+                    err,
+                    NetError::Rejected {
+                        code: RejectCode::VersionMismatch,
+                        ..
+                    }
+                ));
+                assert_eq!(conn.stream.read_timeout().unwrap(), Some(HANDSHAKE_TIMEOUT));
+                assert_eq!(
+                    conn.stream.write_timeout().unwrap(),
+                    Some(HANDSHAKE_TIMEOUT)
+                );
+            },
+        );
+    }
+
+    /// A peer that completes TCP and then goes silent must not hang the
+    /// host: the installed deadline fires and `accept_hello` errors out.
+    /// Uses the `_within` variant so the leg does not wait out the 10 s
+    /// default.
+    #[test]
+    fn a_silent_client_cannot_stall_accept_hello() {
+        pair(
+            |mut conn| match accept_hello_within(&mut conn, 0xaaaa, Duration::from_millis(150)) {
+                Err(NetError::Io(e)) => assert!(
+                    matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ),
+                    "expected a read timeout, got {e}"
+                ),
+                other => panic!("expected a read timeout, got {other:?}"),
+            },
+            |conn| {
+                // Hold the connection open but send nothing — well past
+                // the host's handshake deadline.
+                thread::sleep(Duration::from_millis(500));
+                drop(conn);
+            },
+        );
+    }
+
+    /// Symmetric leg: a host that never answers must not hang the
+    /// client's `send_hello` either.
+    #[test]
+    fn a_silent_host_cannot_stall_send_hello() {
+        let result = pair(
+            |conn| {
+                thread::sleep(Duration::from_millis(500));
+                drop(conn);
+            },
+            |mut conn| {
+                send_hello_within(
+                    &mut conn,
+                    &hello("b".to_string(), "d".to_string(), 0xaaaa),
+                    Duration::from_millis(150),
+                )
+            },
+        );
+        match result {
+            Err(NetError::Io(e)) => assert!(
+                matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ),
+                "expected a read timeout, got {e}"
+            ),
+            other => panic!("expected a read timeout, got {other:?}"),
+        }
     }
 
     #[test]
