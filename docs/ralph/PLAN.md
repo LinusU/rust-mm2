@@ -123,6 +123,21 @@ clip accessors (`nan` survives `f32::clamp`; a `nan CameraFar` was a
 reads unauthored too. Retail: all 119 authored camera/dash records
 scanned, zero non-finite tokens — the gates reject nothing authored.
 Candidate pending external check.
+Iter 005 (same run) closed the iteration-004 review's flagged residual:
+component finiteness never bounded *composed* results — a finite
+`3e38` `TrackTo` could still overflow `veh_rot * aim` (NaN via
+`Transform::look_at`), `MaxDist` could overflow `dir * dist`, and
+`eye + v3(DashPos)`/`pivot + offset + pivot_offset` sums and the
+`(max − min) * frac` needle sweeps could reach `inf` from finite
+inputs. The family's gate is now a designed magnitude bound —
+`camtrack::USABLE_BOUND = 1e6` (retail max authored value in the
+family is `CameraFar 1330`) behind `usable_f32`/`usable3`/`usable1`/
+`usable_vec` — shared by all three specs' accessors and the app-side
+`v3`/`rot`/`wheel_fact`/`part.origin` filters; `validate` reports
+"exceeds the usable bound" distinctly from "is not finite", raw fields
+stay verbatim, and `CameraFOV` keeps its tighter drawable bound.
+Retail re-scan: 4,550 tokens, none beyond the bound — nothing authored
+rejected. Candidate pending external check.
 Iter 001's candidate failed external review on one blocking finding:
 `mm2_game::ped::matrix_bucket` (F19-A.4 code, co-landed in the same
 range) summed the full-range authored `mtxv`/`mtxn` counts with a plain

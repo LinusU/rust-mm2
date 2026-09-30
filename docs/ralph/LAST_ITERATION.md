@@ -1,3 +1,98 @@
+# Last iteration — authored-numbers robustness: magnitude-bound the
+# camera/dash spec family (iteration 005, run 20260929T174954)
+
+Implementation iteration on `ralph/night` (baseline `6c3823e` — the
+iteration-004 finite-gate slice; external verify green, review **pass**
+with no blocking findings). One coherent slice: close the asymmetric
+overflow residual the iteration-004 review named as a verification gap
+— finite-but-astronomical authored values still bound verbatim, and
+only `Offset` had a derived-length overflow check.
+
+## Task selection
+
+The review's first verification gap was the only concrete residual of
+the F22-B camera/dash contract: a finite ~`3e38` `TrackTo` can still
+overflow `veh_rot * aim` into a non-finite look target (NaN via
+`Transform::look_at`), `eye + v3(DashPos)` can overflow to an `inf`
+translation from two finite inputs, and the same shape sits in
+`MaxDist` → `dir * dist`, the `pivot + offset + pivot_offset` needle
+chains, the ±sweep `(max − min) * frac`, `WheelFact * π`, and
+`Pitch`/`Offset` child transforms. Component-finite gating cannot
+close that class — the inputs are already finite — so the gate needed
+a designed magnitude bound. (Verification gaps are not blocking
+findings; this was selected ahead of TASKS-queue feature slices
+because it is the unfinished edge of the just-checked work, and the
+queued slices' deps are unchanged.)
+
+## What landed
+
+- `mm2_formats::camtrack` — `USABLE_BOUND = 1e6` (designed bound:
+  orders above anything authored — retail max is `CameraFar 1330` —
+  orders below `f32::MAX`, so every composed sum/product stays
+  finite). The family's read gate is now `usable_f32`/`usable3` +
+  `usable1`/`usable_vec` Option filters (replacing `finite3`/
+  `finite1`/`finite_vec`): a field reads unauthored when non-finite
+  *or* beyond the bound, `validate` distinguishes the two cases
+  ("is not finite" vs "exceeds the usable bound ±1e6") via shared
+  `vec_issue`/`scalar_issue` helpers, and the raw fields stay
+  verbatim. `CameraFOV` keeps its tighter drawable `(0, 180)` bound.
+- `mm2_formats::dash` — `PovCamSpec` and `DashSpec` read through the
+  same helpers; both `validate()`s name beyond-bound fields the same
+  way (needle sweeps get the pair-level message).
+- `mm2_app::camera` — `ChaseLens::authored`'s hand-rolled
+  offset-length filter is subsumed by the bound and removed; `aim`,
+  the dist/speed windows, clips and flags all inherit it through the
+  accessors (`3e38` `TrackTo`/`MaxDist` can no longer reach
+  `veh_rot * …`).
+- `mm2_app::dash` — `v3` reads through `usable_vec`, the `rot` closure
+  through `usable_f32`, `WheelFact` through `usable1`, and the
+  pkg/mtx-authored `part.origin` pivot joins the gate (a `3e38` binary
+  origin would overflow `pivot + offset` identically — same defect
+  shape, sibling record family).
+
+## Evidence
+
+- `mm2_formats` tests green, incl.
+  `camtrack::beyond_bound_fields_are_named_and_read_unauthored`
+  (verbatim retention, `validate` naming with the distinct bound
+  message, accessors unauthored, ±bound edge legs),
+  `dash::beyond_bound_fields_are_named_and_read_unauthored` (asnode +
+  campovcs legs).
+- `mm2_app` suites green, incl.
+  `camtrack::overflowing_authored_fields_fall_back_to_the_designed_boom`
+  (`3e38` TrackTo/MaxDist/etc → designed lens values + 60 finite
+  `chase_follow` frames at speed),
+  `dash::overflowing_asnode_reads_unauthored` (synthetic hostile
+  `_dash.asnode` + `3e38` `campovcs` eye through the real VFS; parked
+  sweep, `WheelFact` 1.0, all spawned transforms finite through
+  `drive_dash`), `mirror::overflowing_authored_pov_fields_fall_back`.
+- Retail audit (`fnv1a64:e91e6cd4b2ae30d9`, read-only): all 119
+  authored camera/dash records re-dumped — 4,550 numeric tokens, zero
+  non-finite, max `|v|` = `CameraFar 1330` → the `1e6` bound rejects
+  nothing authored.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --locked --workspace` — all suites green (exit 0).
+
+## Classification / remaining open items
+
+- Implementation choice throughout — `USABLE_BOUND` is a designed
+  overflow guard, not a plausibility claim about the original's own
+  limits (unrecovered). Sincere mods under ±1e6 still bind verbatim.
+- No GPU/rendered/audio/network evidence this slice; none claimed —
+  finiteness verified on component values in headless Bevy worlds.
+- Still open: `authored-numbers.md` S1–S5 speculative list, the
+  F19-A.4 ped sweep caveat; `PovCamSpec::track_to` still has no
+  consumer (validated, kept verbatim); `DashSpec::gear_pivot_offset`
+  likewise. `part.origin` is bounded at this consumer only — a wider
+  pkg/mtx sweep is not claimed.
+
+---
+
 # Last iteration — authored-numbers robustness: finite-gate the rest
 # of the camera/dash spec family (iteration 004, run 20260929T174954)
 
