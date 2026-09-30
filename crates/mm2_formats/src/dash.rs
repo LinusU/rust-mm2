@@ -204,10 +204,11 @@ impl DashSpec {
     }
 
     /// Record-level problems a loader should report — every typed
-    /// field must be finite or absent. Reported, never silently
-    /// repaired: the raw fields stay verbatim on the record and the
-    /// app reads a non-finite value as unauthored (the needle parks,
-    /// the designed placement/factor stands in).
+    /// field must be finite and within
+    /// [`USABLE_BOUND`](crate::camtrack::USABLE_BOUND), or absent.
+    /// Reported, never silently repaired: the raw fields stay verbatim
+    /// on the record and the app reads an unusable value as unauthored
+    /// (the needle parks, the designed placement/factor stands in).
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
         for (name, v) in [
@@ -223,26 +224,27 @@ impl DashSpec {
             ("WheelPivotOffset", self.wheel_pivot_offset),
             ("GearPivotOffset", self.gear_pivot_offset),
         ] {
-            if let Some(v) = v
-                && !crate::camtrack::finite3(&v)
-            {
-                issues.push(format!("{name} {v:?} is not finite"));
+            if let Some(v) = v {
+                issues.extend(crate::camtrack::vec_issue(name, &v));
             }
         }
-        if let Some(f) = self.wheel_fact
-            && !f.is_finite()
-        {
-            issues.push(format!("WheelFact {f} is not finite"));
+        if let Some(f) = self.wheel_fact {
+            issues.extend(crate::camtrack::scalar_issue("WheelFact", f));
         }
         for (name, pair) in [
             ("RPMRotMin/RPMRotMax", self.rpm_rot),
             ("SpeedRotMin/SpeedRotMax", self.speed_rot),
             ("DamageRotMin/DamageRotMax", self.damage_rot),
         ] {
-            if let Some((lo, hi)) = pair
-                && !(lo.is_finite() && hi.is_finite())
-            {
-                issues.push(format!("{name} ({lo}, {hi}) is not finite"));
+            if let Some((lo, hi)) = pair {
+                if !(lo.is_finite() && hi.is_finite()) {
+                    issues.push(format!("{name} ({lo}, {hi}) is not finite"));
+                } else if !(crate::camtrack::usable_f32(lo) && crate::camtrack::usable_f32(hi)) {
+                    issues.push(format!(
+                        "{name} ({lo}, {hi}) exceeds the usable bound ±{}",
+                        crate::camtrack::USABLE_BOUND
+                    ));
+                }
             }
         }
         issues
@@ -292,45 +294,49 @@ impl PovCamSpec {
             .filter(|&f| crate::camtrack::drawable_fov(f))
     }
 
-    /// `Offset` when authored *and* finite — a `nan`/`inf` component
+    /// `Offset` when authored *and*
+    /// [`usable3`](crate::camtrack::usable3) — a `nan`/`inf` component
     /// would poison the cockpit eye and every anchor derived from it
-    /// (and the mirror strip's eye), so it reads unauthored. The raw
+    /// (and the mirror strip's eye), and a beyond-bound component would
+    /// overflow the composed anchors, so it reads unauthored. The raw
     /// field stays verbatim; [`Self::validate`] names it.
     pub fn offset_vec(&self) -> Option<[f32; 3]> {
-        self.offset.filter(crate::camtrack::finite3)
+        crate::camtrack::usable_vec(self.offset)
     }
 
-    /// `ReverseOffset` when authored *and* finite — see
+    /// `ReverseOffset` when authored *and* usable — see
     /// [`Self::offset_vec`].
     pub fn reverse_offset_vec(&self) -> Option<[f32; 3]> {
-        self.reverse_offset.filter(crate::camtrack::finite3)
+        crate::camtrack::usable_vec(self.reverse_offset)
     }
 
-    /// `Pitch` when authored *and* finite — a `nan` tilt poisons the
+    /// `Pitch` when authored *and* usable — a `nan` tilt poisons the
     /// cockpit camera rotation, so it reads unauthored (level).
     /// [`Self::validate`] names it.
     pub fn pitch_rad(&self) -> Option<f32> {
-        self.pitch.filter(|f| f.is_finite())
+        crate::camtrack::usable1(self.pitch)
     }
 
-    /// `CameraNear` when authored *and* finite — a `nan` survives
+    /// `CameraNear` when authored *and* usable — a `nan` survives
     /// `f32::clamp` into the projection, so it reads unauthored.
     /// [`Self::validate`] names it.
     pub fn camera_near_m(&self) -> Option<f32> {
-        self.camera_near.filter(|f| f.is_finite())
+        crate::camtrack::usable1(self.camera_near)
     }
 
-    /// `CameraFar` when authored *and* finite — a `nan` through a
+    /// `CameraFar` when authored *and* usable — a `nan` through a
     /// `.max(1.0)` sink becomes a 1 m far plane, so it reads
     /// unauthored. [`Self::validate`] names it.
     pub fn camera_far_m(&self) -> Option<f32> {
-        self.camera_far.filter(|f| f.is_finite())
+        crate::camtrack::usable1(self.camera_far)
     }
 
     /// Record-level problems a loader should report — every typed
-    /// field must be finite or absent (`CameraFOV` additionally must
-    /// sit inside the drawable range). Reported, never silently
-    /// repaired: the raw fields stay verbatim on the record.
+    /// field must be finite and within
+    /// [`USABLE_BOUND`](crate::camtrack::USABLE_BOUND), or absent
+    /// (`CameraFOV` additionally must sit inside the drawable range).
+    /// Reported, never silently repaired: the raw fields stay verbatim
+    /// on the record.
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
         for (name, v) in [
@@ -338,10 +344,8 @@ impl PovCamSpec {
             ("ReverseOffset", self.reverse_offset),
             ("TrackTo", self.track_to),
         ] {
-            if let Some(v) = v
-                && !crate::camtrack::finite3(&v)
-            {
-                issues.push(format!("{name} {v:?} is not finite"));
+            if let Some(v) = v {
+                issues.extend(crate::camtrack::vec_issue(name, &v));
             }
         }
         for (name, v) in [
@@ -349,10 +353,8 @@ impl PovCamSpec {
             ("CameraNear", self.camera_near),
             ("CameraFar", self.camera_far),
         ] {
-            if let Some(v) = v
-                && !v.is_finite()
-            {
-                issues.push(format!("{name} {v} is not finite"));
+            if let Some(v) = v {
+                issues.extend(crate::camtrack::scalar_issue(name, v));
             }
         }
         if let Some(f) = self.camera_fov
@@ -416,11 +418,12 @@ mod tests {
         assert!(s.extra_fields.is_empty());
     }
 
-    /// Every typed `asNode` field must be finite or absent — a
-    /// `nan`/`inf` stays verbatim on the record but is named by
-    /// `validate` so the app can read it as unauthored (the needle
-    /// parks, the designed placement stands in) instead of writing a
-    /// NaN transform.
+    /// Every typed `asNode` field must be usable (finite, within
+    /// [`USABLE_BOUND`](crate::camtrack::USABLE_BOUND)) or absent — a
+    /// `nan`/`inf`/astronomical value stays verbatim on the record but
+    /// is named by `validate` so the app can read it as unauthored
+    /// (the needle parks, the designed placement stands in) instead of
+    /// writing a NaN/`inf` transform.
     #[test]
     fn dash_spec_non_finite_fields_are_named() {
         let s = DashSpec::parse(
@@ -486,5 +489,42 @@ mod tests {
         assert_eq!(s.pitch_rad(), Some(0.02));
         assert_eq!(s.camera_near_m(), Some(0.1));
         assert_eq!(s.camera_far_m(), Some(600.0));
+    }
+
+    /// Finite-but-overflowing values — `3e38`-class components — get
+    /// the same unauthored read: two finite placements summing past
+    /// `f32::MAX` would still write an `inf` translation, so the gate
+    /// bounds magnitude, not just finiteness
+    /// ([`crate::camtrack::USABLE_BOUND`]).
+    #[test]
+    fn beyond_bound_fields_are_named_and_read_unauthored() {
+        let s = DashSpec::parse(
+            "type: a\nasNode {\n  DashPos 3e38 -0.6 -0.78\n  SpeedPivotOffset 2e6 0.0 0.0\n  WheelFact 1e9\n  SpeedRotMin 0.0\n  SpeedRotMax 3e38\n}\n",
+        )
+        .unwrap();
+        // Verbatim on the record — reported, not repaired.
+        assert_eq!(s.dash_pos.unwrap()[0], 3e38);
+        let issues = s.validate();
+        let named: Vec<&str> = issues
+            .iter()
+            .map(|i| i.split(' ').next().unwrap())
+            .collect();
+        for name in [
+            "DashPos",
+            "SpeedPivotOffset",
+            "WheelFact",
+            "SpeedRotMin/SpeedRotMax",
+        ] {
+            assert!(named.contains(&name), "{name} not named: {named:?}");
+        }
+        let s = PovCamSpec::parse(
+            "type: a\ncamPovCS {\n  Offset 3e38 1.0 0.0\n  ReverseOffset 0.0 2e6 0.0\n  Pitch 1e9\n  CameraFar 3e38\n}\n",
+        )
+        .unwrap();
+        assert_eq!(s.offset_vec(), None);
+        assert_eq!(s.reverse_offset_vec(), None);
+        assert_eq!(s.pitch_rad(), None);
+        assert_eq!(s.camera_far_m(), None);
+        assert_eq!(s.validate().len(), 4);
     }
 }

@@ -84,18 +84,17 @@ pub struct ChaseLens {
 impl ChaseLens {
     /// Distill an authored `camTrackCS` record. Missing fields take
     /// designed defaults — a sparse record still binds. Every field
-    /// reads through the spec's finite-checked accessors (a `nan`/
-    /// `inf` authored value reads unauthored and `validate` names it):
-    /// a non-finite `Offset` would poison the rest length into a NaN
-    /// boom, and a `nan` `CameraFar` through a `.max(1.0)` sink would
-    /// silently clamp the far plane to a metre.
+    /// reads through the spec's usable-checked accessors — a `nan`/
+    /// `inf` or beyond-[`USABLE_BOUND`](mm2_formats::camtrack::USABLE_BOUND)
+    /// authored value reads unauthored and `validate` names it: a
+    /// non-finite `Offset` would poison the rest length into a NaN
+    /// boom, a `3e38` `TrackTo` would overflow `veh_rot * aim` into a
+    /// non-finite look target, and a `nan` `CameraFar` through a
+    /// `.max(1.0)` sink would silently clamp the far plane to a metre.
     pub fn authored(spec: &TrackCamSpec) -> Self {
         let offset = spec
             .offset_vec()
             .map(Vec3::from)
-            // An astronomical-but-finite anchor can still overflow the
-            // length into `inf` — that reads unauthored too.
-            .filter(|v| v.length().is_finite())
             .unwrap_or(Vec3::new(0.0, 1.8, 5.0));
         let rest = offset.length();
         let min_max_on = spec.min_max_gated();

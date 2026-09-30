@@ -693,6 +693,66 @@ fn non_finite_authored_fields_fall_back_to_the_designed_boom() {
     );
 }
 
+/// The same contract covers finite-but-overflowing values — the
+/// iteration-005 review residual: a `3e38` `TrackTo` has finite
+/// components, yet `veh_rot * aim` can still reach `inf` inside the
+/// quaternion product (NaN rotation via `look_at`), and a `3e38`
+/// `MaxDist` overflows `dir * dist` into an `inf` boom target. Past
+/// `USABLE_BOUND` every field reads unauthored, so the tracker below
+/// only ever composes designed values.
+#[test]
+fn overflowing_authored_fields_fall_back_to_the_designed_boom() {
+    let mut spec = TrackCamSpec::parse(NEAR_TEXT).unwrap();
+    spec.offset = Some([3e38, 1.0, 4.0]);
+    spec.track_to = Some([3e38, 0.0, 0.0]); // finite *length*, still unusable
+    spec.min_dist = Some(3e38);
+    spec.max_dist = Some(3e38);
+    spec.min_speed = Some(2e6);
+    spec.max_speed = Some(3e38);
+    spec.camera_far = Some(3e38);
+    spec.collide_type = Some(1e9);
+    spec.min_max_on = Some(1e9);
+    let lens = ChaseLens::authored(&spec);
+    let rest = Vec3::new(0.0, 1.8, 5.0).length();
+    assert_eq!(lens.offset, Vec3::new(0.0, 1.8, 5.0));
+    assert_eq!(
+        lens.aim,
+        Vec3::new(0.0, 1.0, 0.0),
+        "a finite-but-overflowing TrackTo reads unauthored"
+    );
+    assert_eq!(lens.dist_min, 0.0);
+    assert_eq!(lens.dist_max, rest);
+    assert_eq!(lens.speed_min, 0.0);
+    assert_eq!(lens.speed_max, 0.0);
+    assert!(!lens.collide, "a beyond-bound flag reads off");
+    assert_eq!(lens.clip_far, 600.0);
+    for issue in spec.validate() {
+        assert!(issue.contains("exceeds the usable bound"), "{issue}");
+    }
+
+    // And the tracker never produces a non-finite pose from it.
+    let mut app = base_app(CameraMode::Chase);
+    app.add_systems(Update, chase_follow);
+    spawn_vehicle(&mut app, Vec3::ZERO, Vec3::new(0.0, 0.0, -30.0));
+    let cam = spawn_chase(
+        &mut app,
+        ChaseCamera {
+            near: lens,
+            far: None,
+            ..Default::default()
+        },
+        true,
+    );
+    for _ in 0..60 {
+        app.update();
+    }
+    let xf = app.world().get::<Transform>(cam).unwrap();
+    assert!(
+        xf.translation.is_finite() && xf.rotation.is_finite(),
+        "boom from an overflowing spec stays finite, got {xf:?}"
+    );
+}
+
 /// A jump the frame delta cannot explain — the `R` reset's
 /// `ResetVehicle` teleport, a water/stuck/disabled recovery or a
 /// scripted re-anchor — snaps the boom to the new target on the next

@@ -119,24 +119,70 @@ pub(crate) fn drawable_fov(f: f32) -> bool {
     f.is_finite() && f > 0.0 && f < 180.0
 }
 
-/// Every component finite — the gate for authored vectors that feed
-/// transforms and camera math (`Offset`, `TrackTo`, the `_dash.asnode`
-/// placements). Shared by the `camTrackCS`, `camPovCS` and `asNode`
-/// decoders.
-pub(crate) fn finite3(v: &[f32; 3]) -> bool {
-    v.iter().all(|c| c.is_finite())
+/// Designed magnitude bound for the record family's other typed fields
+/// (implementation choice — the original's own guard, if any, is
+/// unrecovered). Component finiteness alone leaves an overflow
+/// residual: `3e38 + 3e38`, a `(max − min) * frac` sweep over ±3e38
+/// bounds, and the intermediate product sums inside `Quat * Vec3` all
+/// reach `inf` from finite inputs, so a field also reads unauthored
+/// past this bound. `1e6` sits orders above anything authored — the
+/// largest retail value in the family is `CameraFar 1330` — and
+/// orders below `f32::MAX`, so the composed transforms, projections
+/// and sweeps cannot overflow.
+pub const USABLE_BOUND: f32 = 1e6;
+
+/// A scalar is usable only when finite *and* within [`USABLE_BOUND`].
+pub fn usable_f32(v: f32) -> bool {
+    v.is_finite() && v.abs() <= USABLE_BOUND
 }
 
-/// A scalar field reads `Some` only when authored *and* finite —
-/// `nan`/`inf`/overflowing literals read as unauthored so consumers
-/// take their designed defaults; [`validate`](TrackCamSpec::validate)
-/// names the field instead of repairing it.
-fn finite1(v: Option<f32>) -> Option<f32> {
-    v.filter(|f| f.is_finite())
+/// A scalar field reads `Some` only when authored *and* [`usable_f32`]
+/// — `nan`/`inf`/overflowing literals and beyond-bound values read as
+/// unauthored so consumers take their designed defaults;
+/// [`validate`](TrackCamSpec::validate) names the field instead of
+/// repairing it.
+pub fn usable1(v: Option<f32>) -> Option<f32> {
+    v.filter(|f| usable_f32(*f))
 }
 
-fn finite_vec(v: Option<[f32; 3]>) -> Option<[f32; 3]> {
-    v.filter(finite3)
+/// Every component [`usable_f32`] — the gate for authored vectors that
+/// feed transforms and camera math (`Offset`, `TrackTo`, the
+/// `_dash.asnode` placements). Shared by the `camTrackCS`, `camPovCS`
+/// and `asNode` decoders and their app-side readers.
+pub fn usable3(v: &[f32; 3]) -> bool {
+    v.iter().all(|c| usable_f32(*c))
+}
+
+/// [`usable3`] as an `Option` filter — see [`usable1`].
+pub fn usable_vec(v: Option<[f32; 3]>) -> Option<[f32; 3]> {
+    v.filter(usable3)
+}
+
+/// The `validate` wording for a vec3 field — `None` when usable.
+/// Shared across the family's decoders.
+pub(crate) fn vec_issue(name: &str, v: &[f32; 3]) -> Option<String> {
+    if !v.iter().all(|c| c.is_finite()) {
+        Some(format!("{name} {v:?} is not finite"))
+    } else if !usable3(v) {
+        Some(format!(
+            "{name} {v:?} exceeds the usable bound ±{USABLE_BOUND}"
+        ))
+    } else {
+        None
+    }
+}
+
+/// [`vec_issue`] for a scalar field.
+pub(crate) fn scalar_issue(name: &str, v: f32) -> Option<String> {
+    if !v.is_finite() {
+        Some(format!("{name} {v} is not finite"))
+    } else if !usable_f32(v) {
+        Some(format!(
+            "{name} {v} exceeds the usable bound ±{USABLE_BOUND}"
+        ))
+    } else {
+        None
+    }
 }
 
 fn vec3(block: &crate::tune::TuneBlock, name: &str) -> Option<[f32; 3]> {
@@ -224,78 +270,82 @@ impl TrackCamSpec {
         self.camera_fov.filter(|&f| drawable_fov(f))
     }
 
-    /// `Offset` when authored *and* finite — a `nan`/`inf` component
-    /// would poison the boom's rest length (and through it the whole
-    /// chase transform), so it reads unauthored instead. The raw field
-    /// stays verbatim; [`Self::validate`] names it.
+    /// `Offset` when authored *and* [`usable3`] — a `nan`/`inf`
+    /// component would poison the boom's rest length (and through it
+    /// the whole chase transform), and a beyond-bound component would
+    /// overflow the composed pose, so it reads unauthored instead. The
+    /// raw field stays verbatim; [`Self::validate`] names it.
     pub fn offset_vec(&self) -> Option<[f32; 3]> {
-        finite_vec(self.offset)
+        usable_vec(self.offset)
     }
 
-    /// `TrackTo` when authored *and* finite — see [`Self::offset_vec`].
+    /// `TrackTo` when authored *and* [`usable3`] — see
+    /// [`Self::offset_vec`]. An astronomical-but-finite aim would
+    /// overflow `veh_rot * aim` into a non-finite look target.
     pub fn track_to_vec(&self) -> Option<[f32; 3]> {
-        finite_vec(self.track_to)
+        usable_vec(self.track_to)
     }
 
     /// `MinDist`/`MaxDist`/`MinSpeed`/`MaxSpeed`/`CameraNear`/
-    /// `CameraFar` when authored *and* finite — the non-finite reads
-    /// that a `.max()` sink would silently coerce (a `nan`
-    /// `CameraFar` becomes a 1 m far plane) instead read unauthored.
-    /// [`Self::validate`] names the field.
+    /// `CameraFar` when authored *and* [`usable_f32`] — the non-finite
+    /// reads that a `.max()` sink would silently coerce (a `nan`
+    /// `CameraFar` becomes a 1 m far plane) instead read unauthored,
+    /// as does a beyond-bound value that could overflow the composed
+    /// boom length. [`Self::validate`] names the field.
     pub fn min_dist_m(&self) -> Option<f32> {
-        finite1(self.min_dist)
+        usable1(self.min_dist)
     }
 
     /// [`Self::min_dist_m`] for `MaxDist`.
     pub fn max_dist_m(&self) -> Option<f32> {
-        finite1(self.max_dist)
+        usable1(self.max_dist)
     }
 
     /// [`Self::min_dist_m`] for `MinSpeed`.
     pub fn min_speed_mps(&self) -> Option<f32> {
-        finite1(self.min_speed)
+        usable1(self.min_speed)
     }
 
     /// [`Self::min_dist_m`] for `MaxSpeed`.
     pub fn max_speed_mps(&self) -> Option<f32> {
-        finite1(self.max_speed)
+        usable1(self.max_speed)
     }
 
     /// [`Self::min_dist_m`] for `CameraNear`.
     pub fn camera_near_m(&self) -> Option<f32> {
-        finite1(self.camera_near)
+        usable1(self.camera_near)
     }
 
     /// [`Self::min_dist_m`] for `CameraFar`.
     pub fn camera_far_m(&self) -> Option<f32> {
-        finite1(self.camera_far)
+        usable1(self.camera_far)
     }
 
-    /// `CollideType` as the authored gate: nonzero *and* finite. A
-    /// `nan` flag reads `!= 0.0` — true — so the unguarded read would
-    /// silently enable the occlusion pull-in; a non-finite value reads
-    /// unauthored (off) and [`Self::validate`] names it.
+    /// `CollideType` as the authored gate: nonzero *and*
+    /// [`usable_f32`]. A `nan` flag reads `!= 0.0` — true — so the
+    /// unguarded read would silently enable the occlusion pull-in; an
+    /// unusable value reads unauthored (off) and [`Self::validate`]
+    /// names it.
     pub fn collides(&self) -> bool {
-        finite1(self.collide_type).is_some_and(|c| c != 0.0)
+        usable1(self.collide_type).is_some_and(|c| c != 0.0)
     }
 
     /// `MinMaxOn` as the authored gate on the `MinDist`/`MaxDist`
-    /// clamp — same non-finite rule as [`Self::collides`].
+    /// clamp — same unusable-field rule as [`Self::collides`].
     pub fn min_max_gated(&self) -> bool {
-        finite1(self.min_max_on).is_some_and(|v| v != 0.0)
+        usable1(self.min_max_on).is_some_and(|v| v != 0.0)
     }
 
     /// Record-level problems a loader should report — every typed
-    /// field must be finite or absent (`CameraFOV` additionally must
-    /// sit inside the drawable range). Reported, never silently
-    /// repaired: the raw fields stay verbatim on the record.
+    /// field must be finite and within [`USABLE_BOUND`], or absent
+    /// (`CameraFOV` additionally must sit inside the drawable range).
+    /// Reported, never silently repaired: the raw fields stay verbatim
+    /// on the record.
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
         for (name, v) in [("Offset", self.offset), ("TrackTo", self.track_to)] {
-            if let Some(v) = v
-                && !finite3(&v)
-            {
-                issues.push(format!("{name} {v:?} is not finite"));
+            if let Some(v) = v {
+                issues.extend(vec_issue(name, &v));
             }
         }
         for (name, v) in [
@@ -314,10 +364,8 @@ impl TrackCamSpec {
             ("CameraNear", self.camera_near),
             ("CameraFar", self.camera_far),
         ] {
-            if let Some(v) = v
-                && !v.is_finite()
-            {
-                issues.push(format!("{name} {v} is not finite"));
+            if let Some(v) = v {
+                issues.extend(scalar_issue(name, v));
             }
         }
         if let Some(f) = self.camera_fov
@@ -475,5 +523,76 @@ mod tests {
         assert_eq!(s.max_speed_mps(), Some(15.35));
         assert_eq!(s.camera_near_m(), Some(0.5));
         assert_eq!(s.camera_far_m(), Some(600.0));
+    }
+
+    /// The gate also rejects finite-but-overflowing values: a `3e38`
+    /// `TrackTo` has finite components yet `veh_rot * aim` can still
+    /// reach `inf` inside the quaternion product, and a `3e38`
+    /// `MaxDist` overflows `dir * dist` the same way — so past
+    /// [`USABLE_BOUND`] a field reads unauthored and `validate` names
+    /// it. The bound sits far above anything authored (retail max is
+    /// `CameraFar 1330`).
+    #[test]
+    fn beyond_bound_fields_are_named_and_read_unauthored() {
+        let s = TrackCamSpec::parse(
+            "type: a\ncamTrackCS {\n  Offset 0.0 2e6 4.0\n  TrackTo 3e38 0.0 0.0\n  CollideType 1e9\n  MinMaxOn 3e38\n  TrackBreak 1e9\n  MinDist -2e6\n  MaxDist 3e38\n  MinSpeed 2e6\n  MaxSpeed 1e9\n  LookAbove 3e38\n  CameraNear 2e6\n  CameraFar 1e7\n}\n",
+        )
+        .unwrap();
+        // Verbatim on the record — reported, not repaired.
+        assert_eq!(s.track_to.unwrap()[0], 3e38);
+        assert_eq!(s.offset_vec(), None);
+        assert_eq!(s.track_to_vec(), None);
+        assert!(!s.collides(), "beyond-bound CollideType must read off");
+        assert!(!s.min_max_gated());
+        assert_eq!(s.min_dist_m(), None);
+        assert_eq!(s.max_dist_m(), None);
+        assert_eq!(s.min_speed_mps(), None);
+        assert_eq!(s.max_speed_mps(), None);
+        assert_eq!(s.camera_near_m(), None);
+        assert_eq!(s.camera_far_m(), None);
+        let issues = s.validate();
+        let named: Vec<&str> = issues
+            .iter()
+            .map(|i| i.split(' ').next().unwrap())
+            .collect();
+        for name in [
+            "Offset",
+            "TrackTo",
+            "CollideType",
+            "MinMaxOn",
+            "TrackBreak",
+            "MinDist",
+            "MaxDist",
+            "MinSpeed",
+            "MaxSpeed",
+            "LookAbove",
+            "CameraNear",
+            "CameraFar",
+        ] {
+            assert!(named.contains(&name), "{name} not named: {issues:?}");
+        }
+        assert!(
+            issues
+                .iter()
+                .all(|i| i.contains("exceeds the usable bound")),
+            "finite beyond-bound values are named as such: {issues:?}"
+        );
+
+        // The bound's own edge: ±USABLE_BOUND binds, past it reads
+        // unauthored.
+        let edge = |v: f32| {
+            TrackCamSpec::parse(&format!(
+                "type: a\ncamTrackCS {{\n  MaxDist {v}\n  TrackTo 0.0 {v} 0.0\n}}\n"
+            ))
+            .unwrap()
+        };
+        let s = edge(USABLE_BOUND);
+        assert_eq!(s.max_dist_m(), Some(USABLE_BOUND));
+        assert_eq!(s.track_to_vec().unwrap()[1], USABLE_BOUND);
+        assert!(s.validate().is_empty());
+        let s = edge(USABLE_BOUND * 1.01);
+        assert_eq!(s.max_dist_m(), None);
+        assert_eq!(s.track_to_vec(), None);
+        assert_eq!(s.validate().len(), 2);
     }
 }

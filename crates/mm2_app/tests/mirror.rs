@@ -538,3 +538,50 @@ fn non_finite_authored_pov_fields_fall_back() {
         other => panic!("expected perspective, got {other:?}"),
     }
 }
+
+/// Finite-but-overflowing authored values read unauthored the same
+/// way — a `3e38` eye is finite per component yet could still
+/// overflow the child's composed `GlobalTransform` (iteration-005's
+/// `USABLE_BOUND` gate).
+#[test]
+fn overflowing_authored_pov_fields_fall_back() {
+    let mut app = base_app(SessionPhase::Playing);
+    let vehicle = app.world_mut().spawn(PlayerVehicle).id();
+    let pov = PovCamSpec {
+        offset: Some([3e38, 1.19, -0.55]),
+        camera_far: Some(1e7),
+        ..PovCamSpec::default()
+    };
+    let strip = {
+        let mut queue = CommandQueue::default();
+        let strip = {
+            let mut commands = Commands::new(&mut queue, app.world_mut());
+            spawn_mirror(
+                &mut commands,
+                Some(&pov),
+                Vec3::new(0.0, 9.9, 9.9),
+                vehicle,
+                SessionEntity(1),
+                None,
+            )
+        };
+        queue.apply(app.world_mut());
+        strip
+    };
+    let w = app.world();
+    assert_eq!(
+        w.get::<Transform>(strip).unwrap().translation,
+        Vec3::new(0.0, 9.9, 9.9),
+        "a finite-but-overflowing Offset reads unauthored"
+    );
+    match w.get::<Projection>(strip).unwrap() {
+        Projection::Perspective(p) => {
+            assert!(
+                (p.far - 600.0).abs() < 1e-6,
+                "beyond-bound far → 600, got {}",
+                p.far
+            );
+        }
+        other => panic!("expected perspective, got {other:?}"),
+    }
+}

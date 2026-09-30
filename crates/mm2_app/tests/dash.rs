@@ -1138,3 +1138,107 @@ fn hostile_asnode_reads_unauthored() {
         );
     }
 }
+
+/// The finite-but-overflowing residual (iteration-005): `3e38`-class
+/// placements have finite components, yet `eye + DashPos` or the
+/// `pivot + offset + pivot_offset` chain can still reach `inf`, and a
+/// ±3e38 needle sweep overflows `(max − min) * frac`. Past
+/// `USABLE_BOUND` each field reads unauthored — same contract as the
+/// non-finite case above.
+#[test]
+fn overflowing_asnode_reads_unauthored() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("tune")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("geometry")).unwrap();
+    std::fs::write(
+        tmp.path().join("tune/x_dash.asnode"),
+        "type: a\nasNode {\n  DashPos 3e38 -0.6 -0.78\n  RoofPos 0.0 2e6 0.0\n  WheelPos 0.0 1e9 0.0\n  SpeedRotMin 0.0\n  SpeedRotMax 3e38\n  WheelFact 1e9\n}\n",
+    )
+    .unwrap();
+    std::fs::write(tmp.path().join("geometry/x_dash.pkg"), dash_pkg()).unwrap();
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(tmp.path(), 0).unwrap();
+
+    let mut app = base_app();
+    app.init_resource::<Assets<Mesh>>()
+        .init_resource::<Assets<Image>>()
+        .init_resource::<Assets<StandardMaterial>>()
+        .add_systems(Update, drive_dash);
+    let config = test_config();
+    let mut state = VehicleState::new(&config);
+    state.forward_speed = 25.0;
+    state.steer_angle = 0.25;
+    state.direction = DriveDirection::Forward;
+    let vehicle = spawn_player(&mut app, &config, state);
+
+    // A `3e38` campovcs eye reads unauthored too — its transform is a
+    // rigid child whose GlobalTransform product could still overflow.
+    let pov = PovCamSpec {
+        offset: Some([3e38, 1.19, -0.55]),
+        ..PovCamSpec::default()
+    };
+    let report = app
+        .world_mut()
+        .resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
+                world.resource_scope(|world, mut materials: Mut<Assets<StandardMaterial>>| {
+                    let mut queue = CommandQueue::default();
+                    let report = {
+                        let mut commands = Commands::new(&mut queue, world);
+                        spawn_dash(
+                            &mut commands,
+                            &vfs,
+                            "x",
+                            0,
+                            Some(pov),
+                            &mut meshes,
+                            &mut images,
+                            &mut materials,
+                            vehicle,
+                            SessionEntity(1),
+                            CameraMode::Cockpit,
+                            None,
+                        )
+                    };
+                    queue.apply(world);
+                    report
+                })
+            })
+        });
+    assert_eq!(report.parts, 2, "both authored parts bound: {report}");
+
+    let mut q = app.world_mut().query::<&CockpitCamera>();
+    let cam = q.single(app.world()).unwrap();
+    assert_eq!(cam.offset, Vec3::ZERO, "3e38 Offset reads unauthored");
+
+    let mut q = app.world_mut().query::<&DashNode>();
+    let mut saw_speed = false;
+    let mut saw_wheel = false;
+    for node in q.iter(app.world()) {
+        match &node.role {
+            DashRole::Speed { min, max } => {
+                saw_speed = true;
+                assert_eq!((*min, *max), (0.0, 0.0), "overflow sweep → parked");
+            }
+            DashRole::Wheel { factor } => {
+                saw_wheel = true;
+                assert_eq!(*factor, 1.0, "1e9 WheelFact → designed 1.0");
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_speed && saw_wheel);
+
+    // Every spawned cockpit transform is finite, and stays finite once
+    // the needles drive off live vehicle state.
+    app.update();
+    let mut q = app
+        .world_mut()
+        .query_filtered::<&Transform, With<CockpitPart>>();
+    for t in q.iter(app.world()) {
+        assert!(
+            t.translation.is_finite() && t.rotation.is_finite(),
+            "overflowing asnode produced a non-finite transform: {t:?}"
+        );
+    }
+}

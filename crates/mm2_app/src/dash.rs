@@ -41,6 +41,7 @@ use bevy::prelude::*;
 use mm2_assets::Vfs;
 use mm2_content::model::{ModelPart, VehicleModel, build_model};
 use mm2_formats::{
+    camtrack::{usable_f32, usable_vec, usable1, usable3},
     dash::{DashSpec, PovCamSpec},
     mtx::Mtx,
     pkg::Pkg,
@@ -197,13 +198,15 @@ pub fn load_pov_cam(vfs: &Vfs, car: &str) -> Option<PovCamSpec> {
     Some(spec)
 }
 
-/// Authored `[f32; 3]` → `Vec3`; a non-finite component reads as
-/// unauthored (`Vec3::ZERO`) — the record's `validate` names the
-/// field instead of repairing it (the `camera_fov_deg` contract).
+/// Authored `[f32; 3]` → `Vec3`; an unusable value (non-finite or
+/// beyond [`USABLE_BOUND`](mm2_formats::camtrack::USABLE_BOUND)) reads
+/// as unauthored (`Vec3::ZERO`) — the
+/// record's `validate` names the field instead of repairing it (the
+/// `camera_fov_deg` contract). The bound, not bare finiteness, is what
+/// keeps `eye + field` sums and pivot chains from overflowing to
+/// `inf` on finite-but-astronomical components.
 fn v3(f: Option<[f32; 3]>) -> Vec3 {
-    f.filter(|v| v.iter().all(|c| c.is_finite()))
-        .map(Vec3::from)
-        .unwrap_or(Vec3::ZERO)
+    usable_vec(f).map(Vec3::from).unwrap_or(Vec3::ZERO)
 }
 
 /// Load and spawn the authored cockpit rig under `vehicle`.
@@ -320,17 +323,25 @@ pub fn spawn_dash(
                 ))
                 .id();
             commands.entity(vehicle).add_child(roof_root);
-            // A non-finite authored sweep reads unauthored — the
-            // needle parks at (0, 0) instead of rotating to NaN.
+            // An unusable authored sweep reads unauthored — the
+            // needle parks at (0, 0) instead of rotating to NaN
+            // (`(max − min) * frac` overflows on ±3e38 bounds).
             let rot = |r: Option<(f32, f32)>| {
-                r.filter(|(a, b)| a.is_finite() && b.is_finite())
+                r.filter(|(a, b)| usable_f32(*a) && usable_f32(*b))
                     .unwrap_or((0.0, 0.0))
             };
             let (speed_min, speed_max) = rot(spec.speed_rot);
             let (rpm_min, rpm_max) = rot(spec.rpm_rot);
             let (dmg_min, dmg_max) = rot(spec.damage_rot);
             for part in &model.parts {
-                let pivot = part.origin.map(Vec3::from).unwrap_or(Vec3::ZERO);
+                // The pkg/mtx-authored pivot shares the gate — an
+                // astronomical origin would overflow `pivot + offset`
+                // the same way the text records could.
+                let pivot = part
+                    .origin
+                    .filter(usable3)
+                    .map(Vec3::from)
+                    .unwrap_or(Vec3::ZERO);
                 let (parent, node_pos, child_off, role) = match part.name.as_str() {
                     "speed_needle" => (
                         cluster,
@@ -364,7 +375,7 @@ pub fn spawn_dash(
                         pivot + v3(spec.wheel_pos) + v3(spec.wheel_pivot_offset),
                         -(pivot + v3(spec.wheel_pivot_offset)),
                         Some(DashRole::Wheel {
-                            factor: spec.wheel_fact.filter(|f| f.is_finite()).unwrap_or(1.0),
+                            factor: usable1(spec.wheel_fact).unwrap_or(1.0),
                         }),
                     ),
                     "roof" => (roof_root, Vec3::ZERO, Vec3::ZERO, None),
