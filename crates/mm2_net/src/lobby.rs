@@ -59,7 +59,8 @@ pub struct HostConfig {
     /// Remote-client ceiling. The default [`MAX_PLAYERS`] counts
     /// connections only — a host that is itself a player (MP-1's eight
     /// *total*) should pass `MAX_PLAYERS - 1`; a dedicated headless host
-    /// may keep the full eight.
+    /// may keep the full eight. Values above [`MAX_PLAYERS`] are
+    /// rejected at listen time — the wire roster cannot carry them.
     pub max_clients: u16,
 }
 
@@ -149,6 +150,11 @@ impl Host {
     }
 
     fn spawn(listener: TcpListener, config: &HostConfig) -> Result<Self, NetError> {
+        if config.max_clients > MAX_PLAYERS as u16 {
+            return Err(NetError::Config(
+                "max_clients exceeds the wire's MAX_PLAYERS bound",
+            ));
+        }
         let addr = listener.local_addr()?;
         let (tx, rx) = mpsc::channel();
         let (events_tx, events) = mpsc::channel();
@@ -417,7 +423,11 @@ fn run(
                     build: hello.build,
                 });
                 broadcast_roster(&mut players, &events);
-                spawn_reader(conn, id, tx.clone());
+                // The newcomer's own first roster send may have removed
+                // it as `Lost` — a departed slot gets no reader.
+                if players.contains_key(&id) {
+                    spawn_reader(conn, id, tx.clone());
+                }
             }
             LoopMsg::PeerMessage {
                 id,
@@ -432,6 +442,9 @@ fn run(
             LoopMsg::PeerMessage { .. } => {}
             LoopMsg::PeerGone { id, cause } => {
                 if let Some(slot) = players.remove(&id) {
+                    // The reporting reader already exited, but removal
+                    // always disconnects — no path leaves a live socket.
+                    slot.writer.disconnect();
                     let _ = events.send(HostEvent::Left {
                         id,
                         driver: slot.driver,
@@ -467,8 +480,11 @@ fn alloc_id(players: &BTreeMap<u16, Slot>, next_id: &mut u16) -> u16 {
 }
 
 /// Send the complete roster to every player. A failed write means the
-/// peer is gone: drop it as `Lost` and rebuild — each pass removes at
-/// least one player, so the resend loop terminates.
+/// peer is gone: disconnect it (waking its reader thread, which is still
+/// blocked in `recv` on the same socket — otherwise the thread, the fd
+/// and the client's dead-but-open connection all leak), drop it as
+/// `Lost` and rebuild — each pass removes at least one player, so the
+/// resend loop terminates.
 fn broadcast_roster(players: &mut BTreeMap<u16, Slot>, events: &Sender<HostEvent>) {
     loop {
         let msg = Message::Roster {
@@ -493,6 +509,7 @@ fn broadcast_roster(players: &mut BTreeMap<u16, Slot>, events: &Sender<HostEvent
         }
         for id in failed {
             if let Some(slot) = players.remove(&id) {
+                slot.writer.disconnect();
                 let _ = events.send(HostEvent::Left {
                     id,
                     driver: slot.driver,
@@ -820,6 +837,96 @@ mod tests {
             }
         });
         assert!(refused, "no join was refused while the flood held");
+    }
+
+    /// The iteration-010 review's zombie-drop defect: a broadcast write
+    /// failure removed the peer without disconnecting it — the `Writer`
+    /// drop left the reader thread blocked in `recv` on the same
+    /// socket, leaking the thread and the fd and leaving the client on
+    /// a dead-but-open connection. Here the roster fails *encode* (nine
+    /// entries over `MAX_PLAYERS`), so no bytes and no FIN reach the
+    /// peer — the assertions below can only pass if the removal path
+    /// itself disconnects the socket.
+    #[test]
+    fn a_failed_broadcast_disconnects_the_peer() {
+        use std::io::Read;
+
+        let listener = listen_loopback().unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut peer = TcpStream::connect(addr).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let conn = Conn::from_stream(server).unwrap();
+        // Nine slots sharing this one socket — the oversize roster fails
+        // every send before a byte is written.
+        let mut players = BTreeMap::new();
+        for id in 1..=9u16 {
+            players.insert(
+                id,
+                Slot {
+                    driver: format!("p{id}"),
+                    build: "b".to_string(),
+                    ready: false,
+                    writer: conn.writer().unwrap(),
+                },
+            );
+        }
+        // The production reader shape: blocked in `recv` for as long as
+        // the socket lives.
+        let (gone, check) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            let mut conn = conn;
+            let _ = conn.recv();
+            let _ = gone.send(());
+        });
+        let (events, rx) = mpsc::channel();
+
+        broadcast_roster(&mut players, &events);
+
+        assert!(players.is_empty());
+        for _ in 0..9 {
+            match rx.recv_timeout(WAIT) {
+                Ok(HostEvent::Left {
+                    cause: LeaveCause::Lost,
+                    ..
+                }) => {}
+                other => panic!("expected a Lost Left, got {other:?}"),
+            }
+        }
+        // The blocked reader woke — its thread and fd are reaped.
+        check
+            .recv_timeout(WAIT)
+            .expect("the departed peers' reader never woke");
+        reader.join().unwrap();
+        // And the peer is told: its socket reads EOF, not silence. No
+        // roster byte was ever sent, so only `disconnect` can do this.
+        peer.set_read_timeout(Some(WAIT)).unwrap();
+        let mut buf = [0u8; 8];
+        assert_eq!(peer.read(&mut buf).unwrap(), 0);
+    }
+
+    /// The iteration-010 review's config-validation defect: a
+    /// `max_clients` above the wire's `MAX_PLAYERS` bound admitted a
+    /// roster `Roster::encode` cannot represent — every broadcast then
+    /// failed `OversizeRoster` and mass-dropped the lobby as `Lost`,
+    /// with no diagnostic pointing at the config. It is rejected at
+    /// listen instead.
+    #[test]
+    fn an_over_cap_max_clients_is_rejected() {
+        let over = HostConfig {
+            gameplay_fingerprint: FP,
+            max_clients: MAX_PLAYERS as u16 + 1,
+        };
+        match Host::listen_loopback(&over) {
+            Err(NetError::Config(msg)) => assert!(msg.contains("max_clients"), "got {msg}"),
+            Err(e) => panic!("expected NetError::Config, got {e}"),
+            Ok(_) => panic!("an over-cap max_clients listened successfully"),
+        }
+        // The bound itself still listens.
+        Host::listen_loopback(&HostConfig {
+            gameplay_fingerprint: FP,
+            max_clients: MAX_PLAYERS as u16,
+        })
+        .unwrap();
     }
 
     #[test]

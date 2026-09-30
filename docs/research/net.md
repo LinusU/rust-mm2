@@ -105,24 +105,31 @@ client → Hello                     host   → Accept | Reject
   a stalled peer never blocks accepts), and a reader thread per
   admitted player forwarding `SetReady`/`Leave` and socket death.
 - The roster is a `BTreeMap<u16, Slot>`; ids mint monotonically from 1
-  and are never recycled (0 is reserved for the host player at the app
-  layer). `Welcome` carries the assigned slot; `Roster` is a complete
-  snapshot, not a delta, rebroadcast after every join/leave/ready
-  change — receivers replace wholesale, so no ordering hazards.
+  and a live slot's id is never reused — freed ids can be re-minted
+  only after the `u16` counter wraps (~65k joins). `0` is reserved for
+  the host player at the app layer. `Welcome` carries the assigned
+  slot; `Roster` is a complete snapshot, not a delta, rebroadcast after
+  every join/leave/ready change — receivers replace wholesale, so no
+  ordering hazards.
 - Bounds: `MAX_PLAYERS = 8` on the wire roster (MP-1's documented
   TCP/IP ceiling) and on the encode/decode of `Roster`; `max_clients`
   in `HostConfig` is the runtime seat count (default 8 — a host that is
-  itself a player should pass 7); `MAX_PENDING` caps in-flight
-  handshakes so a connect flood drops at the accept boundary instead of
-  spawning unbounded threads. A full roster rejects with
-  `RejectCode::LobbyFull` *before* `Accept`, so a refused client sees a
-  named reason through the normal handshake verdict.
+  itself a player should pass 7) and a value above `MAX_PLAYERS` is
+  rejected at listen as `NetError::Config` — the wire roster cannot
+  represent it; `MAX_PENDING` caps in-flight handshakes so a connect
+  flood drops at the accept boundary instead of spawning unbounded
+  threads. A full roster rejects with `RejectCode::LobbyFull` *before*
+  `Accept`, so a refused client sees a named reason through the normal
+  handshake verdict.
 - Post-handshake discipline: a client may send only `SetReady`/`Leave`;
   anything else drops it as `LeaveCause::Malformed`. A dead socket is
   `Lost`; `Leave` is `Quit` — `Client::leave` half-closes and drains so
   a quit isn't RST'd into looking like a drop. Established-lobby writes
   carry `WRITE_TIMEOUT` (10 s) so a peer that stops reading is dropped
-  rather than freezing a broadcast.
+  rather than freezing a broadcast. Every removal — quit, drop or a
+  failed broadcast write — disconnects the peer socket, so the blocked
+  reader thread exits and the client observes the close instead of
+  sitting on a dead-but-open connection.
 - `Host::shutdown`/`Drop` closes every peer socket (waking the reader
   threads), self-connects to wake the blocking accept, and joins the
   loop. Clients observe the lobby's death as a failed `recv`.

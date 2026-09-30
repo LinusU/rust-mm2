@@ -1,3 +1,89 @@
+# Last iteration — external-review repair: close the F24-B.1 lobby
+# drop/zombie leaks and bound `max_clients` (iteration 011, run
+# 20260929T174954)
+
+Repair iteration on `ralph/night` (baseline `2117f5a` — the F24-B.1
+lobby candidate; external verify green, review **fail** on two blocking
+findings).
+
+## Root causes
+
+Both findings are implementation defects in `mm2_net::lobby`:
+
+1. **Host-initiated drops never disconnected the peer.**
+   `broadcast_roster` removed a player whose roster write failed via
+   `players.remove(&id)`, which only dropped the `Slot`'s `Writer` — a
+   `try_clone`d handle on the same socket. The peer's reader thread
+   stayed blocked in `conn.recv()` on the original handle, so the
+   socket stayed open forever: the consumer saw `Left{Lost}`, the
+   thread+fd leaked, and the client's `recv` blocked on a stale
+   connection — remotely triggerable and uncapped (a write-stalled
+   client kept its connection, thread and fd after being dropped, and
+   no longer counted against `max_clients`/`MAX_PENDING`). The
+   `PeerGone` path was safe only because the reporting reader had
+   already exited and dropped its handle.
+2. **`HostConfig::max_clients` was never validated against the wire
+   bound.** A value above `MAX_PLAYERS` (8) admitted a roster
+   `Roster::encode` cannot represent: the 9th join passed the seat
+   check, was announced `Joined`, then every `broadcast_roster` send
+   failed `OversizeRoster` and the whole roster was removed as `Lost` —
+   a caller configuration error surfacing as silent mass disconnection.
+
+## Repair
+
+- Every roster removal now disconnects the peer socket:
+  `broadcast_roster`'s write-failure removal calls
+  `slot.writer.disconnect()` (`shutdown(Both)` wakes the blocked
+  reader, which exits and drops the last handle — client sees the
+  close, thread+fd reaped), and the `PeerGone` path does it uniformly
+  so removal always means a closed socket. A newcomer removed by its
+  own first roster send no longer gets a reader spawned for a departed
+  slot.
+- `Host::spawn` (the funnel for `listen`/`listen_loopback`) rejects
+  `max_clients > MAX_PLAYERS` as `NetError::Config` — a new named
+  variant, so a caller configuration error has a diagnostic instead of
+  a mass drop.
+- `conn::Writer` is re-exported (`mm2_net::Writer`) so external
+  consumers can name `Conn::writer()`'s return type — the review's
+  flagged pub-in-private-module wart.
+- Doc overclaim corrected: `net.md`/PLAN's "slot ids never recycled"
+  now reads "a live slot's id is never reused — freed ids re-mint only
+  after `u16` wraparound".
+
+## Regression legs (mm2_net 27 → 29, real loopback sockets)
+
+- `a_failed_broadcast_disconnects_the_peer` — drives
+  `broadcast_roster` over nine slots sharing one socket so the roster
+  fails *encode* (`OversizeRoster`): no bytes and no FIN reach the
+  peer, so every assertion isolates the removal path: all nine removed
+  as `Lost`, the blocked reader thread wakes and is joined, and the
+  peer's socket reads EOF rather than silence.
+- `an_over_cap_max_clients_is_rejected` — `max_clients = 9` refuses to
+  listen with `NetError::Config` naming the field; the bound itself
+  still listens.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --locked --workspace` — all suites green (exit 0),
+  mm2_net 29/29.
+
+## Notes
+
+- The review's non-blocking residuals stand as disclosed: loop/event
+  channels are unbounded and `SetReady` → broadcast has no rate limit
+  (F24-C's AC03 rate-excess leg); same-process loopback only — AC01,
+  AC05, AC06 remain unevidenced; AC04 has wire-level causes but no
+  consumer-facing error surface yet.
+- The 9-slots-one-socket test shape exists because the production
+  trigger (a peer that stops reading until `WRITE_TIMEOUT` fires)
+  cannot be made fast and deterministic on real sockets; the encode
+  failure exercises the identical removal path.
+
+---
+
 # Last iteration — F24-B.1: the `mm2_net` lobby driver — host accept
 # loop, slot roster, readiness, leave/drop lifecycle (iteration 010,
 # run 20260929T174954)

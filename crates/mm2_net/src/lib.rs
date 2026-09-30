@@ -32,8 +32,8 @@ mod lobby;
 mod proto;
 
 pub use conn::{
-    Conn, HANDSHAKE_TIMEOUT, accept_hello, accept_hello_within, hello, listen_loopback, send_hello,
-    send_hello_within,
+    Conn, HANDSHAKE_TIMEOUT, Writer, accept_hello, accept_hello_within, hello, listen_loopback,
+    send_hello, send_hello_within,
 };
 pub use frame::{MAX_FRAME, read_frame, write_frame};
 pub use lobby::{Client, Host, HostConfig, HostEvent, LeaveCause};
@@ -71,4 +71,8 @@ pub enum NetError {
     /// the peer's first frame was not `Hello`.
     #[error("unexpected message: {0}")]
     Unexpected(&'static str),
+    /// A caller configuration the wire cannot represent — e.g.
+    /// `HostConfig::max_clients` above [`MAX_PLAYERS`].
+    #[error("invalid host configuration: {0}")]
+    Config(&'static str),
 }
