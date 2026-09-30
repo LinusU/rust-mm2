@@ -1183,12 +1183,21 @@ pub fn headless_smoke(
             )
         })
         .unwrap_or_default();
-    // F05-B.6 smoke evidence: emitted/expired puff counts. Same
-    // presence rule — an undamaged run stays bit-identical.
+    // F05-B.6 smoke evidence: emitted/expired puff counts, plus
+    // `+Nu` draws declined on an unrepresentable authored flipbook
+    // window. Same presence rule — an undamaged run stays
+    // bit-identical.
     let ptx_detail = world_ecs
         .get_resource::<crate::damage_fx::SmokeFxReport>()
-        .filter(|r| r.emitted + r.expired > 0)
-        .map(|r| format!(" ptx={}e/{}x", r.emitted, r.expired))
+        .filter(|r| r.emitted + r.expired + r.undrawable > 0)
+        .map(|r| {
+            let undrawable = if r.undrawable > 0 {
+                format!("+{}u", r.undrawable)
+            } else {
+                String::new()
+            };
+            format!(" ptx={}e/{}x{undrawable}", r.emitted, r.expired)
+        })
         .unwrap_or_default();
     // F05-B.7 impairment evidence: episodes entering/leaving the
     // impaired band (DSN-25). Same presence rule — a run under
@@ -1229,9 +1238,14 @@ pub fn headless_smoke(
                     } else {
                         String::new()
                     };
+                    let undrawable = if r.undrawable > 0 {
+                        format!("+{}u", r.undrawable)
+                    } else {
+                        String::new()
+                    };
                     let untex = if r.texture { "" } else { "+ut" };
                     format!(
-                        " ppt={name}:{}e/{}x{covered}{landed}{untex}",
+                        " ppt={name}:{}e/{}x{covered}{landed}{undrawable}{untex}",
                         r.emitted, r.expired
                     )
                 }

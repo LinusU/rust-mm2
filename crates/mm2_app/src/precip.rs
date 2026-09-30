@@ -92,6 +92,10 @@ pub struct PrecipReport {
     pub covered: u64,
     /// Drops despawned on world contact.
     pub landed: u64,
+    /// Spawns declined because the authored `TexFrame*` window cannot
+    /// fit `i64` — an undrawable spec is counted, never overflowed or
+    /// silently clamped.
+    pub undrawable: u64,
 }
 
 impl PrecipReport {
@@ -260,7 +264,13 @@ pub fn emit_precip(
     let owner = SessionEntity(session.generation());
     let live = drops.iter().count();
     for _ in 0..rig.draw(time.delta_secs(), live) {
-        let drop = rig.drop(focus);
+        // A spec whose authored flipbook window cannot fit `i64` is
+        // undrawable — the spawn is declined and counted, never an
+        // overflow.
+        let Some(drop) = rig.drop(focus) else {
+            report.undrawable += 1;
+            continue;
+        };
         // The cover probe — a spawn under world geometry reads as
         // sheltered and is suppressed. `solid: true` also catches a
         // candidate *inside* a collider (a jittered spawn buried in a
@@ -273,7 +283,12 @@ pub fn emit_precip(
             report.covered += 1;
             continue;
         }
-        let quad = fx.assets.quads[(drop.frame() as usize).min(fx.assets.quads.len() - 1)].clone();
+        // `rig.drop` already declined an unrepresentable window, so a
+        // spawned drop's flipbook always resolves — `unreachable`
+        // would be a lie if a drop were ever built by hand; keep the
+        // first tile instead.
+        let frame = drop.frame().unwrap_or(drop.frame_start);
+        let quad = fx.assets.quads[(frame as usize).min(fx.assets.quads.len() - 1)].clone();
         let mut material = base.clone();
         material.base_color = Color::srgba(1.0, 1.0, 1.0, drop.alpha());
         let mut transform =
@@ -351,9 +366,10 @@ pub fn advance_precip(
             xf.look_at(f, Vec3::Y);
             xf.rotate_local_z(drop.rotation);
         }
-        if let Some(fx) = fx.as_ref() {
-            mesh.0 =
-                fx.assets.quads[(drop.frame() as usize).min(fx.assets.quads.len() - 1)].clone();
+        if let Some(fx) = fx.as_ref()
+            && let Some(frame) = drop.frame()
+        {
+            mesh.0 = fx.assets.quads[(frame as usize).min(fx.assets.quads.len() - 1)].clone();
         }
         if let Some(mut mat) = materials.get_mut(&material.0) {
             mat.base_color = Color::srgba(1.0, 1.0, 1.0, drop.alpha());

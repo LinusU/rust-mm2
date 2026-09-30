@@ -137,20 +137,14 @@ impl CrashDataFile {
                 continue;
             }
             let mut d = Vec::new();
-            let mut num = |what: &str, cell: &str| match cell.parse::<f32>() {
-                Ok(v) => Some(v),
-                Err(_) => {
-                    d.push(TableDiagnostic {
-                        line,
-                        message: format!("non-numeric {what} value {cell:?}"),
-                    });
-                    None
-                }
-            };
-            let event = num("Event", cells[1]);
-            let checkpoints = num("Checkpoints", cells[2]);
-            let time_limit = num("TimeLimit", cells[3]);
-            let amb_density = num("AmbDensity", cells[4]);
+            // `Event`/`Checkpoints` are integer columns — parsing them
+            // through `f32` misdecoded `nan` to a valid-looking `0` and
+            // truncated fractions silently; they parse as `i64` like
+            // the `mm*data.csv` integer columns do.
+            let event = int_cell("Event", cells[1], line, &mut d);
+            let checkpoints = int_cell("Checkpoints", cells[2], line, &mut d);
+            let time_limit = num_cell("TimeLimit", cells[3], line, &mut d);
+            let amb_density = num_cell("AmbDensity", cells[4], line, &mut d);
             let mut extra = Vec::with_capacity(cells.len() - 5);
             let mut extra_ok = true;
             for cell in &cells[5..] {
@@ -181,8 +175,8 @@ impl CrashDataFile {
             }
             rows.push(CrashDataRow {
                 filename: cells[0].to_string(),
-                event: event as i64,
-                checkpoints: checkpoints as i64,
+                event,
+                checkpoints,
                 time_limit,
                 amb_density,
                 extra,
@@ -194,6 +188,44 @@ impl CrashDataFile {
             columns: cols.iter().map(|c| c.to_string()).collect(),
             diagnostics,
         })
+    }
+}
+
+/// An integer column — `Event`/`Checkpoints` and the `extra` tail are
+/// integral on retail data, so a fractional or non-numeric cell is a
+/// diagnosed skip, not a truncated read.
+fn int_cell(what: &str, cell: &str, line: u32, d: &mut Vec<TableDiagnostic>) -> Option<i64> {
+    match cell.parse::<i64>() {
+        Ok(v) => Some(v),
+        Err(_) => {
+            d.push(TableDiagnostic {
+                line,
+                message: format!("non-numeric {what} value {cell:?}"),
+            });
+            None
+        }
+    }
+}
+
+/// A decimal column — `TimeLimit`/`AmbDensity` are floats, but
+/// `nan`/`inf` are diagnosed rather than propagated to consumers.
+fn num_cell(what: &str, cell: &str, line: u32, d: &mut Vec<TableDiagnostic>) -> Option<f32> {
+    match cell.parse::<f32>() {
+        Ok(v) if v.is_finite() => Some(v),
+        Ok(_) => {
+            d.push(TableDiagnostic {
+                line,
+                message: format!("non-finite {what} value {cell:?}"),
+            });
+            None
+        }
+        Err(_) => {
+            d.push(TableDiagnostic {
+                line,
+                message: format!("non-numeric {what} value {cell:?}"),
+            });
+            None
+        }
     }
 }
 
@@ -271,5 +303,58 @@ mod tests {
         assert_eq!(f.rows.len(), 1);
         assert_eq!(f.rows[0].filename, "good");
         assert_eq!(f.diagnostics.len(), 3);
+    }
+
+    /// `Event`/`Checkpoints` are integral columns — parsed as `i64`
+    /// like the `mm*data.csv` integer columns, so a fractional,
+    /// `nan`, or out-of-range cell is a diagnosed skip rather than a
+    /// truncated or saturated read (authored-numbers audit finding
+    /// 10). Signed extremes and negatives still decode verbatim.
+    #[test]
+    fn integer_columns_reject_non_integral_cells() {
+        let text = "Filename,Event,Checkpoints,TimeLimit,AmbDensity,extra,\n\
+                    frac,1.5,1,10,0,0\n\
+                    notint,nan,1,10,0,0\n\
+                    over,9223372036854775808,1,10,0,0\n\
+                    badcp,1,-x,10,0,0\n\
+                    neg,-1,-2,10,0,0\n\
+                    big,9223372036854775807,-9223372036854775808,10,0,0\n";
+        let f = CrashDataFile::parse(text).unwrap();
+        assert_eq!(f.rows.len(), 2, "{:?}", f.diagnostics);
+        assert_eq!(f.rows[0].filename, "neg");
+        assert_eq!(f.rows[0].event, -1);
+        assert_eq!(f.rows[0].checkpoints, -2);
+        assert_eq!(f.rows[1].event, i64::MAX);
+        assert_eq!(f.rows[1].checkpoints, i64::MIN);
+        assert_eq!(f.diagnostics.len(), 4);
+        assert!(
+            f.diagnostics
+                .iter()
+                .all(|d| d.message.contains("non-numeric")),
+            "{:?}",
+            f.diagnostics
+        );
+    }
+
+    /// A `nan`/`inf` decimal cell is diagnosed too — it never reaches
+    /// `time_limit`/`amb_density` as a live NaN (finding 10's same
+    /// authored-value class on the float columns).
+    #[test]
+    fn non_finite_decimal_cells_are_diagnostics() {
+        let text = "Filename,Event,Checkpoints,TimeLimit,AmbDensity,extra,\n\
+                    nanlimit,1,1,nan,0,0\n\
+                    infdens,1,1,10,inf,0\n\
+                    ok,1,1,10,0.2,0\n";
+        let f = CrashDataFile::parse(text).unwrap();
+        assert_eq!(f.rows.len(), 1);
+        assert_eq!(f.rows[0].filename, "ok");
+        assert_eq!(f.diagnostics.len(), 2);
+        assert!(
+            f.diagnostics
+                .iter()
+                .all(|d| d.message.contains("non-finite")),
+            "{:?}",
+            f.diagnostics
+        );
     }
 }

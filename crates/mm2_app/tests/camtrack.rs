@@ -601,6 +601,27 @@ fn load_track_cams_binds_what_ships() {
     assert!(t.near.is_none() && t.far.is_none());
 }
 
+/// An authored `CameraFOV` outside the drawable `(0, 180)` range —
+/// or non-finite — never reaches the projection: `camera_fov_deg`
+/// reads it as unauthored and the designed 70° stands in, with the
+/// record's `validate` naming the field for the loader's warning
+/// (authored-numbers audit finding 11).
+#[test]
+fn undrawable_authored_fov_falls_back_to_the_designed_lens() {
+    for bad in [f32::NAN, f32::INFINITY, 0.0, -30.0, 720.0] {
+        let mut spec = TrackCamSpec::parse(NEAR_TEXT).unwrap();
+        spec.camera_fov = Some(bad);
+        assert_eq!(spec.validate().len(), 1, "{bad}");
+        let lens = ChaseLens::authored(&spec);
+        assert_eq!(lens.fov_deg, 70.0, "{bad}");
+        assert!(lens.projection().fov.is_finite(), "{bad}");
+    }
+    // A drawable authored value still binds verbatim.
+    let mut spec = TrackCamSpec::parse(NEAR_TEXT).unwrap();
+    spec.camera_fov = Some(92.5);
+    assert_eq!(ChaseLens::authored(&spec).fov_deg, 92.5);
+}
+
 /// A jump the frame delta cannot explain — the `R` reset's
 /// `ResetVehicle` teleport, a water/stuck/disabled recovery or a
 /// scripted re-anchor — snaps the boom to the new target on the next

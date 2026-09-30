@@ -198,8 +198,8 @@ fn puffs_draw_authored_fields_deterministically() {
     let mut a = rig(CARDAMAGE);
     let mut b = rig(CARDAMAGE);
     // Same seed → identical streams (replicable by construction).
-    let pa = a.puff(0, origin, e);
-    let pb = b.puff(0, origin, e);
+    let pa = a.puff(0, origin, e).unwrap();
+    let pb = b.puff(0, origin, e).unwrap();
     assert_eq!(pa.position, pb.position);
     assert_eq!(pa.velocity, pb.velocity);
     assert_eq!(pa.life, pb.life);
@@ -208,7 +208,7 @@ fn puffs_draw_authored_fields_deterministically() {
     // Every draw lands inside the authored ±var envelope.
     let s = a.spec.clone();
     for _ in 0..64 {
-        let p = a.puff(0, origin, e);
+        let p = a.puff(0, origin, e).unwrap();
         assert!(
             (p.position.x - (origin.x + s.position.x)).abs() <= s.position_var.x + 1e-6,
             "{p:?}"
@@ -240,9 +240,30 @@ fn frames_clamp_into_the_atlas_tile_space() {
     let mut r = rig(&CARDAMAGE.replace("TexFrameEnd 3", "TexFrameEnd 9"));
     let e = bevy::prelude::Entity::PLACEHOLDER;
     for _ in 0..32 {
-        let p = r.puff(0, bevy::prelude::Vec3::ZERO, e);
+        let p = r.puff(0, bevy::prelude::Vec3::ZERO, e).unwrap();
         assert!((0i64..4).contains(&p.frame), "{p:?}");
     }
+}
+
+#[test]
+fn unrepresentable_flipbook_windows_decline_without_drawing() {
+    let e = bevy::prelude::Entity::PLACEHOLDER;
+    // `TexFrameStart i64::MIN`..`TexFrameEnd i64::MAX` spans past what
+    // `i64` arithmetic can represent — the spec is undrawable, so the
+    // draw is declined rather than overflowing or wrapping, and the
+    // seeded stream does not advance.
+    let hostile = CARDAMAGE
+        .replace("TexFrameStart 0", "TexFrameStart -9223372036854775808")
+        .replace("TexFrameEnd 3", "TexFrameEnd 9223372036854775807");
+    let mut a = rig(&hostile);
+    assert!(a.puff(0, bevy::prelude::Vec3::ZERO, e).is_none());
+    // An inverted window is representable — it still pins the start
+    // tile rather than declining.
+    let inverted = CARDAMAGE
+        .replace("TexFrameStart 0", "TexFrameStart 3")
+        .replace("TexFrameEnd 3", "TexFrameEnd 1");
+    let mut b = rig(&inverted);
+    assert_eq!(b.puff(0, bevy::prelude::Vec3::ZERO, e).unwrap().frame, 3);
 }
 
 #[test]
@@ -605,7 +626,7 @@ fn precip_drops_draw_inside_the_authored_envelopes() {
     let origin = Vec3::new(100.0, 30.0, -50.0);
     let mut rig = rain_rig();
     for _ in 0..500 {
-        let d = rig.drop(origin);
+        let d = rig.drop(origin).unwrap();
         let rel = d.position - origin;
         assert!(rel.x.abs() <= 25.0, "{d:?}");
         assert!(rel.y.abs() <= f32::EPSILON, "{d:?}");
@@ -623,13 +644,13 @@ fn precip_drops_draw_inside_the_authored_envelopes() {
     // The seeded stream replays identically — the replicability leg.
     let (mut a, mut b) = (rain_rig(), rain_rig());
     for _ in 0..50 {
-        let (da, db) = (a.drop(origin), b.drop(origin));
+        let (da, db) = (a.drop(origin).unwrap(), b.drop(origin).unwrap());
         assert_eq!(da.position, db.position);
         assert_eq!(da.velocity, db.velocity);
         assert_eq!(da.life, db.life);
     }
     let mut c = Precipitation::new(rain_spec(), 8);
-    let drift = c.drop(origin).position != rain_rig().drop(origin).position;
+    let drift = c.drop(origin).unwrap().position != rain_rig().drop(origin).unwrap().position;
     assert!(drift, "a different seed is a different stream");
 }
 
@@ -696,17 +717,41 @@ fn precip_drop_frame_sweeps_the_authored_tiles() {
         frame_start: 5,
         frame_end: 7,
     };
-    assert_eq!(d.frame(), 5);
+    assert_eq!(d.frame(), Some(5));
     d.age = 0.5;
-    assert_eq!(d.frame(), 6);
+    assert_eq!(d.frame(), Some(6));
     d.age = 0.99;
-    assert_eq!(d.frame(), 7);
+    assert_eq!(d.frame(), Some(7));
     let degenerate = mm2_game::PrecipDrop {
         frame_start: 7,
         frame_end: 5,
         ..d.clone()
     };
-    assert_eq!(degenerate.frame(), 7, "a bad range pins the start tile");
+    assert_eq!(
+        degenerate.frame(),
+        Some(7),
+        "a bad range pins the start tile"
+    );
+    // A window past what `i64` arithmetic can represent is
+    // undrawable — `None`, never an overflow or a wrapped span.
+    let hostile = mm2_game::PrecipDrop {
+        frame_start: i64::MIN,
+        frame_end: i64::MAX,
+        ..d.clone()
+    };
+    assert_eq!(hostile.frame(), None);
+}
+
+/// A spec whose authored flipbook window cannot fit `i64` declines
+/// the spawn instead of overflowing — `Precipitation::drop` returns
+/// `None` before drawing on the seeded stream.
+#[test]
+fn precip_declines_an_unrepresentable_flipbook_window() {
+    let mut spec = rain_spec();
+    spec.tex_frame_start = i64::MIN;
+    spec.tex_frame_end = i64::MAX;
+    let mut rig = Precipitation::new(spec, 7);
+    assert!(rig.drop(Vec3::ZERO).is_none());
 }
 
 /// `DAlpha` drifts the sprite alpha (0 on retail → opaque drops);

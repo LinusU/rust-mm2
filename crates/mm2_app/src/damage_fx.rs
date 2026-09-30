@@ -55,6 +55,10 @@ pub struct SmokeFxReport {
     pub emitted: u64,
     /// Puffs expired and despawned this session.
     pub expired: u64,
+    /// Emission draws declined because the authored `TexFrame*` window
+    /// cannot fit `i64` — an undrawable spec is counted, never
+    /// overflowed or silently clamped.
+    pub undrawable: u64,
 }
 
 impl SmokeFxReport {
@@ -172,7 +176,13 @@ pub fn drive_smoke(
         let live = puffs.iter().filter(|p| p.emitter == entity).count();
         for idx in rig.draw(dt, rate, live) {
             let origin = xf.transform_point(rig.emitters[idx].pivot);
-            let puff = rig.puff(idx, origin, entity);
+            // A spec whose authored flipbook window cannot fit `i64`
+            // is undrawable — the draw is declined and counted, never
+            // an overflow.
+            let Some(puff) = rig.puff(idx, origin, entity) else {
+                report.undrawable += 1;
+                continue;
+            };
             let quad =
                 fx.assets.quads[(puff.frame as usize).min(fx.assets.quads.len() - 1)].clone();
             let mut material = base.clone();

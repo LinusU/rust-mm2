@@ -839,3 +839,67 @@ fn cockpit_near_clip_is_capped_for_the_interior() {
         );
     }
 }
+
+/// A `camPovCS` `CameraFOV` outside the drawable range never reaches
+/// the cockpit projection — `camera_fov_deg` reads it as unauthored
+/// and the designed 60° stands in (finding 11).
+#[test]
+fn undrawable_authored_fov_falls_back_to_the_designed_lens() {
+    fn spawn_with(fov: f32) -> App {
+        let mut app = base_app();
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<Assets<StandardMaterial>>();
+        let vehicle = app
+            .world_mut()
+            .spawn((PlayerVehicle, Visibility::Visible))
+            .id();
+        let vfs = Vfs::new();
+        let pov = PovCamSpec {
+            camera_fov: Some(fov),
+            ..PovCamSpec::default()
+        };
+        app.world_mut()
+            .resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+                world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
+                    world.resource_scope(|world, mut materials: Mut<Assets<StandardMaterial>>| {
+                        let mut queue = CommandQueue::default();
+                        {
+                            let mut commands = Commands::new(&mut queue, world);
+                            spawn_dash(
+                                &mut commands,
+                                &vfs,
+                                "nonexistent_car",
+                                0,
+                                Some(pov.clone()),
+                                &mut meshes,
+                                &mut images,
+                                &mut materials,
+                                vehicle,
+                                SessionEntity(1),
+                                CameraMode::Cockpit,
+                                None,
+                            );
+                        }
+                        queue.apply(world);
+                    })
+                })
+            });
+        app
+    }
+
+    for bad in [f32::NAN, f32::INFINITY, 0.0, 720.0] {
+        let mut app = spawn_with(bad);
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&Projection, With<CockpitCamera>>();
+        let Projection::Perspective(p) = q.single(app.world()).unwrap() else {
+            panic!("cockpit camera keeps a perspective projection");
+        };
+        assert!(
+            (p.fov - 60.0f32.to_radians()).abs() < 1e-6,
+            "authored {bad} → designed 60°, got {}°",
+            p.fov.to_degrees()
+        );
+    }
+}

@@ -447,3 +447,44 @@ fn spawn_binds_the_authored_eye_rear_facing() {
         Vec3::new(0.0, 9.9, 9.9)
     );
 }
+
+/// A `camPovCS` `CameraFOV` outside the drawable range never reaches
+/// the strip's projection — the designed 60° stands in (finding 11).
+#[test]
+fn undrawable_authored_fov_falls_back_to_the_designed_lens() {
+    let mut app = base_app(SessionPhase::Playing);
+    let vehicle = app.world_mut().spawn(PlayerVehicle).id();
+    for bad in [f32::NAN, f32::INFINITY, 0.0, 720.0] {
+        let pov = PovCamSpec {
+            camera_fov: Some(bad),
+            ..PovCamSpec::default()
+        };
+        let strip = {
+            let mut queue = CommandQueue::default();
+            let strip = {
+                let mut commands = Commands::new(&mut queue, app.world_mut());
+                spawn_mirror(
+                    &mut commands,
+                    Some(&pov),
+                    Vec3::new(0.0, 9.9, 9.9),
+                    vehicle,
+                    SessionEntity(1),
+                    None,
+                )
+            };
+            queue.apply(app.world_mut());
+            strip
+        };
+        let w = app.world();
+        match w.get::<Projection>(strip).unwrap() {
+            Projection::Perspective(p) => {
+                assert!(
+                    (p.fov - 60.0f32.to_radians()).abs() < 1e-6,
+                    "authored {bad} → designed 60°, got {}°",
+                    p.fov.to_degrees()
+                );
+            }
+            other => panic!("expected perspective, got {other:?}"),
+        }
+    }
+}

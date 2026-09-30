@@ -398,6 +398,53 @@ fn definition_validation_rejects_unusable_shapes() {
     assert_eq!(instant.validate(), Err(RaceError::BadTimeLimit));
 }
 
+/// Non-finite authored geometry is a rejected definition, never a
+/// NaN simulation — a `nan`/`inf` waypoint or `_strtpnts` cell would
+/// otherwise reach the crossing test or a spawned `RigidBody`
+/// unchecked (authored-numbers audit finding 5).
+#[test]
+fn definition_validation_rejects_non_finite_authored_values() {
+    let mut gate = checkpoint(0.0, 0.0);
+    gate.center.x = f32::NAN;
+    assert_eq!(
+        any_order(vec![gate], None).validate(),
+        Err(RaceError::NonFiniteGate)
+    );
+    let mut gate = checkpoint(0.0, 0.0);
+    gate.heading_deg = f32::INFINITY;
+    assert_eq!(
+        any_order(vec![gate], None).validate(),
+        Err(RaceError::NonFiniteGate)
+    );
+    // The optional finish trigger goes through the same check.
+    let mut fin = checkpoint(1.0, 1.0);
+    fin.center.y = f32::NEG_INFINITY;
+    assert_eq!(
+        any_order(vec![checkpoint(0.0, 0.0)], Some(fin)).validate(),
+        Err(RaceError::NonFiniteGate)
+    );
+    // Start slots: a non-finite position or authored yaw rejects.
+    let mut def = any_order(vec![checkpoint(0.0, 0.0)], None);
+    def.start_slots.push(RaceStart {
+        position: Vec3::new(f32::NAN, 0.0, 0.0),
+        yaw_deg: Some(0.0),
+    });
+    assert_eq!(def.validate(), Err(RaceError::NonFiniteStart));
+    let mut def = any_order(vec![checkpoint(0.0, 0.0)], None);
+    def.start_slots.push(RaceStart {
+        position: Vec3::ZERO,
+        yaw_deg: Some(f32::INFINITY),
+    });
+    assert_eq!(def.validate(), Err(RaceError::NonFiniteStart));
+    // A headless slot (no authored yaw) on finite ground stays valid.
+    let mut def = any_order(vec![checkpoint(0.0, 0.0)], None);
+    def.start_slots.push(RaceStart {
+        position: Vec3::ZERO,
+        yaw_deg: None,
+    });
+    def.validate().unwrap();
+}
+
 /// `course_yaw` derives the course-facing a headless authored slot
 /// (`yaw_deg == None`) falls back to: the first trigger far enough
 /// away to define a direction, as a vehicle-yaw heading — the same

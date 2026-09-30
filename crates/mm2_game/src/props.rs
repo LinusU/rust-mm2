@@ -786,18 +786,53 @@ pub fn walk_prop_rules(psdl: &Psdl, defs: &PropDefs, rules: &PropRules) -> PropW
                         walk.stats.defs_missing += 1;
                         continue;
                     };
-                    if def.distance <= 0.0 || def.files.is_empty() || def.max_use <= 0 {
+                    // A def whose start/distance/lerp fields are
+                    // unusable cannot be counted or stamped at all:
+                    // non-finite values escape the `<= 0` comparisons,
+                    // a huge negative start saturates the float→int
+                    // cast below (a `+ 1` on `u64::MAX` overflowed
+                    // before this check existed), and a NaN distance
+                    // or lerp stamps a NaN position.
+                    // `PropDefs::validate` names the row; the walk
+                    // reports the use site and skips it.
+                    if !def.start.is_finite()
+                        || def.start < 0.0
+                        || !def.distance.is_finite()
+                        || def.distance <= 0.0
+                        || !def.lerp_min.is_finite()
+                        || !def.lerp_max.is_finite()
+                    {
+                        issue(
+                            &mut walk.stats,
+                            format!(
+                                "path {pi} room {rid} {}: propdef {:?} has unusable fields (start {}, distance {}, lerp {}..{}); skipped",
+                                side.which,
+                                def.name,
+                                def.start,
+                                def.distance,
+                                def.lerp_min,
+                                def.lerp_max
+                            ),
+                        );
+                        continue;
+                    }
+                    if def.files.is_empty() || def.max_use <= 0 {
                         continue;
                     }
                     // Offsets s = start + k·distance ≤ curb_len,
-                    // counted arithmetically so a hostile def is
-                    // measured against the budget instead of walked.
-                    let want = if def.start <= curb_len {
-                        (((curb_len - def.start) / def.distance) as u64) + 1
+                    // counted arithmetically in f64 and bounded by
+                    // `maxUse` *before* the truncating cast, so a
+                    // hostile span is measured against the budget
+                    // instead of walked and can never overflow a
+                    // `+ 1` on a saturated cast.
+                    let want = (if def.start <= curb_len {
+                        ((f64::from(curb_len) - f64::from(def.start)) / f64::from(def.distance))
+                            .floor()
+                            + 1.0
                     } else {
-                        0
-                    }
-                    .min(def.max_use as u64);
+                        0.0
+                    })
+                    .min(def.max_use as f64) as u64;
                     let take = want.min(stamps_left as u64);
                     walk.stats.stamps_capped = walk
                         .stats
@@ -2406,5 +2441,82 @@ mod tests {
             .collect();
         assert_eq!(fans.len(), 1, "the wall fan never becomes a floor");
         assert_eq!(fans[0].kind, AttributeType::Fan);
+    }
+
+    /// Hostile authored defs — non-finite/negative `start`, non-finite
+    /// or non-positive `distance`, non-finite lerp — are skipped with a
+    /// bounded issue and stamp nothing; a span past any representable
+    /// count is measured in `f64` and bounded by `maxUse` before the
+    /// truncating cast, so no NaN position lands and no count
+    /// overflows (authored-numbers audit finding 6).
+    #[test]
+    fn hostile_propdefs_skip_and_report_instead_of_stamping_nan() {
+        let city = psdl(
+            quad_verts(),
+            vec![room1_solo()],
+            &[0, 1],
+            vec![path([1, 2, 0, 0], [5, 6, 0, 0], &[1])],
+        );
+        let mut nan_lerp = def("nan_lerp", 2., 6., 5, &["pa"]);
+        nan_lerp.lerp_min = f32::NAN;
+        let (defs, rules) = tables(
+            vec![
+                def("nan_start", f32::NAN, 6., 5, &["pa"]),
+                def("neg_start", -1.0e38, 6., 5, &["pa"]),
+                def("nan_dist", 2., f32::NAN, 5, &["pa"]),
+                def("zero_dist", 2., 0., 5, &["pa"]),
+                nan_lerp,
+                // ~2e10 theoretical stamps on a 20 m kerb; `maxUse`
+                // bounds the count before the integer cast.
+                def("dense", 0., 1e-9, 3, &["pa"]),
+                // Same span with an unbounded `maxUse` — the walk's
+                // own stamp budget is what bounds it, counted.
+                def("vast", 0., 1e-9, i64::MAX, &["pa"]),
+            ],
+            vec![rule(
+                "n01left",
+                &[
+                    "nan_start",
+                    "neg_start",
+                    "nan_dist",
+                    "zero_dist",
+                    "nan_lerp",
+                    "dense",
+                    "vast",
+                ],
+            )],
+        );
+        let walk = walk_prop_rules(&city, &defs, &rules);
+        // `dense` stamps exactly `maxUse`; `vast` fills the rest of the
+        // walk budget — every stamp finite, no NaN positions.
+        assert_eq!(walk.stamps.len(), MAX_PROP_RULE_STAMPS);
+        assert!(
+            walk.stamps
+                .iter()
+                .all(|s| s.position.iter().all(|v| v.is_finite()))
+        );
+        for name in [
+            "nan_start",
+            "neg_start",
+            "nan_dist",
+            "zero_dist",
+            "nan_lerp",
+        ] {
+            assert!(
+                walk.stats
+                    .issues
+                    .iter()
+                    .any(|i| i.contains(name) && i.contains("skipped")),
+                "no skip issue for {name}: {:?}",
+                walk.stats.issues
+            );
+        }
+        // The ~2e10-count span reported its suppression against the
+        // walk budget rather than overflowing the integer count.
+        assert!(
+            walk.stats.stamps_capped > 1_000_000_000,
+            "the ~2e10-count span reports its suppression: {:?}",
+            walk.stats
+        );
     }
 }

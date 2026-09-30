@@ -195,6 +195,19 @@ pub enum PropRuleIssue {
         /// Raw start value.
         start: f32,
     },
+    /// A `propdefs.csv` row carries a non-finite numeric field —
+    /// `nan`/`inf`/`1e999` parse cleanly as floats but satisfy no
+    /// range comparison, so they need their own check.
+    NonFiniteField {
+        /// Prototype name.
+        name: String,
+        /// Line number.
+        line: u32,
+        /// Column name.
+        field: &'static str,
+        /// Raw value.
+        value: f32,
+    },
     /// A `propdefs.csv` row's `maxUse` is not positive.
     NonPositiveMaxUse {
         /// Prototype name.
@@ -275,6 +288,17 @@ impl fmt::Display for PropRuleIssue {
             } => write!(f, "line {line}: propdef {name:?} distance {distance} <= 0"),
             PropRuleIssue::NegativeStart { name, line, start } => {
                 write!(f, "line {line}: propdef {name:?} start {start} < 0")
+            }
+            PropRuleIssue::NonFiniteField {
+                name,
+                line,
+                field,
+                value,
+            } => {
+                write!(
+                    f,
+                    "line {line}: propdef {name:?} {field} is non-finite ({value})"
+                )
             }
             PropRuleIssue::NonPositiveMaxUse {
                 name,
@@ -448,14 +472,31 @@ impl PropDefs {
                     line: def.line,
                 });
             }
-            if def.distance <= 0.0 {
+            // NaN satisfies no comparison — finiteness is its own
+            // check on every float column.
+            for (field, value) in [
+                ("start", def.start),
+                ("distance", def.distance),
+                ("minLerp", def.lerp_min),
+                ("maxLerp", def.lerp_max),
+            ] {
+                if !value.is_finite() {
+                    issues.push(PropRuleIssue::NonFiniteField {
+                        name: def.name.clone(),
+                        line: def.line,
+                        field,
+                        value,
+                    });
+                }
+            }
+            if def.distance.is_finite() && def.distance <= 0.0 {
                 issues.push(PropRuleIssue::NonPositiveDistance {
                     name: def.name.clone(),
                     line: def.line,
                     distance: def.distance,
                 });
             }
-            if def.start < 0.0 {
+            if def.start.is_finite() && def.start < 0.0 {
                 issues.push(PropRuleIssue::NegativeStart {
                     name: def.name.clone(),
                     line: def.line,
@@ -804,6 +845,51 @@ mod tests {
             name: "nofile".into(),
             line: 5
         }));
+    }
+
+    /// `nan`/`inf` cells parse (the f32 grammar accepts them) but are
+    /// named by `validate` as `NonFiniteField` — the field carries the
+    /// authored value verbatim, and NaN is no comparison's friend so
+    /// each non-finite column reports independently (authored-numbers
+    /// audit finding 6).
+    #[test]
+    fn propdefs_non_finite_fields_are_named() {
+        let text = format!(
+            "{DEFS_HEADER}\nbadstart,nan,10,5,0.1,0.1,f1\nbaddist,1,inf,5,0.1,0.1,f2\nbadlerp,1,10,5,-inf,0.1,f3\n"
+        );
+        let defs = PropDefs::parse(&text).unwrap();
+        assert_eq!(defs.defs.len(), 3, "{:?}", defs.diagnostics);
+        let issues = defs.validate();
+        // NaN never equals itself, so match on the named field rather
+        // than the value.
+        assert!(issues.iter().any(|i| matches!(
+            i,
+            PropRuleIssue::NonFiniteField {
+                name,
+                field: "start",
+                ..
+            } if name == "badstart"
+        )));
+        assert!(issues.contains(&PropRuleIssue::NonFiniteField {
+            name: "baddist".into(),
+            line: 3,
+            field: "distance",
+            value: f32::INFINITY,
+        }));
+        assert!(issues.iter().any(|i| matches!(
+            i,
+            PropRuleIssue::NonFiniteField {
+                name,
+                field: "minLerp",
+                ..
+            } if name == "badlerp"
+        )));
+        // A non-finite distance is not *also* misreported as
+        // non-positive — the comparison checks stay finite-only.
+        assert!(!issues.iter().any(|i| matches!(
+            i,
+            PropRuleIssue::NonPositiveDistance { name, .. } if name == "baddist"
+        )));
     }
 
     #[test]

@@ -236,6 +236,30 @@ impl PovCamSpec {
             extra_fields: extras(root, KNOWN),
         })
     }
+
+    /// `CameraFOV` in degrees when authored *and* drawable — a
+    /// non-finite or out-of-range value reads `None` so consumers
+    /// take their designed default instead of building a degenerate
+    /// projection (the [`crate::camtrack::TrackCamSpec`] contract).
+    /// The raw field stays verbatim; [`Self::validate`] reports it.
+    pub fn camera_fov_deg(&self) -> Option<f32> {
+        self.camera_fov
+            .filter(|&f| crate::camtrack::drawable_fov(f))
+    }
+
+    /// Record-level problems a loader should reject the spec for —
+    /// reported, never silently repaired.
+    pub fn validate(&self) -> Vec<String> {
+        let mut issues = Vec::new();
+        if let Some(f) = self.camera_fov
+            && !crate::camtrack::drawable_fov(f)
+        {
+            issues.push(format!(
+                "CameraFOV {f} is outside the drawable (0, 180) degree range"
+            ));
+        }
+        issues
+    }
 }
 
 #[cfg(test)]

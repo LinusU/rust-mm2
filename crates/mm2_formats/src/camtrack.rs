@@ -109,6 +109,16 @@ fn scalar(block: &crate::tune::TuneBlock, name: &str) -> Option<f32> {
         .and_then(|f| f.values.first()?.number.map(|n| n as f32))
 }
 
+/// `CameraFOV` is authored in degrees; only the open `(0, 180)`
+/// interval builds a drawable perspective projection — `0` or a
+/// negative value collapses it to an infinite clip matrix, `180` or
+/// more inverts it, and `nan`/`inf` poison it (designed bound; the
+/// original's own guard is unrecovered). Shared by the `camTrackCS`
+/// and `camPovCS` decoders.
+pub(crate) fn drawable_fov(f: f32) -> bool {
+    f.is_finite() && f > 0.0 && f < 180.0
+}
+
 fn vec3(block: &crate::tune::TuneBlock, name: &str) -> Option<[f32; 3]> {
     let f = block.field_ci(name)?;
     let mut v = [0.0; 3];
@@ -184,6 +194,29 @@ impl TrackCamSpec {
                 .collect(),
         })
     }
+
+    /// `CameraFOV` in degrees when authored *and* drawable — a
+    /// non-finite or out-of-range value reads `None` so consumers
+    /// take their designed default instead of building a degenerate
+    /// projection. The raw field stays verbatim; [`Self::validate`]
+    /// reports it.
+    pub fn camera_fov_deg(&self) -> Option<f32> {
+        self.camera_fov.filter(|&f| drawable_fov(f))
+    }
+
+    /// Record-level problems a loader should reject the spec for —
+    /// reported, never silently repaired.
+    pub fn validate(&self) -> Vec<String> {
+        let mut issues = Vec::new();
+        if let Some(f) = self.camera_fov
+            && !drawable_fov(f)
+        {
+            issues.push(format!(
+                "CameraFOV {f} is outside the drawable (0, 180) degree range"
+            ));
+        }
+        issues
+    }
 }
 
 #[cfg(test)]
@@ -241,5 +274,30 @@ mod tests {
         // A truncated vector must not partially decode.
         let s = TrackCamSpec::parse("type: a\ncamTrackCS {\n  Offset 0.0 1.0\n}\n").unwrap();
         assert!(s.offset.is_none());
+    }
+
+    /// A `CameraFOV` outside the drawable `(0, 180)` degree range —
+    /// or non-finite — stays verbatim on the record but is named by
+    /// `validate` and reads as unauthored through `camera_fov_deg`,
+    /// so consumers take their designed lens instead of a degenerate
+    /// projection (authored-numbers audit finding 11).
+    #[test]
+    fn undrawable_camera_fov_is_named_and_reads_unauthored() {
+        for bad in ["nan", "inf", "-inf", "0.0", "-30.0", "180.0", "720.0"] {
+            let text = format!("type: a\ncamTrackCS {{\n  CameraFOV {bad}\n  CameraNear 0.5\n}}\n");
+            let s = TrackCamSpec::parse(&text).unwrap();
+            assert_eq!(s.camera_fov_deg(), None, "{bad}");
+            assert_eq!(s.validate().len(), 1, "{bad}");
+            assert!(s.validate()[0].contains("CameraFOV"), "{}", s.validate()[0]);
+        }
+        // Drawable authored values and an absent field stay clean.
+        let s =
+            TrackCamSpec::parse("type: a\ncamTrackCS {\n  CameraFOV 179.9\n  CameraNear 0.5\n}\n")
+                .unwrap();
+        assert_eq!(s.camera_fov_deg(), Some(179.9));
+        assert!(s.validate().is_empty());
+        let s = TrackCamSpec::parse("type: a\ncamTrackCS {\n  CameraNear 0.5\n}\n").unwrap();
+        assert_eq!(s.camera_fov_deg(), None);
+        assert!(s.validate().is_empty());
     }
 }

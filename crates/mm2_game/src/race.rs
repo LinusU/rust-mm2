@@ -341,6 +341,15 @@ pub enum RaceError {
     /// `time_limit_ticks` of `Some(0)` — a race no one could ever run;
     /// a zero authored limit is rejected at the producer, not clamped.
     BadTimeLimit,
+    /// A trigger with a non-finite `center`/`heading_deg` — the
+    /// authored `_strtpnts`/waypoint columns reach the physics engine
+    /// and the crossing test verbatim, so a `nan`/`inf` row is a
+    /// rejected event, not a NaN simulation.
+    NonFiniteGate,
+    /// A start slot with a non-finite `position` or `yaw_deg` — the
+    /// pose lands on a spawned `RigidBody` unchecked downstream, so
+    /// the definition rejects it here.
+    NonFiniteStart,
 }
 
 impl std::fmt::Display for RaceError {
@@ -350,6 +359,12 @@ impl std::fmt::Display for RaceError {
             Self::BadExtent => write!(f, "checkpoint with non-positive or non-finite extent"),
             Self::NoLaps => write!(f, "ordered race with zero laps"),
             Self::BadTimeLimit => write!(f, "time limit of zero fixed steps"),
+            Self::NonFiniteGate => {
+                write!(f, "trigger with a non-finite centre or heading")
+            }
+            Self::NonFiniteStart => {
+                write!(f, "start slot with a non-finite position or heading")
+            }
         }
     }
 }
@@ -376,6 +391,26 @@ impl RaceDefinition {
             || self.finish.is_some_and(|c| !extent_ok(&c))
         {
             return Err(RaceError::BadExtent);
+        }
+        // The authored positions/headings are the other file-derived
+        // values that reach the runtime: a start slot pose lands on a
+        // spawned `RigidBody` and a gate centre feeds the swept
+        // crossing test — a `nan`/`inf` cell in either is a rejected
+        // event, never a NaN simulation or an unhittable trigger.
+        if self
+            .checkpoints
+            .iter()
+            .chain(self.finish.iter())
+            .any(|c| !c.center.is_finite() || !c.heading_deg.is_finite())
+        {
+            return Err(RaceError::NonFiniteGate);
+        }
+        if self
+            .start_slots
+            .iter()
+            .any(|s| !s.position.is_finite() || s.yaw_deg.is_some_and(|y| !y.is_finite()))
+        {
+            return Err(RaceError::NonFiniteStart);
         }
         Ok(())
     }

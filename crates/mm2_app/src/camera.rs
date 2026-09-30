@@ -108,7 +108,10 @@ impl ChaseLens {
             speed_min: spec.min_speed.unwrap_or(0.0).max(0.0),
             speed_max: spec.max_speed.unwrap_or(0.0).max(0.0),
             collide: spec.collide_type.is_some_and(|c| c != 0.0),
-            fov_deg: spec.camera_fov.unwrap_or(70.0),
+            // `camera_fov_deg` reads an undrawable `CameraFOV`
+            // (non-finite or outside `(0, 180)`) as unauthored — the
+            // designed 70° stands in, `validate` reports the record.
+            fov_deg: spec.camera_fov_deg().unwrap_or(70.0),
             clip_near: spec.camera_near.unwrap_or(0.5).max(0.01),
             clip_far: spec.camera_far.unwrap_or(600.0).max(1.0),
             authored: true,
@@ -161,9 +164,15 @@ pub struct TrackCams {
 /// Read both authored chase-lens records for `car`.
 pub fn load_track_cams(vfs: &Vfs, car: &str) -> TrackCams {
     let read = |suffix: &str| {
-        vfs.read_path(&format!("tune/camera/{car}_{suffix}.camtrackcs"))
+        let path = format!("tune/camera/{car}_{suffix}.camtrackcs");
+        let spec = vfs
+            .read_path(&path)
             .ok()
-            .and_then(|(bytes, _)| TrackCamSpec::parse(&String::from_utf8_lossy(&bytes)).ok())
+            .and_then(|(bytes, _)| TrackCamSpec::parse(&String::from_utf8_lossy(&bytes)).ok())?;
+        for issue in spec.validate() {
+            warn!(path = %path, issue = %issue, "camtrackcs spec issue");
+        }
+        Some(spec)
     };
     TrackCams {
         near: read("near"),
@@ -732,7 +741,12 @@ pub fn spawn_mirror(
                 ..default()
             },
             Projection::Perspective(PerspectiveProjection {
-                fov: pov.and_then(|p| p.camera_fov).unwrap_or(60.0).to_radians(),
+                // `camera_fov_deg` reads an undrawable `CameraFOV` as
+                // unauthored — the designed 60° stands in.
+                fov: pov
+                    .and_then(|p| p.camera_fov_deg())
+                    .unwrap_or(60.0)
+                    .to_radians(),
                 near: pov.and_then(|p| p.camera_near).unwrap_or(0.1).max(0.01),
                 far: pov.and_then(|p| p.camera_far).unwrap_or(600.0).max(1.0),
                 ..default()

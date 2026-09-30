@@ -189,8 +189,12 @@ fn read_text(vfs: &Vfs, logical: &str) -> Option<String> {
 /// before any camera spawns inactive (a dashless car, the dev car or a
 /// `Cockpit` mode persisted across a reload has no camera otherwise).
 pub fn load_pov_cam(vfs: &Vfs, car: &str) -> Option<PovCamSpec> {
-    read_text(vfs, &format!("tune/camera/{car}_dash.campovcs"))
-        .and_then(|t| PovCamSpec::parse(&t).ok())
+    let path = format!("tune/camera/{car}_dash.campovcs");
+    let spec = read_text(vfs, &path).and_then(|t| PovCamSpec::parse(&t).ok())?;
+    for issue in spec.validate() {
+        warn!(path = %path, issue = %issue, "campovcs spec issue");
+    }
+    Some(spec)
 }
 
 fn v3(f: Option<[f32; 3]>) -> Vec3 {
@@ -257,7 +261,9 @@ pub fn spawn_dash(
                     ..default()
                 },
                 Projection::Perspective(PerspectiveProjection {
-                    fov: p.camera_fov.unwrap_or(60.0).to_radians(),
+                    // `camera_fov_deg` reads an undrawable `CameraFOV`
+                    // as unauthored — the designed 60° stands in.
+                    fov: p.camera_fov_deg().unwrap_or(60.0).to_radians(),
                     near: p.camera_near.unwrap_or(0.1).clamp(0.01, COCKPIT_NEAR_CAP),
                     far: p.camera_far.unwrap_or(600.0).max(1.0),
                     ..default()

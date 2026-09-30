@@ -175,6 +175,17 @@ impl From<&DamageEffect> for ParticleSpec {
     }
 }
 
+/// `end - start + 1` for an authored `TexFrame*` flipbook window,
+/// `None` when the arithmetic cannot fit `i64` — a hostile
+/// `i64::MIN`-scale bound makes the spec undrawable rather than an
+/// overflow panic or a wrapped span (the `audio::draw_cue_suffix`
+/// contract). An inverted window (`end < start`) is representable
+/// and returns a negative span: degenerate, not undrawable — callers
+/// pin the start tile.
+fn flipbook_span(start: i64, end: i64) -> Option<i64> {
+    end.checked_sub(start)?.checked_add(1)
+}
+
 /// Designed emission policy for engine smoke (DSN-24). The recovered
 /// struct proves the original emits smoke from the authored pivots
 /// while damaged; its `Update()` is a thunk, so the gate and rate
@@ -361,16 +372,22 @@ impl VehicleSmoke {
     /// authored spec drawn through this emitter's deterministic
     /// stream. `origin` already includes the vehicle transform; the
     /// authored `Position`/`PositionVar` jitter applies around it.
-    pub fn puff(&mut self, i: usize, origin: Vec3, emitter: Entity) -> SmokePuff {
+    /// `None` when the authored `TexFrame*` window cannot fit `i64`
+    /// — an undrawable spec declines before drawing so the seeded
+    /// stream stays aligned (the `audio::draw_cue_suffix` contract).
+    pub fn puff(&mut self, i: usize, origin: Vec3, emitter: Entity) -> Option<SmokePuff> {
         let spec = &self.spec;
         let e = &mut self.emitters[i];
         let frame = if spec.tex_frame_end >= spec.tex_frame_start {
-            spec.tex_frame_start
-                + (e.rng.next_u64() % (spec.tex_frame_end - spec.tex_frame_start + 1) as u64) as i64
+            // `end >= start` bounds the draw to `start..=end`, so
+            // `start + draw ≤ end` is provably in range once the span
+            // itself checked out.
+            let span = flipbook_span(spec.tex_frame_start, spec.tex_frame_end)?;
+            spec.tex_frame_start + (e.rng.next_u64() % span as u64) as i64
         } else {
             spec.tex_frame_start
         };
-        SmokePuff {
+        Some(SmokePuff {
             emitter,
             position: origin + spec.position + e.jitter3(Vec3::ZERO, spec.position_var),
             velocity: e.jitter3(spec.velocity, spec.velocity_var),
@@ -383,7 +400,7 @@ impl VehicleSmoke {
             d_alpha: e.jitter(spec.d_alpha, spec.d_alpha_var),
             frame: self.policy.tile(frame) as i64,
             color: spec.color,
-        }
+        })
     }
 }
 
@@ -724,10 +741,14 @@ impl Precipitation {
     /// One authored-spec drop around `origin` — the emitter point the
     /// app supplies (its camera-relative anchor); `Position`/
     /// `PositionVar` jitter applies around it through this rig's
-    /// deterministic stream.
-    pub fn drop(&mut self, origin: Vec3) -> PrecipDrop {
+    /// deterministic stream. `None` when the authored `TexFrame*`
+    /// window cannot fit `i64` — an undrawable spec declines before
+    /// drawing so the seeded stream stays aligned (the
+    /// `audio::draw_cue_suffix` contract).
+    pub fn drop(&mut self, origin: Vec3) -> Option<PrecipDrop> {
+        flipbook_span(self.spec.tex_frame_start, self.spec.tex_frame_end)?;
         let spec = self.spec.clone();
-        PrecipDrop {
+        Some(PrecipDrop {
             position: origin + spec.position + self.jitter3(Vec3::ZERO, spec.position_var),
             velocity: self.jitter3(spec.velocity, spec.velocity_var),
             age: 0.0,
@@ -741,7 +762,7 @@ impl Precipitation {
             d_rotation: self.jitter(spec.d_rotation, spec.d_rotation_var),
             frame_start: spec.tex_frame_start,
             frame_end: spec.tex_frame_end,
-        }
+        })
     }
 
     /// Uniform `v ± var` draw on this rig's stream.
@@ -813,14 +834,17 @@ impl PrecipDrop {
     /// The atlas tile at the current age — the authored
     /// `TexFrameStart..=TexFrameEnd` range sweeps as a flipbook over
     /// `life` (designed reading; the original's frame semantics are
-    /// unrecovered, UNK-40). A degenerate range pins the start tile.
-    pub fn frame(&self) -> i64 {
-        let span = self.frame_end - self.frame_start + 1;
+    /// unrecovered, UNK-40). A degenerate range pins the start tile;
+    /// a window that cannot fit `i64` is `None` — undrawable, never
+    /// an overflow. With a checked span, `start + draw ≤ end` is
+    /// provably in range.
+    pub fn frame(&self) -> Option<i64> {
+        let span = flipbook_span(self.frame_start, self.frame_end)?;
         if span <= 1 {
-            return self.frame_start;
+            return Some(self.frame_start);
         }
         let frac = (self.age / self.life).clamp(0.0, 1.0);
-        self.frame_start + ((frac * span as f32) as i64).min(span - 1)
+        Some(self.frame_start + ((frac * span as f32) as i64).min(span - 1))
     }
 
     /// Sprite alpha in 0..1 — full alpha drifted by `DAlpha·age`
@@ -1197,7 +1221,12 @@ impl WheelPuff {
     /// `life` (designed, the [`PrecipDrop::frame`] reading; the
     /// original's frame semantics are unrecovered, UNK-40).
     pub fn frame(&self) -> i64 {
-        let span = self.frame_end - self.frame_start + 1;
+        // `frame_start`/`frame_end` arrive policy-tile-clamped from
+        // `WheelPtx::puff`, so this span always fits; a hand-built
+        // hostile pair pins the start tile instead of overflowing.
+        let Some(span) = flipbook_span(self.frame_start, self.frame_end) else {
+            return self.frame_start;
+        };
         if span <= 1 {
             return self.frame_start;
         }
