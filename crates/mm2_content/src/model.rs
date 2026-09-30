@@ -373,7 +373,7 @@ pub fn build_model(pkg: &Pkg, mut mtx_for: impl FnMut(&str) -> Option<Mtx>) -> V
                         (mn[2] + mx[2]) * 0.5,
                     ]
                 })
-                .filter(|c| usable3(c))
+                .filter(usable3)
                 .unwrap_or([0.0, 0.0, 0.0])
         };
         // `part.origin` already carries the part loop's gate — a wheel
@@ -539,7 +539,7 @@ pub fn build_model(pkg: &Pkg, mut mtx_for: impl FnMut(&str) -> Option<Mtx>) -> V
         .parts
         .iter()
         .filter(|p| p.role == PartRole::Body)
-        .filter_map(|p| usable_aabb(p))
+        .filter_map(&mut usable_aabb)
         .collect::<Vec<_>>();
     let combined = |aabbs: &[([f32; 3], [f32; 3])]| {
         let mut min = [f32::MAX; 3];
