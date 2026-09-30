@@ -1,3 +1,74 @@
+# Last iteration — external-review repair: the F24-B.2 ledger recorded
+# an `mm2-host` CLI and a `Host::recv` signature that never shipped
+# (iteration 013)
+
+Repair iteration on `ralph/night` (baseline `920fdd8` — the F24-B.2
+candidate; external verify green, review **fail** on one blocking
+finding). Docs-only repair: no code changed.
+
+## Root cause
+
+The iteration-012 review found the three committed records of the
+slice — `docs/research/net.md`, PLAN.md's F24-B.2 row and the
+iteration-012 entry below — described an `mm2-host` interface the
+binary does not implement: flags `--mode/--difficulty/--vehicle/
+--paint/--name` and `--mod` (actual: none of those exist; the session
+flags are `--dev-world`/`--city`, `--pro`, `--weather`,
+`--time-of-day`, `--seed`, and the mod flag is `--mods`), a `--bind`
+default of `127.0.0.1:47700` (actual: `127.0.0.1:0`, loopback +
+ephemeral), and a `Host::recv` described as returning "the peer event
+plus the message that accompanied it" (shipped: `Result<HostEvent,
+RecvError>` — event only, lobby.rs:207). The phantom flags also
+asserted a host-side negotiation surface the same docs correctly defer
+to F24-B.3+. Ledger defect, not an implementation defect — the review
+called the code slice itself solid; the fix is mechanical correction
+of the docs against `mm2_host.rs`'s clap `Cli`.
+
+## Repair
+
+- `docs/research/net.md` "Dedicated host": rewritten against the
+  actual clap surface — `--mm2-path` required (an empty dir is a valid
+  content-free mount), `--mods`, `--bind` default `127.0.0.1:0`,
+  `--dev-world` xor `--city` (default `london`, refused when the psdl
+  does not resolve), `--pro`, `--weather`/`--time-of-day` 0–3,
+  `--seed`; the `listening=` record then `event=` lines is the
+  documented output contract. Vehicle/paint/name/non-cruise flags
+  explicitly recorded as *not* existing yet.
+- PLAN.md's F24-B.2 row: same flag/default corrections, plus
+  `Host::recv` now reads `Result<HostEvent, RecvError>` (with
+  `recv_timeout`/`try_recv` alongside), and an iter-013 repair note in
+  the established convention.
+- The iteration-012 entry below: both wrong passages corrected in
+  place with a parenthetical noting what the original text claimed.
+
+## Gates
+
+Docs-only diff — markdown cannot move fmt/clippy/test, but the gates
+were re-run anyway:
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --locked --workspace` — all suites green (exit 0).
+
+## Notes
+
+- F24-B.2 stays a candidate pending external check; this iteration
+  only corrected its record. The review's verification gaps stand:
+  `mm2-host` exercised only with an empty install + `--dev-world` (no
+  retail-install run), clients still share the test process (full
+  AC01 topology, LAN and Internet are F24-C), session revalidation of
+  joined peers / join gating / vehicle-paint negotiation / start are
+  later legs, and the Bevy-side in-app host (AC05's other leg) is
+  unstarted.
+- Defect class worth noting for future slices: the ledger was drafted
+  from the *intended* CLI (which included negotiation flags later
+  scoped out) rather than the shipped clap struct. Doc records of a
+  binary's flags should be checked against `--help` output before
+  commit.
+
+---
+
 # Last iteration — F24-B.2: session advertisement on the wire, the
 # `mm2_app` SessionConfig bridge, the headless `mm2-host` binary
 # (iteration 012, run 20260929T174954)
@@ -39,8 +110,10 @@ F24-B legs three and four.
   and the corrected roster rebroadcasts; a client sending `Session` is
   out-of-turn and dropped as `Malformed` by the existing discipline.
   `broadcast_roster` generalized into a `broadcast` helper shared by
-  both sends. `Host::recv` added — one call returning the peer event
-  plus the message that accompanied it, for CLI/REPL consumers.
+  both sends. `Host::recv` added — `Result<HostEvent, RecvError>`, a
+  blocking wait for the next lobby event for consumers that live
+  entirely on lobby traffic (the dedicated host); `recv_timeout` and
+  `try_recv` sit alongside it.
 - `mm2_app::net` (new module; `mm2_app` is the only crate where
   `mm2_game` and `mm2_net` may meet) — `SessionConfig` ↔
   `SessionAdvertisement`: params is bounded serde JSON of the
@@ -54,13 +127,19 @@ F24-B legs three and four.
   refs.
 - `mm2-host` — a second `mm2_app` binary, the first real consumer and
   the AC05 binary leg: headless (no window, audio or GPU), mounts the
-  VFS (`--mm2-path` + `--mod`, or `--dev-world` for no-install runs),
-  computes the gameplay fingerprint, binds `--bind` (default
-  `127.0.0.1:47700`), advertises a `SessionConfig` built from
-  `--city/--mode/--difficulty/--vehicle/--paint/--seed/--name`, then
-  serves the lobby, printing `listening=<addr> fingerprint=… seed=…
-  session="…"` once and one `event=` line per lobby event for harness
-  consumption.
+  VFS (`--mm2-path` required — an empty directory is a valid
+  content-free mount for no-install runs; `--mods` adds a mod
+  directory), computes the gameplay fingerprint, binds `--bind`
+  (default `127.0.0.1:0` — loopback, ephemeral port), advertises a
+  cruise `SessionConfig` built from `--dev-world` or `--city`
+  (conflicting; default `london`, refused when `city/<name>.psdl` does
+  not resolve), `--pro`, `--weather`, `--time-of-day` and `--seed`,
+  then serves the lobby, printing `listening=<addr> fingerprint=…
+  seed=… session="…"` once and one `event=` line per lobby event for
+  harness consumption. (The committed text originally listed
+  `--mode/--difficulty/--vehicle/--paint/--name`, `--mod` and a
+  `127.0.0.1:47700` default — none of which shipped; corrected in
+  iteration 013.)
 
 ## Evidence
 

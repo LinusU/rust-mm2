@@ -158,13 +158,21 @@ fingerprint remains the only compatibility gate.
 ### Dedicated host
 
 `mm2-host` (a second `mm2_app` binary) is the first consumer: a headless
-host process that mounts the VFS (`--mm2-path`, `--mod`), computes the
-gameplay fingerprint, binds a configured address (`--bind`, default
-loopback), advertises one `SessionConfig` built from its CLI flags
-(`--city`, `--mode`, `--difficulty`, `--vehicle`, `--paint`, `--seed`,
-`--name`, `--dev-world`), and prints one `loop event` line per lobby
-event for harness consumption. No window, audio or GPU is required —
-that is the F24-AC05 binary leg, exercised so far only on loopback.
+host process that mounts the VFS read-only (`--mm2-path` is required —
+an empty directory is a valid content-free mount; `--mods` adds a mod
+directory), computes the gameplay fingerprint, binds `--bind` (default
+`127.0.0.1:0` — loopback with an ephemeral port; the chosen address is
+printed so a harness can dial it), advertises a cruise `SessionConfig`
+built from `--dev-world` *or* `--city` (the flags conflict; the default
+city is `london` and one whose `city/<name>.psdl` does not resolve
+through the mounted VFS is refused), `--pro` (Professional instead of
+Amateur), `--weather`/`--time-of-day` (0–3 selectors) and `--seed`
+(clock-derived when omitted), and prints one
+`listening=<addr> fingerprint=… seed=… session="…"` record followed by
+one `event=` line per lobby event for harness consumption. No window,
+audio or GPU is required — that is the F24-AC05 binary leg, exercised
+so far only on loopback. Vehicle/paint, named sessions and non-cruise
+modes have no flags yet — those arrive with the negotiation legs below.
 
 Deliberately *not* here: start/cancel, vehicle/paint negotiation,
 session-content join gating, late-join into a running session, host
