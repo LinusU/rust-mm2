@@ -16,6 +16,7 @@
 //! TEX textures decode top-down while PKG UVs are authored against the
 //! bottom-up file order, so `v` is complemented when meshes are built.
 
+use mm2_formats::camtrack::{usable_f32, usable3};
 use mm2_formats::mtx::Mtx;
 use mm2_formats::pkg::{PRIMTYPE_TRIANGLES, Pkg, PkgChunk, PkgGeometry, PkgShader, PkgShaders};
 
@@ -140,9 +141,15 @@ pub struct ModelPart {
     pub role: PartRole,
     /// Geometry per LOD tier (ascending detail).
     pub lods: Vec<(Lod, Vec<MeshGroup>)>,
-    /// Attach point in car space (mtx origin); `None` = authored in place.
+    /// Attach point in car space (mtx origin); `None` = authored in
+    /// place — including an authored-but-unusable origin (non-finite or
+    /// beyond `USABLE_BOUND`), which `build_model` reports and reads as
+    /// unauthored so `attach`/`pivot + offset` consumers never see a
+    /// component that overflows on composition.
     pub origin: Option<[f32; 3]>,
-    /// Pivot/rotation centre from mtx, when meaningful.
+    /// Pivot/rotation centre from mtx, when meaningful — gated like
+    /// `origin` (currently stored for consumers downstream, not read
+    /// by the rig itself).
     pub pivot: Option<[f32; 3]>,
     /// Translation to apply to geometry before placing the part at
     /// `origin` — used when a wheel's mesh is authored in place rather than
@@ -328,8 +335,16 @@ pub fn build_model(pkg: &Pkg, mut mtx_for: impl FnMut(&str) -> Option<Mtx>) -> V
         part.lods.sort_by_key(|(lod, _)| *lod);
         let mtx = mtx_for(&stem);
         if let Some(m) = mtx {
-            part.origin = Some(m.origin);
-            if m.pivot.iter().any(|v| v.abs() > 1e-6) {
+            // The `.mtx` transform shares the camera/dash family's
+            // usable gate: `validate` names each unusable field, and an
+            // origin/pivot that is non-finite or beyond `USABLE_BOUND`
+            // reads unauthored (`None` = authored in place) instead of
+            // binding a component that overflows on composition.
+            for issue in m.validate() {
+                warnings.push(format!("part {stem} .mtx: {issue}"));
+            }
+            part.origin = usable3(&m.origin).then_some(m.origin);
+            if usable3(&m.pivot) && m.pivot.iter().any(|v| v.abs() > 1e-6) {
                 part.pivot = Some(m.pivot);
             }
         }
@@ -346,25 +361,50 @@ pub fn build_model(pkg: &Pkg, mut mtx_for: impl FnMut(&str) -> Option<Mtx>) -> V
             _ => continue,
         };
         let mtx = mtx_for(&part.name);
-        let (origin, mtx_radius, mtx_width) = match &mtx {
-            Some(m) => (m.origin, m.wheel_radius(), m.wheel_width()),
-            None => {
-                warnings.push(format!(
-                    "wheel part {} has no mtx transform; using geometry centre",
-                    part.name
-                ));
-                let c = part
-                    .best_nonempty_lod()
-                    .and_then(|g| mesh_aabb(g))
-                    .map(|(mn, mx)| {
-                        [
-                            (mn[0] + mx[0]) * 0.5,
-                            (mn[1] + mx[1]) * 0.5,
-                            (mn[2] + mx[2]) * 0.5,
-                        ]
-                    })
-                    .unwrap_or([0.0, 0.0, 0.0]);
-                (c, 0.0, 0.0)
+        // The geometry-centre fallback — also gated: a beyond-bound
+        // vertex cloud's centre is not a usable attach point either.
+        let geometry_centre = |part: &ModelPart| {
+            part.best_nonempty_lod()
+                .and_then(|g| mesh_aabb(g))
+                .map(|(mn, mx)| {
+                    [
+                        (mn[0] + mx[0]) * 0.5,
+                        (mn[1] + mx[1]) * 0.5,
+                        (mn[2] + mx[2]) * 0.5,
+                    ]
+                })
+                .filter(|c| usable3(c))
+                .unwrap_or([0.0, 0.0, 0.0])
+        };
+        // `part.origin` already carries the part loop's gate — a wheel
+        // whose authored origin did not survive it takes the fallback
+        // exactly like a missing transform.
+        let (origin, mtx_radius, mtx_width) = match (&mtx, part.origin) {
+            (Some(m), Some(o)) => {
+                let (r, w) = (m.wheel_radius(), m.wheel_width());
+                (
+                    o,
+                    if usable_f32(r) { r } else { 0.0 },
+                    if usable_f32(w) { w } else { 0.0 },
+                )
+            }
+            // `part.origin` proves a usable transform existed — keep it
+            // even if this second lookup misses (an inconsistent
+            // `mtx_for`); the value is already gated.
+            (None, Some(o)) => (o, 0.0, 0.0),
+            (m, _) => {
+                warnings.push(if m.is_some() {
+                    format!(
+                        "wheel part {} mtx origin is not usable; using geometry centre",
+                        part.name
+                    )
+                } else {
+                    format!(
+                        "wheel part {} has no mtx transform; using geometry centre",
+                        part.name
+                    )
+                });
+                (geometry_centre(part), 0.0, 0.0)
             }
         };
         // Radius: prefer the wheel geometry's own extent (matches visuals);
@@ -378,25 +418,33 @@ pub fn build_model(pkg: &Pkg, mut mtx_for: impl FnMut(&str) -> Option<Mtx>) -> V
             let r = (mx[1] - mn[1]) * 0.5;
             // In-place authored wheel meshes (stock trailer wheels) are
             // recentred onto their own centroid so the mtx origin applies.
+            // A beyond-bound centre is not a usable recentre target.
             let off =
                 (centre[0] * centre[0] + centre[1] * centre[1] + centre[2] * centre[2]).sqrt();
-            if r > 0.05 && off > r * 0.75 && mtx.is_some() {
+            if usable3(&centre) && r > 0.05 && off > r * 0.75 && mtx.is_some() {
                 recentres.push((i, centre, part.name.clone()));
             }
         }
-        let (radius, width) = part
+        // Wheel geometry is authored around its own centre only when
+        // the bbox is symmetric around the origin; trailer wheels are
+        // sometimes authored in place — measure y-extent either way.
+        // A non-finite or beyond-bound extent is not a usable wheel
+        // size: it is reported and the mtx bound stands in.
+        let measured = part
             .best_nonempty_lod()
             .and_then(|g| mesh_aabb(g))
-            .map(|(mn, mx)| {
-                let r = (mx[1] - mn[1]) * 0.5;
-                let w = (mx[0] - mn[0]) * 0.5;
-                // Wheel geometry is authored around its own centre only when
-                // the bbox is symmetric around the origin; trailer wheels are
-                // sometimes authored in place — measure y-extent either way.
-                (r.max(0.01), w.max(0.01))
-            })
-            .filter(|(r, _)| *r > 0.05)
-            .unwrap_or((mtx_radius.max(0.05), mtx_width.max(0.01)));
+            .map(|(mn, mx)| ((mx[1] - mn[1]) * 0.5, (mx[0] - mn[0]) * 0.5));
+        let (radius, width) = match measured {
+            Some((r, w)) if !usable_f32(r) || !usable_f32(w) => {
+                warnings.push(format!(
+                    "wheel part {} geometry extent {r:.3}×{w:.3} is not usable; using the mtx bound",
+                    part.name
+                ));
+                (mtx_radius.max(0.05), mtx_width.max(0.01))
+            }
+            Some((r, w)) if r > 0.05 => (r.max(0.01), w.max(0.01)),
+            _ => (mtx_radius.max(0.05), mtx_width.max(0.01)),
+        };
         model.wheels.push(WheelVisual {
             index,
             trailer,
@@ -466,12 +514,32 @@ pub fn build_model(pkg: &Pkg, mut mtx_for: impl FnMut(&str) -> Option<Mtx>) -> V
         }
     }
 
-    // Body AABB: from BODY parts; fall back to all non-shadow parts.
+    // Body AABB: from BODY parts; fall back to all non-shadow parts. A
+    // part whose measured bound is unusable (non-finite or beyond
+    // `USABLE_BOUND` — hostile pkg vertices) is reported and excluded
+    // rather than inflating the bound the convert path centres the
+    // mass and chassis on.
+    let mut bound_warned = std::collections::HashSet::new();
+    let mut usable_aabb = |p: &ModelPart| -> Option<([f32; 3], [f32; 3])> {
+        let aabb = p.best_lod().and_then(|g| mesh_aabb(g))?;
+        if usable3(&aabb.0) && usable3(&aabb.1) {
+            Some(aabb)
+        } else {
+            // A part checked for both lists reports once.
+            if bound_warned.insert(p.name.clone()) {
+                warnings.push(format!(
+                    "part {} geometry bound is not usable; excluded from the body bound",
+                    p.name
+                ));
+            }
+            None
+        }
+    };
     let body = model
         .parts
         .iter()
         .filter(|p| p.role == PartRole::Body)
-        .filter_map(|p| p.best_lod().and_then(|g| mesh_aabb(g)))
+        .filter_map(|p| usable_aabb(p))
         .collect::<Vec<_>>();
     let combined = |aabbs: &[([f32; 3], [f32; 3])]| {
         let mut min = [f32::MAX; 3];
@@ -497,7 +565,7 @@ pub fn build_model(pkg: &Pkg, mut mtx_for: impl FnMut(&str) -> Option<Mtx>) -> V
                 )
             })
             .filter_map(|p| {
-                let aabb = p.best_lod().and_then(|g| mesh_aabb(g))?;
+                let aabb = usable_aabb(p)?;
                 // Parts authored around a local origin move to their attach
                 // point.
                 Some(match p.origin {
@@ -607,6 +675,100 @@ mod tests {
             |_| None,
         );
         assert!(model.wheels.iter().all(|w| w.simulated));
+    }
+
+    /// A hostile `.mtx` (non-finite or beyond `USABLE_BOUND`) is
+    /// reported per field and reads unauthored — the part sits
+    /// authored-in-place and the wheel falls back to its geometry
+    /// centre, exactly like a missing transform.
+    #[test]
+    fn unusable_mtx_fields_read_unauthored() {
+        let hostile = Mtx {
+            bounds_min: [f32::NAN, -0.3, -0.15],
+            bounds_max: [0.15, 3e38, 0.15],
+            pivot: [f32::INFINITY, 0.0, 0.0],
+            origin: [3e38, 0.3, -1.3],
+        };
+        let model = build_model(&pkg(&[("BODY_H", 1.0), ("WHL0_H", 0.3)]), |stem| {
+            (stem == "whl0").then_some(hostile)
+        });
+        let whl0 = model.parts.iter().find(|p| p.name == "whl0").unwrap();
+        assert_eq!(whl0.origin, None, "3e38 origin reads unauthored");
+        assert_eq!(whl0.pivot, None, "inf pivot reads unauthored");
+        // tri_geo(0.3) spans ±0.3 in x/y and 0..0.3 in z — the wheel
+        // takes the geometry-centre fallback, never the authored 3e38.
+        let w = model.wheels.iter().find(|w| w.index == 0).unwrap();
+        assert_eq!(w.origin, [0.0, 0.0, 0.15]);
+        assert!((w.radius - 0.3).abs() < 1e-6, "radius: {}", w.radius);
+        for field in ["bounds_min", "bounds_max", "pivot", "origin"] {
+            assert!(
+                model.warnings.iter().any(|w| w.contains(field)),
+                "{field} named: {:?}",
+                model.warnings
+            );
+        }
+        assert!(
+            model
+                .warnings
+                .iter()
+                .any(|w| w.contains("mtx origin is not usable")),
+            "the wheel fallback is reported: {:?}",
+            model.warnings
+        );
+    }
+
+    /// Within the bound everything binds verbatim — the gate rejects
+    /// nothing authored.
+    #[test]
+    fn usable_mtx_fields_bind_verbatim() {
+        let m = Mtx {
+            bounds_min: [-0.15, -0.3, -0.15],
+            bounds_max: [0.15, 0.3, 0.15],
+            pivot: [0.0, 0.05, 0.0],
+            origin: [0.8, 0.3, -1.3],
+        };
+        let model = build_model(&pkg(&[("WHL0_H", 0.3)]), |stem| {
+            (stem == "whl0").then_some(m)
+        });
+        let whl0 = &model.parts[0];
+        assert_eq!(whl0.origin, Some([0.8, 0.3, -1.3]));
+        assert_eq!(whl0.pivot, Some([0.0, 0.05, 0.0]));
+        assert_eq!(
+            model.wheels[0].origin,
+            [0.8, 0.3, -1.3],
+            "the authored wheel centre binds verbatim"
+        );
+        assert!(model.warnings.is_empty(), "{:?}", model.warnings);
+    }
+
+    /// Hostile pkg vertices cannot inflate the wheel measurement or the
+    /// body bound: unusable measurements are reported and excluded, so
+    /// nothing downstream of `WheelVisual`/`body_aabb` composes a
+    /// non-finite or astronomical value.
+    #[test]
+    fn unusable_geometry_measurements_read_unauthored() {
+        let model = build_model(&pkg(&[("BODY_H", 3e38), ("WHL0_H", 3e38)]), |_| None);
+        let w = model.wheels.iter().find(|w| w.index == 0).unwrap();
+        assert_eq!(
+            w.origin, [0.0; 3],
+            "the beyond-bound geometry centre reads unauthored"
+        );
+        assert!(
+            (w.radius - 0.05).abs() < 1e-6,
+            "the designed floor stands in: {}",
+            w.radius
+        );
+        assert!(
+            model.warnings.iter().any(|w| w.contains("extent")),
+            "the unusable extent is reported: {:?}",
+            model.warnings
+        );
+        assert_eq!(model.body_aabb, None, "the 3e38 bound is excluded");
+        assert!(
+            model.warnings.iter().any(|w| w.contains("geometry bound")),
+            "{:?}",
+            model.warnings
+        );
     }
 
     #[test]

@@ -128,7 +128,9 @@ pub(crate) fn drawable_fov(f: f32) -> bool {
 /// past this bound. `1e6` sits orders above anything authored — the
 /// largest retail value in the family is `CameraFar 1330` — and
 /// orders below `f32::MAX`, so the composed transforms, projections
-/// and sweeps cannot overflow.
+/// and sweeps cannot overflow. The `.mtx` part-transform record shares
+/// the bound: its `origin`/`pivot`/`bounds_*` fields feed the same
+/// `attach`/`pivot + offset` compositions through `build_model`.
 pub const USABLE_BOUND: f32 = 1e6;
 
 /// A scalar is usable only when finite *and* within [`USABLE_BOUND`].
@@ -147,8 +149,9 @@ pub fn usable1(v: Option<f32>) -> Option<f32> {
 
 /// Every component [`usable_f32`] — the gate for authored vectors that
 /// feed transforms and camera math (`Offset`, `TrackTo`, the
-/// `_dash.asnode` placements). Shared by the `camTrackCS`, `camPovCS`
-/// and `asNode` decoders and their app-side readers.
+/// `_dash.asnode` placements, the `.mtx` part transforms). Shared by
+/// the `camTrackCS`, `camPovCS` and `asNode` decoders, the `Mtx`
+/// record's readers in `build_model`, and their app-side readers.
 pub fn usable3(v: &[f32; 3]) -> bool {
     v.iter().all(|c| usable_f32(*c))
 }

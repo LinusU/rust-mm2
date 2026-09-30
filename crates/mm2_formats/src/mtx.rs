@@ -73,4 +73,61 @@ impl Mtx {
     pub fn wheel_width(&self) -> f32 {
         (self.bounds_max[0] - self.bounds_min[0]).abs()
     }
+
+    /// Named issues for unusable authored fields — non-finite or beyond
+    /// the shared [`USABLE_BOUND`](crate::camtrack::USABLE_BOUND), the
+    /// same gate the camera/dash family carries (a beyond-bound origin
+    /// overflows `pivot + offset`/`attach` compositions just like a
+    /// beyond-bound `Offset` overflows `eye + field`). The raw fields
+    /// stay verbatim: consumers gate their reads, `validate` names the
+    /// field instead of repairing it.
+    pub fn validate(&self) -> Vec<String> {
+        let mut issues = Vec::new();
+        for (name, v) in [
+            ("bounds_min", &self.bounds_min),
+            ("bounds_max", &self.bounds_max),
+            ("pivot", &self.pivot),
+            ("origin", &self.origin),
+        ] {
+            if let Some(i) = crate::camtrack::vec_issue(name, v) {
+                issues.push(i);
+            }
+        }
+        issues
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A record within the bound validates clean; non-finite and
+    /// beyond-bound fields are each named while the raw values stay
+    /// verbatim.
+    #[test]
+    fn validate_names_unusable_fields_verbatim() {
+        let clean = Mtx {
+            bounds_min: [-0.15, -0.3, -0.15],
+            bounds_max: [0.15, 0.3, 0.15],
+            pivot: [0.0; 3],
+            origin: [0.8, 0.3, -1.3],
+        };
+        assert!(clean.validate().is_empty());
+
+        let hostile = Mtx {
+            bounds_min: [f32::NAN, 0.0, 0.0],
+            bounds_max: [0.15, 3e38, 0.15],
+            pivot: [f32::INFINITY, 0.0, 0.0],
+            origin: [3e38, 0.3, -1.3],
+        };
+        let issues = hostile.validate();
+        assert_eq!(issues.len(), 4, "{issues:?}");
+        assert!(issues[0].contains("bounds_min") && issues[0].contains("is not finite"));
+        assert!(issues[1].contains("bounds_max") && issues[1].contains("usable bound"));
+        assert!(issues[2].contains("pivot") && issues[2].contains("is not finite"));
+        assert!(issues[3].contains("origin") && issues[3].contains("usable bound"));
+        // Raw fields keep their authored (hostile) values verbatim.
+        assert_eq!(hostile.origin, [3e38, 0.3, -1.3]);
+        assert!(hostile.bounds_min[0].is_nan());
+    }
 }

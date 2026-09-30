@@ -252,6 +252,11 @@ pub fn spawn_dash(
                     .and_then(|b| Mtx::parse(&b).ok())
             })
         });
+    if let Some(m) = &model {
+        for w in &m.warnings {
+            warn!(car = %car, "dash model: {w}");
+        }
+    }
 
     let eye = pov
         .as_ref()

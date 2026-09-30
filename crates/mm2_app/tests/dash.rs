@@ -1242,3 +1242,173 @@ fn overflowing_asnode_reads_unauthored() {
         );
     }
 }
+
+/// A 48-byte `.mtx` part transform: bounds min/max, pivot, origin.
+fn part_mtx(origin: [f32; 3]) -> Vec<u8> {
+    let mut d = Vec::new();
+    for f in [
+        -0.15f32, -0.3, -0.15, 0.15, 0.3, 0.15, // bounds min/max
+        0.0, 0.0, 0.0, // pivot
+        origin[0], origin[1], origin[2],
+    ] {
+        d.extend_from_slice(&f.to_le_bytes());
+    }
+    d
+}
+
+/// The pkg/mtx-authored dash pivot shares the `USABLE_BOUND` gate at
+/// `build_model`: a hostile `geometry/<car>_dash_<part>.mtx` origin
+/// would overflow `pivot + offset + pivot_offset` the same way a text
+/// field would, so the pivot reads unauthored (part at the in-place
+/// pose) and every spawned transform stays finite through `drive_dash`.
+/// A usable origin still binds verbatim — the gate rejects nothing
+/// authored.
+#[test]
+fn overflowing_dash_mtx_origin_reads_unauthored() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("tune")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("geometry")).unwrap();
+    std::fs::write(
+        tmp.path().join("tune/x_dash.asnode"),
+        "type: a\nasNode {\n  DashPos 0.0 -0.6 -0.78\n  SpeedOffset 0.1 0.2 0.3\n  WheelPos 0.0 0.0 0.0\n}\n",
+    )
+    .unwrap();
+    std::fs::write(tmp.path().join("geometry/x_dash.pkg"), dash_pkg()).unwrap();
+    // The needle's origin overflows `pivot + offset` verbatim (3.4e38);
+    // the wheel's sits just past the bound (2e6). Both read unauthored.
+    std::fs::write(
+        tmp.path().join("geometry/x_dash_speed_needle.mtx"),
+        part_mtx([3.4e38, 0.0, 0.0]),
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("geometry/x_dash_wheel.mtx"),
+        part_mtx([2e6, 0.0, 0.0]),
+    )
+    .unwrap();
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(tmp.path(), 0).unwrap();
+
+    let mut app = base_app();
+    app.init_resource::<Assets<Mesh>>()
+        .init_resource::<Assets<Image>>()
+        .init_resource::<Assets<StandardMaterial>>()
+        .add_systems(Update, drive_dash);
+    let config = test_config();
+    let mut state = VehicleState::new(&config);
+    state.forward_speed = 25.0;
+    state.steer_angle = 0.25;
+    let vehicle = spawn_player(&mut app, &config, state);
+
+    let report = app
+        .world_mut()
+        .resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
+                world.resource_scope(|world, mut materials: Mut<Assets<StandardMaterial>>| {
+                    let mut queue = CommandQueue::default();
+                    let report = {
+                        let mut commands = Commands::new(&mut queue, world);
+                        spawn_dash(
+                            &mut commands,
+                            &vfs,
+                            "x",
+                            0,
+                            None,
+                            &mut meshes,
+                            &mut images,
+                            &mut materials,
+                            vehicle,
+                            SessionEntity(1),
+                            CameraMode::Cockpit,
+                            None,
+                        )
+                    };
+                    queue.apply(world);
+                    report
+                })
+            })
+        });
+    assert_eq!(report.parts, 2, "both authored parts bound: {report}");
+
+    // The hostile origins read unauthored: the needle pivot node sits at
+    // `SpeedOffset` (in-place pose), the wheel node at `WheelPos` — not
+    // at 3.4e38/2e6, and never non-finite.
+    let mut saw_speed = false;
+    let mut saw_wheel = false;
+    let mut q = app.world_mut().query::<(&DashNode, &Transform)>();
+    for (node, t) in q.iter(app.world()) {
+        match &node.role {
+            DashRole::Speed { .. } => {
+                saw_speed = true;
+                assert_eq!(
+                    t.translation,
+                    Vec3::new(0.1, 0.2, 0.3),
+                    "3.4e38 mtx origin reads unauthored"
+                );
+            }
+            DashRole::Wheel { .. } => {
+                saw_wheel = true;
+                assert_eq!(t.translation, Vec3::ZERO, "2e6 mtx origin reads unauthored");
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_speed && saw_wheel);
+
+    // A usable authored origin still binds verbatim: rewrite the
+    // needle's transform record in place and respawn.
+    std::fs::write(
+        tmp.path().join("geometry/x_dash_speed_needle.mtx"),
+        part_mtx([0.05, 0.0, 0.0]),
+    )
+    .unwrap();
+    let report = app
+        .world_mut()
+        .resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
+                world.resource_scope(|world, mut materials: Mut<Assets<StandardMaterial>>| {
+                    let mut queue = CommandQueue::default();
+                    let report = {
+                        let mut commands = Commands::new(&mut queue, world);
+                        spawn_dash(
+                            &mut commands,
+                            &vfs,
+                            "x",
+                            0,
+                            None,
+                            &mut meshes,
+                            &mut images,
+                            &mut materials,
+                            vehicle,
+                            SessionEntity(1),
+                            CameraMode::Cockpit,
+                            None,
+                        )
+                    };
+                    queue.apply(world);
+                    report
+                })
+            })
+        });
+    assert_eq!(report.parts, 2, "usable mtx still binds: {report}");
+    // The first spawn's needle still exists beside the respawn — find
+    // the one the usable origin produced (`0.05 + SpeedOffset`).
+    let mut q = app.world_mut().query::<(&DashNode, &Transform)>();
+    let bound = q.iter(app.world()).any(|(n, t)| {
+        matches!(n.role, DashRole::Speed { .. }) && t.translation == Vec3::new(0.15, 0.2, 0.3)
+    });
+    assert!(bound, "usable origin adds to the authored offset");
+
+    // Every spawned cockpit transform is finite, and stays finite once
+    // the needles drive off live vehicle state.
+    app.update();
+    let mut q = app
+        .world_mut()
+        .query_filtered::<&Transform, With<CockpitPart>>();
+    for t in q.iter(app.world()) {
+        assert!(
+            t.translation.is_finite() && t.rotation.is_finite(),
+            "hostile mtx produced a non-finite transform: {t:?}"
+        );
+    }
+}
