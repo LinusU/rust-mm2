@@ -26,6 +26,9 @@ impl Conn {
     /// Connect to a listening peer.
     pub fn connect(addr: SocketAddr) -> Result<Self, NetError> {
         let stream = TcpStream::connect(addr)?;
+        // Small latency-sensitive frames (Input/Snap) must not sit in
+        // Nagle's buffer behind an ACK timer.
+        stream.set_nodelay(true)?;
         let peer = stream.peer_addr()?;
         Ok(Self { stream, peer })
     }
@@ -44,6 +47,8 @@ impl Conn {
     /// Wrap an already-accepted stream — the accept thread's hand-off to
     /// the host loop.
     pub(crate) fn from_stream(stream: TcpStream) -> io::Result<Self> {
+        // See `connect` — the session data plane cannot sit in Nagle.
+        stream.set_nodelay(true)?;
         let peer = stream.peer_addr()?;
         Ok(Self { stream, peer })
     }

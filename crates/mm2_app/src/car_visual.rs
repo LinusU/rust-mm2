@@ -73,6 +73,58 @@ pub struct Trailer {
     pub rest_offset: Vec3,
 }
 
+/// The synthetic dev car's visuals: a cuboid body plus cylinder wheels on
+/// the standard mount/spin rig. `root` is the physics vehicle entity the
+/// pieces attach under. Shared by the local no-`--car` spawn and remote
+/// participants whose pick is the dev car (F25-A).
+pub fn spawn_dev_car(
+    commands: &mut Commands,
+    cfg: &mm2_vehicle::VehicleConfig,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    root: Entity,
+) {
+    let body_mesh = meshes.add(Cuboid::from_size(Vec3::from(cfg.chassis_size)));
+    let body_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.85, 0.15, 0.1),
+        metallic: 0.3,
+        perceptual_roughness: 0.5,
+        ..default()
+    });
+    commands
+        .entity(root)
+        .insert((Mesh3d(body_mesh), MeshMaterial3d(body_mat)));
+    let wheel_mesh = meshes.add(Cylinder::new(0.34, 0.25));
+    let wheel_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.1, 0.1, 0.1),
+        perceptual_roughness: 0.9,
+        ..default()
+    });
+    for (i, w) in cfg.wheels.iter().enumerate() {
+        let mount = commands
+            .spawn((
+                WheelMount {
+                    vehicle: root,
+                    index: i,
+                    follow_offset: Vec3::ZERO,
+                },
+                Transform::from_translation(Vec3::from(w.position)),
+            ))
+            .id();
+        commands.entity(root).add_child(mount);
+        let spin = commands.spawn((WheelSpin, Transform::IDENTITY)).id();
+        commands.entity(mount).add_child(spin);
+        commands.entity(spin).with_child((
+            Mesh3d(wheel_mesh.clone()),
+            MeshMaterial3d(wheel_mat.clone()),
+            // Cylinder is Y-aligned: rotate onto the axle (X) and
+            // scale to the configured radius.
+            Transform::from_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2))
+                .with_scale(Vec3::new(w.radius / 0.34, 1.0, w.radius / 0.34)),
+        ));
+    }
+}
+
 /// Convert a [`MeshGroup`] into a Bevy mesh, baking the optional recenter
 /// offset (translation only — normals are unaffected).
 pub(crate) fn group_mesh(g: &MeshGroup, recenter: Option<Vec3>) -> Mesh {

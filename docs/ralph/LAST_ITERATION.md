@@ -1,3 +1,140 @@
+# Last iteration — F25-A.1: host-authoritative remote driving transport
+# — inputs up, host-side remote sim, snapshots down (iteration 022,
+# run 20261001T195454-62282 continued)
+
+Implementation iteration on `ralph/night` (baseline `92a46f3` — the
+F24-B.8 candidate; external verify green, review pass with gaps only).
+One coherent slice: the first F25-A data-plane leg — remote lobby
+players stop being roster/display state and become networked driving
+participants over the socket the lobby already owns.
+
+## Task selection
+
+F24-B closed with one named gap: "remote players remain
+roster/display state only — no spawn, interpolation, input transport
+or replication exists to observe (explicit F25/F26 scope)". F25-A is
+the next frontier and unblocked (F24-B landed). Scope is the minimal
+authoritative data plane, deliberately not full multiplayer: no
+client-side prediction or own-seat reconciliation, no damage/stuck/
+result replication (the rule systems' `PlayerControl::Remote` skips
+are preserved — resolving a remote driver's *outcome* needs wire
+coordination a later slice adds), no LAN/Internet reachability
+(F24-C), no DirectPlay compatibility (out of product scope).
+
+## What landed
+
+- `mm2_net::proto` — protocol v4. `DriveInput{generation, seq,
+  throttle:u8, brake:u8, steer:i8, handbrake:u8}` (quantized integer
+  controls) and `SnapEntry{player, pos, rot, vel, angvel}` (f32 pose)
+  ride new `Message::Input`/`Message::Snap{generation, tick, entries}`
+  frames — bounded encode/decode like every sibling; `Snap` entries
+  are roster-capped (`MAX_PLAYERS`). `Message::Start` carries
+  `host_pick: Option<VehiclePick>` — the host seat is never a wire
+  roster entry (ids mint from 1; 0 is reserved), so its vehicle
+  travels on the start frame.
+- `mm2_net::conn` — `TCP_NODELAY` on lobby sockets: the data plane is
+  latency-sensitive traffic, not a batch channel.
+- `mm2_net::lobby` — `RemoteInputs`, the host's per-player input
+  mailbox (`Arc<Mutex<BTreeMap<u16, StampedInput>>>`, latest-wins per
+  roster slot, bounded by `MAX_PLAYERS`, arrival-time staleness clock).
+  Per-peer reader threads absorb `Input` frames straight into the
+  mailbox — they never queue behind lobby events — so a fast sender
+  cannot pile up a backlog and a slow sender just leaves a stale
+  sample. Departed slots prune on roster removal; teardown clears the
+  map. `HostCtl::broadcast` queues an arbitrary host→all message for
+  the event loop (snapshot publication path); `ClientCtl::send_input`
+  is the client send. A failed broadcast write reaps the peer under
+  the existing disconnect discipline and rebroadcasts the corrected
+  roster.
+- `mm2_app::netdrive` (new) — the app-side data plane:
+  - `encode_input`/`decode_input` — `VehicleInput` ↔ `DriveInput`
+    quantization (0–255 / ±127), `forced_gear` stays local.
+  - `NetPlayer(u16)` stamps each participant's wire identity — the
+    local car included, so the host's snapshot carries seat 0 and a
+    client recognizes its own entry.
+  - `reconcile_remote_players` — keeps the world equal to the lobby
+    state: every picked remote roster slot (plus the `host_pick` seat
+    on clients) spawns a session-owned participant (`PlayerControl::
+    Remote`, minted ids, `DamageSignals`, the shared vehicle/spawn
+    paths); a departure or changed pick despawns it. The authority
+    role splits the spawn — on the host it is a dynamic simulated
+    car, on a client a kinematic copy with a `RemoteLerp` blend.
+  - `send_drive_input` (client) — the settled local `VehicleInput`
+    becomes a generation-stamped `Input` frame per update while
+    `Playing`.
+  - `apply_remote_inputs` (host) — each remote car reads its mailbox
+    slot; samples older than `INPUT_STALE` (250 ms) or from another
+    generation zero the input — a stalled driver coasts, it never
+    keeps its last throttle.
+  - `publish_snapshots` (host) — every participant's `Position`/
+    `Rotation`/velocities broadcast once per update, ticked by the
+    session clock.
+  - `RemoteSnaps`/`apply_snapshots`/`drive_remote_lerp` (client) —
+    the latest staged snapshot retargets each copy's lerp (interval =
+    the observed arrival gap); stale ticks and foreign generations
+    drop, own-seat entries are received but never applied.
+- `mm2_app::net` — `LobbyState.host_pick`; `drive_lobby` stages `Snap`
+  into `RemoteSnaps`; `HostLink::open` advertises the host seat's pick
+  via `Start`; `HostLink::remote_inputs` exposes the mailbox.
+- `car_visual::spawn_dev_car` — the synthetic dev car's visuals
+  extracted so remote dev-car picks build the same rig the local one
+  does.
+- `main.rs`/`smoke.rs` — both link arms wire the systems with the
+  drain-before-consume ordering; the headless record gains
+  `net=in<s>a/x,snap<s>a,rem<n>` (absent for non-lobby records —
+  bit-identical otherwise).
+
+## Evidence
+
+- `mm2_net` 58 tests green: `Input`/`Snap` wire round-trips and
+  truncation/oversize rejections, `Start` host-pick legs (both
+  `Some`/`None`), mailbox latest-wins under a real socket pump, the
+  `MAX_PLAYERS` bound, prune-on-leave, teardown clear, `Snap`
+  broadcast reaching every peer, dead-write removal under the shared
+  discipline.
+- `mm2_app` netdrive unit legs: encode/decode round-trip incl.
+  `forced_gear` staying local, out-of-range/NaN clamping, wire
+  quaternion sanitization.
+- `tests/net_app.rs` 27→29: `a_remote_players_inputs_drive_the_hosted_car`
+  — a real loopback peer's `Input` frames spawn a
+  `Remote`+`Authority` dynamic car whose `VehicleInput` follows the
+  mailbox, staleness zeroes it, `Snap` reaches the peer, departure
+  despawns; `a_client_streams_inputs_and_applies_the_host_snapshot` —
+  the host seat spawns as a `Remote`+`Predicted` kinematic copy, the
+  local input stream lands in the host's mailbox under the session
+  generation, a `Snap` retargets the lerp and the `Position` follows,
+  stale-tick and foreign-generation frames drop, the own-seat entry
+  is skipped.
+- `net_host.rs` asserts a dedicated (`mm2-host`) session advertises
+  `host_pick: None` — a seat-less host spawns no seat-0 car.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --workspace` — all suites green incl. `net_app` 29/29
+  and `mm2_net` 58/58.
+
+## Classification / remaining open items
+
+- Implementation choices: host seat = wire id 0 (never a roster
+  entry); remote spawn offsets are designed staging (grid assignment
+  is a follow-up); `INPUT_STALE` 250 ms is a designed bound;
+  `TCP_NODELAY` on the lobby socket; snapshot pacing rides Update.
+- Still open F25-A scope: own-seat prediction/reconciliation,
+  damage/stuck/recovery/result replication for remote drivers (their
+  `PlayerControl::Remote` skips stay intentional), spawn-grid
+  assignment, HUD/roster naming of remote drivers, input
+  rate-limiting beyond latest-wins, interpolation tuning, the
+  F25-B/C rows (opponent/traffic/object replication).
+- Verification gaps carried forward: everything is loopback — AC03's
+  impairment matrix and LAN/Internet legs remain F24-C; no
+  retail-install leg this iteration (synthetic mounts only); the
+  windowed surface is still a status line.
+
+---
+
 # Last iteration — F24-B.8: the in-app host surface — `mm2 --host`
 # runs the lobby inside the real application (iteration 021, run
 # 20261001T195454-62282)

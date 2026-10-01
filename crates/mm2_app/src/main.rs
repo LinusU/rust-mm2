@@ -22,9 +22,9 @@ use clap::Parser;
 use mm2_app::session::{SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
     audio, banger, breakaway, camera, car_visual, city, contracts, damage, damage_fx, dash,
-    environment, hud, hudmap, input, menu, nav_overlay, navarrow, net, oppind, opponents, pause,
-    precip, profile, progression, pvs, race, racestat, racetime, recovery, results, scripted,
-    sequence, session, smoke, spark_fx, stuck, texel_fx, traffic, wheel_fx,
+    environment, hud, hudmap, input, menu, nav_overlay, navarrow, net, netdrive, oppind, opponents,
+    pause, precip, profile, progression, pvs, race, racestat, racetime, recovery, results,
+    scripted, sequence, session, smoke, spark_fx, stuck, texel_fx, traffic, wheel_fx,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
@@ -1619,6 +1619,9 @@ fn main() {
         // until a real lobby menu exists.
         app.insert_resource(link)
             .init_resource::<net::LobbyState>()
+            .init_resource::<netdrive::RemoteSnaps>()
+            .init_resource::<netdrive::InputSeq>()
+            .init_resource::<netdrive::NetDriveReport>()
             .add_systems(
                 Update,
                 (
@@ -1628,6 +1631,21 @@ fn main() {
                     net::lobby_input.run_if(not(capturing)),
                     net::drive_lobby.after(session::drive_session),
                     net::drive_lobby_text,
+                    // F25-A: the roster/host-pick drives remote
+                    // participant spawning; the newest drained snapshot
+                    // feeds their lerp. Both run after the drain sees
+                    // this frame's wire state.
+                    netdrive::reconcile_remote_players.after(net::drive_lobby),
+                    netdrive::apply_snapshots.after(net::drive_lobby),
+                    netdrive::drive_remote_lerp,
+                    // The wire sample reads the settled `VehicleInput`
+                    // — after the keyboard mapping and every scripted
+                    // owner that can overwrite it.
+                    netdrive::send_drive_input
+                        .after(input::vehicle_input)
+                        .after(input::parked_drive)
+                        .after(scripted::scripted_drive)
+                        .after(sequence::sequence_drive),
                 ),
             );
         app.world_mut().spawn((
@@ -1655,12 +1673,21 @@ fn main() {
         // minimal surface until a real lobby menu exists.
         app.insert_resource(link)
             .init_resource::<net::LobbyState>()
+            .init_resource::<netdrive::NetDriveReport>()
             .add_systems(
                 Update,
                 (
                     net::host_input.run_if(not(capturing)),
                     net::drive_host.after(session::drive_session),
                     net::drive_host_text,
+                    // F25-A: the roster drives remote participant
+                    // spawning; their `VehicleInput` comes from the
+                    // wire mailbox and their settled poses go back out
+                    // as snapshots — all after the drain sees this
+                    // frame's lobby events.
+                    netdrive::reconcile_remote_players.after(net::drive_host),
+                    netdrive::apply_remote_inputs.after(net::drive_host),
+                    netdrive::publish_snapshots.after(net::drive_host),
                 ),
             );
         app.world_mut().spawn((

@@ -441,6 +441,10 @@ pub struct LobbyState {
     /// The running session's lobby generation once `Start` arrived —
     /// cleared by the matching `Cancel`.
     pub generation: Option<u64>,
+    /// The host seat's vehicle pick as the last `Start` carried it —
+    /// `None` on a dedicated seat-less host or before any start. The
+    /// remote-spawn reconcile builds the host's car from this (F25-A).
+    pub host_pick: Option<VehiclePick>,
     /// The latest display-ready notice — a refused pick, a refused or
     /// unrunnable session, a lost link. Replaced, not accumulated.
     pub notice: Option<String>,
@@ -475,6 +479,7 @@ pub fn drive_lobby(
     mut selected: ResMut<SelectedCar>,
     mut tuned: ResMut<TunedVehicle>,
     menu: Option<Res<MenuShell>>,
+    mut snaps: ResMut<crate::netdrive::RemoteSnaps>,
     mut exit: MessageWriter<AppExit>,
 ) {
     for event in link.drain() {
@@ -490,6 +495,7 @@ pub fn drive_lobby(
             LobbyEvent::Message(Message::Start {
                 generation,
                 session: ad,
+                host_pick,
             }) => start(
                 &mut link,
                 &mut lobby,
@@ -500,7 +506,13 @@ pub fn drive_lobby(
                 &mut tuned,
                 generation,
                 &ad,
+                host_pick,
             ),
+            LobbyEvent::Message(Message::Snap {
+                generation,
+                tick,
+                entries,
+            }) => snaps.push(generation, tick, entries),
             LobbyEvent::Message(Message::Cancel { generation }) => {
                 cancel(&mut lobby, &mut session, &mut control, generation)
             }
@@ -513,6 +525,7 @@ pub fn drive_lobby(
                     lobby.roster.clear();
                     lobby.advertised = None;
                     lobby.generation = None;
+                    lobby.host_pick = None;
                     lobby.pending_start = None;
                     lobby.notice = Some(format!("lost the host: {reason}"));
                     lobby.pending_exit.get_or_insert(1);
@@ -602,11 +615,13 @@ fn start(
     tuned: &mut TunedVehicle,
     generation: u64,
     ad: &SessionAdvertisement,
+    host_pick: Option<VehiclePick>,
 ) {
     let mut config = match gate(vfs, ad) {
         Ok(config) => config,
         Err(why) => return refuse(link, lobby, why),
     };
+    lobby.host_pick = host_pick;
     // The pick is roster state, not session params — ours is what the
     // host last confirmed on our entry (a late joiner without a
     // committed pick drives the dev car).
@@ -666,6 +681,7 @@ fn cancel(
     }
     if lobby.generation == Some(generation) {
         lobby.generation = None;
+        lobby.host_pick = None;
         if !matches!(
             session.phase(),
             SessionPhase::Menu | SessionPhase::Unloading
@@ -979,6 +995,9 @@ impl HostLink {
                 gameplay_fingerprint,
                 max_clients: MAX_PLAYERS as u16 - 1,
                 pick_validator,
+                // The host seat is a player — peers learn its pick
+                // from `Start` so they can spawn its car.
+                host_pick: Some(encode_pick(&config.vehicle)?),
             },
         )?;
         let ctl = host.ctl();
@@ -1008,6 +1027,15 @@ impl HostLink {
     /// The host loop's control handle (`start`/`cancel`/`shutdown`).
     pub fn ctl(&self) -> &HostCtl {
         &self.ctl
+    }
+
+    /// The per-player input mailbox the lobby's reader threads fill —
+    /// the host's remote cars read their `VehicleInput` from it.
+    pub fn remote_inputs(&self) -> mm2_net::RemoteInputs {
+        self.host
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remote_inputs()
     }
 
     /// The advertised session's display summary.

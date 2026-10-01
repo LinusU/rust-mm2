@@ -11,8 +11,9 @@
 /// match exactly. v2: `RosterEntry` gained the driver's `pick` field and
 /// the `SetVehicle`/`VehicleRefused` negotiation pair landed. v3:
 /// `Start`/`Cancel` (session lifecycle) and `RejectCode::SessionStarted`
-/// landed.
-pub const PROTOCOL_VERSION: u16 = 3;
+/// landed. v4: `Input`/`Snap` — the in-session driving transport
+/// (F25-A).
+pub const PROTOCOL_VERSION: u16 = 4;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -35,6 +36,8 @@ const TAG_SET_VEHICLE: u8 = 0x09;
 const TAG_VEHICLE_REFUSED: u8 = 0x0a;
 const TAG_START: u8 = 0x0b;
 const TAG_CANCEL: u8 = 0x0c;
+const TAG_INPUT: u8 = 0x0d;
+const TAG_SNAP: u8 = 0x0e;
 
 /// Byte cap on a [`SessionAdvertisement`]'s opaque `params` field — the
 /// `mm2_app` bridge's serialized session config is a few hundred bytes,
@@ -124,8 +127,50 @@ pub struct RosterEntry {
     pub pick: Option<VehiclePick>,
 }
 
+/// One sampled driver input, client → host while a session runs
+/// (F25-A). The channels are quantized for the wire — the consumer's
+/// `mm2_app` side owns the mapping (0..255 spans the sim's normalized
+/// ranges; `steer` is signed so centered steering encodes exactly 0).
+/// `generation`/`seq` let the host drop input for a session it is not
+/// running and order samples without trusting sender clocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DriveInput {
+    /// The session generation this input belongs to.
+    pub generation: u64,
+    /// Sender-side session tick when sampled — arrival order on one
+    /// socket is already monotonic, so this is a freshness/telemetry
+    /// tag, not a reordering mechanism.
+    pub seq: u64,
+    /// Quantized throttle, 0..=255.
+    pub throttle: u8,
+    /// Quantized brake, 0..=255.
+    pub brake: u8,
+    /// Quantized steering, -127..=127 (0 = centered).
+    pub steer: i8,
+    /// Quantized handbrake, 0..=255.
+    pub handbrake: u8,
+}
+
+/// One participant's authoritative rigid state inside a [`Message::Snap`].
+/// `player` is the wire roster id — the host's own seat is 0 (it is never
+/// a roster entry, but its car is part of the shared sim). Positions and
+/// velocities are world-space `f32`s — the same precision the sim runs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SnapEntry {
+    /// Wire roster slot (0 = the host seat).
+    pub player: u16,
+    /// World position, metres.
+    pub pos: [f32; 3],
+    /// World rotation, quaternion `x,y,z,w`.
+    pub rot: [f32; 4],
+    /// Linear velocity, m/s.
+    pub vel: [f32; 3],
+    /// Angular velocity, rad/s.
+    pub angvel: [f32; 3],
+}
+
 /// One wire message.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Message {
     /// Client → host hello; always the first frame.
     Hello(Hello),
@@ -192,6 +237,11 @@ pub enum Message {
         /// The session being started. Same shape and bounds as the
         /// lobby's `Session` broadcast.
         session: SessionAdvertisement,
+        /// The host's own vehicle pick when the host process is also a
+        /// player (`mm2 --host`); `None` on a dedicated seat-less host.
+        /// The roster never carries the host seat — this is how peers
+        /// learn what its snapshots' player-0 entity drives (F25-A).
+        host_pick: Option<VehiclePick>,
     },
     /// Host → every client: the in-progress session is over — abort or
     /// normal end, the wire does not distinguish; every peer returns to
@@ -201,6 +251,25 @@ pub enum Message {
     Cancel {
         /// The generation whose session ended.
         generation: u64,
+    },
+    /// Client → host: one driver input sample (F25-A). The host absorbs
+    /// these into a per-player mailbox — they are session data-plane
+    /// traffic, not lobby verbs, so they are legal whenever the link is
+    /// up (the generation field, not the send timing, decides whether a
+    /// sample applies).
+    Input(DriveInput),
+    /// Host → every client: an authoritative pose snapshot of the
+    /// running session's participants (F25-A). `tick` is the host's
+    /// session tick when the snapshot was taken; entries are a complete
+    /// set for that tick, bounded by [`MAX_PLAYERS`].
+    Snap {
+        /// The session generation this snapshot belongs to — a snap for
+        /// any other generation is dropped, never replayed.
+        generation: u64,
+        /// Host session tick at capture — receivers order/discard by it.
+        tick: u64,
+        /// Every simulated player's pose, wire-id sorted.
+        entries: Vec<SnapEntry>,
     },
 }
 
@@ -235,6 +304,9 @@ pub enum ProtoError {
     /// [`MAX_SESSION_PARAMS`] bytes.
     #[error("session params declare {0} bytes, bound is {MAX_SESSION_PARAMS}")]
     OversizeSessionParams(usize),
+    /// A snapshot declared more than [`MAX_PLAYERS`] entries.
+    #[error("snapshot declares {0} entries, bound is {MAX_PLAYERS}")]
+    OversizeSnapshot(u8),
 }
 
 impl RejectCode {
@@ -282,6 +354,14 @@ impl<'a> Cursor<'a> {
 
     fn u64(&mut self) -> Result<u64, ProtoError> {
         Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+
+    fn f32(&mut self) -> Result<f32, ProtoError> {
+        Ok(f32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+
+    fn vec3(&mut self) -> Result<[f32; 3], ProtoError> {
+        Ok([self.f32()?, self.f32()?, self.f32()?])
     }
 
     fn bool(&mut self) -> Result<bool, ProtoError> {
@@ -339,6 +419,29 @@ fn get_session(cur: &mut Cursor<'_>) -> Result<SessionAdvertisement, ProtoError>
     Ok(SessionAdvertisement {
         summary,
         params: cur.take(len)?.to_vec(),
+    })
+}
+
+fn put_opt_pick(out: &mut Vec<u8>, pick: &Option<VehiclePick>) -> Result<(), ProtoError> {
+    match pick {
+        Some(pick) => {
+            out.push(1);
+            put_string(out, &pick.vehicle)?;
+            out.push(pick.paint);
+        }
+        None => out.push(0),
+    }
+    Ok(())
+}
+
+fn get_opt_pick(cur: &mut Cursor<'_>) -> Result<Option<VehiclePick>, ProtoError> {
+    Ok(if cur.bool()? {
+        Some(VehiclePick {
+            vehicle: cur.string()?,
+            paint: cur.u8()?,
+        })
+    } else {
+        None
     })
 }
 
@@ -406,14 +509,50 @@ impl Message {
             Self::Start {
                 generation,
                 session,
+                host_pick,
             } => {
                 out.push(TAG_START);
                 out.extend_from_slice(&generation.to_le_bytes());
                 put_session(&mut out, session)?;
+                put_opt_pick(&mut out, host_pick)?;
             }
             Self::Cancel { generation } => {
                 out.push(TAG_CANCEL);
                 out.extend_from_slice(&generation.to_le_bytes());
+            }
+            Self::Input(input) => {
+                out.push(TAG_INPUT);
+                out.extend_from_slice(&input.generation.to_le_bytes());
+                out.extend_from_slice(&input.seq.to_le_bytes());
+                out.push(input.throttle);
+                out.push(input.brake);
+                out.push(input.steer as u8);
+                out.push(input.handbrake);
+            }
+            Self::Snap {
+                generation,
+                tick,
+                entries,
+            } => {
+                out.push(TAG_SNAP);
+                out.extend_from_slice(&generation.to_le_bytes());
+                out.extend_from_slice(&tick.to_le_bytes());
+                if entries.len() > MAX_PLAYERS as usize {
+                    return Err(ProtoError::OversizeSnapshot(entries.len() as u8));
+                }
+                out.push(entries.len() as u8);
+                for e in entries {
+                    out.extend_from_slice(&e.player.to_le_bytes());
+                    for v in e
+                        .pos
+                        .iter()
+                        .chain(e.rot.iter())
+                        .chain(e.vel.iter())
+                        .chain(e.angvel.iter())
+                    {
+                        out.extend_from_slice(&v.to_le_bytes());
+                    }
+                }
             }
         }
         Ok(out)
@@ -474,10 +613,42 @@ impl Message {
             TAG_START => Self::Start {
                 generation: cur.u64()?,
                 session: get_session(&mut cur)?,
+                host_pick: get_opt_pick(&mut cur)?,
             },
             TAG_CANCEL => Self::Cancel {
                 generation: cur.u64()?,
             },
+            TAG_INPUT => Self::Input(DriveInput {
+                generation: cur.u64()?,
+                seq: cur.u64()?,
+                throttle: cur.u8()?,
+                brake: cur.u8()?,
+                steer: cur.u8()? as i8,
+                handbrake: cur.u8()?,
+            }),
+            TAG_SNAP => {
+                let generation = cur.u64()?;
+                let tick = cur.u64()?;
+                let count = cur.u8()?;
+                if count > MAX_PLAYERS {
+                    return Err(ProtoError::OversizeSnapshot(count));
+                }
+                let mut entries = Vec::with_capacity(count as usize);
+                for _ in 0..count {
+                    entries.push(SnapEntry {
+                        player: cur.u16()?,
+                        pos: cur.vec3()?,
+                        rot: [cur.f32()?, cur.f32()?, cur.f32()?, cur.f32()?],
+                        vel: cur.vec3()?,
+                        angvel: cur.vec3()?,
+                    });
+                }
+                Self::Snap {
+                    generation,
+                    tick,
+                    entries,
+                }
+            }
             tag => return Err(ProtoError::BadTag(tag)),
         };
         cur.finish()?;
@@ -582,8 +753,49 @@ mod tests {
                     summary: "sf, cruise, amateur".to_string(),
                     params: vec![9, 8, 7],
                 },
+                host_pick: Some(VehiclePick {
+                    vehicle: "vpbug".to_string(),
+                    paint: 0,
+                }),
+            },
+            // A seat-less host's start — `host_pick: None`.
+            Message::Start {
+                generation: 8,
+                session: SessionAdvertisement {
+                    summary: "sf, cruise, amateur".to_string(),
+                    params: vec![1],
+                },
+                host_pick: None,
             },
             Message::Cancel { generation: 7 },
+            Message::Input(DriveInput {
+                generation: 7,
+                seq: 240,
+                throttle: 255,
+                brake: 0,
+                steer: -64,
+                handbrake: 12,
+            }),
+            Message::Snap {
+                generation: 7,
+                tick: 480,
+                entries: vec![
+                    SnapEntry {
+                        player: 0,
+                        pos: [1.0, 2.5, -3.25],
+                        rot: [0.0, 0.707, 0.0, 0.707],
+                        vel: [12.5, 0.0, -1.0],
+                        angvel: [0.0, 0.4, 0.0],
+                    },
+                    SnapEntry {
+                        player: 3,
+                        pos: [-9.0, 1.0, 0.5],
+                        rot: [0.0, 0.0, 0.0, 1.0],
+                        vel: [0.0, 0.0, 0.0],
+                        angvel: [0.0, 0.0, 0.0],
+                    },
+                ],
+            },
         ] {
             let bytes = msg.encode().unwrap();
             assert_eq!(Message::decode(&bytes).unwrap(), msg);
@@ -641,6 +853,25 @@ mod tests {
             Message::decode(&[TAG_SET_READY, 2]),
             Err(ProtoError::InvalidBool(2))
         ));
+        // A snapshot declaring more than the player ceiling.
+        let mut bad_snap = vec![TAG_SNAP];
+        bad_snap.extend_from_slice(&1u64.to_le_bytes());
+        bad_snap.extend_from_slice(&2u64.to_le_bytes());
+        bad_snap.push(MAX_PLAYERS + 1);
+        assert!(matches!(
+            Message::decode(&bad_snap),
+            Err(ProtoError::OversizeSnapshot(9))
+        ));
+        // A truncated snapshot entry ends in `Truncated`, not a partial pose.
+        let mut short_snap = vec![TAG_SNAP];
+        short_snap.extend_from_slice(&1u64.to_le_bytes());
+        short_snap.extend_from_slice(&2u64.to_le_bytes());
+        short_snap.push(1);
+        short_snap.extend_from_slice(&[0; 10]);
+        assert!(matches!(
+            Message::decode(&short_snap),
+            Err(ProtoError::Truncated)
+        ));
     }
 
     #[test]
@@ -661,6 +892,30 @@ mod tests {
         ));
     }
 
+    /// An over-crowded snapshot is refused at encode like the roster.
+    #[test]
+    fn an_oversize_snapshot_does_not_encode() {
+        let entries = vec![
+            SnapEntry {
+                player: 0,
+                pos: [0.0; 3],
+                rot: [0.0, 0.0, 0.0, 1.0],
+                vel: [0.0; 3],
+                angvel: [0.0; 3],
+            };
+            MAX_PLAYERS as usize + 1
+        ];
+        assert!(matches!(
+            Message::Snap {
+                generation: 1,
+                tick: 1,
+                entries,
+            }
+            .encode(),
+            Err(ProtoError::OversizeSnapshot(9))
+        ));
+    }
+
     #[test]
     fn an_oversize_session_does_not_encode() {
         let msg = Message::Session(SessionAdvertisement {
@@ -678,6 +933,7 @@ mod tests {
                 summary: "s".to_string(),
                 params: vec![0; MAX_SESSION_PARAMS + 1],
             },
+            host_pick: None,
         };
         assert!(matches!(
             msg.encode(),

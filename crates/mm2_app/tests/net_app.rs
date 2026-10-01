@@ -24,16 +24,20 @@ use bevy::prelude::*;
 mod support;
 
 use mm2_app::net::{self, HostCommand, HostLink, LobbyLink, LobbyState};
+use mm2_app::netdrive::{self, NetPlayer, RemotePick};
 use mm2_app::session;
 use mm2_app::session::{SelectedCar, SessionControl, TunedVehicle};
 use mm2_app::smoke::{self, SmokeStatus};
 use mm2_assets::Vfs;
 use mm2_game::{
-    DevOverrides, Mm2Vfs, Session, SessionAuthority, SessionConfig, SessionMode, SessionPhase,
-    WorldMode, despawn_session_entities,
+    DevOverrides, Mm2Vfs, Player, PlayerControl, PlayerVehicle, Session, SessionAuthority,
+    SessionConfig, SessionMode, SessionPhase, WorldMode, despawn_session_entities,
 };
-use mm2_net::{Client, Host, HostConfig, HostEvent, LateJoin, LeaveCause, Message, hello};
-use mm2_vehicle::VehicleConfig;
+use mm2_net::{
+    Client, DriveInput, Host, HostConfig, HostEvent, LateJoin, LeaveCause, Message, SnapEntry,
+    VehiclePick, hello,
+};
+use mm2_vehicle::{VehicleConfig, VehicleInput};
 use support::{Proc, WAIT, listening, mount};
 
 const HOST_EXE: &str = env!("CARGO_BIN_EXE_mm2-host");
@@ -101,6 +105,11 @@ fn lobby_app(vfs: Vfs) -> App {
         .init_resource::<mm2_app::damage_fx::SmokeFxReport>()
         .init_resource::<mm2_app::spark_fx::SparkFxReport>()
         .init_resource::<mm2_app::texel_fx::TexelDamageReport>()
+        // F25-A: the reconcile needs the asset stores to build remote
+        // visuals (dev-car picks build meshes/materials here).
+        .init_resource::<Assets<Mesh>>()
+        .init_resource::<Assets<Image>>()
+        .init_resource::<Assets<StandardMaterial>>()
         .add_systems(
             Update,
             (
@@ -117,26 +126,42 @@ fn lobby_app(vfs: Vfs) -> App {
 /// ordering the windowed app and `run_headless` use.
 fn bridge_app(vfs: Vfs, link: LobbyLink) -> App {
     let mut app = lobby_app(vfs);
-    app.insert_resource(link).add_systems(
-        Update,
-        (
-            net::lobby_input,
-            net::drive_lobby.after(session::drive_session),
-        ),
-    );
+    app.insert_resource(link)
+        .init_resource::<netdrive::RemoteSnaps>()
+        .init_resource::<netdrive::InputSeq>()
+        .init_resource::<netdrive::NetDriveReport>()
+        .add_systems(
+            Update,
+            (
+                net::lobby_input,
+                net::drive_lobby.after(session::drive_session),
+                // F25-A: same wiring as `run_headless` — reconcile and
+                // snapshot application settle after the drain, the
+                // input stream after the input owners.
+                netdrive::reconcile_remote_players.after(net::drive_lobby),
+                netdrive::apply_snapshots.after(net::drive_lobby),
+                netdrive::drive_remote_lerp,
+                netdrive::send_drive_input,
+            ),
+        );
     app
 }
 
 /// The hosted-lobby bridge app — same wiring, `HostLink` side.
 fn host_app(vfs: Vfs, link: HostLink) -> App {
     let mut app = lobby_app(vfs);
-    app.insert_resource(link).add_systems(
-        Update,
-        (
-            net::host_input,
-            net::drive_host.after(session::drive_session),
-        ),
-    );
+    app.insert_resource(link)
+        .init_resource::<netdrive::NetDriveReport>()
+        .add_systems(
+            Update,
+            (
+                net::host_input,
+                net::drive_host.after(session::drive_session),
+                netdrive::reconcile_remote_players.after(net::drive_host),
+                netdrive::apply_remote_inputs.after(net::drive_host),
+                netdrive::publish_snapshots.after(net::drive_host),
+            ),
+        );
     app
 }
 
@@ -1488,4 +1513,383 @@ fn mm2_host_flag_gates_are_named_exits() {
             "{extra:?} must be a usage error"
         );
     }
+}
+
+// ─── F25-A: the session data plane ─────────────────────────────────
+//
+// Inputs up, host-side remote simulation, snapshots down — over the
+// same loopback socket the lobby already owns. These legs prove the
+// wire drives real entities (mailbox-fed `VehicleInput` on the host,
+// snapshot-lerped kinematic copies on the client); they do not claim
+// prediction, reconciliation of the local seat, or damage/result
+// replication — the named gaps of this slice.
+
+/// Drive a hosted session to `Playing`: the operator `start` mints the
+/// generation (the peer is already ready), the begin lands `Loading`,
+/// and the manual transitions stand it live — the load legs are the
+/// headless/process runs.
+fn hosted_playing(app: &mut App) -> u64 {
+    app.world()
+        .resource::<HostLink>()
+        .command_sender()
+        .send(HostCommand::Start)
+        .unwrap();
+    spin(app, |a| a.world().resource::<Session>().config().is_some());
+    let generation = app.world().resource::<Session>().generation();
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    app.update();
+    generation
+}
+
+/// `spin` for predicates that need `world_mut` (a query state is a
+/// mutable borrow) — same bounded contract.
+fn spin_mut(app: &mut App, mut pred: impl FnMut(&mut App) -> bool) {
+    for _ in 0..200 {
+        app.update();
+        if pred(app) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    panic!("the app never reached the expected state");
+}
+
+/// The host's half of the data plane: the peer's roster pick spawns a
+/// real remote participant (`Remote` control, `Authority` role — the
+/// host simulates its truth), wire `Input` frames land in the mailbox
+/// and become its `VehicleInput`, staleness coasts it, and snapshots
+/// broadcast every live update.
+#[test]
+fn a_remote_players_inputs_drive_the_hosted_car() {
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let mut app = host_app(vfs, link);
+    let mut peer = ready_peer(addr, "eve", fp);
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<LobbyState>()
+            .roster
+            .iter()
+            .any(|e| e.pick.is_some())
+    });
+    let generation = hosted_playing(&mut app);
+
+    // The reconcile spawned the peer's seat — remote-controlled but
+    // locally authoritative: the host runs its physics.
+    spin_mut(&mut app, |a| {
+        a.world_mut()
+            .query_filtered::<(&NetPlayer, &Player, &mm2_game::AuthorityRole), With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some()
+    });
+    {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<(&NetPlayer, &Player, &mm2_game::AuthorityRole), With<RemotePick>>();
+        let (wire, player, role) = q.single(app.world()).expect("the remote car");
+        assert_eq!(wire.0, 1, "the peer's wire slot");
+        assert_eq!(player.control, PlayerControl::Remote);
+        assert!(role.is_authority(), "the host owns a remote car's truth");
+    }
+    assert_eq!(
+        app.world().resource::<netdrive::NetDriveReport>().remotes,
+        1
+    );
+
+    // A throttle sample up the wire becomes its settled `VehicleInput`.
+    peer.ctl()
+        .unwrap()
+        .send_input(DriveInput {
+            generation,
+            seq: 1,
+            throttle: 255,
+            brake: 0,
+            steer: -64,
+            handbrake: 0,
+        })
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .inputs_applied
+            > 0
+    });
+    {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&VehicleInput, With<RemotePick>>();
+        let input = q.single(app.world()).expect("the remote car's input");
+        assert!(
+            input.throttle > 0.9,
+            "the wire throttle drove the car: {}",
+            input.throttle
+        );
+        assert!(input.steering < -0.4, "the wire steer drove the car");
+    }
+
+    // The host publishes — the peer sees its own seat's snapshot.
+    let snap = until_wire(
+        &mut peer,
+        |m| matches!(m, Message::Snap { entries, .. } if entries.iter().any(|e| e.player == 1)),
+    );
+    let Message::Snap {
+        generation: sg,
+        tick,
+        ..
+    } = snap
+    else {
+        unreachable!()
+    };
+    assert_eq!(sg, generation, "the snapshot rides this session");
+    let _ = tick;
+    assert!(
+        app.world()
+            .resource::<netdrive::NetDriveReport>()
+            .snaps_sent
+            > 0
+    );
+
+    // Silence past INPUT_STALE zeroes the input — a stalled driver
+    // coasts rather than keeping its last throttle.
+    thread::sleep(netdrive::INPUT_STALE + Duration::from_millis(60));
+    app.update();
+    {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&VehicleInput, With<RemotePick>>();
+        let input = q.single(app.world()).expect("the remote car's input");
+        assert_eq!(input.throttle, 0.0, "a stale driver coasts");
+    }
+    assert!(
+        app.world()
+            .resource::<netdrive::NetDriveReport>()
+            .inputs_staled
+            > 0
+    );
+
+    // And the departed peer's car despawns with its roster slot.
+    peer.leave().unwrap();
+    spin_mut(&mut app, |a| {
+        a.world_mut()
+            .query_filtered::<(), With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_none()
+    });
+    assert_eq!(
+        app.world().resource::<netdrive::NetDriveReport>().despawned,
+        1
+    );
+}
+
+/// The client's half: the host seat (wire id 0 — carried by `Start`'s
+/// `host_pick`, never a roster entry) spawns as a *predicted* kinematic
+/// copy, the local car's input streams up, and snapshots blend the copy
+/// toward the host's asserted pose. Stale and foreign-generation frames
+/// drop.
+#[test]
+fn a_client_streams_inputs_and_applies_the_host_snapshot() {
+    let install = tempfile::tempdir().unwrap();
+    let vfs = mount(install.path());
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host_config = HostConfig::new(fp);
+    host_config.host_pick = Some(VehiclePick {
+        vehicle: String::new(),
+        paint: 0,
+    });
+    let mut host = Host::listen_loopback(&host_config).unwrap();
+    host.set_session(net::advertise(&dev_cruise()).unwrap())
+        .unwrap();
+    let link = LobbyLink::join(
+        host.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join failed");
+    let our_id = link.player_id();
+    let mut app = bridge_app(vfs, link);
+    {
+        let link = app.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    app.update();
+    host.start(LateJoin::Open).unwrap();
+    until_started(&host);
+    until_begun(&mut app);
+    let generation = app.world().resource::<Session>().generation();
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+
+    // The host pick reconciles into a predicted copy: Remote control,
+    // Predicted role, kinematic body, and a lerp the snapshots drive.
+    spin_mut(&mut app, |a| {
+        a.world_mut()
+            .query_filtered::<&NetPlayer, With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some()
+    });
+    {
+        let mut q = app.world_mut().query_filtered::<(
+            &NetPlayer,
+            &Player,
+            &mm2_game::AuthorityRole,
+            &avian3d::prelude::RigidBody,
+        ), With<RemotePick>>();
+        let (wire, player, role, body) = q.single(app.world()).expect("the host copy");
+        assert_eq!(wire.0, 0, "the host seat is wire id 0");
+        assert_eq!(player.control, PlayerControl::Remote);
+        assert!(
+            !role.is_authority(),
+            "a client never owns the host car's truth"
+        );
+        assert_eq!(*body, avian3d::prelude::RigidBody::Kinematic);
+    }
+
+    // The local car's settled input rides up — the host's mailbox sees
+    // this seat's wire id with this session's generation.
+    let local = app
+        .world_mut()
+        .spawn((
+            PlayerVehicle,
+            Player {
+                id: mm2_game::PlayerId(1),
+                control: PlayerControl::Local,
+            },
+            mm2_game::AuthorityRole::Predicted,
+            VehicleInput {
+                throttle: 0.5,
+                ..VehicleInput::default()
+            },
+        ))
+        .id();
+    spin(&mut app, |a| {
+        a.world().resource::<netdrive::NetDriveReport>().inputs_sent > 0
+    });
+    let sent = host
+        .remote_inputs()
+        .latest(our_id)
+        .expect("the mailbox saw our input");
+    assert_eq!(sent.input.generation, generation);
+    assert!(
+        (sent.input.throttle as f32 / 255.0 - 0.5).abs() < 0.01,
+        "the quantized throttle round-trips: {}",
+        sent.input.throttle
+    );
+
+    // A snapshot for seat 0 retargets the copy's lerp; the lerp drives
+    // its `Position` toward the asserted pose.
+    host.ctl()
+        .broadcast(&Message::Snap {
+            generation,
+            tick: 7,
+            entries: vec![
+                SnapEntry {
+                    player: 0,
+                    pos: [9.0, 1.0, 9.0],
+                    rot: [0.0, 0.0, 0.0, 1.0],
+                    vel: [1.0, 0.0, 0.0],
+                    angvel: [0.0, 0.0, 0.0],
+                },
+                // Our own seat's entry is received and skipped —
+                // reconciliation of the local car is a later slice.
+                SnapEntry {
+                    player: our_id,
+                    pos: [-50.0, 0.0, -50.0],
+                    rot: [0.0, 0.0, 0.0, 1.0],
+                    vel: [0.0; 3],
+                    angvel: [0.0; 3],
+                },
+            ],
+        })
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .snaps_applied
+            > 0
+    });
+    // The lerp's first blend interval is zero — the next lerp update
+    // lands the copy on the asserted pose.
+    app.update();
+    {
+        let mut q = app.world_mut().query_filtered::<(
+            &netdrive::RemoteLerp,
+            &avian3d::prelude::Position,
+        ), With<RemotePick>>();
+        let (lerp, pos) = q.single(app.world()).expect("the host copy");
+        assert!(
+            (lerp.to_pos - Vec3::new(9.0, 1.0, 9.0)).length() < 1e-3,
+            "the lerp targets the asserted pose: {:?}",
+            lerp.to_pos
+        );
+        assert!(
+            (pos.0 - Vec3::new(9.0, 1.0, 9.0)).length() < 1e-3,
+            "the copy blends to the asserted pose: {:?}",
+            pos.0
+        );
+    }
+    // The local seat was not moved by its own entry.
+    assert!(
+        app.world().get::<PlayerVehicle>(local).is_some(),
+        "the local car stayed ours"
+    );
+
+    // A stale tick and a foreign generation both drop untouched.
+    for tick in [3u64, 7] {
+        host.ctl()
+            .broadcast(&Message::Snap {
+                generation,
+                tick,
+                entries: vec![SnapEntry {
+                    player: 0,
+                    pos: [0.0; 3],
+                    rot: [0.0, 0.0, 0.0, 1.0],
+                    vel: [0.0; 3],
+                    angvel: [0.0; 3],
+                }],
+            })
+            .unwrap();
+    }
+    host.ctl()
+        .broadcast(&Message::Snap {
+            generation: generation + 9,
+            tick: 99,
+            entries: vec![SnapEntry {
+                player: 0,
+                pos: [0.0; 3],
+                rot: [0.0, 0.0, 0.0, 1.0],
+                vel: [0.0; 3],
+                angvel: [0.0; 3],
+            }],
+        })
+        .unwrap();
+    // Let the frames drain — each `update` consumes the newest staged
+    // snap, so spin until the report is settled.
+    for _ in 0..5 {
+        app.update();
+    }
+    {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&netdrive::RemoteLerp, With<RemotePick>>();
+        let lerp = q.single(app.world()).expect("the host copy");
+        assert!(
+            (lerp.to_pos - Vec3::new(9.0, 1.0, 9.0)).length() < 1e-3,
+            "stale/foreign snaps never retargeted the lerp"
+        );
+    }
+
+    host.shutdown();
 }

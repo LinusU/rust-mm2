@@ -656,6 +656,9 @@ fn run_headless(
         RunSource::Lobby(link) => {
             app.insert_resource(*link)
                 .init_resource::<net::LobbyState>()
+                .init_resource::<crate::netdrive::RemoteSnaps>()
+                .init_resource::<crate::netdrive::InputSeq>()
+                .init_resource::<crate::netdrive::NetDriveReport>()
                 .add_systems(
                     Update,
                     (
@@ -665,17 +668,35 @@ fn run_headless(
                         // take a queued exit (or a parked `Start` begin)
                         // the same update.
                         net::drive_lobby.after(session::drive_session),
+                        // F25-A: remote spawn reconcile, snapshot
+                        // application + lerp, and the input stream —
+                        // same ordering contract as the windowed app.
+                        crate::netdrive::reconcile_remote_players.after(net::drive_lobby),
+                        crate::netdrive::apply_snapshots.after(net::drive_lobby),
+                        crate::netdrive::drive_remote_lerp,
+                        crate::netdrive::send_drive_input
+                            .after(crate::input::vehicle_input)
+                            .after(crate::input::parked_drive)
+                            .after(scripted::scripted_drive)
+                            .after(crate::sequence::sequence_drive),
                     ),
                 );
         }
         RunSource::Host(link) => {
             app.insert_resource(*link)
                 .init_resource::<net::LobbyState>()
+                .init_resource::<crate::netdrive::NetDriveReport>()
                 .add_systems(
                     Update,
                     (
                         net::host_input,
                         net::drive_host.after(session::drive_session),
+                        // F25-A: spawn reconcile, mailbox-fed inputs,
+                        // and the snapshot broadcast — same ordering
+                        // contract as the windowed app.
+                        crate::netdrive::reconcile_remote_players.after(net::drive_host),
+                        crate::netdrive::apply_remote_inputs.after(net::drive_host),
+                        crate::netdrive::publish_snapshots.after(net::drive_host),
                     ),
                 );
         }
@@ -932,6 +953,25 @@ fn run_headless(
                 };
                 format!(" mp={parked}({}p)", l.roster.len())
             }
+        })
+        .unwrap_or_default();
+    // F25-A data-plane evidence: `net=` reports the wire traffic the
+    // run actually moved — inputs sent (client), inputs applied vs
+    // staled (host), snapshots sent (host) vs applied (client), and
+    // live remote participants. Absent without a link's report, so a
+    // non-lobby record stays bit-identical.
+    let net_detail = world_ecs
+        .get_resource::<crate::netdrive::NetDriveReport>()
+        .map(|r| {
+            format!(
+                " net=in{}s/{}a/{}x,snap{}s/{}a,rem{}",
+                r.inputs_sent,
+                r.inputs_applied,
+                r.inputs_staled,
+                r.snaps_sent,
+                r.snaps_applied,
+                r.remotes
+            )
         })
         .unwrap_or_default();
     // A lobby run parked at `Menu` at the frame cap gets the lobby's
@@ -1735,7 +1775,7 @@ fn run_headless(
     // (DRV-2/DRV-3) and aimap variant (RACE-11) selected its content.
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{extra}",
+            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{extra}",
             driver.as_str(),
             rec_config.difficulty.as_str(),
             session.phase().name(),

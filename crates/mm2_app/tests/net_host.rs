@@ -189,7 +189,12 @@ fn a_dedicated_host_process_runs_start_and_cancel() {
             Message::Start {
                 generation,
                 session,
+                host_pick,
             } => {
+                assert!(
+                    host_pick.is_none(),
+                    "a dedicated mm2-host has no player seat"
+                );
                 assert_eq!(generation, 1);
                 let config = net::accept(&session).unwrap();
                 assert_eq!(config.world, WorldMode::DevWorld);

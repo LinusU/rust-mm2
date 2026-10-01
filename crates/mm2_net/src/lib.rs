@@ -21,14 +21,17 @@
 //!   vehicle picks, runs the consumer's start/cancel under the
 //!   per-session [`LateJoin`](lobby::LateJoin) policy, and reports
 //!   join/leave/ready/pick/session transitions as events; [`Client`] is
-//!   the joining side.
+//!   the joining side. The lobby's socket pair also carries the F25-A
+//!   session data plane: `Input` frames land in the host's
+//!   [`RemoteInputs`](lobby::RemoteInputs) mailbox (latest-wins per
+//!   roster slot) and `Snap` snapshots broadcast to every peer.
 //!
-//! Scope deliberately ends at the lobby lifecycle: the session
-//! advertisement the lobby carries is an opaque blob (the `mm2_app`
-//! bridge owns the `SessionConfig` mapping), and vehicle-state
-//! replication plus the gameplay dataplane are later F25 work on top of
-//! this layer. See `docs/research/net.md` for the transport decision
-//! record.
+//! Scope deliberately ends at transport: the session advertisement is
+//! an opaque blob (the `mm2_app` bridge owns the `SessionConfig`
+//! mapping) and what `Input`/`Snap` payloads *mean* — vehicle state,
+//! interpolation, reconciliation — is the app's F25/F26 domain, not a
+//! wire-layer concern. See `docs/research/net.md` for the transport
+//! decision record.
 
 mod conn;
 mod frame;
@@ -42,10 +45,11 @@ pub use conn::{
 pub use frame::{MAX_FRAME, read_frame, write_frame};
 pub use lobby::{
     Client, ClientCtl, Host, HostConfig, HostCtl, HostEvent, LateJoin, LeaveCause, PickValidator,
+    RemoteInputs, StampedInput,
 };
 pub use proto::{
-    Hello, MAX_PLAYERS, MAX_SESSION_PARAMS, MAX_STRING, Message, PROTOCOL_VERSION, ProtoError,
-    RejectCode, RosterEntry, SessionAdvertisement, VehiclePick,
+    DriveInput, Hello, MAX_PLAYERS, MAX_SESSION_PARAMS, MAX_STRING, Message, PROTOCOL_VERSION,
+    ProtoError, RejectCode, RosterEntry, SessionAdvertisement, SnapEntry, VehiclePick,
 };
 
 /// Every failure mode of this layer: transport I/O, frame bounds, wire

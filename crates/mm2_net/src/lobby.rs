@@ -28,6 +28,13 @@
 //! at start but keeps Cruise and Cops & Robbers open, so a late joiner
 //! into an open session gets its roster then the running `Start`.
 //!
+//! The session data plane (F25-A) shares the same ordered socket:
+//! a peer's `Input` frames never wake the host loop — they absorb into
+//! the [`RemoteInputs`] mailbox, latest-wins per roster slot, so input
+//! rate cannot flood the event channel; host→client `Snap` snapshots go
+//! out through [`HostCtl::broadcast`], which follows the same
+//! dead-peer-removal discipline as every other send.
+//!
 //! Nothing here knows about vehicles, cities or modes: `vehicle` is an
 //! opaque id the consumer's validator interprets and `params` an opaque
 //! blob — the game-rule types stay in `mm2_game` and the wire carries
@@ -40,13 +47,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvError, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::NetError;
 use crate::conn::{Conn, HANDSHAKE_TIMEOUT, Writer, listen_loopback, recv_hello_within};
 use crate::proto::{
-    Hello, MAX_PLAYERS, MAX_STRING, Message, RejectCode, RosterEntry, SessionAdvertisement,
-    VehiclePick,
+    DriveInput, Hello, MAX_PLAYERS, MAX_STRING, Message, RejectCode, RosterEntry,
+    SessionAdvertisement, VehiclePick,
 };
 
 /// Cap on connections mid-handshake. A connect flood drops at the accept
@@ -94,15 +101,23 @@ pub struct HostConfig {
     /// lobby with no content knowledge (tests, a bare transport host);
     /// a real consumer installs its catalog validator.
     pub pick_validator: Option<PickValidator>,
+    /// The host process's own vehicle pick when it is also a player
+    /// (`mm2 --host`). `None` — the default — means a dedicated
+    /// seat-less host; peers then know snapshot player 0 does not
+    /// exist. Carried on `Start` so a client can spawn the host's car
+    /// (F25-A); the wire roster itself never lists the seat.
+    pub host_pick: Option<VehiclePick>,
 }
 
 impl HostConfig {
-    /// A lobby at the documented player ceiling, no pick validation.
+    /// A lobby at the documented player ceiling, no pick validation,
+    /// no host seat.
     pub fn new(gameplay_fingerprint: u64) -> Self {
         Self {
             gameplay_fingerprint,
             max_clients: MAX_PLAYERS as u16,
             pick_validator: None,
+            host_pick: None,
         }
     }
 }
@@ -230,6 +245,82 @@ pub enum HostEvent {
     },
 }
 
+/// A remote player's newest received [`DriveInput`] plus when it landed.
+/// `received` is the staleness clock: sender `seq` values are ticks on
+/// the sender's clock, so *arrival* time is what "how old is this
+/// sample" is measured against (F25-A).
+#[derive(Debug, Clone)]
+pub struct StampedInput {
+    /// The wire input.
+    pub input: DriveInput,
+    /// Host-side arrival instant.
+    pub received: Instant,
+}
+
+/// The host's per-player input mailbox (F25-A). Each admitted peer's
+/// reader thread writes its newest `Input` here — one slot per roster
+/// id, latest-wins — so a fast sender can never pile up a backlog the
+/// consumer must drain, and a slow sender simply leaves a stale sample.
+/// Bounded by [`MAX_PLAYERS`]; a departing player's slot is pruned with
+/// its roster removal, and lobby teardown clears the map.
+#[derive(Debug, Clone, Default)]
+pub struct RemoteInputs {
+    inner: Arc<Mutex<BTreeMap<u16, StampedInput>>>,
+}
+
+impl RemoteInputs {
+    /// Store `input` as `id`'s newest sample. Never grows past the roster
+    /// ceiling — a key the map does not already hold is only admitted
+    /// while a slot is free, so junk ids cannot exhaust it.
+    fn store(&self, id: u16, input: DriveInput) {
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if map.len() >= MAX_PLAYERS as usize && !map.contains_key(&id) {
+            return;
+        }
+        map.insert(
+            id,
+            StampedInput {
+                input,
+                received: Instant::now(),
+            },
+        );
+    }
+
+    /// `id`'s newest sample, if one ever arrived.
+    pub fn latest(&self, id: u16) -> Option<StampedInput> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&id)
+            .cloned()
+    }
+
+    /// Drop `id`'s slot — called with every roster removal so a recycled
+    /// wire id never inherits its predecessor's stream.
+    fn remove(&self, id: u16) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
+    }
+
+    /// Occupied slots — for the consumer's diagnostics; never exceeds
+    /// [`MAX_PLAYERS`].
+    pub fn len(&self) -> usize {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// Whether any player has a stored sample.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Drop every slot — the lobby teardown's final state.
+    fn clear(&self) {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}
+
 /// A running lobby host: owns the listener and event loop, hands the
 /// consumer a channel of [`HostEvent`]s. Dropping the `Host` shuts the
 /// lobby down (peer sockets closed, threads reaped).
@@ -237,6 +328,7 @@ pub struct Host {
     addr: SocketAddr,
     events: Receiver<HostEvent>,
     control: Sender<LoopMsg>,
+    inputs: RemoteInputs,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -265,13 +357,16 @@ impl Host {
         let (events_tx, events) = mpsc::channel();
         let config = config.clone();
         let control = tx.clone();
+        let inputs = RemoteInputs::default();
+        let loop_inputs = inputs.clone();
         let handle = thread::spawn(move || {
-            run(listener, addr, config, tx, rx, events_tx);
+            run(listener, addr, config, tx, rx, events_tx, loop_inputs);
         });
         Ok(Self {
             addr,
             events,
             control,
+            inputs,
             handle: Some(handle),
         })
     }
@@ -291,6 +386,13 @@ impl Host {
         HostCtl {
             control: self.control.clone(),
         }
+    }
+
+    /// The input mailbox every admitted peer's `Input` frames land in —
+    /// the host-side consumer's view of the session data plane (F25-A).
+    /// Latest-wins per roster slot; see [`RemoteInputs`].
+    pub fn remote_inputs(&self) -> RemoteInputs {
+        self.inputs.clone()
     }
 
     /// Advertise (or replace) the session this lobby will run. The
@@ -408,6 +510,17 @@ impl HostCtl {
     pub fn shutdown(&self) -> Result<(), NetError> {
         self.send(LoopMsg::Shutdown)
     }
+
+    /// Broadcast `msg` to every rostered player — the host→client
+    /// data-plane send (F25-A: `Snap` snapshots). Shares the loop's
+    /// removal discipline: a peer whose write fails is reaped `Lost`
+    /// and the survivors get a corrected roster. A payload the wire
+    /// cannot carry is refused here (encode-checked) rather than
+    /// silently dropped by the loop.
+    pub fn broadcast(&self, msg: &Message) -> Result<(), NetError> {
+        msg.encode()?;
+        self.send(LoopMsg::Broadcast(msg.clone()))
+    }
 }
 
 /// The joining side of a lobby. `join` completes the handshake and the
@@ -461,10 +574,9 @@ impl Client {
         }))
     }
 
-    /// Send an arbitrary lobby message. The host only accepts the
-    /// client→host set (`SetReady`, `SetVehicle`, `Leave`)
-    /// post-handshake — anything else is a protocol violation that gets
-    /// this client dropped.
+    /// Send an arbitrary lobby message. The host accepts `SetReady`,
+    /// `SetVehicle`, `Leave` and `Input` post-handshake — anything else
+    /// is a protocol violation that gets this client dropped.
     pub fn send(&mut self, msg: &Message) -> Result<(), NetError> {
         self.conn.send(msg)
     }
@@ -517,8 +629,8 @@ impl Client {
 
 /// A cloneable `Send`/`Sync` handle to a joined [`Client`]'s send side —
 /// see [`Client::ctl`]. It carries only the legal client→host set
-/// (`SetReady`, `SetVehicle`, `Leave`), so a caller cannot send a
-/// host-only message and get the client dropped `Malformed`.
+/// (`SetReady`, `SetVehicle`, `Leave`, `Input`), so a caller cannot send
+/// a host-only message and get the client dropped `Malformed`.
 #[derive(Debug, Clone)]
 pub struct ClientCtl {
     writer: Arc<Mutex<Writer>>,
@@ -544,6 +656,14 @@ impl ClientCtl {
             vehicle: vehicle.to_string(),
             paint,
         }))
+    }
+
+    /// Send one driver input sample (F25-A) — the client→host
+    /// data-plane verb. Unlike the lobby verbs this is fire-and-forget
+    /// by design: the newest sample is the only one that matters, and
+    /// the host's mailbox keeps exactly that.
+    pub fn send_input(&self, input: DriveInput) -> Result<(), NetError> {
+        self.send(&Message::Input(input))
     }
 
     /// A clean quit from another thread: the host records
@@ -576,6 +696,9 @@ enum LoopMsg {
     Start { late_join: LateJoin },
     /// `Host::cancel`/`HostCtl::cancel` — end the in-session phase.
     Cancel,
+    /// `HostCtl::broadcast` — a host→client data-plane send
+    /// (F25-A snapshots).
+    Broadcast(Message),
     /// `Host::shutdown`.
     Shutdown,
 }
@@ -618,6 +741,7 @@ fn run(
     tx: Sender<LoopMsg>,
     rx: Receiver<LoopMsg>,
     events: Sender<HostEvent>,
+    inputs: RemoteInputs,
 ) {
     let stop = Arc::new(AtomicBool::new(false));
     let accept = {
@@ -768,11 +892,11 @@ fn run(
                     driver: hello.driver,
                     build: hello.build,
                 });
-                broadcast_roster(&mut players, &events);
+                broadcast_roster(&mut players, &events, &inputs);
                 // The newcomer's own first roster send may have removed
                 // it as `Lost` — a departed slot gets no reader.
                 if players.contains_key(&id) {
-                    spawn_reader(conn, id, tx.clone());
+                    spawn_reader(conn, id, tx.clone(), inputs.clone());
                 }
                 // A join into an open in-progress session is dropped
                 // straight into it: after its first roster the newcomer
@@ -789,12 +913,14 @@ fn run(
                     let msg = Message::Start {
                         generation: *generation,
                         session: started.clone(),
+                        host_pick: config.host_pick.clone(),
                     };
                     let failed = players
                         .get_mut(&id)
                         .is_some_and(|slot| slot.writer.send(&msg).is_err());
-                    if failed && remove_player(&mut players, id, LeaveCause::Lost, &events) {
-                        broadcast_roster(&mut players, &events);
+                    if failed && remove_player(&mut players, id, LeaveCause::Lost, &events, &inputs)
+                    {
+                        broadcast_roster(&mut players, &events, &inputs);
                     }
                 }
             }
@@ -805,7 +931,7 @@ fn run(
                 if let Some(slot) = players.get_mut(&id) {
                     slot.ready = ready;
                     let _ = events.send(HostEvent::ReadyChanged { id, ready });
-                    broadcast_roster(&mut players, &events);
+                    broadcast_roster(&mut players, &events, &inputs);
                 }
             }
             LoopMsg::PeerMessage {
@@ -827,7 +953,7 @@ fn run(
                                 slot.pick = Some(pick);
                                 let _ =
                                     events.send(HostEvent::VehicleChanged { id, vehicle, paint });
-                                broadcast_roster(&mut players, &events);
+                                broadcast_roster(&mut players, &events, &inputs);
                             }
                         }
                     }
@@ -853,9 +979,15 @@ fn run(
                                 .writer
                                 .send(&Message::VehicleRefused { reason })
                                 .is_err()
-                                && remove_player(&mut players, id, LeaveCause::Lost, &events)
+                                && remove_player(
+                                    &mut players,
+                                    id,
+                                    LeaveCause::Lost,
+                                    &events,
+                                    &inputs,
+                                )
                             {
-                                broadcast_roster(&mut players, &events);
+                                broadcast_roster(&mut players, &events, &inputs);
                             }
                         }
                     }
@@ -866,8 +998,17 @@ fn run(
                 session = Some(ad.clone());
                 // Removals under the session send change the roster too —
                 // survivors get the corrected snapshot after the ad.
-                if !broadcast(&mut players, &Message::Session(ad), &events) {
-                    broadcast_roster(&mut players, &events);
+                if !broadcast(&mut players, &Message::Session(ad), &events, &inputs) {
+                    broadcast_roster(&mut players, &events, &inputs);
+                }
+            }
+            LoopMsg::Broadcast(msg) => {
+                // The data-plane send (`Snap`) follows the same removal
+                // discipline as every other broadcast: a peer that fails
+                // the write is reaped `Lost` and survivors get the
+                // corrected roster.
+                if !broadcast(&mut players, &msg, &events, &inputs) {
+                    broadcast_roster(&mut players, &events, &inputs);
                 }
             }
             LoopMsg::Start { late_join } => {
@@ -911,14 +1052,15 @@ fn run(
                         let msg = Message::Start {
                             generation,
                             session: started,
+                            host_pick: config.host_pick.clone(),
                         };
                         // Peers that fail the `Start` write are reaped
                         // `Lost` under the usual discipline and the
                         // survivors get the corrected snapshot — then
                         // `Started` reports the roster the session
                         // actually began with.
-                        if !broadcast(&mut players, &msg, &events) {
-                            broadcast_roster(&mut players, &events);
+                        if !broadcast(&mut players, &msg, &events, &inputs) {
+                            broadcast_roster(&mut players, &events, &inputs);
                         }
                         let _ = events.send(HostEvent::Started { generation });
                     }
@@ -927,7 +1069,12 @@ fn run(
             LoopMsg::Cancel => {
                 if let Phase::InSession { generation, .. } = phase {
                     phase = Phase::Lobby;
-                    broadcast(&mut players, &Message::Cancel { generation }, &events);
+                    broadcast(
+                        &mut players,
+                        &Message::Cancel { generation },
+                        &events,
+                        &inputs,
+                    );
                     // Back in the lobby a fresh start wants fresh
                     // consent — readiness resets (designed); picks stay.
                     for slot in players.values_mut() {
@@ -936,23 +1083,25 @@ fn run(
                     let _ = events.send(HostEvent::Cancelled { generation });
                     // Departures under the `Cancel` send and the
                     // readiness reset both changed the roster.
-                    broadcast_roster(&mut players, &events);
+                    broadcast_roster(&mut players, &events, &inputs);
                 }
             }
             LoopMsg::PeerGone { id, cause } => {
-                if remove_player(&mut players, id, cause, &events) {
-                    broadcast_roster(&mut players, &events);
+                if remove_player(&mut players, id, cause, &events, &inputs) {
+                    broadcast_roster(&mut players, &events, &inputs);
                 }
             }
         }
     }
 
     // Teardown: close every peer socket (wakes the reader threads, whose
-    // sends into the dead channel just fail), stop the accept thread and
-    // wake its blocking accept with a self-connect.
+    // sends into the dead channel just fail), drop the input mailbox,
+    // stop the accept thread and wake its blocking accept with a
+    // self-connect.
     for slot in players.values_mut() {
         slot.writer.disconnect();
     }
+    inputs.clear();
     stop.store(true, Ordering::Relaxed);
     let _ = TcpStream::connect(addr);
     let _ = accept.join();
@@ -991,18 +1140,21 @@ fn bound_reason(reason: &str) -> String {
 /// every removal path so a departed peer never leaves a live socket —
 /// the disconnect wakes the reader thread still blocked in `recv` on
 /// the same socket (otherwise the thread, the fd and the client's
-/// dead-but-open connection all leak). `false` when the slot was
-/// already gone.
+/// dead-but-open connection all leak). The peer's input-mailbox slot
+/// goes with it, so a recycled wire id never inherits a dead driver's
+/// last input. `false` when the slot was already gone.
 fn remove_player(
     players: &mut BTreeMap<u16, Slot>,
     id: u16,
     cause: LeaveCause,
     events: &Sender<HostEvent>,
+    inputs: &RemoteInputs,
 ) -> bool {
     let Some(slot) = players.remove(&id) else {
         return false;
     };
     slot.writer.disconnect();
+    inputs.remove(id);
     let _ = events.send(HostEvent::Left {
         id,
         driver: slot.driver,
@@ -1017,7 +1169,12 @@ fn remove_player(
 /// received the message; on `false` the roster changed and callers whose
 /// message no longer fits should resend a corrected snapshot
 /// (`broadcast_roster` does this for `Roster` itself).
-fn broadcast(players: &mut BTreeMap<u16, Slot>, msg: &Message, events: &Sender<HostEvent>) -> bool {
+fn broadcast(
+    players: &mut BTreeMap<u16, Slot>,
+    msg: &Message,
+    events: &Sender<HostEvent>,
+    inputs: &RemoteInputs,
+) -> bool {
     let mut failed = Vec::new();
     for (id, slot) in players.iter_mut() {
         if slot.writer.send(msg).is_err() {
@@ -1026,7 +1183,7 @@ fn broadcast(players: &mut BTreeMap<u16, Slot>, msg: &Message, events: &Sender<H
     }
     let removed = !failed.is_empty();
     for id in failed {
-        remove_player(players, id, LeaveCause::Lost, events);
+        remove_player(players, id, LeaveCause::Lost, events, inputs);
     }
     !removed
 }
@@ -1035,7 +1192,11 @@ fn broadcast(players: &mut BTreeMap<u16, Slot>, msg: &Message, events: &Sender<H
 /// each removal — a survivor must never see a snapshot still listing a
 /// departed peer. Each pass removes at least one player, so the resend
 /// loop terminates.
-fn broadcast_roster(players: &mut BTreeMap<u16, Slot>, events: &Sender<HostEvent>) {
+fn broadcast_roster(
+    players: &mut BTreeMap<u16, Slot>,
+    events: &Sender<HostEvent>,
+    inputs: &RemoteInputs,
+) {
     loop {
         let msg = Message::Roster {
             players: players
@@ -1049,16 +1210,17 @@ fn broadcast_roster(players: &mut BTreeMap<u16, Slot>, events: &Sender<HostEvent
                 })
                 .collect(),
         };
-        if broadcast(players, &msg, events) {
+        if broadcast(players, &msg, events, inputs) {
             return;
         }
     }
 }
 
-/// One thread per player: forward `SetReady`/`SetVehicle`, report
-/// `Leave` as a clean quit, and drop the peer on a protocol violation
-/// or a dead socket.
-fn spawn_reader(conn: Conn, id: u16, tx: Sender<LoopMsg>) {
+/// One thread per player: forward `SetReady`/`SetVehicle` to the loop,
+/// absorb `Input` into the shared mailbox (data-plane traffic — the loop
+/// is not woken per sample), report `Leave` as a clean quit, and drop
+/// the peer on a protocol violation or a dead socket.
+fn spawn_reader(conn: Conn, id: u16, tx: Sender<LoopMsg>, inputs: RemoteInputs) {
     thread::spawn(move || {
         let mut conn = conn;
         loop {
@@ -1067,6 +1229,13 @@ fn spawn_reader(conn: Conn, id: u16, tx: Sender<LoopMsg>) {
                     id,
                     cause: LeaveCause::Quit,
                 },
+                Ok(Message::Input(input)) => {
+                    // Absorbed, not forwarded: input arrives per session
+                    // tick — far above the event channel's cadence — and
+                    // only the newest sample matters anyway.
+                    inputs.store(id, input);
+                    continue;
+                }
                 Ok(msg @ (Message::SetReady { .. } | Message::SetVehicle(_))) => {
                     LoopMsg::PeerMessage { id, msg }
                 }
@@ -1091,6 +1260,7 @@ fn spawn_reader(conn: Conn, id: u16, tx: Sender<LoopMsg>) {
 mod tests {
     use super::*;
     use crate::hello;
+    use crate::proto::SnapEntry;
 
     const FP: u64 = 0xaaaa;
     const WAIT: Duration = Duration::from_secs(5);
@@ -1272,6 +1442,7 @@ mod tests {
             gameplay_fingerprint: FP,
             max_clients: 1,
             pick_validator: None,
+            host_pick: None,
         };
         let host = Host::listen_loopback(&config).unwrap();
         let _alice = join(host.addr(), "alice");
@@ -1422,8 +1593,9 @@ mod tests {
             let _ = gone.send(());
         });
         let (events, rx) = mpsc::channel();
+        let inputs = RemoteInputs::default();
 
-        broadcast_roster(&mut players, &events);
+        broadcast_roster(&mut players, &events, &inputs);
 
         assert!(players.is_empty());
         for _ in 0..9 {
@@ -1459,6 +1631,7 @@ mod tests {
             gameplay_fingerprint: FP,
             max_clients: MAX_PLAYERS as u16 + 1,
             pick_validator: None,
+            host_pick: None,
         };
         match Host::listen_loopback(&over) {
             Err(NetError::Config(msg)) => assert!(msg.contains("max_clients"), "got {msg}"),
@@ -1470,6 +1643,7 @@ mod tests {
             gameplay_fingerprint: FP,
             max_clients: MAX_PLAYERS as u16,
             pick_validator: None,
+            host_pick: None,
         })
         .unwrap();
     }
@@ -1821,6 +1995,7 @@ mod tests {
                 Message::Start {
                     generation,
                     session,
+                    ..
                 } => return (generation, session),
                 Message::Roster { .. } => continue,
                 other => panic!("expected Start, got {other:?}"),
@@ -2083,6 +2258,7 @@ mod tests {
             .send(&Message::Start {
                 generation: 1,
                 session: ad("x"),
+                host_pick: None,
             })
             .unwrap();
         match host.recv_timeout(WAIT) {
@@ -2243,5 +2419,132 @@ mod tests {
         // roster (the removal rebroadcast) then errors — it does not
         // sit blocked on a dead lobby.
         while alice.recv().is_ok() {}
+    }
+
+    /// Poll the mailbox until a sample with `seq` (or newer) lands for
+    /// `id` — the reader absorbs frames asynchronously, and a slower
+    /// frame may still be newest when the poll starts.
+    fn wait_input(inputs: &RemoteInputs, id: u16, seq: u64) -> StampedInput {
+        let deadline = std::time::Instant::now() + WAIT;
+        loop {
+            if let Some(input) = inputs.latest(id)
+                && input.input.seq >= seq
+            {
+                return input;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no input landed for slot {id}"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn drive_input(seq: u64) -> DriveInput {
+        DriveInput {
+            generation: 1,
+            seq,
+            throttle: 200,
+            brake: 40,
+            steer: -90,
+            handbrake: 0,
+        }
+    }
+
+    /// `Input` frames are data-plane traffic: they land latest-wins in
+    /// the mailbox — newest `seq` replaces the older sample — while the
+    /// lobby itself is undisturbed (the sender still reads `SetReady`
+    /// afterwards rather than having been dropped as a violator).
+    #[test]
+    fn input_frames_land_latest_wins_in_the_mailbox() {
+        let host = host();
+        let mut alice = join(host.addr(), "alice");
+        host.recv_timeout(WAIT).unwrap(); // Joined
+        recv_roster(&mut alice, 1);
+
+        let ctl = alice.ctl().unwrap();
+        ctl.send_input(drive_input(10)).unwrap();
+        assert_eq!(wait_input(&host.remote_inputs(), 1, 10).input.seq, 10);
+        ctl.send_input(drive_input(11)).unwrap();
+        assert_eq!(wait_input(&host.remote_inputs(), 1, 11).input.seq, 11);
+
+        alice.set_ready(true).unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::ReadyChanged { id: 1, ready: true }) => {}
+            other => panic!("expected ReadyChanged, got {other:?}"),
+        }
+    }
+
+    /// A departed player's input slot is pruned with the roster slot —
+    /// a recycled wire id can never inherit a dead driver's throttle.
+    #[test]
+    fn a_departed_players_input_is_pruned() {
+        let host = host();
+        let mut alice = join(host.addr(), "alice");
+        host.recv_timeout(WAIT).unwrap(); // Joined
+        recv_roster(&mut alice, 1);
+
+        alice.ctl().unwrap().send_input(drive_input(1)).unwrap();
+        wait_input(&host.remote_inputs(), 1, 1);
+
+        alice.leave().unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::Left {
+                id: 1,
+                cause: LeaveCause::Quit,
+                ..
+            }) => {}
+            other => panic!("expected a Quit Left, got {other:?}"),
+        }
+        assert!(host.remote_inputs().latest(1).is_none());
+    }
+
+    /// `HostCtl::broadcast` is the snapshot channel: the `Snap` frame
+    /// lands on every peer's stream.
+    #[test]
+    fn a_broadcasted_snapshot_reaches_every_peer() {
+        let host = sessioned_host();
+        let mut alice = join_sessioned(&host, "alice");
+        let mut bob = join_sessioned(&host, "bob");
+        host.recv_timeout(WAIT).unwrap();
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut alice, 2);
+        recv_roster(&mut bob, 2);
+
+        let snap = Message::Snap {
+            generation: 1,
+            tick: 42,
+            entries: vec![SnapEntry {
+                player: 1,
+                pos: [1.0, 2.0, 3.0],
+                rot: [0.0, 0.0, 0.0, 1.0],
+                vel: [4.0, 0.0, 0.0],
+                angvel: [0.0, 5.0, 0.0],
+            }],
+        };
+        host.ctl().broadcast(&snap).unwrap();
+        for client in [&mut alice, &mut bob] {
+            match client.recv().unwrap() {
+                Message::Snap {
+                    generation: 1,
+                    tick: 42,
+                    entries,
+                } => assert_eq!(entries[0].player, 1),
+                other => panic!("expected Snap, got {other:?}"),
+            }
+        }
+    }
+
+    /// The mailbox is bounded by the roster cap: stuffing it with ids
+    /// beyond `MAX_PLAYERS` neither grows it unboundedly nor accepts
+    /// samples for unjoined ids.
+    #[test]
+    fn the_mailbox_never_exceeds_the_player_cap() {
+        let inputs = RemoteInputs::default();
+        for id in 1..=(MAX_PLAYERS as u16 + 20) {
+            inputs.store(id, drive_input(u64::from(id)));
+        }
+        assert_eq!(inputs.len(), MAX_PLAYERS as usize);
+        assert!(inputs.latest(MAX_PLAYERS as u16 + 20).is_none());
     }
 }

@@ -267,6 +267,7 @@ fn main() {
             Ok(Message::Start {
                 generation,
                 session,
+                ..
             }) => match check_advertised(&vfs, &session) {
                 Ok(()) => println!(
                     "event=started generation={generation} session={:?}",

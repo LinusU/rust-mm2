@@ -46,7 +46,7 @@ use mm2_vehicle::{ResetVehicle, TireConditions, VehicleConfig, vehicle_bundle};
 use tracing::{debug, error, info, warn};
 
 use crate::camera::{CameraMode, ChaseCamera, FreeCamera};
-use crate::car_visual::{self, WheelMount, WheelSpin};
+use crate::car_visual;
 use crate::contracts::ImpactFilter;
 use crate::{city, dev_world, opponents, race, scripted};
 
@@ -1325,47 +1325,13 @@ pub fn load_session_world(
         // Synthetic dev car: cuboid body + cylinder wheels, same
         // mount/spin rig as imported wheels.
         None => {
-            let body_mesh = assets
-                .meshes
-                .add(Cuboid::from_size(Vec3::from(vehicle_cfg.chassis_size)));
-            let body_mat = assets.materials.add(StandardMaterial {
-                base_color: Color::srgb(0.85, 0.15, 0.1),
-                metallic: 0.3,
-                perceptual_roughness: 0.5,
-                ..default()
-            });
-            commands
-                .entity(vehicle)
-                .insert((Mesh3d(body_mesh), MeshMaterial3d(body_mat)));
-            let wheel_mesh = assets.meshes.add(Cylinder::new(0.34, 0.25));
-            let wheel_mat = assets.materials.add(StandardMaterial {
-                base_color: Color::srgb(0.1, 0.1, 0.1),
-                perceptual_roughness: 0.9,
-                ..default()
-            });
-            for (i, w) in vehicle_cfg.wheels.iter().enumerate() {
-                let mount = commands
-                    .spawn((
-                        WheelMount {
-                            vehicle,
-                            index: i,
-                            follow_offset: Vec3::ZERO,
-                        },
-                        Transform::from_translation(Vec3::from(w.position)),
-                    ))
-                    .id();
-                commands.entity(vehicle).add_child(mount);
-                let spin = commands.spawn((WheelSpin, Transform::IDENTITY)).id();
-                commands.entity(mount).add_child(spin);
-                commands.entity(spin).with_child((
-                    Mesh3d(wheel_mesh.clone()),
-                    MeshMaterial3d(wheel_mat.clone()),
-                    // Cylinder is Y-aligned: rotate onto the axle (X) and
-                    // scale to the configured radius.
-                    Transform::from_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2))
-                        .with_scale(Vec3::new(w.radius / 0.34, 1.0, w.radius / 0.34)),
-                ));
-            }
+            car_visual::spawn_dev_car(
+                &mut commands,
+                vehicle_cfg,
+                &mut assets.meshes,
+                &mut assets.materials,
+                vehicle,
+            );
         }
     }
 
