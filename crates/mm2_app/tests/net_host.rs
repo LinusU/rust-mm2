@@ -137,6 +137,35 @@ fn a_dedicated_host_process_serves_an_advertised_lobby() {
     alice.set_ready(true).unwrap();
     assert_eq!(host.line(), "event=ready id=1 ready=true");
 
+    // Vehicle picks run through the host's catalog validator: on an
+    // empty install only the dev car (empty wire id) is legal.
+    alice.set_vehicle("", 0).unwrap();
+    assert_eq!(host.line(), "event=vehicle id=1 vehicle=\"\" paint=0");
+    // The pick rides the roster rebroadcast to every peer — bob sees
+    // alice's dev car on the snapshot.
+    let pick_seen = (0..8).any(|_| match bob.recv().unwrap() {
+        Message::Roster { players } => players.iter().any(|p| {
+            p.pick
+                == Some(mm2_net::VehiclePick {
+                    vehicle: String::new(),
+                    paint: 0,
+                })
+        }),
+        _ => false,
+    });
+    assert!(pick_seen, "bob never saw alice's pick on the roster");
+
+    // An out-of-catalog id is refused — to bob alone, roster unchanged.
+    bob.set_vehicle("vpbug", 0).unwrap();
+    match bob.recv().unwrap() {
+        Message::VehicleRefused { reason } => {
+            assert!(reason.contains("unknown vehicle"), "got {reason}")
+        }
+        other => panic!("expected VehicleRefused, got {other:?}"),
+    }
+    let refused = host.line();
+    assert!(refused.starts_with("event=pick_refused id=2"), "{refused}");
+
     // A mismatched gameplay fingerprint is refused at the door — AC02's
     // gate, here against a separate host process.
     let err = Client::join(

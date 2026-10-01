@@ -8,8 +8,9 @@
 //! violation, not a parse to fudge.
 
 /// Wire version. Bumped for any incompatible message change; peers must
-/// match exactly.
-pub const PROTOCOL_VERSION: u16 = 1;
+/// match exactly. v2: `RosterEntry` gained the driver's `pick` field and
+/// the `SetVehicle`/`VehicleRefused` negotiation pair landed.
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -28,6 +29,8 @@ const TAG_ROSTER: u8 = 0x05;
 const TAG_SET_READY: u8 = 0x06;
 const TAG_LEAVE: u8 = 0x07;
 const TAG_SESSION: u8 = 0x08;
+const TAG_SET_VEHICLE: u8 = 0x09;
+const TAG_VEHICLE_REFUSED: u8 = 0x0a;
 
 /// Byte cap on a [`SessionAdvertisement`]'s opaque `params` field — the
 /// `mm2_app` bridge's serialized session config is a few hundred bytes,
@@ -79,6 +82,22 @@ pub enum RejectCode {
     LobbyFull = 4,
 }
 
+/// A driver's vehicle pick as the lobby carries it: an opaque content
+/// id plus a paint index. The wire bounds both (`vehicle` ≤
+/// [`MAX_STRING`], `paint` a `u8`) but knows nothing about which ids or
+/// paints are legal — that is the consumer's validator
+/// (`HostConfig::pick_validator`), which runs on the authoritative side.
+/// What `vehicle` *means* is likewise the consumer's: `mm2_app` carries
+/// catalog ids (`vpbug`) and uses the empty string for the synthetic dev
+/// car.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VehiclePick {
+    /// The picked vehicle's content id (consumer-defined).
+    pub vehicle: String,
+    /// Zero-based paint index.
+    pub paint: u8,
+}
+
 /// One roster entry — the lobby's view of a connected driver. Player ids
 /// are host-minted `u16` slots; `0` is reserved for the host player at the
 /// app layer, so wire ids start at 1.
@@ -92,6 +111,8 @@ pub struct RosterEntry {
     pub build: String,
     /// Whether the peer has marked itself ready to start.
     pub ready: bool,
+    /// The driver's current vehicle pick; `None` until the peer sets one.
+    pub pick: Option<VehiclePick>,
 }
 
 /// One wire message.
@@ -129,6 +150,19 @@ pub enum Message {
     SetReady {
         /// The new readiness state.
         ready: bool,
+    },
+    /// Client → host: set this player's vehicle pick. The host applies
+    /// it through the consumer's pick validator and rebroadcasts the
+    /// roster, or answers this peer alone with `VehicleRefused` — a bad
+    /// pick is a refused request, not a protocol violation.
+    SetVehicle(VehiclePick),
+    /// Host → the refused client only: its `SetVehicle` pick failed the
+    /// host's validator, with a display-ready reason. The roster is
+    /// unchanged — receivers must not treat this as an error that ends
+    /// the connection.
+    VehicleRefused {
+        /// Why the pick was refused.
+        reason: String,
     },
     /// Client → host: a clean quit. Distinguishes a deliberate leave from
     /// a dropped connection on the wire.
@@ -292,11 +326,28 @@ impl Message {
                     out.push(p.ready as u8);
                     put_string(&mut out, &p.driver)?;
                     put_string(&mut out, &p.build)?;
+                    match &p.pick {
+                        Some(pick) => {
+                            out.push(1);
+                            put_string(&mut out, &pick.vehicle)?;
+                            out.push(pick.paint);
+                        }
+                        None => out.push(0),
+                    }
                 }
             }
             Self::SetReady { ready } => {
                 out.push(TAG_SET_READY);
                 out.push(*ready as u8);
+            }
+            Self::SetVehicle(pick) => {
+                out.push(TAG_SET_VEHICLE);
+                put_string(&mut out, &pick.vehicle)?;
+                out.push(pick.paint);
+            }
+            Self::VehicleRefused { reason } => {
+                out.push(TAG_VEHICLE_REFUSED);
+                put_string(&mut out, reason)?;
             }
             Self::Leave => out.push(TAG_LEAVE),
         }
@@ -344,11 +395,26 @@ impl Message {
                         ready: cur.bool()?,
                         driver: cur.string()?,
                         build: cur.string()?,
+                        pick: if cur.bool()? {
+                            Some(VehiclePick {
+                                vehicle: cur.string()?,
+                                paint: cur.u8()?,
+                            })
+                        } else {
+                            None
+                        },
                     });
                 }
                 Self::Roster { players }
             }
             TAG_SET_READY => Self::SetReady { ready: cur.bool()? },
+            TAG_SET_VEHICLE => Self::SetVehicle(VehiclePick {
+                vehicle: cur.string()?,
+                paint: cur.u8()?,
+            }),
+            TAG_VEHICLE_REFUSED => Self::VehicleRefused {
+                reason: cur.string()?,
+            },
             TAG_LEAVE => Self::Leave,
             tag => return Err(ProtoError::BadTag(tag)),
         };
@@ -417,16 +483,32 @@ mod tests {
                         driver: "driver one".to_string(),
                         build: "test".to_string(),
                         ready: false,
+                        pick: Some(VehiclePick {
+                            vehicle: "vpbug".to_string(),
+                            paint: 2,
+                        }),
                     },
                     RosterEntry {
                         player_id: 2,
                         driver: "driver two".to_string(),
                         build: "test".to_string(),
                         ready: true,
+                        pick: None,
                     },
                 ],
             },
             Message::SetReady { ready: true },
+            Message::SetVehicle(VehiclePick {
+                vehicle: "vpbug".to_string(),
+                paint: 0,
+            }),
+            Message::SetVehicle(VehiclePick {
+                vehicle: String::new(),
+                paint: 0,
+            }),
+            Message::VehicleRefused {
+                reason: "unknown vehicle id".to_string(),
+            },
             Message::Leave,
         ] {
             let bytes = msg.encode().unwrap();
@@ -495,6 +577,7 @@ mod tests {
                 driver: "d".to_string(),
                 build: "b".to_string(),
                 ready: false,
+                pick: None,
             };
             MAX_PLAYERS as usize + 1
         ];

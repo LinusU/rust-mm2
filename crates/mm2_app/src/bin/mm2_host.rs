@@ -14,6 +14,8 @@
 //! event=joined id=<n> driver="<name>" build="<id>"
 //! event=left id=<n> driver="<name>" cause=quit|lost|malformed
 //! event=ready id=<n> ready=<bool>
+//! event=vehicle id=<n> vehicle="<id>" paint=<n>
+//! event=pick_refused id=<n> vehicle="<id>" paint=<n> reason="<text>"
 //! event=join_failed peer=<addr> reason="<text>"
 //! ```
 //!
@@ -27,7 +29,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::Parser;
 use mm2_app::net;
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
-use mm2_content::fingerprint;
+use mm2_content::{VehicleCatalog, fingerprint};
 use mm2_game::{
     Difficulty, SessionAuthority, SessionConditions, SessionConfig, SessionMode, TimeOfDay,
     Weather, WorldMode,
@@ -182,7 +184,15 @@ fn main() {
 
     // Dedicated host: no local player seat, so the full wire ceiling is
     // available to remote clients (HostConfig::new defaults to it).
-    let host = match Host::listen(cli.bind, &HostConfig::new(fingerprint.hash)) {
+    // Vehicle picks are gated on the mounted catalog — a peer cannot
+    // roster a car that cannot spawn. An empty install leaves only the
+    // dev car legal, which suits a --dev-world lobby.
+    let catalog = VehicleCatalog::scan(&vfs);
+    let host_config = HostConfig {
+        pick_validator: Some(net::vehicle_validator(&catalog)),
+        ..HostConfig::new(fingerprint.hash)
+    };
+    let host = match Host::listen(cli.bind, &host_config) {
         Ok(host) => host,
         Err(e) => {
             eprintln!("error: listening on {}: {e}", cli.bind);
@@ -222,6 +232,19 @@ fn describe(event: &HostEvent) -> String {
         }
         HostEvent::ReadyChanged { id, ready } => {
             format!("event=ready id={id} ready={ready}")
+        }
+        HostEvent::VehicleChanged { id, vehicle, paint } => {
+            format!("event=vehicle id={id} vehicle={vehicle:?} paint={paint}")
+        }
+        HostEvent::VehicleRefused {
+            id,
+            vehicle,
+            paint,
+            reason,
+        } => {
+            format!(
+                "event=pick_refused id={id} vehicle={vehicle:?} paint={paint} reason={reason:?}"
+            )
         }
         HostEvent::JoinFailed { peer, reason } => {
             format!("event=join_failed peer={peer} reason={reason:?}")

@@ -18,8 +18,8 @@
 //!   default for tests; LAN binding is the caller's explicit choice.
 //! - [`lobby`] — the session lobby driver: [`Host`] accepts and gates
 //!   peers on its own threads, mints roster slots, tracks readiness and
-//!   reports join/leave/ready transitions as events; [`Client`] is the
-//!   joining side.
+//!   vehicle picks, and reports join/leave/ready/pick transitions as
+//!   events; [`Client`] is the joining side.
 //!
 //! Scope deliberately ends at the lobby: the session advertisement the
 //! lobby carries is an opaque blob (the `mm2_app` bridge owns the
@@ -37,10 +37,10 @@ pub use conn::{
     send_hello, send_hello_within,
 };
 pub use frame::{MAX_FRAME, read_frame, write_frame};
-pub use lobby::{Client, Host, HostConfig, HostEvent, LeaveCause};
+pub use lobby::{Client, Host, HostConfig, HostEvent, LeaveCause, PickValidator};
 pub use proto::{
     Hello, MAX_PLAYERS, MAX_SESSION_PARAMS, Message, PROTOCOL_VERSION, ProtoError, RejectCode,
-    RosterEntry, SessionAdvertisement,
+    RosterEntry, SessionAdvertisement, VehiclePick,
 };
 
 /// Every failure mode of this layer: transport I/O, frame bounds, wire

@@ -12,14 +12,17 @@
 //!   lobby messages and reporting the socket's death.
 //!
 //! The **host loop** is the only code that mutates the roster: it mints
-//! player ids, sends `Accept`/`Reject` + `Welcome`, applies `SetReady`,
-//! reaps gone peers and broadcasts the whole `Roster` after every change.
-//! Consumers drain [`HostEvent`]s — the Bevy bridge (F24-B follow-up) is
-//! just a system that forwards them into app state.
+//! player ids, sends `Accept`/`Reject` + `Welcome`, applies `SetReady`
+//! and `SetVehicle` (through the consumer's [`HostConfig::pick_validator`]
+//! — the roster carries each driver's pick), reaps gone peers and
+//! broadcasts the whole `Roster` after every change. Consumers drain
+//! [`HostEvent`]s — the Bevy bridge (F24-B follow-up) is just a system
+//! that forwards them into app state.
 //!
-//! Nothing here knows about vehicles, cities or modes: session
-//! advertisement and start/cancel are later F24-B legs, and the game-rule
-//! types stay in `mm2_game` — the wire carries opaque fields only.
+//! Nothing here knows about vehicles, cities or modes: `vehicle` is an
+//! opaque id the consumer's validator interprets, `params` an opaque
+//! blob, and start/cancel is a later F24-B leg — the game-rule types
+//! stay in `mm2_game` and the wire carries opaque fields only.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -32,7 +35,9 @@ use std::time::Duration;
 
 use crate::NetError;
 use crate::conn::{Conn, HANDSHAKE_TIMEOUT, Writer, listen_loopback, recv_hello_within};
-use crate::proto::{Hello, MAX_PLAYERS, Message, RejectCode, RosterEntry, SessionAdvertisement};
+use crate::proto::{
+    Hello, MAX_PLAYERS, Message, RejectCode, RosterEntry, SessionAdvertisement, VehiclePick,
+};
 
 /// Cap on connections mid-handshake. A connect flood drops at the accept
 /// boundary rather than spawning unbounded threads; each in-flight
@@ -51,8 +56,17 @@ const WRITE_TIMEOUT: Duration = HANDSHAKE_TIMEOUT;
 /// the socket); this only bounds a host that never does.
 const LEAVE_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 
+/// The consumer's gate on `SetVehicle` picks (F24-B.3): the wire layer
+/// knows nothing about which vehicle ids or paint indices are legal, so
+/// the app supplies the check — `mm2_app::net::vehicle_validator` runs a
+/// pick against the mounted `VehicleCatalog`. Called on the host loop;
+/// `Ok(())` applies the pick to the roster, `Err(reason)` answers the
+/// peer with `VehicleRefused` (a refused request, not a violation) and
+/// leaves the roster unchanged. The `reason` string is display-ready.
+pub type PickValidator = Arc<dyn Fn(&str, u8) -> Result<(), String> + Send + Sync>;
+
 /// Parameters a host listens under.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HostConfig {
     /// The host's `mm2_content::fingerprint::gameplay` value — the
     /// compatibility gate every joining `Hello` is checked against.
@@ -63,15 +77,31 @@ pub struct HostConfig {
     /// may keep the full eight. Values above [`MAX_PLAYERS`] are
     /// rejected at listen time — the wire roster cannot carry them.
     pub max_clients: u16,
+    /// Gate applied to every `SetVehicle` pick on the authoritative
+    /// side. `None` accepts any bounded pick — the right default for a
+    /// lobby with no content knowledge (tests, a bare transport host);
+    /// a real consumer installs its catalog validator.
+    pub pick_validator: Option<PickValidator>,
 }
 
 impl HostConfig {
-    /// A lobby at the documented player ceiling.
+    /// A lobby at the documented player ceiling, no pick validation.
     pub fn new(gameplay_fingerprint: u64) -> Self {
         Self {
             gameplay_fingerprint,
             max_clients: MAX_PLAYERS as u16,
+            pick_validator: None,
         }
+    }
+}
+
+impl std::fmt::Debug for HostConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostConfig")
+            .field("gameplay_fingerprint", &self.gameplay_fingerprint)
+            .field("max_clients", &self.max_clients)
+            .field("pick_validator", &self.pick_validator.is_some())
+            .finish()
     }
 }
 
@@ -114,6 +144,29 @@ pub enum HostEvent {
         id: u16,
         /// The new state.
         ready: bool,
+    },
+    /// A peer's `SetVehicle` pick passed the validator and is now on the
+    /// roster (rebroadcast to everyone).
+    VehicleChanged {
+        /// The slot that picked.
+        id: u16,
+        /// The picked vehicle id.
+        vehicle: String,
+        /// The picked paint index.
+        paint: u8,
+    },
+    /// A peer's `SetVehicle` pick failed the validator — the roster is
+    /// unchanged and the peer was answered `VehicleRefused`. Logged for
+    /// the host; not an error that drops the peer.
+    VehicleRefused {
+        /// The slot that asked.
+        id: u16,
+        /// The refused vehicle id.
+        vehicle: String,
+        /// The refused paint index.
+        paint: u8,
+        /// The validator's display-ready reason.
+        reason: String,
     },
     /// A connection was refused — a failed handshake (version/content/
     /// malformed/stalled, with the wire `Reject` sent where applicable)
@@ -273,9 +326,23 @@ impl Client {
         self.conn.send(&Message::SetReady { ready })
     }
 
+    /// Set this client's vehicle pick. The host checks it against the
+    /// consumer's pick validator: a legal pick lands on the roster and
+    /// is rebroadcast to everyone; a refused one comes back to this
+    /// client alone as `Message::VehicleRefused`. `vehicle` is the
+    /// consumer's content id — `mm2_app` uses catalog ids (`vpbug`) and
+    /// the empty string for the synthetic dev car.
+    pub fn set_vehicle(&mut self, vehicle: &str, paint: u8) -> Result<(), NetError> {
+        self.conn.send(&Message::SetVehicle(VehiclePick {
+            vehicle: vehicle.to_string(),
+            paint,
+        }))
+    }
+
     /// Send an arbitrary lobby message. The host only accepts the
-    /// client→host set (`SetReady`, `Leave`) post-handshake — anything
-    /// else is a protocol violation that gets this client dropped.
+    /// client→host set (`SetReady`, `SetVehicle`, `Leave`)
+    /// post-handshake — anything else is a protocol violation that gets
+    /// this client dropped.
     pub fn send(&mut self, msg: &Message) -> Result<(), NetError> {
         self.conn.send(msg)
     }
@@ -334,6 +401,7 @@ struct Slot {
     driver: String,
     build: String,
     ready: bool,
+    pick: Option<VehiclePick>,
     writer: Writer,
 }
 
@@ -458,6 +526,7 @@ fn run(
                         driver: hello.driver.clone(),
                         build: hello.build.clone(),
                         ready: false,
+                        pick: None,
                         writer,
                     },
                 );
@@ -483,6 +552,52 @@ fn run(
                     broadcast_roster(&mut players, &events);
                 }
             }
+            LoopMsg::PeerMessage {
+                id,
+                msg: Message::SetVehicle(pick),
+            } => {
+                let verdict = match &config.pick_validator {
+                    Some(validate) => validate(&pick.vehicle, pick.paint),
+                    None => Ok(()),
+                };
+                match verdict {
+                    Ok(()) => {
+                        if let Some(slot) = players.get_mut(&id) {
+                            // An unchanged pick is a no-op — no event,
+                            // no broadcast: a repeated request cannot
+                            // flood the lobby with rosters.
+                            if slot.pick.as_ref() != Some(&pick) {
+                                let VehiclePick { vehicle, paint } = pick.clone();
+                                slot.pick = Some(pick);
+                                let _ =
+                                    events.send(HostEvent::VehicleChanged { id, vehicle, paint });
+                                broadcast_roster(&mut players, &events);
+                            }
+                        }
+                    }
+                    Err(reason) => {
+                        if let Some(slot) = players.get_mut(&id) {
+                            let _ = events.send(HostEvent::VehicleRefused {
+                                id,
+                                vehicle: pick.vehicle.clone(),
+                                paint: pick.paint,
+                                reason: reason.clone(),
+                            });
+                            // A dead refusal write means the peer is
+                            // gone — the same removal discipline as a
+                            // failed broadcast.
+                            if slot
+                                .writer
+                                .send(&Message::VehicleRefused { reason })
+                                .is_err()
+                                && remove_player(&mut players, id, LeaveCause::Lost, &events)
+                            {
+                                broadcast_roster(&mut players, &events);
+                            }
+                        }
+                    }
+                }
+            }
             LoopMsg::PeerMessage { .. } => {}
             LoopMsg::SetSession(ad) => {
                 session = Some(ad.clone());
@@ -493,15 +608,7 @@ fn run(
                 }
             }
             LoopMsg::PeerGone { id, cause } => {
-                if let Some(slot) = players.remove(&id) {
-                    // The reporting reader already exited, but removal
-                    // always disconnects — no path leaves a live socket.
-                    slot.writer.disconnect();
-                    let _ = events.send(HostEvent::Left {
-                        id,
-                        driver: slot.driver,
-                        cause,
-                    });
+                if remove_player(&mut players, id, cause, &events) {
                     broadcast_roster(&mut players, &events);
                 }
             }
@@ -531,14 +638,36 @@ fn alloc_id(players: &BTreeMap<u16, Slot>, next_id: &mut u16) -> u16 {
     }
 }
 
+/// Remove one player and close its socket, emitting `Left`. Shared by
+/// every removal path so a departed peer never leaves a live socket —
+/// the disconnect wakes the reader thread still blocked in `recv` on
+/// the same socket (otherwise the thread, the fd and the client's
+/// dead-but-open connection all leak). `false` when the slot was
+/// already gone.
+fn remove_player(
+    players: &mut BTreeMap<u16, Slot>,
+    id: u16,
+    cause: LeaveCause,
+    events: &Sender<HostEvent>,
+) -> bool {
+    let Some(slot) = players.remove(&id) else {
+        return false;
+    };
+    slot.writer.disconnect();
+    let _ = events.send(HostEvent::Left {
+        id,
+        driver: slot.driver,
+        cause,
+    });
+    true
+}
+
 /// Send `msg` to every player once. A failed write means the peer is
-/// gone: disconnect it (waking its reader thread, which is still blocked
-/// in `recv` on the same socket — otherwise the thread, the fd and the
-/// client's dead-but-open connection all leak) and drop it as `Lost`.
-/// Returns `true` when every player received the message; on `false` the
-/// roster changed and callers whose message no longer fits should resend
-/// a corrected snapshot (`broadcast_roster` does this for `Roster`
-/// itself).
+/// gone: it is removed as `Lost` (disconnecting the socket so its
+/// blocked reader thread wakes). Returns `true` when every player
+/// received the message; on `false` the roster changed and callers whose
+/// message no longer fits should resend a corrected snapshot
+/// (`broadcast_roster` does this for `Roster` itself).
 fn broadcast(players: &mut BTreeMap<u16, Slot>, msg: &Message, events: &Sender<HostEvent>) -> bool {
     let mut failed = Vec::new();
     for (id, slot) in players.iter_mut() {
@@ -546,17 +675,11 @@ fn broadcast(players: &mut BTreeMap<u16, Slot>, msg: &Message, events: &Sender<H
             failed.push(*id);
         }
     }
-    for id in &failed {
-        if let Some(slot) = players.remove(id) {
-            slot.writer.disconnect();
-            let _ = events.send(HostEvent::Left {
-                id: *id,
-                driver: slot.driver,
-                cause: LeaveCause::Lost,
-            });
-        }
+    let removed = !failed.is_empty();
+    for id in failed {
+        remove_player(players, id, LeaveCause::Lost, events);
     }
-    failed.is_empty()
+    !removed
 }
 
 /// Send the complete roster to every player, rebuilt and resent after
@@ -573,6 +696,7 @@ fn broadcast_roster(players: &mut BTreeMap<u16, Slot>, events: &Sender<HostEvent
                     driver: s.driver.clone(),
                     build: s.build.clone(),
                     ready: s.ready,
+                    pick: s.pick.clone(),
                 })
                 .collect(),
         };
@@ -582,8 +706,9 @@ fn broadcast_roster(players: &mut BTreeMap<u16, Slot>, events: &Sender<HostEvent
     }
 }
 
-/// One thread per player: forward `SetReady`, report `Leave` as a clean
-/// quit, and drop the peer on a protocol violation or a dead socket.
+/// One thread per player: forward `SetReady`/`SetVehicle`, report
+/// `Leave` as a clean quit, and drop the peer on a protocol violation
+/// or a dead socket.
 fn spawn_reader(conn: Conn, id: u16, tx: Sender<LoopMsg>) {
     thread::spawn(move || {
         let mut conn = conn;
@@ -593,7 +718,9 @@ fn spawn_reader(conn: Conn, id: u16, tx: Sender<LoopMsg>) {
                     id,
                     cause: LeaveCause::Quit,
                 },
-                Ok(msg @ Message::SetReady { .. }) => LoopMsg::PeerMessage { id, msg },
+                Ok(msg @ (Message::SetReady { .. } | Message::SetVehicle(_))) => {
+                    LoopMsg::PeerMessage { id, msg }
+                }
                 Ok(_) => LoopMsg::PeerGone {
                     id,
                     cause: LeaveCause::Malformed,
@@ -667,6 +794,7 @@ mod tests {
                 driver: "alice".to_string(),
                 build: "test-build".to_string(),
                 ready: false,
+                pick: None,
             }]
         );
     }
@@ -684,12 +812,14 @@ mod tests {
                 driver: "alice".to_string(),
                 build: "test-build".to_string(),
                 ready: false,
+                pick: None,
             },
             RosterEntry {
                 player_id: 2,
                 driver: "bob".to_string(),
                 build: "test-build".to_string(),
                 ready: false,
+                pick: None,
             },
         ];
         // The newcomer and the incumbent both see the same roster.
@@ -792,6 +922,7 @@ mod tests {
         let config = HostConfig {
             gameplay_fingerprint: FP,
             max_clients: 1,
+            pick_validator: None,
         };
         let host = Host::listen_loopback(&config).unwrap();
         let _alice = join(host.addr(), "alice");
@@ -928,6 +1059,7 @@ mod tests {
                     driver: format!("p{id}"),
                     build: "b".to_string(),
                     ready: false,
+                    pick: None,
                     writer: conn.writer().unwrap(),
                 },
             );
@@ -977,6 +1109,7 @@ mod tests {
         let over = HostConfig {
             gameplay_fingerprint: FP,
             max_clients: MAX_PLAYERS as u16 + 1,
+            pick_validator: None,
         };
         match Host::listen_loopback(&over) {
             Err(NetError::Config(msg)) => assert!(msg.contains("max_clients"), "got {msg}"),
@@ -987,6 +1120,7 @@ mod tests {
         Host::listen_loopback(&HostConfig {
             gameplay_fingerprint: FP,
             max_clients: MAX_PLAYERS as u16,
+            pick_validator: None,
         })
         .unwrap();
     }
@@ -1090,6 +1224,168 @@ mod tests {
         match alice.recv().unwrap() {
             Message::Roster { .. } => {}
             other => panic!("expected Roster, got {other:?}"),
+        }
+    }
+
+    /// A host whose consumer knows its content: `vpbug` with paints 0-3
+    /// is the entire legal set here.
+    fn catalog_host() -> Host {
+        Host::listen_loopback(&HostConfig {
+            pick_validator: Some(Arc::new(|vehicle: &str, paint: u8| {
+                match (vehicle, paint) {
+                    ("vpbug", 0..=3) => Ok(()),
+                    ("vpbug", _) => Err("paint out of range".to_string()),
+                    _ => Err(format!("unknown vehicle id {vehicle:?}")),
+                }
+            })),
+            ..HostConfig::new(FP)
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_vehicle_pick_lands_on_the_roster() {
+        let host = catalog_host();
+        let mut alice = join(host.addr(), "alice");
+        let mut bob = join(host.addr(), "bob");
+        host.recv_timeout(WAIT).unwrap();
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut alice, 2);
+        recv_roster(&mut bob, 2);
+
+        alice.set_vehicle("vpbug", 2).unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::VehicleChanged {
+                id: 1,
+                vehicle,
+                paint: 2,
+            }) => assert_eq!(vehicle, "vpbug"),
+            other => panic!("expected VehicleChanged, got {other:?}"),
+        }
+        let pick = Some(VehiclePick {
+            vehicle: "vpbug".to_string(),
+            paint: 2,
+        });
+        // The rebroadcast reaches the picker and every peer alike.
+        for client in [&mut alice, &mut bob] {
+            let roster = recv_roster(client, 2);
+            assert_eq!(roster[0].pick, pick);
+            assert_eq!(roster[1].pick, None);
+        }
+        // And a join after the pick sees it in its first roster.
+        let mut carol = join(host.addr(), "carol");
+        let roster = recv_roster(&mut carol, 3);
+        assert_eq!(roster[0].pick, pick);
+    }
+
+    #[test]
+    fn a_refused_pick_leaves_the_roster_and_informs_the_peer() {
+        let host = catalog_host();
+        let mut alice = join(host.addr(), "alice");
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut alice, 1);
+
+        alice.set_vehicle("vpbug", 9).unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::VehicleRefused {
+                id: 1,
+                vehicle,
+                paint: 9,
+                reason,
+            }) => {
+                assert_eq!(vehicle, "vpbug");
+                assert_eq!(reason, "paint out of range");
+            }
+            other => panic!("expected VehicleRefused, got {other:?}"),
+        }
+        // The refusal reaches the picker alone as a message, not a drop.
+        match alice.recv().unwrap() {
+            Message::VehicleRefused { reason } => assert_eq!(reason, "paint out of range"),
+            other => panic!("expected VehicleRefused, got {other:?}"),
+        }
+        // The roster was untouched — alice can still pick legally.
+        alice.set_vehicle("vpbug", 0).unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::VehicleChanged { id: 1, .. }) => {}
+            other => panic!("expected VehicleChanged, got {other:?}"),
+        }
+    }
+
+    /// A pick identical to the slot's current one must not emit an
+    /// event or a broadcast — otherwise a repeating client floods the
+    /// lobby with rosters. Deterministic leg: a duplicate pick
+    /// followed by `SetReady` produces exactly one broadcast (the
+    /// ready one) — any dup-pick roster would carry `ready = false`
+    /// and arrive first.
+    #[test]
+    fn an_identical_pick_is_a_noop() {
+        let host = catalog_host();
+        let mut alice = join(host.addr(), "alice");
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut alice, 1);
+
+        alice.set_vehicle("vpbug", 1).unwrap();
+        host.recv_timeout(WAIT).unwrap(); // VehicleChanged
+        recv_roster(&mut alice, 1);
+
+        alice.set_vehicle("vpbug", 1).unwrap(); // identical — swallowed
+        alice.set_ready(true).unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::ReadyChanged { id: 1, ready: true }) => {}
+            other => panic!("expected ReadyChanged, got {other:?}"),
+        }
+        match alice.recv().unwrap() {
+            Message::Roster { players } => {
+                assert!(players[0].ready, "a dup-pick broadcast arrived first");
+            }
+            other => panic!("expected the ready Roster, got {other:?}"),
+        }
+        // And no host event named the duplicate pick.
+        assert!(host.try_recv().is_err());
+    }
+
+    /// `VehicleRefused` is host→client traffic; a client sending it (or
+    /// any other host-side message) speaks out of turn and is dropped.
+    #[test]
+    fn a_client_sending_vehicle_refused_is_dropped() {
+        let host = host();
+        let mut alice = join(host.addr(), "alice");
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut alice, 1);
+
+        alice
+            .send(&Message::VehicleRefused {
+                reason: "i am the host now".to_string(),
+            })
+            .unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::Left {
+                id: 1,
+                cause: LeaveCause::Malformed,
+                ..
+            }) => {}
+            other => panic!("expected a Malformed Left, got {other:?}"),
+        }
+        assert!(alice.recv().is_err());
+    }
+
+    /// A lobby with no validator installed accepts any wire-bounded
+    /// pick — the default for a transport-level host with no content.
+    #[test]
+    fn a_host_without_a_validator_accepts_any_pick() {
+        let host = host();
+        let mut alice = join(host.addr(), "alice");
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut alice, 1);
+
+        alice.set_vehicle("anything", 250).unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::VehicleChanged {
+                id: 1,
+                vehicle,
+                paint: 250,
+            }) => assert_eq!(vehicle, "anything"),
+            other => panic!("expected VehicleChanged, got {other:?}"),
         }
     }
 }

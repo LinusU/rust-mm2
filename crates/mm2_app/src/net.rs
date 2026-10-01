@@ -15,19 +15,26 @@
 //! - `authority` — a peer that accepted an advertisement is always
 //!   `SessionAuthority::Remote`; the host alone is authoritative;
 //! - `vehicle` — the driver's car/paint pick is per-player roster
-//!   state, not session config (negotiation is a later F24-B leg);
+//!   state, not session config; it travels separately via
+//!   [`Message::SetVehicle`](mm2_net::Message::SetVehicle) and this
+//!   module's [`encode_pick`]/[`decode_pick`]/[`vehicle_validator`]
+//!   helpers;
 //! - `mods_active` — whether *this* process mounted mods is a local
 //!   fact the session builder stamps on its own;
 //! - `dev` — developer overrides are never network-legal, so
 //!   [`advertise`] refuses a config carrying any rather than dropping
 //!   them silently.
 
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use mm2_content::{EntryStatus, VehicleCatalog};
 use mm2_game::{
     ConfigError, Densities, DevOverrides, Difficulty, EventRef, EventTableKind, RaceCustomization,
     SelectorError, SessionAuthority, SessionConditions, SessionConfig, SessionCustomization,
     SessionMode, TimeOfDay, VehicleSelection, Weather, WorldMode,
 };
-use mm2_net::SessionAdvertisement;
+use mm2_net::{PickValidator, SessionAdvertisement, VehiclePick};
 use serde::{Deserialize, Serialize};
 
 /// A `SessionConfig` the advertisement could not carry, or a `params`
@@ -48,6 +55,9 @@ pub enum SessionWireError {
     /// The params blob is not the encoding this build produces.
     #[error("session params: {0}")]
     Params(#[from] serde_json::Error),
+    /// A paint index the wire's `u8` field cannot carry.
+    #[error("paint index {0} exceeds the wire's u8 bound")]
+    Paint(usize),
 }
 
 /// Encode a session's configuration for the lobby to carry. The result
@@ -72,6 +82,83 @@ pub fn accept(ad: &SessionAdvertisement) -> Result<SessionConfig, SessionWireErr
     let config = params.into_config()?;
     config.validate()?;
     Ok(config)
+}
+
+/// `VehicleSelection` → the wire pick the lobby carries: `id: None`
+/// (the synthetic dev car) travels as the empty string — a real id is
+/// never empty (`ConfigError::EmptyVehicleId` guards that), so `""` is
+/// unambiguous — and `paint` must fit the wire's `u8` field.
+pub fn encode_pick(selection: &VehicleSelection) -> Result<VehiclePick, SessionWireError> {
+    Ok(VehiclePick {
+        vehicle: selection.id.clone().unwrap_or_default(),
+        paint: u8::try_from(selection.paint)
+            .map_err(|_| SessionWireError::Paint(selection.paint))?,
+    })
+}
+
+/// The reverse of [`encode_pick`]: a roster pick back into the app's
+/// `VehicleSelection` — the empty wire id is the dev car.
+pub fn decode_pick(pick: &VehiclePick) -> VehicleSelection {
+    VehicleSelection {
+        id: if pick.vehicle.is_empty() {
+            None
+        } else {
+            Some(pick.vehicle.clone())
+        },
+        paint: pick.paint as usize,
+    }
+}
+
+/// The lobby's pick validator, built from the mounted content catalog —
+/// the authoritative side of `SetVehicle` (F24-B.3). A host installs it
+/// as `HostConfig::pick_validator` so a peer cannot roster a car it
+/// could never spawn. Designed policy:
+///
+/// - `""` (the synthetic dev car) is always a legal pick — it is the
+///   engine's no-content fallback — but it has exactly one paint job,
+///   so `paint` must be 0;
+/// - any other pick must name a catalog entry *exactly* — ids are the
+///   canonical lowercase basenames; display-name aliases are a menu
+///   convenience, not a wire identity — and must be `EntryStatus::Ready`
+///   (an entry with missing deps cannot spawn for anyone);
+/// - `paint` is bounded by the entry's metadata `Colors` list
+///   (`paints.len()`, minimum one job) — the same bound the garage menu
+///   presents. The model's `paint_jobs` check in
+///   `mm2_content::load_vehicle` stays authoritative at spawn time; the
+///   fingerprint gate guarantees every peer's catalog is identical, so
+///   a pick legal here is legal everywhere.
+pub fn vehicle_validator(catalog: &VehicleCatalog) -> PickValidator {
+    // id → paint bound, or the refusal reason for a known-but-unloadable
+    // entry — kept whole so a refusal can say *why* a listed car fails.
+    let mut legal: BTreeMap<String, Result<usize, String>> = BTreeMap::new();
+    for e in &catalog.entries {
+        let bound = match &e.status {
+            EntryStatus::Ready => Ok(e.paints.len().max(1)),
+            EntryStatus::Incomplete { missing } => Err(format!(
+                "vehicle {} is incomplete: missing {}",
+                e.id,
+                missing.join(", ")
+            )),
+        };
+        legal.insert(e.id.clone(), bound);
+    }
+    Arc::new(move |vehicle, paint| {
+        if vehicle.is_empty() {
+            return if paint == 0 {
+                Ok(())
+            } else {
+                Err("the dev car has a single paint job".to_string())
+            };
+        }
+        match legal.get(vehicle) {
+            None => Err(format!("unknown vehicle id {vehicle:?}")),
+            Some(Err(reason)) => Err(reason.clone()),
+            Some(Ok(bound)) if paint as usize >= *bound => Err(format!(
+                "paint {paint} out of range: {vehicle} has {bound} paint job(s)"
+            )),
+            Some(Ok(_)) => Ok(()),
+        }
+    })
 }
 
 /// The display line for lobby UIs/CLIs (`"sf, circuit:3, professional"`).
@@ -432,5 +519,118 @@ mod tests {
             accept(&ad),
             Err(SessionWireError::Invalid(ConfigError::ZeroLaps))
         ));
+    }
+
+    fn catalog_entry(id: &str, paints: &[&str], ready: bool) -> mm2_content::CatalogEntry {
+        mm2_content::CatalogEntry {
+            id: id.to_string(),
+            display_name: id.to_string(),
+            paints: paints.iter().map(|p| p.to_string()).collect(),
+            canonical_info: true,
+            unlock_score: 0,
+            unlock_flags: 0,
+            class: mm2_content::VehicleClass::Stock,
+            deps: mm2_content::DepSet::default(),
+            status: if ready {
+                EntryStatus::Ready
+            } else {
+                EntryStatus::Incomplete {
+                    missing: vec!["model (geometry/<id>.pkg)".to_string()],
+                }
+            },
+            notes: Vec::new(),
+        }
+    }
+
+    fn test_catalog() -> VehicleCatalog {
+        VehicleCatalog {
+            entries: vec![
+                catalog_entry("vpbug", &["red", "blue", "green", "yellow"], true),
+                catalog_entry("vpcab", &["taxi"], false),
+                // A ready entry with no Colors metadata gets the
+                // one-paint-job floor like `paint_jobs.max(1)`.
+                catalog_entry("vpbare", &[], true),
+            ],
+        }
+    }
+
+    /// The dev car (empty wire id ↔ `VehicleSelection::id = None`) and
+    /// a catalog pick both survive the pick codec; a paint index that
+    /// does not fit the wire's `u8` is refused, not clamped.
+    #[test]
+    fn picks_roundtrip_between_selection_and_wire() {
+        let sel = VehicleSelection {
+            id: Some("vpbug".to_string()),
+            paint: 2,
+        };
+        let pick = encode_pick(&sel).unwrap();
+        assert_eq!(pick.vehicle, "vpbug");
+        assert_eq!(pick.paint, 2);
+        assert_eq!(decode_pick(&pick), sel);
+
+        let dev = VehicleSelection::default();
+        let pick = encode_pick(&dev).unwrap();
+        assert_eq!(pick.vehicle, "");
+        assert_eq!(decode_pick(&pick), dev);
+
+        let wild = VehicleSelection {
+            id: Some("vpbug".to_string()),
+            paint: 300,
+        };
+        assert!(matches!(
+            encode_pick(&wild),
+            Err(SessionWireError::Paint(300))
+        ));
+    }
+
+    /// The validator applies the designed policy: the dev car is always
+    /// legal (paint 0 only), catalog ids must match exactly, incomplete
+    /// entries refuse with their missing deps, and paint is bounded by
+    /// the entry's `Colors` list.
+    #[test]
+    fn the_vehicle_validator_gates_picks_by_catalog() {
+        let validate = vehicle_validator(&test_catalog());
+
+        validate("", 0).unwrap();
+        assert_eq!(
+            validate("", 1).unwrap_err(),
+            "the dev car has a single paint job"
+        );
+
+        validate("vpbug", 0).unwrap();
+        validate("vpbug", 3).unwrap();
+        assert_eq!(
+            validate("vpbug", 4).unwrap_err(),
+            "paint 4 out of range: vpbug has 4 paint job(s)"
+        );
+
+        // No Colors metadata: paint 0 alone is legal.
+        validate("vpbare", 0).unwrap();
+        assert!(validate("vpbare", 1).unwrap_err().contains("out of range"));
+
+        // Unknown ids and non-canonical spellings refuse alike — the
+        // wire carries catalog ids, not menu aliases.
+        assert_eq!(
+            validate("nosuch", 0).unwrap_err(),
+            "unknown vehicle id \"nosuch\""
+        );
+        assert_eq!(
+            validate("VPBUG", 0).unwrap_err(),
+            "unknown vehicle id \"VPBUG\""
+        );
+
+        // A cataloged-but-incomplete entry refuses with the reason.
+        let err = validate("vpcab", 0).unwrap_err();
+        assert!(err.contains("incomplete"), "got {err}");
+        assert!(err.contains("geometry"), "got {err}");
+    }
+
+    /// An empty catalog still admits the dev car — a content-free host
+    /// (`mm2-host --dev-world` on an empty install) lobbies fine.
+    #[test]
+    fn the_validator_on_empty_content_admits_only_the_dev_car() {
+        let validate = vehicle_validator(&VehicleCatalog::default());
+        validate("", 0).unwrap();
+        assert!(validate("vpbug", 0).is_err());
     }
 }

@@ -1,3 +1,109 @@
+# Last iteration — F24-B.3: vehicle/paint picks on the roster, gated by
+# a consumer-supplied catalog validator (iteration 014, run
+# 20260929T174954)
+
+Implementation iteration on `ralph/night` (baseline `8aceb4c` — the
+iteration-013 docs repair; external verify green, review **pass** with
+verification gaps only, no blocking findings). One coherent slice: the
+plan's named third leg of F24-B — vehicle/paint pick + validation.
+
+## Task selection
+
+No failing gate or review finding to repair — iteration 013's review
+passed with gaps only (single-process clients, unbounded channels, no
+`SetReady` rate limit — all disclosed F24-C scope). The plan offered
+"vehicle/paint pick + validation or start/cancel"; I took the pick leg:
+it lands the roster field the F24-A remainder anticipates and the
+AC01 "choose compatible cars" surface, while start/cancel stays a
+separate leg because it needs a session-lifecycle design (who triggers
+start on a dedicated host, session generation, late-join policy).
+
+## What landed
+
+- `mm2_net::proto` — `PROTOCOL_VERSION` 1 → 2 (the roster entry's shape
+  changed). `VehiclePick{vehicle, paint}` rides `RosterEntry::pick`
+  (`Option`, `None` until picked); `SetVehicle` is the client→host pick
+  request; `VehicleRefused{reason}` is host→*that peer alone*.
+- `mm2_net::lobby` — `HostConfig::pick_validator: Option<PickValidator>`
+  (`Arc<dyn Fn(&str, u8) -> Result<(), String>>`): the wire crate stays
+  project-free, so the consumer supplies the legality check and the
+  host loop applies it on the authoritative side. A legal pick lands on
+  the slot and rebroadcasts the roster (`HostEvent::VehicleChanged`);
+  a refused one sends `VehicleRefused` to the picker only, emits
+  `HostEvent::VehicleRefused`, and leaves the roster unchanged — a bad
+  pick is a refused request, not a drop. A pick identical to the
+  current one is a no-op (no event, no broadcast) so a repeating client
+  cannot flood the lobby. A dead `VehicleRefused` write reaps the peer
+  via the shared `remove_player` disconnect discipline (factored out of
+  `broadcast`/`PeerGone`). `Client::set_vehicle`; the reader thread
+  forwards `SetVehicle` alongside `SetReady`. No validator = any
+  bounded pick accepted (a content-free transport host).
+- `mm2_app::net` — `vehicle_validator(&VehicleCatalog)`: designed
+  policy — the empty wire id is the synthetic dev car (always legal,
+  paint 0 only); a catalog pick names an exact lowercase `Ready` entry
+  (display-name aliases are menu conveniences, not wire identity);
+  `paint` is bounded by the entry's metadata `Colors` list with a
+  one-job floor — the same bound the garage menu presents, while
+  `load_vehicle`'s `paint_jobs` check stays authoritative at spawn.
+  `encode_pick`/`decode_pick` map `VehicleSelection` ↔ `VehiclePick`
+  (`id None` ↔ `""`; `paint > 255` refuses as `SessionWireError::Paint`,
+  never clamps).
+- `mm2-host` — scans the `VehicleCatalog` at startup and installs the
+  validator; the record contract gains `event=vehicle id=… vehicle="…"
+  paint=…` and `event=pick_refused id=… vehicle="…" paint=… reason="…"`.
+
+## Evidence
+
+- `mm2_net` 34 → 39, real loopback sockets: a pick lands on the roster
+  for the picker, incumbents and a post-pick newcomer; a refused pick
+  reaches the picker alone as `VehicleRefused` with the roster
+  untouched and the client still alive; an identical re-pick produces
+  neither event nor broadcast (deterministic leg: dup-pick then
+  `SetReady` yields exactly the ready roster); no-validator hosts
+  accept any bounded pick; a client sending `VehicleRefused` is a
+  host-only-message violation dropped `Malformed`.
+- `mm2_app::net` 7 → 10: pick codec round-trips (catalog pick, dev car,
+  `paint 300` refused), the catalog validator policy (dev car paint
+  bound, exact-id rule, `Ready` gating with the missing-deps reason,
+  `Colors`-list paint bound + no-`Colors` floor, non-canonical
+  spellings refused), and the empty-catalog dev-car-only shape.
+- `tests/net_host.rs` — against the separate `mm2-host` process:
+  alice's dev-car pick (`""`) lands (`event=vehicle`) and bob sees it
+  on the roster snapshot; bob's `vpbug` pick on the empty-install host
+  is refused (`event=pick_refused`, `VehicleRefused` to bob alone).
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean (after one rustfmt reflow).
+- `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --locked --workspace` — green; mm2_net 39/39, mm2_app
+  `net::` 10/10, `net_host` 1/1. The run was slow (~40 min) because
+  every test-binary exec pays the intermittent `_dyld_start`
+  security-evaluation stall on this machine (first noted in iter 012);
+  two earlier `net_host` runs failed that way — the mm2-host child
+  never exec'd inside the 15 s wait — then passed in 1.85 s once the
+  stall cleared. Environment flakiness, not a code defect.
+
+## Classification / remaining open items
+
+- Implementation choice throughout (wire fields, validator boundary,
+  no-op dedupe, paint bounds). The designed dev-car token (`""`)
+  and the `Colors`-list paint bound are recorded in
+  `docs/research/net.md`.
+- Still open F24-B scope: start/cancel (un-picked players and start
+  gating belong there — `pick: None` is a legal lobby state by design),
+  session-content join gating, late-join, the Bevy-side bridge, AC04's
+  consumer-facing error surface. The `SetReady`/`SetVehicle` rate gap
+  stands as disclosed (identical-pick dedupe covers only the cheapest
+  repeat). AC01's full topology (separate client processes), AC06's
+  LAN/Internet matrix: F24-C.
+- Verification gap carried forward: `mm2-host` exercised only with an
+  empty install + `--dev-world` (dev-car-only validator leg); no
+  retail-install run with real catalog picks is on record yet.
+
+---
+
 # Last iteration — external-review repair: the F24-B.2 ledger recorded
 # an `mm2-host` CLI and a `Host::recv` signature that never shipped
 # (iteration 013)
