@@ -896,7 +896,11 @@ fn run(
                         let _ = events.send(HostEvent::StartRefused { reason });
                     }
                     None => {
-                        generation += 1;
+                        // Saturating: at the `u64` ceiling the mint
+                        // stays monotonic rather than wrapping into a
+                        // regression the clients' never-regress clamp
+                        // would silently adopt.
+                        generation = generation.saturating_add(1);
                         // The gate guarantees `session` is `Some`.
                         let started = session.clone().unwrap();
                         phase = Phase::InSession {

@@ -234,9 +234,11 @@ impl Session {
     /// (`Menu → Loading`). Illegal from any other phase — restart goes
     /// `Unloading → Menu` first, so a session always tears down before
     /// the next begins. Bumps [`generation`](Self::generation) and
-    /// resets the session clock.
+    /// resets the session clock. The bump saturates at `u64::MAX` —
+    /// wrapping to 0 would regress the generation-keyed ids staleness
+    /// detection relies on.
     pub fn begin(&mut self, config: SessionConfig) -> Result<(), SessionError> {
-        self.begin_at(config, self.generation + 1)
+        self.begin_at(config, self.generation.saturating_add(1))
     }
 
     /// `begin` under a host-minted generation (F24-B): a joined
@@ -245,13 +247,16 @@ impl Session {
     /// the lobby's counter is the namespace owner. The wire value may
     /// only move the local counter forward: staleness detection
     /// assumes generations never regress, and a link can only ever
-    /// present the lobby's own monotonic sequence.
+    /// present the lobby's own monotonic sequence. The forward clamp
+    /// saturates at `u64::MAX` — a hostile `Start` at the ceiling pins
+    /// the counter there instead of overflowing the next bump (dev
+    /// `overflow-checks` panic) or wrapping it into a regression.
     pub fn begin_generation(
         &mut self,
         config: SessionConfig,
         generation: u64,
     ) -> Result<(), SessionError> {
-        self.begin_at(config, generation.max(self.generation + 1))
+        self.begin_at(config, generation.max(self.generation.saturating_add(1)))
     }
 
     fn begin_at(&mut self, config: SessionConfig, generation: u64) -> Result<(), SessionError> {

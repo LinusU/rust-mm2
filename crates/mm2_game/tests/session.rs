@@ -120,6 +120,32 @@ fn networked_authority_cannot_pause() {
 }
 
 #[test]
+fn a_u64_max_generation_never_overflows_or_regresses() {
+    // The wire generation is an unbounded u64: a hostile `Start` at
+    // `u64::MAX` must not panic the next bump (dev `overflow-checks`)
+    // nor wrap the counter to 0 — a regression would silently reuse
+    // the generation `ObjectId`/`ResultId` staleness detection keys on.
+    let mut s = Session::new();
+    s.begin_generation(SessionConfig::default(), u64::MAX)
+        .unwrap();
+    assert_eq!(s.generation(), u64::MAX, "the wire ceiling is adopted");
+    s.transition(SessionPhase::Unloading).unwrap();
+    s.transition(SessionPhase::Menu).unwrap();
+
+    s.begin(SessionConfig::default()).unwrap();
+    assert_eq!(
+        s.generation(),
+        u64::MAX,
+        "a local bump saturates at the ceiling"
+    );
+    s.transition(SessionPhase::Unloading).unwrap();
+    s.transition(SessionPhase::Menu).unwrap();
+    s.begin_generation(SessionConfig::default(), u64::MAX)
+        .unwrap();
+    assert_eq!(s.generation(), u64::MAX, "the forward clamp saturates too");
+}
+
+#[test]
 fn config_validation_rejects_bad_fields() {
     let mut s = Session::new();
     let bad_density = SessionConfig {
