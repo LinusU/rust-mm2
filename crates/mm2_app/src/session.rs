@@ -23,7 +23,9 @@
 //!   bookkeeping) and moves `Unloading → Menu`. At `Menu` a `restart`
 //!   intent calls `Session::begin` again — which flips the phase back to
 //!   `Loading` and re-runs [`load_session_world`] — while `quit` writes
-//!   `AppExit`.
+//!   `AppExit`. The restart `begin` is `Local`-authority only: under a
+//!   networked session the host's `Cancel`/`Start` owns restarts, so a
+//!   queued intent is consumed at `Menu` without minting a generation.
 //!
 //! The cycle is `Playing → Unloading → Menu → Loading → Playing`; every
 //! start goes through `Menu`, so session-owned entities are always cleaned
@@ -41,7 +43,7 @@ use mm2_game::{
     VehicleDamage, VehicleRecovery, VehicleSmoke, VehicleSparks, VehicleStuck, WorldMode,
 };
 use mm2_vehicle::{ResetVehicle, TireConditions, VehicleConfig, vehicle_bundle};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::camera::{CameraMode, ChaseCamera, FreeCamera};
 use crate::car_visual::{self, WheelMount, WheelSpin};
@@ -89,6 +91,10 @@ pub struct SessionControl {
     /// Tear down, reach `Menu`, then exit the app.
     pub quit: bool,
     /// Tear down, then `begin` a new session with the same config.
+    /// `Local`-authority sessions only — a networked session's
+    /// restarts are the host's `Cancel`/`Start`, so `drive_session`
+    /// consumes a non-`Local` restart intent at `Menu` without
+    /// beginning anything.
     pub restart: bool,
     /// `Playing → Paused` (F17-B). Only ever set for a live session
     /// whose authority allows pause — `session_control_input` falls
@@ -208,7 +214,9 @@ impl MenuExit<'_> {
 ///   or a [`LobbyLink`](crate::net::LobbyLink) exists, in which case
 ///   that surface owns exit and a quit here just returns to it;
 ///   `restart` calls `begin` with the retained config, flipping the
-///   phase to `Loading` so the spawn system builds the next session.
+///   phase to `Loading` so the spawn system builds the next session —
+///   `Local` authority only, since a networked session's restarts are
+///   the host's `Cancel`/`Start`, not a locally minted generation.
 /// - `Playing`: a queued `pause` intent (Esc/Start or `--pause`) moves
 ///   the session to `Paused` — the pause overlay's Resume row and
 ///   `pause_input`'s Esc bring it straight back.
@@ -337,13 +345,30 @@ pub fn drive_session(
             } else if control.restart {
                 control.restart = false;
                 match session.config().cloned() {
-                    Some(config) => {
+                    Some(config) if config.authority == SessionAuthority::Local => {
                         if let Err(e) = session.begin(config) {
                             // The retained config already validated once;
                             // a failure here means the session state is
                             // inconsistent — log and stay at Menu.
                             error!(error = %e, "session restart rejected");
                         }
+                    }
+                    // The wire owns a networked session's restarts —
+                    // the host's `Cancel`/`Start` pair — the same
+                    // `Local`-authority predicate the `F4` binding
+                    // applies at intent time. Producers the binding
+                    // does not cover (the results Restart row, a
+                    // Blitz/Checkpoint `RestartEvent` disabled
+                    // outcome, `--restart`) still queue the intent and
+                    // teardown has already landed the client at `Menu`;
+                    // a local `begin` here would mint a generation the
+                    // lobby never issued and diverge the prediction
+                    // from lobby authority until the next wire message.
+                    Some(config) => {
+                        debug!(
+                            authority = ?config.authority,
+                            "restart intent consumed without a begin — the wire owns this session's restarts"
+                        );
                     }
                     None => warn!("restart requested with no previous session"),
                 }

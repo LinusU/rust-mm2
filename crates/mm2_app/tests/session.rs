@@ -406,6 +406,72 @@ fn esc_quits_when_the_authority_cannot_pause() {
     assert_eq!(pause_rows(&mut app), 0, "no pause overlay for a host");
 }
 
+/// The `F4` binding is not the only `control.restart` producer — the
+/// results screen's Restart row (`results_input`) and a Blitz/
+/// Checkpoint `RestartEvent` disabled outcome queue the same intent.
+/// Under a networked authority the wire owns restarts (the host's
+/// `Cancel`/`Start`), so the intent must still tear the predicted
+/// session down to `Menu` — the lobby's waiting state — but never
+/// mint a local `begin`: no new generation, the retained config keeps
+/// its authority, and nothing exits.
+#[test]
+fn a_networked_restart_returns_to_menu_without_a_local_begin() {
+    for authority in [SessionAuthority::Remote, SessionAuthority::Host] {
+        let mut app = test_app(
+            SessionConfig {
+                authority,
+                ..SessionConfig::default()
+            },
+            1.0 / 60.0,
+        );
+        app.update();
+        assert!(phase_is(&mut app, SessionPhase::Playing));
+        let generation = app.world().resource::<Session>().generation();
+
+        // The real producer path: `Results` → focus "Restart race" →
+        // Enter queues `control.restart` — not a planted flag.
+        app.world_mut()
+            .resource_mut::<Session>()
+            .transition(SessionPhase::Results)
+            .unwrap();
+        press_key(&mut app, KeyCode::ArrowDown);
+        press_key(&mut app, KeyCode::Enter);
+        assert!(
+            app.world().resource::<SessionControl>().restart,
+            "the Restart row queued the intent ({authority:?})"
+        );
+        assert!(
+            run_until(&mut app, 12, |a| phase_is(a, SessionPhase::Menu)),
+            "the restart intent should still tear down to Menu ({authority:?}): {:?}",
+            app.world().resource::<Session>().phase()
+        );
+        // A few settled updates — no begin may fire late either.
+        for _ in 0..4 {
+            app.update();
+        }
+        let session = app.world().resource::<Session>();
+        assert_eq!(
+            session.phase(),
+            &SessionPhase::Menu,
+            "no local begin under {authority:?}"
+        );
+        assert_eq!(
+            session.generation(),
+            generation,
+            "no generation was minted ({authority:?})"
+        );
+        assert_eq!(session.config().unwrap().authority, authority);
+        assert!(
+            !app.world().resource::<SessionControl>().restart,
+            "the intent was consumed, not left dangling"
+        );
+        assert!(
+            app.should_exit().is_none(),
+            "no exit either — the lobby owns what comes next"
+        );
+    }
+}
+
 /// The `--pause` dev override pauses the first `Playing` frame — how a
 /// `--frames`/`--screenshot` capture (live input frozen) renders the
 /// overlay. It is a one-shot: a resume afterwards stays resumed.
