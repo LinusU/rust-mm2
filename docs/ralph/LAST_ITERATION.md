@@ -1,3 +1,112 @@
+# Last iteration — F25-A.2: shared seat/grid assignment — the lobby's
+# humans take the authored start slots in wire-id order (iteration 023,
+# run 20261001T195454-62282 continued)
+
+Implementation iteration on `ralph/night` (baseline `8a081ca` — the
+F25-A.1 candidate; external verify + review pass with gaps only). One
+coherent slice: remote participants stop staging at a designed lateral
+offset — every networked human resolves a deterministic seat on the
+session's authored start grid, and MP-4 keeps AI opponents out of
+networked races entirely.
+
+## Task selection
+
+F25-A.1's review left spawn-grid assignment as the named A-scope
+remainder that was ready (own-seat prediction, outcome replication and
+impairment testing are deliberately later). During design the rules
+ledger settled one open question: MP-4 is *documented* — "No ambient
+traffic, cops or AI opponents in MP races; humans replace AI
+opponents." The AI-shift design was dropped in favour of a `Local`-
+authority gate, which is also the only consistent behavior while
+opponents are unreplicated (each process would otherwise simulate its
+own divergent AI set).
+
+## What landed
+
+- `mm2_app::netdrive` — the shared seat map. `seat_ids` ranks the
+  lobby's wire ids ascending: roster entries + our own id + wire id 0
+  while a host seat exists (`HostLink` on a hosted app, the
+  `Start`-carried `host_pick` on a joined client; a dedicated
+  `mm2-host` seats nobody, so its first roster member takes seat 0).
+  `seat_pose` resolves a seat identically on every process: authored
+  `start_slots[seat]` verbatim — authored `yaw_deg`, or the
+  `course_yaw` facing on the `a = 0` no-heading sentinel (WPT-4) —
+  and past the grid a designed `SEAT_STAGE_GAP` fan-out continues off
+  the last row's right vector; a race-less session fans off the roam
+  base. `apply_seat` moves a `SpawnPoint` to a seat; `NetSeats` is the
+  `SystemParam` the session load reads its own seat through.
+  `remote_spawn_pose` and `REMOTE_SPAWN_GAP` are gone — the reconcile
+  now feeds each remote `NetPlayer` through the same `seat_pose`.
+- `mm2_app::session` — `SpawnPoint` gains `origin`/`origin_yaw`, the
+  pre-seat roam base the fan-out anchors on (the authored slot grid is
+  the anchor when a race ships one — a per-process `--spawn` override
+  must never enter the shared map). `load_session_world` captures the
+  base, seats the local car via `seats.self_seat()` (solo seats 0, the
+  slot it took before), then still applies `--spawn` last as the dev
+  override it always was. MP-4: `spawn_opponents` is gated on
+  `SessionAuthority::Local` — `Host` and `Remote` event sessions field
+  the lobby's humans only.
+- `mm2_app::opponents` — `spawn_opponents` docs record the MP-4
+  boundary; the `index + 1` slot rule is single-player-only now.
+
+## Evidence
+
+Synthetic tests:
+
+- `netdrive` units +5 — seat-id ranking (joined-client, hosted-app,
+  dedicated-host and self-dedup legs), authored-row order + `a = 0`
+  course-facing fallback + grid-exhaustion fan-out + no-race fan
+  (`seat_pose` legs), `apply_seat` preserves the roam-base origin.
+- `event` +1 — `a_joined_client_seats_the_local_car_on_its_grid_row`:
+  a real loopback `Host` + joined `LobbyLink` mint wire id 1; the
+  `Remote`-authority `load_session_world` puts the local car on the
+  authored grid's row 1 (position + verbatim 90° facing), not row 0.
+- `opponents` +1 — `a_networked_event_spawns_no_ai_opponents`: the
+  authored two-driver roster that spawns under `Local` spawns zero
+  `OpponentDriver`s under both `Host` and `Remote` authority while
+  the local car still loads.
+- `net_app` — both data-plane legs now assert the seat pose: the
+  host's remote car lands one `SEAT_STAGE_GAP` right of the roam base
+  (wire id 1 → seat 1) and the client's host copy lands on the base
+  itself (wire id 0 → seat 0) — the same mapping resolved on both
+  sides of the wire.
+- All `SpawnPoint` fixture literals across 20+ test files converted to
+  `SpawnPoint::new` (origin = position for pre-load placeholders);
+  the trailer fixture uses struct-update syntax.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --workspace
+--all-targets --all-features -- -D warnings` clean; `cargo test
+--workspace` — recorded in the commit message / verify log.
+
+## Classification
+
+- Grid row consumption and the `a`/`yaw` conventions ride the WPT-3 /
+  WPT-4 evidence; the original's row→participant mapping stays
+  UNK-17 — wire-id rank order is designed.
+- MP-4's no-AI gate is documented original behavior (help:
+  Multiplayer Games); applying it is original requirement, not
+  designed policy.
+- The fan-out spacing and anchor are designed (`SEAT_STAGE_GAP`); no
+  original equivalent is claimed.
+
+## Remaining open items
+
+- F25-A stays active: own-seat prediction/reconciliation, outcome
+  replication (damage/stuck/recovery/results — the
+  `PlayerControl::Remote` skips stay deliberate), input rate limiting
+  beyond latest-wins, interpolation tuning.
+- All evidence is loopback/synthetic; no retail-install leg this
+  slice and no rendered observation — grid placement was verified at
+  the ECS level.
+- Ambient traffic still loads under networked authority (MP-4 also
+  removes it — the ambient traffic path is a separate gate, left for
+  a follow-up slice since divergent parked/lane cars are at least
+  non-interactive today).
+
+---
+
 # Last iteration — F25-A.1: host-authoritative remote driving transport
 # — inputs up, host-side remote sim, snapshots down (iteration 022,
 # run 20261001T195454-62282 continued)

@@ -395,11 +395,7 @@ fn run_headless(
         // F22-A.3: the HUD master gate — `--no-hud` starts it off like
         // the windowed app; the `hud=` field reports the off state.
         .insert_resource(crate::hud::HudVisible(!dev.no_hud))
-        .insert_resource(session::SpawnPoint {
-            position: Vec3::new(0.0, 1.5, 0.0),
-            yaw: 0.0,
-            trailers: Vec::new(),
-        })
+        .insert_resource(session::SpawnPoint::new(Vec3::new(0.0, 1.5, 0.0), 0.0))
         .insert_resource(Mm2Vfs(vfs))
         .insert_resource(session::TunedVehicle(vehicle_config.clone()))
         .insert_resource(car)

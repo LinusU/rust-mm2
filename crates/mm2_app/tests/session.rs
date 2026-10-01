@@ -52,11 +52,7 @@ fn test_app(config: SessionConfig, frame_secs: f64) -> App {
             def: None,
             paint: 0,
         })
-        .insert_resource(SpawnPoint {
-            position: Vec3::new(0.0, 1.5, 0.0),
-            yaw: 0.0,
-            trailers: Vec::new(),
-        })
+        .insert_resource(SpawnPoint::new(Vec3::new(0.0, 1.5, 0.0), 0.0))
         .insert_resource(CameraMode::Chase)
         // `load_session_world` fills the real asset stores; without render
         // plugins the stores are inert collections — enough to spawn.
@@ -1391,9 +1387,8 @@ fn spawn_resets_reseats_the_whole_rig() {
     let player = world.spawn_empty().id();
     let trailer = world.spawn_empty().id();
     let spawn = SpawnPoint {
-        position: Vec3::new(10.0, 1.0, -5.0),
-        yaw: std::f32::consts::FRAC_PI_2,
         trailers: vec![(trailer, Vec3::new(0.0, -0.5, 8.0))],
+        ..SpawnPoint::new(Vec3::new(10.0, 1.0, -5.0), std::f32::consts::FRAC_PI_2)
     };
     let msgs = session::spawn_resets(&spawn, Some(player));
     assert_eq!(msgs.len(), 2, "player + one trailer");

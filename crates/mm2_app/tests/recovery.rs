@@ -75,11 +75,7 @@ fn recovery_app(car_pos: Vec3) -> (App, Entity, ObjectId) {
         .insert_resource(Gravity(Vec3::NEG_Y * 9.81))
         .insert_resource(session)
         .insert_resource(TireConditions::default())
-        .insert_resource(SpawnPoint {
-            position: SPAWN,
-            yaw: SPAWN_YAW,
-            trailers: Vec::new(),
-        })
+        .insert_resource(SpawnPoint::new(SPAWN, SPAWN_YAW))
         .add_plugins(TransformPlugin)
         .add_plugins(VehiclePlugin)
         .add_message::<ImpactEvent>()

@@ -104,11 +104,7 @@ fn break_app(
         .insert_resource(session)
         .insert_resource(TireConditions::default())
         .insert_resource(pool)
-        .insert_resource(SpawnPoint {
-            position: SPAWN,
-            yaw: SPAWN_YAW,
-            trailers: Vec::new(),
-        })
+        .insert_resource(SpawnPoint::new(SPAWN, SPAWN_YAW))
         .add_plugins(TransformPlugin)
         .add_plugins(VehiclePlugin)
         .add_message::<ImpactEvent>()

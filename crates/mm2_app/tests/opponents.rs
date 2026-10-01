@@ -25,8 +25,9 @@ use mm2_game::{
     Densities, Difficulty, EventRef, EventTableKind, ImpactEvent, Mm2Vfs, ObjectIdentity,
     OpponentRoute, OpponentRoutePoint, OpponentSpec, ParticipantState, Player, PlayerControl,
     PlayerVehicle, RaceCustomization, RaceDefinition, RaceProgress, RaceStarted, RaceState,
-    ResultLedger, RouteGateLine, Session, SessionConditions, SessionConfig, SessionCustomization,
-    SessionEntity, SessionMode, SessionPhase, advance_session_tick, despawn_session_entities,
+    ResultLedger, RouteGateLine, Session, SessionAuthority, SessionConditions, SessionConfig,
+    SessionCustomization, SessionEntity, SessionMode, SessionPhase, advance_session_tick,
+    despawn_session_entities,
 };
 use mm2_vehicle::{Vehicle, VehicleConfig, VehicleInput, VehiclePlugin};
 
@@ -381,11 +382,7 @@ fn event_app(config: SessionConfig, vfs: Vfs) -> App {
         .init_resource::<Assets<Image>>()
         .init_resource::<Assets<StandardMaterial>>()
         .insert_resource(camera::CameraMode::Chase)
-        .insert_resource(session::SpawnPoint {
-            position: Vec3::new(0.0, 1.5, 0.0),
-            yaw: 0.0,
-            trailers: Vec::new(),
-        })
+        .insert_resource(session::SpawnPoint::new(Vec3::new(0.0, 1.5, 0.0), 0.0))
         .insert_resource(Mm2Vfs(vfs))
         .insert_resource(session::TunedVehicle(VehicleConfig::default()))
         .insert_resource(session::SelectedCar {
@@ -776,6 +773,37 @@ fn roster_spawns_distinct_ai_participants() {
         (p.x - 70.0).abs() < 2.0 && (p.z - 146.0).abs() < 2.0,
         "vpheavy at its route anchor: {p:?}"
     );
+}
+
+/// MP-4 (documented): a networked race fields no AI opponents — the
+/// lobby's humans take the grid slots instead. The same authored
+/// roster that spawns two drivers under `Local` authority spawns none
+/// under either network authority — and a per-process unreplicated AI
+/// set would diverge anyway, so the gate is also the only consistent
+/// behavior until a slice replicates opponents.
+#[test]
+fn a_networked_event_spawns_no_ai_opponents() {
+    for authority in [SessionAuthority::Host, SessionAuthority::Remote] {
+        let tmp = roster_install("", &[]);
+        let config = SessionConfig {
+            authority,
+            ..event_config()
+        };
+        let mut app = event_app(config, vfs_of(tmp.path()));
+        app.update();
+
+        assert_eq!(phase(&app), SessionPhase::Countdown, "{authority:?}");
+        assert!(
+            opponents(&mut app).is_empty(),
+            "{authority:?}: MP-4 — humans replace the authored roster"
+        );
+        // The local participant still loads onto the grid.
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&Player, With<PlayerVehicle>>();
+        let player = q.single(app.world()).expect("the local car");
+        assert_eq!(player.control, PlayerControl::Local);
+    }
 }
 
 /// The authored staging heading reaches the real spawn: `vpt`'s row-0

@@ -338,11 +338,7 @@ fn test_app(
         .init_resource::<Assets<Image>>()
         .init_resource::<Assets<StandardMaterial>>()
         .insert_resource(CameraMode::Chase)
-        .insert_resource(SpawnPoint {
-            position: Vec3::new(0.0, 1.5, 0.0),
-            yaw: 0.0,
-            trailers: Vec::new(),
-        })
+        .insert_resource(SpawnPoint::new(Vec3::new(0.0, 1.5, 0.0), 0.0))
         .insert_resource(Mm2Vfs(vfs))
         .insert_resource(TunedVehicle(VehicleConfig::default()))
         .insert_resource(car)

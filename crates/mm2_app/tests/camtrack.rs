@@ -436,9 +436,8 @@ fn own_trailer_is_not_an_occluder() {
         ))
         .id();
     app.insert_resource(SpawnPoint {
-        position: Vec3::ZERO,
-        yaw: 0.0,
         trailers: vec![(trailer, Vec3::new(0.0, -0.2, 8.0))],
+        ..SpawnPoint::new(Vec3::ZERO, 0.0)
     });
     let cam = spawn_chase(
         &mut app,
@@ -474,11 +473,7 @@ fn other_trailer_still_occludes() {
         Transform::from_xyz(0.0, 2.0, 5.0),
     ));
     // SpawnPoint exists but lists no trailer for this entity.
-    app.insert_resource(SpawnPoint {
-        position: Vec3::ZERO,
-        yaw: 0.0,
-        trailers: Vec::new(),
-    });
+    app.insert_resource(SpawnPoint::new(Vec3::ZERO, 0.0));
     let cam = spawn_chase(
         &mut app,
         ChaseCamera {

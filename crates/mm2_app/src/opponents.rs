@@ -685,6 +685,12 @@ pub fn driving_route(
 /// together. A vehicle that fails to load is warned and its authored
 /// slot skipped; the roster's own issue list is untouched. Returns the
 /// number spawned.
+///
+/// Single-player only: MP-4 (documented) removes AI opponents from
+/// networked races — the lobby's humans take the grid instead — so the
+/// `load_session_world` caller gates this on `SessionAuthority::Local`.
+/// The `index + 1` slot rule below is therefore always relative to a
+/// sole human at slot 0.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_opponents(
     commands: &mut Commands,

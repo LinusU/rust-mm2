@@ -48,17 +48,38 @@ use tracing::{debug, error, info, warn};
 use crate::camera::{CameraMode, ChaseCamera, FreeCamera};
 use crate::car_visual;
 use crate::contracts::ImpactFilter;
-use crate::{city, dev_world, opponents, race, scripted};
+use crate::{city, dev_world, netdrive, opponents, race, scripted};
 
-/// Where the player vehicle (re)spawns. `trailers` holds each spawned
-/// trailer's entity plus its car-space rest offset so a reset can place it
-/// back behind the car instead of on top of it. Session-scoped: teardown
-/// clears `trailers`, and the next session's spawn rewrites position/yaw.
+/// Where the player vehicle (re)spawns. `origin`/`origin_yaw` are the
+/// pre-seat roam base — the world/authored pose before this
+/// participant's grid seat applied (`position`/`yaw` carry the seated
+/// pose; identical to the origin in a solo session). Network seat
+/// resolution anchors on the origin, never on another participant's
+/// slot (F25-A.2). `trailers` holds each spawned trailer's entity plus
+/// its car-space rest offset so a reset can place it back behind the
+/// car instead of on top of it. Session-scoped: teardown clears
+/// `trailers`, and the next session's spawn rewrites the poses.
 #[derive(Resource)]
 pub struct SpawnPoint {
     pub position: Vec3,
     pub yaw: f32,
+    pub origin: Vec3,
+    pub origin_yaw: f32,
     pub trailers: Vec<(Entity, Vec3)>,
+}
+
+impl SpawnPoint {
+    /// A spawn whose seated pose and roam base are the same point —
+    /// the app's pre-load placeholder and every test fixture.
+    pub fn new(position: Vec3, yaw: f32) -> Self {
+        Self {
+            position,
+            yaw,
+            origin: position,
+            origin_yaw: yaw,
+            trailers: Vec::new(),
+        }
+    }
 }
 
 /// The imported stock vehicle selected by `--car` or the deterministic
@@ -534,6 +555,7 @@ pub fn load_session_world(
     selected: Res<SelectedCar>,
     cam_mode: Res<CameraMode>,
     mut spawn: ResMut<SpawnPoint>,
+    seats: netdrive::NetSeats,
     mut active_profile: Option<ResMut<crate::profile::ActiveProfile>>,
     mut note: Option<ResMut<SessionNote>>,
 ) {
@@ -626,10 +648,14 @@ pub fn load_session_world(
             }
         }
     }
+    // The roam base the world authored — kept as the seat map's anchor
+    // while `position`/`yaw` take this participant's grid seat below.
+    spawn.origin = spawn.position;
+    spawn.origin_yaw = spawn.yaw;
     // Event mode: resolve the catalog event into the shared race
     // definition before the session is declared Ready. An event that
     // cannot load fails the session — it never silently cruises. The
-    // authored player slot replaces the world's roam spawn.
+    // authored grid seats every participant below.
     let mut event_race: Option<(
         RaceDefinition,
         mm2_game::OpponentRoster,
@@ -661,26 +687,6 @@ pub fn load_session_world(
                         opponents_clamped = applied.opponents_clamped,
                         "race-shape picks applied"
                     );
-                }
-                // The player slot overrides the world's roam spawn; an
-                // event without slots keeps the roam spawn.
-                if let Some(slot) = def.start_slots.get(mm2_content::PLAYER_SLOT) {
-                    spawn.position = slot.position;
-                    // `RaceStart.yaw_deg` is already the vehicle-yaw
-                    // convention — forward is (−sin a, −cos a) in XZ,
-                    // exactly what `Quat::from_rotation_y` produces for
-                    // local −Z forward. The authored `_strtpnts` `a`
-                    // column measures this way (retail `cir1` ≈ +92°
-                    // faces the −X course); it is *not* the waypoint
-                    // `a` bearing — the two sit 180° apart (UNK-16).
-                    // `None` means the record authored no heading
-                    // (`cir6_strtpnts`' all-zero column): fall back to
-                    // the course facing, not a verbatim −Z.
-                    spawn.yaw = slot
-                        .yaw_deg
-                        .map(f32::to_radians)
-                        .or_else(|| def.course_yaw(slot.position))
-                        .unwrap_or(spawn.yaw);
                 }
                 info!(
                     event = %format!("{:?}[{}]", event_ref.table, event_ref.index),
@@ -732,6 +738,20 @@ pub fn load_session_world(
             }
         }
     }
+    // F25-A.2: the lobby's humans share the event's authored grid —
+    // the local participant's seat resolves through the same
+    // `seat_pose` the remote reconcile applies (`start_slots[seat]`,
+    // authored `yaw_deg` or the derived course facing — `a` is the
+    // vehicle-yaw convention, `None`/`a = 0` is no heading, WPT-4).
+    // Solo — no link — seats 0, the slot the player took before; a
+    // seat past the authored grid, or no grid at all, fans off the
+    // roam `origin` (designed; the original's row→participant mapping
+    // is UNK-17).
+    netdrive::apply_seat(
+        &mut spawn,
+        event_race.as_ref().map(|(def, ..)| def),
+        seats.self_seat(),
+    );
     // The session's effective weather/time-of-day — resolved once so
     // the environment preset (F18-A.2) and the surface-audio variant
     // (F07-B.8) read the same pick: player customization > authored
@@ -1417,20 +1437,27 @@ pub fn load_session_world(
             }
             // F15-A.2: the authored opponent lineup spawns as real
             // participants — own vehicles, own routes, AI control.
-            opponents::spawn_opponents(
-                &mut commands,
-                &vfs.0,
-                &mut assets.meshes,
-                &mut assets.images,
-                &mut assets.materials,
-                &roster,
-                &def,
-                owner,
-                &mut session,
-                spawn.position,
-                spawn.yaw,
-                nav,
-            );
+            // MP-4 (documented): a networked race fields none of them —
+            // the lobby's humans replace the roster. A remote-side
+            // spawn would be worse than absent anyway: nothing
+            // replicates opponents yet, so each process would diverge
+            // its own set.
+            if config.authority == SessionAuthority::Local {
+                opponents::spawn_opponents(
+                    &mut commands,
+                    &vfs.0,
+                    &mut assets.meshes,
+                    &mut assets.images,
+                    &mut assets.materials,
+                    &roster,
+                    &def,
+                    owner,
+                    &mut session,
+                    spawn.position,
+                    spawn.yaw,
+                    nav,
+                );
+            }
             race::spawn_checkpoint_markers(
                 &mut commands,
                 &mut assets.meshes,

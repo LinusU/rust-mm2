@@ -105,11 +105,10 @@ fn results_app(
         .insert_resource(Gravity(Vec3::NEG_Y * 9.81))
         .insert_resource(session)
         .insert_resource(RaceState::new(def, generation))
-        .insert_resource(mm2_app::session::SpawnPoint {
-            position: Vec3::new(0.0, 1.5, 0.0),
-            yaw: 0.0,
-            trailers: Vec::new(),
-        })
+        .insert_resource(mm2_app::session::SpawnPoint::new(
+            Vec3::new(0.0, 1.5, 0.0),
+            0.0,
+        ))
         .init_resource::<ResultLedger>()
         .init_resource::<SessionControl>()
         .init_resource::<SessionNote>()

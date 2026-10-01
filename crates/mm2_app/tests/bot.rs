@@ -148,11 +148,7 @@ fn bot_app(config: SessionConfig, vfs: Vfs) -> App {
         .init_resource::<Assets<Image>>()
         .init_resource::<Assets<StandardMaterial>>()
         .insert_resource(camera::CameraMode::Chase)
-        .insert_resource(session::SpawnPoint {
-            position: Vec3::new(0.0, 1.5, 0.0),
-            yaw: 0.0,
-            trailers: Vec::new(),
-        })
+        .insert_resource(session::SpawnPoint::new(Vec3::new(0.0, 1.5, 0.0), 0.0))
         .insert_resource(Mm2Vfs(vfs))
         .insert_resource(session::TunedVehicle(VehicleConfig::default()))
         .insert_resource(session::SelectedCar {

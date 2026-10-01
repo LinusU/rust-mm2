@@ -196,11 +196,7 @@ fn texel_app(pos: Vec3) -> (App, Entity, ObjectId, Fixture) {
         .init_resource::<SessionControl>()
         .init_resource::<Assets<Image>>()
         .init_resource::<Assets<StandardMaterial>>()
-        .insert_resource(SpawnPoint {
-            position: pos,
-            yaw: 0.0,
-            trailers: Vec::new(),
-        })
+        .insert_resource(SpawnPoint::new(pos, 0.0))
         .add_systems(FixedUpdate, advance_session_tick)
         .add_systems(
             FixedLast,

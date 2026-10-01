@@ -92,11 +92,7 @@ fn lobby_app(vfs: Vfs) -> App {
             paint: 0,
         })
         .insert_resource(TunedVehicle(VehicleConfig::default()))
-        .insert_resource(session::SpawnPoint {
-            position: Vec3::new(0.0, 1.5, 0.0),
-            yaw: 0.0,
-            trailers: Vec::new(),
-        })
+        .insert_resource(session::SpawnPoint::new(Vec3::new(0.0, 1.5, 0.0), 0.0))
         .init_resource::<mm2_app::contracts::ImpactFilter>()
         .init_resource::<mm2_app::damage::DamageReport>()
         .init_resource::<mm2_app::stuck::StuckReport>()
@@ -1597,6 +1593,19 @@ fn a_remote_players_inputs_drive_the_hosted_car() {
         assert_eq!(player.control, PlayerControl::Remote);
         assert!(role.is_authority(), "the host owns a remote car's truth");
     }
+    // F25-A.2: seats [0, 1] — the peer's wire id 1 ranks to seat 1,
+    // which a race-less dev world resolves one seat-gap right of the
+    // roam base (yaw 0 → +X), not the old fixed lateral offset.
+    {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&avian3d::prelude::Position, With<RemotePick>>();
+        let pos = q.single(app.world()).expect("the remote car").0;
+        assert!(
+            (pos.x - 4.0).abs() < 0.5 && pos.z.abs() < 0.5,
+            "seat 1 lands right of the roam base, got {pos:?}"
+        );
+    }
     assert_eq!(
         app.world().resource::<netdrive::NetDriveReport>().remotes,
         1
@@ -1755,6 +1764,19 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
             "a client never owns the host car's truth"
         );
         assert_eq!(*body, avian3d::prelude::RigidBody::Kinematic);
+    }
+    // F25-A.2's other half: seats [0, 1] — the host's wire id 0 ranks
+    // to seat 0, the roam-base pose itself, and our own id 1 is not
+    // re-spawned as a remote.
+    {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&avian3d::prelude::Position, With<RemotePick>>();
+        let pos = q.single(app.world()).expect("the host copy").0;
+        assert!(
+            pos.x.abs() < 0.5 && pos.z.abs() < 0.5,
+            "seat 0 lands on the roam base, got {pos:?}"
+        );
     }
 
     // The local car's settled input rides up — the host's mailbox sees

@@ -26,6 +26,14 @@
 //! host's snapshots include its own pose and a client knows which entry
 //! is itself.
 //!
+//! The lobby's humans share the session's start grid (F25-A.2): the
+//! seat map — wire ids sorted ascending, the seated host's 0 included
+//! — ranks every participant, and [`seat_pose`] resolves rank → pose
+//! identically on every process (authored `_strtpnts` slot while the
+//! race ships one, a designed fan-out past it). `load_session_world`
+//! puts the local car on its seat through [`NetSeats`]; this module's
+//! reconcile puts each remote car on its own.
+//!
 //! Everything here is loopback-scoped groundwork like the rest of F24/F25:
 //! no client-side prediction, no lag compensation, no damage/result
 //! replication — those are named gaps, not silent behavior.
@@ -38,8 +46,8 @@ use avian3d::prelude::{
 };
 use bevy::prelude::*;
 use mm2_game::{
-    DamageSignals, Mm2Vfs, ObjectIdentity, Player, PlayerControl, PlayerVehicle, RaceProgress,
-    RaceState, Session, SessionEntity, SessionPhase,
+    DamageSignals, Mm2Vfs, ObjectIdentity, Player, PlayerControl, PlayerVehicle, RaceDefinition,
+    RaceProgress, RaceState, Session, SessionEntity, SessionPhase,
 };
 use mm2_net::{DriveInput, Message, RemoteInputs, SnapEntry, VehiclePick};
 use mm2_vehicle::{VehicleInput, vehicle_bundle};
@@ -55,10 +63,11 @@ use crate::session::SpawnPoint;
 /// scope (one missed input window is ~8 ms; this covers ~30).
 pub const INPUT_STALE: Duration = Duration::from_millis(250);
 
-/// Lateral spacing between participants' spawn slots — grid assignment
-/// is an F25 follow-up; meanwhile remote cars stage beside the local
-/// spawn so nobody interpenetrates.
-const REMOTE_SPAWN_GAP: f32 = 4.0;
+/// Lateral spacing a designed fan-out puts between start slots a grid
+/// does not author — no `_strtpnts` record at all, or more seated
+/// humans than authored rows (designed; the authored grid itself is
+/// the product of record, UNK-17).
+const SEAT_STAGE_GAP: f32 = 4.0;
 
 /// The wire roster id this participant entity carries. `0` is the host
 /// seat — the roster never lists it, but its `Start`-carried pick and
@@ -210,12 +219,114 @@ fn self_wire(link: Option<&LobbyLink>, host: Option<&HostLink>) -> Option<u16> {
     }
 }
 
-/// A remote participant's spawn pose: the session's roam spawn shifted
-/// laterally by wire id so every peer derives the same layout.
-fn remote_spawn_pose(spawn: &SpawnPoint, wire: u16) -> (Vec3, f32) {
-    let right = Vec3::new(spawn.yaw.cos(), 0.0, -spawn.yaw.sin());
-    let pos = spawn.position + right * (REMOTE_SPAWN_GAP * (wire as f32 + 1.0));
-    (pos, spawn.yaw)
+/// The grid seat every wire id maps to — the participants the lobby
+/// seated, sorted so host and clients compute the same assignment.
+/// Wire id 0 joins the list only while a host seat exists — `hosted`
+/// is `HostLink::is_some` on a hosted app, `lobby.host_pick.is_some()`
+/// (a `Start`-carried pick) on a joined client; a dedicated `mm2-host`
+/// seats nobody, so its first roster member takes seat 0. Our own id
+/// is part of the map — the local car occupies a grid slot like every
+/// remote one.
+fn seat_ids(lobby: Option<&LobbyState>, hosted: bool, self_wire: Option<u16>) -> Vec<u16> {
+    let mut ids: Vec<u16> = lobby
+        .map(|l| l.roster.iter().map(|e| e.player_id).collect())
+        .unwrap_or_default();
+    if let Some(wire) = self_wire
+        && !ids.contains(&wire)
+    {
+        ids.push(wire);
+    }
+    // The host seat is never a roster entry — add it while the wire
+    // says one is playing.
+    if hosted || self_wire == Some(0) {
+        ids.push(0);
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// A participant's rank on the seat map — its grid slot index.
+/// `None`/unknown ids rank 0, the same slot solo play takes.
+fn seat_index(seats: &[u16], wire: Option<u16>) -> usize {
+    wire.and_then(|w| seats.iter().position(|&id| id == w))
+        .unwrap_or(0)
+}
+
+/// The pose one grid seat starts at — the resolution every process
+/// computes identically for every participant (F25-A.2):
+///
+/// - seat *i* takes `start_slots[i]` verbatim — authored position,
+///   authored `yaw_deg` or the derived course facing (`yaw_deg` `None`
+///   is the `_strtpnts` `a = 0` no-heading case, WPT-4);
+/// - past the authored grid the seats keep fanning right off the last
+///   authored slot — the grid's own spacing continued (designed);
+/// - with no definition at all (cruise, dev world) the seats fan
+///   right off the roam base the same way.
+///
+/// `base` is the session's pre-seat spawn pose — `SpawnPoint.origin`,
+/// not the already-seated `position`.
+pub fn seat_pose(race: Option<&RaceDefinition>, base: (Vec3, f32), seat: usize) -> (Vec3, f32) {
+    let (base_pos, base_yaw) = base;
+    let right = |yaw: f32| Vec3::new(yaw.cos(), 0.0, -yaw.sin());
+    if let Some(def) = race
+        && let Some(&last) = def.start_slots.last()
+    {
+        let slot = def.start_slots.get(seat).unwrap_or(&last);
+        let yaw = slot
+            .yaw_deg
+            .map(f32::to_radians)
+            .or_else(|| def.course_yaw(slot.position))
+            .unwrap_or(base_yaw);
+        let pos = if seat < def.start_slots.len() {
+            slot.position
+        } else {
+            slot.position
+                + right(yaw) * (SEAT_STAGE_GAP * (seat + 1 - def.start_slots.len()) as f32)
+        };
+        return (pos, yaw);
+    }
+    (
+        base_pos + right(base_yaw) * (SEAT_STAGE_GAP * seat as f32),
+        base_yaw,
+    )
+}
+
+/// Seat the local participant on the shared grid: `position`/`yaw`
+/// become the seat's pose while `origin`/`origin_yaw` keep the pre-seat
+/// roam base — the anchor remote seats' fan-out fallback resolves
+/// against on every process.
+pub fn apply_seat(spawn: &mut SpawnPoint, race: Option<&RaceDefinition>, seat: usize) {
+    let (pos, yaw) = seat_pose(race, (spawn.origin, spawn.origin_yaw), seat);
+    spawn.position = pos;
+    spawn.yaw = yaw;
+}
+
+/// The session-load side of the seat map: the lobby/transport resources
+/// `load_session_world` reads to learn the local participant's grid
+/// seat without declaring each link itself.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct NetSeats<'w> {
+    lobby: Option<Res<'w, LobbyState>>,
+    link: Option<Res<'w, LobbyLink>>,
+    host: Option<Res<'w, HostLink>>,
+}
+
+impl NetSeats<'_> {
+    /// The local participant's seat index — its rank on the wire-id
+    /// map; 0 while no link exists (solo play, or a link still in its
+    /// handshake — the `Start` roster lands before `load_session_world`
+    /// ever runs, so a joined client never races the map).
+    pub fn self_seat(&self) -> usize {
+        let (lobby, link, host) = (
+            self.lobby.as_deref(),
+            self.link.as_deref(),
+            self.host.as_deref(),
+        );
+        let wire = self_wire(link, host);
+        let hosted = host.is_some() || lobby.is_some_and(|l| l.host_pick.is_some());
+        seat_index(&seat_ids(lobby, hosted, wire), wire)
+    }
 }
 
 /// The remote participants the lobby state says should exist:
@@ -308,6 +419,13 @@ pub fn reconcile_remote_players(
         .collect();
     let owner = SessionEntity(session.generation());
     let role = session.authority_role();
+    // The shared seat map — every remote's grid pose resolves through
+    // the same function `load_session_world` seated the local car with.
+    let seats = seat_ids(
+        Some(&lobby),
+        host.is_some() || lobby.host_pick.is_some(),
+        Some(self_wire),
+    );
     let mut spawned_now = 0usize;
     for (wire, pick) in desired {
         if present.contains_key(&wire) {
@@ -318,6 +436,7 @@ pub fn reconcile_remote_players(
             &vfs.0,
             &mut session,
             race.as_deref(),
+            &seats,
             &spawn,
             &mut meshes,
             &mut images,
@@ -347,6 +466,7 @@ fn spawn_remote(
     vfs: &mm2_assets::Vfs,
     session: &mut Session,
     race: Option<&RaceState>,
+    seats: &[u16],
     spawn: &SpawnPoint,
     meshes: &mut Assets<Mesh>,
     images: &mut Assets<Image>,
@@ -374,7 +494,13 @@ fn spawn_remote(
         }
     };
     let cfg = def.as_ref().map(|d| d.config.clone()).unwrap_or_default();
-    let (mut pos, yaw) = remote_spawn_pose(spawn, wire);
+    // The seat map's slot: an authored grid row, or the designed
+    // fan-out past it — identical on host and clients (F25-A.2).
+    let (mut pos, yaw) = seat_pose(
+        race.map(|r| &r.definition),
+        (spawn.origin, spawn.origin_yaw),
+        seat_index(seats, Some(wire)),
+    );
     // The same hull clearance every participant spawn applies.
     let hull_min_y = cfg
         .collider_points
@@ -731,5 +857,158 @@ mod tests {
             std::f32::consts::FRAC_1_SQRT_2,
         ]);
         assert!((q.length() - 1.0).abs() < 1e-4);
+    }
+
+    fn roster_entry(id: u16) -> mm2_net::RosterEntry {
+        mm2_net::RosterEntry {
+            player_id: id,
+            driver: format!("p{id}"),
+            build: String::new(),
+            ready: true,
+            pick: Some(VehiclePick {
+                vehicle: "vpbug".into(),
+                paint: 0,
+            }),
+        }
+    }
+
+    /// A `RaceDefinition` carrying just enough for the `seat_pose`
+    /// legs — authored slots plus one course-defining gate 200 m out
+    /// on −Z, so a slot at the origin resolves `course_yaw` to 0
+    /// exactly (`atan2(-0, 200)`).
+    fn grid_def(slots: &[(f32, f32, Option<f32>)]) -> RaceDefinition {
+        RaceDefinition {
+            checkpoints: vec![mm2_game::Checkpoint {
+                center: Vec3::new(0.0, 0.0, -200.0),
+                radius: 15.0,
+                height: mm2_game::DEFAULT_CHECKPOINT_HEIGHT,
+                heading_deg: 0.0,
+                require_direction: false,
+            }],
+            finish: None,
+            rule: mm2_game::CheckpointRule::AnyOrder,
+            laps: 0,
+            time_limit_ticks: None,
+            params: mm2_game::EventParams::default(),
+            countdown_ticks: 1,
+            start_slots: slots
+                .iter()
+                .map(|&(x, z, yaw_deg)| mm2_game::RaceStart {
+                    position: Vec3::new(x, 0.0, z),
+                    yaw_deg,
+                })
+                .collect(),
+        }
+    }
+
+    /// The seat map is the lobby's wire ids ranked ascending — the same
+    /// list on every process — with the host seat in only while a host
+    /// is playing, and our own id included once.
+    #[test]
+    fn seat_ids_rank_the_lobby_deterministically() {
+        let mut lobby = LobbyState {
+            roster: vec![roster_entry(3), roster_entry(1)],
+            host_pick: Some(roster_entry(0).pick.unwrap()),
+            ..LobbyState::default()
+        };
+
+        // A joined client's view: self 2 on the roster view plus the
+        // host seat the `Start` pick announced → 0 ranks first.
+        assert_eq!(
+            seat_ids(Some(&lobby), true, Some(2)),
+            vec![0, 1, 2, 3],
+            "seats sort by wire id, self deduped against the roster"
+        );
+
+        // A hosted app's view: self 0, remotes on the roster.
+        assert_eq!(seat_ids(Some(&lobby), true, Some(0)), vec![0, 1, 3]);
+
+        // A dedicated-host client's view: no seat 0 anywhere, so the
+        // first roster member takes seat 0's slot.
+        lobby.host_pick = None;
+        assert_eq!(seat_ids(Some(&lobby), false, Some(2)), vec![1, 2, 3]);
+
+        // Solo — no lobby at all — is one seat.
+        assert_eq!(seat_ids(None, false, None), Vec::<u16>::new());
+        assert_eq!(seat_index(&[], None), 0);
+    }
+
+    /// Each seat consumes one authored `_strtpnts` row in order; a slot
+    /// carrying the authored "no heading" sentinel resolves to the
+    /// course-facing yaw instead of verbatim 0.
+    #[test]
+    fn seat_pose_takes_authored_slots_in_order() {
+        let def = grid_def(&[(10.0, 0.0, Some(90.0)), (0.0, 0.0, None)]);
+        // A non-zero base yaw — seat 1 falling back to it (instead of
+        // the course facing) would fail the assertion below.
+        let base = (Vec3::ZERO, 0.7);
+        // Seat 0 gets row 0 verbatim — position and authored yaw.
+        let (p0, y0) = seat_pose(Some(&def), base, 0);
+        assert_eq!(p0, Vec3::new(10.0, 0.0, 0.0));
+        assert!((y0 - 90f32.to_radians()).abs() < 1e-4);
+        // Seat 1's `None` yaw resolves the course facing — the gate
+        // sits −Z of the origin slot → `atan2(-0, 200)` = 0, not the
+        // base yaw and not a verbatim 0 row read.
+        let (p1, y1) = seat_pose(Some(&def), base, 1);
+        assert_eq!(p1, Vec3::ZERO);
+        assert!(y1.abs() < 1e-4, "course-facing yaw, got {y1}");
+    }
+
+    /// Grid exhaustion fans the extra seats out on the last slot's
+    /// right — deterministic, unbounded by the authored row count.
+    #[test]
+    fn seat_pose_fans_out_past_the_grid() {
+        let def = grid_def(&[(10.0, 0.0, Some(90.0))]);
+        let (p, yaw) = seat_pose(Some(&def), (Vec3::ZERO, 0.0), 2);
+        // Seat 2 = the one-row grid's last slot + two seat-gaps along
+        // its right vector.
+        let yaw90 = 90f32.to_radians();
+        let right = Vec3::new(yaw90.cos(), 0.0, -yaw90.sin());
+        let expect = Vec3::new(10.0, 0.0, 0.0) + right * SEAT_STAGE_GAP * 2.0;
+        assert!((p - expect).length() < 1e-3);
+        assert!((yaw - yaw90).abs() < 1e-4);
+
+        // An empty grid treats the base pose as the anchor — seat 1
+        // lands one gap right of it, facing the base yaw.
+        let empty = grid_def(&[]);
+        let (p, yaw) = seat_pose(
+            Some(&empty),
+            (Vec3::new(5.0, 0.0, 5.0), std::f32::consts::PI),
+            1,
+        );
+        let right = Vec3::new(std::f32::consts::PI.cos(), 0.0, -std::f32::consts::PI.sin());
+        assert!((p - (Vec3::new(5.0, 0.0, 5.0) + right * SEAT_STAGE_GAP)).length() < 1e-3);
+        assert_eq!(yaw, std::f32::consts::PI);
+    }
+
+    /// Dev worlds carry no race at all — seats fan out on the spawn
+    /// base exactly like an empty grid does.
+    #[test]
+    fn seat_pose_without_a_race_fans_off_the_base() {
+        let base = (Vec3::new(0.0, 1.5, 0.0), 0.0);
+        assert_eq!(seat_pose(None, base, 0), base);
+        let (p, yaw) = seat_pose(None, base, 1);
+        // Yaw 0 → forward (0,0,-1), right (1,0,0).
+        assert!((p - Vec3::new(SEAT_STAGE_GAP, 1.5, 0.0)).length() < 1e-3);
+        assert_eq!(yaw, 0.0);
+    }
+
+    /// `apply_seat` writes the resolved pose while keeping the base
+    /// origin — the pole anchor `spawn_pose`'s AI fallback still needs.
+    #[test]
+    fn apply_seat_moves_the_spawn_but_keeps_its_origin() {
+        let def = grid_def(&[(10.0, 0.0, Some(90.0)), (14.0, 0.0, Some(90.0))]);
+        let mut spawn = SpawnPoint::new(Vec3::new(0.0, 1.5, 0.0), 0.0);
+        apply_seat(&mut spawn, Some(&def), 1);
+        assert_eq!(spawn.position, Vec3::new(14.0, 0.0, 0.0));
+        assert!((spawn.yaw - 90f32.to_radians()).abs() < 1e-4);
+        // Origin stays the pole anchor.
+        assert_eq!(spawn.origin, Vec3::new(0.0, 1.5, 0.0));
+        assert_eq!(spawn.origin_yaw, 0.0);
+        // Seat 0 was untouched — reseating is idempotent for index 0.
+        let mut solo = SpawnPoint::new(Vec3::new(0.0, 1.5, 0.0), 0.25);
+        apply_seat(&mut solo, Some(&def), 0);
+        assert_eq!(solo.position, Vec3::new(10.0, 0.0, 0.0));
+        assert!((solo.yaw - 90f32.to_radians()).abs() < 1e-4);
     }
 }

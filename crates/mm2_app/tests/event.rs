@@ -9,15 +9,18 @@ use std::time::Duration;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
+use mm2_app::net::{LobbyLink, LobbyState};
 use mm2_app::race::{self, CheckpointMarker};
 use mm2_app::session::{self, SessionControl};
 use mm2_app::{camera, contracts};
 use mm2_assets::Vfs;
 use mm2_game::{
-    CityEntity, EventRef, EventTableKind, ImpactEvent, Mm2Vfs, ParticipantState, PlayerVehicle,
-    RacePhase, RaceProgress, RaceStarted, RaceState, ResultLedger, Session, SessionConfig,
-    SessionEntity, SessionMode, SessionPhase, advance_session_tick, despawn_session_entities,
+    CityEntity, DevOverrides, EventRef, EventTableKind, ImpactEvent, Mm2Vfs, ParticipantState,
+    PlayerVehicle, RacePhase, RaceProgress, RaceStarted, RaceState, ResultLedger, Session,
+    SessionAuthority, SessionConfig, SessionEntity, SessionMode, SessionPhase,
+    advance_session_tick, despawn_session_entities,
 };
+use mm2_net::{Host, HostConfig, VehiclePick, hello};
 use mm2_vehicle::{VehicleConfig, VehicleInput, VehiclePlugin, VehicleState};
 
 const MM_HEADER: &str = "Description, CarType, TimeofDay, Weather, Opponents, Cops, Ambient, Peds, NumLaps, TimeLimit, Difficulty, CarType, TimeofDay, Weather, Opponents, Cops, Ambient, Peds, NumLaps, TimeLimit, Difficulty";
@@ -118,11 +121,7 @@ fn event_app(config: SessionConfig, vfs: Vfs) -> App {
         .init_resource::<Assets<Image>>()
         .init_resource::<Assets<StandardMaterial>>()
         .insert_resource(camera::CameraMode::Chase)
-        .insert_resource(session::SpawnPoint {
-            position: Vec3::new(0.0, 1.5, 0.0),
-            yaw: 0.0,
-            trailers: Vec::new(),
-        })
+        .insert_resource(session::SpawnPoint::new(Vec3::new(0.0, 1.5, 0.0), 0.0))
         .insert_resource(Mm2Vfs(vfs))
         .insert_resource(session::TunedVehicle(VehicleConfig::default()))
         .insert_resource(session::SelectedCar {
@@ -324,6 +323,103 @@ fn zero_strtpnts_yaw_falls_back_to_the_course() {
     assert!(
         fwd.x > 0.98,
         "no authored heading → face the course (+X toward gate 0), fwd={fwd:?}"
+    );
+}
+
+/// F25-A.2's local half: on a joined client the local car takes the
+/// grid row its wire id ranks to — wire id 1 → authored row 1 —
+/// resolved through the same `seat_pose` the host applies to the copy
+/// it runs. Row 0 stays the host seat's (wire id 0 rides `Start`'s
+/// `host_pick`, never the roster).
+#[test]
+fn a_joined_client_seats_the_local_car_on_its_grid_row() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(
+        d,
+        "race/testcity/mmracedata.csv",
+        format!("{MM_HEADER}\n{ROW}\n"),
+    );
+    write(d, "race/testcity/race0.aimap", "#\n");
+    write(
+        d,
+        "race/testcity/race0waypoints.csv",
+        format!(
+            "{WAYPOINTS}{}{}{}{}{}",
+            waypoint_row(COURSE[0], COURSE_Z),
+            waypoint_row(COURSE[1], COURSE_Z),
+            waypoint_row(COURSE[2], COURSE_Z),
+            waypoint_row(COURSE[3], COURSE_Z),
+            waypoint_row(COURSE[4], COURSE_Z),
+        ),
+    );
+    // A two-row authored grid facing −X (vehicle yaw +90° — the
+    // retail `cir1` convention), one lane apart.
+    write(
+        d,
+        "race/testcity/race0_strtpnts",
+        "60,0,140,90,0,0,0,0,0,\n56,0,144,90,0,0,0,0,0,\n",
+    );
+
+    // A real loopback host + joined link mint this client's wire id —
+    // the seat map reads the same resources `drive_lobby` leaves.
+    let vfs = vfs_of(d);
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host_config = HostConfig::new(fp);
+    host_config.host_pick = Some(VehiclePick {
+        vehicle: String::new(),
+        paint: 0,
+    });
+    let host = Host::listen_loopback(&host_config).unwrap();
+    let link = LobbyLink::join(
+        host.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join failed");
+    let our_id = link.player_id();
+    assert_eq!(our_id, 1, "the first peer takes wire id 1");
+
+    // The lobby view a `Start` leaves: our roster entry plus the
+    // announced host pick → seats [0, 1], ours is seat 1.
+    let lobby = LobbyState {
+        roster: vec![mm2_net::RosterEntry {
+            player_id: our_id,
+            driver: "alice".into(),
+            build: "net-app-test".into(),
+            ready: true,
+            pick: Some(VehiclePick {
+                vehicle: String::new(),
+                paint: 0,
+            }),
+        }],
+        host_pick: host_config.host_pick.clone(),
+        ..LobbyState::default()
+    };
+
+    let mut app = event_app(
+        SessionConfig {
+            authority: SessionAuthority::Remote,
+            ..event_config()
+        },
+        vfs,
+    );
+    app.insert_resource(link);
+    app.insert_resource(lobby);
+    app.update();
+    assert_eq!(phase(&app), SessionPhase::Countdown);
+
+    let car = car(&mut app);
+    let pos = app.world().get::<Position>(car).unwrap().0;
+    assert!(
+        (pos.x - 56.0).abs() < 3.0 && (pos.z - 144.0).abs() < 3.0,
+        "wire id 1 seats the authored grid's row 1, got {pos:?}"
+    );
+    let fwd = app.world().get::<Transform>(car).unwrap().rotation * Vec3::NEG_Z;
+    assert!(
+        fwd.x < -0.98,
+        "row 1's authored 90° yaw faces −X verbatim, fwd={fwd:?}"
     );
 }
 

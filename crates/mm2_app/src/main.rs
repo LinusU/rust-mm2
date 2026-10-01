@@ -1150,11 +1150,7 @@ fn main() {
     .insert_resource(Gravity(Vec3::NEG_Y * 9.81))
     .insert_resource(ClearColor(Color::srgb(0.5, 0.65, 0.85)))
     .insert_resource(session)
-    .insert_resource(SpawnPoint {
-        position: Vec3::new(0.0, 1.5, 0.0),
-        yaw: 0.0,
-        trailers: Vec::new(),
-    })
+    .insert_resource(SpawnPoint::new(Vec3::new(0.0, 1.5, 0.0), 0.0))
     .insert_resource(Mm2Vfs(vfs))
     .insert_resource(TunedVehicle(vehicle))
     .insert_resource(SelectedCar {
