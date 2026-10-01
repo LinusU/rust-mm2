@@ -1,3 +1,123 @@
+# Last iteration — F24-B.5: event-mode hosting, the `LateJoin::Closed`
+# consumer (iteration 017, run 20260929T174954)
+
+Implementation iteration on `ralph/night` (baseline `29cc266` — the
+F24-B.4 candidate; external verify green, review **pass** with
+verification gaps only, no blocking findings). One coherent slice: the
+plan's named "event-mode hosting + a `LateJoin::Closed` consumer" leg —
+`mm2-host` can now host an authored event lobby, which makes MP-5's
+race rule real end-to-end instead of wire-only.
+
+## Task selection
+
+No failing gate or review finding to repair — iteration 016's review
+passed with gaps only. The plan's F24-B remainder named three legs:
+client-side session-content join gating (blocked on the in-app bridge
+having somewhere to report), the Bevy-side bridge itself (too large
+for one slice on its own), and event-mode hosting. I took event-mode
+hosting: the smallest remaining piece with a real shipped consumer,
+and the only consumer `LateJoin::Closed` has.
+
+## What landed
+
+- `mm2_game::config` — `EventRef::parse(arg, city)` +
+  `EventTableKind::parse_token`: the `<table>:<row>` selector grammar
+  (`checkpoint`/`race`, `blitz`, `circuit`, `crash`/`crashcourse`),
+  hoisted out of `main.rs`'s `parse_event_ref`; `mm2 --event`,
+  `mm2-host --event` and `mm2-inspect`'s `parse_table_filter` now share
+  the one implementation (three near-copies collapsed; mm2-inspect
+  keeps its own error wording).
+- `mm2-host` — `--event <table>:<row>` hosts an authored event instead
+  of cruise. `--city` names both the world and the event's city
+  (default `london`), mirroring `mm2`; `--dev-world` + `--event` stays
+  legal as a dev rig. The gate is the same path a session load takes:
+  `race::event_race_setup` (catalog scan → dependency-checked
+  `EventCatalog::resolve` → `race_definition` build, plus the authored
+  roster/reward surface) — an unknown row, missing records or an
+  unbuildable definition exit 2 at flag time rather than failing every
+  client at start. Crash Course rows refuse through
+  `RaceBuildError::CrashCourseUnsupported`, same as `mm2` (F21).
+  `start`'s late-join policy is the session mode's (MP-5,
+  documented): `Event` → `LateJoin::Closed`, `Cruise` → `Open` — the
+  first shipped `Closed` consumer.
+- No wire change — `PROTOCOL_VERSION` stays 3; `Start`/`Cancel`/
+  `SessionStarted` already carry everything this leg needs.
+
+## Evidence
+
+- `mm2_game` +2: `EventRef::parse` grammar round-trip (aliases,
+  lowercase normalization) and malformed-selector rejections
+  (`circuit:-1`, `circuit:0:extra`, index overflow, …).
+- `tests/net_host.rs` +2 against the separate `mm2-host` process:
+  - `an_event_host_closes_joins_at_start` — a synthetic `testcity`
+    install (checkpoint row + `race0.aimap`/`race0waypoints.csv` +
+    `city/testcity.psdl` stub) hosts `--event race:0`; the advertised
+    `Session` decodes back to `SessionMode::Event{testcity, Checkpoint,
+    0}` on `city/testcity.psdl`; `start` mints generation 1, then a
+    late join is refused `Rejected{SessionStarted}` with
+    `event=join_failed … "the session has already started"` on the
+    record; `cancel` re-opens the lobby (a post-cancel join gets
+    Session+Roster and a quiet socket — no trailing `Start`), `quit`
+    exits 0.
+  - `an_unrunnable_event_is_refused_at_flag_time` — `--event bogus`
+    (grammar), `--event race:9` (row beyond the table — resolve fails)
+    and `--event circuit:0` (resolve-Ready but `NumLaps 0` cannot build
+    an Ordered definition) each exit 2 with a named stderr error; the
+    last leg proves the gate runs the real build, not just resolve.
+- Retail leg (original-content evidence): `mm2-host --mm2-path
+  /Users/linus/coding/rust-mm2/retail --city sf --event race:0`
+  resolves+builds and serves `session="sf, race:0, amateur"`;
+  `--event crash:0` exits 2 on `CrashCourseUnsupported` and
+  `--event race:99` exits 2 on the missing row.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --locked -p mm2_game` — all suites green (lib 89/89).
+- `cargo test --locked -p mm2_app --lib` — 62/62 (`net::` 10/10).
+- `cargo test --locked -p mm2_inspect` — 42/42 (incl. the delegated
+  `parses_event_specs` legs).
+- `cargo test --locked -p mm2_app --test net_host` — 4/4 in ~2 s with
+  `mm2-host` as a separate OS process. Note: the intermittent
+  `_dyld_start` security-evaluation stall on this machine made several
+  earlier runs fail with the child never exec'd inside the 15 s wait —
+  environment flakiness first recorded in iter 012, identical to iter
+  014's note; the suite passes cleanly once a fresh binary has been
+  exec'd once. Full-workspace `cargo test --locked --workspace` is left
+  to the external `verify.sh` pass — mm2_net is untouched by this diff.
+
+## Classification / remaining open items
+
+- Original requirement honoured: MP-5's race-side late-join rule now
+  has a real consumer (event lobbies close at start); cruise stays
+  open. `mm2 --event`'s flag-time refusal semantics are matched
+  (resolve-or-fail, never advertise the unrunnable).
+- Designed and recorded in `docs/research/net.md`: advertising is
+  gated by the shared loader build (`event_race_setup`) — a lobby-level
+  check cannot prove each client's render path; the mode→`LateJoin`
+  mapping (any authored event = race rule, incl. Crash Course rows,
+  which refuse earlier at the build anyway).
+- Still open F24-B scope: client-side session-content join gating (a
+  peer validating an advertised session against its *own* content —
+  `EventRef.index`, customized `laps`/`opponents` range binding — lands
+  with the in-app bridge that has somewhere to report it), the
+  Bevy-side bridge (AC05's in-app leg), `Start` → spawn-roster
+  consumption (picks are still unused at session build — F25/F26
+  scope), AC04's consumer-facing error surface. The advertised-event
+  wire path now exists, but no client builds the session from `Start`
+  yet — `Start` remains a signal only.
+- Verification gaps carried forward: clients still share the test
+  process (full AC01 topology + AC06 LAN/Internet matrix are F24-C);
+  the wire-level event legs run over a synthetic `testcity` fixture —
+  the retail leg above proves the flag-time gate on real content but
+  no client ever joined a retail-hosted event lobby; `SetReady`/
+  `SetVehicle` rate-limiting and unbounded channels remain
+  F24-C/AC03 scope as previously disclosed.
+
+---
+
 # Last iteration — F24-B.4: session start/cancel, generation, and the
 # MP-5 late-join policy (iteration 016, run 20260929T174954)
 

@@ -12,10 +12,18 @@ use std::thread;
 use std::time::Duration;
 
 use mm2_app::net;
-use mm2_game::{SessionAuthority, SessionMode, WorldMode};
+use mm2_game::{EventRef, EventTableKind, SessionAuthority, SessionMode, WorldMode};
 use mm2_net::{Client, Message, NetError, RejectCode, hello};
 
 const WAIT: Duration = Duration::from_secs(15);
+
+const MM_HEADER: &str = "Description, CarType, TimeofDay, Weather, Opponents, Cops, Ambient, Peds, NumLaps, TimeLimit, Difficulty, CarType, TimeofDay, Weather, Opponents, Cops, Ambient, Peds, NumLaps, TimeLimit, Difficulty";
+const WAYPOINTS: &str = "x,y,z,a,poly count,frane rate,state changes,texture changes,msg\n";
+/// A checkpoint row with one authored lap/time block per difficulty.
+const ROW: &str = "none,0,0,0,0,0,0.1,0.0,1,50,1,0,0,0,0,0,0.2,0.0,1,40,1";
+/// A circuit row whose `NumLaps` is zero — resolves fine, fails the
+/// race-definition build (`Ordered` needs at least one lap).
+const LAPLESS_ROW: &str = "none,0,0,0,0,0,0.1,0.0,0,50,1,0,0,0,0,0,0.2,0.0,0,40,1";
 
 /// A running `mm2-host` child with its stdout drained onto a channel —
 /// the process's `key=value` record contract is the observable surface —
@@ -86,6 +94,85 @@ fn join(addr: SocketAddr, driver: &str, fp: u64) -> Client {
     client
 }
 
+fn write(dir: &std::path::Path, rel: &str, contents: impl AsRef<[u8]>) {
+    let p = dir.join(rel);
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(p, contents).unwrap();
+}
+
+fn waypoint_row(x: f32, z: f32) -> String {
+    format!("{x},0,{z},0,15,0,0,0,\n")
+}
+
+/// A minimal `testcity` install: the `city/testcity.psdl` `--city`
+/// requires, one checkpoint row with the records
+/// `EventCatalog::resolve` demands (`race0.aimap`,
+/// `race0waypoints.csv`), and a `circuit0` event whose `NumLaps` of
+/// zero resolves Ready but cannot build a race definition. The lobby
+/// host never loads geometry, so stub bytes suffice.
+fn event_install() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(d, "city/testcity.psdl", b"synthetic fixture stub\n");
+    write(
+        d,
+        "race/testcity/mmracedata.csv",
+        format!("{MM_HEADER}\n{ROW}\n"),
+    );
+    write(d, "race/testcity/race0.aimap", "#\n");
+    write(
+        d,
+        "race/testcity/race0waypoints.csv",
+        format!(
+            "{WAYPOINTS}{}{}{}{}{}",
+            waypoint_row(60.0, 140.0),
+            waypoint_row(110.0, 140.0),
+            waypoint_row(140.0, 140.0),
+            waypoint_row(165.0, 140.0),
+            waypoint_row(180.0, 140.0),
+        ),
+    );
+    write(
+        d,
+        "race/testcity/mmcircuitdata.csv",
+        format!("{MM_HEADER}\n{LAPLESS_ROW}\n"),
+    );
+    write(d, "race/testcity/circuit0.aimap", "#\n");
+    write(
+        d,
+        "race/testcity/circuit0waypoints.csv",
+        format!(
+            "{WAYPOINTS}{}{}{}{}",
+            waypoint_row(60.0, 140.0),
+            waypoint_row(110.0, 140.0),
+            waypoint_row(140.0, 140.0),
+            waypoint_row(165.0, 140.0),
+        ),
+    );
+    tmp
+}
+
+/// Read the `listening=` record and return (address, fingerprint,
+/// line) — the two facts a join needs plus the record itself for
+/// callers asserting on `session=`.
+fn listening(host: &HostProc) -> (SocketAddr, u64, String) {
+    // The first record binds the contract: the address peers dial and
+    // the gameplay fingerprint the handshake requires.
+    let first = host.line();
+    let addr: SocketAddr = first
+        .strip_prefix("listening=")
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or_else(|| panic!("unexpected first record: {first:?}"))
+        .parse()
+        .unwrap();
+    let fp_hex = first
+        .split_whitespace()
+        .find_map(|tok| tok.strip_prefix("fingerprint=fnv1a64:"))
+        .unwrap_or_else(|| panic!("no fingerprint in {first:?}"));
+    let fp = u64::from_str_radix(fp_hex, 16).unwrap();
+    (addr, fp, first)
+}
+
 /// Spawn an `mm2-host` on a content-free dev world and parse the
 /// `listening=` record into (address, fingerprint) — the two facts a
 /// join needs. The install dir is returned so it outlives the child.
@@ -103,20 +190,7 @@ fn dev_host(seed: u64) -> (HostProc, SocketAddr, u64, tempfile::TempDir) {
         seed.to_string(),
     ]);
 
-    // The first record binds the contract: the address peers dial and
-    // the gameplay fingerprint the handshake requires.
-    let first = host.line();
-    let addr: SocketAddr = first
-        .strip_prefix("listening=")
-        .and_then(|rest| rest.split_whitespace().next())
-        .unwrap_or_else(|| panic!("unexpected first record: {first:?}"))
-        .parse()
-        .unwrap();
-    let fp_hex = first
-        .split_whitespace()
-        .find_map(|tok| tok.strip_prefix("fingerprint=fnv1a64:"))
-        .unwrap_or_else(|| panic!("no fingerprint in {first:?}"));
-    let fp = u64::from_str_radix(fp_hex, 16).unwrap();
+    let (addr, fp, _) = listening(&host);
     (host, addr, fp, dir)
 }
 
@@ -330,4 +404,181 @@ fn a_dedicated_host_process_runs_start_and_cancel() {
     // `quit` is a clean shutdown — the process exits on its own.
     host.cmd("quit");
     assert!(host.wait().success(), "mm2-host did not exit cleanly");
+}
+
+/// The event leg against the separate host process: `mm2-host --event`
+/// advertises an authored event and `start` applies MP-5's race rule —
+/// joins close for the session's duration and `cancel` re-opens them.
+#[test]
+fn an_event_host_closes_joins_at_start() {
+    let install = event_install();
+    let mut host = HostProc::spawn(&[
+        "--mm2-path".to_string(),
+        install.path().to_str().unwrap().to_string(),
+        "--city".to_string(),
+        "testcity".to_string(),
+        "--event".to_string(),
+        "race:0".to_string(),
+        "--bind".to_string(),
+        "127.0.0.1:0".to_string(),
+        "--seed".to_string(),
+        13.to_string(),
+    ]);
+    let (addr, fp, first) = listening(&host);
+    assert!(
+        first.contains("session=\"testcity, race:0, amateur\""),
+        "{first}"
+    );
+
+    // The advertised session names the authored event, decodable back
+    // into the same SessionConfig shape a local `--event` run builds.
+    let mut alice = join(addr, "alice", fp);
+    match alice.recv().unwrap() {
+        Message::Session(ad) => {
+            let config = net::accept(&ad).unwrap();
+            assert_eq!(
+                config.world,
+                WorldMode::City {
+                    psdl: "city/testcity.psdl".to_string()
+                }
+            );
+            assert_eq!(
+                config.mode,
+                SessionMode::Event(EventRef {
+                    city: "testcity".to_string(),
+                    table: EventTableKind::Checkpoint,
+                    index: 0,
+                })
+            );
+            assert_eq!(config.seed, 13);
+        }
+        other => panic!("expected Session, got {other:?}"),
+    }
+    match alice.recv().unwrap() {
+        Message::Roster { players } => assert_eq!(players.len(), 1),
+        other => panic!("expected Roster, got {other:?}"),
+    }
+    assert_eq!(
+        host.line(),
+        "event=joined id=1 driver=\"alice\" build=\"test\""
+    );
+
+    alice.set_vehicle("", 0).unwrap();
+    assert_eq!(host.line(), "event=vehicle id=1 vehicle=\"\" paint=0");
+    alice.set_ready(true).unwrap();
+    assert_eq!(host.line(), "event=ready id=1 ready=true");
+
+    host.cmd("start");
+    assert_eq!(host.line(), "event=started generation=1");
+    loop {
+        match alice.recv().unwrap() {
+            Message::Start { generation, .. } => {
+                assert_eq!(generation, 1);
+                break;
+            }
+            Message::Roster { .. } => continue,
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    // MP-5's race rule: a started event lobby refuses a late joiner —
+    // `LateJoin::Closed` has a real consumer here, not just wire legs.
+    let err = Client::join(addr, &hello("test".to_string(), "bob".to_string(), fp)).unwrap_err();
+    assert!(matches!(
+        err,
+        NetError::Rejected {
+            code: RejectCode::SessionStarted,
+            ..
+        }
+    ));
+    let refused = host.line();
+    assert!(
+        refused.starts_with("event=join_failed") && refused.contains("already started"),
+        "{refused}"
+    );
+
+    // Cancel re-opens the lobby: the same join now succeeds and is
+    // served the advertised event session with no `Start` behind it.
+    host.cmd("cancel");
+    assert_eq!(host.line(), "event=cancelled generation=1");
+    loop {
+        match alice.recv().unwrap() {
+            Message::Cancel { generation: 1 } => break,
+            Message::Roster { .. } => continue,
+            other => panic!("expected Cancel, got {other:?}"),
+        }
+    }
+    let mut bob = join(addr, "bob", fp);
+    assert_eq!(
+        host.line(),
+        "event=joined id=2 driver=\"bob\" build=\"test\""
+    );
+    match bob.recv().unwrap() {
+        Message::Session(ad) => {
+            assert!(matches!(
+                net::accept(&ad).unwrap().mode,
+                SessionMode::Event(_)
+            ));
+        }
+        other => panic!("expected Session, got {other:?}"),
+    }
+    match bob.recv().unwrap() {
+        Message::Roster { players } => assert_eq!(players.len(), 2),
+        other => panic!("expected Roster, got {other:?}"),
+    }
+    // The lobby is in lobby phase again: nothing follows the roster.
+    bob.set_timeout(Some(Duration::from_millis(300))).unwrap();
+    match bob.recv() {
+        Err(NetError::Io(e)) => assert!(matches!(
+            e.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        )),
+        other => panic!("expected a quiet socket post-cancel, got {other:?}"),
+    }
+
+    host.cmd("quit");
+    assert!(host.wait().success(), "mm2-host did not exit cleanly");
+}
+
+/// `--event` failures are startup failures (exit 2), before the lobby
+/// opens: a malformed selector, a row beyond the city's table and an
+/// event that resolves but cannot build all refuse at flag time — the
+/// host never advertises a session it cannot run.
+#[test]
+fn an_unrunnable_event_is_refused_at_flag_time() {
+    let install = event_install();
+    let install = install.path().to_str().unwrap().to_string();
+    for (args, needle) in [
+        // Not the `<table>:<row>` grammar.
+        (
+            vec!["--city", "testcity", "--event", "bogus"],
+            "invalid --event",
+        ),
+        // Row beyond the single-row checkpoint table — resolve fails.
+        (
+            vec!["--city", "testcity", "--event", "race:9"],
+            "cannot run",
+        ),
+        // Resolves Ready but `NumLaps` zero cannot build an Ordered
+        // definition — the gate is the real build, not just resolve.
+        (
+            vec!["--city", "testcity", "--event", "circuit:0"],
+            "cannot run",
+        ),
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_mm2-host"))
+            .arg("--mm2-path")
+            .arg(&install)
+            .args(&args)
+            .output()
+            .expect("failed to run mm2-host");
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{args:?} must exit 2, stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(needle), "{args:?} stderr: {stderr}");
+    }
 }

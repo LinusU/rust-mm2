@@ -1380,15 +1380,12 @@ fn events(
 
 /// `--table` filter vocabulary — same names `mm2 --event` accepts.
 fn parse_table_filter(s: &str) -> Result<mm2_game::EventTableKind, String> {
-    match s.to_ascii_lowercase().as_str() {
-        "checkpoint" | "race" => Ok(mm2_game::EventTableKind::Checkpoint),
-        "blitz" => Ok(mm2_game::EventTableKind::Blitz),
-        "circuit" => Ok(mm2_game::EventTableKind::Circuit),
-        "crash" | "crashcourse" => Ok(mm2_game::EventTableKind::CrashCourse),
-        other => Err(format!(
-            "unknown table {other:?}: expected checkpoint|race, blitz, circuit, crash|crashcourse"
-        )),
-    }
+    mm2_game::EventTableKind::parse_token(s).ok_or_else(|| {
+        format!(
+            "unknown table {:?}: expected checkpoint|race, blitz, circuit, crash|crashcourse",
+            s.to_ascii_lowercase()
+        )
+    })
 }
 
 /// Compact one-cell description of a per-difficulty build outcome.

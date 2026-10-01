@@ -181,6 +181,22 @@ impl EventRef {
     pub fn row<'a>(&self, table: &'a EventTable) -> Option<&'a EventRow> {
         table.rows.get(self.index)
     }
+
+    /// The `<table>:<row>` selector the `mm2`/`mm2-host`/`mm2-inspect`
+    /// CLIs take (`--event`): table one of the tokens
+    /// [`EventTableKind::parse_token`] accepts, row the 0-based table
+    /// index. `city` is normalized to lowercase, matching
+    /// `EventCatalog::scan`'s case-insensitive lookup and the authored
+    /// lowercase paths. `None` on a malformed token or a row that does
+    /// not fit `usize`.
+    pub fn parse(arg: &str, city: &str) -> Option<Self> {
+        let (table, row) = arg.split_once(':')?;
+        Some(Self {
+            city: city.to_ascii_lowercase(),
+            table: EventTableKind::parse_token(table)?,
+            index: row.trim().parse().ok()?,
+        })
+    }
 }
 
 /// The four authored `mm*data.csv` event tables each stock city ships
@@ -247,6 +263,20 @@ impl EventTableKind {
         ]
         .into_iter()
         .find(|kind| kind.reward_token() == token)
+    }
+
+    /// The operator-facing table token the `--event` selectors share
+    /// (`mm2`, `mm2-host`, `mm2-inspect`): `checkpoint`/`race`,
+    /// `blitz`, `circuit`, `crash`/`crashcourse`, case-insensitive.
+    /// `None` for anything else.
+    pub fn parse_token(token: &str) -> Option<Self> {
+        match token.to_ascii_lowercase().as_str() {
+            "checkpoint" | "race" => Some(Self::Checkpoint),
+            "blitz" => Some(Self::Blitz),
+            "circuit" => Some(Self::Circuit),
+            "crash" | "crashcourse" => Some(Self::CrashCourse),
+            _ => None,
+        }
     }
 }
 
@@ -683,4 +713,53 @@ pub struct NavOverlay {
     /// Optional route probe `<from>:<to>` as BAI road indices, snapped
     /// like `mm2-inspect nav --route` and highlighted over the lanes.
     pub route: Option<(u16, u16)>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_ref_parses_the_cli_grammar() {
+        assert_eq!(
+            EventRef::parse("circuit:3", "SF"),
+            Some(EventRef {
+                city: "sf".to_string(),
+                table: EventTableKind::Circuit,
+                index: 3,
+            })
+        );
+        // The documented aliases name the same tables.
+        for token in ["checkpoint", "race"] {
+            assert_eq!(
+                EventRef::parse(&format!("{token}:0"), "london")
+                    .unwrap()
+                    .table,
+                EventTableKind::Checkpoint
+            );
+        }
+        for token in ["crash", "crashcourse"] {
+            assert_eq!(
+                EventRef::parse(&format!("{token}:0"), "london")
+                    .unwrap()
+                    .table,
+                EventTableKind::CrashCourse
+            );
+        }
+    }
+
+    #[test]
+    fn event_ref_rejects_malformed_selectors() {
+        for bad in [
+            "bogus:0",
+            "circuit",
+            "circuit:",
+            ":0",
+            "circuit:0:extra",
+            "circuit:-1",
+            "circuit:99999999999999999999",
+        ] {
+            assert!(EventRef::parse(bad, "sf").is_none(), "{bad:?} must fail");
+        }
+    }
 }

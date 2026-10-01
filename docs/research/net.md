@@ -252,7 +252,7 @@ host process that mounts the VFS read-only (`--mm2-path` is required —
 an empty directory is a valid content-free mount; `--mods` adds a mod
 directory), computes the gameplay fingerprint, binds `--bind` (default
 `127.0.0.1:0` — loopback with an ephemeral port; the chosen address is
-printed so a harness can dial it), advertises a cruise `SessionConfig`
+printed so a harness can dial it), advertises a `SessionConfig`
 built from `--dev-world` *or* `--city` (the flags conflict; the default
 city is `london` and one whose `city/<name>.psdl` does not resolve
 through the mounted VFS is refused), `--pro` (Professional instead of
@@ -264,17 +264,31 @@ one `event=` line per lobby event for harness consumption
 (`joined`/`left`/`ready`/`vehicle`/`pick_refused`/`join_failed`/
 `started`/`start_refused`/`cancelled`). No
 window, audio or GPU is required — that is the F24-AC05 binary leg,
-exercised so far only on loopback. Named sessions and non-cruise modes
-have no flags yet — those arrive with their own F24-B legs.
+exercised so far only on loopback. Named sessions have no flag yet.
+
+`--event <table>:<row>` hosts an authored event instead of cruise — the
+same selector grammar `mm2 --event` and `mm2-inspect` share, now owned
+by `mm2_game::EventRef::parse`/`EventTableKind::parse_token`. The gate
+is the same path a session load takes (`mm2_app::race::event_race_setup`:
+catalog scan → dependency-checked `EventCatalog::resolve` →
+`race_definition` build): an unknown row, missing records or a
+definition that fails to build exit 2 at flag time, so the host never
+advertises a session it cannot run. Crash Course rows refuse through
+`RaceBuildError::CrashCourseUnsupported` exactly as `mm2` refuses them
+(F21). *Designed:* advertising is limited to what the shared loader can
+build; a lobby-level check cannot prove the per-client render path.
 
 The operator's control surface is stdin: `start`, `cancel`, `quit`,
-one per line. `start` always passes `LateJoin::Open` — `mm2-host`
-advertises cruise sessions only, and MP-5 keeps those joinable. A
+one per line. `start`'s late-join policy is the session mode's (MP-5):
+an event lobby starts `LateJoin::Closed` — the first shipped consumer
+of the race rule — and a cruise lobby `LateJoin::Open`. A
 closed stdin means unattended operation, not shutdown; `quit` is the
 clean-exit command (`HostCtl::shutdown`, exit 0 after the loop ends).
 
-Deliberately *not* here: session-content join gating, host migration,
-an in-app (Bevy-side) host surface, and the per-tick dataplane (F25).
+Deliberately *not* here: session-content join gating on the *client*
+side (a peer validating the advertised session against its own mounted
+content — lands with the in-app bridge), host migration, the Bevy-side
+host/client surface, and the per-tick dataplane (F25).
 
 ## Evidence level
 
@@ -305,6 +319,18 @@ process). Its second leg drives stdin `start`/`cancel`/`quit`: a gated
 refusal, a generation-1 start with the session decoding back through
 `net::accept`, a mid-session joiner receiving the running `Start`
 (open-policy MP-5 cruise), a cancel re-opening the lobby into a
-generation-2 start, and `quit` exiting the process cleanly. This is
+generation-2 start, and `quit` exiting the process cleanly. The third
+leg hosts a synthetic authored event (`--city testcity --event race:0`
+over a fixture install): the advertised session decodes back to the
+`SessionMode::Event` config, a started lobby refuses a late joiner
+`SessionStarted` (MP-5's race rule through the real consumer), and
+`cancel` re-opens joins; the fourth runs the flag-time refusals —
+malformed selector, out-of-range row and a resolve-Ready-but-unbuildable
+event (`NumLaps 0`) all exit 2. A retail leg is on record for the
+event gate: `mm2-host --city sf --event race:0` against the retail
+installation resolves and builds through `event_race_setup` and
+advertises `sf, race:0, amateur`; `--event crash:0` refuses
+`CrashCourseUnsupported` at flag time and `--event race:99` refuses
+the missing row — both exit 2. This is
 *not* fully separate-process, LAN or Internet evidence; F24-C owns
 that matrix.

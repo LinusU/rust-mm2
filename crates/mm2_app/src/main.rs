@@ -486,15 +486,13 @@ fn main() {
     // `--event <table>:<row>` selects an authored event in the chosen
     // city (default london). Crash Course rows are rejected by the
     // producer until F21 — an explicit load failure, not a fallback.
-    let event_ref = cli.event.as_deref().map(|s| match parse_event_ref(s) {
-        Ok((table, index)) => mm2_game::EventRef {
-            city: cli.city.as_deref().unwrap_or("london").to_ascii_lowercase(),
-            table,
-            index,
-        },
-        Err(()) => {
-            error!("invalid --event {s:?}: expected checkpoint|blitz|circuit|crash:<row>");
-            std::process::exit(2);
+    let event_ref = cli.event.as_deref().map(|s| {
+        match mm2_game::EventRef::parse(s, cli.city.as_deref().unwrap_or("london")) {
+            Some(event_ref) => event_ref,
+            None => {
+                error!("invalid --event {s:?}: expected checkpoint|blitz|circuit|crash:<row>");
+                std::process::exit(2);
+            }
         }
     });
 
@@ -1448,20 +1446,6 @@ fn main() {
     if let AppExit::Error(code) = exit {
         std::process::exit(code.get() as i32);
     }
-}
-
-/// Parse `--event <table>:<row>` into a table kind + row index.
-fn parse_event_ref(s: &str) -> Result<(mm2_game::EventTableKind, usize), ()> {
-    let (table, row) = s.split_once(':').ok_or(())?;
-    let table = match table.to_ascii_lowercase().as_str() {
-        "checkpoint" | "race" => mm2_game::EventTableKind::Checkpoint,
-        "blitz" => mm2_game::EventTableKind::Blitz,
-        "circuit" => mm2_game::EventTableKind::Circuit,
-        "crash" | "crashcourse" => mm2_game::EventTableKind::CrashCourse,
-        _ => return Err(()),
-    };
-    let index = row.trim().parse().map_err(|_| ())?;
-    Ok((table, index))
 }
 
 /// Whether a windowing system is present for a windowed/visual run.

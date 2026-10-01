@@ -23,9 +23,11 @@
 //! ```
 //!
 //! stdin is the operator's control surface — one command per line:
-//! `start` requests session start (open late-join — the cruise rule,
-//! MP-5), `cancel` returns everyone to the lobby, `quit` shuts the
-//! host down cleanly. A closed stdin just means unattended operation.
+//! `start` requests session start, `cancel` returns everyone to the
+//! lobby, `quit` shuts the host down cleanly. A closed stdin just means
+//! unattended operation. `start`'s late-join policy is the session
+//! mode's (MP-5, documented — `help:Multiplayer Games`): an event lobby
+//! closes to joins once started, a cruise lobby stays open.
 //!
 //! Usage errors and startup failures exit 2; a host loop that dies on
 //! its own exits 1.
@@ -39,12 +41,12 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
-use mm2_app::net;
+use mm2_app::{net, race};
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, fingerprint};
 use mm2_game::{
-    Difficulty, SessionAuthority, SessionConditions, SessionConfig, SessionMode, TimeOfDay,
-    Weather, WorldMode,
+    Difficulty, EventRef, SessionAuthority, SessionConditions, SessionConfig, SessionMode,
+    TimeOfDay, Weather, WorldMode,
 };
 use mm2_net::{Host, HostConfig, HostEvent, LateJoin, LeaveCause};
 
@@ -81,6 +83,15 @@ struct Cli {
     /// a world it cannot load.
     #[arg(long)]
     city: Option<String>,
+
+    /// Host an authored event instead of cruise: `<table>:<row>` with
+    /// table one of `checkpoint`, `blitz`, `circuit`, `crash` and row
+    /// the 0-based table row in the `--city` tables (default `london`).
+    /// The event is resolved and built through the same path a session
+    /// load takes — one that cannot run here is a startup failure,
+    /// never an advertised session.
+    #[arg(long, value_name = "table:row")]
+    event: Option<String>,
 
     /// Host the Professional parameter block instead of Amateur.
     #[arg(long)]
@@ -135,20 +146,33 @@ fn main() {
         }
     };
 
-    // The session this lobby runs. Cruise only for now — event hosting
-    // lands with its own F24-B leg. A requested city must actually
-    // resolve: advertising a world the host cannot load would fail every
-    // client at session start instead of at flag time.
+    // The session this lobby runs. `--city` names both the world and
+    // the event's city, exactly like `mm2`'s `--event`. A requested
+    // city must actually resolve: advertising a world the host cannot
+    // load would fail every client at session start instead of at flag
+    // time.
+    let city = cli.city.as_deref().unwrap_or("london").to_ascii_lowercase();
     let world = if cli.dev_world {
         WorldMode::DevWorld
     } else {
-        let city = cli.city.as_deref().unwrap_or("london").to_ascii_lowercase();
         let psdl = format!("city/{city}.psdl");
         if vfs.resolve(&psdl).is_none() {
             eprintln!("error: city {city:?} has no resolvable {psdl}");
             std::process::exit(2);
         }
         WorldMode::City { psdl }
+    };
+    let mode = match cli.event.as_deref() {
+        Some(arg) => match EventRef::parse(arg, &city) {
+            Some(event_ref) => SessionMode::Event(event_ref),
+            None => {
+                eprintln!(
+                    "error: invalid --event {arg:?}: expected checkpoint|blitz|circuit|crash:<row>"
+                );
+                std::process::exit(2);
+            }
+        },
+        None => SessionMode::Cruise,
     };
     let conditions = SessionConditions {
         time_of_day: match cli.time_of_day.map(TimeOfDay::new).transpose() {
@@ -174,7 +198,7 @@ fn main() {
     });
     let config = SessionConfig {
         world,
-        mode: SessionMode::Cruise,
+        mode,
         difficulty: if cli.pro {
             Difficulty::Professional
         } else {
@@ -186,6 +210,21 @@ fn main() {
         mods_active,
         ..SessionConfig::default()
     };
+
+    // An event host must not advertise a session it cannot run, so the
+    // gate is the same resolution a session load takes — catalog scan,
+    // dependency-checked resolve, race-definition build (plus the
+    // authored roster/reward surface). An unknown row, missing records
+    // or a definition that fails to build are flag-time errors; Crash
+    // Course rows refuse here the same way `mm2` refuses them
+    // (`RaceBuildError::CrashCourseUnsupported`, F21).
+    if let (SessionMode::Event(event_ref), Some(arg)) = (&config.mode, cli.event.as_deref())
+        && let Err(e) = race::event_race_setup(&vfs, event_ref, config.difficulty)
+    {
+        eprintln!("error: --event {arg:?} cannot run here: {e}");
+        std::process::exit(2);
+    }
+
     let ad = match net::advertise(&config) {
         Ok(ad) => ad,
         Err(e) => {
@@ -226,7 +265,13 @@ fn main() {
     // `Host` is !Sync (the event channel is a Receiver), so the reader
     // thread drives the loop through a `HostCtl` handle. A closed
     // stdin ends the thread without touching the host — unattended
-    // operation is normal.
+    // operation is normal. `start` takes the session mode's late-join
+    // policy (MP-5): an event lobby closes to joins once started,
+    // a cruise lobby stays open.
+    let start_policy = match config.mode {
+        SessionMode::Event(_) => LateJoin::Closed,
+        SessionMode::Cruise => LateJoin::Open,
+    };
     let quitting = Arc::new(AtomicBool::new(false));
     {
         let ctl = host.ctl();
@@ -235,9 +280,7 @@ fn main() {
             for line in io::stdin().lock().lines() {
                 let Ok(line) = line else { return };
                 match line.trim() {
-                    // mm2-host advertises cruise sessions only, whose
-                    // documented rule (MP-5) is join/leave at any time.
-                    "start" => drop(ctl.start(LateJoin::Open)),
+                    "start" => drop(ctl.start(start_policy)),
                     "cancel" => drop(ctl.cancel()),
                     "quit" => {
                         quitting.store(true, Ordering::Relaxed);
