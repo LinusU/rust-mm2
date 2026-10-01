@@ -36,9 +36,9 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvError, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -496,6 +496,63 @@ impl Client {
     /// a broken peer cannot hang the suite.
     pub fn set_timeout(&self, timeout: Option<Duration>) -> Result<(), NetError> {
         self.conn.set_timeout(timeout)
+    }
+
+    /// A send-side handle for threads other than the one blocked in
+    /// [`Client::recv`] — the client's counterpart of [`Host::ctl`],
+    /// so a consumer that reads lobby traffic on one thread can answer
+    /// it from another (a stdin driver, a Bevy system). The handle
+    /// serializes sends so two callers cannot interleave a frame, and
+    /// installs [`WRITE_TIMEOUT`] — socket options are shared, so the
+    /// bound then also covers this `Client`'s own sends: a peer that
+    /// stops reading bounds a send rather than stalling it forever.
+    pub fn ctl(&self) -> Result<ClientCtl, NetError> {
+        let writer = self.conn.writer()?;
+        writer.set_write_timeout(Some(WRITE_TIMEOUT))?;
+        Ok(ClientCtl {
+            writer: Arc::new(Mutex::new(writer)),
+        })
+    }
+}
+
+/// A cloneable `Send`/`Sync` handle to a joined [`Client`]'s send side —
+/// see [`Client::ctl`]. It carries only the legal client→host set
+/// (`SetReady`, `SetVehicle`, `Leave`), so a caller cannot send a
+/// host-only message and get the client dropped `Malformed`.
+#[derive(Debug, Clone)]
+pub struct ClientCtl {
+    writer: Arc<Mutex<Writer>>,
+}
+
+impl ClientCtl {
+    fn send(&self, msg: &Message) -> Result<(), NetError> {
+        // A poisoned mutex only means a send panicked mid-write — the
+        // socket is still usable, so recover the guard rather than
+        // propagate a poisoning that says nothing about the wire.
+        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        writer.send(msg)
+    }
+
+    /// [`Client::set_ready`], from any thread.
+    pub fn set_ready(&self, ready: bool) -> Result<(), NetError> {
+        self.send(&Message::SetReady { ready })
+    }
+
+    /// [`Client::set_vehicle`], from any thread.
+    pub fn set_vehicle(&self, vehicle: &str, paint: u8) -> Result<(), NetError> {
+        self.send(&Message::SetVehicle(VehiclePick {
+            vehicle: vehicle.to_string(),
+            paint,
+        }))
+    }
+
+    /// A clean quit from another thread: the host records
+    /// [`LeaveCause::Quit`] and closes the socket, which ends the
+    /// owner's blocked [`Client::recv`] — unlike [`Client::leave`] this
+    /// cannot drain, so the owner finishes the close by reading the
+    /// socket to its end (or dropping the client).
+    pub fn leave(&self) -> Result<(), NetError> {
+        self.send(&Message::Leave)
     }
 }
 
@@ -2112,5 +2169,75 @@ mod tests {
             other => panic!("expected Started, got {other:?}"),
         }
         driver.join().unwrap().unwrap();
+    }
+
+    /// `Client::ctl` is the client's cross-thread send handle: a
+    /// `set_ready`/`set_vehicle` sent through it lands on the roster
+    /// exactly like the `Client` methods while the owner sits in
+    /// `recv` — the dedicated client's stdin shape.
+    #[test]
+    fn a_client_ctl_drives_the_lobby_from_another_thread() {
+        let host = host();
+        let mut alice = join(host.addr(), "alice");
+        host.recv_timeout(WAIT).unwrap(); // Joined
+        recv_roster(&mut alice, 1);
+
+        let ctl = alice.ctl().unwrap();
+        let driver = thread::spawn(move || {
+            ctl.set_vehicle("vpbug", 1)?;
+            ctl.set_ready(true)
+        });
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::VehicleChanged {
+                id: 1,
+                vehicle,
+                paint: 1,
+            }) => assert_eq!(vehicle, "vpbug"),
+            other => panic!("expected VehicleChanged, got {other:?}"),
+        }
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::ReadyChanged { id: 1, ready: true }) => {}
+            other => panic!("expected ReadyChanged, got {other:?}"),
+        }
+        driver.join().unwrap().unwrap();
+        // Pick and ready each rebroadcast a roster, in wire order.
+        let roster = recv_roster(&mut alice, 1);
+        assert_eq!(
+            roster[0].pick,
+            Some(VehiclePick {
+                vehicle: "vpbug".to_string(),
+                paint: 1,
+            })
+        );
+        let roster = recv_roster(&mut alice, 1);
+        assert!(roster[0].ready);
+    }
+
+    /// `ctl.leave()` is a clean quit the host reports `Quit` — and it
+    /// ends the owner's blocked `recv`, which is the point of the
+    /// handle: the control thread can end the session without the
+    /// reader cooperating.
+    #[test]
+    fn a_ctl_leave_quits_and_ends_the_recv_loop() {
+        let host = host();
+        let mut alice = join(host.addr(), "alice");
+        host.recv_timeout(WAIT).unwrap(); // Joined
+        recv_roster(&mut alice, 1);
+
+        let ctl = alice.ctl().unwrap();
+        thread::spawn(move || ctl.leave()).join().unwrap().unwrap();
+
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::Left {
+                id: 1,
+                cause: LeaveCause::Quit,
+                driver,
+            }) => assert_eq!(driver, "alice"),
+            other => panic!("expected a Quit Left, got {other:?}"),
+        }
+        // The host closed the socket: the owner's recv drains the last
+        // roster (the removal rebroadcast) then errors — it does not
+        // sit blocked on a dead lobby.
+        while alice.recv().is_ok() {}
     }
 }

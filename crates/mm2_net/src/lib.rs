@@ -41,11 +41,11 @@ pub use conn::{
 };
 pub use frame::{MAX_FRAME, read_frame, write_frame};
 pub use lobby::{
-    Client, Host, HostConfig, HostCtl, HostEvent, LateJoin, LeaveCause, PickValidator,
+    Client, ClientCtl, Host, HostConfig, HostCtl, HostEvent, LateJoin, LeaveCause, PickValidator,
 };
 pub use proto::{
-    Hello, MAX_PLAYERS, MAX_SESSION_PARAMS, Message, PROTOCOL_VERSION, ProtoError, RejectCode,
-    RosterEntry, SessionAdvertisement, VehiclePick,
+    Hello, MAX_PLAYERS, MAX_SESSION_PARAMS, MAX_STRING, Message, PROTOCOL_VERSION, ProtoError,
+    RejectCode, RosterEntry, SessionAdvertisement, VehiclePick,
 };
 
 /// Every failure mode of this layer: transport I/O, frame bounds, wire

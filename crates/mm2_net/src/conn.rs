@@ -207,8 +207,11 @@ fn send_reject(conn: &mut Conn, code: RejectCode, message: &str) {
 }
 
 /// The write half of a connection, cloned from the same socket —
-/// [`Conn::writer`]. Only the owner sends on it, so frames cannot
-/// interleave.
+/// [`Conn::writer`]. Socket options are shared with the `Conn`: a
+/// timeout installed here bounds the owner's sends too. Two `Writer`s
+/// on one socket can interleave frames — consumers that share one wrap
+/// it in a mutex (see `lobby::ClientCtl`).
+#[derive(Debug)]
 pub struct Writer {
     stream: TcpStream,
 }
