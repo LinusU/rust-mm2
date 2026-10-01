@@ -28,7 +28,7 @@ use mm2_game::{
 use mm2_vehicle::vehicle::{VehicleInput, VehicleState};
 use mm2_vehicle::{VehicleConfig, VehiclePlugin};
 
-use crate::{camera, city, contracts, damage, opponents, race, scripted, session};
+use crate::{camera, city, contracts, damage, net, opponents, race, scripted, session};
 
 /// Engine commit embedded by `build.rs` — reports stay versioned by the
 /// exact code that produced them.
@@ -185,20 +185,107 @@ pub fn headless_smoke(
     driver: Driver,
     profile: Option<crate::profile::ActiveProfile>,
 ) -> SmokeRecord {
-    let world = match &config.world {
+    run_headless(
+        RunSource::Session(config),
+        vfs,
+        car,
+        vehicle_config,
+        frames,
+        driver,
+        profile,
+    )
+}
+
+/// The `mm2 --join` headless run (F24-B.7): the app parks at `Menu`
+/// inside a joined lobby and the wire drives the session lifecycle —
+/// the host's `Start` is what builds a world. `frames` still bounds
+/// the whole run; a host that never starts one exhausts the budget
+/// waiting, and a parked `Menu` update sleeps a few ms so that wait
+/// is wall-clock rather than a spin through free frames. The record's
+/// `mp=` field reports how far the lobby got.
+pub fn headless_lobby(
+    link: net::LobbyLink,
+    vfs: Vfs,
+    car: session::SelectedCar,
+    vehicle_config: &VehicleConfig,
+    frames: u32,
+    driver: Driver,
+    profile: Option<crate::profile::ActiveProfile>,
+) -> SmokeRecord {
+    run_headless(
+        RunSource::Lobby(Box::new(link)),
+        vfs,
+        car,
+        vehicle_config,
+        frames,
+        driver,
+        profile,
+    )
+}
+
+/// What supplies the session a headless run drives. `Lobby` is boxed —
+/// the link dwarfs the borrowed config variant (clippy's
+/// large-enum-variant bound).
+enum RunSource<'a> {
+    /// A locally configured session — `begin`ned before the first
+    /// update (today's `headless_smoke` path).
+    Session(&'a SessionConfig),
+    /// A joined lobby — the session begins when the host's `Start`
+    /// arrives (F24-B.7).
+    Lobby(Box<net::LobbyLink>),
+}
+
+/// `dev-world` or the logical city path — the `world=` record field.
+fn world_label(config: &SessionConfig) -> String {
+    match &config.world {
         WorldMode::DevWorld => "dev-world".to_string(),
         WorldMode::City { psdl } => psdl.clone(),
+    }
+}
+
+/// The `world=` label at record time: a lobby run names the world the
+/// wire's session actually began on (`"lobby"` while it never left the
+/// lobby); a local run's launch label already is it.
+fn record_world(session: &Session, lobby_mode: bool, launch_world: &str) -> String {
+    if lobby_mode {
+        session
+            .config()
+            .map(world_label)
+            .unwrap_or_else(|| "lobby".to_string())
+    } else {
+        launch_world.to_string()
+    }
+}
+
+fn run_headless(
+    source: RunSource<'_>,
+    vfs: Vfs,
+    car: session::SelectedCar,
+    vehicle_config: &VehicleConfig,
+    frames: u32,
+    driver: Driver,
+    profile: Option<crate::profile::ActiveProfile>,
+) -> SmokeRecord {
+    let lobby_mode = matches!(source, RunSource::Lobby(_));
+    let (world, dev) = match &source {
+        RunSource::Session(config) => (world_label(config), config.dev.clone()),
+        // A lobby run's world label is only known once a session
+        // begins; the record derives it at the end and reports
+        // "lobby" when none ever did.
+        RunSource::Lobby(link) => ("lobby".to_string(), link.dev.clone()),
     };
-    let record = |status: SmokeStatus, detail: String| SmokeRecord {
+    let record = |world: &str, status: SmokeStatus, detail: String| SmokeRecord {
         kind: KIND_HEADLESS_PHYSICS,
-        world: world.clone(),
+        world: world.to_string(),
         status,
         detail,
     };
 
     let mut session_res = Session::new();
-    if let Err(e) = session_res.begin(config.clone()) {
-        return record(SmokeStatus::Fail, format!("session begin: {e}"));
+    if let RunSource::Session(config) = &source
+        && let Err(e) = session_res.begin((*config).clone())
+    {
+        return record(&world, SmokeStatus::Fail, format!("session begin: {e}"));
     }
 
     let mut app = App::new();
@@ -251,12 +338,13 @@ pub fn headless_smoke(
         // `--cockpit`/`--far`/`--cam` view selection reaches the
         // headless app through the config like `dev.mirror` — the
         // record's `cam` pose then proves the authored interior eye /
-        // far chase lens, not a claim.
-        .insert_resource(if config.dev.camera.is_some() {
+        // far chase lens, not a claim. A lobby run has no session
+        // config yet, so `dev` is the launch's override set directly.
+        .insert_resource(if dev.camera.is_some() {
             camera::CameraMode::Free
-        } else if config.dev.cockpit {
+        } else if dev.cockpit {
             camera::CameraMode::Cockpit
-        } else if config.dev.far {
+        } else if dev.far {
             camera::CameraMode::ChaseFar
         } else {
             camera::CameraMode::Chase
@@ -264,13 +352,13 @@ pub fn headless_smoke(
         // F22-B.2: `--mirror` reaches the headless app through the
         // config, like `no_pvs` — the `mir=` record field reports the
         // strip camera's real state.
-        .insert_resource(camera::RearView(config.dev.mirror))
+        .insert_resource(camera::RearView(dev.mirror))
         // F22-A.2: the opponent-indicator toggle — session-agnostic,
         // on by designed default like the windowed app.
         .init_resource::<crate::oppind::OpponentIndicators>()
         // F22-A.3: the HUD master gate — `--no-hud` starts it off like
         // the windowed app; the `hud=` field reports the off state.
-        .insert_resource(crate::hud::HudVisible(!config.dev.no_hud))
+        .insert_resource(crate::hud::HudVisible(!dev.no_hud))
         .insert_resource(session::SpawnPoint {
             position: Vec3::new(0.0, 1.5, 0.0),
             yaw: 0.0,
@@ -528,23 +616,51 @@ pub fn headless_smoke(
     if let Some(profile) = profile {
         app.insert_resource(profile);
     }
+    if let RunSource::Lobby(link) = source {
+        app.insert_resource(*link)
+            .init_resource::<net::LobbyState>()
+            .add_systems(
+                Update,
+                (
+                    net::lobby_input,
+                    // The bridge settles after the session driver — a
+                    // `Cancel` quit that reached `Menu` this frame can
+                    // take a queued exit (or a parked `Start` begin)
+                    // the same update.
+                    net::drive_lobby.after(session::drive_session),
+                ),
+            );
+    }
     app.finish();
     app.cleanup();
 
     // The first update runs the world/event load through the real
     // session driver — `Loading → Ready → Countdown` for an event,
-    // `→ Playing` for cruise, `→ Failed` on any load error.
+    // `→ Playing` for cruise, `→ Failed` on any load error. A lobby
+    // run instead parks at `Menu` — the host's `Start` is what begins.
     app.update();
     if let SessionPhase::Failed(m) = app.world().resource::<Session>().phase() {
-        return record(SmokeStatus::Fail, format!("load: {m}"));
+        return record(&world, SmokeStatus::Fail, format!("load: {m}"));
     }
     let mut player_query = app
         .world_mut()
         .query_filtered::<Entity, With<PlayerVehicle>>();
-    if player_query.iter(app.world()).next().is_none() {
-        return record(SmokeStatus::Fail, "no player vehicle spawned".into());
+    // A lobby run parked at `Menu` has no player yet — legitimately:
+    // the session the host starts is what spawns one. A `Start`
+    // drained inside this first update leaves the session `Loading` —
+    // `load_session_world` picks it up on the next — so only a
+    // loaded-phase session without a player is a real failure.
+    let phase = app.world().resource::<Session>().phase();
+    if app.world().resource::<Session>().config().is_some()
+        && phase != &SessionPhase::Loading
+        && player_query.iter(app.world()).next().is_none()
+    {
+        return record(
+            &world,
+            SmokeStatus::Fail,
+            "no player vehicle spawned".into(),
+        );
     }
-    let spawn_pos = app.world().resource::<session::SpawnPoint>().position;
     // The generation the run started with: a session that restarts
     // mid-run (a `RestartEvent` disabled outcome, `--restart`, a
     // Backspace intent) bumps it, and the record reports the delta as
@@ -600,6 +716,20 @@ pub fn headless_smoke(
         }
         let t0 = std::time::Instant::now();
         app.update();
+        // A lobby run parked at `Menu` is waiting on the host in wall
+        // time — parked updates are near-free, so without a small pause
+        // the frame budget evaporates long before a `Start` can arrive.
+        // A link the bridge has finished with — dead, or queued for
+        // exit — ends the wait outright: nothing more can arrive, and
+        // the windowed runner would be gone already.
+        if lobby_mode && app.world().resource::<Session>().phase() == &SessionPhase::Menu {
+            let link = app.world().resource::<net::LobbyLink>();
+            let lobby = app.world().resource::<net::LobbyState>();
+            if link.closed || lobby.pending_exit.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(4));
+        }
         if diag {
             let mut q = app.world_mut().query::<(
                 Entity,
@@ -703,8 +833,65 @@ pub fn headless_smoke(
     let ticks = session.tick();
     // Session restarts observed over the run — `begin` bumps the
     // generation, so the delta counts teardown/begin cycles the run
-    // went through (`rs=` only appears when one did).
-    let restarts = session.generation().saturating_sub(initial_generation);
+    // went through (`rs=` only appears when one did). A lobby run's
+    // generation is the host's mint — not a local restart counter —
+    // so it suppresses the delta entirely.
+    let restarts = if lobby_mode {
+        0
+    } else {
+        session.generation().saturating_sub(initial_generation)
+    };
+    // The spawn the run's `moved=`/`below-world` checks measure
+    // against. Read after the loop so a lobby run's value is the
+    // session's loaded spawn, not the pre-`Start` placeholder — for a
+    // local run the resource never changed since the first update.
+    let spawn_pos = world_ecs.resource::<session::SpawnPoint>().position;
+    // The config the record's self-describing fields read. For a lobby
+    // run it is the session the wire began (dev overrides and all);
+    // while still parked in the lobby it is a default wearing this
+    // launch's dev set, so `--traction`-style fields stay honest.
+    let rec_config = session.config().cloned().unwrap_or_else(|| SessionConfig {
+        dev,
+        ..SessionConfig::default()
+    });
+    // F24-B.7 lobby evidence: `mp=gen<N>` once a `Start` minted the
+    // session's generation, `mp=lobby(<n>p)` while still waiting on
+    // the host — absent without a `LobbyState`, so every non-lobby
+    // record stays bit-identical.
+    let mp_detail = world_ecs
+        .get_resource::<net::LobbyState>()
+        .map(|l| match l.generation {
+            Some(g) => format!(" mp=gen{g}"),
+            None => format!(" mp=lobby({}p)", l.roster.len()),
+        })
+        .unwrap_or_default();
+    // A lobby run parked at `Menu` at the frame cap gets the lobby's
+    // own verdict, not the generic "no player" one: a refused session
+    // or a lost host carries its reason in the notice, a clean
+    // `Cancel` return is the lifecycle's end state, and a lobby that
+    // simply never started is an honest timeout — not a pass.
+    if lobby_mode && *session.phase() == SessionPhase::Menu {
+        let lobby = world_ecs.resource::<net::LobbyState>();
+        let (status, why) = match &lobby.notice {
+            Some(why) => (SmokeStatus::Fail, format!(" {why}")),
+            None if session.config().is_none() => (
+                SmokeStatus::Fail,
+                " host never started a session".to_string(),
+            ),
+            None => (SmokeStatus::Pass, " returned to the lobby".to_string()),
+        };
+        return record(
+            &record_world(session, lobby_mode, &world),
+            status,
+            format!(
+                "updates={frames} ticks={ticks} driver={} diff={} phase={}{mp_detail}{}",
+                driver.as_str(),
+                rec_config.difficulty.as_str(),
+                session.phase().name(),
+                why
+            ),
+        );
+    }
     // The live player at the frame cap: `None` while the session sits
     // in the teardown/rebuild window, which is a lifecycle state — not
     // a missing pose.
@@ -1110,7 +1297,7 @@ pub fn headless_smoke(
             // The dev `--banger-pool` bound is recorded when set so a
             // reclaim run is self-describing; default runs stay
             // bit-identical to earlier records.
-            let pool = config
+            let pool = rec_config
                 .dev
                 .banger_pool
                 .map(|n| format!(" bng_pool={n}"))
@@ -1394,7 +1581,7 @@ pub fn headless_smoke(
     // `1.0` unmodified runs stay bit-identical.
     let traction_detail = world_ecs
         .get_resource::<mm2_vehicle::TireConditions>()
-        .filter(|t| t.traction != 1.0 || config.dev.traction.is_some())
+        .filter(|t| t.traction != 1.0 || rec_config.dev.traction.is_some())
         .map(|t| format!(" traction={}", t.traction))
         .unwrap_or_default();
     // A bound driver profile is recorded so a run under persisted
@@ -1457,12 +1644,13 @@ pub fn headless_smoke(
     // (DRV-2/DRV-3) and aimap variant (RACE-11) selected its content.
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{extra}",
+            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{extra}",
             driver.as_str(),
-            config.difficulty.as_str(),
+            rec_config.difficulty.as_str(),
             session.phase().name(),
         )
     };
+    let end_world = record_world(session, lobby_mode, &world);
 
     // Absent is only legitimate inside the transient teardown/rebuild
     // window — `Unloading → Menu → Loading` — and only while a restart
@@ -1480,7 +1668,7 @@ pub fn headless_smoke(
                 SessionPhase::Failed(m) => format!(" session failed: {m}"),
                 _ => " no player vehicle".to_string(),
             };
-            return record(SmokeStatus::Fail, detail(&why));
+            return record(&end_world, SmokeStatus::Fail, detail(&why));
         }
     }
     // No player entity at the cap means the session was mid-teardown —
@@ -1491,10 +1679,10 @@ pub fn headless_smoke(
             && vel.is_some_and(|v| v.is_finite())
             && rot.is_some_and(|r| r.is_finite()));
     if !finite {
-        return record(SmokeStatus::Fail, detail(" non-finite pose"));
+        return record(&end_world, SmokeStatus::Fail, detail(" non-finite pose"));
     }
     if !saw_grounded {
-        return record(SmokeStatus::Fail, detail(" never grounded"));
+        return record(&end_world, SmokeStatus::Fail, detail(" never grounded"));
     }
     // "Below the world" is the loaded world's authored floor — the
     // PSDL bounding-box minimum — minus the margin, when the session
@@ -1509,7 +1697,11 @@ pub fn headless_smoke(
     if let Some(p) = pos
         && p.y < below_world
     {
-        return record(SmokeStatus::Fail, detail(" fell through the world"));
+        return record(
+            &end_world,
+            SmokeStatus::Fail,
+            detail(" fell through the world"),
+        );
     }
     // The dev world is flat and empty ahead of spawn — a healthy car must
     // be able to drive *when its driver requests motion*. `Parked` never
@@ -1518,13 +1710,13 @@ pub fn headless_smoke(
     // can legitimately wall the car in, so its bar is load + finite +
     // grounded only.
     if driver != Driver::Parked
-        && matches!(&config.world, WorldMode::DevWorld)
-        && !matches!(&config.mode, mm2_game::SessionMode::Event(_))
+        && matches!(&rec_config.world, WorldMode::DevWorld)
+        && !matches!(&rec_config.mode, mm2_game::SessionMode::Event(_))
         && peak_speed < 5.0
     {
-        return record(SmokeStatus::Fail, detail(" car never drove"));
+        return record(&end_world, SmokeStatus::Fail, detail(" car never drove"));
     }
-    record(SmokeStatus::Pass, detail(""))
+    record(&end_world, SmokeStatus::Pass, detail(""))
 }
 
 /// Whether a missing player entity at the frame cap is a legitimate

@@ -10,6 +10,7 @@
 //! records (see `mm2_app::smoke`) and exit 0/3/4 respectively; usage
 //! errors exit 2.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use avian3d::prelude::*;
@@ -20,9 +21,9 @@ use clap::Parser;
 use mm2_app::session::{SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
     audio, banger, breakaway, camera, car_visual, city, contracts, damage, damage_fx, dash,
-    environment, hud, hudmap, input, menu, nav_overlay, navarrow, oppind, opponents, pause, precip,
-    profile, progression, pvs, race, racestat, racetime, recovery, results, scripted, sequence,
-    session, smoke, spark_fx, stuck, texel_fx, traffic, wheel_fx,
+    environment, hud, hudmap, input, menu, nav_overlay, navarrow, net, oppind, opponents, pause,
+    precip, profile, progression, pvs, race, racestat, racetime, recovery, results, scripted,
+    sequence, session, smoke, spark_fx, stuck, texel_fx, traffic, wheel_fx,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
@@ -313,6 +314,40 @@ struct Cli {
     /// the nav overlay (implies --nav).
     #[arg(long, value_name = "from:to")]
     nav_route: Option<String>,
+
+    /// Join a multiplayer lobby at `addr` (`host:port`, e.g. from an
+    /// `mm2-host` `listening=` line) and park in it (F24-B). The
+    /// session — world, mode, difficulty, conditions, seed — comes
+    /// from the host's wire advertisement, so the session-shaping
+    /// flags conflict; the local `--car`/`--paint` name the pick
+    /// offered to the lobby, and evidence flags (`--frames`,
+    /// `--headless`, `--bot`, `--cam`, …) still apply locally but
+    /// never ride the wire.
+    #[arg(
+        long,
+        value_name = "addr",
+        conflicts_with_all = [
+            "city",
+            "event",
+            "dev_world",
+            "pro",
+            "weather",
+            "time_of_day",
+            "vehicle_config",
+            "menu",
+        ]
+    )]
+    join: Option<SocketAddr>,
+
+    /// Driver name on a joined lobby's roster (default: the bound
+    /// profile's name, else `player`).
+    #[arg(long, requires = "join")]
+    driver: Option<String>,
+
+    /// Mark ready as soon as the lobby admits us — with it the host's
+    /// `start` can fire immediately.
+    #[arg(long, requires = "join")]
+    ready: bool,
 
     /// Force the menu front-end even alongside the capture flags —
     /// `--menu --frames N --screenshot out.png` renders the shell
@@ -800,6 +835,61 @@ fn main() {
         ..SessionConfig::default()
     };
 
+    // `--join`: park at `Menu` inside a joined lobby instead of
+    // beginning `session_config` — the host's wire advertisement owns
+    // world/mode/difficulty/conditions/seed (F24-B.7). Of the launch
+    // config only `vehicle` (the pick we offer the roster) and `dev`
+    // (this process's local-only overrides) still carry over. Join is
+    // a handshake-bounded call; a refused/unreachable lobby is a named
+    // failure, never a silent local session.
+    let mut lobby = if let Some(addr) = cli.join {
+        let fingerprint = match mm2_content::fingerprint::gameplay(&vfs) {
+            Ok(fp) => fp,
+            Err(e) => {
+                error!(error = %e, "fingerprinting content for --join");
+                std::process::exit(2);
+            }
+        };
+        let driver = cli
+            .driver
+            .clone()
+            .or_else(|| active_profile.as_ref().map(|s| s.profile.name.clone()))
+            .unwrap_or_else(|| "player".to_string());
+        if driver.len() > mm2_net::MAX_STRING {
+            error!(
+                "--driver is {} bytes; the wire bound is {}",
+                driver.len(),
+                mm2_net::MAX_STRING
+            );
+            std::process::exit(2);
+        }
+        let hello = mm2_net::hello(smoke::COMMIT.to_string(), driver, fingerprint.hash);
+        let link = match net::LobbyLink::join(addr, &hello, has_mods, session_config.dev.clone()) {
+            Ok(link) => link,
+            Err(e) => {
+                error!(peer = %addr, error = %e, "join failed");
+                std::process::exit(1);
+            }
+        };
+        // Offer our pick immediately — the roster should show what
+        // we'll drive, and the host's catalog gate confirms it can
+        // spawn. `--ready` opts into the start gate.
+        match net::encode_pick(&session_config.vehicle) {
+            Ok(pick) => drop(link.ctl().set_vehicle(&pick.vehicle, pick.paint)),
+            Err(e) => {
+                error!(error = %e, "cannot offer the --car/--paint pick");
+                std::process::exit(2);
+            }
+        }
+        if cli.ready {
+            let _ = link.ctl().set_ready(true);
+        }
+        info!(peer = %addr, driver = %link.driver(), id = link.player_id(), "joined lobby");
+        Some(link)
+    } else {
+        None
+    };
+
     // Capability checks with their own status: a requested city with no
     // data source at all is `unavailable` (missing data), and a visual
     // smoke with no display is `unavailable` (no GPU/windowing). Neither
@@ -830,28 +920,38 @@ fn main() {
     }
 
     // Headless physics smoke: no window, no GPU. Runs and exits here —
-    // `vfs`/`selected` move in, the process exits on the record.
+    // `vfs`/`selected` move in, the process exits on the record. A
+    // joined lobby parks there too: `headless_lobby` waits on the wire
+    // — the host's `Start` is what builds a world.
     if cli.headless {
-        let rec = smoke::headless_smoke(
-            &session_config,
-            vfs,
-            SelectedCar {
-                def: selected,
-                paint,
-            },
-            &vehicle,
-            cli.frames.unwrap_or(600),
-            if cli.bot {
-                smoke::Driver::Scripted
-            } else if cli.parked {
-                smoke::Driver::Parked
-            } else if cli.seq {
-                smoke::Driver::Sequence
-            } else {
-                smoke::Driver::Hold
-            },
-            active_profile,
-        );
+        let driver = if cli.bot {
+            smoke::Driver::Scripted
+        } else if cli.parked {
+            smoke::Driver::Parked
+        } else if cli.seq {
+            smoke::Driver::Sequence
+        } else {
+            smoke::Driver::Hold
+        };
+        let frames = cli.frames.unwrap_or(600);
+        let car = SelectedCar {
+            def: selected,
+            paint,
+        };
+        let rec = match lobby.take() {
+            Some(link) => {
+                smoke::headless_lobby(link, vfs, car, &vehicle, frames, driver, active_profile)
+            }
+            None => smoke::headless_smoke(
+                &session_config,
+                vfs,
+                car,
+                &vehicle,
+                frames,
+                driver,
+                active_profile,
+            ),
+        };
         println!("{}", rec.line());
         std::process::exit(rec.status.exit_code());
     }
@@ -865,8 +965,11 @@ fn main() {
     // run: their records must stay reproducible and unattended. The
     // one exception is `--menu`, which pairs with the capture flags to
     // render the shell itself (`--frames`/`--screenshot` become a menu
-    // visual smoke instead of a world one).
+    // visual smoke instead of a world one). A joined lobby owns the
+    // `Menu` parking spot instead of the shell — `--join` already
+    // conflicts `--menu`, and its quit path returns to the lobby.
     let menu_mode = (!smoke_requested || cli.menu)
+        && lobby.is_none()
         && cli.city.is_none()
         && cli.event.is_none()
         && !cli.dev_world
@@ -901,7 +1004,10 @@ fn main() {
     // not a smoke fail. In menu mode the session parks at `Menu` and
     // the shell owns `begin`.
     let mut session = Session::new();
-    if !menu_mode && let Err(e) = session.begin(session_config) {
+    if !menu_mode
+        && lobby.is_none()
+        && let Err(e) = session.begin(session_config)
+    {
         error!(error = %e, "invalid session configuration");
         std::process::exit(2);
     }
@@ -1411,6 +1517,39 @@ fn main() {
                 )
                     .chain(),
             );
+    }
+    if let Some(link) = lobby {
+        // A joined lobby owns `Menu`-time surface and exit: the pump
+        // thread blocks on the socket while `drive_lobby` drains what
+        // it queued each update — after `drive_session` so a `Cancel`
+        // quit that reached `Menu` this frame can settle the lobby's
+        // follow-ups immediately. `LobbyText` is the minimal surface
+        // until a real lobby menu exists.
+        app.insert_resource(link)
+            .init_resource::<net::LobbyState>()
+            .add_systems(
+                Update,
+                (
+                    net::lobby_input,
+                    net::drive_lobby.after(session::drive_session),
+                    net::drive_lobby_text,
+                ),
+            );
+        app.world_mut().spawn((
+            net::LobbyText,
+            Text::new(""),
+            TextFont {
+                font_size: bevy::text::FontSize::Px(14.0),
+                ..default()
+            },
+            TextColor(Color::WHITE),
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(12.0),
+                left: Val::Px(12.0),
+                ..default()
+            },
+        ));
     }
     if cli.bot {
         app.insert_resource(scripted::ScriptedDrive);

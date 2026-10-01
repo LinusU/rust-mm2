@@ -544,6 +544,12 @@ pub enum Ineligible {
     /// defaults, so an unchanged visit to the options screen keeps
     /// eligibility.
     Customized,
+    /// The session ran under a networked authority — a joined lobby's
+    /// `Remote` session is a local prediction of the host's run, not
+    /// an authoritative single-player race (designed conservative
+    /// policy: what the original's multiplayer counted toward is
+    /// unverified, and a prediction must not mint unlocks).
+    Networked,
 }
 
 impl std::fmt::Display for Ineligible {
@@ -554,6 +560,7 @@ impl std::fmt::Display for Ineligible {
             Self::DevOverride(which) => write!(f, "dev override {which}"),
             Self::ModContent => write!(f, "mod content mounted"),
             Self::Customized => write!(f, "customized conditions"),
+            Self::Networked => write!(f, "networked session"),
         }
     }
 }
@@ -564,6 +571,9 @@ impl std::fmt::Display for Ineligible {
 /// the profile-kind and scripted-driver gates are separate because
 /// they live outside the config.
 pub fn record_eligibility(config: &SessionConfig) -> Result<(), Ineligible> {
+    if config.authority != crate::SessionAuthority::Local {
+        return Err(Ineligible::Networked);
+    }
     if !matches!(config.world, crate::WorldMode::City { .. }) {
         return Err(Ineligible::World);
     }

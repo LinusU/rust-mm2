@@ -236,9 +236,28 @@ impl Session {
     /// the next begins. Bumps [`generation`](Self::generation) and
     /// resets the session clock.
     pub fn begin(&mut self, config: SessionConfig) -> Result<(), SessionError> {
+        self.begin_at(config, self.generation + 1)
+    }
+
+    /// `begin` under a host-minted generation (F24-B): a joined
+    /// lobby's `Start` names the generation the session must adopt so
+    /// `ObjectId`/`ResultId` generation fields agree across peers —
+    /// the lobby's counter is the namespace owner. The wire value may
+    /// only move the local counter forward: staleness detection
+    /// assumes generations never regress, and a link can only ever
+    /// present the lobby's own monotonic sequence.
+    pub fn begin_generation(
+        &mut self,
+        config: SessionConfig,
+        generation: u64,
+    ) -> Result<(), SessionError> {
+        self.begin_at(config, generation.max(self.generation + 1))
+    }
+
+    fn begin_at(&mut self, config: SessionConfig, generation: u64) -> Result<(), SessionError> {
         config.validate().map_err(SessionError::Config)?;
         self.transition(SessionPhase::Loading)?;
-        self.generation += 1;
+        self.generation = generation;
         self.tick = 0;
         self.next_object_slot = 0;
         self.next_player = 0;

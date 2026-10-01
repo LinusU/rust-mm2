@@ -36,9 +36,9 @@ use mm2_content::VehicleDef;
 use mm2_game::{
     BangerPool, BreakPartSpec, DEFAULT_ACTIVE_POOL, DamageSignals, DamageSpec, Mm2Vfs,
     ObjectIdentity, Player, PlayerControl, PlayerVehicle, RaceDefinition, RaceProgress, RaceState,
-    RecoveryPolicy, Session, SessionEntity, SessionMode, SessionPhase, SmokePolicy, SparkPolicy,
-    StuckSpec, TargetSelection, VehicleAudio, VehicleBreaks, VehicleDamage, VehicleRecovery,
-    VehicleSmoke, VehicleSparks, VehicleStuck, WorldMode,
+    RecoveryPolicy, Session, SessionAuthority, SessionEntity, SessionMode, SessionPhase,
+    SmokePolicy, SparkPolicy, StuckSpec, TargetSelection, VehicleAudio, VehicleBreaks,
+    VehicleDamage, VehicleRecovery, VehicleSmoke, VehicleSparks, VehicleStuck, WorldMode,
 };
 use mm2_vehicle::{ResetVehicle, TireConditions, VehicleConfig, vehicle_bundle};
 use tracing::{error, info, warn};
@@ -164,8 +164,36 @@ pub fn session_control_input(
             control.quit = true;
         }
     }
-    if keys.just_pressed(KeyCode::F4) {
+    // The stock restart binding is a single-player control: under a
+    // networked session the wire owns restarts (the host's
+    // `Cancel`/`Start` pair), so `F4` is local-authority only. A
+    // future in-app host restart is a rematch intent, not a local
+    // `begin`.
+    if keys.just_pressed(KeyCode::F4)
+        && session
+            .config()
+            .is_none_or(|c| c.authority == SessionAuthority::Local)
+    {
         control.restart = true;
+    }
+}
+
+/// `drive_session`'s view of what else could own "a `quit` intent
+/// landed at `Menu`". A running [`MenuShell`](crate::menu::MenuShell)
+/// owns exit (its Quit row / Esc at the root); a joined
+/// [`LobbyLink`](crate::net::LobbyLink) means quit lands back in the
+/// lobby and `net::drive_lobby` writes the eventual `AppExit`. Only
+/// with neither is a `Menu` quit the process's exit.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct MenuExit<'w> {
+    menu: Option<Res<'w, crate::menu::MenuShell>>,
+    lobby: Option<Res<'w, crate::net::LobbyLink>>,
+}
+
+impl MenuExit<'_> {
+    /// Whether quit-to-`Menu` stays inside the app.
+    fn keeps_running(&self) -> bool {
+        self.menu.is_some() || self.lobby.is_some()
     }
 }
 
@@ -177,17 +205,17 @@ pub fn session_control_input(
 ///   session-scoped caches — the impact dedup map is keyed by `Entity`,
 ///   which the next session may recycle — and move to `Menu`.
 /// - `Menu`: `quit` exits the process — unless a `MenuShell` resource
-///   exists, in which case the menu owns exit and a quit here just
-///   returns to it; `restart` calls `begin` with the retained config,
-///   flipping the phase to `Loading` so the spawn system builds the
-///   next session.
+///   or a [`LobbyLink`](crate::net::LobbyLink) exists, in which case
+///   that surface owns exit and a quit here just returns to it;
+///   `restart` calls `begin` with the retained config, flipping the
+///   phase to `Loading` so the spawn system builds the next session.
 /// - `Playing`: a queued `pause` intent (Esc/Start or `--pause`) moves
 ///   the session to `Paused` — the pause overlay's Resume row and
 ///   `pause_input`'s Esc bring it straight back.
 /// - `Countdown`/`Playing`/`Paused`/`Results`/`Failed`: a queued
 ///   quit/restart intent moves the session to `Unloading`; teardown
 ///   proceeds on later frames.
-// The menu-shell presence adds one param past the lint's limit — a
+// The lifecycle genuinely threads every report/caches handle — a
 // SystemParam bundle would hide `session`/`control`, the two handles
 // every arm uses, for no real gain.
 #[allow(clippy::too_many_arguments)]
@@ -204,7 +232,7 @@ pub fn drive_session(
     mut spark_fx_report: ResMut<crate::spark_fx::SparkFxReport>,
     mut texel_report: ResMut<crate::texel_fx::TexelDamageReport>,
     mut spawn: ResMut<SpawnPoint>,
-    menu: Option<Res<crate::menu::MenuShell>>,
+    menu_exit: MenuExit,
     roots: Query<Entity, (With<SessionEntity>, Without<ChildOf>)>,
     mut note: Option<ResMut<SessionNote>>,
     mut exit: MessageWriter<AppExit>,
@@ -299,9 +327,11 @@ pub fn drive_session(
                 control.quit = false;
                 // With a menu shell running, quit-to-menu lands back on
                 // the menu — the shell itself owns process exit (its
-                // Quit row / Esc at the root). Without one, Menu is
-                // terminal: quit exits.
-                if menu.is_none() {
+                // Quit row / Esc at the root). The same goes for a
+                // joined lobby: quit-to-menu lands back in the lobby,
+                // and `net::drive_lobby` owns the eventual AppExit.
+                // Without either, Menu is terminal: quit exits.
+                if !menu_exit.keeps_running() {
                     exit.write(AppExit::Success);
                 }
             } else if control.restart {

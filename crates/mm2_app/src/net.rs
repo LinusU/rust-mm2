@@ -1,6 +1,8 @@
 //! The `mm2_net` bridge (F24-B): `SessionConfig` ↔ the lobby's session
-//! advertisement, and the future home of the Bevy systems that drive a
-//! lobby `Host`/`Client` from app state.
+//! advertisement, plus the Bevy-side lobby client — [`LobbyLink`] wraps
+//! an `mm2_net::Client` on a pump thread and [`drive_lobby`] feeds its
+//! events (including `Start` → `Session::begin_generation`) into app
+//! state. An in-app *host* surface is a later slice.
 //!
 //! `mm2_net` stays project-free — the wire's [`SessionAdvertisement`]
 //! carries a bounded opaque `params` blob whose layout this module owns.
@@ -26,20 +28,30 @@
 //!   them silently.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::net::SocketAddr;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
+use bevy::prelude::*;
 use mm2_assets::Vfs;
 use mm2_content::{EntryStatus, VehicleCatalog};
 use mm2_game::{
     CUSTOMIZE_LAP_MAX, CheckpointRule, ConfigError, Densities, DevOverrides, Difficulty, EventRef,
-    EventTableKind, RaceCustomization, SelectorError, SessionAuthority, SessionConditions,
-    SessionConfig, SessionCustomization, SessionMode, TimeOfDay, VehicleSelection, Weather,
-    WorldMode,
+    EventTableKind, Mm2Vfs, RaceCustomization, SelectorError, Session, SessionAuthority,
+    SessionConditions, SessionConfig, SessionCustomization, SessionMode, SessionPhase, TimeOfDay,
+    VehicleSelection, Weather, WorldMode,
 };
-use mm2_net::{PickValidator, SessionAdvertisement, VehiclePick};
+use mm2_net::{
+    Client, ClientCtl, Hello, Message, NetError, PickValidator, RosterEntry, SessionAdvertisement,
+    VehiclePick,
+};
 use serde::{Deserialize, Serialize};
 
+use crate::menu::MenuShell;
 use crate::race;
+use crate::session::{SelectedCar, SessionControl, TunedVehicle};
 
 /// A `SessionConfig` the advertisement could not carry, or a `params`
 /// blob that could not be read back into one.
@@ -238,6 +250,535 @@ pub fn vehicle_validator(catalog: &VehicleCatalog) -> PickValidator {
             Some(Ok(_)) => Ok(()),
         }
     })
+}
+
+// ─── The in-app lobby client (F24-B.7) ───────────────────────────────
+//
+// `Client` is `!Sync` and blocks in `recv`, so it lives on a pump
+// thread owned by [`LobbyLink`]: inbound frames become [`LobbyEvent`]s
+// on a channel, outbound intents ride the shared [`ClientCtl`].
+// [`drive_lobby`] drains that channel once per update into
+// [`LobbyState`] and — the point of the bridge — feeds an accepted
+// `Start` into the *existing* `Session` lifecycle: the world the host
+// configured loads through the same `load_session_world` path a local
+// session takes, never a parallel spawn. Remote players are not
+// spawned and nothing about position/score/damage is replicated —
+// that is F25/F26 scope, and nothing here pretends otherwise.
+//
+// Exit ownership: while a `LobbyLink` resource exists the bridge owns
+// process exit — `drive_session`'s `quit → Menu` arm must not write
+// `AppExit` (quitting a *session* returns to the lobby, not the OS);
+// `drive_lobby` writes it instead, once the session is parked.
+
+/// How long the bridge waits for the host's socket close after our
+/// `Leave` before ending the link anyway — mirrors `mm2-join`'s
+/// `LEAVE_WATCHDOG`; a host that never closes cannot wedge a quit.
+const LEAVE_WATCHDOG: Duration = Duration::from_secs(5);
+
+/// One lobby transition the pump thread observed — the `Client`'s
+/// inbound message stream plus the terminal link-death marker.
+#[derive(Debug)]
+pub enum LobbyEvent {
+    /// A host→client message, verbatim.
+    Message(Message),
+    /// The link ended — the host went away, or it closed our socket
+    /// after our `Leave`. The string is display-ready.
+    Closed(String),
+}
+
+/// The app's handle on a joined lobby. Dropping it is a polite
+/// disconnect — `Drop` sends `Leave` so the host records a `Quit`
+/// (and the close it produces is also what ends the pump thread).
+#[derive(Resource)]
+pub struct LobbyLink {
+    /// Pump→app events. `Receiver` is `!Sync`, so it sits behind a
+    /// mutex to satisfy `Resource`'s bound; `drive_lobby` drains it.
+    events: Mutex<Receiver<LobbyEvent>>,
+    ctl: ClientCtl,
+    /// Our roster slot — the `Welcome` id.
+    player_id: u16,
+    /// The host's advertised address — lobby UI/test display only.
+    peer: SocketAddr,
+    /// Our roster name.
+    driver: String,
+    /// Whether *this* process mounted mods — the wire never carries
+    /// it (`accept` stamps `mods_active: false`); a session the
+    /// lobby starts gets our local fact.
+    mods_active: bool,
+    /// This launch's local dev overrides — applied to the accepted
+    /// session config at `Start`. Never wire-legal (`advertise`
+    /// refuses them), so they can only ever be a local stamp.
+    pub dev: DevOverrides,
+    /// `leave()` was sent — `Some` the instant it went out, doubling
+    /// as the watchdog's clock.
+    leaving: Option<Instant>,
+    /// The pump reported `Closed` — the link is dead.
+    pub closed: bool,
+}
+
+impl LobbyLink {
+    /// Join the lobby at `addr`, then spawn the pump thread. The
+    /// handshake runs inside `Client::join` under its own bound
+    /// (`HANDSHAKE_TIMEOUT`), so a silent host cannot wedge the
+    /// caller past it.
+    pub fn join(
+        addr: SocketAddr,
+        hello: &Hello,
+        mods_active: bool,
+        dev: DevOverrides,
+    ) -> Result<Self, NetError> {
+        let client = Client::join(addr, hello)?;
+        let player_id = client.player_id();
+        let ctl = client.ctl()?;
+        let (tx, rx) = mpsc::channel();
+        thread::Builder::new()
+            .name("mm2-lobby".to_string())
+            .spawn(move || pump(client, tx))?;
+        Ok(Self {
+            events: Mutex::new(rx),
+            ctl,
+            player_id,
+            peer: addr,
+            driver: hello.driver.clone(),
+            mods_active,
+            dev,
+            leaving: None,
+            closed: false,
+        })
+    }
+
+    /// The roster id the host minted for us.
+    pub fn player_id(&self) -> u16 {
+        self.player_id
+    }
+
+    /// The address we joined.
+    pub fn peer(&self) -> SocketAddr {
+        self.peer
+    }
+
+    /// Our roster name — for the lobby surface.
+    pub fn driver(&self) -> &str {
+        &self.driver
+    }
+
+    /// Outbound intents (`set_ready`, `set_vehicle`) — the legal
+    /// client→host set, serialized on the shared writer.
+    pub fn ctl(&self) -> &ClientCtl {
+        &self.ctl
+    }
+
+    /// Whether `leave()` has been sent.
+    pub fn leaving(&self) -> bool {
+        self.leaving.is_some()
+    }
+
+    /// Say goodbye — the host records a `Quit` and closes our socket;
+    /// the pump then reports `Closed`. Idempotent.
+    pub fn leave(&mut self) {
+        if self.leaving.is_none() {
+            self.leaving = Some(Instant::now());
+            let _ = self.ctl.leave();
+        }
+    }
+
+    /// Drain whatever the pump has queued — non-blocking.
+    fn drain(&self) -> Vec<LobbyEvent> {
+        let rx = self.events.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            out.push(event);
+        }
+        out
+    }
+}
+
+impl Drop for LobbyLink {
+    fn drop(&mut self) {
+        self.leave();
+    }
+}
+
+/// The pump's whole job: block in `Client::recv`, forward each inbound
+/// message as a [`LobbyEvent`], and end with `Closed` — on a dead
+/// socket *or* when the app dropped the link (a failed `send` is the
+/// receiver going away). Either way the client says `Leave` on its
+/// way out so the host records `Quit`, not `Lost`.
+fn pump(mut client: Client, tx: Sender<LobbyEvent>) {
+    loop {
+        let event = match client.recv() {
+            Ok(msg) => LobbyEvent::Message(msg),
+            Err(e) => LobbyEvent::Closed(e.to_string()),
+        };
+        let terminal = matches!(event, LobbyEvent::Closed(_));
+        if tx.send(event).is_err() || terminal {
+            break;
+        }
+    }
+    let _ = client.leave();
+}
+
+/// The app's mirror of lobby state — `drive_lobby` writes it, a lobby
+/// surface or test reads it. Everything here is display/decision
+/// state; the session itself is never mirrored (the `Session`
+/// resource stays authoritative).
+#[derive(Resource, Default)]
+pub struct LobbyState {
+    /// Latest roster broadcast — a complete replacement each time,
+    /// never a delta. Includes our own entry.
+    pub roster: Vec<RosterEntry>,
+    /// The advertised session — the newest `Session` message wins.
+    /// `Start` carries its own snapshot of the *running* session, so
+    /// this is lobby-display state, not what a start begins.
+    pub advertised: Option<SessionAdvertisement>,
+    /// The running session's lobby generation once `Start` arrived —
+    /// cleared by the matching `Cancel`.
+    pub generation: Option<u64>,
+    /// The latest display-ready notice — a refused pick, a refused or
+    /// unrunnable session, a lost link. Replaced, not accumulated.
+    pub notice: Option<String>,
+    /// A validated session config parked until the session returns
+    /// to `Menu` — a `Start` that arrived while we were mid-session
+    /// or mid-teardown.
+    pub pending_start: Option<(u64, SessionConfig)>,
+    /// Exit the app once the session is back at `Menu` — refusal and
+    /// leave paths queue teardown first, then this.
+    pub pending_exit: Option<u8>,
+}
+
+/// The drain system — runs once per update wherever a [`LobbyLink`]
+/// exists. Never blocks: everything the pump queued is applied, then
+/// the lifecycle intents that need `Menu` (a parked start, a queued
+/// exit) settle there.
+///
+// The bridge genuinely threads the link, its mirror, the session
+// lifecycle pair, the VFS and the car resources — a SystemParam
+// bundle would hide the pieces every handler uses.
+#[allow(clippy::too_many_arguments)]
+pub fn drive_lobby(
+    mut link: ResMut<LobbyLink>,
+    mut lobby: ResMut<LobbyState>,
+    mut session: ResMut<Session>,
+    mut control: ResMut<SessionControl>,
+    vfs: Res<Mm2Vfs>,
+    mut selected: ResMut<SelectedCar>,
+    mut tuned: ResMut<TunedVehicle>,
+    menu: Option<Res<MenuShell>>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    for event in link.drain() {
+        match event {
+            LobbyEvent::Message(Message::Session(ad)) => match gate(&vfs.0, &ad) {
+                Ok(_) => lobby.advertised = Some(ad),
+                Err(why) => refuse(&mut link, &mut lobby, why),
+            },
+            LobbyEvent::Message(Message::Roster { players }) => lobby.roster = players,
+            LobbyEvent::Message(Message::VehicleRefused { reason }) => {
+                lobby.notice = Some(reason);
+            }
+            LobbyEvent::Message(Message::Start {
+                generation,
+                session: ad,
+            }) => start(
+                &mut link,
+                &mut lobby,
+                &mut session,
+                &mut control,
+                &vfs.0,
+                &mut selected,
+                &mut tuned,
+                generation,
+                &ad,
+            ),
+            LobbyEvent::Message(Message::Cancel { generation }) => {
+                cancel(&mut lobby, &mut session, &mut control, generation)
+            }
+            LobbyEvent::Closed(reason) => {
+                link.closed = true;
+                if link.leaving() {
+                    // The expected end of our own `Leave`.
+                    lobby.pending_exit.get_or_insert(0);
+                } else {
+                    lobby.roster.clear();
+                    lobby.advertised = None;
+                    lobby.generation = None;
+                    lobby.pending_start = None;
+                    lobby.notice = Some(format!("lost the host: {reason}"));
+                    lobby.pending_exit.get_or_insert(1);
+                }
+            }
+            // Variants a client never receives (`Hello`/`Accept`/
+            // `Reject`/`Welcome` are the handshake; `SetReady`/
+            // `SetVehicle`/`Leave` are client→host) — a hostile host
+            // sending them is already dropped server-side, and a bug
+            // here must not invent meaning.
+            LobbyEvent::Message(_) => {}
+        }
+    }
+
+    // A link ending — our `leave()` or a dead host — takes a live
+    // session down with it; the teardown rides the normal
+    // `Unloading → Menu` lifecycle.
+    if (link.leaving() || link.closed)
+        && !matches!(
+            session.phase(),
+            SessionPhase::Menu | SessionPhase::Unloading
+        )
+    {
+        control.quit = true;
+    }
+    // The host should close our socket right after our `Leave` lands;
+    // if it never does, the watchdog ends the link anyway — a quit
+    // must not wait on a hung peer.
+    if let Some(since) = link.leaving
+        && since.elapsed() > LEAVE_WATCHDOG
+    {
+        lobby.pending_exit.get_or_insert(0);
+    }
+
+    // Lifecycle intents settle at `Menu` — the phase the lobby's
+    // "waiting" state *is*.
+    if *session.phase() == SessionPhase::Menu {
+        if lobby.pending_exit.is_none()
+            && let Some((generation, config)) = lobby.pending_start.take()
+            && let Err(e) = session.begin_generation(config, generation)
+        {
+            // `accept` + `check_session` already ran, so a refusal
+            // here means the lifecycle rejected the begin itself.
+            lobby.notice = Some(format!("started session was refused: {e}"));
+            lobby.pending_exit = Some(1);
+            link.leave();
+        }
+        if lobby.pending_start.is_none()
+            && let Some(code) = lobby.pending_exit.take()
+            && menu.is_none()
+        {
+            exit.write(AppExit::from_code(code));
+        }
+    }
+}
+
+/// An advertised session back into a validated config — the same
+/// `accept` + `check_session` pair `mm2-join` runs, so the in-app
+/// client trusts exactly what the headless one does.
+fn gate(vfs: &Vfs, ad: &SessionAdvertisement) -> Result<SessionConfig, String> {
+    let config = accept(ad).map_err(|e| format!("unacceptable session: {e}"))?;
+    check_session(vfs, &config).map_err(|e| format!("session cannot run here: {e}"))?;
+    Ok(config)
+}
+
+/// An advertised session we cannot run: record why, queue the exit,
+/// and leave cleanly — the host records a `Quit`, not a dropped socket.
+fn refuse(link: &mut LobbyLink, lobby: &mut LobbyState, why: String) {
+    lobby.notice = Some(why);
+    lobby.pending_start = None;
+    lobby.pending_exit = Some(1);
+    link.leave();
+}
+
+/// `Start` → the existing session lifecycle. The advertised config is
+/// gated, stamped with the roster-echoed pick and this process's local
+/// facts, then begun — parked first if a session is still live.
+#[allow(clippy::too_many_arguments)]
+fn start(
+    link: &mut LobbyLink,
+    lobby: &mut LobbyState,
+    session: &mut Session,
+    control: &mut SessionControl,
+    vfs: &Vfs,
+    selected: &mut SelectedCar,
+    tuned: &mut TunedVehicle,
+    generation: u64,
+    ad: &SessionAdvertisement,
+) {
+    let mut config = match gate(vfs, ad) {
+        Ok(config) => config,
+        Err(why) => return refuse(link, lobby, why),
+    };
+    // The pick is roster state, not session params — ours is what the
+    // host last confirmed on our entry (a late joiner without a
+    // committed pick drives the dev car).
+    config.vehicle = lobby
+        .roster
+        .iter()
+        .find(|e| e.player_id == link.player_id())
+        .and_then(|e| e.pick.as_ref())
+        .map(decode_pick)
+        .unwrap_or_default();
+    config.mods_active = link.mods_active;
+    config.dev = link.dev.clone();
+    match resolve_selection(vfs, &config.vehicle) {
+        Ok((car, vehicle_config)) => {
+            *selected = car;
+            *tuned = TunedVehicle(vehicle_config);
+        }
+        Err(why) => {
+            return refuse(
+                link,
+                lobby,
+                format!("our roster pick cannot load here: {why}"),
+            );
+        }
+    }
+    lobby.generation = Some(generation);
+    if *session.phase() == SessionPhase::Menu {
+        if let Err(e) = session.begin_generation(config, generation) {
+            lobby.notice = Some(format!("started session was refused: {e}"));
+            lobby.pending_exit = Some(1);
+            link.leave();
+        }
+    } else {
+        // A second `Start` should never arrive mid-session (the host's
+        // own gate forbids it) — but if it does, queue it like a
+        // restart instead of pretending the lifecycle allowed it.
+        lobby.pending_start = Some((generation, config));
+        control.quit = true;
+    }
+}
+
+/// `Cancel` — the host closed the running session. The generation names
+/// *which* session: a stray cancel for one we never entered (a pending
+/// start we never began) only clears that pending begin.
+fn cancel(
+    lobby: &mut LobbyState,
+    session: &mut Session,
+    control: &mut SessionControl,
+    generation: u64,
+) {
+    if lobby
+        .pending_start
+        .as_ref()
+        .is_some_and(|(g, _)| *g == generation)
+    {
+        lobby.pending_start = None;
+    }
+    if lobby.generation == Some(generation) {
+        lobby.generation = None;
+        if !matches!(
+            session.phase(),
+            SessionPhase::Menu | SessionPhase::Unloading
+        ) {
+            control.quit = true;
+        }
+    }
+}
+
+/// The roster-echoed pick into the car resources `load_session_world`
+/// reads — the dev pick (`id: None`) clears `SelectedCar` like a fresh
+/// launch with no `--car`.
+fn resolve_selection(
+    vfs: &Vfs,
+    pick: &VehicleSelection,
+) -> Result<(SelectedCar, mm2_vehicle::VehicleConfig), String> {
+    let Some(id) = pick.id.as_deref() else {
+        return Ok((
+            SelectedCar {
+                def: None,
+                paint: 0,
+            },
+            mm2_vehicle::VehicleConfig::default(),
+        ));
+    };
+    let def = mm2_content::load_vehicle(vfs, id, pick.paint)
+        .map_err(|e| format!("{id:?} paint {}: {e}", pick.paint))?;
+    // `VehicleDef` is `!Clone` — take the tuning before handing the
+    // definition to `SelectedCar`.
+    let config = def.config.clone();
+    Ok((
+        SelectedCar {
+            paint: pick.paint,
+            def: Some(def),
+        },
+        config,
+    ))
+}
+
+/// The windowed lobby's keyboard surface: while the session sits at
+/// `Menu` — the lobby's waiting phase — `Enter` toggles our roster
+/// ready flag and `Esc` leaves the lobby (the session-lifecycle Esc
+/// lives in `session_control_input`, which ignores `Menu`, so the two
+/// never collide). Gamepad equivalents are a menu-surface decision
+/// deferred with the real lobby UI.
+pub fn lobby_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    session: Res<Session>,
+    lobby: Res<LobbyState>,
+    mut link: ResMut<LobbyLink>,
+) {
+    if *session.phase() != SessionPhase::Menu || link.leaving() || link.closed {
+        return;
+    }
+    if keys.just_pressed(KeyCode::Escape) {
+        link.leave();
+    }
+    if keys.just_pressed(KeyCode::Enter) {
+        let ready = !lobby
+            .roster
+            .iter()
+            .any(|e| e.player_id == link.player_id() && e.ready);
+        let _ = link.ctl().set_ready(ready);
+    }
+}
+
+/// Marker for the persistent lobby status line. Session-scoped UI
+/// cannot show the lobby (nothing session-owned exists at `Menu`), so
+/// the app spawns this entity itself.
+#[derive(Component)]
+pub struct LobbyText;
+
+/// The lobby status line's content — the lobby's whole surface until
+/// a real lobby menu exists: where we are, what the host is offering,
+/// the roster's readiness, our own state, and the latest refusal or
+/// link-loss notice. The line empties while a session runs — the HUD
+/// owns the screen then.
+pub fn drive_lobby_text(
+    link: Res<LobbyLink>,
+    lobby: Res<LobbyState>,
+    session: Res<Session>,
+    mut texts: Query<&mut Text, With<LobbyText>>,
+) {
+    let Ok(mut text) = texts.single_mut() else {
+        return;
+    };
+    if *session.phase() != SessionPhase::Menu {
+        text.0.clear();
+        return;
+    }
+    let offered = lobby
+        .advertised
+        .as_ref()
+        .map(|ad| ad.summary.clone())
+        .unwrap_or_else(|| "waiting for the host to advertise a session".to_string());
+    let ours = lobby
+        .roster
+        .iter()
+        .find(|e| e.player_id == link.player_id());
+    let picked = ours
+        .and_then(|e| e.pick.as_ref())
+        .map(|p| {
+            if p.vehicle.is_empty() {
+                "dev car".to_string()
+            } else {
+                format!("{} (paint {})", p.vehicle, p.paint)
+            }
+        })
+        .unwrap_or_else(|| "nothing yet".to_string());
+    let ready = ours.is_some_and(|e| e.ready);
+    let ready_count = lobby.roster.iter().filter(|e| e.ready).count();
+    let notice = lobby
+        .notice
+        .as_ref()
+        .map(|n| format!("\n{n}"))
+        .unwrap_or_default();
+    text.0 = format!(
+        "Lobby {} — {}\nsession: {offered}\nplayers: {} ({} ready)\nyou: {} — {picked}{}\n\nenter: toggle ready    esc: leave lobby",
+        link.peer(),
+        link.driver(),
+        lobby.roster.len(),
+        ready_count,
+        if ready { "ready" } else { "not ready" },
+        notice,
+    );
 }
 
 /// The display line for lobby UIs/CLIs (`"sf, circuit:3, professional"`).

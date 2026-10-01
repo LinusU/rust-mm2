@@ -434,6 +434,33 @@ fn record_eligibility_gates_dev_and_modded_sessions() {
     assert_eq!(record_eligibility(&config), Ok(()));
 }
 
+/// A networked-authority session never feeds single-player records
+/// (F24-B.7's conservative policy): a joined lobby's `Remote` run is
+/// a local prediction, and what the original's multiplayer counted
+/// toward is unverified — only `Local` records.
+#[test]
+fn record_eligibility_refuses_networked_sessions() {
+    let mut config = SessionConfig {
+        world: WorldMode::City {
+            psdl: "city/sf.psdl".to_string(),
+        },
+        vehicle: VehicleSelection {
+            id: Some("vpbug".to_string()),
+            paint: 0,
+        },
+        ..SessionConfig::default()
+    };
+    assert_eq!(record_eligibility(&config), Ok(()));
+    for authority in [SessionAuthority::Remote, SessionAuthority::Host] {
+        config.authority = authority;
+        assert_eq!(
+            record_eligibility(&config),
+            Err(Ineligible::Networked),
+            "{authority:?} must not mint records"
+        );
+    }
+}
+
 /// DRV-6's other half: a run under player-customized conditions is not
 /// a default-conditions run, so its results never record (F17-A.6).
 #[test]

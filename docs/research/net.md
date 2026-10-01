@@ -323,6 +323,58 @@ Deliberately *not* here: a started session is reported, not spawned —
 world/race replication is F26 and the per-tick dataplane is F25 — plus
 host migration and the Bevy-side host/client surface.
 
+### In-app client bridge (F24-B.7)
+
+`mm2 --join <addr>` joins a lobby inside the real application —
+windowed or `--headless`. `mm2_app::net::LobbyLink` owns the
+connection: `Client::recv` blocks, so it lives on a pump thread that
+forwards each inbound frame as a `LobbyEvent` on a channel, ending
+with a terminal `Closed`. The Bevy thread never touches the socket;
+outbound intents (`SetReady`, `SetVehicle`, `Leave`) ride the same
+`ClientCtl` `mm2-join` uses. `drive_lobby` drains
+the channel once per update into `LobbyState` (roster, advertised
+session, running generation, latest notice, a parked start, a queued
+exit) — display/decision state only; the `Session` resource stays the
+single gameplay authority.
+
+A host `Start` is the point: the advertisement is decoded and gated by
+the same `accept` + `check_session` pair `mm2-join` runs, the accepted
+config is stamped `Remote` authority with this process's local facts
+(roster-echoed vehicle pick, `mods_active`, launch-time dev overrides —
+none of which ever ride the wire), and `Session::begin_generation`
+adopts the lobby's minted generation so `ObjectId`/`ResultId`
+generation fields agree across peers. The wire value may only move
+the local counter forward — staleness detection on generation-keyed
+ids assumes it never regresses. A `Start` drained while a session is
+still live parks in `pending_start` and begins when teardown lands
+back at `Menu`; a `Cancel` matching the running generation quits the
+session through the normal `Unloading → Menu` path. The accepted
+session loads through `load_session_world` — the shared world/spawn
+path — never a parallel multiplayer loader.
+
+Exit ownership follows the surface: with a `LobbyLink` present,
+`drive_session`'s `Menu` quit arm does not write `AppExit` (a quit
+returns to the lobby), and `drive_lobby` writes the eventual exit —
+`0` after our own `Leave` is acknowledged (bounded by a five-second
+watchdog against a host that never closes), `1` on a lost host or a
+refused session. The stock `F4` restart binding is `Local`-authority
+only — a remote session's restarts belong to the host's
+`Cancel`/`Start` pair. A networked-authority session is also
+record-ineligible (`Ineligible::Networked`): a local prediction must
+not mint single-player unlocks.
+
+The lobby surface is deliberately minimal: `Enter` toggles ready,
+`Esc` leaves, and a `LobbyText` status line shows the advertised
+session, roster readiness and the latest notice. A real lobby menu
+(pick/browse screens) is future work, as is every piece still absent
+underneath: remote vehicle spawning, roster picks as gameplay spawns,
+replication of position/score/damage (F25/F26), and the in-app *host*
+surface. `mm2 --join --headless` parks the same link inside the smoke
+harness, which waits on the wire with wall-clock pacing while `Menu`
+is parked and reports the lobby's progress as `mp=` on the record
+(`mp=gen<N>` once a `Start` minted the session, `mp=lobby(<n>p)`
+while waiting, `mp=lobby(0p)` after the link dies).
+
 ## Evidence level
 
 Mixed loopback. `mm2_net` tests bind `127.0.0.1:0` and run real
@@ -381,7 +433,25 @@ where the pick applies and pass where the runtime ignores it. A retail
 leg is on record for the pair: `mm2-host --city sf --event race:0` +
 `mm2-join --vehicle vpbug --ready` on the retail installation — stock
 pick validated, `started generation=1 session="sf, race:0, amateur"`
-observed client-side, `cause=quit` leave, both processes exit 0. This
-is *not* LAN or Internet evidence, and a started session is only
-reported, never simulated — F24-C owns the reachability matrix, F25/F26
-the session itself.
+observed client-side, `cause=quit` leave, both processes exit 0.
+`mm2_app`'s `net_app` suite covers the in-app bridge: in-process legs
+run `drive_lobby`/`drive_session` against a real loopback `Host`
+(join broadcast surfacing the ad/roster at `Menu`, `Start` →
+`begin_generation` → `Loading` under the minted generation with
+`Remote` authority, `Cancel` returning through `Unloading → Menu`
+with no `AppExit`, a `Start` mid-session parking until teardown
+lands, a dead host tearing down to a nonzero exit with a named
+notice, a `Leave` reaching the host as `Quit` and exiting 0, a
+`Menu` quit staying inside the lobby, an unrunnable ad refusing with
+a clean leave, the `F4` local-authority gate, and the generation
+clamp); `headless_lobby` joins an in-process host and proves the
+`Start` → `load_session_world` path loads the wired world for real;
+and the process legs run `mm2 --join --headless` against a separate
+`mm2-host` — `start` produces `world=dev-world mp=gen1 status=pass`,
+`cancel` produces `mp=lobby(1p) phase=menu`, a host quit produces
+`lost the host`/`status=fail` exit 3, a refused connection exits 1,
+and `--join` × session-shaping flags are usage exit 2. This
+is *not* LAN or Internet evidence, and a remote session is a
+*local prediction* — no remote vehicles are spawned and nothing is
+replicated — F24-C owns the reachability matrix, F25/F26 the
+session's shared state.

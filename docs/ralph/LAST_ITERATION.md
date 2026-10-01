@@ -1,3 +1,116 @@
+# Last iteration — F24-B.7: the Bevy-side lobby client — `mm2 --join`
+# consumes `Start` into the shared session lifecycle (iteration 019,
+# run 20260929T174954)
+
+Implementation iteration on `ralph/night` (baseline `42f1196` — the
+F24-B.6 candidate; external verify green, review **pass** with
+verification gaps only, no blocking findings). One coherent slice: the
+in-app client bridge — `mm2 --join <addr>` joins a lobby in the real
+application (windowed or `--headless`) and a host `Start` begins a
+session through the production `Session` lifecycle and
+`load_session_world`. This is the AC05 leg B.6's `ClientCtl` was
+built for.
+
+## Task selection
+
+The F24-B remainder was the named next slice, and the bridge was its
+load-bearing piece: `mm2-join` proved the protocol client-side but
+nothing fed `Start` into the app — the joined process could not run a
+session. Scope kept explicit: remote spawning, roster-pick gameplay
+consumption and any replication stay F25/F26; the lobby surface is a
+status line, not a menu; an in-app *host* surface remains future work.
+
+## What landed
+
+- `mm2_game::Session::begin_generation(config, generation)` — a
+  `Menu → Loading` begin under the host-minted lobby generation, so
+  `ObjectId`/`ResultId` generation fields agree across peers. Clamped
+  `max(wire, local + 1)` — generation-keyed staleness detection
+  assumes the counter never regresses.
+- `mm2_app::net` — `LobbyLink` (resource): `Client::recv` blocks, so
+  it lives on a pump thread forwarding each frame as a `LobbyEvent`
+  (terminal `Closed`); outbound intents ride `ClientCtl`; `Drop` sends
+  `Leave`. `drive_lobby` drains the channel once per update into
+  `LobbyState` (roster / advertised session / running generation /
+  notice / `pending_start` / `pending_exit`) — display and decision
+  state only. `Start` runs the same gate `mm2-join` runs (`accept` +
+  `check_session`), stamps `Remote` authority + the roster-echoed
+  pick + this process's local `mods_active`/`dev` (none of which ride
+  the wire), and calls `begin_generation`; a `Start` mid-session parks
+  to `pending_start` until teardown returns `Menu`; a matching
+  `Cancel` quits through `Unloading → Menu`. The lobby owns exit while
+  a link exists — `drive_session`'s `Menu` quit no longer writes
+  `AppExit`; `drive_lobby` writes it (0 after our acknowledged leave —
+  a 5 s watchdog covers a host that never closes; 1 on lost host or
+  refused session).
+- `session.rs` — `MenuExit` system-param (menu shell / lobby link
+  ownership of the `Menu` quit), and the stock `F4` restart binding
+  gated to `Local` authority — a remote session's restarts are the
+  host's `Cancel`/`Start`.
+- `progression.rs` — `Ineligible::Networked`: a networked-authority
+  session is record-ineligible (designed conservative policy — a
+  local prediction must not mint single-player unlocks; the original's
+  MP→SP progression relation is unverified).
+- `smoke.rs` — `headless_lobby(link, …)` shares `run_headless` with
+  `headless_smoke` via `RunSource::{Session, Lobby}`: a lobby run
+  parks at `Menu`, paces parked updates in wall-clock (4 ms) so the
+  frame budget waits on the wire, ends the wait on a dead/finished
+  link, and reports `mp=gen<N>` / `mp=lobby(<n>p)` plus a lobby-aware
+  verdict (`returned to the lobby` pass on `Cancel`, `lost the host` /
+  `host never started` fails). Non-lobby records are bit-identical.
+- `main.rs` — `mm2 --join <addr>` (conflicts every session-shaping
+  flag — the wire owns world/mode/difficulty/conditions/seed),
+  `--driver` (default: bound profile name, else `player`,
+  `MAX_STRING`-bounded), `--ready`; the resolved `--car`/`--paint`
+  pick is offered to the lobby at join. The windowed surface is a
+  `LobbyText` status line (session offer, roster readiness, own pick,
+  latest notice) with `Enter` = ready toggle and `Esc` = leave.
+
+## Evidence
+
+- `tests/net_app.rs` — 15 legs, all green (~9 s):
+  - In-process `drive_lobby`/`drive_session` vs a real loopback
+    `Host`: join surfacing ad+roster at `Menu`; `Start` →
+    `Loading` under the minted generation with `Remote` authority and
+    the wired world/mode; `Cancel` → `Unloading → Menu` with no
+    `AppExit`; a `Start` mid-session parking until teardown lands;
+    a dead host tearing down to `AppExit` 1 with a `lost the host`
+    notice; `Leave` → host `Quit` → exit 0; a `Menu` quit staying in
+    the lobby; an unrunnable ad refused with a clean leave + exit 1;
+    `F4` restart gated to `Local`.
+  - `a_lobby_start_loads_the_wired_world_headless` — a real
+    `headless_lobby` app joins an in-process host; `start` → dev
+    world loads through `load_session_world`, drives, records
+    `world=dev-world mp=gen1 status=pass`.
+  - Process legs — `mm2 --join --headless` as a separate OS process
+    against a separate `mm2-host`: `start` → `mp=gen1 status=pass`;
+    `cancel` → `mp=lobby(1p) phase=menu`; host quit → `lost the
+    host`, exit 3; refused connect → exit 1; `--join` ×
+    session-shaping flags → exit 2.
+- `mm2_game` legs: `begin_generation` adoption + no-regression clamp;
+  `record_eligibility` refuses `Remote`/`Host` authority.
+
+## Gates
+
+- `cargo fmt --all -- --check` — see below.
+- `cargo clippy --workspace --all-targets --all-features --
+  -D warnings` — see below.
+- `cargo test --workspace` — see below. `net_app` 15/15 green.
+
+## Classification / remaining open items
+
+- Still open F24-B scope: a real lobby menu (the surface is a status
+  line), disconnect-UX polish beyond the notice, the in-app host
+  surface, and `Start` → spawn-roster consumption (the wired session
+  spawns only the local player — remote roster entries are not
+  spawned; F25/F26).
+- Verification gaps carried forward: everything is loopback —
+  AC03's impairment matrix and AC06's LAN/Internet legs remain F24-C;
+  the remote session is a *local prediction* — no position/score/
+  damage replication exists to observe.
+
+---
+
 # Last iteration — F24-B.6: `mm2-join`, the headless lobby client +
 # client-side session-content gating (iteration 018, run
 # 20260929T174954)
