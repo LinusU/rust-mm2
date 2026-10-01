@@ -744,7 +744,8 @@ pub fn load_session_world(
     // authored `yaw_deg` or the derived course facing — `a` is the
     // vehicle-yaw convention, `None`/`a = 0` is no heading, WPT-4).
     // Solo — no link — seats 0, the slot the player took before; a
-    // seat past the authored grid, or no grid at all, fans off the
+    // seat past the authored grid keeps fanning off the last row's
+    // right vector, and a session with no grid at all fans off the
     // roam `origin` (designed; the original's row→participant mapping
     // is UNK-17).
     netdrive::apply_seat(
@@ -1358,7 +1359,9 @@ pub fn load_session_world(
     // F10-A.2: ambient traffic — the event aimap's authored overrides
     // (roster replacement, `[Density]`, closed roads, speed limits)
     // layer over the city's aimap; the final spawn pose is the bubble
-    // centre. Non-city worlds and predicted sessions get `None`.
+    // centre. Non-city worlds get `None`, and networked sessions get
+    // `None` under MP-4 (documented) — `load_ambient_traffic` owns the
+    // authority gate.
     if world_ok {
         let (event_aimap, authored_density) = match &event_race {
             Some((def, _, _, _, aimap)) => (aimap.as_ref(), Some(def.params.densities.traffic)),

@@ -1,3 +1,72 @@
+# Last iteration — F25-A.3: MP-4's ambient-traffic leg — networked
+# sessions field no lane followers on either wire side (iteration 024,
+# run 20261001T195454-62282 continued)
+
+Implementation iteration on `ralph/night` (baseline `8ce7a18` — the
+F25-A.2 candidate; external verify + review pass with gaps only). One
+coherent slice: the follow-up A.2 disclosed — ambient traffic still
+loaded under networked authority.
+
+## Task selection
+
+F25-A.2's own remaining-items list named it ("Ambient traffic still
+loads under networked authority — MP-4 also removes it"), and the
+external review confirmed the same gap. It is also a real coherence
+defect, not just a missing rule: `load_ambient_traffic` gated on
+`is_authority()`, which is true on the host — so a hosted session
+simulated lane followers that no client replicates, and the
+host-simulated remote cars could collide with traffic invisible to
+their drivers. MP-4 is documented ("No ambient traffic, cops or AI
+opponents in MP races; humans replace AI opponents" — help:
+Multiplayer Games); cops have no runtime (F20) and pedestrians none
+(F19), so this gate completes MP-4 for everything implemented today.
+
+## What landed
+
+- `mm2_app::traffic::load_ambient_traffic` — the authority gate
+  tightens from `!session.authority_role().is_authority()` to
+  `config.authority != SessionAuthority::Local`. Both wire sides now
+  field the identical empty ambient world; `spawn_traffic_signals`
+  rides inside the same early return. `Local` sessions are unchanged.
+- `mm2_app::session` — the `load_session_world` call-site comment
+  records that networked sessions get `None` under MP-4. Also a
+  comment-only repair of the A.2 review's noted imprecision: a seat
+  past the authored grid fans off the last row's right vector, not
+  the roam `origin` (the no-grid case alone fans off the base).
+- `tests/traffic.rs` — `a_networked_session_spawns_no_ambient_traffic`:
+  the real `load_session_world` over the synthetic city install under
+  `Host` and `Remote` authority — no `AmbientTraffic` resource, zero
+  `AmbientCar`/`TrafficSignal` entities, the local car still loads.
+  The networked legs strip dev overrides (`net::advertise` refuses
+  them — a wire-legal config is the honest fixture), and a `Local`
+  control leg on the same install still fills the seeded plan.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --workspace
+--all-targets --all-features -- -D warnings` clean; `cargo test
+--workspace` — all 90 suites green (traffic 39/39, net_app 29/29,
+mm2_net 58/58).
+
+## Classification / remaining open items
+
+- The no-ambient-traffic gate is documented original behavior (MP-4)
+  — an original requirement, not designed policy. MP-4's "cops" clause
+  has no consumer yet (F20); pedestrians have no runtime (F19).
+- If F26 ever replicates ambient world actors, the gate is the single
+  point to revisit (`load_ambient_traffic`'s early return); the
+  runtime systems' `Option<Res<AmbientTraffic>>` reads stay inert
+  without the resource.
+- F25-A stays active: own-seat prediction/reconciliation, outcome
+  replication (damage/stuck/recovery/results — the
+  `PlayerControl::Remote` skips stay deliberate), input rate limiting
+  beyond latest-wins, interpolation tuning.
+- All evidence is loopback/synthetic; no retail-install leg this
+  slice (the gate is authority-only — content paths unchanged) and no
+  rendered observation.
+
+---
+
 # Last iteration — F25-A.2: shared seat/grid assignment — the lobby's
 # humans take the authored start slots in wire-id order (iteration 023,
 # run 20261001T195454-62282 continued)

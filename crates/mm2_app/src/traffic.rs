@@ -181,10 +181,10 @@ use mm2_game::{
     AmbientRoster, AmbientSpec, AuthorityRole, FollowPolicy, JunctionGate, JunctionPolicy,
     Junctions, KnockPolicy, LaneAdvance, LaneCursor, LaneId, MAX_BANGER_ANGULAR_SPEED,
     MAX_BANGER_LINEAR_SPEED, NavGraph, NavIssue, NavOverrides, NavRng, ObjectIdentity, Player,
-    Session, SessionConfig, SessionEntity, SessionPhase, SignalAspect, SpawnDirective, SpawnDraw,
-    SpawnPolicy, StuckPolicy, StuckWindow, WorldMode, advance_lane_cursor, corridor_gap,
-    draw_spawn, eligible_lanes, follow_speed, inside_junction_zone, junction_speed, junction_zone,
-    plan_ambient, within_interest,
+    Session, SessionAuthority, SessionConfig, SessionEntity, SessionPhase, SignalAspect,
+    SpawnDirective, SpawnDraw, SpawnPolicy, StuckPolicy, StuckWindow, WorldMode,
+    advance_lane_cursor, corridor_gap, draw_spawn, eligible_lanes, follow_speed,
+    inside_junction_zone, junction_speed, junction_zone, plan_ambient, within_interest,
 };
 use tracing::{debug, info, warn};
 
@@ -423,9 +423,11 @@ fn partition_nav_issues(issues: &[NavIssue]) -> (Vec<usize>, Vec<&NavIssue>) {
 
 /// Load the ambient setup for this session and spawn the initial plan.
 /// Returns the resource the caller inserts — `None` when the session
-/// is not authoritative, the world is not a city, or no layer authors
-/// a roster. All failures log and degrade to *no* ambient traffic;
-/// ambient cars never sink an otherwise loadable session.
+/// is networked (MP-4 removes ambient traffic from every networked
+/// mode, both sides of the wire), the world is not a city, or no
+/// layer authors a roster. All failures log and degrade to *no*
+/// ambient traffic; ambient cars never sink an otherwise loadable
+/// session.
 ///
 /// `authored_density` is the event-table `Ambient` dial for event
 /// sessions (`RaceDefinition::params.densities.traffic`); cruise
@@ -456,9 +458,12 @@ pub fn load_ambient_traffic(
     images: &mut Assets<Image>,
     materials: &mut Assets<StandardMaterial>,
 ) -> Option<AmbientTraffic> {
-    // Ambient traffic is authority state — a predicted remote session
-    // mirrors it; it never simulates its own.
-    if !session.authority_role().is_authority() {
+    // MP-4 (documented): a networked session fields no ambient
+    // traffic at all — not even on the authoritative host, where the
+    // lobby's remote cars would collide with lane followers no client
+    // replicates and each process would diverge its own set anyway.
+    // `Local` authority only; F26 replication would revisit this.
+    if config.authority != SessionAuthority::Local {
         return None;
     }
     let WorldMode::City { psdl } = &config.world else {

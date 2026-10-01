@@ -23,8 +23,9 @@ use mm2_formats::bai::{Side, VehicleRule};
 use mm2_game::{
     DamageEvent, DamageSpec, DevOverrides, EventRef, EventTableKind, ImpactEvent, LaneCursor,
     LaneId, LaneKind, Mm2Vfs, ObjectIdentity, Player, PlayerControl, PlayerId, PlayerVehicle,
-    Session, SessionConfig, SessionMode, SessionPhase, SignalAspect, SpawnPolicy, SpawnPose,
-    StuckWindow, VehicleDamage, WorldMode, advance_session_tick, despawn_session_entities,
+    Session, SessionAuthority, SessionConfig, SessionMode, SessionPhase, SignalAspect, SpawnPolicy,
+    SpawnPose, StuckWindow, VehicleDamage, WorldMode, advance_session_tick,
+    despawn_session_entities,
 };
 use mm2_vehicle::{VehicleConfig, VehiclePlugin};
 
@@ -695,6 +696,62 @@ fn session_spawns_the_seeded_plan_on_authored_lanes() {
     let mut b: Vec<Vec3> = ambient_cars(&mut app2).iter().map(|(_, p)| *p).collect();
     b.sort_by_key(|p| p.to_array().map(|c| c.to_bits()));
     assert_eq!(a, b, "seeded placement must replay identically");
+}
+
+/// MP-4 (documented): a networked session fields no ambient traffic —
+/// the lobby's humans are the population, and an unreplicated lane
+/// follower would diverge per process anyway. The same install that
+/// fills the roster under `Local` spawns no `AmbientTraffic`
+/// resource, no `AmbientCar` and no `TrafficSignal` under either
+/// network authority. The `Host` leg is the gate's change: remote
+/// cars the host simulates must never collide with traffic a client
+/// cannot see.
+#[test]
+fn a_networked_session_spawns_no_ambient_traffic() {
+    let install = city_install();
+    for authority in [SessionAuthority::Host, SessionAuthority::Remote] {
+        let mut config = city_config();
+        config.authority = authority;
+        // Dev overrides are not network-legal (the lobby refuses to
+        // advertise them) — the networked legs run a clean config.
+        config.dev = DevOverrides::default();
+        let mut app = test_app(config, vfs_of(install.path()));
+        assert!(
+            run_until(&mut app, 12, |a| phase_is(a, SessionPhase::Playing)),
+            "{authority:?}: city session never reached Playing"
+        );
+        assert!(
+            app.world().get_resource::<AmbientTraffic>().is_none(),
+            "{authority:?}: MP-4 — no ambient-traffic resource"
+        );
+        assert!(
+            ambient_cars(&mut app).is_empty(),
+            "{authority:?}: MP-4 — no ambient cars"
+        );
+        let signals = app
+            .world_mut()
+            .query_filtered::<Entity, With<TrafficSignal>>()
+            .iter(app.world())
+            .count();
+        assert_eq!(signals, 0, "{authority:?}: MP-4 — no traffic signals");
+        // The local participant still loads and drives.
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&Player, With<PlayerVehicle>>();
+        q.single(app.world()).expect("the local car");
+    }
+
+    // Positive control: the same install under `Local` still fills the
+    // roster — the gate changed nothing single-player.
+    let mut app = test_app(city_config(), vfs_of(install.path()));
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    assert!(
+        !ambient_cars(&mut app).is_empty(),
+        "Local: the seeded plan still spawns"
+    );
 }
 
 /// `drive_ambient` walks every car forward along its lane in the
