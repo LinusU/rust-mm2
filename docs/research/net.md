@@ -179,7 +179,12 @@ entry must be `Ready`, paint bounded by the metadata `Colors` list with
 a one-job floor; the dev car is always legal at paint 0). A refused
 pick gets `Message::VehicleRefused { reason }` back to that peer alone —
 a bad pick is a refused request, not a protocol violation, and the
-roster is unchanged. A host with no validator accepts any bounded pick.
+roster is unchanged. The validator's reason is consumer text carried in
+a `MAX_STRING` field, so the host shortens an over-long reason on a char
+boundary before the send — an id-echoing validator fed a long wire-legal
+id must not fail the encode and read as a dead socket, which would turn
+a refused pick into a dropped peer. A host with no validator accepts any
+bounded pick.
 A pick identical to the slot's current one is a no-op: no event, no
 broadcast — a repeating client cannot flood the lobby with rosters
 (this is pick-side only; the disclosed `SetReady` rate-limit gap is

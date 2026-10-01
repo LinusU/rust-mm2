@@ -36,7 +36,8 @@ use std::time::Duration;
 use crate::NetError;
 use crate::conn::{Conn, HANDSHAKE_TIMEOUT, Writer, listen_loopback, recv_hello_within};
 use crate::proto::{
-    Hello, MAX_PLAYERS, Message, RejectCode, RosterEntry, SessionAdvertisement, VehiclePick,
+    Hello, MAX_PLAYERS, MAX_STRING, Message, RejectCode, RosterEntry, SessionAdvertisement,
+    VehiclePick,
 };
 
 /// Cap on connections mid-handshake. A connect flood drops at the accept
@@ -62,7 +63,9 @@ const LEAVE_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 /// pick against the mounted `VehicleCatalog`. Called on the host loop;
 /// `Ok(())` applies the pick to the roster, `Err(reason)` answers the
 /// peer with `VehicleRefused` (a refused request, not a violation) and
-/// leaves the roster unchanged. The `reason` string is display-ready.
+/// leaves the roster unchanged. The `reason` string is display-ready;
+/// it rides a bounded wire field, so the host shortens an over-long
+/// reason on a char boundary rather than letting the send fail.
 pub type PickValidator = Arc<dyn Fn(&str, u8) -> Result<(), String> + Send + Sync>;
 
 /// Parameters a host listens under.
@@ -576,6 +579,13 @@ fn run(
                         }
                     }
                     Err(reason) => {
+                        // The validator is consumer code — its reason is
+                        // not guaranteed to fit `VehicleRefused`'s wire
+                        // field (an id-echoing validator plus a long
+                        // wire-legal id overflows it). Bound it before
+                        // the send so an encode failure cannot read as a
+                        // dead socket and drop a live peer.
+                        let reason = bound_reason(&reason);
                         if let Some(slot) = players.get_mut(&id) {
                             let _ = events.send(HostEvent::VehicleRefused {
                                 id,
@@ -636,6 +646,23 @@ fn alloc_id(players: &BTreeMap<u16, Slot>, next_id: &mut u16) -> u16 {
             return id;
         }
     }
+}
+
+/// A `VehicleRefused` reason that fits its `MAX_STRING` wire field.
+/// `PickValidator` is consumer code — nothing guarantees its `Err`
+/// string fits — and an over-long reason failing the encode would turn
+/// a refused pick into a dropped peer. Shortens on a char boundary and
+/// marks the cut.
+fn bound_reason(reason: &str) -> String {
+    const MARK: &str = "...";
+    if reason.len() <= MAX_STRING {
+        return reason.to_string();
+    }
+    let mut end = MAX_STRING - MARK.len();
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{MARK}", &reason[..end])
 }
 
 /// Remove one player and close its socket, emitting `Left`. Shared by
@@ -1341,6 +1368,63 @@ mod tests {
             other => panic!("expected the ready Roster, got {other:?}"),
         }
         // And no host event named the duplicate pick.
+        assert!(host.try_recv().is_err());
+    }
+
+    /// The iteration-014 review's refusal-encode defect: the validator's
+    /// reason rides a `MAX_STRING` field, but an id-echoing validator
+    /// fed a long wire-legal id produced an over-long reason whose
+    /// encode failed before any I/O — the send error read as a dead
+    /// socket and the *live* picker was dropped `Lost`. The reason is
+    /// bounded before the wire now: the peer gets its (shortened)
+    /// refusal and stays connected.
+    #[test]
+    fn an_overlong_refusal_reason_still_reaches_the_peer() {
+        let host = Host::listen_loopback(&HostConfig {
+            pick_validator: Some(Arc::new(|vehicle: &str, _| {
+                if vehicle == "vpbug" {
+                    Ok(())
+                } else {
+                    Err(format!("unknown vehicle id {vehicle:?}"))
+                }
+            })),
+            ..HostConfig::new(FP)
+        })
+        .unwrap();
+        let mut alice = join(host.addr(), "alice");
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut alice, 1);
+
+        // A wire-legal id (exactly MAX_STRING bytes) whose echo pushes
+        // the reason past the field's bound.
+        let id = "x".repeat(MAX_STRING);
+        alice.set_vehicle(&id, 0).unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::VehicleRefused {
+                id: 1,
+                vehicle,
+                reason,
+                ..
+            }) => {
+                assert_eq!(vehicle, id);
+                assert!(reason.len() <= MAX_STRING, "reason: {reason}");
+            }
+            other => panic!("expected VehicleRefused, got {other:?}"),
+        }
+        match alice.recv().unwrap() {
+            Message::VehicleRefused { reason } => {
+                assert!(reason.len() <= MAX_STRING, "reason: {reason}");
+                assert!(reason.ends_with("..."), "reason: {reason}");
+            }
+            other => panic!("expected VehicleRefused, got {other:?}"),
+        }
+        // The peer survived — a refused pick is not a drop. alice can
+        // still pick legally, and no Left was emitted.
+        alice.set_vehicle("vpbug", 0).unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::VehicleChanged { id: 1, .. }) => {}
+            other => panic!("expected VehicleChanged, got {other:?}"),
+        }
         assert!(host.try_recv().is_err());
     }
 

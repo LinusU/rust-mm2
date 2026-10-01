@@ -1,3 +1,85 @@
+# Last iteration — external-review repair: an over-long `VehicleRefused`
+# reason could drop the live picker (iteration 015, run
+# 20260929T174954)
+
+Repair iteration on `ralph/night` (baseline `0aa82ac` — the F24-B.3
+candidate; external verify green, review **fail** on one blocking
+finding).
+
+## Root cause
+
+An implementation defect in the F24-B.3 refusal path. The
+`PickValidator` contract is `Result<(), String>` — the reason is
+consumer text — but it rode `Message::VehicleRefused.reason`, a
+`MAX_STRING` (256-byte) wire field, with no bound. The shipped
+validator (`mm2_app::net::vehicle_validator`) echoes the
+wire-controlled id: `SetVehicle` with a `vehicle` string of ~236+
+bytes — wire-legal, reachable through `Client::set_vehicle` — produced
+a 257+ byte `unknown vehicle id {vehicle:?}` reason. `Writer::send`
+encodes before any I/O, so the send failed `OversizeString`, and the
+lobby's `.is_err() && remove_player(...)` arm could not tell an encode
+failure from a dead socket — the healthy peer was reaped
+`LeaveCause::Lost` even though `HostEvent::VehicleRefused` had already
+reported a delivered refusal. That inverted the leg's invariant: a bad
+pick became a drop, not a refused request. The validator's pre-computed
+`Incomplete` reasons (`vehicle {id} is incomplete: missing {…}`) were
+the same overflow class with no wire input at all — a long mod-catalog
+id or missing-deps list over the bound.
+
+## Repair
+
+`mm2_net::lobby` now bounds the reason before it reaches the wire:
+`bound_reason` shortens an over-long `Err` string on a char boundary to
+`MAX_STRING` (marking the cut with `...`) ahead of both the
+`HostEvent::VehicleRefused` emission and the `VehicleRefused` send, so
+the encode cannot fail on field length and a failed send once again
+means a transport error — the dead-write removal arm is then
+unambiguous. Bounding lives in `mm2_net` because `MAX_STRING` is the
+wire's bound and the validator is consumer-supplied: any consumer (not
+just `mm2_app`'s catalog validator) gets the guarantee. The
+`PickValidator` doc now states the reason is shortened to fit the wire
+field; `docs/research/net.md` records it.
+
+## Regression leg (mm2_net 39 → 40, real loopback sockets)
+
+- `an_overlong_refusal_reason_still_reaches_the_peer` — an id-echoing
+  validator plus a `MAX_STRING`-byte `SetVehicle.vehicle`: the peer
+  receives `VehicleRefused` with a `<= MAX_STRING` reason carrying the
+  truncation mark, the host event reports the bounded reason against
+  the full wire id, the peer then picks legally (`VehicleChanged`) and
+  no `Left` was emitted — previously the same pick silently
+  disconnected it.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test -p mm2_net` — 40/40.
+- `cargo test -p mm2_app` — all suites green: lib 62/62 (`net::` 10/10),
+  `tests/net_host.rs` 1/1 (~2 s, separate `mm2-host` process). `mm2_net`
+  is only consumed by `mm2_app`, so the diff's blast radius is covered;
+  the external `verify.sh` run owns the full-workspace pass.
+
+## Notes
+
+- The review's verification gaps stand as disclosed: `mm2-host`
+  exercised only with an empty install + `--dev-world` (no
+  retail-install catalog picks), clients still share the test process
+  (full AC01 topology and the AC06 LAN/Internet matrix are F24-C),
+  distinct-pick rate-limiting and unbounded channels are F24-C/AC03
+  scope, and the latent wire-decode range gaps (`EventRef.index`,
+  `RaceCustomization.opponents`, laps) must be re-bound in the
+  session-start leg.
+- Defect class worth noting: any host-constructed wire field populated
+  from consumer or peer-derived strings needs the bound enforced before
+  the send, or encode errors must be distinguished from transport
+  errors at the send site. `Session.summary`/`params` were already
+  pre-encoded in `Host::set_session`; `Reject.message` inputs are
+  bounded by construction; the refusal reason was the remaining gap.
+
+---
+
 # Last iteration — F24-B.3: vehicle/paint picks on the roster, gated by
 # a consumer-supplied catalog validator (iteration 014, run
 # 20260929T174954)
