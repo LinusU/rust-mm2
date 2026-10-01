@@ -4,9 +4,9 @@
 //! opens a window, GPU or audio device). Client processes, LAN and the
 //! impairment matrix remain F24-C scope.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::net::SocketAddr;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -18,9 +18,11 @@ use mm2_net::{Client, Message, NetError, RejectCode, hello};
 const WAIT: Duration = Duration::from_secs(15);
 
 /// A running `mm2-host` child with its stdout drained onto a channel —
-/// the process's `key=value` record contract is the observable surface.
+/// the process's `key=value` record contract is the observable surface —
+/// and its stdin held open for the operator commands.
 struct HostProc {
     child: Child,
+    stdin: ChildStdin,
     lines: mpsc::Receiver<String>,
 }
 
@@ -28,9 +30,11 @@ impl HostProc {
     fn spawn(args: &[String]) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_mm2-host"))
             .args(args)
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
             .expect("failed to spawn mm2-host");
+        let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
@@ -41,7 +45,11 @@ impl HostProc {
                 }
             }
         });
-        Self { child, lines: rx }
+        Self {
+            child,
+            stdin,
+            lines: rx,
+        }
     }
 
     /// The next record line, failing rather than hanging if the child
@@ -50,6 +58,18 @@ impl HostProc {
         self.lines
             .recv_timeout(WAIT)
             .expect("no line from mm2-host")
+    }
+
+    /// One operator command on the host's stdin (`start`, `cancel`,
+    /// `quit`).
+    fn cmd(&mut self, command: &str) {
+        writeln!(self.stdin, "{command}").unwrap();
+        self.stdin.flush().unwrap();
+    }
+
+    /// Reap the child and return its exit status — for `quit` legs.
+    fn wait(mut self) -> std::process::ExitStatus {
+        self.child.wait().expect("failed to wait for mm2-host")
     }
 }
 
@@ -66,8 +86,10 @@ fn join(addr: SocketAddr, driver: &str, fp: u64) -> Client {
     client
 }
 
-#[test]
-fn a_dedicated_host_process_serves_an_advertised_lobby() {
+/// Spawn an `mm2-host` on a content-free dev world and parse the
+/// `listening=` record into (address, fingerprint) — the two facts a
+/// join needs. The install dir is returned so it outlives the child.
+fn dev_host(seed: u64) -> (HostProc, SocketAddr, u64, tempfile::TempDir) {
     // An empty install dir is a valid (if content-free) mount — the
     // gameplay fingerprint still gates deterministically.
     let dir = tempfile::tempdir().unwrap();
@@ -78,7 +100,7 @@ fn a_dedicated_host_process_serves_an_advertised_lobby() {
         "--bind".to_string(),
         "127.0.0.1:0".to_string(),
         "--seed".to_string(),
-        "7".to_string(),
+        seed.to_string(),
     ]);
 
     // The first record binds the contract: the address peers dial and
@@ -95,7 +117,12 @@ fn a_dedicated_host_process_serves_an_advertised_lobby() {
         .find_map(|tok| tok.strip_prefix("fingerprint=fnv1a64:"))
         .unwrap_or_else(|| panic!("no fingerprint in {first:?}"));
     let fp = u64::from_str_radix(fp_hex, 16).unwrap();
-    assert!(first.contains("seed=7"), "seed not in {first:?}");
+    (host, addr, fp, dir)
+}
+
+#[test]
+fn a_dedicated_host_process_serves_an_advertised_lobby() {
+    let (host, addr, fp, _install) = dev_host(7);
 
     // The advertised session arrives before the roster and decodes back
     // into the configuration the host was launched with.
@@ -187,4 +214,120 @@ fn a_dedicated_host_process_serves_an_advertised_lobby() {
     alice.leave().unwrap();
     let left = host.line();
     assert_eq!(left, "event=left id=1 driver=\"alice\" cause=quit");
+}
+
+/// The session lifecycle leg against the separate host process: stdin
+/// drives `start`/`cancel`, the gate refuses early, an open (MP-5
+/// cruise) session admits a mid-session joiner with the running
+/// `Start`, and `cancel` re-opens the lobby for a second generation.
+#[test]
+fn a_dedicated_host_process_runs_start_and_cancel() {
+    let (mut host, addr, fp, _install) = dev_host(9);
+
+    let mut alice = join(addr, "alice", fp);
+    match alice.recv().unwrap() {
+        Message::Session(_) => {}
+        other => panic!("expected Session, got {other:?}"),
+    }
+    match alice.recv().unwrap() {
+        Message::Roster { players } => assert_eq!(players.len(), 1),
+        other => panic!("expected Roster, got {other:?}"),
+    }
+    assert_eq!(
+        host.line(),
+        "event=joined id=1 driver=\"alice\" build=\"test\""
+    );
+
+    // The gate names the blocker — a start before the ready flag is
+    // refused, not silently accepted.
+    host.cmd("start");
+    assert_eq!(
+        host.line(),
+        "event=start_refused reason=\"alice is not ready\""
+    );
+
+    alice.set_vehicle("", 0).unwrap();
+    assert_eq!(host.line(), "event=vehicle id=1 vehicle=\"\" paint=0");
+    alice.set_ready(true).unwrap();
+    assert_eq!(host.line(), "event=ready id=1 ready=true");
+
+    // This time the start goes through: the record reports generation 1
+    // and `Start` carries the running session self-contained.
+    host.cmd("start");
+    assert_eq!(host.line(), "event=started generation=1");
+    loop {
+        match alice.recv().unwrap() {
+            Message::Start {
+                generation,
+                session,
+            } => {
+                assert_eq!(generation, 1);
+                let config = net::accept(&session).unwrap();
+                assert_eq!(config.world, WorldMode::DevWorld);
+                assert_eq!(config.seed, 9);
+                break;
+            }
+            Message::Roster { .. } => continue,
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    // mm2-host advertises cruise only — MP-5's open rule: a mid-session
+    // joiner is admitted and told the running session's Start after its
+    // first roster.
+    let mut bob = join(addr, "bob", fp);
+    assert_eq!(
+        host.line(),
+        "event=joined id=2 driver=\"bob\" build=\"test\""
+    );
+    match bob.recv().unwrap() {
+        Message::Session(_) => {}
+        other => panic!("expected Session, got {other:?}"),
+    }
+    loop {
+        match bob.recv().unwrap() {
+            Message::Start { generation, .. } => {
+                assert_eq!(generation, 1);
+                break;
+            }
+            Message::Roster { .. } => continue,
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    // Cancel returns everyone to the lobby; readiness reset is visible
+    // on the rebroadcast roster. alice may still have bob's join roster
+    // queued ahead of the Cancel — skip roster traffic to it.
+    host.cmd("cancel");
+    assert_eq!(host.line(), "event=cancelled generation=1");
+    for client in [&mut alice, &mut bob] {
+        loop {
+            match client.recv().unwrap() {
+                Message::Cancel { generation: 1 } => break,
+                Message::Roster { .. } => continue,
+                other => panic!("expected Cancel, got {other:?}"),
+            }
+        }
+        match client.recv().unwrap() {
+            Message::Roster { players } => {
+                assert!(players.iter().all(|p| !p.ready));
+            }
+            other => panic!("expected Roster, got {other:?}"),
+        }
+    }
+
+    // A second session is a fresh generation. bob picks and readies;
+    // alice's pick survived the cancel so she needs only ready.
+    bob.set_vehicle("", 0).unwrap();
+    assert_eq!(host.line(), "event=vehicle id=2 vehicle=\"\" paint=0");
+    bob.set_ready(true).unwrap();
+    assert_eq!(host.line(), "event=ready id=2 ready=true");
+    alice.set_ready(true).unwrap();
+    assert_eq!(host.line(), "event=ready id=1 ready=true");
+    host.cmd("start");
+    assert_eq!(host.line(), "event=started generation=2");
+
+    // `quit` is a clean shutdown — the process exits on its own.
+    host.cmd("quit");
+    assert!(host.wait().success(), "mm2-host did not exit cleanly");
 }

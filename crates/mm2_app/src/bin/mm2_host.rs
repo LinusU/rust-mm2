@@ -17,13 +17,25 @@
 //! event=vehicle id=<n> vehicle="<id>" paint=<n>
 //! event=pick_refused id=<n> vehicle="<id>" paint=<n> reason="<text>"
 //! event=join_failed peer=<addr> reason="<text>"
+//! event=started generation=<n>
+//! event=start_refused reason="<text>"
+//! event=cancelled generation=<n>
 //! ```
+//!
+//! stdin is the operator's control surface — one command per line:
+//! `start` requests session start (open late-join — the cruise rule,
+//! MP-5), `cancel` returns everyone to the lobby, `quit` shuts the
+//! host down cleanly. A closed stdin just means unattended operation.
 //!
 //! Usage errors and startup failures exit 2; a host loop that dies on
 //! its own exits 1.
 
+use std::io::{self, BufRead};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
@@ -34,7 +46,7 @@ use mm2_game::{
     Difficulty, SessionAuthority, SessionConditions, SessionConfig, SessionMode, TimeOfDay,
     Weather, WorldMode,
 };
-use mm2_net::{Host, HostConfig, HostEvent, LeaveCause};
+use mm2_net::{Host, HostConfig, HostEvent, LateJoin, LeaveCause};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -210,8 +222,40 @@ fn main() {
         ad.summary
     );
 
+    // The operator's control surface: one command per line on stdin.
+    // `Host` is !Sync (the event channel is a Receiver), so the reader
+    // thread drives the loop through a `HostCtl` handle. A closed
+    // stdin ends the thread without touching the host — unattended
+    // operation is normal.
+    let quitting = Arc::new(AtomicBool::new(false));
+    {
+        let ctl = host.ctl();
+        let quitting = quitting.clone();
+        thread::spawn(move || {
+            for line in io::stdin().lock().lines() {
+                let Ok(line) = line else { return };
+                match line.trim() {
+                    // mm2-host advertises cruise sessions only, whose
+                    // documented rule (MP-5) is join/leave at any time.
+                    "start" => drop(ctl.start(LateJoin::Open)),
+                    "cancel" => drop(ctl.cancel()),
+                    "quit" => {
+                        quitting.store(true, Ordering::Relaxed);
+                        drop(ctl.shutdown());
+                        return;
+                    }
+                    "" => {}
+                    other => eprintln!("error: unknown command {other:?}"),
+                }
+            }
+        });
+    }
+
     while let Ok(event) = host.recv() {
         println!("{}", describe(&event));
+    }
+    if quitting.load(Ordering::Relaxed) {
+        return;
     }
     eprintln!("error: host loop ended unexpectedly");
     std::process::exit(1);
@@ -248,6 +292,15 @@ fn describe(event: &HostEvent) -> String {
         }
         HostEvent::JoinFailed { peer, reason } => {
             format!("event=join_failed peer={peer} reason={reason:?}")
+        }
+        HostEvent::Started { generation } => {
+            format!("event=started generation={generation}")
+        }
+        HostEvent::StartRefused { reason } => {
+            format!("event=start_refused reason={reason:?}")
+        }
+        HostEvent::Cancelled { generation } => {
+            format!("event=cancelled generation={generation}")
         }
     }
 }

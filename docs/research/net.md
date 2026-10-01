@@ -40,14 +40,16 @@ precludes adding a second socket later.
 is added it must come from maintained crypto/session crates, not
 hand-rolled primitives.
 
-## Wire protocol (`PROTOCOL_VERSION = 2`)
+## Wire protocol (`PROTOCOL_VERSION = 3`)
 
 Length-prefixed frames: `u32le` length + payload, bounded by
 `MAX_FRAME` (256 KiB) checked *before* allocation. Messages are strict
 little-endian with `u16`-length-bounded strings; unknown tags, bad
 truncation and trailing bytes are all hard errors. v1→v2: `RosterEntry`
 gained the driver's `pick` and the `SetVehicle`/`VehicleRefused` pair
-landed — an incompatible roster shape, so the version moved.
+landed — an incompatible roster shape, so the version moved. v2→v3:
+`Start`/`Cancel` (the session lifecycle pair) and
+`RejectCode::SessionStarted` landed.
 
 Handshake (always the first exchange):
 
@@ -103,6 +105,8 @@ client → Hello                     host   → Accept | Reject
                                      host → Session | Roster (broadcast)
                                           → VehicleRefused { reason }
                                             (to the refused peer only)
+                                          → Start { generation, session }
+                                          → Cancel { generation }
 ```
 
 `Session` is sent to a newcomer only when the host has advertised one,
@@ -192,6 +196,55 @@ unchanged F24-C/AC03 scope). The gameplay-fingerprint gate means every
 peer's catalog is identical, so a pick the host accepts is spawnable
 everywhere.
 
+### Session lifecycle (start/cancel)
+
+*MP-5 (documented — `help:Multiplayer Games`) is the original-rules
+anchor:* race joiners must be in before the host starts; Cruise and
+Cops & Robbers allow join/leave at any time; a leaver's vehicle
+disappears for everyone. MP-8 (documented — `help:Multiplayer Lobby
+Screen`) gives the host the start control. What the original does not
+evidence is the exact refusal conditions of a blocked start — the gate
+below is a *designed* policy, recorded as such.
+
+- `Host::start(late_join)` / `HostCtl::start` is the consumer's
+  asynchronous request; the verdict arrives as `HostEvent::Started` or
+  `HostEvent::StartRefused { reason }`. The gate, in order: the lobby
+  must not already be in-session, a session must have been advertised
+  (`Start` carries it — there is nothing to start otherwise), and
+  every *connected* player must be `ready` and have a pick — a driver
+  cannot spawn into a session with no committed car. An empty wire
+  roster passes: a remote client's state cannot gate a host that is
+  itself the only player (the app-layer host player, wire id 0, is not
+  on the roster). The first blocker names the refusal reason
+  (`"alice is not ready"`).
+- `Start { generation, session }` is host-authoritative and
+  self-contained: `generation` mints from 1 and climbs monotonically
+  for the lobby's lifetime — the value `mm2_game`'s
+  `Session::generation` / `ObjectId::generation` namespace to — and
+  `session` is the *running* session, snapshotted at start so a
+  mid-session `set_session` re-advertisement (the next round's config)
+  can never rewrite what the running one is.
+- `late_join` is the per-start join policy — `LateJoin::Closed` (the
+  MP-5 race rule: joins get `RejectCode::SessionStarted` before
+  `Accept`, like a full lobby) or `LateJoin::Open` (the MP-5 cruise
+  rule: a newcomer is admitted normally, gets Welcome → Session →
+  Roster, then a unicast `Start` with the *running* session and
+  generation so it enters the session the rest already play).
+- The roster stays the shared truth through a session: departures,
+  readiness and pick changes still apply and rebroadcast (MP-5's
+  "a leaver's vehicle disappears for everyone" at the lobby level; an
+  open session's late joiner picks its car after joining).
+- `Host::cancel` / `HostCtl::cancel` ends the in-session phase:
+  `Cancel { generation }` broadcasts, readiness resets (designed — a
+  fresh start wants fresh consent; picks are kept), joins re-open, and
+  `HostEvent::Cancelled` confirms. Outside a session it is a no-op.
+- `Host::ctl()` hands out `HostCtl` — a cloneable `Send`/`Sync`
+  handle driving `start`/`cancel`/`shutdown` from a thread other than
+  the event-draining one (`Host` is `!Sync`), which is how `mm2-host`'s
+  stdin reader reaches the loop.
+- Client-sent `Start`/`Cancel` are out-of-turn and drop the peer
+  `Malformed`, like every other host-only message.
+
 ### Dedicated host
 
 `mm2-host` (a second `mm2_app` binary) is the first consumer: a headless
@@ -208,14 +261,20 @@ Amateur), `--weather`/`--time-of-day` (0–3 selectors) and `--seed`
 the mounted `VehicleCatalog`, and prints one
 `listening=<addr> fingerprint=… seed=… session="…"` record followed by
 one `event=` line per lobby event for harness consumption
-(`joined`/`left`/`ready`/`vehicle`/`pick_refused`/`join_failed`). No
+(`joined`/`left`/`ready`/`vehicle`/`pick_refused`/`join_failed`/
+`started`/`start_refused`/`cancelled`). No
 window, audio or GPU is required — that is the F24-AC05 binary leg,
 exercised so far only on loopback. Named sessions and non-cruise modes
-have no flags yet — those arrive with the session legs below.
+have no flags yet — those arrive with their own F24-B legs.
 
-Deliberately *not* here: start/cancel, session-content join gating,
-late-join into a running session, host migration, and the per-tick
-dataplane (F25).
+The operator's control surface is stdin: `start`, `cancel`, `quit`,
+one per line. `start` always passes `LateJoin::Open` — `mm2-host`
+advertises cruise sessions only, and MP-5 keeps those joinable. A
+closed stdin means unattended operation, not shutdown; `quit` is the
+clean-exit command (`HostCtl::shutdown`, exit 0 after the loop ends).
+
+Deliberately *not* here: session-content join gating, host migration,
+an in-app (Bevy-side) host surface, and the per-tick dataplane (F25).
 
 ## Evidence level
 
@@ -228,10 +287,24 @@ incompatible-peer rejection, out-of-turn-message drops, handshake-flood
 bounding, session ordering/rebroadcast, host-shutdown disconnect, and
 the pick legs — validator-applied pick riding the roster, refusal
 reaching only the picker with the roster untouched, identical-pick
-no-op, validator-less acceptance and host-only-message drops.
+no-op, validator-less acceptance and host-only-message drops —
+plus the lifecycle legs: gated start (named refusals for unready/
+unpicked/missing-session/already-running, empty-roster pass), `Start`
+carrying generation + session, `Closed` refusing a join with
+`SessionStarted`, `Open` handing a late joiner the running `Start`
+(including the running-vs-readvertised session distinction),
+`Cancel` re-opening the lobby with readiness reset and a fresh
+generation on the next start, mid-session roster liveness,
+client-sent lifecycle messages dropping `Malformed`, and the
+`HostCtl` cross-thread driver.
 `mm2_app`'s `net_host` test additionally runs the `mm2-host` binary as a
 separate OS process with two in-process clients joining it, picking and
 being refused — partial F24-AC01/AC05 evidence (separate host process,
 configured bind, no window/audio; clients still share the test
-process). This is *not* fully separate-process, LAN or Internet
-evidence; F24-C owns that matrix.
+process). Its second leg drives stdin `start`/`cancel`/`quit`: a gated
+refusal, a generation-1 start with the session decoding back through
+`net::accept`, a mid-session joiner receiving the running `Start`
+(open-policy MP-5 cruise), a cancel re-opening the lobby into a
+generation-2 start, and `quit` exiting the process cleanly. This is
+*not* fully separate-process, LAN or Internet evidence; F24-C owns
+that matrix.

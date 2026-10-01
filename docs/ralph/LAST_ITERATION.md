@@ -1,3 +1,112 @@
+# Last iteration — F24-B.4: session start/cancel, generation, and the
+# MP-5 late-join policy (iteration 016, run 20260929T174954)
+
+Implementation iteration on `ralph/night` (baseline `ae01795` — the
+iteration-015 repair; external verify green, review **pass** with
+verification gaps only, no blocking findings). One coherent slice: the
+plan's named fourth leg of F24-B — start/cancel — which also lands the
+spec's session-generation requirement and MP-5's documented late-join
+split.
+
+## Task selection
+
+No failing gate or review finding to repair — iteration 015's review
+passed with gaps only. The plan's named next slice was F24-B's fourth
+leg, start/cancel, which the plan itself flagged as owning "un-picked
+players and start gating". Reading `docs/original-rules.md` first
+mattered: MP-5 (documented, `help:Multiplayer Games`) splits the
+original's late-join behavior by mode — races close at start, Cruise
+and C&R stay open — so a blanket "no joins once started" wire policy
+would have contradicted a documented original rule. The policy is
+instead the consumer's per-start choice (`LateJoin::Closed`/`Open`),
+which is also exactly what a future event-mode host needs.
+
+## What landed
+
+- `mm2_net::proto` — `PROTOCOL_VERSION` 2 → 3. `Message::Start {
+  generation: u64, session: SessionAdvertisement }` (self-contained —
+  the *running* session, snapshotted at start, so a mid-session
+  `set_session` re-advertisement can't rewrite what is running) and
+  `Message::Cancel { generation }`; `RejectCode::SessionStarted`.
+  The session codec is shared between `Session` and `Start`.
+- `mm2_net::lobby` — a `Phase` (`Lobby` / `InSession { generation,
+  session, late_join }`) in the host loop. `Host::start(late_join)`
+  requests a start; the gate (designed — MP-8 documents the host's
+  Start control, not its refusal conditions) requires lobby phase, an
+  advertised session, and every connected player ready *and* picked —
+  the first blocker names the refusal reason, and an empty wire roster
+  passes (the app-layer host player is not on it). `Started` reports
+  the roster that survived the `Start` send. `Host::cancel()` returns
+  to lobby: `Cancel` broadcast, readiness reset (picks kept), joins
+  re-open — a no-op outside a session. `Host::ctl()` hands out
+  `HostCtl`, the cloneable cross-thread driver (`Host` is `!Sync`).
+  Late joins follow MP-5: `Closed` rejects `SessionStarted` before
+  `Accept`; `Open` admits and then unicasts the running `Start`.
+  The roster stays live mid-session — departures and pick changes
+  still apply and rebroadcast (MP-5's leaver rule). Client-sent
+  `Start`/`Cancel` drop `Malformed` like every host-only message.
+- `mm2-host` — stdin is the operator control surface: `start` (always
+  `LateJoin::Open`, since it advertises cruise only), `cancel`,
+  `quit` (clean exit 0); a closed stdin is normal unattended
+  operation. The record contract gains `event=started generation=`,
+  `event=start_refused reason=`, `event=cancelled generation=`.
+
+## Evidence
+
+- `mm2_net` 40 → 51, real loopback sockets: `Start` reaches every peer
+  with generation 1 and the self-contained session; the gate names
+  each blocker (unready, unpicked, no session, already running) and a
+  refused start changes nothing; an empty roster may start; a `Closed`
+  join is refused `SessionStarted` with a `JoinFailed` record; an
+  `Open` joiner gets Session → roster → the *running* `Start` even
+  after a mid-session re-advertisement; `Cancel` broadcasts, resets
+  readiness, keeps picks, re-opens joins, and the next start mints
+  generation 2; a mid-session pick and a quit still update the roster;
+  client-sent `Start`/`Cancel` drop the peer `Malformed`; `HostCtl`
+  drives a start from another thread.
+- `tests/net_host.rs` +1 leg against the separate `mm2-host` process:
+  stdin `start` refused before ready (`event=start_refused`), then
+  `event=started generation=1` with the client decoding the session
+  via `net::accept`, a mid-session joiner receiving the running
+  `Start`, `cancel` → reset roster → generation-2 restart, and `quit`
+  exiting the process cleanly.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test -p mm2_net` — 51/51. `cargo test -p mm2_app --test
+  net_host` — 2/2 in ~2 s with `mm2-host` as a separate OS process.
+  The full workspace run is left to the external `verify.sh` pass;
+  mm2_net's only consumer is mm2_app, covered here.
+
+## Classification / remaining open items
+
+- Original requirement honoured: MP-5's mode-dependent late-join split
+  (Open/Closed) and the leaver-visible roster; MP-8's host-owned start
+  control. Designed and recorded in `docs/research/net.md`: the start
+  gate's exact refusal conditions, readiness-reset-on-cancel,
+  generation semantics (namespaces `mm2_game`'s `ObjectId`), the empty
+  roster pass, `Start`'s self-contained session payload, and
+  mm2-host's stdin surface.
+- Still open F24-B scope: session-content join gating (a peer admitted
+  to a session it cannot run — e.g. missing event content — beyond the
+  fingerprint gate), the Bevy-side in-app host/client bridge (AC05's
+  other leg), event-mode hosting (mm2-host is cruise-only, so the
+  `Closed` policy has only wire-level legs — no real consumer yet),
+  AC04's consumer-facing error surface. Picks are still not consumed
+  by any session-build path — `Start` signals; the spawn roster is a
+  later leg — and the latent decode range gaps (`EventRef.index`,
+  `RaceCustomization.opponents`, laps) stay deferred to it.
+- Verification gaps carried forward: clients still share the test
+  process (full AC01 topology + AC06 LAN/Internet matrix are F24-C);
+  no retail-install `mm2-host` run (real catalog picks) is on record;
+  `SetReady`/`SetVehicle` rate-limiting and unbounded channels remain
+  F24-C/AC03 scope as previously disclosed.
+
+---
+
 # Last iteration — external-review repair: an over-long `VehicleRefused`
 # reason could drop the live picker (iteration 015, run
 # 20260929T174954)

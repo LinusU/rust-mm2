@@ -14,15 +14,24 @@
 //! The **host loop** is the only code that mutates the roster: it mints
 //! player ids, sends `Accept`/`Reject` + `Welcome`, applies `SetReady`
 //! and `SetVehicle` (through the consumer's [`HostConfig::pick_validator`]
-//! — the roster carries each driver's pick), reaps gone peers and
-//! broadcasts the whole `Roster` after every change. Consumers drain
+//! — the roster carries each driver's pick), runs the consumer's
+//! start/cancel against the lobby gate, reaps gone peers and broadcasts
+//! the whole `Roster` after every change. Consumers drain
 //! [`HostEvent`]s — the Bevy bridge (F24-B follow-up) is just a system
 //! that forwards them into app state.
 //!
+//! Start/cancel (F24-B.4): `Host::start` moves the lobby in-session
+//! under a fresh generation and broadcasts `Start` carrying the
+//! *running* session; `Host::cancel` returns everyone to the lobby.
+//! Whether a started session still admits joins is the consumer's
+//! per-start [`LateJoin`] choice — MP-5 (documented) closes race lobbies
+//! at start but keeps Cruise and Cops & Robbers open, so a late joiner
+//! into an open session gets its roster then the running `Start`.
+//!
 //! Nothing here knows about vehicles, cities or modes: `vehicle` is an
-//! opaque id the consumer's validator interprets, `params` an opaque
-//! blob, and start/cancel is a later F24-B leg — the game-rule types
-//! stay in `mm2_game` and the wire carries opaque fields only.
+//! opaque id the consumer's validator interprets and `params` an opaque
+//! blob — the game-rule types stay in `mm2_game` and the wire carries
+//! opaque fields only.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -108,6 +117,22 @@ impl std::fmt::Debug for HostConfig {
     }
 }
 
+/// Whether a started session still admits joins — the consumer's
+/// choice at [`Host::start`], derived from the session's mode. MP-5
+/// (documented — `help:Multiplayer Games`) splits the original's
+/// behavior by mode: races require everyone in before the host starts;
+/// Cruise and Cops & Robbers allow join/leave at any time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LateJoin {
+    /// Joins are refused with [`RejectCode::SessionStarted`] for the
+    /// session's duration — the race rule.
+    Closed,
+    /// Joins stay open — the cruise rule. A newcomer is admitted like
+    /// any lobby join, then told `Start` with the *running* session and
+    /// generation so it enters the session the rest already play.
+    Open,
+}
+
 /// Why a roster entry went away.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaveCause {
@@ -172,13 +197,36 @@ pub enum HostEvent {
         reason: String,
     },
     /// A connection was refused — a failed handshake (version/content/
-    /// malformed/stalled, with the wire `Reject` sent where applicable)
-    /// or a join against a full roster. `reason` is display-ready.
+    /// malformed/stalled, with the wire `Reject` sent where applicable),
+    /// a join against a full roster, or a join during a closed session.
+    /// `reason` is display-ready.
     JoinFailed {
         /// The refused peer's address.
         peer: SocketAddr,
         /// Why it was refused.
         reason: String,
+    },
+    /// A `Host::start` request passed the gate: `Start` went out to the
+    /// roster (peers whose write failed were reaped `Lost` first, so the
+    /// remaining roster is the session's roster) and the lobby is now
+    /// in-session.
+    Started {
+        /// The generation the session was minted under.
+        generation: u64,
+    },
+    /// A `Host::start` request failed the lobby gate — nothing changed.
+    /// `reason` is display-ready (`"alice is not ready"`, `"no session
+    /// has been advertised"`, `"a session is already running"`).
+    StartRefused {
+        /// Why the start did not happen.
+        reason: String,
+    },
+    /// A `Host::cancel` ended the in-session phase: `Cancel` went to
+    /// every peer, readiness reset for the next round, and joins
+    /// re-opened.
+    Cancelled {
+        /// The generation that ended.
+        generation: u64,
     },
 }
 
@@ -234,6 +282,17 @@ impl Host {
         self.addr
     }
 
+    /// A control handle for driving the lobby from another thread —
+    /// `Host` itself is `!Sync` (its event channel is a `Receiver`), so
+    /// a consumer that wants a second thread calling `start`/`cancel`/
+    /// `shutdown` (the dedicated host's stdin reader, a UI thread)
+    /// hands this off instead.
+    pub fn ctl(&self) -> HostCtl {
+        HostCtl {
+            control: self.control.clone(),
+        }
+    }
+
     /// Advertise (or replace) the session this lobby will run. The
     /// advertisement is broadcast to every connected player and sent to
     /// each newcomer between `Welcome` and the roster, so a client always
@@ -246,15 +305,38 @@ impl Host {
     /// blob; the lobby only bounds and carries it.
     pub fn set_session(&self, session: SessionAdvertisement) -> Result<(), NetError> {
         Message::Session(session.clone()).encode()?;
-        self.control
-            .send(LoopMsg::SetSession(session))
-            .map_err(|_| {
-                NetError::Io(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "host loop is not running",
-                ))
-            })?;
-        Ok(())
+        self.ctl().send(LoopMsg::SetSession(session))
+    }
+
+    /// Request the session start. The request is asynchronous — the
+    /// verdict arrives as [`HostEvent::Started`] or
+    /// [`HostEvent::StartRefused`], never as this call's return value.
+    ///
+    /// The gate (designed — MP-8 gives the host the start control but
+    /// does not evidence the original's refusal conditions): a session
+    /// must have been advertised, and every *connected* player must be
+    /// ready and have a vehicle pick — a driver cannot spawn into a
+    /// session with no committed car. An empty roster passes: a remote
+    /// client's state cannot gate a host that is itself the only
+    /// player (wire ids start at 1; the app-layer host player is not
+    /// on the wire roster).
+    ///
+    /// `late_join` is the started session's join policy — see
+    /// [`LateJoin`] for the MP-5 split. On success the lobby mints a
+    /// fresh generation, broadcasts `Start` carrying the running
+    /// session (which `set_session` may later replace for the *next*
+    /// round without touching the running one), and refuses or admits
+    /// joins per the policy.
+    pub fn start(&self, late_join: LateJoin) -> Result<(), NetError> {
+        self.ctl().start(late_join)
+    }
+
+    /// End the in-session phase: broadcast `Cancel`, re-open joins and
+    /// reset every readiness flag for the next round (designed — a new
+    /// start wants fresh consent; picks are kept). A no-op while the
+    /// lobby is not in-session. Confirmed by [`HostEvent::Cancelled`].
+    pub fn cancel(&self) -> Result<(), NetError> {
+        self.ctl().cancel()
     }
 
     /// Wait for the next lobby event, unbounded — for consumers that
@@ -288,6 +370,43 @@ impl Host {
 impl Drop for Host {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+/// A cloneable handle for driving the host loop from a thread other
+/// than the one draining [`HostEvent`]s — see [`Host::ctl`]. Sending
+/// fails `Err` only when the loop is gone; each request's verdict still
+/// arrives on the event channel.
+#[derive(Clone)]
+pub struct HostCtl {
+    control: Sender<LoopMsg>,
+}
+
+impl HostCtl {
+    fn send(&self, msg: LoopMsg) -> Result<(), NetError> {
+        self.control.send(msg).map_err(|_| {
+            NetError::Io(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "host loop is not running",
+            ))
+        })
+    }
+
+    /// [`Host::start`], from any thread.
+    pub fn start(&self, late_join: LateJoin) -> Result<(), NetError> {
+        self.send(LoopMsg::Start { late_join })
+    }
+
+    /// [`Host::cancel`], from any thread.
+    pub fn cancel(&self) -> Result<(), NetError> {
+        self.send(LoopMsg::Cancel)
+    }
+
+    /// Ask the host loop to shut down — like [`Host::shutdown`] but
+    /// without joining its thread (the owner joins on `Drop`). The
+    /// event channel then closes, ending a consumer's `recv` loop.
+    pub fn shutdown(&self) -> Result<(), NetError> {
+        self.send(LoopMsg::Shutdown)
     }
 }
 
@@ -395,8 +514,35 @@ enum LoopMsg {
     PeerGone { id: u16, cause: LeaveCause },
     /// `Host::set_session` — the session this lobby advertises.
     SetSession(SessionAdvertisement),
+    /// `Host::start`/`HostCtl::start` — request session start under the
+    /// given late-join policy.
+    Start { late_join: LateJoin },
+    /// `Host::cancel`/`HostCtl::cancel` — end the in-session phase.
+    Cancel,
     /// `Host::shutdown`.
     Shutdown,
+}
+
+/// Whether the lobby is taking joins/picks or a session is running.
+/// The roster itself stays live either way — mid-session departures,
+/// readiness and pick changes still apply and rebroadcast (MP-5: a
+/// leaver's vehicle disappears for everyone; a cruise session's late
+/// joiner picks its car after joining).
+enum Phase {
+    /// Lobby state: joins admitted up to the seat cap, `start` allowed.
+    Lobby,
+    /// A session is running. `session` is the advertisement that
+    /// *started* it — which may differ from the lobby's currently
+    /// advertised next session — so a late joiner into an `Open`
+    /// session is told the running one, not the pending change.
+    InSession {
+        /// The generation the running session was minted under.
+        generation: u64,
+        /// The session that started, as the peers received it.
+        session: SessionAdvertisement,
+        /// The join policy the consumer chose at `start`.
+        late_join: LateJoin,
+    },
 }
 
 /// A rostered player's host-side state.
@@ -448,6 +594,12 @@ fn run(
     // The session this lobby advertises; `None` until the consumer sets
     // one — clients then simply never see a `Session` message.
     let mut session: Option<SessionAdvertisement> = None;
+    // Lobby vs running session; the session generation counter mints
+    // 1 on the first start and climbs monotonically for the lobby's
+    // lifetime — peers namespace ids by it (`mm2_game`'s
+    // `Session::generation`/`ObjectId::generation` match).
+    let mut phase = Phase::Lobby;
+    let mut generation: u64 = 0;
     let mut pending = 0usize;
     // Wire ids mint from 1; 0 is reserved for the host player at the app
     // layer so the wire roster and the displayed roster share numbering.
@@ -486,6 +638,27 @@ fn run(
             }
             LoopMsg::Handshaken { mut conn, hello } => {
                 pending = pending.saturating_sub(1);
+                // A join during a closed session is refused before
+                // `Accept`, like a full lobby — the peer gets a named
+                // reason through the normal handshake verdict. MP-5:
+                // race joiners must be in before the host starts.
+                if matches!(
+                    phase,
+                    Phase::InSession {
+                        late_join: LateJoin::Closed,
+                        ..
+                    }
+                ) {
+                    let _ = conn.send(&Message::Reject {
+                        code: RejectCode::SessionStarted,
+                        message: "the session has already started".to_string(),
+                    });
+                    let _ = events.send(HostEvent::JoinFailed {
+                        peer: conn.peer_addr(),
+                        reason: "the session has already started".to_string(),
+                    });
+                    continue;
+                }
                 if players.len() >= config.max_clients as usize {
                     let _ = conn.send(&Message::Reject {
                         code: RejectCode::LobbyFull,
@@ -543,6 +716,29 @@ fn run(
                 // it as `Lost` — a departed slot gets no reader.
                 if players.contains_key(&id) {
                     spawn_reader(conn, id, tx.clone());
+                }
+                // A join into an open in-progress session is dropped
+                // straight into it: after its first roster the newcomer
+                // gets the *running* session's `Start` — which may
+                // differ from the lobby's currently advertised next
+                // session — under the running generation. MP-5's
+                // join-at-any-time rule, made explicit.
+                if let Phase::InSession {
+                    generation,
+                    session: started,
+                    late_join: LateJoin::Open,
+                } = &phase
+                {
+                    let msg = Message::Start {
+                        generation: *generation,
+                        session: started.clone(),
+                    };
+                    let failed = players
+                        .get_mut(&id)
+                        .is_some_and(|slot| slot.writer.send(&msg).is_err());
+                    if failed && remove_player(&mut players, id, LeaveCause::Lost, &events) {
+                        broadcast_roster(&mut players, &events);
+                    }
                 }
             }
             LoopMsg::PeerMessage {
@@ -614,6 +810,71 @@ fn run(
                 // Removals under the session send change the roster too —
                 // survivors get the corrected snapshot after the ad.
                 if !broadcast(&mut players, &Message::Session(ad), &events) {
+                    broadcast_roster(&mut players, &events);
+                }
+            }
+            LoopMsg::Start { late_join } => {
+                // The start gate (designed — see `Host::start`): the
+                // lobby must be pre-session, a session must have been
+                // advertised, and every connected player must be ready
+                // and picked. The first offender names the reason.
+                let refusal = match phase {
+                    Phase::InSession { .. } => Some("a session is already running".to_string()),
+                    Phase::Lobby if session.is_none() => {
+                        Some("no session has been advertised".to_string())
+                    }
+                    Phase::Lobby => players
+                        .values()
+                        .find(|slot| !slot.ready)
+                        .map(|slot| format!("{} is not ready", slot.driver))
+                        .or_else(|| {
+                            players
+                                .values()
+                                .find(|slot| slot.pick.is_none())
+                                .map(|slot| format!("{} has not picked a vehicle", slot.driver))
+                        }),
+                };
+                match refusal {
+                    Some(reason) => {
+                        let _ = events.send(HostEvent::StartRefused { reason });
+                    }
+                    None => {
+                        generation += 1;
+                        // The gate guarantees `session` is `Some`.
+                        let started = session.clone().unwrap();
+                        phase = Phase::InSession {
+                            generation,
+                            session: started.clone(),
+                            late_join,
+                        };
+                        let msg = Message::Start {
+                            generation,
+                            session: started,
+                        };
+                        // Peers that fail the `Start` write are reaped
+                        // `Lost` under the usual discipline and the
+                        // survivors get the corrected snapshot — then
+                        // `Started` reports the roster the session
+                        // actually began with.
+                        if !broadcast(&mut players, &msg, &events) {
+                            broadcast_roster(&mut players, &events);
+                        }
+                        let _ = events.send(HostEvent::Started { generation });
+                    }
+                }
+            }
+            LoopMsg::Cancel => {
+                if let Phase::InSession { generation, .. } = phase {
+                    phase = Phase::Lobby;
+                    broadcast(&mut players, &Message::Cancel { generation }, &events);
+                    // Back in the lobby a fresh start wants fresh
+                    // consent — readiness resets (designed); picks stay.
+                    for slot in players.values_mut() {
+                        slot.ready = false;
+                    }
+                    let _ = events.send(HostEvent::Cancelled { generation });
+                    // Departures under the `Cancel` send and the
+                    // readiness reset both changed the roster.
                     broadcast_roster(&mut players, &events);
                 }
             }
@@ -1471,5 +1732,385 @@ mod tests {
             }) => assert_eq!(vehicle, "anything"),
             other => panic!("expected VehicleChanged, got {other:?}"),
         }
+    }
+
+    /// A host with an advertised session — `start` needs one to carry.
+    fn sessioned_host() -> Host {
+        let host = host();
+        host.set_session(ad("go")).unwrap();
+        host
+    }
+
+    /// Join a host that advertises a session — the `Session` message
+    /// lands before the first roster.
+    fn join_sessioned(host: &Host, driver: &str) -> Client {
+        let mut client = join(host.addr(), driver);
+        match client.recv().unwrap() {
+            Message::Session(_) => {}
+            other => panic!("expected Session, got {other:?}"),
+        }
+        client
+    }
+
+    /// Read until `Start` arrives, skipping the roster traffic that
+    /// precedes it.
+    fn recv_start(client: &mut Client) -> (u64, SessionAdvertisement) {
+        for _ in 0..8 {
+            match client.recv().unwrap() {
+                Message::Start {
+                    generation,
+                    session,
+                } => return (generation, session),
+                Message::Roster { .. } => continue,
+                other => panic!("expected Start, got {other:?}"),
+            }
+        }
+        panic!("no Start arrived");
+    }
+
+    /// Drive a rostered player to a start-legal state: pick + ready.
+    fn ready_up(host: &Host, client: &mut Client, vehicle: &str) {
+        client.set_vehicle(vehicle, 0).unwrap();
+        client.set_ready(true).unwrap();
+        host.recv_timeout(WAIT).unwrap(); // VehicleChanged
+        host.recv_timeout(WAIT).unwrap(); // ReadyChanged
+    }
+
+    #[test]
+    fn a_start_broadcasts_the_session_under_a_fresh_generation() {
+        let host = sessioned_host();
+        let mut alice = join_sessioned(&host, "alice");
+        let mut bob = join_sessioned(&host, "bob");
+        host.recv_timeout(WAIT).unwrap();
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut alice, 2);
+        recv_roster(&mut bob, 2);
+        ready_up(&host, &mut alice, "vpbug");
+        ready_up(&host, &mut bob, "vpsemi");
+
+        host.start(LateJoin::Closed).unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::Started { generation: 1 }) => {}
+            other => panic!("expected Started{{1}}, got {other:?}"),
+        }
+        for client in [&mut alice, &mut bob] {
+            let (generation, session) = recv_start(client);
+            assert_eq!(generation, 1);
+            // `Start` is self-contained — the session it carries, not
+            // whatever the client last saw advertised.
+            assert_eq!(session, ad("go"));
+        }
+    }
+
+    /// The start gate (designed): lobby phase, an advertised session,
+    /// and every connected player ready and picked — the first blocker
+    /// is named in the refusal, and a refused start changes nothing.
+    #[test]
+    fn the_start_gate_names_the_blocker() {
+        let host = sessioned_host();
+        let mut alice = join_sessioned(&host, "alice");
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut alice, 1);
+
+        host.start(LateJoin::Closed).unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::StartRefused { reason }) => {
+                assert_eq!(reason, "alice is not ready");
+            }
+            other => panic!("expected StartRefused, got {other:?}"),
+        }
+
+        alice.set_ready(true).unwrap();
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut alice, 1);
+        host.start(LateJoin::Closed).unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::StartRefused { reason }) => {
+                assert_eq!(reason, "alice has not picked a vehicle");
+            }
+            other => panic!("expected StartRefused, got {other:?}"),
+        }
+
+        // A refused start left the lobby untouched: the pick still
+        // lands and the completed roster starts.
+        alice.set_vehicle("vpbug", 0).unwrap();
+        host.recv_timeout(WAIT).unwrap();
+        host.start(LateJoin::Closed).unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::Started { generation: 1 }) => {}
+            other => panic!("expected Started, got {other:?}"),
+        }
+
+        // A second start while in-session is refused.
+        host.start(LateJoin::Closed).unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::StartRefused { reason }) => {
+                assert_eq!(reason, "a session is already running");
+            }
+            other => panic!("expected StartRefused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_start_without_a_session_is_refused() {
+        let host = host();
+        host.start(LateJoin::Open).unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::StartRefused { reason }) => {
+                assert_eq!(reason, "no session has been advertised");
+            }
+            other => panic!("expected StartRefused, got {other:?}"),
+        }
+    }
+
+    /// An empty wire roster passes the gate — a remote client's state
+    /// cannot gate a host that is itself the only player (the app-layer
+    /// host player is not on the wire roster). A dedicated host driving
+    /// an empty start is the consumer's own choice.
+    #[test]
+    fn an_empty_lobby_may_start_a_session() {
+        let host = sessioned_host();
+        host.start(LateJoin::Closed).unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::Started { generation: 1 }) => {}
+            other => panic!("expected Started, got {other:?}"),
+        }
+    }
+
+    /// MP-5's race rule: a join into a `Closed` session is refused at
+    /// the handshake verdict with a named reason.
+    #[test]
+    fn a_closed_session_refuses_joins() {
+        let host = sessioned_host();
+        host.start(LateJoin::Closed).unwrap();
+        host.recv_timeout(WAIT).unwrap(); // Started — empty roster passes
+
+        let err = Client::join(
+            host.addr(),
+            &hello("b".to_string(), "alice".to_string(), FP),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            NetError::Rejected {
+                code: RejectCode::SessionStarted,
+                ..
+            }
+        ));
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::JoinFailed { reason, .. }) => {
+                assert!(reason.contains("started"), "got {reason}");
+            }
+            other => panic!("expected JoinFailed, got {other:?}"),
+        }
+    }
+
+    /// MP-5's cruise rule: a join into an `Open` session is admitted
+    /// normally and then told the *running* session's `Start` — which
+    /// keeps meaning the started session even after a mid-session
+    /// re-advertisement changes the lobby's *next* one.
+    #[test]
+    fn an_open_session_drops_a_joiner_straight_into_it() {
+        let host = sessioned_host();
+        let mut alice = join_sessioned(&host, "alice");
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut alice, 1);
+        ready_up(&host, &mut alice, "vpbug");
+        host.start(LateJoin::Open).unwrap();
+        host.recv_timeout(WAIT).unwrap(); // Started
+        assert_eq!(recv_start(&mut alice), (1, ad("go")));
+
+        // A mid-session re-advertisement is the *next* session's — it
+        // still broadcasts, but the running session is unaffected.
+        host.set_session(ad("next")).unwrap();
+        match alice.recv().unwrap() {
+            Message::Session(got) => assert_eq!(got, ad("next")),
+            other => panic!("expected Session, got {other:?}"),
+        }
+
+        let mut bob = join(host.addr(), "bob");
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::Joined { id: 2, .. }) => {}
+            other => panic!("expected Joined, got {other:?}"),
+        }
+        // The lobby sequence first — the *advertised* (next) session —
+        // then the running session's Start.
+        match bob.recv().unwrap() {
+            Message::Session(got) => assert_eq!(got, ad("next")),
+            other => panic!("expected Session, got {other:?}"),
+        }
+        recv_roster(&mut bob, 2);
+        assert_eq!(recv_start(&mut bob), (1, ad("go")));
+    }
+
+    #[test]
+    fn a_cancel_returns_everyone_to_a_fresh_lobby() {
+        let host = sessioned_host();
+        let mut alice = join_sessioned(&host, "alice");
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut alice, 1);
+        ready_up(&host, &mut alice, "vpbug");
+        host.start(LateJoin::Closed).unwrap();
+        host.recv_timeout(WAIT).unwrap(); // Started
+        recv_start(&mut alice);
+
+        host.cancel().unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::Cancelled { generation: 1 }) => {}
+            other => panic!("expected Cancelled{{1}}, got {other:?}"),
+        }
+        match alice.recv().unwrap() {
+            Message::Cancel { generation: 1 } => {}
+            other => panic!("expected Cancel, got {other:?}"),
+        }
+        // Readiness reset for the next round; the pick survives.
+        let roster = recv_roster(&mut alice, 1);
+        assert!(!roster[0].ready);
+        assert_eq!(
+            roster[0].pick.as_ref().map(|p| p.vehicle.as_str()),
+            Some("vpbug")
+        );
+
+        // The lobby re-opened: a join works; the guest leaves again
+        // and a second start mints the next generation.
+        let bob = join_sessioned(&host, "bob");
+        host.recv_timeout(WAIT).unwrap(); // Joined
+        bob.leave().unwrap();
+        host.recv_timeout(WAIT).unwrap(); // Left
+        alice.set_ready(true).unwrap();
+        host.recv_timeout(WAIT).unwrap(); // ReadyChanged
+        host.start(LateJoin::Closed).unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::Started { generation: 2 }) => {}
+            other => panic!("expected Started{{2}}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_cancel_outside_a_session_is_a_noop() {
+        let host = sessioned_host();
+        let mut alice = join_sessioned(&host, "alice");
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut alice, 1);
+
+        host.cancel().unwrap();
+        alice.set_ready(true).unwrap();
+        // No Cancelled event precedes the ReadyChanged — the first
+        // event after a no-op cancel is the readiness change itself.
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::ReadyChanged { id: 1, ready: true }) => {}
+            other => panic!("expected ReadyChanged, got {other:?}"),
+        }
+        // And no stray Cancel reached the wire — the next message is
+        // the ready roster.
+        match alice.recv().unwrap() {
+            Message::Roster { players } => assert!(players[0].ready),
+            other => panic!("expected the ready Roster, got {other:?}"),
+        }
+    }
+
+    /// `Start`/`Cancel` are host→client traffic; a client sending
+    /// either speaks out of turn and is dropped like any other
+    /// host-only message.
+    #[test]
+    fn client_sent_lifecycle_messages_drop_the_peer() {
+        let host = sessioned_host();
+        let mut alice = join_sessioned(&host, "alice");
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut alice, 1);
+        alice
+            .send(&Message::Start {
+                generation: 1,
+                session: ad("x"),
+            })
+            .unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::Left {
+                id: 1,
+                cause: LeaveCause::Malformed,
+                ..
+            }) => {}
+            other => panic!("expected a Malformed Left, got {other:?}"),
+        }
+
+        let mut bob = join_sessioned(&host, "bob");
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut bob, 1);
+        bob.send(&Message::Cancel { generation: 1 }).unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::Left {
+                id: 2,
+                cause: LeaveCause::Malformed,
+                ..
+            }) => {}
+            other => panic!("expected a Malformed Left, got {other:?}"),
+        }
+    }
+
+    /// The roster stays the shared truth through a session (MP-5's
+    /// leaver rule): mid-session pick changes and departures still
+    /// land and rebroadcast.
+    #[test]
+    fn the_roster_stays_live_mid_session() {
+        let host = sessioned_host();
+        let mut alice = join_sessioned(&host, "alice");
+        let mut bob = join_sessioned(&host, "bob");
+        host.recv_timeout(WAIT).unwrap();
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut alice, 2);
+        recv_roster(&mut bob, 2);
+        ready_up(&host, &mut alice, "vpbug");
+        ready_up(&host, &mut bob, "vpsemi");
+        recv_roster(&mut alice, 2);
+        recv_roster(&mut bob, 2);
+
+        host.start(LateJoin::Open).unwrap();
+        host.recv_timeout(WAIT).unwrap(); // Started
+        recv_start(&mut alice);
+        recv_start(&mut bob);
+
+        bob.set_vehicle("vpcaddie", 1).unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::VehicleChanged {
+                id: 2,
+                vehicle,
+                paint: 1,
+            }) => assert_eq!(vehicle, "vpcaddie"),
+            other => panic!("expected VehicleChanged, got {other:?}"),
+        }
+        let roster = recv_roster(&mut alice, 2);
+        assert_eq!(
+            roster[1].pick,
+            Some(VehiclePick {
+                vehicle: "vpcaddie".to_string(),
+                paint: 1,
+            })
+        );
+
+        bob.leave().unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::Left {
+                id: 2,
+                cause: LeaveCause::Quit,
+                ..
+            }) => {}
+            other => panic!("expected a Quit Left, got {other:?}"),
+        }
+        assert_eq!(recv_roster(&mut alice, 1).len(), 1);
+    }
+
+    /// `Host` is `!Sync`; `HostCtl` is the cross-thread driver a
+    /// control thread uses while the consumer owns the event channel —
+    /// the dedicated host's stdin shape.
+    #[test]
+    fn a_control_handle_drives_the_loop_from_another_thread() {
+        let host = sessioned_host();
+        let ctl = host.ctl();
+        let driver = thread::spawn(move || ctl.start(LateJoin::Closed));
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::Started { generation: 1 }) => {}
+            other => panic!("expected Started, got {other:?}"),
+        }
+        driver.join().unwrap().unwrap();
     }
 }

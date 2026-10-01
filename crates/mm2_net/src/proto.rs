@@ -9,8 +9,10 @@
 
 /// Wire version. Bumped for any incompatible message change; peers must
 /// match exactly. v2: `RosterEntry` gained the driver's `pick` field and
-/// the `SetVehicle`/`VehicleRefused` negotiation pair landed.
-pub const PROTOCOL_VERSION: u16 = 2;
+/// the `SetVehicle`/`VehicleRefused` negotiation pair landed. v3:
+/// `Start`/`Cancel` (session lifecycle) and `RejectCode::SessionStarted`
+/// landed.
+pub const PROTOCOL_VERSION: u16 = 3;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -31,6 +33,8 @@ const TAG_LEAVE: u8 = 0x07;
 const TAG_SESSION: u8 = 0x08;
 const TAG_SET_VEHICLE: u8 = 0x09;
 const TAG_VEHICLE_REFUSED: u8 = 0x0a;
+const TAG_START: u8 = 0x0b;
+const TAG_CANCEL: u8 = 0x0c;
 
 /// Byte cap on a [`SessionAdvertisement`]'s opaque `params` field — the
 /// `mm2_app` bridge's serialized session config is a few hundred bytes,
@@ -80,6 +84,11 @@ pub enum RejectCode {
     Malformed = 3,
     /// The roster was already at capacity when the peer handshook.
     LobbyFull = 4,
+    /// The lobby already started a session that does not accept late
+    /// joins (MP-5's race rule — the host chose `LateJoin::Closed` at
+    /// start). Cruise-style sessions stay joinable and never produce
+    /// this.
+    SessionStarted = 5,
 }
 
 /// A driver's vehicle pick as the lobby carries it: an opaque content
@@ -167,6 +176,32 @@ pub enum Message {
     /// Client → host: a clean quit. Distinguishes a deliberate leave from
     /// a dropped connection on the wire.
     Leave,
+    /// Host → every client: the session starts now. Carries the
+    /// authoritative session the clients must build — the *started*
+    /// session, self-contained, so a lobby-side `Session` re-advertised
+    /// mid-session cannot confuse a late joiner about which config is
+    /// running — plus the session generation the host minted for it.
+    /// A newcomer joining an open in-progress session receives this
+    /// unicast after its first `Roster`.
+    Start {
+        /// Host-minted session generation, monotonically increasing per
+        /// lobby lifetime from 1 — the value `mm2_game`'s `Session`
+        /// generation (and every `ObjectId` minted under it)
+        /// namespaces to, so peers agree on which run an id belongs to.
+        generation: u64,
+        /// The session being started. Same shape and bounds as the
+        /// lobby's `Session` broadcast.
+        session: SessionAdvertisement,
+    },
+    /// Host → every client: the in-progress session is over — abort or
+    /// normal end, the wire does not distinguish; every peer returns to
+    /// the lobby, which re-opens for joins. `generation` names the
+    /// session being cancelled so a client that never entered one can
+    /// ignore a stray message.
+    Cancel {
+        /// The generation whose session ended.
+        generation: u64,
+    },
 }
 
 /// A wire-decode failure on a well-framed payload.
@@ -213,6 +248,7 @@ impl RejectCode {
             2 => Ok(Self::ContentMismatch),
             3 => Ok(Self::Malformed),
             4 => Ok(Self::LobbyFull),
+            5 => Ok(Self::SessionStarted),
             other => Err(ProtoError::BadRejectCode(other)),
         }
     }
@@ -284,6 +320,28 @@ fn put_string(out: &mut Vec<u8>, s: &str) -> Result<(), ProtoError> {
     Ok(())
 }
 
+fn put_session(out: &mut Vec<u8>, ad: &SessionAdvertisement) -> Result<(), ProtoError> {
+    put_string(out, &ad.summary)?;
+    if ad.params.len() > MAX_SESSION_PARAMS {
+        return Err(ProtoError::OversizeSessionParams(ad.params.len()));
+    }
+    out.extend_from_slice(&(ad.params.len() as u16).to_le_bytes());
+    out.extend_from_slice(&ad.params);
+    Ok(())
+}
+
+fn get_session(cur: &mut Cursor<'_>) -> Result<SessionAdvertisement, ProtoError> {
+    let summary = cur.string()?;
+    let len = cur.u16()? as usize;
+    if len > MAX_SESSION_PARAMS {
+        return Err(ProtoError::OversizeSessionParams(len));
+    }
+    Ok(SessionAdvertisement {
+        summary,
+        params: cur.take(len)?.to_vec(),
+    })
+}
+
 impl Message {
     /// Serialize into one frame payload.
     pub fn encode(&self) -> Result<Vec<u8>, ProtoError> {
@@ -308,12 +366,7 @@ impl Message {
             }
             Self::Session(ad) => {
                 out.push(TAG_SESSION);
-                put_string(&mut out, &ad.summary)?;
-                if ad.params.len() > MAX_SESSION_PARAMS {
-                    return Err(ProtoError::OversizeSessionParams(ad.params.len()));
-                }
-                out.extend_from_slice(&(ad.params.len() as u16).to_le_bytes());
-                out.extend_from_slice(&ad.params);
+                put_session(&mut out, ad)?;
             }
             Self::Roster { players } => {
                 out.push(TAG_ROSTER);
@@ -350,6 +403,18 @@ impl Message {
                 put_string(&mut out, reason)?;
             }
             Self::Leave => out.push(TAG_LEAVE),
+            Self::Start {
+                generation,
+                session,
+            } => {
+                out.push(TAG_START);
+                out.extend_from_slice(&generation.to_le_bytes());
+                put_session(&mut out, session)?;
+            }
+            Self::Cancel { generation } => {
+                out.push(TAG_CANCEL);
+                out.extend_from_slice(&generation.to_le_bytes());
+            }
         }
         Ok(out)
     }
@@ -372,17 +437,7 @@ impl Message {
             TAG_WELCOME => Self::Welcome {
                 player_id: cur.u16()?,
             },
-            TAG_SESSION => {
-                let summary = cur.string()?;
-                let len = cur.u16()? as usize;
-                if len > MAX_SESSION_PARAMS {
-                    return Err(ProtoError::OversizeSessionParams(len));
-                }
-                Self::Session(SessionAdvertisement {
-                    summary,
-                    params: cur.take(len)?.to_vec(),
-                })
-            }
+            TAG_SESSION => Self::Session(get_session(&mut cur)?),
             TAG_ROSTER => {
                 let count = cur.u8()?;
                 if count > MAX_PLAYERS {
@@ -416,6 +471,13 @@ impl Message {
                 reason: cur.string()?,
             },
             TAG_LEAVE => Self::Leave,
+            TAG_START => Self::Start {
+                generation: cur.u64()?,
+                session: get_session(&mut cur)?,
+            },
+            TAG_CANCEL => Self::Cancel {
+                generation: cur.u64()?,
+            },
             tag => return Err(ProtoError::BadTag(tag)),
         };
         cur.finish()?;
@@ -467,6 +529,10 @@ mod tests {
                 code: RejectCode::ContentMismatch,
                 message: "content differs".to_string(),
             },
+            Message::Reject {
+                code: RejectCode::SessionStarted,
+                message: "session already started".to_string(),
+            },
             Message::Welcome { player_id: 3 },
             Message::Session(SessionAdvertisement {
                 summary: "sf, cruise, amateur".to_string(),
@@ -510,6 +576,14 @@ mod tests {
                 reason: "unknown vehicle id".to_string(),
             },
             Message::Leave,
+            Message::Start {
+                generation: 7,
+                session: SessionAdvertisement {
+                    summary: "sf, cruise, amateur".to_string(),
+                    params: vec![9, 8, 7],
+                },
+            },
+            Message::Cancel { generation: 7 },
         ] {
             let bytes = msg.encode().unwrap();
             assert_eq!(Message::decode(&bytes).unwrap(), msg);
@@ -593,6 +667,18 @@ mod tests {
             summary: "s".to_string(),
             params: vec![0; MAX_SESSION_PARAMS + 1],
         });
+        assert!(matches!(
+            msg.encode(),
+            Err(ProtoError::OversizeSessionParams(4097))
+        ));
+        // `Start` carries a session payload under the same bound.
+        let msg = Message::Start {
+            generation: 1,
+            session: SessionAdvertisement {
+                summary: "s".to_string(),
+                params: vec![0; MAX_SESSION_PARAMS + 1],
+            },
+        };
         assert!(matches!(
             msg.encode(),
             Err(ProtoError::OversizeSessionParams(4097))
