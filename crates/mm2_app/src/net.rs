@@ -549,9 +549,9 @@ pub fn drive_lobby(
             lobby.pending_exit = Some(1);
             link.leave();
         }
-        if lobby.pending_start.is_none()
+        if menu.is_none()
+            && lobby.pending_start.is_none()
             && let Some(code) = lobby.pending_exit.take()
-            && menu.is_none()
         {
             exit.write(AppExit::from_code(code));
         }

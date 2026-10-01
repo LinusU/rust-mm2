@@ -1530,7 +1530,10 @@ fn main() {
             .add_systems(
                 Update,
                 (
-                    net::lobby_input,
+                    // Frozen during a capture like every other input —
+                    // a `--join --frames` screenshot must be
+                    // reproducible.
+                    net::lobby_input.run_if(not(capturing)),
                     net::drive_lobby.after(session::drive_session),
                     net::drive_lobby_text,
                 ),
