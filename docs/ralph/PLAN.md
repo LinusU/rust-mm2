@@ -42,9 +42,13 @@ Choose the highest-value ready small slice; repair current regressions before un
 
 **Next selected slice: the F24-B remainder (B.7 landed the Bevy-side
 client bridge — `mm2 --join` consumes `Start` into the shared
-`Session` lifecycle; still open: a real lobby menu surface,
-disconnect-UX polish beyond the notice line, the in-app host surface,
-and the `Start` → spawn-roster consumption, likely F25/F26 scope —
+`Session` lifecycle; iter 020 repaired its two external-review
+findings — wire-generation saturation at the `u64` ceiling and the
+networked-session restart gate now enforced at `drive_session`'s
+`Menu` arm, not just the `F4` binding; still open: a real lobby menu
+surface, disconnect-UX polish beyond the notice line, the in-app host
+surface, and the `Start` → spawn-roster consumption, likely F25/F26
+scope —
 B.1 landed the host/join driver, B.2 session advertisement + the
 headless `mm2-host` binary, B.3 vehicle/paint pick + catalog
 validation, B.4 start/cancel + late-join policy, B.5 event-mode

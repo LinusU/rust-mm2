@@ -1,3 +1,79 @@
+# Last iteration — F24-B.7 repair: generation-ceiling saturation +
+# the networked restart gate (iteration 020, run 20261001T195454)
+
+Repair iteration on `ralph/night` (baseline `6298749` — the F24-B.7
+candidate; external verify green, review **fail** on two blocking
+findings, both inside the candidate's own contracts).
+
+## Task selection
+
+Iteration 019's review named two blockers; the selection policy puts
+repair ahead of any new feature work. No unrelated work was taken.
+
+## What landed
+
+- `mm2_game::Session::{begin, begin_generation}` — both generation
+  bumps are `saturating_add(1)`. `Message::Start.generation` decodes
+  as an unbounded `u64`: a `Start{generation: u64::MAX}` was adopted
+  verbatim, after which the next bump computed `u64::MAX + 1` — a
+  remote-triggerable panic under dev `overflow-checks`, and in release
+  a wrap to 0 that `max(wire, 0)` silently regressed, breaking the
+  never-regress invariant `ObjectId`/`ResultId` staleness detection
+  keys on. The host-side mint in `mm2_net::lobby` (`generation += 1`)
+  saturates too — same contract.
+- `mm2_app::session::drive_session` — the `Menu` restart arm gates
+  `Session::begin` on `config.authority == SessionAuthority::Local`,
+  the predicate the `F4` binding already applies at intent time. The
+  F4 gate left the intent's other producers unhandled: the results
+  screen's Restart row (`results_input` — reachable under `Remote`),
+  the Blitz/Checkpoint `RestartEvent` disabled outcome (inert under
+  `Remote` — `resolve_disabled` is authority-gated — but live under
+  `Host`), and `--restart`. Each could mint a local generation for a
+  session the lobby owns. A non-`Local` restart intent is now consumed
+  at `Menu` without a `begin` — teardown has already returned the
+  client to the lobby's waiting state, where the wire's next
+  `Cancel`/`Start` (or a parked `pending_start`) owns what happens
+  next. Pause-menu Restart was already unreachable under non-`Local`
+  (MP-6 forbids the pause).
+
+## Evidence
+
+- `mm2_game` `tests/session.rs` —
+  `a_u64_max_generation_never_overflows_or_regresses`: wire `u64::MAX`
+  adopted, the next local `begin` saturates at the ceiling, and a
+  repeated `begin_generation(u64::MAX)` stays pinned — no panic, no
+  wrap, no regression.
+- `mm2_app` `tests/session.rs` —
+  `a_networked_restart_returns_to_menu_without_a_local_begin`: under
+  both `Remote` and `Host`, the real producer path (`Results` → focus
+  "Restart race" → `Enter` through `results_input`) queues the intent,
+  the session tears down to `Menu` through the production
+  `Unloading` arm, and no `begin` follows — generation unchanged,
+  authority retained, intent consumed, no `AppExit`.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean (after one `cargo fmt` pass).
+- `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --locked --workspace` — all suites green: mm2_game
+  session 14/14, mm2_app session 26/26 (incl. the new leg), net_app
+  15/15, net_host 4/4, net_join 4/4, mm2_net 53/53.
+
+## Classification / remaining open items
+
+- Implementation choice: a networked-authority restart intent still
+  tears the predicted session down to `Menu` (the lobby's waiting
+  state) — it is the "leave the session" leg, not a hidden begin. A
+  hostile-generation host is not otherwise defended: saturation pins
+  the counter at the ceiling rather than rejecting the peer.
+- All of iteration 019's open items stand unchanged: the lobby menu
+  surface, disconnect-UX polish, the in-app host surface, `Start` →
+  spawn-roster consumption (F25/F26), the AC03 impairment matrix and
+  AC06 LAN/Internet legs (F24-C), and replication generally.
+
+---
+
 # Last iteration — F24-B.7: the Bevy-side lobby client — `mm2 --join`
 # consumes `Start` into the shared session lifecycle (iteration 019,
 # run 20260929T174954)
