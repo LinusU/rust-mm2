@@ -28,14 +28,18 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use mm2_assets::Vfs;
 use mm2_content::{EntryStatus, VehicleCatalog};
 use mm2_game::{
-    ConfigError, Densities, DevOverrides, Difficulty, EventRef, EventTableKind, RaceCustomization,
-    SelectorError, SessionAuthority, SessionConditions, SessionConfig, SessionCustomization,
-    SessionMode, TimeOfDay, VehicleSelection, Weather, WorldMode,
+    CUSTOMIZE_LAP_MAX, CheckpointRule, ConfigError, Densities, DevOverrides, Difficulty, EventRef,
+    EventTableKind, RaceCustomization, SelectorError, SessionAuthority, SessionConditions,
+    SessionConfig, SessionCustomization, SessionMode, TimeOfDay, VehicleSelection, Weather,
+    WorldMode,
 };
 use mm2_net::{PickValidator, SessionAdvertisement, VehiclePick};
 use serde::{Deserialize, Serialize};
+
+use crate::race;
 
 /// A `SessionConfig` the advertisement could not carry, or a `params`
 /// blob that could not be read back into one.
@@ -82,6 +86,81 @@ pub fn accept(ad: &SessionAdvertisement) -> Result<SessionConfig, SessionWireErr
     let config = params.into_config()?;
     config.validate()?;
     Ok(config)
+}
+
+/// Why a session a host advertised cannot run on *this* peer's mounted
+/// content — the client-side half of the never-advertise-the-unrunnable
+/// rule (F24-B.6). The handshake's gameplay fingerprint already proves
+/// both peers resolve the same bytes; this is the defense-in-depth
+/// against a host blob that disagrees with that shared content, plus the
+/// range gaps the blob leaves latent until a session build would trip
+/// on them.
+#[derive(Debug, thiserror::Error)]
+pub enum SessionContentError {
+    /// `WorldMode::City` names a logical path nothing resolves to here.
+    #[error("city world {0:?} does not resolve on this install")]
+    World(String),
+    /// The advertised event cannot be resolved into a runnable race by
+    /// this install — the same [`race::event_race_setup`] gate the
+    /// dedicated host runs at flag time (unknown row, missing records,
+    /// an unbuildable definition, the Crash Course refusal).
+    #[error("advertised event cannot run here: {0}")]
+    Event(#[from] race::EventSetupError),
+    /// A customized `laps` pick outside the designed picker range
+    /// (`1..=CUSTOMIZE_LAP_MAX`; `laps == 0` is already refused by
+    /// `SessionConfig::validate` inside [`accept`]). Consulted only on
+    /// `Ordered` definitions — every other rule ignores the pick, so
+    /// refusing one there would reject a session that runs identically.
+    #[error("customized laps {0} exceeds the picker range (max {CUSTOMIZE_LAP_MAX})")]
+    Laps(u32),
+    /// A customized `opponents` pick beyond the event's authored
+    /// roster — the advertisement promises more opponents than the
+    /// event's aimap can field.
+    #[error("customized opponents {asked} exceeds the authored roster of {available}")]
+    Opponents {
+        /// The pick the advertisement carried.
+        asked: u32,
+        /// The event's authored roster size at the session difficulty.
+        available: u32,
+    },
+}
+
+/// Whether this peer's mounted content can run an advertised session —
+/// the join-side complement of the flag-time gate `mm2-host` runs. A
+/// host is trusted to gate itself; a joining peer is not obliged to
+/// trust the host did. `SessionAdvertisement` is opaque to the wire
+/// and `accept` only bounds the blob structurally, so the check that
+/// the session's *content* is runnable here lives one layer up, where
+/// the VFS is.
+///
+/// Deliberately *not* checked — anything `accept`'s decode +
+/// `SessionConfig::validate` already bounds (selectors, densities,
+/// zero laps), and picks the runtime itself ignores (any `race`
+/// customization on a Cruise session, `laps` on a non-`Ordered`
+/// event): refusing those would reject sessions that would have run
+/// identically.
+pub fn check_session(vfs: &Vfs, config: &SessionConfig) -> Result<(), SessionContentError> {
+    if let WorldMode::City { psdl } = &config.world
+        && vfs.resolve(psdl).is_none()
+    {
+        return Err(SessionContentError::World(psdl.clone()));
+    }
+    if let SessionMode::Event(event_ref) = &config.mode {
+        let setup = race::event_race_setup(vfs, event_ref, config.difficulty)?;
+        if let Some(pick) = config.customization.as_ref().and_then(|c| c.race) {
+            if setup.definition.rule == CheckpointRule::Ordered && pick.laps > CUSTOMIZE_LAP_MAX {
+                return Err(SessionContentError::Laps(pick.laps));
+            }
+            let wired = setup.roster.entries.len() as u32;
+            if pick.opponents > wired {
+                return Err(SessionContentError::Opponents {
+                    asked: pick.opponents,
+                    available: wired,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `VehicleSelection` → the wire pick the lobby carries: `id: None`

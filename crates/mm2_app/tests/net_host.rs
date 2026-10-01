@@ -4,173 +4,25 @@
 //! opens a window, GPU or audio device). Client processes, LAN and the
 //! impairment matrix remain F24-C scope.
 
-use std::io::{BufRead, BufReader, Write};
 use std::net::SocketAddr;
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc;
-use std::thread;
+use std::process::Command;
 use std::time::Duration;
+
+mod support;
 
 use mm2_app::net;
 use mm2_game::{EventRef, EventTableKind, SessionAuthority, SessionMode, WorldMode};
 use mm2_net::{Client, Message, NetError, RejectCode, hello};
+use support::{Proc, WAIT, event_install, listening};
 
-const WAIT: Duration = Duration::from_secs(15);
+const HOST_EXE: &str = env!("CARGO_BIN_EXE_mm2-host");
 
-const MM_HEADER: &str = "Description, CarType, TimeofDay, Weather, Opponents, Cops, Ambient, Peds, NumLaps, TimeLimit, Difficulty, CarType, TimeofDay, Weather, Opponents, Cops, Ambient, Peds, NumLaps, TimeLimit, Difficulty";
-const WAYPOINTS: &str = "x,y,z,a,poly count,frane rate,state changes,texture changes,msg\n";
-/// A checkpoint row with one authored lap/time block per difficulty.
-const ROW: &str = "none,0,0,0,0,0,0.1,0.0,1,50,1,0,0,0,0,0,0.2,0.0,1,40,1";
-/// A circuit row whose `NumLaps` is zero — resolves fine, fails the
-/// race-definition build (`Ordered` needs at least one lap).
-const LAPLESS_ROW: &str = "none,0,0,0,0,0,0.1,0.0,0,50,1,0,0,0,0,0,0.2,0.0,0,40,1";
-
-/// A running `mm2-host` child with its stdout drained onto a channel —
-/// the process's `key=value` record contract is the observable surface —
-/// and its stdin held open for the operator commands.
-struct HostProc {
-    child: Child,
-    stdin: ChildStdin,
-    lines: mpsc::Receiver<String>,
-}
-
-impl HostProc {
-    fn spawn(args: &[String]) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_mm2-host"))
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .expect("failed to spawn mm2-host");
-        let stdin = child.stdin.take().unwrap();
-        let stdout = child.stdout.take().unwrap();
-        let (tx, rx) = mpsc::channel();
-        thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { return };
-                if tx.send(line).is_err() {
-                    return;
-                }
-            }
-        });
-        Self {
-            child,
-            stdin,
-            lines: rx,
-        }
-    }
-
-    /// The next record line, failing rather than hanging if the child
-    /// dies or stalls.
-    fn line(&self) -> String {
-        self.lines
-            .recv_timeout(WAIT)
-            .expect("no line from mm2-host")
-    }
-
-    /// One operator command on the host's stdin (`start`, `cancel`,
-    /// `quit`).
-    fn cmd(&mut self, command: &str) {
-        writeln!(self.stdin, "{command}").unwrap();
-        self.stdin.flush().unwrap();
-    }
-
-    /// Reap the child and return its exit status — for `quit` legs.
-    fn wait(mut self) -> std::process::ExitStatus {
-        self.child.wait().expect("failed to wait for mm2-host")
-    }
-}
-
-impl Drop for HostProc {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
+type HostProc = Proc;
 
 fn join(addr: SocketAddr, driver: &str, fp: u64) -> Client {
     let client = Client::join(addr, &hello("test".to_string(), driver.to_string(), fp)).unwrap();
     client.set_timeout(Some(WAIT)).unwrap();
     client
-}
-
-fn write(dir: &std::path::Path, rel: &str, contents: impl AsRef<[u8]>) {
-    let p = dir.join(rel);
-    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-    std::fs::write(p, contents).unwrap();
-}
-
-fn waypoint_row(x: f32, z: f32) -> String {
-    format!("{x},0,{z},0,15,0,0,0,\n")
-}
-
-/// A minimal `testcity` install: the `city/testcity.psdl` `--city`
-/// requires, one checkpoint row with the records
-/// `EventCatalog::resolve` demands (`race0.aimap`,
-/// `race0waypoints.csv`), and a `circuit0` event whose `NumLaps` of
-/// zero resolves Ready but cannot build a race definition. The lobby
-/// host never loads geometry, so stub bytes suffice.
-fn event_install() -> tempfile::TempDir {
-    let tmp = tempfile::tempdir().unwrap();
-    let d = tmp.path();
-    write(d, "city/testcity.psdl", b"synthetic fixture stub\n");
-    write(
-        d,
-        "race/testcity/mmracedata.csv",
-        format!("{MM_HEADER}\n{ROW}\n"),
-    );
-    write(d, "race/testcity/race0.aimap", "#\n");
-    write(
-        d,
-        "race/testcity/race0waypoints.csv",
-        format!(
-            "{WAYPOINTS}{}{}{}{}{}",
-            waypoint_row(60.0, 140.0),
-            waypoint_row(110.0, 140.0),
-            waypoint_row(140.0, 140.0),
-            waypoint_row(165.0, 140.0),
-            waypoint_row(180.0, 140.0),
-        ),
-    );
-    write(
-        d,
-        "race/testcity/mmcircuitdata.csv",
-        format!("{MM_HEADER}\n{LAPLESS_ROW}\n"),
-    );
-    write(d, "race/testcity/circuit0.aimap", "#\n");
-    write(
-        d,
-        "race/testcity/circuit0waypoints.csv",
-        format!(
-            "{WAYPOINTS}{}{}{}{}",
-            waypoint_row(60.0, 140.0),
-            waypoint_row(110.0, 140.0),
-            waypoint_row(140.0, 140.0),
-            waypoint_row(165.0, 140.0),
-        ),
-    );
-    tmp
-}
-
-/// Read the `listening=` record and return (address, fingerprint,
-/// line) — the two facts a join needs plus the record itself for
-/// callers asserting on `session=`.
-fn listening(host: &HostProc) -> (SocketAddr, u64, String) {
-    // The first record binds the contract: the address peers dial and
-    // the gameplay fingerprint the handshake requires.
-    let first = host.line();
-    let addr: SocketAddr = first
-        .strip_prefix("listening=")
-        .and_then(|rest| rest.split_whitespace().next())
-        .unwrap_or_else(|| panic!("unexpected first record: {first:?}"))
-        .parse()
-        .unwrap();
-    let fp_hex = first
-        .split_whitespace()
-        .find_map(|tok| tok.strip_prefix("fingerprint=fnv1a64:"))
-        .unwrap_or_else(|| panic!("no fingerprint in {first:?}"));
-    let fp = u64::from_str_radix(fp_hex, 16).unwrap();
-    (addr, fp, first)
 }
 
 /// Spawn an `mm2-host` on a content-free dev world and parse the
@@ -180,15 +32,18 @@ fn dev_host(seed: u64) -> (HostProc, SocketAddr, u64, tempfile::TempDir) {
     // An empty install dir is a valid (if content-free) mount — the
     // gameplay fingerprint still gates deterministically.
     let dir = tempfile::tempdir().unwrap();
-    let host = HostProc::spawn(&[
-        "--mm2-path".to_string(),
-        dir.path().to_str().unwrap().to_string(),
-        "--dev-world".to_string(),
-        "--bind".to_string(),
-        "127.0.0.1:0".to_string(),
-        "--seed".to_string(),
-        seed.to_string(),
-    ]);
+    let host = HostProc::spawn(
+        HOST_EXE,
+        &[
+            "--mm2-path".to_string(),
+            dir.path().to_str().unwrap().to_string(),
+            "--dev-world".to_string(),
+            "--bind".to_string(),
+            "127.0.0.1:0".to_string(),
+            "--seed".to_string(),
+            seed.to_string(),
+        ],
+    );
 
     let (addr, fp, _) = listening(&host);
     (host, addr, fp, dir)
@@ -412,18 +267,21 @@ fn a_dedicated_host_process_runs_start_and_cancel() {
 #[test]
 fn an_event_host_closes_joins_at_start() {
     let install = event_install();
-    let mut host = HostProc::spawn(&[
-        "--mm2-path".to_string(),
-        install.path().to_str().unwrap().to_string(),
-        "--city".to_string(),
-        "testcity".to_string(),
-        "--event".to_string(),
-        "race:0".to_string(),
-        "--bind".to_string(),
-        "127.0.0.1:0".to_string(),
-        "--seed".to_string(),
-        13.to_string(),
-    ]);
+    let mut host = HostProc::spawn(
+        HOST_EXE,
+        &[
+            "--mm2-path".to_string(),
+            install.path().to_str().unwrap().to_string(),
+            "--city".to_string(),
+            "testcity".to_string(),
+            "--event".to_string(),
+            "race:0".to_string(),
+            "--bind".to_string(),
+            "127.0.0.1:0".to_string(),
+            "--seed".to_string(),
+            13.to_string(),
+        ],
+    );
     let (addr, fp, first) = listening(&host);
     assert!(
         first.contains("session=\"testcity, race:0, amateur\""),
