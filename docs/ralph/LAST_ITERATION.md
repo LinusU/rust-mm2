@@ -1,3 +1,124 @@
+# Last iteration — F24-B.8: the in-app host surface — `mm2 --host`
+# runs the lobby inside the real application (iteration 021, run
+# 20261001T195454-62282)
+
+Implementation iteration on `ralph/night` (baseline `12b42f1` — a
+same-run repair commit gating `lobby_input` on `not(capturing)` and
+fixing `drive_lobby`'s `pending_exit.take()` ordering, both
+non-blocking review observations from the F24-B.7 range; iteration
+020's range verified green, review pass with gaps only). One coherent
+slice: the host mirror of B.7's client bridge — `mm2 --host` hosts a
+lobby in the real application, windowed or `--headless`, and the
+operator's `start` mints a generation that begins the session through
+the shared `Session` lifecycle.
+
+## Task selection
+
+The F24-B remainder was the named next slice; with B.7's client
+bridge landed, the in-app *host* surface was its named open piece —
+F24 spec req 2 wants direct host *and* join paths in the application,
+and the app could only join. Scope kept explicit: remote players are
+roster/display state only — no remote spawning, interpolation, input
+transport or world replication (F25/F26); the lobby surface is a
+status line, not a menu.
+
+## What landed
+
+- `mm2_app::net` — `HostLink` (resource) owns `mm2_net::Host`:
+  `try_recv` is nonblocking so no pump thread; `Host` is `!Sync`
+  (its receiver), so it lives behind a `Mutex`. Operator intents ride
+  a `HostCommand` channel (`Start`/`Cancel`/`Quit`) — the headless
+  stdin loop parses `start`/`cancel`/`quit` (the same contract
+  `mm2-host` documents), the windowed `host_input` maps `Enter` →
+  start and `Esc` → stop hosting, gated on `not(capturing)` and
+  parked-at-`Menu`. `drive_host` drains commands + `HostEvent`s once
+  per update into the shared `LobbyState`: remote `Joined`/`Left`/
+  `VehicleChanged`/`ReadyChanged` mirror into `roster` (the host seat
+  is the local player — never a wire entry), `Started` runs
+  `Session::begin_generation` under the host-minted generation with
+  `SessionAuthority::Host`, `StartRefused` becomes the gate notice.
+  Lifecycle edges: a locally ended hosted session auto-sends `Cancel`;
+  `Quit` cancels a running session, drains the leave and owns
+  `AppExit` (0 clean, 1 dead host loop); a `Start` queued once
+  `leaving` is ignored and a `Started` drained while leaving begins
+  nothing — a session nobody is left to cancel must never mint.
+  `LobbyState::exit_sent` preserves the consumed exit code so the
+  smoke record reports a drained clean shutdown as a pass.
+  `net::describe_host_event` is the shared `event=` formatter —
+  `mm2-host` and the in-app headless host print identical records.
+- `session.rs` — `MenuExit` covers `HostLink`: `drive_session`'s
+  `Menu` quit no longer writes `AppExit` while hosting.
+- `main.rs` — `mm2 --host` (conflicts `--join`/`--menu`), `--bind`
+  (default `127.0.0.1:0`), `--seed`. The session-shaping flags
+  configure the *advertised* session, validated at startup through
+  the VFS — city psdl resolves, `event_race_setup` builds, the
+  `--car`/`--paint` pick passes the scanned catalog, `net::advertise`
+  encodes (dev overrides are not network-legal — refused). The app
+  prints `listening=<addr> fingerprint=… seed=… session="…"`; the
+  windowed surface is a `HostText` status line (bind addr, session
+  offer, remote readiness, own pick, gate notice) that clears while a
+  session runs.
+- `smoke.rs` — `RunSource::Host` + `headless_host` share
+  `run_headless`: parked records carry `mp=host(<n>p)`, a running
+  session `mp=gen<N>`; verdict — a clean `quit` (including a
+  never-started lobby) is a `lobby closed` pass via `pending_exit`/
+  `exit_sent`, a dead host loop a named fail, a `Cancel` return to
+  the lobby `returned to the lobby` pass. Non-lobby records
+  bit-identical.
+
+## Evidence
+
+- `tests/net_app.rs` 15→27 legs, all green (~8 s):
+  - In-process hosted bridge vs real loopback `mm2_net` clients:
+    remote join/pick/ready/leave mirroring `LobbyState.roster` (host
+    seat absent — remote players only); `Started` → `Loading` under
+    the minted generation with `Host` authority; `StartRefused`
+    naming the unready blocker as the notice; `Cancel` →
+    `Unloading → Menu`; a mid-session `Start` parking until teardown
+    lands; a locally ended session auto-cancelling on the wire;
+    `Quit` cancelling + leaving + `AppExit` 0; a dead host loop →
+    `AppExit` 1.
+  - `host_input_keys_ride_the_command_channel` — `Enter`/`Esc` ride
+    the command channel through the real `ButtonInput` resource,
+    `Esc` mid-session ignored, `Esc` at `Menu` exits 0.
+  - `a_headless_host_runs_the_advertised_session` — a real
+    `headless_host` app with a remote peer: `start` → dev world loads
+    through `load_session_world`, records `world=dev-world mp=gen1
+    status=pass`.
+  - Process legs — `mm2 --host --headless` as a separate OS process
+    vs `mm2-join`/`mm2 --join` clients: `start` → `mp=gen1` pass on
+    the host and `mp=gen1` on the joiner; unready-peer refusal +
+    clean `quit` → `lobby closed` exit 0; `--host` flag gates
+    (`--bind`/`--seed` required-forms, `--join`/`--menu` conflicts)
+    → exit 2.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --workspace` — all suites green incl. `net_app` 27/27.
+
+## Classification / remaining open items
+
+- Implementation choices: the app-layer host seat is never a wire
+  entry (remote players only in `roster`); `Enter`/`Esc` and
+  `start`/`cancel`/`quit` are the designed operator surface (MP-8
+  documents host control; the original's refusal conditions are
+  unrecovered — the start gate's designed policy stands).
+- Still open F24-B scope: a real lobby menu (both sides are status
+  lines), disconnect-UX polish beyond the notice, and `Start` →
+  spawn-roster consumption — the wired session spawns only the local
+  player; remote roster entries are not spawned (F25/F26).
+- Verification gaps carried forward: everything is loopback — AC03's
+  impairment matrix and AC06's LAN/Internet legs remain F24-C; the
+  hosted session runs the host seat only — no position/score/damage
+  replication exists to observe; no retail-install leg was run for
+  `--host` (B.6 recorded the retail `mm2-host`/`mm2-join` leg — the
+  VFS/validation paths are shared).
+
+---
+
 # Last iteration — F24-B.7 repair: generation-ceiling saturation +
 # the networked restart gate (iteration 020, run 20261001T195454)
 

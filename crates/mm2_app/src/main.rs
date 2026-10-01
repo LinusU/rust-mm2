@@ -12,6 +12,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use avian3d::prelude::*;
 use bevy::audio::AddAudioSource;
@@ -348,6 +349,27 @@ struct Cli {
     /// `start` can fire immediately.
     #[arg(long, requires = "join")]
     ready: bool,
+
+    /// Host a multiplayer lobby inside the app (F24-B.8): the
+    /// session-shaping flags name the advertised session — world,
+    /// mode, difficulty, conditions, seed — and this process plays the
+    /// host seat when `start` fires. Operator surface: stdin
+    /// `start`/`cancel`/`quit`, or Enter/Esc on the windowed lobby
+    /// line. Developer-override flags are never network-legal — a
+    /// config carrying any refuses to advertise (exit 2).
+    #[arg(long, conflicts_with_all = ["join", "menu"])]
+    host: bool,
+
+    /// Address the hosted lobby listens on (requires --host). The
+    /// default is loopback + ephemeral port — a LAN/public bind is an
+    /// explicit operator choice, never the default.
+    #[arg(long, requires = "host", default_value = "127.0.0.1:0")]
+    bind: SocketAddr,
+
+    /// Session seed the lobby replicates to every client — default is
+    /// clock-derived like `mm2-host`; pass a value to reproduce a run.
+    #[arg(long, requires = "host")]
+    seed: Option<u64>,
 
     /// Force the menu front-end even alongside the capture flags —
     /// `--menu --frames N --screenshot out.png` renders the shell
@@ -789,7 +811,7 @@ fn main() {
     // overrides have runtime consumers today — the rest are the
     // contract F11+ builds against. Developer tweaks stay quarantined
     // in `dev`.
-    let session_config = SessionConfig {
+    let mut session_config = SessionConfig {
         world: mode,
         mode: event_ref
             .clone()
@@ -890,6 +912,73 @@ fn main() {
         None
     };
 
+    // `--host`: park at `Menu` hosting a lobby — the operator's `start`
+    // mints the generation the host seat and every client begin under
+    // (F24-B.8). The flag-time gates are the same `mm2-host` runs: the
+    // advertised world must resolve through the VFS, an authored event
+    // must survive `event_race_setup`, the catalog feeds the roster's
+    // pick validator, and `advertise` refuses a config carrying dev
+    // overrides — never network-legal.
+    let mut host_link = if cli.host {
+        session_config.seed = cli.seed.unwrap_or_else(|| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0)
+        });
+        if let WorldMode::City { psdl } = &session_config.world
+            && vfs.resolve(psdl).is_none()
+        {
+            error!(city = %psdl, "cannot host a world the VFS cannot resolve");
+            std::process::exit(2);
+        }
+        if let mm2_game::SessionMode::Event(event_ref) = &session_config.mode
+            && let Err(e) = race::event_race_setup(&vfs, event_ref, session_config.difficulty)
+        {
+            error!(error = %e, "--event cannot run on this install");
+            std::process::exit(2);
+        }
+        let fingerprint = match mm2_content::fingerprint::gameplay(&vfs) {
+            Ok(fp) => fp,
+            Err(e) => {
+                error!(error = %e, "fingerprinting content for --host");
+                std::process::exit(2);
+            }
+        };
+        let catalog = VehicleCatalog::scan(&vfs);
+        let driver = active_profile
+            .as_ref()
+            .map(|s| s.profile.name.clone())
+            .unwrap_or_else(|| "player".to_string());
+        let link = match net::HostLink::open(
+            cli.bind,
+            &session_config,
+            driver,
+            fingerprint.hash,
+            Some(net::vehicle_validator(&catalog)),
+        ) {
+            Ok(link) => link,
+            Err(e) => {
+                error!(error = %e, "hosting failed");
+                std::process::exit(2);
+            }
+        };
+        println!(
+            "listening={} fingerprint={} seed={} session={:?}",
+            link.addr(),
+            fingerprint.display(),
+            session_config.seed,
+            link.summary()
+        );
+        // stdin `start`/`cancel`/`quit` reaches the lobby update loop
+        // from whatever context the app runs in — headless and
+        // windowed alike.
+        net::stdin_commands(link.command_sender());
+        Some(link)
+    } else {
+        None
+    };
+
     // Capability checks with their own status: a requested city with no
     // data source at all is `unavailable` (missing data), and a visual
     // smoke with no display is `unavailable` (no GPU/windowing). Neither
@@ -938,11 +1027,12 @@ fn main() {
             def: selected,
             paint,
         };
-        let rec = match lobby.take() {
-            Some(link) => {
-                smoke::headless_lobby(link, vfs, car, &vehicle, frames, driver, active_profile)
-            }
-            None => smoke::headless_smoke(
+        let rec = if let Some(link) = lobby.take() {
+            smoke::headless_lobby(link, vfs, car, &vehicle, frames, driver, active_profile)
+        } else if let Some(link) = host_link.take() {
+            smoke::headless_host(link, vfs, car, &vehicle, frames, driver, active_profile)
+        } else {
+            smoke::headless_smoke(
                 &session_config,
                 vfs,
                 car,
@@ -950,7 +1040,7 @@ fn main() {
                 frames,
                 driver,
                 active_profile,
-            ),
+            )
         };
         println!("{}", rec.line());
         std::process::exit(rec.status.exit_code());
@@ -970,6 +1060,7 @@ fn main() {
     // conflicts `--menu`, and its quit path returns to the lobby.
     let menu_mode = (!smoke_requested || cli.menu)
         && lobby.is_none()
+        && host_link.is_none()
         && cli.city.is_none()
         && cli.event.is_none()
         && !cli.dev_world
@@ -1006,6 +1097,7 @@ fn main() {
     let mut session = Session::new();
     if !menu_mode
         && lobby.is_none()
+        && host_link.is_none()
         && let Err(e) = session.begin(session_config)
     {
         error!(error = %e, "invalid session configuration");
@@ -1540,6 +1632,39 @@ fn main() {
             );
         app.world_mut().spawn((
             net::LobbyText,
+            Text::new(""),
+            TextFont {
+                font_size: bevy::text::FontSize::Px(14.0),
+                ..default()
+            },
+            TextColor(Color::WHITE),
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(12.0),
+                left: Val::Px(12.0),
+                ..default()
+            },
+        ));
+    }
+    if let Some(link) = host_link {
+        // A hosted lobby owns `Menu`-time surface and exit like a
+        // joined one: `drive_host` drains host-loop events and operator
+        // commands once per update — after `drive_session` so a
+        // teardown landing at `Menu` this frame can settle the
+        // session-ended `Cancel` immediately. `HostText` is the
+        // minimal surface until a real lobby menu exists.
+        app.insert_resource(link)
+            .init_resource::<net::LobbyState>()
+            .add_systems(
+                Update,
+                (
+                    net::host_input.run_if(not(capturing)),
+                    net::drive_host.after(session::drive_session),
+                    net::drive_host_text,
+                ),
+            );
+        app.world_mut().spawn((
+            net::HostText,
             Text::new(""),
             TextFont {
                 font_size: bevy::text::FontSize::Px(14.0),

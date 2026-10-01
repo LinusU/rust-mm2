@@ -48,7 +48,7 @@ use mm2_game::{
     Difficulty, EventRef, SessionAuthority, SessionConditions, SessionConfig, SessionMode,
     TimeOfDay, Weather, WorldMode,
 };
-use mm2_net::{Host, HostConfig, HostEvent, LateJoin, LeaveCause};
+use mm2_net::{Host, HostConfig, LateJoin};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -295,55 +295,11 @@ fn main() {
     }
 
     while let Ok(event) = host.recv() {
-        println!("{}", describe(&event));
+        println!("{}", net::describe_host_event(&event));
     }
     if quitting.load(Ordering::Relaxed) {
         return;
     }
     eprintln!("error: host loop ended unexpectedly");
     std::process::exit(1);
-}
-
-fn describe(event: &HostEvent) -> String {
-    match event {
-        HostEvent::Joined { id, driver, build } => {
-            format!("event=joined id={id} driver={driver:?} build={build:?}")
-        }
-        HostEvent::Left { id, driver, cause } => {
-            let cause = match cause {
-                LeaveCause::Quit => "quit",
-                LeaveCause::Lost => "lost",
-                LeaveCause::Malformed => "malformed",
-            };
-            format!("event=left id={id} driver={driver:?} cause={cause}")
-        }
-        HostEvent::ReadyChanged { id, ready } => {
-            format!("event=ready id={id} ready={ready}")
-        }
-        HostEvent::VehicleChanged { id, vehicle, paint } => {
-            format!("event=vehicle id={id} vehicle={vehicle:?} paint={paint}")
-        }
-        HostEvent::VehicleRefused {
-            id,
-            vehicle,
-            paint,
-            reason,
-        } => {
-            format!(
-                "event=pick_refused id={id} vehicle={vehicle:?} paint={paint} reason={reason:?}"
-            )
-        }
-        HostEvent::JoinFailed { peer, reason } => {
-            format!("event=join_failed peer={peer} reason={reason:?}")
-        }
-        HostEvent::Started { generation } => {
-            format!("event=started generation={generation}")
-        }
-        HostEvent::StartRefused { reason } => {
-            format!("event=start_refused reason={reason:?}")
-        }
-        HostEvent::Cancelled { generation } => {
-            format!("event=cancelled generation={generation}")
-        }
-    }
 }

@@ -223,6 +223,36 @@ pub fn headless_lobby(
     )
 }
 
+/// The `mm2 --host` headless run (F24-B.8): the app parks at `Menu`
+/// inside a lobby it hosts — an operator's `start` (stdin `start`, a
+/// test's `HostCommand::Start`) is what begins a session, and the
+/// `event=` record lines give the host the same observable surface
+/// `mm2-host` prints. The record's `mp=` field reports `host(<n>p)`
+/// parked / `gen<N>` once a session minted.
+pub fn headless_host(
+    mut link: net::HostLink,
+    vfs: Vfs,
+    car: session::SelectedCar,
+    vehicle_config: &VehicleConfig,
+    frames: u32,
+    driver: Driver,
+    profile: Option<crate::profile::ActiveProfile>,
+) -> SmokeRecord {
+    // A headless host has no `HostText` surface — the `event=` record
+    // lines are how an operator (or a process-level test) watches the
+    // lobby.
+    link.log_events(true);
+    run_headless(
+        RunSource::Host(Box::new(link)),
+        vfs,
+        car,
+        vehicle_config,
+        frames,
+        driver,
+        profile,
+    )
+}
+
 /// What supplies the session a headless run drives. `Lobby` is boxed —
 /// the link dwarfs the borrowed config variant (clippy's
 /// large-enum-variant bound).
@@ -233,6 +263,9 @@ enum RunSource<'a> {
     /// A joined lobby — the session begins when the host's `Start`
     /// arrives (F24-B.7).
     Lobby(Box<net::LobbyLink>),
+    /// A hosted lobby — the session begins when the operator's
+    /// `start` mints a generation (F24-B.8).
+    Host(Box<net::HostLink>),
 }
 
 /// `dev-world` or the logical city path — the `world=` record field.
@@ -266,13 +299,16 @@ fn run_headless(
     driver: Driver,
     profile: Option<crate::profile::ActiveProfile>,
 ) -> SmokeRecord {
-    let lobby_mode = matches!(source, RunSource::Lobby(_));
+    // A "lobby run" is one the wire drives — joined (`Lobby`) or
+    // hosted (`Host`): both park at `Menu` until a session mints.
+    let lobby_mode = matches!(source, RunSource::Lobby(_) | RunSource::Host(_));
     let (world, dev) = match &source {
         RunSource::Session(config) => (world_label(config), config.dev.clone()),
         // A lobby run's world label is only known once a session
         // begins; the record derives it at the end and reports
         // "lobby" when none ever did.
         RunSource::Lobby(link) => ("lobby".to_string(), link.dev.clone()),
+        RunSource::Host(link) => ("lobby".to_string(), link.config().dev.clone()),
     };
     let record = |world: &str, status: SmokeStatus, detail: String| SmokeRecord {
         kind: KIND_HEADLESS_PHYSICS,
@@ -616,20 +652,34 @@ fn run_headless(
     if let Some(profile) = profile {
         app.insert_resource(profile);
     }
-    if let RunSource::Lobby(link) = source {
-        app.insert_resource(*link)
-            .init_resource::<net::LobbyState>()
-            .add_systems(
-                Update,
-                (
-                    net::lobby_input,
-                    // The bridge settles after the session driver — a
-                    // `Cancel` quit that reached `Menu` this frame can
-                    // take a queued exit (or a parked `Start` begin)
-                    // the same update.
-                    net::drive_lobby.after(session::drive_session),
-                ),
-            );
+    match source {
+        RunSource::Lobby(link) => {
+            app.insert_resource(*link)
+                .init_resource::<net::LobbyState>()
+                .add_systems(
+                    Update,
+                    (
+                        net::lobby_input,
+                        // The bridge settles after the session driver — a
+                        // `Cancel` quit that reached `Menu` this frame can
+                        // take a queued exit (or a parked `Start` begin)
+                        // the same update.
+                        net::drive_lobby.after(session::drive_session),
+                    ),
+                );
+        }
+        RunSource::Host(link) => {
+            app.insert_resource(*link)
+                .init_resource::<net::LobbyState>()
+                .add_systems(
+                    Update,
+                    (
+                        net::host_input,
+                        net::drive_host.after(session::drive_session),
+                    ),
+                );
+        }
+        RunSource::Session(_) => {}
     }
     app.finish();
     app.cleanup();
@@ -716,16 +766,27 @@ fn run_headless(
         }
         let t0 = std::time::Instant::now();
         app.update();
-        // A lobby run parked at `Menu` is waiting on the host in wall
+        // A lobby run parked at `Menu` is waiting on the wire in wall
         // time — parked updates are near-free, so without a small pause
         // the frame budget evaporates long before a `Start` can arrive.
-        // A link the bridge has finished with — dead, or queued for
-        // exit — ends the wait outright: nothing more can arrive, and
-        // the windowed runner would be gone already.
+        // A link the bridge has finished with — dead, leaving, or
+        // queued for exit — ends the wait outright: nothing more can
+        // arrive, and the windowed runner would be gone already.
         if lobby_mode && app.world().resource::<Session>().phase() == &SessionPhase::Menu {
-            let link = app.world().resource::<net::LobbyLink>();
-            let lobby = app.world().resource::<net::LobbyState>();
-            if link.closed || lobby.pending_exit.is_some() {
+            let done = app
+                .world()
+                .get_resource::<net::LobbyLink>()
+                .is_some_and(|l| l.closed)
+                || app
+                    .world()
+                    .get_resource::<net::HostLink>()
+                    .is_some_and(|l| l.leaving())
+                || app
+                    .world()
+                    .resource::<net::LobbyState>()
+                    .pending_exit
+                    .is_some();
+            if done {
                 break;
             }
             std::thread::sleep(Duration::from_millis(4));
@@ -854,15 +915,23 @@ fn run_headless(
         dev,
         ..SessionConfig::default()
     });
-    // F24-B.7 lobby evidence: `mp=gen<N>` once a `Start` minted the
-    // session's generation, `mp=lobby(<n>p)` while still waiting on
-    // the host — absent without a `LobbyState`, so every non-lobby
-    // record stays bit-identical.
+    // F24-B lobby evidence: `mp=gen<N>` once a minted generation began
+    // the session, `mp=lobby(<n>p)`/`mp=host(<n>p)` while still parked
+    // (joined vs hosted — the hosted count is remote players only) —
+    // absent without a `LobbyState`, so every non-lobby record stays
+    // bit-identical.
     let mp_detail = world_ecs
         .get_resource::<net::LobbyState>()
         .map(|l| match l.generation {
             Some(g) => format!(" mp=gen{g}"),
-            None => format!(" mp=lobby({}p)", l.roster.len()),
+            None => {
+                let parked = if world_ecs.get_resource::<net::HostLink>().is_some() {
+                    "host"
+                } else {
+                    "lobby"
+                };
+                format!(" mp={parked}({}p)", l.roster.len())
+            }
         })
         .unwrap_or_default();
     // A lobby run parked at `Menu` at the frame cap gets the lobby's
@@ -872,13 +941,35 @@ fn run_headless(
     // simply never started is an honest timeout — not a pass.
     if lobby_mode && *session.phase() == SessionPhase::Menu {
         let lobby = world_ecs.resource::<net::LobbyState>();
-        let (status, why) = match &lobby.notice {
-            Some(why) => (SmokeStatus::Fail, format!(" {why}")),
-            None if session.config().is_none() => (
+        let never_started = if world_ecs.get_resource::<net::HostLink>().is_some() {
+            " the hosted session never started"
+        } else {
+            " host never started a session"
+        };
+        // The lobby's own exit verdict wins: a clean close (operator
+        // `quit`, a drained `leave`) is a pass even with a stale gate
+        // notice parked in the state; a nonzero one reports its reason.
+        // `pending_exit` is consumed by the `AppExit` write, so a
+        // drained exit is read from `exit_sent`. No exit yet means the
+        // frame budget ran out parked — a notice or never-started
+        // session is the honest timeout, a clean `Cancel` return is
+        // the lifecycle's end state.
+        let (status, why) = match lobby.pending_exit.or(lobby.exit_sent) {
+            Some(0) => (SmokeStatus::Pass, " lobby closed".to_string()),
+            Some(code) => (
                 SmokeStatus::Fail,
-                " host never started a session".to_string(),
+                match &lobby.notice {
+                    Some(why) => format!(" {why}"),
+                    None => format!(" lobby exit {code}"),
+                },
             ),
-            None => (SmokeStatus::Pass, " returned to the lobby".to_string()),
+            None => match &lobby.notice {
+                Some(why) => (SmokeStatus::Fail, format!(" {why}")),
+                None if session.config().is_none() => {
+                    (SmokeStatus::Fail, never_started.to_string())
+                }
+                None => (SmokeStatus::Pass, " returned to the lobby".to_string()),
+            },
         };
         return record(
             &record_world(session, lobby_mode, &world),

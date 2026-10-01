@@ -1,8 +1,9 @@
 //! The `mm2_net` bridge (F24-B): `SessionConfig` ↔ the lobby's session
-//! advertisement, plus the Bevy-side lobby client — [`LobbyLink`] wraps
-//! an `mm2_net::Client` on a pump thread and [`drive_lobby`] feeds its
-//! events (including `Start` → `Session::begin_generation`) into app
-//! state. An in-app *host* surface is a later slice.
+//! advertisement, plus the Bevy-side lobby surfaces — [`LobbyLink`]
+//! wraps an `mm2_net::Client` on a pump thread and [`drive_lobby`]
+//! feeds its events (including `Start` → `Session::begin_generation`)
+//! into app state; [`HostLink`] owns an in-app `mm2_net::Host` and
+//! [`drive_host`] plays the host seat through the same lifecycle.
 //!
 //! `mm2_net` stays project-free — the wire's [`SessionAdvertisement`]
 //! carries a bounded opaque `params` blob whose layout this module owns.
@@ -28,8 +29,9 @@
 //!   them silently.
 
 use std::collections::BTreeMap;
+use std::io::BufRead;
 use std::net::SocketAddr;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -44,8 +46,8 @@ use mm2_game::{
     VehicleSelection, Weather, WorldMode,
 };
 use mm2_net::{
-    Client, ClientCtl, Hello, Message, NetError, PickValidator, RosterEntry, SessionAdvertisement,
-    VehiclePick,
+    Client, ClientCtl, Hello, Host, HostConfig, HostCtl, HostEvent, LateJoin, LeaveCause,
+    MAX_PLAYERS, Message, NetError, PickValidator, RosterEntry, SessionAdvertisement, VehiclePick,
 };
 use serde::{Deserialize, Serialize};
 
@@ -418,16 +420,21 @@ fn pump(mut client: Client, tx: Sender<LobbyEvent>) {
     let _ = client.leave();
 }
 
-/// The app's mirror of lobby state — `drive_lobby` writes it, a lobby
-/// surface or test reads it. Everything here is display/decision
-/// state; the session itself is never mirrored (the `Session`
-/// resource stays authoritative).
+/// The app's mirror of lobby state — `drive_lobby` (joined) or
+/// `drive_host` (hosted) writes it, a lobby surface or test reads it.
+/// On the host side `roster` carries remote players only — the wire
+/// roster never carries the host's own seat (player id 0). Everything
+/// here is display/decision state; the session itself is never
+/// mirrored (the `Session` resource stays authoritative).
 #[derive(Resource, Default)]
 pub struct LobbyState {
-    /// Latest roster broadcast — a complete replacement each time,
-    /// never a delta. Includes our own entry.
+    /// Latest roster state — the wire broadcast verbatim on a joined
+    /// link (includes our own entry), or the mirror `drive_host`
+    /// rebuilds from [`HostEvent`] deltas on a hosted one (remote
+    /// players only; the host's own seat is never on the wire).
     pub roster: Vec<RosterEntry>,
-    /// The advertised session — the newest `Session` message wins.
+    /// The advertised session — the newest `Session` message a joined
+    /// link received, or the advertisement a hosted link itself set.
     /// `Start` carries its own snapshot of the *running* session, so
     /// this is lobby-display state, not what a start begins.
     pub advertised: Option<SessionAdvertisement>,
@@ -444,6 +451,10 @@ pub struct LobbyState {
     /// Exit the app once the session is back at `Menu` — refusal and
     /// leave paths queue teardown first, then this.
     pub pending_exit: Option<u8>,
+    /// The exit code the bridge already wrote as an `AppExit` —
+    /// `pending_exit` is consumed by the write, so this is the record
+    /// surface's view of how the lobby ended.
+    pub exit_sent: Option<u8>,
 }
 
 /// The drain system — runs once per update wherever a [`LobbyLink`]
@@ -553,6 +564,7 @@ pub fn drive_lobby(
             && lobby.pending_start.is_none()
             && let Some(code) = lobby.pending_exit.take()
         {
+            lobby.exit_sent = Some(code);
             exit.write(AppExit::from_code(code));
         }
     }
@@ -777,6 +789,564 @@ pub fn drive_lobby_text(
         lobby.roster.len(),
         ready_count,
         if ready { "ready" } else { "not ready" },
+        notice,
+    );
+}
+
+// ─── The in-app lobby host (F24-B.8) ───────────────────────────────
+//
+// The dedicated `mm2-host` binary runs a lobby with no player seat;
+// [`HostLink`] hosts one *inside* the app, so the process that listens
+// is also the process that drives. `Host` is `!Sync` (its event
+// channel is a `Receiver`), so it sits behind a mutex — unlike the
+// client side no pump thread is needed: `Host::try_recv` drains
+// without blocking, and [`drive_host`] runs it once per update.
+//
+// Lifecycle ownership mirrors `drive_lobby`: while a `HostLink`
+// exists the bridge owns `Menu`-time exit (`drive_session`'s quit arm
+// stays out of it), and the wire owns session boundaries — `Started`
+// begins the advertised config locally under the lobby's minted
+// generation with `Host` authority, a hosted session reaching `Menu`
+// sends `Cancel` so the roster returns to the lobby, and `Quit`
+// (stdin `quit`, Esc at `Menu`, drop) cancels a live session before
+// closing the sockets. Remote players are roster/display state only —
+// nothing is spawned or replicated yet (F25/F26).
+
+/// Why hosting could not be set up — the advertisement or the
+/// listen loop failed before the app took ownership.
+#[derive(Debug, thiserror::Error)]
+pub enum HostOpenError {
+    /// The session config cannot ride the wire (`advertise` refused
+    /// it — e.g. dev overrides are never network-legal).
+    #[error("session cannot be advertised: {0}")]
+    Advertise(#[from] SessionWireError),
+    /// The lobby transport failed — bind, session broadcast.
+    #[error("{0}")]
+    Net(#[from] NetError),
+}
+
+/// An operator intent for a hosted lobby — the stdin command surface
+/// (`start`/`cancel`/`quit`, the same words `mm2-host` accepts) and
+/// the windowed lobby keys feed one channel [`drive_host`] drains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostCommand {
+    /// Request the session start — the lobby's own gate decides, the
+    /// verdict arrives as `Started`/`StartRefused`.
+    Start,
+    /// End the running session — everyone returns to the lobby.
+    Cancel,
+    /// Shut the lobby down and exit the app.
+    Quit,
+}
+
+/// Feed stdin `start`/`cancel`/`quit` lines into a hosted lobby — the
+/// same operator surface `mm2-host` documents. A closed stdin just
+/// ends the thread; unknown lines are named on stderr, never queued.
+pub fn stdin_commands(tx: Sender<HostCommand>) {
+    let _ = thread::Builder::new()
+        .name("mm2-host-stdin".to_string())
+        .spawn(move || {
+            for line in std::io::stdin().lock().lines() {
+                let Ok(line) = line else { return };
+                let command = match line.trim() {
+                    "start" => HostCommand::Start,
+                    "cancel" => HostCommand::Cancel,
+                    "quit" => HostCommand::Quit,
+                    "" => continue,
+                    other => {
+                        eprintln!("error: unknown command {other:?}");
+                        continue;
+                    }
+                };
+                if tx.send(command).is_err() {
+                    return;
+                }
+            }
+        });
+}
+
+/// The `mm2-host` record contract for one [`HostEvent`], shared so the
+/// dedicated binary and the in-app host's headless event log speak
+/// identical lines (`event=joined id=<n> driver="<name>" …`).
+pub fn describe_host_event(event: &HostEvent) -> String {
+    match event {
+        HostEvent::Joined { id, driver, build } => {
+            format!("event=joined id={id} driver={driver:?} build={build:?}")
+        }
+        HostEvent::Left { id, driver, cause } => {
+            let cause = match cause {
+                LeaveCause::Quit => "quit",
+                LeaveCause::Lost => "lost",
+                LeaveCause::Malformed => "malformed",
+            };
+            format!("event=left id={id} driver={driver:?} cause={cause}")
+        }
+        HostEvent::ReadyChanged { id, ready } => {
+            format!("event=ready id={id} ready={ready}")
+        }
+        HostEvent::VehicleChanged { id, vehicle, paint } => {
+            format!("event=vehicle id={id} vehicle={vehicle:?} paint={paint}")
+        }
+        HostEvent::VehicleRefused {
+            id,
+            vehicle,
+            paint,
+            reason,
+        } => {
+            format!(
+                "event=pick_refused id={id} vehicle={vehicle:?} paint={paint} reason={reason:?}"
+            )
+        }
+        HostEvent::JoinFailed { peer, reason } => {
+            format!("event=join_failed peer={peer} reason={reason:?}")
+        }
+        HostEvent::Started { generation } => {
+            format!("event=started generation={generation}")
+        }
+        HostEvent::StartRefused { reason } => {
+            format!("event=start_refused reason={reason:?}")
+        }
+        HostEvent::Cancelled { generation } => {
+            format!("event=cancelled generation={generation}")
+        }
+    }
+}
+
+/// The app's handle on a hosted lobby. Dropping it is the operator's
+/// `quit` — `Drop` runs [`leave`](Self::leave), which cancels a live
+/// session before the sockets close.
+#[derive(Resource)]
+pub struct HostLink {
+    /// `Mutex` for `Sync` — `Host` is `!Sync` (its event channel is a
+    /// `Receiver`). Held only for `try_recv` drains and `shutdown`.
+    host: Mutex<Host>,
+    ctl: HostCtl,
+    /// Operator commands (stdin thread, `host_input`, tests).
+    commands_rx: Mutex<Receiver<HostCommand>>,
+    commands_tx: Sender<HostCommand>,
+    /// The session this lobby advertises and the host seat plays —
+    /// stamped `Host` authority at `open`; `Started` begins a clone.
+    config: SessionConfig,
+    /// What was advertised — `lobby.advertised`'s seed and the
+    /// `listening=` record's summary.
+    ad: SessionAdvertisement,
+    /// The start's late-join policy — the session mode's (MP-5:
+    /// event lobbies close once started, cruise stays open).
+    late_join: LateJoin,
+    /// The host driver's display name — never on the wire roster.
+    driver: String,
+    /// `leave()` ran — the link is coming down (cancel, shutdown,
+    /// then `pending_exit` at `Menu`).
+    leaving: bool,
+    /// A `cancel` request is in flight to the host loop — suppresses
+    /// the auto-cancel edge re-firing until `Cancelled` lands.
+    cancel_sent: bool,
+    /// The host loop's event channel ended — the lobby is dead under
+    /// us, so the bridge exits nonzero like a client's lost host.
+    dead: bool,
+    /// Print each drained `HostEvent` as a `describe_host_event`
+    /// record line — the headless run's operator surface (the same
+    /// contract `mm2-host` prints); off on the windowed path, where
+    /// the `HostText` surface is the display.
+    log_events: bool,
+}
+
+impl HostLink {
+    /// Open a hosted lobby on `bind`, advertising `config`. The host
+    /// seat is itself a player, so the remote-client ceiling keeps one
+    /// of the wire's [`MAX_PLAYERS`] free (MP-1's eight *total*).
+    /// `config` is cloned and stamped `Host` authority; `pick_validator`
+    /// is the catalog gate `mm2-host` installs. Nothing here loads the
+    /// world — the event gate is the caller's flag-time check, the
+    /// same one `mm2-host` runs.
+    pub fn open(
+        bind: SocketAddr,
+        config: &SessionConfig,
+        driver: String,
+        gameplay_fingerprint: u64,
+        pick_validator: Option<PickValidator>,
+    ) -> Result<Self, HostOpenError> {
+        let mut config = config.clone();
+        config.authority = SessionAuthority::Host;
+        let ad = advertise(&config)?;
+        let late_join = match config.mode {
+            SessionMode::Event(_) => LateJoin::Closed,
+            SessionMode::Cruise => LateJoin::Open,
+        };
+        let host = Host::listen(
+            bind,
+            &HostConfig {
+                gameplay_fingerprint,
+                max_clients: MAX_PLAYERS as u16 - 1,
+                pick_validator,
+            },
+        )?;
+        let ctl = host.ctl();
+        host.set_session(ad.clone())?;
+        let (commands_tx, commands_rx) = mpsc::channel();
+        Ok(Self {
+            host: Mutex::new(host),
+            ctl,
+            commands_rx: Mutex::new(commands_rx),
+            commands_tx,
+            config,
+            ad,
+            late_join,
+            driver,
+            leaving: false,
+            cancel_sent: false,
+            dead: false,
+            log_events: false,
+        })
+    }
+
+    /// The address peers dial — `127.0.0.1:<ephemeral>` by default.
+    pub fn addr(&self) -> SocketAddr {
+        self.host.lock().unwrap_or_else(|e| e.into_inner()).addr()
+    }
+
+    /// The host loop's control handle (`start`/`cancel`/`shutdown`).
+    pub fn ctl(&self) -> &HostCtl {
+        &self.ctl
+    }
+
+    /// The advertised session's display summary.
+    pub fn summary(&self) -> &str {
+        &self.ad.summary
+    }
+
+    /// The session the host seat plays once `Started` lands.
+    pub fn config(&self) -> &SessionConfig {
+        &self.config
+    }
+
+    /// The host driver's display name.
+    pub fn driver(&self) -> &str {
+        &self.driver
+    }
+
+    /// Send-side handle for operator commands — clone it for the
+    /// stdin thread or a test.
+    pub fn command_sender(&self) -> Sender<HostCommand> {
+        self.commands_tx.clone()
+    }
+
+    /// Whether the link is coming down (`leave()` ran or the loop died).
+    pub fn leaving(&self) -> bool {
+        self.leaving
+    }
+
+    /// Print drained host events as record lines (the headless run's
+    /// operator surface — the `mm2-host` contract).
+    pub fn log_events(&mut self, on: bool) {
+        self.log_events = on;
+    }
+
+    /// Take the lobby down: a running session gets a `Cancel` first
+    /// (queued ahead of the shutdown on the same control channel, so
+    /// peers see the session end before the sockets die), then the
+    /// loop is joined. Idempotent.
+    pub fn leave(&mut self) {
+        if self.leaving {
+            return;
+        }
+        self.leaving = true;
+        self.cancel_sent = true;
+        let _ = self.ctl.cancel();
+        self.host
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .shutdown();
+    }
+
+    /// Drain queued operator commands — non-blocking.
+    fn drain_commands(&self) -> Vec<HostCommand> {
+        let rx = self.commands_rx.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out = Vec::new();
+        while let Ok(command) = rx.try_recv() {
+            out.push(command);
+        }
+        out
+    }
+
+    /// Drain the host loop's events — non-blocking. A disconnected
+    /// channel means the loop died under us: `dead` marks it so the
+    /// bridge can exit rather than sit on a lobby that no longer runs.
+    fn drain_events(&mut self) -> Vec<HostEvent> {
+        let host = self.host.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out = Vec::new();
+        loop {
+            match host.try_recv() {
+                Ok(event) => out.push(event),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.dead = true;
+                    break;
+                }
+            }
+        }
+        out
+    }
+}
+
+impl Drop for HostLink {
+    fn drop(&mut self) {
+        self.leave();
+    }
+}
+
+/// The host-side drain system — runs once per update wherever a
+/// [`HostLink`] exists, after `drive_session` so a teardown landing at
+/// `Menu` this frame can settle the lobby's follow-ups immediately.
+/// Operator commands go first (their verdicts ride the event channel
+/// either way), then host events drive the mirror and the local
+/// lifecycle, then the `Menu`-phase settlements: a parked start, the
+/// session-ended auto-`Cancel`, and the queued exit.
+pub fn drive_host(
+    mut link: ResMut<HostLink>,
+    mut lobby: ResMut<LobbyState>,
+    mut session: ResMut<Session>,
+    mut control: ResMut<SessionControl>,
+    menu: Option<Res<MenuShell>>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    // The advertised session is the link's own — seed the mirror once.
+    if lobby.advertised.is_none() {
+        lobby.advertised = Some(link.ad.clone());
+    }
+    for command in link.drain_commands() {
+        match command {
+            HostCommand::Start => {
+                // A start queued while the lobby comes down must not
+                // mint a session nobody is left to cancel.
+                if !link.leaving {
+                    let _ = link.ctl.start(link.late_join);
+                }
+            }
+            HostCommand::Cancel => {
+                link.cancel_sent = true;
+                let _ = link.ctl.cancel();
+            }
+            HostCommand::Quit => {
+                link.leave();
+                lobby.pending_exit.get_or_insert(0);
+            }
+        }
+    }
+    for event in link.drain_events() {
+        if link.log_events {
+            println!("{}", describe_host_event(&event));
+        }
+        match event {
+            HostEvent::Joined { id, driver, build } => {
+                lobby.roster.push(RosterEntry {
+                    player_id: id,
+                    driver,
+                    build,
+                    ready: false,
+                    pick: None,
+                });
+                lobby.roster.sort_by_key(|e| e.player_id);
+            }
+            HostEvent::Left { id, .. } => {
+                lobby.roster.retain(|e| e.player_id != id);
+            }
+            HostEvent::ReadyChanged { id, ready } => {
+                if let Some(entry) = lobby.roster.iter_mut().find(|e| e.player_id == id) {
+                    entry.ready = ready;
+                }
+            }
+            HostEvent::VehicleChanged { id, vehicle, paint } => {
+                if let Some(entry) = lobby.roster.iter_mut().find(|e| e.player_id == id) {
+                    entry.pick = Some(VehiclePick { vehicle, paint });
+                }
+            }
+            HostEvent::VehicleRefused {
+                id,
+                vehicle,
+                paint,
+                reason,
+            } => {
+                let who = lobby
+                    .roster
+                    .iter()
+                    .find(|e| e.player_id == id)
+                    .map(|e| e.driver.as_str())
+                    .unwrap_or("a player");
+                lobby.notice = Some(format!(
+                    "{who}'s pick was refused ({vehicle}:{paint}): {reason}"
+                ));
+            }
+            HostEvent::JoinFailed { peer, reason } => {
+                lobby.notice = Some(format!("rejected {peer}: {reason}"));
+            }
+            HostEvent::Started { generation } => {
+                host_started(
+                    &mut link,
+                    &mut lobby,
+                    &mut session,
+                    &mut control,
+                    generation,
+                );
+            }
+            HostEvent::StartRefused { reason } => {
+                lobby.notice = Some(reason);
+            }
+            HostEvent::Cancelled { generation } => {
+                link.cancel_sent = false;
+                cancel(&mut lobby, &mut session, &mut control, generation);
+            }
+        }
+    }
+    // A dead loop or a requested leave takes a live session down with
+    // it — teardown rides the normal `Unloading → Menu` lifecycle. A
+    // parked `Start` is moot once the lobby is coming down: drop it so
+    // it cannot wedge the queued exit behind an unplayable session.
+    if link.leaving || link.dead {
+        lobby.pending_start = None;
+        if !matches!(
+            session.phase(),
+            SessionPhase::Menu | SessionPhase::Unloading
+        ) {
+            control.quit = true;
+        }
+    }
+    // The loop dying under us is the host's lost-lobby equivalent —
+    // a named failure, never a silent sit. A `dead` that lands while
+    // `leaving` is our own `leave()` draining dry: cover the bare-`leave`
+    // path (Drop, a test) that never queued the exit itself.
+    if link.dead {
+        if link.leaving {
+            lobby.pending_exit.get_or_insert(0);
+        } else {
+            lobby.notice = Some("the lobby host loop died".to_string());
+            link.leave();
+            lobby.pending_exit.get_or_insert(1);
+        }
+    }
+    // Lifecycle intents settle at `Menu` — the lobby's "waiting" phase.
+    if *session.phase() == SessionPhase::Menu {
+        if lobby.pending_exit.is_none()
+            && let Some((generation, config)) = lobby.pending_start.take()
+            && let Err(e) = session.begin_generation(config, generation)
+        {
+            // The advertised config was flag-time gated, so a refusal
+            // here is lifecycle-internal — end the lobby's session
+            // rather than leave peers playing one we are not in.
+            lobby.notice = Some(format!("hosted session could not begin: {e}"));
+            link.cancel_sent = true;
+            let _ = link.ctl.cancel();
+        }
+        // The hosted session ended locally (finish → quit → Menu) —
+        // end it for everyone; the lobby re-opens for the next round.
+        if *session.phase() == SessionPhase::Menu
+            && !link.leaving
+            && lobby.pending_start.is_none()
+            && lobby.pending_exit.is_none()
+            && lobby.generation.is_some()
+            && !link.cancel_sent
+        {
+            link.cancel_sent = true;
+            let _ = link.ctl.cancel();
+        }
+        if menu.is_none()
+            && lobby.pending_start.is_none()
+            && let Some(code) = lobby.pending_exit.take()
+        {
+            lobby.exit_sent = Some(code);
+            exit.write(AppExit::from_code(code));
+        }
+    }
+}
+
+/// `Started` — the lobby minted a generation and `Start` went to every
+/// peer. The host seat begins the same advertised session under the
+/// same generation (authority `Host`); a `Started` that lands while a
+/// previous session is still tearing down parks until `Menu` returns
+/// (the loop's own gate makes this defensive — a second `start` while
+/// in-session is refused before it mints). One that lands after
+/// `leave` is already cancelled on the wire — begin nothing here.
+fn host_started(
+    link: &mut HostLink,
+    lobby: &mut LobbyState,
+    session: &mut Session,
+    control: &mut SessionControl,
+    generation: u64,
+) {
+    lobby.generation = Some(generation);
+    link.cancel_sent = false;
+    if link.leaving {
+        return;
+    }
+    if *session.phase() == SessionPhase::Menu {
+        if let Err(e) = session.begin_generation(link.config.clone(), generation) {
+            lobby.notice = Some(format!("hosted session could not begin: {e}"));
+            link.cancel_sent = true;
+            let _ = link.ctl.cancel();
+        }
+    } else {
+        lobby.pending_start = Some((generation, link.config.clone()));
+        control.quit = true;
+    }
+}
+
+/// The windowed host lobby's keyboard surface — `Enter` requests the
+/// start (the lobby's own gate answers `Started`/`StartRefused`),
+/// `Esc` takes the lobby down. Both ride the command channel the
+/// stdin driver feeds, so the keys and the operator words share one
+/// intake. Only live while the session parks at `Menu`.
+pub fn host_input(keys: Res<ButtonInput<KeyCode>>, session: Res<Session>, link: Res<HostLink>) {
+    if *session.phase() != SessionPhase::Menu || link.leaving() {
+        return;
+    }
+    if keys.just_pressed(KeyCode::Enter) {
+        let _ = link.command_sender().send(HostCommand::Start);
+    }
+    if keys.just_pressed(KeyCode::Escape) {
+        let _ = link.command_sender().send(HostCommand::Quit);
+    }
+}
+
+/// Marker for the hosted lobby's status line — the counterpart of
+/// [`LobbyText`], spawned by the app itself (the lobby is `Menu`-time
+/// state, so no session-owned UI can show it).
+#[derive(Component)]
+pub struct HostText;
+
+/// The hosted lobby's status line — where peers dial, what the lobby
+/// runs, the remote roster's readiness, and the latest gate notice.
+/// The line empties while a session runs — the HUD owns the screen.
+pub fn drive_host_text(
+    link: Res<HostLink>,
+    lobby: Res<LobbyState>,
+    session: Res<Session>,
+    mut texts: Query<&mut Text, With<HostText>>,
+) {
+    let Ok(mut text) = texts.single_mut() else {
+        return;
+    };
+    if *session.phase() != SessionPhase::Menu {
+        text.0.clear();
+        return;
+    }
+    let offered = link.summary();
+    let pick = match &link.config.vehicle.id {
+        Some(id) => format!("{id} (paint {})", link.config.vehicle.paint),
+        None => "dev car".to_string(),
+    };
+    let ready_count = lobby.roster.iter().filter(|e| e.ready).count();
+    let notice = lobby
+        .notice
+        .as_ref()
+        .map(|n| format!("\n{n}"))
+        .unwrap_or_default();
+    text.0 = format!(
+        "Hosting {} — {}\nsession: {offered}\nplayers: {} connected ({} ready)\nyou: {} — {pick} (host)\n\nenter: start session    esc: stop hosting{}",
+        link.addr(),
+        link.driver(),
+        lobby.roster.len(),
+        ready_count,
+        link.driver(),
         notice,
     );
 }

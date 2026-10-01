@@ -187,19 +187,22 @@ pub fn session_control_input(
 /// `drive_session`'s view of what else could own "a `quit` intent
 /// landed at `Menu`". A running [`MenuShell`](crate::menu::MenuShell)
 /// owns exit (its Quit row / Esc at the root); a joined
-/// [`LobbyLink`](crate::net::LobbyLink) means quit lands back in the
-/// lobby and `net::drive_lobby` writes the eventual `AppExit`. Only
-/// with neither is a `Menu` quit the process's exit.
+/// [`LobbyLink`](crate::net::LobbyLink) or a hosted
+/// [`HostLink`](crate::net::HostLink) means quit lands back in the
+/// lobby and `net::drive_lobby`/`net::drive_host` writes the eventual
+/// `AppExit`. Only with none of them is a `Menu` quit the process's
+/// exit.
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct MenuExit<'w> {
     menu: Option<Res<'w, crate::menu::MenuShell>>,
     lobby: Option<Res<'w, crate::net::LobbyLink>>,
+    host: Option<Res<'w, crate::net::HostLink>>,
 }
 
 impl MenuExit<'_> {
     /// Whether quit-to-`Menu` stays inside the app.
     fn keeps_running(&self) -> bool {
-        self.menu.is_some() || self.lobby.is_some()
+        self.menu.is_some() || self.lobby.is_some() || self.host.is_some()
     }
 }
 
@@ -211,7 +214,8 @@ impl MenuExit<'_> {
 ///   session-scoped caches — the impact dedup map is keyed by `Entity`,
 ///   which the next session may recycle — and move to `Menu`.
 /// - `Menu`: `quit` exits the process — unless a `MenuShell` resource
-///   or a [`LobbyLink`](crate::net::LobbyLink) exists, in which case
+///   or a [`LobbyLink`](crate::net::LobbyLink)/
+///   [`HostLink`](crate::net::HostLink) exists, in which case
 ///   that surface owns exit and a quit here just returns to it;
 ///   `restart` calls `begin` with the retained config, flipping the
 ///   phase to `Loading` so the spawn system builds the next session —

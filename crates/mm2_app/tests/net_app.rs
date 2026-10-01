@@ -1,11 +1,13 @@
-//! `mm2 --join` — the app's Bevy-side lobby bridge (F24-B.7).
+//! `mm2 --join` / `mm2 --host` — the app's Bevy-side lobby bridges
+//! (F24-B.7 joined, F24-B.8 hosted).
 //!
-//! The in-process legs drive `drive_lobby`/`drive_session` inside a
-//! minimal `App` against a real loopback `mm2_net::Host`: the pump
-//! thread, the wire, the host's roster gate are all real — only the
-//! world-load plugins are absent (a begun session parks in `Loading`;
-//! the actual `load_session_world` legs are the `headless_lobby`
-//! in-process run and the `mm2 --join --headless` process legs below,
+//! The in-process legs drive `drive_lobby`/`drive_host`/`drive_session`
+//! inside a minimal `App` against a real loopback wire: the pump
+//! thread, the sockets, the lobby's roster/start gates are all real —
+//! only the world-load plugins are absent (a begun session parks in
+//! `Loading`; the actual `load_session_world` legs are the
+//! `headless_lobby`/`headless_host` in-process runs and the
+//! `mm2 --join --headless`/`mm2 --host --headless` process legs below,
 //! which carry the real asset stack).
 //!
 //! Loopback only — LAN/Internet reachability is F24-C. Remote players
@@ -21,7 +23,7 @@ use bevy::prelude::*;
 
 mod support;
 
-use mm2_app::net::{self, LobbyLink, LobbyState};
+use mm2_app::net::{self, HostCommand, HostLink, LobbyLink, LobbyState};
 use mm2_app::session;
 use mm2_app::session::{SelectedCar, SessionControl, TunedVehicle};
 use mm2_app::smoke::{self, SmokeStatus};
@@ -30,7 +32,7 @@ use mm2_game::{
     DevOverrides, Mm2Vfs, Session, SessionAuthority, SessionConfig, SessionMode, SessionPhase,
     WorldMode, despawn_session_entities,
 };
-use mm2_net::{Host, HostConfig, HostEvent, LateJoin, LeaveCause, hello};
+use mm2_net::{Client, Host, HostConfig, HostEvent, LateJoin, LeaveCause, Message, hello};
 use mm2_vehicle::VehicleConfig;
 use support::{Proc, WAIT, listening, mount};
 
@@ -69,11 +71,11 @@ fn host_and_link(
     (host, link, vfs)
 }
 
-/// The app half of the bridge, wired the way `run_headless` wires it:
-/// the session lifecycle (`despawn_session_entities` → `drive_session`)
-/// then the lobby drain — minus the load/spawn systems that need the
+/// The shared half of both bridges: the session lifecycle
+/// (`despawn_session_entities` → `drive_session`) and the resources the
+/// lobby drain reads — minus the load/spawn systems that need the
 /// asset stack.
-fn bridge_app(vfs: Vfs, link: LobbyLink) -> App {
+fn lobby_app(vfs: Vfs) -> App {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
         .insert_resource(Session::new())
@@ -99,21 +101,42 @@ fn bridge_app(vfs: Vfs, link: LobbyLink) -> App {
         .init_resource::<mm2_app::damage_fx::SmokeFxReport>()
         .init_resource::<mm2_app::spark_fx::SparkFxReport>()
         .init_resource::<mm2_app::texel_fx::TexelDamageReport>()
-        .insert_resource(link)
         .add_systems(
             Update,
             (
-                net::lobby_input,
-                (
-                    despawn_session_entities.run_if(session::unloading),
-                    session::drive_session,
-                )
-                    .chain(),
-                // The bridge settles after the session driver — the
-                // same ordering the windowed app and `run_headless` use.
-                net::drive_lobby.after(session::drive_session),
-            ),
+                despawn_session_entities.run_if(session::unloading),
+                session::drive_session,
+            )
+                .chain(),
         );
+    app
+}
+
+/// The joined-client bridge app, wired the way `run_headless` wires
+/// it — the lobby drain settles after the session driver, the same
+/// ordering the windowed app and `run_headless` use.
+fn bridge_app(vfs: Vfs, link: LobbyLink) -> App {
+    let mut app = lobby_app(vfs);
+    app.insert_resource(link).add_systems(
+        Update,
+        (
+            net::lobby_input,
+            net::drive_lobby.after(session::drive_session),
+        ),
+    );
+    app
+}
+
+/// The hosted-lobby bridge app — same wiring, `HostLink` side.
+fn host_app(vfs: Vfs, link: HostLink) -> App {
+    let mut app = lobby_app(vfs);
+    app.insert_resource(link).add_systems(
+        Update,
+        (
+            net::host_input,
+            net::drive_host.after(session::drive_session),
+        ),
+    );
     app
 }
 
@@ -493,6 +516,483 @@ fn an_unrunnable_session_is_refused_with_a_clean_leave() {
     host.shutdown();
 }
 
+// ─── The in-app host (F24-B.8) ─────────────────────────────────────
+//
+// `HostLink` hosts the lobby inside the app: the host seat is the
+// local player (never a wire roster entry — ids start at 1), and
+// `drive_host` drains host-loop events plus operator commands into the
+// same `LobbyState` the joined bridge fills.
+
+/// A loopback `HostLink` advertising `config` — the in-app half of
+/// `mm2 --host`. The fingerprint is the mount's own, so a peer built
+/// from it satisfies the handshake gate.
+fn host_link(dir: &std::path::Path, config: &SessionConfig) -> (HostLink, Vfs, u64) {
+    let vfs = mount(dir);
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let link = HostLink::open(
+        "127.0.0.1:0".parse().unwrap(),
+        config,
+        "host".to_string(),
+        fp,
+        None,
+    )
+    .expect("host open failed");
+    (link, vfs, fp)
+}
+
+/// A bare wire client joined to a hosted lobby — the remote peer the
+/// host-side roster mirror is built from.
+fn remote_peer(addr: SocketAddr, driver: &str, fp: u64) -> Client {
+    let client = Client::join(
+        addr,
+        &hello("net-app-test".to_string(), driver.to_string(), fp),
+    )
+    .expect("remote join failed");
+    client.set_timeout(Some(WAIT)).unwrap();
+    client
+}
+
+/// `peer.recv()` until `pred` holds — bounded by the peer's read
+/// timeout, so a missing message fails rather than hanging.
+fn until_wire(peer: &mut Client, pred: impl Fn(&Message) -> bool) -> Message {
+    loop {
+        let msg = peer.recv().expect("the peer stream ended");
+        if pred(&msg) {
+            return msg;
+        }
+    }
+}
+
+/// A remote peer already past the host's start gate — pick + ready
+/// sent and the roster broadcast showing both — so a following
+/// `start` cannot race the loop's intake.
+fn ready_peer(addr: SocketAddr, driver: &str, fp: u64) -> Client {
+    let mut peer = remote_peer(addr, driver, fp);
+    let ctl = peer.ctl().unwrap();
+    ctl.set_vehicle("", 0).unwrap();
+    ctl.set_ready(true).unwrap();
+    until_wire(
+        &mut peer,
+        |m| matches!(m, Message::Roster { players: r } if r.iter().any(|e| e.driver == driver && e.ready && e.pick.is_some())),
+    );
+    peer
+}
+
+/// `app.update()` until `pred` holds — bounded so a broken settle
+/// fails rather than hanging.
+fn spin(app: &mut App, pred: impl Fn(&App) -> bool) {
+    for _ in 0..200 {
+        app.update();
+        if pred(app) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    panic!("the app never reached the expected state");
+}
+
+/// The minimal test app has no `InputPlugin` clearing `ButtonInput`
+/// per frame — a `just_pressed` would linger into every later update
+/// and `pressed` survives `clear()`, so a re-press needs the release.
+/// Mirror the real app: `tap` is one discrete keypress.
+fn clear_keys(app: &mut App) {
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .clear();
+}
+
+fn tap(app: &mut App, key: KeyCode) {
+    {
+        let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+        keys.release(key);
+        keys.press(key);
+    }
+    app.update();
+    clear_keys(app);
+}
+
+/// A hosted lobby parks at `Menu` like a joined one, but the roster
+/// mirror starts empty: the host seat is the local player, never a
+/// wire entry. Remote joins/picks/readiness/leaves fill it from host
+/// events — and the advertised session is the link's own config,
+/// stamped `Host` authority.
+#[test]
+fn the_hosted_roster_mirrors_remote_players_only() {
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let mut app = host_app(vfs, link);
+
+    app.update();
+    {
+        let lobby = app.world().resource::<LobbyState>();
+        assert_eq!(
+            lobby.advertised.as_ref().map(|ad| ad.summary.as_str()),
+            Some("dev world, cruise, amateur")
+        );
+        assert!(
+            lobby.roster.is_empty(),
+            "the host seat is not a wire roster entry"
+        );
+    }
+    assert_eq!(
+        app.world().resource::<HostLink>().config().authority,
+        SessionAuthority::Host
+    );
+    assert_eq!(session_phase(&app), SessionPhase::Menu);
+    assert!(app.should_exit().is_none());
+
+    let peer = remote_peer(addr, "eve", fp);
+    spin(&mut app, |a| {
+        a.world().resource::<LobbyState>().roster.len() == 1
+    });
+    {
+        let lobby = app.world().resource::<LobbyState>();
+        assert_eq!(lobby.roster[0].driver, "eve");
+        assert!(
+            lobby.roster[0].player_id > 0,
+            "wire ids skip the host's slot"
+        );
+        assert!(!lobby.roster[0].ready);
+        assert!(lobby.roster[0].pick.is_none());
+    }
+    let ctl = peer.ctl().unwrap();
+    ctl.set_vehicle("", 0).unwrap();
+    ctl.set_ready(true).unwrap();
+    spin(&mut app, |a| {
+        let lobby = a.world().resource::<LobbyState>();
+        lobby.roster[0].ready && lobby.roster[0].pick.is_some()
+    });
+
+    peer.leave().unwrap();
+    spin(&mut app, |a| {
+        a.world().resource::<LobbyState>().roster.is_empty()
+    });
+    assert!(app.should_exit().is_none(), "a peer leaving is not an exit");
+}
+
+/// The operator's `start` mints the generation, broadcasts `Start`,
+/// and begins the host seat's session — `Host` authority, the
+/// advertised config — on the same drain the peer heard it on.
+#[test]
+fn a_hosted_start_begins_the_session_for_everyone() {
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let commands = link.command_sender();
+    let mut app = host_app(vfs, link);
+    let mut peer = ready_peer(addr, "eve", fp);
+    spin(&mut app, |a| {
+        a.world().resource::<LobbyState>().roster.len() == 1
+    });
+
+    commands.send(HostCommand::Start).unwrap();
+    app.update(); // drains the command → ctl.start → the loop mints
+    let generation = match until_wire(&mut peer, |m| matches!(m, Message::Start { .. })) {
+        Message::Start { generation, .. } => generation,
+        _ => unreachable!(),
+    };
+    spin(&mut app, |a| session_phase(a) == SessionPhase::Loading);
+
+    let session = app.world().resource::<Session>();
+    assert_eq!(session.generation(), generation);
+    let config = session.config().expect("the hosted session is stored");
+    assert_eq!(config.authority, SessionAuthority::Host);
+    assert!(matches!(config.world, WorldMode::DevWorld));
+    assert_eq!(
+        app.world().resource::<LobbyState>().generation,
+        Some(generation)
+    );
+    assert!(app.should_exit().is_none());
+}
+
+/// `start` against an unready peer is the lobby gate's verdict: a
+/// `StartRefused` surfaces as a lobby notice — nothing mints, nothing
+/// begins, and the lobby keeps running.
+#[test]
+fn a_start_with_an_unready_peer_is_refused() {
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let commands = link.command_sender();
+    let mut app = host_app(vfs, link);
+    let _peer = remote_peer(addr, "eve", fp); // joined but never ready
+    spin(&mut app, |a| {
+        a.world().resource::<LobbyState>().roster.len() == 1
+    });
+
+    commands.send(HostCommand::Start).unwrap();
+    spin(&mut app, |a| {
+        a.world().resource::<LobbyState>().notice.is_some()
+    });
+
+    let lobby = app.world().resource::<LobbyState>();
+    assert!(
+        lobby
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.contains("not ready")),
+        "the refusal names the gate: {:?}",
+        lobby.notice
+    );
+    assert_eq!(lobby.generation, None, "a refused start mints nothing");
+    assert_eq!(session_phase(&app), SessionPhase::Menu);
+    assert!(app.should_exit().is_none());
+}
+
+/// A hosted session ending locally is the lobby's `Cancel`: the wire
+/// hears the generation close, the mirror clears, and the lobby
+/// re-opens for the next `start` — which mints a fresh generation.
+/// (Readiness resets on `Cancel`, so the peer re-consents first.)
+#[test]
+fn a_hosted_session_end_cancels_the_wire_session() {
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let commands = link.command_sender();
+    let mut app = host_app(vfs, link);
+    let mut peer = ready_peer(addr, "eve", fp);
+    spin(&mut app, |a| {
+        a.world().resource::<LobbyState>().roster.len() == 1
+    });
+    commands.send(HostCommand::Start).unwrap();
+    app.update();
+    until_wire(&mut peer, |m| matches!(m, Message::Start { .. }));
+    spin(&mut app, |a| session_phase(a) == SessionPhase::Loading);
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+
+    // The local session ends — finish/quit lands the phase at `Menu`,
+    // where `drive_host` settles it as the wire's `Cancel`.
+    app.world_mut().resource_mut::<SessionControl>().quit = true;
+    spin(&mut app, |a| {
+        session_phase(a) == SessionPhase::Menu
+            && a.world().resource::<LobbyState>().generation.is_none()
+    });
+    match until_wire(&mut peer, |m| matches!(m, Message::Cancel { .. })) {
+        Message::Cancel { generation } => assert_eq!(generation, 1),
+        _ => unreachable!(),
+    }
+    assert_eq!(
+        app.world().resource::<LobbyState>().roster.len(),
+        1,
+        "the lobby re-opens with the roster intact"
+    );
+    assert!(app.should_exit().is_none(), "a session end is not an exit");
+
+    // Next round: `Cancel` reset the roster's readiness — re-ready and
+    // the mint moves forward.
+    let ctl = peer.ctl().unwrap();
+    ctl.set_ready(true).unwrap();
+    until_wire(
+        &mut peer,
+        |m| matches!(m, Message::Roster { players: r } if r.iter().all(|e| e.ready)),
+    );
+    commands.send(HostCommand::Start).unwrap();
+    app.update();
+    match until_wire(&mut peer, |m| matches!(m, Message::Start { .. })) {
+        Message::Start { generation, .. } => assert_eq!(generation, 2),
+        _ => unreachable!(),
+    }
+}
+
+/// `quit` while a hosted session runs: the wire session is cancelled
+/// ahead of the sockets dying (both ride the same control channel —
+/// the `Cancel` is processed first), the live session tears down to
+/// `Menu`, and the app exits cleanly.
+#[test]
+fn quitting_the_host_cancels_the_session_and_exits() {
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let commands = link.command_sender();
+    let mut app = host_app(vfs, link);
+    let mut peer = ready_peer(addr, "eve", fp);
+    spin(&mut app, |a| {
+        a.world().resource::<LobbyState>().roster.len() == 1
+    });
+    commands.send(HostCommand::Start).unwrap();
+    app.update();
+    until_wire(&mut peer, |m| matches!(m, Message::Start { .. }));
+    spin(&mut app, |a| session_phase(a) == SessionPhase::Loading);
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+
+    commands.send(HostCommand::Quit).unwrap();
+    let exit = until_exit(&mut app);
+    assert_eq!(exit, AppExit::Success, "a hosted quit is a clean exit");
+    assert_eq!(session_phase(&app), SessionPhase::Menu);
+    assert!(matches!(
+        until_wire(&mut peer, |m| matches!(m, Message::Cancel { .. })),
+        Message::Cancel { generation: 1 }
+    ));
+}
+
+/// The host loop dying under the link is the hosted lobby's lost-host
+/// equivalent: a live session tears down, the notice names it, and the
+/// app exits nonzero — never a silent sit on a dead lobby.
+#[test]
+fn a_dead_host_loop_tears_down_and_exits() {
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let commands = link.command_sender();
+    let mut app = host_app(vfs, link);
+    let _peer = ready_peer(addr, "eve", fp);
+    spin(&mut app, |a| {
+        a.world().resource::<LobbyState>().roster.len() == 1
+    });
+    commands.send(HostCommand::Start).unwrap();
+    app.update();
+    spin(&mut app, |a| session_phase(a) == SessionPhase::Loading);
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+
+    // Kill the loop without going through `leave()` — the ctl-channel
+    // shutdown is the same observable end an internal failure gives
+    // the drain: the event channel disconnects.
+    app.world().resource::<HostLink>().ctl().shutdown().unwrap();
+    let exit = until_exit(&mut app);
+
+    assert!(
+        matches!(exit, AppExit::Error(code) if code.get() == 1),
+        "a dead host loop is a nonzero exit, got {exit:?}"
+    );
+    assert_eq!(session_phase(&app), SessionPhase::Menu);
+    let lobby = app.world().resource::<LobbyState>();
+    assert!(
+        lobby
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.contains("host loop died")),
+        "the notice names the cause: {:?}",
+        lobby.notice
+    );
+}
+
+/// A `quit` intent consumed at `Menu` while a hosted lobby owns the
+/// surface must not exit the app — `drive_session` defers to the link.
+#[test]
+fn a_menu_quit_stays_inside_the_hosted_lobby() {
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, _fp) = host_link(install.path(), &dev_cruise());
+    let mut app = host_app(vfs, link);
+    app.update();
+
+    app.world_mut().resource_mut::<SessionControl>().quit = true;
+    app.update();
+
+    assert!(
+        app.should_exit().is_none(),
+        "a Menu quit must return to the lobby, not the OS"
+    );
+    assert!(
+        !app.world().resource::<SessionControl>().quit,
+        "the intent was consumed, not left dangling"
+    );
+}
+
+/// The windowed keys ride the same command channel stdin drives —
+/// `Enter` requests a start (an empty roster passes the gate: the host
+/// seat is a player), `Esc` at `Menu` takes the lobby down.
+#[test]
+fn host_input_keys_ride_the_command_channel() {
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, _fp) = host_link(install.path(), &dev_cruise());
+    let mut app = host_app(vfs, link);
+    app.update();
+
+    tap(&mut app, KeyCode::Enter);
+    spin(&mut app, |a| session_phase(a) == SessionPhase::Loading);
+    assert_eq!(app.world().resource::<LobbyState>().generation, Some(1));
+
+    // `Esc` mid-session is not the lobby's key — `host_input` only
+    // acts while parked at `Menu`.
+    tap(&mut app, KeyCode::Escape);
+    assert!(app.should_exit().is_none());
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    app.world_mut().resource_mut::<SessionControl>().quit = true;
+    spin(&mut app, |a| session_phase(a) == SessionPhase::Menu);
+
+    // Back at the lobby: `Esc` is the host's shutdown — the auto-`Cancel`
+    // already ran, so this is `leave` + the queued clean exit.
+    tap(&mut app, KeyCode::Escape);
+    let exit = until_exit(&mut app);
+    assert_eq!(exit, AppExit::Success);
+}
+
+/// The end-to-end hosted leg: a real `headless_host` app — full plugin
+/// stack, real `load_session_world` — runs the advertised session once
+/// the operator's `start` mints, with a remote peer on the same wire.
+#[test]
+fn a_headless_host_runs_the_advertised_session() {
+    let install = tempfile::tempdir().unwrap();
+    let fp = mm2_content::fingerprint::gameplay(&mount(install.path()))
+        .unwrap()
+        .hash;
+    let link = HostLink::open(
+        "127.0.0.1:0".parse().unwrap(),
+        &dev_cruise(),
+        "host".to_string(),
+        fp,
+        None,
+    )
+    .unwrap();
+    let addr = link.addr();
+    let commands = link.command_sender();
+    let run = thread::spawn(move || {
+        smoke::headless_host(
+            link,
+            mount(install.path()),
+            SelectedCar {
+                def: None,
+                paint: 0,
+            },
+            &VehicleConfig::default(),
+            600,
+            smoke::Driver::Hold,
+            None,
+        )
+    });
+
+    let mut peer = ready_peer(addr, "eve", fp);
+    commands.send(HostCommand::Start).unwrap();
+    let generation = match until_wire(&mut peer, |m| matches!(m, Message::Start { .. })) {
+        Message::Start { generation, .. } => generation,
+        _ => unreachable!(),
+    };
+    assert_eq!(generation, 1);
+
+    let rec = run.join().expect("the headless host run panicked");
+    assert_eq!(rec.status, SmokeStatus::Pass, "{}", rec.line());
+    assert!(
+        rec.line().contains(&format!("mp=gen{generation}")),
+        "the record carries the hosted generation: {}",
+        rec.line()
+    );
+    assert!(
+        rec.line().contains("world=dev-world"),
+        "the record names the advertised world: {}",
+        rec.line()
+    );
+    // The run's `HostLink` drop already took the lobby down — a polite
+    // `leave` at this point may race the closed socket.
+    let _ = peer.leave();
+}
+
 /// The stock `F4` restart binding (CTL-1) is a single-player control:
 /// under a `Remote`-authority session the wire owns restarts, so the
 /// key must not queue `control.restart`.
@@ -801,6 +1301,191 @@ fn mm2_join_failures_and_conflicts_are_named_exits() {
             client.wait().code(),
             Some(2),
             "--join + {extra:?} must be a usage error"
+        );
+    }
+}
+
+// ─── `mm2 --host` process legs (F24-B.8) ───────────────────────────
+//
+// Same loopback scope as the join legs: real child processes, real
+// wire, real asset stack — the `listening=`/`event=` records are the
+// same contract `mm2-host` prints.
+
+/// Parse the `listening=` record an `mm2 --host` prints — unlike
+/// `mm2-host` it follows the smoke header, so scan rather than taking
+/// the first line.
+fn host_addr(host: &Proc) -> SocketAddr {
+    let line = host.until("listening=");
+    line.strip_prefix("listening=")
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or_else(|| panic!("malformed listening record: {line:?}"))
+        .parse()
+        .unwrap()
+}
+
+/// The separate-process host leg: `mm2 --host` runs the lobby *and*
+/// the host seat's local session — `mm2 --join` attaches, `start`
+/// drives both ends, and the records carry the shared generation.
+/// Loopback only — F24-C owns reachability.
+#[test]
+fn mm2_hosted_lobby_runs_the_in_app_session() {
+    let install = tempfile::tempdir().unwrap();
+    let path = install.path().to_str().unwrap().to_string();
+    let mut host = Proc::spawn(
+        MM2_EXE,
+        &[
+            "--mm2-path".to_string(),
+            path.clone(),
+            "--dev-world".to_string(),
+            "--host".to_string(),
+            "--seed".to_string(),
+            7.to_string(),
+            "--headless".to_string(),
+            "--frames".to_string(),
+            5000.to_string(),
+        ],
+    );
+    let addr = host_addr(&host);
+
+    let client = Proc::spawn(
+        MM2_EXE,
+        &[
+            "--mm2-path".to_string(),
+            path,
+            "--join".to_string(),
+            addr.to_string(),
+            "--driver".to_string(),
+            "carol".to_string(),
+            "--ready".to_string(),
+            "--headless".to_string(),
+            "--frames".to_string(),
+            600.to_string(),
+        ],
+    );
+
+    // The `event=` contract is the dedicated host's — the joined peer,
+    // its pick echo, its readiness.
+    let joined = host.until("event=joined");
+    assert!(joined.contains("driver=\"carol\""), "{joined}");
+    host.until("event=ready id=1 ready=true");
+
+    host.cmd("start");
+    assert_eq!(host.until("event=started"), "event=started generation=1");
+
+    // The joining client ran the wired session to its record.
+    let rec = client.until("smoke=");
+    assert!(rec.contains("world=dev-world"), "{rec}");
+    assert!(rec.contains("mp=gen1"), "{rec}");
+    assert!(rec.contains("status=pass"), "the wired session ran: {rec}");
+
+    // Quit while the hosted session runs: the cancel is confirmed on
+    // the wire's own contract before the sockets die, the local session
+    // tears down to the lobby, and the run exits cleanly.
+    host.cmd("quit");
+    host.until("event=cancelled generation=1");
+    let rec = host.until("smoke=");
+    assert!(rec.contains("status=pass"), "{rec}");
+    assert!(rec.contains("phase=menu"), "{rec}");
+    assert!(
+        rec.contains("mp=host("),
+        "the parked record counts remote players only: {rec}"
+    );
+    assert!(host.wait().success(), "the hosted run did not exit 0");
+    assert!(client.wait().success());
+}
+
+/// The wire's own start gate answers an operator `start` against an
+/// unready roster — refused and named, and the host keeps running.
+/// Then `quit` ends the host cleanly; the parked client reports the
+/// loss as its named failure.
+#[test]
+fn mm2_hosted_lobby_refuses_a_start_against_an_unready_peer() {
+    let install = tempfile::tempdir().unwrap();
+    let path = install.path().to_str().unwrap().to_string();
+    let mut host = Proc::spawn(
+        MM2_EXE,
+        &[
+            "--mm2-path".to_string(),
+            path.clone(),
+            "--dev-world".to_string(),
+            "--host".to_string(),
+            "--headless".to_string(),
+            "--frames".to_string(),
+            900.to_string(),
+        ],
+    );
+    let addr = host_addr(&host);
+    let client = Proc::spawn(
+        MM2_EXE,
+        &[
+            "--mm2-path".to_string(),
+            path,
+            "--join".to_string(),
+            addr.to_string(),
+            "--headless".to_string(),
+            "--frames".to_string(),
+            900.to_string(),
+        ],
+    );
+    host.until("event=joined");
+
+    host.cmd("start");
+    let refused = host.until("event=start_refused");
+    assert!(refused.contains("not ready"), "{refused}");
+
+    host.cmd("quit");
+    assert!(host.wait().success(), "the host did not exit cleanly");
+
+    let rec = client.until("smoke=");
+    assert!(
+        rec.contains("status=fail") && rec.contains("lost the host"),
+        "the parked client names the host loss: {rec}"
+    );
+    assert_eq!(client.wait().code(), Some(3));
+}
+
+/// `--host` flag-time gates are named exits: a dev-override config is
+/// never advertised, `--join`/`--host` conflict, and `--bind`/`--seed`
+/// are host flags — never a silent local session.
+#[test]
+fn mm2_host_flag_gates_are_named_exits() {
+    let install = tempfile::tempdir().unwrap();
+    let path = install.path().to_str().unwrap().to_string();
+
+    // Dev overrides are never network-legal — the advertise check is
+    // the flag-time gate.
+    let host = Proc::spawn(
+        MM2_EXE,
+        &[
+            "--mm2-path".to_string(),
+            path.clone(),
+            "--dev-world".to_string(),
+            "--host".to_string(),
+            "--headless".to_string(),
+            "--traction".to_string(),
+            0.9.to_string(),
+        ],
+    );
+    assert_eq!(host.wait().code(), Some(2));
+
+    for extra in [
+        vec!["--host", "--join", "127.0.0.1:1"],
+        vec!["--host", "--menu"],
+        vec!["--bind", "127.0.0.1:0"],
+        vec!["--seed", "3"],
+    ] {
+        let mut args = vec![
+            "--mm2-path".to_string(),
+            path.clone(),
+            "--dev-world".to_string(),
+            "--headless".to_string(),
+        ];
+        args.extend(extra.iter().map(|s| s.to_string()));
+        let proc = Proc::spawn(MM2_EXE, &args);
+        assert_eq!(
+            proc.wait().code(),
+            Some(2),
+            "{extra:?} must be a usage error"
         );
     }
 }
