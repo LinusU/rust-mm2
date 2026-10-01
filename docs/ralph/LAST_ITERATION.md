@@ -1,3 +1,117 @@
+# Last iteration — F24-B.6: `mm2-join`, the headless lobby client +
+# client-side session-content gating (iteration 018, run
+# 20260929T174954)
+
+Implementation iteration on `ralph/night` (baseline `a682db9` — the
+F24-B.5 candidate; external verify green, review **pass** with
+verification gaps only, no blocking findings). One coherent slice: the
+client side of the headless lobby pair — a real `mm2-join` process as
+the counterpart of `mm2-host`, consuming the deferred client-side
+session-content gate.
+
+## Task selection
+
+No failing gate or review finding to repair — iteration 017's review
+passed with gaps only. Its recorded gap was the load-bearing one: "a
+hostile host blob's Event params are bounded in size but not
+content-validated by the joiner," and clients had *no* shipped process
+at all — `mm2_net::Client` existed only inside tests, so AC01's
+"separate client processes" leg had no consumer. The gate needed a
+real client to live in; `mm2-join` is the smallest concrete one and
+the shape the Bevy bridge's control thread will reuse.
+
+## What landed
+
+- `mm2_net::lobby` — `Client::ctl()` hands out a cloneable
+  `ClientCtl` (`set_ready`/`set_vehicle`/`leave`), mirroring `HostCtl`:
+  a thread blocked in `Client::recv` can still send. Senders serialize
+  on a shared `Mutex<Writer>` — a frame is two `write_all` calls, so
+  unsynchronized clones would interleave them. `MAX_STRING` is
+  re-exported from the crate root (the validator bound was always
+  public policy).
+- `mm2_app::net::check_session(vfs, &SessionConfig)` +
+  `SessionContentError::{World, Event, Laps, Opponents}` — the join-side
+  content gate: the advertised `City` psdl must resolve on *this*
+  mount; an `Event` must survive `race::event_race_setup` (the same
+  resolve+build the host's flag-time gate runs); a `race`
+  customization is bounded where it applies — `laps ≤
+  CUSTOMIZE_LAP_MAX` on `Ordered` rules only, `opponents ≤` the authored
+  aimap roster. Deliberately skipped: anything `accept` + `validate`
+  already bounds, and picks the runtime ignores.
+- `mm2-join` — new `mm2_app` binary. `--mm2-path` (read-only mount,
+  same policy as `mm2-host`), `--mods`, `--connect`, `--driver`,
+  `--vehicle <id>[:<paint>]`, `--ready`. Prints `connected=`/`session=`/
+  `event=` records (`roster`/`pick_refused`/`started`/`cancelled`/
+  `join_failed`/`session_refused`/`closed`); stdin drives
+  `vehicle`/`ready`/`unready`/`quit`. Every advertised session — the
+  lobby ad and the running one inside `Start` — is checked by
+  `net::accept` + `check_session`; a refusal is `session_refused`, a
+  clean `Leave`, exit 1. Exit codes mirror `mm2-host`: 0 `quit`, 1
+  refused/lost, 2 usage. A started session is reported, never spawned
+  — F25/F26 scope.
+- `tests/support/mod.rs` — the spawned-proc line driver and the
+  `testcity` fixture hoisted out of `net_host.rs` (fixture gained a
+  buildable `circuit:1` row for the customization legs).
+
+## Evidence
+
+- `mm2_net` 51→53: `ClientCtl` drives a cross-thread pick/ready/leave
+  against a real lobby.
+- `tests/net_join.rs` (8 legs, ~2 s):
+  - `separate_client_processes_pick_ready_and_start` — two `mm2-join`
+    OS processes + one `mm2-host` process: pick, ready, roster
+    reaching 2/2, `started generation=1`, `quit` exit 0 each and
+    `cause=quit` on the host record. First separate-*client*-process
+    AC01 evidence — loopback still.
+  - `a_client_process_reports_a_refused_join` — mismatched mounts fail
+    the fingerprint handshake: `join_failed` exit 1 client-side, the
+    refusal logged host-side (AC02/AC04 surface).
+  - `a_client_process_refuses_a_session_it_cannot_run` — an in-process
+    `Host` on identical (empty) mounts advertises a dev-world event
+    and an unresolvable city; the client reports `session_refused`,
+    exits 1, and the host sees a `Quit` leave, not a dropped socket.
+  - `a_client_process_accepts_a_runnable_event` — real `mm2-host
+    --event race:0` process + `mm2-join`: `session="testcity, race:0,
+    amateur"`, `started generation=1`, clean quit.
+  - Direct `check_session` matrix: runnable dev/cruise/event sessions
+    pass; missing world / out-of-table / absent-table /
+    resolve-but-unbuildable events refuse `World`/`Event`; `laps` 11
+    and `opponents` 1 refuse on `circuit:1` (`Ordered`, empty aimap
+    roster) while the same picks pass where the runtime ignores them
+    (Checkpoint `laps`, Cruise `race`).
+  - `check_accepts_a_retail_session` — env-gated (`MM2_RETAIL`) leg
+    over the real install.
+- Retail leg (original-content evidence): `mm2-host --mm2-path
+  /Users/linus/coding/rust-mm2/retail --city sf --event race:0` +
+  `mm2-join --vehicle vpbug --ready` — stock pick validated by the
+  host's catalog gate, roster 1/1, `started generation=1
+  session="sf, race:0, amateur"` observed client-side, `quit` →
+  `cause=quit`, both processes exit 0.
+
+## Gates
+
+- `cargo fmt --all -- --check` — clean (after one `cargo fmt` pass).
+- `cargo clippy --workspace --all-targets --all-features --
+  -D warnings` — clean.
+- `cargo test --workspace` — all suites green incl. `net_host` 4/4 and
+  `net_join` 8/8 (exact totals in the run log).
+
+## Classification / remaining open items
+
+- Implementation choice recorded in `docs/research/net.md`: the
+  client-side gate duplicates the *check*, not trust — the fingerprint
+  handshake already means an honest host shares the content; the gate
+  is defense-in-depth for a blob that disagrees with it.
+- Still open F24-B scope: the Bevy-side bridge (AC05's in-app leg —
+  `ClientCtl` is the piece it was waiting on), `Start` → spawn-roster
+  consumption (F25/F26), AC04's richer disconnect UX.
+- Verification gaps carried forward: everything is loopback — the
+  AC06 LAN/Internet matrix and AC03's impairment legs remain F24-C; a
+  started session is a record line, not a simulation — no position/
+  score/damage replication exists to observe.
+
+---
+
 # Last iteration — F24-B.5: event-mode hosting, the `LateJoin::Closed`
 # consumer (iteration 017, run 20260929T174954)
 

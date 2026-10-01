@@ -14,6 +14,10 @@ path = "src/main.rs"
 name = "mm2-host"
 path = "src/bin/mm2_host.rs"
 
+[[bin]]
+name = "mm2-join"
+path = "src/bin/mm2_join.rs"
+
 [dependencies]
 avian3d.workspace = true
 bevy = { version = "0.19", features = ["tga", "bevy_audio"] }

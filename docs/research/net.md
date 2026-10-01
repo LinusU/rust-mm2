@@ -285,10 +285,43 @@ of the race rule — and a cruise lobby `LateJoin::Open`. A
 closed stdin means unattended operation, not shutdown; `quit` is the
 clean-exit command (`HostCtl::shutdown`, exit 0 after the loop ends).
 
-Deliberately *not* here: session-content join gating on the *client*
-side (a peer validating the advertised session against its own mounted
-content — lands with the in-app bridge), host migration, the Bevy-side
-host/client surface, and the per-tick dataplane (F25).
+### Dedicated client
+
+`mm2-join` (a third `mm2_app` binary) is the lobby's client-side
+counterpart: a headless process that mounts the VFS read-only with the
+same policy as `mm2-host` (`--mm2-path` required, `--mods` optional),
+computes the gameplay fingerprint, joins `--connect` and prints one
+`connected=<addr> id=<n> driver="…" fingerprint=…` record followed by
+`event=` lines per lobby transition (`roster`/`pick_refused`/`started`/
+`cancelled`/`join_failed`/`session_refused`/`closed`). stdin drives
+`vehicle <id>[:<paint>]`/`ready`/`unready`/`quit`; `--vehicle` and
+`--ready` do the same once at startup. The send side reaches the
+blocked `recv` through `Client::ctl()` — a cloneable handle mirroring
+`HostCtl` that serializes `SetReady`/`SetVehicle`/`Leave` on a shared
+`Mutex<Writer>` (wire frames are two `write_all` calls; unsynchronized
+senders would interleave them). No window, GPU or audio is touched.
+
+`mm2-join` is also the first consumer of the **client-side session
+gate**, `mm2_app::net::check_session`: every `Session` advertisement
+and the running session inside `Start` is decoded (`net::accept`) and
+then proven runnable against *this* install — a `City` world psdl must
+resolve, an `Event` must survive the same `race::event_race_setup`
+path the host's flag-time gate runs, and a `race` customization pick
+is bounded where it applies (`laps ≤ CUSTOMIZE_LAP_MAX` on `Ordered`
+rules, `opponents ≤` the authored roster). What the gate deliberately
+does not recheck: bounds `accept`'s structural decode +
+`SessionConfig::validate` already cover, and picks the runtime ignores
+(`race` on Cruise, `laps` on a non-`Ordered` rule). An unrunnable
+session gets `event=session_refused`, a clean `Leave` and exit 1 — a
+client never holds a lobby seat for a session it cannot spawn. The
+fingerprint handshake means an honest host shares this content
+already; the gate is defense-in-depth for one that does not. `quit`
+exits 0; a refused join or a lost host exits 1; usage/mount failures
+exit 2 — the same code shape as `mm2-host`.
+
+Deliberately *not* here: a started session is reported, not spawned —
+world/race replication is F26 and the per-tick dataplane is F25 — plus
+host migration and the Bevy-side host/client surface.
 
 ## Evidence level
 
@@ -331,6 +364,24 @@ event gate: `mm2-host --city sf --event race:0` against the retail
 installation resolves and builds through `event_race_setup` and
 advertises `sf, race:0, amateur`; `--event crash:0` refuses
 `CrashCourseUnsupported` at flag time and `--event race:99` refuses
-the missing row — both exit 2. This is
-*not* fully separate-process, LAN or Internet evidence; F24-C owns
-that matrix.
+the missing row — both exit 2.
+`mm2_app`'s `net_join` suite adds the client side: two separate
+`mm2-join` OS processes against a separate `mm2-host` pick vehicles,
+ready, observe `Start` and leave cleanly (the first *separate client
+process* evidence for AC01 — still loopback); a fingerprint-mismatched
+join reports `join_failed`/exit 1 on the client and `join_failed` on
+the host; an in-process host feeding advertisements a client's fixture
+cannot run (dev-world event, unresolvable city) produces
+`session_refused`/exit 1 and a clean `quit` leave; and the `race:0`
+fixture event round-trips through a real `mm2-host` + `mm2-join` pair
+into `started`. Direct `check_session` legs cover the accept/refuse
+matrix: runnable dev-world/event sessions pass; missing world, out-of-
+and unbuildable-table events refuse; `laps`/`opponents` bounds refuse
+where the pick applies and pass where the runtime ignores it. A retail
+leg is on record for the pair: `mm2-host --city sf --event race:0` +
+`mm2-join --vehicle vpbug --ready` on the retail installation — stock
+pick validated, `started generation=1 session="sf, race:0, amateur"`
+observed client-side, `cause=quit` leave, both processes exit 0. This
+is *not* LAN or Internet evidence, and a started session is only
+reported, never simulated — F24-C owns the reachability matrix, F25/F26
+the session itself.
