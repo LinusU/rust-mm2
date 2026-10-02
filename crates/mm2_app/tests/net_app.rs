@@ -34,8 +34,8 @@ use mm2_game::{
     SessionConfig, SessionMode, SessionPhase, WorldMode, despawn_session_entities,
 };
 use mm2_net::{
-    Client, DriveInput, Host, HostConfig, HostEvent, LateJoin, LeaveCause, Message, SnapEntry,
-    VehiclePick, hello,
+    Client, DriveInput, Host, HostConfig, HostEvent, Impair, ImpairProxy, LateJoin, LeaveCause,
+    LinkDir, Message, SnapEntry, VehiclePick, hello,
 };
 use mm2_vehicle::{ResetVehicle, Teleported, VehicleConfig, VehicleInput};
 use support::{Proc, WAIT, listening, mount};
@@ -2517,4 +2517,169 @@ fn r_under_a_remote_session_asks_the_authority() {
     );
 
     host.shutdown();
+}
+
+/// F25-B: the data plane under real impairment. The `ImpairProxy`
+/// relay sits between the peer and the in-app host, so once the recipe
+/// is armed every `Input`/`Snap`/`ResetRequest` crosses a seeded mix of
+/// delay, duplication and reorder — and the session still converges:
+/// the mailbox keeps the freshest input by sender `seq`, the hosted
+/// car drives on it, and a reset ask is granted exactly once no matter
+/// how many copies the wire delivered. Loss stays off this leg — a
+/// dropped `ResetRequest` is a press nothing answered by design, so
+/// the assertion would be about timing, not correctness.
+#[test]
+fn an_impaired_link_still_converges_the_data_plane() {
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    // The proxy dials the hosted lobby; the peer dials the proxy.
+    let proxy = ImpairProxy::loopback_seeded(link.addr(), 13).unwrap();
+    let mut app = host_app(vfs, link);
+    let mut peer = ready_peer(proxy.addr(), "eve", fp);
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<LobbyState>()
+            .roster
+            .iter()
+            .any(|e| e.pick.is_some())
+    });
+    let generation = hosted_playing(&mut app);
+    spin_mut(&mut app, |a| {
+        a.world_mut()
+            .query_filtered::<(), With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some()
+    });
+    let seated = {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&avian3d::prelude::Position, With<RemotePick>>();
+        q.single(app.world()).expect("the remote car").0
+    };
+
+    // Arm the data plane: the lobby phase crossed clean, everything
+    // below is impaired — delayed, jittered, duplicated and reordered
+    // on the way up, duplicated on the way down.
+    proxy.set(
+        LinkDir::Up,
+        Impair {
+            delay: Duration::from_millis(4),
+            jitter: Duration::from_millis(12),
+            loss: 0.0,
+            duplicate: 0.4,
+            reorder: 0.4,
+        },
+    );
+    proxy.set(
+        LinkDir::Down,
+        Impair {
+            delay: Duration::from_millis(4),
+            duplicate: 0.5,
+            ..Impair::default()
+        },
+    );
+
+    // A run of inputs up the storm: arrival order is no longer send
+    // order, but `seq` names the freshest, and the hosted car ends up
+    // driving on it.
+    let ctl = peer.ctl().unwrap();
+    for seq in 1..=12u64 {
+        ctl.send_input(DriveInput {
+            generation,
+            seq,
+            throttle: 255,
+            brake: 0,
+            steer: 90,
+            handbrake: 0,
+        })
+        .unwrap();
+    }
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<HostLink>()
+            .remote_inputs()
+            .latest(1)
+            .is_some_and(|s| s.input.seq == 12)
+    });
+    {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&VehicleInput, With<RemotePick>>();
+        let input = q.single(app.world()).expect("the remote car's input");
+        assert!(
+            input.throttle > 0.9,
+            "the impaired stream still drove the car: {}",
+            input.throttle
+        );
+    }
+    let up = proxy.stats(LinkDir::Up);
+    assert!(up.frames_in >= 12, "the lane saw the inputs: {up:?}");
+    assert!(
+        up.duplicated + up.reordered > 0,
+        "the recipe really impaired this leg: {up:?}"
+    );
+
+    // Snapshots cross the impaired Down link — duplicated copies and
+    // all — and still carry the remote seat's pose.
+    until_wire(
+        &mut peer,
+        |m| matches!(m, Message::Snap { entries, .. } if entries.iter().any(|e| e.player == 1)),
+    );
+
+    // A reset ask through the storm: copied, delayed, reordered — the
+    // mailbox collapses it to one ask and the grant lands once, the
+    // seat teleported back to its grid slot with the epoch bump.
+    {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<(&mut avian3d::prelude::Position, &mut Transform), With<RemotePick>>(
+            );
+        let (mut pos, mut transform) = q.single_mut(app.world_mut()).expect("the remote car");
+        pos.0 = Vec3::new(30.0, 1.5, -8.0);
+        transform.translation = pos.0;
+    }
+    ctl.request_reset(generation).unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .requests_granted
+            == 1
+    });
+    // Let any duplicate copies drain through — a repeated ask inside
+    // the cooldown drops, never re-grants.
+    for _ in 0..5 {
+        app.update();
+        thread::sleep(Duration::from_millis(30));
+    }
+    {
+        let report = app.world().resource::<netdrive::NetDriveReport>();
+        assert_eq!(
+            report.requests_granted, 1,
+            "duplicated asks cannot double-grant"
+        );
+        let mut q = app
+            .world_mut()
+            .query_filtered::<(&netdrive::ResetEpoch, &Transform), With<RemotePick>>();
+        let (epoch, transform) = q.single(app.world()).expect("the remote car");
+        assert_eq!(epoch.0, 1, "one granted ask, one epoch");
+        assert!(
+            (transform.translation - seated).length() < 0.5,
+            "the reset landed back on the seat: {:?} vs {seated:?}",
+            transform.translation
+        );
+    }
+
+    // Back to a clean link for the close — a `Leave` is a control verb
+    // whose delivery the leg does not want to lottery.
+    proxy.set(LinkDir::Up, Impair::default());
+    proxy.set(LinkDir::Down, Impair::default());
+    peer.leave().unwrap();
+    spin_mut(&mut app, |a| {
+        a.world_mut()
+            .query_filtered::<(), With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_none()
+    });
 }

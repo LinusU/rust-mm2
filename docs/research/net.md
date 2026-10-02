@@ -383,6 +383,36 @@ is parked and reports the lobby's progress as `mp=` on the record
 (`mp=gen<N>` once a `Start` minted the session, `mp=lobby(<n>p)`
 while waiting, `mp=lobby(0p)` after the link dies).
 
+## Impairment harness (F25-B)
+
+*Implementation choice.* `mm2_net::impair::ImpairProxy` is a framed TCP
+relay a test inserts between a peer and a host: the peer dials the
+proxy's loopback address, the proxy dials the real target, and every
+frame crosses a per-connection, per-direction *lane* that applies an
+`Impair` recipe — `delay` (a release instant per frame), `jitter`
+(uniform extra release, so jitter past a neighbour's release is a real
+reorder), `loss` (whole-frame drop), `duplicate` (an adjacent second
+copy) and `reorder` (a frame defers to its successor — the pair swaps;
+a successor that never comes emits at a bounded `HOLD_CAP`). Decisions
+come from a per-lane SplitMix64 stream seeded at construction, so a
+fixed seed replays an identical impairment pattern over identical
+traffic; `set` retunes a live direction so a scenario handshakes clean
+and impairs only the data plane. `LinkStats` reports what the recipe
+actually did (frames in/out, dropped, duplicated, reordered,
+overflowed) — a leg asserts the impairment *happened*, not just that
+the session coped. Pending frames are bounded (`MAX_QUEUED` per lane,
+excess dropped and counted), the relay never decodes payloads (present
+and future messages alike), and `Drop` shuts every relayed socket and
+joins every thread.
+
+The harness is what makes the mailbox's ordering rules load-bearing.
+Ordered TCP cannot reorder or duplicate in practice, so both guards
+exist for the impaired legs and any future unordered transport: an
+`Input` only displaces the stored sample when its sender `seq` is
+strictly ahead, and a `ResetRequest` mailbox keeps the *highest*
+generation per slot — a reordered stale ask can never mask a fresher
+one.
+
 ## Evidence level
 
 Mixed loopback. `mm2_net` tests bind `127.0.0.1:0` and run real
@@ -403,7 +433,13 @@ carrying generation + session, `Closed` refusing a join with
 `Cancel` re-opening the lobby with readiness reset and a fresh
 generation on the next start, mid-session roster liveness,
 client-sent lifecycle messages dropping `Malformed`, and the
-`HostCtl` cross-thread driver.
+`HostCtl` cross-thread driver. The impairment harness legs add the
+lane unit checks (delay holds, full-loss drops, duplication,
+pairwise reorder, held-frame deadline, queue overflow, per-seed
+determinism), real-socket relay legs (upstream/downstream recipes,
+runtime retune, stats aggregation across connections), and a lobby
+leg that replays a reordered input stream into the real mailbox and
+finds the freshest `seq` still held.
 `mm2_app`'s `net_host` test additionally runs the `mm2-host` binary as a
 separate OS process with two in-process clients joining it, picking and
 being refused — partial F24-AC01/AC05 evidence (separate host process,
@@ -452,7 +488,12 @@ lands, a dead host tearing down to a nonzero exit with a named
 notice, a `Leave` reaching the host as `Quit` and exiting 0, a
 `Menu` quit staying inside the lobby, an unrunnable ad refusing with
 a clean leave, the `F4` local-authority gate, and the generation
-clamp); `headless_lobby` joins an in-process host and proves the
+clamp); `an_impaired_link_still_converges_the_data_plane` runs the
+whole session through a live `ImpairProxy` — the lobby handshake
+crosses clean, then `Input`s, `Snap`s and a `ResetRequest` all ride a
+seeded delay/jitter/duplicate/reorder recipe, and the hosted car
+still drives on the freshest `seq` while the ask is granted exactly
+once; `headless_lobby` joins an in-process host and proves the
 `Start` → `load_session_world` path loads the wired world for real;
 and the process legs run `mm2 --join --headless` against a separate
 `mm2-host` — `start` produces `world=dev-world mp=gen1 status=pass`,

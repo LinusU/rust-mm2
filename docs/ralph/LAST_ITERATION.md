@@ -1,6 +1,109 @@
-# Last iteration — external-gate repair: the `net_app` bridge tests'
-# start-gate race — `set_*` → `host.start` now waits for the roster
-# echo (iteration 031, run 20261001T195454-62282 continued)
+# Last iteration — F25-B second slice: the deterministic impairment
+# harness, plus the mailbox ordering rules it makes load-bearing
+# (iteration 032, run 20261001T195454-62282 continued)
+
+Implementation iteration on `ralph/night` (baseline `2b5dc1f` — the
+start-gate repair candidate; external verify + review pass with gaps
+only). One coherent slice of F25-B: the seeded impairment harness the
+spec's req 6 names and F25-AC03 needs, plus the two mailbox guards an
+impaired wire exercises for real, plus the review's two naming/doc
+nits.
+
+## Task selection
+
+No failing gate or blocking finding — the F25-B review listed
+verification gaps (no impairment matrix, no seq freshness check) and
+two nits (`#[allow]` justifications, `RemoteInputs::len`/`is_empty`
+counting only input slots). The impairment harness was the highest-value
+ready item: it is a spec-named requirement, it is what turns AC03's
+"documented latency/jitter/loss matrix" from hand-waving into a
+measurable run, and it surfaced two real ordering holes — `seq` existed
+on `DriveInput` but nothing enforced it, and the reset mailbox took
+arrival order rather than highest generation. All three share one
+abstraction boundary, so they landed as one slice.
+
+## What landed
+
+- `crates/mm2_net/src/impair.rs` — `ImpairProxy`, a framed TCP relay:
+  peer dials the proxy's loopback address, the proxy dials the target,
+  and each direction of each connection is a *lane* (a blocking reader
+  thread feeding a bounded `sync_channel`, and a writer thread that
+  classifies, schedules and emits). `Impair` is the recipe: `delay` +
+  uniform `jitter` set a per-frame release instant (jitter past a
+  neighbour's release is a genuine reorder), `loss` drops whole frames,
+  `duplicate` emits an adjacent copy, `reorder` holds a frame to swap
+  with its successor (bounded by `HOLD_CAP` when the successor never
+  comes — a held stream cannot stall). Draws come from a per-lane
+  SplitMix64 seeded at construction — `lane_seed(seed, conn, dir)` —
+  so one seed replays an identical pattern over identical traffic;
+  `set()` retunes a live direction so legs handshake clean and impair
+  only the session phase; `LinkStats` per lane slot (summed per
+  direction on read) records in/out/dropped/duplicated/reordered/
+  overflowed so a leg proves the impairment happened. `MAX_QUEUED`
+  bounds pending frames; `Drop` shuts down every relayed socket (the
+  only thing that wakes a `read_frame`-blocked reader) then joins
+  every thread.
+- `crates/mm2_net/src/lobby.rs` — two ordering hardenings the harness
+  makes load-bearing (ordered TCP produces neither defect in practice;
+  the impaired legs and any future unordered transport do):
+  - `RemoteInputs::store` refuses a sample whose `seq` is not strictly
+    ahead of the stored one — duplicates and arrival-order regressions
+    can no longer regress the slot. The staleness clock stays the
+    stored sample's arrival `Instant`.
+  - `RemoteInputs::request_reset` keeps the *highest* generation per
+    slot — a stale ask reordered behind a fresher one never masks it.
+  - `len`/`is_empty` → `input_len`/`is_idle` (review nit): pending
+    asks are mail too, so the honest "empty" question is both maps.
+- `crates/mm2_net/src/proto.rs` — `DriveInput::seq`'s doc now states
+  the enforced contract (monotonic per client, freshness tag the
+  mailbox enforces) instead of "telemetry only".
+- `crates/mm2_app/src/netdrive.rs` — the review's missing `#[allow]`
+  justification comments (`reconcile_remote_players`, `spawn_remote`,
+  `apply_reset_requests`).
+- `docs/research/net.md` — an "Impairment harness (F25-B)" section and
+  the evidence paragraph extended.
+- `crates/mm2_app/tests/net_app.rs` +`an_impaired_link_still_converges_
+  the_data_plane` — the full session through a live proxy: lobby
+  crosses clean, then `set` arms Up with delay+jitter+dup+reorder and
+  Down with delay+dup; 12 inputs ride the storm and the hosted car
+  still drives on `seq == 12`; `Snap`s cross impaired; one
+  `ResetRequest` — duplicated and reordered on the wire — is granted
+  exactly once (`requests_granted == 1`, one epoch bump, seat back on
+  its grid slot) even after the duplicate copies drain. `LinkStats`
+  asserts the recipe really fired.
+
+A real bug the first run caught: the accept loop polls its listener
+nonblocking, and on macOS an accepted socket inherits the flag — the
+lane readers died on `WouldBlock`, and `finish()` then flushed delayed
+frames early (the delay leg's "arrived in 2 ms" was the tell). `relay`
+now restores blocking I/O before the lanes spawn.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked --workspace
+--all-targets --all-features -- -D warnings` clean; `cargo test
+--locked --workspace` green — 90 suites, 0 failures (mm2_net 80/80
+incl. the impair and mailbox legs, net_app 32/32 incl. the impaired
+session leg in 8.37 s).
+
+## Classification / remaining open items
+
+- The harness is implementation choice end to end — test scaffolding,
+  no original-behavior claim; MM2's DirectPlay netcode is out of scope.
+- F25-AC03 still open: the harness exists and is exercised, but the
+  *recorded* impairment matrix (a delay/jitter/loss grid over a driving
+  session with measured corrections and stale-state behavior) has not
+  been run. Loss was deliberately left out of the net_app leg — a
+  dropped `ResetRequest` is a press nothing answered by design, so a
+  loss-matrix leg belongs with the measured matrix, not an assertion
+  about timing.
+- Evidence stays in-process loopback: no two-process impaired session,
+  no LAN leg, no rendered observation. F25-AC01/AC04/AC05/AC06 remain
+  open; B's remaining scope is replicated damage/result/wheel-engine
+  presentation, deduplicated audio/effects, and the bandwidth/
+  update-rate budget doc.
+
+---
 
 Repair iteration on `ralph/night` (baseline `b73f875` — the F25-B
 first-slice candidate; external verify **failed**: `cargo test

@@ -24,8 +24,15 @@
 //!   the joining side. The lobby's socket pair also carries the F25-A
 //!   session data plane: `Input` frames land in the host's
 //!   [`RemoteInputs`](lobby::RemoteInputs) mailbox (latest-wins per
-//!   roster slot), `ResetRequest`s absorb alongside them (F25-B), and
-//!   `Snap` snapshots broadcast to every peer.
+//!   roster slot, on the sender's `seq`), `ResetRequest`s absorb
+//!   alongside them (F25-B), and `Snap` snapshots broadcast to every
+//!   peer.
+//! - [`impair`] — the deterministic impairment harness (F25-B, spec
+//!   req 6): an [`ImpairProxy`](impair::ImpairProxy) is a framed TCP
+//!   relay a test inserts between a peer and a host, applying a seeded
+//!   per-direction recipe of delay, jitter, loss, duplication and
+//!   reorder while [`LinkStats`](impair::LinkStats) counts what the
+//!   recipe actually did.
 //!
 //! Scope deliberately ends at transport: the session advertisement is
 //! an opaque blob (the `mm2_app` bridge owns the `SessionConfig`
@@ -36,6 +43,7 @@
 
 mod conn;
 mod frame;
+mod impair;
 mod lobby;
 mod proto;
 
@@ -44,6 +52,7 @@ pub use conn::{
     send_hello, send_hello_within,
 };
 pub use frame::{MAX_FRAME, read_frame, write_frame};
+pub use impair::{Impair, ImpairProxy, LinkDir, LinkStats};
 pub use lobby::{
     Client, ClientCtl, Host, HostConfig, HostCtl, HostEvent, LateJoin, LeaveCause, PickValidator,
     RemoteInputs, StampedInput,
