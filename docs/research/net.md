@@ -40,7 +40,7 @@ precludes adding a second socket later.
 is added it must come from maintained crypto/session crates, not
 hand-rolled primitives.
 
-## Wire protocol (`PROTOCOL_VERSION = 3`)
+## Wire protocol (`PROTOCOL_VERSION = 6`)
 
 Length-prefixed frames: `u32le` length + payload, bounded by
 `MAX_FRAME` (256 KiB) checked *before* allocation. Messages are strict
@@ -49,7 +49,12 @@ truncation and trailing bytes are all hard errors. v1→v2: `RosterEntry`
 gained the driver's `pick` and the `SetVehicle`/`VehicleRefused` pair
 landed — an incompatible roster shape, so the version moved. v2→v3:
 `Start`/`Cancel` (the session lifecycle pair) and
-`RejectCode::SessionStarted` landed.
+`RejectCode::SessionStarted` landed. v3→v4: `Input`/`Snap` — the
+in-session driving transport (F25-A). v4→v5: `SnapEntry` gained
+`epoch`, the authority's per-seat reset counter (F25-A.5). v5→v6:
+`ResetRequest { generation }` — a client asking the authority to reset
+its own seat (F25-B); the roster slot names the seat, so no target
+field exists to forge.
 
 Handshake (always the first exchange):
 
@@ -102,6 +107,9 @@ client → Hello                     host   → Accept | Reject
        ← Roster { entries }               → SetReady { ready }
                                           → SetVehicle { vehicle, paint }
                                           → Leave
+                                          → Input (absorbed, per-tick)
+                                          → ResetRequest { generation }
+                                            (absorbed, collapsed)
                                      host → Session | Roster (broadcast)
                                           → VehicleRefused { reason }
                                             (to the refused peer only)

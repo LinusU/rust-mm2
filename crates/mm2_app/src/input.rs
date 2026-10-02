@@ -184,9 +184,10 @@ pub fn vehicle_input(
 /// teleport the car under the overlay. Authority only: under a
 /// predicted (`Remote`) session the local teleport would move a car the
 /// host never reset — a self-teleport its wire copy can never learn —
-/// so the remote driver's recovery is the authority's detectors
-/// resolving the seat and the reset epoch carrying it back (F25-A.5;
-/// a driver-requested reset over the wire is F25-B scope).
+/// so the key instead asks the authority: `netdrive::send_reset_request`
+/// sends a `ResetRequest`, and the granted answer returns as the seat's
+/// epoch-declared `Snap` (F25-A.5's own-seat reconcile; the wire request
+/// is F25-B).
 pub fn reset_input(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,

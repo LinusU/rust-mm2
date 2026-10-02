@@ -31,9 +31,11 @@
 //! The session data plane (F25-A) shares the same ordered socket:
 //! a peer's `Input` frames never wake the host loop — they absorb into
 //! the [`RemoteInputs`] mailbox, latest-wins per roster slot, so input
-//! rate cannot flood the event channel; host→client `Snap` snapshots go
-//! out through [`HostCtl::broadcast`], which follows the same
-//! dead-peer-removal discipline as every other send.
+//! rate cannot flood the event channel; a peer's `ResetRequest` absorbs
+//! the same way (F25-B), collapsing a burst into the one newest ask the
+//! consumer drains. Host→client `Snap` snapshots go out through
+//! [`HostCtl::broadcast`], which follows the same dead-peer-removal
+//! discipline as every other send.
 //!
 //! Nothing here knows about vehicles, cities or modes: `vehicle` is an
 //! opaque id the consumer's validator interprets and `params` an opaque
@@ -257,15 +259,26 @@ pub struct StampedInput {
     pub received: Instant,
 }
 
-/// The host's per-player input mailbox (F25-A). Each admitted peer's
-/// reader thread writes its newest `Input` here — one slot per roster
-/// id, latest-wins — so a fast sender can never pile up a backlog the
-/// consumer must drain, and a slow sender simply leaves a stale sample.
-/// Bounded by [`MAX_PLAYERS`]; a departing player's slot is pruned with
-/// its roster removal, and lobby teardown clears the map.
+/// The mailbox itself: each roster slot's newest input sample plus its
+/// newest pending reset request's generation (F25-B).
+#[derive(Debug, Default)]
+struct PeerMail {
+    inputs: BTreeMap<u16, StampedInput>,
+    resets: BTreeMap<u16, u64>,
+}
+
+/// The host's per-player data-plane mailbox (F25-A). Each admitted
+/// peer's reader thread writes its newest `Input` here — one slot per
+/// roster id, latest-wins — so a fast sender can never pile up a
+/// backlog the consumer must drain, and a slow sender simply leaves a
+/// stale sample. `ResetRequest` frames absorb the same way (F25-B): the
+/// newest requested generation per slot is what a drain hands the
+/// consumer, since a repeated ask is idempotent. Bounded by
+/// [`MAX_PLAYERS`]; a departing player's slots are pruned with its
+/// roster removal, and lobby teardown clears both maps.
 #[derive(Debug, Clone, Default)]
 pub struct RemoteInputs {
-    inner: Arc<Mutex<BTreeMap<u16, StampedInput>>>,
+    inner: Arc<Mutex<PeerMail>>,
 }
 
 impl RemoteInputs {
@@ -273,11 +286,11 @@ impl RemoteInputs {
     /// ceiling — a key the map does not already hold is only admitted
     /// while a slot is free, so junk ids cannot exhaust it.
     fn store(&self, id: u16, input: DriveInput) {
-        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if map.len() >= MAX_PLAYERS as usize && !map.contains_key(&id) {
+        let mut mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if mail.inputs.len() >= MAX_PLAYERS as usize && !mail.inputs.contains_key(&id) {
             return;
         }
-        map.insert(
+        mail.inputs.insert(
             id,
             StampedInput {
                 input,
@@ -291,23 +304,47 @@ impl RemoteInputs {
         self.inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .inputs
             .get(&id)
             .cloned()
     }
 
-    /// Drop `id`'s slot — called with every roster removal so a recycled
-    /// wire id never inherits its predecessor's stream.
+    /// Record `id`'s `ResetRequest` — the newest requested generation
+    /// wins like a sample does: a burst between drains collapses to one
+    /// ask, which is all an idempotent reset ever needed. Same admission
+    /// bound as the input slots.
+    fn request_reset(&self, id: u16, generation: u64) {
+        let mut mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if mail.resets.len() >= MAX_PLAYERS as usize && !mail.resets.contains_key(&id) {
+            return;
+        }
+        mail.resets.insert(id, generation);
+    }
+
+    /// Take every pending reset request — `(roster id, requested
+    /// generation)` pairs, id-sorted. The consumer owns deciding which
+    /// requests are still meaningful (a stale generation is not).
+    pub fn drain_resets(&self) -> Vec<(u16, u64)> {
+        let mut mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut mail.resets).into_iter().collect()
+    }
+
+    /// Drop `id`'s slots — called with every roster removal so a recycled
+    /// wire id never inherits its predecessor's stream or pending ask.
     fn remove(&self, id: u16) {
+        let mut mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        mail.inputs.remove(&id);
+        mail.resets.remove(&id);
+    }
+
+    /// Occupied input slots — for the consumer's diagnostics; never
+    /// exceeds [`MAX_PLAYERS`].
+    pub fn len(&self) -> usize {
         self.inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .remove(&id);
-    }
-
-    /// Occupied slots — for the consumer's diagnostics; never exceeds
-    /// [`MAX_PLAYERS`].
-    pub fn len(&self) -> usize {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).len()
+            .inputs
+            .len()
     }
 
     /// Whether any player has a stored sample.
@@ -317,7 +354,9 @@ impl RemoteInputs {
 
     /// Drop every slot — the lobby teardown's final state.
     fn clear(&self) {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        let mut mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        mail.inputs.clear();
+        mail.resets.clear();
     }
 }
 
@@ -388,9 +427,10 @@ impl Host {
         }
     }
 
-    /// The input mailbox every admitted peer's `Input` frames land in —
-    /// the host-side consumer's view of the session data plane (F25-A).
-    /// Latest-wins per roster slot; see [`RemoteInputs`].
+    /// The data-plane mailbox every admitted peer's `Input` frames and
+    /// `ResetRequest`s land in — the host-side consumer's view of the
+    /// session data plane (F25-A/F25-B). Latest-wins per roster slot;
+    /// see [`RemoteInputs`].
     pub fn remote_inputs(&self) -> RemoteInputs {
         self.inputs.clone()
     }
@@ -575,8 +615,9 @@ impl Client {
     }
 
     /// Send an arbitrary lobby message. The host accepts `SetReady`,
-    /// `SetVehicle`, `Leave` and `Input` post-handshake — anything else
-    /// is a protocol violation that gets this client dropped.
+    /// `SetVehicle`, `Leave`, `Input` and `ResetRequest` post-handshake
+    /// — anything else is a protocol violation that gets this client
+    /// dropped.
     pub fn send(&mut self, msg: &Message) -> Result<(), NetError> {
         self.conn.send(msg)
     }
@@ -629,8 +670,9 @@ impl Client {
 
 /// A cloneable `Send`/`Sync` handle to a joined [`Client`]'s send side —
 /// see [`Client::ctl`]. It carries only the legal client→host set
-/// (`SetReady`, `SetVehicle`, `Leave`, `Input`), so a caller cannot send
-/// a host-only message and get the client dropped `Malformed`.
+/// (`SetReady`, `SetVehicle`, `Leave`, `Input`, `ResetRequest`), so a
+/// caller cannot send a host-only message and get the client dropped
+/// `Malformed`.
 #[derive(Debug, Clone)]
 pub struct ClientCtl {
     writer: Arc<Mutex<Writer>>,
@@ -664,6 +706,17 @@ impl ClientCtl {
     /// the host's mailbox keeps exactly that.
     pub fn send_input(&self, input: DriveInput) -> Result<(), NetError> {
         self.send(&Message::Input(input))
+    }
+
+    /// Ask the authority to reset this client's own seat (F25-B) —
+    /// the predicted-session answer to the local `R` bundle, which a
+    /// `Remote` session must never fire itself. Fire-and-forget like
+    /// `Input`: the answer, if granted, is the next `Snap` carrying the
+    /// seat's bumped `epoch` — no reply message exists. `generation`
+    /// must be the session the sender is driving in; the host drops a
+    /// request minted against anything else.
+    pub fn request_reset(&self, generation: u64) -> Result<(), NetError> {
+        self.send(&Message::ResetRequest { generation })
     }
 
     /// A clean quit from another thread: the host records
@@ -1234,6 +1287,14 @@ fn spawn_reader(conn: Conn, id: u16, tx: Sender<LoopMsg>, inputs: RemoteInputs) 
                     // tick — far above the event channel's cadence — and
                     // only the newest sample matters anyway.
                     inputs.store(id, input);
+                    continue;
+                }
+                Ok(Message::ResetRequest { generation }) => {
+                    // Data-plane like `Input`: newest-wins in the
+                    // mailbox, and the generation it was minted against
+                    // decides whether the consumer honors it — the
+                    // lobby loop neither needs nor wants a wake per ask.
+                    inputs.request_reset(id, generation);
                     continue;
                 }
                 Ok(msg @ (Message::SetReady { .. } | Message::SetVehicle(_))) => {
@@ -2547,5 +2608,86 @@ mod tests {
         }
         assert_eq!(inputs.len(), MAX_PLAYERS as usize);
         assert!(inputs.latest(MAX_PLAYERS as u16 + 20).is_none());
+    }
+
+    /// A `ResetRequest` rides the same socket and lands in the mailbox
+    /// beside the input stream — the reader absorbs it without waking
+    /// the lobby loop, so the sender is never dropped as a violator.
+    #[test]
+    fn reset_requests_absorb_into_the_mailbox() {
+        let host = host();
+        let mut alice = join(host.addr(), "alice");
+        host.recv_timeout(WAIT).unwrap(); // Joined
+        recv_roster(&mut alice, 1);
+
+        alice.ctl().unwrap().request_reset(7).unwrap();
+        let deadline = std::time::Instant::now() + WAIT;
+        loop {
+            let drained = host.remote_inputs().drain_resets();
+            if !drained.is_empty() {
+                assert_eq!(drained, [(1, 7)], "the peer's ask, keyed by its slot");
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "no request landed");
+            thread::sleep(Duration::from_millis(2));
+        }
+        // Drained means drained — a second take is empty.
+        assert!(host.remote_inputs().drain_resets().is_empty());
+        // The lobby is undisturbed: the sender still talks afterwards.
+        alice.set_ready(true).unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::ReadyChanged { id: 1, ready: true }) => {}
+            other => panic!("expected ReadyChanged, got {other:?}"),
+        }
+    }
+
+    /// Requests collapse newest-wins per slot like input samples — a
+    /// burst is one ask, since a reset is idempotent — and a drained
+    /// slot stays empty. The admission bound is the roster cap.
+    #[test]
+    fn reset_requests_collapse_newest_wins_and_stay_bounded() {
+        let inputs = RemoteInputs::default();
+        inputs.request_reset(1, 3);
+        inputs.request_reset(1, 9);
+        inputs.request_reset(2, 4);
+        assert_eq!(inputs.drain_resets(), [(1, 9), (2, 4)]);
+        assert!(inputs.drain_resets().is_empty());
+        for id in 10..=(10 + MAX_PLAYERS as u16 + 20) {
+            inputs.request_reset(id, 1);
+        }
+        let drained = inputs.drain_resets();
+        assert_eq!(drained.len(), MAX_PLAYERS as usize);
+        assert!(!drained.iter().any(|(id, _)| *id == 10 + 28));
+    }
+
+    /// A departed player's pending request is pruned with the roster
+    /// slot — a recycled wire id never inherits a dead driver's ask.
+    /// Ordered on the socket: the reader stores the request before it
+    /// reports the `Leave`, and the `Left` event means the removal ran.
+    #[test]
+    fn a_departed_players_reset_request_is_pruned() {
+        let host = host();
+        let mut alice = join(host.addr(), "alice");
+        host.recv_timeout(WAIT).unwrap(); // Joined
+        recv_roster(&mut alice, 1);
+
+        alice.ctl().unwrap().request_reset(3).unwrap();
+        alice.leave().unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::Left {
+                id: 1,
+                cause: LeaveCause::Quit,
+                ..
+            }) => {}
+            other => panic!("expected a Quit Left, got {other:?}"),
+        }
+        assert!(
+            !host
+                .remote_inputs()
+                .drain_resets()
+                .iter()
+                .any(|(id, _)| *id == 1),
+            "a dead driver's pending ask must not survive the roster slot"
+        );
     }
 }

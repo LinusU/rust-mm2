@@ -1653,6 +1653,11 @@ fn main() {
                     netdrive::reconcile_remote_players.after(net::drive_lobby),
                     netdrive::apply_snapshots.after(net::drive_lobby),
                     netdrive::drive_remote_lerp,
+                    // F25-B: `R` under a predicted session asks the
+                    // authority for the reset `reset_input` is gated
+                    // against — the granted answer arrives as the
+                    // own-seat epoch snap.
+                    netdrive::send_reset_request,
                     // The wire sample reads the settled `VehicleInput`
                     // — after the keyboard mapping and every scripted
                     // owner that can overwrite it.
@@ -1707,6 +1712,13 @@ fn main() {
                     // bump never trails the teleported pose.
                     netdrive::reconcile_remote_players.after(net::drive_host),
                     netdrive::apply_remote_inputs.after(net::drive_host),
+                    // F25-B: driver `ResetRequest`s are `ResetVehicle`
+                    // writers — ahead of the apply like every other so
+                    // the granted reset's pose and epoch bump leave on
+                    // the same `Snap`.
+                    netdrive::apply_reset_requests
+                        .after(net::drive_host)
+                        .before(mm2_vehicle::systems::vehicle_reset),
                     netdrive::track_reset_epochs
                         .after(net::drive_host)
                         .after(mm2_vehicle::systems::vehicle_reset)

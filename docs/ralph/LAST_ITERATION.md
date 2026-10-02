@@ -1,3 +1,114 @@
+# Last iteration — F25-B first slice: the wire-carried driver reset
+# request — `R` under a predicted session asks the authority to reset
+# its seat (iteration 030, run 20261001T195454-62282 continued)
+
+Implementation iteration on `ralph/night` (baseline `7bd13ac` — the
+iteration-029 repair candidate; external verify + review pass with
+gaps only). One coherent slice: the reset-request verb the A-ledger
+repeatedly named as F25-B's opening move.
+
+## Task selection
+
+F25-A.5's authority gate made `R` provably inert under `Remote`
+authority — correct (a local teleport is a self-teleport the host can
+never declare) but dead-feeling: the driver presses the key and
+nothing happens until a detector fires. The F25-A row's remaining
+scope carried exactly this fix: *a wire-carried driver reset request —
+the R-gate's UX successor*. Everything downstream already exists —
+the authority's `ResetVehicle` → `vehicle_reset` →
+`track_reset_epochs` → `Snap` path lands a declared teleport on the
+owning client since A.5/A.6 — so the missing piece was only the
+client→host verb and a bounded host-side grant path. TASKS.json
+carries F25-B as the next queued feature and this is its smallest
+coherent first slice.
+
+## What landed
+
+- `mm2_net` — protocol v6: `Message::ResetRequest { generation }`,
+  a fixed 8-byte client→host message. It carries no target field on
+  purpose: the sender's roster slot names the seat, so a request can
+  only ever ask for the sender's own car.
+- `mm2_net::lobby` — `RemoteInputs` gains a reset mailbox beside the
+  input mailbox: per-slot latest-wins, bounded by `MAX_PLAYERS`,
+  absorbed by the reader threads (the lobby event loop never wakes
+  for one), pruned when a player departs; `drain_resets` hands the
+  batch to the sim. `ClientCtl::request_reset(generation)` sends it.
+- `mm2_app::netdrive::send_reset_request` (client) — the same
+  key/pad edge `reset_input` reads (`R` / `pad::RESET`), gated to
+  predicted authority + `Playing` + a live link; sends the running
+  generation and counts `requests_sent`. Fire-and-forget by design —
+  the answer is the seat's epoch-declared `Snap`, which A.5's
+  own-seat reconcile already applies like any authority reset.
+- `mm2_app::netdrive::apply_reset_requests` (host) — drains the
+  mailbox once per update after `drive_host`. A request drops (never
+  queues) on: a generation that is not the running session's, a
+  not-`Playing` phase, a sender with no spawned participant, or an
+  ask inside `RESET_REQUEST_COOLDOWN` (1 s per seat — designed; wire
+  asks arrive at socket rate, not key-edge rate, so an unbounded
+  grant would let one client teleport-lock its seat every update).
+  A fresh grant computes the *requesting* seat's shared grid slot
+  (`seat_ids`/`seat_pose`, the map every process resolves
+  identically) with the reconcile's hull-clearance lift and emits a
+  targeted `ResetVehicle` — scheduled `.before(vehicle_reset)` so
+  A.6's ordering contract carries it: the teleported pose and the
+  bumped epoch leave on the same `Snap`.
+- Wiring — `send_reset_request` joins the client lobby systems in
+  `main.rs`/`smoke.rs`; `apply_reset_requests` joins the host side
+  ordered after `drive_host` and before `vehicle_reset` in both.
+  `NetDriveReport` gains `requests_sent`/`requests_granted`/
+  `requests_dropped`, surfaced on the smoke record's `net=` field
+  as `req<n>s/<n>g/<n>d`.
+- `docs/research/net.md` — the protocol section moves to v6 with
+  the v3→v4/v4→v5/v5→v6 history named (it had stalled at v3 through
+  the F25-A run), and the lobby diagram lists the absorbed
+  `Input`/`ResetRequest` arrows.
+
+## Tests
+
+- `mm2_net` +4 — wire round-trip/strict decode, latest-wins collapse
+  + cap, absorb-into-mailbox over a real socket pair, departed peer
+  prune.
+- `net_app` +2 — `a_remote_drivers_reset_request_resets_its_seat`
+  (host leg through the production schedule: an ask drained pre-
+  `Playing` drops; the granted ask teleports the remote seat back to
+  its grid slot with `Teleported` + `ResetEpoch` 1, and the same
+  `Snap` carries pose *and* epoch; a cooldown repeat and a foreign
+  generation drop) and `r_under_a_remote_session_asks_the_authority`
+  (client leg: `Menu`-phase `R` sends nothing, `Playing` `R` lands
+  exactly one ask in the real host's mailbox keyed to our roster
+  slot, a held key resends nothing).
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --workspace
+--all-targets --all-features -- -D warnings` clean; `cargo test
+--workspace` green — all suites pass (mm2_net 61/61, net_app 31/31,
+session 29/29, drive 17/17).
+
+## Classification / remaining open items
+
+- The request verb, the mailbox, the cooldown and the drop policy
+  are implementation choice / designed policy — the original's
+  networked driver-reset rule is unrecovered; spec req 4 wants the
+  authority to own teleports and this keeps it so. No reply message
+  exists by design: a granted ask is answered by the epoch-declared
+  `Snap` itself; a dropped ask is a press nothing answered (a lobby
+  notice is future UX work).
+- F25-B remains open: replicated damage/result/wheel-engine
+  presentation for remote drivers, deduplicated audio/effects on
+  remote cars, the impairment harness (delay/jitter/loss/duplication/
+  reorder — F25 spec req 13), and documented bandwidth/update-rate
+  budgets. `mm2-host` the dedicated binary absorbs requests into its
+  mailbox but never drains them — it owns no simulation, so resets
+  there are out of scope by design.
+- Evidence stays synthetic/loopback — the new legs run a real
+  socket pair and the real reader/mailbox/schedule path in one
+  process; no two-process driving session, no impairment matrix, no
+  retail-install leg (no content paths changed), no rendered
+  observation. F25-AC01..AC06 remain open.
+
+---
+
 # Last iteration — external-review repair: `dev_reset_at` joins the
 # authority gate — `--join --reset-at` can no longer self-teleport a
 # predicted seat (iteration 029, run 20261001T195454-62282 continued)

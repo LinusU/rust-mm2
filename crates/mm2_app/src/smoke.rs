@@ -681,6 +681,9 @@ fn run_headless(
                         crate::netdrive::reconcile_remote_players.after(net::drive_lobby),
                         crate::netdrive::apply_snapshots.after(net::drive_lobby),
                         crate::netdrive::drive_remote_lerp,
+                        // F25-B: `R` asks the authority under a
+                        // predicted session — same wiring as the app.
+                        crate::netdrive::send_reset_request,
                         crate::netdrive::send_drive_input
                             .after(crate::input::vehicle_input)
                             .after(crate::input::parked_drive)
@@ -703,6 +706,12 @@ fn run_headless(
                         // contract as the windowed app.
                         crate::netdrive::reconcile_remote_players.after(net::drive_host),
                         crate::netdrive::apply_remote_inputs.after(net::drive_host),
+                        // F25-B: `ResetRequest`s are `ResetVehicle`
+                        // writers ahead of the apply — same ordering
+                        // contract as the windowed app.
+                        crate::netdrive::apply_reset_requests
+                            .after(net::drive_host)
+                            .before(mm2_vehicle::systems::vehicle_reset),
                         crate::netdrive::track_reset_epochs
                             .after(net::drive_host)
                             .after(mm2_vehicle::systems::vehicle_reset)
@@ -977,13 +986,16 @@ fn run_headless(
         .get_resource::<crate::netdrive::NetDriveReport>()
         .map(|r| {
             format!(
-                " net=in{}s/{}a/{}x,snap{}s/{}a,rem{}",
+                " net=in{}s/{}a/{}x,snap{}s/{}a,rem{},req{}s/{}g/{}d",
                 r.inputs_sent,
                 r.inputs_applied,
                 r.inputs_staled,
                 r.snaps_sent,
                 r.snaps_applied,
-                r.remotes
+                r.remotes,
+                r.requests_sent,
+                r.requests_granted,
+                r.requests_dropped
             )
         })
         .unwrap_or_default();

@@ -13,8 +13,9 @@
 /// `Start`/`Cancel` (session lifecycle) and `RejectCode::SessionStarted`
 /// landed. v4: `Input`/`Snap` — the in-session driving transport
 /// (F25-A). v5: `SnapEntry` gained `epoch`, the authority's per-player
-/// reset counter (F25-A.5).
-pub const PROTOCOL_VERSION: u16 = 5;
+/// reset counter (F25-A.5). v6: `ResetRequest` — a driver asking the
+/// authority to reset its own seat (F25-B).
+pub const PROTOCOL_VERSION: u16 = 6;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -39,6 +40,7 @@ const TAG_START: u8 = 0x0b;
 const TAG_CANCEL: u8 = 0x0c;
 const TAG_INPUT: u8 = 0x0d;
 const TAG_SNAP: u8 = 0x0e;
+const TAG_RESET_REQUEST: u8 = 0x0f;
 
 /// Byte cap on a [`SessionAdvertisement`]'s opaque `params` field — the
 /// `mm2_app` bridge's serialized session config is a few hundred bytes,
@@ -268,6 +270,18 @@ pub enum Message {
     /// up (the generation field, not the send timing, decides whether a
     /// sample applies).
     Input(DriveInput),
+    /// Client → host: the driver asked to be reset (F25-B). The sender's
+    /// roster slot names the seat — a request carries no target, so a
+    /// client can only ever ask for its own car. `generation` namespaces
+    /// the request like an `Input` sample: a request minted against a
+    /// session the host is no longer running is dropped, never applied
+    /// to the next one. Session data-plane traffic like `Input` — the
+    /// host absorbs it into the mailbox rather than waking the lobby
+    /// loop; the answer is the epoch-declared `Snap`, not a reply.
+    ResetRequest {
+        /// The session generation this request belongs to.
+        generation: u64,
+    },
     /// Host → every client: an authoritative pose snapshot of the
     /// running session's participants (F25-A). `tick` is the host's
     /// session tick when the snapshot was taken; entries are a complete
@@ -539,6 +553,10 @@ impl Message {
                 out.push(input.steer as u8);
                 out.push(input.handbrake);
             }
+            Self::ResetRequest { generation } => {
+                out.push(TAG_RESET_REQUEST);
+                out.extend_from_slice(&generation.to_le_bytes());
+            }
             Self::Snap {
                 generation,
                 tick,
@@ -637,6 +655,9 @@ impl Message {
                 steer: cur.u8()? as i8,
                 handbrake: cur.u8()?,
             }),
+            TAG_RESET_REQUEST => Self::ResetRequest {
+                generation: cur.u64()?,
+            },
             TAG_SNAP => {
                 let generation = cur.u64()?;
                 let tick = cur.u64()?;
@@ -788,6 +809,10 @@ mod tests {
                 steer: -64,
                 handbrake: 12,
             }),
+            Message::ResetRequest { generation: 7 },
+            Message::ResetRequest {
+                generation: u64::MAX,
+            },
             Message::Snap {
                 generation: 7,
                 tick: 480,

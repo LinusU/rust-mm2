@@ -140,6 +140,9 @@ fn bridge_app(vfs: Vfs, link: LobbyLink) -> App {
                 netdrive::reconcile_remote_players.after(net::drive_lobby),
                 netdrive::apply_snapshots.after(net::drive_lobby),
                 netdrive::drive_remote_lerp,
+                // F25-B: `R` asks the authority under a predicted
+                // session — production wiring.
+                netdrive::send_reset_request,
                 netdrive::send_drive_input,
             ),
         );
@@ -164,6 +167,11 @@ fn host_app(vfs: Vfs, link: HostLink) -> App {
                 net::drive_host.after(session::drive_session),
                 netdrive::reconcile_remote_players.after(net::drive_host),
                 netdrive::apply_remote_inputs.after(net::drive_host),
+                // F25-B: the request drain is a `ResetVehicle` writer —
+                // same ordering edge as `reset_input`.
+                netdrive::apply_reset_requests
+                    .after(net::drive_host)
+                    .before(mm2_vehicle::systems::vehicle_reset),
                 netdrive::track_reset_epochs
                     .after(net::drive_host)
                     .after(mm2_vehicle::systems::vehicle_reset)
@@ -2260,6 +2268,228 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
             "the collapsed blend holds the landing"
         );
     }
+
+    host.shutdown();
+}
+
+/// F25-B, host half: a remote driver's reset request drains into the
+/// shared `ResetVehicle` path — the requesting seat teleports back to
+/// its grid slot and the bumped epoch declares it on the same `Snap`.
+/// Out-of-phase asks, foreign generations and cooldown repeats drop.
+#[test]
+fn a_remote_drivers_reset_request_resets_its_seat() {
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let mut app = host_app(vfs, link);
+    let mut peer = ready_peer(addr, "eve", fp);
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<LobbyState>()
+            .roster
+            .iter()
+            .any(|e| e.pick.is_some())
+    });
+
+    // `Start` mints the generation; an ask drained before the session
+    // stands `Playing` drops — it never queues for later.
+    app.world()
+        .resource::<HostLink>()
+        .command_sender()
+        .send(HostCommand::Start)
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world().resource::<Session>().config().is_some()
+    });
+    let generation = app.world().resource::<Session>().generation();
+    peer.ctl().unwrap().request_reset(generation).unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .requests_dropped
+            == 1
+    });
+
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    app.update();
+    spin_mut(&mut app, |a| {
+        a.world_mut()
+            .query_filtered::<(), With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some()
+    });
+    // The reconcile's seat pose is the ask's landing target — record it
+    // rather than recomputing the hull lift.
+    let seated = {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&avian3d::prelude::Position, With<RemotePick>>();
+        q.single(app.world()).expect("the remote car").0
+    };
+
+    // Move the authority pose off-seat — the harness has no physics, so
+    // the write *is* the settled truth — then the driver asks.
+    {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<(&mut avian3d::prelude::Position, &mut Transform), With<RemotePick>>(
+            );
+        let (mut pos, mut transform) = q.single_mut(app.world_mut()).expect("the remote car");
+        pos.0 = Vec3::new(30.0, 1.5, -8.0);
+        transform.translation = pos.0;
+    }
+    peer.ctl().unwrap().request_reset(generation).unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .requests_granted
+            == 1
+    });
+    {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<(Entity, &netdrive::ResetEpoch, &Transform), With<RemotePick>>();
+        let (remote, epoch, transform) = q.single(app.world()).expect("the remote car");
+        assert_eq!(epoch.0, 1, "the granted ask bumped the seat's epoch");
+        assert!(
+            (transform.translation - seated).length() < 0.5,
+            "the reset landed back on the seat: {:?} vs {seated:?}",
+            transform.translation
+        );
+        assert!(
+            app.world().get::<Teleported>(remote).is_some(),
+            "the production apply stamped the teleport"
+        );
+    }
+    // The same `Snap` that first carries `epoch == 1` already carries
+    // the seat pose — the request writer runs before `vehicle_reset`,
+    // the tracker after it, the publish after the tracker.
+    until_wire(&mut peer, |m| {
+        matches!(m, Message::Snap { entries, .. } if entries.iter().any(|e| {
+            e.player == 1
+                && e.epoch == 1
+                && (Vec3::from_array(e.pos) - seated).length() < 0.5
+        }))
+    });
+
+    // A repeat inside the designed cooldown drops rather than stacking
+    // a second teleport, and a foreign generation is refused too.
+    peer.ctl().unwrap().request_reset(generation).unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .requests_dropped
+            == 2
+    });
+    peer.ctl().unwrap().request_reset(generation + 9).unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .requests_dropped
+            == 3
+    });
+    {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<(&netdrive::ResetEpoch, &Transform), With<RemotePick>>();
+        let (epoch, transform) = q.single(app.world()).expect("the remote car");
+        assert_eq!(epoch.0, 1, "the drops left the seat untouched");
+        assert!(
+            (transform.translation - seated).length() < 0.5,
+            "the car stayed on its seat"
+        );
+    }
+}
+
+/// F25-B, client half: `R` under a predicted session no longer sits
+/// inert — it sends a `ResetRequest` minted against the running
+/// generation, absorbed by the host's mailbox keyed to our slot. An
+/// `R` press outside `Playing` sends nothing.
+#[test]
+fn r_under_a_remote_session_asks_the_authority() {
+    let install = tempfile::tempdir().unwrap();
+    let vfs = mount(install.path());
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host = Host::listen_loopback(&HostConfig::new(fp)).unwrap();
+    host.set_session(net::advertise(&dev_cruise()).unwrap())
+        .unwrap();
+    let link = LobbyLink::join(
+        host.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join failed");
+    let our_id = link.player_id();
+    let mut app = bridge_app(vfs, link);
+
+    // Parked at `Menu` an `R` press asks nothing — the reset request is
+    // a session verb, not a lobby one.
+    tap(&mut app, KeyCode::KeyR);
+    assert_eq!(
+        app.world()
+            .resource::<netdrive::NetDriveReport>()
+            .requests_sent,
+        0,
+        "a lobby-phase R asks nothing"
+    );
+
+    {
+        let link = app.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    app.update();
+    host.start(LateJoin::Open).unwrap();
+    until_started(&host);
+    until_begun(&mut app);
+    let generation = app.world().resource::<Session>().generation();
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    app.update();
+
+    tap(&mut app, KeyCode::KeyR);
+    assert_eq!(
+        app.world()
+            .resource::<netdrive::NetDriveReport>()
+            .requests_sent,
+        1,
+        "R under the predicted session asked once"
+    );
+    // The host mailbox absorbed it, keyed by our roster slot — the
+    // target is never a wire field to forge.
+    let deadline = std::time::Instant::now() + WAIT;
+    loop {
+        let requests = host.remote_inputs().drain_resets();
+        if let Some(&(player, requested)) = requests.first() {
+            assert_eq!(player, our_id, "the ask is keyed to our slot");
+            assert_eq!(requested, generation, "the ask rides this session");
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the host mailbox never saw the reset request"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    // No edge, no re-send — one press is one ask; the host's cooldown
+    // owns the rate limit.
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<netdrive::NetDriveReport>()
+            .requests_sent,
+        1
+    );
 
     host.shutdown();
 }

@@ -24,7 +24,8 @@
 //!   the joining side. The lobby's socket pair also carries the F25-A
 //!   session data plane: `Input` frames land in the host's
 //!   [`RemoteInputs`](lobby::RemoteInputs) mailbox (latest-wins per
-//!   roster slot) and `Snap` snapshots broadcast to every peer.
+//!   roster slot), `ResetRequest`s absorb alongside them (F25-B), and
+//!   `Snap` snapshots broadcast to every peer.
 //!
 //! Scope deliberately ends at transport: the session advertisement is
 //! an opaque blob (the `mm2_app` bridge owns the `SessionConfig`

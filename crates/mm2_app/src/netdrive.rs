@@ -27,7 +27,11 @@
 //!   advances: the authority teleported us, so the local pose snaps to
 //!   the asserted state (F25-A.5). Between resets the local sim owns the
 //!   seat — sub-epoch divergence stays local, which is what `Predicted`
-//!   means; continuous drift correction is named later scope.
+//!   means; continuous drift correction is named later scope. The `R`
+//!   key is the exception to a client's inertness: it sends a
+//!   `ResetRequest` up (F25-B), and the host's granted answer arrives
+//!   back as the own-seat epoch snap — the requester's car teleports to
+//!   its grid seat without the local sim ever asserting the pose.
 //!
 //! Identities on the wire are the lobby's roster slots, never Bevy
 //! entities: the host seat is wire id 0 (it never appears on the roster;
@@ -50,7 +54,7 @@
 //! silent behavior.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use avian3d::prelude::{
     AngularVelocity, LinearVelocity, Position, RigidBody, Rotation, TransformInterpolation,
@@ -62,9 +66,10 @@ use mm2_game::{
     StuckSpec, VehicleDamage, VehicleRecovery, VehicleStuck,
 };
 use mm2_net::{DriveInput, Message, RemoteInputs, SnapEntry, VehiclePick};
-use mm2_vehicle::{ResetVehicle, Teleported, VehicleInput, vehicle_bundle};
+use mm2_vehicle::{ResetVehicle, Teleported, Vehicle, VehicleInput, vehicle_bundle};
 
 use crate::car_visual;
+use crate::input::{control_just_pressed, pad};
 use crate::net::{HostLink, LobbyLink, LobbyState};
 use crate::opponents::SPAWN_LIFT;
 use crate::session::SpawnPoint;
@@ -90,6 +95,14 @@ const SEAT_STAGE_GAP: f32 = 4.0;
 /// for teleports the epoch cannot describe (drift past the bound, a
 /// pose written by hand).
 const CORRECTION_SNAP_DIST: f32 = 20.0;
+
+/// A granted reset request mutes further asks from the same seat for
+/// this long (F25-B; designed — the original's networked reset rule is
+/// unrecovered). The local `R` is human edge rate, but a wire ask can
+/// arrive every socket read — unbounded grants would let one client
+/// teleport-lock its own seat every frame. One per second is still an
+/// immediate answer to a wedge.
+pub const RESET_REQUEST_COOLDOWN: Duration = Duration::from_secs(1);
 
 /// The wire roster id this participant entity carries. `0` is the host
 /// seat — the roster never lists it, but its `Start`-carried pick and
@@ -204,6 +217,16 @@ pub struct NetDriveReport {
     /// landings that bumped a wire epoch; client: epoch-declared
     /// teleports applied to a copy or the own seat.
     pub resets: u64,
+    /// Driver reset requests this client sent on `R`/pad — the
+    /// predicted-session form of the local reset key (F25-B).
+    pub requests_sent: u64,
+    /// Requests the authority granted — each lands as a `ResetVehicle`
+    /// the epoch tracker counts again in `resets` (host side).
+    pub requests_granted: u64,
+    /// Requests the authority dropped: a foreign or stale generation, a
+    /// not-`Playing` phase, a seat with no spawned participant, or an
+    /// ask inside [`RESET_REQUEST_COOLDOWN`] (host side).
+    pub requests_dropped: u64,
 }
 
 /// A rotation off the wire, sanitized — a malformed-quaternion guard so
@@ -705,6 +728,129 @@ pub fn apply_remote_inputs(
                 report.inputs_staled += 1;
             }
         }
+    }
+}
+
+/// Client-side (F25-B): `R`/[`pad::RESET`] under a predicted (`Remote`)
+/// session asks the authority for the reset `reset_input` is gated
+/// against performing — a local teleport would diverge the own seat
+/// from the host's copy forever (F25-A.5), so the key instead sends a
+/// `ResetRequest` for the running generation. The granted answer is the
+/// seat's epoch-declared `Snap`: [`apply_snapshots`]' own-seat reconcile
+/// already applies it like any authority reset. Fire-and-forget — a
+/// dropped request is a key press nothing answered, the same
+/// dead-feeling the inert gate had (a lobby notice is future UX work);
+/// no reply message exists by design.
+pub fn send_reset_request(
+    keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<&Gamepad>,
+    windows: Query<&Window>,
+    link: Res<LobbyLink>,
+    session: Res<Session>,
+    mut report: ResMut<NetDriveReport>,
+) {
+    if session.authority_role().is_authority()
+        || !session.is_playing()
+        || link.closed
+        || link.leaving()
+        || !control_just_pressed(&keys, &pads, &windows, KeyCode::KeyR, pad::RESET)
+    {
+        return;
+    }
+    if link.ctl().request_reset(session.generation()).is_ok() {
+        report.requests_sent += 1;
+    }
+}
+
+/// Per-seat grant ledger for [`apply_reset_requests`] — the instant each
+/// wire id's last request was honored. Scoped to the session generation:
+/// a `Cancel`/`Start` cycle clears every debt.
+#[derive(Default)]
+pub struct RequestGrants {
+    generation: u64,
+    last: BTreeMap<u16, Instant>,
+}
+
+/// Host-side (F25-B): fold the drained reset requests into
+/// [`ResetVehicle`]s — targeted at the *requesting* seat and landed on
+/// its grid slot (the seat map every process resolves identically,
+/// F25-A.2), so `vehicle_reset` applies it the same frame and
+/// `track_reset_epochs` declares the bump on the `Snap` the teleported
+/// pose rides — exactly like any other authority teleport. The writer
+/// is scheduled ahead of the apply like every Update-side writer
+/// (F25-A.6's ordering contract).
+///
+/// A request is dropped, never deferred: minted against a foreign or
+/// stale generation, sent while the session is not `Playing`, naming a
+/// seat with no spawned participant, or inside
+/// [`RESET_REQUEST_COOLDOWN`]. The cooldown is the designed bound spec
+/// req 1 wants on the channel — a wire ask arrives at socket rate, not
+/// key-edge rate, so without it one client could teleport-lock its seat
+/// every update. Requests carry no target — the sender's roster slot
+/// names the seat — so a peer can only ever reset its own car.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_reset_requests(
+    host: Res<HostLink>,
+    session: Res<Session>,
+    lobby: Res<LobbyState>,
+    spawn: Res<SpawnPoint>,
+    race: Option<Res<RaceState>>,
+    remotes: Query<(Entity, &NetPlayer, &Vehicle), With<RemotePick>>,
+    mut resets: MessageWriter<ResetVehicle>,
+    mut grants: Local<RequestGrants>,
+    mut report: ResMut<NetDriveReport>,
+) {
+    let generation = session.generation();
+    if grants.generation != generation {
+        grants.generation = generation;
+        grants.last.clear();
+    }
+    let requests = host.remote_inputs().drain_resets();
+    if requests.is_empty() {
+        return;
+    }
+    let playing = session.is_playing();
+    let now = Instant::now();
+    // The shared seat map — on a hosted app the local seat is wire id
+    // 0, and `LobbyState` mirrors the remote roster.
+    let seats = seat_ids(Some(&lobby), true, Some(0));
+    for (wire, requested) in requests {
+        let fresh = playing
+            && requested == generation
+            && grants
+                .last
+                .get(&wire)
+                .is_none_or(|t| now.duration_since(*t) >= RESET_REQUEST_COOLDOWN);
+        let target = if fresh {
+            remotes.iter().find(|(_, w, _)| w.0 == wire)
+        } else {
+            None
+        };
+        let Some((entity, _, vehicle)) = target else {
+            report.requests_dropped += 1;
+            continue;
+        };
+        let (mut pos, yaw) = seat_pose(
+            race.as_deref().map(|r| &r.definition),
+            (spawn.origin, spawn.origin_yaw),
+            seat_index(&seats, Some(wire)),
+        );
+        // The same hull clearance the spawn applies — the seat lands
+        // the car just above the ground for gravity to settle.
+        let hull_min_y = vehicle
+            .config
+            .collider_points
+            .as_ref()
+            .and_then(|pts| pts.iter().map(|p| p[1]).reduce(f32::min))
+            .unwrap_or(-vehicle.config.chassis_size[1] * 0.5);
+        pos.y += (SPAWN_LIFT - hull_min_y).max(0.35);
+        resets.write(ResetVehicle {
+            entity: Some(entity),
+            position: pos,
+            yaw,
+        });
+        grants.last.insert(wire, now);
+        report.requests_granted += 1;
     }
 }
 
