@@ -28,10 +28,11 @@
 //!   participants map to `NetPlayer` seats rides the next snapshot as
 //!   one row per seat, and clients replay them through the
 //!   [`RemoteImpact`] stream — per-impact point/normal/severity the
-//!   damage fraction cannot carry — so remote cars spark and sound on
-//!   every process. Texel splats and breakaway detachment stay
-//!   state-adjacent gaps (the copy owns no texel rig and fragments are
-//!   authority-spawned state).
+//!   damage fraction cannot carry — so remote cars spark, sound and
+//!   splat their skin on every process (the copy binds the authored
+//!   `TexelDamageRig` like a local pick, and the v8 byte's >0→0
+//!   transition is the repair that clears it). Breakaway detachment
+//!   stays a state-side gap — fragments are authority-spawned state.
 //! - **Client** (`SessionAuthority::Remote` → `Predicted`): remote cars
 //!   are kinematic copies blended between the two newest snapshots
 //!   ([`RemoteLerp`]), marked [`RemoteReplica`] so the local sim never
@@ -68,9 +69,8 @@
 //!
 //! Everything here is loopback-scoped groundwork like the rest of F24/F25:
 //! no lag compensation, no result/race-state replication, and replicated
-//! impact events are presentation-only (texel splats and breakaway
-//! fragments on remote copies stay state-side gaps) — named gaps, not
-//! silent behavior.
+//! impact events are presentation-only (breakaway fragments on remote
+//! copies stay a state-side gap) — named gaps, not silent behavior.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -557,14 +557,28 @@ fn encode_damage(damage: Option<&VehicleDamage>) -> u8 {
 /// (under a predicted session nothing local accumulates damage, so the
 /// replicated total is the meter's truth — F05 req 6). Entities with
 /// no authored damage record carry no component and are skipped.
+///
+/// A `>0 → 0` transition is the wire's repair signal: the authority's
+/// `resolve_disabled` wipes the skin next to each `damage.reset()` it
+/// performs, and this is the same wipe arriving by replication — the
+/// rig's `Reset` re-blits clean. Splats stamped while the byte read
+/// intact stay put: the retail rig splats every `ImpactsTable` entry
+/// regardless of the accumulator, so only a real repair transition
+/// re-blits.
 fn apply_damage(
+    entity: Entity,
     entry: &SnapEntry,
     damage: Option<Mut<'_, VehicleDamage>>,
+    texel: &mut crate::texel_fx::TexelRepair,
     report: &mut NetDriveReport,
 ) {
     if let Some(mut damage) = damage {
+        let was_damaged = damage.total() > 0.0;
         damage.set_replicated(entry.damage as f32 / 255.0);
         report.damage_synced += 1;
+        if was_damaged && damage.total() <= 0.0 {
+            texel.reset(entity);
+        }
     }
 }
 
@@ -1003,12 +1017,17 @@ fn spawn_remote(
                 images,
                 materials,
                 vehicle,
-                // The texel rig reads the authored damage record and
-                // splats per impact — the v10 tail now carries the
-                // per-impact positions, but the rig itself clones the
-                // pick's textures at spawn, so a remote car's skin
-                // still stays unrigged (named gap, F25-B).
-                None,
+                // F25-B (protocol v10): the texel rig binds on the
+                // authored damage record like a local pick's, seeded
+                // off the wire id the same way the smoke/spark rigs
+                // are. On the authority the seat's own `ImpactEvent`s
+                // splat it (`apply_texel_damage`); on a client the
+                // replicated `RemoteImpact` rows do
+                // (`apply_remote_texels`), and the v8 byte's repair
+                // transition clears it.
+                def.damage
+                    .as_ref()
+                    .map(|d| (d, (session.generation() << 32) | u64::from(wire))),
             );
             if !missing.is_empty() {
                 warn!(car = %def.id, "remote vehicle missing textures: {}", missing.join(", "));
@@ -1596,6 +1615,10 @@ pub fn apply_snapshots(
     // never carries the seat marker).
     mut trailers: Query<SnapTrailerRow<'_>, (With<car_visual::Trailer>, Without<NetPlayer>)>,
     mut remote_fx: MessageWriter<RemoteImpact>,
+    // The replicated repair lands here: a snap's damage byte going
+    // >0→0 wipes the seat's texel rig like `resolve_disabled`'s own
+    // `damage.reset()` + `texel.reset()` pair does on the authority.
+    mut texel: crate::texel_fx::TexelRepair,
     mut report: ResMut<NetDriveReport>,
 ) {
     // Replicated impacts are events, not state — the pending queue
@@ -1713,7 +1736,7 @@ pub fn apply_snapshots(
             // accumulates `VehicleDamage`, so the replicated total is
             // the only truth the meter/smoke/impairment consumers can
             // read (F05 req 6). Applied on every snap, not just resets.
-            apply_damage(entry, damage, &mut report);
+            apply_damage(entity, entry, damage, &mut texel, &mut report);
             // The own seat: only an authority reset may move it — the
             // host teleported our car (its copy of us is the truth),
             // so the predicted pose yields to the asserted one. Its

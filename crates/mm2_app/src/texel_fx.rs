@@ -286,8 +286,13 @@ impl TexelDamageBuilder {
 /// participant's [`TexelDamageRig`] — the `ImpactsTable`→`ApplyDamage`
 /// chain. The impact's world point lands in car space through the
 /// body's transform (the recovered `LastImpactPos` is car-space too).
-/// Authority-gated and Remote-skipped like `apply_impact_damage`: a
-/// remote participant's skin belongs to its own client.
+/// On the authority a `Remote` seat is a locally simulated participant
+/// and splats like an AI car's; on a predicted client the local stream
+/// presents only the own seat's hits (its sim is what produced them) —
+/// a `Remote` copy's hits arrive as
+/// [`crate::netdrive::RemoteImpact`] rows off the `Snap.impacts` tail
+/// (protocol v10) for [`apply_remote_texels`], so each impact splats
+/// exactly once per process.
 pub fn apply_texel_damage(
     mut reader: MessageReader<ImpactEvent>,
     session: Res<Session>,
@@ -296,11 +301,12 @@ pub fn apply_texel_damage(
     mut rigs: Query<(&GlobalTransform, &mut TexelDamageRig)>,
     mut report: ResMut<TexelDamageReport>,
 ) {
-    if !session.is_playing() || !session.authority_role().is_authority() {
+    if !session.is_playing() {
         reader.read().for_each(drop);
         return;
     }
     let generation = session.generation();
+    let authority = session.authority_role().is_authority();
     let index: HashMap<ObjectId, (Entity, Option<PlayerControl>)> = identities
         .iter()
         .map(|(entity, id, player)| (id.0, (entity, player.map(|p| p.control))))
@@ -313,7 +319,7 @@ pub fn apply_texel_damage(
             let Some(&(entity, control)) = index.get(&object) else {
                 continue;
             };
-            if control == Some(PlayerControl::Remote) {
+            if !authority && control == Some(PlayerControl::Remote) {
                 continue;
             }
             let Ok((xf, mut rig)) = rigs.get_mut(entity) else {
@@ -325,6 +331,41 @@ pub fn apply_texel_damage(
                 report.impacts += 1;
                 report.splats += stamped as u64;
             }
+        }
+    }
+}
+
+/// Update-side consumer of the replicated impact stream (protocol v10,
+/// F25-B): each [`crate::netdrive::RemoteImpact`] `apply_snapshots`
+/// resolved splats its remote copy's [`TexelDamageRig`] — the same
+/// `ApplyDamage` the local stream feeds on the authority, delivered
+/// over the wire instead. `point` is world space like an
+/// `ImpactEvent`'s and lands in car space through the copy's displayed
+/// transform. Scheduled `.after(apply_snapshots)` so a replicated hit
+/// splats in the frame it landed; the reader drains while not
+/// `Playing` like the other impact consumers.
+pub fn apply_remote_texels(
+    mut reader: MessageReader<crate::netdrive::RemoteImpact>,
+    session: Res<Session>,
+    mut images: ResMut<Assets<Image>>,
+    mut rigs: Query<(&GlobalTransform, &mut TexelDamageRig)>,
+    mut report: ResMut<TexelDamageReport>,
+) {
+    if !session.is_playing() {
+        reader.read().for_each(drop);
+        return;
+    }
+    for impact in reader.read() {
+        let Ok((xf, mut rig)) = rigs.get_mut(impact.entity) else {
+            // No rig — a copy whose pick carries no authored damage
+            // record, or whose body bound no `_dmg` pair.
+            continue;
+        };
+        let local = xf.to_matrix().inverse().transform_point3(impact.point);
+        let stamped = rig.apply(local, &mut images);
+        if stamped > 0 {
+            report.impacts += 1;
+            report.splats += stamped as u64;
         }
     }
 }

@@ -1492,6 +1492,15 @@ fn main() {
             .chain()
             .after(netdrive::apply_snapshots),
     )
+    // F25-B: replicated texel damage — the v10 `Snap.impacts` rows a
+    // remote copy's skin splats from (the local stream feeds
+    // `apply_texel_damage` in FixedLast). Same `apply_snapshots` edge
+    // as the spark/audio consumers: a replicated hit splats the frame
+    // it landed, keeping `--frames` captures deterministic.
+    .add_systems(
+        Update,
+        texel_fx::apply_remote_texels.after(netdrive::apply_snapshots),
+    )
     // F18-B.2: authored precipitation — the emitter anchors on the
     // active camera, the cover probe suppresses sheltered spawns and
     // the advance step sweeps contacts so drops land instead of

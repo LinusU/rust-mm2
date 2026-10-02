@@ -125,15 +125,30 @@ id)` (bounded FIFO window), drops stale/unspawned/non-finite rows,
 skips the receiver's own seat — its predicted physics already
 rendered the hit through the local stream — and mints
 `netdrive::RemoteImpact` messages resolved to the live remote copy.
-`spark_fx::emit_sparks` and `audio::impact_voices` now read both
-streams, and on the authority a remote-controlled seat's local-stream
-impacts render like an AI car's (it is a locally simulated
-participant there). What the wire still does not carry: the struck
-side's identity (a replicated row's audio picks the id-0 catch-all)
-and `surface` (no consumer reads it) — and the state-adjacent gaps
-stay open: a remote copy binds no texel rig (its skin never splats)
-and breakaway fragments are authority-spawned state, not
-presentation.
+`spark_fx::emit_sparks`, `audio::impact_voices` and
+`texel_fx::apply_remote_texels` now read both streams, and on the
+authority a remote-controlled seat's local-stream impacts render like
+an AI car's (it is a locally simulated participant there). The texel
+leg (F25-B, same iteration): `spawn_remote` binds a `TexelDamageRig`
+on the authored `vehcardamage` gate exactly like a local pick, seeded
+`generation | wire` the way the smoke/spark rigs are. On the
+authority the seat's local `ImpactEvent`s splat it through
+`apply_texel_damage` — whose `Remote` skip narrows to predicted
+sessions only, since nothing echoes a wire row back at the process
+that authored the hit. On a predicted client a `RemoteImpact`'s
+world point converts through the copy's `GlobalTransform` into the
+car space `rig.apply` wants; a remote copy's local-stream hits stay
+skipped there so nothing double-stamps. Repairs replicate through
+the v8 damage byte alone: `apply_snapshots`' `apply_damage` sees the
+`>0→0` transition — the authority's `resolve_disabled`
+`damage.reset()` + `texel.reset()` pair arriving as state — and runs
+`TexelRepair::reset`, so repeated clean bytes never re-blit a splat
+the accumulator missed. What the wire still does not carry: the
+struck side's identity (a replicated row's audio picks the id-0
+catch-all) and `surface` (no consumer reads it) — and the
+state-adjacent gap stays open: breakaway fragments are
+authority-spawned state, not presentation, so a remote copy's body
+panels never tear off even where its skin now splats.
 
 Handshake (always the first exchange):
 

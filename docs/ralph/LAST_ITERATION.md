@@ -1,3 +1,119 @@
+# Last iteration — F25-B eighth slice: replicated texel damage —
+# remote copies bind a `TexelDamageRig`, splat off the `RemoteImpact`
+# stream, and clear on the replicated damage byte's repair transition
+# (iteration 3, run 20261002T095452-41346)
+
+Implementation iteration on `ralph/night` (baseline `06a027c` — the
+v10 impact-event candidate; external verify + review pass with gaps
+only). The named next slice was the F25-B remainder; this takes the
+texel leg its review named as the open "a remote copy binds no texel
+rig" gap — protocol v10 already carries per-impact positions, so the
+skin can now splat where the hit landed.
+
+## Task selection
+
+No failing gate or blocking finding — the v10 review passed with gaps
+only. Of the named F25-B remainder (result/race state, texel splats,
+breakaway fragments, the AC03 measured matrix, bandwidth budgets),
+texel replication is the highest-value ready slice: every piece it
+needs already exists (`RemoteImpact` rows, `spawn_vehicle_model`'s
+optional rig, `TexelRepair`), the consumers (`spark_fx`, `audio`) just
+proved the exactly-once-per-process pattern, and it closes req 5's
+damage-replication leg presentation-side. Breakaway fragments are a
+bigger slice (authority-spawned state, not presentation).
+
+## What landed
+
+- `netdrive::spawn_remote`: the model build now passes
+  `def.damage.as_ref().map(|d| (d, generation << 32 | wire))` to
+  `car_visual::spawn_vehicle_model` — a remote copy binds
+  `TexelDamageRig` on the same authored `vehcardamage` record +
+  `_dmg`-paired-shader gate a local pick does, seeded off the wire id
+  like the smoke/spark rigs. Nothing new loads; the rig builder is
+  the existing one.
+- `texel_fx::apply_texel_damage`: the authority gate widened to the
+  session — outside `Playing` it drains-and-drops like before; inside
+  it applies local `ImpactEvent`s to every participant on the
+  authority (a `Remote` seat is locally simulated there and splats
+  like an AI car), while on a predicted client the `Remote` skip
+  keeps remote copies off the local stream so a hit never
+  double-stamps. A client's own predicted seat splats off its local
+  stream — `apply_snapshots` never echoes an own-seat row.
+- `texel_fx::apply_remote_texels` (new, Update): reads `RemoteImpact`,
+  resolves the copy's `GlobalTransform` + `TexelDamageRig`, converts
+  the replicated world point to car space, and runs the same
+  `rig.apply` the local stream feeds. Copies without a rig (no
+  authored damage record / no `_dmg` pair) skip silently; the reader
+  drains while not `Playing`. Scheduled `.after(apply_snapshots)` in
+  `main.rs` and `smoke.rs` — a replicated hit splats in the frame it
+  landed (the `smoke.rs` Update tuple hit Bevy's system-config arity
+  cap, so the system registers on its own `add_systems` line).
+- `netdrive::apply_damage` (the v8 damage-byte write): now detects the
+  `>0 → 0` transition — the authority's `resolve_disabled`
+  `damage.reset()` + `texel.reset()` pair arriving as replicated
+  state — and runs `TexelRepair::reset` on it. Splats stamped while
+  the byte read intact stay put (the retail rig splats every
+  `ImpactsTable` entry regardless of the accumulator), and repeated
+  clean bytes are not repairs — only a real transition re-blits. The
+  transition check sits inside the `Option<VehicleDamage>` guard, so
+  undamageable picks keep skipping.
+- `apply_snapshots` threads a `TexelRepair` SystemParam (the bundle
+  `resolve_disabled` already uses) so the wipe runs inside the apply
+  pass.
+- `docs/research/net.md`: the v10 paragraph now records the texel leg
+  and keeps the open gaps honest — no struck-side identity, no
+  `surface`, breakaway fragments still authority-only.
+
+## Tests
+
+`texel_fx` 5→10: `texel_app` gained a `SessionAuthority` parameter
+(the fixture app can now run a predicted session) and the fixture
+spawn moved into `bind_fixture_model`, shared with a new
+`spawn_rigged_remote` that reproduces `spawn_remote`'s component
+shape (`SessionEntity`/`NetPlayer`/`ResetEpoch`/`PlayerControl::Remote`
++ the authored-spec `VehicleDamage`) through the production model
+path. New legs: `a_remote_seat_splats_off_the_local_stream_on_the_
+authority` (Remote participant splats like an AI car where it is
+simulated), `a_predicted_clients_own_seat_splats_off_the_local_stream`,
+`a_remote_copy_ignores_the_local_stream_on_a_predicted_client` (the
+once-per-process contract), `a_replicated_impact_splats_the_remote_
+copy` (`RemoteImpact` → `rig.apply` at the replicated point),
+`a_replicated_repair_restores_the_splats` (byte 200 lands, splat,
+byte 0 re-blits clean, `resets == 1`), `a_replicated_repair_restores_
+the_own_seats_skin` (the predicted seat's own splats wipe on the same
+signal — its `VehicleDamage` is only written by the byte), and
+`a_clean_byte_never_erases_a_splat` (a splat stamped at byte 0
+survives repeated `damage: 0` snaps — `resets == 0`).
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --workspace
+--all-targets --all-features -- -D warnings` clean; `cargo test
+--workspace` green — all binaries, 0 failures (`texel_fx` 10/10).
+
+## Classification / remaining open items
+
+- Implementation choice throughout — rig gating/seed, the `Remote`
+  skip split, the `>0→0`-as-repair read of the v8 byte are all ours;
+  the retail wire protocol is unrecovered, so no original-behavior
+  claim.
+- Evidence: in-process integration legs only — the fixture apps drive
+  the production systems but no process-level session ever produced a
+  nonzero `imp` cell (the dev-world cruise never collides), nothing
+  rendered or driven by hand, no LAN, no retail content exercised.
+- Named gaps stay open: `RemoteImpact` carries no struck-side
+  identity (replicated audio still picks the id-0 catch-all) and no
+  `surface`; a remote copy's splats are presentation-only — its body
+  panels still never detach (breakaway is authority-spawned state);
+  the `RemoteImpact`→rig path keys off the copy's displayed transform
+  a snap behind the authority's.
+- F25-B remaining scope: replicated *result/race* state, remote-copy
+  breakaway fragments, the measured AC03 impairment matrix,
+  bandwidth/update-rate budgets. AC01–AC06 stay open as before; this
+  slice advances req 5's damage leg only.
+
+---
+
 # Last iteration — F25-B seventh slice: replicated impact events —
 # protocol v10 gives `Snap` an `impacts` list so a remote car's
 # per-hit sparks and impact audio render on every process

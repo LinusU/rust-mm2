@@ -10,6 +10,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::car_visual;
+use mm2_app::netdrive::{self, NetPlayer, RemoteImpact, RemoteSnaps, ResetEpoch};
 use mm2_app::session::{SessionControl, SpawnPoint};
 use mm2_app::texel_fx::{self, TexelDamageReport, TexelDamageRig};
 use mm2_app::{contracts, damage};
@@ -20,9 +21,10 @@ use mm2_formats::tune::TuneFile;
 use mm2_formats::veh::VehCarDamage;
 use mm2_game::{
     DamageEvent, DamageSpec, ImpactEvent, ImpactId, ObjectId, ObjectIdentity, Player,
-    PlayerControl, Session, SessionConfig, SessionPhase, SurfaceState, VehicleDamage,
-    advance_session_tick,
+    PlayerControl, Session, SessionAuthority, SessionConfig, SessionEntity, SessionPhase,
+    SurfaceState, VehicleDamage, advance_session_tick,
 };
+use mm2_net::SnapEntry;
 use mm2_vehicle::{TireConditions, VehicleConfig, VehiclePlugin, vehicle_bundle};
 
 /// `VehicleConfig::default().mass` — impulse is `severity × MASS`.
@@ -164,8 +166,20 @@ fn model() -> VehicleModel {
 /// Playing session + the texel pipeline; spawns the fixture model under
 /// a player-marked car and returns app/car/object/vfs.
 fn texel_app(pos: Vec3) -> (App, Entity, ObjectId, Fixture) {
+    texel_app_with(pos, SessionAuthority::Local)
+}
+
+/// `texel_app` under an explicit session authority — the F25-B legs
+/// need a predicted (`Remote`) session to cover the replicated
+/// `RemoteImpact`/damage-byte paths next to the local stream.
+fn texel_app_with(pos: Vec3, authority: SessionAuthority) -> (App, Entity, ObjectId, Fixture) {
     let mut session = Session::new();
-    session.begin(SessionConfig::default()).unwrap();
+    session
+        .begin(SessionConfig {
+            authority,
+            ..SessionConfig::default()
+        })
+        .unwrap();
     session.transition(SessionPhase::Ready).unwrap();
     session.transition(SessionPhase::Playing).unwrap();
     let object = session.mint_object_id();
@@ -189,11 +203,14 @@ fn texel_app(pos: Vec3) -> (App, Entity, ObjectId, Fixture) {
         .add_plugins(VehiclePlugin)
         .add_message::<ImpactEvent>()
         .add_message::<DamageEvent>()
+        .add_message::<RemoteImpact>()
         .insert_resource(contracts::ImpactFilter::default())
         .init_resource::<damage::DamageReport>()
         .init_resource::<mm2_app::breakaway::BreakReport>()
         .init_resource::<TexelDamageReport>()
         .init_resource::<SessionControl>()
+        .init_resource::<RemoteSnaps>()
+        .init_resource::<netdrive::NetDriveReport>()
         .init_resource::<Assets<Image>>()
         .init_resource::<Assets<StandardMaterial>>()
         .insert_resource(SpawnPoint::new(pos, 0.0))
@@ -207,6 +224,13 @@ fn texel_app(pos: Vec3) -> (App, Entity, ObjectId, Fixture) {
                 damage::resolve_disabled,
             )
                 .chain(),
+        )
+        .add_systems(
+            Update,
+            (
+                netdrive::apply_snapshots,
+                texel_fx::apply_remote_texels.after(netdrive::apply_snapshots),
+            ),
         );
     app.finish();
     app.cleanup();
@@ -229,10 +253,16 @@ fn texel_app(pos: Vec3) -> (App, Entity, ObjectId, Fixture) {
             Transform::from_translation(pos),
         ))
         .id();
+    bind_fixture_model(&mut app, &fixture, car, 42);
+    (app, car, object, fixture)
+}
 
-    // Spawn the model through the production path — rig build included.
-    // `Commands` borrows the world immutably, so the asset stores are
-    // swapped out for the call and put back after the queue applies.
+/// Spawn the fixture model through the production path — rig build
+/// included. `Commands` borrows the world immutably, so the asset
+/// stores are swapped out for the call and put back after the queue
+/// applies; a closing `update` settles the transform propagation the
+/// rig's world→car-space read needs.
+fn bind_fixture_model(app: &mut App, fixture: &Fixture, entity: Entity, seed: u64) {
     let model = model();
     let damage = damage_record();
     let (mut images, mut materials, mut meshes) = {
@@ -255,8 +285,8 @@ fn texel_app(pos: Vec3) -> (App, Entity, ObjectId, Fixture) {
             &mut meshes,
             &mut images,
             &mut materials,
-            car,
-            Some((&damage, 42)),
+            entity,
+            Some((&damage, seed)),
         )
     };
     assert!(missing.is_empty(), "fixture textures resolve: {missing:?}");
@@ -268,7 +298,93 @@ fn texel_app(pos: Vec3) -> (App, Entity, ObjectId, Fixture) {
         *world.resource_mut::<Assets<Mesh>>() = meshes;
     }
     app.update();
-    (app, car, object, fixture)
+}
+
+/// A remote-participant row: `spawn_remote`'s component shape — the
+/// wire seat markers (`NetPlayer`/`ResetEpoch`) and rigid state
+/// `apply_snapshots` reconciles, the authored damage spec and the
+/// bound texel rig — driven through the same production systems.
+fn spawn_rigged_remote(
+    app: &mut App,
+    fixture: &Fixture,
+    pos: Vec3,
+    wire: u16,
+    control: PlayerControl,
+) -> (Entity, ObjectId) {
+    let (object, player, role, generation) = {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        (
+            session.mint_object_id(),
+            session.mint_player_id(),
+            session.authority_role(),
+            session.generation(),
+        )
+    };
+    let car = app
+        .world_mut()
+        .spawn((
+            SessionEntity(generation),
+            ObjectIdentity(object),
+            Player {
+                id: player,
+                control,
+            },
+            role,
+            NetPlayer(wire),
+            ResetEpoch(0),
+            mm2_game::DamageSignals::default(),
+            VehicleDamage::new(SPEC),
+            vehicle_bundle(&VehicleConfig::default()),
+            Position(pos),
+            Transform::from_translation(pos),
+        ))
+        .id();
+    bind_fixture_model(app, fixture, car, u64::from(wire));
+    (car, object)
+}
+
+/// A minimal `SnapEntry` for the `RemoteSnaps` legs — every field the
+/// apply path ignores sits at its wire zero.
+fn snap_entry(player: u16, damage: u8) -> SnapEntry {
+    SnapEntry {
+        player,
+        pos: [0.0; 3],
+        rot: [0.0, 0.0, 0.0, 1.0],
+        vel: [0.0; 3],
+        angvel: [0.0; 3],
+        epoch: 0,
+        steer: 0,
+        spin: 0,
+        compression: 0,
+        flags: 0,
+        damage,
+    }
+}
+
+/// The rig's writable skin and the clean image it was cloned from —
+/// the pair every splat/repair assertion compares.
+fn skin(app: &App, entity: Entity) -> (Handle<Image>, Vec<u8>) {
+    let rig = app.world().get::<TexelDamageRig>(entity).unwrap();
+    let clean = app
+        .world()
+        .resource::<Assets<Image>>()
+        .get(&rig.slots[0].clean)
+        .unwrap()
+        .data
+        .clone()
+        .unwrap();
+    (rig.slots[0].current.clone(), clean)
+}
+
+/// The writable skin's current bytes.
+fn skin_data(app: &App, current: &Handle<Image>) -> Vec<u8> {
+    app.world()
+        .resource::<Assets<Image>>()
+        .get(current)
+        .unwrap()
+        .data
+        .clone()
+        .unwrap()
 }
 
 #[test]
@@ -403,6 +519,260 @@ fn an_impact_splats_the_clone_and_a_repair_restores_it() {
         Some(clean_data.as_slice()),
         "reset re-blits the clean texture"
     );
+}
+
+/// Deliver one synthetic impact into the session's local stream,
+/// stamped with the live generation/tick like `collect_impacts`
+/// writes.
+fn write_hit(app: &mut App, id: u64, a: ObjectId, b: ObjectId, point: Vec3) {
+    let (generation, tick) = {
+        let s = app.world().resource::<Session>();
+        (s.generation(), s.tick())
+    };
+    app.world_mut()
+        .resource_mut::<Messages<ImpactEvent>>()
+        .write(ImpactEvent {
+            id: ImpactId(id),
+            generation,
+            tick,
+            participants: (a, b),
+            point,
+            normal: Vec3::Y,
+            severity: 10.0,
+            surface: SurfaceState::default(),
+        });
+}
+
+/// Stage a snapshot frame into the client's inbox — the same
+/// `RemoteSnaps::push` the lobby pump performs, minus the wire.
+fn push_snap(app: &mut App, tick: u64, entries: Vec<SnapEntry>) {
+    let generation = app.world().resource::<Session>().generation();
+    app.world_mut().resource_mut::<RemoteSnaps>().push(
+        generation,
+        tick,
+        entries,
+        Vec::new(),
+        Vec::new(),
+    );
+}
+
+/// F25-B: on the authority a remote seat is a locally simulated
+/// participant — its skin splats off the local impact stream like an
+/// AI car's. The `Remote` skip narrows to predicted sessions only; the
+/// wire never echoes an impact back at the process that owns the rig.
+#[test]
+fn a_remote_seat_splats_off_the_local_stream_on_the_authority() {
+    let (mut app, _car, _object, fixture) = texel_app(Vec3::new(0.0, 1.2, 0.0));
+    let (remote, roid) = spawn_rigged_remote(
+        &mut app,
+        &fixture,
+        Vec3::new(20.0, 1.2, 0.0),
+        3,
+        PlayerControl::Remote,
+    );
+    let (current, clean) = skin(&app, remote);
+    write_hit(
+        &mut app,
+        1,
+        roid,
+        ObjectId::WORLD,
+        Vec3::new(20.2, 1.2, 0.2),
+    );
+    app.update();
+    assert_eq!(app.world().resource::<TexelDamageReport>().impacts, 1);
+    assert_ne!(
+        skin_data(&app, &current),
+        clean,
+        "the authority's copy of a remote car splats"
+    );
+}
+
+/// F25-B: a predicted client's own seat splats off the local stream —
+/// its predicted sim produced the hit, and `apply_snapshots` never
+/// echoes our own seat's rows back.
+#[test]
+fn a_predicted_clients_own_seat_splats_off_the_local_stream() {
+    let (mut app, car, object, _f) =
+        texel_app_with(Vec3::new(0.0, 1.2, 0.0), SessionAuthority::Remote);
+    app.world_mut()
+        .entity_mut(car)
+        .insert((NetPlayer(1), ResetEpoch(0)));
+    let (current, clean) = skin(&app, car);
+    write_hit(
+        &mut app,
+        1,
+        object,
+        ObjectId::WORLD,
+        Vec3::new(0.2, 1.2, 0.2),
+    );
+    app.update();
+    assert_eq!(app.world().resource::<TexelDamageReport>().impacts, 1);
+    assert_ne!(skin_data(&app, &current), clean);
+}
+
+/// F25-B: on a predicted client a remote copy stays clean off the
+/// local stream — the same hit arrives as a `RemoteImpact` row off the
+/// snap tail, so splatting here too would double the effect.
+#[test]
+fn a_remote_copy_ignores_the_local_stream_on_a_predicted_client() {
+    let (mut app, _car, _object, fixture) =
+        texel_app_with(Vec3::new(0.0, 1.2, 0.0), SessionAuthority::Remote);
+    let (remote, roid) = spawn_rigged_remote(
+        &mut app,
+        &fixture,
+        Vec3::new(20.0, 1.2, 0.0),
+        3,
+        PlayerControl::Remote,
+    );
+    let (current, clean) = skin(&app, remote);
+    write_hit(
+        &mut app,
+        1,
+        roid,
+        ObjectId::WORLD,
+        Vec3::new(20.2, 1.2, 0.2),
+    );
+    app.update();
+    assert_eq!(app.world().resource::<TexelDamageReport>().impacts, 0);
+    assert_eq!(skin_data(&app, &current), clean);
+}
+
+/// F25-B (protocol v10): a `RemoteImpact` resolved by
+/// `apply_snapshots` splats the remote copy's rig — the same
+/// `ApplyDamage` the local stream feeds, at the replicated point.
+#[test]
+fn a_replicated_impact_splats_the_remote_copy() {
+    let (mut app, _car, _object, fixture) =
+        texel_app_with(Vec3::new(0.0, 1.2, 0.0), SessionAuthority::Remote);
+    let (remote, _roid) = spawn_rigged_remote(
+        &mut app,
+        &fixture,
+        Vec3::new(20.0, 1.2, 0.0),
+        3,
+        PlayerControl::Remote,
+    );
+    let (current, clean) = skin(&app, remote);
+    app.world_mut().write_message(RemoteImpact {
+        entity: remote,
+        point: Vec3::new(20.2, 1.2, 0.2),
+        normal: Vec3::Y,
+        severity: 10.0,
+    });
+    app.update();
+    assert_eq!(app.world().resource::<TexelDamageReport>().impacts, 1);
+    assert_ne!(skin_data(&app, &current), clean);
+}
+
+/// F25-B: the wire's repair signal is the damage byte's >0→0
+/// transition — `resolve_disabled`'s `damage.reset()` + `texel.reset()`
+/// pair arriving by replication. The splats land while the seat reads
+/// damaged, then the healed snap re-blits the clean texture.
+#[test]
+fn a_replicated_repair_restores_the_splats() {
+    let (mut app, _car, _object, fixture) =
+        texel_app_with(Vec3::new(0.0, 1.2, 0.0), SessionAuthority::Remote);
+    let (remote, _roid) = spawn_rigged_remote(
+        &mut app,
+        &fixture,
+        Vec3::new(20.0, 1.2, 0.0),
+        3,
+        PlayerControl::Remote,
+    );
+    let (current, clean) = skin(&app, remote);
+
+    // Damage lands (byte 200/255), then a replicated impact splats.
+    push_snap(&mut app, 1, vec![snap_entry(3, 200)]);
+    app.world_mut().write_message(RemoteImpact {
+        entity: remote,
+        point: Vec3::new(20.2, 1.2, 0.2),
+        normal: Vec3::Y,
+        severity: 10.0,
+    });
+    app.update();
+    assert_ne!(skin_data(&app, &current), clean, "the hit splatted");
+    assert!(
+        app.world().get::<VehicleDamage>(remote).unwrap().total() > 0.0,
+        "the byte reconstituted a damaged total"
+    );
+
+    // The authority repairs: the byte drops >0→0 and the skin follows.
+    push_snap(&mut app, 2, vec![snap_entry(3, 0)]);
+    app.update();
+    assert_eq!(
+        skin_data(&app, &current),
+        clean,
+        "the replicated repair re-blitted the clean texture"
+    );
+    assert_eq!(app.world().resource::<TexelDamageReport>().resets, 1);
+}
+
+/// The own seat takes the same repair: under prediction its
+/// `VehicleDamage` is written only by the replicated byte, so the
+/// byte's `>0 → 0` transition is also the wipe for splats its local
+/// stream stamped.
+#[test]
+fn a_replicated_repair_restores_the_own_seats_skin() {
+    let (mut app, car, object, _f) =
+        texel_app_with(Vec3::new(0.0, 1.2, 0.0), SessionAuthority::Remote);
+    app.world_mut()
+        .entity_mut(car)
+        .insert((NetPlayer(1), ResetEpoch(0)));
+    let (current, clean) = skin(&app, car);
+
+    // The seat reads damaged off the wire, then its local hit splats.
+    push_snap(&mut app, 1, vec![snap_entry(1, 200)]);
+    write_hit(
+        &mut app,
+        1,
+        object,
+        ObjectId::WORLD,
+        Vec3::new(0.2, 1.2, 0.2),
+    );
+    app.update();
+    assert_ne!(skin_data(&app, &current), clean);
+
+    // The replicated repair clears it.
+    push_snap(&mut app, 2, vec![snap_entry(1, 0)]);
+    app.update();
+    assert_eq!(skin_data(&app, &current), clean);
+    assert_eq!(app.world().resource::<TexelDamageReport>().resets, 1);
+}
+
+/// Retail splats ride the impact stream, not the damage accumulator —
+/// a splat stamped while the replicated byte reads intact stays put,
+/// and only a real >0→0 repair transition re-blits. Repeated
+/// `damage: 0` snaps are not repairs.
+#[test]
+fn a_clean_byte_never_erases_a_splat() {
+    let (mut app, _car, _object, fixture) =
+        texel_app_with(Vec3::new(0.0, 1.2, 0.0), SessionAuthority::Remote);
+    let (remote, _roid) = spawn_rigged_remote(
+        &mut app,
+        &fixture,
+        Vec3::new(20.0, 1.2, 0.0),
+        3,
+        PlayerControl::Remote,
+    );
+    let (current, clean) = skin(&app, remote);
+    push_snap(&mut app, 1, vec![snap_entry(3, 0)]);
+    app.world_mut().write_message(RemoteImpact {
+        entity: remote,
+        point: Vec3::new(20.2, 1.2, 0.2),
+        normal: Vec3::Y,
+        severity: 10.0,
+    });
+    app.update();
+    assert_ne!(
+        skin_data(&app, &current),
+        clean,
+        "the impact splatted an intact-skinned car"
+    );
+    // More clean snaps — never a transition, never a reset.
+    push_snap(&mut app, 2, vec![snap_entry(3, 0)]);
+    push_snap(&mut app, 3, vec![snap_entry(3, 0)]);
+    app.update();
+    assert_ne!(skin_data(&app, &current), clean);
+    assert_eq!(app.world().resource::<TexelDamageReport>().resets, 0);
 }
 
 #[test]

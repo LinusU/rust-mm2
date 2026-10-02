@@ -45,8 +45,10 @@ landed this iteration — protocol v10 `Snap.impacts` replicates the
 authority's filtered `ImpactEvent` stream as per-seat point/normal/
 severity rows, deduped `(generation, seat, id)` client-side and
 replayed through a `RemoteImpact` stream so remote copies spark and
-voice their hits on every process; still open: replicated
-result/race state, texel splats and breakaway fragments on remote
+voice their hits on every process — and this iteration's texel leg
+now splats remote skins off the same stream and clears them on the
+replicated damage byte's repair transition; still open: replicated
+result/race state, breakaway fragments on remote
 copies, the measured AC03 impairment matrix, bandwidth budgets), the F24-B
 remainder (B.7 landed the Bevy-side
 client bridge — `mm2 --join` consumes `Start` into the shared

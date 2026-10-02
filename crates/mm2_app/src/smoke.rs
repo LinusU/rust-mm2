@@ -668,6 +668,13 @@ fn run_headless(
                 crate::wheel_fx::advance_wheel_fx,
             )
                 .chain(),
+        )
+        // F25-B: replicated texel splats — own slot like the other FX
+        // splits; the snap-apply edge lands a remote hit's splat in
+        // its arrival frame.
+        .add_systems(
+            Update,
+            crate::texel_fx::apply_remote_texels.after(crate::netdrive::apply_snapshots),
         );
     if driver == Driver::Scripted {
         app.insert_resource(scripted::ScriptedDrive);
