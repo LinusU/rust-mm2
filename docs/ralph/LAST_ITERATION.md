@@ -1,3 +1,73 @@
+# Last iteration — external-gate repair: the `net_app` bridge tests'
+# start-gate race — `set_*` → `host.start` now waits for the roster
+# echo (iteration 031, run 20261001T195454-62282 continued)
+
+Repair iteration on `ralph/night` (baseline `b73f875` — the F25-B
+first-slice candidate; external verify **failed**: `cargo test
+--locked --workspace` exit 101 —
+`r_under_a_remote_session_asks_the_authority` panicked `no host event:
+Timeout` at `net_app.rs:188`, i.e. `until_started` never saw
+`Started`).
+
+## Root cause
+
+Not the feature — a test-side race shared by every `link.ctl().set_*`
+→ `host.start` leg. `set_vehicle`/`set_ready` write to the socket; the
+host's per-peer reader thread forwards `PeerMessage` into the loop's
+control channel, while `host.start` sends `LoopMsg::Start` from the
+test thread — two producers racing on one channel. The bare
+`app.update()` between them only pumps the *client* app; when `Start`
+wins, the loop's start gate sees a not-ready player and emits
+`StartRefused` ("alice is not ready"), which `until_started` discarded
+until `recv_timeout` fired — a 15 s stall instead of the real reason.
+The older legs carried the same latent race; the new client-leg test
+lost it under verify load. `ready_peer`, the `net_host` record legs
+and the mm2_net lobby tests were already synchronized — they wait for
+the roster broadcast, the `event=ready` record line, or per-event
+`recv`s. No production code is implicated: an operator's start is
+human-timescale after readying, and the dedicated host reads its own
+event confirmations.
+
+## What landed
+
+- `net_app.rs` +`until_ready` — the `LobbyLink` half of `ready_peer`'s
+  discipline: `app.update()`s until `LobbyState.roster` echoes our own
+  slot `ready` with a pick. The loop broadcasts the roster only
+  *after* applying each `SetVehicle`/`SetReady`, so the echo is the
+  happens-before `host.start` needs. Applied at all six racy sites
+  (`a_start_begins_the_wired_session`,
+  `a_cancel_returns_the_session_to_the_lobby`,
+  `a_start_mid_session_parks_until_teardown_lands`,
+  `losing_the_host_tears_down_and_exits`,
+  `a_remote_drivers_reset_request_resets_its_seat`,
+  `r_under_a_remote_session_asks_the_authority`), replacing the bare
+  `app.update()`.
+- `until_started` now panics on `StartRefused` with the host's reason
+  — a refused start is the answer, not a 15 s wait for `Started`.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked --workspace
+--all-targets --all-features -- -D warnings` clean; `cargo test
+--locked --workspace` green — 90 suites, 0 failures; `net_app` 31/31
+in 8.18 s (the failed run burned 15 s on the timeout alone).
+
+## Classification / remaining open items
+
+- Test-only change — no production behavior moved, no gate muted, no
+  assertion narrowed; the refusal path itself is unchanged (the
+  mm2_net `StartRefused` legs already cover it). The repair makes the
+  ordering deterministic rather than retrying the racy command.
+- F25-B's open scope is unchanged: replicated damage/result/
+  wheel-engine presentation for remote drivers, deduplicated
+  audio/effects on remote cars, the impairment harness
+  (delay/jitter/loss/duplication/reorder — spec req 13), bandwidth/
+  update-rate budgets. Evidence stays synthetic/loopback — no
+  two-process driving session, no retail-install leg, no rendered
+  observation. F25-AC01..AC06 remain open.
+
+---
+
 # Last iteration — F25-B first slice: the wire-carried driver reset
 # request — `R` under a predicted session asks the authority to reset
 # its seat (iteration 030, run 20261001T195454-62282 continued)

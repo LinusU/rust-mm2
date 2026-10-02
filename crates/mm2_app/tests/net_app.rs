@@ -189,11 +189,16 @@ fn host_event(host: &Host) -> HostEvent {
 }
 
 /// Drain host events until the `Started` verdict; returns the minted
-/// generation.
+/// generation. A `StartRefused` verdict is the answer too — panic with
+/// its reason instead of timing out on a `Started` that never comes.
 fn until_started(host: &Host) -> u64 {
     loop {
-        if let HostEvent::Started { generation } = host_event(host) {
-            return generation;
+        match host_event(host) {
+            HostEvent::Started { generation } => return generation,
+            HostEvent::StartRefused { reason } => {
+                panic!("the host refused the start: {reason}")
+            }
+            _ => {}
         }
     }
 }
@@ -269,7 +274,9 @@ fn a_start_begins_the_wired_session_under_the_lobby_generation() {
     link.ctl().set_vehicle("", 0).unwrap();
     link.ctl().set_ready(true).unwrap();
     let mut app = bridge_app(vfs, link);
-    app.update(); // join broadcast: Session ad + roster + pick echo
+    // join broadcast: Session ad + roster + pick echo — the echoed
+    // ready flag is also the happens-before `start` needs.
+    until_ready(&mut app);
 
     host.start(LateJoin::Open).unwrap();
     let generation = until_started(&host);
@@ -297,7 +304,7 @@ fn a_cancel_returns_the_session_to_the_lobby() {
     link.ctl().set_vehicle("", 0).unwrap();
     link.ctl().set_ready(true).unwrap();
     let mut app = bridge_app(vfs, link);
-    app.update();
+    until_ready(&mut app);
     host.start(LateJoin::Open).unwrap();
     until_started(&host);
     until_begun(&mut app); // Start → Loading
@@ -355,7 +362,7 @@ fn a_start_mid_session_parks_until_teardown_lands() {
         .resource_mut::<Session>()
         .begin(dev_cruise())
         .unwrap();
-    app.update();
+    until_ready(&mut app);
 
     host.start(LateJoin::Open).unwrap();
     let wire_generation = until_started(&host);
@@ -418,7 +425,7 @@ fn losing_the_host_tears_down_and_exits() {
     link.ctl().set_vehicle("", 0).unwrap();
     link.ctl().set_ready(true).unwrap();
     let mut app = bridge_app(vfs, link);
-    app.update();
+    until_ready(&mut app);
     host.start(LateJoin::Open).unwrap();
     until_started(&host);
     until_begun(&mut app); // Start → Loading
@@ -633,6 +640,24 @@ fn spin(app: &mut App, pred: impl Fn(&App) -> bool) {
         thread::sleep(Duration::from_millis(5));
     }
     panic!("the app never reached the expected state");
+}
+
+/// The `LobbyLink` half of `ready_peer`'s discipline: `set_*` writes
+/// ride the socket through the host's reader thread, so a `Start` sent
+/// before the roster echo showing our pick+ready can reach the loop's
+/// control channel first and be refused. The loop broadcasts the
+/// roster only after applying each update, so the echoed flag is the
+/// happens-before `host.start` needs.
+fn until_ready(app: &mut App) {
+    spin(app, |a| {
+        let world = a.world();
+        let our_id = world.resource::<LobbyLink>().player_id();
+        world
+            .resource::<LobbyState>()
+            .roster
+            .iter()
+            .any(|e| e.player_id == our_id && e.ready && e.pick.is_some())
+    });
 }
 
 /// The minimal test app has no `InputPlugin` clearing `ButtonInput`
@@ -1851,7 +1876,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
         link.ctl().set_vehicle("", 0).unwrap();
         link.ctl().set_ready(true).unwrap();
     }
-    app.update();
+    until_ready(&mut app);
     host.start(LateJoin::Open).unwrap();
     until_started(&host);
     until_begun(&mut app);
@@ -2444,7 +2469,7 @@ fn r_under_a_remote_session_asks_the_authority() {
         link.ctl().set_vehicle("", 0).unwrap();
         link.ctl().set_ready(true).unwrap();
     }
-    app.update();
+    until_ready(&mut app);
     host.start(LateJoin::Open).unwrap();
     until_started(&host);
     until_begun(&mut app);
