@@ -1,3 +1,81 @@
+# Last iteration — F25-B measurement slice: `RemoteSnaps::push`
+# gains a `(generation, tick)` watermark so a reordered/duplicated
+# frame can no longer displace a newer staged pose, `LinkStats`
+# measures payload bytes and delay-holds, and the `net=` record
+# reports client-side stale drops (`snap<x>`) (new-run iteration 1)
+
+Resume-and-finish iteration on `ralph/night` (baseline `b2999a0` —
+the trailer-leg candidate; external verify + review pass with gaps
+only). The previous run's iteration 2 was interrupted mid-slice with
+this work uncommitted in the tree (the push gate + `stale` counter and
+the `LinkStats` counters were already written; the report fold, the
+`net=` cell, and all test coverage were not). This iteration completed
+that slice rather than opening unrelated work — same disposition as
+the previous run's iteration 1 gave *its* interrupted predecessor.
+
+## What landed
+
+- `RemoteSnaps::push` is now latest-wins on the frame's own
+  `(generation, tick)` instead of arrival order: an incoming frame at
+  or behind the staged-or-applied watermark drops counted into a new
+  `stale` counter — under a reorder/duplicate recipe an old frame can
+  no longer clobber a newer pending pose for a frame. Its impact rows
+  still queue: events outlive the frame that carried them.
+- `NetDriveReport::snaps_staled` folds the push-time count
+  (`apply_snapshots` folds every run — a stale drop can land when
+  nothing is staged) plus the now-unreachable-in-practice apply-side
+  stale drop, kept as a counted guard.
+- `net=`'s snap cell gained a third counter — `snap<s>s/<a>a/<x>x`,
+  sent/applied/staled — matching `in`'s existing `<x>` convention.
+- `LinkStats` gained `bytes_in`/`bytes_out` (payload bytes, each
+  duplicated copy re-paying) and `delayed` (frames scheduled with a
+  positive delay/jitter hold; a reorder-held frame counts once for
+  the hold and once for its delayed release) — the measured half of
+  F25-B req 6's bandwidth/delay budget evidence.
+- `net_drive`'s parser reads the new cell; the impaired two-process
+  leg now asserts `bytes_*`/`delayed` on both proxy directions and
+  `snaps_staled > 0` across the client records — the AC03
+  stale-state measure landing on real processes.
+
+## Tests
+
+`netdrive` 14→16: `a_stale_snap_drops_at_push_but_keeps_its_events`
+(straggler/dup at or behind the watermark drops counted and cannot
+displace a newer staged pose, its impact rows still queue and dedup,
+latest-wins still moves forward, the applied watermark gates with
+nothing staged, a new generation is never stale) and
+`apply_snapshots_reports_the_stale_drops` (the fold runs even when
+nothing applies). `mm2_net` impair legs extended: byte counts on the
+transparent/clean/reorder/duplicate/delay legs and `delayed` on the
+delay/reorder legs (reorder alone pays no delay-hold — `reordered`
+counts it). `net_drive::an_impaired_two_process_session_still_
+converges` gained the `bytes_*`/`delayed`/stale-cell asserts — and
+produces them over real loopback.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` green — 91 binaries, 0 failures
+(`netdrive` unit 16/16, `mm2_net` 80/80, `net_drive` 2/2 incl. the
+impaired leg).
+
+## Classification / remaining open items
+
+- Implementation choice throughout — the watermark ordering, the
+  counter shapes and the record cell are ours; the retail wire
+  protocol is unrecovered, so no original-behavior claim.
+- Evidence: in-process unit + integration legs plus the two-process
+  impaired leg over real loopback — still no LAN, no rendered/manual
+  observation, no retail content.
+- F25-B remaining scope: replicated result/race state, remote-copy
+  breakaway fragments, the full documented AC03 impairment *matrix*
+  (this landed the measurement plumbing and one measured recipe, not
+  a grid), the written bandwidth/update-rate budget doc the new
+  `bytes_*` counters now feed. AC01–AC06 stay open.
+
+---
+
 # Last iteration — F25-B repair: the trailer leg's three copy-side
 # review findings — grounded bit lands on the copy's wheel state, the
 # hitch joint despawns with its trailer, the predicted copy carries

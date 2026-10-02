@@ -57,10 +57,18 @@ next iteration repaired the trailer leg's three copy-side review
 findings (the grounded bit now drives the copy's wheel droop through
 `VehicleState`, the hitch joint rides `ChildOf` the trailer so a
 despawn sweeps it, and the predicted copy carries `DamageSignals`
-like every trailer); still
+like every trailer); the
+following iteration landed the measurement slice — `RemoteSnaps::push`
+is latest-wins on the frame's own `(generation, tick)` watermark so a
+reordered/duplicated frame drops counted (`net=`'s new `snap<x>`
+cell) instead of clobbering a newer staged pose, and `LinkStats`
+gained `bytes_*`/`delayed` counters the impaired two-process leg now
+asserts; still
 open: replicated
 result/race state, breakaway fragments on remote
-copies, the measured AC03 impairment matrix, bandwidth budgets), the F24-B
+copies, the measured AC03 impairment matrix (the plumbing and one
+measured recipe landed, not a grid), the written
+bandwidth/update-rate budget), the F24-B
 remainder (B.7 landed the Bevy-side
 client bridge — `mm2 --join` consumes `Start` into the shared
 `Session` lifecycle; iter 020 repaired its two external-review
