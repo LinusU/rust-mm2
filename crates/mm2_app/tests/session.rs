@@ -1449,6 +1449,91 @@ fn r_is_inert_under_remote_authority() {
     assert!(phase_is(&mut app, SessionPhase::Playing));
 }
 
+/// F25-A.7 repair (the iteration-009 review's blocking finding):
+/// `--reset-at` emits the same `spawn_resets` bundle as the `R` key
+/// and it *does* reach a `Remote` session — the flag is absent from
+/// `--join`'s conflicts list and `net::start` stamps the client's
+/// `dev` flags onto the accepted config — so the scheduled teleport
+/// shares the key's authority gate. A predicted session writes no
+/// `ResetVehicle` and never self-teleports; the `Host` leg proves the
+/// gate is the authority boundary, not "dev flags die under
+/// networking".
+#[test]
+fn reset_at_is_inert_under_remote_authority() {
+    for authority in [SessionAuthority::Remote, SessionAuthority::Host] {
+        let mut app = test_app(
+            SessionConfig {
+                authority,
+                dev: DevOverrides {
+                    reset_at: Some(100),
+                    ..DevOverrides::default()
+                },
+                ..SessionConfig::default()
+            },
+            1.0 / 60.0,
+        );
+        assert!(run_until(&mut app, 12, |a| phase_is(
+            a,
+            SessionPhase::Playing
+        )));
+        let car = single::<With<PlayerVehicle>>(&mut app);
+        app.world_mut()
+            .get_mut::<VehicleInput>(car)
+            .unwrap()
+            .throttle = 1.0;
+        // Anything buffered at spawn drains here so the count below is
+        // the scheduled flag alone.
+        let _ = app
+            .world_mut()
+            .resource_mut::<Messages<ResetVehicle>>()
+            .drain()
+            .count();
+
+        match authority {
+            SessionAuthority::Remote => {
+                // Tick 100 at 120 Hz is ~50 updates — drive well past
+                // the threshold; the flag must never have fired.
+                for _ in 0..200 {
+                    app.update();
+                }
+                let pos = app.world().get::<Transform>(car).unwrap().translation;
+                assert!(
+                    pos.distance(Vec3::new(0.0, 1.5, 0.0)) > 5.0,
+                    "control leg: the car actually left the spawn, still at {pos:?}"
+                );
+                let resets = app
+                    .world_mut()
+                    .resource_mut::<Messages<ResetVehicle>>()
+                    .drain()
+                    .count();
+                assert_eq!(
+                    resets, 0,
+                    "a Remote-authority --reset-at wrote a reset message"
+                );
+                assert!(
+                    app.world().get::<Teleported>(car).is_none(),
+                    "a Remote-authority --reset-at teleported the predicted car"
+                );
+            }
+            _ => {
+                assert!(
+                    run_until(&mut app, 120, |a| a
+                        .world()
+                        .get::<Teleported>(car)
+                        .is_some()),
+                    "the scheduled reset never landed under Host authority"
+                );
+                let pos = app.world().get::<Transform>(car).unwrap().translation;
+                assert!(
+                    pos.distance(Vec3::new(0.0, 1.5, 0.0)) < 3.0,
+                    "the reset put the car back on the spawn point, got {pos:?}"
+                );
+            }
+        }
+        assert!(phase_is(&mut app, SessionPhase::Playing));
+    }
+}
+
 /// F25-A.7: the self-right assist is authority-gated like the `R`
 /// bundle. `load_session_world` stamps `ResetAuthority` from the
 /// session's authority, so under `Remote` an upended predicted car

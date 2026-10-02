@@ -1,3 +1,82 @@
+# Last iteration — external-review repair: `dev_reset_at` joins the
+# authority gate — `--join --reset-at` can no longer self-teleport a
+# predicted seat (iteration 029, run 20261001T195454-62282 continued)
+
+Repair iteration on `ralph/night` (baseline `f6782a1` — the F25-A.7
+candidate; external verify green, review **fail** on one blocking
+finding inside the candidate's own closing claim).
+
+## Task selection
+
+The A.7 review refuted the iteration's closing claim that every local
+`ResetVehicle` writer is "authority-gated or wire-impossible":
+`session::dev_reset_at` carried no authority check and *is* reachable
+under `Remote` — `--reset-at` is absent from `--join`'s conflicts
+list, `LobbyLink::join` hands `cli.dev` to the link, and `net::start`
+deliberately stamps `config.dev = link.dev.clone()` onto the accepted
+config so evidence flags still apply locally. `mm2 --join <addr>
+--reset-at N` therefore fired the shared `spawn_resets` bundle under
+predicted authority — a local self-teleport of the predicted own seat
+that the host never declares, while the client's `ResetEpoch` never
+moves (`track_reset_epochs` is host-only) and epoch-equal own-seat
+`Snap` entries stay ignored: exactly the permanent divergence the A.5
+`R` gate closed. The asymmetry with `reset_input` — same bundle,
+gated since A.5 — made it an oversight, not a designed dev exception.
+Repair ahead of any new feature work; no unrelated work taken.
+
+## What landed
+
+- `session::dev_reset_at` early-returns under
+  `!session.authority_role().is_authority()` — the same predicate in
+  the same position as `reset_input`'s gate. The flag keeps its
+  evidence role on authoritative sessions (`Local`; a `Host`
+  advertisement could never carry it — `net::advertise` refuses dev
+  overrides — but the gate sits on the authority boundary like every
+  other writer) and is inert under `Remote`.
+- The system's doc now records the reachability — `--reset-at` does
+  not conflict with `--join`, and `net::start` stamps the client's
+  `dev` flags onto the accepted config — so the gate reads as
+  deliberate rather than belt-and-braces.
+- Ledger correction in place: the A.7 entry/row's "or wire-impossible
+  (dev overrides refused by `net::advertise`)" was false for the
+  client path — that refusal only covers *hosting*.
+
+## Tests
+
+- `session` +1 — `reset_at_is_inert_under_remote_authority`: a
+  `Remote` session carrying `dev.reset_at` drives past the tick with
+  zero `ResetVehicle` messages, no `Teleported`, the predicted car
+  never returning to spawn; the `Host` leg still fires through the
+  production path (`Teleported` + back on the spawn point), proving
+  the gate is the authority boundary rather than dev flags dying
+  under networking.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked --workspace
+--all-targets --all-features -- -D warnings` clean; `cargo test
+--locked --workspace` green — 90 suites, 0 failures (session 29/29).
+
+## Classification / remaining open items
+
+- Implementation choice encoding the same designed policy as the
+  other reset gates (a predicted session never self-teleports; spec
+  req 4). `dev_finish`'s direct `Position` write remains the one
+  disclosed dev exception — it was never a `ResetVehicle` writer, so
+  it sits outside the refuted claim's scope, and its Local-only
+  reasoning stands as documented in A.6/A.7.
+- All other A.7 disclosures stand: FixedLast-writer same-`Snap`
+  coherence is reasoned from schedule order, gyro-ledger preservation
+  across resets is designed with its original-rule status unverified,
+  and the open F25-A scope is unchanged (drift reconciliation, input
+  replay, replicated damage/result presentation, rate limiting,
+  interpolation tuning, the F25-B wire reset request).
+- Evidence stays synthetic/loopback — no two-process driving session,
+  no impairment matrix, no retail-install leg (no content paths
+  changed), no rendered observation. F25-AC01..AC06 remain open.
+
+---
+
 # Last iteration — F25-A.7: the self-right assist joins the authority
 # gate — a predicted session never self-teleports (iteration 028, run
 # 20261001T195454-62282 continued)
@@ -37,8 +116,13 @@ as a resource the app stamps — the `TireConditions` pattern.
   `TireConditions` write — re-stamped on every load so a networked
   session's gate cannot leak into the next local one. Every local
   `ResetVehicle` writer is now authority-gated (`reset_input`, the
-  scripted/opponent re-anchors, self-right) or wire-impossible (dev
-  overrides are refused by `net::advertise`).
+  scripted/opponent re-anchors, self-right — and `dev_reset_at`,
+  gated in the iteration-029 repair above: the original claim's
+  "or wire-impossible — dev overrides are refused by
+  `net::advertise`" was false for the client path, since
+  `net::start` stamps `link.dev` onto the accepted `Remote` config;
+  `dev_finish`'s direct `Position` write stays the disclosed
+  exception).
 
 ## Tests
 

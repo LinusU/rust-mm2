@@ -514,6 +514,13 @@ pub fn spawn_resets(spawn: &SpawnPoint, player: Option<Entity>) -> Vec<ResetVehi
 /// exercised on real content — the reset-transition camera leg.
 /// One-shot; unlike the `R` key itself the scheduled teleport is a
 /// dev-timed intervention, so `record_eligibility` names `reset-at`.
+/// Authority-gated like the `R` key: the flag reaches a `Remote`
+/// session — `--reset-at` does not conflict with `--join`, and
+/// `net::start` stamps the client's `dev` flags onto the accepted
+/// config — where the scheduled teleport would be the same
+/// unannounced self-teleport the key's gate forbids (a pose the
+/// host's copy can never learn, with the local `ResetEpoch` never
+/// bumped), so the writer stays inert there.
 pub fn dev_reset_at(
     session: Res<Session>,
     spawn: Res<SpawnPoint>,
@@ -521,7 +528,7 @@ pub fn dev_reset_at(
     mut resets: MessageWriter<ResetVehicle>,
     mut fired: Local<bool>,
 ) {
-    if *fired {
+    if *fired || !session.authority_role().is_authority() {
         return;
     }
     let at = session.config().and_then(|c| c.dev.reset_at);
