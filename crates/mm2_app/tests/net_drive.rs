@@ -95,11 +95,14 @@ fn leading_u64(s: &str) -> u64 {
     digits.parse().unwrap()
 }
 
-/// The `net=in<s>s/<a>a/<x>x,snap<s>s/<a>a,rem<r>,req<s>s/<g>g/<d>d,rspn<n>,dsyn<n>,tsyn<n>,imp<s>s/<a>a/<d>d`
+/// The `net=in<s>s/<a>a/<x>x,snap<s>s/<a>a/<x>x,rem<r>,req<s>s/<g>g/<d>d,rspn<n>,dsyn<n>,tsyn<n>,imp<s>s/<a>a/<d>d`
 /// record field decoded — the wire counters the run actually moved.
-/// `dsyn` (v8 damage writes) is parsed but not asserted: the dev car
-/// binds no authored damage record, so a dev-world session has no
-/// `VehicleDamage` for the byte to land on and 0 is the honest value.
+/// `snap<x>` counts pose frames the client dropped stale at push: a
+/// duplicated or reordered `Snap` at/behind the staged-or-applied
+/// watermark (F25-AC03 stale-state evidence). `dsyn` (v8 damage
+/// writes) is parsed but not asserted: the dev car binds no authored
+/// damage record, so a dev-world session has no `VehicleDamage` for
+/// the byte to land on and 0 is the honest value.
 /// `tsyn` (v9 trailer rows) is the same — the dev car tows nothing —
 /// and `imp` (v10 impact rows) likewise: the clean cruise never
 /// collides, so all three cells read 0 here.
@@ -109,6 +112,7 @@ struct NetField {
     inputs_applied: u64,
     snaps_sent: u64,
     snaps_applied: u64,
+    snaps_staled: u64,
     remotes: u64,
     remote_spin: u64,
     #[allow(dead_code)]
@@ -141,6 +145,7 @@ fn net_field(line: &str) -> NetField {
         inputs_applied: inputs[1],
         snaps_sent: snaps[0],
         snaps_applied: snaps[1],
+        snaps_staled: snaps[2],
         remotes: leading_u64(parts[2].strip_prefix("rem").unwrap()),
         remote_spin: leading_u64(parts[4].strip_prefix("rspn").unwrap()),
         damage_synced: leading_u64(parts[5].strip_prefix("dsyn").unwrap()),
@@ -161,8 +166,9 @@ fn moved_m(line: &str) -> f64 {
 
 /// A client's mid-session record: the frame cap lands while the session
 /// is still `Playing`, so the full driving record — `net=` counters
-/// included — is what prints.
-fn assert_client_drove(rec: &str, min_remotes: u64) {
+/// included — is what prints. Returns the decoded field so a leg can
+/// assert counters beyond the convergence floor.
+fn assert_client_drove(rec: &str, min_remotes: u64) -> NetField {
     assert_eq!(field(rec, "status"), "pass", "{rec}");
     assert_eq!(field(rec, "phase"), "playing", "{rec}");
     assert_eq!(field(rec, "mp"), "gen1", "{rec}");
@@ -184,6 +190,7 @@ fn assert_client_drove(rec: &str, min_remotes: u64) {
         net.remote_spin > 0,
         "the v7 presentation tail turned a remote copy's wheels: {rec}"
     );
+    net
 }
 
 /// Wait until both `mm2 --join` clients have readied on the host's
@@ -265,9 +272,12 @@ fn two_mm2_processes_drive_one_session_over_loopback() {
 /// arms only once both `ready` echoes prove them delivered, `Down`
 /// once `event=started` plus a settle prove `Start` landed; after that
 /// the entire driving phase (inputs up, snaps down) runs impaired, and
-/// [`LinkStats`] proves the recipe fired on the wire. Convergence is
-/// the same client record: predicted driving kept the seat moving while
-/// stale/duplicated snaps dropped instead of wedging the session.
+/// [`LinkStats`] proves the recipe fired on the wire — frame counts,
+/// the payload `bytes_*` bandwidth leg, and the `delayed` count of
+/// frames that paid the recipe's positive hold. Convergence is the
+/// same client record: predicted driving kept the seat moving while
+/// stale/duplicated snaps dropped counted at the push watermark
+/// (`snap<x>`) instead of wedging the session.
 #[test]
 fn an_impaired_two_process_session_still_converges() {
     let install = tempfile::tempdir().unwrap();
@@ -306,17 +316,27 @@ fn an_impaired_two_process_session_still_converges() {
 
     // Same cap staggering as the clean leg: bob's record pins rem2
     // while alice is still connected; alice's pins rem>=1.
-    assert_client_drove(&bob.until("smoke=headless-physics"), 2);
-    assert_client_drove(&alice.until("smoke=headless-physics"), 1);
+    let bob_net = assert_client_drove(&bob.until("smoke=headless-physics"), 2);
+    let alice_net = assert_client_drove(&alice.until("smoke=headless-physics"), 1);
     assert!(alice.wait().success(), "alice did not exit cleanly");
     assert!(bob.wait().success(), "bob did not exit cleanly");
 
     // The recipe really fired — both directions carried data-plane
-    // frames and each lost/duplicated/reordered some of them.
+    // frames and each lost/duplicated/reordered some of them. The
+    // byte counters are the payload volume behind those frame counts
+    // (each duplicated copy re-pays bytes_out); `delayed` counts the
+    // frames the 40 ms hold actually scheduled.
     let up = proxy.stats(LinkDir::Up);
     let down = proxy.stats(LinkDir::Down);
     assert!(up.frames_in > 0 && up.frames_out > 0, "{up:?}");
     assert!(down.frames_in > 0 && down.frames_out > 0, "{down:?}");
+    assert!(up.bytes_in > 0 && up.bytes_out > 0, "{up:?}");
+    assert!(down.bytes_in > 0 && down.bytes_out > 0, "{down:?}");
+    assert!(up.delayed > 0, "the delay recipe held frames up: {up:?}");
+    assert!(
+        down.delayed > 0,
+        "the delay recipe held frames down: {down:?}"
+    );
     assert!(
         up.dropped + up.duplicated + up.reordered > 0,
         "no impairment observed upstream: {up:?}"
@@ -324,6 +344,13 @@ fn an_impaired_two_process_session_still_converges() {
     assert!(
         down.dropped + down.duplicated + down.reordered > 0,
         "no impairment observed downstream: {down:?}"
+    );
+    // The client side of the same evidence: duplicated and reordered
+    // snaps arrive at/behind the push watermark and drop counted —
+    // the AC03 stale-state measure.
+    assert!(
+        alice_net.snaps_staled + bob_net.snaps_staled > 0,
+        "no stale snap drops recorded on either client"
     );
     drop(proxy);
 

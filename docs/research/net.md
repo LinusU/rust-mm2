@@ -524,20 +524,27 @@ come from a per-lane SplitMix64 stream seeded at construction, so a
 fixed seed replays an identical impairment pattern over identical
 traffic; `set` retunes a live direction so a scenario handshakes clean
 and impairs only the data plane. `LinkStats` reports what the recipe
-actually did (frames in/out, dropped, duplicated, reordered,
-overflowed) — a leg asserts the impairment *happened*, not just that
-the session coped. Pending frames are bounded (`MAX_QUEUED` per lane,
+actually did (frames in/out, payload bytes in/out — each duplicated
+copy re-paying — frames that paid a positive delay/jitter hold,
+dropped, duplicated, reordered, overflowed) — a leg asserts the
+impairment *happened*, not just that the session coped, and the byte
+counters are the bandwidth leg of F25-B req 6's budget evidence.
+Pending frames are bounded (`MAX_QUEUED` per lane,
 excess dropped and counted), the relay never decodes payloads (present
 and future messages alike), and `Drop` shuts every relayed socket and
 joins every thread.
 
 The harness is what makes the mailbox's ordering rules load-bearing.
-Ordered TCP cannot reorder or duplicate in practice, so both guards
+Ordered TCP cannot reorder or duplicate in practice, so the guards
 exist for the impaired legs and any future unordered transport: an
 `Input` only displaces the stored sample when its sender `seq` is
-strictly ahead, and a `ResetRequest` mailbox keeps the *highest*
+strictly ahead, a `ResetRequest` mailbox keeps the *highest*
 generation per slot — a reordered stale ask can never mask a fresher
-one.
+one — and `RemoteSnaps::push` is latest-wins on the frame's own
+`(generation, tick)`, not arrival order: a frame at or behind the
+staged-or-applied watermark drops counted (`net=`'s `snap<x>` cell)
+instead of displacing a newer pose, while its `impacts` rows still
+queue — events outlive the frame that carried them.
 
 ## Two-process driving (F25-B)
 
@@ -551,7 +558,9 @@ wire actually moved rather than an in-process mailbox's contents.
 
 - **Clean leg** (`two_mm2_processes_drive_one_session_over_loopback`):
   each client's mid-session record shows inputs streamed up
-  (`in<N>s`), authoritative snapshots applied (`snap<N>a`), the other
+  (`in<N>s`), authoritative snapshots applied (`snap<N>a` — the
+  cell's third counter, `snap<x>`, is pose frames dropped stale at
+  the push watermark: 0 on a clean link), the other
   participants reconciled as remote copies (`rem2` while both peers
   are still connected), the v7 presentation tail driving the copies'
   wheel spin (`rspn` — accumulated radians the client integrated into
@@ -581,7 +590,10 @@ wire actually moved rather than an in-process mailbox's contents.
   directions. Both clients still converge: predicted driving keeps
   the seat moving while stale, duplicated and reordered frames drop
   at the mailbox instead of wedging the session. `LinkStats` asserts
-  the recipe genuinely fired in each direction.
+  the recipe genuinely fired in each direction — frame counts, the
+  `bytes_*` payload volume and the `delayed` hold count — and the
+  client records' `snap<x>` cells show the push watermark counted
+  the stragglers the recipe produced.
 
 Scope stays honest: this is loopback on a synthetic dev world — no
 LAN leg, no rendered observation, no retail install. One recipe over

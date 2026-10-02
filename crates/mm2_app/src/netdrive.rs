@@ -238,7 +238,12 @@ pub struct RemoteImpact {
 
 /// The client-side snapshot inbox: the newest `Snap` the lobby pump
 /// drained, staged for [`apply_snapshots`]. Latest-wins like the host's
-/// input mailbox — a backlog of poses is strictly worse than the newest.
+/// input mailbox — a backlog of poses is strictly worse than the newest
+/// — on the *frame's own* `(generation, tick)`, not on arrival order:
+/// a reordered or duplicated frame older than what is already staged
+/// or applied keeps its impact rows but cannot displace the newer pose
+/// (an old frame clobbering a newer pending one would roll a remote
+/// copy back for a frame under a reorder recipe).
 /// Impact rows are the exception: they are *events*, not state, so they
 /// ride their own bounded `pending` queue — a superseded frame's poses
 /// drop, its unreceived effects still land.
@@ -252,6 +257,11 @@ pub struct RemoteSnaps {
     /// is dropped; a snap from an older session can never apply, and a
     /// new generation resets the tick check.
     applied: Option<(u64, u64)>,
+    /// Pose frames dropped stale at [`push`](Self::push) — a duplicated
+    /// or reordered frame at or behind the staged/applied watermark.
+    /// Folded into [`NetDriveReport`] by `apply_snapshots`, the only
+    /// consumer that runs with one.
+    stale: u64,
     /// Replicated impact rows awaiting `apply_snapshots`, FIFO; each
     /// carries its frame's generation for the apply-side staleness
     /// check.
@@ -290,7 +300,11 @@ struct Snap {
 }
 
 impl RemoteSnaps {
-    /// Queue a received snapshot frame.
+    /// Queue a received snapshot frame. Pose state is latest-wins on
+    /// `(generation, tick)`: an incoming frame at or behind the staged
+    /// or last-applied watermark is stale — it drops counted (a dup or
+    /// a reorder's straggler) instead of displacing a newer pose. Its
+    /// impact rows still queue below — events outlive their frame.
     pub fn push(
         &mut self,
         generation: u64,
@@ -299,12 +313,18 @@ impl RemoteSnaps {
         trailers: Vec<SnapTrailer>,
         impacts: Vec<SnapImpact>,
     ) {
-        self.latest = Some(Snap {
-            generation,
-            tick,
-            entries,
-            trailers,
-        });
+        let staged = self.latest.as_ref().map(|s| (s.generation, s.tick));
+        let watermark = staged.into_iter().chain(self.applied).max();
+        if watermark.is_some_and(|w| (generation, tick) <= w) {
+            self.stale += 1;
+        } else {
+            self.latest = Some(Snap {
+                generation,
+                tick,
+                entries,
+                trailers,
+            });
+        }
         for row in impacts {
             let key = (generation, row.seat, row.id);
             if !self.seen.insert(key) {
@@ -350,6 +370,11 @@ pub struct NetDriveReport {
     pub snaps_sent: u64,
     /// Snapshot frames the client applied to its remote copies.
     pub snaps_applied: u64,
+    /// Pose frames the client dropped stale at [`RemoteSnaps::push`] —
+    /// a duplicated or reordered `Snap` at or behind the
+    /// staged-or-applied `(generation, tick)` watermark. Its impact
+    /// rows still queue; only the superseded pose drops.
+    pub snaps_staled: u64,
     /// Remote participants currently spawned.
     pub remotes: usize,
     /// Reconciliation spawns over the session.
@@ -1703,6 +1728,10 @@ pub fn apply_snapshots(
     mut texel: crate::texel_fx::TexelRepair,
     mut report: ResMut<NetDriveReport>,
 ) {
+    // Push-time stale drops fold into the report every run — a stale
+    // frame counts even on a run with nothing staged, so this cannot
+    // ride inside `apply_snap_frame`'s early return.
+    report.snaps_staled += std::mem::take(&mut snaps.stale);
     // The state pass runs before the event drain: a repair byte
     // landing this frame records its snap tick in
     // `RemoteSnaps::repaired` before the queued impact rows are
@@ -1752,6 +1781,9 @@ fn apply_snap_frame(
         .applied
         .is_some_and(|(g, t)| snap.generation == g && snap.tick <= t);
     if stale {
+        // Unreachable through `push` (its watermark already gates
+        // this), but the drop still counts if a future path stages one.
+        report.snaps_staled += 1;
         return;
     }
     snaps.applied = Some((snap.generation, snap.tick));
@@ -2564,5 +2596,115 @@ mod tests {
         );
         assert_eq!(world.get::<SessionEntity>(te).unwrap().0, 7);
         assert!(world.get::<ObjectIdentity>(te).is_some());
+    }
+
+    fn snap_entry() -> SnapEntry {
+        SnapEntry {
+            player: 1,
+            pos: [0.0; 3],
+            rot: [0.0, 0.0, 0.0, 1.0],
+            vel: [0.0; 3],
+            angvel: [0.0; 3],
+            epoch: 0,
+            steer: 0,
+            spin: 0,
+            compression: 0,
+            flags: 0,
+            damage: 0,
+        }
+    }
+
+    fn snap_impact(id: u64) -> SnapImpact {
+        SnapImpact {
+            seat: 1,
+            id,
+            tick: 0,
+            point: [0.0; 3],
+            normal: [0.0, 1.0, 0.0],
+            severity: 1.0,
+        }
+    }
+
+    /// `push` is latest-wins on the frame's own `(generation, tick)`,
+    /// not arrival order: a reordered straggler or duplicated copy at
+    /// or behind the staged-or-applied watermark drops counted instead
+    /// of displacing the newer pose — while its impact rows still
+    /// queue (events outlive their frame).
+    #[test]
+    fn a_stale_snap_drops_at_push_but_keeps_its_events() {
+        let mut snaps = RemoteSnaps::default();
+        snaps.push(1, 10, vec![snap_entry()], Vec::new(), Vec::new());
+        // A reordered straggler cannot displace the newer staged pose.
+        snaps.push(1, 9, vec![snap_entry()], Vec::new(), vec![snap_impact(7)]);
+        assert_eq!(snaps.latest.as_ref().unwrap().tick, 10);
+        assert_eq!(snaps.stale, 1);
+        assert_eq!(
+            snaps.pending.len(),
+            1,
+            "the stale frame's impact rows still queue"
+        );
+        // A duplicated copy of the staged frame is stale too — and its
+        // repeat impact row hits the dedup window.
+        snaps.push(1, 10, vec![snap_entry()], Vec::new(), vec![snap_impact(7)]);
+        assert_eq!(snaps.stale, 2);
+        assert_eq!(snaps.pending.len(), 1);
+        // Latest-wins still moves forward.
+        snaps.push(1, 11, vec![snap_entry()], Vec::new(), Vec::new());
+        assert_eq!(snaps.latest.as_ref().unwrap().tick, 11);
+        // The applied watermark gates too — nothing staged needed.
+        snaps.applied = Some((1, 11));
+        snaps.latest = None;
+        snaps.push(1, 11, vec![snap_entry()], Vec::new(), Vec::new());
+        assert!(snaps.latest.is_none());
+        assert_eq!(snaps.stale, 3);
+        // A new generation is always newer — a session restart never
+        // reads as a straggler of the last one.
+        snaps.push(2, 1, vec![snap_entry()], Vec::new(), Vec::new());
+        assert_eq!(snaps.latest.as_ref().unwrap().generation, 2);
+        assert_eq!(snaps.stale, 3);
+    }
+
+    /// `apply_snapshots` folds the push-time stale count into
+    /// `NetDriveReport` even on a run where nothing applies — the fold
+    /// sits outside `apply_snap_frame`'s early return.
+    #[test]
+    fn apply_snapshots_reports_the_stale_drops() {
+        let mut session = Session::new();
+        session
+            .begin(mm2_game::SessionConfig {
+                authority: mm2_game::SessionAuthority::Remote,
+                ..mm2_game::SessionConfig::default()
+            })
+            .unwrap();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(session)
+            .init_resource::<RemoteSnaps>()
+            .init_resource::<NetDriveReport>()
+            .init_resource::<crate::texel_fx::TexelDamageReport>()
+            .add_message::<RemoteImpact>()
+            .add_systems(Update, apply_snapshots);
+
+        // A stale push with nothing staged still folds — the count is
+        // the client's evidence a reordered/duplicated stream dropped.
+        let mut snaps = app.world_mut().resource_mut::<RemoteSnaps>();
+        snaps.push(1, 5, vec![snap_entry()], Vec::new(), Vec::new());
+        snaps.push(1, 4, vec![snap_entry()], Vec::new(), Vec::new());
+        app.update();
+        let report = app.world().resource::<NetDriveReport>();
+        assert_eq!(report.snaps_applied, 1);
+        assert_eq!(report.snaps_staled, 1);
+        // The next stale drop rides a run with no staged snap at all.
+        app.world_mut().resource_mut::<RemoteSnaps>().push(
+            1,
+            3,
+            vec![snap_entry()],
+            Vec::new(),
+            Vec::new(),
+        );
+        app.update();
+        assert_eq!(app.world().resource::<NetDriveReport>().snaps_staled, 2);
     }
 }

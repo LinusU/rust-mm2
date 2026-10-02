@@ -1008,7 +1008,9 @@ fn run_headless(
         .unwrap_or_default();
     // F25-A data-plane evidence: `net=` reports the wire traffic the
     // run actually moved — inputs sent (client), inputs applied vs
-    // staled (host), snapshots sent (host) vs applied (client), live
+    // staled (host), snapshots sent (host) vs applied (client) vs
+    // staled at the push watermark (client; a duplicated/reordered
+    // frame at or behind the newest staged/applied tick), live
     // remote participants, `rspn`, the wheel-spin radians the v7
     // presentation tail drove into remote copies, and `dsyn`, the
     // replicated damage totals the v8 tail wrote onto live
@@ -1025,12 +1027,13 @@ fn run_headless(
         .get_resource::<crate::netdrive::NetDriveReport>()
         .map(|r| {
             format!(
-                " net=in{}s/{}a/{}x,snap{}s/{}a,rem{},req{}s/{}g/{}d,rspn{:.0},dsyn{},tsyn{},imp{}s/{}a/{}d",
+                " net=in{}s/{}a/{}x,snap{}s/{}a/{}x,rem{},req{}s/{}g/{}d,rspn{:.0},dsyn{},tsyn{},imp{}s/{}a/{}d",
                 r.inputs_sent,
                 r.inputs_applied,
                 r.inputs_staled,
                 r.snaps_sent,
                 r.snaps_applied,
+                r.snaps_staled,
                 r.remotes,
                 r.requests_sent,
                 r.requests_granted,
