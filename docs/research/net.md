@@ -546,6 +546,125 @@ staged-or-applied watermark drops counted (`net=`'s `snap<x>` cell)
 instead of displacing a newer pose, while its `impacts` rows still
 queue — events outlive the frame that carried them.
 
+## Measured impairment matrix (F25-AC03)
+
+*Measured evidence — in-process apps over real loopback.*
+`net_app`'s `the_impairment_matrix_records_each_recipe_cell` runs the
+spec's impairment axes as named recipe cells, each over a fresh hosted
+session + joined client through a fresh seeded `ImpairProxy`: the lobby
+crosses clean, both directions arm only once the session is `Playing`,
+a fixed window of paired updates moves real `Input` frames up and real
+`Snap` frames down, and a settle tail drains every scheduled release
+(deepest owed hold is delay + jitter + `HOLD_CAP`). The cell asserts
+floors — frames moved both ways, fresh snapshots still applied, inputs
+still drove the remote seat, each armed knob shows in its `LinkStats`
+counter, and duplicate/reorder cells land counted stale drops — while
+the `matrix cell=` record line carries the measured counters.
+
+One recorded run (dev-world cruise, one client;
+`snap=<sent>s/<applied>a/<staled>x`,
+`input=<sent>s/<applied>a/<staled>x`; per-direction `LinkStats` are
+whole-connection sums — the handful of clean lobby frames that cross
+before arming are inside `frames_in`/`bytes_in`):
+
+| cell | recipe (both dirs) | snap s/a/x | input s/a/x | delayed u/d | dropped u/d | dup u/d | reo u/d |
+|---|---|---|---|---|---|---|---|
+| clean | — | 251/103/148 | 251/250/0 | 0/0 | 0/0 | 0/0 | 0/0 |
+| latency | 100 ms + 20 ms jit | 251/88/142 | 251/250/0 | 250/250 | 0/0 | 0/0 | 0/0 |
+| jitter | 10 ms + 60 ms jit | 251/71/164 | 251/250/0 | 250/250 | 0/0 | 0/0 | 0/0 |
+| loss | 20% | 251/102/102 | 251/250/0 | 0/0 | 50/47 | 0/0 | 0/0 |
+| loss-heavy | 60% | 251/69/25 | 251/250/0 | 0/0 | 147/157 | 0/0 | 0/0 |
+| duplicate | 50% | 251/102/271 | 251/250/0 | 0/0 | 0/0 | 122/122 | 0/0 |
+| reorder | 50% | 251/104/146 | 251/250/0 | 0/0 | 0/0 | 0/0 | 77/81 |
+| combined | 40 ms + 30 ms jit + 5% loss + 10% dup + 10% reo | 251/85/164 | 251/250/0 | 284/285 | 11/10 | 24/24 | 21/21 |
+
+What the numbers show:
+
+- **The `clean` row calibrates `snap<x>`.** `publish_snapshots`
+  broadcasts once per `Update` while `session.tick` only advances on
+  fixed steps (64 Hz here — the test app's default `Time<Fixed>`), so
+  roughly two of three publishes re-send the same tick and drop at the
+  client's watermark: 148 stale of 251 on a *clean* link is
+  publish-cadence dedup, not impairment. A `snap<x>` reading is only
+  meaningful against this floor.
+- **Duplicate adds ~one stale per copy** (148 → 271 over 122
+  duplicated frames): each second copy lands at-or-behind the
+  watermark.
+- **Reorder moves the floor rather than raising it** (146 vs 148 over
+  81 swaps): the stream is already redundancy-dominated — the straggler
+  lands behind the successor it deferred to and drops, which is the
+  correctness property (a superseded pose never displaces a newer
+  staged one), counted rather than silently rolled back.
+- **Loss shrinks the stream, not the session**: at 60% down-loss 69
+  snapshots still applied and 250 inputs still drove the remote seat —
+  latest-wins means a dropped frame costs only its freshness.
+- **`inputs_staled` stayed 0 in every cell**: at ~250 sends/s against
+  `INPUT_STALE` (250 ms) even 60% loss never starved the mailbox of a
+  fresh sample — the counter measures *staleness at apply*, not
+  arrivals (arrival volume is `frames_in`/`bytes_in` at the proxy).
+- **Delayed arrivals bunch**: under the 100–120 ms hold, applied drops
+  below the distinct-tick count (88) because several frames arrive
+  between updates and the staged one supersedes uncounted —
+  latest-wins again, only the newest pose ever blends.
+- No cell produced an `overflowed`, a `resets` correction, or a lost
+  session — bounded queues held and no authority reset was needed.
+
+Same-shape floors are asserted for every cell; the per-frame ordering
+that makes those floors safe is proven in `impair`'s lane legs (dup
+copies emit adjacent, a swap emits the held frame behind its
+successor) and `netdrive`'s push legs (at-or-behind watermark → counted
+drop). Scope: in-process loopback — the two-process impaired leg
+(`net_drive`) runs the `combined` recipe over real OS processes; a
+process-level grid, LAN and Internet scope stay open.
+
+## Data-plane budget and bounds (F25-B req 6)
+
+*Implementation choice + measured.* Payload sizes are fixed by the
+v10 encode (4-byte length prefix excluded everywhere):
+
+| frame | payload bytes |
+|---|---|
+| `Input` | 21 (tag 1, generation 8, seq 8, 4 channels) |
+| `ResetRequest` | 9 (tag 1, generation 8) |
+| `Snap` header | 20 (tag 1, generation 8, tick 8, three counts) |
+| per `SnapEntry` | 62 (player 2, pos/rot/vel/angvel 52, epoch 1, steer 2, spin 2, compression 1, flags 1, damage 1) |
+| per `SnapTrailer` | 57 (owner 2, pos/rot/vel/angvel 52, spin 2, flags 1) |
+| per `SnapImpact` | 46 (seat 2, id 8, tick 8, point 12, normal 12, severity 4) |
+
+A `Snap` is `20 + 62·seats + 57·trailers + 46·impacts` — worst case
+`MAX_PLAYERS` 8 seats and trailers plus `MAX_SNAP_IMPACTS` 64 rows =
+3,916 B, far under `MAX_FRAME` (256 KiB). Measured in the matrix run:
+`Input` payloads averaged 21 B (`bytes_in`/`frames_in` ≈ 20.9) and the
+one-seat dev-world `Snap` 82 B (20 + 62); the two-process leg's
+three-seat snaps are 206 B.
+
+**Update rates.** Both directions send once per app `Update` while the
+session is live — the wire rate is the update-loop rate, not the fixed
+simulation clock: vsync-bounded windowed (~60–144 Hz), unbounded in
+headless runs (the matrix's test apps publish ~250 snaps/s). Same-tick
+republishes are deliberate redundancy — `tick` dedups them at the
+receiver (the clean-row floor above). Consequences worth recording:
+
+- per-client downstream at a 60 Hz update rate, 8 seats: ≈31 KB/s of
+  `Snap` payload (516 B × 60); the ~250 Hz headless cadence multiplies
+  that ≈4× (≈127 KB/s, ~1 Mbps) and a full-impact burst snap is still
+  ≤3,916 B.
+- per-client upstream: 25 B on the wire per update — ≈1.5 KB/s at
+  60 Hz, ≈6 KB/s headless.
+- a faster update loop buys smoother *redundancy*, not fresher poses —
+  poses only change per fixed tick; whether to throttle publishes to
+  the tick rate is an open efficiency question, not a correctness one
+  (the dedup floor above is the cost).
+
+**Receiver bounds.** Latest-wins everywhere a backlog could form: one
+staged `Snap` per client (`RemoteSnaps`), one input sample per seat
+(the mailbox, `INPUT_STALE` 250 ms before the seat coasts), the reset
+mailbox keeps the highest generation, pending replicated impact rows
+cap at 256 with a 512-entry dedup window, `CORRECTION_SNAP_DIST`
+(20 m) bounds a blend-vs-snap decision, and `RESET_REQUEST_COOLDOWN`
+(1 s) bounds ask rate. The proxy's `MAX_QUEUED` (4096/lane) is harness
+state, not protocol.
+
 ## Two-process driving (F25-B)
 
 `crates/mm2_app/tests/net_drive.rs` is the data plane's first
@@ -596,9 +715,10 @@ wire actually moved rather than an in-process mailbox's contents.
   the stragglers the recipe produced.
 
 Scope stays honest: this is loopback on a synthetic dev world — no
-LAN leg, no rendered observation, no retail install. One recipe over
-a live session is not the recorded delay/jitter/loss matrix
-F25-AC03 names; that grid remains open.
+LAN leg, no rendered observation, no retail install. The recorded
+delay/jitter/loss matrix now exists at the in-process level (see
+"Measured impairment matrix" above); a *process-level* grid over
+this three-process harness remains open.
 
 ## Evidence level
 
@@ -686,7 +806,13 @@ and the process legs run `mm2 --join --headless` against a separate
 `mm2-host` — `start` produces `world=dev-world mp=gen1 status=pass`,
 `cancel` produces `mp=lobby(1p) phase=menu`, a host quit produces
 `lost the host`/`status=fail` exit 3, a refused connection exits 1,
-and `--join` × session-shaping flags are usage exit 2.
+and `--join` × session-shaping flags are usage exit 2. The suite's
+`the_impairment_matrix_records_each_recipe_cell` leg adds the
+F25-AC03 grid: eight named recipes (clean/latency/jitter/loss/
+loss-heavy/duplicate/reorder/combined) each run a fresh in-process
+host + client over a seeded `ImpairProxy` and record the measured
+`LinkStats`, `snap s/a/x` and `input s/a/x` counters — the table
+under "Measured impairment matrix" is a transcribed run.
 `mm2_app`'s `net_drive` suite is the first two-process *driving*
 evidence: a separate `mm2 --host --headless` authority plus two
 separate `mm2 --join --headless` clients drive one dev-world cruise —

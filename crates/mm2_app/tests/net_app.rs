@@ -32,7 +32,7 @@ use mm2_assets::Vfs;
 use mm2_game::{
     DevOverrides, ImpactEvent, ImpactId, Mm2Vfs, ObjectId, ObjectIdentity, Player, PlayerControl,
     PlayerVehicle, Session, SessionAuthority, SessionConfig, SessionMode, SessionPhase,
-    SurfaceState, WorldMode, despawn_session_entities,
+    SurfaceState, WorldMode, advance_session_tick, despawn_session_entities,
 };
 use mm2_net::{
     Client, DriveInput, Host, HostConfig, HostEvent, Impair, ImpairProxy, LateJoin, LeaveCause,
@@ -132,7 +132,13 @@ fn lobby_app(vfs: Vfs) -> App {
                 session::drive_session,
             )
                 .chain(),
-        );
+        )
+        // The session clock, same registration the production app and
+        // `run_headless` use: a hosted session's `Snap::tick` advances
+        // like it does on the wire in a real process — a same-tick
+        // republish is a receiver-side duplicate, which the impairment
+        // matrix below measures as the clean baseline's stale floor.
+        .add_systems(FixedUpdate, advance_session_tick);
     app
 }
 
@@ -3793,4 +3799,326 @@ fn an_impaired_link_still_converges_the_data_plane() {
         app.world().get_entity(trailer).is_err(),
         "the trailer copy despawned with its seat"
     );
+}
+
+/// One cell of the F25-AC03 impairment matrix: a named [`Impair`]
+/// recipe armed on *both* directions for the measured window — the
+/// spec's axes are exercised symmetric, and each direction's
+/// [`LinkStats`] still reports what actually happened.
+struct MatrixCell {
+    name: &'static str,
+    impair: Impair,
+}
+
+/// F25-AC03's measured matrix (the recorded run lives in
+/// `docs/research/net.md` under "Measured impairment matrix"). Each
+/// cell is a fresh in-process host + client over real loopback through
+/// a seeded [`ImpairProxy`]: the lobby crosses clean, the session
+/// reaches `Playing`, both directions arm for the measured window, and
+/// a fixed run of paired updates moves real `Input` frames up and
+/// real `Snap` frames down while the lanes' seeded decisions apply the
+/// recipe. A `LinkStats` row per direction plus both
+/// `NetDriveReport`s are the cell's measurement.
+///
+/// Per-cell assertions are floors, not exact counts — traffic volume
+/// is update-rate-bound so frame counts drift between runs. The
+/// airtight per-frame effects are already proven in halves:
+/// `impair`'s lane legs pin the wire emission order (duplicates emit
+/// adjacent, a swap emits the held frame behind its successor) and
+/// `netdrive`'s push legs pin the watermark drop — so here each cell
+/// proves the recipe really fired on the wire *and* the session still
+/// converged, while duplicate/reorder cells must additionally land
+/// counted stale drops on the client (`snap<x>`).
+///
+/// The `clean` control row is load-bearing for interpretation: a
+/// `Snap` publishes once per Update while `session.tick` only advances
+/// per fixed step, so a clean link already drops same-tick
+/// republishes at the push watermark — the baseline stale floor every
+/// impaired cell is read against, not evidence of wire impairment.
+#[test]
+fn the_impairment_matrix_records_each_recipe_cell() {
+    let cells = [
+        // The control: a transparent pair of lanes.
+        MatrixCell {
+            name: "clean",
+            impair: Impair::default(),
+        },
+        // Latency — a fixed hold every frame pays.
+        MatrixCell {
+            name: "latency",
+            impair: Impair {
+                delay: Duration::from_millis(100),
+                jitter: Duration::from_millis(20),
+                ..Impair::default()
+            },
+        },
+        // Jitter — small fixed hold, wide spread: releases overtake
+        // each other, a real reorder source on a lane.
+        MatrixCell {
+            name: "jitter",
+            impair: Impair {
+                delay: Duration::from_millis(10),
+                jitter: Duration::from_millis(60),
+                ..Impair::default()
+            },
+        },
+        // Loss — every fifth frame gone, both ways.
+        MatrixCell {
+            name: "loss",
+            impair: Impair {
+                loss: 0.20,
+                ..Impair::default()
+            },
+        },
+        // Heavy loss — the "client falls behind"/intermittent-loss
+        // edge: six of ten frames never arrive.
+        MatrixCell {
+            name: "loss-heavy",
+            impair: Impair {
+                loss: 0.60,
+                ..Impair::default()
+            },
+        },
+        // Duplication — every other frame emits a second adjacent
+        // copy; the second always lands at-or-behind the watermark.
+        MatrixCell {
+            name: "duplicate",
+            impair: Impair {
+                duplicate: 0.50,
+                ..Impair::default()
+            },
+        },
+        // Reorder — every other frame swaps with its successor; the
+        // held frame always lands behind the newer tick it deferred to.
+        MatrixCell {
+            name: "reorder",
+            impair: Impair {
+                reorder: 0.50,
+                ..Impair::default()
+            },
+        },
+        // Combined — the recipe the two-process `net_drive` leg runs.
+        MatrixCell {
+            name: "combined",
+            impair: Impair {
+                delay: Duration::from_millis(40),
+                jitter: Duration::from_millis(30),
+                loss: 0.05,
+                duplicate: 0.10,
+                reorder: 0.10,
+            },
+        },
+    ];
+    for (index, cell) in cells.iter().enumerate() {
+        run_matrix_cell(cell, index as u64 + 1);
+    }
+}
+
+/// Run one matrix cell: a fresh hosted session and joined client
+/// through a fresh proxy, so lane counters start at zero.
+fn run_matrix_cell(cell: &MatrixCell, seed: u64) {
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let proxy = ImpairProxy::loopback_seeded(link.addr(), seed).unwrap();
+    let mut host = host_app(vfs, link);
+    let link = LobbyLink::join(
+        proxy.addr(),
+        &hello("net-app-test".to_string(), cell.name.to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join through the proxy failed");
+    let our_id = link.player_id();
+    let mut client = bridge_app(mount(install.path()), link);
+    {
+        let link = client.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    until_ready(&mut client);
+    hosted_playing(&mut host);
+    until_begun(&mut client);
+    {
+        let mut session = client.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    // The driver's own seat, declared the way
+    // `a_client_streams_inputs_and_applies_the_host_snapshot` does —
+    // the fixture app's load systems never spawn it, and
+    // `send_drive_input` needs a settled `VehicleInput` to stream.
+    client.world_mut().spawn((
+        PlayerVehicle,
+        Player {
+            id: mm2_game::PlayerId(our_id),
+            control: PlayerControl::Local,
+        },
+        mm2_game::AuthorityRole::Predicted,
+        VehicleInput {
+            throttle: 0.5,
+            ..VehicleInput::default()
+        },
+        avian3d::prelude::Position::default(),
+        avian3d::prelude::Rotation::default(),
+        avian3d::prelude::LinearVelocity::default(),
+        avian3d::prelude::AngularVelocity::default(),
+    ));
+    // The host seat reconciles into a remote copy — the apply target
+    // the snapshot stream drives.
+    spin_mut(&mut client, |a| {
+        a.world_mut()
+            .query_filtered::<(), With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some()
+    });
+
+    // The measured window. Both directions arm together — the lobby
+    // phase crossed clean, so only data-plane frames (`Input` up,
+    // `Snap` down) pay the recipe. Paired real-time updates let the
+    // lanes' release schedules fire while the session runs.
+    proxy.set(LinkDir::Up, cell.impair);
+    proxy.set(LinkDir::Down, cell.impair);
+    for _ in 0..150 {
+        host.update();
+        client.update();
+        thread::sleep(Duration::from_millis(4));
+    }
+    // Settle until every scheduled release is provably past: the
+    // deepest hold a frame can still owe is delay + jitter plus the
+    // reorder stall bound `HOLD_CAP` — at most 220 ms for these recipes.
+    // Doubling it drains the tail and lets the client's pump push what
+    // arrived before the counters are read.
+    for _ in 0..100 {
+        host.update();
+        client.update();
+        thread::sleep(Duration::from_millis(4));
+    }
+
+    let up = proxy.stats(LinkDir::Up);
+    let down = proxy.stats(LinkDir::Down);
+    let (snaps_applied, snaps_staled, inputs_sent, remotes, resets) = {
+        let r = client.world().resource::<netdrive::NetDriveReport>();
+        (
+            r.snaps_applied,
+            r.snaps_staled,
+            r.inputs_sent,
+            r.remotes,
+            r.resets,
+        )
+    };
+    let (inputs_applied, inputs_staled, snaps_sent) = {
+        let r = host.world().resource::<netdrive::NetDriveReport>();
+        (r.inputs_applied, r.inputs_staled, r.snaps_sent)
+    };
+    // The cell's record line — one measured row per recipe; the doc's
+    // matrix table is harvested from these.
+    eprintln!(
+        "matrix cell={} seed={seed} snap={snaps_sent}s/{snaps_applied}a/{snaps_staled}x \
+         input={inputs_sent}s/{inputs_applied}a/{inputs_staled}x rem={remotes} resets={resets} \
+         up={up:?} down={down:?}",
+        cell.name,
+    );
+
+    // Convergence — every cell's data plane still moved state both ways.
+    assert!(
+        up.frames_in > 0 && down.frames_in > 0,
+        "cell {} moved no data-plane frames: {up:?} {down:?}",
+        cell.name,
+    );
+    assert!(
+        snaps_sent > 0 && snaps_applied > 0,
+        "cell {} applied no snapshot: sent={snaps_sent} applied={snaps_applied}",
+        cell.name,
+    );
+    assert!(
+        inputs_sent > 0 && inputs_applied > 0,
+        "cell {} drove nothing: sent={inputs_sent} applied={inputs_applied}",
+        cell.name,
+    );
+    assert!(
+        remotes >= 1,
+        "cell {} never reconciled the host seat",
+        cell.name
+    );
+    assert_eq!(
+        up.overflowed + down.overflowed,
+        0,
+        "cell {} overflowed a lane: {up:?} {down:?}",
+        cell.name,
+    );
+
+    // Each armed knob must show in the counter it claims to turn.
+    let impair = cell.impair;
+    if impair.delay > Duration::ZERO || impair.jitter > Duration::ZERO {
+        assert!(
+            up.delayed > 0 && down.delayed > 0,
+            "cell {} scheduled no delay holds: {up:?} {down:?}",
+            cell.name,
+        );
+    }
+    if impair.loss >= 0.10 {
+        assert!(
+            up.dropped > 0 && down.dropped > 0,
+            "cell {} dropped nothing: {up:?} {down:?}",
+            cell.name,
+        );
+    }
+    if impair.duplicate > 0.0 {
+        assert!(
+            up.duplicated > 0 && down.duplicated > 0,
+            "cell {} duplicated nothing: {up:?} {down:?}",
+            cell.name,
+        );
+        // Every duplicated `Snap` copy pushes at-or-behind the
+        // watermark — a counted stale drop.
+        assert!(
+            snaps_staled > 0,
+            "cell {} recorded no stale drop off duplicated snaps",
+            cell.name,
+        );
+    }
+    if impair.reorder > 0.0 {
+        assert!(
+            up.reordered > 0 && down.reordered > 0,
+            "cell {} reordered nothing: {up:?} {down:?}",
+            cell.name,
+        );
+        // A swap's held frame is older than the successor it lands
+        // behind — it can never displace the newer staged pose.
+        assert!(
+            snaps_staled > 0,
+            "cell {} recorded no stale drop off reordered snaps",
+            cell.name,
+        );
+    }
+    // The control cell: a transparent lane impairs nothing — every
+    // recipe counter stays at zero, so `snaps_staled` on this row is
+    // publish-cadence dedup only, the floor the others are read
+    // against.
+    if impair == Impair::default() {
+        assert_eq!(
+            up.delayed + up.dropped + up.duplicated + up.reordered,
+            0,
+            "cell {} impaired a clean lane: {up:?}",
+            cell.name,
+        );
+        assert_eq!(
+            down.delayed + down.dropped + down.duplicated + down.reordered,
+            0,
+            "cell {} impaired a clean lane: {down:?}",
+            cell.name,
+        );
+    }
+
+    // A polite close per cell — disarm so `Leave` isn't itself
+    // impaired, let it cross, then drop the lane set.
+    proxy.set(LinkDir::Up, Impair::default());
+    proxy.set(LinkDir::Down, Impair::default());
+    client.world_mut().resource_mut::<LobbyLink>().leave();
+    for _ in 0..10 {
+        host.update();
+        client.update();
+        thread::sleep(Duration::from_millis(4));
+    }
 }
