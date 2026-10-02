@@ -979,14 +979,16 @@ fn run_headless(
         .unwrap_or_default();
     // F25-A data-plane evidence: `net=` reports the wire traffic the
     // run actually moved — inputs sent (client), inputs applied vs
-    // staled (host), snapshots sent (host) vs applied (client), and
-    // live remote participants. Absent without a link's report, so a
-    // non-lobby record stays bit-identical.
+    // staled (host), snapshots sent (host) vs applied (client), live
+    // remote participants, and `rspn`, the wheel-spin radians the v7
+    // presentation tail drove into remote copies (client side; 0 on a
+    // host, which runs the real sim). Absent without a link's report,
+    // so a non-lobby record stays bit-identical.
     let net_detail = world_ecs
         .get_resource::<crate::netdrive::NetDriveReport>()
         .map(|r| {
             format!(
-                " net=in{}s/{}a/{}x,snap{}s/{}a,rem{},req{}s/{}g/{}d",
+                " net=in{}s/{}a/{}x,snap{}s/{}a,rem{},req{}s/{}g/{}d,rspn{:.0}",
                 r.inputs_sent,
                 r.inputs_applied,
                 r.inputs_staled,
@@ -995,7 +997,8 @@ fn run_headless(
                 r.remotes,
                 r.requests_sent,
                 r.requests_granted,
-                r.requests_dropped
+                r.requests_dropped,
+                r.remote_spin
             )
         })
         .unwrap_or_default();

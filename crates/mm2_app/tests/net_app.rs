@@ -1977,10 +1977,19 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                     vel: [1.0, 0.0, 0.0],
                     angvel: [0.0, 0.0, 0.0],
                     epoch: 0,
+                    // The v7 presentation tail (F25-B): the host seat
+                    // steered 0.25 rad, its wheels roll at 30 rad/s
+                    // grounded at 0.4 travel, brake held.
+                    steer: 250,
+                    spin: 300,
+                    compression: 102,
+                    flags: mm2_net::SNAP_FLAG_BRAKE | mm2_net::SNAP_FLAG_GROUNDED,
                 },
                 // Our own seat's entry is received and, epoch-equal,
                 // skipped — between authority resets the local sim
-                // owns the pose (F25-A.5).
+                // owns the pose (F25-A.5). Its tail is junk on purpose:
+                // a remote entry's presentation fields must never
+                // overwrite the local car's live state.
                 SnapEntry {
                     player: our_id,
                     pos: [-50.0, 0.0, -50.0],
@@ -1988,6 +1997,10 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                     vel: [0.0; 3],
                     angvel: [0.0; 3],
                     epoch: 0,
+                    steer: i16::MAX,
+                    spin: i16::MIN,
+                    compression: 255,
+                    flags: mm2_net::SNAP_FLAG_BRAKE | mm2_net::SNAP_FLAG_REVERSE,
                 },
             ],
         })
@@ -2018,10 +2031,60 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
             pos.0
         );
     }
-    // The local seat was not moved by its own entry.
+    // The v7 presentation tail landed on the copy — steer angle,
+    // grounded compression on every wheel, the brake pedal the glow
+    // system reads, and the wheel rate `drive_remote_lerp` integrates.
+    // (`RemoteReplica` keeps the local sim from stepping this state.)
+    {
+        let mut q = app.world_mut().query_filtered::<(
+            &mm2_vehicle::VehicleState,
+            &VehicleInput,
+            &netdrive::RemoteDrive,
+        ), With<RemotePick>>();
+        let (state, input, drive) = q.single(app.world()).expect("the host copy");
+        assert!(
+            (state.steer_angle - 0.25).abs() < 1e-3,
+            "the replicated steer angle: {}",
+            state.steer_angle
+        );
+        assert!(state.grounded);
+        assert!(
+            state
+                .wheels
+                .iter()
+                .all(|w| w.grounded && w.compression > 0.0),
+            "the replicated droop reached every wheel"
+        );
+        assert_eq!(input.brake, 1.0, "the brake flag drives the glows");
+        assert_eq!(drive.spin_rate, 30.0, "300 x 0.1 rad/s");
+    }
+    // The rate integrates into the copy's wheel spin each update — the
+    // visuals' `WheelState::spin` accumulates like a live car's.
+    // (`spin`, not fixed updates — a 0 delta step adds nothing.)
+    spin(&mut app, |a| {
+        a.world().resource::<netdrive::NetDriveReport>().remote_spin > 0.0
+    });
+    {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&mm2_vehicle::VehicleState, With<RemotePick>>();
+        let state = q.single(app.world()).expect("the host copy");
+        assert!(
+            state.wheels.iter().all(|w| w.spin > 0.0),
+            "the replicated rate turned the copy's wheels"
+        );
+    }
+
+    // The local seat was not moved by its own entry — and its live
+    // input kept its own pedal, never the entry's brake flag.
     assert!(
         app.world().get::<PlayerVehicle>(local).is_some(),
         "the local car stayed ours"
+    );
+    assert_eq!(
+        app.world().get::<VehicleInput>(local).unwrap().brake,
+        0.0,
+        "the own-seat tail never overwrote the local input"
     );
 
     // A stale tick and a foreign generation both drop untouched.
@@ -2037,6 +2100,10 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                     vel: [0.0; 3],
                     angvel: [0.0; 3],
                     epoch: 0,
+                    steer: 0,
+                    spin: 0,
+                    compression: 0,
+                    flags: 0,
                 }],
             })
             .unwrap();
@@ -2052,6 +2119,10 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 vel: [0.0; 3],
                 angvel: [0.0; 3],
                 epoch: 0,
+                steer: 0,
+                spin: 0,
+                compression: 0,
+                flags: 0,
             }],
         })
         .unwrap();
@@ -2086,6 +2157,10 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 vel: [0.0; 3],
                 angvel: [0.0; 3],
                 epoch: 0,
+                steer: 0,
+                spin: 0,
+                compression: 0,
+                flags: 0,
             }],
         })
         .unwrap();
@@ -2126,6 +2201,10 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 vel: [0.0; 3],
                 angvel: [0.0; 3],
                 epoch: 0,
+                steer: 0,
+                spin: 0,
+                compression: 0,
+                flags: 0,
             }],
         })
         .unwrap();
@@ -2180,6 +2259,10 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 vel: [2.0, 0.0, 0.0],
                 angvel: [0.0; 3],
                 epoch: 1,
+                steer: 0,
+                spin: 0,
+                compression: 0,
+                flags: 0,
             }],
         })
         .unwrap();
@@ -2234,6 +2317,10 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 vel: [0.0; 3],
                 angvel: [0.0; 3],
                 epoch: 1,
+                steer: 0,
+                spin: 0,
+                compression: 0,
+                flags: 0,
             }],
         })
         .unwrap();
@@ -2270,6 +2357,10 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 vel: [0.0; 3],
                 angvel: [0.0; 3],
                 epoch: 1,
+                steer: 0,
+                spin: 0,
+                compression: 0,
+                flags: 0,
             }],
         })
         .unwrap();
@@ -2429,6 +2520,105 @@ fn a_remote_drivers_reset_request_resets_its_seat() {
             "the car stayed on its seat"
         );
     }
+}
+
+/// F25-B, host half of the v7 presentation tail: `publish_snapshots`
+/// encodes the seat's *drive state* — the peer's wire `Snap` carries
+/// the steer angle, mean wheel rate, droop fraction and pedal/
+/// direction flags the copy's visuals consume, quantized exactly the
+/// way `encode_present` specifies.
+#[test]
+fn a_snap_carries_the_remote_cars_drive_state() {
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let mut app = host_app(vfs, link);
+    let mut peer = ready_peer(addr, "eve", fp);
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<LobbyState>()
+            .roster
+            .iter()
+            .any(|e| e.pick.is_some())
+    });
+    app.world()
+        .resource::<HostLink>()
+        .command_sender()
+        .send(HostCommand::Start)
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world().resource::<Session>().config().is_some()
+    });
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    app.update();
+    spin_mut(&mut app, |a| {
+        a.world_mut()
+            .query_filtered::<(), With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some()
+    });
+
+    // The harness has no physics — hand-write the authority's truth
+    // the way the sim leaves it: steered 0.25 rad, reversing, fronts
+    // grounded at 20 rad/s and 0.4 of travel. The brake pedal comes
+    // up the wire — `apply_remote_inputs` owns the seat's `VehicleInput`.
+    peer.ctl()
+        .unwrap()
+        .send_input(DriveInput {
+            generation: app.world().resource::<Session>().generation(),
+            seq: 1,
+            throttle: 0,
+            brake: 255,
+            steer: 0,
+            handbrake: 0,
+        })
+        .unwrap();
+    spin_mut(&mut app, |a| {
+        a.world_mut()
+            .query_filtered::<&VehicleInput, With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some_and(|i| i.brake > 0.9)
+    });
+    {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&mut mm2_vehicle::VehicleState, With<RemotePick>>();
+        let mut state = q.single_mut(app.world_mut()).expect("the remote car");
+        state.steer_angle = 0.25;
+        state.direction = mm2_vehicle::DriveDirection::Reverse;
+        state.grounded = true;
+        for ws in &mut state.wheels[..2] {
+            ws.grounded = true;
+            ws.vel_long = 6.8;
+            ws.compression = 0.14;
+        }
+    }
+    // Publish a handful of frames so the peer's buffer holds a snap
+    // carrying the tail before the blocking recv drains it.
+    for _ in 0..5 {
+        app.update();
+    }
+    let msg = until_wire(
+        &mut peer,
+        |m| matches!(m, Message::Snap { entries, .. } if entries.iter().any(|e| e.player == 1 && e.steer == 250)),
+    );
+    let Message::Snap { entries, .. } = msg else {
+        unreachable!()
+    };
+    let e = entries.iter().find(|e| e.player == 1).unwrap();
+    assert_eq!(e.steer, 250, "0.25 rad in milliradians");
+    assert_eq!(e.spin, 200, "6.8 / 0.34 rad/s in 0.1 rad/s units");
+    assert_eq!(e.compression, 51, "mean droop fraction x255");
+    assert_eq!(
+        e.flags,
+        mm2_net::SNAP_FLAG_BRAKE | mm2_net::SNAP_FLAG_REVERSE | mm2_net::SNAP_FLAG_GROUNDED
+    );
 }
 
 /// F25-B, client half: `R` under a predicted session no longer sits

@@ -82,6 +82,8 @@ type VehicleQuery<'w, 's> = Query<
         Option<&'static EngineImpairment>,
         Forces,
     ),
+    // A `RemoteReplica`'s state is the wire's, not the sim's (F25-B).
+    Without<crate::vehicle::RemoteReplica>,
 >;
 
 /// Core simulation: runs inside [`PhysicsSchedule`] at the fixed physics rate.

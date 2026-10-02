@@ -95,7 +95,7 @@ fn leading_u64(s: &str) -> u64 {
     digits.parse().unwrap()
 }
 
-/// The `net=in<s>s/<a>a/<x>x,snap<s>s/<a>a,rem<r>,req<s>s/<g>g/<d>d`
+/// The `net=in<s>s/<a>a/<x>x,snap<s>s/<a>a,rem<r>,req<s>s/<g>g/<d>d,rspn<n>`
 /// record field decoded — the wire counters the run actually moved.
 #[derive(Debug, Default)]
 struct NetField {
@@ -104,6 +104,7 @@ struct NetField {
     snaps_sent: u64,
     snaps_applied: u64,
     remotes: u64,
+    remote_spin: u64,
 }
 
 fn net_field(line: &str) -> NetField {
@@ -126,6 +127,7 @@ fn net_field(line: &str) -> NetField {
         snaps_sent: snaps[0],
         snaps_applied: snaps[1],
         remotes: leading_u64(parts[2].strip_prefix("rem").unwrap()),
+        remote_spin: leading_u64(parts[4].strip_prefix("rspn").unwrap()),
     }
 }
 
@@ -158,6 +160,10 @@ fn assert_client_drove(rec: &str, min_remotes: u64) {
     assert!(
         net.remotes >= min_remotes,
         "expected >= {min_remotes} remote copies: {rec}"
+    );
+    assert!(
+        net.remote_spin > 0,
+        "the v7 presentation tail turned a remote copy's wheels: {rec}"
     );
 }
 

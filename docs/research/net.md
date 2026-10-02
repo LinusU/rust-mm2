@@ -40,7 +40,7 @@ precludes adding a second socket later.
 is added it must come from maintained crypto/session crates, not
 hand-rolled primitives.
 
-## Wire protocol (`PROTOCOL_VERSION = 6`)
+## Wire protocol (`PROTOCOL_VERSION = 7`)
 
 Length-prefixed frames: `u32le` length + payload, bounded by
 `MAX_FRAME` (256 KiB) checked *before* allocation. Messages are strict
@@ -54,7 +54,24 @@ in-session driving transport (F25-A). v4→v5: `SnapEntry` gained
 `epoch`, the authority's per-seat reset counter (F25-A.5). v5→v6:
 `ResetRequest { generation }` — a client asking the authority to reset
 its own seat (F25-B); the roster slot names the seat, so no target
-field exists to forge.
+field exists to forge. v6→v7: `SnapEntry` gained a presentation tail
+(F25-B) — `steer` (i16, milliradians, saturating), `spin` (i16, 0.1
+rad/s, the mean rate of the grounded wheels), `compression` (u8, the
+mean suspension-droop fraction ×255) and `flags` (u8: brake, reverse,
+grounded). Pose/velocity were already replicated but a remote copy's
+`VehicleState`/`VehicleInput` were dead — wheels stayed at full droop,
+never steered or spun, and the brake/reverse glows never lit. The tail
+is informational: it drives `car_visual`'s wheel/glow systems on the
+copy, never authority pose; application clamps it to the pick's
+steer/travel bounds, so a hostile wire value cannot write unbounded
+visual state. A client-side remote copy also carries
+`mm2_vehicle::RemoteReplica`, which excludes it from the local
+`vehicle_simulation` — without it the sim's own dead-input step would
+overwrite every replicated field between snapshots (the host's
+authoritative seats keep simulating; the marker exists only on
+predicted-session copies). Between snapshots `RemoteDrive::spin_rate`
+integrates the replicated rate into `WheelState::spin`, so wheels
+keep turning at ~20 Hz updates instead of stepping.
 
 Handshake (always the first exchange):
 
@@ -427,7 +444,9 @@ wire actually moved rather than an in-process mailbox's contents.
   each client's mid-session record shows inputs streamed up
   (`in<N>s`), authoritative snapshots applied (`snap<N>a`), the other
   participants reconciled as remote copies (`rem2` while both peers
-  are still connected) and its own predicted seat driven (`moved=`).
+  are still connected), the v7 presentation tail driving the copies'
+  wheel spin (`rspn` — accumulated radians the client integrated into
+  remote wheels), and its own predicted seat driven (`moved=`).
   A client's frame-cap exit lands on the host as `cause=quit` — the
   link `Drop` sends a deliberate `Leave`, not a lost socket — and the
   host's `quit` record carries the authority side: remote inputs

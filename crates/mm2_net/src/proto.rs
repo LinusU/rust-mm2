@@ -14,8 +14,10 @@
 /// landed. v4: `Input`/`Snap` — the in-session driving transport
 /// (F25-A). v5: `SnapEntry` gained `epoch`, the authority's per-player
 /// reset counter (F25-A.5). v6: `ResetRequest` — a driver asking the
-/// authority to reset its own seat (F25-B).
-pub const PROTOCOL_VERSION: u16 = 6;
+/// authority to reset its own seat (F25-B). v7: `SnapEntry` gained the
+/// presentation tail — steer/spin/compression/flags a remote copy's
+/// wheel and light visuals consume (F25-B).
+pub const PROTOCOL_VERSION: u16 = 7;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -183,7 +185,36 @@ pub struct SnapEntry {
     /// missed reset — 256 resets between applied snapshots is far past
     /// any plausible stream gap.
     pub epoch: u8,
+    /// Presentation tail (v7, F25-B): the drive state a remote copy's
+    /// wheel/light visuals need but cannot derive from pose. These
+    /// fields are *informational* — they carry no authority over the
+    /// replicated pose, and receivers clamp/derive rather than trust.
+    /// Actual steering angle at the front wheels, milliradians
+    /// (saturating) — quantized on the authority's `VehicleState`, not
+    /// the input, so assists and rate limits are already reflected.
+    pub steer: i16,
+    /// Mean grounded-wheel angular rate in 0.1 rad/s units, signed
+    /// (negative = rolling backwards), saturating. `0` while no wheel
+    /// is grounded — the sim's own rule holds a lifted wheel's angle
+    /// rather than free-spinning it.
+    pub spin: i16,
+    /// Mean suspension compression as a fraction of each wheel's own
+    /// travel, ×255. Aggregated across wheels by design — per-wheel
+    /// droop deltas are presentation detail, not wire cost.
+    pub compression: u8,
+    /// Presentation flags: bit 0 `SNAP_FLAG_BRAKE`, bit 1
+    /// `SNAP_FLAG_REVERSE`, bit 2 `SNAP_FLAG_GROUNDED`.
+    pub flags: u8,
 }
+
+/// [`SnapEntry::flags`] bit 0 — the driver's brake pedal is held (the
+/// same threshold the brake/reverse glows read).
+pub const SNAP_FLAG_BRAKE: u8 = 0x01;
+/// [`SnapEntry::flags`] bit 1 — the drivetrain is engaged in reverse.
+pub const SNAP_FLAG_REVERSE: u8 = 0x02;
+/// [`SnapEntry::flags`] bit 2 — any wheel has ground contact; clear
+/// means the copy hangs its wheels at full droop.
+pub const SNAP_FLAG_GROUNDED: u8 = 0x04;
 
 /// One wire message.
 #[derive(Debug, Clone, PartialEq)]
@@ -378,6 +409,10 @@ impl<'a> Cursor<'a> {
 
     fn u16(&mut self) -> Result<u16, ProtoError> {
         Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
+    }
+
+    fn i16(&mut self) -> Result<i16, ProtoError> {
+        Ok(i16::from_le_bytes(self.take(2)?.try_into().unwrap()))
     }
 
     fn u64(&mut self) -> Result<u64, ProtoError> {
@@ -585,6 +620,10 @@ impl Message {
                         out.extend_from_slice(&v.to_le_bytes());
                     }
                     out.push(e.epoch);
+                    out.extend_from_slice(&e.steer.to_le_bytes());
+                    out.extend_from_slice(&e.spin.to_le_bytes());
+                    out.push(e.compression);
+                    out.push(e.flags);
                 }
             }
         }
@@ -678,6 +717,10 @@ impl Message {
                         vel: cur.vec3()?,
                         angvel: cur.vec3()?,
                         epoch: cur.u8()?,
+                        steer: cur.i16()?,
+                        spin: cur.i16()?,
+                        compression: cur.u8()?,
+                        flags: cur.u8()?,
                     });
                 }
                 Self::Snap {
@@ -828,6 +871,10 @@ mod tests {
                         vel: [12.5, 0.0, -1.0],
                         angvel: [0.0, 0.4, 0.0],
                         epoch: 2,
+                        steer: -310,
+                        spin: 1420,
+                        compression: 96,
+                        flags: SNAP_FLAG_BRAKE | SNAP_FLAG_GROUNDED,
                     },
                     SnapEntry {
                         player: 3,
@@ -836,6 +883,10 @@ mod tests {
                         vel: [0.0, 0.0, 0.0],
                         angvel: [0.0, 0.0, 0.0],
                         epoch: 0,
+                        steer: 0,
+                        spin: -80,
+                        compression: 0,
+                        flags: SNAP_FLAG_REVERSE,
                     },
                 ],
             },
@@ -946,6 +997,10 @@ mod tests {
                 vel: [0.0; 3],
                 angvel: [0.0; 3],
                 epoch: 0,
+                steer: 0,
+                spin: 0,
+                compression: 0,
+                flags: 0,
             };
             MAX_PLAYERS as usize + 1
         ];

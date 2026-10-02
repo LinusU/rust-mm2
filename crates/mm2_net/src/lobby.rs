@@ -2640,6 +2640,10 @@ mod tests {
                 vel: [4.0, 0.0, 0.0],
                 angvel: [0.0, 5.0, 0.0],
                 epoch: 0,
+                steer: 0,
+                spin: 0,
+                compression: 0,
+                flags: 0,
             }],
         };
         host.ctl().broadcast(&snap).unwrap();

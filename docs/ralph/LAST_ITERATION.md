@@ -1,3 +1,86 @@
+# Last iteration — F25-B fourth slice: replicated drive-presentation
+# state — protocol v7 gives `SnapEntry` a wheel/engine tail so remote
+# copies steer, spin, settle their suspension and light their pedals
+# (iteration 15, run 20261001T195454-62282 continued)
+
+Implementation iteration on `ralph/night` (baseline `6816fc3` — the
+two-process driving candidate; external verify + review pass with gaps
+only). One coherent slice: the wheel/engine leg of spec req 3 — remote
+kinematic copies already received pose/velocity snapshots but their
+`VehicleState`/`VehicleInput` were dead fields nobody wrote, so the
+copy's wheels sat at full droop, never steered or spun, and the
+brake/reverse glows never lit.
+
+## Task selection
+
+No failing gate or blocking finding — the previous review passed with
+gaps only. Of F25-B's remaining scope (replicated damage/result/
+wheel-engine presentation, the AC03 measured matrix, dedup'd effects,
+bandwidth budgets), the presentation tail is the remaining *production*
+gap the review's "replicated remote damage/result/wheel-engine
+presentation" names — the matrix is queued as the next test-side slice.
+
+## What landed
+
+- `mm2_net` protocol v7 (`proto.rs`): `SnapEntry` gains `steer` (i16
+  milliradians, saturating), `spin` (i16, 0.1 rad/s, mean grounded-wheel
+  rate), `compression` (u8, mean droop fraction ×255) and `flags`
+  (brake/reverse/grounded). Strict encode/decode; every fixture
+  updated.
+- `mm2_vehicle`: `RemoteReplica` marker — a client-side remote copy is
+  kinematic and carries `VehicleState`/`VehicleInput` the local
+  `vehicle_simulation` would otherwise stomp with dead-input results
+  between snapshots; the query now excludes `RemoteReplica`. The
+  host's authoritative seats never get the marker and still simulate.
+- `mm2_app::netdrive`: `encode_present` on publish (authoritative
+  steer angle — assists/rate limits included — mean grounded-wheel
+  `vel_long/radius`, per-wheel compression normalised by travel,
+  brake/direction/grounded flags); `apply_present` on receipt writes
+  the copy's `VehicleState`/`VehicleInput` with wire values clamped to
+  the pick's steer/travel bounds — informational only, pose still
+  belongs to the lerp; `RemoteDrive::spin_rate` integrates the
+  replicated rate into `WheelState::spin` inside `drive_remote_lerp`
+  so wheels keep turning between ~20 Hz snapshots; the epoch-equal
+  own-seat entry keeps ignoring the tail (local prediction owns it).
+  `NetDriveReport.remote_spin` counts integrated radians; the smoke
+  `net=` field gains `rspn<n>` — on the real driving legs the clients
+  report nonzero (the host's own copy of truth is simulation, so its
+  `rspn` stays 0 and `net_drive` asserts it on clients only).
+- Tests: netdrive units +3 (tail encode incl. saturation and the
+  airborne-freezes-spin leg, apply incl. hostile-value clamping);
+  `net_app` extended + new — the client leg's tick-7 snap carries a
+  live tail and asserts steer/compression/grounded/brake land on the
+  copy's state, the spin rate integrates over updates, and a junk tail
+  on the epoch-equal own-seat entry stays ignored; new host leg
+  `a_snap_carries_the_remote_cars_drive_state` drives a real wire
+  `DriveInput` + hand-written authority truth through the real
+  `publish_snapshots` encode and asserts the decoded tail; `net_drive`
+  parses `rspn` and requires `remote_spin > 0` in both process-level
+  client records.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked --workspace
+--all-targets --all-features -- -D warnings` clean; `cargo test
+--locked --workspace` green — 89 test binaries, 0 failures (`net_app`
+33/33 incl. the new host-side tail leg, `net_drive` 2/2 in ~4 s).
+
+## Classification / remaining open items
+
+- Implementation choice throughout (protocol and component shape);
+  the presentation fields replay simulation output, no original-behavior
+  claim.
+- Evidence: in-process integration + unit legs plus two real-process
+  loopback sessions asserting `rspn` — synthetic dev world only, no
+  LAN, no retail install, nothing rendered or driven by hand.
+- F25-B remaining scope: replicated damage/result state, deduplicated
+  audio/effects on remote cars, the *measured* AC03 impairment matrix
+  (harness exists; one recipe exercised), bandwidth/update-rate
+  budgets. AC01–AC06 stay open as before; this slice advances req 3's
+  wheel/engine leg only.
+
+---
+
 # Last iteration — F25-B third slice: the first two-process driving
 # evidence — `mm2 --host`/`mm2 --join` as separate OS processes, clean
 # and through a live `ImpairProxy` (iteration 14, run

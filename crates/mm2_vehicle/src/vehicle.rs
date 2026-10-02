@@ -140,6 +140,19 @@ pub struct GyroSpin {
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct EngineImpairment(pub f32);
 
+/// Marker for a vehicle entity whose truth arrives by replication from
+/// a remote authority rather than the local sim (F25-B) — the kinematic
+/// copies a predicted client keeps of the other participants' cars.
+/// [`vehicle_simulation`](crate::systems::vehicle_simulation) skips
+/// these: stepping them would burn wheel raycasts on a kinematic body
+/// and overwrite the `VehicleState`/`VehicleInput` fields the snapshot
+/// stream drives (steer angle, wheel spin, brake/direction flags).
+/// Presentation systems still read those components normally — the
+/// marker only excludes the *stepping* of the state, never its
+/// consumption. The authority's own simulated remote cars are unmarked.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct RemoteReplica;
+
 /// Mutable simulation state of a vehicle.
 #[derive(Component)]
 pub struct VehicleState {
