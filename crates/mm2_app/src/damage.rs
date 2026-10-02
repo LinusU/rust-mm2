@@ -24,7 +24,10 @@
 //!   the production lifecycle, never a shortcut. AI opponents reset in
 //!   place and repair regardless of mode (designed — the original's
 //!   opponent-destruction behavior is unverified); remote participants
-//!   resolve under their own authority (F25+ territory).
+//!   take the same in-place arm on the authority that simulates them
+//!   (F25-A.4 — the host owns their physics truth, and the reset rides
+//!   the snapshot stream down; telling the *owning* client it was reset
+//!   is own-seat reconciliation, still open).
 //!
 //! Both systems are authority-gated and drain their input while the
 //! session is not `Playing`, so a buffered stale event can never flush
@@ -187,11 +190,15 @@ pub fn apply_impact_damage(
 ///   event restarts through the production lifecycle. Reset outcomes
 ///   repair the damage with them — a reset wreck that stays wrecked
 ///   would just disable again next contact.
-/// - AI participant: resets in place and repairs under every mode
-///   (designed — original opponent-destruction behavior is unverified,
-///   UNK-13; the alternative, an opponent wreck ending its race
-///   permanently, would silently shrink the field).
-/// - remote participant: skipped — its authority resolves it (F25+).
+/// - AI and remote participants: reset in place and repair under every
+///   mode (designed — original opponent-destruction behavior is
+///   unverified, UNK-13; the alternative, a wreck ending its race
+///   permanently, would silently shrink the field, and a remote driver's
+///   wreck must never restart the event or tax the shared race clock
+///   for everyone else on the wire). On the host the remote car is a
+///   real participant this system owns; a predicted client's copies
+///   never reach this code — the whole system early-returns without
+///   `AuthorityRole::Authority`.
 ///
 /// The outcome re-checks the live tier: a `Disabled` event whose state
 /// was already repaired by an earlier resolution in the same tick is a
@@ -245,12 +252,9 @@ pub fn resolve_disabled(
         // restart) supersedes any armed stuck episode, so the detector
         // disarms here rather than fire a second recovery into the
         // pose the outcome lands the car in (`VehicleStuck::disarm`'s
-        // reset-path contract). Remote participants' detectors belong
-        // to their own authority.
-        if matches!(
-            control_kind,
-            Some(PlayerControl::Local) | Some(PlayerControl::Ai)
-        ) && let Ok(mut detector) = stuck.get_mut(entity)
+        // reset-path contract).
+        if control_kind.is_some()
+            && let Ok(mut detector) = stuck.get_mut(entity)
         {
             detector.disarm();
         }
@@ -332,7 +336,10 @@ pub fn resolve_disabled(
                     }
                 }
             }
-            Some(PlayerControl::Ai) => {
+            // AI and remote wrecks share the in-place arm — on the
+            // host a remote car is this authority's participant, so its
+            // reset+repair rides the next snapshot down (F25-A.4).
+            Some(PlayerControl::Ai) | Some(PlayerControl::Remote) => {
                 if let Some((position, rotation)) =
                     poses.get(entity).ok().filter(|(p, _)| p.0.is_finite())
                 {
@@ -356,16 +363,15 @@ pub fn resolve_disabled(
                 texel.reset(entity);
                 report.recovered += 1;
             }
-            // Remote participants resolve under their own authority —
-            // the host-of-record path is F25+ territory.
-            Some(PlayerControl::Remote) | None => {}
+            // An unidentified object has no driver to resolve for.
+            None => {}
         }
     }
 }
 
-/// Fixed-step: mirror each local/AI participant's authored damage into
-/// the physics-side [`EngineImpairment`] the sim consumes — F05-B.7,
-/// the designed smoke↔engine-torque coupling (DSN-25). MM2Hook's
+/// Fixed-step: mirror each participant's authored damage into the
+/// physics-side [`EngineImpairment`] the sim consumes — F05-B.7, the
+/// designed smoke↔engine-torque coupling (DSN-25). MM2Hook's
 /// `PhysicalEngineDamage` option documents the original rule —
 /// "when the engine spews smoke … less acceleration and less top
 /// speed" — so impairment keys on the same `MedDamage` bound the
@@ -377,30 +383,23 @@ pub fn resolve_disabled(
 /// bit-identical. Running after [`resolve_disabled`] in the chain
 /// means a wreck's repair clears the factor the same tick the state
 /// returns to `Intact`; regeneration, where a session lets it run,
-/// lifts it gradually. Remote participants are skipped like every
-/// F05 system — their authority impairs its own sim (F25+).
+/// lifts it gradually. Remote participants impair like AI (F25-A.4):
+/// the host simulates their cars, so their engine power is the
+/// authority's to weaken.
 /// Entering/leaving the impaired band counts into
 /// [`DamageReport::impaired`]/[`restored`], the headless record's
 /// `imp=` field.
 pub fn sync_impairment(
     mut commands: Commands,
     session: Res<Session>,
-    mut cars: Query<(
-        Entity,
-        &VehicleDamage,
-        Option<&Player>,
-        Option<&mut EngineImpairment>,
-    )>,
+    mut cars: Query<(Entity, &VehicleDamage, Option<&mut EngineImpairment>)>,
     mut report: ResMut<DamageReport>,
 ) {
     if !session.is_playing() || !session.authority_role().is_authority() {
         return;
     }
     let policy = ImpairmentPolicy::default();
-    for (entity, damage, player, impairment) in &mut cars {
-        if player.is_some_and(|p| p.control == PlayerControl::Remote) {
-            continue;
-        }
+    for (entity, damage, impairment) in &mut cars {
         let factor = policy.factor(damage.total(), &damage.spec);
         match impairment {
             Some(mut imp) => {

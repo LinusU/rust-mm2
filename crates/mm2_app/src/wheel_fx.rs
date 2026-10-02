@@ -217,8 +217,10 @@ fn wheel_fx_assets(
 /// utilization — the same measure the skid voices read — so the
 /// authored `ptxthreshold` applies on the same 0..1 domain a slip
 /// trigger plausibly reads (the original quantity is unrecovered,
-/// UNK-23). Remote participants are skipped like every effect system
-/// (their own client renders them). A vehicle without a rig yet binds
+/// UNK-23). Remote participants are skipped like every effect system —
+/// their presentation is replication scope (F25-B/F26), and a client's
+/// kinematic copy runs no wheel sim to read. A vehicle without a rig
+/// yet binds
 /// one seeded off its object id — session-stable, so emission replays
 /// identically (F18 req 5).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)] // Bevy system — the borrows are the contract.

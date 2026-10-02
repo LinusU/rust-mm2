@@ -126,8 +126,10 @@ type RecoveryVehicles<'w, 's> = Query<
 /// Fixed-step: advance every participant's [`VehicleRecovery`]
 /// detector once, emitting one [`RecoveryEvent`] per fired episode.
 ///
-/// Remote participants are skipped: a predicted client's recovery is
-/// its authority's to declare (F05 req 6). A `Disabled` wreck belongs
+/// Remote drivers observe like AI: the authority simulating their car
+/// owns their detector (F25-A.4; a predicted client's copies never
+/// reach this system — it early-returns without
+/// `AuthorityRole::Authority`, F05 req 6). A `Disabled` wreck belongs
 /// to [`crate::damage::resolve_disabled`]'s outcome — its reset or
 /// restart owns the pose, so the observe leg does not run a second
 /// recovery underneath it.
@@ -148,10 +150,7 @@ pub fn track_recovery(
     let generation = session.generation();
     let tick = session.tick();
     let water = water.as_deref();
-    for (.., id, player, pos, rot, state, mut recovery, damage) in &mut vehicles {
-        if player.is_some_and(|p| p.control == PlayerControl::Remote) {
-            continue;
-        }
+    for (.., id, _player, pos, rot, state, mut recovery, damage) in &mut vehicles {
         // A wreck belongs to the damage outcome — it cannot drive out
         // of anything.
         if damage.is_some_and(|d| d.condition() == DamageTier::Disabled) {
@@ -183,8 +182,10 @@ pub fn track_recovery(
 /// touched dry ground (`landing: None`) falls back to the session
 /// [`SpawnPoint`]; a session with no spawn at all cannot resolve and
 /// the event is spent — a count in `recovered` always means a real
-/// reset. Local and AI participants resolve identically; remote
-/// participants belong to their own authority (F25+).
+/// reset. Local, AI and remote participants resolve identically — on
+/// the authority a remote car's recovery is this process's to declare,
+/// and the reset reaches its copies through the snapshot stream
+/// (F25-A.4).
 ///
 /// The recovery supersedes an armed [`VehicleStuck`] episode — the
 /// reset moves the car far past `move_thresh`, and disarming here
@@ -221,10 +222,10 @@ pub fn resolve_recovery(
         let Some(&(entity, control)) = index.get(&event.object) else {
             continue;
         };
-        if !matches!(
-            control,
-            Some(PlayerControl::Local) | Some(PlayerControl::Ai)
-        ) {
+        // Every identified participant resolves — a remote driver is
+        // this authority's simulated car (F25-A.4); an unidentified
+        // object has no driver to recover for.
+        if control.is_none() {
             continue;
         }
         let landing = event

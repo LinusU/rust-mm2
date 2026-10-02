@@ -136,9 +136,12 @@ pub(crate) fn tile_quad(tile: u32, n: u32) -> Mesh {
 
 /// Emit puffs from every rigged participant. Presentation of whatever
 /// `VehicleDamage` state the entity carries — remote participants are
-/// skipped like every F05 system because their damage is the remote
-/// authority's state (and its own client renders it). Gated on
-/// `Playing` so a pause freezes emission with the rest of the sim.
+/// skipped because their smoke is replicated presentation (F25-B/F26
+/// scope): the authority resolves their damage state, but emission on
+/// any process renders from the *replicated* total, and none is wired
+/// yet (remote spawns carry no `VehicleSmoke` rig either, so the skip
+/// is belt-and-braces). Gated on `Playing` so a pause freezes emission
+/// with the rest of the sim.
 #[allow(clippy::too_many_arguments)] // Bevy system — the borrows are the contract.
 pub fn drive_smoke(
     mut commands: Commands,

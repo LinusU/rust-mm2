@@ -1,3 +1,96 @@
+# Last iteration — F25-A.4: authority-owned remote-driver outcomes —
+# the host's damage/stuck/recovery pipeline resolves remote drivers
+# (iteration 025, run 20261001T195454-62282 continued)
+
+Implementation iteration on `ralph/night` (baseline `bbc7527` — the
+F25-A.3 candidate; external verify + review pass with gaps only). One
+coherent slice: `PlayerControl::Remote` conflated input ownership with
+process authority — on a hosted session the host already simulates a
+remote driver's car, so a remote who wrecks, wedges or sinks was never
+resolved by anyone. The host's rule pipeline now owns those outcomes.
+
+## Task selection
+
+The F25-A row's remaining scope named it ("damage/stuck/recovery/result
+replication for remote drivers") and the defect was structural: the
+host ran every remote car's physics but skipped it in every outcome
+system, so a remote wreck just sat there forever while its driver
+waited on an authority that already was this process. The correct
+split is `SessionAuthority`/`AuthorityRole` decides *whether* this
+process resolves; `PlayerControl` only says whose hands the input came
+from.
+
+## What landed
+
+- `mm2_app::damage` — `sync_impairment` drops its remote skip: the
+  host weakens the engine of the remote car it simulates.
+  `resolve_disabled` merges `Remote` into the AI arm — in-place
+  reset + repair under every mode, never the local driver's event
+  restart or a shared clock tax; the stuck-disarm broadens to every
+  identified participant.
+- `mm2_app::stuck` / `mm2_app::recovery` — the arm/observe/resolve
+  legs drop their remote skips; a remote car arms off the real impact
+  stream, fires on the authored window, recovers through the shared
+  `ResetVehicle` path (production `Teleported` marking included).
+  Predicted sessions still drain everything inertly — the session-level
+  `authority_role().is_authority()` gate is the real boundary.
+- `mm2_app::netdrive::spawn_remote` — remote cars now carry the
+  authored `VehicleDamage`/`VehicleStuck` (recordless picks stay
+  undamageable/unstuckable — no fabricated spec) and the designed
+  `VehicleRecovery` detector, on both wire sides: inert under a
+  predicted session, one spawn shape, and damage-state replication
+  gets a landing place.
+- `mm2_app::netdrive::apply_snapshots` — `CORRECTION_SNAP_DIST`
+  (20 m, designed bound for spec req 4's bounded corrections): a
+  teleport-scale correction snaps the copy to the asserted pose
+  instead of blending a slide through the world. The authority's new
+  resets produce exactly those corrections; sub-bound corrections
+  still blend.
+- Presentation systems keep their remote skips (smoke/sparks/texel/
+  breakaway/impact-audio): remote-car effects are replicated
+  presentation, F25-B/F26 scope, and remote spawns carry none of those
+  rigs — the skips are belt-and-braces. Stale "their own authority
+  renders it" comments updated to say so.
+- Tests — `damage`/`stuck`/`recovery` fixtures take a caller
+  `SessionConfig`; each suite gains a `Host` leg (remote car
+  arms/impairs/resolves/recovers through the production path, no
+  session restart) and a `Remote` leg (predicted session drains
+  everything inertly — even a hand-written `RecoveryEvent` never
+  resolves). `net_app` legs extended in place: the real
+  `reconcile_remote_players` spawn asserts it carries
+  `VehicleRecovery` while the recordless dev-car pick stays
+  undamageable/unstuckable, and the snapshot leg asserts a
+  teleport-scale correction snaps where a 4 m correction still
+  blends.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --workspace
+--all-targets --all-features -- -D warnings` clean; `cargo test
+--workspace` — all suites green (damage 15/15, stuck 12/12,
+recovery 16/16, net_app 29/29 — unchanged count, two legs extended
+in place).
+
+## Classification / remaining open items
+
+- The outcome split is designed policy: authority decides, not input
+  ownership. A remote driver's wreck resetting in place + repairing
+  under every mode (rather than ending their event) is designed —
+  the original's MP wreck handling is unverified (UNK-13 territory);
+  the alternative, one remote wreck restarting everyone's event, was
+  rejected in the row above.
+- Still open F25-A scope: own-seat prediction/reconciliation — the
+  owning client does not yet learn it was reset (its copies of
+  *other* cars snap correctly); replicated damage/result presentation;
+  input rate limiting beyond latest-wins; interpolation tuning.
+- All evidence is synthetic/loopback: the `Host`/`Remote` legs stamp
+  authority on the session config; `net_app`'s snap legs ride a real
+  loopback socket but a hand-broadcast `Snap`. No two-process driving
+  evidence, no impairment matrix, no soak, no rendered observation —
+  F25-AC02..AC06 stay open.
+
+---
+
 # Last iteration — F25-A.3: MP-4's ambient-traffic leg — networked
 # sessions field no lane followers on either wire side (iteration 024,
 # run 20261001T195454-62282 continued)

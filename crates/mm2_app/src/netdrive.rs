@@ -8,14 +8,20 @@
 //! - **Host** (`SessionAuthority::Host` → `AuthorityRole::Authority`):
 //!   remote-driven cars are real dynamic participants whose
 //!   [`VehicleInput`] is fed from the wire mailbox instead of local
-//!   devices. They are stamped `PlayerControl::Remote` — the rule
-//!   systems that skip `Remote` (damage outcomes, stuck, recovery) still
-//!   do so on the host, since resolving a remote driver's *outcome*
-//!   needs wire coordination a later F25 slice adds; physics, collision
-//!   and contract telemetry apply to them like any participant.
+//!   devices. They are stamped `PlayerControl::Remote` and resolved by
+//!   the authority's rule pipeline like AI (F25-A.4): damage accrues
+//!   against the authored record, stuck/water/out-of-bounds episodes
+//!   recover in place, a wreck resets in place and repairs, and the
+//!   smoke↔torque impairment applies — the resets and pose changes ride
+//!   the ordinary snapshot stream down. What the wire still does not
+//!   carry is the *owning* client's reconciliation of its own seat or
+//!   the replicated damage presentation (smoke/sparks/texel/breakaway
+//!   stay unrigged on remote cars — F25-B/F26 scope).
 //! - **Client** (`SessionAuthority::Remote` → `Predicted`): remote cars
 //!   are kinematic copies blended between the two newest snapshots
-//!   ([`RemoteLerp`]). Our own car keeps driving on local physics —
+//!   ([`RemoteLerp`]) — they carry the same damage/stuck/recovery
+//!   components inertly, since the rule systems never run under a
+//!   predicted session. Our own car keeps driving on local physics —
 //!   snapshot entries naming our wire id are received but not applied
 //!   (reconciliation is a later slice), which is what `Predicted` means.
 //!
@@ -36,7 +42,8 @@
 //!
 //! Everything here is loopback-scoped groundwork like the rest of F24/F25:
 //! no client-side prediction, no lag compensation, no damage/result
-//! replication — those are named gaps, not silent behavior.
+//! replication down to clients' presentation — those are named gaps, not
+//! silent behavior.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -46,8 +53,9 @@ use avian3d::prelude::{
 };
 use bevy::prelude::*;
 use mm2_game::{
-    DamageSignals, Mm2Vfs, ObjectIdentity, Player, PlayerControl, PlayerVehicle, RaceDefinition,
-    RaceProgress, RaceState, Session, SessionEntity, SessionPhase,
+    DamageSignals, DamageSpec, Mm2Vfs, ObjectIdentity, Player, PlayerControl, PlayerVehicle,
+    RaceDefinition, RaceProgress, RaceState, RecoveryPolicy, Session, SessionEntity, SessionPhase,
+    StuckSpec, VehicleDamage, VehicleRecovery, VehicleStuck,
 };
 use mm2_net::{DriveInput, Message, RemoteInputs, SnapEntry, VehiclePick};
 use mm2_vehicle::{VehicleInput, vehicle_bundle};
@@ -68,6 +76,16 @@ pub const INPUT_STALE: Duration = Duration::from_millis(250);
 /// humans than authored rows (designed; the authored grid itself is
 /// the product of record, UNK-17).
 const SEAT_STAGE_GAP: f32 = 4.0;
+
+/// A snapshot correction larger than this snaps the remote copy to the
+/// asserted pose instead of blending toward it (designed bound, F25-A.4
+/// — spec req 4's bounded corrections). Inter-snapshot travel is at
+/// most top-speed × the clamped arrival interval — well under 20 m —
+/// while the teleports the authority now performs on remote cars
+/// (stuck/disabled/recovery resets) land far past it. Without the bound
+/// a reset would read as the copy smearing through the world between
+/// the old pose and the landing.
+const CORRECTION_SNAP_DIST: f32 = 20.0;
 
 /// The wire roster id this participant entity carries. `0` is the host
 /// seat — the roster never lists it, but its `Start`-carried pick and
@@ -455,11 +473,14 @@ pub fn reconcile_remote_players(
 
 /// Spawn one remote participant: session-owned, stably identified,
 /// `PlayerControl::Remote` — then the authority role splits it. On the
-/// host it is a dynamic `Vehicle` the input mailbox drives; on a client
-/// it is a kinematic copy a `RemoteLerp` blend drives. A pick that fails
-/// to load is warned and skipped — the validator already gates roster
-/// picks, so this is a defensive path (a dev-car pick cannot fail).
-/// Returns whether the entity was spawned.
+/// host it is a dynamic `Vehicle` the input mailbox drives, carrying the
+/// authored damage/stuck specs and the designed recovery detector so the
+/// authority's rule pipeline resolves it like an AI opponent (F25-A.4);
+/// on a client it is a kinematic copy a `RemoteLerp` blend drives, the
+/// same components present but inert under a predicted session. A pick
+/// that fails to load is warned and skipped — the validator already
+/// gates roster picks, so this is a defensive path (a dev-car pick
+/// cannot fail). Returns whether the entity was spawned.
 #[allow(clippy::too_many_arguments)]
 fn spawn_remote(
     commands: &mut Commands,
@@ -546,6 +567,31 @@ fn spawn_remote(
             },
         ));
     }
+    // F25-A.4: the authority resolves a remote driver's world outcomes
+    // like an AI opponent's — the authored damage/stuck records gate
+    // the components (absent = undamageable/unstuckable, never a
+    // fabricated spec) and the designed recovery policy rides every
+    // seat, anchored at its spawn pose. On a predicted client the
+    // components are inert — the systems that read them never run
+    // without `AuthorityRole::Authority` — but carrying them keeps one
+    // spawn shape and gives damage-state replication a place to land.
+    if let Some(d) = def.as_ref().and_then(|d| d.damage.as_ref()) {
+        commands
+            .entity(vehicle)
+            .insert(VehicleDamage::new(DamageSpec::from(d)));
+    }
+    if let Some(s) = def.as_ref().and_then(|d| d.stuck.as_ref()) {
+        commands
+            .entity(vehicle)
+            .insert(VehicleStuck::new(StuckSpec::from(s)));
+    }
+    commands
+        .entity(vehicle)
+        .insert(VehicleRecovery::with_anchor(
+            RecoveryPolicy::default(),
+            pos,
+            yaw,
+        ));
     // Race progress on the shared definition — a remote participant in
     // an event scores like any other driver on the authority that owns
     // it (the host); the component is inert on predicted copies.
@@ -565,9 +611,10 @@ fn spawn_remote(
                 images,
                 materials,
                 vehicle,
-                // The texel rig reads the authored damage record — the
-                // remote car carries no VehicleDamage this slice, so it
-                // gets no texel rig either.
+                // The texel rig reads the authored damage record — a
+                // remote car carries `VehicleDamage` for the authority's
+                // pipeline, but its *skin* is replicated presentation
+                // (F25-B/F26), so no rig is bound.
                 None,
             );
             if !missing.is_empty() {
@@ -754,8 +801,18 @@ pub fn apply_snapshots(
             *ang = AngularVelocity(Vec3::from(entry.angvel));
             match lerp {
                 Some(mut lerp) => {
-                    lerp.from_pos = pos.0;
-                    lerp.from_rot = rot.0;
+                    if to_pos.distance(pos.0) > CORRECTION_SNAP_DIST {
+                        // A teleport, not motion — the authority's
+                        // reset/recovery moved the car. Snap rather
+                        // than blend a slide through the world.
+                        *pos = Position(to_pos);
+                        *rot = Rotation(to_rot);
+                        lerp.from_pos = to_pos;
+                        lerp.from_rot = to_rot;
+                    } else {
+                        lerp.from_pos = pos.0;
+                        lerp.from_rot = rot.0;
+                    }
                     lerp.to_pos = to_pos;
                     lerp.to_rot = to_rot;
                     lerp.start = now;

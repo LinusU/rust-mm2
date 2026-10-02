@@ -15,8 +15,8 @@ use mm2_app::session::{SessionControl, SpawnPoint};
 use mm2_game::{
     Checkpoint, CheckpointRule, DamageEvent, DamageSpec, DamageTier, EventParams, EventRef,
     EventTableKind, ImpactEvent, ImpactId, ObjectId, ObjectIdentity, Player, PlayerControl,
-    RaceDefinition, RacePhase, RaceStart, RaceState, Session, SessionConfig, SessionMode,
-    SessionPhase, SurfaceState, VehicleDamage, advance_session_tick,
+    RaceDefinition, RacePhase, RaceStart, RaceState, Session, SessionAuthority, SessionConfig,
+    SessionMode, SessionPhase, SurfaceState, VehicleDamage, advance_session_tick,
 };
 use mm2_vehicle::{TireConditions, VehicleConfig, VehiclePlugin, vehicle_bundle};
 
@@ -568,13 +568,18 @@ fn repair_restores_full_engine_output() {
 }
 
 #[test]
-fn a_remote_participants_engine_is_not_impaired() {
-    // A remote participant's damage is its own authority's state —
-    // this host must not feed it into the local sim (F25+).
-    let (mut app, _car, _object) = damage_app(cruise_config(), Vec3::new(0.0, 1.2, 0.0));
+fn the_authority_impairs_and_resolves_a_remote_driver() {
+    // F25-A.4: a hosted session's remote car is this authority's
+    // simulated participant — authored damage impairs its engine like
+    // an AI opponent's, and a wreck resolves through the in-place
+    // reset+repair arm, never the local driver's event restart.
+    let mut hosted = event_config(EventTableKind::Blitz);
+    hosted.authority = SessionAuthority::Host;
+    let (mut app, _car, _object) = damage_app(hosted, Vec3::new(0.0, 1.2, 0.0));
     let remote_object = app.world_mut().resource_mut::<Session>().mint_object_id();
     let remote_player = app.world_mut().resource_mut::<Session>().mint_player_id();
     let role = app.world().resource::<Session>().authority_role();
+    let remote_pos = Vec3::new(10.0, 1.2, 5.0);
     let remote = app
         .world_mut()
         .spawn((
@@ -587,13 +592,15 @@ fn a_remote_participants_engine_is_not_impaired() {
             mm2_game::DamageSignals::default(),
             VehicleDamage::new(SPEC),
             vehicle_bundle(&VehicleConfig::default()),
-            Position(Vec3::new(10.0, 1.2, 5.0)),
-            Transform::from_xyz(10.0, 1.2, 5.0),
+            Position(remote_pos),
+            Transform::from_translation(remote_pos),
         ))
         .id();
     app.update();
     drain_damage(&mut app);
 
+    // 120 m/s → +156 000 impulse — past MedDamage: the host weakens
+    // the engine of the remote car it simulates.
     write_impact(&mut app, 7, remote_object, ObjectId::WORLD, 120.0);
     app.update();
     assert_eq!(
@@ -602,15 +609,66 @@ fn a_remote_participants_engine_is_not_impaired() {
             .unwrap()
             .condition(),
         DamageTier::Damaged,
-        "the remote accumulator still tracks damage"
+        "the remote accumulator tracks damage"
     );
     assert!(
         app.world()
             .get::<mm2_vehicle::EngineImpairment>(remote)
-            .is_none(),
-        "the remote authority owns its own sim"
+            .is_some(),
+        "the authority impairs the remote engine it simulates"
     );
-    assert_eq!(report(&app).impaired, 0);
+    assert_eq!(report(&app).impaired, 1);
+
+    // A second hit past MaxDamage: the disable resolves in place with
+    // a repair — the Blitz session's restart intent stays clear, since
+    // one remote wreck must never restart everyone's event.
+    write_impact(&mut app, 8, remote_object, ObjectId::WORLD, 300.0);
+    app.update();
+    let damage = app.world().get::<VehicleDamage>(remote).unwrap();
+    assert_eq!(damage.total(), 0.0);
+    assert_eq!(damage.condition(), DamageTier::Intact);
+    let pos = app.world().get::<Position>(remote).unwrap().0;
+    assert!(
+        pos.distance(Vec3::new(remote_pos.x, pos.y, remote_pos.z)) < 1.0,
+        "the remote wreck resets in place, got {pos}"
+    );
+    assert!(
+        !app.world().resource::<SessionControl>().restart,
+        "a remote wreck never restarts the session's event"
+    );
+    assert_eq!(report(&app).disabled, 1);
+    assert_eq!(report(&app).recovered, 1);
+    // The repair lifted the impairment the same tick.
+    assert!(
+        app.world()
+            .get::<mm2_vehicle::EngineImpairment>(remote)
+            .is_none()
+    );
+    assert_eq!(report(&app).restored, 1);
+}
+
+#[test]
+fn a_predicted_session_drains_the_pipeline_without_applying() {
+    // The complement: under a `Remote` (predicted) session the whole
+    // damage pipeline early-returns — impacts drain unapplied, no
+    // impairment mints, no outcome resolves. The authoritative copy
+    // lives on the host.
+    let mut predicted = cruise_config();
+    predicted.authority = SessionAuthority::Remote;
+    let (mut app, car, object) = damage_app(predicted, Vec3::new(0.0, 1.2, 0.0));
+    write_impact(&mut app, 1, object, ObjectId::WORLD, 300.0);
+    app.update();
+    assert_eq!(report(&app).applied, 0);
+    assert!(drain_damage(&mut app).is_empty());
+    assert_eq!(app.world().get::<VehicleDamage>(car).unwrap().total(), 0.0);
+    assert!(
+        app.world()
+            .get::<mm2_vehicle::EngineImpairment>(car)
+            .is_none()
+    );
+    assert_eq!(report(&app).disabled, 0);
+    assert_eq!(report(&app).recovered, 0);
+    assert!(!app.world().resource::<SessionControl>().restart);
 }
 
 #[test]

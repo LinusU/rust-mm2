@@ -1,8 +1,8 @@
 //! F05-B.2 integration: authored `vehstuck` detectors arm off the real
 //! impact stream, fire on the authored window, and resolve through the
 //! production `ResetVehicle` path — an in-place upright recovery for the
-//! local driver, AI opponents and trailer rigs; remote participants and
-//! `Disabled` wrecks are someone else's business.
+//! local driver, AI opponents, remote drivers and trailer rigs;
+//! `Disabled` wrecks and predicted sessions are someone else's business.
 
 use std::time::Duration;
 
@@ -15,8 +15,8 @@ use mm2_app::session::{SessionControl, SpawnPoint};
 use mm2_app::stuck::{self, StuckReport};
 use mm2_game::{
     DamageEvent, DamageSpec, ImpactEvent, ImpactId, ObjectId, ObjectIdentity, Player,
-    PlayerControl, Session, SessionConfig, SessionPhase, StuckEvent, StuckSpec, SurfaceState,
-    VehicleDamage, VehicleStuck, advance_session_tick,
+    PlayerControl, Session, SessionAuthority, SessionConfig, SessionPhase, StuckEvent, StuckSpec,
+    SurfaceState, VehicleDamage, VehicleStuck, advance_session_tick,
 };
 use mm2_vehicle::{TireConditions, VehicleConfig, VehiclePlugin, vehicle_bundle};
 
@@ -43,8 +43,18 @@ const SPAWN_YAW: f32 = 0.25;
 /// an authored stuck spec. Returns the app, the car entity and its
 /// minted object id.
 fn stuck_app(car_pos: Vec3, spec: StuckSpec) -> (App, Entity, ObjectId) {
+    stuck_app_with(SessionConfig::default(), car_pos, spec)
+}
+
+/// `stuck_app` under a caller-chosen session config — the authority
+/// legs need a `Host`/`Remote` stamp.
+fn stuck_app_with(
+    config: SessionConfig,
+    car_pos: Vec3,
+    spec: StuckSpec,
+) -> (App, Entity, ObjectId) {
     let mut session = Session::new();
-    session.begin(SessionConfig::default()).unwrap();
+    session.begin(config).unwrap();
     session.transition(SessionPhase::Ready).unwrap();
     session.transition(SessionPhase::Playing).unwrap();
     let object = session.mint_object_id();
@@ -339,35 +349,76 @@ fn an_opponent_stuck_recovers_without_touching_the_session() {
 }
 
 #[test]
-fn a_remote_participant_is_never_armed_or_recovered() {
-    let (mut app, _car, _object) = stuck_app(Vec3::new(0.0, 1.2, 0.0), SPEC);
+fn a_remote_driver_is_armed_and_recovered_by_the_authority() {
+    // F25-A.4: under a hosted session a remote car is this authority's
+    // simulated participant — it arms, detects and recovers in place
+    // like the AI leg above, and the reset rides the snapshot stream
+    // down to its copies.
+    let hosted = SessionConfig {
+        authority: SessionAuthority::Host,
+        ..SessionConfig::default()
+    };
+    let (mut app, _car, _object) = stuck_app_with(hosted, Vec3::new(0.0, 1.2, 0.0), SPEC);
     let remote_object = app.world_mut().resource_mut::<Session>().mint_object_id();
     let remote_player = app.world_mut().resource_mut::<Session>().mint_player_id();
     let role = app.world().resource::<Session>().authority_role();
     let remote_pos = Vec3::new(10.0, 1.2, 5.0);
-    app.world_mut().spawn((
-        ObjectIdentity(remote_object),
-        Player {
-            id: remote_player,
-            control: PlayerControl::Remote,
-        },
-        role,
-        mm2_game::DamageSignals::default(),
-        VehicleStuck::new(SPEC),
-        vehicle_bundle(&VehicleConfig::default()),
-        Position(remote_pos),
-        Transform::from_translation(remote_pos),
-    ));
+    let remote = app
+        .world_mut()
+        .spawn((
+            ObjectIdentity(remote_object),
+            Player {
+                id: remote_player,
+                control: PlayerControl::Remote,
+            },
+            role,
+            mm2_game::DamageSignals::default(),
+            VehicleStuck::new(SPEC),
+            vehicle_bundle(&VehicleConfig::default()),
+            Position(remote_pos),
+            Transform::from_translation(remote_pos),
+        ))
+        .id();
     app.update();
+    drain_stuck(&mut app);
     app.world_mut().resource_mut::<StuckReport>().reset();
 
-    // F05 req 6: a predicted client's detector is its authority's —
-    // neither armed nor observed here.
     write_impact(&mut app, 7, remote_object, ObjectId::WORLD, 30.0);
+    run(&mut app, 45);
+    assert_eq!(report(&app).armed, 1);
+    assert_eq!(report(&app).detections, 1);
+    assert_eq!(report(&app).recovered, 1);
+    let pos = app.world().get::<Position>(remote).unwrap().0;
+    assert!(
+        pos.distance(Vec3::new(remote_pos.x, pos.y, remote_pos.z)) < 0.5,
+        "the remote car resets where it was stuck, got {pos}"
+    );
+    assert!(!app.world().resource::<SessionControl>().restart);
+}
+
+#[test]
+fn a_predicted_session_never_arms_or_recovers() {
+    // The complement: under a `Remote` (predicted) session the systems
+    // early-return — the copy's detector is inert, buffered impacts
+    // drain unarmed (F05 req 6's real boundary).
+    let predicted = SessionConfig {
+        authority: SessionAuthority::Remote,
+        ..SessionConfig::default()
+    };
+    let (mut app, car, object) = stuck_app_with(predicted, Vec3::new(0.0, 1.2, 0.0), SPEC);
+    app.update();
+    drain_stuck(&mut app);
+    app.world_mut().resource_mut::<StuckReport>().reset();
+
+    write_impact(&mut app, 7, object, ObjectId::WORLD, 30.0);
     run(&mut app, 45);
     assert_eq!(report(&app).armed, 0);
     assert_eq!(report(&app).detections, 0);
     assert_eq!(report(&app).recovered, 0);
+    assert!(
+        app.world().get::<mm2_vehicle::Teleported>(car).is_none(),
+        "a predicted session never resets its own car"
+    );
 }
 
 #[test]

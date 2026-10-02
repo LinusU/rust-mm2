@@ -20,11 +20,14 @@
 //!   The reset marks the car [`Teleported`], so even this in-place hop
 //!   can never sweep a checkpoint (F05 req 5).
 //!
-//! Policy: the local participant and AI opponents recover the same way;
-//! a remote participant's authority owns its detector (F05 req 6), and
-//! a `Disabled` wreck belongs to [`crate::damage::resolve_disabled`],
-//! so the observe leg skips both. Both systems drain their input while
-//! the session is not `Playing`, so a buffered event can never flush a
+//! Policy: the local participant, AI opponents and remote drivers
+//! recover the same way — a remote car is the session authority's
+//! simulated participant, so its detector lives where its physics does
+//! (F25-A.4; a predicted client's copies never reach these systems —
+//! they early-return without `AuthorityRole::Authority`, F05 req 6). A
+//! `Disabled` wreck belongs to [`crate::damage::resolve_disabled`], so
+//! the observe leg skips it. Both systems drain their input while the
+//! session is not `Playing`, so a buffered event can never flush a
 //! reset into the next session or a pause.
 
 use std::collections::HashMap;
@@ -81,10 +84,10 @@ type StuckVehicles<'w, 's> = Query<
 /// [`StuckEvent`] per episode that held inside `pos_thresh` for the
 /// authored `time_thresh`.
 ///
-/// Remote participants are skipped on both legs: a predicted client's
-/// stuck state is its authority's to declare (F05 req 6). A participant
-/// with no `vehstuck` record has no component and is skipped like an
-/// undamageable car is — authored absence, never a fabricated spec.
+/// A participant with no `vehstuck` record has no component and is
+/// skipped like an undamageable car is — authored absence, never a
+/// fabricated spec. Remote drivers arm and observe like AI: the
+/// authority simulating their car owns their detector (F25-A.4).
 pub fn track_stuck(
     mut reader: MessageReader<ImpactEvent>,
     session: Res<Session>,
@@ -116,12 +119,9 @@ pub fn track_stuck(
             let Some(&entity) = index.get(&side) else {
                 continue;
             };
-            let Ok((.., player, pos, rot, mut stuck, damage)) = vehicles.get_mut(entity) else {
+            let Ok((.., _player, pos, rot, mut stuck, damage)) = vehicles.get_mut(entity) else {
                 continue;
             };
-            if player.is_some_and(|p| p.control == PlayerControl::Remote) {
-                continue;
-            }
             // A `Disabled` wreck belongs to the damage outcome — an
             // impact into it does not start a stuck episode.
             if damage.is_some_and(|d| d.condition() == DamageTier::Disabled) {
@@ -136,10 +136,7 @@ pub fn track_stuck(
     // the stuck detector — a wrecked car cannot move by definition.
     let dt = time.delta_secs();
     let tick = session.tick();
-    for (.., id, player, pos, rot, mut stuck, damage) in &mut vehicles {
-        if player.is_some_and(|p| p.control == PlayerControl::Remote) {
-            continue;
-        }
+    for (.., id, _player, pos, rot, mut stuck, damage) in &mut vehicles {
         if damage.is_some_and(|d| d.condition() == DamageTier::Disabled) {
             continue;
         }
@@ -156,13 +153,13 @@ pub fn track_stuck(
 
 /// Fixed-step: answer each [`StuckEvent`] with the bounded in-place
 /// recovery — [`ResetVehicle`] onto the [`upright_recovery_pose`], the
-/// same landing [`vehicle_self_right`] computes. Local and AI
-/// participants recover identically (designed — the original's
-/// opponent stuck behavior is unverified, UNK-13); remote participants
-/// resolve under their own authority. The local participant's trailers
-/// re-seat behind the tractor's recovered pose — the same offsets the
-/// cruise disabled outcome uses, anchored on the live pose instead of
-/// the spawn point.
+/// same landing [`vehicle_self_right`] computes. Local, AI and remote
+/// participants recover identically (designed — the original's opponent
+/// stuck behavior is unverified, UNK-13; a remote car's reset rides the
+/// snapshot stream down to its copies, F25-A.4). The local
+/// participant's trailers re-seat behind the tractor's recovered pose —
+/// the same offsets the cruise disabled outcome uses, anchored on the
+/// live pose instead of the spawn point.
 ///
 /// [`vehicle_self_right`]: mm2_vehicle::systems::vehicle_self_right
 pub fn resolve_stuck(
@@ -191,14 +188,11 @@ pub fn resolve_stuck(
         let Some(&(entity, control)) = index.get(&event.object) else {
             continue;
         };
-        // Only local and AI participants resolve here — a remote
-        // participant's authority owns its recovery, and an unidentified
-        // object has no driver to recover for (same policy as
-        // `resolve_disabled`).
-        if !matches!(
-            control,
-            Some(PlayerControl::Local) | Some(PlayerControl::Ai)
-        ) {
+        // Every identified participant resolves here — a remote driver
+        // is this authority's simulated car (same in-place arm as AI,
+        // F25-A.4); an unidentified object has no driver to recover for
+        // (same policy as `resolve_disabled`).
+        if control.is_none() {
             continue;
         }
         let Ok((pos, rot, vehicle)) = vehicles.get(entity) else {

@@ -1,8 +1,8 @@
 //! F05-B.5 integration: water/OOB detectors read the real wheel
 //! contacts the physics step leaves, fire on the designed dwell/margin
 //! and resolve through the production `ResetVehicle` path — back to the
-//! last dry-grounded pose for the local driver, AI opponents and
-//! trailer rigs; remote participants and `Disabled` wrecks are someone
+//! last dry-grounded pose for the local driver, AI opponents and remote
+//! drivers alike; `Disabled` wrecks and predicted sessions are someone
 //! else's business.
 
 use std::time::Duration;
@@ -17,9 +17,9 @@ use mm2_app::session::{SessionControl, SpawnPoint};
 use mm2_app::stuck::{self, StuckReport};
 use mm2_game::{
     DamageEvent, DamageSpec, ImpactEvent, ImpactId, ObjectId, ObjectIdentity, Player,
-    PlayerControl, RecoveryCause, RecoveryEvent, RecoveryPolicy, Session, SessionConfig,
-    SessionPhase, StuckEvent, StuckSpec, VehicleDamage, VehicleRecovery, VehicleStuck,
-    advance_session_tick,
+    PlayerControl, RecoveryCause, RecoveryEvent, RecoveryPolicy, Session, SessionAuthority,
+    SessionConfig, SessionPhase, StuckEvent, StuckSpec, VehicleDamage, VehicleRecovery,
+    VehicleStuck, advance_session_tick,
 };
 use mm2_vehicle::{TireConditions, TireSurface, VehicleConfig, VehiclePlugin, vehicle_bundle};
 
@@ -54,8 +54,14 @@ const WATER_AT: Vec3 = Vec3::new(60.0, -0.5, 0.0);
 /// the player car carrying the recovery detector. Returns the app, the
 /// car entity, its object id and the settled pose (the live anchor).
 fn recovery_app(car_pos: Vec3) -> (App, Entity, ObjectId) {
+    recovery_app_with(SessionConfig::default(), car_pos)
+}
+
+/// `recovery_app` under a caller-chosen session config — the authority
+/// legs need a `Host`/`Remote` stamp.
+fn recovery_app_with(config: SessionConfig, car_pos: Vec3) -> (App, Entity, ObjectId) {
     let mut session = Session::new();
-    session.begin(SessionConfig::default()).unwrap();
+    session.begin(config).unwrap();
     session.transition(SessionPhase::Ready).unwrap();
     session.transition(SessionPhase::Playing).unwrap();
     let object = session.mint_object_id();
@@ -358,8 +364,15 @@ fn recovery_is_not_a_repair() {
 }
 
 #[test]
-fn a_remote_participant_is_never_tracked_or_recovered() {
-    let (mut app, _car, _object) = recovery_app(Vec3::new(0.0, 1.2, 0.0));
+fn a_remote_driver_is_tracked_and_recovered_by_the_authority() {
+    // F25-A.4: under a hosted session the remote car is this
+    // authority's simulated participant — a dunk fires the same
+    // recovery episode the AI leg gets, back to its own anchor.
+    let hosted = SessionConfig {
+        authority: SessionAuthority::Host,
+        ..SessionConfig::default()
+    };
+    let (mut app, _car, _object) = recovery_app_with(hosted, Vec3::new(0.0, 1.2, 0.0));
     let remote_object = app.world_mut().resource_mut::<Session>().mint_object_id();
     let remote_player = app.world_mut().resource_mut::<Session>().mint_player_id();
     let role = app.world().resource::<Session>().authority_role();
@@ -383,12 +396,53 @@ fn a_remote_participant_is_never_tracked_or_recovered() {
     drain_recovery(&mut app);
     app.world_mut().resource_mut::<RecoveryReport>().reset();
 
-    // F05 req 6: a predicted client's detector is its authority's —
-    // neither observed nor resolved here.
     teleport(&mut app, remote, Vec3::new(WATER_AT.x, 1.0, WATER_AT.z));
+    run(&mut app, 90);
+    assert_eq!(report(&app).submerged, 1);
+    assert_eq!(report(&app).recovered, 1);
+    let pos = app.world().get::<Position>(remote).unwrap().0;
+    assert!(
+        pos.distance(Vec3::new(5.0, pos.y, 5.0)) < 1.0,
+        "the remote car lands back on its dry anchor, got {pos}"
+    );
+}
+
+#[test]
+fn a_predicted_session_never_tracks_or_recovers() {
+    // The complement: under a `Remote` (predicted) session the
+    // detectors are inert — a dunked copy accrues no dwell and the
+    // buffered recovery event drains unresolved.
+    let predicted = SessionConfig {
+        authority: SessionAuthority::Remote,
+        ..SessionConfig::default()
+    };
+    let (mut app, car, object) = recovery_app_with(predicted, Vec3::new(0.0, 1.2, 0.0));
+    run(&mut app, 30);
+    drain_recovery(&mut app);
+    app.world_mut().resource_mut::<RecoveryReport>().reset();
+
+    teleport(&mut app, car, Vec3::new(WATER_AT.x, 1.0, WATER_AT.z));
     run(&mut app, 90);
     assert_eq!(report(&app).submerged, 0);
     assert_eq!(report(&app).recovered, 0);
+    // Even a hand-written event cannot resolve under a predicted
+    // session — the drain drops it.
+    let generation = app.world().resource::<Session>().generation();
+    app.world_mut()
+        .resource_mut::<Messages<RecoveryEvent>>()
+        .write(RecoveryEvent {
+            object,
+            generation,
+            tick: 0,
+            cause: RecoveryCause::Submerged,
+            landing: Some((Vec3::new(0.0, 1.0, 0.0), 0.0)),
+        });
+    app.update();
+    assert_eq!(report(&app).recovered, 0);
+    assert!(
+        app.world().get::<mm2_vehicle::Teleported>(car).is_none(),
+        "a predicted session never resets its own car"
+    );
 }
 
 #[test]

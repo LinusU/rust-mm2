@@ -189,7 +189,9 @@ pub fn detach_breaks(
             let Some((entity, control, owner)) = participant else {
                 continue;
             };
-            // Remote rigs are their authority's business (F25+).
+            // Remote rigs stay bolted — fragment replication is F26
+            // scope, and remote spawns carry no `VehicleBreaks` yet,
+            // so the skip is belt-and-braces.
             if matches!(control, Some(PlayerControl::Remote)) {
                 continue;
             }

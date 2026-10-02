@@ -1593,6 +1593,26 @@ fn a_remote_players_inputs_drive_the_hosted_car() {
         assert_eq!(player.control, PlayerControl::Remote);
         assert!(role.is_authority(), "the host owns a remote car's truth");
     }
+    // F25-A.4: the authority's rule pipeline covers the remote car —
+    // the designed recovery detector rides every remote seat. The
+    // dev-car pick has no authored records, so `VehicleDamage`/
+    // `VehicleStuck` stay absent — authored absence is never a
+    // fabricated spec.
+    {
+        let mut q = app.world_mut().query_filtered::<Entity, With<RemotePick>>();
+        let remote = q.single(app.world()).expect("the remote car");
+        assert!(
+            app.world()
+                .get::<mm2_game::VehicleRecovery>(remote)
+                .is_some(),
+            "the remote car carries the recovery detector"
+        );
+        assert!(
+            app.world().get::<mm2_game::VehicleDamage>(remote).is_none()
+                && app.world().get::<mm2_game::VehicleStuck>(remote).is_none(),
+            "a recordless pick stays undamageable/unstuckable"
+        );
+    }
     // F25-A.2: seats [0, 1] — the peer's wire id 1 ranks to seat 1,
     // which a race-less dev world resolves one seat-gap right of the
     // roam base (yaw 0 → +X), not the old fixed lateral offset.
@@ -1910,6 +1930,90 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
         assert!(
             (lerp.to_pos - Vec3::new(9.0, 1.0, 9.0)).length() < 1e-3,
             "stale/foreign snaps never retargeted the lerp"
+        );
+    }
+
+    // F25-A.4: a teleport-scale correction snaps the copy to the
+    // asserted pose at once — the host's reset/recovery outcomes move
+    // a remote car past the blend bound, and a copy must not smear
+    // through the world between the poses.
+    host.ctl()
+        .broadcast(&Message::Snap {
+            generation,
+            tick: 8,
+            entries: vec![SnapEntry {
+                player: 0,
+                pos: [80.0, 1.0, 80.0],
+                rot: [0.0, 0.0, 0.0, 1.0],
+                vel: [0.0; 3],
+                angvel: [0.0; 3],
+            }],
+        })
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .snaps_applied
+            >= 2
+    });
+    {
+        let mut q = app.world_mut().query_filtered::<(
+            &netdrive::RemoteLerp,
+            &avian3d::prelude::Position,
+        ), With<RemotePick>>();
+        let (lerp, pos) = q.single(app.world()).expect("the host copy");
+        let target = Vec3::new(80.0, 1.0, 80.0);
+        assert!(
+            (pos.0 - target).length() < 1e-3,
+            "a teleport correction lands at once, got {:?}",
+            pos.0
+        );
+        assert!(
+            (lerp.from_pos - target).length() < 1e-3 && (lerp.to_pos - target).length() < 1e-3,
+            "the collapsed blend holds the landing"
+        );
+    }
+
+    // A sub-bound correction still blends — ordinary motion never
+    // snaps (bounded corrections cut the other way too).
+    host.ctl()
+        .broadcast(&Message::Snap {
+            generation,
+            tick: 9,
+            entries: vec![SnapEntry {
+                player: 0,
+                pos: [84.0, 1.0, 80.0],
+                rot: [0.0, 0.0, 0.0, 1.0],
+                vel: [0.0; 3],
+                angvel: [0.0; 3],
+            }],
+        })
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .snaps_applied
+            >= 3
+    });
+    {
+        let mut q = app.world_mut().query_filtered::<(
+            &netdrive::RemoteLerp,
+            &avian3d::prelude::Position,
+        ), With<RemotePick>>();
+        let (lerp, pos) = q.single(app.world()).expect("the host copy");
+        assert!(
+            (lerp.to_pos - Vec3::new(84.0, 1.0, 80.0)).length() < 1e-3,
+            "the blend still targets the asserted pose"
+        );
+        assert!(
+            (lerp.from_pos - Vec3::new(80.0, 1.0, 80.0)).length() < 1e-3,
+            "the blend restarts from the displayed pose: {:?}",
+            lerp.from_pos
+        );
+        assert!(
+            pos.0.x < 83.5,
+            "a 4 m correction blends instead of snapping: {:?}",
+            pos.0
         );
     }
 
