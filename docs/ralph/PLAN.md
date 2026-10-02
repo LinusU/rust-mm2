@@ -72,10 +72,16 @@ the *process-level* grid — `net_drive`'s
 `the_process_level_impairment_matrix_records_each_recipe_cell` runs the
 same eight named recipes over real `mm2` OS processes (fresh
 host + proxy + client pair per cell), its measured table beside the
-in-process one in `net.md` — still
+in-process one in `net.md`; the
+following iteration landed the breakaway leg — protocol v11
+`SnapEntry.breaks` replicates the authority's detached-part bitmask
+as per-seat state (`detach_breaks` sheds remote seats' rigs on the
+host, `spawn_remote` binds `VehicleBreaks` on both roles, and a
+copy's `apply_break_bits` diffs the mask every snap — a set bit
+hides the node and spawns the pooled fragment motion-only, a cleared
+bit is the repair arriving as state) — still
 open: replicated
-result/race state, breakaway fragments on remote
-copies, LAN/Internet scope), the F24-B
+result/race state, LAN/Internet scope), the F24-B
 remainder (B.7 landed the Bevy-side
 client bridge — `mm2 --join` consumes `Start` into the shared
 `Session` lifecycle; iter 020 repaired its two external-review

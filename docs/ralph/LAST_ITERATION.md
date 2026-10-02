@@ -1,3 +1,112 @@
+# Last iteration — F25-B breakaway leg: protocol v11
+# `SnapEntry.breaks` replicates the authority's detached-part bitmask
+# as per-seat state; remote seats shed on the host, copies reconcile
+# the mask into pooled fragments and repairs (new-run iteration 1)
+
+Resume-and-finish iteration on `ralph/night` (baseline `391832b` —
+the process-level-matrix candidate; external verify + review pass
+with gaps only). The previous run's iteration 1 was interrupted
+mid-verification (rate limit) with this slice already written in the
+tree — production, tests and docs complete, two fixture gaps and the
+lint sweep unfinished. This iteration completed it rather than
+opening unrelated work — same disposition as the earlier
+interrupted-slice resumes.
+
+## What landed
+
+- Protocol v11 (`PROTOCOL_VERSION` 10→11): `SnapEntry` gained
+  `breaks`, a `u32` detached-part bitmask — bit *i* = `VehicleBreaks`
+  part *i* in authored order (identical on every process under the
+  gameplay fingerprint). Replicated *state* like the v8 damage byte,
+  not an event: a dropped snap or a late join can never leave a
+  copy's rig diverged. Parts past bit 31 unexpressible — far past
+  any authored count. 66 B per entry (was 62).
+- Authority side: `detach_breaks` stopped skipping
+  `PlayerControl::Remote` seats — a remote driver's rig on the host
+  is this authority's participant and sheds like an AI's.
+  `spawn_remote` binds `VehicleBreaks` off the authored inventory on
+  both roles (same absence gate as a local pick). The fragment spawn
+  factored into shared `breakaway::spawn_break_fragment` — the
+  authority passes the impact `kick`, the replicated path passes
+  `None` (the wire carries the detach *state*, not the per-part
+  launch impulse; designed presentation).
+- Client side: `apply_break_bits` in `apply_snap_frame` diffs the
+  wire mask against every named seat's rig — own seat included, the
+  same contract the v8 byte established (a predicted client never
+  runs `detach_breaks`, so the mask is its only detach truth). A set
+  bit hides the intact node (dropping `CockpitHidden`) and claims a
+  `BangerPool` fragment through the shared helper; a cleared bit
+  re-attaches via new `VehicleBreaks::attach` (the per-part half of
+  `restore`) and despawns the fragment — the authority's repair
+  arriving as state. `apply_snapshots` gained the `BangerPool`/
+  `BangerMut`/`BangerStateChanged`/`BreakVisualMut` params with
+  `Without<Banger>` disjointness proofs (`SnapTargetFilter`/
+  `SnapTrailerFilter` aliases — added this iteration to clear
+  clippy's `type_complexity` on the widened trailer filter).
+- `NetDriveReport` gained `breaks_detached`/`breaks_restored`; the
+  `net=` record's new `rb<d>d/<r>r` cell carries them (0 on the dev
+  car — it authors no breakable parts). `docs/research/net.md`: the
+  v10→v11 history paragraph, the payload table and the
+  process-grid scope note updated; the "state-adjacent gap" sentence
+  closed.
+- This iteration's finish work: `texel_fx`'s fixture and the
+  `apply_snapshots_reports_the_stale_drops` mini-app gained the
+  `BangerPool`/`BangerStateChanged` registrations the widened
+  `apply_snapshots` signature requires (the interrupted run had only
+  reached `net_app`'s `lobby_app`), and `cargo fmt` was run.
+
+## Tests
+
+- `net_app` 38→39: `a_snap_reconciles_the_remote_copys_breakaway_rig`
+  runs the real loopback wire — a `Snap` with both seats' bit 0 set
+  sheds the remote copy's and the own rig's part (node hides, pooled
+  fragment per seat), a repeated mask is a no-op (state, not event),
+  a cleared mask restores both (fragment despawns, node re-shows,
+  `detached_count` 0).
+- `breakaway` 12→13: the stale
+  `a_remote_participants_rig_is_not_ours_to_detach` split into
+  `a_remote_seats_rig_sheds_on_the_authority` (the host's copy of a
+  remote driver sheds + reports off its own stream) and
+  `a_predicted_session_detaches_nothing_locally` (`SessionAuthority::
+  Remote` drains the stream without touching a rig).
+- `netdrive` unit 16→17: `breaks_tail_encodes_the_detached_mask`
+  (`None`/intact → 0, authored-order bits, part 32 unexpressible).
+- `net_drive` parser reads the `rb` cell; the process legs assert it
+  exists (0 — the dev car authors no rig). `texel_fx` unchanged at
+  13 — fixture-only resource registrations.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` green — 91 binaries, 0 failures
+(`net_app` 39/39, `breakaway` 13/13, `texel_fx` 13/13, `net_drive`
+3/3 incl. the process-level matrix, `mm2_net` 80/80, `netdrive`
+unit 17/17). Toolchain 1.98.1.
+
+## Classification / remaining open items
+
+- Implementation choice throughout — the bitmask shape, the
+  motion-only fragment and the reconcile contract are ours; the
+  retail wire protocol is unrecovered, so no original-behavior claim.
+  The `F05 req 5` reference is to our own spec's replication
+  requirement, not a retail rule.
+- Evidence: in-process unit + integration legs over real loopback —
+  the new reconcile leg drives a real host/broadcast/`bridge_app`
+  path. No process-level session shed a part (`rb` reads 0 on the
+  dev car — honest, not a gap in the run), nothing rendered or
+  driven by hand, no LAN/Internet leg, no retail content.
+- Designed deltas recorded in `net.md`: no launch impulse on a
+  replicated detach (the fragment tumbles off the copy's replicated
+  motion), no `PartDetached` message client-side (breakaway audio on
+  remote copies stays a named gap — nothing consumes it there).
+- F25-B remaining scope: replicated result/race state, LAN/Internet
+  scope. The `RemoteSnaps`-persists-across-hosts wedge and the
+  impact-side nits (no struck-side identity/surface on
+  `RemoteImpact`) stay open as recorded.
+
+---
+
 # Last iteration — F25-B measurement slice III: the AC03 impairment
 # matrix now runs at process level — `net_drive`'s eight named recipe
 # cells each carried by a real `mm2 --host` process plus two real
