@@ -40,7 +40,7 @@ precludes adding a second socket later.
 is added it must come from maintained crypto/session crates, not
 hand-rolled primitives.
 
-## Wire protocol (`PROTOCOL_VERSION = 7`)
+## Wire protocol (`PROTOCOL_VERSION = 8`)
 
 Length-prefixed frames: `u32le` length + payload, bounded by
 `MAX_FRAME` (256 KiB) checked *before* allocation. Messages are strict
@@ -71,7 +71,24 @@ overwrite every replicated field between snapshots (the host's
 authoritative seats keep simulating; the marker exists only on
 predicted-session copies). Between snapshots `RemoteDrive::spin_rate`
 integrates the replicated rate into `WheelState::spin`, so wheels
-keep turning at ~20 Hz updates instead of stepping.
+keep turning at ~20 Hz updates instead of stepping. v7→v8:
+`SnapEntry` gained `damage` (u8, F25-B) — the authority's
+`VehicleDamage` total as a fraction of the seat's authored
+`MaxDamage`, ×255; `0` for intact and for a seat with no authored
+`vehcardamage` record (undamageable reads as undamaged, never a
+fabricated spec), `255` at/over the bound. On a predicted client the
+byte writes through `VehicleDamage::set_replicated` onto every named
+seat — remote copies *and* the client's own (the only own-seat field
+a snap applies, since nothing local accumulates under prediction) —
+reconstituting the total through the copy's own spec without touching
+the `ImpactId` watermark, so authority repairs replicate down while a
+late duplicate impact still cannot land. It is state replication, not
+impact replication: the byte carries no per-impact positions, so
+texel splats, sparks and breakaway detachment stay F26 scope; the
+authored `VehicleSmoke` rig now binds at remote spawn and emits off
+the replicated total, and `sync_impairment` runs under predicted
+sessions so the client's own seat weakens the way the authority's
+copy of it does.
 
 Handshake (always the first exchange):
 
@@ -393,7 +410,9 @@ The lobby surface is deliberately minimal: `Enter` toggles ready,
 session, roster readiness and the latest notice. A real lobby menu
 (pick/browse screens) is future work, as is every piece still absent
 underneath: remote vehicle spawning, roster picks as gameplay spawns,
-replication of position/score/damage (F25/F26), and the in-app *host*
+replication of score/result state and damage *events* (F26 — the v8
+`SnapEntry::damage` byte already carries the replicated total), and
+the in-app *host*
 surface. `mm2 --join --headless` parks the same link inside the smoke
 harness, which waits on the wire with wall-clock pacing while `Menu`
 is parked and reports the lobby's progress as `mp=` on the record
@@ -446,7 +465,10 @@ wire actually moved rather than an in-process mailbox's contents.
   participants reconciled as remote copies (`rem2` while both peers
   are still connected), the v7 presentation tail driving the copies'
   wheel spin (`rspn` — accumulated radians the client integrated into
-  remote wheels), and its own predicted seat driven (`moved=`).
+  remote wheels), the v8 damage counter (`dsyn` — replicated totals
+  written onto live `VehicleDamage` components; `dsyn0` on these legs
+  is honest, the dev car binds no authored damage record), and its own
+  predicted seat driven (`moved=`).
   A client's frame-cap exit lands on the host as `cause=quit` — the
   link `Drop` sends a deliberate `Leave`, not a lost socket — and the
   host's `quit` record carries the authority side: remote inputs

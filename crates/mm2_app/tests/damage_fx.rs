@@ -1,8 +1,11 @@
 //! F05-B.6 integration — authored engine smoke runs through the
 //! production `drive_smoke`/`advance_smoke` systems: the authored
 //! pivots and particle spec emit bounded billboard puffs while the
-//! vehicle is damaged, remote participants and paused sessions emit
-//! nothing, and puffs expire on their authored life.
+//! vehicle is damaged, paused sessions emit nothing, and puffs expire
+//! on their authored life. Remote participants emit too — since the
+//! v8 snap tail replicates the authority's damage total, a remote
+//! copy's `VehicleDamage` is presentation input like any other
+//! (F25-B).
 
 use std::time::Duration;
 
@@ -232,14 +235,47 @@ fn puffs_expire_on_their_authored_life_and_stay_bounded() {
 }
 
 #[test]
-fn a_remote_participant_never_smokes_locally() {
+fn a_remote_participant_smokes_from_its_carried_state() {
+    // F25-B: a remote copy's `VehicleDamage` holds the replicated
+    // authority total (the v8 snap tail is its only writer), so the
+    // rig bound at spawn emits off it exactly like a local car's.
     let mut app = smoke_app(true);
-    damaged_car(&mut app, PlayerControl::Remote, SPEC.max_damage);
-    run(&mut app, 120);
-    // Remote damage is the remote authority's state — its own client
-    // renders it; nothing local is emitted.
-    assert_eq!(report(&app).emitted, 0);
-    assert!(puffs(&mut app).is_empty());
+    let car = damaged_car(&mut app, PlayerControl::Remote, SPEC.max_damage);
+    run(&mut app, 60);
+    assert!(
+        report(&app).emitted > 0,
+        "a damaged remote copy's rig emits off its replicated total"
+    );
+    assert!(
+        puffs(&mut app)
+            .iter()
+            .all(|e| app.world().get::<SmokePuff>(*e).unwrap().emitter == car),
+        "the puffs name the remote copy as emitter"
+    );
+
+    // And a remote with no rig (a pick with no authored record — the
+    // dev car) still emits nothing: absence stays undamageable.
+    let generation = app.world().resource::<Session>().generation();
+    app.world_mut().spawn((
+        SessionEntity(generation),
+        Player {
+            id: mm2_game::PlayerId(9),
+            control: PlayerControl::Remote,
+        },
+        {
+            let mut d = VehicleDamage::new(SPEC);
+            d.apply(ImpactId(2), SPEC.max_damage);
+            d
+        },
+        Transform::from_translation(Vec3::new(9.0, 0.6, 9.0)),
+    ));
+    run(&mut app, 60);
+    assert!(
+        puffs(&mut app)
+            .iter()
+            .all(|e| app.world().get::<SmokePuff>(*e).unwrap().emitter == car),
+        "no rig, no puffs — even fully damaged"
+    );
 }
 
 #[test]

@@ -2644,6 +2644,7 @@ mod tests {
                 spin: 0,
                 compression: 0,
                 flags: 0,
+                damage: 0,
             }],
         };
         host.ctl().broadcast(&snap).unwrap();

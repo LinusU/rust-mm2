@@ -18,9 +18,7 @@ use bevy::render::mesh::{Indices, PrimitiveTopology};
 use tracing::warn;
 
 use mm2_assets::Vfs;
-use mm2_game::{
-    Player, PlayerControl, Session, SessionEntity, SmokePuff, VehicleDamage, VehicleSmoke,
-};
+use mm2_game::{Session, SessionEntity, SmokePuff, VehicleDamage, VehicleSmoke};
 
 use crate::city;
 
@@ -135,12 +133,11 @@ pub(crate) fn tile_quad(tile: u32, n: u32) -> Mesh {
 }
 
 /// Emit puffs from every rigged participant. Presentation of whatever
-/// `VehicleDamage` state the entity carries — remote participants are
-/// skipped because their smoke is replicated presentation (F25-B/F26
-/// scope): the authority resolves their damage state, but emission on
-/// any process renders from the *replicated* total, and none is wired
-/// yet (remote spawns carry no `VehicleSmoke` rig either, so the skip
-/// is belt-and-braces). Gated on `Playing` so a pause freezes emission
+/// `VehicleDamage` state the entity carries — on the authority that is
+/// the live accumulator; on a predicted client it is the replicated
+/// total the v8 snap tail writes onto remote copies (and the own
+/// seat), whose rigs are bound at spawn exactly so this system can
+/// render them (F25-B). Gated on `Playing` so a pause freezes emission
 /// with the rest of the sim.
 #[allow(clippy::too_many_arguments)] // Bevy system — the borrows are the contract.
 pub fn drive_smoke(
@@ -150,13 +147,7 @@ pub fn drive_smoke(
     fx: Option<Res<SmokeFx>>,
     mut report: ResMut<SmokeFxReport>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut rigs: Query<(
-        Entity,
-        &mut VehicleSmoke,
-        &VehicleDamage,
-        &Transform,
-        Option<&Player>,
-    )>,
+    mut rigs: Query<(Entity, &mut VehicleSmoke, &VehicleDamage, &Transform)>,
     puffs: Query<&SmokePuff>,
 ) {
     if !session.is_playing() {
@@ -168,10 +159,7 @@ pub fn drive_smoke(
     };
     let dt = time.delta_secs();
     let owner = SessionEntity(session.generation());
-    for (entity, mut rig, damage, xf, player) in &mut rigs {
-        if player.is_some_and(|p| p.control == PlayerControl::Remote) {
-            continue;
-        }
+    for (entity, mut rig, damage, xf) in &mut rigs {
         let rate = rig.policy.rate(damage.total(), &damage.spec);
         if rate <= 0.0 {
             continue;

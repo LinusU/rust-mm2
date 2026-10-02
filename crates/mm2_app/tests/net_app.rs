@@ -43,6 +43,17 @@ use support::{Proc, WAIT, listening, mount};
 const HOST_EXE: &str = env!("CARGO_BIN_EXE_mm2-host");
 const MM2_EXE: &str = env!("CARGO_BIN_EXE_mm2");
 
+/// A dev-car-scale authored damage spec: the synthetic install's dev
+/// car has no `vehcardamage` record, so the replication legs bind a
+/// synthetic one to give the v8 damage byte a component to land on
+/// (F25-B). Shaped like the retail bounds.
+const DAMAGE_SPEC: mm2_game::DamageSpec = mm2_game::DamageSpec {
+    impact_threshold: 1500.0,
+    med_damage: 150_000.0,
+    max_damage: 321_300.0,
+    regenerate_rate: 0.0,
+};
+
 /// The wire session every leg advertises: a dev-world cruise — the
 /// world the synthetic mounts can actually load.
 fn dev_cruise() -> SessionConfig {
@@ -1929,7 +1940,8 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
     // The local car's settled input rides up — the host's mailbox sees
     // this seat's wire id with this session's generation. It carries
     // the rigid row so its snapshot entry has a predicted pose to
-    // reconcile (F25-A.5).
+    // reconcile (F25-A.5) and a `VehicleDamage` for the v8 byte to land
+    // on — a dev car never grows one, so the spec is bound by hand.
     let local = app
         .world_mut()
         .spawn((
@@ -1943,12 +1955,22 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 throttle: 0.5,
                 ..VehicleInput::default()
             },
+            mm2_game::VehicleDamage::new(DAMAGE_SPEC),
             avian3d::prelude::Position::default(),
             avian3d::prelude::Rotation::default(),
             avian3d::prelude::LinearVelocity::default(),
             avian3d::prelude::AngularVelocity::default(),
         ))
         .id();
+    // Same for the host copy — a dev-car pick binds no authored damage
+    // record, so the replication target is attached by hand.
+    {
+        let mut q = app.world_mut().query_filtered::<Entity, With<RemotePick>>();
+        let copy = q.single(app.world()).expect("the host copy");
+        app.world_mut()
+            .entity_mut(copy)
+            .insert(mm2_game::VehicleDamage::new(DAMAGE_SPEC));
+    }
     spin(&mut app, |a| {
         a.world().resource::<netdrive::NetDriveReport>().inputs_sent > 0
     });
@@ -1984,12 +2006,17 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                     spin: 300,
                     compression: 102,
                     flags: mm2_net::SNAP_FLAG_BRAKE | mm2_net::SNAP_FLAG_GROUNDED,
+                    // v8: the host copy is half-wrecked.
+                    damage: 128,
                 },
                 // Our own seat's entry is received and, epoch-equal,
                 // skipped — between authority resets the local sim
-                // owns the pose (F25-A.5). Its tail is junk on purpose:
-                // a remote entry's presentation fields must never
-                // overwrite the local car's live state.
+                // owns the pose (F25-A.5). Its presentation fields are
+                // junk on purpose: a remote entry's drive fields must
+                // never overwrite the local car's live state. The v8
+                // damage byte is the deliberate exception — it is the
+                // *only* own-seat field the snap applies, since under
+                // prediction nothing local ever accumulates damage.
                 SnapEntry {
                     player: our_id,
                     pos: [-50.0, 0.0, -50.0],
@@ -2001,6 +2028,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                     spin: i16::MIN,
                     compression: 255,
                     flags: mm2_net::SNAP_FLAG_BRAKE | mm2_net::SNAP_FLAG_REVERSE,
+                    damage: 200,
                 },
             ],
         })
@@ -2058,6 +2086,35 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
         assert_eq!(input.brake, 1.0, "the brake flag drives the glows");
         assert_eq!(drive.spin_rate, 30.0, "300 x 0.1 rad/s");
     }
+    // The v8 damage byte landed too — 128/255 of the authored
+    // `MaxDamage` on the copy, 200/255 on our own seat: under a
+    // predicted session the replicated total is the only writer both
+    // sides' `VehicleDamage` ever sees.
+    {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&mm2_game::VehicleDamage, With<RemotePick>>();
+        let damage = q.single(app.world()).expect("the host copy");
+        assert!(
+            (damage.total() - 128.0 / 255.0 * DAMAGE_SPEC.max_damage).abs() < 1.0,
+            "the replicated fraction reconstituted the copy's total: {}",
+            damage.total()
+        );
+        assert_eq!(damage.condition(), mm2_game::DamageTier::Damaged);
+        let own = app.world().get::<mm2_game::VehicleDamage>(local).unwrap();
+        assert!(
+            (own.total() - 200.0 / 255.0 * DAMAGE_SPEC.max_damage).abs() < 1.0,
+            "the own seat's replicated total is the meter's truth: {}",
+            own.total()
+        );
+        assert!(
+            app.world()
+                .resource::<netdrive::NetDriveReport>()
+                .damage_synced
+                >= 2,
+            "both seats' replicated writes counted"
+        );
+    }
     // The rate integrates into the copy's wheel spin each update — the
     // visuals' `WheelState::spin` accumulates like a live car's.
     // (`spin`, not fixed updates — a 0 delta step adds nothing.)
@@ -2104,6 +2161,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                     spin: 0,
                     compression: 0,
                     flags: 0,
+                    damage: 0,
                 }],
             })
             .unwrap();
@@ -2123,6 +2181,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 spin: 0,
                 compression: 0,
                 flags: 0,
+                damage: 0,
             }],
         })
         .unwrap();
@@ -2161,6 +2220,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 spin: 0,
                 compression: 0,
                 flags: 0,
+                damage: 0,
             }],
         })
         .unwrap();
@@ -2205,6 +2265,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 spin: 0,
                 compression: 0,
                 flags: 0,
+                damage: 0,
             }],
         })
         .unwrap();
@@ -2263,6 +2324,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 spin: 0,
                 compression: 0,
                 flags: 0,
+                damage: 0,
             }],
         })
         .unwrap();
@@ -2321,6 +2383,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 spin: 0,
                 compression: 0,
                 flags: 0,
+                damage: 0,
             }],
         })
         .unwrap();
@@ -2361,6 +2424,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 spin: 0,
                 compression: 0,
                 flags: 0,
+                damage: 0,
             }],
         })
         .unwrap();
@@ -2383,6 +2447,23 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
             (lerp.from_pos - target).length() < 1e-3 && (lerp.to_pos - target).length() < 1e-3,
             "the collapsed blend holds the landing"
         );
+    }
+
+    // Replication lowers the total too — the later snaps all carried
+    // `damage: 0`, so both seats reconstituted the authority's repair
+    // back to intact (a wrecked-then-reset seat is exactly this path).
+    {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&mm2_game::VehicleDamage, With<RemotePick>>();
+        let copy = q.single(app.world()).expect("the host copy");
+        assert_eq!(
+            copy.total(),
+            0.0,
+            "the copy's replicated total followed the authority back to intact"
+        );
+        let own = app.world().get::<mm2_game::VehicleDamage>(local).unwrap();
+        assert_eq!(own.total(), 0.0, "the own seat's total repaired too");
     }
 
     host.shutdown();
@@ -2599,6 +2680,17 @@ fn a_snap_carries_the_remote_cars_drive_state() {
             ws.compression = 0.14;
         }
     }
+    // The v8 damage byte (F25-B): the authority's accumulated total
+    // as a fraction of the seat's authored `MaxDamage` — the dev-car
+    // pick binds no record, so the spec attaches by hand and half of
+    // `max_damage` accumulates through the real `apply` path.
+    {
+        let mut q = app.world_mut().query_filtered::<Entity, With<RemotePick>>();
+        let remote = q.single(app.world()).expect("the remote car");
+        let mut damage = mm2_game::VehicleDamage::new(DAMAGE_SPEC);
+        damage.apply(mm2_game::ImpactId(1), DAMAGE_SPEC.max_damage * 0.5);
+        app.world_mut().entity_mut(remote).insert(damage);
+    }
     // Publish a handful of frames so the peer's buffer holds a snap
     // carrying the tail before the blocking recv drains it.
     for _ in 0..5 {
@@ -2618,6 +2710,10 @@ fn a_snap_carries_the_remote_cars_drive_state() {
     assert_eq!(
         e.flags,
         mm2_net::SNAP_FLAG_BRAKE | mm2_net::SNAP_FLAG_REVERSE | mm2_net::SNAP_FLAG_GROUNDED
+    );
+    assert_eq!(
+        e.damage, 128,
+        "half of MaxDamage rounds to 128 on the x255 byte"
     );
 }
 

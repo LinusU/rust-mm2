@@ -980,15 +980,19 @@ fn run_headless(
     // F25-A data-plane evidence: `net=` reports the wire traffic the
     // run actually moved — inputs sent (client), inputs applied vs
     // staled (host), snapshots sent (host) vs applied (client), live
-    // remote participants, and `rspn`, the wheel-spin radians the v7
-    // presentation tail drove into remote copies (client side; 0 on a
-    // host, which runs the real sim). Absent without a link's report,
-    // so a non-lobby record stays bit-identical.
+    // remote participants, `rspn`, the wheel-spin radians the v7
+    // presentation tail drove into remote copies, and `dsyn`, the
+    // replicated damage totals the v8 tail wrote onto live
+    // `VehicleDamage` components (both client-side; 0 on a host, which
+    // runs the real sim — and 0 on a dev-world run regardless, since
+    // the dev car binds no authored damage record to write). Absent
+    // without a link's report, so a non-lobby record stays
+    // bit-identical.
     let net_detail = world_ecs
         .get_resource::<crate::netdrive::NetDriveReport>()
         .map(|r| {
             format!(
-                " net=in{}s/{}a/{}x,snap{}s/{}a,rem{},req{}s/{}g/{}d,rspn{:.0}",
+                " net=in{}s/{}a/{}x,snap{}s/{}a,rem{},req{}s/{}g/{}d,rspn{:.0},dsyn{}",
                 r.inputs_sent,
                 r.inputs_applied,
                 r.inputs_staled,
@@ -998,7 +1002,8 @@ fn run_headless(
                 r.requests_sent,
                 r.requests_granted,
                 r.requests_dropped,
-                r.remote_spin
+                r.remote_spin,
+                r.damage_synced
             )
         })
         .unwrap_or_default();

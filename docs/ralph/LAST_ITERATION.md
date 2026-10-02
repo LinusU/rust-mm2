@@ -1,3 +1,107 @@
+# Last iteration — F25-B fifth slice: replicated damage state —
+# protocol v8 gives `SnapEntry` a damage byte so remote copies carry
+# the authority's `VehicleDamage` total and emit authored smoke off it
+# (iteration 16, run 20261001T195454-62282 continued)
+
+Implementation iteration on `ralph/night` (baseline `f018915` — the
+v7 presentation-tail candidate; external verify + review pass with
+gaps only). One coherent slice: the damage leg of spec req 3's
+"damage/reset state" — remote kinematic copies carried an inert
+`VehicleDamage` nobody wrote, so a remote car could never show damage
+and a client's own seat never learned its authoritative total.
+
+## Task selection
+
+No failing gate or blocking finding — the previous review passed with
+gaps only, and its remaining-scope list names "replicated
+damage/result state" first. The damage *state* leg is the coherent
+small piece: damage *events* (sparks/texel/breakaway need per-impact
+positions) stay F26 scope, and result/race-state replication is a
+separate slice.
+
+## What landed
+
+- `mm2_net` protocol v8 (`proto.rs`): `SnapEntry` gains `damage`
+  (u8) — the authority's `VehicleDamage` total as a fraction of the
+  seat's authored `MaxDamage`, ×255. `0` for intact and for a seat
+  with no authored `vehcardamage` record (undamageable reads as
+  undamaged — no fabricated spec); `255` at/over the bound. Strict
+  fixed-width decode, exact-version admit gate unchanged; every
+  fixture updated.
+- `mm2_game::VehicleDamage::set_replicated` — the wire's write path:
+  reconstitutes the total through the entity's own spec, clamps into
+  `0.0..=1.0` (an authority repair legitimately lowers it — `apply`
+  never could), ignores non-finite input, and never touches the
+  `ImpactId` watermark so a late duplicate impact still cannot land.
+- `mm2_app::netdrive`: `encode_damage` on publish (`None`/degenerate
+  spec → 0, fraction saturates at 255); `apply_snapshots` writes the
+  byte through `set_replicated` onto every named seat — remote copies
+  *and* the client's own predicted seat, the only own-seat snap field
+  (nothing local accumulates damage under prediction, so the
+  replicated total is the meter's truth). Writes count into
+  `NetDriveReport.damage_synced` → `dsyn<n>` on the smoke `net=`
+  field.
+- `spawn_remote` binds the authored `VehicleSmoke` rig next to
+  `VehicleDamage`, seeded off `generation|wire` so every process
+  replays the same emission stream for a seat; `drive_smoke` drops
+  its `Remote` skip — on the host a remote copy's rig emits off the
+  authority's live accumulator, on a client off the replicated total.
+  Texel/sparks/breakaway stay unrigged on remotes: the byte carries
+  no per-impact positions — that is F26 event replication.
+- `damage::sync_impairment` drops its authority gate (still
+  `Playing`-gated; `RemoteReplica` excluded — dead weight on
+  unsimulated copies) so a client's own predicted seat weakens the
+  way the authority's copy of it does. `apply_impact_damage` and
+  `resolve_disabled` stay authority-gated, so a replicated `Disabled`
+  never resolves a local wreck — the authority's epoch-declared
+  teleport plus a repaired total is the answer that comes back down.
+- Tests: mm2_game +1 (`set_replicated` — fraction reconstitution,
+  clamps, repair-down, NaN/inf ignored, watermark survives a stale
+  duplicate); netdrive +1 (`encode_damage` — none/intact/half=128/
+  saturated/degenerate); `net_app` — the client leg's snap carries
+  `damage: 128` on the host copy and `200` on the own seat (both
+  reconstitute, own-seat drive fields still ignored,
+  `damage_synced >= 2`) and the later `damage: 0` snaps assert
+  replicated repair on both; the host leg accumulates half of
+  `MaxDamage` through the real `apply` path and asserts the decoded
+  wire byte is 128; `damage_fx` — `a_remote_participant_never_smokes_
+  locally` inverted to `a_remote_participant_smokes_from_its_carried_
+  state` (rigged remote emits, puffs attribute to it, an unrigged
+  damaged entity still emits nothing); `net_drive` parses `dsyn` (not
+  asserted — the dev car binds no damage record, so `dsyn0` is the
+  honest dev-world value; nonzero evidence needs retail content).
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked --workspace
+--all-targets --all-features -- -D warnings` clean; `cargo test
+--locked --workspace` green — 91 test binaries, 0 failures
+(`net_app` 33/33, `net_drive` 2/2, `damage_fx` 10/10, `damage` 15/15,
+mm2_net 80/80 incl. updated v8 fixtures).
+
+## Classification / remaining open items
+
+- Implementation choice throughout (wire byte, `set_replicated`
+  semantics, smoke-rig seeding); the replicated total replays
+  authority state, no original-behavior claim.
+- Evidence: unit + in-process integration legs plus the two real-
+  process loopback sessions — but `dsyn` is `0` there by design (dev
+  car has no authored damage record), so the byte's end-to-end path is
+  proven in-process only; no LAN, no retail install, nothing rendered
+  or driven by hand.
+- Replicated `Disabled` presentation on a client is now internally
+  consistent (meter/smoke/impairment read the total; the authority's
+  epoch teleport carries the wreck's reset) but unexercised
+  end-to-end — no retail car has taken a replicated wreck on a live
+  session.
+- F25-B remaining scope: replicated *result/race* state, damage
+  *event* replication (sparks/texel/breakaway — needs per-impact
+  positions on the wire), deduplicated audio/effects, the measured
+  AC03 impairment matrix, bandwidth/update-rate budgets. AC01–AC06
+  stay open as before; this slice advances req 3's damage leg only.
+
+---
+
 # Last iteration — F25-B fourth slice: replicated drive-presentation
 # state — protocol v7 gives `SnapEntry` a wheel/engine tail so remote
 # copies steer, spin, settle their suspension and light their pedals

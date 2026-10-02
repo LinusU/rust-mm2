@@ -20,17 +20,22 @@
 //!   mean grounded-wheel spin rate, mean suspension compression and the
 //!   brake/reverse/grounded flags — enough for a remote copy's wheels
 //!   to steer, spin and droop and its brake/reverse lights to work.
-//!   What the wire still does not carry is the replicated damage
-//!   presentation (smoke/sparks/texel/breakaway stay unrigged on remote
-//!   cars — F25-B/F26 scope).
+//!   The v8 tail adds the seat's authoritative *damage fraction*
+//!   (F25-B): a copy's `VehicleDamage` carries the replicated total
+//!   (never locally accumulated — F05 req 6), which is what its bound
+//!   `VehicleSmoke` rig emits from. Event-driven damage presentation
+//!   stays unwired — impact sparks, texel splats and breakaway
+//!   detachment are per-impact effects, not a state the fraction can
+//!   carry (F26 scope).
 //! - **Client** (`SessionAuthority::Remote` → `Predicted`): remote cars
 //!   are kinematic copies blended between the two newest snapshots
 //!   ([`RemoteLerp`]), marked [`RemoteReplica`] so the local sim never
 //!   steps them — their `VehicleState`/`VehicleInput` carry the snapshot
-//!   tail's replicated drive state for the wheel/glow visuals instead.
-//!   They carry the same damage/stuck/recovery
-//!   components inertly, since the rule systems never run under a
-//!   predicted session. Our own car keeps driving on local physics —
+//!   tail's replicated drive state for the wheel/glow visuals instead,
+//!   and their `VehicleDamage` carries the replicated total the bound
+//!   smoke rig emits from. The damage/stuck/recovery rule systems
+//!   stay inert — the authority owns every outcome. Our own car keeps
+//!   driving on local physics —
 //!   snapshot entries naming our wire id apply only when their `epoch`
 //!   advances: the authority teleported us, so the local pose snaps to
 //!   the asserted state (F25-A.5). Between resets the local sim owns the
@@ -57,9 +62,9 @@
 //! reconcile puts each remote car on its own.
 //!
 //! Everything here is loopback-scoped groundwork like the rest of F24/F25:
-//! no client-side prediction, no lag compensation, no damage/result
-//! replication down to clients' presentation — those are named gaps, not
-//! silent behavior.
+//! no lag compensation, no result/race-state replication, no event-driven
+//! effect replication (sparks/texel/breakaway) — those are named gaps,
+//! not silent behavior.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -71,7 +76,7 @@ use bevy::prelude::*;
 use mm2_game::{
     DamageSignals, DamageSpec, Mm2Vfs, ObjectIdentity, Player, PlayerControl, PlayerVehicle,
     RaceDefinition, RaceProgress, RaceState, RecoveryPolicy, Session, SessionEntity, SessionPhase,
-    StuckSpec, VehicleDamage, VehicleRecovery, VehicleStuck,
+    SmokePolicy, StuckSpec, VehicleDamage, VehicleRecovery, VehicleSmoke, VehicleStuck,
 };
 use mm2_net::{
     DriveInput, Message, RemoteInputs, SNAP_FLAG_BRAKE, SNAP_FLAG_GROUNDED, SNAP_FLAG_REVERSE,
@@ -258,6 +263,11 @@ pub struct NetDriveReport {
     /// from the replicated rate (client side) — evidence the v7
     /// presentation tail visibly turned a copy's wheels.
     pub remote_spin: f64,
+    /// Replicated damage totals written onto live `VehicleDamage`
+    /// components (client side, F25-B v8 tail) — remote copies and the
+    /// own seat both count; a participant with no authored damage
+    /// record has no component to write and never counts.
+    pub damage_synced: u64,
 }
 
 /// A rotation off the wire, sanitized — a malformed-quaternion guard so
@@ -399,6 +409,43 @@ fn apply_present(
     };
     if let Some(drive) = drive {
         drive.spin_rate = entry.spin as f32 * 0.1;
+    }
+}
+
+/// `VehicleDamage` → a [`SnapEntry`]'s `damage` byte (protocol v8,
+/// F25-B): the authority's accumulated total as a fraction of the
+/// seat's authored `MaxDamage`, quantized ×255. `None` — a participant
+/// with no authored `vehcardamage` — encodes 0: undamageable reads as
+/// undamaged, never a fabricated spec. A degenerate (`<= 0` or
+/// non-finite) bound encodes 0 the same way rather than dividing by
+/// it; a saturating accumulator can never exceed `max_damage`, but the
+/// clamp stands anyway — the byte means "fraction of the authored
+/// bound", not "whatever total happened to accumulate".
+fn encode_damage(damage: Option<&VehicleDamage>) -> u8 {
+    let Some(damage) = damage else {
+        return 0;
+    };
+    let fraction = damage.total() / damage.spec.max_damage;
+    if !fraction.is_finite() {
+        return 0;
+    }
+    (fraction.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// The damage side of a [`SnapEntry`]: reconstitute the wire fraction
+/// onto the entity's own [`VehicleDamage`] spec. Runs for every
+/// `NetPlayer` seat the snap names — remote copies *and* the own seat
+/// (under a predicted session nothing local accumulates damage, so the
+/// replicated total is the meter's truth — F05 req 6). Entities with
+/// no authored damage record carry no component and are skipped.
+fn apply_damage(
+    entry: &SnapEntry,
+    damage: Option<Mut<'_, VehicleDamage>>,
+    report: &mut NetDriveReport,
+) {
+    if let Some(mut damage) = damage {
+        damage.set_replicated(entry.damage as f32 / 255.0);
+        report.damage_synced += 1;
     }
 }
 
@@ -761,13 +808,25 @@ fn spawn_remote(
     // the components (absent = undamageable/unstuckable, never a
     // fabricated spec) and the designed recovery policy rides every
     // seat, anchored at its spawn pose. On a predicted client the
-    // components are inert — the systems that read them never run
-    // without `AuthorityRole::Authority` — but carrying them keeps one
-    // spawn shape and gives damage-state replication a place to land.
+    // rule systems are inert — but `VehicleDamage` is where the v8
+    // snap tail lands the replicated total, and `VehicleSmoke` renders
+    // it.
     if let Some(d) = def.as_ref().and_then(|d| d.damage.as_ref()) {
-        commands
-            .entity(vehicle)
-            .insert(VehicleDamage::new(DamageSpec::from(d)));
+        commands.entity(vehicle).insert((
+            VehicleDamage::new(DamageSpec::from(d)),
+            // F25-B: the authored engine-smoke rig rides with the
+            // damage spec like any participant's — on the host it
+            // emits from the authority's own accumulation, on a
+            // client from the replicated total the v8 snap tail
+            // writes. Seeded off the wire id rather than the locally
+            // minted object slot so every process replays the same
+            // emission stream for the seat.
+            VehicleSmoke::new(
+                d,
+                SmokePolicy::default(),
+                (session.generation() << 32) | u64::from(wire),
+            ),
+        ));
     }
     if let Some(s) = def.as_ref().and_then(|d| d.stuck.as_ref()) {
         commands
@@ -800,10 +859,11 @@ fn spawn_remote(
                 images,
                 materials,
                 vehicle,
-                // The texel rig reads the authored damage record — a
-                // remote car carries `VehicleDamage` for the authority's
-                // pipeline, but its *skin* is replicated presentation
-                // (F25-B/F26), so no rig is bound.
+                // The texel rig reads the authored damage record and
+                // splats per impact — the v8 tail carries only the
+                // damage *total*, no per-impact positions, so a remote
+                // car's skin stays unrigged (F26's event replication
+                // would have to carry the impacts).
                 None,
             );
             if !missing.is_empty() {
@@ -1040,8 +1100,10 @@ pub fn track_reset_epochs(
 
 /// The snapshot publish query row — a participant's wire identity,
 /// reset epoch, rigid truth and the drive state the v7 presentation
-/// tail encodes. The drive row is `Option`: a participant without a
-/// vehicle bundle still publishes its pose rather than vanishing.
+/// tail encodes, plus the damage state the v8 tail encodes. The drive
+/// and damage rows are `Option`: a participant without a vehicle
+/// bundle or authored damage record still publishes its pose rather
+/// than vanishing.
 type SnapSourceRow<'a> = (
     &'a NetPlayer,
     &'a ResetEpoch,
@@ -1052,6 +1114,7 @@ type SnapSourceRow<'a> = (
     Option<&'a Vehicle>,
     Option<&'a VehicleState>,
     Option<&'a VehicleInput>,
+    Option<&'a VehicleDamage>,
 );
 
 /// Host-side: every participant's authoritative pose, broadcast once per
@@ -1062,8 +1125,9 @@ type SnapSourceRow<'a> = (
 /// [`ResetEpoch`] — the receiver's teleport signal. The v7 tail carries
 /// the replicated drive presentation ([`encode_present`]): steering
 /// angle, wheel spin rate, suspension droop and the brake/reverse/
-/// grounded flags — what a remote copy needs to *look* like the car the
-/// authority is simulating.
+/// grounded flags; the v8 tail adds [`encode_damage`], the seat's
+/// authoritative damage fraction — what a remote copy needs to *look*
+/// like the car the authority is simulating.
 pub fn publish_snapshots(
     host: Res<HostLink>,
     session: Res<Session>,
@@ -1078,24 +1142,27 @@ pub fn publish_snapshots(
     }
     let mut entries: Vec<SnapEntry> = players
         .iter()
-        .map(|(wire, epoch, pos, rot, vel, ang, vehicle, state, input)| {
-            let (steer, spin, compression, flags) = match (vehicle, state, input) {
-                (Some(v), Some(s), Some(i)) => encode_present(&v.config, s, i),
-                _ => (0, 0, 0, 0),
-            };
-            SnapEntry {
-                player: wire.0,
-                pos: pos.0.to_array(),
-                rot: rot.0.to_array(),
-                vel: vel.0.to_array(),
-                angvel: ang.0.to_array(),
-                epoch: epoch.0,
-                steer,
-                spin,
-                compression,
-                flags,
-            }
-        })
+        .map(
+            |(wire, epoch, pos, rot, vel, ang, vehicle, state, input, damage)| {
+                let (steer, spin, compression, flags) = match (vehicle, state, input) {
+                    (Some(v), Some(s), Some(i)) => encode_present(&v.config, s, i),
+                    _ => (0, 0, 0, 0),
+                };
+                SnapEntry {
+                    player: wire.0,
+                    pos: pos.0.to_array(),
+                    rot: rot.0.to_array(),
+                    vel: vel.0.to_array(),
+                    angvel: ang.0.to_array(),
+                    epoch: epoch.0,
+                    steer,
+                    spin,
+                    compression,
+                    flags,
+                    damage: encode_damage(damage),
+                }
+            },
+        )
         .collect();
     entries.sort_by_key(|e| e.player);
     if host
@@ -1133,6 +1200,11 @@ type SnapTargetRow<'a> = (
     Option<&'a mut VehicleState>,
     Option<&'a mut VehicleInput>,
     Option<&'a mut RemoteDrive>,
+    // The v8 damage byte lands here — `Option` like the drive row:
+    // a participant with no authored damage record has nothing to
+    // write. Unlike the drive row the own seat *does* take it —
+    // replicated damage is the only writer under prediction.
+    Option<&'a mut VehicleDamage>,
 );
 
 /// Client-side: fold the newest staged snapshot into the remote copies'
@@ -1197,6 +1269,7 @@ pub fn apply_snapshots(
             state,
             input,
             drive,
+            damage,
         ) in &mut players
         {
             if wire.0 != entry.player {
@@ -1206,11 +1279,17 @@ pub fn apply_snapshots(
             let to_rot = wire_quat(entry.rot);
             let authority_reset = entry.epoch != epoch.0;
             epoch.0 = entry.epoch;
+            // The v8 damage byte lands on every named seat, own seat
+            // included: under a predicted session nothing local
+            // accumulates `VehicleDamage`, so the replicated total is
+            // the only truth the meter/smoke/impairment consumers can
+            // read (F05 req 6). Applied on every snap, not just resets.
+            apply_damage(entry, damage, &mut report);
             // The own seat: only an authority reset may move it — the
             // host teleported our car (its copy of us is the truth),
             // so the predicted pose yields to the asserted one. Its
-            // presentation fields stay ignored too — the local sim's
-            // `VehicleState` is already the truth here.
+            // presentation fields stay ignored — the local sim's
+            // `VehicleState`/`VehicleInput` is already the truth here.
             if player.control == PlayerControl::Local {
                 if authority_reset {
                     *pos = Position(to_pos);
@@ -1656,6 +1735,7 @@ mod tests {
             spin: 150,
             compression: 102, // 0.4 of travel
             flags: SNAP_FLAG_BRAKE | SNAP_FLAG_GROUNDED,
+            damage: 0,
         };
         apply_present(&entry, &cfg, &mut state, &mut input, Some(&mut drive));
         assert_eq!(state.steer_angle, -0.26);
@@ -1681,5 +1761,37 @@ mod tests {
         };
         apply_present(&hostile, &cfg, &mut state, &mut input, None);
         assert_eq!(state.steer_angle, MAX_WIRE_STEER);
+    }
+
+    /// The v8 damage byte encodes the authority's fraction of the
+    /// authored `MaxDamage` — saturating at the bound, `0` for a seat
+    /// with no damage record or a degenerate one.
+    #[test]
+    fn damage_tail_encodes_the_authority_fraction() {
+        const SPEC: DamageSpec = DamageSpec {
+            impact_threshold: 1500.0,
+            med_damage: 150_000.0,
+            max_damage: 321_300.0,
+            regenerate_rate: 0.0,
+        };
+        // No authored record → undamageable reads as undamaged.
+        assert_eq!(encode_damage(None), 0);
+        let mut damage = VehicleDamage::new(SPEC);
+        assert_eq!(encode_damage(Some(&damage)), 0, "intact");
+        damage.apply(mm2_game::ImpactId(1), SPEC.max_damage * 0.5);
+        assert_eq!(encode_damage(Some(&damage)), 128, "half of max");
+        damage.apply(mm2_game::ImpactId(2), SPEC.max_damage);
+        assert_eq!(
+            encode_damage(Some(&damage)),
+            255,
+            "the saturating accumulator can never exceed the bound"
+        );
+        // A degenerate spec (max <= 0) encodes 0 rather than dividing
+        // by it.
+        let degenerate = VehicleDamage::new(DamageSpec {
+            max_damage: 0.0,
+            ..SPEC
+        });
+        assert_eq!(encode_damage(Some(&degenerate)), 0);
     }
 }

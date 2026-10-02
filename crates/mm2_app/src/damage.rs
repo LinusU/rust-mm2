@@ -387,16 +387,26 @@ pub fn resolve_disabled(
 /// lifts it gradually. Remote participants impair like AI (F25-A.4):
 /// the host simulates their cars, so their engine power is the
 /// authority's to weaken.
-/// Entering/leaving the impaired band counts into
+///
+/// Under a predicted session this system still runs — the v8 snap
+/// tail writes the authority's damage total onto the local seat
+/// (F25-B), so the predicted car must weaken the same way the
+/// authority's copy of it does, or the client drives a stronger car
+/// than the wire reports. `RemoteReplica` copies are excluded: they
+/// are never stepped by `vehicle_simulation`, so the component would
+/// be dead weight. Entering/leaving the impaired band counts into
 /// [`DamageReport::impaired`]/[`restored`], the headless record's
-/// `imp=` field.
+/// `imp=` field — on a client that count is replicated episodes.
 pub fn sync_impairment(
     mut commands: Commands,
     session: Res<Session>,
-    mut cars: Query<(Entity, &VehicleDamage, Option<&mut EngineImpairment>)>,
+    mut cars: Query<
+        (Entity, &VehicleDamage, Option<&mut EngineImpairment>),
+        Without<mm2_vehicle::RemoteReplica>,
+    >,
     mut report: ResMut<DamageReport>,
 ) {
-    if !session.is_playing() || !session.authority_role().is_authority() {
+    if !session.is_playing() {
         return;
     }
     let policy = ImpairmentPolicy::default();

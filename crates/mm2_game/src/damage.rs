@@ -366,6 +366,23 @@ impl VehicleDamage {
         self.state.tick(dt, &self.spec);
     }
 
+    /// Write the authority's replicated damage onto this copy (F25-B):
+    /// `damaged_fraction` is the wire's `total / max_damage` quantized
+    /// to `u8` units — `0.0` intact, `1.0` at the destruction bound.
+    /// This bypasses [`Self::apply`] deliberately: a replicated total
+    /// is the authority's truth, not an impact — no [`ImpactId`] exists
+    /// on the wire and the `last_impact` watermark must stay where the
+    /// impact stream left it so a late duplicate still cannot land.
+    /// The fraction clamps into `0.0..=1.0` (a repair legitimately
+    /// lowers the total) and a non-finite input is ignored rather than
+    /// poisoning the state.
+    pub fn set_replicated(&mut self, damaged_fraction: f32) {
+        if !damaged_fraction.is_finite() {
+            return;
+        }
+        self.state.total = damaged_fraction.clamp(0.0, 1.0) * self.spec.max_damage.max(0.0);
+    }
+
     /// Restore to full health — authority-only (the session's role
     /// check decides who may repair, never a remote client for itself).
     /// The impact watermark survives: a repair is not a rewind, and a

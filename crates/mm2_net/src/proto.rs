@@ -16,8 +16,11 @@
 /// reset counter (F25-A.5). v6: `ResetRequest` — a driver asking the
 /// authority to reset its own seat (F25-B). v7: `SnapEntry` gained the
 /// presentation tail — steer/spin/compression/flags a remote copy's
-/// wheel and light visuals consume (F25-B).
-pub const PROTOCOL_VERSION: u16 = 7;
+/// wheel and light visuals consume (F25-B). v8: `SnapEntry` gained
+/// `damage`, the seat's authoritative damage fraction — a remote
+/// copy's (and a predicted own seat's) `VehicleDamage` is replicated
+/// state, never locally accumulated (F25-B, F05 req 6).
+pub const PROTOCOL_VERSION: u16 = 8;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -205,6 +208,14 @@ pub struct SnapEntry {
     /// Presentation flags: bit 0 `SNAP_FLAG_BRAKE`, bit 1
     /// `SNAP_FLAG_REVERSE`, bit 2 `SNAP_FLAG_GROUNDED`.
     pub flags: u8,
+    /// Damage fraction (v8, F25-B): the authority's `VehicleDamage`
+    /// total as a fraction of the seat's authored `MaxDamage`, ×255 —
+    /// `0` intact (also the value a participant with no authored
+    /// `vehcardamage` record publishes — undamageable reads as
+    /// undamaged), `255` at/over the destruction bound. Informational
+    /// like the rest of the tail: receivers reconstitute the total
+    /// through their own copy's spec and never accumulate locally.
+    pub damage: u8,
 }
 
 /// [`SnapEntry::flags`] bit 0 — the driver's brake pedal is held (the
@@ -624,6 +635,7 @@ impl Message {
                     out.extend_from_slice(&e.spin.to_le_bytes());
                     out.push(e.compression);
                     out.push(e.flags);
+                    out.push(e.damage);
                 }
             }
         }
@@ -721,6 +733,7 @@ impl Message {
                         spin: cur.i16()?,
                         compression: cur.u8()?,
                         flags: cur.u8()?,
+                        damage: cur.u8()?,
                     });
                 }
                 Self::Snap {
@@ -875,6 +888,7 @@ mod tests {
                         spin: 1420,
                         compression: 96,
                         flags: SNAP_FLAG_BRAKE | SNAP_FLAG_GROUNDED,
+                        damage: 128,
                     },
                     SnapEntry {
                         player: 3,
@@ -887,6 +901,7 @@ mod tests {
                         spin: -80,
                         compression: 0,
                         flags: SNAP_FLAG_REVERSE,
+                        damage: 0,
                     },
                 ],
             },
@@ -1001,6 +1016,7 @@ mod tests {
                 spin: 0,
                 compression: 0,
                 flags: 0,
+                damage: 0,
             };
             MAX_PLAYERS as usize + 1
         ];

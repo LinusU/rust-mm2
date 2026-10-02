@@ -174,6 +174,49 @@ fn vehicle_damage_wraps_the_state_against_its_authored_spec() {
     assert_eq!(damage.condition(), DamageTier::Intact);
 }
 
+/// F25-B: `set_replicated` is the wire's write path — a fraction of
+/// `MaxDamage` reconstitutes the authority's total, clamps at the
+/// bound, can lower the total (the authority's repair), and never
+/// touches the impact watermark.
+#[test]
+fn replicated_fractions_write_the_total_without_touching_impacts() {
+    let spec = spec(); // max 321 300
+    let mut damage = VehicleDamage::new(spec);
+
+    // A real application first so the watermark has somewhere to
+    // stand — replication must not rewind it.
+    damage.apply(ImpactId(5), 10_000.0);
+
+    damage.set_replicated(0.5);
+    assert!((damage.total() - spec.max_damage * 0.5).abs() < 1.0);
+    assert_eq!(damage.condition(), DamageTier::Damaged);
+
+    // At/over the bound reads disabled; the fraction clamps rather
+    // than exceeding it.
+    damage.set_replicated(1.0);
+    assert_eq!(damage.condition(), DamageTier::Disabled);
+    damage.set_replicated(1.7);
+    assert_eq!(damage.total(), spec.max_damage);
+
+    // The authority's repair replicates down — replication may lower
+    // the total, which `apply` never does.
+    damage.set_replicated(0.0);
+    assert_eq!(damage.total(), 0.0);
+    damage.set_replicated(-0.4);
+    assert_eq!(damage.total(), 0.0);
+
+    // Garbage stays out: a non-finite fraction is ignored outright.
+    damage.set_replicated(0.5);
+    damage.set_replicated(f32::NAN);
+    damage.set_replicated(f32::INFINITY);
+    assert!((damage.total() - spec.max_damage * 0.5).abs() < 1.0);
+
+    // The watermark survived — a late duplicate of a pre-replication
+    // impact still cannot land on the copy.
+    assert_eq!(damage.apply(ImpactId(5), 9000.0), DamageVerdict::Duplicate);
+    assert!((damage.total() - spec.max_damage * 0.5).abs() < 1.0);
+}
+
 #[test]
 fn impairment_steps_down_at_the_smoke_gate_and_ramps_to_max() {
     // DSN-25: the documented "when the engine spews smoke" coupling —
