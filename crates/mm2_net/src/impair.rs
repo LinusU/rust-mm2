@@ -109,13 +109,23 @@ impl Default for Impair {
 /// What a lane actually did — the measured half of an impairment leg.
 /// `frames_out` counts emitted copies, so a duplicating run reports
 /// `frames_out = frames_in − dropped + duplicated` modulo what is still
-/// queued.
+/// queued. `bytes_*` are the payload byte counts behind those frame
+/// counts (the 4-byte length prefix excluded) — the bandwidth leg of
+/// F25-B req 6's budget evidence.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LinkStats {
     /// Frames read off the source socket.
     pub frames_in: u64,
     /// Frames written onward — each emitted copy counts.
     pub frames_out: u64,
+    /// Payload bytes read off the source socket.
+    pub bytes_in: u64,
+    /// Payload bytes written onward — each emitted copy counts.
+    pub bytes_out: u64,
+    /// Frames scheduled onto the release queue (or reorder-held) with a
+    /// positive hold — delay/jitter the recipe actually made the lane
+    /// pay. Each duplicated copy counts.
+    pub delayed: u64,
     /// Frames the loss draw dropped.
     pub dropped: u64,
     /// Extra copies the duplicate draw emitted.
@@ -130,6 +140,9 @@ impl LinkStats {
     fn absorb(&mut self, other: &LinkStats) {
         self.frames_in += other.frames_in;
         self.frames_out += other.frames_out;
+        self.bytes_in += other.bytes_in;
+        self.bytes_out += other.bytes_out;
+        self.delayed += other.delayed;
         self.dropped += other.dropped;
         self.duplicated += other.duplicated;
         self.reordered += other.reordered;
@@ -239,6 +252,7 @@ impl Lane {
     /// hold it for a swap, duplicate it or drop it.
     fn offer(&mut self, params: &Impair, now: Instant, payload: Vec<u8>) {
         self.stats.frames_in += 1;
+        self.stats.bytes_in += payload.len() as u64;
         // A deferred frame's successor arrived: the swap completes —
         // the successor emits at its own release and the held frame
         // goes right behind it (same release, later `order`). The
@@ -248,6 +262,9 @@ impl Lane {
             self.push(release, payload);
             self.push(release, held);
             self.stats.reordered += 1;
+            if release > now {
+                self.stats.delayed += 2;
+            }
             return;
         }
         if self.rng.chance(params.loss) {
@@ -255,7 +272,13 @@ impl Lane {
             return;
         }
         let release = now + params.delay + self.rng.jitter(params.jitter);
+        if release > now {
+            self.stats.delayed += 1;
+        }
         if self.rng.chance(params.duplicate) {
+            if release > now {
+                self.stats.delayed += 1;
+            }
             self.push(release, payload.clone());
             self.stats.duplicated += 1;
         }
@@ -563,6 +586,7 @@ fn spawn_lane(
             lane.collect_due(now, &mut out);
             for payload in out.drain(..) {
                 lane.stats.frames_out += 1;
+                lane.stats.bytes_out += payload.len() as u64;
                 if write_frame(&mut dst, &payload).is_err() {
                     open = false;
                     break;
@@ -588,6 +612,7 @@ fn spawn_lane(
         lane.finish(&mut out);
         for payload in out.drain(..) {
             lane.stats.frames_out += 1;
+            lane.stats.bytes_out += payload.len() as u64;
             let _ = write_frame(&mut dst, &payload);
         }
         shared_w.publish(slot, lane.stats);
@@ -636,6 +661,8 @@ mod tests {
         let (out, stats) = run_lane(0, Impair::default(), 6, due);
         assert_eq!(out, [0, 1, 2, 3, 4, 5]);
         assert_eq!(stats.frames_in, 6);
+        assert_eq!(stats.bytes_in, 24, "four payload bytes per frame");
+        assert_eq!(stats.delayed, 0, "a transparent lane holds nothing");
         assert_eq!(stats.dropped + stats.duplicated + stats.reordered, 0);
     }
 
@@ -650,6 +677,7 @@ mod tests {
         lane.offer(&impair, t0, frame(1));
         assert!(drained(&mut lane, t0 + Duration::from_millis(40)).is_empty());
         assert_eq!(drained(&mut lane, t0 + Duration::from_millis(60)), [1]);
+        assert_eq!(lane.stats.delayed, 1, "the positive hold counted");
     }
 
     #[test]
@@ -835,6 +863,9 @@ mod tests {
         assert_eq!(received(&in_rx, 4), [0, 1, 2, 3]);
         let stats = stats_at_least(&proxy, LinkDir::Up, 4);
         assert_eq!(stats.frames_out, 4);
+        assert_eq!(stats.bytes_in, 16);
+        assert_eq!(stats.bytes_out, 16, "each relayed frame's payload counted");
+        assert_eq!(stats.delayed, 0, "a clean lane holds nothing");
         assert_eq!(stats.dropped + stats.duplicated + stats.reordered, 0);
     }
 
@@ -879,6 +910,11 @@ mod tests {
         assert_eq!(received(&in_rx, 4), [1, 0, 3, 2]);
         let stats = stats_at_least(&proxy, LinkDir::Up, 4);
         assert_eq!(stats.reordered, 2);
+        assert_eq!(stats.bytes_out, 16, "a swap emits both payloads once");
+        assert_eq!(
+            stats.delayed, 0,
+            "reorder alone pays no delay/jitter hold — `reordered` counts it"
+        );
     }
 
     #[test]
@@ -899,6 +935,10 @@ mod tests {
         assert_eq!(received(&in_rx, 6), [0, 0, 1, 1, 2, 2]);
         let stats = stats_at_least(&proxy, LinkDir::Up, 3);
         assert_eq!(stats.duplicated, 3);
+        assert_eq!(
+            stats.bytes_out, 24,
+            "each duplicated copy re-pays the payload bytes"
+        );
     }
 
     #[test]
@@ -921,6 +961,10 @@ mod tests {
             "the frame arrived faster than its release: {:?}",
             sent.elapsed()
         );
+        let stats = stats_at_least(&proxy, LinkDir::Up, 1);
+        assert_eq!(stats.delayed, 1, "the 60 ms hold counted");
+        assert_eq!(stats.bytes_in, 4);
+        assert_eq!(stats.bytes_out, 4);
     }
 
     #[test]
