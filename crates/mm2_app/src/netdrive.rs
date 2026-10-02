@@ -90,8 +90,8 @@ use mm2_net::{
     SNAP_FLAG_REVERSE, SnapEntry, SnapImpact, SnapTrailer, VehiclePick,
 };
 use mm2_vehicle::{
-    DriveDirection, RemoteReplica, ResetVehicle, Teleported, Vehicle, VehicleConfig, VehicleInput,
-    VehicleState, vehicle_bundle,
+    DriveDirection, HandlingMetrics, RemoteReplica, ResetVehicle, Teleported, Vehicle,
+    VehicleConfig, VehicleInput, VehicleState, vehicle_bundle,
 };
 
 use crate::car_visual;
@@ -538,6 +538,29 @@ fn apply_present(
     };
     if let Some(drive) = drive {
         drive.spin_rate = entry.spin as f32 * 0.1;
+    }
+}
+
+/// The [`SnapTrailer`] row's grounded bit folded into a kinematic
+/// copy's wheel state (F25-B). The row carries no compression field —
+/// the seat entry's byte is aggregated across wheels by design and the
+/// trailer tail omits it — so a grounded copy settles every wheel at
+/// its authored rest sag and an airborne one at full droop: the two
+/// poses `update_wheel_visuals` can draw from a single bit.
+fn apply_trailer_present(row: &SnapTrailer, cfg: &VehicleConfig, state: &mut VehicleState) {
+    let grounded = row.flags & SNAP_FLAG_GROUNDED != 0;
+    state.grounded = grounded;
+    if grounded {
+        let rest = HandlingMetrics::of(cfg);
+        for (ws, wm) in state.wheels.iter_mut().zip(rest.wheels.iter()) {
+            ws.grounded = true;
+            ws.compression = wm.rest_compression;
+        }
+    } else {
+        for ws in &mut state.wheels {
+            ws.grounded = false;
+            ws.compression = 0.0;
+        }
     }
 }
 
@@ -1635,6 +1658,11 @@ type SnapTrailerRow<'a> = (
     &'a mut AngularVelocity,
     Option<&'a mut RemoteLerp>,
     Option<&'a mut RemoteDrive>,
+    // The grounded bit's presentation target — `Option` like the seat
+    // row's: a trailer without a vehicle bundle still reconciles its
+    // pose, it just has no wheels to droop.
+    Option<&'a Vehicle>,
+    Option<&'a mut VehicleState>,
 );
 
 /// Client-side: fold the newest staged snapshot into the remote copies'
@@ -1852,8 +1880,19 @@ fn apply_snap_frame(
     // only when *our* seat's epoch advanced (the authority reseated the
     // whole rig in the same broadcast).
     for t in &snap.trailers {
-        for (entity, trailer, marker, mut pos, mut rot, mut vel, mut ang, lerp, drive) in
-            trailers.iter_mut()
+        for (
+            entity,
+            trailer,
+            marker,
+            mut pos,
+            mut rot,
+            mut vel,
+            mut ang,
+            lerp,
+            drive,
+            vehicle,
+            mut state,
+        ) in trailers.iter_mut()
         {
             let remote_copy = marker.is_some_and(|m| m.owner == t.owner);
             let own_rig = marker.is_none()
@@ -1877,6 +1916,12 @@ fn apply_snap_frame(
             *ang = AngularVelocity(Vec3::from(t.angvel));
             if let Some(mut drive) = drive {
                 drive.spin_rate = t.spin as f32 * 0.1;
+            }
+            // The row's only suspension truth — fold it into the
+            // kinematic copy's wheel state. The own rig's trailer is a
+            // real body whose `VehicleState` the local sim owns.
+            if remote_copy && let (Some(vehicle), Some(state)) = (vehicle, state.as_deref_mut()) {
+                apply_trailer_present(t, &vehicle.config, state);
             }
             match lerp {
                 Some(mut lerp) if remote_copy && !snap_to => {

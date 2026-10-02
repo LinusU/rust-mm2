@@ -3073,6 +3073,171 @@ fn a_snapshot_drives_a_remote_rigs_trailer() {
     host.shutdown();
 }
 
+/// F25-B, the trailer row's grounded bit: the row carries no per-wheel
+/// compression, so the bit is the copy's only suspension truth — a
+/// grounded row settles the kinematic copy's wheels at their authored
+/// rest sag (the pose `update_wheel_visuals` draws against
+/// `ws.compression`) and a clear one hangs them at full droop, instead
+/// of the `VehicleState::new` droop they were spawned with.
+#[test]
+fn a_trailer_rows_grounded_bit_drives_the_copys_suspension() {
+    let install = tempfile::tempdir().unwrap();
+    let vfs = mount(install.path());
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host_config = HostConfig::new(fp);
+    host_config.host_pick = Some(VehiclePick {
+        vehicle: String::new(),
+        paint: 0,
+    });
+    let mut host = Host::listen_loopback(&host_config).unwrap();
+    host.set_session(net::advertise(&dev_cruise()).unwrap())
+        .unwrap();
+    let link = LobbyLink::join(
+        host.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join failed");
+    let mut app = bridge_app(vfs, link);
+    {
+        let link = app.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    until_ready(&mut app);
+    host.start(LateJoin::Open).unwrap();
+    until_started(&host);
+    until_begun(&mut app);
+    let generation = app.world().resource::<Session>().generation();
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    // The host's seat reconciles into the kinematic copy the trailer
+    // copy hitches to.
+    spin_mut(&mut app, |a| {
+        a.world_mut()
+            .query_filtered::<(), With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some()
+    });
+    let host_copy = {
+        let mut q = app.world_mut().query_filtered::<Entity, With<RemotePick>>();
+        q.single(app.world()).expect("the host copy")
+    };
+    // The remote copy's trailer — the shape `spawn_trailer_copy` builds
+    // for a trailered pick on a predicted client (trailered picks are
+    // retail-only, so the rig is declared by hand).
+    let cfg = VehicleConfig {
+        trailer: true,
+        ..VehicleConfig::default()
+    };
+    let trailer_copy = app
+        .world_mut()
+        .spawn((
+            mm2_app::car_visual::Trailer {
+                towing: host_copy,
+                rest_offset: Vec3::new(0.0, -0.5, 4.0),
+            },
+            netdrive::RemoteTrailer { owner: 0 },
+            RemotePick(VehiclePick {
+                vehicle: String::new(),
+                paint: 0,
+            }),
+            mm2_vehicle::vehicle_bundle(&cfg),
+            avian3d::prelude::Position(Vec3::new(0.0, 1.0, 4.0)),
+            avian3d::prelude::Rotation::default(),
+        ))
+        .id();
+    app.world_mut().entity_mut(trailer_copy).insert((
+        avian3d::prelude::RigidBody::Kinematic,
+        mm2_vehicle::RemoteReplica,
+        netdrive::RemoteDrive::default(),
+        netdrive::RemoteLerp {
+            from_pos: Vec3::new(0.0, 1.0, 4.0),
+            from_rot: Quat::IDENTITY,
+            to_pos: Vec3::new(0.0, 1.0, 4.0),
+            to_rot: Quat::IDENTITY,
+            start: 0.0,
+            end: 0.0,
+        },
+    ));
+    let trailer_row = |flags: u8| mm2_net::SnapTrailer {
+        owner: 0,
+        pos: [9.0, 1.0, 9.7],
+        rot: [0.0, 0.0, 0.0, 1.0],
+        vel: [0.0; 3],
+        angvel: [0.0; 3],
+        spin: 0,
+        flags,
+    };
+    host.ctl()
+        .broadcast(&Message::Snap {
+            impacts: Vec::new(),
+            generation,
+            tick: 7,
+            entries: Vec::new(),
+            trailers: vec![trailer_row(mm2_net::SNAP_FLAG_GROUNDED)],
+        })
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .snaps_applied
+            > 0
+    });
+    let expect = mm2_vehicle::HandlingMetrics::of(&cfg);
+    {
+        let state = app
+            .world()
+            .get::<mm2_vehicle::VehicleState>(trailer_copy)
+            .unwrap();
+        assert!(state.grounded, "the row's grounded bit landed");
+        for (ws, wm) in state.wheels.iter().zip(expect.wheels.iter()) {
+            assert!(ws.grounded, "every wheel reads grounded");
+            assert!(wm.rest_compression > 0.0, "the fixture config sags at rest");
+            assert!(
+                (ws.compression - wm.rest_compression).abs() < 1e-6,
+                "the copy settles at the authored rest sag: {} vs {}",
+                ws.compression,
+                wm.rest_compression
+            );
+        }
+    }
+    // A clear bit hangs every wheel at full droop.
+    host.ctl()
+        .broadcast(&Message::Snap {
+            impacts: Vec::new(),
+            generation,
+            tick: 8,
+            entries: Vec::new(),
+            trailers: vec![trailer_row(0)],
+        })
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .snaps_applied
+            > 1
+    });
+    {
+        let state = app
+            .world()
+            .get::<mm2_vehicle::VehicleState>(trailer_copy)
+            .unwrap();
+        assert!(!state.grounded, "the cleared bit lands too");
+        for ws in &state.wheels {
+            assert!(!ws.grounded);
+            assert_eq!(ws.compression, 0.0, "airborne hangs at full droop");
+        }
+    }
+
+    host.shutdown();
+}
+
 /// F25-B, protocol v10 host half: the authority's filtered
 /// `ImpactEvent` stream rides the next `Snap` as per-seat
 /// `SnapImpact` rows — one row per participant side that names a
