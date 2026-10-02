@@ -108,7 +108,16 @@ the `R` bundle, `--reset-at`, recovery/stuck/disabled resolves,
 scripted and opponent re-anchors, the self-right assist, wire
 `ResetRequest`s — emits each towed trailer's reseat ahead of the
 apply, so a remote participant's rig teleports as one on the
-authority exactly like the local `R` bundle. v9→v10: `Snap` gained
+authority exactly like the local `R` bundle. The copy-side contract
+matches the seat's: the kinematic trailer carries `DamageSignals`
+like the authority's real body and the local trailer (client-side
+impact-signal consumers see its contacts), its hitch joint rides as a
+`ChildOf` the trailer entity on every role so a leave/re-pick despawn
+sweeps it instead of orphaning it on dead bodies, and the row's
+grounded bit — the only suspension truth the trailer tail carries —
+folds into the copy's `VehicleState`: grounded settles each wheel at
+its authored rest sag (`HandlingMetrics`, the same number the local
+sim settles to), a clear bit hangs it at full droop. v9→v10: `Snap` gained
 `impacts`, a bounded (`MAX_SNAP_IMPACTS` = 64) list of `SnapImpact`
 rows replicating the authority's filtered `ImpactEvent` stream —
 per-impact `point`, outward `normal`, `severity` and the authority's

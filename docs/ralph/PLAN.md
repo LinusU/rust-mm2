@@ -52,7 +52,12 @@ iteration repairing that replication's ordering (a per-seat
 `repaired` ledger in `RemoteSnaps` drops a pending row emitted
 at/below the repair's snap tick, so a pre-repair hit can no longer
 splat after the wipe) and the byte's sub-byte rounding (any positive
-total encodes ≥1 — byte 0 is reserved for the repair signal); still
+total encodes ≥1 — byte 0 is reserved for the repair signal); the
+next iteration repaired the trailer leg's three copy-side review
+findings (the grounded bit now drives the copy's wheel droop through
+`VehicleState`, the hitch joint rides `ChildOf` the trailer so a
+despawn sweeps it, and the predicted copy carries `DamageSignals`
+like every trailer); still
 open: replicated
 result/race state, breakaway fragments on remote
 copies, the measured AC03 impairment matrix, bandwidth budgets), the F24-B

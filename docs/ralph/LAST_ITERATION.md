@@ -1,3 +1,76 @@
+# Last iteration — F25-B repair: the trailer leg's three copy-side
+# review findings — grounded bit lands on the copy's wheel state, the
+# hitch joint despawns with its trailer, the predicted copy carries
+# `DamageSignals` (new-run iteration 1)
+
+Repair iteration on `ralph/night` (baseline `a844eb3` — the
+encode-floor candidate of the previous run's interrupted iteration 4;
+its uncommitted ordering-repair half was still in the tree and is now
+committed as `af2cc5c`, gates re-verified green before committing).
+The trailer leg's external review (run 20261002T095452, iter 1, pass
+with gaps) left three non-blocking copy-side findings; this iteration
+repairs all three — repair-before-feature per the selection policy.
+Three commits, one per defect class:
+
+- `ef315d4` — `car_visual::spawn_trailer` now children the
+  `SphericalJoint` entity to the trailer (`ChildOf`), so a mid-session
+  leave/re-pick despawn sweeps it instead of orphaning it on dead
+  bodies until `SessionEntity` teardown.
+- `cf231a9` — the predicted half of `spawn_remote`'s trailer rig is a
+  named helper, `spawn_trailer_copy`, which lands the copy with
+  `DamageSignals` like the authority's real body and the local trailer
+  — a client's impact-signal consumers (`collect_impacts` →
+  telemetry/events) now see remote-trailer contacts.
+- `dad1c59` — the v9 `SnapTrailer` grounded bit reaches the kinematic
+  copy's `VehicleState` (`apply_trailer_present` in the trailer apply
+  loop): the row carries no compression, so grounded settles every
+  wheel at its authored rest sag (`HandlingMetrics::of` — the number
+  the local sim settles to) and a clear bit hangs full droop. The own
+  rig's real trailer keeps its sim-owned wheel state.
+
+## Tests
+
+- `netdrive::tests::a_predicted_trailer_copy_carries_damage_signals`
+  drives `spawn_trailer_copy` through a real `CommandQueue` and locks
+  the copy's contract (DamageSignals, kinematic replica rig, wire-keyed
+  marker, hitched rest pose).
+- `trailer.rs::despawning_the_trailer_takes_the_hitch_joint_with_it`
+  spawns the real jointed rig through `spawn_trailer`, despawns the
+  trailer, asserts the `SphericalJoint` entity is gone and the car
+  untouched.
+- `net_app::a_trailer_rows_grounded_bit_drives_the_copys_suspension`
+  runs the real loopback wire: host broadcasts `Snap.trailers` rows
+  into a `bridge_app` client — grounded row lands `state.grounded`
+  plus per-wheel rest sag matching `HandlingMetrics`, a clear row
+  droops every wheel.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` green — 91 binaries, 0 failures
+(`net_app` 37, `trailer` 2, `netdrive` unit 14).
+
+## Classification / remaining open items
+
+- Implementation choice throughout — copy-side presentation/lifecycle,
+  no original-behavior claim.
+- Evidence: in-process unit + integration legs over real loopback
+  sockets. Trailered picks remain retail-only (`vpsemi`/`vpcentury`),
+  so no process-level session carried a trailer — the rigs are
+  declared by hand the way the spawn paths leave them. Nothing
+  rendered or driven by hand; no LAN.
+- The `apply_trailer_present` rest-sag presentation is designed: the
+  wire grounded bit cannot express per-wheel droop, so a grounded copy
+  shows the settled pose rather than live deflection.
+- F25-B remaining scope unchanged: replicated result/race state,
+  remote-copy breakaway fragments, the measured AC03 impairment
+  matrix, bandwidth budgets. AC01–AC06 stay open. Impact-side review
+  nits still open: `RemoteImpact` carries no struck-side identity,
+  surface or generation; `OversizeImpacts`'s u8 cast is cosmetic.
+
+---
+
 # Last iteration — F25-B repair: replicated repair ordering — a
 # per-seat repair ledger makes a pre-repair `SnapImpact` row drop
 # instead of splatting after the wipe, and `encode_damage` stops
