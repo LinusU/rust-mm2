@@ -285,8 +285,23 @@ impl RemoteInputs {
     /// Store `input` as `id`'s newest sample. Never grows past the roster
     /// ceiling — a key the map does not already hold is only admitted
     /// while a slot is free, so junk ids cannot exhaust it.
+    ///
+    /// "Newest" is judged on the sender's clock: a sample whose `seq` is
+    /// not ahead of the stored one's is a duplicate or an arrival-order
+    /// regression and is refused (the slot's staleness clock keeps the
+    /// fresher sample's landing time). Ordered TCP cannot reorder in
+    /// practice, so this guards the impairment harness's reorder/dup
+    /// legs and any future unordered transport — spec req 1's sequence
+    /// handling.
     fn store(&self, id: u16, input: DriveInput) {
         let mut mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if mail
+            .inputs
+            .get(&id)
+            .is_some_and(|cur| input.seq <= cur.input.seq)
+        {
+            return;
+        }
         if mail.inputs.len() >= MAX_PLAYERS as usize && !mail.inputs.contains_key(&id) {
             return;
         }
@@ -311,14 +326,18 @@ impl RemoteInputs {
 
     /// Record `id`'s `ResetRequest` — the newest requested generation
     /// wins like a sample does: a burst between drains collapses to one
-    /// ask, which is all an idempotent reset ever needed. Same admission
-    /// bound as the input slots.
+    /// ask, which is all an idempotent reset ever needed. "Newest" here
+    /// is the *highest* generation — a sender's generation never
+    /// regresses, so an arrival-order regression (the impairment
+    /// harness's reorder leg) cannot let a stale session's ask mask a
+    /// fresher one. Same admission bound as the input slots.
     fn request_reset(&self, id: u16, generation: u64) {
         let mut mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if mail.resets.len() >= MAX_PLAYERS as usize && !mail.resets.contains_key(&id) {
             return;
         }
-        mail.resets.insert(id, generation);
+        let slot = mail.resets.entry(id).or_insert(generation);
+        *slot = (*slot).max(generation);
     }
 
     /// Take every pending reset request — `(roster id, requested
@@ -338,8 +357,10 @@ impl RemoteInputs {
     }
 
     /// Occupied input slots — for the consumer's diagnostics; never
-    /// exceeds [`MAX_PLAYERS`].
-    pub fn len(&self) -> usize {
+    /// exceeds [`MAX_PLAYERS`]. Pending reset asks are counted
+    /// separately: [`Self::is_idle`] reports whether the mailbox holds
+    /// anything at all.
+    pub fn input_len(&self) -> usize {
         self.inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -347,9 +368,12 @@ impl RemoteInputs {
             .len()
     }
 
-    /// Whether any player has a stored sample.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+    /// Whether the mailbox holds nothing — no stored input sample and
+    /// no pending reset ask. A peer that only ever asked still leaves
+    /// mail behind.
+    pub fn is_idle(&self) -> bool {
+        let mail = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        mail.inputs.is_empty() && mail.resets.is_empty()
     }
 
     /// Drop every slot — the lobby teardown's final state.
@@ -2536,6 +2560,40 @@ mod tests {
         }
     }
 
+    /// "Newest" is the sender's clock, not arrival order: a sample
+    /// whose `seq` is not ahead of the stored one — a duplicate or a
+    /// reordered delivery — is refused rather than regressing the slot.
+    /// Ordered TCP produces neither in practice; the impairment proxy's
+    /// reorder/dup legs (`impair` tests) are where this bites, and a
+    /// future unordered transport would need it.
+    #[test]
+    fn an_older_seq_never_regresses_the_mailbox() {
+        let host = host();
+        let mut alice = join(host.addr(), "alice");
+        host.recv_timeout(WAIT).unwrap(); // Joined
+        recv_roster(&mut alice, 1);
+
+        let ctl = alice.ctl().unwrap();
+        ctl.send_input(drive_input(10)).unwrap();
+        ctl.send_input(drive_input(9)).unwrap();
+        ctl.send_input(drive_input(10)).unwrap();
+        // The ReadyChanged event lands after the reader thread absorbed
+        // all three inputs — socket order is the happens-before.
+        alice.set_ready(true).unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::ReadyChanged { id: 1, ready: true }) => {}
+            other => panic!("expected ReadyChanged, got {other:?}"),
+        }
+        assert_eq!(
+            host.remote_inputs().latest(1).unwrap().input.seq,
+            10,
+            "the seq-9 sample and the seq-10 duplicate were refused"
+        );
+        // A genuinely newer sample still lands.
+        ctl.send_input(drive_input(11)).unwrap();
+        assert_eq!(wait_input(&host.remote_inputs(), 1, 11).input.seq, 11);
+    }
+
     /// A departed player's input slot is pruned with the roster slot —
     /// a recycled wire id can never inherit a dead driver's throttle.
     #[test]
@@ -2606,7 +2664,7 @@ mod tests {
         for id in 1..=(MAX_PLAYERS as u16 + 20) {
             inputs.store(id, drive_input(u64::from(id)));
         }
-        assert_eq!(inputs.len(), MAX_PLAYERS as usize);
+        assert_eq!(inputs.input_len(), MAX_PLAYERS as usize);
         assert!(inputs.latest(MAX_PLAYERS as u16 + 20).is_none());
     }
 
@@ -2658,6 +2716,24 @@ mod tests {
         let drained = inputs.drain_resets();
         assert_eq!(drained.len(), MAX_PLAYERS as usize);
         assert!(!drained.iter().any(|(id, _)| *id == 10 + 28));
+    }
+
+    /// Newest-wins for asks means newest *generation*: a stale
+    /// generation arriving behind a fresher ask — the impairment
+    /// proxy's reorder case — can never mask it. `is_idle` counts
+    /// pending asks too, not just input slots.
+    #[test]
+    fn reset_requests_keep_the_newest_generation() {
+        let inputs = RemoteInputs::default();
+        assert!(inputs.is_idle());
+        inputs.request_reset(1, 9);
+        inputs.request_reset(1, 3);
+        assert_eq!(inputs.drain_resets(), [(1, 9)], "the stale ask lost");
+        assert!(inputs.is_idle());
+        inputs.request_reset(1, 4);
+        assert!(!inputs.is_idle(), "a pending ask is mail");
+        assert_eq!(inputs.drain_resets(), [(1, 4)]);
+        assert!(inputs.is_idle());
     }
 
     /// A departed player's pending request is pruned with the roster

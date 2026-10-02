@@ -140,9 +140,13 @@ pub struct RosterEntry {
 pub struct DriveInput {
     /// The session generation this input belongs to.
     pub generation: u64,
-    /// Sender-side session tick when sampled — arrival order on one
-    /// socket is already monotonic, so this is a freshness/telemetry
-    /// tag, not a reordering mechanism.
+    /// Sender-side sample counter, monotonic per client process — the
+    /// freshness tag the host's mailbox enforces: a sample that is not
+    /// ahead of the stored `seq` is a duplicate or an arrival-order
+    /// regression and is refused. Ordered TCP cannot produce either in
+    /// practice; the tag is what lets the impairment harness (and any
+    /// future unordered transport) reorder or duplicate frames without
+    /// regressing the mailbox.
     pub seq: u64,
     /// Quantized throttle, 0..=255.
     pub throttle: u8,
