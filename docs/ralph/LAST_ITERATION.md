@@ -1,3 +1,106 @@
+# Last iteration — F25-B third slice: the first two-process driving
+# evidence — `mm2 --host`/`mm2 --join` as separate OS processes, clean
+# and through a live `ImpairProxy` (iteration 14, run
+# 20261001T195454-62282 continued)
+
+Implementation iteration on `ralph/night` (baseline `083ed24` — the
+F25-B second-slice candidate; external verify + review pass with gaps
+only). One coherent slice: the multi-process side of F25-AC01/AC02 —
+until now every driving leg ran the host and clients in one test
+process, so "separate host/client processes" had no coverage at all.
+
+## Task selection
+
+No failing gate or blocking finding. The F25-B review's sharpest gap
+was that all evidence stayed in-process loopback — no two-process
+session, impaired or clean. That gap is now cheap to close honestly:
+`mm2 --host --headless` and `mm2 --join --headless` already exist with
+the full data plane wired (inputs up, snaps down, remote reconcile,
+reset requests), and each prints a `smoke=` record carrying the `net=`
+counters — so a process-level test can assert what the wire moved
+rather than what an in-process mailbox held.
+
+## What landed
+
+- `crates/mm2_app/tests/net_drive.rs` — two legs over real OS
+  processes and real loopback sockets:
+  - `two_mm2_processes_drive_one_session_over_loopback` — one
+    `--host --headless` (9000-frame budget so the parked lobby
+    outlives the clients) plus two `--join --headless --ready`
+    clients on a synthetic dev-world install. The host's record stream
+    gates the start (`ready=true` ×2 → `start` → `event=started
+    generation=1`). Each client's mid-session record proves the full
+    data plane: inputs streamed (`in<N>s`), snapshots applied
+    (`snap<N>a`), remote copies reconciled, own predicted seat driven
+    (`moved=` 197 m on the scripted driver). Both exits land on the
+    host as `cause=quit` — a deliberate `Leave`, not a lost socket —
+    and the host's `quit` record shows the authority side
+    (`in<N>a`/`snap<N>s` — e.g. `in0s/1095a/1x,snap19345s/0a` on the
+    manual rehearsal).
+  - `an_impaired_two_process_session_still_converges` — the same
+    session with every client connection relayed through one
+    `ImpairProxy` (seed `0xC0FFEE`). The lobby crosses clean — the
+    `Up` recipe arms only after both `ready` echoes prove the verbs
+    delivered, `Down` arms after `event=started` plus a settle, since
+    a one-shot verb has no retransmit — then the whole driving phase
+    rides delay 40 ms + jitter 30 ms + loss 5% + duplicate 10% +
+    reorder 10% in *both* directions. Both clients still converge and
+    `LinkStats` asserts the recipe fired on the wire (drops/dups/
+    reorders nonzero in each direction). This is the first end-to-end
+    leg where `loss` is armed — the earlier net_app leg left it out by
+    design (a dropped `ResetRequest` is an unanswered press); the
+    input/snap stream tolerates it.
+- `crates/mm2_app/src/smoke.rs` — the parked-lobby verdict now
+  carries `net=` too. A hosted session that ran and then quit (the
+  `quit` → `Cancel` → teardown → parked `Menu` path) used to report
+  only `lobby closed`; now the record shows what its data plane
+  moved, which is what `quit_and_assert_host_drove` reads.
+
+Two things the first run taught the test:
+
+- `mm2`'s tracing logs share stdout with the record stream — records
+  are scanned for (`until("listening=")`), never assumed first.
+- `rem<N>` on a cap record is *final-state*: a peer that caps and
+  leaves first is correctly roster-pruned and its remote despawns
+  before the later client's record prints. Client frame caps are
+  therefore staggered (bob 900/1100 < alice 1400/1600): the earlier
+  record pins `rem>=2` while both peers are connected — covering
+  AC01's "visibly distinct cars" count deterministically — and the
+  later record pins `rem>=1`. The despawn-on-leave itself is the
+  designed behavior F25-AC05's disconnect leg wants, observed here on
+  the wire for the first time.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked --workspace
+--all-targets --all-features -- -D warnings` clean; `cargo test
+--locked --workspace` green — 91 suites, 0 failures (`net_drive` 2/2
+in ~7.5 s).
+
+## Classification / remaining open items
+
+- Implementation choice throughout — test scaffolding on the
+  already-shipped data plane; no original-behavior claim.
+- Evidence level is *separate OS processes over loopback* on a
+  synthetic dev world: the first non-in-process driving legs, and the
+  first with loss armed end-to-end. Still no LAN leg, no rendered
+  observation, no retail install, no human-driven input.
+- F25-AC03 stays open — one recipe over a live session is not the
+  recorded delay/jitter/loss matrix with measured corrections and
+  stale-state behavior.
+- F25-AC01/AC02 are *advanced* but not claimed: three real processes
+  drove one authoritative session with two visibly distinct clients,
+  but AC01 wants city/retail-rendered proof and AC02's collision+reset
+  convergence is untested at process level. AC04/AC05/AC06 remain
+  open; B's remaining scope is unchanged (replicated damage/result/
+  wheel-engine presentation, deduplicated audio/effects, bandwidth/
+  update-rate budgets).
+- Known harness caveats stand: `LinkStats` direction aggregation
+  assumes up-then-down lane spawn order; reset dedup is
+  cooldown-based; a blocked lane reader relies on socket shutdown.
+
+---
+
 # Last iteration — F25-B second slice: the deterministic impairment
 # harness, plus the mailbox ordering rules it makes load-bearing
 # (iteration 032, run 20261001T195454-62282 continued)

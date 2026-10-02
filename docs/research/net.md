@@ -413,6 +413,45 @@ strictly ahead, and a `ResetRequest` mailbox keeps the *highest*
 generation per slot — a reordered stale ask can never mask a fresher
 one.
 
+## Two-process driving (F25-B)
+
+`crates/mm2_app/tests/net_drive.rs` is the data plane's first
+evidence above the in-process level: three real `mm2` OS processes —
+one `--host --headless` (the authority, playing seat 0) and two
+`--join --headless --ready` clients — driving one dev-world cruise
+over real loopback sockets. Each process's `smoke=headless-physics`
+record carries the `net=` counters, so the assertions read what the
+wire actually moved rather than an in-process mailbox's contents.
+
+- **Clean leg** (`two_mm2_processes_drive_one_session_over_loopback`):
+  each client's mid-session record shows inputs streamed up
+  (`in<N>s`), authoritative snapshots applied (`snap<N>a`), the other
+  participants reconciled as remote copies (`rem2` while both peers
+  are still connected) and its own predicted seat driven (`moved=`).
+  A client's frame-cap exit lands on the host as `cause=quit` — the
+  link `Drop` sends a deliberate `Leave`, not a lost socket — and the
+  host's `quit` record carries the authority side: remote inputs
+  applied to their seats (`in<N>a`) and snapshots broadcast
+  (`snap<N>s`).
+- **Impaired leg**
+  (`an_impaired_two_process_session_still_converges`): the same
+  session with every client connection relayed through one
+  `ImpairProxy`. The lobby phase crosses clean (recipes are armed
+  only after the `ready` echoes prove the verbs delivered, and the
+  downstream recipe arms after `Start` has landed — a one-shot verb
+  has no retransmit), then the whole driving phase — `Input`s up,
+  `Snap`s down — rides a seeded recipe of 40 ms delay + 30 ms jitter
+  + 5% loss + 10% duplication + 10% pairwise reorder in both
+  directions. Both clients still converge: predicted driving keeps
+  the seat moving while stale, duplicated and reordered frames drop
+  at the mailbox instead of wedging the session. `LinkStats` asserts
+  the recipe genuinely fired in each direction.
+
+Scope stays honest: this is loopback on a synthetic dev world — no
+LAN leg, no rendered observation, no retail install. One recipe over
+a live session is not the recorded delay/jitter/loss matrix
+F25-AC03 names; that grid remains open.
+
 ## Evidence level
 
 Mixed loopback. `mm2_net` tests bind `127.0.0.1:0` and run real
@@ -499,8 +538,14 @@ and the process legs run `mm2 --join --headless` against a separate
 `mm2-host` — `start` produces `world=dev-world mp=gen1 status=pass`,
 `cancel` produces `mp=lobby(1p) phase=menu`, a host quit produces
 `lost the host`/`status=fail` exit 3, a refused connection exits 1,
-and `--join` × session-shaping flags are usage exit 2. This
-is *not* LAN or Internet evidence, and a remote session is a
-*local prediction* — no remote vehicles are spawned and nothing is
-replicated — F24-C owns the reachability matrix, F25/F26 the
-session's shared state.
+and `--join` × session-shaping flags are usage exit 2.
+`mm2_app`'s `net_drive` suite is the first two-process *driving*
+evidence: a separate `mm2 --host --headless` authority plus two
+separate `mm2 --join --headless` clients drive one dev-world cruise —
+cleanly, then with every client connection relayed through an armed
+`ImpairProxy` (see "Two-process driving" above) — while each
+process's record counters prove inputs flowed up, snapshots flowed
+down and remote copies spawned. This
+is *not* LAN or Internet evidence — every socket so far is
+`127.0.0.1`, the world is synthetic, and nothing rendered — F24-C owns
+the reachability matrix.

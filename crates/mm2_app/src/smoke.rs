@@ -1036,14 +1036,18 @@ fn run_headless(
                 None => (SmokeStatus::Pass, " returned to the lobby".to_string()),
             },
         };
+        // `net=` rides the parked verdict too: a run that did start —
+        // a hosted session quit mid-drive, a client that saw `Cancel` —
+        // reports what its data plane moved, not just that it parked.
         return record(
             &record_world(session, lobby_mode, &world),
             status,
             format!(
-                "updates={frames} ticks={ticks} driver={} diff={} phase={}{mp_detail}{}",
+                "updates={frames} ticks={ticks} driver={} diff={} phase={}{mp_detail}{}{}",
                 driver.as_str(),
                 rec_config.difficulty.as_str(),
                 session.phase().name(),
+                net_detail,
                 why
             ),
         );
