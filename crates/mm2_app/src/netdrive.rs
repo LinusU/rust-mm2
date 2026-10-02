@@ -545,10 +545,13 @@ fn encode_damage(damage: Option<&VehicleDamage>) -> u8 {
         return 0;
     };
     let fraction = damage.total() / damage.spec.max_damage;
-    if !fraction.is_finite() {
+    if !fraction.is_finite() || fraction <= 0.0 {
         return 0;
     }
-    (fraction.clamp(0.0, 1.0) * 255.0).round() as u8
+    // A positive total never encodes 0: the byte's `>0 → 0` transition
+    // is the wire's repair signal (the receiver wipes the seat's texel
+    // splats on it), so a rounding-to-zero hit must not mint one.
+    ((fraction.min(1.0) * 255.0).round() as u8).max(1)
 }
 
 /// The damage side of a [`SnapEntry`]: reconstitute the wire fraction
@@ -2298,6 +2301,19 @@ mod tests {
             encode_damage(Some(&damage)),
             255,
             "the saturating accumulator can never exceed the bound"
+        );
+        // A sub-byte positive total still encodes nonzero — byte 0 is
+        // the repair signal, so a rounding-to-zero fraction must not
+        // mint a wipe the authority never performed. (`apply` can't
+        // land here — an accepted severity always clears ~0.4% of max —
+        // but a regenerating total could, so the encoder guards it.)
+        let mut graze = VehicleDamage::new(SPEC);
+        graze.set_replicated(0.001);
+        assert!(graze.total() > 0.0);
+        assert_eq!(
+            encode_damage(Some(&graze)),
+            1,
+            "any positive damage encodes at least byte 1"
         );
         // A degenerate spec (max <= 0) encodes 0 rather than dividing
         // by it.
