@@ -2,8 +2,9 @@
 //! deduplicated impact stream, detach once when the delivered impulse
 //! estimate exceeds the part's own `ImpulseLimit2`, spawn a pooled
 //! fragment body, hide the intact render node, and come back with the
-//! disabled outcome's repair. Remote rigs, authoredless cars and stale
-//! generations stay bolted together.
+//! disabled outcome's repair. A predicted session drains the stream
+//! without touching a rig (detach truth belongs to the authority),
+//! while authoredless cars and stale generations stay bolted together.
 
 use std::time::Duration;
 
@@ -81,8 +82,19 @@ fn break_app(
     car_pos: Vec3,
     pool: BangerPool,
 ) -> (App, Entity, ObjectId, Vec<Entity>) {
+    break_app_as(specs, car_pos, pool, SessionConfig::default())
+}
+
+/// [`break_app`] with a caller-chosen session config — the predicted
+/// leg needs `authority: SessionAuthority::Remote`.
+fn break_app_as(
+    specs: Vec<BreakPartSpec>,
+    car_pos: Vec3,
+    pool: BangerPool,
+    config: SessionConfig,
+) -> (App, Entity, ObjectId, Vec<Entity>) {
     let mut session = Session::new();
-    session.begin(SessionConfig::default()).unwrap();
+    session.begin(config).unwrap();
     session.transition(SessionPhase::Ready).unwrap();
     session.transition(SessionPhase::Playing).unwrap();
     let object = session.mint_object_id();
@@ -464,7 +476,11 @@ fn a_reset_without_repair_keeps_the_parts_off() {
 }
 
 #[test]
-fn a_remote_participants_rig_is_not_ours_to_detach() {
+fn a_remote_seats_rig_sheds_on_the_authority() {
+    // F25-B (protocol v11): on the authority a remote driver's seat is
+    // a simulated participant like an AI — this app *is* that
+    // authority, so the rig sheds here and the detached bitmask rides
+    // its `SnapEntry` down to the copies, which reconcile it as state.
     let (mut app, _car, _object, _nodes) =
         break_app(vec![], Vec3::new(0.0, 1.2, 0.0), BangerPool::default());
     let remote_object = app.world_mut().resource_mut::<Session>().mint_object_id();
@@ -504,15 +520,43 @@ fn a_remote_participants_rig_is_not_ours_to_detach() {
     app.world_mut().entity_mut(remote).add_child(node);
     app.update();
 
-    // F05 req 12: the remote rig's detachments are its authority's —
-    // not observed here.
     write_impact(&mut app, 7, remote_object, ObjectId::WORLD, 60.0);
+    app.update();
+    assert_eq!(report(&app).detached, 1);
+    assert_eq!(
+        *app.world().get::<Visibility>(node).unwrap(),
+        Visibility::Hidden
+    );
+    // The authority still reports the detach on its own stream —
+    // replication rides the `SnapEntry` bitmask, not this event.
+    let events = drain_parts(&mut app);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].object, remote_object);
+}
+
+#[test]
+fn a_predicted_session_detaches_nothing_locally() {
+    // The other half of the contract: a client never runs detach —
+    // `detach_breaks` drains the stream under a predicted session and
+    // the replicated `SnapEntry.breaks` bitmask is a copy's only
+    // detach truth (`netdrive::apply_snapshots`).
+    let (mut app, _car, object, nodes) = break_app_as(
+        vec![part("break0", LIMIT)],
+        Vec3::new(0.0, 1.2, 0.0),
+        BangerPool::default(),
+        SessionConfig {
+            authority: mm2_game::SessionAuthority::Remote,
+            ..SessionConfig::default()
+        },
+    );
+    write_impact(&mut app, 1, object, ObjectId::WORLD, 60.0);
     run(&mut app, 3);
     assert_eq!(report(&app).detached, 0);
     assert_eq!(
-        *app.world().get::<Visibility>(node).unwrap(),
+        *app.world().get::<Visibility>(nodes[0]).unwrap(),
         Visibility::Visible
     );
+    assert!(drain_parts(&mut app).is_empty());
 }
 
 #[test]

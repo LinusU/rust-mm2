@@ -26,8 +26,12 @@
 /// `impacts` — a bounded list of [`SnapImpact`] rows replicating the
 /// authority's filtered `ImpactEvent` stream per participant seat, so
 /// remote copies can render per-impact presentation (sparks, impact
-/// audio) the damage *state* byte cannot carry (F25-B).
-pub const PROTOCOL_VERSION: u16 = 10;
+/// audio) the damage *state* byte cannot carry (F25-B). v11:
+/// `SnapEntry` gained `breaks`, the seat's detached-breakaway-part
+/// bitmask — replicated *state* (not an event) so a dropped snap or a
+/// late join can never leave a remote copy's rig diverged from the
+/// authority's (F25-B, F05 req 5).
+pub const PROTOCOL_VERSION: u16 = 11;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -223,6 +227,15 @@ pub struct SnapEntry {
     /// like the rest of the tail: receivers reconstitute the total
     /// through their own copy's spec and never accumulate locally.
     pub damage: u8,
+    /// Breakaway bitmask (v11, F25-B): bit *i* set = the seat's
+    /// `VehicleBreaks` part *i* (authored order — identical rigs on
+    /// every process, enforced by the gameplay fingerprint) is off
+    /// the rig. Replicated state like `damage`, not an event: a
+    /// receiver diffs it against its copy's rig every snap, so a
+    /// repair arrives as the bits clearing. `0` on a seat with no
+    /// authored break inventory. Parts past bit 31 never ride the
+    /// wire — far past any authored count.
+    pub breaks: u32,
 }
 
 /// [`SnapEntry::flags`] bit 0 — the driver's brake pedal is held (the
@@ -513,6 +526,10 @@ impl<'a> Cursor<'a> {
         Ok(i16::from_le_bytes(self.take(2)?.try_into().unwrap()))
     }
 
+    fn u32(&mut self) -> Result<u32, ProtoError> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+
     fn u64(&mut self) -> Result<u64, ProtoError> {
         Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
     }
@@ -725,6 +742,7 @@ impl Message {
                     out.push(e.compression);
                     out.push(e.flags);
                     out.push(e.damage);
+                    out.extend_from_slice(&e.breaks.to_le_bytes());
                 }
                 if trailers.len() > MAX_PLAYERS as usize {
                     return Err(ProtoError::OversizeTrailers(trailers.len() as u8));
@@ -854,6 +872,7 @@ impl Message {
                         compression: cur.u8()?,
                         flags: cur.u8()?,
                         damage: cur.u8()?,
+                        breaks: cur.u32()?,
                     });
                 }
                 let trailer_count = cur.u8()?;
@@ -1042,6 +1061,7 @@ mod tests {
                         compression: 96,
                         flags: SNAP_FLAG_BRAKE | SNAP_FLAG_GROUNDED,
                         damage: 128,
+                        breaks: 0b0101,
                     },
                     SnapEntry {
                         player: 3,
@@ -1055,6 +1075,7 @@ mod tests {
                         compression: 0,
                         flags: SNAP_FLAG_REVERSE,
                         damage: 0,
+                        breaks: 0,
                     },
                 ],
                 trailers: vec![
@@ -1229,6 +1250,7 @@ mod tests {
                 compression: 0,
                 flags: 0,
                 damage: 0,
+                breaks: 0,
             };
             MAX_PLAYERS as usize + 1
         ];

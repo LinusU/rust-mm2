@@ -173,10 +173,33 @@ row is indistinguishable from a fresh hit on an intact car (a
 per-seat repair epoch on the row would close it if it ever matters).
 What the wire still does not carry: the
 struck side's identity (a replicated row's audio picks the id-0
-catch-all) and `surface` (no consumer reads it) — and the
-state-adjacent gap stays open: breakaway fragments are
-authority-spawned state, not presentation, so a remote copy's body
-panels never tear off even where its skin now splats.
+catch-all) and `surface` (no consumer reads it). v10→v11:
+`SnapEntry` gained `breaks` (u32, F25-B) — the seat's
+detached-breakaway-part bitmask, bit *i* = `VehicleBreaks` part *i*
+in authored order. Authored order is identical on every process
+(the gameplay fingerprint gates the handshake), so the mask needs
+no names. It is replicated *state* like the v8 damage byte, not an
+event: `apply_snapshots` diffs it against every named seat's rig —
+own seat included, since a predicted client never runs
+`detach_breaks` — and a set bit hides the part's intact node and
+spawns its `BangerPool` fragment through the same
+`spawn_break_fragment` helper the authority's `detach_breaks`
+uses; a cleared bit re-attaches and despawns the fragment — the
+authority's `resolve_disabled` repair arriving as state, so a
+dropped snap or a late join can never leave a copy's rig diverged.
+Two designed deltas from the authority path: the wire carries the
+detach *state* but not the per-part launch impulse, so a copy's
+fragment inherits the replicated motion and tumbles on its own;
+and no `PartDetached` message fires client-side (nothing consumes
+it there today — breakaway audio on remote copies stays a named
+gap). Parts past bit 31 are unexpressible — far past any authored
+count (the retail roster tops out at single digits). On the
+authority side of the same change, `detach_breaks` stopped
+skipping `PlayerControl::Remote` seats: a remote driver's rig on
+the host *is* this authority's participant — simulated like an
+AI's — so its parts shed there and the mask publishes with its
+entry. `spawn_remote` now binds `VehicleBreaks` on both roles off
+the authored inventory, the same absence gate as a local pick.
 
 Handshake (always the first exchange):
 
@@ -499,9 +522,9 @@ session, roster readiness and the latest notice. A real lobby menu
 (pick/browse screens) is future work, as is every piece still absent
 underneath: remote vehicle spawning, roster picks as gameplay spawns,
 replication of score/result state (F26 — the v8
-`SnapEntry::damage` byte already carries the replicated total and
-v10 `Snap.impacts` the per-impact spark/audio presentation; texel
-splats and breakaway fragments on remote copies stay open), and
+`SnapEntry::damage` byte already carries the replicated total, v10
+`Snap.impacts` the per-impact spark/audio presentation and texel
+splat, and v11 `SnapEntry::breaks` the detached-part mask), and
 the in-app *host*
 surface. `mm2 --join --headless` parks the same link inside the smoke
 harness, which waits on the wire with wall-clock pacing while `Menu`
@@ -682,30 +705,32 @@ What differs from the in-process table, and why:
 
 Scope: still loopback on a synthetic dev world — no LAN or Internet
 leg, no rendered observation, no retail install. The cells also leave
-`dsyn`/`tsyn`/`imp` honest: the dev car binds no damage record and
-tows nothing; `imp` shows single-digit applied rows (spawn-landing
-impacts replicated through the real session), not a driven collision.
+`dsyn`/`tsyn`/`imp`/`rb` honest: the dev car binds no damage record,
+tows nothing and authors no breakable parts; `imp` shows single-digit
+applied rows (spawn-landing impacts replicated through the real
+session), not a driven collision.
 
 ## Data-plane budget and bounds (F25-B req 6)
 
 *Implementation choice + measured.* Payload sizes are fixed by the
-v10 encode (4-byte length prefix excluded everywhere):
+v11 encode (4-byte length prefix excluded everywhere):
 
 | frame | payload bytes |
 |---|---|
 | `Input` | 21 (tag 1, generation 8, seq 8, 4 channels) |
 | `ResetRequest` | 9 (tag 1, generation 8) |
 | `Snap` header | 20 (tag 1, generation 8, tick 8, three counts) |
-| per `SnapEntry` | 62 (player 2, pos/rot/vel/angvel 52, epoch 1, steer 2, spin 2, compression 1, flags 1, damage 1) |
+| per `SnapEntry` | 66 (player 2, pos/rot/vel/angvel 52, epoch 1, steer 2, spin 2, compression 1, flags 1, damage 1, breaks 4) |
 | per `SnapTrailer` | 57 (owner 2, pos/rot/vel/angvel 52, spin 2, flags 1) |
 | per `SnapImpact` | 46 (seat 2, id 8, tick 8, point 12, normal 12, severity 4) |
 
-A `Snap` is `20 + 62·seats + 57·trailers + 46·impacts` — worst case
+A `Snap` is `20 + 66·seats + 57·trailers + 46·impacts` — worst case
 `MAX_PLAYERS` 8 seats and trailers plus `MAX_SNAP_IMPACTS` 64 rows =
-3,916 B, far under `MAX_FRAME` (256 KiB). Measured in the matrix run:
-`Input` payloads averaged 21 B (`bytes_in`/`frames_in` ≈ 20.9) and the
-one-seat dev-world `Snap` 82 B (20 + 62); the two-process leg's
-three-seat snaps are 206 B.
+3,948 B, far under `MAX_FRAME` (256 KiB). The matrix runs measured
+the v10 shape: `Input` payloads averaged 21 B
+(`bytes_in`/`frames_in` ≈ 20.9) and the one-seat dev-world `Snap`
+82 B (20 + 62 — 86 B under v11); the two-process leg's three-seat
+snaps were 206 B (218 under v11).
 
 **Update rates.** Both directions send once per app `Update` while the
 session is live — the wire rate is the update-loop rate, not the fixed
@@ -714,10 +739,10 @@ headless runs (the matrix's test apps publish ~250 snaps/s). Same-tick
 republishes are deliberate redundancy — `tick` dedups them at the
 receiver (the clean-row floor above). Consequences worth recording:
 
-- per-client downstream at a 60 Hz update rate, 8 seats: ≈31 KB/s of
-  `Snap` payload (516 B × 60); the ~250 Hz headless cadence multiplies
-  that ≈4× (≈127 KB/s, ~1 Mbps) and a full-impact burst snap is still
-  ≤3,916 B.
+- per-client downstream at a 60 Hz update rate, 8 seats: ≈33 KB/s of
+  `Snap` payload (548 B × 60); the ~250 Hz headless cadence multiplies
+  that ≈4× (≈134 KB/s, ~1 Mbps) and a full-impact burst snap is still
+  ≤3,948 B.
 - per-client upstream: 25 B on the wire per update — ≈1.5 KB/s at
   60 Hz, ≈6 KB/s headless.
 - a faster update loop buys smoother *redundancy*, not fresher poses —
@@ -759,7 +784,10 @@ wire actually moved rather than an in-process mailbox's contents.
   trailer; `tsyn0` likewise, the dev car tows nothing), the v10
   impact counter (`imp<s>s/<a>a/<d>d` — rows broadcast on the
   authority, applied/dropped on the client; `imp0s/0a/0d` on these
-  legs is honest, the clean cruise never collides), and its own
+  legs is honest, the clean cruise never collides), the v11
+  breakaway counter (`rb<d>d/<r>r` — detached-mask transitions the
+  client reconciled / restored; `rb0d/0r` is honest too, the dev
+  car authors no breakable parts), and its own
   predicted seat driven (`moved=`).
   A client's frame-cap exit lands on the host as `cause=quit` — the
   link `Drop` sends a deliberate `Leave`, not a lost socket — and the

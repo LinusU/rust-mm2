@@ -23,9 +23,14 @@
 //! plain reset or stuck recovery does not repair, so detached parts
 //! stay off.
 //!
-//! Both paths are authority-gated and drain while not `Playing`, like
-//! every other impact consumer; remote participants' rigs belong to
-//! their own authority (F25+).
+//! [`detach_breaks`] is authority-gated and drains while not
+//! `Playing`, like every other impact consumer — but a remote seat on
+//! the host is this authority's participant, so its rig sheds parts
+//! like an AI's and the detached bitmask rides its `SnapEntry`
+//! (protocol v11, F25-B). Predicted clients never run this system:
+//! their copies' rigs reconcile off that bitmask instead
+//! (`netdrive::apply_snapshots`), spawning the same pooled fragment
+//! through [`spawn_break_fragment`].
 
 use std::collections::HashMap;
 
@@ -33,8 +38,8 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_content::model::ModelPart;
 use mm2_game::{
-    Banger, BangerPhase, BangerPool, BangerStateChanged, ImpactEvent, ObjectId, ObjectIdentity,
-    PartDetached, Player, PlayerControl, Session, SessionEntity, VehicleBreaks,
+    Banger, BangerPhase, BangerPool, BangerStateChanged, BreakPartSpec, ImpactEvent, ObjectId,
+    ObjectIdentity, PartDetached, Session, SessionEntity, VehicleBreaks,
 };
 
 use crate::banger::{BangerMut, banger_bundle, claim_slot};
@@ -120,6 +125,127 @@ pub struct BreakFragment {
     pub part: usize,
 }
 
+/// The break-node query shape [`detach_breaks`] scans and
+/// [`spawn_break_fragment`] hides through — shared with the
+/// replicated-detach reconcile in [`crate::netdrive`], which looks the
+/// same nodes up and re-shows them on a repair.
+pub(crate) type BreakVisualMut = (
+    Entity,
+    &'static BreakPartVisual,
+    &'static mut Visibility,
+    &'static ChildOf,
+);
+
+/// Spawn one detached part's fragment body — the shared half of
+/// [`detach_breaks`] (authority, real impact) and the replicated-detach
+/// reconcile in [`crate::netdrive`] (predicted copy). Hides the intact
+/// node — dropping any `CockpitHidden` claim so leaving the cockpit
+/// never re-shows the panel — claims an active-pool slot and spawns
+/// the part's convex body at `car_pose * node_local`, carrying the
+/// car's velocity at the part centroid. `kick` is the impact's
+/// `dir`/`point`/`severity` triple — `None` on the replicated path,
+/// where the wire carries the detach *state* but not the per-part
+/// launch impulse: the copy's fragment inherits the replicated motion
+/// and tumbles on its own (designed presentation — the bitmask, not
+/// the launch, is what the authority asserts). No collider or no pool
+/// slot leaves the part detached without a body — it still left the
+/// rig. Returns the spawned body's `(entity, object)` id pair.
+#[allow(clippy::too_many_arguments)] // the pool, the writers and the part/car geometry are genuinely distinct borrows
+pub(crate) fn spawn_break_fragment(
+    node: Entity,
+    entity: Entity,
+    part: usize,
+    spec: &BreakPartSpec,
+    pose: (Vec3, Quat),
+    motion: (Vec3, Vec3),
+    kick: Option<(Vec3, Vec3, f32)>,
+    owner: SessionEntity,
+    occupied: &mut usize,
+    session: &mut Session,
+    pool: &BangerPool,
+    bangers: &mut Query<BangerMut>,
+    banger_writer: &mut MessageWriter<BangerStateChanged>,
+    visuals: &mut Query<BreakVisualMut, Without<Banger>>,
+    render_parts: &Query<(&Mesh3d, &MeshMaterial3d<StandardMaterial>, &ChildOf)>,
+    commands: &mut Commands,
+) -> Option<(Entity, ObjectId)> {
+    let Ok((_, visual, mut vis, _)) = visuals.get_mut(node) else {
+        return None;
+    };
+    let (local, collider, centroid) = (visual.local, visual.collider.clone(), visual.centroid);
+    *vis = Visibility::Hidden;
+    commands.entity(node).remove::<crate::dash::CockpitHidden>();
+    let collider = collider?;
+    if !claim_slot(
+        occupied,
+        session.tick(),
+        session.generation(),
+        pool,
+        bangers,
+        banger_writer,
+        commands,
+    ) {
+        return None;
+    }
+    let (car_pos, car_rot) = pose;
+    let (car_lv, car_av) = motion;
+    let (kick_dir, kick_lever_from, kick_speed) = kick.unwrap_or((Vec3::ZERO, Vec3::ZERO, 0.0));
+    let node_pos = car_pos + car_rot * local.translation;
+    let node_rot = car_rot * local.rotation;
+    let centroid_world = node_pos + node_rot * centroid;
+    let lever = kick_lever_from - centroid_world;
+    let object = session.mint_object_id();
+    let transform = Transform::from_translation(node_pos).with_rotation(node_rot);
+    let fragment = commands
+        .spawn(banger_bundle(
+            Banger {
+                phase: BangerPhase::Active,
+                def: spec.def.clone(),
+                activated: Some(session.tick()),
+            },
+            object,
+            session.authority_role(),
+            owner,
+            collider,
+            transform,
+            format!("breakaway-{}", spec.def.name),
+        ))
+        .insert((
+            RigidBody::Dynamic,
+            LinearVelocity(car_lv + car_av.cross(centroid_world - car_pos) + kick_dir * kick_speed),
+            AngularVelocity(
+                car_av
+                    + spec
+                        .def
+                        .angular_kick(lever, kick_dir * kick_speed * spec.def.mass),
+            ),
+            // The hull's own mass centre — the record CG's convention
+            // is not consumed (see the component doc).
+            CenterOfMass(centroid),
+            BreakFragment {
+                vehicle: entity,
+                part,
+            },
+        ))
+        .id();
+    // The fragment's visuals are the part's own mesh children,
+    // re-spawned under the new body.
+    for (mesh, material, child) in render_parts.iter() {
+        if child.parent() != node {
+            continue;
+        }
+        let part = commands
+            .spawn((
+                Mesh3d(mesh.0.clone()),
+                MeshMaterial3d(material.0.clone()),
+                Transform::IDENTITY,
+            ))
+            .id();
+        commands.entity(fragment).add_child(part);
+    }
+    Some((fragment, object))
+}
+
 /// Fixed-step: detach authored breakaway parts whose `ImpulseLimit2`
 /// an impact's delivered impulse exceeds. Runs after
 /// `apply_impact_damage` — a wrecking blow can shed a panel the same
@@ -130,19 +256,14 @@ pub fn detach_breaks(
     mut reader: MessageReader<ImpactEvent>,
     mut session: ResMut<Session>,
     pool: Res<BangerPool>,
-    identities: Query<(
-        Entity,
-        &ObjectIdentity,
-        Option<&Player>,
-        Option<&SessionEntity>,
-    )>,
+    identities: Query<(Entity, &ObjectIdentity, Option<&SessionEntity>)>,
     // Disjoint from `bangers` below: a vehicle is never a Banger, and
     // `BangerMut` takes `&mut LinearVelocity`/`&mut AngularVelocity`.
     motions: Query<(&Position, &Rotation, &LinearVelocity, &AngularVelocity), Without<Banger>>,
     mut rigs: Query<&mut VehicleBreaks>,
     // Disjoint from `bangers` below: a break-part node is never a
     // Banger, and both queries take `&mut Visibility`.
-    mut visuals: Query<(Entity, &BreakPartVisual, &mut Visibility, &ChildOf), Without<Banger>>,
+    mut visuals: Query<BreakVisualMut, Without<Banger>>,
     render_parts: Query<(&Mesh3d, &MeshMaterial3d<StandardMaterial>, &ChildOf)>,
     mut bangers: Query<BangerMut>,
     mut banger_writer: MessageWriter<BangerStateChanged>,
@@ -159,12 +280,10 @@ pub fn detach_breaks(
     }
     let tick = session.tick();
     let generation = session.generation();
-    let role = session.authority_role();
-    let index: HashMap<ObjectId, (Entity, Option<PlayerControl>, Option<SessionEntity>)> =
-        identities
-            .iter()
-            .map(|(e, id, p, o)| (id.0, (e, p.map(|p| p.control), o.copied())))
-            .collect();
+    let index: HashMap<ObjectId, (Entity, Option<SessionEntity>)> = identities
+        .iter()
+        .map(|(e, id, o)| (id.0, (e, o.copied())))
+        .collect();
     let mut occupied = bangers
         .iter()
         .filter(|(_, _, b, _, _, _, _)| b.phase == BangerPhase::Active)
@@ -186,15 +305,12 @@ pub fn detach_breaks(
         ];
         for (side, (object, participant)) in resolved.iter().enumerate() {
             let (object, participant) = (*object, *participant);
-            let Some((entity, control, owner)) = participant else {
+            let Some((entity, owner)) = participant else {
                 continue;
             };
-            // Remote rigs stay bolted — fragment replication is F26
-            // scope, and remote spawns carry no `VehicleBreaks` yet,
-            // so the skip is belt-and-braces.
-            if matches!(control, Some(PlayerControl::Remote)) {
-                continue;
-            }
+            // A remote driver's seat is this authority's participant —
+            // its rig sheds parts like an AI's; the detached bitmask
+            // rides its `SnapEntry` down to the copies (F25-B, v11).
             let Ok(mut rig) = rigs.get_mut(entity) else {
                 continue;
             };
@@ -223,117 +339,42 @@ pub fn detach_breaks(
                 // repair. A rig part with no node cannot detach — the
                 // spec was built from the same model the visuals were,
                 // so a miss is an assembly inconsistency, not data.
-                let Some((node, local, collider, centroid)) = visuals
+                let Some(node) = visuals
                     .iter()
                     .find(|(_, bpv, _, child)| {
                         child.parent() == entity && bpv.part == rig.parts[i].spec.name
                     })
-                    .map(|(e, bpv, _, _)| (e, bpv.local, bpv.collider.clone(), bpv.centroid))
+                    .map(|(e, _, _, _)| e)
                 else {
                     continue;
                 };
-
-                // Hide the intact representation — it is exactly the
-                // geometry the fragment picks up, so nothing doubles.
-                // This `Hidden` is now ours: drop any claim the cockpit
-                // visibility split holds on the node, so leaving
-                // `CameraMode::Cockpit` never re-shows the panel next to
-                // its fragment.
-                if let Ok((_, _, mut vis, _)) = visuals.get_mut(node) {
-                    *vis = Visibility::Hidden;
-                    commands.entity(node).remove::<crate::dash::CockpitHidden>();
-                }
-
-                // Spawn the fragment body at the detached mesh's own
-                // pose: `car_pose * node_local` — the part keeps the
-                // car's motion at its centroid plus the impact kick
-                // (the prop fragments' `dir × severity` convention,
-                // extended by velocity inheritance a static prop never
-                // had). No collider or no pool slot leaves the part
-                // detached without a body — it still left the rig.
                 let spec = rig.parts[i].spec.clone();
-                let mut fragment_entity = None;
-                let mut fragment_object = None;
-                if let Some(collider) = collider
-                    && claim_slot(
-                        &mut occupied,
-                        tick,
-                        generation,
-                        &pool,
-                        &mut bangers,
-                        &mut banger_writer,
-                        &mut commands,
-                    )
-                {
-                    let node_pos = car_pos + car_rot * local.translation;
-                    let node_rot = car_rot * local.rotation;
-                    let centroid_world = node_pos + node_rot * centroid;
-                    let lever = event.point - centroid_world;
-                    let object = session.mint_object_id();
-                    let transform = Transform::from_translation(node_pos).with_rotation(node_rot);
-                    let fragment = commands
-                        .spawn(banger_bundle(
-                            Banger {
-                                phase: BangerPhase::Active,
-                                def: spec.def.clone(),
-                                activated: Some(tick),
-                            },
-                            object,
-                            role,
-                            owner,
-                            collider,
-                            transform,
-                            format!("breakaway-{}", spec.def.name),
-                        ))
-                        .insert((
-                            RigidBody::Dynamic,
-                            LinearVelocity(
-                                car_lv
-                                    + car_av.cross(centroid_world - car_pos)
-                                    + dir * event.severity,
-                            ),
-                            AngularVelocity(
-                                car_av
-                                    + spec
-                                        .def
-                                        .angular_kick(lever, dir * event.severity * spec.def.mass),
-                            ),
-                            // The hull's own mass centre — the record
-                            // CG's convention is not consumed (see the
-                            // component doc).
-                            CenterOfMass(centroid),
-                            BreakFragment {
-                                vehicle: entity,
-                                part: i,
-                            },
-                        ))
-                        .id();
-                    // The fragment's visuals are the part's own mesh
-                    // children, re-spawned under the new body.
-                    for (mesh, material, child) in render_parts.iter() {
-                        if child.parent() != node {
-                            continue;
-                        }
-                        let part = commands
-                            .spawn((
-                                Mesh3d(mesh.0.clone()),
-                                MeshMaterial3d(material.0.clone()),
-                                Transform::IDENTITY,
-                            ))
-                            .id();
-                        commands.entity(fragment).add_child(part);
-                    }
-                    fragment_entity = Some(fragment);
-                    fragment_object = Some(object);
-                }
-                if rig.detach(i, fragment_entity) {
+                let spawned = spawn_break_fragment(
+                    node,
+                    entity,
+                    i,
+                    &spec,
+                    (car_pos, car_rot),
+                    (car_lv, car_av),
+                    Some((dir, event.point, event.severity)),
+                    owner,
+                    &mut occupied,
+                    &mut session,
+                    &pool,
+                    &mut bangers,
+                    &mut banger_writer,
+                    &mut visuals,
+                    &render_parts,
+                    &mut commands,
+                );
+                if rig.detach(i, spawned.map(|(e, _)| e)) {
                     report.detached += 1;
                     writer.write(PartDetached {
                         object,
                         generation,
                         tick,
                         part: spec.name,
-                        fragment: fragment_object,
+                        fragment: spawned.map(|(_, o)| o),
                         estimate: event.severity * spec.def.mass,
                     });
                 }

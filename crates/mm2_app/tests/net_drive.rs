@@ -97,7 +97,7 @@ fn leading_u64(s: &str) -> u64 {
     digits.parse().unwrap()
 }
 
-/// The `net=in<s>s/<a>a/<x>x,snap<s>s/<a>a/<x>x,rem<r>,req<s>s/<g>g/<d>d,rspn<n>,dsyn<n>,tsyn<n>,imp<s>s/<a>a/<d>d`
+/// The `net=in<s>s/<a>a/<x>x,snap<s>s/<a>a/<x>x,rem<r>,req<s>s/<g>g/<d>d,rspn<n>,dsyn<n>,tsyn<n>,imp<s>s/<a>a/<d>d,rb<d>d/<r>r`
 /// record field decoded — the wire counters the run actually moved.
 /// `snap<x>` counts pose frames the client dropped stale at push: a
 /// duplicated or reordered `Snap` at/behind the staged-or-applied
@@ -106,8 +106,9 @@ fn leading_u64(s: &str) -> u64 {
 /// damage record, so a dev-world session has no `VehicleDamage` for
 /// the byte to land on and 0 is the honest value.
 /// `tsyn` (v9 trailer rows) is the same — the dev car tows nothing —
-/// and `imp` (v10 impact rows) likewise: the clean cruise never
-/// collides, so all three cells read 0 here.
+/// `imp` (v10 impact rows) likewise (the clean cruise never
+/// collides), and `rb` (v11 breakaway-mask transitions) too — the dev
+/// car authors no breakable parts — so all four cells read 0 here.
 #[derive(Debug, Default)]
 struct NetField {
     inputs_sent: u64,
@@ -125,6 +126,10 @@ struct NetField {
     impacts_sent: u64,
     #[allow(dead_code)]
     impacts_applied: u64,
+    #[allow(dead_code)]
+    breaks_detached: u64,
+    #[allow(dead_code)]
+    breaks_restored: u64,
 }
 
 fn net_field(line: &str) -> NetField {
@@ -142,6 +147,7 @@ fn net_field(line: &str) -> NetField {
     let inputs = cells(parts[0], "in");
     let snaps = cells(parts[1], "snap");
     let impacts = cells(parts[7], "imp");
+    let breaks = cells(parts[8], "rb");
     NetField {
         inputs_sent: inputs[0],
         inputs_applied: inputs[1],
@@ -154,6 +160,8 @@ fn net_field(line: &str) -> NetField {
         trailers_synced: leading_u64(parts[6].strip_prefix("tsyn").unwrap()),
         impacts_sent: impacts[0],
         impacts_applied: impacts[1],
+        breaks_detached: breaks[0],
+        breaks_restored: breaks[1],
     }
 }
 

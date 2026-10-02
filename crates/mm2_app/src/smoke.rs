@@ -1018,16 +1018,17 @@ fn run_headless(
     // runs the real sim — and 0 on a dev-world run regardless, since
     // the dev car binds no authored damage record to write), and
     // `tsyn`, the v9 trailer rows applied (client side; 0 without a
-    // trailered seat — the dev car tows nothing), and `imp`, the v10
+    // trailered seat — the dev car tows nothing), `imp`, the v10
     // replicated impact rows (sent on the authority, applied/dropped
-    // on clients; 0 on a dev world with no collisions). Absent
-    // without a link's report, so a non-lobby record stays
-    // bit-identical.
+    // on clients; 0 on a dev world with no collisions), and `rb`, the
+    // v11 breakaway-mask transitions a client reconciled (0 on the
+    // dev car — it authors no breakable parts). Absent without a
+    // link's report, so a non-lobby record stays bit-identical.
     let net_detail = world_ecs
         .get_resource::<crate::netdrive::NetDriveReport>()
         .map(|r| {
             format!(
-                " net=in{}s/{}a/{}x,snap{}s/{}a/{}x,rem{},req{}s/{}g/{}d,rspn{:.0},dsyn{},tsyn{},imp{}s/{}a/{}d",
+                " net=in{}s/{}a/{}x,snap{}s/{}a/{}x,rem{},req{}s/{}g/{}d,rspn{:.0},dsyn{},tsyn{},imp{}s/{}a/{}d,rb{}d/{}r",
                 r.inputs_sent,
                 r.inputs_applied,
                 r.inputs_staled,
@@ -1043,7 +1044,9 @@ fn run_headless(
                 r.trailers_synced,
                 r.impacts_sent,
                 r.impacts_applied,
-                r.impacts_dropped
+                r.impacts_dropped,
+                r.breaks_detached,
+                r.breaks_restored
             )
         })
         .unwrap_or_default();

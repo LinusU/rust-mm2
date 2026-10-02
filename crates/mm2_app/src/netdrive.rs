@@ -31,8 +31,17 @@
 //!   damage fraction cannot carry — so remote cars spark, sound and
 //!   splat their skin on every process (the copy binds the authored
 //!   `TexelDamageRig` like a local pick, and the v8 byte's >0→0
-//!   transition is the repair that clears it). Breakaway detachment
-//!   stays a state-side gap — fragments are authority-spawned state.
+//!   transition is the repair that clears it). The v11 tail adds the
+//!   seat's breakaway bitmask (F25-B): [`SnapEntry::breaks`] carries
+//!   the authority rig's detached-part set — `detach_breaks` sheds
+//!   parts off remote seats on the authority like it does AI — and a
+//!   copy's rig diffs the wire mask every snap: a set bit hides the
+//!   intact node and claims a `BangerPool` fragment through the same
+//!   [`crate::breakaway::spawn_break_fragment`] helper the authority
+//!   uses (minus the impact kick — the wire carries the detach
+//!   *state*, not the launch impulse), a cleared bit re-attaches the
+//!   node and despawns the fragment — the authority's repair arriving
+//!   as replicated state.
 //! - **Client** (`SessionAuthority::Remote` → `Predicted`): remote cars
 //!   are kinematic copies blended between the two newest snapshots
 //!   ([`RemoteLerp`]), marked [`RemoteReplica`] so the local sim never
@@ -68,9 +77,10 @@
 //! reconcile puts each remote car on its own.
 //!
 //! Everything here is loopback-scoped groundwork like the rest of F24/F25:
-//! no lag compensation, no result/race-state replication, and replicated
-//! impact events are presentation-only (breakaway fragments on remote
-//! copies stay a state-side gap) — named gaps, not silent behavior.
+//! no lag compensation, no result/race-state replication, and a remote
+//! copy's breakaway fragment carries only the car's replicated motion —
+//! the per-part launch impulse never rides the wire (named gaps, not
+//! silent behavior).
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -80,10 +90,11 @@ use avian3d::prelude::{
 };
 use bevy::prelude::*;
 use mm2_game::{
-    DamageSignals, DamageSpec, ImpactEvent, Mm2Vfs, ObjectId, ObjectIdentity, Player,
-    PlayerControl, PlayerVehicle, RaceDefinition, RaceProgress, RaceState, RecoveryPolicy, Session,
-    SessionEntity, SessionPhase, SmokePolicy, SparkPolicy, StuckSpec, VehicleDamage,
-    VehicleRecovery, VehicleSmoke, VehicleSparks, VehicleStuck,
+    Banger, BangerPhase, BangerPool, BangerStateChanged, BreakPartSpec, DamageSignals, DamageSpec,
+    ImpactEvent, Mm2Vfs, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerVehicle,
+    RaceDefinition, RaceProgress, RaceState, RecoveryPolicy, Session, SessionEntity, SessionPhase,
+    SmokePolicy, SparkPolicy, StuckSpec, VehicleBreaks, VehicleDamage, VehicleRecovery,
+    VehicleSmoke, VehicleSparks, VehicleStuck,
 };
 use mm2_net::{
     DriveInput, MAX_SNAP_IMPACTS, Message, RemoteInputs, SNAP_FLAG_BRAKE, SNAP_FLAG_GROUNDED,
@@ -94,6 +105,8 @@ use mm2_vehicle::{
     VehicleConfig, VehicleInput, VehicleState, vehicle_bundle,
 };
 
+use crate::banger::BangerMut;
+use crate::breakaway::{self, BreakVisualMut};
 use crate::car_visual;
 use crate::input::{control_just_pressed, pad};
 use crate::net::{HostLink, LobbyLink, LobbyState};
@@ -422,6 +435,15 @@ pub struct NetDriveReport {
     /// generations, unsanitized rows, and rows whose seat has no live
     /// participant entity.
     pub impacts_dropped: u64,
+    /// `SnapEntry.breaks` bitmask transitions applied on this client
+    /// (protocol v11, F25-B): parts the wire newly reports off the
+    /// rig — each hides its intact node and spawns its pooled
+    /// fragment.
+    pub breaks_detached: u64,
+    /// Parts a clearing `breaks` bit put back on the rig — the
+    /// authority's repair arriving as replicated state: the fragment
+    /// despawns and the intact node shows.
+    pub breaks_restored: u64,
 }
 
 /// A rotation off the wire, sanitized — a malformed-quaternion guard so
@@ -610,6 +632,26 @@ fn encode_damage(damage: Option<&VehicleDamage>) -> u8 {
     // is the wire's repair signal (the receiver wipes the seat's texel
     // splats on it), so a rounding-to-zero hit must not mint one.
     ((fraction.min(1.0) * 255.0).round() as u8).max(1)
+}
+
+/// `VehicleBreaks` → a [`SnapEntry`]'s `breaks` bitmask (protocol v11,
+/// F25-B): bit *i* set = rig part *i* (authored order — identical on
+/// every process under the gameplay fingerprint) is off the car.
+/// `None` — a participant with no authored break inventory — encodes
+/// 0, and parts past bit 31 never ride the wire: far past any authored
+/// count (the retail roster tops out at single digits).
+fn encode_breaks(breaks: Option<&VehicleBreaks>) -> u32 {
+    let Some(breaks) = breaks else {
+        return 0;
+    };
+    breaks
+        .parts
+        .iter()
+        .enumerate()
+        .take(32)
+        .fold(0u32, |bits, (i, part)| {
+            bits | (u32::from(!part.attached) << i)
+        })
 }
 
 /// The damage side of a [`SnapEntry`]: reconstitute the wire fraction
@@ -1057,6 +1099,23 @@ fn spawn_remote(
             .entity(vehicle)
             .insert(VehicleStuck::new(StuckSpec::from(s)));
     }
+    // F25-B (protocol v11): the authored breakaway inventory rides
+    // both roles — on the authority it is the live rig `detach_breaks`
+    // sheds parts off (the seat's `SnapEntry.breaks` bitmask publishes
+    // it); on a client it is the presentation rig the replicated
+    // bitmask reconciles. Same absence policy as the local spawn: no
+    // authored parts, no component.
+    if let Some(def) = def.as_ref().filter(|d| !d.breaks.is_empty()) {
+        commands.entity(vehicle).insert(VehicleBreaks::new(
+            def.breaks
+                .iter()
+                .map(|b| BreakPartSpec {
+                    name: b.name.clone(),
+                    def: b.def.clone(),
+                })
+                .collect(),
+        ));
+    }
     commands
         .entity(vehicle)
         .insert(VehicleRecovery::with_anchor(
@@ -1470,6 +1529,9 @@ type SnapSourceRow<'a> = (
     Option<&'a VehicleState>,
     Option<&'a VehicleInput>,
     Option<&'a VehicleDamage>,
+    // The v11 breakaway bitmask's source — `Option` like the drive
+    // row: a participant with no authored break inventory publishes 0.
+    Option<&'a VehicleBreaks>,
 );
 
 /// The publish-side trailer row (protocol v9, F25-B): the `Trailer`
@@ -1502,7 +1564,10 @@ type SnapTrailerSourceRow<'a> = (
 /// participant side that maps to a `NetPlayer` seat emits one row
 /// (mirrored outward normal per side), capped at
 /// [`MAX_SNAP_IMPACTS`] with the strongest hits kept — presentation
-/// the damage fraction cannot express.
+/// the damage fraction cannot express. The v11 tail adds
+/// [`encode_breaks`], the seat's detached-part bitmask — replicated
+/// rig state a receiver diffs, so a dropped snap or a repair can
+/// never leave a copy's breakaway inventory diverged.
 pub fn publish_snapshots(
     host: Res<HostLink>,
     session: Res<Session>,
@@ -1530,7 +1595,7 @@ pub fn publish_snapshots(
     let mut entries: Vec<SnapEntry> = players
         .iter()
         .map(
-            |(_, wire, epoch, _, pos, rot, vel, ang, vehicle, state, input, damage)| {
+            |(_, wire, epoch, _, pos, rot, vel, ang, vehicle, state, input, damage, breaks)| {
                 let (steer, spin, compression, flags) = match (vehicle, state, input) {
                     (Some(v), Some(s), Some(i)) => encode_present(&v.config, s, i),
                     _ => (0, 0, 0, 0),
@@ -1547,6 +1612,7 @@ pub fn publish_snapshots(
                     compression,
                     flags,
                     damage: encode_damage(damage),
+                    breaks: encode_breaks(breaks),
                 }
             },
         )
@@ -1666,6 +1732,10 @@ type SnapTargetRow<'a> = (
     // write. Unlike the drive row the own seat *does* take it —
     // replicated damage is the only writer under prediction.
     Option<&'a mut VehicleDamage>,
+    // The v11 breakaway bitmask reconciles here — `Option` like the
+    // damage row: a participant with no authored break inventory has
+    // no rig to diff the wire mask against.
+    Option<&'a mut VehicleBreaks>,
 );
 
 /// The snapshot application's trailer row (protocol v9, F25-B). A
@@ -1688,6 +1758,21 @@ type SnapTrailerRow<'a> = (
     // pose, it just has no wheels to droop.
     Option<&'a Vehicle>,
     Option<&'a mut VehicleState>,
+);
+
+/// The players query's filter — `With<NetPlayer>` selects the session
+/// seats; `Without<Banger>` proves them statically disjoint from the
+/// `bangers` pool query the v11 breakaway reconcile claims fragments
+/// through (a participant is never a Banger).
+type SnapTargetFilter = (With<NetPlayer>, Without<Banger>);
+
+/// The trailer row's filter — `Without<NetPlayer>` proves it disjoint
+/// from `players` (a trailer never carries the seat marker),
+/// `Without<Banger>` from `bangers`.
+type SnapTrailerFilter = (
+    With<car_visual::Trailer>,
+    Without<NetPlayer>,
+    Without<Banger>,
 );
 
 /// Client-side: fold the newest staged snapshot into the remote copies'
@@ -1713,19 +1798,28 @@ type SnapTrailerRow<'a> = (
 pub fn apply_snapshots(
     mut commands: Commands,
     mut snaps: ResMut<RemoteSnaps>,
-    session: Res<Session>,
+    mut session: ResMut<Session>,
     time: Res<Time>,
-    mut players: Query<SnapTargetRow<'_>, With<NetPlayer>>,
+    // `SnapTargetFilter`'s `Without<Banger>` proves the players
+    // disjoint from the `bangers` query the v11 breakaway reconcile
+    // claims pool slots through — a participant is never a Banger.
+    mut players: Query<SnapTargetRow<'_>, SnapTargetFilter>,
     // Every trailer — remote copies key off `RemoteTrailer::owner`, the
     // own rig's trailer off `Trailer::towing` == the local seat entity.
-    // `Without<NetPlayer>` proves it disjoint from `players` (a trailer
-    // never carries the seat marker).
-    mut trailers: Query<SnapTrailerRow<'_>, (With<car_visual::Trailer>, Without<NetPlayer>)>,
+    mut trailers: Query<SnapTrailerRow<'_>, SnapTrailerFilter>,
     mut remote_fx: MessageWriter<RemoteImpact>,
     // The replicated repair lands here: a snap's damage byte going
     // >0→0 wipes the seat's texel rig like `resolve_disabled`'s own
     // `damage.reset()` + `texel.reset()` pair does on the authority.
     mut texel: crate::texel_fx::TexelRepair,
+    // The v11 breakaway reconcile's fragment spawn claims pool slots
+    // and shows/hides the intact nodes exactly like the authority's
+    // `detach_breaks` does.
+    pool: Res<BangerPool>,
+    mut bangers: Query<BangerMut>,
+    mut banger_writer: MessageWriter<BangerStateChanged>,
+    mut break_visuals: Query<BreakVisualMut, Without<Banger>>,
+    render_parts: Query<(&Mesh3d, &MeshMaterial3d<StandardMaterial>, &ChildOf)>,
     mut report: ResMut<NetDriveReport>,
 ) {
     // Push-time stale drops fold into the report every run — a stale
@@ -1739,15 +1833,109 @@ pub fn apply_snapshots(
     // drops instead of splatting on top of the wipe that erased it.
     apply_snap_frame(
         &mut snaps,
-        &session,
+        &mut session,
         &time,
         &mut commands,
         &mut players,
         &mut trailers,
         &mut texel,
+        &pool,
+        &mut bangers,
+        &mut banger_writer,
+        &mut break_visuals,
+        &render_parts,
         &mut report,
     );
     drain_pending_impacts(&mut snaps, &session, &players, &mut remote_fx, &mut report);
+}
+
+/// One seat's replicated [`SnapEntry::breaks`] bitmask diffed against
+/// its rig (protocol v11, F25-B): a set bit on an attached part sheds
+/// it — the intact node hides and the pooled fragment spawns carrying
+/// the copy's replicated motion (the wire carries the detach *state*,
+/// not the per-part launch impulse — designed presentation); a clear
+/// bit on a detached part re-attaches it — the authority's repair
+/// arriving as state, the same transition `resolve_disabled` +
+/// `restore_rig` performs on the authority. Runs on every named seat,
+/// the own seat included: `detach_breaks` is inert under a predicted
+/// session, so the wire mask is the own rig's only detach truth —
+/// mirrored the way the v8 damage byte is. Bits past the rig's part
+/// count are unexpressible and ignored; the gameplay fingerprint makes
+/// a longer wire rig impossible anyway.
+#[allow(clippy::too_many_arguments)] // the fragment spawn genuinely threads the pool, the writers and the part/car geometry
+fn apply_break_bits(
+    entity: Entity,
+    bits: u32,
+    rig: &mut VehicleBreaks,
+    pose: (Vec3, Quat),
+    motion: (Vec3, Vec3),
+    visuals: &mut Query<BreakVisualMut, Without<Banger>>,
+    render_parts: &Query<(&Mesh3d, &MeshMaterial3d<StandardMaterial>, &ChildOf)>,
+    bangers: &mut Query<BangerMut>,
+    pool: &BangerPool,
+    occupied: &mut Option<usize>,
+    banger_writer: &mut MessageWriter<BangerStateChanged>,
+    session: &mut Session,
+    commands: &mut Commands,
+    report: &mut NetDriveReport,
+) {
+    let owner = SessionEntity(session.generation());
+    for i in 0..rig.parts.len().min(32) {
+        let wire_detached = bits & (1 << i) != 0;
+        if rig.parts[i].attached == !wire_detached {
+            continue;
+        }
+        if wire_detached {
+            let spec = rig.parts[i].spec.clone();
+            // Same no-node refusal the authority applies: a part with
+            // no render node cannot detach — an assembly inconsistency,
+            // not data.
+            let Some(node) = visuals
+                .iter()
+                .find(|(_, bpv, _, child)| child.parent() == entity && bpv.part == spec.name)
+                .map(|(e, _, _, _)| e)
+            else {
+                continue;
+            };
+            let occupied = occupied.get_or_insert_with(|| {
+                bangers
+                    .iter()
+                    .filter(|(_, _, b, _, _, _, _)| b.phase == BangerPhase::Active)
+                    .count()
+            });
+            let spawned = breakaway::spawn_break_fragment(
+                node,
+                entity,
+                i,
+                &spec,
+                pose,
+                motion,
+                None,
+                owner,
+                occupied,
+                session,
+                pool,
+                bangers,
+                banger_writer,
+                visuals,
+                render_parts,
+                commands,
+            );
+            if rig.detach(i, spawned.map(|(e, _)| e)) {
+                report.breaks_detached += 1;
+            }
+        } else {
+            if let Some(fragment) = rig.attach(i) {
+                commands.entity(fragment).despawn();
+            }
+            for (_, bpv, mut vis, child) in visuals.iter_mut() {
+                if child.parent() == entity && bpv.part == rig.parts[i].spec.name {
+                    *vis = Visibility::Visible;
+                }
+            }
+            report.breaks_restored += 1;
+        }
+    }
 }
 
 /// The state half of [`apply_snapshots`]: apply the newest staged
@@ -1758,12 +1946,17 @@ pub fn apply_snapshots(
 #[allow(clippy::too_many_arguments)] // Bevy system helper — the borrows are the contract.
 fn apply_snap_frame(
     snaps: &mut RemoteSnaps,
-    session: &Session,
+    session: &mut Session,
     time: &Time,
     commands: &mut Commands,
-    players: &mut Query<SnapTargetRow<'_>, With<NetPlayer>>,
-    trailers: &mut Query<SnapTrailerRow<'_>, (With<car_visual::Trailer>, Without<NetPlayer>)>,
+    players: &mut Query<SnapTargetRow<'_>, SnapTargetFilter>,
+    trailers: &mut Query<SnapTrailerRow<'_>, SnapTrailerFilter>,
     texel: &mut crate::texel_fx::TexelRepair,
+    pool: &BangerPool,
+    bangers: &mut Query<BangerMut>,
+    banger_writer: &mut MessageWriter<BangerStateChanged>,
+    visuals: &mut Query<BreakVisualMut, Without<Banger>>,
+    render_parts: &Query<(&Mesh3d, &MeshMaterial3d<StandardMaterial>, &ChildOf)>,
     report: &mut NetDriveReport,
 ) {
     let Some(snap) = snaps.latest.take() else {
@@ -1800,6 +1993,9 @@ fn apply_snap_frame(
     // entity/wire pair the own rig's trailer keys off.
     let mut reset_owners: HashSet<u16> = HashSet::new();
     let mut own_seat: Option<(Entity, u16)> = None;
+    // The frame's `Banger::active` census for the breakaway reconcile's
+    // pool claims — one count serves every fragment this frame spawns.
+    let mut occupied = None::<usize>;
     for entry in &snap.entries {
         for (
             entity,
@@ -1816,6 +2012,7 @@ fn apply_snap_frame(
             input,
             drive,
             damage,
+            breaks,
         ) in players.iter_mut()
         {
             if wire.0 != entry.player {
@@ -1843,6 +2040,28 @@ fn apply_snap_frame(
                 snaps
                     .repaired
                     .insert(entry.player, (snap.generation, snap.tick));
+            }
+            // The v11 breakaway bitmask reconciles on every named
+            // seat too — set bits shed the part's node onto a pooled
+            // fragment, cleared bits put it back (the authority's
+            // repair arriving as state).
+            if let Some(mut rig) = breaks {
+                apply_break_bits(
+                    entity,
+                    entry.breaks,
+                    &mut rig,
+                    (pos.0, rot.0),
+                    (vel.0, ang.0),
+                    visuals,
+                    render_parts,
+                    bangers,
+                    pool,
+                    &mut occupied,
+                    banger_writer,
+                    session,
+                    commands,
+                    report,
+                );
             }
             // The own seat: only an authority reset may move it — the
             // host teleported our car (its copy of us is the truth),
@@ -2005,7 +2224,7 @@ fn apply_snap_frame(
 fn drain_pending_impacts(
     snaps: &mut RemoteSnaps,
     session: &Session,
-    players: &Query<SnapTargetRow<'_>, With<NetPlayer>>,
+    players: &Query<SnapTargetRow<'_>, SnapTargetFilter>,
     remote_fx: &mut MessageWriter<RemoteImpact>,
     report: &mut NetDriveReport,
 ) {
@@ -2450,6 +2669,7 @@ mod tests {
             compression: 102, // 0.4 of travel
             flags: SNAP_FLAG_BRAKE | SNAP_FLAG_GROUNDED,
             damage: 0,
+            breaks: 0,
         };
         apply_present(&entry, &cfg, &mut state, &mut input, Some(&mut drive));
         assert_eq!(state.steer_angle, -0.26);
@@ -2520,6 +2740,42 @@ mod tests {
             ..SPEC
         });
         assert_eq!(encode_damage(Some(&degenerate)), 0);
+    }
+
+    /// The v11 breakaway bitmask encodes the rig's detached set in
+    /// authored order — `None` and an intact rig both read 0 — and
+    /// parts past bit 31 are unexpressible by design (far past any
+    /// authored count, and the gameplay fingerprint keeps every
+    /// process's rig identical anyway).
+    #[test]
+    fn breaks_tail_encodes_the_detached_mask() {
+        let part = |name: String| BreakPartSpec {
+            name,
+            def: mm2_game::BangerDefinition {
+                name: "frag".into(),
+                mass: 100.0,
+                friction: 0.9,
+                elasticity: 0.3,
+                impulse_limit2: 500.0,
+                size: [0.8, 0.4, 1.2],
+                cg: [0.0, 0.2, 0.0],
+                num_parts: 0,
+                audio_id: 0,
+            },
+        };
+        assert_eq!(encode_breaks(None), 0, "no authored rig reads intact");
+        let mut rig =
+            VehicleBreaks::new(vec![part("a".into()), part("b".into()), part("c".into())]);
+        assert_eq!(encode_breaks(Some(&rig)), 0);
+        rig.detach(0, None);
+        rig.detach(2, None);
+        assert_eq!(encode_breaks(Some(&rig)), 0b101);
+        // Part 33 cannot ride a u32 mask.
+        let mut wide = VehicleBreaks::new((0..33).map(|i| part(format!("p{i}"))).collect());
+        wide.detach(32, None);
+        assert_eq!(encode_breaks(Some(&wide)), 0);
+        wide.detach(1, None);
+        assert_eq!(encode_breaks(Some(&wide)), 0b10);
     }
 
     /// The predicted trailer copy lands the same contract the
@@ -2611,6 +2867,7 @@ mod tests {
             compression: 0,
             flags: 0,
             damage: 0,
+            breaks: 0,
         }
     }
 
@@ -2685,6 +2942,11 @@ mod tests {
             .init_resource::<NetDriveReport>()
             .init_resource::<crate::texel_fx::TexelDamageReport>()
             .add_message::<RemoteImpact>()
+            // The v11 breakaway reconcile's pool claims and lifecycle
+            // stream — never exercised by this leg, but the system's
+            // parameters require them registered.
+            .add_message::<BangerStateChanged>()
+            .init_resource::<BangerPool>()
             .add_systems(Update, apply_snapshots);
 
         // A stale push with nothing staged still folds — the count is

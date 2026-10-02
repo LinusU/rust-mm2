@@ -204,6 +204,10 @@ fn texel_app_with(pos: Vec3, authority: SessionAuthority) -> (App, Entity, Objec
         .add_message::<ImpactEvent>()
         .add_message::<DamageEvent>()
         .add_message::<RemoteImpact>()
+        // F25-B (v11): `apply_snapshots`'s breakaway reconcile claims
+        // pool slots and writes the banger lifecycle stream.
+        .add_message::<mm2_game::BangerStateChanged>()
+        .init_resource::<mm2_game::BangerPool>()
         .insert_resource(contracts::ImpactFilter::default())
         .init_resource::<damage::DamageReport>()
         .init_resource::<mm2_app::breakaway::BreakReport>()
@@ -368,6 +372,7 @@ fn snap_entry(player: u16, damage: u8) -> SnapEntry {
         compression: 0,
         flags: 0,
         damage,
+        breaks: 0,
     }
 }
 

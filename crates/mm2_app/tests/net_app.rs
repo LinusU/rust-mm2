@@ -105,6 +105,10 @@ fn lobby_app(vfs: Vfs) -> App {
         // `apply_snapshots` writes the replicated one.
         .add_message::<mm2_game::ImpactEvent>()
         .add_message::<netdrive::RemoteImpact>()
+        // F25-B (v11): the breakaway reconcile claims pool slots and
+        // writes the banger lifecycle stream like the authority does.
+        .add_message::<mm2_game::BangerStateChanged>()
+        .init_resource::<mm2_game::BangerPool>()
         .insert_resource(Mm2Vfs(vfs))
         .insert_resource(SelectedCar {
             def: None,
@@ -2021,6 +2025,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                     flags: mm2_net::SNAP_FLAG_BRAKE | mm2_net::SNAP_FLAG_GROUNDED,
                     // v8: the host copy is half-wrecked.
                     damage: 128,
+                    breaks: 0,
                 },
                 // Our own seat's entry is received and, epoch-equal,
                 // skipped — between authority resets the local sim
@@ -2042,6 +2047,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                     compression: 255,
                     flags: mm2_net::SNAP_FLAG_BRAKE | mm2_net::SNAP_FLAG_REVERSE,
                     damage: 200,
+                    breaks: 0,
                 },
             ],
         })
@@ -2177,6 +2183,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                     compression: 0,
                     flags: 0,
                     damage: 0,
+                    breaks: 0,
                 }],
             })
             .unwrap();
@@ -2199,6 +2206,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 compression: 0,
                 flags: 0,
                 damage: 0,
+                breaks: 0,
             }],
         })
         .unwrap();
@@ -2240,6 +2248,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 compression: 0,
                 flags: 0,
                 damage: 0,
+                breaks: 0,
             }],
         })
         .unwrap();
@@ -2287,6 +2296,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 compression: 0,
                 flags: 0,
                 damage: 0,
+                breaks: 0,
             }],
         })
         .unwrap();
@@ -2348,6 +2358,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 compression: 0,
                 flags: 0,
                 damage: 0,
+                breaks: 0,
             }],
         })
         .unwrap();
@@ -2409,6 +2420,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 compression: 0,
                 flags: 0,
                 damage: 0,
+                breaks: 0,
             }],
         })
         .unwrap();
@@ -2452,6 +2464,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 compression: 0,
                 flags: 0,
                 damage: 0,
+                breaks: 0,
             }],
         })
         .unwrap();
@@ -2933,6 +2946,7 @@ fn a_snapshot_drives_a_remote_rigs_trailer() {
         compression: 0,
         flags: mm2_net::SNAP_FLAG_GROUNDED,
         damage: 0,
+        breaks: 0,
     };
     // An epoch-equal snap: the remote trailer blends, the own rig's
     // trailer stays exactly where the local sim left it — the wire row
@@ -3410,6 +3424,7 @@ fn a_snapshot_feeds_the_remote_impact_stream() {
         compression: 0,
         flags: 0,
         damage: 0,
+        breaks: 0,
     };
     let row = |seat: u16, id: u64| SnapImpact {
         seat,
@@ -3520,6 +3535,239 @@ fn a_snapshot_feeds_the_remote_impact_stream() {
 
     host.shutdown();
 }
+
+/// F25-B (protocol v11): a `SnapEntry.breaks` bitmask is replicated
+/// rig *state* — a client diffs it every snap against every named
+/// seat's `VehicleBreaks`: a set bit sheds the part onto a pooled
+/// fragment (intact node hides), a cleared bit re-attaches it (the
+/// authority's repair arriving as state). The dev car authors no
+/// breakable parts, so the copies' rigs are declared by hand exactly
+/// the way `spawn_remote` + `car_visual::spawn_vehicle_model` build
+/// them for a `dgbangerdata`-backed pick.
+#[test]
+fn a_snap_reconciles_the_remote_copys_breakaway_rig() {
+    let install = tempfile::tempdir().unwrap();
+    let vfs = mount(install.path());
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host_config = HostConfig::new(fp);
+    host_config.host_pick = Some(VehiclePick {
+        vehicle: String::new(),
+        paint: 0,
+    });
+    let mut host = Host::listen_loopback(&host_config).unwrap();
+    host.set_session(net::advertise(&dev_cruise()).unwrap())
+        .unwrap();
+    let link = LobbyLink::join(
+        host.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join failed");
+    let our_id = link.player_id();
+    let mut app = bridge_app(vfs, link);
+    {
+        let link = app.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    until_ready(&mut app);
+    host.start(LateJoin::Open).unwrap();
+    until_started(&host);
+    until_begun(&mut app);
+    let generation = app.world().resource::<Session>().generation();
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    spin_mut(&mut app, |a| {
+        a.world_mut()
+            .query_filtered::<Entity, With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some()
+    });
+    let host_copy = {
+        let mut q = app.world_mut().query_filtered::<Entity, With<RemotePick>>();
+        q.single(app.world()).expect("the host copy")
+    };
+    // The local seat — stamped `NetPlayer(our_id)` by the reconcile.
+    let local = app
+        .world_mut()
+        .spawn((
+            PlayerVehicle,
+            Player {
+                id: mm2_game::PlayerId(1),
+                control: PlayerControl::Local,
+            },
+            mm2_game::AuthorityRole::Predicted,
+            avian3d::prelude::Position::default(),
+            avian3d::prelude::Rotation::default(),
+            avian3d::prelude::LinearVelocity::default(),
+            avian3d::prelude::AngularVelocity::default(),
+        ))
+        .id();
+    spin(&mut app, |a| a.world().get::<NetPlayer>(local).is_some());
+
+    // The authored-shaped rig both copies carry when the pick backs
+    // it: `VehicleBreaks` on the car, one tagged node per part.
+    let spec = mm2_game::BreakPartSpec {
+        name: "break0".into(),
+        def: mm2_game::BangerDefinition {
+            name: "vpcar_break0".into(),
+            mass: 100.0,
+            friction: 0.9,
+            elasticity: 0.3,
+            impulse_limit2: 500.0,
+            size: [0.8, 0.4, 1.2],
+            cg: [0.0, 0.2, 0.0],
+            num_parts: 0,
+            audio_id: 0,
+        },
+    };
+    let rig_node = |app: &mut App, car: Entity| {
+        app.world_mut()
+            .entity_mut(car)
+            .insert(mm2_game::VehicleBreaks::new(vec![spec.clone()]));
+        let node = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 0.4, -1.0),
+                Visibility::Visible,
+                mm2_app::breakaway::BreakPartVisual {
+                    part: "break0".into(),
+                    local: Transform::from_xyz(0.0, 0.4, -1.0),
+                    collider: Some(avian3d::prelude::Collider::cuboid(0.4, 0.2, 0.6)),
+                    centroid: Vec3::ZERO,
+                },
+            ))
+            .id();
+        app.world_mut().entity_mut(car).add_child(node);
+        node
+    };
+    let remote_node = rig_node(&mut app, host_copy);
+    let own_node = rig_node(&mut app, local);
+    app.update();
+
+    let entry = |player: u16, breaks: u32| SnapEntry {
+        player,
+        pos: [9.0, 1.0, 9.0],
+        rot: [0.0, 0.0, 0.0, 1.0],
+        vel: [0.0; 3],
+        angvel: [0.0; 3],
+        epoch: 0,
+        steer: 0,
+        spin: 0,
+        compression: 0,
+        flags: 0,
+        damage: 0,
+        breaks,
+    };
+    // Bit 0 set on both seats: the remote copy sheds like the wire
+    // says, and the own seat mirrors it — its predicted sim never runs
+    // `detach_breaks`, so the mask is its only detach truth (the same
+    // contract the v8 damage byte established).
+    host.ctl()
+        .broadcast(&Message::Snap {
+            generation,
+            tick: 7,
+            entries: vec![entry(0, 0b1), entry(our_id, 0b1)],
+            trailers: Vec::new(),
+            impacts: Vec::new(),
+        })
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .breaks_detached
+            == 2
+    });
+    assert_eq!(
+        *app.world().get::<Visibility>(remote_node).unwrap(),
+        Visibility::Hidden,
+        "the remote copy's intact node hides"
+    );
+    assert_eq!(
+        *app.world().get::<Visibility>(own_node).unwrap(),
+        Visibility::Hidden,
+        "the own rig sheds off the same replicated state"
+    );
+    let fragments = app
+        .world_mut()
+        .query::<&mm2_app::breakaway::BreakFragment>()
+        .iter(app.world())
+        .map(|f| f.vehicle)
+        .collect::<Vec<_>>();
+    assert_eq!(fragments.len(), 2, "each shed part spawned one fragment");
+    assert!(fragments.contains(&host_copy));
+    assert!(fragments.contains(&local));
+
+    // Re-sending the same mask is a no-op — it is state, not an event.
+    host.ctl()
+        .broadcast(&Message::Snap {
+            generation,
+            tick: 8,
+            entries: vec![entry(0, 0b1), entry(our_id, 0b1)],
+            trailers: Vec::new(),
+            impacts: Vec::new(),
+        })
+        .unwrap();
+    app.update();
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<netdrive::NetDriveReport>()
+            .breaks_detached,
+        2,
+        "a repeated mask never re-detaches"
+    );
+
+    // The bits clear: the authority's repair arrives as state — the
+    // fragments despawn and the intact nodes show again.
+    host.ctl()
+        .broadcast(&Message::Snap {
+            generation,
+            tick: 9,
+            entries: vec![entry(0, 0), entry(our_id, 0)],
+            trailers: Vec::new(),
+            impacts: Vec::new(),
+        })
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .breaks_restored
+            == 2
+    });
+    assert_eq!(
+        *app.world().get::<Visibility>(remote_node).unwrap(),
+        Visibility::Visible,
+        "the repaired copy shows its panel again"
+    );
+    assert_eq!(
+        *app.world().get::<Visibility>(own_node).unwrap(),
+        Visibility::Visible
+    );
+    assert_eq!(
+        app.world_mut()
+            .query::<&mm2_app::breakaway::BreakFragment>()
+            .iter(app.world())
+            .count(),
+        0,
+        "the reconcile's fragments despawned"
+    );
+    assert!(
+        app.world()
+            .get::<mm2_game::VehicleBreaks>(host_copy)
+            .unwrap()
+            .detached_count()
+            == 0
+    );
+
+    host.shutdown();
+}
+
 /// inert — it sends a `ResetRequest` minted against the running
 /// generation, absorbed by the host's mailbox keyed to our slot. An
 /// `R` press outside `Playing` sends nothing.

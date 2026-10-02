@@ -139,6 +139,20 @@ impl VehicleBreaks {
         true
     }
 
+    /// Re-attach one part — the per-part half of [`restore`](Self::restore)
+    /// a replicated-state consumer needs: the authority's detach mask
+    /// can clear a single bit while others stay off (F25-B). Returns
+    /// the fragment entity the part spawned as for the caller to
+    /// despawn; `None` for an attached part or a bad index.
+    pub fn attach(&mut self, index: usize) -> Option<Entity> {
+        let part = self.parts.get_mut(index)?;
+        if part.attached {
+            return None;
+        }
+        part.attached = true;
+        part.fragment.take()
+    }
+
     /// Restore the whole rig (the repair side of the disabled
     /// outcome): every part re-attaches and the fragment entities it
     /// spawned are returned for the caller to despawn. Idempotent —

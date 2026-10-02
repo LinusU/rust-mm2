@@ -2645,6 +2645,7 @@ mod tests {
                 compression: 0,
                 flags: 0,
                 damage: 0,
+                breaks: 0,
             }],
             trailers: Vec::new(),
             impacts: Vec::new(),
