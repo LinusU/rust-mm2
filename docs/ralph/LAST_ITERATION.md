@@ -1,3 +1,79 @@
+# Last iteration — F25-B measurement slice III: the AC03 impairment
+# matrix now runs at process level — `net_drive`'s eight named recipe
+# cells each carried by a real `mm2 --host` process plus two real
+# `mm2 --join` clients through a seeded `ImpairProxy`, measured into
+# `docs/research/net.md` (new-run iteration 3)
+
+Implementation iteration on `ralph/night` (baseline `95ad7be` — the
+in-process-matrix candidate; external verify + review pass with gaps
+only). The review's named gap was the process-level grid over the
+`net_drive` harness — this iteration lands it, reusing the exact cell
+table and floor semantics the in-process matrix established.
+
+## What landed
+
+- `net_drive::the_process_level_impairment_matrix_records_each_recipe_cell`:
+  the same eight named recipes (clean, latency 100 ms + 20 ms jitter,
+  jitter 10 ms + 60 ms, loss 20%, loss-heavy 60%, duplicate 50%,
+  reorder 50%, combined 40+30 ms+5%+10%+10%), each a fresh host +
+  proxy + client *pair* — the review named the three-process harness,
+  so every cell keeps both clients: bob's shorter cap pins `rem2`
+  while alice still drives, alice's pins `rem≥1`. The lobby crosses
+  clean, `Start` lands before Down arms (a one-shot verb has no
+  retransmit), the driving window pays the recipe both ways, each
+  client's mid-session `net=` record asserts predicted driving +
+  applied snaps + reconciled remotes + remote wheel spin, the armed
+  knobs show in that cell's `LinkStats` (fresh proxy → counters start
+  at zero), and duplicate/reorder cells land counted `snap<x>` drops
+  on real clients. `quit_and_assert_host_drove` runs per cell — the
+  authority-side `in<a>`/`snap<s>` counters assert per recipe too.
+  The proxy drop ordering matters: it holds relayed socket clones, so
+  the host only sees the clients' disconnects after `drop(proxy)` —
+  same ordering the single-recipe leg established.
+- `docs/research/net.md`: new "Process-level grid" subsection with a
+  transcribed `--nocapture` run beside the in-process table. The two
+  tables differ in one instructive way: the process-level clean row
+  reads `snap<x>` = 0, not ~60% — the headless runner's
+  `TimeUpdateStrategy::ManualDuration(1/60)` makes every `app.update()`
+  exactly two 120 Hz fixed steps, so every published `Snap` carries a
+  fresh tick and the publish-cadence dedup floor does not exist there.
+  At process level every stale drop is purely recipe-attributed —
+  including the delay/jitter cells, whose release jitter manufactures
+  real reorders (696/893 stale on alice), not just the dedicated
+  `reorder` knob. Also recorded: `frames_in` sums both clients' lanes,
+  and pushed-but-superseded staged poses are neither applied nor stale.
+
+## Tests
+
+`net_drive` 2→3 (the matrix leg; the two existing legs unchanged).
+Zero production-code changes — test + doc only.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` green — all binaries, 0 failures
+(`net_drive` 3/3, matrix cell included).
+
+## Classification / remaining open items
+
+- Implementation choice + measured evidence throughout — recipes,
+  floors and the record format are ours; the retail wire protocol is
+  unrecovered, so no original-behavior claim.
+- Evidence: real OS processes over real loopback — the AC03 grid is
+  now measured at both in-process and process level. Still loopback
+  scope: no LAN or Internet leg, nothing rendered or driven by hand,
+  no retail content. AC03's remaining open flank is LAN/Internet
+  scope, not the grid itself; AC01–AC02/AC04–AC06 stay open as before.
+- Doc numbers are one transcribed run; lane decisions are seed-exact
+  per connection while session counters drift between runs (same
+  caveat as the in-process table).
+- F25-B remaining scope: replicated result/race state, remote-copy
+  breakaway fragments. The `RemoteSnaps`-persists-across-hosts wedge
+  stays open — one client process still only ever sees one authority.
+
+---
+
 # Last iteration — F25-B measurement slice II: the AC03 impairment
 # matrix runs as an eight-cell recipe grid over real loopback with
 # measured counters recorded in `docs/research/net.md`, which also

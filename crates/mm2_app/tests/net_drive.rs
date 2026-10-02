@@ -10,19 +10,21 @@
 //! [`ImpairProxy`] (delay/jitter/loss/duplication/reorder, F25-B req 6)
 //! instead of a clean loopback.
 //!
-//! Evidence level: two real processes over real loopback sockets — the
+//! Evidence level: real OS processes over real loopback sockets — the
 //! first non-in-process driving legs, advancing F25-AC01/AC02's
 //! multi-process side. Still loopback scope: no LAN, no rendered
-//! output, no retail install (synthetic dev world). The recorded
-//! impairment *matrix* (F25-AC03) remains open — this is one recipe
-//! exercised over a live session, not a measured grid.
+//! output, no retail install (synthetic dev world). The third leg is
+//! the measured impairment *matrix* (F25-AC03) at process level: the
+//! same eight named recipe cells the in-process `net_app` grid runs,
+//! each a fresh host + proxy + client-pair set so every cell's
+//! counters start at zero.
 
 use std::net::SocketAddr;
 use std::time::Duration;
 
 mod support;
 
-use mm2_net::{Impair, ImpairProxy, LinkDir};
+use mm2_net::{Impair, ImpairProxy, LinkDir, LinkStats};
 use support::Proc;
 
 const MM2_EXE: &str = env!("CARGO_BIN_EXE_mm2");
@@ -358,4 +360,248 @@ fn an_impaired_two_process_session_still_converges() {
         host.until("event=left");
     }
     quit_and_assert_host_drove(host);
+}
+
+/// One cell of the process-level impairment grid — a named [`Impair`]
+/// recipe armed on both directions for the driving window. The table
+/// is `net_app`'s in-process matrix verbatim — keep the two in step
+/// so their recorded runs stay directly comparable.
+struct MatrixCell {
+    name: &'static str,
+    impair: Impair,
+}
+
+/// Run one matrix cell end to end: a fresh host, a fresh seeded
+/// [`ImpairProxy`], and a fresh client pair — every counter starts at
+/// zero, so the cell's [`LinkStats`] are whole-connection sums like
+/// the in-process grid's. Returns the cell's wire counters plus both
+/// clients' decoded `net=` records for the per-cell floors.
+fn run_matrix_cell(
+    install: &std::path::Path,
+    cell: &MatrixCell,
+) -> (LinkStats, LinkStats, NetField, NetField) {
+    let mut host = Proc::spawn(MM2_EXE, &host_args(install, 9000));
+    let addr = listening_addr(&host);
+    let proxy = ImpairProxy::loopback_seeded(addr, 0xAC03).unwrap();
+
+    let alice = Proc::spawn(MM2_EXE, &join_args(install, proxy.addr(), "alice", 1400));
+    let bob = Proc::spawn(MM2_EXE, &join_args(install, proxy.addr(), "bob", 1000));
+    start_when_ready(&mut host, 2);
+    // `Start` rides Down: let the still-clean lane deliver it before
+    // the snap stream earns its recipe — the same one-shot-verb
+    // reasoning as the single-recipe leg above. The lobby phase
+    // crossing clean is what makes every armed frame a data-plane
+    // frame (`Input` up, `Snap` down).
+    std::thread::sleep(Duration::from_millis(400));
+    proxy.set(LinkDir::Up, cell.impair);
+    proxy.set(LinkDir::Down, cell.impair);
+
+    // Same cap staggering as the other legs: bob's record pins rem2
+    // while alice is still connected; alice's pins rem>=1.
+    let bob_net = assert_client_drove(&bob.until("smoke=headless-physics"), 2);
+    let alice_net = assert_client_drove(&alice.until("smoke=headless-physics"), 1);
+    assert!(alice.wait().success(), "alice did not exit cleanly");
+    assert!(bob.wait().success(), "bob did not exit cleanly");
+
+    // A lane's writer finishes within a pump quantum of the client's
+    // exit — a short grace lets the last `finish` flush publish so the
+    // counters below are the cell's whole story.
+    std::thread::sleep(Duration::from_millis(300));
+    let up = proxy.stats(LinkDir::Up);
+    let down = proxy.stats(LinkDir::Down);
+    // The relay holds socket clones until it drops — the host only
+    // sees the clients' disconnects (and their roster entries only
+    // leave) once the proxy itself is down.
+    drop(proxy);
+    for _ in 0..2 {
+        host.until("event=left");
+    }
+    quit_and_assert_host_drove(host);
+    (up, down, alice_net, bob_net)
+}
+
+/// F25-AC03's measured matrix at process level — the recorded run
+/// lives in `docs/research/net.md` under "Measured impairment
+/// matrix". The cell table is the in-process `net_app` grid's
+/// verbatim (clean, latency, jitter, loss, loss-heavy, duplicate,
+/// reorder, combined), but every cell is a real `mm2 --host` process
+/// plus two real `mm2 --join` clients relayed through a seeded
+/// [`ImpairProxy`] — the lobby crosses clean, the driving window pays
+/// the recipe in both directions, and each client's mid-session
+/// `net=` record proves its predicted seat drove, authority snaps
+/// applied, and both peers reconciled as remote copies.
+///
+/// Assertions are floors, not counts — the process-level traffic
+/// volume is update-rate-bound and drifts between runs. The per-frame
+/// ordering that makes the floors safe stays where the in-process
+/// grid puts it: `impair`'s lane legs (dup copies emit adjacent, a
+/// swap emits the held frame behind its successor) and `netdrive`'s
+/// push legs (at-or-behind watermark → counted drop). The `clean`
+/// cell's `snap<x>` reading is the publish-cadence dedup floor every
+/// impaired cell is read against, not wire impairment.
+#[test]
+fn the_process_level_impairment_matrix_records_each_recipe_cell() {
+    let cells = [
+        // The control: a transparent pair of lanes.
+        MatrixCell {
+            name: "clean",
+            impair: Impair::default(),
+        },
+        // Latency — a fixed hold every frame pays.
+        MatrixCell {
+            name: "latency",
+            impair: Impair {
+                delay: Duration::from_millis(100),
+                jitter: Duration::from_millis(20),
+                ..Impair::default()
+            },
+        },
+        // Jitter — small fixed hold, wide spread.
+        MatrixCell {
+            name: "jitter",
+            impair: Impair {
+                delay: Duration::from_millis(10),
+                jitter: Duration::from_millis(60),
+                ..Impair::default()
+            },
+        },
+        // Loss — every fifth frame gone, both ways.
+        MatrixCell {
+            name: "loss",
+            impair: Impair {
+                loss: 0.20,
+                ..Impair::default()
+            },
+        },
+        // Heavy loss — the "client falls behind" edge.
+        MatrixCell {
+            name: "loss-heavy",
+            impair: Impair {
+                loss: 0.60,
+                ..Impair::default()
+            },
+        },
+        // Duplication — every other frame emits a second adjacent
+        // copy; the second always lands at-or-behind the watermark.
+        MatrixCell {
+            name: "duplicate",
+            impair: Impair {
+                duplicate: 0.50,
+                ..Impair::default()
+            },
+        },
+        // Reorder — every other frame swaps with its successor; the
+        // held frame always lands behind the newer tick it deferred to.
+        MatrixCell {
+            name: "reorder",
+            impair: Impair {
+                reorder: 0.50,
+                ..Impair::default()
+            },
+        },
+        // Combined — the recipe the single-recipe leg above runs.
+        MatrixCell {
+            name: "combined",
+            impair: Impair {
+                delay: Duration::from_millis(40),
+                jitter: Duration::from_millis(30),
+                loss: 0.05,
+                duplicate: 0.10,
+                reorder: 0.10,
+            },
+        },
+    ];
+    let install = tempfile::tempdir().unwrap();
+    for cell in &cells {
+        let (up, down, alice, bob) = run_matrix_cell(install.path(), cell);
+
+        // The cell's record line — one measured row per recipe; the
+        // doc's process-level table is harvested from these.
+        eprintln!(
+            "proc-matrix cell={} alice={alice:?} bob={bob:?} up={up:?} down={down:?}",
+            cell.name,
+        );
+
+        // Convergence — every cell's data plane still moved state
+        // both ways (the client-record floors ran inside the cell).
+        assert!(
+            up.frames_in > 0 && down.frames_in > 0,
+            "cell {} moved no data-plane frames: {up:?} {down:?}",
+            cell.name,
+        );
+        assert!(
+            up.bytes_in > 0 && down.bytes_in > 0,
+            "cell {} moved no payload bytes: {up:?} {down:?}",
+            cell.name,
+        );
+        assert_eq!(
+            up.overflowed + down.overflowed,
+            0,
+            "cell {} overflowed a lane: {up:?} {down:?}",
+            cell.name,
+        );
+
+        // Each armed knob must show in the counter it claims to turn.
+        let impair = cell.impair;
+        let snaps_staled = alice.snaps_staled + bob.snaps_staled;
+        if impair.delay > Duration::ZERO || impair.jitter > Duration::ZERO {
+            assert!(
+                up.delayed > 0 && down.delayed > 0,
+                "cell {} scheduled no delay holds: {up:?} {down:?}",
+                cell.name,
+            );
+        }
+        if impair.loss >= 0.10 {
+            assert!(
+                up.dropped > 0 && down.dropped > 0,
+                "cell {} dropped nothing: {up:?} {down:?}",
+                cell.name,
+            );
+        }
+        if impair.duplicate > 0.0 {
+            assert!(
+                up.duplicated > 0 && down.duplicated > 0,
+                "cell {} duplicated nothing: {up:?} {down:?}",
+                cell.name,
+            );
+            // Every duplicated `Snap` copy pushes at-or-behind the
+            // watermark — a counted stale drop on a real client.
+            assert!(
+                snaps_staled > 0,
+                "cell {} recorded no stale drop off duplicated snaps",
+                cell.name,
+            );
+        }
+        if impair.reorder > 0.0 {
+            assert!(
+                up.reordered > 0 && down.reordered > 0,
+                "cell {} reordered nothing: {up:?} {down:?}",
+                cell.name,
+            );
+            // A swap's held frame is older than the successor it
+            // lands behind — it can never displace the newer pose.
+            assert!(
+                snaps_staled > 0,
+                "cell {} recorded no stale drop off reordered snaps",
+                cell.name,
+            );
+        }
+        // The control cell: a transparent lane impairs nothing, so
+        // its `snap<x>` row is publish-cadence dedup only — the floor
+        // the impaired cells are read against.
+        if impair == Impair::default() {
+            assert_eq!(
+                up.delayed + up.dropped + up.duplicated + up.reordered,
+                0,
+                "cell {} impaired a clean lane: {up:?}",
+                cell.name,
+            );
+            assert_eq!(
+                down.delayed + down.dropped + down.duplicated + down.reordered,
+                0,
+                "cell {} impaired a clean lane: {down:?}",
+                cell.name,
+            );
+        }
+    }
 }

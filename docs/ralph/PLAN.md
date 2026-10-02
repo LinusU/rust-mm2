@@ -67,11 +67,15 @@ asserts; the
 next iteration landed the measured AC03 impairment matrix itself —
 `net_app`'s eight-cell recipe grid over real loopback, counters
 recorded into `docs/research/net.md`, which also gained the req-6
-payload/update-rate/bounds budget — still
+payload/update-rate/bounds budget, and the following iteration landed
+the *process-level* grid — `net_drive`'s
+`the_process_level_impairment_matrix_records_each_recipe_cell` runs the
+same eight named recipes over real `mm2` OS processes (fresh
+host + proxy + client pair per cell), its measured table beside the
+in-process one in `net.md` — still
 open: replicated
 result/race state, breakaway fragments on remote
-copies, a *process-level* impairment grid over the `net_drive`
-harness (the in-process grid landed), LAN/Internet scope), the F24-B
+copies, LAN/Internet scope), the F24-B
 remainder (B.7 landed the Bevy-side
 client bridge — `mm2 --join` consumes `Start` into the shared
 `Session` lifecycle; iter 020 repaired its two external-review

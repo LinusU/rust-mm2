@@ -613,9 +613,78 @@ Same-shape floors are asserted for every cell; the per-frame ordering
 that makes those floors safe is proven in `impair`'s lane legs (dup
 copies emit adjacent, a swap emits the held frame behind its
 successor) and `netdrive`'s push legs (at-or-behind watermark → counted
-drop). Scope: in-process loopback — the two-process impaired leg
-(`net_drive`) runs the `combined` recipe over real OS processes; a
-process-level grid, LAN and Internet scope stay open.
+drop). Scope: in-process loopback — the same grid also exists at
+process level (next section); LAN and Internet scope stay open.
+
+### Process-level grid
+
+*Measured evidence — real `mm2` OS processes over real loopback.*
+`net_drive`'s
+`the_process_level_impairment_matrix_records_each_recipe_cell` runs
+the identical cell table with a fresh `mm2 --host --headless` +
+`mm2 --join --headless --ready` client pair + seeded `ImpairProxy` per
+cell: the lobby crosses clean, `Start` lands unimpaired (a one-shot
+verb has no retransmit), then both directions arm the recipe for the
+driving window. Each client's mid-session `net=` record proves the
+convergence floors — predicted seat drove, authority snaps applied,
+both peers reconciled (`rem2`/`rem≥1`), remote wheel spin accumulated
+— and the armed recipe's own `LinkStats` counters show it really
+fired. A `proc-matrix cell=` record line per recipe carries the
+measured counters.
+
+One recorded run (dev-world cruise; `snap=<applied>a/<staled>x` and
+`in=<sent>s` from each client's `net=` record; `LinkStats` u/d are
+upstream/downstream whole-connection sums — the clean lobby phase is
+inside `frames_in`/`bytes_in`):
+
+| cell | recipe (both dirs) | snap a/x alice | snap a/x bob | in s a/b | delayed u/d | dropped u/d | dup u/d | reo u/d |
+|---|---|---|---|---|---|---|---|---|
+| clean | — | 1336/0 | 943/0 | 1400/1000 | 0/0 | 0/0 | 0/0 | 0/0 |
+| latency | 100 ms + 20 ms jit | 557/696 | 471/418 | 1398/998 | 1910/1918 | 0/0 | 0/0 | 0/0 |
+| jitter | 10 ms + 60 ms jit | 436/893 | 369/578 | 1398/998 | 1924/1927 | 0/0 | 0/0 | 0/0 |
+| loss | 20% | 1154/0 | 814/0 | 1398/998 | 0/0 | 388/364 | 0/0 | 0/0 |
+| loss-heavy | 60% | 697/0 | 549/0 | 1398/998 | 0/0 | 1137/1143 | 0/0 | 0/0 |
+| duplicate | 50% | 1339/561 | 965/355 | 1398/998 | 0/0 | 0/0 | 927/916 | 0/0 |
+| reorder | 50% | 1002/391 | 744/240 | 1398/998 | 0/0 | 0/0 | 0/0 | 642/633 |
+| combined | 40 ms + 30 ms jit + 5% loss + 10% dup + 10% reo | 494/840 | 431/544 | 1398/998 | 2175/2149 | 83/91 | 158/157 | 167/152 |
+
+What differs from the in-process table, and why:
+
+- **The `clean` row's `snap<x>` floor is 0 here, not ~60%.** The
+  headless runner drives `TimeUpdateStrategy::ManualDuration(1/60)` —
+  every `app.update()` is exactly one 60 Hz frame, i.e. exactly two
+  120 Hz fixed steps — so every published `Snap` carries a fresh tick
+  and nothing republishes same-tick. The in-process floor was the
+  fixture's ~250 Hz paired-update cadence against its default 64 Hz
+  `Time<Fixed>`. At process level `snap<x>` is therefore *purely*
+  wire-attributed: every stale drop above was manufactured by the
+  recipe (an overtaken release, a second copy, a held swap frame).
+- **Delay/jitter cells produce real stale drops, not just holds** —
+  ±20 ms or ±60 ms release jitter lets a later-sent frame emit before
+  an earlier one, so the straggler lands at-or-behind the watermark
+  and drops counted (696/893 on alice). This is the spec's reordered-
+  arrival guarantee exercised end-to-end through real sockets, not
+  only the dedicated `reorder` knob.
+- **Loss shrinks the stream, not the session**: at 60% loss 697/549
+  snaps still applied and every client's `in` stream still drove its
+  remote seat — latest-wins costs freshness, never convergence.
+- **`frames_in` sums both clients' lanes** (~2,411 sent downstream in
+  the clean cell ≈ alice's ~1,340 + bob's ~940 + the clean lobby
+  phase), while each `snap<a>`/`<x>` pair is one client's own record.
+  A snap pushed then superseded by a newer staged pose before the
+  client's next update ran is neither applied nor stale — latest-wins
+  replacing `latest` is deliberately uncounted — so `applied + staled`
+  need not equal that client's pushed count.
+- No cell produced an `overflowed`, a lost session, or a failed
+  process — every client exited `status=pass` at its frame cap and
+  every host `quit` reported the authority-side counters
+  (`in<N>a`/`snap<N>s` nonzero).
+
+Scope: still loopback on a synthetic dev world — no LAN or Internet
+leg, no rendered observation, no retail install. The cells also leave
+`dsyn`/`tsyn`/`imp` honest: the dev car binds no damage record and
+tows nothing; `imp` shows single-digit applied rows (spawn-landing
+impacts replicated through the real session), not a driven collision.
 
 ## Data-plane budget and bounds (F25-B req 6)
 
@@ -716,9 +785,10 @@ wire actually moved rather than an in-process mailbox's contents.
 
 Scope stays honest: this is loopback on a synthetic dev world — no
 LAN leg, no rendered observation, no retail install. The recorded
-delay/jitter/loss matrix now exists at the in-process level (see
-"Measured impairment matrix" above); a *process-level* grid over
-this three-process harness remains open.
+delay/jitter/loss matrix exists at both levels now — in-process (see
+"Measured impairment matrix" above) and process-level over this
+harness ("Process-level grid", same cell table). LAN and Internet
+scope remain open.
 
 ## Evidence level
 
