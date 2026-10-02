@@ -27,8 +27,8 @@ pub use debug::VehicleDebugEnabled;
 pub use surface::{TireConditions, TireSurface};
 pub use systems::upright_recovery_pose;
 pub use vehicle::{
-    DriveDirection, EngineImpairment, ResetVehicle, StrikeBound, Teleported, Vehicle, VehicleInput,
-    VehicleState, WheelState,
+    DriveDirection, EngineImpairment, ResetAuthority, ResetVehicle, StrikeBound, Teleported,
+    Vehicle, VehicleInput, VehicleState, WheelState,
 };
 
 /// Registers the vehicle simulation. Requires [`PhysicsPlugins`] and a fixed
@@ -39,6 +39,10 @@ impl Plugin for VehiclePlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<ResetVehicle>()
             .init_resource::<VehicleDebugEnabled>()
+            // A session under a remote authority overwrites this at
+            // load; standalone and authoritative worlds keep the
+            // default-on local resets.
+            .init_resource::<ResetAuthority>()
             // The tire path reads this every physics step; sessions
             // overwrite it at load with their environment modifier.
             .init_resource::<TireConditions>()

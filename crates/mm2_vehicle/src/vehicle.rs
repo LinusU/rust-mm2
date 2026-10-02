@@ -197,6 +197,24 @@ impl VehicleState {
     }
 }
 
+/// Whether this process may originate a [`ResetVehicle`] itself. A
+/// standalone world and any authoritative session (`Local`, or the host
+/// of a networked session) resolve their own teleports; a predicted
+/// client never does — a locally-teleported car is a self-teleport the
+/// authority's copy can never learn, so on a `Remote` session every
+/// teleport arrives as the wire's declared reset epoch instead
+/// (F25-A.7). The app stamps it from the session's authority at load;
+/// the default is `true`, so a vehicle world that never joined a
+/// networked session keeps its assists.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct ResetAuthority(pub bool);
+
+impl Default for ResetAuthority {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
 /// Message requesting a vehicle reset to a pose. Every authority-side
 /// teleport lands here — the `R`/pad bundle, a scheduled `--reset-at`,
 /// scripted and opponent re-anchors, the stuck/disabled/recovery

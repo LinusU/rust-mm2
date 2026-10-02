@@ -26,7 +26,8 @@ use mm2_game::{
     advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::{
-    ResetVehicle, Teleported, Vehicle, VehicleConfig, VehicleInput, VehiclePlugin, VehicleState,
+    ResetAuthority, ResetVehicle, Teleported, Vehicle, VehicleConfig, VehicleInput, VehiclePlugin,
+    VehicleState,
 };
 
 /// A headless app wired exactly like the binary's session path: real
@@ -1446,6 +1447,95 @@ fn r_is_inert_under_remote_authority() {
         "the predicted car stayed off the spawn point, got {pos:?}"
     );
     assert!(phase_is(&mut app, SessionPhase::Playing));
+}
+
+/// F25-A.7: the self-right assist is authority-gated like the `R`
+/// bundle. `load_session_world` stamps `ResetAuthority` from the
+/// session's authority, so under `Remote` an upended predicted car
+/// writes no `ResetVehicle` and never flops — its recovery is the
+/// host's epoch-declared reset — while a `Host` session keeps the
+/// assist (the hosted remote drivers' flops resolve through it).
+#[test]
+fn self_right_is_inert_under_remote_authority() {
+    let delay = VehicleConfig::default().assists.self_right_delay;
+    let wait = ((delay + 1.5) * 60.0) as usize;
+    for authority in [SessionAuthority::Remote, SessionAuthority::Host] {
+        let mut app = test_app(
+            SessionConfig {
+                authority,
+                ..SessionConfig::default()
+            },
+            1.0 / 60.0,
+        );
+        assert!(run_until(&mut app, 12, |a| phase_is(
+            a,
+            SessionPhase::Playing
+        )));
+        let car = single::<With<PlayerVehicle>>(&mut app);
+        assert_eq!(
+            app.world().resource::<ResetAuthority>().0,
+            authority.is_authoritative(),
+            "the session load stamped the reset authority from {authority:?}"
+        );
+        // Anything buffered at spawn drains here so the count below is
+        // the upended wait alone.
+        let _ = app
+            .world_mut()
+            .resource_mut::<Messages<ResetVehicle>>()
+            .drain()
+            .count();
+
+        // On its roof and nearly still — the assist's trigger pose.
+        let flipped = Quat::from_rotation_z(std::f32::consts::PI);
+        {
+            let world = app.world_mut();
+            world.get_mut::<Rotation>(car).unwrap().0 = flipped;
+            world.get_mut::<Transform>(car).unwrap().rotation = flipped;
+            world.get_mut::<LinearVelocity>(car).unwrap().0 = Vec3::ZERO;
+            world.get_mut::<AngularVelocity>(car).unwrap().0 = Vec3::ZERO;
+        }
+        for _ in 0..wait {
+            app.update();
+        }
+
+        let upright = (app.world().get::<Rotation>(car).unwrap().0 * Vec3::Y).y;
+        let resets = app
+            .world_mut()
+            .resource_mut::<Messages<ResetVehicle>>()
+            .drain()
+            .count();
+        match authority {
+            SessionAuthority::Remote => {
+                assert_eq!(
+                    resets, 0,
+                    "a Remote-authority self-right wrote a reset message"
+                );
+                assert!(
+                    app.world().get::<Teleported>(car).is_none(),
+                    "a Remote-authority self-right teleported the predicted car"
+                );
+                assert!(
+                    upright < 0.0,
+                    "the predicted car stayed upended, up.y {upright}"
+                );
+                assert_eq!(
+                    app.world().get::<VehicleState>(car).unwrap().upended_for,
+                    0.0,
+                    "the gated detector never armed"
+                );
+            }
+            _ => {
+                assert!(
+                    upright > 0.9,
+                    "the hosted session's car flopped back onto its wheels, up.y {upright}"
+                );
+                assert!(
+                    app.world().get::<Teleported>(car).is_some(),
+                    "the hosted flop went through the reset path (Teleported)"
+                );
+            }
+        }
+    }
 }
 
 /// The reset bundle re-seats every trailer at its authored car-space

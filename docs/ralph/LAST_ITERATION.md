@@ -1,3 +1,86 @@
+# Last iteration — F25-A.7: the self-right assist joins the authority
+# gate — a predicted session never self-teleports (iteration 028, run
+# 20261001T195454-62282 continued)
+
+Implementation iteration on `ralph/night` (baseline `96cfc93` — the
+F25-A.6 candidate; external verify + review pass with gaps only). One
+coherent slice: the A.6 review's named divergence gap.
+
+## Task selection
+
+A.6 established "an authority-side teleport is a declared reset" and
+gated the `R` bundle; the review then observed the other in-crate
+writer was still live under a predicted session: `vehicle_self_right`
+emitted a local-only `ResetVehicle` on remote kinematic copies and the
+predicted own seat under `Remote` authority. On the own seat that is
+exactly the self-teleport the A.5 gate forbade — the host's copy never
+learns it, and the epoch-equal `Snap` entries that would correct it
+stay ignored, so the divergence was permanent; on a remote kinematic
+copy the local flop fights the next `Snap`'s blend. `mm2_vehicle`
+cannot see `Session` (the crate boundary), so the authority reaches it
+as a resource the app stamps — the `TireConditions` pattern.
+
+## What landed
+
+- `mm2_vehicle::vehicle::ResetAuthority(pub bool)` — whether this
+  process may originate a `ResetVehicle` itself. `VehiclePlugin` inits
+  it `true`: a standalone world and any authoritative session
+  (`Local`, `Host`) resolve their own teleports, and every harness
+  that never loads a networked session keeps its assists. `Remote`
+  stamps `false`.
+- `vehicle_self_right` early-returns under the gate — no
+  `ResetVehicle`, no `upended_for` accumulation. The remote driver's
+  flip is resolved by the host's own detectors and carried back as
+  the declared epoch, not flopped locally.
+- `mm2_app::session::load_session_world` stamps
+  `ResetAuthority(config.authority.is_authoritative())` beside the
+  `TireConditions` write — re-stamped on every load so a networked
+  session's gate cannot leak into the next local one. Every local
+  `ResetVehicle` writer is now authority-gated (`reset_input`, the
+  scripted/opponent re-anchors, self-right) or wire-impossible (dev
+  overrides are refused by `net::advertise`).
+
+## Tests
+
+- `drive` +1 — `an_upended_car_stays_down_without_reset_authority`:
+  `ResetAuthority(false)` + a roofed car waits out the authored delay
+  with no flop, no `Teleported`, the detector never arming.
+- `session` +1 — `self_right_is_inert_under_remote_authority`: the
+  production `load_session_world` stamps the gate — `Remote` →
+  `ResetAuthority(false)`, no `ResetVehicle` written, no `Teleported`,
+  the predicted car still upended; `Host` → `true`, the flop still
+  lands through `vehicle_reset` (the hosted remote drivers' recovery
+  path stays live).
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked --workspace
+--all-targets --all-features -- -D warnings` clean; `cargo test
+--locked --workspace` green — 90 suites, 0 failures (drive 17/17,
+session 28/28).
+
+## Classification / remaining open items
+
+- The gate is an implementation choice encoding the same designed
+  policy as the R-gate (a predicted session never self-teleports);
+  self-right staying live on the authority for remote drivers' cars is
+  the designed recovery path from A.4.
+- Still open F25-A scope: continuous drift reconciliation between
+  epochs, full input-replay prediction, replicated damage/result
+  presentation, input rate-limiting, interpolation tuning, and the
+  wire-carried driver reset request (F25-B). The A.6 review's other
+  disclosures stand: `dev.finish`'s direct `Position` write is the
+  deliberate Local-only dev-flag exception (its swept segment is the
+  point — a `Teleported` hop would bank nothing); gyro-ledger
+  preservation across resets is designed, its original-rule status
+  unverified; FixedLast-writer same-`Snap` coherence is reasoned from
+  schedule order, not yet test-asserted.
+- All evidence remains synthetic/loopback — no two-process driving
+  session, no impairment matrix, no retail-install leg (no content
+  paths changed), no rendered observation. F25-AC01..AC06 stay open.
+
+---
+
 # Last iteration — F25-A.6: every authority teleport is a declared
 # reset — self-right joins the `ResetVehicle` lifecycle and the epoch
 # tracker can no longer trail the pose (iteration 027, run

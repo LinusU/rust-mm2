@@ -13,7 +13,9 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_vehicle::vehicle::{DriveDirection, VehicleInput, VehicleState};
-use mm2_vehicle::{ResetVehicle, Teleported, VehicleConfig, VehiclePlugin, vehicle_bundle};
+use mm2_vehicle::{
+    ResetAuthority, ResetVehicle, Teleported, VehicleConfig, VehiclePlugin, vehicle_bundle,
+};
 
 const FRAMES_PER_SECOND: usize = 60;
 
@@ -379,6 +381,45 @@ fn an_upended_car_flops_back_onto_its_wheels() {
     assert!(
         app.world().get::<Teleported>(car).is_some(),
         "the self-right went through the reset path (Teleported)"
+    );
+    assert_finite(&app, car);
+}
+
+/// F25-A.7: under a remote authority the assist is inert — a predicted
+/// car's flop is the host's declared reset, not a local self-teleport
+/// the authority's copy could never learn.
+#[test]
+fn an_upended_car_stays_down_without_reset_authority() {
+    let (mut app, car) = test_app();
+    app.world_mut().insert_resource(ResetAuthority(false));
+    let delay = VehicleConfig::default().assists.self_right_delay;
+
+    {
+        let flipped = Quat::from_rotation_z(std::f32::consts::PI);
+        let world = app.world_mut();
+        world.get_mut::<Rotation>(car).unwrap().0 = flipped;
+        world.get_mut::<Transform>(car).unwrap().rotation = flipped;
+    }
+    drive(
+        &mut app,
+        car,
+        (FRAMES_PER_SECOND as f32 * (delay + 1.5)) as usize,
+        VehicleInput::default(),
+    );
+
+    let upright = (app.world().get::<Rotation>(car).unwrap().0 * Vec3::Y).y;
+    assert!(
+        upright < 0.0,
+        "a gated assist never flopped the car, up.y {upright}"
+    );
+    assert_eq!(
+        app.world().get::<VehicleState>(car).unwrap().upended_for,
+        0.0,
+        "the gated detector never armed"
+    );
+    assert!(
+        app.world().get::<Teleported>(car).is_none(),
+        "no teleport happened under a remote authority"
     );
     assert_finite(&app, car);
 }

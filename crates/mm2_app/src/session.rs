@@ -42,7 +42,7 @@ use mm2_game::{
     SmokePolicy, SparkPolicy, StuckSpec, TargetSelection, VehicleAudio, VehicleBreaks,
     VehicleDamage, VehicleRecovery, VehicleSmoke, VehicleSparks, VehicleStuck, WorldMode,
 };
-use mm2_vehicle::{ResetVehicle, TireConditions, VehicleConfig, vehicle_bundle};
+use mm2_vehicle::{ResetAuthority, ResetVehicle, TireConditions, VehicleConfig, vehicle_bundle};
 use tracing::{debug, error, info, warn};
 
 use crate::camera::{CameraMode, ChaseCamera, FreeCamera};
@@ -853,6 +853,15 @@ pub fn load_session_world(
             .unwrap_or_else(|| session_conditions.weather.traction_factor())
             .max(0.0),
     });
+    // F25-A.7: whether this process may originate a `ResetVehicle`
+    // itself. `Local`/`Host` sessions resolve their own teleports;
+    // under a `Remote` session every teleport is the wire's declared
+    // epoch, so the self-right assist stays inert there like the
+    // app-side writers already are (`reset_input`, the scripted and
+    // opponent re-anchors). Re-stamped on every load like
+    // `TireConditions` — a networked session cannot leak its gate into
+    // the next local one.
+    commands.insert_resource(ResetAuthority(config.authority.is_authoritative()));
     // F05-B.6: the smoke sprite assets — resolved through the VFS
     // like every texture; a missing `fxpt2` warns and emits
     // untextured puffs, never sinks the session. Session-scoped:

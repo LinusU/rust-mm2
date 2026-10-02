@@ -7,8 +7,8 @@ use crate::config::VehicleConfig;
 use crate::sim;
 use crate::surface::{TireConditions, TireSurface};
 use crate::vehicle::{
-    DriveDirection, EngineImpairment, GyroSpin, ResetVehicle, Teleported, Vehicle, VehicleInput,
-    VehicleState, WheelState,
+    DriveDirection, EngineImpairment, GyroSpin, ResetAuthority, ResetVehicle, Teleported, Vehicle,
+    VehicleInput, VehicleState, WheelState,
 };
 
 /// What the steered axle can do with steering lock: how much grip it makes
@@ -777,13 +777,23 @@ pub fn upright_recovery_pose(
 /// session's reset epoch declares it on the wire. The scheduled chain
 /// keeps the authored delay exact; had the message drained a frame later
 /// the car would just wait out one extra update.
+///
+/// The assist is [`ResetAuthority`]-gated like every other local reset
+/// writer (F25-A.7): under a predicted (`Remote`) session a local flop
+/// is a self-teleport the authority never declared — the predicted own
+/// seat would diverge from the host's copy, and a remote kinematic copy
+/// would fight the next `Snap` for its pose. There the host's own
+/// detectors resolve the flip and the epoch carries it back, so this
+/// system stays inert rather than accumulating `upended_for` toward a
+/// teleport it must not make.
 pub fn vehicle_self_right(
     time: Res<Time>,
+    authority: Res<ResetAuthority>,
     mut vehicles: SelfRightQuery,
     mut resets: MessageWriter<ResetVehicle>,
 ) {
     let dt = time.delta_secs();
-    if dt <= 0.0 {
+    if dt <= 0.0 || !authority.0 {
         return;
     }
     for (entity, vehicle, mut state, pos, rot, lv) in &mut vehicles {
