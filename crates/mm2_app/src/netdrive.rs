@@ -12,18 +12,22 @@
 //!   the authority's rule pipeline like AI (F25-A.4): damage accrues
 //!   against the authored record, stuck/water/out-of-bounds episodes
 //!   recover in place, a wreck resets in place and repairs, and the
-//!   smoke↔torque impairment applies — the resets and pose changes ride
-//!   the ordinary snapshot stream down. What the wire still does not
-//!   carry is the *owning* client's reconciliation of its own seat or
-//!   the replicated damage presentation (smoke/sparks/texel/breakaway
-//!   stay unrigged on remote cars — F25-B/F26 scope).
+//!   smoke↔torque impairment applies. Every reset the authority performs
+//!   bumps the seat's [`ResetEpoch`] (F25-A.5) — the counter rides each
+//!   snapshot entry, so a teleport is a declared fact on the wire rather
+//!   than a pose jump receivers must infer. What the wire still does not
+//!   carry is the replicated damage presentation (smoke/sparks/texel/
+//!   breakaway stay unrigged on remote cars — F25-B/F26 scope).
 //! - **Client** (`SessionAuthority::Remote` → `Predicted`): remote cars
 //!   are kinematic copies blended between the two newest snapshots
 //!   ([`RemoteLerp`]) — they carry the same damage/stuck/recovery
 //!   components inertly, since the rule systems never run under a
 //!   predicted session. Our own car keeps driving on local physics —
-//!   snapshot entries naming our wire id are received but not applied
-//!   (reconciliation is a later slice), which is what `Predicted` means.
+//!   snapshot entries naming our wire id apply only when their `epoch`
+//!   advances: the authority teleported us, so the local pose snaps to
+//!   the asserted state (F25-A.5). Between resets the local sim owns the
+//!   seat — sub-epoch divergence stays local, which is what `Predicted`
+//!   means; continuous drift correction is named later scope.
 //!
 //! Identities on the wire are the lobby's roster slots, never Bevy
 //! entities: the host seat is wire id 0 (it never appears on the roster;
@@ -58,7 +62,7 @@ use mm2_game::{
     StuckSpec, VehicleDamage, VehicleRecovery, VehicleStuck,
 };
 use mm2_net::{DriveInput, Message, RemoteInputs, SnapEntry, VehiclePick};
-use mm2_vehicle::{VehicleInput, vehicle_bundle};
+use mm2_vehicle::{ResetVehicle, Teleported, VehicleInput, vehicle_bundle};
 
 use crate::car_visual;
 use crate::net::{HostLink, LobbyLink, LobbyState};
@@ -80,11 +84,11 @@ const SEAT_STAGE_GAP: f32 = 4.0;
 /// A snapshot correction larger than this snaps the remote copy to the
 /// asserted pose instead of blending toward it (designed bound, F25-A.4
 /// — spec req 4's bounded corrections). Inter-snapshot travel is at
-/// most top-speed × the clamped arrival interval — well under 20 m —
-/// while the teleports the authority now performs on remote cars
-/// (stuck/disabled/recovery resets) land far past it. Without the bound
-/// a reset would read as the copy smearing through the world between
-/// the old pose and the landing.
+/// most top-speed × the clamped arrival interval — well under 20 m.
+/// Since F25-A.5 the authority's resets declare themselves through
+/// [`ResetEpoch`]/`SnapEntry::epoch` — the bound stays as the catch-all
+/// for teleports the epoch cannot describe (drift past the bound, a
+/// pose written by hand).
 const CORRECTION_SNAP_DIST: f32 = 20.0;
 
 /// The wire roster id this participant entity carries. `0` is the host
@@ -99,6 +103,16 @@ pub struct NetPlayer(pub u16);
 /// entity rather than leaving a stale shell.
 #[derive(Component, Debug, Clone, PartialEq)]
 pub struct RemotePick(pub VehiclePick);
+
+/// The reset epoch this entity's pose currently reflects (F25-A.5).
+/// Stamped `0` on every participant — the local car included — at
+/// spawn/stamping time. On the authority, [`track_reset_epochs`] bumps
+/// it once per [`ResetVehicle`] the rule pipeline lands on the entity,
+/// and [`publish_snapshots`] carries it as `SnapEntry::epoch`; on a
+/// predicted client it is the last applied epoch — a differing wire
+/// value means the asserted pose is an authority teleport, not motion.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResetEpoch(pub u8);
 
 /// Blend state on a `Predicted` remote copy: the pose it displayed when
 /// the newest snapshot arrived, the pose that snapshot asserts, and the
@@ -186,6 +200,10 @@ pub struct NetDriveReport {
     pub spawned: u64,
     /// Reconciliation despawns over the session.
     pub despawned: u64,
+    /// Authority resets observed this session — host: `ResetVehicle`
+    /// landings that bumped a wire epoch; client: epoch-declared
+    /// teleports applied to a copy or the own seat.
+    pub resets: u64,
 }
 
 /// A rotation off the wire, sanitized — a malformed-quaternion guard so
@@ -412,10 +430,12 @@ pub fn reconcile_remote_players(
     }
 
     // The local car joins the wire namespace once it exists — the host's
-    // snapshots carry it as seat 0; a client's copy of it is the `Local`
-    // entry snapshot application skips.
+    // snapshots carry it as seat 0, and a client reconciles its own
+    // entry through `ResetEpoch` (F25-A.5).
     for entity in &local {
-        commands.entity(entity).insert(NetPlayer(self_wire));
+        commands
+            .entity(entity)
+            .insert((NetPlayer(self_wire), ResetEpoch(0)));
     }
 
     let desired = desired_remotes(&lobby, self_wire);
@@ -543,6 +563,7 @@ fn spawn_remote(
             role,
             NetPlayer(wire),
             RemotePick(pick.clone()),
+            ResetEpoch(0),
             DamageSignals::default(),
             vehicle_bundle(&cfg),
             Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)),
@@ -687,24 +708,60 @@ pub fn apply_remote_inputs(
     }
 }
 
+/// Host-side: fold every [`ResetVehicle`] the session's reset paths
+/// emit into the targets' [`ResetEpoch`] — the wire's reset signal
+/// (F25-A.5). `vehicle_reset` consumes the same message stream to apply
+/// the teleport; readers are independent cursors, so watching it here
+/// can never steal the reset from its applier. A `None` entity resets
+/// every vehicle, so every participant's epoch bumps. Runs before
+/// [`publish_snapshots`] so the bumped epoch and the teleported pose
+/// leave on the same `Snap`.
+pub fn track_reset_epochs(
+    mut resets: MessageReader<ResetVehicle>,
+    mut players: Query<&mut ResetEpoch>,
+    mut report: ResMut<NetDriveReport>,
+) {
+    for ev in resets.read() {
+        match ev.entity {
+            Some(entity) => {
+                // Non-participant resets (a re-seated trailer) carry no
+                // epoch — they ride their tractor's snap.
+                if let Ok(mut epoch) = players.get_mut(entity) {
+                    epoch.0 = epoch.0.wrapping_add(1);
+                    report.resets += 1;
+                }
+            }
+            None => {
+                for mut epoch in &mut players {
+                    epoch.0 = epoch.0.wrapping_add(1);
+                }
+                report.resets += 1;
+            }
+        }
+    }
+}
+
+/// The snapshot publish query row — a participant's wire identity,
+/// reset epoch and rigid truth.
+type SnapSourceRow<'a> = (
+    &'a NetPlayer,
+    &'a ResetEpoch,
+    &'a Position,
+    &'a Rotation,
+    &'a LinearVelocity,
+    &'a AngularVelocity,
+);
+
 /// Host-side: every participant's authoritative pose, broadcast once per
 /// update while the session is live. `tick` is the host's session tick —
 /// physics only moves inside fixed steps, so a same-tick snapshot is a
 /// duplicate clients discard. Positions are `Position`/`Rotation` (the
-/// solver's truth), not the render `Transform`.
+/// solver's truth), not the render `Transform`; `epoch` is the seat's
+/// [`ResetEpoch`] — the receiver's teleport signal.
 pub fn publish_snapshots(
     host: Res<HostLink>,
     session: Res<Session>,
-    players: Query<
-        (
-            &NetPlayer,
-            &Position,
-            &Rotation,
-            &LinearVelocity,
-            &AngularVelocity,
-        ),
-        With<Player>,
-    >,
+    players: Query<SnapSourceRow<'_>, With<Player>>,
     mut report: ResMut<NetDriveReport>,
 ) {
     if !matches!(
@@ -715,12 +772,13 @@ pub fn publish_snapshots(
     }
     let mut entries: Vec<SnapEntry> = players
         .iter()
-        .map(|(wire, pos, rot, vel, ang)| SnapEntry {
+        .map(|(wire, epoch, pos, rot, vel, ang)| SnapEntry {
             player: wire.0,
             pos: pos.0.to_array(),
             rot: rot.0.to_array(),
             vel: vel.0.to_array(),
             angvel: ang.0.to_array(),
+            epoch: epoch.0,
         })
         .collect();
     entries.sort_by_key(|e| e.player);
@@ -738,10 +796,14 @@ pub fn publish_snapshots(
 }
 
 /// The snapshot application's query row — factored out of the system
-/// signature for `clippy::type_complexity`.
+/// signature for `clippy::type_complexity`. Covers every [`NetPlayer`]
+/// entity: remote copies reconcile through their [`RemoteLerp`], the
+/// own seat through its [`ResetEpoch`].
 type SnapTargetRow<'a> = (
+    Entity,
     &'a NetPlayer,
     &'a Player,
+    &'a mut ResetEpoch,
     &'a mut Position,
     &'a mut Rotation,
     &'a mut LinearVelocity,
@@ -750,15 +812,26 @@ type SnapTargetRow<'a> = (
 );
 
 /// Client-side: fold the newest staged snapshot into the remote copies'
-/// [`RemoteLerp`] blend and velocities. Wrong-generation and stale-tick
-/// frames drop untouched; entries without a spawned copy (a roster slot
-/// whose car hasn't arrived, or our own seat) are skipped — own-seat
-/// reconciliation is a later slice.
+/// [`RemoteLerp`] blend and velocities, and reconcile the own seat on
+/// an epoch advance (F25-A.5). Wrong-generation and stale-tick frames
+/// drop untouched; entries without a spawned entity are skipped.
+///
+/// Two snap triggers share the "teleport, not motion" rule: a changed
+/// `epoch` — the authority's declared reset — or a correction past
+/// [`CORRECTION_SNAP_DIST`]. A remote copy snaps its pose and collapses
+/// the blend; the own seat takes the asserted state outright — pose and
+/// velocities — since the authority moved the car the local sim thought
+/// it owned. Between epochs the own seat's entries are ignored: local
+/// physics predicts it, and a mid-drive blend would rubber-band the
+/// driver toward a host copy that lags by the round-trip. Both snap
+/// paths mark [`Teleported`] so a swept-segment consumer breaks rather
+/// than banking the jump.
 pub fn apply_snapshots(
+    mut commands: Commands,
     mut snaps: ResMut<RemoteSnaps>,
     session: Res<Session>,
     time: Res<Time>,
-    mut remotes: Query<SnapTargetRow<'_>, With<RemotePick>>,
+    mut players: Query<SnapTargetRow<'_>, With<NetPlayer>>,
     mut report: ResMut<NetDriveReport>,
 ) {
     let Some(snap) = snaps.latest.take() else {
@@ -786,22 +859,35 @@ pub fn apply_snapshots(
         .unwrap_or(0.0);
     snaps.last_arrival = Some(now);
     for entry in &snap.entries {
-        for (wire, player, mut pos, mut rot, mut vel, mut ang, lerp) in &mut remotes {
+        for (entity, wire, player, mut epoch, mut pos, mut rot, mut vel, mut ang, lerp) in
+            &mut players
+        {
             if wire.0 != entry.player {
                 continue;
             }
-            // A local seat never takes a snapshot pose — predicted, not
-            // reconciled.
-            if player.control == PlayerControl::Local {
-                break;
-            }
             let to_pos = Vec3::from(entry.pos);
             let to_rot = wire_quat(entry.rot);
+            let authority_reset = entry.epoch != epoch.0;
+            epoch.0 = entry.epoch;
+            // The own seat: only an authority reset may move it — the
+            // host teleported our car (its copy of us is the truth),
+            // so the predicted pose yields to the asserted one.
+            if player.control == PlayerControl::Local {
+                if authority_reset {
+                    *pos = Position(to_pos);
+                    *rot = Rotation(to_rot);
+                    *vel = LinearVelocity(Vec3::from(entry.vel));
+                    *ang = AngularVelocity(Vec3::from(entry.angvel));
+                    commands.entity(entity).insert(Teleported);
+                    report.resets += 1;
+                }
+                break;
+            }
             *vel = LinearVelocity(Vec3::from(entry.vel));
             *ang = AngularVelocity(Vec3::from(entry.angvel));
             match lerp {
                 Some(mut lerp) => {
-                    if to_pos.distance(pos.0) > CORRECTION_SNAP_DIST {
+                    if authority_reset || to_pos.distance(pos.0) > CORRECTION_SNAP_DIST {
                         // A teleport, not motion — the authority's
                         // reset/recovery moved the car. Snap rather
                         // than blend a slide through the world.
@@ -824,6 +910,10 @@ pub fn apply_snapshots(
                     *pos = Position(to_pos);
                     *rot = Rotation(to_rot);
                 }
+            }
+            if authority_reset {
+                commands.entity(entity).insert(Teleported);
+                report.resets += 1;
             }
             break;
         }
@@ -914,6 +1004,52 @@ mod tests {
             std::f32::consts::FRAC_1_SQRT_2,
         ]);
         assert!((q.length() - 1.0).abs() < 1e-4);
+    }
+
+    /// Host-side epochs: a `ResetVehicle` landing on a participant bumps
+    /// its counter, a non-participant target (a trailer) touches none,
+    /// and a reset-all bumps every participant. The wrapping counter
+    /// rolls at 256 — a wrap is a false snap, never a missed reset.
+    #[test]
+    fn reset_vehicle_events_bump_the_seat_epoch() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<ResetVehicle>()
+            .init_resource::<NetDriveReport>()
+            .add_systems(Update, track_reset_epochs);
+        let car = app.world_mut().spawn(ResetEpoch(0)).id();
+        let trailer = app.world_mut().spawn_empty().id();
+
+        let write = |app: &mut App, entity: Option<Entity>| {
+            app.world_mut()
+                .resource_mut::<Messages<ResetVehicle>>()
+                .write(ResetVehicle {
+                    entity,
+                    position: Vec3::ZERO,
+                    yaw: 0.0,
+                });
+        };
+
+        write(&mut app, Some(car));
+        app.update();
+        assert_eq!(app.world().get::<ResetEpoch>(car).unwrap().0, 1);
+
+        write(&mut app, Some(trailer));
+        app.update();
+        assert_eq!(
+            app.world().get::<ResetEpoch>(car).unwrap().0,
+            1,
+            "a non-participant reset touches no epoch"
+        );
+
+        write(&mut app, None);
+        app.update();
+        assert_eq!(
+            app.world().get::<ResetEpoch>(car).unwrap().0,
+            2,
+            "a reset-all bumps every participant"
+        );
+        assert_eq!(app.world().resource::<NetDriveReport>().resets, 2);
     }
 
     fn roster_entry(id: u16) -> mm2_net::RosterEntry {

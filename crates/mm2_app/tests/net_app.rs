@@ -37,7 +37,7 @@ use mm2_net::{
     Client, DriveInput, Host, HostConfig, HostEvent, LateJoin, LeaveCause, Message, SnapEntry,
     VehiclePick, hello,
 };
-use mm2_vehicle::{VehicleConfig, VehicleInput};
+use mm2_vehicle::{ResetVehicle, Teleported, VehicleConfig, VehicleInput};
 use support::{Proc, WAIT, listening, mount};
 
 const HOST_EXE: &str = env!("CARGO_BIN_EXE_mm2-host");
@@ -86,6 +86,9 @@ fn lobby_app(vfs: Vfs) -> App {
         .init_resource::<SessionControl>()
         .init_resource::<LobbyState>()
         .init_resource::<ButtonInput<KeyCode>>()
+        // F25-A.5: `track_reset_epochs` reads the same `ResetVehicle`
+        // stream `vehicle_reset` applies.
+        .add_message::<ResetVehicle>()
         .insert_resource(Mm2Vfs(vfs))
         .insert_resource(SelectedCar {
             def: None,
@@ -155,6 +158,9 @@ fn host_app(vfs: Vfs, link: HostLink) -> App {
                 net::drive_host.after(session::drive_session),
                 netdrive::reconcile_remote_players.after(net::drive_host),
                 netdrive::apply_remote_inputs.after(net::drive_host),
+                netdrive::track_reset_epochs
+                    .after(net::drive_host)
+                    .before(netdrive::publish_snapshots),
                 netdrive::publish_snapshots.after(net::drive_host),
             ),
         );
@@ -1516,8 +1522,9 @@ fn mm2_host_flag_gates_are_named_exits() {
 // Inputs up, host-side remote simulation, snapshots down — over the
 // same loopback socket the lobby already owns. These legs prove the
 // wire drives real entities (mailbox-fed `VehicleInput` on the host,
-// snapshot-lerped kinematic copies on the client); they do not claim
-// prediction, reconciliation of the local seat, or damage/result
+// snapshot-lerped kinematic copies on the client, epoch-declared
+// resets reconciling either side); they do not claim full prediction
+// replay, drift correction between epochs, or damage/result
 // replication — the named gaps of this slice.
 
 /// Drive a hosted session to `Playing`: the operator `start` mints the
@@ -1684,6 +1691,41 @@ fn a_remote_players_inputs_drive_the_hosted_car() {
             > 0
     );
 
+    // F25-A.5: an authority reset on the remote seat bumps its wire
+    // epoch — the next `Snap` declares the teleport instead of
+    // presenting only a jumped pose.
+    {
+        let mut q = app.world_mut().query_filtered::<Entity, With<RemotePick>>();
+        let remote = q.single(app.world()).expect("the remote car");
+        app.world_mut()
+            .resource_mut::<Messages<ResetVehicle>>()
+            .write(ResetVehicle {
+                entity: Some(remote),
+                position: Vec3::new(0.0, 1.5, 0.0),
+                yaw: 0.0,
+            });
+    }
+    app.update();
+    {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&netdrive::ResetEpoch, With<RemotePick>>();
+        assert_eq!(
+            q.single(app.world()).expect("the remote car").0,
+            1,
+            "the authority reset bumped the seat's epoch"
+        );
+    }
+    until_wire(
+        &mut peer,
+        |m| matches!(m, Message::Snap { entries, .. } if entries.iter().any(|e| e.player == 1 && e.epoch == 1)),
+    );
+    assert_eq!(
+        app.world().resource::<netdrive::NetDriveReport>().resets,
+        1,
+        "the tracked reset counted once"
+    );
+
     // Silence past INPUT_STALE zeroes the input — a stalled driver
     // coasts rather than keeping its last throttle.
     thread::sleep(netdrive::INPUT_STALE + Duration::from_millis(60));
@@ -1800,7 +1842,9 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
     }
 
     // The local car's settled input rides up — the host's mailbox sees
-    // this seat's wire id with this session's generation.
+    // this seat's wire id with this session's generation. It carries
+    // the rigid row so its snapshot entry has a predicted pose to
+    // reconcile (F25-A.5).
     let local = app
         .world_mut()
         .spawn((
@@ -1814,6 +1858,10 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 throttle: 0.5,
                 ..VehicleInput::default()
             },
+            avian3d::prelude::Position::default(),
+            avian3d::prelude::Rotation::default(),
+            avian3d::prelude::LinearVelocity::default(),
+            avian3d::prelude::AngularVelocity::default(),
         ))
         .id();
     spin(&mut app, |a| {
@@ -1843,15 +1891,18 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                     rot: [0.0, 0.0, 0.0, 1.0],
                     vel: [1.0, 0.0, 0.0],
                     angvel: [0.0, 0.0, 0.0],
+                    epoch: 0,
                 },
-                // Our own seat's entry is received and skipped —
-                // reconciliation of the local car is a later slice.
+                // Our own seat's entry is received and, epoch-equal,
+                // skipped — between authority resets the local sim
+                // owns the pose (F25-A.5).
                 SnapEntry {
                     player: our_id,
                     pos: [-50.0, 0.0, -50.0],
                     rot: [0.0, 0.0, 0.0, 1.0],
                     vel: [0.0; 3],
                     angvel: [0.0; 3],
+                    epoch: 0,
                 },
             ],
         })
@@ -1900,6 +1951,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                     rot: [0.0, 0.0, 0.0, 1.0],
                     vel: [0.0; 3],
                     angvel: [0.0; 3],
+                    epoch: 0,
                 }],
             })
             .unwrap();
@@ -1914,6 +1966,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 rot: [0.0, 0.0, 0.0, 1.0],
                 vel: [0.0; 3],
                 angvel: [0.0; 3],
+                epoch: 0,
             }],
         })
         .unwrap();
@@ -1947,6 +2000,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 rot: [0.0, 0.0, 0.0, 1.0],
                 vel: [0.0; 3],
                 angvel: [0.0; 3],
+                epoch: 0,
             }],
         })
         .unwrap();
@@ -1986,6 +2040,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 rot: [0.0, 0.0, 0.0, 1.0],
                 vel: [0.0; 3],
                 angvel: [0.0; 3],
+                epoch: 0,
             }],
         })
         .unwrap();
@@ -2014,6 +2069,143 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
             pos.0.x < 83.5,
             "a 4 m correction blends instead of snapping: {:?}",
             pos.0
+        );
+    }
+
+    // F25-A.5: an epoch advance on *our own* seat is the authority
+    // saying "I teleported your car" — the predicted pose yields
+    // outright (position, rotation and velocities), marked `Teleported`
+    // so swept-segment consumers re-anchor on the jump.
+    spin(&mut app, |a| {
+        a.world().get::<netdrive::ResetEpoch>(local).is_some()
+    });
+    host.ctl()
+        .broadcast(&Message::Snap {
+            generation,
+            tick: 10,
+            entries: vec![SnapEntry {
+                player: our_id,
+                pos: [-50.0, 0.0, -50.0],
+                rot: [
+                    0.0,
+                    std::f32::consts::FRAC_1_SQRT_2,
+                    0.0,
+                    std::f32::consts::FRAC_1_SQRT_2,
+                ],
+                vel: [2.0, 0.0, 0.0],
+                angvel: [0.0; 3],
+                epoch: 1,
+            }],
+        })
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world().resource::<netdrive::NetDriveReport>().resets >= 1
+    });
+    {
+        let pos = app
+            .world()
+            .get::<avian3d::prelude::Position>(local)
+            .unwrap()
+            .0;
+        assert!(
+            (pos - Vec3::new(-50.0, 0.0, -50.0)).length() < 1e-3,
+            "the authority's reset moved our own car: {pos:?}"
+        );
+        let vel = app
+            .world()
+            .get::<avian3d::prelude::LinearVelocity>(local)
+            .unwrap()
+            .0;
+        assert!(
+            (vel - Vec3::new(2.0, 0.0, 0.0)).length() < 1e-3,
+            "the asserted velocity lands too: {vel:?}"
+        );
+        assert_eq!(
+            app.world().get::<netdrive::ResetEpoch>(local).unwrap().0,
+            1,
+            "the applied epoch is stamped on the seat"
+        );
+        assert!(
+            app.world().get::<Teleported>(local).is_some(),
+            "a reconciled teleport is marked so swept consumers re-anchor"
+        );
+    }
+
+    // An epoch-equal entry naming our seat is ignored — between
+    // authority resets the local sim owns the pose; a host copy that
+    // merely lags must never rubber-band the driver.
+    let applied = app
+        .world()
+        .resource::<netdrive::NetDriveReport>()
+        .snaps_applied;
+    host.ctl()
+        .broadcast(&Message::Snap {
+            generation,
+            tick: 11,
+            entries: vec![SnapEntry {
+                player: our_id,
+                pos: [999.0, 0.0, 999.0],
+                rot: [0.0, 0.0, 0.0, 1.0],
+                vel: [0.0; 3],
+                angvel: [0.0; 3],
+                epoch: 1,
+            }],
+        })
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .snaps_applied
+            > applied
+    });
+    {
+        let pos = app
+            .world()
+            .get::<avian3d::prelude::Position>(local)
+            .unwrap()
+            .0;
+        assert!(
+            (pos - Vec3::new(-50.0, 0.0, -50.0)).length() < 1e-3,
+            "an epoch-equal entry must not rubber-band the own seat: {pos:?}"
+        );
+    }
+
+    // And the declared reset beats the blend bound on remote copies
+    // too: an epoch bump snaps a sub-`CORRECTION_SNAP_DIST` correction
+    // — an in-place wreck resolve is a teleport even when it lands on
+    // the same spot.
+    host.ctl()
+        .broadcast(&Message::Snap {
+            generation,
+            tick: 12,
+            entries: vec![SnapEntry {
+                player: 0,
+                pos: [85.0, 1.0, 80.0],
+                rot: [0.0, 0.0, 0.0, 1.0],
+                vel: [0.0; 3],
+                angvel: [0.0; 3],
+                epoch: 1,
+            }],
+        })
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world().resource::<netdrive::NetDriveReport>().resets >= 2
+    });
+    {
+        let mut q = app.world_mut().query_filtered::<(
+            &netdrive::RemoteLerp,
+            &avian3d::prelude::Position,
+        ), With<RemotePick>>();
+        let (lerp, pos) = q.single(app.world()).expect("the host copy");
+        let target = Vec3::new(85.0, 1.0, 80.0);
+        assert!(
+            (pos.0 - target).length() < 1e-3,
+            "an epoch-declared reset snaps under the blend bound: {:?}",
+            pos.0
+        );
+        assert!(
+            (lerp.from_pos - target).length() < 1e-3 && (lerp.to_pos - target).length() < 1e-3,
+            "the collapsed blend holds the landing"
         );
     }
 

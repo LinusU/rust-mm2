@@ -1680,9 +1680,14 @@ fn main() {
                     // spawning; their `VehicleInput` comes from the
                     // wire mailbox and their settled poses go back out
                     // as snapshots — all after the drain sees this
-                    // frame's lobby events.
+                    // frame's lobby events. Resets bump the wire epoch
+                    // before the publish so a teleport and its epoch
+                    // leave on the same `Snap`.
                     netdrive::reconcile_remote_players.after(net::drive_host),
                     netdrive::apply_remote_inputs.after(net::drive_host),
+                    netdrive::track_reset_epochs
+                        .after(net::drive_host)
+                        .before(netdrive::publish_snapshots),
                     netdrive::publish_snapshots.after(net::drive_host),
                 ),
             );

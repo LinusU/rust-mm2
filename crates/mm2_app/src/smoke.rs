@@ -692,6 +692,9 @@ fn run_headless(
                         // contract as the windowed app.
                         crate::netdrive::reconcile_remote_players.after(net::drive_host),
                         crate::netdrive::apply_remote_inputs.after(net::drive_host),
+                        crate::netdrive::track_reset_epochs
+                            .after(net::drive_host)
+                            .before(crate::netdrive::publish_snapshots),
                         crate::netdrive::publish_snapshots.after(net::drive_host),
                     ),
                 );

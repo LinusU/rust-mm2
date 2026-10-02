@@ -12,8 +12,9 @@
 /// the `SetVehicle`/`VehicleRefused` negotiation pair landed. v3:
 /// `Start`/`Cancel` (session lifecycle) and `RejectCode::SessionStarted`
 /// landed. v4: `Input`/`Snap` — the in-session driving transport
-/// (F25-A).
-pub const PROTOCOL_VERSION: u16 = 4;
+/// (F25-A). v5: `SnapEntry` gained `epoch`, the authority's per-player
+/// reset counter (F25-A.5).
+pub const PROTOCOL_VERSION: u16 = 5;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -167,6 +168,15 @@ pub struct SnapEntry {
     pub vel: [f32; 3],
     /// Angular velocity, rad/s.
     pub angvel: [f32; 3],
+    /// The authority's reset counter for this seat — bumped every time
+    /// the host teleports the participant (damage/stuck/recovery/manual
+    /// reset), wrapping at 256. A changed value means the asserted pose
+    /// is a teleport, not motion: receivers snap to it rather than
+    /// blending, and the owning client reconciles its own seat. Only
+    /// *difference* is read, so a wrap is a false snap at worst, never a
+    /// missed reset — 256 resets between applied snapshots is far past
+    /// any plausible stream gap.
+    pub epoch: u8,
 }
 
 /// One wire message.
@@ -552,6 +562,7 @@ impl Message {
                     {
                         out.extend_from_slice(&v.to_le_bytes());
                     }
+                    out.push(e.epoch);
                 }
             }
         }
@@ -641,6 +652,7 @@ impl Message {
                         rot: [cur.f32()?, cur.f32()?, cur.f32()?, cur.f32()?],
                         vel: cur.vec3()?,
                         angvel: cur.vec3()?,
+                        epoch: cur.u8()?,
                     });
                 }
                 Self::Snap {
@@ -786,6 +798,7 @@ mod tests {
                         rot: [0.0, 0.707, 0.0, 0.707],
                         vel: [12.5, 0.0, -1.0],
                         angvel: [0.0, 0.4, 0.0],
+                        epoch: 2,
                     },
                     SnapEntry {
                         player: 3,
@@ -793,6 +806,7 @@ mod tests {
                         rot: [0.0, 0.0, 0.0, 1.0],
                         vel: [0.0, 0.0, 0.0],
                         angvel: [0.0, 0.0, 0.0],
+                        epoch: 0,
                     },
                 ],
             },
@@ -902,6 +916,7 @@ mod tests {
                 rot: [0.0, 0.0, 0.0, 1.0],
                 vel: [0.0; 3],
                 angvel: [0.0; 3],
+                epoch: 0,
             };
             MAX_PLAYERS as usize + 1
         ];

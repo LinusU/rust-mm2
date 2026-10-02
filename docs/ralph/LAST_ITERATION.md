@@ -1,3 +1,95 @@
+# Last iteration — F25-A.5: reset epochs on the wire — the authority's
+# teleports reconcile the owning seat and snap remote copies
+# deterministically (iteration 026, run 20261001T195454-62282 continued)
+
+Implementation iteration on `ralph/night` (baseline `a31dc72` — the
+F25-A.4 candidate; external verify + review pass with gaps only). One
+coherent slice: the gap the review named "open and now observable" —
+the host resolves a remote driver's reset, but the owning client's
+predicted car never learned, so a wrecked remote driver stayed wrecked
+in their own view forever.
+
+## Task selection
+
+F25-A.4's own remaining-items list carried "own-seat
+prediction/reconciliation — the owning client does not yet learn it was
+reset". A pose-difference heuristic cannot detect it: the commonest
+authority reset is *in place* (the stuck/wreck resolve lands the car on
+the same spot, uprighted) — `CORRECTION_SNAP_DIST` only sees teleports
+with distance. So the wire now declares resets: `SnapEntry.epoch` is
+the authority's per-seat reset counter.
+
+## What landed
+
+- `mm2_net` — protocol v5: `SnapEntry` gains `epoch: u8`, the seat's
+  reset counter (wraps at 256 — only *difference* is read, so a wrap
+  is a false snap at worst, never a missed reset).
+- `mm2_app::netdrive::ResetEpoch` — one component on every participant
+  (remote spawns and the `NetPlayer` stamping of the local car),
+  meaning "the reset epoch this entity's pose reflects". On the host,
+  `track_reset_epochs` reads the same `ResetVehicle` stream
+  `vehicle_reset` applies (independent cursors — it can never steal a
+  reset) and bumps the target's counter; `entity: None` bumps all.
+  `publish_snapshots` stamps it, ordered after the tracker so a bump
+  and its teleported pose leave on the same `Snap`.
+- `apply_snapshots` — the epoch is a second snap trigger beside the
+  20 m distance bound (which stays as the catch-all for teleports the
+  epoch cannot describe). Remote copies snap on either; the **own
+  seat** — the `PlayerControl::Local` car — takes the asserted pose and
+  velocities outright when the epoch advances, marked `Teleported` so
+  swept-segment consumers re-anchor. Epoch-equal own-seat entries stay
+  ignored: between authority resets the local sim owns the pose, and
+  blending toward a host copy that lags by the round-trip would
+  rubber-band the driver.
+- `input::reset_input` — the `R`/pad reset is now authority-gated.
+  Under a predicted session a local teleport was exactly the
+  self-teleport spec req 4 forbids: the host copy could never learn it
+  and the two truths would diverge permanently. A remote driver's
+  recovery is the authority's detectors (impact-armed stuck,
+  water/out-of-bounds recovery, wreck resolve) answered by an
+  epoch-declared reset. A driver-*requested* reset over the wire is
+  named F25-B scope — the gate trades a working-looking but divergent
+  key for an honest one.
+- `NetDriveReport.resets` counts authority resets observed (host:
+  tracked bumps; client: applied epoch teleports).
+
+## Tests
+
+- netdrive units +1 — `reset_vehicle_events_bump_the_seat_epoch`:
+  targeted bump, non-participant target ignored, reset-all bumps all.
+- `net_app` (29 tests, extended in place): host leg — a hand-written
+  `ResetVehicle` on the remote car bumps `ResetEpoch` and the next
+  wire `Snap` carries `epoch: 1` for that seat. Client legs — an
+  epoch-1 own-seat entry snaps the local car's pose + velocities and
+  stamps `Teleported`; an epoch-equal own-seat entry never moves it;
+  an epoch bump snaps a remote copy at 5 m — under the blend bound —
+  proving the declared reset beats distance.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked --workspace
+--all-targets --all-features -- -D warnings` clean; `cargo test
+--locked --workspace` green (mm2_net 58/58, mm2_app lib 71, net_app
+29/29, session 26/26 — recorded below/verify log).
+
+## Classification / remaining open items
+
+- The epoch mechanism is an implementation choice; the *policy* it
+  encodes — authority resets reconcile the owning seat, epoch-equal
+  divergence stays predicted-local — is designed, documented per spec
+  req 2/4's leave to choose the prediction policy.
+- Still open F25-A scope: continuous drift reconciliation between
+  epochs (sub-epoch divergence is accepted — physics agreement bounds
+  it in practice; a worst case is the 20 m snap bound firing), full
+  input-replay prediction, replicated damage/result presentation for
+  remote drivers, input rate-limiting, interpolation tuning, and a
+  wire-carried driver reset request (the R-gate's UX successor).
+- All evidence is synthetic/loopback; no retail-install leg (no
+  content paths changed), no two-process or impairment-matrix run —
+  F25-AC01..AC06 stay open.
+
+---
+
 # Last iteration — F25-A.4: authority-owned remote-driver outcomes —
 # the host's damage/stuck/recovery pipeline resolves remote drivers
 # (iteration 025, run 20261001T195454-62282 continued)

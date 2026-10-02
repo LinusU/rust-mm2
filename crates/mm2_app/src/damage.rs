@@ -26,8 +26,9 @@
 //!   opponent-destruction behavior is unverified); remote participants
 //!   take the same in-place arm on the authority that simulates them
 //!   (F25-A.4 — the host owns their physics truth, and the reset rides
-//!   the snapshot stream down; telling the *owning* client it was reset
-//!   is own-seat reconciliation, still open).
+//!   the snapshot stream down; since F25-A.5 the bump is declared on
+//!   the wire by `SnapEntry::epoch`, which is also how the *owning*
+//!   client reconciles the reset onto its predicted car).
 //!
 //! Both systems are authority-gated and drain their input while the
 //! session is not `Playing`, so a buffered stale event can never flush

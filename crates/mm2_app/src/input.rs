@@ -181,7 +181,12 @@ pub fn vehicle_input(
 
 /// `R` / [`pad::RESET`] resets the player vehicle (and any trailer) to
 /// the spawn point. Driving-phase only: a reset while `Paused` would
-/// teleport the car under the overlay.
+/// teleport the car under the overlay. Authority only: under a
+/// predicted (`Remote`) session the local teleport would move a car the
+/// host never reset — a self-teleport its wire copy can never learn —
+/// so the remote driver's recovery is the authority's detectors
+/// resolving the seat and the reset epoch carrying it back (F25-A.5;
+/// a driver-requested reset over the wire is F25-B scope).
 pub fn reset_input(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
@@ -192,6 +197,7 @@ pub fn reset_input(
     mut writer: MessageWriter<ResetVehicle>,
 ) {
     if !session.is_playing()
+        || !session.authority_role().is_authority()
         || !control_just_pressed(&keys, &pads, &windows, KeyCode::KeyR, pad::RESET)
     {
         return;

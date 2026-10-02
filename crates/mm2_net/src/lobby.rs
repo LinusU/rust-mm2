@@ -2520,6 +2520,7 @@ mod tests {
                 rot: [0.0, 0.0, 0.0, 1.0],
                 vel: [4.0, 0.0, 0.0],
                 angvel: [0.0, 5.0, 0.0],
+                epoch: 0,
             }],
         };
         host.ctl().broadcast(&snap).unwrap();
