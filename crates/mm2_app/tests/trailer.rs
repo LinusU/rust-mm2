@@ -139,3 +139,72 @@ fn the_hitch_joint_disables_car_trailer_contacts() {
         "trailer drifted off the hitch: {trailer_pos} vs {car_pos}"
     );
 }
+
+/// The hitch joint rides as the trailer's child so a trailer despawn —
+/// a remote owner's leave/re-pick reconcile, or session teardown —
+/// sweeps it instead of leaving a standalone entity referencing dead
+/// bodies until the `SessionEntity` sweep.
+#[test]
+fn despawning_the_trailer_takes_the_hitch_joint_with_it() {
+    let mut app = physics_app();
+    let car_pos = Vec3::new(0.0, 1.2, 0.0);
+    let car = app
+        .world_mut()
+        .spawn((
+            vehicle_bundle(&VehicleConfig::default()),
+            Position(car_pos),
+            Transform::from_translation(car_pos),
+            Rotation(Quat::IDENTITY),
+        ))
+        .id();
+
+    let def = trailer_def();
+    let trailer = {
+        let world = app.world_mut();
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let ent = {
+            let mut commands = Commands::new(&mut queue, world);
+            let (mut meshes, mut images, mut materials) = (
+                Assets::<Mesh>::default(),
+                Assets::<Image>::default(),
+                Assets::<StandardMaterial>::default(),
+            );
+            let car_tf = *world.get::<Transform>(car).unwrap();
+            let (e, _missing) = car_visual::spawn_trailer(
+                &mut commands,
+                &Vfs::new(),
+                &def,
+                0,
+                &mut meshes,
+                &mut images,
+                &mut materials,
+                car,
+                car_tf,
+                SessionEntity(1),
+            );
+            e
+        };
+        queue.apply(world);
+        ent
+    };
+
+    let mut joints = app
+        .world_mut()
+        .query_filtered::<Entity, With<SphericalJoint>>();
+    assert_eq!(
+        joints.iter(app.world()).count(),
+        1,
+        "one hitch joint before the despawn"
+    );
+
+    app.world_mut().entity_mut(trailer).despawn();
+    assert_eq!(
+        joints.iter(app.world()).count(),
+        0,
+        "the joint despawns with its trailer — no orphan on dead bodies"
+    );
+    assert!(
+        app.world().get_entity(car).is_ok(),
+        "the towing car is untouched"
+    );
+}

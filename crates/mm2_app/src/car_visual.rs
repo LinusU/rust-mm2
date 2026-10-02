@@ -480,6 +480,11 @@ pub fn spawn_trailer(
         .id();
     commands.spawn((
         owner,
+        // A child of the trailer so the trailer's despawn sweeps the
+        // joint with it — as a standalone entity it would outlive a
+        // mid-session leave/re-pick despawn, orphaned on dead bodies
+        // until `SessionEntity` teardown swept it.
+        ChildOf(entity),
         SphericalJoint::new(car, entity)
             .with_local_anchor1(Vec3::from(trailer.car_hitch))
             .with_local_anchor2(Vec3::from(trailer.trailer_hitch))
