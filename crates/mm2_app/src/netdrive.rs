@@ -420,6 +420,9 @@ fn desired_remotes(lobby: &LobbyState, self_wire: u16) -> BTreeMap<u16, VehicleP
 /// Remote entities are `SessionEntity`-stamped like everything the
 /// session owns, so teardown never needs a second sweep; `RemotePick`
 /// is the marker the reconcile uses to tell them from the local car.
+// Threads the session, lobby and both link resources plus the asset
+// stores a spawn needs — a SystemParam bundle for them would exist only
+// to satisfy the lint.
 #[allow(clippy::too_many_arguments)]
 pub fn reconcile_remote_players(
     mut commands: Commands,
@@ -524,6 +527,8 @@ pub fn reconcile_remote_players(
 /// that fails to load is warned and skipped — the validator already
 /// gates roster picks, so this is a defensive path (a dev-car pick
 /// cannot fail). Returns whether the entity was spawned.
+// Every argument is a distinct borrow `reconcile_remote_players` already
+// holds — bundling them into a struct would just move the same list.
 #[allow(clippy::too_many_arguments)]
 fn spawn_remote(
     commands: &mut Commands,
@@ -788,6 +793,9 @@ pub struct RequestGrants {
 /// key-edge rate, so without it one client could teleport-lock its seat
 /// every update. Requests carry no target — the sender's roster slot
 /// names the seat — so a peer can only ever reset its own car.
+// A Bevy system that has to see the host link, session, lobby, spawn
+// point, race, participant query, reset writer, grant ledger and report
+// — the seat-grant computation genuinely needs all of them.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_reset_requests(
     host: Res<HostLink>,
