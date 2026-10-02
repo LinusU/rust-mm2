@@ -1061,43 +1061,9 @@ fn spawn_remote(
     // the same blend-and-spin treatment the car copy gets).
     if let Some(trailer) = def.as_ref().and_then(|d| d.trailer.as_ref()) {
         if predicted {
-            let rest_offset = Vec3::from(trailer.car_hitch) - Vec3::from(trailer.trailer_hitch);
-            let trot = Quat::from_rotation_y(yaw);
-            let tpos = pos + trot * rest_offset;
-            let te = commands
-                .spawn((
-                    owner,
-                    ObjectIdentity(session.mint_object_id()),
-                    role,
-                    car_visual::Trailer {
-                        towing: vehicle,
-                        rest_offset,
-                    },
-                    RemoteTrailer { owner: wire },
-                    RemotePick(pick.clone()),
-                    vehicle_bundle(&trailer.config),
-                    Transform::from_translation(tpos).with_rotation(trot),
-                    TransformInterpolation,
-                    Visibility::Visible,
-                ))
-                .id();
-            // Same insert-over-bundle pattern the seat spawn uses:
-            // `vehicle_bundle` already carries `RigidBody`, so the
-            // kinematic override goes through `insert`, not the spawn
-            // tuple (a duplicate component in one bundle panics).
-            commands.entity(te).insert((
-                RigidBody::Kinematic,
-                RemoteReplica,
-                RemoteDrive::default(),
-                RemoteLerp {
-                    from_pos: tpos,
-                    from_rot: trot,
-                    to_pos: tpos,
-                    to_rot: trot,
-                    start: 0.0,
-                    end: 0.0,
-                },
-            ));
+            let te = spawn_trailer_copy(
+                commands, session, trailer, pick, wire, vehicle, pos, yaw, owner, role,
+            );
             let missing = car_visual::spawn_vehicle_model(
                 commands,
                 vfs,
@@ -1146,6 +1112,72 @@ fn spawn_remote(
     }
     info!(player = wire, "remote participant spawned");
     true
+}
+
+/// The predicted-client half of [`spawn_remote`]'s trailer rig (F25-B):
+/// a kinematic copy the `Snap.trailers` rows drive — no hitch joint,
+/// the wire owns its pose. `RemoteReplica`/`RemoteLerp`/`RemoteDrive`
+/// give it the same blend-and-spin treatment the seat copy gets, and
+/// `DamageSignals` matches what the authority's real body and the local
+/// trailer carry so a client's impact-signal consumers see the remote
+/// rig's trailer contacts too.
+// Every argument is a distinct borrow `spawn_remote` already holds —
+// bundling them into a struct would just move the same list.
+#[allow(clippy::too_many_arguments)]
+fn spawn_trailer_copy(
+    commands: &mut Commands,
+    session: &mut Session,
+    trailer: &mm2_content::TrailerDef,
+    pick: &VehiclePick,
+    wire: u16,
+    car: Entity,
+    pos: Vec3,
+    yaw: f32,
+    owner: SessionEntity,
+    role: mm2_game::AuthorityRole,
+) -> Entity {
+    // The same rest geometry `car_visual::spawn_trailer` uses: both
+    // hitch anchors coincide in world space while the trailer shares
+    // the car's heading.
+    let rest_offset = Vec3::from(trailer.car_hitch) - Vec3::from(trailer.trailer_hitch);
+    let trot = Quat::from_rotation_y(yaw);
+    let tpos = pos + trot * rest_offset;
+    let te = commands
+        .spawn((
+            owner,
+            ObjectIdentity(session.mint_object_id()),
+            role,
+            car_visual::Trailer {
+                towing: car,
+                rest_offset,
+            },
+            RemoteTrailer { owner: wire },
+            RemotePick(pick.clone()),
+            DamageSignals::default(),
+            vehicle_bundle(&trailer.config),
+            Transform::from_translation(tpos).with_rotation(trot),
+            TransformInterpolation,
+            Visibility::Visible,
+        ))
+        .id();
+    // Same insert-over-bundle pattern the seat spawn uses:
+    // `vehicle_bundle` already carries `RigidBody`, so the kinematic
+    // override goes through `insert`, not the spawn tuple (a duplicate
+    // component in one bundle panics).
+    commands.entity(te).insert((
+        RigidBody::Kinematic,
+        RemoteReplica,
+        RemoteDrive::default(),
+        RemoteLerp {
+            from_pos: tpos,
+            from_rot: trot,
+            to_pos: tpos,
+            to_rot: trot,
+            start: 0.0,
+            end: 0.0,
+        },
+    ));
+    te
 }
 
 /// Client-side: the local car's `VehicleInput` becomes a `DriveInput`
@@ -2411,5 +2443,81 @@ mod tests {
             ..SPEC
         });
         assert_eq!(encode_damage(Some(&degenerate)), 0);
+    }
+
+    /// The predicted trailer copy lands the same contract the
+    /// authority's real body and the local trailer carry — `DamageSignals`
+    /// included, so a client's impact-signal consumers see the remote
+    /// rig's trailer contacts — plus the kinematic `RemoteReplica`/
+    /// `RemoteLerp`/`RemoteDrive` rig the snap rows drive.
+    #[test]
+    fn a_predicted_trailer_copy_carries_damage_signals() {
+        let trailer = mm2_content::TrailerDef {
+            config: VehicleConfig {
+                trailer: true,
+                ..VehicleConfig::default()
+            },
+            model: mm2_content::VehicleModel::default(),
+            car_hitch: [0.0, 0.0, 1.9],
+            trailer_hitch: [0.0, 0.0, -2.4],
+            wheels: Vec::new(),
+        };
+        let pick = VehiclePick {
+            vehicle: "vpsemi".into(),
+            paint: 0,
+        };
+        let mut world = World::new();
+        let mut session = Session::new();
+        let car = world.spawn_empty().id();
+        let te = {
+            let mut queue = bevy::ecs::world::CommandQueue::default();
+            let mut commands = Commands::new(&mut queue, &world);
+            let te = spawn_trailer_copy(
+                &mut commands,
+                &mut session,
+                &trailer,
+                &pick,
+                3,
+                car,
+                Vec3::new(2.0, 0.6, -4.0),
+                0.5,
+                SessionEntity(7),
+                mm2_game::AuthorityRole::Predicted,
+            );
+            queue.apply(&mut world);
+            te
+        };
+        assert!(
+            world.get::<DamageSignals>(te).is_some(),
+            "the copy accumulates impact signals like every trailer"
+        );
+        assert!(
+            matches!(world.get::<RigidBody>(te), Some(RigidBody::Kinematic)),
+            "a client's copy is kinematic — the wire owns its pose"
+        );
+        assert!(world.get::<RemoteReplica>(te).is_some());
+        assert!(world.get::<RemoteDrive>(te).is_some());
+        assert!(world.get::<RemoteLerp>(te).is_some());
+        assert_eq!(
+            world.get::<RemoteTrailer>(te).unwrap().owner,
+            3,
+            "keyed by the towing seat's wire id"
+        );
+        let link = world.get::<car_visual::Trailer>(te).unwrap();
+        assert_eq!(link.towing, car);
+        assert!(
+            (link.rest_offset - Vec3::new(0.0, 0.0, 4.3)).length() < 1e-3,
+            "car_hitch - trailer_hitch, matching spawn_trailer's geometry"
+        );
+        // The copy starts hitched: trailer origin sits at the
+        // yaw-rotated rest offset off the car's pose.
+        let want =
+            Vec3::new(2.0, 0.6, -4.0) + Quat::from_rotation_y(0.5) * Vec3::new(0.0, 0.0, 4.3);
+        assert!(
+            (world.get::<Transform>(te).unwrap().translation - want).length() < 1e-3,
+            "spawned at the hitched rest pose"
+        );
+        assert_eq!(world.get::<SessionEntity>(te).unwrap().0, 7);
+        assert!(world.get::<ObjectIdentity>(te).is_some());
     }
 }
