@@ -1,3 +1,120 @@
+# Last iteration — F25-B sixth slice: replicated trailers — protocol
+# v9 gives `Snap` a `trailers` list so a trailered pick's rig rides
+# the wire, plus the `ResetVehicle`-stream follower that reseats any
+# tractor's trailer (iteration 1, run 20261002T095452-41346; resumed
+# an interrupted iteration of run 20261002T081030-24791)
+
+Implementation iteration on `ralph/night` (baseline `acabb40` — the
+v8 damage candidate; external verify + review pass with gaps only).
+The previous run's iteration was interrupted (agent exit 1) with the
+v9 production diff landed but no net-side test legs; this iteration
+finished that slice rather than starting a new one.
+
+## Task selection
+
+No failing gate or blocking finding — the prior review passed with
+gaps only. The uncommitted tree already implemented replicated
+trailers (`vpsemi`/`vpcentury` rigs) end-to-end in code; the missing
+half was its wire-side evidence and two latent bugs the new legs
+exposed.
+
+## What landed
+
+- `mm2_net` protocol v9 (`proto.rs`): `Snap` gains `trailers`, a
+  `MAX_PLAYERS`-bounded list of `SnapTrailer` rows — owner wire id,
+  pose, velocities, mean grounded-wheel spin (the `SnapEntry`
+  encoding) and a grounded flag. Trailers key off the *towing seat*
+  and ride its reset epoch; they carry none of their own. Strict
+  fixed-width decode, `OversizeTrailers` guard, exact-version admit
+  gate, round-trip/oversize fixtures updated.
+- `mm2_app::netdrive`: `RemoteTrailer { owner }` marker on both
+  roles — `spawn_remote` builds the authority's real jointed body
+  via `car_visual::spawn_trailer` or the client's kinematic
+  `RemoteLerp`/`RemoteDrive`/`RemoteReplica` copy; `publish_snapshots`
+  emits a row per trailer towing a `NetPlayer` seat (host rig
+  included); `apply_snapshots` blends a remote copy like its seat,
+  snaps it on the owner's epoch advance, and drops the own rig's
+  epoch-equal rows outright; `reconcile_remote_players` despawns a
+  trailer with its departed/re-picked owner or a stale `towing`.
+- `session::reseat_towed_trailers` — a `MessageMutator` follower on
+  the `ResetVehicle` stream, scheduled in the binary and headless
+  app after every writer and before `vehicle_reset`: every tractor
+  reset (the `R` bundle, `--reset-at`, recovery/stuck/disabled
+  resolves, scripted/opponent re-anchors, self-right, wire
+  `ResetRequest`s) now reseats that tractor's trailers at their
+  authored `rest_offset`s in the same update. This replaces the four
+  per-caller `SpawnPoint.trailers` loops (`spawn_resets`,
+  `resolve_stuck`, `resolve_recovery`, `resolve_disabled`), which
+  only ever covered the *local* player — a remote participant's rig
+  reseats on the authority identically.
+- `trailer_input` reads the tractor's `VehicleInput` by the `Trailer`
+  relation instead of `PlayerVehicle`, so a remote rig's trailer
+  copy takes its brake state off the snap-applied input.
+- `NetDriveReport.trailers_synced` → `tsyn<n>` on the smoke `net=`
+  field (client side; `tsyn0` is the honest dev-world value — the
+  dev car tows nothing).
+- `docs/research/net.md` v9 paragraph and `net=` field list updated.
+
+## Bugs the new legs caught
+
+- `spawn_remote`'s predicted trailer branch spawned
+  `vehicle_bundle(..)` **and** `RigidBody::Kinematic`/velocities in
+  one tuple — a duplicate-component panic on the first remote
+  trailered pick (never exercised: the dev car tows nothing). Now
+  the kinematic override inserts over the bundle like the seat does.
+- `apply_snapshots` hard-snapped the own rig's trailer — a real
+  local body — to the authority's lagged pose *every* snapshot,
+  fighting the hitch joint and contradicting the own-seat contract.
+  Epoch-equal rows are now dropped; the row lands only on the
+  owner's epoch advance or a real divergence.
+
+## Tests
+
+`net_app` 33→34: `a_snap_carries_the_remote_cars_drive_state`
+extended (host publishes a trailer row keyed by the seat's wire id,
+pose/vel/angvel/spin/grounded asserted off the wire);
+`a_snapshot_drives_a_remote_rigs_trailer` new (remote copy blends +
+velocities + spin rate land, own rig's epoch-equal row provably
+ignored, owner-epoch advance snaps it with `Teleported`,
+`trailers_synced` counts the landed rows);
+`an_impaired_link_still_converges_the_data_plane` now parks a
+`RemoteTrailer`+`RemotePick` trailer on the remote rig and asserts
+the reconcile despawn cascades on `Leave`. `session.rs` test:
+`spawn_resets_is_the_player_row` (the bundle shrank to the player
+row) + `reseat_towed_trailers_follows_any_tractor_reset` (stream
+follower lands the trailer the same update, through `vehicle_reset`).
+`stuck`/`recovery` trailer legs updated to declare the real `Trailer`
+relation. `mm2_net` fixtures updated for v9.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` green — 91 test binaries, 0
+failures (`net_app` 34/34, `net_drive` 2/2, mm2_net 80/80 incl. the
+v9 fixtures).
+
+## Classification / remaining open items
+
+- Implementation choice throughout (wire row shape, marker/follower
+  design); no original-behavior claim — the original's networked
+  trailer behavior is unrecovered.
+- Evidence: in-process integration legs over real loopback plus the
+  proto fixtures — but no *process-level* session ever carried a
+  trailer (`tsyn0` by design on the dev car; nonzero evidence needs
+  a retail trailered pick, and `vpsemi`'s rig on a live two-process
+  session is unexercised). No LAN, nothing rendered or driven by
+  hand.
+- `SpawnPoint.trailers` remains populated — the chase-cam occluder
+  (`camera.rs`) still reads it; it is no longer a reseat source.
+- F25-B remaining scope: replicated *result/race* state, damage
+  *event* replication (sparks/texel/breakaway — per-impact
+  positions), deduplicated audio/effects, the measured AC03
+  impairment matrix, bandwidth/update-rate budgets. AC01–AC06 stay
+  open; this slice advances req 3's trailer leg only.
+
+---
+
 # Last iteration — F25-B fifth slice: replicated damage state —
 # protocol v8 gives `SnapEntry` a damage byte so remote copies carry
 # the authority's `VehicleDamage` total and emit authored smoke off it

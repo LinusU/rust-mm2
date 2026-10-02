@@ -66,7 +66,7 @@
 //! effect replication (sparks/texel/breakaway) — those are named gaps,
 //! not silent behavior.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::time::{Duration, Instant};
 
 use avian3d::prelude::{
@@ -80,7 +80,7 @@ use mm2_game::{
 };
 use mm2_net::{
     DriveInput, Message, RemoteInputs, SNAP_FLAG_BRAKE, SNAP_FLAG_GROUNDED, SNAP_FLAG_REVERSE,
-    SnapEntry, VehiclePick,
+    SnapEntry, SnapTrailer, VehiclePick,
 };
 use mm2_vehicle::{
     DriveDirection, RemoteReplica, ResetVehicle, Teleported, Vehicle, VehicleConfig, VehicleInput,
@@ -132,9 +132,23 @@ pub struct NetPlayer(pub u16);
 
 /// The roster pick a spawned remote participant was built from — a
 /// mid-session `SetVehicle` rebroadcast that changes it respawns the
-/// entity rather than leaving a stale shell.
+/// entity rather than leaving a stale shell. A remote trailer copy
+/// carries its towing seat's pick, so a pick change respawns the whole
+/// rig.
 #[derive(Component, Debug, Clone, PartialEq)]
 pub struct RemotePick(pub VehiclePick);
+
+/// The towing seat's wire roster id on a spawned remote trailer —
+/// `Snap`'s `trailers` list keys trailer rows by the *seat*, not a
+/// fresh identity, so the copy reconciles against its owner's roster
+/// presence and pick (F25-B, protocol v9). Stamped on both roles: on
+/// the authority it marks which seat's snap the trailer rides; on a
+/// client it marks the kinematic copy.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteTrailer {
+    /// The towing participant's wire roster id (0 = the host seat).
+    pub owner: u16,
+}
 
 /// The reset epoch this entity's pose currently reflects (F25-A.5).
 /// Stamped `0` on every participant — the local car included — at
@@ -201,15 +215,23 @@ struct Snap {
     generation: u64,
     tick: u64,
     entries: Vec<SnapEntry>,
+    trailers: Vec<SnapTrailer>,
 }
 
 impl RemoteSnaps {
     /// Queue a received snapshot frame.
-    pub fn push(&mut self, generation: u64, tick: u64, entries: Vec<SnapEntry>) {
+    pub fn push(
+        &mut self,
+        generation: u64,
+        tick: u64,
+        entries: Vec<SnapEntry>,
+        trailers: Vec<SnapTrailer>,
+    ) {
         self.latest = Some(Snap {
             generation,
             tick,
             entries,
+            trailers,
         });
     }
 
@@ -268,6 +290,11 @@ pub struct NetDriveReport {
     /// own seat both count; a participant with no authored damage
     /// record has no component to write and never counts.
     pub damage_synced: u64,
+    /// `Snap.trailers` rows applied to a live trailer entity (client
+    /// side, F25-B protocol v9) — remote copies and the own rig's
+    /// trailer on a declared reset; a session with no trailered seats
+    /// never counts.
+    pub trailers_synced: u64,
 }
 
 /// A rotation off the wire, sanitized — a malformed-quaternion guard so
@@ -618,6 +645,7 @@ pub fn reconcile_remote_players(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     remotes: Query<(Entity, &NetPlayer, &RemotePick)>,
+    trailers: Query<(Entity, &car_visual::Trailer, &RemoteTrailer, &RemotePick)>,
     local: Query<Entity, (With<PlayerVehicle>, Without<NetPlayer>)>,
     mut report: ResMut<NetDriveReport>,
 ) {
@@ -662,6 +690,20 @@ pub fn reconcile_remote_players(
         .filter(|(_, w, p)| desired.get(&w.0) == Some(&p.0))
         .map(|(_, w, _)| (w.0, ()))
         .collect();
+    // A trailer reconciles against its towing seat (F25-B): a departed
+    // or re-picked owner takes the trailer down with it — the seat's
+    // respawn below rebuilds the whole rig — and a trailer whose
+    // `towing` entity is not a kept remote of the same wire id is
+    // stale, so the participant despawn above never strands a copy.
+    for (entity, trailer, marker, pick) in &trailers {
+        let owner_live = remotes.iter().any(|(e, w, p)| {
+            e == trailer.towing && w.0 == marker.owner && desired.get(&w.0) == Some(&p.0)
+        });
+        if desired.get(&marker.owner) != Some(&pick.0) || !owner_live {
+            commands.entity(entity).despawn();
+            report.despawned += 1;
+        }
+    }
     let owner = SessionEntity(session.generation());
     let role = session.authority_role();
     // The shared seat map — every remote's grid pose resolves through
@@ -871,6 +913,97 @@ fn spawn_remote(
             }
         }
         None => car_visual::spawn_dev_car(commands, &cfg, meshes, materials, vehicle),
+    }
+    // F25-B (protocol v9): a trailered pick tows its trailer on every
+    // process — the authority builds the real jointed body
+    // `spawn_trailer` gives the local car, a predicted client holds a
+    // kinematic copy the `Snap.trailers` rows drive (no joint: the wire
+    // owns its pose; `RemoteReplica`/`RemoteLerp`/`RemoteDrive` give it
+    // the same blend-and-spin treatment the car copy gets).
+    if let Some(trailer) = def.as_ref().and_then(|d| d.trailer.as_ref()) {
+        if predicted {
+            let rest_offset = Vec3::from(trailer.car_hitch) - Vec3::from(trailer.trailer_hitch);
+            let trot = Quat::from_rotation_y(yaw);
+            let tpos = pos + trot * rest_offset;
+            let te = commands
+                .spawn((
+                    owner,
+                    ObjectIdentity(session.mint_object_id()),
+                    role,
+                    car_visual::Trailer {
+                        towing: vehicle,
+                        rest_offset,
+                    },
+                    RemoteTrailer { owner: wire },
+                    RemotePick(pick.clone()),
+                    vehicle_bundle(&trailer.config),
+                    Transform::from_translation(tpos).with_rotation(trot),
+                    TransformInterpolation,
+                    Visibility::Visible,
+                ))
+                .id();
+            // Same insert-over-bundle pattern the seat spawn uses:
+            // `vehicle_bundle` already carries `RigidBody`, so the
+            // kinematic override goes through `insert`, not the spawn
+            // tuple (a duplicate component in one bundle panics).
+            commands.entity(te).insert((
+                RigidBody::Kinematic,
+                RemoteReplica,
+                RemoteDrive::default(),
+                RemoteLerp {
+                    from_pos: tpos,
+                    from_rot: trot,
+                    to_pos: tpos,
+                    to_rot: trot,
+                    start: 0.0,
+                    end: 0.0,
+                },
+            ));
+            let missing = car_visual::spawn_vehicle_model(
+                commands,
+                vfs,
+                &trailer.model,
+                pick.paint as usize,
+                meshes,
+                images,
+                materials,
+                te,
+                // Trailers carry no `vehcardamage` — no texel rig.
+                None,
+            );
+            if !missing.is_empty() {
+                warn!(car = %def.as_ref().map(|d| d.id.as_str()).unwrap_or("?"),
+                    "remote trailer missing textures: {}", missing.join(", "));
+            }
+        } else {
+            let car_xf = Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw));
+            let (te, tmissing) = car_visual::spawn_trailer(
+                commands,
+                vfs,
+                trailer,
+                pick.paint as usize,
+                meshes,
+                images,
+                materials,
+                vehicle,
+                car_xf,
+                owner,
+            );
+            // Stamped like the local spawn's trailer: simulated under
+            // the session's authority with an object id, plus the wire
+            // markers reconcile/publish key on.
+            commands.entity(te).insert((
+                ObjectIdentity(session.mint_object_id()),
+                role,
+                DamageSignals::default(),
+                RemoteTrailer { owner: wire },
+                RemotePick(pick.clone()),
+            ));
+            if !tmissing.is_empty() {
+                warn!(car = %def.as_ref().map(|d| d.id.as_str()).unwrap_or("?"),
+                    "remote trailer missing textures: {}", tmissing.join(", "));
+            }
+        }
     }
     info!(player = wire, "remote participant spawned");
     true
@@ -1103,8 +1236,10 @@ pub fn track_reset_epochs(
 /// tail encodes, plus the damage state the v8 tail encodes. The drive
 /// and damage rows are `Option`: a participant without a vehicle
 /// bundle or authored damage record still publishes its pose rather
-/// than vanishing.
+/// than vanishing. The `Entity` leads so a trailer row can key off its
+/// towing car's wire id.
 type SnapSourceRow<'a> = (
+    Entity,
     &'a NetPlayer,
     &'a ResetEpoch,
     &'a Position,
@@ -1115,6 +1250,21 @@ type SnapSourceRow<'a> = (
     Option<&'a VehicleState>,
     Option<&'a VehicleInput>,
     Option<&'a VehicleDamage>,
+);
+
+/// The publish-side trailer row (protocol v9, F25-B): the `Trailer`
+/// relation names the towing seat the row keys off, and the optional
+/// drive triple feeds `encode_present`'s spin/grounded half — a
+/// trailer with no vehicle bundle still publishes its pose.
+type SnapTrailerSourceRow<'a> = (
+    &'a car_visual::Trailer,
+    &'a Position,
+    &'a Rotation,
+    &'a LinearVelocity,
+    &'a AngularVelocity,
+    Option<&'a Vehicle>,
+    Option<&'a VehicleState>,
+    Option<&'a VehicleInput>,
 );
 
 /// Host-side: every participant's authoritative pose, broadcast once per
@@ -1132,6 +1282,9 @@ pub fn publish_snapshots(
     host: Res<HostLink>,
     session: Res<Session>,
     players: Query<SnapSourceRow<'_>, With<Player>>,
+    // Every trailer towing a `NetPlayer` seat — the host's own rig's
+    // trailer included — publishes under the owner's wire id.
+    trailers: Query<SnapTrailerSourceRow<'_>, Without<Player>>,
     mut report: ResMut<NetDriveReport>,
 ) {
     if !matches!(
@@ -1140,10 +1293,14 @@ pub fn publish_snapshots(
     ) {
         return;
     }
+    let wires: BTreeMap<Entity, u16> = players
+        .iter()
+        .map(|(entity, wire, ..)| (entity, wire.0))
+        .collect();
     let mut entries: Vec<SnapEntry> = players
         .iter()
         .map(
-            |(wire, epoch, pos, rot, vel, ang, vehicle, state, input, damage)| {
+            |(_, wire, epoch, pos, rot, vel, ang, vehicle, state, input, damage)| {
                 let (steer, spin, compression, flags) = match (vehicle, state, input) {
                     (Some(v), Some(s), Some(i)) => encode_present(&v.config, s, i),
                     _ => (0, 0, 0, 0),
@@ -1165,12 +1322,39 @@ pub fn publish_snapshots(
         )
         .collect();
     entries.sort_by_key(|e| e.player);
+    // The v9 trailer rows (F25-B): a trailer publishes the same
+    // pose/spin/grounded truth a seat does, keyed by its towing seat's
+    // wire id — the receiver snaps it on the owner entry's epoch, so it
+    // carries no epoch of its own. Brake/reverse presentation follows
+    // the tractor's `VehicleInput` through `trailer_input`, so the row
+    // only carries what pose cannot derive.
+    let mut trailer_rows: Vec<SnapTrailer> = trailers
+        .iter()
+        .filter_map(|(trailer, pos, rot, vel, ang, vehicle, state, input)| {
+            let &owner = wires.get(&trailer.towing)?;
+            let (_, spin, _, flags) = match (vehicle, state, input) {
+                (Some(v), Some(s), Some(i)) => encode_present(&v.config, s, i),
+                _ => (0, 0, 0, 0),
+            };
+            Some(SnapTrailer {
+                owner,
+                pos: pos.0.to_array(),
+                rot: rot.0.to_array(),
+                vel: vel.0.to_array(),
+                angvel: ang.0.to_array(),
+                spin,
+                flags: flags & SNAP_FLAG_GROUNDED,
+            })
+        })
+        .collect();
+    trailer_rows.sort_by_key(|t| t.owner);
     if host
         .ctl()
         .broadcast(&Message::Snap {
             generation: session.generation(),
             tick: session.tick(),
             entries,
+            trailers: trailer_rows,
         })
         .is_ok()
     {
@@ -1207,6 +1391,23 @@ type SnapTargetRow<'a> = (
     Option<&'a mut VehicleDamage>,
 );
 
+/// The snapshot application's trailer row (protocol v9, F25-B). A
+/// remote copy matches its row by `RemoteTrailer::owner`; the own rig's
+/// trailer — a real dynamic body under the predicted session — matches
+/// `Trailer::towing` == the local `NetPlayer` entity and only ever
+/// snaps, on its owner's epoch advance, like the own seat itself.
+type SnapTrailerRow<'a> = (
+    Entity,
+    &'a car_visual::Trailer,
+    Option<&'a RemoteTrailer>,
+    &'a mut Position,
+    &'a mut Rotation,
+    &'a mut LinearVelocity,
+    &'a mut AngularVelocity,
+    Option<&'a mut RemoteLerp>,
+    Option<&'a mut RemoteDrive>,
+);
+
 /// Client-side: fold the newest staged snapshot into the remote copies'
 /// [`RemoteLerp`] blend and velocities, and reconcile the own seat on
 /// an epoch advance (F25-A.5). Wrong-generation and stale-tick frames
@@ -1228,6 +1429,11 @@ pub fn apply_snapshots(
     session: Res<Session>,
     time: Res<Time>,
     mut players: Query<SnapTargetRow<'_>, With<NetPlayer>>,
+    // Every trailer — remote copies key off `RemoteTrailer::owner`, the
+    // own rig's trailer off `Trailer::towing` == the local seat entity.
+    // `Without<NetPlayer>` proves it disjoint from `players` (a trailer
+    // never carries the seat marker).
+    mut trailers: Query<SnapTrailerRow<'_>, (With<car_visual::Trailer>, Without<NetPlayer>)>,
     mut report: ResMut<NetDriveReport>,
 ) {
     let Some(snap) = snaps.latest.take() else {
@@ -1254,6 +1460,11 @@ pub fn apply_snapshots(
         .map(|prev| (now - prev).clamp(0.005, 0.5))
         .unwrap_or(0.0);
     snaps.last_arrival = Some(now);
+    // Owners whose epoch advanced this frame — the trailer rows snap on
+    // the same signal the seat does (v9, F25-B) — plus the local seat's
+    // entity/wire pair the own rig's trailer keys off.
+    let mut reset_owners: HashSet<u16> = HashSet::new();
+    let mut own_seat: Option<(Entity, u16)> = None;
     for entry in &snap.entries {
         for (
             entity,
@@ -1279,6 +1490,12 @@ pub fn apply_snapshots(
             let to_rot = wire_quat(entry.rot);
             let authority_reset = entry.epoch != epoch.0;
             epoch.0 = entry.epoch;
+            if authority_reset {
+                reset_owners.insert(entry.player);
+            }
+            if player.control == PlayerControl::Local {
+                own_seat = Some((entity, wire.0));
+            }
             // The v8 damage byte lands on every named seat, own seat
             // included: under a predicted session nothing local
             // accumulates `VehicleDamage`, so the replicated total is
@@ -1345,6 +1562,67 @@ pub fn apply_snapshots(
                 commands.entity(entity).insert(Teleported);
                 report.resets += 1;
             }
+            break;
+        }
+    }
+    // The v9 trailer rows (F25-B): a remote copy blends like its seat —
+    // an owner-epoch advance snaps it — and the own rig's trailer snaps
+    // only when *our* seat's epoch advanced (the authority reseated the
+    // whole rig in the same broadcast).
+    for t in &snap.trailers {
+        for (entity, trailer, marker, mut pos, mut rot, mut vel, mut ang, lerp, drive) in
+            &mut trailers
+        {
+            let remote_copy = marker.is_some_and(|m| m.owner == t.owner);
+            let own_rig = marker.is_none()
+                && own_seat.is_some_and(|(e, w)| w == t.owner && trailer.towing == e);
+            if !remote_copy && !own_rig {
+                continue;
+            }
+            let to_pos = Vec3::from(t.pos);
+            let to_rot = wire_quat(t.rot);
+            let snap_to =
+                reset_owners.contains(&t.owner) || to_pos.distance(pos.0) > CORRECTION_SNAP_DIST;
+            // The own rig's trailer is a real body the local hitch
+            // joint owns: like the own seat's epoch-equal entries, the
+            // authority's lagged view of it is dropped — only a
+            // declared reset (or a real divergence) reseats it, never a
+            // ~20 Hz teleport fighting the joint.
+            if own_rig && !snap_to {
+                continue;
+            }
+            *vel = LinearVelocity(Vec3::from(t.vel));
+            *ang = AngularVelocity(Vec3::from(t.angvel));
+            if let Some(mut drive) = drive {
+                drive.spin_rate = t.spin as f32 * 0.1;
+            }
+            match lerp {
+                Some(mut lerp) if remote_copy && !snap_to => {
+                    lerp.from_pos = pos.0;
+                    lerp.from_rot = rot.0;
+                    lerp.to_pos = to_pos;
+                    lerp.to_rot = to_rot;
+                    lerp.start = now;
+                    lerp.end = now + interval;
+                }
+                // A snap — the owner's declared reset or a correction
+                // past the snap distance — or the own rig's trailer,
+                // which is a real body that takes its pose outright.
+                _ => {
+                    *pos = Position(to_pos);
+                    *rot = Rotation(to_rot);
+                    if let Some(mut lerp) = lerp {
+                        lerp.from_pos = to_pos;
+                        lerp.from_rot = to_rot;
+                        lerp.to_pos = to_pos;
+                        lerp.to_rot = to_rot;
+                    }
+                    if snap_to {
+                        commands.entity(entity).insert(Teleported);
+                    }
+                }
+            }
+            report.trailers_synced += 1;
             break;
         }
     }

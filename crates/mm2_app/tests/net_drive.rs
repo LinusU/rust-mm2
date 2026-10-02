@@ -95,11 +95,12 @@ fn leading_u64(s: &str) -> u64 {
     digits.parse().unwrap()
 }
 
-/// The `net=in<s>s/<a>a/<x>x,snap<s>s/<a>a,rem<r>,req<s>s/<g>g/<d>d,rspn<n>,dsyn<n>`
+/// The `net=in<s>s/<a>a/<x>x,snap<s>s/<a>a,rem<r>,req<s>s/<g>g/<d>d,rspn<n>,dsyn<n>,tsyn<n>`
 /// record field decoded — the wire counters the run actually moved.
 /// `dsyn` (v8 damage writes) is parsed but not asserted: the dev car
 /// binds no authored damage record, so a dev-world session has no
 /// `VehicleDamage` for the byte to land on and 0 is the honest value.
+/// `tsyn` (v9 trailer rows) is the same — the dev car tows nothing.
 #[derive(Debug, Default)]
 struct NetField {
     inputs_sent: u64,
@@ -110,6 +111,8 @@ struct NetField {
     remote_spin: u64,
     #[allow(dead_code)]
     damage_synced: u64,
+    #[allow(dead_code)]
+    trailers_synced: u64,
 }
 
 fn net_field(line: &str) -> NetField {
@@ -134,6 +137,7 @@ fn net_field(line: &str) -> NetField {
         remotes: leading_u64(parts[2].strip_prefix("rem").unwrap()),
         remote_spin: leading_u64(parts[4].strip_prefix("rspn").unwrap()),
         damage_synced: leading_u64(parts[5].strip_prefix("dsyn").unwrap()),
+        trailers_synced: leading_u64(parts[6].strip_prefix("tsyn").unwrap()),
     }
 }
 

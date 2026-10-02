@@ -190,8 +190,10 @@ pub fn track_recovery(
 /// The recovery supersedes an armed [`VehicleStuck`] episode — the
 /// reset moves the car far past `move_thresh`, and disarming here
 /// keeps a stale episode from firing into the recovered pose (the
-/// `resolve_disabled` contract). The local participant's trailers
-/// re-seat behind the recovered tractor at their authored offsets.
+/// `resolve_disabled` contract). Towed trailers re-seat behind the
+/// recovered tractor through [`crate::session::reseat_towed_trailers`],
+/// the stream follower — for a remote rig exactly as for the local
+/// one.
 pub fn resolve_recovery(
     mut reader: MessageReader<RecoveryEvent>,
     session: Res<Session>,
@@ -249,20 +251,6 @@ pub fn resolve_recovery(
             // must not fire a second reset into it.
             if let Some(mut detector) = stuck {
                 detector.disarm();
-            }
-        }
-        if control == Some(PlayerControl::Local)
-            && let Some(spawn) = spawn.as_ref()
-        {
-            // Trailer rigs re-seat at their authored offsets behind the
-            // recovered tractor — the `resolve_stuck` pattern.
-            let flat = Quat::from_rotation_y(yaw);
-            for (trailer, offset) in &spawn.trailers {
-                resets.write(ResetVehicle {
-                    entity: Some(*trailer),
-                    position: position + flat * *offset,
-                    yaw,
-                });
             }
         }
         report.recovered += 1;

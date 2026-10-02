@@ -2646,6 +2646,7 @@ mod tests {
                 flags: 0,
                 damage: 0,
             }],
+            trailers: Vec::new(),
         };
         host.ctl().broadcast(&snap).unwrap();
         for client in [&mut alice, &mut bob] {
@@ -2654,6 +2655,7 @@ mod tests {
                     generation: 1,
                     tick: 42,
                     entries,
+                    ..
                 } => assert_eq!(entries[0].player, 1),
                 other => panic!("expected Snap, got {other:?}"),
             }

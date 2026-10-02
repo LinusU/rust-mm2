@@ -40,8 +40,6 @@ use mm2_game::{
 };
 use mm2_vehicle::{ResetVehicle, Vehicle, upright_recovery_pose};
 
-use crate::session::SpawnPoint;
-
 /// Per-session evidence counters for the stuck pipeline — the `vsk=`
 /// field of the headless smoke record. Session-scoped like
 /// [`crate::damage::DamageReport`]: `drive_session` resets it during
@@ -156,16 +154,14 @@ pub fn track_stuck(
 /// same landing [`vehicle_self_right`] computes. Local, AI and remote
 /// participants recover identically (designed — the original's opponent
 /// stuck behavior is unverified, UNK-13; a remote car's reset rides the
-/// snapshot stream down to its copies, F25-A.4). The local
-/// participant's trailers re-seat behind the tractor's recovered pose —
-/// the same offsets the cruise disabled outcome uses, anchored on the
-/// live pose instead of the spawn point.
+/// snapshot stream down to its copies, F25-A.4). Towed trailers re-seat
+/// behind the tractor's recovered pose through
+/// [`crate::session::reseat_towed_trailers`], the stream follower.
 ///
 /// [`vehicle_self_right`]: mm2_vehicle::systems::vehicle_self_right
 pub fn resolve_stuck(
     mut reader: MessageReader<StuckEvent>,
     session: Res<Session>,
-    spawn: Option<Res<SpawnPoint>>,
     identities: Query<(Entity, &ObjectIdentity, Option<&Player>)>,
     vehicles: Query<(&Position, &Rotation, &Vehicle)>,
     mut resets: MessageWriter<ResetVehicle>,
@@ -204,21 +200,6 @@ pub fn resolve_stuck(
             position: landing,
             yaw,
         });
-        if control == Some(PlayerControl::Local)
-            && let Some(spawn) = spawn.as_ref()
-        {
-            // Trailer rigs re-seat at their authored offsets behind the
-            // recovered tractor — the FreeReset pattern, anchored on the
-            // live pose instead of the spawn point.
-            let flat = Quat::from_rotation_y(yaw);
-            for (trailer, offset) in &spawn.trailers {
-                resets.write(ResetVehicle {
-                    entity: Some(*trailer),
-                    position: landing + flat * *offset,
-                    yaw,
-                });
-            }
-        }
         report.recovered += 1;
     }
 }

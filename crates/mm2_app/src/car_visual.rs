@@ -580,10 +580,15 @@ pub fn update_glows(
 }
 
 /// Copy the towing vehicle's brake/handbrake onto the trailer so its
-/// authored brake bias actually engages.
+/// authored brake bias actually engages. The tractor is whatever entity
+/// `Trailer::towing` names — the local player, an AI opponent or a
+/// networked participant's authority-side car (F25-B); on a predicted
+/// client the remote copy's snap-applied input feeds its trailer copy
+/// the same way. The `Without<Trailer>` filter keeps the queries
+/// provably disjoint — a trailer carries `VehicleInput` too.
 pub fn trailer_input(
-    cars: Query<&VehicleInput, With<mm2_game::PlayerVehicle>>,
-    mut trailers: Query<(&Trailer, &mut VehicleInput), Without<mm2_game::PlayerVehicle>>,
+    cars: Query<&VehicleInput, Without<Trailer>>,
+    mut trailers: Query<(&Trailer, &mut VehicleInput)>,
 ) {
     for (t, mut input) in &mut trailers {
         if let Ok(car_input) = cars.get(t.towing) {

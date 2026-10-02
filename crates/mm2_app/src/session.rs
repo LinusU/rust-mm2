@@ -484,26 +484,69 @@ pub fn dev_restart_at(
 }
 
 /// The `R`-key reset bundle: teleport the player vehicle to the spawn
-/// point and re-seat every spawned trailer at its car-space offset —
-/// the same [`ResetVehicle`] path the water/stuck/disabled recoveries
-/// and scripted re-anchors take (`Teleported` breaks race segments,
-/// and `camera::chase_follow` snaps the boom on the jump). Shared by
-/// `reset_input` and [`dev_reset_at`] so the key and the scheduled
-/// flag emit identical messages.
+/// point — the same [`ResetVehicle`] path the water/stuck/disabled
+/// recoveries and scripted re-anchors take (`Teleported` breaks race
+/// segments, and `camera::chase_follow` snaps the boom on the jump).
+/// Shared by `reset_input` and [`dev_reset_at`] so the key and the
+/// scheduled flag emit identical messages. Trailers reseat through
+/// [`reseat_towed_trailers`], the stream follower every tractor reset
+/// picks up — the bundle no longer has to name them itself.
 pub fn spawn_resets(spawn: &SpawnPoint, player: Option<Entity>) -> Vec<ResetVehicle> {
-    let rot = Quat::from_rotation_y(spawn.yaw);
-    let mut msgs = Vec::with_capacity(spawn.trailers.len() + 1);
-    msgs.push(ResetVehicle {
+    vec![ResetVehicle {
         entity: player,
         position: spawn.position,
         yaw: spawn.yaw,
-    });
-    msgs.extend(spawn.trailers.iter().map(|(entity, offset)| ResetVehicle {
-        entity: Some(*entity),
-        position: spawn.position + rot * *offset,
-        yaw: spawn.yaw,
-    }));
-    msgs
+    }]
+}
+
+/// Follower on the [`ResetVehicle`] stream (F25-B): a tractor's reset
+/// reseats every trailer towing it — `Trailer::rest_offset` rotated into
+/// the reset pose's frame — so the rig leaves `vehicle_reset` as one
+/// landed teleport. This is the generalized form of the per-caller
+/// `SpawnPoint.trailers` loops: it covers every writer the stream sees
+/// (the `R` bundle, `--reset-at`, recovery/stuck/disabled resolves,
+/// scripted and opponent re-anchors, the self-right assist, wire
+/// `ResetRequest`s) and every tractor — a trailer's owner is the
+/// `Trailer` relation, not the local `PlayerVehicle`, so a remote
+/// participant's rig reseats on the authority exactly like the local
+/// one.
+///
+/// Scheduled after every Update-side writer and before
+/// `vehicle_reset`, whose message cursor then reads the trailer rows in
+/// the same pass. The emitted rows target trailer entities, which tow
+/// nothing, so the follower cannot re-trigger itself; trailers carry no
+/// `ResetEpoch` — on the wire they ride their owner's epoch
+/// (`Message::Snap::trailers` keys rows by the seat's wire id).
+pub fn reseat_towed_trailers(
+    // A mutator, not reader+writer: the follower reads and extends the
+    // same stream, and separate `MessageReader`/`MessageWriter` params
+    // of one message type conflict over `Messages<ResetVehicle>`.
+    mut resets: MessageMutator<ResetVehicle>,
+    trailers: Query<(Entity, &car_visual::Trailer)>,
+) {
+    // Collect before writing — the emitted trailer rows land on the
+    // same stream, and reading a fresh batch in the same pass would
+    // re-observe them a frame early (harmless, a trailer tows nothing,
+    // but wasteful).
+    let msgs: Vec<ResetVehicle> = resets.read().map(|m| *m).collect();
+    for msg in msgs {
+        // `entity: None` resets every vehicle — trailers included —
+        // directly onto `msg.position`; a tractor-relative reseat would
+        // only write a different pose over the same row.
+        let Some(towing) = msg.entity else {
+            continue;
+        };
+        let rot = Quat::from_rotation_y(msg.yaw);
+        for (entity, trailer) in &trailers {
+            if trailer.towing == towing {
+                resets.write(ResetVehicle {
+                    entity: Some(entity),
+                    position: msg.position + rot * trailer.rest_offset,
+                    yaw: msg.yaw,
+                });
+            }
+        }
+    }
 }
 
 /// `--reset-at TICK` (quarantined `DevOverrides`, evidence runs

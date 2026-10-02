@@ -137,6 +137,13 @@ fn test_app(config: SessionConfig, frame_secs: f64) -> App {
                     // The binary orders every Update `ResetVehicle`
                     // writer (`dev_reset_at` here) ahead of the apply.
                     .before(mm2_vehicle::systems::vehicle_reset),
+                // F25-B: the binary's trailer-reseat follower — between
+                // the writers and the apply so a rig teleports as one.
+                session::reseat_towed_trailers
+                    .after(mm2_vehicle::systems::vehicle_self_right)
+                    .after(mm2_app::input::reset_input)
+                    .after(session::dev_reset_at)
+                    .before(mm2_vehicle::systems::vehicle_reset),
                 // Phase mirrors run after the driver — the update that
                 // enters/leaves `Paused` sees the settled phase.
                 pause::sync_physics_pause.after(session::drive_session),
@@ -1623,11 +1630,10 @@ fn self_right_is_inert_under_remote_authority() {
     }
 }
 
-/// The reset bundle re-seats every trailer at its authored car-space
-/// offset under the spawn yaw — one `ResetVehicle` for the player and
-/// one per trailer, the same messages the `R` key emits.
+/// The `R`-key bundle is just the player reset — trailer reseats are
+/// the stream follower's job (F25-B), not the caller's.
 #[test]
-fn spawn_resets_reseats_the_whole_rig() {
+fn spawn_resets_is_the_player_row() {
     let mut world = World::new();
     let player = world.spawn_empty().id();
     let trailer = world.spawn_empty().id();
@@ -1636,16 +1642,77 @@ fn spawn_resets_reseats_the_whole_rig() {
         ..SpawnPoint::new(Vec3::new(10.0, 1.0, -5.0), std::f32::consts::FRAC_PI_2)
     };
     let msgs = session::spawn_resets(&spawn, Some(player));
-    assert_eq!(msgs.len(), 2, "player + one trailer");
+    assert_eq!(msgs.len(), 1, "player only — trailers follow the stream");
     assert_eq!(msgs[0].entity, Some(player));
     assert_eq!(msgs[0].position, Vec3::new(10.0, 1.0, -5.0));
     assert_eq!(msgs[0].yaw, std::f32::consts::FRAC_PI_2);
-    assert_eq!(msgs[1].entity, Some(trailer));
-    // yaw π/2 maps the +Z rest offset onto +X.
+}
+
+/// The `ResetVehicle` follower reseats every trailer towing the reset
+/// entity at its authored car-space offset (F25-B) — the generalized
+/// form of the `SpawnPoint.trailers` loops the writers used to repeat,
+/// so a remote/AI tractor's reset carries its rig exactly like the
+/// local `R` bundle does.
+#[test]
+fn reseat_towed_trailers_follows_any_tractor_reset() {
+    // Same plugin floor as the session/stuck/recovery harnesses —
+    // Avian's collider cache reads `AssetEvent<Mesh>` messages and
+    // `debug_draw` a `Gizmos` param, both needing the asset/gizmo
+    // plugins the binary's DefaultPlugins supplies.
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_plugins(AssetPlugin::default())
+        .add_plugins(bevy::mesh::MeshPlugin)
+        .add_plugins(bevy::gizmos::GizmoPlugin)
+        .add_plugins(PhysicsPlugins::default())
+        .add_plugins(VehiclePlugin)
+        .add_systems(
+            Update,
+            session::reseat_towed_trailers.before(mm2_vehicle::systems::vehicle_reset),
+        );
+    app.finish();
+    app.cleanup();
+    let car = app
+        .world_mut()
+        .spawn((
+            mm2_vehicle::vehicle_bundle(&VehicleConfig::default()),
+            Position(Vec3::new(0.0, 1.0, 0.0)),
+            Transform::from_translation(Vec3::new(0.0, 1.0, 0.0)),
+        ))
+        .id();
+    let offset = Vec3::new(0.0, -0.5, 8.0);
+    let trailer = app
+        .world_mut()
+        .spawn((
+            mm2_app::car_visual::Trailer {
+                towing: car,
+                rest_offset: offset,
+            },
+            mm2_vehicle::vehicle_bundle(&VehicleConfig::default()),
+            Position(Vec3::new(9.0, 1.0, 9.0)),
+            Transform::from_translation(Vec3::new(9.0, 1.0, 9.0)),
+        ))
+        .id();
+    app.world_mut().write_message(ResetVehicle {
+        entity: Some(car),
+        position: Vec3::new(10.0, 1.0, -5.0),
+        yaw: std::f32::consts::FRAC_PI_2,
+    });
+    app.update();
+    // yaw π/2 maps the +Z rest offset onto +X — the trailer lands the
+    // same update, behind the tractor's new pose.
     let want = Vec3::new(18.0, 0.5, -5.0);
+    let got = app.world().get::<Position>(trailer).unwrap().0;
     assert!(
-        (msgs[1].position - want).length() < 1e-4,
-        "trailer offset rotated by the spawn yaw, got {:?}",
-        msgs[1].position
+        (got - want).length() < 1e-4,
+        "trailer re-seated at its authored offset, got {got:?}"
+    );
+    assert_eq!(
+        app.world().get::<Position>(car).unwrap().0,
+        Vec3::new(10.0, 1.0, -5.0)
+    );
+    assert!(
+        app.world().get::<Teleported>(trailer).is_some(),
+        "the reseat went through `vehicle_reset` (Teleported)"
     );
 }

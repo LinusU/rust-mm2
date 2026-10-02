@@ -88,7 +88,27 @@ texel splats, sparks and breakaway detachment stay F26 scope; the
 authored `VehicleSmoke` rig now binds at remote spawn and emits off
 the replicated total, and `sync_impairment` runs under predicted
 sessions so the client's own seat weakens the way the authority's
-copy of it does.
+copy of it does. v8→v9: `Snap` gained `trailers`, a bounded
+(`MAX_PLAYERS`) list of `SnapTrailer` rows — pose, velocities, wheel
+rate and a grounded bit for each trailered seat's trailer, keyed by
+the *towing seat's* wire id rather than a fresh identity. The
+authority's `publish_snapshots` emits a row per `Trailer` relation
+whose `towing` is a `NetPlayer` seat; on the client a remote trailer
+copy blends and spins exactly like its seat (the same `RemoteLerp`/
+`RemoteDrive` rig, `RemoteReplica`-excluded from the local sim) and
+snaps on its owner's reset epoch — trailers carry no epoch of their
+own, they ride the seat's. The predicted client's *own* trailer is
+the exception that proves the rule: it is a real jointed body the
+local hitch owns, so like the own seat's epoch-equal entries the
+authority's lagged view is dropped — only a declared reset (the
+epoch-advance row) or a real divergence reseats it. The reseat side
+of that contract is the generalized `reseat_towed_trailers`
+`ResetVehicle` follower: every tractor reset the stream carries —
+the `R` bundle, `--reset-at`, recovery/stuck/disabled resolves,
+scripted and opponent re-anchors, the self-right assist, wire
+`ResetRequest`s — emits each towed trailer's reseat ahead of the
+apply, so a remote participant's rig teleports as one on the
+authority exactly like the local `R` bundle.
 
 Handshake (always the first exchange):
 
@@ -467,7 +487,9 @@ wire actually moved rather than an in-process mailbox's contents.
   wheel spin (`rspn` — accumulated radians the client integrated into
   remote wheels), the v8 damage counter (`dsyn` — replicated totals
   written onto live `VehicleDamage` components; `dsyn0` on these legs
-  is honest, the dev car binds no authored damage record), and its own
+  is honest, the dev car binds no authored damage record), the v9
+  trailer counter (`tsyn` — `Snap.trailers` rows applied to a live
+  trailer; `tsyn0` likewise, the dev car tows nothing), and its own
   predicted seat driven (`moved=`).
   A client's frame-cap exit lands on the host as `cause=quit` — the
   link `Drop` sends a deliberate `Leave`, not a lost socket — and the

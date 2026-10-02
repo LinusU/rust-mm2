@@ -1453,6 +1453,22 @@ fn main() {
             // ahead of the apply like the other Update writers.
             .before(mm2_vehicle::systems::vehicle_reset),
     )
+    // F25-B: the trailer reseat follower reads every `ResetVehicle` the
+    // frame produced — the FixedLast resolvers, `vehicle_self_right`
+    // and each Update writer — and emits each towed trailer's reseat
+    // ahead of the apply, so the whole rig teleports in the same update
+    // and the epoch-declared `Snap` carries its settled pose.
+    .add_systems(
+        Update,
+        session::reseat_towed_trailers
+            .after(mm2_vehicle::systems::vehicle_self_right)
+            .after(input::reset_input)
+            .after(session::dev_reset_at)
+            .after(scripted::scripted_drive)
+            .after(opponents::opponent_drive)
+            .after(netdrive::apply_reset_requests)
+            .before(mm2_vehicle::systems::vehicle_reset),
+    )
     // F05-B.6: authored engine smoke — emission reads the damage
     // state the FixedLast systems leave, then the advance step
     // integrates the puffs it just spawned. Own schedule slot (the

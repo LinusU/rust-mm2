@@ -109,6 +109,12 @@ fn recovery_app_with(config: SessionConfig, car_pos: Vec3) -> (App, Entity, Obje
                 recovery::resolve_recovery,
             )
                 .chain(),
+        )
+        // The binary's trailer-reseat follower — reads the resolvers'
+        // `ResetVehicle`s ahead of the apply like the real schedule.
+        .add_systems(
+            Update,
+            mm2_app::session::reseat_towed_trailers.before(mm2_vehicle::systems::vehicle_reset),
         );
     app.finish();
     app.cleanup();
@@ -662,15 +668,22 @@ fn a_trailer_rig_recovers_with_the_tractor() {
     // pattern on the anchor pose.
     let (mut app, car, _object) = recovery_app(Vec3::new(0.0, 1.2, 0.0));
     let trailer_pos = Vec3::new(0.0, 1.0, 5.0);
+    let offset = Vec3::new(0.0, -0.2, 4.0);
+    // The real rig declares the tow through `Trailer` — the stream
+    // follower reads it, not `SpawnPoint.trailers` bookkeeping (which
+    // production keeps in parallel for the camera occluder).
     let trailer = app
         .world_mut()
         .spawn((
+            mm2_app::car_visual::Trailer {
+                towing: car,
+                rest_offset: offset,
+            },
             vehicle_bundle(&VehicleConfig::default()),
             Position(trailer_pos),
             Transform::from_translation(trailer_pos),
         ))
         .id();
-    let offset = Vec3::new(0.0, -0.2, 4.0);
     app.world_mut()
         .resource_mut::<SpawnPoint>()
         .trailers

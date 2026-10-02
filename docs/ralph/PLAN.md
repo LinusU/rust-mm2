@@ -40,7 +40,15 @@
 
 Choose the highest-value ready small slice; repair current regressions before unrelated work. Search existing code first. Split tasks that do not fit one focused change, preserving all parent acceptance requirements. A blocked content-specific slice does not stop independent work. Do not silently omit blocked items.
 
-**Next selected slice: the F24-B remainder (B.7 landed the Bevy-side
+**Next selected slice: the F25-B remainder (the trailer leg landed
+this iteration — protocol v9 `Snap.trailers` replicates a trailered
+pick's rig keyed by its seat's wire id, and the generalized
+`reseat_towed_trailers` `ResetVehicle` follower replaced the
+local-only `SpawnPoint.trailers` reseat loops so any tractor —
+local, AI or remote — carries its rig through a reset; still open:
+replicated result/race state, damage *event* replication, the
+measured AC03 impairment matrix, bandwidth budgets), the F24-B
+remainder (B.7 landed the Bevy-side
 client bridge — `mm2 --join` consumes `Start` into the shared
 `Session` lifecycle; iter 020 repaired its two external-review
 findings — wire-generation saturation at the `u64` ceiling and the

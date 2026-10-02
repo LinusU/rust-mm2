@@ -607,6 +607,19 @@ fn run_headless(
                 crate::progression::record_session_results,
             ),
         )
+        // F25-B: towed trailers reseat off the `ResetVehicle` stream —
+        // after every writer, before the apply; own slot, the main
+        // tuple is at the arity limit.
+        .add_systems(
+            Update,
+            session::reseat_towed_trailers
+                .after(mm2_vehicle::systems::vehicle_self_right)
+                .after(session::dev_reset_at)
+                .after(scripted::scripted_drive)
+                .after(opponents::opponent_drive)
+                .after(crate::netdrive::apply_reset_requests)
+                .before(mm2_vehicle::systems::vehicle_reset),
+        )
         // F22-A.2: `I` toggles `OpponentIndicators` and the pool
         // rebinds headless too — own slot: the big Update tuple is at
         // Bevy's arity limit (same split the windowed app makes).
@@ -985,14 +998,16 @@ fn run_headless(
     // replicated damage totals the v8 tail wrote onto live
     // `VehicleDamage` components (both client-side; 0 on a host, which
     // runs the real sim — and 0 on a dev-world run regardless, since
-    // the dev car binds no authored damage record to write). Absent
+    // the dev car binds no authored damage record to write), and
+    // `tsyn`, the v9 trailer rows applied (client side; 0 without a
+    // trailered seat — the dev car tows nothing). Absent
     // without a link's report, so a non-lobby record stays
     // bit-identical.
     let net_detail = world_ecs
         .get_resource::<crate::netdrive::NetDriveReport>()
         .map(|r| {
             format!(
-                " net=in{}s/{}a/{}x,snap{}s/{}a,rem{},req{}s/{}g/{}d,rspn{:.0},dsyn{}",
+                " net=in{}s/{}a/{}x,snap{}s/{}a,rem{},req{}s/{}g/{}d,rspn{:.0},dsyn{},tsyn{}",
                 r.inputs_sent,
                 r.inputs_applied,
                 r.inputs_staled,
@@ -1003,7 +1018,8 @@ fn run_headless(
                 r.requests_granted,
                 r.requests_dropped,
                 r.remote_spin,
-                r.damage_synced
+                r.damage_synced,
+                r.trailers_synced
             )
         })
         .unwrap_or_default();

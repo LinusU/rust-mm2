@@ -1989,6 +1989,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
     // its `Position` toward the asserted pose.
     host.ctl()
         .broadcast(&Message::Snap {
+            trailers: Vec::new(),
             generation,
             tick: 7,
             entries: vec![
@@ -2148,6 +2149,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
     for tick in [3u64, 7] {
         host.ctl()
             .broadcast(&Message::Snap {
+                trailers: Vec::new(),
                 generation,
                 tick,
                 entries: vec![SnapEntry {
@@ -2168,6 +2170,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
     }
     host.ctl()
         .broadcast(&Message::Snap {
+            trailers: Vec::new(),
             generation: generation + 9,
             tick: 99,
             entries: vec![SnapEntry {
@@ -2207,6 +2210,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
     // through the world between the poses.
     host.ctl()
         .broadcast(&Message::Snap {
+            trailers: Vec::new(),
             generation,
             tick: 8,
             entries: vec![SnapEntry {
@@ -2252,6 +2256,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
     // snaps (bounded corrections cut the other way too).
     host.ctl()
         .broadcast(&Message::Snap {
+            trailers: Vec::new(),
             generation,
             tick: 9,
             entries: vec![SnapEntry {
@@ -2306,6 +2311,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
     });
     host.ctl()
         .broadcast(&Message::Snap {
+            trailers: Vec::new(),
             generation,
             tick: 10,
             entries: vec![SnapEntry {
@@ -2370,6 +2376,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
         .snaps_applied;
     host.ctl()
         .broadcast(&Message::Snap {
+            trailers: Vec::new(),
             generation,
             tick: 11,
             entries: vec![SnapEntry {
@@ -2411,6 +2418,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
     // the same spot.
     host.ctl()
         .broadcast(&Message::Snap {
+            trailers: Vec::new(),
             generation,
             tick: 12,
             entries: vec![SnapEntry {
@@ -2684,23 +2692,62 @@ fn a_snap_carries_the_remote_cars_drive_state() {
     // as a fraction of the seat's authored `MaxDamage` — the dev-car
     // pick binds no record, so the spec attaches by hand and half of
     // `max_damage` accumulates through the real `apply` path.
-    {
+    let remote = {
         let mut q = app.world_mut().query_filtered::<Entity, With<RemotePick>>();
-        let remote = q.single(app.world()).expect("the remote car");
+        q.single(app.world()).expect("the remote car")
+    };
+    {
         let mut damage = mm2_game::VehicleDamage::new(DAMAGE_SPEC);
         damage.apply(mm2_game::ImpactId(1), DAMAGE_SPEC.max_damage * 0.5);
         app.world_mut().entity_mut(remote).insert(damage);
+    }
+    // The v9 trailer row (F25-B): a trailer towing the seat publishes
+    // under the seat's wire id — hand-spawned the way `spawn_trailer`
+    // leaves an authority-side trailer (the dev-car pick tows nothing,
+    // so the rig is declared by hand), wheels grounded at 20 rad/s.
+    let trailer = app
+        .world_mut()
+        .spawn((
+            mm2_app::car_visual::Trailer {
+                towing: remote,
+                rest_offset: Vec3::new(0.0, -0.5, 4.0),
+            },
+            mm2_vehicle::vehicle_bundle(&VehicleConfig::default()),
+            avian3d::prelude::Position(Vec3::new(3.0, 0.6, -7.0)),
+            avian3d::prelude::Rotation(Quat::from_rotation_y(0.5)),
+        ))
+        .id();
+    // `vehicle_bundle` already carries the rigid-body components — the
+    // truth overrides insert over them rather than duplicate the spawn.
+    app.world_mut().entity_mut(trailer).insert((
+        avian3d::prelude::LinearVelocity(Vec3::new(4.0, 0.0, 0.0)),
+        avian3d::prelude::AngularVelocity(Vec3::new(0.0, 0.25, 0.0)),
+    ));
+    {
+        let mut state = app
+            .world_mut()
+            .get_mut::<mm2_vehicle::VehicleState>(trailer)
+            .unwrap();
+        state.grounded = true;
+        for ws in &mut state.wheels {
+            ws.grounded = true;
+            ws.vel_long = 6.8;
+        }
     }
     // Publish a handful of frames so the peer's buffer holds a snap
     // carrying the tail before the blocking recv drains it.
     for _ in 0..5 {
         app.update();
     }
-    let msg = until_wire(
-        &mut peer,
-        |m| matches!(m, Message::Snap { entries, .. } if entries.iter().any(|e| e.player == 1 && e.steer == 250)),
-    );
-    let Message::Snap { entries, .. } = msg else {
+    let msg = until_wire(&mut peer, |m| {
+        matches!(m, Message::Snap { entries, trailers, .. }
+            if entries.iter().any(|e| e.player == 1 && e.steer == 250)
+                && trailers.iter().any(|t| t.owner == 1))
+    });
+    let Message::Snap {
+        entries, trailers, ..
+    } = msg
+    else {
         unreachable!()
     };
     let e = entries.iter().find(|e| e.player == 1).unwrap();
@@ -2715,9 +2762,301 @@ fn a_snap_carries_the_remote_cars_drive_state() {
         e.damage, 128,
         "half of MaxDamage rounds to 128 on the x255 byte"
     );
+    // The trailer row keys off the towing seat's wire id and carries
+    // the trailer's own pose/velocity/spin truth.
+    let t = trailers.iter().find(|t| t.owner == 1).unwrap();
+    assert_eq!(t.pos, [3.0, 0.6, -7.0]);
+    assert_eq!(t.vel, [4.0, 0.0, 0.0]);
+    assert_eq!(t.angvel, [0.0, 0.25, 0.0]);
+    assert_eq!(t.spin, 200, "the trailer's grounded wheels rate");
+    assert_eq!(
+        t.flags,
+        mm2_net::SNAP_FLAG_GROUNDED,
+        "brake/reverse are seat state a trailer row does not carry"
+    );
 }
 
-/// F25-B, client half: `R` under a predicted session no longer sits
+/// F25-B, client half of the v9 trailer rows: a `Snap.trailers` row
+/// drives the remote rig's kinematic trailer copy exactly like its
+/// seat — blend between arrivals, velocities and wheel rate written,
+/// an owner-epoch advance snapping it outright — while the own rig's
+/// real trailer drops epoch-equal rows (local physics owns it under
+/// prediction) and snaps only when the authority reseats the rig.
+/// Trailered picks are retail-only, so both rigs are declared by hand
+/// the way the spawn paths leave them.
+#[test]
+fn a_snapshot_drives_a_remote_rigs_trailer() {
+    let install = tempfile::tempdir().unwrap();
+    let vfs = mount(install.path());
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host_config = HostConfig::new(fp);
+    host_config.host_pick = Some(VehiclePick {
+        vehicle: String::new(),
+        paint: 0,
+    });
+    let mut host = Host::listen_loopback(&host_config).unwrap();
+    host.set_session(net::advertise(&dev_cruise()).unwrap())
+        .unwrap();
+    let link = LobbyLink::join(
+        host.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join failed");
+    let our_id = link.player_id();
+    let mut app = bridge_app(vfs, link);
+    {
+        let link = app.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    until_ready(&mut app);
+    host.start(LateJoin::Open).unwrap();
+    until_started(&host);
+    until_begun(&mut app);
+    let generation = app.world().resource::<Session>().generation();
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    // The host's seat reconciles into the kinematic copy the trailer
+    // row will key off.
+    spin_mut(&mut app, |a| {
+        a.world_mut()
+            .query_filtered::<(), With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some()
+    });
+    let host_copy = {
+        let mut q = app.world_mut().query_filtered::<Entity, With<RemotePick>>();
+        q.single(app.world()).expect("the host copy")
+    };
+    // The local seat — the reconcile stamps it `NetPlayer(our_id)`,
+    // which is what the own-rig trailer keys its row off.
+    let local = app
+        .world_mut()
+        .spawn((
+            PlayerVehicle,
+            Player {
+                id: mm2_game::PlayerId(1),
+                control: PlayerControl::Local,
+            },
+            mm2_game::AuthorityRole::Predicted,
+            avian3d::prelude::Position::default(),
+            avian3d::prelude::Rotation::default(),
+            avian3d::prelude::LinearVelocity::default(),
+            avian3d::prelude::AngularVelocity::default(),
+        ))
+        .id();
+    spin(&mut app, |a| a.world().get::<NetPlayer>(local).is_some());
+
+    // The remote copy's trailer — the shape `spawn_remote`'s predicted
+    // branch builds for a trailered pick: kinematic, snap-driven, a
+    // `RemoteDrive`/`RemoteLerp` rig like the seat's.
+    let trailer_copy = app
+        .world_mut()
+        .spawn((
+            mm2_app::car_visual::Trailer {
+                towing: host_copy,
+                rest_offset: Vec3::new(0.0, -0.5, 4.0),
+            },
+            netdrive::RemoteTrailer { owner: 0 },
+            RemotePick(VehiclePick {
+                vehicle: String::new(),
+                paint: 0,
+            }),
+            mm2_vehicle::vehicle_bundle(&VehicleConfig::default()),
+            avian3d::prelude::Position(Vec3::new(0.0, 1.0, 4.0)),
+            avian3d::prelude::Rotation::default(),
+        ))
+        .id();
+    app.world_mut().entity_mut(trailer_copy).insert((
+        avian3d::prelude::RigidBody::Kinematic,
+        mm2_vehicle::RemoteReplica,
+        netdrive::RemoteDrive::default(),
+        netdrive::RemoteLerp {
+            from_pos: Vec3::new(0.0, 1.0, 4.0),
+            from_rot: Quat::IDENTITY,
+            to_pos: Vec3::new(0.0, 1.0, 4.0),
+            to_rot: Quat::IDENTITY,
+            start: 0.0,
+            end: 0.0,
+        },
+    ));
+    // The own rig's trailer — a real body the local hitch joint owns:
+    // no `RemoteTrailer` marker, no lerp, dynamic like `spawn_trailer`
+    // leaves it.
+    let own_trailer = app
+        .world_mut()
+        .spawn((
+            mm2_app::car_visual::Trailer {
+                towing: local,
+                rest_offset: Vec3::new(0.0, -0.5, 4.0),
+            },
+            mm2_vehicle::vehicle_bundle(&VehicleConfig::default()),
+            avian3d::prelude::Position(Vec3::new(1.0, 1.0, 5.0)),
+            avian3d::prelude::Rotation::default(),
+        ))
+        .id();
+
+    let seat_entry = |player: u16, epoch: u8| SnapEntry {
+        player,
+        pos: [9.0, 1.0, 9.0],
+        rot: [0.0, 0.0, 0.0, 1.0],
+        vel: [1.0, 0.0, 0.0],
+        angvel: [0.0; 3],
+        epoch,
+        steer: 0,
+        spin: 300,
+        compression: 0,
+        flags: mm2_net::SNAP_FLAG_GROUNDED,
+        damage: 0,
+    };
+    // An epoch-equal snap: the remote trailer blends, the own rig's
+    // trailer stays exactly where the local sim left it — the wire row
+    // lands close (4.2 m, inside the correction bound) and visibly off
+    // its pose, so a buggy unconditional write would move it.
+    host.ctl()
+        .broadcast(&Message::Snap {
+            generation,
+            tick: 7,
+            entries: vec![seat_entry(0, 0), seat_entry(our_id, 0)],
+            trailers: vec![
+                mm2_net::SnapTrailer {
+                    owner: 0,
+                    pos: [9.0, 1.0, 9.7],
+                    rot: [0.0, 0.0, 0.0, 1.0],
+                    vel: [1.0, 0.0, 0.0],
+                    angvel: [0.0, 0.25, 0.0],
+                    spin: 150,
+                    flags: mm2_net::SNAP_FLAG_GROUNDED,
+                },
+                mm2_net::SnapTrailer {
+                    owner: our_id,
+                    pos: [4.0, 1.0, 8.0],
+                    rot: [0.0, 0.0, 0.0, 1.0],
+                    vel: [9.0, 9.0, 9.0],
+                    angvel: [9.0; 3],
+                    spin: -400,
+                    flags: 0,
+                },
+            ],
+        })
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .snaps_applied
+            > 0
+    });
+    {
+        let lerp = app
+            .world()
+            .get::<netdrive::RemoteLerp>(trailer_copy)
+            .unwrap();
+        assert!(
+            (lerp.to_pos - Vec3::new(9.0, 1.0, 9.7)).length() < 1e-3,
+            "the remote trailer's lerp targets the wire pose: {:?}",
+            lerp.to_pos
+        );
+        assert_eq!(
+            app.world()
+                .get::<avian3d::prelude::LinearVelocity>(trailer_copy)
+                .unwrap()
+                .0,
+            Vec3::new(1.0, 0.0, 0.0),
+            "the row's velocity landed"
+        );
+        assert_eq!(
+            app.world()
+                .get::<netdrive::RemoteDrive>(trailer_copy)
+                .unwrap()
+                .spin_rate,
+            15.0,
+            "the row's wheel rate landed"
+        );
+    }
+    // The first blend interval is zero — the next lerp update lands
+    // the copy on the asserted pose.
+    app.update();
+    assert!(
+        (app.world()
+            .get::<avian3d::prelude::Position>(trailer_copy)
+            .unwrap()
+            .0
+            - Vec3::new(9.0, 1.0, 9.7))
+        .length()
+            < 1e-3,
+        "the remote trailer blended to the wire pose"
+    );
+    // The own rig's trailer ignored its epoch-equal row — pose and
+    // velocities stay the local sim's.
+    assert_eq!(
+        app.world()
+            .get::<avian3d::prelude::Position>(own_trailer)
+            .unwrap()
+            .0,
+        Vec3::new(1.0, 1.0, 5.0),
+        "an epoch-equal own-rig row never moves the local body"
+    );
+    assert_eq!(
+        app.world()
+            .get::<avian3d::prelude::LinearVelocity>(own_trailer)
+            .unwrap()
+            .0,
+        Vec3::ZERO
+    );
+
+    // An owner-epoch advance — the authority's reset reseated the rig —
+    // snaps the own trailer outright and marks the jump `Teleported`.
+    host.ctl()
+        .broadcast(&Message::Snap {
+            generation,
+            tick: 8,
+            entries: vec![seat_entry(0, 0), seat_entry(our_id, 1)],
+            trailers: vec![mm2_net::SnapTrailer {
+                owner: our_id,
+                pos: [4.0, 1.0, 8.0],
+                rot: [0.0, 0.0, 0.0, 1.0],
+                vel: [0.0; 3],
+                angvel: [0.0; 3],
+                spin: 0,
+                flags: 0,
+            }],
+        })
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .snaps_applied
+            > 1
+    });
+    assert_eq!(
+        app.world()
+            .get::<avian3d::prelude::Position>(own_trailer)
+            .unwrap()
+            .0,
+        Vec3::new(4.0, 1.0, 8.0),
+        "the owner's epoch advance reseats the own trailer"
+    );
+    assert!(
+        app.world().get::<Teleported>(own_trailer).is_some(),
+        "the wire-declared reseat is marked Teleported"
+    );
+    // One remote row + one own-rig snap landed; the dropped epoch-equal
+    // own row never counted.
+    assert_eq!(
+        app.world()
+            .resource::<netdrive::NetDriveReport>()
+            .trailers_synced,
+        2
+    );
+
+    host.shutdown();
+}
 /// inert — it sends a `ResetRequest` minted against the running
 /// generation, absorbed by the host's mailbox keyed to our slot. An
 /// `R` press outside `Playing` sends nothing.
@@ -2837,12 +3176,35 @@ fn an_impaired_link_still_converges_the_data_plane() {
             .next()
             .is_some()
     });
-    let seated = {
+    let remote = {
         let mut q = app
             .world_mut()
-            .query_filtered::<&avian3d::prelude::Position, With<RemotePick>>();
-        q.single(app.world()).expect("the remote car").0
+            .query_filtered::<(Entity, &avian3d::prelude::Position), With<RemotePick>>();
+        let (e, p) = q.single(app.world()).expect("the remote car");
+        (e, p.0)
     };
+    let seated = remote.1;
+    // The remote rig's trailer (v9): marked like `spawn_remote`'s
+    // authority branch leaves it — the reconcile must take it down
+    // with its seat when the peer leaves (the dev-car pick tows
+    // nothing, so the rig is declared by hand).
+    let trailer = app
+        .world_mut()
+        .spawn((
+            mm2_app::car_visual::Trailer {
+                towing: remote.0,
+                rest_offset: Vec3::new(0.0, -0.5, 4.0),
+            },
+            netdrive::RemoteTrailer { owner: 1 },
+            RemotePick(VehiclePick {
+                vehicle: String::new(),
+                paint: 0,
+            }),
+            mm2_vehicle::vehicle_bundle(&VehicleConfig::default()),
+            avian3d::prelude::Position(seated + Vec3::new(0.0, -0.5, 4.0)),
+            avian3d::prelude::Rotation::default(),
+        ))
+        .id();
 
     // Arm the data plane: the lobby phase crossed clean, everything
     // below is impaired — delayed, jittered, duplicated and reordered
@@ -2889,9 +3251,11 @@ fn an_impaired_link_still_converges_the_data_plane() {
             .is_some_and(|s| s.input.seq == 12)
     });
     {
+        // `With<NetPlayer>` picks the seat out of the rig — the trailer
+        // carries `RemotePick` too (it reconciles with its owner).
         let mut q = app
             .world_mut()
-            .query_filtered::<&VehicleInput, With<RemotePick>>();
+            .query_filtered::<&VehicleInput, (With<RemotePick>, With<NetPlayer>)>();
         let input = q.single(app.world()).expect("the remote car's input");
         assert!(
             input.throttle > 0.9,
@@ -2968,4 +3332,8 @@ fn an_impaired_link_still_converges_the_data_plane() {
             .next()
             .is_none()
     });
+    assert!(
+        app.world().get_entity(trailer).is_err(),
+        "the trailer copy despawned with its seat"
+    );
 }

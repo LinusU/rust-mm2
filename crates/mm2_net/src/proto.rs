@@ -19,8 +19,11 @@
 /// wheel and light visuals consume (F25-B). v8: `SnapEntry` gained
 /// `damage`, the seat's authoritative damage fraction — a remote
 /// copy's (and a predicted own seat's) `VehicleDamage` is replicated
-/// state, never locally accumulated (F25-B, F05 req 6).
-pub const PROTOCOL_VERSION: u16 = 8;
+/// state, never locally accumulated (F25-B, F05 req 6). v9: `Snap`
+/// gained `trailers` — a bounded list of trailered seats' trailer
+/// poses (F25-B); a trailered pick's trailer is replicated state like
+/// the seat itself, never simulated on clients.
+pub const PROTOCOL_VERSION: u16 = 9;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -227,6 +230,35 @@ pub const SNAP_FLAG_REVERSE: u8 = 0x02;
 /// means the copy hangs its wheels at full droop.
 pub const SNAP_FLAG_GROUNDED: u8 = 0x04;
 
+/// One participant's trailer inside a [`Message::Snap`] (v9, F25-B).
+/// A trailered pick (`vpsemi`, `vpcentury`) tows a real jointed body on
+/// the authority; clients hold a kinematic copy the same way they hold
+/// the car's. `owner` is the *towing seat's* wire roster id — the
+/// trailer rides its tractor's entry's reset epoch, so it carries none
+/// of its own: receivers snap it when the owner entry's epoch advances,
+/// exactly like the seat it follows. `spin`/`flags` use the
+/// [`SnapEntry`] encodings (mean grounded-wheel rate in 0.1 rad/s
+/// units; bit 0 = [`SNAP_FLAG_GROUNDED`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SnapTrailer {
+    /// Wire roster slot of the towing seat (0 = the host seat).
+    pub owner: u16,
+    /// World position, metres.
+    pub pos: [f32; 3],
+    /// World rotation, quaternion `x,y,z,w`.
+    pub rot: [f32; 4],
+    /// Linear velocity, m/s.
+    pub vel: [f32; 3],
+    /// Angular velocity, rad/s.
+    pub angvel: [f32; 3],
+    /// Mean grounded-wheel angular rate in 0.1 rad/s units, signed and
+    /// saturating — the `SnapEntry::spin` encoding.
+    pub spin: i16,
+    /// Bit 0 `SNAP_FLAG_GROUNDED` — the other presentation bits are
+    /// seat state (brake/reverse) a trailer does not own.
+    pub flags: u8,
+}
+
 /// One wire message.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
@@ -340,6 +372,9 @@ pub enum Message {
         tick: u64,
         /// Every simulated player's pose, wire-id sorted.
         entries: Vec<SnapEntry>,
+        /// The trailers the seated picks tow (v9, F25-B) — present only
+        /// for trailered seats, bounded by [`MAX_PLAYERS`].
+        trailers: Vec<SnapTrailer>,
     },
 }
 
@@ -377,6 +412,9 @@ pub enum ProtoError {
     /// A snapshot declared more than [`MAX_PLAYERS`] entries.
     #[error("snapshot declares {0} entries, bound is {MAX_PLAYERS}")]
     OversizeSnapshot(u8),
+    /// A snapshot declared more than [`MAX_PLAYERS`] trailer entries.
+    #[error("snapshot declares {0} trailers, bound is {MAX_PLAYERS}")]
+    OversizeTrailers(u8),
 }
 
 impl RejectCode {
@@ -611,6 +649,7 @@ impl Message {
                 generation,
                 tick,
                 entries,
+                trailers,
             } => {
                 out.push(TAG_SNAP);
                 out.extend_from_slice(&generation.to_le_bytes());
@@ -636,6 +675,24 @@ impl Message {
                     out.push(e.compression);
                     out.push(e.flags);
                     out.push(e.damage);
+                }
+                if trailers.len() > MAX_PLAYERS as usize {
+                    return Err(ProtoError::OversizeTrailers(trailers.len() as u8));
+                }
+                out.push(trailers.len() as u8);
+                for t in trailers {
+                    out.extend_from_slice(&t.owner.to_le_bytes());
+                    for v in t
+                        .pos
+                        .iter()
+                        .chain(t.rot.iter())
+                        .chain(t.vel.iter())
+                        .chain(t.angvel.iter())
+                    {
+                        out.extend_from_slice(&v.to_le_bytes());
+                    }
+                    out.extend_from_slice(&t.spin.to_le_bytes());
+                    out.push(t.flags);
                 }
             }
         }
@@ -736,10 +793,27 @@ impl Message {
                         damage: cur.u8()?,
                     });
                 }
+                let trailer_count = cur.u8()?;
+                if trailer_count > MAX_PLAYERS {
+                    return Err(ProtoError::OversizeTrailers(trailer_count));
+                }
+                let mut trailers = Vec::with_capacity(trailer_count as usize);
+                for _ in 0..trailer_count {
+                    trailers.push(SnapTrailer {
+                        owner: cur.u16()?,
+                        pos: cur.vec3()?,
+                        rot: [cur.f32()?, cur.f32()?, cur.f32()?, cur.f32()?],
+                        vel: cur.vec3()?,
+                        angvel: cur.vec3()?,
+                        spin: cur.i16()?,
+                        flags: cur.u8()?,
+                    });
+                }
                 Self::Snap {
                     generation,
                     tick,
                     entries,
+                    trailers,
                 }
             }
             tag => return Err(ProtoError::BadTag(tag)),
@@ -904,6 +978,26 @@ mod tests {
                         damage: 0,
                     },
                 ],
+                trailers: vec![
+                    SnapTrailer {
+                        owner: 0,
+                        pos: [1.0, 2.0, 5.9],
+                        rot: [0.0, 0.707, 0.0, 0.707],
+                        vel: [12.5, 0.0, -1.0],
+                        angvel: [0.0, 0.4, 0.0],
+                        spin: 1420,
+                        flags: SNAP_FLAG_GROUNDED,
+                    },
+                    SnapTrailer {
+                        owner: 3,
+                        pos: [-9.0, 0.5, 6.0],
+                        rot: [0.0, 0.0, 0.0, 1.0],
+                        vel: [0.0, 0.0, 0.0],
+                        angvel: [0.0, 0.0, 0.0],
+                        spin: -80,
+                        flags: 0,
+                    },
+                ],
             },
         ] {
             let bytes = msg.encode().unwrap();
@@ -981,6 +1075,16 @@ mod tests {
             Message::decode(&short_snap),
             Err(ProtoError::Truncated)
         ));
+        // A snapshot declaring more trailers than the player ceiling.
+        let mut wide_snap = vec![TAG_SNAP];
+        wide_snap.extend_from_slice(&1u64.to_le_bytes());
+        wide_snap.extend_from_slice(&2u64.to_le_bytes());
+        wide_snap.push(0);
+        wide_snap.push(MAX_PLAYERS + 1);
+        assert!(matches!(
+            Message::decode(&wide_snap),
+            Err(ProtoError::OversizeTrailers(9))
+        ));
     }
 
     #[test]
@@ -1025,9 +1129,33 @@ mod tests {
                 generation: 1,
                 tick: 1,
                 entries,
+                trailers: Vec::new(),
             }
             .encode(),
             Err(ProtoError::OversizeSnapshot(9))
+        ));
+        // …and the trailer list is bounded by the same ceiling.
+        let trailers = vec![
+            SnapTrailer {
+                owner: 0,
+                pos: [0.0; 3],
+                rot: [0.0, 0.0, 0.0, 1.0],
+                vel: [0.0; 3],
+                angvel: [0.0; 3],
+                spin: 0,
+                flags: 0,
+            };
+            MAX_PLAYERS as usize + 1
+        ];
+        assert!(matches!(
+            Message::Snap {
+                generation: 1,
+                tick: 1,
+                entries: Vec::new(),
+                trailers,
+            }
+            .encode(),
+            Err(ProtoError::OversizeTrailers(9))
         ));
     }
 

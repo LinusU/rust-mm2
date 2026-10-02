@@ -278,14 +278,6 @@ pub fn resolve_disabled(
                                 position: spawn.position,
                                 yaw: spawn.yaw,
                             });
-                            let rot = Quat::from_rotation_y(spawn.yaw);
-                            for (trailer, offset) in &spawn.trailers {
-                                resets.write(ResetVehicle {
-                                    entity: Some(*trailer),
-                                    position: spawn.position + rot * *offset,
-                                    yaw: spawn.yaw,
-                                });
-                            }
                         }
                         damage.reset();
                         // Repair restores the rig (F05-AC03): detached
