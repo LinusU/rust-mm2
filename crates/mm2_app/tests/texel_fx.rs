@@ -24,7 +24,7 @@ use mm2_game::{
     PlayerControl, Session, SessionAuthority, SessionConfig, SessionEntity, SessionPhase,
     SurfaceState, VehicleDamage, advance_session_tick,
 };
-use mm2_net::SnapEntry;
+use mm2_net::{SnapEntry, SnapImpact};
 use mm2_vehicle::{TireConditions, VehicleConfig, VehiclePlugin, vehicle_bundle};
 
 /// `VehicleConfig::default().mass` — impulse is `severity × MASS`.
@@ -343,6 +343,16 @@ fn spawn_rigged_remote(
     (car, object)
 }
 
+/// A `SnapEntry` asserting a pose — keeps the remote copy where it
+/// was spawned instead of teleporting it to the origin (the pose the
+/// `RemoteImpact` points are authored against).
+fn snap_entry_at(player: u16, damage: u8, pos: Vec3) -> SnapEntry {
+    SnapEntry {
+        pos: pos.to_array(),
+        ..snap_entry(player, damage)
+    }
+}
+
 /// A minimal `SnapEntry` for the `RemoteSnaps` legs — every field the
 /// apply path ignores sits at its wire zero.
 fn snap_entry(player: u16, damage: u8) -> SnapEntry {
@@ -546,14 +556,37 @@ fn write_hit(app: &mut App, id: u64, a: ObjectId, b: ObjectId, point: Vec3) {
 /// Stage a snapshot frame into the client's inbox — the same
 /// `RemoteSnaps::push` the lobby pump performs, minus the wire.
 fn push_snap(app: &mut App, tick: u64, entries: Vec<SnapEntry>) {
+    push_snap_with_impacts(app, tick, entries, Vec::new());
+}
+
+/// The same staging with the snap's `impacts` tail populated.
+fn push_snap_with_impacts(
+    app: &mut App,
+    tick: u64,
+    entries: Vec<SnapEntry>,
+    impacts: Vec<SnapImpact>,
+) {
     let generation = app.world().resource::<Session>().generation();
     app.world_mut().resource_mut::<RemoteSnaps>().push(
         generation,
         tick,
         entries,
         Vec::new(),
-        Vec::new(),
+        impacts,
     );
+}
+
+/// A `Snap.impacts` row for one seat — `tick` is the host session
+/// tick the authority's `ImpactEvent` was emitted on.
+fn impact_row(seat: u16, id: u64, tick: u64, point: Vec3) -> SnapImpact {
+    SnapImpact {
+        seat,
+        id,
+        tick,
+        point: point.to_array(),
+        normal: [0.0, 1.0, 0.0],
+        severity: 10.0,
+    }
 }
 
 /// F25-B: on the authority a remote seat is a locally simulated
@@ -773,6 +806,145 @@ fn a_clean_byte_never_erases_a_splat() {
     app.update();
     assert_ne!(skin_data(&app, &current), clean);
     assert_eq!(app.world().resource::<TexelDamageReport>().resets, 0);
+}
+
+/// F25-B repair ordering: a pre-repair impact row co-arriving with the
+/// `>0 → 0` byte must not splat *after* the wipe — the authority
+/// ordered splat-then-wipe, so the wire's stale event drops. The row
+/// rode a snap whose pose the repair snap supersedes — exactly the
+/// case the pending queue preserves — and its emit tick sits at/below
+/// the repair's snap tick.
+#[test]
+fn a_pre_repair_impact_row_never_splats_after_the_wipe() {
+    let (mut app, _car, _object, fixture) =
+        texel_app_with(Vec3::new(0.0, 1.2, 0.0), SessionAuthority::Remote);
+    let (remote, _roid) = spawn_rigged_remote(
+        &mut app,
+        &fixture,
+        Vec3::new(20.0, 1.2, 0.0),
+        3,
+        PlayerControl::Remote,
+    );
+    let (current, clean) = skin(&app, remote);
+    let at = Vec3::new(20.0, 1.2, 0.0);
+
+    // The damaged byte lands, then both the queued pre-repair hit and
+    // the repair snap stage before the next update — the middle snap
+    // (which carried the hit) is superseded, only its row survives.
+    push_snap(&mut app, 1, vec![snap_entry_at(3, 200, at)]);
+    app.update();
+    assert!(
+        app.world().get::<VehicleDamage>(remote).unwrap().total() > 0.0,
+        "the damaged byte applied"
+    );
+    push_snap_with_impacts(
+        &mut app,
+        2,
+        vec![snap_entry_at(3, 200, at)],
+        vec![impact_row(3, 1, 2, Vec3::new(20.2, 1.2, 0.2))],
+    );
+    push_snap(&mut app, 3, vec![snap_entry_at(3, 0, at)]);
+    app.update();
+    assert_eq!(
+        skin_data(&app, &current),
+        clean,
+        "the stale row dropped instead of splatting after the wipe"
+    );
+    assert_eq!(app.world().resource::<TexelDamageReport>().resets, 1);
+    let net = app.world().resource::<netdrive::NetDriveReport>();
+    assert_eq!(net.impacts_applied, 0, "no stale row was presented");
+    assert_eq!(
+        net.impacts_dropped, 1,
+        "the pre-repair row counted as a drop"
+    );
+}
+
+/// The ledger also covers a row arriving *after* the repair snap
+/// applied — a delayed or reordered frame re-presenting a hit the
+/// wipe already erased (loss/jitter: the pending queue holds rows
+/// across snap frames).
+#[test]
+fn a_delayed_pre_repair_row_drops_against_the_repair_ledger() {
+    let (mut app, _car, _object, fixture) =
+        texel_app_with(Vec3::new(0.0, 1.2, 0.0), SessionAuthority::Remote);
+    let (remote, _roid) = spawn_rigged_remote(
+        &mut app,
+        &fixture,
+        Vec3::new(20.0, 1.2, 0.0),
+        3,
+        PlayerControl::Remote,
+    );
+    let (current, clean) = skin(&app, remote);
+    let at = Vec3::new(20.0, 1.2, 0.0);
+
+    push_snap(&mut app, 1, vec![snap_entry_at(3, 200, at)]);
+    app.update();
+    push_snap(&mut app, 2, vec![snap_entry_at(3, 0, at)]);
+    app.update();
+    assert_eq!(app.world().resource::<TexelDamageReport>().resets, 1);
+
+    // A hit emitted at host tick 1 arrives only now — inside a later
+    // snap whose poses applied while the row sat in the queue.
+    push_snap_with_impacts(
+        &mut app,
+        3,
+        vec![snap_entry_at(3, 0, at)],
+        vec![impact_row(3, 9, 1, Vec3::new(20.2, 1.2, 0.2))],
+    );
+    app.update();
+    assert_eq!(
+        skin_data(&app, &current),
+        clean,
+        "the late pre-repair row still dropped"
+    );
+    let net = app.world().resource::<netdrive::NetDriveReport>();
+    assert_eq!(net.impacts_applied, 0);
+    assert_eq!(net.impacts_dropped, 1);
+}
+
+/// The boundary is the repair's snap tick, not the byte being clean:
+/// a hit the authority emitted *after* the repair still splats — the
+/// wipe must not eat real new damage.
+#[test]
+fn a_post_repair_impact_still_splats() {
+    let (mut app, _car, _object, fixture) =
+        texel_app_with(Vec3::new(0.0, 1.2, 0.0), SessionAuthority::Remote);
+    let (remote, _roid) = spawn_rigged_remote(
+        &mut app,
+        &fixture,
+        Vec3::new(20.0, 1.2, 0.0),
+        3,
+        PlayerControl::Remote,
+    );
+    let (current, clean) = skin(&app, remote);
+    let at = Vec3::new(20.0, 1.2, 0.0);
+
+    push_snap(&mut app, 1, vec![snap_entry_at(3, 200, at)]);
+    app.update();
+    push_snap(&mut app, 2, vec![snap_entry_at(3, 0, at)]);
+    app.update();
+    assert_eq!(skin_data(&app, &current), clean, "the repair wiped");
+
+    // A post-repair hit — emit tick past the repair's snap tick —
+    // lands like any other.
+    push_snap_with_impacts(
+        &mut app,
+        3,
+        vec![snap_entry_at(3, 0, at)],
+        vec![impact_row(3, 9, 3, Vec3::new(20.2, 1.2, 0.2))],
+    );
+    app.update();
+    assert_ne!(
+        skin_data(&app, &current),
+        clean,
+        "the post-repair hit splatted"
+    );
+    assert_eq!(
+        app.world()
+            .resource::<netdrive::NetDriveReport>()
+            .impacts_applied,
+        1
+    );
 }
 
 #[test]

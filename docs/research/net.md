@@ -143,7 +143,26 @@ the v8 damage byte alone: `apply_snapshots`' `apply_damage` sees the
 `>0→0` transition — the authority's `resolve_disabled`
 `damage.reset()` + `texel.reset()` pair arriving as state — and runs
 `TexelRepair::reset`, so repeated clean bytes never re-blit a splat
-the accumulator missed. What the wire still does not carry: the
+the accumulator missed. Byte `0` is reserved for that signal:
+`encode_damage` floors any positive total to byte 1 rather than
+letting `round` mint a repair the authority never performed. The two
+halves of `apply_snapshots` order against each other through the
+per-seat `repaired` ledger — the state pass runs first and records
+each transition's `(generation, snap tick)`; the pending-impact drain
+then drops any row whose emit tick sits at or below it
+(`SnapImpact::tick` is the host tick the `ImpactEvent` was emitted,
+never after its snap's publish tick, so such a row is provably
+pre-repair). A hit the authority wiped therefore drops instead of
+splatting *after* the wipe — the authority ordered splat-then-wipe —
+whether it rode a superseded frame or arrived late on a reordered
+one. Two presentation-only edges remain by construction: a hit
+emitted in the same host tick the repair resolved reads as pre-repair
+and may drop a legitimate post-repair splat, and a pre-repair hit
+whose *damaged* intermediate byte was superseded before it ever
+applied is unobservable — the client never saw a transition, so the
+row is indistinguishable from a fresh hit on an intact car (a
+per-seat repair epoch on the row would close it if it ever matters).
+What the wire still does not carry: the
 struck side's identity (a replicated row's audio picks the id-0
 catch-all) and `surface` (no consumer reads it) — and the
 state-adjacent gap stays open: breakaway fragments are

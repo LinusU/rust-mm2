@@ -256,6 +256,16 @@ pub struct RemoteSnaps {
     /// carries its frame's generation for the apply-side staleness
     /// check.
     pending: VecDeque<(u64, SnapImpact)>,
+    /// Per-seat repair ledger: the (generation, snap tick) of the
+    /// newest `damage` byte `>0 → 0` transition the apply pass
+    /// performed — the wire's repair signal. A pending impact row
+    /// emitted at or before that tick predates the wipe on the
+    /// authority (`SnapImpact::tick` is the host tick the
+    /// `ImpactEvent` was emitted, never after its snap's publish
+    /// tick), so the drain drops it rather than splatting *after* a
+    /// wipe the authority ordered last. Only seats a snap actually
+    /// named can record one, so the map stays roster-bounded.
+    repaired: HashMap<u16, (u64, u64)>,
     /// Dedup window over `(generation, seat, id)` — a duplicated or
     /// reordered frame re-presents its rows; only the first lands. The
     /// generation rides the key so a new session's restarted id stream
@@ -567,22 +577,27 @@ fn encode_damage(damage: Option<&VehicleDamage>) -> u8 {
 /// rig's `Reset` re-blits clean. Splats stamped while the byte read
 /// intact stay put: the retail rig splats every `ImpactsTable` entry
 /// regardless of the accumulator, so only a real repair transition
-/// re-blits.
+/// re-blits. Returns `true` when the transition fired so the caller
+/// can record it in [`RemoteSnaps::repaired`] — the ledger the
+/// pending-impact drain reads to drop a pre-repair row rather than
+/// splat it on top of the wipe.
 fn apply_damage(
     entity: Entity,
     entry: &SnapEntry,
     damage: Option<Mut<'_, VehicleDamage>>,
     texel: &mut crate::texel_fx::TexelRepair,
     report: &mut NetDriveReport,
-) {
+) -> bool {
     if let Some(mut damage) = damage {
         let was_damaged = damage.total() > 0.0;
         damage.set_replicated(entry.damage as f32 / 255.0);
         report.damage_synced += 1;
         if was_damaged && damage.total() <= 0.0 {
             texel.reset(entity);
+            return true;
         }
     }
+    false
 }
 
 /// The wire id this process's own seat carries: 0 on a host, our roster
@@ -1593,7 +1608,11 @@ type SnapTrailerRow<'a> = (
 /// Client-side: fold the newest staged snapshot into the remote copies'
 /// [`RemoteLerp`] blend and velocities, and reconcile the own seat on
 /// an epoch advance (F25-A.5). Wrong-generation and stale-tick frames
-/// drop untouched; entries without a spawned entity are skipped.
+/// drop untouched; entries without a spawned entity are skipped. The
+/// queued replicated impact rows then drain into the [`RemoteImpact`]
+/// stream — every run, and *after* the state pass so a repair byte
+/// landing this frame is already recorded in [`RemoteSnaps::repaired`]
+/// before the rows are judged against it.
 ///
 /// Two snap triggers share the "teleport, not motion" rule: a changed
 /// `epoch` — the authority's declared reset — or a correction past
@@ -1624,62 +1643,48 @@ pub fn apply_snapshots(
     mut texel: crate::texel_fx::TexelRepair,
     mut report: ResMut<NetDriveReport>,
 ) {
-    // Replicated impacts are events, not state — the pending queue
-    // drains every run, not only when a fresh frame staged (a
-    // superseded snap's poses drop, its effects still land). `push`
-    // already deduped `(seat, id)` and binned foreign generations;
-    // here each row gets the session gate, the own-seat skip — a
-    // predicted seat's local physics stream already rendered the hit,
-    // so the wire row must not double it — the wire sanitize, and the
-    // resolve to this process's remote copy.
-    report.impacts_dropped += snaps.dropped;
-    snaps.dropped = 0;
-    if !snaps.pending.is_empty() {
-        let generation = session.generation();
-        let seats: HashMap<u16, (Entity, bool)> = players
-            .iter()
-            .map(|(entity, wire, player, ..)| {
-                (wire.0, (entity, player.control == PlayerControl::Local))
-            })
-            .collect();
-        while let Some((row_gen, row)) = snaps.pending.pop_front() {
-            if row_gen != generation {
-                report.impacts_dropped += 1;
-                continue;
-            }
-            let Some(&(entity, is_local)) = seats.get(&row.seat) else {
-                // Departed or unspawned seat — nothing to present on.
-                report.impacts_dropped += 1;
-                continue;
-            };
-            if is_local {
-                continue;
-            }
-            let sane = row.point.iter().all(|v| v.is_finite())
-                && row.normal.iter().all(|v| v.is_finite())
-                && row.severity.is_finite()
-                && row.severity >= 0.0;
-            if !sane {
-                report.impacts_dropped += 1;
-                continue;
-            }
-            remote_fx.write(RemoteImpact {
-                entity,
-                point: Vec3::from_array(row.point),
-                normal: Vec3::from_array(row.normal)
-                    .try_normalize()
-                    .unwrap_or(Vec3::Y),
-                severity: row.severity,
-            });
-            report.impacts_applied += 1;
-        }
-    }
+    // The state pass runs before the event drain: a repair byte
+    // landing this frame records its snap tick in
+    // `RemoteSnaps::repaired` before the queued impact rows are
+    // judged, so a hit the authority wiped before publishing the snap
+    // drops instead of splatting on top of the wipe that erased it.
+    apply_snap_frame(
+        &mut snaps,
+        &session,
+        &time,
+        &mut commands,
+        &mut players,
+        &mut trailers,
+        &mut texel,
+        &mut report,
+    );
+    drain_pending_impacts(&mut snaps, &session, &players, &mut remote_fx, &mut report);
+}
+
+/// The state half of [`apply_snapshots`]: apply the newest staged
+/// snapshot's pose/velocity/presentation rows plus each entry's v8
+/// damage byte — whose `>0 → 0` transition wipes the seat's texel rig
+/// and records the snap tick in [`RemoteSnaps::repaired`] for the
+/// drain that follows.
+#[allow(clippy::too_many_arguments)] // Bevy system helper — the borrows are the contract.
+fn apply_snap_frame(
+    snaps: &mut RemoteSnaps,
+    session: &Session,
+    time: &Time,
+    commands: &mut Commands,
+    players: &mut Query<SnapTargetRow<'_>, With<NetPlayer>>,
+    trailers: &mut Query<SnapTrailerRow<'_>, (With<car_visual::Trailer>, Without<NetPlayer>)>,
+    texel: &mut crate::texel_fx::TexelRepair,
+    report: &mut NetDriveReport,
+) {
     let Some(snap) = snaps.latest.take() else {
         return;
     };
     // A frame from another session is never applied — and a stale tick
     // inside this generation isn't either (physics only moves on fixed
-    // steps, so a same-tick snap carries a duplicate pose).
+    // steps, so a same-tick snap carries a duplicate pose). Either way
+    // the queued impact rows still drain: events outlive the pose
+    // frame that carried them.
     if snap.generation != session.generation() {
         return;
     }
@@ -1719,7 +1724,7 @@ pub fn apply_snapshots(
             input,
             drive,
             damage,
-        ) in &mut players
+        ) in players.iter_mut()
         {
             if wire.0 != entry.player {
                 continue;
@@ -1739,7 +1744,14 @@ pub fn apply_snapshots(
             // accumulates `VehicleDamage`, so the replicated total is
             // the only truth the meter/smoke/impairment consumers can
             // read (F05 req 6). Applied on every snap, not just resets.
-            apply_damage(entity, entry, damage, &mut texel, &mut report);
+            if apply_damage(entity, entry, damage, texel, report) {
+                // The wipe just ran — record the repair's snap tick so
+                // the drain drops any still-queued pre-repair impact
+                // row instead of splatting on top of it.
+                snaps
+                    .repaired
+                    .insert(entry.player, (snap.generation, snap.tick));
+            }
             // The own seat: only an authority reset may move it — the
             // host teleported our car (its copy of us is the truth),
             // so the predicted pose yields to the asserted one. Its
@@ -1809,7 +1821,7 @@ pub fn apply_snapshots(
     // whole rig in the same broadcast).
     for t in &snap.trailers {
         for (entity, trailer, marker, mut pos, mut rot, mut vel, mut ang, lerp, drive) in
-            &mut trailers
+            trailers.iter_mut()
         {
             let remote_copy = marker.is_some_and(|m| m.owner == t.owner);
             let own_rig = marker.is_none()
@@ -1865,6 +1877,83 @@ pub fn apply_snapshots(
         }
     }
     report.snaps_applied += 1;
+}
+
+/// The event half of [`apply_snapshots`]: drain the queued replicated
+/// impact rows into the [`RemoteImpact`] stream. Replicated impacts
+/// are events, not state — the queue drains every run, not only when
+/// a fresh frame applied (a superseded snap's poses drop, its effects
+/// still land). It runs *after* the state pass so a repair byte
+/// applied this frame is already in [`RemoteSnaps::repaired`]: a row
+/// emitted at or before the repair's snap tick predates the wipe on
+/// the authority (splat-then-wipe), so it drops rather than
+/// re-stamping a hit the repair already erased. `push` already
+/// deduped `(seat, id)` and binned foreign generations; here each row
+/// gets the session gate, the own-seat skip — a predicted seat's
+/// local physics stream already rendered the hit, so the wire row
+/// must not double it — the wire sanitize, the repair-ledger
+/// staleness check, and the resolve to this process's remote copy.
+fn drain_pending_impacts(
+    snaps: &mut RemoteSnaps,
+    session: &Session,
+    players: &Query<SnapTargetRow<'_>, With<NetPlayer>>,
+    remote_fx: &mut MessageWriter<RemoteImpact>,
+    report: &mut NetDriveReport,
+) {
+    report.impacts_dropped += snaps.dropped;
+    snaps.dropped = 0;
+    if snaps.pending.is_empty() {
+        return;
+    }
+    let generation = session.generation();
+    let seats: HashMap<u16, (Entity, bool)> = players
+        .iter()
+        .map(|(entity, wire, player, ..)| {
+            (wire.0, (entity, player.control == PlayerControl::Local))
+        })
+        .collect();
+    while let Some((row_gen, row)) = snaps.pending.pop_front() {
+        if row_gen != generation {
+            report.impacts_dropped += 1;
+            continue;
+        }
+        let Some(&(entity, is_local)) = seats.get(&row.seat) else {
+            // Departed or unspawned seat — nothing to present on.
+            report.impacts_dropped += 1;
+            continue;
+        };
+        if is_local {
+            continue;
+        }
+        let sane = row.point.iter().all(|v| v.is_finite())
+            && row.normal.iter().all(|v| v.is_finite())
+            && row.severity.is_finite()
+            && row.severity >= 0.0;
+        if !sane {
+            report.impacts_dropped += 1;
+            continue;
+        }
+        // The seat's repair wiped the skin at or after this row's
+        // emit tick — the authority ordered splat-then-wipe, so the
+        // hit must not land on top of the wipe.
+        if snaps
+            .repaired
+            .get(&row.seat)
+            .is_some_and(|&(g, tick)| g == row_gen && row.tick <= tick)
+        {
+            report.impacts_dropped += 1;
+            continue;
+        }
+        remote_fx.write(RemoteImpact {
+            entity,
+            point: Vec3::from_array(row.point),
+            normal: Vec3::from_array(row.normal)
+                .try_normalize()
+                .unwrap_or(Vec3::Y),
+            severity: row.severity,
+        });
+        report.impacts_applied += 1;
+    }
 }
 
 /// The remote-copy blend query row — pose, the `RemoteLerp` window and

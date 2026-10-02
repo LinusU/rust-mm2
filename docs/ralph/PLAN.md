@@ -47,7 +47,13 @@ severity rows, deduped `(generation, seat, id)` client-side and
 replayed through a `RemoteImpact` stream so remote copies spark and
 voice their hits on every process — and this iteration's texel leg
 now splats remote skins off the same stream and clears them on the
-replicated damage byte's repair transition; still open: replicated
+replicated damage byte's repair transition, with the following
+iteration repairing that replication's ordering (a per-seat
+`repaired` ledger in `RemoteSnaps` drops a pending row emitted
+at/below the repair's snap tick, so a pre-repair hit can no longer
+splat after the wipe) and the byte's sub-byte rounding (any positive
+total encodes ≥1 — byte 0 is reserved for the repair signal); still
+open: replicated
 result/race state, breakaway fragments on remote
 copies, the measured AC03 impairment matrix, bandwidth budgets), the F24-B
 remainder (B.7 landed the Bevy-side

@@ -1,3 +1,84 @@
+# Last iteration — F25-B repair: replicated repair ordering — a
+# per-seat repair ledger makes a pre-repair `SnapImpact` row drop
+# instead of splatting after the wipe, and `encode_damage` stops
+# rounding a positive total onto the repair byte (iteration 4, run
+# 20261002T095452-41346)
+
+Repair iteration on `ralph/night` (baseline `9e93990` — the texel
+candidate; external verify + review pass with gaps only). Two of its
+verification gaps were real defects in the landed ordering, so this
+iteration repairs them instead of opening new feature work.
+
+## What landed
+
+Two commits, one per defect class:
+
+- `a844eb3` — `encode_damage` floors any positive total at byte 1:
+  `round(fraction*255)` mapped a total in (0, ~0.2% of `MaxDamage`)
+  to 0, which a predicted client reads as the `>0→0` repair signal —
+  a wipe the authority never ordered. Unreachable through `apply`
+  today (an accepted severity always clears ~0.4% of max); reachable
+  the day the authored `regenerate_rate` channel runs mid-session.
+  Byte 0 now strictly means "total is 0".
+- ordering — `RemoteSnaps` gains `repaired`, a per-seat ledger
+  recording `(generation, snap tick)` of each `>0→0` transition the
+  apply pass performs. `apply_snapshots` split into
+  `apply_snap_frame` (state) + `drain_pending_impacts` (events); the
+  drain now runs *after* the state pass every run, so a repair byte
+  landing this frame is recorded before the queued rows are judged.
+  A pending row whose `tick` sits at or below the seat's recorded
+  repair tick drops (`SnapImpact::tick` is the emit tick, never after
+  its snap's publish tick, so it is provably pre-repair — the
+  authority ordered splat-then-wipe). This covers both co-arrival
+  (the row outlived its superseded snap and drains beside the repair
+  byte) and late arrival (a reordered pre-repair frame's rows
+  draining after the repair applied).
+
+## Tests
+
+`texel_fx` 10→13: `a_pre_repair_impact_row_never_splats_after_the_
+wipe` (co-arrival — damaged byte applied, then a queued pre-repair
+row plus the repair snap in one update: skin stays clean, row counts
+as a drop, the wipe still runs), `a_delayed_pre_repair_row_drops_
+against_the_repair_ledger` (the row arrives a snap *after* the wipe
+applied), `a_post_repair_impact_still_splats` (emit tick past the
+repair's snap tick lands like any other hit). `netdrive` unit test
+gained the sub-byte encode leg. New helpers: `push_snap_with_
+impacts`, `impact_row`, `snap_entry_at` (asserts a pose so the copy
+stays where the impact points were authored — entries at the wire
+zero pose teleport it to the origin before `apply_remote_texels`
+reads `GlobalTransform`).
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` green — 91 binaries, 0 failures
+(`texel_fx` 13/13).
+
+## Classification / remaining open items
+
+- Implementation choice throughout — the ledger shape, the `<=`
+  boundary and the encode floor are ours; the retail wire protocol is
+  unrecovered, so no original-behavior claim.
+- Evidence: in-process integration legs driving the production
+  systems — no process-level session produced a nonzero `imp` cell
+  (the dev-world cruise never collides), nothing rendered or driven
+  by hand, no LAN, no retail content.
+- Residual edges, documented in `docs/research/net.md`: a hit emitted
+  in the *same host tick* the repair resolved reads as pre-repair
+  (may drop a legitimate post-repair splat); a pre-repair hit whose
+  damaged intermediate byte was superseded before it ever applied is
+  unobservable — no transition was seen, so the row is
+  indistinguishable from a fresh hit on an intact car. Both are
+  presentation-only; a per-seat repair epoch on the wire row would
+  close them if they ever matter.
+- F25-B remaining scope unchanged: replicated result/race state,
+  remote-copy breakaway fragments, the measured AC03 impairment
+  matrix, bandwidth budgets. AC01–AC06 stay open.
+
+---
+
 # Last iteration — F25-B eighth slice: replicated texel damage —
 # remote copies bind a `TexelDamageRig`, splat off the `RemoteImpact`
 # stream, and clear on the replicated damage byte's repair transition
