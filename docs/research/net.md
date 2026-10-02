@@ -40,7 +40,7 @@ precludes adding a second socket later.
 is added it must come from maintained crypto/session crates, not
 hand-rolled primitives.
 
-## Wire protocol (`PROTOCOL_VERSION = 8`)
+## Wire protocol (`PROTOCOL_VERSION = 10`)
 
 Length-prefixed frames: `u32le` length + payload, bounded by
 `MAX_FRAME` (256 KiB) checked *before* allocation. Messages are strict
@@ -83,8 +83,8 @@ a snap applies, since nothing local accumulates under prediction) —
 reconstituting the total through the copy's own spec without touching
 the `ImpactId` watermark, so authority repairs replicate down while a
 late duplicate impact still cannot land. It is state replication, not
-impact replication: the byte carries no per-impact positions, so
-texel splats, sparks and breakaway detachment stay F26 scope; the
+impact replication: the byte carries no per-impact positions (v10
+later added those, below); the
 authored `VehicleSmoke` rig now binds at remote spawn and emits off
 the replicated total, and `sync_impairment` runs under predicted
 sessions so the client's own seat weakens the way the authority's
@@ -108,7 +108,32 @@ the `R` bundle, `--reset-at`, recovery/stuck/disabled resolves,
 scripted and opponent re-anchors, the self-right assist, wire
 `ResetRequest`s — emits each towed trailer's reseat ahead of the
 apply, so a remote participant's rig teleports as one on the
-authority exactly like the local `R` bundle.
+authority exactly like the local `R` bundle. v9→v10: `Snap` gained
+`impacts`, a bounded (`MAX_SNAP_IMPACTS` = 64) list of `SnapImpact`
+rows replicating the authority's filtered `ImpactEvent` stream —
+per-impact `point`, outward `normal`, `severity` and the authority's
+`ImpactId` that the v8 damage *fraction* cannot express (F25-B).
+`publish_snapshots` drains the stream every run, filters to the
+current generation, and emits one row per participant side that maps
+to a `NetPlayer` seat — a car-vs-car hit rides as two rows sharing
+`id` with mirrored outward normals — sorted strongest-first at the
+cap, so a pile-up keeps its worst hits. The rows are presentation
+*events*, not state: poses stay latest-wins but impacts ride a
+separate bounded pending queue, so a superseded frame's effects are
+not silently lost with it. The client dedupes on `(generation, seat,
+id)` (bounded FIFO window), drops stale/unspawned/non-finite rows,
+skips the receiver's own seat — its predicted physics already
+rendered the hit through the local stream — and mints
+`netdrive::RemoteImpact` messages resolved to the live remote copy.
+`spark_fx::emit_sparks` and `audio::impact_voices` now read both
+streams, and on the authority a remote-controlled seat's local-stream
+impacts render like an AI car's (it is a locally simulated
+participant there). What the wire still does not carry: the struck
+side's identity (a replicated row's audio picks the id-0 catch-all)
+and `surface` (no consumer reads it) — and the state-adjacent gaps
+stay open: a remote copy binds no texel rig (its skin never splats)
+and breakaway fragments are authority-spawned state, not
+presentation.
 
 Handshake (always the first exchange):
 
@@ -430,8 +455,10 @@ The lobby surface is deliberately minimal: `Enter` toggles ready,
 session, roster readiness and the latest notice. A real lobby menu
 (pick/browse screens) is future work, as is every piece still absent
 underneath: remote vehicle spawning, roster picks as gameplay spawns,
-replication of score/result state and damage *events* (F26 — the v8
-`SnapEntry::damage` byte already carries the replicated total), and
+replication of score/result state (F26 — the v8
+`SnapEntry::damage` byte already carries the replicated total and
+v10 `Snap.impacts` the per-impact spark/audio presentation; texel
+splats and breakaway fragments on remote copies stay open), and
 the in-app *host*
 surface. `mm2 --join --headless` parks the same link inside the smoke
 harness, which waits on the wire with wall-clock pacing while `Menu`
@@ -489,7 +516,10 @@ wire actually moved rather than an in-process mailbox's contents.
   written onto live `VehicleDamage` components; `dsyn0` on these legs
   is honest, the dev car binds no authored damage record), the v9
   trailer counter (`tsyn` — `Snap.trailers` rows applied to a live
-  trailer; `tsyn0` likewise, the dev car tows nothing), and its own
+  trailer; `tsyn0` likewise, the dev car tows nothing), the v10
+  impact counter (`imp<s>s/<a>a/<d>d` — rows broadcast on the
+  authority, applied/dropped on the client; `imp0s/0a/0d` on these
+  legs is honest, the clean cruise never collides), and its own
   predicted seat driven (`moved=`).
   A client's frame-cap exit lands on the host as `cause=quit` — the
   link `Drop` sends a deliberate `Leave`, not a lost socket — and the

@@ -178,14 +178,20 @@ fn streak_transform(spark: &Spark) -> Transform {
 /// through the shared deduplicated [`ImpactEvent`] stream, so resting
 /// contact and sub-threshold taps spark nothing. Each participant's
 /// burst leaves the contact point along the normal *toward* it —
-/// sprayed away from the surface it struck. Remote participants are
-/// skipped like every F05 system (their own client renders them);
-/// the reader drains while not `Playing` so a buffered stale impact
-/// never flushes sparks into a pause or the next session.
+/// sprayed away from the surface it struck. On the authority a
+/// remote-controlled seat is a locally simulated participant and
+/// sparks like an AI car's; on a predicted client the local stream's
+/// Remote hits stay skipped — the same impact arrives as a
+/// [`RemoteImpact`] row off the `Snap.impacts` tail (protocol v10)
+/// resolved to this process's copy, so the effect renders once, from
+/// the authority's stream. Both readers drain while not `Playing` so
+/// a buffered stale impact never flushes sparks into a pause or the
+/// next session.
 #[allow(clippy::too_many_arguments)] // Bevy system — the borrows are the contract.
 pub fn emit_sparks(
     mut commands: Commands,
     mut reader: MessageReader<ImpactEvent>,
+    mut remote_reader: MessageReader<crate::netdrive::RemoteImpact>,
     session: Res<Session>,
     fx: Option<Res<SparkFx>>,
     mut report: ResMut<SparkFxReport>,
@@ -196,6 +202,7 @@ pub fn emit_sparks(
 ) {
     if !session.is_playing() {
         reader.read().for_each(drop);
+        remote_reader.read().for_each(drop);
         return;
     }
     let Some(fx) = fx else { return };
@@ -203,6 +210,7 @@ pub fn emit_sparks(
         return;
     };
     let generation = session.generation();
+    let authority = session.authority_role().is_authority();
     let owner = SessionEntity(generation);
     let index: HashMap<ObjectId, (Entity, Option<PlayerControl>)> = identities
         .iter()
@@ -212,6 +220,35 @@ pub fn emit_sparks(
     // deferred spawns, so the count accrues locally or a burst-heavy
     // tick could overrun the designed pool bound.
     let mut live: HashMap<Entity, usize> = HashMap::new();
+    // The shared burst tail: `point`/`outward`/`severity` are the
+    // RadialBlast primitives whichever stream delivered them.
+    let mut burst_at = |entity: Entity, point: Vec3, outward: Vec3, severity: f32| {
+        let Ok(mut rig) = rigs.get_mut(entity) else {
+            return;
+        };
+        let live_now = *live
+            .entry(entity)
+            .or_insert_with(|| sparks.iter().filter(|s| s.emitter == entity).count());
+        let burst = rig.burst(point, outward, severity, live_now, entity);
+        if !burst.is_empty() {
+            report.bursts += 1;
+            live.insert(entity, live_now + burst.len());
+        }
+        for spark in burst {
+            let mut material = base.clone();
+            material.base_color =
+                Color::srgba(SPARK_TINT[0], SPARK_TINT[1], SPARK_TINT[2], spark.alpha());
+            let transform = streak_transform(&spark);
+            commands.spawn((
+                owner,
+                spark,
+                Mesh3d(fx.assets.mesh.clone()),
+                MeshMaterial3d(materials.add(material)),
+                transform,
+            ));
+            report.emitted += 1;
+        }
+    };
     for event in reader.read() {
         if event.generation != generation {
             continue;
@@ -225,12 +262,9 @@ pub fn emit_sparks(
             let Some(&(entity, control)) = index.get(&object) else {
                 continue;
             };
-            if control == Some(PlayerControl::Remote) {
+            if !authority && control == Some(PlayerControl::Remote) {
                 continue;
             }
-            let Ok(mut rig) = rigs.get_mut(entity) else {
-                continue;
-            };
             // `normal` points from participant 0 toward participant 1 —
             // each side's burst rebounds the other way.
             let outward = if side == 0 {
@@ -238,29 +272,14 @@ pub fn emit_sparks(
             } else {
                 event.normal
             };
-            let live_now = *live
-                .entry(entity)
-                .or_insert_with(|| sparks.iter().filter(|s| s.emitter == entity).count());
-            let burst = rig.burst(event.point, outward, event.severity, live_now, entity);
-            if !burst.is_empty() {
-                report.bursts += 1;
-                live.insert(entity, live_now + burst.len());
-            }
-            for spark in burst {
-                let mut material = base.clone();
-                material.base_color =
-                    Color::srgba(SPARK_TINT[0], SPARK_TINT[1], SPARK_TINT[2], spark.alpha());
-                let transform = streak_transform(&spark);
-                commands.spawn((
-                    owner,
-                    spark,
-                    Mesh3d(fx.assets.mesh.clone()),
-                    MeshMaterial3d(materials.add(material)),
-                    transform,
-                ));
-                report.emitted += 1;
-            }
+            burst_at(entity, event.point, outward, event.severity);
         }
+    }
+    // The replicated stream — remote copies' impacts delivered by the
+    // v10 snap tail; `apply_snapshots` already resolved, sanitized and
+    // deduped each row, and the receiver's own seat never appears.
+    for impact in remote_reader.read() {
+        burst_at(impact.entity, impact.point, impact.normal, impact.severity);
     }
 }
 

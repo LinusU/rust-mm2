@@ -30,12 +30,13 @@ use mm2_app::session::{SelectedCar, SessionControl, TunedVehicle};
 use mm2_app::smoke::{self, SmokeStatus};
 use mm2_assets::Vfs;
 use mm2_game::{
-    DevOverrides, Mm2Vfs, Player, PlayerControl, PlayerVehicle, Session, SessionAuthority,
-    SessionConfig, SessionMode, SessionPhase, WorldMode, despawn_session_entities,
+    DevOverrides, ImpactEvent, ImpactId, Mm2Vfs, ObjectId, ObjectIdentity, Player, PlayerControl,
+    PlayerVehicle, Session, SessionAuthority, SessionConfig, SessionMode, SessionPhase,
+    SurfaceState, WorldMode, despawn_session_entities,
 };
 use mm2_net::{
     Client, DriveInput, Host, HostConfig, HostEvent, Impair, ImpairProxy, LateJoin, LeaveCause,
-    LinkDir, Message, SnapEntry, VehiclePick, hello,
+    LinkDir, Message, SnapEntry, SnapImpact, VehiclePick, hello,
 };
 use mm2_vehicle::{ResetVehicle, Teleported, VehicleConfig, VehicleInput};
 use support::{Proc, WAIT, listening, mount};
@@ -100,6 +101,10 @@ fn lobby_app(vfs: Vfs) -> App {
         // F25-A.5: `track_reset_epochs` reads the same `ResetVehicle`
         // stream `vehicle_reset` applies.
         .add_message::<ResetVehicle>()
+        // F25-B (v10): `publish_snapshots` reads the impact stream,
+        // `apply_snapshots` writes the replicated one.
+        .add_message::<mm2_game::ImpactEvent>()
+        .add_message::<netdrive::RemoteImpact>()
         .insert_resource(Mm2Vfs(vfs))
         .insert_resource(SelectedCar {
             def: None,
@@ -1989,6 +1994,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
     // its `Position` toward the asserted pose.
     host.ctl()
         .broadcast(&Message::Snap {
+            impacts: Vec::new(),
             trailers: Vec::new(),
             generation,
             tick: 7,
@@ -2149,6 +2155,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
     for tick in [3u64, 7] {
         host.ctl()
             .broadcast(&Message::Snap {
+                impacts: Vec::new(),
                 trailers: Vec::new(),
                 generation,
                 tick,
@@ -2170,6 +2177,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
     }
     host.ctl()
         .broadcast(&Message::Snap {
+            impacts: Vec::new(),
             trailers: Vec::new(),
             generation: generation + 9,
             tick: 99,
@@ -2210,6 +2218,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
     // through the world between the poses.
     host.ctl()
         .broadcast(&Message::Snap {
+            impacts: Vec::new(),
             trailers: Vec::new(),
             generation,
             tick: 8,
@@ -2256,6 +2265,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
     // snaps (bounded corrections cut the other way too).
     host.ctl()
         .broadcast(&Message::Snap {
+            impacts: Vec::new(),
             trailers: Vec::new(),
             generation,
             tick: 9,
@@ -2311,6 +2321,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
     });
     host.ctl()
         .broadcast(&Message::Snap {
+            impacts: Vec::new(),
             trailers: Vec::new(),
             generation,
             tick: 10,
@@ -2376,6 +2387,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
         .snaps_applied;
     host.ctl()
         .broadcast(&Message::Snap {
+            impacts: Vec::new(),
             trailers: Vec::new(),
             generation,
             tick: 11,
@@ -2418,6 +2430,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
     // the same spot.
     host.ctl()
         .broadcast(&Message::Snap {
+            impacts: Vec::new(),
             trailers: Vec::new(),
             generation,
             tick: 12,
@@ -2921,6 +2934,7 @@ fn a_snapshot_drives_a_remote_rigs_trailer() {
     // its pose, so a buggy unconditional write would move it.
     host.ctl()
         .broadcast(&Message::Snap {
+            impacts: Vec::new(),
             generation,
             tick: 7,
             entries: vec![seat_entry(0, 0), seat_entry(our_id, 0)],
@@ -3014,6 +3028,7 @@ fn a_snapshot_drives_a_remote_rigs_trailer() {
     // snaps the own trailer outright and marks the jump `Teleported`.
     host.ctl()
         .broadcast(&Message::Snap {
+            impacts: Vec::new(),
             generation,
             tick: 8,
             entries: vec![seat_entry(0, 0), seat_entry(our_id, 1)],
@@ -3054,6 +3069,283 @@ fn a_snapshot_drives_a_remote_rigs_trailer() {
             .trailers_synced,
         2
     );
+
+    host.shutdown();
+}
+
+/// F25-B, protocol v10 host half: the authority's filtered
+/// `ImpactEvent` stream rides the next `Snap` as per-seat
+/// `SnapImpact` rows — one row per participant side that names a
+/// `NetPlayer` seat — so a client can present a remote car's hits from
+/// the replicated stream the damage byte cannot express. A hit naming
+/// no seat emits nothing, and a foreign-generation event never rides.
+#[test]
+fn a_snap_carries_the_sessions_impact_rows() {
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let mut app = host_app(vfs, link);
+    let mut peer = ready_peer(addr, "eve", fp);
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<LobbyState>()
+            .roster
+            .iter()
+            .any(|e| e.pick.is_some())
+    });
+    let generation = hosted_playing(&mut app);
+    spin_mut(&mut app, |a| {
+        a.world_mut()
+            .query_filtered::<Entity, With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some()
+    });
+    let remote_oid = {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&ObjectIdentity, With<RemotePick>>();
+        q.single(app.world()).expect("the remote car").0
+    };
+    let session_tick = app.world().resource::<Session>().tick();
+    let write_impact = |app: &mut App, id: u64, generation: u64, a: ObjectId, b: ObjectId| {
+        app.world_mut().write_message(ImpactEvent {
+            id: ImpactId(id),
+            generation,
+            tick: session_tick,
+            participants: (a, b),
+            point: Vec3::new(1.0, 0.5, -2.0),
+            normal: Vec3::new(0.0, 0.0, -1.0),
+            severity: 12.5,
+            surface: SurfaceState::default(),
+        });
+    };
+    // The seat-named hit (the remote car is participant 0 — its row
+    // carries the mirrored outward normal), a pair no seat can name,
+    // and a foreign-generation event: only the first rides the wire.
+    write_impact(&mut app, 7, generation, remote_oid, ObjectId::WORLD);
+    write_impact(&mut app, 8, generation, ObjectId::WORLD, ObjectId::WORLD);
+    write_impact(&mut app, 9, generation + 9, remote_oid, ObjectId::WORLD);
+    app.update();
+    let snap = until_wire(
+        &mut peer,
+        |m| matches!(m, Message::Snap { impacts, .. } if !impacts.is_empty()),
+    );
+    let Message::Snap { impacts, .. } = snap else {
+        unreachable!()
+    };
+    assert_eq!(impacts.len(), 1, "only the seat-named side rides");
+    let row = impacts[0];
+    assert_eq!((row.seat, row.id, row.tick), (1, 7, session_tick));
+    assert_eq!(row.point, [1.0, 0.5, -2.0]);
+    assert_eq!(
+        row.normal,
+        [0.0, 0.0, 1.0],
+        "the seat-0 side's row carries the mirrored outward normal"
+    );
+    assert_eq!(row.severity, 12.5);
+    assert_eq!(
+        app.world()
+            .resource::<netdrive::NetDriveReport>()
+            .impacts_sent,
+        1
+    );
+}
+
+/// F25-B, protocol v10 client half: a `Snap.impacts` row resolves to
+/// the named seat's remote copy and lands as a `RemoteImpact`
+/// presentation event — deduped across duplicated frames, skipped for
+/// the receiver's own seat (the predicted local stream already
+/// rendered it), dropped for departed seats, foreign generations and
+/// unsanitized fields.
+#[test]
+fn a_snapshot_feeds_the_remote_impact_stream() {
+    let install = tempfile::tempdir().unwrap();
+    let vfs = mount(install.path());
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host_config = HostConfig::new(fp);
+    host_config.host_pick = Some(VehiclePick {
+        vehicle: String::new(),
+        paint: 0,
+    });
+    let mut host = Host::listen_loopback(&host_config).unwrap();
+    host.set_session(net::advertise(&dev_cruise()).unwrap())
+        .unwrap();
+    let link = LobbyLink::join(
+        host.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join failed");
+    let our_id = link.player_id();
+    let mut app = bridge_app(vfs, link);
+    {
+        let link = app.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    until_ready(&mut app);
+    host.start(LateJoin::Open).unwrap();
+    until_started(&host);
+    until_begun(&mut app);
+    let generation = app.world().resource::<Session>().generation();
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    // The host's seat reconciles into the remote copy the wire row
+    // resolves to.
+    spin_mut(&mut app, |a| {
+        a.world_mut()
+            .query_filtered::<Entity, With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some()
+    });
+    let host_copy = {
+        let mut q = app.world_mut().query_filtered::<Entity, With<RemotePick>>();
+        q.single(app.world()).expect("the host copy")
+    };
+    // The local seat — stamped `NetPlayer(our_id)` by the reconcile,
+    // the identity the own-seat skip reads.
+    let local = app
+        .world_mut()
+        .spawn((
+            PlayerVehicle,
+            Player {
+                id: mm2_game::PlayerId(1),
+                control: PlayerControl::Local,
+            },
+            mm2_game::AuthorityRole::Predicted,
+            avian3d::prelude::Position::default(),
+            avian3d::prelude::Rotation::default(),
+            avian3d::prelude::LinearVelocity::default(),
+            avian3d::prelude::AngularVelocity::default(),
+        ))
+        .id();
+    spin(&mut app, |a| a.world().get::<NetPlayer>(local).is_some());
+
+    let entry = |player: u16| SnapEntry {
+        player,
+        pos: [9.0, 1.0, 9.0],
+        rot: [0.0, 0.0, 0.0, 1.0],
+        vel: [0.0; 3],
+        angvel: [0.0; 3],
+        epoch: 0,
+        steer: 0,
+        spin: 0,
+        compression: 0,
+        flags: 0,
+        damage: 0,
+    };
+    let row = |seat: u16, id: u64| SnapImpact {
+        seat,
+        id,
+        tick: 7,
+        point: [3.0, 0.4, -1.0],
+        normal: [0.0, 0.0, 1.0],
+        severity: 12.5,
+    };
+    // One valid remote-seat row plus the traps: the own seat's row
+    // (skipped, never presented), a departed seat's row, and a
+    // non-finite row the sanitize drops.
+    host.ctl()
+        .broadcast(&Message::Snap {
+            generation,
+            tick: 7,
+            entries: vec![entry(0), entry(our_id)],
+            trailers: Vec::new(),
+            impacts: vec![
+                row(0, 1),
+                row(our_id, 1),
+                row(7, 1),
+                SnapImpact {
+                    seat: 0,
+                    id: 2,
+                    tick: 7,
+                    point: [f32::NAN; 3],
+                    normal: [0.0, 1.0, 0.0],
+                    severity: 1.0,
+                },
+            ],
+        })
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .impacts_applied
+            > 0
+    });
+    {
+        let drained: Vec<netdrive::RemoteImpact> = app
+            .world_mut()
+            .resource_mut::<Messages<netdrive::RemoteImpact>>()
+            .drain()
+            .collect();
+        assert_eq!(drained.len(), 1, "only the remote-seat row lands");
+        let impact = drained[0];
+        assert_eq!(impact.entity, host_copy);
+        assert_eq!(impact.point, Vec3::new(3.0, 0.4, -1.0));
+        assert_eq!(impact.normal, Vec3::new(0.0, 0.0, 1.0));
+        assert_eq!(impact.severity, 12.5);
+    }
+    {
+        let r = app.world().resource::<netdrive::NetDriveReport>();
+        assert_eq!(r.impacts_applied, 1);
+        // Seat 7 has no spawned participant; the NaN row fails the
+        // sanitize. The own-seat row is skipped by design, not a drop.
+        assert_eq!(r.impacts_dropped, 2);
+    }
+
+    // A duplicated frame re-presents the same rows — the `(gen, seat,
+    // id)` dedup absorbs them before they reach the apply pass.
+    host.ctl()
+        .broadcast(&Message::Snap {
+            generation,
+            tick: 8,
+            entries: vec![entry(0), entry(our_id)],
+            trailers: Vec::new(),
+            impacts: vec![row(0, 1)],
+        })
+        .unwrap();
+    app.update();
+    app.update();
+    {
+        let drained: Vec<netdrive::RemoteImpact> = app
+            .world_mut()
+            .resource_mut::<Messages<netdrive::RemoteImpact>>()
+            .drain()
+            .collect();
+        assert!(
+            drained.is_empty(),
+            "a duplicated frame's rows never double-fire"
+        );
+    }
+    // A foreign-generation row drops at the apply-side session gate.
+    host.ctl()
+        .broadcast(&Message::Snap {
+            generation: generation + 9,
+            tick: 9,
+            entries: vec![entry(0)],
+            trailers: Vec::new(),
+            impacts: vec![row(0, 99)],
+        })
+        .unwrap();
+    app.update();
+    app.update();
+    {
+        let drained: Vec<netdrive::RemoteImpact> = app
+            .world_mut()
+            .resource_mut::<Messages<netdrive::RemoteImpact>>()
+            .drain()
+            .collect();
+        assert!(drained.is_empty());
+        let r = app.world().resource::<netdrive::NetDriveReport>();
+        assert_eq!(r.impacts_applied, 1);
+        assert_eq!(r.impacts_dropped, 3, "the foreign-generation row dropped");
+    }
 
     host.shutdown();
 }

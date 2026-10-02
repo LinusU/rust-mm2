@@ -1178,6 +1178,7 @@ fn main() {
     .insert_resource(hud::HudVisible(!cli.no_hud))
     .add_plugins(VehiclePlugin)
     .add_message::<ImpactEvent>()
+    .add_message::<netdrive::RemoteImpact>()
     .add_message::<DamageEvent>()
     .add_message::<StuckEvent>()
     .add_message::<PartDetached>()
@@ -1481,10 +1482,15 @@ fn main() {
     // F05-B.8: authored impact sparks — emission consumes the
     // deduplicated impact stream the FixedLast systems publish, then
     // the advance step integrates the streaks it just spawned. Same
-    // schedule slot and `is_playing` gate as the smoke pair.
+    // schedule slot and `is_playing` gate as the smoke pair. The
+    // `apply_snapshots` edge keeps a replicated `RemoteImpact`
+    // sparking in the frame it arrived rather than a frame late (and
+    // keeps the emit/advance frame deterministic under `--frames`).
     .add_systems(
         Update,
-        (spark_fx::emit_sparks, spark_fx::advance_sparks).chain(),
+        (spark_fx::emit_sparks, spark_fx::advance_sparks)
+            .chain()
+            .after(netdrive::apply_snapshots),
     )
     // F18-B.2: authored precipitation — the emitter anchors on the
     // active camera, the cover probe suppresses sheltered spawns and
@@ -1549,8 +1555,12 @@ fn main() {
                 .after(session::drive_session),
             // F07-B.3: deduplicated impacts → bounded one-shot voices —
             // the same despawn ordering as the rigs (a struck car dying
-            // mid-update must not queue voice reads on it).
-            audio::impact_voices.after(session::drive_session),
+            // mid-update must not queue voice reads on it). The
+            // `apply_snapshots` edge voices a replicated `RemoteImpact`
+            // in the frame it landed rather than a frame late.
+            audio::impact_voices
+                .after(session::drive_session)
+                .after(netdrive::apply_snapshots),
             // F07-B.5: committed gear/direction changes → authored
             // clutch one-shots — the same despawn ordering.
             audio::clutch_voices.after(session::drive_session),

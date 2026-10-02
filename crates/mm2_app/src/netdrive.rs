@@ -23,10 +23,15 @@
 //!   The v8 tail adds the seat's authoritative *damage fraction*
 //!   (F25-B): a copy's `VehicleDamage` carries the replicated total
 //!   (never locally accumulated — F05 req 6), which is what its bound
-//!   `VehicleSmoke` rig emits from. Event-driven damage presentation
-//!   stays unwired — impact sparks, texel splats and breakaway
-//!   detachment are per-impact effects, not a state the fraction can
-//!   carry (F26 scope).
+//!   `VehicleSmoke` rig emits from. The v10 tail adds [`SnapImpact`]
+//!   rows (F25-B): each authority-side [`ImpactEvent`] whose
+//!   participants map to `NetPlayer` seats rides the next snapshot as
+//!   one row per seat, and clients replay them through the
+//!   [`RemoteImpact`] stream — per-impact point/normal/severity the
+//!   damage fraction cannot carry — so remote cars spark and sound on
+//!   every process. Texel splats and breakaway detachment stay
+//!   state-adjacent gaps (the copy owns no texel rig and fragments are
+//!   authority-spawned state).
 //! - **Client** (`SessionAuthority::Remote` → `Predicted`): remote cars
 //!   are kinematic copies blended between the two newest snapshots
 //!   ([`RemoteLerp`]), marked [`RemoteReplica`] so the local sim never
@@ -62,11 +67,12 @@
 //! reconcile puts each remote car on its own.
 //!
 //! Everything here is loopback-scoped groundwork like the rest of F24/F25:
-//! no lag compensation, no result/race-state replication, no event-driven
-//! effect replication (sparks/texel/breakaway) — those are named gaps,
-//! not silent behavior.
+//! no lag compensation, no result/race-state replication, and replicated
+//! impact events are presentation-only (texel splats and breakaway
+//! fragments on remote copies stay state-side gaps) — named gaps, not
+//! silent behavior.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use avian3d::prelude::{
@@ -74,13 +80,14 @@ use avian3d::prelude::{
 };
 use bevy::prelude::*;
 use mm2_game::{
-    DamageSignals, DamageSpec, Mm2Vfs, ObjectIdentity, Player, PlayerControl, PlayerVehicle,
-    RaceDefinition, RaceProgress, RaceState, RecoveryPolicy, Session, SessionEntity, SessionPhase,
-    SmokePolicy, StuckSpec, VehicleDamage, VehicleRecovery, VehicleSmoke, VehicleStuck,
+    DamageSignals, DamageSpec, ImpactEvent, Mm2Vfs, ObjectId, ObjectIdentity, Player,
+    PlayerControl, PlayerVehicle, RaceDefinition, RaceProgress, RaceState, RecoveryPolicy, Session,
+    SessionEntity, SessionPhase, SmokePolicy, SparkPolicy, StuckSpec, VehicleDamage,
+    VehicleRecovery, VehicleSmoke, VehicleSparks, VehicleStuck,
 };
 use mm2_net::{
-    DriveInput, Message, RemoteInputs, SNAP_FLAG_BRAKE, SNAP_FLAG_GROUNDED, SNAP_FLAG_REVERSE,
-    SnapEntry, SnapTrailer, VehiclePick,
+    DriveInput, MAX_SNAP_IMPACTS, Message, RemoteInputs, SNAP_FLAG_BRAKE, SNAP_FLAG_GROUNDED,
+    SNAP_FLAG_REVERSE, SnapEntry, SnapImpact, SnapTrailer, VehiclePick,
 };
 use mm2_vehicle::{
     DriveDirection, RemoteReplica, ResetVehicle, Teleported, Vehicle, VehicleConfig, VehicleInput,
@@ -122,6 +129,19 @@ const CORRECTION_SNAP_DIST: f32 = 20.0;
 /// teleport-lock its own seat every frame. One per second is still an
 /// immediate answer to a wedge.
 pub const RESET_REQUEST_COOLDOWN: Duration = Duration::from_secs(1);
+
+/// Client-side bound on replicated impact rows queued ahead of
+/// [`apply_snapshots`] (protocol v10, F25-B). Snaps arrive off the
+/// reader thread faster than the app applies them under load; the
+/// queue is a backlog bound, not a reliability mechanism — past it the
+/// oldest rows drop and count against [`NetDriveReport::impacts_dropped`].
+const MAX_PENDING_IMPACTS: usize = 256;
+
+/// Bound on the replicated-impact dedup window (protocol v10, F25-B):
+/// `(seat, id)` pairs stay known long enough to suppress a duplicated
+/// or reordered frame's rows, then retire FIFO — a seen-set that only
+/// grows would itself be the leak.
+const MAX_SEEN_IMPACTS: usize = 512;
 
 /// The wire roster id this participant entity carries. `0` is the host
 /// seat — the roster never lists it, but its `Start`-carried pick and
@@ -195,9 +215,33 @@ pub struct RemoteDrive {
     pub spin_rate: f32,
 }
 
+/// A replicated participant impact delivered to a remote copy —
+/// client-side presentation events minted by [`apply_snapshots`] from
+/// `Snap.impacts` rows (protocol v10, F25-B). Presentation only: `point`
+/// and `normal` position the effect, `severity` drives its strength, and
+/// nothing here writes damage or physics — those stay on the v8 state
+/// byte and the authority's own `ImpactEvent` stream. `entity` is the
+/// resolved local remote copy; the receiver's own seat never gets one —
+/// its predicted physics already rendered the hit through the local
+/// stream, so replaying the wire row would double the effect.
+#[derive(Message, Debug, Clone, Copy)]
+pub struct RemoteImpact {
+    /// The remote participant entity the impact presents on.
+    pub entity: Entity,
+    /// World-space contact point.
+    pub point: Vec3,
+    /// Outward contact normal from this participant's side of the hit.
+    pub normal: Vec3,
+    /// Relative impact speed, m/s — `ImpactEvent::severity`.
+    pub severity: f32,
+}
+
 /// The client-side snapshot inbox: the newest `Snap` the lobby pump
 /// drained, staged for [`apply_snapshots`]. Latest-wins like the host's
 /// input mailbox — a backlog of poses is strictly worse than the newest.
+/// Impact rows are the exception: they are *events*, not state, so they
+/// ride their own bounded `pending` queue — a superseded frame's poses
+/// drop, its unreceived effects still land.
 #[derive(Resource, Default)]
 pub struct RemoteSnaps {
     latest: Option<Snap>,
@@ -208,6 +252,23 @@ pub struct RemoteSnaps {
     /// is dropped; a snap from an older session can never apply, and a
     /// new generation resets the tick check.
     applied: Option<(u64, u64)>,
+    /// Replicated impact rows awaiting `apply_snapshots`, FIFO; each
+    /// carries its frame's generation for the apply-side staleness
+    /// check.
+    pending: VecDeque<(u64, SnapImpact)>,
+    /// Dedup window over `(generation, seat, id)` — a duplicated or
+    /// reordered frame re-presents its rows; only the first lands. The
+    /// generation rides the key so a new session's restarted id stream
+    /// never collides with the last one's marks. Bounded by
+    /// [`MAX_SEEN_IMPACTS`], retired FIFO through `seen_order`.
+    seen: HashSet<(u64, u16, u64)>,
+    /// Insertion order of `seen` for the bounded retire.
+    seen_order: VecDeque<(u64, u16, u64)>,
+    /// Rows dropped at push time — `pending` overflow — folded into
+    /// [`NetDriveReport`] by `apply_snapshots`, the only consumer that
+    /// runs with one. Stale-generation rows queue and drop at apply
+    /// instead, where the session gate can count them.
+    dropped: u64,
 }
 
 /// A staged snapshot frame.
@@ -226,6 +287,7 @@ impl RemoteSnaps {
         tick: u64,
         entries: Vec<SnapEntry>,
         trailers: Vec<SnapTrailer>,
+        impacts: Vec<SnapImpact>,
     ) {
         self.latest = Some(Snap {
             generation,
@@ -233,6 +295,23 @@ impl RemoteSnaps {
             entries,
             trailers,
         });
+        for row in impacts {
+            let key = (generation, row.seat, row.id);
+            if !self.seen.insert(key) {
+                continue;
+            }
+            self.seen_order.push_back(key);
+            if self.seen_order.len() > MAX_SEEN_IMPACTS
+                && let Some(old) = self.seen_order.pop_front()
+            {
+                self.seen.remove(&old);
+            }
+            if self.pending.len() >= MAX_PENDING_IMPACTS {
+                self.pending.pop_front();
+                self.dropped += 1;
+            }
+            self.pending.push_back((generation, row));
+        }
     }
 
     /// Newest snapshot tick applied so far — for the record/tests.
@@ -295,6 +374,19 @@ pub struct NetDriveReport {
     /// trailer on a declared reset; a session with no trailered seats
     /// never counts.
     pub trailers_synced: u64,
+    /// `Snap.impacts` rows broadcast (authority side, protocol v10,
+    /// F25-B) — one per participant side of each authority
+    /// [`ImpactEvent`], after the per-snapshot cap.
+    pub impacts_sent: u64,
+    /// `Snap.impacts` rows applied to a live remote participant's
+    /// entity (client side, protocol v10) — emitted into the
+    /// [`RemoteImpact`] stream for presentation consumers.
+    pub impacts_applied: u64,
+    /// Impact rows dropped: on the authority, rows over the
+    /// per-snapshot cap; on the client, pending-queue overflow, stale
+    /// generations, unsanitized rows, and rows whose seat has no live
+    /// participant entity.
+    pub impacts_dropped: u64,
 }
 
 /// A rotation off the wire, sanitized — a malformed-quaternion guard so
@@ -868,6 +960,16 @@ fn spawn_remote(
                 SmokePolicy::default(),
                 (session.generation() << 32) | u64::from(wire),
             ),
+            // The impact-spark renderer binds the same way (F25-B
+            // protocol v10): on the authority the copy sparks off the
+            // local `ImpactEvent` stream like any simulated seat, on a
+            // client off the replicated `RemoteImpact` rows the v10
+            // tail delivers — same wire-seeded stream on every
+            // process.
+            VehicleSparks::new(
+                SparkPolicy::default(),
+                (session.generation() << 32) | u64::from(wire),
+            ),
         ));
     }
     if let Some(s) = def.as_ref().and_then(|d| d.stuck.as_ref()) {
@@ -902,10 +1004,10 @@ fn spawn_remote(
                 materials,
                 vehicle,
                 // The texel rig reads the authored damage record and
-                // splats per impact — the v8 tail carries only the
-                // damage *total*, no per-impact positions, so a remote
-                // car's skin stays unrigged (F26's event replication
-                // would have to carry the impacts).
+                // splats per impact — the v10 tail now carries the
+                // per-impact positions, but the rig itself clones the
+                // pick's textures at spawn, so a remote car's skin
+                // still stays unrigged (named gap, F25-B).
                 None,
             );
             if !missing.is_empty() {
@@ -1242,6 +1344,7 @@ type SnapSourceRow<'a> = (
     Entity,
     &'a NetPlayer,
     &'a ResetEpoch,
+    &'a ObjectIdentity,
     &'a Position,
     &'a Rotation,
     &'a LinearVelocity,
@@ -1277,7 +1380,12 @@ type SnapTrailerSourceRow<'a> = (
 /// angle, wheel spin rate, suspension droop and the brake/reverse/
 /// grounded flags; the v8 tail adds [`encode_damage`], the seat's
 /// authoritative damage fraction — what a remote copy needs to *look*
-/// like the car the authority is simulating.
+/// like the car the authority is simulating. The v10 tail replicates
+/// this frame's [`ImpactEvent`] stream as [`SnapImpact`] rows: every
+/// participant side that maps to a `NetPlayer` seat emits one row
+/// (mirrored outward normal per side), capped at
+/// [`MAX_SNAP_IMPACTS`] with the strongest hits kept — presentation
+/// the damage fraction cannot express.
 pub fn publish_snapshots(
     host: Res<HostLink>,
     session: Res<Session>,
@@ -1285,8 +1393,13 @@ pub fn publish_snapshots(
     // Every trailer towing a `NetPlayer` seat — the host's own rig's
     // trailer included — publishes under the owner's wire id.
     trailers: Query<SnapTrailerSourceRow<'_>, Without<Player>>,
+    mut impacts: MessageReader<ImpactEvent>,
     mut report: ResMut<NetDriveReport>,
 ) {
+    // The reader drains every run — including gated-out phases — so a
+    // pre-`Start` or post-session stream never replays stale hits into
+    // the next publish.
+    let drained: Vec<&ImpactEvent> = impacts.read().collect();
     if !matches!(
         session.phase(),
         SessionPhase::Ready | SessionPhase::Countdown | SessionPhase::Playing
@@ -1300,7 +1413,7 @@ pub fn publish_snapshots(
     let mut entries: Vec<SnapEntry> = players
         .iter()
         .map(
-            |(_, wire, epoch, pos, rot, vel, ang, vehicle, state, input, damage)| {
+            |(_, wire, epoch, _, pos, rot, vel, ang, vehicle, state, input, damage)| {
                 let (steer, spin, compression, flags) = match (vehicle, state, input) {
                     (Some(v), Some(s), Some(i)) => encode_present(&v.config, s, i),
                     _ => (0, 0, 0, 0),
@@ -1348,17 +1461,64 @@ pub fn publish_snapshots(
         })
         .collect();
     trailer_rows.sort_by_key(|t| t.owner);
+    // The v10 impact rows (F25-B): each drained `ImpactEvent` emits one
+    // row per participant side that names a `NetPlayer` seat — a
+    // car-vs-car hit rides the wire twice with mirrored outward
+    // normals, one per seat. `point`/`normal`/`severity` are shared
+    // presentation fields; the receiver resolves `seat` to its own
+    // copy. Rows are strongest-first at the cap so a pile-up keeps its
+    // worst hits rather than its first.
+    let oid_wires: HashMap<ObjectId, u16> = players
+        .iter()
+        .map(|(_, wire, _, identity, ..)| (identity.0, wire.0))
+        .collect();
+    let generation = session.generation();
+    let mut impact_rows: Vec<SnapImpact> = drained
+        .into_iter()
+        .filter(|e| e.generation == generation)
+        .flat_map(|e| {
+            // `ImpactEvent::normal` points from participant.0 toward
+            // participant.1 — each seat's row carries its own side's
+            // outward normal.
+            [(e.participants.0, -e.normal), (e.participants.1, e.normal)]
+                .into_iter()
+                .filter_map(|(who, normal)| {
+                    let &seat = oid_wires.get(&who)?;
+                    let sane = e.point.is_finite() && normal.is_finite() && e.severity.is_finite();
+                    sane.then_some(SnapImpact {
+                        seat,
+                        id: e.id.0,
+                        tick: e.tick,
+                        point: e.point.to_array(),
+                        normal: normal.to_array(),
+                        severity: e.severity,
+                    })
+                })
+        })
+        .collect();
+    impact_rows.sort_by(|a, b| {
+        b.severity
+            .total_cmp(&a.severity)
+            .then_with(|| (a.seat, a.id).cmp(&(b.seat, b.id)))
+    });
+    if impact_rows.len() > MAX_SNAP_IMPACTS as usize {
+        report.impacts_dropped += (impact_rows.len() - MAX_SNAP_IMPACTS as usize) as u64;
+        impact_rows.truncate(MAX_SNAP_IMPACTS as usize);
+    }
+    let sent_rows = impact_rows.len() as u64;
     if host
         .ctl()
         .broadcast(&Message::Snap {
-            generation: session.generation(),
+            generation,
             tick: session.tick(),
             entries,
             trailers: trailer_rows,
+            impacts: impact_rows,
         })
         .is_ok()
     {
         report.snaps_sent += 1;
+        report.impacts_sent += sent_rows;
     }
 }
 
@@ -1423,6 +1583,7 @@ type SnapTrailerRow<'a> = (
 /// driver toward a host copy that lags by the round-trip. Both snap
 /// paths mark [`Teleported`] so a swept-segment consumer breaks rather
 /// than banking the jump.
+#[allow(clippy::too_many_arguments)] // Bevy system — the borrows are the contract.
 pub fn apply_snapshots(
     mut commands: Commands,
     mut snaps: ResMut<RemoteSnaps>,
@@ -1434,8 +1595,59 @@ pub fn apply_snapshots(
     // `Without<NetPlayer>` proves it disjoint from `players` (a trailer
     // never carries the seat marker).
     mut trailers: Query<SnapTrailerRow<'_>, (With<car_visual::Trailer>, Without<NetPlayer>)>,
+    mut remote_fx: MessageWriter<RemoteImpact>,
     mut report: ResMut<NetDriveReport>,
 ) {
+    // Replicated impacts are events, not state — the pending queue
+    // drains every run, not only when a fresh frame staged (a
+    // superseded snap's poses drop, its effects still land). `push`
+    // already deduped `(seat, id)` and binned foreign generations;
+    // here each row gets the session gate, the own-seat skip — a
+    // predicted seat's local physics stream already rendered the hit,
+    // so the wire row must not double it — the wire sanitize, and the
+    // resolve to this process's remote copy.
+    report.impacts_dropped += snaps.dropped;
+    snaps.dropped = 0;
+    if !snaps.pending.is_empty() {
+        let generation = session.generation();
+        let seats: HashMap<u16, (Entity, bool)> = players
+            .iter()
+            .map(|(entity, wire, player, ..)| {
+                (wire.0, (entity, player.control == PlayerControl::Local))
+            })
+            .collect();
+        while let Some((row_gen, row)) = snaps.pending.pop_front() {
+            if row_gen != generation {
+                report.impacts_dropped += 1;
+                continue;
+            }
+            let Some(&(entity, is_local)) = seats.get(&row.seat) else {
+                // Departed or unspawned seat — nothing to present on.
+                report.impacts_dropped += 1;
+                continue;
+            };
+            if is_local {
+                continue;
+            }
+            let sane = row.point.iter().all(|v| v.is_finite())
+                && row.normal.iter().all(|v| v.is_finite())
+                && row.severity.is_finite()
+                && row.severity >= 0.0;
+            if !sane {
+                report.impacts_dropped += 1;
+                continue;
+            }
+            remote_fx.write(RemoteImpact {
+                entity,
+                point: Vec3::from_array(row.point),
+                normal: Vec3::from_array(row.normal)
+                    .try_normalize()
+                    .unwrap_or(Vec3::Y),
+                severity: row.severity,
+            });
+            report.impacts_applied += 1;
+        }
+    }
     let Some(snap) = snaps.latest.take() else {
         return;
     };

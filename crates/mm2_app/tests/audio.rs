@@ -29,9 +29,9 @@ use mm2_formats::materials::{MaterialMap, MaterialSet};
 use mm2_game::{
     AmbientAudio, AmbientEngineSpec, Banger, BangerDefinition, DevOverrides, ImpactEvent, ImpactId,
     Mm2Vfs, NavRng, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerVehicle, Session,
-    SessionConditions, SessionConfig, SessionEntity, SessionPhase, SirenSampleSpec, SirenSpec,
-    SurfaceMaterial, SurfaceState, SurfaceVariant, TimeOfDay, VehicleAudio, Weather,
-    advance_session_tick, despawn_session_entities,
+    SessionAuthority, SessionConditions, SessionConfig, SessionEntity, SessionPhase,
+    SirenSampleSpec, SirenSpec, SurfaceMaterial, SurfaceState, SurfaceVariant, TimeOfDay,
+    VehicleAudio, Weather, advance_session_tick, despawn_session_entities,
 };
 use mm2_vehicle::{DriveDirection, VehicleConfig, VehicleState, vehicle_bundle};
 
@@ -830,12 +830,24 @@ fn impact_dir() -> tempfile::TempDir {
 /// `ImpactAudio` (loaded through the production path), and the
 /// `impact_voices` system on Update like the live schedules wire it.
 fn impact_app(dir: &Path) -> App {
+    impact_app_with(dir, SessionAuthority::Local)
+}
+
+/// `impact_app` under an explicit session authority — the F25-B v10
+/// legs need a predicted (`Remote`) session to cover the replicated
+/// stream's split from the local one.
+fn impact_app_with(dir: &Path, authority: SessionAuthority) -> App {
     let mut vfs = Vfs::new();
     vfs.mount_dir(dir, 0).unwrap();
     let bank = WaveBank::index(&vfs);
 
     let mut session = Session::new();
-    session.begin(SessionConfig::default()).unwrap();
+    session
+        .begin(SessionConfig {
+            authority,
+            ..SessionConfig::default()
+        })
+        .unwrap();
     session.transition(SessionPhase::Ready).unwrap();
     session.transition(SessionPhase::Playing).unwrap();
     let generation = session.generation();
@@ -852,6 +864,7 @@ fn impact_app(dir: &Path) -> App {
         .init_resource::<Assets<PcmAudio>>()
         .init_resource::<AudioReport>()
         .add_message::<ImpactEvent>()
+        .add_message::<mm2_app::netdrive::RemoteImpact>()
         .add_systems(Update, audio::impact_voices);
     if let Some(table) = table {
         app.insert_resource(table);
@@ -1027,17 +1040,53 @@ fn a_two_vehicle_impact_voices_each_side_at_its_own_impulse() {
 }
 
 #[test]
-fn a_remote_participant_spawns_no_voice() {
+fn a_remote_participant_spawns_no_voice_on_a_predicted_client() {
+    // A Remote copy's local-stream hit stays silent on a client — the
+    // same impact arrives as a `RemoteImpact` row off the snap tail, so
+    // voicing here too would double the sound.
+    let dir = impact_dir();
+    let mut app = impact_app_with(dir.path(), SessionAuthority::Remote);
+    let (remote, _) = spawn_test_car(&mut app, PlayerControl::Remote, 1300.0);
+    write_impact(&mut app, remote, ObjectId::WORLD, 30.0);
+    app.update();
+    assert!(impact_voices(&mut app).is_empty());
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.impacts, r.failed), (0, 0));
+}
+
+#[test]
+fn a_remote_participant_voices_on_the_authority() {
+    // On the authority the remote seat is a locally simulated
+    // participant — its impacts voice here like an AI car's, spatially
+    // at the contact.
     let dir = impact_dir();
     let mut app = impact_app(dir.path());
     let (remote, _) = spawn_test_car(&mut app, PlayerControl::Remote, 1300.0);
     write_impact(&mut app, remote, ObjectId::WORLD, 30.0);
     app.update();
-    // The remote car's audio belongs to its own client — nothing
-    // plays here, nothing counts as a failure.
-    assert!(impact_voices(&mut app).is_empty());
-    let r = app.world().resource::<AudioReport>();
-    assert_eq!((r.impacts, r.failed), (0, 0));
+    // 30 m/s × 1300 kg → HUGE band, spatially at the contact point.
+    assert_eq!(impact_voices(&mut app), [(VoiceKind::Impact, 48000, true)]);
+    assert_eq!(app.world().resource::<AudioReport>().impacts, 1);
+}
+
+#[test]
+fn a_replicated_impact_voices_the_remote_copy() {
+    // The v10 `Snap.impacts` path: a resolved `RemoteImpact` voices the
+    // copy's side — spatial at the contact, the struck side reading the
+    // id-0 catch-all (the wire carries no counterpart identity).
+    let dir = impact_dir();
+    let mut app = impact_app_with(dir.path(), SessionAuthority::Remote);
+    let (_, entity) = spawn_test_car(&mut app, PlayerControl::Remote, 1300.0);
+    app.world_mut()
+        .write_message(mm2_app::netdrive::RemoteImpact {
+            entity,
+            point: Vec3::new(1.0, 2.0, 3.0),
+            normal: Vec3::Y,
+            severity: 30.0,
+        });
+    app.update();
+    assert_eq!(impact_voices(&mut app), [(VoiceKind::Impact, 48000, true)]);
+    assert_eq!(app.world().resource::<AudioReport>().impacts, 1);
 }
 
 #[test]

@@ -1610,13 +1610,24 @@ pub fn siren_drive(
 /// by [`MAX_IMPACT_VOICES`] so a pile-up counts drops instead of
 /// stacking voices; a sub-floor force resolves no band and stays
 /// authored-silent. Events on a stale generation are skipped; while
-/// not `Playing` the reader drains without emitting (spark_fx's
+/// not `Playing` both readers drain without emitting (spark_fx's
 /// contract — a buffered stale impact never flushes sound into a
 /// pause or the next session).
+///
+/// A remote-controlled seat voices on the authority like an AI car —
+/// it is a locally simulated participant there. On a predicted client
+/// its local-stream hits stay skipped: the same impact arrives as a
+/// [`crate::netdrive::RemoteImpact`] row off the v10 `Snap.impacts`
+/// tail, resolved to this process's copy, so the sound plays once —
+/// from the authority's stream. The wire carries no struck-side
+/// identity, so a replicated row's authored selector is the id-0
+/// catch-all — the same category car-vs-car/world hits already pick
+/// (the striker side's mass is the copy's own).
 #[allow(clippy::too_many_arguments)] // Bevy system — the borrows are the contract.
 pub fn impact_voices(
     mut commands: Commands,
     mut reader: MessageReader<ImpactEvent>,
+    mut remote_reader: MessageReader<crate::netdrive::RemoteImpact>,
     session: Res<Session>,
     table: Option<ResMut<ImpactAudio>>,
     vfs: Option<Res<Mm2Vfs>>,
@@ -1630,6 +1641,7 @@ pub fn impact_voices(
 ) {
     if !session.is_playing() {
         reader.read().for_each(drop);
+        remote_reader.read().for_each(drop);
         return;
     }
     let (Some(mut table), Some(vfs), Some(mut bank)) = (table, vfs, bank) else {
@@ -1642,6 +1654,7 @@ pub fn impact_voices(
     // not split through `ResMut`'s Deref — reborrow the inner struct.
     let table = &mut *table;
     let generation = session.generation();
+    let authority = session.authority_role().is_authority();
     let index: HashMap<ObjectId, (Entity, Option<PlayerControl>)> = identities
         .iter()
         .map(|(entity, id, player)| (id.0, (entity, player.map(|p| p.control))))
@@ -1650,6 +1663,78 @@ pub fn impact_voices(
         .iter()
         .filter(|v| v.kind == VoiceKind::Impact)
         .count();
+    // The shared voice tail: `point`/`severity` and the striker's
+    // resolved mass pick the authored band whichever stream delivered
+    // the hit; `audio_id` is the struck side's selector (the id-0
+    // catch-all on replicated rows — the wire carries no counterpart).
+    let mut voice_at = |entity: Entity,
+                        point: Vec3,
+                        severity: f32,
+                        audio_id: i64,
+                        spatial: bool,
+                        live: &mut usize| {
+        let Ok((vehicle, computed, mass)) = cars.get(entity) else {
+            return;
+        };
+        let Some(vehicle) = vehicle else { return };
+        // The designed force quantity: approach speed × the striker's
+        // resolved mass (computed → authored → config), matching
+        // `impulse_estimate`'s contract. Each source is checked before
+        // the fallback — a not-yet-computed `Mass(0)` must fall through
+        // to the config mass, not collapse the pick to a 1 kg touch.
+        let valid = |m: f32| (m.is_finite() && m > 0.0).then_some(m);
+        let striker_mass = computed
+            .and_then(|m| valid(m.value()))
+            .or_else(|| mass.and_then(|m| valid(m.0)))
+            .or_else(|| valid(vehicle.config.mass))
+            .unwrap_or(1.0);
+        let force = severity * striker_mass;
+        let Some(category) = impact_category(&table.table, audio_id) else {
+            // The table cannot answer this selector at all — a
+            // data failure, counted once per event side.
+            report.failed += 1;
+            warn!("audio: no impact category for AudioId {audio_id}");
+            return;
+        };
+        let Some(pick) = pick_impact(category, force, &mut table.rng) else {
+            // No band covers the force — authored silence for a
+            // sub-floor touch, not a failure.
+            return;
+        };
+        if *live >= MAX_IMPACT_VOICES {
+            report.dropped += 1;
+            return;
+        }
+        match bank.load(&vfs.0, &mut waves, &pick.sample.name) {
+            Ok(handle) => {
+                // The local player's hits anchor the mix non-spatially
+                // like its engine rig (DSN-37); everyone else is a
+                // world emitter at the contact.
+                commands.spawn((
+                    AudioVoice {
+                        kind: VoiceKind::Impact,
+                    },
+                    SessionEntity(generation),
+                    Transform::from_translation(point),
+                    AudioPlayer(handle),
+                    PlaybackSettings {
+                        mode: PlaybackMode::Despawn,
+                        volume: Volume::Linear(pick.volume),
+                        spatial,
+                        spatial_scale: spatial.then(|| SpatialScale::new(ENGINE_SPATIAL_SCALE)),
+                        ..Default::default()
+                    },
+                ));
+                report.voices += 1;
+                report.impacts += 1;
+                *live += 1;
+            }
+            Err(e) => {
+                report.failed += 1;
+                warn!("audio: {e}");
+            }
+        }
+    };
     for event in reader.read() {
         if event.generation != generation {
             continue;
@@ -1663,15 +1748,9 @@ pub fn impact_voices(
             let Some(&(entity, control)) = index.get(&me) else {
                 continue;
             };
-            if control == Some(PlayerControl::Remote) {
+            if !authority && control == Some(PlayerControl::Remote) {
                 continue;
             }
-            let Ok((vehicle, computed, mass)) = cars.get(entity) else {
-                continue;
-            };
-            let Some(vehicle) = vehicle else {
-                continue;
-            };
             // The struck side's authored selector — its banger record's
             // `AudioId`; world geometry and recordless bodies read the
             // id-0 catch-all.
@@ -1680,66 +1759,30 @@ pub fn impact_voices(
                 .and_then(|(e, _)| bangers.get(*e).ok())
                 .map(|b| b.def.audio_id)
                 .unwrap_or(0);
-            // The designed force quantity: approach speed × the
-            // striker's resolved mass (computed → authored → config),
-            // matching `impulse_estimate`'s contract. Each source is
-            // checked before the fallback — a not-yet-computed
-            // `Mass(0)` must fall through to the config mass, not
-            // collapse the pick to a 1 kg touch.
-            let valid = |m: f32| (m.is_finite() && m > 0.0).then_some(m);
-            let striker_mass = computed
-                .and_then(|m| valid(m.value()))
-                .or_else(|| mass.and_then(|m| valid(m.0)))
-                .or_else(|| valid(vehicle.config.mass))
-                .unwrap_or(1.0);
-            let force = event.severity * striker_mass;
-            let Some(category) = impact_category(&table.table, audio_id) else {
-                // The table cannot answer this selector at all — a
-                // data failure, counted once per event side.
-                report.failed += 1;
-                warn!("audio: no impact category for AudioId {audio_id}");
-                continue;
-            };
-            let Some(pick) = pick_impact(category, force, &mut table.rng) else {
-                // No band covers the force — authored silence for a
-                // sub-floor touch, not a failure.
-                continue;
-            };
-            if live >= MAX_IMPACT_VOICES {
-                report.dropped += 1;
-                continue;
-            }
-            match bank.load(&vfs.0, &mut waves, &pick.sample.name) {
-                Ok(handle) => {
-                    // The local player's hits anchor the mix
-                    // non-spatially like its engine rig (DSN-37);
-                    // everyone else is a world emitter at the contact.
-                    let spatial = control != Some(PlayerControl::Local);
-                    commands.spawn((
-                        AudioVoice {
-                            kind: VoiceKind::Impact,
-                        },
-                        SessionEntity(generation),
-                        Transform::from_translation(event.point),
-                        AudioPlayer(handle),
-                        PlaybackSettings {
-                            mode: PlaybackMode::Despawn,
-                            volume: Volume::Linear(pick.volume),
-                            spatial,
-                            spatial_scale: spatial.then(|| SpatialScale::new(ENGINE_SPATIAL_SCALE)),
-                            ..Default::default()
-                        },
-                    ));
-                    report.voices += 1;
-                    report.impacts += 1;
-                    live += 1;
-                }
-                Err(e) => {
-                    report.failed += 1;
-                    warn!("audio: {e}");
-                }
-            }
+            let spatial = control != Some(PlayerControl::Local);
+            voice_at(
+                entity,
+                event.point,
+                event.severity,
+                audio_id,
+                spatial,
+                &mut live,
+            );
         }
+    }
+    // The replicated stream — remote copies' impacts delivered by the
+    // v10 snap tail (`apply_snapshots` already resolved, sanitized and
+    // deduped each row, and the receiver's own seat never appears).
+    // Always a world emitter at the contact.
+    for impact in remote_reader.read() {
+        voice_at(
+            impact.entity,
+            impact.point,
+            impact.severity,
+            0,
+            true,
+            &mut live,
+        );
     }
 }
 

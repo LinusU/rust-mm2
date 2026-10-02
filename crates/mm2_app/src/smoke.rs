@@ -342,6 +342,7 @@ fn run_headless(
         .add_plugins(TransformPlugin)
         .add_plugins(VehiclePlugin)
         .add_message::<ImpactEvent>()
+        .add_message::<crate::netdrive::RemoteImpact>()
         .add_message::<DamageEvent>()
         .add_message::<mm2_game::StuckEvent>()
         .add_message::<mm2_game::PartDetached>()
@@ -549,8 +550,12 @@ fn run_headless(
                         .chain()
                         .after(session::drive_session),
                     // F07-B.3: deduplicated impacts → bounded one-shot
-                    // voices — same despawn ordering as the rigs.
-                    crate::audio::impact_voices.after(session::drive_session),
+                    // voices — same despawn ordering as the rigs, and
+                    // after the snap apply so a replicated impact
+                    // voices in the frame it landed.
+                    crate::audio::impact_voices
+                        .after(session::drive_session)
+                        .after(crate::netdrive::apply_snapshots),
                     // F07-B.5: committed gear/direction changes →
                     // clutch one-shots — the record's `aud=` `c` field
                     // counts them.
@@ -595,12 +600,16 @@ fn run_headless(
                 )
                     .chain(),
                 // F05-B.8: authored impact sparks — the headless
-                // record's `spk=` field reads the report.
+                // record's `spk=` field reads the report. After the
+                // snap apply so a replicated `RemoteImpact` sparks in
+                // the frame it landed, keeping `--frames` captures
+                // deterministic.
                 (
                     crate::spark_fx::emit_sparks,
                     crate::spark_fx::advance_sparks,
                 )
-                    .chain(),
+                    .chain()
+                    .after(crate::netdrive::apply_snapshots),
                 // F16-B: the same result → profile consumption the
                 // windowed app runs — a bound profile in a headless
                 // evidence run must record identically.
@@ -1000,14 +1009,16 @@ fn run_headless(
     // runs the real sim — and 0 on a dev-world run regardless, since
     // the dev car binds no authored damage record to write), and
     // `tsyn`, the v9 trailer rows applied (client side; 0 without a
-    // trailered seat — the dev car tows nothing). Absent
+    // trailered seat — the dev car tows nothing), and `imp`, the v10
+    // replicated impact rows (sent on the authority, applied/dropped
+    // on clients; 0 on a dev world with no collisions). Absent
     // without a link's report, so a non-lobby record stays
     // bit-identical.
     let net_detail = world_ecs
         .get_resource::<crate::netdrive::NetDriveReport>()
         .map(|r| {
             format!(
-                " net=in{}s/{}a/{}x,snap{}s/{}a,rem{},req{}s/{}g/{}d,rspn{:.0},dsyn{},tsyn{}",
+                " net=in{}s/{}a/{}x,snap{}s/{}a,rem{},req{}s/{}g/{}d,rspn{:.0},dsyn{},tsyn{},imp{}s/{}a/{}d",
                 r.inputs_sent,
                 r.inputs_applied,
                 r.inputs_staled,
@@ -1019,7 +1030,10 @@ fn run_headless(
                 r.requests_dropped,
                 r.remote_spin,
                 r.damage_synced,
-                r.trailers_synced
+                r.trailers_synced,
+                r.impacts_sent,
+                r.impacts_applied,
+                r.impacts_dropped
             )
         })
         .unwrap_or_default();

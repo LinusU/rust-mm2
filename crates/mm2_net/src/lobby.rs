@@ -2647,6 +2647,7 @@ mod tests {
                 damage: 0,
             }],
             trailers: Vec::new(),
+            impacts: Vec::new(),
         };
         host.ctl().broadcast(&snap).unwrap();
         for client in [&mut alice, &mut bob] {

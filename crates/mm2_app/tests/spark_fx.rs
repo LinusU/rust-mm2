@@ -8,10 +8,12 @@ use std::time::Duration;
 
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
+use mm2_app::netdrive::RemoteImpact;
 use mm2_app::spark_fx::{self, SparkAssets, SparkFx, SparkFxReport};
 use mm2_game::{
-    ImpactEvent, ImpactId, ObjectId, ObjectIdentity, Player, PlayerControl, Session, SessionConfig,
-    SessionEntity, SessionPhase, Spark, SparkPolicy, SurfaceState, VehicleSparks,
+    ImpactEvent, ImpactId, ObjectId, ObjectIdentity, Player, PlayerControl, Session,
+    SessionAuthority, SessionConfig, SessionEntity, SessionPhase, Spark, SparkPolicy, SurfaceState,
+    VehicleSparks,
 };
 
 const POINT: Vec3 = Vec3::new(3.0, 0.8, -5.0);
@@ -22,8 +24,20 @@ const NORMAL: Vec3 = Vec3::new(0.0, 0.0, 1.0);
 /// render detail the headless tests don't read). `fx` toggles the
 /// `SparkFx` resource so the absent-assets case is covered.
 fn spark_app(fx: bool) -> (App, ObjectId, ObjectId) {
+    spark_app_with(fx, SessionAuthority::Local)
+}
+
+/// `spark_app` under an explicit session authority — the F25-B v10
+/// legs need a predicted (`Remote`) session to cover the replicated
+/// stream's split from the local one.
+fn spark_app_with(fx: bool, authority: SessionAuthority) -> (App, ObjectId, ObjectId) {
     let mut session = Session::new();
-    session.begin(SessionConfig::default()).unwrap();
+    session
+        .begin(SessionConfig {
+            authority,
+            ..SessionConfig::default()
+        })
+        .unwrap();
     session.transition(SessionPhase::Ready).unwrap();
     session.transition(SessionPhase::Playing).unwrap();
     let car_a = session.mint_object_id();
@@ -41,6 +55,7 @@ fn spark_app(fx: bool) -> (App, ObjectId, ObjectId) {
         .init_resource::<Assets<StandardMaterial>>()
         .init_resource::<SparkFxReport>()
         .add_message::<ImpactEvent>()
+        .add_message::<mm2_app::netdrive::RemoteImpact>()
         .add_systems(
             Update,
             (spark_fx::emit_sparks, spark_fx::advance_sparks).chain(),
@@ -175,15 +190,56 @@ fn both_rigged_participants_spark_on_their_own_sides() {
 }
 
 #[test]
-fn a_remote_participant_never_sparks_locally() {
-    let (mut app, car, world) = spark_app(true);
+fn a_remote_participant_never_sparks_locally_on_a_predicted_client() {
+    // Predicted session: a Remote copy's local-stream hit stays silent
+    // — the same impact arrives as a `RemoteImpact` row off the snap
+    // tail, so rendering here too would double the effect.
+    let (mut app, car, world) = spark_app_with(true, SessionAuthority::Remote);
     rigged_car(&mut app, car, PlayerControl::Remote);
     write_impact(&mut app, 1, car, world, 10.0);
     app.update();
-    // Remote impacts belong to the remote authority — its own client
-    // renders them; nothing local is emitted.
     assert_eq!(report(&app).emitted, 0);
     assert!(sparks(&mut app).is_empty());
+}
+
+#[test]
+fn a_remote_participant_sparks_on_the_authority() {
+    // On the authority the remote seat is a locally simulated
+    // participant — its impacts spark here like an AI car's, exactly
+    // once (no replicated row is ever aimed back at it).
+    let (mut app, car, world) = spark_app(true);
+    let entity = rigged_car(&mut app, car, PlayerControl::Remote);
+    write_impact(&mut app, 1, car, world, 10.0);
+    app.update();
+    assert_eq!(report(&app).bursts, 1);
+    for e in sparks(&mut app) {
+        assert_eq!(app.world().get::<Spark>(e).unwrap().emitter, entity);
+    }
+}
+
+#[test]
+fn a_replicated_impact_sparks_the_remote_copy() {
+    // The v10 `Snap.impacts` path: `apply_snapshots` resolves a wire
+    // row to the remote copy's entity and writes `RemoteImpact`; the
+    // consumer draws the same burst the local stream would.
+    let (mut app, car, _world) = spark_app_with(true, SessionAuthority::Remote);
+    let entity = rigged_car(&mut app, car, PlayerControl::Remote);
+    app.world_mut().write_message(RemoteImpact {
+        entity,
+        point: POINT,
+        normal: NORMAL,
+        severity: 10.0,
+    });
+    app.update();
+    assert_eq!(report(&app).bursts, 1);
+    let policy = SparkPolicy::default();
+    assert_eq!(report(&app).emitted as usize, policy.burst_count(10.0));
+    for e in sparks(&mut app) {
+        let s = app.world().get::<Spark>(e).unwrap();
+        assert_eq!(s.emitter, entity);
+        assert_eq!(s.position, POINT);
+        assert!(s.velocity.dot(NORMAL) > 0.0, "{s:?}");
+    }
 }
 
 #[test]

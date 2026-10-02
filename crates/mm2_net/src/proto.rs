@@ -22,8 +22,12 @@
 /// state, never locally accumulated (F25-B, F05 req 6). v9: `Snap`
 /// gained `trailers` — a bounded list of trailered seats' trailer
 /// poses (F25-B); a trailered pick's trailer is replicated state like
-/// the seat itself, never simulated on clients.
-pub const PROTOCOL_VERSION: u16 = 9;
+/// the seat itself, never simulated on clients. v10: `Snap` gained
+/// `impacts` — a bounded list of [`SnapImpact`] rows replicating the
+/// authority's filtered `ImpactEvent` stream per participant seat, so
+/// remote copies can render per-impact presentation (sparks, impact
+/// audio) the damage *state* byte cannot carry (F25-B).
+pub const PROTOCOL_VERSION: u16 = 10;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -259,6 +263,44 @@ pub struct SnapTrailer {
     pub flags: u8,
 }
 
+/// Snapshot bound on replicated impact rows: several frames' worth of
+/// the authority's filtered `ImpactEvent` stream (16 events per tick ×
+/// up to two seat rows each), so a burst never writes an unbounded
+/// tail. The stream is loss-tolerant presentation — a dropped frame's
+/// effects are ephemeral, not state.
+pub const MAX_SNAP_IMPACTS: u8 = 64;
+
+/// One replicated side of a participant impact inside a
+/// [`Message::Snap`] (v10, F25-B). The authority's
+/// `mm2_game::ImpactEvent` carries a contact pair; each participant
+/// that is a `NetPlayer` seat emits one row, so a car-vs-car hit rides
+/// the wire as two rows sharing `id` — `seat` names which side the row
+/// presents (the two rows carry mirrored normals). `(seat, id)` is the
+/// dedup key for reordered/duplicated frames; the receiver's own seat
+/// is skipped — its copy already rendered the impact from the local
+/// physics stream. `surface` does not ride the wire: no current
+/// consumer reads it, and state consumers resolve the copy's live
+/// `SurfaceState` instead.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SnapImpact {
+    /// Wire roster slot of the seat this side presents (0 = the host
+    /// seat).
+    pub seat: u16,
+    /// The authority-side `ImpactId` — session-unique per generation,
+    /// so `(seat, id)` survives reordering and duplication.
+    pub id: u64,
+    /// Host session tick the impact was emitted on — diagnostic, not an
+    /// ordering guarantee (`id` already is).
+    pub tick: u64,
+    /// World-space contact point, metres.
+    pub point: [f32; 3],
+    /// Outward contact normal from this seat's side of the contact —
+    /// the normal a spark burst or impact voice positions against.
+    pub normal: [f32; 3],
+    /// Relative impact speed, m/s — `ImpactEvent::severity`.
+    pub severity: f32,
+}
+
 /// One wire message.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
@@ -375,6 +417,10 @@ pub enum Message {
         /// The trailers the seated picks tow (v9, F25-B) — present only
         /// for trailered seats, bounded by [`MAX_PLAYERS`].
         trailers: Vec<SnapTrailer>,
+        /// The participant impacts the authority emitted since the last
+        /// snapshot (v10, F25-B) — presentation events, bounded by
+        /// [`MAX_SNAP_IMPACTS`].
+        impacts: Vec<SnapImpact>,
     },
 }
 
@@ -415,6 +461,9 @@ pub enum ProtoError {
     /// A snapshot declared more than [`MAX_PLAYERS`] trailer entries.
     #[error("snapshot declares {0} trailers, bound is {MAX_PLAYERS}")]
     OversizeTrailers(u8),
+    /// A snapshot declared more than [`MAX_SNAP_IMPACTS`] impact rows.
+    #[error("snapshot declares {0} impacts, bound is {MAX_SNAP_IMPACTS}")]
+    OversizeImpacts(u8),
 }
 
 impl RejectCode {
@@ -650,6 +699,7 @@ impl Message {
                 tick,
                 entries,
                 trailers,
+                impacts,
             } => {
                 out.push(TAG_SNAP);
                 out.extend_from_slice(&generation.to_le_bytes());
@@ -693,6 +743,19 @@ impl Message {
                     }
                     out.extend_from_slice(&t.spin.to_le_bytes());
                     out.push(t.flags);
+                }
+                if impacts.len() > MAX_SNAP_IMPACTS as usize {
+                    return Err(ProtoError::OversizeImpacts(impacts.len() as u8));
+                }
+                out.push(impacts.len() as u8);
+                for m in impacts {
+                    out.extend_from_slice(&m.seat.to_le_bytes());
+                    out.extend_from_slice(&m.id.to_le_bytes());
+                    out.extend_from_slice(&m.tick.to_le_bytes());
+                    for v in m.point.iter().chain(m.normal.iter()) {
+                        out.extend_from_slice(&v.to_le_bytes());
+                    }
+                    out.extend_from_slice(&m.severity.to_le_bytes());
                 }
             }
         }
@@ -809,11 +872,27 @@ impl Message {
                         flags: cur.u8()?,
                     });
                 }
+                let impact_count = cur.u8()?;
+                if impact_count > MAX_SNAP_IMPACTS {
+                    return Err(ProtoError::OversizeImpacts(impact_count));
+                }
+                let mut impacts = Vec::with_capacity(impact_count as usize);
+                for _ in 0..impact_count {
+                    impacts.push(SnapImpact {
+                        seat: cur.u16()?,
+                        id: cur.u64()?,
+                        tick: cur.u64()?,
+                        point: cur.vec3()?,
+                        normal: cur.vec3()?,
+                        severity: cur.f32()?,
+                    });
+                }
                 Self::Snap {
                     generation,
                     tick,
                     entries,
                     trailers,
+                    impacts,
                 }
             }
             tag => return Err(ProtoError::BadTag(tag)),
@@ -998,6 +1077,24 @@ mod tests {
                         flags: 0,
                     },
                 ],
+                impacts: vec![
+                    SnapImpact {
+                        seat: 1,
+                        id: 7,
+                        tick: 2,
+                        point: [3.0, 0.4, -1.0],
+                        normal: [0.0, 0.0, 1.0],
+                        severity: 12.5,
+                    },
+                    SnapImpact {
+                        seat: 3,
+                        id: 7,
+                        tick: 2,
+                        point: [3.0, 0.4, -1.0],
+                        normal: [0.0, 0.0, -1.0],
+                        severity: 12.5,
+                    },
+                ],
             },
         ] {
             let bytes = msg.encode().unwrap();
@@ -1085,6 +1182,17 @@ mod tests {
             Message::decode(&wide_snap),
             Err(ProtoError::OversizeTrailers(9))
         ));
+        // A snapshot declaring more impacts than the row bound.
+        let mut hot_snap = vec![TAG_SNAP];
+        hot_snap.extend_from_slice(&1u64.to_le_bytes());
+        hot_snap.extend_from_slice(&2u64.to_le_bytes());
+        hot_snap.push(0);
+        hot_snap.push(0);
+        hot_snap.push(MAX_SNAP_IMPACTS + 1);
+        assert!(matches!(
+            Message::decode(&hot_snap),
+            Err(ProtoError::OversizeImpacts(65))
+        ));
     }
 
     #[test]
@@ -1130,6 +1238,7 @@ mod tests {
                 tick: 1,
                 entries,
                 trailers: Vec::new(),
+                impacts: Vec::new(),
             }
             .encode(),
             Err(ProtoError::OversizeSnapshot(9))
@@ -1153,9 +1262,33 @@ mod tests {
                 tick: 1,
                 entries: Vec::new(),
                 trailers,
+                impacts: Vec::new(),
             }
             .encode(),
             Err(ProtoError::OversizeTrailers(9))
+        ));
+        // …and the impact tail is bounded by its own row ceiling.
+        let impacts = vec![
+            SnapImpact {
+                seat: 0,
+                id: 1,
+                tick: 1,
+                point: [0.0; 3],
+                normal: [0.0, 1.0, 0.0],
+                severity: 1.0,
+            };
+            MAX_SNAP_IMPACTS as usize + 1
+        ];
+        assert!(matches!(
+            Message::Snap {
+                generation: 1,
+                tick: 1,
+                entries: Vec::new(),
+                trailers: Vec::new(),
+                impacts,
+            }
+            .encode(),
+            Err(ProtoError::OversizeImpacts(65))
         ));
     }
 

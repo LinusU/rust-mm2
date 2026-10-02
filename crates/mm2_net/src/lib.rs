@@ -58,9 +58,9 @@ pub use lobby::{
     RemoteInputs, StampedInput,
 };
 pub use proto::{
-    DriveInput, Hello, MAX_PLAYERS, MAX_SESSION_PARAMS, MAX_STRING, Message, PROTOCOL_VERSION,
-    ProtoError, RejectCode, RosterEntry, SNAP_FLAG_BRAKE, SNAP_FLAG_GROUNDED, SNAP_FLAG_REVERSE,
-    SessionAdvertisement, SnapEntry, SnapTrailer, VehiclePick,
+    DriveInput, Hello, MAX_PLAYERS, MAX_SESSION_PARAMS, MAX_SNAP_IMPACTS, MAX_STRING, Message,
+    PROTOCOL_VERSION, ProtoError, RejectCode, RosterEntry, SNAP_FLAG_BRAKE, SNAP_FLAG_GROUNDED,
+    SNAP_FLAG_REVERSE, SessionAdvertisement, SnapEntry, SnapImpact, SnapTrailer, VehiclePick,
 };
 
 /// Every failure mode of this layer: transport I/O, frame bounds, wire

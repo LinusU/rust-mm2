@@ -1,3 +1,116 @@
+# Last iteration — F25-B seventh slice: replicated impact events —
+# protocol v10 gives `Snap` an `impacts` list so a remote car's
+# per-hit sparks and impact audio render on every process
+(iteration 2, run 20261002T095452-41346)
+
+Implementation iteration on `ralph/night` (baseline `4ebd968` — the
+v9 trailer candidate; external verify + review pass with gaps only).
+The named next slice was the F25-B remainder; this takes its damage
+*event* leg — the review's own noted gap (per-impact positions the v8
+damage byte cannot carry).
+
+## Task selection
+
+No failing gate or blocking finding — the v9 review passed with gaps
+only. Of the named F25-B remainder (result/race state, damage events,
+the AC03 measured matrix, bandwidth budgets), replicated damage
+events is the highest-value ready slice: it lands on the just-proven
+snapshot path, unblocks two presentation consumers at once
+(`emit_sparks`, `impact_voices`), and carries the F05 req-6
+presentation story forward.
+
+## What landed
+
+- `mm2_net` protocol v10 (`proto.rs`): `Snap` gains `impacts`, a
+  `MAX_SNAP_IMPACTS` (64)-bounded list of `SnapImpact` rows — seat
+  wire id, `ImpactId`, host tick, world-space point, outward normal
+  (mirrored per side), severity. Strict fixed-width decode with an
+  `OversizeImpacts` guard on both encode and decode; exact-version
+  admit gate; round-trip and oversize fixtures updated.
+- `mm2_app::netdrive`: `publish_snapshots` drains the `ImpactEvent`
+  stream every run (incl. gated-out phases, so stale hits never
+  replay), filters to the current generation, maps `ObjectId` →
+  `NetPlayer` wire id, emits one row per seat-named participant side,
+  sanitizes finite point/normal/severity, sorts strongest-first and
+  truncates at the cap (overflow counts `impacts_dropped`).
+  `RemoteSnaps` queues impact rows on their own bounded pending queue
+  (256) — events, not state, so a superseded pose frame keeps its
+  effects — behind a bounded `(generation, seat, id)` dedup window
+  (512, FIFO retire) for duplicated/reordered frames.
+  `apply_snapshots` drains the queue every run: foreign-generation,
+  unspawned-seat and non-finite rows drop counted; the receiver's own
+  seat skips silently (predicted physics already rendered it); the
+  rest emit `RemoteImpact` messages resolved to the live copy, with
+  the normal re-normalized (`Vec3::Y` fallback on degenerate wire
+  values).
+- `spawn_remote` binds the authored `VehicleSparks` rig on
+  damage-record picks beside `VehicleSmoke` (both roles — on the
+  authority the copy is a locally simulated participant and sparks
+  off the local stream; on a client off `RemoteImpact`).
+- `spark_fx::emit_sparks` / `audio::impact_voices` consume both
+  streams through shared burst/voice tails; the authority-side
+  `PlayerControl::Remote` skip narrows to predicted sessions only
+  (the host renders its remote seats' hits like AI cars'), so each
+  impact presents exactly once per process. Replicated audio rows
+  read the id-0 catch-all — the wire carries no struck-side identity.
+- `emit_sparks`/`impact_voices` order `.after(apply_snapshots)` in
+  `main.rs`/`smoke.rs` — a replicated hit presents in the frame it
+  landed, keeping `--frames` captures deterministic.
+- `NetDriveReport` gains `impacts_sent`/`impacts_applied`/
+  `impacts_dropped` → `imp<s>s/<a>a/<d>d` on the smoke `net=` field
+  (`imp0s/0a/0d` is the honest dev-world value — the clean cruise
+  never collides); `net_drive`'s parser reads the cells.
+- `docs/research/net.md` v10 paragraph, gap list and `net=` field
+  list updated; the v8 paragraph's "F26 scope" claim corrected.
+
+## Tests
+
+`net_app` +2: `a_snap_carries_the_sessions_impact_rows` (host leg —
+a real lobby socket, an `ImpactEvent` naming the remote seat rides
+the next `Snap` with mirrored outward normal; world-only and
+foreign-generation events emit nothing; `impacts_sent` counts) and
+`a_snapshot_feeds_the_remote_impact_stream` (client leg — remote-seat
+row resolves to the spawned copy and lands one `RemoteImpact`;
+own-seat row skipped by design; departed-seat and NaN rows count as
+drops; a duplicated frame's rows never double-fire; a
+foreign-generation row drops at the apply gate). `spark_fx` +2,
+renamed 1 (authority sparks a remote seat's local-stream hit;
+predicted client stays silent; a `RemoteImpact` bursts the copy's
+rig at the replicated point/normal/severity). `audio` +2, renamed 1
+(same split: authority voices the remote seat spatially; predicted
+client silent on local stream; a `RemoteImpact` voices through the
+id-0 catch-all). `mm2_net` fixtures: v10 round-trip rows, decode
+`OversizeImpacts`, encode `OversizeImpacts`.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` green — 0 failures across all
+binaries (mm2_net 80/80, `net_app`, `net_drive` 2/2, `spark_fx`,
+`audio` incl. the new legs).
+
+## Classification / remaining open items
+
+- Implementation choice throughout — the row shape, dedup key,
+  per-side mirroring and the presentation-only boundary are ours;
+  no original-behavior claim (the retail wire protocol is
+  unrecovered).
+- Evidence is in-process integration over real loopback plus the
+  proto fixtures — no process-level session ever produced a nonzero
+  `imp` cell (`imp0s/0a/0d` on the dev-world cruise is honest: it
+  never collides), nothing rendered or driven by hand, no LAN.
+- Named gaps stay open: a remote copy binds no texel rig (its skin
+  never splats — the rig clones textures at spawn), breakaway
+  fragments are authority-spawned state, the wire carries no
+  struck-side identity (replicated audio picks the id-0 catch-all)
+  and no `surface` (no consumer reads it).
+- F25-B remaining scope: replicated *result/race* state, remote-copy
+  texel/breakaway, the measured AC03 impairment matrix,
+  bandwidth/update-rate budgets. AC01–AC06 stay open.
+
+---
+
 # Last iteration — F25-B sixth slice: replicated trailers — protocol
 # v9 gives `Snap` a `trailers` list so a trailered pick's rig rides
 # the wire, plus the `ResetVehicle`-stream follower that reseats any
