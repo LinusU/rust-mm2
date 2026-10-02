@@ -1,3 +1,89 @@
+# Last iteration — F25-B measurement slice II: the AC03 impairment
+# matrix runs as an eight-cell recipe grid over real loopback with
+# measured counters recorded in `docs/research/net.md`, which also
+# gains the req-6 payload/update-rate/bounds budget (new-run
+# iteration 2)
+
+Implementation iteration on `ralph/night` (baseline `1e1f820` — the
+latest-wins/`LinkStats` candidate; external verify + review pass with
+gaps only). The named open items were the F25-AC03 matrix itself and
+the written bandwidth/update-rate budget — this iteration lands both,
+consuming the `bytes_*`/`delayed`/`snap<x>` counters the last slice
+added.
+
+## What landed
+
+- `net_app::the_impairment_matrix_records_each_recipe_cell`: eight
+  named recipe cells (clean, latency 100 ms + 20 ms jitter, jitter
+  10 ms + 60 ms, loss 20%, loss-heavy 60%, duplicate 50%, reorder 50%,
+  and the combined recipe the two-process `net_drive` leg runs), each
+  a fresh in-process host + joined client over real loopback through
+  a fresh seeded `ImpairProxy`. The lobby crosses clean, both
+  directions arm at `Playing`, ~150 paired updates move real `Input`
+  frames up and `Snap` frames down, and a bounded settle tail drains
+  every owed hold (delay + jitter + `HOLD_CAP` ≤ 220 ms) before the
+  counters are read. Per-cell floors assert frames moved both ways,
+  snapshots applied, inputs drove the remote seat, no lane overflow,
+  each armed knob visible in its `LinkStats` counter, and
+  duplicate/reorder cells landing counted `snaps_staled`; the clean
+  cell asserts all recipe counters zero so its stale count calibrates
+  the publish-cadence dedup floor. A `matrix cell=` record line per
+  recipe carries the measured `LinkStats` + `NetDriveReport` numbers.
+- `lobby_app` (the shared `net_app` fixture) now registers
+  `advance_session_tick` in `FixedUpdate`, matching production and
+  `run_headless` — without it every published `Snap` shares tick 0
+  and the stale floor would measure a test artifact, not the wire.
+- `docs/research/net.md`: new "Measured impairment matrix (F25-AC03)"
+  section records the run (251 snaps published, 103 applied / 148
+  staled clean — the ~60% same-tick republish floor at the fixture's
+  64 Hz tick vs ~250 Hz update cadence; duplicate adds ~1 stale per
+  copy; reorder moves the floor rather than raising it; 60% loss
+  still applies 69 snaps and never starves the input mailbox), plus a
+  "Data-plane budget and bounds" section: the v10 payload-size table
+  (`Input` 21 B, `Snap` = 20 + 62·seats + 57·trailers + 46·impacts,
+  worst case 3,916 B ≪ `MAX_FRAME`), the update-rate model (both
+  directions send once per `Update` — vsync-bounded windowed,
+  unbounded headless; ~31 KB/s downstream per client at 60 Hz/8
+  seats), and the receiver bounds (`RemoteSnaps`, the 250 ms input
+  staleness, impact pending/dedup caps, `CORRECTION_SNAP_DIST`,
+  `RESET_REQUEST_COOLDOWN`).
+
+## Tests
+
+`net_app` 37→38 (the matrix leg; the `advance_session_tick`
+registration is exercised by every existing leg — all 38 pass).
+Measured numbers in the doc are a transcribed `--nocapture` run.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` green — all binaries, 0 failures
+(`net_app` 38/38 incl. the matrix cell).
+
+## Classification / remaining open items
+
+- Implementation choice + measured evidence throughout — the matrix
+  recipes, assertion floors and budget numbers are ours; no
+  original-behavior claim (the retail wire protocol is unrecovered).
+- Evidence: in-process apps over real loopback sockets only — the
+  measured grid is *not* process-level (the `net_drive` two-process
+  harness still runs its single combined recipe), still no LAN or
+  Internet leg, nothing rendered or driven by hand, no retail
+  content. AC03 advances but stays open until a process-level grid
+  exists; AC01–AC02/AC04–AC06 stay open as before.
+- Documented interpretation: `snap<x>` is only meaningful against the
+  clean-cell floor (same-tick republish dedup); `inputs_staled`
+  measures staleness at apply, not arrivals — arrival volume is the
+  proxy's `bytes_in`/`frames_in`.
+- F25-B remaining scope: replicated result/race state, remote-copy
+  breakaway fragments, the process-level impairment grid. The
+  `RemoteSnaps`-persists-across-hosts wedge the last review named is
+  unchanged — a fresh host restarting generation 1 stale-drops until
+  its ticks pass a stale watermark.
+
+---
+
 # Last iteration — F25-B measurement slice: `RemoteSnaps::push`
 # gains a `(generation, tick)` watermark so a reordered/duplicated
 # frame can no longer displace a newer staged pose, `LinkStats`
