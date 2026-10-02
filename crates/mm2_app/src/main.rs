@@ -1308,7 +1308,13 @@ fn main() {
                 session::dev_reset_at,
                 session::drive_session,
             )
-                .chain(),
+                .chain()
+                // The reset apply runs last among Update's `ResetVehicle`
+                // writers (this chain emits the `dev_reset_at` bundle):
+                // a teleport lands the frame it was written, and the
+                // netdrive epoch tracker — ordered after `vehicle_reset`
+                // — declares the bump on that frame's `Snap`.
+                .before(mm2_vehicle::systems::vehicle_reset),
             input::vehicle_input.run_if(not(capturing)),
             // The evidence drivers own `VehicleInput` while their flag
             // is on — scheduled after the keyboard mapping so they win
@@ -1323,6 +1329,9 @@ fn main() {
             )
                 .chain()
                 .after(input::vehicle_input)
+                // A scripted re-anchor emits `ResetVehicle` — same
+                // before-apply ordering as every Update writer.
+                .before(mm2_vehicle::systems::vehicle_reset)
                 .run_if(not(capturing)),
             navarrow::nav_target_input.run_if(not(capturing)),
             (
@@ -1351,7 +1360,10 @@ fn main() {
                 dash::sync_dash_visibility.after(car_visual::update_glows),
                 dash::cockpit_look.run_if(not(capturing)),
             ),
-            input::reset_input,
+            // The `R` bundle is a `ResetVehicle` write — ahead of the
+            // apply so the reset lands this frame and a hosted session's
+            // epoch tracker declares it on this frame's `Snap`.
+            input::reset_input.before(mm2_vehicle::systems::vehicle_reset),
             debug_toggle,
             screenshot_input,
             camera::retarget_hud,
@@ -1433,7 +1445,14 @@ fn main() {
     // AI opponents own their own `VehicleInput` — `vehicle_input` only
     // writes `PlayerVehicle`, so no ordering is needed. Frozen during
     // captures like every other driver.
-    .add_systems(Update, opponents::opponent_drive.run_if(not(capturing)))
+    .add_systems(
+        Update,
+        opponents::opponent_drive
+            .run_if(not(capturing))
+            // A penned opponent re-anchors through `ResetVehicle` —
+            // ahead of the apply like the other Update writers.
+            .before(mm2_vehicle::systems::vehicle_reset),
+    )
     // F05-B.6: authored engine smoke — emission reads the damage
     // state the FixedLast systems leave, then the advance step
     // integrates the puffs it just spawned. Own schedule slot (the
@@ -1682,13 +1701,19 @@ fn main() {
                     // as snapshots — all after the drain sees this
                     // frame's lobby events. Resets bump the wire epoch
                     // before the publish so a teleport and its epoch
-                    // leave on the same `Snap`.
+                    // leave on the same `Snap`; the tracker also runs
+                    // after `vehicle_reset`, which every Update-scheduled
+                    // `ResetVehicle` writer is ordered ahead of — so the
+                    // bump never trails the teleported pose.
                     netdrive::reconcile_remote_players.after(net::drive_host),
                     netdrive::apply_remote_inputs.after(net::drive_host),
                     netdrive::track_reset_epochs
                         .after(net::drive_host)
+                        .after(mm2_vehicle::systems::vehicle_reset)
                         .before(netdrive::publish_snapshots),
-                    netdrive::publish_snapshots.after(net::drive_host),
+                    netdrive::publish_snapshots
+                        .after(net::drive_host)
+                        .after(mm2_vehicle::systems::vehicle_reset),
                 ),
             );
         app.world_mut().spawn((

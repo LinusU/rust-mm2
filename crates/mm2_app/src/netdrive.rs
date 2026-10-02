@@ -713,9 +713,12 @@ pub fn apply_remote_inputs(
 /// (F25-A.5). `vehicle_reset` consumes the same message stream to apply
 /// the teleport; readers are independent cursors, so watching it here
 /// can never steal the reset from its applier. A `None` entity resets
-/// every vehicle, so every participant's epoch bumps. Runs before
-/// [`publish_snapshots`] so the bumped epoch and the teleported pose
-/// leave on the same `Snap`.
+/// every vehicle, so every participant's epoch bumps. The schedule
+/// keeps `writers → vehicle_reset → tracker → publish_snapshots`
+/// (F25-A.6): every Update-scheduled reset writer is ordered ahead of
+/// the apply and the tracker runs after it, so the bumped epoch and the
+/// teleported pose leave on the same `Snap` — never a pose first with
+/// its epoch trailing a snapshot later.
 pub fn track_reset_epochs(
     mut resets: MessageReader<ResetVehicle>,
     mut players: Query<&mut ResetEpoch>,

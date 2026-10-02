@@ -50,8 +50,14 @@ impl Plugin for VehiclePlugin {
                     // Avian's own `First` systems (same pattern Avian uses).
                     .ambiguous_with(PhysicsStepSystems::First),
             )
-            .add_systems(Update, systems::vehicle_reset)
-            .add_systems(Update, systems::vehicle_self_right)
+            // `vehicle_self_right` emits `ResetVehicle`; the chained
+            // `vehicle_reset` applies it the same frame — and every
+            // Update-scheduled reset writer orders ahead of it so a
+            // teleport's `ResetEpoch` bump lands in the same `Snap`.
+            .add_systems(
+                Update,
+                (systems::vehicle_self_right, systems::vehicle_reset).chain(),
+            )
             .add_systems(Update, debug::debug_draw);
     }
 }

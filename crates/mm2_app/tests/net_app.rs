@@ -146,7 +146,11 @@ fn bridge_app(vfs: Vfs, link: LobbyLink) -> App {
     app
 }
 
-/// The hosted-lobby bridge app — same wiring, `HostLink` side.
+/// The hosted-lobby bridge app — same wiring, `HostLink` side. The
+/// `R`-bundle writer and the reset apply sit in the same ordering
+/// contract the binary schedules (writer → `vehicle_reset` → epoch
+/// tracker → `publish_snapshots`), so a test leg observes the real
+/// same-frame epoch/pose coherence rather than a test-only stream.
 fn host_app(vfs: Vfs, link: HostLink) -> App {
     let mut app = lobby_app(vfs);
     app.insert_resource(link)
@@ -154,14 +158,19 @@ fn host_app(vfs: Vfs, link: HostLink) -> App {
         .add_systems(
             Update,
             (
+                mm2_app::input::reset_input.before(mm2_vehicle::systems::vehicle_reset),
+                mm2_vehicle::systems::vehicle_reset,
                 net::host_input,
                 net::drive_host.after(session::drive_session),
                 netdrive::reconcile_remote_players.after(net::drive_host),
                 netdrive::apply_remote_inputs.after(net::drive_host),
                 netdrive::track_reset_epochs
                     .after(net::drive_host)
+                    .after(mm2_vehicle::systems::vehicle_reset)
                     .before(netdrive::publish_snapshots),
-                netdrive::publish_snapshots.after(net::drive_host),
+                netdrive::publish_snapshots
+                    .after(net::drive_host)
+                    .after(mm2_vehicle::systems::vehicle_reset),
             ),
         );
     app
@@ -1693,7 +1702,11 @@ fn a_remote_players_inputs_drive_the_hosted_car() {
 
     // F25-A.5: an authority reset on the remote seat bumps its wire
     // epoch — the next `Snap` declares the teleport instead of
-    // presenting only a jumped pose.
+    // presenting only a jumped pose. F25-A.6 strengthens the leg: the
+    // harness schedules the real `vehicle_reset` apply, so the same
+    // `Snap` that first carries `epoch == 1` must already carry the
+    // teleported pose — the tracker runs after the apply, the publish
+    // after the tracker.
     {
         let mut q = app.world_mut().query_filtered::<Entity, With<RemotePick>>();
         let remote = q.single(app.world()).expect("the remote car");
@@ -1716,14 +1729,53 @@ fn a_remote_players_inputs_drive_the_hosted_car() {
             "the authority reset bumped the seat's epoch"
         );
     }
-    until_wire(
-        &mut peer,
-        |m| matches!(m, Message::Snap { entries, .. } if entries.iter().any(|e| e.player == 1 && e.epoch == 1)),
-    );
+    until_wire(&mut peer, |m| {
+        matches!(m, Message::Snap { entries, .. } if entries.iter().any(|e| {
+            e.player == 1 && e.epoch == 1 && e.pos == [0.0, 1.5, 0.0]
+        }))
+    });
     assert_eq!(
         app.world().resource::<netdrive::NetDriveReport>().resets,
         1,
         "the tracked reset counted once"
+    );
+
+    // F25-A.6: an Update-scheduled writer — the host's own `R` — goes
+    // through the same ordering edge, so its teleport and epoch bump
+    // leave on one `Snap` too rather than the epoch trailing a frame.
+    // No `PlayerVehicle` exists in this harness, so the `R` bundle is
+    // the reset-all form — the remote seat still teleports and bumps.
+    app.world_mut()
+        .resource_mut::<session::SpawnPoint>()
+        .position = Vec3::new(7.0, 1.5, -3.0);
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyR);
+    app.update();
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .reset_all();
+    {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<(&netdrive::ResetEpoch, &Transform), With<RemotePick>>();
+        let (epoch, transform) = q.single(app.world()).expect("the remote car");
+        assert_eq!(epoch.0, 2, "the R bundle bumped the seat epoch again");
+        assert_eq!(
+            transform.translation,
+            Vec3::new(7.0, 1.5, -3.0),
+            "vehicle_reset applied the R bundle to the remote seat"
+        );
+    }
+    until_wire(&mut peer, |m| {
+        matches!(m, Message::Snap { entries, .. } if entries.iter().any(|e| {
+            e.player == 1 && e.epoch == 2 && e.pos == [7.0, 1.5, -3.0]
+        }))
+    });
+    assert_eq!(
+        app.world().resource::<netdrive::NetDriveReport>().resets,
+        2,
+        "the Update-writer reset tracked the same frame"
     );
 
     // Silence past INPUT_STALE zeroes the input — a stalled driver

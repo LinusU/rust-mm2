@@ -25,7 +25,9 @@ use mm2_game::{
     SessionAuthority, SessionConfig, SessionEntity, SessionPhase, SpawnPose, WorldMode,
     advance_session_tick, despawn_session_entities,
 };
-use mm2_vehicle::{Teleported, Vehicle, VehicleConfig, VehicleInput, VehiclePlugin, VehicleState};
+use mm2_vehicle::{
+    ResetVehicle, Teleported, Vehicle, VehicleConfig, VehicleInput, VehiclePlugin, VehicleState,
+};
 
 /// A headless app wired exactly like the binary's session path: real
 /// world spawning, teardown and contract pipeline, minus the window and
@@ -92,7 +94,9 @@ fn test_app(config: SessionConfig, frame_secs: f64) -> App {
                 session::session_control_input,
                 // The binary's `R`-reset reader — pad North reaches the
                 // same `spawn_resets` bundle (F22-AC06's designed map).
-                mm2_app::input::reset_input,
+                // Same ordering edge as the binary: every Update
+                // `ResetVehicle` writer precedes the apply.
+                mm2_app::input::reset_input.before(mm2_vehicle::systems::vehicle_reset),
                 // F22-B.2: the binary's mirror toggle — Backspace must
                 // reach `RearView`, not the restart intent, in every
                 // phase the harness exercises — and the strip's
@@ -128,7 +132,10 @@ fn test_app(config: SessionConfig, frame_secs: f64) -> App {
                     session::dev_reset_at,
                     session::drive_session,
                 )
-                    .chain(),
+                    .chain()
+                    // The binary orders every Update `ResetVehicle`
+                    // writer (`dev_reset_at` here) ahead of the apply.
+                    .before(mm2_vehicle::systems::vehicle_reset),
                 // Phase mirrors run after the driver — the update that
                 // enters/leaves `Paused` sees the settled phase.
                 pause::sync_physics_pause.after(session::drive_session),
@@ -1376,6 +1383,69 @@ fn unfocused_window_gates_the_pad_map() {
         run_until(&mut app, 10, |a| a.world().get::<Teleported>(car).is_some()),
         "the refocused pad reset never landed"
     );
+}
+
+/// F25-A.6: the `R` bundle is authority-only — under a `Remote`
+/// (predicted) session the key writes no `ResetVehicle` and the
+/// predicted car never self-teleports. The remote driver's reset is
+/// the host's: it arrives as an epoch-declared `Snap`, not as a local
+/// pose write a wire copy could never learn (F25-A.5's gate, proven
+/// here rather than inspected).
+#[test]
+fn r_is_inert_under_remote_authority() {
+    let mut app = test_app(
+        SessionConfig {
+            authority: SessionAuthority::Remote,
+            ..SessionConfig::default()
+        },
+        1.0 / 60.0,
+    );
+    assert!(run_until(&mut app, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    let car = single::<With<PlayerVehicle>>(&mut app);
+    app.world_mut()
+        .get_mut::<VehicleInput>(car)
+        .unwrap()
+        .throttle = 1.0;
+    for _ in 0..120 {
+        app.update();
+    }
+    let pos = app.world().get::<Transform>(car).unwrap().translation;
+    assert!(
+        pos.distance(Vec3::new(0.0, 1.5, 0.0)) > 5.0,
+        "control leg: the car actually left the spawn, still at {pos:?}"
+    );
+    // Anything buffered before the key drains here so the assertion
+    // below counts only what `R` itself wrote.
+    let _ = app
+        .world_mut()
+        .resource_mut::<Messages<ResetVehicle>>()
+        .drain()
+        .count();
+
+    press_key(&mut app, KeyCode::KeyR);
+    for _ in 0..10 {
+        app.update();
+    }
+
+    let resets = app
+        .world_mut()
+        .resource_mut::<Messages<ResetVehicle>>()
+        .drain()
+        .count();
+    assert_eq!(resets, 0, "a Remote-authority R wrote a reset message");
+    assert!(
+        app.world().get::<Teleported>(car).is_none(),
+        "a Remote-authority R teleported the predicted car"
+    );
+    let pos = app.world().get::<Transform>(car).unwrap().translation;
+    assert!(
+        pos.distance(Vec3::new(0.0, 1.5, 0.0)) > 5.0,
+        "the predicted car stayed off the spawn point, got {pos:?}"
+    );
+    assert!(phase_is(&mut app, SessionPhase::Playing));
 }
 
 /// The reset bundle re-seats every trailer at its authored car-space

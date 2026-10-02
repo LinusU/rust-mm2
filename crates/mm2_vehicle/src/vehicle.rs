@@ -197,7 +197,13 @@ impl VehicleState {
     }
 }
 
-/// Message requesting a vehicle reset to a pose.
+/// Message requesting a vehicle reset to a pose. Every authority-side
+/// teleport lands here — the `R`/pad bundle, a scheduled `--reset-at`,
+/// scripted and opponent re-anchors, the stuck/disabled/recovery
+/// resolves, and the self-right assist — so
+/// [`vehicle_reset`](crate::systems::vehicle_reset) stays the single
+/// apply point and no teleport can skip the `Teleported` marker or, in
+/// a hosted session, the wire reset epoch.
 #[derive(Message, Debug, Clone, Copy)]
 pub struct ResetVehicle {
     /// Entity to reset; `None` resets every vehicle.

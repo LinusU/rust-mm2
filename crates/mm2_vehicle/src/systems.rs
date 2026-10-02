@@ -720,13 +720,12 @@ type SelfRightQuery<'w, 's> = Query<
     'w,
     's,
     (
+        Entity,
         &'static Vehicle,
         &'static mut VehicleState,
-        &'static mut Position,
-        &'static mut Rotation,
-        &'static mut LinearVelocity,
-        &'static mut AngularVelocity,
-        &'static mut Transform,
+        &'static Position,
+        &'static Rotation,
+        &'static LinearVelocity,
     ),
 >;
 
@@ -770,12 +769,24 @@ pub fn upright_recovery_pose(
 /// wheel in contact, so nothing in the simulation can push it back over
 /// and the player is stranded. Recovery keeps the car's heading and drops
 /// it upright on whatever surface is below it.
-pub fn vehicle_self_right(time: Res<Time>, mut vehicles: SelfRightQuery) {
+///
+/// The assist emits a targeted [`ResetVehicle`] rather than writing the
+/// pose itself: an upright is a teleport, and [`vehicle_reset`] (chained
+/// after this system) applies it the same frame with the `Teleported`
+/// marker — so swept-segment consumers break on the jump and a networked
+/// session's reset epoch declares it on the wire. The scheduled chain
+/// keeps the authored delay exact; had the message drained a frame later
+/// the car would just wait out one extra update.
+pub fn vehicle_self_right(
+    time: Res<Time>,
+    mut vehicles: SelfRightQuery,
+    mut resets: MessageWriter<ResetVehicle>,
+) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
-    for (vehicle, mut state, mut pos, mut rot, mut lv, mut av, mut transform) in &mut vehicles {
+    for (entity, vehicle, mut state, pos, rot, lv) in &mut vehicles {
         let delay = vehicle.config.assists.self_right_delay;
         if delay <= 0.0 {
             state.upended_for = 0.0;
@@ -792,13 +803,13 @@ pub fn vehicle_self_right(time: Res<Time>, mut vehicles: SelfRightQuery) {
         }
 
         let (landing, yaw) = upright_recovery_pose(&vehicle.config, pos.0, rot.0);
-        let level = Quat::from_rotation_y(yaw);
-        pos.0 = landing;
-        rot.0 = level;
-        lv.0 = Vec3::ZERO;
-        av.0 = Vec3::ZERO;
-        transform.translation = pos.0;
-        transform.rotation = level;
+        resets.write(ResetVehicle {
+            entity: Some(entity),
+            position: landing,
+            yaw,
+        });
+        // The reset wipes `VehicleState` — clearing here too keeps the
+        // retry bound honest if the message's target has already gone.
         state.upended_for = 0.0;
     }
 }
@@ -844,7 +855,14 @@ pub fn vehicle_reset(
             av.0 = Vec3::ZERO;
             transform.translation = ev.position;
             transform.rotation = Quat::from_rotation_y(ev.yaw);
+            // The gyro counters are run evidence, not sim state — a reset
+            // clears the car's motion bookkeeping, not the record of what
+            // it did (a self-right now lands here too, and wiping them
+            // would erase a flip's own maneuver history).
+            let (spins, completed) = (state.gyro_spins, state.gyro_completed);
             *state = VehicleState::new(&vehicle.config);
+            state.gyro_spins = spins;
+            state.gyro_completed = completed;
             commands.entity(entity).insert(Teleported);
         }
     }

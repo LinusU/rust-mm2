@@ -478,9 +478,17 @@ fn run_headless(
                     crate::hudmap::dev_pause_map_once,
                     session::drive_session,
                 )
-                    .chain(),
+                    .chain()
+                    // `dev_reset_at` writes `ResetVehicle` — the apply
+                    // runs after every Update writer so the epoch bump
+                    // and the teleported pose leave on the same `Snap`.
+                    .before(mm2_vehicle::systems::vehicle_reset),
                 race::update_checkpoint_markers,
-                scripted::scripted_drive.run_if(resource_exists::<scripted::ScriptedDrive>),
+                scripted::scripted_drive
+                    .run_if(resource_exists::<scripted::ScriptedDrive>)
+                    // A scripted re-anchor is a `ResetVehicle` write —
+                    // before the apply like every Update writer.
+                    .before(mm2_vehicle::systems::vehicle_reset),
                 // F13-C.2: the parked control owns `VehicleInput` under
                 // `--parked` — the same resource-gated pattern
                 // `ScriptedDrive` holds for `--bot`.
@@ -574,7 +582,10 @@ fn run_headless(
                     crate::precip::reset_precip_report.run_if(session::unloading),
                     crate::wheel_fx::reset_wheel_fx_report.run_if(session::unloading),
                 ),
-                opponents::opponent_drive,
+                opponents::opponent_drive
+                    // Opponent re-anchors emit `ResetVehicle` — before
+                    // the apply, matching the windowed schedule.
+                    .before(mm2_vehicle::systems::vehicle_reset),
                 // F05-B.6: authored engine smoke — the headless
                 // record's `ptx=` field reads the report. Assets are
                 // real (VFS `fxpt2` + quads); nothing rasterizes.
@@ -694,8 +705,11 @@ fn run_headless(
                         crate::netdrive::apply_remote_inputs.after(net::drive_host),
                         crate::netdrive::track_reset_epochs
                             .after(net::drive_host)
+                            .after(mm2_vehicle::systems::vehicle_reset)
                             .before(crate::netdrive::publish_snapshots),
-                        crate::netdrive::publish_snapshots.after(net::drive_host),
+                        crate::netdrive::publish_snapshots
+                            .after(net::drive_host)
+                            .after(mm2_vehicle::systems::vehicle_reset),
                     ),
                 );
         }

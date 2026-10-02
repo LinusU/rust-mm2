@@ -373,6 +373,13 @@ fn an_upended_car_flops_back_onto_its_wheels() {
     );
     let state = app.world().get::<VehicleState>(car).unwrap();
     assert!(state.grounded, "recovered car should be back on the road");
+    // F25-A.6: the flop lands through `vehicle_reset`, not an in-place
+    // pose write — `Teleported` marks the break for swept-segment
+    // consumers, and over the wire the reset epoch declared the jump.
+    assert!(
+        app.world().get::<Teleported>(car).is_some(),
+        "the self-right went through the reset path (Teleported)"
+    );
     assert_finite(&app, car);
 }
 
@@ -569,6 +576,13 @@ fn reset_teleports_and_clears_motion() {
             ..default()
         },
     );
+    // F25-A.6: the gyro ledger is run evidence, not sim state — the
+    // reset rebuilds the motion bookkeeping but must keep the tally.
+    {
+        let mut state = app.world_mut().get_mut::<VehicleState>(car).unwrap();
+        state.gyro_spins = 3;
+        state.gyro_completed = 2;
+    }
     app.world_mut().write_message(ResetVehicle {
         entity: Some(car),
         position: Vec3::new(5.0, 1.2, 5.0),
@@ -594,6 +608,8 @@ fn reset_teleports_and_clears_motion() {
             .iter()
             .all(|w| !w.grounded && w.compression == 0.0)
     );
+    assert_eq!(state.gyro_spins, 3, "a reset keeps the spin ledger");
+    assert_eq!(state.gyro_completed, 2, "a reset keeps the spin ledger");
 }
 
 #[test]

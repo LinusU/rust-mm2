@@ -1,3 +1,98 @@
+# Last iteration — F25-A.6: every authority teleport is a declared
+# reset — self-right joins the `ResetVehicle` lifecycle and the epoch
+# tracker can no longer trail the pose (iteration 027, run
+# 20261001T195454-62282 continued)
+
+Implementation iteration on `ralph/night` (baseline `aa4af45` — the
+F25-A.5 candidate; external verify + review pass with gaps only). One
+coherent slice: the three gaps A.5's review named, all facets of one
+invariant — *an authority-side teleport must be a declared reset*.
+
+## Task selection
+
+The A.5 review passed the change but found the epoch lifecycle had
+holes: (1) `vehicle_self_right` teleported an upended car in place —
+no `ResetVehicle`, no `Teleported`, no epoch bump — so a client's copy
+blended the flop instead of receiving a declared snap; (2) the
+Update-scheduled reset writers (`reset_input`, `dev_reset_at`,
+`scripted_drive`, `opponent_drive`) were unordered vs
+`track_reset_epochs`, so a reset's epoch could ride the `Snap` *after*
+the one carrying the teleported pose; (3) the new `reset_input`
+authority gate had no negative test. One repair covers all three:
+route self-right through the message like every other teleport, then
+make the writer → apply → track → publish order explicit.
+
+## What landed
+
+- `mm2_vehicle::vehicle_self_right` — no longer writes
+  `Position`/`Rotation`/velocities/`Transform` itself. It emits a
+  targeted `ResetVehicle` on the shared `upright_recovery_pose`
+  landing and the plugin chains it before `vehicle_reset`
+  (`(vehicle_self_right, vehicle_reset).chain()`), so the flop applies
+  the same frame through the single apply point — `Teleported`-marked
+  for swept-segment consumers and visible to the wire epoch tracker.
+- `mm2_vehicle::vehicle_reset` — preserves `gyro_spins` /
+  `gyro_completed` across the `VehicleState` rebuild: now that
+  self-right routes through it, wiping the ledger would erase a flip's
+  own maneuver history. The counters are run evidence, not sim state.
+- Schedule ordering — identical in `main.rs` and `smoke.rs`: every
+  Update-scheduled `ResetVehicle` writer is `.before(vehicle_reset)`
+  (`reset_input`, the `dev_reset_at` chain, `scripted_drive`,
+  `opponent_drive`; `vehicle_self_right` is chained inside the
+  plugin), and `track_reset_epochs` is `.after(vehicle_reset)` +
+  `.before(publish_snapshots)` with the publish also `.after` the
+  apply. The epoch bump and the teleported pose now provably leave on
+  the same `Snap`. FixedLast writers (`resolve_disabled`,
+  `resolve_stuck`, `resolve_recovery`) needed no edge: fixed schedules
+  run ahead of `Update`, so their messages were already readable in
+  the frame that applies and tracks them.
+- Test-harness wiring mirrors the production edges — `host_app` in
+  `net_app.rs` schedules the real `reset_input` +
+  `vehicle_reset` with the same constraints, so the legs observe real
+  same-frame coherence rather than a test-only stream; `session.rs`'s
+  `test_app` carries the same `.before(vehicle_reset)` edges.
+
+## Tests
+
+- `drive` (16, extended in place) — `an_upended_car_flops_back_onto_
+  its_wheels` now asserts `Teleported` on the recovered car (proof the
+  flop went through `vehicle_reset`, not an in-place write);
+  `reset_teleports_and_clears_motion` seeds `gyro_spins`/`gyro_
+  completed` and asserts both survive the reset.
+- `session` (+1) — `r_is_inert_under_remote_authority`: a `Remote`
+  (predicted) session drives off its spawn, then `R` writes **no**
+  `ResetVehicle` message, stamps no `Teleported`, and the predicted
+  car never moves back — the A.5 gate's missing negative leg.
+- `net_app` (host leg extended) — the hand-written remote-seat reset
+  now must arrive on the wire with pose **and** `epoch: 1` in the same
+  `Snap`; and a host-side `R` keypress — the real `reset_input`
+  writer — teleports the remote seat and the same `Snap` carries its
+  new pose with `epoch: 2`. `NetDriveReport.resets` counts both.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --workspace
+--all-targets --all-features -- -D warnings` clean; `cargo test
+--workspace` green — recorded below/verify log.
+
+## Classification / remaining open items
+
+- The shared-`ResetVehicle` discipline and the ordering edges are
+  implementation choice; self-right riding the declared-reset path is
+  designed policy consistent with spec req 4 (authority teleports are
+  the wire's job to declare).
+- Still open F25-A scope: continuous drift reconciliation between
+  epochs, full input-replay prediction, replicated damage/result
+  presentation, input rate-limiting, interpolation tuning, and a
+  wire-carried driver reset request (the `R`-gate's UX successor —
+  under `Remote` the key is now provably inert, which is honest but
+  dead-feeling; the request message is F25-B).
+- All evidence remains synthetic/loopback — no two-process driving
+  session, no impairment matrix, no retail-install leg, no rendered
+  observation. F25-AC01..AC06 stay open.
+
+---
+
 # Last iteration — F25-A.5: reset epochs on the wire — the authority's
 # teleports reconcile the owning seat and snap remote copies
 # deterministically (iteration 026, run 20261001T195454-62282 continued)
