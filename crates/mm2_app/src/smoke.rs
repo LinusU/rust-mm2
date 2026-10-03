@@ -608,7 +608,12 @@ fn run_headless(
                     // F07-B.4: wheel contact → skid/rolling loop
                     // voices — the mix computes on the components, so
                     // the record's `aud=` k/g gauges read it headless.
-                    crate::audio::surface_voices.after(session::drive_session),
+                    // The `apply_snapshots` edge voices a replicated
+                    // `SurfaceContact` in the frame it landed — same
+                    // contract `impact_voices`/`emit_sparks` keep.
+                    crate::audio::surface_voices
+                        .after(session::drive_session)
+                        .after(crate::netdrive::apply_snapshots),
                     // F07-B.6: ambient engine tables → looping voices —
                     // the record's `aud=` e/n fields read the mix the
                     // same headless way.
@@ -771,7 +776,12 @@ fn run_headless(
                             .before(crate::netdrive::publish_snapshots),
                         crate::netdrive::publish_snapshots
                             .after(net::drive_host)
-                            .after(mm2_vehicle::systems::vehicle_reset),
+                            .after(mm2_vehicle::systems::vehicle_reset)
+                            // F25-B (v16): the seat's `SurfaceContact`
+                            // publish reads `surface_voices`'
+                            // same-frame resolution — same ordering
+                            // contract as the windowed app.
+                            .after(crate::audio::surface_voices),
                     ),
                 );
         }

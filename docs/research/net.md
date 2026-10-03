@@ -323,9 +323,30 @@ informational: it feeds the audio mix only, and the `u16`
 domain is itself the bound a hostile value cannot exceed.
 Horn and clutch stay local-owner behavior — horn systems read
 `PlayerVehicle` only and `clutch_voices` never voices a
-`Remote` seat — and surface loops remain unsupported: the
-wire carries no wheel-contact truth to mix them from.
-Implementation choice throughout, no original-protocol claim.
+`Remote` seat. Implementation choice throughout, no
+original-protocol claim.
+
+v15→v16: `SnapEntry` gained the surface-contact tail (7 B,
+F25-B) — `surf_skid` (u16 `sound` class, `SNAP_NO_SURFACE`
+when no skid band covered), `skid_slip` (u8, slippage ×255),
+`skid_speed` (i16, the winning wheel's `vel_long` in 0.1 m/s)
+and `surf_roll` (u16 rolling class, same sentinel). It closes
+the surface-presentation gap the same way `rpm` closed the
+engine one: `surface_voices` resolves each simulated car's
+dominant wheel contact into a `SurfaceContact` component, the
+publisher encodes it, and a copy replays it through
+`surface_voices`' `RemoteReplica` arm — which re-runs
+`SkidSpec::pick` and `RollingSpec::mix` against *this*
+process's `SurfaceAudio` rather than trusting a resolved band
+or gain. The wire carries the `sound` class, not an `aud/`
+table row, because `aud/` rides no gameplay fingerprint — a
+cosmetically modded table stays legal, and a class the local
+table cannot answer resolves to silence like an unmapped
+material. The rolling mix's speed derives from the copy's
+`vel · forward` at apply, so no extra field rides. Absence
+stays absence: `SNAP_NO_SURFACE` clears the copy's contact —
+no fabricated rows. Implementation choice throughout, no
+original-protocol claim.
 
 Two receive-side holds keep that delivery from being swallowed
 (F25-B): `apply_snapshots` consumes nothing while the session is
@@ -915,26 +936,26 @@ sides — the dev cruise carries no `RaceState`, so no v13 rows move
 ## Data-plane budget and bounds (F25-B req 6)
 
 *Implementation choice + measured.* Payload sizes are fixed by the
-v15 encode (4-byte length prefix excluded everywhere):
+v16 encode (4-byte length prefix excluded everywhere):
 
 | frame | payload bytes |
 |---|---|
 | `Input` | 21 (tag 1, generation 8, seq 8, 4 channels) |
 | `ResetRequest` | 9 (tag 1, generation 8) |
 | `Snap` header | 21 (tag 1, generation 8, tick 8, three counts, race presence 1) |
-| per `SnapEntry` | 101 (player 2, pos/rot/vel/angvel 52, epoch 1, steer 2, spin 2, compression 1, flags 1, damage 1, breaks 4, progress tail 33, rpm 2) |
+| per `SnapEntry` | 108 (player 2, pos/rot/vel/angvel 52, epoch 1, steer 2, spin 2, compression 1, flags 1, damage 1, breaks 4, progress tail 33, rpm 2, surface tail 7) |
 | per `SnapTrailer` | 57 (owner 2, pos/rot/vel/angvel 52, spin 2, flags 1) |
 | per `SnapImpact` | 54 (seat 2, id 8, tick 8, point 12, normal 12, severity 4, audio_id 8) |
 | `SnapRace` when present | 13 (phase 1, countdown 4, clock 8) |
 
-A `Snap` is `21 + 101·seats + 57·trailers + 54·impacts` plus 13 while a
+A `Snap` is `21 + 108·seats + 57·trailers + 54·impacts` plus 13 while a
 race row rides — worst case `MAX_PLAYERS` 8 seats and trailers plus
-`MAX_SNAP_IMPACTS` 64 rows = 4,741 B, far under `MAX_FRAME` (256 KiB).
+`MAX_SNAP_IMPACTS` 64 rows = 4,810 B, far under `MAX_FRAME` (256 KiB).
 The matrix runs measured
 the v10 shape: `Input` payloads averaged 21 B
 (`bytes_in`/`frames_in` ≈ 20.9) and the one-seat dev-world `Snap`
-82 B (20 + 62 — 122 B under v15, raceless); the two-process leg's
-three-seat snaps were 206 B (324 under v15, raceless).
+82 B (20 + 62 — 129 B under v16, raceless); the two-process leg's
+three-seat snaps were 206 B (345 under v16, raceless).
 
 **Update rates.** Both directions send once per app `Update` while the
 session is live — the wire rate is the update-loop rate, not the fixed
@@ -943,10 +964,10 @@ headless runs (the matrix's test apps publish ~250 snaps/s). Same-tick
 republishes are deliberate redundancy — `tick` dedups them at the
 receiver (the clean-row floor above). Consequences worth recording:
 
-- per-client downstream at a 60 Hz update rate, 8 seats: ≈50 KB/s of
-  `Snap` payload (829 B × 60); the ~250 Hz headless cadence multiplies
-  that ≈4× (≈207 KB/s, ~1.7 Mbps) and a full-impact burst snap is still
-  ≤4,741 B.
+- per-client downstream at a 60 Hz update rate, 8 seats: ≈53 KB/s of
+  `Snap` payload (885 B × 60); the ~250 Hz headless cadence multiplies
+  that ≈4× (≈221 KB/s, ~1.8 Mbps) and a full-impact burst snap is still
+  ≤4,810 B.
 - per-client upstream: 25 B on the wire per update — ≈1.5 KB/s at
   60 Hz, ≈6 KB/s headless.
 - a faster update loop buys smoother *redundancy*, not fresher poses —

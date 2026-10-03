@@ -19,8 +19,8 @@ use bevy::time::TimeUpdateStrategy;
 use mm2_app::audio::{
     self, AmbientEngineVoice, AmbientRig, AudioReport, AudioVoice, CommentaryAudio,
     CommentaryVoice, EngineVoice, GearWatch, HornRequest, ImpactAudio, PcmAudio, Siren, SirenAudio,
-    SurfaceAudio, SurfaceRig, SurfaceRole, SurfaceVoice, VoiceKind, WaveBank, WeatherAudio,
-    WeatherRole, WeatherVoice, decode_wave,
+    SkidContact, SurfaceAudio, SurfaceContact, SurfaceRig, SurfaceRole, SurfaceVoice, VoiceKind,
+    WaveBank, WeatherAudio, WeatherRole, WeatherVoice, decode_wave,
 };
 use mm2_assets::Vfs;
 use mm2_content::SurfaceTables;
@@ -33,7 +33,7 @@ use mm2_game::{
     SirenSampleSpec, SirenSpec, SurfaceMaterial, SurfaceState, SurfaceVariant, TimeOfDay,
     VehicleAudio, Weather, advance_session_tick, despawn_session_entities,
 };
-use mm2_vehicle::{DriveDirection, VehicleConfig, VehicleState, vehicle_bundle};
+use mm2_vehicle::{DriveDirection, RemoteReplica, VehicleConfig, VehicleState, vehicle_bundle};
 
 /// A minimal 16-bit mono PCM RIFF/WAVE at `rate` with `frames` frames.
 fn pcm_wav(rate: u32, frames: usize) -> Vec<u8> {
@@ -1624,6 +1624,106 @@ fn the_surface_rig_bound_caps_resolving_cars() {
         4,
         "the muted marker reports once, not per frame"
     );
+}
+
+/// F25-B (protocol v16): a `RemoteReplica` copy keeps no wheel-contact
+/// truth — a kinematic replica's wheels never ground — so
+/// `surface_voices` replays the replicated `SurfaceContact` through
+/// *this* process's `SurfaceAudio` instead of reading wheels
+/// (`aud/` rides no gameplay fingerprint; each peer re-runs the pick).
+/// A class the local table cannot answer resolves to silence like an
+/// unmapped material — no fabricated row.
+#[test]
+fn a_remote_replica_replays_its_replicated_surface_contact() {
+    let dir = surface_dir();
+    let mut app = surface_app(dir.path());
+    // The copy's only contact truth is the replicated component —
+    // `set_contact(None, ..)` leaves every wheel airborne, so the
+    // live-wheel loop could never produce what voices here.
+    let (copy, _collider) = surface_car(&mut app, false, SurfaceMaterial::Unspecified);
+    app.world_mut().entity_mut(copy).insert((
+        RemoteReplica,
+        SurfaceContact {
+            skid: Some(SkidContact {
+                surface: 99,
+                slippage: 0.9,
+                wheel_speed: -8.0,
+            }),
+            roll: Some(99),
+        },
+    ));
+    // `apply_present`'s wire-derived forward speed — 10 m/s keeps the
+    // rolling gate open.
+    set_contact(&mut app, copy, None, 10.0, 0.0);
+    for _ in 0..4 {
+        app.update();
+    }
+    assert_eq!(
+        surface_voices(&mut app),
+        [],
+        "a surface class the local table cannot answer stays silent"
+    );
+    assert_eq!(
+        app.world_mut()
+            .query_filtered::<Entity, With<SurfaceRig>>()
+            .iter(app.world())
+            .count(),
+        0,
+        "no rig builds off an unresolvable contact"
+    );
+
+    // The v16 tail lands a real contact: `_default` row 0's skid band
+    // 0 covers 0.5–0.75 slippage (ROADSKID1's 22050 wave) and class 1's
+    // grass rolling loop (ROLLWAVE's 48000 wave) mixes off the copy's
+    // own forward speed. Non-player → both spatial emitters.
+    app.world_mut().entity_mut(copy).insert(SurfaceContact {
+        skid: Some(SkidContact {
+            surface: 0,
+            slippage: 0.6,
+            wheel_speed: -8.0,
+        }),
+        roll: Some(1),
+    });
+    for _ in 0..3 {
+        app.update();
+    }
+    let mut voices = surface_voices(&mut app);
+    voices.sort_by_key(|(role, ..)| match role {
+        SurfaceRole::Skid(b) => *b,
+        SurfaceRole::Rolling => usize::MAX,
+    });
+    assert_eq!(
+        voices,
+        [
+            (SurfaceRole::Skid(0), 22050, true, copy),
+            (SurfaceRole::Rolling, 48000, true, copy)
+        ],
+        "the replicated contact replays through the local table — \
+         spatial like any non-player car"
+    );
+    // Band 0 progress 0.4 (0.6 across 0.5–0.75) interpolates the
+    // authored skid volumes like the live leg's numbers.
+    let (volume, speed) = surface_mix(&mut app, SurfaceRole::Skid(0));
+    assert!((volume - 0.652).abs() < 1e-3, "{volume}");
+    assert_eq!(speed, 1.0);
+    // Rolling at 10 m/s across the authored 0–25 window — the copy's
+    // `apply_present` speed, not a wire field.
+    let (volume, speed) = surface_mix(&mut app, SurfaceRole::Rolling);
+    assert!((volume - 0.51).abs() < 1e-3, "{volume}");
+    assert!((speed - 1.01).abs() < 1e-3, "{speed}");
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.skids, r.rolling, r.failed), (1, 1, 0));
+
+    // A quiet snap (both tails `SNAP_NO_SURFACE` → `None`) silences
+    // the copy like an authority-side release.
+    app.world_mut()
+        .entity_mut(copy)
+        .insert(SurfaceContact::default());
+    for _ in 0..3 {
+        app.update();
+    }
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.skids, r.rolling), (0, 0));
 }
 
 #[test]

@@ -23,7 +23,11 @@
 //!   v15 tail adds the engine RPM (F25-B): a remote seat binds the
 //!   authored `VehicleAudio` spec like an opponent, so its engine rig
 //!   mixes off the live sim on the authority and off the replicated RPM
-//!   on a client — remote cars are no longer engine-silent.
+//!   on a client — remote cars are no longer engine-silent. The v16
+//!   tail adds the dominant wheel contact (F25-B): the resolved `sound`
+//!   class, slippage and wheel speed a copy's `SurfaceRig` replays
+//!   through *its* surface table — `aud/` rides no gameplay
+//!   fingerprint, so the resolved pick never crosses the wire.
 //!   The v8 tail adds the seat's authoritative *damage fraction*
 //!   (F25-B): a copy's `VehicleDamage` carries the replicated total
 //!   (never locally accumulated — F05 req 6), which is what its bound
@@ -136,13 +140,14 @@ use mm2_game::{
 };
 use mm2_net::{
     DriveInput, MAX_SNAP_IMPACTS, Message, RemoteInputs, SNAP_FLAG_BRAKE, SNAP_FLAG_GROUNDED,
-    SNAP_FLAG_REVERSE, SnapEntry, SnapImpact, SnapRace, SnapTrailer, VehiclePick,
+    SNAP_FLAG_REVERSE, SNAP_NO_SURFACE, SnapEntry, SnapImpact, SnapRace, SnapTrailer, VehiclePick,
 };
 use mm2_vehicle::{
     DriveDirection, HandlingMetrics, RemoteReplica, ResetVehicle, Teleported, Vehicle,
     VehicleConfig, VehicleInput, VehicleState, vehicle_bundle,
 };
 
+use crate::audio::{SkidContact, SurfaceContact};
 use crate::banger::BangerMut;
 use crate::breakaway::{self, BreakVisualMut};
 use crate::car_visual;
@@ -891,8 +896,9 @@ const MAX_WIRE_STEER: f32 = 1.5;
 /// reflected), `spin` the mean grounded-wheel `vel_long / radius` — the
 /// same expression the sim integrates into `WheelState::spin` — and
 /// `compression` the mean per-wheel `compression / travel`. `rpm`
-/// (v15) is the engine state a copy's `EngineVoice` rig mixes off.
-/// Every field saturates or clamps rather than wrapping.
+/// (v15) is the engine state a copy's `EngineVoice` rig mixes off and
+/// the v16 surface tail the wheel contact a copy's `SurfaceRig`
+/// replays. Every field saturates or clamps rather than wrapping.
 fn encode_present(
     cfg: &VehicleConfig,
     state: &VehicleState,
@@ -949,6 +955,46 @@ fn encode_present(
     (steer, spin, compression, flags, rpm)
 }
 
+/// `SurfaceContact` → a [`SnapEntry`]'s v16 surface tail: the dominant
+/// contact's resolved `sound` class plus the winning wheel's
+/// quantities, quantized like the rest of the presentation tail
+/// (slippage ×255, `vel_long` in 0.1 m/s — the two quantities every
+/// `SkidUnit` reads, so a receiver replays the pick under its own
+/// spec's unit). `None` — a car `surface_voices` never resolved, or a
+/// contact whose own halves are empty — encodes [`SNAP_NO_SURFACE`]
+/// rather than a fabricated row.
+fn encode_surface(contact: Option<&SurfaceContact>) -> (u16, u8, i16, u16) {
+    let Some(contact) = contact else {
+        return (SNAP_NO_SURFACE, 0, 0, SNAP_NO_SURFACE);
+    };
+    let skid = contact
+        .skid
+        .map(|s| {
+            // Non-finite reads as no-quantity rather than a garbage
+            // cast — the class still rides so the row resolves.
+            let slippage = if s.slippage.is_finite() {
+                (s.slippage.clamp(0.0, 1.0) * 255.0).round() as u8
+            } else {
+                0
+            };
+            let speed = if s.wheel_speed.is_finite() {
+                (s.wheel_speed * 10.0)
+                    .round()
+                    .clamp(i16::MIN as f32, i16::MAX as f32) as i16
+            } else {
+                0
+            };
+            (s.surface, slippage, speed)
+        })
+        .unwrap_or((SNAP_NO_SURFACE, 0, 0));
+    (
+        skid.0,
+        skid.1,
+        skid.2,
+        contact.roll.unwrap_or(SNAP_NO_SURFACE),
+    )
+}
+
 /// The receiving half of [`encode_present`]: fold a [`SnapEntry`]'s
 /// presentation tail into a remote copy's `VehicleState`/`VehicleInput`
 /// so the stock presentation systems (`update_wheel_visuals`,
@@ -961,6 +1007,7 @@ fn apply_present(
     state: &mut VehicleState,
     input: &mut VehicleInput,
     drive: Option<&mut RemoteDrive>,
+    surface: Option<&mut SurfaceContact>,
 ) {
     state.steer_angle = (entry.steer as f32 / 1000.0).clamp(-MAX_WIRE_STEER, MAX_WIRE_STEER);
     state.direction = if entry.flags & SNAP_FLAG_REVERSE != 0 {
@@ -994,6 +1041,23 @@ fn apply_present(
     // bound; `EngineLoopSpec::mix` clamps out-of-band values into its
     // authored windows, so nothing here needs a second clamp.
     state.rpm = entry.rpm as f32;
+    // The v16 surface tail — the copy's `SurfaceRig` replays the
+    // contact through its own table off this truth. The rolling half's
+    // speed is the sim's own derivation (`vel · forward`, -Z the MM2
+    // forward) applied to the asserted motion, so a copy's loop mixes
+    // the authority's pace without another field riding the wire. A
+    // wire class stays verbatim — `contact_wins` bounds it against
+    // the local table, the same `get`-or-silence an unmapped material
+    // takes.
+    state.forward_speed = Vec3::from(entry.vel).dot(wire_quat(entry.rot) * Vec3::NEG_Z);
+    if let Some(surface) = surface {
+        surface.skid = (entry.surf_skid != SNAP_NO_SURFACE).then_some(SkidContact {
+            surface: entry.surf_skid,
+            slippage: entry.skid_slip as f32 / 255.0,
+            wheel_speed: entry.skid_speed as f32 / 10.0,
+        });
+        surface.roll = (entry.surf_roll != SNAP_NO_SURFACE).then_some(entry.surf_roll);
+    }
 }
 
 /// The [`SnapTrailer`] row's grounded bit folded into a kinematic
@@ -1461,6 +1525,10 @@ fn spawn_remote(
             RigidBody::Kinematic,
             RemoteReplica,
             RemoteDrive::default(),
+            // The v16 surface tail lands here like the drive state —
+            // bound at spawn so `apply_present` writes in place rather
+            // than binding a component every snap.
+            SurfaceContact::default(),
             RemoteLerp {
                 from_pos: pos,
                 from_rot: Quat::from_rotation_y(yaw),
@@ -1521,8 +1589,11 @@ fn spawn_remote(
     // copy mixes off the v15 `SnapEntry.rpm` tail `apply_present`
     // writes. Horn/clutch stay local to the owning process (the horn
     // system reads `PlayerVehicle` only; `clutch_voices` watches but
-    // never voices a `Remote` seat), and the surface loops need
-    // wheel-contact truth the wire does not carry.
+    // never voices a `Remote` seat). The surface loops need no authored
+    // binding at all — `surface_voices` mixes a live seat's wheel
+    // contact on the authority and replays the v16 `SnapEntry` tail's
+    // replicated `SurfaceContact` on a client copy, each process off
+    // its own surface table.
     if let Some(a) = def.as_ref().and_then(|d| d.audio.as_ref()) {
         commands
             .entity(vehicle)
@@ -2114,6 +2185,11 @@ type SnapSourceRow<'a> = (
     // The v11 breakaway bitmask's source — `Option` like the drive
     // row: a participant with no authored break inventory publishes 0.
     Option<&'a VehicleBreaks>,
+    // The v16 surface tail's source — `surface_voices` refreshes it
+    // every update the session's surface table resolves; `Option` like
+    // the drive row: a seat `surface_voices` never reached publishes
+    // `SNAP_NO_SURFACE` rather than a fabricated class.
+    Option<&'a SurfaceContact>,
 );
 
 /// The publish-side trailer row (protocol v9, F25-B): the `Trailer`
@@ -2139,8 +2215,9 @@ type SnapTrailerSourceRow<'a> = (
 /// [`ResetEpoch`] — the receiver's teleport signal. The v7 tail carries
 /// the replicated drive presentation ([`encode_present`]): steering
 /// angle, wheel spin rate, suspension droop, the brake/reverse/
-/// grounded flags and (v15) engine RPM — what a remote copy needs to
-/// *look* and sound like the car the authority is simulating; the v8
+/// grounded flags, (v15) engine RPM and the (v16) surface contact
+/// ([`encode_surface`]) — what a remote copy needs to *look* and sound
+/// like the car the authority is simulating; the v8
 /// tail adds [`encode_damage`], the seat's authoritative damage
 /// fraction. The v10 tail replicates
 /// this frame's [`ImpactEvent`] stream as [`SnapImpact`] rows: every
@@ -2233,11 +2310,13 @@ pub fn publish_snapshots(
                 input,
                 damage,
                 breaks,
+                contact,
             )| {
                 let (steer, spin, compression, flags, rpm) = match (vehicle, state, input) {
                     (Some(v), Some(s), Some(i)) => encode_present(&v.config, s, i),
                     _ => (0, 0, 0, 0, 0),
                 };
+                let (surf_skid, skid_slip, skid_speed, surf_roll) = encode_surface(contact);
                 let mut entry = SnapEntry {
                     player: wire.0,
                     pos: pos.0.to_array(),
@@ -2252,6 +2331,10 @@ pub fn publish_snapshots(
                     damage: encode_damage(damage),
                     breaks: encode_breaks(breaks),
                     rpm,
+                    surf_skid,
+                    skid_slip,
+                    skid_speed,
+                    surf_roll,
                     ..SnapEntry::default()
                 };
                 // The v14 progress tail (F25-B): the seat's replicated
@@ -2482,6 +2565,10 @@ pub fn apply_snapshots(
     // disjoint from the `bangers` query the v11 breakaway reconcile
     // claims pool slots through — a participant is never a Banger.
     mut players: Query<SnapTargetRow<'_>, SnapTargetFilter>,
+    // v16 surface tail — the copy's `SurfaceContact` the replicated
+    // class/slip/speed lands on. Queried apart from `SnapTargetRow` —
+    // the row already sits at Bevy's 15-element query-tuple cap.
+    mut surfaces: Query<&mut SurfaceContact>,
     // Every trailer — remote copies key off `RemoteTrailer::owner`, the
     // own rig's trailer off `Trailer::towing` == the local seat entity.
     mut trailers: Query<SnapTrailerRow<'_>, SnapTrailerFilter>,
@@ -2534,6 +2621,7 @@ pub fn apply_snapshots(
         &time,
         &mut commands,
         &mut players,
+        &mut surfaces,
         &mut trailers,
         &mut mirror,
         &mut texel,
@@ -2763,6 +2851,7 @@ fn apply_snap_frame(
     time: &Time,
     commands: &mut Commands,
     players: &mut Query<SnapTargetRow<'_>, SnapTargetFilter>,
+    surfaces: &mut Query<&mut SurfaceContact>,
     trailers: &mut Query<SnapTrailerRow<'_>, SnapTrailerFilter>,
     mirror: &mut RaceMirror,
     texel: &mut crate::texel_fx::TexelRepair,
@@ -2919,7 +3008,9 @@ fn apply_snap_frame(
             *ang = AngularVelocity(Vec3::from(entry.angvel));
             // The v7 tail drives the copy's wheel/glow presentation
             // (F25-B) — the entity carries `RemoteReplica`, so nothing
-            // local steps this state between snaps.
+            // local steps this state between snaps. The v16 tail joins
+            // it via the separate `surfaces` query — the copy's
+            // `SurfaceRig` replays the contact through the local table.
             if let (Some(vehicle), Some(mut state), Some(mut input)) = (vehicle, state, input) {
                 apply_present(
                     entry,
@@ -2927,6 +3018,7 @@ fn apply_snap_frame(
                     &mut state,
                     &mut input,
                     drive.map(|d| d.into_inner()),
+                    surfaces.get_mut(entity).ok().map(|s| s.into_inner()),
                 );
             }
             match lerp {
@@ -3538,10 +3630,33 @@ mod tests {
             damage: 0,
             breaks: 0,
             rpm: 4321,
+            surf_skid: 2,
+            skid_slip: 128,
+            skid_speed: -124,
+            surf_roll: 2,
             ..SnapEntry::default()
         };
-        apply_present(&entry, &cfg, &mut state, &mut input, Some(&mut drive));
+        let mut surface = SurfaceContact::default();
+        apply_present(
+            &entry,
+            &cfg,
+            &mut state,
+            &mut input,
+            Some(&mut drive),
+            Some(&mut surface),
+        );
         assert_eq!(state.rpm, 4321.0, "the v15 engine byte lands");
+        // The v16 contact lands verbatim — `contact_wins` bounds the
+        // class against the local table, so nothing here clamps.
+        assert_eq!(
+            surface.skid,
+            Some(SkidContact {
+                surface: 2,
+                slippage: 128.0 / 255.0,
+                wheel_speed: -12.4,
+            })
+        );
+        assert_eq!(surface.roll, Some(2));
         assert_eq!(state.steer_angle, -0.26);
         assert_eq!(state.direction, DriveDirection::Forward);
         assert!(state.grounded);
@@ -3563,8 +3678,80 @@ mod tests {
             steer: i16::MAX,
             ..entry
         };
-        apply_present(&hostile, &cfg, &mut state, &mut input, None);
+        apply_present(&hostile, &cfg, &mut state, &mut input, None, None);
         assert_eq!(state.steer_angle, MAX_WIRE_STEER);
+
+        // The clearing frame silences the contact rather than freezing
+        // the last pick.
+        let quiet = SnapEntry {
+            surf_skid: SNAP_NO_SURFACE,
+            surf_roll: SNAP_NO_SURFACE,
+            ..entry
+        };
+        apply_present(
+            &quiet,
+            &cfg,
+            &mut state,
+            &mut input,
+            None,
+            Some(&mut surface),
+        );
+        assert_eq!(surface.skid, None);
+        assert_eq!(surface.roll, None);
+    }
+
+    /// The v16 surface tail encodes the resolved contact — quantization
+    /// saturating like the rest of the presentation tail, an unresolved
+    /// contact reading [`SNAP_NO_SURFACE`] rather than a fabricated row.
+    #[test]
+    fn surface_tail_encodes_the_resolved_contact() {
+        assert_eq!(
+            encode_surface(None),
+            (SNAP_NO_SURFACE, 0, 0, SNAP_NO_SURFACE),
+            "a seat `surface_voices` never resolved"
+        );
+        assert_eq!(
+            encode_surface(Some(&SurfaceContact::default())),
+            (SNAP_NO_SURFACE, 0, 0, SNAP_NO_SURFACE),
+            "no contact this frame"
+        );
+        assert_eq!(
+            encode_surface(Some(&SurfaceContact {
+                skid: Some(SkidContact {
+                    surface: 3,
+                    slippage: 0.5,
+                    wheel_speed: -12.37,
+                }),
+                roll: Some(3),
+            })),
+            (3, 128, -124, 3),
+            "the class and both wheel quantities ride"
+        );
+        // Saturation + non-finite guards like the rest of the tail.
+        assert_eq!(
+            encode_surface(Some(&SurfaceContact {
+                skid: Some(SkidContact {
+                    surface: 9,
+                    slippage: f32::NAN,
+                    wheel_speed: f32::INFINITY,
+                }),
+                roll: None,
+            })),
+            (9, 0, 0, SNAP_NO_SURFACE),
+            "the class still rides while garbage quantities read zero"
+        );
+        assert_eq!(
+            encode_surface(Some(&SurfaceContact {
+                skid: Some(SkidContact {
+                    surface: 1,
+                    slippage: 2.0,
+                    wheel_speed: -4000.0,
+                }),
+                roll: None,
+            })),
+            (1, 255, i16::MIN, SNAP_NO_SURFACE),
+            "in-range overflow clamps — slippage to 1.0, speed to the i16 bound"
+        );
     }
 
     /// The v8 damage byte encodes the authority's fraction of the

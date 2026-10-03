@@ -155,7 +155,7 @@ use mm2_game::{
     draw_cue_suffix, draw_speaker, impact_category, pick_impact, prerace_tod_stem,
     prerace_weather_stem, tire_slippage,
 };
-use mm2_vehicle::{DriveDirection, Vehicle, VehicleState};
+use mm2_vehicle::{DriveDirection, RemoteReplica, Vehicle, VehicleState};
 
 /// Decode bound: samples (per channel-interleaved count) beyond this
 /// are refused — retail waves top out under ~2.5 M samples; the cap
@@ -1018,6 +1018,43 @@ struct SkidSlot {
     tried: bool,
     /// The spawned band-loop voice.
     voice: Option<Entity>,
+}
+
+/// The dominant wheel contact [`surface_voices`] resolved for a car —
+/// F25-B protocol v16's wire source on the authority and a remote
+/// copy's replicated presentation state on a client. The system writes
+/// it on every car its wheel loop resolves (player, wire seat, AI
+/// opponent, ambient), so `netdrive::publish_snapshots` can encode a
+/// seat's `SnapEntry` tail from it; `netdrive`'s apply half instead
+/// writes it on a `RemoteReplica` copy off the wire, and this system
+/// reads the copy's back rather than running the wheel loop — a
+/// kinematic replica has no contact truth of its own.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct SurfaceContact {
+    /// The loudest skid contact's truth — `None` while no grounded
+    /// wheel's pick resolves.
+    pub skid: Option<SkidContact>,
+    /// The loudest rolling contact's `sound` class — the loop's speed
+    /// is the car's `forward_speed`, so nothing else rides.
+    pub roll: Option<u16>,
+}
+
+/// One skid contact's truth — see [`SurfaceContact::skid`]. `surface`
+/// is the *resolved* `sound` class (`SurfaceTables::sound_index`'s row
+/// — the authored selector city content pins, so identical on every
+/// peer), while the quantities are the winning wheel's own so a
+/// receiver replays `SkidSpec::pick` under its spec's unit rather than
+/// trusting the authority's band.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SkidContact {
+    /// `SurfaceTables::sound_index`'s row for the winning wheel's
+    /// material — the class space `SnapEntry::surf_skid` carries.
+    pub surface: u16,
+    /// `tire_slippage`'s clamped 0..1 utilization on that wheel.
+    pub slippage: f32,
+    /// The wheel's `vel_long`, m/s — `Speed`-unit picks read
+    /// `|vel_long|`.
+    pub wheel_speed: f32,
 }
 
 /// A looping surface voice — a skid band or a rolling loop, a child
@@ -2529,6 +2566,132 @@ fn push_mix(mix: EngineMix, sink: Option<Mut<AudioSink>>, spatial: Option<Mut<Sp
     }
 }
 
+/// A `contact_pick`/`contact_wins` result: the loudest covering skid
+/// pick `(sound class, band, gain)` and rolling pick `(class, gain)`
+/// across the car — `None` on either half when nothing covers.
+#[derive(Default)]
+struct SurfaceWins {
+    skid: Option<(u16, usize, f32)>,
+    roll: Option<(u16, f32)>,
+}
+
+/// [`surface_voices`]' per-car wheel loop distilled to a value: the
+/// [`SurfaceWins`] plus the [`SurfaceContact`] truth that produced them
+/// — the winning wheel's class/slippage/`vel_long`, the fields protocol
+/// v16's `SnapEntry` tail carries so a remote copy can replay the same
+/// pick through its own table.
+fn contact_pick(
+    vehicle: &Vehicle,
+    state: &VehicleState,
+    tables: &SurfaceTables,
+    audio: &SurfaceAudio,
+    collider_surfaces: &Query<&SurfaceMaterial>,
+) -> (SurfaceWins, SurfaceContact) {
+    // The loudest covering skid band and rolling loop across the
+    // grounded wheels — `(sound index, band, gain)` / `(index, _)`.
+    let mut skid_win: Option<(u16, usize, f32)> = None;
+    let mut skid_contact: Option<SkidContact> = None;
+    let mut roll_win: Option<(u16, f32)> = None;
+    let moving = state.forward_speed.abs() > ROLL_MIN_SPEED;
+    for (i, w) in state.wheels.iter().enumerate() {
+        if !w.grounded {
+            continue;
+        }
+        let material = w
+            .contact_entity
+            .and_then(|e| collider_surfaces.get(e).ok())
+            .copied()
+            .unwrap_or_default();
+        let Some(idx) = tables.sound_index(material) else {
+            continue;
+        };
+        let (Some(spec), Some(entry)) = (
+            audio.specs.get(idx as usize),
+            audio.table.surfaces.get(idx as usize),
+        ) else {
+            continue;
+        };
+        if let Some(skid) = spec.skid {
+            let peak = vehicle
+                .config
+                .wheels
+                .get(i)
+                .and_then(|c| c.tires.as_ref())
+                .map_or(vehicle.config.tires.peak_slip_angle, |t| t.peak_slip_angle);
+            let slippage = tire_slippage(w.traction_demand, w.slip_angle, peak);
+            let q = match skid.unit {
+                SkidUnit::Slippage => slippage,
+                SkidUnit::Speed => w.vel_long.abs(),
+            };
+            if let Some(pick) = skid.pick(&entry.skids[..entry.skids.len().min(MAX_SKID_VOICES)], q)
+                && skid_win.is_none_or(|(.., g)| pick.volume > g)
+            {
+                skid_win = Some((idx, pick.band, pick.volume));
+                skid_contact = Some(SkidContact {
+                    surface: idx,
+                    slippage,
+                    wheel_speed: w.vel_long,
+                });
+            }
+        }
+        if moving && let Some(rolling) = spec.rolling {
+            let gain = rolling.mix(state.forward_speed).volume;
+            if roll_win.is_none_or(|(_, g)| gain > g) {
+                roll_win = Some((idx, gain));
+            }
+        }
+    }
+    (
+        SurfaceWins {
+            skid: skid_win,
+            roll: roll_win,
+        },
+        SurfaceContact {
+            skid: skid_contact,
+            roll: roll_win.map(|(idx, _)| idx),
+        },
+    )
+}
+
+/// The receiving half of the v16 surface tail: replay a replicated
+/// [`SurfaceContact`] through this process's own [`SurfaceAudio`].
+/// `aud/` rides no gameplay fingerprint — a peer may carry a modded
+/// table — so each process re-runs `SkidSpec::pick` under its spec's
+/// unit and mixes `RollingSpec` off the copy's forward speed rather
+/// than trusting the authority's band or gain. A class the local table
+/// cannot answer — out of range or spec-less — resolves to silence
+/// like an unmapped material.
+fn contact_wins(audio: &SurfaceAudio, contact: &SurfaceContact, forward_speed: f32) -> SurfaceWins {
+    let skid_win = contact.skid.and_then(|sk| {
+        let (Some(spec), Some(entry)) = (
+            audio.specs.get(sk.surface as usize),
+            audio.table.surfaces.get(sk.surface as usize),
+        ) else {
+            return None;
+        };
+        let skid = spec.skid?;
+        let q = match skid.unit {
+            SkidUnit::Slippage => sk.slippage,
+            SkidUnit::Speed => sk.wheel_speed.abs(),
+        };
+        skid.pick(&entry.skids[..entry.skids.len().min(MAX_SKID_VOICES)], q)
+            .map(|pick| (sk.surface, pick.band, pick.volume))
+    });
+    let roll_win = if forward_speed.abs() > ROLL_MIN_SPEED {
+        contact.roll.and_then(|idx| {
+            let spec = audio.specs.get(idx as usize)?;
+            audio.table.surfaces.get(idx as usize)?;
+            spec.rolling.map(|r| (idx, r.mix(forward_speed).volume))
+        })
+    } else {
+        None
+    };
+    SurfaceWins {
+        skid: skid_win,
+        roll: roll_win,
+    }
+}
+
 /// Wheel contact → surface voices (F07-B.4, spec req 3). Every
 /// `Vehicle` car resolves its grounded wheels against the session's
 /// [`SurfaceTables`] — `SurfaceMaterial` → the material's authored
@@ -2555,6 +2718,13 @@ fn push_mix(mix: EngineMix, sink: Option<Mut<AudioSink>>, spatial: Option<Mut<Sp
 /// report once and stay silent. Ungated by phase like `engine_drive`
 /// — voices only exist inside a live session and `sync_audio_pause`
 /// holds the sinks.
+///
+/// The resolved contact also lands on the car's [`SurfaceContact`]
+/// (F25-B protocol v16) — `netdrive::publish_snapshots` encodes a wire
+/// seat's `SnapEntry` tail from it. A `RemoteReplica` copy runs the
+/// inverse arm instead: no wheel loop (a kinematic replica has no
+/// contact truth), just [`contact_wins`] replaying the replicated
+/// contact through this process's own table.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)] // Bevy system — the borrows are the contract.
 pub fn surface_voices(
     mut commands: Commands,
@@ -2571,6 +2741,8 @@ pub fn surface_voices(
         &VehicleState,
         Option<&mut SurfaceRig>,
         Has<PlayerVehicle>,
+        Has<RemoteReplica>,
+        Option<&mut SurfaceContact>,
     )>,
     collider_surfaces: Query<&SurfaceMaterial>,
     mut voices: Query<(
@@ -2590,57 +2762,30 @@ pub fn surface_voices(
     };
     let generation = session.generation();
     let mut live_rigs = rigs.iter().count();
-    for (car, vehicle, state, rig_slot, player) in &mut cars {
-        // The loudest covering skid band and rolling loop across the
-        // grounded wheels — `(sound index, band, gain)` / `(index, _)`.
-        let mut skid_win: Option<(u16, usize, f32)> = None;
-        let mut roll_win: Option<(u16, f32)> = None;
-        let moving = state.forward_speed.abs() > ROLL_MIN_SPEED;
-        for (i, w) in state.wheels.iter().enumerate() {
-            if !w.grounded {
-                continue;
-            }
-            let material = w
-                .contact_entity
-                .and_then(|e| collider_surfaces.get(e).ok())
-                .copied()
-                .unwrap_or_default();
-            let Some(idx) = tables.sound_index(material) else {
-                continue;
-            };
-            let (Some(spec), Some(entry)) = (
-                audio.specs.get(idx as usize),
-                audio.table.surfaces.get(idx as usize),
-            ) else {
-                continue;
-            };
-            if let Some(skid) = spec.skid {
-                let q = match skid.unit {
-                    SkidUnit::Slippage => {
-                        let peak = vehicle
-                            .config
-                            .wheels
-                            .get(i)
-                            .and_then(|c| c.tires.as_ref())
-                            .map_or(vehicle.config.tires.peak_slip_angle, |t| t.peak_slip_angle);
-                        tire_slippage(w.traction_demand, w.slip_angle, peak)
-                    }
-                    SkidUnit::Speed => w.vel_long.abs(),
-                };
-                if let Some(pick) =
-                    skid.pick(&entry.skids[..entry.skids.len().min(MAX_SKID_VOICES)], q)
-                    && skid_win.is_none_or(|(.., g)| pick.volume > g)
-                {
-                    skid_win = Some((idx, pick.band, pick.volume));
+    for (car, vehicle, state, rig_slot, player, remote, mut contact) in &mut cars {
+        // The loudest covering skid band and rolling loop —
+        // `(sound index, band, gain)` / `(index, _)`. A simulated car
+        // resolves its wheels ([`contact_pick`]) and publishes the
+        // winning contact on its `SurfaceContact`; a `RemoteReplica`
+        // copy replays the replicated one ([`contact_wins`]).
+        let wins = if remote {
+            contact_wins(
+                &audio,
+                &contact.as_deref().copied().unwrap_or_default(),
+                state.forward_speed,
+            )
+        } else {
+            let (wins, resolved) =
+                contact_pick(vehicle, state, &tables, &audio, &collider_surfaces);
+            match contact.as_deref_mut() {
+                Some(slot) => *slot = resolved,
+                None => {
+                    commands.entity(car).insert(resolved);
                 }
             }
-            if moving && let Some(rolling) = spec.rolling {
-                let gain = rolling.mix(state.forward_speed).volume;
-                if roll_win.is_none_or(|(_, g)| gain > g) {
-                    roll_win = Some((idx, gain));
-                }
-            }
-        }
+            wins
+        };
+        let (skid_win, roll_win) = (wins.skid, wins.roll);
         if skid_win.is_none() && roll_win.is_none() && rig_slot.is_none() {
             // Never resolved a surface — no rig to silence either.
             continue;

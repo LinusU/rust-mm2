@@ -246,7 +246,11 @@ fn host_app(vfs: Vfs, link: HostLink) -> App {
                     .before(netdrive::publish_snapshots),
                 netdrive::publish_snapshots
                     .after(net::drive_host)
-                    .after(mm2_vehicle::systems::vehicle_reset),
+                    .after(mm2_vehicle::systems::vehicle_reset)
+                    // F25-B (v16): the production contact→publish
+                    // ordering — `surface_voices` is not scheduled in
+                    // this slice, so the leg stages the component.
+                    .after(mm2_app::audio::surface_voices),
             ),
         );
     app
@@ -2311,6 +2315,17 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
             avian3d::prelude::Rotation::default(),
             avian3d::prelude::LinearVelocity::default(),
             avian3d::prelude::AngularVelocity::default(),
+            // The v16 sentinel: a live sim resolves its own
+            // `SurfaceContact` — a snap row's junk tail must never
+            // overwrite it like it never overwrites the input.
+            mm2_app::audio::SurfaceContact {
+                skid: Some(mm2_app::audio::SkidContact {
+                    surface: 5,
+                    slippage: 0.5,
+                    wheel_speed: 9.0,
+                }),
+                roll: Some(7),
+            },
         ))
         .id();
     // Same for the host copy — a dev-car pick binds no authored damage
@@ -2389,6 +2404,10 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                     damage: 200,
                     breaks: 0,
                     rpm: u16::MAX,
+                    surf_skid: 9,
+                    skid_slip: 255,
+                    skid_speed: i16::MAX,
+                    surf_roll: 9,
                     ..SnapEntry::default()
                 },
             ],
@@ -2508,6 +2527,22 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
         0.0,
         "the own-seat tail never overwrote the local input"
     );
+    {
+        let contact = app
+            .world()
+            .get::<mm2_app::audio::SurfaceContact>(local)
+            .expect("the own seat's resolved contact");
+        assert_eq!(
+            contact.skid,
+            Some(mm2_app::audio::SkidContact {
+                surface: 5,
+                slippage: 0.5,
+                wheel_speed: 9.0,
+            }),
+            "the own-seat junk tail never touched the local contact"
+        );
+        assert_eq!(contact.roll, Some(7));
+    }
 
     // A stale tick and a foreign generation both drop untouched.
     for tick in [3u64, 7] {
@@ -3052,6 +3087,241 @@ fn a_remote_copys_engine_voice_mixes_off_the_replicated_rpm() {
     assert_eq!(
         state.rpm, 4321.0,
         "the replicated rpm is what the copy's engine rig reads"
+    );
+
+    host.shutdown();
+}
+
+/// F25-B (protocol v16), authority half: the `SurfaceContact` a wire
+/// seat's `surface_voices` pass resolves publishes in its `SnapEntry`
+/// tail — class/slippage/wheel-speed for the loudest skid pick plus
+/// the rolling class — so a client's copy can replay the same pick
+/// through *its* surface table (`aud/` rides no gameplay fingerprint;
+/// resolved table indices never cross the wire).
+#[test]
+fn a_wire_seats_surface_contact_publishes_in_its_snap() {
+    let install = tempfile::tempdir().unwrap();
+    support::audio_car(install.path(), "vpt");
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let mut app = host_app(vfs, link);
+    let mut peer = remote_peer(addr, "eve", fp);
+    let ctl = peer.ctl().unwrap();
+    ctl.set_vehicle("vpt", 0).unwrap();
+    ctl.set_ready(true).unwrap();
+    until_wire(
+        &mut peer,
+        |m| matches!(m, Message::Roster { players: r } if r.iter().any(|e| e.driver == "eve" && e.ready && e.pick.as_ref().is_some_and(|p| p.vehicle == "vpt"))),
+    );
+    hosted_playing(&mut app);
+    spin_mut(&mut app, |a| {
+        a.world_mut()
+            .query_filtered::<Entity, With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some()
+    });
+    let remote = {
+        let mut q = app.world_mut().query_filtered::<Entity, With<RemotePick>>();
+        q.single(app.world()).expect("the remote car")
+    };
+
+    // A slide on class 3 plus class 1 rolling — staged on the seat like
+    // `surface_voices` writes it (this slice schedules the publish
+    // ordering edge, not the resolve itself).
+    app.world_mut()
+        .entity_mut(remote)
+        .insert(mm2_app::audio::SurfaceContact {
+            skid: Some(mm2_app::audio::SkidContact {
+                surface: 3,
+                slippage: 0.5,
+                wheel_speed: -12.4,
+            }),
+            roll: Some(1),
+        });
+    app.update();
+    let snap = until_wire(
+        &mut peer,
+        |m| matches!(m, Message::Snap { entries, .. } if entries.iter().any(|e| e.player == 1 && e.surf_skid == 3)),
+    );
+    let Message::Snap { entries, .. } = snap else {
+        unreachable!("the predicate matched the contact-bearing row")
+    };
+    let entry = entries
+        .iter()
+        .find(|e| e.player == 1)
+        .expect("the remote seat's row");
+    assert_eq!(
+        (
+            entry.surf_skid,
+            entry.skid_slip,
+            entry.skid_speed,
+            entry.surf_roll
+        ),
+        (3, 128, -124, 1),
+        "the winning contact publishes quantized — 0.5×255→128, \
+         -12.4 m/s→-124"
+    );
+}
+
+/// F25-B (protocol v16), client half: a remote copy's `SurfaceContact`
+/// decodes off the `SnapEntry` tail — the component `surface_voices`
+/// replays through this process's own `SurfaceAudio` — while the
+/// rolling mix's forward speed derives from the wire velocity, not a
+/// dedicated field.
+#[test]
+fn a_remote_copy_replays_the_replicated_surface_contact() {
+    let install = tempfile::tempdir().unwrap();
+    support::audio_car(install.path(), "vpt");
+    let vfs = mount(install.path());
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host_config = HostConfig::new(fp);
+    host_config.host_pick = Some(VehiclePick {
+        vehicle: "vpt".to_string(),
+        paint: 0,
+    });
+    let mut host = Host::listen_loopback(&host_config).unwrap();
+    host.set_session(net::advertise(&dev_cruise()).unwrap())
+        .unwrap();
+    let link = LobbyLink::join(
+        host.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join failed");
+    let mut app = bridge_app(vfs, link);
+    {
+        let link = app.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    until_ready(&mut app);
+    host.start(LateJoin::Open).unwrap();
+    until_started(&host);
+    until_begun(&mut app);
+    let generation = app.world().resource::<Session>().wire_generation();
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+
+    spin_mut(&mut app, |a| {
+        a.world_mut()
+            .query_filtered::<Entity, With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some()
+    });
+    let copy = {
+        let mut q = app.world_mut().query_filtered::<Entity, With<RemotePick>>();
+        q.single(app.world()).expect("the host copy")
+    };
+    assert!(
+        app.world()
+            .get::<mm2_app::audio::SurfaceContact>(copy)
+            .is_some_and(|c| c.skid.is_none() && c.roll.is_none()),
+        "the copy spawned with an empty contact"
+    );
+
+    // The v16 tail: a slide on class 2 at 0.5 slippage with the wheel
+    // still spinning -12.4 m/s, class 2 rolling underneath; the pose
+    // asserts 4 m/s forward (vel · the rot frame's -Z).
+    host.ctl()
+        .broadcast(&Message::Snap {
+            impacts: Vec::new(),
+            race: None,
+            trailers: Vec::new(),
+            generation,
+            tick: 7,
+            entries: vec![SnapEntry {
+                player: 0,
+                pos: [9.0, 1.0, 9.0],
+                rot: [0.0, 0.0, 0.0, 1.0],
+                vel: [0.0, 0.0, -4.0],
+                angvel: [0.0; 3],
+                epoch: 0,
+                steer: 0,
+                spin: 0,
+                compression: 0,
+                flags: 0,
+                damage: 0,
+                breaks: 0,
+                surf_skid: 2,
+                skid_slip: 128,
+                skid_speed: -124,
+                surf_roll: 2,
+                ..SnapEntry::default()
+            }],
+        })
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .snaps_applied
+            > 0
+    });
+    let contact = app
+        .world()
+        .get::<mm2_app::audio::SurfaceContact>(copy)
+        .expect("the copy's contact");
+    let skid = contact.skid.expect("the replicated skid contact");
+    assert_eq!(skid.surface, 2);
+    assert!(
+        (skid.slippage - 128.0 / 255.0).abs() < 1e-6,
+        "the slip dequantizes: {}",
+        skid.slippage
+    );
+    assert_eq!(skid.wheel_speed, -12.4, "the wheel speed dequantizes");
+    assert_eq!(contact.roll, Some(2));
+    let state = app
+        .world()
+        .get::<mm2_vehicle::VehicleState>(copy)
+        .expect("the copy's vehicle state");
+    assert_eq!(
+        state.forward_speed, 4.0,
+        "the rolling mix's speed derives off the wire velocity"
+    );
+
+    // A quiet frame clears both halves — no stale contact replays.
+    host.ctl()
+        .broadcast(&Message::Snap {
+            impacts: Vec::new(),
+            race: None,
+            trailers: Vec::new(),
+            generation,
+            tick: 8,
+            entries: vec![SnapEntry {
+                player: 0,
+                pos: [9.0, 1.0, 9.0],
+                rot: [0.0, 0.0, 0.0, 1.0],
+                vel: [0.0; 3],
+                angvel: [0.0; 3],
+                epoch: 0,
+                steer: 0,
+                spin: 0,
+                compression: 0,
+                flags: 0,
+                damage: 0,
+                breaks: 0,
+                ..SnapEntry::default()
+            }],
+        })
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .snaps_applied
+            >= 2
+    });
+    let contact = app
+        .world()
+        .get::<mm2_app::audio::SurfaceContact>(copy)
+        .expect("the copy's contact");
+    assert!(
+        contact.skid.is_none() && contact.roll.is_none(),
+        "sentinel fields clear the copy's contact"
     );
 
     host.shutdown();

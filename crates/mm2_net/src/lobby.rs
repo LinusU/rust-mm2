@@ -1345,7 +1345,7 @@ fn spawn_reader(conn: Conn, id: u16, tx: Sender<LoopMsg>, inputs: RemoteInputs) 
 mod tests {
     use super::*;
     use crate::hello;
-    use crate::proto::SnapEntry;
+    use crate::proto::{SNAP_NO_SURFACE, SnapEntry};
 
     const FP: u64 = 0xaaaa;
     const WAIT: Duration = Duration::from_secs(5);
@@ -2654,6 +2654,10 @@ mod tests {
                 prog_crossings: 0,
                 prog_route_clears: 0,
                 rpm: 0,
+                surf_skid: SNAP_NO_SURFACE,
+                skid_slip: 0,
+                skid_speed: 0,
+                surf_roll: SNAP_NO_SURFACE,
             }],
             trailers: Vec::new(),
             impacts: Vec::new(),

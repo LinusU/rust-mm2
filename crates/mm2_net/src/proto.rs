@@ -44,8 +44,12 @@
 /// never advances `RaceProgress` mirrors every seat's standing
 /// (F25-B). v15: `SnapEntry` gained `rpm`, the authority's engine RPM —
 /// the last piece of engine state a remote copy's `EngineVoice` rig
-/// needs to mix like the authority's (F25-B).
-pub const PROTOCOL_VERSION: u16 = 15;
+/// needs to mix like the authority's (F25-B). v16: `SnapEntry` gained
+/// the surface-contact tail — the dominant grounded wheel's resolved
+/// `sound` class plus its slippage and longitudinal speed — so a remote
+/// copy's `SurfaceRig` replays the same `SkidSpec`/`RollingSpec` pick
+/// through its own surface table (F25-B).
+pub const PROTOCOL_VERSION: u16 = 16;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -192,7 +196,7 @@ pub struct DriveInput {
 /// `player` is the wire roster id — the host's own seat is 0 (it is never
 /// a roster entry, but its car is part of the shared sim). Positions and
 /// velocities are world-space `f32`s — the same precision the sim runs.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SnapEntry {
     /// Wire roster slot (0 = the host seat).
     pub player: u16,
@@ -282,6 +286,62 @@ pub struct SnapEntry {
     /// else, and the `u16` domain is itself the bound a hostile value
     /// cannot exceed.
     pub rpm: u16,
+    /// Surface-contact tail (v16, F25-B): the dominant *skid* contact's
+    /// resolved surface class — the `SurfaceTables::sound_index` row
+    /// into the session's surface table, keyed by authored `sound`
+    /// class rather than a receiver's row index so a modded
+    /// (`aud/` rides no gameplay fingerprint) table still answers the
+    /// same class. [`SNAP_NO_SURFACE`] while no grounded wheel's pick
+    /// resolves. The wheel's own quantities ride beside it — every
+    /// process re-runs `SkidSpec::pick` under its own spec's unit
+    /// (`skid_slip` for `Slippage`, `skid_speed` for `Speed`) and mixes
+    /// its own band/gain rather than trusting the authority's choice.
+    pub surf_skid: u16,
+    /// The winning skid wheel's slippage (`tire_slippage`'s clamped
+    /// 0..1 utilization) ×255.
+    pub skid_slip: u8,
+    /// The winning skid wheel's `vel_long` in 0.1 m/s, signed —
+    /// `Speed`-unit picks read `|vel_long|`, and a backwards-rolling
+    /// wheel's skid is still a skid.
+    pub skid_speed: i16,
+    /// The dominant *rolling* contact's surface class — same class
+    /// space and [`SNAP_NO_SURFACE`] sentinel as `surf_skid`. The
+    /// loop's speed is the car's forward speed, derivable from `vel`
+    /// and `rot`, so nothing else rides.
+    pub surf_roll: u16,
+}
+
+impl Default for SnapEntry {
+    /// The zero pose with the surface tail at its "no contact"
+    /// sentinel — a defaulted entry must not claim a class-0 skid.
+    fn default() -> Self {
+        Self {
+            player: 0,
+            pos: [0.0; 3],
+            rot: [0.0; 4],
+            vel: [0.0; 3],
+            angvel: [0.0; 3],
+            epoch: 0,
+            steer: 0,
+            spin: 0,
+            compression: 0,
+            flags: 0,
+            damage: 0,
+            breaks: 0,
+            prog_state: 0,
+            prog_ticks: 0,
+            prog_lap: 0,
+            prog_next: 0,
+            prog_cleared: 0,
+            prog_crossings: 0,
+            prog_route_clears: 0,
+            rpm: 0,
+            surf_skid: SNAP_NO_SURFACE,
+            skid_slip: 0,
+            skid_speed: 0,
+            surf_roll: SNAP_NO_SURFACE,
+        }
+    }
 }
 
 /// [`SnapEntry::flags`] bit 0 — the driver's brake pedal is held (the
@@ -292,6 +352,11 @@ pub const SNAP_FLAG_REVERSE: u8 = 0x02;
 /// [`SnapEntry::flags`] bit 2 — any wheel has ground contact; clear
 /// means the copy hangs its wheels at full droop.
 pub const SNAP_FLAG_GROUNDED: u8 = 0x04;
+
+/// The `surf_skid`/`surf_roll` "no contact" sentinel (v16, F25-B) —
+/// distinct from every reachable class so a quiet wheel never
+/// misreads as surface row 0.
+pub const SNAP_NO_SURFACE: u16 = u16::MAX;
 
 /// One participant's trailer inside a [`Message::Snap`] (v9, F25-B).
 /// A trailered pick (`vpsemi`, `vpcentury`) tows a real jointed body on
@@ -837,6 +902,10 @@ impl Message {
                     out.extend_from_slice(&e.prog_crossings.to_le_bytes());
                     out.extend_from_slice(&e.prog_route_clears.to_le_bytes());
                     out.extend_from_slice(&e.rpm.to_le_bytes());
+                    out.extend_from_slice(&e.surf_skid.to_le_bytes());
+                    out.push(e.skid_slip);
+                    out.extend_from_slice(&e.skid_speed.to_le_bytes());
+                    out.extend_from_slice(&e.surf_roll.to_le_bytes());
                 }
                 if trailers.len() > MAX_PLAYERS as usize {
                     return Err(ProtoError::OversizeTrailers(trailers.len() as u8));
@@ -985,6 +1054,10 @@ impl Message {
                         prog_crossings: cur.u32()?,
                         prog_route_clears: cur.u32()?,
                         rpm: cur.u16()?,
+                        surf_skid: cur.u16()?,
+                        skid_slip: cur.u8()?,
+                        skid_speed: cur.i16()?,
+                        surf_roll: cur.u16()?,
                     });
                 }
                 let trailer_count = cur.u8()?;
@@ -1195,6 +1268,10 @@ mod tests {
                         prog_crossings: 9,
                         prog_route_clears: 2,
                         rpm: 4321,
+                        surf_skid: 1,
+                        skid_slip: 179,
+                        skid_speed: -124,
+                        surf_roll: 1,
                     },
                     SnapEntry {
                         player: 3,
@@ -1217,6 +1294,10 @@ mod tests {
                         prog_crossings: 0,
                         prog_route_clears: 0,
                         rpm: 900,
+                        surf_skid: SNAP_NO_SURFACE,
+                        skid_slip: 0,
+                        skid_speed: 0,
+                        surf_roll: SNAP_NO_SURFACE,
                     },
                 ],
                 trailers: vec![
@@ -1416,6 +1497,10 @@ mod tests {
                 prog_crossings: 0,
                 prog_route_clears: 0,
                 rpm: 0,
+                surf_skid: SNAP_NO_SURFACE,
+                skid_slip: 0,
+                skid_speed: 0,
+                surf_roll: SNAP_NO_SURFACE,
             };
             MAX_PLAYERS as usize + 1
         ];

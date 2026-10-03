@@ -1574,8 +1574,13 @@ fn main() {
             // clutch one-shots — the same despawn ordering.
             audio::clutch_voices.after(session::drive_session),
             // F07-B.4: wheel contact → skid/rolling loop voices — the
-            // same despawn ordering for the same reason.
-            audio::surface_voices.after(session::drive_session),
+            // same despawn ordering for the same reason. The
+            // `apply_snapshots` edge voices a replicated `SurfaceContact`
+            // in the frame it landed rather than a frame late — same
+            // contract `impact_voices` keeps.
+            audio::surface_voices
+                .after(session::drive_session)
+                .after(netdrive::apply_snapshots),
             // F07-B.6: ambient cars' resolved engine tables → bounded
             // looping voices — the same despawn ordering.
             (audio::ambient_engine_rigs, audio::ambient_engine_drive)
@@ -1776,7 +1781,11 @@ fn main() {
                         .before(netdrive::publish_snapshots),
                     netdrive::publish_snapshots
                         .after(net::drive_host)
-                        .after(mm2_vehicle::systems::vehicle_reset),
+                        .after(mm2_vehicle::systems::vehicle_reset)
+                        // F25-B (v16): the seat's `SurfaceContact`
+                        // publish reads `surface_voices`' same-frame
+                        // resolution, not last frame's.
+                        .after(audio::surface_voices),
                 ),
             );
         app.world_mut().spawn((
