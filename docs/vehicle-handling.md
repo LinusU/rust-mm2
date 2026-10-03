@@ -154,7 +154,11 @@ The countersteer assist is applied *after* this cap on purpose: a car
 already sideways is not the steady-state corner the cap models, and
 catching it needs more lock than that corner would.
 
-Imported cars get `1.3` — enough over the limit to provoke a slide.
+Imported cars get `1.0`. It was `1.3`, a margin to provoke a slide, but
+once the cap also allows the front tires their peak slip that margin
+counts twice and full lock — which is all a keyboard ever asks for —
+ploughs past the grip; at `1.0` the roster corners a little harder at
+every speed the cap governs.
 
 ### Gear changes
 

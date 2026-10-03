@@ -94,8 +94,10 @@ const SELF_RIGHT_DELAY: f32 = 2.0;
 /// and top speed make acceleration arrive in steps.
 const MAX_SHIFT_TIME: f32 = 0.35;
 /// Multiple of tire grip the steering lock may demand (adapted arcade
-/// policy — stock locks ask for 8-64 g at their high-speed limit).
-const STEERING_GRIP_LIMIT: f32 = 1.3;
+/// policy — stock locks ask for 8-64 g at their high-speed limit). The
+/// cap already allows the front tires their peak slip on top, so any
+/// margin here only ploughs.
+const STEERING_GRIP_LIMIT: f32 = 1.0;
 
 /// How each emitted value was obtained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
