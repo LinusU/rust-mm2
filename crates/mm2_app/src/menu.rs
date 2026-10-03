@@ -279,6 +279,34 @@ pub struct Row {
     pub enabled: Result<(), String>,
     /// What `Activate` runs when enabled.
     pub action: Action,
+    /// The event's win criterion was met — drawn as a badge so won
+    /// races stand out in a list. `None` on every non-event row.
+    pub won: Option<Won>,
+}
+
+/// Which difficulties an event has been beaten at (the persisted
+/// `beaten_*` flags: top 3 on Amateur, 1st on Professional).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Won {
+    /// Beaten on an Amateur run.
+    pub amateur: bool,
+    /// Beaten on a Professional run.
+    pub professional: bool,
+}
+
+impl Won {
+    /// The record's badge — `None` until either criterion is met.
+    fn of(record: &mm2_game::EventRecord) -> Option<Self> {
+        record.is_beaten().then_some(Self {
+            amateur: record.beaten_amateur,
+            professional: record.beaten_professional,
+        })
+    }
+
+    /// Badge text: `WON`, or `WON PRO` once beaten on Professional.
+    pub fn label(self) -> &'static str {
+        if self.professional { "WON PRO" } else { "WON" }
+    }
 }
 
 /// What [`MenuShell::apply`] asks the app shell to do. The model emits,
@@ -968,6 +996,7 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                         text: city.clone(),
                         enabled: enabled.clone(),
                         action: Action::LaunchCruise { city: city.clone() },
+                        won: None,
                     },
                     // RACE-4: cruise condition options are always open.
                     Row {
@@ -982,6 +1011,7 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                             seed_densities: Densities::DEFAULT,
                             seed_race: None,
                         }),
+                        won: None,
                     },
                 ]
             })
@@ -993,6 +1023,7 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                 text: city.clone(),
                 enabled: data.city_loadable(vfs, city),
                 action: Action::Push(Screen::EventTable { city: city.clone() }),
+                won: None,
             })
             .collect(),
         Screen::EventTable { city } => {
@@ -1017,6 +1048,7 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                             city: city.clone(),
                             table: *kind,
                         }),
+                        won: None,
                     }
                 })
                 .collect()
@@ -1060,11 +1092,20 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                         }
                         mm2_content::EventStatus::Ready => availability_reason(avail.clone()),
                     };
+                    let won = bound.as_ref().and_then(|p| {
+                        p.event(&mm2_game::EventKey {
+                            city: e.event_ref.city.clone(),
+                            table: e.event_ref.table,
+                            stem: e.stem.clone(),
+                        })
+                        .and_then(Won::of)
+                    });
                     [
                         Row {
                             text: data.event_label(vfs, &e.event_ref, &e.stem),
                             enabled: enabled.clone(),
                             action: Action::LaunchEvent(e.event_ref.clone()),
+                            won,
                         },
                         options_row(e, &enabled, bound.as_ref(), &avail, difficulty),
                     ]
@@ -1092,16 +1133,19 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                     text: format!("Weather: {}", conditions.weather.name()),
                     enabled: Ok(()),
                     action: Action::CycleWeather,
+                    won: None,
                 },
                 Row {
                     text: format!("Time of day: {}", conditions.time_of_day.name()),
                     enabled: Ok(()),
                     action: Action::CycleTimeOfDay,
+                    won: None,
                 },
                 Row {
                     text: format!("Traffic density: {:.0}%", densities.traffic * 100.0),
                     enabled: Ok(()),
                     action: Action::CycleTrafficDensity,
+                    won: None,
                 },
             ];
             // RACE-3's parenthetical: Circuit options additionally
@@ -1111,17 +1155,20 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                     text: format!("Laps: {}", race.laps),
                     enabled: Ok(()),
                     action: Action::CycleLaps,
+                    won: None,
                 });
                 rows.push(Row {
                     text: format!("Opponents: {}", race.opponents),
                     enabled: Ok(()),
                     action: Action::CycleOpponents,
+                    won: None,
                 });
             }
             rows.push(Row {
                 text: start.to_string(),
                 enabled: Ok(()),
                 action: Action::LaunchCustomize,
+                won: None,
             });
             rows
         }
@@ -1136,11 +1183,13 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                 text: format!("Delete {label} - this cannot be undone"),
                 enabled: Ok(()),
                 action: Action::ConfirmDelete(id.clone()),
+                won: None,
             },
             Row {
                 text: "Cancel".into(),
                 enabled: Ok(()),
                 action: Action::Back,
+                won: None,
             },
         ],
     };
@@ -1171,12 +1220,14 @@ fn root_rows(shell: &MenuShell, data: &mut MenuData, vfs: &Vfs) -> Vec<Row> {
                 Ok(())
             },
             action: Action::Push(Screen::CruiseCity),
+            won: None,
         },
         quick_race_row(data, vfs),
         Row {
             text: "Events".into(),
             enabled: Ok(()),
             action: Action::Push(Screen::EventCity),
+            won: None,
         },
         Row {
             text: format!("Vehicle: {vehicle_label}"),
@@ -1185,6 +1236,7 @@ fn root_rows(shell: &MenuShell, data: &mut MenuData, vfs: &Vfs) -> Vec<Row> {
                 _ => Err("no vehicle data - pass --mm2-path <install>".to_string()),
             },
             action: Action::Push(Screen::Garage),
+            won: None,
         },
         Row {
             text: format!("Driver: {driver_label}"),
@@ -1194,6 +1246,7 @@ fn root_rows(shell: &MenuShell, data: &mut MenuData, vfs: &Vfs) -> Vec<Row> {
                 Err("profile store unavailable (--no-profile or unwritable data dir)".to_string())
             },
             action: Action::Push(Screen::Profiles),
+            won: None,
         },
         Row {
             text: "Race Records".into(),
@@ -1206,6 +1259,7 @@ fn root_rows(shell: &MenuShell, data: &mut MenuData, vfs: &Vfs) -> Vec<Row> {
                 city: None,
                 table: None,
             }),
+            won: None,
         },
         // AC05's tracked capability: the original's stats screen has
         // no persisted data to draw on yet, so the row names the gap
@@ -1214,6 +1268,7 @@ fn root_rows(shell: &MenuShell, data: &mut MenuData, vfs: &Vfs) -> Vec<Row> {
             text: "Driver's Stats".into(),
             enabled: Err("not implemented yet (menu audit: docs/research/menu.md)".to_string()),
             action: Action::Quit, // unreachable while disabled
+            won: None,
         },
         Row {
             text: format!(
@@ -1225,21 +1280,25 @@ fn root_rows(shell: &MenuShell, data: &mut MenuData, vfs: &Vfs) -> Vec<Row> {
             ),
             enabled: Ok(()),
             action: Action::ToggleDifficulty,
+            won: None,
         },
         Row {
             text: "Options".into(),
             enabled: Err("not implemented yet (F23)".to_string()),
             action: Action::Quit, // unreachable while disabled
+            won: None,
         },
         Row {
             text: "Multiplayer".into(),
             enabled: Err("not implemented yet (F24)".to_string()),
             action: Action::Quit, // unreachable while disabled
+            won: None,
         },
         Row {
             text: "Quit".into(),
             enabled: Ok(()),
             action: Action::Quit,
+            won: None,
         },
     ]
 }
@@ -1260,6 +1319,7 @@ fn quick_race_row(data: &mut MenuData, vfs: &Vfs) -> Row {
         text,
         enabled: Err(reason),
         action: Action::Back, // unreachable while disabled
+        won: None,
     };
     let bound = data.bound.clone();
     let Some(key) = bound.as_ref().and_then(|p| p.selections.last_event.clone()) else {
@@ -1311,6 +1371,7 @@ fn quick_race_row(data: &mut MenuData, vfs: &Vfs) -> Row {
         ),
         enabled,
         action: Action::LaunchEvent(event.event_ref),
+        won: None,
     }
 }
 
@@ -1355,6 +1416,7 @@ fn garage_rows(shell: &MenuShell, data: &MenuData) -> Vec<Row> {
                 ),
                 enabled,
                 action: Action::PickVehicle { id: row.id.clone() },
+                won: None,
             }
         })
         .collect()
@@ -1402,6 +1464,7 @@ fn paint_rows(shell: &MenuShell, data: &MenuData, car: &str) -> Vec<Row> {
                     car: car.to_string(),
                     index: i,
                 },
+                won: None,
             }
         })
         .collect()
@@ -1439,6 +1502,7 @@ fn profile_rows(_shell: &MenuShell, data: &mut MenuData) -> Vec<Row> {
                 text,
                 enabled: Ok(()),
                 action: Action::BindProfile(p.id.clone()),
+                won: None,
             }
         })
         .collect();
@@ -1448,6 +1512,7 @@ fn profile_rows(_shell: &MenuShell, data: &mut MenuData) -> Vec<Row> {
         action: Action::Push(Screen::NewProfile {
             name: String::new(),
         }),
+        won: None,
     });
     rows.push(Row {
         text: "Drive without a profile".into(),
@@ -1457,6 +1522,7 @@ fn profile_rows(_shell: &MenuShell, data: &mut MenuData) -> Vec<Row> {
             Err("already driving without a profile".to_string())
         },
         action: Action::DriveProfileless,
+        won: None,
     });
     rows
 }
@@ -1537,6 +1603,7 @@ fn options_row(
             seed_densities: seed.1,
             seed_race: seed.2,
         }),
+        won: None,
     }
 }
 
@@ -1671,6 +1738,7 @@ fn record_rows(
             text: "no driver profile - records are kept per driver".into(),
             enabled: Err("no driver profile - records are kept per driver".into()),
             action: Action::Back,
+            won: None,
         }];
     };
     if bound.progress.events.is_empty() {
@@ -1678,6 +1746,7 @@ fn record_rows(
             text: "no recorded results yet - finish an event".into(),
             enabled: Err("no recorded results yet".into()),
             action: Action::Back,
+            won: None,
         }];
     }
     let mut rows = vec![
@@ -1685,11 +1754,13 @@ fn record_rows(
             text: format!("City: {}", city.unwrap_or("all")),
             enabled: Ok(()),
             action: Action::RecordsCityFilter,
+            won: None,
         },
         Row {
             text: format!("Race type: {}", table.map(table_name).unwrap_or("all")),
             enabled: Ok(()),
             action: Action::RecordsTableFilter,
+            won: None,
         },
     ];
     // Deterministic order — city, authored table order, stem — so a
@@ -1717,6 +1788,7 @@ fn record_rows(
             text: "no records match these filters".into(),
             enabled: Err("no records match these filters".into()),
             action: Action::Back,
+            won: None,
         });
         return rows;
     }
@@ -1761,6 +1833,7 @@ fn record_row(
         text: format!("{} ({}) - {stats}", key.stem, key.city),
         enabled: Err(reason),
         action: Action::Back, // unreachable while disabled
+        won: Won::of(record),
     };
     if key.table == EventTableKind::CrashCourse {
         return disabled("crash course events are not loadable yet (F21)".into());
@@ -1795,6 +1868,7 @@ fn record_row(
         ),
         enabled,
         action: Action::LaunchEvent(event.event_ref),
+        won: Won::of(record),
     }
 }
 

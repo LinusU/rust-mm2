@@ -948,6 +948,53 @@ fn event_rows_show_authored_race_names() {
     );
 }
 
+/// Won races carry a badge in the event list: a beaten record marks
+/// its row with the difficulties it was beaten at, while a finish that
+/// missed the place criterion (or no record at all) leaves it bare.
+#[test]
+fn event_rows_mark_won_races() {
+    let tmp = install();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let alice = store
+        .create("Alice", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    let key = |stem: &str| EventKey {
+        city: "testcity".into(),
+        table: EventTableKind::Checkpoint,
+        stem: stem.into(),
+    };
+    seed_record(&store, &alice.id, key("race0"), 120 * 60, Some(1));
+    seed_record(&store, &alice.id, key("race1"), 120 * 60, Some(5));
+
+    let mut app = menu_app(tmp.path(), Some(store));
+    app.update();
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "Alice");
+    press(&mut app, KeyCode::Escape);
+    activate_row(&mut app, "Events");
+    activate_row(&mut app, "testcity");
+    activate_row(&mut app, "Checkpoint");
+    let won = |stem: &str| {
+        shell(&app)
+            .rows
+            .iter()
+            .find(|r| r.text.contains(stem))
+            .unwrap()
+            .won
+    };
+    assert_eq!(
+        won("race0"),
+        Some(menu::Won {
+            amateur: true,
+            professional: false
+        })
+    );
+    assert_eq!(won("race0").unwrap().label(), "WON");
+    assert_eq!(won("race1"), None, "a 5th place is a finish, not a win");
+    assert_eq!(won("race3"), None);
+}
+
 /// Garage → paints → launch: the roster row is the real catalog entry,
 /// a reward-gated paint stays disabled with its reason, and the pick
 /// lands in the launched session's `SelectedCar`.

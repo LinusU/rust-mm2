@@ -15,6 +15,8 @@ const BLUE: Color = Color::srgb(0.25, 0.43, 0.95);
 
 const INK: Color = Color::srgba(0.025, 0.035, 0.12, 0.94);
 
+const GREEN: Color = Color::srgb(0.3, 0.82, 0.38);
+
 const PREVIEW_LAYER: usize = 7;
 
 #[derive(Component)]
@@ -591,16 +593,52 @@ fn draw_row(parent: &mut ChildSpawnerCommands, row: &Row, index: usize, focus: b
             BorderColor::all(if focus { GOLD } else { BLUE }),
         ))
         .with_children(|p| {
-            label(
-                p,
-                format!(
+            p.spawn((
+                MenuUi,
+                Text::new(format!(
                     "{} {}",
                     if focus { ">" } else { " " },
                     display_label(&row.text)
-                ),
-                18.0,
-                color,
-            );
+                )),
+                TextFont {
+                    font_size: bevy::text::FontSize::Px(18.0),
+                    ..default()
+                },
+                TextColor(color),
+                Node {
+                    flex_grow: 1.0,
+                    ..default()
+                },
+            ));
+            if let Some(won) = row.won {
+                badge(p, won.label(), GREEN);
+            }
+        });
+}
+
+/// A small filled tag at a row's right edge.
+fn badge(parent: &mut ChildSpawnerCommands, text: &str, fill: Color) {
+    parent
+        .spawn((
+            MenuUi,
+            Node {
+                flex_shrink: 0.0,
+                margin: UiRect::left(Val::Px(8.0)),
+                padding: UiRect::axes(Val::Px(8.0), Val::Px(2.0)),
+                ..default()
+            },
+            BackgroundColor(fill),
+        ))
+        .with_children(|p| {
+            p.spawn((
+                MenuUi,
+                Text::new(text),
+                TextFont {
+                    font_size: bevy::text::FontSize::Px(13.0),
+                    ..default()
+                },
+                TextColor(INK),
+            ));
         });
 }
 
@@ -711,6 +749,14 @@ fn draw_detail(
         ));
         if let Some(row) = shell.rows.get(shell.focus) {
             label(p, display_label(&row.text), 26.0, GOLD);
+            if let Some(won) = row.won {
+                let on = match (won.amateur, won.professional) {
+                    (true, true) => "Amateur and Professional",
+                    (false, true) => "Professional",
+                    _ => "Amateur",
+                };
+                label(p, format!("WON on {on}"), 18.0, GREEN);
+            }
             label(
                 p,
                 row.enabled
