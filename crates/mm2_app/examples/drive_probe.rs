@@ -12,6 +12,7 @@
 //! cargo run -p mm2_app --example drive_probe -- retail --controls # launch/brake/reverse/reset
 //! cargo run -p mm2_app --example drive_probe -- retail --drop     # level-drop landing leg
 //! cargo run -p mm2_app --example drive_probe -- retail vpbug --handbrake # handbrake turns
+//! cargo run -p mm2_app --example drive_probe -- retail vpbug --turn      # turn-in from speed
 //! ```
 //!
 //! With a city name it instead reproduces the plainest possible bug
@@ -69,6 +70,7 @@ fn main() {
     let controls = args.iter().any(|a| a == "--controls");
     let drop_leg = args.iter().any(|a| a == "--drop");
     let handbrake_leg = args.iter().any(|a| a == "--handbrake");
+    let turn_leg = args.iter().any(|a| a == "--turn");
     let clearance = args.iter().any(|a| a == "--clearance");
     let trace = args.iter().any(|a| a == "--trace");
     let config_path = args
@@ -140,6 +142,28 @@ fn main() {
         let cfg = effective_config(&def, config_path.as_deref());
         std::fs::write(&path, cfg.to_toml()).unwrap();
         println!("wrote {}: {}", def.id, path);
+        return;
+    }
+
+    if turn_leg {
+        println!(
+            "{:<14} {:<4} {:>5}   {:>15} {:>15} {:>15}",
+            "id", "gas", "km/h", "turned @0.5s", "@1.0s", "@1.5s"
+        );
+        for id in &ids {
+            let def = mm2_content::load_vehicle(&vfs, id, 0).unwrap();
+            let cfg = effective_config(&def, config_path.as_deref());
+            for (flat_out, how) in [(false, "hold"), (true, "flat")] {
+                for kmh in [30.0, 50.0, 70.0, 100.0] {
+                    let marks = probe_turn_in(&cfg, kmh / 3.6, flat_out);
+                    let cells: Vec<String> = marks
+                        .iter()
+                        .map(|(deg, kmh)| format!("{deg:>4.0}° {kmh:>4.0}km/h"))
+                        .collect();
+                    println!("{:<14} {how} {:>5.0}   {}", def.id, kmh, cells.join("  "));
+                }
+            }
+        }
         return;
     }
 
@@ -546,6 +570,48 @@ fn probe_acceleration(cfg: &VehicleConfig, trace: bool) -> AccelProbe {
         longest_stall: stall,
         heading_drift: drift.to_degrees(),
     }
+}
+
+/// Turn-in from `speed` m/s: full left lock from a straight line, the
+/// throttle either holding the speed or `flat_out` — the keyboard
+/// driver's way through a corner — sampling how far the path has turned
+/// (and the speed) at 0.5, 1.0 and 1.5 s: what a 90° city corner asks of
+/// a car. The path, not the body: a car sliding round reports what it
+/// actually changed direction by.
+fn probe_turn_in(cfg: &VehicleConfig, speed: f32, flat_out: bool) -> Vec<(f32, f32)> {
+    let (mut app, car) = headless(cfg.clone());
+    settle(&mut app, car);
+    {
+        let world = app.world_mut();
+        let rot = world.get::<Rotation>(car).unwrap().0;
+        world.get_mut::<LinearVelocity>(car).unwrap().0 = rot * Vec3::NEG_Z * speed;
+    }
+    let heading = |v: Vec3| (-v.x).atan2(-v.z).to_degrees();
+    let path0 = heading(app.world().get::<LinearVelocity>(car).unwrap().0);
+    let mut marks = Vec::new();
+    for frame in 1..=HZ * 3 / 2 {
+        let now = app.world().get::<VehicleState>(car).unwrap().forward_speed;
+        set_input(
+            &mut app,
+            car,
+            VehicleInput {
+                steering: -1.0,
+                throttle: if flat_out {
+                    1.0
+                } else {
+                    ((speed - now) * 0.5).clamp(0.0, 1.0)
+                },
+                ..default()
+            },
+        );
+        app.update();
+        if frame % (HZ / 2) == 0 {
+            let v = app.world().get::<LinearVelocity>(car).unwrap().0;
+            let turned = (heading(v) - path0 + 540.0).rem_euclid(360.0) - 180.0;
+            marks.push((turned, Vec3::new(v.x, 0.0, v.z).length() * 3.6));
+        }
+    }
+    marks
 }
 
 /// A handbrake turn from 72 km/h: `hold` seconds of handbrake on full
