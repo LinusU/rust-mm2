@@ -4,7 +4,10 @@
 //! (`hudmap_tri` — a flat XZ triangle whose apex is vehicle-forward,
 //! `hudmap_square` — a textured dot quad with nine authored paint jobs)
 //! bound into a dedicated top-down orthographic camera on its own
-//! render layer.
+//! render layer. The local player's own marker is a designed
+//! black-outlined yellow arrowhead ([`player_marker_mesh`]) rather
+//! than the authored tri: the authored one reads as a speck against
+//! the busy tile artwork.
 //!
 //! - [`spawn_hud_map`] runs inside `load_session_world` for city
 //!   sessions: it parses the spec, converts the tile PKG through the
@@ -79,11 +82,21 @@ const MARKER_LIFT: f32 = 5.0;
 /// (designed — the original's two "smaller views" geometry is
 /// unrecovered; the larger inset keeps the same corner anchor).
 const LARGE_VIEW_SCALE: f32 = 1.9;
-/// `hudmap_tri` paint job for the local player (yellow — designed pick
-/// over the authored palette).
-const TRI_PAINT_PLAYER: usize = 5;
+/// The player arrowhead's fill (designed — the HUD-4 highlight yellow).
+const PLAYER_FILL: Color = Color::srgb(1.0, 0.85, 0.0);
+/// Outline width around the player arrowhead, as a fraction of its
+/// extent — a thin dark rim that keeps it readable over light tiles.
+const PLAYER_OUTLINE: f32 = 0.08;
+/// The player arrowhead's size over the authored `IconScale` extent
+/// the other markers use — it is the one marker the driver must find at
+/// a glance.
+const PLAYER_ICON_SCALE: f32 = 1.5;
+/// The player arrowhead rides this far above the other markers so it
+/// always draws over an opponent tri it overlaps.
+const PLAYER_LIFT: f32 = 1.0;
 /// Pool of `hudmap_tri` paint jobs opponents cycle through — every
-/// authored paint except the player's and the near-black navy. Shared
+/// authored paint except the player's yellow (5) and the near-black
+/// navy. Shared
 /// with `oppind`'s in-world arrows so an opponent's indicator and map
 /// tri agree on colour (both pools bind in entity order).
 pub(crate) const TRI_PAINT_OPPONENTS: &[usize] = &[4, 1, 3, 6, 7, 8, 2, 9];
@@ -237,6 +250,62 @@ pub(crate) fn paint_material(
     Some(mats.unlit_copy(&base))
 }
 
+/// The local player's map marker: a yellow arrowhead with a thin black
+/// rim, apex −Z (vehicle-forward, like the authored `hudmap_tri`), in
+/// the XZ plane with a bounding extent of 1 so `IconScale` scales it
+/// like every other marker. One mesh with vertex colours — the rim is
+/// a larger copy of the fill grown about its incentre (a homothety
+/// about the incentre moves every edge out by the same distance), set
+/// just below it so the fill always wins the depth test.
+pub fn player_marker_mesh() -> Mesh {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::mesh::{Indices, PrimitiveTopology};
+
+    // Apex forward, centroid on the origin so the car sits at the
+    // arrowhead's middle and heading-up rotation pivots in place.
+    let fill = [
+        Vec2::new(0.0, -0.6),
+        Vec2::new(-0.36, 0.3),
+        Vec2::new(0.36, 0.3),
+    ];
+    let side = |a: usize, b: usize| fill[a].distance(fill[b]);
+    let (la, lb, lc) = (side(1, 2), side(2, 0), side(0, 1));
+    let perimeter = la + lb + lc;
+    let incentre = (fill[0] * la + fill[1] * lb + fill[2] * lc) / perimeter;
+    let area = (fill[1] - fill[0]).perp_dot(fill[2] - fill[0]).abs() / 2.0;
+    let inradius = 2.0 * area / perimeter;
+    let grow = (inradius + PLAYER_OUTLINE) / inradius;
+    let rim = fill.map(|v| incentre + (v - incentre) * grow);
+
+    // Normalise the outer outline to the unit bounding extent
+    // `authored_extent` would measure.
+    let half = rim
+        .iter()
+        .map(|v| v.x.abs().max(v.y.abs()))
+        .fold(0.0f32, f32::max);
+    let k = 0.5 / half;
+    let black = LinearRgba::BLACK.to_f32_array();
+    let yellow = LinearRgba::from(PLAYER_FILL).to_f32_array();
+    let mut positions = Vec::with_capacity(6);
+    let mut colors = Vec::with_capacity(6);
+    for v in rim {
+        positions.push([v.x * k, -0.05, v.y * k]);
+        colors.push(black);
+    }
+    for v in fill {
+        positions.push([v.x * k, 0.0, v.y * k]);
+        colors.push(yellow);
+    }
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; 6])
+    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
+    .with_inserted_indices(Indices::U16(vec![0, 2, 1, 3, 5, 4]))
+}
+
 /// Read-and-parse one authored PKG through the VFS; `None` on either
 /// failure with the cause logged — shared with `oppind`, which binds
 /// the same marker package in-world.
@@ -319,6 +388,16 @@ pub fn spawn_hud_map(
         }
     };
 
+    // Designed player arrowhead — vertex-coloured, so the material is
+    // plain white, unlit and double-sided like the authored markers.
+    let player_mesh = meshes.add(player_marker_mesh());
+    let player_mat = materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        unlit: true,
+        cull_mode: None,
+        ..default()
+    });
+
     let mut mats = MaterialCache::new(vfs, images, materials);
     let mut missing_prims = 0usize;
     let spawn_marker = |commands: &mut Commands,
@@ -361,9 +440,21 @@ pub fn spawn_hud_map(
         return (report, None);
     }
 
+    // The player's heading arrowhead.
+    spawn_marker(
+        commands,
+        &mut report,
+        &player_mesh,
+        player_mat,
+        MarkerRole::Player,
+        // Unit mesh extent, enlarged over the shared `IconScale`.
+        1.0 / PLAYER_ICON_SCALE,
+        Vec3::ZERO,
+    );
+
     // Marker meshes — authored flat XZ shapes shared by every city.
     // Each missing piece degrades its own marker family only: a map
-    // without gate dots still draws tiles and the player tri.
+    // without gate dots still draws tiles and the player arrowhead.
     let tri_pkg = read_pkg(vfs, "geometry/hudmap_tri.pkg");
     let square_pkg = read_pkg(vfs, "geometry/hudmap_square.pkg");
 
@@ -374,18 +465,6 @@ pub fn spawn_hud_map(
             .next()
             .map(|(m, _)| m);
         if let Some(tri_mesh) = mesh {
-            // The player's heading tri.
-            if let Some(mat) = paint_material(tri, TRI_PAINT_PLAYER, &mut mats) {
-                spawn_marker(
-                    commands,
-                    &mut report,
-                    &tri_mesh,
-                    mat,
-                    MarkerRole::Player,
-                    extent,
-                    Vec3::ZERO,
-                );
-            }
             // The opponent pool — paint cycled over the authored jobs.
             for slot in 0..opponent_count {
                 let paint = TRI_PAINT_OPPONENTS[slot % TRI_PAINT_OPPONENTS.len()];
@@ -403,7 +482,7 @@ pub fn spawn_hud_map(
             }
         }
     } else {
-        warn!("geometry/hudmap_tri.pkg unavailable — no player/opponent map markers");
+        warn!("geometry/hudmap_tri.pkg unavailable — no opponent map markers");
     }
 
     if let Some(square) = &square_pkg
@@ -790,7 +869,7 @@ pub fn drive_hud_map(
         match marker.role {
             MarkerRole::Player => match player_pose {
                 Some((pos, yaw)) => {
-                    xf.translation = Vec3::new(pos.x, report.marker_y, pos.z);
+                    xf.translation = Vec3::new(pos.x, report.marker_y + PLAYER_LIFT, pos.z);
                     xf.rotation = Quat::from_rotation_y(yaw);
                     *vis = Visibility::Visible;
                 }
