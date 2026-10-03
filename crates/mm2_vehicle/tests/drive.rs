@@ -246,6 +246,65 @@ fn a_hard_turn_slides_instead_of_rolling_the_car_over() {
     );
 }
 
+/// The default car squeezed onto the Moon Rover's proportions: a 0.86 m
+/// wheelbase under a centre of mass 0.65 m off the road, all four wheels
+/// driven — the shape that stood on its tail under its own drive.
+fn stubby_config() -> VehicleConfig {
+    let mut cfg = VehicleConfig {
+        wheelbase: 0.86,
+        ..Default::default()
+    };
+    for w in &mut cfg.wheels {
+        w.position[2] = w.position[2].signum() * cfg.wheelbase / 2.0;
+        w.driven = true;
+    }
+    let metrics = mm2_vehicle::HandlingMetrics::of(&cfg);
+    cfg.center_of_mass[1] = metrics.ground_y + 0.65;
+    cfg
+}
+
+/// Steepest nose-up pitch, radians, over three seconds of full throttle
+/// from rest.
+fn peak_launch_pitch(cfg: VehicleConfig) -> f32 {
+    let (mut app, car) = test_app_with(cfg);
+    drive(&mut app, car, FRAMES_PER_SECOND, VehicleInput::default());
+    let mut peak = 0.0f32;
+    for _ in 0..FRAMES_PER_SECOND * 3 {
+        drive(
+            &mut app,
+            car,
+            1,
+            VehicleInput {
+                throttle: 1.0,
+                ..default()
+            },
+        );
+        let fwd = app.world().get::<Rotation>(car).unwrap().0 * Vec3::NEG_Z;
+        peak = peak.max(fwd.y.asin());
+    }
+    assert_finite(&app, car);
+    peak
+}
+
+#[test]
+fn pitch_resistance_keeps_a_stubby_car_off_its_tail() {
+    // The assist off: the car rears up on its own drive. This half is
+    // what proves the other half is actually being tested.
+    let bare = peak_launch_pitch(stubby_config());
+    assert!(
+        bare > 0.15,
+        "unassisted stubby car should rear up, peak pitch was {bare}"
+    );
+
+    let mut assisted = stubby_config();
+    assisted.assists.pitch_resistance = 0.85;
+    let assisted = peak_launch_pitch(assisted);
+    assert!(
+        assisted < bare * 0.5,
+        "assisted stubby car should squat, not rear: {assisted} against {bare}"
+    );
+}
+
 #[test]
 fn grip_limited_steering_still_reaches_the_tires_grip() {
     // The cap exists so full lock at speed stops short of ploughing, not

@@ -155,6 +155,8 @@ physics rear axle, so the nose lifts, the tail hull rests on the road
 (penetration 0.000 — touching, not interpenetrating), and the front
 wheels hang at droop. That is the retail four-wheel rig's own
 equilibrium, not a spawn defect — see the moon-rover finding below.
+(Superseded 2026-10-03: the equilibrium was a centre-of-mass sign
+error; the rover now passes on both cities.)
 
 ## Rendered-output evidence (F02-AC03)
 
@@ -259,6 +261,21 @@ bottoms out — expected, not a defect).
 
 ## Findings
 
+- **vpmoonrover was a conversion defect after all — fixed
+  2026-10-03.** The "authored character" reading below was wrong on
+  two counts. `CenterOfGravity` locates the model *from* the centre of
+  mass, so the mass sits at `-CenterOfGravity` (the original's static
+  load split, `vehWheel::ComputeConstants`); we added it instead, which
+  put the rover's mass behind its rear axle. And the back-back wheel
+  offsets are mm2hook's own extension to `vehCarSim`, not retail
+  behaviour. With the centre of mass forward of the rear axle the
+  rover stood on four wheels but reared up under its own drive (0.63 m
+  of height over a 0.86 m wheelbase); the derived
+  `assists.pitch_resistance` holds it down. Same install: `--controls`
+  ok (was `FAIL(drive)`), `--clearance` 21/21 on sf and london,
+  `--drop` 21/21, accel probe 0-100 km/h 4.2 s, 47.8 m/s, 5° drift.
+  See docs/vehicle-handling.md "Centre of mass" and "Pitch
+  resistance"; the tables above predate it.
 - **A reused `--screenshot` path could pass on stale pixels —
   fixed.** `smoke_test`'s capture-wait accepted any non-empty file at
   the target, so a second run to the same path reported
@@ -269,7 +286,8 @@ bottoms out — expected, not a defect).
   target cannot be cleared. Regression test:
   `smoke::tests::a_stale_capture_is_cleared_before_the_new_request`.
 - **vpmoonrover's brokenness is authored, not a rig defect —
-  resolved.** The model carries six wheel parts, but the retail
+  resolved** (the authored-character half superseded 2026-10-03,
+  above). The model carries six wheel parts, but the retail
   `vehCarSim` has exactly four `vehWheel` slots: mm2hook's
   `vehCarSim::Init` binds `whl0`–`whl3` and records
   `BackBackLeft/RightWheelPosDiff = whl4/whl5 pivot − whl2/whl3

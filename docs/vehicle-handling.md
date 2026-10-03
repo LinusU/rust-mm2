@@ -93,8 +93,8 @@ cargo run -p mm2_app --example drive_probe -- <install> vppanoz --city sf
 ```
 
 Use the second whenever a handling claim depends on what the solver does
-rather than on what the numbers say. Two of the adaptations below were
-found only by running it.
+rather than on what the numbers say. Several of the adaptations below
+were found only by running it.
 
 ### Centre of mass
 
@@ -149,6 +149,43 @@ and measuring against the contact normal rather than world up keeps banked
 road correct.
 
 Imported cars get `0.85`, which puts the roster at 1.37–4.21.
+
+### Pitch resistance
+
+Drive and brake force act at the contact patch too, and pitch the car
+on the same lever. On ordinary proportions that is squat and dive worth
+keeping, so longitudinal force stays at the patch — except on the Moon
+Rover, which carries 0.63 m of centre-of-mass height over a 0.86 m
+wheelbase. Even standing on all four wheels it reared up under its own
+drive, lifted its front wheels within a second, and inside seven
+struck its tail hard enough to be thrown round 180°.
+
+The measure that separates it is the **pitch gradient**, radians of
+pitch per g of longitudinal acceleration. Load transfer `m·a·h/L`
+compresses each axle by its static sag in proportion to the load it
+carries, so the body pitches
+
+```
+h / L² · (sag_front / share_front + sag_rear / share_rear)
+```
+
+per g. The stock roster runs 0.020 (City Bus) to 0.073 (London Cab);
+the rover is 0.576, thirteen times the Beetle's: soft springs under a
+wheelbase a third of a car's. `h/L` alone
+does not separate it: the cap that brought the rover back that way
+would have caught most of the roster too.
+
+`assists.pitch_resistance` is `roll_resistance` for pitch: it raises
+the point longitudinal force is applied toward the centre of mass
+along the contact normal. The converter sets it just high enough to
+bring a car's gradient down to `MAX_PITCH_GRADIENT` (0.08 rad/g), so
+it is `0.0` on every stock car but the rover, which gets `0.86`.
+`drive_probe` now has the rover at 0–100 km/h in 4.2 s, 47.8 m/s,
+5° of drift on a straight launch and 1.56–1.97 g of cornering from
+10 to 40 m/s. That is quicker to 100 km/h than the other 2500 kg
+vehicles (the Light Tactical Vehicle and F-350 take 4.7 s), and it
+corners like a car rather than a truck because its authored
+`StaticFric 3.0` is a car's tires.
 
 ### Grip-limited steering
 

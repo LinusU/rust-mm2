@@ -528,9 +528,14 @@ pub fn vehicle_simulation(
             let lateral_point = ws.contact_point
                 + ws.contact_normal * com_above_patch * cfg.assists.roll_resistance;
             forces.apply_force_at_point(tire_right * lateral, lateral_point);
-            // Longitudinal force stays at the patch: squat and dive under
-            // power and braking are wanted, and they do not tip the car.
-            forces.apply_force_at_point(tire_fwd * longitudinal, ws.contact_point);
+            // Longitudinal force stays at the patch on most cars: squat and
+            // dive under power and braking are wanted, and on ordinary
+            // proportions they do not tip the car. One whose mass sits
+            // high over a very short wheelbase gets the same raise as the
+            // lateral force (see `AssistConfig::pitch_resistance`).
+            let longitudinal_point = ws.contact_point
+                + ws.contact_normal * com_above_patch * cfg.assists.pitch_resistance;
+            forces.apply_force_at_point(tire_fwd * longitudinal, longitudinal_point);
 
             // Wading resistance: the surface's authored `drag` applies a
             // viscous force opposing the contact point's motion in the

@@ -243,6 +243,20 @@ pub struct AssistConfig {
     /// hard corner slide instead of trip.
     #[serde(default = "default_roll_resistance")]
     pub roll_resistance: f32,
+    /// How much of the pitch moment from longitudinal tire force is
+    /// cancelled, `0.0`–`1.0` — [`roll_resistance`](Self::roll_resistance)
+    /// for squat and dive.
+    ///
+    /// Drive and brake force act at the contact patch too, and the lever
+    /// they pitch the car on is the centre-of-mass height against the
+    /// wheelbase. On a car of ordinary proportions that is squat and dive
+    /// worth keeping, so `0.0` (force at the patch) is the default. A car
+    /// carrying its mass high over a very short wheelbase lifts its front
+    /// wheels under its own drive instead, and this raises the point the
+    /// force is applied toward the centre of mass — the arcade form of
+    /// anti-squat geometry. `1.0` would leave no pitch moment at all.
+    #[serde(default)]
+    pub pitch_resistance: f32,
     /// Yaw damping strength: bleeds angular velocity toward the velocity
     /// heading (0 = off).
     pub yaw_stability: f32,
@@ -473,6 +487,7 @@ impl Default for VehicleConfig {
             },
             assists: AssistConfig {
                 roll_resistance: default_roll_resistance(),
+                pitch_resistance: 0.0,
                 yaw_stability: 2.5,
                 traction_control: 0.9,
                 countersteer: 0.35,
@@ -832,6 +847,10 @@ impl VehicleConfig {
         check!(
             "assists.roll_resistance",
             finite(asst.roll_resistance) && (0.0..=1.0).contains(&asst.roll_resistance),
+        );
+        check!(
+            "assists.pitch_resistance",
+            finite(asst.pitch_resistance) && (0.0..=1.0).contains(&asst.pitch_resistance),
         );
         check!(
             "assists.yaw_stability",

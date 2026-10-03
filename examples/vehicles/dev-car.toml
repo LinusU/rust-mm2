@@ -127,6 +127,7 @@ downforce_coefficient = 0.35
 
 [assists]
 roll_resistance = 0.8
+pitch_resistance = 0.0
 yaw_stability = 2.5
 traction_control = 0.9
 countersteer = 0.35

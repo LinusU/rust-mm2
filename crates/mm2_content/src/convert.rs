@@ -80,6 +80,15 @@ const DAMPING_RATIO_MAX: f32 = 0.90;
 /// Share of the lateral-force roll moment cancelled on imported cars
 /// (adapted arcade policy — see `AssistConfig::roll_resistance`).
 const ROLL_RESISTANCE: f32 = 0.85;
+/// Steepest pitch gradient, radians per g of longitudinal acceleration,
+/// an imported car keeps its full squat and dive on (adapted). The stock
+/// roster runs 0.020 (City Bus) to 0.073 (London Cab); the Moon Rover,
+/// 0.63 m of centre-of-mass height over a 0.86 m wheelbase on soft
+/// springs, is 0.576 — it stood on its tail under its own drive. Lever
+/// beyond this is cancelled by `AssistConfig::pitch_resistance`, which is
+/// therefore zero on every other stock car — see
+/// docs/vehicle-handling.md "Pitch resistance".
+const MAX_PITCH_GRADIENT: f32 = 0.08;
 /// How briskly an imported car levels itself in the air, rad/s — roughly
 /// half a second to flat, so a jump lands on its wheels and not its nose.
 const AIR_LEVELLING_RATE: f32 = 8.0;
@@ -418,6 +427,9 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
 
     let mut wheels = Vec::with_capacity(input.wheels.len());
     let mut contact_ys: Vec<f32> = Vec::with_capacity(input.wheels.len());
+    // Static spring compression per axle, front then rear: what sets how
+    // far the body pitches for a given load transfer.
+    let mut axle_sag = [0.0f32; 2];
     for wg in input.wheels {
         let front = wg.origin[2] < z_mid;
         let wt: &VehWheel = if front {
@@ -454,6 +466,8 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
         // it off the design sag, so solve it rather than assume it.
         let rest_compression = (wheel_load / spring_rate).min(travel);
         contact_ys.push(position[1] - (travel - rest_compression) - wg.radius);
+        let axle = &mut axle_sag[usize::from(!front)];
+        *axle = axle.max(rest_compression);
 
         let steer_scale = if front {
             1.0
@@ -705,12 +719,30 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
         ),
     );
 
+    // Pitch gradient — radians of pitch per g of longitudinal
+    // acceleration. Load transfer `m·a·h/L` compresses one axle and
+    // extends the other by its static sag in proportion to the load it
+    // carries, so the body pitches `h/L² · (sag_f/share_f + sag_r/share_r)`
+    // per g. Longitudinal force is raised toward the centre of mass just
+    // far enough to bring that inside `MAX_PITCH_GRADIENT`; zero on every
+    // car already inside it.
+    let com_height = com[1] - ground_y;
+    let pitch_gradient = (com_height.max(0.0) / (wheelbase * wheelbase)
+        * (axle_sag[0] / front_share + axle_sag[1] / back_share))
+        .max(0.0);
+    let pitch_resistance = if pitch_gradient > MAX_PITCH_GRADIENT {
+        (1.0 - MAX_PITCH_GRADIENT / pitch_gradient).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
     let assists = AssistConfig {
         // Every stock MM2 car carries its mass about as high as its track
         // is wide while running tires good for 2.25 g — geometry that puts
         // the car on its roof in any committed corner. See
         // `AssistConfig::roll_resistance`.
         roll_resistance: ROLL_RESISTANCE,
+        pitch_resistance,
         yaw_stability: 2.0,
         traction_control: 0.85,
         countersteer: 0.3,
@@ -740,6 +772,13 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
         "assists.roll_resistance",
         format!(
             "{ROLL_RESISTANCE} of the lateral-force roll moment cancelled; stock geometry tips below its grip limit without it"
+        ),
+    );
+    report.adapted(
+        "vehCarSim.CenterOfGravity + whlN.mtx origins",
+        "assists.pitch_resistance",
+        format!(
+            "{pitch_resistance:.2} of the longitudinal-force pitch moment cancelled; {pitch_gradient:.3} rad/g pitch gradient (centre of mass {com_height:.2} m over a {wheelbase:.2} m wheelbase), kept at or below {MAX_PITCH_GRADIENT}"
         ),
     );
     report.unsupported(
@@ -1044,6 +1083,23 @@ mod tests {
             rate(0),
             rate(2)
         );
+    }
+
+    #[test]
+    fn only_a_stubby_tall_car_gets_pitch_resistance() {
+        let sim = sim_with_cog([0.0, -0.1, 0.0]);
+        // Ordinary proportions keep all their squat and dive.
+        let ordinary = convert_with(&sim, &wheels(1.3), 1.5).config;
+        assert_eq!(ordinary.assists.pitch_resistance, 0.0);
+
+        // The same car on the Moon Rover's 0.86 m wheelbase pitches far
+        // past the cap, and is brought back to it.
+        let stubby = convert_with(&sim, &wheels(0.43), 1.5);
+        let pr = stubby.config.assists.pitch_resistance;
+        assert!(pr > 0.5, "stubby car got pitch_resistance {pr}");
+        assert!(stubby.report.entries.iter().any(|e| {
+            e.dest == "assists.pitch_resistance" && e.provenance == Provenance::Adapted
+        }));
     }
 
     /// Damping ratio implied by a rate, as the physics crate measures it.
