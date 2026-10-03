@@ -46,9 +46,10 @@
 //! world-extent reading, and the pause-map close path (HUD-4 names
 //! only the open).
 
-use bevy::camera::ScalingMode;
 use bevy::camera::Viewport;
 use bevy::camera::visibility::RenderLayers;
+use bevy::camera::{MsaaWriteback, ScalingMode};
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use mm2_assets::Vfs;
@@ -250,6 +251,28 @@ pub(crate) fn read_pkg(vfs: &Vfs, logical: &str) -> Option<Pkg> {
                 None
             }
         })
+}
+
+/// Render authored artwork verbatim over an opaque, city-authored background.
+fn map_camera_presentation(ocean_color: [f32; 3]) -> impl Bundle {
+    (
+        // Unlit artwork still passes through a Camera3d's tone curve unless
+        // explicitly disabled, which changes the authored sRGB palette.
+        Tonemapping::None,
+        Camera {
+            order: 1,
+            // Automatic MSAA writeback copies the previous camera into every
+            // later view, consuming its clear operation. This view owns its
+            // opaque background; its output viewport preserves the world outside.
+            msaa_writeback: MsaaWriteback::Off,
+            clear_color: ClearColorConfig::Custom(Color::srgb(
+                ocean_color[0],
+                ocean_color[1],
+                ocean_color[2],
+            )),
+            ..default()
+        },
+    )
 }
 
 /// Spawn the session's HUD map for `psdl_path`'s city. `race` carries
@@ -465,15 +488,7 @@ pub fn spawn_hud_map(
         owner,
         HudMapCamera,
         Camera3d::default(),
-        Camera {
-            order: 1,
-            clear_color: ClearColorConfig::Custom(Color::srgb(
-                spec.ocean_color[0],
-                spec.ocean_color[1],
-                spec.ocean_color[2],
-            )),
-            ..default()
-        },
+        map_camera_presentation(spec.ocean_color),
         Projection::Orthographic(OrthographicProjection {
             scaling_mode: ScalingMode::Fixed {
                 width: 2.0 * spec.zoom_out_dist,
@@ -841,5 +856,121 @@ pub fn drive_hud_map(
         }
         let s = (icon_scale / marker.extent).max(0.0);
         xf.scale = Vec3::splat(s);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authored_artwork_camera_owns_opaque_background_without_tone_curve() {
+        let mut world = World::new();
+        for ocean in [[0.084, 0.7, 0.94], [0.25, 0.5, 0.75]] {
+            let entity = world
+                .spawn((Camera3d::default(), map_camera_presentation(ocean)))
+                .id();
+            assert_eq!(world.get::<Tonemapping>(entity), Some(&Tonemapping::None));
+            let camera = world.get::<Camera>(entity).unwrap();
+            assert_eq!(camera.order, 1);
+            assert!(matches!(camera.msaa_writeback, MsaaWriteback::Off));
+            let ClearColorConfig::Custom(clear) = camera.clear_color else {
+                panic!("map must clear its background");
+            };
+            assert_eq!(
+                clear.to_srgba().to_f32_array(),
+                [ocean[0], ocean[1], ocean[2], 1.0]
+            );
+        }
+    }
+
+    #[test]
+    fn inset_fullscreen_inset_preserves_camera_artwork_policy() {
+        let spec = HudMapSpec::parse(
+            "mmHudMap {
+Size 0.21 0.25
+Pos 0.78 0.75
+ZoomIn 0
+Approach Rate 1.2
+ZoomInDist 577
+ZoomOutDist 1195
+IconScaleMin 34
+IconScaleMax 52
+ZoomInDistFS 786
+ZoomOutDistFS 1581
+IconScaleMinFS 15
+IconScaleMaxFS 18
+Ocean Color 0.084 0.7 0.94
+}",
+        )
+        .unwrap();
+        let ocean = spec.ocean_color;
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(Session::new())
+            .insert_resource(crate::hud::HudVisible(true))
+            .insert_resource(HudMap::new(spec, 0))
+            .insert_resource(HudMapReport {
+                spec_path: String::new(),
+                pkg_path: String::new(),
+                tiles: 1,
+                markers: 0,
+                absent: None,
+                dot_materials: Vec::new(),
+                marker_y: 5.0,
+            })
+            .add_systems(Update, drive_hud_map);
+        app.world_mut().spawn((
+            PrimaryWindow,
+            Window {
+                resolution: bevy::window::WindowResolution::new(1280, 960),
+                ..default()
+            },
+        ));
+        app.world_mut().spawn((
+            Player {
+                id: mm2_game::PlayerId(0),
+                control: PlayerControl::Local,
+            },
+            GlobalTransform::from_translation(Vec3::new(10.0, 0.0, 20.0)),
+        ));
+        let camera = app
+            .world_mut()
+            .spawn((
+                HudMapCamera,
+                Camera3d::default(),
+                map_camera_presentation(ocean),
+                Transform::default(),
+                Projection::Orthographic(OrthographicProjection::default_3d()),
+            ))
+            .id();
+        app.update();
+        let inset = app
+            .world()
+            .get::<Camera>(camera)
+            .unwrap()
+            .viewport
+            .clone()
+            .unwrap();
+        assert_eq!(inset.physical_size, UVec2::new(268, 240));
+        for fullscreen in [true, false] {
+            app.world_mut().resource_mut::<HudMap>().fullscreen = fullscreen;
+            app.update();
+            let cam = app.world().get::<Camera>(camera).unwrap();
+            assert!(cam.is_active);
+            assert!(matches!(cam.msaa_writeback, MsaaWriteback::Off));
+            assert_eq!(
+                app.world().get::<Tonemapping>(camera),
+                Some(&Tonemapping::None)
+            );
+            if fullscreen {
+                assert!(cam.viewport.is_none());
+            } else {
+                assert_eq!(
+                    cam.viewport.as_ref().unwrap().physical_size,
+                    inset.physical_size
+                );
+            }
+        }
     }
 }
