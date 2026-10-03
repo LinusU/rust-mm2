@@ -47,7 +47,7 @@ type MotionPlayers<'w, 's> = Query<
         &'static Rotation,
         &'static LinearVelocity,
         &'static VehicleInput,
-        Has<Teleported>,
+        Option<Ref<'static, Teleported>>,
     ),
     With<PlayerVehicle>,
 >;
@@ -66,7 +66,7 @@ pub(crate) fn sample_motion(
             session.generation(),
             pos.0,
             rot.0.is_finite() && vel.0.is_finite(),
-            teleported,
+            teleported.is_some_and(|marker| marker.is_changed()),
         );
         report.throttle_steps += u64::from(input.throttle > 0.1);
         report.brake_steps += u64::from(input.brake > 0.1);

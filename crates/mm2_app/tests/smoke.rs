@@ -615,3 +615,42 @@ fn record_lines_distinguish_kinds_and_statuses() {
     assert_eq!(SmokeStatus::Fail.exit_code(), 3);
     assert_eq!(SmokeStatus::Unavailable.exit_code(), 4);
 }
+
+#[test]
+fn a_cruise_reset_is_counted_once_with_later_travel_preserved() {
+    let config = SessionConfig {
+        world: WorldMode::DevWorld,
+        dev: DevOverrides {
+            reset_at: Some(650),
+            ..DevOverrides::default()
+        },
+        ..SessionConfig::default()
+    };
+    let record = smoke::headless_smoke(
+        &config,
+        Vfs::new(),
+        SelectedCar {
+            def: None,
+            paint: 0,
+        },
+        &VehicleConfig::default(),
+        500,
+        smoke::Driver::Hold,
+        None,
+    );
+    assert_eq!(record.status, SmokeStatus::Pass, "{}", record.detail);
+    assert!(record.detail.contains("resets=1 "), "{}", record.detail);
+    let distance: f32 = record
+        .detail
+        .split_whitespace()
+        .find_map(|v| v.strip_prefix("travel="))
+        .unwrap()
+        .trim_end_matches('m')
+        .parse()
+        .unwrap();
+    assert!(
+        distance > 45.0,
+        "travel after reset must be counted: {}",
+        record.detail
+    );
+}
