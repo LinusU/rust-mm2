@@ -737,5 +737,44 @@ pub fn scripted_drive(
         }
         let bearing = relative_bearing(yaw, pos.0, target);
         *input = scripted_input(bot, bearing, vstate.forward_speed, vstate.grounded);
+        if let Some(limit) = session.config().and_then(|c| c.dev.bot_speed) {
+            limit_evidence_speed(&mut input, vstate.forward_speed, limit);
+        }
+    }
+}
+
+/// An explicit probe ceiling changes inputs only, preserving the shared handling.
+fn limit_evidence_speed(input: &mut VehicleInput, speed: f32, limit: f32) {
+    if speed > limit {
+        input.throttle = 0.0;
+        input.brake = input.brake.max(0.35);
+    }
+}
+
+#[cfg(test)]
+mod speed_limit_tests {
+    use super::*;
+    #[test]
+    fn speed_ceiling_brakes_without_changing_steering() {
+        let mut input = VehicleInput {
+            throttle: 1.0,
+            steering: -0.5,
+            ..default()
+        };
+        limit_evidence_speed(&mut input, 12.0, 8.0);
+        assert_eq!(input.throttle, 0.0);
+        assert_eq!(input.brake, 0.35);
+        assert_eq!(input.steering, -0.5);
+    }
+    #[test]
+    fn reverse_recovery_is_preserved() {
+        let mut input = VehicleInput {
+            brake: 1.0,
+            steering: 1.0,
+            ..default()
+        };
+        limit_evidence_speed(&mut input, -5.0, 8.0);
+        assert_eq!(input.brake, 1.0);
+        assert_eq!(input.steering, 1.0);
     }
 }
