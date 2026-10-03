@@ -985,7 +985,11 @@ pub fn load_session_world(
     // through. Same absence policy as every authored record: a table
     // that does not resolve or parse yields no resource, not a
     // fabricated category.
-    if let Some(table) = crate::audio::ImpactAudio::load(&vfs.0, session.generation()) {
+    // The seed is the wire generation — the authority's minted value —
+    // so a replicated `RemoteImpact` picks the same authored variant on
+    // every process the way the wire-seeded smoke/spark/texel rigs do
+    // (the local id counter can diverge across processes).
+    if let Some(table) = crate::audio::ImpactAudio::load(&vfs.0, session.wire_generation()) {
         commands.insert_resource(table);
     }
     // F07-B.4/B.8: the authored surface table — the player-side
@@ -1017,7 +1021,8 @@ pub fn load_session_world(
         ),
         WorldMode::DevWorld => None,
     };
-    if let Some(programs) = crate::audio::SirenAudio::load(&vfs.0, session.generation(), siren_city)
+    if let Some(programs) =
+        crate::audio::SirenAudio::load(&vfs.0, session.wire_generation(), siren_city)
     {
         commands.insert_resource(programs);
     }

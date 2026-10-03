@@ -361,6 +361,29 @@ impl RemoteSnaps {
     pub fn applied(&self) -> Option<(u64, u64)> {
         self.applied
     }
+
+    /// End the stream's authority boundary: the staged frame, both
+    /// watermarks, the per-seat repair ledger and the dedup window all
+    /// describe the *ended* session's `(generation, tick)` sequence.
+    /// `drive_lobby` calls this when the link dies and on every
+    /// accepted `Start` — a *different* authority restarts its
+    /// numbering (a fresh host process's first start mints generation
+    /// 1), and the dead stream's watermark would stale-drop that
+    /// restarted sequence forever. Still-queued impact rows die with
+    /// the stream: they fold into `dropped`, the count the drain would
+    /// have given them as foreign generations. `stale`/`dropped`
+    /// themselves are report evidence awaiting the `apply_snapshots`
+    /// fold, not stream state — they survive.
+    pub fn reset(&mut self) {
+        self.latest = None;
+        self.last_arrival = None;
+        self.applied = None;
+        self.dropped += self.pending.len() as u64;
+        self.pending.clear();
+        self.repaired.clear();
+        self.seen.clear();
+        self.seen_order.clear();
+    }
 }
 
 /// The client's outbound input counter — `seq` tags each sent sample so
@@ -868,7 +891,10 @@ pub fn reconcile_remote_players(
     };
     // Only reconcile inside the session the lobby minted — parked at
     // `Menu` nothing exists, and mid-teardown nothing should spawn.
-    let live = lobby.generation == Some(session.generation())
+    // `lobby.generation` is the wire's minted value, so it compares
+    // against the session's wire generation — a different authority's
+    // numbering may sit behind the local id counter.
+    let live = lobby.generation == Some(session.wire_generation())
         && session.config().is_some()
         && matches!(
             session.phase(),
@@ -1080,7 +1106,10 @@ fn spawn_remote(
             VehicleSmoke::new(
                 d,
                 SmokePolicy::default(),
-                (session.generation() << 32) | u64::from(wire),
+                // The wire generation likewise — the local id
+                // counter can diverge across processes when a
+                // different authority's numbering joins.
+                (session.wire_generation() << 32) | u64::from(wire),
             ),
             // The impact-spark renderer binds the same way (F25-B
             // protocol v10): on the authority the copy sparks off the
@@ -1090,7 +1119,7 @@ fn spawn_remote(
             // process.
             VehicleSparks::new(
                 SparkPolicy::default(),
-                (session.generation() << 32) | u64::from(wire),
+                (session.wire_generation() << 32) | u64::from(wire),
             ),
         ));
     }
@@ -1152,7 +1181,7 @@ fn spawn_remote(
                 // transition clears it.
                 def.damage
                     .as_ref()
-                    .map(|d| (d, (session.generation() << 32) | u64::from(wire))),
+                    .map(|d| (d, (session.wire_generation() << 32) | u64::from(wire))),
             );
             if !missing.is_empty() {
                 warn!(car = %def.id, "remote vehicle missing textures: {}", missing.join(", "));
@@ -1308,7 +1337,7 @@ pub fn send_drive_input(
     seq.0 += 1;
     if link
         .ctl()
-        .send_input(encode_input(input, session.generation(), seq.0))
+        .send_input(encode_input(input, session.wire_generation(), seq.0))
         .is_ok()
     {
         report.inputs_sent += 1;
@@ -1332,7 +1361,7 @@ pub fn apply_remote_inputs(
     let inputs: RemoteInputs = host.remote_inputs();
     for (wire, mut input) in &mut remotes {
         let fresh = inputs.latest(wire.0).filter(|s| {
-            s.input.generation == session.generation() && s.received.elapsed() <= INPUT_STALE
+            s.input.generation == session.wire_generation() && s.received.elapsed() <= INPUT_STALE
         });
         match fresh {
             Some(stamped) => {
@@ -1373,7 +1402,7 @@ pub fn send_reset_request(
     {
         return;
     }
-    if link.ctl().request_reset(session.generation()).is_ok() {
+    if link.ctl().request_reset(session.wire_generation()).is_ok() {
         report.requests_sent += 1;
     }
 }
@@ -1419,7 +1448,9 @@ pub fn apply_reset_requests(
     mut grants: Local<RequestGrants>,
     mut report: ResMut<NetDriveReport>,
 ) {
-    let generation = session.generation();
+    // Requests arrive stamped with the *wire* generation — the
+    // authority's minted value, not the local id counter.
+    let generation = session.wire_generation();
     if grants.generation != generation {
         grants.generation = generation;
         grants.last.clear();
@@ -1655,7 +1686,11 @@ pub fn publish_snapshots(
         .iter()
         .map(|(_, wire, _, identity, ..)| (identity.0, wire.0))
         .collect();
+    // `ImpactEvent::generation` mints in the local id namespace, so the
+    // filter compares the local counter — the `Snap` frame's own
+    // `generation` field below is the wire namespace.
     let generation = session.generation();
+    let wire_generation = session.wire_generation();
     let mut impact_rows: Vec<SnapImpact> = drained
         .into_iter()
         .filter(|e| e.generation == generation)
@@ -1692,7 +1727,7 @@ pub fn publish_snapshots(
     if host
         .ctl()
         .broadcast(&Message::Snap {
-            generation,
+            generation: wire_generation,
             tick: session.tick(),
             entries,
             trailers: trailer_rows,
@@ -1966,8 +2001,10 @@ fn apply_snap_frame(
     // inside this generation isn't either (physics only moves on fixed
     // steps, so a same-tick snap carries a duplicate pose). Either way
     // the queued impact rows still drain: events outlive the pose
-    // frame that carried them.
-    if snap.generation != session.generation() {
+    // frame that carried them. The frame's `generation` is the wire
+    // namespace — a different authority's numbering can sit behind the
+    // local id counter.
+    if snap.generation != session.wire_generation() {
         return;
     }
     let stale = snaps
@@ -2233,7 +2270,9 @@ fn drain_pending_impacts(
     if snaps.pending.is_empty() {
         return;
     }
-    let generation = session.generation();
+    // Rows queue stamped with their frame's wire generation — compare
+    // against the session's wire namespace, not the local id counter.
+    let generation = session.wire_generation();
     let seats: HashMap<u16, (Entity, bool)> = players
         .iter()
         .map(|(entity, wire, player, ..)| {
@@ -2968,5 +3007,48 @@ mod tests {
         );
         app.update();
         assert_eq!(app.world().resource::<NetDriveReport>().snaps_staled, 2);
+    }
+
+    /// `reset` ends a stream at its authority boundary: the staged
+    /// frame, watermarks, repair ledger and dedup window all describe
+    /// the dead authority's `(generation, tick)` sequence — a fresh
+    /// authority restarting its numbering must stage and apply
+    /// cleanly rather than stale-drop under the dead watermark. The
+    /// report's stale/dropped evidence survives the reset, and
+    /// still-queued impact rows fold into `dropped` rather than
+    /// vanishing.
+    #[test]
+    fn a_stream_reset_rebases_the_inbox_on_a_new_authority() {
+        let mut snaps = RemoteSnaps::default();
+        snaps.push(2, 900, vec![snap_entry()], Vec::new(), vec![snap_impact(7)]);
+        // A stale drop for the evidence counter, then clear the staged
+        // frame and mark the watermark applied — the state a live
+        // stream carries when its authority dies.
+        snaps.push(2, 800, vec![snap_entry()], Vec::new(), Vec::new());
+        snaps.applied = Some((2, 900));
+        snaps.latest = None;
+        snaps.repaired.insert(1, (2, 800));
+        assert_eq!(snaps.stale, 1);
+        assert_eq!(snaps.pending.len(), 1);
+
+        snaps.reset();
+        assert!(snaps.latest.is_none());
+        assert_eq!(snaps.applied, None);
+        assert!(snaps.last_arrival.is_none());
+        assert!(snaps.pending.is_empty());
+        assert_eq!(snaps.dropped, 1, "the queued row folds into the drop count");
+        assert!(snaps.repaired.is_empty());
+        assert!(snaps.seen.is_empty() && snaps.seen_order.is_empty());
+        assert_eq!(snaps.stale, 1, "the stale evidence is preserved");
+
+        // The restarted sequence is not a straggler of the dead
+        // stream: a fresh authority's generation-1 frame stages even
+        // under the old (2, 900) watermark — and the dedup window's
+        // memory is gone, so an impact id the old stream already saw
+        // queues again under the new authority.
+        snaps.push(1, 1, vec![snap_entry()], Vec::new(), vec![snap_impact(7)]);
+        assert_eq!(snaps.latest.as_ref().unwrap().generation, 1);
+        assert_eq!(snaps.stale, 1);
+        assert_eq!(snaps.pending.len(), 1, "the new stream's rows queue");
     }
 }

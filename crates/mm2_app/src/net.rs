@@ -504,6 +504,7 @@ pub fn drive_lobby(
                 &vfs.0,
                 &mut selected,
                 &mut tuned,
+                &mut snaps,
                 generation,
                 &ad,
                 host_pick,
@@ -520,6 +521,13 @@ pub fn drive_lobby(
             }
             LobbyEvent::Closed(reason) => {
                 link.closed = true;
+                // The snap stream died with the link — its watermarks
+                // and ledgers belong to the dead authority's
+                // `(generation, tick)` sequence, which a new authority
+                // restarts. Clear the inbox now rather than let a
+                // staged frame or a stale watermark reach into the
+                // next session.
+                snaps.reset();
                 if link.leaving() {
                     // The expected end of our own `Leave`.
                     lobby.pending_exit.get_or_insert(0);
@@ -615,6 +623,7 @@ fn start(
     vfs: &Vfs,
     selected: &mut SelectedCar,
     tuned: &mut TunedVehicle,
+    snaps: &mut crate::netdrive::RemoteSnaps,
     generation: u64,
     ad: &SessionAdvertisement,
     host_pick: Option<VehiclePick>,
@@ -650,6 +659,16 @@ fn start(
         }
     }
     lobby.generation = Some(generation);
+    // The accepted `Start` ends whatever snap stream preceded it —
+    // even the same authority's restart mints a fresh generation, and
+    // a *different* authority (a fresh host process, or this same
+    // link's host after a `Cancel`) restarts its numbering entirely.
+    // The inbox's watermarks and ledgers describe the stream that
+    // produced them, so the new sequence starts clean rather than
+    // stale-dropping under a dead stream's watermark. Reset on accept,
+    // not on begin: impact rows the new stream queues while a parked
+    // session tears down belong to it and must not be wiped.
+    snaps.reset();
     if *session.phase() == SessionPhase::Menu {
         if let Err(e) = session.begin_generation(config, generation) {
             lobby.notice = Some(format!("started session was refused: {e}"));

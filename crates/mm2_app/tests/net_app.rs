@@ -310,7 +310,7 @@ fn a_start_begins_the_wired_session_under_the_lobby_generation() {
 
     let session = app.world().resource::<Session>();
     assert_eq!(session.phase(), &SessionPhase::Loading);
-    assert_eq!(session.generation(), generation);
+    assert_eq!(session.wire_generation(), generation);
     let config = session.config().expect("the wired session is stored");
     assert_eq!(config.authority, SessionAuthority::Remote);
     assert!(matches!(config.world, WorldMode::DevWorld));
@@ -426,13 +426,19 @@ fn a_start_mid_session_parks_until_teardown_lands() {
 
     let session = app.world().resource::<Session>();
     assert_eq!(session.phase(), &SessionPhase::Loading);
-    // The adopted generation is the host's mint — clamped never to
-    // regress behind what this app already minted (the local begin
-    // above took generation 1).
+    // The wire generation is the host's mint adopted verbatim — even
+    // behind the local counter, which clamps forward instead: the
+    // local begin above took generation 1, so the wire value here sits
+    // at 1 while the local namespace is already at 2 (F25-B).
+    assert_eq!(
+        session.wire_generation(),
+        wire_generation,
+        "the wire generation is the host's mint, verbatim"
+    );
     assert_eq!(
         session.generation(),
         wire_generation.max(2),
-        "wire {wire_generation} adopted monotonically"
+        "the local counter never regresses behind its own mints"
     );
     assert_eq!(
         session.config().unwrap().authority,
@@ -790,7 +796,7 @@ fn a_hosted_start_begins_the_session_for_everyone() {
     spin(&mut app, |a| session_phase(a) == SessionPhase::Loading);
 
     let session = app.world().resource::<Session>();
-    assert_eq!(session.generation(), generation);
+    assert_eq!(session.wire_generation(), generation);
     let config = session.config().expect("the hosted session is stored");
     assert_eq!(config.authority, SessionAuthority::Host);
     assert!(matches!(config.world, WorldMode::DevWorld));
@@ -1127,14 +1133,17 @@ fn f4_restart_is_a_local_authority_binding() {
 }
 
 /// The generation contract (`Session::begin_generation`): a host-minted
-/// generation is adopted verbatim, and a wire value that would regress
-/// the local counter is clamped forward instead — staleness detection
-/// on `generation`-keyed ids depends on never reusing one.
+/// generation is adopted verbatim as the *wire* namespace, and a wire
+/// value that would regress the local counter is clamped forward
+/// instead — staleness detection on `generation`-keyed ids depends on
+/// never reusing one, while the wire stamps follow the authority's
+/// numbering even when it restarts.
 #[test]
 fn a_host_generation_is_adopted_but_never_regresses() {
     let mut session = Session::new();
     session.begin_generation(dev_cruise(), 3).unwrap();
     assert_eq!(session.generation(), 3);
+    assert_eq!(session.wire_generation(), 3);
     session.transition(SessionPhase::Unloading).unwrap();
     session.transition(SessionPhase::Menu).unwrap();
     session.begin_generation(dev_cruise(), 1).unwrap();
@@ -1143,6 +1152,204 @@ fn a_host_generation_is_adopted_but_never_regresses() {
         4,
         "a regressed wire generation clamps to the local counter"
     );
+    assert_eq!(
+        session.wire_generation(),
+        1,
+        "the wire value is adopted verbatim — a different authority restarts its numbering"
+    );
+}
+
+/// The authority-boundary contract on the snap stream (F25-B):
+/// `RemoteSnaps` is process-lifetime state while the `(generation,
+/// tick)` sequence belongs to the current *authority* — a fresh host
+/// restarts its numbering from 1, so a rejoining client must not drop
+/// the new stream under the dead stream's watermark. The leg runs the
+/// real lifecycle: authority A's stream applies; the host dies
+/// (`Closed` resets the inbox); authority B's `Start` adopts wire
+/// generation 1 verbatim — behind the local counter — and its
+/// restarted tick sequence applies.
+#[test]
+fn a_dead_authoritys_watermark_dies_with_the_link() {
+    let install = tempfile::tempdir().unwrap();
+    let (mut host_a, link_a, vfs) = host_and_link(install.path(), &dev_cruise(), "alice");
+    link_a.ctl().set_vehicle("", 0).unwrap();
+    link_a.ctl().set_ready(true).unwrap();
+    let mut app = bridge_app(vfs, link_a);
+    until_ready(&mut app);
+    host_a.start(LateJoin::Open).unwrap();
+    let gen_a = until_started(&host_a);
+    until_begun(&mut app);
+
+    // The dead stream's watermark climbs high enough that a restarted
+    // (generation 1, low tick) sequence would read as a straggler
+    // without the boundary reset.
+    host_a
+        .ctl()
+        .broadcast(&Message::Snap {
+            generation: gen_a,
+            tick: 900,
+            entries: Vec::new(),
+            trailers: Vec::new(),
+            impacts: Vec::new(),
+        })
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world().resource::<netdrive::RemoteSnaps>().applied() == Some((gen_a, 900))
+    });
+
+    // The minimal app has no loader — move the session through the
+    // two legal steps `load_session_world` would have run so the
+    // quit-to-teardown leg can land, then kill the host.
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    host_a.shutdown();
+    let exit = until_exit(&mut app);
+    assert_ne!(
+        exit,
+        AppExit::Success,
+        "a lost host is a nonzero exit: {exit:?}"
+    );
+    assert_eq!(
+        app.world().resource::<netdrive::RemoteSnaps>().applied(),
+        None,
+        "the Closed boundary cleared the dead stream's watermark"
+    );
+
+    // Authority B: a fresh host process restarts its numbering at
+    // generation 1 — the stream regression the watermark would have
+    // swallowed.
+    let (mut host_b, link_b, _vfs_b) = host_and_link(install.path(), &dev_cruise(), "alice");
+    link_b.ctl().set_vehicle("", 0).unwrap();
+    link_b.ctl().set_ready(true).unwrap();
+    app.insert_resource(link_b);
+    until_ready(&mut app);
+    host_b.start(LateJoin::Open).unwrap();
+    let gen_b = until_started(&host_b);
+    assert_eq!(gen_b, 1, "the fresh authority restarts its numbering");
+    until_begun(&mut app);
+    {
+        let session = app.world().resource::<Session>();
+        assert_eq!(
+            session.wire_generation(),
+            1,
+            "authority B's generation adopts verbatim"
+        );
+        assert_eq!(
+            session.generation(),
+            2,
+            "the local counter climbed past the regressed wire value"
+        );
+    }
+
+    host_b
+        .ctl()
+        .broadcast(&Message::Snap {
+            generation: gen_b,
+            tick: 5,
+            entries: Vec::new(),
+            trailers: Vec::new(),
+            impacts: Vec::new(),
+        })
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world().resource::<netdrive::RemoteSnaps>().applied() == Some((gen_b, 5))
+    });
+    let report = app.world().resource::<netdrive::NetDriveReport>();
+    assert_eq!(report.snaps_applied, 2, "one snap applied per authority");
+    assert_eq!(
+        report.snaps_staled, 0,
+        "the restarted stream never dropped stale"
+    );
+    host_b.shutdown();
+}
+
+/// The other half of the boundary contract: the `Closed` reset is
+/// not the only stream boundary — an accepted `Start` is too, because
+/// a wire client can observe *no* close at all when the authority is
+/// swapped underneath it. The link resource is replaced wholesale —
+/// its pump dies with the `Closed` event still queued — so the only
+/// boundary signal the drain sees is authority B's `Start`. Without
+/// the accept-side reset the restarted tick sequence would drop under
+/// authority A's watermark.
+#[test]
+fn a_start_resets_the_stream_without_a_close() {
+    let install = tempfile::tempdir().unwrap();
+    let (mut host_a, link_a, vfs) = host_and_link(install.path(), &dev_cruise(), "alice");
+    link_a.ctl().set_vehicle("", 0).unwrap();
+    link_a.ctl().set_ready(true).unwrap();
+    let mut app = bridge_app(vfs, link_a);
+    until_ready(&mut app);
+    host_a.start(LateJoin::Open).unwrap();
+    let gen_a = until_started(&host_a);
+    until_begun(&mut app);
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    host_a
+        .ctl()
+        .broadcast(&Message::Snap {
+            generation: gen_a,
+            tick: 900,
+            entries: Vec::new(),
+            trailers: Vec::new(),
+            impacts: Vec::new(),
+        })
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world().resource::<netdrive::RemoteSnaps>().applied() == Some((gen_a, 900))
+    });
+
+    // The authority is swapped mid-session: a fresh host (its
+    // numbering restarts at generation 1) and a fresh link. The old
+    // `LobbyLink` drops with the resource — its pump and the `Closed`
+    // event it would deliver die with it, so only `Start` can signal
+    // the boundary.
+    let (mut host_b, link_b, _vfs_b) = host_and_link(install.path(), &dev_cruise(), "alice");
+    link_b.ctl().set_vehicle("", 0).unwrap();
+    link_b.ctl().set_ready(true).unwrap();
+    app.insert_resource(link_b);
+    until_ready(&mut app);
+    host_b.start(LateJoin::Open).unwrap();
+    let gen_b = until_started(&host_b);
+    assert_eq!(gen_b, 1, "the fresh authority restarts its numbering");
+    // B's `Start` arrives while A's session is still `Playing`: it
+    // parks in `pending_start` until the teardown lands at `Menu`,
+    // then begins under the new wire generation.
+    spin(&mut app, |a| {
+        a.world().resource::<Session>().generation() == 2
+    });
+    {
+        let session = app.world().resource::<Session>();
+        assert_eq!(session.wire_generation(), 1);
+        assert_eq!(session.phase(), &SessionPhase::Loading);
+    }
+
+    host_b
+        .ctl()
+        .broadcast(&Message::Snap {
+            generation: gen_b,
+            tick: 5,
+            entries: Vec::new(),
+            trailers: Vec::new(),
+            impacts: Vec::new(),
+        })
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world().resource::<netdrive::RemoteSnaps>().applied() == Some((gen_b, 5))
+    });
+    let report = app.world().resource::<netdrive::NetDriveReport>();
+    assert_eq!(report.snaps_applied, 2, "one snap applied per authority");
+    assert_eq!(
+        report.snaps_staled, 0,
+        "the restarted stream never dropped stale"
+    );
+    host_a.shutdown();
+    host_b.shutdown();
 }
 
 /// The end-to-end in-process leg: a real `headless_lobby` app — full
@@ -1606,7 +1813,7 @@ fn hosted_playing(app: &mut App) -> u64 {
         .send(HostCommand::Start)
         .unwrap();
     spin(app, |a| a.world().resource::<Session>().config().is_some());
-    let generation = app.world().resource::<Session>().generation();
+    let generation = app.world().resource::<Session>().wire_generation();
     {
         let mut session = app.world_mut().resource_mut::<Session>();
         session.transition(SessionPhase::Ready).unwrap();
@@ -1906,7 +2113,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
     host.start(LateJoin::Open).unwrap();
     until_started(&host);
     until_begun(&mut app);
-    let generation = app.world().resource::<Session>().generation();
+    let generation = app.world().resource::<Session>().wire_generation();
     {
         let mut session = app.world_mut().resource_mut::<Session>();
         session.transition(SessionPhase::Ready).unwrap();
@@ -2538,7 +2745,7 @@ fn a_remote_drivers_reset_request_resets_its_seat() {
     spin(&mut app, |a| {
         a.world().resource::<Session>().config().is_some()
     });
-    let generation = app.world().resource::<Session>().generation();
+    let generation = app.world().resource::<Session>().wire_generation();
     peer.ctl().unwrap().request_reset(generation).unwrap();
     spin(&mut app, |a| {
         a.world()
@@ -2691,7 +2898,7 @@ fn a_snap_carries_the_remote_cars_drive_state() {
     peer.ctl()
         .unwrap()
         .send_input(DriveInput {
-            generation: app.world().resource::<Session>().generation(),
+            generation: app.world().resource::<Session>().wire_generation(),
             seq: 1,
             throttle: 0,
             brake: 255,
@@ -2847,7 +3054,7 @@ fn a_snapshot_drives_a_remote_rigs_trailer() {
     host.start(LateJoin::Open).unwrap();
     until_started(&host);
     until_begun(&mut app);
-    let generation = app.world().resource::<Session>().generation();
+    let generation = app.world().resource::<Session>().wire_generation();
     {
         let mut session = app.world_mut().resource_mut::<Session>();
         session.transition(SessionPhase::Ready).unwrap();
@@ -3129,7 +3336,7 @@ fn a_trailer_rows_grounded_bit_drives_the_copys_suspension() {
     host.start(LateJoin::Open).unwrap();
     until_started(&host);
     until_begun(&mut app);
-    let generation = app.world().resource::<Session>().generation();
+    let generation = app.world().resource::<Session>().wire_generation();
     {
         let mut session = app.world_mut().resource_mut::<Session>();
         session.transition(SessionPhase::Ready).unwrap();
@@ -3374,7 +3581,7 @@ fn a_snapshot_feeds_the_remote_impact_stream() {
     host.start(LateJoin::Open).unwrap();
     until_started(&host);
     until_begun(&mut app);
-    let generation = app.world().resource::<Session>().generation();
+    let generation = app.world().resource::<Session>().wire_generation();
     {
         let mut session = app.world_mut().resource_mut::<Session>();
         session.transition(SessionPhase::Ready).unwrap();
@@ -3575,7 +3782,7 @@ fn a_snap_reconciles_the_remote_copys_breakaway_rig() {
     host.start(LateJoin::Open).unwrap();
     until_started(&host);
     until_begun(&mut app);
-    let generation = app.world().resource::<Session>().generation();
+    let generation = app.world().resource::<Session>().wire_generation();
     {
         let mut session = app.world_mut().resource_mut::<Session>();
         session.transition(SessionPhase::Ready).unwrap();
@@ -3809,7 +4016,7 @@ fn r_under_a_remote_session_asks_the_authority() {
     host.start(LateJoin::Open).unwrap();
     until_started(&host);
     until_begun(&mut app);
-    let generation = app.world().resource::<Session>().generation();
+    let generation = app.world().resource::<Session>().wire_generation();
     {
         let mut session = app.world_mut().resource_mut::<Session>();
         session.transition(SessionPhase::Ready).unwrap();

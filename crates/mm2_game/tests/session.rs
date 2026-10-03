@@ -24,6 +24,9 @@ fn begin_validates_and_enters_loading() {
     s.begin(SessionConfig::default()).unwrap();
     assert_eq!(*s.phase(), SessionPhase::Loading);
     assert_eq!(s.generation(), 1);
+    // A local begin is its own authority: the wire namespace follows
+    // the local mint until a `begin_generation` adopts a host's value.
+    assert_eq!(s.wire_generation(), 1);
     assert!(matches!(s.config(), Some(c) if c.mode == SessionMode::Cruise));
 }
 
@@ -123,12 +126,14 @@ fn networked_authority_cannot_pause() {
 fn a_u64_max_generation_never_overflows_or_regresses() {
     // The wire generation is an unbounded u64: a hostile `Start` at
     // `u64::MAX` must not panic the next bump (dev `overflow-checks`)
-    // nor wrap the counter to 0 — a regression would silently reuse
-    // the generation `ObjectId`/`ResultId` staleness detection keys on.
+    // nor wrap the local counter to 0 — a regression would silently
+    // reuse the generation `ObjectId`/`ResultId` staleness detection
+    // keys on. The wire namespace adopts the value verbatim.
     let mut s = Session::new();
     s.begin_generation(SessionConfig::default(), u64::MAX)
         .unwrap();
-    assert_eq!(s.generation(), u64::MAX, "the wire ceiling is adopted");
+    assert_eq!(s.generation(), u64::MAX, "the local counter saturates");
+    assert_eq!(s.wire_generation(), u64::MAX, "the wire ceiling is adopted");
     s.transition(SessionPhase::Unloading).unwrap();
     s.transition(SessionPhase::Menu).unwrap();
 

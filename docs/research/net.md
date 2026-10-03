@@ -372,11 +372,11 @@ below is a *designed* policy, recorded as such.
   (`"alice is not ready"`).
 - `Start { generation, session }` is host-authoritative and
   self-contained: `generation` mints from 1 and climbs monotonically
-  for the lobby's lifetime — the value `mm2_game`'s
-  `Session::generation` / `ObjectId::generation` namespace to — and
-  `session` is the *running* session, snapshotted at start so a
-  mid-session `set_session` re-advertisement (the next round's config)
-  can never rewrite what the running one is.
+  for *that host's* lifetime — the value `mm2_game`'s
+  `Session::wire_generation` tracks (see "Generation namespaces"
+  below) — and `session` is the *running* session, snapshotted at
+  start so a mid-session `set_session` re-advertisement (the next
+  round's config) can never rewrite what the running one is.
 - `late_join` is the per-start join policy — `LateJoin::Closed` (the
   MP-5 race rule: joins get `RejectCode::SessionStarted` before
   `Accept`, like a full lobby) or `LateJoin::Open` (the MP-5 cruise
@@ -495,15 +495,12 @@ the same `accept` + `check_session` pair `mm2-join` runs, the accepted
 config is stamped `Remote` authority with this process's local facts
 (roster-echoed vehicle pick, `mods_active`, launch-time dev overrides —
 none of which ever ride the wire), and `Session::begin_generation`
-adopts the lobby's minted generation so `ObjectId`/`ResultId`
-generation fields agree across peers. The wire value may only move
-the local counter forward — staleness detection on generation-keyed
-ids assumes it never regresses. A `Start` drained while a session is
-still live parks in `pending_start` and begins when teardown lands
-back at `Menu`; a `Cancel` matching the running generation quits the
-session through the normal `Unloading → Menu` path. The accepted
-session loads through `load_session_world` — the shared world/spawn
-path — never a parallel multiplayer loader.
+adopts the lobby's minted generation. A `Start` drained while a
+session is still live parks in `pending_start` and begins when
+teardown lands back at `Menu`; a `Cancel` matching the running
+generation quits the session through the normal `Unloading → Menu`
+path. The accepted session loads through `load_session_world` — the
+shared world/spawn path — never a parallel multiplayer loader.
 
 Exit ownership follows the surface: with a `LobbyLink` present,
 `drive_session`'s `Menu` quit arm does not write `AppExit` (a quit
@@ -531,6 +528,38 @@ harness, which waits on the wire with wall-clock pacing while `Menu`
 is parked and reports the lobby's progress as `mp=` on the record
 (`mp=gen<N>` once a `Start` minted the session, `mp=lobby(<n>p)`
 while waiting, `mp=lobby(0p)` after the link dies).
+
+### Generation namespaces
+
+*Implementation choice.* `Session` carries two generation counters.
+`generation()` is the local, process-lifetime counter —
+`ObjectId`/`ResultId` mint off it and staleness detection assumes it
+never regresses, so a wire value may only move it forward (a lower
+`Start` generation clamps to `local + 1`). `wire_generation()` is the
+authority's minted value, adopted verbatim by `begin_generation`;
+`begin()` sets both to the local mint since a local session is its own
+authority. Everything the wire stamps or gates on — `Input`,
+`Snap`/`SnapImpact` frames, `ResetRequest`, the reconcile's
+`LobbyState::generation` liveness check, and the cross-process
+deterministic seeds (`VehicleSmoke`/`VehicleSparks`/`TexelDamageRig`
+and the session audio tables, which need every process to pick the
+same authored variant) — reads the wire namespace. The two diverge
+because the wire number belongs to the *authority*: a fresh host
+process restarts its numbering at 1, so a rejoining client can adopt
+a wire generation below its local counter without reusing a local
+id space.
+
+The same boundary rules apply to the snap stream itself.
+`RemoteSnaps`'s `(generation, tick)` watermarks, pending-impact queue,
+repair ledger and dedup window all describe the stream of *one*
+authority — none of it can safely reach into the next stream, whose
+numbering may restart anywhere. `RemoteSnaps::reset()` therefore runs
+at the two observable authority boundaries: an accepted `Start` (on
+accept, not on begin — impact rows the new stream queues while a
+parked session tears down belong to it) and the pump's terminal
+`Closed`. The reset folds still-queued impact rows into `dropped`
+rather than losing the evidence, and leaves the `stale`/`dropped`
+counters themselves intact for the report fold.
 
 ## Impairment harness (F25-B)
 
@@ -567,7 +596,12 @@ one — and `RemoteSnaps::push` is latest-wins on the frame's own
 `(generation, tick)`, not arrival order: a frame at or behind the
 staged-or-applied watermark drops counted (`net=`'s `snap<x>` cell)
 instead of displacing a newer pose, while its `impacts` rows still
-queue — events outlive the frame that carried them.
+queue — events outlive the frame that carried them. The watermark is
+scoped to the stream's authority: `RemoteSnaps::reset` at an accepted
+`Start` or a link `Closed` clears it (and the pending queue, repair
+ledger and dedup window), so a *different* authority's restarted
+`(generation, tick)` sequence never reads as a straggler of the dead
+stream.
 
 ## Measured impairment matrix (F25-AC03)
 

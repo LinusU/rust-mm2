@@ -123,6 +123,11 @@ pub struct Session {
     phase: SessionPhase,
     config: Option<SessionConfig>,
     generation: u64,
+    /// The generation the session's *authority* minted — the lobby's
+    /// own counter for a hosted/joined session, the local counter's
+    /// bump otherwise. Wire messages stamp and gate on this; the local
+    /// `generation` stays the per-process monotone id namespace.
+    wire_generation: u64,
     tick: u64,
     next_object_slot: u32,
     next_player: u16,
@@ -142,6 +147,7 @@ impl Session {
             phase: SessionPhase::Menu,
             config: None,
             generation: 0,
+            wire_generation: 0,
             tick: 0,
             next_object_slot: 0,
             next_player: 0,
@@ -163,6 +169,22 @@ impl Session {
     /// distinguishable from the current one.
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// The generation the session's *authority* minted — the namespace
+    /// every wire message's `generation` field belongs to (F24-B/F25):
+    /// `Input`/`Snap`/`ResetRequest`/`Start`/`Cancel` stamps and their
+    /// receiver-side gates read this, never
+    /// [`generation`](Self::generation). The two counters are usually
+    /// equal — a hosted or joined session adopts the lobby's value
+    /// while the local counter is still behind it — but they are *not*
+    /// the same sequence: a different authority's lobby restarts its
+    /// numbering, so a `Start`'s minted value can sit behind the local
+    /// counter, which must keep climbing for `is_stale`/
+    /// [`ObjectId`]/[`ResultId`] detection to never alias two sessions
+    /// that happen to share a wire number.
+    pub fn wire_generation(&self) -> u64 {
+        self.wire_generation
     }
 
     /// Fixed-step count within the session (`advance_session_tick`).
@@ -238,31 +260,44 @@ impl Session {
     /// wrapping to 0 would regress the generation-keyed ids staleness
     /// detection relies on.
     pub fn begin(&mut self, config: SessionConfig) -> Result<(), SessionError> {
-        self.begin_at(config, self.generation.saturating_add(1))
+        let generation = self.generation.saturating_add(1);
+        self.begin_at(config, generation, generation)
     }
 
     /// `begin` under a host-minted generation (F24-B): a joined
-    /// lobby's `Start` names the generation the session must adopt so
-    /// `ObjectId`/`ResultId` generation fields agree across peers —
-    /// the lobby's counter is the namespace owner. The wire value may
-    /// only move the local counter forward: staleness detection
-    /// assumes generations never regress, and a link can only ever
-    /// present the lobby's own monotonic sequence. The forward clamp
-    /// saturates at `u64::MAX` — a hostile `Start` at the ceiling pins
-    /// the counter there instead of overflowing the next bump (dev
-    /// `overflow-checks` panic) or wrapping it into a regression.
+    /// lobby's `Start` names the generation the wire messages of this
+    /// session stamp and gate on — adopted verbatim as
+    /// [`wire_generation`](Self::wire_generation). The *local* counter
+    /// is a different namespace and may only move forward: staleness
+    /// detection assumes it never regresses, and a different
+    /// authority's lobby restarts its sequence — a fresh host's first
+    /// `Start` mints generation 1 whatever this process last ran. The
+    /// forward clamp saturates at `u64::MAX` — a hostile `Start` at
+    /// the ceiling pins the counter there instead of overflowing the
+    /// next bump (dev `overflow-checks` panic) or wrapping it into a
+    /// regression.
     pub fn begin_generation(
         &mut self,
         config: SessionConfig,
         generation: u64,
     ) -> Result<(), SessionError> {
-        self.begin_at(config, generation.max(self.generation.saturating_add(1)))
+        self.begin_at(
+            config,
+            generation.max(self.generation.saturating_add(1)),
+            generation,
+        )
     }
 
-    fn begin_at(&mut self, config: SessionConfig, generation: u64) -> Result<(), SessionError> {
+    fn begin_at(
+        &mut self,
+        config: SessionConfig,
+        generation: u64,
+        wire_generation: u64,
+    ) -> Result<(), SessionError> {
         config.validate().map_err(SessionError::Config)?;
         self.transition(SessionPhase::Loading)?;
         self.generation = generation;
+        self.wire_generation = wire_generation;
         self.tick = 0;
         self.next_object_slot = 0;
         self.next_player = 0;
