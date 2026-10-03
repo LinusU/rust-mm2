@@ -1,3 +1,102 @@
+# Last iteration — F25-B slice: the wire-seat stall watchdog —
+# the deferral's last named hole. `retire_stalled_wire_seats`
+# bounds the hosted authority's wait on a silent `Remote` seat:
+# past `WireStall`'s designed bounds the seat is retired through
+# the deadline's own `TimedOut` mint, so `Playing → Results`
+# releases through the ordinary "every wire seat resolved" edge
+# and the seat's v14 tail lands on every live client — a
+# recorded result, not a kick (new-run iteration 11)
+
+Feature iteration on `ralph/night` (baseline `4137959` — the
+iter-10 deferral-endpoint evidence handoff; external gates +
+review pass). Selection: the F25-B remainder's most concrete
+correctness gap — named verbatim in the deferral comment, both
+iter-8/9 handoffs and every review since: "a stalled-but-
+connected remote can hold the session in `Playing`". A hung or
+socket-dead-but-open client froze the host's results screen
+forever on a deadline-free race; every other strand exit
+(resolve/depart/host death) already had legs. This is the
+authority half of the stall story: retire the *seat*, keep the
+lobby link. A lobby-level kick for the ghost's dead socket
+stays open as lobby scope.
+
+## What landed
+
+- `netdrive::WireStall` (`Resource`, designed bounds —
+  `live_silence` 10 s / `join_grace` 120 s): a seat that went
+  *live* this wire generation is retired after `live_silence` of
+  mailbox quiet, measured off `StampedInput.received` — MP-6
+  means a networked client has no `Playing` pause, so seconds of
+  silence on a proven stream is a dead process or link, not a
+  pause; a seat that never produced a generation-matching
+  sample gets `join_grace` from first observation — a wedged
+  mid-load joiner is indistinguishable from a slow one until it
+  streams, so the never-live bound is deliberately generous and
+  the live arm can never fire on an empty slot.
+- `retire_stalled_wire_seats` (`Update`, `.after(drive_host)`
+  `.before(publish_snapshots)` in the windowed *and* headless
+  host schedulings): scans unresolved `Remote` + `NetPlayer`
+  participants while `Playing` under a fresh `RaceState` and
+  mints `SessionOutcome::TimedOut { race_ticks: race.clock }`
+  through the same `mint_result_id`/`ledger.record`/
+  `ParticipantState::TimedOut` path the deadline uses — the
+  deferral releases next fixed step, the owed `Results` frame
+  carries the tail, and a live client resolves off it through
+  the already-tested replicated-edge machinery. A generation-
+  scoped `StallClock` `Local` holds the never-live first-seen
+  map (a `Cancel`/`Start` cycle inherits no silences).
+- `NetDriveReport.wire_seats_retired` → `stall<n>` on the smoke
+  `net=` record; `race.rs`'s deferral comment, the netdrive
+  module doc and `docs/research/net.md` now name the watchdog
+  where they used to name the gap.
+- `net_app` +2 real loopback off `staged_deferral`:
+  `a_stalled_wire_seat_is_retired_and_releases_the_deferred_authority`
+  — first half proves a stream pumped live past `live_silence`
+  holds `Playing` and retires nothing (the bound is about
+  stopped streams, not unresolved seats); killing the feed
+  retires the seat (`TimedOut` mint, `despawned` stays 0 — the
+  parked car stays), releases the host to `Results`/`Complete`,
+  and the owed frame resolves the still-live client into its
+  own `TimedOut` ledger row;
+  `a_never_live_wire_seat_is_retired_after_the_join_grace` — the
+  staged empty-mailbox seat retires past `join_grace` without
+  the `live_silence` arm ever applying (the watchdog ran under
+  production defaults through staging, so a grace shorter than
+  the accumulated observation retires next pass; the asserted
+  `Playing` is the inside-grace half).
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` green — 91 suites, 0 failures
+(`mm2_app` lib 88/88, `race` 48/48, `net_app` 52/52 incl. the
+two new legs, `net_drive` 3/3, `mm2_net` 80/80).
+
+## Classification / remaining open items
+
+- Implementation choice throughout — the retirement rule, the
+  `TimedOut` reuse and both bounds are ours; the retail wire
+  protocol is unrecovered, so no original-behavior claim.
+- Evidence: two-app real-loopback legs through the real mailbox
+  (`StampedInput.received` is the socket reader's own stamp),
+  the real mint/ledger/deferral/publish/apply chain. Still not
+  exercised: a true two-process leg on the stall path (the
+  staging needs the asset stack), no LAN/Internet or
+  impairment-matrix leg on the deferral/tail/stall path.
+- The retirement leaves a ghosted client's socket up: a
+  lobby-level kick for a dead-but-open link stays open as
+  lobby scope (F26) — the seat no longer holds anything, the
+  peer itself is never disconnected.
+- All other open items unchanged: rematch/lobby-result
+  lifecycle and bulk late-joiner ledger sync (F26), the absent
+  dedicated-authority sim (F26 — `mm2 --host` always seats
+  itself, `mm2-host` runs no Bevy app), process-level rejoin
+  (product decision), LAN/Internet scope. Not F25-AC01..06 or
+  F26-AC01..06 completion.
+
+---
+
 # Last iteration — F25-B evidence slice: the deferral's two
 # unverified endpoints — a wire seat's *departure* now provably
 # releases the hosted session's held `Playing`, and a client left
