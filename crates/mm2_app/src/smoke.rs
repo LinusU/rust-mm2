@@ -789,6 +789,13 @@ fn run_headless(
         }
         RunSource::Session(_) => {}
     }
+    app.init_resource::<crate::motion_evidence::MotionEvidence>()
+        .add_systems(
+            FixedLast,
+            crate::motion_evidence::sample_motion
+                .after(crate::contracts::publish_vehicle_telemetry)
+                .before(crate::race::reanchor_teleported_participants),
+        );
     app.finish();
     app.cleanup();
 
@@ -1916,9 +1923,20 @@ fn run_headless(
     // field like `driver=`, printed unconditionally so an evidence
     // record is self-describing about which authored parameter block
     // (DRV-2/DRV-3) and aimap variant (RACE-11) selected its content.
+    let motion = world_ecs.resource::<crate::motion_evidence::MotionEvidence>();
+    let motion_detail = format!(
+        " travel={:.1}m sim={:.2}s resets={} controls={}t/{}b/{}s finite={}",
+        motion.distance,
+        motion.steps as f64 / 120.0,
+        motion.resets,
+        motion.throttle_steps,
+        motion.brake_steps,
+        motion.steer_steps,
+        motion.finite,
+    );
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{extra}",
+            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{extra}",
             driver.as_str(),
             rec_config.difficulty.as_str(),
             session.phase().name(),
@@ -1952,7 +1970,7 @@ fn run_headless(
         || (pos.is_some_and(|p| p.is_finite())
             && vel.is_some_and(|v| v.is_finite())
             && rot.is_some_and(|r| r.is_finite()));
-    if !finite {
+    if !finite || (motion.steps > 0 && !motion.finite) {
         return record(&end_world, SmokeStatus::Fail, detail(" non-finite pose"));
     }
     if !saw_grounded {
