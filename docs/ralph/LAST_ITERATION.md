@@ -1,3 +1,144 @@
+# Last iteration — F25-B slice: the remote surface voice —
+# `mm2_net` protocol v16 adds the `SnapEntry` surface-contact
+# tail and `surface_voices` gains a `RemoteReplica` arm, so a
+# remote participant's skid/rolling loops resolve off real
+# wheel-contact truth on the authority and replay the
+# replicated contact through the receiver's *own* surface
+# table on a client — remote cars are no longer
+# surface-silent on any process (new-run iteration 13)
+
+Feature iteration on `ralph/night` (baseline `2d40d50` — the
+iter-12 remote-rpm handoff; external gates + review pass).
+Selection: the review's last named presentation gap in F25-B's
+"wheel/engine state needed for presentation" — remote seats
+bound `VehicleAudio` but the wire still carried no
+wheel-contact truth, so a client copy had nothing to mix
+surface loops from (iter-12's own disclosed open item). Two
+non-blocking review nits rode first: `net.md`'s worst-case
+snap arithmetic omitted its own +13 B race row (4,741 claimed,
+4,754 true at v15) and `tests/support::audio_car` duplicated
+the `opponents.rs` private fixture — consolidated into the
+shared module parameterized by mass (`tuned_car`).
+
+## What landed
+
+- `mm2_net` protocol v16 (`proto.rs`): `SnapEntry` gains
+  `surf_skid: u16` + `skid_slip: u8` + `skid_speed: i16` +
+  `surf_roll: u16` (7 B; per-entry payload 101 → 108 B,
+  worst-case snap 4,754 → 4,810 B, `net.md` budget updated).
+  The wire carries the resolved **`sound` class**, never an
+  `aud/` table row — `aud/` rides no gameplay fingerprint, so
+  a cosmetically modded table stays legal and each process
+  re-runs `SkidSpec::pick`/`RollingSpec::mix` against its own
+  `SurfaceAudio`. `SNAP_NO_SURFACE` (u16::MAX) marks absence;
+  `SnapEntry::default()` now *means* no-contact rather than
+  fabricating a class-0 skid (manual impl replaces the
+  derive).
+- `audio.rs`: the wheel loop's pick is distilled to
+  `contact_pick` (live arm — returns the `SurfaceWins` plus
+  the `SurfaceContact` truth that produced them) and
+  `contact_wins` (replica arm — replays the replicated class/
+  slippage/`vel_long` through this process's table, re-running
+  the pick under the local spec's `SkidUnit`, bounding every
+  class by local `get`-or-silence). `surface_voices` branches
+  on `Has<RemoteReplica>`; simulated cars get `SurfaceContact`
+  written (or inserted) for the publisher.
+- `netdrive`: `encode_surface` quantizes the contact
+  (slippage ×255 clamped, `vel_long` in 0.1 m/s saturating at
+  i16, non-finite → 0); `apply_present` derives the copy's
+  `forward_speed` from `vel · (rot × −Z)` — the rolling mix's
+  speed needs no extra field — and writes the decoded contact
+  through a `surfaces` query kept apart from `SnapTargetRow`
+  (Bevy's 15-tuple cap). `spawn_remote` inserts an empty
+  `SurfaceContact` with `RemoteReplica`/`RemoteDrive`.
+- Scheduling: `publish_snapshots.after(surface_voices)` in
+  `main.rs`, `smoke.rs` and the `host_app` test wiring so a
+  seat's same-frame contact publishes (not last frame's), and
+  `surface_voices.after(apply_snapshots)` so a replicated
+  contact voices in the frame it lands — the same contract
+  `impact_voices`/`emit_sparks` already keep.
+- `SnapTargetRow` stays 15 elements; the copy's
+  `SurfaceContact` is reached via a sibling
+  `Query<&mut SurfaceContact>` (disjoint components, no
+  `ParamSet` needed). The own-seat early-`break` still skips
+  `apply_present`, so a local car's live sim-resolved contact
+  is never wire-overwritten.
+
+## Tests
+
+- `netdrive` +2: `surface_tail_encodes_the_resolved_contact` —
+  sentinel defaults, quantization (0.5 → 128, −12.37 → −124),
+  NaN/infinity → 0, clamp saturation; `apply_present`'s
+  six-argument form drives the copy's `SurfaceContact` +
+  `forward_speed`, and a sentinel frame clears both halves.
+  `apply_present_drives_the_copy_state` extended — the wire
+  contact lands dequantized (wheel speed decoded `/10` for an
+  exact f32 round-trip).
+- `proto` round-trip/oversize fixtures carry the new fields;
+  `lobby` snap literal updated.
+- `net_app` +2 real loopback through `load_vehicle`, the real
+  reconcile and the real publish/apply path:
+  `a_wire_seats_surface_contact_publishes_in_its_snap` — a
+  staged `SurfaceContact` on the remote seat publishes
+  quantized (class 3, slip 128, speed −124, roll 1);
+  `a_remote_copy_replays_the_replicated_surface_contact` — a
+  forged snap's tail decodes onto the predicted copy's
+  `SurfaceContact` (slippage 128/255, −12.4 m/s, roll 2),
+  `forward_speed` derives 4.0 off the wire velocity, and a
+  quiet frame clears the contact.
+- `a_client_streams_inputs_and_applies_the_host_snapshot`
+  extended — the own seat keeps a sentinel `SurfaceContact`
+  and its junk wire tail (`surf_skid 9`, `skid_slip 255`,
+  `skid_speed i16::MAX`, `surf_roll 9`) never lands.
+- `audio` +1 `a_remote_replica_replays_its_replicated_
+  surface_contact` — the full production `surface_voices`
+  path on the synthetic install: a `RemoteReplica` with
+  airborne wheels voices the replicated contact's real
+  spatial voices (ROADSKID1 22050 skid band 0 at the authored
+  0.5–0.75 gain, ROLLWAVE 48000 rolling mixed off the copy's
+  forward speed — same numbers the live legs produce), an
+  unanswerable class (99) stays silent with no rig, and
+  `SurfaceContact::default()` silences like a release.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` green — 0 failures
+(`mm2_app` lib incl. the new encode/apply legs, `net_app`
+56/56 incl. the two new legs and the extended isolation leg,
+`audio` 90/90 incl. the replica-replay leg, `mm2_net` 80/80,
+`net_drive` 3/3).
+
+## Classification / remaining open items
+
+- Implementation choice throughout — the fields, the
+  class-vs-row indirection, the quantization and the replay
+  arm are ours; the retail wire protocol and remote-audio
+  behavior are unrecovered, so no original-behavior claim.
+- Evidence: unit + two-app real-loopback legs through the real
+  encode/publish and decode/apply path, plus a real
+  `surface_voices` run proving voices actually spawn and mix
+  off the replicated contact (the iter-12 rpm leg only proved
+  the component contract — this leg proves the voice).
+- Not exercised: an audible or rendered capture (voices spawn
+  with correct waves/mixes, but no `AudioSink` played and no
+  listener heard them — `AudioReport.sunk` stays 0 in a
+  headless app), a two-process leg carrying a live-resolved
+  contact (the publish leg stages the component), LAN/Internet,
+  the impairment matrix on this tail.
+- Remote audio presentation is now covered end to end
+  structurally: engine (v15) + surface (v16) + replicated
+  impacts. Horn/clutch stay local-owner by design.
+- All other open items unchanged: rematch/lobby-result
+  lifecycle and bulk late-joiner ledger sync (F26), the absent
+  dedicated-authority sim (F26), a lobby-level kick for a
+  dead-but-open link (lobby scope), process-level rejoin
+  (product decision), LAN/Internet scope. Not F25-AC01..06 or
+  F26-AC01..06 completion. Candidate pending external check.
+
+---
+
 # Last iteration — F25-B slice: the remote engine voice —
 # `mm2_net` protocol v15 adds `SnapEntry.rpm` and
 # `netdrive::spawn_remote` binds the pick's authored
