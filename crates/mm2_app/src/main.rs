@@ -282,6 +282,10 @@ struct Cli {
     #[arg(long)]
     bot: bool,
 
+    /// Limit the evidence driver's forward speed (m/s), using throttle/brake inputs.
+    #[arg(long, requires = "bot", value_parser = parse_bot_speed)]
+    bot_speed: Option<f32>,
+
     /// Stationary control: the player vehicle holds its handbrake for
     /// the whole session — it never races, so an event run measures what
     /// the opponents do with no competing local driver (the isolation
@@ -842,6 +846,7 @@ fn main() {
             restart: cli.restart,
             restart_at: cli.restart_at,
             reset_at: cli.reset_at,
+            bot_speed: cli.bot_speed,
             no_pvs: cli.no_pvs,
             horn: cli.horn,
             cockpit: cli.cockpit,
@@ -2102,5 +2107,14 @@ fn print_roster(catalog: &VehicleCatalog, garage: &mm2_game::GarageTable) {
         for f in &failures {
             eprintln!("  {f}");
         }
+    }
+}
+
+fn parse_bot_speed(value: &str) -> Result<f32, String> {
+    let speed: f32 = value.parse().map_err(|_| "expected a speed in m/s")?;
+    if speed.is_finite() && (2.0..=40.0).contains(&speed) {
+        Ok(speed)
+    } else {
+        Err("bot speed must be finite and within 2..=40 m/s".into())
     }
 }

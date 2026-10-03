@@ -250,3 +250,15 @@ cargo test --workspace
 *Midtown Madness 2* is © Microsoft/Angel Studios. This project is an
 unofficial, non-commercial reimplementation effort; it ships no copyrighted
 material and requires users to supply their own game data.
+
+Headless smoke reports also include `travel=<metres>`, `sim=<seconds>`,
+`resets=<count>`, `controls=<throttle steps>t/<brake steps>b/<steer steps>s`
+and `finite=<bool>`. Travel is planar solver displacement sampled at 120 Hz;
+reset teleports and session-generation changes break the segment. `moved=`
+remains displacement from spawn. These metrics describe evidence, not a
+claim that the whole course was completed; read `cp=` and the race result.
+
+`--bot --bot-speed 8` limits the evidence driver to approximately 8 m/s
+through its ordinary throttle/brake inputs. The optional ceiling preserves
+steering, reverse recoveries, vehicle tuning and the default driver behavior.
+It works in windowed and headless sessions; useful for narrow custom streets.

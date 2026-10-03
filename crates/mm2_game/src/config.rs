@@ -652,6 +652,8 @@ pub struct DevOverrides {
     /// session-legal parameter). One-shot; like `finish`/`restart` it
     /// changes the run's course, so it IS in `record_eligibility`.
     pub reset_at: Option<u64>,
+    /// Optional evidence-driver speed ceiling in m/s; never changes vehicle handling.
+    pub bot_speed: Option<f32>,
     /// `--no-pvs`: disable the authored `.cpvs` room-PVS render culling
     /// (F18-A.5) — the retail `cityLevel::EnablePVS(false)` counterpart
     /// and the escape hatch for comparing culled vs unculled captures.
