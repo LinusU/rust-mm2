@@ -151,6 +151,15 @@ fn event_config() -> SessionConfig {
     }
 }
 
+/// `event_config` as a networked authority sees it — the `Host` stamp
+/// `advance_race`'s wire-seat deferral reads.
+fn host_event_config() -> SessionConfig {
+    SessionConfig {
+        authority: SessionAuthority::Host,
+        ..event_config()
+    }
+}
+
 fn any_order_def(countdown: u32) -> RaceDefinition {
     RaceDefinition {
         checkpoints: vec![cp(0.0, 0.0), cp(100.0, 0.0)],
@@ -289,6 +298,17 @@ fn drain_started(app: &mut App) -> usize {
 /// `RigidBody` — physics leaves its `Position` alone between the
 /// segment writes the tests make).
 fn spawn_participant(app: &mut App, def: &RaceDefinition, pos: Vec3) -> (Entity, PlayerId) {
+    spawn_participant_as(app, def, pos, PlayerControl::Local)
+}
+
+/// `spawn_participant` with a caller-chosen control — the networked
+/// authority's wire seats carry `Remote`.
+fn spawn_participant_as(
+    app: &mut App,
+    def: &RaceDefinition,
+    pos: Vec3,
+    control: PlayerControl,
+) -> (Entity, PlayerId) {
     let generation = app.world().resource::<Session>().generation();
     let id = app.world_mut().resource_mut::<Session>().mint_player_id();
     let cfg = VehicleConfig::default();
@@ -296,10 +316,7 @@ fn spawn_participant(app: &mut App, def: &RaceDefinition, pos: Vec3) -> (Entity,
         .world_mut()
         .spawn((
             SessionEntity(generation),
-            Player {
-                id,
-                control: PlayerControl::Local,
-            },
+            Player { id, control },
             RaceProgress::new(def),
             TargetSelection::default(),
             Vehicle {
@@ -1368,6 +1385,133 @@ fn a_non_local_resolution_does_not_end_the_local_race() {
     assert_eq!(phase(&app), SessionPhase::Results);
     assert_eq!(race(&app).phase, RacePhase::Complete);
     assert_eq!(app.world().resource::<ResultLedger>().len(), 2);
+}
+
+/// F25-B networked-authority deferral: on a `Host` session the local
+/// driver's finish does not end `Playing` while a wire seat still
+/// races — everything a remote client's seat lives on (this system's
+/// progress stepping, its input feed, and the snap stream publishing
+/// its terminal edge) gates on the session phase. The last wire
+/// seat's resolution is what ends the session.
+#[test]
+fn a_wire_seat_holds_the_authority_in_playing_until_it_resolves() {
+    let def = any_order_def(0);
+    let mut app = race_app(host_event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(-200.0, 0.0, 0.0));
+    let (wire, _) = spawn_participant_as(
+        &mut app,
+        &def,
+        Vec3::new(-200.0, 0.0, 4.0),
+        PlayerControl::Remote,
+    );
+    run(&mut app, 2); // release + anchor
+
+    // The authority's own seat resolves first — the session holds.
+    set_position(&mut app, car, Vec3::new(200.0, 0.0, 0.0));
+    run(&mut app, 1);
+    assert!(matches!(
+        progress(&app, car).state,
+        ParticipantState::Finished { .. }
+    ));
+    assert_eq!(
+        phase(&app),
+        SessionPhase::Playing,
+        "the authority's own finish must not strand a racing wire seat"
+    );
+    assert_eq!(race(&app).phase, RacePhase::Running);
+
+    // The wire seat's finish is what ends the session — the same step
+    // completes the race.
+    set_position(&mut app, wire, Vec3::new(200.0, 0.0, 4.0));
+    run(&mut app, 1);
+    assert!(matches!(
+        progress(&app, wire).state,
+        ParticipantState::Finished { .. }
+    ));
+    assert_eq!(phase(&app), SessionPhase::Results);
+    assert_eq!(race(&app).phase, RacePhase::Complete);
+    assert_eq!(app.world().resource::<ResultLedger>().len(), 2);
+}
+
+/// The deadline leg of the same deferral contract: the mass `TimedOut`
+/// wave and the `Playing → Results` transition land in one
+/// `advance_race` step — the snap stamped with that tick carries every
+/// owed terminal edge.
+#[test]
+fn the_deadline_resolves_the_wire_seats_and_releases_results() {
+    let def = timed_def(0, 24);
+    let mut app = race_app(host_event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(-200.0, 0.0, 0.0));
+    // A wire seat parked off the course — only the deadline resolves it.
+    let (wire, _) = spawn_participant_as(
+        &mut app,
+        &def,
+        Vec3::new(600.0, 0.0, 600.0),
+        PlayerControl::Remote,
+    );
+    run(&mut app, 2);
+    set_position(&mut app, car, Vec3::new(200.0, 0.0, 0.0));
+    run(&mut app, 1);
+    assert!(matches!(
+        progress(&app, car).state,
+        ParticipantState::Finished { .. }
+    ));
+    assert_eq!(
+        phase(&app),
+        SessionPhase::Playing,
+        "the deadline has not hit yet — the racing wire seat holds the session"
+    );
+
+    // Clock ≈2 ticks per update — the limit resolves the wire seat and
+    // the deferred transition lands in the same step.
+    for _ in 0..40 {
+        app.update();
+        if phase(&app) == SessionPhase::Results {
+            break;
+        }
+    }
+    let wire_state = progress(&app, wire).state.clone();
+    assert!(
+        matches!(wire_state, ParticipantState::TimedOut { .. }),
+        "expected the deadline's TimedOut, got {wire_state:?} (clock {}, phase {:?}, session {:?})",
+        race(&app).clock,
+        race(&app).phase,
+        phase(&app),
+    );
+    assert_eq!(race(&app).phase, RacePhase::Complete);
+    assert_eq!(phase(&app), SessionPhase::Results);
+    assert_eq!(app.world().resource::<ResultLedger>().len(), 2);
+}
+
+/// A wire seat spawning while the race already runs missed the
+/// countdown's release flip — `advance_race` starts it `Racing` on the
+/// next step, the same mid-race join semantics `RaceProgress::join`
+/// scores. (Tests spawn through `new`; production seats arrive via
+/// `join` — the flip covers every `AwaitingStart` ordering edge.)
+#[test]
+fn a_wire_seat_joining_a_running_race_starts_racing() {
+    let def = any_order_def(0);
+    let mut app = race_app(host_event_config(), def.clone());
+    let (_car, _) = spawn_participant(&mut app, &def, Vec3::new(-200.0, 0.0, 0.0));
+    run(&mut app, 2); // released — everyone racing
+
+    let (wire, _) = spawn_participant_as(
+        &mut app,
+        &def,
+        Vec3::new(-200.0, 0.0, 4.0),
+        PlayerControl::Remote,
+    );
+    assert_eq!(
+        progress(&app, wire).state,
+        ParticipantState::AwaitingStart,
+        "the seat landed after the release flip fired"
+    );
+    run(&mut app, 1);
+    assert_eq!(
+        progress(&app, wire).state,
+        ParticipantState::Racing,
+        "a running race starts a wire seat on arrival"
+    );
 }
 
 /// The deadline's `TimedOut` is terminal for the local session too —

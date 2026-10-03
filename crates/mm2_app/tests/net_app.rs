@@ -20,6 +20,7 @@ use std::thread;
 use std::time::Duration;
 
 use bevy::prelude::*;
+use bevy::time::TimeUpdateStrategy;
 
 mod support;
 
@@ -5400,5 +5401,257 @@ fn run_matrix_cell(cell: &MatrixCell, seed: u64) {
         host.update();
         client.update();
         thread::sleep(Duration::from_millis(4));
+    }
+}
+
+/// F25-B repair leg, the v14 candidate's blocking finding over the
+/// real path: the authority's own `Playing → Results` used to kill both
+/// producers a racing remote client lives on — `advance_race`
+/// early-returns outside `Playing`, `publish_snapshots` outside the
+/// live phases — so a host-first finish or the event deadline stranded
+/// every unresolved client on a dead stream. The repaired contract
+/// holds the hosted session in `Playing` until every `Remote` wire
+/// seat resolves, then owes the wire exactly one `Results`-phase snap
+/// at the frozen transition tick. Both halves run real systems here —
+/// the hosted app with `advance_race` in `FixedLast` like `main.rs`
+/// schedules it, the joined client through `apply_snapshots` — nothing
+/// stages a `Snap` by hand.
+#[test]
+fn the_deferred_authority_delivers_the_wire_seats_terminal_edge() {
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let mut host = host_app(vfs, link);
+    // The real race driver on the fixed step, scheduled like
+    // `main.rs` does — the deferral and the deadline both live on
+    // this system's stepping. One fixed step per update keeps the
+    // clock's arrival order deterministic.
+    host.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+        1.0 / 60.0,
+    )));
+    host.add_systems(
+        FixedLast,
+        (
+            mm2_app::race::reanchor_teleported_participants,
+            mm2_app::race::advance_race,
+        )
+            .chain(),
+    );
+
+    // The joined client — the same bridge wiring `mm2 --join` runs.
+    let link = LobbyLink::join(
+        addr,
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join failed");
+    let mut client = bridge_app(mount(install.path()), link);
+    {
+        let link = client.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    until_ready(&mut client);
+
+    // The operator's start — `drive_host` mints the generation on the
+    // host half, the `Start` frame begins the client's session.
+    host.world()
+        .resource::<HostLink>()
+        .command_sender()
+        .send(HostCommand::Start)
+        .unwrap();
+    spin(&mut host, |a| {
+        a.world().resource::<Session>().config().is_some()
+    });
+    until_begun(&mut client);
+
+    // Stand both halves live under a running, deadline-bearing race —
+    // the `Ready → Playing` hop the load legs take, plus the
+    // `RaceState` the event producer inserts. `wire_race_def`'s single
+    // checkpoint is the host seat's finish; its `time_limit` is the
+    // parked remote seat's only resolution.
+    let mut def = wire_race_def(0);
+    def.time_limit_ticks = Some(40);
+    for app in [&mut host, &mut client] {
+        let generation = {
+            let mut session = app.world_mut().resource_mut::<Session>();
+            session.transition(SessionPhase::Ready).unwrap();
+            session.transition(SessionPhase::Playing).unwrap();
+            session.generation()
+        };
+        let mut race = mm2_game::RaceState::new(def.clone(), generation);
+        race.phase = mm2_game::RacePhase::Running;
+        app.world_mut().insert_resource(race);
+    }
+
+    // The host's own seat — the shape `load_session_world` leaves it:
+    // wire id 0, `Local` control, `Racing` under a running race.
+    let mut seat_progress = mm2_game::RaceProgress::new(&def);
+    seat_progress.state = mm2_game::ParticipantState::Racing;
+    let host_seat = host
+        .world_mut()
+        .spawn((
+            NetPlayer(0),
+            Player {
+                id: mm2_game::PlayerId(0),
+                control: PlayerControl::Local,
+            },
+            netdrive::ResetEpoch(0),
+            mm2_game::ObjectIdentity(mm2_game::ObjectId {
+                generation: 1,
+                slot: 100,
+            }),
+            seat_progress,
+            avian3d::prelude::Position(Vec3::new(0.0, 0.0, -100.0)),
+            avian3d::prelude::Rotation::default(),
+            avian3d::prelude::LinearVelocity::default(),
+            avian3d::prelude::AngularVelocity::default(),
+        ))
+        .id();
+
+    // The client's own seat — `PlayerVehicle`-marked so the reconcile
+    // stamps its `NetPlayer`, and `RaceProgress`-tracked like the
+    // load path leaves it.
+    let mut client_progress = mm2_game::RaceProgress::new(&def);
+    client_progress.state = mm2_game::ParticipantState::Racing;
+    let client_seat = client
+        .world_mut()
+        .spawn((
+            PlayerVehicle,
+            Player {
+                id: mm2_game::PlayerId(1),
+                control: PlayerControl::Local,
+            },
+            mm2_game::AuthorityRole::Predicted,
+            client_progress,
+            avian3d::prelude::Position::default(),
+            avian3d::prelude::Rotation::default(),
+            avian3d::prelude::LinearVelocity::default(),
+            avian3d::prelude::AngularVelocity::default(),
+        ))
+        .id();
+    spin(&mut client, |a| {
+        a.world().get::<NetPlayer>(client_seat).is_some()
+    });
+
+    // The wire seat lands through the real reconcile — spawned into a
+    // running race, `RaceProgress::join` scores it `Racing` on arrival
+    // rather than stranding `AwaitingStart` past the missed release
+    // flip.
+    spin_mut(&mut host, |a| {
+        a.world_mut()
+            .query_filtered::<&mm2_game::RaceProgress, With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some_and(|p| p.state == mm2_game::ParticipantState::Racing)
+    });
+    // The client meanwhile holds the authority's copy — same reconcile.
+    spin_mut(&mut client, |a| {
+        a.world_mut()
+            .query_filtered::<Entity, With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some()
+    });
+
+    // The authority's own seat finishes first — the swept segment
+    // through the lone checkpoint mints its result on the wire clock.
+    host.update(); // anchor `last_position`
+    *host
+        .world_mut()
+        .get_mut::<avian3d::prelude::Position>(host_seat)
+        .unwrap() = avian3d::prelude::Position(Vec3::new(0.0, 0.0, -300.0));
+    spin_mut(&mut host, |a| {
+        matches!(
+            a.world()
+                .get::<mm2_game::RaceProgress>(host_seat)
+                .map(|p| &p.state),
+            Some(mm2_game::ParticipantState::Finished { .. })
+        )
+    });
+
+    // The deferral: the host holds `Playing` — progress stepping and
+    // the snap stream stay alive for the racing wire seat. The client
+    // keeps applying frames through the window.
+    let applied_at_finish = client
+        .world()
+        .resource::<netdrive::NetDriveReport>()
+        .snaps_applied;
+    for _ in 0..6 {
+        host.update();
+        client.update();
+    }
+    assert_eq!(
+        session_phase(&host),
+        SessionPhase::Playing,
+        "the authority's own finish must not strand a racing wire seat"
+    );
+    assert_eq!(
+        session_phase(&client),
+        SessionPhase::Playing,
+        "the wire's word leaves the racing client's session alone"
+    );
+    assert!(
+        client
+            .world()
+            .resource::<netdrive::NetDriveReport>()
+            .snaps_applied
+            > applied_at_finish,
+        "the snap stream outlived the authority's own finish"
+    );
+
+    // The deadline resolves the parked wire seat — the mass `TimedOut`
+    // mint and the `Playing → Results` transition land in one
+    // `advance_race` step, so the snap stamped with that tick is the
+    // terminal row's only carrier. (The clock is set to the limit's
+    // edge rather than idled there — the deferral window above is the
+    // behavior under test.)
+    host.world_mut().resource_mut::<mm2_game::RaceState>().clock = 37;
+    spin(&mut host, |a| session_phase(a) == SessionPhase::Results);
+    assert_eq!(
+        host.world().resource::<mm2_game::RaceState>().phase,
+        mm2_game::RacePhase::Complete
+    );
+
+    // The owed `Results`-phase frame publishes exactly once — the
+    // publisher does not stream a quiescent phase.
+    let sent_at_results = host
+        .world()
+        .resource::<netdrive::NetDriveReport>()
+        .snaps_sent;
+    for _ in 0..4 {
+        host.update();
+    }
+    assert_eq!(
+        host.world()
+            .resource::<netdrive::NetDriveReport>()
+            .snaps_sent,
+        sent_at_results,
+        "the Results debt is the one unpublished transition frame"
+    );
+
+    // And it lands: the client's own terminal edge mints the same
+    // `TimedOut` `advance_race` recorded on the authority and ends its
+    // `Playing` — the stranded-client hang is the regression this
+    // leg exists to kill.
+    spin(&mut client, |a| session_phase(a) == SessionPhase::Results);
+    {
+        let state = &client
+            .world()
+            .get::<mm2_game::RaceProgress>(client_seat)
+            .unwrap()
+            .state;
+        assert!(
+            matches!(state, mm2_game::ParticipantState::TimedOut { .. }),
+            "expected the replicated TimedOut, got {state:?}"
+        );
+        let ledger = client.world().resource::<mm2_game::ResultLedger>();
+        assert!(
+            ledger
+                .iter()
+                .any(|r| matches!(r.outcome, mm2_game::SessionOutcome::TimedOut { .. })),
+            "the wire's word minted the client's own result row"
+        );
     }
 }

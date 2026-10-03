@@ -24,10 +24,17 @@
 //!   expiry tick itself still counts — then every participant still
 //!   unresolved records one [`SessionOutcome::TimedOut`] (DSN-7).
 //!   All-resolved marks the race `Complete`. A *local* participant's
-//!   terminal resolution (`Finished`/`TimedOut`) also moves the session
-//!   `Playing → Results` on the same step (UI-5: a results screen
-//!   follows each race) — a remote/AI participant resolving while the
-//!   local driver still races changes nothing.
+//!   terminal resolution (`Finished`/`TimedOut`) moves the session
+//!   `Playing → Results` (UI-5: a results screen follows each race) —
+//!   deferred on a networked authority while a wire seat still races:
+//!   both producers a remote client lives on gate on `Playing` (this
+//!   system's stepping and `publish_snapshots`), so ending on the
+//!   local edge alone would strand every unresolved remote — inputs,
+//!   standings and its own terminal edge included. The deferral ends
+//!   when the last `Remote` participant resolves, and one
+//!   `Results`-phase publish carries the final rows. A remote/AI
+//!   participant resolving while the local driver still races changes
+//!   nothing.
 //! - anything else (`Paused`, `Unloading`, …): frozen — the race clock
 //!   and every swept segment hold still, so pause/resume is
 //!   deterministic and no timer runs during teardown.
@@ -46,8 +53,8 @@ use mm2_assets::Vfs;
 use mm2_game::{
     Checkpoint, CheckpointRule, Difficulty, EventRef, ParticipantState, Player, PlayerControl,
     ProgressOutcome, RACE_TICK_HZ, RaceDefinition, RacePhase, RaceProgress, RaceStarted, RaceState,
-    ResultLedger, RouteGateLine, Session, SessionEntity, SessionOutcome, SessionPhase,
-    SessionResult,
+    ResultLedger, RouteGateLine, Session, SessionAuthority, SessionEntity, SessionOutcome,
+    SessionPhase, SessionResult,
 };
 use mm2_vehicle::Teleported;
 use tracing::warn;
@@ -345,8 +352,19 @@ pub fn advance_race(
             }
             race.clock += 1;
             let mut pending = false;
-            let mut local_resolved = false;
             for (player, position, mut progress, line) in &mut participants {
+                // A wire seat spawned after the countdown's release
+                // flip — the reconcile's spawn lands on the next
+                // command flush, which can sit past the releasing
+                // fixed step — never saw it. It races on arrival like
+                // `RaceProgress::join` scores a mid-race joiner rather
+                // than pinning the race pending on a seat that can
+                // never start.
+                if progress.state == ParticipantState::AwaitingStart
+                    && player.control == PlayerControl::Remote
+                {
+                    progress.state = ParticipantState::Racing;
+                }
                 // AwaitingStart during Running counts as pending: the
                 // race cannot complete with a participant that never
                 // started. Finished participants are done.
@@ -389,9 +407,6 @@ pub fn advance_race(
                         race_ticks: race.clock,
                         result: id,
                     };
-                    if player.control == PlayerControl::Local {
-                        local_resolved = true;
-                    }
                 } else {
                     pending = true;
                 }
@@ -426,9 +441,6 @@ pub fn advance_race(
                             race_ticks: race.clock,
                             result: id,
                         };
-                        if player.control == PlayerControl::Local {
-                            local_resolved = true;
-                        }
                     }
                 }
                 pending = false;
@@ -442,7 +454,45 @@ pub fn advance_race(
             // runs once the session leaves `Playing`). A non-local
             // participant resolving while the local driver still races
             // never ends the local race.
-            if local_resolved {
+            //
+            // Networked-authority deferral (F25-B): on a *hosted*
+            // session, `Playing → Results` waits until no `Remote`
+            // participant is unresolved. Everything a remote client
+            // lives on gates on `Playing` — this system's stepping (an
+            // unresolved remote `RaceProgress` would never advance or
+            // mint its terminal edge again), the wire input feed and
+            // `publish_snapshots` (even the rows minted on the
+            // transition tick itself would die with the stream). The
+            // deferral ends when the last wire seat resolves — the
+            // deadline's mass-timeout clears them all in one pass — or
+            // departs (a despawned entity stops counting). The
+            // transition's own fixed step is the terminal rows' mint,
+            // so `publish_snapshots` owes the wire exactly one
+            // `Results`-phase frame at the frozen transition tick. A
+            // stalled-but-connected remote can hold the session here —
+            // the host's results screen waits for its roster by design;
+            // a wire-seat stall/kick policy is lobby scope. A `Local`
+            // session keeps UI-5's edge exactly: `Remote` there is a
+            // simulated opponent's stamp, not a wire seat.
+            let hosted = session
+                .config()
+                .is_some_and(|c| c.authority == SessionAuthority::Host);
+            let local_done = participants.iter().any(|(player, _, progress, _)| {
+                player.control == PlayerControl::Local
+                    && matches!(
+                        progress.state,
+                        ParticipantState::Finished { .. } | ParticipantState::TimedOut { .. }
+                    )
+            });
+            let wire_open = hosted
+                && participants.iter().any(|(player, _, progress, _)| {
+                    player.control == PlayerControl::Remote
+                        && matches!(
+                            progress.state,
+                            ParticipantState::AwaitingStart | ParticipantState::Racing
+                        )
+                });
+            if local_done && !wire_open {
                 session
                     .transition(SessionPhase::Results)
                     .expect("Playing → Results is a legal transition");

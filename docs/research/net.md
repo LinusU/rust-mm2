@@ -223,8 +223,9 @@ and never steps, so without the row a joined event session sat in
 `send_drive_input` never sent, `Session::is_playing()` gating on
 the phase the countdown feeds. `publish_snapshots` emits the row
 through `Ready|Countdown|Playing` while the session's `RaceState`
-is live — stale-generation residue (a resource teardown has not
-dropped yet) publishes nothing, so receivers read `race: None`,
+is live — plus exactly one `Results`-phase frame at the transition
+tick (v14 below); stale-generation residue (a resource teardown has
+not dropped yet) publishes nothing, so receivers read `race: None`,
 never a foreign numbering's state. The client stages the row off
 the pose watermark on its own monotonic key — `(generation, phase
 rank, progress)`, where the countdown's *remaining* inverts and
@@ -268,7 +269,30 @@ the resolution already on the participant — is a non-conforming
 authority's word and drops counted, as does an unnamed
 `prog_state` discriminant. Tails ride the seat entry's own
 freshness: a stale pose frame drops them with it, so a reordered
-snap can never regress a standing. What the wire still does not
+snap can never regress a standing. The authority side reshapes
+UI-5's edge rule on a *hosted* session: `Playing → Results` waits
+until no `Remote` participant remains unresolved, because every
+producer a remote client lives on gates on `Playing` —
+`advance_race` steps the wire seats' progress, the input feed and
+`publish_snapshots` run only in the live phases — so an authority
+ending its race on its own finish (or on the deadline's mass
+`TimedOut` wave) would strand every still-racing client on a dead
+stream, terminal rows minted on the transition tick itself
+included. The deferral ends when the last wire seat resolves or
+departs (a despawned entity stops counting), and the transition's
+own fixed step owes the wire exactly one more frame:
+`publish_snapshots` emits a single `Results`-phase snap at the
+transition's `(generation, tick)` — the session clock freezes in
+`Results`, so the debt is exactly one unpublished frame, never a
+resumed stream. A stalled-but-connected remote can hold the host
+in `Playing` — the host's results screen waits for its roster by
+design (implementation choice, not a verified retail behavior); a
+wire-seat stall/kick policy is lobby scope. A `Local` session
+keeps UI-5's edge verbatim — `Remote` there is a simulated
+opponent's stamp, not a wire seat — and a wire seat spawning
+mid-race scores `Racing` on arrival through `RaceProgress::join`,
+with `advance_race` flipping any `Remote` `AwaitingStart` seat
+that still missed the release. What the wire still does not
 carry: rematch/lobby-result lifecycle (F26) and a bulk
 late-joiner ledger sync — standings arrive incrementally as each
 seat's tail lands, which is complete once every tracked entry

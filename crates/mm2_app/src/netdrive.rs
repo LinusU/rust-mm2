@@ -46,7 +46,18 @@
 //!   countdown remainder and clock on every snapshot, and a predicted
 //!   client mirrors them — its own `advance_race` is authority-gated
 //!   and never steps, so without the row a joined event's countdown
-//!   would hold control forever.
+//!   would hold control forever. The v14 tail adds each seat's
+//!   [`RaceProgress`] (F25-B) — lifecycle discriminant, resolution
+//!   tick, `Ordered` counters, cleared-gate mask, evidence counters —
+//!   so a predicted client mirrors every seat's standing and a
+//!   terminal edge mints into its own `ResultLedger`, the local seat's
+//!   edge ending `Playing → Results` exactly like a simulated finish.
+//!   Because both producers a remote seat lives on gate on `Playing`,
+//!   the authority defers its own `Playing → Results` until every
+//!   `Remote` participant resolves or departs (see `advance_race`) —
+//!   and this publisher then owes the wire exactly one `Results`-phase
+//!   frame at the frozen transition tick, the terminal rows' only
+//!   carrier.
 //! - **Client** (`SessionAuthority::Remote` → `Predicted`): remote cars
 //!   are kinematic copies blended between the two newest snapshots
 //!   ([`RemoteLerp`]), marked [`RemoteReplica`] so the local sim never
@@ -82,11 +93,11 @@
 //! reconcile puts each remote car on its own.
 //!
 //! Everything here is loopback-scoped groundwork like the rest of F24/F25:
-//! no lag compensation, no replicated checkpoint progress or
-//! finish/results state (the v13 row mirrors phase/clock only — F26
-//! owns the rest), and a remote copy's breakaway fragment carries only
-//! the car's replicated motion — the per-part launch impulse never
-//! rides the wire (named gaps, not silent behavior).
+//! no lag compensation, no rematch/lobby-result lifecycle or bulk
+//! late-joiner ledger sync (F26 owns those), and a remote copy's
+//! breakaway fragment carries only the car's replicated motion — the
+//! per-part launch impulse never rides the wire (named gaps, not
+//! silent behavior).
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -1485,10 +1496,13 @@ fn spawn_remote(
     // Race progress on the shared definition — a remote participant in
     // an event scores like any other driver on the authority that owns
     // it (the host); the component is inert on predicted copies.
+    // `join`, not `new`: a spawn landing while the race already runs
+    // starts `Racing` — `AwaitingStart` here would never see the
+    // countdown's release flip (it fired before the entity existed).
     if let Some(race) = race {
         commands
             .entity(vehicle)
-            .insert(RaceProgress::new(&race.definition));
+            .insert(RaceProgress::join(&race.definition, race));
     }
     match &def {
         Some(def) => {
@@ -1938,6 +1952,10 @@ pub fn publish_snapshots(
     // The v13 race row's source — `None` on a raceless session (cruise,
     // dev worlds), so the field stays `None` on the wire too.
     race: Option<Res<RaceState>>,
+    // The `(wire generation, session tick)` of the last broadcast —
+    // bounds the `Results`-phase debt below to the one unpublished
+    // transition frame.
+    mut published: Local<Option<(u64, u64)>>,
     players: Query<SnapSourceRow<'_>, With<Player>>,
     // Every trailer towing a `NetPlayer` seat — the host's own rig's
     // trailer included — publishes under the owner's wire id.
@@ -1957,10 +1975,22 @@ pub fn publish_snapshots(
     // pre-`Start` or post-session stream never replays stale hits into
     // the next publish.
     let drained: Vec<&ImpactEvent> = impacts.read().collect();
+    let key = (session.wire_generation(), session.tick());
+    // `Results` owes the wire exactly one more frame (F25-B): the fixed
+    // step that resolves the last owed wire seat mints the terminal
+    // progress rows and moves `Playing → Results` atomically — the snap
+    // stamped with that transition tick is their only carrier. The
+    // session clock freezes in `Results` (`advance_session_tick` is
+    // `Playing`-only), so the debt is exactly one unpublished
+    // `(generation, tick)`; everything earlier already left inside the
+    // live phases `advance_race`'s wire-seat deferral preserves.
+    let owed =
+        *session.phase() == SessionPhase::Results && published.is_none_or(|last| last != key);
     if !matches!(
         session.phase(),
         SessionPhase::Ready | SessionPhase::Countdown | SessionPhase::Playing
-    ) {
+    ) && !owed
+    {
         return;
     }
     // A seat row is only progress-honest while the session actually
@@ -2133,6 +2163,7 @@ pub fn publish_snapshots(
         })
         .is_ok()
     {
+        *published = Some(key);
         report.snaps_sent += 1;
         report.impacts_sent += sent_rows;
     }
