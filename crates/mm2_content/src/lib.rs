@@ -13,6 +13,7 @@
 pub mod assemble;
 pub mod availability;
 pub mod catalog;
+pub mod city_info;
 pub mod convert;
 pub mod crashcourse;
 pub mod damage;
@@ -36,6 +37,7 @@ pub use availability::availability_table;
 pub use catalog::{
     CatalogEntry, DepSet, EXPECTED_STOCK_ROSTER, EntryStatus, VehicleCatalog, VehicleClass,
 };
+pub use city_info::CityInfo;
 pub use convert::{
     ConversionReport, ConvertInput, Converted, Provenance, ReportEntry, WheelGeom, convert,
     convert_trailer,

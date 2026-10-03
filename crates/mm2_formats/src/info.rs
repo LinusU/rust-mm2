@@ -1,5 +1,5 @@
-//! Parser for MM2 vehicle metadata files (`tune/<id>.info`, `.inf`,
-//! `.vinfo`).
+//! Parser for MM2 metadata files: vehicle `tune/<id>.info` (`.inf`,
+//! `.vinfo`) and city `tune/<city>.cinfo`.
 //!
 //! The format is line-oriented `Key=Value` text. Keys may contain spaces
 //! (`Top Speed`), values may contain spaces and pipe-separated lists
