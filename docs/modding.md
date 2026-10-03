@@ -104,3 +104,23 @@ the VFS — the limitation is on the import side, not resolution.
   the fastest way to see whether an override is live.
 - Conflicts are silent by design (deterministic last-wins); use
   `mm2-inspect list` + `lookup` to verify which file is live.
+
+## Portable cities with multiple PSDL parts
+
+A custom city may provide a sibling `city/<name>.chunks` text file. Its first
+non-comment line is `MM2_CHUNKS 1`; subsequent lines are logical VFS paths to
+additional PSDL files, for example `city/mycity.parts/east.psdl`. All parts
+use the same metre coordinates and materials resolved through the VFS. The
+primary file retains its default spawn. Each part owns an independent vertex
+pool, allowing maps larger than PSDL's 16-bit vertex indices.
+
+The loader validates every listed file before spawning geometry and reports
+missing or malformed parts as fatal. Paths must be relative, unique, traversal
+free, and must not list the primary file. At most 128 additional parts are
+accepted. Nested manifests and CPVS visibility files are rejected: cross-part
+visibility is not yet supported. Room IDs are offset into one unique city
+namespace; per-part `.water` files retain their own water bounds and levels.
+Collision surfaces and city diagnostic counts include every part.
+
+This optional companion format is a rust-mm2 extension, not a claim of retail
+MM2 support. A single PSDL without this companion keeps the existing behavior.

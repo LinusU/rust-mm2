@@ -175,6 +175,20 @@ impl CityWater {
         }
     }
 
+    /// Append a separately authored chunk without turning water into a global
+    /// below-level kill plane. Each room keeps its own bound and polygon.
+    pub(crate) fn append_chunk(&mut self, mut other: Self, room_offset: u32) {
+        other.offset_room_ids(room_offset);
+        self.rooms.extend(other.rooms);
+        self.skipped += other.skipped;
+    }
+
+    pub(crate) fn offset_room_ids(&mut self, offset: u32) {
+        for room in &mut self.rooms {
+            room.id += offset;
+        }
+    }
+
     /// The authored water level (world Y).
     pub fn level(&self) -> f32 {
         self.level
@@ -218,6 +232,35 @@ impl CityWater {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn chunk_water_retains_local_bounds_with_distinct_room_ids() {
+        let mut first = CityWater::build(
+            &WaterDef {
+                level: 0.2,
+                refs: vec![1],
+            },
+            &psdl_with_water(0.0, 2.0),
+            None,
+        );
+        let mut second_psdl = psdl_with_water(4.0, 6.0);
+        for point in &mut second_psdl.vertices {
+            point[0] += 20.0;
+        }
+        let second = CityWater::build(
+            &WaterDef {
+                level: 4.2,
+                refs: vec![1],
+            },
+            &second_psdl,
+            None,
+        );
+        first.append_chunk(second, 2);
+        assert_eq!(first.room_ids().collect::<Vec<_>>(), vec![1, 3]);
+        assert!(first.is_deadly(Vec3::new(24.0, 4.0, 4.0)));
+        assert!(!first.is_deadly(Vec3::new(4.0, 2.0, 4.0)));
+        assert!(!first.is_deadly(Vec3::new(14.0, -5.0, 4.0)));
+    }
+
     use mm2_formats::psdl::{PerimeterPoint, PsdlRoom};
 
     /// A two-room PSDL: room 1 is a flat water plane at `water_y`
