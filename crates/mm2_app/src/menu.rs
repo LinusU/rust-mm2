@@ -1027,6 +1027,7 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
             })
             .collect(),
         Screen::EventTable { city } => {
+            let bound = data.bound.clone();
             let catalog = data.catalog_of(vfs, city);
             TABLE_KINDS
                 .iter()
@@ -1041,8 +1042,31 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                         None if rows_found == 0 => Err("no authored rows".to_string()),
                         None => Ok(()),
                     };
+                    // Won counts only the table's authored events, so a
+                    // stale record for a since-removed row never
+                    // inflates it.
+                    let progress = match &bound {
+                        _ if rows_found == 0 => "no races".to_string(),
+                        Some(p) => {
+                            let won = catalog
+                                .events
+                                .iter()
+                                .filter(|e| e.event_ref.table == *kind)
+                                .filter(|e| {
+                                    p.event(&mm2_game::EventKey {
+                                        city: e.event_ref.city.clone(),
+                                        table: *kind,
+                                        stem: e.stem.clone(),
+                                    })
+                                    .is_some_and(|r| r.is_beaten())
+                                })
+                                .count();
+                            format!("{won}/{rows_found} won")
+                        }
+                        None => format!("{rows_found} races"),
+                    };
                     Row {
-                        text: format!("{} ({rows_found})", table_name(*kind)),
+                        text: format!("{} ({progress})", table_name(*kind)),
                         enabled,
                         action: Action::Push(Screen::EventList {
                             city: city.clone(),

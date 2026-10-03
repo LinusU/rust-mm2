@@ -838,6 +838,8 @@ fn event_rows_carry_real_availability() {
         assert!(crash.enabled.is_err());
         let blitz = rows.iter().find(|r| r.text.starts_with("Blitz")).unwrap();
         assert!(blitz.enabled.is_err());
+        // No driver, no progress to count — just the table size.
+        assert_eq!(rows[0].text, "Checkpoint (4 races)");
     }
     activate_row(&mut app, "Checkpoint");
 
@@ -974,6 +976,10 @@ fn event_rows_mark_won_races() {
     press(&mut app, KeyCode::Escape);
     activate_row(&mut app, "Events");
     activate_row(&mut app, "testcity");
+    // The race-type selector counts won events against the table.
+    let texts: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
+    assert_eq!(texts[0], "Checkpoint (1/4 won)", "{texts:?}");
+    assert_eq!(texts[1], "Blitz (no races)", "{texts:?}");
     activate_row(&mut app, "Checkpoint");
     let won = |stem: &str| {
         shell(&app)
