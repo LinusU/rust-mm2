@@ -1,3 +1,140 @@
+# Last iteration — F25-B race-progress slice: protocol v14
+# `SnapEntry` progress tail — every tracked seat's `RaceProgress`
+# (lifecycle discriminant, resolution tick, lap/gate counters,
+# cleared-gate mask, evidence counters) rides its own snap row, so a
+# joined client whose rule pipeline is authority-gated mirrors every
+# seat's standing, and a terminal edge mints the local `SessionResult`
+# / moves `Playing → Results` on the wire's word (new-run iteration 6)
+
+Implementation iteration on `ralph/night` (baseline `8da6c07` — the
+v13 race-lifecycle slice; external verify + review pass with
+verification gaps only). Selected slice: the F25-B remainder's
+per-participant leg, named "F26 territory" in the last handoff but
+landable now — the v13 row mirrored the race's *lifecycle*, yet
+`advance_race` is authority-gated, so a joined client's
+`RaceProgress` never advances: checkpoints never clear, no seat ever
+resolves, and `Playing` never reaches `Results` even though the
+client can now drive. The v14 tail replicates each seat's standing;
+a terminal edge lands exactly like `advance_race` records it on the
+authority. Rematch/lobby-result lifecycle and a bulk late-joiner
+ledger sync stay F26 — deliberately off this row.
+
+## What landed
+
+- `mm2_net` protocol v14 (`PROTOCOL_VERSION` 13→14): `SnapEntry`
+  gains a 33-byte progress tail — `prog_state` (u8 — the
+  `ParticipantState` discriminant opaque on the wire, named in
+  `mm2_app`: 0 awaiting, 1 racing, 2 finished, 3 timed out),
+  `prog_ticks` (u64 — the terminal state's resolution race tick),
+  `prog_lap`/`prog_next` (u32 — the `Ordered` rule's counters),
+  `prog_cleared` (u64 bitmask — bit *i* = gate *i* cleared in
+  authored order; past bit 63 unexpressible, far past any authored
+  count) and `prog_crossings`/`prog_route_clears` (u32 evidence
+  counters). Per-entry 66→99 B; worst-case snap 4,738 B — still far
+  under `MAX_FRAME`. `SnapEntry` derives `Default` so existing
+  literals spread the tail.
+- `mm2_game::RaceProgress` gains `cleared_mask()` (flags pack
+  low-bit-first) and `apply_replicated(cleared, next, lap,
+  crossings, route_clears)` — the wire's verbatim write path for
+  the rule counters. `state` is deliberately *not* set there: the
+  terminal edge's result mint needs the session, so the caller owns
+  the lifecycle.
+- `publish_snapshots` builds an `ObjectId → &RaceProgress` map off
+  `(&ObjectIdentity, &RaceProgress), With<Player>` only while the
+  session's `RaceState` is live and non-stale, and `encode_progress`
+  writes each seat's tail. A seat the race does not track — no
+  component, or a raceless/stale `RaceState` — publishes the
+  all-zero tail: "not tracked" reads as never-started, never a
+  fabricated row.
+- `apply_snap_frame` runs `apply_progress` on every named wire seat
+  carrying `RaceProgress` — *before* the own-seat branch's `break`,
+  so the local participant resolves on the wire's word too.
+  `decode_progress` names the discriminant (an unnamed one drops
+  counted); `apply_replicated` lands the counters verbatim; a
+  terminal edge mints a `SessionResult` in this process's local
+  `ResultId` namespace (the authority's id never rides the wire),
+  stamps it with the snap's session tick, records it deduplicated
+  into this process's `ResultLedger`, sets `Finished`/`TimedOut`,
+  and — only for a `PlayerControl::Local` seat — moves `Playing →
+  Results`, UI-5's local-resolution rule mirrored. A recorded
+  resolution is final: an identical terminal row is idempotent
+  state, a conflicting one (rewound lifecycle, different outcome or
+  tick) drops counted rather than rewriting a minted result.
+- `RaceMirror` grew: the `RaceProgress` borrow is now a `ParamSet`
+  (`p0` walks every participant for the countdown-release flip,
+  `p1` resolves a `NetPlayer` seat's tail inside the seat loop) and
+  the `ResultLedger` borrow joins it. `NetDriveReport` gains
+  `progress_applied`/`progress_dropped`; the smoke `net=` field
+  appends `prog<a>a/<d>d` (0 on the authority, raceless sessions
+  and untracked seats); `net_drive`'s parser decodes the cells.
+- `docs/research/net.md`: `PROTOCOL_VERSION = 14`, the v13→v14
+  history paragraph (tail shape, zero-tail semantics, the mint/
+  record/resolve contract, the rewind-refusal), payload table
+  (entry 99 B), worst-case bound 4,738 B, the 60 Hz/250 Hz budget
+  arithmetic and the bounds note all updated.
+
+## Tests
+
+- `mm2_net` roundtrip fixtures carry discriminating tail values
+  (finished seat: state 2/ticks 4200/mask `0b101`; racing seat:
+  state 1/`next` 1); the oversize fixture literals spell the zero
+  tail explicitly.
+- `mm2_game` +1: `progress_replication_round_trips_the_rule_counters`
+  — mask packs low-bit-first across a skipped gate, counters round-
+  trip verbatim, `state` untouched, `u64::MAX` mirrors a full
+  standing.
+- `netdrive` +1: `a_progress_tail_mirrors_the_seats_race_standing` —
+  the whole client leg in-process: counters land verbatim on the
+  named seat (an absent row leaves the other seat untouched), the
+  remote terminal edge mints + records without ending `Playing`,
+  an identical redelivery is silent, a conflicting rewind and an
+  unnamed discriminant drop counted, and the *local* seat's finish
+  on the wire's word moves `Playing → Results` with the ledger at 2.
+- `net_app` +2 over real loopback:
+  `a_snap_publishes_the_seats_race_progress` (host leg — the
+  authority's finished standing rides the wire verbatim, the
+  untracked seat's tail reads all-zero) and
+  `a_snap_progress_tail_mirrors_and_resolves_the_joined_client`
+  (client leg — mid-race counters mirror, the remote terminal edge
+  mints into the client's own `ResultLedger` while `Playing` holds,
+  the local edge resolves the session, the rewound row drops).
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --workspace
+--all-targets --all-features -- -D warnings` clean (the `RaceMirror`
+`ParamSet` factored into a `RaceProgressQueries` alias for
+`type_complexity`); `cargo test --workspace` green — 91 suites,
+0 failures (`mm2_app` lib 85/85, `net_app` 46/46, `mm2_game` race
+43/43, `mm2_net` 80/80, `net_drive` 3/3).
+
+## Classification / remaining open items
+
+- Implementation choice throughout — the tail shape, the opaque
+  discriminant encoding, the local-namespace result mint and the
+  rewind-refusal are ours; the retail wire protocol is unrecovered,
+  so no original-behavior claim. UI-5's local-resolution rule is
+  the only mirrored original-verified behavior.
+- Evidence: unit + integration legs over real loopback. No
+  process-level leg for this field (`net_drive`'s dev cruise
+  carries no `RaceState` — the `prog` cells read 0 there by
+  design), no end-to-end event-session leg through
+  `load_session_world` (both integration tests stage the phase
+  transitions and `RaceState` by hand — the load path needs the
+  asset stack), nothing rendered or played by hand, no retail
+  content, no LAN/Internet leg.
+- F25-B remaining scope: rematch/lobby-result lifecycle
+  replication and bulk late-joiner ledger sync (F26 territory —
+  standings arrive incrementally per tail; a mid-race joiner's
+  ledger is complete only once every tracked seat's terminal row
+  has landed), LAN/Internet scope, and the process-level rejoin
+  leg (needs a client rejoin feature that does not exist — link
+  `Closed` is terminal by design; recorded as a product-scope
+  decision). This slice is not F25-AC01..06 or F26-AC01..06
+  completion.
+
+---
+
 # Last iteration — F25-B race-lifecycle slice: protocol v13
 # `Snap.race` — the authority's race phase, countdown remainder and
 # race clock replicated to joined clients, so a predicted session's
