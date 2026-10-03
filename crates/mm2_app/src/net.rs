@@ -1769,6 +1769,7 @@ mod tests {
             canonical_info: true,
             unlock_score: 0,
             unlock_flags: 0,
+            stats: mm2_content::DisplayStats::default(),
             class: mm2_content::VehicleClass::Stock,
             deps: mm2_content::DepSet::default(),
             status: if ready {

@@ -35,7 +35,8 @@ pub use assemble::{
 };
 pub use availability::availability_table;
 pub use catalog::{
-    CatalogEntry, DepSet, EXPECTED_STOCK_ROSTER, EntryStatus, VehicleCatalog, VehicleClass,
+    CatalogEntry, DepSet, DisplayStats, EXPECTED_STOCK_ROSTER, EntryStatus, VehicleCatalog,
+    VehicleClass,
 };
 pub use city_info::CityInfo;
 pub use convert::{

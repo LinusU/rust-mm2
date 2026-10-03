@@ -116,6 +116,8 @@ pub struct CatalogEntry {
     /// Authored `UnlockFlags`, verbatim (UNK-6 — nonzero stock values
     /// do not correlate with the reward-locked set).
     pub unlock_flags: u32,
+    /// The vehicle-select screen's comparison figures.
+    pub stats: DisplayStats,
     /// Stock / mod classification.
     pub class: VehicleClass,
     /// Resolved dependency paths.
@@ -124,6 +126,40 @@ pub struct CatalogEntry {
     pub status: EntryStatus,
     /// Metadata diagnostics and notes.
     pub notes: Vec<String>,
+}
+
+/// The four figures the original vehicle-select screen compares cars
+/// by, read verbatim from the `.info` metadata (`Horsepower`,
+/// `Top Speed`, `Durability`, `Mass`). They are presentation numbers,
+/// not the tuning: retail's vppanozgt claims 1000 hp and an 850 Mass,
+/// and Durability is an unlabelled scale (200000-2000000). The
+/// simulation reads `.vehcarsim`; nothing here feeds the physics.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct DisplayStats {
+    /// `Horsepower`.
+    pub horsepower: Option<f32>,
+    /// `Top Speed` — the key carries a space on retail.
+    pub top_speed: Option<f32>,
+    /// `Durability`.
+    pub durability: Option<f32>,
+    /// `Mass`.
+    pub mass: Option<f32>,
+}
+
+impl DisplayStats {
+    fn from_info(info: &InfoFile) -> Self {
+        let num = |key: &str| {
+            info.get_ci(key)
+                .and_then(|v| v.trim().parse::<f32>().ok())
+                .filter(|v| v.is_finite() && *v >= 0.0)
+        };
+        Self {
+            horsepower: num("Horsepower"),
+            top_speed: num("Top Speed"),
+            durability: num("Durability"),
+            mass: num("Mass"),
+        }
+    }
 }
 
 impl CatalogEntry {
@@ -231,6 +267,7 @@ impl VehicleCatalog {
         let mut canonical_info = false;
         let mut unlock_score = 0;
         let mut unlock_flags = 0;
+        let mut stats = DisplayStats::default();
         let mut saw_info = false;
 
         if let Some(r) = &info_res {
@@ -250,6 +287,7 @@ impl VehicleCatalog {
                     paints = info.list("Colors");
                     unlock_score = info.u32("UnlockScore").unwrap_or(0);
                     unlock_flags = info.u32("UnlockFlags").unwrap_or(0);
+                    stats = DisplayStats::from_info(&info);
                     if let Some(base) = info.get("BaseName")
                         && !base.eq_ignore_ascii_case(id)
                     {
@@ -319,6 +357,7 @@ impl VehicleCatalog {
             canonical_info,
             unlock_score,
             unlock_flags,
+            stats,
             class,
             deps,
             status: if missing.is_empty() {
