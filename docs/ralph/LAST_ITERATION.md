@@ -1,3 +1,106 @@
+# Last iteration — F25-B evidence slice: the process-level
+# live-resolved surface contact — the dev world now mounts the
+# authored `materials.{mtl,csv}` pair (a global, not city-scoped,
+# table), `NetDriveReport` counts v16 surface tails on the wire
+# (`surf{s}s/{a}a` on the `net=` record), `AudioReport` counts
+# skid/rolling voice *spawns* (`/NK/NG` on `aud=`), and a new
+# two-process loopback leg drives the whole chain: real host
+# `vehicle_simulation` → live `SurfaceContact` → snap tail →
+# remote-copy replay voices (new-run iteration 20)
+
+Feature/evidence iteration on `ralph/night` (baseline `43073ec` —
+the iter-14 live-resolve-in-process handoff; external gates +
+review pass, runs 15–19 `agent_failed_or_interrupted` before any
+candidate). Selection: the iter-14 review's top named gap — no
+two-process leg carried a live-resolved `SurfaceContact` (every
+earlier leg staged wheel telemetry in-process or resolved
+nothing). Closing it needed one production change first: the
+dev world mounted no `SurfaceTables`, so `surface_voices`' real
+resolve early-returned there — `city/materials.{mtl,csv}` is
+*global* (verified: retail carries one pair, no per-city copies),
+so `load_session_world`'s `DevWorld` arm now mounts it with the
+city loader's exact policy — authored pair binds, absent pair
+binds nothing, half pair warns and binds nothing.
+
+## What landed
+
+- `session.rs`: `WorldMode::DevWorld` mounts
+  `mm2_content::load_surface_tables` — every dev-world collider
+  is `SurfaceMaterial::Unspecified`, so contacts resolve the
+  `_default` block's `sound`/`ptx` through the same inheritance
+  an unmarked city collider applies.
+- `netdrive.rs`: `NetDriveReport.surfaces_sent` (authority rows
+  whose `surf_skid`/`surf_roll` left `SNAP_NO_SURFACE`) +
+  `surfaces_applied` (client rows that carried a contact *and*
+  landed on a live copy's `SurfaceContact`). Sentinel clears
+  count neither — a release row is not contact evidence.
+- `smoke.rs`: `net=` gains the trailing `,surf{s}s/{a}a` cell;
+  `aud=`'s surface cell gains `/NK/NG` cumulative spawns next to
+  the `k`/`g` live gauges — the record update can land on an
+  airborne or faded frame, but a spawned voice is permanent
+  proof the pick ran (a mid-leg flake made this concrete: a
+  900-frame record caught the cars parked at the perimeter wall
+  spinning wheels `0g`, a 500-frame record caught one airborne
+  off the jump `wheels=0/4`).
+- `audio.rs`: `AudioReport.skid_voices`/`rolling_voices` —
+  cumulative subsets of `voices`, incremented at the two spawn
+  sites only.
+- `tests/support/mod.rs`: `surface_materials(dir)` — the global
+  pair fixture: `mtl _default` authors `sound: 1` (the dry
+  table's grass row — a nonzero class so row 0 can't pass by
+  accident), `ptxindex -1 -1` keeps wheel-fx dark, empty csv.
+- `tests/net_drive.rs::two_mm2_processes_relay_a_live_resolved_
+  surface_contact`: three real `mm2` processes on the fixture
+  install — nothing staged. Asserts bob's `surfaces_applied > 0`,
+  his `G` rolling-voice spawns `>= 2` (own seat + at least one
+  remote copy replaying the replicated contact through *his*
+  table), alice's `surfaces_applied > 0`, and the host's
+  `surfaces_sent > 0` after `quit`.
+- `tests/net_app.rs`: the v16 legs assert the counters — the
+  live-resolve publish leg `surfaces_sent > 0`; the remote-replay
+  leg `surfaces_applied == 1` and still 1 after a sentinel frame
+  (clears don't count).
+- `tests/session.rs::a_dev_world_mounts_the_authored_surface_
+  tables`: the mount policy through `load_session_world` itself
+  — pair mounts (`sound_index(Unspecified) == 1`), absent mounts
+  nothing, half pair mounts nothing.
+- `tests/smoke.rs::dev_world_surface_voices_resolve_off_the_
+  authored_default`: an in-app `headless_smoke` on the fixture —
+  real wheel contacts spawn the rolling loop (`G` = 1, no
+  anomalies), proving the mount feeds `surface_voices` end to end
+  without any harness staging.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` green — 91 suites, 0 failures
+(`net_drive` 4/4 incl. the new leg — also rerun standalone 3×,
+stable; `net_app` 56/56, `session` 31/31, `smoke` 11/11).
+
+## Classification / remaining open items
+
+- The dev-world mount is an **implementation choice** consistent
+  with measured format facts (the pair is global on retail); the
+  `Unspecified` → `_default` `sound` inheritance is the already-
+  designed reading (UNK-23/UNK-25), not a new original claim.
+- Evidence level: synthetic loopback + in-process only. Not
+  exercised: audible output (`sunk`/`a` stay 0 headless), any
+  rendered capture, LAN/Internet, retail install (`MM2_RETAIL`
+  unset in the verify env — the retail table's real `_default`
+  class is untested here), the impairment matrix rerun *with*
+  surface traffic riding its snaps (the cells still pass — the
+  v16 tail changes payload size only).
+- `surfaces_*` count snap rows carrying contacts, not bytes or
+  distinct contacts — a parked-contact release row (both halves
+  sentinel) correctly does not count.
+- Still open, unchanged: F25-B remainder, all of F26 (networked
+  world/races), F25-C's full matrix, roster/original-content
+  validation. Not F25-AC01..06 completion. Candidate pending
+  external check.
+
+---
+
 # Last iteration — F25-B evidence slice: the live-resolve leg
 # the v16 review named — `host_app` now schedules the real
 # `surface_voices`, so the wire-seat publish leg resolves the

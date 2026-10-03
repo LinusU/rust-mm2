@@ -131,7 +131,14 @@ review's live-resolve gap — `host_app` schedules the real
 `surface_voices`, so the wire-seat publish leg resolves the
 `SurfaceContact` off staged wheel telemetry through the real
 material→class→pick chain, and an `audio` leg asserts
-`contact_pick`'s written record — still
+`contact_pick`'s written record; the iteration after that carried
+it to process level — `load_session_world` mounts the global
+`materials.{mtl,csv}` pair for the dev world too,
+`NetDriveReport`/`AudioReport` expose the v16 wire counters
+(`surf{s}s/{a}a`) and cumulative skid/rolling voice spawns
+(`/NK/NG`), and a three-process loopback leg drives a real
+live-resolved contact end to end (host sim → snap tail →
+remote-copy replay voices) — still
 open: rematch/lobby-result lifecycle and bulk late-joiner ledger
 sync (F26), LAN/Internet scope, and the process-level
 rejoin leg, which needs a client rejoin feature that does not
