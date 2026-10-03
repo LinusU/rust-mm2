@@ -114,6 +114,15 @@ Notes:
 - Decoded attribute coverage: all bytes accounted for; the only deliberately
   unhandled family is tunnels/railings (`0x09`, ~127 attrs).
 
+Designed rendering policy: generic `Fan` and `RoadFan` surfaces with a
+nonzero vertical normal retain the importer’s upward orientation, even on
+steep slopes. Only effectively vertical planes (normalized normal
+`abs(y) < 0.001`, allowing numeric noise) use the room perimeter to choose
+the street-facing side. The perimeter is an XZ footprint and cannot choose
+the visible side of sloped paving. Vertical gables still face outward from
+building rooms or inward into street rooms. This is an importer policy,
+not a recovered original slope threshold.
+
 ## Confidence
 
 - File structure and attribute word layout: **verified** against retail

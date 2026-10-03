@@ -462,6 +462,85 @@ fn emits_counted_attributes_meshes_colliders_and_report() {
     );
 }
 
+/// A single fan at a room edge. Ground and wall fans share the same
+/// attribute encoding, so slope (rather than the room's street side)
+/// must determine whether the perimeter may choose their facing.
+fn edge_fan(kind: mm2_formats::psdl::AttributeType, steep: bool, reversed: bool) -> Psdl {
+    use mm2_formats::psdl::{AttributeType, PerimeterPoint, RoomAttribute};
+    let mut psdl = Psdl::parse(&synthetic_psdl()).unwrap();
+    let edge = if kind == AttributeType::RoadFan {
+        5.0
+    } else {
+        -5.0
+    };
+    psdl.vertices = vec![
+        [0.0, 0.0, 0.0],
+        [if steep { 1.0 } else { 0.0 }, 4.0, 1.0],
+        [0.0, 0.0, 2.0],
+        [edge, 0.0, 0.0],
+        [edge, 0.0, 2.0],
+    ];
+    psdl.rooms[0].perimeter = [0, 3, 4, 2]
+        .into_iter()
+        .map(|vertex| PerimeterPoint { vertex, room: 0 })
+        .collect();
+    psdl.rooms[0].attributes = vec![RoomAttribute {
+        kind,
+        subtype: 1,
+        last: true,
+        data: if reversed {
+            vec![0, 2, 1]
+        } else {
+            vec![0, 1, 2]
+        },
+    }];
+    psdl
+}
+
+#[test]
+fn steep_ground_fans_face_up_on_either_side_of_a_room_perimeter() {
+    use bevy::math::Vec3;
+    use mm2_formats::psdl::AttributeType;
+    for kind in [AttributeType::Fan, AttributeType::RoadFan] {
+        for reversed in [false, true] {
+            let import = emit_psdl(&edge_fan(kind, true, reversed), None);
+            assert_eq!(import.report.rejected, 0);
+            let mesh = &import.meshes[0];
+            let [a, b, c] = mesh.indices[..3].try_into().unwrap();
+            let point = |index: u32| Vec3::from(mesh.positions[index as usize]);
+            let normal = (point(b) - point(a)).cross(point(c) - point(a)).normalize();
+            assert!(normal.y > 0.2 && normal.y < 0.3, "{kind:?}: {normal:?}");
+        }
+    }
+}
+
+#[test]
+fn vertical_fans_still_face_the_street_side_for_either_authored_winding() {
+    use bevy::math::Vec3;
+    use mm2_formats::psdl::AttributeType;
+    for kind in [AttributeType::Fan, AttributeType::RoadFan] {
+        for reversed in [false, true] {
+            for side in [-1.0, 1.0] {
+                let mut psdl = edge_fan(kind, false, reversed);
+                for point in &mut psdl.vertices {
+                    point[0] *= side;
+                }
+                let import = emit_psdl(&psdl, None);
+                let mesh = &import.meshes[0];
+                let [a, b, c] = mesh.indices[..3].try_into().unwrap();
+                let point = |index: u32| Vec3::from(mesh.positions[index as usize]);
+                let normal = (point(b) - point(a)).cross(point(c) - point(a)).normalize();
+                // Face outward from a building footprint or inward into
+                // a street footprint, on either side of the vertical wall.
+                assert!(
+                    normal.x * side > 0.99 && normal.y.abs() < 1e-5,
+                    "{kind:?}, side {side}: {normal:?}"
+                );
+            }
+        }
+    }
+}
+
 /// F06-A: the room's collider splits per authored surface class — the
 /// road strip, its sidewalk-texture slot and the unmapped fan texture
 /// become three colliders carrying `Authored(i)`/`Unspecified`, and
