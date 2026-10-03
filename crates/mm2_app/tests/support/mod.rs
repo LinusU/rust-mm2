@@ -212,19 +212,21 @@ pub fn event_install() -> tempfile::TempDir {
 //
 // The dev-car pick (`vehicle == ""`) carries no authored records, so
 // legs that exercise an authored binding — F25-B's cardata audio on a
-// remote seat — write a minimal `vpt`-shaped car: the required tune and
-// model plus the optional record under test. Same grammar the
-// opponents.rs roster fixture authors.
+// remote seat, F15-A's `_opp` tune variants — write a minimal
+// `vpt`-shaped car: the required tune and model plus the optional
+// record under test. `tuned_car` is the shared base opponents.rs's
+// roster fixture builds on.
 
-/// Minimal `vehCarSim` tune — every required field.
-fn vehcarsim() -> String {
+/// Minimal `vehCarSim` tune — every required field, `mass` the only
+/// variable so a `_opp` variant or a heavy car stays distinguishable.
+pub fn vehcarsim(mass: f32) -> String {
     let wheel = |name: &str| {
         format!(
             "  {name} {{\n    SuspensionExtent 0.2\n    SuspensionLimit 0.05\n    SuspensionFactor 1.0\n    SuspensionDampCoef 0.1\n    SteeringLimit 0.5\n    BrakeCoef 0.14\n    TireDispLimitLong 0.075\n    TireDampCoefLong 0.75\n    TireDragCoefLong 0.01\n    TireDispLimitLat 0.075\n    TireDampCoefLat 0.75\n    TireDragCoefLat 0.02\n    OptimumSlipPercent 0.05\n    StaticFric 3.0\n    SlidingFric 2.95\n  }}\n"
         )
     };
     format!(
-        "type: a\nvehCarSim {{\n  Mass 1200.0\n  InertiaBox 2.0 1.3 3.0\n  DrivetrainType 0\n  Aero {{\n    Drag 0.5\n    Down 0.0\n  }}\n  Engine {{\n    MaxHorsePower 200.0\n    IdleRPM 750.0\n    OptRPM 5800.0\n    MaxRPM 8500.0\n  }}\n  Trans {{\n    AutoNumGears 4\n    Reverse 20.0\n    Low 20.0\n    High 75.0\n  }}\n{}{}}}\n",
+        "type: a\nvehCarSim {{\n  Mass {mass}\n  InertiaBox 2.0 1.3 3.0\n  DrivetrainType 0\n  Aero {{\n    Drag 0.5\n    Down 0.0\n  }}\n  Engine {{\n    MaxHorsePower 200.0\n    IdleRPM 750.0\n    OptRPM 5800.0\n    MaxRPM 8500.0\n  }}\n  Trans {{\n    AutoNumGears 4\n    Reverse 20.0\n    Low 20.0\n    High 75.0\n  }}\n{}{}}}\n",
         wheel("WheelFront"),
         wheel("WheelBack"),
     )
@@ -328,12 +330,18 @@ fn car_cardata() -> &'static str {
     "Horn wave name,Horn volume,flags,Num Engine Samples,clutch wave name,clutch volume\nTESTHORN,0.9,0,1,REV,0.5\nEngine wave name,Min Volume,Max Volume,fade in start RPM,fade in end RPM,fade out start RPM,fade out end RPM,Min Pitch,Max Pitch,Pitch shift start RPM,Pitch shift end RPM\nEIDLE,0.55,0.835,1,800,2500,7000,0.85,2,1,7000\n"
 }
 
+/// The tuned pick `id` at `mass`: the required tune + model + bound —
+/// the files `load_vehicle` resolves before any optional record.
+pub fn tuned_car(d: &std::path::Path, id: &str, mass: f32) {
+    write(d, &format!("tune/vehicle/{id}.vehcarsim"), vehcarsim(mass));
+    write(d, &format!("geometry/{id}.pkg"), car_pkg());
+    write(d, &format!("bound/{id}_bound.bnd"), car_bnd());
+}
+
 /// The authored pick `id`: the required tune + model + bound plus its
 /// cardata record — the files `load_vehicle` resolves for a
 /// `VehicleAudio`-backed spawn (F25-B protocol v15).
 pub fn audio_car(d: &std::path::Path, id: &str) {
-    write(d, &format!("tune/vehicle/{id}.vehcarsim"), vehcarsim());
-    write(d, &format!("geometry/{id}.pkg"), car_pkg());
-    write(d, &format!("bound/{id}_bound.bnd"), car_bnd());
+    tuned_car(d, id, 1200.0);
     write(d, &format!("aud/cardata/player/{id}.csv"), car_cardata());
 }

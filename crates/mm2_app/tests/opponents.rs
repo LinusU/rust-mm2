@@ -6,6 +6,8 @@
 //! `.opp` routes through the same `VehicleInput` → physics →
 //! `advance_race` validation the player's controls feed.
 
+mod support;
+
 use std::path::Path;
 use std::time::Duration;
 
@@ -53,123 +55,18 @@ fn vfs_of(dir: &Path) -> Vfs {
     vfs
 }
 
-/// Minimal `vehCarSim` tune — every required field, `mass` the only
-/// variable so the `_opp` variant and the heavy car are distinguishable.
-fn vehcarsim(mass: f32) -> String {
-    let wheel = |name: &str| {
-        format!(
-            "  {name} {{\n    SuspensionExtent 0.2\n    SuspensionLimit 0.05\n    SuspensionFactor 1.0\n    SuspensionDampCoef 0.1\n    SteeringLimit 0.5\n    BrakeCoef 0.14\n    TireDispLimitLong 0.075\n    TireDampCoefLong 0.75\n    TireDragCoefLong 0.01\n    TireDispLimitLat 0.075\n    TireDampCoefLat 0.75\n    TireDragCoefLat 0.02\n    OptimumSlipPercent 0.05\n    StaticFric 3.0\n    SlidingFric 2.95\n  }}\n"
-        )
-    };
-    format!(
-        "type: a\nvehCarSim {{\n  Mass {mass}\n  InertiaBox 2.0 1.3 3.0\n  DrivetrainType 0\n  Aero {{\n    Drag 0.5\n    Down 0.0\n  }}\n  Engine {{\n    MaxHorsePower 200.0\n    IdleRPM 750.0\n    OptRPM 5800.0\n    MaxRPM 8500.0\n  }}\n  Trans {{\n    AutoNumGears 4\n    Reverse 20.0\n    Low 20.0\n    High 75.0\n  }}\n{}{}}}\n",
-        wheel("WheelFront"),
-        wheel("WheelBack"),
-    )
-}
-
-/// One quad geometry chunk: 4 verts, 2 tris, centred on `c`.
-fn quad_geo(c: [f32; 3], hx: f32, hy: f32, hz: f32) -> Vec<u8> {
-    let mut geo = Vec::new();
-    geo.extend_from_slice(&1u32.to_le_bytes()); // nSections
-    geo.extend_from_slice(&4u32.to_le_bytes()); // total vertices
-    geo.extend_from_slice(&6u32.to_le_bytes()); // total indices
-    geo.extend_from_slice(&1u32.to_le_bytes()); // sections duplicate
-    geo.extend_from_slice(&0x112u32.to_le_bytes()); // fvf: XYZ|NORMAL|1 tex
-    geo.extend_from_slice(&1u16.to_le_bytes()); // nStrips
-    geo.extend_from_slice(&0u16.to_le_bytes()); // section flags
-    geo.extend_from_slice(&(-1i32).to_le_bytes()); // shader offset → fallback
-    geo.extend_from_slice(&3i32.to_le_bytes()); // prim type: triangles
-    geo.extend_from_slice(&4u32.to_le_bytes()); // strip vertices
-    for p in [
-        [c[0] - hx, c[1] - hy, c[2] - hz],
-        [c[0] + hx, c[1] - hy, c[2] + hz],
-        [c[0] + hx, c[1] + hy, c[2] - hz],
-        [c[0] - hx, c[1] + hy, c[2] + hz],
-    ] {
-        for v in p {
-            geo.extend_from_slice(&v.to_le_bytes());
-        }
-        for n in [0.0f32, 1.0, 0.0] {
-            geo.extend_from_slice(&n.to_le_bytes());
-        }
-        for uv in [0.0f32, 0.0] {
-            geo.extend_from_slice(&uv.to_le_bytes());
-        }
-    }
-    geo.extend_from_slice(&6u32.to_le_bytes()); // strip indices
-    for i in [0u16, 1, 2, 0, 3, 1] {
-        geo.extend_from_slice(&i.to_le_bytes());
-    }
-    geo
-}
-
-/// A PKG3 with `body_h` plus `whl0..3` — wheels authored in place
-/// (no `.mtx`, so the importer falls back to geometry centres). Front
-/// wheels at -Z (MM2 forward), rear driven per `DrivetrainType 0`.
-fn car_pkg() -> Vec<u8> {
-    let mut d = b"PKG3".to_vec();
-    let chunks: &[(&str, Vec<u8>)] = &[
-        ("body_h", quad_geo([0.0, 0.5, 0.0], 0.9, 0.5, 1.6)),
-        ("whl0_h", quad_geo([0.8, 0.3, -1.3], 0.15, 0.3, 0.15)),
-        ("whl1_h", quad_geo([-0.8, 0.3, -1.3], 0.15, 0.3, 0.15)),
-        ("whl2_h", quad_geo([0.8, 0.3, 1.3], 0.15, 0.3, 0.15)),
-        ("whl3_h", quad_geo([-0.8, 0.3, 1.3], 0.15, 0.3, 0.15)),
-    ];
-    for (name, geo) in chunks {
-        d.extend_from_slice(b"FILE");
-        d.push(name.len() as u8 + 1);
-        d.extend_from_slice(name.as_bytes());
-        d.push(0);
-        d.extend_from_slice(&(geo.len() as u32).to_le_bytes());
-        d.extend_from_slice(geo);
-    }
-    d
-}
-
-/// An ASCII bound box — without it `convert` falls back to a centred
-/// chassis cuboid whose hull rests high enough that the wheel rays
-/// never reach the ground. Underside at local ~0, like the stock cars.
-fn car_bnd() -> String {
-    let mut s = "version: 1.01\nverts: 8\nmaterials: 1\nedges: 0\npolys: 6\n\n".to_string();
-    for v in [
-        [-0.9f32, 0.05, -1.6],
-        [0.9, 0.05, -1.6],
-        [0.9, 0.9, -1.6],
-        [-0.9, 0.9, -1.6],
-        [-0.9, 0.05, 1.6],
-        [0.9, 0.05, 1.6],
-        [0.9, 0.9, 1.6],
-        [-0.9, 0.9, 1.6],
-    ] {
-        s.push_str(&format!("v {} {} {}\n", v[0], v[1], v[2]));
-    }
-    s.push_str("mtl default {\n  elasticity: 0.1\n  friction: 0.5\n}\n");
-    for quad in [
-        [0, 4, 5, 1],
-        [0, 1, 2, 3],
-        [4, 7, 6, 5],
-        [0, 3, 7, 4],
-        [1, 5, 6, 2],
-        [3, 2, 6, 7],
-    ] {
-        s.push_str(&format!(
-            "quad {} {} {} {} 0\n",
-            quad[0], quad[1], quad[2], quad[3]
-        ));
-    }
-    s
-}
-
-/// One vehicle: base tune + opponent tune (unless `opp_tune` is None)
-/// + model + bound.
+/// One vehicle: the shared `tuned_car` base (tune + model + bound —
+/// `tests/support`'s fixture, the same grammar `audio_car` layers
+/// cardata on) plus the `_opp` tune variant unless `opp_mass` is None.
 fn write_car(d: &Path, id: &str, mass: f32, opp_mass: Option<f32>) {
-    write(d, &format!("tune/vehicle/{id}.vehcarsim"), vehcarsim(mass));
+    support::tuned_car(d, id, mass);
     if let Some(m) = opp_mass {
-        write(d, &format!("tune/vehicle/{id}_opp.vehcarsim"), vehcarsim(m));
+        write(
+            d,
+            &format!("tune/vehicle/{id}_opp.vehcarsim"),
+            support::vehcarsim(m),
+        );
     }
-    write(d, &format!("geometry/{id}.pkg"), car_pkg());
-    write(d, &format!("bound/{id}_bound.bnd"), car_bnd());
 }
 
 fn opp_file(points: &[[f32; 3]]) -> String {
