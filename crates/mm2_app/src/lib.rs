@@ -40,6 +40,7 @@ pub mod race;
 pub mod race_audio;
 pub mod racestat;
 pub mod racetime;
+pub mod racing_line;
 pub mod recovery;
 pub mod results;
 pub mod scripted;

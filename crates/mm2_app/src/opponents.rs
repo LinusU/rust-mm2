@@ -13,7 +13,9 @@
 //!   skipped, never repaired or re-numbered.
 //! - **Route following vs. driving control.** [`route_target`] owns
 //!   where the car is going (advance past reached points, close out or
-//!   loop the polyline); [`crate::scripted::scripted_input_tuned`] owns how
+//!   loop the polyline) and [`crate::racing_line`] turns that into an
+//!   aim point down the line (DSN-66);
+//!   [`crate::scripted::scripted_input_tuned`] owns how
 //!   it gets there (proportional steering, corner braking, bounded
 //!   reverse-and-turn stuck recovery — the same normalized-input
 //!   control law the scripted evidence driver uses).
@@ -97,6 +99,7 @@ use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState, vehicle_bun
 use tracing::{info, warn};
 
 use crate::car_visual;
+use crate::racing_line::RouteCursor;
 use crate::scripted::{ScriptedBot, ScriptedTuning, scripted_input_tuned};
 
 /// XZ distance within which a route point counts as reached. `.opp`
@@ -242,6 +245,18 @@ const PANIC_GAP: f32 = 4.0;
 /// Blocker speed (m/s) below which it counts as standing: a parked
 /// car is steered around, a moving one is trailed at the comfort gap.
 const CRAWL_SPEED: f32 = 3.0;
+
+/// Pure-pursuit aim distance (m) at a standstill, the extra per m/s of
+/// speed, and the bounds — about 0.7 s of travel ahead, never so close
+/// that steering hunts nor so far that it cuts the inside of a bend.
+const AIM_BASE: f32 = 8.0;
+const AIM_PER_SPEED: f32 = 0.7;
+const AIM_RANGE: (f32, f32) = (12.0, 40.0);
+
+/// How far down the route line the driver aims at `speed`.
+pub fn aim_distance(speed: f32) -> f32 {
+    (AIM_BASE + AIM_PER_SPEED * speed.max(0.0)).clamp(AIM_RANGE.0, AIM_RANGE.1)
+}
 
 /// Distance-to-objective scale (m) the catch-up course measure falls
 /// back to when a definition's own gate spacing cannot be measured —
@@ -1220,8 +1235,23 @@ pub fn opponent_drive(
                     line.arc_high = line.arc_high.max(arc);
                 }
             }
+            // Pure pursuit: aim a speed-scaled distance down the line
+            // from the car's projection onto it, not at the next raw
+            // anchor 40-200 m away — the bend shows up while it is
+            // still ahead, and a car shoved off the line aims back
+            // onto it instead of across the block to a far anchor. An
+            // open route still approaching its first anchor has no
+            // leg to project onto and keeps the anchor.
+            let aim = target.map(|t| {
+                if next == 0 && !route_is_closed(route) {
+                    return t;
+                }
+                RouteCursor::locate(route, next, pos.0).map_or(t, |c| {
+                    c.point_ahead(route, aim_distance(vstate.forward_speed))
+                })
+            });
             driver.next = next;
-            target
+            aim
         } else {
             None
         };
