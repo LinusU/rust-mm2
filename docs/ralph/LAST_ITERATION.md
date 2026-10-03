@@ -1,3 +1,94 @@
+# Last iteration — F24-C.1: process-level hostile-peer /
+# abrupt-loss coverage — new `tests/net_edge.rs` puts a real
+# `mm2-host` against bytes that were never a protocol peer
+# (undecodable payload, `MAX_FRAME+1` length word, a valid-but-not-
+# `Hello` first frame, a TCP-then-silent socket, a rostered peer
+# speaking host-only messages) and SIGKILLs real host processes out
+# from under parked, started and mid-drive `mm2-join`/`mm2 --join`
+# clients (new-run iteration 21)
+
+Evidence iteration on `ralph/night` (baseline `dbd1b51` — the
+iter-20 surface-contact handoff; external gates + review pass).
+Selection: F24-C is the queued F24 remainder and its named scope —
+multi-process malformed-input and host-loss legs — was the one
+thing the deep in-process lobby coverage could not reach. Existing
+process tests covered clean `quit` host loss (`net_app`'s
+`mm2_join_reports_a_lost_host`) and unreachable `mm2 --join`; what
+had never been proven at the process boundary was the door's
+rejection behavior, the handshake deadline inside a real host,
+abrupt process death, and slot freshness across a real rejoin.
+No production change was needed — the bounds held as designed;
+the iteration closes the evidence hole.
+
+## What landed
+
+- `tests/support/mod.rs`: `Proc::kill` (SIGKILL — a dead peer's
+  sockets close at the kernel, *not* through the lobby's own
+  disconnect path, which is what made the existing lost-host leg a
+  clean-loss proof only) and `Proc::wait_timeout` (polls
+  `try_wait` against a deadline — the loss legs' claim is that the
+  client exits *on its own*, so a child that outlives the bound
+  fails rather than hanging the suite).
+- `tests/net_edge.rs`, 8 legs, all real OS processes over real
+  loopback on synthetic installs:
+  - `the_door_bounds_garbage_frames` — three bad first contacts
+    against `mm2-host`: a well-formed frame whose payload decodes
+    to nothing (peer reads `Reject{Malformed}`, host logs the
+    protocol reason), a length word over `MAX_FRAME` refused
+    pre-allocation (`frame declares`), and a decodable non-`Hello`
+    (a mid-lobby `SetReady` — rejected `Malformed` naming the
+    first-message contract). A real `mm2-join` then joins the same
+    lobby — each hit cost the host nothing but its `join_failed`
+    line.
+  - `a_silent_peer_is_refused_on_the_deadline` — a TCP-complete
+    socket that never speaks dies `join_failed` at the host-side
+    `HANDSHAKE_TIMEOUT`, then the lobby serves a real join.
+  - `a_rostered_peer_speaking_for_the_host_is_dropped` — a valid
+    client that sends `Roster` (host→client-only) leaves
+    `cause=malformed`; a fresh join still lands.
+  - `a_killed_host_closes_a_parked_client` / `…_a_started_client`
+    — SIGKILL `mm2-host` under a parked `mm2-join` and under one
+    that already observed `event=started`; both report
+    `event=closed` and exit 1.
+  - `a_killed_host_ends_a_driving_client` — SIGKILL `mm2 --host`
+    mid-drive; the `mm2 --join` client's smoke record names
+    `lost the host`/`status=fail` and the app exits 3 through its
+    normal teardown.
+  - `a_rejoined_client_gets_a_fresh_slot` — depart and redial
+    mints `id=2`, not the recycled `id=1` (the process half of
+    `a_rejoin_mints_a_fresh_slot`).
+  - `an_unreachable_address_fails_the_join` — `mm2-join` at a dead
+    address: `join_failed`/exit 1 (the headless client's half of
+    the leg `net_app` already holds for `mm2 --join`).
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` green — 0 failures
+(`net_edge` 8/8, ~12 s wall; all other suites unchanged).
+
+## Classification / remaining open items
+
+- Evidence-only iteration — `Proc` gained test-harness helpers;
+  no production code changed. Every behavior asserted is already
+  designed/bounded in `mm2_net` (strict decode, `MAX_FRAME`
+  pre-allocation refusal, `HANDSHAKE_TIMEOUT`, `cause=malformed`
+  drops, monotonic slot ids, `lost the host` teardown).
+- Evidence level: synthetic installs + `127.0.0.1` only. Not
+  exercised: LAN/Internet reachability, NAT/firewall paths, a
+  dead-but-*open* link (kill always closes sockets — a host that
+  stops speaking on a live socket is unproven; `WRITE_TIMEOUT`
+  exists but has no process leg), rendered/audio observation, and
+  retail installs.
+- F24-C stays **active**, not complete: the reachability matrix
+  and the dead-but-open link remain. Partial F24-AC03 (process-
+  level malformed coverage) and F24-AC04 (abrupt-loss surface)
+  advanced; AC01/AC02/AC05/AC06 unchanged. Candidate pending
+  external check.
+
+---
+
 # Last iteration — F25-B evidence slice: the process-level
 # live-resolved surface contact — the dev world now mounts the
 # authored `materials.{mtl,csv}` pair (a global, not city-scoped,
