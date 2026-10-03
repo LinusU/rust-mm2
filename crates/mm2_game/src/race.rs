@@ -1257,9 +1257,10 @@ pub struct CatchUpPolicy {
     pub deficit_full: f32,
     /// Largest absolute lift added to the authored throttle ceiling at
     /// full deficit — `throttle_cap + assist`, still bounded by the
-    /// normalized input's `0..=1`. `corner_speed` scales by
-    /// `1 + assist` under the same factor: carried corner pace lifts
-    /// with the demand ceiling through one mechanism, not two.
+    /// normalized input's `0..=1`. Carried corner speed lifts by
+    /// `1 + assist` under the same factor (the opponent's planned
+    /// corner grip by its square): corner pace lifts with the demand
+    /// ceiling through one mechanism, not two.
     pub assist_max: f32,
 }
 
