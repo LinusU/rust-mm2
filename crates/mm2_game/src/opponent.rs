@@ -169,9 +169,9 @@ pub struct OpponentDriveParams {
     /// Column 3 — `cornerBrakingThreshold` (RegisterRoute default 0.7;
     /// retail 0.07–1.0 centred ~0.7). The documented semantics are a
     /// brake-demand floor: the original skips braking when the corner's
-    /// required brake power falls below it. Bound, unconsumed — our
-    /// control law's corner brake is a binary engage, not a continuous
-    /// demand, so there is no faithful quantity to compare yet.
+    /// required brake power falls below it. The opponent's speed plan
+    /// consumes it that way (DSN-66) — a designed reading, since how
+    /// the original measured the demand is unrecovered.
     pub corner_brake: Option<f32>,
     /// Column 4 — `avoidTraffic`: sense ambient traffic. Bound but
     /// inert — ambient cars are not `Player` participants, so the

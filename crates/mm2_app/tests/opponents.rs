@@ -19,6 +19,7 @@ use mm2_app::opponents::{
     initial_route_index, nearest_blocker, opponent_drive, pick_pass_side, reanchor_pose,
     route_target, spawn_pose,
 };
+use mm2_app::racing_line::CarLimits;
 use mm2_app::scripted::{ScriptedBot, ScriptedTuning};
 use mm2_app::session::{self, SessionControl};
 use mm2_app::{camera, contracts, race};
@@ -1263,6 +1264,8 @@ fn driver(avoid_players: bool, avoid_opponents: bool) -> OpponentDriver {
         reanchors: 0,
         catch_up_policy: mm2_game::CatchUpPolicy::default(),
         catch_up: 0.0,
+        limits: CarLimits::of(&VehicleConfig::default(), None),
+        corner_brake: mm2_app::racing_line::CORNER_BRAKE_DEFAULT,
         stats: Default::default(),
     }
 }
@@ -1533,14 +1536,15 @@ fn checkpoint_markers_track_the_local_participant() {
 
 /// The authored tail reaches the driver through the production roster
 /// path: `maxThrottle` clamps to the input ceiling, the corner-speed
-/// column multiplies the corner-brake floor, the look-ahead column sets
+/// column scales the speed plan's corner grip by `value / 2.0` and the
+/// corner-brake column is its brake-demand floor, the look-ahead column sets
 /// the corridor reach, and `avoidPlayers`/`avoidOpponents` gate the
 /// corridor's classes — `None` columns take the `RegisterRoute`
 /// defaults.
 #[test]
 fn authored_tail_binds_the_driver_tuning() {
     let tmp = roster_install_rows(
-        "vpt race0-a-0.opp 0.90 0 50.0 0.7 1 1 0 1 0 1.5\nvpheavy race0-a-1.opp 0.80 0 120.0 0.7 1 1 1 0 0 2.0\n",
+        "vpt race0-a-0.opp 0.90 0 50.0 0.4 1 1 0 1 0 1.5\nvpheavy race0-a-1.opp 0.80 0 120.0 0.7 1 1 1 0 0 2.0\n",
         &[],
     );
     let mut app = event_app(event_config(), vfs_of(tmp.path()));
@@ -1549,11 +1553,14 @@ fn authored_tail_binds_the_driver_tuning() {
     let vpt = opponent_by_vehicle(&mut app, "vpt");
     let d = app.world().get::<OpponentDriver>(vpt).unwrap();
     assert!((d.tuning.throttle_cap - 0.9).abs() < 1e-6);
+    let cfg = &app.world().get::<Vehicle>(vpt).unwrap().config;
+    let stock = CarLimits::of(cfg, None);
     assert!(
-        (d.tuning.corner_speed - ScriptedTuning::DEFAULT.corner_speed * 1.5).abs() < 1e-4,
-        "col 9 multiplies the corner-brake floor: {}",
-        d.tuning.corner_speed
+        (d.limits.corner_accel / stock.corner_accel - 0.75).abs() < 1e-4,
+        "col 9 scales the planned corner grip: {:?} vs {stock:?}",
+        d.limits
     );
+    assert_eq!(d.corner_brake, 0.4, "col 3 is the brake-demand floor");
     assert!(
         !d.avoid_players,
         "authored avoidPlayers=0 (col 6) gates human sensing off"
@@ -1564,7 +1571,9 @@ fn authored_tail_binds_the_driver_tuning() {
     let heavy = opponent_by_vehicle(&mut app, "vpheavy");
     let d = app.world().get::<OpponentDriver>(heavy).unwrap();
     assert!((d.tuning.throttle_cap - 0.8).abs() < 1e-6);
-    assert!((d.tuning.corner_speed - ScriptedTuning::DEFAULT.corner_speed * 2.0).abs() < 1e-4);
+    let cfg = &app.world().get::<Vehicle>(heavy).unwrap().config;
+    assert_eq!(d.limits, CarLimits::of(cfg, None), "2.0 is the default");
+    assert_eq!(d.corner_brake, 0.7);
     assert!(d.avoid_players);
     assert!(
         !d.avoid_opponents,
@@ -2692,11 +2701,15 @@ fn ordered_route_credit_covers_a_gate_the_authored_line_misses() {
         format!(
             "{WAYPOINTS}{}{}{}{}",
             waypoint_row(60.0, COURSE_Z),
-            waypoint_row(110.0, COURSE_Z),
+            waypoint_row(95.0, COURSE_Z),
             waypoint_row(140.0, COURSE_Z),
             waypoint_row(165.0, COURSE_Z),
         ),
     );
+    // The first course gate sits on the straight before the swerve —
+    // a gate plane on the corner anchor itself is crossed a frame
+    // after a driver cutting the corner already projects past it, and
+    // route credit would bank it first.
     // The authored line swerves 30 m around the middle gate — its
     // closest approach misses the 15 m cylinder by ~19 m — then
     // rejoins: the authored-miss shape the matrix measured.

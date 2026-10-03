@@ -1,5 +1,6 @@
-//! Opponent racing line (F15): where along its route an opponent is
-//! and where it should aim.
+//! Opponent racing line (F15): where along its route an opponent is,
+//! where it should aim, and how fast it may be going to make the
+//! corners ahead.
 //!
 //! The opponent driver used to chase the next raw `.opp` anchor. Those
 //! sit 40–200 m apart, so a corner only came into view inside the
@@ -14,13 +15,130 @@
 //!   speed-scaled distance down the line. A car knocked off the line
 //!   aims back onto it instead of straight at a distant anchor through
 //!   the block in between.
+//! - [`plan_speed`] scans the line out to braking distance, estimates
+//!   each stretch's radius from how far its heading turns, and returns
+//!   the speed from which the car can still brake to every corner's
+//!   grip-limited speed; [`pace`] turns that into throttle and brake.
 //!
+//! The car's limits come from its own handling ([`CarLimits::of`]), so
+//! a bus and a GTR plan different corner speeds on the same street.
 //! All of this is designed policy (DSN-66): the original opponent
 //! controller is unrecovered (UNK-11).
 
+use bevy::math::Vec3;
 use mm2_game::OpponentRoute;
+use mm2_vehicle::{HandlingMetrics, VehicleConfig};
 
 use crate::opponents::route_is_closed;
+
+/// Standard gravity (m/s²).
+const G: f32 = 9.81;
+
+/// Share of the analytic tire limit the planner corners at. The
+/// handling probe measures cars cornering at about 0.8 of the tires'
+/// analytic peak (the Beetle: 1.32 g on 1.65 g tires), and the planner
+/// wants a little in hand on top of that for bumps, camber and traffic.
+const CORNER_GRIP_SHARE: f32 = 0.7;
+/// Share of the car's straight-line braking limit the planner assumes
+/// — braking while still turning in shares the friction ellipse.
+const BRAKE_GRIP_SHARE: f32 = 0.6;
+/// `cornerSpeedMultiplier` value that leaves the planned corner grip
+/// unchanged — `RegisterRoute`'s default (R4). Retail authors
+/// 0.89–2.29, amateur rows the low end.
+const CORNER_MULT_DEFAULT: f32 = 2.0;
+/// Bounds on the authored multiplier's effect on corner grip, so an
+/// extreme row stays a timid or a bold driver rather than a stopped or
+/// a crashing one.
+const CORNER_MULT_RANGE: (f32, f32) = (0.5, 1.2);
+/// `cornerBrakingThreshold` when the row authors none — the
+/// `RegisterRoute` default (R4).
+pub const CORNER_BRAKE_DEFAULT: f32 = 0.7;
+/// Ceiling on the authored threshold: a driver that waits for a full
+/// stop's worth of demand before touching the brake has no margin left
+/// for a misjudged corner.
+const CORNER_BRAKE_MAX: f32 = 0.9;
+
+/// Spacing (m) of the samples the speed scan takes along the line.
+const SAMPLE_STEP: f32 = 4.0;
+/// Samples either side of a point whose heading change sets its
+/// curvature — a ±12 m window, wide enough that densified lane points'
+/// small offsets average out and a sharp authored corner (one vertex)
+/// still reads as the tight radius it is.
+const CURVE_HALF_WINDOW: usize = 3;
+/// Slack (m) the scan looks past the car's braking distance.
+const HORIZON_SLACK: f32 = 40.0;
+/// Furthest the speed scan looks (m) — beyond any car's braking
+/// distance from its top speed.
+const MAX_HORIZON: f32 = 320.0;
+/// Speed (m/s) the planner never asks a car to drop below for a
+/// corner — a hairpin is taken slowly, never at a standstill.
+const MIN_CORNER_SPEED: f32 = 7.0;
+/// Overspeed (m/s) the pace law tolerates before acting — inside it the
+/// car holds its pace instead of hunting between throttle and brake.
+const PACE_DEADBAND: f32 = 0.5;
+
+/// What a car can do, distilled from its handling for the planner.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CarLimits {
+    /// Lateral acceleration (m/s²) the planner corners at.
+    pub corner_accel: f32,
+    /// Deceleration (m/s²) the planner brakes at.
+    pub brake_accel: f32,
+    /// The car's full straight-line deceleration (m/s²) — the
+    /// denominator of a corner's brake demand.
+    pub max_brake_accel: f32,
+    /// Axle-to-axle distance (m) — the steering geometry's lever.
+    pub wheelbase: f32,
+}
+
+impl CarLimits {
+    /// Limits for `config`, with the corner grip scaled by the authored
+    /// `cornerSpeedMultiplier` (`None` = the `RegisterRoute` default).
+    /// The multiplier is read as a scale on the lateral acceleration
+    /// the driver accepts — a designed reading of the documented name
+    /// (RACE-14): amateur rows (≈0.9) corner noticeably slower than
+    /// professional ones (≈2.2).
+    pub fn of(config: &VehicleConfig, corner_mult: Option<f32>) -> Self {
+        let metrics = HandlingMetrics::of(config);
+        // A car that tips before it slides must corner below the tip
+        // threshold, not its tires' limit.
+        let lateral_g = metrics
+            .peak_lateral_g
+            .min(metrics.assisted_tip_threshold_g)
+            .clamp(0.4, 2.5);
+        let mult = (corner_mult.unwrap_or(CORNER_MULT_DEFAULT) / CORNER_MULT_DEFAULT)
+            .clamp(CORNER_MULT_RANGE.0, CORNER_MULT_RANGE.1);
+        let mass = config.mass.max(1.0);
+        let brake_force = config.brakes.max_brake_force * config.wheels.len().max(1) as f32;
+        let long_g = config.tires.longitudinal_grip.clamp(0.4, 2.5);
+        let max_brake = ((brake_force / (mass * G)).min(long_g) * G).max(3.0);
+        Self {
+            corner_accel: lateral_g * CORNER_GRIP_SHARE * mult * G,
+            brake_accel: max_brake * BRAKE_GRIP_SHARE,
+            max_brake_accel: max_brake,
+            wheelbase: config.wheelbase.max(0.5),
+        }
+    }
+
+    /// Distance (m) to brake from `v` to a standstill at the planned
+    /// deceleration.
+    pub fn braking_distance(&self, v: f32) -> f32 {
+        v * v / (2.0 * self.brake_accel)
+    }
+}
+
+/// What the line ahead asks of the car's speed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpeedPlan {
+    /// Speed (m/s) the car may carry now and still brake, at the
+    /// planned deceleration, to every corner in range —
+    /// `f32::INFINITY` when nothing ahead binds.
+    pub limit: f32,
+    /// Share of the car's full braking the most demanding corner ahead
+    /// needs from the current speed (0 when none needs any) — what the
+    /// authored `cornerBrakingThreshold` is compared against.
+    pub demand: f32,
+}
 
 /// The car's place on its route: the leg it is chasing and how far
 /// along that leg its projection sits. Leg `i` runs `points[i]` →
@@ -40,7 +158,7 @@ impl RouteCursor {
     /// the cursor then sits at the start of leg 0, and the car is
     /// expected to aim at the anchor itself. `None` for a route with
     /// fewer than two points or a chase index past an open route's end.
-    pub fn locate(route: &OpponentRoute, next: usize, pos: bevy::math::Vec3) -> Option<Self> {
+    pub fn locate(route: &OpponentRoute, next: usize, pos: Vec3) -> Option<Self> {
         let n = route.points.len();
         if n < 2 || next > n {
             return None;
@@ -66,7 +184,7 @@ impl RouteCursor {
     /// The point `dist` metres further down the line, following legs
     /// past their anchors — wrapping on a closed route, stopping at the
     /// last anchor of an open one. Heights interpolate along the legs.
-    pub fn point_ahead(&self, route: &OpponentRoute, dist: f32) -> bevy::math::Vec3 {
+    pub fn point_ahead(&self, route: &OpponentRoute, dist: f32) -> Vec3 {
         let n = route.points.len();
         let closed = route_is_closed(route);
         let legs = leg_count(n, closed);
@@ -93,11 +211,94 @@ impl RouteCursor {
     }
 }
 
+/// Scan the line ahead of `cursor` out to braking distance from
+/// `speed` and work out what its corners ask: the highest speed the car
+/// may carry now and still brake to each corner's grip-limited speed,
+/// and how hard it would have to brake from `speed` to make the most
+/// demanding one.
+///
+/// Curvature comes from the heading change across a sliding window of
+/// samples, so a sharp corner authored as one vertex and a smooth bend
+/// densified into many lane points both read as the radius actually
+/// driven.
+pub fn plan_speed(
+    route: &OpponentRoute,
+    cursor: RouteCursor,
+    speed: f32,
+    limits: &CarLimits,
+) -> SpeedPlan {
+    let speed = speed.max(0.0);
+    let horizon = (limits.braking_distance(speed) + HORIZON_SLACK).min(MAX_HORIZON);
+    let count = (horizon / SAMPLE_STEP).ceil() as usize + 2 * CURVE_HALF_WINDOW + 1;
+    let samples: Vec<Vec3> = (0..count)
+        .map(|k| cursor.point_ahead(route, k as f32 * SAMPLE_STEP))
+        .collect();
+    // Heading of each sample-to-sample step; a zero-length step (the
+    // end of an open route) carries the previous heading.
+    let mut headings: Vec<f32> = Vec::with_capacity(count.saturating_sub(1));
+    for w in samples.windows(2) {
+        let (dx, dz) = (w[1].x - w[0].x, w[1].z - w[0].z);
+        let h = if dx.hypot(dz) > 1e-3 {
+            dz.atan2(dx)
+        } else {
+            headings.last().copied().unwrap_or(0.0)
+        };
+        headings.push(h);
+    }
+    let span = 2.0 * CURVE_HALF_WINDOW as f32 * SAMPLE_STEP;
+    let mut plan = SpeedPlan {
+        limit: f32::INFINITY,
+        demand: 0.0,
+    };
+    for k in CURVE_HALF_WINDOW..headings.len().saturating_sub(CURVE_HALF_WINDOW) {
+        let turn = wrap_angle(headings[k + CURVE_HALF_WINDOW] - headings[k - CURVE_HALF_WINDOW]);
+        if turn.abs() < 1e-3 {
+            continue;
+        }
+        let radius = span / turn.abs();
+        let corner = (limits.corner_accel * radius).sqrt().max(MIN_CORNER_SPEED);
+        // Brake to the corner by the start of its window.
+        let dist = (k - CURVE_HALF_WINDOW) as f32 * SAMPLE_STEP;
+        let reachable = (corner * corner + 2.0 * limits.brake_accel * dist).sqrt();
+        plan.limit = plan.limit.min(reachable);
+        if speed > corner {
+            let need = (speed * speed - corner * corner) / (2.0 * dist.max(1.0));
+            plan.demand = plan.demand.max(need / limits.max_brake_accel);
+        }
+    }
+    plan
+}
+
+/// Throttle and brake (both `0..=1`) that hold `speed` to `plan`.
+///
+/// Under the limit the car drives at `throttle_cap` (eased by the
+/// steering's own `bearing_throttle` band when the aim swings wide).
+/// Over it, the authored `cornerBrakingThreshold` decides between
+/// lifting and braking — the documented reading (R3) is a brake-demand
+/// floor: a corner that needs less than that share of the car's
+/// braking is made by lifting off, one that needs more by braking at
+/// the demand it needs. The threshold is clamped to
+/// [`CORNER_BRAKE_MAX`] so a driver never waits for a full stop's
+/// worth of demand.
+pub fn pace(speed: f32, plan: SpeedPlan, throttle: f32, corner_brake_threshold: f32) -> (f32, f32) {
+    if speed <= plan.limit {
+        return (throttle, 0.0);
+    }
+    if speed <= plan.limit + PACE_DEADBAND {
+        return (0.0, 0.0);
+    }
+    let threshold = corner_brake_threshold.clamp(0.0, CORNER_BRAKE_MAX);
+    if plan.demand < threshold {
+        return (0.0, 0.0);
+    }
+    (0.0, plan.demand.clamp(0.2, 1.0))
+}
+
 fn leg_count(n: usize, closed: bool) -> usize {
     if closed { n } else { n - 1 }
 }
 
-fn leg_ends(route: &OpponentRoute, leg: usize) -> (bevy::math::Vec3, bevy::math::Vec3) {
+fn leg_ends(route: &OpponentRoute, leg: usize) -> (Vec3, Vec3) {
     let n = route.points.len();
     (
         route.points[leg].position,
@@ -105,14 +306,25 @@ fn leg_ends(route: &OpponentRoute, leg: usize) -> (bevy::math::Vec3, bevy::math:
     )
 }
 
-fn xz_len(a: bevy::math::Vec3, b: bevy::math::Vec3) -> f32 {
+fn xz_len(a: Vec3, b: Vec3) -> f32 {
     (b.x - a.x).hypot(b.z - a.z)
+}
+
+/// `a` wrapped into `(-π, π]`.
+fn wrap_angle(a: f32) -> f32 {
+    let tau = std::f32::consts::TAU;
+    let mut a = a % tau;
+    if a > std::f32::consts::PI {
+        a -= tau;
+    } else if a <= -std::f32::consts::PI {
+        a += tau;
+    }
+    a
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy::math::Vec3;
     use mm2_game::OpponentRoutePoint;
 
     fn route(points: &[[f32; 2]]) -> OpponentRoute {
@@ -171,5 +383,84 @@ mod tests {
         assert_eq!(c.leg, 3);
         let p = c.point_ahead(&r, 25.0);
         assert!((p - Vec3::new(20.0, 0.0, 0.0)).length() < 0.1, "{p}");
+    }
+
+    fn limits() -> CarLimits {
+        CarLimits {
+            corner_accel: 8.0,
+            brake_accel: 5.0,
+            max_brake_accel: 10.0,
+            wheelbase: 2.5,
+        }
+    }
+
+    /// A straight line asks nothing of the car's speed.
+    #[test]
+    fn a_straight_line_sets_no_limit() {
+        let r = route(&[[0.0, 0.0], [1000.0, 0.0]]);
+        let c = RouteCursor { leg: 0, along: 0.0 };
+        let plan = plan_speed(&r, c, 30.0, &limits());
+        assert_eq!(plan.limit, f32::INFINITY);
+        assert_eq!(plan.demand, 0.0);
+    }
+
+    /// A right-angle corner ahead binds the speed: the limit falls as
+    /// the car closes on it and sits near the corner speed at its
+    /// entry, so braking starts in time instead of at the apex.
+    #[test]
+    fn a_corner_ahead_limits_speed_by_braking_distance() {
+        let r = route(&[[0.0, 0.0], [300.0, 0.0], [300.0, 300.0]]);
+        let far = plan_speed(
+            &r,
+            RouteCursor {
+                leg: 0,
+                along: 100.0,
+            },
+            40.0,
+            &limits(),
+        );
+        let near = plan_speed(
+            &r,
+            RouteCursor {
+                leg: 0,
+                along: 280.0,
+            },
+            40.0,
+            &limits(),
+        );
+        assert!(
+            far.limit.is_finite() && near.limit < far.limit,
+            "{far:?} {near:?}"
+        );
+        // At the corner the ±12 m window reads a ~15 m radius:
+        // sqrt(8 × 15.3) ≈ 11 m/s.
+        let at = plan_speed(
+            &r,
+            RouteCursor {
+                leg: 0,
+                along: 290.0,
+            },
+            11.0,
+            &limits(),
+        );
+        assert!((9.0..14.0).contains(&at.limit), "{at:?}");
+        // Carrying 40 m/s 20 m out needs far more than full braking.
+        assert!(near.demand > 1.0, "{near:?}");
+    }
+
+    /// Under the limit the car drives; over it, a corner that needs less
+    /// than the authored threshold of braking is made by lifting off,
+    /// one that needs more by braking at that demand.
+    #[test]
+    fn pace_lifts_or_brakes_by_the_authored_threshold() {
+        let plan = |demand| SpeedPlan {
+            limit: 20.0,
+            demand,
+        };
+        assert_eq!(pace(15.0, plan(0.0), 0.8, 0.7), (0.8, 0.0));
+        assert_eq!(pace(20.3, plan(0.9), 0.8, 0.7), (0.0, 0.0), "deadband");
+        assert_eq!(pace(25.0, plan(0.5), 0.8, 0.7), (0.0, 0.0), "lift");
+        assert_eq!(pace(25.0, plan(0.8), 0.8, 0.7), (0.0, 0.8), "brake");
+        assert_eq!(pace(25.0, plan(0.5), 0.8, 0.1), (0.0, 0.5), "eager");
     }
 }

@@ -14,11 +14,11 @@
 //! - **Route following vs. driving control.** [`route_target`] owns
 //!   where the car is going (advance past reached points, close out or
 //!   loop the polyline) and [`crate::racing_line`] turns that into an
-//!   aim point down the line (DSN-66);
-//!   [`crate::scripted::scripted_input_tuned`] owns how
-//!   it gets there (proportional steering, corner braking, bounded
-//!   reverse-and-turn stuck recovery — the same normalized-input
-//!   control law the scripted evidence driver uses).
+//!   aim point down the line and a speed plan for the corners ahead
+//!   (DSN-66). How it gets there is proportional steering, the
+//!   planned pace's throttle and brake, and the bounded
+//!   reverse-and-turn stuck recovery shared with the scripted evidence
+//!   driver ([`crate::scripted::recovery_input`]).
 //! - **Traffic (F15-B.1).** Each opponent also senses the other
 //!   *participants* in a corridor ahead — the player included — from
 //!   live physics state, never map data: a parked car and a moving one
@@ -38,7 +38,8 @@
 //!   ledger RACE-14) — resolves at spawn into a per-driver
 //!   [`ScriptedTuning`] and corridor sense mask: `maxThrottle`
 //!   ceilings the car's throttle demand, the corner-speed multiplier
-//!   scales the corner-brake engage speed, the look-ahead distance
+//!   scales the speed plan's corner grip and `cornerBrakingThreshold`
+//!   is its brake-demand floor (DSN-66), the look-ahead distance
 //!   sets the corridor's reach, and the authored `avoidPlayers`/
 //!   `avoidOpponents` flags gate whether the corridor senses human or
 //!   AI participants at all (an unsensed class is fully transparent —
@@ -96,11 +97,15 @@ use mm2_game::{
     VehicleRecovery, VehicleSmoke, VehicleSparks, VehicleStuck, relative_bearing,
 };
 use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState, vehicle_bundle};
-use tracing::{info, warn};
+use tracing::{info, trace, warn};
 
 use crate::car_visual;
-use crate::racing_line::RouteCursor;
-use crate::scripted::{ScriptedBot, ScriptedTuning, scripted_input_tuned};
+use crate::racing_line::{
+    CORNER_BRAKE_DEFAULT, CarLimits, RouteCursor, SpeedPlan, pace, plan_speed,
+};
+use crate::scripted::{
+    ScriptedBot, ScriptedTuning, bearing_throttle, recovery_input, steer_cmd, watch_stuck,
+};
 
 /// XZ distance within which a route point counts as reached. `.opp`
 /// points on retail routes sit 40-200 m apart; a generous radius keeps
@@ -294,10 +299,10 @@ pub struct OpponentDriver {
     /// the entry resolved no route at all.
     pub route: Option<OpponentRoute>,
     /// Control-law tuning resolved from the authored parameter tail at
-    /// spawn (F15-B.2): `maxThrottle` → the throttle ceiling, the
-    /// corner-speed multiplier → the corner-brake engage speed.
-    /// `None` columns take the `RegisterRoute` defaults — full
-    /// throttle, base corner speed — i.e. the pre-tail behavior.
+    /// spawn (F15-B.2): `maxThrottle` → the throttle ceiling (full
+    /// throttle when absent). The corner-speed multiplier lives in
+    /// [`OpponentDriver::limits`] — the bearing law's corner-brake
+    /// speed is not used by opponents.
     pub tuning: ScriptedTuning,
     /// Whether the corridor senses human participants — authored
     /// `avoidPlayers`, column 6 (default on, the `RegisterRoute`
@@ -376,6 +381,14 @@ pub struct OpponentDriver {
     /// counts, kept distinct from `reanchors` on purpose: lifted
     /// demand is not a recovery.
     pub catch_up: f32,
+    /// What this car can do, from its own handling and the authored
+    /// `cornerSpeedMultiplier` — the speed plan's corner grip and
+    /// braking (DSN-66).
+    pub limits: CarLimits,
+    /// The authored `cornerBrakingThreshold` (column 3,
+    /// [`CORNER_BRAKE_DEFAULT`] when absent): the share of full braking
+    /// below which a corner is made by lifting off rather than braking.
+    pub corner_brake: f32,
     /// How far and how long this driver has actually driven — the
     /// denominator that turns escape, re-anchor and impact counts into
     /// rates the smoke record's `opp_drv=` field can compare across
@@ -835,8 +848,7 @@ pub fn spawn_opponents(
                     route,
                     tuning: ScriptedTuning {
                         throttle_cap: drive_params.max_throttle.unwrap_or(1.0).clamp(0.0, 1.0),
-                        corner_speed: ScriptedTuning::DEFAULT.corner_speed
-                            * drive_params.corner_speed_multiplier.unwrap_or(1.0).max(0.0),
+                        ..ScriptedTuning::DEFAULT
                     },
                     avoid_players: drive_params.avoid_players.unwrap_or(true),
                     avoid_opponents: drive_params.avoid_opponents.unwrap_or(true),
@@ -858,6 +870,11 @@ pub fn spawn_opponents(
                     reanchors: 0,
                     catch_up_policy: mm2_game::CatchUpPolicy::default(),
                     catch_up: 0.0,
+                    limits: CarLimits::of(&def.config, drive_params.corner_speed_multiplier),
+                    corner_brake: drive_params
+                        .corner_brake
+                        .filter(|t| t.is_finite())
+                        .unwrap_or(CORNER_BRAKE_DEFAULT),
                     stats: DriveStats::default(),
                 },
                 vehicle_bundle(&def.config),
@@ -1217,6 +1234,9 @@ pub fn opponent_drive(
             progress.state,
             ParticipantState::AwaitingStart | ParticipantState::Racing
         );
+        // Where the car sits on its line this frame — the speed plan
+        // scans ahead from here.
+        let mut cursor: Option<RouteCursor> = None;
         let target = if !session.field_races() || locked || !racing {
             None
         } else if let Some(route) = &driver.route {
@@ -1242,11 +1262,11 @@ pub fn opponent_drive(
             // onto it instead of across the block to a far anchor. An
             // open route still approaching its first anchor has no
             // leg to project onto and keeps the anchor.
+            if target.is_some() && (next > 0 || route_is_closed(route)) {
+                cursor = RouteCursor::locate(route, next, pos.0);
+            }
             let aim = target.map(|t| {
-                if next == 0 && !route_is_closed(route) {
-                    return t;
-                }
-                RouteCursor::locate(route, next, pos.0).map_or(t, |c| {
+                cursor.map_or(t, |c| {
                     c.point_ahead(route, aim_distance(vstate.forward_speed))
                 })
             });
@@ -1357,6 +1377,8 @@ pub fn opponent_drive(
                 info!(
                     vehicle = %driver.spec.vehicle,
                     reanchors = driver.reanchors,
+                    from = ?pos.0,
+                    to = ?pose,
                     "opponent re-anchored onto its route after a bounded stuck"
                 );
                 *input = VehicleInput::default();
@@ -1484,17 +1506,59 @@ pub fn opponent_drive(
         };
         driver.catch_up = assist;
         let mut tuning = driver.tuning;
+        let mut limits = driver.limits;
         if assist > 0.0 {
             tuning.throttle_cap = (tuning.throttle_cap + assist).min(1.0);
-            tuning.corner_speed *= 1.0 + assist;
+            // The same lift on carried corner speed the bearing law's
+            // corner-brake speed took: speed scales with the root of
+            // the lateral acceleration.
+            limits.corner_accel *= (1.0 + assist) * (1.0 + assist);
         }
-        *input = scripted_input_tuned(
-            &mut driver.recovery,
-            bearing,
-            vstate.forward_speed,
-            vstate.grounded,
-            &tuning,
-        );
+        // Planned pace (DSN-66): the line ahead sets the speed the car
+        // may carry, from its own grip and brakes; throttle and brake
+        // hold it there. Steering and the bounded escapes are the
+        // scripted law's.
+        let speed = vstate.forward_speed;
+        let d = &mut *driver;
+        *input = recovery_input(&mut d.recovery, bearing, &tuning).unwrap_or_else(|| {
+            let plan = match (&d.route, cursor) {
+                (Some(route), Some(c)) => plan_speed(route, c, speed, &limits),
+                _ => SpeedPlan {
+                    limit: f32::INFINITY,
+                    demand: 0.0,
+                },
+            };
+            let throttle = bearing_throttle(bearing).min(tuning.throttle_cap);
+            let (throttle, brake) = pace(speed, plan, throttle, d.corner_brake);
+            let input = VehicleInput {
+                steering: steer_cmd(bearing),
+                throttle,
+                brake,
+                ..default()
+            };
+            watch_stuck(&mut d.recovery, &input, speed, vstate.grounded);
+            // Twice a second of driving, at trace level — the per-car
+            // record behind a stall diagnosis (`RUST_LOG=
+            // mm2_app::opponents=trace`, then filter on `opp=`).
+            if ((d.stats.seconds * 60.0).round() as u32).is_multiple_of(30) {
+                trace!(
+                    opp = d.index,
+                    t = d.stats.seconds,
+                    pos = ?pos.0,
+                    speed,
+                    limit = plan.limit,
+                    demand = plan.demand,
+                    bearing,
+                    steer = input.steering,
+                    throttle = input.throttle,
+                    brake = input.brake,
+                    next = d.next,
+                    aim = ?target,
+                    "opponent drive"
+                );
+            }
+            input
+        });
         // Braking answers the narrow corridor only: the committed pass
         // target may sit outside it while we are alongside, and braking
         // for it there would stall the overtake it is holding open.

@@ -179,16 +179,16 @@ below is a designed reading of the documented names.
 
 | col | field | retail range | consumed |
 |-----|-------|--------------|----------|
-| 0 | `maxThrottle` (default 1.0) | 0.57–1.00 | throttle ceiling on the scripted control law |
+| 0 | `maxThrottle` (default 1.0) | 0.57–1.00 | throttle ceiling on the opponent's pace law |
 | 1 | `unkFlag` (unknown/unused per R3) | 0; set on london `crash6`/`race12` rows only | bound, unconsumed |
 | 2 | look-ahead distance / `someDistancePadding` (default 75) | 50–150 | corridor obstacle-sensing reach (designed reading) |
-| 3 | `cornerBrakingThreshold` (default 0.7; R3: brake-demand floor) | 0.07–1.0, centred ~0.7 | bound, unconsumed |
+| 3 | `cornerBrakingThreshold` (default 0.7; R3: brake-demand floor) | 0.07–1.0, centred ~0.7 | brake-demand floor of the speed plan: below it a corner is made by lifting off, above it by braking (capped at 0.9; DSN-66) |
 | 4 | `avoidTraffic` | 0 on 57% of rows | bound, inert — no ambient-traffic class exists |
 | 5 | `avoidProps` | 0 on 59% | bound, inert — the corridor senses participants only |
 | 6 | `avoidPlayers` | 0 on 75% | gates human participants in the traffic corridor |
 | 7 | `avoidOpponents` | 0 on 59% | gates AI participants in the traffic corridor |
 | 8 | `weirdPathfinding`/`BadPathfinding` | 0; set on london `crash6`/`race12` rows only | bound, unconsumed |
-| 9 | `cornerSpeedMultiplier` (default 2.0) | 0.89–2.29 | multiplies the corner-brake engage speed |
+| 9 | `cornerSpeedMultiplier` (default 2.0) | 0.89–2.29 | scales the planned corner grip by `value / 2.0`, clamped 0.5–1.2 (DSN-66) |
 
 Under the corrected order the avoid flags carry real authored
 variance — `sf/circuit0` amateurs avoid opponents but not players
@@ -198,11 +198,13 @@ consumed ones gate `OpponentDriver::senses`: an unsensed class is
 fully transparent to the corridor (no pass, no brake). That 59% of
 rows author `avoidOpponents=0` means stock opponents genuinely do
 not dodge each other there — consistent with the famously chaotic
-field — and is a documented polarity, not a guess. The
-`cornerBrakingThreshold` consumption stays open: R3 describes a
-brake-demand floor (skip braking when the corner's required brake
-power falls below it) and our control law's binary corner-brake has
-no faithful quantity to compare.
+field — and is a documented polarity, not a guess.
+`cornerBrakingThreshold` is consumed as R3 describes it, a
+brake-demand floor: the opponent's speed plan (DSN-66) computes the
+share of full braking the most demanding corner ahead needs, and
+below the threshold the driver lifts off instead of braking. How the
+original measured that demand is unrecovered — the reading is
+designed.
 
 Difficulty signal: amateur rows author `maxThrottle` at the low end
 more often (sf `race0` amateur vpbug 0.70–0.75 vs professional
