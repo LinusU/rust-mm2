@@ -218,19 +218,31 @@ pub fn dev_finish_once(
     let Some(target) = next_open_trigger(&race.definition, progress, pos.0) else {
         return;
     };
-    pos.0 = target;
-    transform.translation = target;
+    let f = target.forward();
+    let normal = Vec3::new(f.x, 0.0, f.y);
+    let side = (pos.0 - target.center).dot(normal);
+    // Stage off the plane if parked on it; the following update sweeps across.
+    let destination = target.center + normal * if side < -1e-4 { 2.0 } else { -2.0 };
+    pos.0 = destination;
+    transform.translation = destination;
 }
 
 /// The trigger a `Racing` participant must cross next — the target the
 /// navigation arrow would point at (the finish once every gate is
 /// cleared). `Ordered` races have no arrow target (HUD-2), so the next
 /// authored gate stands in.
-fn next_open_trigger(def: &RaceDefinition, progress: &RaceProgress, pos: Vec3) -> Option<Vec3> {
+fn next_open_trigger<'a>(
+    def: &'a RaceDefinition,
+    progress: &RaceProgress,
+    pos: Vec3,
+) -> Option<&'a mm2_game::Checkpoint> {
     match def.rule {
-        CheckpointRule::Ordered => def.checkpoints.get(progress.next).map(|c| c.center),
+        CheckpointRule::Ordered => def.checkpoints.get(progress.next),
         CheckpointRule::AnyOrder => {
-            navigation_target(def, progress, None, pos).and_then(|t| t.position(def))
+            navigation_target(def, progress, None, pos).and_then(|t| match t {
+                mm2_game::NavTarget::Gate(i) => def.checkpoints.get(i),
+                mm2_game::NavTarget::Finish => def.finish.as_ref(),
+            })
         }
     }
 }

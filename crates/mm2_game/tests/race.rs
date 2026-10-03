@@ -10,7 +10,7 @@ fn checkpoint(x: f32, z: f32) -> Checkpoint {
         center: Vec3::new(x, 0.0, z),
         radius: 15.0,
         height: DEFAULT_CHECKPOINT_HEIGHT,
-        heading_deg: 0.0,
+        heading_deg: -90.0,
         require_direction: false,
     }
 }
@@ -52,13 +52,16 @@ fn swept_crossing_cannot_be_skipped_by_speed() {
     assert!(!cp.crossed(Vec3::new(-200.0, 0.0, 20.0), Vec3::new(200.0, 0.0, 20.0)));
     // The radius boundary itself counts.
     assert!(cp.crossed(Vec3::new(-20.0, 0.0, 15.0), Vec3::new(20.0, 0.0, 15.0)));
-    // A segment that starts already inside counts.
-    assert!(cp.crossed(Vec3::new(1.0, 0.0, 1.0), Vec3::new(200.0, 0.0, 0.0)));
-    // Parked on the checkpoint counts (the car *is* in the trigger).
-    assert!(cp.crossed(Vec3::ZERO, Vec3::ZERO));
+    // Entering the old circle without reaching the line earns nothing.
+    assert!(!cp.crossed(Vec3::new(-20.0, 0.0, 0.0), Vec3::new(-1.0, 0.0, 0.0)));
+    assert!(cp.crossed(Vec3::new(-1.0, 0.0, 0.0), Vec3::ZERO));
+    // Departure from the line, stationary poses and travel along it earn nothing.
+    assert!(!cp.crossed(Vec3::ZERO, Vec3::new(20.0, 0.0, 0.0)));
+    assert!(!cp.crossed(Vec3::ZERO, Vec3::ZERO));
+    assert!(!cp.crossed(Vec3::new(0.0, 0.0, -20.0), Vec3::new(0.0, 0.0, 20.0)));
 }
 
-/// AC02: the trigger is a cylinder — passing over or under it at the
+/// AC02: the finite gate plane rejects passing over or under it at the
 /// wrong height does not count.
 #[test]
 fn crossing_rejects_wrong_height() {
@@ -101,28 +104,28 @@ fn any_order_clears_independently_and_once() {
     let mut p = RaceProgress::new(&def);
     p.state = ParticipantState::Racing;
     // Anchor, then clear the *last* checkpoint first — order is free.
-    p.advance(&def, Vec3::new(200.0, 0.0, -1.0));
+    p.advance(&def, Vec3::new(199.0, 0.0, 0.0));
     assert_eq!(
-        p.advance(&def, Vec3::new(200.0, 0.0, 1.0)),
+        p.advance(&def, Vec3::new(201.0, 0.0, 0.0)),
         ProgressOutcome::Racing
     );
     assert!(p.is_cleared(2));
     assert_eq!(p.cleared_count(), 1);
     // Re-crossing an already-cleared checkpoint does not double count.
-    p.advance(&def, Vec3::new(200.0, 0.0, -1.0));
-    p.advance(&def, Vec3::new(200.0, 0.0, 1.0));
+    p.advance(&def, Vec3::new(199.0, 0.0, 0.0));
+    p.advance(&def, Vec3::new(201.0, 0.0, 0.0));
     assert_eq!(p.crossings, 1);
     // Clear the rest out of order; the last one finishes (no separate
     // finish trigger). Repositioning between far-apart checkpoints is an
     // explicit segment break so each hop tests one trigger.
     p.break_segment();
-    p.advance(&def, Vec3::new(0.0, 0.0, -1.0));
-    p.advance(&def, Vec3::new(0.0, 0.0, 1.0));
+    p.advance(&def, Vec3::new(-1.0, 0.0, 0.0));
+    p.advance(&def, Vec3::new(1.0, 0.0, 0.0));
     assert!(p.is_cleared(0));
     p.break_segment();
-    p.advance(&def, Vec3::new(100.0, 0.0, -1.0));
+    p.advance(&def, Vec3::new(99.0, 0.0, 0.0));
     assert_eq!(
-        p.advance(&def, Vec3::new(100.0, 0.0, 1.0)),
+        p.advance(&def, Vec3::new(101.0, 0.0, 0.0)),
         ProgressOutcome::Finished
     );
 }
@@ -137,21 +140,21 @@ fn finish_trigger_waits_for_full_clearance() {
     let mut p = RaceProgress::new(&def);
     p.state = ParticipantState::Racing;
     // Cross the finish trigger before clearing the checkpoint: inert.
-    p.advance(&def, Vec3::new(499.0, 0.0, -10.0));
+    p.advance(&def, Vec3::new(490.0, 0.0, 0.0));
     assert_eq!(
-        p.advance(&def, Vec3::new(499.0, 0.0, 10.0)),
+        p.advance(&def, Vec3::new(510.0, 0.0, 0.0)),
         ProgressOutcome::Racing
     );
     // Clear the checkpoint (repositioning is an explicit segment
     // break), then cross the finish for real.
     p.break_segment();
-    p.advance(&def, Vec3::new(0.0, 0.0, -1.0));
-    p.advance(&def, Vec3::new(0.0, 0.0, 1.0));
+    p.advance(&def, Vec3::new(-1.0, 0.0, 0.0));
+    p.advance(&def, Vec3::new(1.0, 0.0, 0.0));
     assert!(p.is_cleared(0));
     p.break_segment();
-    p.advance(&def, Vec3::new(499.0, 0.0, -10.0));
+    p.advance(&def, Vec3::new(490.0, 0.0, 0.0));
     assert_eq!(
-        p.advance(&def, Vec3::new(499.0, 0.0, 10.0)),
+        p.advance(&def, Vec3::new(510.0, 0.0, 0.0)),
         ProgressOutcome::Finished
     );
 }
@@ -165,30 +168,30 @@ fn ordered_requires_sequence_and_wraps_laps() {
     let mut p = RaceProgress::new(&def);
     p.state = ParticipantState::Racing;
     // Cross checkpoint 1 first: nothing clears.
-    p.advance(&def, Vec3::new(99.0, 0.0, -1.0));
-    p.advance(&def, Vec3::new(99.0, 0.0, 1.0));
+    p.advance(&def, Vec3::new(99.0, 0.0, 0.0));
+    p.advance(&def, Vec3::new(101.0, 0.0, 0.0));
     assert_eq!(p.cleared_count(), 0);
     // Clear 0 then 1 — lap 1 completes, progress resets for lap 2.
     // Repositioning between far-apart checkpoints is an explicit
     // segment break, like a reset would be.
     p.break_segment();
-    p.advance(&def, Vec3::new(0.0, 0.0, -1.0));
-    p.advance(&def, Vec3::new(0.0, 0.0, 1.0));
+    p.advance(&def, Vec3::new(-1.0, 0.0, 0.0));
+    p.advance(&def, Vec3::new(1.0, 0.0, 0.0));
     assert!(p.is_cleared(0));
     p.break_segment();
-    p.advance(&def, Vec3::new(99.0, 0.0, -1.0));
-    p.advance(&def, Vec3::new(99.0, 0.0, 1.0));
+    p.advance(&def, Vec3::new(99.0, 0.0, 0.0));
+    p.advance(&def, Vec3::new(101.0, 0.0, 0.0));
     assert_eq!(p.lap, 1);
     assert_eq!(p.next, 0);
     assert_eq!(p.cleared_count(), 0, "the new lap starts un-cleared");
     // Lap 2: the finish comes from the last required crossing.
     p.break_segment();
-    p.advance(&def, Vec3::new(0.0, 0.0, -1.0));
-    p.advance(&def, Vec3::new(0.0, 0.0, 1.0));
+    p.advance(&def, Vec3::new(-1.0, 0.0, 0.0));
+    p.advance(&def, Vec3::new(1.0, 0.0, 0.0));
     p.break_segment();
-    p.advance(&def, Vec3::new(99.0, 0.0, -1.0));
+    p.advance(&def, Vec3::new(99.0, 0.0, 0.0));
     assert_eq!(
-        p.advance(&def, Vec3::new(99.0, 0.0, 1.0)),
+        p.advance(&def, Vec3::new(101.0, 0.0, 0.0)),
         ProgressOutcome::Finished
     );
     assert_eq!(p.lap, 2);
@@ -231,7 +234,7 @@ fn the_lap_line_only_closes_a_completed_sequence() {
     // Oscillate on the closing gate before any sequence progress:
     // repeated finish-line hits without the required gates are inert.
     for z in [-10.0, 10.0, -10.0, 10.0] {
-        p.advance(&def, Vec3::new(200.0, 0.0, z));
+        p.advance(&def, Vec3::new(200.0 + z, 0.0, 0.0));
     }
     assert_eq!(p.cleared_count(), 0);
     assert_eq!(p.lap, 0);
@@ -239,28 +242,28 @@ fn the_lap_line_only_closes_a_completed_sequence() {
     // A complete sequence closes lap 1 exactly once.
     for x in [0.0, 100.0, 200.0] {
         p.break_segment();
-        p.advance(&def, Vec3::new(x, 0.0, -10.0));
-        p.advance(&def, Vec3::new(x, 0.0, 10.0));
+        p.advance(&def, Vec3::new(x - 10.0, 0.0, 0.0));
+        p.advance(&def, Vec3::new(x + 10.0, 0.0, 0.0));
     }
     assert_eq!(p.lap, 1);
     assert_eq!(p.crossings, 3);
     // Bouncing on the line again clears nothing — the new lap's first
     // required gate is A, not the line.
     for z in [-10.0, 10.0, -10.0] {
-        p.advance(&def, Vec3::new(200.0, 0.0, z));
+        p.advance(&def, Vec3::new(200.0 + z, 0.0, 0.0));
     }
     assert_eq!(p.lap, 1);
     assert_eq!(p.crossings, 3);
     // Lap 2's sequence finishes the race on the line crossing.
     for x in [0.0, 100.0] {
         p.break_segment();
-        p.advance(&def, Vec3::new(x, 0.0, -10.0));
-        p.advance(&def, Vec3::new(x, 0.0, 10.0));
+        p.advance(&def, Vec3::new(x - 10.0, 0.0, 0.0));
+        p.advance(&def, Vec3::new(x + 10.0, 0.0, 0.0));
     }
     p.break_segment();
-    p.advance(&def, Vec3::new(200.0, 0.0, -10.0));
+    p.advance(&def, Vec3::new(190.0, 0.0, 0.0));
     assert_eq!(
-        p.advance(&def, Vec3::new(200.0, 0.0, 10.0)),
+        p.advance(&def, Vec3::new(210.0, 0.0, 0.0)),
         ProgressOutcome::Finished
     );
     assert_eq!(p.lap, 2);
@@ -517,8 +520,8 @@ fn arrow_pick_wins_until_its_gate_is_cleared() {
         Some(NavTarget::Gate(2))
     );
     // Clear the picked gate — the arrow must not keep aiming at it.
-    p.advance(&def, Vec3::new(199.0, 0.0, -10.0));
-    p.advance(&def, Vec3::new(199.0, 0.0, 10.0));
+    p.advance(&def, Vec3::new(190.0, 0.0, 0.0));
+    p.advance(&def, Vec3::new(210.0, 0.0, 0.0));
     assert!(p.is_cleared(2));
     assert_eq!(
         navigation_target(&def, &p, Some(2), at),
@@ -598,8 +601,8 @@ fn cycling_walks_remaining_gates_and_wraps() {
     assert_eq!(pick, Some(2), "backward cycling wraps the other way");
 
     // A cleared gate is skipped in both directions.
-    p.advance(&def, Vec3::new(99.0, 0.0, -10.0));
-    p.advance(&def, Vec3::new(99.0, 0.0, 10.0));
+    p.advance(&def, Vec3::new(90.0, 0.0, 0.0));
+    p.advance(&def, Vec3::new(110.0, 0.0, 0.0));
     assert!(p.is_cleared(1));
     assert_eq!(cycle_target(&def, &p, Some(0), at, 1), Some(2));
     assert_eq!(cycle_target(&def, &p, Some(0), at, -1), Some(2));
@@ -607,8 +610,8 @@ fn cycling_walks_remaining_gates_and_wraps() {
     // Nothing left to aim at clears the pick.
     p.advance(&def, Vec3::new(-10.0, 0.0, 0.0));
     p.advance(&def, Vec3::new(10.0, 0.0, 0.0));
-    p.advance(&def, Vec3::new(199.0, 0.0, -10.0));
-    p.advance(&def, Vec3::new(199.0, 0.0, 10.0));
+    p.advance(&def, Vec3::new(190.0, 0.0, 0.0));
+    p.advance(&def, Vec3::new(210.0, 0.0, 0.0));
     assert_eq!(cycle_target(&def, &p, Some(0), at, 1), None);
 }
 
@@ -1312,13 +1315,13 @@ fn progress_replication_round_trips_the_rule_counters() {
     // clear credited, mid-race.
     let mut src = RaceProgress::new(&def);
     src.state = ParticipantState::Racing;
-    src.advance(&def, Vec3::new(0.0, 0.0, -1.0));
-    src.advance(&def, Vec3::new(0.0, 0.0, 1.0));
+    src.advance(&def, Vec3::new(-1.0, 0.0, 0.0));
+    src.advance(&def, Vec3::new(1.0, 0.0, 0.0));
     // A teleported jump (reset) breaks the sweep — gate 1 is never
     // crossed, gate 2 clears on its own segment.
     src.break_segment();
-    src.advance(&def, Vec3::new(200.0, 0.0, -1.0));
-    src.advance(&def, Vec3::new(200.0, 0.0, 1.0));
+    src.advance(&def, Vec3::new(199.0, 0.0, 0.0));
+    src.advance(&def, Vec3::new(201.0, 0.0, 0.0));
     src.route_clears = 1;
     let mask = src.cleared_mask();
     assert_eq!(mask, 0b101, "cleared flags pack low-bit-first");
@@ -1341,4 +1344,37 @@ fn progress_replication_round_trips_the_rule_counters() {
     let mut wide = RaceProgress::new(&def);
     wide.apply_replicated(u64::MAX, 0, 0, 0, 0);
     assert_eq!(wide.cleared_count(), def.checkpoints.len());
+}
+
+#[test]
+fn oblique_gate_uses_its_drawn_plane_and_finite_width() {
+    let mut cp = checkpoint(-329.765_05, -111.798_71);
+    cp.heading_deg = 63.809998; // First gate of London circuit0
+    let f = cp.forward();
+    let normal = Vec3::new(f.x, 0.0, f.y);
+    let across = Vec3::new(f.y, 0.0, -f.x);
+    let start = cp.center - normal * 25.0;
+    assert!(!cp.crossed(start, cp.center - normal));
+    assert!(cp.crossed(start, cp.center + normal * 25.0));
+    assert!(cp.crossed(cp.center + normal, start)); // reverse allowed
+    let edge = cp.center + across * cp.radius;
+    assert!(cp.crossed(edge - normal * 25.0, edge + normal * 25.0));
+    let outside = cp.center + across * (cp.radius + 0.1);
+    assert!(!cp.crossed(outside - normal * 25.0, outside + normal * 25.0));
+    let overhead = cp.center + Vec3::Y * (cp.height + 1.0);
+    assert!(!cp.crossed(overhead - normal, overhead + normal));
+}
+
+#[test]
+fn one_line_crossing_cannot_bank_multiple_laps() {
+    let def = ordered(vec![checkpoint(0.0, 0.0)], 3);
+    let mut p = RaceProgress::new(&def);
+    p.state = ParticipantState::Racing;
+    p.advance(&def, Vec3::new(-20.0, 0.0, 0.0));
+    assert_eq!(
+        p.advance(&def, Vec3::new(20.0, 0.0, 0.0)),
+        ProgressOutcome::Racing
+    );
+    assert_eq!(p.lap, 1);
+    assert_eq!(p.crossings, 1);
 }

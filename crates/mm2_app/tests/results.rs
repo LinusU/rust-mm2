@@ -28,7 +28,7 @@ fn cp(x: f32, z: f32) -> Checkpoint {
         center: Vec3::new(x, 0.0, z),
         radius: 15.0,
         height: mm2_game::DEFAULT_CHECKPOINT_HEIGHT,
-        heading_deg: 0.0,
+        heading_deg: -90.0,
         require_direction: false,
     }
 }

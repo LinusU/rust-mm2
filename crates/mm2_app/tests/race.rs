@@ -135,7 +135,7 @@ fn cp(x: f32, z: f32) -> Checkpoint {
         center: Vec3::new(x, 0.0, z),
         radius: 15.0,
         height: mm2_game::DEFAULT_CHECKPOINT_HEIGHT,
-        heading_deg: 0.0,
+        heading_deg: -90.0,
         require_direction: false,
     }
 }
@@ -676,11 +676,8 @@ fn ordered_multi_lap_participants_stay_independent_and_order() {
     app.world_mut().get_mut::<Player>(remote).unwrap().control = PlayerControl::Remote;
     run(&mut app, 2); // release + anchor
 
-    // The drive path, per gate: enter the trigger, leave into the
-    // middle zone (x in 15..85), then enter the next. One segment
-    // clears one gate — resting inside a radius would let the next
-    // segment clear the wrapped sequence too (the swept contract's
-    // intended multi-crossing, pinned by other tests).
+    // Cross each gate plane, then return across gate 0 for the new lap.
+    // A segment only earns the ordered crossings it physically traverses.
     let drive = |app: &mut App, e: Entity, z: f32, xs: &[f32]| {
         for &x in xs {
             set_position(app, e, Vec3::new(x, 0.0, z));
@@ -694,19 +691,19 @@ fn ordered_multi_lap_participants_stay_independent_and_order() {
     drive(&mut app, local, 2.0, &[10.0]);
     assert_eq!(progress(&app, remote).next, 1);
     assert_eq!(progress(&app, local).next, 1);
-    drive(&mut app, remote, -2.0, &[40.0, 90.0]);
+    drive(&mut app, remote, -2.0, &[40.0, 110.0]);
     assert_eq!(progress(&app, remote).lap, 1, "remote finished lap 1");
     assert_eq!(progress(&app, remote).next, 0);
     assert_eq!(progress(&app, local).next, 1, "local still owes gate 1");
     assert_eq!(progress(&app, local).lap, 0);
-    drive(&mut app, local, 2.0, &[40.0, 90.0]);
+    drive(&mut app, local, 2.0, &[40.0, 110.0]);
     assert_eq!(progress(&app, local).lap, 1);
 
     // The remote's lap 2 finishes first — its resolution is recorded
     // but the local still races, so the session stays Playing.
-    drive(&mut app, remote, -2.0, &[50.0, 10.0]);
+    drive(&mut app, remote, -2.0, &[50.0, -10.0]);
     assert_eq!(progress(&app, remote).next, 1, "lap-2 gate 0 cleared");
-    drive(&mut app, remote, -2.0, &[40.0, 90.0]);
+    drive(&mut app, remote, -2.0, &[40.0, 110.0]);
     assert!(
         matches!(
             progress(&app, remote).state,
@@ -719,7 +716,7 @@ fn ordered_multi_lap_participants_stay_independent_and_order() {
 
     // The local completes lap 2 a few ticks later — one result each,
     // standings ordered by the recorded clock.
-    drive(&mut app, local, 2.0, &[50.0, 10.0, 40.0, 90.0]);
+    drive(&mut app, local, 2.0, &[50.0, -10.0, 40.0, 110.0]);
     assert!(matches!(
         progress(&app, local).state,
         ParticipantState::Finished { .. }
@@ -777,7 +774,7 @@ fn ordered_skipped_gate_clears_nothing_until_revisited_in_order() {
     drive(&mut app, Vec3::new(-50.0, 0.0, 50.0));
     drive(&mut app, Vec3::new(45.0, 0.0, 50.0));
     drive(&mut app, Vec3::new(45.0, 0.0, 0.0));
-    drive(&mut app, Vec3::new(95.0, 0.0, 0.0));
+    drive(&mut app, Vec3::new(105.0, 0.0, 0.0));
     let p = progress(&app, car);
     assert_eq!(p.next, 0, "gate 1 cannot clear while gate 0 is owed");
     assert_eq!(p.cleared_count(), 0, "the skipped crossing must not bank");
@@ -792,7 +789,7 @@ fn ordered_skipped_gate_clears_nothing_until_revisited_in_order() {
     drive(&mut app, Vec3::new(-10.0, 0.0, 0.0));
     assert_eq!(progress(&app, car).next, 1);
     drive(&mut app, Vec3::new(45.0, 0.0, 0.0));
-    drive(&mut app, Vec3::new(95.0, 0.0, 0.0));
+    drive(&mut app, Vec3::new(105.0, 0.0, 0.0));
     assert_eq!(progress(&app, car).next, 2, "gate 1 needed a second visit");
 
     // The closing line completes the lap — once, with exactly one
@@ -849,7 +846,7 @@ fn ordered_finish_line_is_inert_until_it_is_next() {
             Vec3::new(45.0, 0.0, 0.0),
             Vec3::new(-10.0, 0.0, 0.0),
             Vec3::new(45.0, 0.0, 0.0),
-            Vec3::new(95.0, 0.0, 0.0),
+            Vec3::new(105.0, 0.0, 0.0),
             Vec3::new(215.0, 0.0, 0.0),
         ] {
             drive(app, to);
@@ -905,7 +902,7 @@ fn ordered_spawn_inside_the_line_grants_nothing() {
         Vec3::new(45.0, 0.0, 0.0),
         Vec3::new(-10.0, 0.0, 0.0),
         Vec3::new(45.0, 0.0, 0.0),
-        Vec3::new(95.0, 0.0, 0.0),
+        Vec3::new(105.0, 0.0, 0.0),
         Vec3::new(205.0, 0.0, 0.0),
     ] {
         drive(&mut app, to);
@@ -972,9 +969,9 @@ fn ordered_last_lap_tie_records_both_deterministically() {
     // Both clear the course gates on parallel lanes, then cross the
     // line on the same update.
     drive(&mut app, a, -2.0, Vec3::new(10.0, 0.0, 0.0));
-    drive(&mut app, a, -2.0, Vec3::new(90.0, 0.0, 0.0));
+    drive(&mut app, a, -2.0, Vec3::new(110.0, 0.0, 0.0));
     drive(&mut app, b, 2.0, Vec3::new(10.0, 0.0, 0.0));
-    drive(&mut app, b, 2.0, Vec3::new(90.0, 0.0, 0.0));
+    drive(&mut app, b, 2.0, Vec3::new(110.0, 0.0, 0.0));
     drive(&mut app, a, -2.0, Vec3::new(150.0, 0.0, 0.0));
     drive(&mut app, b, 2.0, Vec3::new(150.0, 0.0, 0.0));
     set_position(&mut app, a, Vec3::new(215.0, 0.0, -2.0));
@@ -1021,7 +1018,7 @@ fn ordered_reset_over_the_line_still_owes_the_crossing() {
     };
 
     drive(&mut app, Vec3::new(10.0, 0.0, 0.0));
-    drive(&mut app, Vec3::new(90.0, 0.0, 0.0));
+    drive(&mut app, Vec3::new(110.0, 0.0, 0.0));
     assert_eq!(progress(&app, car).next, 2, "only the line is owed");
 
     // The reset's jump sweeps the closing gate's cylinder on the way
@@ -1040,7 +1037,7 @@ fn ordered_reset_over_the_line_still_owes_the_crossing() {
 
     // Driving back across it completes the lap — once.
     drive(&mut app, Vec3::new(300.0, 0.0, 0.0));
-    drive(&mut app, Vec3::new(210.0, 0.0, 0.0));
+    drive(&mut app, Vec3::new(190.0, 0.0, 0.0));
     assert!(matches!(
         progress(&app, car).state,
         ParticipantState::Finished { .. }
@@ -1068,7 +1065,7 @@ fn an_unresolved_participant_does_not_block_the_local_result() {
 
     for to in [
         Vec3::new(10.0, 0.0, 0.0),
-        Vec3::new(90.0, 0.0, 0.0),
+        Vec3::new(110.0, 0.0, 0.0),
         Vec3::new(215.0, 0.0, 0.0),
     ] {
         drive(&mut app, to);
@@ -1756,7 +1753,16 @@ fn pad_press(app: &mut App, button: GamepadButton) {
 fn arrow_tracks_the_live_objective() {
     // Gates on the Z axis: gate 0 dead ahead (−Z), gate 1 behind.
     let def = RaceDefinition {
-        checkpoints: vec![cp(0.0, -100.0), cp(0.0, 100.0)],
+        checkpoints: vec![
+            Checkpoint {
+                heading_deg: 0.0,
+                ..cp(0.0, -100.0)
+            },
+            Checkpoint {
+                heading_deg: 0.0,
+                ..cp(0.0, 100.0)
+            },
+        ],
         ..any_order_def(0)
     };
     let mut app = race_app(event_config(), def.clone());
@@ -2185,13 +2191,13 @@ fn live_order_tracks_progress_and_locks_finished_places() {
 
     // A completed lap outranks proximity: the remote's lap-1 wrap beats
     // the local parked outside gate 1's door.
-    drive(&mut app, remote, -2.0, &[90.0]);
+    drive(&mut app, remote, -2.0, &[110.0]);
     assert_eq!(progress(&app, remote).lap, 1);
     assert_eq!(order(&app), vec![pr, pl]);
 
     // The remote finishes lap 2 — its lead is now a locked place, not
     // progress; the local still races so the session stays Playing.
-    drive(&mut app, remote, -2.0, &[40.0, 10.0, 40.0, 90.0]);
+    drive(&mut app, remote, -2.0, &[40.0, -10.0, 40.0, 110.0]);
     assert!(matches!(
         progress(&app, remote).state,
         ParticipantState::Finished { .. }
@@ -2201,7 +2207,7 @@ fn live_order_tracks_progress_and_locks_finished_places() {
 
     // The local finishes later; the live order resolves into the same
     // ordering the ledger's standings record.
-    drive(&mut app, local, 2.0, &[90.0, 40.0, 10.0, 40.0, 90.0]);
+    drive(&mut app, local, 2.0, &[110.0, 40.0, -10.0, 40.0, 110.0]);
     assert!(matches!(
         progress(&app, local).state,
         ParticipantState::Finished { .. }
@@ -2495,4 +2501,26 @@ fn checkpoint_gantries_follow_progress_and_teardown() {
             .count(),
         0
     );
+}
+
+#[test]
+fn checkpoint_clears_at_the_gantry_line_not_on_approach() {
+    let def = any_order_def(0);
+    let mut app = race_app(event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(-30.0, 0.0, 0.0));
+    run(&mut app, 2);
+    set_position(&mut app, car, Vec3::new(-1.0, 0.0, 0.0));
+    run(&mut app, 1);
+    assert_eq!(progress(&app, car).crossings, 0);
+    set_position(&mut app, car, Vec3::ZERO);
+    run(&mut app, 1);
+    assert_eq!(progress(&app, car).crossings, 1);
+    set_position(&mut app, car, Vec3::new(99.0, 0.0, 0.0));
+    run(&mut app, 1);
+    assert_eq!(progress(&app, car).crossings, 1);
+    assert_eq!(race(&app).phase, RacePhase::Running);
+    set_position(&mut app, car, Vec3::new(100.0, 0.0, 0.0));
+    run(&mut app, 1);
+    assert_eq!(progress(&app, car).crossings, 2);
+    assert_eq!(race(&app).phase, RacePhase::Complete);
 }

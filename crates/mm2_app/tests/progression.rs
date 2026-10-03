@@ -241,7 +241,7 @@ fn install() -> tempfile::TempDir {
     );
     let mut wp = WAYPOINTS.to_string();
     for x in COURSE {
-        wp.push_str(&format!("{x},0,{COURSE_Z},0,15,0,0,0,\n"));
+        wp.push_str(&format!("{x},0,{COURSE_Z},-90,15,0,0,0,\n"));
     }
     write(d, "race/testcity/race0waypoints.csv", wp);
     write(
@@ -270,7 +270,7 @@ fn install_gated() -> tempfile::TempDir {
     write(d, "race/testcity/race3.aimap", "#\n");
     let mut wp = WAYPOINTS.to_string();
     for x in COURSE {
-        wp.push_str(&format!("{x},0,{COURSE_Z},0,15,0,0,0,\n"));
+        wp.push_str(&format!("{x},0,{COURSE_Z},-90,15,0,0,0,\n"));
     }
     write(d, "race/testcity/race3waypoints.csv", wp);
     tmp

@@ -353,7 +353,7 @@ fn drive_target_tracks_the_live_objective() {
         center: Vec3::new(x, 0.0, z),
         radius: 10.0,
         height: 8.0,
-        heading_deg: 0.0,
+        heading_deg: if x == 60.0 { -90.0 } else { 0.0 },
         require_direction: false,
     };
     let any = RaceDefinition {
@@ -377,7 +377,7 @@ fn drive_target_tracks_the_live_objective() {
         Some(Vec3::new(60.0, 0.0, 0.0)),
         "gate 1 cleared out of order — gate 0 is still the objective"
     );
-    progress.advance(&any, Vec3::new(55.0, 0.0, 4.0));
+    progress.advance(&any, Vec3::new(65.0, 0.0, 4.0));
     assert_eq!(
         scripted::drive_target(&any, &progress),
         Some(Vec3::new(-20.0, 0.0, -20.0)),

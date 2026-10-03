@@ -53,16 +53,15 @@ pub const DEFAULT_COUNTDOWN_TICKS: u32 = 3 * RACE_TICK_HZ;
 /// until real event data says otherwise (F12+).
 pub const DEFAULT_CHECKPOINT_HEIGHT: f32 = 8.0;
 
-/// One checkpoint trigger volume: a vertical cylinder of `radius`
-/// around `center` (XZ) and `±height` around `center.y`. The authored
-/// `radius`/`poly count` column supplies `radius`; `height` and
-/// `require_direction` are contract fields the producer sets — no
-/// authored value exists for either (designed).
+/// One finite gate plane: `±radius` across the gantry and `±height`
+/// vertically around `center`, with its normal derived from `heading_deg`.
+/// The authored fifth column supplies the half-width (`radius` is retained
+/// as the field name); the planar crossing test is a designed rule.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Checkpoint {
     /// Authored world position of the trigger.
     pub center: Vec3,
-    /// Horizontal extent — the authored fifth-column value.
+    /// Gate half-width across the road — the authored fifth-column value.
     pub radius: f32,
     /// Vertical half-extent — designed default
     /// [`DEFAULT_CHECKPOINT_HEIGHT`]; a car a bridge below or a jump
@@ -88,36 +87,39 @@ impl Checkpoint {
         Vec2::new(-a.sin(), a.cos())
     }
 
-    /// Whether the movement segment `from → to` crosses this trigger.
-    ///
-    /// Swept, not sampled: the test is against the whole segment, so a
-    /// car covering more than a trigger's width in one fixed step still
-    /// registers — it cannot skip a checkpoint by going fast (AC02).
-    /// The check is cylindrical: closest XZ approach within `radius`
-    /// *and* the segment's height there within `±height`.
+    /// Whether the swept movement crosses the finite gate plane. Approaching
+    /// the gantry, dwelling on it, or driving alongside it earns nothing.
+    /// The entire segment is tested so high speed cannot skip the line.
     pub fn crossed(&self, from: Vec3, to: Vec3) -> bool {
-        let a = Vec2::new(from.x - self.center.x, from.z - self.center.z);
-        let ab = Vec2::new(to.x - from.x, to.z - from.z);
-        // Parameter of the XZ segment's closest approach to the axis.
-        let len2 = ab.length_squared();
-        let t = if len2 > 0.0 {
-            (-a.dot(ab) / len2).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
+        self.crossing_time(from, to).is_some()
+    }
+
+    /// Fraction along the sweep at the plane, used to consume ordered gates
+    /// in travel order without reusing the same line crossing for a new lap.
+    fn crossing_time(&self, from: Vec3, to: Vec3) -> Option<f32> {
+        let normal = self.forward();
+        let relative = |p: Vec3| Vec2::new(p.x - self.center.x, p.z - self.center.z);
+        let start = relative(from).dot(normal);
+        let end = relative(to).dot(normal);
+        // Avoid counting departure after a preceding step landed on the line.
+        const EPSILON: f32 = 1e-4;
+        if start.abs() <= EPSILON {
+            return None;
+        }
+        let end = if end.abs() <= EPSILON { 0.0 } else { end };
+        if (start > 0.0 && end > 0.0) || (start < 0.0 && end < 0.0) {
+            return None;
+        }
+        if self.require_direction && end <= start {
+            return None;
+        }
+        let t = start / (start - end);
         let p = from.lerp(to, t);
-        let dx = p.x - self.center.x;
-        let dz = p.z - self.center.z;
-        if dx.mul_add(dx, dz * dz) > self.radius * self.radius {
-            return false;
+        let across = relative(p).dot(Vec2::new(normal.y, -normal.x));
+        if across.abs() > self.radius + EPSILON || (p.y - self.center.y).abs() > self.height {
+            return None;
         }
-        if (p.y - self.center.y).abs() > self.height {
-            return false;
-        }
-        if self.require_direction && len2 > 0.0 && (ab / len2.sqrt()).dot(self.forward()) <= 0.0 {
-            return false;
-        }
-        true
+        Some(t)
     }
 }
 
@@ -723,10 +725,15 @@ impl RaceProgress {
                 }
             }
             CheckpointRule::Ordered => {
+                let mut last_crossing = -1.0;
                 while let Some(cp) = definition.checkpoints.get(self.next) {
-                    if !cp.crossed(from, to) {
+                    let Some(t) = cp.crossing_time(from, to) else {
+                        break;
+                    };
+                    if t <= last_crossing {
                         break;
                     }
+                    last_crossing = t;
                     self.cleared[self.next] = true;
                     self.crossings += 1;
                     self.next += 1;

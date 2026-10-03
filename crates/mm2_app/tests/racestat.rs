@@ -169,8 +169,10 @@ fn spawn_opponent(app: &mut App, def: &RaceDefinition, pos: Vec3) -> Entity {
 fn cross(prog: &mut RaceProgress, def: &RaceDefinition, gate: usize) {
     let cp = &def.checkpoints[gate];
     let c = cp.center;
-    prog.advance(def, c - Vec3::X * (cp.radius + 5.0));
-    prog.advance(def, c + Vec3::X * (cp.radius + 5.0));
+    let f = cp.forward();
+    let normal = Vec3::new(f.x, 0.0, f.y);
+    prog.advance(def, c - normal * (cp.radius + 5.0));
+    prog.advance(def, c + normal * (cp.radius + 5.0));
 }
 
 /// `spawn_race_stats` takes `&mut Commands` plus the image store —

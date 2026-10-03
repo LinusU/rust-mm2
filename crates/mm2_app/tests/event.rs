@@ -39,7 +39,7 @@ fn write(dir: &Path, rel: &str, contents: impl AsRef<[u8]>) {
 }
 
 fn waypoint_row(x: f32, z: f32) -> String {
-    format!("{x},0,{z},0,15,0,0,0,\n")
+    format!("{x},0,{z},-90,15,0,0,0,\n")
 }
 
 /// A `race/testcity/` install: one checkpoint row plus records.

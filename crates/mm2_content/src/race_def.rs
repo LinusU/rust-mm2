@@ -13,7 +13,7 @@
 //!   lifted copy of it is appended last so each lap's final gate is
 //!   the start line and `laps × rows` crossings complete the race.
 //!
-//! Trigger radius is the authored fifth-column value verbatim — the
+//! Gate half-width is the authored fifth-column value verbatim — the
 //! [`Checkpoint`] contract already documents that mapping; the
 //! `radius`/`poly count` label difference stays a provenance question
 //! (`WPT-1`), not a runtime branch. Start slots come from a

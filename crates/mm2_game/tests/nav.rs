@@ -1369,7 +1369,7 @@ fn densify_route_rejects_repaths_that_drop_a_gate_the_leg_crossed() {
         center: Vec3::new(30.0, 0.0, 10.0),
         radius: 5.0,
         height: 4.0,
-        heading_deg: 0.0,
+        heading_deg: -90.0,
         require_direction: false,
     };
     let d = g.densify_route(&route, false, &[gate], &RouteOptions::default());
@@ -1392,7 +1392,7 @@ fn densify_route_keeps_repaths_that_still_cross_the_gate() {
         center: Vec3::new(58.0, 0.0, 12.0),
         radius: 8.0,
         height: 4.0,
-        heading_deg: 0.0,
+        heading_deg: -45.0, // Both approaches cross this oblique plane at the end anchor.
         require_direction: false,
     };
     let d = g.densify_route(&route, false, &[gate], &RouteOptions::default());

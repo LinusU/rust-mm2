@@ -83,7 +83,7 @@ fn aimap_with_opponents(rows: &str) -> String {
 }
 
 fn waypoint_row(x: f32, z: f32) -> String {
-    format!("{x},0,{z},0,15,0,0,0,\n")
+    format!("{x},0,{z},-90,15,0,0,0,\n")
 }
 
 /// A `race/testcity/` checkpoint event wiring two opponents on parallel
@@ -2140,9 +2140,9 @@ fn catch_up_lifts_a_trailing_opponents_demand() {
 
     // Teleport the player deep into the course: the swept segment
     // clears all three gates through the shared `advance` validation
-    // but ends 20 m short of the finish trigger — the participant
+    // but ends 10 m short of the finish trigger — the participant
     // leads at ~3.3 gate units without resolving.
-    app.world_mut().get_mut::<Position>(car).unwrap().0 = Vec3::new(160.0, 0.5, COURSE_Z);
+    app.world_mut().get_mut::<Position>(car).unwrap().0 = Vec3::new(170.0, 0.5, COURSE_Z);
     run(&mut app, 4);
     let progress = app.world().get::<RaceProgress>(car).unwrap();
     assert_eq!(progress.cleared_count(), 3, "the sweep earned the gates");
