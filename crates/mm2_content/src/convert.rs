@@ -93,6 +93,13 @@ const SELF_RIGHT_DELAY: f32 = 2.0;
 /// second of interrupted drive on every upshift; five of them between rest
 /// and top speed make acceleration arrive in steps.
 const MAX_SHIFT_TIME: f32 = 0.35;
+/// Multiple of the authored `SteeringLimit` a car gets as full lock
+/// (adapted). Stock locks run 0.35–0.6 rad, and at the Beetle's 0.4 a car
+/// at 36 km/h ran out of lock at 1.24 g on 2.25 g tires; the grip cap
+/// governs the lock at speed, so this mostly tightens slow corners. More
+/// than `1.2` and full lock starts ploughing the heavy vehicles at
+/// 70 km/h — see docs/vehicle-handling.md "Grip-limited steering".
+const STEERING_LOCK_SCALE: f32 = 1.2;
 /// Multiple of tire grip the steering lock may demand (adapted arcade
 /// policy — stock locks ask for 8-64 g at their high-speed limit). The
 /// cap already allows the front tires their peak slip on top, so any
@@ -591,7 +598,7 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
     );
 
     // --- steering ----------------------------------------------------------
-    let low_angle = sim.wheel_front.steering_limit.clamp(0.05, 0.7);
+    let low_angle = (sim.wheel_front.steering_limit * STEERING_LOCK_SCALE).clamp(0.05, 0.75);
     let high_angle =
         (low_angle * (1.0 - sim.wheel_front.steering_offset * 0.8)).clamp(0.04, low_angle);
     let high_speed = input
@@ -608,10 +615,13 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
         response_curve: 1.4,
         grip_limit: STEERING_GRIP_LIMIT,
     };
-    report.imported(
+    report.adapted(
         "vehCarSim.WheelFront.SteeringLimit",
         "steering.low_speed_max_angle",
-        format!("{low_angle:.2} rad"),
+        format!(
+            "{:.2} rad authored × {STEERING_LOCK_SCALE} = {low_angle:.2} rad",
+            sim.wheel_front.steering_limit
+        ),
     );
     report.adapted(
         "vehCarSim.WheelFront.SteeringOffset + asNode.SpeedBaseHi",

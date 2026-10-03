@@ -55,7 +55,7 @@ behind the adaptations.
 | `Trans.GearChangeTime` | `transmission.shift_time` | seconds, capped — see below |
 | `DrivetrainType`, `Axle*.TorqueCoef` | `wheels[].driven`, `drive_share` | |
 | `Wheel*.BrakeCoef` / `HandbrakeCoef` | `wheels[].brake_bias` / `handbrake_coef` | normalised against the axle sum |
-| `Wheel*.SteeringLimit` | `steering.low_speed_max_angle`, `steer_scale` | |
+| `Wheel*.SteeringLimit` | `steering.low_speed_max_angle`, `steer_scale` | lock × 1.2, see below |
 | `Wheel*.StaticFric` / `SlidingFric` | `tires.lateral_grip`, `slide_fraction` | scaled, see below |
 | `Wheel*.SuspensionExtent` + `Limit` | `suspension.travel` | |
 | `Aero.Drag` / `Down` | `aero.*` | × frontal area × air density |
@@ -159,6 +159,15 @@ once the cap also allows the front tires their peak slip that margin
 counts twice and full lock — which is all a keyboard ever asks for —
 ploughs past the grip; at `1.0` the roster corners a little harder at
 every speed the cap governs.
+
+Below the speeds the cap governs, the authored lock is the limit. Stock
+`SteeringLimit` runs 0.35–0.6 rad; at the Beetle's 0.4, a car at 36 km/h
+ran out of lock at 1.24 g on 2.25 g tires. Imported locks are scaled by
+`1.2` (capped at 0.75 rad): the Beetle reaches 1.47 g there and the
+roster gains 0.12 g on average at 10 m/s. More scale buys more at walking
+pace but ploughs the heavy vehicles at full lock around 70 km/h — at
+`1.4` eight cars lost over 5% somewhere against five at `1.2`, the Cab,
+F-350, fire truck and both buses, all within 0.13 g at 20 m/s.
 
 ### Gear changes
 
