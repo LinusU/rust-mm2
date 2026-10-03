@@ -1,3 +1,96 @@
+# Last iteration — F25-B impact-side nit: protocol v12
+# `SnapImpact.audio_id` — the struck side's authored `dgBangerData`
+# `AudioId` resolved on the authority at publish and carried on
+# `RemoteImpact`, so a remote copy's hit voices the same authored
+# category the authority played (new-run iteration 4)
+
+Implementation iteration on `ralph/night` (baseline `4d03a6d` — the
+gen-0 floor slice; external verify + review pass with verification
+gaps only). Selected slice: the review's named impact-side nit —
+"`RemoteImpact` carries no struck-side identity/surface". Half of it
+is a real consumer gap: `impact_voices` hardcoded the id-0 `WALL`
+catch-all for every replicated row, so a remote car striking an
+authored prop voiced the wall category where the authority played
+the prop's own. The other half (`surface`) is dead data — no
+consumer reads `ImpactEvent::surface` locally either — so it stays
+off the wire by deliberate decision, documented in `net.md`, rather
+than travelling as a field nothing reads.
+
+## What landed
+
+- `mm2_net` protocol v12 (`PROTOCOL_VERSION` 11→12):
+  `SnapImpact.audio_id: i64` — the struck (non-seat) side's authored
+  `AudioId`, verbatim. 54 B per row (was 46); worst-case snap tail
+  now 4,460 B, still far under `MAX_FRAME`.
+- `publish_snapshots` resolves it at emit time through the same
+  `ObjectId → entity → Banger::def.audio_id` lookup
+  `impact_voices` runs locally — a `Query<(&ObjectIdentity,
+  &Banger)>` index built only when the drained stream has events to
+  tag. The resolution must happen on the authority: a struck prop's
+  `ObjectId` lives in the local `(generation, slot)` namespace,
+  which diverges across processes (the same reason the copy can't
+  resolve it). World / another seat / recordless bodies read the 0
+  catch-all — identical to the local path's fallback.
+- `RemoteImpact` gains `audio_id`; `drain_pending_impacts` lands
+  the wire value verbatim (any i64 is representable — an
+  unresolvable one reads as a data failure downstream, the same
+  accounting a mod's broken binding gets: counted `failed`, not
+  rejected). `impact_voices` passes it to `voice_at` instead of the
+  hardcoded `0`, so a replicated prop hit now picks the authored
+  category the authority played; a garbage id counts `failed` like
+  any unresolvable authored selector.
+- `docs/research/net.md`: the v11→v12 history paragraph, the
+  payload table row (`SnapImpact` 46→54 B) and the worst-case snap
+  bound updated; the "what the wire still does not carry" note now
+  names `surface` alone with the dead-data rationale.
+
+## Tests
+
+- `mm2_net` roundtrip fixture rows carry `audio_id` 7/0 — the
+  encode/decode legs discriminate the field (80/80).
+- `net_app` `a_snap_carries_the_sessions_impact_rows` (host leg,
+  real loopback): extended — a struck `Banger` prop with authored
+  `audio_id: 7` resolves onto its row while the world-struck row
+  reads 0 (42/42).
+- `net_app` `a_snapshot_feeds_the_remote_impact_stream` (client
+  leg): the surviving row lands `audio_id == 7` on the emitted
+  `RemoteImpact`.
+- `audio` +1 `a_replicated_impact_picks_the_struck_sides_authored_category`:
+  a `RemoteImpact` with `audio_id: 7` and the same severity/mass
+  that voices HUGE under the id-0 catch-all now voices the prop's
+  authored LIGHT/`PROP` sample — the discriminating leg (89/89).
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` green — 91 suites, 0 failures
+(`mm2_net` 80/80, `net_app` 42/42, `audio` 89/89, `mm2_app` lib
+81/81, `net_drive` 3/3). Toolchain per `rust-toolchain.toml`
+stable.
+
+## Classification / remaining open items
+
+- Implementation choice throughout — the wire field, the
+  publish-side resolution and the verbatim landing are ours; the
+  retail wire protocol is unrecovered, so no original-behavior
+  claim. The category selection itself follows the existing
+  designed binding (the struck side's `AudioId`, UNK-25 stands).
+- Evidence: unit + integration legs over real loopback; the
+  publish-side resolution is exercised through the real
+  `host_app`/`publish_snapshots` path. No process-level leg for
+  this field specifically (the harness asserts counters, not
+  per-row fields), nothing rendered or audible by hand, no retail
+  content, no LAN/Internet leg.
+- F25-B remaining scope: replicated result/race state, LAN/Internet
+  scope, and the process-level rejoin leg (needs a client rejoin
+  feature that does not exist — link `Closed` is terminal by
+  design; recorded as a product-scope decision, not silently
+  narrowed). `ImpactEvent::surface` stays unwired until a consumer
+  exists for it locally.
+
+---
+
 # Last iteration — F25-B stream-boundary repair II: the wire
 # generation's floor — `Session::begin_generation` refuses the
 # at-rest mint `0`, and the apply/drain gates drop gen-0 wire
