@@ -45,6 +45,20 @@ the build artefacts and the git stash stack are shared:
 - `cargo build` writes one binary that others may be running. If someone
   is testing a build, tell them before you rebuild, and leave the tree at
   a committed state rather than mid-experiment.
+- A fresh worktree has no `target/`, and building every dependency from
+  scratch takes ~5 minutes. Before the first build, clone the main
+  checkout's `target/` with an APFS copy-on-write clone (`cp -c`, near
+  free on disk):
+
+  ```sh
+  cp -c -R "$(git rev-parse --path-format=absolute --git-common-dir)/../target" target
+  ```
+
+  Cargo then reuses every dependency and rebuilds only the workspace
+  crates (~2 minutes including the clone). Don't share one `target/` or
+  `build.build-dir` between worktrees instead: Cargo keys workspace crates
+  by relative path, so a worktree on another branch can silently link the
+  other worktree's code.
 
 ## Orientation
 
