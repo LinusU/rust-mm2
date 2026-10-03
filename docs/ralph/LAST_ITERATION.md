@@ -1,3 +1,110 @@
+# Last iteration — F25-B race-lifecycle slice: protocol v13
+# `Snap.race` — the authority's race phase, countdown remainder and
+# race clock replicated to joined clients, so a predicted session's
+# countdown mirrors and releases on the authority's word (new-run
+# iteration 5)
+
+Implementation iteration on `ralph/night` (baseline `6873d97` — the
+struck-side `AudioId` slice; external verify + review pass with
+verification gaps only). Selected slice: the named F25-B remainder —
+replicated race state — first leg. The discovery that picks it:
+`advance_race` is authority-gated, so a remote-authority client's
+`RaceState` sits in `Countdown` forever — `Session::is_playing()`
+never goes true, `send_drive_input` never sends, and a joined client
+cannot drive an event session at all. The wire carries the lifecycle
+row; the client mirrors it. Checkpoint progress, finish ordering,
+timeouts and the `ResultLedger` stay F26 — deliberately off this row.
+
+## What landed
+
+- `mm2_net` protocol v13 (`PROTOCOL_VERSION` 12→13): `Snap` gains
+  `race: Option<SnapRace>` — `{ phase: u8, countdown: u32,
+  clock: u64 }`, a presence byte plus 13 bytes when present (worst-
+  case snap tail now 4,474 B, still far under `MAX_FRAME`). The
+  phase discriminant is opaque on the wire — the `RacePhase` naming
+  lives in `mm2_app` with its only consumer.
+- `publish_snapshots` emits the row through `Ready|Countdown|Playing`
+  while the session's `RaceState` is live; a stale resource minted
+  under a dead generation publishes `race: None` — teardown residue
+  never leaks a foreign numbering.
+- `RemoteSnaps` stages the row off the pose watermark on its own
+  monotonic freshness key — `(generation, phase rank, progress)`,
+  the countdown's *remaining* inverted so a descending remainder
+  climbs — because every countdown snap repeats the same frozen
+  session tick and the row would otherwise read stale at push for
+  the whole countdown. Regressed/duplicated rows are idempotent
+  state and never restage (silent, like the pose dedup floor); a
+  `phase` the wire cannot name dies at `push` counted; a foreign
+  generation stages past the key then dies at the apply-side
+  session gate the queued impact rows share.
+- `apply_snapshots` drains the row every run (a frozen-tick frame
+  still delivers it) and mirrors phase + clock verbatim onto the
+  session's `RaceState`. On the countdown → running/complete edge
+  it performs the release `advance_race` runs on the authority:
+  every `AwaitingStart` `RaceProgress` flips to `Racing`, the
+  session moves `Countdown`/`Ready` → `Playing`, and one
+  `RaceStarted` goes out for the GO consumers. A raceless session's
+  row (cruise/dev world) drops counted — nothing to mirror into.
+  The three new borrows ride `RaceMirror`, a `SystemParam` —
+  `apply_snapshots` was at the system-parameter arity ceiling.
+- `NetDriveReport` gains `race_applied`/`race_dropped`; the smoke
+  `net=` field appends `race<a>a/<d>d` (0 on the authority and on
+  raceless sessions); `net_drive`'s parser decodes the cells.
+- `docs/research/net.md`: v12→v13 history paragraph, payload table
+  (`Snap` header 21 B with the presence byte; `SnapRace` 13 B),
+  worst-case bound, receiver-bounds list and the two-process
+  scope note all updated.
+
+## Tests
+
+- `mm2_net` roundtrip fixtures carry a raced and a raceless `Snap`
+  — the encode/decode legs discriminate the field.
+- `netdrive` +3: `a_race_row_releases_the_predicted_countdown` (the
+  whole client leg in-process — fresher countdown row wins, the
+  `Running` row flips progress + session + one `RaceStarted`, a
+  regressed countdown never restages, a foreign generation drops at
+  the session gate, an unnamed phase dies at `push`);
+  `a_race_row_on_a_raceless_session_drops`;
+  `race_rows_encode_and_order_the_lifecycle` (the encode/mirror pair
+  plus the key's monotonic ranking).
+- `net_app` +2 over real loopback: `a_snap_publishes_the_authoritys_race_state`
+  (host leg — a mid-countdown `RaceState` rides the wire as
+  `phase 0/countdown 180`, the `Running` mutation rides as
+  `phase 1`, teardown-residue generation publishes `race: None`)
+  and `a_snap_race_row_releases_the_joined_clients_countdown`
+  (client leg — same-tick countdown rows still mirror, the
+  `Running` row stands the session `Playing` + flips `RaceProgress`
+  + writes exactly one `RaceStarted`, a regressed countdown cannot
+  re-hold control, a foreign generation drops counted).
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --workspace
+--all-targets --all-features -- -D warnings` clean; `cargo test
+--workspace` green — 91 suites, 0 failures (`mm2_net` 80/80,
+`net_app` 44/44, `mm2_app` lib 84/84, `net_drive` 3/3).
+
+## Classification / remaining open items
+
+- Implementation choice throughout — the row shape, the opaque
+  phase encoding, the freshness key and the mirror's release
+  transition are ours; the retail wire protocol is unrecovered, so
+  no original-behavior claim.
+- Evidence: unit + integration legs over real loopback. No
+  process-level leg for this field (`net_drive` asserts counters;
+  the dev cruise publishes no race rows — the `race` cells read 0
+  there by design), nothing rendered or audible by hand, no retail
+  content, no LAN/Internet leg.
+- F25-B remaining scope: replicated *per-participant* race state —
+  checkpoint progress, finish ordering, timeouts, `ResultLedger`
+  (F26 territory) — LAN/Internet scope, and the process-level
+  rejoin leg (needs a client rejoin feature that does not exist —
+  link `Closed` is terminal by design; recorded as a product-scope
+  decision, not silently narrowed). This slice is not F25-AC01..06
+  completion.
+
+---
+
 # Last iteration — F25-B impact-side nit: protocol v12
 # `SnapImpact.audio_id` — the struck side's authored `dgBangerData`
 # `AudioId` resolved on the authority at publish and carried on
