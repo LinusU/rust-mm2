@@ -27,8 +27,8 @@ pub use debug::VehicleDebugEnabled;
 pub use surface::{TireConditions, TireSurface};
 pub use systems::upright_recovery_pose;
 pub use vehicle::{
-    DriveDirection, EngineImpairment, RemoteReplica, ResetAuthority, ResetVehicle, StrikeBound,
-    Teleported, Vehicle, VehicleInput, VehicleState, WheelState,
+    DriveDirection, EngineImpairment, PreStepVelocity, RemoteReplica, ResetAuthority, ResetVehicle,
+    StrikeBound, Teleported, Vehicle, VehicleInput, VehicleState, WheelState,
 };
 
 /// Registers the vehicle simulation. Requires [`PhysicsPlugins`] and a fixed
@@ -113,6 +113,7 @@ pub fn vehicle_bundle(config: &VehicleConfig) -> impl Bundle {
             VehicleState::new(config),
             VehicleInput::default(),
             StrikeBound(strike_bound.0),
+            PreStepVelocity::default(),
             Name::new(config.name.clone()),
         ),
         (

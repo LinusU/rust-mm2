@@ -7,8 +7,8 @@ use crate::config::VehicleConfig;
 use crate::sim;
 use crate::surface::{TireConditions, TireSurface};
 use crate::vehicle::{
-    DriveDirection, EngineImpairment, GyroSpin, ResetAuthority, ResetVehicle, Teleported, Vehicle,
-    VehicleInput, VehicleState, WheelState,
+    DriveDirection, EngineImpairment, GyroSpin, PreStepVelocity, ResetAuthority, ResetVehicle,
+    Teleported, Vehicle, VehicleInput, VehicleState, WheelState,
 };
 
 /// What the steered axle can do with steering lock: how much grip it makes
@@ -84,6 +84,7 @@ type VehicleQuery<'w, 's> = Query<
         &'static mut VehicleState,
         &'static VehicleInput,
         Option<&'static EngineImpairment>,
+        Option<&'static mut PreStepVelocity>,
         Forces,
     ),
     // A `RemoteReplica`'s state is the wire's, not the sim's (F25-B).
@@ -102,12 +103,18 @@ pub fn vehicle_simulation(
     if dt <= 0.0 {
         return;
     }
-    for (entity, vehicle, mut state, input, impairment, mut forces) in &mut vehicles {
+    for (entity, vehicle, mut state, input, impairment, pre_step, mut forces) in &mut vehicles {
         let cfg = &vehicle.config;
         let pos = forces.position().0;
         let rot = forces.rotation().0;
         let linvel = forces.linear_velocity();
         let angvel = forces.angular_velocity();
+        if let Some(mut pre_step) = pre_step {
+            *pre_step = PreStepVelocity {
+                linear: linvel,
+                angular: angvel,
+            };
+        }
         let com_world = pos + rot * Vec3::from(cfg.center_of_mass);
         let forward = rot * Vec3::NEG_Z;
         let right = rot * Vec3::X;

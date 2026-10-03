@@ -40,6 +40,21 @@ pub struct Vehicle {
 #[derive(Component, Clone)]
 pub struct StrikeBound(pub Collider);
 
+/// The body's velocity as the physics step began, before the solver
+/// answered any contact. Written by `vehicle_simulation` every step.
+///
+/// It is what a post-solver correction restores when it has to take
+/// back a response the solver should never have given — a dormant prop
+/// answered as a wall. Undoing that response as one impulse along one
+/// contact normal missed whatever the solver spread over other points
+/// and substeps: a parking meter at 80 km/h sent the Beetle up at
+/// 5.5 m/s spinning on every axis.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct PreStepVelocity {
+    pub linear: Vec3,
+    pub angular: Vec3,
+}
+
 /// Per-wheel runtime state (useful for debug drawing and tuning).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WheelState {
