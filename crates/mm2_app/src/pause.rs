@@ -206,6 +206,7 @@ pub fn pause_input(
             | MenuCommand::Right
             | MenuCommand::Delete
             | MenuCommand::FocusAt(_)
+            | MenuCommand::FocusSide(_)
             | MenuCommand::Type(_)
             | MenuCommand::Erase => {}
         }

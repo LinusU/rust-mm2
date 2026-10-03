@@ -551,7 +551,8 @@ fn draw_rows(body: &mut ChildSpawnerCommands, shell: &MenuShell, garage: bool) {
         let count = shell.rows.len();
         let start = shell.focus.saturating_sub(7).min(count.saturating_sub(9));
         for (index, row) in shell.rows.iter().enumerate().skip(start).take(9) {
-            draw_row(p, row, index, index == shell.focus);
+            let focused = index == shell.focus;
+            draw_row(p, row, index, focused && !shell.side, focused && shell.side);
         }
         if count > 9 {
             label(
@@ -564,14 +565,27 @@ fn draw_rows(body: &mut ChildSpawnerCommands, shell: &MenuShell, garage: bool) {
     });
 }
 
-fn draw_row(parent: &mut ChildSpawnerCommands, row: &Row, index: usize, focus: bool) {
-    let color = if row.enabled.is_err() {
+fn row_color(row: &Row, focus: bool) -> Color {
+    if row.enabled.is_err() {
         Color::srgb(0.55, 0.59, 0.7)
     } else if focus {
         GOLD
     } else {
         Color::WHITE
-    };
+    }
+}
+
+/// One list row. `focus` highlights the row itself; `side_focus` the
+/// side entry drawn at its right edge, which the row then frames
+/// rather than fills so the eye lands on the entry.
+fn draw_row(
+    parent: &mut ChildSpawnerCommands,
+    row: &Row,
+    index: usize,
+    focus: bool,
+    side_focus: bool,
+) {
+    let color = row_color(row, focus);
     parent
         .spawn((
             MenuUi,
@@ -590,7 +604,7 @@ fn draw_row(parent: &mut ChildSpawnerCommands, row: &Row, index: usize, focus: b
             } else {
                 Color::srgba(0.04, 0.065, 0.2, 0.8)
             }),
-            BorderColor::all(if focus { GOLD } else { BLUE }),
+            BorderColor::all(if focus || side_focus { GOLD } else { BLUE }),
         ))
         .with_children(|p| {
             p.spawn((
@@ -613,6 +627,43 @@ fn draw_row(parent: &mut ChildSpawnerCommands, row: &Row, index: usize, focus: b
             if let Some(won) = row.won {
                 badge(p, won.label(), GREEN);
             }
+            if let Some(side) = &row.side {
+                draw_side(p, side, index, side_focus);
+            }
+        });
+}
+
+/// A row's side entry: a framed cell at the right edge, its own hover
+/// and click target.
+fn draw_side(parent: &mut ChildSpawnerCommands, side: &Row, index: usize, focus: bool) {
+    parent
+        .spawn((
+            MenuUi,
+            MenuSide { index },
+            Node {
+                flex_shrink: 0.0,
+                margin: UiRect::left(Val::Px(10.0)),
+                padding: UiRect::axes(Val::Px(10.0), Val::Px(2.0)),
+                border: UiRect::all(Val::Px(2.0)),
+                ..default()
+            },
+            BackgroundColor(if focus {
+                Color::srgba(0.2, 0.3, 0.68, 0.95)
+            } else {
+                Color::NONE
+            }),
+            BorderColor::all(if focus { GOLD } else { BLUE }),
+        ))
+        .with_children(|p| {
+            p.spawn((
+                MenuUi,
+                Text::new(format!("{}{}", if focus { "> " } else { "" }, side.text)),
+                TextFont {
+                    font_size: bevy::text::FontSize::Px(14.0),
+                    ..default()
+                },
+                TextColor(row_color(side, focus)),
+            ));
         });
 }
 
@@ -747,7 +798,7 @@ fn draw_detail(
                 ..default()
             },
         ));
-        if let Some(row) = shell.rows.get(shell.focus) {
+        if let Some(row) = shell.focused_row() {
             label(p, display_label(&row.text), 26.0, GOLD);
             if let Some(won) = row.won {
                 let on = match (won.amateur, won.professional) {
@@ -828,7 +879,7 @@ fn draw_navigation(parent: &mut ChildSpawnerCommands, screen: &Screen) {
     let hint = if matches!(screen, Screen::NewProfile { .. }) {
         "Type a name | Enter create | Esc cancel"
     } else {
-        "UP / DOWN  Browse     LEFT / RIGHT  Adjust     ENTER  Select     ESC / Right click  Back"
+        "UP / DOWN  Browse     LEFT / RIGHT  Adjust / Options     ENTER  Select     ESC / Right click  Back"
     };
     label(parent, hint, 14.0, Color::WHITE);
 }

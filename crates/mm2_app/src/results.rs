@@ -175,6 +175,7 @@ pub fn results_input(
             | MenuCommand::Right
             | MenuCommand::Delete
             | MenuCommand::FocusAt(_)
+            | MenuCommand::FocusSide(_)
             | MenuCommand::Type(_)
             | MenuCommand::Erase => {}
         }

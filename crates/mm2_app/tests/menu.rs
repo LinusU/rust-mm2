@@ -522,6 +522,25 @@ fn focus_row(app: &mut App, needle: &str) {
     }
 }
 
+/// Focus the row containing `needle`, step right onto its options
+/// side entry and open it.
+fn open_options(app: &mut App, needle: &str) {
+    focus_row(app, needle);
+    press(app, KeyCode::ArrowRight);
+    assert!(shell(app).side, "{needle:?} has no options entry");
+    press(app, KeyCode::Enter);
+}
+
+/// The options side entry of the row containing `needle`.
+fn options_of<'a>(app: &'a App, needle: &str) -> &'a menu::Row {
+    shell(app)
+        .rows
+        .iter()
+        .find(|r| r.text.contains(needle))
+        .and_then(|r| r.side.as_deref())
+        .unwrap_or_else(|| panic!("no options entry beside {needle:?}"))
+}
+
 /// Focus the row containing `needle` and activate it.
 fn activate_row(app: &mut App, needle: &str) {
     focus_row(app, needle);
@@ -843,29 +862,34 @@ fn event_rows_carry_real_availability() {
     }
     activate_row(&mut app, "Checkpoint");
 
-    // The event list: each event is followed by its options row —
+    // The event list: one row per event, its options beside it —
     // race0/race1 open, race2 incomplete, race3 gated.
     let enabled: Vec<(String, Result<(), String>)> = shell(&app)
         .rows
         .iter()
         .map(|r| (r.text.clone(), r.enabled.clone()))
         .collect();
-    assert_eq!(enabled.len(), 8);
+    assert_eq!(enabled.len(), 4);
     assert!(enabled[0].0.contains("race0") && enabled[0].1.is_ok());
-    assert_eq!(enabled[1].0, "  options");
-    assert!(enabled[2].0.contains("race1") && enabled[2].1.is_ok());
-    assert_eq!(enabled[3].0, "  options");
-    assert!(enabled[4].0.contains("race2"));
+    assert!(enabled[1].0.contains("race1") && enabled[1].1.is_ok());
+    assert!(enabled[2].0.contains("race2"));
     assert!(
-        enabled[4].1.as_ref().unwrap_err().contains("incomplete"),
+        enabled[2].1.as_ref().unwrap_err().contains("incomplete"),
         "race2 should report its missing files: {:?}",
-        enabled[4].1
+        enabled[2].1
     );
-    assert!(enabled[6].0.contains("race3"));
+    assert!(enabled[3].0.contains("race3"));
     assert!(
-        enabled[6].1.as_ref().unwrap_err().contains("race0"),
+        enabled[3].1.as_ref().unwrap_err().contains("race0"),
         "race3 should name its gate: {:?}",
-        enabled[6].1
+        enabled[3].1
+    );
+    assert!(
+        shell(&app)
+            .rows
+            .iter()
+            .all(|r| r.side.as_ref().is_some_and(|o| o.text == menu::OPTIONS)),
+        "every event carries its options beside it"
     );
 
     // Activating the gated row is a status line, never a launch.
@@ -933,12 +957,7 @@ fn event_rows_show_authored_race_names() {
     activate_row(&mut app, "Events");
     activate_row(&mut app, "testcity");
     activate_row(&mut app, "Checkpoint");
-    let texts: Vec<String> = shell(&app)
-        .rows
-        .iter()
-        .map(|r| r.text.clone())
-        .filter(|t| t != "  options")
-        .collect();
+    let texts: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
     assert_eq!(
         texts,
         [
@@ -1684,6 +1703,108 @@ fn the_mouse_focuses_rows_and_clicks_drive_the_same_commands() {
     assert!(matches!(shell(&app).screen, menu::Screen::Root));
 }
 
+/// Options sit beside their row instead of between rows: Up/Down walk
+/// only the launchable entries, Right steps onto the focused row's
+/// options and Left back, the column survives vertical moves and a
+/// round trip through the options screen, and Enter on the row itself
+/// launches.
+#[test]
+fn options_sit_to_the_right_of_their_row() {
+    let tmp = install();
+    let mut app = menu_app(tmp.path(), None);
+    app.update();
+    activate_row(&mut app, "Events");
+    activate_row(&mut app, "testcity");
+    activate_row(&mut app, "Checkpoint");
+
+    // Down walks events, not options.
+    press(&mut app, KeyCode::ArrowDown);
+    assert_eq!(shell(&app).focus, 1);
+    assert!(shell(&app).rows[1].text.contains("race1"));
+
+    // Right steps onto the options; the focused entry is now the
+    // side entry, Left steps back.
+    press(&mut app, KeyCode::ArrowRight);
+    assert!(shell(&app).side);
+    assert_eq!(
+        shell(&app).focused_row().map(|r| r.text.as_str()),
+        Some(menu::OPTIONS)
+    );
+    press(&mut app, KeyCode::ArrowLeft);
+    assert!(!shell(&app).side);
+
+    // The column survives a vertical move.
+    press(&mut app, KeyCode::ArrowRight);
+    press(&mut app, KeyCode::ArrowUp);
+    assert_eq!(shell(&app).focus, 0);
+    assert!(shell(&app).side, "Up keeps the options column");
+
+    // Cruise options open with Right + Enter, and Back returns to the
+    // options column the user left from.
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Escape);
+    }
+    activate_row(&mut app, "Cruise");
+    open_options(&mut app, "testcity");
+    assert!(matches!(shell(&app).screen, menu::Screen::Customize { .. }));
+    press(&mut app, KeyCode::Escape);
+    assert!(matches!(shell(&app).screen, menu::Screen::CruiseCity));
+    assert!(shell(&app).side);
+
+    // Back on the row itself, Enter launches.
+    press(&mut app, KeyCode::ArrowLeft);
+    press(&mut app, KeyCode::Enter);
+    assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Playing));
+}
+
+/// The mouse reaches a side entry directly: hovering the options cell
+/// focuses it, clicking opens it, and hovering the row proper moves
+/// focus back off the cell.
+#[test]
+fn the_mouse_hovers_and_clicks_options_cells() {
+    let tmp = install();
+    let mut app = menu_app(tmp.path(), None);
+    app.update();
+    spawn_window(&mut app);
+    activate_row(&mut app, "Cruise");
+    lay_out_rows(&mut app);
+    lay_out_sides(&mut app);
+
+    cursor_to(&mut app, 520.0, row_y(0));
+    app.update();
+    assert!(shell(&app).side, "hovering the cell focuses the options");
+
+    // The focus change respawned the row entities — re-lay them out.
+    lay_out_rows(&mut app);
+    lay_out_sides(&mut app);
+    cursor_to(&mut app, 200.0, row_y(0));
+    app.update();
+    assert!(!shell(&app).side, "hovering the row focuses the row");
+
+    lay_out_rows(&mut app);
+    lay_out_sides(&mut app);
+    cursor_to(&mut app, 520.0, row_y(0));
+    click(&mut app, MouseButton::Left);
+    assert!(matches!(shell(&app).screen, menu::Screen::Customize { .. }));
+}
+
+/// Place every `MenuSide` cell as `lay_out_rows` places rows: an 80x22
+/// rect centred at `(520, row_y(index))`, clear of the row rects.
+fn lay_out_sides(app: &mut App) {
+    let world = app.world_mut();
+    let mut q = world.query::<(Entity, &menu::MenuSide)>();
+    let sides: Vec<(Entity, usize)> = q.iter(world).map(|(e, r)| (e, r.index)).collect();
+    for (entity, index) in sides {
+        world.entity_mut(entity).insert((
+            ComputedNode {
+                size: Vec2::new(80.0, 22.0),
+                ..default()
+            },
+            UiGlobalTransform::from_xy(520.0, row_y(index)),
+        ));
+    }
+}
+
 /// F17-A.4 negative leg: clicking a disabled row focuses it and
 /// surfaces its reason — the same `Activate` path a keyboard press
 /// takes — instead of navigating.
@@ -2107,10 +2228,8 @@ fn event_options_unlock_only_after_the_race_is_beaten() {
     activate_row(&mut app, "Events");
     activate_row(&mut app, "testcity");
     activate_row(&mut app, "Checkpoint");
-    let rows = &shell(&app).rows;
-    assert_eq!(rows.len(), 8, "one launch + one options row per event");
-    let race0_options = &rows[1];
-    assert_eq!(race0_options.text, "  options");
+    assert_eq!(shell(&app).rows.len(), 4, "one row per event");
+    let race0_options = options_of(&app, "race0");
     assert!(
         race0_options
             .enabled
@@ -2122,15 +2241,15 @@ fn event_options_unlock_only_after_the_race_is_beaten() {
     );
     // The CHK-3-gated race3's options share its launch block reason,
     // and the incomplete race2's share its missing-records reason.
+    let race3_options = &options_of(&app, "race3").enabled;
     assert!(
-        rows[7].enabled.as_ref().unwrap_err().contains("beat race0"),
-        "{:?}",
-        rows[7].enabled
+        race3_options.as_ref().unwrap_err().contains("beat race0"),
+        "{race3_options:?}"
     );
+    let race2_options = &options_of(&app, "race2").enabled;
     assert!(
-        rows[5].enabled.as_ref().unwrap_err().contains("incomplete"),
-        "{:?}",
-        rows[5].enabled
+        race2_options.as_ref().unwrap_err().contains("incomplete"),
+        "{race2_options:?}"
     );
 
     // Bind Bob — a driver with nothing beaten gets the unlock reason.
@@ -2143,14 +2262,13 @@ fn event_options_unlock_only_after_the_race_is_beaten() {
     activate_row(&mut app, "Events");
     activate_row(&mut app, "testcity");
     activate_row(&mut app, "Checkpoint");
+    let race0_options = &options_of(&app, "race0").enabled;
     assert!(
-        shell(&app).rows[1]
-            .enabled
+        race0_options
             .as_ref()
             .unwrap_err()
             .contains("beat this race"),
-        "{:?}",
-        shell(&app).rows[1].enabled
+        "{race0_options:?}"
     );
 }
 
@@ -2188,10 +2306,9 @@ fn customized_event_launch_carries_the_picks() {
     activate_row(&mut app, "testcity");
     activate_row(&mut app, "Checkpoint");
 
-    // race0's options row is enabled and opens the seeded screen.
-    assert!(shell(&app).rows[1].enabled.is_ok());
-    focus_row(&mut app, "options");
-    press(&mut app, KeyCode::Enter);
+    // race0's options entry is enabled and opens the seeded screen.
+    assert!(options_of(&app, "race0").enabled.is_ok());
+    open_options(&mut app, "race0");
     let texts: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
     assert_eq!(texts[0], "Weather: clear");
     assert_eq!(texts[1], "Time of day: morning");
@@ -2284,8 +2401,7 @@ fn unchanged_options_launch_a_default_run() {
     activate_row(&mut app, "Events");
     activate_row(&mut app, "testcity");
     activate_row(&mut app, "Checkpoint");
-    focus_row(&mut app, "options");
-    press(&mut app, KeyCode::Enter);
+    open_options(&mut app, "race0");
     activate_row(&mut app, "Start race");
     assert!(run_until(&mut app, 12, |a| matches!(
         phase(a),
@@ -2310,7 +2426,7 @@ fn cruise_options_launch_a_customized_session() {
     app.update();
 
     activate_row(&mut app, "Cruise");
-    activate_row(&mut app, "options");
+    open_options(&mut app, "testcity");
     let texts: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
     assert_eq!(texts[0], "Weather: clear");
     assert_eq!(texts[3], "Start cruise");
@@ -2377,7 +2493,7 @@ fn circuit_options_carry_authored_laps_and_opponents() {
     let tmp = circuit_install();
     let (mut app, _store_dir) = beaten_circuit_options(&tmp);
 
-    activate_row(&mut app, "options");
+    open_options(&mut app, "circuit0");
     let texts: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
     assert_eq!(
         texts,
@@ -2401,7 +2517,7 @@ fn circuit_options_carry_authored_laps_and_opponents() {
 fn circuit_laps_and_opponents_rows_cycle_in_bounds() {
     let tmp = circuit_install();
     let (mut app, _store_dir) = beaten_circuit_options(&tmp);
-    activate_row(&mut app, "options");
+    open_options(&mut app, "circuit0");
 
     focus_row(&mut app, "Laps:");
     press(&mut app, KeyCode::ArrowRight);
@@ -2444,7 +2560,7 @@ fn circuit_laps_and_opponents_rows_cycle_in_bounds() {
 fn circuit_customized_launch_carries_the_race_picks() {
     let tmp = circuit_install();
     let (mut app, _store_dir) = beaten_circuit_options(&tmp);
-    activate_row(&mut app, "options");
+    open_options(&mut app, "circuit0");
 
     focus_row(&mut app, "Laps:");
     press(&mut app, KeyCode::ArrowRight); // 2 → 3
@@ -2495,7 +2611,7 @@ fn circuit_customized_launch_carries_the_race_picks() {
 fn circuit_options_returned_to_seed_launch_a_default_run() {
     let tmp = circuit_install();
     let (mut app, _store_dir) = beaten_circuit_options(&tmp);
-    activate_row(&mut app, "options");
+    open_options(&mut app, "circuit0");
 
     focus_row(&mut app, "Laps:");
     press(&mut app, KeyCode::ArrowRight);

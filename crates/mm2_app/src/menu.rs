@@ -77,9 +77,11 @@ pub enum MenuCommand {
     Up,
     /// Down.
     Down,
-    /// Adjust a value row left (difficulty).
+    /// Adjust a value row left (difficulty), or step back from a
+    /// row's side entry to the row itself.
     Left,
-    /// Right.
+    /// Adjust a value row right, or step onto a row's side entry (an
+    /// event's or city's options).
     Right,
     /// Activate the focused row.
     Activate,
@@ -91,6 +93,9 @@ pub enum MenuCommand {
     /// produces this; keyboard/gamepad use relative moves instead.
     /// Out-of-range or already-focused indices are no-ops.
     FocusAt(usize),
+    /// Focus a row's side entry by row index — the mouse hover path
+    /// over a side cell. Rows without one ignore it.
+    FocusSide(usize),
     /// Append a character to a text field — only [`Screen::NewProfile`]
     /// accepts text today. Production input feeds this from
     /// `KeyboardInput.text` so layout, Shift and dead keys resolve to
@@ -282,6 +287,10 @@ pub struct Row {
     /// The event's win criterion was met — drawn as a badge so won
     /// races stand out in a list. `None` on every non-event row.
     pub won: Option<Won>,
+    /// A secondary entry drawn to the right of the row and reached
+    /// with Right — an event's or cruise city's options. Keeping it off
+    /// the row list leaves Up/Down walking only the things you launch.
+    pub side: Option<Box<Row>>,
 }
 
 /// Which difficulties an event has been beaten at (the persisted
@@ -342,10 +351,14 @@ pub struct MenuShell {
     pub active: bool,
     /// Current screen.
     pub screen: Screen,
-    /// `(screen, focus)` stack Back pops.
-    stack: Vec<(Screen, usize)>,
+    /// `(screen, focus, side)` stack Back pops.
+    stack: Vec<(Screen, usize, bool)>,
     /// Focused row index.
     pub focus: usize,
+    /// Focus sits on the focused row's side entry rather than the row.
+    /// Only meaningful while that row has one — every move that lands
+    /// on a row without a side entry clears it.
+    pub side: bool,
     /// Rows of the current screen — rebuilt on every change.
     pub rows: Vec<Row>,
     /// One-line status/error shown under the rows.
@@ -512,6 +525,7 @@ impl MenuShell {
             screen: Screen::Root,
             stack: Vec::new(),
             focus: 0,
+            side: false,
             rows: Vec::new(),
             status: None,
             vehicle,
@@ -528,6 +542,7 @@ impl MenuShell {
         self.screen = Screen::Root;
         self.stack.clear();
         self.focus = 0;
+        self.side = false;
         self.status = None;
         // Stale device commands must not fire against the reopened
         // shell — a click queued while a session ran has no screen.
@@ -536,20 +551,38 @@ impl MenuShell {
     }
 
     fn push(&mut self, screen: Screen) {
-        self.stack.push((self.screen.clone(), self.focus));
+        self.stack
+            .push((self.screen.clone(), self.focus, self.side));
         self.screen = screen;
         self.focus = 0;
+        self.side = false;
         self.status = None;
     }
 
     fn pop(&mut self) -> bool {
-        if let Some((screen, focus)) = self.stack.pop() {
+        if let Some((screen, focus, side)) = self.stack.pop() {
             self.screen = screen;
             self.focus = focus;
+            self.side = side;
             self.status = None;
             true
         } else {
             false
+        }
+    }
+
+    /// Whether row `index` carries a side entry.
+    fn has_side(&self, index: usize) -> bool {
+        self.rows.get(index).is_some_and(|r| r.side.is_some())
+    }
+
+    /// The row `Activate` would run — the focused row, or its side
+    /// entry while focus sits there.
+    pub fn focused_row(&self) -> Option<&Row> {
+        let row = self.rows.get(self.focus)?;
+        match &row.side {
+            Some(side) if self.side => Some(side),
+            _ => Some(row),
         }
     }
 
@@ -603,23 +636,40 @@ impl MenuShell {
             return effects;
         }
         match cmd {
-            MenuCommand::Up => self.focus = self.focus.saturating_sub(1),
+            // Vertical moves keep the column, so walking a list of
+            // options stays on the options.
+            MenuCommand::Up => {
+                self.focus = self.focus.saturating_sub(1);
+                self.side &= self.has_side(self.focus);
+            }
             MenuCommand::Down => {
-                self.focus = (self.focus + 1).min(self.rows.len().saturating_sub(1))
+                self.focus = (self.focus + 1).min(self.rows.len().saturating_sub(1));
+                self.side &= self.has_side(self.focus);
             }
             MenuCommand::FocusAt(i) => {
                 // Mouse hover lands here. A no-op (same row, off-list
                 // index) must not dirty — hover alone cannot justify
                 // a redraw, so this arm skips the unconditional mark.
-                if i != self.focus && i < self.rows.len() {
+                if (i != self.focus || self.side) && i < self.rows.len() {
                     self.focus = i;
+                    self.side = false;
+                    self.dirty = true;
+                }
+                return effects;
+            }
+            MenuCommand::FocusSide(i) => {
+                if (i != self.focus || !self.side) && self.has_side(i) {
+                    self.focus = i;
+                    self.side = true;
                     self.dirty = true;
                 }
                 return effects;
             }
             MenuCommand::Left | MenuCommand::Right => {
                 let forward = cmd == MenuCommand::Right;
-                if let Some(action) = self.rows.get(self.focus).map(|r| r.action.clone()) {
+                if self.has_side(self.focus) {
+                    self.side = forward;
+                } else if let Some(action) = self.rows.get(self.focus).map(|r| r.action.clone()) {
                     self.adjust_with(data, &action, forward);
                 }
             }
@@ -643,7 +693,7 @@ impl MenuShell {
                 }
             }
             MenuCommand::Activate => {
-                let picked = self.rows.get(self.focus).map(|row| match &row.enabled {
+                let picked = self.focused_row().map(|row| match &row.enabled {
                     Err(reason) => Err(reason.clone()),
                     Ok(()) => Ok(row.action.clone()),
                 });
@@ -972,6 +1022,9 @@ fn table_name(table: EventTableKind) -> &'static str {
     }
 }
 
+/// Label of the options side entry on event and cruise-city rows.
+pub const OPTIONS: &str = "Options";
+
 const TABLE_KINDS: [EventTableKind; 4] = [
     EventTableKind::Checkpoint,
     EventTableKind::Blitz,
@@ -989,18 +1042,16 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
         Screen::CruiseCity => data
             .cities
             .iter()
-            .flat_map(|city| {
+            .map(|city| {
                 let enabled = data.city_loadable(vfs, city);
-                [
-                    Row {
-                        text: city.clone(),
-                        enabled: enabled.clone(),
-                        action: Action::LaunchCruise { city: city.clone() },
-                        won: None,
-                    },
+                Row {
+                    text: city.clone(),
+                    enabled: enabled.clone(),
+                    action: Action::LaunchCruise { city: city.clone() },
+                    won: None,
                     // RACE-4: cruise condition options are always open.
-                    Row {
-                        text: "  options".to_string(),
+                    side: Some(Box::new(Row {
+                        text: OPTIONS.to_string(),
                         enabled,
                         action: Action::Push(Screen::Customize {
                             target: CustomizeTarget::Cruise { city: city.clone() },
@@ -1012,8 +1063,9 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                             seed_race: None,
                         }),
                         won: None,
-                    },
-                ]
+                        side: None,
+                    })),
+                }
             })
             .collect(),
         Screen::EventCity => data
@@ -1024,6 +1076,7 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                 enabled: data.city_loadable(vfs, city),
                 action: Action::Push(Screen::EventTable { city: city.clone() }),
                 won: None,
+                side: None,
             })
             .collect(),
         Screen::EventTable { city } => {
@@ -1073,6 +1126,7 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                             table: *kind,
                         }),
                         won: None,
+                        side: None,
                     }
                 })
                 .collect()
@@ -1092,7 +1146,7 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                 .collect();
             events
                 .iter()
-                .flat_map(|e| {
+                .map(|e| {
                     let avail = match &e.status {
                         mm2_content::EventStatus::Ready => {
                             let key = mm2_game::EventKey {
@@ -1124,15 +1178,19 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                         })
                         .and_then(Won::of)
                     });
-                    [
-                        Row {
-                            text: data.event_label(vfs, &e.event_ref, &e.stem),
-                            enabled: enabled.clone(),
-                            action: Action::LaunchEvent(e.event_ref.clone()),
-                            won,
-                        },
-                        options_row(e, &enabled, bound.as_ref(), &avail, difficulty),
-                    ]
+                    Row {
+                        text: data.event_label(vfs, &e.event_ref, &e.stem),
+                        enabled: enabled.clone(),
+                        action: Action::LaunchEvent(e.event_ref.clone()),
+                        won,
+                        side: Some(Box::new(options_row(
+                            e,
+                            &enabled,
+                            bound.as_ref(),
+                            &avail,
+                            difficulty,
+                        ))),
+                    }
                 })
                 .collect()
         }
@@ -1158,18 +1216,21 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                     enabled: Ok(()),
                     action: Action::CycleWeather,
                     won: None,
+                    side: None,
                 },
                 Row {
                     text: format!("Time of day: {}", conditions.time_of_day.name()),
                     enabled: Ok(()),
                     action: Action::CycleTimeOfDay,
                     won: None,
+                    side: None,
                 },
                 Row {
                     text: format!("Traffic density: {:.0}%", densities.traffic * 100.0),
                     enabled: Ok(()),
                     action: Action::CycleTrafficDensity,
                     won: None,
+                    side: None,
                 },
             ];
             // RACE-3's parenthetical: Circuit options additionally
@@ -1180,12 +1241,14 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                     enabled: Ok(()),
                     action: Action::CycleLaps,
                     won: None,
+                    side: None,
                 });
                 rows.push(Row {
                     text: format!("Opponents: {}", race.opponents),
                     enabled: Ok(()),
                     action: Action::CycleOpponents,
                     won: None,
+                    side: None,
                 });
             }
             rows.push(Row {
@@ -1193,6 +1256,7 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                 enabled: Ok(()),
                 action: Action::LaunchCustomize,
                 won: None,
+                side: None,
             });
             rows
         }
@@ -1208,17 +1272,20 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                 enabled: Ok(()),
                 action: Action::ConfirmDelete(id.clone()),
                 won: None,
+                side: None,
             },
             Row {
                 text: "Cancel".into(),
                 enabled: Ok(()),
                 action: Action::Back,
                 won: None,
+                side: None,
             },
         ],
     };
     shell.rows = rows;
     shell.focus = shell.focus.min(shell.rows.len().saturating_sub(1));
+    shell.side &= shell.has_side(shell.focus);
 }
 
 fn root_rows(shell: &MenuShell, data: &mut MenuData, vfs: &Vfs) -> Vec<Row> {
@@ -1245,6 +1312,7 @@ fn root_rows(shell: &MenuShell, data: &mut MenuData, vfs: &Vfs) -> Vec<Row> {
             },
             action: Action::Push(Screen::CruiseCity),
             won: None,
+            side: None,
         },
         quick_race_row(data, vfs),
         Row {
@@ -1252,6 +1320,7 @@ fn root_rows(shell: &MenuShell, data: &mut MenuData, vfs: &Vfs) -> Vec<Row> {
             enabled: Ok(()),
             action: Action::Push(Screen::EventCity),
             won: None,
+            side: None,
         },
         Row {
             text: format!("Vehicle: {vehicle_label}"),
@@ -1261,6 +1330,7 @@ fn root_rows(shell: &MenuShell, data: &mut MenuData, vfs: &Vfs) -> Vec<Row> {
             },
             action: Action::Push(Screen::Garage),
             won: None,
+            side: None,
         },
         Row {
             text: format!("Driver: {driver_label}"),
@@ -1271,6 +1341,7 @@ fn root_rows(shell: &MenuShell, data: &mut MenuData, vfs: &Vfs) -> Vec<Row> {
             },
             action: Action::Push(Screen::Profiles),
             won: None,
+            side: None,
         },
         Row {
             text: "Race Records".into(),
@@ -1284,6 +1355,7 @@ fn root_rows(shell: &MenuShell, data: &mut MenuData, vfs: &Vfs) -> Vec<Row> {
                 table: None,
             }),
             won: None,
+            side: None,
         },
         // AC05's tracked capability: the original's stats screen has
         // no persisted data to draw on yet, so the row names the gap
@@ -1293,6 +1365,7 @@ fn root_rows(shell: &MenuShell, data: &mut MenuData, vfs: &Vfs) -> Vec<Row> {
             enabled: Err("not implemented yet (menu audit: docs/research/menu.md)".to_string()),
             action: Action::Quit, // unreachable while disabled
             won: None,
+            side: None,
         },
         Row {
             text: format!(
@@ -1305,24 +1378,28 @@ fn root_rows(shell: &MenuShell, data: &mut MenuData, vfs: &Vfs) -> Vec<Row> {
             enabled: Ok(()),
             action: Action::ToggleDifficulty,
             won: None,
+            side: None,
         },
         Row {
             text: "Options".into(),
             enabled: Err("not implemented yet (F23)".to_string()),
             action: Action::Quit, // unreachable while disabled
             won: None,
+            side: None,
         },
         Row {
             text: "Multiplayer".into(),
             enabled: Err("not implemented yet (F24)".to_string()),
             action: Action::Quit, // unreachable while disabled
             won: None,
+            side: None,
         },
         Row {
             text: "Quit".into(),
             enabled: Ok(()),
             action: Action::Quit,
             won: None,
+            side: None,
         },
     ]
 }
@@ -1344,6 +1421,7 @@ fn quick_race_row(data: &mut MenuData, vfs: &Vfs) -> Row {
         enabled: Err(reason),
         action: Action::Back, // unreachable while disabled
         won: None,
+        side: None,
     };
     let bound = data.bound.clone();
     let Some(key) = bound.as_ref().and_then(|p| p.selections.last_event.clone()) else {
@@ -1396,6 +1474,7 @@ fn quick_race_row(data: &mut MenuData, vfs: &Vfs) -> Row {
         enabled,
         action: Action::LaunchEvent(event.event_ref),
         won: None,
+        side: None,
     }
 }
 
@@ -1441,6 +1520,7 @@ fn garage_rows(shell: &MenuShell, data: &MenuData) -> Vec<Row> {
                 enabled,
                 action: Action::PickVehicle { id: row.id.clone() },
                 won: None,
+                side: None,
             }
         })
         .collect()
@@ -1489,6 +1569,7 @@ fn paint_rows(shell: &MenuShell, data: &MenuData, car: &str) -> Vec<Row> {
                     index: i,
                 },
                 won: None,
+                side: None,
             }
         })
         .collect()
@@ -1527,6 +1608,7 @@ fn profile_rows(_shell: &MenuShell, data: &mut MenuData) -> Vec<Row> {
                 enabled: Ok(()),
                 action: Action::BindProfile(p.id.clone()),
                 won: None,
+                side: None,
             }
         })
         .collect();
@@ -1537,6 +1619,7 @@ fn profile_rows(_shell: &MenuShell, data: &mut MenuData) -> Vec<Row> {
             name: String::new(),
         }),
         won: None,
+        side: None,
     });
     rows.push(Row {
         text: "Drive without a profile".into(),
@@ -1547,6 +1630,7 @@ fn profile_rows(_shell: &MenuShell, data: &mut MenuData) -> Vec<Row> {
         },
         action: Action::DriveProfileless,
         won: None,
+        side: None,
     });
     rows
 }
@@ -1572,10 +1656,10 @@ fn cycle_choice<T: PartialEq + Copy>(
     (next > 0).then(|| choices[next - 1])
 }
 
-/// The RACE-3 per-event options row: condition options open once the
-/// event's own record is beaten (`EventAvailability::customizable`),
-/// disabled with the reason otherwise — the capability stays visible
-/// instead of hiding (AC05). The pushed screen seeds its picks from
+/// The RACE-3 per-event options entry, drawn beside the event's row:
+/// condition options open once the event's own record is beaten
+/// (`EventAvailability::customizable`), disabled with the reason
+/// otherwise — the capability stays visible instead of hiding (AC05). The pushed screen seeds its picks from
 /// the difficulty's authored block so a zero-change launch stays a
 /// default run.
 fn options_row(
@@ -1613,7 +1697,7 @@ fn options_row(
         ),
     };
     Row {
-        text: "  options".to_string(),
+        text: OPTIONS.to_string(),
         enabled: gate,
         action: Action::Push(Screen::Customize {
             target: CustomizeTarget::Event {
@@ -1628,6 +1712,7 @@ fn options_row(
             seed_race: seed.2,
         }),
         won: None,
+        side: None,
     }
 }
 
@@ -1763,6 +1848,7 @@ fn record_rows(
             enabled: Err("no driver profile - records are kept per driver".into()),
             action: Action::Back,
             won: None,
+            side: None,
         }];
     };
     if bound.progress.events.is_empty() {
@@ -1771,6 +1857,7 @@ fn record_rows(
             enabled: Err("no recorded results yet".into()),
             action: Action::Back,
             won: None,
+            side: None,
         }];
     }
     let mut rows = vec![
@@ -1779,12 +1866,14 @@ fn record_rows(
             enabled: Ok(()),
             action: Action::RecordsCityFilter,
             won: None,
+            side: None,
         },
         Row {
             text: format!("Race type: {}", table.map(table_name).unwrap_or("all")),
             enabled: Ok(()),
             action: Action::RecordsTableFilter,
             won: None,
+            side: None,
         },
     ];
     // Deterministic order — city, authored table order, stem — so a
@@ -1813,6 +1902,7 @@ fn record_rows(
             enabled: Err("no records match these filters".into()),
             action: Action::Back,
             won: None,
+            side: None,
         });
         return rows;
     }
@@ -1858,6 +1948,7 @@ fn record_row(
         enabled: Err(reason),
         action: Action::Back, // unreachable while disabled
         won: Won::of(record),
+        side: None,
     };
     if key.table == EventTableKind::CrashCourse {
         return disabled("crash course events are not loadable yet (F21)".into());
@@ -1893,6 +1984,7 @@ fn record_row(
         enabled,
         action: Action::LaunchEvent(event.event_ref),
         won: Won::of(record),
+        side: None,
     }
 }
 
@@ -1916,6 +2008,14 @@ pub struct MenuCamera;
 /// marker and are never hover targets.
 #[derive(Component)]
 pub struct MenuRow {
+    /// Index into `MenuShell::rows`.
+    pub index: usize,
+}
+
+/// A row's side-entry cell (`Row::side`) — tagged with its row's index
+/// so `menu_mouse` can focus or activate the side entry itself.
+#[derive(Component)]
+pub struct MenuSide {
     /// Index into `MenuShell::rows`.
     pub index: usize,
 }
@@ -2152,6 +2252,15 @@ pub struct MenuPointer<'w, 's> {
             &'static UiGlobalTransform,
         ),
     >,
+    sides: Query<
+        'w,
+        's,
+        (
+            &'static MenuSide,
+            &'static ComputedNode,
+            &'static UiGlobalTransform,
+        ),
+    >,
 }
 
 /// Mouse navigation (F17 spec req 5): hovering a row focuses it,
@@ -2233,6 +2342,24 @@ pub fn menu_mouse(
             }
         }
     }
+    let clicked = mouse
+        .as_ref()
+        .is_some_and(|m| m.just_pressed(MouseButton::Left));
+    // A side cell sits inside its row's rect, so it is tested first.
+    if let Some(index) = pointer
+        .sides
+        .iter()
+        .find(|(_, node, transform)| node.contains_point(**transform, pos))
+        .map(|(side, _, _)| side.index)
+    {
+        if clicked {
+            shell.pending.push(MenuCommand::FocusSide(index));
+            shell.pending.push(MenuCommand::Activate);
+        } else if moved && (index != shell.focus || !shell.side) {
+            shell.pending.push(MenuCommand::FocusSide(index));
+        }
+        return;
+    }
     let Some(index) = pointer
         .rows
         .iter()
@@ -2242,13 +2369,10 @@ pub fn menu_mouse(
     else {
         return;
     };
-    if mouse
-        .as_ref()
-        .is_some_and(|m| m.just_pressed(MouseButton::Left))
-    {
+    if clicked {
         shell.pending.push(MenuCommand::FocusAt(index));
         shell.pending.push(MenuCommand::Activate);
-    } else if moved && index != shell.focus {
+    } else if moved && (index != shell.focus || shell.side) {
         shell.pending.push(MenuCommand::FocusAt(index));
     }
 }
