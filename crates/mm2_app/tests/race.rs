@@ -1483,6 +1483,50 @@ fn the_deadline_resolves_the_wire_seats_and_releases_results() {
     assert_eq!(app.world().resource::<ResultLedger>().len(), 2);
 }
 
+/// The deferral's other release edge: a wire seat whose owner left
+/// mid-deferral stops counting the moment its entity despawns — the
+/// reconcile's despawn is all `advance_race` reads, so the session
+/// resolves instead of waiting on a participant that no longer
+/// exists.
+#[test]
+fn a_departed_wire_seat_releases_the_deferred_authority() {
+    let def = any_order_def(0);
+    let mut app = race_app(host_event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(-200.0, 0.0, 0.0));
+    let (wire, _) = spawn_participant_as(
+        &mut app,
+        &def,
+        Vec3::new(-200.0, 0.0, 4.0),
+        PlayerControl::Remote,
+    );
+    run(&mut app, 2); // release + anchor
+
+    // The authority's own seat resolves first — the deferral holds.
+    set_position(&mut app, car, Vec3::new(200.0, 0.0, 0.0));
+    run(&mut app, 1);
+    assert!(matches!(
+        progress(&app, car).state,
+        ParticipantState::Finished { .. }
+    ));
+    assert_eq!(
+        phase(&app),
+        SessionPhase::Playing,
+        "the racing wire seat holds the session"
+    );
+    assert_eq!(race(&app).phase, RacePhase::Running);
+
+    // The owner left — a despawned entity simply stops counting.
+    app.world_mut().despawn(wire);
+    run(&mut app, 1);
+    assert_eq!(phase(&app), SessionPhase::Results);
+    assert_eq!(race(&app).phase, RacePhase::Complete);
+    assert_eq!(
+        app.world().resource::<ResultLedger>().len(),
+        1,
+        "a departed seat mints no result — only the host's finish records"
+    );
+}
+
 /// A wire seat spawning while the race already runs missed the
 /// countdown's release flip — `advance_race` starts it `Racing` on the
 /// next step, the same mid-race join semantics `RaceProgress::join`

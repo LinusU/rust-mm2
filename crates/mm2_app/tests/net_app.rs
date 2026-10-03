@@ -5675,6 +5675,252 @@ fn the_deferred_authority_delivers_the_wire_seats_terminal_edge() {
     }
 }
 
+/// Shared staging for the deferral's endpoint legs — the same build
+/// `the_deferred_authority_delivers_the_wire_seats_terminal_edge`
+/// runs, stopped inside the held window: the host's own seat has
+/// `Finished`, the joined client's wire seat still races (no deadline
+/// — departure and death are the only releases these legs exercise),
+/// and both sessions sit in `Playing` on a live snap stream. The
+/// install rides the tuple because both mounts must outlive the apps.
+fn staged_deferral() -> (tempfile::TempDir, App, App, Entity, Entity) {
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let mut host = host_app(vfs, link);
+    host.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+        1.0 / 60.0,
+    )));
+    host.add_systems(
+        FixedLast,
+        (
+            mm2_app::race::reanchor_teleported_participants,
+            mm2_app::race::advance_race,
+        )
+            .chain(),
+    );
+
+    let link = LobbyLink::join(
+        addr,
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join failed");
+    let mut client = bridge_app(mount(install.path()), link);
+    {
+        let link = client.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    until_ready(&mut client);
+
+    host.world()
+        .resource::<HostLink>()
+        .command_sender()
+        .send(HostCommand::Start)
+        .unwrap();
+    spin(&mut host, |a| {
+        a.world().resource::<Session>().config().is_some()
+    });
+    until_begun(&mut client);
+
+    // Both halves live under a running, deadline-free race — the
+    // endpoint under test is the only way out of the deferral.
+    let def = wire_race_def(0);
+    for app in [&mut host, &mut client] {
+        let generation = {
+            let mut session = app.world_mut().resource_mut::<Session>();
+            session.transition(SessionPhase::Ready).unwrap();
+            session.transition(SessionPhase::Playing).unwrap();
+            session.generation()
+        };
+        let mut race = mm2_game::RaceState::new(def.clone(), generation);
+        race.phase = mm2_game::RacePhase::Running;
+        app.world_mut().insert_resource(race);
+    }
+
+    // The host's own seat — wire id 0, `Local`, `Racing`.
+    let mut seat_progress = mm2_game::RaceProgress::new(&def);
+    seat_progress.state = mm2_game::ParticipantState::Racing;
+    let host_seat = host
+        .world_mut()
+        .spawn((
+            NetPlayer(0),
+            Player {
+                id: mm2_game::PlayerId(0),
+                control: PlayerControl::Local,
+            },
+            netdrive::ResetEpoch(0),
+            mm2_game::ObjectIdentity(mm2_game::ObjectId {
+                generation: 1,
+                slot: 100,
+            }),
+            seat_progress,
+            avian3d::prelude::Position(Vec3::new(0.0, 0.0, -100.0)),
+            avian3d::prelude::Rotation::default(),
+            avian3d::prelude::LinearVelocity::default(),
+            avian3d::prelude::AngularVelocity::default(),
+        ))
+        .id();
+
+    // The client's own seat — `PlayerVehicle` so the reconcile stamps
+    // its `NetPlayer`, `RaceProgress`-tracked like the load leaves it.
+    let mut client_progress = mm2_game::RaceProgress::new(&def);
+    client_progress.state = mm2_game::ParticipantState::Racing;
+    let client_seat = client
+        .world_mut()
+        .spawn((
+            PlayerVehicle,
+            Player {
+                id: mm2_game::PlayerId(1),
+                control: PlayerControl::Local,
+            },
+            mm2_game::AuthorityRole::Predicted,
+            client_progress,
+            avian3d::prelude::Position::default(),
+            avian3d::prelude::Rotation::default(),
+            avian3d::prelude::LinearVelocity::default(),
+            avian3d::prelude::AngularVelocity::default(),
+        ))
+        .id();
+    spin(&mut client, |a| {
+        a.world().get::<NetPlayer>(client_seat).is_some()
+    });
+
+    // The wire seat lands through the real reconcile — `Racing` on
+    // arrival under `RaceProgress::join`'s mid-race semantics.
+    spin_mut(&mut host, |a| {
+        a.world_mut()
+            .query_filtered::<&mm2_game::RaceProgress, With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some_and(|p| p.state == mm2_game::ParticipantState::Racing)
+    });
+    // The client holds the authority's copy through the same reconcile.
+    spin_mut(&mut client, |a| {
+        a.world_mut()
+            .query_filtered::<Entity, With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some()
+    });
+
+    // The authority's own seat finishes — the deferral holds `Playing`
+    // for the racing wire seat on both processes.
+    host.update(); // anchor `last_position`
+    *host
+        .world_mut()
+        .get_mut::<avian3d::prelude::Position>(host_seat)
+        .unwrap() = avian3d::prelude::Position(Vec3::new(0.0, 0.0, -300.0));
+    spin_mut(&mut host, |a| {
+        matches!(
+            a.world()
+                .get::<mm2_game::RaceProgress>(host_seat)
+                .map(|p| &p.state),
+            Some(mm2_game::ParticipantState::Finished { .. })
+        )
+    });
+    for _ in 0..3 {
+        host.update();
+        client.update();
+    }
+    assert_eq!(
+        session_phase(&host),
+        SessionPhase::Playing,
+        "staging must leave the authority in the deferred Playing"
+    );
+    assert_eq!(
+        session_phase(&client),
+        SessionPhase::Playing,
+        "staging must leave the client racing on the wire's word"
+    );
+    (install, host, client, host_seat, client_seat)
+}
+
+/// The deferral's departure edge over the real loopback path: the
+/// wire seat's owner leaving mid-deferral drops its roster slot, the
+/// reconcile despawns the participant, and the despawn — not a
+/// replicated resolution — releases the host's held `Playing`. A quit
+/// inside the window would otherwise strand the hosted session
+/// exactly like a stalled seat.
+#[test]
+fn a_departing_wire_seat_releases_the_deferred_authority() {
+    let (_install, mut host, mut client, _host_seat, _client_seat) = staged_deferral();
+
+    // The wire seat's owner says goodbye.
+    client.world_mut().resource_mut::<LobbyLink>().leave();
+
+    spin(&mut host, |a| session_phase(a) == SessionPhase::Results);
+    assert_eq!(
+        host.world().resource::<mm2_game::RaceState>().phase,
+        mm2_game::RacePhase::Complete
+    );
+    assert!(
+        host.world()
+            .resource::<netdrive::NetDriveReport>()
+            .despawned
+            >= 1,
+        "the departed seat left through the reconcile's despawn, not a resolution"
+    );
+
+    // The transition still owes its one `Results`-phase frame — to an
+    // empty wire now, but the debt bounds the stream the same.
+    let sent_at_results = host
+        .world()
+        .resource::<netdrive::NetDriveReport>()
+        .snaps_sent;
+    for _ in 0..4 {
+        host.update();
+    }
+    assert_eq!(
+        host.world()
+            .resource::<netdrive::NetDriveReport>()
+            .snaps_sent,
+        sent_at_results,
+        "the Results debt stays exactly one unpublished transition frame"
+    );
+}
+
+/// The stranded client's recovery over the same staging: a client
+/// still `Playing` inside the deferral window when its host dies must
+/// not sit on the dead stream — the link's `Closed` takes the session
+/// down through the normal lifecycle and the app exits nonzero. The
+/// bare-`Playing` teardown leg covers the mechanism; this leg covers
+/// the stranded-in-deferral case it exists for.
+#[test]
+fn a_stranded_client_recovers_when_the_host_dies() {
+    let (_install, host, mut client, _host_seat, _client_seat) = staged_deferral();
+    assert_eq!(
+        session_phase(&client),
+        SessionPhase::Playing,
+        "the staging leaves the client mid-deferral"
+    );
+
+    // The host process dies inside the window — the wire seat the
+    // client was racing can never resolve now.
+    host.world()
+        .resource::<HostLink>()
+        .ctl()
+        .shutdown()
+        .unwrap();
+
+    let exit = until_exit(&mut client);
+    assert!(
+        matches!(exit, AppExit::Error(code) if code.get() == 1),
+        "a lost host is a nonzero exit, got {exit:?}"
+    );
+    assert_eq!(session_phase(&client), SessionPhase::Menu);
+    let lobby = client.world().resource::<LobbyState>();
+    assert!(
+        lobby
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.contains("lost the host")),
+        "the notice names the cause: {:?}",
+        lobby.notice
+    );
+}
+
 /// F25-B repair leg, the reviewer's wider variant over the real
 /// loopback path: a `LateJoin::Open` joiner whose first applied frame
 /// is the owed `Results`-phase one. While the session is still
