@@ -261,13 +261,13 @@ fn authored_lens_drives_boom_and_projection() {
     for _ in 0..240 {
         app.update();
     }
-    // Rest boom = |Offset| = √(1²+4²) ≈ 4.12 once the smoothing
-    // converges.
+    // Rest boom = |Offset| = √(1²+4²) ≈ 4.12 from the aim point once
+    // the smoothing converges.
     let xf = app.world().get::<Transform>(cam).unwrap();
+    let boom = (xf.translation - near_lens().aim).length();
     assert!(
-        (xf.translation.length() - (1.0f32 + 16.0).sqrt()).abs() < 0.15,
-        "near rest boom ≈ authored |Offset|, got {}",
-        xf.translation.length()
+        (boom - (1.0f32 + 16.0).sqrt()).abs() < 0.15,
+        "near rest boom ≈ authored |Offset|, got {boom}"
     );
     let Projection::Perspective(p) = app.world().get::<Projection>(cam).unwrap() else {
         panic!("chase camera keeps a perspective projection");
@@ -282,10 +282,10 @@ fn authored_lens_drives_boom_and_projection() {
         app.update();
     }
     let xf = app.world().get::<Transform>(cam).unwrap();
+    let boom = (xf.translation - far_lens().aim).length();
     assert!(
-        (xf.translation.length() - (1.8f32 * 1.8 + 64.0).sqrt()).abs() < 0.15,
-        "far rest boom ≈ authored |Offset|, got {}",
-        xf.translation.length()
+        (boom - (1.8f32 * 1.8 + 64.0).sqrt()).abs() < 0.15,
+        "far rest boom ≈ authored |Offset|, got {boom}"
     );
     let Projection::Perspective(p) = app.world().get::<Projection>(cam).unwrap() else {
         panic!();
@@ -318,10 +318,10 @@ fn speed_window_extends_boom() {
         app.update();
     }
     let xf = app.world().get::<Transform>(cam).unwrap();
+    let boom = (xf.translation - near_lens().aim).length();
     assert!(
-        (xf.translation.length() - 5.0).abs() < 0.1,
-        "boom at MaxDist under full speed, got {}",
-        xf.translation.length()
+        (boom - 5.0).abs() < 0.1,
+        "boom at MaxDist under full speed, got {boom}"
     );
 }
 
@@ -540,12 +540,15 @@ fn drive_views_steer_and_free_detaches() {
 #[test]
 fn sized_lens_drives_the_fallback_boom() {
     let lens = ChaseLens::sized(2.0, 4.5);
-    let offset = Vec3::new(0.0, 2.0 * 0.55 + 1.4, 4.5 * 0.85 + 3.5);
+    let offset = Vec3::new(0.0, 2.0 * 0.10 + 1.4, 4.5 * 0.85 + 3.5);
     assert!((lens.offset - offset).length() < 1e-5);
     let rest = lens.offset.length();
     assert!((lens.dist_max - (rest + 3.6)).abs() < 1e-5);
     assert_eq!((lens.speed_min, lens.speed_max), (0.0, 60.0));
     assert!(!lens.collide && !lens.authored);
+    // The eye lands where the retired constants put it.
+    assert!((lens.anchor() - Vec3::new(0.0, 2.0 * 0.55 + 1.4, 4.5 * 0.85 + 3.5)).length() < 1e-5);
+    let aim = lens.aim;
 
     let mut app = base_app(CameraMode::Chase);
     app.add_systems(Update, chase_follow);
@@ -564,10 +567,10 @@ fn sized_lens_drives_the_fallback_boom() {
         app.update();
     }
     let xf = app.world().get::<Transform>(cam).unwrap();
+    let boom = (xf.translation - aim).length();
     assert!(
-        (xf.translation.length() - rest).abs() < 0.15,
-        "sized lens converges to its rest boom, got {}",
-        xf.translation.length()
+        (boom - rest).abs() < 0.15,
+        "sized lens converges to its rest boom, got {boom}"
     );
 }
 
@@ -782,7 +785,7 @@ fn teleport_snaps_the_boom() {
     app.update();
 
     let xf = app.world().get::<Transform>(cam).unwrap();
-    let expect = Vec3::new(200.0, 0.0, 0.0) + near_lens().offset;
+    let expect = Vec3::new(200.0, 0.0, 0.0) + near_lens().anchor();
     assert!(
         xf.translation.distance(expect) < 0.05,
         "boom snapped onto the new anchor, got {:?}",
@@ -820,7 +823,7 @@ fn small_displacements_stay_smooth() {
     app.update();
 
     let xf = app.world().get::<Transform>(cam).unwrap();
-    let expect = Vec3::new(0.0, 0.0, -1.5) + near_lens().offset;
+    let expect = Vec3::new(0.0, 0.0, -1.5) + near_lens().anchor();
     assert!(
         xf.translation.distance(expect) > 0.5,
         "a 1.5 m hop eases instead of snapping, got {:?}",
@@ -871,7 +874,7 @@ fn mode_reentry_snaps_the_stale_boom() {
     *app.world_mut().resource_mut::<CameraMode>() = CameraMode::Chase;
     app.update();
     let xf = app.world().get::<Transform>(cam).unwrap();
-    let expect = Vec3::new(80.0, 0.0, 0.0) + near_lens().offset;
+    let expect = Vec3::new(80.0, 0.0, 0.0) + near_lens().anchor();
     assert!(
         xf.translation.distance(expect) < 0.05,
         "re-entry snapped onto the car, got {:?}",
@@ -904,14 +907,14 @@ fn lens_transition_stays_smooth() {
     *app.world_mut().resource_mut::<CameraMode>() = CameraMode::ChaseFar;
     app.update();
     let xf = app.world().get::<Transform>(cam).unwrap();
-    let far_target = far_lens().offset;
+    let far_target = far_lens().anchor();
     assert!(
         xf.translation.distance(far_target) > 0.5,
         "near→far eases across the lens swap, got {:?}",
         xf.translation
     );
     assert!(
-        xf.translation.distance(near_lens().offset) > 0.02,
+        xf.translation.distance(near_lens().anchor()) > 0.02,
         "and it is already moving toward the far anchor, got {:?}",
         xf.translation
     );
@@ -937,7 +940,7 @@ fn first_track_lands_on_the_boom() {
     app.update();
     app.update();
     let xf = app.world().get::<Transform>(cam).unwrap();
-    let expect = Vec3::new(500.0, 0.0, 500.0) + near_lens().offset;
+    let expect = Vec3::new(500.0, 0.0, 500.0) + near_lens().anchor();
     assert!(
         xf.translation.distance(expect) < 0.05,
         "first tracked frame lands on the anchor, got {:?}",

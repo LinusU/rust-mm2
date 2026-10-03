@@ -49,11 +49,20 @@ impl CameraMode {
 /// authored near or far rig, or a designed size-derived fallback when
 /// the vehicle ships no record. `offset`/`aim` are car-space: `+Z` is
 /// rearward (vehicle forward is `−Z`), `+Y` up.
+///
+/// The boom hangs off the aim point: the rest eye is `aim + offset`
+/// ([`Self::anchor`]), not `offset` from the car origin. Designed
+/// reading (UNK-36), chosen because it is the one the retail records
+/// agree on — measured from the aim point, all 49 stock `camtrackcs`
+/// look *down* at the car, nearly all at 13–19°; measured from the
+/// car origin, near lenses sit below their own aim and look up at the
+/// car by up to 20° (`vpbug_near`: eye 1.0 m, under its 1.53 m roof).
 #[derive(Debug, Clone)]
 pub struct ChaseLens {
-    /// `Offset` — boom anchor; its length is the rest distance.
+    /// `Offset` — boom from the aim point to the eye; its length is the
+    /// rest distance.
     pub offset: Vec3,
-    /// `TrackTo` — the point the camera aims at.
+    /// `TrackTo` — the point the camera aims at, and the boom's root.
     pub aim: Vec3,
     /// `MinDist`/`MaxDist` — boom-length bounds in metres. `MaxDist` is
     /// also the extension target the speed window drives toward; the
@@ -127,11 +136,11 @@ impl ChaseLens {
 
     /// Designed boom sized from the chassis (`h`/`d` metres) — the
     /// pre-authored fallback for a vehicle without records. Mirrors the
-    /// retired constants: rest boom `d*0.85 + 3.5` back, `h*0.55 + 1.4`
+    /// retired constants: rest eye `d*0.85 + 3.5` back and `h*0.55 + 1.4`
     /// up, aim `h*0.45`, and the 0.06 m-of-boom-per-m/s stretch now
     /// expressed as a 0–60 m/s window toward `rest + 3.6`.
     pub fn sized(h: f32, d: f32) -> Self {
-        let offset = Vec3::new(0.0, h * 0.55 + 1.4, d * 0.85 + 3.5);
+        let offset = Vec3::new(0.0, h * 0.10 + 1.4, d * 0.85 + 3.5);
         Self {
             offset,
             aim: Vec3::new(0.0, h * 0.45, 0.0),
@@ -145,6 +154,12 @@ impl ChaseLens {
             clip_far: PerspectiveProjection::default().far,
             authored: false,
         }
+    }
+
+    /// The rest eye position in car space: the boom's `offset` hung
+    /// off the `aim` point.
+    pub fn anchor(&self) -> Vec3 {
+        self.aim + self.offset
     }
 
     /// The perspective projection this lens asks for.
@@ -616,7 +631,7 @@ pub fn chase_follow(
         } else {
             Vec3::Z
         };
-        let target = veh_pos + veh_rot * (dir * dist);
+        let target = veh_pos + veh_rot * (lens.aim + dir * dist);
         let t = 1.0 - (-cam.smoothness * time.delta_secs()).exp();
         let mut next = if jumped {
             target
