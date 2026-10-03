@@ -1071,6 +1071,8 @@ pub fn load_session_world(
             .expect("Loading → Ready is a legal transition");
     }
 
+    crate::speedometer::spawn_speedometer(&mut commands, &mut assets.images, owner);
+
     // HUD + error text.
     commands.spawn((
         owner,

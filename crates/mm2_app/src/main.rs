@@ -1406,6 +1406,7 @@ fn main() {
         Update,
         (
             hudmap::drive_hud_map.after(session::drive_session),
+            mm2_app::speedometer::drive_speedometer.after(session::drive_session),
             camera::drive_mirror.after(session::drive_session),
             // F22-A.2: the indicator pool rebinds ungated too — a
             // `--frames`/`--screenshot` run needs the markers live.

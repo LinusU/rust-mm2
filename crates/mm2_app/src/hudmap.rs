@@ -710,7 +710,12 @@ fn inset_rect(view: MapView, spec: &HudMapSpec, window: Vec2) -> (Vec2, Vec2) {
     let size_px = (size * window).min(window * 0.95);
     let origin_px =
         (((Vec2::from(spec.pos) + Vec2::from(spec.size)) * window) - size_px).max(Vec2::ZERO);
-    (origin_px, size_px)
+    // Mirror the tuned horizontal anchor so the new driving dial owns
+    // the lower-right corner; large maps grow inward from the lower-left.
+    (
+        Vec2::new((window.x - origin_px.x - size_px.x).max(0.0), origin_px.y),
+        size_px,
+    )
 }
 
 /// The participants the map reads: entity (opponent ordering), control

@@ -517,6 +517,7 @@ pub fn active_cam_pose(
 /// nowhere) whenever it is armed.
 type HudNodes = Or<(
     With<crate::session::Hud>,
+    With<crate::speedometer::Speedometer>,
     With<crate::session::ErrorText>,
     With<crate::pause::PauseUi>,
     With<crate::results::ResultsUi>,

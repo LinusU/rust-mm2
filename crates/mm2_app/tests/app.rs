@@ -36,6 +36,7 @@ mod sequence;
 mod session;
 mod smoke;
 mod spark_fx;
+mod speedometer;
 mod stuck;
 mod surface;
 mod texel_fx;
