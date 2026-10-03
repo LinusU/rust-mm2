@@ -1,3 +1,130 @@
+# Last iteration — F25-B repair: the client-side terminal-edge
+# swallow — a local resolution replicated while the session is still
+# `Ready`/`Countdown` can never re-fire its `Playing`-gated
+# transition, so `apply_snapshots` re-checks it after the race-row
+# drain; and staged snap state now holds while the session is
+# `Loading` so a mid-race joiner's first applied frame lands whole
+# (new-run iteration 8)
+
+Repair iteration on `ralph/night` (baseline `64116ef` — the iter-7
+Results-deferral repair; external review **rejected**: fail on F25-B,
+one blocking finding plus a related wider variant). Root cause of the
+blocker — an implementation defect, not a test expectation or a
+missing capability: `apply_progress` mints and records the local
+seat's replicated terminal row unconditionally, but performs
+`Playing → Results` only `if session.phase() == Playing`. Once
+recorded, the resolved guard early-returns every later identical row
+— the transition can never re-fire — and the seat pass runs *before*
+`apply_race_snap` drains the same frame's race row. So one snap
+carrying the local `TimedOut`/`Finished` tail plus the
+`Running`/`Complete` row mints the result while still
+`Ready`/`Countdown`, the row's release edge then moves the session to
+`Playing`, and nothing can ever resolve it — the only other
+transition site is `advance_race`, which is authority-gated and never
+runs on a predicted client. The reviewer's repro is a `LateJoin::Open`
+client joining inside the deadline window: the authority mints the
+joiner's `TimedOut` on the expiry step, the owed `Results`-phase
+frame is the first snap applied after the seats spawn, the local tail
+is swallowed pre-`Playing`, the `Complete` row releases to `Playing`
+— participant terminal, ledger complete, session stuck `Playing`
+forever on a dead stream. The same stranded-client failure class the
+iter-7 repair eliminated, reachable through the new mid-race-join
+semantics.
+
+## What landed
+
+- `release_resolved_local` (`netdrive.rs`, new): `apply_snapshots`
+  ends every run by re-checking the deferred edge — a *predicted*
+  session in `Playing` whose local `RaceProgress` already carries a
+  replicated `Finished`/`TimedOut` moves `Results`. A recorded
+  resolution is final, so the second look after the race-row drain
+  is the only place the edge can still fire. Authority sessions are
+  exempt — the iter-7 deferral keeps a hosted `Playing` alive past
+  its own seat's resolution on purpose.
+- The reviewer's wider variant, closed: a joiner whose *only*
+  delivered frame is the owed one while its session is still
+  `Loading` (no spawned seats, no `RaceState` — a consumed snap
+  would skip the local tail and drop the `Complete` row raceless,
+  stranding at `Ready`). `apply_snapshots` now consumes nothing
+  while `SessionPhase::Loading`: the staged pose frame, the staged
+  race row and the queued impact rows all hold — everything the wire
+  sends is latest-wins state `push` already coalesces, so holding
+  costs nothing and the newest of each applies whole on the first
+  live update.
+- `apply_snapshots` is ordered `.after(reconcile_remote_players)` in
+  both schedulers (`main.rs`, `net_app`'s `bridge_app`): the
+  reconcile's `NetPlayer` stamp is a deferred insert — without the
+  edge the held frame's local tail would skip the seat stamped in
+  the same update.
+- `docs/research/net.md` + `netdrive` module docs: the v14 receive
+  side now names both holds, the second-look rationale and the
+  ordering edge.
+- Three pre-existing legs updated for the hold — test-side only:
+  `foreign_generation_impact_rows_drain_drop_at_the_session_gate`
+  (netdrive) and `a_dead_authoritys_watermark_dies_with_the_link` /
+  `a_start_resets_the_stream_without_a_close` (net_app) broadcast
+  while the client session is `Loading` and expected the stream to
+  apply; they now stand the session `Ready → Playing` first like
+  every other leg (`Loading` holding the stream is the intended
+  behavior). Assertions unchanged.
+
+## Tests
+
+- `netdrive` +2:
+  `a_terminal_edge_landed_before_the_release_still_resolves_the_session`
+  — one snap's local `TimedOut` tail plus `Complete` row, session at
+  `Ready`: the mint/record lands pre-`Playing`, the release edge
+  runs, the second look ends the session at `Results` (not the
+  stranded `Playing` the review reproduced);
+  `a_snap_held_through_the_load_arrives_whole` — the same frame
+  staged during `Loading` consumes nothing (`snaps_applied`/
+  `race_dropped`/ledger all 0, the row stays staged), then the first
+  live update after `Ready` + `RaceState` mints, releases and
+  resolves in one update.
+- `net_app` +1 real loopback:
+  `a_joiners_held_snap_resolves_the_terminal_edge_after_the_load` —
+  the reviewer's full scenario: the owed `Results`-phase frame
+  (local `TimedOut` tail + `Complete` row) broadcasts while the
+  joined client is still `Loading`, holds unconsumed, and after the
+  staged load-end (`Ready → Countdown` + `RaceState` + the spawned
+  local seat) one update lands the reconcile's `NetPlayer` stamp,
+  the `TimedOut` mint into the client's own `ResultLedger`, the
+  `Countdown → Playing` release and `Results` — the session the
+  review showed stranded now ends.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` green — 91 suites, 0 failures
+(`mm2_app` lib 87/87, `net_app` 48/48, `mm2_net` 80/80,
+`net_drive` 3/3).
+
+## Classification / remaining open items
+
+- Implementation choice throughout — the `Loading` hold, the
+  second-look release and the scheduling edge are ours; the retail
+  wire protocol is unrecovered, so no original-behavior claim.
+- Evidence: unit + two-app real-loopback legs through the real drain,
+  reconcile and apply path. Still not exercised: a true two-process
+  leg on this path (the load needs the asset stack — `Ready →
+  Countdown`, `RaceState` and the seat spawn are staged by hand in
+  the new `net_app` leg too), no retail event def, nothing rendered
+  or played by hand, no LAN/Internet or impairment-matrix leg on the
+  deferral/tail path, and client recovery on host teardown while
+  stranded stays inferred, not exercised.
+- A stalled-but-connected remote still holds a hosted session in
+  `Playing` indefinitely — no wire-seat stall/kick watchdog (lobby
+  scope, F26). A dedicated `mm2-host` with no `Local` participant
+  still never reaches `Results` on its own — pre-existing gap.
+- F25-B remaining scope: rematch/lobby-result lifecycle and bulk
+  late-joiner ledger sync (F26), LAN/Internet scope, and the
+  process-level rejoin leg (needs a client rejoin feature that does
+  not exist — recorded as a product-scope decision). This slice is
+  not F25-AC01..06 or F26-AC01..06 completion.
+
+---
+
 # Last iteration — F25-B repair: the networked authority's
 # `Playing → Results` deferral — a hosted session's own resolution
 # holds `Playing` until every `Remote` wire seat resolves, and
