@@ -16,8 +16,18 @@ use crate::vehicle::{
 pub(crate) struct FrontAxle {
     /// Mean lateral grip coefficient of the steered tires.
     pub lateral_grip: f32,
-    /// Slip the steered tires need beyond what the unsteered ones are
-    /// already giving — the understeer term of the bicycle model.
+    /// Slip the steered tires need to reach their peak — how far past the
+    /// car's path the front wheels can usefully be turned.
+    ///
+    /// Not the difference from the rear's peak: that assumes the rear is
+    /// at its own peak, which only a perfectly neutral car at the limit
+    /// is. Every real corner carries some understeer — load transfer, the
+    /// drive force a front-driven axle is also carrying, the yaw damper —
+    /// so the fronts slip more than the rears, and a cap that leaves them
+    /// no room for it stops them well short of their grip: the Beetle,
+    /// with the same tires front and rear, held full lock at 144 km/h
+    /// with its fronts at half their peak slip, cornering at 0.72 g on
+    /// tires good for 1.65.
     pub slip_allowance: f32,
 }
 
@@ -25,7 +35,6 @@ impl FrontAxle {
     pub(crate) fn of(cfg: &crate::config::VehicleConfig) -> Self {
         let mut grip = (0.0f32, 0usize);
         let mut steered_slip = (0.0f32, 0usize);
-        let mut fixed_slip = (0.0f32, 0usize);
         for w in &cfg.wheels {
             let t = w.tires.as_ref().unwrap_or(&cfg.tires);
             if w.steered {
@@ -33,19 +42,14 @@ impl FrontAxle {
                 grip.1 += 1;
                 steered_slip.0 += t.peak_slip_angle;
                 steered_slip.1 += 1;
-            } else {
-                fixed_slip.0 += t.peak_slip_angle;
-                fixed_slip.1 += 1;
             }
         }
         let mean = |(sum, n): (f32, usize), fallback: f32| {
             if n == 0 { fallback } else { sum / n as f32 }
         };
-        let front_slip = mean(steered_slip, cfg.tires.peak_slip_angle);
-        let rear_slip = mean(fixed_slip, front_slip);
         Self {
             lateral_grip: mean(grip, cfg.tires.lateral_grip),
-            slip_allowance: (front_slip - rear_slip).max(0.0),
+            slip_allowance: mean(steered_slip, cfg.tires.peak_slip_angle),
         }
     }
 }

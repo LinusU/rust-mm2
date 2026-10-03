@@ -220,8 +220,8 @@ fn tippy_config() -> VehicleConfig {
     let metrics = mm2_vehicle::HandlingMetrics::of(&cfg);
     cfg.center_of_mass[1] = metrics.ground_y + 0.8;
     cfg.tires.lateral_grip = 1.65;
-    // Grip-limited steering is the *other* thing standing between this
-    // geometry and a roll; switch it off so each test isolates one.
+    // Full lock, not the grip-limited lock: the roll test wants the
+    // hardest corner the tires can make, nothing short of it.
     cfg.steering.grip_limit = 0.0;
     cfg
 }
@@ -247,15 +247,69 @@ fn a_hard_turn_slides_instead_of_rolling_the_car_over() {
 }
 
 #[test]
-fn grip_limited_steering_also_keeps_a_tippy_car_down() {
-    // Same geometry, roll assist off, but the driver can no longer command
-    // a corner the tires cannot hold — which is also a corner that would
-    // tip the car. The two protections are independent on purpose.
-    let mut cfg = tippy_config();
-    cfg.assists.roll_resistance = 0.0;
-    cfg.steering.grip_limit = VehicleConfig::default().steering.grip_limit;
-    let up = up_after_hard_turn(cfg);
-    assert!(up > 0.85, "car should stay upright, up.y was {up}");
+fn grip_limited_steering_still_reaches_the_tires_grip() {
+    // The cap exists so full lock at speed stops short of ploughing, not
+    // so it stops short of the tires: on a car whose axles want the same
+    // slip it once left the fronts no slip allowance at all, and at 40 m/s
+    // this car cornered at 1.15 g against the uncapped car's 1.60.
+    let corner_g = |grip_limit: f32| {
+        let mut cfg = VehicleConfig::default();
+        cfg.steering.grip_limit = grip_limit;
+        cornering_g_at(cfg, 40.0)
+    };
+    let capped = corner_g(VehicleConfig::default().steering.grip_limit);
+    let uncapped = corner_g(0.0);
+    assert!(
+        capped > uncapped * 0.9,
+        "the capped car corners at {capped:.2} g, uncapped {uncapped:.2} g"
+    );
+}
+
+/// Launch at `speed` m/s, hold it with the pedals on full lock and return
+/// how hard the path bends once settled, in g — from the velocity's
+/// heading, so a car spinning faster than it corners does not count.
+fn cornering_g_at(cfg: VehicleConfig, speed: f32) -> f32 {
+    let (mut app, car) = test_app_with(cfg);
+    drive(&mut app, car, FRAMES_PER_SECOND, VehicleInput::default());
+    app.world_mut().get_mut::<LinearVelocity>(car).unwrap().0 = Vec3::NEG_Z * speed;
+    let heading = |app: &App| {
+        let v = app.world().get::<LinearVelocity>(car).unwrap().0;
+        v.x.atan2(v.z)
+    };
+    let hold = |app: &mut App| {
+        let now = app.world().get::<VehicleState>(car).unwrap().forward_speed;
+        drive(
+            app,
+            car,
+            1,
+            VehicleInput {
+                throttle: ((speed - now) * 0.5).clamp(0.0, 1.0),
+                brake: ((now - speed) * 0.5).clamp(0.0, 1.0),
+                steering: 1.0,
+                ..default()
+            },
+        );
+    };
+    for _ in 0..FRAMES_PER_SECOND * 2 {
+        hold(&mut app);
+    }
+    let (start, frames) = (heading(&app), FRAMES_PER_SECOND / 2);
+    let mut swept = 0.0f32;
+    let mut prev = start;
+    for _ in 0..frames {
+        hold(&mut app);
+        let now = heading(&app);
+        let mut d = now - prev;
+        if d > std::f32::consts::PI {
+            d -= std::f32::consts::TAU;
+        } else if d < -std::f32::consts::PI {
+            d += std::f32::consts::TAU;
+        }
+        swept += d.abs();
+        prev = now;
+    }
+    assert_finite(&app, car);
+    swept / (frames as f32 / FRAMES_PER_SECOND as f32) * speed / 9.81
 }
 
 /// Accelerate to speed, then hold full lock; return the vertical component

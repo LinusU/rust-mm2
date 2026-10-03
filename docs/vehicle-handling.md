@@ -135,10 +135,20 @@ capping them at the geometric angle leaves a car whose fronts want more
 slip than its rears turning the wheel for nothing. Sorting the roster by
 front minus rear `OptimumSlipPercent` sorts it exactly by how badly it
 steered: the London Cab (0.40 against 0.14) managed 3 deg/s of yaw at
-30 m/s and the DB7 (0.20/0.08) 8, while the Mini and Panoz, whose axles
-want the same slip, were unaffected. With the understeer term added the
-Cab reaches 22 and the DB7 27, and the cars that were already fine do not
-move.
+30 m/s and the DB7 (0.20/0.08) 8.
+
+Front minus rear was still too little. It assumes the rear tires sit at
+their own peak, which only a perfectly neutral car at the limit does;
+every real corner carries some understeer — load transfer, the drive
+force a front-driven axle also carries, the yaw damper — so the fronts
+slip more than the rears and the cap stopped them short. Cars whose axles
+want the same slip got no allowance at all: the Beetle held full lock at
+40 m/s with its fronts at half their peak slip, cornering at 0.72 g on
+1.65 g tires, and the Audi TT managed 0.27 g. The allowance is now the
+front tires' whole peak slip angle, so they can always reach their grip:
+`drive_probe` puts the Beetle at 1.32 g and the TT at 1.32 g at 40 m/s,
+the fire truck goes from 0.38 to 0.81, and cars that already cornered
+well move by a few hundredths.
 
 The countersteer assist is applied *after* this cap on purpose: a car
 already sideways is not the steady-state corner the cap models, and

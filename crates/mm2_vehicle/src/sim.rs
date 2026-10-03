@@ -29,8 +29,9 @@ pub fn max_steer_angle(speed: f32, cfg: &SteeringConfig) -> f32 {
 ///   rather than authored.
 /// * **Slip.** A tire makes force by slipping, so the front wheels must be
 ///   turned *past* the path the car is taking before they pull at all.
-///   `slip_allowance` is how much further — the understeer term, the slip
-///   the front tires need beyond what the rears are already giving.
+///   `slip_allowance` is how much further — the front tires' peak slip
+///   angle, so they can always reach their grip however much the car
+///   understeers.
 ///
 /// Leaving the slip term out caps the wheels at the geometric angle, where
 /// tires that need a lot of slip make almost none of their grip: MM2's
