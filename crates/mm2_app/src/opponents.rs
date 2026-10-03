@@ -15,10 +15,10 @@
 //!   where the car is going (advance past reached points, close out or
 //!   loop the polyline) and [`crate::racing_line`] turns that into an
 //!   aim point down the line and a speed plan for the corners ahead
-//!   (DSN-66). How it gets there is proportional steering, the
-//!   planned pace's throttle and brake, and the bounded
-//!   reverse-and-turn stuck recovery shared with the scripted evidence
-//!   driver ([`crate::scripted::recovery_input`]).
+//!   (DSN-66). How it gets there is pursuit steering from the car's
+//!   own geometry, the planned pace's throttle and brake, and the
+//!   bounded reverse-and-turn stuck recovery shared with the scripted
+//!   evidence driver ([`crate::scripted::recovery_input`]).
 //! - **Traffic (F15-B.1).** Each opponent also senses the other
 //!   *participants* in a corridor ahead — the player included — from
 //!   live physics state, never map data: a parked car and a moving one
@@ -103,11 +103,9 @@ use tracing::{info, trace, warn};
 use crate::car_visual;
 use crate::racing_line::{
     CORNER_BRAKE_DEFAULT, CarLimits, RouteCursor, SpeedPlan, WallSense, pace, plan_speed,
-    sense_walls,
+    sense_walls, steer_toward,
 };
-use crate::scripted::{
-    ScriptedBot, ScriptedTuning, bearing_throttle, recovery_input, steer_cmd, watch_stuck,
-};
+use crate::scripted::{ScriptedBot, ScriptedTuning, bearing_throttle, recovery_input, watch_stuck};
 
 /// XZ distance within which a route point counts as reached. `.opp`
 /// points on retail routes sit 40-200 m apart; a generous radius keeps
@@ -1524,7 +1522,8 @@ pub fn opponent_drive(
         }
         // Planned pace (DSN-66): the line ahead sets the speed the car
         // may carry, from its own grip and brakes; throttle and brake
-        // hold it there. Steering and the bounded escapes are the
+        // hold it there; steering puts the car on the arc through the
+        // aim point from its own geometry. The bounded escapes are the
         // scripted law's.
         let speed = vstate.forward_speed;
         // Wall feelers (DSN-66): static geometry around the nose — the
@@ -1550,8 +1549,10 @@ pub fn opponent_drive(
             };
             let throttle = bearing_throttle(bearing).min(tuning.throttle_cap);
             let (throttle, brake) = pace(speed, plan, throttle, d.corner_brake);
+            let aim_dist = (target.x - pos.0.x).hypot(target.z - pos.0.z);
             let input = VehicleInput {
-                steering: (steer_cmd(bearing) + walls.steer).clamp(-1.0, 1.0),
+                steering: (steer_toward(bearing, aim_dist, speed, &limits) + walls.steer)
+                    .clamp(-1.0, 1.0),
                 throttle,
                 brake,
                 ..default()

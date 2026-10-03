@@ -27,6 +27,7 @@
 
 use bevy::math::Vec3;
 use mm2_game::OpponentRoute;
+use mm2_vehicle::sim::steering_response;
 use mm2_vehicle::{HandlingMetrics, VehicleConfig};
 
 use crate::opponents::route_is_closed;
@@ -89,6 +90,22 @@ pub struct CarLimits {
     pub max_brake_accel: f32,
     /// Axle-to-axle distance (m) — the steering geometry's lever.
     pub wheelbase: f32,
+    /// Mean lateral grip coefficient of the steered tires.
+    pub front_grip: f32,
+    /// Slip angle (rad) at which the steered tires make their peak
+    /// grip — how far past the path the wheels must turn to pull.
+    pub front_peak_slip: f32,
+    /// Steering lock (rad) at a standstill and at `lock_speed` and
+    /// above, interpolated between — the vehicle's own
+    /// `max_steer_angle` — so a wheel angle can be turned back into the
+    /// normalized input that commands it.
+    pub lock_low: f32,
+    /// Steering lock (rad) from `lock_speed` up.
+    pub lock_high: f32,
+    /// Speed (m/s) at which `lock_high` fully applies.
+    pub lock_speed: f32,
+    /// The input shaping exponent (`steering_response`).
+    pub response_curve: f32,
 }
 
 impl CarLimits {
@@ -112,11 +129,30 @@ impl CarLimits {
         let brake_force = config.brakes.max_brake_force * config.wheels.len().max(1) as f32;
         let long_g = config.tires.longitudinal_grip.clamp(0.4, 2.5);
         let max_brake = ((brake_force / (mass * G)).min(long_g) * G).max(3.0);
+        let steered: Vec<_> = config
+            .wheels
+            .iter()
+            .filter(|w| w.steered)
+            .map(|w| w.tires.as_ref().unwrap_or(&config.tires))
+            .collect();
+        let mean = |f: fn(&mm2_vehicle::config::TireConfig) -> f32, fallback: f32| {
+            if steered.is_empty() {
+                fallback
+            } else {
+                steered.iter().map(|t| f(t)).sum::<f32>() / steered.len() as f32
+            }
+        };
         Self {
             corner_accel: lateral_g * CORNER_GRIP_SHARE * mult * G,
             brake_accel: max_brake * BRAKE_GRIP_SHARE,
             max_brake_accel: max_brake,
             wheelbase: config.wheelbase.max(0.5),
+            front_grip: mean(|t| t.lateral_grip, config.tires.lateral_grip).max(0.1),
+            front_peak_slip: mean(|t| t.peak_slip_angle, config.tires.peak_slip_angle).max(0.0),
+            lock_low: config.steering.low_speed_max_angle,
+            lock_high: config.steering.high_speed_max_angle,
+            lock_speed: config.steering.high_speed.max(1.0),
+            response_curve: config.steering.response_curve.max(0.1),
         }
     }
 
@@ -292,6 +328,35 @@ pub fn pace(speed: f32, plan: SpeedPlan, throttle: f32, corner_brake_threshold: 
         return (0.0, 0.0);
     }
     (0.0, plan.demand.clamp(0.2, 1.0))
+}
+
+/// Normalized steering (`-1..=1`, positive right) that puts the car on
+/// the arc through an aim point `bearing` radians off its nose and
+/// `aim_dist` metres away — pure pursuit, from this car's geometry
+/// instead of a fixed gain on the bearing.
+///
+/// The arc's curvature `2·sin(bearing)/aim_dist` becomes a wheel angle
+/// through the wheelbase, plus the slip the front tires need to make
+/// that much cornering force at `speed` (the share of their grip it
+/// uses, times their peak slip angle). The angle is then divided by
+/// the lock the car actually has at `speed` and passed back through
+/// the inverse of its input shaping, so the vehicle's own steering
+/// produces it. An aim behind the car takes full lock toward it.
+pub fn steer_toward(bearing: f32, aim_dist: f32, speed: f32, limits: &CarLimits) -> f32 {
+    if bearing.abs() >= std::f32::consts::FRAC_PI_2 {
+        return bearing.signum();
+    }
+    let curvature = 2.0 * bearing.sin() / aim_dist.max(1.0);
+    let geometric = (limits.wheelbase * curvature).atan();
+    let lateral = speed * speed * curvature.abs();
+    let used = (lateral / (limits.front_grip * G)).min(1.0);
+    let angle = geometric + bearing.signum() * used * limits.front_peak_slip;
+    let t = (speed.abs() / limits.lock_speed).clamp(0.0, 1.0);
+    let lock = (limits.lock_low + (limits.lock_high - limits.lock_low) * t).max(1e-3);
+    let shaped = (angle / lock).clamp(-1.0, 1.0);
+    // `steering_response` is `sign·|x|^curve`; its inverse is the same
+    // form with the reciprocal exponent.
+    steering_response(shaped, 1.0 / limits.response_curve)
 }
 
 /// Feeler angles (rad) off the nose, each side: a long narrow pair that
@@ -480,6 +545,12 @@ mod tests {
             brake_accel: 5.0,
             max_brake_accel: 10.0,
             wheelbase: 2.5,
+            front_grip: 1.5,
+            front_peak_slip: 0.1,
+            lock_low: 0.6,
+            lock_high: 0.3,
+            lock_speed: 30.0,
+            response_curve: 1.0,
         }
     }
 
@@ -551,6 +622,22 @@ mod tests {
         assert_eq!(pace(25.0, plan(0.5), 0.8, 0.7), (0.0, 0.0), "lift");
         assert_eq!(pace(25.0, plan(0.8), 0.8, 0.7), (0.0, 0.8), "brake");
         assert_eq!(pace(25.0, plan(0.5), 0.8, 0.1), (0.0, 0.5), "eager");
+    }
+
+    /// Pursuit steering is signed like the bearing, zero dead ahead,
+    /// full lock for an aim behind, and asks for more input at speed —
+    /// the lock shrinks and the tires need slip to pull.
+    #[test]
+    fn steer_toward_follows_the_arc_from_the_cars_geometry() {
+        let l = limits();
+        assert_eq!(steer_toward(0.0, 20.0, 10.0, &l), 0.0);
+        let right = steer_toward(0.2, 20.0, 10.0, &l);
+        assert!(right > 0.0 && right < 1.0, "{right}");
+        assert_eq!(steer_toward(-0.2, 20.0, 10.0, &l), -right);
+        assert_eq!(steer_toward(2.5, 20.0, 10.0, &l), 1.0);
+        assert!(steer_toward(0.2, 20.0, 25.0, &l) > right);
+        // A nearer aim at the same bearing is a tighter arc.
+        assert!(steer_toward(0.2, 10.0, 10.0, &l) > right);
     }
 
     /// A wall close on the left steers right and marks the right as the
