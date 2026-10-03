@@ -3398,9 +3398,105 @@ impl std::fmt::Display for LoadCityError {
 
 impl std::error::Error for LoadCityError {}
 
-/// Load a city from `psdl_path` (e.g. `city/london.psdl`) plus its sibling
-/// `.inst` placement file. Every spawned entity is stamped with `owner`
-/// so session teardown can remove the city wholesale.
+fn merge_city_reports(total: &mut CityReport, part: CityReport) {
+    total.rooms += part.rooms;
+    total.attributes += part.attributes;
+    total.emitted += part.emitted;
+    total.suppressed += part.suppressed;
+    total.rejected += part.rejected;
+    total.unparsed_words += part.unparsed_words;
+    total.approximated += part.approximated;
+    total.collider_rooms += part.collider_rooms;
+    total.mesh_groups += part.mesh_groups;
+    total.props_spawned += part.props_spawned;
+    total.props_failed += part.props_failed;
+    total.pathset_props_spawned += part.pathset_props_spawned;
+    total.pathset_decal_paths += part.pathset_decal_paths;
+    total.pathset_props_failed += part.pathset_props_failed;
+    total.pathset_props_capped += part.pathset_props_capped;
+    total.pathset_issues += part.pathset_issues;
+    total.pathset_bangers += part.pathset_bangers;
+    total.pathset_pieces += part.pathset_pieces;
+    total.pathset_banger_failed += part.pathset_banger_failed;
+    total.proprule_rooms += part.proprule_rooms;
+    total.proprule_stamps += part.proprule_stamps;
+    total.proprule_bangers += part.proprule_bangers;
+    total.proprule_pieces += part.proprule_pieces;
+    total.proprule_unresolved += part.proprule_unresolved;
+    total.proprule_issues += part.proprule_issues;
+    total.proprule_banger_failed += part.proprule_banger_failed;
+    total.decals.ribbons += part.decals.ribbons;
+    total.decals.quads += part.decals.quads;
+    total.decals.entities += part.decals.entities;
+    total.decals.label_paths += part.decals.label_paths;
+    total.decals.animated_paths += part.decals.animated_paths;
+    total.decals.missing_texture_paths += part.decals.missing_texture_paths;
+    total.decals.prop_paths += part.decals.prop_paths;
+    total.decals.unresolved_paths += part.decals.unresolved_paths;
+    total.decals.empty_paths += part.decals.empty_paths;
+    total.decals.degenerate_paths += part.decals.degenerate_paths;
+    total.decals.odd_point_paths += part.decals.odd_point_paths;
+    total.decals.unsupported_kind_paths += part.decals.unsupported_kind_paths;
+    total.decals.skipped_quads += part.decals.skipped_quads;
+    total.decals.capped += part.decals.capped;
+    total.decals.missing_textures += part.decals.missing_textures;
+    total.decals.issues += part.decals.issues;
+    total.surfaces.named += part.surfaces.named;
+    total.surfaces.none += part.surfaces.none;
+    total.surfaces.blank += part.surfaces.blank;
+    total.surfaces.issues += part.surfaces.issues;
+    for (kind, count) in part.unsupported {
+        *total.unsupported.entry(kind).or_default() += count;
+    }
+    total.missing_textures.extend(part.missing_textures);
+    total.surfaces.unmapped.extend(part.surfaces.unmapped);
+    total.surfaces.loaded |= part.surfaces.loaded;
+    if total.surfaces.failure.is_none() {
+        total.surfaces.failure = part.surfaces.failure;
+    }
+}
+
+/// Parse an optional, flat custom-city chunk list. Paths are logical VFS
+/// paths, never filesystem paths; duplicate/self/nested manifests are rejected.
+fn city_chunk_paths(main: &str, text: &str) -> Result<Vec<String>, LoadCityError> {
+    let mut lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.starts_with('#'));
+    if lines.next() != Some("MM2_CHUNKS 1") {
+        return Err(LoadCityError::Malformed(
+            "expected MM2_CHUNKS 1 header".into(),
+        ));
+    }
+    let mut paths = vec![main.to_owned()];
+    for line in lines {
+        if paths.len() >= 129
+            || !line.starts_with("city/")
+            || !line.ends_with(".psdl")
+            || line.contains(['\\', ':'])
+            || line
+                .split('/')
+                .any(|p| p.is_empty() || p == "." || p == "..")
+            || paths.iter().any(|p| p == line)
+        {
+            return Err(LoadCityError::Malformed(format!(
+                "invalid or duplicate city chunk: {line}"
+            )));
+        }
+        paths.push(line.to_owned());
+    }
+    if paths.len() == 1 {
+        return Err(LoadCityError::Malformed(
+            "chunk manifest lists no additional parts".into(),
+        ));
+    }
+    Ok(paths)
+}
+
+/// Load an ordinary city or a custom city with a sibling `.chunks` manifest.
+/// Every part uses the normal PSDL/material/collision loader and session owner.
+/// Main-file spawn is retained; room identities, reports and water volumes are
+/// combined. PVS and nested chunk lists are unsupported and fail explicitly.
 #[allow(clippy::too_many_arguments)]
 pub fn load_city(
     commands: &mut Commands,
@@ -3411,6 +3507,81 @@ pub fn load_city(
     materials: &mut Assets<StandardMaterial>,
     owner: SessionEntity,
     session: &mut Session,
+) -> Result<LoadedCity, LoadCityError> {
+    let manifest = psdl_path.replace(".psdl", ".chunks");
+    let paths = if vfs.resolve(&manifest).is_some() {
+        let (bytes, _) = vfs
+            .read_path(&manifest)
+            .map_err(|e| LoadCityError::Missing(e.to_string()))?;
+        let text =
+            std::str::from_utf8(&bytes).map_err(|e| LoadCityError::Malformed(e.to_string()))?;
+        city_chunk_paths(psdl_path, text)?
+    } else {
+        vec![psdl_path.to_owned()]
+    };
+    if paths.len() > 1 {
+        // Validate all inputs before queuing any entity. There is no fallback
+        // to the main part when a listed part is missing/corrupt.
+        for (i, path) in paths.iter().enumerate() {
+            let (bytes, _) = vfs
+                .read_path(path)
+                .map_err(|e| LoadCityError::Missing(format!("{path}: {e}")))?;
+            Psdl::parse(&bytes).map_err(|e| LoadCityError::Malformed(format!("{path}: {e}")))?;
+            if vfs.resolve(&path.replace(".psdl", ".cpvs")).is_some()
+                || (i > 0 && vfs.resolve(&path.replace(".psdl", ".chunks")).is_some())
+            {
+                return Err(LoadCityError::Malformed(format!(
+                    "chunked cities do not support PVS or nested manifests: {path}"
+                )));
+            }
+        }
+    }
+    let mut loaded = load_city_part(
+        commands, vfs, &paths[0], meshes, images, materials, owner, session, 0,
+    )?;
+    for path in &paths[1..] {
+        let offset = loaded.report.rooms as u32;
+        let part = load_city_part(
+            commands, vfs, path, meshes, images, materials, owner, session, offset,
+        )?;
+        if let Some(water) = part.water {
+            if let Some(current) = &mut loaded.water {
+                current.append_chunk(water, offset);
+            } else {
+                let mut water = water;
+                water.offset_room_ids(offset);
+                loaded.water = Some(water);
+            }
+        }
+        if let Some(floor) = part.floor {
+            loaded.floor = Some(WorldFloor(
+                loaded.floor.map_or(floor.0, |old| old.0.min(floor.0)),
+            ));
+        }
+        merge_city_reports(&mut loaded.report, part.report);
+    }
+    info!(
+        parts = paths.len(),
+        rooms = loaded.report.rooms,
+        "city parts ready"
+    );
+    Ok(loaded)
+}
+
+/// Load a city from `psdl_path` (e.g. `city/london.psdl`) plus its sibling
+/// `.inst` placement file. Every spawned entity is stamped with `owner`
+/// so session teardown can remove the city wholesale.
+#[allow(clippy::too_many_arguments)]
+fn load_city_part(
+    commands: &mut Commands,
+    vfs: &Vfs,
+    psdl_path: &str,
+    meshes: &mut Assets<Mesh>,
+    images: &mut Assets<Image>,
+    materials: &mut Assets<StandardMaterial>,
+    owner: SessionEntity,
+    session: &mut Session,
+    room_offset: u32,
 ) -> Result<LoadedCity, LoadCityError> {
     let (bytes, resolved) = vfs
         .read_path(psdl_path)
@@ -3466,13 +3637,13 @@ pub fn load_city(
             // `.cpvs` PVS culling pass (`pvs::apply_city_pvs`) — and an
             // explicit `Visibility` makes the tag queryable (`Mesh3d`
             // requires `Transform` only).
-            crate::pvs::CityRoom(group.room as u32 + 1),
+            crate::pvs::CityRoom(group.room as u32 + room_offset + 1),
             Visibility::Inherited,
             Mesh3d(meshes.add(builder.build())),
             MeshMaterial3d(material),
             Name::new(format!(
                 "city-room{}-tex{}",
-                group.room + 1,
+                group.room as u32 + room_offset + 1,
                 group.texture.map(|i| i as i64).unwrap_or(-1)
             )),
         ));
@@ -3536,7 +3707,11 @@ pub fn load_city(
             spawn_collider(
                 col.surface,
                 Collider::trimesh(col.positions, rest),
-                format!("city-room{}-collider{}", col.room + 1, tag(col.surface)),
+                format!(
+                    "city-room{}-collider{}",
+                    col.room as u32 + room_offset + 1,
+                    tag(col.surface)
+                ),
             );
         }
     }
@@ -3899,6 +4074,43 @@ fn ground_collider(positions: Vec<Vec3>, tris: Vec<[u32; 3]>) -> Collider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn custom_city_chunks_validate_paths_without_silent_fallback() {
+        let main = "city/test.psdl";
+        assert_eq!(
+            city_chunk_paths(main, "MM2_CHUNKS 1\ncity/test.parts/one.psdl\n").unwrap(),
+            vec![main, "city/test.parts/one.psdl"]
+        );
+        for bad in [
+            "bad\ncity/one.psdl",
+            "MM2_CHUNKS 1",
+            "MM2_CHUNKS 1\ncity/test.psdl",
+            "MM2_CHUNKS 1\ncity/../escape.psdl",
+            "MM2_CHUNKS 1\n/absolute.psdl",
+            "MM2_CHUNKS 1\ncity/a.psdl\ncity/a.psdl",
+            "MM2_CHUNKS 1\ncity/a\\b.psdl",
+        ] {
+            assert!(city_chunk_paths(main, bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn custom_city_report_aggregates_rejected_geometry() {
+        let mut total = CityReport {
+            rooms: 2,
+            rejected: 1,
+            ..Default::default()
+        };
+        merge_city_reports(
+            &mut total,
+            CityReport {
+                rooms: 3,
+                rejected: 2,
+                ..Default::default()
+            },
+        );
+        assert_eq!((total.rooms, total.rejected), (5, 3));
+    }
 
     /// Slide a box down a 7° slope onto the flat at 40 m/s and report the
     /// fastest it ever moved upward and its height at the end — the kink
