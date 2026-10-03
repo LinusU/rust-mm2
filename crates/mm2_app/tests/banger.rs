@@ -50,6 +50,12 @@ fn banger_def(name: &str, impulse_limit2: f32) -> BangerDefinition {
 /// schedule. Returns the minted id of a dormant cube banger at `pos`
 /// and the ground beneath it.
 fn test_app_with(authority: SessionAuthority, pool: usize) -> App {
+    test_app_full(authority, pool, false)
+}
+
+/// [`test_app_with`], optionally running the vehicle simulation so a
+/// real `vehicle_bundle` car can be the striker.
+fn test_app_full(authority: SessionAuthority, pool: usize, vehicles: bool) -> App {
     let mut session = Session::new();
     session
         .begin(SessionConfig {
@@ -78,6 +84,9 @@ fn test_app_with(authority: SessionAuthority, pool: usize) -> App {
         .insert_resource(BangerPool { max_active: pool })
         .add_systems(FixedUpdate, advance_session_tick)
         .add_systems(FixedLast, (activate_bangers, settle_bangers).chain());
+    if vehicles {
+        app.add_plugins(VehiclePlugin);
+    }
     app.finish();
     app.cleanup();
 
@@ -261,6 +270,55 @@ fn a_light_prop_takes_only_its_momentum_share() {
         pv.x > 20.0,
         "the prop takes the transferred impulse, faster than the approach: {pv:?}"
     );
+}
+
+#[test]
+fn a_car_keeps_its_line_through_a_light_prop() {
+    // A dormant prop is a static wall when the solver first meets it,
+    // and at speed the solver answers it in the same step activation
+    // sees it. Taking that wall response back as one impulse along one
+    // normal left a car striking a parking meter at 80 km/h rising at
+    // 5.5 m/s and spinning on every axis; restoring the car's pre-step
+    // velocity takes it back exactly. A 1 t car at 22 m/s against a
+    // 40 kg prop keeps its line and nearly all its speed.
+    let mut app = test_app_full(SessionAuthority::Local, 32, true);
+    let car = app
+        .world_mut()
+        .spawn((
+            vehicle_bundle(&VehicleConfig::default()),
+            Position(Vec3::new(0.0, 1.0, 0.0)),
+            Transform::from_xyz(0.0, 1.0, 0.0),
+        ))
+        .id();
+    for _ in 0..FRAMES_PER_SECOND {
+        app.update();
+    }
+    app.world_mut().get_mut::<LinearVelocity>(car).unwrap().0 = Vec3::NEG_Z * 22.0;
+    let (_, object) = spawn_banger(
+        &mut app,
+        Vec3::new(0.0, 0.5, -12.0),
+        banger_def("meter", 0.0),
+    );
+
+    let (mut activated, mut rise, mut spin, mut speed) = (false, 0.0f32, 0.0f32, f32::MAX);
+    for _ in 0..FRAMES_PER_SECOND {
+        app.update();
+        activated |= drain_transitions(&mut app)
+            .iter()
+            .any(|e| e.object == object && e.phase == BangerPhase::Active);
+        if activated {
+            let v = app.world().get::<LinearVelocity>(car).unwrap().0;
+            rise = rise.max(v.y);
+            spin = spin.max(app.world().get::<AngularVelocity>(car).unwrap().0.length());
+            speed = speed.min(-v.z);
+        }
+    }
+    assert!(activated, "the car's strike activates the prop");
+    assert!(rise < 0.5, "the car rose at {rise} m/s off a 40 kg prop");
+    // The transfer itself pitches the nose a little: ~1.2 kN·s struck
+    // half a metre below the centre of mass is ~0.6 rad/s.
+    assert!(spin < 1.0, "the car spun at {spin} rad/s off a 40 kg prop");
+    assert!(speed > 19.0, "the car kept {speed} of its 22 m/s");
 }
 
 #[test]

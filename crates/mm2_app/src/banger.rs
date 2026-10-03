@@ -55,7 +55,7 @@ use mm2_game::{
     BangerStateChanged, CityEntity, MAX_BANGER_ANGULAR_SPEED, MAX_BANGER_LINEAR_SPEED, ObjectId,
     ObjectIdentity, Session, SessionEntity,
 };
-use mm2_vehicle::StrikeBound;
+use mm2_vehicle::{PreStepVelocity, StrikeBound};
 use tracing::{debug, warn};
 
 use crate::contracts::{
@@ -303,19 +303,40 @@ struct Activation {
 /// same rewrite — and its `write_striker_correction` clamps the
 /// striker's post-write spin at `MAX_BANGER_ANGULAR_SPEED` write-side,
 /// the same bound `banger_bundle` stamps solver-side.
+///
+/// A striker that snapshots its velocity before the solver runs (every
+/// vehicle carries [`PreStepVelocity`]) has the wall response taken back
+/// exactly instead: its velocity returns to the snapshot and only the
+/// transfer is charged. Returning `applied_impulse` along one normal at
+/// the deepest contact's lever undoes a response the solver spread over
+/// several points and substeps only in that direction — a parking meter
+/// at 80 km/h left the Beetle rising at 5.5 m/s and spinning on every
+/// axis. The snapshot also drops the step's other forces, one 1/120 s
+/// of drive and suspension.
 fn apply_striker_correction(
     a: &Activation,
     transfer: Option<&Transfer>,
     struck: &mut Query<StruckMut, Without<Banger>>,
+    pre_step: &Query<&PreStepVelocity>,
 ) {
     let (Some(entity), Some(transfer)) = (a.striker, transfer) else {
         return;
     };
-    let Ok((linvel, angvel, inertia, rotation)) = struck.get_mut(entity) else {
+    let Ok((mut linvel, mut angvel, inertia, rotation)) = struck.get_mut(entity) else {
         return;
     };
+    let delta_p = match pre_step.get(entity) {
+        Ok(pre) if a.applied_impulse > 0.0 => {
+            linvel.0 = pre.linear;
+            if let Some(angvel) = angvel.as_mut() {
+                angvel.0 = pre.angular;
+            }
+            -a.dir * transfer.impulse
+        }
+        _ => striker_correction(a.applied_dir, a.applied_impulse, a.dir, transfer.impulse),
+    };
     write_striker_correction(
-        striker_correction(a.applied_dir, a.applied_impulse, a.dir, transfer.impulse),
+        delta_p,
         transfer.striker_mass,
         a.striker_lever,
         linvel,
@@ -532,6 +553,7 @@ pub fn activate_bangers(
     mut bangers: Query<BangerMut>,
     pieces: Query<(&BangerPieces, &SessionEntity, &GlobalTransform)>,
     masses: Query<&ComputedMass>,
+    pre_step: Query<&PreStepVelocity>,
     mut writer: MessageWriter<BangerStateChanged>,
     mut commands: Commands,
 ) {
@@ -720,7 +742,7 @@ pub fn activate_bangers(
             .min(MAX_BANGER_LINEAR_SPEED);
         match pieces.get(a.entity) {
             Ok((pieces, owner, gt)) if pieces.collidable().next().is_some() => {
-                apply_striker_correction(&a, transfer.as_ref(), &mut strikers.p1());
+                apply_striker_correction(&a, transfer.as_ref(), &mut strikers.p1(), &pre_step);
                 break_banger(
                     &a,
                     launch,
@@ -769,7 +791,7 @@ pub fn activate_bangers(
         // kick — plus the record's spin kick. The lever runs from the
         // body's centre of mass (the authored `CG`, the bound's
         // centre), not the bound-base origin.
-        apply_striker_correction(&a, transfer.as_ref(), &mut strikers.p1());
+        apply_striker_correction(&a, transfer.as_ref(), &mut strikers.p1(), &pre_step);
         let impulse = a.dir
             * transfer
                 .as_ref()

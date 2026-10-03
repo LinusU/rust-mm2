@@ -302,7 +302,18 @@ verified original behaviour — every provisional point is still UNK-22.
   share with `applied_impulse = 0` and the record's `Elasticity`; a
   coincident contact+overlap folds the real solve data in rather than
   charging twice. Unresolvable striker mass keeps the pre-transfer
-  launch and leaves the striker alone. Implementation choice under
+  launch and leaves the striker alone. A vehicle striker — every
+  `vehicle_bundle` carries `PreStepVelocity`, snapshot before the
+  solver each step — has the wall response taken back exactly
+  instead: its velocity returns to the snapshot and only the transfer
+  is charged. Returning `applied_impulse` along one normal at the
+  deepest contact's lever undid a response the solver spread over
+  several points and substeps only along that normal: at 80 km/h a
+  London parking meter left the Beetle rising at 5.5 m/s and spinning
+  on every axis, and a box stack at 60 km/h threw it up at 4.5 m/s,
+  sped it up to 74 km/h and spun it round at ~340°/s. With the
+  snapshot the meter costs nothing visible and the stack 7 km/h.
+  Implementation choice under
   UNK-22 — the original's exact exchange quantity is unrecovered, but
   the measured symptom (static-wall response) is repaired without
   tuning constants or touching `ImpulseLimit2`/`Elasticity` data paths.
