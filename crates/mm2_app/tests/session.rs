@@ -30,6 +30,8 @@ use mm2_vehicle::{
     VehicleState,
 };
 
+mod support;
+
 /// A headless app wired exactly like the binary's session path: real
 /// world spawning, teardown and contract pipeline, minus the window and
 /// device input (tests drive `SessionControl`/`VehicleInput` directly).
@@ -1714,5 +1716,53 @@ fn reseat_towed_trailers_follows_any_tractor_reset() {
     assert!(
         app.world().get::<Teleported>(trailer).is_some(),
         "the reseat went through `vehicle_reset` (Teleported)"
+    );
+}
+
+/// A dev world mounts the global `materials.{mtl,csv}` pair the same
+/// way a city session does — the pair is not city-scoped, and every
+/// dev-world collider is `SurfaceMaterial::Unspecified`, so the
+/// `_default` block is what its contacts read. An authored pair binds
+/// the resource; an absent pair binds nothing; a half pair (the
+/// loader's broken-table error) warns and binds nothing rather than
+/// substituting — the same policy `city::load_city` keeps.
+#[test]
+fn a_dev_world_mounts_the_authored_surface_tables() {
+    let install = tempfile::tempdir().unwrap();
+    support::surface_materials(install.path());
+    let mut app = dev_app();
+    app.insert_resource(Mm2Vfs(support::mount(install.path())));
+    app.update();
+    let tables = app
+        .world()
+        .get_resource::<mm2_content::SurfaceTables>()
+        .expect("the authored pair mounted for the dev world");
+    assert_eq!(
+        tables.sound_index(mm2_game::SurfaceMaterial::Unspecified),
+        Some(1),
+        "the unmarked colliders' fallback reads _default's sound class"
+    );
+
+    let install = tempfile::tempdir().unwrap();
+    let mut app = dev_app();
+    app.insert_resource(Mm2Vfs(support::mount(install.path())));
+    app.update();
+    assert!(
+        app.world()
+            .get_resource::<mm2_content::SurfaceTables>()
+            .is_none(),
+        "an install without the pair mounts nothing"
+    );
+
+    let install = tempfile::tempdir().unwrap();
+    support::write(install.path(), "city/materials.csv", b"texture,physics\n");
+    let mut app = dev_app();
+    app.insert_resource(Mm2Vfs(support::mount(install.path())));
+    app.update();
+    assert!(
+        app.world()
+            .get_resource::<mm2_content::SurfaceTables>()
+            .is_none(),
+        "a half pair is a broken table, not an absent one — never substituted"
     );
 }

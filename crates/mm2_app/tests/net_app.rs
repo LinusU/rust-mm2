@@ -3133,8 +3133,10 @@ fn a_wire_seats_surface_contact_publishes_in_its_snap() {
     let (link, vfs, fp) = host_link(install.path(), &config);
     // The session resources `load_session_world` binds — the authored
     // dry table off this install's VFS and the wave bank indexing it.
-    // The dev world ships no city materials, so `SurfaceTables` is the
-    // test's own two-material set, the same staging `audio.rs` uses.
+    // This leg builds the app by hand rather than loading a session
+    // world, so `SurfaceTables` is the test's own two-material set,
+    // the same staging `audio.rs` uses (`support::surface_materials`
+    // is what the session path would mount for this install).
     let audio = mm2_app::audio::SurfaceAudio::load(&vfs, config.conditions.weather, None)
         .expect("the fixture's dry table resolves");
     let bank = mm2_app::audio::WaveBank::index(&vfs);
@@ -3224,6 +3226,13 @@ fn a_wire_seats_surface_contact_publishes_in_its_snap() {
         (1, 153, 124, 1),
         "the resolved contact publishes quantized — 0.6×255→153, \
          12.4 m/s→124"
+    );
+    assert!(
+        app.world()
+            .resource::<netdrive::NetDriveReport>()
+            .surfaces_sent
+            > 0,
+        "the contact-bearing rows count on the authority"
     );
 
     // The same live chain keeps voicing: the resolved contact spawned
@@ -3377,6 +3386,13 @@ fn a_remote_copy_replays_the_replicated_surface_contact() {
         state.forward_speed, 4.0,
         "the rolling mix's speed derives off the wire velocity"
     );
+    assert_eq!(
+        app.world()
+            .resource::<netdrive::NetDriveReport>()
+            .surfaces_applied,
+        1,
+        "the contact-bearing row counted on the client"
+    );
 
     // A quiet frame clears both halves — no stale contact replays.
     host.ctl()
@@ -3416,6 +3432,13 @@ fn a_remote_copy_replays_the_replicated_surface_contact() {
     assert!(
         contact.skid.is_none() && contact.roll.is_none(),
         "sentinel fields clear the copy's contact"
+    );
+    assert_eq!(
+        app.world()
+            .resource::<netdrive::NetDriveReport>()
+            .surfaces_applied,
+        1,
+        "sentinel rows land silently — the counter only counts contacts"
     );
 
     host.shutdown();

@@ -633,6 +633,22 @@ pub fn load_session_world(
             );
             spawn.position = Vec3::new(0.0, 1.5, 0.0);
             spawn.yaw = 0.0;
+            // The `materials.{mtl,csv}` pair is global — not city-scoped
+            // — so a dev world mounts it too: every dev-world collider
+            // is `SurfaceMaterial::Unspecified`, which resolves the
+            // `_default` block's `sound` class / `ptx` channels through
+            // the same inheritance an unmarked city collider applies.
+            // Same failure policy as the city loader: a broken pair
+            // warns and stays unmounted rather than substituting.
+            match mm2_content::load_surface_tables(&vfs.0) {
+                Ok(Some(tables)) => {
+                    commands.insert_resource(tables);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(error = %e, "surface tables failed; dev world colliders stay Unspecified");
+                }
+            }
         }
         WorldMode::City { psdl } => {
             match city::load_city(

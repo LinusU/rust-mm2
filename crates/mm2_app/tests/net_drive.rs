@@ -97,7 +97,7 @@ fn leading_u64(s: &str) -> u64 {
     digits.parse().unwrap()
 }
 
-/// The `net=in<s>s/<a>a/<x>x,snap<s>s/<a>a/<x>x,rem<r>,req<s>s/<g>g/<d>d,rspn<n>,dsyn<n>,tsyn<n>,imp<s>s/<a>a/<d>d,rb<d>d/<r>r,race<a>a/<d>d,prog<a>a/<d>d,stall<n>`
+/// The `net=in<s>s/<a>a/<x>x,snap<s>s/<a>a/<x>x,rem<r>,req<s>s/<g>g/<d>d,rspn<n>,dsyn<n>,tsyn<n>,imp<s>s/<a>a/<d>d,rb<d>d/<r>r,race<a>a/<d>d,prog<a>a/<d>d,stall<n>,surf<s>s/<a>a`
 /// record field decoded — the wire counters the run actually moved.
 /// `stall` (F25-B wire-seat retirements) is authority-side only and
 /// reads 0 on a clean run — it is not parsed here since nothing in
@@ -114,6 +114,9 @@ fn leading_u64(s: &str) -> u64 {
 /// car authors no breakable parts — and `race` (v13 race rows) plus
 /// `prog` (v14 per-seat progress tails) read 0 on both sides: the dev
 /// cruise carries no `RaceState` — so all six cells read 0 here.
+/// `surf` (v16 surface tails carrying a resolved contact — sent on
+/// the authority, applied on a client) reads 0 on a surface-table-
+/// less install and counts on the fixture pair's.
 #[derive(Debug, Default)]
 struct NetField {
     inputs_sent: u64,
@@ -143,6 +146,8 @@ struct NetField {
     progress_applied: u64,
     #[allow(dead_code)]
     progress_dropped: u64,
+    surfaces_sent: u64,
+    surfaces_applied: u64,
 }
 
 fn net_field(line: &str) -> NetField {
@@ -163,6 +168,7 @@ fn net_field(line: &str) -> NetField {
     let breaks = cells(parts[8], "rb");
     let race = cells(parts[9], "race");
     let prog = cells(parts[10], "prog");
+    let surf = cells(parts[12], "surf");
     NetField {
         inputs_sent: inputs[0],
         inputs_applied: inputs[1],
@@ -181,6 +187,8 @@ fn net_field(line: &str) -> NetField {
         race_dropped: race[1],
         progress_applied: prog[0],
         progress_dropped: prog[1],
+        surfaces_sent: surf[0],
+        surfaces_applied: surf[1],
     }
 }
 
@@ -232,11 +240,34 @@ fn start_when_ready(host: &mut Proc, clients: u32) {
     host.until("event=started generation=1");
 }
 
+/// The `aud=` field's surface cells — `/Nk/Ng` the loop voices
+/// audible on the record update, `/NK/NG` the cumulative spawns.
+/// Absent `aud=` (no audio activity) reads as zeros. The spawned
+/// counts are what a leg asserts: the audible gauges sample one
+/// update — a record landing on an airborne or contact-faded frame
+/// reads 0 without disproving the voice ever resolved.
+fn surface_counts(line: &str) -> (u64, u64, u64, u64) {
+    let Some(aud) = line.split_whitespace().find_map(|t| t.strip_prefix("aud=")) else {
+        return (0, 0, 0, 0);
+    };
+    let (mut k, mut g, mut sk, mut rg) = (0, 0, 0, 0);
+    for tok in aud.split('/') {
+        for (suffix, slot) in [('k', &mut k), ('g', &mut g), ('K', &mut sk), ('G', &mut rg)] {
+            if let Some(n) = tok.strip_suffix(suffix) {
+                *slot = n
+                    .parse()
+                    .unwrap_or_else(|_| panic!("bad surface gauge in {line}"));
+            }
+        }
+    }
+    (k, g, sk, rg)
+}
+
 /// The host's parked-lobby record after `quit` — the authority side of
 /// the session: its `net=` shows the clients' inputs were applied to
 /// the simulated remote seats and snapshots went back out. (`quit` is
 /// also the host's Cancel→teardown→exit lifecycle leg.)
-fn quit_and_assert_host_drove(mut host: Proc) {
+fn quit_and_assert_host_drove(mut host: Proc) -> NetField {
     host.cmd("quit");
     let rec = host.until("smoke=headless-physics");
     assert_eq!(field(&rec, "status"), "pass", "{rec}");
@@ -255,6 +286,7 @@ fn quit_and_assert_host_drove(mut host: Proc) {
         host.wait().success(),
         "mm2 --host did not exit cleanly: {rec}"
     );
+    net
 }
 
 /// F25-AC01/AC02's first real leg: three `mm2` processes — an in-app
@@ -293,6 +325,74 @@ fn two_mm2_processes_drive_one_session_over_loopback() {
     }
 
     quit_and_assert_host_drove(host);
+}
+
+/// The v16 surface tail at process level — the review gap the v16
+/// landing disclosed: every earlier leg either staged the
+/// `SurfaceContact` by hand (in-process) or had nothing to resolve
+/// (a dev world mounted no `materials` pair). With the fixture pair +
+/// dry table on the install, this leg is live-resolved end to end:
+/// the host's real `vehicle_simulation` grounds the remote seats'
+/// wheels on the dev-world colliders, `surface_voices` resolves the
+/// `Unspecified` → `_default` → `sound 1` (grass) chain into a real
+/// `SurfaceContact`, `publish_snapshots` encodes it onto the wire,
+/// and each client's `apply_snapshots` decodes it onto the remote
+/// copies' `SurfaceContact` — which the client's own `surface_voices`
+/// then replays into a rolling-loop voice off the same authored
+/// waves. `surf<a>` counts rows that landed; `surf<s>` the rows the
+/// authority broadcast; `aud=`'s `G` spawn counter is the replayed
+/// voice itself. Nothing is staged: the same leg on a table-less
+/// install (the clean leg above) reads `surf0s/0a`.
+#[test]
+fn two_mm2_processes_relay_a_live_resolved_surface_contact() {
+    let install = tempfile::tempdir().unwrap();
+    support::surface_audio(install.path());
+    support::surface_materials(install.path());
+    let mut host = Proc::spawn(MM2_EXE, &host_args(install.path(), 9000));
+    let addr = listening_addr(&host);
+
+    let alice = Proc::spawn(MM2_EXE, &join_args(install.path(), addr, "alice", 1400));
+    let bob = Proc::spawn(MM2_EXE, &join_args(install.path(), addr, "bob", 500));
+    start_when_ready(&mut host, 2);
+
+    // Bob's shorter cap lands mid-drive — the record while the cars
+    // still cruise, before they pin against the dev world's
+    // perimeter wall like the clean leg's 900-frame end-state.
+    let bob_rec = bob.until("smoke=headless-physics");
+    let bob_net = assert_client_drove(&bob_rec, 2);
+    assert!(
+        bob_net.surfaces_applied > 0,
+        "live-resolved surface tails landed on bob's remote copies: {bob_rec}"
+    );
+    // `rolling_voices` counts the client's own seat too — `>= 2`
+    // pins at least one remote copy replaying its replicated
+    // contact through bob's own table. Cumulative, not the live
+    // gauge: the record update can land on an airborne or faded
+    // frame, but a spawned voice is permanent proof the pick ran.
+    let (_, _, _, rolling) = surface_counts(&bob_rec);
+    assert!(
+        rolling >= 2,
+        "a remote copy voices its replicated rolling loop: {bob_rec}"
+    );
+
+    let alice_rec = alice.until("smoke=headless-physics");
+    let alice_net = assert_client_drove(&alice_rec, 1);
+    assert!(
+        alice_net.surfaces_applied > 0,
+        "live-resolved surface tails landed on alice's remote copies: {alice_rec}"
+    );
+    assert!(alice.wait().success(), "alice did not exit cleanly");
+    assert!(bob.wait().success(), "bob did not exit cleanly");
+
+    for _ in 0..2 {
+        assert!(host.until("event=left").contains("cause=quit"));
+    }
+
+    let host_net = quit_and_assert_host_drove(host);
+    assert!(
+        host_net.surfaces_sent > 0,
+        "the authority broadcast live-resolved surface contacts"
+    );
 }
 
 /// The same session with the data plane riding an armed `ImpairProxy`:

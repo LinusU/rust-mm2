@@ -1196,6 +1196,13 @@ pub struct AudioReport {
     /// Rolling-loop voices whose last computed mix is audible — the
     /// same gauge for the rolling half.
     pub rolling: u64,
+    /// Skid band voices spawned this session — a subset of `voices`.
+    /// Unlike `skids` this never rewinds: a voice that resolved stays
+    /// counted after its mix fades or the contact clears (F07-B.4).
+    pub skid_voices: u64,
+    /// Rolling-loop voices spawned this session — a subset of
+    /// `voices`; the same cumulative measure for the rolling half.
+    pub rolling_voices: u64,
     /// Clutch voices spawned this session — a subset of `voices`
     /// (F07-B.5).
     pub clutch: u64,
@@ -2875,6 +2882,7 @@ pub fn surface_voices(
                             .id();
                         slot.voice = Some(v);
                         report.voices += 1;
+                        report.skid_voices += 1;
                     }
                     Err(e) => {
                         report.failed += 1;
@@ -2961,6 +2969,7 @@ pub fn surface_voices(
                             .id();
                         rig.rolling_voice = Some(v);
                         report.voices += 1;
+                        report.rolling_voices += 1;
                     }
                     Err(e) => {
                         report.failed += 1;

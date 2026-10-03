@@ -14,6 +14,8 @@ use mm2_assets::Vfs;
 use mm2_game::{DevOverrides, Difficulty, SessionConfig, SpawnPose, WorldMode};
 use mm2_vehicle::VehicleConfig;
 
+mod support;
+
 fn write(dir: &Path, rel: &str, contents: impl AsRef<[u8]>) {
     let p = dir.join(rel);
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -202,6 +204,54 @@ fn dev_world_headless_smoke_passes_without_mm2_data() {
     assert!(
         (1100..=1200).contains(&ticks),
         "600 updates should produce ~1200 fixed ticks, got {ticks}"
+    );
+}
+
+/// The dev world resolves surface voices live when the install authors
+/// the `materials` pair (F07-B.4 on `Unspecified` ground): the
+/// `_default` block's `sound` class reaches the dry table's grass row,
+/// so the Hold driver's real wheel contacts mix a rolling loop off the
+/// authored waves — the `aud=` spawn counter reads it even if the
+/// record update lands on an airborne or faded frame. Nothing staged:
+/// the session mounts `SurfaceTables` itself.
+#[test]
+fn dev_world_surface_voices_resolve_off_the_authored_default() {
+    let install = tempfile::tempdir().unwrap();
+    support::surface_audio(install.path());
+    support::surface_materials(install.path());
+    let rec = smoke::headless_smoke(
+        &SessionConfig::default(),
+        support::mount(install.path()),
+        SelectedCar {
+            def: None,
+            paint: 0,
+        },
+        &VehicleConfig::default(),
+        600,
+        smoke::Driver::Hold,
+        None,
+    );
+    assert_eq!(
+        rec.status,
+        SmokeStatus::Pass,
+        "expected pass, got: {}",
+        rec.line()
+    );
+    let line = rec.line();
+    let aud = line
+        .split_whitespace()
+        .find_map(|kv| kv.strip_prefix("aud="))
+        .expect("surface voices make the run audio-active");
+    let rolling: u64 = aud
+        .split('/')
+        .find_map(|tok| tok.strip_suffix('G'))
+        .and_then(|n| n.parse().ok())
+        .expect("aud= carries a rolling spawn counter");
+    assert_eq!(rolling, 1, "the rolling loop spawned: {}", rec.line());
+    assert!(
+        !aud.contains('+'),
+        "no dropped or failed voice anomalies: {}",
+        rec.line()
     );
 }
 

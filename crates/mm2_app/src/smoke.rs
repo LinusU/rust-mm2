@@ -1061,15 +1061,21 @@ fn run_headless(
     // raceless sessions — the dev cruise publishes none), and `prog`,
     // the v14 per-seat progress tails a client applied/dropped (0 on
     // the authority, on raceless sessions and on seats the race does
-    // not track), and `stall`, the wire seats the authority retired
-    // for silence (0 everywhere but a hosted run with a dead peer).
+    // not track), `stall`, the wire seats the authority retired
+    // for silence (0 everywhere but a hosted run with a dead peer), and
+    // `surf`, the v16 surface tails the authority broadcast carrying a
+    // live-resolved contact / a client decoded onto a remote copy's
+    // `SurfaceContact` (0 while every seat rolls on unresolvable ground
+    // — a dev world mounts the authored `materials` pair when the
+    // install carries one, so the `_default` block's sound class can
+    // resolve there).
     // Absent without a link's report, so a non-lobby record stays
     // bit-identical.
     let net_detail = world_ecs
         .get_resource::<crate::netdrive::NetDriveReport>()
         .map(|r| {
             format!(
-                " net=in{}s/{}a/{}x,snap{}s/{}a/{}x,rem{},req{}s/{}g/{}d,rspn{:.0},dsyn{},tsyn{},imp{}s/{}a/{}d,rb{}d/{}r,race{}a/{}d,prog{}a/{}d,stall{}",
+                " net=in{}s/{}a/{}x,snap{}s/{}a/{}x,rem{},req{}s/{}g/{}d,rspn{:.0},dsyn{},tsyn{},imp{}s/{}a/{}d,rb{}d/{}r,race{}a/{}d,prog{}a/{}d,stall{},surf{}s/{}a",
                 r.inputs_sent,
                 r.inputs_applied,
                 r.inputs_staled,
@@ -1092,7 +1098,9 @@ fn run_headless(
                 r.race_dropped,
                 r.progress_applied,
                 r.progress_dropped,
-                r.wire_seats_retired
+                r.wire_seats_retired,
+                r.surfaces_sent,
+                r.surfaces_applied
             )
         })
         .unwrap_or_default();
@@ -1771,10 +1779,17 @@ fn run_headless(
             } else {
                 String::new()
             };
-            // F07-B.4: skid/rolling loop voices currently audible —
-            // gauges like `a`, appended only when nonzero.
-            let surface = if r.skids + r.rolling > 0 {
-                format!("/{}k/{}g", r.skids, r.rolling)
+            // F07-B.4: skid/rolling loop voices — `k`/`g` the
+            // currently-audible gauges like `a`, `K`/`G` the
+            // cumulative spawns. The spawns keep a resolved contact's
+            // evidence when the record update lands on a faded or
+            // airborne frame; appended only when any of the four
+            // counts is nonzero.
+            let surface = if r.skids + r.rolling + r.skid_voices + r.rolling_voices > 0 {
+                format!(
+                    "/{}k/{}g/{}K/{}G",
+                    r.skids, r.rolling, r.skid_voices, r.rolling_voices
+                )
             } else {
                 String::new()
             };

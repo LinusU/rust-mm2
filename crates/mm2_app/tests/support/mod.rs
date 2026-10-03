@@ -414,3 +414,31 @@ pub fn surface_audio(d: &std::path::Path) {
         );
     }
 }
+
+/// The global `city/materials.{mtl,csv}` pair a dev world needs to
+/// resolve a surface class at all: `_default` authors `sound: 1` — the
+/// dry table's grass row, so an unmarked collider (`SurfaceMaterial::
+/// Unspecified`, every dev-world surface) inherits a rolling loop and
+/// a wide skid band through the designed fallback, and a nonzero index
+/// proves the class lookup rather than an accidental row 0.
+/// `ptxindex -1 -1` keeps the wheel-effect channels dark; the csv maps
+/// no textures because nothing named ever queries it.
+pub fn surface_materials(d: &std::path::Path) {
+    write(
+        d,
+        "city/materials.mtl",
+        b"mtl _default {\n\
+          elasticity: 0.0\n\
+          friction: 1.0\n\
+          effect: none\n\
+          sound: 1\n\
+          drag: 0.0\n\
+          width: 0.0\n\
+          height: 0.0\n\
+          depth: 0.0\n\
+          ptxindex: -1 -1\n\
+          ptxthreshold: 0.0 0.0\n\
+          }\n",
+    );
+    write(d, "city/materials.csv", b"texture,physics\n");
+}

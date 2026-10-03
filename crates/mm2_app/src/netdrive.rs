@@ -843,6 +843,18 @@ pub struct NetDriveReport {
     /// terminal edge, so the count is results the deferral no longer
     /// waits on, not kicks.
     pub wire_seats_retired: u64,
+    /// `SnapEntry` surface tails broadcast carrying a resolved contact
+    /// (authority side, protocol v16, F25-B): a row counts when its
+    /// `surf_skid`/`surf_roll` half left [`SNAP_NO_SURFACE`] — the
+    /// `SurfaceContact` `surface_voices` resolved live off the seat's
+    /// wheel telemetry, never a fabricated class.
+    pub surfaces_sent: u64,
+    /// `SnapEntry` surface tails decoded onto a live remote copy's
+    /// `SurfaceContact` (client side, protocol v16): a row counts when
+    /// it carried a contact and a spawned copy's component took it.
+    /// Sentinel rows — the release — land silently like every other
+    /// state carry.
+    pub surfaces_applied: u64,
 }
 
 /// A rotation off the wire, sanitized — a malformed-quaternion guard so
@@ -2437,6 +2449,12 @@ pub fn publish_snapshots(
         impact_rows.truncate(MAX_SNAP_IMPACTS as usize);
     }
     let sent_rows = impact_rows.len() as u64;
+    // The v16 tails that left `SNAP_NO_SURFACE` — a seat `surface_voices`
+    // resolved a live contact for this frame.
+    let sent_surfaces = entries
+        .iter()
+        .filter(|e| e.surf_skid != SNAP_NO_SURFACE || e.surf_roll != SNAP_NO_SURFACE)
+        .count() as u64;
     if host
         .ctl()
         .broadcast(&Message::Snap {
@@ -2458,6 +2476,7 @@ pub fn publish_snapshots(
         *published = Some(key);
         report.snaps_sent += 1;
         report.impacts_sent += sent_rows;
+        report.surfaces_sent += sent_surfaces;
     }
 }
 
@@ -3012,14 +3031,24 @@ fn apply_snap_frame(
             // it via the separate `surfaces` query — the copy's
             // `SurfaceRig` replays the contact through the local table.
             if let (Some(vehicle), Some(mut state), Some(mut input)) = (vehicle, state, input) {
+                let surface = surfaces.get_mut(entity).ok();
+                let has_surface = surface.is_some();
+                let carried =
+                    entry.surf_skid != SNAP_NO_SURFACE || entry.surf_roll != SNAP_NO_SURFACE;
                 apply_present(
                     entry,
                     &vehicle.config,
                     &mut state,
                     &mut input,
                     drive.map(|d| d.into_inner()),
-                    surfaces.get_mut(entity).ok().map(|s| s.into_inner()),
+                    surface.map(|s| s.into_inner()),
                 );
+                // The v16 tail landed on a live copy's `SurfaceContact`
+                // — the replicated contact `surface_voices`' replica
+                // arm replays next update.
+                if carried && has_surface {
+                    report.surfaces_applied += 1;
+                }
             }
             match lerp {
                 Some(mut lerp) => {
