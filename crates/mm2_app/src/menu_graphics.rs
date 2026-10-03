@@ -728,6 +728,14 @@ fn draw_detail(
                 },
             ));
             label(p, &g.state.specs, 18.0, Color::WHITE);
+            // A locked car or paint names what earns it here, not only
+            // on the status line after a refused Enter.
+            if let Some(Err(reason)) = shell.focused_row().map(|r| &r.enabled) {
+                label(p, upper_first(reason), 18.0, GOLD);
+                if reason.contains(" won)") {
+                    label(p, WIN_RULE, 14.0, Color::WHITE);
+                }
+            }
             label(p, "LIVE SHOWROOM   /   360 DEGREE VIEW", 13.0, GOLD);
             return;
         }
@@ -820,6 +828,19 @@ fn draw_detail(
             );
         }
     });
+}
+
+/// What counts as winning a race toward a reward (the persisted
+/// `beaten_*` criterion).
+const WIN_RULE: &str =
+    "A race counts as won with a top 3 finish on Amateur or 1st place on Professional.";
+
+fn upper_first(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
 fn display_label(text: &str) -> &str {

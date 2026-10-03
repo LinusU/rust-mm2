@@ -61,8 +61,9 @@ use mm2_content::{CityInfo, EventCatalog, VehicleCatalog, VehicleDef};
 use mm2_game::{
     AvailabilityTable, Densities, Difficulty, EventRef, EventTableKind, GarageTable,
     MAX_NAME_CHARS, Mm2Vfs, PlayerProfile, ProfileId, ProfileStore, ProfileSummary,
-    RaceCustomization, Session, SessionConditions, SessionConfig, SessionCustomization,
-    SessionMode, SessionPhase, TimeOfDay, VehicleSelection, Weather, WorldMode,
+    RaceCustomization, RewardTable, Session, SessionConditions, SessionConfig,
+    SessionCustomization, SessionMode, SessionPhase, TimeOfDay, Unlock, VehicleSelection, Weather,
+    WorldMode,
 };
 use tracing::{info, warn};
 
@@ -406,6 +407,9 @@ pub struct MenuData {
     availability: BTreeMap<String, AvailabilityTable>,
     /// Per-city `tune/<city>.cinfo` — `None` when the city ships none.
     city_info: BTreeMap<String, Option<CityInfo>>,
+    /// Per-city reward tables (shares the catalog scan) — what the
+    /// garage names as a locked car's requirement.
+    rewards: BTreeMap<String, RewardTable>,
     profiles: Vec<ProfileSummary>,
 }
 
@@ -424,6 +428,7 @@ impl MenuData {
             events: BTreeMap::new(),
             availability: BTreeMap::new(),
             city_info: BTreeMap::new(),
+            rewards: BTreeMap::new(),
             profiles: Vec::new(),
         }
     }
@@ -467,6 +472,83 @@ impl MenuData {
             self.availability.insert(city.to_string(), table);
         }
         &self.availability[city]
+    }
+
+    /// A city's reward table (shares the catalog scan).
+    fn rewards_of(&mut self, vfs: &Vfs, city: &str) -> &RewardTable {
+        if !self.rewards.contains_key(city) {
+            let table = mm2_content::reward_table(self.catalog_of(vfs, city));
+            self.rewards.insert(city.to_string(), table);
+        }
+        &self.rewards[city]
+    }
+
+    /// A city's display name — the `.cinfo` `LocalizedName`, else the
+    /// stem.
+    fn city_name(&mut self, vfs: &Vfs, city: &str) -> String {
+        self.city_info_of(vfs, city)
+            .and_then(|info| info.localized_name.clone())
+            .unwrap_or_else(|| city.to_string())
+    }
+
+    /// What earns `unlock`, phrased for a locked garage or paint row:
+    /// every authored reward row that grants it, across every race
+    /// city, with the bound driver's progress toward milestone rows.
+    /// `None` when no authored row grants it.
+    fn unlock_requirement(&mut self, vfs: &Vfs, unlock: &Unlock) -> Option<String> {
+        let bound = self.bound.clone();
+        let mut ways = Vec::new();
+        for city in self.race_cities.clone() {
+            let table = self.rewards_of(vfs, &city).clone();
+            if !table
+                .milestones
+                .iter()
+                .chain(table.per_event.iter().map(|(_, rule)| rule))
+                .any(|rule| rule.unlock == *unlock)
+            {
+                continue;
+            }
+            let city_name = self.city_name(vfs, &city);
+            for rule in table.milestones.iter().filter(|r| r.unlock == *unlock) {
+                let Some(needed) = table.milestone_target(rule) else {
+                    continue;
+                };
+                let size = table
+                    .family_sizes
+                    .get(&rule.family)
+                    .copied()
+                    .unwrap_or(needed);
+                let won = bound
+                    .as_ref()
+                    .map_or(0, |p| p.beaten_in(&city, rule.family))
+                    .min(needed);
+                let family = table_name(rule.family);
+                ways.push(if needed == size {
+                    format!("win all {size} {family} races in {city_name} ({won}/{needed} won)")
+                } else {
+                    format!(
+                        "win {needed} of the {size} {family} races in {city_name} ({won}/{needed} won)"
+                    )
+                });
+            }
+            for (key, _) in table.per_event.iter().filter(|(_, r)| r.unlock == *unlock) {
+                let event = self
+                    .catalog_of(vfs, &city)
+                    .events
+                    .iter()
+                    .find(|e| e.event_ref.table == key.table && e.stem == key.stem)
+                    .cloned();
+                let label = match event {
+                    Some(e) if key.table == EventTableKind::CrashCourse => {
+                        format!("Crash Course {}", lesson_name(&e.description))
+                    }
+                    Some(e) => self.event_label(vfs, &e.event_ref, &e.stem),
+                    None => key.stem.clone(),
+                };
+                ways.push(format!("pass {label} in {city_name}"));
+            }
+        }
+        (!ways.is_empty()).then(|| ways.join(", or "))
     }
 
     /// A city's display metadata, read on first request.
@@ -1260,8 +1342,8 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
             });
             rows
         }
-        Screen::Garage => garage_rows(shell, data),
-        Screen::Paints { car } => paint_rows(shell, data, car),
+        Screen::Garage => garage_rows(shell, data, vfs),
+        Screen::Paints { car } => paint_rows(shell, data, vfs, car),
         Screen::Profiles => profile_rows(shell, data),
         // A text field, not a row list — the buffer lives on the
         // screen and `menu_present` draws it.
@@ -1478,8 +1560,32 @@ fn quick_race_row(data: &mut MenuData, vfs: &Vfs) -> Row {
     }
 }
 
-fn garage_rows(shell: &MenuShell, data: &MenuData) -> Vec<Row> {
-    let Some(garage) = &data.garage else {
+/// The locked-row reason: what earns the unlock, or the generic
+/// reason when no authored reward row names it.
+fn locked_reason(data: &mut MenuData, vfs: &Vfs, unlock: &Unlock) -> String {
+    match data.unlock_requirement(vfs, unlock) {
+        Some(how) => format!("locked - {how}"),
+        None => "locked - earned through event rewards".to_string(),
+    }
+}
+
+/// A Crash Course row's authored tag as a name — `midtrm2` →
+/// "Midterm 2", `final13` → "Final", `lesson4` → "Lesson 4".
+fn lesson_name(tag: &str) -> String {
+    let tag = tag.to_ascii_lowercase();
+    if tag.starts_with("final") {
+        "Final".to_string()
+    } else if let Some(n) = tag.strip_prefix("midtrm") {
+        format!("Midterm {n}")
+    } else if let Some(n) = tag.strip_prefix("lesson") {
+        format!("Lesson {n}")
+    } else {
+        tag
+    }
+}
+
+fn garage_rows(shell: &MenuShell, data: &mut MenuData, vfs: &Vfs) -> Vec<Row> {
+    let Some(garage) = data.garage.clone() else {
         return Vec::new();
     };
     garage
@@ -1490,7 +1596,12 @@ fn garage_rows(shell: &MenuShell, data: &MenuData) -> Vec<Row> {
         // reading).
         .filter(|row| row.listed)
         .map(|row| {
-            let entry = data.catalog.as_ref().and_then(|c| c.find(&row.id).ok());
+            let entry = data
+                .catalog
+                .as_ref()
+                .and_then(|c| c.find(&row.id).ok())
+                .cloned();
+            let entry = entry.as_ref();
             let selected = shell.vehicle.id.as_deref() == Some(row.id.as_str());
             let avail = match &data.bound {
                 Some(p) => garage.of(p, &row.id),
@@ -1507,7 +1618,7 @@ fn garage_rows(shell: &MenuShell, data: &MenuData) -> Vec<Row> {
                     .unwrap_or_else(|| "not in the catalog".to_string());
                 Err(format!("incomplete: {missing}"))
             } else if !avail.is_some_and(|a| a.unlocked) {
-                Err("locked - earned through event rewards".to_string())
+                Err(locked_reason(data, vfs, &Unlock::Vehicle(row.id.clone())))
             } else {
                 Ok(())
             };
@@ -1526,7 +1637,7 @@ fn garage_rows(shell: &MenuShell, data: &MenuData) -> Vec<Row> {
         .collect()
 }
 
-fn paint_rows(shell: &MenuShell, data: &MenuData, car: &str) -> Vec<Row> {
+fn paint_rows(shell: &MenuShell, data: &mut MenuData, vfs: &Vfs, car: &str) -> Vec<Row> {
     let entry = data.catalog.as_ref().and_then(|c| c.find(car).ok());
     let avail = data.garage.as_ref().and_then(|g| match &data.bound {
         Some(p) => g.of(p, car),
@@ -1555,7 +1666,14 @@ fn paint_rows(shell: &MenuShell, data: &MenuData, car: &str) -> Vec<Row> {
         .enumerate()
         .map(|(i, name)| {
             let enabled = match avail.as_ref().and_then(|a| a.paints.get(i)) {
-                Some(false) => Err("locked - earned through event rewards".to_string()),
+                Some(false) => Err(locked_reason(
+                    data,
+                    vfs,
+                    &Unlock::Paint {
+                        car: car.to_string(),
+                        variant: i as i64,
+                    },
+                )),
                 _ => Ok(()),
             };
             Row {

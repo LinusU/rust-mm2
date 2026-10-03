@@ -1069,6 +1069,81 @@ fn garage_picks_carry_through_launch() {
     assert_eq!(car.def.as_ref().map(|d| d.id.as_str()), Some("vpt"));
 }
 
+/// A locked car or paint names what earns it: milestone rewards count
+/// the driver's won races in the family against the target, indexed
+/// rewards name their event.
+#[test]
+fn locked_vehicles_name_their_unlock_requirement() {
+    let tmp = install();
+    let d = tmp.path();
+    // A second complete car, reward-gated behind half the checkpoints.
+    write(d, "tune/vpu.info", "Description=Locked Car\nColors=Green\n");
+    write(d, "tune/vehicle/vpu.vehcarsim", vehcarsim());
+    write(d, "geometry/vpu.pkg", car_pkg());
+    write(d, "bound/vpu_bound.bnd", car_bnd());
+    write(d, "geometry/vpu_whl0.mtx", wheel_mtx());
+    write(
+        d,
+        "race/testcity/testcity_rewards.csv",
+        format!(
+            "{REWARDS}race,0,vpt,1,Beaten event zero paint,\n\
+             race,half,vpu,0,Half the checkpoints,\n"
+        ),
+    );
+    write(
+        d,
+        "tune/testcity.cinfo",
+        "LocalizedName=Test City\nCheckpointNames=Racing 101\n",
+    );
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let alice = store
+        .create("Alice", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    seed_record(
+        &store,
+        &alice.id,
+        EventKey {
+            city: "testcity".into(),
+            table: EventTableKind::Checkpoint,
+            stem: "race1".into(),
+        },
+        120 * 60,
+        Some(2),
+    );
+
+    let mut app = menu_app(d, Some(store));
+    app.update();
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "Alice");
+    press(&mut app, KeyCode::Escape);
+    activate_row(&mut app, "Vehicle:");
+    let locked = shell(&app)
+        .rows
+        .iter()
+        .find(|r| r.text.contains("Locked Car"))
+        .unwrap()
+        .enabled
+        .clone();
+    assert_eq!(
+        locked,
+        Err("locked - win 2 of the 4 Checkpoint races in Test City (1/2 won)".to_string())
+    );
+
+    activate_row(&mut app, "Test Car");
+    let blue = shell(&app)
+        .rows
+        .iter()
+        .find(|r| r.text.contains("Blue"))
+        .unwrap()
+        .enabled
+        .clone();
+    assert_eq!(
+        blue,
+        Err("locked - pass Racing 101 in Test City".to_string())
+    );
+}
+
 /// The Driver screen binds, creates and deletes real profiles through
 /// `ProfileStore` — with the delete sitting behind its own
 /// confirmation screen (F16-AC06's deliberate-confirmation leg) and
