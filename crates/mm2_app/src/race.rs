@@ -55,10 +55,10 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_assets::Vfs;
 use mm2_game::{
-    Checkpoint, CheckpointRule, Difficulty, EventRef, ParticipantState, Player, PlayerControl,
-    ProgressOutcome, RACE_TICK_HZ, RaceDefinition, RacePhase, RaceProgress, RaceStarted, RaceState,
-    ResultLedger, RouteGateLine, Session, SessionAuthority, SessionEntity, SessionOutcome,
-    SessionPhase, SessionResult,
+    CheckpointRule, Difficulty, EventRef, ParticipantState, Player, PlayerControl, ProgressOutcome,
+    RACE_TICK_HZ, RaceDefinition, RacePhase, RaceProgress, RaceStarted, RaceState, ResultLedger,
+    RouteGateLine, Session, SessionAuthority, SessionEntity, SessionOutcome, SessionPhase,
+    SessionResult,
 };
 use mm2_vehicle::Teleported;
 use tracing::warn;
@@ -187,56 +187,18 @@ pub struct CheckpointMarker {
     pub gate: Option<usize>,
 }
 
-/// Spawn one translucent cylinder per trigger — gates orange, the
-/// finish green. Decorative only: they carry no collider and the
-/// swept-segment tests in `Checkpoint::crossed` own correctness. All
-/// are stamped `owner` so session teardown removes them (AC03).
+/// Spawn decorative checkpoint gantries. No colliders: the shared swept
+/// trigger tests still own crossing correctness. Session-owned roots control
+/// visibility for all metalwork and signs together.
 pub fn spawn_checkpoint_markers(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
+    images: &mut Assets<Image>,
     materials: &mut Assets<StandardMaterial>,
     definition: &RaceDefinition,
     owner: SessionEntity,
 ) {
-    let gate_mat = materials.add(StandardMaterial {
-        base_color: Color::srgba(1.0, 0.55, 0.1, 0.28),
-        alpha_mode: AlphaMode::Blend,
-        unlit: true,
-        cull_mode: None,
-        ..default()
-    });
-    let finish_mat = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.2, 1.0, 0.4, 0.35),
-        alpha_mode: AlphaMode::Blend,
-        unlit: true,
-        cull_mode: None,
-        ..default()
-    });
-    let mut spawn_gate = |cp: &Checkpoint, gate: Option<usize>, mat: &Handle<StandardMaterial>| {
-        let mesh = meshes.add(Cylinder::new(cp.radius, cp.height));
-        commands.spawn((
-            owner,
-            CheckpointMarker { gate },
-            Mesh3d(mesh),
-            MeshMaterial3d(mat.clone()),
-            // The finish starts hidden — it only appears once every
-            // gate is cleared (RACE-7).
-            if gate.is_none() {
-                Visibility::Hidden
-            } else {
-                Visibility::Visible
-            },
-            // The trigger band is ±height around the authored point;
-            // show the above-ground half so the gate reads as a column.
-            Transform::from_translation(cp.center + Vec3::Y * (cp.height * 0.5)),
-        ));
-    };
-    for (i, cp) in definition.checkpoints.iter().enumerate() {
-        spawn_gate(cp, Some(i), &gate_mat);
-    }
-    if let Some(finish) = &definition.finish {
-        spawn_gate(finish, None, &finish_mat);
-    }
+    crate::checkpoint_gate::spawn(commands, meshes, images, materials, definition, owner);
 }
 
 /// Reflect progress on the markers: a cleared `AnyOrder` gate hides;

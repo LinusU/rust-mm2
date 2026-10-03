@@ -2398,3 +2398,92 @@ fn countdown_banner_ignores_stale_race_and_despawns() {
         "the session-owned banner despawned"
     );
 }
+
+/// Gantry roots retain the progress marker; every render child inherits
+/// visibility and belongs to the same session so teardown cannot leak signs.
+#[test]
+fn checkpoint_gantries_follow_progress_and_teardown() {
+    use mm2_app::race::{CheckpointMarker, spawn_checkpoint_markers, update_checkpoint_markers};
+    let mut def = any_order_def(0);
+    def.finish = Some(cp(200.0, 0.0));
+    let mut app = race_app(event_config(), def.clone());
+    app.init_resource::<Assets<Image>>()
+        .init_resource::<Assets<StandardMaterial>>()
+        .add_systems(Update, update_checkpoint_markers);
+    let owner = SessionEntity(app.world().resource::<Session>().generation());
+    let mut queue = bevy::ecs::world::CommandQueue::default();
+    let mut meshes = Assets::<Mesh>::default();
+    let mut images = Assets::<Image>::default();
+    let mut materials = Assets::<StandardMaterial>::default();
+    spawn_checkpoint_markers(
+        &mut Commands::new(&mut queue, app.world()),
+        &mut meshes,
+        &mut images,
+        &mut materials,
+        &def,
+        owner,
+    );
+    queue.apply(app.world_mut());
+    let roots: Vec<_> = app
+        .world_mut()
+        .query::<(Entity, &CheckpointMarker)>()
+        .iter(app.world())
+        .map(|(e, marker)| (e, marker.gate))
+        .collect();
+    assert_eq!(roots.len(), 3);
+    for (root, gate) in &roots {
+        assert_eq!(
+            app.world().get::<Visibility>(*root),
+            Some(&if gate.is_none() {
+                Visibility::Hidden
+            } else {
+                Visibility::Visible
+            })
+        );
+        let children = app.world().get::<Children>(*root).unwrap();
+        assert_eq!(children.len(), 4);
+        for child in children.iter() {
+            assert_eq!(
+                app.world().get::<Visibility>(child),
+                Some(&Visibility::Inherited)
+            );
+            assert_eq!(app.world().get::<SessionEntity>(child), Some(&owner));
+            assert!(app.world().get::<Collider>(child).is_none());
+        }
+    }
+    let (player, _) = spawn_participant(&mut app, &def, Vec3::ZERO);
+    app.world_mut()
+        .get_mut::<RaceProgress>(player)
+        .unwrap()
+        .apply_replicated(0b11, 2, 0, 2, 0);
+    app.update();
+    for (root, gate) in &roots {
+        assert_eq!(
+            app.world().get::<Visibility>(*root),
+            Some(&if gate.is_none() {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            })
+        );
+    }
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Unloading)
+        .unwrap();
+    app.update();
+    assert_eq!(
+        app.world_mut()
+            .query_filtered::<Entity, With<CheckpointMarker>>()
+            .iter(app.world())
+            .count(),
+        0
+    );
+    assert_eq!(
+        app.world_mut()
+            .query_filtered::<Entity, With<Mesh3d>>()
+            .iter(app.world())
+            .count(),
+        0
+    );
+}

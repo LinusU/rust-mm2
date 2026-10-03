@@ -1544,6 +1544,7 @@ pub fn load_session_world(
             race::spawn_checkpoint_markers(
                 &mut commands,
                 &mut assets.meshes,
+                &mut assets.images,
                 &mut assets.materials,
                 &def,
                 owner,

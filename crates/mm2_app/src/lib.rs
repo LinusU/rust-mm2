@@ -51,3 +51,5 @@ pub mod water;
 pub mod wheel_fx;
 
 pub(crate) mod motion_evidence;
+
+mod checkpoint_gate;
