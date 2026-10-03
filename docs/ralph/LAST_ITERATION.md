@@ -1,3 +1,77 @@
+# Last iteration — F25-B evidence slice: the deferral's two
+# unverified endpoints — a wire seat's *departure* now provably
+# releases the hosted session's held `Playing`, and a client left
+# `Playing` inside the deferral window now provably recovers when
+# its host dies (new-run iteration 10)
+
+Evidence iteration on `ralph/night` (baseline `5ef1d6e` — the iter-9
+headless-join scheduling repair; external gates + review pass). The
+iter-7 deferral contract names two exits besides resolution — "the
+last wire seat resolves — or departs (a despawned entity stops
+counting)" — but no leg ever exercised departure, and both prior
+reviews listed "client recovery on host teardown while stranded" as
+inferred-not-exercised. Selection: close those two named gaps on the
+real path. No production change was needed — every mechanism held
+exactly as designed; the iteration is honest evidence, not a repair.
+
+## What landed
+
+- `staged_deferral` (`net_app.rs`, shared staging): the same build
+  `the_deferred_authority_delivers_the_wire_seats_terminal_edge`
+  runs — host app with real `advance_race`/`publish_snapshots`,
+  joined `bridge_app`, real `Start`/`Ready → Playing`/`RaceState` —
+  stopped inside the held window: the host's own seat `Finished`,
+  the wire seat still `Racing` under a deadline-free race, both
+  sessions deferred in `Playing` on a live snap stream.
+- `race` +1 `a_departed_wire_seat_releases_the_deferred_authority`:
+  hosted deferral holds past the local finish; despawning the
+  `Remote` entity lands same-step `Complete` + `Results` and the
+  ledger keeps only the host's row — a departed seat mints nothing.
+- `net_app` +2 real loopback:
+  `a_departing_wire_seat_releases_the_deferred_authority` — the
+  owner's `leave()` drops the roster slot (`HostEvent::Left` →
+  `drive_host` → `desired_remotes` → reconcile `despawned ≥ 1`),
+  the host lands `Results`/`Complete`, and the owed-frame bound
+  still freezes `snaps_sent` after exactly one `Results` publish —
+  the debt is honored even with no clients left to carry it;
+  `a_stranded_client_recovers_when_the_host_dies` —
+  `HostCtl::shutdown` mid-deferral takes the still-`Playing`
+  client down through `Closed` → `control.quit` → `Unloading` →
+  `Menu` to `AppExit::Error(1)` with the "lost the host" notice —
+  the stranded-in-deferral case the bare-`Playing` teardown leg
+  only inferred (no `RaceState`, no held wire seat, no live
+  deferral to dissolve).
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` green — 0 failures
+(`mm2_app` lib 88/88, `race` 48/48, `net_app` 50/50 incl. the two
+new legs, `net_drive` 3/3, `mm2_net` 80/80).
+
+## Classification / remaining open items
+
+- Implementation choice throughout — the departure edge and the
+  teardown-on-`Closed` path are ours; no original-behavior claim.
+- Evidence: unit + two-app real-loopback legs through the real
+  reconcile, deferral, publisher and lifecycle. Still not
+  exercised: a true two-process leg on these paths (the load needs
+  the asset stack), no LAN/Internet or impairment-matrix leg on
+  the deferral/tail/hold path.
+- Clarified this iteration: the "dedicated `mm2-host` never reaches
+  `Results`" gap is unreachable by `advance_race` today — `mm2
+  --host` always seats itself (`host_pick` is always `Some`), and
+  `mm2-host` runs no Bevy app at all. The real gap is the absent
+  dedicated-authority sim — F26 territory, not an `advance_race`
+  defect.
+- All other open items unchanged: rematch/lobby-result lifecycle
+  and bulk late-joiner ledger sync (F26), stalled-wire-seat
+  watchdog (lobby scope), process-level rejoin (product decision),
+  LAN/Internet scope. Not F25-AC01..06 or F26-AC01..06 completion.
+
+---
+
 # Last iteration — F25-B repair: the missed third scheduling —
 # `run_headless`'s `RunSource::Lobby` arm (the `mm2 --join --headless`
 # client) now orders `apply_snapshots` after
