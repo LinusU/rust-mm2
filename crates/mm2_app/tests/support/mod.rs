@@ -345,3 +345,72 @@ pub fn audio_car(d: &std::path::Path, id: &str) {
     tuned_car(d, id, 1200.0);
     write(d, &format!("aud/cardata/player/{id}.csv"), car_cardata());
 }
+
+// ─── A surface-audio fixture ───────────────────────────────────────
+//
+// The legs that exercise `surface_voices`' live resolve (F25-B
+// protocol v16's wire source) need the authored dry table plus the
+// waves its rows name — the same fixture `tests/audio.rs::surface_dir`
+// authors, shared here so the net legs mount the identical data.
+
+/// A minimal 16-bit mono PCM RIFF/WAVE at `rate` with `frames` frames.
+pub fn pcm_wav(rate: u32, frames: usize) -> Vec<u8> {
+    let mut fmt = Vec::new();
+    fmt.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    fmt.extend_from_slice(&1u16.to_le_bytes()); // mono
+    fmt.extend_from_slice(&rate.to_le_bytes());
+    fmt.extend_from_slice(&(rate * 2).to_le_bytes());
+    fmt.extend_from_slice(&2u16.to_le_bytes()); // block align
+    fmt.extend_from_slice(&16u16.to_le_bytes());
+    let pcm = vec![0x20u8; frames * 2];
+    let mut body = Vec::from(&b"WAVE"[..]);
+    body.extend_from_slice(b"fmt ");
+    body.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+    body.extend_from_slice(&fmt);
+    body.extend_from_slice(b"data");
+    body.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+    body.extend_from_slice(&pcm);
+    let mut out = Vec::from(&b"RIFF"[..]);
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&body);
+    out
+}
+
+/// The authored dry table rows — the retail `default_surfacedry.csv`
+/// 10-column schema. Row 0 is the `_default` road (NOSOUND rolling +
+/// two slippage bands), row 1 `grass` (a rolling loop + one wide
+/// band).
+pub const DRY_SURFACE_TABLE: &[u8] = b"Tunnel sound index\n0\n\
+surface wave,max speed,min surface volume,max surface volume,min surface pitch,max surface pitch,min skid volume,max skid volume,num skid samples\n\
+NOSOUND,125,0,0,0,0,0.5,0.88,2\n\
+skid wave,min slippage,max slippage\n\
+ROADSKID1,0.5,0.75\n\
+ROADSKID2,0.75,1\n\
+surface wave,max speed,min surface volume,max surface volume,min surface pitch,max surface pitch,min skid volume,max skid volume,num skid samples\n\
+ROLLWAVE,25,0.35,0.75,0.85,1.25,0.5,0.72,1\n\
+skid wave,min slippage,max slippage\n\
+GRASSSKID,0.25,1\n";
+
+/// The surface-audio slice of an install: the dry table plus a wave
+/// for every stem it names at a distinguishing sample rate — the files
+/// `SurfaceAudio::load` and `WaveBank::index` resolve so a live contact
+/// both resolves and voices.
+pub fn surface_audio(d: &std::path::Path) {
+    write(
+        d,
+        "aud/cardata/player/default_surfacedry.csv",
+        DRY_SURFACE_TABLE,
+    );
+    for (stem, rate) in [
+        ("roadskid1", 22050),
+        ("roadskid2", 32000),
+        ("grassskid", 11025),
+        ("rollwave", 48000),
+    ] {
+        write(
+            d,
+            &format!("aud/aud22/surfaces/{stem}.22k.wav"),
+            pcm_wav(rate, 220),
+        );
+    }
+}
