@@ -1,3 +1,111 @@
+# Last iteration — F25-B slice: the remote engine voice —
+# `mm2_net` protocol v15 adds `SnapEntry.rpm` and
+# `netdrive::spawn_remote` binds the pick's authored
+# `VehicleAudio`, so a remote participant's `EngineVoice`
+# mixes off the live sim on the authority and off the
+# replicated field on a client — remote cars are no longer
+# engine-silent on any process (new-run iteration 12)
+
+Feature iteration on `ralph/night` (baseline `23e1f17` — the
+iter-11 stall-watchdog handoff; external gates + review pass).
+Selection: a concrete presentation gap inside F25-B's "wheel/
+engine state needed for presentation" — remote spawns bound
+model, physics, damage/stuck/smoke/spark/breakaway rigs but
+never `VehicleAudio`, so `engine_rigs` skipped every remote
+car while AI opponents voiced; and a client copy had no
+replicated `VehicleState::rpm` to mix from even had a rig been
+bound (the v7..v14 tails carried steering/wheel/damage/progress
+but never the engine).
+
+## What landed
+
+- `mm2_net` protocol v15 (`proto.rs`): `SnapEntry.rpm: u16` —
+  the authority's `VehicleState::rpm` quantized to whole
+  revolutions, saturating at 65535. Appended after the v14
+  progress tail; per-entry payload 99 → 101 B (`net.md` budget
+  table updated). Fixtures: the round-trip carries 4321/900,
+  the oversize builder fills `rpm: 0`, every literal in the
+  workspace gained the field.
+- `netdrive::encode_present` returns the rpm as a fifth field —
+  `is_finite() && > 0.0` else 0 (a NaN/garbage or stopped
+  engine silences rather than mix garbage), rounded, clamped
+  at `u16::MAX`; seats without sim state publish 0.
+  `apply_present` writes `entry.rpm` into the copy's
+  `VehicleState` — the `u16` domain is itself the bound.
+- `spawn_remote` binds `VehicleAudio { spec }` off the pick's
+  authored `aud/cardata` record on *both* wire roles — same
+  absence policy as damage/stuck/breakaway (recordless pick →
+  no component, never a fabricated spec). On the authority the
+  seat's engine rig mixes its live `rpm` like an AI opponent;
+  on a client the copy mixes the replicated field. Horn/clutch
+  stay local-owner behavior — horn/siren read `PlayerVehicle`
+  only, `clutch_voices` watches but never voices a `Remote`
+  seat — and surface loops stay unbound: the wire carries no
+  wheel-contact truth to mix them from (named open item).
+- `tests/support::audio_car(dir, id)` — a synthetic `vpt`-
+  shaped install (`.vehcarsim` + `PKG3` + `.bnd` + the player
+  `cardata` csv), the fixture shape `opponents.rs` already
+  authors, so the legs exercise a *real* authored pick through
+  `load_vehicle` instead of a hand-bound component.
+
+## Tests
+
+- `netdrive` +2: `present_tail_encodes_the_engine_rpm` —
+  rounding, `u16::MAX` saturation, NaN and negative → 0;
+  `apply_present_drives_the_copy_state` extended — the wire
+  rpm lands on the copy's state.
+- `net_app` +2 real loopback through `load_vehicle`, the real
+  reconcile and the real publish/apply path:
+  `an_authored_remote_picks_engine_voice_publishes_its_rpm` —
+  a peer's `vpt` roster pick spawns a remote seat on the host
+  app carrying `VehicleAudio` (the fixture's one engine row
+  proves the authored table rode the pick), and the seat's
+  live `rpm` publishes as `SnapEntry.rpm` (4321.6 → 4322);
+  `a_remote_copys_engine_voice_mixes_off_the_replicated_rpm` —
+  a `vpt` `host_pick` reconciles into a predicted copy with
+  `VehicleAudio` bound (`PlayerVehicle`-less, `Remote`
+  control), and a forged snap's `rpm` lands in its
+  `VehicleState` for `engine_drive` to mix.
+- `a_client_streams_inputs_and_applies_the_host_snapshot`
+  extended — the forged presentation tail carries `rpm` and
+  lands on the copy; the own-seat junk `rpm` is ignored with
+  the rest of its drive fields.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` green — 0 failures
+(`mm2_app` lib 89/89 incl. the rpm encode/apply legs,
+`net_app` 54/54 incl. the two new legs, `mm2_net` 80/80,
+`net_drive` 3/3).
+
+## Classification / remaining open items
+
+- Implementation choice throughout — the field, the
+  quantization, and the audio binding are ours; the retail
+  wire protocol and its remote-audio behavior are unrecovered,
+  so no original-behavior claim.
+- Evidence: unit + two-app real-loopback legs through the real
+  encode/publish and decode/apply path plus the real
+  `load_vehicle` audio binding — the `engine_rigs` component
+  contract (`VehicleAudio` present, `VehicleState::rpm` fed).
+  Not exercised: an audible or rendered capture (no `WaveBank`
+  voice ran in any leg — the mix formula is `audio.rs`-tested
+  separately), a two-process leg on this path, LAN/Internet,
+  the impairment matrix on this tail.
+- Remote surface audio stays open by design: the wire carries
+  no wheel-contact truth, so a copy has nothing to mix surface
+  loops from.
+- All other open items unchanged: rematch/lobby-result
+  lifecycle and bulk late-joiner ledger sync (F26), the absent
+  dedicated-authority sim (F26), a lobby-level kick for a
+  dead-but-open link (lobby scope), process-level rejoin
+  (product decision), LAN/Internet scope. Not F25-AC01..06 or
+  F26-AC01..06 completion. Candidate pending external check.
+
+---
+
 # Last iteration — F25-B slice: the wire-seat stall watchdog —
 # the deferral's last named hole. `retire_stalled_wire_seats`
 # bounds the hosted authority's wait on a silent `Remote` seat:
