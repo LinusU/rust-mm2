@@ -113,6 +113,10 @@ const DOT_FINISH: usize = 5;
 #[derive(Component)]
 pub struct HudMapCamera;
 
+/// Designed bezel surrounding the corner map viewport.
+#[derive(Component)]
+pub struct HudMapFrame;
+
 /// Query filter for systems that pick "the" world camera
 /// (`audio_listener`, `apply_city_pvs`, damage billboards, …): the map
 /// camera and the F22-B.2 mirror strip are *active* `Camera3d`s while
@@ -582,6 +586,46 @@ pub fn spawn_hud_map(
         Transform::from_translation(Vec3::Y * (report.marker_y + CAMERA_LIFT))
             .looking_at(Vec3::new(0.0, report.marker_y, 0.0), Vec3::NEG_Z),
     ));
+    let frame = commands
+        .spawn((
+            owner,
+            HudMapFrame,
+            Visibility::Hidden,
+            Node {
+                position_type: PositionType::Absolute,
+                border: UiRect::all(Val::Px(6.0)),
+                ..default()
+            },
+            BorderColor::all(Color::srgb(0.055, 0.065, 0.08)),
+        ))
+        .id();
+    commands.spawn((
+        owner,
+        ChildOf(frame),
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(-5.0),
+            top: Val::Px(-5.0),
+            right: Val::Px(-5.0),
+            bottom: Val::Px(-5.0),
+            border: UiRect::all(Val::Px(1.0)),
+            ..default()
+        },
+        BorderColor::all(Color::srgb(0.38, 0.42, 0.46)),
+    ));
+    commands.spawn((
+        owner,
+        ChildOf(frame),
+        BackgroundColor(Color::srgb(1.0, 0.64, 0.15)),
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(10.0),
+            bottom: Val::Px(-4.0),
+            width: Val::Px(36.0),
+            height: Val::Px(2.0),
+            ..default()
+        },
+    ));
     info!(
         spec = %report.spec_path,
         pkg = %report.pkg_path,
@@ -696,8 +740,8 @@ pub fn dev_pause_map_once(
 }
 
 /// The authored `Pos`/`Size` viewport in physical pixels. `Inset` uses
-/// the authored fractions verbatim (top-left origin — the corner the
-/// original draws the map in); `Large` is the same corner anchor at the
+/// the authored size fractions with the designed lower-left anchor;
+/// `Large` is the same corner anchor at the
 /// designed `LARGE_VIEW_SCALE`. Returns `(position, size)`.
 fn inset_rect(view: MapView, spec: &HudMapSpec, window: Vec2) -> (Vec2, Vec2) {
     let scale = if view == MapView::Large {
@@ -746,6 +790,13 @@ type MapCam<'w, 's> = Query<
     (With<HudMapCamera>, Without<HudMapMarker>),
 >;
 
+type MapFrames<'w, 's> = Query<
+    'w,
+    's,
+    (&'static mut Node, &'static mut Visibility),
+    (With<HudMapFrame>, Without<HudMapMarker>),
+>;
+
 /// The marker entities.
 type MapMarkers<'w, 's> = Query<
     'w,
@@ -777,6 +828,7 @@ pub fn drive_hud_map(
     participants: MapParticipants,
     mut camera: MapCam,
     mut markers: MapMarkers,
+    mut frames: MapFrames,
 ) {
     let (Some(mut map), Some(report)) = (map, report) else {
         return;
@@ -805,6 +857,9 @@ pub fn drive_hud_map(
         v.into_iter().map(|(_, pos, yaw)| (pos, yaw)).collect()
     };
 
+    for (_, mut visibility) in &mut frames {
+        *visibility = Visibility::Hidden;
+    }
     // Camera: parked above the local player, north up or heading up.
     let player_pose = local.map(|(_, _, gt, ..)| (gt.translation(), yaw_of(gt)));
     for (mut xf, mut cam, mut proj) in &mut camera {
@@ -837,11 +892,25 @@ pub fn drive_hud_map(
                 w.resolution.physical_height() as f32,
             )
         });
-        let (vp_pos, vp_size) = if map.fullscreen {
+        let scale_factor = windows.iter().next().map_or(1.0, Window::scale_factor);
+        let (mut vp_pos, vp_size) = if map.fullscreen {
             (Vec2::ZERO, win.unwrap_or(Vec2::ONE))
         } else {
             inset_rect(map.view, &map.spec, win.unwrap_or(Vec2::new(1280.0, 960.0)))
         };
+        if !map.fullscreen {
+            // Leave breathing room for the bezel, in logical pixels even on Retina.
+            vp_pos.x = (vp_pos.x + 12.0 * scale_factor)
+                .min(win.unwrap_or(Vec2::new(1280.0, 960.0)).x - vp_size.x);
+            vp_pos.y = (vp_pos.y - 18.0 * scale_factor).max(0.0);
+            for (mut node, mut visibility) in &mut frames {
+                node.left = Val::Px(vp_pos.x / scale_factor - 6.0);
+                node.top = Val::Px(vp_pos.y / scale_factor - 6.0);
+                node.width = Val::Px(vp_size.x / scale_factor + 12.0);
+                node.height = Val::Px(vp_size.y / scale_factor + 12.0);
+                *visibility = Visibility::Visible;
+            }
+        }
         cam.viewport = if map.fullscreen {
             None
         } else {

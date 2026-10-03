@@ -516,6 +516,7 @@ pub fn active_cam_pose(
 /// an unlisted instrument renders inside the strip viewport (or
 /// nowhere) whenever it is armed.
 type HudNodes = Or<(
+    With<crate::hudmap::HudMapFrame>,
     With<crate::session::Hud>,
     With<crate::speedometer::Speedometer>,
     With<crate::session::ErrorText>,
