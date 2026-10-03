@@ -2653,6 +2653,7 @@ mod tests {
                 prog_cleared: 0,
                 prog_crossings: 0,
                 prog_route_clears: 0,
+                rpm: 0,
             }],
             trailers: Vec::new(),
             impacts: Vec::new(),

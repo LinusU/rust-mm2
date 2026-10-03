@@ -42,8 +42,10 @@
 /// cleared-gate bitmask and evidence counters — replicated *state*
 /// like `damage`/`breaks`, so a predicted client whose rule pipeline
 /// never advances `RaceProgress` mirrors every seat's standing
-/// (F25-B).
-pub const PROTOCOL_VERSION: u16 = 14;
+/// (F25-B). v15: `SnapEntry` gained `rpm`, the authority's engine RPM —
+/// the last piece of engine state a remote copy's `EngineVoice` rig
+/// needs to mix like the authority's (F25-B).
+pub const PROTOCOL_VERSION: u16 = 15;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -273,6 +275,13 @@ pub struct SnapEntry {
     /// Gates credited by driven-route position rather than a physical
     /// crossing — the consumer's route-clear evidence counter.
     pub prog_route_clears: u32,
+    /// Engine RPM (v15, F25-B): the authority's `VehicleState::rpm`
+    /// quantized to whole revolutions, saturating at 65535 — far past
+    /// any authored redline. Presentation state like the rest of the
+    /// tail: it feeds a remote copy's `EngineVoice` mix and nothing
+    /// else, and the `u16` domain is itself the bound a hostile value
+    /// cannot exceed.
+    pub rpm: u16,
 }
 
 /// [`SnapEntry::flags`] bit 0 — the driver's brake pedal is held (the
@@ -827,6 +836,7 @@ impl Message {
                     out.extend_from_slice(&e.prog_cleared.to_le_bytes());
                     out.extend_from_slice(&e.prog_crossings.to_le_bytes());
                     out.extend_from_slice(&e.prog_route_clears.to_le_bytes());
+                    out.extend_from_slice(&e.rpm.to_le_bytes());
                 }
                 if trailers.len() > MAX_PLAYERS as usize {
                     return Err(ProtoError::OversizeTrailers(trailers.len() as u8));
@@ -974,6 +984,7 @@ impl Message {
                         prog_cleared: cur.u64()?,
                         prog_crossings: cur.u32()?,
                         prog_route_clears: cur.u32()?,
+                        rpm: cur.u16()?,
                     });
                 }
                 let trailer_count = cur.u8()?;
@@ -1183,6 +1194,7 @@ mod tests {
                         prog_cleared: 0b101,
                         prog_crossings: 9,
                         prog_route_clears: 2,
+                        rpm: 4321,
                     },
                     SnapEntry {
                         player: 3,
@@ -1204,6 +1216,7 @@ mod tests {
                         prog_cleared: 0,
                         prog_crossings: 0,
                         prog_route_clears: 0,
+                        rpm: 900,
                     },
                 ],
                 trailers: vec![
@@ -1402,6 +1415,7 @@ mod tests {
                 prog_cleared: 0,
                 prog_crossings: 0,
                 prog_route_clears: 0,
+                rpm: 0,
             };
             MAX_PLAYERS as usize + 1
         ];

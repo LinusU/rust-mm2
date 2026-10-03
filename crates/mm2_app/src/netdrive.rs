@@ -19,7 +19,11 @@
 //!   a small presentation tail (protocol v7, F25-B): steering angle,
 //!   mean grounded-wheel spin rate, mean suspension compression and the
 //!   brake/reverse/grounded flags — enough for a remote copy's wheels
-//!   to steer, spin and droop and its brake/reverse lights to work.
+//!   to steer, spin and droop and its brake/reverse lights to work. The
+//!   v15 tail adds the engine RPM (F25-B): a remote seat binds the
+//!   authored `VehicleAudio` spec like an opponent, so its engine rig
+//!   mixes off the live sim on the authority and off the replicated RPM
+//!   on a client — remote cars are no longer engine-silent.
 //!   The v8 tail adds the seat's authoritative *damage fraction*
 //!   (F25-B): a copy's `VehicleDamage` carries the replicated total
 //!   (never locally accumulated — F05 req 6), which is what its bound
@@ -127,8 +131,8 @@ use mm2_game::{
     ImpactEvent, Mm2Vfs, ObjectId, ObjectIdentity, ParticipantState, Player, PlayerControl,
     PlayerVehicle, RaceDefinition, RacePhase, RaceProgress, RaceStarted, RaceState, RecoveryPolicy,
     ResultLedger, Session, SessionEntity, SessionOutcome, SessionPhase, SessionResult, SmokePolicy,
-    SparkPolicy, StuckSpec, VehicleBreaks, VehicleDamage, VehicleRecovery, VehicleSmoke,
-    VehicleSparks, VehicleStuck,
+    SparkPolicy, StuckSpec, VehicleAudio, VehicleBreaks, VehicleDamage, VehicleRecovery,
+    VehicleSmoke, VehicleSparks, VehicleStuck,
 };
 use mm2_net::{
     DriveInput, MAX_SNAP_IMPACTS, Message, RemoteInputs, SNAP_FLAG_BRAKE, SNAP_FLAG_GROUNDED,
@@ -886,13 +890,14 @@ const MAX_WIRE_STEER: f32 = 1.5;
 /// `steer` is the *actual* angle (rate limits and assists already
 /// reflected), `spin` the mean grounded-wheel `vel_long / radius` — the
 /// same expression the sim integrates into `WheelState::spin` — and
-/// `compression` the mean per-wheel `compression / travel`. Every field
-/// saturates or clamps rather than wrapping.
+/// `compression` the mean per-wheel `compression / travel`. `rpm`
+/// (v15) is the engine state a copy's `EngineVoice` rig mixes off.
+/// Every field saturates or clamps rather than wrapping.
 fn encode_present(
     cfg: &VehicleConfig,
     state: &VehicleState,
     input: &VehicleInput,
-) -> (i16, i16, u8, u8) {
+) -> (i16, i16, u8, u8, u16) {
     let steer = (state.steer_angle * 1000.0)
         .round()
         .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
@@ -933,15 +938,23 @@ fn encode_present(
     if state.grounded {
         flags |= SNAP_FLAG_GROUNDED;
     }
-    (steer, spin, compression, flags)
+    // Whole revolutions, saturating — non-finite reads as a stopped
+    // engine rather than a garbage cast (NaN `as u16` would read 0 too;
+    // the explicit guard keeps the intent legible).
+    let rpm = if state.rpm.is_finite() && state.rpm > 0.0 {
+        state.rpm.round().min(u16::MAX as f32) as u16
+    } else {
+        0
+    };
+    (steer, spin, compression, flags, rpm)
 }
 
 /// The receiving half of [`encode_present`]: fold a [`SnapEntry`]'s
 /// presentation tail into a remote copy's `VehicleState`/`VehicleInput`
 /// so the stock presentation systems (`update_wheel_visuals`,
-/// `update_glows`) render it like a live car. Clamp-before-trust like
-/// the pose path — presentation fields are informational, never
-/// authoritative over physics.
+/// `update_glows`, `engine_drive`) render it like a live car.
+/// Clamp-before-trust like the pose path — presentation fields are
+/// informational, never authoritative over physics.
 fn apply_present(
     entry: &SnapEntry,
     cfg: &VehicleConfig,
@@ -976,6 +989,11 @@ fn apply_present(
     if let Some(drive) = drive {
         drive.spin_rate = entry.spin as f32 * 0.1;
     }
+    // The v15 rpm byte — the copy's `EngineVoice` rig mixes off it like
+    // an opponent's does off the sim. The `u16` domain is already the
+    // bound; `EngineLoopSpec::mix` clamps out-of-band values into its
+    // authored windows, so nothing here needs a second clamp.
+    state.rpm = entry.rpm as f32;
 }
 
 /// The [`SnapTrailer`] row's grounded bit folded into a kinematic
@@ -1350,13 +1368,14 @@ pub fn reconcile_remote_players(
 /// Spawn one remote participant: session-owned, stably identified,
 /// `PlayerControl::Remote` — then the authority role splits it. On the
 /// host it is a dynamic `Vehicle` the input mailbox drives, carrying the
-/// authored damage/stuck specs and the designed recovery detector so the
-/// authority's rule pipeline resolves it like an AI opponent (F25-A.4);
-/// on a client it is a kinematic copy a `RemoteLerp` blend drives, the
-/// same components present but inert under a predicted session. A pick
-/// that fails to load is warned and skipped — the validator already
-/// gates roster picks, so this is a defensive path (a dev-car pick
-/// cannot fail). Returns whether the entity was spawned.
+/// authored damage/stuck/audio specs and the designed recovery detector
+/// so the authority's rule pipeline resolves it like an AI opponent
+/// (F25-A.4); on a client it is a kinematic copy a `RemoteLerp` blend
+/// drives, the same components present but inert under a predicted
+/// session. A pick that fails to load is warned and skipped — the
+/// validator already gates roster picks, so this is a defensive path
+/// (a dev-car pick cannot fail). Returns whether the entity was
+/// spawned.
 // Every argument is a distinct borrow `reconcile_remote_players` already
 // holds — bundling them into a struct would just move the same list.
 #[allow(clippy::too_many_arguments)]
@@ -1494,6 +1513,20 @@ fn spawn_remote(
         commands
             .entity(vehicle)
             .insert(VehicleStuck::new(StuckSpec::from(s)));
+    }
+    // Authored audio bindings (F25-B): the cardata table verbatim —
+    // same absence policy as the local/opponent spawns (no record, no
+    // component). On the authority the seat's `EngineVoice` rig mixes
+    // off its live `VehicleState::rpm` like an AI car; on a client the
+    // copy mixes off the v15 `SnapEntry.rpm` tail `apply_present`
+    // writes. Horn/clutch stay local to the owning process (the horn
+    // system reads `PlayerVehicle` only; `clutch_voices` watches but
+    // never voices a `Remote` seat), and the surface loops need
+    // wheel-contact truth the wire does not carry.
+    if let Some(a) = def.as_ref().and_then(|d| d.audio.as_ref()) {
+        commands
+            .entity(vehicle)
+            .insert(VehicleAudio { spec: a.clone() });
     }
     // F25-B (protocol v11): the authored breakaway inventory rides
     // both roles — on the authority it is the live rig `detach_breaks`
@@ -2105,10 +2138,11 @@ type SnapTrailerSourceRow<'a> = (
 /// solver's truth), not the render `Transform`; `epoch` is the seat's
 /// [`ResetEpoch`] — the receiver's teleport signal. The v7 tail carries
 /// the replicated drive presentation ([`encode_present`]): steering
-/// angle, wheel spin rate, suspension droop and the brake/reverse/
-/// grounded flags; the v8 tail adds [`encode_damage`], the seat's
-/// authoritative damage fraction — what a remote copy needs to *look*
-/// like the car the authority is simulating. The v10 tail replicates
+/// angle, wheel spin rate, suspension droop, the brake/reverse/
+/// grounded flags and (v15) engine RPM — what a remote copy needs to
+/// *look* and sound like the car the authority is simulating; the v8
+/// tail adds [`encode_damage`], the seat's authoritative damage
+/// fraction. The v10 tail replicates
 /// this frame's [`ImpactEvent`] stream as [`SnapImpact`] rows: every
 /// participant side that maps to a `NetPlayer` seat emits one row
 /// (mirrored outward normal per side), capped at
@@ -2200,9 +2234,9 @@ pub fn publish_snapshots(
                 damage,
                 breaks,
             )| {
-                let (steer, spin, compression, flags) = match (vehicle, state, input) {
+                let (steer, spin, compression, flags, rpm) = match (vehicle, state, input) {
                     (Some(v), Some(s), Some(i)) => encode_present(&v.config, s, i),
-                    _ => (0, 0, 0, 0),
+                    _ => (0, 0, 0, 0, 0),
                 };
                 let mut entry = SnapEntry {
                     player: wire.0,
@@ -2217,6 +2251,7 @@ pub fn publish_snapshots(
                     flags,
                     damage: encode_damage(damage),
                     breaks: encode_breaks(breaks),
+                    rpm,
                     ..SnapEntry::default()
                 };
                 // The v14 progress tail (F25-B): the seat's replicated
@@ -2238,9 +2273,9 @@ pub fn publish_snapshots(
         .iter()
         .filter_map(|(trailer, pos, rot, vel, ang, vehicle, state, input)| {
             let &owner = wires.get(&trailer.towing)?;
-            let (_, spin, _, flags) = match (vehicle, state, input) {
+            let (_, spin, _, flags, _) = match (vehicle, state, input) {
                 (Some(v), Some(s), Some(i)) => encode_present(&v.config, s, i),
-                _ => (0, 0, 0, 0),
+                _ => (0, 0, 0, 0, 0),
             };
             Some(SnapTrailer {
                 owner,
@@ -3426,7 +3461,7 @@ mod tests {
             brake: 1.0,
             ..VehicleInput::default()
         };
-        let (steer, spin, compression, flags) = encode_present(&cfg, &state, &input);
+        let (steer, spin, compression, flags, rpm) = encode_present(&cfg, &state, &input);
         assert_eq!(steer, 320);
         assert_eq!(spin, 200, "6.8 / 0.34 rad/s at 0.1 rad/s units");
         assert_eq!(
@@ -3437,6 +3472,31 @@ mod tests {
             flags,
             SNAP_FLAG_BRAKE | SNAP_FLAG_REVERSE | SNAP_FLAG_GROUNDED
         );
+        assert_eq!(rpm, 900, "the default config idles at its authored rpm");
+    }
+
+    /// The v15 rpm field: whole revolutions, saturating at the `u16`
+    /// bound, non-finite or stopped reading 0 — the copy's engine rig
+    /// silences rather than mixing a garbage value.
+    #[test]
+    fn present_tail_encodes_the_engine_rpm() {
+        let cfg = VehicleConfig::default();
+        let mut state = VehicleState::new(&cfg);
+        state.rpm = 4321.6;
+        let (_, _, _, _, rpm) = encode_present(&cfg, &state, &VehicleInput::default());
+        assert_eq!(rpm, 4322, "whole revolutions, rounded");
+
+        state.rpm = 200_000.0;
+        let (_, _, _, _, rpm) = encode_present(&cfg, &state, &VehicleInput::default());
+        assert_eq!(rpm, u16::MAX, "past the wire bound saturates");
+
+        state.rpm = f32::NAN;
+        let (_, _, _, _, rpm) = encode_present(&cfg, &state, &VehicleInput::default());
+        assert_eq!(rpm, 0, "non-finite reads as a stopped engine");
+
+        state.rpm = -50.0;
+        let (_, _, _, _, rpm) = encode_present(&cfg, &state, &VehicleInput::default());
+        assert_eq!(rpm, 0, "a nonsense negative reads 0 the same way");
     }
 
     /// Extremes saturate rather than wrap; a fully airborne car reports
@@ -3449,7 +3509,7 @@ mod tests {
         for ws in &mut state.wheels {
             ws.vel_long = -5000.0; // airborne: stale patch speed must not spin
         }
-        let (steer, spin, _, flags) = encode_present(&cfg, &state, &VehicleInput::default());
+        let (steer, spin, _, flags, _) = encode_present(&cfg, &state, &VehicleInput::default());
         assert_eq!(steer, i16::MAX);
         assert_eq!(spin, 0, "no grounded wheel means a frozen spin");
         assert_eq!(flags, 0);
@@ -3477,9 +3537,11 @@ mod tests {
             flags: SNAP_FLAG_BRAKE | SNAP_FLAG_GROUNDED,
             damage: 0,
             breaks: 0,
+            rpm: 4321,
             ..SnapEntry::default()
         };
         apply_present(&entry, &cfg, &mut state, &mut input, Some(&mut drive));
+        assert_eq!(state.rpm, 4321.0, "the v15 engine byte lands");
         assert_eq!(state.steer_angle, -0.26);
         assert_eq!(state.direction, DriveDirection::Forward);
         assert!(state.grounded);

@@ -2363,6 +2363,8 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                     // v8: the host copy is half-wrecked.
                     damage: 128,
                     breaks: 0,
+                    // v15: the authority's engine is pulling 4321 rpm.
+                    rpm: 4321,
                     ..SnapEntry::default()
                 },
                 // Our own seat's entry is received and, epoch-equal,
@@ -2386,6 +2388,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                     flags: mm2_net::SNAP_FLAG_BRAKE | mm2_net::SNAP_FLAG_REVERSE,
                     damage: 200,
                     breaks: 0,
+                    rpm: u16::MAX,
                     ..SnapEntry::default()
                 },
             ],
@@ -2443,6 +2446,10 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
         );
         assert_eq!(input.brake, 1.0, "the brake flag drives the glows");
         assert_eq!(drive.spin_rate, 30.0, "300 x 0.1 rad/s");
+        assert_eq!(
+            state.rpm, 4321.0,
+            "the v15 tail lands the rpm the copy's engine rig mixes"
+        );
     }
     // The v8 damage byte landed too — 128/255 of the authored
     // `MaxDamage` on the copy, 200/255 on our own seat: under a
@@ -2858,6 +2865,194 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
         let own = app.world().get::<mm2_game::VehicleDamage>(local).unwrap();
         assert_eq!(own.total(), 0.0, "the own seat's total repaired too");
     }
+
+    host.shutdown();
+}
+
+/// F25-B (protocol v15), authority half: a remote seat whose pick
+/// carries authored cardata binds `VehicleAudio` like a local or
+/// opponent spawn — the component `engine_rigs` voices — and the
+/// seat's live `VehicleState::rpm` publishes in its `SnapEntry` so a
+/// client's copy can mix the same voice. Horn and clutch stay
+/// local-owner behavior (`PlayerVehicle`/`clutch_voices` never voice a
+/// `Remote` seat); surface loops stay unsupported — the wire carries
+/// no wheel-contact truth.
+#[test]
+fn an_authored_remote_picks_engine_voice_publishes_its_rpm() {
+    let install = tempfile::tempdir().unwrap();
+    support::audio_car(install.path(), "vpt");
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let mut app = host_app(vfs, link);
+    // The peer picks the authored car — `ready_peer`'s discipline with
+    // `vpt` riding the roster instead of the dev car.
+    let mut peer = remote_peer(addr, "eve", fp);
+    let ctl = peer.ctl().unwrap();
+    ctl.set_vehicle("vpt", 0).unwrap();
+    ctl.set_ready(true).unwrap();
+    until_wire(
+        &mut peer,
+        |m| matches!(m, Message::Roster { players: r } if r.iter().any(|e| e.driver == "eve" && e.ready && e.pick.as_ref().is_some_and(|p| p.vehicle == "vpt"))),
+    );
+    hosted_playing(&mut app);
+    spin_mut(&mut app, |a| {
+        a.world_mut()
+            .query_filtered::<Entity, With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some()
+    });
+    let remote = {
+        let mut q = app.world_mut().query_filtered::<Entity, With<RemotePick>>();
+        q.single(app.world()).expect("the remote car")
+    };
+    // The cardata bound like a local or opponent spawn's — the
+    // fixture's one engine row proves the authored table rode the
+    // pick, not a fabricated spec.
+    let audio = app
+        .world()
+        .get::<mm2_game::VehicleAudio>(remote)
+        .expect("the authored cardata bound on the remote seat");
+    assert_eq!(
+        audio.spec.engine_samples.len(),
+        1,
+        "the authored engine rows rode the pick"
+    );
+
+    // The seat's live rpm publishes — quantized to whole revolutions.
+    // Earlier snaps (idle rpm or zero) drain past the predicate.
+    {
+        let mut entity = app.world_mut().entity_mut(remote);
+        let mut state = entity
+            .get_mut::<mm2_vehicle::VehicleState>()
+            .expect("the remote seat simulates");
+        state.rpm = 4321.6;
+    }
+    app.update();
+    let snap = until_wire(
+        &mut peer,
+        |m| matches!(m, Message::Snap { entries, .. } if entries.iter().any(|e| e.player == 1 && e.rpm == 4322)),
+    );
+    let Message::Snap { entries, .. } = snap else {
+        unreachable!("the predicate matched the rpm-bearing row")
+    };
+    let entry = entries
+        .iter()
+        .find(|e| e.player == 1)
+        .expect("the remote seat's row");
+    assert_eq!(
+        entry.rpm, 4322,
+        "the live rpm publishes rounded to whole revolutions"
+    );
+}
+
+/// F25-B (protocol v15), client half: an authored host pick's cardata
+/// binds `VehicleAudio` on the predicted copy the same way — its
+/// `EngineVoice` rig then mixes off the `SnapEntry.rpm` tail
+/// `apply_present` writes.
+#[test]
+fn a_remote_copys_engine_voice_mixes_off_the_replicated_rpm() {
+    let install = tempfile::tempdir().unwrap();
+    support::audio_car(install.path(), "vpt");
+    let vfs = mount(install.path());
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host_config = HostConfig::new(fp);
+    host_config.host_pick = Some(VehiclePick {
+        vehicle: "vpt".to_string(),
+        paint: 0,
+    });
+    let mut host = Host::listen_loopback(&host_config).unwrap();
+    host.set_session(net::advertise(&dev_cruise()).unwrap())
+        .unwrap();
+    let link = LobbyLink::join(
+        host.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join failed");
+    let mut app = bridge_app(vfs, link);
+    {
+        let link = app.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    until_ready(&mut app);
+    host.start(LateJoin::Open).unwrap();
+    until_started(&host);
+    until_begun(&mut app);
+    let generation = app.world().resource::<Session>().wire_generation();
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+
+    // The authored host pick reconciles into a predicted copy whose
+    // cardata bound — while the seat stays `Remote` and un-`PlayerVehicle`d,
+    // so horn/clutch remain the owning process's business.
+    spin_mut(&mut app, |a| {
+        a.world_mut()
+            .query_filtered::<Entity, With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some()
+    });
+    let copy = {
+        let mut q = app.world_mut().query_filtered::<Entity, With<RemotePick>>();
+        q.single(app.world()).expect("the host copy")
+    };
+    let audio = app
+        .world()
+        .get::<mm2_game::VehicleAudio>(copy)
+        .expect("the authored cardata bound on the copy");
+    assert_eq!(audio.spec.engine_samples.len(), 1);
+    assert!(
+        app.world().get::<PlayerVehicle>(copy).is_none(),
+        "the copy is no horn/clutch owner"
+    );
+
+    // A snapshot's v15 tail feeds the copy's `VehicleState::rpm` — the
+    // field `engine_drive` mixes the rig from.
+    host.ctl()
+        .broadcast(&Message::Snap {
+            impacts: Vec::new(),
+            race: None,
+            trailers: Vec::new(),
+            generation,
+            tick: 7,
+            entries: vec![SnapEntry {
+                player: 0,
+                pos: [9.0, 1.0, 9.0],
+                rot: [0.0, 0.0, 0.0, 1.0],
+                vel: [0.0; 3],
+                angvel: [0.0; 3],
+                epoch: 0,
+                steer: 0,
+                spin: 0,
+                compression: 0,
+                flags: 0,
+                damage: 0,
+                breaks: 0,
+                rpm: 4321,
+                ..SnapEntry::default()
+            }],
+        })
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .snaps_applied
+            > 0
+    });
+    let state = app
+        .world()
+        .get::<mm2_vehicle::VehicleState>(copy)
+        .expect("the copy's vehicle state");
+    assert_eq!(
+        state.rpm, 4321.0,
+        "the replicated rpm is what the copy's engine rig reads"
+    );
 
     host.shutdown();
 }

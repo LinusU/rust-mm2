@@ -207,3 +207,133 @@ pub fn event_install() -> tempfile::TempDir {
     }
     tmp
 }
+
+// ─── An authored-pick fixture ──────────────────────────────────────
+//
+// The dev-car pick (`vehicle == ""`) carries no authored records, so
+// legs that exercise an authored binding — F25-B's cardata audio on a
+// remote seat — write a minimal `vpt`-shaped car: the required tune and
+// model plus the optional record under test. Same grammar the
+// opponents.rs roster fixture authors.
+
+/// Minimal `vehCarSim` tune — every required field.
+fn vehcarsim() -> String {
+    let wheel = |name: &str| {
+        format!(
+            "  {name} {{\n    SuspensionExtent 0.2\n    SuspensionLimit 0.05\n    SuspensionFactor 1.0\n    SuspensionDampCoef 0.1\n    SteeringLimit 0.5\n    BrakeCoef 0.14\n    TireDispLimitLong 0.075\n    TireDampCoefLong 0.75\n    TireDragCoefLong 0.01\n    TireDispLimitLat 0.075\n    TireDampCoefLat 0.75\n    TireDragCoefLat 0.02\n    OptimumSlipPercent 0.05\n    StaticFric 3.0\n    SlidingFric 2.95\n  }}\n"
+        )
+    };
+    format!(
+        "type: a\nvehCarSim {{\n  Mass 1200.0\n  InertiaBox 2.0 1.3 3.0\n  DrivetrainType 0\n  Aero {{\n    Drag 0.5\n    Down 0.0\n  }}\n  Engine {{\n    MaxHorsePower 200.0\n    IdleRPM 750.0\n    OptRPM 5800.0\n    MaxRPM 8500.0\n  }}\n  Trans {{\n    AutoNumGears 4\n    Reverse 20.0\n    Low 20.0\n    High 75.0\n  }}\n{}{}}}\n",
+        wheel("WheelFront"),
+        wheel("WheelBack"),
+    )
+}
+
+/// One quad geometry chunk: 4 verts, 2 tris, centred on `c`.
+fn quad_geo(c: [f32; 3], hx: f32, hy: f32, hz: f32) -> Vec<u8> {
+    let mut geo = Vec::new();
+    geo.extend_from_slice(&1u32.to_le_bytes()); // nSections
+    geo.extend_from_slice(&4u32.to_le_bytes()); // total vertices
+    geo.extend_from_slice(&6u32.to_le_bytes()); // total indices
+    geo.extend_from_slice(&1u32.to_le_bytes()); // sections duplicate
+    geo.extend_from_slice(&0x112u32.to_le_bytes()); // fvf: XYZ|NORMAL|1 tex
+    geo.extend_from_slice(&1u16.to_le_bytes()); // nStrips
+    geo.extend_from_slice(&0u16.to_le_bytes()); // section flags
+    geo.extend_from_slice(&(-1i32).to_le_bytes()); // shader offset → fallback
+    geo.extend_from_slice(&3i32.to_le_bytes()); // prim type: triangles
+    geo.extend_from_slice(&4u32.to_le_bytes()); // strip vertices
+    for p in [
+        [c[0] - hx, c[1] - hy, c[2] - hz],
+        [c[0] + hx, c[1] - hy, c[2] + hz],
+        [c[0] + hx, c[1] + hy, c[2] - hz],
+        [c[0] - hx, c[1] + hy, c[2] + hz],
+    ] {
+        for v in p {
+            geo.extend_from_slice(&v.to_le_bytes());
+        }
+        for n in [0.0f32, 1.0, 0.0] {
+            geo.extend_from_slice(&n.to_le_bytes());
+        }
+        for uv in [0.0f32, 0.0] {
+            geo.extend_from_slice(&uv.to_le_bytes());
+        }
+    }
+    geo.extend_from_slice(&6u32.to_le_bytes()); // strip indices
+    for i in [0u16, 1, 2, 0, 3, 1] {
+        geo.extend_from_slice(&i.to_le_bytes());
+    }
+    geo
+}
+
+/// A PKG3 with `body_h` plus `whl0..3` — wheels authored in place
+/// (no `.mtx`, so the importer falls back to geometry centres).
+fn car_pkg() -> Vec<u8> {
+    let mut d = b"PKG3".to_vec();
+    let chunks: &[(&str, Vec<u8>)] = &[
+        ("body_h", quad_geo([0.0, 0.5, 0.0], 0.9, 0.5, 1.6)),
+        ("whl0_h", quad_geo([0.8, 0.3, -1.3], 0.15, 0.3, 0.15)),
+        ("whl1_h", quad_geo([-0.8, 0.3, -1.3], 0.15, 0.3, 0.15)),
+        ("whl2_h", quad_geo([0.8, 0.3, 1.3], 0.15, 0.3, 0.15)),
+        ("whl3_h", quad_geo([-0.8, 0.3, 1.3], 0.15, 0.3, 0.15)),
+    ];
+    for (name, geo) in chunks {
+        d.extend_from_slice(b"FILE");
+        d.push(name.len() as u8 + 1);
+        d.extend_from_slice(name.as_bytes());
+        d.push(0);
+        d.extend_from_slice(&(geo.len() as u32).to_le_bytes());
+        d.extend_from_slice(geo);
+    }
+    d
+}
+
+/// An ASCII bound box — without it `convert` falls back to a centred
+/// chassis cuboid whose hull rests high enough that the wheel rays
+/// never reach the ground.
+fn car_bnd() -> String {
+    let mut s = "version: 1.01\nverts: 8\nmaterials: 1\nedges: 0\npolys: 6\n\n".to_string();
+    for v in [
+        [-0.9f32, 0.05, -1.6],
+        [0.9, 0.05, -1.6],
+        [0.9, 0.9, -1.6],
+        [-0.9, 0.9, -1.6],
+        [-0.9, 0.05, 1.6],
+        [0.9, 0.05, 1.6],
+        [0.9, 0.9, 1.6],
+        [-0.9, 0.9, 1.6],
+    ] {
+        s.push_str(&format!("v {} {} {}\n", v[0], v[1], v[2]));
+    }
+    s.push_str("mtl default {\n  elasticity: 0.1\n  friction: 0.5\n}\n");
+    for quad in [
+        [0, 4, 5, 1],
+        [0, 1, 2, 3],
+        [4, 7, 6, 5],
+        [0, 3, 7, 4],
+        [1, 5, 6, 2],
+        [3, 2, 6, 7],
+    ] {
+        s.push_str(&format!(
+            "quad {} {} {} {} 0\n",
+            quad[0], quad[1], quad[2], quad[3]
+        ));
+    }
+    s
+}
+
+/// A `aud/cardata/player/<id>.csv` the real grammar accepts: the horn
+/// record plus one canonical fade-window engine sample.
+fn car_cardata() -> &'static str {
+    "Horn wave name,Horn volume,flags,Num Engine Samples,clutch wave name,clutch volume\nTESTHORN,0.9,0,1,REV,0.5\nEngine wave name,Min Volume,Max Volume,fade in start RPM,fade in end RPM,fade out start RPM,fade out end RPM,Min Pitch,Max Pitch,Pitch shift start RPM,Pitch shift end RPM\nEIDLE,0.55,0.835,1,800,2500,7000,0.85,2,1,7000\n"
+}
+
+/// The authored pick `id`: the required tune + model + bound plus its
+/// cardata record — the files `load_vehicle` resolves for a
+/// `VehicleAudio`-backed spawn (F25-B protocol v15).
+pub fn audio_car(d: &std::path::Path, id: &str) {
+    write(d, &format!("tune/vehicle/{id}.vehcarsim"), vehcarsim());
+    write(d, &format!("geometry/{id}.pkg"), car_pkg());
+    write(d, &format!("bound/{id}_bound.bnd"), car_bnd());
+    write(d, &format!("aud/cardata/player/{id}.csv"), car_cardata());
+}
