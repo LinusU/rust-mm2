@@ -203,6 +203,23 @@ so that figure means the same thing on a Mini and on a fire truck, and its
 torque axis is horizontal by construction, so a deliberate spin is left
 alone.
 
+### Slide recovery
+
+Not an import either. Past about 45° of slide both axles are sliding
+about equally hard, and nothing in the tire model turns the body back
+toward its path: a handbrake flick held a moment too long ran on into a
+full spin however the driver steered out of it.
+
+`assists.slide_recovery` is the natural frequency in rad/s of a spring
+turning the body back toward the way it is travelling, acting only on
+the slide beyond about 10° and only at forward speed. It never acts
+while the handbrake is held — held, the handbrake is a spin; released,
+it is a slide to catch. It is soft on purpose: it also pulls the body
+back toward its *old* path, so every step firmer costs the turn a flick
+makes. `drive_probe --handbrake` measures the trade — from 72 km/h a
+0.3 s flick exits 44° off its line with it off, 39° at the imported
+`2.5`, 33° at `4.0`.
+
 ### Authored gyro maneuvers
 
 Unlike the assists above, `.vehgyro` is authored data — every retail

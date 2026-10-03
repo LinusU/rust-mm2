@@ -262,6 +262,17 @@ pub struct AssistConfig {
     /// the player.
     #[serde(default = "default_self_right_delay")]
     pub self_right_delay: f32,
+    /// How firmly a slide is pulled back into line once the handbrake is
+    /// let go, as the natural frequency in rad/s of a spring turning the
+    /// body back toward the way it is travelling (`0` = off). It acts only
+    /// on the slide beyond a few degrees, and never while the handbrake is
+    /// held — a held handbrake is a spin, a released one a slide to catch.
+    ///
+    /// Without it a slide past about 45° cannot end: both axles slide
+    /// equally hard, nothing turns the body back, and a half-second
+    /// handbrake flick runs on into a full spin.
+    #[serde(default)]
+    pub slide_recovery: f32,
 }
 
 /// Authored `vehGyro` stability-assist rates, carried verbatim from the
@@ -467,6 +478,7 @@ impl Default for VehicleConfig {
                 countersteer: 0.35,
                 air_control: 8.0,
                 self_right_delay: default_self_right_delay(),
+                slide_recovery: 2.5,
             },
             gyro: None,
             trailer: false,
@@ -840,6 +852,10 @@ impl VehicleConfig {
         check!(
             "assists.self_right_delay",
             finite(asst.self_right_delay) && asst.self_right_delay >= 0.0,
+        );
+        check!(
+            "assists.slide_recovery",
+            finite(asst.slide_recovery) && asst.slide_recovery >= 0.0,
         );
 
         if let Some(g) = &self.gyro {

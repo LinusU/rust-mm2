@@ -79,6 +79,9 @@ const ROLL_RESISTANCE: f32 = 0.85;
 /// How briskly an imported car levels itself in the air, rad/s — roughly
 /// half a second to flat, so a jump lands on its wheels and not its nose.
 const AIR_LEVELLING_RATE: f32 = 8.0;
+/// How firmly a released handbrake slide is pulled back into line, rad/s
+/// (see `AssistConfig::slide_recovery`).
+const SLIDE_RECOVERY: f32 = 2.5;
 /// Seconds an upended car waits before flopping back onto its wheels —
 /// the fallback when the vehicle ships no `vehstuck` record; authored
 /// cars right on their own `TimeThresh`.
@@ -686,10 +689,11 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
             .stuck
             .map(|s| s.time_thresh)
             .unwrap_or(SELF_RIGHT_DELAY),
+        slide_recovery: SLIDE_RECOVERY,
     };
     report.defaulted(
         "assists",
-        "fixed modern arcade policy (yaw stability, TC, countersteer, air control)",
+        "fixed modern arcade policy (yaw stability, TC, countersteer, air control, slide recovery)",
     );
     if let Some(s) = input.stuck {
         report.imported(

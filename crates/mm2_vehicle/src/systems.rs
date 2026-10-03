@@ -582,6 +582,24 @@ pub fn vehicle_simulation(
         let yaw_torque = -angvel.y * cfg.assists.yaw_stability * inertia_y * drift_factor;
         forces.apply_torque(Vec3::Y * yaw_torque);
 
+        // Slide recovery: once the handbrake is let go, turn the body back
+        // toward the way it is travelling. Past about 45° both axles slide
+        // equally hard and nothing else would — a flick that went a little
+        // long ran on into a full spin. Only the slide beyond a small dead
+        // zone is pulled on, so an ordinary corner's few degrees of body
+        // slip are left to the tires.
+        if grounded_any
+            && cfg.assists.slide_recovery > 0.0
+            && input.handbrake <= GYRO_SPIN_HANDBRAKE
+            && fwd_speed > SLIDE_RECOVERY_MIN_SPEED
+        {
+            let excess = (body_slip.abs() - SLIDE_RECOVERY_DEADZONE).max(0.0) * body_slip.signum();
+            let w = cfg.assists.slide_recovery;
+            // Positive slip is the car sliding to its right — nose left of
+            // its path — so the body turns right, a negative yaw.
+            forces.apply_torque(Vec3::Y * (-inertia_y * w * w * excess));
+        }
+
         // Air control: level the car before it lands.
         //
         // A car that crests a rise at speed leaves it nose-down and keeps
@@ -704,6 +722,13 @@ pub fn vehicle_simulation(
         }
     }
 }
+
+/// Body slip (rad) a slide may keep before `slide_recovery` pulls on it —
+/// about 10°, past what an ordinary corner carries.
+const SLIDE_RECOVERY_DEADZONE: f32 = 0.17;
+/// Forward speed (m/s) below which there is no slide to recover — the
+/// body slip of a car barely moving says nothing about a slide.
+const SLIDE_RECOVERY_MIN_SPEED: f32 = 5.0;
 
 /// Speed (m/s) below which handbrake + steering is a parking maneuver,
 /// not a gyro spin trigger.

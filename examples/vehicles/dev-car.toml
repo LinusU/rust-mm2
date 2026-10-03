@@ -132,3 +132,4 @@ traction_control = 0.9
 countersteer = 0.35
 air_control = 8.0
 self_right_delay = 2.0
+slide_recovery = 2.5
