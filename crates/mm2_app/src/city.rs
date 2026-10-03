@@ -2730,34 +2730,61 @@ struct PropCache<'a> {
     vfs: &'a Vfs,
     meshes: &'a mut Assets<Mesh>,
     mats: MaterialCache<'a>,
-    cache: HashMap<(String, u8), Option<PropModel>>,
+    cache: HashMap<(String, u8, usize), Option<PropModel>>,
+    /// Paint-job count per prop name (`0` for an unloadable PKG).
+    paint_jobs: HashMap<String, usize>,
     /// Strips with unsupported primitive types encountered while building.
     missing_prims: usize,
 }
 
 impl<'a> PropCache<'a> {
     fn get(&mut self, name: &str, offset: PropOffset) -> Option<&PropModel> {
-        let key = (name.to_ascii_lowercase(), offset.class());
+        self.get_painted(name, offset, 0)
+    }
+
+    /// [`Self::get`] in paint job `paint` (wrapped into the PKG's
+    /// paint-job count).
+    fn get_painted(&mut self, name: &str, offset: PropOffset, paint: usize) -> Option<&PropModel> {
+        let name = name.to_ascii_lowercase();
+        let paint = paint % self.paint_jobs(&name).max(1);
+        let key = (name, offset.class(), paint);
         if !self.cache.contains_key(&key) {
-            let built = self.build(&key.0, offset);
+            let built = self.build(&key.0, offset, paint);
             self.cache.insert(key.clone(), built);
         }
         self.cache.get(&key).and_then(|o| o.as_ref())
     }
 
-    fn build(&mut self, name: &str, offset: PropOffset) -> Option<PropModel> {
+    /// How many paint jobs the prop's PKG authors.
+    fn paint_jobs(&mut self, name: &str) -> usize {
+        if let Some(&n) = self.paint_jobs.get(name) {
+            return n;
+        }
+        let n = self
+            .load_pkg(name)
+            .and_then(|pkg| pkg.shaders().map(|s| s.paint_jobs as usize))
+            .unwrap_or(0);
+        self.paint_jobs.insert(name.to_string(), n);
+        n
+    }
+
+    fn load_pkg(&self, name: &str) -> Option<Pkg> {
         let resolved = self
             .vfs
             .resolve_preferred(&format!("geometry/{name}"), &["pkg"])
             .or_else(|| self.vfs.resolve_preferred(name, &["pkg"]))?;
         let bytes = self.vfs.read(&resolved).ok()?;
-        let pkg = match Pkg::parse(&bytes) {
-            Ok(p) => p,
+        match Pkg::parse(&bytes) {
+            Ok(p) => Some(p),
             Err(e) => {
                 warn!(pkg = %name, error = %e, "PKG parse failed");
-                return None;
+                None
             }
-        };
+        }
+    }
+
+    fn build(&mut self, name: &str, offset: PropOffset, paint: usize) -> Option<PropModel> {
+        let pkg = self.load_pkg(name)?;
         let offset = match offset {
             PropOffset::Verbatim => Vec3::ZERO,
             PropOffset::Bound(v) => v,
@@ -2769,7 +2796,7 @@ impl<'a> PropCache<'a> {
             self.meshes,
             &mut self.missing_prims,
             offset,
-            0,
+            paint,
         );
         if model.parts.is_empty() {
             return None;
@@ -2805,6 +2832,7 @@ impl<'a> MovableModels<'a> {
                 meshes,
                 mats: MaterialCache::new(vfs, images, materials),
                 cache: HashMap::new(),
+                paint_jobs: HashMap::new(),
                 missing_prims: 0,
             },
         }
@@ -2814,7 +2842,7 @@ impl<'a> MovableModels<'a> {
     /// vertex; `None` when the PKG is missing or has nothing to draw.
     /// Uncached: callers load each name once.
     pub fn load(&mut self, name: &str, offset: Vec3) -> Option<MovableModel> {
-        let model = self.cache.build(name, PropOffset::Bound(offset))?;
+        let model = self.cache.build(name, PropOffset::Bound(offset), 0)?;
         Some(MovableModel {
             parts: model.parts,
             collider: model.collider,
@@ -3349,6 +3377,7 @@ pub fn spawn_event_pathsets(
         meshes,
         mats: MaterialCache::new(vfs, images, materials),
         cache: HashMap::new(),
+        paint_jobs: HashMap::new(),
         missing_prims: 0,
     };
     let mut bangers = BangerDefs::new(vfs);
@@ -3385,6 +3414,135 @@ pub fn spawn_event_pathsets(
     for anim in std::mem::take(&mut cache.mats.animated) {
         commands.spawn((CityEntity, owner, anim));
     }
+    report
+}
+
+/// What the session's parked-car file produced.
+#[derive(Resource, Debug, Default, Clone)]
+pub struct ParkedCarReport {
+    /// The file the cars came from; `None` when the city ships none
+    /// or the session skips them.
+    pub file: Option<String>,
+    /// Candidate files that resolved but failed to parse.
+    pub failed_files: Vec<String>,
+    /// Cars placed.
+    pub cars: usize,
+    /// Bays the roll left empty.
+    pub empty_bays: usize,
+    /// Rolls naming a model that failed to load.
+    pub missing_models: usize,
+    /// Stamps suppressed by [`MAX_PATHSET_STAMPS`].
+    pub capped: usize,
+    /// Texture stems the car models could not resolve.
+    pub missing_textures: BTreeSet<String>,
+}
+
+/// Spawn the session's kerbside parked cars (the retail parked-car
+/// manager — rules in [`mm2_game::parked`]): every path of the
+/// event's `<city>_parkedcar_<stem>.pathset`, else the city default,
+/// is stamped at its spacing floored to 5 m; each stamp rolls an empty
+/// bay or a `giz_pcar0{1,2}_l` in a rolled paint, laid along the path.
+/// The cars are ordinary knockable bangers, session-owned. Rolls come
+/// from `seed`, so every peer of a session places the same cars.
+#[allow(clippy::too_many_arguments)] // Bevy asset stores have to be threaded separately
+pub fn spawn_parked_cars(
+    commands: &mut Commands,
+    vfs: &Vfs,
+    city: &str,
+    event_stem: Option<&str>,
+    seed: u64,
+    meshes: &mut Assets<Mesh>,
+    images: &mut Assets<Image>,
+    materials: &mut Assets<StandardMaterial>,
+    owner: SessionEntity,
+    session: &mut Session,
+) -> ParkedCarReport {
+    let mut report = ParkedCarReport::default();
+    let mut chosen = None;
+    for logical in mm2_game::object_pathset_candidates(city, "parkedcar", event_stem) {
+        let Ok((bytes, resolved)) = vfs.read_path(&logical) else {
+            continue;
+        };
+        match pathset::Pathset::parse(&bytes) {
+            Ok(ps) => {
+                chosen = Some((resolved.logical.clone(), ps));
+                break;
+            }
+            Err(e) => {
+                warn!(path = %resolved.logical, error = %e, "parked-car pathset parse failed; falling back");
+                report.failed_files.push(resolved.logical.clone());
+            }
+        }
+    }
+    let Some((file, ps)) = chosen else {
+        return report;
+    };
+    report.file = Some(file);
+
+    let mut cache = PropCache {
+        vfs,
+        meshes,
+        mats: MaterialCache::new(vfs, images, materials),
+        cache: HashMap::new(),
+        paint_jobs: HashMap::new(),
+        missing_prims: 0,
+    };
+    let mut bangers = BangerDefs::new(vfs);
+    let mut rng = mm2_game::parked::ParkedRng::new(seed);
+    // The stamp frame runs local +X along the path; the manager turns
+    // the car a further 90° about Y, laying its local +Z along it.
+    let quarter_turn = Mat4::from_rotation_y(if MIRROR_Z {
+        -std::f32::consts::FRAC_PI_2
+    } else {
+        std::f32::consts::FRAC_PI_2
+    });
+    let mut stamps_left = MAX_PATHSET_STAMPS;
+    for (pi, path) in ps.paths.iter().enumerate() {
+        let spacing = mm2_game::parked::parked_spacing(path.spacing_metres());
+        let sites = mm2_game::path_stamp_sites_spaced(path, spacing, stamps_left);
+        stamps_left -= sites.sites.len();
+        report.capped = report.capped.saturating_add(sites.capped);
+        for (si, site) in sites.sites.iter().enumerate() {
+            let Some(name) = mm2_game::parked::parked_model(rng.next_roll()) else {
+                report.empty_bays += 1;
+                continue;
+            };
+            let paint = rng.next_roll() as usize;
+            let stamp = match site.forward {
+                Some(d) => yawed_transform(site.position, v3(d)),
+                None => unrotated_transform(site.position),
+            };
+            let transform = Transform::from_matrix(stamp * quarter_turn);
+            let bound = bangers.get(name).cloned();
+            let Some(model) = cache.get_painted(name, stamp_offset(bound.as_ref()), paint) else {
+                report.missing_models += 1;
+                continue;
+            };
+            let pname = format!("parkedcar-{name}-{pi}-{si}");
+            match (&bound, &model.collider) {
+                (Some(def), Some(_)) => {
+                    let pieces = fragment_pieces(&mut bangers, name, model, def);
+                    spawn_banger_prop(
+                        commands, model, transform, owner, &pname, def, session, pieces,
+                    );
+                }
+                _ => spawn_prop(commands, model, transform, owner, &pname),
+            }
+            report.cars += 1;
+        }
+    }
+    report.missing_textures = std::mem::take(&mut cache.mats.missing);
+    for anim in std::mem::take(&mut cache.mats.animated) {
+        commands.spawn((CityEntity, owner, anim));
+    }
+    info!(
+        file = report.file.as_deref().unwrap_or("-"),
+        cars = report.cars,
+        empty_bays = report.empty_bays,
+        missing_models = report.missing_models,
+        capped = report.capped,
+        "parked cars spawned"
+    );
     report
 }
 
@@ -3816,6 +3974,7 @@ fn load_city_part(
         meshes,
         mats,
         cache: HashMap::new(),
+        paint_jobs: HashMap::new(),
         missing_prims: 0,
     };
 

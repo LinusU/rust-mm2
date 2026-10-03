@@ -219,14 +219,15 @@ rail street). The 4–5 props-only rail segments are never drawn; if
 original evidence shows prop-channel decals render, one flag flips.
 
 The `<city>_bridge[_<event>].pathset` drawbridge sets are consumed by
-`mm2_app::drawbridge` — see `docs/research/drawbridge.md`.
+`mm2_app::drawbridge` (`docs/research/drawbridge.md`), the
+`<city>_parkedcar[_<event>].pathset` sets by
+`mm2_app::city::spawn_parked_cars` (`docs/research/parked.md`).
 
 Still unconsumed: `audio_pathsets/` (`PATHnn` sound
-routes, F07/F08), the other `<city>_<object>.pathset` ambient object
-sets and `<object>_<event>.pathset` overrides (`*_parkedcar*`,
-`*_ferry`, `*_sailboat`, `london_train` — all
-`giz_*`/`PATHnn`/`sp_pcar*` on retail; they need the animated-object
-and parked-car features, not static stamping), crash-course stem
+routes, F07/F08), the moving-object sets and their overrides
+(`*_ferry`, `*_sailboat`, `london_train` — `giz_*`/`PATHnn` routes
+on retail; they need the animated-object feature, not static
+stamping), crash-course stem
 files (the events are not loadable yet, F21), `circuitx`/`slalom`/
 `*_test`/`ramp` dev files, and `city/phys/`, `bak/` dev sets. Which
 pathsets the original loads per session and whether the stamping

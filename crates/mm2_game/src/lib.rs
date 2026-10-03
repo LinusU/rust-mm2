@@ -21,6 +21,7 @@ pub mod ids;
 pub mod impact;
 pub mod nav;
 pub mod opponent;
+pub mod parked;
 pub mod ped;
 pub mod profile;
 pub mod progression;
@@ -92,8 +93,8 @@ pub use progression::{
 pub use props::{
     Carriageway, MAX_PATHSET_STAMPS, MAX_PROP_RULE_STAMPS, PathStampSite, PathStampSites,
     PropStamp, PropWalk, PropWalkStats, SIDEWALK_KERB_LIFT, SurfaceBand, carriageways,
-    object_pathset_candidates, path_stamp_sites, stamp_content_offset, stamp_space_verts,
-    walk_prop_rules, walkable_surfaces, yawed_basis,
+    object_pathset_candidates, path_stamp_sites, path_stamp_sites_spaced, stamp_content_offset,
+    stamp_space_verts, walk_prop_rules, walkable_surfaces, yawed_basis,
 };
 pub use race::{
     CUSTOMIZE_LAP_MAX, CatchUpPolicy, Checkpoint, CheckpointRule, DEFAULT_CHECKPOINT_HEIGHT,

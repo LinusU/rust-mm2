@@ -1007,7 +1007,7 @@ pub fn path_stamp_sites(path: &Path, budget: usize) -> PathStampSites {
                 capped: pairs.len() - take,
             }
         }
-        Some(PathKind::LineStrip) => line_strip_sites(path, budget),
+        Some(PathKind::LineStrip) => line_strip_sites(path, path.spacing_metres(), budget),
         None => PathStampSites::default(),
     }
 }
@@ -1031,9 +1031,19 @@ pub fn object_pathset_candidates(
     out
 }
 
+/// [`path_stamp_sites`] with the strip spacing chosen by the consumer
+/// instead of read from the path — the original's object managers pass
+/// their own (the parked-car manager floors it at 5 m). Only
+/// `LineStrip` paths read a spacing; other kinds expand unchanged.
+pub fn path_stamp_sites_spaced(path: &Path, spacing: f32, budget: usize) -> PathStampSites {
+    match path.kind() {
+        Some(PathKind::LineStrip) => line_strip_sites(path, spacing, budget),
+        _ => path_stamp_sites(path, budget),
+    }
+}
+
 /// `LineStrip` expansion — see [`path_stamp_sites`] for the rule.
-fn line_strip_sites(path: &Path, budget: usize) -> PathStampSites {
-    let spacing = path.spacing_metres();
+fn line_strip_sites(path: &Path, spacing: f32, budget: usize) -> PathStampSites {
     let pts: Vec<[f32; 3]> = path.points.iter().map(|p| p.position).collect();
     if spacing <= f32::EPSILON {
         let finite: Vec<[f32; 3]> = pts

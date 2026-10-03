@@ -825,6 +825,28 @@ pub fn load_session_world(
             owner,
         );
         commands.insert_resource(report);
+        // Kerbside parked cars, from the same per-event/default file
+        // pair. The original skips them in networked cruise and cops
+        // & robbers; networked races keep them.
+        let networked_roam = config.authority != mm2_game::SessionAuthority::Local
+            && !matches!(config.mode, SessionMode::Event(_));
+        let parked = if networked_roam {
+            city::ParkedCarReport::default()
+        } else {
+            city::spawn_parked_cars(
+                &mut commands,
+                &vfs.0,
+                &city_stem,
+                event_key.as_ref().map(|k| k.stem.as_str()),
+                config.seed,
+                &mut assets.meshes,
+                &mut assets.images,
+                &mut assets.materials,
+                owner,
+                &mut session,
+            )
+        };
+        commands.insert_resource(parked);
     }
     // F25-A.2: the lobby's humans share the event's authored grid —
     // the local participant's seat resolves through the same

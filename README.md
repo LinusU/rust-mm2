@@ -42,6 +42,8 @@ Vertical-slice stage. What works today:
 - Drawbridges: Tower Bridge, both Waterloo crossings and the Tower of
   London gate open and close on the retail cycle (per-event bridge
   files honoured); SF's Chinatown gate stands.
+- Kerbside parked cars along the authored parked-car paths of both
+  cities, knockable like other bangers.
 
 ## Build & run
 
