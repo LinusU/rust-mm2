@@ -121,8 +121,17 @@ engine-presentation gap — protocol v15 `SnapEntry.rpm` carries
 the authority's engine rpm and `spawn_remote` binds the pick's
 authored `VehicleAudio` on both wire roles, so remote cars
 voice off the live sim on the authority and the replicated
-field on a client (horn/clutch stay local-owner; surface loops
-stay unbound — no wheel-contact truth on the wire) — still
+field on a client (horn/clutch stay local-owner), and the
+following iteration landed the remote surface voice —
+protocol v16 `SnapEntry`'s surface-contact tail carries the
+resolved `sound` class plus the winning wheel's quantities,
+with `surface_voices` gaining a `RemoteReplica` replay arm
+through the local table; the iteration after that closed the
+review's live-resolve gap — `host_app` schedules the real
+`surface_voices`, so the wire-seat publish leg resolves the
+`SurfaceContact` off staged wheel telemetry through the real
+material→class→pick chain, and an `audio` leg asserts
+`contact_pick`'s written record — still
 open: rematch/lobby-result lifecycle and bulk late-joiner ledger
 sync (F26), LAN/Internet scope, and the process-level
 rejoin leg, which needs a client rejoin feature that does not

@@ -1,3 +1,92 @@
+# Last iteration — F25-B evidence slice: the live-resolve leg
+# the v16 review named — `host_app` now schedules the real
+# `surface_voices`, so the wire-seat publish leg resolves the
+# `SurfaceContact` off staged *wheel telemetry* through the
+# real material→class→pick chain instead of inserting the
+# component by hand, and a new `audio` leg asserts the record
+# `contact_pick` writes (new-run iteration 14)
+
+Evidence/repair iteration on `ralph/night` (baseline `6d24c5b` —
+the iter-13 remote-surface-voice handoff; external gates +
+review pass). Selection: the review's first named verification
+gap — "no leg exercises a live-resolved SurfaceContact
+end-to-end: the net_app publish leg stages the component by
+hand (host_app schedules publish but not surface_voices), and
+no test asserts contact_pick's written component contents
+directly." No production change was needed — the chain held
+exactly as designed; the iteration closes the evidence hole.
+
+## What landed
+
+- `net_app::host_app` schedules `mm2_app::audio::surface_voices`
+  (`.after(session::drive_session)`, mirroring the windowed/
+  headless ordering) plus the two unconditional resources it
+  needs (`AudioReport`, `Assets<PcmAudio>`). Its surface
+  resources stay `Option`-gated — legs that never install
+  `SurfaceAudio`/`SurfaceTables`/`WaveBank` run the system as
+  the no-table early return, so no other host leg's behavior
+  changed. The `publish_snapshots.after(surface_voices)` edge
+  now has a real target in this slice.
+- `a_wire_seats_surface_contact_publishes_in_its_snap`
+  rewritten live: the install gains `support::surface_audio`
+  (the authored `default_surfacedry.csv` + the waves its rows
+  name), the app mounts the real `SurfaceAudio::load` +
+  `WaveBank::index` off that VFS and the shared two-material
+  `SurfaceTables` (`audio.rs`'s staging — the dev world ships
+  no city materials). The leg stages only the sim's own wheel
+  telemetry (`grounded`/`contact_entity`/`traction_demand`/
+  `vel_long`/`forward_speed`) on the remote seat against a
+  class-1 collider; `surface_voices` resolves the contact, and
+  the leg asserts the written `SurfaceContact` *before* reading
+  the wire, then the published row `(surf_skid 1, skid_slip
+  153, skid_speed 124, surf_roll 1)` — the 0.6-utilization
+  grass slide and rolling loop quantized by `encode_surface`.
+  It then proves the voices themselves spawned off the live
+  resolve (`AudioReport` skids 1 / rolling 1 / failed 0 — the
+  authored waves decoded), and the airborne half: unstaging
+  the wheels flips the next rows back to `SNAP_NO_SURFACE`.
+- `audio::a_live_car_records_the_resolved_contact_for_the_wire`
+  — the review's second half: `contact_pick`'s written record
+  asserted directly on a live car (`surface` 1, `slippage`
+  0.6, `wheel_speed` 10.0, `roll` Some(1)), then a quiet
+  resolve writes the empty contact back.
+- `tests/support`: the surface fixture consolidated —
+  `pcm_wav`, `DRY_SURFACE_TABLE` and the `surface_audio(dir)`
+  writer are shared; `audio.rs`'s `DRY_TABLE` now aliases the
+  support constant (same bytes, verbatim).
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` green — 91 suites, 0
+failures (`net_app` 56/56 incl. the rewritten leg, `audio`
+91/91 incl. the new leg, `mm2_app` lib 90/90, `net_drive`
+3/3, `mm2_net` 80/80).
+
+## Classification / remaining open items
+
+- Evidence-only iteration — no production code changed. The
+  staging honesty boundary moved from "component inserted by
+  hand" to "the sim's own wheel-state fields written by hand";
+  the physics that produces those fields on a real drive still
+  has no in-test sim leg (host_app runs no
+  `vehicle_simulation` — a true end-to-end leg would need the
+  Avian step + a world, the headless/process tier's scope).
+- Still not exercised: an audible or rendered capture
+  (`AudioReport.sunk` stays 0 headless), a two-process leg
+  carrying the tail, the impairment matrix at v16 (the leg
+  rides the same `Snap` the matrix measured — byte budget is
+  analytic), LAN/Internet scope.
+- All other open items unchanged: rematch/lobby-result
+  lifecycle and bulk late-joiner ledger sync (F26), the absent
+  dedicated-authority sim (F26), a lobby-level kick for a
+  dead-but-open link (lobby scope), process-level rejoin
+  (product decision). Not F25-AC01..06 or F26-AC01..06
+  completion. Candidate pending external check.
+
+---
+
 # Last iteration — F25-B slice: the remote surface voice —
 # `mm2_net` protocol v16 adds the `SnapEntry` surface-contact
 # tail and `surface_voices` gains a `RemoteReplica` arm, so a
