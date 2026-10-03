@@ -28,9 +28,10 @@
 //!   inside the closing-scaled follow gap the demand becomes a brake
 //!   instead of a shove. The pass target is tracked until it falls
 //!   fully behind — the corridor alone would release alongside and the
-//!   merge would cut back across its nose. Static geometry (walls,
-//!   props) is deliberately not sensed here; a hit the pass cannot
-//!   make stays the recovery law's job.
+//!   merge would cut back across its nose. Static geometry is not part
+//!   of the corridor; the wall feelers (DSN-66,
+//!   [`crate::racing_line::sense_walls`]) steer off static walls
+//!   instead, and dynamic props stay the recovery law's job.
 //! - **Authored tuning (F15-B.2/B.8).** The `[Opponent]` row's
 //!   ten-value parameter tail — the documented
 //!   `aiVehiclePhysics::RegisterRoute` behavioral vocabulary (R3's
@@ -101,7 +102,8 @@ use tracing::{info, trace, warn};
 
 use crate::car_visual;
 use crate::racing_line::{
-    CORNER_BRAKE_DEFAULT, CarLimits, RouteCursor, SpeedPlan, pace, plan_speed,
+    CORNER_BRAKE_DEFAULT, CarLimits, RouteCursor, SpeedPlan, WallSense, pace, plan_speed,
+    sense_walls,
 };
 use crate::scripted::{
     ScriptedBot, ScriptedTuning, bearing_throttle, recovery_input, steer_cmd, watch_stuck,
@@ -262,6 +264,10 @@ const AIM_RANGE: (f32, f32) = (12.0, 40.0);
 pub fn aim_distance(speed: f32) -> f32 {
     (AIM_BASE + AIM_PER_SPEED * speed.max(0.0)).clamp(AIM_RANGE.0, AIM_RANGE.1)
 }
+
+/// Height (m) above the body origin the wall feelers cast from — clear
+/// of kerbs and road crowns, below every wall.
+const FEELER_HEIGHT: f32 = 0.5;
 
 /// Distance-to-objective scale (m) the catch-up course measure falls
 /// back to when a definition's own gate spacing cannot be measured —
@@ -1158,6 +1164,8 @@ pub fn apply_gap_brake(input: &mut VehicleInput, blocker: &Blocker, speed: f32) 
 pub fn opponent_drive(
     session: Res<Session>,
     time: Res<Time>,
+    spatial: Option<SpatialQuery>,
+    bodies: Query<&RigidBody>,
     race: Option<Res<RaceState>>,
     mut resets: MessageWriter<ResetVehicle>,
     mut set: ParamSet<(
@@ -1519,6 +1527,18 @@ pub fn opponent_drive(
         // hold it there. Steering and the bounded escapes are the
         // scripted law's.
         let speed = vstate.forward_speed;
+        // Wall feelers (DSN-66): static geometry around the nose — the
+        // corridor only ever sensed participants.
+        let walls = spatial.as_ref().map_or_else(WallSense::default, |sq| {
+            let filter = SpatialQueryFilter::from_excluded_entities([entity]);
+            let origin = pos.0 + Vec3::Y * FEELER_HEIGHT;
+            let is_static = |e: Entity| bodies.get(e).is_ok_and(|b| b.is_static());
+            sense_walls(fwd, speed, |dir, len| {
+                let dir = Dir3::new(dir).ok()?;
+                sq.cast_ray_predicate(origin, dir, len, true, &filter, &is_static)
+                    .map(|hit| (hit.distance, hit.normal))
+            })
+        });
         let d = &mut *driver;
         *input = recovery_input(&mut d.recovery, bearing, &tuning).unwrap_or_else(|| {
             let plan = match (&d.route, cursor) {
@@ -1531,12 +1551,20 @@ pub fn opponent_drive(
             let throttle = bearing_throttle(bearing).min(tuning.throttle_cap);
             let (throttle, brake) = pace(speed, plan, throttle, d.corner_brake);
             let input = VehicleInput {
-                steering: steer_cmd(bearing),
+                steering: (steer_cmd(bearing) + walls.steer).clamp(-1.0, 1.0),
                 throttle,
                 brake,
                 ..default()
             };
+            let escapes = d.recovery.escapes;
             watch_stuck(&mut d.recovery, &input, speed, vstate.grounded);
+            // A fresh escape turns toward the open side when the
+            // feelers see one, instead of the blind alternation.
+            if d.recovery.escapes > escapes
+                && let Some(side) = walls.open_side()
+            {
+                d.recovery.recovery_side = side;
+            }
             // Twice a second of driving, at trace level — the per-car
             // record behind a stall diagnosis (`RUST_LOG=
             // mm2_app::opponents=trace`, then filter on `opp=`).
@@ -1552,6 +1580,8 @@ pub fn opponent_drive(
                     steer = input.steering,
                     throttle = input.throttle,
                     brake = input.brake,
+                    wall_l = walls.left,
+                    wall_r = walls.right,
                     next = d.next,
                     aim = ?target,
                     "opponent drive"
