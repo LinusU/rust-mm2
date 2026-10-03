@@ -1,0 +1,44 @@
+//! Headless app integration tests, grouped to link the Bevy app once.
+//! Add new test modules here; automatic test-target discovery is disabled.
+
+mod support;
+
+mod audio;
+mod banger;
+mod bot;
+mod breakaway;
+mod camtrack;
+mod contracts;
+mod damage;
+mod damage_fx;
+mod dash;
+mod environment;
+mod event;
+mod hud;
+mod hudmap;
+mod import_pipeline;
+mod input;
+mod menu;
+mod mirror;
+mod nav_overlay;
+mod navarrow;
+mod oppind;
+mod opponents;
+mod precip;
+mod profile;
+mod progression;
+mod race;
+mod racestat;
+mod racetime;
+mod recovery;
+mod results;
+mod sequence;
+mod session;
+mod smoke;
+mod spark_fx;
+mod stuck;
+mod surface;
+mod texel_fx;
+mod traffic;
+mod trailer;
+mod wheel_fx;

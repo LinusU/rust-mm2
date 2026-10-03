@@ -14,7 +14,7 @@ use mm2_assets::Vfs;
 use mm2_game::{DevOverrides, Difficulty, SessionConfig, SpawnPose, WorldMode};
 use mm2_vehicle::VehicleConfig;
 
-mod support;
+use crate::support;
 
 fn write(dir: &Path, rel: &str, contents: impl AsRef<[u8]>) {
     let p = dir.join(rel);

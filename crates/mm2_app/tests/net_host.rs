@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::process::Command;
 use std::time::Duration;
 
-mod support;
+use crate::support;
 
 use mm2_app::net;
 use mm2_game::{EventRef, EventTableKind, SessionAuthority, SessionMode, WorldMode};

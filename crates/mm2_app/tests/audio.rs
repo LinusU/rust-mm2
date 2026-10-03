@@ -36,7 +36,7 @@ use mm2_game::{
 use mm2_vehicle::vehicle::Vehicle;
 use mm2_vehicle::{DriveDirection, RemoteReplica, VehicleConfig, VehicleState, vehicle_bundle};
 
-mod support;
+use crate::support;
 
 /// A minimal 16-bit mono PCM RIFF/WAVE at `rate` with `frames` frames.
 fn pcm_wav(rate: u32, frames: usize) -> Vec<u8> {

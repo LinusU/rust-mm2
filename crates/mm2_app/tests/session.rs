@@ -30,7 +30,7 @@ use mm2_vehicle::{
     VehicleState,
 };
 
-mod support;
+use crate::support;
 
 /// A headless app wired exactly like the binary's session path: real
 /// world spawning, teardown and contract pipeline, minus the window and

@@ -24,7 +24,7 @@ use std::io::Write;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
 
-mod support;
+use crate::support;
 
 use mm2_net::{Client, MAX_FRAME, Message, RejectCode, hello, read_frame, write_frame};
 use support::{Proc, WAIT, listening};

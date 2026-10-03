@@ -7,7 +7,7 @@
 //! (Checkpoint, AnyOrder) and `circuit:0` (resolves but cannot build:
 //! `NumLaps` 0) / `circuit:1` (buildable Ordered) rows.
 
-mod support;
+use crate::support;
 
 use mm2_app::net;
 use mm2_game::{

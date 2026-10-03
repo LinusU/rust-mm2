@@ -22,7 +22,7 @@ use std::time::Duration;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 
-mod support;
+use crate::support;
 
 use mm2_app::net::{self, HostCommand, HostLink, LobbyLink, LobbyState};
 use mm2_app::netdrive::{self, NetPlayer, RemotePick};

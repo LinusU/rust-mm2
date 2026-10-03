@@ -22,7 +22,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-mod support;
+use crate::support;
 
 use mm2_net::{Impair, ImpairProxy, LinkDir, LinkStats};
 use support::Proc;

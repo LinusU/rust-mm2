@@ -253,6 +253,14 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 ```
 
+The app integration tests build two executables: `app` for headless app
+behavior and `network` for networking and host/join process tests. Test
+files are modules registered in `crates/mm2_app/tests/app.rs` or
+`crates/mm2_app/tests/network.rs`; add new modules to the appropriate suite.
+Run one suite with `cargo test -p mm2_app --test app`, or filter a module
+with `cargo test -p mm2_app --test app audio::` (use `--test network net_host::`
+for the host process tests).
+
 ## Legal
 
 *Midtown Madness 2* is © Microsoft/Angel Studios. This project is an

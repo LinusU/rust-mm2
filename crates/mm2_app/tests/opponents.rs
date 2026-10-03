@@ -6,7 +6,7 @@
 //! `.opp` routes through the same `VehicleInput` → physics →
 //! `advance_race` validation the player's controls feed.
 
-mod support;
+use crate::support;
 
 use std::path::Path;
 use std::time::Duration;

@@ -5,6 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 default-run = "mm2"
+# Integration files are modules in the two explicit suites below.
+autotests = false
 
 [[bin]]
 name = "mm2"
@@ -17,6 +19,14 @@ path = "src/bin/mm2_host.rs"
 [[bin]]
 name = "mm2-join"
 path = "src/bin/mm2_join.rs"
+
+[[test]]
+name = "app"
+path = "tests/app.rs"
+
+[[test]]
+name = "network"
+path = "tests/network.rs"
 
 [dependencies]
 avian3d.workspace = true

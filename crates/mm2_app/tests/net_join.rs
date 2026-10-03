@@ -12,7 +12,7 @@
 
 use std::net::SocketAddr;
 
-mod support;
+use crate::support;
 
 use mm2_app::net;
 use mm2_game::{EventTableKind, SessionConfig, SessionMode, WorldMode};
