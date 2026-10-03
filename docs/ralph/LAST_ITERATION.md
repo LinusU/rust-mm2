@@ -1,3 +1,132 @@
+# Last iteration — F25-B repair: the networked authority's
+# `Playing → Results` deferral — a hosted session's own resolution
+# holds `Playing` until every `Remote` wire seat resolves, and
+# `publish_snapshots` owes the wire exactly one `Results`-phase snap
+# at the transition tick (new-run iteration 7)
+
+Repair iteration on `ralph/night` (baseline `a656d48` — the v14
+progress-tail slice; external review **rejected**: fail on F25-B).
+Root cause of the blocker: `advance_race` moved `Playing → Results`
+the step the authority's *own* seat resolved, which atomically killed
+both producers an unresolved remote client lives on — `advance_race`
+early-returns outside `Countdown|Playing`, so the remote seat's
+`RaceProgress` never stepped or minted its terminal edge again, and
+`publish_snapshots` early-returns outside `Ready|Countdown|Playing`,
+so even the terminal rows minted on the transition tick itself — a
+deadline's mass `TimedOut` wave included — never reached the wire. A
+client still racing when the host resolved was stranded in `Playing`
+on a dead snap stream; the v14 tests could not see it because the
+client leg fed `host.ctl().broadcast()` past the real publisher's
+phase gate and no leg ran the real producer in `Results`. The repair
+is the review's option (a): defer the session transition on a hosted
+authority until every tracked wire seat resolves or departs, then
+emit the one owed `Results`-phase frame that carries the minted rows.
+
+## What landed
+
+- `advance_race` (`mm2_app/src/race.rs`): the `Playing → Results`
+  edge now requires `local_done && !wire_open` — `wire_open` is "a
+  `Remote` participant still `AwaitingStart`/`Racing`", read only on
+  a `SessionAuthority::Host` session. The deadline's mass-`TimedOut`
+  and the last wire seat's finish clear the deferral in the same step
+  they mint; a departed wire seat (despawned entity) stops counting.
+  The deferred host keeps stepping remote progress and publishing
+  snaps through the window. A `Local` session keeps UI-5's edge
+  verbatim — `Remote` there is a simulated opponent's stamp, and the
+  pre-existing `an_unresolved_participant_does_not_block_the_local_result`
+  leg stands unchanged as proof. A stalled-but-connected remote can
+  hold `Playing` — the host's results screen waits for its roster by
+  design; a wire-seat stall/kick watchdog is lobby scope (F26).
+- `advance_race` also flips a `Remote` `AwaitingStart` seat to
+  `Racing` inside the running loop — a seat spawned past the
+  countdown's release flip could otherwise never resolve and would
+  hold the deferral forever. `spawn_remote` (`netdrive.rs`) now
+  inserts `RaceProgress::join` — the mid-race join semantics scoring
+  `Racing` on arrival — instead of `new`; the in-loop flip is the
+  ordering-edge net underneath it.
+- `publish_snapshots` (`netdrive.rs`): `Results` owes the wire
+  exactly one more frame. A `Local<Option<(u64, u64)>>` holds the
+  `(wire generation, session tick)` of the last broadcast; a
+  `Results`-phase run publishes only when that key is unpublished —
+  the transition step mints the terminal rows and moves phases
+  atomically, so its tick was never sent inside `Playing`, and the
+  frozen `Results` session clock bounds the debt to exactly one
+  frame. Every other phase still early-returns — a quiescent
+  `Results` screen does not stream.
+- `docs/research/net.md` + module docs: the v13 publish-phase line,
+  the v14 paragraph and both modules' header docs now name the
+  deferral, the owed frame, the stalled-remote caveat, the `Local`
+  carve-out and the mid-race `Racing` join semantics (the v14 docs
+  also no longer claim "no replicated finish/results state").
+
+## Tests
+
+- `race` +3:
+  `a_wire_seat_holds_the_authority_in_playing_until_it_resolves`
+  (host authority — the local finish while a wire seat races holds
+  `Playing`; the wire seat's finish ends it same-step with
+  `Complete` and both results banked),
+  `the_deadline_resolves_the_wire_seats_and_releases_results`
+  (parked wire seat — the deadline's `TimedOut` mint and `Results`
+  transition land together),
+  `a_wire_seat_joining_a_running_race_starts_racing` (a `Remote`
+  `AwaitingStart` seat landing post-release flips `Racing` next
+  step).
+- `net_app` +1 two-app real loopback:
+  `the_deferred_authority_delivers_the_wire_seats_terminal_edge` —
+  a hosted app running the real `advance_race` (FixedLast,
+  `main.rs` ordering) + `publish_snapshots` pair against a joined
+  `bridge_app` through `apply_snapshots`, no `ctl().broadcast`
+  staging: the host's seat finishes first → the host holds
+  `Playing` and the client's `snaps_applied` keeps climbing while
+  the remote seat races → the deadline mints the remote's
+  `TimedOut` and lands `Results` in one step → the owed frame
+  delivers the client's terminal edge — its session reaches
+  `Results` with a minted `TimedOut` row — and `snaps_sent` stays
+  frozen across four further `Results` updates, proving the debt
+  is exactly one frame. The host-side reconcile's spawned wire
+  seat asserts `Racing` on arrival (the `RaceProgress::join` leg).
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` green — 91 suites, 0 failures
+(`mm2_app` lib 85/85, `race` 47/47, `net_app` 47/47, `mm2_net`
+80/80, `net_drive` 3/3).
+
+## Classification / remaining open items
+
+- Implementation choice throughout — the deferral rule, the owed
+  frame and the join/flip semantics are ours; the retail wire
+  protocol is unrecovered, so no original-behavior claim. The
+  review's alternative (b) — host-resolution-ends-the-event plus an
+  explicit session-end signal — was rejected: it discards unresolved
+  remote clients' results, and the deferred host's results screen
+  waiting for its roster is the behavior the product wants.
+- Evidence: unit + two-app loopback legs through the real producer
+  and publisher. Still not exercised: a true two-*process* leg (the
+  load path needs the asset stack — `Ready → Playing` and the
+  `RaceState` are staged by hand in the new test too), no retail
+  event def, nothing rendered or played by hand, no LAN/Internet or
+  impairment-matrix leg on this path, and client recovery on host
+  teardown while stranded stays inferred, not exercised.
+- A stalled-but-connected remote now holds the hosted session in
+  `Playing` indefinitely — no wire-seat stall/kick watchdog exists;
+  named lobby scope. A dedicated `mm2-host` (no `Local` participant)
+  still never reaches `Results` on its own — pre-existing gap the
+  deferral neither widens nor narrows.
+- F25-B remaining scope: rematch/lobby-result lifecycle and bulk
+  late-joiner ledger sync (F26 — standings arrive incrementally per
+  tail; a mid-race joiner's ledger completes once every tracked
+  seat's terminal row lands), LAN/Internet scope, and the
+  process-level rejoin leg (needs a client rejoin feature that does
+  not exist — link `Closed` is terminal by design; recorded as a
+  product-scope decision). This slice is not F25-AC01..06 or
+  F26-AC01..06 completion.
+
+---
+
 # Last iteration — F25-B race-progress slice: protocol v14
 # `SnapEntry` progress tail — every tracked seat's `RaceProgress`
 # (lifecycle discriminant, resolution tick, lap/gate counters,
