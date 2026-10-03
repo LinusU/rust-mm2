@@ -210,6 +210,9 @@ fn texel_app_with(pos: Vec3, authority: SessionAuthority) -> (App, Entity, Objec
         // pool slots and writes the banger lifecycle stream.
         .add_message::<mm2_game::BangerStateChanged>()
         .init_resource::<mm2_game::BangerPool>()
+        // F25-B (v14): `apply_snapshots`'s progress tails record into
+        // the session's result ledger.
+        .init_resource::<mm2_game::ResultLedger>()
         .insert_resource(contracts::ImpactFilter::default())
         .init_resource::<damage::DamageReport>()
         .init_resource::<mm2_app::breakaway::BreakReport>()
@@ -375,6 +378,7 @@ fn snap_entry(player: u16, damage: u8) -> SnapEntry {
         flags: 0,
         damage,
         breaks: 0,
+        ..SnapEntry::default()
     }
 }
 

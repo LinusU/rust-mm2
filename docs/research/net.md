@@ -40,7 +40,7 @@ precludes adding a second socket later.
 is added it must come from maintained crypto/session crates, not
 hand-rolled primitives.
 
-## Wire protocol (`PROTOCOL_VERSION = 13`)
+## Wire protocol (`PROTOCOL_VERSION = 14`)
 
 Length-prefixed frames: `u32le` length + payload, bounded by
 `MAX_FRAME` (256 KiB) checked *before* allocation. Messages are strict
@@ -238,10 +238,41 @@ participants flip to `Racing`, the session moves
 for the GO consumers. Regressed or duplicated rows are idempotent
 state — they never restage — a foreign generation stages but dies
 at the apply-side session gate the queued impact rows share, and
-a `phase` the wire cannot name dies at `push`. What the row
-deliberately does not carry: checkpoint progress, finish
-ordering, timeouts and the `ResultLedger` — per-participant race
-state is F26 scope.
+a `phase` the wire cannot name dies at `push`.
+v13→v14: `SnapEntry` gained the per-seat race-progress tail
+(F25-B): `prog_state` (u8 discriminant — 0 awaiting start, 1
+racing, 2 finished, 3 timed out), `prog_ticks` (u64, the terminal
+state's resolution race tick, 0 otherwise), `prog_lap` and
+`prog_next` (u32, the `Ordered` rule's counters — 0 under
+`AnyOrder`), `prog_cleared` (u64 bitmask — bit *i* = gate *i*
+cleared in authored order; gates past bit 63 unexpressible), and
+`prog_crossings`/`prog_route_clears` (u32 evidence counters). The
+same replicated-state argument the v8 damage byte established:
+`advance_race` is authority-gated, so a predicted client's
+`RaceProgress` never advances — the tail is its only standing,
+and the mirror writes the authority's counters verbatim through
+`RaceProgress::apply_replicated`. A seat the race does not track
+(no `RaceProgress`, or a raceless/stale `RaceState`) publishes
+the all-zero tail — "not tracked", never a fabricated row. On
+the receiving side a terminal edge lands like `advance_race`'s
+own: the client mints the `SessionResult` in its *local* id
+namespace (participant/generation/event/sequence — the
+authority's `ResultId` never rides the wire), records it into the
+process's `ResultLedger` deduplicated by identity, stamps it with
+the carrying snap's session tick, and — only for the *local*
+seat — moves the session `Playing → Results`, UI-5's
+local-resolution rule mirrored. A redelivered identical terminal
+row is idempotent state (the ledger dedups anyway); a row that
+rewinds a recorded lifecycle — a different outcome or tick than
+the resolution already on the participant — is a non-conforming
+authority's word and drops counted, as does an unnamed
+`prog_state` discriminant. Tails ride the seat entry's own
+freshness: a stale pose frame drops them with it, so a reordered
+snap can never regress a standing. What the wire still does not
+carry: rematch/lobby-result lifecycle (F26) and a bulk
+late-joiner ledger sync — standings arrive incrementally as each
+seat's tail lands, which is complete once every tracked entry
+has applied.
 
 Handshake (always the first exchange):
 
@@ -814,26 +845,26 @@ sides — the dev cruise carries no `RaceState`, so no v13 rows move
 ## Data-plane budget and bounds (F25-B req 6)
 
 *Implementation choice + measured.* Payload sizes are fixed by the
-v13 encode (4-byte length prefix excluded everywhere):
+v14 encode (4-byte length prefix excluded everywhere):
 
 | frame | payload bytes |
 |---|---|
 | `Input` | 21 (tag 1, generation 8, seq 8, 4 channels) |
 | `ResetRequest` | 9 (tag 1, generation 8) |
 | `Snap` header | 21 (tag 1, generation 8, tick 8, three counts, race presence 1) |
-| per `SnapEntry` | 66 (player 2, pos/rot/vel/angvel 52, epoch 1, steer 2, spin 2, compression 1, flags 1, damage 1, breaks 4) |
+| per `SnapEntry` | 99 (player 2, pos/rot/vel/angvel 52, epoch 1, steer 2, spin 2, compression 1, flags 1, damage 1, breaks 4, progress tail 33) |
 | per `SnapTrailer` | 57 (owner 2, pos/rot/vel/angvel 52, spin 2, flags 1) |
 | per `SnapImpact` | 54 (seat 2, id 8, tick 8, point 12, normal 12, severity 4, audio_id 8) |
 | `SnapRace` when present | 13 (phase 1, countdown 4, clock 8) |
 
-A `Snap` is `21 + 66·seats + 57·trailers + 54·impacts` plus 13 while a
+A `Snap` is `21 + 99·seats + 57·trailers + 54·impacts` plus 13 while a
 race row rides — worst case `MAX_PLAYERS` 8 seats and trailers plus
-`MAX_SNAP_IMPACTS` 64 rows = 4,474 B, far under `MAX_FRAME` (256 KiB).
+`MAX_SNAP_IMPACTS` 64 rows = 4,738 B, far under `MAX_FRAME` (256 KiB).
 The matrix runs measured
 the v10 shape: `Input` payloads averaged 21 B
 (`bytes_in`/`frames_in` ≈ 20.9) and the one-seat dev-world `Snap`
-82 B (20 + 62 — 87 B under v13, raceless); the two-process leg's
-three-seat snaps were 206 B (219 under v13, raceless).
+82 B (20 + 62 — 120 B under v14, raceless); the two-process leg's
+three-seat snaps were 206 B (318 under v14, raceless).
 
 **Update rates.** Both directions send once per app `Update` while the
 session is live — the wire rate is the update-loop rate, not the fixed
@@ -842,10 +873,10 @@ headless runs (the matrix's test apps publish ~250 snaps/s). Same-tick
 republishes are deliberate redundancy — `tick` dedups them at the
 receiver (the clean-row floor above). Consequences worth recording:
 
-- per-client downstream at a 60 Hz update rate, 8 seats: ≈33 KB/s of
-  `Snap` payload (548 B × 60); the ~250 Hz headless cadence multiplies
-  that ≈4× (≈134 KB/s, ~1 Mbps) and a full-impact burst snap is still
-  ≤4,460 B.
+- per-client downstream at a 60 Hz update rate, 8 seats: ≈49 KB/s of
+  `Snap` payload (813 B × 60); the ~250 Hz headless cadence multiplies
+  that ≈4× (≈203 KB/s, ~1.6 Mbps) and a full-impact burst snap is still
+  ≤4,725 B.
 - per-client upstream: 25 B on the wire per update — ≈1.5 KB/s at
   60 Hz, ≈6 KB/s headless.
 - a faster update loop buys smoother *redundancy*, not fresher poses —
@@ -858,7 +889,9 @@ staged `Snap` per client (`RemoteSnaps`), one input sample per seat
 (the mailbox, `INPUT_STALE` 250 ms before the seat coasts), the reset
 mailbox keeps the highest generation, pending replicated impact rows
 cap at 256 with a 512-entry dedup window, the v13 race row keeps one
-latest-wins slot on its own monotonic key, `CORRECTION_SNAP_DIST`
+latest-wins slot on its own monotonic key, the v14 progress tails ride
+each seat entry's own freshness (a stale pose frame drops them with
+it), `CORRECTION_SNAP_DIST`
 (20 m) bounds a blend-vs-snap decision, and `RESET_REQUEST_COOLDOWN`
 (1 s) bounds ask rate. The proxy's `MAX_QUEUED` (4096/lane) is harness
 state, not protocol.

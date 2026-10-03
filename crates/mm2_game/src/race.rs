@@ -615,6 +615,47 @@ impl RaceProgress {
         self.last_position = None;
     }
 
+    /// The cleared flags as a bitmask — bit *i* set = gate *i* cleared,
+    /// in authored order. The replication tail (protocol v14, F25-B)
+    /// carries the progress this way: flags past bit 63 are
+    /// unexpressible — the bound the wire documents, far past any
+    /// authored gate count. `Ordered`'s in-lap prefix and `AnyOrder`'s
+    /// free set read the same way.
+    pub fn cleared_mask(&self) -> u64 {
+        self.cleared
+            .iter()
+            .take(64)
+            .enumerate()
+            .fold(0u64, |mask, (i, c)| mask | (u64::from(*c) << i))
+    }
+
+    /// Write the authority's replicated rule counters verbatim (F25-B,
+    /// protocol v14): under a predicted session nothing calls
+    /// [`advance`](Self::advance), so the wire is the participant's
+    /// only progress truth — the same argument that makes the snap
+    /// tail's damage byte the only `VehicleDamage` truth. `cleared`
+    /// is the authority's [`cleared_mask`](Self::cleared_mask): flags
+    /// past bit 63 are unexpressible there, so they read cleared.
+    /// `state` is *not* set here — the caller owns the lifecycle edge
+    /// (a terminal transition mints and records a `SessionResult`,
+    /// which needs the session, not this component).
+    pub fn apply_replicated(
+        &mut self,
+        cleared: u64,
+        next: usize,
+        lap: u32,
+        crossings: u32,
+        route_clears: u32,
+    ) {
+        for (i, flag) in self.cleared.iter_mut().enumerate() {
+            *flag = i < 64 && cleared & (1 << i) != 0;
+        }
+        self.next = next;
+        self.lap = lap;
+        self.crossings = crossings;
+        self.route_clears = route_clears;
+    }
+
     /// Number of checkpoints cleared this lap (`Ordered`) or in total
     /// (`AnyOrder`).
     pub fn cleared_count(&self) -> usize {

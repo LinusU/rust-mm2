@@ -37,8 +37,13 @@
 /// an optional [`SnapRace`] row carrying the authority's race phase,
 /// countdown remainder and clock — a predicted client's race loop
 /// never steps under a remote authority, so the wire mirrors it
+/// (F25-B). v14: `SnapEntry` gained the per-seat race-progress tail —
+/// the seat's participant state, resolution tick, lap/gate counters,
+/// cleared-gate bitmask and evidence counters — replicated *state*
+/// like `damage`/`breaks`, so a predicted client whose rule pipeline
+/// never advances `RaceProgress` mirrors every seat's standing
 /// (F25-B).
-pub const PROTOCOL_VERSION: u16 = 13;
+pub const PROTOCOL_VERSION: u16 = 14;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -185,7 +190,7 @@ pub struct DriveInput {
 /// `player` is the wire roster id — the host's own seat is 0 (it is never
 /// a roster entry, but its car is part of the shared sim). Positions and
 /// velocities are world-space `f32`s — the same precision the sim runs.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct SnapEntry {
     /// Wire roster slot (0 = the host seat).
     pub player: u16,
@@ -243,6 +248,31 @@ pub struct SnapEntry {
     /// authored break inventory. Parts past bit 31 never ride the
     /// wire — far past any authored count.
     pub breaks: u32,
+    /// Race-progress tail (v14, F25-B): the seat's participant
+    /// lifecycle state as an opaque discriminant the `mm2_app`
+    /// consumer names (`mm2_game::ParticipantState`'s encoding —
+    /// 0 awaiting start, 1 racing, 2 finished, 3 timed out). `0` on
+    /// a seat the race does not track and on a raceless session.
+    pub prog_state: u8,
+    /// The resolution's race-clock tick while `prog_state` names a
+    /// terminal state; `0` otherwise.
+    pub prog_ticks: u64,
+    /// `Ordered` rule: completed laps. `0` under `AnyOrder`.
+    pub prog_lap: u32,
+    /// `Ordered` rule: index of the next required gate. `0` under
+    /// `AnyOrder`.
+    pub prog_next: u32,
+    /// Cleared-gate bitmask — bit *i* set = gate *i* cleared in
+    /// authored order (identical definitions on every process, per
+    /// the gameplay fingerprint). Gates past bit 63 are
+    /// unexpressible — far past any authored count.
+    pub prog_cleared: u64,
+    /// Total gate crossings credited by trigger sweep — a diagnostic
+    /// counter the consumer's race HUD/records read.
+    pub prog_crossings: u32,
+    /// Gates credited by driven-route position rather than a physical
+    /// crossing — the consumer's route-clear evidence counter.
+    pub prog_route_clears: u32,
 }
 
 /// [`SnapEntry::flags`] bit 0 — the driver's brake pedal is held (the
@@ -790,6 +820,13 @@ impl Message {
                     out.push(e.flags);
                     out.push(e.damage);
                     out.extend_from_slice(&e.breaks.to_le_bytes());
+                    out.push(e.prog_state);
+                    out.extend_from_slice(&e.prog_ticks.to_le_bytes());
+                    out.extend_from_slice(&e.prog_lap.to_le_bytes());
+                    out.extend_from_slice(&e.prog_next.to_le_bytes());
+                    out.extend_from_slice(&e.prog_cleared.to_le_bytes());
+                    out.extend_from_slice(&e.prog_crossings.to_le_bytes());
+                    out.extend_from_slice(&e.prog_route_clears.to_le_bytes());
                 }
                 if trailers.len() > MAX_PLAYERS as usize {
                     return Err(ProtoError::OversizeTrailers(trailers.len() as u8));
@@ -930,6 +967,13 @@ impl Message {
                         flags: cur.u8()?,
                         damage: cur.u8()?,
                         breaks: cur.u32()?,
+                        prog_state: cur.u8()?,
+                        prog_ticks: cur.u64()?,
+                        prog_lap: cur.u32()?,
+                        prog_next: cur.u32()?,
+                        prog_cleared: cur.u64()?,
+                        prog_crossings: cur.u32()?,
+                        prog_route_clears: cur.u32()?,
                     });
                 }
                 let trailer_count = cur.u8()?;
@@ -1132,6 +1176,13 @@ mod tests {
                         flags: SNAP_FLAG_BRAKE | SNAP_FLAG_GROUNDED,
                         damage: 128,
                         breaks: 0b0101,
+                        prog_state: 2,
+                        prog_ticks: 4200,
+                        prog_lap: 1,
+                        prog_next: 3,
+                        prog_cleared: 0b101,
+                        prog_crossings: 9,
+                        prog_route_clears: 2,
                     },
                     SnapEntry {
                         player: 3,
@@ -1146,6 +1197,13 @@ mod tests {
                         flags: SNAP_FLAG_REVERSE,
                         damage: 0,
                         breaks: 0,
+                        prog_state: 1,
+                        prog_ticks: 0,
+                        prog_lap: 0,
+                        prog_next: 1,
+                        prog_cleared: 0,
+                        prog_crossings: 0,
+                        prog_route_clears: 0,
                     },
                 ],
                 trailers: vec![
@@ -1337,6 +1395,13 @@ mod tests {
                 flags: 0,
                 damage: 0,
                 breaks: 0,
+                prog_state: 0,
+                prog_ticks: 0,
+                prog_lap: 0,
+                prog_next: 0,
+                prog_cleared: 0,
+                prog_crossings: 0,
+                prog_route_clears: 0,
             };
             MAX_PLAYERS as usize + 1
         ];

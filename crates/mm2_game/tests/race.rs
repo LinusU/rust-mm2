@@ -1289,3 +1289,56 @@ fn zero_laps_customization_fails_validation() {
     };
     assert_eq!(config.validate(), Err(ConfigError::ZeroLaps));
 }
+
+/// The replication tail's encode half (protocol v14, F25-B): the
+/// cleared flags pack low-bit-first in authored order — bit *i* set =
+/// gate *i* cleared — and `apply_replicated` writes the wire word
+/// verbatim back onto a fresh participant, so an authority's progress
+/// round-trips exactly. The lifecycle `state` is *not* the
+/// component's business — the caller owns the terminal edge's result
+/// mint, so a replicated row leaves it untouched.
+#[test]
+fn progress_replication_round_trips_the_rule_counters() {
+    let def = any_order(
+        vec![
+            checkpoint(0.0, 0.0),
+            checkpoint(100.0, 0.0),
+            checkpoint(200.0, 0.0),
+        ],
+        Some(checkpoint(300.0, 0.0)),
+    );
+    def.validate().unwrap();
+    // The authority's participant: gates 0 and 2 cleared, one route
+    // clear credited, mid-race.
+    let mut src = RaceProgress::new(&def);
+    src.state = ParticipantState::Racing;
+    src.advance(&def, Vec3::new(0.0, 0.0, -1.0));
+    src.advance(&def, Vec3::new(0.0, 0.0, 1.0));
+    // A teleported jump (reset) breaks the sweep — gate 1 is never
+    // crossed, gate 2 clears on its own segment.
+    src.break_segment();
+    src.advance(&def, Vec3::new(200.0, 0.0, -1.0));
+    src.advance(&def, Vec3::new(200.0, 0.0, 1.0));
+    src.route_clears = 1;
+    let mask = src.cleared_mask();
+    assert_eq!(mask, 0b101, "cleared flags pack low-bit-first");
+
+    // The predicted client's fresh participant mirrors the wire
+    // words — counters land verbatim; the untouched gates stay clear.
+    let mut dst = RaceProgress::new(&def);
+    dst.state = ParticipantState::Racing;
+    dst.apply_replicated(mask, src.next, src.lap, src.crossings, src.route_clears);
+    assert!(dst.is_cleared(0));
+    assert!(!dst.is_cleared(1));
+    assert!(dst.is_cleared(2));
+    assert_eq!(dst.next, src.next);
+    assert_eq!(dst.lap, src.lap);
+    assert_eq!(dst.crossings, src.crossings);
+    assert_eq!(dst.route_clears, src.route_clears);
+
+    // Every set mask bit lands — a fuller mask mirrors a fuller
+    // standing, never a fabricated or dropped gate.
+    let mut wide = RaceProgress::new(&def);
+    wide.apply_replicated(u64::MAX, 0, 0, 0, 0);
+    assert_eq!(wide.cleared_count(), def.checkpoints.len());
+}

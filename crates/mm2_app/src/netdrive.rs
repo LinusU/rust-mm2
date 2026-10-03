@@ -99,8 +99,9 @@ use mm2_game::{
     Banger, BangerPhase, BangerPool, BangerStateChanged, BreakPartSpec, DamageSignals, DamageSpec,
     ImpactEvent, Mm2Vfs, ObjectId, ObjectIdentity, ParticipantState, Player, PlayerControl,
     PlayerVehicle, RaceDefinition, RacePhase, RaceProgress, RaceStarted, RaceState, RecoveryPolicy,
-    Session, SessionEntity, SessionPhase, SmokePolicy, SparkPolicy, StuckSpec, VehicleBreaks,
-    VehicleDamage, VehicleRecovery, VehicleSmoke, VehicleSparks, VehicleStuck,
+    ResultLedger, Session, SessionEntity, SessionOutcome, SessionPhase, SessionResult, SmokePolicy,
+    SparkPolicy, StuckSpec, VehicleBreaks, VehicleDamage, VehicleRecovery, VehicleSmoke,
+    VehicleSparks, VehicleStuck,
 };
 use mm2_net::{
     DriveInput, MAX_SNAP_IMPACTS, Message, RemoteInputs, SNAP_FLAG_BRAKE, SNAP_FLAG_GROUNDED,
@@ -348,6 +349,14 @@ const SNAP_PHASE_COUNTDOWN: u8 = 0;
 const SNAP_PHASE_RUNNING: u8 = 1;
 const SNAP_PHASE_COMPLETE: u8 = 2;
 
+/// The `SnapEntry` v14 progress tail's `prog_state` encoding —
+/// `ParticipantState`'s discriminant opaque on the wire, named here
+/// with its only consumer like the `SnapRace` phases above.
+const SNAP_PROG_AWAITING: u8 = 0;
+const SNAP_PROG_RACING: u8 = 1;
+const SNAP_PROG_FINISHED: u8 = 2;
+const SNAP_PROG_TIMED_OUT: u8 = 3;
+
 /// `RaceState` → the v13 `Snap.race` row (F25-B): the lifecycle
 /// discriminant, the countdown remainder while counting, and the race
 /// clock verbatim. Stale resources never encode — the caller filters.
@@ -377,21 +386,204 @@ fn race_phase(row: &SnapRace) -> Option<RacePhase> {
     }
 }
 
-/// The v13 race row's apply-side targets bundled as one param
+/// The two `RaceProgress` borrows the race mirror needs — a
+/// `ParamSet` because they overlap: `p0` walks *every* participant
+/// for the countdown-release flip (seats and non-wire participants
+/// alike), while `p1` resolves a `NetPlayer` seat's v14 row to its
+/// entity inside `apply_snap_frame`'s seat loop.
+type RaceProgressQueries<'w, 's> = bevy::ecs::system::ParamSet<
+    'w,
+    's,
+    (
+        Query<'w, 's, &'static mut RaceProgress>,
+        Query<'w, 's, &'static mut RaceProgress, With<NetPlayer>>,
+    ),
+>;
+
+/// The v13/v14 race rows' apply-side targets bundled as one param
 /// (F25-B): `apply_snapshots` is at the system-parameter arity
-/// ceiling, so the mirror's three borrows ride together — the
-/// session's [`RaceState`] (absent on a raceless session), the
-/// participants' [`RaceProgress`] for the release flip, and the
-/// [`RaceStarted`] writer for the one GO edge.
+/// ceiling, so the mirror's borrows ride together — the session's
+/// [`RaceState`] (absent on a raceless session), the participants'
+/// [`RaceProgress`] for both the release flip and the v14 per-seat
+/// row mirror, the [`ResultLedger`] a replicated terminal edge
+/// records into, and the [`RaceStarted`] writer for the one GO edge.
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct RaceMirror<'w, 's> {
     /// The session's race resource the row mirrors into.
     race: Option<ResMut<'w, RaceState>>,
-    /// Every participant's progress — the release flips
-    /// `AwaitingStart → Racing` exactly like `advance_race` does.
-    progress: Query<'w, 's, &'static mut RaceProgress>,
+    /// See [`RaceProgressQueries`].
+    progress: RaceProgressQueries<'w, 's>,
+    /// The ledger a replicated terminal edge records into — the same
+    /// dedup sink `advance_race` writes on the authority.
+    ledger: ResMut<'w, ResultLedger>,
     /// The release event consumers observe for the unlock.
     started: MessageWriter<'w, RaceStarted>,
+}
+
+/// `RaceProgress` → the v14 per-seat progress tail on its
+/// [`SnapEntry`] (F25-B): the lifecycle discriminant plus the
+/// terminal state's resolution tick, the `Ordered` counters, the
+/// cleared-gate mask and the evidence counters — verbatim state,
+/// replicated like the v8 damage byte. `None` — a participant the
+/// race does not track (or a session whose `RaceState` is stale —
+/// the caller gates) — leaves the all-zero tail: "no progress"
+/// reads as never-started, never a fabricated row.
+fn encode_progress(progress: Option<&RaceProgress>, entry: &mut SnapEntry) {
+    let Some(progress) = progress else { return };
+    (entry.prog_state, entry.prog_ticks) = match progress.state {
+        ParticipantState::AwaitingStart => (SNAP_PROG_AWAITING, 0),
+        ParticipantState::Racing => (SNAP_PROG_RACING, 0),
+        ParticipantState::Finished { race_ticks, .. } => (SNAP_PROG_FINISHED, race_ticks),
+        ParticipantState::TimedOut { race_ticks, .. } => (SNAP_PROG_TIMED_OUT, race_ticks),
+    };
+    entry.prog_lap = progress.lap;
+    entry.prog_next = progress.next.min(u32::MAX as usize) as u32;
+    entry.prog_cleared = progress.cleared_mask();
+    entry.prog_crossings = progress.crossings;
+    entry.prog_route_clears = progress.route_clears;
+}
+
+/// The decoded v14 progress tail's lifecycle word — a `prog_state`
+/// discriminant the wire cannot name reads `None` and drops counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapProgress {
+    /// Awaiting the countdown's release.
+    Awaiting,
+    /// Racing.
+    Racing,
+    /// Finished at the carried race tick.
+    Finished {
+        /// The authority's finish tick.
+        race_ticks: u64,
+    },
+    /// The deadline expired with objectives open.
+    TimedOut {
+        /// The authority's expiry tick — the limit's tick.
+        race_ticks: u64,
+    },
+}
+
+/// A [`SnapEntry`]'s v14 tail → [`SnapProgress`] — `None` for a
+/// discriminant the consumer cannot name (a peer speaking a wire we
+/// do not know).
+fn decode_progress(entry: &SnapEntry) -> Option<SnapProgress> {
+    match entry.prog_state {
+        SNAP_PROG_AWAITING => Some(SnapProgress::Awaiting),
+        SNAP_PROG_RACING => Some(SnapProgress::Racing),
+        SNAP_PROG_FINISHED => Some(SnapProgress::Finished {
+            race_ticks: entry.prog_ticks,
+        }),
+        SNAP_PROG_TIMED_OUT => Some(SnapProgress::TimedOut {
+            race_ticks: entry.prog_ticks,
+        }),
+        _ => None,
+    }
+}
+
+/// The v14 per-seat progress tail's receiving half (F25-B): mirror
+/// the authority's `RaceProgress` counters verbatim and land the
+/// terminal edge exactly like `advance_race` records it on the
+/// authority — the minted [`SessionResult`] records into this
+/// process's [`ResultLedger`] (deduped by identity), the
+/// participant's state carries the minted id, and a resolved *local*
+/// participant moves the session `Playing → Results` — UI-5's
+/// local-resolution rule, mirrored. `snap_tick` is the authority's
+/// session tick at the frame's mint — the same clock family the
+/// authority stamps its own results' `tick` field on.
+///
+/// The wire is a predicted client's only progress truth —
+/// `advance_race` is authority-gated. A locally-resolved seat keeps
+/// its recorded state: an identical row is idempotent state (no
+/// count, like the race row's), a conflicting one — a rewound
+/// lifecycle or a different resolution — is a non-conforming
+/// authority's word and drops counted rather than rewriting a
+/// recorded result.
+#[allow(clippy::too_many_arguments)] // the mirror genuinely threads the row, the session mint and the ledger
+fn apply_progress(
+    entry: &SnapEntry,
+    player: &Player,
+    progress: &mut RaceProgress,
+    session: &mut Session,
+    ledger: &mut ResultLedger,
+    snap_tick: u64,
+    report: &mut NetDriveReport,
+) {
+    let Some(wire) = decode_progress(entry) else {
+        report.progress_dropped += 1;
+        return;
+    };
+    // A recorded resolution is final — the local terminal edge
+    // already minted and recorded this participant's result.
+    let resolved = match &progress.state {
+        ParticipantState::Finished { race_ticks, .. } => Some((*race_ticks, false)),
+        ParticipantState::TimedOut { race_ticks, .. } => Some((*race_ticks, true)),
+        _ => None,
+    };
+    if let Some((ticks, timed_out)) = resolved {
+        let same = match wire {
+            SnapProgress::Finished { race_ticks } => !timed_out && race_ticks == ticks,
+            SnapProgress::TimedOut { race_ticks } => timed_out && race_ticks == ticks,
+            _ => false,
+        };
+        if same {
+            return;
+        }
+        report.progress_dropped += 1;
+        return;
+    }
+    progress.apply_replicated(
+        entry.prog_cleared,
+        entry.prog_next as usize,
+        entry.prog_lap,
+        entry.prog_crossings,
+        entry.prog_route_clears,
+    );
+    match wire {
+        SnapProgress::Awaiting => progress.state = ParticipantState::AwaitingStart,
+        SnapProgress::Racing => progress.state = ParticipantState::Racing,
+        SnapProgress::Finished { .. } | SnapProgress::TimedOut { .. } => {
+            // The terminal edge — mint and record exactly like
+            // `advance_race` does: one result per participant per
+            // generation, deduplicated by identity through the
+            // ledger (the mint lives in this process's local id
+            // namespace, like every id the replicated side holds).
+            let id = session.mint_result_id(player.id);
+            let outcome = match wire {
+                SnapProgress::Finished { race_ticks } => SessionOutcome::Finished { race_ticks },
+                SnapProgress::TimedOut { race_ticks } => SessionOutcome::TimedOut { race_ticks },
+                _ => unreachable!(),
+            };
+            let result = SessionResult {
+                id: id.clone(),
+                tick: snap_tick,
+                outcome,
+            };
+            if let Err(dup) = ledger.record(result) {
+                warn!(duplicate = %dup, "replicated race result rejected");
+            }
+            progress.state = match wire {
+                SnapProgress::Finished { race_ticks } => ParticipantState::Finished {
+                    race_ticks,
+                    result: id,
+                },
+                SnapProgress::TimedOut { race_ticks } => ParticipantState::TimedOut {
+                    race_ticks,
+                    result: id,
+                },
+                _ => unreachable!(),
+            };
+            // UI-5's local-resolution rule mirrored: the wire's word
+            // that *our* seat resolved ends the local session's
+            // `Playing`, exactly like a locally-simulated finish
+            // does on the authority.
+            if player.control == PlayerControl::Local && *session.phase() == SessionPhase::Playing {
+                session
+                    .transition(SessionPhase::Results)
+                    .expect("Playing → Results is a legal transition");
+            }
+        }
+    }
+    report.progress_applied += 1;
 }
 
 /// The freshness key for a staged race row — `(generation, rank,
@@ -594,6 +786,17 @@ pub struct NetDriveReport {
     /// Equal-or-older rows never reach here — idempotent state is
     /// not a drop.
     pub race_dropped: u64,
+    /// `SnapEntry` v14 progress tails applied (client side, F25-B):
+    /// a wire seat's replicated `RaceProgress` mirrored onto its
+    /// participant — terminal edges minting a `SessionResult` into
+    /// the local `ResultLedger` included. `0` on the authority and on
+    /// seats the race does not track.
+    pub progress_applied: u64,
+    /// Progress tails refused — an unnamed `prog_state` discriminant,
+    /// or a terminal row conflicting with a resolution this process
+    /// already recorded (a non-conforming authority rewinding a
+    /// lifecycle is refused, not believed).
+    pub progress_dropped: u64,
 }
 
 /// A rotation off the wire, sanitized — a malformed-quaternion guard so
@@ -1746,6 +1949,9 @@ pub fn publish_snapshots(
     bangers: Query<(&ObjectIdentity, &Banger)>,
     mut impacts: MessageReader<ImpactEvent>,
     mut report: ResMut<NetDriveReport>,
+    // The v14 progress tail's source: a seat's `ObjectId` → its
+    // participant `RaceProgress`, when the race tracks it.
+    progresses: Query<(&ObjectIdentity, &RaceProgress), With<Player>>,
 ) {
     // The reader drains every run — including gated-out phases — so a
     // pre-`Start` or post-session stream never replays stale hits into
@@ -1757,6 +1963,17 @@ pub fn publish_snapshots(
     ) {
         return;
     }
+    // A seat row is only progress-honest while the session actually
+    // has a live race — a raceless or stale `RaceState` leaves every
+    // tail zeroed: "the race does not track this seat".
+    let race_live = race
+        .as_ref()
+        .is_some_and(|r| !r.is_stale(session.generation()));
+    let seat_progress: HashMap<ObjectId, &RaceProgress> = if race_live {
+        progresses.iter().map(|(id, p)| (id.0, p)).collect()
+    } else {
+        HashMap::new()
+    };
     let wires: BTreeMap<Entity, u16> = players
         .iter()
         .map(|(entity, wire, ..)| (entity, wire.0))
@@ -1764,12 +1981,26 @@ pub fn publish_snapshots(
     let mut entries: Vec<SnapEntry> = players
         .iter()
         .map(
-            |(_, wire, epoch, _, pos, rot, vel, ang, vehicle, state, input, damage, breaks)| {
+            |(
+                _,
+                wire,
+                epoch,
+                identity,
+                pos,
+                rot,
+                vel,
+                ang,
+                vehicle,
+                state,
+                input,
+                damage,
+                breaks,
+            )| {
                 let (steer, spin, compression, flags) = match (vehicle, state, input) {
                     (Some(v), Some(s), Some(i)) => encode_present(&v.config, s, i),
                     _ => (0, 0, 0, 0),
                 };
-                SnapEntry {
+                let mut entry = SnapEntry {
                     player: wire.0,
                     pos: pos.0.to_array(),
                     rot: rot.0.to_array(),
@@ -1782,7 +2013,13 @@ pub fn publish_snapshots(
                     flags,
                     damage: encode_damage(damage),
                     breaks: encode_breaks(breaks),
-                }
+                    ..SnapEntry::default()
+                };
+                // The v14 progress tail (F25-B): the seat's replicated
+                // `RaceProgress` — a predicted client whose rule
+                // pipeline never steps mirrors every seat's standing.
+                encode_progress(seat_progress.get(&identity.0).copied(), &mut entry);
+                entry
             },
         )
         .collect();
@@ -2016,7 +2253,8 @@ pub fn apply_snapshots(
     mut banger_writer: MessageWriter<BangerStateChanged>,
     mut break_visuals: Query<BreakVisualMut, Without<Banger>>,
     render_parts: Query<(&Mesh3d, &MeshMaterial3d<StandardMaterial>, &ChildOf)>,
-    // The v13 race row's targets — see [`RaceMirror`].
+    // The v13 race row's and v14 progress tails' targets — see
+    // [`RaceMirror`].
     mut mirror: RaceMirror,
     mut report: ResMut<NetDriveReport>,
 ) {
@@ -2037,6 +2275,7 @@ pub fn apply_snapshots(
         &mut commands,
         &mut players,
         &mut trailers,
+        &mut mirror,
         &mut texel,
         &pool,
         &mut bangers,
@@ -2065,8 +2304,9 @@ pub fn apply_snapshots(
 /// mirror performs the same release `advance_race` does: every
 /// participant's `AwaitingStart` flips, the session moves to
 /// `Playing`, and the one `RaceStarted` goes out for the GO
-/// consumers. Checkpoint progress and results are not on the wire —
-/// F26 owns them; the phase word is what unlocks control.
+/// consumers. Per-seat checkpoint progress and results ride the
+/// seat rows' v14 tail — see [`apply_progress`]; the phase word is
+/// what unlocks control.
 fn apply_race_snap(
     generation: u64,
     row: SnapRace,
@@ -2097,7 +2337,7 @@ fn apply_race_snap(
     race.phase = phase;
     race.clock = row.clock;
     if releasing {
-        for mut progress in mirror.progress.iter_mut() {
+        for mut progress in mirror.progress.p0().iter_mut() {
             if progress.state == ParticipantState::AwaitingStart {
                 progress.state = ParticipantState::Racing;
             }
@@ -2222,6 +2462,7 @@ fn apply_snap_frame(
     commands: &mut Commands,
     players: &mut Query<SnapTargetRow<'_>, SnapTargetFilter>,
     trailers: &mut Query<SnapTrailerRow<'_>, SnapTrailerFilter>,
+    mirror: &mut RaceMirror,
     texel: &mut crate::texel_fx::TexelRepair,
     pool: &BangerPool,
     bangers: &mut Query<BangerMut>,
@@ -2315,6 +2556,24 @@ fn apply_snap_frame(
                 snaps
                     .repaired
                     .insert(entry.player, (snap.generation, snap.tick));
+            }
+            // The v14 progress tail lands on every named wire seat
+            // the race tracks — replicated `RaceProgress` mirrored
+            // verbatim, terminal edges recording into this process's
+            // `ResultLedger` like `advance_race` does on the
+            // authority (F25-B). Runs before the own-seat branch's
+            // `break` so the local participant resolves on the
+            // wire's word too.
+            if let Ok(mut progress) = mirror.progress.p1().get_mut(entity) {
+                apply_progress(
+                    entry,
+                    player,
+                    &mut progress,
+                    session,
+                    &mut mirror.ledger,
+                    snap.tick,
+                    report,
+                );
             }
             // The v11 breakaway bitmask reconciles on every named
             // seat too — set bits shed the part's node onto a pooled
@@ -2951,6 +3210,7 @@ mod tests {
             flags: SNAP_FLAG_BRAKE | SNAP_FLAG_GROUNDED,
             damage: 0,
             breaks: 0,
+            ..SnapEntry::default()
         };
         apply_present(&entry, &cfg, &mut state, &mut input, Some(&mut drive));
         assert_eq!(state.steer_angle, -0.26);
@@ -3149,6 +3409,7 @@ mod tests {
             flags: 0,
             damage: 0,
             breaks: 0,
+            ..SnapEntry::default()
         }
     }
 
@@ -3244,6 +3505,10 @@ mod tests {
             // parameters require them registered.
             .add_message::<BangerStateChanged>()
             .init_resource::<BangerPool>()
+            // The v14 progress tails' terminal edges record into the
+            // session ledger — never exercised by every leg, but the
+            // system's parameters require it registered.
+            .init_resource::<ResultLedger>()
             .add_systems(Update, apply_snapshots);
 
         // A stale push with nothing staged still folds — the count is
@@ -3345,6 +3610,10 @@ mod tests {
             .add_message::<RaceStarted>()
             .add_message::<BangerStateChanged>()
             .init_resource::<BangerPool>()
+            // The v14 progress tails' terminal edges record into the
+            // session ledger — never exercised by every leg, but the
+            // system's parameters require it registered.
+            .init_resource::<ResultLedger>()
             .add_systems(Update, apply_snapshots);
         // A remote seat for the drain to resolve — the required half
         // of the `SnapTargetRow` tuple, nothing more.
@@ -3505,6 +3774,10 @@ mod tests {
             .add_message::<RaceStarted>()
             .add_message::<BangerStateChanged>()
             .init_resource::<BangerPool>()
+            // The v14 progress tails' terminal edges record into the
+            // session ledger — never exercised by every leg, but the
+            // system's parameters require it registered.
+            .init_resource::<ResultLedger>()
             .add_systems(Update, apply_snapshots);
         // A participant awaiting the countdown — the release flips it.
         let participant = app.world_mut().spawn(RaceProgress::new(&def)).id();
@@ -3658,6 +3931,10 @@ mod tests {
             .add_message::<RaceStarted>()
             .add_message::<BangerStateChanged>()
             .init_resource::<BangerPool>()
+            // The v14 progress tails' terminal edges record into the
+            // session ledger — never exercised by every leg, but the
+            // system's parameters require it registered.
+            .init_resource::<ResultLedger>()
             .add_systems(Update, apply_snapshots);
 
         app.world_mut().resource_mut::<RemoteSnaps>().push(
@@ -3738,5 +4015,198 @@ mod tests {
         assert!(key(3, SNAP_PHASE_RUNNING, 0, 9) < key(3, SNAP_PHASE_COMPLETE, 0, 9));
         assert!(key(3, SNAP_PHASE_COMPLETE, 0, 9) < key(4, SNAP_PHASE_COUNTDOWN, 99, 0));
         assert_eq!(key(3, 99, 0, 0), None);
+    }
+
+    /// A wire seat's v14 progress tail is the predicted client's only
+    /// `RaceProgress` truth (protocol v14, F25-B): the mirror lands
+    /// the authority's rule counters verbatim, and a terminal edge
+    /// mints the same `SessionResult` `advance_race` records on the
+    /// authority — stamped on the snap's own tick, deduplicated
+    /// through the `ResultLedger`. Resolving the *local* seat moves
+    /// the session `Playing → Results`, the transition UI-5's own
+    /// resolution runs. A redelivered identical row is idempotent
+    /// state; a conflicting terminal or an unnamed discriminant
+    /// drops counted rather than rewriting a recorded result.
+    #[test]
+    fn a_progress_tail_mirrors_the_seats_race_standing() {
+        let mut session = Session::new();
+        session
+            .begin_generation(
+                mm2_game::SessionConfig {
+                    authority: mm2_game::SessionAuthority::Remote,
+                    ..mm2_game::SessionConfig::default()
+                },
+                1,
+            )
+            .unwrap();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+        let generation = session.generation();
+        let def = grid_def(&[]);
+        let mut race = RaceState::new(def.clone(), generation);
+        race.phase = RacePhase::Running;
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(session)
+            .insert_resource(race)
+            .init_resource::<RemoteSnaps>()
+            .init_resource::<NetDriveReport>()
+            .init_resource::<crate::texel_fx::TexelDamageReport>()
+            .add_message::<RemoteImpact>()
+            .add_message::<RaceStarted>()
+            .add_message::<BangerStateChanged>()
+            .init_resource::<BangerPool>()
+            .init_resource::<ResultLedger>()
+            .add_systems(Update, apply_snapshots);
+        // A remote wire seat and our own — both participants the
+        // race tracks, so both carry `RaceProgress` to mirror into.
+        let seat = |wire: u16, id: u16, control| {
+            (
+                NetPlayer(wire),
+                Player {
+                    id: mm2_game::PlayerId(id),
+                    control,
+                },
+                ResetEpoch(0),
+                Position(Vec3::ZERO),
+                Rotation(Quat::IDENTITY),
+                LinearVelocity(Vec3::ZERO),
+                AngularVelocity(Vec3::ZERO),
+                RaceProgress::new(&def),
+            )
+        };
+        let remote = app
+            .world_mut()
+            .spawn(seat(7, 9, PlayerControl::Remote))
+            .id();
+        let own = app
+            .world_mut()
+            .spawn(seat(8, 11, PlayerControl::Local))
+            .id();
+
+        let push = |app: &mut App, tick: u64, entries: Vec<SnapEntry>| {
+            app.world_mut().resource_mut::<RemoteSnaps>().push(
+                1,
+                tick,
+                entries,
+                Vec::new(),
+                Vec::new(),
+                None,
+            );
+        };
+        let progress_of =
+            |app: &App, seat: Entity| app.world().get::<RaceProgress>(seat).unwrap().clone();
+
+        // Mid-race standing: the counters land verbatim.
+        let mut racing = snap_entry();
+        racing.player = 7;
+        racing.prog_state = SNAP_PROG_RACING;
+        racing.prog_cleared = 0b1;
+        racing.prog_next = 5;
+        racing.prog_lap = 2;
+        racing.prog_crossings = 9;
+        racing.prog_route_clears = 1;
+        push(&mut app, 10, vec![racing]);
+        app.update();
+        let p = progress_of(&app, remote);
+        assert_eq!(p.state, ParticipantState::Racing);
+        assert!(p.is_cleared(0));
+        assert_eq!(p.next, 5);
+        assert_eq!(p.lap, 2);
+        assert_eq!(p.crossings, 9);
+        assert_eq!(p.route_clears, 1);
+        assert_eq!(app.world().resource::<NetDriveReport>().progress_applied, 1);
+        // The absent own row left the local participant untouched.
+        assert_eq!(
+            progress_of(&app, own).state,
+            ParticipantState::AwaitingStart
+        );
+
+        // The terminal edge mints a result like `advance_race` does —
+        // the snap's own tick stamps it, the ledger dedups it.
+        let mut finished = racing;
+        finished.prog_state = SNAP_PROG_FINISHED;
+        finished.prog_ticks = 4200;
+        push(&mut app, 11, vec![finished]);
+        app.update();
+        let result = match progress_of(&app, remote).state {
+            ParticipantState::Finished { race_ticks, result } => {
+                assert_eq!(race_ticks, 4200);
+                result
+            }
+            other => panic!("expected Finished, got {other:?}"),
+        };
+        {
+            let ledger = app.world().resource::<ResultLedger>();
+            assert_eq!(ledger.len(), 1);
+            let recorded = ledger.get(&result).unwrap();
+            assert_eq!(recorded.tick, 11, "the snap's tick stamps the result");
+            assert_eq!(
+                recorded.outcome,
+                SessionOutcome::Finished { race_ticks: 4200 }
+            );
+        }
+        assert_eq!(app.world().resource::<NetDriveReport>().progress_applied, 2);
+        // A *remote* seat resolving never ends the local session —
+        // only the local participant's own resolution does (UI-5).
+        assert_eq!(
+            app.world().resource::<Session>().phase(),
+            &SessionPhase::Playing
+        );
+
+        // A redelivery of the same terminal row is idempotent state,
+        // not a second resolution — nothing re-mints, nothing counts.
+        push(&mut app, 12, vec![finished]);
+        app.update();
+        assert_eq!(app.world().resource::<NetDriveReport>().progress_applied, 2);
+        assert_eq!(app.world().resource::<NetDriveReport>().progress_dropped, 0);
+        assert_eq!(app.world().resource::<ResultLedger>().len(), 1);
+
+        // A terminal row disagreeing with the recorded resolution is
+        // a non-conforming authority's word — refused, not believed.
+        let mut rewound = finished;
+        rewound.prog_state = SNAP_PROG_TIMED_OUT;
+        rewound.prog_ticks = 100;
+        push(&mut app, 13, vec![rewound]);
+        app.update();
+        assert_eq!(app.world().resource::<NetDriveReport>().progress_dropped, 1);
+        assert!(matches!(
+            progress_of(&app, remote).state,
+            ParticipantState::Finished {
+                race_ticks: 4200,
+                ..
+            }
+        ));
+        assert_eq!(app.world().resource::<ResultLedger>().len(), 1);
+
+        // An unnamed discriminant drops counted.
+        let mut nonsense = snap_entry();
+        nonsense.player = 7;
+        nonsense.prog_state = 9;
+        push(&mut app, 14, vec![nonsense]);
+        app.update();
+        assert_eq!(app.world().resource::<NetDriveReport>().progress_dropped, 2);
+
+        // The local seat's resolution on the wire's word ends the
+        // local session exactly like a simulated finish does.
+        let mut own_row = snap_entry();
+        own_row.player = 8;
+        own_row.prog_state = SNAP_PROG_FINISHED;
+        own_row.prog_ticks = 4300;
+        push(&mut app, 15, vec![own_row]);
+        app.update();
+        assert!(matches!(
+            progress_of(&app, own).state,
+            ParticipantState::Finished {
+                race_ticks: 4300,
+                ..
+            }
+        ));
+        assert_eq!(
+            app.world().resource::<Session>().phase(),
+            &SessionPhase::Results,
+            "UI-5's local-resolution rule, mirrored"
+        );
+        assert_eq!(app.world().resource::<ResultLedger>().len(), 2);
     }
 }

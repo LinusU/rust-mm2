@@ -136,6 +136,9 @@ fn lobby_app(vfs: Vfs) -> App {
         // writes the banger lifecycle stream like the authority does.
         .add_message::<mm2_game::BangerStateChanged>()
         .init_resource::<mm2_game::BangerPool>()
+        // F25-B (v14): a replicated terminal edge records into the
+        // session's result ledger like `advance_race` does.
+        .init_resource::<mm2_game::ResultLedger>()
         .insert_resource(Mm2Vfs(vfs))
         .insert_resource(SelectedCar {
             def: None,
@@ -2334,6 +2337,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                     // v8: the host copy is half-wrecked.
                     damage: 128,
                     breaks: 0,
+                    ..SnapEntry::default()
                 },
                 // Our own seat's entry is received and, epoch-equal,
                 // skipped — between authority resets the local sim
@@ -2356,6 +2360,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                     flags: mm2_net::SNAP_FLAG_BRAKE | mm2_net::SNAP_FLAG_REVERSE,
                     damage: 200,
                     breaks: 0,
+                    ..SnapEntry::default()
                 },
             ],
         })
@@ -2493,6 +2498,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                     flags: 0,
                     damage: 0,
                     breaks: 0,
+                    ..SnapEntry::default()
                 }],
             })
             .unwrap();
@@ -2517,6 +2523,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 flags: 0,
                 damage: 0,
                 breaks: 0,
+                ..SnapEntry::default()
             }],
         })
         .unwrap();
@@ -2560,6 +2567,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 flags: 0,
                 damage: 0,
                 breaks: 0,
+                ..SnapEntry::default()
             }],
         })
         .unwrap();
@@ -2609,6 +2617,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 flags: 0,
                 damage: 0,
                 breaks: 0,
+                ..SnapEntry::default()
             }],
         })
         .unwrap();
@@ -2672,6 +2681,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 flags: 0,
                 damage: 0,
                 breaks: 0,
+                ..SnapEntry::default()
             }],
         })
         .unwrap();
@@ -2735,6 +2745,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 flags: 0,
                 damage: 0,
                 breaks: 0,
+                ..SnapEntry::default()
             }],
         })
         .unwrap();
@@ -2780,6 +2791,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
                 flags: 0,
                 damage: 0,
                 breaks: 0,
+                ..SnapEntry::default()
             }],
         })
         .unwrap();
@@ -3262,6 +3274,7 @@ fn a_snapshot_drives_a_remote_rigs_trailer() {
         flags: mm2_net::SNAP_FLAG_GROUNDED,
         damage: 0,
         breaks: 0,
+        ..SnapEntry::default()
     };
     // An epoch-equal snap: the remote trailer blends, the own rig's
     // trailer stays exactly where the local sim left it — the wire row
@@ -3775,6 +3788,7 @@ fn a_snapshot_feeds_the_remote_impact_stream() {
         flags: 0,
         damage: 0,
         breaks: 0,
+        ..SnapEntry::default()
     };
     let row = |seat: u16, id: u64| SnapImpact {
         seat,
@@ -4187,6 +4201,369 @@ fn a_snap_race_row_releases_the_joined_clients_countdown() {
     host.shutdown();
 }
 
+/// F25-B, protocol v14 client half: a seat's `SnapEntry` progress
+/// tail is the predicted client's only `RaceProgress` truth —
+/// `advance_race` is authority-gated and never steps there, so the
+/// wire mirrors every seat's standing. The tail lands the rule
+/// counters verbatim, a terminal edge mints the same `SessionResult`
+/// `advance_race` records on the authority into the client's own
+/// `ResultLedger` — and only the *local* participant's resolution
+/// moves the session `Playing → Results` (UI-5). A conflicting
+/// terminal row drops counted rather than rewriting a recorded
+/// result.
+#[test]
+fn a_snap_progress_tail_mirrors_and_resolves_the_joined_client() {
+    let install = tempfile::tempdir().unwrap();
+    let vfs = mount(install.path());
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host_config = HostConfig::new(fp);
+    host_config.host_pick = Some(VehiclePick {
+        vehicle: String::new(),
+        paint: 0,
+    });
+    let mut host = Host::listen_loopback(&host_config).unwrap();
+    host.set_session(net::advertise(&dev_cruise()).unwrap())
+        .unwrap();
+    let link = LobbyLink::join(
+        host.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join failed");
+    let our_id = link.player_id();
+    let mut app = bridge_app(vfs, link);
+    {
+        let link = app.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    until_ready(&mut app);
+    host.start(LateJoin::Open).unwrap();
+    until_started(&host);
+    until_begun(&mut app);
+    let generation = app.world().resource::<Session>().wire_generation();
+    {
+        // The load legs stand the session `Ready → Countdown` and
+        // insert the event's `RaceState` — staged by hand here, the
+        // load systems need the asset stack. The wire's rows then
+        // carry the run forward.
+        let local_generation = app.world().resource::<Session>().generation();
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+        let mut race = mm2_game::RaceState::new(wire_race_def(180), local_generation);
+        race.phase = mm2_game::RacePhase::Running;
+        app.world_mut().insert_resource(race);
+    }
+    // The host's seat reconciles into the kinematic copy; the race
+    // tracks it as a participant, so it carries `RaceProgress` like
+    // the real load path's seat spawn does.
+    spin_mut(&mut app, |a| {
+        a.world_mut()
+            .query_filtered::<Entity, With<RemotePick>>()
+            .iter(a.world())
+            .next()
+            .is_some()
+    });
+    let host_copy = {
+        let mut q = app.world_mut().query_filtered::<Entity, With<RemotePick>>();
+        q.single(app.world()).expect("the host copy")
+    };
+    app.world_mut()
+        .entity_mut(host_copy)
+        .insert(mm2_game::RaceProgress::new(&wire_race_def(180)));
+    // The local seat — stamped `NetPlayer(our_id)` by the reconcile.
+    let local = app
+        .world_mut()
+        .spawn((
+            PlayerVehicle,
+            Player {
+                id: mm2_game::PlayerId(1),
+                control: PlayerControl::Local,
+            },
+            mm2_game::AuthorityRole::Predicted,
+            mm2_game::RaceProgress::new(&wire_race_def(180)),
+            avian3d::prelude::Position::default(),
+            avian3d::prelude::Rotation::default(),
+            avian3d::prelude::LinearVelocity::default(),
+            avian3d::prelude::AngularVelocity::default(),
+        ))
+        .id();
+    spin(&mut app, |a| a.world().get::<NetPlayer>(local).is_some());
+
+    let progress_entry = |player: u16, state: u8, ticks: u64| SnapEntry {
+        player,
+        pos: [9.0, 1.0, 9.0],
+        rot: [0.0, 0.0, 0.0, 1.0],
+        vel: [0.0; 3],
+        angvel: [0.0; 3],
+        epoch: 0,
+        steer: 0,
+        spin: 0,
+        compression: 0,
+        flags: 0,
+        damage: 0,
+        breaks: 0,
+        prog_state: state,
+        prog_ticks: ticks,
+        prog_cleared: 0b1,
+        prog_crossings: 4,
+        ..SnapEntry::default()
+    };
+    let snap = |tick: u64, entries: Vec<SnapEntry>| Message::Snap {
+        generation,
+        tick,
+        entries,
+        trailers: Vec::new(),
+        impacts: Vec::new(),
+        race: None,
+    };
+
+    // A mid-race row: the host seat's counters mirror verbatim.
+    host.ctl()
+        .broadcast(&snap(7, vec![progress_entry(0, 1, 0)]))
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .progress_applied
+            >= 1
+    });
+    {
+        let progress = app
+            .world()
+            .get::<mm2_game::RaceProgress>(host_copy)
+            .unwrap();
+        assert_eq!(progress.state, mm2_game::ParticipantState::Racing);
+        assert!(progress.is_cleared(0), "the cleared mask landed");
+        assert_eq!(progress.crossings, 4);
+    }
+
+    // The host's terminal edge mints a result on this process — the
+    // ledger is the client's own, the participant's state carries
+    // the minted id — while the local session stays `Playing`: a
+    // remote seat resolving never ends *our* run (UI-5).
+    host.ctl()
+        .broadcast(&snap(8, vec![progress_entry(0, 2, 4200)]))
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world().resource::<mm2_game::ResultLedger>().len() == 1
+    });
+    {
+        let state = &app
+            .world()
+            .get::<mm2_game::RaceProgress>(host_copy)
+            .unwrap()
+            .state;
+        let mm2_game::ParticipantState::Finished { race_ticks, result } = state else {
+            panic!("expected Finished, got {state:?}")
+        };
+        assert_eq!(*race_ticks, 4200);
+        let ledger = app.world().resource::<mm2_game::ResultLedger>();
+        let recorded = ledger.get(result).unwrap();
+        assert_eq!(
+            recorded.outcome,
+            mm2_game::SessionOutcome::Finished { race_ticks: 4200 },
+            "the wire's word minted the same shape `advance_race` does"
+        );
+        assert_eq!(recorded.tick, 8, "the snap's tick stamps the result");
+        assert_eq!(session_phase(&app), SessionPhase::Playing);
+    }
+
+    // The local participant's own finish on the wire's word is what
+    // ends the local session — the mirrored UI-5 rule.
+    host.ctl()
+        .broadcast(&snap(9, vec![progress_entry(our_id, 2, 4300)]))
+        .unwrap();
+    spin(&mut app, |a| session_phase(a) == SessionPhase::Results);
+    assert!(matches!(
+        app.world()
+            .get::<mm2_game::RaceProgress>(local)
+            .unwrap()
+            .state,
+        mm2_game::ParticipantState::Finished {
+            race_ticks: 4300,
+            ..
+        }
+    ));
+    assert_eq!(app.world().resource::<mm2_game::ResultLedger>().len(), 2);
+
+    // A terminal row disagreeing with a recorded resolution is a
+    // non-conforming authority's word — refused, not believed: the
+    // host seat's recorded finish stands, the row counts as dropped.
+    host.ctl()
+        .broadcast(&snap(10, vec![progress_entry(0, 3, 100)]))
+        .unwrap();
+    app.update();
+    app.update();
+    {
+        assert!(matches!(
+            app.world()
+                .get::<mm2_game::RaceProgress>(host_copy)
+                .unwrap()
+                .state,
+            mm2_game::ParticipantState::Finished {
+                race_ticks: 4200,
+                ..
+            }
+        ));
+        assert_eq!(app.world().resource::<mm2_game::ResultLedger>().len(), 2);
+        assert!(
+            app.world()
+                .resource::<netdrive::NetDriveReport>()
+                .progress_dropped
+                >= 1,
+            "the rewound lifecycle dropped counted"
+        );
+    }
+
+    host.shutdown();
+}
+
+/// F25-B, protocol v14 host half: while an event session runs, every
+/// tracked seat's `RaceProgress` rides its `SnapEntry` — the
+/// lifecycle discriminant, the terminal state's resolution tick, the
+/// `Ordered` counters, the cleared-gate mask and the evidence
+/// counters — the standing a predicted client's authority-gated rule
+/// pipeline can never compute for itself. A seat the race does not
+/// track publishes the all-zero tail: never a fabricated row.
+#[test]
+fn a_snap_publishes_the_seats_race_progress() {
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let mut app = host_app(vfs, link);
+    let mut peer = ready_peer(addr, "eve", fp);
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<LobbyState>()
+            .roster
+            .iter()
+            .any(|e| e.pick.is_some())
+    });
+    app.world()
+        .resource::<HostLink>()
+        .command_sender()
+        .send(HostCommand::Start)
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world().resource::<Session>().config().is_some()
+    });
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    let generation = app.world().resource::<Session>().generation();
+    let def = wire_race_def(180);
+    let mut race = mm2_game::RaceState::new(def.clone(), generation);
+    race.phase = mm2_game::RacePhase::Running;
+    app.world_mut().insert_resource(race);
+
+    // The host seat — the shape `load_session_world` leaves a
+    // participant: wire id 0, the pose row publish reads, and a
+    // `RaceProgress` mid-race (the gate cleared by a real crossing,
+    // the rest verbatim counters).
+    let mut progress = mm2_game::RaceProgress::new(&def);
+    progress.state = mm2_game::ParticipantState::Racing;
+    progress.advance(&def, Vec3::new(0.0, 0.0, -201.0));
+    progress.advance(&def, Vec3::new(0.0, 0.0, -199.0));
+    progress.route_clears = 2;
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        let result = session.mint_result_id(mm2_game::PlayerId(0));
+        progress.state = mm2_game::ParticipantState::Finished {
+            race_ticks: 4200,
+            result,
+        };
+    }
+    app.world_mut().spawn((
+        netdrive::NetPlayer(0),
+        Player {
+            id: mm2_game::PlayerId(0),
+            control: PlayerControl::Local,
+        },
+        netdrive::ResetEpoch(0),
+        mm2_game::ObjectIdentity(mm2_game::ObjectId {
+            generation: 1,
+            slot: 100,
+        }),
+        progress,
+        avian3d::prelude::Position(Vec3::new(1.0, 1.0, 1.0)),
+        avian3d::prelude::Rotation::default(),
+        avian3d::prelude::LinearVelocity::default(),
+        avian3d::prelude::AngularVelocity::default(),
+    ));
+    app.update();
+
+    let snap = until_wire(
+        &mut peer,
+        |m| matches!(m, Message::Snap { entries, .. } if entries.iter().any(|e| e.prog_state == 2)),
+    );
+    let Message::Snap { entries, .. } = snap else {
+        unreachable!("the predicate matched a progress tail")
+    };
+    let entry = entries
+        .iter()
+        .find(|e| e.player == 0)
+        .expect("the host seat's row");
+    assert_eq!(
+        (
+            entry.prog_state,
+            entry.prog_ticks,
+            entry.prog_cleared,
+            entry.prog_crossings,
+            entry.prog_route_clears,
+        ),
+        (2, 4200, 0b1, 1, 2),
+        "the authority's standing rides the seat's row verbatim"
+    );
+
+    // A seat the race does not track — no `RaceProgress` — publishes
+    // the all-zero tail: "not tracked", never a fabricated row.
+    // (Wire id 7 keeps it out of the roster's own numbering.)
+    app.world_mut().spawn((
+        netdrive::NetPlayer(7),
+        Player {
+            id: mm2_game::PlayerId(1),
+            control: PlayerControl::Local,
+        },
+        netdrive::ResetEpoch(0),
+        mm2_game::ObjectIdentity(mm2_game::ObjectId {
+            generation: 1,
+            slot: 101,
+        }),
+        avian3d::prelude::Position(Vec3::new(2.0, 1.0, 2.0)),
+        avian3d::prelude::Rotation::default(),
+        avian3d::prelude::LinearVelocity::default(),
+        avian3d::prelude::AngularVelocity::default(),
+    ));
+    app.update();
+    let snap = until_wire(
+        &mut peer,
+        |m| matches!(m, Message::Snap { entries, .. } if entries.iter().any(|e| e.player == 7)),
+    );
+    let Message::Snap { entries, .. } = snap else {
+        unreachable!("the predicate matched the untracked seat's row")
+    };
+    let entry = entries
+        .iter()
+        .find(|e| e.player == 7)
+        .expect("the untracked seat's row");
+    assert_eq!(
+        (
+            entry.prog_state,
+            entry.prog_ticks,
+            entry.prog_cleared,
+            entry.prog_crossings,
+            entry.prog_route_clears,
+        ),
+        (0, 0, 0, 0, 0),
+        "no fabricated progress for a seat the race does not track"
+    );
+}
+
 /// F25-B (protocol v11): a `SnapEntry.breaks` bitmask is replicated
 /// rig *state* — a client diffs it every snap against every named
 /// seat's `VehicleBreaks`: a set bit sheds the part onto a pooled
@@ -4314,6 +4691,7 @@ fn a_snap_reconciles_the_remote_copys_breakaway_rig() {
         flags: 0,
         damage: 0,
         breaks,
+        ..SnapEntry::default()
     };
     // Bit 0 set on both seats: the remote copy sheds like the wire
     // says, and the own seat mirrors it — its predicted sim never runs
