@@ -188,6 +188,11 @@ fn milestones_count_beaten_events_in_the_family() {
     );
     assert!(!p.progress.unlocks.contains("vehicle:vphalf"));
 
+    // The counts the menu shows: one beaten here, the two targets.
+    assert_eq!(p.beaten_in("sf", EventTableKind::Checkpoint), 1);
+    assert_eq!(table.milestone_target(&table.milestones[0]), Some(2));
+    assert_eq!(table.milestone_target(&table.milestones[1]), Some(4));
+
     // Second beaten event of four = half → the half grant, not all.
     apply_result(
         &mut p,

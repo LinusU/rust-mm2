@@ -338,6 +338,16 @@ impl PlayerProfile {
         self.progress.events.iter().find(|r| &r.key == key)
     }
 
+    /// How many of `city`'s `family` events this profile has beaten —
+    /// the count `half`/`all` reward milestones measure.
+    pub fn beaten_in(&self, city: &str, family: EventTableKind) -> usize {
+        self.progress
+            .events
+            .iter()
+            .filter(|r| r.key.city == city && r.key.table == family && r.is_beaten())
+            .count()
+    }
+
     /// Mutable access to `key`'s record, inserting a zeroed one when
     /// the event has no record yet. Keeps `events` sorted so the
     /// serialized layout stays stable.

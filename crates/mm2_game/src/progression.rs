@@ -121,6 +121,22 @@ pub struct RewardTable {
     pub diagnostics: Vec<String>,
 }
 
+impl RewardTable {
+    /// How many beaten events in its family a milestone `rule` needs.
+    /// `None` for an indexed rule — a stray one in `milestones` is a
+    /// producer diagnostic, never a rule — and for an empty family,
+    /// which no finish can move.
+    pub fn milestone_target(&self, rule: &RewardRule) -> Option<usize> {
+        let size = self.family_sizes.get(&rule.family).copied().unwrap_or(0);
+        let needed = match rule.requirement {
+            RewardRequirement::Half => size.div_ceil(2),
+            RewardRequirement::All => size,
+            RewardRequirement::Event(_) => return None,
+        };
+        (needed > 0).then_some(needed)
+    }
+}
+
 /// The documented place a finish must reach to count the event as
 /// beaten: top-3 at Amateur, 1st at Professional (RACE-3/CHK-3/VEH-3/
 /// VEH-4 — every authored rule states "top-3/1st").
@@ -487,27 +503,14 @@ pub fn apply_result(
     }
     // Family milestones: this finish can only move this family in this
     // city, so only its rules are re-evaluated.
-    let size = table.family_sizes.get(&key.table).copied().unwrap_or(0);
     for rule in &table.milestones {
         if rule.family != key.table {
             continue;
         }
-        let needed = match rule.requirement {
-            RewardRequirement::Half => size.div_ceil(2),
-            RewardRequirement::All => size,
-            // A stray indexed row in milestones is a producer
-            // diagnostic, never a rule — skip rather than guess.
-            RewardRequirement::Event(_) => continue,
-        };
-        if needed == 0 {
+        let Some(needed) = table.milestone_target(rule) else {
             continue;
-        }
-        let beaten = profile
-            .progress
-            .events
-            .iter()
-            .filter(|r| r.key.city == key.city && r.key.table == rule.family && r.is_beaten())
-            .count();
+        };
+        let beaten = profile.beaten_in(&key.city, rule.family);
         if beaten >= needed && profile.progress.unlocks.insert(rule.unlock.id()) {
             granted.push(Grant {
                 unlock: rule.unlock.clone(),
