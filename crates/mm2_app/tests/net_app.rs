@@ -66,6 +66,29 @@ fn dev_cruise() -> SessionConfig {
     }
 }
 
+/// A minimal event definition for the v13 race-row legs: the wire
+/// field carries phase/countdown/clock whatever the route's shape, so
+/// one checkpoint is enough. `countdown` names the authored countdown
+/// length — `RaceState::new` opens with it.
+fn wire_race_def(countdown: u32) -> mm2_game::RaceDefinition {
+    mm2_game::RaceDefinition {
+        checkpoints: vec![mm2_game::Checkpoint {
+            center: Vec3::new(0.0, 0.0, -200.0),
+            radius: 15.0,
+            height: mm2_game::DEFAULT_CHECKPOINT_HEIGHT,
+            heading_deg: 0.0,
+            require_direction: false,
+        }],
+        finish: None,
+        rule: mm2_game::CheckpointRule::AnyOrder,
+        laps: 0,
+        time_limit_ticks: None,
+        params: mm2_game::EventParams::default(),
+        countdown_ticks: countdown,
+        start_slots: Vec::new(),
+    }
+}
+
 /// A loopback host advertising `config`, plus a joined `LobbyLink` and
 /// the VFS the app checks sessions against. `fp` is this side's own
 /// gameplay fingerprint — the in-process host simply trusts it.
@@ -106,6 +129,9 @@ fn lobby_app(vfs: Vfs) -> App {
         // `apply_snapshots` writes the replicated one.
         .add_message::<mm2_game::ImpactEvent>()
         .add_message::<netdrive::RemoteImpact>()
+        // F25-B (v13): `apply_snapshots` writes the release event when
+        // the wire's race row runs the countdown out.
+        .add_message::<mm2_game::RaceStarted>()
         // F25-B (v11): the breakaway reconcile claims pool slots and
         // writes the banger lifecycle stream like the authority does.
         .add_message::<mm2_game::BangerStateChanged>()
@@ -1192,6 +1218,7 @@ fn a_dead_authoritys_watermark_dies_with_the_link() {
             entries: Vec::new(),
             trailers: Vec::new(),
             impacts: Vec::new(),
+            race: None,
         })
         .unwrap();
     spin(&mut app, |a| {
@@ -1253,6 +1280,7 @@ fn a_dead_authoritys_watermark_dies_with_the_link() {
             entries: Vec::new(),
             trailers: Vec::new(),
             impacts: Vec::new(),
+            race: None,
         })
         .unwrap();
     spin(&mut app, |a| {
@@ -1299,6 +1327,7 @@ fn a_start_resets_the_stream_without_a_close() {
             entries: Vec::new(),
             trailers: Vec::new(),
             impacts: Vec::new(),
+            race: None,
         })
         .unwrap();
     spin(&mut app, |a| {
@@ -1338,6 +1367,7 @@ fn a_start_resets_the_stream_without_a_close() {
             entries: Vec::new(),
             trailers: Vec::new(),
             impacts: Vec::new(),
+            race: None,
         })
         .unwrap();
     spin(&mut app, |a| {
@@ -2282,6 +2312,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
     host.ctl()
         .broadcast(&Message::Snap {
             impacts: Vec::new(),
+            race: None,
             trailers: Vec::new(),
             generation,
             tick: 7,
@@ -2445,6 +2476,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
         host.ctl()
             .broadcast(&Message::Snap {
                 impacts: Vec::new(),
+                race: None,
                 trailers: Vec::new(),
                 generation,
                 tick,
@@ -2468,6 +2500,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
     host.ctl()
         .broadcast(&Message::Snap {
             impacts: Vec::new(),
+            race: None,
             trailers: Vec::new(),
             generation: generation + 9,
             tick: 99,
@@ -2510,6 +2543,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
     host.ctl()
         .broadcast(&Message::Snap {
             impacts: Vec::new(),
+            race: None,
             trailers: Vec::new(),
             generation,
             tick: 8,
@@ -2558,6 +2592,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
     host.ctl()
         .broadcast(&Message::Snap {
             impacts: Vec::new(),
+            race: None,
             trailers: Vec::new(),
             generation,
             tick: 9,
@@ -2615,6 +2650,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
     host.ctl()
         .broadcast(&Message::Snap {
             impacts: Vec::new(),
+            race: None,
             trailers: Vec::new(),
             generation,
             tick: 10,
@@ -2682,6 +2718,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
     host.ctl()
         .broadcast(&Message::Snap {
             impacts: Vec::new(),
+            race: None,
             trailers: Vec::new(),
             generation,
             tick: 11,
@@ -2726,6 +2763,7 @@ fn a_client_streams_inputs_and_applies_the_host_snapshot() {
     host.ctl()
         .broadcast(&Message::Snap {
             impacts: Vec::new(),
+            race: None,
             trailers: Vec::new(),
             generation,
             tick: 12,
@@ -3232,6 +3270,7 @@ fn a_snapshot_drives_a_remote_rigs_trailer() {
     host.ctl()
         .broadcast(&Message::Snap {
             impacts: Vec::new(),
+            race: None,
             generation,
             tick: 7,
             entries: vec![seat_entry(0, 0), seat_entry(our_id, 0)],
@@ -3326,6 +3365,7 @@ fn a_snapshot_drives_a_remote_rigs_trailer() {
     host.ctl()
         .broadcast(&Message::Snap {
             impacts: Vec::new(),
+            race: None,
             generation,
             tick: 8,
             entries: vec![seat_entry(0, 0), seat_entry(our_id, 1)],
@@ -3474,6 +3514,7 @@ fn a_trailer_rows_grounded_bit_drives_the_copys_suspension() {
     host.ctl()
         .broadcast(&Message::Snap {
             impacts: Vec::new(),
+            race: None,
             generation,
             tick: 7,
             entries: Vec::new(),
@@ -3508,6 +3549,7 @@ fn a_trailer_rows_grounded_bit_drives_the_copys_suspension() {
     host.ctl()
         .broadcast(&Message::Snap {
             impacts: Vec::new(),
+            race: None,
             generation,
             tick: 8,
             entries: Vec::new(),
@@ -3770,6 +3812,7 @@ fn a_snapshot_feeds_the_remote_impact_stream() {
                     audio_id: 0,
                 },
             ],
+            race: None,
         })
         .unwrap();
     spin(&mut app, |a| {
@@ -3812,6 +3855,7 @@ fn a_snapshot_feeds_the_remote_impact_stream() {
             entries: vec![entry(0), entry(our_id)],
             trailers: Vec::new(),
             impacts: vec![row(0, 1)],
+            race: None,
         })
         .unwrap();
     app.update();
@@ -3835,6 +3879,7 @@ fn a_snapshot_feeds_the_remote_impact_stream() {
             entries: vec![entry(0)],
             trailers: Vec::new(),
             impacts: vec![row(0, 99)],
+            race: None,
         })
         .unwrap();
     app.update();
@@ -3849,6 +3894,294 @@ fn a_snapshot_feeds_the_remote_impact_stream() {
         let r = app.world().resource::<netdrive::NetDriveReport>();
         assert_eq!(r.impacts_applied, 1);
         assert_eq!(r.impacts_dropped, 3, "the foreign-generation row dropped");
+    }
+
+    host.shutdown();
+}
+
+/// F25-B, protocol v13 host half: while the session runs an event the
+/// authority's `RaceState` rides every `Snap` — the lifecycle phase,
+/// the live countdown remainder and the race clock — the state a
+/// predicted client's authority-gated `advance_race` can never step
+/// for itself. A stale resource minted under a dead generation
+/// publishes nothing: receivers read `race: None`, never a foreign
+/// numbering's row.
+#[test]
+fn a_snap_publishes_the_authoritys_race_state() {
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let mut app = host_app(vfs, link);
+    let mut peer = ready_peer(addr, "eve", fp);
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<LobbyState>()
+            .roster
+            .iter()
+            .any(|e| e.pick.is_some())
+    });
+    // Begin under the lobby's minted generation and hold the session
+    // mid-countdown: `publish_snapshots` emits through
+    // `Ready|Countdown|Playing`, so the row rides before control
+    // releases. `RaceState::new` is the resource `load_session_world`
+    // inserts for an event session — staged by hand here because the
+    // load legs need the asset stack.
+    app.world()
+        .resource::<HostLink>()
+        .command_sender()
+        .send(HostCommand::Start)
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world().resource::<Session>().config().is_some()
+    });
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Countdown).unwrap();
+    }
+    let generation = app.world().resource::<Session>().generation();
+    app.world_mut()
+        .insert_resource(mm2_game::RaceState::new(wire_race_def(180), generation));
+    app.update();
+    let snap = until_wire(&mut peer, |m| {
+        matches!(m, Message::Snap { race: Some(..), .. })
+    });
+    let Message::Snap {
+        race: Some(race), ..
+    } = snap
+    else {
+        unreachable!("the predicate matched a race row")
+    };
+    assert_eq!(
+        (race.phase, race.countdown, race.clock),
+        (0, 180, 0),
+        "the countdown remainder and the untouched clock ride the snap"
+    );
+
+    // The release rides the same row: mutate the resource the way
+    // `advance_race` does and the next `Snap` carries it.
+    {
+        let mut race = app.world_mut().resource_mut::<mm2_game::RaceState>();
+        race.phase = mm2_game::RacePhase::Running;
+        race.clock = 3;
+    }
+    app.update();
+    let snap = until_wire(
+        &mut peer,
+        |m| matches!(m, Message::Snap { race: Some(r), .. } if r.phase == 1),
+    );
+    let Message::Snap {
+        race: Some(race), ..
+    } = snap
+    else {
+        unreachable!("the predicate matched a running row")
+    };
+    assert_eq!(race.clock, 3, "the running clock ticks over the wire");
+
+    // Teardown residue — a resource minted under a dead generation —
+    // publishes nothing: the last rows read `race: None`, so no
+    // receiver can mirror a dead session's numbering.
+    app.world_mut()
+        .resource_mut::<mm2_game::RaceState>()
+        .generation = generation + 9;
+    app.update();
+    let snap = until_wire(&mut peer, |m| matches!(m, Message::Snap { race: None, .. }));
+    let Message::Snap { race: None, .. } = snap else {
+        unreachable!("the predicate matched a raceless row")
+    };
+}
+
+/// F25-B, protocol v13 client half: the wire's race rows are the only
+/// clock a predicted client's countdown runs on — `advance_race` is
+/// authority-gated and never steps there, which is why joined clients
+/// sat in `Countdown` forever (and `send_drive_input` never sent). A
+/// countdown row mirrors the remainder; the `Running` row performs
+/// the release — the session moves `Countdown → Playing`, awaiting
+/// participants flip, one `RaceStarted` goes out; a regressed reorder
+/// cannot re-hold control and a foreign-generation row drops counted.
+#[test]
+fn a_snap_race_row_releases_the_joined_clients_countdown() {
+    let install = tempfile::tempdir().unwrap();
+    let vfs = mount(install.path());
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host_config = HostConfig::new(fp);
+    host_config.host_pick = Some(VehiclePick {
+        vehicle: String::new(),
+        paint: 0,
+    });
+    let mut host = Host::listen_loopback(&host_config).unwrap();
+    host.set_session(net::advertise(&dev_cruise()).unwrap())
+        .unwrap();
+    let link = LobbyLink::join(
+        host.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join failed");
+    let mut app = bridge_app(vfs, link);
+    {
+        let link = app.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    until_ready(&mut app);
+    host.start(LateJoin::Open).unwrap();
+    until_started(&host);
+    until_begun(&mut app);
+    let generation = app.world().resource::<Session>().wire_generation();
+    {
+        // The load legs stand the session `Ready → Countdown` and
+        // insert the event's `RaceState` — staged by hand here, the
+        // load systems need the asset stack.
+        let local_generation = app.world().resource::<Session>().generation();
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Countdown).unwrap();
+        app.world_mut().insert_resource(mm2_game::RaceState::new(
+            wire_race_def(180),
+            local_generation,
+        ));
+    }
+    // A participant awaiting the countdown — the release flips it.
+    let participant = app
+        .world_mut()
+        .spawn(mm2_game::RaceProgress::new(&wire_race_def(180)))
+        .id();
+
+    let race_snap = |generation, tick, race| Message::Snap {
+        generation,
+        tick,
+        entries: Vec::new(),
+        trailers: Vec::new(),
+        impacts: Vec::new(),
+        race,
+    };
+    let countdown = |remaining: u32| {
+        Some(mm2_net::SnapRace {
+            phase: 0,
+            countdown: remaining,
+            clock: 0,
+        })
+    };
+    let running = |clock: u64| {
+        Some(mm2_net::SnapRace {
+            phase: 1,
+            countdown: 0,
+            clock,
+        })
+    };
+
+    // Every countdown snap carries the same frozen session tick — the
+    // pose side reads them all stale after the first; the race row
+    // still has to move.
+    host.ctl()
+        .broadcast(&race_snap(generation, 7, countdown(170)))
+        .unwrap();
+    host.ctl()
+        .broadcast(&race_snap(generation, 7, countdown(160)))
+        .unwrap();
+    spin(&mut app, |a| {
+        matches!(
+            a.world().resource::<mm2_game::RaceState>().phase,
+            mm2_game::RacePhase::Countdown { remaining: 160 }
+        )
+    });
+    assert_eq!(session_phase(&app), SessionPhase::Countdown);
+    // Race rows are latest-wins *state*, not events — the 170 row may
+    // apply once before the 160 row displaces it, or never at all.
+    assert!(
+        app.world()
+            .resource::<netdrive::NetDriveReport>()
+            .race_applied
+            >= 1
+    );
+
+    // The release: the wire's `Running` row is the client's
+    // `advance_race` — the session stands live, awaiting participants
+    // flip, the one `RaceStarted` goes out for the GO consumers.
+    host.ctl()
+        .broadcast(&race_snap(generation, 7, running(0)))
+        .unwrap();
+    spin(&mut app, |a| session_phase(a) == SessionPhase::Playing);
+    {
+        let race = app.world().resource::<mm2_game::RaceState>();
+        assert_eq!(race.phase, mm2_game::RacePhase::Running);
+        assert_eq!(race.clock, 0);
+        assert_eq!(
+            app.world()
+                .get::<mm2_game::RaceProgress>(participant)
+                .unwrap()
+                .state,
+            mm2_game::ParticipantState::Racing,
+            "the release flips awaiting participants"
+        );
+        let started: Vec<mm2_game::RaceStarted> = app
+            .world_mut()
+            .resource_mut::<Messages<mm2_game::RaceStarted>>()
+            .drain()
+            .collect();
+        assert_eq!(started.len(), 1, "one release event — the authority's word");
+    }
+
+    // A reorder's countdown straggler cannot re-hold control — its
+    // freshness key ranks behind the applied `Running`, so it never
+    // stages (idempotent state reads nothing).
+    host.ctl()
+        .broadcast(&race_snap(generation, 7, countdown(90)))
+        .unwrap();
+    app.update();
+    app.update();
+    {
+        assert_eq!(
+            app.world().resource::<mm2_game::RaceState>().phase,
+            mm2_game::RacePhase::Running,
+            "the regressed countdown row never staged"
+        );
+        assert_eq!(session_phase(&app), SessionPhase::Playing);
+        assert_eq!(
+            app.world()
+                .resource::<netdrive::NetDriveReport>()
+                .race_dropped,
+            0,
+            "a regressed state row is silent, not a drop"
+        );
+    }
+
+    // The running clock keeps ticking over the wire.
+    host.ctl()
+        .broadcast(&race_snap(generation, 7, running(41)))
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world().resource::<mm2_game::RaceState>().clock == 41
+    });
+
+    // The foreign generation's row stages past the key — a different
+    // authority's numbering ranks ahead — but dies at the session
+    // gate the queued rows share. (It must land after the gen-row
+    // above applied: staged rows are latest-wins, so an in-flight
+    // interleave would displace it.)
+    host.ctl()
+        .broadcast(&race_snap(generation + 9, 7, running(99)))
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .race_dropped
+            == 1
+    });
+    {
+        assert_eq!(
+            app.world().resource::<mm2_game::RaceState>().phase,
+            mm2_game::RacePhase::Running,
+            "the foreign generation's row dropped at the session gate"
+        );
+        assert_eq!(
+            app.world().resource::<mm2_game::RaceState>().clock,
+            41,
+            "the foreign clock never mirrored"
+        );
+        assert_eq!(session_phase(&app), SessionPhase::Playing);
     }
 
     host.shutdown();
@@ -3993,6 +4326,7 @@ fn a_snap_reconciles_the_remote_copys_breakaway_rig() {
             entries: vec![entry(0, 0b1), entry(our_id, 0b1)],
             trailers: Vec::new(),
             impacts: Vec::new(),
+            race: None,
         })
         .unwrap();
     spin(&mut app, |a| {
@@ -4029,6 +4363,7 @@ fn a_snap_reconciles_the_remote_copys_breakaway_rig() {
             entries: vec![entry(0, 0b1), entry(our_id, 0b1)],
             trailers: Vec::new(),
             impacts: Vec::new(),
+            race: None,
         })
         .unwrap();
     app.update();
@@ -4050,6 +4385,7 @@ fn a_snap_reconciles_the_remote_copys_breakaway_rig() {
             entries: vec![entry(0, 0), entry(our_id, 0)],
             trailers: Vec::new(),
             impacts: Vec::new(),
+            race: None,
         })
         .unwrap();
     spin(&mut app, |a| {

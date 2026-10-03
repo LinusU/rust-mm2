@@ -1020,15 +1020,18 @@ fn run_headless(
     // `tsyn`, the v9 trailer rows applied (client side; 0 without a
     // trailered seat — the dev car tows nothing), `imp`, the v10
     // replicated impact rows (sent on the authority, applied/dropped
-    // on clients; 0 on a dev world with no collisions), and `rb`, the
+    // on clients; 0 on a dev world with no collisions), `rb`, the
     // v11 breakaway-mask transitions a client reconciled (0 on the
-    // dev car — it authors no breakable parts). Absent without a
-    // link's report, so a non-lobby record stays bit-identical.
+    // dev car — it authors no breakable parts), and `race`, the v13
+    // race rows a client applied/dropped (0 on the authority and on
+    // raceless sessions — the dev cruise publishes none). Absent
+    // without a link's report, so a non-lobby record stays
+    // bit-identical.
     let net_detail = world_ecs
         .get_resource::<crate::netdrive::NetDriveReport>()
         .map(|r| {
             format!(
-                " net=in{}s/{}a/{}x,snap{}s/{}a/{}x,rem{},req{}s/{}g/{}d,rspn{:.0},dsyn{},tsyn{},imp{}s/{}a/{}d,rb{}d/{}r",
+                " net=in{}s/{}a/{}x,snap{}s/{}a/{}x,rem{},req{}s/{}g/{}d,rspn{:.0},dsyn{},tsyn{},imp{}s/{}a/{}d,rb{}d/{}r,race{}a/{}d",
                 r.inputs_sent,
                 r.inputs_applied,
                 r.inputs_staled,
@@ -1046,7 +1049,9 @@ fn run_headless(
                 r.impacts_applied,
                 r.impacts_dropped,
                 r.breaks_detached,
-                r.breaks_restored
+                r.breaks_restored,
+                r.race_applied,
+                r.race_dropped
             )
         })
         .unwrap_or_default();

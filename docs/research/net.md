@@ -40,7 +40,7 @@ precludes adding a second socket later.
 is added it must come from maintained crypto/session crates, not
 hand-rolled primitives.
 
-## Wire protocol (`PROTOCOL_VERSION = 10`)
+## Wire protocol (`PROTOCOL_VERSION = 13`)
 
 Length-prefixed frames: `u32le` length + payload, bounded by
 `MAX_FRAME` (256 KiB) checked *before* allocation. Messages are strict
@@ -214,7 +214,34 @@ catch-all (an unresolvable wire value reads as a data failure like
 a mod's broken binding — counted `failed`, not rejected). What the
 wire still does not carry: `ImpactEvent::surface` — no consumer
 reads it locally either, so it stays off the row rather than
-travelling as dead data.
+travelling as dead data. v12→v13: `Snap` gained `race`, an
+optional `SnapRace` row — the authority's race lifecycle phase,
+the countdown remainder while counting, and the race clock
+(F25-B). A predicted client's `advance_race` is authority-gated
+and never steps, so without the row a joined event session sat in
+`Countdown` forever — the race never visibly ticked down and
+`send_drive_input` never sent, `Session::is_playing()` gating on
+the phase the countdown feeds. `publish_snapshots` emits the row
+through `Ready|Countdown|Playing` while the session's `RaceState`
+is live — stale-generation residue (a resource teardown has not
+dropped yet) publishes nothing, so receivers read `race: None`,
+never a foreign numbering's state. The client stages the row off
+the pose watermark on its own monotonic key — `(generation, phase
+rank, progress)`, where the countdown's *remaining* inverts and
+the clock counts up — precisely because every countdown snap
+repeats the same frozen session tick and would otherwise read
+stale at push. Mirroring applies phase and clock verbatim; the
+countdown → running/complete edge performs the same release
+`advance_race` does on the authority — `AwaitingStart`
+participants flip to `Racing`, the session moves
+`Countdown`/`Ready` → `Playing`, and one `RaceStarted` goes out
+for the GO consumers. Regressed or duplicated rows are idempotent
+state — they never restage — a foreign generation stages but dies
+at the apply-side session gate the queued impact rows share, and
+a `phase` the wire cannot name dies at `push`. What the row
+deliberately does not carry: checkpoint progress, finish
+ordering, timeouts and the `ResultLedger` — per-participant race
+state is F26 scope.
 
 Handshake (always the first exchange):
 
@@ -777,32 +804,36 @@ What differs from the in-process table, and why:
 
 Scope: still loopback on a synthetic dev world — no LAN or Internet
 leg, no rendered observation, no retail install. The cells also leave
-`dsyn`/`tsyn`/`imp`/`rb` honest: the dev car binds no damage record,
-tows nothing and authors no breakable parts; `imp` shows single-digit
-applied rows (spawn-landing impacts replicated through the real
-session), not a driven collision.
+`dsyn`/`tsyn`/`imp`/`rb`/`race` honest: the dev car binds no damage
+record, tows nothing and authors no breakable parts; `imp` shows
+single-digit applied rows (spawn-landing impacts replicated through
+the real session), not a driven collision; `race` reads 0 on both
+sides — the dev cruise carries no `RaceState`, so no v13 rows move
+(the row's legs are the in-process `net_app` tests above).
 
 ## Data-plane budget and bounds (F25-B req 6)
 
 *Implementation choice + measured.* Payload sizes are fixed by the
-v12 encode (4-byte length prefix excluded everywhere):
+v13 encode (4-byte length prefix excluded everywhere):
 
 | frame | payload bytes |
 |---|---|
 | `Input` | 21 (tag 1, generation 8, seq 8, 4 channels) |
 | `ResetRequest` | 9 (tag 1, generation 8) |
-| `Snap` header | 20 (tag 1, generation 8, tick 8, three counts) |
+| `Snap` header | 21 (tag 1, generation 8, tick 8, three counts, race presence 1) |
 | per `SnapEntry` | 66 (player 2, pos/rot/vel/angvel 52, epoch 1, steer 2, spin 2, compression 1, flags 1, damage 1, breaks 4) |
 | per `SnapTrailer` | 57 (owner 2, pos/rot/vel/angvel 52, spin 2, flags 1) |
 | per `SnapImpact` | 54 (seat 2, id 8, tick 8, point 12, normal 12, severity 4, audio_id 8) |
+| `SnapRace` when present | 13 (phase 1, countdown 4, clock 8) |
 
-A `Snap` is `20 + 66·seats + 57·trailers + 54·impacts` — worst case
-`MAX_PLAYERS` 8 seats and trailers plus `MAX_SNAP_IMPACTS` 64 rows =
-4,460 B, far under `MAX_FRAME` (256 KiB). The matrix runs measured
+A `Snap` is `21 + 66·seats + 57·trailers + 54·impacts` plus 13 while a
+race row rides — worst case `MAX_PLAYERS` 8 seats and trailers plus
+`MAX_SNAP_IMPACTS` 64 rows = 4,474 B, far under `MAX_FRAME` (256 KiB).
+The matrix runs measured
 the v10 shape: `Input` payloads averaged 21 B
 (`bytes_in`/`frames_in` ≈ 20.9) and the one-seat dev-world `Snap`
-82 B (20 + 62 — 86 B under v12); the two-process leg's three-seat
-snaps were 206 B (218 under v12).
+82 B (20 + 62 — 87 B under v13, raceless); the two-process leg's
+three-seat snaps were 206 B (219 under v13, raceless).
 
 **Update rates.** Both directions send once per app `Update` while the
 session is live — the wire rate is the update-loop rate, not the fixed
@@ -826,7 +857,8 @@ receiver (the clean-row floor above). Consequences worth recording:
 staged `Snap` per client (`RemoteSnaps`), one input sample per seat
 (the mailbox, `INPUT_STALE` 250 ms before the seat coasts), the reset
 mailbox keeps the highest generation, pending replicated impact rows
-cap at 256 with a 512-entry dedup window, `CORRECTION_SNAP_DIST`
+cap at 256 with a 512-entry dedup window, the v13 race row keeps one
+latest-wins slot on its own monotonic key, `CORRECTION_SNAP_DIST`
 (20 m) bounds a blend-vs-snap decision, and `RESET_REQUEST_COOLDOWN`
 (1 s) bounds ask rate. The proxy's `MAX_QUEUED` (4096/lane) is harness
 state, not protocol.

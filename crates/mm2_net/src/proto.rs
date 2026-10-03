@@ -33,8 +33,12 @@
 /// authority's (F25-B, F05 req 5). v12: `SnapImpact` gained
 /// `audio_id`, the struck side's authored `AudioId` resolved on the
 /// authority at publish, so a replicated row voices the same impact
-/// category the authority played (F25-B).
-pub const PROTOCOL_VERSION: u16 = 12;
+/// category the authority played (F25-B). v13: `Snap` gained `race`,
+/// an optional [`SnapRace`] row carrying the authority's race phase,
+/// countdown remainder and clock — a predicted client's race loop
+/// never steps under a remote authority, so the wire mirrors it
+/// (F25-B).
+pub const PROTOCOL_VERSION: u16 = 13;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -327,6 +331,28 @@ pub struct SnapImpact {
     pub audio_id: i64,
 }
 
+/// The authority's race state inside a [`Message::Snap`] (v13, F25-B).
+/// `mm2_net` stays contract-free — the phase encoding is opaque to the
+/// wire — so this is an untyped tuple the `mm2_app` consumer names:
+/// `phase` is the race lifecycle discriminant (`mm2_game::RacePhase`'s
+/// encoding lives on the app side), `countdown` the ticks left while
+/// the race counts down, `clock` the race clock in fixed ticks. The
+/// row rides every snapshot while the authority's session runs an
+/// event — *state*, not an event, so a dropped or reordered frame
+/// self-corrects on the next, and the receiver keeps the freshest by
+/// `(phase rank, progress)` rather than arrival order. Absent (`None`)
+/// on a session with no race — cruise and dev worlds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SnapRace {
+    /// Opaque lifecycle discriminant — the consumer names the phases.
+    pub phase: u8,
+    /// Ticks until control releases while `phase` names the countdown;
+    /// `0` once running or complete.
+    pub countdown: u32,
+    /// The authority's race clock — fixed ticks since the release.
+    pub clock: u64,
+}
+
 /// One wire message.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
@@ -447,6 +473,9 @@ pub enum Message {
         /// snapshot (v10, F25-B) — presentation events, bounded by
         /// [`MAX_SNAP_IMPACTS`].
         impacts: Vec<SnapImpact>,
+        /// The authority's race state while the session runs an event
+        /// (v13, F25-B) — `None` on a raceless session.
+        race: Option<SnapRace>,
     },
 }
 
@@ -734,6 +763,7 @@ impl Message {
                 entries,
                 trailers,
                 impacts,
+                race,
             } => {
                 out.push(TAG_SNAP);
                 out.extend_from_slice(&generation.to_le_bytes());
@@ -792,6 +822,15 @@ impl Message {
                     }
                     out.extend_from_slice(&m.severity.to_le_bytes());
                     out.extend_from_slice(&m.audio_id.to_le_bytes());
+                }
+                match race {
+                    Some(race) => {
+                        out.push(1);
+                        out.push(race.phase);
+                        out.extend_from_slice(&race.countdown.to_le_bytes());
+                        out.extend_from_slice(&race.clock.to_le_bytes());
+                    }
+                    None => out.push(0),
                 }
             }
         }
@@ -925,12 +964,24 @@ impl Message {
                         audio_id: cur.i64()?,
                     });
                 }
+                // `phase` decodes verbatim — the discriminant's naming
+                // lives in `mm2_app`, which drops what it cannot name.
+                let race = if cur.bool()? {
+                    Some(SnapRace {
+                        phase: cur.u8()?,
+                        countdown: cur.u32()?,
+                        clock: cur.u64()?,
+                    })
+                } else {
+                    None
+                };
                 Self::Snap {
                     generation,
                     tick,
                     entries,
                     trailers,
                     impacts,
+                    race,
                 }
             }
             tag => return Err(ProtoError::BadTag(tag)),
@@ -1137,6 +1188,20 @@ mod tests {
                         audio_id: 0,
                     },
                 ],
+                race: Some(SnapRace {
+                    phase: 0,
+                    countdown: 180,
+                    clock: 0,
+                }),
+            },
+            // A raceless session's snap — `race: None`.
+            Message::Snap {
+                generation: 7,
+                tick: 481,
+                entries: Vec::new(),
+                trailers: Vec::new(),
+                impacts: Vec::new(),
+                race: None,
             },
         ] {
             let bytes = msg.encode().unwrap();
@@ -1282,6 +1347,7 @@ mod tests {
                 entries,
                 trailers: Vec::new(),
                 impacts: Vec::new(),
+                race: None,
             }
             .encode(),
             Err(ProtoError::OversizeSnapshot(9))
@@ -1306,6 +1372,7 @@ mod tests {
                 entries: Vec::new(),
                 trailers,
                 impacts: Vec::new(),
+                race: None,
             }
             .encode(),
             Err(ProtoError::OversizeTrailers(9))
@@ -1330,6 +1397,7 @@ mod tests {
                 entries: Vec::new(),
                 trailers: Vec::new(),
                 impacts,
+                race: None,
             }
             .encode(),
             Err(ProtoError::OversizeImpacts(65))

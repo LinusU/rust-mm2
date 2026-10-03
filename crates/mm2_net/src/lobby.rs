@@ -2649,6 +2649,7 @@ mod tests {
             }],
             trailers: Vec::new(),
             impacts: Vec::new(),
+            race: None,
         };
         host.ctl().broadcast(&snap).unwrap();
         for client in [&mut alice, &mut bob] {

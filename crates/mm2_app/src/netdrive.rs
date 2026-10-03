@@ -41,7 +41,12 @@
 //!   uses (minus the impact kick — the wire carries the detach
 //!   *state*, not the launch impulse), a cleared bit re-attaches the
 //!   node and despawns the fragment — the authority's repair arriving
-//!   as replicated state.
+//!   as replicated state. The v13 tail adds [`SnapRace`] (F25-B): while
+//!   the session runs an event the authority publishes its race phase,
+//!   countdown remainder and clock on every snapshot, and a predicted
+//!   client mirrors them — its own `advance_race` is authority-gated
+//!   and never steps, so without the row a joined event's countdown
+//!   would hold control forever.
 //! - **Client** (`SessionAuthority::Remote` → `Predicted`): remote cars
 //!   are kinematic copies blended between the two newest snapshots
 //!   ([`RemoteLerp`]), marked [`RemoteReplica`] so the local sim never
@@ -77,10 +82,11 @@
 //! reconcile puts each remote car on its own.
 //!
 //! Everything here is loopback-scoped groundwork like the rest of F24/F25:
-//! no lag compensation, no result/race-state replication, and a remote
-//! copy's breakaway fragment carries only the car's replicated motion —
-//! the per-part launch impulse never rides the wire (named gaps, not
-//! silent behavior).
+//! no lag compensation, no replicated checkpoint progress or
+//! finish/results state (the v13 row mirrors phase/clock only — F26
+//! owns the rest), and a remote copy's breakaway fragment carries only
+//! the car's replicated motion — the per-part launch impulse never
+//! rides the wire (named gaps, not silent behavior).
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -91,14 +97,14 @@ use avian3d::prelude::{
 use bevy::prelude::*;
 use mm2_game::{
     Banger, BangerPhase, BangerPool, BangerStateChanged, BreakPartSpec, DamageSignals, DamageSpec,
-    ImpactEvent, Mm2Vfs, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerVehicle,
-    RaceDefinition, RaceProgress, RaceState, RecoveryPolicy, Session, SessionEntity, SessionPhase,
-    SmokePolicy, SparkPolicy, StuckSpec, VehicleBreaks, VehicleDamage, VehicleRecovery,
-    VehicleSmoke, VehicleSparks, VehicleStuck,
+    ImpactEvent, Mm2Vfs, ObjectId, ObjectIdentity, ParticipantState, Player, PlayerControl,
+    PlayerVehicle, RaceDefinition, RacePhase, RaceProgress, RaceStarted, RaceState, RecoveryPolicy,
+    Session, SessionEntity, SessionPhase, SmokePolicy, SparkPolicy, StuckSpec, VehicleBreaks,
+    VehicleDamage, VehicleRecovery, VehicleSmoke, VehicleSparks, VehicleStuck,
 };
 use mm2_net::{
     DriveInput, MAX_SNAP_IMPACTS, Message, RemoteInputs, SNAP_FLAG_BRAKE, SNAP_FLAG_GROUNDED,
-    SNAP_FLAG_REVERSE, SnapEntry, SnapImpact, SnapTrailer, VehiclePick,
+    SNAP_FLAG_REVERSE, SnapEntry, SnapImpact, SnapRace, SnapTrailer, VehiclePick,
 };
 use mm2_vehicle::{
     DriveDirection, HandlingMetrics, RemoteReplica, ResetVehicle, Teleported, Vehicle,
@@ -308,6 +314,22 @@ pub struct RemoteSnaps {
     /// runs with one. Stale-generation rows queue and drop at apply
     /// instead, where the session gate can count them.
     dropped: u64,
+    /// The freshest race row the stream carried (protocol v13), staged
+    /// apart from the pose watermark: while the authority's race
+    /// counts down the session tick is frozen, so every `Snap` after
+    /// the first reads stale on `(generation, tick)` — the row still
+    /// has to move or a client's countdown would never visibly tick,
+    /// let alone release. `apply_snapshots` consumes it on every run.
+    race: Option<(u64, SnapRace)>,
+    /// The staged row's [`race_order_key`] — the monotonic freshness
+    /// the reorder recipe can otherwise regress (a deferred frame's
+    /// row arrives *after* its successor's).
+    race_key: Option<(u64, u8, u64)>,
+    /// Race rows refused at push — a `phase` discriminant the wire
+    /// cannot name — folded into [`NetDriveReport`] like `dropped`.
+    /// Equal-or-older rows skip silently: state replication is
+    /// idempotent, and a repeated row is not a drop.
+    race_dropped: u64,
 }
 
 /// A staged snapshot frame.
@@ -318,12 +340,85 @@ struct Snap {
     trailers: Vec<SnapTrailer>,
 }
 
+/// The `SnapRace.phase` encoding (protocol v13) — `mm2_net` carries the
+/// discriminant opaque, so the `RacePhase` naming lives here with its
+/// only consumer. Ranks order the lifecycle: a fresher row is a higher
+/// rank, or the same rank further along.
+const SNAP_PHASE_COUNTDOWN: u8 = 0;
+const SNAP_PHASE_RUNNING: u8 = 1;
+const SNAP_PHASE_COMPLETE: u8 = 2;
+
+/// `RaceState` → the v13 `Snap.race` row (F25-B): the lifecycle
+/// discriminant, the countdown remainder while counting, and the race
+/// clock verbatim. Stale resources never encode — the caller filters.
+fn encode_race(race: &RaceState) -> SnapRace {
+    let (phase, countdown) = match race.phase {
+        RacePhase::Countdown { remaining } => (SNAP_PHASE_COUNTDOWN, remaining),
+        RacePhase::Running => (SNAP_PHASE_RUNNING, 0),
+        RacePhase::Complete => (SNAP_PHASE_COMPLETE, 0),
+    };
+    SnapRace {
+        phase,
+        countdown,
+        clock: race.clock,
+    }
+}
+
+/// A wire row → `RacePhase` — `None` for a discriminant the consumer
+/// cannot name (a peer speaking a wire we do not know).
+fn race_phase(row: &SnapRace) -> Option<RacePhase> {
+    match row.phase {
+        SNAP_PHASE_COUNTDOWN => Some(RacePhase::Countdown {
+            remaining: row.countdown,
+        }),
+        SNAP_PHASE_RUNNING => Some(RacePhase::Running),
+        SNAP_PHASE_COMPLETE => Some(RacePhase::Complete),
+        _ => None,
+    }
+}
+
+/// The v13 race row's apply-side targets bundled as one param
+/// (F25-B): `apply_snapshots` is at the system-parameter arity
+/// ceiling, so the mirror's three borrows ride together — the
+/// session's [`RaceState`] (absent on a raceless session), the
+/// participants' [`RaceProgress`] for the release flip, and the
+/// [`RaceStarted`] writer for the one GO edge.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct RaceMirror<'w, 's> {
+    /// The session's race resource the row mirrors into.
+    race: Option<ResMut<'w, RaceState>>,
+    /// Every participant's progress — the release flips
+    /// `AwaitingStart → Racing` exactly like `advance_race` does.
+    progress: Query<'w, 's, &'static mut RaceProgress>,
+    /// The release event consumers observe for the unlock.
+    started: MessageWriter<'w, RaceStarted>,
+}
+
+/// The freshness key for a staged race row — `(generation, rank,
+/// progress)`, strictly increasing along the authority's sequence:
+/// ranks order the lifecycle and within a rank the progress runs
+/// monotone (a countdown's *remaining* inverts — it counts down — and
+/// the clock counts up). `None` for a discriminant `push` cannot
+/// stage: a bogus rank would otherwise park the key above every legit
+/// row and mute the mirror until the next generation.
+fn race_order_key(generation: u64, row: &SnapRace) -> Option<(u64, u8, u64)> {
+    let progress = match row.phase {
+        SNAP_PHASE_COUNTDOWN => u64::from(u32::MAX - row.countdown),
+        SNAP_PHASE_RUNNING | SNAP_PHASE_COMPLETE => row.clock,
+        _ => return None,
+    };
+    Some((generation, row.phase, progress))
+}
+
 impl RemoteSnaps {
     /// Queue a received snapshot frame. Pose state is latest-wins on
     /// `(generation, tick)`: an incoming frame at or behind the staged
     /// or last-applied watermark is stale — it drops counted (a dup or
     /// a reorder's straggler) instead of displacing a newer pose. Its
-    /// impact rows still queue below — events outlive their frame.
+    /// impact rows still queue below — events outlive their frame —
+    /// and its race row still stages on its own key (race state moves
+    /// while the frame's session tick is frozen, e.g. the whole
+    /// countdown).
     pub fn push(
         &mut self,
         generation: u64,
@@ -331,6 +426,7 @@ impl RemoteSnaps {
         entries: Vec<SnapEntry>,
         trailers: Vec<SnapTrailer>,
         impacts: Vec<SnapImpact>,
+        race: Option<SnapRace>,
     ) {
         let staged = self.latest.as_ref().map(|s| (s.generation, s.tick));
         let watermark = staged.into_iter().chain(self.applied).max();
@@ -343,6 +439,18 @@ impl RemoteSnaps {
                 entries,
                 trailers,
             });
+        }
+        if let Some(race) = race {
+            match race_order_key(generation, &race) {
+                // A strictly newer row stages; an equal or regressed
+                // one is the idempotent-state case — no count.
+                Some(key) if self.race_key.is_none_or(|k| key > k) => {
+                    self.race_key = Some(key);
+                    self.race = Some((generation, race));
+                }
+                Some(_) => {}
+                None => self.race_dropped += 1,
+            }
         }
         for row in impacts {
             let key = (generation, row.seat, row.id);
@@ -389,6 +497,8 @@ impl RemoteSnaps {
         self.repaired.clear();
         self.seen.clear();
         self.seen_order.clear();
+        self.race = None;
+        self.race_key = None;
     }
 }
 
@@ -473,6 +583,17 @@ pub struct NetDriveReport {
     /// authority's repair arriving as replicated state: the fragment
     /// despawns and the intact node shows.
     pub breaks_restored: u64,
+    /// `Snap.race` rows applied to the session's `RaceState` (client
+    /// side, protocol v13, F25-B): each fresher countdown tick, the
+    /// release, the running clock and the `Complete` word land here.
+    /// `0` on the authority and on raceless sessions.
+    pub race_applied: u64,
+    /// Race rows refused — a `phase` discriminant the wire cannot
+    /// name at `push`, or at apply: a row for a session with no
+    /// `RaceState`, a foreign generation, or a stale resource.
+    /// Equal-or-older rows never reach here — idempotent state is
+    /// not a drop.
+    pub race_dropped: u64,
 }
 
 /// A rotation off the wire, sanitized — a malformed-quaternion guard so
@@ -1604,10 +1725,16 @@ type SnapTrailerSourceRow<'a> = (
 /// the damage fraction cannot express. The v11 tail adds
 /// [`encode_breaks`], the seat's detached-part bitmask — replicated
 /// rig state a receiver diffs, so a dropped snap or a repair can
-/// never leave a copy's breakaway inventory diverged.
+/// never leave a copy's breakaway inventory diverged. The v13 tail
+/// adds [`encode_race`], the session's race phase/clock — replicated
+/// lifecycle state a predicted client mirrors instead of stepping.
+#[allow(clippy::too_many_arguments)] // Bevy system — the borrows are the contract.
 pub fn publish_snapshots(
     host: Res<HostLink>,
     session: Res<Session>,
+    // The v13 race row's source — `None` on a raceless session (cruise,
+    // dev worlds), so the field stays `None` on the wire too.
+    race: Option<Res<RaceState>>,
     players: Query<SnapSourceRow<'_>, With<Player>>,
     // Every trailer towing a `NetPlayer` seat — the host's own rig's
     // trailer included — publishes under the owner's wire id.
@@ -1759,6 +1886,13 @@ pub fn publish_snapshots(
             entries,
             trailers: trailer_rows,
             impacts: impact_rows,
+            // The race resource's own generation is the *local*
+            // namespace — `is_stale` compares it that way (teardown
+            // can leave a resource briefly while the wire id has
+            // already moved).
+            race: race
+                .filter(|r| !r.is_stale(session.generation()))
+                .map(|r| encode_race(&r)),
         })
         .is_ok()
     {
@@ -1882,12 +2016,15 @@ pub fn apply_snapshots(
     mut banger_writer: MessageWriter<BangerStateChanged>,
     mut break_visuals: Query<BreakVisualMut, Without<Banger>>,
     render_parts: Query<(&Mesh3d, &MeshMaterial3d<StandardMaterial>, &ChildOf)>,
+    // The v13 race row's targets — see [`RaceMirror`].
+    mut mirror: RaceMirror,
     mut report: ResMut<NetDriveReport>,
 ) {
     // Push-time stale drops fold into the report every run — a stale
     // frame counts even on a run with nothing staged, so this cannot
     // ride inside `apply_snap_frame`'s early return.
     report.snaps_staled += std::mem::take(&mut snaps.stale);
+    report.race_dropped += std::mem::take(&mut snaps.race_dropped);
     // The state pass runs before the event drain: a repair byte
     // landing this frame records its snap tick in
     // `RemoteSnaps::repaired` before the queued impact rows are
@@ -1909,6 +2046,78 @@ pub fn apply_snapshots(
         &mut report,
     );
     drain_pending_impacts(&mut snaps, &session, &players, &mut remote_fx, &mut report);
+    // The v13 race row drains every run like the pending impacts —
+    // it stages off the pose watermark precisely because the
+    // authority's frozen countdown tick would otherwise hold it.
+    if let Some((generation, row)) = snaps.race.take() {
+        apply_race_snap(generation, row, &mut session, &mut mirror, &mut report);
+    }
+}
+
+/// The v13 `Snap.race` row's consumer (F25-B): mirror the authority's
+/// race phase and clock onto the session's [`RaceState`] — a predicted
+/// client's `advance_race` never steps, so the wire is the race's only
+/// clock. The generation gate matches the queued rows' (the wire
+/// namespace, `0` never a live session's name); a row with no local
+/// `RaceState` or a stale one drops counted — an event session's
+/// resource exists from load, so a legit authority's row always has
+/// its landing place. On the countdown → running/complete edge the
+/// mirror performs the same release `advance_race` does: every
+/// participant's `AwaitingStart` flips, the session moves to
+/// `Playing`, and the one `RaceStarted` goes out for the GO
+/// consumers. Checkpoint progress and results are not on the wire —
+/// F26 owns them; the phase word is what unlocks control.
+fn apply_race_snap(
+    generation: u64,
+    row: SnapRace,
+    session: &mut Session,
+    mirror: &mut RaceMirror,
+    report: &mut NetDriveReport,
+) {
+    let Some(race) = mirror.race.as_deref_mut() else {
+        // A race row for a raceless session — a cruise or dev world
+        // has no `RaceState` to mirror into.
+        report.race_dropped += 1;
+        return;
+    };
+    if generation == 0
+        || generation != session.wire_generation()
+        || race.is_stale(session.generation())
+    {
+        report.race_dropped += 1;
+        return;
+    }
+    let Some(phase) = race_phase(&row) else {
+        // `push` already refused unnamed discriminants — defensive.
+        report.race_dropped += 1;
+        return;
+    };
+    let releasing = matches!(race.phase, RacePhase::Countdown { .. })
+        && !matches!(phase, RacePhase::Countdown { .. });
+    race.phase = phase;
+    race.clock = row.clock;
+    if releasing {
+        for mut progress in mirror.progress.iter_mut() {
+            if progress.state == ParticipantState::AwaitingStart {
+                progress.state = ParticipantState::Racing;
+            }
+        }
+        // The wire's release moves the session `Countdown → Playing`
+        // — the transition `advance_race` performs on the authority.
+        // `Ready` releases too: snaps can land before the client's
+        // own countdown edge, and a race that is already over on the
+        // authority still means control is live.
+        if matches!(
+            session.phase(),
+            SessionPhase::Countdown | SessionPhase::Ready
+        ) && session.transition(SessionPhase::Playing).is_err()
+        {
+            report.race_dropped += 1;
+            return;
+        }
+        mirror.started.write(RaceStarted);
+    }
+    report.race_applied += 1;
 }
 
 /// One seat's replicated [`SnapEntry::breaks`] bitmask diffed against
@@ -2963,9 +3172,16 @@ mod tests {
     #[test]
     fn a_stale_snap_drops_at_push_but_keeps_its_events() {
         let mut snaps = RemoteSnaps::default();
-        snaps.push(1, 10, vec![snap_entry()], Vec::new(), Vec::new());
+        snaps.push(1, 10, vec![snap_entry()], Vec::new(), Vec::new(), None);
         // A reordered straggler cannot displace the newer staged pose.
-        snaps.push(1, 9, vec![snap_entry()], Vec::new(), vec![snap_impact(7)]);
+        snaps.push(
+            1,
+            9,
+            vec![snap_entry()],
+            Vec::new(),
+            vec![snap_impact(7)],
+            None,
+        );
         assert_eq!(snaps.latest.as_ref().unwrap().tick, 10);
         assert_eq!(snaps.stale, 1);
         assert_eq!(
@@ -2975,21 +3191,28 @@ mod tests {
         );
         // A duplicated copy of the staged frame is stale too — and its
         // repeat impact row hits the dedup window.
-        snaps.push(1, 10, vec![snap_entry()], Vec::new(), vec![snap_impact(7)]);
+        snaps.push(
+            1,
+            10,
+            vec![snap_entry()],
+            Vec::new(),
+            vec![snap_impact(7)],
+            None,
+        );
         assert_eq!(snaps.stale, 2);
         assert_eq!(snaps.pending.len(), 1);
         // Latest-wins still moves forward.
-        snaps.push(1, 11, vec![snap_entry()], Vec::new(), Vec::new());
+        snaps.push(1, 11, vec![snap_entry()], Vec::new(), Vec::new(), None);
         assert_eq!(snaps.latest.as_ref().unwrap().tick, 11);
         // The applied watermark gates too — nothing staged needed.
         snaps.applied = Some((1, 11));
         snaps.latest = None;
-        snaps.push(1, 11, vec![snap_entry()], Vec::new(), Vec::new());
+        snaps.push(1, 11, vec![snap_entry()], Vec::new(), Vec::new(), None);
         assert!(snaps.latest.is_none());
         assert_eq!(snaps.stale, 3);
         // A new generation is always newer — a session restart never
         // reads as a straggler of the last one.
-        snaps.push(2, 1, vec![snap_entry()], Vec::new(), Vec::new());
+        snaps.push(2, 1, vec![snap_entry()], Vec::new(), Vec::new(), None);
         assert_eq!(snaps.latest.as_ref().unwrap().generation, 2);
         assert_eq!(snaps.stale, 3);
     }
@@ -3015,6 +3238,7 @@ mod tests {
             .init_resource::<NetDriveReport>()
             .init_resource::<crate::texel_fx::TexelDamageReport>()
             .add_message::<RemoteImpact>()
+            .add_message::<RaceStarted>()
             // The v11 breakaway reconcile's pool claims and lifecycle
             // stream — never exercised by this leg, but the system's
             // parameters require them registered.
@@ -3025,8 +3249,8 @@ mod tests {
         // A stale push with nothing staged still folds — the count is
         // the client's evidence a reordered/duplicated stream dropped.
         let mut snaps = app.world_mut().resource_mut::<RemoteSnaps>();
-        snaps.push(1, 5, vec![snap_entry()], Vec::new(), Vec::new());
-        snaps.push(1, 4, vec![snap_entry()], Vec::new(), Vec::new());
+        snaps.push(1, 5, vec![snap_entry()], Vec::new(), Vec::new(), None);
+        snaps.push(1, 4, vec![snap_entry()], Vec::new(), Vec::new(), None);
         app.update();
         let report = app.world().resource::<NetDriveReport>();
         assert_eq!(report.snaps_applied, 1);
@@ -3038,6 +3262,7 @@ mod tests {
             vec![snap_entry()],
             Vec::new(),
             Vec::new(),
+            None,
         );
         app.update();
         assert_eq!(app.world().resource::<NetDriveReport>().snaps_staled, 2);
@@ -3054,11 +3279,18 @@ mod tests {
     #[test]
     fn a_stream_reset_rebases_the_inbox_on_a_new_authority() {
         let mut snaps = RemoteSnaps::default();
-        snaps.push(2, 900, vec![snap_entry()], Vec::new(), vec![snap_impact(7)]);
+        snaps.push(
+            2,
+            900,
+            vec![snap_entry()],
+            Vec::new(),
+            vec![snap_impact(7)],
+            None,
+        );
         // A stale drop for the evidence counter, then clear the staged
         // frame and mark the watermark applied — the state a live
         // stream carries when its authority dies.
-        snaps.push(2, 800, vec![snap_entry()], Vec::new(), Vec::new());
+        snaps.push(2, 800, vec![snap_entry()], Vec::new(), Vec::new(), None);
         snaps.applied = Some((2, 900));
         snaps.latest = None;
         snaps.repaired.insert(1, (2, 800));
@@ -3080,7 +3312,14 @@ mod tests {
         // under the old (2, 900) watermark — and the dedup window's
         // memory is gone, so an impact id the old stream already saw
         // queues again under the new authority.
-        snaps.push(1, 1, vec![snap_entry()], Vec::new(), vec![snap_impact(7)]);
+        snaps.push(
+            1,
+            1,
+            vec![snap_entry()],
+            Vec::new(),
+            vec![snap_impact(7)],
+            None,
+        );
         assert_eq!(snaps.latest.as_ref().unwrap().generation, 1);
         assert_eq!(snaps.stale, 1);
         assert_eq!(snaps.pending.len(), 1, "the new stream's rows queue");
@@ -3103,6 +3342,7 @@ mod tests {
             .init_resource::<NetDriveReport>()
             .init_resource::<crate::texel_fx::TexelDamageReport>()
             .add_message::<RemoteImpact>()
+            .add_message::<RaceStarted>()
             .add_message::<BangerStateChanged>()
             .init_resource::<BangerPool>()
             .add_systems(Update, apply_snapshots);
@@ -3131,6 +3371,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             vec![row],
+            None,
         );
         app.update();
         let report = app.world().resource::<NetDriveReport>();
@@ -3159,6 +3400,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             vec![row],
+            None,
         );
         app.update();
         let report = app.world().resource::<NetDriveReport>();
@@ -3175,7 +3417,7 @@ mod tests {
             gap_row.seat = 7;
             let mut snaps = app.world_mut().resource_mut::<RemoteSnaps>();
             snaps.reset();
-            snaps.push(2, 5, Vec::new(), Vec::new(), vec![gap_row]);
+            snaps.push(2, 5, Vec::new(), Vec::new(), vec![gap_row], None);
         }
         {
             let mut session = app.world_mut().resource_mut::<Session>();
@@ -3211,12 +3453,290 @@ mod tests {
         }
         let mut row = snap_impact(3);
         row.seat = 7;
-        app.world_mut()
-            .resource_mut::<RemoteSnaps>()
-            .push(2, 5, Vec::new(), Vec::new(), vec![row]);
+        app.world_mut().resource_mut::<RemoteSnaps>().push(
+            2,
+            5,
+            Vec::new(),
+            Vec::new(),
+            vec![row],
+            None,
+        );
         app.update();
         let report = app.world().resource::<NetDriveReport>();
         assert_eq!(report.impacts_applied, 2);
         assert_eq!(report.snaps_applied, 2);
+    }
+
+    /// A predicted session's race counts down and releases on the
+    /// wire's word (protocol v13, F25-B): the client's own
+    /// `advance_race` is authority-gated and never steps, so the
+    /// `Snap.race` rows are its only race clock. A fresher countdown
+    /// row mirrors the remainder; the `Running` row performs the
+    /// release — participants flip `AwaitingStart → Racing`, the
+    /// session moves `Countdown → Playing`, one `RaceStarted` goes
+    /// out. A regressed reorder never restages, a foreign-generation
+    /// row stages past the key but dies at the session gate, an
+    /// unnamed phase dies at `push`, and a raceless session's row has
+    /// nothing to mirror into.
+    #[test]
+    fn a_race_row_releases_the_predicted_countdown() {
+        let mut session = Session::new();
+        session
+            .begin_generation(
+                mm2_game::SessionConfig {
+                    authority: mm2_game::SessionAuthority::Remote,
+                    ..mm2_game::SessionConfig::default()
+                },
+                1,
+            )
+            .unwrap();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Countdown).unwrap();
+        let generation = session.generation();
+        let def = grid_def(&[]);
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(session)
+            .insert_resource(RaceState::new(def.clone(), generation))
+            .init_resource::<RemoteSnaps>()
+            .init_resource::<NetDriveReport>()
+            .init_resource::<crate::texel_fx::TexelDamageReport>()
+            .add_message::<RemoteImpact>()
+            .add_message::<RaceStarted>()
+            .add_message::<BangerStateChanged>()
+            .init_resource::<BangerPool>()
+            .add_systems(Update, apply_snapshots);
+        // A participant awaiting the countdown — the release flips it.
+        let participant = app.world_mut().spawn(RaceProgress::new(&def)).id();
+
+        let push_race = |app: &mut App, generation: u64, row: SnapRace| {
+            app.world_mut().resource_mut::<RemoteSnaps>().push(
+                generation,
+                0,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Some(row),
+            );
+        };
+        let countdown = |remaining| SnapRace {
+            phase: SNAP_PHASE_COUNTDOWN,
+            countdown: remaining,
+            clock: 0,
+        };
+        let running = |clock| SnapRace {
+            phase: SNAP_PHASE_RUNNING,
+            countdown: 0,
+            clock,
+        };
+        let phase = |app: &App| app.world().resource::<RaceState>().phase;
+        let clock = |app: &App| app.world().resource::<RaceState>().clock;
+
+        // Countdown rows stage off the pose watermark — every snap
+        // carries the same frozen session tick while the authority
+        // counts down, so the pose side reads them all stale after
+        // the first. The freshest row still mirrors.
+        push_race(&mut app, 1, countdown(120));
+        push_race(&mut app, 1, countdown(100));
+        app.update();
+        assert_eq!(
+            phase(&app),
+            RacePhase::Countdown { remaining: 100 },
+            "the freshest countdown row wins"
+        );
+        assert_eq!(
+            app.world().resource::<Session>().phase(),
+            &SessionPhase::Countdown
+        );
+        assert!(app.world().resource::<NetDriveReport>().race_applied == 1);
+
+        // The release: `Running` flips the participant, moves the
+        // session and writes the one `RaceStarted`.
+        push_race(&mut app, 1, running(0));
+        app.update();
+        {
+            assert_eq!(phase(&app), RacePhase::Running);
+            assert_eq!(clock(&app), 0);
+            assert_eq!(
+                app.world().resource::<Session>().phase(),
+                &SessionPhase::Playing,
+                "the wire's release is the client's `advance_race`"
+            );
+            assert_eq!(
+                app.world().get::<RaceProgress>(participant).unwrap().state,
+                ParticipantState::Racing,
+                "the release flips awaiting participants"
+            );
+            let started: Vec<_> = app
+                .world_mut()
+                .resource_mut::<Messages<RaceStarted>>()
+                .drain()
+                .collect();
+            assert_eq!(started.len(), 1, "one release event, like the authority's");
+            assert_eq!(app.world().resource::<NetDriveReport>().race_applied, 2);
+        }
+
+        // The running clock ticks along off the wire.
+        push_race(&mut app, 1, running(41));
+        app.update();
+        assert_eq!(clock(&app), 41);
+        assert_eq!(app.world().resource::<NetDriveReport>().race_applied, 3);
+        // No second release edge — `Running → Running` is no countdown.
+        assert!(
+            app.world_mut()
+                .resource_mut::<Messages<RaceStarted>>()
+                .drain()
+                .next()
+                .is_none()
+        );
+
+        // A reorder's straggler cannot re-hold control: the countdown
+        // row ranks behind the applied `Running`, so `push` never even
+        // stages it — the count stays silent (idempotent state).
+        push_race(&mut app, 1, countdown(60));
+        app.update();
+        assert_eq!(phase(&app), RacePhase::Running);
+        assert_eq!(app.world().resource::<NetDriveReport>().race_dropped, 0);
+
+        // A foreign generation stages past the key — a *different*
+        // authority's numbering ranks ahead — but dies at the session
+        // gate the queued rows share. (Once staged it also mutes lower
+        // gen-1 rows; in production a new authority resets the inbox.)
+        push_race(&mut app, 9, running(99));
+        app.update();
+        assert_eq!(phase(&app), RacePhase::Running);
+        assert_eq!(clock(&app), 41);
+        assert_eq!(
+            app.world().resource::<NetDriveReport>().race_dropped,
+            1,
+            "the foreign-generation row dropped at the session gate"
+        );
+        assert_eq!(app.world().resource::<NetDriveReport>().race_applied, 3);
+
+        // A discriminant the wire cannot name never stages.
+        push_race(
+            &mut app,
+            9,
+            SnapRace {
+                phase: 99,
+                countdown: 0,
+                clock: 0,
+            },
+        );
+        app.update();
+        assert_eq!(
+            app.world().resource::<NetDriveReport>().race_dropped,
+            2,
+            "the unnamed phase died at push"
+        );
+    }
+
+    /// A `Snap.race` row on a session with no `RaceState` — cruise and
+    /// dev worlds — has nothing to mirror into; the row drops counted
+    /// rather than fabricating a race.
+    #[test]
+    fn a_race_row_on_a_raceless_session_drops() {
+        let mut session = Session::new();
+        session
+            .begin_generation(
+                mm2_game::SessionConfig {
+                    authority: mm2_game::SessionAuthority::Remote,
+                    ..mm2_game::SessionConfig::default()
+                },
+                1,
+            )
+            .unwrap();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(session)
+            .init_resource::<RemoteSnaps>()
+            .init_resource::<NetDriveReport>()
+            .init_resource::<crate::texel_fx::TexelDamageReport>()
+            .add_message::<RemoteImpact>()
+            .add_message::<RaceStarted>()
+            .add_message::<BangerStateChanged>()
+            .init_resource::<BangerPool>()
+            .add_systems(Update, apply_snapshots);
+
+        app.world_mut().resource_mut::<RemoteSnaps>().push(
+            1,
+            0,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Some(SnapRace {
+                phase: SNAP_PHASE_RUNNING,
+                countdown: 0,
+                clock: 7,
+            }),
+        );
+        app.update();
+        let report = app.world().resource::<NetDriveReport>();
+        assert_eq!(report.race_applied, 0);
+        assert_eq!(report.race_dropped, 1);
+    }
+
+    /// The encode/mirror pair: every `RacePhase` maps to the wire
+    /// tuple `race_phase` reconstitutes, and the freshness key ranks
+    /// the lifecycle monotonically.
+    #[test]
+    fn race_rows_encode_and_order_the_lifecycle() {
+        let def = grid_def(&[]);
+        let mut state = RaceState::new(def, 3);
+        let countdown = encode_race(&state);
+        assert_eq!(
+            countdown,
+            SnapRace {
+                phase: SNAP_PHASE_COUNTDOWN,
+                countdown: 1,
+                clock: 0
+            }
+        );
+        assert_eq!(
+            race_phase(&countdown),
+            Some(RacePhase::Countdown { remaining: 1 })
+        );
+        state.phase = RacePhase::Running;
+        state.clock = 41;
+        let running = encode_race(&state);
+        assert_eq!(
+            race_phase(&running),
+            Some(RacePhase::Running),
+            "the running row keeps the clock"
+        );
+        assert_eq!(running.clock, 41);
+        state.phase = RacePhase::Complete;
+        let complete = encode_race(&state);
+        assert_eq!(race_phase(&complete), Some(RacePhase::Complete));
+        assert_eq!(
+            race_phase(&SnapRace {
+                phase: 7,
+                countdown: 0,
+                clock: 0
+            }),
+            None,
+            "an unnamed discriminant decodes nothing"
+        );
+        // The order key is monotone along the real sequence: the
+        // countdown's *remaining* descends while its key climbs, then
+        // the release outranks any countdown, then the clock counts up.
+        let key = |g: u64, phase: u8, countdown: u32, clock: u64| {
+            race_order_key(
+                g,
+                &SnapRace {
+                    phase,
+                    countdown,
+                    clock,
+                },
+            )
+        };
+        assert!(key(3, SNAP_PHASE_COUNTDOWN, 120, 0) < key(3, SNAP_PHASE_COUNTDOWN, 60, 0));
+        assert!(key(3, SNAP_PHASE_COUNTDOWN, 1, 0) < key(3, SNAP_PHASE_RUNNING, 0, 0));
+        assert!(key(3, SNAP_PHASE_RUNNING, 0, 0) < key(3, SNAP_PHASE_RUNNING, 0, 1));
+        assert!(key(3, SNAP_PHASE_RUNNING, 0, 9) < key(3, SNAP_PHASE_COMPLETE, 0, 9));
+        assert!(key(3, SNAP_PHASE_COMPLETE, 0, 9) < key(4, SNAP_PHASE_COUNTDOWN, 99, 0));
+        assert_eq!(key(3, 99, 0, 0), None);
     }
 }

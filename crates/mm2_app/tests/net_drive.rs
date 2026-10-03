@@ -97,7 +97,7 @@ fn leading_u64(s: &str) -> u64 {
     digits.parse().unwrap()
 }
 
-/// The `net=in<s>s/<a>a/<x>x,snap<s>s/<a>a/<x>x,rem<r>,req<s>s/<g>g/<d>d,rspn<n>,dsyn<n>,tsyn<n>,imp<s>s/<a>a/<d>d,rb<d>d/<r>r`
+/// The `net=in<s>s/<a>a/<x>x,snap<s>s/<a>a/<x>x,rem<r>,req<s>s/<g>g/<d>d,rspn<n>,dsyn<n>,tsyn<n>,imp<s>s/<a>a/<d>d,rb<d>d/<r>r,race<a>a/<d>d`
 /// record field decoded — the wire counters the run actually moved.
 /// `snap<x>` counts pose frames the client dropped stale at push: a
 /// duplicated or reordered `Snap` at/behind the staged-or-applied
@@ -107,8 +107,10 @@ fn leading_u64(s: &str) -> u64 {
 /// the byte to land on and 0 is the honest value.
 /// `tsyn` (v9 trailer rows) is the same — the dev car tows nothing —
 /// `imp` (v10 impact rows) likewise (the clean cruise never
-/// collides), and `rb` (v11 breakaway-mask transitions) too — the dev
-/// car authors no breakable parts — so all four cells read 0 here.
+/// collides), `rb` (v11 breakaway-mask transitions) too — the dev
+/// car authors no breakable parts — and `race` (v13 race rows) reads
+/// 0 on both sides: the dev cruise carries no `RaceState` — so all
+/// five cells read 0 here.
 #[derive(Debug, Default)]
 struct NetField {
     inputs_sent: u64,
@@ -130,6 +132,10 @@ struct NetField {
     breaks_detached: u64,
     #[allow(dead_code)]
     breaks_restored: u64,
+    #[allow(dead_code)]
+    race_applied: u64,
+    #[allow(dead_code)]
+    race_dropped: u64,
 }
 
 fn net_field(line: &str) -> NetField {
@@ -148,6 +154,7 @@ fn net_field(line: &str) -> NetField {
     let snaps = cells(parts[1], "snap");
     let impacts = cells(parts[7], "imp");
     let breaks = cells(parts[8], "rb");
+    let race = cells(parts[9], "race");
     NetField {
         inputs_sent: inputs[0],
         inputs_applied: inputs[1],
@@ -162,6 +169,8 @@ fn net_field(line: &str) -> NetField {
         impacts_applied: impacts[1],
         breaks_detached: breaks[0],
         breaks_restored: breaks[1],
+        race_applied: race[0],
+        race_dropped: race[1],
     }
 }
 

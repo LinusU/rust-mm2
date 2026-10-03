@@ -204,6 +204,8 @@ fn texel_app_with(pos: Vec3, authority: SessionAuthority) -> (App, Entity, Objec
         .add_message::<ImpactEvent>()
         .add_message::<DamageEvent>()
         .add_message::<RemoteImpact>()
+        // F25-B (v13): `apply_snapshots` writes the release event.
+        .add_message::<mm2_game::RaceStarted>()
         // F25-B (v11): `apply_snapshots`'s breakaway reconcile claims
         // pool slots and writes the banger lifecycle stream.
         .add_message::<mm2_game::BangerStateChanged>()
@@ -578,6 +580,7 @@ fn push_snap_with_impacts(
         entries,
         Vec::new(),
         impacts,
+        None,
     );
 }
 
