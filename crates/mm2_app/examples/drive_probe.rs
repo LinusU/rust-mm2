@@ -11,6 +11,7 @@
 //! cargo run -p mm2_app --example drive_probe -- retail            # roster
 //! cargo run -p mm2_app --example drive_probe -- retail --controls # launch/brake/reverse/reset
 //! cargo run -p mm2_app --example drive_probe -- retail --drop     # level-drop landing leg
+//! cargo run -p mm2_app --example drive_probe -- retail vpbug --handbrake # handbrake turns
 //! ```
 //!
 //! With a city name it instead reproduces the plainest possible bug
@@ -67,6 +68,7 @@ fn main() {
         .cloned();
     let controls = args.iter().any(|a| a == "--controls");
     let drop_leg = args.iter().any(|a| a == "--drop");
+    let handbrake_leg = args.iter().any(|a| a == "--handbrake");
     let clearance = args.iter().any(|a| a == "--clearance");
     let trace = args.iter().any(|a| a == "--trace");
     let config_path = args
@@ -138,6 +140,24 @@ fn main() {
         let cfg = effective_config(&def, config_path.as_deref());
         std::fs::write(&path, cfg.to_toml()).unwrap();
         println!("wrote {}: {}", def.id, path);
+        return;
+    }
+
+    if handbrake_leg {
+        for id in &ids {
+            let def = mm2_content::load_vehicle(&vfs, id, 0).unwrap();
+            let cfg = effective_config(&def, config_path.as_deref());
+            println!(
+                "{}: flick — 0.3 s handbrake on full lock, then straighten",
+                def.id
+            );
+            probe_handbrake(&cfg, 0.3, 0.0);
+            println!(
+                "{}: hold — 0.6 s handbrake on full lock, then keep the lock",
+                def.id
+            );
+            probe_handbrake(&cfg, 0.6, 1.0);
+        }
         return;
     }
 
@@ -525,6 +545,74 @@ fn probe_acceleration(cfg: &VehicleConfig, trace: bool) -> AccelProbe {
         worst_interval_ratio: if mean > 0.0 { worst / mean } else { 0.0 },
         longest_stall: stall,
         heading_drift: drift.to_degrees(),
+    }
+}
+
+/// A handbrake turn from 72 km/h: `hold` seconds of handbrake on full
+/// left lock, then full throttle with `exit_lock` of left lock. Prints a
+/// timeline of how far the body and its path have turned — the body
+/// getting ahead of the path is the slide; both turning together is just
+/// a corner.
+fn probe_handbrake(cfg: &VehicleConfig, hold: f32, exit_lock: f32) {
+    let (mut app, car) = headless(cfg.clone());
+    settle(&mut app, car);
+    {
+        let world = app.world_mut();
+        let rot = world.get::<Rotation>(car).unwrap().0;
+        world.get_mut::<LinearVelocity>(car).unwrap().0 = rot * Vec3::NEG_Z * 20.0;
+    }
+    println!(
+        "  {:>5} {:<9} {:>6} {:>7} {:>6} {:>6} {:>6}",
+        "t", "input", "km/h", "yaw°/s", "body°", "path°", "slide°"
+    );
+    let heading = |v: Vec3| (-v.x).atan2(-v.z).to_degrees();
+    let wrap = |d: f32| (d + 540.0).rem_euclid(360.0) - 180.0;
+    let (body0, path0) = {
+        let w = app.world();
+        (
+            heading(w.get::<Rotation>(car).unwrap().0 * Vec3::NEG_Z),
+            heading(w.get::<LinearVelocity>(car).unwrap().0),
+        )
+    };
+    for frame in 0..HZ * 2 {
+        let t = frame as f32 / HZ as f32;
+        let (phase, input) = if t < hold {
+            (
+                "handbrake",
+                VehicleInput {
+                    steering: -1.0,
+                    handbrake: 1.0,
+                    ..default()
+                },
+            )
+        } else {
+            (
+                "throttle",
+                VehicleInput {
+                    steering: -exit_lock,
+                    throttle: 1.0,
+                    ..default()
+                },
+            )
+        };
+        set_input(&mut app, car, input);
+        app.update();
+        if frame % (HZ / 5) == 0 {
+            let w = app.world();
+            let v = w.get::<LinearVelocity>(car).unwrap().0;
+            let body = wrap(heading(w.get::<Rotation>(car).unwrap().0 * Vec3::NEG_Z) - body0);
+            let path = wrap(heading(v) - path0);
+            println!(
+                "  {:>5.2} {:<9} {:>6.1} {:>7.0} {:>6.0} {:>6.0} {:>6.0}",
+                t,
+                phase,
+                Vec3::new(v.x, 0.0, v.z).length() * 3.6,
+                w.get::<AngularVelocity>(car).unwrap().0.y.to_degrees(),
+                body,
+                path,
+                wrap(body - path),
+            );
+        }
     }
 }
 
