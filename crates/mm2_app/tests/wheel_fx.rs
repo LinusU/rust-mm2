@@ -414,15 +414,27 @@ fn test_car(app: &mut App, slot: u32) -> Entity {
 
 /// Write one wheel's contact fields — `contact` is the
 /// `SurfaceMaterial`-carrying entity the wheel rests on (or `None`
-/// airborne), `demand` the signed traction utilization.
+/// airborne), `demand` the slippage to read: how far past its
+/// longitudinal limit the tire has slid, written as the traction
+/// demand that produces it (0 is a gripping tire).
 fn set_wheel(app: &mut App, car: Entity, wheel: usize, contact: Option<Entity>, demand: f32) {
+    let config = &app.world().get::<Vehicle>(car).unwrap().config;
+    let ratio = config.wheels[wheel]
+        .tires
+        .as_ref()
+        .unwrap_or(&config.tires)
+        .peak_slip_ratio;
     let mut state = app.world_mut().get_mut::<VehicleState>(car).unwrap();
     let w = &mut state.wheels[wheel];
     w.grounded = contact.is_some();
     w.contact_entity = contact;
     w.contact_point = Vec3::new(0.0, 0.0, 5.0);
     w.contact_normal = Vec3::Y;
-    w.traction_demand = demand;
+    w.traction_demand = if demand > 0.0 {
+        1.0 + demand * ratio
+    } else {
+        0.0
+    };
 }
 
 /// Live puffs `car` owns.

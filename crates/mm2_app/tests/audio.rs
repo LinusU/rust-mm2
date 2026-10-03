@@ -33,6 +33,7 @@ use mm2_game::{
     SirenSampleSpec, SirenSpec, SurfaceMaterial, SurfaceState, SurfaceVariant, TimeOfDay,
     VehicleAudio, Weather, advance_session_tick, despawn_session_entities,
 };
+use mm2_vehicle::vehicle::Vehicle;
 use mm2_vehicle::{DriveDirection, RemoteReplica, VehicleConfig, VehicleState, vehicle_bundle};
 
 mod support;
@@ -1450,13 +1451,20 @@ fn a_live_car_records_the_resolved_contact_for_the_wire() {
     let dir = surface_dir();
     let mut app = surface_app(dir.path());
     let (car, grass) = surface_car(&mut app, true, SurfaceMaterial::Authored(1));
-    // Rolling at 10 m/s plus a 0.6-utilization slide — both halves of
-    // the grass row resolve.
+    // Rolling at 10 m/s plus a slide 0.6 of the way past the
+    // longitudinal limit — both halves of the grass row resolve.
     set_contact(&mut app, car, Some(grass), 10.0, 0.0);
+    let ratio = app
+        .world()
+        .get::<Vehicle>(car)
+        .unwrap()
+        .config
+        .tires
+        .peak_slip_ratio;
     {
         let mut state = app.world_mut().get_mut::<VehicleState>(car).unwrap();
         for w in &mut state.wheels {
-            w.traction_demand = 0.6;
+            w.traction_demand = 1.0 + 0.6 * ratio;
         }
     }
     app.update();
@@ -1468,8 +1476,8 @@ fn a_live_car_records_the_resolved_contact_for_the_wire() {
     let skid = contact.skid.expect("the slide resolved a skid contact");
     assert_eq!(skid.surface, 1, "the collider's authored sound class");
     assert!(
-        (skid.slippage - 0.6).abs() < 1e-6,
-        "the winning wheel's utilization: {}",
+        (skid.slippage - 0.6).abs() < 1e-5,
+        "the winning wheel's slide: {}",
         skid.slippage
     );
     assert_eq!(skid.wheel_speed, 10.0, "the winning wheel's vel_long");

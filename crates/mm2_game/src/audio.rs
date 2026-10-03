@@ -585,23 +585,36 @@ impl AmbientEngineSpec {
 }
 
 /// The designed quantity fed to `min slippage` bands (UNK-25): the
-/// larger of the tire's longitudinal over-demand (`traction_demand` —
-/// the fraction of its grip limit the controller asked for) and its
-/// lateral utilization (`|slip angle| / peak slip angle`), clamped to
-/// `0..=1` so utilization saturates at the authored limit the bands
-/// domain. The arcade tire model has no wheel-speed state, so there is
-/// no measured slip ratio to read; this is the closest "how far past
-/// the tire's limit" quantity the sim publishes — a handbrake slide
-/// reads high on the lateral term, a burnout on the longitudinal, and
-/// a brake held at rest reads ~0 (its demand is zero while `vel_long`
-/// is zero), which is what keeps AC03's no-squeal legs silent.
-/// Non-finite inputs read as 0 rather than poisoning the pick.
-pub fn tire_slippage(traction_demand: f32, slip_angle: f32, peak_slip_angle: f32) -> f32 {
-    let long = if traction_demand.is_finite() {
-        traction_demand.abs()
-    } else {
-        0.0
-    };
+/// larger of how far the tire has slid past its longitudinal limit and
+/// its lateral utilization (`|slip angle| / peak slip angle`), clamped
+/// to `0..=1` so it saturates at the authored band domain. The arcade
+/// tire model has no wheel-speed state, so there is no measured slip
+/// ratio to read; these are the closest "how hard is this tire working"
+/// quantities the sim publishes.
+///
+/// The longitudinal term is the over-limit share only —
+/// `(|traction_demand| − 1) / peak_slip_ratio`, the same slide progress
+/// `mm2_vehicle::sim::longitudinal_force` falls off by. A tire held
+/// under its limit is gripping, not slipping: traction control holds a
+/// launching car's driven wheels at 85 % of grip through every low
+/// gear, and reading that utilization as slippage screeched the whole
+/// way to 120 km/h on a straight road. A locked brake or a burnout
+/// still reads high, and a handbrake slide reads high on the lateral
+/// term. A brake held at rest reads 0 (its demand is zero while
+/// `vel_long` is zero), which is what keeps AC03's no-squeal legs
+/// silent. Non-finite inputs read as 0 rather than poisoning the pick.
+pub fn tire_slippage(
+    traction_demand: f32,
+    slip_angle: f32,
+    peak_slip_angle: f32,
+    peak_slip_ratio: f32,
+) -> f32 {
+    let long =
+        if traction_demand.is_finite() && peak_slip_ratio.is_finite() && peak_slip_ratio > 0.0 {
+            (traction_demand.abs() - 1.0).max(0.0) / peak_slip_ratio
+        } else {
+            0.0
+        };
     let lat = if slip_angle.is_finite() && peak_slip_angle.is_finite() && peak_slip_angle > 0.0 {
         (slip_angle / peak_slip_angle).abs()
     } else {
@@ -1149,17 +1162,23 @@ mod tests {
     }
 
     #[test]
-    fn tire_slippage_is_the_larger_utilization_saturated_at_one() {
+    fn tire_slippage_is_the_larger_slide_saturated_at_one() {
+        // Under-limit longitudinal demand is grip, not slip — the
+        // traction-controlled launch reads silent.
+        assert_eq!(tire_slippage(0.85, 0.0, 0.16, 0.2), 0.0);
+        // Past the limit the slide progresses over `peak_slip_ratio`.
+        assert!((tire_slippage(1.1, 0.0, 0.16, 0.2) - 0.5).abs() < 1e-5);
         // Longitudinal over-demand and lateral utilization compete.
-        assert_eq!(tire_slippage(0.7, 0.05, 0.16), 0.7);
-        assert!((tire_slippage(0.2, 0.12, 0.16) - 0.75).abs() < 1e-5);
-        // Over-limit demand saturates at the band domain's top.
-        assert_eq!(tire_slippage(1.4, 0.0, 0.16), 1.0);
+        assert!((tire_slippage(1.1, 0.12, 0.16, 0.2) - 0.75).abs() < 1e-5);
+        assert!((tire_slippage(0.2, 0.12, 0.16, 0.2) - 0.75).abs() < 1e-5);
+        // A deep over-demand saturates at the band domain's top.
+        assert_eq!(tire_slippage(1.4, 0.0, 0.16, 0.2), 1.0);
         // A held brake at rest demands nothing — no squeal.
-        assert_eq!(tire_slippage(0.0, 0.0, 0.16), 0.0);
-        // Non-finite inputs and a degenerate peak read as 0.
-        assert_eq!(tire_slippage(f32::NAN, f32::INFINITY, 0.16), 0.0);
-        assert_eq!(tire_slippage(0.0, 0.5, 0.0), 0.0);
+        assert_eq!(tire_slippage(0.0, 0.0, 0.16, 0.2), 0.0);
+        // Non-finite inputs and degenerate peaks read as 0.
+        assert_eq!(tire_slippage(f32::NAN, f32::INFINITY, 0.16, 0.2), 0.0);
+        assert_eq!(tire_slippage(0.0, 0.5, 0.0, 0.2), 0.0);
+        assert_eq!(tire_slippage(1.4, 0.0, 0.16, 0.0), 0.0);
     }
 
     // -------------------------------------------------------------------

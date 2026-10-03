@@ -295,13 +295,18 @@ pub fn emit_wheel_fx(
                 .copied()
                 .unwrap_or_default();
             let channels = tables.ptx_channels(material);
-            let peak = vehicle
+            let tires = vehicle
                 .config
                 .wheels
                 .get(i)
                 .and_then(|c| c.tires.as_ref())
-                .map_or(vehicle.config.tires.peak_slip_angle, |t| t.peak_slip_angle);
-            let q = tire_slippage(w.traction_demand, w.slip_angle, peak);
+                .unwrap_or(&vehicle.config.tires);
+            let q = tire_slippage(
+                w.traction_demand,
+                w.slip_angle,
+                tires.peak_slip_angle,
+                tires.peak_slip_ratio,
+            );
             let emission = rig.draw(
                 i,
                 WheelDraw {

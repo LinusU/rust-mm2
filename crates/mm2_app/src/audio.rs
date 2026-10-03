@@ -2619,13 +2619,18 @@ fn contact_pick(
             continue;
         };
         if let Some(skid) = spec.skid {
-            let peak = vehicle
+            let tires = vehicle
                 .config
                 .wheels
                 .get(i)
                 .and_then(|c| c.tires.as_ref())
-                .map_or(vehicle.config.tires.peak_slip_angle, |t| t.peak_slip_angle);
-            let slippage = tire_slippage(w.traction_demand, w.slip_angle, peak);
+                .unwrap_or(&vehicle.config.tires);
+            let slippage = tire_slippage(
+                w.traction_demand,
+                w.slip_angle,
+                tires.peak_slip_angle,
+                tires.peak_slip_ratio,
+            );
             let q = match skid.unit {
                 SkidUnit::Slippage => slippage,
                 SkidUnit::Speed => w.vel_long.abs(),

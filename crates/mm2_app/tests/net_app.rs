@@ -3176,17 +3176,27 @@ fn a_wire_seats_surface_contact_publishes_in_its_snap() {
         "airborne wheels resolve the empty contact — sentinel rows only"
     );
 
-    // A grass slide: every wheel grounded on the class-1 collider at
-    // 0.6 utilization, wheel speed and forward speed both 12.4 m/s so
-    // the rolling gate stays open.
+    // A grass slide: every wheel grounded on the class-1 collider and
+    // 0.6 of the way past its longitudinal limit, wheel speed and
+    // forward speed both 12.4 m/s so the rolling gate stays open.
     let grass = app.world_mut().spawn(SurfaceMaterial::Authored(1)).id();
+    let config = &app
+        .world()
+        .get::<mm2_vehicle::vehicle::Vehicle>(remote)
+        .unwrap()
+        .config;
+    let ratios: Vec<f32> = config
+        .wheels
+        .iter()
+        .map(|w| w.tires.as_ref().unwrap_or(&config.tires).peak_slip_ratio)
+        .collect();
     {
         let mut state = app.world_mut().get_mut::<VehicleState>(remote).unwrap();
         state.forward_speed = 12.4;
-        for w in &mut state.wheels {
+        for (w, ratio) in state.wheels.iter_mut().zip(ratios) {
             w.grounded = true;
             w.contact_entity = Some(grass);
-            w.traction_demand = 0.6;
+            w.traction_demand = 1.0 + 0.6 * ratio;
             w.vel_long = 12.4;
         }
     }
@@ -3201,7 +3211,7 @@ fn a_wire_seats_surface_contact_publishes_in_its_snap() {
         .expect("the resolve wrote the seat's contact");
     let skid = contact.skid.expect("the grass slide resolved a skid");
     assert_eq!(skid.surface, 1, "the collider's authored sound class");
-    assert!((skid.slippage - 0.6).abs() < 1e-6, "{}", skid.slippage);
+    assert!((skid.slippage - 0.6).abs() < 1e-5, "{}", skid.slippage);
     assert_eq!(skid.wheel_speed, 12.4);
     assert_eq!(contact.roll, Some(1), "the moving car's rolling class");
 
