@@ -338,8 +338,22 @@ fn probe_city(vfs: &Vfs, city_name: &str, cfg: &VehicleConfig) {
         }
         let pos = world.get::<Position>(car).unwrap().0;
         let rot = world.get::<Rotation>(car).unwrap().0;
-        let touching = world.get::<CollidingEntities>(car).unwrap();
-        match (touching.iter().next().copied(), &open) {
+        // `CollidingEntities` includes speculative contacts — anything
+        // inside a margin that grows with speed — so at 100 km/h the road
+        // 0.2 m under the floor would count. A touch is a pair the solver
+        // actually pushed on.
+        let touching = world
+            .resource::<ContactGraph>()
+            .contact_pairs_with(car)
+            .find(|pair| pair.total_normal_impulse_magnitude() > 0.0)
+            .map(|pair| {
+                if pair.collider1 == car {
+                    pair.collider2
+                } else {
+                    pair.collider1
+                }
+            });
+        match (touching, &open) {
             (Some(other), None) => {
                 let forward = rot * Vec3::NEG_Z;
                 open = Some(Contact {
