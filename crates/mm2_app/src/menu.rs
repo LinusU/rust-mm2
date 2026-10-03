@@ -57,7 +57,7 @@ use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use mm2_assets::Vfs;
-use mm2_content::{EventCatalog, VehicleCatalog, VehicleDef};
+use mm2_content::{CityInfo, EventCatalog, VehicleCatalog, VehicleDef};
 use mm2_game::{
     AvailabilityTable, Densities, Difficulty, EventRef, EventTableKind, GarageTable,
     MAX_NAME_CHARS, Mm2Vfs, PlayerProfile, ProfileId, ProfileStore, ProfileSummary,
@@ -363,6 +363,8 @@ pub struct MenuData {
     garage: Option<GarageTable>,
     events: BTreeMap<String, EventCatalog>,
     availability: BTreeMap<String, AvailabilityTable>,
+    /// Per-city `tune/<city>.cinfo` — `None` when the city ships none.
+    city_info: BTreeMap<String, Option<CityInfo>>,
     profiles: Vec<ProfileSummary>,
 }
 
@@ -380,6 +382,7 @@ impl MenuData {
             garage: None,
             events: BTreeMap::new(),
             availability: BTreeMap::new(),
+            city_info: BTreeMap::new(),
             profiles: Vec::new(),
         }
     }
@@ -423,6 +426,31 @@ impl MenuData {
             self.availability.insert(city.to_string(), table);
         }
         &self.availability[city]
+    }
+
+    /// A city's display metadata, read on first request.
+    fn city_info_of(&mut self, vfs: &Vfs, city: &str) -> Option<&CityInfo> {
+        self.city_info
+            .entry(city.to_string())
+            .or_insert_with(|| CityInfo::load(vfs, city))
+            .as_ref()
+    }
+
+    /// An event's display label: its authored race name
+    /// (`tune/<city>.cinfo`), or `Checkpoint #3 (race3)` for a city
+    /// that names none — Crash Course lessons always take the latter.
+    fn event_label(&mut self, vfs: &Vfs, event_ref: &EventRef, stem: &str) -> String {
+        match self
+            .city_info_of(vfs, &event_ref.city)
+            .and_then(|info| info.race_name(event_ref.table, event_ref.index))
+        {
+            Some(name) => name.to_string(),
+            None => format!(
+                "{} #{} ({stem})",
+                table_name(event_ref.table),
+                event_ref.index
+            ),
+        }
     }
 
     /// Re-read the profile list from the store.
@@ -999,11 +1027,15 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
             let availability = data.availability_of(vfs, city).clone();
             let bound = data.bound.clone();
             let difficulty = shell.difficulty;
-            let catalog = data.catalog_of(vfs, city);
-            catalog
+            let events: Vec<mm2_content::CatalogEvent> = data
+                .catalog_of(vfs, city)
                 .events
                 .iter()
                 .filter(|e| e.event_ref.table == *table)
+                .cloned()
+                .collect();
+            events
+                .iter()
                 .flat_map(|e| {
                     let avail = match &e.status {
                         mm2_content::EventStatus::Ready => {
@@ -1030,12 +1062,7 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                     };
                     [
                         Row {
-                            text: format!(
-                                "{} #{} ({})",
-                                table_name(*table),
-                                e.event_ref.index,
-                                e.stem
-                            ),
+                            text: data.event_label(vfs, &e.event_ref, &e.stem),
                             enabled: enabled.clone(),
                             action: Action::LaunchEvent(e.event_ref.clone()),
                         },
@@ -1261,6 +1288,7 @@ fn quick_race_row(data: &mut MenuData, vfs: &Vfs) -> Row {
         .events
         .iter()
         .find(|e| e.event_ref.table == key.table && e.stem == key.stem)
+        .cloned()
     else {
         return disabled(
             text,
@@ -1278,13 +1306,11 @@ fn quick_race_row(data: &mut MenuData, vfs: &Vfs) -> Row {
     };
     Row {
         text: format!(
-            "Quick Race: {} #{} ({})",
-            table_name(key.table),
-            event.event_ref.index,
-            key.stem
+            "Quick Race: {}",
+            data.event_label(vfs, &event.event_ref, &key.stem)
         ),
         enabled,
-        action: Action::LaunchEvent(event.event_ref.clone()),
+        action: Action::LaunchEvent(event.event_ref),
     }
 }
 
@@ -1763,11 +1789,9 @@ fn record_row(
     };
     Row {
         text: format!(
-            "{} ({}) - {} #{} - {stats}",
-            key.stem,
+            "{} ({}) - {stats}",
+            data.event_label(vfs, &event.event_ref, &key.stem),
             key.city,
-            table_name(key.table),
-            event.event_ref.index,
         ),
         enabled,
         action: Action::LaunchEvent(event.event_ref),

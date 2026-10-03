@@ -897,6 +897,57 @@ fn event_rows_carry_real_availability() {
     }
 }
 
+/// Event rows carry the race names `tune/<city>.cinfo` authors, by
+/// table row; a row past the authored list keeps the stem label, and
+/// Quick Race shows the same name.
+#[test]
+fn event_rows_show_authored_race_names() {
+    let tmp = install();
+    write(
+        tmp.path(),
+        "tune/testcity.cinfo",
+        "LocalizedName=Test City\r\nCheckpointNames=Racing 101|Deck The Hall\r\n",
+    );
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = ProfileStore::open(store_dir.path()).unwrap();
+    let alice = store
+        .create("Alice", Difficulty::Amateur, ProfileKind::Standard)
+        .unwrap();
+    let mut loaded = store.load(&alice.id).unwrap().profile;
+    loaded.selections.last_event = Some(EventKey {
+        city: "testcity".into(),
+        table: EventTableKind::Checkpoint,
+        stem: "race1".into(),
+    });
+    store.save(&mut loaded).unwrap();
+
+    let mut app = menu_app(tmp.path(), Some(store));
+    app.update();
+    activate_row(&mut app, "Driver:");
+    activate_row(&mut app, "Alice");
+    press(&mut app, KeyCode::Escape);
+    assert_eq!(quick_race(&app).0, "Quick Race: Deck The Hall");
+
+    activate_row(&mut app, "Events");
+    activate_row(&mut app, "testcity");
+    activate_row(&mut app, "Checkpoint");
+    let texts: Vec<String> = shell(&app)
+        .rows
+        .iter()
+        .map(|r| r.text.clone())
+        .filter(|t| t != "  options")
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            "Racing 101",
+            "Deck The Hall",
+            "Checkpoint #2 (race2)",
+            "Checkpoint #3 (race3)"
+        ]
+    );
+}
+
 /// Garage → paints → launch: the roster row is the real catalog entry,
 /// a reward-gated paint stays disabled with its reason, and the pick
 /// lands in the launched session's `SelectedCar`.
