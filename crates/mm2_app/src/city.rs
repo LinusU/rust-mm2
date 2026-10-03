@@ -1168,10 +1168,10 @@ impl EmitCtx<'_> {
         Vec3::new(fx, 0.0, authored_z(fz))
     }
 
-    /// For mostly-vertical fans (gables, embankment walls — unlike ground
+    /// For vertical fans (gables, embankment walls — unlike ground
     /// fans their authored winding isn't reliable): the Bevy-space
-    /// direction the fan should face, or `None` for horizontal/degenerate
-    /// fans and ambiguous sides (which keep the authored winding).
+    /// direction the fan should face, or `None` for sloped/degenerate
+    /// fans and ambiguous sides (which use the ordinary upward fan emission).
     fn vertical_facing(&self, pts: &[Vec3]) -> Option<Vec3> {
         let mut n = Vec3::ZERO;
         for i in 1..pts.len().saturating_sub(1) {
@@ -1181,7 +1181,11 @@ impl EmitCtx<'_> {
                 break;
             }
         }
-        if n.length_squared() < 0.5 || n.y.abs() >= 0.3 || self.poly.len() < 3 {
+        // Only a vertical plane may use the horizontal room-side test.
+        // A steep terrain fan still has an upward-facing surface; treating
+        // it as a wall can flip its paving downward at a perimeter edge.
+        // The tolerance allows floating-point noise on authored wall planes.
+        if n.length_squared() < 0.5 || n.y.abs() >= 1e-3 || self.poly.len() < 3 {
             return None;
         }
         let mut mid = Vec3::ZERO;
