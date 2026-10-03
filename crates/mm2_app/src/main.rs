@@ -1684,9 +1684,17 @@ fn main() {
                     // F25-A: the roster/host-pick drives remote
                     // participant spawning; the newest drained snapshot
                     // feeds their lerp. Both run after the drain sees
-                    // this frame's wire state.
+                    // this frame's wire state. The apply runs after the
+                    // reconcile so its `NetPlayer` stamps and remote
+                    // spawns — deferred inserts — are visible the same
+                    // update they land: a snap held through the session
+                    // load then applies whole rather than skipping the
+                    // local seat's rows (its v14 terminal edge
+                    // included) on the frame they become receivable.
                     netdrive::reconcile_remote_players.after(net::drive_lobby),
-                    netdrive::apply_snapshots.after(net::drive_lobby),
+                    netdrive::apply_snapshots
+                        .after(net::drive_lobby)
+                        .after(netdrive::reconcile_remote_players),
                     netdrive::drive_remote_lerp,
                     // F25-B: `R` under a predicted session asks the
                     // authority for the reset `reset_input` is gated

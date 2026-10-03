@@ -57,7 +57,13 @@
 //!   `Remote` participant resolves or departs (see `advance_race`) —
 //!   and this publisher then owes the wire exactly one `Results`-phase
 //!   frame at the frozen transition tick, the terminal rows' only
-//!   carrier.
+//!   carrier. Two receive-side edges keep that delivery from being
+//!   swallowed: staged state holds while the session is `Loading`
+//!   (its seats and `RaceState` do not exist yet, so a consumed frame
+//!   would skip every row), and a local edge recorded before the
+//!   session reaches `Playing` resolves on the release edge — the
+//!   seat rows run ahead of the same frame's race row, so the
+//!   `Playing`-gated transition is re-checked after the drain.
 //! - **Client** (`SessionAuthority::Remote` → `Predicted`): remote cars
 //!   are kinematic copies blended between the two newest snapshots
 //!   ([`RemoteLerp`]), marked [`RemoteReplica`] so the local sim never
@@ -498,7 +504,12 @@ fn decode_progress(entry: &SnapEntry) -> Option<SnapProgress> {
 /// process's [`ResultLedger`] (deduped by identity), the
 /// participant's state carries the minted id, and a resolved *local*
 /// participant moves the session `Playing → Results` — UI-5's
-/// local-resolution rule, mirrored. `snap_tick` is the authority's
+/// local-resolution rule, mirrored. A local edge landing while the
+/// session is still `Ready`/`Countdown` records like any other and
+/// [`release_resolved_local`] ends the session once the race row's
+/// release reaches `Playing` — the seat rows run ahead of the same
+/// frame's race row, so the phase gate below cannot be the only
+/// look. `snap_tick` is the authority's
 /// session tick at the frame's mint — the same clock family the
 /// authority stamps its own results' `tick` field on.
 ///
@@ -2242,11 +2253,16 @@ type SnapTrailerFilter = (
 /// Client-side: fold the newest staged snapshot into the remote copies'
 /// [`RemoteLerp`] blend and velocities, and reconcile the own seat on
 /// an epoch advance (F25-A.5). Wrong-generation and stale-tick frames
-/// drop untouched; entries without a spawned entity are skipped. The
-/// queued replicated impact rows then drain into the [`RemoteImpact`]
+/// drop untouched; entries without a spawned entity are skipped. A
+/// `Loading` session consumes nothing — its seats and `RaceState` do
+/// not exist yet, so the staged frame, race row and impact queue hold
+/// for the first live update (F25-B). The queued replicated impact
+/// rows then drain into the [`RemoteImpact`]
 /// stream — every run, and *after* the state pass so a repair byte
 /// landing this frame is already recorded in [`RemoteSnaps::repaired`]
-/// before the rows are judged against it.
+/// before the rows are judged against it. The v13 race row drains
+/// last, and [`release_resolved_local`] then resolves the session if
+/// the local seat's terminal edge landed before its release.
 ///
 /// Two snap triggers share the "teleport, not motion" rule: a changed
 /// `epoch` — the authority's declared reset — or a correction past
@@ -2294,6 +2310,21 @@ pub fn apply_snapshots(
     // ride inside `apply_snap_frame`'s early return.
     report.snaps_staled += std::mem::take(&mut snaps.stale);
     report.race_dropped += std::mem::take(&mut snaps.race_dropped);
+    // A `Loading` session cannot receive wire state yet — the seats a
+    // frame's rows target spawn at the load's end, the local seat's
+    // `NetPlayer` stamp lands through the next
+    // `reconcile_remote_players` (scheduled ahead of this system so
+    // the same update's stamp is visible), and the race row's
+    // `RaceState` arrives with them. Consuming now would skip every
+    // seat row — a local terminal edge included — and drop the race
+    // row raceless: a mid-race joiner's first applied frame would
+    // strand it. Everything the wire sends is latest-wins state
+    // `push` already coalesces, so holding the staged frame, race row
+    // and impact queue costs nothing — the newest of each applies
+    // whole on the first live update.
+    if *session.phase() == SessionPhase::Loading {
+        return;
+    }
     // The state pass runs before the event drain: a repair byte
     // landing this frame records its snap tick in
     // `RemoteSnaps::repaired` before the queued impact rows are
@@ -2322,6 +2353,7 @@ pub fn apply_snapshots(
     if let Some((generation, row)) = snaps.race.take() {
         apply_race_snap(generation, row, &mut session, &mut mirror, &mut report);
     }
+    release_resolved_local(&mut session, &players, &mut mirror);
 }
 
 /// The v13 `Snap.race` row's consumer (F25-B): mirror the authority's
@@ -2389,6 +2421,47 @@ fn apply_race_snap(
         mirror.started.write(RaceStarted);
     }
     report.race_applied += 1;
+}
+
+/// The v14 terminal edge's second look (F25-B): a local participant's
+/// replicated resolution can land *before* the session reaches
+/// `Playing` — `apply_snap_frame`'s seat rows run ahead of the same
+/// frame's race-row release, so a snap carrying a terminal tail and
+/// the `Running`/`Complete` row records the result while the session
+/// is still `Ready`/`Countdown`, and the release edge the row then
+/// performs is `apply_progress`'s phase gate's only visit. A recorded
+/// resolution is final — the identical row's early return can never
+/// re-fire the transition — and `advance_race` never runs on a
+/// predicted client, so without this check the session would sit in
+/// `Playing` forever on a dead stream: its own seat resolved, its
+/// ledger complete, the race unendable. A predicted session in
+/// `Playing` whose local participant is already resolved ends here —
+/// the deferred edge `apply_progress` could not take. Authority
+/// sessions are exempt: a hosted session's `Playing` outlives the
+/// local seat's resolution on purpose (the wire-seat deferral in
+/// `advance_race`).
+fn release_resolved_local(
+    session: &mut Session,
+    players: &Query<SnapTargetRow<'_>, SnapTargetFilter>,
+    mirror: &mut RaceMirror,
+) {
+    if *session.phase() != SessionPhase::Playing || session.authority_role().is_authority() {
+        return;
+    }
+    let resolved = players.iter().any(|(entity, _, player, ..)| {
+        player.control == PlayerControl::Local
+            && mirror.progress.p1().get(entity).is_ok_and(|progress| {
+                matches!(
+                    progress.state,
+                    ParticipantState::Finished { .. } | ParticipantState::TimedOut { .. }
+                )
+            })
+    });
+    if resolved {
+        session
+            .transition(SessionPhase::Results)
+            .expect("Playing → Results is a legal transition");
+    }
 }
 
 /// One seat's replicated [`SnapEntry::breaks`] bitmask diffed against
@@ -3738,7 +3811,8 @@ mod tests {
         );
 
         // The begin adopts the new generation — the stream's rows then
-        // land like the first session's did.
+        // land like the first session's did: stood up out of `Loading`,
+        // which holds the staged state until the world can receive it.
         {
             let mut session = app.world_mut().resource_mut::<Session>();
             session
@@ -3750,6 +3824,8 @@ mod tests {
                     2,
                 )
                 .unwrap();
+            session.transition(SessionPhase::Ready).unwrap();
+            session.transition(SessionPhase::Playing).unwrap();
         }
         let mut row = snap_impact(3);
         row.seat = 7;
@@ -4239,5 +4315,235 @@ mod tests {
             "UI-5's local-resolution rule, mirrored"
         );
         assert_eq!(app.world().resource::<ResultLedger>().len(), 2);
+    }
+
+    /// The v14 client leg's ordering edge, repaired (F25-B): one snap
+    /// can carry the local seat's terminal tail *and* the race row
+    /// that releases the session — the owed `Results`-phase frame a
+    /// mid-race joiner's first applied snap is. `apply_progress`
+    /// mints and records the resolution while the session is still
+    /// `Ready`, then the drained row's release edge moves it
+    /// `Ready → Playing` — after the `Playing`-gated transition
+    /// already passed. A recorded resolution is final and
+    /// `advance_race` never runs on a predicted client, so without
+    /// `release_resolved_local` the session would sit in `Playing`
+    /// forever on a dead stream — its own seat resolved, its ledger
+    /// complete, the race unendable.
+    #[test]
+    fn a_terminal_edge_landed_before_the_release_still_resolves_the_session() {
+        let mut session = Session::new();
+        session
+            .begin_generation(
+                mm2_game::SessionConfig {
+                    authority: mm2_game::SessionAuthority::Remote,
+                    ..mm2_game::SessionConfig::default()
+                },
+                1,
+            )
+            .unwrap();
+        // `Ready`, not `Playing`: the release edge has not run yet —
+        // the swallow's trigger phase.
+        session.transition(SessionPhase::Ready).unwrap();
+        let generation = session.generation();
+        let def = grid_def(&[]);
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(session)
+            // The event session's race resource — the load inserts it
+            // before `Ready` is observable, so it waits mid-countdown
+            // for the wire's rows like it does here.
+            .insert_resource(RaceState::new(def.clone(), generation))
+            .init_resource::<RemoteSnaps>()
+            .init_resource::<NetDriveReport>()
+            .init_resource::<crate::texel_fx::TexelDamageReport>()
+            .add_message::<RemoteImpact>()
+            .add_message::<RaceStarted>()
+            .add_message::<BangerStateChanged>()
+            .init_resource::<BangerPool>()
+            .init_resource::<ResultLedger>()
+            .add_systems(Update, apply_snapshots);
+        let own = app
+            .world_mut()
+            .spawn((
+                NetPlayer(8),
+                Player {
+                    id: mm2_game::PlayerId(11),
+                    control: PlayerControl::Local,
+                },
+                ResetEpoch(0),
+                Position(Vec3::ZERO),
+                Rotation(Quat::IDENTITY),
+                LinearVelocity(Vec3::ZERO),
+                AngularVelocity(Vec3::ZERO),
+                RaceProgress::new(&def),
+            ))
+            .id();
+
+        // One frame: the local seat's `TimedOut` tail plus the
+        // `Complete` row — the seat rows run before the row drains.
+        let mut own_row = snap_entry();
+        own_row.player = 8;
+        own_row.prog_state = SNAP_PROG_TIMED_OUT;
+        own_row.prog_ticks = 40;
+        app.world_mut().resource_mut::<RemoteSnaps>().push(
+            1,
+            7,
+            vec![own_row],
+            Vec::new(),
+            Vec::new(),
+            Some(SnapRace {
+                phase: SNAP_PHASE_COMPLETE,
+                countdown: 0,
+                clock: 40,
+            }),
+        );
+        app.update();
+
+        // The tail minted and recorded while still `Ready` — the
+        // wire's word is never refused.
+        assert!(matches!(
+            app.world().get::<RaceProgress>(own).unwrap().state,
+            ParticipantState::TimedOut { race_ticks: 40, .. }
+        ));
+        {
+            let ledger = app.world().resource::<ResultLedger>();
+            assert_eq!(ledger.len(), 1);
+            assert_eq!(
+                ledger.iter().next().unwrap().outcome,
+                SessionOutcome::TimedOut { race_ticks: 40 }
+            );
+        }
+        // The same frame's release moved `Ready → Playing`, and the
+        // second look resolved it — not the reviewer's stranded
+        // `Playing` on a dead stream.
+        assert_eq!(
+            app.world().resource::<Session>().phase(),
+            &SessionPhase::Results,
+            "the terminal edge that predates the release still ends the session"
+        );
+        assert_eq!(
+            app.world().resource::<NetDriveReport>().race_applied,
+            1,
+            "the release edge ran — this is the ordering the swallow needed"
+        );
+        assert_eq!(
+            app.world().resource::<RaceState>().phase,
+            RacePhase::Complete
+        );
+    }
+
+    /// A snap arriving while the session is still `Loading` cannot be
+    /// received — the seats its rows target and the `RaceState` its
+    /// race row mirrors into do not exist yet — so `apply_snapshots`
+    /// holds the staged frame, race row and impact queue rather than
+    /// consuming into nothing (F25-B, the reviewer's wider variant).
+    /// The first live update applies the newest of each whole: the
+    /// terminal tail mints, the `Complete` row releases, and the
+    /// second look ends the session.
+    #[test]
+    fn a_snap_held_through_the_load_arrives_whole() {
+        let mut session = Session::new();
+        // `begin` leaves the session `Loading` — the world the wire
+        // state targets is still being built.
+        session
+            .begin_generation(
+                mm2_game::SessionConfig {
+                    authority: mm2_game::SessionAuthority::Remote,
+                    ..mm2_game::SessionConfig::default()
+                },
+                1,
+            )
+            .unwrap();
+        let generation = session.generation();
+        let def = grid_def(&[]);
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(session)
+            .init_resource::<RemoteSnaps>()
+            .init_resource::<NetDriveReport>()
+            .init_resource::<crate::texel_fx::TexelDamageReport>()
+            .add_message::<RemoteImpact>()
+            .add_message::<RaceStarted>()
+            .add_message::<BangerStateChanged>()
+            .init_resource::<BangerPool>()
+            .init_resource::<ResultLedger>()
+            .add_systems(Update, apply_snapshots);
+        let own = app
+            .world_mut()
+            .spawn((
+                NetPlayer(8),
+                Player {
+                    id: mm2_game::PlayerId(11),
+                    control: PlayerControl::Local,
+                },
+                ResetEpoch(0),
+                Position(Vec3::ZERO),
+                Rotation(Quat::IDENTITY),
+                LinearVelocity(Vec3::ZERO),
+                AngularVelocity(Vec3::ZERO),
+                RaceProgress::new(&def),
+            ))
+            .id();
+
+        // The owed frame arrives mid-load — terminal tail plus the
+        // `Complete` row. Held, not consumed: nothing applies, nothing
+        // drops, the staged state survives for the first live update.
+        let mut own_row = snap_entry();
+        own_row.player = 8;
+        own_row.prog_state = SNAP_PROG_TIMED_OUT;
+        own_row.prog_ticks = 40;
+        app.world_mut().resource_mut::<RemoteSnaps>().push(
+            1,
+            7,
+            vec![own_row],
+            Vec::new(),
+            Vec::new(),
+            Some(SnapRace {
+                phase: SNAP_PHASE_COMPLETE,
+                countdown: 0,
+                clock: 40,
+            }),
+        );
+        app.update();
+        {
+            let report = app.world().resource::<NetDriveReport>();
+            assert_eq!(report.snaps_applied, 0, "the load consumed nothing");
+            assert_eq!(report.race_dropped, 0, "the race row held, not dropped");
+            let snaps = app.world().resource::<RemoteSnaps>();
+            assert!(snaps.latest.is_some(), "the frame stays staged");
+            assert!(snaps.race.is_some(), "the race row stays staged");
+            assert_eq!(
+                app.world().resource::<Session>().phase(),
+                &SessionPhase::Loading
+            );
+            assert_eq!(app.world().resource::<ResultLedger>().len(), 0);
+            assert_eq!(
+                app.world().get::<RaceProgress>(own).unwrap().state,
+                ParticipantState::AwaitingStart,
+                "the tail never landed — it arrives whole below"
+            );
+        }
+
+        // The load's end: `Ready` plus the event's `RaceState` — what
+        // `load_session_world` leaves. The held snap now applies
+        // whole: mint, release, resolve, one update.
+        {
+            let mut session = app.world_mut().resource_mut::<Session>();
+            session.transition(SessionPhase::Ready).unwrap();
+        }
+        app.world_mut()
+            .insert_resource(RaceState::new(def.clone(), generation));
+        app.update();
+        assert_eq!(app.world().resource::<NetDriveReport>().snaps_applied, 1);
+        assert!(matches!(
+            app.world().get::<RaceProgress>(own).unwrap().state,
+            ParticipantState::TimedOut { race_ticks: 40, .. }
+        ));
+        assert_eq!(app.world().resource::<ResultLedger>().len(), 1);
+        assert_eq!(
+            app.world().resource::<Session>().phase(),
+            &SessionPhase::Results,
+            "the held frame delivers its terminal edge after the load"
+        );
     }
 }

@@ -193,9 +193,14 @@ fn bridge_app(vfs: Vfs, link: LobbyLink) -> App {
                 net::drive_lobby.after(session::drive_session),
                 // F25-A: same wiring as `run_headless` — reconcile and
                 // snapshot application settle after the drain, the
-                // input stream after the input owners.
+                // input stream after the input owners. The apply runs
+                // after the reconcile so the update's `NetPlayer`
+                // stamps are visible to it — a snap held through the
+                // load applies whole on the first live update.
                 netdrive::reconcile_remote_players.after(net::drive_lobby),
-                netdrive::apply_snapshots.after(net::drive_lobby),
+                netdrive::apply_snapshots
+                    .after(net::drive_lobby)
+                    .after(netdrive::reconcile_remote_players),
                 netdrive::drive_remote_lerp,
                 // F25-B: `R` asks the authority under a predicted
                 // session — production wiring.
@@ -1211,6 +1216,16 @@ fn a_dead_authoritys_watermark_dies_with_the_link() {
     let gen_a = until_started(&host_a);
     until_begun(&mut app);
 
+    // The minimal app has no loader — move the session through the
+    // two legal steps `load_session_world` would have run so the
+    // stream applies (a `Loading` session holds it) and the
+    // quit-to-teardown leg can land.
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+
     // The dead stream's watermark climbs high enough that a restarted
     // (generation 1, low tick) sequence would read as a straggler
     // without the boundary reset.
@@ -1229,14 +1244,6 @@ fn a_dead_authoritys_watermark_dies_with_the_link() {
         a.world().resource::<netdrive::RemoteSnaps>().applied() == Some((gen_a, 900))
     });
 
-    // The minimal app has no loader — move the session through the
-    // two legal steps `load_session_world` would have run so the
-    // quit-to-teardown leg can land, then kill the host.
-    {
-        let mut session = app.world_mut().resource_mut::<Session>();
-        session.transition(SessionPhase::Ready).unwrap();
-        session.transition(SessionPhase::Playing).unwrap();
-    }
     host_a.shutdown();
     let exit = until_exit(&mut app);
     assert_ne!(
@@ -1274,6 +1281,11 @@ fn a_dead_authoritys_watermark_dies_with_the_link() {
             2,
             "the local counter climbed past the regressed wire value"
         );
+    }
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
     }
 
     host_b
@@ -1361,6 +1373,13 @@ fn a_start_resets_the_stream_without_a_close() {
         let session = app.world().resource::<Session>();
         assert_eq!(session.wire_generation(), 1);
         assert_eq!(session.phase(), &SessionPhase::Loading);
+    }
+    // The load's end a `Loading` session waits on before the stream
+    // applies — staged here like every other leg.
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
     }
 
     host_b
@@ -5654,4 +5673,157 @@ fn the_deferred_authority_delivers_the_wire_seats_terminal_edge() {
             "the wire's word minted the client's own result row"
         );
     }
+}
+
+/// F25-B repair leg, the reviewer's wider variant over the real
+/// loopback path: a `LateJoin::Open` joiner whose first applied frame
+/// is the owed `Results`-phase one. While the session is still
+/// `Loading` the staged snap holds — its seat rows have no entities
+/// and its race row no `RaceState` yet, so a consumed frame would
+/// strand the joiner exactly like the swallowed terminal edge did.
+/// The first live update applies it whole: the reconcile's
+/// `NetPlayer` stamp lands ahead of the apply in the same update,
+/// the local tail mints while still `Countdown`, the `Complete` row
+/// releases, and the second look resolves the session to `Results`
+/// off the one frame.
+#[test]
+fn a_joiners_held_snap_resolves_the_terminal_edge_after_the_load() {
+    let install = tempfile::tempdir().unwrap();
+    let vfs = mount(install.path());
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host_config = HostConfig::new(fp);
+    host_config.host_pick = Some(VehiclePick {
+        vehicle: String::new(),
+        paint: 0,
+    });
+    let mut host = Host::listen_loopback(&host_config).unwrap();
+    host.set_session(net::advertise(&dev_cruise()).unwrap())
+        .unwrap();
+    let link = LobbyLink::join(
+        host.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join failed");
+    let our_id = link.player_id();
+    let mut app = bridge_app(vfs, link);
+    {
+        let link = app.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    until_ready(&mut app);
+    host.start(LateJoin::Open).unwrap();
+    until_started(&host);
+    until_begun(&mut app); // Start → begin_generation → Loading
+    assert_eq!(session_phase(&app), SessionPhase::Loading);
+    let generation = app.world().resource::<Session>().wire_generation();
+
+    // The owed `Results`-phase frame lands mid-load: our seat's
+    // `TimedOut` tail plus the `Complete` race row — the only frame a
+    // dead stream carries.
+    let mut own_row = SnapEntry {
+        player: our_id,
+        ..SnapEntry::default()
+    };
+    own_row.prog_state = 3; // timed out
+    own_row.prog_ticks = 40;
+    host.ctl()
+        .broadcast(&Message::Snap {
+            generation,
+            tick: 7,
+            entries: vec![own_row],
+            trailers: Vec::new(),
+            impacts: Vec::new(),
+            race: Some(mm2_net::SnapRace {
+                phase: 2, // complete
+                countdown: 0,
+                clock: 40,
+            }),
+        })
+        .unwrap();
+    // It drains off the wire and holds — a `Loading` session
+    // consumes nothing: no pose apply, no raceless race-row drop, no
+    // skipped terminal mint.
+    for _ in 0..4 {
+        app.update();
+    }
+    {
+        let report = app.world().resource::<netdrive::NetDriveReport>();
+        assert_eq!(report.snaps_applied, 0, "the load consumed nothing");
+        assert_eq!(
+            report.race_dropped, 0,
+            "the race row held rather than dropping raceless"
+        );
+        assert_eq!(
+            app.world().resource::<mm2_game::ResultLedger>().len(),
+            0,
+            "no tail landed — it arrives whole below"
+        );
+    }
+
+    // The load's end — `Ready → Countdown` plus the event's
+    // `RaceState` and the local seat the spawn leaves, staged by
+    // hand here (the load legs need the asset stack). One live
+    // update delivers the whole held frame: the reconcile's
+    // `NetPlayer` stamp lands before the apply through the ordering
+    // edge, the tail mints, the `Complete` row releases
+    // `Countdown → Playing`, and the second look ends the session.
+    {
+        let local_generation = {
+            let mut session = app.world_mut().resource_mut::<Session>();
+            session.transition(SessionPhase::Ready).unwrap();
+            session.transition(SessionPhase::Countdown).unwrap();
+            session.generation()
+        };
+        app.world_mut().insert_resource(mm2_game::RaceState::new(
+            wire_race_def(180),
+            local_generation,
+        ));
+    }
+    let local = app
+        .world_mut()
+        .spawn((
+            PlayerVehicle,
+            Player {
+                id: mm2_game::PlayerId(1),
+                control: PlayerControl::Local,
+            },
+            mm2_game::AuthorityRole::Predicted,
+            mm2_game::RaceProgress::new(&wire_race_def(180)),
+            avian3d::prelude::Position::default(),
+            avian3d::prelude::Rotation::default(),
+            avian3d::prelude::LinearVelocity::default(),
+            avian3d::prelude::AngularVelocity::default(),
+        ))
+        .id();
+    app.update();
+    assert!(
+        app.world().get::<NetPlayer>(local).is_some(),
+        "the reconcile stamped the wire id the snap names"
+    );
+    assert_eq!(
+        session_phase(&app),
+        SessionPhase::Results,
+        "the held frame delivered its terminal edge — not a stranded `Playing`"
+    );
+    assert!(matches!(
+        app.world()
+            .get::<mm2_game::RaceProgress>(local)
+            .unwrap()
+            .state,
+        mm2_game::ParticipantState::TimedOut { race_ticks: 40, .. }
+    ));
+    {
+        let ledger = app.world().resource::<mm2_game::ResultLedger>();
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(
+            ledger.iter().next().unwrap().outcome,
+            mm2_game::SessionOutcome::TimedOut { race_ticks: 40 },
+            "the wire's word minted the client's own result row"
+        );
+    }
+
+    host.shutdown();
 }

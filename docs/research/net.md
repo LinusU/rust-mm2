@@ -298,6 +298,23 @@ late-joiner ledger sync — standings arrive incrementally as each
 seat's tail lands, which is complete once every tracked entry
 has applied.
 
+Two receive-side holds keep that delivery from being swallowed
+(F25-B): `apply_snapshots` consumes nothing while the session is
+`Loading` — the staged frame's seat rows and the staged race row
+have no targets yet (seats spawn at the load's end, `RaceState`
+arrives with them), so holding latest-wins state costs nothing and
+a mid-race joiner's first applied frame lands whole instead of
+dropping its race row raceless and skipping its terminal tails —
+and a local terminal edge recorded while the session is still
+`Ready`/`Countdown` resolves on the release edge, re-checked after
+every drain, because the seat rows run ahead of the same frame's
+race row and a recorded resolution's early return can never
+re-fire the `Playing`-gated transition. `apply_snapshots` is
+ordered after `reconcile_remote_players` so the update's
+`NetPlayer` stamps are visible to it — the deferred inserts
+otherwise land an update late and the held frame's local tail
+would skip the just-stamped seat.
+
 Handshake (always the first exchange):
 
 ```
