@@ -15,6 +15,8 @@
 //! and only while the session is `Playing` — telemetry freezes with the
 //! session clock rather than stamping a stale tick onto moving physics.
 
+use std::collections::BTreeMap;
+
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_game::{
@@ -32,6 +34,11 @@ use mm2_vehicle::vehicle::{Vehicle, VehicleState};
 pub struct ImpactFilter {
     dedup: ImpactDedup,
     policy: ImpactPolicy,
+    /// Pairs whose `CollisionStart` was speculative — inside Avian's
+    /// velocity-scaled contact margin but not yet pushed apart by the
+    /// solver. Re-checked every tick until the solver applies an
+    /// impulse (the real hit) or the pair stops touching.
+    pending: BTreeMap<(Entity, Entity), ImpactEdge>,
     next: u64,
     /// Events emitted so far — evidence the pipeline is live.
     pub emitted: u64,
@@ -44,6 +51,7 @@ impl ImpactFilter {
         Self {
             dedup: ImpactDedup::new(policy.pair_cooldown_ticks),
             policy,
+            pending: BTreeMap::new(),
             next: 0,
             emitted: 0,
             dropped: 0,
@@ -67,6 +75,7 @@ impl ImpactFilter {
     /// active session's stream.
     pub fn reset(&mut self) {
         self.dedup.clear();
+        self.pending.clear();
         self.next = 0;
         self.emitted = 0;
         self.dropped = 0;
@@ -324,6 +333,16 @@ fn object_of(
         .unwrap_or(ObjectId::WORLD)
 }
 
+/// The colliders and bodies of one contact edge — a `CollisionStart`,
+/// or a speculative one [`ImpactFilter`] is still holding.
+#[derive(Debug, Clone, Copy)]
+struct ImpactEdge {
+    collider1: Entity,
+    collider2: Entity,
+    body1: Option<Entity>,
+    body2: Option<Entity>,
+}
+
 /// Fixed-step: turn solver contact edges into bounded `ImpactEvent`s.
 ///
 /// `CollisionStart` only fires when a pair *begins* touching, but that is
@@ -332,6 +351,16 @@ fn object_of(
 /// than any sound/damage/network consumer should see. The policy keeps
 /// one event per physical impact (`ImpactDedup`), drops sub-threshold
 /// touches, and caps emission per tick keeping the most severe.
+///
+/// "Touching" to Avian includes speculative contacts: any point inside a
+/// margin that grows with speed, so at 100 km/h a car's floor 0.2 m above
+/// the road already counts, and the springs bobbing it toward the road at
+/// a metre a second read as an impact. An edge is therefore only an
+/// impact once the solver has applied a normal impulse across it — it
+/// actually had to push the bodies apart. A speculative edge is held in
+/// [`ImpactFilter`] and becomes an impact the tick the solver first
+/// pushes on it, so a wall approached fast enough to be speculative a
+/// step early still lands; one that never closes is dropped.
 // Bevy systems legitimately take one param per resource/query; this one
 // joins contact events, identities, surfaces and damage.
 #[allow(clippy::too_many_arguments)]
@@ -357,21 +386,37 @@ pub fn collect_impacts(
     let generation = session.generation();
     let policy = filter.policy;
 
+    // Held edges first, in entity order — a deterministic walk keeps
+    // `ImpactId` assignment replayable.
+    let edges: Vec<ImpactEdge> = std::mem::take(&mut filter.pending)
+        .into_values()
+        .chain(reader.read().map(|event| ImpactEdge {
+            collider1: event.collider1,
+            collider2: event.collider2,
+            body1: event.body1,
+            body2: event.body2,
+        }))
+        .collect();
     let mut candidates = Vec::new();
-    for event in reader.read() {
-        let (c1, c2) = (event.collider1, event.collider2);
+    for edge in edges {
+        let (c1, c2) = (edge.collider1, edge.collider2);
         let (a, b) = (
-            object_of(c1, event.body1, &identities),
-            object_of(c2, event.body2, &identities),
+            object_of(c1, edge.body1, &identities),
+            object_of(c2, edge.body2, &identities),
         );
         if a.is_world() && b.is_world() {
             continue;
         }
         // The deepest contact carries the point, normal and the
-        // pre-solver approach speed — mass-independent severity.
+        // pre-solver approach speed — mass-independent severity. A pair
+        // with no live manifold has separated: a held edge lapses.
         let Some(deepest) = deepest_contact(&collisions, c1, c2) else {
             continue;
         };
+        if deepest.applied_impulse <= 0.0 {
+            filter.pending.insert((c1, c2), edge);
+            continue;
+        }
         let (point, normal, severity) = (deepest.point, deepest.normal, deepest.severity);
         if severity < policy.min_severity {
             continue;
@@ -395,21 +440,21 @@ pub fn collect_impacts(
             material: surfaces.get(surface_entity).copied().unwrap_or_default(),
             traction: conditions.traction,
         };
-        candidates.push((event, a, b, point, normal, severity, surface));
+        candidates.push((edge, a, b, point, normal, severity, surface));
     }
 
     // Bound the tick's emission: keep the most severe, count the rest.
     candidates.sort_by(|a, b| b.5.partial_cmp(&a.5).unwrap_or(std::cmp::Ordering::Equal));
     filter.dropped += candidates.len().saturating_sub(policy.max_per_tick) as u64;
-    for (event, a, b, point, normal, severity, surface) in
+    for (edge, a, b, point, normal, severity, surface) in
         candidates.into_iter().take(policy.max_per_tick)
     {
         // Impact severity feeds each participant's damage signal — the
         // raw input F05's damage model will consume. Static geometry
         // carries no `DamageSignals` and is skipped.
         for entity in [
-            event.body1.unwrap_or(event.collider1),
-            event.body2.unwrap_or(event.collider2),
+            edge.body1.unwrap_or(edge.collider1),
+            edge.body2.unwrap_or(edge.collider2),
         ] {
             if let Ok(mut d) = damage.get_mut(entity) {
                 d.impact_total += severity;

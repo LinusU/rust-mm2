@@ -288,6 +288,83 @@ fn a_quiet_touch_does_not_suppress_a_real_reimpact() {
     assert!(damage.impact_count >= 1 && damage.impact_total >= worst);
 }
 
+/// A free box with its own identity, gravity off so its motion is
+/// exactly the velocity it is given.
+fn spawn_drifting_box(app: &mut App, pos: Vec3, vel: Vec3) -> ObjectId {
+    let object = app.world_mut().resource_mut::<Session>().mint_object_id();
+    app.world_mut().spawn((
+        ObjectIdentity(object),
+        DamageSignals::default(),
+        RigidBody::Dynamic,
+        Collider::cuboid(1.0, 1.0, 1.0),
+        CollisionEventsEnabled,
+        GravityScale(0.0),
+        LinearVelocity(vel),
+        Position(pos),
+        Transform::from_translation(pos),
+    ));
+    object
+}
+
+fn impacts_of(app: &mut App, object: ObjectId, frames: usize) -> Vec<ImpactEvent> {
+    let mut events = Vec::new();
+    for _ in 0..frames {
+        app.update();
+        events.extend(
+            drain_impacts(app)
+                .into_iter()
+                .filter(|e| e.participants.0 == object || e.participants.1 == object),
+        );
+    }
+    events
+}
+
+#[test]
+fn a_speculative_near_miss_is_not_an_impact() {
+    // A car at 100 km/h with its floor 0.2 m above the road: Avian's
+    // speculative margin (speed × step) already counts the pair as
+    // touching, and the springs bobbing the body toward the road at
+    // 0.8 m/s read as a closing speed above `min_severity`. Nothing
+    // touched — no impact, no damage.
+    let (mut app, _car, _) = test_app(Vec3::new(-100.0, 1.2, 0.0));
+    let object = spawn_drifting_box(
+        &mut app,
+        Vec3::new(0.0, 0.7, 0.0),
+        Vec3::new(30.0, -0.8, 0.0),
+    );
+    // 10 frames close 0.13 of the 0.2 m gap.
+    let events = impacts_of(&mut app, object, 10);
+    assert!(
+        events.is_empty(),
+        "a near miss is not an impact: {events:?}"
+    );
+}
+
+#[test]
+fn a_contact_that_starts_speculative_still_lands() {
+    // Scraping into a wall: the box runs along it fast enough that the
+    // pair turns speculative while still 0.2 m clear, then closes at
+    // 1 m/s. `CollisionStart` fired on the speculative edge and fires no
+    // second time, so the real hit has to come from the held edge.
+    let (mut app, _car, _) = test_app(Vec3::new(-100.0, 1.2, 0.0));
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::cuboid(80.0, 4.0, 1.0),
+        Position(Vec3::new(0.0, 2.0, -0.5)),
+        Transform::from_xyz(0.0, 2.0, -0.5),
+    ));
+    let object = spawn_drifting_box(
+        &mut app,
+        Vec3::new(-20.0, 1.5, 0.7),
+        Vec3::new(30.0, 0.0, -1.0),
+    );
+    let events = impacts_of(&mut app, object, 30);
+    assert!(
+        events.iter().any(|e| e.severity >= 0.8),
+        "the scrape lands once the box reaches the wall: {events:?}"
+    );
+}
+
 #[test]
 fn each_wheel_reports_the_material_of_the_collider_under_it() {
     // F06-AC01's wheel leg: the car straddles the seam of two marked
