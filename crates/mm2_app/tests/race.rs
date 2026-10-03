@@ -1320,9 +1320,8 @@ fn timeout_resolves_an_unreleased_participant() {
 
 /// UI-5's results flow through the production driver: the local
 /// driver's finish moves the session `Playing → Results` on the same
-/// step — the race freezes with the phase change and the result is
-/// already recorded once (F13-A: the finish is terminal, not just a
-/// checkpoint count).
+/// step, and the result is already recorded once (F13-A: the finish is
+/// terminal, not just a checkpoint count).
 #[test]
 fn local_finish_moves_the_session_to_results() {
     let def = any_order_def(0);
@@ -1384,6 +1383,96 @@ fn a_non_local_resolution_does_not_end_the_local_race() {
     run(&mut app, 1);
     assert_eq!(phase(&app), SessionPhase::Results);
     assert_eq!(race(&app).phase, RacePhase::Complete);
+    assert_eq!(app.world().resource::<ResultLedger>().len(), 2);
+}
+
+/// DSN-11: the field races on behind the results screen. An opponent
+/// still racing when the local driver finishes keeps stepping in
+/// `Results` — its later crossing records its own finish at its real,
+/// later race time and completes the race, all without leaving
+/// `Results`.
+#[test]
+fn the_field_races_on_behind_the_results_screen() {
+    let def = any_order_def(0);
+    let mut app = race_app(event_config(), def.clone());
+    let (car, local) = spawn_participant(&mut app, &def, Vec3::new(-200.0, 0.0, 0.0));
+    let (ai, opponent) = spawn_participant_as(
+        &mut app,
+        &def,
+        Vec3::new(-200.0, 0.0, 4.0),
+        PlayerControl::Ai,
+    );
+    run(&mut app, 2);
+
+    set_position(&mut app, car, Vec3::new(200.0, 0.0, 0.0));
+    run(&mut app, 1);
+    assert_eq!(phase(&app), SessionPhase::Results);
+    let ParticipantState::Finished {
+        race_ticks: local_ticks,
+        ..
+    } = progress(&app, car).state
+    else {
+        panic!("the local driver finished: {:?}", progress(&app, car).state);
+    };
+    assert_eq!(race(&app).phase, RacePhase::Running);
+
+    // The opponent crosses both gates while the results screen is up.
+    run(&mut app, 3);
+    set_position(&mut app, ai, Vec3::new(200.0, 0.0, 4.0));
+    run(&mut app, 1);
+    let ParticipantState::Finished {
+        race_ticks: ai_ticks,
+        ..
+    } = progress(&app, ai).state
+    else {
+        panic!(
+            "the opponent finishes behind the results screen: {:?}",
+            progress(&app, ai).state
+        );
+    };
+    assert!(
+        ai_ticks > local_ticks,
+        "the race clock ran on in Results: {ai_ticks} vs {local_ticks}"
+    );
+    assert_eq!(phase(&app), SessionPhase::Results);
+    assert_eq!(race(&app).phase, RacePhase::Complete);
+    let ledger = app.world().resource::<ResultLedger>();
+    assert_eq!(ledger.len(), 2);
+    assert_eq!(ledger.place_of_in(1, local), Some(1));
+    assert_eq!(ledger.place_of_in(1, opponent), Some(2));
+}
+
+/// The deadline keeps running behind the results screen too: an
+/// opponent that never finishes after the local driver did times out
+/// on the deadline tick, so the field always resolves on a timed race.
+#[test]
+fn the_deadline_resolves_the_field_behind_the_results_screen() {
+    let def = timed_def(0, 20);
+    let mut app = race_app(event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(-200.0, 0.0, 0.0));
+    let (ai, _) = spawn_participant_as(
+        &mut app,
+        &def,
+        Vec3::new(600.0, 0.0, 600.0),
+        PlayerControl::Ai,
+    );
+    run(&mut app, 2);
+    set_position(&mut app, car, Vec3::new(200.0, 0.0, 0.0));
+    run(&mut app, 1);
+    assert_eq!(phase(&app), SessionPhase::Results);
+    assert_eq!(progress(&app, ai).state, ParticipantState::Racing);
+
+    run(&mut app, 20);
+    assert!(
+        matches!(
+            progress(&app, ai).state,
+            ParticipantState::TimedOut { race_ticks: 20, .. }
+        ),
+        "the opponent timed out on the deadline tick: {:?}",
+        progress(&app, ai).state
+    );
+    assert_eq!(race(&app).phase, RacePhase::Complete);
+    assert_eq!(phase(&app), SessionPhase::Results);
     assert_eq!(app.world().resource::<ResultLedger>().len(), 2);
 }
 

@@ -814,6 +814,41 @@ fn opponents_drive_routes_and_finish() {
     );
 }
 
+/// DSN-11: opponents race on behind the results screen. Once the
+/// session reaches `Results` — the local driver resolved — the AI keeps
+/// driving its route and still earns its finish through `advance_race`,
+/// so the results list fills in instead of reading "still racing".
+#[test]
+fn opponents_race_on_behind_the_results_screen() {
+    let tmp = roster_install("", &[]);
+    let mut app = event_app(event_config(), vfs_of(tmp.path()));
+    app.update();
+    let vpt = opponent_by_vehicle(&mut app, "vpt");
+    let heavy = opponent_by_vehicle(&mut app, "vpheavy");
+    while phase(&app) != SessionPhase::Playing {
+        app.update();
+    }
+    // Stand in for the local driver's finish: the session leaves
+    // `Playing` before any opponent has cleared a gate.
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Results)
+        .unwrap();
+
+    run(&mut app, 1500);
+
+    assert_eq!(phase(&app), SessionPhase::Results);
+    for e in [vpt, heavy] {
+        let progress = app.world().get::<RaceProgress>(e).unwrap();
+        assert!(
+            matches!(progress.state, ParticipantState::Finished { .. }),
+            "opponent finished behind the results screen: {:?} cleared {}/3",
+            progress.state,
+            progress.cleared_count(),
+        );
+    }
+}
+
 /// An entry whose vehicle fails to load keeps its authored slot in the
 /// roster but spawns nothing — the rest of the lineup still races.
 #[test]

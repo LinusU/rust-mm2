@@ -27,14 +27,18 @@
 //!   terminal resolution (`Finished`/`TimedOut`) moves the session
 //!   `Playing → Results` (UI-5: a results screen follows each race) —
 //!   deferred on a networked authority while a wire seat still races:
-//!   both producers a remote client lives on gate on `Playing` (this
-//!   system's stepping and `publish_snapshots`), so ending on the
-//!   local edge alone would strand every unresolved remote — inputs,
-//!   standings and its own terminal edge included. The deferral ends
+//!   the wire input feed and `publish_snapshots` a remote client lives
+//!   on gate on `Playing`, so ending on the local edge alone would
+//!   strand every unresolved remote — inputs, standings and its own
+//!   terminal edge included. The deferral ends
 //!   when the last `Remote` participant resolves, and one
 //!   `Results`-phase publish carries the final rows. A remote/AI
 //!   participant resolving while the local driver still races changes
 //!   nothing.
+//! - session `Results` + race `Running`: the same stepping for the
+//!   participants still racing — the field races on behind the
+//!   results screen (DSN-11), the clock runs on so a late finish
+//!   records its real time, and the deadline still times out the rest.
 //! - anything else (`Paused`, `Unloading`, …): frozen — the race clock
 //!   and every swept segment hold still, so pause/resume is
 //!   deterministic and no timer runs during teardown.
@@ -318,8 +322,10 @@ pub fn advance_race(
     }
     match *session.phase() {
         // The race clock and its triggers only live while the session
-        // runs them; Paused/Results/Unloading freeze everything.
-        SessionPhase::Countdown | SessionPhase::Playing => {}
+        // runs them — `Results` included, where the field races on
+        // behind the results screen (DSN-11); Paused/Unloading freeze
+        // everything.
+        SessionPhase::Countdown | SessionPhase::Playing | SessionPhase::Results => {}
         _ => return,
     }
     match &mut race.phase {
@@ -346,8 +352,8 @@ pub fn advance_race(
         RacePhase::Running => {
             // A race released by another path while the session still
             // counts down waits for the session — the clock only runs
-            // while Playing.
-            if !session.is_playing() {
+            // while the field races (`Playing`, then `Results`).
+            if !session.field_races() {
                 return;
             }
             race.clock += 1;
@@ -449,19 +455,20 @@ pub fn advance_race(
                 race.phase = RacePhase::Complete;
             }
             // UI-5's results-screen rule: the local driver's terminal
-            // resolution ends the playing session — the race state and
-            // ledger freeze with the phase change (the system no longer
-            // runs once the session leaves `Playing`). A non-local
+            // resolution ends the playing session. The rest of the
+            // field races on behind the results screen — this system
+            // keeps stepping in `Results`, so every opponent still
+            // earns a recorded finish (DSN-11); the guard on
+            // `is_playing` makes the edge fire once. A non-local
             // participant resolving while the local driver still races
             // never ends the local race.
             //
             // Networked-authority deferral (F25-B): on a *hosted*
             // session, `Playing → Results` waits until no `Remote`
-            // participant is unresolved. Everything a remote client
-            // lives on gates on `Playing` — this system's stepping (an
-            // unresolved remote `RaceProgress` would never advance or
-            // mint its terminal edge again), the wire input feed and
-            // `publish_snapshots` (even the rows minted on the
+            // participant is unresolved. What a remote client lives on
+            // gates on `Playing` — the wire input feed (an unresolved
+            // remote car would coast, never earning its terminal edge)
+            // and `publish_snapshots` (even the rows minted on the
             // transition tick itself would die with the stream). The
             // deferral ends when the last wire seat resolves — the
             // deadline's mass-timeout clears them all in one pass — or
@@ -495,7 +502,7 @@ pub fn advance_race(
                             ParticipantState::AwaitingStart | ParticipantState::Racing
                         )
                 });
-            if local_done && !wire_open {
+            if local_done && !wire_open && session.is_playing() {
                 session
                     .transition(SessionPhase::Results)
                     .expect("Playing → Results is a legal transition");

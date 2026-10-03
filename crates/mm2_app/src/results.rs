@@ -13,8 +13,9 @@
 //!   "Out of time" on expiry.
 //! - The field list reads [`ResultLedger::standings_in`] — the same
 //!   ordering results/progression use — and marks participants with no
-//!   result yet as still racing (DSN-11: the session ends at local
-//!   resolution, so an unfinished field is reported, not invented).
+//!   result yet as still racing. They are: the field races on behind
+//!   the screen (DSN-11), and the list redraws as each late result
+//!   lands, so an unfinished field is reported, never invented.
 //! - The rewards block reads [`SessionReport`], which
 //!   `record_session_results` maintains — granted unlocks, "recorded",
 //!   or the honest reason nothing was kept. Nothing here decides
@@ -269,11 +270,13 @@ pub fn results_present(
         results.focus = 0;
         return;
     }
-    // Redraw on entry, on input, and when the report lands — the
-    // report is written after the ledger entry exists, so the rewards
-    // block can arrive a frame late.
+    // Redraw on entry, on input, when the report lands — the report
+    // is written after the ledger entry exists, so the rewards block
+    // can arrive a frame late — and when an opponent still racing
+    // behind the screen records its result (DSN-11).
     let report_changed = report.as_ref().is_some_and(|r| r.is_changed());
-    if !results.dirty && !report_changed && !roots.is_empty() {
+    let ledger_changed = ledger.as_ref().is_some_and(|l| l.is_changed());
+    if !results.dirty && !report_changed && !ledger_changed && !roots.is_empty() {
         return;
     }
     results.dirty = false;
@@ -332,8 +335,8 @@ pub fn results_present(
     lines.push((String::new(), 8.0, Color::NONE));
 
     // The field, in ledger order — resolved entries with their
-    // outcome, unresolved ones honestly still racing (the session ends
-    // at the local resolution, DSN-11).
+    // outcome, unresolved ones still racing behind the screen (DSN-11)
+    // until their own result lands.
     if let Some(ledger) = ledger.as_ref() {
         let standings = ledger.standings_in(generation);
         for (i, result) in standings.iter().enumerate() {

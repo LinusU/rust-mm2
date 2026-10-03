@@ -206,6 +206,15 @@ impl Session {
         self.phase == SessionPhase::Playing
     }
 
+    /// Whether the race field still runs: `Playing`, or `Results` —
+    /// the local driver has resolved, but the rest of the field races
+    /// on behind the results screen until it resolves too (DSN-11).
+    /// Systems that serve the local driver (input, damage outcomes,
+    /// the session clock) stay on [`Self::is_playing`].
+    pub fn field_races(&self) -> bool {
+        matches!(self.phase, SessionPhase::Playing | SessionPhase::Results)
+    }
+
     /// The [`AuthorityRole`] this session stamps on simulated objects:
     /// `Local` and `Host` sessions simulate their own rules; a `Remote`
     /// client predicts/replicates. Spawn sites use this so rule systems

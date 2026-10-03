@@ -685,7 +685,7 @@ pub fn drive_signals(
     }
     if !matches!(
         session.phase(),
-        SessionPhase::Countdown | SessionPhase::Playing
+        SessionPhase::Countdown | SessionPhase::Playing | SessionPhase::Results
     ) {
         return;
     }
@@ -936,7 +936,7 @@ pub fn drive_ambient(
     if !session.authority_role().is_authority()
         || !matches!(
             session.phase(),
-            SessionPhase::Countdown | SessionPhase::Playing
+            SessionPhase::Countdown | SessionPhase::Playing | SessionPhase::Results
         )
     {
         return;
@@ -1314,7 +1314,7 @@ pub fn drape_ambient(
     if !session.authority_role().is_authority()
         || !matches!(
             session.phase(),
-            SessionPhase::Countdown | SessionPhase::Playing
+            SessionPhase::Countdown | SessionPhase::Playing | SessionPhase::Results
         )
     {
         return;
@@ -1503,7 +1503,7 @@ pub fn knock_ambient(
     if !session.authority_role().is_authority()
         || !matches!(
             session.phase(),
-            SessionPhase::Countdown | SessionPhase::Playing
+            SessionPhase::Countdown | SessionPhase::Playing | SessionPhase::Results
         )
     {
         reader.read().for_each(drop);
@@ -1770,13 +1770,14 @@ pub fn maintain_ambient(
     let (Some(mut traffic), Some(vfs)) = (traffic, vfs) else {
         return;
     };
-    // Same live-phase gate `drive_ambient` runs under — a paused or
-    // resolved session freezes its population instead of churning
-    // respawns behind the overlay.
+    // Same live-phase gate `drive_ambient` runs under — a paused
+    // session freezes its population instead of churning respawns
+    // behind the overlay. `Results` stays live: the field races on
+    // behind the results screen (DSN-11), through live traffic.
     if !session.authority_role().is_authority()
         || !matches!(
             session.phase(),
-            SessionPhase::Countdown | SessionPhase::Playing
+            SessionPhase::Countdown | SessionPhase::Playing | SessionPhase::Results
         )
     {
         return;

@@ -1053,8 +1053,10 @@ pub fn apply_gap_brake(input: &mut VehicleInput, blocker: &Blocker, speed: f32) 
 /// contention — this is the same normalized-input path, a different
 /// driver behind it.
 ///
-/// Honors the player input's gates: the session must be `Playing` and
-/// the countdown's `input_locked` holds every car still. A participant
+/// Honors the race's gates: the field must still race — `Playing`, or
+/// `Results` while the opponents behind a finished local driver race
+/// on (DSN-11) — and the countdown's `input_locked` holds every car
+/// still. A participant
 /// whose `RaceProgress` resolved — finished or timed out — gets a
 /// zeroed input and coasts. A roster entry with no route (a dead `.opp`
 /// reference the roster deliberately kept) holds still: the slot exists
@@ -1159,7 +1161,7 @@ pub fn opponent_drive(
             progress.state,
             ParticipantState::AwaitingStart | ParticipantState::Racing
         );
-        let target = if !session.is_playing() || locked || !racing {
+        let target = if !session.field_races() || locked || !racing {
             None
         } else if let Some(route) = &driver.route {
             let (next, target) = route_target(route, driver.next, pos.0);
