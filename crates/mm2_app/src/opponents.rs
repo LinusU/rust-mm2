@@ -361,6 +361,45 @@ pub struct OpponentDriver {
     /// counts, kept distinct from `reanchors` on purpose: lifted
     /// demand is not a recovery.
     pub catch_up: f32,
+    /// How far and how long this driver has actually driven — the
+    /// denominator that turns escape, re-anchor and impact counts into
+    /// rates the smoke record's `opp_drv=` field can compare across
+    /// controller changes.
+    pub stats: DriveStats,
+}
+
+/// Distance and time an opponent spent driving its route — only frames
+/// with a live target count, so the countdown, a finish and a dead
+/// route add nothing. Re-anchor teleports are excluded from the
+/// distance: the odometer measures driving, not the assist.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct DriveStats {
+    /// XZ distance driven (m).
+    pub distance: f32,
+    /// Seconds spent with a route target.
+    pub seconds: f32,
+    /// Where the previous driving frame left the car; `None` after a
+    /// re-anchor or any frame without a target.
+    pub last_pos: Option<Vec3>,
+}
+
+/// Per-frame XZ displacement (m) above which a step counts as a jump
+/// rather than driving — well past any car's top speed at 60 Hz,
+/// well below a re-anchor or recovery teleport.
+const ODOMETER_JUMP: f32 = 5.0;
+
+impl DriveStats {
+    /// Accumulate one driving frame of `dt` seconds ending at `pos`.
+    pub fn record(&mut self, pos: Vec3, dt: f32) {
+        if let Some(last) = self.last_pos {
+            let step = (pos.x - last.x).hypot(pos.z - last.z);
+            if step < ODOMETER_JUMP {
+                self.distance += step;
+            }
+        }
+        self.seconds += dt;
+        self.last_pos = Some(pos);
+    }
 }
 
 impl OpponentDriver {
@@ -804,6 +843,7 @@ pub fn spawn_opponents(
                     reanchors: 0,
                     catch_up_policy: mm2_game::CatchUpPolicy::default(),
                     catch_up: 0.0,
+                    stats: DriveStats::default(),
                 },
                 vehicle_bundle(&def.config),
                 Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)),
@@ -1085,6 +1125,7 @@ pub fn apply_gap_brake(input: &mut VehicleInput, blocker: &Blocker, speed: f32) 
 #[allow(clippy::type_complexity)]
 pub fn opponent_drive(
     session: Res<Session>,
+    time: Res<Time>,
     race: Option<Res<RaceState>>,
     mut resets: MessageWriter<ResetVehicle>,
     mut set: ParamSet<(
@@ -1192,9 +1233,11 @@ pub fn opponent_drive(
             driver.stuck_frames = 0;
             driver.stuck_pos = pos.0;
             driver.catch_up = 0.0;
+            driver.stats.last_pos = None;
             *input = VehicleInput::default();
             continue;
         };
+        driver.stats.record(pos.0, time.delta_secs());
         let fwd = rot.0 * Vec3::NEG_Z;
         let yaw = (-fwd.x).atan2(-fwd.z);
         // F15-B.3 — the bounded last resort. The stuck window measures
@@ -1279,6 +1322,7 @@ pub fn opponent_drive(
                 driver.stuck_pos = pose;
                 driver.reanchors += 1;
                 driver.catch_up = 0.0;
+                driver.stats.last_pos = None;
                 claimed.push(pose);
                 info!(
                     vehicle = %driver.spec.vehicle,

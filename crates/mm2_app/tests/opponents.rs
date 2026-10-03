@@ -15,7 +15,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::opponents::{
-    Blocker, OpponentDriver, REANCHOR_CLEAR, REANCHOR_FRAMES, Traffic, apply_gap_brake,
+    Blocker, DriveStats, OpponentDriver, REANCHOR_CLEAR, REANCHOR_FRAMES, Traffic, apply_gap_brake,
     initial_route_index, nearest_blocker, opponent_drive, pick_pass_side, reanchor_pose,
     route_target, spawn_pose,
 };
@@ -1220,6 +1220,20 @@ fn nearest_blocker_reads_only_the_corridor_ahead() {
     );
 }
 
+/// The odometer behind `opp_drv=` counts driven XZ distance and
+/// driving time, and a teleport-sized jump adds time but no distance —
+/// a re-anchor is the assist, not driving.
+#[test]
+fn drive_stats_count_driving_but_not_jumps() {
+    let mut s = DriveStats::default();
+    s.record(Vec3::new(0.0, 0.0, 0.0), 0.5);
+    s.record(Vec3::new(1.5, 9.0, 2.0), 0.5);
+    assert!((s.distance - 2.5).abs() < 1e-4, "XZ only: {}", s.distance);
+    s.record(Vec3::new(100.0, 0.0, 2.0), 0.5);
+    assert!((s.distance - 2.5).abs() < 1e-4, "jump excluded");
+    assert!((s.seconds - 1.5).abs() < 1e-4);
+}
+
 /// A bare driver for the sense-gate tests: authored spec, default
 /// tuning, no committed pass — only the avoid flags vary.
 fn driver(avoid_players: bool, avoid_opponents: bool) -> OpponentDriver {
@@ -1249,6 +1263,7 @@ fn driver(avoid_players: bool, avoid_opponents: bool) -> OpponentDriver {
         reanchors: 0,
         catch_up_policy: mm2_game::CatchUpPolicy::default(),
         catch_up: 0.0,
+        stats: Default::default(),
     }
 }
 

@@ -1255,6 +1255,7 @@ fn run_headless(
             // cars cleared their gates.
             let ordered = r.definition.rule == mm2_game::CheckpointRule::Ordered;
             let mut rows: Vec<OppRow> = Vec::new();
+            let mut drv = FieldDriving::default();
             let (opp, opp_done, opp_rec, opp_cu) = world_ecs.iter_entities().fold(
                 (0usize, 0usize, 0usize, 0usize),
                 |(n, d, rec, c), e| {
@@ -1282,6 +1283,12 @@ fn run_headless(
                         stuck: driver.stuck_peak,
                         route_clears: progress.map_or(0, |p| p.route_clears),
                     });
+                    drv.add(
+                        &driver.stats,
+                        e.get::<mm2_game::DamageSignals>()
+                            .map_or(0, |d| d.impact_count),
+                        driver.recovery.escapes + driver.reanchors,
+                    );
                     (
                         n + 1,
                         d + usize::from(resolved.is_some()),
@@ -1302,7 +1309,8 @@ fn run_headless(
                     String::new()
                 };
                 format!(
-                    " opp={opp_done}/{opp}{rec}{cu}{}",
+                    " opp={opp_done}/{opp}{rec}{cu}{}{}",
+                    drv.field(),
                     opponent_detail(&mut rows)
                 )
             } else {
@@ -2037,6 +2045,49 @@ fn absent_player_is_transient(phase: &SessionPhase, teardown_queued: bool, resta
     }
 }
 
+/// The field-wide driving rates behind the `opp_drv=` record field —
+/// how far the opponents drove, how fast, and how often they hit
+/// something or needed a recovery along the way. Rates per kilometre
+/// make runs of different length and controller comparable: a field
+/// that drives further also has more chances to crash.
+#[derive(Debug, Default)]
+struct FieldDriving {
+    /// Summed driven distance (m).
+    distance: f32,
+    /// Summed driving time (s).
+    seconds: f32,
+    /// Summed recorded impacts (`DamageSignals::impact_count`).
+    impacts: u32,
+    /// Summed escapes plus re-anchors.
+    recoveries: u32,
+}
+
+impl FieldDriving {
+    fn add(&mut self, stats: &opponents::DriveStats, impacts: u32, recoveries: u32) {
+        self.distance += stats.distance;
+        self.seconds += stats.seconds;
+        self.impacts += impacts;
+        self.recoveries += recoveries;
+    }
+
+    /// ` opp_drv=<m>m/<mean m/s>mps/<impacts/km>ipk/<recoveries/km>xpk`
+    /// — absent until the field has driven at all, so records from
+    /// before the race starts stay unchanged.
+    fn field(&self) -> String {
+        if self.distance <= 0.0 || self.seconds <= 0.0 {
+            return String::new();
+        }
+        let km = self.distance / 1000.0;
+        format!(
+            " opp_drv={:.0}m/{:.1}mps/{:.1}ipk/{:.1}xpk",
+            self.distance,
+            self.distance / self.seconds,
+            self.impacts as f32 / km,
+            self.recoveries as f32 / km,
+        )
+    }
+}
+
 /// One opponent's row in the `opps=` field (F15 req 6): which roster
 /// slot and vehicle, how much of the course it earned, and what the
 /// bounded recovery machinery did for it.
@@ -2289,6 +2340,20 @@ mod tests {
     /// reported `status=pass … phase=failed moved=none final=none`.
     /// A `Menu` cap with no teardown intent queued is likewise parked
     /// (a rejected re-begin leaves it there), not a lifecycle window.
+    #[test]
+    fn field_driving_reports_rates_per_kilometre() {
+        let mut drv = FieldDriving::default();
+        assert_eq!(drv.field(), "", "no driving yet, no field");
+        let stats = opponents::DriveStats {
+            distance: 1500.0,
+            seconds: 100.0,
+            last_pos: None,
+        };
+        drv.add(&stats, 30, 6);
+        drv.add(&stats, 0, 0);
+        assert_eq!(drv.field(), " opp_drv=3000m/15.0mps/10.0ipk/2.0xpk");
+    }
+
     #[test]
     fn absent_player_is_transient_only_in_the_teardown_window() {
         use mm2_game::SessionPhase::*;
