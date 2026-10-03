@@ -1012,6 +1012,25 @@ pub fn path_stamp_sites(path: &Path, budget: usize) -> PathStampSites {
     }
 }
 
+/// The pathset files one of the original's per-city object managers
+/// (`bridge`, `parkedcar`, `ferry`, …) tries, in order: the event's
+/// own `race/<city>/<city>_<object>_<event stem>.pathset`, then the
+/// city default `<city>_<object>.pathset`. Cruise passes no stem and
+/// takes the default. Recovered from the retail executable
+/// (`docs/research/drawbridge.md` § "Which file a session loads").
+pub fn object_pathset_candidates(
+    city: &str,
+    object: &str,
+    event_stem: Option<&str>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(stem) = event_stem {
+        out.push(format!("race/{city}/{city}_{object}_{stem}.pathset"));
+    }
+    out.push(format!("race/{city}/{city}_{object}.pathset"));
+    out
+}
+
 /// `LineStrip` expansion — see [`path_stamp_sites`] for the rule.
 fn line_strip_sites(path: &Path, budget: usize) -> PathStampSites {
     let spacing = path.spacing_metres();
@@ -2517,6 +2536,21 @@ mod tests {
             walk.stats.stamps_capped > 1_000_000_000,
             "the ~2e10-count span reports its suppression: {:?}",
             walk.stats
+        );
+    }
+
+    #[test]
+    fn object_pathsets_try_the_event_override_first() {
+        assert_eq!(
+            object_pathset_candidates("london", "bridge", Some("race0")),
+            vec![
+                "race/london/london_bridge_race0.pathset".to_string(),
+                "race/london/london_bridge.pathset".to_string(),
+            ]
+        );
+        assert_eq!(
+            object_pathset_candidates("sf", "parkedcar", None),
+            vec!["race/sf/sf_parkedcar.pathset".to_string()]
         );
     }
 }

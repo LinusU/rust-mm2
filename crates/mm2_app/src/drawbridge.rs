@@ -22,7 +22,9 @@ use mm2_formats::pathset::Pathset;
 use mm2_game::drawbridge::{
     DrawbridgeMode, LEAF_DROP, LeafMotion, LeafPhase, PROXIMITY_RADIUS, RAISE_RATE, leaf_hinges,
 };
-use mm2_game::{CityEntity, Player, Session, SessionEntity, SessionPhase};
+use mm2_game::{
+    CityEntity, Player, Session, SessionEntity, SessionPhase, object_pathset_candidates,
+};
 use tracing::{info, warn};
 
 use crate::banger::BangerDefs;
@@ -86,20 +88,6 @@ impl DrawbridgeReport {
     }
 }
 
-/// The bridge files a session tries, in order: the event's own
-/// override, then the city default. `city` is the PSDL stem
-/// (`london`), `event_stem` the event's file stem (`race0`,
-/// `circuit3`) — the same names the original builds from its game
-/// type and race index.
-pub fn bridge_pathset_candidates(city: &str, event_stem: Option<&str>) -> Vec<String> {
-    let mut out = Vec::new();
-    if let Some(stem) = event_stem {
-        out.push(format!("race/{city}/{city}_bridge_{stem}.pathset"));
-    }
-    out.push(format!("race/{city}/{city}_bridge.pathset"));
-    out
-}
-
 /// Load the session's bridge file and spawn its leaves, session-owned
 /// so teardown removes them. A file that fails to parse falls back to
 /// the next candidate (retail's truncated `london_bridge_blitz10` is
@@ -118,7 +106,7 @@ pub fn spawn_drawbridges(
 ) -> DrawbridgeReport {
     let mut report = DrawbridgeReport::default();
     let mut chosen = None;
-    for logical in bridge_pathset_candidates(city, event_stem) {
+    for logical in object_pathset_candidates(city, "bridge", event_stem) {
         let Ok((bytes, resolved)) = vfs.read_path(&logical) else {
             continue;
         };
@@ -323,21 +311,6 @@ pub fn drive_drawbridges(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn candidates_try_the_event_override_first() {
-        assert_eq!(
-            bridge_pathset_candidates("london", Some("race0")),
-            vec![
-                "race/london/london_bridge_race0.pathset".to_string(),
-                "race/london/london_bridge.pathset".to_string(),
-            ]
-        );
-        assert_eq!(
-            bridge_pathset_candidates("sf", None),
-            vec!["race/sf/sf_bridge.pathset".to_string()]
-        );
-    }
 
     #[test]
     fn closed_leaf_reaches_toward_its_partner() {
