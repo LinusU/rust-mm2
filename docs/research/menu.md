@@ -15,7 +15,7 @@ Statuses:
 | Original entry | Status | Notes |
 |---|---|---|
 | Crash Course | tracked | `Events → city → Crash Course` row stays visible with "not loadable yet (F21)". |
-| Races | implemented | `Events → city → table → event list`, availability gates on rows (CHK-3-style). Per-event condition options landed (below) — deferred fields stay open. |
+| Races | implemented | `Events → city → table → event list`, availability gates on rows (CHK-3-style). Rows show the race names from `tune/<city>.cinfo` (name *i* ↔ table row *i* — inferred pairing), a WON / WON PRO badge once beaten, and each race-type row counts its won events. Per-event condition options landed (below) — deferred fields stay open. |
 | Multiplayer | tracked | Disabled root row, reason names F24. |
 | Quick Race | implemented | DRV-8 leg: replays the bound profile's stem-keyed `last_event`; stale events disable with the reason. The original's vehicle-select interstitial is folded into the persistent root `Vehicle:` pick — an enhanced-layout choice, not a parity claim. |
 | Driver select/create/delete | implemented | Profiles screen binds; New driver is a real text field; delete sits behind a confirm screen; DRV-7's last-profile refusal is a status line. |
