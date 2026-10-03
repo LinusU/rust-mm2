@@ -44,6 +44,9 @@ Vertical-slice stage. What works today:
   files honoured); SF's Chinatown gate stands.
 - Kerbside parked cars along the authored parked-car paths of both
   cities, knockable like other bangers.
+- Moving scenery: tugs, water taxis, sailboards and ducks, the car
+  ferries, and London's Underground trains shuttling through their
+  tunnels.
 
 ## Build & run
 

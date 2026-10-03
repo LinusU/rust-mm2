@@ -1,0 +1,81 @@
+# Moving scenery (`<city>_{sailboat,ferry,train}*.pathset`)
+
+Beside the drawbridges and parked cars (`drawbridge.md`, `parked.md`)
+the original creates three more per-city object managers
+(`0x413230`): sailboats (`0x415250`, default model `giz_sailboat01_f`),
+the Underground (`0x4155d0`, `va_ug_l`) and ferries (`0x415790`,
+`giz_carferry01_f`, created only when the session is not networked).
+All use the shared `<city>_<object>[_<event stem>].pathset` lookup.
+Everything below is **verified_original** — read from `Midtown2.exe`.
+
+Retail files: `london_sailboat` (tugs, water taxis, ducks — 16
+paths), `london_ferry` (6, two of them moored two-point paths),
+`london_ferry_crash9/11/12` (Crash Course), `london_train` (8 lines);
+`sf_sailboat` (sailboards, ducks, default sailboats — 16),
+`sf_ferry` (1).
+
+## The path follower (`0x579dd0`–`0x57a4e0`)
+
+Every object rides a follower over its path's points:
+
+- a **closed** Catmull-Rom loop: each segment is a Hermite cubic
+  (basis `[2,−2,1,1; −3,3,−2,−1; 0,0,1,0; 1,0,0,0]` at `0x4c0860`)
+  from `P[i]` to `P[i+1]` with tangents `(P[i+1] − P[i−1]) / 2` and
+  `(P[i+2] − P[i]) / 2`, indices wrapping;
+- the segment's length is estimated as `|P[i] − mid| + |mid − P[i+1]|`
+  with `mid` the curve at `t = 0.5`;
+- the follower holds seconds `u` into the segment and
+  `t = speed · u / length`; advancing adds `dt` to `u` and crosses at
+  most one segment boundary per call (backwards too, for negative
+  `dt`);
+- position is the cubic, direction its derivative; a **two-point
+  path** returns its first point facing the second — a parked object.
+
+The object's matrix takes the direction as its local +Z row and
+orthonormalises with +Y up (`0x4bee80`): it faces +Z along travel.
+
+## Sailboats (`0x578370`)
+
+Model: the path name when `geometry/<name>.pkg` exists, else the
+default. Speed: the path's spacing (metres) ± 1 — a uniform draw
+between `spacing − 1` and `spacing + 1` (manager fields 4.0/1.0 at
+`0x57826d`; the 4.0 base is only used by a re-randomise call). The
+mesh is drawn raw at the curve point.
+
+## Ferries (`0x579400`, `0x5791e0`)
+
+Model as above. Speed 0.75 m/s with zero spread (`0x579307`).
+Height: the curve point plus the model's `dgBangerData` `CG.y`
+(`[record + 0x20]`) — which puts each hull's bottom on the water.
+Each ferry carries the `ferry` object sound.
+
+## The Underground (`0x578da0`, `0x5788d0`–`0x578c70`)
+
+Per path, a train of three cars (`0x5788f6`), each its own follower at
+40 m/s (`0x5db034`), car *i* advanced `0.44·i` s (`0x5db030`) — 17.6 m
+apart. Car height is the straight interpolation of the segment's end
+point heights (level with the authored rails, not the curve's
+overshoot) plus `CG.y`. The shuttle:
+
+| Phase | Behaviour |
+| --- | --- |
+| waiting | 10 s (`0x5db038`), then accelerate |
+| accelerating | speed fraction +0.51/s (`0x5db03c`) to 1 — cars advance `dt · fraction` |
+| running | full speed until the end check, then brake |
+| braking | fraction −0.51/s to 0, then wait and reverse direction |
+
+The fraction starts at 1, so the first departure skips the ramp. End
+check: running forward, the rear car's segment index reaches
+`count − 3`; backward, the last car's index falls to 1. Reversal
+negates `dt` (`0x5af408` = −1). The `subwaycar` object sound rides
+the middle car (see below).
+
+## Implementation
+
+`mm2_game::movers` (`PathFollower`, `TrainMotion`, `mover_rotation`,
+the constants) and `mm2_app::movers` (spawning and the fixed-step
+driver). Each object is a kinematic body whose origin is the curve
+point; the driver poses it where its path is now and sets the
+velocities that reach the next step's pose, so a car resting on a
+ferry rides it. Sailboat speed draws are seeded from the session
+(designed).

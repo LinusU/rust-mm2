@@ -19,6 +19,7 @@ pub mod effects;
 pub mod hudmap;
 pub mod ids;
 pub mod impact;
+pub mod movers;
 pub mod nav;
 pub mod opponent;
 pub mod parked;

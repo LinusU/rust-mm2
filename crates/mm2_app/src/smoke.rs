@@ -447,6 +447,7 @@ fn run_headless(
         .insert_resource(car)
         .add_systems(FixedUpdate, advance_session_tick)
         .add_systems(FixedLast, crate::drawbridge::drive_drawbridges)
+        .add_systems(FixedLast, crate::movers::drive_movers)
         .add_systems(
             FixedLast,
             (

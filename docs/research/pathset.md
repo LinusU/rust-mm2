@@ -221,13 +221,12 @@ original evidence shows prop-channel decals render, one flag flips.
 The `<city>_bridge[_<event>].pathset` drawbridge sets are consumed by
 `mm2_app::drawbridge` (`docs/research/drawbridge.md`), the
 `<city>_parkedcar[_<event>].pathset` sets by
-`mm2_app::city::spawn_parked_cars` (`docs/research/parked.md`).
+`mm2_app::city::spawn_parked_cars` (`docs/research/parked.md`), and
+the `*_sailboat`/`*_ferry`/`*_train` moving-object sets by
+`mm2_app::movers` (`docs/research/movers.md`).
 
 Still unconsumed: `audio_pathsets/` (`PATHnn` sound
-routes, F07/F08), the moving-object sets and their overrides
-(`*_ferry`, `*_sailboat`, `london_train` — `giz_*`/`PATHnn` routes
-on retail; they need the animated-object feature, not static
-stamping), crash-course stem
+routes, F07/F08), crash-course stem
 files (the events are not loadable yet, F21), `circuitx`/`slalom`/
 `*_test`/`ramp` dev files, and `city/phys/`, `bak/` dev sets. Which
 pathsets the original loads per session and whether the stamping

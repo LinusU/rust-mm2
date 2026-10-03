@@ -1220,6 +1220,7 @@ fn main() {
     // Drawbridge leaves pose after the solver step, like the lane
     // followers: the angular velocity they leave carries the next step.
     .add_systems(FixedLast, mm2_app::drawbridge::drive_drawbridges)
+    .add_systems(FixedLast, mm2_app::movers::drive_movers)
     .add_systems(
         FixedLast,
         (

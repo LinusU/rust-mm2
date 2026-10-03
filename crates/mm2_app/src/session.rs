@@ -847,6 +847,21 @@ pub fn load_session_world(
             )
         };
         commands.insert_resource(parked);
+        // Tugs, water taxis, ducks, ferries and the Underground — the
+        // original's moving-object managers, same file lookup.
+        let movers = crate::movers::spawn_movers(
+            &mut commands,
+            &vfs.0,
+            &city_stem,
+            event_key.as_ref().map(|k| k.stem.as_str()),
+            config.authority != mm2_game::SessionAuthority::Local,
+            config.seed,
+            &mut assets.meshes,
+            &mut assets.images,
+            &mut assets.materials,
+            owner,
+        );
+        commands.insert_resource(movers);
     }
     // F25-A.2: the lobby's humans share the event's authored grid —
     // the local participant's seat resolves through the same
