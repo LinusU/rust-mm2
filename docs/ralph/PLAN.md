@@ -79,7 +79,17 @@ as per-seat state (`detach_breaks` sheds remote seats' rigs on the
 host, `spawn_remote` binds `VehicleBreaks` on both roles, and a
 copy's `apply_break_bits` diffs the mask every snap — a set bit
 hides the node and spawns the pooled fragment motion-only, a cleared
-bit is the repair arriving as state) — still
+bit is the repair arriving as state); the
+following iteration repaired the stream/generation boundary wedge —
+`Session` now carries two generation counters: `generation()` stays
+the local monotonic id namespace `ObjectId`/`ResultId` key off while
+`wire_generation()` adopts the authority's minted value verbatim
+(a regressed wire value clamps the local counter forward, never
+back), every wire stamp/gate and cross-process seed reads the wire
+namespace, and `RemoteSnaps::reset` clears the stream's watermarks/
+ledgers at the two observable authority boundaries (an accepted
+`Start`, the link's `Closed`) so a fresh host's restarted numbering
+can never stale-drop under a dead stream's watermark) — still
 open: replicated
 result/race state, LAN/Internet scope), the F24-B
 remainder (B.7 landed the Bevy-side

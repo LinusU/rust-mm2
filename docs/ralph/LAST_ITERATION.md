@@ -1,3 +1,118 @@
+# Last iteration — F25-B repair: the snap stream's generation
+# namespace split — `Session::wire_generation()` adopts the
+# authority's mint verbatim while `generation()` stays the local
+# monotonic id counter, and `RemoteSnaps::reset()` rebases the stream
+# at authority boundaries (`Start` accept, link `Closed`) so a fresh
+# host's restarted numbering can never stale-drop under a dead
+# stream's watermark (new-run iteration 2)
+
+Implementation iteration on `ralph/night` (baseline `e4064ce` — the
+v11 breakaway handoff; external verify + review pass with gaps only).
+Selected slice: the `RemoteSnaps`-persists-across-hosts wedge the last
+two iterations recorded open — its review named a fresh host
+restarting generation 1 as stale-dropping under the dead watermark.
+Investigation showed the defect ran deeper than the inbox:
+`begin_generation` clamped the wire generation onto the
+process-lifetime local id counter, so a regressed wire value (a new
+authority, or a host process that ran local sessions first) made the
+adopted session generation diverge from the wire's — breaking the
+snap apply gate, the `Input`/`ResetRequest` stamps, the reconcile's
+`lobby.generation` liveness check and every cross-process seed, not
+just the watermark. The repair is therefore two-layered.
+
+## What landed
+
+- `mm2_game::Session` carries two generation counters.
+  `generation()` stays the local, monotonic namespace
+  `ObjectId`/`ResultId`/`ImpactEvent` mint off and staleness detection
+  keys on — a wire value may only move it forward.
+  `wire_generation()` is the authority's mint, adopted verbatim by
+  `begin_generation`; `begin()` sets both to the local mint (a local
+  session is its own authority). A regressed wire value clamps the
+  local counter to `local + 1`, never back.
+- Every wire-facing stamp and gate now reads `wire_generation()`:
+  `send_drive_input`/`apply_remote_inputs`, `send_reset_request`,
+  `apply_reset_requests` grants, the `Snap` apply gate, the
+  `publish_snapshots` frame stamp, the reconcile's
+  `lobby.generation` liveness check, the pending-impact row filter,
+  and the cross-process deterministic seeds — `VehicleSmoke`,
+  `VehicleSparks`, `TexelDamageRig`, plus the session audio tables
+  (`ImpactAudio`/`SirenAudio`) in `load_session_world`, which need
+  every process to pick the same authored variant. `ImpactEvent`'s
+  mint and the `ObjectId`/`ResultId`/`SessionEntity` namespaces keep
+  the local counter — comments at each boundary say which namespace
+  and why. Protocol unchanged (still v11): the wire shape is the
+  same, the client now compares it against the right counter.
+- `RemoteSnaps::reset()` clears the stream-scoped state — staged
+  frame, arrival timing, applied watermark, pending-impact queue,
+  repair ledger, dedup window — folding still-queued rows into
+  `dropped` and leaving the `stale`/`dropped` counters themselves
+  intact for the report fold. `drive_lobby` calls it at both
+  observable authority boundaries: the pump's terminal `Closed`, and
+  `start()` on accept — *before* the parked-session teardown path,
+  so impact rows the new stream queues during teardown belong to it
+  and are not wiped.
+- `docs/research/net.md`: the `Start` generation bullet and the
+  push-watermark paragraph corrected, plus a new "Generation
+  namespaces" subsection recording the two-counter decision and the
+  stream-boundary rule (classified implementation choice — the
+  retail wire protocol is unrecovered).
+
+## Tests
+
+- `netdrive` unit 17→18: `a_stream_reset_rebases_the_inbox_on_a_new_authority`
+  — reset clears watermarks/ledgers/queue, folds queued rows into
+  `dropped`, preserves `stale`, and a restarted `(1, 1)` sequence
+  stages under the old `(2, 900)` watermark while the dedup window
+  forgets the dead stream's ids.
+- `net_app` 39→41: `a_dead_authoritys_watermark_dies_with_the_link`
+  (real loopback: host A's `(1, 900)` snap applies, `host.shutdown`
+  delivers `Closed` → nonzero exit, the watermark is gone; a fresh
+  host B restarts at generation 1 — adopted verbatim as
+  `wire_generation() == 1` while the local counter is 2 — and its
+  `(1, 5)` snap applies, `snaps_staled == 0`) and
+  `a_start_resets_the_stream_without_a_close` (the discriminating
+  leg for the accept-side reset: the `LobbyLink` resource is swapped
+  wholesale for a fresh host's link, so no `Closed` is ever
+  observed; B's `Start` parks then begins, and its restarted stream
+  applies instead of dropping under A's watermark).
+- Extended assertions: `a_host_generation_is_adopted_but_never_regresses`
+  now pins both namespaces (wire 1 adopted under local 4);
+  `a_start_mid_session_parks_until_teardown_lands` asserts the real
+  divergence it already exercised (wire 1 vs local 2);
+  `a_start_begins_…`/`hosted_playing` and every wire-facing
+  `session.generation()` read in `net_app` now read
+  `wire_generation()`. `mm2_game` session tests pin `wire == local`
+  mint on `begin` and `u64::MAX` adoption on both namespaces.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --workspace
+--all-targets --all-features -- -D warnings` clean; `cargo test
+--workspace` green — all binaries, 0 failures (`net_app` 41/41,
+`netdrive` unit 18/18, `mm2_game` session 14/14, `net_drive` 3/3,
+`mm2_net` 80/80). Toolchain per `rust-toolchain.toml` stable.
+
+## Classification / remaining open items
+
+- Implementation choice throughout — the two-counter split, the
+  boundary set and the reset's evidence-folding are ours; no
+  original-behavior claim (the retail wire protocol is unrecovered).
+- Evidence: in-process unit + integration legs over real loopback
+  hosts — the two-authority legs run real `Host`/`LobbyLink` wires,
+  the link swap exercising the no-`Close` boundary. No process-level
+  rejoin leg (the `net_drive` harness still runs one authority per
+  client process), nothing rendered or driven by hand, no
+  LAN/Internet leg, no retail content.
+- F25-B remaining scope: replicated result/race state, LAN/Internet
+  scope, the impact-side nits (no struck-side identity/surface on
+  `RemoteImpact`). A wire client that observes *no* boundary at all
+  (authority swapped without any link or `Start` signal) is not
+  reachable on this protocol — the reset set covers every observable
+  boundary.
+
+---
+
 # Last iteration — F25-B breakaway leg: protocol v11
 # `SnapEntry.breaks` replicates the authority's detached-part bitmask
 # as per-seat state; remote seats shed on the host, copies reconcile
