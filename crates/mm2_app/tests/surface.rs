@@ -281,15 +281,22 @@ fn a_ray_into_each_region_reports_its_authored_surface() {
     assert_eq!(tables.set.defs[1].name, "cobblestone");
     assert_eq!(tables.set.defs[2].name, "grass");
 
-    // Three colliders, each marked — the road strip (|x| ≤ 3) reads
-    // cobblestone, the kerb (3 < |x| ≤ 5) reads grass, the fan on the
-    // unmapped name reports the conservative unspecified surface.
-    let marked = app
+    // Three surface classes of collider, each marked — the road strip
+    // (|x| ≤ 3) reads cobblestone, the kerb (3 < |x| ≤ 5) reads grass,
+    // the fan on the unmapped name reports the conservative unspecified
+    // surface. (The kerb's ground and faces spawn as two entities.)
+    let mut marked: Vec<SurfaceMaterial> = app
         .world_mut()
         .query_filtered::<&SurfaceMaterial, With<CityEntity>>()
         .iter(app.world())
-        .count();
-    assert_eq!(marked, 3);
+        .copied()
+        .collect();
+    marked.sort_by_key(|s| match s {
+        SurfaceMaterial::Unspecified => 0,
+        SurfaceMaterial::Authored(i) => i + 1,
+    });
+    marked.dedup();
+    assert_eq!(marked.len(), 3);
     assert_eq!(
         surface_at(&mut app, 0.0, 5.0),
         Some(SurfaceMaterial::Authored(1)),

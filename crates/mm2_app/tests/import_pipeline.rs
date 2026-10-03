@@ -564,14 +564,16 @@ fn vfs_to_city_marks_colliders_with_their_authored_surfaces() {
     assert_eq!(loaded.report.surfaces.named, 2);
     assert_eq!(loaded.report.surfaces.unmapped.len(), 1);
 
-    // Three collider entities, each carrying the component the
-    // contact pipeline queries — and no others.
+    // Three surface classes of collider, each carrying the component
+    // the contact pipeline queries — and no others. A class with both
+    // ground and kerb faces spawns as two entities (`RoomCollider::split`).
     let mut q = world.query_filtered::<&SurfaceMaterial, With<CityEntity>>();
     let mut surfaces: Vec<SurfaceMaterial> = q.iter(&world).copied().collect();
     surfaces.sort_by_key(|s| match s {
         SurfaceMaterial::Unspecified => 0,
         SurfaceMaterial::Authored(i) => i + 1,
     });
+    surfaces.dedup();
     assert_eq!(
         surfaces,
         vec![
@@ -634,7 +636,8 @@ fn vfs_to_city_with_a_broken_table_pair_marks_everything_unspecified() {
 
     let mut q = world.query_filtered::<&SurfaceMaterial, With<CityEntity>>();
     let surfaces: Vec<SurfaceMaterial> = q.iter(&world).copied().collect();
-    assert_eq!(surfaces, vec![SurfaceMaterial::Unspecified]);
+    assert!(!surfaces.is_empty());
+    assert!(surfaces.iter().all(|s| *s == SurfaceMaterial::Unspecified));
 }
 
 #[test]
@@ -679,10 +682,10 @@ fn vfs_to_city_spawns_meshes_colliders_and_props() {
     };
     queue.apply(&mut world);
 
-    // 2 mesh groups + 1 room collider + 1 prop part + 1 prop collider
-    // = 5 city entities.
+    // 2 mesh groups + 1 room collider split into ground and kerb faces
+    // + 1 prop part + 1 prop collider = 6 city entities.
     let city_entities = world.query::<&CityEntity>().iter(&world).count();
-    assert_eq!(city_entities, 5);
+    assert_eq!(city_entities, 6);
     assert_eq!(loaded.report.props_spawned, 1);
     assert_eq!(loaded.report.props_failed, 0);
     assert!(loaded.report.missing_textures.is_empty());

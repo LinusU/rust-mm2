@@ -378,17 +378,33 @@ impl MeshBuilder {
 }
 
 /// Collision triangles accumulated for one (room, surface) pair
-/// (positions + indices; winding is irrelevant to the physics backend).
-/// Since F06-A a room's collider is split per authored surface class —
-/// road, sidewalk and water tris become separate entities carrying
-/// their own [`SurfaceMaterial`].
+/// (positions + indices, in authored winding — [`RoomCollider::split`]
+/// orients what needs orienting). Since F06-A a room's collider is
+/// split per authored surface class — road, sidewalk and water tris
+/// become separate entities carrying their own [`SurfaceMaterial`].
 #[derive(Default)]
 struct ColliderBuilder {
     positions: Vec<Vec3>,
     tris: Vec<[u32; 3]>,
+    /// Indices into `tris` of tunnel ceilings: flat enough to pass for
+    /// ground, but solid from below.
+    ceilings: Vec<u32>,
 }
 
 impl ColliderBuilder {
+    /// [`Self::quad`] for a ceiling — see [`Self::ceilings`].
+    fn ceiling_quad(&mut self, a: Vec3, b: Vec3, c: Vec3, d: Vec3) {
+        let first = self.tris.len() as u32;
+        self.quad(a, b, c, d);
+        self.ceilings.extend(first..self.tris.len() as u32);
+    }
+
+    /// [`Self::tri`] for a ceiling — see [`Self::ceilings`].
+    fn ceiling_tri(&mut self, a: Vec3, b: Vec3, c: Vec3) {
+        self.ceilings.push(self.tris.len() as u32);
+        self.tri(a, b, c);
+    }
+
     fn tri(&mut self, a: Vec3, b: Vec3, c: Vec3) {
         let base = self.positions.len() as u32;
         self.positions.extend_from_slice(&[a, b, c]);
@@ -717,8 +733,41 @@ pub struct RoomCollider {
     pub surface: SurfaceMaterial,
     /// Vertices (Bevy space).
     pub positions: Vec<Vec3>,
-    /// Triangles.
+    /// Triangles, in authored winding.
     pub tris: Vec<[u32; 3]>,
+    /// Indices into `tris` of tunnel ceilings.
+    pub ceilings: Vec<u32>,
+}
+
+/// Steepest slope a collision triangle can have and still count as
+/// ground in [`RoomCollider::split`] — 60°.
+const GROUND_MIN_NORMAL_Y: f32 = 0.5;
+
+impl RoomCollider {
+    /// Split the triangles into ground and the rest, both indexing
+    /// `positions`.
+    ///
+    /// Ground is every triangle sloping less than 60° that is not a
+    /// tunnel ceiling, rewound to face up: the internal-edge fix that
+    /// [`ground_collider`] gives it makes triangles one-sided, and about
+    /// one ground triangle in eleven is authored facing down. The rest —
+    /// walls, kerb faces, ceilings — keeps a plain two-sided mesh, since
+    /// nothing records which side of a wall is the street.
+    pub fn split(&self) -> (Vec<[u32; 3]>, Vec<[u32; 3]>) {
+        let (mut ground, mut rest) = (Vec::new(), Vec::new());
+        for (i, &[a, b, c]) in self.tris.iter().enumerate() {
+            let [pa, pb, pc] = [a, b, c].map(|v| self.positions[v as usize]);
+            let up = (pb - pa).cross(pc - pa).normalize_or_zero().y;
+            if self.ceilings.contains(&(i as u32)) || up.abs() < GROUND_MIN_NORMAL_Y {
+                rest.push([a, b, c]);
+            } else if up > 0.0 {
+                ground.push([a, b, c]);
+            } else {
+                ground.push([a, c, b]);
+            }
+        }
+        (ground, rest)
+    }
 }
 
 /// The Bevy-free result of importing a parsed PSDL.
@@ -888,6 +937,7 @@ pub fn emit_psdl(psdl: &Psdl, surfaces: Option<&SurfaceTables>) -> CityImport {
                 surface: surface.map_or(SurfaceMaterial::Unspecified, SurfaceMaterial::Authored),
                 positions: group.positions,
                 tris: group.tris,
+                ceilings: group.ceilings,
             });
         }
     }
@@ -1476,7 +1526,7 @@ fn emit_attribute(ctx: &mut EmitCtx<'_>, attr: &RoomAttribute) -> Result<Outcome
                             tri.map(MeshBuilder::planar_uv),
                             Vec3::NEG_Y,
                         );
-                        ctx.collider_rel(2).tri(centre, a, b);
+                        ctx.collider_rel(2).ceiling_tri(centre, a, b);
                     }
                 }
                 Outcome::Emitted
@@ -1668,7 +1718,7 @@ fn emit_road_tunnel(ctx: &mut EmitCtx<'_>, left: &[Vec3], right: &[Vec3]) {
                     Vec3::NEG_Y,
                 );
                 ctx.collider_at(t.tex_key + 2)
-                    .quad(quad[0], quad[1], quad[2], quad[3]);
+                    .ceiling_quad(quad[0], quad[1], quad[2], quad[3]);
             }
         }
     }
@@ -3424,29 +3474,36 @@ pub fn load_city(
             SurfaceMaterial::Authored(i) => format!("-m{i}"),
             SurfaceMaterial::Unspecified => String::new(),
         };
-        let mut entity = commands.spawn((
-            CityEntity,
-            owner,
-            RigidBody::Static,
-            col.surface,
-            Collider::trimesh(col.positions, col.tris),
-            Name::new(format!("city-room{}-collider{tag}", col.room + 1)),
-        ));
-        if let Some(tire) = surfaces
-            .as_ref()
-            .and_then(|t| t.tire_surface_for(col.surface))
-        {
-            entity.insert(tire);
-        }
-        // The same material's `elasticity` becomes the collider's
-        // contact restitution (scaled — `SurfaceTables` owns the
-        // policy): banger/prop bounces off authored surfaces differ by
-        // material without touching the tire path's neutral policy.
-        if let Some(restitution) = surfaces
-            .as_ref()
-            .and_then(|t| t.restitution_for(col.surface))
-        {
-            entity.insert(Restitution::new(restitution));
+        let (ground, rest) = col.split();
+        let shapes = [
+            (!ground.is_empty()).then(|| ground_collider(col.positions.clone(), ground)),
+            (!rest.is_empty()).then(|| Collider::trimesh(col.positions, rest)),
+        ];
+        for collider in shapes.into_iter().flatten() {
+            let mut entity = commands.spawn((
+                CityEntity,
+                owner,
+                RigidBody::Static,
+                col.surface,
+                collider,
+                Name::new(format!("city-room{}-collider{tag}", col.room + 1)),
+            ));
+            if let Some(tire) = surfaces
+                .as_ref()
+                .and_then(|t| t.tire_surface_for(col.surface))
+            {
+                entity.insert(tire);
+            }
+            // The same material's `elasticity` becomes the collider's
+            // contact restitution (scaled — `SurfaceTables` owns the
+            // policy): banger/prop bounces off authored surfaces differ by
+            // material without touching the tire path's neutral policy.
+            if let Some(restitution) = surfaces
+                .as_ref()
+                .and_then(|t| t.restitution_for(col.surface))
+            {
+                entity.insert(Restitution::new(restitution));
+            }
         }
     }
 
@@ -3783,9 +3840,135 @@ pub fn load_city(
     })
 }
 
+/// The static collider for a city mesh's ground triangles (see
+/// [`RoomCollider::split`]), which must all face up.
+///
+/// `FIX_INTERNAL_EDGES` resolves a contact on an edge two triangles share
+/// against the neighbouring faces rather than the bare edge. Without it a
+/// road's slope-to-flat kink is an edge a car's nose can catch: at the foot
+/// of an SF hill at 150 km/h the Beetle's bumper met it with a normal 45°
+/// off the road's, the solver read the car's whole forward speed as
+/// approach speed, and the car was thrown into the air spinning nose-up.
+/// The fix also makes every triangle one-sided, solid only from the side
+/// it faces.
+fn ground_collider(positions: Vec<Vec3>, tris: Vec<[u32; 3]>) -> Collider {
+    Collider::trimesh_with_config(positions, tris, TrimeshFlags::FIX_INTERNAL_EDGES)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Slide a box down a 7° slope onto the flat at 40 m/s and report the
+    /// fastest it ever moved upward and its height at the end — the kink
+    /// is the shared edge of the two road quads, the shape of the SF hill
+    /// bottoms.
+    fn slide_over_kink(collider: Collider) -> (f32, f32) {
+        use std::time::Duration;
+
+        use bevy::time::TimeUpdateStrategy;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(AssetPlugin::default())
+            .add_plugins(bevy::mesh::MeshPlugin)
+            .add_plugins(PhysicsPlugins::default())
+            .insert_resource(Time::<Fixed>::from_hz(120.0))
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+                1.0 / 120.0,
+            )))
+            .insert_resource(Gravity(Vec3::NEG_Y * 9.81))
+            .add_plugins(TransformPlugin);
+        app.finish();
+        app.cleanup();
+        app.world_mut().spawn((RigidBody::Static, collider));
+
+        let slope = 7f32.to_radians();
+        let down = Vec3::new(slope.cos(), -slope.sin(), 0.0);
+        let tilt = Quat::from_rotation_z(-slope);
+        let start = down * -8.0 + tilt * Vec3::Y * 0.25;
+        let body = app
+            .world_mut()
+            .spawn((
+                RigidBody::Dynamic,
+                Collider::cuboid(4.0, 0.5, 1.8),
+                Friction::new(0.0),
+                Restitution::new(0.0),
+                LinearVelocity(down * 40.0),
+                Position(start),
+                Rotation(tilt),
+                Transform::from_translation(start).with_rotation(tilt),
+            ))
+            .id();
+        let mut peak = f32::MIN;
+        for _ in 0..60 {
+            app.update();
+            peak = peak.max(app.world().get::<LinearVelocity>(body).unwrap().y);
+        }
+        (peak, app.world().get::<Position>(body).unwrap().y)
+    }
+
+    /// The kink as the importer hands it over: the slope authored facing
+    /// down, as about one ground triangle in eleven is on retail.
+    fn kinked_road() -> RoomCollider {
+        let slope = 7f32.to_radians();
+        let top = Vec3::new(-30.0 * slope.cos(), 30.0 * slope.sin(), 0.0);
+        let positions = vec![
+            top + Vec3::Z * -5.0,
+            top + Vec3::Z * 5.0,
+            Vec3::new(0.0, 0.0, -5.0),
+            Vec3::new(0.0, 0.0, 5.0),
+            Vec3::new(40.0, 0.0, -5.0),
+            Vec3::new(40.0, 0.0, 5.0),
+        ];
+        RoomCollider {
+            room: 0,
+            surface: SurfaceMaterial::Unspecified,
+            positions,
+            tris: vec![[0, 2, 1], [2, 3, 1], [2, 3, 4], [4, 3, 5]],
+            ceilings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_road_kink_does_not_launch_a_car() {
+        let road = kinked_road();
+        let (ground, rest) = road.split();
+        assert!(rest.is_empty(), "a 7° road is all ground");
+        let (rise, y) = slide_over_kink(ground_collider(road.positions, ground));
+        assert!(
+            rise < 1.0,
+            "a body sliding off a slope onto the flat rose at {rise} m/s"
+        );
+        assert!(y > 0.0, "and it stays on the road, ending at y = {y}");
+    }
+
+    #[test]
+    fn walls_and_ceilings_stay_out_of_the_ground() {
+        let mut ceiling = ColliderBuilder::default();
+        // A wall, a ceiling authored facing up, and a floor facing down.
+        ceiling.tri(Vec3::ZERO, Vec3::X, Vec3::Y);
+        ceiling.ceiling_tri(
+            Vec3::Y * 5.0,
+            Vec3::Y * 5.0 + Vec3::Z,
+            Vec3::Y * 5.0 + Vec3::X,
+        );
+        ceiling.tri(Vec3::ZERO, Vec3::X, Vec3::Z);
+        let room = RoomCollider {
+            room: 0,
+            surface: SurfaceMaterial::Unspecified,
+            positions: ceiling.positions,
+            tris: ceiling.tris,
+            ceilings: ceiling.ceilings,
+        };
+        let (ground, rest) = room.split();
+        assert_eq!(
+            rest,
+            vec![[0, 1, 2], [3, 4, 5]],
+            "wall and ceiling keep two sides"
+        );
+        assert_eq!(ground, vec![[6, 8, 7]], "the floor is rewound to face up");
+    }
 
     #[test]
     fn simple_placement_with_unit_heading_is_unrotated() {
