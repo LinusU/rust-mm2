@@ -3469,42 +3469,69 @@ pub fn load_city(
     // is the normalized grip the tire path applies (F06-B). Both come
     // from the same loaded tables, computed once here so the physics
     // step stays a component read.
-    for col in import.colliders {
-        let tag = match col.surface {
-            SurfaceMaterial::Authored(i) => format!("-m{i}"),
-            SurfaceMaterial::Unspecified => String::new(),
-        };
-        let (ground, rest) = col.split();
-        let shapes = [
-            (!ground.is_empty()).then(|| ground_collider(col.positions.clone(), ground)),
-            (!rest.is_empty()).then(|| Collider::trimesh(col.positions, rest)),
-        ];
-        for collider in shapes.into_iter().flatten() {
-            let mut entity = commands.spawn((
-                CityEntity,
-                owner,
-                RigidBody::Static,
-                col.surface,
-                collider,
-                Name::new(format!("city-room{}-collider{tag}", col.room + 1)),
-            ));
-            if let Some(tire) = surfaces
-                .as_ref()
-                .and_then(|t| t.tire_surface_for(col.surface))
-            {
-                entity.insert(tire);
-            }
-            // The same material's `elasticity` becomes the collider's
-            // contact restitution (scaled — `SurfaceTables` owns the
-            // policy): banger/prop bounces off authored surfaces differ by
-            // material without touching the tire path's neutral policy.
-            if let Some(restitution) = surfaces
-                .as_ref()
-                .and_then(|t| t.restitution_for(col.surface))
-            {
-                entity.insert(Restitution::new(restitution));
-            }
+    // Ground goes into one mesh per surface across the whole city rather
+    // than one per room: the internal-edge fix only sees edges inside a
+    // single mesh, and a street running into its intersection is two
+    // rooms. Per room, the first SF checkpoint race threw every car at
+    // the foot of its second hill, where the street's room meets the
+    // intersection's on an edge the bumpers caught at 17–27 m/s. PSDL
+    // rooms share one vertex table, so the seam's vertices coincide and
+    // `MERGE_DUPLICATE_VERTICES` joins them. Walls, kerb faces and
+    // ceilings stay per room.
+    let mut ground: Vec<(SurfaceMaterial, Vec<Vec3>, Vec<[u32; 3]>)> = Vec::new();
+    let mut spawn_collider = |surface: SurfaceMaterial, collider: Collider, name: String| {
+        let mut entity = commands.spawn((
+            CityEntity,
+            owner,
+            RigidBody::Static,
+            surface,
+            collider,
+            Name::new(name),
+        ));
+        if let Some(tire) = surfaces.as_ref().and_then(|t| t.tire_surface_for(surface)) {
+            entity.insert(tire);
         }
+        // The same material's `elasticity` becomes the collider's
+        // contact restitution (scaled — `SurfaceTables` owns the
+        // policy): banger/prop bounces off authored surfaces differ by
+        // material without touching the tire path's neutral policy.
+        if let Some(restitution) = surfaces.as_ref().and_then(|t| t.restitution_for(surface)) {
+            entity.insert(Restitution::new(restitution));
+        }
+    };
+    let tag = |surface: SurfaceMaterial| match surface {
+        SurfaceMaterial::Authored(i) => format!("-m{i}"),
+        SurfaceMaterial::Unspecified => String::new(),
+    };
+    for col in import.colliders {
+        let (room_ground, rest) = col.split();
+        if !room_ground.is_empty() {
+            let i = match ground.iter().position(|(s, ..)| *s == col.surface) {
+                Some(i) => i,
+                None => {
+                    ground.push((col.surface, Vec::new(), Vec::new()));
+                    ground.len() - 1
+                }
+            };
+            let (_, positions, tris) = &mut ground[i];
+            let base = positions.len() as u32;
+            positions.extend_from_slice(&col.positions);
+            tris.extend(room_ground.iter().map(|t| t.map(|v| v + base)));
+        }
+        if !rest.is_empty() {
+            spawn_collider(
+                col.surface,
+                Collider::trimesh(col.positions, rest),
+                format!("city-room{}-collider{}", col.room + 1, tag(col.surface)),
+            );
+        }
+    }
+    for (surface, positions, tris) in ground {
+        spawn_collider(
+            surface,
+            ground_collider(positions, tris),
+            format!("city-ground{}", tag(surface)),
+        );
     }
 
     // `decals.pathset` beside the PSDL paints the road markings —
