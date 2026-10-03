@@ -1699,6 +1699,147 @@ fn centred_pkg() -> Vec<u8> {
     d
 }
 
+/// Open enclosure made from three zero-thickness, double-sided panels.
+/// Opposite winding on every triangle cancels signed volume/inertia;
+/// the render surface is suitable for static collision but not dynamic
+/// trimesh mass properties. Its vertices still enclose a solid hull.
+fn open_panel_pkg() -> Vec<u8> {
+    let points = [
+        [-0.5f32, -0.5, -0.5],
+        [0.5, -0.5, -0.5],
+        [-0.5, 0.5, -0.5],
+        [0.5, 0.5, -0.5],
+        [-0.5, -0.5, 0.5],
+        [0.5, -0.5, 0.5],
+        [-0.5, 0.5, 0.5],
+        [0.5, 0.5, 0.5],
+    ];
+    let faces = [
+        [0u16, 1, 2],
+        [1, 3, 2],
+        [0, 2, 4],
+        [2, 6, 4],
+        [1, 5, 3],
+        [3, 5, 7],
+    ];
+    let mut indices = Vec::new();
+    for [a, b, c] in faces {
+        indices.extend([a, b, c, c, b, a]);
+    }
+    let mut geo = Vec::new();
+    for n in [1u32, points.len() as u32, indices.len() as u32, 1, 0x112] {
+        geo.extend_from_slice(&n.to_le_bytes());
+    }
+    geo.extend_from_slice(&1u16.to_le_bytes());
+    geo.extend_from_slice(&0u16.to_le_bytes());
+    geo.extend_from_slice(&(-1i32).to_le_bytes());
+    geo.extend_from_slice(&3i32.to_le_bytes());
+    geo.extend_from_slice(&(points.len() as u32).to_le_bytes());
+    for point in points {
+        for value in point.into_iter().chain([0.0f32, 1.0, 0.0, 0.0, 0.0]) {
+            geo.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    geo.extend_from_slice(&(indices.len() as u32).to_le_bytes());
+    for index in indices {
+        geo.extend_from_slice(&index.to_le_bytes());
+    }
+    let mut pkg = b"PKG3FILE".to_vec();
+    pkg.push(10);
+    pkg.extend_from_slice(b"centred_h\0");
+    pkg.extend_from_slice(&(geo.len() as u32).to_le_bytes());
+    pkg.extend(geo);
+    pkg
+}
+
+#[test]
+fn double_sided_intact_banger_keeps_finite_inertia_after_a_vehicle_strike() {
+    let tmp = centred_install();
+    write(tmp.path(), "geometry/centred.pkg", open_panel_pkg());
+    write(tmp.path(), "geometry/plain.pkg", open_panel_pkg());
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(tmp.path(), 0).unwrap();
+    let mut app = city_app(vfs);
+    app.update();
+    app.update();
+    let banger = app
+        .world_mut()
+        .query_filtered::<Entity, With<Banger>>()
+        .single(app.world())
+        .unwrap();
+    assert!(app.world().get::<BangerPieces>(banger).is_none());
+    let start = app.world().get::<Position>(banger).unwrap().0;
+    let inertia = app
+        .world()
+        .get::<Collider>(banger)
+        .unwrap()
+        .shape()
+        .mass_properties(1.0)
+        .principal_inertia();
+    assert!(inertia.is_finite());
+    assert!(inertia.cmpgt(Vec3::ZERO).all());
+
+    // The unbound copy keeps its open triangle mesh; a convex hull would
+    // turn its front opening into an invisible wall.
+    let static_collider = app
+        .world_mut()
+        .query::<(&Name, &Collider)>()
+        .iter(app.world())
+        .find(|(name, _)| name.as_str() == "pathset-plain-1-0-collider")
+        .unwrap()
+        .1;
+    assert!(static_collider.shape().as_trimesh().is_some());
+
+    let car = app
+        .world_mut()
+        .query_filtered::<Entity, With<mm2_vehicle::Vehicle>>()
+        .single(app.world())
+        .unwrap();
+    app.world_mut().entity_mut(car).insert((
+        Position(Vec3::new(0.0, 0.8, 8.0)),
+        LinearVelocity(Vec3::new(0.0, 0.0, 15.0)),
+    ));
+    let mut events = Vec::new();
+    let mut moved = false;
+    for _ in 0..FRAMES_PER_SECOND * 5 {
+        app.update();
+        events.extend(drain_transitions(&mut app));
+        let position = app.world().get::<Position>(banger).unwrap().0;
+        moved |= position.distance(start) > 0.1;
+        assert!(position.is_finite());
+        assert!(app.world().get::<Rotation>(banger).unwrap().0.is_finite());
+        assert!(
+            app.world()
+                .get::<LinearVelocity>(banger)
+                .unwrap()
+                .0
+                .is_finite()
+        );
+        assert!(
+            app.world()
+                .get::<AngularVelocity>(banger)
+                .unwrap()
+                .0
+                .is_finite()
+        );
+        assert!(
+            app.world()
+                .get::<ComputedAngularInertia>(banger)
+                .unwrap()
+                .inverse_tensor()
+                .is_finite()
+        );
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.phase == BangerPhase::Active)
+            .count(),
+        1
+    );
+    assert!(moved, "intact prop must still be knocked loose");
+}
+
 /// A minimal `.inst` file stamping each `(name, location)` as a simple
 /// placement — unit heading, scale 1.
 fn inst_file(comps: &[(&str, [f32; 3])]) -> Vec<u8> {
