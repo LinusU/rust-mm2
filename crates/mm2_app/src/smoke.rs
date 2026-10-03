@@ -387,6 +387,9 @@ fn run_headless(
         .add_plugins(TransformPlugin)
         .add_plugins(VehiclePlugin)
         .add_message::<ImpactEvent>()
+        // The record's `opp_drv=` AI-on-AI contact rate.
+        .init_resource::<FieldContacts>()
+        .add_systems(Update, count_field_contacts)
         .add_message::<crate::netdrive::RemoteImpact>()
         .add_message::<DamageEvent>()
         .add_message::<mm2_game::StuckEvent>()
@@ -1259,7 +1262,12 @@ fn run_headless(
             // cars cleared their gates.
             let ordered = r.definition.rule == mm2_game::CheckpointRule::Ordered;
             let mut rows: Vec<OppRow> = Vec::new();
-            let mut drv = FieldDriving::default();
+            let field_contacts = world_ecs.get_resource::<FieldContacts>();
+            let mut drv = FieldDriving {
+                contacts: field_contacts.map_or(0, |c| c.count),
+                hard_contacts: field_contacts.map_or(0, |c| c.hard),
+                ..FieldDriving::default()
+            };
             let (opp, opp_done, opp_rec, opp_cu) = world_ecs.iter_entities().fold(
                 (0usize, 0usize, 0usize, 0usize),
                 |(n, d, rec, c), e| {
@@ -2071,6 +2079,10 @@ struct FieldDriving {
     impacts: u32,
     /// Summed escapes plus re-anchors.
     recoveries: u32,
+    /// Impacts between two opponents ([`FieldContacts`]).
+    contacts: u32,
+    /// Those of them that were hard hits.
+    hard_contacts: u32,
 }
 
 impl FieldDriving {
@@ -2081,7 +2093,7 @@ impl FieldDriving {
         self.recoveries += recoveries;
     }
 
-    /// ` opp_drv=<m>m/<mean m/s>mps/<impacts/km>ipk/<recoveries/km>xpk`
+    /// ` opp_drv=<m>m/<mean m/s>mps/<impacts/km>ipk/<recoveries/km>xpk/<AI-on-AI impacts/km>apk/<hard AI-on-AI impacts/km>hpk`
     /// — absent until the field has driven at all, so records from
     /// before the race starts stay unchanged.
     fn field(&self) -> String {
@@ -2090,12 +2102,65 @@ impl FieldDriving {
         }
         let km = self.distance / 1000.0;
         format!(
-            " opp_drv={:.0}m/{:.1}mps/{:.1}ipk/{:.1}xpk",
+            " opp_drv={:.0}m/{:.1}mps/{:.1}ipk/{:.1}xpk/{:.1}apk/{:.2}hpk",
             self.distance,
             self.distance / self.seconds,
             self.impacts as f32 / km,
             self.recoveries as f32 / km,
+            self.contacts as f32 / km,
+            self.hard_contacts as f32 / km,
         )
+    }
+}
+
+/// Impacts this session generation where both participants are
+/// opponents — the field running into itself, which the rear-end
+/// guard exists to cut. Counted per impact, not per participant.
+#[derive(Resource, Debug, Default)]
+pub struct FieldContacts {
+    /// Session generation the count belongs to.
+    generation: u64,
+    /// AI-on-AI impacts so far.
+    count: u32,
+    /// Those of them at or above [`HARD_CONTACT`] approach speed.
+    hard: u32,
+}
+
+/// Approach speed (m/s) from which an AI-on-AI impact counts as a hard
+/// hit rather than a nudge — about a 20 km/h closure.
+const HARD_CONTACT: f32 = 5.0;
+
+/// Count AI-on-AI impacts into [`FieldContacts`].
+fn count_field_contacts(
+    mut reader: MessageReader<ImpactEvent>,
+    session: Res<Session>,
+    opponents: Query<&mm2_game::ObjectIdentity, With<opponents::OpponentDriver>>,
+    mut contacts: ResMut<FieldContacts>,
+) {
+    let generation = session.generation();
+    if contacts.generation != generation {
+        *contacts = FieldContacts {
+            generation,
+            ..FieldContacts::default()
+        };
+    }
+    let mut ids = None;
+    for event in reader.read() {
+        if event.generation != generation {
+            continue;
+        }
+        let ids = ids.get_or_insert_with(|| {
+            opponents
+                .iter()
+                .map(|o| o.0)
+                .collect::<std::collections::HashSet<_>>()
+        });
+        if ids.contains(&event.participants.0) && ids.contains(&event.participants.1) {
+            contacts.count += 1;
+            if event.severity >= HARD_CONTACT {
+                contacts.hard += 1;
+            }
+        }
     }
 }
 
@@ -2362,7 +2427,12 @@ mod tests {
         };
         drv.add(&stats, 30, 6);
         drv.add(&stats, 0, 0);
-        assert_eq!(drv.field(), " opp_drv=3000m/15.0mps/10.0ipk/2.0xpk");
+        drv.contacts = 3;
+        drv.hard_contacts = 1;
+        assert_eq!(
+            drv.field(),
+            " opp_drv=3000m/15.0mps/10.0ipk/2.0xpk/1.0apk/0.33hpk"
+        );
     }
 
     #[test]
