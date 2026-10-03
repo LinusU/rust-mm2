@@ -1145,7 +1145,47 @@ separate `mm2 --join --headless` clients drive one dev-world cruise —
 cleanly, then with every client connection relayed through an armed
 `ImpairProxy` (see "Two-process driving" above) — while each
 process's record counters prove inputs flowed up, snapshots flowed
-down and remote copies spawned. This
-is *not* LAN or Internet evidence — every socket so far is
+down and remote copies spawned.
+`mm2_app`'s `net_edge` suite is the hostile-peer/abrupt-loss tier —
+the F24-C legs the in-process coverage could not reach, every one
+against real OS processes over real loopback:
+
+- **The door bounds three kinds of bad first contact.** A
+  well-formed frame whose payload decodes to no `Message` reads a
+  `Reject{Malformed}` back and the host records `join_failed` naming
+  the protocol reason; a length word declaring `MAX_FRAME + 1` is
+  refused before allocation (`join_failed … frame declares`); a
+  decodable-but-wrong first frame (a mid-lobby `SetReady`) reads a
+  `Reject{Malformed}` naming the first-message contract. A real
+  `mm2-join` then joins the same lobby — each hit cost nothing but
+  its record line.
+- **A silent peer is refused on the deadline.** A socket that
+  completes TCP and never speaks dies `join_failed` at the
+  host-side `HANDSHAKE_TIMEOUT` (the in-process
+  `a_silent_client_cannot_stall_accept_hello` proves the mechanism;
+  this leg proves it fires inside a real host process), after which
+  the lobby still serves.
+- **A rostered peer speaking for the host is dropped.** A valid
+  client that sends a host→client-only variant (`Roster`) leaves
+  `cause=malformed`; a fresh join still lands afterward.
+- **Abrupt host death is a lost peer, not a wedge.** SIGKILLing an
+  `mm2-host` — its sockets die at the kernel, not through the
+  lobby's own `quit` disconnect that `net_app`'s lost-host leg
+  already covered — closes a parked `mm2-join` and a started one
+  with `event=closed`/exit 1; SIGKILLing an `mm2 --host` mid-drive
+  closes the `mm2 --join` client's link, the app names `lost the
+  host`/`status=fail` and exits 3.
+- **A rejoin mints a fresh slot at the process boundary.** A
+  departing `mm2-join` that dials again is `id=2`, never the
+  recycled `id=1` (the process half of `a_rejoin_mints_a_fresh_
+  slot`'s in-process claim).
+- `mm2-join` dialling a dead address reports `join_failed`/exit 1 —
+  the headless client's half of the unreachable-join leg `net_app`
+  already holds for `mm2 --join`.
+
+This is *not* LAN or Internet evidence — every socket so far is
 `127.0.0.1`, the world is synthetic, and nothing rendered — F24-C owns
-the reachability matrix.
+the reachability matrix. A real firewall/NAT path, a dead-but-open
+link (the legs kill the process, which always closes sockets — a host
+that *stops speaking* on a live socket is unproven), and the
+multi-process impairment matrix stay open.

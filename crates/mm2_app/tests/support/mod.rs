@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mm2_assets::{InstallMount, Vfs, mount_install};
 use mm2_game::{EventRef, EventTableKind};
@@ -93,6 +93,32 @@ impl Proc {
     /// Reap the child and return its exit status — for `quit` legs.
     pub fn wait(mut self) -> std::process::ExitStatus {
         self.child.wait().expect("failed to wait for child")
+    }
+
+    /// SIGKILL the child — the abrupt-loss legs' way to make a process
+    /// vanish mid-stream instead of through its polite `quit` path (a
+    /// dead peer's sockets close at the kernel, not by the lobby's own
+    /// disconnect). `Drop` still reaps the corpse.
+    pub fn kill(&mut self) {
+        let _ = self.child.kill();
+    }
+
+    /// Reap the child, bounded: the loss legs' claim is that the child
+    /// exits *on its own* once the peer dies, so a child that outlives
+    /// `bound` is killed and the leg fails rather than hanging the
+    /// suite.
+    pub fn wait_timeout(mut self, bound: Duration) -> std::process::ExitStatus {
+        let deadline = Instant::now() + bound;
+        loop {
+            if let Some(status) = self.child.try_wait().expect("failed to poll child") {
+                return status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "child did not exit within {bound:?}"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
     }
 }
 
