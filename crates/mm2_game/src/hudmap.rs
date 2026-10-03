@@ -20,11 +20,22 @@
 //!   bottom-right corner, where the original draws it).
 //! - **Designed:** the *order* TAB cycles in (Inset → Large → Off), the
 //!   second inset's exact size (the original's two "smaller views"
-//!   geometry is unrecovered), and `ZoomIn == 0` meaning "start zoomed
-//!   out" (the field's semantics are unrecovered).
+//!   geometry is unrecovered), `ZoomIn == 0` meaning "start zoomed
+//!   out" (the field's semantics are unrecovered), and
+//!   [`INSET_VIEW_SCALE`] — read verbatim as half-extents, the authored
+//!   inset distances frame most of the city in a ~360 px corner, which
+//!   leaves the streets around the car unreadable.
 
 use bevy::prelude::*;
 use mm2_formats::hudmap::HudMapSpec;
+
+/// How much of the authored `ZoomInDist`/`ZoomOutDist` the corner views
+/// show: their view half-extent is the eased zoom times this. Designed
+/// — the authored distances read as half-extents put ~2.4 km of SF in
+/// the zoomed-out inset; a quarter of that keeps a few blocks around
+/// the car legible. The full-screen map keeps its `*FS` pair verbatim,
+/// since its job is the whole-city overview.
+pub const INSET_VIEW_SCALE: f32 = 0.25;
 
 /// Which corner-map presentation the HUD shows — TAB cycles it
 /// (HUD-4: "two smaller map views and off"). The cycle order is
@@ -152,6 +163,17 @@ impl HudMap {
             (false, true) => self.spec.zoom_in_dist,
             (true, false) => self.spec.zoom_out_dist_fs,
             (true, true) => self.spec.zoom_in_dist_fs,
+        }
+    }
+
+    /// The view half-extent (metres) the map camera frames this frame:
+    /// the eased [`Self::zoom`], scaled by [`INSET_VIEW_SCALE`] for the
+    /// corner views.
+    pub fn view_half_extent(&self) -> f32 {
+        if self.fullscreen {
+            self.zoom
+        } else {
+            self.zoom * INSET_VIEW_SCALE
         }
     }
 
@@ -303,6 +325,14 @@ mod tests {
         m.fullscreen = true;
         m.zoom = m.spec.zoom_in_dist_fs;
         assert!((m.icon_scale() - 15.07).abs() < 1e-4);
+    }
+
+    #[test]
+    fn corner_views_frame_a_quarter_of_the_authored_distance() {
+        let mut m = HudMap::new(spec(), 0);
+        assert!((m.view_half_extent() - 1195.0 * INSET_VIEW_SCALE).abs() < 1e-3);
+        m.fullscreen = true;
+        assert_eq!(m.view_half_extent(), m.zoom);
     }
 
     #[test]

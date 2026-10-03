@@ -476,8 +476,8 @@ pub fn spawn_hud_map(
         },
         Projection::Orthographic(OrthographicProjection {
             scaling_mode: ScalingMode::Fixed {
-                width: 2.0 * spec.zoom_out_dist,
-                height: 2.0 * spec.zoom_out_dist,
+                width: 2.0 * spec.zoom_out_dist * mm2_game::hudmap::INSET_VIEW_SCALE,
+                height: 2.0 * spec.zoom_out_dist * mm2_game::hudmap::INSET_VIEW_SCALE,
             },
             near: 0.0,
             far: CAMERA_LIFT * 4.0,
@@ -728,8 +728,9 @@ pub fn drive_hud_map(
             .looking_at(Vec3::new(pos.x, report.marker_y, pos.z), up);
         // The viewport: authored `Pos`/`Size` fractions of the window
         // for the insets, the whole window while the full-screen map is
-        // up. `zoom` is the view half-extent — the projection rectangle
-        // follows the viewport's aspect so the map does not stretch.
+        // up. The view half-extent is the eased zoom (scaled down for
+        // the corner views) — the projection rectangle follows the
+        // viewport's aspect so the map does not stretch.
         let win = windows.iter().next().map(|w| {
             Vec2::new(
                 w.resolution.physical_width() as f32,
@@ -751,7 +752,7 @@ pub fn drive_hud_map(
             })
         };
         if let Projection::Orthographic(o) = &mut *proj {
-            let height = 2.0 * map.zoom;
+            let height = 2.0 * map.view_half_extent();
             let aspect = (vp_size.x / vp_size.y.max(1.0)).max(0.01);
             o.scaling_mode = ScalingMode::Fixed {
                 width: height * aspect,
