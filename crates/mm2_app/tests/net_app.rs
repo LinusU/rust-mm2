@@ -30,17 +30,19 @@ use mm2_app::session;
 use mm2_app::session::{SelectedCar, SessionControl, TunedVehicle};
 use mm2_app::smoke::{self, SmokeStatus};
 use mm2_assets::Vfs;
+use mm2_content::SurfaceTables;
+use mm2_formats::materials::{MaterialMap, MaterialSet};
 use mm2_game::{
     DevOverrides, ImpactEvent, ImpactId, Mm2Vfs, ObjectId, ObjectIdentity, Player, PlayerControl,
     PlayerVehicle, Session, SessionAuthority, SessionConfig, SessionMode, SessionPhase,
-    SurfaceState, WorldMode, advance_session_tick, despawn_session_entities,
+    SurfaceMaterial, SurfaceState, WorldMode, advance_session_tick, despawn_session_entities,
 };
 use mm2_net::{
     Client, Conn, DriveInput, Host, HostConfig, HostEvent, Impair, ImpairProxy, LateJoin,
-    LeaveCause, LinkDir, Message, SnapEntry, SnapImpact, VehiclePick, accept_hello, hello,
-    listen_loopback,
+    LeaveCause, LinkDir, Message, SNAP_NO_SURFACE, SnapEntry, SnapImpact, VehiclePick,
+    accept_hello, hello, listen_loopback,
 };
-use mm2_vehicle::{ResetVehicle, Teleported, VehicleConfig, VehicleInput};
+use mm2_vehicle::{ResetVehicle, Teleported, VehicleConfig, VehicleInput, VehicleState};
 use support::{Proc, WAIT, listening, mount};
 
 const HOST_EXE: &str = env!("CARGO_BIN_EXE_mm2-host");
@@ -221,6 +223,13 @@ fn host_app(vfs: Vfs, link: HostLink) -> App {
     app.insert_resource(link)
         .init_resource::<netdrive::NetDriveReport>()
         .init_resource::<netdrive::WireStall>()
+        // F25-B (v16): `surface_voices` resolves a wire seat's live
+        // wheel contact into the `SurfaceContact` the publish encodes.
+        // Its surface resources are `Option` — legs that never install
+        // them run it as the no-table early return; the surface legs
+        // insert `SurfaceAudio`/`SurfaceTables`/`WaveBank` themselves.
+        .init_resource::<mm2_app::audio::AudioReport>()
+        .init_resource::<Assets<mm2_app::audio::PcmAudio>>()
         .add_systems(
             Update,
             (
@@ -244,12 +253,17 @@ fn host_app(vfs: Vfs, link: HostLink) -> App {
                     .after(net::drive_host)
                     .after(mm2_vehicle::systems::vehicle_reset)
                     .before(netdrive::publish_snapshots),
+                // F25-B (v16): the live contact resolve — the same
+                // `drive_session` ordering the windowed/headless
+                // schedules keep (their `apply_snapshots` edge is
+                // client-side; this app hosts).
+                mm2_app::audio::surface_voices.after(session::drive_session),
                 netdrive::publish_snapshots
                     .after(net::drive_host)
                     .after(mm2_vehicle::systems::vehicle_reset)
                     // F25-B (v16): the production contact→publish
-                    // ordering — `surface_voices` is not scheduled in
-                    // this slice, so the leg stages the component.
+                    // ordering — a seat's same-frame resolved contact
+                    // publishes, not last frame's.
                     .after(mm2_app::audio::surface_voices),
             ),
         );
@@ -3092,19 +3106,43 @@ fn a_remote_copys_engine_voice_mixes_off_the_replicated_rpm() {
     host.shutdown();
 }
 
-/// F25-B (protocol v16), authority half: the `SurfaceContact` a wire
-/// seat's `surface_voices` pass resolves publishes in its `SnapEntry`
-/// tail — class/slippage/wheel-speed for the loudest skid pick plus
-/// the rolling class — so a client's copy can replay the same pick
-/// through *its* surface table (`aud/` rides no gameplay fingerprint;
-/// resolved table indices never cross the wire).
+/// `_default` → row 0, `grass` → row 1 — the `sound` class wiring
+/// `SurfaceTables::sound_index` reads (the same two-material set
+/// `tests/audio.rs`'s surface legs stage).
+fn surface_tables() -> SurfaceTables {
+    let set = MaterialSet::parse("mtl _default {\n    sound: 0\n}\nmtl grass {\n    sound: 1\n}\n")
+        .unwrap();
+    let map = MaterialMap::parse("texture,physics\n").unwrap();
+    SurfaceTables { set, map }
+}
+
+/// F25-B (protocol v16), authority half: a wire seat's live wheel
+/// contact resolves through `surface_voices` — the collider's
+/// `SurfaceMaterial` → the material's authored `sound` class → the
+/// session's `SurfaceAudio` row — and the `SurfaceContact` it records
+/// publishes in the seat's `SnapEntry` tail the same update. Nothing
+/// about the row is staged: the test writes only the wheel telemetry
+/// the sim owns (`grounded`/`contact_entity`/`traction_demand`/
+/// `vel_long`/`forward_speed`).
 #[test]
 fn a_wire_seats_surface_contact_publishes_in_its_snap() {
     let install = tempfile::tempdir().unwrap();
     support::audio_car(install.path(), "vpt");
-    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    support::surface_audio(install.path());
+    let config = dev_cruise();
+    let (link, vfs, fp) = host_link(install.path(), &config);
+    // The session resources `load_session_world` binds — the authored
+    // dry table off this install's VFS and the wave bank indexing it.
+    // The dev world ships no city materials, so `SurfaceTables` is the
+    // test's own two-material set, the same staging `audio.rs` uses.
+    let audio = mm2_app::audio::SurfaceAudio::load(&vfs, config.conditions.weather, None)
+        .expect("the fixture's dry table resolves");
+    let bank = mm2_app::audio::WaveBank::index(&vfs);
     let addr = link.addr();
     let mut app = host_app(vfs, link);
+    app.insert_resource(audio)
+        .insert_resource(surface_tables())
+        .insert_resource(bank);
     let mut peer = remote_peer(addr, "eve", fp);
     let ctl = peer.ctl().unwrap();
     ctl.set_vehicle("vpt", 0).unwrap();
@@ -3125,24 +3163,49 @@ fn a_wire_seats_surface_contact_publishes_in_its_snap() {
         let mut q = app.world_mut().query_filtered::<Entity, With<RemotePick>>();
         q.single(app.world()).expect("the remote car")
     };
-
-    // A slide on class 3 plus class 1 rolling — staged on the seat like
-    // `surface_voices` writes it (this slice schedules the publish
-    // ordering edge, not the resolve itself).
-    app.world_mut()
-        .entity_mut(remote)
-        .insert(mm2_app::audio::SurfaceContact {
-            skid: Some(mm2_app::audio::SkidContact {
-                surface: 3,
-                slippage: 0.5,
-                wheel_speed: -12.4,
-            }),
-            roll: Some(1),
-        });
+    // One more pass so `surface_voices` has provably resolved the seat —
+    // its spawn lands mid-schedule, so this update is the first the
+    // wheel loop can see it.
     app.update();
+    assert!(
+        app.world()
+            .get::<mm2_app::audio::SurfaceContact>(remote)
+            .is_some_and(|c| c.skid.is_none() && c.roll.is_none()),
+        "airborne wheels resolve the empty contact — sentinel rows only"
+    );
+
+    // A grass slide: every wheel grounded on the class-1 collider at
+    // 0.6 utilization, wheel speed and forward speed both 12.4 m/s so
+    // the rolling gate stays open.
+    let grass = app.world_mut().spawn(SurfaceMaterial::Authored(1)).id();
+    {
+        let mut state = app.world_mut().get_mut::<VehicleState>(remote).unwrap();
+        state.forward_speed = 12.4;
+        for w in &mut state.wheels {
+            w.grounded = true;
+            w.contact_entity = Some(grass);
+            w.traction_demand = 0.6;
+            w.vel_long = 12.4;
+        }
+    }
+    app.update();
+
+    // `surface_voices`' live resolve wrote the contact — the record the
+    // publish encodes, asserted here before the wire leg so a staged
+    // row can never masquerade as a resolved one.
+    let contact = app
+        .world()
+        .get::<mm2_app::audio::SurfaceContact>(remote)
+        .expect("the resolve wrote the seat's contact");
+    let skid = contact.skid.expect("the grass slide resolved a skid");
+    assert_eq!(skid.surface, 1, "the collider's authored sound class");
+    assert!((skid.slippage - 0.6).abs() < 1e-6, "{}", skid.slippage);
+    assert_eq!(skid.wheel_speed, 12.4);
+    assert_eq!(contact.roll, Some(1), "the moving car's rolling class");
+
     let snap = until_wire(
         &mut peer,
-        |m| matches!(m, Message::Snap { entries, .. } if entries.iter().any(|e| e.player == 1 && e.surf_skid == 3)),
+        |m| matches!(m, Message::Snap { entries, .. } if entries.iter().any(|e| e.player == 1 && e.surf_skid == 1)),
     );
     let Message::Snap { entries, .. } = snap else {
         unreachable!("the predicate matched the contact-bearing row")
@@ -3158,9 +3221,40 @@ fn a_wire_seats_surface_contact_publishes_in_its_snap() {
             entry.skid_speed,
             entry.surf_roll
         ),
-        (3, 128, -124, 1),
-        "the winning contact publishes quantized — 0.5×255→128, \
-         -12.4 m/s→-124"
+        (1, 153, 124, 1),
+        "the resolved contact publishes quantized — 0.6×255→153, \
+         12.4 m/s→124"
+    );
+
+    // The same live chain keeps voicing: the resolved contact spawned
+    // the grass skid band plus the rolling loop off the authored
+    // waves — spatial emitters like any non-player car.
+    spin(&mut app, |a| {
+        let r = a.world().resource::<mm2_app::audio::AudioReport>();
+        r.skids == 1 && r.rolling == 1
+    });
+    assert_eq!(
+        app.world().resource::<mm2_app::audio::AudioReport>().failed,
+        0,
+        "every resolved voice decoded its authored wave"
+    );
+
+    // Airborne: the next resolve writes the empty contact and the wire
+    // falls back to its sentinels — never a stale row.
+    {
+        let mut state = app.world_mut().get_mut::<VehicleState>(remote).unwrap();
+        state.forward_speed = 0.0;
+        for w in &mut state.wheels {
+            w.grounded = false;
+            w.contact_entity = None;
+            w.traction_demand = 0.0;
+            w.vel_long = 0.0;
+        }
+    }
+    app.update();
+    until_wire(
+        &mut peer,
+        |m| matches!(m, Message::Snap { entries, .. } if entries.iter().any(|e| e.player == 1 && e.surf_skid == SNAP_NO_SURFACE && e.surf_roll == SNAP_NO_SURFACE)),
     );
 }
 

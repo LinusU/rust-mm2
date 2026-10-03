@@ -35,6 +35,8 @@ use mm2_game::{
 };
 use mm2_vehicle::{DriveDirection, RemoteReplica, VehicleConfig, VehicleState, vehicle_bundle};
 
+mod support;
+
 /// A minimal 16-bit mono PCM RIFF/WAVE at `rate` with `frames` frames.
 fn pcm_wav(rate: u32, frames: usize) -> Vec<u8> {
     let mut fmt = Vec::new();
@@ -1229,17 +1231,8 @@ fn an_absent_table_degrades_to_silence() {
 /// The authored dry table rows — the retail `default_surfacedry.csv`
 /// 10-column schema. Row 0 is the `_default` road (NOSOUND rolling +
 /// two slippage bands), row 1 `grass` (a rolling loop + one wide
-/// band).
-const DRY_TABLE: &[u8] = b"Tunnel sound index\n0\n\
-surface wave,max speed,min surface volume,max surface volume,min surface pitch,max surface pitch,min skid volume,max skid volume,num skid samples\n\
-NOSOUND,125,0,0,0,0,0.5,0.88,2\n\
-skid wave,min slippage,max slippage\n\
-ROADSKID1,0.5,0.75\n\
-ROADSKID2,0.75,1\n\
-surface wave,max speed,min surface volume,max surface volume,min surface pitch,max surface pitch,min skid volume,max skid volume,num skid samples\n\
-ROLLWAVE,25,0.35,0.75,0.85,1.25,0.5,0.72,1\n\
-skid wave,min slippage,max slippage\n\
-GRASSSKID,0.25,1\n";
+/// band). Shared with the net legs as `tests/support::DRY_SURFACE_TABLE`.
+use support::DRY_SURFACE_TABLE as DRY_TABLE;
 
 /// The wet table — same schema as dry (AUD-6), distinct sample names
 /// so a resolved voice identifies which variant bound.
@@ -1444,6 +1437,55 @@ fn a_sliding_wheel_voices_the_covering_skid_band() {
     assert_eq!(
         session_entity,
         app.world().resource::<Session>().generation()
+    );
+}
+
+/// F25-B (protocol v16): the `SurfaceContact` `contact_pick` writes on
+/// a live car is the wire's source — assert the resolved record itself
+/// (class, slippage, wheel speed, rolling class), not just the voices
+/// it produced, and that a quiet resolve writes the empty contact back
+/// so the publish encodes its sentinels rather than a stale row.
+#[test]
+fn a_live_car_records_the_resolved_contact_for_the_wire() {
+    let dir = surface_dir();
+    let mut app = surface_app(dir.path());
+    let (car, grass) = surface_car(&mut app, true, SurfaceMaterial::Authored(1));
+    // Rolling at 10 m/s plus a 0.6-utilization slide — both halves of
+    // the grass row resolve.
+    set_contact(&mut app, car, Some(grass), 10.0, 0.0);
+    {
+        let mut state = app.world_mut().get_mut::<VehicleState>(car).unwrap();
+        for w in &mut state.wheels {
+            w.traction_demand = 0.6;
+        }
+    }
+    app.update();
+
+    let contact = app
+        .world()
+        .get::<SurfaceContact>(car)
+        .expect("the resolve wrote the car's contact");
+    let skid = contact.skid.expect("the slide resolved a skid contact");
+    assert_eq!(skid.surface, 1, "the collider's authored sound class");
+    assert!(
+        (skid.slippage - 0.6).abs() < 1e-6,
+        "the winning wheel's utilization: {}",
+        skid.slippage
+    );
+    assert_eq!(skid.wheel_speed, 10.0, "the winning wheel's vel_long");
+    assert_eq!(contact.roll, Some(1), "the moving car's rolling class");
+
+    // Airborne: the next resolve writes the empty contact — the record
+    // a quiet frame publishes.
+    set_contact(&mut app, car, None, 10.0, 0.9);
+    app.update();
+    let contact = app
+        .world()
+        .get::<SurfaceContact>(car)
+        .expect("the component stays bound");
+    assert!(
+        contact.skid.is_none() && contact.roll.is_none(),
+        "an unresolving frame clears the record, not a stale carry-over"
     );
 }
 
