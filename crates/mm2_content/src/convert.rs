@@ -39,7 +39,10 @@ const AIR_DENSITY: f32 = 1.225;
 /// Rest compression target as a fraction of suspension travel.
 const SAG_FRACTION: f32 = 0.45;
 /// Lateral/longitudinal grip scale from MM2 static friction (adapted).
-const GRIP_LAT_SCALE: f32 = 0.55;
+/// Lateral is the arcade one: MM2 cars corner far harder than real ones,
+/// and `0.75` is as far as the roll assist holds the tall cars down —
+/// see docs/vehicle-handling.md "Grip scale".
+const GRIP_LAT_SCALE: f32 = 0.75;
 const GRIP_LONG_SCALE: f32 = 0.60;
 /// Torque-peak placement and height relative to the power peak (adapted).
 const TORQUE_PEAK_RPM_FRAC: f32 = 0.72;
@@ -677,7 +680,7 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
 
     let assists = AssistConfig {
         // Every stock MM2 car carries its mass about as high as its track
-        // is wide while running tires good for 1.65 g — geometry that puts
+        // is wide while running tires good for 2.25 g — geometry that puts
         // the car on its roof in any committed corner. See
         // `AssistConfig::roll_resistance`.
         roll_resistance: ROLL_RESISTANCE,

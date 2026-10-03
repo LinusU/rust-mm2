@@ -98,9 +98,9 @@ found only by running it.
 **Every stock car tips before it slides.** Retail geometry carries the mass
 about as high as the track is wide — the Beetle's static rollover threshold
 is 0.98 g, the London Cab's 0.63 — while `StaticFric 3.0` maps to tires
-worth 1.65 g. The whole roster audited between 0.28 and 0.86 on
-`rollover_margin`, meaning a merely committed corner ends with the car on
-its roof.
+worth 2.25 g. Even on the gentler 1.65 g tires of an earlier grip scale
+the whole roster audited between 0.28 and 0.86 on `rollover_margin`,
+meaning a merely committed corner ends with the car on its roof.
 
 Tire grip acts at the contact patch, a full centre-of-mass height below the
 mass it is turning, and that lever is what does it. Real suspension resists
@@ -111,7 +111,7 @@ moment untouched — the car corners exactly as hard, it just stays down —
 and measuring against the contact normal rather than world up keeps banked
 road correct.
 
-Imported cars get `0.85`, which puts the roster at 1.87–5.75.
+Imported cars get `0.85`, which puts the roster at 1.37–4.21.
 
 ### Grip-limited steering
 
@@ -287,8 +287,15 @@ snag-safe hull.
 
 `StaticFric` runs from 1.2 (City Bus) to 3.0 (most cars), which at the top
 end is not a friction coefficient any tire has. It is scaled by
-`GRIP_LAT_SCALE` / `GRIP_LONG_SCALE` into a 0.9–1.7 g range, preserving the
-ordering between cars.
+`GRIP_LAT_SCALE` / `GRIP_LONG_SCALE`, preserving the ordering between cars.
+
+The lateral scale is `0.75`, a 0.9–2.25 g range: more than a road tire,
+because MM2 cars corner far harder than real ones and a 1.65 g ceiling
+turned too little at every speed. It was `0.55`. `0.95` is past what the
+roll assist can hold — the Freightliner audits as tipping and the
+double-decker loses it at 40 m/s — and `0.75` keeps every car at a
+`rollover_margin` of 1.37 or more. `drive_probe` puts the Beetle at
+1.73 g at 40 m/s (1.32 before).
 
 ### Engine curve
 
