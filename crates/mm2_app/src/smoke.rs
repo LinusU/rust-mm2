@@ -479,11 +479,13 @@ fn run_headless(
                 // F10-A.2: ambient lane-following + recycle/respawn —
                 // the headless record's `traf=` field reads the state
                 // these leave behind. F10-B.6's handover runs before
-                // the driver (knock → drive → maintain); the B.7
-                // signal update reads the controller state the driver
-                // just advanced, so it runs last.
+                // the driver and the drape follows it
+                // (knock → drive → drape → maintain); the B.7 signal
+                // update reads the controller state the driver just
+                // advanced, so it runs last.
                 crate::traffic::knock_ambient,
                 crate::traffic::drive_ambient,
+                crate::traffic::drape_ambient,
                 crate::traffic::maintain_ambient,
                 crate::traffic::drive_signals,
             )

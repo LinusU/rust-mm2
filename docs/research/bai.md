@@ -86,6 +86,15 @@ occupies each room.
 - `london_sup.bai`/`sf_sup.bai` share the `CAI1` magic but do not fit
   this layout under either field reading — reported `unsupported`; their
   record structure is uninvestigated.
+- Lane vertex heights are **not** the PSDL road surface (measured
+  2026-10-03, `city/sf`: ambient cars posed on lane curves, ground
+  ray-cast under them over ~36k car-ticks on the hills around
+  (−1150, 55, 370)). Mean offset is ~0, but the linear curve between
+  sections sits from 1.87 m above to 1.42 m below the road over
+  crests and dips, and 7.6 % of samples are more than 0.3 m off. The
+  curves are good for routing and plan position; anything resting on
+  the road has to take its height from the PSDL geometry
+  (`mm2_app::traffic::drape_ambient` does).
 
 ## Confidence
 

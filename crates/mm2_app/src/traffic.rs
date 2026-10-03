@@ -166,6 +166,14 @@
 //! designed presentation over authored positions and rules; the
 //! original's signal visuals and exact state semantics are unverified
 //! (UNK-12).
+//!
+//! [`drape_ambient`] rests every lane follower on the road surface.
+//! BAI lane curves are linear between authored road sections, and on
+//! SF's hills they leave the PSDL road by up to ±1.9 m — cars floated
+//! over dips and sank into crests. The drape probes the city's ground
+//! colliders under each car's corners every tick and takes height,
+//! pitch and camber from the road, heading and travel from the lane.
+//! The probe footprint and search window are designed values.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
@@ -182,7 +190,7 @@ use mm2_game::{
     Junctions, KnockPolicy, LaneAdvance, LaneCursor, LaneId, MAX_BANGER_ANGULAR_SPEED,
     MAX_BANGER_LINEAR_SPEED, NavGraph, NavIssue, NavOverrides, NavRng, ObjectIdentity, Player,
     Session, SessionAuthority, SessionConfig, SessionEntity, SessionPhase, SignalAspect,
-    SpawnDirective, SpawnDraw, SpawnPolicy, StuckPolicy, StuckWindow, WorldMode,
+    SpawnDirective, SpawnDraw, SpawnPolicy, StuckPolicy, StuckWindow, SurfaceMaterial, WorldMode,
     advance_lane_cursor, corridor_gap, draw_spawn, eligible_lanes, follow_speed,
     inside_junction_zone, junction_speed, junction_zone, plan_ambient, within_interest,
 };
@@ -1067,6 +1075,9 @@ pub fn drive_ambient(
             }
         }
         let previous = car.cursor.clone();
+        let was = previous
+            .sample(&traffic.graph)
+            .map_or(position.0, |s| Vec3::from(s.position));
         let step = if ds > 0.0 {
             advance_lane_cursor(
                 &traffic.graph,
@@ -1184,8 +1195,11 @@ pub fn drive_ambient(
         // lane follower only ever moves its own driven step — a
         // displacement wider than that is a teleport the aggregate
         // counters cannot see. Junction crossings must read zero.
+        // Measured lane-to-lane: the body sits where `drape_ambient`
+        // rested it, up to `DRAPE_RISE` off the lane, and that offset
+        // is not a step the car drove.
         let step_limit = car.speed.max(0.0) * dt * 2.0 + 1.0;
-        if pos.distance(position.0) > step_limit {
+        if pos.distance(was) > step_limit {
             traffic.jumps += 1;
         }
         position.0 = pos;
@@ -1209,6 +1223,155 @@ pub fn drive_ambient(
     }
     traffic.queued = queued;
     traffic.junction_held = junction_held;
+}
+
+/// How far above the lane curve the ground probe starts. BAI lane
+/// heights are interpolated between road sections, and on SF's hills
+/// they leave the PSDL road surface by up to ±1.9 m (measured on
+/// retail `city/sf`, 2026-10-03) — the window covers that with room
+/// to spare while staying under any deck a car could fit beneath.
+const DRAPE_RISE: f32 = 2.5;
+/// How far below the lane curve the ground probe still looks.
+const DRAPE_DROP: f32 = 2.5;
+/// Fraction of the class's authored half-length/half-width the four
+/// ground probes sit at — roughly where the tyres meet the road.
+/// Designed, not recovered.
+const DRAPE_FOOTPRINT: f32 = 0.8;
+
+/// Rest a lane pose on the ground under its four corners.
+///
+/// `half` is the probe footprint's (half-width, half-length) in the
+/// car's frame; `ground` answers the ground height under a world
+/// point, or `None` where there is none in reach. Returns the pose
+/// whose origin sits on the plane through the four ground points and
+/// whose up axis is that plane's normal — pitch and camber follow the
+/// road rather than the lane curve. `None` when any corner misses the
+/// ground or the fit tips past 60°: the caller keeps the lane pose,
+/// which is never worse than before draping existed.
+fn drape_pose(
+    pos: Vec3,
+    rot: Quat,
+    half: Vec2,
+    ground: impl Fn(Vec3) -> Option<f32>,
+) -> Option<(Vec3, Quat)> {
+    let corner = |x: f32, z: f32| {
+        let p = pos + rot * Vec3::new(x * half.x, 0.0, z * half.y);
+        ground(p).map(|y| Vec3::new(p.x, y, p.z))
+    };
+    // Bevy convention: -Z is forward, +X is right.
+    let fl = corner(-1.0, -1.0)?;
+    let fr = corner(1.0, -1.0)?;
+    let rl = corner(-1.0, 1.0)?;
+    let rr = corner(1.0, 1.0)?;
+    let forward = ((fl + fr) - (rl + rr)).normalize_or_zero();
+    let right = ((fr + rr) - (fl + rl)).normalize_or_zero();
+    let up = right.cross(forward).normalize_or_zero();
+    if up.y < 0.5 || forward == Vec3::ZERO {
+        return None;
+    }
+    let right = forward.cross(up);
+    let rot = Quat::from_mat3(&Mat3::from_cols(right, up, -forward));
+    Some(((fl + fr + rl + rr) * 0.25, rot))
+}
+
+/// Rest every lane-following ambient car on the road surface.
+///
+/// `drive_ambient` poses a car on its BAI lane curve, which is sampled
+/// linearly between authored road sections — over a crest or a dip
+/// the curve cuts above or below the PSDL road the player drives on,
+/// and the car floats or sinks by up to a couple of metres. This
+/// probes the city's ground colliders (only room colliders carry a
+/// [`SurfaceMaterial`], so other cars, props and bangers never catch
+/// the ray) under the car's four corners and rewrites the pose onto
+/// them: height, pitch and camber from the road, travel position and
+/// heading from the lane. The lane cursor is untouched, so the drape
+/// is recomputed from the lane every tick and never accumulates.
+///
+/// Runs right after `drive_ambient`, under the same phase/authority
+/// gate, so the solver and the renderer only ever see the draped
+/// pose. A car whose corners do not all find ground keeps its lane
+/// pose.
+#[allow(clippy::type_complexity)] // Bevy system: the ParamSet is the system's actual signature
+pub fn drape_ambient(
+    session: Res<Session>,
+    traffic: Option<Res<AmbientTraffic>>,
+    ground: Query<(), With<SurfaceMaterial>>,
+    mut world: ParamSet<(
+        SpatialQuery,
+        Query<(
+            Entity,
+            &AmbientCar,
+            &mut Position,
+            &mut Rotation,
+            &mut LinearVelocity,
+            &mut Transform,
+        )>,
+    )>,
+) {
+    let Some(traffic) = traffic else {
+        return;
+    };
+    if !session.authority_role().is_authority()
+        || !matches!(
+            session.phase(),
+            SessionPhase::Countdown | SessionPhase::Playing
+        )
+    {
+        return;
+    }
+    // The spatial query reads every collider's pose, ambient cars
+    // included, so the lane poses are read out first and the draped
+    // ones written back after.
+    let lane_poses: Vec<(Entity, Vec3, Quat, Vec2)> = world
+        .p1()
+        .iter()
+        .filter(|(_, car, ..)| car.drive == AmbientDrive::Lane)
+        .map(|(entity, car, position, rotation, ..)| {
+            let size = traffic
+                .roster
+                .entries
+                .get(car.class)
+                .and_then(|spec| spec.tuning.as_ref())
+                .map_or([2.0, 1.5, 5.0], |t| t.size);
+            let half = Vec2::new(size[0], size[2]) * 0.5 * DRAPE_FOOTPRINT;
+            (entity, position.0, rotation.0, half)
+        })
+        .collect();
+    let draped: Vec<(Entity, Vec3, Quat)> = {
+        let spatial = world.p0();
+        let filter = SpatialQueryFilter::default();
+        let ground_at = |p: Vec3| {
+            let origin = p + Vec3::Y * DRAPE_RISE;
+            spatial
+                .cast_ray_predicate(
+                    origin,
+                    Dir3::NEG_Y,
+                    DRAPE_RISE + DRAPE_DROP,
+                    true,
+                    &filter,
+                    &|e| ground.contains(e),
+                )
+                .map(|hit| origin.y - hit.distance)
+        };
+        lane_poses
+            .into_iter()
+            .filter_map(|(entity, pos, rot, half)| {
+                drape_pose(pos, rot, half, ground_at).map(|(pos, rot)| (entity, pos, rot))
+            })
+            .collect()
+    };
+    let mut cars = world.p1();
+    for (entity, pos, rot) in draped {
+        let Ok((_, car, mut position, mut rotation, mut velocity, mut transform)) =
+            cars.get_mut(entity)
+        else {
+            continue;
+        };
+        position.0 = pos;
+        rotation.0 = rot;
+        velocity.0 = rot * Vec3::NEG_Z * car.speed.max(0.0);
+        *transform = Transform::from_translation(pos).with_rotation(rot);
+    }
 }
 
 /// One pending handover decided off a contact edge, before any
@@ -1744,5 +1907,65 @@ mod tests {
     fn an_empty_issue_list_partitions_empty() {
         let (quiet, notable) = partition_nav_issues(&[]);
         assert!(quiet.is_empty() && notable.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod drape_tests {
+    //! `drape_pose` rests a lane pose on the ground under its corners:
+    //! height, pitch and camber come from the ground, heading from the
+    //! lane.
+
+    use bevy::prelude::*;
+
+    use super::drape_pose;
+
+    const HALF: Vec2 = Vec2::new(0.8, 2.0);
+
+    fn close(a: Vec3, b: Vec3) -> bool {
+        a.distance(b) < 1e-4
+    }
+
+    #[test]
+    fn a_lane_above_flat_ground_drops_onto_it_keeping_its_heading() {
+        let rot = Quat::from_rotation_y(0.7);
+        let (pos, draped) = drape_pose(Vec3::new(3.0, 1.2, -4.0), rot, HALF, |_| Some(0.0))
+            .expect("flat ground under every corner");
+        assert!(close(pos, Vec3::new(3.0, 0.0, -4.0)));
+        assert!(close(draped * Vec3::NEG_Z, rot * Vec3::NEG_Z));
+        assert!(close(draped * Vec3::Y, Vec3::Y));
+    }
+
+    #[test]
+    fn a_level_lane_on_a_hill_takes_its_pitch() {
+        // Ground rising 0.3 m per metre of travel toward -Z.
+        let (pos, rot) = drape_pose(Vec3::ZERO, Quat::IDENTITY, HALF, |p| Some(-0.3 * p.z))
+            .expect("the slope is under every corner");
+        assert!(close(pos, Vec3::ZERO));
+        let forward = rot * Vec3::NEG_Z;
+        assert!(close(forward, Vec3::new(0.0, 0.3, -1.0).normalize()));
+        assert!(close(rot * Vec3::X, Vec3::X));
+    }
+
+    #[test]
+    fn a_cambered_road_rolls_the_car_and_leaves_travel_level() {
+        // Ground rising 0.1 m per metre to the car's right.
+        let (_, rot) = drape_pose(Vec3::ZERO, Quat::IDENTITY, HALF, |p| Some(0.1 * p.x))
+            .expect("the camber is under every corner");
+        assert!(close(rot * Vec3::NEG_Z, Vec3::NEG_Z));
+        assert!(close(rot * Vec3::X, Vec3::new(1.0, 0.1, 0.0).normalize()));
+    }
+
+    #[test]
+    fn a_corner_without_ground_keeps_the_lane_pose() {
+        let ground = |p: Vec3| (p.x < 0.0 || p.z < 0.0).then_some(0.0);
+        assert!(drape_pose(Vec3::ZERO, Quat::IDENTITY, HALF, ground).is_none());
+    }
+
+    #[test]
+    fn ground_too_steep_to_stand_on_keeps_the_lane_pose() {
+        // 70° side slope: the fitted up axis leans past 60°.
+        let tan = 70f32.to_radians().tan();
+        assert!(drape_pose(Vec3::ZERO, Quat::IDENTITY, HALF, |p| Some(tan * p.x)).is_none());
     }
 }

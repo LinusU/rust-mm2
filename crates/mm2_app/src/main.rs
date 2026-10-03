@@ -1261,11 +1261,15 @@ fn main() {
             // reads the same contact edges the impact pipeline and the
             // bangers consume, then runs before the driver so a knocked
             // car is solver-owned from the tick it flips
-            // (knock → drive → maintain). The F10-B.7 signal update
-            // reads the junction controller the driver just advanced,
-            // so it runs last (knock → drive → maintain → signals).
+            // (knock → drive → maintain). The drape rests each lane
+            // pose on the road straight after the driver writes it, so
+            // the recycler and the next solver step see the draped
+            // pose. The F10-B.7 signal update reads the junction
+            // controller the driver just advanced, so it runs last
+            // (knock → drive → drape → maintain → signals).
             traffic::knock_ambient,
             traffic::drive_ambient,
+            traffic::drape_ambient,
             traffic::maintain_ambient,
             traffic::drive_signals,
         )
