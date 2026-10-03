@@ -284,10 +284,20 @@ own fixed step owes the wire exactly one more frame:
 `publish_snapshots` emits a single `Results`-phase snap at the
 transition's `(generation, tick)` — the session clock freezes in
 `Results`, so the debt is exactly one unpublished frame, never a
-resumed stream. A stalled-but-connected remote can hold the host
-in `Playing` — the host's results screen waits for its roster by
-design (implementation choice, not a verified retail behavior); a
-wire-seat stall/kick policy is lobby scope. A `Local` session
+resumed stream. A wire seat that cannot resolve is the deferral's
+failure mode, so the authority bounds the wait itself:
+`retire_stalled_wire_seats` mints a stalled seat's `TimedOut` — the
+deadline's own terminal edge — once its silence outlives the
+designed `WireStall` bounds (implementation choice, not a verified
+retail behavior): `live_silence` (10 s) for a seat that went live
+this generation then stopped — a networked client has no `Playing`
+pause (MP-6), so seconds of quiet is a dead process or link, not a
+pause — and `join_grace` (120 s from first observation) for a seat
+that never produced a generation-matching sample, which a wedged
+mid-load joiner is indistinguishable from until it streams. The
+retirement is a recorded result, not a kick: the roster slot,
+parked car and lobby link stay, and the minted tail replicates to
+every live client like any resolution. A `Local` session
 keeps UI-5's edge verbatim — `Remote` there is a simulated
 opponent's stamp, not a wire seat — and a wire seat spawning
 mid-race scores `Racing` on arrival through `RaceProgress::join`,

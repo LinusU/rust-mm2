@@ -220,6 +220,7 @@ fn host_app(vfs: Vfs, link: HostLink) -> App {
     let mut app = lobby_app(vfs);
     app.insert_resource(link)
         .init_resource::<netdrive::NetDriveReport>()
+        .init_resource::<netdrive::WireStall>()
         .add_systems(
             Update,
             (
@@ -229,6 +230,11 @@ fn host_app(vfs: Vfs, link: HostLink) -> App {
                 net::drive_host.after(session::drive_session),
                 netdrive::reconcile_remote_players.after(net::drive_host),
                 netdrive::apply_remote_inputs.after(net::drive_host),
+                // F25-B: the stalled-seat retirement — production
+                // ordering ahead of the publish.
+                netdrive::retire_stalled_wire_seats
+                    .after(net::drive_host)
+                    .before(netdrive::publish_snapshots),
                 // F25-B: the request drain is a `ResetVehicle` writer —
                 // same ordering edge as `reset_input`.
                 netdrive::apply_reset_requests
@@ -5918,6 +5924,160 @@ fn a_stranded_client_recovers_when_the_host_dies() {
             .is_some_and(|n| n.contains("lost the host")),
         "the notice names the cause: {:?}",
         lobby.notice
+    );
+}
+
+/// F25-B: the deferral's stall edge over the real loopback path — a
+/// wire seat whose input stream went live this generation and then
+/// died inside the deferral window is retired with the deadline's own
+/// `TimedOut` mint: the host's held `Playing` releases through the
+/// ordinary "every wire seat resolved" edge, the owed `Results` frame
+/// carries the seat's terminal tail, and the still-live client mints
+/// its own result off it. Without the watchdog this exact staging
+/// held `Playing` forever — the named gap iters 7–10 deferred.
+#[test]
+fn a_stalled_wire_seat_is_retired_and_releases_the_deferred_authority() {
+    let (_install, mut host, mut client, _host_seat, client_seat) = staged_deferral();
+    // Designed bounds short enough to wait out — production defaults
+    // are 10 s live / 120 s grace.
+    host.world_mut().insert_resource(netdrive::WireStall {
+        live_silence: Duration::from_millis(200),
+        join_grace: Duration::from_secs(60),
+    });
+    let generation = client.world().resource::<Session>().wire_generation();
+
+    // First half of the leg — a stream that stays live holds the
+    // deferral open past the silence bound: the retirement is about
+    // *stopped* streams, not unresolved seats. `seq` climbs because
+    // the mailbox's latest-wins store only refreshes `received` on an
+    // accepted newer sample.
+    let mut seq = 0u64;
+    let hold_until = std::time::Instant::now() + Duration::from_millis(450);
+    while std::time::Instant::now() < hold_until {
+        seq += 1;
+        client
+            .world()
+            .resource::<LobbyLink>()
+            .ctl()
+            .send_input(DriveInput {
+                generation,
+                seq,
+                throttle: 0,
+                brake: 0,
+                steer: 0,
+                handbrake: 0,
+            })
+            .unwrap();
+        host.update();
+        client.update();
+        thread::sleep(Duration::from_millis(15));
+    }
+    assert_eq!(
+        session_phase(&host),
+        SessionPhase::Playing,
+        "a stream that kept streaming held the deferral past the bound"
+    );
+    assert_eq!(
+        host.world()
+            .resource::<netdrive::NetDriveReport>()
+            .wire_seats_retired,
+        0,
+        "a live seat is never retired"
+    );
+
+    // The stream dies mid-deferral — the client keeps draining snaps
+    // and lobby traffic like a wedged sim would, only its input feed
+    // is gone. Silence past `live_silence` retires the seat: a
+    // `TimedOut` mint, not a despawn and not a kick.
+    spin(&mut host, |a| session_phase(a) == SessionPhase::Results);
+    assert_eq!(
+        host.world().resource::<mm2_game::RaceState>().phase,
+        mm2_game::RacePhase::Complete
+    );
+    assert!(
+        host.world()
+            .resource::<netdrive::NetDriveReport>()
+            .wire_seats_retired
+            >= 1,
+        "the stalled seat was retired, not departed"
+    );
+    assert_eq!(
+        host.world()
+            .resource::<netdrive::NetDriveReport>()
+            .despawned,
+        0,
+        "a retirement keeps the seat — the parked car stays"
+    );
+    {
+        let mut q = host
+            .world_mut()
+            .query_filtered::<&mm2_game::RaceProgress, With<RemotePick>>();
+        let progress = q.single(host.world()).expect("the wire seat");
+        assert!(
+            matches!(progress.state, mm2_game::ParticipantState::TimedOut { .. }),
+            "the retirement mints the deadline's own terminal edge: {:?}",
+            progress.state
+        );
+    }
+
+    // The owed `Results` frame delivers the seat's terminal tail —
+    // the client mints its own `TimedOut` row and resolves through
+    // the same replicated-edge path the deadline's legs exercise.
+    spin(&mut client, |a| session_phase(a) == SessionPhase::Results);
+    assert!(matches!(
+        client
+            .world()
+            .get::<mm2_game::RaceProgress>(client_seat)
+            .unwrap()
+            .state,
+        mm2_game::ParticipantState::TimedOut { .. }
+    ));
+    assert!(
+        client
+            .world()
+            .resource::<mm2_game::ResultLedger>()
+            .iter()
+            .any(|r| matches!(r.outcome, mm2_game::SessionOutcome::TimedOut { .. })),
+        "the wire's word minted the stalled seat's row client-side"
+    );
+}
+
+/// The never-live arm of the same watchdog: a wire seat that never
+/// produced a generation-matching sample — a joiner wedged mid-load
+/// is indistinguishable from one until it streams — gets the longer
+/// `join_grace` bound instead of `live_silence`, then retires the
+/// same way. A retirement is still a result, not a kick: the roster
+/// slot and link stay.
+#[test]
+fn a_never_live_wire_seat_is_retired_after_the_join_grace() {
+    let (_install, mut host, _client, _host_seat, _client_seat) = staged_deferral();
+    // The staged client's seat never streamed (its local car carries
+    // no `VehicleInput` for `send_drive_input` to send), so the
+    // mailbox slot is empty — the never-live arm. The watchdog ran
+    // under the production defaults through the whole staging above,
+    // so the seat's `first_seen` observation is already older than a
+    // test-sized grace: a grace under that elapsed observation
+    // retires it next pass. The `Playing` the staging asserted is
+    // the inside-grace half — the default 120 s never came close.
+    host.world_mut().insert_resource(netdrive::WireStall {
+        live_silence: Duration::from_secs(60),
+        join_grace: Duration::from_millis(1),
+    });
+
+    spin(&mut host, |a| session_phase(a) == SessionPhase::Results);
+    assert!(
+        host.world()
+            .resource::<netdrive::NetDriveReport>()
+            .wire_seats_retired
+            >= 1,
+        "past grace the never-live seat retires too"
+    );
+    assert_eq!(
+        host.world()
+            .resource::<netdrive::NetDriveReport>()
+            .despawned,
+        0,
+        "a retirement keeps the seat — the parked car stays"
     );
 }
 

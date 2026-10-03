@@ -97,8 +97,11 @@ fn leading_u64(s: &str) -> u64 {
     digits.parse().unwrap()
 }
 
-/// The `net=in<s>s/<a>a/<x>x,snap<s>s/<a>a/<x>x,rem<r>,req<s>s/<g>g/<d>d,rspn<n>,dsyn<n>,tsyn<n>,imp<s>s/<a>a/<d>d,rb<d>d/<r>r,race<a>a/<d>d,prog<a>a/<d>d`
+/// The `net=in<s>s/<a>a/<x>x,snap<s>s/<a>a/<x>x,rem<r>,req<s>s/<g>g/<d>d,rspn<n>,dsyn<n>,tsyn<n>,imp<s>s/<a>a/<d>d,rb<d>d/<r>r,race<a>a/<d>d,prog<a>a/<d>d,stall<n>`
 /// record field decoded — the wire counters the run actually moved.
+/// `stall` (F25-B wire-seat retirements) is authority-side only and
+/// reads 0 on a clean run — it is not parsed here since nothing in
+/// this suite stalls a seat.
 /// `snap<x>` counts pose frames the client dropped stale at push: a
 /// duplicated or reordered `Snap` at/behind the staged-or-applied
 /// watermark (F25-AC03 stale-state evidence). `dsyn` (v8 damage

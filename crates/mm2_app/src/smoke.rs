@@ -742,6 +742,7 @@ fn run_headless(
             app.insert_resource(*link)
                 .init_resource::<net::LobbyState>()
                 .init_resource::<crate::netdrive::NetDriveReport>()
+                .init_resource::<crate::netdrive::WireStall>()
                 .add_systems(
                     Update,
                     (
@@ -752,6 +753,12 @@ fn run_headless(
                         // contract as the windowed app.
                         crate::netdrive::reconcile_remote_players.after(net::drive_host),
                         crate::netdrive::apply_remote_inputs.after(net::drive_host),
+                        // F25-B: the stalled-seat retirement mints
+                        // ahead of the publish — same ordering
+                        // contract as the windowed app.
+                        crate::netdrive::retire_stalled_wire_seats
+                            .after(net::drive_host)
+                            .before(crate::netdrive::publish_snapshots),
                         // F25-B: `ResetRequest`s are `ResetVehicle`
                         // writers ahead of the apply — same ordering
                         // contract as the windowed app.
@@ -1044,13 +1051,15 @@ fn run_headless(
     // raceless sessions — the dev cruise publishes none), and `prog`,
     // the v14 per-seat progress tails a client applied/dropped (0 on
     // the authority, on raceless sessions and on seats the race does
-    // not track). Absent without a link's report, so a non-lobby
-    // record stays bit-identical.
+    // not track), and `stall`, the wire seats the authority retired
+    // for silence (0 everywhere but a hosted run with a dead peer).
+    // Absent without a link's report, so a non-lobby record stays
+    // bit-identical.
     let net_detail = world_ecs
         .get_resource::<crate::netdrive::NetDriveReport>()
         .map(|r| {
             format!(
-                " net=in{}s/{}a/{}x,snap{}s/{}a/{}x,rem{},req{}s/{}g/{}d,rspn{:.0},dsyn{},tsyn{},imp{}s/{}a/{}d,rb{}d/{}r,race{}a/{}d,prog{}a/{}d",
+                " net=in{}s/{}a/{}x,snap{}s/{}a/{}x,rem{},req{}s/{}g/{}d,rspn{:.0},dsyn{},tsyn{},imp{}s/{}a/{}d,rb{}d/{}r,race{}a/{}d,prog{}a/{}d,stall{}",
                 r.inputs_sent,
                 r.inputs_applied,
                 r.inputs_staled,
@@ -1072,7 +1081,8 @@ fn run_headless(
                 r.race_applied,
                 r.race_dropped,
                 r.progress_applied,
-                r.progress_dropped
+                r.progress_dropped,
+                r.wire_seats_retired
             )
         })
         .unwrap_or_default();

@@ -57,7 +57,17 @@
 //!   `Remote` participant resolves or departs (see `advance_race`) —
 //!   and this publisher then owes the wire exactly one `Results`-phase
 //!   frame at the frozen transition tick, the terminal rows' only
-//!   carrier. Two receive-side edges keep that delivery from being
+//!   carrier. A seat that cannot resolve is the deferral's failure
+//!   mode, so [`retire_stalled_wire_seats`] bounds the wait: a wire
+//!   seat whose input stream went silent while `Playing` — provably
+//!   dead, since MP-6 leaves a networked client no `Playing` pause —
+//!   is retired with the deadline's own `TimedOut` mint after
+//!   [`WireStall`]'s designed bounds (a short silence for a seat that
+//!   went live this generation, a long grace for one that never did,
+//!   which a wedged mid-load joiner is indistinguishable from until it
+//!   streams). Retirement is a recorded result, not a kick — the
+//!   roster slot, parked car and lobby link stay. Two receive-side
+//!   edges keep that delivery from being
 //!   swallowed: staged state holds while the session is `Loading`
 //!   (its seats and `RaceState` do not exist yet, so a consumed frame
 //!   would skip every row), and a local edge recorded before the
@@ -819,6 +829,11 @@ pub struct NetDriveReport {
     /// already recorded (a non-conforming authority rewinding a
     /// lifecycle is refused, not believed).
     pub progress_dropped: u64,
+    /// Wire seats the authority retired for silence (host side, F25-B)
+    /// — [`retire_stalled_wire_seats`] mints each one's `TimedOut`
+    /// terminal edge, so the count is results the deferral no longer
+    /// waits on, not kicks.
+    pub wire_seats_retired: u64,
 }
 
 /// A rotation off the wire, sanitized — a malformed-quaternion guard so
@@ -1856,6 +1871,154 @@ pub fn apply_reset_requests(
         });
         grants.last.insert(wire, now);
         report.requests_granted += 1;
+    }
+}
+
+/// Designed bounds on a hosted session's patience with a wire seat that
+/// stops producing inputs (F25-B). MP-6 means a networked client has no
+/// legitimate `Playing` pause — `send_drive_input` streams every update
+/// its session plays — so silence while `Playing` is a stalled process
+/// or link, never a consenting pause. Both bounds are designed, not
+/// original rules: the retail wire protocol is unrecovered, and the
+/// deferral they bound is ours.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct WireStall {
+    /// How long a seat that went *live* this generation — a
+    /// generation-matching mailbox sample exists — may stay silent
+    /// before the authority retires it. Generous past a transport
+    /// stall: the mailbox's [`INPUT_STALE`] coast window is 250 ms,
+    /// and a stream quiet for seconds is dead, not delayed.
+    pub live_silence: Duration,
+    /// How long a seat that never went live this generation may stay
+    /// unresolved — a joiner wedged mid-load, or a connected client
+    /// parked somewhere it streams nothing. Much longer than
+    /// [`Self::live_silence`]: the mid-race-join semantics want a
+    /// slow-but-real load to arrive, so this is the last-resort bound
+    /// that keeps one wedged joiner from holding every results screen,
+    /// not the normal path.
+    pub join_grace: Duration,
+}
+
+impl Default for WireStall {
+    fn default() -> Self {
+        Self {
+            live_silence: Duration::from_secs(10),
+            join_grace: Duration::from_secs(120),
+        }
+    }
+}
+
+/// Per-generation ledger for [`retire_stalled_wire_seats`]: the instant
+/// each unresolved wire seat was first observed without a live
+/// this-generation mailbox sample — the clock [`WireStall::join_grace`]
+/// measures against. Scoped to the wire generation like
+/// [`RequestGrants`]: a `Cancel`/`Start` cycle's new session neither
+/// inherits the last one's silences nor lets a recycled wire id keep
+/// its predecessor's clock. `pub` because a public system's `Local`
+/// shows in its signature.
+#[derive(Default)]
+pub struct StallClock {
+    generation: u64,
+    first_seen: BTreeMap<u16, Instant>,
+}
+
+/// Host-side (F25-B): retire a wire seat that stopped producing inputs,
+/// minting its `TimedOut` terminal edge exactly like the race deadline
+/// does, so `advance_race`'s deferral ends through the same "every wire
+/// seat resolved" edge and the seat's replicated tail lands on every
+/// live client. A retirement is a recorded result, not a kick — the
+/// roster slot, the parked car and the lobby link all stay.
+///
+/// Two silences count, measured on [`WireStall`]'s designed bounds:
+///
+/// - *live then silent* — the slot holds a sample stamped with the
+///   running wire generation whose `received` aged past
+///   `live_silence`: the seat provably raced this session, so quiet
+///   can only be death. The mailbox's own arrival stamp is the clock,
+///   so silence that started before the host finished counts from its
+///   true start, not from the deferral.
+/// - *never live* — no generation-matching sample ever landed: a
+///   joiner wedged mid-load or a connected client that never entered
+///   the session. These get `join_grace` from first observation —
+///   deliberately generous, since a legitimately slow load looks the
+///   same until it streams.
+///
+/// A seat that streams again before either bound is never retired —
+/// the live check runs first, so a resumed feed drops a seat out of
+/// the never-live arm entirely. Runs ahead of [`publish_snapshots`] so
+/// a retirement leaves on the next `Snap` like any minted resolution.
+// The seat scan genuinely needs the link's mailbox, the session's mint
+// and phase, the race's clock, the result sink, the participant query,
+// the bound resource, the first-seen ledger and the report.
+#[allow(clippy::too_many_arguments)]
+pub fn retire_stalled_wire_seats(
+    host: Res<HostLink>,
+    mut session: ResMut<Session>,
+    race: Option<Res<RaceState>>,
+    stall: Res<WireStall>,
+    mut ledger: ResMut<ResultLedger>,
+    mut participants: Query<(&Player, &NetPlayer, &mut RaceProgress)>,
+    mut clock: Local<StallClock>,
+    mut report: ResMut<NetDriveReport>,
+) {
+    let Some(race) = race else { return };
+    if !session.is_playing() || race.is_stale(session.generation()) {
+        return;
+    }
+    let generation = session.wire_generation();
+    if clock.generation != generation {
+        clock.generation = generation;
+        clock.first_seen.clear();
+    }
+    let inputs = host.remote_inputs();
+    let now = Instant::now();
+    for (player, wire, mut progress) in &mut participants {
+        // `control == Remote` is the deferral's own wire-seat predicate
+        // — a hosted app's `Local` seat carries `NetPlayer(0)`, and a
+        // `Local`-authority session's simulated opponents stamp
+        // `Remote` but never a wire id. Both checks keep this on the
+        // seats the wire can actually stall.
+        if player.control != PlayerControl::Remote
+            || !matches!(
+                progress.state,
+                ParticipantState::AwaitingStart | ParticipantState::Racing
+            )
+        {
+            continue;
+        }
+        let stamped = inputs.latest(wire.0);
+        let live = stamped
+            .as_ref()
+            .is_some_and(|s| s.input.generation == generation);
+        let silent_past_bound = if live {
+            stamped.expect("live implies a sample").received.elapsed() > stall.live_silence
+        } else {
+            now.duration_since(*clock.first_seen.entry(wire.0).or_insert(now)) > stall.join_grace
+        };
+        if !silent_past_bound {
+            continue;
+        }
+        // The deadline's own mint: `TimedOut` is the designed DNF a
+        // seat that stopped driving earns — its `race_ticks` is the
+        // clock when the authority gave up on it, which is also what
+        // the replicated tail reports on every client.
+        let id = session.mint_result_id(player.id);
+        let result = SessionResult {
+            id: id.clone(),
+            tick: session.tick(),
+            outcome: SessionOutcome::TimedOut {
+                race_ticks: race.clock,
+            },
+        };
+        if let Err(dup) = ledger.record(result) {
+            warn!(duplicate = %dup, "race result rejected");
+        }
+        progress.state = ParticipantState::TimedOut {
+            race_ticks: race.clock,
+            result: id,
+        };
+        clock.first_seen.remove(&wire.0);
+        report.wire_seats_retired += 1;
     }
 }
 

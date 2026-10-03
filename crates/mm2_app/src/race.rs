@@ -469,9 +469,12 @@ pub fn advance_race(
             // transition's own fixed step is the terminal rows' mint,
             // so `publish_snapshots` owes the wire exactly one
             // `Results`-phase frame at the frozen transition tick. A
-            // stalled-but-connected remote can hold the session here —
-            // the host's results screen waits for its roster by design;
-            // a wire-seat stall/kick policy is lobby scope. A `Local`
+            // wire seat that goes silent while `Playing` does not hold
+            // this forever: `netdrive::retire_stalled_wire_seats` mints
+            // its `TimedOut` past `WireStall`'s designed bounds, which
+            // lands here as an ordinary resolution — the lobby link,
+            // roster slot and parked car all stay (a retirement, not a
+            // kick). A `Local`
             // session keeps UI-5's edge exactly: `Remote` there is a
             // simulated opponent's stamp, not a wire seat.
             let hosted = session

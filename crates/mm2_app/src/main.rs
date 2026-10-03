@@ -1737,6 +1737,7 @@ fn main() {
         app.insert_resource(link)
             .init_resource::<net::LobbyState>()
             .init_resource::<netdrive::NetDriveReport>()
+            .init_resource::<netdrive::WireStall>()
             .add_systems(
                 Update,
                 (
@@ -1755,6 +1756,13 @@ fn main() {
                     // bump never trails the teleported pose.
                     netdrive::reconcile_remote_players.after(net::drive_host),
                     netdrive::apply_remote_inputs.after(net::drive_host),
+                    // F25-B: a wire seat whose input stream stalled is
+                    // retired — its `TimedOut` mint releases the
+                    // deferral and rides the next `Snap` like any
+                    // resolution.
+                    netdrive::retire_stalled_wire_seats
+                        .after(net::drive_host)
+                        .before(netdrive::publish_snapshots),
                     // F25-B: driver `ResetRequest`s are `ResetVehicle`
                     // writers — ahead of the apply like every other so
                     // the granted reset's pose and epoch bump leave on
