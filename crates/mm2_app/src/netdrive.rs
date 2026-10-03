@@ -2003,8 +2003,10 @@ fn apply_snap_frame(
     // the queued impact rows still drain: events outlive the pose
     // frame that carried them. The frame's `generation` is the wire
     // namespace — a different authority's numbering can sit behind the
-    // local id counter.
-    if snap.generation != session.wire_generation() {
+    // local id counter — and `0` is never a live session's name
+    // (`begin_generation` refuses the at-rest value), so it drops like
+    // any foreign frame even while `wire_generation()` still reads 0.
+    if snap.generation == 0 || snap.generation != session.wire_generation() {
         return;
     }
     let stale = snaps
@@ -2280,7 +2282,10 @@ fn drain_pending_impacts(
         })
         .collect();
     while let Some((row_gen, row)) = snaps.pending.pop_front() {
-        if row_gen != generation {
+        // `0` is never a live session's name either — the at-rest
+        // `wire_generation` of a never-begun session must not pass a
+        // non-conforming peer's gen-0 rows.
+        if row_gen == 0 || row_gen != generation {
             report.impacts_dropped += 1;
             continue;
         }
@@ -3050,5 +3055,139 @@ mod tests {
         assert_eq!(snaps.latest.as_ref().unwrap().generation, 1);
         assert_eq!(snaps.stale, 1);
         assert_eq!(snaps.pending.len(), 1, "the new stream's rows queue");
+    }
+
+    /// The accept-to-begin gap (F25-B): a parked `Start`'s new stream
+    /// can queue impact rows while the outgoing session still tears
+    /// down — `apply_snapshots` runs every `Update`, gated on the
+    /// not-yet-adopted wire generation. Foreign-generation rows
+    /// drain-drop counted rather than landing on the dying session or
+    /// lingering past the begin; a row stamped `0` drops the same way
+    /// — the at-rest value is never a session's name, on the frame
+    /// gate and the row gate alike.
+    #[test]
+    fn foreign_generation_impact_rows_drain_drop_at_the_session_gate() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(Session::new())
+            .init_resource::<RemoteSnaps>()
+            .init_resource::<NetDriveReport>()
+            .init_resource::<crate::texel_fx::TexelDamageReport>()
+            .add_message::<RemoteImpact>()
+            .add_message::<BangerStateChanged>()
+            .init_resource::<BangerPool>()
+            .add_systems(Update, apply_snapshots);
+        // A remote seat for the drain to resolve — the required half
+        // of the `SnapTargetRow` tuple, nothing more.
+        app.world_mut().spawn((
+            NetPlayer(7),
+            Player {
+                id: mm2_game::PlayerId(9),
+                control: PlayerControl::Remote,
+            },
+            ResetEpoch(0),
+            Position(Vec3::ZERO),
+            Rotation(Quat::IDENTITY),
+            LinearVelocity(Vec3::ZERO),
+            AngularVelocity(Vec3::ZERO),
+        ));
+
+        // At rest (`wire_generation() == 0`) gen-0 wire traffic is not
+        // "this session's" — the frame and its rows drop.
+        let mut row = snap_impact(1);
+        row.seat = 7;
+        app.world_mut().resource_mut::<RemoteSnaps>().push(
+            0,
+            10,
+            Vec::new(),
+            Vec::new(),
+            vec![row],
+        );
+        app.update();
+        let report = app.world().resource::<NetDriveReport>();
+        assert_eq!(report.snaps_applied, 0, "a gen-0 frame is foreign");
+        assert_eq!(report.impacts_dropped, 1);
+        assert_eq!(report.impacts_applied, 0);
+
+        // A live session adopts wire generation 1 — its own rows land.
+        {
+            let mut session = app.world_mut().resource_mut::<Session>();
+            session
+                .begin_generation(
+                    mm2_game::SessionConfig {
+                        authority: mm2_game::SessionAuthority::Remote,
+                        ..mm2_game::SessionConfig::default()
+                    },
+                    1,
+                )
+                .unwrap();
+            session.transition(SessionPhase::Ready).unwrap();
+            session.transition(SessionPhase::Playing).unwrap();
+        }
+        app.world_mut().resource_mut::<RemoteSnaps>().push(
+            1,
+            10,
+            Vec::new(),
+            Vec::new(),
+            vec![row],
+        );
+        app.update();
+        let report = app.world().resource::<NetDriveReport>();
+        assert_eq!(report.impacts_applied, 1, "the seat/gen-matching row lands");
+        assert_eq!(report.snaps_applied, 1);
+
+        // The boundary: `start()` resets the inbox on accept while the
+        // parked session tears down — rows the *next* stream queues in
+        // the gap are stamped with its generation, so the drain reads
+        // them as foreign against the not-yet-adopted wire value and
+        // drops them counted rather than holding them for the begin.
+        {
+            let mut gap_row = snap_impact(2);
+            gap_row.seat = 7;
+            let mut snaps = app.world_mut().resource_mut::<RemoteSnaps>();
+            snaps.reset();
+            snaps.push(2, 5, Vec::new(), Vec::new(), vec![gap_row]);
+        }
+        {
+            let mut session = app.world_mut().resource_mut::<Session>();
+            session.transition(SessionPhase::Unloading).unwrap();
+            session.transition(SessionPhase::Menu).unwrap();
+        }
+        app.update();
+        let report = app.world().resource::<NetDriveReport>();
+        assert_eq!(
+            report.impacts_dropped, 2,
+            "the new stream's queued row drains out as foreign"
+        );
+        assert_eq!(report.impacts_applied, 1);
+        assert_eq!(report.snaps_applied, 1, "its frame is foreign too");
+        assert!(
+            app.world().resource::<RemoteSnaps>().pending.is_empty(),
+            "foreign rows drop, they do not linger past the begin"
+        );
+
+        // The begin adopts the new generation — the stream's rows then
+        // land like the first session's did.
+        {
+            let mut session = app.world_mut().resource_mut::<Session>();
+            session
+                .begin_generation(
+                    mm2_game::SessionConfig {
+                        authority: mm2_game::SessionAuthority::Remote,
+                        ..mm2_game::SessionConfig::default()
+                    },
+                    2,
+                )
+                .unwrap();
+        }
+        let mut row = snap_impact(3);
+        row.seat = 7;
+        app.world_mut()
+            .resource_mut::<RemoteSnaps>()
+            .push(2, 5, Vec::new(), Vec::new(), vec![row]);
+        app.update();
+        let report = app.world().resource::<NetDriveReport>();
+        assert_eq!(report.impacts_applied, 2);
+        assert_eq!(report.snaps_applied, 2);
     }
 }

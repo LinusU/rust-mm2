@@ -559,7 +559,30 @@ accept, not on begin — impact rows the new stream queues while a
 parked session tears down belong to it) and the pump's terminal
 `Closed`. The reset folds still-queued impact rows into `dropped`
 rather than losing the evidence, and leaves the `stale`/`dropped`
-counters themselves intact for the report fold.
+counters themselves intact for the report fold. "Belong to it" means
+the accept-time reset does not wipe them — the *apply* gate still
+judges each row against the live `wire_generation`, so rows queued in
+the accept-to-begin gap drain-drop counted as foreign (presentation
+events do not carry across a session begin); the new stream's rows
+land only once `begin_generation` has adopted its mint.
+
+Generation `0` is not a session's name. A conforming lobby mints from
+`1` (`generation.saturating_add(1)` runs *before* the `Start`
+broadcast), and `0` is the at-rest `wire_generation` of a never-begun
+`Session` — the value every wire gate compares against.
+`Session::begin_generation` therefore refuses `0`
+(`SessionError::InvalidGeneration`) on both the immediate and the
+parked-start paths: a `Start{generation: 0}` is wire-legal — the field
+is a plain `u64` — but no conforming peer can produce it, so it reads
+as a refused session (notice, clean `Leave`, nonzero exit) rather than
+adopting the at-rest value and passing gen-0 traffic through gates
+meant for live sessions. The wire-side gates drop gen-0 traffic
+outright for the same reason: `apply_snap_frame` treats a
+`Snap{generation: 0}` as foreign even while `wire_generation` still
+reads `0`, and `drain_pending_impacts` drops a gen-0 row counted
+whatever the session value. `mm2-join` needs no floor — it reports
+the wire verbatim (`event=started generation=0` would be the honest
+record of a rogue mint) and never adopts a generation.
 
 ## Impairment harness (F25-B)
 

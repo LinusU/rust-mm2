@@ -151,6 +151,27 @@ fn a_u64_max_generation_never_overflows_or_regresses() {
 }
 
 #[test]
+fn a_zero_wire_generation_is_refused() {
+    // `0` is the at-rest value of a never-begun `Session` — a
+    // conforming lobby mints from `1`, so `Start{generation: 0}` is a
+    // non-conforming peer's mint, not a namespace to adopt. Refusing
+    // must leave everything untouched: the phase stays `Menu`, no
+    // config is stored, and both counters keep their at-rest value so
+    // `wire_generation() == 0` still means "no session has begun".
+    let mut s = Session::new();
+    let err = s.begin_generation(SessionConfig::default(), 0).unwrap_err();
+    assert!(matches!(err, SessionError::InvalidGeneration(0)));
+    assert_eq!(*s.phase(), SessionPhase::Menu);
+    assert_eq!(s.generation(), 0);
+    assert_eq!(s.wire_generation(), 0);
+    assert!(s.config().is_none());
+    // A legal mint still begins after the refused one.
+    s.begin_generation(SessionConfig::default(), 1).unwrap();
+    assert_eq!(s.wire_generation(), 1);
+    assert_eq!(s.generation(), 1);
+}
+
+#[test]
 fn config_validation_rejects_bad_fields() {
     let mut s = Session::new();
     let bad_density = SessionConfig {

@@ -92,6 +92,11 @@ pub enum SessionError {
         /// Requested phase name.
         to: &'static str,
     },
+    /// `begin_generation` was handed a wire value that cannot name a
+    /// session — `0` is the at-rest generation of a never-begun
+    /// `Session`, and a conforming lobby mints from `1`, so `0` marks
+    /// a non-conforming peer rather than a namespace to adopt.
+    InvalidGeneration(u64),
     /// `begin` was handed an invalid configuration.
     Config(ConfigError),
 }
@@ -102,6 +107,7 @@ impl std::fmt::Display for SessionError {
             Self::IllegalTransition { from, to } => {
                 write!(f, "illegal session transition {from} → {to}")
             }
+            Self::InvalidGeneration(g) => write!(f, "invalid session generation {g}"),
             Self::Config(e) => write!(f, "invalid session config: {e}"),
         }
     }
@@ -110,7 +116,7 @@ impl std::fmt::Display for SessionError {
 impl std::error::Error for SessionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::IllegalTransition { .. } => None,
+            Self::IllegalTransition { .. } | Self::InvalidGeneration(_) => None,
             Self::Config(e) => Some(e),
         }
     }
@@ -182,7 +188,10 @@ impl Session {
     /// numbering, so a `Start`'s minted value can sit behind the local
     /// counter, which must keep climbing for `is_stale`/
     /// [`ObjectId`]/[`ResultId`] detection to never alias two sessions
-    /// that happen to share a wire number.
+    /// that happen to share a wire number. A begun session's wire
+    /// generation is never `0` — `begin_generation` refuses the
+    /// at-rest value — so `0` unambiguously means *no* session has
+    /// begun on this process.
     pub fn wire_generation(&self) -> u64 {
         self.wire_generation
     }
@@ -276,11 +285,23 @@ impl Session {
     /// the ceiling pins the counter there instead of overflowing the
     /// next bump (dev `overflow-checks` panic) or wrapping it into a
     /// regression.
+    ///
+    /// Generation `0` is refused: it is the at-rest value of a
+    /// never-begun `Session`, and a conforming `mm2_net` lobby mints
+    /// from `1` (`generation.saturating_add(1)` before the `Start`
+    /// broadcast), so `0` on the wire marks a non-conforming peer,
+    /// not a session. Adopting it would also leave
+    /// [`wire_generation`](Self::wire_generation) indistinguishable
+    /// from "no session has ever begun" — the value every wire gate
+    /// compares against.
     pub fn begin_generation(
         &mut self,
         config: SessionConfig,
         generation: u64,
     ) -> Result<(), SessionError> {
+        if generation == 0 {
+            return Err(SessionError::InvalidGeneration(0));
+        }
         self.begin_at(
             config,
             generation.max(self.generation.saturating_add(1)),

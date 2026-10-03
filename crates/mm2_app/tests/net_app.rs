@@ -35,8 +35,9 @@ use mm2_game::{
     SurfaceState, WorldMode, advance_session_tick, despawn_session_entities,
 };
 use mm2_net::{
-    Client, DriveInput, Host, HostConfig, HostEvent, Impair, ImpairProxy, LateJoin, LeaveCause,
-    LinkDir, Message, SnapEntry, SnapImpact, VehiclePick, hello,
+    Client, Conn, DriveInput, Host, HostConfig, HostEvent, Impair, ImpairProxy, LateJoin,
+    LeaveCause, LinkDir, Message, SnapEntry, SnapImpact, VehiclePick, accept_hello, hello,
+    listen_loopback,
 };
 use mm2_vehicle::{ResetVehicle, Teleported, VehicleConfig, VehicleInput};
 use support::{Proc, WAIT, listening, mount};
@@ -1350,6 +1351,75 @@ fn a_start_resets_the_stream_without_a_close() {
     );
     host_a.shutdown();
     host_b.shutdown();
+}
+
+/// The mint's floor: a `Start` naming generation `0` is a
+/// non-conforming peer, not a session — a conforming `mm2_net` host
+/// mints from `1`, and `0` is the at-rest `wire_generation` every
+/// gate reads as "no session has begun". `begin_generation` refuses
+/// the adoption, so the boundary rides the same refusal path an
+/// unacceptable session takes: notice, clean `Leave`, nonzero exit —
+/// and the session never begins. The leg drives a raw socket: the
+/// field is wire-legal (a plain `u64`), conforming hosts just never
+/// send it, so a real `Host` cannot mint the bad value for the leg.
+#[test]
+fn a_zero_generation_start_is_refused() {
+    let install = tempfile::tempdir().unwrap();
+    let vfs = mount(install.path());
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let ad = net::advertise(&dev_cruise()).unwrap();
+    let listener = listen_loopback().unwrap();
+    let addr = listener.local_addr().unwrap();
+    // The rogue host: handshake, `Welcome`, then a `Start` minted 0.
+    // The refusal ends in the client's `Leave`; read it, then close.
+    let rogue = thread::spawn(move || {
+        let mut conn = Conn::accept(&listener).unwrap();
+        accept_hello(&mut conn, fp).unwrap();
+        conn.send(&Message::Welcome { player_id: 1 }).unwrap();
+        conn.send(&Message::Start {
+            generation: 0,
+            session: ad,
+            host_pick: None,
+        })
+        .unwrap();
+        match conn.recv() {
+            Ok(Message::Leave) => {}
+            other => panic!("expected the client's Leave, got {other:?}"),
+        }
+    });
+    let link = LobbyLink::join(
+        addr,
+        &hello("net-app-test".to_string(), "mallory".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .unwrap();
+    let mut app = bridge_app(vfs, link);
+
+    let exit = until_exit(&mut app);
+
+    assert!(
+        matches!(exit, AppExit::Error(code) if code.get() == 1),
+        "a gen-0 Start is a refused session, got {exit:?}"
+    );
+    let session = app.world().resource::<Session>();
+    assert_eq!(session.phase(), &SessionPhase::Menu);
+    assert_eq!(
+        session.wire_generation(),
+        0,
+        "the at-rest mint was never adopted"
+    );
+    assert!(session.config().is_none(), "no session config was stored");
+    let lobby = app.world().resource::<LobbyState>();
+    assert!(
+        lobby
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.contains("refused")),
+        "the notice names the refusal: {:?}",
+        lobby.notice
+    );
+    rogue.join().unwrap();
 }
 
 /// The end-to-end in-process leg: a real `headless_lobby` app — full
