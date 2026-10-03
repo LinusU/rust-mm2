@@ -290,6 +290,51 @@ fn record_world(session: &Session, lobby_mode: bool, launch_world: &str) -> Stri
     }
 }
 
+/// The joined-lobby client wiring (`headless_lobby`, F24-B.7 + F25):
+/// the lobby drain settles after the session driver, the remote spawn
+/// reconcile after the drain, and the snap apply after *both* — the
+/// same ordering contract the windowed app schedules in `main`. The
+/// apply runs after the reconcile so the update's `NetPlayer` stamps
+/// and remote spawns — deferred `Commands` inserts — are visible the
+/// same update they land (`drive_lobby` has no deferred params, so the
+/// drain edge alone inserts no `apply_deferred` between them): a snap
+/// held through the session load then applies whole rather than
+/// skipping the just-stamped local seat's rows — its v14 terminal edge
+/// included, whose `Playing → Results` release could never re-fire.
+fn add_lobby_client_systems(app: &mut App) {
+    app.init_resource::<net::LobbyState>()
+        .init_resource::<crate::netdrive::RemoteSnaps>()
+        .init_resource::<crate::netdrive::InputSeq>()
+        .init_resource::<crate::netdrive::NetDriveReport>()
+        .add_systems(
+            Update,
+            (
+                net::lobby_input,
+                // The bridge settles after the session driver — a
+                // `Cancel` quit that reached `Menu` this frame can
+                // take a queued exit (or a parked `Start` begin)
+                // the same update.
+                net::drive_lobby.after(session::drive_session),
+                // F25-A: remote spawn reconcile, snapshot
+                // application + lerp, and the input stream —
+                // same ordering contract as the windowed app.
+                crate::netdrive::reconcile_remote_players.after(net::drive_lobby),
+                crate::netdrive::apply_snapshots
+                    .after(net::drive_lobby)
+                    .after(crate::netdrive::reconcile_remote_players),
+                crate::netdrive::drive_remote_lerp,
+                // F25-B: `R` asks the authority under a
+                // predicted session — same wiring as the app.
+                crate::netdrive::send_reset_request,
+                crate::netdrive::send_drive_input
+                    .after(crate::input::vehicle_input)
+                    .after(crate::input::parked_drive)
+                    .after(scripted::scripted_drive)
+                    .after(crate::sequence::sequence_drive),
+            ),
+        );
+}
+
 fn run_headless(
     source: RunSource<'_>,
     vfs: Vfs,
@@ -690,36 +735,8 @@ fn run_headless(
     }
     match source {
         RunSource::Lobby(link) => {
-            app.insert_resource(*link)
-                .init_resource::<net::LobbyState>()
-                .init_resource::<crate::netdrive::RemoteSnaps>()
-                .init_resource::<crate::netdrive::InputSeq>()
-                .init_resource::<crate::netdrive::NetDriveReport>()
-                .add_systems(
-                    Update,
-                    (
-                        net::lobby_input,
-                        // The bridge settles after the session driver — a
-                        // `Cancel` quit that reached `Menu` this frame can
-                        // take a queued exit (or a parked `Start` begin)
-                        // the same update.
-                        net::drive_lobby.after(session::drive_session),
-                        // F25-A: remote spawn reconcile, snapshot
-                        // application + lerp, and the input stream —
-                        // same ordering contract as the windowed app.
-                        crate::netdrive::reconcile_remote_players.after(net::drive_lobby),
-                        crate::netdrive::apply_snapshots.after(net::drive_lobby),
-                        crate::netdrive::drive_remote_lerp,
-                        // F25-B: `R` asks the authority under a
-                        // predicted session — same wiring as the app.
-                        crate::netdrive::send_reset_request,
-                        crate::netdrive::send_drive_input
-                            .after(crate::input::vehicle_input)
-                            .after(crate::input::parked_drive)
-                            .after(scripted::scripted_drive)
-                            .after(crate::sequence::sequence_drive),
-                    ),
-                );
+            app.insert_resource(*link);
+            add_lobby_client_systems(&mut app);
         }
         RunSource::Host(link) => {
             app.insert_resource(*link)
@@ -2265,5 +2282,62 @@ mod tests {
         // than risking a stale pass.
         assert!(clear_stale_screenshot(&dir).is_err());
         std::fs::remove_dir(&dir).unwrap();
+    }
+
+    /// `mm2 --join --headless` (`run_headless`'s `RunSource::Lobby`
+    /// arm) must order `apply_snapshots` after
+    /// `reconcile_remote_players` exactly like the windowed app and
+    /// `net_app`'s `bridge_app` do: the reconcile's `NetPlayer` stamp
+    /// on the local seat is a deferred `Commands` insert and
+    /// `drive_lobby` has no deferred params, so without the edge Bevy
+    /// inserts no `apply_deferred` between the two — a snap held
+    /// through `Loading` could apply on the first live update with the
+    /// stamp invisible, skipping the seat's replicated terminal edge
+    /// and stranding a resolved client in `Playing` forever (the
+    /// iter-8 review's missed-scheduling finding). The schedule graph
+    /// records the ordering edge eagerly at `add_systems`, so the
+    /// assert reads the production wiring without running the app.
+    #[test]
+    fn the_headless_join_orders_the_apply_after_the_reconcile() {
+        use bevy::ecs::schedule::graph::Direction;
+        use bevy::ecs::schedule::{IntoSystemSet, NodeId, Schedules, SystemSet};
+
+        let mut app = App::new();
+        add_lobby_client_systems(&mut app);
+
+        let schedules = app.world().resource::<Schedules>();
+        let graph = schedules
+            .get(Update)
+            .expect("the Update schedule exists")
+            .graph();
+        // `.after(system)` lands on the system's `SystemTypeSet` node,
+        // so the dependency edge is `Set(reconcile) → System(apply)`.
+        // Both sides resolve through `system_sets` — `System::name` is
+        // a placeholder without bevy's `debug` feature.
+        let reconcile_set = graph
+            .system_sets
+            .get_key(
+                crate::netdrive::reconcile_remote_players
+                    .into_system_set()
+                    .intern(),
+            )
+            .expect("reconcile_remote_players' type set is registered");
+        let apply_set = graph
+            .system_sets
+            .get_key(crate::netdrive::apply_snapshots.into_system_set().intern())
+            .expect("apply_snapshots' type set is registered");
+        let apply = graph
+            .hierarchy()
+            .graph()
+            .neighbors_directed(NodeId::Set(apply_set), Direction::Outgoing)
+            .find_map(|node| node.as_system())
+            .expect("apply_snapshots is scheduled");
+        assert!(
+            graph
+                .dependency()
+                .graph()
+                .contains_edge(NodeId::Set(reconcile_set), NodeId::System(apply)),
+            "apply_snapshots is not ordered after reconcile_remote_players"
+        );
     }
 }
