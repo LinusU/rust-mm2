@@ -141,13 +141,7 @@ fn showroom(commands: &mut Commands, shell: &MenuShell, vfs: &Vfs, g: &mut Graph
     g.state.title = def.display_name.clone();
 
     g.state.specs = format!(
-        "{}   /   {:.0} kg\nPaint: {}",
-        def.config
-            .engine
-            .max_power_w
-            .map(|w| format!("{:.0} hp", w / 745.7))
-            .unwrap_or_else(|| "Power unavailable".into()),
-        def.config.mass,
+        "Paint: {}",
         def.paints
             .get(paint)
             .map(String::as_str)
@@ -727,6 +721,15 @@ fn draw_detail(
                     ..default()
                 },
             ));
+            if let Some(stats) = g
+                .state
+                .selection
+                .as_ref()
+                .and_then(|(id, _)| data.catalog.as_ref()?.find(id).ok())
+                .map(|entry| entry.stats)
+            {
+                stat_bars(p, &stats, &roster_max(data));
+            }
             label(p, &g.state.specs, 18.0, Color::WHITE);
             // A locked car or paint names what earns it here, not only
             // on the status line after a refused Enter.
@@ -828,6 +831,103 @@ fn draw_detail(
             );
         }
     });
+}
+
+/// The largest of each figure across the select roster — the scale
+/// the original's bars compare cars on.
+fn roster_max(data: &MenuData) -> mm2_content::DisplayStats {
+    let mut max = mm2_content::DisplayStats::default();
+    let entries = data.catalog.iter().flat_map(|c| &c.entries);
+    for stats in entries.filter(|e| e.canonical_info).map(|e| e.stats) {
+        let bump = |m: &mut Option<f32>, v: Option<f32>| {
+            if let Some(v) = v {
+                *m = Some(m.map_or(v, |m| m.max(v)));
+            }
+        };
+        bump(&mut max.horsepower, stats.horsepower);
+        bump(&mut max.top_speed, stats.top_speed);
+        bump(&mut max.durability, stats.durability);
+        bump(&mut max.mass, stats.mass);
+    }
+    max
+}
+
+/// The original vehicle-select comparison: one bar per authored
+/// figure, scaled to the roster's largest. Horsepower and top speed
+/// read as real units and print their number; Durability and Mass are
+/// unitless scales (vppanozgt's Mass is 850), so they show as bars.
+fn stat_bars(
+    parent: &mut ChildSpawnerCommands,
+    stats: &mm2_content::DisplayStats,
+    max: &mm2_content::DisplayStats,
+) {
+    let rows = [
+        ("HORSEPOWER", stats.horsepower, max.horsepower, Some("hp")),
+        ("TOP SPEED", stats.top_speed, max.top_speed, Some("mph")),
+        ("DURABILITY", stats.durability, max.durability, None),
+        ("MASS", stats.mass, max.mass, None),
+    ];
+    for (name, value, max, unit) in rows {
+        let fill = match (value, max) {
+            (Some(v), Some(m)) if m > 0.0 => (v / m).clamp(0.0, 1.0),
+            _ => 0.0,
+        };
+        let text = match (value, unit) {
+            (None, _) => format!("{name}  n/a"),
+            (Some(v), Some(unit)) => format!("{name}  {v:.0} {unit}"),
+            (Some(_), None) => name.to_string(),
+        };
+        parent
+            .spawn((
+                MenuUi,
+                Node {
+                    width: Val::Percent(100.0),
+                    height: Val::Px(22.0),
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(12.0),
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+            ))
+            .with_children(|p| {
+                p.spawn((
+                    MenuUi,
+                    Text::new(text),
+                    // A label measured as wrapping sits above its bar.
+                    TextLayout::no_wrap(),
+                    TextFont {
+                        font_size: bevy::text::FontSize::Px(14.0),
+                        ..default()
+                    },
+                    TextColor(GOLD),
+                    Node {
+                        width: Val::Px(190.0),
+                        flex_shrink: 0.0,
+                        ..default()
+                    },
+                ));
+                p.spawn((
+                    MenuUi,
+                    Node {
+                        flex_grow: 1.0,
+                        height: Val::Px(10.0),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.25, 0.43, 0.95, 0.25)),
+                ))
+                .with_children(|track| {
+                    track.spawn((
+                        MenuUi,
+                        Node {
+                            width: Val::Percent(fill * 100.0),
+                            height: Val::Percent(100.0),
+                            ..default()
+                        },
+                        BackgroundColor(GOLD),
+                    ));
+                });
+            });
+    }
 }
 
 /// What counts as winning a race toward a reward (the persisted
