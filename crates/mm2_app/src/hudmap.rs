@@ -49,6 +49,7 @@
 use bevy::camera::ScalingMode;
 use bevy::camera::Viewport;
 use bevy::camera::visibility::RenderLayers;
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use mm2_assets::Vfs;
@@ -460,11 +461,14 @@ pub fn spawn_hud_map(
     // the main camera (order 1) into the authored `Pos`/`Size` viewport
     // (`drive_hud_map` recomputes it per frame — window size is only
     // known there). `Ocean Color` is its clear colour — the authored
-    // background for tile-free water areas.
+    // background for tile-free water areas. No tonemapping: the map is
+    // flat unlit artwork, and the world's filmic curve would mute the
+    // authored tile colours and marker paints alike.
     commands.spawn((
         owner,
         HudMapCamera,
         Camera3d::default(),
+        Tonemapping::None,
         Camera {
             order: 1,
             clear_color: ClearColorConfig::Custom(Color::srgb(
