@@ -2445,8 +2445,8 @@ fn break_index(stem: &str) -> Option<&str> {
 }
 
 /// Collision triangles accumulated over a whole prop (all best-LOD
-/// geometries, every section). Props are static, so their collision is the
-/// authored triangle mesh: a convex hull would seal the openings of the
+/// geometries, every section). Static placements keep the authored triangle
+/// mesh: a convex hull would seal the openings of the
 /// concave props the city is full of — archways, bridge trusses, tunnel
 /// mouths — turning them into invisible walls and floors.
 #[derive(Default)]
@@ -2456,9 +2456,16 @@ struct PropCollision {
 }
 
 impl PropCollision {
-    fn into_collider(self) -> Option<Collider> {
+    fn into_collider(self, movable: bool) -> Option<Collider> {
         if self.positions.is_empty() || self.tris.is_empty() {
             return None;
+        }
+        if movable {
+            // Open or double-sided render meshes have no reliable signed
+            // volume. Their trimesh mass properties can produce NaN inertia
+            // when a dormant banger becomes dynamic. Like debris, intact
+            // movable props need a closed convex collision volume.
+            return Collider::convex_hull(self.positions);
         }
         Some(Collider::trimesh(self.positions, self.tris))
     }
@@ -2489,7 +2496,8 @@ struct FragmentModel {
 }
 
 /// Build renderable parts (best-LOD mesh per stem, grouped by shader) plus
-/// one triangle-mesh collider covering the whole prop. `BREAK<NN>`
+/// one collider covering the whole prop (convex for movable bound props,
+/// authored triangles for static placements). `BREAK<NN>`
 /// chunks are split out into [`FragmentModel`]s — they are the
 /// authored breakaway pieces, not part of the dormant prop's surface
 /// or collider (they only composed the same shape with duplicate
@@ -2501,6 +2509,7 @@ fn pkg_to_parts(
     missing_prims: &mut usize,
     offset: Vec3,
     paint: usize,
+    movable: bool,
 ) -> PropModel {
     let mut best: HashMap<String, (u8, &str)> = HashMap::new();
     for (name, _geo) in pkg.geometries() {
@@ -2584,7 +2593,7 @@ fn pkg_to_parts(
     }
     PropModel {
         parts: out,
-        collider: collision.into_collider(),
+        collider: collision.into_collider(movable),
         fragments,
     }
 }
@@ -2601,7 +2610,7 @@ pub(crate) fn pkg_paint_parts(
     missing_prims: &mut usize,
     paint: usize,
 ) -> Vec<(Handle<Mesh>, Handle<StandardMaterial>)> {
-    pkg_to_parts(pkg, mats, meshes, missing_prims, Vec3::ZERO, paint).parts
+    pkg_to_parts(pkg, mats, meshes, missing_prims, Vec3::ZERO, paint, false).parts
 }
 
 /// Emit one PKG strip into a builder; authored normals and UVs preserved.
@@ -2785,6 +2794,7 @@ impl<'a> PropCache<'a> {
 
     fn build(&mut self, name: &str, offset: PropOffset, paint: usize) -> Option<PropModel> {
         let pkg = self.load_pkg(name)?;
+        let movable = matches!(offset, PropOffset::Bound(_));
         let offset = match offset {
             PropOffset::Verbatim => Vec3::ZERO,
             PropOffset::Bound(v) => v,
@@ -2797,6 +2807,7 @@ impl<'a> PropCache<'a> {
             &mut self.missing_prims,
             offset,
             paint,
+            movable,
         );
         if model.parts.is_empty() {
             return None;

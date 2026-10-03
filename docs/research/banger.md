@@ -597,6 +597,20 @@ channel (sf 5 927 total, london 6 271).
 - Natural-pool (>32 simultaneous) reclaim remains unobserved —
   unchanged; the dev bound exercises the same claim/reclaim path.
 
+## Intact movable collision volumes
+
+Designed engine policy: bound pathset/prop-rule bangers use a convex hull
+of the intact best-LOD PKG vertices, just as their dynamic BREAK pieces do.
+An open enclosure or double-sided panel mesh does not supply a valid signed
+volume for triangle-mesh inertia: activating such a trimesh can produce
+non-finite angular inertia and poison the physics pose. The closed hull
+keeps intact `NumParts 0` props knockable with finite mass properties.
+This may fill an intact banger's concavities; exact original bound shape
+selection remains unknown (UNK-22). Unbound static and INST placements
+retain authored triangle collision so archways and bridges remain open.
+A degenerate intact hull has no collider and follows the existing ordinary
+prop fallback; no volume or original collision primitive is fabricated.
+
 ## Runtime consumption — what is not known
 
 Parsed, bound and provisionally simulated. Everything below is UNK-22:
