@@ -1580,6 +1580,15 @@ pub fn load_session_world(
                 owner,
                 key.table,
             );
+            if arrow_report.absent.is_none() {
+                crate::navarrow3d::spawn_nav_arrow_view(
+                    &mut commands,
+                    &mut assets.meshes,
+                    &mut assets.images,
+                    &mut assets.materials,
+                    owner,
+                );
+            }
             commands.insert_resource(arrow_report);
             race::spawn_race_warning(&mut commands, owner);
             race::spawn_countdown_banner(&mut commands, owner);

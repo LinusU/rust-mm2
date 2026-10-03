@@ -22,6 +22,7 @@ mod menu;
 mod mirror;
 mod nav_overlay;
 mod navarrow;
+mod navarrow3d;
 mod oppind;
 mod opponents;
 mod precip;

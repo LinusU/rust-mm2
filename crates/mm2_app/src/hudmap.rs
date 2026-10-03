@@ -122,6 +122,7 @@ pub type WorldCamera3d = (
     With<Camera3d>,
     Without<HudMapCamera>,
     Without<crate::camera::MirrorCamera>,
+    Without<crate::navarrow3d::NavArrowCamera>,
 );
 
 /// One world-space map tile (`hudmap_<city>.pkg` section) — spawned at

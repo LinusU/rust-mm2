@@ -17,15 +17,13 @@
 //! capture or recovered draw body pins them — the arrow keeps the
 //! needle's top-centre slot.
 //!
-//! The pkg geometry is authored as a flat XZ billboard, so the
-//! instrument rasterizes each paint job's triangles once at spawn
-//! into an `ARROW_CANVAS_PX` sprite (top-down projection, mesh origin
-//! at canvas centre so [`update_nav_arrow`]'s rotation pivots
-//! exactly where the authored transform would) and the HUD node
-//! swaps between the two bound sprites — paint 0 ahead, paint 1
-//! behind — instead of tinting. A missing package, unparseable pkg,
-//! or missing/undecodable texture records `absent` on the
-//! [`NavArrowReport`] — never substitute art.
+//! The flat XZ package is rasterized once to preserve and validate its two
+//! paint bindings. The logical node tracks bearing/visibility/paint selection;
+//! `navarrow3d` presents that state as a designed bevelled extrusion turning
+//! about its vertical axis, rendered to a transparent HUD texture. The flat
+//! sprite node has `Display::None`, so no upright 2D pointer is drawn.
+//! Missing package/geometry/paint data still reports `absent` rather than
+//! replacing the authored binding. Geometry depth and presentation are designed.
 //!
 //! - [`spawn_nav_arrow`] runs in `load_session_world`'s event arm
 //!   with the event's table so the family variant binds.
@@ -533,7 +531,10 @@ pub fn spawn_nav_arrow(
         owner,
         NavArrow,
         NavArrowSprites { ahead, behind },
+        // Keep the authored paint/bearing binding as state. The isolated
+        // 3D view renders it; the flat sprite is no longer drawn.
         Node {
+            display: Display::None,
             position_type: PositionType::Absolute,
             top: Val::Px(ARROW_TOP_PX),
             left: Val::Percent(50.0),

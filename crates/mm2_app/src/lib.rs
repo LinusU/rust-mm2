@@ -25,6 +25,7 @@ pub mod input;
 pub mod menu;
 pub mod nav_overlay;
 pub mod navarrow;
+pub mod navarrow3d;
 pub mod net;
 pub mod netdrive;
 pub mod oppind;
