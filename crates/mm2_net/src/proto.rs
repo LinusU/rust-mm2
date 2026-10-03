@@ -30,8 +30,11 @@
 /// `SnapEntry` gained `breaks`, the seat's detached-breakaway-part
 /// bitmask — replicated *state* (not an event) so a dropped snap or a
 /// late join can never leave a remote copy's rig diverged from the
-/// authority's (F25-B, F05 req 5).
-pub const PROTOCOL_VERSION: u16 = 11;
+/// authority's (F25-B, F05 req 5). v12: `SnapImpact` gained
+/// `audio_id`, the struck side's authored `AudioId` resolved on the
+/// authority at publish, so a replicated row voices the same impact
+/// category the authority played (F25-B).
+pub const PROTOCOL_VERSION: u16 = 12;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -293,7 +296,10 @@ pub const MAX_SNAP_IMPACTS: u8 = 64;
 /// is skipped — its copy already rendered the impact from the local
 /// physics stream. `surface` does not ride the wire: no current
 /// consumer reads it, and state consumers resolve the copy's live
-/// `SurfaceState` instead.
+/// `SurfaceState` instead. What the wire *does* carry (v12) is the
+/// struck side's authored audio selector — the identity a receiver
+/// cannot resolve itself because a struck prop's `ObjectId` lives in
+/// the authority's local id namespace.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SnapImpact {
     /// Wire roster slot of the seat this side presents (0 = the host
@@ -312,6 +318,13 @@ pub struct SnapImpact {
     pub normal: [f32; 3],
     /// Relative impact speed, m/s — `ImpactEvent::severity`.
     pub severity: f32,
+    /// The struck (non-seat) side's authored `dgBangerData` `AudioId`,
+    /// resolved on the authority — the same lookup `impact_voices`
+    /// runs locally (`0` when the struck side is the world, another
+    /// seat or carries no banger record). Verbatim authored data: any
+    /// value is representable and an unresolvable one reads as a data
+    /// failure downstream, exactly like a mod's broken binding.
+    pub audio_id: i64,
 }
 
 /// One wire message.
@@ -532,6 +545,10 @@ impl<'a> Cursor<'a> {
 
     fn u64(&mut self) -> Result<u64, ProtoError> {
         Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+
+    fn i64(&mut self) -> Result<i64, ProtoError> {
+        Ok(i64::from_le_bytes(self.take(8)?.try_into().unwrap()))
     }
 
     fn f32(&mut self) -> Result<f32, ProtoError> {
@@ -774,6 +791,7 @@ impl Message {
                         out.extend_from_slice(&v.to_le_bytes());
                     }
                     out.extend_from_slice(&m.severity.to_le_bytes());
+                    out.extend_from_slice(&m.audio_id.to_le_bytes());
                 }
             }
         }
@@ -904,6 +922,7 @@ impl Message {
                         point: cur.vec3()?,
                         normal: cur.vec3()?,
                         severity: cur.f32()?,
+                        audio_id: cur.i64()?,
                     });
                 }
                 Self::Snap {
@@ -1106,6 +1125,7 @@ mod tests {
                         point: [3.0, 0.4, -1.0],
                         normal: [0.0, 0.0, 1.0],
                         severity: 12.5,
+                        audio_id: 7,
                     },
                     SnapImpact {
                         seat: 3,
@@ -1114,6 +1134,7 @@ mod tests {
                         point: [3.0, 0.4, -1.0],
                         normal: [0.0, 0.0, -1.0],
                         severity: 12.5,
+                        audio_id: 0,
                     },
                 ],
             },
@@ -1298,6 +1319,7 @@ mod tests {
                 point: [0.0; 3],
                 normal: [0.0, 1.0, 0.0],
                 severity: 1.0,
+                audio_id: 0,
             };
             MAX_SNAP_IMPACTS as usize + 1
         ];

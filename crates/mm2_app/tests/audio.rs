@@ -1072,8 +1072,9 @@ fn a_remote_participant_voices_on_the_authority() {
 #[test]
 fn a_replicated_impact_voices_the_remote_copy() {
     // The v10 `Snap.impacts` path: a resolved `RemoteImpact` voices the
-    // copy's side — spatial at the contact, the struck side reading the
-    // id-0 catch-all (the wire carries no counterpart identity).
+    // copy's side — spatial at the contact, a wire `audio_id` of 0
+    // reading the catch-all like a world/recordless struck side does
+    // locally.
     let dir = impact_dir();
     let mut app = impact_app_with(dir.path(), SessionAuthority::Remote);
     let (_, entity) = spawn_test_car(&mut app, PlayerControl::Remote, 1300.0);
@@ -1083,9 +1084,33 @@ fn a_replicated_impact_voices_the_remote_copy() {
             point: Vec3::new(1.0, 2.0, 3.0),
             normal: Vec3::Y,
             severity: 30.0,
+            audio_id: 0,
         });
     app.update();
     assert_eq!(impact_voices(&mut app), [(VoiceKind::Impact, 48000, true)]);
+    assert_eq!(app.world().resource::<AudioReport>().impacts, 1);
+}
+
+#[test]
+fn a_replicated_impact_picks_the_struck_sides_authored_category() {
+    // Protocol v12: the authority resolved the struck prop's authored
+    // `AudioId` into the row — the client voices the same LIGHT
+    // category (`PROP`, 11 kHz) the authority played, not the id-0
+    // catch-all a wire without the selector would have picked (30 m/s
+    // × 1300 kg = 39000 force → HUGE under WALL, PROP under LIGHT).
+    let dir = impact_dir();
+    let mut app = impact_app_with(dir.path(), SessionAuthority::Remote);
+    let (_, entity) = spawn_test_car(&mut app, PlayerControl::Remote, 1300.0);
+    app.world_mut()
+        .write_message(mm2_app::netdrive::RemoteImpact {
+            entity,
+            point: Vec3::new(1.0, 2.0, 3.0),
+            normal: Vec3::Y,
+            severity: 30.0,
+            audio_id: 7,
+        });
+    app.update();
+    assert_eq!(impact_voices(&mut app), [(VoiceKind::Impact, 11025, true)]);
     assert_eq!(app.world().resource::<AudioReport>().impacts, 1);
 }
 

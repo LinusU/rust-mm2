@@ -229,6 +229,7 @@ fn a_replicated_impact_sparks_the_remote_copy() {
         point: POINT,
         normal: NORMAL,
         severity: 10.0,
+        audio_id: 0,
     });
     app.update();
     assert_eq!(report(&app).bursts, 1);

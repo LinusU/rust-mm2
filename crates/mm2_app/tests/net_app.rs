@@ -3541,6 +3541,9 @@ fn a_trailer_rows_grounded_bit_drives_the_copys_suspension() {
 /// `NetPlayer` seat — so a client can present a remote car's hits from
 /// the replicated stream the damage byte cannot express. A hit naming
 /// no seat emits nothing, and a foreign-generation event never rides.
+/// v12: each row also carries the struck side's authored `AudioId`,
+/// resolved on the authority — a receiver cannot resolve a struck
+/// prop's `ObjectId` out of the authority's local id namespace.
 #[test]
 fn a_snap_carries_the_sessions_impact_rows() {
     let install = tempfile::tempdir().unwrap();
@@ -3569,6 +3572,23 @@ fn a_snap_carries_the_sessions_impact_rows() {
             .query_filtered::<&ObjectIdentity, With<RemotePick>>();
         q.single(app.world()).expect("the remote car").0
     };
+    // A struck prop carrying an authored `AudioId` — the v12 lookup
+    // resolves its record for the row the seat emits.
+    let prop_oid = app.world_mut().resource_mut::<Session>().mint_object_id();
+    app.world_mut().spawn((
+        ObjectIdentity(prop_oid),
+        mm2_game::Banger::new(mm2_game::BangerDefinition {
+            name: "sp_wireprop".into(),
+            mass: 40.0,
+            friction: 0.9,
+            elasticity: 0.5,
+            impulse_limit2: 0.0,
+            size: [0.5, 0.5, 0.5],
+            cg: [0.0, 0.0, 0.0],
+            num_parts: 0,
+            audio_id: 7,
+        }),
+    ));
     let session_tick = app.world().resource::<Session>().tick();
     let write_impact = |app: &mut App, id: u64, generation: u64, a: ObjectId, b: ObjectId| {
         app.world_mut().write_message(ImpactEvent {
@@ -3582,21 +3602,25 @@ fn a_snap_carries_the_sessions_impact_rows() {
             surface: SurfaceState::default(),
         });
     };
-    // The seat-named hit (the remote car is participant 0 — its row
-    // carries the mirrored outward normal), a pair no seat can name,
-    // and a foreign-generation event: only the first rides the wire.
+    // The seat-named world hit (the remote car is participant 0 — its
+    // row carries the mirrored outward normal and the world's
+    // catch-all selector), a seat-vs-prop hit whose row carries the
+    // prop's authored `AudioId`, a pair no seat can name, and a
+    // foreign-generation event: only the first two ride the wire.
     write_impact(&mut app, 7, generation, remote_oid, ObjectId::WORLD);
     write_impact(&mut app, 8, generation, ObjectId::WORLD, ObjectId::WORLD);
     write_impact(&mut app, 9, generation + 9, remote_oid, ObjectId::WORLD);
+    write_impact(&mut app, 10, generation, remote_oid, prop_oid);
     app.update();
     let snap = until_wire(
         &mut peer,
-        |m| matches!(m, Message::Snap { impacts, .. } if !impacts.is_empty()),
+        |m| matches!(m, Message::Snap { impacts, .. } if impacts.len() >= 2),
     );
     let Message::Snap { impacts, .. } = snap else {
         unreachable!()
     };
-    assert_eq!(impacts.len(), 1, "only the seat-named side rides");
+    assert_eq!(impacts.len(), 2, "only the seat-named sides ride");
+    // Equal severities order by `(seat, id)`.
     let row = impacts[0];
     assert_eq!((row.seat, row.id, row.tick), (1, 7, session_tick));
     assert_eq!(row.point, [1.0, 0.5, -2.0]);
@@ -3606,11 +3630,18 @@ fn a_snap_carries_the_sessions_impact_rows() {
         "the seat-0 side's row carries the mirrored outward normal"
     );
     assert_eq!(row.severity, 12.5);
+    assert_eq!(row.audio_id, 0, "the world reads the catch-all selector");
+    let prop_row = impacts[1];
+    assert_eq!((prop_row.seat, prop_row.id), (1, 10));
+    assert_eq!(
+        prop_row.audio_id, 7,
+        "the struck prop's authored AudioId rides its row"
+    );
     assert_eq!(
         app.world()
             .resource::<netdrive::NetDriveReport>()
             .impacts_sent,
-        1
+        2
     );
 }
 
@@ -3710,10 +3741,12 @@ fn a_snapshot_feeds_the_remote_impact_stream() {
         point: [3.0, 0.4, -1.0],
         normal: [0.0, 0.0, 1.0],
         severity: 12.5,
+        audio_id: 0,
     };
-    // One valid remote-seat row plus the traps: the own seat's row
-    // (skipped, never presented), a departed seat's row, and a
-    // non-finite row the sanitize drops.
+    // One valid remote-seat row carrying the struck side's authored
+    // selector (v12) plus the traps: the own seat's row (skipped,
+    // never presented), a departed seat's row, and a non-finite row
+    // the sanitize drops.
     host.ctl()
         .broadcast(&Message::Snap {
             generation,
@@ -3721,7 +3754,10 @@ fn a_snapshot_feeds_the_remote_impact_stream() {
             entries: vec![entry(0), entry(our_id)],
             trailers: Vec::new(),
             impacts: vec![
-                row(0, 1),
+                SnapImpact {
+                    audio_id: 7,
+                    ..row(0, 1)
+                },
                 row(our_id, 1),
                 row(7, 1),
                 SnapImpact {
@@ -3731,6 +3767,7 @@ fn a_snapshot_feeds_the_remote_impact_stream() {
                     point: [f32::NAN; 3],
                     normal: [0.0, 1.0, 0.0],
                     severity: 1.0,
+                    audio_id: 0,
                 },
             ],
         })
@@ -3753,6 +3790,10 @@ fn a_snapshot_feeds_the_remote_impact_stream() {
         assert_eq!(impact.point, Vec3::new(3.0, 0.4, -1.0));
         assert_eq!(impact.normal, Vec3::new(0.0, 0.0, 1.0));
         assert_eq!(impact.severity, 12.5);
+        assert_eq!(
+            impact.audio_id, 7,
+            "the wire's struck-side selector lands on the event"
+        );
     }
     {
         let r = app.world().resource::<netdrive::NetDriveReport>();

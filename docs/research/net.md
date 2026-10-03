@@ -171,9 +171,7 @@ whose *damaged* intermediate byte was superseded before it ever
 applied is unobservable — the client never saw a transition, so the
 row is indistinguishable from a fresh hit on an intact car (a
 per-seat repair epoch on the row would close it if it ever matters).
-What the wire still does not carry: the
-struck side's identity (a replicated row's audio picks the id-0
-catch-all) and `surface` (no consumer reads it). v10→v11:
+v10→v11:
 `SnapEntry` gained `breaks` (u32, F25-B) — the seat's
 detached-breakaway-part bitmask, bit *i* = `VehicleBreaks` part *i*
 in authored order. Authored order is identical on every process
@@ -200,6 +198,23 @@ the host *is* this authority's participant — simulated like an
 AI's — so its parts shed there and the mask publishes with its
 entry. `spawn_remote` now binds `VehicleBreaks` on both roles off
 the authored inventory, the same absence gate as a local pick.
+v11→v12: `SnapImpact` gained `audio_id` (i64, F25-B) — the
+struck side's authored `dgBangerData` `AudioId`, resolved on the
+authority at publish through the same `ObjectId → entity →
+Banger::def.audio_id` lookup `impact_voices` runs locally (built
+only when the drained stream has events to tag), `0` for the
+world/another seat/a recordless body. A receiver cannot run that
+lookup itself: a struck prop's `ObjectId` lives in the authority's
+local `(generation, slot)` namespace, which diverges across
+processes — so the resolved selector rides the wire instead and
+`RemoteImpact` lands it on the replicated row. `impact_voices`
+consumes it verbatim: a remote copy's prop hit now voices the same
+authored category the authority played rather than the id-0 `WALL`
+catch-all (an unresolvable wire value reads as a data failure like
+a mod's broken binding — counted `failed`, not rejected). What the
+wire still does not carry: `ImpactEvent::surface` — no consumer
+reads it locally either, so it stays off the row rather than
+travelling as dead data.
 
 Handshake (always the first exchange):
 
@@ -770,7 +785,7 @@ session), not a driven collision.
 ## Data-plane budget and bounds (F25-B req 6)
 
 *Implementation choice + measured.* Payload sizes are fixed by the
-v11 encode (4-byte length prefix excluded everywhere):
+v12 encode (4-byte length prefix excluded everywhere):
 
 | frame | payload bytes |
 |---|---|
@@ -779,15 +794,15 @@ v11 encode (4-byte length prefix excluded everywhere):
 | `Snap` header | 20 (tag 1, generation 8, tick 8, three counts) |
 | per `SnapEntry` | 66 (player 2, pos/rot/vel/angvel 52, epoch 1, steer 2, spin 2, compression 1, flags 1, damage 1, breaks 4) |
 | per `SnapTrailer` | 57 (owner 2, pos/rot/vel/angvel 52, spin 2, flags 1) |
-| per `SnapImpact` | 46 (seat 2, id 8, tick 8, point 12, normal 12, severity 4) |
+| per `SnapImpact` | 54 (seat 2, id 8, tick 8, point 12, normal 12, severity 4, audio_id 8) |
 
-A `Snap` is `20 + 66·seats + 57·trailers + 46·impacts` — worst case
+A `Snap` is `20 + 66·seats + 57·trailers + 54·impacts` — worst case
 `MAX_PLAYERS` 8 seats and trailers plus `MAX_SNAP_IMPACTS` 64 rows =
-3,948 B, far under `MAX_FRAME` (256 KiB). The matrix runs measured
+4,460 B, far under `MAX_FRAME` (256 KiB). The matrix runs measured
 the v10 shape: `Input` payloads averaged 21 B
 (`bytes_in`/`frames_in` ≈ 20.9) and the one-seat dev-world `Snap`
-82 B (20 + 62 — 86 B under v11); the two-process leg's three-seat
-snaps were 206 B (218 under v11).
+82 B (20 + 62 — 86 B under v12); the two-process leg's three-seat
+snaps were 206 B (218 under v12).
 
 **Update rates.** Both directions send once per app `Update` while the
 session is live — the wire rate is the update-loop rate, not the fixed
@@ -799,7 +814,7 @@ receiver (the clean-row floor above). Consequences worth recording:
 - per-client downstream at a 60 Hz update rate, 8 seats: ≈33 KB/s of
   `Snap` payload (548 B × 60); the ~250 Hz headless cadence multiplies
   that ≈4× (≈134 KB/s, ~1 Mbps) and a full-impact burst snap is still
-  ≤3,948 B.
+  ≤4,460 B.
 - per-client upstream: 25 B on the wire per update — ≈1.5 KB/s at
   60 Hz, ≈6 KB/s headless.
 - a faster update loop buys smoother *redundancy*, not fresher poses —

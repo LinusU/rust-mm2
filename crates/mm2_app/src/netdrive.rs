@@ -247,6 +247,12 @@ pub struct RemoteImpact {
     pub normal: Vec3,
     /// Relative impact speed, m/s — `ImpactEvent::severity`.
     pub severity: f32,
+    /// The struck side's authored `dgBangerData` `AudioId` (protocol
+    /// v12) — resolved on the authority at publish since the receiver
+    /// cannot resolve a struck prop's `ObjectId` out of the
+    /// authority's local id namespace. `0` is the catch-all: the
+    /// world, another seat or a recordless body.
+    pub audio_id: i64,
 }
 
 /// The client-side snapshot inbox: the newest `Snap` the lobby pump
@@ -1606,6 +1612,11 @@ pub fn publish_snapshots(
     // Every trailer towing a `NetPlayer` seat — the host's own rig's
     // trailer included — publishes under the owner's wire id.
     trailers: Query<SnapTrailerSourceRow<'_>, Without<Player>>,
+    // The v12 struck-side lookup: a row's `audio_id` is the *other*
+    // participant's authored `AudioId` — the same resolution
+    // `impact_voices` runs locally, done here because a struck prop's
+    // `ObjectId` means nothing in the receiver's id namespace.
+    bangers: Query<(&ObjectIdentity, &Banger)>,
     mut impacts: MessageReader<ImpactEvent>,
     mut report: ResMut<NetDriveReport>,
 ) {
@@ -1686,6 +1697,17 @@ pub fn publish_snapshots(
         .iter()
         .map(|(_, wire, _, identity, ..)| (identity.0, wire.0))
         .collect();
+    // The struck-side selector index — built only when the drained
+    // stream has events to tag, so a publish tick with no impacts
+    // never walks the prop inventory.
+    let struck_audio: HashMap<ObjectId, i64> = if drained.is_empty() {
+        HashMap::new()
+    } else {
+        bangers
+            .iter()
+            .map(|(id, b)| (id.0, b.def.audio_id))
+            .collect()
+    };
     // `ImpactEvent::generation` mints in the local id namespace, so the
     // filter compares the local counter — the `Snap` frame's own
     // `generation` field below is the wire namespace.
@@ -1697,21 +1719,26 @@ pub fn publish_snapshots(
         .flat_map(|e| {
             // `ImpactEvent::normal` points from participant.0 toward
             // participant.1 — each seat's row carries its own side's
-            // outward normal.
-            [(e.participants.0, -e.normal), (e.participants.1, e.normal)]
-                .into_iter()
-                .filter_map(|(who, normal)| {
-                    let &seat = oid_wires.get(&who)?;
-                    let sane = e.point.is_finite() && normal.is_finite() && e.severity.is_finite();
-                    sane.then_some(SnapImpact {
-                        seat,
-                        id: e.id.0,
-                        tick: e.tick,
-                        point: e.point.to_array(),
-                        normal: normal.to_array(),
-                        severity: e.severity,
-                    })
+            // outward normal, and the *other* side's authored audio
+            // selector (world/seat/recordless read the 0 catch-all).
+            [
+                (e.participants.0, e.participants.1, -e.normal),
+                (e.participants.1, e.participants.0, e.normal),
+            ]
+            .into_iter()
+            .filter_map(|(who, other, normal)| {
+                let &seat = oid_wires.get(&who)?;
+                let sane = e.point.is_finite() && normal.is_finite() && e.severity.is_finite();
+                sane.then_some(SnapImpact {
+                    seat,
+                    id: e.id.0,
+                    tick: e.tick,
+                    point: e.point.to_array(),
+                    normal: normal.to_array(),
+                    severity: e.severity,
+                    audio_id: struck_audio.get(&other).copied().unwrap_or(0),
                 })
+            })
         })
         .collect();
     impact_rows.sort_by(|a, b| {
@@ -2323,6 +2350,7 @@ fn drain_pending_impacts(
                 .try_normalize()
                 .unwrap_or(Vec3::Y),
             severity: row.severity,
+            audio_id: row.audio_id,
         });
         report.impacts_applied += 1;
     }
@@ -2923,6 +2951,7 @@ mod tests {
             point: [0.0; 3],
             normal: [0.0, 1.0, 0.0],
             severity: 1.0,
+            audio_id: 0,
         }
     }
 

@@ -1619,10 +1619,13 @@ pub fn siren_drive(
 /// its local-stream hits stay skipped: the same impact arrives as a
 /// [`crate::netdrive::RemoteImpact`] row off the v10 `Snap.impacts`
 /// tail, resolved to this process's copy, so the sound plays once —
-/// from the authority's stream. The wire carries no struck-side
-/// identity, so a replicated row's authored selector is the id-0
-/// catch-all — the same category car-vs-car/world hits already pick
-/// (the striker side's mass is the copy's own).
+/// from the authority's stream. The v12 row carries the struck side's
+/// authored `AudioId` resolved on the authority — a receiver cannot
+/// resolve a struck prop itself, its `ObjectId` lives in the
+/// authority's local id namespace — so a replicated prop hit picks the
+/// same authored category the authority played (still the id-0
+/// catch-all for world/seat/recordless struck sides; the striker
+/// side's mass is the copy's own).
 #[allow(clippy::too_many_arguments)] // Bevy system — the borrows are the contract.
 pub fn impact_voices(
     mut commands: Commands,
@@ -1665,8 +1668,8 @@ pub fn impact_voices(
         .count();
     // The shared voice tail: `point`/`severity` and the striker's
     // resolved mass pick the authored band whichever stream delivered
-    // the hit; `audio_id` is the struck side's selector (the id-0
-    // catch-all on replicated rows — the wire carries no counterpart).
+    // the hit; `audio_id` is the struck side's selector (resolved
+    // locally, or carried on the wire row — protocol v12).
     let mut voice_at = |entity: Entity,
                         point: Vec3,
                         severity: f32,
@@ -1773,13 +1776,15 @@ pub fn impact_voices(
     // The replicated stream — remote copies' impacts delivered by the
     // v10 snap tail (`apply_snapshots` already resolved, sanitized and
     // deduped each row, and the receiver's own seat never appears).
-    // Always a world emitter at the contact.
+    // Always a world emitter at the contact; `audio_id` is the v12
+    // wire field — the struck side's authored selector resolved on the
+    // authority.
     for impact in remote_reader.read() {
         voice_at(
             impact.entity,
             impact.point,
             impact.severity,
-            0,
+            impact.audio_id,
             true,
             &mut live,
         );

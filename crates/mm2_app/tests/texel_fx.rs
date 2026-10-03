@@ -591,6 +591,7 @@ fn impact_row(seat: u16, id: u64, tick: u64, point: Vec3) -> SnapImpact {
         point: point.to_array(),
         normal: [0.0, 1.0, 0.0],
         severity: 10.0,
+        audio_id: 0,
     }
 }
 
@@ -695,6 +696,7 @@ fn a_replicated_impact_splats_the_remote_copy() {
         point: Vec3::new(20.2, 1.2, 0.2),
         normal: Vec3::Y,
         severity: 10.0,
+        audio_id: 0,
     });
     app.update();
     assert_eq!(app.world().resource::<TexelDamageReport>().impacts, 1);
@@ -725,6 +727,7 @@ fn a_replicated_repair_restores_the_splats() {
         point: Vec3::new(20.2, 1.2, 0.2),
         normal: Vec3::Y,
         severity: 10.0,
+        audio_id: 0,
     });
     app.update();
     assert_ne!(skin_data(&app, &current), clean, "the hit splatted");
@@ -798,6 +801,7 @@ fn a_clean_byte_never_erases_a_splat() {
         point: Vec3::new(20.2, 1.2, 0.2),
         normal: Vec3::Y,
         severity: 10.0,
+        audio_id: 0,
     });
     app.update();
     assert_ne!(
