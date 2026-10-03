@@ -400,7 +400,11 @@ Positional ambient emitters: clips with volume/attenuation fields and
 `VECTORPOINTS` sections listing world-space emitter positions (up to 99
 points — `waves.csv`, `trolleycable.csv`). `drawbridge`, `ferry`,
 `birdies`, `buoyseals`, `horns_gulls`, `londonriver`, `tubevoices`,
-ped-voice tables (`maleped*`, `femaleped1`).
+ped-voice tables (`maleped*`, `femaleped1`). The `sample type`
+vocabulary (0 loop, 1/2 timed one-shots, 3 trigger-only) and the
+runtime `active` switching are recovered from the executable and
+consumed for `drawbridge`/`ferry`/`subwaycar` — `movers.md` § Object
+audio.
 
 ### Ambient containers — `aud/ambient/*ambientcontainer.csv`
 

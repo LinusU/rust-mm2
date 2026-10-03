@@ -21,6 +21,7 @@ pub mod ids;
 pub mod impact;
 pub mod movers;
 pub mod nav;
+pub mod object_audio;
 pub mod opponent;
 pub mod parked;
 pub mod ped;

@@ -47,7 +47,7 @@ mesh is drawn raw at the curve point.
 Model as above. Speed 0.75 m/s with zero spread (`0x579307`).
 Height: the curve point plus the model's `dgBangerData` `CG.y`
 (`[record + 0x20]`) — which puts each hull's bottom on the water.
-Each ferry carries the `ferry` object sound.
+Each ferry carries the `ferry` object sound (§ Object audio).
 
 ## The Underground (`0x578da0`, `0x5788d0`–`0x578c70`)
 
@@ -68,14 +68,48 @@ The fraction starts at 1, so the first departure skips the ramp. End
 check: running forward, the rear car's segment index reaches
 `count − 3`; backward, the last car's index falls to 1. Reversal
 negates `dt` (`0x5af408` = −1). The `subwaycar` object sound rides
-the middle car (see below).
+the middle car (§ Object audio).
+
+## Object audio (`Aud3DAmbientObject`, `0x515080`–`0x515bc0`)
+
+Drawbridge leaves, ferries and trains each own a positional sound
+object bound to `aud/ambient/<name>.csv` (`aud\ambient` + `csv`,
+`0x515742`): `drawbridge`, `ferry`, `subwaycar`. The table's
+`sample type` dispatches through the jump table at `0x515314`:
+
+| Type | Behaviour |
+| --- | --- |
+| 0 | loop, played while the row is active and the emitter's speed lies in `min speed..max speed` (`0x515390`); deactivating stops it at once (`0x5155a0`) |
+| 1 | timed one-shot at a random 0.75–1 gain and pan (`0x5154b0`) |
+| 2 | timed one-shot: while active and in the speed window, a run-out timer fires the row unless it still plays, then redraws the timer in `oneshot time limit low..high` (`0x5153e0`, `0x515440`) |
+| 3 | parameter updates only — fired solely by an explicit trigger no retail object issues |
+
+The `active` column is each row's initial state; owners flip rows
+with `0x515580`/`0x5155a0` (or all rows with index −1):
+
+- **drawbridge** (`bridgemove` loop, `bridgebell` type 2 with a `0,0`
+  window — so the bell re-rings back to back): both rows on when a
+  leaf starts opening or closing (`0x5774c6`, `0x577503`), off when it
+  comes to rest (`0x5775b1`, `0x57764e`); each leaf has its own.
+- **ferry** (`ferryengine` loop, `ferryhorn` every 5–10 s): authored
+  active, never switched.
+- **subwaycar** on the middle car (`0x59d490`): moving trains switch
+  to row 0 (`LondonTube`), stopped ones to row 1 (`NOTHING` — the
+  silent sentinel); the subclass switches on a speed threshold of 1.
+
+Emitters are silent beyond the table's `Max distance` (150 m bridge
+and Tube, 225 m ferry). The attenuation inside it is unrecovered;
+the runtime uses the spatial inverse-square curve with the max
+distance at 3 spatial units (designed, `OBJECT_SPATIAL_EDGE`).
 
 ## Implementation
 
 `mm2_game::movers` (`PathFollower`, `TrainMotion`, `mover_rotation`,
 the constants) and `mm2_app::movers` (spawning and the fixed-step
-driver). Each object is a kinematic body whose origin is the curve
-point; the driver poses it where its path is now and sets the
+driver); `mm2_game::object_audio` (the table rules) and
+`mm2_app::object_sound` (voices). Each object is a kinematic body
+whose origin is the curve point; the driver poses it where its path
+is now and sets the
 velocities that reach the next step's pose, so a car resting on a
 ferry rides it. Sailboat speed draws are seeded from the session
 (designed).

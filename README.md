@@ -47,6 +47,8 @@ Vertical-slice stage. What works today:
 - Moving scenery: tugs, water taxis, sailboards and ducks, the car
   ferries, and London's Underground trains shuttling through their
   tunnels.
+- Their sounds: the drawbridge motor and bell, ferry engines and horns,
+  and the Tube's rumble, positional and range-limited like the original.
 
 ## Build & run
 

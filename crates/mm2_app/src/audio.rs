@@ -955,6 +955,10 @@ pub enum VoiceKind {
     /// One `spchdata` cue the session's [`CommentaryAudio`] queue
     /// spawned (F18-B.5).
     Commentary,
+    /// One row of a moving object's `aud/ambient` table — a
+    /// drawbridge, ferry or Underground sound
+    /// (`crate::object_sound`).
+    Object,
 }
 
 /// Marker on a vehicle whose engine rig was built — set once whether
@@ -1236,6 +1240,9 @@ pub struct AudioReport {
     pub commentary: u64,
     /// Countdown, checkpoint, low-time and terminal race effects.
     pub race_cues: u64,
+    /// Object-sound voices spawned this session — a subset of
+    /// `voices` (drawbridges, ferries, the Underground).
+    pub objects: u64,
 }
 
 impl AudioReport {
@@ -1259,6 +1266,7 @@ impl AudioReport {
             + self.interior as u64
             + self.commentary
             + self.race_cues
+            + self.objects
             > 0
     }
 

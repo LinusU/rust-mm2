@@ -1616,6 +1616,9 @@ fn main() {
             // despawn ordering; one-shots resolve and play inside the
             // pre-race window.
             audio::commentary_voices.after(session::drive_session),
+            // Drawbridge, ferry and Underground sounds — the same
+            // despawn ordering as the other rigs.
+            mm2_app::object_sound::object_sound_voices.after(session::drive_session),
             mm2_app::race_audio::race_cue_voices
                 .after(session::drive_session)
                 .after(netdrive::apply_snapshots),

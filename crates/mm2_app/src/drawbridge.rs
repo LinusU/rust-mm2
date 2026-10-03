@@ -29,6 +29,7 @@ use tracing::{info, warn};
 
 use crate::banger::BangerDefs;
 use crate::city::{MIRROR_Z, MovableModels, v3};
+use crate::object_sound::ObjectSound;
 
 /// The leaf model the original substitutes when a path's name names
 /// no geometry (`gizBridgeMgr`'s default argument).
@@ -128,6 +129,9 @@ pub fn spawn_drawbridges(
 
     let mut models = MovableModels::new(vfs, meshes, images, materials);
     let mut bangers = BangerDefs::new(vfs);
+    // Every leaf carries the `drawbridge` table: motor loop and bell,
+    // both off until the leaf moves.
+    let sound = crate::object_sound::load_object_audio(vfs, "drawbridge");
     for (pi, path) in pathset.paths.iter().enumerate() {
         let points: Vec<[f32; 3]> = path.points.iter().map(|p| p.position).collect();
         if points.iter().flatten().any(|c| !c.is_finite()) {
@@ -203,6 +207,11 @@ pub fn spawn_drawbridges(
             if let Some(collider) = &model.collider {
                 commands.entity(root).insert(collider.clone());
             }
+            if let Some(spec) = &sound {
+                commands
+                    .entity(root)
+                    .insert(ObjectSound::new(spec.clone(), (pi * 2 + li) as u32 + 1));
+            }
             for (mesh, material) in &model.parts {
                 let part = commands
                     .spawn((
@@ -248,6 +257,17 @@ fn leaf_base(from: [f32; 3], to: [f32; 3]) -> Option<Quat> {
     Some(Quat::from_mat3(&Mat3::from_cols(x, y, z)))
 }
 
+/// What [`drive_drawbridges`] reads and writes on each leaf.
+type LeafQuery<'a> = (
+    Entity,
+    &'a mut DrawbridgeLeaf,
+    &'a mut Position,
+    &'a mut Rotation,
+    &'a mut LinearVelocity,
+    &'a mut AngularVelocity,
+    Option<&'a mut ObjectSound>,
+);
+
 /// Advance every leaf one fixed step and pose its body:
 /// proximity leaves open when any participant comes within
 /// [`PROXIMITY_RADIUS`] of the hinge (and open their partner), timed
@@ -259,14 +279,7 @@ fn leaf_base(from: [f32; 3], to: [f32; 3]) -> Option<Quat> {
 pub fn drive_drawbridges(
     session: Res<Session>,
     time: Res<Time<Fixed>>,
-    mut leaves: Query<(
-        Entity,
-        &mut DrawbridgeLeaf,
-        &mut Position,
-        &mut Rotation,
-        &mut LinearVelocity,
-        &mut AngularVelocity,
-    )>,
+    mut leaves: Query<LeafQuery>,
     cars: Query<&Position, (With<Player>, Without<DrawbridgeLeaf>)>,
 ) {
     if !matches!(
@@ -294,8 +307,15 @@ pub fn drive_drawbridges(
             leaf.motion.trigger();
         }
     }
-    for (_, mut leaf, mut pos, mut rot, mut lin, mut ang) in &mut leaves {
+    for (_, mut leaf, mut pos, mut rot, mut lin, mut ang, sound) in &mut leaves {
         leaf.motion.step(dt);
+        // Motor and bell sound exactly while the leaf moves — the
+        // original switches both rows on as a leaf starts opening or
+        // closing and off as it comes to rest.
+        if let Some(mut sound) = sound {
+            let moving = matches!(leaf.motion.phase, LeafPhase::Opening | LeafPhase::Closing);
+            sound.state.set_active(None, moving);
+        }
         let rate = match leaf.motion.phase {
             LeafPhase::Opening => RAISE_RATE,
             LeafPhase::Closing => -RAISE_RATE,

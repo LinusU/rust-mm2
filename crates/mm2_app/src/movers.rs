@@ -23,6 +23,7 @@ use tracing::{info, warn};
 
 use crate::banger::BangerDefs;
 use crate::city::{MovableModel, MovableModels, v3};
+use crate::object_sound::{ObjectSound, load_object_audio};
 
 /// The three manager families.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,6 +194,10 @@ pub fn spawn_movers(
     let mut models = MovableModels::new(vfs, meshes, images, materials);
     let mut bangers = BangerDefs::new(vfs);
     let mut rng = ParkedRng::new(seed ^ 0x6d6f_7665);
+    // Ferries carry `ferry` (engine loop, horn every 5–10 s); a train
+    // carries `subwaycar` on its middle car.
+    let ferry_sound = load_object_audio(vfs, "ferry");
+    let train_sound = load_object_audio(vfs, "subwaycar");
     let mut families = vec![MoverFamily::Sailboat, MoverFamily::Train];
     if !networked {
         families.insert(1, MoverFamily::Ferry);
@@ -234,6 +239,13 @@ pub fn spawn_movers(
                         follower,
                         lift,
                     });
+                    if family == MoverFamily::Ferry
+                        && let Some(spec) = &ferry_sound
+                    {
+                        commands
+                            .entity(body)
+                            .insert(ObjectSound::new(spec.clone(), pi as u32 + 1));
+                    }
                     match family {
                         MoverFamily::Ferry => report.ferries += 1,
                         _ => report.sailboats += 1,
@@ -259,6 +271,11 @@ pub fn spawn_movers(
                             car
                         })
                         .collect();
+                    if let Some(spec) = &train_sound {
+                        commands
+                            .entity(cars[TRAIN_CARS / 2])
+                            .insert(ObjectSound::new(spec.clone(), pi as u32 + 1));
+                    }
                     commands.spawn((
                         CityEntity,
                         owner,
@@ -329,6 +346,7 @@ pub fn drive_movers(
     mut movers: Query<(&mut Mover, BodyQuery), Without<TrainCar>>,
     mut trains: Query<&mut Train>,
     mut cars: Query<BodyQuery, (With<TrainCar>, Without<Mover>)>,
+    mut sounds: Query<&mut ObjectSound, With<TrainCar>>,
 ) {
     let running = matches!(
         session.phase(),
@@ -351,6 +369,14 @@ pub fn drive_movers(
         let lift = Vec3::Y * train.lift;
         let before: Vec<(Vec3, Vec3)> = (0..TRAIN_CARS).map(|i| train.motion.car_pose(i)).collect();
         train.motion.step(dt);
+        // The Underground's sound switches rows by speed: the
+        // `LondonTube` rumble (row 0) while the train moves, the
+        // silent `NOTHING` row while it waits.
+        if let Ok(mut sound) = sounds.get_mut(train.cars[TRAIN_CARS / 2]) {
+            let moving = train.motion.moving();
+            sound.state.set_active(Some(0), moving);
+            sound.state.set_active(Some(1), !moving);
+        }
         for (i, &car) in train.cars.iter().enumerate() {
             let Ok((mut pos, mut rot, mut lin, mut ang)) = cars.get_mut(car) else {
                 continue;

@@ -30,6 +30,7 @@ pub mod navarrow;
 pub mod navarrow3d;
 pub mod net;
 pub mod netdrive;
+pub mod object_sound;
 pub mod oppind;
 pub mod opponents;
 pub mod pause;

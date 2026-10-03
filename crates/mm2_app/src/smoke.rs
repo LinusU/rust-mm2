@@ -634,6 +634,9 @@ fn run_headless(
                     // F18-B.5: the environmental commentary queue —
                     // the record's `aud=` q field reads its count.
                     crate::audio::commentary_voices.after(session::drive_session),
+                    // Object sounds — the record's `aud=` o field
+                    // counts the voices spawned.
+                    crate::object_sound::object_sound_voices.after(session::drive_session),
                     crate::race_audio::race_cue_voices.after(session::drive_session),
                     crate::audio::audio_listener.after(session::drive_session),
                     crate::audio::count_sinks,
@@ -1856,8 +1859,15 @@ fn run_headless(
             } else {
                 String::new()
             };
+            // Object sounds (drawbridges, ferries, the Underground) —
+            // voices spawned, the same activity-gated append.
+            let objects = if r.objects > 0 {
+                format!("/{}o", r.objects)
+            } else {
+                String::new()
+            };
             format!(
-                " aud={}h/{}v/{}s/{}l/{}a/{}r{impacts}{clutch}{surface}{ambient}{sirens}{weather}{commentary}{race_cues}{dropped}{failed}",
+                " aud={}h/{}v/{}s/{}l/{}a/{}r{impacts}{clutch}{surface}{ambient}{sirens}{weather}{commentary}{objects}{race_cues}{dropped}{failed}",
                 r.horns, r.voices, r.sunk, r.loops, r.audible, r.rigs
             )
         })

@@ -85,7 +85,8 @@ each fixed step, leaving the angular velocity that carries it to the
 next step so cars on a moving leaf ride it. The session's
 `DrawbridgeReport` resource records the file and leaf counts.
 
-Not reproduced: the bell/motor audio (`aud/ambient/drawbridge.csv`,
-`bridgebell`/`bridgemove`), and which cars count for `prox` (the
+The motor loop and bell (`aud/ambient/drawbridge.csv`) sound while a
+leaf moves — see `movers.md` § Object audio. Not reproduced: which
+cars count for `prox` (the
 list at `+0x24` of the manager is unidentified; every participant is
 used — no retail path uses `prox`).
