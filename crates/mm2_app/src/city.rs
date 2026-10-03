@@ -2778,6 +2778,60 @@ impl<'a> PropCache<'a> {
     }
 }
 
+/// A PKG prepared for a placement that moves at runtime (drawbridge
+/// leaves): render parts plus one collider, with a caller-chosen
+/// content offset baked in — the body's origin is then the pivot.
+pub(crate) struct MovableModel {
+    pub parts: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
+    pub collider: Option<Collider>,
+}
+
+/// Builds [`MovableModel`]s through the same PKG→mesh path stamped
+/// props use, sharing materials across every model it loads.
+pub(crate) struct MovableModels<'a> {
+    cache: PropCache<'a>,
+}
+
+impl<'a> MovableModels<'a> {
+    pub fn new(
+        vfs: &'a Vfs,
+        meshes: &'a mut Assets<Mesh>,
+        images: &'a mut Assets<Image>,
+        materials: &'a mut Assets<StandardMaterial>,
+    ) -> Self {
+        Self {
+            cache: PropCache {
+                vfs,
+                meshes,
+                mats: MaterialCache::new(vfs, images, materials),
+                cache: HashMap::new(),
+                missing_prims: 0,
+            },
+        }
+    }
+
+    /// `geometry/<name>.pkg` with `offset` (Bevy space) added to every
+    /// vertex; `None` when the PKG is missing or has nothing to draw.
+    /// Uncached: callers load each name once.
+    pub fn load(&mut self, name: &str, offset: Vec3) -> Option<MovableModel> {
+        let model = self.cache.build(name, PropOffset::Bound(offset))?;
+        Some(MovableModel {
+            parts: model.parts,
+            collider: model.collider,
+        })
+    }
+
+    /// Spawn the animated-texture drivers the loaded materials need
+    /// and return the texture stems that failed to resolve.
+    pub fn finish(self, commands: &mut Commands, owner: SessionEntity) -> BTreeSet<String> {
+        let mut mats = self.cache.mats;
+        for anim in std::mem::take(&mut mats.animated) {
+            commands.spawn((CityEntity, owner, anim));
+        }
+        mats.missing
+    }
+}
+
 /// Convert an INST coordinate placement to a Bevy `Mat4` in mirrored space.
 fn inst_transform(c: &inst::InstCoordinate) -> Mat4 {
     // When mirroring, the placement is re-expressed in the mirrored frame

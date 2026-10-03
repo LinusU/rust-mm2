@@ -804,6 +804,28 @@ pub fn load_session_world(
             }
         }
     }
+    // Drawbridge leaves (Tower Bridge, Waterloo, SF's Chinatown gate):
+    // the PSDL suppresses the road under them, so they are part of
+    // the drivable world. The event's own bridge file wins over the
+    // city default, which is why this waits for the event setup.
+    if world_ok && let WorldMode::City { psdl } = &config.world {
+        let city_stem = std::path::Path::new(psdl)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let report = crate::drawbridge::spawn_drawbridges(
+            &mut commands,
+            &vfs.0,
+            &city_stem,
+            event_key.as_ref().map(|k| k.stem.as_str()),
+            &mut assets.meshes,
+            &mut assets.images,
+            &mut assets.materials,
+            owner,
+        );
+        commands.insert_resource(report);
+    }
     // F25-A.2: the lobby's humans share the event's authored grid —
     // the local participant's seat resolves through the same
     // `seat_pose` the remote reconcile applies (`start_slots[seat]`,

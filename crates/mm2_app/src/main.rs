@@ -1217,6 +1217,9 @@ fn main() {
     .init_resource::<pause::PauseMenu>()
     .init_resource::<results::ResultsMenu>()
     .add_systems(FixedUpdate, advance_session_tick)
+    // Drawbridge leaves pose after the solver step, like the lane
+    // followers: the angular velocity they leave carries the next step.
+    .add_systems(FixedLast, mm2_app::drawbridge::drive_drawbridges)
     .add_systems(
         FixedLast,
         (

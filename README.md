@@ -39,6 +39,9 @@ Vertical-slice stage. What works today:
   per-room textured meshes, per-room static colliders, facade-bound walls,
   ~2000 INST/PKG props with collision, and a spawn on verified road
   geometry. San Francisco parses and emits identically.
+- Drawbridges: Tower Bridge, both Waterloo crossings and the Tower of
+  London gate open and close on the retail cycle (per-event bridge
+  files honoured); SF's Chinatown gate stands.
 
 ## Build & run
 

@@ -52,8 +52,9 @@ per path: char[32] name (NUL-padded, may fill all 32 bytes)
   the last). Kept raw; `validate()` reports an out-of-range cursor.
 - `PREFIX:` name decorations — `OPEN:`/`open:`/`inactive:` appear on
   `giz_*` bridge/gate props (`london_bridge_circuit0.pathset` carries
-  `OPEN:giz_bridge01_l`), inferred to be event-state variants; the
-  audit strips the prefix for asset resolution.
+  `OPEN:giz_bridge01_l`). On bridge files they are the drawbridge
+  mode, verified from the executable (`docs/research/drawbridge.md`);
+  the audit strips the prefix for asset resolution.
 - Other authored prefixes seen: `sp_`/`np_`/`op_`/`wp_`/`cp_`/`xcp_`/
   `giz_`/`prop_`/`decal_`/`trackdecal_`/`r4i_`/`r_` — naming
   conventions, not verified semantics.
@@ -217,10 +218,13 @@ stamping (authoring leftovers — double-stamping would z-fight the
 rail street). The 4–5 props-only rail segments are never drawn; if
 original evidence shows prop-channel decals render, one flag flips.
 
+The `<city>_bridge[_<event>].pathset` drawbridge sets are consumed by
+`mm2_app::drawbridge` — see `docs/research/drawbridge.md`.
+
 Still unconsumed: `audio_pathsets/` (`PATHnn` sound
-routes, F07/F08), the `<city>_<object>.pathset` ambient object sets
-and `<object>_<event>.pathset` overrides (`london_bridge*`,
-`*_parkedcar*`, `*_ferry`, `*_sailboat`, `london_train` — all
+routes, F07/F08), the other `<city>_<object>.pathset` ambient object
+sets and `<object>_<event>.pathset` overrides (`*_parkedcar*`,
+`*_ferry`, `*_sailboat`, `london_train` — all
 `giz_*`/`PATHnn`/`sp_pcar*` on retail; they need the animated-object
 and parked-car features, not static stamping), crash-course stem
 files (the events are not loadable yet, F21), `circuitx`/`slalom`/

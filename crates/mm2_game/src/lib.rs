@@ -14,6 +14,7 @@ pub mod banger;
 pub mod breakaway;
 pub mod config;
 pub mod damage;
+pub mod drawbridge;
 pub mod effects;
 pub mod hudmap;
 pub mod ids;
