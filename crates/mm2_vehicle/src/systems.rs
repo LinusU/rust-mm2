@@ -646,17 +646,22 @@ pub fn vehicle_simulation(
             } else {
                 None
             };
-            // The gyroscope is the yaw authority for the maneuver's
-            // duration, not a torque source: it sets the body's yaw
-            // rate to the authored value outright each step. A torque
-            // (or a partial blend) has to wrestle the tires' kinetic
-            // friction — which, correctly, resists rotation once the
-            // car has scrubbed its speed, stalling the maneuver at
-            // ~140° exactly where it is meant to work. The record is
-            // the car's authored spin capability; the assist delivers
-            // it. The solver can still knock the rate back within a
-            // step (contacts, tire forces) — the write re-asserts it
-            // next step.
+            // The gyroscope guarantees the authored yaw rate for the
+            // maneuver's duration, not a torque source: a body turning
+            // slower than the record is set to it outright each step. A
+            // torque (or a partial blend) has to wrestle the tires'
+            // kinetic friction — which, correctly, resists rotation
+            // once the car has scrubbed its speed, stalling the
+            // maneuver at ~140° exactly where it is meant to work. The
+            // solver can still knock the rate back within a step
+            // (contacts, tire forces) — the write re-asserts it next
+            // step.
+            //
+            // It is a floor, never a ceiling. The locked rear tires of a
+            // handbrake turn already rotate most cars faster than their
+            // record — the Beetle authors 0.8 rad/s, the rate it already
+            // corners at on full lock — and holding them to it made the
+            // handbrake scrub speed without sliding the car at all.
             match state.gyro_spin.as_mut() {
                 Some(spin) => {
                     spin.age += dt;
@@ -677,7 +682,7 @@ pub fn vehicle_simulation(
                         state.gyro_spin = None;
                     } else if released || reversed || spin.age >= max_age {
                         state.gyro_spin = None;
-                    } else {
+                    } else if angvel.y * spin.rate.signum() < spin.rate.abs() {
                         forces.angular_velocity_mut().y = spin.rate;
                     }
                 }
@@ -691,7 +696,9 @@ pub fn vehicle_simulation(
                             rotated: 0.0,
                             age: 0.0,
                         });
-                        forces.angular_velocity_mut().y = rate;
+                        if angvel.y * rate.signum() < rate.abs() {
+                            forces.angular_velocity_mut().y = rate;
+                        }
                     }
                 }
             }

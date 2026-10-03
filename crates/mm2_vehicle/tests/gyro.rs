@@ -173,8 +173,8 @@ fn a_tap_doses_the_spin() {
     let (mut app, car) = grounded_app(cfg);
     up_to_speed(&mut app, car);
     let h0 = heading(&app, car);
-    // Half a second of handbrake — a tap, not a held spin.
-    drive(&mut app, car, FRAMES_PER_SECOND / 2, SPIN_INPUT);
+    // A quarter second of handbrake — a tap, not a held spin.
+    drive(&mut app, car, FRAMES_PER_SECOND / 4, SPIN_INPUT);
     // Let go; the latch must release with the inputs.
     drive(
         &mut app,

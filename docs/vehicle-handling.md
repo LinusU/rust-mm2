@@ -229,10 +229,16 @@ carries the record verbatim; `None` means no record and no assist.
 
 The consumption is a designed reading — the original's `Update()` is
 unrecovered (UNK-13; see `docs/research/damage.md` and DSN-22).
-Handbrake plus steering while travelling latches a spin that *writes*
-the authored yaw rate for as long as the inputs are held — a tap spins
-partway, a held one completes ~180°, `Reverse180` runs the same
-maneuver backwards as the J-turn. `Drift` relieves the yaw damper's
+Handbrake plus steering while travelling latches a spin that holds the
+yaw rate *at least* at the authored rate for as long as the inputs are
+held — a tap spins partway, a held one completes ~180°, `Reverse180`
+runs the same maneuver backwards as the J-turn. It is a floor, never a
+ceiling: the locked rear tires already rotate most cars faster than
+their record, and the Beetle's 0.8 rad/s is just the rate it corners at
+on full lock, so pinning the rate there made the handbrake scrub speed
+without sliding the car. From 72 km/h a 0.3 s flick now slides the
+Beetle out to ~40° and exits ~40° off its line; held 0.6 s it spins
+the full 180°. `Drift` relieves the yaw damper's
 slip term so a drift-authored car holds its slide; `drift = 0` is the
 unmodified policy. `Pitch`/`Roll` would right the car per-axis in the
 air like `air_control`, but every retail record authors them at 0.0.

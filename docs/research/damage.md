@@ -300,10 +300,12 @@ gates and the Crash Course's own lessons:
   backwards. The latch is `VehicleState::gyro_spin`: a per-frame gate
   cannot express a 180 because the car's forward speed collapses to
   zero halfway through (the recovered `mmCarSim` keeps a `SpinState`
-  machine for the same reason). While latched the gyro writes the
-  authored yaw rate directly — it is the maneuver's yaw authority,
-  not a torque fighting the tires, which correctly resist rotation
-  once the car has scrubbed its speed. The handbrake hold doses the
+  machine for the same reason). While latched the gyro raises a
+  slower yaw rate to the authored one directly — not a torque
+  fighting the tires, which correctly resist rotation once the car
+  has scrubbed its speed — but never lowers a faster one: the
+  Beetle's 0.8 rad/s is the rate it already corners at, so pinning
+  the rate made its handbrake scrub speed without sliding at all. The handbrake hold doses the
   rotation ("a short tap ~90°, a held one ~180°" — the community
   reading of the lesson): releasing either input drops the latch
   partway, ~π completes it (`gyro_completed`), an opposite flick

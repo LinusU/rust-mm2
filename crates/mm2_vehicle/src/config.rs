@@ -284,15 +284,15 @@ pub struct AssistConfig {
 /// `{Drift}` and `{Pitch, Roll}` to the three maneuver families. Its
 /// `Update()` is unrecovered, so how the sim applies the rates is a
 /// documented designed reading (UNK-13): the rates are yaw-speed
-/// ceilings a servo drives the car toward while the maneuver input
-/// holds — a short handbrake tap doses a partial spin, a held one the
-/// full 180°.
+/// floors the car is held to while the maneuver input holds — a short
+/// handbrake tap doses a partial spin, a held one the full 180° — and
+/// never ceilings: tires already rotating the car faster are left to.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct GyroConfig {
-    /// `Spin180` — yaw-rate ceiling (rad/s) for the handbrake 180° spin
+    /// `Spin180` — yaw-rate floor (rad/s) for the handbrake 180° spin
     /// while travelling forward. `0` = the car authors no spin assist.
     pub spin180: f32,
-    /// `Reverse180` — yaw-rate ceiling (rad/s) for the reverse 180°
+    /// `Reverse180` — yaw-rate floor (rad/s) for the reverse 180°
     /// (J-turn) while travelling backwards.
     pub reverse180: f32,
     /// `Drift` — 0..1 share of the handbrake yaw-damping relief: a car
