@@ -1,3 +1,74 @@
+# Last iteration — F25-B repair: the missed third scheduling —
+# `run_headless`'s `RunSource::Lobby` arm (the `mm2 --join --headless`
+# client) now orders `apply_snapshots` after
+# `reconcile_remote_players` like the windowed app and `bridge_app`,
+# and a schedule-graph test asserts the edge on the real wiring
+# (new-run iteration 9)
+
+Repair iteration on `ralph/night` (baseline `0a93fb1` — the iter-8
+terminal-edge + `Loading`-hold repair; external review **rejected**:
+fail on F25-B, one blocking finding). Root cause — an implementation
+defect, a missed call site: the iter-8 fix added the
+`apply_snapshots.after(reconcile_remote_players)` edge to two of the
+three client schedulings (`main`'s windowed arm and `net_app`'s
+`bridge_app`) but not to `smoke.rs`'s `RunSource::Lobby` arm — the
+`mm2 --join --headless` path the `net_drive`/`net_app` process-level
+legs drive. The reconcile's `NetPlayer` stamp on the local seat is a
+deferred `Commands` insert and `drive_lobby` has no deferred params,
+so the lone `.after(drive_lobby)` edge created no sync point: a snap
+held through `Loading` could apply on the first live update with the
+stamp still queued, the `With<NetPlayer>` seat filter would skip the
+local seat's rows — a replicated `TimedOut`/`Finished` tail included —
+and the session would strand in `Playing` forever on a dead stream,
+the same failure class the iteration exists to eliminate.
+
+## What landed
+
+- `add_lobby_client_systems` (`smoke.rs`, new private fn): the
+  `RunSource::Lobby` arm's `init_resource`s + `add_systems` tuple
+  extracted into one named place so the production wiring is directly
+  inspectable by a test (the link insert stays at the arm).
+- `apply_snapshots` now also `.after(reconcile_remote_players)` on
+  this path — the identical edge `main.rs` and `bridge_app` carry,
+  and the arm's stale "same ordering contract" comment is true again.
+- `smoke::tests::the_headless_join_orders_the_apply_after_the_reconcile`
+  (+1): builds an app through the real `add_lobby_client_systems` and
+  asserts the `Set(reconcile) → System(apply)` edge exists in the
+  `Update` schedule's dependency graph — the graph records ordering
+  eagerly at `add_systems`, and both nodes resolve through their
+  `SystemTypeSet`s (`.after(system)` lands on the type-set node;
+  `System::name` is a placeholder string without bevy's `debug`
+  feature). Verified to fail when the edge is removed. A
+  behavior-level leg could not distinguish the bug — Bevy's
+  unordered-pair scheduling is deterministic-but-unguaranteed, so the
+  edge itself is the assertion.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` green — 89 suites, 0 failures
+(`mm2_app` lib 88/88 incl. the new leg, `net_app` 48/48,
+`net_drive` 3/3, `mm2_net` 80/80).
+
+## Classification / remaining open items
+
+- Implementation choice throughout — the scheduling edge is ours;
+  no original-behavior claim.
+- Evidence: the ordering edge asserted on the production wiring +
+  the iter-8 behavior legs re-verified (all still pass). Still not
+  exercised: a true two-process leg reproducing the held-snap
+  scenario on the smoke path (the load needs the asset stack — the
+  timing cannot be staged deterministically in-process), LAN/Internet,
+  and the impairment matrix on the deferral/tail/hold path.
+- All other open items unchanged from the iter-8 handoff: rematch/
+  lobby-result lifecycle and bulk late-joiner ledger sync (F26),
+  stalled-wire-seat watchdog, dedicated `mm2-host` `Results`,
+  stranded-client teardown recovery. Not F25-AC01..06 or
+  F26-AC01..06 completion.
+
+---
+
 # Last iteration — F25-B repair: the client-side terminal-edge
 # swallow — a local resolution replicated while the session is still
 # `Ready`/`Countdown` can never re-fire its `Playing`-gated
