@@ -243,6 +243,24 @@ pace but ploughs the heavy vehicles at full lock around 70 km/h — at
 `1.4` eight cars lost over 5% somewhere against five at `1.2`, the Cab,
 F-350, fire truck and both buses, all within 0.13 g at 20 m/s.
 
+### Traction control
+
+`assists.traction_control` caps each driven tire's drive at a share of
+its grip — and of the grip the car's hardest-cornering tire has left,
+`sqrt(1 − u²)` for its lateral utilization `u`, not of its straight-
+line limit. Lateral force and drive come out of one friction ellipse,
+and a keyboard driver holds the throttle through a corner: capped
+against the straight-line limit, the drive spent the grip the steering
+needed. Flat out on full lock from 50 km/h the Audi TT turned 41° in
+1.5 s against 89° holding speed, and the rear-driven Mustang Cruiser
+ran from 50 to 90 km/h through the corner and wide. It is the whole
+car's worst tire because a rear-driven car's fronts run out first; the
+cap uses last step's value, so it lags a step. It fades in between 2
+and 8 m/s — at a crawl a few cm/s of creep reads as a tire at its limit
+and the car could not pull away. `drive_probe --turn` measures it: flat
+out the Beetle now turns 121° from 50 km/h, the TT 110°, the Cruiser
+112°, scrubbing speed instead of running wide.
+
 ### Gear changes
 
 `GearChangeTime` is authored at 0.8-1.0 s. Cutting drive for that long is

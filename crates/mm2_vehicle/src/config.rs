@@ -260,7 +260,10 @@ pub struct AssistConfig {
     /// Yaw damping strength: bleeds angular velocity toward the velocity
     /// heading (0 = off).
     pub yaw_stability: f32,
-    /// Traction control: max allowed slip ratio under power (0 = off).
+    /// Traction control: the share of a driven tire's grip the drive
+    /// may use (0 = off) — of what the car's hardest-cornering tire has
+    /// left once it is cornering, so throttle held through a corner
+    /// cannot spend the grip the steering needs.
     pub traction_control: f32,
     /// Countersteer assistance: extra steering authority correcting yaw
     /// error during slides (0 = off).

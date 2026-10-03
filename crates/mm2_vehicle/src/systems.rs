@@ -195,6 +195,16 @@ pub fn vehicle_simulation(
                 .all(|w| !w.driven || w.drive_share.is_some());
         let n_driven_cfg = cfg.wheels.iter().filter(|w| w.driven).count().max(1) as f32;
 
+        // The hardest-cornering tire last step, read before the first
+        // pass resets the wheel state — traction control holds every
+        // driven wheel to what that tire has left (see below).
+        let cornering_prev = state
+            .wheels
+            .iter()
+            .map(|w| w.cornering.abs())
+            .fold(0.0f32, f32::max)
+            .min(1.0);
+
         // First pass: probes + suspension, collecting per-wheel data.
         let mut grounded_any = false;
         let wheel_count = wheel_count_cfg.min(state.wheels.len());
@@ -474,8 +484,31 @@ pub fn vehicle_simulation(
 
             // Traction control caps the drive request to a fraction of the
             // tire's limit (0 = off). It only governs the power side.
+            //
+            // The limit is what the hardest-cornering tire has left: the
+            // friction ellipse below takes lateral force and drive from
+            // one budget, so a keyboard driver holding throttle through a
+            // corner spent the grip the steering needed — from 50 km/h the
+            // Audi TT turned 41° in 1.5 s flat out against 89° holding
+            // speed. It is the whole car's, not just this tire's: a
+            // rear-driven car whose fronts are at their limit otherwise
+            // accelerates through the corner and runs wide anyway.
+            // Steering wins; the drive takes the rest. It fades in with
+            // speed: at a crawl the slip angle of a few cm/s of creep
+            // reads as a tire at its limit, and the car could not pull
+            // away at all.
+            let lateral_limit = tires.lateral_grip * load * surface_grip;
+            let cornering = if lateral_limit > 0.0 {
+                (lateral / lateral_limit).clamp(-1.0, 1.0)
+            } else {
+                0.0
+            };
             if cfg.assists.traction_control > 0.0 {
-                let cap = traction_limit * cfg.assists.traction_control;
+                let fade =
+                    ((fwd_speed.abs() - CORNERING_TC_FROM) / CORNERING_TC_RAMP).clamp(0.0, 1.0);
+                let worst = cornering.abs().max(cornering_prev) * fade;
+                let left = (1.0 - worst * worst).sqrt();
+                let cap = traction_limit * cfg.assists.traction_control * left;
                 drive_request = drive_request.clamp(-cap, cap);
             }
             drive_delivered += drive_request;
@@ -563,6 +596,7 @@ pub fn vehicle_simulation(
             ws.surface_grip = surface_grip;
             ws.surface_drag = surface_drag;
             ws.lateral_force = lateral;
+            ws.cornering = cornering;
             ws.longitudinal_force = longitudinal;
             ws.spin += (vel_long / wheel.radius.max(0.01)) * dt;
         }
@@ -742,6 +776,11 @@ pub fn vehicle_simulation(
     }
 }
 
+/// Forward speed (m/s) below which traction control ignores cornering,
+/// and the span over which it fades in — a crawl's slip angles say
+/// nothing about how hard a tire is cornering.
+const CORNERING_TC_FROM: f32 = 2.0;
+const CORNERING_TC_RAMP: f32 = 6.0;
 /// Body slip (rad) a slide may keep before `slide_recovery` pulls on it —
 /// about 10°, past what an ordinary corner carries.
 const SLIDE_RECOVERY_DEADZONE: f32 = 0.17;

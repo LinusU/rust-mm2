@@ -324,6 +324,50 @@ fn grip_limited_steering_still_reaches_the_tires_grip() {
     );
 }
 
+#[test]
+fn flat_out_through_a_corner_still_turns() {
+    // A keyboard driver holds the throttle through a corner. Traction
+    // control that capped drive only against the tire's straight-line
+    // limit let the drive spend the grip the steering needed — flat out
+    // from 50 km/h the Audi TT turned 41° in 1.5 s against 89° holding
+    // speed. It now leaves the hardest-cornering tire its lateral share,
+    // so flat out turns nearly as far as holding the speed does.
+    let turned = |flat_out: bool| {
+        let mut cfg = VehicleConfig::default();
+        // A sports car's engine — enough drive to spend the grip.
+        cfg.engine.peak_torque_nm *= 3.0;
+        cfg.engine.max_power_w = cfg.engine.max_power_w.map(|w| w * 3.0);
+        let (mut app, car) = test_app_with(cfg);
+        drive(&mut app, car, FRAMES_PER_SECOND, VehicleInput::default());
+        app.world_mut().get_mut::<LinearVelocity>(car).unwrap().0 = Vec3::NEG_Z * 14.0;
+        for _ in 0..FRAMES_PER_SECOND * 3 / 2 {
+            let speed = app.world().get::<VehicleState>(car).unwrap().forward_speed;
+            let throttle = if flat_out {
+                1.0
+            } else {
+                ((14.0 - speed) * 0.5).clamp(0.0, 1.0)
+            };
+            drive(
+                &mut app,
+                car,
+                1,
+                VehicleInput {
+                    throttle,
+                    steering: 1.0,
+                    ..default()
+                },
+            );
+        }
+        let v = app.world().get::<LinearVelocity>(car).unwrap().0;
+        v.x.atan2(-v.z).abs().to_degrees()
+    };
+    let (flat, held) = (turned(true), turned(false));
+    assert!(
+        flat > held * 0.85,
+        "flat out turned {flat:.0}° against {held:.0}° holding speed"
+    );
+}
+
 /// Launch at `speed` m/s, hold it with the pedals on full lock and return
 /// how hard the path bends once settled, in g — from the velocity's
 /// heading, so a car spinning faster than it corners does not count.

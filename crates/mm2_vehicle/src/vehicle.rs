@@ -86,6 +86,11 @@ pub struct WheelState {
     pub traction_demand: f32,
     /// Applied lateral force, N.
     pub lateral_force: f32,
+    /// Cornering utilization: the tire's lateral force over its lateral
+    /// limit, signed, before the friction ellipse shares the budget with
+    /// the drive. Traction control reads the car's hardest-cornering
+    /// tire from the previous step.
+    pub cornering: f32,
     /// Applied longitudinal force, N.
     pub longitudinal_force: f32,
     /// The combined surface × environment grip multiplier the tire path
