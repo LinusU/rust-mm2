@@ -36,8 +36,11 @@ behind the adaptations.
   (`WheelVisual::follows`); the parts stay in the visual model and copy
   the reference wheel's droop, steer and spin, but add no suspension,
   tire or load-sharing corner. Simulating them independently makes the
-  rig statically indeterminate — the Moon Rover's rear-biased
-  `CenterOfGravity` then tripsods and porpoises. Trailer `twhl` parts use
+  rig statically indeterminate — the Moon Rover tripods and porpoises
+  on six independent corners. (Even the back-back offsets are
+  mm2hook's own extension: it adds the `BackBack*WheelPosDiff` fields
+  to `vehCarSim`, so unhooked retail never drew `whl4`/`whl5` at
+  all.) Trailer `twhl` parts use
   the decorative-radius rule instead; the retail trailer wheel binding
   beyond four is unrecovered (mm2hook has `TrailerBackBack*PosDiff`
   fields but no stock trailer exercises them).
@@ -48,7 +51,7 @@ behind the adaptations.
 | --- | --- | --- |
 | `Mass` | `mass` | kg, verbatim |
 | `InertiaBox` | `inertia` | box dimensions → principal tensor |
-| `CenterOfGravity` | `center_of_mass` | offset from the bound centre |
+| `CenterOfGravity` | `center_of_mass` | `-x`/`-z` from the model origin; height adapted, see below |
 | `Engine.MaxHorsePower` / `OptRPM` | `engine.max_power_w` / `peak_power_rpm` | 745.7 W/hp |
 | `Engine.IdleRPM` / `MaxRPM` | `engine.idle_rpm` / `redline_rpm` | verbatim |
 | `Trans.Low`/`High`/`Reverse`/`GearBias` | `transmission.gear_ratios` | per-band top speeds → ratios at `OptRPM` |
@@ -92,6 +95,40 @@ cargo run -p mm2_app --example drive_probe -- <install> vppanoz --city sf
 Use the second whenever a handling claim depends on what the solver does
 rather than on what the numbers say. Two of the adaptations below were
 found only by running it.
+
+### Centre of mass
+
+`CenterOfGravity` is not where the mass is. The original places the
+model at the inertial origin *plus* `CenterOfGravity`, so in model space
+the centre of mass sits at `-CenterOfGravity` — and its static load
+split says so outright: `vehWheel::ComputeConstants` gives each wheel
+`|z - CenterOfGravity.z| / 2|z|` of the weight, so a positive `z`
+offset loads the front (`-z`) axle. (Read from Dummiesman's
+`mmclone_v2` port of the binary, which loads wheel pivots and
+`CenterOfGravity` through the same z flip — documented, not decompiled
+here.)
+
+We read it the other way round for a long time, adding `z` to the bound
+centre. Most cars author a few tenths either way and drove regardless,
+but the Moon Rover's `+0.4` put its mass 0.35 m *behind* its rear
+axle: it rested on its tail with the front wheels in the air, never
+reached 100 km/h and wandered 180° off a straight launch. Plan-view
+position (`x`, `z`) now follows the original. On the rest of the
+roster, `drive_probe` measured the Mustang Fastback's half-second
+stall and the Freightliner's 25° launch wander gone, the double-decker
+pulling evenly, the London Cab's one-second stall gone with its 93°
+launch wander down to 11° (9.5→4.2 s to 100 km/h), and both Minis
+1.6 s quicker. The DB7 is the cost: front-driven with 57% of its
+weight now on the rear axle, it is 1.2 s slower to 100 km/h and spins
+at full lock from 30 m/s, cornering at 1.2 g there against 1.8 before.
+
+Height stays an adaptation. `-y` from the model origin puts every
+stock car's mass below its wheel hubs — the Beetle's 0.1 m off the
+road, the London Cab's 0.2 m *under* it — which is how the original
+kept cars on their wheels, and nothing else here (roll resistance, the
+grip scale, the steering cap) is tuned for it. The height is the bound
+centre plus the authored `y` offset, and the roll assist below does
+the job the low mass did.
 
 ### Roll resistance
 

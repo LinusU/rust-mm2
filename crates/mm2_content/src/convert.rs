@@ -12,10 +12,11 @@
 //! * Vehicle space uses **identity** mapping from MM2 coordinates: MM2's
 //!   `-Z` forward matches Bevy's `-Z` forward, so no axis is mirrored for
 //!   vehicles (unlike the city importer, which mirrors Z for map layout).
-//!   `CenterOfGravity` is therefore mirrored on Z after being evaluated in
-//!   MM2 space.
-//! * `CenterOfGravity` is an offset from the bound-box centre — verified
-//!   against every stock car (produces plausible COM heights).
+//! * `CenterOfGravity` locates the model *from* the centre of mass, so in
+//!   plan view the centre of mass sits at `-CenterOfGravity` from the
+//!   model origin (the original's static load split; see
+//!   docs/vehicle-handling.md "Centre of mass"). Its height is adapted:
+//!   bound-box centre plus the authored `y` offset.
 //! * `Trans.Low`/`High`/`Reverse` are per-band top speeds in mph; combined
 //!   gear ratios are derived so the engine sits at `OptRPM` at each band's
 //!   top speed, geometrically interpolated (biased by `GearBias`).
@@ -294,19 +295,33 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
     let mass = sim.mass.max(50.0);
     report.imported("vehCarSim.Mass", "mass", format!("{mass} kg"));
 
-    // COM = bound centre + CenterOfGravity (verified on stock data). The
-    // vehicle space is an identity map of MM2 coordinates: both use -Z
-    // forward.
+    // The original places the model at the inertial origin plus
+    // `CenterOfGravity`, so in model space the centre of mass is at
+    // `-CenterOfGravity`: `vehWheel::ComputeConstants` gives each wheel
+    // `|z - CenterOfGravity.z| / 2|z|` of the weight, loading the front
+    // (-z) axle for a positive offset. Read the other way the Moon Rover's
+    // +0.4 put its mass behind its rear axle. Height is the exception:
+    // `-y` from the model origin puts every stock car's mass below its
+    // wheel hubs (the London Cab's under the road), so it stays bound
+    // centre plus the authored offset — see docs/vehicle-handling.md
+    // "Centre of mass".
     let cog = sim.center_of_gravity;
-    let com = [
-        bcenter[0] + cog[0],
-        bcenter[1] + cog[1],
-        bcenter[2] + cog[2],
-    ];
+    let com = [-cog[0], bcenter[1] + cog[1], -cog[2]];
     report.derived(
         "vehCarSim.CenterOfGravity",
-        "center_of_mass",
-        format!("bound centre {bcenter:?} + authored offset {cog:?}"),
+        "center_of_mass.x/z",
+        format!(
+            "-CenterOfGravity from the model origin ({:.2}, {:.2})",
+            com[0], com[2]
+        ),
+    );
+    report.adapted(
+        "vehCarSim.CenterOfGravity",
+        "center_of_mass.y",
+        format!(
+            "bound centre {:.2} + authored offset {:.2}; the original's -y from the model origin sits below the wheel hubs",
+            bcenter[1], cog[1]
+        ),
     );
 
     let ib = sim.inertia_box;
@@ -959,6 +974,77 @@ pub fn convert_trailer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mm2_formats::tune::TuneFile;
+
+    /// A stock-shaped `vehCarSim` record carrying `cog` as its
+    /// `CenterOfGravity`.
+    fn sim_with_cog(cog: [f32; 3]) -> VehCarSim {
+        let wheel = "SuspensionExtent 0.15\nSuspensionLimit 0.05\nSuspensionFactor 1.0\n\
+            SuspensionDampCoef 0.1\nSteeringLimit 0.4\nSteeringOffset 0.25\nBrakeCoef 0.6\n\
+            HandbrakeCoef 2.0\nTireDispLimitLong 0.125\nTireDampCoefLong 0.25\n\
+            TireDragCoefLong 0.02\nTireDispLimitLat 0.125\nTireDampCoefLat 0.25\n\
+            TireDragCoefLat 0.05\nOptimumSlipPercent 0.16\n\
+            StaticFric 3.0\nSlidingFric 2.7\n";
+        let text = format!(
+            "vehCarSim {{\nMass 1000.0\nInertiaBox 2.0 2.0 3.0\n\
+             CenterOfGravity {} {} {}\nDrivetrainType 2\n\
+             Aero {{\nDrag 0.5\nDown 0.0\n}}\n\
+             Engine {{\nMaxHorsePower 260.0\nIdleRPM 750.0\nOptRPM 5800.0\nMaxRPM 8500.0\n}}\n\
+             Trans {{\nAutoNumGears 6\nReverse 30.0\nLow 20.0\nHigh 90.0\nGearBias 0.5\n\
+             GearChangeTime 0.8\n}}\n\
+             WheelFront {{\n{wheel}}}\nWheelBack {{\n{wheel}}}\n}}\n",
+            cog[0], cog[1], cog[2],
+        );
+        VehCarSim::from_tune(&TuneFile::parse(&text).unwrap()).unwrap()
+    }
+
+    /// Four wheels of radius 0.35 at `z = ±half_wheelbase`, origin on the
+    /// road like a stock `whlN.mtx`.
+    fn wheels(half_wheelbase: f32) -> Vec<WheelGeom> {
+        [(-0.75, -1.0), (0.75, -1.0), (-0.75, 1.0), (0.75, 1.0)]
+            .iter()
+            .enumerate()
+            .map(|(index, (x, side))| WheelGeom {
+                index,
+                origin: [*x, 0.35, side * half_wheelbase],
+                radius: 0.35,
+            })
+            .collect()
+    }
+
+    fn convert_with(sim: &VehCarSim, wheels: &[WheelGeom], body_top: f32) -> Converted {
+        convert(&ConvertInput {
+            id: "vptest",
+            display_name: "Test",
+            sim,
+            asnode: None,
+            wheels,
+            bound: None,
+            body_aabb: ([-0.9, 0.1, -2.0], [0.9, body_top, 2.0]),
+            stuck: None,
+            gyro: None,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn center_of_gravity_z_points_the_other_way_from_the_model() {
+        // The original's static load split (`vehWheel::ComputeConstants`)
+        // gives each wheel `|z - CenterOfGravity.z| / 2|z|` of the weight,
+        // so a positive offset loads the *front* (-z) axle: the centre of
+        // mass sits at -CenterOfGravity.z. The Moon Rover's +0.4 read the
+        // other way put its mass behind its rear axle.
+        let sim = sim_with_cog([0.0, -0.1, 0.4]);
+        let cfg = convert_with(&sim, &wheels(1.3), 1.5).config;
+        assert!((cfg.center_of_mass[2] - -0.4).abs() < 1e-6);
+        let rate = |i: usize| cfg.wheels[i].suspension.as_ref().unwrap().spring_rate;
+        assert!(
+            rate(0) > rate(2),
+            "front springs should carry the forward mass: {} against {}",
+            rate(0),
+            rate(2)
+        );
+    }
 
     /// Damping ratio implied by a rate, as the physics crate measures it.
     fn zeta(damping: f32, spring_rate: f32, wheel_load: f32) -> f32 {
