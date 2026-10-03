@@ -89,9 +89,17 @@ back), every wire stamp/gate and cross-process seed reads the wire
 namespace, and `RemoteSnaps::reset` clears the stream's watermarks/
 ledgers at the two observable authority boundaries (an accepted
 `Start`, the link's `Closed`) so a fresh host's restarted numbering
-can never stale-drop under a dead stream's watermark) — still
+can never stale-drop under a dead stream's watermark; the
+following iteration repaired the mint's floor — `begin_generation`
+now refuses the at-rest `generation == 0` a non-conforming peer can
+wire but no conforming lobby can mint, the apply/drain gates drop
+gen-0 traffic outright even at rest, and the accept-to-begin gap's
+foreign-generation drain-drop is now asserted) — still
 open: replicated
-result/race state, LAN/Internet scope), the F24-B
+result/race state, LAN/Internet scope, and the process-level
+rejoin leg, which needs a client rejoin feature that does not
+exist (a link `Closed` is terminal by design — whether rejoin is
+in scope is a product decision, recorded open), the F24-B
 remainder (B.7 landed the Bevy-side
 client bridge — `mm2 --join` consumes `Start` into the shared
 `Session` lifecycle; iter 020 repaired its two external-review

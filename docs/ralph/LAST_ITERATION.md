@@ -1,3 +1,99 @@
+# Last iteration — F25-B stream-boundary repair II: the wire
+# generation's floor — `Session::begin_generation` refuses the
+# at-rest mint `0`, and the apply/drain gates drop gen-0 wire
+# traffic outright even while `wire_generation()` still reads `0`
+# (new-run iteration 3)
+
+Repair iteration on `ralph/night` (baseline `f6b2a30` — the
+stream-generation slice; external verify + review pass with
+verification gaps only). Selected slice: two of that review's named
+gaps on the generation boundary the previous iteration landed —
+verbatim wire adoption had no floor, so a non-conforming peer's
+`Start{generation: 0}` was adopted verbatim (before the split it
+had clamped forward into an effective refusal), and the
+accept-to-begin gap's foreign-generation drain-drop was documented
+policy with no asserting test. The remaining review gaps stay open
+by scope rather than silence: a process-level rejoin leg needs a
+client rejoin feature that does not exist (link `Closed` is
+terminal by design — whether a rejoin should exist at all is a
+product decision, not a gate repair), the impairment legs over the
+authority-swap boundary build on it, and rendered/manual
+verification is a capability gap as before.
+
+## What landed
+
+- `Session::begin_generation` refuses `generation == 0` with a new
+  `SessionError::InvalidGeneration` — `0` is the at-rest value of a
+  never-begun `Session`, and a conforming `mm2_net` lobby mints
+  from `1` (`saturating_add` runs before the `Start` broadcast), so
+  `0` on the wire marks a non-conforming peer, not a session. The
+  refusal rides the existing begin-refusal path on both entry
+  points — `start()`'s immediate begin and the parked
+  `pending_start` consume — so a gen-0 `Start` ends as a named
+  session refusal (notice, clean `Leave`, nonzero exit) instead of
+  adopting the at-rest namespace. `wire_generation() == 0` now
+  unambiguously means "no session has begun on this process".
+- The wire-side gates drop gen-0 traffic outright for the same
+  reason: `apply_snap_frame` treats a `Snap{generation: 0}` as
+  foreign even at rest (a host streaming snaps with no `Start`
+  could otherwise "apply" a gen-0 frame against the at-rest value),
+  and `drain_pending_impacts` drops a gen-0 row counted whatever
+  the session value.
+- `docs/research/net.md`: the accept-to-begin drain clarified
+  (the accept-time reset does not wipe the new stream's queued
+  rows — the apply gate still drain-drops them as foreign until
+  `begin_generation` adopts the new mint), plus a "generation 0 is
+  not a session's name" paragraph recording the floor and
+  `mm2-join`'s verbatim-report stance (it never adopts a
+  generation, so it needs no floor).
+
+## Tests
+
+- `mm2_game` session 14→15: `a_zero_wire_generation_is_refused` —
+  the refusal returns `InvalidGeneration(0)`, leaves phase/config/
+  both counters untouched, and a legal mint still begins.
+- `netdrive` unit 18→19:
+  `foreign_generation_impact_rows_drain_drop_at_the_session_gate` —
+  a spawned remote seat discriminates the generation gate from the
+  seat gate: gen-0 traffic drops at rest (frame + row), the live
+  session's own rows land, the accept-to-begin gap's gen-2 rows
+  drain-drop counted while `wire_generation` is still the outgoing
+  session's (`pending` empties — nothing lingers past the begin),
+  and post-begin gen-2 rows land again.
+- `net_app` 41→42: `a_zero_generation_start_is_refused` — a rogue
+  host over a real loopback socket (raw `Conn`/`accept_hello` —
+  a conforming `Host` cannot mint 0 for the leg) completes the
+  handshake, sends `Welcome` and `Start{generation: 0}`; the
+  client refuses (notice + `Leave` + `AppExit` 1), never begins,
+  and adopts nothing.
+
+## Gates
+
+`cargo fmt --all -- --check` clean; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean;
+`cargo test --locked --workspace` green — 91 suites, 0 failures
+(`net_app` 42/42, `netdrive` unit 19/19 within `mm2_app` lib 81/81,
+`mm2_game` session 15/15, `net_drive` 3/3, `mm2_net` 80/80).
+Toolchain per `rust-toolchain.toml` stable.
+
+## Classification / remaining open items
+
+- Implementation choice throughout — the floor, the refusal path
+  and the gen-0 wire drops are ours; the retail wire protocol is
+  unrecovered, so no original-behavior claim.
+- Evidence: unit + integration legs — the rogue-`Start` leg drives
+  a real loopback socket through the real `drive_lobby`/`start()`
+  path. Still no process-level rejoin leg (one client process can
+  only ever see one authority — `Closed` is terminal by design;
+  recorded as a product-scope question, not silently narrowed), no
+  LAN/Internet leg, nothing rendered or driven by hand, no retail
+  content.
+- F25-B remaining scope: replicated result/race state, LAN/Internet
+  scope, the impact-side nits (no struck-side identity/surface on
+  `RemoteImpact`), and the rejoin evidence above.
+
+---
+
 # Last iteration — F25-B repair: the snap stream's generation
 # namespace split — `Session::wire_generation()` adopts the
 # authority's mint verbatim while `generation()` stays the local
