@@ -220,12 +220,13 @@ pub fn spawn(
         .map(|(i, cp)| (cp, Some(i)))
         .chain(definition.finish.iter().map(|cp| (cp, None)))
     {
+        let forward = cp.forward();
         let root = commands
             .spawn((
                 owner,
                 CheckpointMarker { gate },
                 Transform::from_translation(cp.center)
-                    .with_rotation(Quat::from_rotation_y(cp.heading_deg.to_radians())),
+                    .with_rotation(Quat::from_rotation_y(forward.x.atan2(forward.y))),
                 if gate.is_none() {
                     Visibility::Hidden
                 } else {

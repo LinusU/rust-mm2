@@ -81,11 +81,11 @@ pub struct Checkpoint {
 impl Checkpoint {
     /// The trigger's forward axis in the ground plane, derived from
     /// [`heading_deg`](Self::heading_deg). The column's convention is
-    /// inferred — `0°` is treated as `+Z`, increasing toward `+X` —
-    /// and only matters when `require_direction` is set.
+    /// measured against London circuit gates: `0°` is `+Z`, positive
+    /// angles turn toward `-X`. The same axis orients the drawn gantry.
     pub fn forward(&self) -> Vec2 {
         let a = self.heading_deg.to_radians();
-        Vec2::new(a.sin(), a.cos())
+        Vec2::new(-a.sin(), a.cos())
     }
 
     /// Whether the movement segment `from → to` crosses this trigger.
@@ -128,8 +128,8 @@ impl Checkpoint {
 /// `_strtpnts` `a` column and the `.opp` row-0 heading both author it
 /// this way (retail `cir1_strtpnts` ≈ +92° faces the grid's −X course),
 /// while the waypoint `a` column
-/// ([`Checkpoint::heading_deg`]) is a course *bearing* — the same
-/// column name, exactly 180° apart (the UNK-16 split).
+/// ([`Checkpoint::heading_deg`]) orients the gate normal; it is not
+/// interchangeable with vehicle yaw (WPT-4).
 ///
 /// `None` means the authored record supplies no heading: a `_strtpnts`
 /// row authoring `a = 0` is the same zero-means-unset convention the

@@ -302,7 +302,7 @@ fn start_slots(event: &CatalogEvent, rows: &[mm2_formats::waypoints::Waypoint]) 
 /// (inferred, `WPT-3`/`UNK-17`). Nonzero angles stay verbatim — the
 /// column is measured as a vehicle-yaw heading (the grid's ~+92° faces
 /// the −X course on `cir1_strtpnts`), *not* the waypoint `a` bearing —
-/// the two `a` columns sit exactly 180° apart (UNK-16 split). An
+/// waypoint angles orient gate normals in a different convention (WPT-4). An
 /// authored `a = 0` means no heading — the same zero-means-unset rule
 /// the `.opp` staging field uses: retail `cir6_strtpnts` is the lone
 /// all-zero grid and its routes stage ~180°, so a verbatim 0 would

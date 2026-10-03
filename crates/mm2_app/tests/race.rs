@@ -2406,6 +2406,7 @@ fn checkpoint_gantries_follow_progress_and_teardown() {
     use mm2_app::race::{CheckpointMarker, spawn_checkpoint_markers, update_checkpoint_markers};
     let mut def = any_order_def(0);
     def.finish = Some(cp(200.0, 0.0));
+    def.checkpoints[0].heading_deg = 63.809998; // London circuit0 first gate
     let mut app = race_app(event_config(), def.clone());
     app.init_resource::<Assets<Image>>()
         .init_resource::<Assets<StandardMaterial>>()
@@ -2432,6 +2433,14 @@ fn checkpoint_gantries_follow_progress_and_teardown() {
         .collect();
     assert_eq!(roots.len(), 3);
     for (root, gate) in &roots {
+        let cp = gate.map_or(def.finish.as_ref().unwrap(), |i| &def.checkpoints[i]);
+        let normal = app.world().get::<Transform>(*root).unwrap().rotation * Vec3::Z;
+        let forward = cp.forward();
+        assert!(normal.distance(Vec3::new(forward.x, 0.0, forward.y)) < 1e-5);
+        if *gate == Some(0) {
+            // The authored route travels NW here, not NE.
+            assert!(normal.x < -0.89 && normal.z > 0.43);
+        }
         assert_eq!(
             app.world().get::<Visibility>(*root),
             Some(&if gate.is_none() {
