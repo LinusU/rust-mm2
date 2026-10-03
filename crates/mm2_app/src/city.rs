@@ -742,10 +742,20 @@ pub struct RoomCollider {
 /// Steepest slope a collision triangle can have and still count as
 /// ground in [`RoomCollider::split`] — 60°.
 const GROUND_MIN_NORMAL_Y: f32 = 0.5;
+/// Twice the area (m²) below which [`RoomCollider::split`] treats a
+/// collision triangle as degenerate.
+const DEGENERATE_TWICE_AREA: f32 = 1e-4;
 
 impl RoomCollider {
     /// Split the triangles into ground and the rest, both indexing
-    /// `positions`.
+    /// `positions`, dropping degenerate ones.
+    ///
+    /// About one collision triangle in twelve has collinear corners —
+    /// fans and strips whose authored references repeat a vertex. They
+    /// bound no surface, but a zero-area triangle has no normal, so a
+    /// body touching it gets one made up from its edge: the run of them
+    /// along the mouth of the first SF checkpoint race's second
+    /// intersection threw every car that crossed it.
     ///
     /// Ground is every triangle sloping less than 60° that is not a
     /// tunnel ceiling, rewound to face up: the internal-edge fix that
@@ -757,7 +767,11 @@ impl RoomCollider {
         let (mut ground, mut rest) = (Vec::new(), Vec::new());
         for (i, &[a, b, c]) in self.tris.iter().enumerate() {
             let [pa, pb, pc] = [a, b, c].map(|v| self.positions[v as usize]);
-            let up = (pb - pa).cross(pc - pa).normalize_or_zero().y;
+            let normal = (pb - pa).cross(pc - pa);
+            if normal.length() < DEGENERATE_TWICE_AREA {
+                continue;
+            }
+            let up = normal.normalize().y;
             if self.ceilings.contains(&(i as u32)) || up.abs() < GROUND_MIN_NORMAL_Y {
                 rest.push([a, b, c]);
             } else if up > 0.0 {
@@ -3995,6 +4009,24 @@ mod tests {
             "wall and ceiling keep two sides"
         );
         assert_eq!(ground, vec![[6, 8, 7]], "the floor is rewound to face up");
+    }
+
+    #[test]
+    fn degenerate_triangles_leave_collision() {
+        let mut col = ColliderBuilder::default();
+        // A floor, then a sliver whose corners all lie on one line.
+        col.tri(Vec3::ZERO, Vec3::Z, Vec3::X);
+        col.tri(Vec3::ZERO, Vec3::X * 5.0, Vec3::X * 2.0);
+        let room = RoomCollider {
+            room: 0,
+            surface: SurfaceMaterial::Unspecified,
+            positions: col.positions,
+            tris: col.tris,
+            ceilings: col.ceilings,
+        };
+        let (ground, rest) = room.split();
+        assert_eq!(ground, vec![[0, 1, 2]]);
+        assert!(rest.is_empty(), "the sliver is in neither mesh: {rest:?}");
     }
 
     #[test]
