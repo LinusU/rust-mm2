@@ -395,7 +395,7 @@ impl Default for ScriptedTuning {
     }
 }
 
-fn steer_cmd(bearing: f32) -> f32 {
+pub(crate) fn steer_cmd(bearing: f32) -> f32 {
     (bearing * STEER_GAIN).clamp(-1.0, 1.0)
 }
 
@@ -418,26 +418,8 @@ pub fn scripted_input_tuned(
     grounded: bool,
     tuning: &ScriptedTuning,
 ) -> VehicleInput {
-    if bot.reverse_frames > 0 {
-        bot.reverse_frames -= 1;
-        let steer = -steer_cmd(bearing);
-        return VehicleInput {
-            brake: 1.0,
-            steering: if steer.abs() >= 0.5 {
-                steer
-            } else {
-                -bot.recovery_side
-            },
-            ..default()
-        };
-    }
-    if bot.turn_frames > 0 {
-        bot.turn_frames -= 1;
-        return VehicleInput {
-            throttle: 0.5_f32.min(tuning.throttle_cap),
-            steering: bot.recovery_side,
-            ..default()
-        };
+    if let Some(input) = recovery_input(bot, bearing, tuning) {
+        return input;
     }
     let mut input = VehicleInput {
         steering: steer_cmd(bearing),
@@ -447,15 +429,65 @@ pub fn scripted_input_tuned(
     if b > CORNER_RAD && forward_speed > tuning.corner_speed {
         input.brake = 0.6;
     } else if forward_speed < SPEED_CAP {
-        let band: f32 = if b <= STRAIGHT_RAD {
-            1.0
-        } else if b <= TURN_RAD {
-            0.45
-        } else {
-            0.25
-        };
-        input.throttle = band.min(tuning.throttle_cap);
+        input.throttle = bearing_throttle(bearing).min(tuning.throttle_cap);
     }
+    watch_stuck(bot, &input, forward_speed, grounded);
+    input
+}
+
+/// Throttle the bearing allows: full while the target is ahead, eased
+/// as it swings wide so the car can rotate rather than push straight.
+pub(crate) fn bearing_throttle(bearing: f32) -> f32 {
+    let b = bearing.abs();
+    if b <= STRAIGHT_RAD {
+        1.0
+    } else if b <= TURN_RAD {
+        0.45
+    } else {
+        0.25
+    }
+}
+
+/// The input of an escape in progress — reverse, then the forward turn
+/// — or `None` when no escape is running and the driving law decides.
+pub(crate) fn recovery_input(
+    bot: &mut ScriptedBot,
+    bearing: f32,
+    tuning: &ScriptedTuning,
+) -> Option<VehicleInput> {
+    if bot.reverse_frames > 0 {
+        bot.reverse_frames -= 1;
+        let steer = -steer_cmd(bearing);
+        return Some(VehicleInput {
+            brake: 1.0,
+            steering: if steer.abs() >= 0.5 {
+                steer
+            } else {
+                -bot.recovery_side
+            },
+            ..default()
+        });
+    }
+    if bot.turn_frames > 0 {
+        bot.turn_frames -= 1;
+        return Some(VehicleInput {
+            throttle: 0.5_f32.min(tuning.throttle_cap),
+            steering: bot.recovery_side,
+            ..default()
+        });
+    }
+    None
+}
+
+/// Count grounded frames spent demanding throttle without moving and
+/// arm the reverse-and-turn escape once [`STUCK_FRAMES`] accrue —
+/// alternating its side each time.
+pub(crate) fn watch_stuck(
+    bot: &mut ScriptedBot,
+    input: &VehicleInput,
+    forward_speed: f32,
+    grounded: bool,
+) {
     if grounded && input.throttle > 0.0 && forward_speed.abs() < STUCK_SPEED {
         bot.stuck_frames += 1;
         if bot.stuck_frames >= STUCK_FRAMES {
@@ -468,7 +500,6 @@ pub fn scripted_input_tuned(
     } else {
         bot.stuck_frames = 0;
     }
-    input
 }
 
 /// One frame of the control law at [`ScriptedTuning::DEFAULT`].
