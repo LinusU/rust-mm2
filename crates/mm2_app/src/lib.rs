@@ -35,6 +35,7 @@ pub mod profile;
 pub mod progression;
 pub mod pvs;
 pub mod race;
+pub mod race_audio;
 pub mod racestat;
 pub mod racetime;
 pub mod recovery;

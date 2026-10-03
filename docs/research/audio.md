@@ -521,3 +521,32 @@ etc.) are extras.
 - DirectMusic segment/style/band playback (F08) and the `csv_files`
   cue tables.
 - `spchdata`/`creaturedata` grammars (F08).
+
+## Race feedback effects (2026-10-03)
+
+The retail VFS ships `aud/aud22/{startracelow,startracehigh,waypoint,
+lastwaypoint,timerwarning,endofracetag,youlose}.22k.wav`. Their presence is
+verified by `mm2-inspect list`; the original trigger timing and gain have not
+been recovered. The replacement engine uses this designed mapping:
+
+| Local race edge | Sample stem |
+| --- | --- |
+| Each displayed countdown second (3, 2, 1) | `startracelow` |
+| Countdown releases control | `startracehigh` |
+| Checkpoint credited (including driven-route credit) | `waypoint` |
+| All any-order checkpoints cleared, or final lap's closing gate becomes next | `lastwaypoint` |
+| Running timer first enters the existing 10-second HUD warning band | `timerwarning` |
+| Local participant finishes | `endofracetag` |
+| Local participant times out | `youlose` |
+
+`race_audio::race_cue_voices` observes the local participant's cumulative
+crossings plus route clears, including replicated client progress. Render-frame
+batches coalesce multiple clears into one cue; a terminal result takes priority
+over a checkpoint in that same frame. Generation/player identity scopes the
+edge tracker; pause freezes it, and repeated result snapshots cannot re-play a
+terminal cue. Finish playback remains eligible in Results. Listener-side,
+non-spatial one-shots use linear gain 0.85, session ownership and despawn at
+clip end. Missing clips count one failure per edge without frame-by-frame
+retries. Headless smoke reports `/NR` for N race cue voices (0 output sinks
+remains an honest no-device result). This does not yet bind race announcer
+speech tables or mode-specific Cops & Robbers cues.

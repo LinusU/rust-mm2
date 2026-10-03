@@ -925,6 +925,8 @@ pub struct AudioVoice {
 /// The authored binding a voice plays (grows with F07-B drivers).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VoiceKind {
+    /// Listener-side checkpoint/countdown/result effect.
+    RaceCue,
     /// The cardata horn sample.
     Horn,
     /// One `Engine wave name` loop of a vehicle's engine rig.
@@ -1232,6 +1234,8 @@ pub struct AudioReport {
     /// Commentary cue voices spawned this session — a subset of
     /// `voices` (F18-B.5); at most one per bound cue family.
     pub commentary: u64,
+    /// Countdown, checkpoint, low-time and terminal race effects.
+    pub race_cues: u64,
 }
 
 impl AudioReport {
@@ -1254,6 +1258,7 @@ impl AudioReport {
             + self.thunder
             + self.interior as u64
             + self.commentary
+            + self.race_cues
             > 0
     }
 

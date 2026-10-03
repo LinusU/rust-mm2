@@ -632,6 +632,7 @@ fn run_headless(
                     // F18-B.5: the environmental commentary queue —
                     // the record's `aud=` q field reads its count.
                     crate::audio::commentary_voices.after(session::drive_session),
+                    crate::race_audio::race_cue_voices.after(session::drive_session),
                     crate::audio::audio_listener.after(session::drive_session),
                     crate::audio::count_sinks,
                     crate::audio::sync_audio_pause,
@@ -1835,13 +1836,18 @@ fn run_headless(
             // activity-gated append; a registry/table/wave that
             // resolves nothing surfaces through the shared `+Nx`
             // failure counter, never a silent dry run.
+            let race_cues = if r.race_cues > 0 {
+                format!("/{}R", r.race_cues)
+            } else {
+                String::new()
+            };
             let commentary = if r.commentary > 0 {
                 format!("/{}q", r.commentary)
             } else {
                 String::new()
             };
             format!(
-                " aud={}h/{}v/{}s/{}l/{}a/{}r{impacts}{clutch}{surface}{ambient}{sirens}{weather}{commentary}{dropped}{failed}",
+                " aud={}h/{}v/{}s/{}l/{}a/{}r{impacts}{clutch}{surface}{ambient}{sirens}{weather}{commentary}{race_cues}{dropped}{failed}",
                 r.horns, r.voices, r.sunk, r.loops, r.audible, r.rigs
             )
         })

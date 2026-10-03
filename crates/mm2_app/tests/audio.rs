@@ -3604,3 +3604,290 @@ fn teardown_sweeps_commentary_voices() {
 fn a_dev_world_binds_no_commentary() {
     assert!(CommentaryAudio::bind(None, commentary_conditions(), 7).is_none());
 }
+
+fn race_effect_app(dir: &Path) -> (App, Entity) {
+    use mm2_game::{Checkpoint, CheckpointRule, RaceDefinition, RaceProgress, RaceState};
+    let mut app = horn_app(dir, false);
+    let def = RaceDefinition {
+        checkpoints: [0.0, 50.0]
+            .map(|x| Checkpoint {
+                center: Vec3::new(x, 0.0, 0.0),
+                radius: 5.0,
+                height: 8.0,
+                heading_deg: 0.0,
+                require_direction: false,
+            })
+            .to_vec(),
+        finish: None,
+        rule: CheckpointRule::AnyOrder,
+        laps: 1,
+        time_limit_ticks: Some(20 * mm2_game::RACE_TICK_HZ),
+        params: default(),
+        countdown_ticks: 360,
+        start_slots: vec![],
+    };
+    let generation = app.world().resource::<Session>().generation();
+    let id = app.world_mut().resource_mut::<Session>().mint_player_id();
+    let player = app
+        .world_mut()
+        .spawn((
+            Player {
+                id,
+                control: PlayerControl::Local,
+            },
+            RaceProgress::new(&def),
+        ))
+        .id();
+    app.insert_resource(RaceState::new(def, generation))
+        .add_systems(Update, mm2_app::race_audio::race_cue_voices);
+    (app, player)
+}
+
+fn race_effect_fixture() -> tempfile::TempDir {
+    let tmp = fixture_dir();
+    for stem in [
+        "startracelow",
+        "startracehigh",
+        "waypoint",
+        "lastwaypoint",
+        "endofracetag",
+        "timerwarning",
+        "youlose",
+    ] {
+        write(
+            tmp.path(),
+            &format!("aud/aud22/{stem}.22k.wav"),
+            &pcm_wav(22050, 220),
+        );
+    }
+    tmp
+}
+
+fn race_effect_stems(app: &mut App) -> Vec<&'static str> {
+    app.world_mut()
+        .query::<&mm2_app::race_audio::RaceCueVoice>()
+        .iter(app.world())
+        .map(|voice| voice.stem)
+        .collect()
+}
+
+#[test]
+fn race_effects_countdown_checkpoints_warning_and_finish_once() {
+    use mm2_game::{ParticipantState, RacePhase, RaceProgress, RaceState};
+    let tmp = race_effect_fixture();
+    let (mut app, player) = race_effect_app(tmp.path());
+    app.update();
+    app.update();
+    assert_eq!(race_effect_stems(&mut app), ["startracelow"]);
+    for remaining in [240, 120] {
+        app.world_mut().resource_mut::<RaceState>().phase = RacePhase::Countdown { remaining };
+        app.update();
+    }
+    app.world_mut().resource_mut::<RaceState>().phase = RacePhase::Running;
+    app.update();
+    assert_eq!(
+        race_effect_stems(&mut app)
+            .iter()
+            .filter(|s| **s == "startracelow")
+            .count(),
+        3
+    );
+    assert!(race_effect_stems(&mut app).contains(&"startracehigh"));
+    app.world_mut()
+        .get_mut::<RaceProgress>(player)
+        .unwrap()
+        .apply_replicated(1, 0, 0, 1, 0);
+    app.update();
+    app.world_mut()
+        .get_mut::<RaceProgress>(player)
+        .unwrap()
+        .apply_replicated(3, 0, 0, 2, 0);
+    app.update();
+    assert!(race_effect_stems(&mut app).contains(&"waypoint"));
+    assert!(race_effect_stems(&mut app).contains(&"lastwaypoint"));
+    app.world_mut().resource_mut::<RaceState>().clock = 10 * u64::from(mm2_game::RACE_TICK_HZ);
+    app.update();
+    app.update();
+    assert_eq!(
+        race_effect_stems(&mut app)
+            .iter()
+            .filter(|s| **s == "timerwarning")
+            .count(),
+        1
+    );
+    let id = app.world().get::<Player>(player).unwrap().id;
+    let result = app.world_mut().resource_mut::<Session>().mint_result_id(id);
+    app.world_mut()
+        .get_mut::<RaceProgress>(player)
+        .unwrap()
+        .state = ParticipantState::Finished {
+        race_ticks: 1200,
+        result,
+    };
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Results)
+        .unwrap();
+    app.update();
+    app.update();
+    assert_eq!(
+        race_effect_stems(&mut app)
+            .iter()
+            .filter(|s| **s == "endofracetag")
+            .count(),
+        1
+    );
+    for (owner, settings) in app.world_mut().query_filtered::<(&SessionEntity, &PlaybackSettings), With<mm2_app::race_audio::RaceCueVoice>>().iter(app.world()) {
+        assert_eq!(owner.0, app.world().resource::<Session>().generation());
+        assert!(matches!(settings.mode, PlaybackMode::Despawn));
+        assert!(!settings.spatial);
+    }
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Unloading)
+        .unwrap();
+    app.world_mut()
+        .run_system_once(despawn_session_entities)
+        .unwrap();
+    app.update();
+    assert!(race_effect_stems(&mut app).is_empty());
+}
+
+#[test]
+fn race_effects_hold_during_pause_ignore_remote_progress_and_scope_to_restart() {
+    use mm2_game::{RacePhase, RaceProgress, RaceState};
+    let tmp = race_effect_fixture();
+    let (mut app, player) = race_effect_app(tmp.path());
+    app.world_mut().resource_mut::<RaceState>().phase = RacePhase::Running;
+    app.update();
+    let remote_id = app.world_mut().resource_mut::<Session>().mint_player_id();
+    let mut remote_progress = app.world().get::<RaceProgress>(player).unwrap().clone();
+    remote_progress.apply_replicated(3, 0, 0, 2, 0);
+    app.world_mut().spawn((
+        Player {
+            id: remote_id,
+            control: PlayerControl::Remote,
+        },
+        remote_progress,
+    ));
+    app.update();
+    assert!(race_effect_stems(&mut app).is_empty());
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Paused)
+        .unwrap();
+    app.world_mut()
+        .get_mut::<RaceProgress>(player)
+        .unwrap()
+        .apply_replicated(1, 0, 0, 1, 0);
+    app.update();
+    assert!(race_effect_stems(&mut app).is_empty());
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Playing)
+        .unwrap();
+    app.update();
+    app.update();
+    assert_eq!(race_effect_stems(&mut app), ["waypoint"]);
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Unloading)
+        .unwrap();
+    app.world_mut()
+        .run_system_once(despawn_session_entities)
+        .unwrap();
+    app.update();
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Menu)
+        .unwrap();
+    app.world_mut()
+        .resource_mut::<Session>()
+        .begin(SessionConfig::default())
+        .unwrap();
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Ready)
+        .unwrap();
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Playing)
+        .unwrap();
+    let generation = app.world().resource::<Session>().generation();
+    app.world_mut().resource_mut::<RaceState>().generation = generation;
+    app.world_mut()
+        .get_mut::<RaceProgress>(player)
+        .unwrap()
+        .apply_replicated(0, 0, 0, 0, 0);
+    app.update();
+    app.world_mut()
+        .get_mut::<RaceProgress>(player)
+        .unwrap()
+        .apply_replicated(1, 0, 0, 1, 0);
+    app.update();
+    assert_eq!(race_effect_stems(&mut app), ["waypoint"]);
+}
+
+#[test]
+fn race_effects_missing_clip_is_counted_once_without_retries() {
+    use mm2_game::{RacePhase, RaceProgress, RaceState};
+    let tmp = fixture_dir();
+    let (mut app, player) = race_effect_app(tmp.path());
+    app.world_mut().resource_mut::<RaceState>().phase = RacePhase::Running;
+    app.update();
+    app.world_mut()
+        .get_mut::<RaceProgress>(player)
+        .unwrap()
+        .apply_replicated(1, 0, 0, 1, 0);
+    app.update();
+    app.update();
+    assert!(race_effect_stems(&mut app).is_empty());
+    assert_eq!(app.world().resource::<AudioReport>().failed, 1);
+}
+
+#[test]
+fn race_effects_circuit_route_progress_and_timeout_use_distinct_cues() {
+    use mm2_game::{CheckpointRule, ParticipantState, RacePhase, RaceProgress, RaceState};
+    let tmp = race_effect_fixture();
+    let (mut app, player) = race_effect_app(tmp.path());
+    {
+        let mut race = app.world_mut().resource_mut::<RaceState>();
+        race.phase = RacePhase::Running;
+        race.definition.rule = CheckpointRule::Ordered;
+        race.definition.laps = 2;
+    }
+    app.update();
+    app.world_mut()
+        .get_mut::<RaceProgress>(player)
+        .unwrap()
+        .apply_replicated(1, 1, 0, 1, 0);
+    app.update();
+    assert_eq!(race_effect_stems(&mut app), ["waypoint"]);
+    // Route-based clears are credited through the same authoritative progress.
+    app.world_mut()
+        .get_mut::<RaceProgress>(player)
+        .unwrap()
+        .apply_replicated(1, 1, 1, 1, 2);
+    app.update();
+    assert_eq!(race_effect_stems(&mut app), ["waypoint", "lastwaypoint"]);
+    let id = app.world().get::<Player>(player).unwrap().id;
+    let result = app.world_mut().resource_mut::<Session>().mint_result_id(id);
+    app.world_mut()
+        .get_mut::<RaceProgress>(player)
+        .unwrap()
+        .state = ParticipantState::TimedOut {
+        race_ticks: 2400,
+        result,
+    };
+    app.world_mut().resource_mut::<RaceState>().phase = RacePhase::Complete;
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Results)
+        .unwrap();
+    app.update();
+    app.update();
+    assert_eq!(
+        race_effect_stems(&mut app),
+        ["waypoint", "lastwaypoint", "youlose"]
+    );
+}

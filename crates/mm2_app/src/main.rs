@@ -1608,6 +1608,9 @@ fn main() {
             // despawn ordering; one-shots resolve and play inside the
             // pre-race window.
             audio::commentary_voices.after(session::drive_session),
+            mm2_app::race_audio::race_cue_voices
+                .after(session::drive_session)
+                .after(netdrive::apply_snapshots),
             // F07-B.2: the spatial listener follows whichever camera is
             // active — after the toggle so a mode switch moves the ear
             // the same frame, and after the session driver for the
