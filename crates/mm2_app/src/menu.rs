@@ -1798,6 +1798,10 @@ pub struct MenuRow {
     pub index: usize,
 }
 
+/// A graphical navigation control using the same intents as keyboard input.
+#[derive(Component)]
+pub struct MenuButton(pub MenuCommand);
+
 /// Keep the shell's `active` flag honest: open exactly while the
 /// session sits at `Menu`, closed everywhere else — this is what makes
 /// a quit from a menu-launched session return to the menu, and it
@@ -2017,6 +2021,15 @@ pub struct MenuPointer<'w, 's> {
             &'static UiGlobalTransform,
         ),
     >,
+    buttons: Query<
+        'w,
+        's,
+        (
+            &'static MenuButton,
+            &'static ComputedNode,
+            &'static UiGlobalTransform,
+        ),
+    >,
 }
 
 /// Mouse navigation (F17 spec req 5): hovering a row focuses it,
@@ -2087,6 +2100,17 @@ pub fn menu_mouse(
         shell.pending.push(MenuCommand::Back);
         return;
     }
+    if mouse
+        .as_ref()
+        .is_some_and(|m| m.just_pressed(MouseButton::Left))
+    {
+        for (button, node, transform) in &pointer.buttons {
+            if node.contains_point(*transform, pos) {
+                shell.pending.push(button.0);
+                return;
+            }
+        }
+    }
     let Some(index) = pointer
         .rows
         .iter()
@@ -2130,143 +2154,6 @@ fn screen_title(screen: &Screen) -> String {
     }
 }
 
-/// (Re)draw the menu while it is active: keep a `Camera2d` up as the
-/// UI's render target, rebuild the row model when `dirty`, then respawn
-/// the text tree. Entities carry `MenuUi`, not `SessionEntity` — the
-/// menu outlives sessions. The camera carries `MenuCamera` so the
-/// teardown path can drop it with the shell while redraws leave it
-/// alone.
-pub fn menu_present(
-    mut commands: Commands,
-    mut shell: ResMut<MenuShell>,
-    mut data: ResMut<MenuData>,
-    vfs: Res<Mm2Vfs>,
-    roots: Query<Entity, (With<MenuUi>, Without<ChildOf>)>,
-    cameras: Query<Entity, With<MenuCamera>>,
-) {
-    if !shell.active {
-        for root in &roots {
-            commands.entity(root).despawn();
-        }
-        for camera in &cameras {
-            commands.entity(camera).despawn();
-        }
-        return;
-    }
-    // The menu owns the screen — it must bring its own render target,
-    // or the `Node`/`Text` tree below is built but never drawn (the
-    // world holds zero cameras at boot and after each quit-to-menu).
-    let camera = match cameras.iter().next() {
-        Some(camera) => camera,
-        None => commands.spawn((MenuCamera, Camera2d)).id(),
-    };
-    if !shell.dirty {
-        return;
-    }
-    shell.dirty = false;
-    rebuild(&mut shell, &mut data, &vfs.0);
-    for root in &roots {
-        commands.entity(root).despawn();
-    }
-
-    // Each line carries the `shell.rows` index it draws, when it is
-    // one — `menu_mouse` hit-tests `MenuRow` entities back to it.
-    let mut lines: Vec<(String, f32, Color, Option<usize>)> = Vec::new();
-    lines.push((
-        screen_title(&shell.screen),
-        34.0,
-        Color::srgb(0.95, 0.9, 0.6),
-        None,
-    ));
-    lines.push((String::new(), 8.0, Color::NONE, None));
-    if let Screen::NewProfile { name } = &shell.screen {
-        lines.push((
-            format!("  Name: {name}_"),
-            22.0,
-            Color::srgb(1.0, 1.0, 1.0),
-            None,
-        ));
-    }
-    for (i, row) in shell.rows.iter().enumerate() {
-        let (text, color) = match &row.enabled {
-            Ok(()) => (
-                if i == shell.focus {
-                    // The bundled font has no `›` glyph — it renders
-                    // as tofu, which would erase the focus marker.
-                    format!("> {}", row.text)
-                } else {
-                    format!("  {}", row.text)
-                },
-                if i == shell.focus {
-                    Color::srgb(1.0, 1.0, 1.0)
-                } else {
-                    Color::srgb(0.75, 0.75, 0.8)
-                },
-            ),
-            Err(reason) => (
-                format!("  {} - {reason}", row.text),
-                Color::srgb(0.45, 0.45, 0.5),
-            ),
-        };
-        lines.push((text, 22.0, color, Some(i)));
-    }
-    lines.push((String::new(), 8.0, Color::NONE, None));
-    if let Some(status) = &shell.status {
-        lines.push((status.clone(), 18.0, Color::srgb(1.0, 0.75, 0.35), None));
-    }
-    let footer = if matches!(shell.screen, Screen::NewProfile { .. }) {
-        "Type a name | Enter create | Esc cancel"
-    } else if matches!(shell.screen, Screen::Records { .. }) {
-        "Enter race again | Left/Right cycle filters | Esc back"
-    } else if matches!(shell.screen, Screen::Customize { .. }) {
-        "Left/Right change | Enter select | Esc back"
-    } else {
-        "Up/Down move | Enter select | Esc back | X delete | click works"
-    };
-    lines.push((footer.to_string(), 14.0, Color::srgb(0.5, 0.5, 0.55), None));
-
-    commands
-        .spawn((
-            MenuUi,
-            // Pin the tree to the menu camera — without it the UI
-            // would fall back to the default camera, which is nothing
-            // while no session world is loaded.
-            UiTargetCamera(camera),
-            Node {
-                position_type: PositionType::Absolute,
-                top: Val::Px(0.0),
-                left: Val::Px(0.0),
-                right: Val::Px(0.0),
-                bottom: Val::Px(0.0),
-                flex_direction: FlexDirection::Column,
-                justify_content: JustifyContent::Center,
-                padding: UiRect::left(Val::Px(90.0)),
-                row_gap: Val::Px(4.0),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.02, 0.03, 0.07, 0.88)),
-        ))
-        .with_children(|parent| {
-            for (text, size, color, row) in lines {
-                let mut line = parent.spawn((
-                    MenuUi,
-                    Text::new(text),
-                    // Full-width rows: the mouse hit box covers the
-                    // whole line, not just the glyphs (a click right
-                    // of a short label still picks the row).
-                    Node {
-                        width: Val::Percent(100.0),
-                        ..default()
-                    },
-                    TextFont {
-                        font_size: bevy::text::FontSize::Px(size),
-                        ..default()
-                    },
-                    TextColor(color),
-                ));
-                if let Some(index) = row {
-                    line.insert(MenuRow { index });
-                }
-            }
-        });
-}
+#[path = "menu_graphics.rs"]
+mod graphics;
+pub use graphics::{MenuPreviewCapture, menu_present, menu_preview_motion};

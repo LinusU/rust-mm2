@@ -95,6 +95,14 @@ cargo run -- --mm2-path "/path/to/Midtown Madness 2"
 ```
 
 With no session-shaping flag the app opens the menu front-end
+with original blue/amber city artwork, driver cards, framed buttons and a
+loading splash. The garage renders the focused vehicle and paint in a rotating
+3D showroom using the same imported meshes and textures as driving. Keyboard,
+gamepad and mouse share navigation; Previous/Next buttons browse longer lists.
+For reproducible screenshots, use `--menu --menu-screen garage --frames 90
+--screenshot garage.png` (screens: `root`, `profiles`, `races`, `garage`).
+
+The menu supports
 (F17-A.1): Cruise and authored-event pickers over the real city/event
 catalogs, the garage (reward-locked cars and paints are listed but
 refuse with their reason), the driver-profile screen (select, create

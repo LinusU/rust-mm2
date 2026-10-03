@@ -134,6 +134,7 @@ fn quad_geo(c: [f32; 3], hx: f32, hy: f32, hz: f32) -> Vec<u8> {
     geo.extend_from_slice(&6u32.to_le_bytes());
     geo.extend_from_slice(&1u32.to_le_bytes());
     geo.extend_from_slice(&0x112u32.to_le_bytes());
+    geo.extend_from_slice(&1u16.to_le_bytes()); // nStrips
     geo.extend_from_slice(&0u16.to_le_bytes());
     geo.extend_from_slice(&(-1i32).to_le_bytes());
     geo.extend_from_slice(&3i32.to_le_bytes());
@@ -405,6 +406,7 @@ fn menu_app(dir: &Path, store: Option<ProfileStore>) -> App {
                     menu::menu_mouse,
                     menu::menu_input,
                     menu::menu_present,
+                    menu::menu_preview_motion,
                 )
                     .chain(),
             ),
@@ -1455,8 +1457,23 @@ fn restart_in_menu_mode_leaves_the_shell_closed() {
             "the shell must never reopen mid-restart (phase {:?})",
             phase(&app)
         );
-        assert_eq!(menu_roots(&mut app), 0, "menu drew mid-restart");
-        assert_eq!(menu_cameras(&mut app), 0, "menu camera mid-restart");
+        // A loading splash may render, but the interactive shell stays closed.
+        let splash = menu_roots(&mut app);
+        assert!(splash <= 1, "duplicate restart UI");
+        assert_eq!(menu_cameras(&mut app), splash, "unexpected restart camera");
+        if splash == 1 {
+            assert!(
+                menu_texts(&mut app)
+                    .iter()
+                    .any(|t| t == "LOADING THE STREETS")
+            );
+        }
+        let world = app.world_mut();
+        assert_eq!(
+            world.query::<&menu::MenuRow>().iter(world).count(),
+            0,
+            "interactive rows appeared during restart"
+        );
         if phase(&app) == SessionPhase::Playing {
             replayed = true;
             break;
@@ -1527,10 +1544,10 @@ fn the_mouse_focuses_rows_and_clicks_drive_the_same_commands() {
     spawn_window(&mut app);
     lay_out_rows(&mut app);
 
-    // The drawn row entities map 1:1 onto the shell's rows.
+    // The visible page preserves model indices for mouse hit testing.
     let world = app.world_mut();
     let count = world.query::<&menu::MenuRow>().iter(world).count();
-    assert_eq!(count, shell(&app).rows.len());
+    assert_eq!(count, shell(&app).rows.len().min(9));
 
     // Empty space focuses nothing.
     cursor_to(&mut app, 200.0, 10.0);
@@ -2395,4 +2412,81 @@ fn circuit_options_returned_to_seed_launch_a_default_run() {
         .expect("a launched session has a config");
     assert!(config.customization.is_none());
     assert_eq!(mm2_game::record_eligibility(config), Ok(()));
+}
+
+/// Imported wheel grandchildren must render in the offscreen view, while
+/// showroom cameras and meshes must disappear before gameplay starts.
+#[test]
+fn showroom_renders_the_actual_vehicle_on_an_isolated_layer() {
+    use bevy::camera::{RenderTarget, visibility::RenderLayers};
+    let tmp = install();
+    let mut app = menu_app(tmp.path(), None);
+    app.update();
+    activate_row(&mut app, "Vehicle:");
+    app.update();
+    {
+        let world = app.world_mut();
+        let targets: Vec<_> = world
+            .query::<(&Camera3d, &RenderTarget)>()
+            .iter(world)
+            .collect();
+        assert_eq!(targets.len(), 1);
+        assert!(matches!(targets[0].1, RenderTarget::Image(_)));
+        let mesh_count = world.query::<&Mesh3d>().iter(world).count();
+        let meshes: Vec<_> = world
+            .query::<(&Mesh3d, &RenderLayers)>()
+            .iter(world)
+            .collect();
+        assert!(meshes.len() >= 5, "body plus the four wheel meshes");
+        assert_eq!(
+            meshes.len(),
+            mesh_count,
+            "every mesh has an explicit render layer"
+        );
+        assert!(
+            meshes
+                .iter()
+                .all(|(_, layers)| **layers == RenderLayers::layer(7))
+        );
+    }
+    let before = {
+        let world = app.world_mut();
+        world
+            .query_filtered::<Entity, With<Camera3d>>()
+            .iter(world)
+            .next()
+            .unwrap()
+    };
+    app.update();
+    assert!(
+        app.world().get_entity(before).is_ok(),
+        "idle preview reuses its scene"
+    );
+    activate_row(&mut app, "Test Car");
+    focus_row(&mut app, "Blue");
+    app.update();
+    assert!(
+        app.world().get_entity(before).is_err(),
+        "paint change rebuilds the preview"
+    );
+    assert_eq!(
+        shell(&app).vehicle.paint,
+        0,
+        "previewing a locked paint does not select it"
+    );
+    press(&mut app, KeyCode::Escape);
+    press(&mut app, KeyCode::Escape);
+    let world = app.world_mut();
+    assert_eq!(
+        world
+            .query_filtered::<Entity, With<Camera3d>>()
+            .iter(world)
+            .count(),
+        0
+    );
+    assert_eq!(
+        world.query::<&Mesh3d>().iter(world).count(),
+        0,
+        "no preview mesh leaks into the root menu"
+    );
 }

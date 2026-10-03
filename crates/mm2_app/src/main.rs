@@ -379,6 +379,10 @@ struct Cli {
     /// warning) when one is present.
     #[arg(long, conflicts_with = "headless")]
     menu: bool,
+
+    /// Open a menu screen directly for reproducible visual captures.
+    #[arg(long, requires = "menu", value_parser = ["root", "profiles", "races", "garage"])]
+    menu_screen: Option<String>,
 }
 
 /// Smoke-test capture: run N frames, take the screenshot (if requested),
@@ -1647,7 +1651,15 @@ fn main() {
         // rows and `menu_watch` reopens the shell whenever the session
         // returns to `Menu`, so quitting a menu-launched session
         // comes back here instead of exiting.
-        app.insert_resource(menu::MenuShell::new(menu_vehicle, difficulty))
+        let mut shell = menu::MenuShell::new(menu_vehicle, difficulty);
+        shell.screen = match cli.menu_screen.as_deref() {
+            Some("profiles") => menu::Screen::Profiles,
+            Some("races") => menu::Screen::EventCity,
+            Some("garage") => menu::Screen::Garage,
+            _ => menu::Screen::Root,
+        };
+        app.insert_resource(shell)
+            .insert_resource(menu::MenuPreviewCapture(cli.frames.is_some()))
             .insert_resource(menu::MenuData::new(menu_store, has_mods, menu_bound))
             .add_systems(
                 Update,
@@ -1661,6 +1673,7 @@ fn main() {
                     menu::menu_mouse.run_if(not(capturing)),
                     menu::menu_input.run_if(not(capturing)),
                     menu::menu_present,
+                    menu::menu_preview_motion,
                 )
                     .chain(),
             );
