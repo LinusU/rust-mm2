@@ -312,3 +312,8 @@ Scripted escape and route reanchor traces disclose their tick, position, speed,
 heading, route index and live gate. Escape traces also include the current aim;
 reanchor traces include the landing point, helping locate source obstacles
 without treating a recovered traversal as clean evidence.
+
+An explicit `--bot` also opts into scripted motion during a windowed
+`--frames N --screenshot out.png` capture, enabling played lap/finish HUD
+images with the real opponent drivers active. Keyboard input remains frozen. Captures without `--bot` preserve their
+ordinary static pose policy.
