@@ -861,7 +861,14 @@ pub fn scripted_drive(
                     rs.reanchors += 1;
                     claimed.push(pose);
                     info!(
+                        tick = session.tick(),
                         reanchors = rs.reanchors,
+                        position = ?pos.0,
+                        speed = vstate.forward_speed,
+                        heading_rad = yaw,
+                        route_next = rs.next,
+                        gate = ?gate,
+                        landing = ?pose,
                         "scripted player re-anchored onto its route after a bounded stuck"
                     );
                     *input = VehicleInput::default();
@@ -890,6 +897,7 @@ pub fn scripted_drive(
             planned = Some((limits, plan));
         }
         let bearing = relative_bearing(yaw, pos.0, target);
+        let escapes_before = bot.escapes;
         *input = if let Some((limits, plan)) = planned {
             planned_input(
                 bot,
@@ -903,6 +911,20 @@ pub fn scripted_drive(
         } else {
             scripted_input(bot, bearing, vstate.forward_speed, vstate.grounded)
         };
+        if bot.escapes > escapes_before {
+            info!(
+                tick = session.tick(),
+                escapes = bot.escapes,
+                position = ?pos.0,
+                speed = vstate.forward_speed,
+                heading_rad = yaw,
+                bearing_rad = bearing,
+                route_next = ?bot_route.as_ref().map(|rs| rs.next),
+                gate = ?gate,
+                aim = ?target,
+                "scripted player started a bounded escape after sustained low-speed throttle"
+            );
+        }
         if let Some(limit) = session.config().and_then(|c| c.dev.bot_speed) {
             limit_evidence_speed(&mut input, vstate.forward_speed, limit);
         }

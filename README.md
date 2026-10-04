@@ -307,3 +307,8 @@ speed-scaled route projection, handling-derived steering and curvature braking.
 The live player's next checkpoint still bounds the aim, so lookahead never
 substitutes route traversal for crossing a gate. Unguided steering and the
 existing bounded recovery policy remain unchanged.
+
+Scripted escape and route reanchor traces disclose their tick, position, speed,
+heading, route index and live gate. Escape traces also include the current aim;
+reanchor traces include the landing point, helping locate source obstacles
+without treating a recovered traversal as clean evidence.
