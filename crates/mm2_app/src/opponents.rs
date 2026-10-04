@@ -811,6 +811,28 @@ pub fn reanchor_pose_with_progress(
     }
 }
 
+/// The authored route with its leading anchors that sit behind the
+/// staged heading dropped — everything after the staging record
+/// (row 0, which keeps the authored heading) starts at the first anchor
+/// [`initial_route_index`] would chase. Retail `.opp` lines routinely
+/// author row 1 a car-length or two *behind* the grid (`sf` checkpoint
+/// 2: row 1 sits 40 m behind a car facing −Z). Left in, the nav
+/// re-path joins the facing-forward car to that anchor by the nearest
+/// legal road — a lap around the block — and every point of that lap
+/// reads as "ahead", so the car drives it before racing. Dropping the
+/// anchors first keeps the first leg pointing the way the car faces.
+/// Routes that need no trimming come back unchanged.
+pub fn trim_behind_staging(route: &OpponentRoute, pos: Vec3, yaw: f32) -> OpponentRoute {
+    let first = initial_route_index(route, pos, yaw);
+    if first <= 1 || first >= route.points.len() {
+        return route.clone();
+    }
+    let points = std::iter::once(route.points[0].clone())
+        .chain(route.points[first..].iter().cloned())
+        .collect();
+    OpponentRoute { points }
+}
+
 /// The driving line a participant chases: `route` verbatim when no
 /// road graph was bound at session load, else
 /// [`NavGraph::densify_route`]'s re-pathed copy (F15-B.6). Ambient
@@ -819,19 +841,26 @@ pub fn reanchor_pose_with_progress(
 /// from a race course the `.opp` anchors route through. `gates` are
 /// the race's checkpoint triggers: a re-path that abandons a gate the
 /// authored leg crossed is rejected so the course stays crossable.
+///
+/// `pos`/`yaw` is the staged pose the car starts from: anchors behind
+/// it are dropped by [`trim_behind_staging`] before the re-path, so the
+/// densified line cannot open with a detour back to them.
 pub fn driving_route(
     route: &OpponentRoute,
     nav: Option<&NavGraph>,
     gates: &[mm2_game::Checkpoint],
+    pos: Vec3,
+    yaw: f32,
 ) -> OpponentRoute {
+    let route = trim_behind_staging(route, pos, yaw);
     match nav {
         Some(g) => g.densify_route(
-            route,
-            route_is_closed(route),
+            &route,
+            route_is_closed(&route),
             gates,
             &RouteOptions::default(),
         ),
-        None => route.clone(),
+        None => route,
     }
 }
 
@@ -887,7 +916,7 @@ pub fn spawn_opponents(
         let route = spec
             .route
             .as_ref()
-            .map(|r| driving_route(r, nav, &definition.checkpoints));
+            .map(|r| driving_route(r, nav, &definition.checkpoints, pos, yaw));
         // First chase index along the authored facing — early anchors
         // behind the staged heading are left for the next pass, not
         // chased off the spawn line.

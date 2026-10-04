@@ -1613,7 +1613,13 @@ pub fn load_session_world(
                         if explicit_bot_route.is_some() {
                             route
                         } else {
-                            opponents::driving_route(&route, nav, &def.checkpoints)
+                            opponents::driving_route(
+                                &route,
+                                nav,
+                                &def.checkpoints,
+                                spawn.position,
+                                spawn.yaw,
+                            )
                         },
                         spawn.position,
                         spawn.yaw,

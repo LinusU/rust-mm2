@@ -18,6 +18,7 @@ use mm2_app::opponents::{
     Blocker, DriveStats, OpponentDriver, REANCHOR_CLEAR, REANCHOR_FRAMES, Traffic, apply_gap_brake,
     apply_rear_end_guard, initial_route_index, nearest_blocker, opponent_drive, pick_pass_side,
     reanchor_pose, reanchor_pose_with_progress, rear_end_demand, route_target, spawn_pose,
+    trim_behind_staging,
 };
 use mm2_app::racing_line::CarLimits;
 use mm2_app::scripted::{ScriptedBot, ScriptedTuning};
@@ -605,6 +606,37 @@ fn initial_chase_index_skips_anchors_behind_the_staging() {
         1,
         "facing +X the first leg is the chase"
     );
+}
+
+/// Retail `.opp` lines author row 1 behind the grid (`sf` checkpoint
+/// 2: 40 m behind a −Z-facing car). The nav re-path would join the
+/// car to it by a lap around the block, so those anchors are dropped
+/// *before* densifying — the staging row stays (it carries the
+/// heading), the course anchors after it are untouched.
+#[test]
+fn anchors_behind_the_staging_are_dropped_before_densifying() {
+    let r = staged_route(
+        90.0,
+        &[
+            [0.0, 0.0, 0.0],
+            [50.0, 0.0, 0.0], // behind a −X-facing spawn
+            [-50.0, 0.0, 0.0],
+            [-100.0, 0.0, 0.0],
+        ],
+    );
+    let pos = Vec3::new(0.0, 0.0, 0.0);
+    let trimmed = trim_behind_staging(&r, pos, std::f32::consts::FRAC_PI_2);
+    let xs: Vec<f32> = trimmed.points.iter().map(|p| p.position.x).collect();
+    assert_eq!(xs, vec![0.0, -50.0, -100.0], "row 1 is behind the line");
+    assert_eq!(
+        trimmed.start_heading_deg(),
+        r.start_heading_deg(),
+        "the staging row keeps its authored heading"
+    );
+
+    // Facing +X nothing is behind: the route comes back unchanged.
+    let kept = trim_behind_staging(&r, pos, -std::f32::consts::FRAC_PI_2);
+    assert_eq!(kept.points.len(), r.points.len());
 }
 
 // ---------------------------------------------------------------------------
