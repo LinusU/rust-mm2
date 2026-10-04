@@ -416,7 +416,8 @@ Implemented in `mm2_game::effects` + `mm2_app::damage_fx`:
   `DamageEffect` field. Consumed: `PositionVar`, `Velocity`(±var),
   `Life`(±var), `Radius`(±var), `Drag`(±var), `DRadius`(±var),
   `DAlpha`(±var), `Gravity`, `TexFrameStart`/`End`, `Color` (packed
-  ARGB — retail decodes as `0xF6000000`-class near-opaque black).
+  ARGB — retail decodes as `0xF5FFFFFF`, near-opaque white; the black
+  comes from the atlas tile).
   Carried unconsumed: `Position` (pivots own placement), `Mass`,
   `Damp`, `DRotation` (0 on retail), `InitialBlast`, `SpewRate`/
   `SpewTimeLimit` (driver fields — 0 on every retail damage record;
@@ -435,13 +436,22 @@ Implemented in `mm2_game::effects` + `mm2_app::damage_fx`:
   `Color` alpha byte per second (retail ≈ −83 ⇒ ~3 s fade inside the
   ~1.5 s life). These are defensible readings, not recovered
   semantics — the original integrator is unrecovered.
-- **Sprite (implementation choice).** `texture/fxpt2` resolves
-  through the VFS — a measured 2×2 puff-tile atlas; `TexFrameStart`/
-  `TexFrameEnd` index its tiles like mm2hook's `asSparkPos::
-  TexCoordOffset`. One unlit, blended, camera-facing quad per puff,
-  tinted by `Color` with per-puff alpha. The texture binding itself
-  is designed — the original's atlas choice is unrecovered, but every
-  retail damage record authors frames inside a 2×2 tile space.
+- **Sprite (measured binding).** `texture/fxpt8` resolves through the
+  VFS — a measured 2×2 puff-tile atlas (white, white, black, grey;
+  row-major from the top left); `TexFrameStart`/`TexFrameEnd` index
+  its tiles like mm2hook's `asSparkPos::TexCoordOffset`. One unlit,
+  blended, camera-facing quad per puff, tinted by `Color` with
+  per-puff alpha. No record names a texture, so the binding is
+  inferred — but `fxpt8` is the only smoke-shaped particle sheet, and
+  with it the authored data reads as black smoke: `Color` is white
+  (`0xF5FFFFFF`, not the black the earlier note assumed), and 17 of
+  the 20 retail records author tile 2 — the black puff (two author
+  tile 0, one tile 1 — white). The earlier
+  `fxpt2` binding was a sheet of coins.
+- **Placement (measured).** The authored `Position` is *not* added to
+  the pivot: every retail record carries a stale editor world
+  coordinate there (vpbug: 298.7, 13.7, −48.5), which threw the puffs
+  hundreds of metres from the car. The pivot owns placement.
 - **Ownership (same family rules).** Emission rides whatever
   `VehicleDamage` the entity carries; `PlayerControl::Remote` skips
   (its authority renders its own), pause freezes emission and

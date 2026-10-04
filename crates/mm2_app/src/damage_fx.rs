@@ -22,12 +22,17 @@ use mm2_game::{Session, SessionEntity, SmokePuff, VehicleDamage, VehicleSmoke};
 
 use crate::city;
 
-/// `texture/fxpt2` — the engine-smoke atlas: a measured 2×2 grid of
-/// puff tiles; `TexFrameStart`/`TexFrameEnd` index its tiles like
-/// mm2hook's `asSparkPos::TexCoordOffset` (designed binding — the
-/// original's texture choice is unrecovered, but every retail damage
-/// record authors frames inside a 2×2 tile space).
-const SMOKE_TEXTURE: &str = "fxpt2";
+/// `texture/fxpt8` — the engine-smoke atlas: a measured 2×2 grid of puff
+/// tiles (white, white, black, grey; row-major from the top left), so
+/// the authored `TexFrameStart 2` that most retail damage records carry
+/// is the black puff under the white `Color` tint. `TexFrameStart`/
+/// `TexFrameEnd` index its tiles like mm2hook's
+/// `asSparkPos::TexCoordOffset`. The binding is measured, not
+/// recovered: no record names a texture, but `fxpt8` is the only
+/// particle sheet shaped like smoke and the authored frame/tint pair
+/// then reads as black smoke (`fxpt2`, the earlier guess, is a sheet of
+/// coins).
+const SMOKE_TEXTURE: &str = "fxpt8";
 
 /// Render assets for the smoke sprites — built once per session.
 pub struct SmokeAssets {
@@ -67,7 +72,7 @@ impl SmokeFxReport {
 
 /// Build the sprite assets for one session — the atlas resolves
 /// through `city::load_image` so mods can override it like any
-/// texture. A missing/undecodable `fxpt2` warns and falls back to an
+/// texture. A missing/undecodable `fxpt8` warns and falls back to an
 /// untextured material — the same missing-texture policy the rest of
 /// the loader applies; it never sinks the session.
 pub fn smoke_assets(

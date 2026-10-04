@@ -657,7 +657,7 @@ fn run_headless(
                     .before(mm2_vehicle::systems::vehicle_reset),
                 // F05-B.6: authored engine smoke — the headless
                 // record's `ptx=` field reads the report. Assets are
-                // real (VFS `fxpt2` + quads); nothing rasterizes.
+                // real (VFS `fxpt8` + quads); nothing rasterizes.
                 (
                     crate::damage_fx::drive_smoke,
                     crate::damage_fx::advance_smoke,

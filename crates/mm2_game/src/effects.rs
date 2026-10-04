@@ -201,7 +201,7 @@ pub struct SmokePolicy {
     /// Live-puff bound per vehicle — designed (F05-AC03 bounded
     /// cleanup: a damaged vehicle can never flood the world).
     pub max_live: usize,
-    /// Tiles across the smoke atlas — `texture/fxpt2` is a measured
+    /// Tiles across the smoke atlas — `texture/fxpt8` is a measured
     /// 2×2 puff atlas and `TexFrameStart`/`TexFrameEnd` index its
     /// tiles (mm2hook `asSparkPos::TexCoordOffset` reads frames the
     /// same way).
@@ -874,7 +874,7 @@ pub const PTX_RULE_NAMES: [&str; 8] = [
 ];
 
 /// `texture/ptx_wheel` is a measured 8×8 tile atlas (64 tiles) — the
-/// authored `TexFrame*` indexes select its tiles, unlike `fxpt2`'s
+/// authored `TexFrame*` indexes select its tiles, unlike `fxpt8`'s
 /// 2×2 smoke sheet.
 pub const PTX_ATLAS_TILES: u32 = 8;
 

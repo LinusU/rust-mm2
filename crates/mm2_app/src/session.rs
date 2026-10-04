@@ -1020,7 +1020,7 @@ pub fn load_session_world(
     // the next local one.
     commands.insert_resource(ResetAuthority(config.authority.is_authoritative()));
     // F05-B.6: the smoke sprite assets — resolved through the VFS
-    // like every texture; a missing `fxpt2` warns and emits
+    // like every texture; a missing `fxpt8` warns and emits
     // untextured puffs, never sinks the session. Session-scoped:
     // teardown removes it and the next load re-resolves.
     commands.insert_resource(crate::damage_fx::SmokeFx {
