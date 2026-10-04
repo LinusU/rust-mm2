@@ -254,9 +254,19 @@ const CORNER_AIM_ROLLOUT: f32 = 3.0;
 const CORNER_LINE_CUT: f32 = 2.0;
 
 fn junction_turn(route: &OpponentRoute, leg: usize, legs: usize) -> f32 {
-    let (a, b) = leg_ends(route, leg);
-    let (_, c) = leg_ends(route, (leg + 1) % legs);
-    wrap_angle((c.z - b.z).atan2(c.x - b.x) - (b.z - a.z).atan2(b.x - a.x)).abs()
+    // Closed native guides may repeat the starting point, producing a zero-
+    // length wrap leg. It has no direction; use its actual neighbouring legs
+    // so atan2(0, 0) cannot invent a world-axis junction at the lap boundary.
+    let heading = |candidate| {
+        let (a, b) = leg_ends(route, candidate);
+        (xz_len(a, b) > 1e-3).then(|| (b.z - a.z).atan2(b.x - a.x))
+    };
+    let incoming = (0..legs).find_map(|offset| heading((leg + legs - offset) % legs));
+    let outgoing = (1..=legs).find_map(|offset| heading((leg + offset) % legs));
+    match (incoming, outgoing) {
+        (Some(a), Some(b)) => wrap_angle(b - a).abs(),
+        _ => 0.0,
+    }
 }
 
 /// Keep the pursuit chord near a sharp vertex until the car has traversed its

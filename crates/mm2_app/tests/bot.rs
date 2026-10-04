@@ -1656,3 +1656,23 @@ fn sharp_corner_guidance_retains_aim_and_pace_after_dense_progress_crosses_verte
             .is_infinite()
     );
 }
+
+#[test]
+fn repeated_closed_guide_start_keeps_its_real_straight_heading() {
+    use mm2_app::racing_line::{RouteCursor, corner_aim_distance};
+    let route = route_of(&[
+        (0., 0., 0.),
+        (-10., 0., 10.),
+        (-20., 0., 20.),
+        (-20., 0., -20.),
+        (20., 0., -20.),
+        (10., 0., -10.),
+        (0., 0., 0.),
+    ]);
+    let cursor = RouteCursor { leg: 0, along: 1. };
+    assert_eq!(
+        corner_aim_distance(&route, cursor, 12.),
+        12.,
+        "a repeated start is not a zero-heading corner"
+    );
+}
