@@ -37,8 +37,11 @@ const HP_TO_W: f32 = 745.7;
 const G: f32 = 9.81;
 /// Standard air density for aero forces.
 const AIR_DENSITY: f32 = 1.225;
-/// Rest compression target as a fraction of suspension travel.
-const SAG_FRACTION: f32 = 0.45;
+/// Rest compression target as a fraction of suspension travel (adapted).
+/// A smaller fraction is a stiffer spring on the same travel: `0.35` is
+/// about 13% more natural frequency than the `0.45` it was, with more
+/// of the travel left for bumps.
+const SAG_FRACTION: f32 = 0.35;
 /// Lateral/longitudinal grip scale from MM2 static friction (adapted).
 /// Lateral is the arcade one: MM2 cars corner far harder than real ones,
 /// and `0.9` is as far as the roll assist holds the tall cars down —
@@ -73,10 +76,10 @@ const MAX_COLLIDER_FRICTION: f32 = 0.3;
 /// body trampolines off every kerb it touches. A car should thud.
 const MAX_RESTITUTION: f32 = 0.1;
 /// Suspension damping ratio band imported cars are mapped into: below
-/// ~0.3 a car pogos off road seams, above ~1.0 the springs stop moving and
-/// the chassis takes every impact instead.
-const DAMPING_RATIO_MIN: f32 = 0.40;
-const DAMPING_RATIO_MAX: f32 = 0.90;
+/// ~0.5 a car wallows and pogos off road seams, above ~1.0 the springs
+/// stop moving and the chassis takes every impact instead.
+const DAMPING_RATIO_MIN: f32 = 0.55;
+const DAMPING_RATIO_MAX: f32 = 1.0;
 /// Share of the lateral-force roll moment cancelled on imported cars
 /// (adapted arcade policy — see `AssistConfig::roll_resistance`).
 const ROLL_RESISTANCE: f32 = 0.95;

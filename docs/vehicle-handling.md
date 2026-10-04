@@ -364,7 +364,21 @@ the corner's **mass**. `SuspensionDampCoef` is authored between about 0.01
 lands near ζ = 0.1 and the car pogos off every road seam.
 
 The authored value still orders the roster, but inside a band
-(`DAMPING_RATIO_MIN`..`MAX`) that keeps all of it drivable.
+(`DAMPING_RATIO_MIN`..`MAX`) that keeps all of it drivable. The band is
+`0.55`–`1.0` of critical; it was `0.40`–`0.90`, which left the body
+wallowing after every bump and corner.
+
+The spring is set to carry the static load at `SAG_FRACTION` of its
+travel. At `0.35` (it was `0.45`) every car's natural frequency is
+13% higher — the roster runs 1.19–2.66 Hz instead of 1.05–2.35 — and
+the springs keep more of their travel for bumps; the body pitches and
+rolls less under load. `drive_probe` sees one effect it can measure:
+the London Cab, whose authored damping is the softest on the roster,
+no longer launches into a spin (21.8 s to 100 km/h and 156° of wander
+before; 4.8 s and 7°), and the level-drop landing leg passes on every
+car. Everything else on the roster's acceleration and cornering table
+is within noise, so the rest of this is a claim about how the car
+feels, not a measured one.
 
 ### Collider underside
 
