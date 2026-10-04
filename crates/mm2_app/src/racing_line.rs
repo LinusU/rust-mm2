@@ -247,6 +247,144 @@ impl RouteCursor {
     }
 }
 
+// Discrete junction policy for explicit evidence guides. These are pursuit
+// geometry margins, not road width, authored speed or vehicle-physics edits.
+const SHARP_TURN_MIN: f32 = std::f32::consts::FRAC_PI_3;
+const CORNER_AIM_ROLLOUT: f32 = 3.0;
+const CORNER_LINE_CUT: f32 = 2.0;
+
+fn junction_turn(route: &OpponentRoute, leg: usize, legs: usize) -> f32 {
+    let (a, b) = leg_ends(route, leg);
+    let (_, c) = leg_ends(route, (leg + 1) % legs);
+    wrap_angle((c.z - b.z).atan2(c.x - b.x) - (b.z - a.z).atan2(b.x - a.x)).abs()
+}
+
+/// Keep the pursuit chord near a sharp vertex until the car has traversed its
+/// outgoing tangent. Advancing a dense cursor does not mean the body has yet
+/// completed its turn. Straight lines and smooth bends keep ordinary lookahead.
+pub fn corner_aim_distance(route: &OpponentRoute, cursor: RouteCursor, wanted: f32) -> f32 {
+    let closed = route_is_closed(route);
+    let legs = leg_count(route.points.len(), closed);
+    let mut behind = cursor.along;
+    for offset in 0..legs {
+        if !closed && offset >= cursor.leg {
+            break;
+        }
+        let incoming = (cursor.leg + legs - 1 - offset) % legs;
+        if junction_turn(route, incoming, legs) >= SHARP_TURN_MIN && behind < wanted {
+            return wanted.min(CORNER_AIM_ROLLOUT);
+        }
+        let (a, b) = leg_ends(route, incoming);
+        behind += xz_len(a, b);
+        if behind >= wanted {
+            break;
+        }
+    }
+    let mut distance = -cursor.along;
+    for offset in 0..legs {
+        let leg = (cursor.leg + offset) % legs;
+        let (a, b) = leg_ends(route, leg);
+        distance += xz_len(a, b);
+        if distance > wanted || (!closed && leg + 1 >= legs) {
+            break;
+        }
+        if junction_turn(route, leg, legs) >= SHARP_TURN_MIN {
+            return wanted.min(distance.max(0.0) + CORNER_AIM_ROLLOUT);
+        }
+    }
+    wanted
+}
+
+/// Radius, speed and tangent length of a rounded discrete junction. A circle's
+/// closest-line inset is radius * (1 - cos(turn/2)); cap that inset while
+/// respecting the car's mechanical steering radius. The steering-speed cap
+/// inverts this car's existing speed-dependent lock, leaving 2% for corrections.
+fn junction_geometry(turn: f32, limits: &CarLimits) -> (f32, f32) {
+    let radius = (CORNER_LINE_CUT / (1.0 - (turn * 0.5).cos()))
+        .max(limits.wheelbase / (limits.lock_low * 0.98).tan().max(0.1));
+    let angle = (limits.wheelbase / radius).atan();
+    let steering_speed = if limits.lock_low > limits.lock_high && angle > limits.lock_high {
+        limits.lock_speed
+            * ((limits.lock_low - angle) / (limits.lock_low - limits.lock_high)).clamp(0.0, 1.0)
+    } else {
+        f32::INFINITY
+    };
+    let speed = (limits.corner_accel * radius)
+        .sqrt()
+        .min(steering_speed)
+        .max(1.0);
+    (speed, (radius * (turn * 0.5).tan()).min(HORIZON_SLACK))
+}
+
+/// Brake to the entry tangent of a sharp junction, then retain its handling-
+/// limited speed through the outgoing tangent. The broad smooth-bend window
+/// cannot represent a discrete street corner's entry or steering-lock demand.
+pub fn sharp_corner_plan(
+    route: &OpponentRoute,
+    cursor: RouteCursor,
+    speed: f32,
+    limits: &CarLimits,
+) -> SpeedPlan {
+    let closed = route_is_closed(route);
+    let legs = leg_count(route.points.len(), closed);
+    let mut plan = SpeedPlan {
+        limit: f32::INFINITY,
+        demand: 0.0,
+    };
+    let mut behind = cursor.along;
+    for offset in 0..legs {
+        if !closed && offset >= cursor.leg {
+            break;
+        }
+        let incoming = (cursor.leg + legs - 1 - offset) % legs;
+        let turn = junction_turn(route, incoming, legs);
+        if turn >= SHARP_TURN_MIN {
+            let (corner, tangent) = junction_geometry(turn, limits);
+            if behind < tangent + limits.wheelbase {
+                plan.limit = plan.limit.min(corner);
+                if speed > corner {
+                    plan.demand = plan.demand.max(1.0);
+                }
+            }
+        }
+        let (a, b) = leg_ends(route, incoming);
+        behind += xz_len(a, b);
+        if behind > HORIZON_SLACK {
+            break;
+        }
+    }
+    let mut distance = -cursor.along;
+    for offset in 0..legs {
+        let leg = (cursor.leg + offset) % legs;
+        let (a, b) = leg_ends(route, leg);
+        distance += xz_len(a, b);
+        if distance > limits.braking_distance(speed) + HORIZON_SLACK || (!closed && leg + 1 >= legs)
+        {
+            break;
+        }
+        let turn = junction_turn(route, leg, legs);
+        if turn < SHARP_TURN_MIN {
+            continue;
+        }
+        let (corner, tangent) = junction_geometry(turn, limits);
+        let entry = (distance - tangent).max(0.0);
+        // Reserve the normal pace actuator share in the entry-distance budget;
+        // once over the envelope, brake rather than waiting to reach the vertex.
+        let reachable =
+            (corner * corner + 2.0 * limits.brake_accel * CORNER_BRAKE_DEFAULT * entry).sqrt();
+        plan.limit = plan.limit.min(reachable);
+        if speed > reachable {
+            plan.demand = plan.demand.max(1.0);
+        }
+        if speed > corner {
+            plan.demand = plan.demand.max(
+                (speed * speed - corner * corner) / (2.0 * entry.max(1.0) * limits.max_brake_accel),
+            );
+        }
+    }
+    plan
+}
+
 /// Scan the line ahead of `cursor` out to braking distance from
 /// `speed` and work out what its corners ask: the highest speed the car
 /// may carry now and still brake to each corner's grip-limited speed,
