@@ -5010,11 +5010,22 @@ fn a_snap_progress_tail_mirrors_and_resolves_the_joined_client() {
     // A terminal row disagreeing with a recorded resolution is a
     // non-conforming authority's word — refused, not believed: the
     // host seat's recorded finish stands, the row counts as dropped.
+    // The drop count is the arrival signal: the row crosses the host
+    // loop, the socket and the pump thread on wall-clock time, so a
+    // fixed frame count can look before it lands.
+    let dropped_before = app
+        .world()
+        .resource::<netdrive::NetDriveReport>()
+        .progress_dropped;
     host.ctl()
         .broadcast(&snap(10, vec![progress_entry(0, 3, 100)]))
         .unwrap();
-    app.update();
-    app.update();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .progress_dropped
+            > dropped_before
+    });
     {
         assert!(matches!(
             app.world()
@@ -5027,11 +5038,11 @@ fn a_snap_progress_tail_mirrors_and_resolves_the_joined_client() {
             }
         ));
         assert_eq!(app.world().resource::<mm2_game::ResultLedger>().len(), 2);
-        assert!(
+        assert_eq!(
             app.world()
                 .resource::<netdrive::NetDriveReport>()
-                .progress_dropped
-                >= 1,
+                .progress_dropped,
+            dropped_before + 1,
             "the rewound lifecycle dropped counted"
         );
     }
