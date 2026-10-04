@@ -1403,12 +1403,28 @@ fn planned_guide_control_uses_existing_curvature_brakes_and_handling_steering() 
 
 #[test]
 fn planned_guide_drives_a_short_tight_two_lap_circuit_without_reanchors() {
+    drive_short_circuit(false);
+}
+
+#[test]
+fn dense_guide_drives_a_short_tight_two_lap_circuit_without_reanchors() {
+    drive_short_circuit(true);
+}
+
+fn drive_short_circuit(dense: bool) {
     let tmp = circuit_install();
     let mut gates = WAYPOINTS.to_string();
     let mut guide_text = OPP_HEADER.to_string();
-    for (x, z) in [(0, 140), (35, 140), (35, 105), (0, 105)] {
+    let corners = [(0, 140), (35, 140), (35, 105), (0, 105)];
+    for (i, &(x, z)) in corners.iter().enumerate() {
         gates.push_str(&format!("{x},0,{z},0,5,0,0,0,\n"));
-        guide_text.push_str(&format!("{x},0,{z},0,0,0,0,0,0\n"));
+        let (end_x, end_z) = corners[(i + 1) % corners.len()];
+        let samples = if dense { 7 } else { 1 };
+        for k in 0..samples {
+            let sample_x = x + (end_x - x) * k / samples;
+            let sample_z = z + (end_z - z) * k / samples;
+            guide_text.push_str(&format!("{sample_x},0,{sample_z},0,0,0,0,0,0\n"));
+        }
     }
     guide_text.push_str("0,0,140,0,0,0,0,0,0\n");
     write(tmp.path(), "race/testcity/circuit0waypoints.csv", &gates);
@@ -1462,4 +1478,35 @@ fn planned_guide_gate_ties_follow_forward_progress_on_revisited_streets() {
             "the early occurrence still caps at its live gate"
         );
     }
+}
+
+#[test]
+fn dense_guide_progress_keeps_the_corner_ahead_until_the_car_turns() {
+    use mm2_app::racing_line::{CarLimits, RouteCursor, plan_speed};
+    let points: Vec<_> = (0..=4)
+        .map(|i| (i as f32 * 5.0, 0.0, 0.0))
+        .chain((1..=16).map(|i| (20.0, 0.0, i as f32 * 5.0)))
+        .collect();
+    let route = route_of(&points);
+    let gate = Vec3::new(20.0, 0.0, 80.0);
+    let pos = Vec3::new(8.0, 0.0, -3.0);
+    let (next, aim) = scripted::planned_route_aim(&route, 1, pos, gate, 10.0);
+    assert_eq!(next, 2, "5m samples must not advance14m before the corner");
+    assert_eq!(aim, Vec3::new(20.0, 0.0, 3.0));
+    let plan = plan_speed(
+        &route,
+        RouteCursor::locate(&route, next, pos).unwrap(),
+        20.0,
+        &CarLimits::of(&VehicleConfig::default(), None),
+    );
+    assert!(
+        plan.limit.is_finite() && plan.limit < 20.0,
+        "the upcoming turn still demands braking"
+    );
+    let (next, aim) = scripted::planned_route_aim(&route, 4, Vec3::new(18.0, 0.0, 3.0), gate, 10.0);
+    assert_eq!(
+        next, 5,
+        "an actually rounded corner follows its outgoing leg"
+    );
+    assert_eq!(aim, Vec3::new(20.0, 0.0, 18.0));
 }

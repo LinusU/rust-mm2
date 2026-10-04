@@ -458,10 +458,22 @@ impl OpponentDriver {
 /// interior points; point 0 has none, so its outgoing leg decides —
 /// anything already ahead of the first anchor skips it.
 pub(crate) fn point_reached(points: &[mm2_game::OpponentRoutePoint], i: usize, pos: Vec3) -> bool {
+    point_reached_with_radius(points, i, pos, ROUTE_REACH)
+}
+
+/// Shared plane test with a bounded reach distance for densely sampled evidence
+/// guides. Native opponent callers retain the exact `ROUTE_REACH` policy above.
+pub(crate) fn point_reached_with_radius(
+    points: &[mm2_game::OpponentRoutePoint],
+    i: usize,
+    pos: Vec3,
+    reach: f32,
+) -> bool {
+    let reach = reach.clamp(0.0, ROUTE_REACH);
     let p = points[i].position;
     let dx = pos.x - p.x;
     let dz = pos.z - p.z;
-    if dx * dx + dz * dz <= ROUTE_REACH * ROUTE_REACH {
+    if dx * dx + dz * dz <= reach * reach {
         return true;
     }
     let dir = if i > 0 {
