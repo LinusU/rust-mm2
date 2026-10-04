@@ -652,9 +652,13 @@ impl Client {
     /// which would make a deliberate quit indistinguishable from a
     /// crash. Consumes the client.
     pub fn leave(mut self) -> Result<(), NetError> {
+        // Bound the drain before `Leave` goes out: the host closes as
+        // soon as it reads `Leave`, and macOS refuses `setsockopt`
+        // (EINVAL) on a socket whose write half is shut and whose peer
+        // has closed — setting it after the half-close races that close.
+        self.conn.set_read_timeout(Some(LEAVE_DRAIN_TIMEOUT))?;
         self.conn.send(&Message::Leave)?;
         self.conn.shutdown_write();
-        self.conn.set_timeout(Some(LEAVE_DRAIN_TIMEOUT))?;
         // Read until the host closes (its reader thread exits on `Leave`)
         // or the drain bound expires — either way no inbound data is
         // left pending at drop, so the close stays a clean FIN.

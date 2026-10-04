@@ -82,6 +82,13 @@ impl Conn {
         Ok(())
     }
 
+    /// Bound only how long `recv` may block, leaving the send bound as
+    /// it was — for a drain that must not shorten its own final send.
+    pub(crate) fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<(), NetError> {
+        self.stream.set_read_timeout(timeout)?;
+        Ok(())
+    }
+
     /// Send one protocol message.
     pub fn send(&mut self, msg: &Message) -> Result<(), NetError> {
         write_frame(&mut self.stream, &msg.encode()?)
