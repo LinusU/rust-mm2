@@ -4504,6 +4504,9 @@ fn a_snapshot_feeds_the_remote_impact_stream() {
         );
     }
     // A foreign-generation row drops at the apply-side session gate.
+    // The drop count is the arrival signal: the row crosses the host
+    // loop, the socket and the pump thread on wall-clock time, so a
+    // fixed frame count can look before it lands.
     host.ctl()
         .broadcast(&Message::Snap {
             generation: generation + 9,
@@ -4514,8 +4517,12 @@ fn a_snapshot_feeds_the_remote_impact_stream() {
             race: None,
         })
         .unwrap();
-    app.update();
-    app.update();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .impacts_dropped
+            > 2
+    });
     {
         let drained: Vec<netdrive::RemoteImpact> = app
             .world_mut()
