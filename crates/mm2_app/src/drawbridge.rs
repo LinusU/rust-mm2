@@ -369,6 +369,11 @@ mod tests {
         let omega = leaf.base * Vec3::X * (mirror_sign() * RAISE_RATE);
         let integrated = Quat::from_scaled_axis(omega * dt) * leaf.rotation_at(0.2);
         let expected = leaf.rotation_at(0.2 + RAISE_RATE * dt);
-        assert!(integrated.angle_between(expected) < 1e-5);
+        // `angle_between` is `2·acos(dot)` in f32, which cannot resolve
+        // angles below ~7e-4 rad: the test passed only where the dot
+        // happened to round to exactly 1. The relative rotation's vector
+        // part, sin(θ/2), stays precise for tiny angles.
+        let error = (expected.inverse() * integrated).xyz().length();
+        assert!(error < 1e-5, "{error}");
     }
 }
