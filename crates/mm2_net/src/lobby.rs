@@ -2,8 +2,8 @@
 //!
 //! The host is three kinds of thread bridged by one channel:
 //!
-//! - an **accept thread** blocking on the listener, forwarding every new
-//!   connection;
+//! - an **accept thread** polling the non-blocking listener against a
+//!   stop flag, forwarding every new connection;
 //! - a short-lived **handshake thread** per accepted connection, running
 //!   the compatibility gate under [`HANDSHAKE_TIMEOUT`] so a stalled or
 //!   flooding peer can never block accepts — in-flight handshakes are
@@ -44,7 +44,7 @@
 
 use std::collections::BTreeMap;
 use std::io;
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvError, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -63,6 +63,12 @@ use crate::proto::{
 /// handshake is itself bounded by [`HANDSHAKE_TIMEOUT`]. Sized like the
 /// roster — more pending joins than seats can never all fit anyway.
 const MAX_PENDING: usize = MAX_PLAYERS as usize;
+
+/// How often the accept thread re-checks the stop flag while no
+/// connection is waiting. It bounds both teardown's wait for the
+/// accept thread and the extra delay a join sees before its handshake
+/// starts — invisible next to a human joining a lobby.
+const ACCEPT_POLL: Duration = Duration::from_millis(20);
 
 /// Write bound on established lobby connections. Broadcast sends share
 /// the socket with the reader thread, so they get their own deadline:
@@ -422,8 +428,10 @@ impl Host {
         let control = tx.clone();
         let inputs = RemoteInputs::default();
         let loop_inputs = inputs.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let accept = spawn_accept(listener, tx.clone(), stop.clone())?;
         let handle = thread::spawn(move || {
-            run(listener, addr, config, tx, rx, events_tx, loop_inputs);
+            run(accept, stop, config, tx, rx, events_tx, loop_inputs);
         });
         Ok(Self {
             addr,
@@ -815,43 +823,58 @@ struct Slot {
     writer: Writer,
 }
 
-fn run(
+/// Run the accept loop on its own thread until `stop` is set. The
+/// listener is polled in non-blocking mode so teardown needs nothing but
+/// the flag: a blocking `accept` can only be woken by a connection, and
+/// the self-connect that used to wake it fails when the host is out of
+/// ephemeral ports (`EADDRNOTAVAIL`), leaving `Host::shutdown` hung in
+/// the join forever.
+fn spawn_accept(
     listener: TcpListener,
-    addr: SocketAddr,
+    tx: Sender<LoopMsg>,
+    stop: Arc<AtomicBool>,
+) -> io::Result<JoinHandle<()>> {
+    listener.set_nonblocking(true)?;
+    Ok(thread::spawn(move || {
+        while !stop.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    // A peer that lands after teardown began is dropped at
+                    // the door, never forwarded to a loop that is leaving.
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    // BSD stacks (macOS) hand an accepted socket the
+                    // listener's non-blocking mode; a `Conn` relies on
+                    // blocking reads and writes under deadlines.
+                    match stream
+                        .set_nonblocking(false)
+                        .and_then(|()| Conn::from_stream(stream))
+                    {
+                        Ok(conn) => {
+                            if tx.send(LoopMsg::Accepted(conn)).is_err() {
+                                return;
+                            }
+                        }
+                        Err(_) => return,
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => thread::sleep(ACCEPT_POLL),
+                Err(_) => return,
+            }
+        }
+    }))
+}
+
+fn run(
+    accept: JoinHandle<()>,
+    stop: Arc<AtomicBool>,
     config: HostConfig,
     tx: Sender<LoopMsg>,
     rx: Receiver<LoopMsg>,
     events: Sender<HostEvent>,
     inputs: RemoteInputs,
 ) {
-    let stop = Arc::new(AtomicBool::new(false));
-    let accept = {
-        let tx = tx.clone();
-        let stop = stop.clone();
-        thread::spawn(move || {
-            loop {
-                match listener.accept() {
-                    // On shutdown the loop self-connects to wake this accept;
-                    // the flag tells a wake connection from a real peer.
-                    Ok((stream, _)) => {
-                        if stop.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        match Conn::from_stream(stream) {
-                            Ok(conn) => {
-                                if tx.send(LoopMsg::Accepted(conn)).is_err() {
-                                    return;
-                                }
-                            }
-                            Err(_) => return,
-                        }
-                    }
-                    Err(_) => return,
-                }
-            }
-        })
-    };
-
     let mut players: BTreeMap<u16, Slot> = BTreeMap::new();
     // The session this lobby advertises; `None` until the consumer sets
     // one — clients then simply never see a `Session` message.
@@ -1176,15 +1199,14 @@ fn run(
     }
 
     // Teardown: close every peer socket (wakes the reader threads, whose
-    // sends into the dead channel just fail), drop the input mailbox,
-    // stop the accept thread and wake its blocking accept with a
-    // self-connect.
+    // sends into the dead channel just fail), drop the input mailbox and
+    // stop the accept thread, which sees the flag within one
+    // `ACCEPT_POLL`.
     for slot in players.values_mut() {
         slot.writer.disconnect();
     }
     inputs.clear();
     stop.store(true, Ordering::Relaxed);
-    let _ = TcpStream::connect(addr);
     let _ = accept.join();
 }
 
@@ -1350,6 +1372,7 @@ mod tests {
     use super::*;
     use crate::hello;
     use crate::proto::{SNAP_NO_SURFACE, SnapEntry};
+    use std::net::TcpStream;
 
     const FP: u64 = 0xaaaa;
     const WAIT: Duration = Duration::from_secs(5);
@@ -1748,6 +1771,37 @@ mod tests {
         // The client's socket is dead: its next read errors instead of
         // idling on a lobby that no longer exists.
         assert!(alice.recv().is_err());
+    }
+
+    /// The accept thread exits on the stop flag alone. A blocking accept
+    /// could only be woken by a self-connect, and when that connect
+    /// failed (ephemeral ports exhausted) `Host::shutdown` hung in the
+    /// join forever; here no wake connection is ever made, which is
+    /// exactly that failure.
+    #[test]
+    fn the_accept_thread_stops_without_a_wake_connection() {
+        let listener = listen_loopback().unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let accept = spawn_accept(listener, tx, stop.clone()).unwrap();
+
+        // A real peer goes through first, so the thread is known to be
+        // live in its accept loop when the flag flips.
+        let _peer = TcpStream::connect(addr).unwrap();
+        match rx.recv_timeout(WAIT).unwrap() {
+            LoopMsg::Accepted(_) => {}
+            _ => panic!("expected the peer to be forwarded"),
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        let (done_tx, done) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = accept.join();
+            let _ = done_tx.send(());
+        });
+        done.recv_timeout(WAIT)
+            .expect("the accept thread ignored the stop flag");
     }
 
     fn ad(tag: &str) -> SessionAdvertisement {

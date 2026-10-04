@@ -431,7 +431,8 @@ always before its first `Roster` (see "Session advertisement" below).
 
 - `Host` owns the listener and a single event loop; the loop is the
   only roster mutator. Three thread kinds feed it one channel: an
-  accept thread (blocking `listener.accept`), a short-lived handshake
+  accept thread (polling a non-blocking listener every `ACCEPT_POLL`,
+  20 ms, against a stop flag), a short-lived handshake
   thread per accepted conn (the gate runs under `HANDSHAKE_TIMEOUT`, so
   a stalled peer never blocks accepts), and a reader thread per
   admitted player forwarding `SetReady`/`SetVehicle`/`Leave` and socket
@@ -465,8 +466,12 @@ always before its first `Roster` (see "Session advertisement" below).
   reader thread exits and the client observes the close instead of
   sitting on a dead-but-open connection.
 - `Host::shutdown`/`Drop` closes every peer socket (waking the reader
-  threads), self-connects to wake the blocking accept, and joins the
-  loop. Clients observe the lobby's death as a failed `recv`.
+  threads), sets the accept thread's stop flag, and joins the loop.
+  The accept thread used to block in `accept` and be woken by a
+  self-connect; when that connect failed (ephemeral ports exhausted,
+  `EADDRNOTAVAIL`) shutdown hung forever in the join, so teardown now
+  depends on no connection at all. Clients observe the lobby's death
+  as a failed `recv`.
 
 ### Session advertisement
 
