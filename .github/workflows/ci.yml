@@ -10,6 +10,15 @@ jobs:
     name: fmt / clippy / test
     runs-on: ubuntu-latest
     steps:
+      # The hosted runner's free disk is smaller than a debug build of the
+      # Bevy workspace plus its tests: rustc fails with
+      # "No space left on device" and ld dies of SIGBUS mid-link. Drop
+      # the preinstalled toolchains this job never uses.
+      - name: free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
