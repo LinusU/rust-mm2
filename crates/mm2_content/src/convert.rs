@@ -92,6 +92,15 @@ const ROLL_RESISTANCE: f32 = 0.95;
 /// therefore zero on every other stock car — see
 /// docs/vehicle-handling.md "Pitch resistance".
 const MAX_PITCH_GRADIENT: f32 = 0.08;
+/// Margin a car's traction-limited acceleration keeps below the
+/// acceleration that tips it onto its rear wheels (adapted). `1.2` means
+/// the drive may use at most 1/1.2 of the way to the wheelie; lever beyond
+/// that is cancelled by `AssistConfig::pitch_resistance` — see
+/// docs/vehicle-handling.md "Wheelies".
+const WHEELIE_MARGIN: f32 = 1.2;
+/// Share of a driven tire's grip the drive may use, for imported cars
+/// (see `AssistConfig::traction_control`).
+const TRACTION_CONTROL: f32 = 0.85;
 /// How briskly an imported car levels itself in the air, rad/s — roughly
 /// half a second to flat, so a jump lands on its wheels and not its nose.
 const AIR_LEVELLING_RATE: f32 = 8.0;
@@ -734,11 +743,41 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
     let pitch_gradient = (com_height.max(0.0) / (wheelbase * wheelbase)
         * (axle_sag[0] / front_share + axle_sag[1] / back_share))
         .max(0.0);
-    let pitch_resistance = if pitch_gradient > MAX_PITCH_GRADIENT {
+    let gradient_resistance = if pitch_gradient > MAX_PITCH_GRADIENT {
         (1.0 - MAX_PITCH_GRADIENT / pitch_gradient).clamp(0.0, 1.0)
     } else {
         0.0
     };
+
+    // Wheelie limit. Drive force at the contact patch pitches the car up
+    // about the rear axle, and the front wheels leave the road at
+    // `a = g·b/h` — `b` the centre of mass's distance ahead of the rear
+    // axle, `h` its height. A rear-driven car is traction-limited to
+    // roughly `grip · traction_control · g` with all its weight on the
+    // rear wheels, which is exactly where it stands up. Lever beyond what
+    // keeps `WHEELIE_MARGIN` between the two is cancelled; a front-driven
+    // car unloads its own driven wheels first and needs nothing.
+    let rear_driven_grip = {
+        let grips: Vec<f32> = wheels
+            .iter()
+            .filter(|w| w.driven && w.position[2] > z_mid)
+            .filter_map(|w| w.tires.as_ref().map(|t| t.longitudinal_grip))
+            .collect();
+        (!grips.is_empty()).then(|| grips.iter().sum::<f32>() / grips.len() as f32)
+    };
+    // `a·h·margin < g·b` with `a = grip·tc·g` reduces to a length: the
+    // lever the drive force would need, against the arm that holds the
+    // nose down.
+    let wheelie_lever = rear_driven_grip
+        .map(|grip| grip * TRACTION_CONTROL * WHEELIE_MARGIN * com_height.max(0.0))
+        .unwrap_or(0.0);
+    let rear_arm = (rear_z - com_z_mm2).max(0.05);
+    let wheelie_resistance = if wheelie_lever > rear_arm {
+        (1.0 - rear_arm / wheelie_lever).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let pitch_resistance = gradient_resistance.max(wheelie_resistance);
 
     let assists = AssistConfig {
         // Every stock MM2 car carries its mass about as high as its track
@@ -748,7 +787,7 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
         roll_resistance: ROLL_RESISTANCE,
         pitch_resistance,
         yaw_stability: 2.0,
-        traction_control: 0.85,
+        traction_control: TRACTION_CONTROL,
         countersteer: 0.3,
         air_control: AIR_LEVELLING_RATE,
         self_right_delay: input
@@ -782,7 +821,7 @@ pub fn convert(input: &ConvertInput<'_>) -> Result<Converted, String> {
         "vehCarSim.CenterOfGravity + whlN.mtx origins",
         "assists.pitch_resistance",
         format!(
-            "{pitch_resistance:.2} of the longitudinal-force pitch moment cancelled; {pitch_gradient:.3} rad/g pitch gradient (centre of mass {com_height:.2} m over a {wheelbase:.2} m wheelbase), kept at or below {MAX_PITCH_GRADIENT}"
+            "{pitch_resistance:.2} of the longitudinal-force pitch moment cancelled; {pitch_gradient:.3} rad/g pitch gradient (centre of mass {com_height:.2} m over a {wheelbase:.2} m wheelbase), kept at or below {MAX_PITCH_GRADIENT}; {wheelie_resistance:.2} needed to hold a {WHEELIE_MARGIN} margin under the wheelie ({rear_arm:.2} m to the rear axle)"
         ),
     );
     report.unsupported(
@@ -1104,6 +1143,28 @@ mod tests {
         assert!(stubby.report.entries.iter().any(|e| {
             e.dest == "assists.pitch_resistance" && e.provenance == Provenance::Adapted
         }));
+    }
+
+    #[test]
+    fn a_rear_driven_car_that_would_stand_up_is_held_down() {
+        // The same car with its mass 0.3 m ahead of the rear axle instead
+        // of mid-wheelbase: traction alone now takes it past the point
+        // where the nose lifts, so the drive force's lever is shortened.
+        let sim = sim_with_cog([0.0, -0.1, -1.0]);
+        let tail_heavy = convert_with(&sim, &wheels(1.3), 1.5);
+        let pr = tail_heavy.config.assists.pitch_resistance;
+        assert!(pr > 0.3, "tail-heavy car got pitch_resistance {pr}");
+        assert!(
+            tail_heavy
+                .report
+                .entries
+                .iter()
+                .any(|e| { e.dest == "assists.pitch_resistance" && e.note.contains("wheelie") })
+        );
+
+        // Mid-wheelbase mass needs none.
+        let balanced = convert_with(&sim_with_cog([0.0, -0.1, 0.0]), &wheels(1.3), 1.5);
+        assert_eq!(balanced.config.assists.pitch_resistance, 0.0);
     }
 
     /// Damping ratio implied by a rate, as the physics crate measures it.

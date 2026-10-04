@@ -182,13 +182,39 @@ would have caught most of the roster too.
 the point longitudinal force is applied toward the centre of mass
 along the contact normal. The converter sets it just high enough to
 bring a car's gradient down to `MAX_PITCH_GRADIENT` (0.08 rad/g), so
-it is `0.0` on every stock car but the rover, which gets `0.86`.
-`drive_probe` now has the rover at 0–100 km/h in 4.2 s, 47.8 m/s,
-5° of drift on a straight launch and 1.56–1.97 g of cornering from
-10 to 40 m/s. That is quicker to 100 km/h than the other 2500 kg
+that rule alone is `0.0` on every stock car but the rover, which gets
+`0.82`. `drive_probe` has the rover at 0–100 km/h in 4.2 s, 47.8 m/s,
+4° of drift on a straight launch and 1.66–1.95 g of cornering from
+10 to 30 m/s. That is quicker to 100 km/h than the other 2500 kg
 vehicles (the Light Tactical Vehicle and F-350 take 4.7 s), and it
 corners like a car rather than a truck because its authored
 `StaticFric 3.0` is a car's tires.
+
+### Wheelies
+
+The pitch gradient is about soft springs; it says nothing about a car
+that is simply tipped back by its own drive. Drive force at the contact
+patch pitches the car up about the rear axle, and the front wheels
+leave the road at `a = g·b/h` — `b` the centre of mass's distance ahead
+of the rear axle, `h` its height. A rear-driven car is traction-limited
+to roughly `grip · traction_control · g` with all its weight on the
+rear wheels, which is exactly where it stands up. The London Cab
+(300 hp in 1000 kg, mass 1.28 m up and only 1.04 m ahead of the rear
+axle) did: 26° of pitch and the front wheels in the air through the
+first three gears. It was hidden behind its launch spin until the
+suspension and grip were retuned.
+
+The converter now also computes the lever that keeps the traction limit
+`WHEELIE_MARGIN` (1.2) below that threshold, and cancels the rest of it
+with the same `pitch_resistance`, taking the larger of the two rules.
+Front-driven cars need nothing — their driven wheels unload first.
+It touches the Cab (`0.47`), the Freightliner (`0.36`), the double-
+decker (`0.14`) and the Audi TT (`0.13`); every other stock car is
+untouched, and the Moon Rover's gradient rule is the larger there.
+`drive_probe --trace` has the Cab's launch pitch under 2° and its
+0–100 km/h at 3.7 s, down from 4.8 s: it no longer spends its thrust
+standing up. Braking is the mirror image (a stoppie, about the front
+axle) and is *not* covered here; the roster has not shown one.
 
 ### Grip-limited steering
 
