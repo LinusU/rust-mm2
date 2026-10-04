@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+env:
+  # Debug info is most of a debug Bevy target directory and nothing in
+  # CI reads it; a failing test's panic message still names the file.
+  CARGO_PROFILE_DEV_DEBUG: 0
+
 jobs:
   test:
     name: fmt / clippy / test
