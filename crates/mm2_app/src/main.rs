@@ -1341,8 +1341,9 @@ fn main() {
             input::vehicle_input.run_if(not(capturing)),
             // The evidence drivers own `VehicleInput` while their flag
             // is on — scheduled after the keyboard mapping so they win
-            // deterministically, and frozen during a capture like every
-            // other input. The parked control is chained after the
+            // deterministically. Explicit --bot also opts into motion
+            // during capture; ordinary static captures stay frozen.
+            // The parked control is chained after the
             // scripted one so a world holding both markers stays
             // deterministic (the CLI flags conflict, so that can only
             // come from a test).
@@ -1355,7 +1356,7 @@ fn main() {
                 // A scripted re-anchor emits `ResetVehicle` — same
                 // before-apply ordering as every Update writer.
                 .before(mm2_vehicle::systems::vehicle_reset)
-                .run_if(not(capturing)),
+                .run_if(evidence_capture_input_allowed),
             navarrow::nav_target_input.run_if(not(capturing)),
             (
                 camera::toggle_camera.run_if(not(capturing)),
@@ -1470,12 +1471,12 @@ fn main() {
         ),
     )
     // AI opponents own their own `VehicleInput` — `vehicle_input` only
-    // writes `PlayerVehicle`, so no ordering is needed. Frozen during
-    // captures like every other driver.
+    // writes `PlayerVehicle`, so no ordering is needed. Ordinary static
+    // captures freeze them; explicit --bot captures keep the real race moving.
     .add_systems(
         Update,
         opponents::opponent_drive
-            .run_if(not(capturing))
+            .run_if(evidence_capture_input_allowed)
             // A penned opponent re-anchors through `ResetVehicle` —
             // ahead of the apply like the other Update writers.
             .before(mm2_vehicle::systems::vehicle_reset),
@@ -1901,9 +1902,19 @@ fn display_available() -> bool {
 /// capture opens a window that can take focus from whatever else is on
 /// screen, and stray keystrokes fly the free camera away from the `--cam`
 /// pose the capture exists to reproduce. Physics keeps running, so the
-/// vehicle still settles — it just is not driven.
+/// vehicle still settles. Explicit scripted evidence may opt into motion
+/// through `evidence_capture_input_allowed`; live keyboard input stays frozen.
 fn capturing(smoke: Option<Res<SmokeTest>>) -> bool {
     smoke.is_some()
+}
+
+/// Explicit scripted evidence opts into a driven capture. Keyboard input and
+/// ordinary static screenshots retain the frozen-input policy above.
+fn evidence_capture_input_allowed(
+    smoke: Option<Res<SmokeTest>>,
+    scripted: Option<Res<scripted::ScriptedDrive>>,
+) -> bool {
+    smoke.is_none() || scripted.is_some()
 }
 
 /// After N frames, take the screenshot (if requested) and exit.
@@ -2217,5 +2228,77 @@ mod bot_route_cli_tests {
         ])
         .unwrap_err();
         assert!(error.to_string().contains("cannot read bot route"));
+    }
+}
+
+#[cfg(test)]
+mod capture_input_tests {
+    use super::*;
+
+    #[derive(Resource, Default)]
+    struct InputWrites {
+        keyboard: u32,
+        evidence: u32,
+        opponent: u32,
+    }
+
+    fn keyboard(mut writes: ResMut<InputWrites>) {
+        writes.keyboard += 1;
+    }
+
+    fn evidence(mut writes: ResMut<InputWrites>) {
+        writes.evidence += 1;
+    }
+
+    fn opponent(mut writes: ResMut<InputWrites>) {
+        writes.opponent += 1;
+    }
+
+    #[test]
+    fn explicit_bot_capture_runs_evidence_but_keeps_keyboard_frozen() {
+        let mut app = App::new();
+        app.init_resource::<InputWrites>()
+            .insert_resource(SmokeTest {
+                world: "capture-policy".into(),
+                screenshot: None,
+                frames_left: 20,
+                pending: None,
+                capture_wait: 0,
+            })
+            .add_systems(
+                Update,
+                (
+                    keyboard.run_if(not(capturing)),
+                    evidence.run_if(evidence_capture_input_allowed),
+                    opponent.run_if(evidence_capture_input_allowed),
+                ),
+            );
+        app.update();
+        let writes = app.world().resource::<InputWrites>();
+        assert_eq!(
+            (writes.keyboard, writes.evidence, writes.opponent),
+            (0, 0, 0)
+        );
+        app.insert_resource(scripted::ScriptedDrive);
+        app.update();
+        let writes = app.world().resource::<InputWrites>();
+        assert_eq!(
+            (writes.keyboard, writes.evidence, writes.opponent),
+            (0, 1, 1)
+        );
+        app.world_mut().remove_resource::<scripted::ScriptedDrive>();
+        app.update();
+        let writes = app.world().resource::<InputWrites>();
+        assert_eq!(
+            (writes.keyboard, writes.evidence, writes.opponent),
+            (0, 1, 1)
+        );
+        app.world_mut().remove_resource::<SmokeTest>();
+        app.update();
+        let writes = app.world().resource::<InputWrites>();
+        assert_eq!(
+            (writes.keyboard, writes.evidence, writes.opponent),
+            (1, 2, 2)
+        );
     }
 }
