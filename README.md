@@ -292,3 +292,12 @@ claim that the whole course was completed; read `cp=` and the race result.
 through its ordinary throttle/brake inputs. The optional ceiling preserves
 steering, reverse recoveries, vehicle tuning and the default driver behavior.
 It works in windowed and headless sessions; useful for narrow custom streets.
+
+`--bot --event <table:row> --bot-route /absolute/path/guide.opp` supplies
+an explicit native `.opp` evidence guide. It overrides the roster-derived
+player guide without spawning or changing opponents. The guide must contain at
+least two points, no malformed rows, finite values in every column, and positive
+finite XZ length for each consecutive edge. Invalid input fails before world
+spawning. The route guides ordinary steering and throttle/brake inputs; gates,
+laps, countdown and time limits still use the event definition. These runs are
+record-ineligible, and existing bounded bot recovery behavior still applies.

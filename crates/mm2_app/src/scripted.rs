@@ -6,7 +6,8 @@
 //! production checkpoint/finish/result path (`advance_race` +
 //! `RaceProgress::advance`) instead of idling or running straight off
 //! the course. It is an evidence driver, not a gameplay feature: it
-//! borrows one wired `.opp` driving line as a guide between gates
+//! uses an explicit diagnostic `.opp` guide, or borrows one wired
+//! `.opp` driving line, as a guide between gates
 //! ([`ScriptedRoute`], F15-B.5 — an implementation choice; retail
 //! assigns routes to AI opponents, never to the player), with no
 //! opponent AI beyond that, just enough control to finish authored
@@ -93,7 +94,7 @@ impl Default for ScriptedBot {
 /// drops it with everything else the session owns.
 #[derive(Component, Debug, Clone)]
 pub struct ScriptedRoute {
-    /// The authored driving line — one roster entry's resolved `.opp`.
+    /// Driving line from the explicit evidence guide or a resolved roster `.opp`.
     pub route: OpponentRoute,
     /// The route anchor currently being chased — the same convention
     /// as `OpponentDriver::next`.
@@ -148,6 +149,72 @@ impl ScriptedRoute {
             reanchors: 0,
         }
     }
+}
+
+/// Load an explicit diagnostic guide without wiring a fake opponent. Unlike
+/// retail roster parsing, evidence input is strict: malformed rows cannot be
+/// silently skipped, every field must be finite, and every XZ leg must advance.
+pub fn load_bot_route(path: &std::path::Path) -> Result<OpponentRoute, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read bot route {}: {e}", path.display()))?;
+    let file = mm2_formats::opp::OppFile::parse(&text)
+        .map_err(|e| format!("invalid bot route {}: {e}", path.display()))?;
+    if let Some(problem) = file.diagnostics.first() {
+        return Err(format!(
+            "invalid bot route {} at line {}: {}",
+            path.display(),
+            problem.line,
+            problem.message
+        ));
+    }
+    if file.rows.len() < 2 {
+        return Err(format!(
+            "invalid bot route {}: need at least two points",
+            path.display()
+        ));
+    }
+    let mut points = Vec::with_capacity(file.rows.len());
+    for row in file.rows {
+        if !row
+            .position
+            .iter()
+            .chain([
+                &row.brake,
+                &row.forward_offset,
+                &row.side_offset,
+                &row.target_speed,
+                &row.speed_start,
+                &row.side_start,
+            ])
+            .all(|v| v.is_finite())
+        {
+            return Err(format!(
+                "invalid bot route {} at line {}: non-finite field",
+                path.display(),
+                row.line
+            ));
+        }
+        points.push(mm2_game::OpponentRoutePoint {
+            position: Vec3::from_array(row.position),
+            brake: row.brake,
+            forward_offset: row.forward_offset,
+            side_offset: row.side_offset,
+            target_speed: row.target_speed,
+            speed_start: row.speed_start,
+            side_start: row.side_start,
+        });
+    }
+    if points.windows(2).any(|pair| {
+        let delta = pair[1].position - pair[0].position;
+        let length = delta.x.hypot(delta.z);
+        !length.is_finite() || length <= 0.0
+    }) {
+        return Err(format!(
+            "invalid bot route {}: every consecutive XZ edge must have positive finite length",
+            path.display()
+        ));
+    }
+    Ok(OpponentRoute { points })
 }
 
 /// Pick the scripted driver's driving line out of the wired roster:

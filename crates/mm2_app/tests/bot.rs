@@ -1157,3 +1157,186 @@ fn penned_bot_reanchor_lands_clear_of_a_parked_participant() {
         "the teleport itself banked nothing"
     );
 }
+
+#[test]
+fn explicit_bot_guide_rejects_invalid_evidence() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    for (body, expected) in [
+        ("", "header"),
+        ("0,0,0,0,0,0,0,0,0\n", "at least two"),
+        (
+            "0,0,0,0,0,0,0,0,0\nwrong\n0,0,10,0,0,0,0,0,0\n",
+            "at line 3",
+        ),
+        ("0,0,0,0,0,0,0,0,0\n0,0,10,0,0,0,NaN,0,0\n", "non-finite"),
+        (
+            "0,0,0,0,0,0,0,0,0\n0,0,0,0,0,0,0,0,0\n",
+            "positive finite length",
+        ),
+        (
+            "0,0,0,0,0,0,0,0,0\n0,10,0,0,0,0,0,0,0\n",
+            "positive finite length",
+        ),
+    ] {
+        std::fs::write(file.path(), format!("{OPP_HEADER}{body}")).unwrap();
+        let error = scripted::load_bot_route(file.path()).unwrap_err();
+        // Header-only is rejected by point count, not by a parser header failure.
+        let expected = if body.is_empty() {
+            "at least two"
+        } else {
+            expected
+        };
+        assert!(error.contains(expected), "{error}");
+    }
+    assert!(
+        scripted::load_bot_route(Path::new("missing-guide.opp"))
+            .unwrap_err()
+            .contains("cannot read")
+    );
+}
+
+#[test]
+fn explicit_bot_guide_drives_two_real_laps_without_opponents() {
+    let tmp = circuit_install();
+    let guide = tmp.path().join("evidence.opp");
+    let mut text = OPP_HEADER.to_string();
+    for (x, z) in [
+        (0, 140),
+        (40, 140),
+        (80, 140),
+        (80, 100),
+        (80, 60),
+        (40, 60),
+        (0, 60),
+        (0, 100),
+        (0, 140),
+    ] {
+        text.push_str(&format!("{x},0,{z},0,0,0,0,0,0\n"));
+    }
+    std::fs::write(&guide, text).unwrap();
+    let mut config = event_config(EventTableKind::Circuit);
+    config.dev.bot_route = Some(guide);
+    let mut app = bot_app(config, vfs_of(tmp.path()));
+    app.update();
+    let car = car(&mut app);
+    assert_eq!(
+        app.world()
+            .get::<ScriptedRoute>(car)
+            .unwrap()
+            .route
+            .points
+            .len(),
+        9
+    );
+    let race = app.world().resource::<RaceState>();
+    assert_eq!(race.definition.laps, 2);
+    assert_eq!(race.definition.rule, CheckpointRule::Ordered);
+    assert_eq!(race.definition.params.opponents, 0);
+    assert_eq!(
+        app.world()
+            .get::<RaceProgress>(car)
+            .unwrap()
+            .cleared_count(),
+        0
+    );
+    run(&mut app, 4200);
+    let progress = app.world().get::<RaceProgress>(car).unwrap();
+    assert!(
+        matches!(progress.state, ParticipantState::Finished { .. }),
+        "{:?}, lap {}",
+        progress.state,
+        progress.lap
+    );
+    assert_eq!(app.world().resource::<ResultLedger>().len(), 1);
+    assert_eq!(
+        app.world().resource::<RaceState>().phase,
+        RacePhase::Complete
+    );
+}
+
+#[test]
+fn invalid_bot_guide_fails_before_spawning_world_or_player() {
+    let tmp = circuit_install();
+    let mut config = event_config(EventTableKind::Circuit);
+    config.dev.bot_route = Some(tmp.path().join("missing.opp"));
+    let mut app = bot_app(config, vfs_of(tmp.path()));
+    app.update();
+    assert!(matches!(
+        app.world().resource::<Session>().phase(),
+        mm2_game::SessionPhase::Failed { .. }
+    ));
+    assert_eq!(
+        app.world_mut()
+            .query_filtered::<Entity, With<PlayerVehicle>>()
+            .iter(app.world())
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn explicit_bot_guide_overrides_roster_line_without_changing_roster() {
+    let tmp = routed_install();
+    let guide = tmp.path().join("override.opp");
+    std::fs::write(
+        &guide,
+        format!("{OPP_HEADER}-60,0,140,0,0,0,0,0,0\n100,0,140,0,0,0,0,0,0\n"),
+    )
+    .unwrap();
+    let mut config = event_config(EventTableKind::Checkpoint);
+    config.dev.bot_route = Some(guide);
+    let mut app = bot_app(config, vfs_of(tmp.path()));
+    app.update();
+    let car = car(&mut app);
+    let guide = &app.world().get::<ScriptedRoute>(car).unwrap().route;
+    assert_eq!(guide.points.len(), 2);
+    assert_eq!(guide.points[1].position, Vec3::new(100.0, 0.0, 140.0));
+    assert_eq!(
+        app.world()
+            .resource::<RaceState>()
+            .definition
+            .params
+            .opponents,
+        1
+    );
+}
+
+#[test]
+fn explicit_bot_guide_preserves_blitz_countdown_and_deadline() {
+    let tmp = turn_install();
+    write(
+        tmp.path(),
+        "race/testcity/mmblitzdata.csv",
+        &format!("{MM_HEADER}\nshort,0,0,0,0,0,0,0,1,0.5,0,0,0,0,0,0,0,0,1,0.5,0\n"),
+    );
+    write(tmp.path(), "race/testcity/blitz0.aimap", "#\n");
+    let rows =
+        std::fs::read_to_string(tmp.path().join("race/testcity/race0waypoints.csv")).unwrap();
+    write(tmp.path(), "race/testcity/blitz0waypoints.csv", &rows);
+    let guide = tmp.path().join("timer.opp");
+    std::fs::write(
+        &guide,
+        format!("{OPP_HEADER}-60,0,140,0,0,0,0,0,0\n100,0,140,0,0,0,0,0,0\n"),
+    )
+    .unwrap();
+    let mut config = event_config(EventTableKind::Blitz);
+    config.dev.bot_route = Some(guide);
+    let mut app = bot_app(config, vfs_of(tmp.path()));
+    app.update();
+    let car = car(&mut app);
+    let race = app.world().resource::<RaceState>();
+    assert_eq!(race.definition.time_limit_ticks, Some(60));
+    assert_eq!(race.definition.rule, CheckpointRule::AnyOrder);
+    assert_eq!(race.clock, 0);
+    assert!(matches!(race.phase, RacePhase::Countdown { .. }));
+    run(&mut app, 300);
+    assert!(matches!(
+        app.world().get::<RaceProgress>(car).unwrap().state,
+        ParticipantState::TimedOut { .. }
+    ));
+    assert_eq!(app.world().resource::<ResultLedger>().len(), 1);
+    assert_eq!(
+        app.world().resource::<RaceState>().phase,
+        RacePhase::Complete
+    );
+}

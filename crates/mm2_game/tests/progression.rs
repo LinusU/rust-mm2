@@ -388,6 +388,13 @@ fn record_eligibility_gates_dev_and_modded_sessions() {
     assert_eq!(record_eligibility(&config), Err(Ineligible::ModContent));
     config.mods_active = false;
 
+    config.dev.bot_route = Some("evidence.opp".into());
+    assert_eq!(
+        record_eligibility(&config),
+        Err(Ineligible::DevOverride("bot-route"))
+    );
+    config.dev.bot_route = None;
+
     config.dev.traction = Some(0.5);
     assert_eq!(
         record_eligibility(&config),
