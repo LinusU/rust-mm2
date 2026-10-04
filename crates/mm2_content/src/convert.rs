@@ -41,9 +41,9 @@ const AIR_DENSITY: f32 = 1.225;
 const SAG_FRACTION: f32 = 0.45;
 /// Lateral/longitudinal grip scale from MM2 static friction (adapted).
 /// Lateral is the arcade one: MM2 cars corner far harder than real ones,
-/// and `0.75` is as far as the roll assist holds the tall cars down —
+/// and `0.9` is as far as the roll assist holds the tall cars down —
 /// see docs/vehicle-handling.md "Grip scale".
-const GRIP_LAT_SCALE: f32 = 0.75;
+const GRIP_LAT_SCALE: f32 = 0.9;
 const GRIP_LONG_SCALE: f32 = 0.60;
 /// Torque-peak placement and height relative to the power peak (adapted).
 const TORQUE_PEAK_RPM_FRAC: f32 = 0.72;
@@ -79,7 +79,7 @@ const DAMPING_RATIO_MIN: f32 = 0.40;
 const DAMPING_RATIO_MAX: f32 = 0.90;
 /// Share of the lateral-force roll moment cancelled on imported cars
 /// (adapted arcade policy — see `AssistConfig::roll_resistance`).
-const ROLL_RESISTANCE: f32 = 0.85;
+const ROLL_RESISTANCE: f32 = 0.95;
 /// Steepest pitch gradient, radians per g of longitudinal acceleration,
 /// an imported car keeps its full squat and dive on (adapted). The stock
 /// roster runs 0.020 (City Bus) to 0.073 (London Cab); the Moon Rover,

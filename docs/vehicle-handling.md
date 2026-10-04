@@ -148,7 +148,10 @@ moment untouched — the car corners exactly as hard, it just stays down —
 and measuring against the contact normal rather than world up keeps banked
 road correct.
 
-Imported cars get `0.85`, which puts the roster at 1.37–4.21.
+Imported cars get `0.95`, which puts the roster at 3.42–10.54. It was
+`0.85` (1.37–4.21), which is what capped the grip scale below: the
+roll arm left at `0.95` is a third of the one at `0.85`, so the same
+tires tip at three times the lateral load.
 
 ### Pitch resistance
 
@@ -394,13 +397,14 @@ snag-safe hull.
 end is not a friction coefficient any tire has. It is scaled by
 `GRIP_LAT_SCALE` / `GRIP_LONG_SCALE`, preserving the ordering between cars.
 
-The lateral scale is `0.75`, a 0.9–2.25 g range: more than a road tire,
-because MM2 cars corner far harder than real ones and a 1.65 g ceiling
-turned too little at every speed. It was `0.55`. `0.95` is past what the
-roll assist can hold — the Freightliner audits as tipping and the
-double-decker loses it at 40 m/s — and `0.75` keeps every car at a
-`rollover_margin` of 1.37 or more. `drive_probe` puts the Beetle at
-1.73 g at 40 m/s (1.32 before).
+The lateral scale is `0.9`, a 1.1–2.7 g range: well past a road tire,
+because MM2 cars corner far harder than real ones and the cars were
+still hard to hold on a corner at 2.25 g — they ran out of grip before
+the driver ran out of road. It was `0.75`, and `0.55` before that.
+`0.95` was past what the roll assist could hold at `0.85`; with the
+assist at `0.95` every car keeps a `rollover_margin` of 3.42 or more
+at `0.9`. `drive_probe` puts the Beetle at 2.36 g at 40 m/s (1.96
+before).
 
 ### Engine curve
 
