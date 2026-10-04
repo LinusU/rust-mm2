@@ -1168,7 +1168,7 @@ impl EmitCtx<'_> {
         Vec3::new(fx, 0.0, authored_z(fz))
     }
 
-    /// For mostly-vertical fans (gables, embankment walls — unlike ground
+    /// For vertical fans (gables, embankment walls — unlike ground
     /// fans their authored winding isn't reliable): the Bevy-space
     /// direction the fan should face, or `None` for horizontal/degenerate
     /// fans and ambiguous sides (which keep the authored winding).
@@ -1181,7 +1181,12 @@ impl EmitCtx<'_> {
                 break;
             }
         }
-        if n.length_squared() < 0.5 || n.y.abs() >= 0.3 || self.poly.len() < 3 {
+        // A steep heightfield still has a meaningful upward side. Treating it
+        // as a wall can reverse individual terrain triangles towards the
+        // room exterior, opening back-face holes in a continuous hillside.
+        // Restrict this designed wall heuristic to essentially vertical
+        // faces; the tolerance accommodates floating-point vertex noise.
+        if n.length_squared() < 0.5 || n.y.abs() >= 1e-4 || self.poly.len() < 3 {
             return None;
         }
         let mut mid = Vec3::ZERO;
