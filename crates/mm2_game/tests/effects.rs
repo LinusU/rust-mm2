@@ -210,7 +210,7 @@ fn puffs_draw_authored_fields_deterministically() {
     for _ in 0..64 {
         let p = a.puff(0, origin, e).unwrap();
         assert!(
-            (p.position.x - (origin.x + s.position.x)).abs() <= s.position_var.x + 1e-6,
+            (p.position.x - origin.x).abs() <= s.position_var.x + 1e-6,
             "{p:?}"
         );
         assert!(
@@ -1198,4 +1198,19 @@ fn wheel_puff_advances_and_expires() {
     assert_eq!(q.alpha(), 1.0);
     q.intensity = 0.5;
     assert!((q.alpha() - 0.5).abs() < 1e-5);
+}
+
+/// Retail `vehcardamage` records author `Position` as a stale editor
+/// world coordinate (vpbug: 298.7, 13.7, −48.5). Adding it to the pivot
+/// threw every puff hundreds of metres from the car, so the player's
+/// damage smoke was never seen.
+#[test]
+fn puffs_ignore_the_stale_authored_world_position() {
+    let origin = bevy::prelude::Vec3::new(10.0, 2.0, -30.0);
+    let e = bevy::prelude::Entity::PLACEHOLDER;
+    let mut r = rig(CARDAMAGE);
+    r.spec.position = bevy::prelude::Vec3::new(298.687_32, 13.712_537, -48.516_205);
+    r.spec.position_var = bevy::prelude::Vec3::ZERO;
+    let p = r.puff(0, origin, e).unwrap();
+    assert_eq!(p.position, origin);
 }

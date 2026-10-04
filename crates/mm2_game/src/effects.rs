@@ -389,7 +389,10 @@ impl VehicleSmoke {
         };
         Some(SmokePuff {
             emitter,
-            position: origin + spec.position + e.jitter3(Vec3::ZERO, spec.position_var),
+            // The authored `Position` is deliberately not added: every
+            // retail damage record carries a stale world coordinate there
+            // (hundreds of metres from the car) — the pivot owns placement.
+            position: origin + e.jitter3(Vec3::ZERO, spec.position_var),
             velocity: e.jitter3(spec.velocity, spec.velocity_var),
             age: 0.0,
             life: e.jitter(spec.life, spec.life_var).max(0.01),
