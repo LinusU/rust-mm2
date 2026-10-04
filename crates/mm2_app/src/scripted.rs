@@ -40,7 +40,7 @@ use crate::racing_line::{
 
 use crate::opponents::{
     REANCHOR_DIST, REANCHOR_FRAMES, SPAWN_LIFT, aim_distance, initial_route_index, point_reached,
-    reanchor_occupied, reanchor_pose, route_is_closed, spacing_point_reached,
+    reanchor_occupied, reanchor_pose_with_progress, route_is_closed, spacing_point_reached,
 };
 
 /// Presence enables the scripted driver: `--bot` inserts it, and
@@ -854,14 +854,15 @@ pub fn scripted_drive(
                             occupants.iter().copied().chain(claimed.iter().copied()),
                         )
                     };
-                    let (mut pose, ryaw) = reanchor_pose(&rs.route, rs.next, pos.0, yaw, |p| {
-                        gates.iter().any(|g| {
-                            let dx = p.x - g.center.x;
-                            let dz = p.z - g.center.z;
-                            dx * dx + dz * dz < g.radius * g.radius
-                        }) || !supported(p)
-                            || occupied(p)
-                    });
+                    let (mut pose, ryaw, resync_next) =
+                        reanchor_pose_with_progress(&rs.route, rs.next, pos.0, yaw, |p| {
+                            gates.iter().any(|g| {
+                                let dx = p.x - g.center.x;
+                                let dz = p.z - g.center.z;
+                                dx * dx + dz * dz < g.radius * g.radius
+                            }) || !supported(p)
+                                || occupied(p)
+                        });
                     // The same hull clearance the spawn applies.
                     let hull_min_y = vehicle
                         .config
@@ -875,7 +876,7 @@ pub fn scripted_drive(
                         position: pose,
                         yaw: ryaw,
                     });
-                    rs.next = initial_route_index(&rs.route, pose, ryaw);
+                    rs.next = resync_next;
                     *bot = ScriptedBot {
                         escapes: bot.escapes,
                         ..ScriptedBot::default()
