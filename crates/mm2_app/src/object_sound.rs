@@ -7,17 +7,22 @@
 //! on and off (a drawbridge while it moves, the train while it runs),
 //! and [`object_sound_voices`] turns the state's cues into voices —
 //! loops kept as children while wanted, one-shots fired when no
-//! earlier firing of the row still plays. Beyond the table's
-//! `Max distance` from the listener the emitter is silent, as in the
-//! original. The spatial falloff inside that range is designed (the
-//! original's attenuation curve is unrecovered, UNK-25):
-//! [`OBJECT_SPATIAL_EDGE`] sets how far down the inverse-square curve
-//! the max distance sits.
+//! earlier firing of the row still plays. As in the original, the
+//! emitter is silent (and its timers hold) from the table's
+//! `Max distance` out, and positional rows follow the table's
+//! recovered falloff every frame
+//! ([`ObjectAudioSpec::falloff`](mm2_game::object_audio::ObjectAudioSpec::falloff)).
+//! Bevy's spatial audio supplies only the stereo pan: the voices'
+//! spatial scale ([`PAN_ONLY_EDGE`]) keeps every audible distance
+//! inside rodio's unattenuated unit sphere, so the inverse-square
+//! curve never applies. The pan law is Bevy's (designed); the random
+//! pan of type-1 rows is not reproduced — they play centred.
 
 use std::sync::Arc;
 
 use bevy::audio::{
-    AudioPlayer, PlaybackMode, PlaybackSettings, SpatialListener, SpatialScale, Volume,
+    AudioPlayer, AudioSinkPlayback, PlaybackMode, PlaybackSettings, SpatialAudioSink,
+    SpatialListener, SpatialScale, Volume,
 };
 use bevy::prelude::*;
 use mm2_assets::Vfs;
@@ -28,10 +33,10 @@ use tracing::warn;
 
 use crate::audio::{AudioReport, AudioVoice, PcmAudio, VoiceKind, WaveBank};
 
-/// The emitter's max distance lands this many spatial units from the
-/// listener — inverse-square gain `1/edge²` (≈ −19 dB at 3) just
-/// before the hard cut. Designed.
-pub const OBJECT_SPATIAL_EDGE: f32 = 3.0;
+/// A table's max distance lands this many spatial units from the
+/// listener — under rodio's unit radius, inside which spatial voices
+/// pan without attenuating, so the falloff is ours alone.
+pub const PAN_ONLY_EDGE: f32 = 0.5;
 
 /// One object's sound: its table, the table's runtime state and the
 /// emitter speed the speed-gated rows test.
@@ -94,10 +99,12 @@ pub fn load_object_audio(vfs: &Vfs, name: &str) -> Option<Arc<ObjectAudioSpec>> 
 
 /// Run every emitter's state and keep its voices in step: wanted loops
 /// spawned and unwanted ones stopped, due one-shots fired unless the
-/// row is still sounding, nothing at all beyond the table's max
-/// distance. The state advances only while the session simulates
-/// (countdown, play, results) — a pause holds both the timers and,
-/// through `sync_audio_pause`, the sinks.
+/// row is still sounding, positional voices re-levelled to the
+/// listener's distance, nothing at all from the table's max distance
+/// out. The state advances only while the emitter is in range and the
+/// session simulates (countdown, play, results) — the original runs a
+/// table only while it holds a sound slot, and a pause holds both the
+/// timers and, through `sync_audio_pause`, the sinks.
 #[allow(clippy::too_many_arguments)] // Bevy system — the borrows are the contract.
 pub fn object_sound_voices(
     mut commands: Commands,
@@ -110,6 +117,7 @@ pub fn object_sound_voices(
     listener: Query<&GlobalTransform, With<SpatialListener>>,
     mut emitters: Query<(Entity, &GlobalTransform, &mut ObjectSound)>,
     voices: Query<(Entity, &ObjectSoundVoice, &ChildOf)>,
+    mut sinks: Query<&mut SpatialAudioSink, With<ObjectSoundVoice>>,
 ) {
     if emitters.is_empty() {
         return;
@@ -125,14 +133,16 @@ pub fn object_sound_voices(
     let ear = listener.iter().next().map(|g| g.translation());
     for (emitter, at, mut sound) in &mut emitters {
         let sound = &mut *sound;
-        let cues = if running {
+        // No ear yet (the camera gains its listener a frame after
+        // spawn) hears nothing.
+        let distance = ear.map(|e| e.distance(at.translation()));
+        let in_range = distance.is_some_and(|d| sound.spec.in_range(d));
+        let falloff = distance.map_or(0.0, |d| sound.spec.falloff(d));
+        let cues = if running && in_range {
             sound.state.step(&sound.spec, dt, sound.speed)
         } else {
             Default::default()
         };
-        // No ear yet (the camera gains its listener a frame after
-        // spawn) hears nothing.
-        let in_range = ear.is_some_and(|e| e.distance(at.translation()) <= sound.spec.max_distance);
         let mine: Vec<(Entity, ObjectSoundVoice)> = voices
             .iter()
             .filter(|(_, _, parent)| parent.parent() == emitter)
@@ -156,7 +166,16 @@ pub fn object_sound_voices(
                 commands.entity(*entity).despawn();
             }
         }
-        let scale = OBJECT_SPATIAL_EDGE / sound.spec.max_distance.max(1.0);
+        // Positional rows follow the distance every frame.
+        for (entity, voice) in &mine {
+            let row = &sound.spec.samples[voice.sample];
+            if row.kind.is_positional()
+                && let Ok(mut sink) = sinks.get_mut(*entity)
+            {
+                sink.set_volume(Volume::Linear(row_volume(row.volume) * falloff));
+            }
+        }
+        let scale = PAN_ONLY_EDGE / sound.spec.max_distance.max(1.0);
         let mut spawn = |sample: usize, gain: f32, looped: bool, report: &mut AudioReport| {
             if sound.failed[sample] {
                 return;
@@ -168,11 +187,9 @@ pub fn object_sound_voices(
             }
             match bank.load(&vfs.0, &mut waves, &row.name) {
                 Ok(handle) => {
-                    let volume = if row.volume.is_finite() && row.volume >= 0.0 {
-                        row.volume
-                    } else {
-                        1.0
-                    } * gain;
+                    let positional = row.kind.is_positional();
+                    let level = if positional { falloff } else { 1.0 };
+                    let volume = row_volume(row.volume) * gain * level;
                     commands.spawn((
                         AudioVoice {
                             kind: VoiceKind::Object,
@@ -189,8 +206,8 @@ pub fn object_sound_voices(
                                 PlaybackMode::Despawn
                             },
                             volume: Volume::Linear(volume),
-                            spatial: true,
-                            spatial_scale: Some(SpatialScale::new(scale)),
+                            spatial: positional,
+                            spatial_scale: positional.then(|| SpatialScale::new(scale)),
                             ..Default::default()
                         },
                     ));
@@ -216,5 +233,14 @@ pub fn object_sound_voices(
                 }
             }
         }
+    }
+}
+
+/// An authored row volume, or 1 when the cell is unusable.
+fn row_volume(volume: f32) -> f32 {
+    if volume.is_finite() && volume >= 0.0 {
+        volume
+    } else {
+        1.0
     }
 }

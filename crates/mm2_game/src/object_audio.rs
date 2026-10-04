@@ -15,12 +15,17 @@
 //!   is still playing, and the timer is redrawn uniformly within the
 //!   row's `oneshot time limit low..high` seconds — a `0,0` window
 //!   (the drawbridge bell) re-fires the moment the last ring ends.
-//!   Deactivation lets a playing one-shot finish. Type 1 also draws a
-//!   random gain in `0.75..1` and pan (the pan is not reproduced);
+//!   Deactivation lets a playing one-shot finish;
 //! - type 3 never fires on its own (it waits for an explicit trigger
 //!   no retail object issues).
 //!
-//! The emitter is silent beyond the table's `Max distance`.
+//! The emitter is silent from the table's `Max distance` out. Inside
+//! it, rows of types 0, 2 and 3 play at their authored volume times
+//! [`ObjectAudioSpec::falloff`] — full volume within `Min distance`,
+//! then falling linearly in *squared* distance to nothing at the max —
+//! re-applied every frame. Type 1 rows are not positional: each firing
+//! draws a gain in `0.75..1` and a random pan (the pan is not
+//! reproduced) and ignores distance.
 
 use mm2_formats::cardata::ObjectAudio;
 
@@ -38,6 +43,12 @@ pub enum SampleKind {
 }
 
 impl SampleKind {
+    /// Whether the row's volume follows the emitter's distance (every
+    /// kind but the random one-shot, which draws its own gain and pan).
+    pub fn is_positional(self) -> bool {
+        self != Self::RandomOneShot
+    }
+
     fn from_code(code: f32) -> Self {
         match code as i32 {
             0 => Self::Loop,
@@ -70,7 +81,9 @@ pub struct ObjectSampleSpec {
 pub struct ObjectAudioSpec {
     /// The table stem (`drawbridge`).
     pub name: String,
-    /// Silent beyond this many metres from the listener.
+    /// Full volume within this many metres of the listener.
+    pub min_distance: f32,
+    /// Silent from this many metres out.
     pub max_distance: f32,
     /// The sample rows.
     pub samples: Vec<ObjectSampleSpec>,
@@ -86,6 +99,7 @@ impl ObjectAudioSpec {
     pub fn from_table(name: &str, table: &ObjectAudio) -> Self {
         Self {
             name: name.to_string(),
+            min_distance: table.min_distance,
             max_distance: table.max_distance,
             samples: table
                 .samples
@@ -100,6 +114,29 @@ impl ObjectAudioSpec {
                 })
                 .collect(),
         }
+    }
+
+    /// Whether a listener `distance` metres away hears the emitter at
+    /// all — the original stops it once the squared distance reaches
+    /// the squared max.
+    pub fn in_range(&self, distance: f32) -> bool {
+        distance < self.max_distance
+    }
+
+    /// Volume factor for positional rows at `distance` metres: 1 within
+    /// `Min distance`, then `1 − (d² − min²) / (max² − min²)` down to 0
+    /// at the max (`0x511eb0`, `0x512260`).
+    pub fn falloff(&self, distance: f32) -> f32 {
+        let d2 = distance * distance;
+        let min2 = self.min_distance * self.min_distance;
+        let max2 = self.max_distance * self.max_distance;
+        if d2 <= min2 {
+            return 1.0;
+        }
+        if max2 <= min2 {
+            return 0.0;
+        }
+        (1.0 - (d2 - min2) / (max2 - min2)).clamp(0.0, 1.0)
     }
 }
 
@@ -215,6 +252,7 @@ mod tests {
     #[test]
     fn table_rows_decode() {
         let s = spec();
+        assert_eq!(s.min_distance, 0.0);
         assert_eq!(s.max_distance, 225.0);
         assert_eq!(s.samples[0].kind, SampleKind::Loop);
         assert_eq!(s.samples[1].kind, SampleKind::TimedOneShot);
@@ -255,6 +293,22 @@ mod tests {
         st.set_active(None, false);
         let cues = st.step(&s, 0.1, 0.0);
         assert!(cues.loops.is_empty() && cues.fire.is_empty());
+    }
+
+    #[test]
+    fn falloff_is_linear_in_squared_distance_between_min_and_max() {
+        let mut s = spec();
+        s.min_distance = 100.0;
+        s.max_distance = 250.0;
+        assert_eq!(s.falloff(0.0), 1.0);
+        assert_eq!(s.falloff(100.0), 1.0);
+        // Halfway in d² (100² + (250² − 100²) / 2 = 36250).
+        assert!((s.falloff(36250f32.sqrt()) - 0.5).abs() < 1e-5);
+        assert_eq!(s.falloff(250.0), 0.0);
+        assert_eq!(s.falloff(400.0), 0.0);
+        assert!(s.in_range(249.9) && !s.in_range(250.0));
+        assert!(!SampleKind::RandomOneShot.is_positional());
+        assert!(SampleKind::Loop.is_positional());
     }
 
     #[test]

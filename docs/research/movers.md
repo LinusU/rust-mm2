@@ -97,10 +97,20 @@ with `0x515580`/`0x5155a0` (or all rows with index −1):
   to row 0 (`LondonTube`), stopped ones to row 1 (`NOTHING` — the
   silent sentinel); the subclass switches on a speed threshold of 1.
 
-Emitters are silent beyond the table's `Max distance` (150 m bridge
-and Tube, 225 m ferry). The attenuation inside it is unrecovered;
-the runtime uses the spatial inverse-square curve with the max
-distance at 3 spatial units (designed, `OBJECT_SPATIAL_EDGE`).
+An emitter plays only while the listener is nearer than the table's
+`Max distance` (150 m bridge and Tube, 225 m ferry): once the squared
+distance reaches the squared max it is stopped (`0x512070`), and its
+rows' timers run only while it plays (`0x515230` is the playing
+object's update). Inside that range the volume factor is
+`1 − (d² − min²) / (max² − min²)`, 1 within `Min distance`
+(`0x511eb0`, set up from the squared distances at `0x512040`;
+`0x512260` turns the attenuation into the factor). Every frame rows of
+types 0, 2 and 3 take `sample volume × factor` (`0x515330`, also the
+pan); type-1 rows instead fire at `sample volume × U(0.75, 1)` with a
+random pan in `−1..1` and never follow the distance (`0x5154b0`).
+The runtime pans with Bevy's spatial audio and sets the volume itself
+(`PAN_ONLY_EDGE`); type-1 voices play centred — the random pan is not
+reproduced.
 
 ## Implementation
 

@@ -1719,9 +1719,9 @@ impl AmbientHorn {
 /// its value vocabulary is unverified beyond the observed 0/1.
 #[derive(Debug, Clone)]
 pub struct ObjectAudio {
-    /// `Min distance` — closer than this, the emitter does not play.
+    /// `Min distance` — within this, the emitter plays at full volume.
     pub min_distance: f32,
-    /// `Max distance` — farther than this, the emitter does not play.
+    /// `Max distance` — from this out, the emitter does not play.
     pub max_distance: f32,
     /// Authored `3D priority`.
     pub priority: f32,
