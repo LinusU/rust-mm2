@@ -39,7 +39,7 @@ use crate::racing_line::{
 
 use crate::opponents::{
     REANCHOR_DIST, REANCHOR_FRAMES, SPAWN_LIFT, aim_distance, initial_route_index, point_reached,
-    point_reached_with_radius, reanchor_occupied, reanchor_pose, route_is_closed,
+    reanchor_occupied, reanchor_pose, route_is_closed, spacing_point_reached,
 };
 
 /// Presence enables the scripted driver: `--bot` inserts it, and
@@ -339,7 +339,7 @@ fn route_aim_at_distance(
     }
     while next != gate_idx
         && if project {
-            guided_point_reached(route, next, pos)
+            spacing_point_reached(route, next, pos)
         } else {
             point_reached(&route.points, next, pos)
         }
@@ -365,44 +365,6 @@ fn route_aim_at_distance(
             distance,
         ),
     )
-}
-
-/// Follow actual adjacent-leg progress on dense evidence guides. A small
-/// spacing-tied reach cannot skip an unseen corner; the outgoing projection
-/// still admits the normal rounded line inside a bend after the car turns.
-fn guided_point_reached(route: &OpponentRoute, next: usize, pos: Vec3) -> bool {
-    let n = route.points.len();
-    let point = route.points[next].position;
-    let mut spacing = f32::INFINITY;
-    for neighbor in [next.checked_sub(1), (next + 1 < n).then_some(next + 1)]
-        .into_iter()
-        .flatten()
-    {
-        let delta = route.points[neighbor].position - point;
-        let length = delta.x.hypot(delta.z);
-        if length > 1e-3 {
-            spacing = spacing.min(length);
-        }
-    }
-    if point_reached_with_radius(&route.points, next, pos, (spacing * 0.25).max(0.5)) {
-        return true;
-    }
-    let Some(incoming) = RouteCursor::locate(route, next, pos) else {
-        return false;
-    };
-    let outgoing_next = if next + 1 < n {
-        next + 1
-    } else if route_is_closed(route) {
-        0
-    } else {
-        return false;
-    };
-    let Some(outgoing) = RouteCursor::locate(route, outgoing_next, pos) else {
-        return false;
-    };
-    outgoing.along > 0.0
-        && outgoing.point_ahead(route, 0.0).distance_squared(pos)
-            < incoming.point_ahead(route, 0.0).distance_squared(pos)
 }
 
 /// Aim distance (m) along the route polyline — about a second of

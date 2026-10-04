@@ -461,8 +461,7 @@ pub(crate) fn point_reached(points: &[mm2_game::OpponentRoutePoint], i: usize, p
     point_reached_with_radius(points, i, pos, ROUTE_REACH)
 }
 
-/// Shared plane test with a bounded reach distance for densely sampled evidence
-/// guides. Native opponent callers retain the exact `ROUTE_REACH` policy above.
+/// Shared plane test with a bounded reach distance for densely sampled routes.
 pub(crate) fn point_reached_with_radius(
     points: &[mm2_game::OpponentRoutePoint],
     i: usize,
@@ -483,6 +482,62 @@ pub(crate) fn point_reached_with_radius(
     };
     let len2 = dir.x * dir.x + dir.z * dir.z;
     len2 > 0.0 && (pos.x - p.x) * dir.x + (pos.z - p.z) * dir.z > 0.0
+}
+
+/// Local nonzero XZ sampling distance, independent of authored speed hints.
+fn point_spacing(points: &[mm2_game::OpponentRoutePoint], next: usize) -> f32 {
+    let n = points.len();
+    let point = points[next].position;
+    let mut spacing = f32::INFINITY;
+    for neighbor in [next.checked_sub(1), (next + 1 < n).then_some(next + 1)]
+        .into_iter()
+        .flatten()
+    {
+        let delta = points[neighbor].position - point;
+        let length = delta.x.hypot(delta.z);
+        if length > 1e-3 {
+            spacing = spacing.min(length);
+        }
+    }
+    spacing
+}
+
+/// Dense authored lines need spatial progress rather than the sparse retail
+/// anchor radius: accepting several unseen samples discards a pending bend.
+/// Widely spaced routes retain the exact legacy 14 m reach and plane policy.
+fn native_point_reached(route: &OpponentRoute, next: usize, pos: Vec3) -> bool {
+    if point_spacing(&route.points, next) < ROUTE_REACH {
+        spacing_point_reached(route, next, pos)
+    } else {
+        point_reached(&route.points, next, pos)
+    }
+}
+
+/// Follow actual adjacent-leg progress on densely sampled routes. A small
+/// spacing-tied reach cannot skip an unseen corner; the outgoing projection
+/// still admits the normal rounded line inside a bend after the car turns.
+pub(crate) fn spacing_point_reached(route: &OpponentRoute, next: usize, pos: Vec3) -> bool {
+    let n = route.points.len();
+    let spacing = point_spacing(&route.points, next);
+    if point_reached_with_radius(&route.points, next, pos, (spacing * 0.25).max(0.5)) {
+        return true;
+    }
+    let Some(incoming) = RouteCursor::locate(route, next, pos) else {
+        return false;
+    };
+    let outgoing_next = if next + 1 < n {
+        next + 1
+    } else if route_is_closed(route) {
+        0
+    } else {
+        return false;
+    };
+    let Some(outgoing) = RouteCursor::locate(route, outgoing_next, pos) else {
+        return false;
+    };
+    outgoing.along > 0.0
+        && outgoing.point_ahead(route, 0.0).distance_squared(pos)
+            < incoming.point_ahead(route, 0.0).distance_squared(pos)
 }
 
 /// Whether a route's last point sits within [`ROUTE_LOOP`] of its
@@ -512,7 +567,7 @@ pub fn route_target(route: &OpponentRoute, mut next: usize, pos: Vec3) -> (usize
     }
     let closed = route_is_closed(route);
     for _ in 0..2 {
-        while next < points.len() && point_reached(points, next, pos) {
+        while next < points.len() && native_point_reached(route, next, pos) {
             next += 1;
         }
         if next < points.len() {
@@ -604,7 +659,7 @@ pub fn initial_route_index(route: &OpponentRoute, pos: Vec3, yaw: f32) -> usize 
     while next < route.points.len() {
         let rel = route.points[next].position - pos;
         let ahead = rel.x * fwd.x + rel.z * fwd.z > 0.0;
-        if ahead && !point_reached(&route.points, next, pos) {
+        if ahead && !native_point_reached(route, next, pos) {
             break;
         }
         next += 1;

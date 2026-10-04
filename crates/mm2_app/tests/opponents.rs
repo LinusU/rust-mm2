@@ -2884,3 +2884,126 @@ fn ordered_route_less_opponent_binds_no_gate_line() {
     );
     assert_eq!(progress.route_clears, 0);
 }
+
+#[test]
+fn native_dense_route_keeps_the_corner_ahead_for_speed_planning() {
+    use mm2_app::racing_line::{RouteCursor, plan_speed};
+    let points: Vec<_> = (0..=4)
+        .map(|i| [i as f32 * 5.0, 0.0, 0.0])
+        .chain((1..=16).map(|i| [20.0, 0.0, i as f32 * 5.0]))
+        .collect();
+    let r = route(&points);
+    let pos = Vec3::new(8.0, 0.0, -3.0);
+    let (next, _) = route_target(&r, 1, pos);
+    assert_eq!(next, 2, "dense anchors must not discard a turn 12 m ahead");
+    let plan = plan_speed(
+        &r,
+        RouteCursor::locate(&r, next, pos).unwrap(),
+        20.0,
+        &CarLimits::of(&VehicleConfig::default(), None),
+    );
+    assert!(plan.limit.is_finite() && plan.limit < 20.0);
+    let (next, _) = route_target(&r, 4, Vec3::new(18.0, 0.0, 3.0));
+    assert_eq!(next, 5, "rounded physical corners follow the outgoing leg");
+}
+
+#[test]
+fn native_dense_opponent_physically_drives_two_tight_laps_without_recovery() {
+    let tmp = circuit_install();
+    let d = tmp.path();
+    // The shared straight-lane fixture steers both axles identically. This
+    // corner fixture authors ordinary front-wheel steering, leaving its
+    // engine, transmission, brakes, grip and native AI demands unchanged.
+    let tune = support::vehcarsim(1000.0);
+    let (front, back) = tune.split_once("WheelBack {").unwrap();
+    write(
+        d,
+        "tune/vehicle/vpt.vehcarsim",
+        format!(
+            "{front}WheelBack {{{}",
+            back.replacen("SteeringLimit 0.5", "SteeringLimit 0.0", 1)
+        ),
+    );
+
+    write(
+        d,
+        "race/testcity/mmcircuitdata.csv",
+        format!("{MM_HEADER}\nnone,0,0,0,1,0,0,0,2,50,1,0,0,0,1,0,0,0,2,40,1\n"),
+    );
+    write(
+        d,
+        "race/testcity/circuit0.aimap",
+        aimap_with_opponents("vpt circuit0-a-0.opp 0.90 0 50.0 0.7 1 1 1 1 0 1.0\n"),
+    );
+    write(
+        d,
+        "race/testcity/cir0_strtpnts",
+        "-200,0,140,-90,0,0,0,0,0,\n0,0,140,-90,0,0,0,0,0,\n",
+    );
+    let corners = [
+        [0., 0., 140.],
+        [35., 0., 140.],
+        [35., 0., 105.],
+        [0., 0., 105.],
+    ];
+    let mut points = Vec::new();
+    let mut gates = WAYPOINTS.to_string();
+    for (i, a) in corners.iter().enumerate() {
+        gates.push_str(&waypoint_row(a[0], a[2]));
+        let b = corners[(i + 1) % corners.len()];
+        for k in 0..7 {
+            let t = k as f32 / 7.;
+            points.push([a[0] + (b[0] - a[0]) * t, 0., a[2] + (b[2] - a[2]) * t]);
+        }
+    }
+    points.push(corners[0]);
+    write(d, "race/testcity/circuit0waypoints.csv", gates);
+    write(d, "race/testcity/circuit0-a-0.opp", opp_file(&points));
+    let mut app = event_app(circuit_config(), vfs_of(d));
+    app.update();
+    let ai = opponent_by_vehicle(&mut app, "vpt");
+    assert_eq!(
+        app.world().get::<Player>(ai).unwrap().control,
+        PlayerControl::Ai
+    );
+    let mut worst_lateral = 0.0_f32;
+    for _ in 0..4800 {
+        app.update();
+        let pos = app.world().get::<Position>(ai).unwrap().0;
+        let lateral = corners
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                let a = Vec3::from_array(*a);
+                let b = Vec3::from_array(corners[(i + 1) % 4]);
+                let ab = b - a;
+                let t = ((pos - a).dot(ab) / ab.length_squared()).clamp(0., 1.);
+                let delta = pos - (a + ab * t);
+                delta.x.hypot(delta.z)
+            })
+            .fold(f32::INFINITY, f32::min);
+        worst_lateral = worst_lateral.max(lateral);
+        if matches!(
+            app.world().get::<RaceProgress>(ai).unwrap().state,
+            ParticipantState::Finished { .. }
+        ) {
+            break;
+        }
+    }
+    println!("physical native dense AI worst_lateral={worst_lateral}");
+    let progress = app.world().get::<RaceProgress>(ai).unwrap();
+    assert!(
+        matches!(progress.state, ParticipantState::Finished { .. }),
+        "{:?} lap={} lateral={worst_lateral}",
+        progress.state,
+        progress.lap
+    );
+    assert_eq!(progress.lap, 2);
+    let driver = app.world().get::<OpponentDriver>(ai).unwrap();
+    assert_eq!(driver.reanchors, 0);
+    assert_eq!(driver.recovery.escapes, 0);
+    assert!(
+        worst_lateral < 4.5,
+        "dense line lost at a corner: {worst_lateral}"
+    );
+}
