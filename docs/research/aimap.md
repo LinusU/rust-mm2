@@ -195,7 +195,10 @@ variance — `sf/circuit0` amateurs avoid opponents but not players
 (`0 1 0 1 0`), `london/circuit0` amateurs avoid everything
 (`1 1 1 1 0`) — so all four gates differentiate per-driver. The
 consumed ones gate `OpponentDriver::senses`: an unsensed class is
-fully transparent to the corridor (no pass, no brake). That 59% of
+transparent to the corridor (no pass, no follow brake); a short-range
+rear-end guard (DSN-66) still brakes a driver closing on a fellow
+opponent ahead, so the field holds its lines without ramming itself.
+That 59% of
 rows author `avoidOpponents=0` means stock opponents genuinely do
 not dodge each other there — consistent with the famously chaotic
 field — and is a documented polarity, not a guess.

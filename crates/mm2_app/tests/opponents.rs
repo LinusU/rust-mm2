@@ -16,8 +16,8 @@ use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use mm2_app::opponents::{
     Blocker, DriveStats, OpponentDriver, REANCHOR_CLEAR, REANCHOR_FRAMES, Traffic, apply_gap_brake,
-    initial_route_index, nearest_blocker, opponent_drive, pick_pass_side, reanchor_pose,
-    route_target, spawn_pose,
+    apply_rear_end_guard, initial_route_index, nearest_blocker, opponent_drive, pick_pass_side,
+    reanchor_pose, rear_end_demand, route_target, spawn_pose,
 };
 use mm2_app::racing_line::CarLimits;
 use mm2_app::scripted::{ScriptedBot, ScriptedTuning};
@@ -1235,6 +1235,41 @@ fn drive_stats_count_driving_but_not_jumps() {
     assert!((s.seconds - 1.5).abs() < 1e-4);
 }
 
+/// The rear-end guard's demand is the share of the car's braking that
+/// sheds the closure before the stopping gap: nothing when not
+/// closing, nothing for a standing car approached at a crawl (the
+/// escape handles that), and more the faster and nearer the closure.
+#[test]
+fn rear_end_guard_brakes_for_the_closure_it_must_shed() {
+    let limits = CarLimits::of(&VehicleConfig::default(), None);
+    let ahead = |gap: f32, speed: f32| Blocker {
+        entity: Entity::PLACEHOLDER,
+        gap,
+        lat: 0.0,
+        speed,
+    };
+    assert_eq!(rear_end_demand(&ahead(20.0, 15.0), 12.0, &limits), 0.0);
+    assert_eq!(rear_end_demand(&ahead(8.0, 0.0), 1.0, &limits), 0.0);
+    let far = rear_end_demand(&ahead(40.0, 0.0), 15.0, &limits);
+    let near = rear_end_demand(&ahead(15.0, 0.0), 15.0, &limits);
+    assert!(far > 0.0 && near > far, "far={far} near={near}");
+
+    // A hard closure brakes at its demand; a gentle one only lifts.
+    let mut input = VehicleInput {
+        throttle: 1.0,
+        ..Default::default()
+    };
+    apply_rear_end_guard(&mut input, &ahead(15.0, 0.0), 15.0, &limits);
+    assert_eq!(input.throttle, 0.0);
+    assert!(input.brake >= near.min(1.0) - 1e-6, "{input:?}");
+    let mut input = VehicleInput {
+        throttle: 1.0,
+        ..Default::default()
+    };
+    apply_rear_end_guard(&mut input, &ahead(60.0, 10.0), 13.0, &limits);
+    assert_eq!((input.throttle, input.brake), (1.0, 0.0), "{input:?}");
+}
+
 /// A bare driver for the sense-gate tests: authored spec, default
 /// tuning, no committed pass — only the avoid flags vary.
 fn driver(avoid_players: bool, avoid_opponents: bool) -> OpponentDriver {
@@ -1666,8 +1701,10 @@ fn authored_avoid_players_decides_the_parked_player() {
 /// `avoidOpponents` (tail column 7) gates AI sensing through the full
 /// driving system: a route-less roster slot parked mid-lane is an
 /// authored fellow opponent — the authored-1 driver commits a pass and
-/// slips around it; the authored-0 twin never senses it and collides
-/// head-on.
+/// slips around it; the authored-0 twin never senses it for a pass and
+/// holds its lane into it, but the rear-end guard (DSN-66) brakes it
+/// down first, so the contact is a nudge (~2 m/s) where it used to be
+/// a 17 m/s crash.
 #[test]
 fn authored_avoid_opponents_decides_the_parked_ai() {
     for (tail, expect_contact) in [("1 1 1 1 0", false), ("1 1 1 0 0", true)] {
@@ -1714,6 +1751,15 @@ fn authored_avoid_opponents_decides_the_parked_ai() {
             "avoidOpponents tail {tail}: contact with the parked AI = {hit}"
         );
         if expect_contact {
+            let worst = impacts
+                .iter()
+                .filter(|e| e.participants.0 == parked_obj || e.participants.1 == parked_obj)
+                .map(|e| e.severity)
+                .fold(0.0f32, f32::max);
+            assert!(
+                worst < 5.0,
+                "the rear-end guard turns the head-on into a nudge: {worst} m/s"
+            );
             continue;
         }
         let p = app.world().get::<Position>(vpt).unwrap().0;

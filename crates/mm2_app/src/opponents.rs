@@ -43,9 +43,11 @@
 //!   is its brake-demand floor (DSN-66), the look-ahead distance
 //!   sets the corridor's reach, and the authored `avoidPlayers`/
 //!   `avoidOpponents` flags gate whether the corridor senses human or
-//!   AI participants at all (an unsensed class is fully transparent —
-//!   59% of retail rows author `avoidOpponents=0`, so stock opponents
-//!   genuinely do not dodge each other). `avoidTraffic`/`avoidProps`
+//!   AI participants at all (an unsensed class gets no pass and no
+//!   follow brake — 59% of retail rows author `avoidOpponents=0`, so
+//!   stock opponents genuinely do not dodge each other; only the
+//!   rear-end guard, DSN-66, still brakes for a fellow opponent the
+//!   car would otherwise drive into at speed). `avoidTraffic`/`avoidProps`
 //!   bind but stay inert — ambient cars are not `Player`
 //!   participants and the corridor never sensed props; the remaining
 //!   columns stay decoded-but-unconsumed pending verified semantics.
@@ -437,9 +439,10 @@ impl DriveStats {
 impl OpponentDriver {
     /// Whether the authored avoid flags let the corridor sense `t` —
     /// human participants under `avoidPlayers`, AI under
-    /// `avoidOpponents` (F15-B.2/B.8). An unsensed class is fully
-    /// transparent: no pass, no brake, no ban — the authored lineup
-    /// drives through it.
+    /// `avoidOpponents` (F15-B.2/B.8). An unsensed class gets no pass,
+    /// no follow brake and no ban — the authored lineup holds its line
+    /// through it. The rear-end guard alone still brakes for an
+    /// unsensed fellow opponent closing ahead (DSN-66).
     pub fn senses(&self, t: &Traffic) -> bool {
         match t.control {
             PlayerControl::Ai => self.avoid_opponents,
@@ -1596,5 +1599,67 @@ pub fn opponent_drive(
         if let Some(b) = &narrow {
             apply_gap_brake(&mut input, b, vstate.forward_speed);
         }
+        // Rear-end guard (DSN-66): a fellow opponent the authored
+        // `avoidOpponents=0` leaves unsensed is still never driven into
+        // at speed. It commits no pass — the flag keeps deciding
+        // whether the driver manoeuvres around the field — it only
+        // brakes for a closure its own brakes have to answer.
+        let reach = guard_reach(vstate.forward_speed, &driver.limits).min(driver.look_ahead);
+        if let Some(b) = nearest_blocker(entity, pos.0, fwd, reach, &traffic, |t| {
+            t.control == PlayerControl::Ai && !driver.senses(t)
+        }) {
+            apply_rear_end_guard(&mut input, &b, vstate.forward_speed, &driver.limits);
+        }
+    }
+}
+
+/// Centre-to-centre gap (m) the rear-end guard stops short of — a
+/// car length plus a little.
+const GUARD_GAP: f32 = 5.0;
+/// Slack (m) the guard looks past its own stopping distance.
+const GUARD_SLACK: f32 = 15.0;
+/// Brake demand (share of full braking) below which the guard only
+/// lifts off — a closure that gentle resolves itself.
+const GUARD_LIFT: f32 = 0.15;
+/// Brake demand at and above which the guard brakes rather than lifts.
+const GUARD_BRAKE: f32 = 0.3;
+
+/// How far ahead (m) the rear-end guard looks at `speed`: the distance
+/// to stop from it at the planned deceleration, plus the gap and slack.
+pub fn guard_reach(speed: f32, limits: &CarLimits) -> f32 {
+    limits.braking_distance(speed.max(0.0)) + GUARD_GAP + GUARD_SLACK
+}
+
+/// The share of full braking needed to shed the closure on `blocker`
+/// before [`GUARD_GAP`] — `closing² / 2·room` against the car's own
+/// braking limit. Zero when not closing, and zero for a standing
+/// blocker approached at a crawl: there the stuck escape and the wall
+/// feelers do the work, and holding the brake would only pen the car
+/// behind it until the re-anchor fires.
+pub fn rear_end_demand(blocker: &Blocker, speed: f32, limits: &CarLimits) -> f32 {
+    let closing = speed - blocker.speed;
+    if closing <= 0.0 || (blocker.speed < CRAWL_SPEED && closing < FOLLOW_RELEASE) {
+        return 0.0;
+    }
+    let room = (blocker.gap - GUARD_GAP).max(0.5);
+    closing * closing / (2.0 * room) / limits.max_brake_accel
+}
+
+/// Apply the rear-end guard's demand to `input`: lift off from
+/// [`GUARD_LIFT`], brake at the demand from [`GUARD_BRAKE`]. Only ever
+/// adds braking — an input already braking harder keeps its brake.
+pub fn apply_rear_end_guard(
+    input: &mut VehicleInput,
+    blocker: &Blocker,
+    speed: f32,
+    limits: &CarLimits,
+) {
+    let demand = rear_end_demand(blocker, speed, limits);
+    if demand < GUARD_LIFT {
+        return;
+    }
+    input.throttle = 0.0;
+    if demand >= GUARD_BRAKE {
+        input.brake = input.brake.max(demand.min(1.0));
     }
 }
