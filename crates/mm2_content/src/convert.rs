@@ -104,12 +104,13 @@ const SELF_RIGHT_DELAY: f32 = 2.0;
 /// and top speed make acceleration arrive in steps.
 const MAX_SHIFT_TIME: f32 = 0.35;
 /// Multiple of the authored `SteeringLimit` a car gets as full lock
-/// (adapted). Stock locks run 0.35–0.6 rad, and at the Beetle's 0.4 a car
-/// at 36 km/h ran out of lock at 1.24 g on 2.25 g tires; the grip cap
-/// governs the lock at speed, so this mostly tightens slow corners. More
-/// than `1.2` and full lock starts ploughing the heavy vehicles at
-/// 70 km/h — see docs/vehicle-handling.md "Grip-limited steering".
-const STEERING_LOCK_SCALE: f32 = 1.2;
+/// (adapted). Stock locks run 0.35–0.6 rad and a keyboard driver holds
+/// full lock through every city corner, so the lock is the tightest
+/// corner a car can take below the speeds the grip cap governs. At
+/// `1.5` a car turns 10–20° more in a second from 30 km/h; beyond about
+/// 50 km/h the grip cap decides and this changes nothing — see
+/// docs/vehicle-handling.md "Grip-limited steering".
+const STEERING_LOCK_SCALE: f32 = 1.5;
 /// Multiple of tire grip the steering lock may demand (adapted arcade
 /// policy — stock locks ask for 8-64 g at their high-speed limit). The
 /// cap already allows the front tires their peak slip on top, so any

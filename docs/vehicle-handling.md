@@ -238,13 +238,18 @@ ploughs past the grip; at `1.0` the roster corners a little harder at
 every speed the cap governs.
 
 Below the speeds the cap governs, the authored lock is the limit. Stock
-`SteeringLimit` runs 0.35–0.6 rad; at the Beetle's 0.4, a car at 36 km/h
-ran out of lock at 1.24 g on 2.25 g tires. Imported locks are scaled by
-`1.2` (capped at 0.75 rad): the Beetle reaches 1.47 g there and the
-roster gains 0.12 g on average at 10 m/s. More scale buys more at walking
-pace but ploughs the heavy vehicles at full lock around 70 km/h — at
-`1.4` eight cars lost over 5% somewhere against five at `1.2`, the Cab,
-F-350, fire truck and both buses, all within 0.13 g at 20 m/s.
+`SteeringLimit` runs 0.35–0.6 rad, and a keyboard holds full lock
+through every city corner, so that lock is the tightest corner a car
+can take. Imported locks are scaled by `1.5` (capped at 0.75 rad); it
+was `1.2`, and `1.4` before the tire grip was raised cost eight cars
+5% somewhere. `drive_probe --turn` from 30 km/h, the speed of a city
+corner, has the Beetle turning 97° in a second against 80°, the
+Mini 125° against 112°, the DB7 92° against 75°, and the heavy trucks
+and buses 7–10° more. Around 50 km/h it is neutral on most cars and a
+few (Mustang Cruiser, Panoz GTR-1, Mini) lose 5–12° of it to
+ploughing; from 70 km/h the grip cap governs and nothing changes.
+Steady-state cornering at 10–20 m/s moves by ±0.2 g in both
+directions, which is the noise of that probe, not a trend.
 
 ### Traction control
 
