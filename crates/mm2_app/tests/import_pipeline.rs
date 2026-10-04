@@ -1182,3 +1182,89 @@ fn retail_london_imports_driveable_geometry() {
         );
     }
 }
+
+/// This is original generated Stockholm terrain, not retail geometry. The
+/// exact paving fan/perimeter previously looked like a wall to the importer:
+/// its normal Y is 0.02569 and the outward-room heuristic reversed it below
+/// the hillside, exposing sky through an otherwise continuous native mesh.
+#[test]
+fn steep_heightfield_fan_keeps_upward_visual_side() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/steep-heightfield-paving.json")).unwrap();
+    let read_points = |key: &str| -> Vec<[f32; 3]> {
+        fixture[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|point| std::array::from_fn(|i| point[i].as_f64().unwrap() as f32))
+            .collect()
+    };
+    let perimeter = read_points("perimeter");
+    let triangle = read_points("triangle");
+    for reverse in [false, true] {
+        let mut psdl = Psdl::parse(&synthetic_psdl()).unwrap();
+        psdl.vertices = perimeter.clone();
+        let first = psdl.vertices.len() as u16;
+        psdl.vertices.extend_from_slice(&triangle);
+        psdl.rooms[0].perimeter = (0..first)
+            .map(|vertex| mm2_formats::psdl::PerimeterPoint { vertex, room: 0 })
+            .collect();
+        psdl.rooms[0].attributes = vec![mm2_formats::psdl::RoomAttribute {
+            last: true,
+            kind: mm2_formats::psdl::AttributeType::Fan,
+            subtype: 1,
+            data: if reverse {
+                vec![first, first + 2, first + 1]
+            } else {
+                vec![first, first + 1, first + 2]
+            },
+        }];
+        let import = emit_psdl(&psdl, None);
+        assert_eq!(import.report.rejected, 0);
+        assert_eq!(import.meshes.len(), 1);
+        let mesh = &import.meshes[0];
+        assert_eq!(mesh.indices.len(), 3);
+        let [a, b, c] = std::array::from_fn::<_, 3, _>(|i| {
+            bevy::math::Vec3::from_array(mesh.positions[mesh.indices[i] as usize])
+        });
+        let normal = (b - a).cross(c - a).normalize();
+        assert!(normal.y > 0.02 && normal.y < 0.03, "{normal:?}");
+        let camera = bevy::math::Vec3::new(-5.0, 24.0, -1123.0);
+        assert!(normal.dot(camera - (a + b + c) / 3.0) > 0.0);
+        // Collision geometry stays complete; this change only resolves the
+        // visible side of the native fan.
+        assert_eq!(import.colliders.len(), 1);
+        assert_eq!(import.colliders[0].tris.len(), 1);
+    }
+}
+
+#[test]
+fn vertical_building_fan_still_faces_room_exterior() {
+    let mut psdl = Psdl::parse(&synthetic_psdl()).unwrap();
+    psdl.vertices = vec![
+        [0., 0., 0.],
+        [10., 0., 0.],
+        [10., 0., 10.],
+        [0., 0., 10.],
+        [0., 0., 2.],
+        [0., 5., 2.],
+        [0., 0., 8.],
+    ];
+    psdl.rooms[0].perimeter = (0..4)
+        .map(|vertex| mm2_formats::psdl::PerimeterPoint { vertex, room: 0 })
+        .collect();
+    for data in [vec![4, 5, 6], vec![4, 6, 5]] {
+        psdl.rooms[0].attributes = vec![mm2_formats::psdl::RoomAttribute {
+            last: true,
+            kind: mm2_formats::psdl::AttributeType::Fan,
+            subtype: 1,
+            data,
+        }];
+        let import = emit_psdl(&psdl, None);
+        let mesh = &import.meshes[0];
+        let [a, b, c] = std::array::from_fn::<_, 3, _>(|i| {
+            bevy::math::Vec3::from_array(mesh.positions[mesh.indices[i] as usize])
+        });
+        assert!((b - a).cross(c - a).normalize().x < -0.99);
+    }
+}
