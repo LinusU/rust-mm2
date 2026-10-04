@@ -200,8 +200,14 @@ impl DamageState {
 /// no free-roam consequence).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisabledOutcome {
-    /// Blitz/Checkpoint — the event restarts from the beginning.
+    /// Crash Course — the lesson restarts from the beginning.
     RestartEvent,
+    /// Blitz/Checkpoint — the car sits broken down, smoking, for
+    /// [`BREAKDOWN_SECONDS`], then is fully repaired where it stands
+    /// and the race goes on (designed from the operator's recollection
+    /// of retail play; the help text's "restart" reading of RACE-5 is
+    /// unverified in play).
+    Breakdown,
     /// Circuit — a time penalty and the vehicle resets in place.
     PenaltyReset,
     /// Cruise — a free reset/recovery (designed: no documented cost).
@@ -217,10 +223,49 @@ pub fn disabled_outcome(mode: &SessionMode) -> DisabledOutcome {
         SessionMode::Cruise => DisabledOutcome::FreeReset,
         SessionMode::Event(ev) => match ev.table {
             EventTableKind::Circuit => DisabledOutcome::PenaltyReset,
-            EventTableKind::Blitz | EventTableKind::Checkpoint | EventTableKind::CrashCourse => {
-                DisabledOutcome::RestartEvent
-            }
+            EventTableKind::Blitz | EventTableKind::Checkpoint => DisabledOutcome::Breakdown,
+            EventTableKind::CrashCourse => DisabledOutcome::RestartEvent,
         },
+    }
+}
+
+/// How long a [`DisabledOutcome::Breakdown`] keeps the car dead in the
+/// road before the repair, seconds — the operator's recollection of
+/// retail ("about five seconds"), a designed value (UNK-13).
+pub const BREAKDOWN_SECONDS: f32 = 5.0;
+
+/// A wrecked car's breakdown episode: while present the engine is dead
+/// (brakes and steering still work) and the damage stays at its
+/// disabled total so the smoke keeps pouring; when `remaining` runs
+/// out the session repairs the car in place. Authority-owned like
+/// [`VehicleDamage`].
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct VehicleBreakdown {
+    /// Seconds of breakdown left.
+    pub remaining: f32,
+}
+
+impl VehicleBreakdown {
+    /// A fresh episode of [`BREAKDOWN_SECONDS`].
+    pub fn new() -> Self {
+        Self {
+            remaining: BREAKDOWN_SECONDS,
+        }
+    }
+
+    /// Advance the episode by `dt` seconds; `true` once it is over.
+    /// A non-finite or non-positive step never advances it.
+    pub fn tick(&mut self, dt: f32) -> bool {
+        if dt.is_finite() && dt > 0.0 {
+            self.remaining -= dt;
+        }
+        self.remaining <= 0.0
+    }
+}
+
+impl Default for VehicleBreakdown {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

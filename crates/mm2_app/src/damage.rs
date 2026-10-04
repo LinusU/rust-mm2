@@ -19,9 +19,12 @@
 //!   with the session's [`disabled_outcome`] policy (RACE-5/DMG-2):
 //!   Cruise resets to the spawn point, Circuit resets in place with a
 //!   [`DISABLED_PENALTY_TICKS`] race-clock penalty, and the
-//!   Blitz/Checkpoint/CrashCourse restart maps onto the session's own
-//!   `restart` intent — the event restarts from the beginning through
-//!   the production lifecycle, never a shortcut. AI opponents reset in
+//!   Crash Course's restart maps onto the session's own `restart`
+//!   intent — the lesson restarts from the beginning through the
+//!   production lifecycle, never a shortcut. Blitz/Checkpoint break the
+//!   car down for `BREAKDOWN_SECONDS` — dead engine, smoke still
+//!   pouring — and [`resolve_breakdown`] then repairs it where it
+//!   stands. AI opponents reset in
 //!   place and repair regardless of mode (designed — the original's
 //!   opponent-destruction behavior is unverified); remote participants
 //!   take the same in-place arm on the authority that simulates them
@@ -39,9 +42,10 @@ use std::collections::HashMap;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_game::{
-    DISABLED_PENALTY_TICKS, DamageEvent, DamageTier, DamageVerdict, DisabledOutcome, ImpactEvent,
-    ImpairmentPolicy, ObjectId, ObjectIdentity, Player, PlayerControl, RaceState, Session,
-    VehicleBreaks, VehicleDamage, VehicleStuck, disabled_outcome,
+    BREAKDOWN_SECONDS, DISABLED_PENALTY_TICKS, DamageEvent, DamageTier, DamageVerdict,
+    DisabledOutcome, ImpactEvent, ImpairmentPolicy, ObjectId, ObjectIdentity, Player,
+    PlayerControl, RaceState, Session, VehicleBreakdown, VehicleBreaks, VehicleDamage,
+    VehicleStuck, disabled_outcome,
 };
 use mm2_vehicle::{EngineImpairment, ResetVehicle};
 
@@ -186,9 +190,11 @@ pub fn apply_impact_damage(
 /// - local participant ([`PlayerControl::Local`]): the mode's
 ///   [`disabled_outcome`] — Cruise resets to the spawn point (trailers
 ///   included, the same reset `R` performs), Circuit resets in place
-///   and adds [`DISABLED_PENALTY_TICKS`] to a live race clock, and
-///   `RestartEvent` queues the session's own restart intent so the
-///   event restarts through the production lifecycle. Reset outcomes
+///   and adds [`DISABLED_PENALTY_TICKS`] to a live race clock,
+///   `Breakdown` starts a [`VehicleBreakdown`] episode that
+///   [`resolve_breakdown`] ends with a repair, and `RestartEvent`
+///   queues the session's own restart intent so the lesson restarts
+///   through the production lifecycle. Reset outcomes
 ///   repair the damage with them — a reset wreck that stays wrecked
 ///   would just disable again next contact.
 /// - AI and remote participants: reset in place and repair under every
@@ -214,7 +220,7 @@ pub fn resolve_disabled(
     mut race: Option<ResMut<RaceState>>,
     identities: Query<(Entity, &ObjectIdentity, Option<&Player>)>,
     poses: Query<(&Position, &Rotation)>,
-    mut damaged: Query<&mut VehicleDamage>,
+    mut damaged: Query<(&mut VehicleDamage, Has<VehicleBreakdown>)>,
     mut stuck: Query<&mut VehicleStuck>,
     mut resets: MessageWriter<ResetVehicle>,
     mut report: ResMut<DamageReport>,
@@ -241,7 +247,7 @@ pub fn resolve_disabled(
         let Some(&(entity, control_kind)) = index.get(&event.object) else {
             continue;
         };
-        let Ok(mut damage) = damaged.get_mut(entity) else {
+        let Ok((mut damage, broken_down)) = damaged.get_mut(entity) else {
             continue;
         };
         // Idempotent: an earlier resolution in this tick already
@@ -263,6 +269,19 @@ pub fn resolve_disabled(
             Some(PlayerControl::Local) => {
                 let mode = session.config().map(|c| c.mode.clone()).unwrap_or_default();
                 match disabled_outcome(&mode) {
+                    DisabledOutcome::Breakdown => {
+                        // Further blows on a car already down change
+                        // nothing — the episode owns the wreck.
+                        if !broken_down {
+                            info!(
+                                total = damage.total(),
+                                tick = event.tick,
+                                seconds = BREAKDOWN_SECONDS,
+                                "player vehicle destroyed — broken down"
+                            );
+                            commands.entity(entity).insert(VehicleBreakdown::new());
+                        }
+                    }
                     DisabledOutcome::RestartEvent => {
                         // The session's own restart path tears down and
                         // `begin`s the event again — "restarting from
@@ -272,7 +291,7 @@ pub fn resolve_disabled(
                         info!(
                             total = damage.total(),
                             tick = event.tick,
-                            "player vehicle destroyed — restarting the event"
+                            "player vehicle destroyed — restarting the lesson"
                         );
                         control.restart = true;
                     }
@@ -367,6 +386,60 @@ pub fn resolve_disabled(
     }
 }
 
+/// Fixed-step: run each [`VehicleBreakdown`] episode down and, when it
+/// ends, repair the car where it stands — the damage clears, detached
+/// breakaway parts re-attach and the skin is wiped, the same repair
+/// the reset outcomes perform. The race clock never stops for it; the
+/// five dead seconds are the cost. Frozen while the session is not
+/// `Playing`, so a pause cannot burn the episode down.
+#[allow(clippy::too_many_arguments)] // Bevy system: the repair threads the same handles `resolve_disabled` does
+pub fn resolve_breakdown(
+    session: Res<Session>,
+    time: Res<Time<Fixed>>,
+    mut cars: Query<(Entity, &mut VehicleBreakdown, &mut VehicleDamage)>,
+    mut breaks: Query<&mut VehicleBreaks>,
+    mut break_visuals: Query<(&BreakPartVisual, &mut Visibility, &ChildOf)>,
+    mut break_report: ResMut<BreakReport>,
+    mut texel: crate::texel_fx::TexelRepair,
+    mut report: ResMut<DamageReport>,
+    mut commands: Commands,
+) {
+    if !session.is_playing() || !session.authority_role().is_authority() {
+        return;
+    }
+    let dt = time.delta_secs();
+    for (entity, mut episode, mut damage) in &mut cars {
+        if !episode.tick(dt) {
+            continue;
+        }
+        damage.reset();
+        if let Ok(mut rig) = breaks.get_mut(entity) {
+            break_report.restored +=
+                crate::breakaway::restore_rig(entity, &mut rig, &mut break_visuals, &mut commands)
+                    as u64;
+        }
+        texel.reset(entity);
+        commands.entity(entity).remove::<VehicleBreakdown>();
+        report.recovered += 1;
+        info!("player vehicle repaired after its breakdown");
+    }
+}
+
+/// [`sync_impairment`]'s view of a car: its damage, its live impairment
+/// and whether a breakdown holds the engine dead. `RemoteReplica`
+/// copies are excluded — they are never stepped by the sim.
+type ImpairedCars<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static VehicleDamage,
+        Option<&'static mut EngineImpairment>,
+        Has<VehicleBreakdown>,
+    ),
+    Without<mm2_vehicle::RemoteReplica>,
+>;
+
 /// Fixed-step: mirror each participant's authored damage into the
 /// physics-side [`EngineImpairment`] the sim consumes — F05-B.7, the
 /// designed smoke↔engine-torque coupling (DSN-25). MM2Hook's
@@ -397,18 +470,20 @@ pub fn resolve_disabled(
 pub fn sync_impairment(
     mut commands: Commands,
     session: Res<Session>,
-    mut cars: Query<
-        (Entity, &VehicleDamage, Option<&mut EngineImpairment>),
-        Without<mm2_vehicle::RemoteReplica>,
-    >,
+    mut cars: ImpairedCars,
     mut report: ResMut<DamageReport>,
 ) {
     if !session.is_playing() {
         return;
     }
     let policy = ImpairmentPolicy::default();
-    for (entity, damage, impairment) in &mut cars {
-        let factor = policy.factor(damage.total(), &damage.spec);
+    for (entity, damage, impairment, broken_down) in &mut cars {
+        // A broken-down car's engine is dead, not merely limping.
+        let factor = if broken_down {
+            0.0
+        } else {
+            policy.factor(damage.total(), &damage.spec)
+        };
         match impairment {
             Some(mut imp) => {
                 if factor >= 1.0 {

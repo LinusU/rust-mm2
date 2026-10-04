@@ -16,9 +16,9 @@ use mm2_game::{
     Checkpoint, CheckpointRule, DamageEvent, DamageSpec, DamageTier, EventParams, EventRef,
     EventTableKind, ImpactEvent, ImpactId, ObjectId, ObjectIdentity, Player, PlayerControl,
     RaceDefinition, RacePhase, RaceStart, RaceState, Session, SessionAuthority, SessionConfig,
-    SessionMode, SessionPhase, SurfaceState, VehicleDamage, advance_session_tick,
+    SessionMode, SessionPhase, SurfaceState, VehicleBreakdown, VehicleDamage, advance_session_tick,
 };
-use mm2_vehicle::{TireConditions, VehicleConfig, VehiclePlugin, vehicle_bundle};
+use mm2_vehicle::{EngineImpairment, TireConditions, VehicleConfig, VehiclePlugin, vehicle_bundle};
 
 /// `VehicleConfig::default().mass` — the impulse a world hit delivers
 /// is `severity × MASS`, so the tests pick severities off the authored
@@ -93,6 +93,7 @@ fn damage_app(config: SessionConfig, car_pos: Vec3) -> (App, Entity, ObjectId) {
                 contracts::collect_impacts,
                 damage::apply_impact_damage,
                 damage::resolve_disabled,
+                damage::resolve_breakdown,
                 damage::sync_impairment,
             )
                 .chain(),
@@ -378,19 +379,98 @@ fn disabled_in_circuit_penalizes_the_clock_and_resets_in_place() {
 }
 
 #[test]
-fn disabled_in_blitz_queues_the_session_restart() {
-    let (mut app, _car, object) = damage_app(
+fn disabled_in_blitz_breaks_the_car_down_then_repairs_it_in_place() {
+    let (mut app, car, object) = damage_app(
         event_config(EventTableKind::Blitz),
+        Vec3::new(12.0, 1.2, 7.0),
+    );
+    write_impact(&mut app, 1, object, ObjectId::WORLD, 300.0);
+    app.update();
+    // Destroyed in Blitz: the car sits broken down — still wrecked,
+    // engine dead, smoke source intact — and the event carries on.
+    assert!(
+        !app.world().resource::<SessionControl>().restart,
+        "a wreck no longer throws the player out of the race"
+    );
+    assert!(app.world().get::<VehicleBreakdown>(car).is_some());
+    assert_eq!(
+        app.world().get::<VehicleDamage>(car).unwrap().condition(),
+        DamageTier::Disabled,
+        "the car stays wrecked (smoking) while it is down"
+    );
+    assert_eq!(
+        app.world().get::<EngineImpairment>(car).map(|i| i.0),
+        Some(0.0),
+        "the engine is dead, not limping"
+    );
+    let down_at = app.world().get::<Position>(car).unwrap().0;
+    assert_eq!(report(&app).recovered, 0, "not repaired yet");
+
+    // A further blow on the wreck neither restarts the episode nor
+    // the race.
+    app.update();
+    write_impact(&mut app, 2, object, ObjectId::WORLD, 300.0);
+    app.update();
+    assert!(!app.world().resource::<SessionControl>().restart);
+
+    // ~4 s in (240 updates at 60 Hz) it is still down…
+    for _ in 0..240 {
+        app.update();
+    }
+    assert!(app.world().get::<VehicleBreakdown>(car).is_some());
+    assert_eq!(report(&app).recovered, 0);
+    // …and past five seconds it is fully repaired where it stood.
+    for _ in 0..90 {
+        app.update();
+    }
+    assert!(app.world().get::<VehicleBreakdown>(car).is_none());
+    let damage = app.world().get::<VehicleDamage>(car).unwrap();
+    assert_eq!(damage.total(), 0.0);
+    assert_eq!(report(&app).recovered, 1);
+    assert!(
+        app.world().get::<EngineImpairment>(car).is_none(),
+        "full power returns with the repair"
+    );
+    let pos = app.world().get::<Position>(car).unwrap().0;
+    assert!(
+        pos.distance(Vec3::new(down_at.x, pos.y, down_at.z)) < 1.0,
+        "repaired in place, got {pos} from {down_at}"
+    );
+    assert!(!app.world().resource::<SessionControl>().restart);
+}
+
+#[test]
+fn a_pause_does_not_burn_down_a_breakdown() {
+    let (mut app, car, object) = damage_app(
+        event_config(EventTableKind::Checkpoint),
         Vec3::new(0.0, 1.2, 0.0),
     );
     write_impact(&mut app, 1, object, ObjectId::WORLD, 300.0);
     app.update();
-    // RACE-5/DMG-2: destruction in Blitz restarts the event — the
-    // session's own restart intent drives the production teardown +
-    // re-`begin`, never a damage-specific shortcut.
+    app.world_mut()
+        .resource_mut::<Session>()
+        .transition(SessionPhase::Paused)
+        .unwrap();
+    for _ in 0..600 {
+        app.update();
+    }
+    assert!(
+        app.world().get::<VehicleBreakdown>(car).is_some(),
+        "ten paused seconds must not count against the breakdown"
+    );
+}
+
+#[test]
+fn disabled_in_a_crash_course_still_restarts_the_lesson() {
+    let (mut app, _car, object) = damage_app(
+        event_config(EventTableKind::CrashCourse),
+        Vec3::new(0.0, 1.2, 0.0),
+    );
+    write_impact(&mut app, 1, object, ObjectId::WORLD, 300.0);
+    app.update();
     assert!(
         app.world().resource::<SessionControl>().restart,
-        "the event-restart intent must be queued"
+        "the lesson's restart intent must be queued"
     );
     assert_eq!(report(&app).recovered, 0, "a restart is not a repair");
 }

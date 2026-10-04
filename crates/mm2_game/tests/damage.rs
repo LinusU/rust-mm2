@@ -284,11 +284,11 @@ fn disabled_outcome_is_per_mode() {
     );
     assert_eq!(
         disabled_outcome(&ev(EventTableKind::Blitz)),
-        DisabledOutcome::RestartEvent
+        DisabledOutcome::Breakdown
     );
     assert_eq!(
         disabled_outcome(&ev(EventTableKind::Checkpoint)),
-        DisabledOutcome::RestartEvent
+        DisabledOutcome::Breakdown
     );
     assert_eq!(
         disabled_outcome(&ev(EventTableKind::Circuit)),
@@ -298,4 +298,18 @@ fn disabled_outcome_is_per_mode() {
         disabled_outcome(&ev(EventTableKind::CrashCourse)),
         DisabledOutcome::RestartEvent
     );
+}
+
+#[test]
+fn a_breakdown_runs_its_five_seconds_then_ends() {
+    let mut episode = VehicleBreakdown::new();
+    assert_eq!(episode.remaining, BREAKDOWN_SECONDS);
+    // Junk steps never advance it.
+    assert!(!episode.tick(f32::NAN));
+    assert!(!episode.tick(-1.0));
+    assert!(!episode.tick(0.0));
+    assert_eq!(episode.remaining, BREAKDOWN_SECONDS);
+    // 4.9 s in, still down; the last step ends it.
+    assert!(!episode.tick(BREAKDOWN_SECONDS - 0.1));
+    assert!(episode.tick(0.1));
 }

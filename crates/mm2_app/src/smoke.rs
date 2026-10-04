@@ -467,7 +467,7 @@ fn run_headless(
                 // F05-B.3: authored breakaway detachment — the
                 // headless record's `brk=` field reads the report.
                 crate::breakaway::detach_breaks,
-                damage::resolve_disabled,
+                (damage::resolve_disabled, damage::resolve_breakdown).chain(),
                 // F05-B.7: damage→engine impairment (DSN-25) — the
                 // headless record's `imp=` field reads the report.
                 damage::sync_impairment,

@@ -1248,7 +1248,10 @@ fn main() {
             // wrecking blow can shed a panel the same tick the repair
             // puts it back (one bounded event per part per attachment).
             breakaway::detach_breaks,
-            damage::resolve_disabled,
+            // Blitz/Checkpoint breakdown episodes run down and repair
+            // right after the outcome starts them, before the
+            // impairment sync reads the wreck's state.
+            (damage::resolve_disabled, damage::resolve_breakdown).chain(),
             // F05-B.7: damage→engine-impairment coupling (DSN-25) —
             // after `resolve_disabled` so a wreck's repair clears the
             // factor the same tick the tier leaves `Disabled`.

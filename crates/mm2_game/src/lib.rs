@@ -57,8 +57,9 @@ pub use config::{
     WET_TRACTION, Weather,
 };
 pub use damage::{
-    DISABLED_PENALTY_TICKS, DamageEvent, DamageSpec, DamageState, DamageTier, DamageVerdict,
-    DisabledOutcome, ImpairmentPolicy, VehicleDamage, disabled_outcome,
+    BREAKDOWN_SECONDS, DISABLED_PENALTY_TICKS, DamageEvent, DamageSpec, DamageState, DamageTier,
+    DamageVerdict, DisabledOutcome, ImpairmentPolicy, VehicleBreakdown, VehicleDamage,
+    disabled_outcome,
 };
 pub use effects::{
     PRECIP_MAX_LIVE, PTX_ATLAS_TILES, PTX_RULE_NAMES, ParticleSpec, PrecipDrop, Precipitation,

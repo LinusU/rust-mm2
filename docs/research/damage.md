@@ -133,9 +133,10 @@ empty bands). `tick` advances the authored regeneration channel
 policy). `repair`/`reset` are named authority operations; the
 session's role check decides who may call them (F05 req 6).
 `disabled_outcome(mode)` maps the documented RACE-5/DMG-2
-consequences: `RestartEvent` for Blitz/Checkpoint/CrashCourse (the
-crash-course mapping is designed — F21 territory), `PenaltyReset` for
-Circuit, `FreeReset` for Cruise (designed — the help names no
+consequences: `Breakdown` for Blitz/Checkpoint (DSN-68 — the help's
+"restart" reading is overridden by the operator's recollection of
+retail), `RestartEvent` for CrashCourse (designed — F21 territory),
+`PenaltyReset` for Circuit, `FreeReset` for Cruise (designed — the help names no
 free-roam consequence).
 
 The severity→damage *conversion* is not recovered — `apply` consumes
@@ -172,12 +173,29 @@ Cruise resets the player to the spawn point through `ResetVehicle`
 (trailers included) and repairs; Circuit resets in place and adds
 `DISABLED_PENALTY_TICKS` (5 s, designed — RACE-5 documents a time
 penalty but no magnitude, UNK-13) to the live race clock; Blitz/
-Checkpoint/CrashCourse queue the session's own `restart` intent so
-the event restarts through the production lifecycle. AI opponents
+Checkpoint start a `VehicleBreakdown` episode (below); CrashCourse
+queues the session's own `restart` intent so the lesson restarts
+through the production lifecycle. AI opponents
 reset in place and repair under every mode (designed — original
 opponent-destruction behavior is unverified); remote participants are
 skipped (F25+ authority). The outcome re-checks the live tier, so two
 disabling impacts in one tick resolve once.
+
+### Breakdown (Blitz/Checkpoint, DSN-68)
+
+The help text's reading of RACE-5 is "restart", but the operator who
+played retail remembers the car staying broken down for about five
+seconds, black smoke pouring from the hood, then being fully repaired
+and driving on — and an instant event restart on a late-race collision
+was breaking the game. `DisabledOutcome::Breakdown` implements the
+recollection: a `VehicleBreakdown` of `BREAKDOWN_SECONDS` (5 s)
+starts on the wreck; the damage stays at its disabled total so the
+`MedDamage`-gated smoke keeps pouring, `sync_impairment` drops the
+engine factor to 0 (brakes and steering still work), and
+`resolve_breakdown` ends the episode with the full repair (damage,
+breakaway parts, skin) where the car stands. The race clock never
+stops. The timer freezes outside `Playing`. Neither the five seconds
+nor the black colour is read from retail data (UNK-13).
 
 ## Runtime stuck detection and recovery (F05-B.2)
 
