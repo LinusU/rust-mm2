@@ -308,15 +308,27 @@ fn route_aim_at_distance(
     if next >= n {
         next = n - 1;
     }
+    let closed = route_is_closed(route);
+    // A road can occur more than once in a legitimate itinerary. Equal
+    // geometric matches must follow route progress, not the first visit.
+    let progress_distance = |i: usize| {
+        if i >= next {
+            i - next
+        } else if closed {
+            n - next + i
+        } else {
+            n + next - i
+        }
+    };
     let gate_idx = (0..n)
         .min_by(|&i, &j| {
             route.points[i]
                 .position
                 .distance_squared(gate)
                 .total_cmp(&route.points[j].position.distance_squared(gate))
+                .then_with(|| progress_distance(i).cmp(&progress_distance(j)))
         })
         .unwrap_or(0);
-    let closed = route_is_closed(route);
     let behind = if closed {
         (gate_idx + n - next) % n > n / 2
     } else {
