@@ -1,6 +1,7 @@
 //! VFS source implementations: DAVE archives and plain directories.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -82,12 +83,15 @@ fn deterministic_index<T>(
     rows.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     let mut index = HashMap::with_capacity(rows.len());
     for (logical, original, value) in rows {
-        if index.insert(logical.clone(), value).is_some() {
-            tracing::warn!(
-                logical = %logical,
+        match index.entry(logical) {
+            Entry::Vacant(slot) => {
+                slot.insert(value);
+            }
+            Entry::Occupied(slot) => tracing::warn!(
+                logical = %slot.key(),
                 loser = %original,
                 "normalized path collision inside one source; deterministic winner kept"
-            );
+            ),
         }
     }
     index
@@ -219,5 +223,21 @@ impl Source for DirSource {
             archive_offset: None,
             label: self.label.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collision_keeps_the_smallest_original_name() {
+        // Runs on any filesystem: a case-insensitive one cannot hold both
+        // files the VFS-level collision test writes.
+        let rows = ["texture/foo.tex", "texture/FOO.tex", "texture/Foo.tex"]
+            .into_iter()
+            .map(|original| (normalize_path(original), original.to_string(), original));
+        let index = deterministic_index(rows);
+        assert_eq!(index["texture/foo.tex"], "texture/FOO.tex");
     }
 }
