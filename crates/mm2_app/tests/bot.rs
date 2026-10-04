@@ -1432,3 +1432,34 @@ fn planned_guide_drives_a_short_tight_two_lap_circuit_without_reanchors() {
     assert_eq!(app.world().get::<ScriptedBot>(car).unwrap().escapes, 0);
     assert_eq!(app.world().resource::<ResultLedger>().len(), 1);
 }
+
+/// Revisiting a street must target its next occurrence in the itinerary,
+/// rather than steering straight across the blocks to an earlier visit.
+#[test]
+fn planned_guide_gate_ties_follow_forward_progress_on_revisited_streets() {
+    let points = [
+        (0.0, 0.0, 0.0),
+        (50.0, 0.0, 0.0),
+        (50.0, 0.0, 50.0),
+        (100.0, 0.0, 50.0),
+        (100.0, 0.0, -50.0),
+        (50.0, 0.0, -50.0),
+        (50.0, 0.0, 0.0),
+        (0.0, 0.0, 50.0),
+        (0.0, 0.0, 0.0),
+    ];
+    let gate = Vec3::new(50.0, 0.0, 0.0);
+    for closed in [false, true] {
+        let route = route_of(&points[..if closed { 9 } else { 8 }]);
+        let (next, aim) =
+            scripted::planned_route_aim(&route, 4, Vec3::new(100.0, 0.0, 40.0), gate, 10.0);
+        assert_eq!(next, 4);
+        assert_eq!(aim, Vec3::new(100.0, 0.0, 25.0));
+        let (_, aim) =
+            scripted::planned_route_aim(&route, 1, Vec3::new(10.0, 0.0, 0.0), gate, 10.0);
+        assert_eq!(
+            aim, gate,
+            "the early occurrence still caps at its live gate"
+        );
+    }
+}
