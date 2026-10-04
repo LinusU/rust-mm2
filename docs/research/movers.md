@@ -110,7 +110,8 @@ playing samples (`0x515ad0`, parameters `[mgr + 0xa0]` = 0.5 and 0.96
 
 An emitter plays only while the listener is nearer than the table's
 `Max distance` (150 m bridge and Tube, 225 m ferry): once the squared
-distance reaches the squared max it is stopped (`0x512070`), and its
+distance reaches the squared max it is stopped — every sample, a
+playing one-shot included (`0x512070`, `0x5156f0`) — and its
 rows' timers run only while it plays (`0x515230` is the playing
 object's update). Inside that range the volume factor is
 `1 − (d² − min²) / (max² − min²)`, 1 within `Min distance`

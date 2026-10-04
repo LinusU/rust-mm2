@@ -8,10 +8,10 @@
 //! and [`object_sound_voices`] turns the state's cues into voices —
 //! loops kept as children while wanted, one-shots fired when no
 //! earlier firing of the row still plays. As in the original, the
-//! emitter is silent (and its timers hold) from the table's
-//! `Max distance` out — and wherever its `audible area` excludes the
-//! listener ([`crate::underground`]) — and positional rows follow the table's
-//! recovered falloff every frame
+//! emitter is cut off (one-shots included) and its timers hold from
+//! the table's `Max distance` out, and wherever its `audible area`
+//! excludes the listener ([`crate::underground`]); positional rows
+//! follow the table's recovered falloff every frame
 //! ([`ObjectAudioSpec::falloff`](mm2_game::object_audio::ObjectAudioSpec::falloff)).
 //! Bevy's spatial audio supplies only the stereo pan: the voices'
 //! spatial scale ([`PAN_ONLY_EDGE`]) keeps every audible distance
@@ -166,8 +166,12 @@ pub fn object_sound_voices(
         } else {
             Vec::new()
         };
+        // Out of earshot the original stops the whole object — its
+        // one-shots too (`0x512230` → `0x5156f0`); a row merely
+        // switched off lets its one-shot finish.
+        let silenced = running && !in_range;
         for (entity, voice) in &mine {
-            if voice.looped && !wanted.contains(&voice.sample) {
+            if silenced || (voice.looped && !wanted.contains(&voice.sample)) {
                 commands.entity(*entity).despawn();
             }
         }
