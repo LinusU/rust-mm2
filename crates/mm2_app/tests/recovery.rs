@@ -10,6 +10,7 @@ use std::time::Duration;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
+use mm2_app::city::WorldFloor;
 use mm2_app::contracts::{self, ImpactFilter};
 use mm2_app::damage::{self, DamageReport};
 use mm2_app::recovery::{self, RecoveryReport};
@@ -30,6 +31,7 @@ const POLICY: RecoveryPolicy = RecoveryPolicy {
     water_min_drag: 0.3,
     submerge_dwell: 0.5,
     fall_margin: 8.0,
+    floor_margin: 2.0,
 };
 const DAMAGE_SPEC: DamageSpec = DamageSpec {
     impact_threshold: 1500.0,
@@ -298,6 +300,55 @@ fn a_fall_off_the_world_recovers_to_the_anchor() {
     // One event per fall: back at rest on the anchor, no re-fire.
     run(&mut app, 60);
     assert_eq!(report(&app).out_of_bounds, 1);
+}
+
+/// The retail-city shape of the same rule: a hill jump drops past the
+/// fall margin, but the world floor is far below, so the car is left to
+/// land on the street instead of being snatched back mid-air.
+#[test]
+fn a_fall_past_the_margin_but_over_the_floor_is_left_to_land() {
+    let (mut app, car, _object) = recovery_app(Vec3::new(0.0, 1.2, 0.0));
+    app.world_mut().insert_resource(WorldFloor(-60.0));
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::cuboid(20.0, 1.0, 20.0),
+        Position(Vec3::new(0.0, -26.5, 60.0)),
+        Transform::from_xyz(0.0, -26.5, 60.0),
+    ));
+    teleport(&mut app, car, Vec3::new(0.0, 1.0, 60.0));
+    run(&mut app, 180);
+    assert_eq!(
+        report(&app).out_of_bounds,
+        0,
+        "no mid-air reset over ground"
+    );
+    assert_eq!(report(&app).recovered, 0);
+    assert!(
+        position(&app, car).y < -24.0,
+        "the car really landed 26 m down (past the 8 m margin), at {}",
+        position(&app, car).y
+    );
+}
+
+/// …and with the same floor a car that really leaves the world still
+/// comes back, once it is under the floor rather than merely past the
+/// margin.
+#[test]
+fn a_fall_under_the_world_floor_recovers_to_the_anchor() {
+    let (mut app, car, _object) = recovery_app(Vec3::new(0.0, 1.2, 0.0));
+    let anchor = position(&app, car);
+    app.world_mut().insert_resource(WorldFloor(-20.0));
+    teleport(&mut app, car, Vec3::new(500.0, 5.0, 0.0));
+    run(&mut app, 60); // ~1 s: past the 8 m margin, still above the floor
+    assert_eq!(report(&app).out_of_bounds, 0);
+    run(&mut app, 200); // well under the floor
+    assert_eq!(report(&app).out_of_bounds, 1);
+    assert_eq!(report(&app).recovered, 1);
+    let pos = position(&app, car);
+    assert!(
+        pos.distance(Vec3::new(anchor.x, pos.y, anchor.z)) < 1.0,
+        "recovered to the last dry pose, got {pos} vs {anchor}"
+    );
 }
 
 #[test]

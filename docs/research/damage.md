@@ -358,8 +358,13 @@ policy end to end (the original's rules stay UNK-13):
   keeps driving). Recovery is to the anchor — back on shore, never in
   place on the water.
 - The **out-of-bounds** leg fires once per airborne fall more than
-  `fall_margin` (50 m — sized past retail drops, since any real
-  landing refreshes the anchor first) below the anchor; a non-finite
+  `fall_margin` (50 m) below the anchor *and* more than `floor_margin`
+  (10 m) under the city's `WorldFloor` (the PSDL bounding-box
+  minimum). The margin alone misfired: a legitimate hill jump can drop
+  past 50 m and the reset snatched the car back to its take-off pose
+  just before it landed. No drivable surface exists under the floor,
+  so a car there is lost; with no floor (dev world) the margin stands
+  alone. A non-finite
   pose fires at once as defence-in-depth (a pose gone NaN inside the
   physics step trips the wheel raycast first — the detector can only
   answer poses written between steps).

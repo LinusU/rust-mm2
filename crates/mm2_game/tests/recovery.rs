@@ -9,6 +9,7 @@ const POLICY: RecoveryPolicy = RecoveryPolicy {
     water_min_drag: 0.3,
     submerge_dwell: 0.5,
     fall_margin: 8.0,
+    floor_margin: 2.0,
 };
 const DRY: Vec3 = Vec3::new(10.0, 0.6, -4.0);
 const YAW: f32 = 0.4;
@@ -203,4 +204,57 @@ fn garbage_dt_and_zero_dwell_edges() {
     det.policy.submerge_dwell = 0.0;
     let (cause, _) = recover(&det.observe(DRY + Vec3::X, YAW, GroundContact::Submerged, 0.0));
     assert_eq!(cause, RecoveryCause::Submerged);
+}
+
+#[test]
+fn a_long_fall_over_real_ground_is_left_to_land() {
+    // A hill jump can drop far past the fall margin and still land on
+    // the street. With the world's floor known, being past the margin
+    // is not enough — the car must also be under the floor.
+    let floor = Some(DRY.y - 100.0);
+    let mut det = anchored();
+    for drop in [9.0, 30.0, 99.0] {
+        assert_eq!(
+            det.observe_in_world(
+                DRY - Vec3::Y * drop,
+                YAW,
+                GroundContact::Airborne,
+                DT,
+                floor
+            ),
+            RecoveryVerdict::Clear,
+            "{drop} m down is still above the floor"
+        );
+    }
+    // Landing refreshes the anchor as usual.
+    let landed = DRY - Vec3::Y * 99.0;
+    det.observe_in_world(landed, YAW, GroundContact::Dry, DT, floor);
+    assert_eq!(det.anchor(), Some((landed, YAW)));
+}
+
+#[test]
+fn a_fall_through_the_world_floor_still_recovers() {
+    let floor_y = DRY.y - 100.0;
+    let floor = Some(floor_y);
+    let mut det = anchored();
+    // Inside the floor margin is still the world.
+    assert_eq!(
+        det.observe_in_world(
+            Vec3::new(DRY.x, floor_y - 1.0, DRY.z),
+            YAW,
+            GroundContact::Airborne,
+            DT,
+            floor
+        ),
+        RecoveryVerdict::Clear
+    );
+    let (cause, landing) = recover(&det.observe_in_world(
+        Vec3::new(DRY.x, floor_y - 3.0, DRY.z),
+        YAW,
+        GroundContact::Airborne,
+        DT,
+        floor,
+    ));
+    assert_eq!(cause, RecoveryCause::OutOfBounds);
+    assert_eq!(landing, Some((DRY, YAW)));
 }

@@ -7,9 +7,9 @@
 //! - [`track_recovery`] classifies each participant's grounded wheels
 //!   once per fixed step — any dry contact re-anchors the detector,
 //!   an all-water contact accrues the submersion dwell, and an
-//!   airborne fall past `fall_margin` below the anchor fires the
-//!   out-of-bounds leg — emitting one bounded [`RecoveryEvent`] per
-//!   episode. (The detector's non-finite arm is defence-in-depth for
+//!   airborne fall past `fall_margin` below the anchor *and* under the
+//!   city's [`WorldFloor`] fires the out-of-bounds leg — emitting one
+//!   bounded [`RecoveryEvent`] per episode. (The detector's non-finite arm is defence-in-depth for
 //!   poses written *between* steps: a pose gone non-finite inside the
 //!   physics step trips the wheel raycast first.)
 //! - [`resolve_recovery`] answers a detection with [`ResetVehicle`]
@@ -41,6 +41,7 @@ use mm2_game::{
 };
 use mm2_vehicle::{ResetVehicle, VehicleState};
 
+use crate::city::WorldFloor;
 use crate::session::SpawnPoint;
 
 /// Per-session evidence counters for the recovery pipeline — the
@@ -137,6 +138,7 @@ pub fn track_recovery(
     session: Res<Session>,
     time: Res<Time<Fixed>>,
     water: Option<Res<crate::water::CityWater>>,
+    floor: Option<Res<WorldFloor>>,
     mut vehicles: RecoveryVehicles,
     mut writer: MessageWriter<RecoveryEvent>,
     mut report: ResMut<RecoveryReport>,
@@ -150,6 +152,7 @@ pub fn track_recovery(
     let generation = session.generation();
     let tick = session.tick();
     let water = water.as_deref();
+    let floor = floor.map(|floor| floor.0);
     for (.., id, _player, pos, rot, state, mut recovery, damage) in &mut vehicles {
         // A wreck belongs to the damage outcome — it cannot drive out
         // of anything.
@@ -159,7 +162,7 @@ pub fn track_recovery(
         let contact = ground_contact(state, pos.0, recovery.policy.water_min_drag, water);
         let (_, yaw, _) = rot.0.to_euler(EulerRot::YXZ);
         if let RecoveryVerdict::Recover { cause, landing } =
-            recovery.observe(pos.0, yaw, contact, dt)
+            recovery.observe_in_world(pos.0, yaw, contact, dt, floor)
         {
             match cause {
                 RecoveryCause::Submerged => report.submerged += 1,

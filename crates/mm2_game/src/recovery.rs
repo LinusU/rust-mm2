@@ -27,12 +27,18 @@
 //!     driving; one that cannot is recovered to the anchor — back on
 //!     the shore it left, not in place on the water;
 //!   - the **out-of-bounds** leg: an airborne car that falls
-//!     [`RecoveryPolicy::fall_margin`] below its anchor has left the
-//!     world (through the floor, off the map edge) and recovers to
-//!     that anchor. A legitimate drop lands on real ground first —
-//!     the landing is a dry contact and refreshes the anchor before
-//!     the margin can fire — so the bound can be sized generously. A
-//!     non-finite pose can never be legitimate and fires at once.
+//!     [`RecoveryPolicy::fall_margin`] below its anchor *and* below the
+//!     world's floor has left the world (through the ground, off the
+//!     map edge) and recovers to that anchor. The fall margin alone is
+//!     not enough: a retail hill jump legitimately drops further than
+//!     any fixed margin and lands on real ground, and a reset fired
+//!     mid-air snatches the car back to its take-off point just before
+//!     the landing. The world floor (the authored bounding-box minimum,
+//!     [`RecoveryPolicy::floor_margin`] of slack under it) separates
+//!     the two: no drivable surface exists below it, so a car there is
+//!     lost. Without a known floor (a dev world) the fall margin
+//!     stands alone. A non-finite pose can never be legitimate and
+//!     fires at once.
 //!
 //! The verdict only *detects*: what the session does with it — reset
 //! to the landing, spawn fallback when no anchor exists yet, trailer
@@ -59,11 +65,17 @@ pub struct RecoveryPolicy {
     /// dwell is the escape window — a car that regains a dry contact
     /// inside it keeps driving.
     pub submerge_dwell: f32,
-    /// Vertical fall below the last dry-grounded anchor that declares
-    /// the car out of the world, metres. Sized far past the largest
-    /// legitimate drop a retail city offers, since any real landing
-    /// refreshes the anchor before the margin can fire.
+    /// Vertical fall below the last dry-grounded anchor that makes a
+    /// car a candidate for the out-of-bounds recovery, metres. With a
+    /// known world floor this is only the first of two conditions (a
+    /// big legitimate jump can exceed it); without one it is the whole
+    /// rule.
     pub fall_margin: f32,
+    /// Slack under the world floor before the car counts as below it,
+    /// metres — the floor is the lowest authored *vertex*, so a car
+    /// resting on that surface sits a little above it, and a body
+    /// clipping the lowest geometry a little under.
+    pub floor_margin: f32,
 }
 
 impl Default for RecoveryPolicy {
@@ -72,6 +84,7 @@ impl Default for RecoveryPolicy {
             water_min_drag: 0.3,
             submerge_dwell: 2.0,
             fall_margin: 50.0,
+            floor_margin: 10.0,
         }
     }
 }
@@ -197,6 +210,21 @@ impl VehicleRecovery {
         contact: GroundContact,
         dt: f32,
     ) -> RecoveryVerdict {
+        self.observe_in_world(position, yaw, contact, dt, None)
+    }
+
+    /// [`Self::observe`] with the world's floor height, when the loaded
+    /// world has one: the out-of-bounds leg then also requires the car
+    /// to be [`RecoveryPolicy::floor_margin`] below it, so a long
+    /// legitimate fall over real ground is left to land.
+    pub fn observe_in_world(
+        &mut self,
+        position: Vec3,
+        yaw: f32,
+        contact: GroundContact,
+        dt: f32,
+        world_floor: Option<f32>,
+    ) -> RecoveryVerdict {
         // A non-finite pose can never be legitimate and cannot refresh
         // an anchor — recover to the last good one at once.
         if !position.is_finite() || !yaw.is_finite() {
@@ -232,6 +260,7 @@ impl VehicleRecovery {
                 if !self.fall_latched
                     && let Some((anchor_pos, _)) = self.anchor
                     && position.y < anchor_pos.y - self.policy.fall_margin
+                    && world_floor.is_none_or(|floor| position.y < floor - self.policy.floor_margin)
                 {
                     self.fall_latched = true;
                     return RecoveryVerdict::Recover {
