@@ -173,9 +173,19 @@ inference had the flag block shifted one column later — it made
 `unused` a 43%-set flag on ordinary rows and `avoidOpponents`
 ≈ universal-0; both anomalies resolve under the documented order.
 Short rows (`stunt0`'s single value) decode trailing fields as
-absent rather than zero. Runtime *semantics* — how the original
-consumed each field — remain unverified (UNK-11); what is consumed
-below is a designed reading of the documented names.
+absent rather than zero.
+
+**Verified 2026-10-04** from `Midtown2.exe` (docs/research/
+opponent-ai.md): the order holds, but the original's own parser
+presets col 2 to **50** and col 9 to **1.0** — not the 75 and 2.0 of
+the community `RegisterRoute` defaults — and how it consumes each
+field is now known: col 0 is the throttle whenever the car is not
+braking, col 2 the obstacle look-ahead along the planned path, col 3
+the brake demand a bend must exceed, cols 4–7 the obstacle classes the
+path sweep tests (ambient cars, props, players, opponents), col 8 a
+detour-candidate preference, and col 9 a multiplier on every corner
+*speed*. The "consumed" column below is still our own reading — DSN-66
+uses col 9 as a grip scale around 2.0, which the original does not.
 
 | col | field | retail range | consumed |
 |-----|-------|--------------|----------|
@@ -246,6 +256,12 @@ course mid-leg — chasing row 1 from the staged pose U-turns the car.
 `race/sf/race5-a-{5,6,7}` carry a second staging row mid-file (what
 re-stages there is unknown). Every other column authors 0 on retail
 and is preserved raw.
+
+The original reads only `x y z` and the heading (verified 2026-10-04,
+docs/research/opponent-ai.md): row 0 places the car, every interior
+row is turned into the intersection whose room holds it — so
+consecutive rows must be adjacent intersections — and the last row is
+where the car stops. It does not read the `_strtpnts` files at all.
 
 The same zero-means-unset rule shows on the `_strtpnts` side:
 `cir6_strtpnts` is the only all-zero `a` column on retail — its
