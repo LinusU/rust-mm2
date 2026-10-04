@@ -301,3 +301,9 @@ finite XZ length for each consecutive edge. Invalid input fails before world
 spawning. The route guides ordinary steering and throttle/brake inputs; gates,
 laps, countdown and time limits still use the event definition. These runs are
 record-ineligible, and existing bounded bot recovery behavior still applies.
+
+When a guide is bound, the evidence driver reuses the opponent planner's
+speed-scaled route projection, handling-derived steering and curvature braking.
+The live player's next checkpoint still bounds the aim, so lookahead never
+substitutes route traversal for crossing a gate. Unguided steering and the
+existing bounded recovery policy remain unchanged.

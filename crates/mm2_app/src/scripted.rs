@@ -33,8 +33,12 @@ use mm2_game::{
 use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState};
 use tracing::info;
 
+use crate::racing_line::{
+    CORNER_BRAKE_DEFAULT, CarLimits, RouteCursor, SpeedPlan, pace, plan_speed, steer_toward,
+};
+
 use crate::opponents::{
-    REANCHOR_DIST, REANCHOR_FRAMES, SPAWN_LIFT, initial_route_index, point_reached,
+    REANCHOR_DIST, REANCHOR_FRAMES, SPAWN_LIFT, aim_distance, initial_route_index, point_reached,
     reanchor_occupied, reanchor_pose, route_is_closed,
 };
 
@@ -130,6 +134,8 @@ pub struct ScriptedRoute {
     /// Bounded re-anchors this session — the observable count, the
     /// same disclosure `OpponentDriver::reanchors` gives AI drivers.
     pub reanchors: u32,
+    /// Handling-derived planner limits, cached for this session-owned car.
+    limits: Option<CarLimits>,
 }
 
 impl ScriptedRoute {
@@ -147,6 +153,7 @@ impl ScriptedRoute {
             recoveries: 0,
             progress_stamp: 0,
             reanchors: 0,
+            limits: None,
         }
     }
 }
@@ -270,7 +277,30 @@ pub fn pick_bot_route(roster: &OpponentRoster, spawn: Vec3) -> Option<OpponentRo
 /// band scrub speed before an edge instead of after it.
 ///
 /// Returns the updated `next` and this frame's aim point.
-pub fn route_aim(route: &OpponentRoute, mut next: usize, pos: Vec3, gate: Vec3) -> (usize, Vec3) {
+pub fn route_aim(route: &OpponentRoute, next: usize, pos: Vec3, gate: Vec3) -> (usize, Vec3) {
+    route_aim_at_distance(route, next, pos, gate, ROUTE_LOOKAHEAD, false)
+}
+
+/// Guided evidence driving uses the AI planner's speed-scaled pursuit distance
+/// and projection onto the route, while retaining the player's gate boundary.
+pub fn planned_route_aim(
+    route: &OpponentRoute,
+    next: usize,
+    pos: Vec3,
+    gate: Vec3,
+    speed: f32,
+) -> (usize, Vec3) {
+    route_aim_at_distance(route, next, pos, gate, aim_distance(speed), true)
+}
+
+fn route_aim_at_distance(
+    route: &OpponentRoute,
+    mut next: usize,
+    pos: Vec3,
+    gate: Vec3,
+    distance: f32,
+    project: bool,
+) -> (usize, Vec3) {
     let n = route.points.len();
     if n == 0 {
         return (0, gate);
@@ -303,7 +333,19 @@ pub fn route_aim(route: &OpponentRoute, mut next: usize, pos: Vec3, gate: Vec3) 
     }
     (
         next,
-        lookahead_aim(route, next, gate_idx, closed, pos, gate),
+        lookahead_aim(
+            route,
+            next,
+            gate_idx,
+            closed,
+            if project {
+                RouteCursor::locate(route, next, pos).map_or(pos, |c| c.point_ahead(route, 0.0))
+            } else {
+                pos
+            },
+            gate,
+            distance,
+        ),
     )
 }
 
@@ -371,10 +413,11 @@ fn lookahead_aim(
     closed: bool,
     pos: Vec3,
     gate: Vec3,
+    distance: f32,
 ) -> Vec3 {
     let n = route.points.len();
     let mut from = pos;
-    let mut remain = ROUTE_LOOKAHEAD;
+    let mut remain = distance;
     loop {
         let at_gate_leg = i == gate_idx;
         let target = if at_gate_leg {
@@ -710,6 +753,7 @@ pub fn scripted_drive(
             }
         };
         let mut target = gate;
+        let mut planned = None;
         if let Some(rs) = bot_route.as_mut() {
             // The bounded last resort — the same disclosed contract
             // `opponent_drive` holds (`reanchors`/`Teleported`/`blocked`
@@ -829,16 +873,71 @@ pub fn scripted_drive(
                 rs.offroute_frames = 0;
                 rs.recoveries = 0;
             }
-            let (next, aim) = route_aim(&rs.route, rs.next, pos.0, gate);
+            let speed = vstate.forward_speed;
+            let (next, aim) = planned_route_aim(&rs.route, rs.next, pos.0, gate, speed);
             rs.next = next;
             target = aim;
+            let limits = *rs
+                .limits
+                .get_or_insert_with(|| CarLimits::of(&vehicle.config, None));
+            let plan = RouteCursor::locate(&rs.route, next, pos.0).map_or(
+                SpeedPlan {
+                    limit: f32::INFINITY,
+                    demand: 0.0,
+                },
+                |cursor| plan_speed(&rs.route, cursor, speed, &limits),
+            );
+            planned = Some((limits, plan));
         }
         let bearing = relative_bearing(yaw, pos.0, target);
-        *input = scripted_input(bot, bearing, vstate.forward_speed, vstate.grounded);
+        *input = if let Some((limits, plan)) = planned {
+            planned_input(
+                bot,
+                bearing,
+                (target.x - pos.0.x).hypot(target.z - pos.0.z),
+                vstate.forward_speed,
+                vstate.grounded,
+                &limits,
+                plan,
+            )
+        } else {
+            scripted_input(bot, bearing, vstate.forward_speed, vstate.grounded)
+        };
         if let Some(limit) = session.config().and_then(|c| c.dev.bot_speed) {
             limit_evidence_speed(&mut input, vstate.forward_speed, limit);
         }
     }
+}
+
+/// Reuse the AI's handling-derived steering and curvature pace for a guided
+/// player. Recovery remains the existing bounded scripted policy; this helper
+/// cannot bank gates or reset a vehicle.
+pub fn planned_input(
+    bot: &mut ScriptedBot,
+    bearing: f32,
+    aim_dist: f32,
+    speed: f32,
+    grounded: bool,
+    limits: &CarLimits,
+    plan: SpeedPlan,
+) -> VehicleInput {
+    if let Some(input) = recovery_input(bot, bearing, &ScriptedTuning::DEFAULT) {
+        return input;
+    }
+    let throttle = if speed < SPEED_CAP {
+        bearing_throttle(bearing)
+    } else {
+        0.0
+    };
+    let (throttle, brake) = pace(speed, plan, throttle, CORNER_BRAKE_DEFAULT);
+    let input = VehicleInput {
+        steering: steer_toward(bearing, aim_dist, speed, limits),
+        throttle,
+        brake,
+        ..default()
+    };
+    watch_stuck(bot, &input, speed, grounded);
+    input
 }
 
 /// An explicit probe ceiling changes inputs only, preserving the shared handling.
