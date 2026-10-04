@@ -82,7 +82,12 @@ leaf state machine; `mm2_app::drawbridge` picks the file, spawns each
 leaf as a kinematic body whose origin is the hinge (centre of mass
 pinned there, the mesh offset baked into the vertices) and poses it
 each fixed step, leaving the angular velocity that carries it to the
-next step so cars on a moving leaf ride it. The session's
+next step so cars on a moving leaf ride it. The leaf's collider is the
+authored triangle mesh, not a convex hull: the deck sits between rails
+that rise 1.5 m above it, so a hull is a solid block across the road
+(an invisible wall at the first leaf of Tower Bridge). Kinematic
+placements (leaves, ferries, trains) never turn dynamic, so they do not
+need the hulls that keep dynamic bangers' inertia finite. The session's
 `DrawbridgeReport` resource records the file and leaf counts.
 
 The motor loop and bell (`aud/ambient/drawbridge.csv`) sound while a

@@ -2449,8 +2449,8 @@ fn break_index(stem: &str) -> Option<&str> {
 }
 
 /// Collision triangles accumulated over a whole prop (all best-LOD
-/// geometries, every section). Static placements keep the authored triangle
-/// mesh: a convex hull would seal the openings of the
+/// geometries, every section). Static and kinematic placements keep the
+/// authored triangle mesh: a convex hull would seal the openings of the
 /// concave props the city is full of — archways, bridge trusses, tunnel
 /// mouths — turning them into invisible walls and floors.
 #[derive(Default)]
@@ -2721,6 +2721,13 @@ enum PropOffset {
     /// authored entirely above its origin (floating signs, pickups)
     /// keeps its authored height.
     Ground,
+    /// Content for a kinematic body the caller poses itself
+    /// (drawbridge leaves, ferries, trains), offset by the given
+    /// vector so the body's origin is the pivot. Unlike
+    /// [`Self::Bound`] it never turns dynamic, so it needs no finite
+    /// inertia and keeps the authored triangles: a convex hull would
+    /// fill a deck's rails into a solid block a car cannot drive onto.
+    Pivot(Vec3),
 }
 
 impl PropOffset {
@@ -2731,6 +2738,7 @@ impl PropOffset {
             Self::Verbatim => 0,
             Self::Ground => 1,
             Self::Bound(_) => 2,
+            Self::Pivot(_) => 3,
         }
     }
 }
@@ -2801,7 +2809,7 @@ impl<'a> PropCache<'a> {
         let movable = matches!(offset, PropOffset::Bound(_));
         let offset = match offset {
             PropOffset::Verbatim => Vec3::ZERO,
-            PropOffset::Bound(v) => v,
+            PropOffset::Bound(v) | PropOffset::Pivot(v) => v,
             PropOffset::Ground => Vec3::from(stamp_content_offset(&pkg, None)),
         };
         let model = pkg_to_parts(
@@ -2857,7 +2865,7 @@ impl<'a> MovableModels<'a> {
     /// vertex; `None` when the PKG is missing or has nothing to draw.
     /// Uncached: callers load each name once.
     pub fn load(&mut self, name: &str, offset: Vec3) -> Option<MovableModel> {
-        let model = self.cache.build(name, PropOffset::Bound(offset), 0)?;
+        let model = self.cache.build(name, PropOffset::Pivot(offset), 0)?;
         Some(MovableModel {
             parts: model.parts,
             collider: model.collider,
@@ -4885,5 +4893,104 @@ mod tests {
             // v = 1 on both kerbs, 0 on the centre line.
             assert!((uv[1] - (p[0] - 4.0).abs() / 4.0).abs() < 1e-6);
         }
+    }
+
+    /// A PKG3 with one `H` chunk: an open channel along Z — a deck
+    /// (y = 0.3) between two rails (y 0.3..1.8, x = ±2) — the shape of
+    /// a drawbridge leaf, with no end caps.
+    fn channel_pkg() -> Vec<u8> {
+        fn push_f32s(out: &mut Vec<u8>, v: &[f32]) {
+            for f in v {
+                out.extend_from_slice(&f.to_le_bytes());
+            }
+        }
+        let verts: [[f32; 3]; 12] = [
+            [-2.0, 0.3, -5.0],
+            [2.0, 0.3, -5.0],
+            [2.0, 0.3, 5.0],
+            [-2.0, 0.3, 5.0],
+            [-2.0, 0.3, -5.0],
+            [-2.0, 1.8, -5.0],
+            [-2.0, 1.8, 5.0],
+            [-2.0, 0.3, 5.0],
+            [2.0, 0.3, -5.0],
+            [2.0, 1.8, -5.0],
+            [2.0, 1.8, 5.0],
+            [2.0, 0.3, 5.0],
+        ];
+        let indices: Vec<u16> = (0..3u16)
+            .flat_map(|q| [0, 1, 2, 0, 2, 3].map(|i| q * 4 + i))
+            .collect();
+        let mut geo = Vec::new();
+        geo.extend_from_slice(&1u32.to_le_bytes()); // n_sections
+        geo.extend_from_slice(&(verts.len() as u32).to_le_bytes());
+        geo.extend_from_slice(&(indices.len() as u32).to_le_bytes());
+        geo.extend_from_slice(&0u32.to_le_bytes()); // sections_duplicate
+        geo.extend_from_slice(&0x002u32.to_le_bytes()); // FVF_XYZ
+        geo.extend_from_slice(&1u16.to_le_bytes()); // n_strips
+        geo.extend_from_slice(&0u16.to_le_bytes()); // flags
+        geo.extend_from_slice(&(-1i32).to_le_bytes()); // shader_offset: fallback
+        geo.extend_from_slice(&3i32.to_le_bytes()); // triangles
+        geo.extend_from_slice(&(verts.len() as u32).to_le_bytes());
+        for v in &verts {
+            push_f32s(&mut geo, v);
+        }
+        geo.extend_from_slice(&(indices.len() as u32).to_le_bytes());
+        for i in &indices {
+            geo.extend_from_slice(&i.to_le_bytes());
+        }
+        let mut pkg = Vec::new();
+        pkg.extend_from_slice(b"PKG3");
+        pkg.extend_from_slice(b"FILE");
+        pkg.push(2);
+        pkg.extend_from_slice(b"H\0");
+        pkg.extend_from_slice(&(geo.len() as u32).to_le_bytes());
+        pkg.extend_from_slice(&geo);
+        pkg
+    }
+
+    /// A drawbridge leaf is a kinematic deck a car drives along, so its
+    /// collider keeps the authored triangles: a convex hull would fill
+    /// the space between the rails into a solid block, an invisible
+    /// wall across the road at the leaf's near end.
+    #[test]
+    fn movable_models_keep_an_open_deck_drivable() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("geometry")).unwrap();
+        std::fs::write(dir.path().join("geometry/test_leaf.pkg"), channel_pkg()).unwrap();
+        let mut vfs = Vfs::new();
+        vfs.mount_dir(dir.path(), 0).unwrap();
+        let mut meshes = Assets::<Mesh>::default();
+        let mut images = Assets::<Image>::default();
+        let mut materials = Assets::<StandardMaterial>::default();
+        let mut models = MovableModels::new(&vfs, &mut meshes, &mut images, &mut materials);
+        let collider = models
+            .load("test_leaf", Vec3::new(0.0, 0.0, -5.0))
+            .and_then(|m| m.collider)
+            .expect("leaf collider");
+
+        // A ray along the deck at car height, between the rails, from
+        // before the leaf to past it: nothing stands in its way.
+        let along = |y: f32| {
+            collider.cast_ray(
+                Vec3::ZERO,
+                Quat::IDENTITY,
+                Vec3::new(0.0, y, 5.0),
+                Vec3::NEG_Z,
+                30.0,
+                true,
+            )
+        };
+        assert!(along(1.0).is_none(), "the leaf walls off its own deck");
+        // The deck itself is still solid underfoot.
+        let down = collider.cast_ray(
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            Vec3::new(0.0, 5.0, -5.0),
+            Vec3::NEG_Y,
+            30.0,
+            true,
+        );
+        assert!((down.expect("deck below").0 - 4.7).abs() < 1e-3);
     }
 }
