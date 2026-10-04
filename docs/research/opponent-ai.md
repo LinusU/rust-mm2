@@ -250,10 +250,10 @@ Our opponents (`mm2_app::opponents`, `mm2_app::racing_line`) are a
 designed controller: pure pursuit along the `.opp` anchors densified
 through the nav graph, a speed plan from the line's curvature and the
 car's own handling, wall feelers, a participant corridor, and the
-bounded re-anchor teleport. Where it diverges from the original:
+bounded re-anchor teleport. Like the original,
+`mm2_content::load_opponent` gives an opponent the player's own tune
+and ignores the `_opp` files. Where it still diverges:
 
-- `mm2_content::load_opponent` merges `<id>_opp.vehcarsim` over the
-  base tune; the original reads only the base tune.
 - Col 2's default reads 75 and col 9 is a grip scale around 2.0
   (DSN-66); the original defaults are 50 and 1.0, and col 9 scales
   speed.

@@ -67,9 +67,9 @@
 //!
 //! Opponents are *not* clones of the player car: each roster entry
 //! loads its own authored vehicle id through
-//! [`mm2_content::load_opponent`], which prefers the retail
-//! `<id>_opp.vehcarsim` opponent tuning when the VFS provides it, so
-//! per-vehicle character (mass, power, size, grip) survives. They are
+//! [`mm2_content::load_opponent`] — the same tuning the player gets for
+//! that car, as in the original (RACE-13), so per-vehicle character
+//! (mass, power, size, grip) survives. They are
 //! stamped `PlayerControl::Ai` — never counted as network clients —
 //! and session-owned, so restart/teardown removes them and their
 //! controller state with everything else.

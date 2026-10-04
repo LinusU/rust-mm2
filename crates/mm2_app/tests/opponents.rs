@@ -59,7 +59,8 @@ fn vfs_of(dir: &Path) -> Vfs {
 
 /// One vehicle: the shared `tuned_car` base (tune + model + bound —
 /// `tests/support`'s fixture, the same grammar `audio_car` layers
-/// cardata on) plus the `_opp` tune variant unless `opp_mass` is None.
+/// cardata on) plus a retail-style `_opp` tune file unless `opp_mass` is
+/// None — written so the tests can prove an opponent never reads it.
 fn write_car(d: &Path, id: &str, mass: f32, opp_mass: Option<f32>) {
     support::tuned_car(d, id, mass);
     if let Some(m) = opp_mass {
@@ -145,8 +146,8 @@ fn roster_install_rows(rows: &str, extra_files: &[(&str, String)]) -> tempfile::
             [180.0, 0.0, 146.0],
         ]),
     );
-    // `vpt` ships an authored `_opp` tune (mass 2000 vs base 1000);
-    // `vpheavy` (mass 3000) has no variant → base tune applies.
+    // `vpt` ships a retail-style `_opp` tune (mass 2000 vs base 1000)
+    // the original never reads; `vpheavy` (mass 3000) has none.
     write_car(d, "vpt", 1000.0, Some(2000.0));
     write_car(d, "vpheavy", 3000.0, None);
     for (rel, contents) in extra_files {
@@ -645,7 +646,8 @@ fn anchors_behind_the_staging_are_dropped_before_densifying() {
 
 /// The authored roster spawns real AI participants: distinct `PlayerId`s,
 /// `PlayerControl::Ai`, session ownership, `RaceProgress` and their own
-/// vehicle configs — the `_opp` tune on `vpt`, the base tune on `vpheavy`.
+/// vehicle configs — each its own base tune, the `_opp` file ignored as
+/// the original ignores it (RACE-13).
 #[test]
 fn roster_spawns_distinct_ai_participants() {
     let tmp = roster_install("", &[]);
@@ -685,12 +687,13 @@ fn roster_spawns_distinct_ai_participants() {
         "distinct player ids"
     );
 
-    // Per-vehicle configs, not a cloned player car: `vpt` picked its
-    // `_opp` tune (2000), `vpheavy` its base tune (3000).
+    // Per-vehicle configs, not a cloned player car: each drives its own
+    // base tune — `vpt` 1000 with its `_opp` file (2000) unread,
+    // `vpheavy` 3000.
     let vpt_mass = app.world().get::<Vehicle>(vpt).unwrap().config.mass;
     let heavy_mass = app.world().get::<Vehicle>(heavy).unwrap().config.mass;
-    assert_eq!(vpt_mass, 2000.0, "_opp tuning wins for vpt");
-    assert_eq!(heavy_mass, 3000.0, "no variant → base tune");
+    assert_eq!(vpt_mass, 1000.0, "the _opp tune is never read");
+    assert_eq!(heavy_mass, 3000.0, "base tune");
 
     // Route-row0 anchors: the authored .opp first points.
     let p = app.world().get::<Position>(vpt).unwrap().0;
