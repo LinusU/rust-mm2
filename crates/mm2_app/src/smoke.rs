@@ -639,7 +639,10 @@ fn run_headless(
                     crate::audio::commentary_voices.after(session::drive_session),
                     // Object sounds — the record's `aud=` o field
                     // counts the voices spawned.
-                    crate::object_sound::object_sound_voices.after(session::drive_session),
+                    crate::object_sound::object_sound_voices
+                        .after(session::drive_session)
+                        .after(crate::underground::track_listener_room),
+                    crate::underground::track_listener_room,
                     crate::race_audio::race_cue_voices.after(session::drive_session),
                     crate::audio::audio_listener.after(session::drive_session),
                     crate::audio::count_sinks,

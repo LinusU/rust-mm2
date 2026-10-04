@@ -3582,6 +3582,9 @@ pub struct LoadedCity {
     /// loaded PSDL's rooms, when the install ships one that parses
     /// (F18-A.6).
     pub water: Option<crate::water::CityWater>,
+    /// The rooms' plan shapes and floors for the listener-underground
+    /// lookup the object sounds' `audible area` reads.
+    pub listener_rooms: crate::underground::ListenerRooms,
     /// Import statistics.
     pub report: CityReport,
 }
@@ -3765,6 +3768,7 @@ pub fn load_city(
                 loaded.water = Some(water);
             }
         }
+        loaded.listener_rooms.append(part.listener_rooms);
         if let Some(floor) = part.floor {
             loaded.floor = Some(WorldFloor(
                 loaded.floor.map_or(floor.0, |old| old.0.min(floor.0)),
@@ -4265,6 +4269,7 @@ fn load_city_part(
         surfaces,
         pvs,
         water,
+        listener_rooms: crate::underground::ListenerRooms::build(&psdl),
         report,
     })
 }

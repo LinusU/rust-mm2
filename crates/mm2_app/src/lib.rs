@@ -54,6 +54,7 @@ pub mod speedometer;
 pub mod stuck;
 pub mod texel_fx;
 pub mod traffic;
+pub mod underground;
 pub mod water;
 pub mod wheel_fx;
 

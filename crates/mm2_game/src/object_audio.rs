@@ -19,6 +19,10 @@
 //! - type 3 never fires on its own (it waits for an explicit trigger
 //!   no retail object issues).
 //!
+//! The table's `audible area` gates it on where the listener is: 1
+//! plays only while the listener stands in a subterranean room, 2 only
+//! while it does not, 0 anywhere ([`AudibleArea`]).
+//!
 //! The emitter is silent from the table's `Max distance` out. Inside
 //! it, rows of types 0, 2 and 3 play at their authored volume times
 //! [`ObjectAudioSpec::falloff`] — full volume within `Min distance`,
@@ -59,6 +63,38 @@ impl SampleKind {
     }
 }
 
+/// Where the listener must be for a table to sound — the `audible
+/// area` column (`0x5151a0`, `0x515bc0`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AudibleArea {
+    /// 0, or anything unrecognised — anywhere.
+    #[default]
+    Anywhere,
+    /// 1 — only while the listener is underground.
+    Underground,
+    /// 2 — only while the listener is above ground.
+    Surface,
+}
+
+impl AudibleArea {
+    fn from_code(code: Option<f32>) -> Self {
+        match code.map(|c| c as i32) {
+            Some(1) => Self::Underground,
+            Some(2) => Self::Surface,
+            _ => Self::Anywhere,
+        }
+    }
+
+    /// Whether a listener that is (or is not) `underground` hears it.
+    pub fn admits(self, underground: bool) -> bool {
+        match self {
+            Self::Anywhere => true,
+            Self::Underground => underground,
+            Self::Surface => !underground,
+        }
+    }
+}
+
 /// One sample row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObjectSampleSpec {
@@ -85,6 +121,8 @@ pub struct ObjectAudioSpec {
     pub min_distance: f32,
     /// Silent from this many metres out.
     pub max_distance: f32,
+    /// Where the listener must be.
+    pub area: AudibleArea,
     /// The sample rows.
     pub samples: Vec<ObjectSampleSpec>,
 }
@@ -101,6 +139,7 @@ impl ObjectAudioSpec {
             name: name.to_string(),
             min_distance: table.min_distance,
             max_distance: table.max_distance,
+            area: AudibleArea::from_code(table.audible_area),
             samples: table
                 .samples
                 .iter()
@@ -309,6 +348,19 @@ mod tests {
         assert!(s.in_range(249.9) && !s.in_range(250.0));
         assert!(!SampleKind::RandomOneShot.is_positional());
         assert!(SampleKind::Loop.is_positional());
+    }
+
+    #[test]
+    fn the_audible_area_gates_on_the_listener_being_underground() {
+        let s = spec();
+        assert_eq!(s.area, AudibleArea::Anywhere);
+        assert!(s.area.admits(true) && s.area.admits(false));
+        assert_eq!(AudibleArea::from_code(Some(1.0)), AudibleArea::Underground);
+        assert!(AudibleArea::Underground.admits(true));
+        assert!(!AudibleArea::Underground.admits(false));
+        assert_eq!(AudibleArea::from_code(Some(2.0)), AudibleArea::Surface);
+        assert!(!AudibleArea::Surface.admits(true));
+        assert_eq!(AudibleArea::from_code(None), AudibleArea::Anywhere);
     }
 
     #[test]

@@ -97,6 +97,17 @@ with `0x515580`/`0x5155a0` (or all rows with index −1):
   to row 0 (`LondonTube`), stopped ones to row 1 (`NOTHING` — the
   silent sentinel); the subclass switches on a speed threshold of 1.
 
+The table's `audible area` gates it on where the camera is. Each
+frame the camera update reads the `Subterranean` flag (0x02) of the
+PSDL room the camera stands in into the audio manager
+(`0x4057c6`–`0x405809` → `0x50f9a0`/`0x50f9c0`, `[mgr + 0x24]`); an
+area-1 table plays only while it is set, area 2 only while it is
+clear, area 0 anywhere (`0x515bc0` before starting, `0x5151a0` while
+playing). `subwaycar` is area 1: the Tube rumble is heard only from
+inside the tunnels. Entering a tunnel also switches an effect on the
+playing samples (`0x515ad0`, parameters `[mgr + 0xa0]` = 0.5 and 0.96
+— an echo by the look of it, unverified) — not reproduced. The room lookup is designed (DSN-67).
+
 An emitter plays only while the listener is nearer than the table's
 `Max distance` (150 m bridge and Tube, 225 m ferry): once the squared
 distance reaches the squared max it is stopped (`0x512070`), and its

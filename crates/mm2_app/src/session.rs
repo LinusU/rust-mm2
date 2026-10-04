@@ -324,6 +324,7 @@ pub fn drive_session(
             commands.remove_resource::<crate::pvs::CityPvs>();
             commands.remove_resource::<crate::water::CityWater>();
             commands.remove_resource::<crate::city::WorldFloor>();
+            commands.remove_resource::<crate::underground::ListenerRooms>();
             // The HUD map pair dies with the session like `CityNav`
             // (F22-A.1) — the entities it serves are `SessionEntity`
             // stamped, so the restart that removes them also drops the
@@ -688,6 +689,9 @@ pub fn load_session_world(
                     if let Some(water) = loaded.water {
                         commands.insert_resource(water);
                     }
+                    // Whether the camera stands underground — the
+                    // object sounds' `audible area` gate.
+                    commands.insert_resource(loaded.listener_rooms);
                     // The authored world floor (`Psdl::bounds_min.y`)
                     // is session-scoped the same way — the smoke
                     // runner's below-world verdict reads it; sessions

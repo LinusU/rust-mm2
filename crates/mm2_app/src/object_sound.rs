@@ -9,7 +9,8 @@
 //! loops kept as children while wanted, one-shots fired when no
 //! earlier firing of the row still plays. As in the original, the
 //! emitter is silent (and its timers hold) from the table's
-//! `Max distance` out, and positional rows follow the table's
+//! `Max distance` out — and wherever its `audible area` excludes the
+//! listener ([`crate::underground`]) — and positional rows follow the table's
 //! recovered falloff every frame
 //! ([`ObjectAudioSpec::falloff`](mm2_game::object_audio::ObjectAudioSpec::falloff)).
 //! Bevy's spatial audio supplies only the stereo pan: the voices'
@@ -32,6 +33,7 @@ use mm2_game::{Mm2Vfs, Session, SessionEntity, SessionPhase};
 use tracing::warn;
 
 use crate::audio::{AudioReport, AudioVoice, PcmAudio, VoiceKind, WaveBank};
+use crate::underground::ListenerRooms;
 
 /// A table's max distance lands this many spatial units from the
 /// listener — under rodio's unit radius, inside which spatial voices
@@ -115,6 +117,7 @@ pub fn object_sound_voices(
     mut waves: ResMut<Assets<PcmAudio>>,
     mut report: ResMut<AudioReport>,
     listener: Query<&GlobalTransform, With<SpatialListener>>,
+    rooms: Option<Res<ListenerRooms>>,
     mut emitters: Query<(Entity, &GlobalTransform, &mut ObjectSound)>,
     voices: Query<(Entity, &ObjectSoundVoice, &ChildOf)>,
     mut sinks: Query<&mut SpatialAudioSink, With<ObjectSoundVoice>>,
@@ -131,12 +134,14 @@ pub fn object_sound_voices(
     );
     let dt = if running { time.delta_secs() } else { 0.0 };
     let ear = listener.iter().next().map(|g| g.translation());
+    let underground = rooms.is_some_and(|r| r.underground);
     for (emitter, at, mut sound) in &mut emitters {
         let sound = &mut *sound;
         // No ear yet (the camera gains its listener a frame after
         // spawn) hears nothing.
         let distance = ear.map(|e| e.distance(at.translation()));
-        let in_range = distance.is_some_and(|d| sound.spec.in_range(d));
+        let in_range =
+            sound.spec.area.admits(underground) && distance.is_some_and(|d| sound.spec.in_range(d));
         let falloff = distance.map_or(0.0, |d| sound.spec.falloff(d));
         let cues = if running && in_range {
             sound.state.step(&sound.spec, dt, sound.speed)
