@@ -44,7 +44,7 @@
 
 use std::collections::BTreeMap;
 use std::io;
-use std::net::{SocketAddr, TcpListener};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvError, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -429,7 +429,7 @@ impl Host {
         let inputs = RemoteInputs::default();
         let loop_inputs = inputs.clone();
         let stop = Arc::new(AtomicBool::new(false));
-        let accept = spawn_accept(listener, tx.clone(), stop.clone())?;
+        let accept = spawn_accept(listener, tx.clone(), stop.clone(), adopt)?;
         let handle = thread::spawn(move || {
             run(accept, stop, config, tx, rx, events_tx, loop_inputs);
         });
@@ -829,10 +829,18 @@ struct Slot {
 /// the self-connect that used to wake it fails when the host is out of
 /// ephemeral ports (`EADDRNOTAVAIL`), leaving `Host::shutdown` hung in
 /// the join forever.
+///
+/// Only the stop flag and a gone loop end the thread. A connection that
+/// fails `adopt` is dropped alone, and every accept error backs off one
+/// `ACCEPT_POLL` and retries: the errors an owned listening socket can
+/// raise are transient (an aborted or reset peer, an interrupt, fd or
+/// buffer exhaustion), and quitting on one would leave the lobby
+/// silently refusing every later join.
 fn spawn_accept(
     listener: TcpListener,
     tx: Sender<LoopMsg>,
     stop: Arc<AtomicBool>,
+    adopt: impl Fn(TcpStream) -> io::Result<Conn> + Send + 'static,
 ) -> io::Result<JoinHandle<()>> {
     listener.set_nonblocking(true)?;
     Ok(thread::spawn(move || {
@@ -844,26 +852,28 @@ fn spawn_accept(
                     if stop.load(Ordering::Relaxed) {
                         return;
                     }
-                    // BSD stacks (macOS) hand an accepted socket the
-                    // listener's non-blocking mode; a `Conn` relies on
-                    // blocking reads and writes under deadlines.
-                    match stream
-                        .set_nonblocking(false)
-                        .and_then(|()| Conn::from_stream(stream))
-                    {
-                        Ok(conn) => {
-                            if tx.send(LoopMsg::Accepted(conn)).is_err() {
-                                return;
-                            }
-                        }
-                        Err(_) => return,
+                    let Ok(conn) = adopt(stream) else {
+                        continue;
+                    };
+                    if tx.send(LoopMsg::Accepted(conn)).is_err() {
+                        return;
                     }
                 }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => thread::sleep(ACCEPT_POLL),
-                Err(_) => return,
+                // `WouldBlock` is the idle case; anything else is
+                // transient too (see above).
+                Err(_) => thread::sleep(ACCEPT_POLL),
             }
         }
     }))
+}
+
+/// Turn an accepted socket into a `Conn`. BSD stacks (macOS) hand an
+/// accepted socket the listener's non-blocking mode; a `Conn` relies on
+/// blocking reads and writes under deadlines. `from_stream` fails when
+/// the peer already reset (`peer_addr` reports `NotConnected`).
+fn adopt(stream: TcpStream) -> io::Result<Conn> {
+    stream.set_nonblocking(false)?;
+    Conn::from_stream(stream)
 }
 
 fn run(
@@ -1372,7 +1382,6 @@ mod tests {
     use super::*;
     use crate::hello;
     use crate::proto::{SNAP_NO_SURFACE, SnapEntry};
-    use std::net::TcpStream;
 
     const FP: u64 = 0xaaaa;
     const WAIT: Duration = Duration::from_secs(5);
@@ -1784,7 +1793,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
-        let accept = spawn_accept(listener, tx, stop.clone()).unwrap();
+        let accept = spawn_accept(listener, tx, stop.clone(), adopt).unwrap();
 
         // A real peer goes through first, so the thread is known to be
         // live in its accept loop when the flag flips.
@@ -1802,6 +1811,38 @@ mod tests {
         });
         done.recv_timeout(WAIT)
             .expect("the accept thread ignored the stop flag");
+    }
+
+    /// A connection that fails setup costs only itself — a peer that
+    /// resets before its accept is the real case — and the next peer
+    /// still gets through. Accept errors themselves (aborted
+    /// connections, fd exhaustion) need SO_LINGER or rlimit control std
+    /// does not offer, so they share the retry path untested.
+    #[test]
+    fn a_connection_that_fails_setup_does_not_stop_accepts() {
+        let listener = listen_loopback().unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let failed = AtomicBool::new(false);
+        let accept = spawn_accept(listener, tx, stop.clone(), move |stream| {
+            if failed.swap(true, Ordering::Relaxed) {
+                adopt(stream)
+            } else {
+                Err(io::ErrorKind::NotConnected.into())
+            }
+        })
+        .unwrap();
+
+        let _first = TcpStream::connect(addr).unwrap();
+        let second = TcpStream::connect(addr).unwrap();
+        match rx.recv_timeout(WAIT).unwrap() {
+            LoopMsg::Accepted(conn) => assert_eq!(conn.peer_addr(), second.local_addr().unwrap()),
+            _ => panic!("expected the second peer to be forwarded"),
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        accept.join().unwrap();
     }
 
     fn ad(tag: &str) -> SessionAdvertisement {

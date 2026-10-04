@@ -432,7 +432,9 @@ always before its first `Roster` (see "Session advertisement" below).
 - `Host` owns the listener and a single event loop; the loop is the
   only roster mutator. Three thread kinds feed it one channel: an
   accept thread (polling a non-blocking listener every `ACCEPT_POLL`,
-  20 ms, against a stop flag), a short-lived handshake
+  20 ms, against a stop flag; an accept error backs off and retries
+  and a connection that fails setup is dropped alone, so neither stops
+  later joins), a short-lived handshake
   thread per accepted conn (the gate runs under `HANDSHAKE_TIMEOUT`, so
   a stalled peer never blocks accepts), and a reader thread per
   admitted player forwarding `SetReady`/`SetVehicle`/`Leave` and socket
