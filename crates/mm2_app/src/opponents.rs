@@ -696,13 +696,30 @@ pub fn reanchor_pose(
     yaw: f32,
     blocked: impl Fn(Vec3) -> bool,
 ) -> (Vec3, f32) {
+    let (position, yaw, _) = reanchor_pose_with_progress(route, next, pos, yaw, blocked);
+    (position, yaw)
+}
+
+/// The same bounded landing walk, retaining its exact authored leg occurrence.
+/// Revisited streets cannot be disambiguated by a fresh-spawn position search.
+pub fn reanchor_pose_with_progress(
+    route: &OpponentRoute,
+    next: usize,
+    pos: Vec3,
+    yaw: f32,
+    blocked: impl Fn(Vec3) -> bool,
+) -> (Vec3, f32, usize) {
     let n = route.points.len();
     if n == 0 || !pos.is_finite() {
-        return (pos, yaw);
+        return (pos, yaw, next.min(n.saturating_sub(1)));
     }
     if n == 1 {
         let p = route.points[0].position;
-        return if p.is_finite() { (p, yaw) } else { (pos, yaw) };
+        return if p.is_finite() {
+            (p, yaw, 0)
+        } else {
+            (pos, yaw, 0)
+        };
     }
     let closed = route_is_closed(route);
     let leg_count = if closed { n } else { n - 1 };
@@ -780,7 +797,7 @@ pub fn reanchor_pose(
         }
         let pose = point_on(leg, d);
         if !pose.is_finite() {
-            return (pos, yaw);
+            return (pos, yaw, next.min(n.saturating_sub(1)));
         }
         if remaining > 0.0
             || steps >= REANCHOR_MAX_STEPS
@@ -788,7 +805,7 @@ pub fn reanchor_pose(
             || walked >= REANCHOR_WALK
             || (leg == 0 && d <= 0.0 && !closed)
         {
-            return (pose, facing(leg, yaw));
+            return (pose, facing(leg, yaw), (leg + 1) % n);
         }
         remaining = REANCHOR_BACK;
     }
@@ -1408,13 +1425,14 @@ pub fn opponent_drive(
                         traffic.iter().map(|t| t.pos).chain(claimed.iter().copied()),
                     )
                 };
-                let (mut pose, ryaw) = reanchor_pose(&route, driver.next, pos.0, yaw, |p| {
-                    gates.iter().any(|g| {
-                        let dx = p.x - g.center.x;
-                        let dz = p.z - g.center.z;
-                        dx * dx + dz * dz < g.radius * g.radius
-                    }) || occupied(p)
-                });
+                let (mut pose, ryaw, resync_next) =
+                    reanchor_pose_with_progress(&route, driver.next, pos.0, yaw, |p| {
+                        gates.iter().any(|g| {
+                            let dx = p.x - g.center.x;
+                            let dz = p.z - g.center.z;
+                            dx * dx + dz * dz < g.radius * g.radius
+                        }) || occupied(p)
+                    });
                 // The same hull clearance the spawn applies.
                 let hull_min_y = vehicle
                     .config
@@ -1428,7 +1446,6 @@ pub fn opponent_drive(
                     position: pose,
                     yaw: ryaw,
                 });
-                let resync_next = initial_route_index(&route, pose, ryaw);
                 // The walk-back can land a closed-route car across
                 // the route boundary — resync the traversal count so
                 // the teleport cannot bank arc it did not drive.

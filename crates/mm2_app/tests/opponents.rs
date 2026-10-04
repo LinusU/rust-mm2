@@ -17,7 +17,7 @@ use bevy::time::TimeUpdateStrategy;
 use mm2_app::opponents::{
     Blocker, DriveStats, OpponentDriver, REANCHOR_CLEAR, REANCHOR_FRAMES, Traffic, apply_gap_brake,
     apply_rear_end_guard, initial_route_index, nearest_blocker, opponent_drive, pick_pass_side,
-    reanchor_pose, rear_end_demand, route_target, spawn_pose,
+    reanchor_pose, reanchor_pose_with_progress, rear_end_demand, route_target, spawn_pose,
 };
 use mm2_app::racing_line::CarLimits;
 use mm2_app::scripted::{ScriptedBot, ScriptedTuning};
@@ -1906,6 +1906,18 @@ fn reanchor_pose_wraps_closed_and_clamps_open() {
     );
     assert!(yaw.abs() < 1e-4, "the −Z wrap leg keeps yaw 0, got {yaw}");
 
+    let (landing, _, next) =
+        reanchor_pose_with_progress(&r, 0, Vec3::new(5.0, 0.0, 1.0), 0.0, |_| false);
+    assert_eq!(next, 0, "the closing leg still targets the first point");
+    assert!((landing.z - 5.0).abs() < 1e-4);
+    let (landing, _, next) =
+        reanchor_pose_with_progress(&r, 1, Vec3::new(1.0, 0.0, 0.0), 0.0, |_| false);
+    assert_eq!(
+        next, 0,
+        "walking across the lap boundary retains the selected closing leg"
+    );
+    assert!((landing.z - 3.0).abs() < 1e-4);
+
     // Open route (60 m leg > ROUTE_LOOP, so not closed), car behind
     // the first anchor chasing it (next=0): leg 0 is the approach
     // line, and the walk clamps at its start.
@@ -3005,5 +3017,69 @@ fn native_dense_opponent_physically_drives_two_tight_laps_without_recovery() {
     assert!(
         worst_lateral < 4.5,
         "dense line lost at a corner: {worst_lateral}"
+    );
+}
+
+/// Recovery resumes the authored occurrence on revisited streets, rather
+/// than choosing the first globally forward anchor from a fresh spawn.
+#[test]
+fn native_reanchor_preserves_revisited_street_occurrence() {
+    let tmp = roster_install(
+        "",
+        &[(
+            "race0-a-0.opp",
+            opp_file(&[
+                [-100.0, 0.0, 140.0],
+                [-50.0, 0.0, 140.0],
+                [0.0, 0.0, 140.0],
+                [50.0, 0.0, 140.0],
+                [50.0, 0.0, 50.0],
+                [0.0, 0.0, 50.0],
+                [0.0, 0.0, 140.0],
+                [50.0, 0.0, 140.0],
+                [100.0, 0.0, 140.0],
+                [180.0, 0.0, 140.0],
+            ]),
+        )],
+    );
+    let mut app = event_app(event_config(), vfs_of(tmp.path()));
+    app.update();
+    let vpt = opponent_by_vehicle(&mut app, "vpt");
+    run(&mut app, 260);
+    let before = Vec3::new(25.0, 0.8, 140.0);
+    app.world_mut().get_mut::<Position>(vpt).unwrap().0 = before;
+    app.world_mut().get_mut::<Rotation>(vpt).unwrap().0 =
+        Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2);
+    app.world_mut().get_mut::<LinearVelocity>(vpt).unwrap().0 = Vec3::ZERO;
+    {
+        let mut d = app.world_mut().get_mut::<OpponentDriver>(vpt).unwrap();
+        d.next = 7;
+        d.stuck_pos = before;
+        d.stuck_frames = REANCHOR_FRAMES - 1;
+    }
+    let cleared = app
+        .world()
+        .get::<RaceProgress>(vpt)
+        .unwrap()
+        .cleared_count();
+    run(&mut app, 4);
+    let d = app.world().get::<OpponentDriver>(vpt).unwrap();
+    assert_eq!(d.reanchors, 1);
+    assert_eq!(d.next, 7, "the landing belongs to the later occurrence");
+    assert_eq!(
+        app.world()
+            .get::<RaceProgress>(vpt)
+            .unwrap()
+            .cleared_count(),
+        cleared,
+        "recovery must not bank checkpoint credits"
+    );
+    run(&mut app, 1800);
+    assert!(
+        matches!(
+            app.world().get::<RaceProgress>(vpt).unwrap().state,
+            ParticipantState::Finished { .. }
+        ),
+        "the actual AI resumes physical traversal to finish"
     );
 }
