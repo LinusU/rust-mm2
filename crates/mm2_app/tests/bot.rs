@@ -1248,6 +1248,8 @@ fn explicit_bot_guide_drives_two_real_laps_without_opponents() {
         progress.lap
     );
     assert_eq!(app.world().resource::<ResultLedger>().len(), 1);
+    assert_eq!(app.world().get::<ScriptedRoute>(car).unwrap().reanchors, 0);
+    assert_eq!(app.world().get::<ScriptedBot>(car).unwrap().escapes, 0);
     assert_eq!(
         app.world().resource::<RaceState>().phase,
         RacePhase::Complete
@@ -1339,4 +1341,94 @@ fn explicit_bot_guide_preserves_blitz_countdown_and_deadline() {
         app.world().resource::<RaceState>().phase,
         RacePhase::Complete
     );
+}
+
+#[test]
+fn planned_guide_aim_projects_onto_short_corner_and_stops_at_gate() {
+    let route = route_of(&[
+        (0.0, 0.0, 0.0),
+        (20.0, 0.0, 0.0),
+        (20.0, 0.0, 20.0),
+        (40.0, 0.0, 20.0),
+    ]);
+    let (_, aim) = scripted::planned_route_aim(
+        &route,
+        1,
+        Vec3::new(4.0, 0.0, -5.0),
+        Vec3::new(40.0, 0.0, 20.0),
+        20.0,
+    );
+    assert!((aim.x - 20.0).abs() < 1e-5);
+    assert!(
+        (aim.z - 6.0).abs() < 1e-5,
+        "speed-scaled 22m pursuit follows the projected source corner: {aim:?}"
+    );
+    let (_, aim) = scripted::planned_route_aim(
+        &route,
+        1,
+        Vec3::new(10.0, 0.0, -5.0),
+        Vec3::new(20.0, 0.0, 0.0),
+        30.0,
+    );
+    assert_eq!(
+        aim,
+        Vec3::new(20.0, 0.0, 0.0),
+        "lookahead cannot bypass the live gate"
+    );
+}
+
+#[test]
+fn planned_guide_control_uses_existing_curvature_brakes_and_handling_steering() {
+    use mm2_app::racing_line::{CarLimits, RouteCursor, plan_speed, steer_toward};
+    let route = route_of(&[(0.0, 0.0, 0.0), (50.0, 0.0, 0.0), (50.0, 0.0, 50.0)]);
+    let limits = CarLimits::of(&VehicleConfig::default(), None);
+    let cursor = RouteCursor::locate(&route, 1, Vec3::new(45.0, 0.0, 0.0)).unwrap();
+    let plan = plan_speed(&route, cursor, 25.0, &limits);
+    let input = scripted::planned_input(
+        &mut ScriptedBot::default(),
+        0.5,
+        15.0,
+        25.0,
+        true,
+        &limits,
+        plan,
+    );
+    assert_eq!(input.throttle, 0.0);
+    assert!(
+        input.brake > 0.0,
+        "braking sees the 90-degree corner before a large bearing"
+    );
+    assert_eq!(input.steering, steer_toward(0.5, 15.0, 25.0, &limits));
+}
+
+#[test]
+fn planned_guide_drives_a_short_tight_two_lap_circuit_without_reanchors() {
+    let tmp = circuit_install();
+    let mut gates = WAYPOINTS.to_string();
+    let mut guide_text = OPP_HEADER.to_string();
+    for (x, z) in [(0, 140), (35, 140), (35, 105), (0, 105)] {
+        gates.push_str(&format!("{x},0,{z},0,5,0,0,0,\n"));
+        guide_text.push_str(&format!("{x},0,{z},0,0,0,0,0,0\n"));
+    }
+    guide_text.push_str("0,0,140,0,0,0,0,0,0\n");
+    write(tmp.path(), "race/testcity/circuit0waypoints.csv", &gates);
+    let guide = tmp.path().join("short-corners.opp");
+    std::fs::write(&guide, guide_text).unwrap();
+    let mut config = event_config(EventTableKind::Circuit);
+    config.dev.bot_route = Some(guide);
+    config.dev.bot_speed = Some(8.0);
+    let mut app = bot_app(config, vfs_of(tmp.path()));
+    app.update();
+    let car = car(&mut app);
+    run(&mut app, 3600);
+    let progress = app.world().get::<RaceProgress>(car).unwrap();
+    assert!(
+        matches!(progress.state, ParticipantState::Finished { .. }),
+        "{:?} lap {}",
+        progress.state,
+        progress.lap
+    );
+    assert_eq!(app.world().get::<ScriptedRoute>(car).unwrap().reanchors, 0);
+    assert_eq!(app.world().get::<ScriptedBot>(car).unwrap().escapes, 0);
+    assert_eq!(app.world().resource::<ResultLedger>().len(), 1);
 }
