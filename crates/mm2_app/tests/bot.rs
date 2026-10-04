@@ -1360,8 +1360,8 @@ fn planned_guide_aim_projects_onto_short_corner_and_stops_at_gate() {
     );
     assert!((aim.x - 20.0).abs() < 1e-5);
     assert!(
-        (aim.z - 6.0).abs() < 1e-5,
-        "speed-scaled 22m pursuit follows the projected source corner: {aim:?}"
+        (aim.z - 3.0).abs() < 1e-5,
+        "pursuit stays three metres beyond the projected sharp corner: {aim:?}"
     );
     let (_, aim) = scripted::planned_route_aim(
         &route,
@@ -1470,7 +1470,7 @@ fn planned_guide_gate_ties_follow_forward_progress_on_revisited_streets() {
         let (next, aim) =
             scripted::planned_route_aim(&route, 4, Vec3::new(100.0, 0.0, 40.0), gate, 10.0);
         assert_eq!(next, 4);
-        assert_eq!(aim, Vec3::new(100.0, 0.0, 25.0));
+        assert_eq!(aim, Vec3::new(100.0, 0.0, 37.0));
         let (_, aim) =
             scripted::planned_route_aim(&route, 1, Vec3::new(10.0, 0.0, 0.0), gate, 10.0);
         assert_eq!(
@@ -1508,5 +1508,151 @@ fn dense_guide_progress_keeps_the_corner_ahead_until_the_car_turns() {
         next, 5,
         "an actually rounded corner follows its outgoing leg"
     );
-    assert_eq!(aim, Vec3::new(20.0, 0.0, 18.0));
+    assert_eq!(aim, Vec3::new(20.0, 0.0, 6.0));
+}
+
+#[test]
+fn dense_guide_physically_keeps_a_sharp_corner_inside_a_nine_metre_road() {
+    let tmp = circuit_install();
+    let corners = [
+        Vec3::new(0., 0., 140.),
+        Vec3::new(60., 0., 140.),
+        Vec3::new(34., 0., 86.),
+        Vec3::new(-26., 0., 86.),
+    ];
+    let mut gates = format!("{WAYPOINTS}0,0,140,0,5,0,0,0,\n");
+    let mut text = OPP_HEADER.to_string();
+    for (i, a) in corners.iter().enumerate() {
+        let b = corners[(i + 1) % corners.len()];
+        let gate = a.lerp(b, 0.5);
+        gates.push_str(&format!("{},0,{},0,5,0,0,0,\n", gate.x, gate.z));
+        let count = (a.distance(b) / 4.).ceil() as usize;
+        for k in 0..count {
+            let p = a.lerp(b, k as f32 / count as f32);
+            text.push_str(&format!("{},0,{},0,0,0,17.8,0,0\n", p.x, p.z));
+        }
+    }
+    text.push_str("0,0,140,0,0,0,17.8,0,0\n");
+    write(tmp.path(), "race/testcity/circuit0waypoints.csv", &gates);
+    let guide = tmp.path().join("sharp-corner.opp");
+    std::fs::write(&guide, text).unwrap();
+    let mut config = event_config(EventTableKind::Circuit);
+    config.dev.bot_route = Some(guide);
+    config.dev.bot_speed = Some(12.);
+    let mut app = bot_app(config, vfs_of(tmp.path()));
+    app.update();
+    let entity = car(&mut app);
+    let mut worst = 0.0_f32;
+    for _ in 0..5400 {
+        app.update();
+        let pos = app.world().get::<Position>(entity).unwrap().0;
+        assert!(pos.is_finite());
+        let state = app
+            .world()
+            .get::<mm2_vehicle::VehicleState>(entity)
+            .unwrap();
+        assert_eq!(state.wheels.len(), 4);
+        assert!(state.forward_speed.is_finite());
+        assert!(
+            state
+                .wheels
+                .iter()
+                .all(|wheel| wheel.contact_point.is_finite()
+                    && wheel.contact_normal.is_finite()
+                    && wheel.compression.is_finite())
+        );
+        let lateral = corners
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                let b = corners[(i + 1) % corners.len()];
+                let ab = b - *a;
+                let t = ((pos - *a).dot(ab) / ab.length_squared()).clamp(0., 1.);
+                (pos - (*a + ab * t)).xz().length()
+            })
+            .fold(f32::INFINITY, f32::min);
+        // The grid begins outside the loop; measure after the first gate.
+        if app
+            .world()
+            .get::<RaceProgress>(entity)
+            .unwrap()
+            .cleared_count()
+            > 0
+        {
+            worst = worst.max(lateral);
+        }
+        if matches!(
+            app.world().get::<RaceProgress>(entity).unwrap().state,
+            ParticipantState::Finished { .. }
+        ) {
+            break;
+        }
+    }
+    let progress = app.world().get::<RaceProgress>(entity).unwrap();
+    println!(
+        "sharp116 physical worst_lateral={worst} state={:?} lap={}",
+        progress.state, progress.lap
+    );
+    assert!(matches!(progress.state, ParticipantState::Finished { .. }));
+    assert_eq!(progress.lap, 2);
+    assert_eq!(
+        app.world().get::<ScriptedRoute>(entity).unwrap().reanchors,
+        0
+    );
+    assert_eq!(app.world().get::<ScriptedBot>(entity).unwrap().escapes, 0);
+    // 4.5m half-road minus a conservative 1m half-body envelope.
+    assert!(
+        worst < 3.5,
+        "sharp corner lost body clearance on nine-metre road: {worst}"
+    );
+}
+
+#[test]
+fn sharp_corner_guidance_preserves_straights_and_smooth_bends() {
+    use mm2_app::racing_line::{CarLimits, RouteCursor, corner_aim_distance, sharp_corner_plan};
+    let straight = route_of(&[(0., 0., 0.), (50., 0., 0.), (100., 0., 0.)]);
+    let smooth: Vec<_> = (0..=18)
+        .map(|i| {
+            let angle = (i as f32 * 5.).to_radians();
+            (50. * angle.sin(), 0., 50. * (1. - angle.cos()))
+        })
+        .collect();
+    for route in [straight, route_of(&smooth)] {
+        let cursor = RouteCursor { leg: 0, along: 1. };
+        assert_eq!(corner_aim_distance(&route, cursor, 20.), 20.);
+        let plan = sharp_corner_plan(
+            &route,
+            cursor,
+            25.,
+            &CarLimits::of(&VehicleConfig::default(), None),
+        );
+        assert!(plan.limit.is_infinite());
+        assert_eq!(plan.demand, 0.);
+    }
+}
+
+#[test]
+fn sharp_corner_guidance_retains_aim_and_pace_after_dense_progress_crosses_vertex() {
+    use mm2_app::racing_line::{CarLimits, RouteCursor, corner_aim_distance, sharp_corner_plan};
+    let points: Vec<_> = (0..=15)
+        .map(|i| (i as f32 * 4., 0., 0.))
+        .chain((1..=15).map(|i| {
+            let t = i as f32 / 15.;
+            (60. - 26. * t, 0., -54. * t)
+        }))
+        .collect();
+    let route = route_of(&points);
+    let before = RouteCursor { leg: 14, along: 0. };
+    assert_eq!(corner_aim_distance(&route, before, 20.), 7.);
+    let after = RouteCursor { leg: 15, along: 2. };
+    assert_eq!(corner_aim_distance(&route, after, 20.), 3.);
+    let limits = CarLimits::of(&VehicleConfig::default(), None);
+    let plan = sharp_corner_plan(&route, after, 12., &limits);
+    assert!(plan.limit < 7. && plan.demand > 0.);
+    let clear = RouteCursor { leg: 19, along: 1. };
+    assert!(
+        sharp_corner_plan(&route, clear, 12., &limits)
+            .limit
+            .is_infinite()
+    );
 }

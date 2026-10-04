@@ -34,7 +34,8 @@ use mm2_vehicle::{ResetVehicle, Vehicle, VehicleInput, VehicleState};
 use tracing::info;
 
 use crate::racing_line::{
-    CORNER_BRAKE_DEFAULT, CarLimits, RouteCursor, SpeedPlan, pace, plan_speed, steer_toward,
+    CORNER_BRAKE_DEFAULT, CarLimits, RouteCursor, SpeedPlan, corner_aim_distance, pace, plan_speed,
+    sharp_corner_plan, steer_toward,
 };
 
 use crate::opponents::{
@@ -349,6 +350,13 @@ fn route_aim_at_distance(
     if next == gate_idx {
         return (next, gate);
     }
+    let distance = if project {
+        RouteCursor::locate(route, next, pos).map_or(distance, |cursor| {
+            corner_aim_distance(route, cursor, distance)
+        })
+    } else {
+        distance
+    };
     (
         next,
         lookahead_aim(
@@ -910,7 +918,13 @@ pub fn scripted_drive(
                     limit: f32::INFINITY,
                     demand: 0.0,
                 },
-                |cursor| plan_speed(&rs.route, cursor, speed, &limits),
+                |cursor| {
+                    let mut plan = plan_speed(&rs.route, cursor, speed, &limits);
+                    let sharp = sharp_corner_plan(&rs.route, cursor, speed, &limits);
+                    plan.limit = plan.limit.min(sharp.limit);
+                    plan.demand = plan.demand.max(sharp.demand);
+                    plan
+                },
             );
             planned = Some((limits, plan));
         }
