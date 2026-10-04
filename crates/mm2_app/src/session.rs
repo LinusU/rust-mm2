@@ -609,6 +609,7 @@ pub fn load_session_world(
     seats: netdrive::NetSeats,
     mut active_profile: Option<ResMut<crate::profile::ActiveProfile>>,
     mut note: Option<ResMut<SessionNote>>,
+    scripted_drive: Option<Res<scripted::ScriptedDrive>>,
 ) {
     // A session loading retires the last session's end-note — a
     // restart bypasses the menu, so a stale failure must not surface
@@ -620,6 +621,28 @@ pub fn load_session_world(
     let Some(config) = session.config().cloned() else {
         error!("load_session_world ran without a session config");
         return;
+    };
+    // Validate before spawning anything: direct SessionConfig callers and a
+    // changed-on-disk guide get the same strict failure as the CLI parser.
+    let explicit_bot_route = match config.dev.bot_route.as_deref() {
+        Some(path) => {
+            let loaded = if scripted_drive.is_none() {
+                Err("bot route requires the scripted driver".to_string())
+            } else if matches!(config.mode, SessionMode::Event(_)) {
+                scripted::load_bot_route(path)
+            } else {
+                Err("bot route requires an event session".to_string())
+            };
+            match loaded {
+                Ok(route) => Some(route),
+                Err(reason) => {
+                    error!(%reason, "bot route failed to load");
+                    session.fail(reason).expect("Loading may fail");
+                    return;
+                }
+            }
+        }
+        None => None,
     };
     let mut world_ok = true;
     match &config.world {
@@ -1574,16 +1597,24 @@ pub fn load_session_world(
                 .entity(vehicle)
                 .insert((RaceProgress::new(&def), TargetSelection::default()));
             // F15-B.5: hand the scripted evidence bot the authored
-            // `.opp` driving line staged nearest its slot — its aim
+            // explicit diagnostic guide, or the `.opp` driving line
+            // staged nearest its slot — its aim
             // between gates then follows the course's own road geometry
             // instead of a straight line that can leave elevated or
             // depressed roads. Dormant unless `--bot` drives the car;
             // session-owned like `RaceProgress` beside it.
-            if let Some(route) = scripted::pick_bot_route(&roster, spawn.position) {
+            let bot_route = explicit_bot_route
+                .clone()
+                .or_else(|| scripted::pick_bot_route(&roster, spawn.position));
+            if let Some(route) = bot_route {
                 commands
                     .entity(vehicle)
                     .insert(scripted::ScriptedRoute::new(
-                        opponents::driving_route(&route, nav, &def.checkpoints),
+                        if explicit_bot_route.is_some() {
+                            route
+                        } else {
+                            opponents::driving_route(&route, nav, &def.checkpoints)
+                        },
                         spawn.position,
                         spawn.yaw,
                     ));

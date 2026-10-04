@@ -286,6 +286,10 @@ struct Cli {
     #[arg(long, requires = "bot", value_parser = parse_bot_speed)]
     bot_speed: Option<f32>,
 
+    /// Explicit native .opp driving guide for evidence runs; never creates an opponent.
+    #[arg(long, requires_all = ["bot", "event"], value_parser = parse_bot_route)]
+    bot_route: Option<PathBuf>,
+
     /// Stationary control: the player vehicle holds its handbrake for
     /// the whole session — it never races, so an event run measures what
     /// the opponents do with no competing local driver (the isolation
@@ -851,6 +855,7 @@ fn main() {
             restart_at: cli.restart_at,
             reset_at: cli.reset_at,
             bot_speed: cli.bot_speed,
+            bot_route: cli.bot_route.clone(),
             no_pvs: cli.no_pvs,
             horn: cli.horn,
             cockpit: cli.cockpit,
@@ -2150,5 +2155,67 @@ fn parse_bot_speed(value: &str) -> Result<f32, String> {
         Ok(speed)
     } else {
         Err("bot speed must be finite and within 2..=40 m/s".into())
+    }
+}
+
+fn parse_bot_route(value: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(value);
+    mm2_app::scripted::load_bot_route(&path)?;
+    Ok(path)
+}
+
+#[cfg(test)]
+mod bot_route_cli_tests {
+    use super::*;
+
+    #[test]
+    fn bot_route_requires_bot_and_event() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "x,y,z,brake,forward offset,side offset,target speed,speed start,side start\n0,0,0,0,0,0,0,0,0\n0,0,10,0,0,0,0,0,0\n").unwrap();
+        let path = file.path().to_str().unwrap();
+        for args in [
+            vec!["mm2", "--bot-route", path],
+            vec!["mm2", "--bot", "--bot-route", path],
+            vec!["mm2", "--event", "circuit:0", "--bot-route", path],
+        ] {
+            assert_eq!(
+                Cli::try_parse_from(args).unwrap_err().kind(),
+                clap::error::ErrorKind::MissingRequiredArgument
+            );
+        }
+        let cli =
+            Cli::try_parse_from(["mm2", "--bot", "--event", "circuit:0", "--bot-route", path])
+                .unwrap();
+        assert_eq!(cli.bot_route.as_deref(), Some(file.path()));
+    }
+
+    #[test]
+    fn bot_route_rejects_parse_diagnostics() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "x,y,z,brake,forward offset,side offset,target speed,speed start,side start\n0,0,0,0,0,0,0,0,0\nwrong\n0,0,10,0,0,0,0,0,0\n").unwrap();
+        let error = Cli::try_parse_from([
+            "mm2",
+            "--bot",
+            "--event",
+            "blitz:0",
+            "--bot-route",
+            file.path().to_str().unwrap(),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("at line 3"));
+    }
+
+    #[test]
+    fn bot_route_rejects_missing_file() {
+        let error = Cli::try_parse_from([
+            "mm2",
+            "--bot",
+            "--event",
+            "blitz:0",
+            "--bot-route",
+            "missing-evidence-guide.opp",
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("cannot read bot route"));
     }
 }

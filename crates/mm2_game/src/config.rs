@@ -654,6 +654,9 @@ pub struct DevOverrides {
     pub reset_at: Option<u64>,
     /// Optional evidence-driver speed ceiling in m/s; never changes vehicle handling.
     pub bot_speed: Option<f32>,
+    /// Explicit `.opp` evidence guide for the scripted player; no opponent is spawned.
+    /// Gameplay-affecting diagnostic input, so results are record-ineligible.
+    pub bot_route: Option<PathBuf>,
     /// `--no-pvs`: disable the authored `.cpvs` room-PVS render culling
     /// (F18-A.5) — the retail `cityLevel::EnablePVS(false)` counterpart
     /// and the escape hatch for comparing culled vs unculled captures.
