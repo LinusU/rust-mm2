@@ -403,15 +403,16 @@ points — `waves.csv`, `trolleycable.csv`). `drawbridge`, `ferry`,
 ped-voice tables (`maleped*`, `femaleped1`). The `sample type`
 vocabulary (0 loop, 1/2 timed one-shots, 3 trigger-only) and the
 runtime `active` switching are recovered from the executable and
-consumed for `drawbridge`/`ferry`/`subwaycar` — `movers.md` § Object
-audio.
+consumed for `drawbridge`/`ferry`/`subwaycar` and the container
+tables — `movers.md` § Object audio and § City ambience.
 
 ### Ambient containers — `aud/ambient/*ambientcontainer.csv`
 
 `file names` lists naming the sibling member tables per city —
 `sfambientcontainer` → `birdies`, `buoyseals`, `horns_gulls`,
 `trolleycable`; `londonambientcontainer` → `londonriver`, `tubevoices`.
-The audit verifies every member resolves.
+The audit verifies every member resolves; the runtime spawns one
+emitter per member (`movers.md` § City ambience).
 
 ### Shared tables
 

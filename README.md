@@ -48,7 +48,11 @@ Vertical-slice stage. What works today:
   ferries, and London's Underground trains shuttling through their
   tunnels.
 - Their sounds: the drawbridge motor and bell, ferry engines and horns,
-  and the Tube's rumble, positional and range-limited like the original.
+  and the Tube's rumble (heard only underground), with the original's
+  range and distance falloff.
+- City ambience: gulls and tug horns along the Thames and the Tube
+  stations' announcements in London; gulls, buoy bells, sea lions,
+  horns and the cable-car slot in San Francisco.
 
 ## Build & run
 

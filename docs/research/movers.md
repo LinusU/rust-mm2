@@ -124,12 +124,37 @@ The runtime pans with Bevy's spatial audio and sets the volume itself
 (`PAN_ONLY_EDGE`); type-1 voices play centred — the random pan is not
 reproduced.
 
+## City ambience (`<city>ambientcontainer.csv`, `0x404046`, `0x5137a0`)
+
+When the city loads, and while the audio detail flag `0x800` of
+`[0x6b0650]` is set (it is in the default `0xc73`), the original reads
+`aud/ambient/londonambientcontainer.csv` for London or
+`sfambientcontainer.csv` for San Francisco (`0x40405b`/`0x404077`; no
+other city name is tried). Each name the container lists becomes one
+`Aud3DAmbientObject` bound to `aud/ambient/<name>.csv` (`0x513880`) —
+`londonriver` and `tubevoices`; `birdies`, `buoyseals`, `horns_gulls`
+and `trolleycable`. `waves.csv` ships but no container lists it, and
+nothing else names it: dead data.
+
+These tables carry `VECTORPOINTS`, read into the object's point list
+(`0x5123e0`). The object stands at one point at a time: while idle,
+every update re-picks the point nearest the listener (`0x512530` →
+`0x512580`, first of equals) and starts the object once in range;
+playing, it keeps that point until the listener's squared distance
+reaches the squared max, when it stops and the next idle update picks
+again. Everything else — rows, timers, falloff, `audible area` — is
+the object audio above: `tubevoices` is area 1, so the station
+announcements are heard only from inside the tunnels; `birdies` holds
+only type-1 rows, so its gulls fire at random gain regardless of
+distance once within 250 m. Row timers start at 0, so every one-shot
+sounds the moment the listener comes in range.
+
 ## Implementation
 
 `mm2_game::movers` (`PathFollower`, `TrainMotion`, `mover_rotation`,
 the constants) and `mm2_app::movers` (spawning and the fixed-step
 driver); `mm2_game::object_audio` (the table rules) and
-`mm2_app::object_sound` (voices). Each object is a kinematic body
+`mm2_app::object_sound` (voices and the ambience emitters). Each object is a kinematic body
 whose origin is the curve point; the driver poses it where its path
 is now and sets the
 velocities that reach the next step's pose, so a car resting on a

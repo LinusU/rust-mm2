@@ -1,5 +1,9 @@
 //! Positional object sounds: the drawbridge motor and bell, the
-//! ferries' engines and horns and the Underground's rumble.
+//! ferries' engines and horns, the Underground's rumble — and the
+//! city ambience tables ([`spawn_ambience`]): the Thames' gulls and
+//! tug horns and the Tube stations' announcements in London, the bay's
+//! gulls, buoy bells, sea lions and horns and the cable-car slot hum
+//! in San Francisco.
 //!
 //! An [`ObjectSound`] on a moving object binds one
 //! `aud/ambient/<name>.csv` table and runs its
@@ -27,7 +31,7 @@ use bevy::audio::{
 };
 use bevy::prelude::*;
 use mm2_assets::Vfs;
-use mm2_formats::cardata::{ObjectAudio, is_sample_sentinel};
+use mm2_formats::cardata::{AmbientContainer, ObjectAudio, is_sample_sentinel};
 use mm2_game::object_audio::{ObjectAudioSpec, ObjectAudioState};
 use mm2_game::{Mm2Vfs, Session, SessionEntity, SessionPhase};
 use tracing::warn;
@@ -53,6 +57,8 @@ pub struct ObjectSound {
     pub speed: f32,
     /// Rows whose wave failed to resolve — retried never, warned once.
     failed: Vec<bool>,
+    /// The `VECTORPOINTS` entry an ambience table stands at.
+    held: Option<usize>,
 }
 
 impl ObjectSound {
@@ -65,6 +71,7 @@ impl ObjectSound {
             state,
             speed: 0.0,
             failed,
+            held: None,
         }
     }
 }
@@ -99,6 +106,50 @@ pub fn load_object_audio(vfs: &Vfs, name: &str) -> Option<Arc<ObjectAudioSpec>> 
     }
 }
 
+/// Spawn `city`'s ambience — one emitter per table its
+/// `aud/ambient/<city>ambientcontainer.csv` lists, standing at the
+/// table's first point until the listener first comes near. Returns
+/// how many were spawned; a city without a container (or with an
+/// unreadable one) gets none. The original loads only `london` and
+/// `sf` containers; any city's is honoured here (designed).
+pub fn spawn_ambience(
+    commands: &mut Commands,
+    vfs: &Vfs,
+    city: &str,
+    owner: SessionEntity,
+) -> usize {
+    let logical = ObjectAudioSpec::container_logical(city);
+    let bytes = match vfs.read_path(&logical) {
+        Ok((bytes, _)) => bytes,
+        Err(_) => return 0,
+    };
+    let container = match AmbientContainer::parse(&bytes) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(path = %logical, error = %e, "ambience container failed to parse");
+            return 0;
+        }
+    };
+    let mut spawned = 0;
+    for (i, name) in container.files.iter().enumerate() {
+        let Some(spec) = load_object_audio(vfs, name) else {
+            continue;
+        };
+        let Some(&first) = spec.points.first() else {
+            warn!(table = %name, "ambience table has no VECTORPOINTS; skipped");
+            continue;
+        };
+        commands.spawn((
+            Name::new(format!("ambience {name}")),
+            Transform::from_translation(Vec3::from_array(first)),
+            ObjectSound::new(spec, 0x100 + i as u32),
+            owner,
+        ));
+        spawned += 1;
+    }
+    spawned
+}
+
 /// Run every emitter's state and keep its voices in step: wanted loops
 /// spawned and unwanted ones stopped, due one-shots fired unless the
 /// row is still sounding, positional voices re-levelled to the
@@ -118,7 +169,12 @@ pub fn object_sound_voices(
     mut report: ResMut<AudioReport>,
     listener: Query<&GlobalTransform, With<SpatialListener>>,
     rooms: Option<Res<ListenerRooms>>,
-    mut emitters: Query<(Entity, &GlobalTransform, &mut ObjectSound)>,
+    mut emitters: Query<(
+        Entity,
+        &GlobalTransform,
+        &mut ObjectSound,
+        Option<&mut Transform>,
+    )>,
     voices: Query<(Entity, &ObjectSoundVoice, &ChildOf)>,
     mut sinks: Query<&mut SpatialAudioSink, With<ObjectSoundVoice>>,
 ) {
@@ -135,20 +191,44 @@ pub fn object_sound_voices(
     let dt = if running { time.delta_secs() } else { 0.0 };
     let ear = listener.iter().next().map(|g| g.translation());
     let underground = rooms.is_some_and(|r| r.underground);
-    for (emitter, at, mut sound) in &mut emitters {
+    for (emitter, at, mut sound, transform) in &mut emitters {
         let sound = &mut *sound;
+        let admitted = sound.spec.area.admits(underground);
+        // An ambience table holds the point it started at while it
+        // plays; out of earshot it moves to the point nearest the
+        // listener (`0x512530`) — a fresh start there.
+        let mut hopped = false;
+        let here = if sound.spec.points.is_empty() {
+            at.translation()
+        } else {
+            let spec = sound.spec.clone();
+            let point = |i: usize| Vec3::from_array(spec.points[i]);
+            if running {
+                let keep = sound.held.filter(|&i| {
+                    admitted && ear.is_some_and(|e| spec.in_range(e.distance(point(i))))
+                });
+                let pick = keep.or_else(|| ear.and_then(|e| spec.nearest_point(e.to_array())));
+                if pick != sound.held {
+                    hopped = true;
+                    sound.held = pick;
+                    if let (Some(i), Some(mut t)) = (pick, transform) {
+                        t.translation = point(i);
+                    }
+                }
+            }
+            sound.held.map_or(at.translation(), point)
+        };
         // No ear yet (the camera gains its listener a frame after
         // spawn) hears nothing.
-        let distance = ear.map(|e| e.distance(at.translation()));
-        let in_range =
-            sound.spec.area.admits(underground) && distance.is_some_and(|d| sound.spec.in_range(d));
+        let distance = ear.map(|e| e.distance(here));
+        let in_range = admitted && distance.is_some_and(|d| sound.spec.in_range(d));
         let falloff = distance.map_or(0.0, |d| sound.spec.falloff(d));
         let cues = if running && in_range {
             sound.state.step(&sound.spec, dt, sound.speed)
         } else {
             Default::default()
         };
-        let mine: Vec<(Entity, ObjectSoundVoice)> = voices
+        let mut mine: Vec<(Entity, ObjectSoundVoice)> = voices
             .iter()
             .filter(|(_, _, parent)| parent.parent() == emitter)
             .map(|(e, v, _)| (e, *v))
@@ -169,11 +249,14 @@ pub fn object_sound_voices(
         // Out of earshot the original stops the whole object — its
         // one-shots too (`0x512230` → `0x5156f0`); a row merely
         // switched off lets its one-shot finish.
-        let silenced = running && !in_range;
+        let silenced = running && (!in_range || hopped);
         for (entity, voice) in &mine {
             if silenced || (voice.looped && !wanted.contains(&voice.sample)) {
                 commands.entity(*entity).despawn();
             }
+        }
+        if silenced {
+            mine.clear();
         }
         // Positional rows follow the distance every frame.
         for (entity, voice) in &mine {

@@ -1,6 +1,14 @@
 //! Positional object sounds — the retail `Aud3DAmbientObject` rules
 //! for the `aud/ambient/<name>.csv` tables the moving world objects
-//! carry (`drawbridge`, `ferry`, `subwaycar`).
+//! carry (`drawbridge`, `ferry`, `subwaycar`) and the city ambience
+//! tables a `<city>ambientcontainer.csv` lists (`londonriver`,
+//! `tubevoices`; `birdies`, `buoyseals`, `horns_gulls`,
+//! `trolleycable`).
+//!
+//! An ambience table stands at one of its `VECTORPOINTS`: while idle
+//! it takes the point nearest the listener ([`ObjectAudioSpec::
+//! nearest_point`]) and starts once in range, then holds that point
+//! until the listener is out of range again (`0x512370`, `0x512580`).
 //!
 //! Recovered from the retail executable (`docs/research/movers.md`
 //! § "Object audio"):
@@ -125,12 +133,21 @@ pub struct ObjectAudioSpec {
     pub area: AudibleArea,
     /// The sample rows.
     pub samples: Vec<ObjectSampleSpec>,
+    /// `VECTORPOINTS` — the places an ambience table may stand; empty
+    /// for tables an object carries.
+    pub points: Vec<[f32; 3]>,
 }
 
 impl ObjectAudioSpec {
     /// The logical path the original loads for `name`.
     pub fn logical(name: &str) -> String {
         format!("aud/ambient/{name}.csv")
+    }
+
+    /// The logical path of `city`'s ambience container (`0x40405b`
+    /// names `londonambientcontainer` and `sfambientcontainer`).
+    pub fn container_logical(city: &str) -> String {
+        format!("aud/ambient/{city}ambientcontainer.csv")
     }
 
     /// Distil a parsed table.
@@ -152,7 +169,25 @@ impl ObjectAudioSpec {
                     speed: (s.min_speed, s.max_speed),
                 })
                 .collect(),
+            points: table.vector_points.clone(),
         }
+    }
+
+    /// The point nearest `ear` — the first of equally near ones — or
+    /// `None` without points (`0x512580`).
+    pub fn nearest_point(&self, ear: [f32; 3]) -> Option<usize> {
+        let d2 = |p: &[f32; 3]| {
+            let (x, y, z) = (p[0] - ear[0], p[1] - ear[1], p[2] - ear[2]);
+            x * x + y * y + z * z
+        };
+        let mut best: Option<(usize, f32)> = None;
+        for (i, p) in self.points.iter().enumerate() {
+            let d = d2(p);
+            if best.is_none_or(|(_, b)| d < b) {
+                best = Some((i, d));
+            }
+        }
+        best.map(|(i, _)| i)
     }
 
     /// Whether a listener `distance` metres away hears the emitter at
@@ -361,6 +396,36 @@ mod tests {
         assert_eq!(AudibleArea::from_code(Some(2.0)), AudibleArea::Surface);
         assert!(!AudibleArea::Surface.admits(true));
         assert_eq!(AudibleArea::from_code(None), AudibleArea::Anywhere);
+    }
+
+    #[test]
+    fn an_ambience_table_stands_at_its_point_nearest_the_listener() {
+        let table = ObjectAudio::parse(
+            b"Min distance,Max distance,3D priority,Audible area,,,,,\n\
+              30,80,12,1,,,,,\n\
+              sample name,sample volume,sample type,oneshot time limit low,oneshot time limit high,active,min speed,max speed,Doppler\n\
+              tubevoice01,0.98,2,9,15,1,0,999999,0\n\
+              VECTORPOINTS,,,,,,,,\n\
+              x,y,z,,,,,,\n\
+              -66.2,-13.1,-686.0,,,,,,\n\
+              832.5,-13.1,-726.3\n\
+              -66.2,-13.1,-686.0\n",
+        )
+        .unwrap();
+        let s = ObjectAudioSpec::from_table("tubevoices", &table);
+        assert_eq!(s.area, AudibleArea::Underground);
+        assert_eq!(s.points.len(), 3);
+        assert_eq!(s.nearest_point([800.0, 0.0, -700.0]), Some(1));
+        assert_eq!(
+            s.nearest_point([-60.0, 0.0, -680.0]),
+            Some(0),
+            "first of a tie"
+        );
+        assert_eq!(spec().nearest_point([0.0; 3]), None);
+        assert_eq!(
+            ObjectAudioSpec::container_logical("london"),
+            "aud/ambient/londonambientcontainer.csv"
+        );
     }
 
     #[test]

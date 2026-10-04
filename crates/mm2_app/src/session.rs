@@ -866,6 +866,11 @@ pub fn load_session_world(
             owner,
         );
         commands.insert_resource(movers);
+        // The city's ambience tables — the river, the Tube stations,
+        // the bay — from its ambience container.
+        let ambience =
+            crate::object_sound::spawn_ambience(&mut commands, &vfs.0, &city_stem, owner);
+        info!(city = %city_stem, tables = ambience, "ambience emitters");
     }
     // F25-A.2: the lobby's humans share the event's authored grid —
     // the local participant's seat resolves through the same
