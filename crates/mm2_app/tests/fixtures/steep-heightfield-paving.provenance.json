@@ -1,0 +1,23 @@
+{
+  "fixture": "steep-heightfield-paving.json",
+  "source_project": "https://github.com/LinusU/mm2-sthlm",
+  "source_package_manifest_sha256": "39f814e15b04bd88a9a2437511c2598a0bc1aa3b4e33a120cfb3689f8d63217e",
+  "provenance": "Original generated native PSDL paving vertices and room perimeter extracted as float32 JSON. No retail geometry.",
+  "attribution": [
+    {
+      "copyright": "© OpenStreetMap contributors",
+      "license": "ODbL 1.0",
+      "copyright_url": "https://www.openstreetmap.org/copyright",
+      "license_url": "https://opendatacommons.org/licenses/odbl/1-0/"
+    },
+    {
+      "copyright": "©Lantmäteriet",
+      "dataset": "Markhöjdmodell (1 m source grid)",
+      "license": "CC BY 4.0",
+      "license_url": "https://creativecommons.org/licenses/by/4.0/",
+      "terms_url": "https://www.lantmateriet.se/globalassets/geodata/geodataprodukter/anvandningsvillkor_for_vardefulla_datamangder.pdf",
+      "modifications": "Bilinear resampling to 10 m local grid, interpolation, road/shoulder profiles and terrain mesh simplification; extracted generated paving geometry encoded as JSON."
+    }
+  ],
+  "procedural_code_license": "MIT"
+}
