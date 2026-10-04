@@ -240,6 +240,13 @@ pub fn resolve_recovery(
         let Some((position, yaw)) = landing else {
             continue;
         };
+        // The local driver's reset is the one a player notices — say
+        // why it happened; opponents' stay at debug.
+        if control == Some(PlayerControl::Local) {
+            info!(cause = ?event.cause, tick = event.tick, to = ?position, "player vehicle recovered");
+        } else {
+            debug!(cause = ?event.cause, tick = event.tick, to = ?position, "vehicle recovered");
+        }
         resets.write(ResetVehicle {
             entity: Some(entity),
             position,

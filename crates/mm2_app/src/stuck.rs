@@ -195,6 +195,12 @@ pub fn resolve_stuck(
             continue;
         };
         let (landing, yaw) = upright_recovery_pose(&vehicle.config, pos.0, rot.0);
+        if control == Some(PlayerControl::Local) {
+            info!(
+                tick = event.tick,
+                "player vehicle righted after sitting still"
+            );
+        }
         resets.write(ResetVehicle {
             entity: Some(entity),
             position: landing,

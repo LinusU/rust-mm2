@@ -269,6 +269,11 @@ pub fn resolve_disabled(
                         // the beginning" is the production lifecycle,
                         // not a damage-specific shortcut. The wrecked
                         // state dies with the session entities.
+                        info!(
+                            total = damage.total(),
+                            tick = event.tick,
+                            "player vehicle destroyed — restarting the event"
+                        );
                         control.restart = true;
                     }
                     DisabledOutcome::FreeReset => {
