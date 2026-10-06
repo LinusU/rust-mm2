@@ -96,4 +96,20 @@ mod tests {
             .count();
         assert!((800..1200).contains(&empty), "{empty}");
     }
+
+    /// Networked races keep the kerbside cars, so two peers must roll the
+    /// same bays. The stream is a pure function of the session seed (which
+    /// the advertised config carries to every client), consumed in stamp
+    /// order only by the spawn loop.
+    #[test]
+    fn peers_sharing_a_session_seed_roll_identical_bays() {
+        let bays = |seed: u64| {
+            let mut rng = ParkedRng::new(seed);
+            (0..64)
+                .map(|_| (parked_model(rng.next_roll()), rng.next_roll()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bays(0xfeed_beef), bays(0xfeed_beef));
+        assert_ne!(bays(0xfeed_beef), bays(42));
+    }
 }

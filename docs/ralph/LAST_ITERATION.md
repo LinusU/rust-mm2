@@ -1,36 +1,22 @@
-# Last iteration — reconcile the field-races rule with the networked
-# Results deferral (new-run iteration 3)
+# Last iteration — parked-car agreement across peers (new-run iteration 4)
 
-Baseline `9ac6f17`. Selection: report 6 follow-up 2 (the host deferral vs
-`field_races`), the smallest open networking item with no wire change.
+Baseline `cd7ad71`. Selection: report 6 follow-up 3, the one F26-A
+question answerable without a wire change: do seed-rolled kerbside cars
+agree across peers in networked races?
 
-## What landed
+## Finding
 
-- Decision recorded in `docs/original-rules.md` DSN-11: one rule. The
-  hosted `Playing → Results` deferral only delays the phase edge the
-  snapshot stream needs; `field_races` already covers `Playing`, so the
-  simulated field records real finish times through the hold exactly as
-  behind a single-player results screen. A client reaches `Results` on
-  its own seat's replicated terminal edge.
-- Test `race::the_field_keeps_racing_through_the_wire_deferral`: host
-  driver finishes first (holds `Playing`), an AI opponent finishes
-  during the hold, the wire seat's finish releases `Results`, a
-  straggler finishes behind it with a later time; ledger holds 4.
+Yes by construction: `spawn_parked_cars` rolls from a local
+`ParkedRng::new(config.seed)`, the seed rides the advertised session
+config to every client (`net.rs` config round trip test), and nothing
+else consumes the stream. Test
+`parked::peers_sharing_a_session_seed_roll_identical_bays` pins the pure
+function of the seed.
 
-## Evidence level
+## Evidence level / still open
 
-Synthetic in-process test on the production `advance_race`. NOT done:
-two-process proof of the results overlay on both sides, progress rows
-for late finishers over the wire, graphics/audio/original content.
-
-## Gates
-
-fmt pass; clippy `-D warnings` clean; `cargo test --locked --workspace`
-exit 0, no failures.
-
-## Still open from report 6
-
-Follow-up 2's two-process leg (overlay both sides), follow-up 3 (F26-A
-replication of drawbridge/movers/parked cars/sounds), follow-up 1's
-two-process leg. Status: implemented (candidate), not independently
-checked.
+Synthetic unit test only. Initial placement agrees; once a host-side
+physics body is knocked, copies on clients diverge — replicating that
+(plus drawbridge, movers, sounds) remains F26-A. Two-process legs for
+follow-ups 1 and 2 remain open. Status: implemented (candidate), not
+independently checked.
