@@ -23,10 +23,11 @@ use mm2_app::contracts::{self, ImpactFilter};
 use mm2_app::session::{self, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_assets::Vfs;
 use mm2_game::{
-    AuthorityRole, Banger, BangerCause, BangerDefinition, BangerPhase, BangerPool,
-    BangerStateChanged, CityEntity, ImpactEvent, MAX_BANGER_ANGULAR_SPEED, MAX_BANGER_LINEAR_SPEED,
-    Mm2Vfs, ObjectId, ObjectIdentity, Session, SessionAuthority, SessionConfig, SessionEntity,
-    SessionPhase, WorldMode, advance_session_tick, despawn_session_entities,
+    AuthorityRole, Banger, BangerCause, BangerDefinition, BangerFragment, BangerPhase, BangerPool,
+    BangerSite, BangerStateChanged, CityEntity, ImpactEvent, MAX_BANGER_ANGULAR_SPEED,
+    MAX_BANGER_LINEAR_SPEED, Mm2Vfs, ObjectId, ObjectIdentity, Session, SessionAuthority,
+    SessionConfig, SessionEntity, SessionPhase, WorldMode, advance_session_tick,
+    despawn_session_entities,
 };
 use mm2_vehicle::{StrikeBound, VehicleConfig, VehiclePlugin, vehicle_bundle};
 
@@ -943,6 +944,45 @@ fn bound_pathset_names_stamp_as_dormant_bangers() {
     assert_eq!(world.query::<&CityEntity>().iter(&world).count(), 0);
 }
 
+/// F26-A: the stamp mints each banger placement the next replication
+/// ordinal, in stamp order, and only bangers — an unbound prop between
+/// them takes none. Two processes stamping the same content agree on
+/// every ordinal because nothing but this order feeds it.
+#[test]
+fn stamped_bangers_take_consecutive_replication_sites() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(d, "geometry/bangtest.pkg", testprop_pkg());
+    write(d, "geometry/plainprop.pkg", testprop_pkg());
+    write(d, "tune/banger/bangtest.dgbangerdata", banger_record(0.0));
+    write(
+        d,
+        "race/t/overlay.pathset",
+        pth1(&[
+            pth1_path("bangtest", &[[0.0, 0.0, 0.0]], 0, 0),
+            pth1_path("plainprop", &[[5.0, 0.0, 0.0]], 0, 0),
+            pth1_path("bangtest", &[[10.0, 0.0, 0.0]], 0, 0),
+        ]),
+    );
+    let (report, mut world) = stamp_overlay(d);
+    assert_eq!(report.stats.bangers, 2);
+    let mut sites: Vec<(u32, f32)> = world
+        .query::<(&BangerSite, &Transform)>()
+        .iter(&world)
+        .map(|(s, t)| (s.0, t.translation.x))
+        .collect();
+    sites.sort_unstable_by_key(|(site, _)| *site);
+    assert_eq!(
+        sites.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
+        vec![0, 1],
+        "consecutive from zero — the plain prop took none"
+    );
+    assert!(
+        sites[0].1 < sites[1].1,
+        "ordinals follow stamp order: {sites:?}"
+    );
+}
+
 #[test]
 fn malformed_and_missing_records_fall_back_to_static_props() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1122,6 +1162,21 @@ fn a_breakable_prop_shatters_into_its_authored_pieces() {
     // lie like any other active.
     let fragments = other_bangers(&mut app, banger);
     assert_eq!(fragments.len(), 3, "one body per collidable piece");
+    // F26-A: each is tagged with its placement and piece index — the
+    // wire name a replicated fragment row resolves by.
+    let mut tags: Vec<u8> = app
+        .world_mut()
+        .query::<&BangerFragment>()
+        .iter(app.world())
+        .inspect(|f| assert_eq!(f.parent, banger))
+        .map(|f| f.index)
+        .collect();
+    tags.sort_unstable();
+    assert_eq!(
+        tags,
+        vec![0, 1, 2],
+        "one tag per collidable piece, in order"
+    );
     assert!(
         fragments.iter().all(|(_, id, _)| *id != object),
         "pieces mint their own ids"

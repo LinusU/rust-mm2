@@ -1818,6 +1818,9 @@ fn main() {
                         .after(net::drive_lobby)
                         .after(netdrive::reconcile_remote_players),
                     netdrive::drive_remote_lerp,
+                    // F26-A: the host's knocked/broken/settled props
+                    // fold into the client's own stamped world.
+                    mm2_app::worldprops::apply_props.after(net::drive_lobby),
                     // F25-B: `R` under a predicted session asks the
                     // authority for the reset `reset_input` is gated
                     // against — the granted answer arrives as the
@@ -1903,6 +1906,9 @@ fn main() {
                         // publish reads `surface_voices`' same-frame
                         // resolution, not last frame's.
                         .after(audio::surface_voices),
+                    // F26-A: the world's prop state rides its own frame
+                    // — after the lobby drain, like the snapshot.
+                    mm2_app::worldprops::publish_props.after(net::drive_host),
                 ),
             );
         app.world_mut().spawn((

@@ -1,29 +1,60 @@
-# Last iteration — world clock session reset + wire test (new-run iteration 1)
+# Last iteration — world-prop replication (new-run iteration 2)
 
-Selection: F26-A follow-up. Review of the previous slice found two
-gaps: `WorldClock` was never reset between sessions (a second race in
-one process counted on from the last session's total, so the
-tolerance check compared the new host's tick against a stale one), and
-the `apply_race_snap` → `WorldClock::sync` path had no test.
+Selection: F26-A, the prop half of F26-AC01. The previous review passed
+with no blocking findings, so no repair work was owed. Of the operator's
+networking follow-ups (report 6) the world-clock slice had landed; the
+largest remaining F26-A gap was that **a client's props never move at
+all** — `activate_bangers`/`settle_bangers` are authority-only and the
+module doc promised "replication (F26) delivers authoritative
+`BangerStateChanged`", which nothing did. Proximity leaves / latency
+compensation stay open as recorded (no RTT, no retail `prox` path).
 
-Change: `advance_world_clock` (worldclock.rs) now zeroes the clock and
-drops an undelivered seek in `Menu`/`Loading`/`Unloading`/`Failed`.
-`Ready` and `Paused` leave it alone — a joiner's first race row seeks
-while still `Ready`. New tests: `the_clock_starts_over_between_sessions`
-(worldclock.rs; the existing system test now stands the session in
-`Countdown`, since the default `Menu` phase resets) and
-`a_snap_race_row_re_seeks_the_scenery_clock` (net_app.rs — real loopback
-row: queued seek to `countdown_ticks + clock`, jitter inside the
-tolerance ignored, real drift queued).
+Design decision (recorded here, nobody to ask): replicate *state*, not
+events, as its own frame. `Message::Props` (protocol v17, host→client
+only) instead of a new `Snap` field, which would have touched 54 test
+constructors for no gain and ties props to the pose stream's watermark.
+Identity is a new `BangerSite` stamp ordinal (`Session::mint_banger_site`),
+**not** `ObjectId`, whose slots interleave with vehicles/remote seats/
+fragments in per-process order. Fragments are named `(site, piece index)`
+via a `BangerFragment{parent,index}` tag. Bounded and loss-tolerant: every
+active body + fresh changes + a rolling 8-row resend window of
+settled/broken, every 2nd `Update`, ≤96 rows; client inbox ≤4,096,
+latest-wins per prop on `(generation, tick)`, held through `Loading`,
+phases never regress. Details: `docs/research/net.md`, ledger DSN-70.
 
-Decision recorded: proximity-leaf replication is not worth a protocol
-bump now — WLD-26 notes no retail bridge path uses `prox`, so it only
-matters for mods. Latency compensation needs an RTT estimate the link
-does not have; the offset is one-way delay, under the 6-tick tolerance
-on LAN. Both stay open in PLAN F26-A. No two-process leg: the dev-world
-cruise carries no `RaceState`, so there is no race row to seek from.
+Code: `mm2_net::proto` (`SnapProp`, `Message::Props`, `MAX_SNAP_PROPS`,
+`OversizeProps`), `mm2_game` (`BangerSite`, `BangerFragment`,
+`Session::mint_banger_site`), `mm2_app::banger` (`shatter_placement`,
+`spawn_fragment` shared by authority and client; fragments tagged),
+`city::spawn_banger_prop` (site stamp), new `mm2_app::worldprops`
+(`publish_props`, `apply_props`, `PropStage` inside `RemoteSnaps`), wired
+into `main.rs`, `smoke.rs` and the `net_app` harness.
 
-Gates (all exit 0): `cargo fmt --all -- --check`, `cargo clippy --locked
---workspace --all-targets --all-features -- -D warnings`, `cargo test
---locked --workspace` (1943 passed, 0 failed). No test processes left.
-Status: implemented candidate, not independently checked.
+Tests added: proto round-trip/bounds/truncation (mm2_net 3 + lobby 1:
+a client-sent `Props` drops the peer, AC04); `mint_banger_site` is
+independent of object-slot order; real pathset stamp gives consecutive
+sites and fragments carry piece tags (`tests/banger.rs`); 7 `PropStage`
+unit tests; 4 `net_app` legs (client rows incl. stale/unknown/NaN/foreign
+generation/fragment-past-pieces, load-time hold, publish-window bound and
+cycle, two-app host→client convergence over a real loopback socket with
+the production systems). New legs spin under bounded deadlines on the
+condition, never fixed frame counts (report 6 rule).
+
+Gates (all exit 0): `cargo fmt --all -- --check`; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings`; `cargo test
+--locked --workspace` (mm2_app lib 143, app suite 763, network suite 85,
+mm2_net 86 …, 0 failed). Retail sf `--headless --frames 300` smoke
+(`/Users/linus/coding/rust-mm2/retail`): `status=pass`, `bng=6110d`
+dormant bangers stamped — no regression from the site stamp. No test
+processes left running.
+
+Not verified / open (F26-A stays active, not AC01..06 completion): no
+interpolation or velocities (active props move at the publish rate); no
+measured impairment cell or two-process/real-GPU leg for `Props`; site
+agreement across peers rests on deterministic stamp order (all `Vec`
+iteration, seeded parked-car rolls) and was checked only on synthetic
+stamps — a two-process retail check that both sides report the same
+site→position table is the next evidence step; traffic/weather/time-of-
+day replication; late-join beyond the resend cycle (~sites/8 frames);
+drawbridge/mover/sound state still clock-only. Status: implemented
+candidate, not independently checked.

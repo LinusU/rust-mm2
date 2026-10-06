@@ -51,7 +51,7 @@ use bevy::prelude::*;
 use mm2_assets::Vfs;
 use mm2_formats::banger::BangerData;
 use mm2_game::{
-    AuthorityRole, Banger, BangerCause, BangerDefinition, BangerPhase, BangerPool,
+    AuthorityRole, Banger, BangerCause, BangerDefinition, BangerFragment, BangerPhase, BangerPool,
     BangerStateChanged, CityEntity, MAX_BANGER_ANGULAR_SPEED, MAX_BANGER_LINEAR_SPEED, ObjectId,
     ObjectIdentity, Session, SessionEntity,
 };
@@ -390,6 +390,66 @@ pub(crate) fn claim_slot(
     true
 }
 
+/// The placement-side half of a break: the unified collider and mesh
+/// children go, the entity stays as the identity the fragments belong
+/// to. Shared by the authority's activation and a client applying the
+/// replicated `Broken` row (F26-A).
+pub(crate) fn shatter_placement(commands: &mut Commands, entity: Entity) {
+    commands
+        .entity(entity)
+        .remove::<(Collider, RigidBody, CollisionEventsEnabled, Sleeping)>()
+        .despawn_related::<Children>();
+}
+
+/// The per-spawn facts of one break fragment.
+pub(crate) struct FragmentSpawn {
+    pub object: ObjectId,
+    pub role: AuthorityRole,
+    pub owner: SessionEntity,
+    pub transform: Transform,
+    pub phase: BangerPhase,
+    pub activated: Option<u64>,
+    pub name: String,
+}
+
+/// Spawn one break fragment body — bundle, render parts and the
+/// [`BangerFragment`] tag — and hand back its commands so the caller
+/// chooses the body kind: dynamic with the impact's launch on the
+/// authority, authority-driven on a client replaying the wire.
+pub(crate) fn spawn_fragment<'a>(
+    commands: &'a mut Commands,
+    piece: &FragmentPiece,
+    tag: BangerFragment,
+    spawn: FragmentSpawn,
+) -> EntityCommands<'a> {
+    let mut fragment = commands.spawn(banger_bundle(
+        Banger {
+            phase: spawn.phase,
+            def: piece.def.clone(),
+            activated: spawn.activated,
+        },
+        spawn.object,
+        spawn.role,
+        spawn.owner,
+        piece.collider.clone().expect("collidable piece"),
+        spawn.transform,
+        spawn.name,
+    ));
+    fragment.insert(tag);
+    let id = fragment.id();
+    for (mesh, material) in &piece.parts {
+        let part = commands
+            .spawn((
+                Mesh3d(mesh.clone()),
+                MeshMaterial3d(material.clone()),
+                Transform::IDENTITY,
+            ))
+            .id();
+        commands.entity(id).add_child(part);
+    }
+    commands.entity(id)
+}
+
 /// The break transition (F04-B): the placement's unified collider and
 /// mesh children are replaced by one fragment body per collidable
 /// [`BangerPieces`] piece — each spawned already `Active` at the
@@ -426,10 +486,7 @@ fn break_banger(
         linvel.0 = Vec3::ZERO;
         angvel.0 = Vec3::ZERO;
     }
-    commands
-        .entity(entity)
-        .remove::<(Collider, RigidBody, CollisionEventsEnabled, Sleeping)>()
-        .despawn_related::<Children>();
+    shatter_placement(commands, entity);
     writer.write(BangerStateChanged {
         object: a.object,
         generation,
@@ -442,7 +499,7 @@ fn break_banger(
     });
 
     let base_vel = a.dir * launch;
-    for piece in pieces.collidable() {
+    for (index, piece) in pieces.collidable().enumerate() {
         if !claim_slot(occupied, tick, generation, pool, bangers, writer, commands) {
             debug!(
                 piece = %piece.index,
@@ -458,36 +515,28 @@ fn break_banger(
             .def
             .angular_kick(lever, a.dir * launch * piece.def.mass);
         let transform = Transform::from_translation(parent_pos).with_rotation(parent_rot);
-        let fragment = commands
-            .spawn(banger_bundle(
-                Banger {
-                    phase: BangerPhase::Active,
-                    def: piece.def.clone(),
-                    activated: Some(tick),
-                },
+        spawn_fragment(
+            commands,
+            piece,
+            BangerFragment {
+                parent: entity,
+                index: index.min(u8::MAX as usize) as u8,
+            },
+            FragmentSpawn {
                 object,
                 role,
                 owner,
-                piece.collider.clone().unwrap(),
                 transform,
-                format!("{parent_name}-break{}", piece.index),
-            ))
-            .insert((
-                RigidBody::Dynamic,
-                LinearVelocity(base_vel),
-                AngularVelocity(ang),
-            ))
-            .id();
-        for (mesh, material) in &piece.parts {
-            let part = commands
-                .spawn((
-                    Mesh3d(mesh.clone()),
-                    MeshMaterial3d(material.clone()),
-                    Transform::IDENTITY,
-                ))
-                .id();
-            commands.entity(fragment).add_child(part);
-        }
+                phase: BangerPhase::Active,
+                activated: Some(tick),
+                name: format!("{parent_name}-break{}", piece.index),
+            },
+        )
+        .insert((
+            RigidBody::Dynamic,
+            LinearVelocity(base_vel),
+            AngularVelocity(ang),
+        ));
     }
     debug!(
         name = %parent_name,

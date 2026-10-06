@@ -517,6 +517,11 @@ pub fn drive_lobby(
                 impacts,
                 race,
             }) => snaps.push(generation, tick, entries, trailers, impacts, race),
+            LobbyEvent::Message(Message::Props {
+                generation,
+                tick,
+                rows,
+            }) => snaps.push_props(generation, tick, rows),
             LobbyEvent::Message(Message::Cancel { generation }) => {
                 cancel(&mut lobby, &mut session, &mut control, generation)
             }

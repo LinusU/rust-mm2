@@ -204,6 +204,8 @@ fn bridge_app(vfs: Vfs, link: LobbyLink) -> App {
                     .after(net::drive_lobby)
                     .after(netdrive::reconcile_remote_players),
                 netdrive::drive_remote_lerp,
+                // F26-A: replicated world props — production wiring.
+                mm2_app::worldprops::apply_props.after(net::drive_lobby),
                 // F25-B: `R` asks the authority under a predicted
                 // session — production wiring.
                 netdrive::send_reset_request,
@@ -265,6 +267,8 @@ fn host_app(vfs: Vfs, link: HostLink) -> App {
                     // ordering — a seat's same-frame resolved contact
                     // publishes, not last frame's.
                     .after(mm2_app::audio::surface_voices),
+                // F26-A: the world's prop state — production wiring.
+                mm2_app::worldprops::publish_props.after(net::drive_host),
             ),
         );
     app
@@ -6943,4 +6947,748 @@ fn a_joiners_held_snap_resolves_the_terminal_edge_after_the_load() {
     }
 
     host.shutdown();
+}
+
+// ── F26-A: replicated world props (protocol v17) ────────────────────
+
+/// A distilled banger record for the world-prop legs.
+fn prop_def(name: &str) -> mm2_game::BangerDefinition {
+    mm2_game::BangerDefinition {
+        name: name.into(),
+        mass: 40.0,
+        friction: 0.9,
+        elasticity: 0.5,
+        impulse_limit2: 100.0,
+        size: [0.5, 0.5, 0.5],
+        cg: [0.0, 0.0, 0.0],
+        num_parts: 0,
+        audio_id: 0,
+    }
+}
+
+/// Stamp one banger placement the way `city::spawn_banger_prop` does —
+/// the shared bundle plus the next [`mm2_game::BangerSite`] ordinal —
+/// at `phase` and `pos`. `pieces` are the collidable `BREAK<NN>` pieces
+/// the placement would carry (none for a plain prop).
+fn stamp_prop(app: &mut App, phase: mm2_game::BangerPhase, pos: Vec3, pieces: usize) -> Entity {
+    use avian3d::prelude::{Collider, Position, Rotation};
+    let (object, role, site, owner) = {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        (
+            session.mint_object_id(),
+            session.authority_role(),
+            session.mint_banger_site(),
+            mm2_game::SessionEntity(session.generation()),
+        )
+    };
+    let mut banger = mm2_game::Banger::new(prop_def("prop"));
+    banger.phase = phase;
+    let entity = app
+        .world_mut()
+        .spawn(mm2_app::banger::banger_bundle(
+            banger,
+            object,
+            role,
+            owner,
+            Collider::cuboid(1.0, 1.0, 1.0),
+            Transform::from_translation(pos),
+            format!("prop-{}", site.0),
+        ))
+        .insert((site, Position(pos), Rotation(Quat::IDENTITY)))
+        .id();
+    if pieces > 0 {
+        app.world_mut()
+            .entity_mut(entity)
+            .insert(mm2_app::banger::BangerPieces {
+                fragments: (0..pieces)
+                    .map(|i| mm2_app::banger::FragmentPiece {
+                        index: format!("{i:02}"),
+                        def: prop_def("piece"),
+                        parts: Vec::new(),
+                        collider: Some(Collider::cuboid(0.5, 0.5, 0.5)),
+                    })
+                    .collect(),
+            });
+    }
+    entity
+}
+
+/// The prop-state a leg asserts on: phase, body kind, pose.
+fn prop_state(
+    app: &App,
+    entity: Entity,
+) -> (
+    mm2_game::BangerPhase,
+    Option<avian3d::prelude::RigidBody>,
+    Vec3,
+) {
+    let world = app.world();
+    (
+        world.get::<mm2_game::Banger>(entity).unwrap().phase,
+        world.get::<avian3d::prelude::RigidBody>(entity).copied(),
+        world.get::<avian3d::prelude::Position>(entity).unwrap().0,
+    )
+}
+
+/// A joined client in `Playing` against a bare host — the harness the
+/// client-side prop legs share. The dev world stamps no props, so each
+/// leg stamps its own.
+fn playing_client(install: &std::path::Path) -> (Host, App, u64) {
+    let vfs = mount(install);
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host_config = HostConfig::new(fp);
+    host_config.host_pick = Some(VehiclePick {
+        vehicle: String::new(),
+        paint: 0,
+    });
+    let host = Host::listen_loopback(&host_config).unwrap();
+    host.set_session(net::advertise(&dev_cruise()).unwrap())
+        .unwrap();
+    let link = LobbyLink::join(
+        host.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join failed");
+    let mut app = bridge_app(vfs, link);
+    {
+        let link = app.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    until_ready(&mut app);
+    host.start(LateJoin::Open).unwrap();
+    until_started(&host);
+    until_begun(&mut app);
+    let generation = app.world().resource::<Session>().wire_generation();
+    (host, app, generation)
+}
+
+fn props_frame(generation: u64, tick: u64, rows: Vec<mm2_net::SnapProp>) -> Message {
+    Message::Props {
+        generation,
+        tick,
+        rows,
+    }
+}
+
+fn prop_row(site: u32, fragment: u8, phase: u8, pos: [f32; 3]) -> mm2_net::SnapProp {
+    mm2_net::SnapProp {
+        site,
+        fragment,
+        phase,
+        pos,
+        rot: [0.0, 0.0, 0.0, 1.0],
+    }
+}
+
+/// F26-A: the client folds the host's prop rows into its own stamped
+/// world — and refuses everything it should. Active drives a kinematic
+/// pose, Settled is a static collider at the row's pose, a fragment row
+/// proves its placement shattered and spawns the piece from the
+/// placement's authored pieces, phases never regress under a reordered
+/// row, and a row naming nothing (unknown site, unreadable phase,
+/// foreign generation, fragment past the authored pieces) resolves to
+/// nothing — counted, never applied.
+#[test]
+fn a_client_folds_prop_rows_into_its_stamped_world() {
+    use avian3d::prelude::RigidBody;
+    use mm2_app::worldprops::{PROP_ACTIVE, PROP_BROKEN, PROP_SETTLED};
+    use mm2_game::BangerPhase;
+
+    let install = tempfile::tempdir().unwrap();
+    let (mut host, mut app, generation) = playing_client(install.path());
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    let knocked = stamp_prop(&mut app, BangerPhase::Dormant, Vec3::new(10.0, 0.0, 0.0), 0);
+    let shattered = stamp_prop(&mut app, BangerPhase::Dormant, Vec3::new(20.0, 0.0, 0.0), 2);
+    let untouched = stamp_prop(&mut app, BangerPhase::Dormant, Vec3::new(30.0, 0.0, 0.0), 0);
+    app.update();
+    let landed = |a: &App| {
+        a.world()
+            .resource::<netdrive::RemoteSnaps>()
+            .props()
+            .landed()
+    };
+    let unresolved = |a: &App| {
+        a.world()
+            .resource::<netdrive::RemoteSnaps>()
+            .props()
+            .unresolved()
+    };
+
+    // Active: kinematic, pose from the wire.
+    host.ctl()
+        .broadcast(&props_frame(
+            generation,
+            5,
+            vec![prop_row(
+                0,
+                mm2_net::SNAP_NO_FRAGMENT,
+                PROP_ACTIVE,
+                [10.0, 1.5, 0.5],
+            )],
+        ))
+        .unwrap();
+    spin(&mut app, |a| landed(a) >= 1);
+    app.update();
+    assert_eq!(
+        prop_state(&app, knocked),
+        (
+            BangerPhase::Active,
+            Some(RigidBody::Kinematic),
+            Vec3::new(10.0, 1.5, 0.5)
+        )
+    );
+
+    // Settled: a static collider at the resting pose.
+    host.ctl()
+        .broadcast(&props_frame(
+            generation,
+            9,
+            vec![prop_row(
+                0,
+                mm2_net::SNAP_NO_FRAGMENT,
+                PROP_SETTLED,
+                [11.0, 0.0, 2.0],
+            )],
+        ))
+        .unwrap();
+    spin(&mut app, |a| landed(a) >= 2);
+    app.update();
+    assert_eq!(
+        prop_state(&app, knocked),
+        (
+            BangerPhase::Settled,
+            Some(RigidBody::Static),
+            Vec3::new(11.0, 0.0, 2.0)
+        )
+    );
+
+    // A reordered older Active row is stale — dropped counted at the
+    // inbox, so the settled prop stays put.
+    let stale_before = app
+        .world()
+        .resource::<netdrive::RemoteSnaps>()
+        .props()
+        .stale();
+    host.ctl()
+        .broadcast(&props_frame(
+            generation,
+            6,
+            vec![prop_row(
+                0,
+                mm2_net::SNAP_NO_FRAGMENT,
+                PROP_ACTIVE,
+                [99.0, 9.0, 9.0],
+            )],
+        ))
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::RemoteSnaps>()
+            .props()
+            .stale()
+            > stale_before
+    });
+    assert_eq!(
+        prop_state(&app, knocked).0,
+        BangerPhase::Settled,
+        "a reordered Active row cannot un-settle the prop"
+    );
+
+    // A fragment row for a placement the client still holds dormant:
+    // the placement shatters (collider and body gone) and the piece
+    // spawns from its authored pieces, kinematic at the wire pose.
+    host.ctl()
+        .broadcast(&props_frame(
+            generation,
+            12,
+            vec![prop_row(1, 1, PROP_ACTIVE, [20.0, 2.0, 1.0])],
+        ))
+        .unwrap();
+    spin(&mut app, |a| landed(a) >= 3);
+    app.update();
+    {
+        let world = app.world();
+        assert_eq!(
+            world.get::<mm2_game::Banger>(shattered).unwrap().phase,
+            BangerPhase::Broken
+        );
+        assert!(
+            world.get::<avian3d::prelude::Collider>(shattered).is_none(),
+            "the shattered placement keeps no collider"
+        );
+    }
+    let fragment_of = |app: &mut App| {
+        let mut q = app
+            .world_mut()
+            .query::<(Entity, &mm2_game::BangerFragment)>();
+        q.iter(app.world())
+            .filter(|(_, f)| f.parent == shattered)
+            .map(|(e, f)| (e, f.index))
+            .collect::<Vec<_>>()
+    };
+    let fragments = fragment_of(&mut app);
+    assert_eq!(fragments.len(), 1, "one piece spawned, not the whole set");
+    let (piece, index) = fragments[0];
+    assert_eq!(index, 1);
+    assert_eq!(
+        prop_state(&app, piece),
+        (
+            BangerPhase::Active,
+            Some(RigidBody::Kinematic),
+            Vec3::new(20.0, 2.0, 1.0)
+        )
+    );
+    assert!(
+        !app.world()
+            .get::<mm2_game::Banger>(piece)
+            .unwrap()
+            .def
+            .name
+            .is_empty()
+    );
+
+    // The same piece settles in place — no second spawn.
+    host.ctl()
+        .broadcast(&props_frame(
+            generation,
+            15,
+            vec![
+                prop_row(1, 1, PROP_SETTLED, [21.0, 0.0, 1.0]),
+                // The placement's own broken row: already so.
+                prop_row(1, mm2_net::SNAP_NO_FRAGMENT, PROP_BROKEN, [20.0, 0.0, 0.0]),
+            ],
+        ))
+        .unwrap();
+    spin(&mut app, |a| landed(a) >= 5);
+    app.update();
+    assert_eq!(fragment_of(&mut app).len(), 1);
+    assert_eq!(
+        prop_state(&app, piece),
+        (
+            BangerPhase::Settled,
+            Some(RigidBody::Static),
+            Vec3::new(21.0, 0.0, 1.0)
+        )
+    );
+
+    // Rows that name nothing resolve to nothing.
+    let before = unresolved(&app);
+    host.ctl()
+        .broadcast(&props_frame(
+            generation,
+            20,
+            vec![
+                // No such placement.
+                prop_row(777, mm2_net::SNAP_NO_FRAGMENT, PROP_ACTIVE, [0.0; 3]),
+                // An unreadable phase.
+                prop_row(0, mm2_net::SNAP_NO_FRAGMENT, 9, [30.0, 1.0, 0.0]),
+                // A non-finite pose.
+                prop_row(
+                    2,
+                    mm2_net::SNAP_NO_FRAGMENT,
+                    PROP_ACTIVE,
+                    [f32::NAN, 0.0, 0.0],
+                ),
+                // A fragment past the authored pieces (2 authored).
+                prop_row(1, 5, PROP_ACTIVE, [20.0, 0.0, 0.0]),
+            ],
+        ))
+        .unwrap();
+    // A frame for another generation is dropped whole.
+    host.ctl()
+        .broadcast(&props_frame(
+            generation + 1,
+            21,
+            vec![prop_row(2, 7, PROP_ACTIVE, [30.0, 1.0, 0.0])],
+        ))
+        .unwrap();
+    spin(&mut app, |a| unresolved(a) >= before + 5);
+    app.update();
+    assert_eq!(
+        prop_state(&app, untouched).0,
+        BangerPhase::Dormant,
+        "nothing unreadable or foreign touched the untouched prop"
+    );
+    assert_eq!(
+        fragment_of(&mut app).len(),
+        1,
+        "the oversized index spawned nothing"
+    );
+
+    host.shutdown();
+}
+
+/// F26-A / F26-AC02: rows that arrive while the world is still being
+/// stamped are held, not spent — a joiner whose first props frame beats
+/// its load applies it whole once the session is live.
+#[test]
+fn prop_rows_hold_through_the_load_and_apply_after() {
+    use mm2_app::worldprops::PROP_SETTLED;
+    use mm2_game::BangerPhase;
+
+    let install = tempfile::tempdir().unwrap();
+    let (mut host, mut app, generation) = playing_client(install.path());
+    assert_eq!(session_phase(&app), SessionPhase::Loading);
+    host.ctl()
+        .broadcast(&props_frame(
+            generation,
+            3,
+            vec![prop_row(
+                0,
+                mm2_net::SNAP_NO_FRAGMENT,
+                PROP_SETTLED,
+                [4.0, 0.0, 4.0],
+            )],
+        ))
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::RemoteSnaps>()
+            .props()
+            .staged()
+            == 1
+    });
+    // Several more frames while loading: still held, not dropped.
+    for _ in 0..5 {
+        app.update();
+    }
+    {
+        let props = app.world().resource::<netdrive::RemoteSnaps>().props();
+        assert_eq!(
+            (props.staged(), props.landed(), props.unresolved()),
+            (1, 0, 0)
+        );
+    }
+    // The world finishes loading; the held row lands on the stamped
+    // placement.
+    let prop = stamp_prop(&mut app, BangerPhase::Dormant, Vec3::new(4.0, 0.0, 0.0), 0);
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Countdown).unwrap();
+    }
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::RemoteSnaps>()
+            .props()
+            .landed()
+            == 1
+    });
+    app.update();
+    assert_eq!(
+        prop_state(&app, prop),
+        (
+            BangerPhase::Settled,
+            Some(avian3d::prelude::RigidBody::Static),
+            Vec3::new(4.0, 0.0, 4.0)
+        )
+    );
+    host.shutdown();
+}
+
+/// F26-A end to end: a hosted app's knocked, shattered and settled props
+/// publish as `Props` frames and a joined client's app — the production
+/// `publish_props`/`apply_props` over a real loopback socket — converges
+/// on the host's world. Dormant props send nothing, and the rolling
+/// resend window carries a prop the first frames' fresh pass already
+/// delivered a second time (state, not events).
+#[test]
+fn a_hosts_prop_state_converges_on_a_joined_clients_world() {
+    use avian3d::prelude::RigidBody;
+    use mm2_game::BangerPhase;
+
+    let install = tempfile::tempdir().unwrap();
+    let (link, host_vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let mut host_app = host_app(host_vfs, link);
+    let client_vfs = mount(install.path());
+    let client_link = LobbyLink::join(
+        addr,
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join failed");
+    let mut client = bridge_app(client_vfs, client_link);
+    {
+        let link = client.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    // Both apps step until the roster shows the client ready, then the
+    // host starts the session and the client follows.
+    for _ in 0..200 {
+        host_app.update();
+        client.update();
+        let our_id = client.world().resource::<LobbyLink>().player_id();
+        let ready = host_app
+            .world()
+            .resource::<LobbyState>()
+            .roster
+            .iter()
+            .any(|e| e.player_id == our_id && e.ready && e.pick.is_some());
+        if ready {
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    hosted_playing(&mut host_app);
+    until_begun(&mut client);
+    {
+        let mut session = client.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+
+    // Both processes stamp the same four placements in the same order —
+    // the stamp ordinal is the shared identity. The host's world has
+    // moved on: site 1 is flying, site 2 shattered with one piece in
+    // the air, site 3 at rest; site 0 is untouched.
+    let host_props = [
+        stamp_prop(
+            &mut host_app,
+            BangerPhase::Dormant,
+            Vec3::new(10.0, 0.0, 0.0),
+            0,
+        ),
+        stamp_prop(
+            &mut host_app,
+            BangerPhase::Active,
+            Vec3::new(20.0, 3.0, 0.0),
+            0,
+        ),
+        stamp_prop(
+            &mut host_app,
+            BangerPhase::Broken,
+            Vec3::new(30.0, 0.0, 0.0),
+            2,
+        ),
+        stamp_prop(
+            &mut host_app,
+            BangerPhase::Settled,
+            Vec3::new(40.0, 0.0, 6.0),
+            0,
+        ),
+    ];
+    let client_props = [
+        stamp_prop(
+            &mut client,
+            BangerPhase::Dormant,
+            Vec3::new(10.0, 0.0, 0.0),
+            0,
+        ),
+        stamp_prop(
+            &mut client,
+            BangerPhase::Dormant,
+            Vec3::new(20.0, 0.0, 0.0),
+            0,
+        ),
+        stamp_prop(
+            &mut client,
+            BangerPhase::Dormant,
+            Vec3::new(30.0, 0.0, 0.0),
+            2,
+        ),
+        stamp_prop(
+            &mut client,
+            BangerPhase::Dormant,
+            Vec3::new(40.0, 0.0, 0.0),
+            0,
+        ),
+    ];
+    // The host's one airborne fragment, index 1 of site 2.
+    {
+        let (object, role, owner) = {
+            let mut session = host_app.world_mut().resource_mut::<Session>();
+            (
+                session.mint_object_id(),
+                session.authority_role(),
+                mm2_game::SessionEntity(session.generation()),
+            )
+        };
+        let mut banger = mm2_game::Banger::new(prop_def("piece"));
+        banger.phase = BangerPhase::Active;
+        host_app.world_mut().spawn((
+            mm2_app::banger::banger_bundle(
+                banger,
+                object,
+                role,
+                owner,
+                avian3d::prelude::Collider::cuboid(0.5, 0.5, 0.5),
+                Transform::from_xyz(31.0, 2.0, 0.5),
+                "piece-1".into(),
+            ),
+            mm2_game::BangerFragment {
+                parent: host_props[2],
+                index: 1,
+            },
+            avian3d::prelude::Position(Vec3::new(31.0, 2.0, 0.5)),
+            avian3d::prelude::Rotation(Quat::IDENTITY),
+        ));
+    }
+
+    let step = |host_app: &mut App, client: &mut App| {
+        host_app.update();
+        client.update();
+        thread::sleep(Duration::from_millis(5));
+    };
+    let mut converged = false;
+    for _ in 0..400 {
+        step(&mut host_app, &mut client);
+        let flying = prop_state(&client, client_props[1]);
+        let shattered = prop_state(&client, client_props[2]).0;
+        let rest = prop_state(&client, client_props[3]);
+        if flying.0 == BangerPhase::Active
+            && shattered == BangerPhase::Broken
+            && rest.0 == BangerPhase::Settled
+        {
+            converged = true;
+            break;
+        }
+    }
+    assert!(converged, "the client never reached the host's prop state");
+    assert_eq!(
+        prop_state(&client, client_props[0]).0,
+        BangerPhase::Dormant,
+        "an untouched prop is not replicated"
+    );
+    let flying = prop_state(&client, client_props[1]);
+    assert_eq!(
+        (flying.1, flying.2),
+        (Some(RigidBody::Kinematic), Vec3::new(20.0, 3.0, 0.0))
+    );
+    let rest = prop_state(&client, client_props[3]);
+    assert_eq!(
+        (rest.1, rest.2),
+        (Some(RigidBody::Static), Vec3::new(40.0, 0.0, 6.0))
+    );
+    // The airborne fragment arrives as a spawned piece of site 2.
+    let mut found = false;
+    for _ in 0..200 {
+        step(&mut host_app, &mut client);
+        let mut q = client.world_mut().query::<(
+            &mm2_game::BangerFragment,
+            &mm2_game::Banger,
+            &avian3d::prelude::Position,
+        )>();
+        if let Some((frag, banger, pos)) = q.iter(client.world()).next() {
+            assert_eq!(frag.parent, client_props[2]);
+            assert_eq!(frag.index, 1);
+            assert_eq!(banger.phase, BangerPhase::Active);
+            assert_eq!(pos.0, Vec3::new(31.0, 2.0, 0.5));
+            found = true;
+            break;
+        }
+    }
+    assert!(
+        found,
+        "the host's airborne fragment never reached the client"
+    );
+
+    // The host's prop comes to rest: the client follows it to the
+    // settled pose and stops treating it as a live body.
+    {
+        let world = host_app.world_mut();
+        let mut banger = world.get_mut::<mm2_game::Banger>(host_props[1]).unwrap();
+        banger.phase = BangerPhase::Settled;
+        world
+            .get_mut::<avian3d::prelude::Position>(host_props[1])
+            .unwrap()
+            .0 = Vec3::new(22.0, 0.0, 1.0);
+    }
+    let mut settled = false;
+    for _ in 0..400 {
+        step(&mut host_app, &mut client);
+        if prop_state(&client, client_props[1]).0 == BangerPhase::Settled {
+            settled = true;
+            break;
+        }
+    }
+    assert!(settled, "the client never followed the prop's settle");
+    let (_, body, pos) = prop_state(&client, client_props[1]);
+    assert_eq!(
+        (body, pos),
+        (Some(RigidBody::Static), Vec3::new(22.0, 0.0, 1.0))
+    );
+
+    let props = client.world().resource::<netdrive::RemoteSnaps>().props();
+    assert_eq!(props.unresolved(), 0, "every row named a real prop");
+    assert_eq!(props.refused(), 0);
+}
+
+/// F26-A: the publish frame is bounded and self-healing. Twenty settled
+/// props all ride the first frame as fresh changes; every later frame
+/// carries only the live body plus the rolling resend window — never
+/// the whole inventory — and the window's cursor still brings every
+/// settled prop around again, which is what heals a dropped frame and
+/// catches a late joiner up. A dormant prop never appears.
+#[test]
+fn the_prop_publish_window_cycles_without_growing_the_frame() {
+    use mm2_app::worldprops::{PROP_ACTIVE, PROP_SETTLED, RESEND_WINDOW};
+    use mm2_game::BangerPhase;
+    use std::collections::BTreeSet;
+
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let mut app = host_app(vfs, link);
+    let mut peer = ready_peer(addr, "eve", fp);
+    hosted_playing(&mut app);
+
+    // Site 0 dormant, site 1 live, sites 2..22 settled.
+    stamp_prop(&mut app, BangerPhase::Dormant, Vec3::ZERO, 0);
+    stamp_prop(&mut app, BangerPhase::Active, Vec3::new(5.0, 2.0, 0.0), 0);
+    for i in 0..20 {
+        stamp_prop(
+            &mut app,
+            BangerPhase::Settled,
+            Vec3::new(10.0 + i as f32, 0.0, 0.0),
+            0,
+        );
+    }
+    for _ in 0..80 {
+        app.update();
+    }
+
+    let mut frames: Vec<Vec<mm2_net::SnapProp>> = Vec::new();
+    while frames.len() < 6 {
+        if let Message::Props { rows, .. } =
+            until_wire(&mut peer, |m| matches!(m, Message::Props { .. }))
+        {
+            frames.push(rows);
+        }
+    }
+    let first_sites: BTreeSet<u32> = frames[0].iter().map(|r| r.site).collect();
+    assert_eq!(
+        first_sites,
+        (1..22).collect::<BTreeSet<u32>>(),
+        "the first frame carries every changed prop and not the dormant one"
+    );
+    let mut cycled = BTreeSet::new();
+    for rows in &frames[1..] {
+        assert!(
+            rows.len() <= 1 + RESEND_WINDOW,
+            "a steady-state frame is the live body plus the window, got {}",
+            rows.len()
+        );
+        let live: Vec<_> = rows.iter().filter(|r| r.phase == PROP_ACTIVE).collect();
+        assert_eq!(live.len(), 1, "the live body rides every frame");
+        assert_eq!((live[0].site, live[0].pos), (1, [5.0, 2.0, 0.0]));
+        for row in rows.iter().filter(|r| r.phase == PROP_SETTLED) {
+            assert!(row.site >= 2, "only settled props ride the window");
+            cycled.insert(row.site);
+        }
+        assert!(rows.iter().all(|r| r.site != 0), "dormant never publishes");
+    }
+    assert!(
+        cycled.len() >= 2 * RESEND_WINDOW,
+        "the cursor advances through the inventory, saw {cycled:?}"
+    );
 }

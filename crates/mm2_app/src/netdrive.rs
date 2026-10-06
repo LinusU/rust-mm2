@@ -140,7 +140,8 @@ use mm2_game::{
 };
 use mm2_net::{
     DriveInput, MAX_SNAP_IMPACTS, Message, RemoteInputs, SNAP_FLAG_BRAKE, SNAP_FLAG_GROUNDED,
-    SNAP_FLAG_REVERSE, SNAP_NO_SURFACE, SnapEntry, SnapImpact, SnapRace, SnapTrailer, VehiclePick,
+    SNAP_FLAG_REVERSE, SNAP_NO_SURFACE, SnapEntry, SnapImpact, SnapProp, SnapRace, SnapTrailer,
+    VehiclePick,
 };
 use mm2_vehicle::{
     DriveDirection, HandlingMetrics, RemoteReplica, ResetVehicle, Teleported, Vehicle,
@@ -367,6 +368,9 @@ pub struct RemoteSnaps {
     /// Equal-or-older rows skip silently: state replication is
     /// idempotent, and a repeated row is not a drop.
     race_dropped: u64,
+    /// The world-prop inbox (protocol v17, F26-A) — its own latest-wins
+    /// rule per prop, reset with the stream's other ledgers.
+    pub(crate) props: crate::worldprops::PropStage,
 }
 
 /// A staged snapshot frame.
@@ -706,6 +710,16 @@ impl RemoteSnaps {
         }
     }
 
+    /// Queue a received world-prop frame (protocol v17, F26-A).
+    pub fn push_props(&mut self, generation: u64, tick: u64, rows: Vec<SnapProp>) {
+        self.props.push(generation, tick, rows);
+    }
+
+    /// The world-prop inbox — counters for the record/tests.
+    pub fn props(&self) -> &crate::worldprops::PropStage {
+        &self.props
+    }
+
     /// Newest snapshot tick applied so far — for the record/tests.
     pub fn applied(&self) -> Option<(u64, u64)> {
         self.applied
@@ -734,6 +748,7 @@ impl RemoteSnaps {
         self.seen_order.clear();
         self.race = None;
         self.race_key = None;
+        self.props.reset();
     }
 }
 
@@ -862,7 +877,7 @@ pub struct NetDriveReport {
 /// A rotation off the wire, sanitized — a malformed-quaternion guard so
 /// a corrupt packet can never poison the pose with NaNs (the wire
 /// decoder bounds sizes but not math).
-fn wire_quat(raw: [f32; 4]) -> Quat {
+pub(crate) fn wire_quat(raw: [f32; 4]) -> Quat {
     let q = Quat::from_array(raw);
     if q.is_finite() && q.length_squared() > 1e-12 {
         q.normalize()

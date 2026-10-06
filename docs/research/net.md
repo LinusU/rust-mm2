@@ -940,6 +940,45 @@ the real session), not a driven collision; `race` reads 0 on both
 sides — the dev cruise carries no `RaceState`, so no v13 rows move
 (the row's legs are the in-process `net_app` tests above).
 
+## World-prop replication (protocol v17, F26-A)
+
+*Implementation choice; no original-protocol claim.* The authority alone
+transitions a banger (`activate_bangers`/`settle_bangers` skip a
+`Predicted` session), so before v17 a client's props never moved. v17
+adds `Message::Props { generation, tick, rows }` (tag 0x10, host →
+client only — a client that sends one is dropped `Malformed`, F26-AC04),
+a frame of `SnapProp { site, fragment, phase, pos, rot }` rows:
+
+- **Identity.** `site` is the placement ordinal
+  `Session::mint_banger_site` hands out at world stamping — the n-th
+  stamped banger, identical on every process loading the same content
+  (stamp order is `Vec`-driven end to end; parked-car rolls are seeded
+  from the session, WLD-27). It is *not* an `ObjectId`: those slots
+  interleave with vehicles, remote seats and fragments in a
+  process-local order. `fragment` is the index among the placement's
+  collidable `BREAK<NN>` pieces (`SNAP_NO_FRAGMENT` = the placement).
+- **State, not events.** `phase` is `1` active / `2` settled / `3`
+  broken (dormant is never sent); `pos`/`rot` the world pose. Each frame
+  carries every active body, every prop that changed since its last
+  carried frame, and `RESEND_WINDOW` = 8 settled/broken rows from a
+  rolling cursor, so a dropped/reordered frame and a late joiner heal
+  within one cycle while the frame never grows with the session.
+  Published every second `Update` (`PUBLISH_EVERY`).
+- **Receiver.** Latest-wins *per prop* on `(generation, tick)` (equal
+  tick passes — the session clock is frozen through `Ready`/`Countdown`);
+  staged bounded at 4,096 props; held through `Loading`; phases only
+  move forward. A fragment row spawns the piece from the placement's own
+  authored `BangerPieces` and proves the placement shattered.
+- **Budget.** 18 B header (tag 1, generation 8, tick 8, count 1) + 34 B
+  per row (site 4, fragment 1, phase 1, pos 12, rot 16);
+  `MAX_SNAP_PROPS` 96 rows = 3,282 B worst case, steady state ≈ 18 +
+  34·(active + 8).
+- **Not covered.** No interpolation (an active prop moves at the
+  publish rate); no velocities on the wire; vehicle breakaway parts
+  keep their own path (`SnapEntry.breaks`); fragments the authority's
+  pool skipped are never sent; no measured impairment cell or
+  two-process leg for this frame yet.
+
 ## Data-plane budget and bounds (F25-B req 6)
 
 *Implementation choice + measured.* Payload sizes are fixed by the

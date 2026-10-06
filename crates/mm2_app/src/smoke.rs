@@ -323,6 +323,9 @@ fn add_lobby_client_systems(app: &mut App) {
                     .after(net::drive_lobby)
                     .after(crate::netdrive::reconcile_remote_players),
                 crate::netdrive::drive_remote_lerp,
+                // F26-A: replicated world props — same wiring as the
+                // app.
+                crate::worldprops::apply_props.after(net::drive_lobby),
                 // F25-B: `R` asks the authority under a
                 // predicted session — same wiring as the app.
                 crate::netdrive::send_reset_request,
@@ -805,6 +808,9 @@ fn run_headless(
                             // same-frame resolution — same ordering
                             // contract as the windowed app.
                             .after(crate::audio::surface_voices),
+                        // F26-A: the world's prop state — same wiring as
+                        // the app.
+                        crate::worldprops::publish_props.after(net::drive_host),
                     ),
                 );
         }
