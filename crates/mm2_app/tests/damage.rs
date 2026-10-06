@@ -653,7 +653,9 @@ fn the_authority_impairs_and_resolves_a_remote_driver() {
     // simulated participant — authored damage impairs its engine like
     // an AI opponent's, and a wreck resolves through the in-place
     // reset+repair arm, never the local driver's event restart.
-    let mut hosted = event_config(EventTableKind::Blitz);
+    // Circuit, not Blitz: a Breakdown mode gives the remote driver the
+    // dead interval instead (the next test).
+    let mut hosted = event_config(EventTableKind::Circuit);
     hosted.authority = SessionAuthority::Host;
     let (mut app, _car, _object) = damage_app(hosted, Vec3::new(0.0, 1.2, 0.0));
     let remote_object = app.world_mut().resource_mut::<Session>().mint_object_id();
@@ -700,7 +702,7 @@ fn the_authority_impairs_and_resolves_a_remote_driver() {
     assert_eq!(report(&app).impaired, 1);
 
     // A second hit past MaxDamage: the disable resolves in place with
-    // a repair — the Blitz session's restart intent stays clear, since
+    // a repair — the session's restart intent stays clear, since
     // one remote wreck must never restart everyone's event.
     write_impact(&mut app, 8, remote_object, ObjectId::WORLD, 300.0);
     app.update();
@@ -716,6 +718,10 @@ fn the_authority_impairs_and_resolves_a_remote_driver() {
         !app.world().resource::<SessionControl>().restart,
         "a remote wreck never restarts the session's event"
     );
+    assert!(
+        app.world().get::<VehicleBreakdown>(remote).is_none(),
+        "a Circuit wreck resets in place, no dead interval"
+    );
     assert_eq!(report(&app).disabled, 1);
     assert_eq!(report(&app).recovered, 1);
     // The repair lifted the impairment the same tick.
@@ -725,6 +731,137 @@ fn the_authority_impairs_and_resolves_a_remote_driver() {
             .is_none()
     );
     assert_eq!(report(&app).restored, 1);
+}
+
+#[test]
+fn a_remote_driver_breaks_down_like_the_host_driver_in_blitz() {
+    // Networked policy: a remote human's wreck in a Breakdown mode
+    // costs the same five dead seconds the host's own driver pays, then
+    // repairs in place — it never gets a free instant reset.
+    let mut hosted = event_config(EventTableKind::Blitz);
+    hosted.authority = SessionAuthority::Host;
+    let (mut app, _car, _object) = damage_app(hosted, Vec3::new(0.0, 1.2, 0.0));
+    let remote_object = app.world_mut().resource_mut::<Session>().mint_object_id();
+    let remote_player = app.world_mut().resource_mut::<Session>().mint_player_id();
+    let role = app.world().resource::<Session>().authority_role();
+    let remote_pos = Vec3::new(10.0, 1.2, 5.0);
+    let remote = app
+        .world_mut()
+        .spawn((
+            ObjectIdentity(remote_object),
+            Player {
+                id: remote_player,
+                control: PlayerControl::Remote,
+            },
+            role,
+            mm2_game::DamageSignals::default(),
+            VehicleDamage::new(SPEC),
+            vehicle_bundle(&VehicleConfig::default()),
+            Position(remote_pos),
+            Transform::from_translation(remote_pos),
+        ))
+        .id();
+    app.update();
+    drain_damage(&mut app);
+    app.world_mut()
+        .entity_mut(remote)
+        .insert(VehicleDamage::new(SPEC));
+
+    write_impact(&mut app, 1, remote_object, ObjectId::WORLD, 300.0);
+    app.update();
+    assert!(app.world().get::<VehicleBreakdown>(remote).is_some());
+    assert_eq!(
+        app.world()
+            .get::<VehicleDamage>(remote)
+            .unwrap()
+            .condition(),
+        DamageTier::Disabled,
+        "the wreck stays wrecked while it is down — the wire's signal"
+    );
+    assert_eq!(
+        app.world().get::<EngineImpairment>(remote).map(|i| i.0),
+        Some(0.0),
+        "the host's sim of the remote car has a dead engine"
+    );
+    assert!(!app.world().resource::<SessionControl>().restart);
+    assert_eq!(report(&app).recovered, 0);
+
+    for _ in 0..240 {
+        app.update();
+    }
+    assert!(app.world().get::<VehicleBreakdown>(remote).is_some());
+    for _ in 0..90 {
+        app.update();
+    }
+    assert!(app.world().get::<VehicleBreakdown>(remote).is_none());
+    assert_eq!(
+        app.world().get::<VehicleDamage>(remote).unwrap().total(),
+        0.0
+    );
+    assert!(app.world().get::<EngineImpairment>(remote).is_none());
+    assert_eq!(report(&app).recovered, 1);
+}
+
+#[test]
+fn a_predicted_client_derives_its_breakdown_from_the_wire_damage() {
+    // The client never owns the episode: the replicated damage holding
+    // at the destruction bound kills the local seat's engine, and the
+    // authority's repair (the byte dropping) lifts it.
+    let mut joined = event_config(EventTableKind::Blitz);
+    joined.authority = SessionAuthority::Remote;
+    let (mut app, car, _object) = damage_app(joined, Vec3::new(0.0, 1.2, 0.0));
+
+    app.world_mut()
+        .get_mut::<VehicleDamage>(car)
+        .unwrap()
+        .set_replicated(1.0);
+    app.update();
+    assert!(
+        app.world().get::<VehicleBreakdown>(car).is_none(),
+        "the client mints no episode of its own"
+    );
+    assert_eq!(
+        app.world().get::<EngineImpairment>(car).map(|i| i.0),
+        Some(0.0)
+    );
+
+    // Just short of destroyed is merely limping, never dead.
+    app.world_mut()
+        .get_mut::<VehicleDamage>(car)
+        .unwrap()
+        .set_replicated(0.99);
+    app.update();
+    assert!(
+        app.world()
+            .get::<EngineImpairment>(car)
+            .is_some_and(|i| i.0 > 0.0)
+    );
+
+    app.world_mut()
+        .get_mut::<VehicleDamage>(car)
+        .unwrap()
+        .set_replicated(0.0);
+    app.update();
+    assert!(app.world().get::<EngineImpairment>(car).is_none());
+}
+
+#[test]
+fn a_predicted_cruise_client_at_the_bound_is_not_derived_dead() {
+    // Cruise's outcome is a free reset, not a dead interval — the
+    // derivation is gated on the mode's Breakdown outcome.
+    let mut joined = cruise_config();
+    joined.authority = SessionAuthority::Remote;
+    let (mut app, car, _object) = damage_app(joined, Vec3::new(0.0, 1.2, 0.0));
+    app.world_mut()
+        .get_mut::<VehicleDamage>(car)
+        .unwrap()
+        .set_replicated(1.0);
+    app.update();
+    assert!(
+        app.world()
+            .get::<EngineImpairment>(car)
+            .is_none_or(|i| i.0 > 0.0)
+    );
 }
 
 #[test]

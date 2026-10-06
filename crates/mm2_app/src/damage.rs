@@ -364,6 +364,27 @@ pub fn resolve_disabled(
             // AI and remote wrecks share the in-place arm — on the
             // host a remote car is this authority's participant, so its
             // reset+repair rides the next snapshot down (F25-A.4).
+            // ... except a remote human in a Breakdown mode, who takes
+            // the same dead interval the host's own driver does
+            // (networked policy, DSN-68 follow-up): the episode is
+            // authority state on the remote seat's car, its engine
+            // dies in the host's sim, and the wire carries it as the
+            // damage byte holding at the destruction bound.
+            Some(PlayerControl::Remote)
+                if session
+                    .config()
+                    .is_some_and(|c| disabled_outcome(&c.mode) == DisabledOutcome::Breakdown) =>
+            {
+                if !broken_down {
+                    info!(
+                        total = damage.total(),
+                        tick = event.tick,
+                        seconds = BREAKDOWN_SECONDS,
+                        "remote vehicle destroyed — broken down"
+                    );
+                    commands.entity(entity).insert(VehicleBreakdown::new());
+                }
+            }
             Some(PlayerControl::Ai) | Some(PlayerControl::Remote) => {
                 if let Some((position, yaw)) = landing.of(entity) {
                     resets.write(ResetVehicle {
@@ -482,9 +503,18 @@ pub fn sync_impairment(
         return;
     }
     let policy = ImpairmentPolicy::default();
+    let predicted_breakdown = !session.authority_role().is_authority()
+        && session
+            .config()
+            .is_some_and(|c| disabled_outcome(&c.mode) == DisabledOutcome::Breakdown);
     for (entity, damage, impairment, broken_down) in &mut cars {
         // A broken-down car's engine is dead, not merely limping.
-        let factor = if broken_down {
+        // A predicted client never owns the episode; the wire's damage
+        // byte holding at the destruction bound is its signal, and in a
+        // Breakdown mode that bound *is* the breakdown (the authority
+        // repairs by dropping the byte).
+        let wire_down = predicted_breakdown && damage.condition() == DamageTier::Disabled;
+        let factor = if broken_down || wire_down {
             0.0
         } else {
             policy.factor(damage.total(), &damage.spec)

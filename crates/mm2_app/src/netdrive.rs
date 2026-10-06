@@ -1115,7 +1115,10 @@ fn encode_damage(damage: Option<&VehicleDamage>) -> u8 {
     // A positive total never encodes 0: the byte's `>0 → 0` transition
     // is the wire's repair signal (the receiver wipes the seat's texel
     // splats on it), so a rounding-to-zero hit must not mint one.
-    ((fraction.min(1.0) * 255.0).round() as u8).max(1)
+    // Byte 255 means *destroyed*: a client derives its breakdown from
+    // it, so a total that merely rounds up to it stays at 254.
+    let byte = ((fraction.min(1.0) * 255.0).round() as u8).max(1);
+    if fraction < 1.0 { byte.min(254) } else { byte }
 }
 
 /// `VehicleBreaks` → a [`SnapEntry`]'s `breaks` bitmask (protocol v11,
@@ -3819,6 +3822,12 @@ mod tests {
             1,
             "any positive damage encodes at least byte 1"
         );
+        // Byte 255 means destroyed — a client derives its breakdown from
+        // it — so a total that only rounds up to it stays at 254.
+        let mut nearly = VehicleDamage::new(SPEC);
+        nearly.set_replicated(0.999);
+        assert!(nearly.total() < SPEC.max_damage);
+        assert_eq!(encode_damage(Some(&nearly)), 254);
         // A degenerate spec (max <= 0) encodes 0 rather than dividing
         // by it.
         let degenerate = VehicleDamage::new(DamageSpec {
