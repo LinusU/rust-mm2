@@ -21,7 +21,7 @@ Statuses:
 | Driver select/create/delete | implemented | Profiles screen binds; New driver is a real text field; delete sits behind a confirm screen; DRV-7's last-profile refusal is a status line. |
 | Driver's Stats | tracked | Disabled root row naming this audit. Nothing persists aggregate stats to display. |
 | Race Records | implemented (first leg) | `Screen::Records`: persisted per-event finishes/best time/best place, city and race-type filters, re-launch from a record row. Open legs below. |
-| Options | tracked | Disabled root row naming F23 — covers CTL-3/4/5 (control, graphics, audio option screens). |
+| Options | implemented (partial) | `Screen::Options`, the root row: a graphics page with two rows — shadow quality (Off/Low/High) and anti-aliasing (Off/2x/4x MSAA) — each cycled with Left/Right/Enter, saved to `settings.json` in the profile store's root on every change (machine-level, whichever driver is bound) and applied by `mm2_app::settings` to the key light and every `Camera3d`. A `Reset to defaults` row disables itself with its reason once nothing differs. The defaults are the pre-settings look (DSN-69). Deferred: control and audio options (CTL-3/CTL-5), the original's other graphics rows (CTL-4: resolution, texture quality, …), and the pause overlay's own `Options` row, still disabled naming F23. |
 
 ## Race Records open legs (DRV-5, help:Race Records)
 

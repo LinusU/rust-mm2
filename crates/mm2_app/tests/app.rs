@@ -36,6 +36,7 @@ mod recovery;
 mod results;
 mod sequence;
 mod session;
+mod settings;
 mod smoke;
 mod spark_fx;
 mod speedometer;

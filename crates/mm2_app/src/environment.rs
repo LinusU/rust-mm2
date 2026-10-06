@@ -11,7 +11,8 @@
 //!   the recovered `setLightDirectionInv` convention
 //!   ([`LightSpec::to_light_dir`]; the Bevy forward axis gets
 //!   [`LightSpec::travel_dir`]); colours are authored verbatim. Only the
-//!   key casts shadows (designed — the fills stand in for bounce light).
+//!   key casts shadows (designed — the fills stand in for bounce light);
+//!   it carries [`KeyLight`], which the user's shadow setting reads.
 //! - `Ambient` → [`GlobalAmbientLight`] from the BGRA-packed colour.
 //! - `city/<stem>_fog.csv` → the session's [`DistanceFog`]: the authored
 //!   per-preset table whose row index is the same `tod*4 + weather`
@@ -43,6 +44,8 @@ use mm2_formats::pkg::Pkg;
 use mm2_formats::sky::SkyDef;
 use mm2_game::{SessionConditions, SessionEntity};
 use tracing::{info, warn};
+
+use crate::settings::KeyLight;
 
 /// Illuminance shared by the three authored directional lights
 /// (designed scale — authored `Color` carries each light's relative
@@ -251,6 +254,7 @@ fn spawn_fallback_lights(commands: &mut Commands, owner: SessionEntity) {
             shadow_maps_enabled: true,
             ..default()
         },
+        KeyLight,
         Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, 0.6, -0.9, 0.0)),
     ));
     commands.insert_resource(GlobalAmbientLight {
@@ -318,7 +322,7 @@ pub fn spawn_environment(
                 warn!(path = %path, issue = ?issue, "lighting preset validation issue");
             }
             report.name = Some(preset.name.clone());
-            commands.spawn((owner, light_bundle(&preset.key, true)));
+            commands.spawn((owner, light_bundle(&preset.key, true), KeyLight));
             commands.spawn((owner, light_bundle(&preset.fill1, false)));
             commands.spawn((owner, light_bundle(&preset.fill2, false)));
             let [r, g, b, _a] = preset.ambient_rgba();

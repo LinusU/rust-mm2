@@ -114,15 +114,16 @@ loading splash. The garage renders the focused vehicle and paint in a rotating
 3D showroom using the same imported meshes and textures as driving. Keyboard,
 gamepad and mouse share navigation; Previous/Next buttons browse longer lists.
 For reproducible screenshots, use `--menu --menu-screen garage --frames 90
---screenshot garage.png` (screens: `root`, `profiles`, `races`, `garage`).
+--screenshot garage.png` (screens: `root`, `profiles`, `races`, `garage`, `options`).
 
 The menu supports
 (F17-A.1): Cruise and authored-event pickers over the real city/event
 catalogs, the garage (reward-locked cars and paints are listed but
 refuse with their reason), the driver-profile screen (select, create
 through a typed-name entry screen, `X`/`Delete` deletes behind a
-confirmation screen), the difficulty toggle, and disabled-with-reason
-rows for the not-yet-built Options and Multiplayer screens. Menu
+confirmation screen), the difficulty toggle, the graphics Options
+screen, and a disabled-with-reason row for the not-yet-built
+Multiplayer screen. Menu
 controls: ↑/↓ or W/S move, ←/→ or A/D adjust, Enter/Space select,
 Esc/Backspace back (quit at the root), X/Delete delete; on the name
 field, type to edit, Backspace erases, Enter creates, Esc cancels; on
@@ -229,6 +230,14 @@ lives here), plus `fixed_steps` and Avian's summed `broad_ms`,
 - A large `render` with small `fixed`/`update` is GPU- or render-thread-
   bound; `--no-vsync` shows the cost without the display's refresh
   interval hiding it.
+
+Shadows and anti-aliasing are the render costs a player can trade for
+frame time: the root **Options** screen sets them (shadows Off/Low/High,
+anti-aliasing Off/2x/4x), defaulting to High and 4x — the look the game
+shipped with — and saves them to `settings.json` beside the driver
+profiles. `--shadows <off|low|high>` and `--msaa <off|2|4>` override
+them for a single run without saving, which is how to compare settings
+with `--perf-log`.
 
 For a CPU profile of where inside those stages the time goes, macOS's
 `sample <pid> 20 1 -file out.txt` works on the stock release binary

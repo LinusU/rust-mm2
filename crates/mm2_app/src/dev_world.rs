@@ -219,6 +219,7 @@ pub fn spawn_dev_world(
             shadow_maps_enabled: true,
             ..default()
         },
+        crate::settings::KeyLight,
         Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, 0.6, -0.9, 0.0)),
     ));
     commands.insert_resource(GlobalAmbientLight {

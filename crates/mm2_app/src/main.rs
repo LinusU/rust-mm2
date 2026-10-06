@@ -24,7 +24,7 @@ use mm2_app::{
     audio, banger, breakaway, camera, car_visual, city, contracts, damage, damage_fx, dash,
     environment, hud, hudmap, input, menu, nav_overlay, navarrow, net, netdrive, oppind, opponents,
     pause, perf, precip, profile, progression, pvs, race, racestat, racetime, recovery, results,
-    scripted, sequence, session, smoke, spark_fx, stuck, texel_fx, traffic, wheel_fx,
+    scripted, sequence, session, settings, smoke, spark_fx, stuck, texel_fx, traffic, wheel_fx,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
@@ -146,6 +146,19 @@ struct Cli {
     /// `--frames`; meaningless headless.
     #[arg(long, value_name = "csv", conflicts_with = "headless")]
     perf_log: Option<PathBuf>,
+
+    /// Shadow quality for this run, over the saved Options setting
+    /// (`off`, `low` or `high`; the default is `high`). A capture or a
+    /// measurement names what it rendered with; the saved file changes
+    /// only if the Options screen edits it afterwards.
+    #[arg(long, value_enum, conflicts_with = "headless")]
+    shadows: Option<settings::ShadowQuality>,
+
+    /// Anti-aliasing for this run, over the saved Options setting
+    /// (`off`, `2` or `4` samples; the default is `4`). Like `--shadows`,
+    /// it is not saved.
+    #[arg(long, value_enum, conflicts_with = "headless")]
+    msaa: Option<settings::Antialiasing>,
 
     /// Present without vsync (`Immediate`), so frame time reports what
     /// the CPU and GPU cost instead of the display's refresh interval.
@@ -403,7 +416,7 @@ struct Cli {
     menu: bool,
 
     /// Open a menu screen directly for reproducible visual captures.
-    #[arg(long, requires = "menu", value_parser = ["root", "profiles", "races", "garage"])]
+    #[arg(long, requires = "menu", value_parser = ["root", "profiles", "races", "garage", "options"])]
     menu_screen: Option<String>,
 }
 
@@ -1160,6 +1173,27 @@ fn main() {
             })
     };
 
+    // Graphics settings live in `settings.json` in the profile store's
+    // root and belong to the machine, not the driver, so `--no-profile`
+    // does not hide them. Evidence runs (`--frames`/`--screenshot`)
+    // neither read nor write the user's file unless `--profile-dir`
+    // names one — a capture must not depend on, or change, how the
+    // person who ran it plays. `--shadows`/`--msaa` override for the run.
+    let settings_path = (!smoke_requested || cli.profile_dir.is_some())
+        .then(|| profile::store_root(cli.profile_dir.clone()))
+        .flatten()
+        .map(|root| settings::settings_path(&root));
+    let mut graphics = settings_path
+        .as_deref()
+        .map(settings::GraphicsSettings::load)
+        .unwrap_or_default();
+    if let Some(shadows) = cli.shadows {
+        graphics.shadows = shadows;
+    }
+    if let Some(antialiasing) = cli.msaa {
+        graphics.antialiasing = antialiasing;
+    }
+
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -1210,6 +1244,8 @@ fn main() {
     // instrument toggles; `--no-hud` starts it off for captures.
     .insert_resource(hud::HudVisible(!cli.no_hud))
     .add_plugins(VehiclePlugin)
+    .insert_resource(graphics)
+    .add_plugins(settings::GraphicsSettingsPlugin)
     .add_message::<ImpactEvent>()
     .add_message::<netdrive::RemoteImpact>()
     .add_message::<DamageEvent>()
@@ -1710,11 +1746,15 @@ fn main() {
             Some("profiles") => menu::Screen::Profiles,
             Some("races") => menu::Screen::EventCity,
             Some("garage") => menu::Screen::Garage,
+            Some("options") => menu::Screen::Options,
             _ => menu::Screen::Root,
         };
         app.insert_resource(shell)
             .insert_resource(menu::MenuPreviewCapture(cli.frames.is_some()))
-            .insert_resource(menu::MenuData::new(menu_store, has_mods, menu_bound))
+            .insert_resource(
+                menu::MenuData::new(menu_store, has_mods, menu_bound)
+                    .with_settings(graphics, settings_path),
+            )
             .add_systems(
                 Update,
                 (

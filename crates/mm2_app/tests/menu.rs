@@ -25,6 +25,7 @@ use mm2_app::pause::{self, PauseMenu};
 use mm2_app::profile::ActiveProfile;
 use mm2_app::results::{self, ResultsMenu};
 use mm2_app::session::{self, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
+use mm2_app::settings::{Antialiasing, GraphicsSettings, ShadowQuality, settings_path};
 use mm2_assets::Vfs;
 use mm2_game::{
     BangerPool, Difficulty, EventKey, EventTableKind, ImpactEvent, Mm2Vfs, PlayerVehicle,
@@ -695,7 +696,7 @@ fn the_app_boots_into_the_menu() {
         shell(&app)
             .rows
             .iter()
-            .any(|r| { r.enabled.is_err() && (r.text == "Options" || r.text == "Multiplayer") })
+            .any(|r| r.enabled.is_err() && r.text == "Multiplayer")
     );
 }
 
@@ -1891,18 +1892,18 @@ fn a_click_on_a_disabled_row_shows_its_reason() {
     spawn_window(&mut app);
     lay_out_rows(&mut app);
 
-    let options = shell(&app)
+    let stats = shell(&app)
         .rows
         .iter()
-        .position(|r| r.text == "Options")
-        .expect("the root screen lists Options");
-    cursor_to(&mut app, 200.0, row_y(options));
+        .position(|r| r.text == "Driver's Stats")
+        .expect("the root screen lists Driver's Stats");
+    cursor_to(&mut app, 200.0, row_y(stats));
     click(&mut app, MouseButton::Left);
     assert!(matches!(shell(&app).screen, menu::Screen::Root));
-    assert_eq!(shell(&app).focus, options);
+    assert_eq!(shell(&app).focus, stats);
     assert_eq!(
         shell(&app).status.as_deref(),
-        Some("not implemented yet (F23)"),
+        Some("not implemented yet (menu audit: docs/research/menu.md)"),
     );
 }
 
@@ -2783,5 +2784,130 @@ fn showroom_renders_the_actual_vehicle_on_an_isolated_layer() {
         world.query::<&Mesh3d>().iter(world).count(),
         0,
         "no preview mesh leaks into the root menu"
+    );
+}
+
+/// The root `Options` row opens the graphics screen, which shows the
+/// look the game shipped with — shadows on High, 4x MSAA — and offers no
+/// reset while nothing differs from it.
+#[test]
+fn options_opens_the_graphics_screen_at_the_shipped_defaults() {
+    let tmp = install();
+    let mut app = menu_app(tmp.path(), None);
+    app.update();
+    focus_row(&mut app, "Options");
+    assert!(shell(&app).focused_row().unwrap().enabled.is_ok());
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(shell(&app).screen, menu::Screen::Options);
+    let rows: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
+    assert_eq!(
+        rows,
+        [
+            "Shadows: High",
+            "Anti-aliasing: 4x MSAA",
+            "Reset to defaults"
+        ]
+    );
+    assert_eq!(
+        shell(&app).rows[2].enabled,
+        Err("already at the defaults".to_string())
+    );
+    // Esc backs out to the root with Options still focused.
+    press(&mut app, KeyCode::Escape);
+    assert_eq!(shell(&app).screen, menu::Screen::Root);
+}
+
+/// Left/Right cycle a setting, the change reaches the world's
+/// `GraphicsSettings` resource and the settings file at once, and the
+/// reset row restores both.
+#[test]
+fn option_changes_apply_persist_and_reset() {
+    let tmp = install();
+    let dir = tempfile::tempdir().unwrap();
+    let path = settings_path(&dir.path().join("saved"));
+    let mut app = menu_app(tmp.path(), None);
+    app.insert_resource(
+        MenuData::new(None, false, None)
+            .with_settings(GraphicsSettings::default(), Some(path.clone())),
+    );
+    app.update();
+    focus_row(&mut app, "Options");
+    press(&mut app, KeyCode::Enter);
+
+    // High -> Off wraps; the resource and the file both follow.
+    focus_row(&mut app, "Shadows");
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(shell(&app).rows[0].text, "Shadows: Off");
+    assert_eq!(
+        app.world().resource::<GraphicsSettings>().shadows,
+        ShadowQuality::Off
+    );
+    assert_eq!(GraphicsSettings::load(&path).shadows, ShadowQuality::Off);
+    // Left steps back (Off -> High wraps the other way).
+    press(&mut app, KeyCode::ArrowLeft);
+    assert_eq!(shell(&app).rows[0].text, "Shadows: High");
+    // Enter cycles forward like Right.
+    press(&mut app, KeyCode::ArrowRight);
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(shell(&app).rows[0].text, "Shadows: Low");
+
+    focus_row(&mut app, "Anti-aliasing");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(shell(&app).rows[1].text, "Anti-aliasing: Off");
+    let saved = GraphicsSettings::load(&path);
+    assert_eq!(saved.shadows, ShadowQuality::Low);
+    assert_eq!(saved.antialiasing, Antialiasing::Off);
+    assert_eq!(app.world().resource::<GraphicsSettings>(), &saved);
+
+    // Reset is offered now, restores the defaults and disables itself.
+    assert!(shell(&app).rows[2].enabled.is_ok());
+    focus_row(&mut app, "Reset");
+    press(&mut app, KeyCode::Enter);
+    let rows: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
+    assert_eq!(rows[..2], ["Shadows: High", "Anti-aliasing: 4x MSAA"]);
+    assert_eq!(
+        app.world().resource::<GraphicsSettings>(),
+        &GraphicsSettings::default()
+    );
+    assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
+    assert!(shell(&app).rows[2].enabled.is_err());
+}
+
+/// A menu with nowhere to save (an evidence run) still applies the
+/// change for the run, and a save that fails says so without refusing
+/// it.
+#[test]
+fn unsaved_and_unsavable_settings_still_apply() {
+    let tmp = install();
+    let mut app = menu_app(tmp.path(), None);
+    app.update();
+    focus_row(&mut app, "Options");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(
+        app.world().resource::<GraphicsSettings>().shadows,
+        ShadowQuality::Off
+    );
+    assert_eq!(shell(&app).status, None);
+
+    // A path whose parent is a file cannot be created.
+    let blocker = tempfile::NamedTempFile::new().unwrap();
+    let bad = blocker.path().join("settings.json");
+    app.insert_resource(
+        MenuData::new(None, false, None).with_settings(GraphicsSettings::default(), Some(bad)),
+    );
+    app.update();
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(
+        app.world().resource::<GraphicsSettings>().shadows,
+        ShadowQuality::Off
+    );
+    assert!(
+        shell(&app)
+            .status
+            .as_deref()
+            .is_some_and(|s| s.starts_with("settings not saved")),
+        "{:?}",
+        shell(&app).status
     );
 }

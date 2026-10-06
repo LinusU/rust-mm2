@@ -45,6 +45,12 @@
 //!   `SessionConfig::customization`; an unchanged pick set launches a
 //!   default run so DRV-6 record eligibility is unaffected by a visit.
 //!
+//! - [`Screen::Options`] is the graphics-options screen (CTL-4's
+//!   designed counterpart): shadow quality and anti-aliasing, adjusted
+//!   with Left/Right, saved on every change and defaulting to the look
+//!   the game shipped with. Control and audio options (CTL-3/CTL-5)
+//!   are still open.
+//!
 //! Deferred to later slices (honest gaps, not placeholders):
 //! pedestrian/cop density options (no consumers — F19/F20), Quick
 //! Race customization, Driver's Stats (no aggregate stats are
@@ -52,6 +58,7 @@
 //! landed in their own modules — `crate::pause`, `crate::results`.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
@@ -69,6 +76,7 @@ use tracing::{info, warn};
 
 use crate::profile::{ActiveProfile, ProfileRequest};
 use crate::session::{SelectedCar, SessionControl, SessionNote, TunedVehicle};
+use crate::settings::{Antialiasing, GraphicsSettings, ShadowQuality};
 
 /// One user intent. Keyboard, gamepad, mouse and tests all produce
 /// these — the model never reads devices.
@@ -163,6 +171,10 @@ pub enum Screen {
         /// Race-type filter.
         table: Option<EventTableKind>,
     },
+    /// Graphics options: shadow quality and anti-aliasing. Rows read
+    /// and write [`MenuData`]'s settings, so the screen holds no state
+    /// of its own.
+    Options,
     /// Condition options for a cruise or a customization-unlocked
     /// event (UI-2, RACE-3/RACE-4). `conditions`/`densities` are the
     /// working picks Left/Right adjusts in place; the `seed_*` fields
@@ -241,6 +253,12 @@ pub enum Action {
     /// Cycle the Customize screen's opponent-count pick (Circuit rows
     /// only, bounded by the authored roster size).
     CycleOpponents,
+    /// Cycle the Options screen's shadow quality.
+    CycleShadows,
+    /// Cycle the Options screen's anti-aliasing.
+    CycleAntialiasing,
+    /// Put every graphics setting back to its default.
+    ResetGraphics,
     /// Launch the session the Customize screen configures.
     LaunchCustomize,
     /// Select a roster vehicle and open its paint list.
@@ -338,6 +356,9 @@ pub enum MenuEffect {
     Bind(Box<ActiveProfile>),
     /// Remove the `ActiveProfile` resource.
     Unbind,
+    /// Replace the [`GraphicsSettings`] resource — already saved by the
+    /// model; the systems in `settings` push it onto lights and cameras.
+    Settings(GraphicsSettings),
     /// Exit the process.
     Exit,
 }
@@ -411,6 +432,12 @@ pub struct MenuData {
     /// garage names as a locked car's requirement.
     rewards: BTreeMap<String, RewardTable>,
     profiles: Vec<ProfileSummary>,
+    /// The graphics settings the Options screen shows and edits —
+    /// seeded from the `GraphicsSettings` resource at startup.
+    settings: GraphicsSettings,
+    /// Where each change is saved. `None` keeps the settings for this
+    /// run only (evidence runs never write the user's settings).
+    settings_path: Option<PathBuf>,
 }
 
 impl MenuData {
@@ -430,7 +457,22 @@ impl MenuData {
             city_info: BTreeMap::new(),
             rewards: BTreeMap::new(),
             profiles: Vec::new(),
+            settings: GraphicsSettings::default(),
+            settings_path: None,
         }
+    }
+
+    /// Start the Options screen from `settings`, saving every change
+    /// to `path` (`None`: for this run only).
+    pub fn with_settings(mut self, settings: GraphicsSettings, path: Option<PathBuf>) -> Self {
+        self.settings = settings;
+        self.settings_path = path;
+        self
+    }
+
+    /// The graphics settings the Options screen currently shows.
+    pub fn settings(&self) -> GraphicsSettings {
+        self.settings
     }
 
     /// Scan content once — the mounted set cannot change mid-run.
@@ -752,7 +794,7 @@ impl MenuShell {
                 if self.has_side(self.focus) {
                     self.side = forward;
                 } else if let Some(action) = self.rows.get(self.focus).map(|r| r.action.clone()) {
-                    self.adjust_with(data, &action, forward);
+                    self.adjust_with(data, &action, forward, &mut effects);
                 }
             }
             MenuCommand::Back => {
@@ -820,7 +862,13 @@ impl MenuShell {
             | Action::CycleTimeOfDay
             | Action::CycleTrafficDensity
             | Action::CycleLaps
-            | Action::CycleOpponents) => self.adjust_with(data, &action, true),
+            | Action::CycleOpponents
+            | Action::CycleShadows
+            | Action::CycleAntialiasing) => self.adjust_with(data, &action, true, effects),
+            Action::ResetGraphics => {
+                self.set_settings(data, GraphicsSettings::default(), effects);
+                self.status = Some("graphics settings reset to the defaults".into());
+            }
             Action::LaunchCustomize => {
                 let Screen::Customize {
                     target,
@@ -965,8 +1013,25 @@ impl MenuShell {
     /// The Left/Right (and Activate-on-option-row) adjustment shared by
     /// every value row — difficulty, Records filters and the Customize
     /// screen's condition picks.
-    fn adjust_with(&mut self, data: &mut MenuData, action: &Action, forward: bool) {
+    fn adjust_with(
+        &mut self,
+        data: &mut MenuData,
+        action: &Action,
+        forward: bool,
+        effects: &mut Vec<MenuEffect>,
+    ) {
         match action {
+            Action::CycleShadows => {
+                let mut settings = data.settings;
+                settings.shadows = cycle_wrapping(&ShadowQuality::ALL, settings.shadows, forward);
+                self.set_settings(data, settings, effects);
+            }
+            Action::CycleAntialiasing => {
+                let mut settings = data.settings;
+                settings.antialiasing =
+                    cycle_wrapping(&Antialiasing::ALL, settings.antialiasing, forward);
+                self.set_settings(data, settings, effects);
+            }
             Action::ToggleDifficulty => {
                 self.difficulty = match self.difficulty {
                     Difficulty::Amateur => Difficulty::Professional,
@@ -1015,6 +1080,28 @@ impl MenuShell {
             }
             _ => {}
         }
+    }
+
+    /// Adopt new graphics settings: remember them, save them, and ask
+    /// the app to apply them. A save failure is a status line, not a
+    /// refusal — the settings still apply for this run.
+    fn set_settings(
+        &mut self,
+        data: &mut MenuData,
+        settings: GraphicsSettings,
+        effects: &mut Vec<MenuEffect>,
+    ) {
+        if settings == data.settings {
+            return;
+        }
+        data.settings = settings;
+        if let Some(path) = &data.settings_path
+            && let Err(e) = settings.save(path)
+        {
+            warn!(path = %path.display(), error = %e, "graphics settings not saved");
+            self.status = Some(format!("settings not saved: {e}"));
+        }
+        effects.push(MenuEffect::Settings(settings));
     }
 
     /// Cycle one of the Records screen's filters through `None` (all)
@@ -1342,6 +1429,7 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
             });
             rows
         }
+        Screen::Options => options_screen_rows(data),
         Screen::Garage => garage_rows(shell, data, vfs),
         Screen::Paints { car } => paint_rows(shell, data, vfs, car),
         Screen::Profiles => profile_rows(shell, data),
@@ -1464,8 +1552,8 @@ fn root_rows(shell: &MenuShell, data: &mut MenuData, vfs: &Vfs) -> Vec<Row> {
         },
         Row {
             text: "Options".into(),
-            enabled: Err("not implemented yet (F23)".to_string()),
-            action: Action::Quit, // unreachable while disabled
+            enabled: Ok(()),
+            action: Action::Push(Screen::Options),
             won: None,
             side: None,
         },
@@ -1772,6 +1860,53 @@ fn cycle_choice<T: PartialEq + Copy>(
         (pos + len - 1) % len
     };
     (next > 0).then(|| choices[next - 1])
+}
+
+/// Step through every value of a setting, wrapping at both ends —
+/// settings have no "all" entry the way the Records filters do.
+fn cycle_wrapping<T: PartialEq + Copy>(all: &[T], current: T, forward: bool) -> T {
+    let pos = all.iter().position(|v| *v == current).unwrap_or(0);
+    let next = if forward {
+        (pos + 1) % all.len()
+    } else {
+        (pos + all.len() - 1) % all.len()
+    };
+    all[next]
+}
+
+/// The Options screen: one cycling row per graphics setting plus a
+/// reset that disables itself, with its reason, once nothing differs
+/// from the defaults.
+fn options_screen_rows(data: &MenuData) -> Vec<Row> {
+    let s = data.settings;
+    let row = |text: String, enabled: Result<(), String>, action: Action| Row {
+        text,
+        enabled,
+        action,
+        won: None,
+        side: None,
+    };
+    vec![
+        row(
+            format!("Shadows: {}", s.shadows.label()),
+            Ok(()),
+            Action::CycleShadows,
+        ),
+        row(
+            format!("Anti-aliasing: {}", s.antialiasing.label()),
+            Ok(()),
+            Action::CycleAntialiasing,
+        ),
+        row(
+            "Reset to defaults".to_string(),
+            if s == GraphicsSettings::default() {
+                Err("already at the defaults".to_string())
+            } else {
+                Ok(())
+            },
+            Action::ResetGraphics,
+        ),
+    ]
 }
 
 /// The RACE-3 per-event options entry, drawn beside the event's row:
@@ -2338,6 +2473,9 @@ pub fn menu_input(
                 MenuEffect::Unbind => {
                     target.commands.remove_resource::<ActiveProfile>();
                 }
+                MenuEffect::Settings(settings) => {
+                    target.commands.insert_resource(settings);
+                }
                 MenuEffect::Exit => {
                     target.exit.write(AppExit::Success);
                 }
@@ -2511,6 +2649,7 @@ fn screen_title(screen: &Screen) -> String {
         Screen::ConfirmDelete { label, .. } => format!("Delete {label}?"),
         Screen::NewProfile { .. } => "New driver".to_string(),
         Screen::Records { .. } => "Race records".to_string(),
+        Screen::Options => "Graphics options".to_string(),
         Screen::Customize { target, .. } => match target {
             CustomizeTarget::Cruise { city } => format!("Cruise options - {city}"),
             CustomizeTarget::Event { stem, .. } => format!("Race options - {stem}"),
