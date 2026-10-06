@@ -23,6 +23,7 @@ pub mod environment;
 pub mod hud;
 pub mod hudmap;
 pub mod input;
+pub mod layers;
 pub mod menu;
 pub mod movers;
 pub mod nav_overlay;

@@ -29,6 +29,7 @@ use tracing::{info, warn};
 
 use crate::banger::BangerDefs;
 use crate::city::{MIRROR_Z, MovableModels, v3};
+use crate::layers::GameLayer;
 use crate::object_sound::ObjectSound;
 
 /// The leaf model the original substitutes when a path's name names
@@ -205,7 +206,11 @@ pub fn spawn_drawbridges(
                 leaf,
             ));
             if let Some(collider) = &model.collider {
-                commands.entity(root).insert(collider.clone());
+                // Kinematic scenery never touches the static city
+                // geometry — see `layers` for why that pair is skipped.
+                commands
+                    .entity(root)
+                    .insert((collider.clone(), GameLayer::scenery()));
             }
             if let Some(spec) = &sound {
                 commands

@@ -23,6 +23,7 @@ use tracing::{info, warn};
 
 use crate::banger::BangerDefs;
 use crate::city::{MovableModel, MovableModels, v3};
+use crate::layers::GameLayer;
 use crate::object_sound::{ObjectSound, load_object_audio};
 
 /// The three manager families.
@@ -158,7 +159,9 @@ fn spawn_body(
         NoAutoCenterOfMass,
     ));
     if let Some(collider) = &model.collider {
-        body.insert(collider.clone());
+        // Kinematic scenery never touches the static city geometry — see
+        // `layers` for why that pair is worth skipping.
+        body.insert((collider.clone(), GameLayer::scenery()));
     }
     let root = body.id();
     for (mesh, material) in &model.parts {

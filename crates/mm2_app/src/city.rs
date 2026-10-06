@@ -50,6 +50,7 @@ use tracing::{debug, info, warn};
 
 use crate::banger::{BangerDefs, BangerPieces, FragmentPiece, banger_bundle, mirrored_cg};
 use crate::decals::{self, DecalStampReport};
+use crate::layers::GameLayer;
 
 /// Whether to mirror Z when converting MM2 coordinates to Bevy space.
 ///
@@ -3024,6 +3025,7 @@ fn spawn_prop(
             CityEntity,
             owner,
             RigidBody::Static,
+            GameLayer::world(),
             collider.clone(),
             transform,
             Name::new(format!("{name}-collider")),
@@ -3926,6 +3928,7 @@ fn load_city_part(
             CityEntity,
             owner,
             RigidBody::Static,
+            GameLayer::world(),
             surface,
             collider,
             Name::new(name),

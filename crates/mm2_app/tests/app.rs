@@ -18,6 +18,7 @@ mod hud;
 mod hudmap;
 mod import_pipeline;
 mod input;
+mod layers;
 mod menu;
 mod mirror;
 mod nav_overlay;
