@@ -1391,6 +1391,7 @@ fn main() {
                 recovery::resolve_recovery,
                 cnr::enroll_cnr_participants,
                 cnr::cnr_host_step,
+                cnr::end_decided_match,
                 cnr::reconcile_gold_load,
             )
                 .chain(),

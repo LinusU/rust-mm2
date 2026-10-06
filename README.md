@@ -155,7 +155,10 @@ A top-right readout shows the clock or limit, your side and points, and
 where the gold is (the `H` key hides it with the rest of the HUD). The
 main menu's `Cops & Robbers` row offers it too: pick a city (listed with
 its reason when it cannot seed a round), cycle the game, gold weight and
-limit, then `Start match`. There is no commentary or rematch yet.
+limit, then `Start match`. When a one-seat match is decided (point or
+time limit) a match-over screen shows the verdict and standings and
+offers `Play again` (a fresh match) or `Continue to menu`; a hosted or
+joined match stays on the readout. There is no commentary yet.
 
 Driver profiles live in the OS user-data directory (never the install):
 `--profile <id|name>` binds one, `--new-profile <name>` creates and binds

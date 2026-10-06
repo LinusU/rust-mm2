@@ -52,7 +52,7 @@ use mm2_content::cnr::{CnrContent, CnrSettings, MARKER_MODELS};
 use mm2_game::gold::{CarrierLoad, Contact, DropCause, GoldError, GoldEvent, GoldMatch, Side};
 use mm2_game::{
     DamageTier, ImpactEvent, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerId,
-    RACE_TICK_HZ, Session, SessionAuthority, SessionEntity, VehicleDamage,
+    RACE_TICK_HZ, Session, SessionAuthority, SessionEntity, SessionPhase, VehicleDamage,
 };
 
 use crate::city::{MovableModels, WorldFloor, v3};
@@ -425,6 +425,31 @@ pub fn cnr_host_step(
 
     for event in game.drain_events() {
         out.write(CnrEvent(event));
+    }
+}
+
+/// Fixed-step: once a *local* match is decided, move the session to
+/// `Results` so the match-over screen ([`crate::results`]) offers
+/// *Play again* and *Continue to menu*. Only a `Local`-authority
+/// session does this — a hosted or joined match's restarts belong to
+/// the lobby's `Cancel`/`Start` (the wire mints each match's
+/// generation), so there the decided match stays on the HUD readout
+/// ([`crate::cnrhud`]). Idle without a [`CnrHost`] and while the
+/// session is not `Playing`.
+pub fn end_decided_match(host: Option<Res<CnrHost>>, mut session: ResMut<Session>) {
+    let Some(host) = host else {
+        return;
+    };
+    if !session.is_playing()
+        || session
+            .config()
+            .is_none_or(|c| c.authority != SessionAuthority::Local)
+        || host.game.outcome().is_none()
+    {
+        return;
+    }
+    if let Err(e) = session.transition(SessionPhase::Results) {
+        warn!(error = %e, "decided match could not open its results screen");
     }
 }
 
@@ -1673,6 +1698,73 @@ mod tests {
             .unwrap();
         app.update();
         assert!(sides(&app).is_empty());
+    }
+
+    /// A match that has already hit its time limit, in `authority`'s
+    /// session, with only the results leg scheduled.
+    fn decided_app(authority: SessionAuthority) -> App {
+        let mut app = enroll_app(CnrVariant::FreeForAll, authority);
+        let (generation, gold) = {
+            let mut session = app.world_mut().resource_mut::<Session>();
+            (session.generation(), session.mint_object_id())
+        };
+        let mut game =
+            GoldMatch::new(generation, gold, rules(EndRule::Ticks(5)), pool(), 3, &[]).unwrap();
+        for _ in 0..10 {
+            game.tick();
+        }
+        assert!(game.outcome().is_some());
+        app.insert_resource(CnrHost::new(game))
+            .add_systems(Update, end_decided_match);
+        app
+    }
+
+    #[test]
+    fn a_decided_local_match_opens_its_results_screen() {
+        let mut app = decided_app(SessionAuthority::Local);
+        app.update();
+        assert_eq!(
+            *app.world().resource::<Session>().phase(),
+            SessionPhase::Results
+        );
+        app.update();
+        assert_eq!(
+            *app.world().resource::<Session>().phase(),
+            SessionPhase::Results,
+            "one transition, then idle"
+        );
+    }
+
+    #[test]
+    fn an_undecided_match_keeps_playing() {
+        let mut app = enroll_app(CnrVariant::FreeForAll, SessionAuthority::Local);
+        app.add_systems(Update, end_decided_match);
+        app.update();
+        assert!(app.world().resource::<Session>().is_playing());
+    }
+
+    #[test]
+    fn a_hosted_or_joined_match_is_not_ended_from_underneath_the_wire() {
+        for authority in [SessionAuthority::Host, SessionAuthority::Remote] {
+            let mut app = decided_app(authority);
+            app.update();
+            assert!(
+                app.world().resource::<Session>().is_playing(),
+                "{authority:?}: the lobby owns restarts"
+            );
+        }
+    }
+
+    #[test]
+    fn no_match_means_no_results_screen() {
+        let mut app = App::new();
+        app.insert_resource(playing(cnr_config(
+            CnrVariant::FreeForAll,
+            SessionAuthority::Local,
+        )))
+        .add_systems(Update, end_decided_match);
+        app.update();
+        assert!(app.world().resource::<Session>().is_playing());
     }
 
     #[test]

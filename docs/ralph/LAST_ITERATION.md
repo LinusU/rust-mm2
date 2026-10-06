@@ -1,3 +1,51 @@
+# Last iteration — F27-B.4c (rematch leg): match-over screen with Play again (new-run iteration 22)
+
+Selection: the previous review passed with no blocking findings; its gaps
+(no screenshot of the new menu screens, retail-city menu gating, fmt/clippy
+markers absent from `verify.log`, no two-process match) are visual /
+log / two-process matters I cannot repair here. Of the queued B.4c legs
+(commentary — audio, menu lobby offer, rematch) the rematch is the one a
+single process can honestly finish and test: a decided match previously
+just froze its HUD with no way to start another short of `F4`.
+
+Change:
+- `cnr::end_decided_match` (fixed step, after `cnr_host_step`): a decided
+  match on a `Local`-authority `Playing` session transitions it to
+  `Results`. Host/remote sessions are untouched — the lobby's
+  `Cancel`/`Start` owns their restarts and each match is a new wire
+  generation, so the replica stage needs no epoch (the earlier note about
+  a rematch inside one generation does not arise).
+- `cnrhud::result_lines` (pure; verdict/reason/time helpers shared with
+  `scoreboard_lines`, whose output is unchanged): verdict, reason + played
+  time, team totals, ranked rows with leavers marked. `None` while
+  undecided.
+- `results.rs`: with a `CnrHost` the overlay shows "Cops & Robbers" + those
+  lines (no rewards block — C&R records nothing to the profile) and the
+  restart row reads `Play again`; the row is the existing restart intent.
+- Docs: README, ledger CNR-12 (wording/layout are designed, original
+  results presentation unrecovered), PLAN.
+
+Tests: `cnrhud` +2 (body needs a result, ranks, leaver mark, other side's
+verdict; FFA has no team line); `cnr` +4 (local decided → Results once;
+undecided keeps playing; Host/Remote untouched; no match → nothing);
+app-level `a_decided_cops_and_robbers_match_offers_play_again` (menu →
+launch → clock run out → `Results` with the C&R body and `Play again` →
+activate → new generation, undecided match, clock 0).
+
+Evidence: `cargo fmt --all -- --check` PASS; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` clean (no
+diagnostics); `cargo test --locked --workspace` exit 0 (2125 passed, 0
+failed). `MM2_RETAIL=/Users/linus/coding/rust-mm2/retail cargo test
+--locked -p mm2_app --test app cops_and_robbers` 3 passed incl. the retail
+session test. No screenshot of the new screen (it reuses the results
+overlay; not captured), no audio, no two-process run. No processes left.
+
+Open: commentary, menu-hosted lobby offer, host-side rematch, client
+carrier-mass prediction, two-process started match; F27-AC01..06 open.
+Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F27-B.4c (menu leg): offer Cops & Robbers from the main menu (new-run iteration 20)
 
 Selection: the previous review passed with no blocking findings; its gaps

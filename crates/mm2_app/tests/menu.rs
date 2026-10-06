@@ -3031,3 +3031,82 @@ fn the_menu_offers_cops_and_robbers_where_the_city_can_seed_a_round() {
         "the launched mode builds the match"
     );
 }
+
+/// F27-B.4c (rematch leg): a decided single-seat match opens the
+/// match-over screen instead of idling on a frozen HUD, and its *Play
+/// again* row begins a fresh generation with a fresh match — the same
+/// restart a race's results use, so nothing of the old match survives.
+#[test]
+fn a_decided_cops_and_robbers_match_offers_play_again() {
+    use mm2_app::cnr::{CnrHost, end_decided_match};
+    use mm2_app::results::ResultsUi;
+
+    let tmp = install();
+    let body: String = (0..3)
+        .map(|i| format!("{},0,140,0,15,0,0,0,\n", 60.0 + 20.0 * i as f32))
+        .collect();
+    write(
+        tmp.path(),
+        "race/testcity/multicopwaypoints.csv",
+        format!("{WAYPOINTS}{body}"),
+    );
+    let mut app = menu_app(tmp.path(), None);
+    app.add_systems(Update, end_decided_match.after(session::drive_session));
+    app.update();
+    activate_row(&mut app, "Cops & Robbers");
+    activate_row(&mut app, "testcity");
+    activate_row(&mut app, "Limit:"); // 5 minutes
+    activate_row(&mut app, "Start match");
+    assert!(run_until(&mut app, 12, |a| phase(a) == SessionPhase::Playing));
+    let first = app.world().resource::<Session>().generation();
+    assert!(
+        app.world().resource::<CnrHost>().game.outcome().is_none(),
+        "a fresh match is undecided"
+    );
+
+    // Run the match clock out; the screen opens on the next step.
+    {
+        let mut host = app.world_mut().resource_mut::<CnrHost>();
+        for _ in 0..(5 * 60 * mm2_game::RACE_TICK_HZ) {
+            host.game.tick();
+        }
+        assert!(host.game.outcome().is_some());
+    }
+    app.update();
+    assert_eq!(phase(&app), SessionPhase::Results);
+    app.update();
+    let texts = |app: &mut App| -> Vec<String> {
+        let mut q = app.world_mut().query_filtered::<&Text, With<ResultsUi>>();
+        q.iter(app.world()).map(|t| t.0.clone()).collect()
+    };
+    let shown = texts(&mut app);
+    assert!(shown.iter().any(|t| t == "Cops & Robbers"), "{shown:?}");
+    assert!(
+        shown.iter().any(|t| t.contains("Play again")),
+        "the restart row is named for the match: {shown:?}"
+    );
+    assert!(
+        shown.iter().any(|t| t.starts_with("time - played 5:00")),
+        "{shown:?}"
+    );
+    assert!(
+        !shown.iter().any(|t| t.contains("Restart race")),
+        "{shown:?}"
+    );
+
+    // Play again: down to the row, activate; a fresh generation plays
+    // a fresh, undecided match.
+    press(&mut app, KeyCode::ArrowDown);
+    press(&mut app, KeyCode::Enter);
+    assert!(
+        run_until(&mut app, 24, |a| {
+            phase(a) == SessionPhase::Playing
+                && a.world().resource::<Session>().generation() != first
+        }),
+        "the rematch never started: {:?}",
+        phase(&app)
+    );
+    let host = app.world().resource::<CnrHost>();
+    assert!(host.game.outcome().is_none());
+    assert_eq!(host.game.elapsed_ticks(), 0, "the clock starts over");
+}

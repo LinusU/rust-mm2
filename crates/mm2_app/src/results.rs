@@ -42,7 +42,10 @@ use mm2_game::{
     navigation_target, ordinal,
 };
 
+use crate::cnr::{CnrHost, participant_id};
+use crate::cnrhud::result_lines;
 use crate::menu::{MenuCommand, MenuShell};
+use crate::netdrive::NetPlayer;
 use crate::opponents::OpponentDriver;
 use crate::progression::SessionReport;
 use crate::session::SessionControl;
@@ -63,15 +66,17 @@ struct ResultsRow {
 }
 
 /// The results overlay's rows — `has_menu` only changes the continue
-/// row's label, same convention as the pause menu.
-fn results_rows(has_menu: bool) -> Vec<ResultsRow> {
+/// row's label, same convention as the pause menu; `cnr` (a Cops &
+/// Robbers match is the session) names the restart row for what it
+/// replays.
+fn results_rows(has_menu: bool, cnr: bool) -> Vec<ResultsRow> {
     vec![
         ResultsRow {
             text: if has_menu { "Continue to menu" } else { "Quit" }.into(),
             action: ResultsAction::Continue,
         },
         ResultsRow {
-            text: "Restart race".into(),
+            text: if cnr { "Play again" } else { "Restart race" }.into(),
             action: ResultsAction::Restart,
         },
     ]
@@ -117,11 +122,12 @@ pub fn results_input(
     mut control: ResMut<SessionControl>,
     mut results: ResMut<ResultsMenu>,
     menu_shell: Option<Res<MenuShell>>,
+    cnr: Option<Res<CnrHost>>,
 ) {
     if !matches!(session.phase(), SessionPhase::Results) {
         return;
     }
-    let rows = results_rows(menu_shell.is_some());
+    let rows = results_rows(menu_shell.is_some(), cnr.is_some());
     let mut cmds = Vec::new();
     if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::KeyW) {
         cmds.push(MenuCommand::Up);
@@ -272,6 +278,8 @@ pub fn results_present(
     menu_shell: Option<Res<MenuShell>>,
     ledger: Option<Res<ResultLedger>>,
     report: Option<Res<SessionReport>>,
+    cnr: Option<Res<CnrHost>>,
+    cars: Query<(&Player, Option<&NetPlayer>)>,
     participants: Query<(&Player, &RaceProgress, Option<&OpponentDriver>)>,
     roots: Query<Entity, (With<ResultsUi>, Without<ChildOf>)>,
 ) {
@@ -297,114 +305,142 @@ pub fn results_present(
         commands.entity(root).despawn();
     }
 
-    let generation = session.generation();
-    let field: Vec<(&Player, &RaceProgress, Option<&OpponentDriver>)> =
-        participants.iter().collect();
-    let n_field = field.len();
-    let name_of = |id: mm2_game::PlayerId| -> String {
-        field
-            .iter()
-            .find(|(p, _, _)| p.id == id)
-            .map(|(p, _, o)| participant_name(p, *o))
-            .unwrap_or_else(|| format!("driver {}", id.0))
-    };
-    let secs = |ticks: u64| ticks as f32 / RACE_TICK_HZ as f32;
-
     let mut lines: Vec<(String, f32, Color)> = Vec::new();
-    lines.push((
-        "Race results".to_string(),
-        34.0,
-        Color::srgb(0.95, 0.9, 0.6),
-    ));
+    if let Some(host) = cnr.as_ref() {
+        // A Cops & Robbers match: its own verdict and standings, read
+        // from the host's decided match. No rewards block — nothing
+        // here is recorded to the profile (the mode has no authored
+        // progression).
+        let me = cars
+            .iter()
+            .find(|(p, _)| p.control == PlayerControl::Local)
+            .map(|(p, net)| participant_id(p, net));
+        lines.push((
+            "Cops & Robbers".to_string(),
+            34.0,
+            Color::srgb(0.95, 0.9, 0.6),
+        ));
+        let view = host.game.view();
+        let body = result_lines(&view, me, RACE_TICK_HZ).unwrap_or_default();
+        for (i, text) in body.into_iter().enumerate() {
+            let (size, color) = if i == 0 {
+                (24.0, Color::srgb(1.0, 1.0, 1.0))
+            } else {
+                (20.0, Color::srgb(0.85, 0.85, 0.9))
+            };
+            lines.push((text, size, color));
+        }
+    } else {
+        let generation = session.generation();
+        let field: Vec<(&Player, &RaceProgress, Option<&OpponentDriver>)> =
+            participants.iter().collect();
+        let n_field = field.len();
+        let name_of = |id: mm2_game::PlayerId| -> String {
+            field
+                .iter()
+                .find(|(p, _, _)| p.id == id)
+                .map(|(p, _, o)| participant_name(p, *o))
+                .unwrap_or_else(|| format!("driver {}", id.0))
+        };
+        let secs = |ticks: u64| ticks as f32 / RACE_TICK_HZ as f32;
 
-    // The local outcome: placing + total time on a finish (UI-5), or
-    // the expiry on a time-out. A session with no local participant or
-    // no resolved state should not reach `Results`; the fallback keeps
-    // the screen honest if one does.
-    let local = field
-        .iter()
-        .find(|(p, _, _)| p.control == PlayerControl::Local);
-    let headline = match local.map(|(_, pr, _)| &pr.state) {
-        Some(ParticipantState::Finished { race_ticks, .. }) => {
-            let place = local
-                .and_then(|(p, _, _)| {
-                    ledger
-                        .as_ref()
-                        .and_then(|l| l.place_of_in(generation, p.id))
-                })
-                .map(|p| match n_field {
-                    n if n > 1 => format!("{} of {n}", ordinal(p)),
-                    _ => ordinal(p),
-                });
-            match place {
-                Some(p) => format!("{p} - {:.1}s", secs(*race_ticks)),
-                None => format!("Finished - {:.1}s", secs(*race_ticks)),
+        lines.push((
+            "Race results".to_string(),
+            34.0,
+            Color::srgb(0.95, 0.9, 0.6),
+        ));
+
+        // The local outcome: placing + total time on a finish (UI-5), or
+        // the expiry on a time-out. A session with no local participant or
+        // no resolved state should not reach `Results`; the fallback keeps
+        // the screen honest if one does.
+        let local = field
+            .iter()
+            .find(|(p, _, _)| p.control == PlayerControl::Local);
+        let headline = match local.map(|(_, pr, _)| &pr.state) {
+            Some(ParticipantState::Finished { race_ticks, .. }) => {
+                let place = local
+                    .and_then(|(p, _, _)| {
+                        ledger
+                            .as_ref()
+                            .and_then(|l| l.place_of_in(generation, p.id))
+                    })
+                    .map(|p| match n_field {
+                        n if n > 1 => format!("{} of {n}", ordinal(p)),
+                        _ => ordinal(p),
+                    });
+                match place {
+                    Some(p) => format!("{p} - {:.1}s", secs(*race_ticks)),
+                    None => format!("Finished - {:.1}s", secs(*race_ticks)),
+                }
+            }
+            Some(ParticipantState::TimedOut { .. }) => "Out of time".to_string(),
+            _ => "Race over".to_string(),
+        };
+        lines.push((headline, 24.0, Color::srgb(1.0, 1.0, 1.0)));
+        lines.push((String::new(), 8.0, Color::NONE));
+
+        // The field, in ledger order — resolved entries with their
+        // outcome, unresolved ones still racing behind the screen (DSN-11)
+        // until their own result lands.
+        if let Some(ledger) = ledger.as_ref() {
+            let standings = ledger.standings_in(generation);
+            for (i, result) in standings.iter().enumerate() {
+                let outcome = match result.outcome {
+                    SessionOutcome::Finished { race_ticks } => format!("{:.1}s", secs(race_ticks)),
+                    SessionOutcome::TimedOut { .. } => "out of time".to_string(),
+                };
+                lines.push((
+                    format!("{}. {} - {outcome}", i + 1, name_of(result.id.participant)),
+                    20.0,
+                    Color::srgb(0.85, 0.85, 0.9),
+                ));
+            }
+            let mut pending: Vec<&Player> = field
+                .iter()
+                .map(|(p, _, _)| *p)
+                .filter(|p| !standings.iter().any(|r| r.id.participant == p.id))
+                .collect();
+            pending.sort_by_key(|p| p.id);
+            for p in pending {
+                lines.push((
+                    format!("   {} - still racing", name_of(p.id)),
+                    20.0,
+                    Color::srgb(0.6, 0.6, 0.65),
+                ));
             }
         }
-        Some(ParticipantState::TimedOut { .. }) => "Out of time".to_string(),
-        _ => "Race over".to_string(),
-    };
-    lines.push((headline, 24.0, Color::srgb(1.0, 1.0, 1.0)));
-    lines.push((String::new(), 8.0, Color::NONE));
 
-    // The field, in ledger order — resolved entries with their
-    // outcome, unresolved ones still racing behind the screen (DSN-11)
-    // until their own result lands.
-    if let Some(ledger) = ledger.as_ref() {
-        let standings = ledger.standings_in(generation);
-        for (i, result) in standings.iter().enumerate() {
-            let outcome = match result.outcome {
-                SessionOutcome::Finished { race_ticks } => format!("{:.1}s", secs(race_ticks)),
-                SessionOutcome::TimedOut { .. } => "out of time".to_string(),
-            };
-            lines.push((
-                format!("{}. {} - {outcome}", i + 1, name_of(result.id.participant)),
-                20.0,
-                Color::srgb(0.85, 0.85, 0.9),
-            ));
-        }
-        let mut pending: Vec<&Player> = field
-            .iter()
-            .map(|(p, _, _)| *p)
-            .filter(|p| !standings.iter().any(|r| r.id.participant == p.id))
-            .collect();
-        pending.sort_by_key(|p| p.id);
-        for p in pending {
-            lines.push((
-                format!("   {} - still racing", name_of(p.id)),
-                20.0,
-                Color::srgb(0.6, 0.6, 0.65),
-            ));
+        // Rewards — the real disposition, not a guess: grants, "recorded",
+        // or the reason nothing was kept.
+        if let Some(report) = report.as_ref().filter(|r| r.generation == generation) {
+            if !report.granted.is_empty() || report.recorded || report.note.is_some() {
+                lines.push((String::new(), 8.0, Color::NONE));
+            }
+            for grant in &report.granted {
+                lines.push((
+                    format!("Unlocked: {grant}"),
+                    20.0,
+                    Color::srgb(0.55, 0.9, 0.5),
+                ));
+            }
+            if report.recorded {
+                lines.push((
+                    "Result saved to the driver profile".to_string(),
+                    18.0,
+                    Color::srgb(0.55, 0.8, 0.9),
+                ));
+            }
+            if let Some(note) = &report.note {
+                lines.push((note.clone(), 18.0, Color::srgb(1.0, 0.75, 0.35)));
+            }
         }
     }
-
-    // Rewards — the real disposition, not a guess: grants, "recorded",
-    // or the reason nothing was kept.
-    if let Some(report) = report.as_ref().filter(|r| r.generation == generation) {
-        if !report.granted.is_empty() || report.recorded || report.note.is_some() {
-            lines.push((String::new(), 8.0, Color::NONE));
-        }
-        for grant in &report.granted {
-            lines.push((
-                format!("Unlocked: {grant}"),
-                20.0,
-                Color::srgb(0.55, 0.9, 0.5),
-            ));
-        }
-        if report.recorded {
-            lines.push((
-                "Result saved to the driver profile".to_string(),
-                18.0,
-                Color::srgb(0.55, 0.8, 0.9),
-            ));
-        }
-        if let Some(note) = &report.note {
-            lines.push((note.clone(), 18.0, Color::srgb(1.0, 0.75, 0.35)));
-        }
-    }
-
     lines.push((String::new(), 8.0, Color::NONE));
-    for (i, row) in results_rows(menu_shell.is_some()).iter().enumerate() {
+    for (i, row) in results_rows(menu_shell.is_some(), cnr.is_some())
+        .iter()
+        .enumerate()
+    {
         let (text, color) = if i == results.focus {
             // The bundled font has no `›` glyph — ASCII markers only
             // (same constraint as the root menu and pause overlay).

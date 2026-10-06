@@ -92,6 +92,63 @@ fn side_points(view: &GoldView, side: Side) -> u32 {
         .fold(0u32, |a, s| a.saturating_add(s.score))
 }
 
+/// Why a match ended, in the readout's words.
+fn reason_text(reason: EndReason) -> &'static str {
+    match reason {
+        EndReason::PointLimit => "point limit",
+        EndReason::TimeLimit => "time",
+    }
+}
+
+/// Who won, from `me`'s seat (`YOU WIN` only for the local participant).
+fn verdict_text(winner: Winner, me: Option<PlayerId>) -> String {
+    match winner {
+        Winner::Tie => "TIE".to_string(),
+        Winner::Player(p) if Some(p) == me => "YOU WIN".to_string(),
+        Winner::Player(p) => format!("PLAYER {} WINS", p.0),
+        Winner::Side(s) => format!("{} WIN", side_label(s)),
+    }
+}
+
+/// The match-over screen's body: the verdict, how long the match ran,
+/// the team totals where it is team-scored, then every participant best
+/// first (leavers marked). `None` while the match is undecided — the
+/// screen has nothing to say before there is a result.
+pub fn result_lines(view: &GoldView, me: Option<PlayerId>, hz: u32) -> Option<Vec<String>> {
+    let outcome = view.outcome?;
+    let mut lines = vec![
+        verdict_text(outcome.winner, me),
+        format!(
+            "{} - played {}",
+            reason_text(outcome.reason),
+            clock_text(outcome.at_tick, hz)
+        ),
+    ];
+    if view.variant.team_scored() {
+        let totals: Vec<String> = view
+            .variant
+            .sides()
+            .iter()
+            .map(|&s| format!("{} {}", side_label(s), side_points(view, s)))
+            .collect();
+        lines.push(totals.join("   "));
+    }
+    for (i, s) in view.standings.iter().enumerate() {
+        let name = if Some(s.player) == me {
+            "You".to_string()
+        } else {
+            format!("Player {}", s.player.0)
+        };
+        let side = match side_label(s.side) {
+            "" => String::new(),
+            label => format!(" ({label})"),
+        };
+        let left = if s.connected { "" } else { " - left" };
+        lines.push(format!("{}. {name}{side} - {} pts{left}", i + 1, s.score));
+    }
+    Some(lines)
+}
+
 /// The readout's lines for one participant's view of a match. `me` is
 /// the local participant, if one is seated (`None` shows the match
 /// without a personal line — a spectating or not-yet-seated process).
@@ -138,17 +195,11 @@ pub fn scoreboard_lines(view: &GoldView, me: Option<PlayerId>, hz: u32) -> Vec<S
 
     // The gold, or the result.
     if let Some(outcome) = view.outcome {
-        let reason = match outcome.reason {
-            EndReason::PointLimit => "point limit",
-            EndReason::TimeLimit => "time",
-        };
-        let verdict = match outcome.winner {
-            Winner::Tie => "TIE".to_string(),
-            Winner::Player(p) if Some(p) == me => "YOU WIN".to_string(),
-            Winner::Player(p) => format!("PLAYER {} WINS", p.0),
-            Winner::Side(s) => format!("{} WIN", side_label(s)),
-        };
-        lines.push(format!("MATCH OVER - {verdict} ({reason})"));
+        lines.push(format!(
+            "MATCH OVER - {} ({})",
+            verdict_text(outcome.winner, me),
+            reason_text(outcome.reason)
+        ));
     } else {
         let my_side = mine.map(|i| view.standings[i].side);
         lines.push(match view.state {
@@ -403,6 +454,55 @@ mod tests {
             scoreboard_lines(&won, None, 60).last().unwrap(),
             "MATCH OVER - COPS WIN (point limit)"
         );
+    }
+
+    #[test]
+    fn the_match_over_body_needs_a_result_and_ranks_everyone() {
+        let (mut m, _) = game(
+            CnrVariant::CopsVsRobbers,
+            EndRule::Ticks(60 * 90),
+            &[(A, Side::Robbers), (B, Side::Cops)],
+        );
+        assert_eq!(result_lines(&m.view(), Some(A), 60), None, "undecided");
+        let g = m.gold_position().unwrap();
+        m.resolve_pickups(&[mm2_game::gold::Contact {
+            player: A,
+            position: g,
+            round: m.round(),
+        }]);
+        for _ in 0..(60 * 90) {
+            m.tick();
+        }
+        let lines = result_lines(&m.view(), Some(A), 60).expect("decided");
+        assert_eq!(lines[0], "ROBBERS WIN");
+        assert_eq!(lines[1], "time - played 1:30");
+        assert!(lines[2].starts_with("ROBBERS 25") && lines[2].contains("COPS 0"));
+        assert_eq!(lines[3], "1. You (ROBBERS) - 25 pts");
+        assert_eq!(lines[4], "2. Player 2 (COPS) - 0 pts");
+        // A leaver keeps their row, marked; the other side's verdict
+        // is not "you".
+        let mut view = m.view();
+        view.standings[1].connected = false;
+        let lines = result_lines(&view, Some(B), 60).unwrap();
+        assert_eq!(lines[0], "ROBBERS WIN");
+        assert_eq!(lines[3], "1. Player 1 (ROBBERS) - 25 pts");
+        assert_eq!(lines[4], "2. You (COPS) - 0 pts - left");
+    }
+
+    #[test]
+    fn a_free_for_all_body_has_no_team_line() {
+        let (mut m, _) = game(
+            CnrVariant::FreeForAll,
+            EndRule::Ticks(60),
+            &[(A, Side::Solo), (B, Side::Solo)],
+        );
+        for _ in 0..120 {
+            m.tick();
+        }
+        let lines = result_lines(&m.view(), Some(A), 60).unwrap();
+        assert_eq!(lines[0], "TIE");
+        assert_eq!(lines.len(), 4, "verdict, reason, two rows");
+        assert_eq!(lines[2], "1. You - 0 pts");
     }
 
     #[test]
