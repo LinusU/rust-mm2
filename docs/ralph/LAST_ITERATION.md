@@ -1,3 +1,67 @@
+# Last iteration — Cops & Robbers rule matrix, data half (new-run iteration 9)
+
+Selection: the previous review passed with no blocking findings, so no
+repair was owed. Eight iterations in a row had gone to F26-A, whose
+remaining items are measurement/impairment legs I cannot run here and
+polish on already-bounded paths. F27-A (verify the full C&R rule/settings
+matrix and placement dependencies) was `queued` with the whole mode
+unevidenced — the ledger said "no C&R-specific data discovered" — and is
+a research slice that needs no network or GPU, so it is the highest-value
+ready work.
+
+What was found (all in `docs/research/cnr.md`, each fact classed
+verified / inferred / unknown): the mode's data ships — `race/<city>/
+multicopwaypoints.csv` is the gold/hideout/bank site pool (44 sf rows, 46
+london), plus five marker models (`wpobj_gold`, `pt_hideout`, `pt_bank`,
+`pt_red`, `pt_blue`) with banger records, five map dots, the per-city
+`cnr<city>.csv` commentary tables (14 cue families: get/drop/stash/recover
+per role, has/stashed/dropped per team) and a loading image. The rest is
+code constants read from `Midtown2.exe` (disassembly) and `mmlang.dll`
+(string table): the packed host-settings word and its tables (gold mass
+0/100/200 engine units, time 5/10/20/30 min, points 100/250/500/1,000);
+delivery = 100 points within a 12.0-radius marker with the carrier's mass
+removed; pickup arbitration by the host only when no carrier exists; the
+local carrier's handling scalar 1.0/0.9/0.81. The executable also tries an
+optional `multicopsets.csv` first; no retail install ships one.
+
+Code (no protocol change, no gameplay change): `mm2_content::cnr` —
+`CnrContent::load` resolves the 18 per-city dependencies and the 14 cue
+families through the VFS and records every miss as an issue (never loses a
+denominator entry); typed option tables (`TIME_LIMIT_MINUTES`,
+`POINT_LIMITS`, `GoldMass` with engine units kept separate from the
+documented kilogram reading, `MatchLimit`, `CnrVariant`, `DELIVERY_POINTS`,
+`DELIVERY_RADIUS_M`). `mm2-inspect cnr [--city] [--strict]` audits it
+(strict also fails on an empty city list). Ledger: CNR-5 narrowed, CNR-6…
+CNR-10 added, MP-9 and UNK-10 updated; the inventory's "no C&R data" note
+now points at the audit.
+
+Tests: 14 `mm2_content::cnr` units (complete city, every dependency counted
+when absent, missing pool, under-3 pool, non-finite site, header-less pool,
+empty install, cue family missing/empty, empty cue table, option tables,
+kg ratio, limit choices, variant scoring, paths) and 4 `mm2_inspect::cnr`
+units. All synthetic.
+
+Original-data evidence (separate): `cargo run -p mm2_inspect -- cnr
+/Users/linus/coding/rust-mm2/retail --strict` — london and sf each 18/18
+dependencies, 14/14 cue families, pools of 46 and 44, exit 0. Code facts
+were read by disassembling the retail executable (`objdump`); they are
+reading evidence, not runtime-observed: no original game was run.
+
+Gates (all exit 0): `cargo fmt --all -- --check` PASS; `cargo clippy
+--locked --workspace --all-targets --all-features -- -D warnings` PASS (no
+new allow); `cargo test --locked --workspace` PASS (2014 passed, 0 failed;
+was 1996). No test processes left running.
+
+Not verified / open: the *inferred* items above (variant 1 numbering, the
+radius test direction, the mass unit); what knocks gold loose, pickup
+radius, cop/robber scoring beyond delivery, respawn timing, disconnect and
+out-of-bounds outcomes; the `multicopsets.csv` path is read from code and
+unimplemented. No state machine, HUD or lobby flow exists — F27-B/C stay
+queued behind F25-B, and F27-AC01..06 are all open. Status: implemented
+candidate, not independently checked.
+
+---
+
 # Last iteration — bound the host's power over a client's re-seeks (new-run iteration 8)
 
 Selection: the previous review passed with no blocking findings, so no
