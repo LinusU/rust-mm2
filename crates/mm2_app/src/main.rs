@@ -1898,6 +1898,9 @@ fn main() {
                     // replica the HUD and markers read (idle until a
                     // match frame arrives).
                     mm2_app::cnrnet::apply_cnr.after(net::drive_lobby),
+                    // F27-B.4c: the host's decided match ends this
+                    // client's `Playing` into the match-over screen.
+                    mm2_app::cnr::end_replicated_match.after(mm2_app::cnrnet::apply_cnr),
                     // F25-B: `R` under a predicted session asks the
                     // authority for the reset `reset_input` is gated
                     // against — the granted answer arrives as the

@@ -428,23 +428,41 @@ pub fn cnr_host_step(
     }
 }
 
-/// Fixed-step: once a *local* match is decided, move the session to
-/// `Results` so the match-over screen ([`crate::results`]) offers
-/// *Play again* and *Continue to menu*. Only a `Local`-authority
-/// session does this — a hosted or joined match's restarts belong to
-/// the lobby's `Cancel`/`Start` (the wire mints each match's
-/// generation), so there the decided match stays on the HUD readout
-/// ([`crate::cnrhud`]). Idle without a [`CnrHost`] and while the
-/// session is not `Playing`.
+/// Fixed-step: once the authority's match is decided, move the session
+/// to `Results` so the match-over screen ([`crate::results`]) shows the
+/// verdict. A `Local` session's screen offers *Play again* (the
+/// session's own restart); a hosted one's offers the way back to the
+/// lobby, whose `Cancel`/`Start` mint the next match's generation. The
+/// decided frame still reaches the clients: [`crate::cnrnet::publish_cnr`]
+/// sends in `Results`, and [`end_replicated_match`] moves each client's
+/// session the same way. Idle without a [`CnrHost`] (a client has none)
+/// and while the session is not `Playing`.
 pub fn end_decided_match(host: Option<Res<CnrHost>>, mut session: ResMut<Session>) {
     let Some(host) = host else {
         return;
     };
     if !session.is_playing()
-        || session
-            .config()
-            .is_none_or(|c| c.authority != SessionAuthority::Local)
+        || !session.authority_role().is_authority()
         || host.game.outcome().is_none()
+    {
+        return;
+    }
+    if let Err(e) = session.transition(SessionPhase::Results) {
+        warn!(error = %e, "decided match could not open its results screen");
+    }
+}
+
+/// Client: the host's word that the match is decided ends the local
+/// `Playing` session the same way, so a joined player sees the verdict
+/// instead of a frozen HUD. Idle on the authority, without a replica and
+/// while the replica is undecided.
+pub fn end_replicated_match(replica: Option<Res<CnrReplica>>, mut session: ResMut<Session>) {
+    let Some(replica) = replica else {
+        return;
+    };
+    if !session.is_playing()
+        || session.authority_role().is_authority()
+        || replica.0.outcome.is_none()
     {
         return;
     }
@@ -1744,15 +1762,67 @@ mod tests {
     }
 
     #[test]
-    fn a_hosted_or_joined_match_is_not_ended_from_underneath_the_wire() {
-        for authority in [SessionAuthority::Host, SessionAuthority::Remote] {
-            let mut app = decided_app(authority);
-            app.update();
-            assert!(
-                app.world().resource::<Session>().is_playing(),
-                "{authority:?}: the lobby owns restarts"
-            );
+    fn a_decided_hosted_match_opens_its_results_screen_too() {
+        let mut app = decided_app(SessionAuthority::Host);
+        app.update();
+        assert_eq!(
+            *app.world().resource::<Session>().phase(),
+            SessionPhase::Results
+        );
+    }
+
+    #[test]
+    fn a_client_never_ends_a_match_from_a_host_it_does_not_have() {
+        // A joined session holds no `CnrHost`; were one present it is
+        // not the authority's, so it is not this system's to act on.
+        let mut app = decided_app(SessionAuthority::Remote);
+        app.update();
+        assert!(app.world().resource::<Session>().is_playing());
+    }
+
+    /// A joined session whose replica reports `decided` (or not).
+    fn replica_app(authority: SessionAuthority, decided: bool) -> App {
+        let mut app = enroll_app(CnrVariant::FreeForAll, authority);
+        let (generation, gold) = {
+            let mut session = app.world_mut().resource_mut::<Session>();
+            (session.generation(), session.mint_object_id())
+        };
+        let end = if decided {
+            EndRule::Ticks(5)
+        } else {
+            EndRule::None
+        };
+        let mut game = GoldMatch::new(generation, gold, rules(end), pool(), 3, &[]).unwrap();
+        for _ in 0..10 {
+            game.tick();
         }
+        app.insert_resource(CnrReplica(game.view()))
+            .add_systems(Update, end_replicated_match);
+        app
+    }
+
+    #[test]
+    fn a_client_opens_its_results_screen_when_the_host_says_decided() {
+        let mut app = replica_app(SessionAuthority::Remote, true);
+        app.update();
+        assert_eq!(
+            *app.world().resource::<Session>().phase(),
+            SessionPhase::Results
+        );
+    }
+
+    #[test]
+    fn an_undecided_replica_keeps_a_client_playing() {
+        let mut app = replica_app(SessionAuthority::Remote, false);
+        app.update();
+        assert!(app.world().resource::<Session>().is_playing());
+    }
+
+    #[test]
+    fn the_authority_ignores_a_replica() {
+        let mut app = replica_app(SessionAuthority::Host, true);
+        app.update();
+        assert!(app.world().resource::<Session>().is_playing());
     }
 
     #[test]

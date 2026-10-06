@@ -38,12 +38,13 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_game::{
     CheckpointRule, ParticipantState, Player, PlayerControl, RACE_TICK_HZ, RaceDefinition,
-    RaceProgress, RaceState, ResultLedger, Session, SessionEntity, SessionOutcome, SessionPhase,
-    navigation_target, ordinal,
+    RaceProgress, RaceState, ResultLedger, Session, SessionAuthority, SessionEntity,
+    SessionOutcome, SessionPhase, navigation_target, ordinal,
 };
 
 use crate::cnr::{CnrHost, participant_id};
-use crate::cnrhud::result_lines;
+use crate::cnrhud::{match_view, result_lines};
+use crate::cnrnet::CnrReplica;
 use crate::menu::{MenuCommand, MenuShell};
 use crate::netdrive::NetPlayer;
 use crate::opponents::OpponentDriver;
@@ -65,18 +66,56 @@ struct ResultsRow {
     action: ResultsAction,
 }
 
+/// What this results screen is for: a race (the default), a Cops &
+/// Robbers match this process owns, or one it joined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResultsKind {
+    Race,
+    /// A `Local` match — *Play again* is the session's own restart.
+    CnrLocal,
+    /// A hosted or joined match: the lobby's `Cancel`/`Start` mint the
+    /// next generation, so the only way on is back to the lobby.
+    CnrNetworked,
+}
+
+impl ResultsKind {
+    fn of(session: &Session, host: Option<&CnrHost>, replica: Option<&CnrReplica>) -> Self {
+        if host.is_none() && replica.is_none() {
+            return Self::Race;
+        }
+        if session
+            .config()
+            .is_some_and(|c| c.authority == SessionAuthority::Local)
+        {
+            Self::CnrLocal
+        } else {
+            Self::CnrNetworked
+        }
+    }
+}
+
 /// The results overlay's rows — `has_menu` only changes the continue
-/// row's label, same convention as the pause menu; `cnr` (a Cops &
-/// Robbers match is the session) names the restart row for what it
-/// replays.
-fn results_rows(has_menu: bool, cnr: bool) -> Vec<ResultsRow> {
+/// row's label, same convention as the pause menu; `kind` names the
+/// restart row for what it replays (a networked match has none).
+fn results_rows(has_menu: bool, kind: ResultsKind) -> Vec<ResultsRow> {
+    if kind == ResultsKind::CnrNetworked {
+        return vec![ResultsRow {
+            text: "Back to lobby".into(),
+            action: ResultsAction::Continue,
+        }];
+    }
     vec![
         ResultsRow {
             text: if has_menu { "Continue to menu" } else { "Quit" }.into(),
             action: ResultsAction::Continue,
         },
         ResultsRow {
-            text: if cnr { "Play again" } else { "Restart race" }.into(),
+            text: if kind == ResultsKind::CnrLocal {
+                "Play again"
+            } else {
+                "Restart race"
+            }
+            .into(),
             action: ResultsAction::Restart,
         },
     ]
@@ -115,6 +154,9 @@ pub struct ResultsUi;
 /// Results-phase input. Runs only while `Results`; nav moves focus and
 /// activation maps to the shared session intents — Continue and
 /// `Esc`/`Back` are quit-to-menu (or exit), Restart replays the event.
+// Pad, keys, session intents, the menu shell and the two match
+// sources are each a distinct input; a bundle would only hide them.
+#[allow(clippy::too_many_arguments)]
 pub fn results_input(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
@@ -123,11 +165,13 @@ pub fn results_input(
     mut results: ResMut<ResultsMenu>,
     menu_shell: Option<Res<MenuShell>>,
     cnr: Option<Res<CnrHost>>,
+    replica: Option<Res<CnrReplica>>,
 ) {
     if !matches!(session.phase(), SessionPhase::Results) {
         return;
     }
-    let rows = results_rows(menu_shell.is_some(), cnr.is_some());
+    let kind = ResultsKind::of(&session, cnr.as_deref(), replica.as_deref());
+    let rows = results_rows(menu_shell.is_some(), kind);
     let mut cmds = Vec::new();
     if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::KeyW) {
         cmds.push(MenuCommand::Up);
@@ -279,6 +323,7 @@ pub fn results_present(
     ledger: Option<Res<ResultLedger>>,
     report: Option<Res<SessionReport>>,
     cnr: Option<Res<CnrHost>>,
+    replica: Option<Res<CnrReplica>>,
     cars: Query<(&Player, Option<&NetPlayer>)>,
     participants: Query<(&Player, &RaceProgress, Option<&OpponentDriver>)>,
     roots: Query<Entity, (With<ResultsUi>, Without<ChildOf>)>,
@@ -305,10 +350,12 @@ pub fn results_present(
         commands.entity(root).despawn();
     }
 
+    let kind = ResultsKind::of(&session, cnr.as_deref(), replica.as_deref());
     let mut lines: Vec<(String, f32, Color)> = Vec::new();
-    if let Some(host) = cnr.as_ref() {
+    if kind != ResultsKind::Race {
         // A Cops & Robbers match: its own verdict and standings, read
-        // from the host's decided match. No rewards block — nothing
+        // from the decided match (the authority's, or a client's
+        // replica of it). No rewards block — nothing
         // here is recorded to the profile (the mode has no authored
         // progression).
         let me = cars
@@ -320,8 +367,9 @@ pub fn results_present(
             34.0,
             Color::srgb(0.95, 0.9, 0.6),
         ));
-        let view = host.game.view();
-        let body = result_lines(&view, me, RACE_TICK_HZ).unwrap_or_default();
+        let body = match_view(cnr.as_deref(), replica.as_deref())
+            .and_then(|view| result_lines(&view, me, RACE_TICK_HZ))
+            .unwrap_or_default();
         for (i, text) in body.into_iter().enumerate() {
             let (size, color) = if i == 0 {
                 (24.0, Color::srgb(1.0, 1.0, 1.0))
@@ -437,10 +485,7 @@ pub fn results_present(
         }
     }
     lines.push((String::new(), 8.0, Color::NONE));
-    for (i, row) in results_rows(menu_shell.is_some(), cnr.is_some())
-        .iter()
-        .enumerate()
-    {
+    for (i, row) in results_rows(menu_shell.is_some(), kind).iter().enumerate() {
         let (text, color) = if i == results.focus {
             // The bundled font has no `›` glyph — ASCII markers only
             // (same constraint as the root menu and pause overlay).
@@ -491,4 +536,131 @@ pub fn results_present(
                 ));
             }
         });
+}
+
+#[cfg(test)]
+mod cnr_tests {
+    use super::*;
+    use mm2_game::SessionConfig;
+    use mm2_game::gold::{CarrierLoad, CnrVariant, EndRule, GoldMatch, GoldRules};
+
+    fn session(authority: SessionAuthority) -> Session {
+        let mut session = Session::new();
+        session
+            .begin(SessionConfig {
+                authority,
+                ..SessionConfig::default()
+            })
+            .unwrap();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+        session.transition(SessionPhase::Results).unwrap();
+        session
+    }
+
+    /// A match that has already run out its clock.
+    fn decided(session: &mut Session) -> GoldMatch {
+        let rules = GoldRules {
+            variant: CnrVariant::FreeForAll,
+            end: EndRule::Ticks(5),
+            load: CarrierLoad {
+                added_mass_kg: 250.0,
+                handling_scalar: 0.9,
+            },
+            pickup_points: 25,
+            delivery_points: 100,
+            pickup_radius: 5.0,
+            delivery_radius: 12.0,
+            drop_lockout_ticks: 120,
+        };
+        let pool = (0..4)
+            .map(|i| Vec3::new(i as f32 * 90.0, 0.0, 20.0))
+            .collect();
+        let mut game = GoldMatch::new(
+            session.generation(),
+            session.mint_object_id(),
+            rules,
+            pool,
+            3,
+            &[],
+        )
+        .unwrap();
+        for _ in 0..10 {
+            game.tick();
+        }
+        assert!(game.outcome().is_some());
+        game
+    }
+
+    fn shown(app: &mut App) -> Vec<String> {
+        let mut q = app.world_mut().query_filtered::<&Text, With<ResultsUi>>();
+        q.iter(app.world()).map(|t| t.0.clone()).collect()
+    }
+
+    #[test]
+    fn the_rows_follow_who_owns_the_restart() {
+        let labels = |kind| {
+            results_rows(true, kind)
+                .into_iter()
+                .map(|r| r.text)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            labels(ResultsKind::Race),
+            ["Continue to menu", "Restart race"]
+        );
+        assert_eq!(
+            labels(ResultsKind::CnrLocal),
+            ["Continue to menu", "Play again"]
+        );
+        // The lobby mints the next generation: one way on, no fake
+        // "play again" that the lifecycle would swallow.
+        assert_eq!(labels(ResultsKind::CnrNetworked), ["Back to lobby"]);
+    }
+
+    #[test]
+    fn a_match_is_networked_unless_the_session_is_local() {
+        let mut s = session(SessionAuthority::Local);
+        let game = decided(&mut s);
+        let replica = CnrReplica(game.view());
+        let host = crate::cnr::CnrHost::new(game);
+        for (authority, kind) in [
+            (SessionAuthority::Local, ResultsKind::CnrLocal),
+            (SessionAuthority::Host, ResultsKind::CnrNetworked),
+            (SessionAuthority::Remote, ResultsKind::CnrNetworked),
+        ] {
+            let s = session(authority);
+            assert_eq!(ResultsKind::of(&s, Some(&host), None), kind);
+            assert_eq!(ResultsKind::of(&s, None, Some(&replica)), kind);
+            assert_eq!(ResultsKind::of(&s, None, None), ResultsKind::Race);
+        }
+    }
+
+    #[test]
+    fn a_joined_client_sees_the_hosts_verdict_and_one_way_back() {
+        let mut s = session(SessionAuthority::Remote);
+        let replica = CnrReplica(decided(&mut s).view());
+        let mut app = App::new();
+        app.insert_resource(s)
+            .insert_resource(replica)
+            .init_resource::<ResultsMenu>()
+            .add_systems(Update, results_present);
+        app.update();
+        let shown = shown(&mut app);
+        assert!(shown.iter().any(|t| t == "Cops & Robbers"), "{shown:?}");
+        assert!(
+            shown.iter().any(|t| t.starts_with("time - played")),
+            "{shown:?}"
+        );
+        assert!(
+            shown.iter().any(|t| t.contains("Back to lobby")),
+            "{shown:?}"
+        );
+        assert!(
+            !shown
+                .iter()
+                .any(|t| t.contains("Restart race") || t.contains("Play again")),
+            "{shown:?}"
+        );
+    }
 }

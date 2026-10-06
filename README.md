@@ -158,7 +158,9 @@ its reason when it cannot seed a round), cycle the game, gold weight and
 limit, then `Start match`. When a one-seat match is decided (point or
 time limit) a match-over screen shows the verdict and standings and
 offers `Play again` (a fresh match) or `Continue to menu`; a hosted or
-joined match stays on the readout. There is no commentary yet.
+joined match shows the same screen to the host and every client but
+offers only `Back to lobby` (the lobby's `Start` begins the next match).
+There is no commentary yet.
 
 Driver profiles live in the OS user-data directory (never the install):
 `--profile <id|name>` binds one, `--new-profile <name>` creates and binds

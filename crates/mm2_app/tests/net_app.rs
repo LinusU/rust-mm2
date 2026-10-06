@@ -8291,6 +8291,84 @@ fn the_host_publishes_the_cops_and_robbers_match_on_change_and_at_the_cadence() 
     assert_eq!(sent(&app), 3);
 }
 
+/// F27-B.4c: a hosted match that is decided ends the host's session in
+/// `Results` — and the decided frame still reaches the peers from
+/// there, so a joined client can open its own match-over screen.
+#[test]
+fn a_decided_hosted_match_still_publishes_from_its_results_screen() {
+    use mm2_app::cnr::{CnrHost, end_decided_match};
+    use mm2_app::cnrnet::decode_view;
+    use mm2_game::gold::{CarrierLoad, CnrVariant, EndRule, GoldMatch, GoldRules, Side};
+
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let mut app = host_app(vfs, link);
+    app.add_systems(Update, end_decided_match);
+    let mut peer = ready_peer(addr, "eve", fp);
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<LobbyState>()
+            .roster
+            .iter()
+            .any(|e| e.pick.is_some())
+    });
+    let generation = hosted_playing(&mut app);
+
+    let mut game = GoldMatch::new(
+        generation,
+        mm2_game::ObjectId {
+            generation,
+            slot: 90,
+        },
+        GoldRules {
+            variant: CnrVariant::FreeForAll,
+            end: EndRule::Ticks(5),
+            load: CarrierLoad::NONE,
+            pickup_points: 25,
+            delivery_points: 100,
+            pickup_radius: 4.0,
+            delivery_radius: 12.0,
+            drop_lockout_ticks: 10,
+        },
+        (0..6)
+            .map(|i| Vec3::new(i as f32 * 40.0, 0.0, -(i as f32) * 25.0))
+            .collect(),
+        11,
+        &[(mm2_game::PlayerId(0), Side::Solo)],
+    )
+    .unwrap();
+    for _ in 0..10 {
+        game.tick();
+    }
+    assert!(game.outcome().is_some());
+    app.insert_resource(CnrHost::new(game));
+    app.update();
+    assert_eq!(
+        *app.world().resource::<Session>().phase(),
+        SessionPhase::Results,
+        "the decided hosted match opens its results screen"
+    );
+    // Whatever frame went out while the phase flipped, the last one the
+    // peer can read says the match is decided.
+    for _ in 0..3 {
+        app.update();
+    }
+    let mut decided = false;
+    for _ in 0..8 {
+        let Message::Cnr { frame, .. } =
+            until_wire(&mut peer, |m| matches!(m, Message::Cnr { .. }))
+        else {
+            unreachable!()
+        };
+        if decode_view(generation, &frame).unwrap().outcome.is_some() {
+            decided = true;
+            break;
+        }
+    }
+    assert!(decided, "the peer never saw the decided match");
+}
+
 /// F27-B.3 client half: the host's match frame lands as a replica for
 /// the session's generation; a reordered older frame, a repeat,
 /// another generation's frame and a self-contradicting one change

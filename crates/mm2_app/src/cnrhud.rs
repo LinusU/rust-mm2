@@ -110,6 +110,16 @@ fn verdict_text(winner: Winner, me: Option<PlayerId>) -> String {
     }
 }
 
+/// The match this process can see: the authority's own, else a client's
+/// replica of it, else none.
+pub fn match_view(host: Option<&CnrHost>, replica: Option<&CnrReplica>) -> Option<GoldView> {
+    match (host, replica) {
+        (Some(host), _) => Some(host.game.view()),
+        (None, Some(replica)) => Some(replica.0.clone()),
+        (None, None) => None,
+    }
+}
+
 /// The match-over screen's body: the verdict, how long the match ran,
 /// the team totals where it is team-scored, then every participant best
 /// first (leavers marked). `None` while the match is undecided — the
@@ -239,11 +249,7 @@ pub fn update_cnr_scoreboard(
     cars: Query<(&Player, Option<&NetPlayer>)>,
     mut board: Query<(&mut Text, &mut Visibility), With<CnrScoreboard>>,
 ) {
-    let view = match (&host, &replica) {
-        (Some(host), _) => Some(host.game.view()),
-        (None, Some(replica)) => Some(replica.0.clone()),
-        (None, None) => None,
-    };
+    let view = match_view(host.as_deref(), replica.as_deref());
     let me = cars
         .iter()
         .find(|(p, _)| p.control == PlayerControl::Local)

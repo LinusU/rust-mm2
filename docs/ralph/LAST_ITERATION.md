@@ -1,3 +1,48 @@
+# Last iteration — F27-B.4c (rematch-net leg): the match-over screen for hosted and joined matches (new-run iteration 23)
+
+Selection: the previous review passed with no blocking findings; its
+gap "hosted and joined matches still freeze on the HUD readout after the
+match is decided" is the one a single process can close honestly. The
+visual/GPU gaps and the two-process run stay out of reach here.
+
+Change:
+- `cnr::end_decided_match` now acts for any authority (was `Local`
+  only), so a hosted decided match opens `Results` on the host.
+  `publish_cnr` already sends from `Results`, so the decided frame still
+  reaches the peers.
+- `cnr::end_replicated_match` (new, `main.rs` after `apply_cnr`): a
+  client whose `CnrReplica` reports an outcome moves `Playing → Results`.
+- `results.rs`: `ResultsKind` (Race / CnrLocal / CnrNetworked) picks the
+  rows; a networked match has one row, `Back to lobby` (Continue → the
+  existing quit-to-menu, which lands in the host/join lobby). There is no
+  `Play again` there: the session lifecycle consumes a restart intent
+  without beginning for `Host`/`Remote` authority, so the row would lie.
+  The body reads the host's match or the replica through the new
+  `cnrhud::match_view` (also used by the HUD readout).
+- Docs: README, ledger CNR-12, PLAN.
+
+Tests: `cnr` — decided hosted match opens Results; a `Remote` session
+with a (stray) `CnrHost` is untouched; client: decided replica opens
+Results, undecided keeps playing, authority ignores a replica; `results`
+— rows per kind, kind per authority, a joined client's screen shows the
+verdict and `Back to lobby` only; `network` — a decided hosted match
+moves the host to Results and the peer still receives a decided `Cnr`
+frame off the real socket.
+
+Gates (iteration 23, foreground): `cargo fmt --all -- --check` pass;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D
+warnings` exit 0; `cargo test --locked --workspace` exit 0, no failing
+result line. No processes left running.
+
+Not verified: two real processes (host + joined client) playing a match
+to its end; any screenshot of the screens; the retained `Playing` input
+of a client between the host's decision and the frame arriving (a few
+frames of local driving). Open: commentary, menu-hosted lobby offer,
+client carrier-mass prediction, two-process started match; F27-AC01..06.
+Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F27-B.4c (rematch leg): match-over screen with Play again (new-run iteration 22)
 
 Selection: the previous review passed with no blocking findings; its gaps
