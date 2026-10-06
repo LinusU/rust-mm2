@@ -789,6 +789,28 @@ impl GoldMatch {
         }
     }
 
+    /// The side the next participant should take: the variant's side
+    /// with the fewest connected members, ties to the first side
+    /// listed ([`CnrVariant::sides`]). *Designed* — the original lets a
+    /// player pick a team in its lobby, which this slice does not model
+    /// (ledger CNR-12) — so a roster fills the sides alternately and
+    /// every process that applies it to the same arrival order agrees.
+    pub fn balanced_side(&self) -> Side {
+        let sides = self.rules.variant.sides();
+        let count = |side: Side| {
+            self.members
+                .values()
+                .filter(|m| m.connected && m.side == side)
+                .count()
+        };
+        // `min_by_key` returns the first minimum, which is the tie rule.
+        sides
+            .iter()
+            .copied()
+            .min_by_key(|&s| count(s))
+            .unwrap_or(Side::Solo)
+    }
+
     /// Add a participant mid-match (late join). They start at zero
     /// points; the gold's state is unaffected.
     pub fn join(&mut self, player: PlayerId, side: Side) -> Result<(), GoldError> {
@@ -1222,6 +1244,36 @@ mod tests {
             new(1, nan, pool(4), &[]).unwrap_err(),
             GoldError::BadRules("delivery_radius")
         );
+    }
+
+    #[test]
+    fn joiners_fill_the_sides_alternately() {
+        let g = ObjectId {
+            generation: 1,
+            slot: 0,
+        };
+        for (variant, first, second) in [
+            (CnrVariant::CopsVsRobbers, Side::Robbers, Side::Cops),
+            (CnrVariant::RobbersVsRobbers, Side::Red, Side::Blue),
+        ] {
+            let mut m =
+                GoldMatch::new(1, g, rules(variant, EndRule::None), pool(4), 1, &[]).unwrap();
+            let mut got = Vec::new();
+            for i in 1..=5u16 {
+                let side = m.balanced_side();
+                m.join(PlayerId(i), side).unwrap();
+                got.push(side);
+            }
+            assert_eq!(got, [first, second, first, second, first]);
+            // A leaver frees its place: the short side is taken next.
+            m.leave(PlayerId(1), Vec3::ZERO).unwrap();
+            m.leave(PlayerId(3), Vec3::ZERO).unwrap();
+            assert_eq!(m.balanced_side(), first);
+        }
+        let mut m = ffa(EndRule::None);
+        assert_eq!(m.balanced_side(), Side::Solo);
+        m.join(PlayerId(9), Side::Solo).unwrap();
+        assert_eq!(m.balanced_side(), Side::Solo);
     }
 
     #[test]
