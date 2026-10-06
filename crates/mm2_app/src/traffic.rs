@@ -206,13 +206,13 @@ use crate::contracts::{
 /// bound (or, failing that, the tuning's authored `Size`) describes,
 /// and the resolved ambient engine table (F07-B.6) when the class has
 /// one — `None` keeps the class's cars noteless like an absent record.
-struct AmbientClass {
-    model: mm2_content::VehicleModel,
-    collider: Collider,
+pub(crate) struct AmbientClass {
+    pub(crate) model: mm2_content::VehicleModel,
+    pub(crate) collider: Collider,
     /// `aud/cardata/ambient/<id>_engine.csv` (or the authored default),
     /// resolved to mix parameters. `None` on absent/malformed tables or
     /// a sentinel sample — authored silence, never a spawn blocker.
-    audio: Option<mm2_game::AmbientEngineSpec>,
+    pub(crate) audio: Option<mm2_game::AmbientEngineSpec>,
 }
 
 /// Session-scoped ambient-traffic state: the merged roster, the nav
@@ -370,6 +370,12 @@ pub struct TrafficSignal {
 }
 
 impl AmbientTraffic {
+    /// The merged roster the class draws index — what a frame's roster
+    /// digest vouches for.
+    pub fn roster(&self) -> &AmbientRoster {
+        &self.roster
+    }
+
     /// The navigation graph the cars follow — exposed for diagnostics
     /// and tests that resolve a [`LaneCursor`] to a world pose.
     pub fn graph(&self) -> &NavGraph {
@@ -429,11 +435,23 @@ fn partition_nav_issues(issues: &[NavIssue]) -> (Vec<usize>, Vec<&NavIssue>) {
     (quiet, notable)
 }
 
+/// Whether a session fields ambient traffic at all (F26-A). Offline
+/// sessions always do. A networked one does only in free-roam Cruise:
+/// MP-4 (documented) says multiplayer *races* carry no ambient traffic,
+/// cops or AI opponents, and the help text names no Cruise exception —
+/// so traffic in networked Cruise is an enhanced policy (the F26 spec
+/// asks Cruise clients to share traffic), not a verified original rule.
+/// On a `Host` the authority simulates the cars and `worldtraffic`
+/// replicates them; a `Remote` client only receives them.
+pub fn fields_ambient_traffic(config: &SessionConfig) -> bool {
+    config.authority == SessionAuthority::Local || config.mode == mm2_game::SessionMode::Cruise
+}
+
 /// Load the ambient setup for this session and spawn the initial plan.
 /// Returns the resource the caller inserts — `None` when the session
-/// is networked (MP-4 removes ambient traffic from every networked
-/// mode, both sides of the wire), the world is not a city, or no
-/// layer authors a roster. All failures log and degrade to *no*
+/// does not field traffic ([`fields_ambient_traffic`]: networked races,
+/// and a `Remote` client, whose cars are the host's copies), the world
+/// is not a city, or no layer authors a roster. All failures log and degrade to *no*
 /// ambient traffic; ambient cars never sink an otherwise loadable
 /// session.
 ///
@@ -466,12 +484,10 @@ pub fn load_ambient_traffic(
     images: &mut Assets<Image>,
     materials: &mut Assets<StandardMaterial>,
 ) -> Option<AmbientTraffic> {
-    // MP-4 (documented): a networked session fields no ambient
-    // traffic at all — not even on the authoritative host, where the
-    // lobby's remote cars would collide with lane followers no client
-    // replicates and each process would diverge its own set anyway.
-    // `Local` authority only; F26 replication would revisit this.
-    if config.authority != SessionAuthority::Local {
+    // Only the process that runs the rules simulates lane followers:
+    // a `Remote` client's cars are copies of the host's, spawned by
+    // `worldtraffic` from its frames, never a second local world.
+    if !fields_ambient_traffic(config) || config.authority == SessionAuthority::Remote {
         return None;
     }
     let WorldMode::City { psdl } = &config.world else {
@@ -710,7 +726,7 @@ pub fn drive_signals(
 /// The ambient engine table resolves alongside (F07-B.6): a malformed
 /// resolved file warns once per class, an absent/sentinel one is
 /// authored silence — neither blocks the spawn.
-fn class_assets(vfs: &Vfs, spec: &AmbientSpec) -> Option<AmbientClass> {
+pub(crate) fn class_assets(vfs: &Vfs, spec: &AmbientSpec) -> Option<AmbientClass> {
     let loaded = mm2_content::ambient_vehicle(vfs, &spec.id).ok()?;
     let collider = loaded
         .bound

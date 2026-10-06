@@ -62,6 +62,7 @@ pub mod water;
 pub mod wheel_fx;
 pub mod worldclock;
 pub mod worldprops;
+pub mod worldtraffic;
 
 pub(crate) mod motion_evidence;
 

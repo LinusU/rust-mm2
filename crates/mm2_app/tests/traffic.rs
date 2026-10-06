@@ -27,6 +27,7 @@ use mm2_game::{
     SpawnPose, StuckWindow, VehicleDamage, WorldMode, advance_session_tick,
     despawn_session_entities,
 };
+use mm2_net::Message;
 use mm2_vehicle::{VehicleConfig, VehiclePlugin};
 
 // ---------------------------------------------------------------------------
@@ -698,16 +699,57 @@ fn session_spawns_the_seeded_plan_on_authored_lanes() {
     assert_eq!(a, b, "seeded placement must replay identically");
 }
 
-/// MP-4 (documented): a networked session fields no ambient traffic —
-/// the lobby's humans are the population, and an unreplicated lane
-/// follower would diverge per process anyway. The same install that
-/// fills the roster under `Local` spawns no `AmbientTraffic`
-/// resource, no `AmbientCar` and no `TrafficSignal` under either
-/// network authority. The `Host` leg is the gate's change: remote
-/// cars the host simulates must never collide with traffic a client
-/// cannot see.
+/// A one-event install: the same synthetic city with an authored
+/// checkpoint-race row, so a session can carry `SessionMode::Event`.
+fn event_install() -> (tempfile::TempDir, SessionConfig) {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(d, "city/testcity.psdl", synthetic_psdl());
+    write(d, "city/testcity.bai", bai_bytes());
+    write(d, "city/testcity.aimap", city_aimap());
+    ambient_assets(d, "va_test_a");
+    ambient_assets(d, "va_test_b");
+    write(
+        d,
+        "race/testcity/mmracedata.csv",
+        "Description, CarType, TimeofDay, Weather, Opponents, Cops, Ambient, Peds, NumLaps, TimeLimit, Difficulty, CarType, TimeofDay, Weather, Opponents, Cops, Ambient, Peds, NumLaps, TimeLimit, Difficulty\nnone,0,0,0,0,0,0.5,0.0,1,50,1,0,0,0,0,0,0.5,0.0,1,40,1\n",
+    );
+    // A non-zero density: Local would field traffic here, so the
+    // networked legs prove the policy, not an authored zero.
+    write(d, "race/testcity/race0.aimap", "[Density]\n0.5\n");
+    write(
+        d,
+        "race/testcity/race0waypoints.csv",
+        "x,y,z,a,poly count,frane rate,state changes,texture changes,msg\n60,0,140,0,15,0,0,0,\n110,0,140,0,15,0,0,0,\n180,0,140,0,15,0,0,0,\n",
+    );
+    let config = SessionConfig {
+        mode: SessionMode::Event(EventRef {
+            city: "testcity".into(),
+            table: EventTableKind::Checkpoint,
+            index: 0,
+        }),
+        world: WorldMode::City {
+            psdl: "city/testcity.psdl".into(),
+        },
+        ..SessionConfig::default()
+    };
+    (tmp, config)
+}
+
+fn replica_present(app: &App) -> bool {
+    app.world()
+        .get_resource::<mm2_app::worldtraffic::TrafficReplica>()
+        .is_some()
+}
+
+/// F26-A policy (an enhanced one — MP-4 only documents "no ambient
+/// traffic ... in MP races"): a networked *Cruise* fields the host's
+/// traffic and a client only copies it; a networked *race* fields none
+/// on either side. The `Host` leg runs the ordinary seeded population;
+/// the `Remote` leg simulates no car, no signal and no second world —
+/// it holds the replica the host's frames land on.
 #[test]
-fn a_networked_session_spawns_no_ambient_traffic() {
+fn networked_cruise_traffic_is_the_hosts_and_a_clients_is_a_replica() {
     let install = city_install();
     for authority in [SessionAuthority::Host, SessionAuthority::Remote] {
         let mut config = city_config();
@@ -720,20 +762,33 @@ fn a_networked_session_spawns_no_ambient_traffic() {
             run_until(&mut app, 12, |a| phase_is(a, SessionPhase::Playing)),
             "{authority:?}: city session never reached Playing"
         );
-        assert!(
-            app.world().get_resource::<AmbientTraffic>().is_none(),
-            "{authority:?}: MP-4 — no ambient-traffic resource"
-        );
-        assert!(
-            ambient_cars(&mut app).is_empty(),
-            "{authority:?}: MP-4 — no ambient cars"
-        );
         let signals = app
             .world_mut()
             .query_filtered::<Entity, With<TrafficSignal>>()
             .iter(app.world())
             .count();
-        assert_eq!(signals, 0, "{authority:?}: MP-4 — no traffic signals");
+        match authority {
+            SessionAuthority::Host => {
+                assert!(
+                    app.world().get_resource::<AmbientTraffic>().is_some(),
+                    "Host: the authority simulates the population"
+                );
+                assert!(!replica_present(&app), "Host: no replica");
+                assert!(!ambient_cars(&mut app).is_empty(), "Host: seeded cars");
+            }
+            _ => {
+                assert!(
+                    app.world().get_resource::<AmbientTraffic>().is_none(),
+                    "Remote: no simulated population"
+                );
+                assert!(replica_present(&app), "Remote: the replica");
+                assert!(
+                    ambient_cars(&mut app).is_empty(),
+                    "Remote: no lane follower"
+                );
+                assert_eq!(signals, 0, "Remote: no signal heads");
+            }
+        }
         // The local participant still loads and drives.
         let mut q = app
             .world_mut()
@@ -741,8 +796,32 @@ fn a_networked_session_spawns_no_ambient_traffic() {
         q.single(app.world()).expect("the local car");
     }
 
-    // Positive control: the same install under `Local` still fills the
-    // roster — the gate changed nothing single-player.
+    // A networked race fields no ambient traffic on either side (MP-4).
+    let (race, race_config) = event_install();
+    for authority in [SessionAuthority::Host, SessionAuthority::Remote] {
+        let mut config = race_config.clone();
+        config.authority = authority;
+        let mut app = test_app(config, vfs_of(race.path()));
+        assert!(
+            run_until(&mut app, 30, |a| {
+                matches!(
+                    a.world().resource::<Session>().phase(),
+                    SessionPhase::Playing | SessionPhase::Countdown
+                )
+            }),
+            "{authority:?}: event session never left Loading ({:?})",
+            app.world().resource::<Session>().phase()
+        );
+        assert!(
+            app.world().get_resource::<AmbientTraffic>().is_none(),
+            "{authority:?}: MP-4 — no ambient-traffic resource in a networked race"
+        );
+        assert!(!replica_present(&app), "{authority:?}: no replica either");
+        assert!(ambient_cars(&mut app).is_empty());
+    }
+
+    // Positive controls: the same installs under `Local` still field
+    // traffic — the policy changed nothing single-player, race or roam.
     let mut app = test_app(city_config(), vfs_of(install.path()));
     assert!(run_until(&mut app, 12, |a| phase_is(
         a,
@@ -751,6 +830,256 @@ fn a_networked_session_spawns_no_ambient_traffic() {
     assert!(
         !ambient_cars(&mut app).is_empty(),
         "Local: the seeded plan still spawns"
+    );
+    assert!(!replica_present(&app), "Local: no replica");
+    let mut app = test_app(race_config, vfs_of(race.path()));
+    assert!(run_until(&mut app, 30, |a| {
+        matches!(
+            a.world().resource::<Session>().phase(),
+            SessionPhase::Playing | SessionPhase::Countdown
+        )
+    }));
+    assert!(
+        app.world()
+            .get_resource::<AmbientTraffic>()
+            .is_some_and(|t| t.target > 0),
+        "Local race: the authored density stands"
+    );
+}
+
+/// A `Remote` client app with the replication consumer wired the way
+/// the application wires it.
+fn client_app(install: &Path) -> App {
+    let mut config = city_config();
+    config.authority = SessionAuthority::Remote;
+    config.dev = DevOverrides::default();
+    let mut app = test_app(config, vfs_of(install));
+    app.init_resource::<mm2_app::netdrive::RemoteSnaps>();
+    app.add_systems(Update, mm2_app::worldtraffic::apply_traffic);
+    app
+}
+
+/// What the host's `publish_traffic` would put on the wire this frame:
+/// the production row collector over the host app's live cars, taken
+/// through the real frame codec.
+fn host_frame(
+    app: &mut App,
+    ledger: &mut mm2_app::worldtraffic::TrafficLedger,
+    roster: Option<u64>,
+) -> Message {
+    let generation = app.world().resource::<Session>().generation();
+    let wire = app.world().resource::<Session>().wire_generation();
+    let tick = app.world().resource::<Session>().tick();
+    let digest =
+        mm2_app::worldtraffic::roster_digest(app.world().resource::<AmbientTraffic>().roster());
+    let mut q = app.world_mut().query::<(
+        Entity,
+        &AmbientCar,
+        &Position,
+        &Rotation,
+        &LinearVelocity,
+        &mm2_game::SessionEntity,
+    )>();
+    let (rows, omitted) = ledger.collect(
+        generation,
+        q.iter(app.world())
+            .filter(|(.., owner)| owner.0 == generation)
+            .map(|(e, c, p, r, v, _)| (e, c.class, c.drive, p.0, r.0, v.0)),
+    );
+    assert_eq!(omitted, 0);
+    let frame = Message::Traffic {
+        generation: wire,
+        tick,
+        roster: roster.unwrap_or(digest),
+        rows,
+    };
+    Message::decode(&frame.encode().expect("a bounded frame")).expect("the codec round-trips")
+}
+
+fn deliver(client: &mut App, frame: Message) {
+    let Message::Traffic {
+        generation,
+        tick,
+        roster,
+        rows,
+    } = frame
+    else {
+        panic!("not a traffic frame");
+    };
+    client
+        .world_mut()
+        .resource_mut::<mm2_app::netdrive::RemoteSnaps>()
+        .push_traffic(generation, tick, roster, rows);
+}
+
+fn copies(app: &mut App) -> Vec<(u32, u16, Vec3, Entity)> {
+    let mut v: Vec<_> = app
+        .world_mut()
+        .query::<(Entity, &mm2_app::worldtraffic::TrafficCopy, &Position)>()
+        .iter(app.world())
+        .map(|(e, c, p)| (c.id, c.class, p.0, e))
+        .collect();
+    v.sort_by_key(|(id, ..)| *id);
+    v
+}
+
+/// F26-A end to end through the production code on both sides: a
+/// host's seeded population, published through the real row collector
+/// and frame codec, appears on a `Remote` client as one kinematic copy
+/// per car — same class, same pose — follows the host's cars as they
+/// drive, refuses a host whose roster differs, drops another session's
+/// rows, and retires copies once frames stop. The client never owns a
+/// lane follower. Same-process, wire codec only: the socket and
+/// real-process legs live in `network.rs`.
+#[test]
+fn a_client_copies_the_hosts_traffic_and_retires_it_when_frames_stop() {
+    let install = city_install();
+    let mut config = city_config();
+    config.authority = SessionAuthority::Host;
+    config.dev = DevOverrides::default();
+    let mut host = test_app(config, vfs_of(install.path()));
+    let mut client = client_app(install.path());
+    assert!(run_until(&mut host, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    assert!(run_until(&mut client, 12, |a| phase_is(
+        a,
+        SessionPhase::Playing
+    )));
+    assert_eq!(
+        host.world().resource::<Session>().wire_generation(),
+        client.world().resource::<Session>().wire_generation(),
+        "both fixtures run the same session generation"
+    );
+    let host_cars = ambient_cars(&mut host);
+    assert!(host_cars.len() >= 2, "the seeded plan fields several cars");
+
+    // Before any frame the client has no traffic of its own.
+    assert!(copies(&mut client).is_empty());
+
+    let mut ledger = mm2_app::worldtraffic::TrafficLedger::default();
+    let frame = host_frame(&mut host, &mut ledger, None);
+    let Message::Traffic { rows: sent, .. } = &frame else {
+        unreachable!()
+    };
+    assert_eq!(
+        sent.len(),
+        host_cars.len(),
+        "every live car rides the frame"
+    );
+    let sent = sent.clone();
+    deliver(&mut client, frame);
+    run(&mut client, 2);
+    let made = copies(&mut client);
+    assert_eq!(made.len(), sent.len(), "one copy per host car");
+    for (copy, row) in made.iter().zip(&sent) {
+        assert_eq!((copy.0, copy.1), (row.id, row.class));
+        assert!(
+            copy.2.distance(Vec3::from_array(row.pos)) < 1.0,
+            "the copy sits where the host's car is"
+        );
+    }
+    // A copy is a posed kinematic body with the class's real model
+    // underneath — never a lane follower.
+    let world = client.world_mut();
+    for (.., entity) in &made {
+        assert_eq!(world.get::<RigidBody>(*entity), Some(&RigidBody::Kinematic));
+        assert!(world.get::<AmbientCar>(*entity).is_none());
+        assert!(
+            world
+                .get::<Children>(*entity)
+                .is_some_and(|c| !c.is_empty()),
+            "the class's model is attached"
+        );
+    }
+    assert!(
+        ambient_cars(&mut client).is_empty(),
+        "no lane follower on a client"
+    );
+    {
+        let stage = client
+            .world()
+            .resource::<mm2_app::netdrive::RemoteSnaps>()
+            .traffic();
+        assert_eq!(stage.landed(), sent.len() as u64);
+        assert_eq!((stage.mismatched(), stage.unresolved()), (0, 0));
+    }
+
+    // The host's cars drive on; the copies follow, as the same entities.
+    run(&mut host, 60);
+    let moved = host_frame(&mut host, &mut ledger, None);
+    let Message::Traffic { rows: after, .. } = &moved else {
+        unreachable!()
+    };
+    let after = after.clone();
+    let kept: Vec<&_> = after
+        .iter()
+        .filter(|r| sent.iter().any(|s| s.id == r.id))
+        .collect();
+    assert!(!kept.is_empty(), "some of the first cars still drive");
+    assert!(
+        kept.iter().any(|r| {
+            let before = sent.iter().find(|s| s.id == r.id).unwrap();
+            Vec3::from_array(r.pos).distance(Vec3::from_array(before.pos)) > 1.0
+        }),
+        "the host's cars moved"
+    );
+    deliver(&mut client, moved);
+    run(&mut client, 2);
+    let followed = copies(&mut client);
+    for row in &kept {
+        let before = made.iter().find(|m| m.0 == row.id).unwrap();
+        let now = followed
+            .iter()
+            .find(|m| m.0 == row.id)
+            .expect("still alive");
+        assert_eq!(now.3, before.3, "the same copy entity follows the car");
+        // Within the velocity carry of two updates (~15 m/s × 33 ms).
+        assert!(
+            now.2.distance(Vec3::from_array(row.pos)) < 1.0,
+            "copy {:?} vs row {:?} (before {:?})",
+            now.2,
+            row.pos,
+            before.2
+        );
+    }
+
+    // A host whose roster differs poses nothing and spawns nothing new.
+    let alive = copies(&mut client).len();
+    let foreign = host_frame(&mut host, &mut ledger, Some(0xdead_beef));
+    deliver(&mut client, foreign);
+    run(&mut client, 2);
+    assert_eq!(copies(&mut client).len(), alive);
+    assert!(
+        client
+            .world()
+            .resource::<mm2_app::netdrive::RemoteSnaps>()
+            .traffic()
+            .mismatched()
+            >= 1,
+        "the refusal is counted"
+    );
+
+    // Frames stop: the copies retire after the TTL (fixed ticks), not
+    // before.
+    run(&mut client, 20);
+    assert!(
+        !copies(&mut client).is_empty(),
+        "one lost frame does not erase the population"
+    );
+    let ticks_needed = mm2_app::worldtraffic::COPY_TTL_TICKS as usize + 20;
+    run(&mut client, ticks_needed);
+    assert!(
+        copies(&mut client).is_empty(),
+        "silent copies retire; a recycled car does not linger"
+    );
+    assert_eq!(
+        client
+            .world()
+            .resource::<mm2_app::worldtraffic::TrafficReplica>()
+            .live(),
+        0
     );
 }
 

@@ -94,7 +94,7 @@ const PUBLISH_EVERY: u32 = 2;
 /// not.
 const SITE_QUANTUM: f32 = 4.0;
 
-fn fnv(mut hash: u64, bytes: &[u8]) -> u64 {
+pub(crate) fn fnv(mut hash: u64, bytes: &[u8]) -> u64 {
     for byte in bytes {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);

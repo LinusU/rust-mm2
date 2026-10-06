@@ -1,3 +1,73 @@
+# Last iteration — ambient-traffic replication (new-run iteration 6)
+
+Selection: the previous review passed with no blocking findings, so no
+repair was owed. F26-A's remaining largest gap against AC01 ("two clients
+see the same relevant traffic") was that a networked session fielded *no*
+ambient traffic at all (the MP-4 gate in `load_ambient_traffic`), so there
+was nothing to share. Weather/time-of-day already agree (they ride
+`Start`'s session config, which a late joiner also gets); props landed in
+iterations 2–5.
+
+Policy decision (recorded, nobody to ask — DSN-71): MP-4 documents "no
+ambient traffic, cops or AI opponents in MP *races*" and names no Cruise
+exception, while the F26 spec wants Cruise clients to share traffic. So
+`traffic::fields_ambient_traffic` = offline always, networked only in
+free-roam Cruise (enhanced policy, original unverified); networked races
+keep none on both sides. The `Host` simulates; a `Remote` client holds
+copies.
+
+Change (protocol **v19**): `Message::Traffic { generation, tick, roster,
+rows }` (host→client only; a client-sent one drops the peer, AC04) with
+`SnapCar { id, class, state, pos, rot, vel }`, ≤64 rows (`MAX_SNAP_CARS`).
+`mm2_app::worldtraffic`: `publish_traffic` (host-minted per-spawn ids via
+`TrafficLedger::collect`, every third frame, roster digest on each frame),
+`TrafficStage` (per-car latest-wins on `(generation, tick)`, staged ≤256,
+applied ledger ≤16,384, held through `Loading`), `apply_traffic` +
+`TrafficReplica` (client roster/class cache; kinematic `TrafficCopy`
+bodies with the class model, collider and ambient engine table; roster
+mismatch refused counted; velocity carry; snap past 3 m; TTL retirement
+after 240 ticks; ≤128 copies). Record gains ` cars=sent,omit,live,landed,
+mism` (absent while the wire carried no car). Docs: `docs/research/net.md`
+(budget 26 B + 47 B/row), ledger DSN-71 + MP-4 note, PLAN F26-A slice 6.
+
+Tests: proto round-trip/bound/truncation (mm2_net); lobby
+`a_client_cannot_assert_traffic`; 7 `TrafficStage`/digest unit tests;
+`traffic::networked_cruise_traffic_is_the_hosts_and_a_clients_is_a_replica`
+(replaces the old "networked spawns none" test: Host cruise fields it,
+Remote cruise holds only the replica, networked races none, Local race and
+roam unchanged); `traffic::a_client_copies_the_hosts_traffic_and_retires_it_when_frames_stop`
+(production row collector → frame codec → `apply_traffic`: one copy per
+car, same class/pose, follows the host's motion as the *same entities*,
+foreign roster refused, copies survive a short silence and retire after
+the TTL). That leg caught a real bug — the retention pass forgot copies
+spawned in the same run (queued in `Commands`), so every frame
+duplicated the whole population; fixed with a `known` set.
+
+Original-data / process evidence (separate from the synthetic tests):
+operator-run `MM2_RETAIL=/Users/linus/coding/rust-mm2/retail cargo test
+--locked -p mm2_app --test network two_retail_processes_replicate` — two
+real `mm2` processes on loopback, one Apple Silicon machine, one binary,
+retail sf Cruise: host `cars=sent4539,omit0`; client
+`cars=sent0,omit0,live16,landed4316,mism0`, both `status=pass`. Not
+rendered/audible evidence (headless) and not impaired.
+
+Gates (all exit 0): `cargo fmt --all -- --check` PASS; `cargo clippy
+--locked --workspace --all-targets --all-features -- -D warnings` PASS (no
+new allow); `cargo test --locked --workspace` PASS (1982 passed, 0 failed;
+was 1970). The retail two-process leg was re-run on the final code and
+passed. No test processes left running.
+
+Still open (F26-A stays active, not AC01..06 completion): per-client
+relevancy (broadcast; bounded by the host's interest union), signal heads
+not replicated, no measured impairment cell / windowed or real-GPU leg for
+`Traffic` or `Props`, interpolation beyond the velocity carry, mid-session
+weather (static per session), late-join of props beyond the resend cycle,
+drawbridge/mover/sound replication, a client's contact with a copy is
+predicted against the copy's last pose. Status: implemented candidate, not
+independently checked.
+
+---
+
 # Last iteration — retail two-process site-table evidence + staging repair (new-run iteration 5)
 
 Selection: the previous review passed with no blocking findings. Its

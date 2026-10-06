@@ -206,6 +206,8 @@ fn bridge_app(vfs: Vfs, link: LobbyLink) -> App {
                 netdrive::drive_remote_lerp,
                 // F26-A: replicated world props — production wiring.
                 mm2_app::worldprops::apply_props.after(net::drive_lobby),
+                // F26-A: replicated ambient cars — production wiring.
+                mm2_app::worldtraffic::apply_traffic.after(net::drive_lobby),
                 // F25-B: `R` asks the authority under a predicted
                 // session — production wiring.
                 netdrive::send_reset_request,
@@ -269,6 +271,8 @@ fn host_app(vfs: Vfs, link: HostLink) -> App {
                     .after(mm2_app::audio::surface_voices),
                 // F26-A: the world's prop state — production wiring.
                 mm2_app::worldprops::publish_props.after(net::drive_host),
+                // F26-A: the ambient population — production wiring.
+                mm2_app::worldtraffic::publish_traffic.after(net::drive_host),
             ),
         );
     app

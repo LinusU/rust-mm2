@@ -1011,6 +1011,73 @@ a frame of `SnapProp { site, fragment, phase, pos, rot }` rows:
   pool skipped are never sent; no measured impairment cell or
   two-process leg for this frame yet.
 
+## Ambient-traffic replication (protocol v19, F26-A)
+
+*Implementation choice / enhanced policy (DSN-71); no original-protocol
+claim.* v19 adds `Message::Traffic { generation, tick, roster, rows }`
+(tag 0x11, host → client only — a client that sends one is dropped
+`Malformed`, F26-AC04), a frame of
+`SnapCar { id, class, state, pos, rot, vel }` rows:
+
+- **Who has traffic.** `traffic::fields_ambient_traffic`: offline
+  always; networked only in free-roam Cruise. MP-4 (documented) says
+  multiplayer *races* carry no ambient traffic and names no Cruise
+  exception; the F26 spec asks Cruise clients to share traffic, so this
+  is an enhanced policy. The `Host` simulates the population (the
+  existing seeded plan, `drive_ambient`, `maintain_ambient`; its
+  interest set is every `Player` participant, remote seats included); a
+  `Remote` client simulates none and holds a `TrafficReplica` (the same
+  `ambient_setup` roster, class assets cached per class).
+- **Identity.** `id` is a host-minted per-spawn counter
+  (`TrafficLedger`, assigned the first publish that sees the car, never
+  reused, forgotten with the car). It is not an `ObjectId`. `class` is
+  the car's index into the ambient roster; every frame carries
+  `roster`, an FNV-1a digest of the roster's row count and authored
+  vehicle ids in order, and a client whose own digest differs drops the
+  row counted `mismatched` rather than pose a different car.
+- **State, not events.** `state` is `0` lane follower / `1` knocked
+  wreck; `pos`/`rot`/`vel` the Avian pose. Every live car rides every
+  frame, in id order, bounded by `MAX_SNAP_CARS` = 64 (twice the
+  default policy's 32; any excess is held back and counted
+  `cars_omitted`). Published every third `Update` (`PUBLISH_EVERY`),
+  during `Ready`/`Countdown`/`Playing`/`Results`; a world with no cars
+  sends nothing.
+- **Receiver.** Latest-wins per car on `(generation, tick)` (equal tick
+  passes), staged bounded at 256 cars, applied-ledger cap 16,384, held
+  through `Loading`, another generation's rows drained counted
+  `unresolved`. A new id spawns a kinematic copy (class collider, real
+  model, the class's `AmbientAudio`) — never an `AmbientCar`, so no
+  local system drives it; a known id writes `Position`/`Rotation`/
+  `LinearVelocity` (past 3 m the transform snaps too, so a host reset
+  shows as a jump). Between frames Avian carries the copy on its
+  velocity. At most 128 copies live. A copy no frame carried for 240
+  ticks (2 s at 120 Hz) is despawned: absence from a frame is not a
+  despawn order, so a lost frame cannot erase the population. Late
+  joiners need no snapshot message — the next frame is complete.
+- **Budget.** 26 B header (tag 1, generation 8, tick 8, roster 8, count
+  1) + 47 B per row (id 4, class 2, state 1, pos 12, rot 16, vel 12);
+  64 rows = 3,034 B worst case. At the default density (0.5 → ~16 cars)
+  and a 60 Hz update loop (20 Hz frames) that is ≈ 15 KB/s per client.
+- **Evidence.** Operator-run, `MM2_RETAIL=<install> cargo test -p
+  mm2_app --test network two_retail_processes_replicate`: a hosted
+  retail sf Cruise and a joined client, two real `mm2` processes on
+  loopback, one machine. The host record carried `cars=sent4539,omit0`
+  and the client's `cars=…,live16,landed4316,mism0` — copies existed
+  and rows landed without a roster refusal. In-process: the production
+  row collector → frame codec → `apply_traffic` leg in
+  `tests/traffic.rs` (copy per car, same class/pose, follows the host's
+  motion as the same entities, foreign roster refused, copies retire
+  after the TTL).
+- **Not covered.** No interpolation beyond the velocity carry and the
+  car's transform interpolation; no per-client relevancy (the host's
+  population is bounded by its own interest union and the frame is
+  broadcast); traffic signal heads are not replicated (aspect is a pure
+  function of the host's clock); no measured impairment cell or
+  windowed/real-GPU leg for `Traffic`; a knocked wreck stays a
+  kinematic copy posed from the wire (the host's solver owns it); the
+  client's own contact with a copy is predicted against the copy's last
+  pose.
+
 ## Data-plane budget and bounds (F25-B req 6)
 
 *Implementation choice + measured.* Payload sizes are fixed by the

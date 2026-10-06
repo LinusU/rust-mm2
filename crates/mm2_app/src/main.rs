@@ -1821,6 +1821,9 @@ fn main() {
                     // F26-A: the host's knocked/broken/settled props
                     // fold into the client's own stamped world.
                     mm2_app::worldprops::apply_props.after(net::drive_lobby),
+                    // F26-A: the host's ambient cars — the copies a
+                    // `Remote` city Cruise session poses.
+                    mm2_app::worldtraffic::apply_traffic.after(net::drive_lobby),
                     // F25-B: `R` under a predicted session asks the
                     // authority for the reset `reset_input` is gated
                     // against — the granted answer arrives as the
@@ -1909,6 +1912,8 @@ fn main() {
                     // F26-A: the world's prop state rides its own frame
                     // — after the lobby drain, like the snapshot.
                     mm2_app::worldprops::publish_props.after(net::drive_host),
+                    // F26-A: the ambient population rides its own frame.
+                    mm2_app::worldtraffic::publish_traffic.after(net::drive_host),
                 ),
             );
         app.world_mut().spawn((

@@ -295,6 +295,7 @@ pub fn drive_session(
             commands.remove_resource::<crate::progression::SessionReport>();
             commands.remove_resource::<crate::nav_overlay::CityNav>();
             commands.remove_resource::<crate::traffic::AmbientTraffic>();
+            commands.remove_resource::<crate::worldtraffic::TrafficReplica>();
             commands.remove_resource::<mm2_content::SurfaceTables>();
             commands.remove_resource::<crate::environment::EnvironmentReport>();
             commands.remove_resource::<crate::damage_fx::SmokeFx>();
@@ -1532,9 +1533,10 @@ pub fn load_session_world(
     // F10-A.2: ambient traffic — the event aimap's authored overrides
     // (roster replacement, `[Density]`, closed roads, speed limits)
     // layer over the city's aimap; the final spawn pose is the bubble
-    // centre. Non-city worlds get `None`, and networked sessions get
-    // `None` under MP-4 (documented) — `load_ambient_traffic` owns the
-    // authority gate.
+    // centre. Non-city worlds get `None`, and so do networked races
+    // (MP-4, documented) and a `Remote` client — `load_ambient_traffic`
+    // owns the gate; networked Cruise traffic is the host's, replicated
+    // (`worldtraffic`, DSN-71).
     if world_ok {
         let (event_aimap, authored_density) = match &event_race {
             Some((def, _, _, _, aimap)) => (aimap.as_ref(), Some(def.params.densities.traffic)),
@@ -1557,6 +1559,11 @@ pub fn load_session_world(
             &mut assets.materials,
         ) {
             commands.insert_resource(t);
+        }
+        // F26-A: a `Remote` city Cruise client holds copies of the
+        // host's cars instead of simulating any.
+        if let Some(r) = crate::worldtraffic::load_traffic_replica(&vfs.0, &config) {
+            commands.insert_resource(r);
         }
     }
 

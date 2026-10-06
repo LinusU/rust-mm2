@@ -54,8 +54,11 @@
 /// matches the host's (F26-A). v18: the `Props` frame carries the
 /// sender's [`SiteTable`] — the placement count and a digest of what
 /// the city stamp minted — so a client whose stamped world differs
-/// refuses the rows instead of misattributing them (F26-A).
-pub const PROTOCOL_VERSION: u16 = 18;
+/// refuses the rows instead of misattributing them (F26-A). v19:
+/// `Message::Traffic` — the authority's ambient cars as their own
+/// host→client frame, each named by a host-minted car id and a roster
+/// class index the frame's roster digest vouches for (F26-A).
+pub const PROTOCOL_VERSION: u16 = 19;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -82,6 +85,7 @@ const TAG_INPUT: u8 = 0x0d;
 const TAG_SNAP: u8 = 0x0e;
 const TAG_RESET_REQUEST: u8 = 0x0f;
 const TAG_PROPS: u8 = 0x10;
+const TAG_TRAFFIC: u8 = 0x11;
 
 /// Byte cap on a [`SessionAdvertisement`]'s opaque `params` field — the
 /// `mm2_app` bridge's serialized session config is a few hundred bytes,
@@ -474,6 +478,37 @@ pub const MAX_SNAP_PROPS: u8 = 96;
 /// than one of its break fragments.
 pub const SNAP_NO_FRAGMENT: u8 = u8::MAX;
 
+/// Bound on one [`Message::Traffic`] frame's rows: the ambient
+/// population is `density × 32` cars, so the bound sits at twice the
+/// default policy's ceiling while a hostile count still cannot claim an
+/// unbounded tail.
+pub const MAX_SNAP_CARS: u8 = 64;
+
+/// One ambient car's replicated state inside a [`Message::Traffic`]
+/// frame (v19, F26-A). The car is named by `id`, an opaque key the
+/// host minted when it spawned the car (never an `ObjectId`, which
+/// lives in one process's local namespace), and its class by `class`,
+/// an index into the roster the frame's digest vouches for. `state` is
+/// the drive discriminant, opaque to the wire like [`SnapProp::phase`].
+/// *State*, not an event: a repeated or dropped row self-corrects on the
+/// next.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SnapCar {
+    /// The host's per-spawn car key.
+    pub id: u32,
+    /// The roster class index the car was drawn from.
+    pub class: u16,
+    /// Opaque drive discriminant — the consumer names the states.
+    pub state: u8,
+    /// World-space position, metres.
+    pub pos: [f32; 3],
+    /// World-space orientation quaternion `[x, y, z, w]`.
+    pub rot: [f32; 4],
+    /// World-space linear velocity, m/s — lets the receiver carry the
+    /// pose between frames.
+    pub vel: [f32; 3],
+}
+
 /// A summary of a process's stamped banger placements, exchanged on
 /// every [`Message::Props`] frame (v18, F26-A). A row names its prop by
 /// placement ordinal, which only means the same prop on two peers when
@@ -653,6 +688,23 @@ pub enum Message {
         /// The prop rows.
         rows: Vec<SnapProp>,
     },
+    /// Host → every client: the authority's ambient traffic (v19,
+    /// F26-A) — every live car, bounded by [`MAX_SNAP_CARS`]. A car
+    /// absent from a frame is not a despawn order: the receiver retires
+    /// a copy once no frame has carried it for a while, so one lost
+    /// frame cannot erase the population. `tick` orders frames per car
+    /// on the receiver; `generation` gates it like [`Message::Snap`].
+    Traffic {
+        /// The session generation this frame belongs to.
+        generation: u64,
+        /// Host session tick at capture.
+        tick: u64,
+        /// A digest of the host's ambient roster (v19) — what the row
+        /// class indices are relative to; opaque to the wire.
+        roster: u64,
+        /// The car rows.
+        rows: Vec<SnapCar>,
+    },
 }
 
 /// A wire-decode failure on a well-framed payload.
@@ -698,6 +750,9 @@ pub enum ProtoError {
     /// A props frame declared more than [`MAX_SNAP_PROPS`] rows.
     #[error("props frame declares {0} rows, bound is {MAX_SNAP_PROPS}")]
     OversizeProps(u8),
+    /// A traffic frame declared more than [`MAX_SNAP_CARS`] rows.
+    #[error("traffic frame declares {0} rows, bound is {MAX_SNAP_CARS}")]
+    OversizeTraffic(u8),
 }
 
 impl RejectCode {
@@ -1056,6 +1111,31 @@ impl Message {
                     }
                 }
             }
+            Self::Traffic {
+                generation,
+                tick,
+                roster,
+                rows,
+            } => {
+                out.push(TAG_TRAFFIC);
+                out.extend_from_slice(&generation.to_le_bytes());
+                out.extend_from_slice(&tick.to_le_bytes());
+                out.extend_from_slice(&roster.to_le_bytes());
+                if rows.len() > MAX_SNAP_CARS as usize {
+                    return Err(ProtoError::OversizeTraffic(
+                        rows.len().min(u8::MAX as usize) as u8,
+                    ));
+                }
+                out.push(rows.len() as u8);
+                for row in rows {
+                    out.extend_from_slice(&row.id.to_le_bytes());
+                    out.extend_from_slice(&row.class.to_le_bytes());
+                    out.push(row.state);
+                    for v in row.pos.iter().chain(row.rot.iter()).chain(row.vel.iter()) {
+                        out.extend_from_slice(&v.to_le_bytes());
+                    }
+                }
+            }
         }
         Ok(out)
     }
@@ -1244,6 +1324,32 @@ impl Message {
                     generation,
                     tick,
                     table,
+                    rows,
+                }
+            }
+            TAG_TRAFFIC => {
+                let generation = cur.u64()?;
+                let tick = cur.u64()?;
+                let roster = cur.u64()?;
+                let count = cur.u8()?;
+                if count > MAX_SNAP_CARS {
+                    return Err(ProtoError::OversizeTraffic(count));
+                }
+                let mut rows = Vec::with_capacity(count as usize);
+                for _ in 0..count {
+                    rows.push(SnapCar {
+                        id: cur.u32()?,
+                        class: cur.u16()?,
+                        state: cur.u8()?,
+                        pos: cur.vec3()?,
+                        rot: cur.vec4()?,
+                        vel: cur.vec3()?,
+                    });
+                }
+                Self::Traffic {
+                    generation,
+                    tick,
+                    roster,
                     rows,
                 }
             }
@@ -1655,6 +1761,74 @@ mod tests {
         wide.extend_from_slice(&0u64.to_le_bytes());
         wide.push(MAX_SNAP_PROPS + 1);
         assert_eq!(Message::decode(&wide), Err(ProtoError::OversizeProps(97)));
+    }
+
+    fn car_row(id: u32) -> SnapCar {
+        SnapCar {
+            id,
+            class: 3,
+            state: 1,
+            pos: [1.5, -2.0, 300.25],
+            rot: [0.0, 0.5, 0.0, 0.5],
+            vel: [0.0, 0.0, -12.5],
+        }
+    }
+
+    #[test]
+    fn a_traffic_frame_round_trips_and_is_bounded() {
+        let msg = Message::Traffic {
+            generation: 7,
+            tick: 4096,
+            roster: 0xfeed_beef_0123_4567,
+            rows: vec![car_row(0), car_row(u32::MAX)],
+        };
+        assert_eq!(Message::decode(&msg.encode().unwrap()).unwrap(), msg);
+        let full = Message::Traffic {
+            generation: 1,
+            tick: 2,
+            roster: 0,
+            rows: (0..MAX_SNAP_CARS as u32).map(car_row).collect(),
+        };
+        assert_eq!(Message::decode(&full.encode().unwrap()).unwrap(), full);
+        let over = Message::Traffic {
+            generation: 1,
+            tick: 2,
+            roster: 0,
+            rows: (0..=MAX_SNAP_CARS as u32).map(car_row).collect(),
+        };
+        assert_eq!(over.encode(), Err(ProtoError::OversizeTraffic(65)));
+        let huge = Message::Traffic {
+            generation: 1,
+            tick: 2,
+            roster: 0,
+            rows: (0..300).map(car_row).collect(),
+        };
+        assert_eq!(huge.encode(), Err(ProtoError::OversizeTraffic(255)));
+        let mut wide = vec![TAG_TRAFFIC];
+        wide.extend_from_slice(&[0u8; 24]);
+        wide.push(MAX_SNAP_CARS + 1);
+        assert_eq!(Message::decode(&wide), Err(ProtoError::OversizeTraffic(65)));
+    }
+
+    #[test]
+    fn a_truncated_or_padded_traffic_frame_is_refused() {
+        let bytes = Message::Traffic {
+            generation: 3,
+            tick: 9,
+            roster: 5,
+            rows: vec![car_row(5)],
+        }
+        .encode()
+        .unwrap();
+        for cut in 1..bytes.len() {
+            assert!(
+                Message::decode(&bytes[..cut]).is_err(),
+                "a {cut}-byte prefix decoded"
+            );
+        }
+        let mut padded = bytes;
+        padded.push(0);
+        assert!(Message::decode(&padded).is_err());
     }
 
     #[test]

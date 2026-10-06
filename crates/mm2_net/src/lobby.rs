@@ -2502,6 +2502,39 @@ mod tests {
         }
     }
 
+    /// F26-AC04: ambient traffic flows host → client only too — a client
+    /// that submits a traffic frame is dropped, never absorbed.
+    #[test]
+    fn a_client_cannot_assert_traffic() {
+        let host = sessioned_host();
+        let mut mallory = join_sessioned(&host, "mallory");
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut mallory, 1);
+        mallory
+            .send(&Message::Traffic {
+                generation: 1,
+                tick: 1,
+                roster: 0,
+                rows: vec![crate::proto::SnapCar {
+                    id: 0,
+                    class: 0,
+                    state: 0,
+                    pos: [0.0; 3],
+                    rot: [0.0, 0.0, 0.0, 1.0],
+                    vel: [0.0; 3],
+                }],
+            })
+            .unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::Left {
+                id: 1,
+                cause: LeaveCause::Malformed,
+                ..
+            }) => {}
+            other => panic!("expected a Malformed Left, got {other:?}"),
+        }
+    }
+
     /// The roster stays the shared truth through a session (MP-5's
     /// leaver rule): mid-session pick changes and departures still
     /// land and rebroadcast.

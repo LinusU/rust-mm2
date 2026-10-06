@@ -798,3 +798,64 @@ fn two_retail_processes_stamp_the_same_prop_world() {
         "host and client stamped different worlds:\nhost   {host_rec}\nclient {rec}"
     );
 }
+
+/// The `cars=sent<n>,omit<n>,live<n>,landed<n>,mism<n>` record field —
+/// the host's published ambient rows and, on a client, the traffic
+/// copies it holds and the rows it landed or refused (F26-A, v19).
+fn cars_field(line: &str) -> (u64, u64, u64, u64, u64) {
+    let cells = field(line, "cars");
+    let cell = |prefix: &str| {
+        cells
+            .split(',')
+            .find_map(|c| c.strip_prefix(prefix))
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("no {prefix} cell in {line}"))
+    };
+    (
+        cell("sent"),
+        cell("omit"),
+        cell("live"),
+        cell("landed"),
+        cell("mism"),
+    )
+}
+
+/// F26-A.6's real-process evidence: a hosted retail sf Cruise fields
+/// ambient traffic, publishes it, and a joined client — which simulates
+/// no lane follower of its own — spawns copies of the host's cars and
+/// lands rows on them without refusing any for a roster that differs.
+/// Skipped without the operator's install (`MM2_RETAIL=<dir>`), like the
+/// prop-world leg beside it.
+///
+/// Same machine, same binary, loopback: it shows the frames cross a real
+/// socket between two processes and that both derive one roster from the
+/// city; it does not show the copies match the host's cars *visually*
+/// (headless) or hold up under impairment.
+#[test]
+fn two_retail_processes_replicate_the_hosts_traffic() {
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let mut host_args = host_args(&retail, 9000);
+    host_args.retain(|a| a != "--dev-world");
+    host_args.extend(["--city".into(), "sf".into()]);
+    let mut host = Proc::spawn(MM2_EXE, &host_args);
+    let addr = listening_addr(&host);
+    let client = Proc::spawn(MM2_EXE, &join_args(&retail, addr, "bob", 1000));
+    start_when_ready(&mut host, 1);
+
+    let rec = client.until("smoke=headless-physics");
+    assert_eq!(field(&rec, "status"), "pass", "{rec}");
+    let (_, _, _live, landed, mismatched) = cars_field(&rec);
+    assert!(landed > 0, "no traffic row landed on the client: {rec}");
+    assert_eq!(mismatched, 0, "the client refused the host's rows: {rec}");
+    assert!(client.wait().success(), "the client did not exit cleanly");
+
+    host.cmd("quit");
+    let host_rec = host.until("smoke=headless-physics");
+    let (sent, ..) = cars_field(&host_rec);
+    assert!(sent > 0, "the host published no traffic: {host_rec}");
+    // The operator's evidence: both records, as the run printed them.
+    eprintln!("host   {host_rec}\nclient {rec}");
+}

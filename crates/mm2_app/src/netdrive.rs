@@ -140,8 +140,8 @@ use mm2_game::{
 };
 use mm2_net::{
     DriveInput, MAX_SNAP_IMPACTS, Message, RemoteInputs, SNAP_FLAG_BRAKE, SNAP_FLAG_GROUNDED,
-    SNAP_FLAG_REVERSE, SNAP_NO_SURFACE, SiteTable, SnapEntry, SnapImpact, SnapProp, SnapRace,
-    SnapTrailer, VehiclePick,
+    SNAP_FLAG_REVERSE, SNAP_NO_SURFACE, SiteTable, SnapCar, SnapEntry, SnapImpact, SnapProp,
+    SnapRace, SnapTrailer, VehiclePick,
 };
 use mm2_vehicle::{
     DriveDirection, HandlingMetrics, RemoteReplica, ResetVehicle, Teleported, Vehicle,
@@ -371,6 +371,9 @@ pub struct RemoteSnaps {
     /// The world-prop inbox (protocol v17, F26-A) — its own latest-wins
     /// rule per prop, reset with the stream's other ledgers.
     pub(crate) props: crate::worldprops::PropStage,
+    /// The ambient-traffic inbox (protocol v19, F26-A) — per-car
+    /// latest-wins, reset with the stream's other ledgers.
+    pub(crate) traffic: crate::worldtraffic::TrafficStage,
 }
 
 /// A staged snapshot frame.
@@ -721,6 +724,16 @@ impl RemoteSnaps {
         self.props.push(generation, tick, table, rows);
     }
 
+    /// Queue a received ambient-traffic frame (protocol v19, F26-A).
+    pub fn push_traffic(&mut self, generation: u64, tick: u64, roster: u64, rows: Vec<SnapCar>) {
+        self.traffic.push(generation, tick, roster, rows);
+    }
+
+    /// The ambient-traffic inbox — counters for the record/tests.
+    pub fn traffic(&self) -> &crate::worldtraffic::TrafficStage {
+        &self.traffic
+    }
+
     /// The world-prop inbox — counters for the record/tests.
     pub fn props(&self) -> &crate::worldprops::PropStage {
         &self.props
@@ -755,6 +768,7 @@ impl RemoteSnaps {
         self.race = None;
         self.race_key = None;
         self.props.reset();
+        self.traffic.reset();
     }
 }
 
@@ -888,6 +902,18 @@ pub struct NetDriveReport {
     /// Prop rows a client dropped because the host's stamped world
     /// differs from its own (F26-A).
     pub props_mismatched: u64,
+    /// Ambient-car rows the host published (F26-A, protocol v19).
+    pub cars_sent: u64,
+    /// Live ambient cars the host held back from a frame because the
+    /// population exceeded the frame bound (F26-A).
+    pub cars_omitted: u64,
+    /// Car rows a client landed on a copy (F26-A).
+    pub cars_landed: u64,
+    /// Car rows a client dropped because the host's ambient roster
+    /// differs from its own (F26-A).
+    pub cars_mismatched: u64,
+    /// Traffic copies a client currently holds (F26-A).
+    pub cars_live: usize,
 }
 
 /// A rotation off the wire, sanitized — a malformed-quaternion guard so
