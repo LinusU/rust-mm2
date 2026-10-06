@@ -1184,11 +1184,11 @@ fn run_headless(
     // while the wire carried none.
     let world_detail = world_ecs
         .get_resource::<crate::netdrive::NetDriveReport>()
-        .filter(|r| r.world_sent + r.world_landed + r.world_refused > 0)
+        .filter(|r| r.world_sent + r.world_landed + r.world_refused + r.world_throttled > 0)
         .map(|r| {
             format!(
-                " wclk=sent{},landed{},seek{},ref{}",
-                r.world_sent, r.world_landed, r.world_seeks, r.world_refused
+                " wclk=sent{},landed{},seek{},ref{},thr{}",
+                r.world_sent, r.world_landed, r.world_seeks, r.world_refused, r.world_throttled
             )
         })
         .unwrap_or_default();

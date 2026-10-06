@@ -20,10 +20,14 @@
 //! ([`apply_world_clock`]), so a late joiner lands on the host's
 //! drawbridge phase and mover positions within one frame's gap. The
 //! frame is *state*: a lost one self-corrects on the next, and an older
-//! reordered one is dropped. No link round trip is measured, so a
+//! reordered one is dropped. A seek replays every actor from its start,
+//! so the stage also bounds how often and how far a host can ask for
+//! one ([`WorldLimits`]). No link round trip is measured, so a
 //! client trails the host by the one-way delay — a few ticks on a LAN,
 //! inside the tolerance — and a longer path drifts out of it and
 //! re-seeks each frame.
+
+use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 use mm2_game::drawbridge::{DrawbridgeMode, LeafMotion};
@@ -53,6 +57,61 @@ pub const PUBLISH_EVERY_TICKS: u64 = 120;
 /// own clock.
 pub const MAX_SEEK_TICKS: u64 = 1 << 21;
 
+/// How hard a host may drive a client's re-seeks. A seek replays every
+/// actor from its start — its cost grows with the target — so a frame
+/// is refused unless it arrives at a sane rate and carries a tick a
+/// running host could have reached since the last one this client took.
+/// An honest host sends about one frame per [`PUBLISH_EVERY_TICKS`] at
+/// the fixed rate and its clock cannot outrun real time, so none of
+/// this touches it; a hostile or corrupt one is held to a couple of
+/// replays a second and a clock that runs at a bounded multiple of real
+/// time (Implementation choice — the numbers are generous margins, not
+/// retail facts).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WorldLimits {
+    /// Least wall time between two frames of one generation that
+    /// count; an earlier one is dropped throttled.
+    pub min_interval: Duration,
+    /// Most host ticks per wall second a clock may be seen to run at.
+    pub max_ticks_per_second: f64,
+    /// Ticks of allowance on top of that, so a stalled host or a
+    /// bunched-up burst after a link blackout is not mistaken for a
+    /// runaway clock.
+    pub slack_ticks: u64,
+}
+
+impl Default for WorldLimits {
+    fn default() -> Self {
+        Self {
+            min_interval: Duration::from_millis(500),
+            // The fixed rate is 120 Hz: four times that.
+            max_ticks_per_second: 480.0,
+            slack_ticks: 4 * PUBLISH_EVERY_TICKS,
+        }
+    }
+}
+
+impl WorldLimits {
+    /// No rate or growth bound — for a harness that feeds frames back
+    /// to back and is not testing the bound.
+    pub const UNBOUNDED: Self = Self {
+        min_interval: Duration::ZERO,
+        max_ticks_per_second: f64::INFINITY,
+        slack_ticks: u64::MAX,
+    };
+
+    /// Whether `ticks` could follow `prev` after `elapsed` of wall time.
+    fn allows(&self, prev: u64, ticks: u64, elapsed: Duration) -> bool {
+        let reach = self.max_ticks_per_second * elapsed.as_secs_f64();
+        let reach = if reach.is_finite() {
+            self.slack_ticks.saturating_add(reach as u64)
+        } else {
+            u64::MAX
+        };
+        ticks.saturating_sub(prev) <= reach
+    }
+}
+
 /// Generations the client-side inbox tracks at once — a frame of a
 /// generation that is not the session's is held only so it can be
 /// refused counted, never so it can poison the session's own.
@@ -68,38 +127,96 @@ const STAGED_GENERATIONS: usize = 4;
 /// session's own.
 #[derive(Default)]
 pub struct WorldStage {
-    /// `(generation, newest tick, not yet applied)`, at most
+    /// Newest accepted frame per generation, at most
     /// [`STAGED_GENERATIONS`] — the oldest generation is evicted.
-    frames: Vec<(u64, u64, bool)>,
+    frames: Vec<StagedClock>,
+    limits: WorldLimits,
+    /// Zero point of the wall-time stamps, set by the first frame.
+    epoch: Option<Instant>,
     stale: u64,
+    throttled: u64,
     refused: u64,
     landed: u64,
     seeks: u64,
 }
 
+/// One generation's newest accepted clock frame.
+#[derive(Debug, Clone, Copy)]
+struct StagedClock {
+    generation: u64,
+    ticks: u64,
+    /// Accepted but not yet applied.
+    fresh: bool,
+    /// Wall time (since the stage's epoch) it was accepted at.
+    at: Duration,
+}
+
 impl WorldStage {
-    /// Queue one received clock frame.
+    /// A stage holding frames to `limits` rather than the defaults.
+    pub fn with_limits(limits: WorldLimits) -> Self {
+        Self {
+            limits,
+            ..Self::default()
+        }
+    }
+
+    /// Hold later frames to `limits`; what is already staged stays.
+    pub fn set_limits(&mut self, limits: WorldLimits) {
+        self.limits = limits;
+    }
+
+    /// Queue one received clock frame, stamped with the wall clock.
     pub fn push(&mut self, generation: u64, ticks: u64) {
+        let now = self.epoch.get_or_insert_with(Instant::now).elapsed();
+        self.push_at(generation, ticks, now);
+    }
+
+    /// [`push`](Self::push) at an explicit wall time since the stage
+    /// began — the clock a test can drive.
+    pub fn push_at(&mut self, generation: u64, ticks: u64, now: Duration) {
         // Refused before it can move a watermark: one corrupt frame
         // must not turn every honest one after it into a stale drop.
         if ticks > MAX_SEEK_TICKS {
             self.refused += 1;
             return;
         }
-        if let Some(entry) = self.frames.iter_mut().find(|(g, ..)| *g == generation) {
-            if ticks <= entry.1 {
+        if let Some(entry) = self.frames.iter_mut().find(|f| f.generation == generation) {
+            if ticks <= entry.ticks {
                 self.stale += 1;
+                return;
+            }
+            let elapsed = now.saturating_sub(entry.at);
+            // Neither bound moves the watermark either: the next frame
+            // is judged against the last one that was taken, and the
+            // wall time since it only grows.
+            if elapsed < self.limits.min_interval {
+                self.throttled += 1;
+            } else if !self.limits.allows(entry.ticks, ticks, elapsed) {
+                self.refused += 1;
             } else {
-                *entry = (generation, ticks, true);
+                *entry = StagedClock {
+                    generation,
+                    ticks,
+                    fresh: true,
+                    at: now,
+                };
             }
             return;
         }
         if self.frames.len() >= STAGED_GENERATIONS
-            && let Some(oldest) = (0..self.frames.len()).min_by_key(|&i| self.frames[i].0)
+            && let Some(oldest) = (0..self.frames.len()).min_by_key(|&i| self.frames[i].generation)
         {
             self.frames.swap_remove(oldest);
         }
-        self.frames.push((generation, ticks, true));
+        // A generation's first frame has nothing to be compared with:
+        // a late joiner has to land wherever the host stands, bounded
+        // by `MAX_SEEK_TICKS` alone.
+        self.frames.push(StagedClock {
+            generation,
+            ticks,
+            fresh: true,
+            at: now,
+        });
     }
 
     /// Drop everything staged and every watermark — the authority's
@@ -114,8 +231,15 @@ impl WorldStage {
         self.stale
     }
 
-    /// Frames refused (a tick past [`MAX_SEEK_TICKS`], or another
-    /// generation's at apply time).
+    /// Frames dropped for arriving sooner than
+    /// [`WorldLimits::min_interval`] after the last one taken.
+    pub fn throttled(&self) -> u64 {
+        self.throttled
+    }
+
+    /// Frames refused (a tick past [`MAX_SEEK_TICKS`], a clock that ran
+    /// faster than [`WorldLimits`] allow, or another generation's at
+    /// apply time).
     pub fn refused(&self) -> u64 {
         self.refused
     }
@@ -135,12 +259,12 @@ impl WorldStage {
     fn take_for(&mut self, wire: u64) -> Option<u64> {
         let mut found = None;
         for entry in &mut self.frames {
-            if !entry.2 {
+            if !entry.fresh {
                 continue;
             }
-            entry.2 = false;
-            if entry.0 == wire {
-                found = Some(entry.1);
+            entry.fresh = false;
+            if entry.generation == wire {
+                found = Some(entry.ticks);
             } else {
                 self.refused += 1;
             }
@@ -232,6 +356,7 @@ pub fn apply_world_clock(
         report.world_landed = stage.landed;
         report.world_seeks = stage.seeks;
         report.world_refused = stage.refused;
+        report.world_throttled = stage.throttled;
     }
 }
 
@@ -371,7 +496,7 @@ mod tests {
 
     #[test]
     fn the_stage_keeps_the_newest_tick_per_generation() {
-        let mut stage = WorldStage::default();
+        let mut stage = WorldStage::with_limits(WorldLimits::UNBOUNDED);
         stage.push(3, 500);
         stage.push(3, 400);
         stage.push(3, 500);
@@ -386,7 +511,7 @@ mod tests {
 
     #[test]
     fn another_generation_is_refused_and_never_marks_the_sessions_own_stale() {
-        let mut stage = WorldStage::default();
+        let mut stage = WorldStage::with_limits(WorldLimits::UNBOUNDED);
         stage.push(4, 9_000);
         stage.push(3, 100);
         assert_eq!(stage.stale(), 0);
@@ -396,7 +521,7 @@ mod tests {
 
     #[test]
     fn an_implausible_tick_is_refused_before_it_can_become_a_watermark() {
-        let mut stage = WorldStage::default();
+        let mut stage = WorldStage::with_limits(WorldLimits::UNBOUNDED);
         stage.push(1, MAX_SEEK_TICKS + 1);
         stage.push(1, u64::MAX);
         assert_eq!(stage.refused(), 2);
@@ -419,14 +544,14 @@ mod tests {
         }
         assert_eq!(stage.frames.len(), STAGED_GENERATIONS);
         assert!(
-            stage.frames.iter().all(|(g, ..)| *g >= 60),
+            stage.frames.iter().all(|f| f.generation >= 60),
             "the oldest generations are the ones evicted"
         );
     }
 
     #[test]
     fn a_reset_forgets_the_stream_but_not_the_evidence() {
-        let mut stage = WorldStage::default();
+        let mut stage = WorldStage::with_limits(WorldLimits::UNBOUNDED);
         stage.push(1, 50);
         stage.push(1, 40);
         stage.reset();
@@ -434,6 +559,109 @@ mod tests {
         stage.push(1, 40);
         assert_eq!(stage.stale(), 1, "counters survive");
         assert_eq!(stage.take_for(1), Some(40), "the watermark does not");
+    }
+
+    const SEC: Duration = Duration::from_secs(1);
+
+    #[test]
+    fn frames_arriving_faster_than_the_interval_are_throttled_not_taken() {
+        let mut stage = WorldStage::default();
+        stage.push_at(1, 1_000, Duration::ZERO);
+        stage.push_at(1, 1_120, Duration::from_millis(10));
+        stage.push_at(1, 1_240, Duration::from_millis(499));
+        assert_eq!(stage.throttled(), 2);
+        assert_eq!(stage.stale(), 0, "a throttled frame is not a stale one");
+        assert_eq!(stage.take_for(1), Some(1_000), "only the first counted");
+        // The watermark stayed on the frame that was taken, so the next
+        // one a half-second on is judged against it, not against a
+        // frame that never counted.
+        stage.push_at(1, 1_240, Duration::from_millis(500));
+        assert_eq!(stage.take_for(1), Some(1_240));
+        assert_eq!(stage.throttled(), 2);
+    }
+
+    #[test]
+    fn a_clock_that_outruns_real_time_is_refused_without_becoming_the_watermark() {
+        let limits = WorldLimits {
+            min_interval: Duration::ZERO,
+            max_ticks_per_second: 100.0,
+            slack_ticks: 50,
+        };
+        let mut stage = WorldStage::with_limits(limits);
+        stage.push_at(1, 10_000, Duration::ZERO);
+        assert_eq!(stage.take_for(1), Some(10_000), "the first frame is free");
+        // 2 s on: 200 ticks of reach plus 50 slack — 250 is the edge.
+        stage.push_at(1, 10_251, 2 * SEC);
+        assert_eq!(stage.refused(), 1);
+        assert_eq!(stage.take_for(1), None);
+        stage.push_at(1, 10_250, 2 * SEC);
+        assert_eq!(stage.take_for(1), Some(10_250), "the bound is inclusive");
+        assert_eq!(stage.refused(), 1, "the refused frame left no watermark");
+        // The wall time since the last taken frame keeps growing, so an
+        // honest host that was merely bunched up by a blackout catches up.
+        stage.push_at(1, 10_250 + 10 * 100 + 50, 12 * SEC);
+        assert_eq!(stage.take_for(1), Some(11_300));
+    }
+
+    #[test]
+    fn a_regressing_clock_is_stale_whatever_the_limits() {
+        let mut stage = WorldStage::with_limits(WorldLimits::UNBOUNDED);
+        stage.push_at(1, 500, Duration::ZERO);
+        stage.push_at(1, 499, SEC);
+        assert_eq!(stage.stale(), 1);
+        stage.push_at(1, u64::MAX / 2, 2 * SEC);
+        assert_eq!(stage.refused(), 1, "the seek cap still holds unbounded");
+    }
+
+    #[test]
+    fn the_limits_bound_the_seek_work_a_hostile_host_can_extract() {
+        // A host sending a frame every millisecond with a clock running
+        // ten times too fast: the default limits take at most one frame
+        // per interval and none past the growth bound.
+        let mut stage = WorldStage::default();
+        let (mut taken, mut tick) = (0u64, 0u64);
+        for ms in 0..10_000u64 {
+            tick += 5; // 5 ticks per ms is 5,000 per second, ~10x the cap
+            stage.push_at(1, tick, Duration::from_millis(ms));
+            if stage.take_for(1).is_some() {
+                taken += 1;
+            }
+        }
+        // First frame is free; then at most one per 500 ms and only
+        // while the claimed clock is plausible: the runaway is shut out.
+        assert!(taken <= 1 + 10_000 / 500, "taken {taken}");
+        assert!(stage.refused() > 0 && stage.throttled() > 0);
+    }
+
+    #[test]
+    fn an_honest_hosts_cadence_is_never_limited() {
+        let mut stage = WorldStage::default();
+        // 120 Hz world, a frame every PUBLISH_EVERY_TICKS (1 s).
+        for i in 1..=60u64 {
+            stage.push_at(1, i * PUBLISH_EVERY_TICKS, Duration::from_secs(i));
+            assert_eq!(
+                stage.take_for(1),
+                Some(i * PUBLISH_EVERY_TICKS),
+                "frame {i}"
+            );
+        }
+        // A 3 s link blackout, then the three queued frames arrive
+        // together: the first lands (four seconds of wall time cover
+        // its ticks), the two that bunch up behind it are throttled,
+        // and the next frame on cadence lands again — the clock is at
+        // most a second behind, never refused.
+        let base = 60 * PUBLISH_EVERY_TICKS;
+        let t = 64 * SEC;
+        for k in 1..=3u64 {
+            stage.push_at(1, base + k * PUBLISH_EVERY_TICKS, t);
+        }
+        assert_eq!(stage.take_for(1), Some(base + PUBLISH_EVERY_TICKS));
+        stage.push_at(1, base + 4 * PUBLISH_EVERY_TICKS, t + SEC);
+        assert_eq!(stage.take_for(1), Some(base + 4 * PUBLISH_EVERY_TICKS));
+        assert_eq!(
+            (stage.throttled(), stage.refused(), stage.stale()),
+            (2, 0, 0)
+        );
     }
 
     #[test]

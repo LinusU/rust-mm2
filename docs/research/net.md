@@ -1107,6 +1107,26 @@ trains) has run since its session entered `Countdown`.
   start and a corrupt tick must not ask for 2^64 steps. An accepted tick
   goes to the existing `WorldClock::sync`, so the 6-tick tolerance and
   the seek itself are the race-row path's.
+- **Seek-rate and growth bound (`WorldLimits`).** A seek costs
+  O(target) per actor, so a host that sent increasing ticks under the
+  cap could force a replay on every frame. A generation's *first* frame
+  is free (a late joiner must land wherever the host stands, bounded by
+  `MAX_SEEK_TICKS`); each later frame is judged against the last one
+  *taken*: it is dropped counted `throttled` if it arrives within
+  500 ms of it, and refused if its tick is more than
+  `slack 480 + 480 × elapsed seconds` ahead (four times the 120 Hz
+  fixed rate, plus four seconds of slack so a stalled host or a burst
+  after a link blackout is not mistaken for a runaway). Neither moves
+  the watermark, so the next honest frame is judged against the same
+  anchor and the wall time since it only grows. Net effect on a hostile
+  host: at most two replays a second, of a clock that cannot have run
+  faster than four times real time. The numbers are margins
+  (Implementation choice), not measurements of any real host; an honest
+  vsync-bound host sends one frame a second and is never limited
+  (`an_honest_hosts_cadence_is_never_limited`, incl. a 3 s blackout).
+  The limits are a `RemoteSnaps::set_world_limits` knob so a harness
+  feeding frames back to back can relax them. The record's `wclk=` gains
+  a `thr<n>` cell.
 - **Interaction with the race row.** In a race both carry the same
   number (`world_ticks(race)` is countdown + race clock), so they agree;
   the clock frame also keeps running after the race completes, when the
@@ -1133,6 +1153,14 @@ trains) has run since its session entered `Countdown`.
   diverge between frames; in a vsync-bound run the fixed clock tracks
   wall time and the client should seek rarely. That has not been
   observed (no windowed two-process run).
+  After the seek bound landed the same run read host `wclk=sent14`,
+  client `wclk=sent0,landed5,seek4,ref0,thr9`: the headless host
+  publishes a frame every ~120 world ticks but its world clock runs
+  faster than wall time (14 frames = 1,680 ticks inside a ~8 s test),
+  so frames reach the client faster than one per 500 ms and nine were
+  throttled. Nothing was refused (the 4× growth margin held). That is
+  the free-running fixture, not an honest host; a vsync-bound one is
+  unobserved.
 - **Not covered.** No windowed/GPU or impaired-network measurement of
   scenery alignment; no check that drawbridge/mover *poses* match the
   host's after a seek beyond the `worldclock` replay-equals-live unit

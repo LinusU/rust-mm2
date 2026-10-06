@@ -5020,7 +5020,7 @@ fn the_host_publishes_its_world_clock_at_the_cadence() {
 /// poisoning the honest frames after it.
 #[test]
 fn a_world_clock_frame_re_seeks_a_cruise_clients_scenery() {
-    use mm2_app::worldclock::{MAX_SEEK_TICKS, SYNC_TOLERANCE_TICKS, WorldClock};
+    use mm2_app::worldclock::{MAX_SEEK_TICKS, SYNC_TOLERANCE_TICKS, WorldClock, WorldLimits};
 
     let install = tempfile::tempdir().unwrap();
     let vfs = mount(install.path());
@@ -5059,6 +5059,12 @@ fn a_world_clock_frame_re_seeks_a_cruise_clients_scenery() {
     // `bridge_app` runs no `advance_world_clock`, so a queued seek
     // stays visible until the test consumes it, as the system would.
     app.world_mut().insert_resource(WorldClock::default());
+    // The legs below send frames back to back; the bound on how fast a
+    // host may do that is exercised at the end, with limits chosen so
+    // no wall-clock timing decides the outcome.
+    app.world_mut()
+        .resource_mut::<netdrive::RemoteSnaps>()
+        .set_world_limits(WorldLimits::UNBOUNDED);
     let seek = |a: &App| a.world().resource::<WorldClock>().seek;
     let world = |a: &App| {
         let w = a.world().resource::<netdrive::RemoteSnaps>().world();
@@ -5110,6 +5116,44 @@ fn a_world_clock_frame_re_seeks_a_cruise_clients_scenery() {
     send(9_000);
     spin(&mut app, |a| seek(a).is_some());
     assert_eq!(seek(&app), Some(9_000));
+
+    // A host cannot drive replays: with a minimum interval no test run
+    // can outlast, the next frame is throttled, applies nothing and
+    // leaves the watermark where it was.
+    app.world_mut().resource_mut::<WorldClock>().seek = None;
+    app.world_mut()
+        .resource_mut::<netdrive::RemoteSnaps>()
+        .set_world_limits(WorldLimits {
+            min_interval: std::time::Duration::from_secs(3_600),
+            ..WorldLimits::UNBOUNDED
+        });
+    send(12_000);
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::RemoteSnaps>()
+            .world()
+            .throttled()
+            == 1
+    });
+    assert_eq!(seek(&app), None, "a throttled frame queues no replay");
+
+    // And a clock that ran further than the host could have since the
+    // last frame taken is refused, again without a watermark: the
+    // modest frame after it (inside the 100-tick allowance) lands.
+    let refused_before = world(&app).2;
+    app.world_mut()
+        .resource_mut::<netdrive::RemoteSnaps>()
+        .set_world_limits(WorldLimits {
+            min_interval: std::time::Duration::ZERO,
+            max_ticks_per_second: 0.0,
+            slack_ticks: 100,
+        });
+    send(9_101);
+    spin(&mut app, |a| world(a).2 == refused_before + 1);
+    assert_eq!(seek(&app), None);
+    send(9_100);
+    spin(&mut app, |a| seek(a).is_some());
+    assert_eq!(seek(&app), Some(9_100));
 }
 
 /// F25-B, protocol v14 client half: a seat's `SnapEntry` progress

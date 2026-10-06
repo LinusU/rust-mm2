@@ -1,3 +1,70 @@
+# Last iteration — bound the host's power over a client's re-seeks (new-run iteration 8)
+
+Selection: the previous review passed with no blocking findings, so no
+repair was owed. Of its verification gaps the one that is a real
+defect-in-waiting rather than missing evidence: "a hostile or buggy host
+can force replays of up to 2^21 steps per actor per frame by sending
+increasing ticks under the cap; no per-second seek rate limit". A seek
+replays every actor from its start, so the cost of one grows with the
+target. I took this over per-client traffic relevancy (moot at the
+default cap) and over the report-6 DSN-11 reconciliation (a larger
+multi-process lifecycle change).
+
+Change (no protocol change, still v20): `worldclock::WorldLimits`, held
+by `WorldStage`. A generation's first frame is free (a late joiner must
+land wherever the host stands; still bounded by `MAX_SEEK_TICKS`). Each
+later frame is judged against the last one *taken*: dropped counted
+`throttled` if within 500 ms of it, refused (`ref`) if its tick is more
+than `480 + 480 × elapsed s` ahead (4× the 120 Hz fixed rate + 4 s
+slack, for a stalled host or a burst after a link blackout). Neither
+moves the watermark, so the next honest frame is judged against the same
+anchor. `push` stamps wall time; `push_at` takes it explicitly so tests
+drive the clock. `RemoteSnaps::set_world_limits` lets a harness relax
+the bound; the record's `wclk=` gains `thr<n>`. The numbers are margins
+(Implementation choice), not measurements of a real host. Docs:
+`docs/research/net.md`, PLAN F26-A slice 8.
+
+Tests: 5 new `WorldStage` units (throttle leaves the watermark on the
+taken frame; runaway clock refused with no watermark and the inclusive
+edge; a regressing clock stays stale and the seek cap holds unbounded;
+a frame-per-millisecond hostile host with a 10× clock gets at most one
+frame per interval and shuts out once implausible; an honest 1 Hz host
+including a 3 s blackout burst is never limited — only the two frames
+bunched behind the first are throttled); the `net_app` world-clock leg
+now relaxes the limits for its back-to-back legs and ends with a
+throttled frame over a real loopback socket (interval no run can
+outlast) and a growth-refused frame followed by an honest one. All use
+conditions under bounded spins or injected time, no wall-clock timing
+decides an outcome.
+
+Process evidence (separate, retail install `/Users/linus/coding/rust-mm2/
+retail`): `MM2_RETAIL=… cargo test --locked -p mm2_app --test network
+two_retail_processes_replicate_the_hosts_traffic` passes; host
+`wclk=sent14`, client `wclk=sent0,landed5,seek4,ref0,thr9`. The nine
+throttles are the **headless fixture**: its host clock runs faster than
+wall time (1,680 ticks in a ~8 s test), so frames arrive faster than one
+per 500 ms. Nothing was refused (the 4× margin held). It is not an
+honest vsync-bound host; that run is unobserved. Not rendered, not
+impaired.
+
+Gates (all exit 0): `cargo fmt --all -- --check` PASS; `cargo clippy
+--locked --workspace --all-targets --all-features -- -D warnings` PASS;
+`cargo test --locked --workspace` PASS (1996 passed, 0 failed; was
+1991). No test processes left running.
+
+Still open (F26-A stays active, not AC01..06 completion): no RTT
+compensation (client trails by the one-way delay; past ~50 ms it
+re-seeks each accepted frame, now at most two a second), proximity
+leaves per-peer, no windowed/GPU or impaired-network scenery
+measurement, the first frame of a generation can still ask for up to
+2^21 steps once, per-client traffic relevancy (moot at the default
+cap), signal heads, interpolation beyond the velocity carry, mid-session
+weather, late-join of props beyond the resend cycle, sound
+replication, report-6 follow-ups 1 (two-process leg) and 2 (DSN-11).
+Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — world-clock replication for Cruise (new-run iteration 7)
 
 Selection: the previous review passed with no blocking findings, so no

@@ -736,6 +736,12 @@ impl RemoteSnaps {
         self.world.push(generation, ticks);
     }
 
+    /// Hold the world-clock inbox to `limits` (a harness that feeds
+    /// frames back to back relaxes them; production keeps the default).
+    pub fn set_world_limits(&mut self, limits: crate::worldclock::WorldLimits) {
+        self.world.set_limits(limits);
+    }
+
     /// The world-clock inbox — counters for the record/tests.
     pub fn world(&self) -> &crate::worldclock::WorldStage {
         &self.world
@@ -936,6 +942,10 @@ pub struct NetDriveReport {
     /// World-clock frames a client refused: an implausible tick or
     /// another generation's.
     pub world_refused: u64,
+    /// World-clock frames a client dropped for arriving faster than
+    /// [`WorldLimits::min_interval`](crate::worldclock::WorldLimits)
+    /// allows (F26-A).
+    pub world_throttled: u64,
 }
 
 /// A rotation off the wire, sanitized — a malformed-quaternion guard so
