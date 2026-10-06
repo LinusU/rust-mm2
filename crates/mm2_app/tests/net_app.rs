@@ -4826,6 +4826,107 @@ fn a_snap_race_row_releases_the_joined_clients_countdown() {
     host.shutdown();
 }
 
+/// F26-A: the race row also steers the scenery clock. A row that puts
+/// this peer's world more than the tolerance away queues a re-seek to
+/// the host's tick (`countdown_ticks + clock` once running); jitter
+/// inside the tolerance leaves the clock alone.
+#[test]
+fn a_snap_race_row_re_seeks_the_scenery_clock() {
+    use mm2_app::worldclock::{SYNC_TOLERANCE_TICKS, WorldClock};
+
+    let install = tempfile::tempdir().unwrap();
+    let vfs = mount(install.path());
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host_config = HostConfig::new(fp);
+    host_config.host_pick = Some(VehiclePick {
+        vehicle: String::new(),
+        paint: 0,
+    });
+    let host = Host::listen_loopback(&host_config).unwrap();
+    host.set_session(net::advertise(&dev_cruise()).unwrap())
+        .unwrap();
+    let link = LobbyLink::join(
+        host.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join failed");
+    let mut app = bridge_app(vfs, link);
+    {
+        let link = app.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    until_ready(&mut app);
+    host.start(LateJoin::Open).unwrap();
+    until_started(&host);
+    until_begun(&mut app);
+    let generation = app.world().resource::<Session>().wire_generation();
+    {
+        let local_generation = app.world().resource::<Session>().generation();
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Countdown).unwrap();
+        app.world_mut().insert_resource(mm2_game::RaceState::new(
+            wire_race_def(180),
+            local_generation,
+        ));
+    }
+    // `bridge_app` runs no `advance_world_clock`, so a queued seek
+    // stays visible until the test consumes it, as the system would.
+    app.world_mut().insert_resource(WorldClock::default());
+    let race_snap = |tick, race| Message::Snap {
+        generation,
+        tick,
+        entries: Vec::new(),
+        trailers: Vec::new(),
+        impacts: Vec::new(),
+        race: Some(race),
+    };
+    let running = |clock: u64| mm2_net::SnapRace {
+        phase: 1,
+        countdown: 0,
+        clock,
+    };
+    let seek = |a: &App| a.world().resource::<WorldClock>().seek;
+
+    // A joiner at tick 0 is 180 ticks (the countdown) behind a host
+    // whose race clock has just started.
+    host.ctl().broadcast(&race_snap(7, running(0))).unwrap();
+    spin(&mut app, |a| seek(a).is_some());
+    assert_eq!(seek(&app), Some(180));
+
+    // The system's consumption: the clock stands at the seek target.
+    *app.world_mut().resource_mut::<WorldClock>() = WorldClock {
+        ticks: 180,
+        seek: None,
+    };
+
+    // A row within the tolerance is jitter, not drift. Wait for the
+    // row to be applied (the report counts it) before asserting that
+    // nothing queued.
+    let applied = app
+        .world()
+        .resource::<netdrive::NetDriveReport>()
+        .race_applied;
+    host.ctl()
+        .broadcast(&race_snap(7, running(SYNC_TOLERANCE_TICKS)))
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::NetDriveReport>()
+            .race_applied
+            > applied
+    });
+    assert_eq!(seek(&app), None, "jitter inside the tolerance is ignored");
+
+    // Real drift queues a seek to the host's tick.
+    host.ctl().broadcast(&race_snap(7, running(600))).unwrap();
+    spin(&mut app, |a| seek(a).is_some());
+    assert_eq!(seek(&app), Some(780));
+}
+
 /// F25-B, protocol v14 client half: a seat's `SnapEntry` progress
 /// tail is the predicted client's only `RaceProgress` truth —
 /// `advance_race` is authority-gated and never steps there, so the

@@ -120,11 +120,20 @@ pub fn advance_world_clock(
     mut movers: Query<(&mut Mover, &WorldStart<PathFollower>)>,
     mut trains: Query<(&mut Train, &WorldStart<TrainMotion>)>,
 ) {
-    if matches!(
-        session.phase(),
-        SessionPhase::Countdown | SessionPhase::Playing | SessionPhase::Results
-    ) {
-        clock.ticks += 1;
+    match session.phase() {
+        SessionPhase::Countdown | SessionPhase::Playing | SessionPhase::Results => {
+            clock.ticks += 1;
+        }
+        // Between sessions the clock starts over: a second race in the
+        // same process must count from its own countdown, not from the
+        // last session's total, or the tolerance check compares the
+        // new host's tick against a stale one. `Ready` is not here — a
+        // joiner's first race row seeks while it is still `Ready`.
+        SessionPhase::Menu
+        | SessionPhase::Loading
+        | SessionPhase::Unloading
+        | SessionPhase::Failed(_) => *clock = WorldClock::default(),
+        SessionPhase::Ready | SessionPhase::Paused => {}
     }
     let Some(target) = clock.seek.take() else {
         return;
@@ -227,8 +236,12 @@ mod tests {
         let mut app = App::new();
         let mut fixed = Time::<Fixed>::from_hz(60.0);
         fixed.advance_by(std::time::Duration::from_secs_f32(DT));
+        let mut session = Session::default();
+        session.transition(SessionPhase::Loading).unwrap();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Countdown).unwrap();
         app.insert_resource(fixed)
-            .insert_resource(Session::default())
+            .insert_resource(session)
             .insert_resource(WorldClock {
                 ticks: 0,
                 seek: Some(2_000),
@@ -254,6 +267,34 @@ mod tests {
         );
         let clock = world.resource::<WorldClock>();
         assert_eq!((clock.ticks, clock.seek), (2_000, None));
+    }
+
+    #[test]
+    fn the_clock_starts_over_between_sessions() {
+        let mut app = App::new();
+        let mut fixed = Time::<Fixed>::from_hz(60.0);
+        fixed.advance_by(std::time::Duration::from_secs_f32(DT));
+        app.insert_resource(fixed)
+            .insert_resource(Session::default())
+            .insert_resource(WorldClock {
+                ticks: 900,
+                seek: Some(1_200),
+            })
+            .add_systems(Update, advance_world_clock);
+        // `Menu` (the default phase): last session's count and any
+        // undelivered seek are dropped.
+        app.update();
+        assert_eq!(*app.world().resource::<WorldClock>(), WorldClock::default());
+
+        // `Ready` keeps a seek queued by a joiner's first race row.
+        let mut session = Session::default();
+        session.transition(SessionPhase::Loading).unwrap();
+        session.transition(SessionPhase::Ready).unwrap();
+        app.insert_resource(session);
+        app.world_mut().resource_mut::<WorldClock>().seek = Some(50);
+        app.update();
+        let clock = app.world().resource::<WorldClock>();
+        assert_eq!((clock.ticks, clock.seek), (50, None));
     }
 
     fn fixed_dt() -> f32 {
