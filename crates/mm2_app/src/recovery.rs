@@ -5,8 +5,9 @@
 //! and the session lifecycle, the same split [`crate::stuck`] uses:
 //!
 //! - [`track_recovery`] classifies each participant's grounded wheels
-//!   once per fixed step — any dry contact re-anchors the detector,
-//!   an all-water contact accrues the submersion dwell, and an
+//!   once per fixed step — a dry contact re-anchors the detector when
+//!   static dry ground holds the car up ([`SupportProbe`]), an
+//!   all-water contact accrues the submersion dwell, and an
 //!   airborne fall past `fall_margin` below the anchor *and* under the
 //!   city's [`WorldFloor`] fires the out-of-bounds leg — emitting one
 //!   bounded [`RecoveryEvent`] per episode. (The detector's non-finite arm is defence-in-depth for
@@ -34,12 +35,13 @@
 use std::collections::HashMap;
 
 use avian3d::prelude::*;
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use mm2_game::{
     DamageTier, GroundContact, ObjectId, ObjectIdentity, Player, PlayerControl, RecoveryCause,
     RecoveryEvent, RecoveryVerdict, Session, VehicleDamage, VehicleRecovery, VehicleStuck,
 };
-use mm2_vehicle::{ResetVehicle, VehicleState};
+use mm2_vehicle::{ResetVehicle, TireSurface, Vehicle, VehicleState};
 
 use crate::city::WorldFloor;
 use crate::session::SpawnPoint;
@@ -109,6 +111,83 @@ fn ground_contact(
     }
 }
 
+/// Least `up.y` — the cosine of the car's tilt — a pose may have and
+/// still anchor the recovery: 30° off level. Streets stay well inside it
+/// (SF's steepest are ~17°); a car pitched further is up a grass bank
+/// or a ramp face, where the level landing a recovery makes would need
+/// ground probed metres above the anchor.
+const ANCHOR_MIN_UPRIGHT: f32 = 0.866;
+
+/// How far below the car's centre of mass the ground that holds it up
+/// may lie, metres — a settled car's centre of mass is under two metres
+/// above its wheels' contacts.
+const ANCHOR_SUPPORT_REACH: f32 = 3.0;
+
+/// The anchor test on top of a dry wheel contact: whether static dry
+/// ground holds the car up.
+///
+/// A dry wheel says something solid is under that wheel, not that the
+/// car stands on it. A car righted level into a 37° bank had one rear
+/// wheel still above the grass while the rest of it lay inside the
+/// one-sided slope and was falling through: that pose became the anchor,
+/// and every out-of-bounds recovery set the car back down inside the
+/// bank to fall again. The probe asks the chassis instead — straight down
+/// from the centre of mass the first thing hit must be dry ground that
+/// cannot move away (no ferry deck or drawbridge leaf), and the car
+/// must be close enough to upright to be set down level where it is.
+#[derive(SystemParam)]
+pub struct SupportProbe<'w, 's> {
+    spatial: SpatialQuery<'w, 's>,
+    colliders: Query<'w, 's, (Option<&'static ColliderOf>, Option<&'static TireSurface>)>,
+    bodies: Query<'w, 's, &'static RigidBody>,
+}
+
+impl SupportProbe<'_, '_> {
+    /// Whether `collider` belongs to no moving body — city ground and
+    /// props, not a car, a loose prop or a ferry deck.
+    fn is_static(&self, collider: Entity) -> bool {
+        let attached = self.colliders.get(collider).ok().and_then(|(c, _)| c);
+        let body = attached.map_or(collider, |c| c.body);
+        !self
+            .bodies
+            .get(body)
+            .is_ok_and(|b| b.is_dynamic() || b.is_kinematic())
+    }
+
+    /// Whether `car`, at `pos`/`rot` with `vehicle`'s centre of mass,
+    /// stands on static dry ground: upright within
+    /// [`ANCHOR_MIN_UPRIGHT`], and the first collider straight below its
+    /// centre of mass within [`ANCHOR_SUPPORT_REACH`] belongs to no
+    /// moving body and is not water by the same rule the wheels use.
+    fn holds_up(
+        &self,
+        car: Entity,
+        pos: Vec3,
+        rot: Quat,
+        vehicle: &Vehicle,
+        water_min_drag: f32,
+        water: Option<&crate::water::CityWater>,
+    ) -> bool {
+        if (rot * Vec3::Y).y < ANCHOR_MIN_UPRIGHT {
+            return false;
+        }
+        let com = pos + rot * Vec3::from(vehicle.config.center_of_mass);
+        let filter = SpatialQueryFilter::default().with_excluded_entities([car]);
+        // `solid: false` — a centre of mass already inside the ground
+        // must find nothing below it, not a hit at its own origin.
+        let Some(hit) =
+            self.spatial
+                .cast_ray(com, Dir3::NEG_Y, ANCHOR_SUPPORT_REACH, false, &filter)
+        else {
+            return false;
+        };
+        let surface = self.colliders.get(hit.entity).ok().and_then(|(_, s)| s);
+        let point = com - Vec3::Y * hit.distance;
+        let deadly = water.is_some_and(|water| water.is_deadly(point));
+        self.is_static(hit.entity) && surface.map_or(0.0, |s| s.drag) < water_min_drag && !deadly
+    }
+}
+
 type RecoveryVehicles<'w, 's> = Query<
     'w,
     's,
@@ -119,6 +198,7 @@ type RecoveryVehicles<'w, 's> = Query<
         &'static Position,
         &'static Rotation,
         &'static VehicleState,
+        &'static Vehicle,
         &'static mut VehicleRecovery,
         Option<&'static VehicleDamage>,
     ),
@@ -127,6 +207,11 @@ type RecoveryVehicles<'w, 's> = Query<
 /// Fixed-step: advance every participant's [`VehicleRecovery`]
 /// detector once, emitting one [`RecoveryEvent`] per fired episode.
 ///
+/// A dry contact only re-anchors the detector when the
+/// [`SupportProbe`] finds static dry ground holding the car up; a dry
+/// wheel on anything else observes as airborne — the anchor stays on
+/// the last ground that did, and the fall leg keeps watching.
+///
 /// Remote drivers observe like AI: the authority simulating their car
 /// owns their detector (F25-A.4; a predicted client's copies never
 /// reach this system — it early-returns without
@@ -134,11 +219,13 @@ type RecoveryVehicles<'w, 's> = Query<
 /// to [`crate::damage::resolve_disabled`]'s outcome — its reset or
 /// restart owns the pose, so the observe leg does not run a second
 /// recovery underneath it.
+#[allow(clippy::too_many_arguments)] // Bevy system: the observe leg threads the session handles it reads
 pub fn track_recovery(
     session: Res<Session>,
     time: Res<Time<Fixed>>,
     water: Option<Res<crate::water::CityWater>>,
     floor: Option<Res<WorldFloor>>,
+    support: SupportProbe,
     mut vehicles: RecoveryVehicles,
     mut writer: MessageWriter<RecoveryEvent>,
     mut report: ResMut<RecoveryReport>,
@@ -153,13 +240,19 @@ pub fn track_recovery(
     let tick = session.tick();
     let water = water.as_deref();
     let floor = floor.map(|floor| floor.0);
-    for (.., id, _player, pos, rot, state, mut recovery, damage) in &mut vehicles {
+    for (entity, id, _player, pos, rot, state, vehicle, mut recovery, damage) in &mut vehicles {
         // A wreck belongs to the damage outcome — it cannot drive out
         // of anything.
         if damage.is_some_and(|d| d.condition() == DamageTier::Disabled) {
             continue;
         }
-        let contact = ground_contact(state, pos.0, recovery.policy.water_min_drag, water);
+        let water_min_drag = recovery.policy.water_min_drag;
+        let mut contact = ground_contact(state, pos.0, water_min_drag, water);
+        if contact == GroundContact::Dry
+            && !support.holds_up(entity, pos.0, rot.0, vehicle, water_min_drag, water)
+        {
+            contact = GroundContact::Airborne;
+        }
         let (_, yaw, _) = rot.0.to_euler(EulerRot::YXZ);
         if let RecoveryVerdict::Recover { cause, landing } =
             recovery.observe_in_world(pos.0, yaw, contact, dt, floor)

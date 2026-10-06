@@ -756,3 +756,136 @@ fn a_trailer_rig_recovers_with_the_tractor() {
         "trailer re-seated at its authored offset: {t_pos} vs {expected}"
     );
 }
+
+/// Hold the car still in `pose` at `pos` — a kinematic body keeps the
+/// wheel raycasts (and so the dry contacts the anchor rule reads) while
+/// nothing moves it.
+fn pin(app: &mut App, car: Entity, pos: Vec3, pose: Quat) {
+    let world = app.world_mut();
+    world.entity_mut(car).insert(RigidBody::Kinematic);
+    world.get_mut::<Position>(car).unwrap().0 = pos;
+    world.get_mut::<Rotation>(car).unwrap().0 = pose;
+    let mut xf = world.get_mut::<Transform>(car).unwrap();
+    xf.translation = pos;
+    xf.rotation = pose;
+    world.get_mut::<LinearVelocity>(car).unwrap().0 = Vec3::ZERO;
+    world.get_mut::<AngularVelocity>(car).unwrap().0 = Vec3::ZERO;
+}
+
+/// A plane of static triangles rising along +X at `deg`, through
+/// `through`, 20 m each way — plain two-sided like the city's banks.
+fn bank(app: &mut App, through: Vec3, deg: f32) {
+    let t = deg.to_radians().tan();
+    let at = |dx: f32, dz: f32| through + Vec3::new(dx, dx * t, dz);
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::trimesh(
+            vec![
+                at(-20.0, -20.0),
+                at(20.0, -20.0),
+                at(20.0, 20.0),
+                at(-20.0, 20.0),
+            ],
+            vec![[0, 2, 1], [0, 3, 2]],
+        ),
+    ));
+}
+
+fn anchor_of(app: &App, car: Entity) -> Vec3 {
+    app.world()
+        .get::<VehicleRecovery>(car)
+        .unwrap()
+        .anchor()
+        .expect("anchored")
+        .0
+}
+
+fn any_wheel_grounded(app: &App, car: Entity) -> bool {
+    app.world()
+        .get::<mm2_vehicle::VehicleState>(car)
+        .unwrap()
+        .wheels
+        .iter()
+        .any(|w| w.grounded)
+}
+
+/// The anchor that looped the Tower Bridge recovery: a car righted level
+/// into a steep bank, its downhill wheels still touching the grass while
+/// the rest of it — centre of mass included — lay inside the bank. A dry
+/// wheel there must not anchor the recovery, or every landing puts the
+/// car back inside the bank to fall again.
+#[test]
+fn a_car_sunk_into_a_bank_never_anchors_there() {
+    let (mut app, car, _object) = recovery_app(Vec3::new(0.0, 1.2, 0.0));
+    let floor = anchor_of(&app, car);
+    let through = Vec3::new(200.0, 10.0, 0.0);
+    bank(&mut app, through, 37.0);
+    // Level, nose uphill, origin 0.4 m under the bank's surface: the
+    // rear wheels reach the slope behind it, the centre of mass is
+    // buried.
+    pin(
+        &mut app,
+        car,
+        through - Vec3::Y * 0.4,
+        Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2),
+    );
+    run(&mut app, 10);
+    assert!(
+        any_wheel_grounded(&app, car),
+        "the rear wheels touch the bank"
+    );
+    assert!(
+        anchor_of(&app, car).distance(floor) < 0.1,
+        "a buried car must keep its anchor on the floor, got {}",
+        anchor_of(&app, car)
+    );
+}
+
+/// Riding something that moves is not standing anywhere: a ferry deck or
+/// a drawbridge leaf can carry the car off, and an anchor left on it
+/// would land the car over the open water.
+#[test]
+fn a_car_on_a_moving_deck_keeps_its_anchor_on_static_ground() {
+    let (mut app, car, _object) = recovery_app(Vec3::new(0.0, 1.2, 0.0));
+    let floor = anchor_of(&app, car);
+    app.world_mut().spawn((
+        RigidBody::Kinematic,
+        Collider::cuboid(20.0, 1.0, 20.0),
+        Position(Vec3::new(200.0, 9.5, 0.0)),
+        Transform::from_xyz(200.0, 9.5, 0.0),
+    ));
+    teleport(&mut app, car, Vec3::new(200.0, 11.0, 0.0));
+    run(&mut app, 60);
+    assert!(any_wheel_grounded(&app, car), "the car stands on the deck");
+    assert!(
+        anchor_of(&app, car).distance(floor) < 0.1,
+        "the deck must not anchor the car, got {}",
+        anchor_of(&app, car)
+    );
+}
+
+/// Tipped steeply up a bank the car could not be set down level where it
+/// stands — the anchor stays on the last ground it stood level-ish on.
+#[test]
+fn a_car_tipped_up_a_bank_keeps_its_anchor() {
+    let (mut app, car, _object) = recovery_app(Vec3::new(0.0, 1.2, 0.0));
+    let floor = anchor_of(&app, car);
+    let through = Vec3::new(200.0, 10.0, 0.0);
+    bank(&mut app, through, 40.0);
+    // Resting on its wheels along the slope, nose uphill.
+    let tilt = Quat::from_rotation_z(40f32.to_radians());
+    let ground_y = mm2_vehicle::HandlingMetrics::of(&VehicleConfig::default()).ground_y;
+    pin(
+        &mut app,
+        car,
+        through + tilt * Vec3::new(0.0, -ground_y, 0.0),
+        tilt * Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2),
+    );
+    run(&mut app, 10);
+    assert!(any_wheel_grounded(&app, car), "the wheels touch the bank");
+    assert!(
+        anchor_of(&app, car).distance(floor) < 0.1,
+        "a car tipped 40° must keep its anchor, got {}",
+        anchor_of(&app, car)
+    );
+}

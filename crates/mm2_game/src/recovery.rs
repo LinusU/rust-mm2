@@ -13,11 +13,15 @@
 //! What the component models:
 //!
 //! - a **dry-grounded anchor**: the last pose where a grounded wheel
-//!   rested on a non-water surface. Water colliders are solid in this
-//!   engine — a car drives onto the Thames and wades on the F06-B.2
-//!   `drag` term — so "in the water" is a surface class under the
-//!   wheels, not a missing floor. While any grounded wheel is dry the
-//!   car is provably somewhere recoverable, and the anchor tracks it;
+//!   rested on a non-water surface and the car stood on it. Water
+//!   colliders are solid in this engine — a car drives onto the Thames
+//!   and wades on the F06-B.2 `drag` term — so "in the water" is a
+//!   surface class under the wheels, not a missing floor. While the car
+//!   stands on dry ground it is provably somewhere recoverable, and the
+//!   anchor tracks it. What counts as standing is the app's call
+//!   ([`GroundContact::Dry`]): a dry wheel alone is not enough — one
+//!   can still touch the grass while the car sinks through the bank
+//!   under it;
 //!   - the **submerged** leg: every grounded wheel on a water-class
 //!     surface (authored `drag` >= [`RecoveryPolicy::water_min_drag`],
 //!     which parts retail `deepwater` 0.5 from shallow `water` 0.119 —
@@ -95,10 +99,15 @@ impl Default for RecoveryPolicy {
 /// borrows the sim's wheel type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroundContact {
-    /// No wheel touches anything — jumping or falling.
+    /// Nothing that can anchor a recovery holds the car up: no wheel
+    /// touches anything (jumping or falling), or the wheels touch
+    /// something the car does not stand on — the anchor stays put and
+    /// the fall leg keeps watching.
     Airborne,
-    /// At least one grounded wheel rests on a non-water surface — the
-    /// car is somewhere recoverable, and the anchor tracks it.
+    /// The car stands on dry ground: at least one grounded wheel rests
+    /// on a non-water surface, and (the app's support test) static dry
+    /// ground holds the chassis up — the car is somewhere recoverable,
+    /// and the anchor tracks it.
     Dry,
     /// Every grounded wheel rests on a water-class surface — the car
     /// floats on water with no dry purchase.
