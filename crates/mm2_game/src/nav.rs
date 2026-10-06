@@ -880,6 +880,21 @@ impl NavGraph {
     /// produced, degrading bad ends to dead ends and bad lanes out of
     /// their arcs rather than inventing connectivity.
     pub fn build(bai: &Bai) -> NavBuild {
+        Self::build_with(bai, true)
+    }
+
+    /// The graph a *racing* participant routes over: every road with
+    /// vehicle lanes is routable, whatever ambient class its sides
+    /// author. `ambientTypes` says who the roaming traffic may spawn
+    /// on — it does not take the road away from a race course, and
+    /// London's Tower Bridge approaches (roads 404/407, both sides
+    /// `Disabled`) are exactly the road an `.opp` line crosses. Ambient
+    /// traffic must keep using [`NavGraph::build`].
+    pub fn build_for_routing(bai: &Bai) -> NavBuild {
+        Self::build_with(bai, false)
+    }
+
+    fn build_with(bai: &Bai, honour_ambient: bool) -> NavBuild {
         let mut issues = Vec::new();
 
         // Resolve every road end first: an end is an intersection
@@ -1051,10 +1066,11 @@ impl NavGraph {
                 // Vehicles are routable only where the authored ambient
                 // types allow them; an undocumented code is left
                 // routable — `Bai::validate` already reports it.
-                let vehicles_allowed = !matches!(
-                    bside.ambient_type(),
-                    Some(AmbientType::PedestriansOnly) | Some(AmbientType::Disabled)
-                );
+                let vehicles_allowed = !honour_ambient
+                    || !matches!(
+                        bside.ambient_type(),
+                        Some(AmbientType::PedestriansOnly) | Some(AmbientType::Disabled)
+                    );
                 if vehicles_allowed && !vehicle_lanes.is_empty() {
                     // Inner→outer order by measured lateral offset:
                     // right side ascending (+x is driver's right), left

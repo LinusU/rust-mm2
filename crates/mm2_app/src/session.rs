@@ -1579,7 +1579,7 @@ pub fn load_session_world(
                         .file_stem()
                         .and_then(|s| s.to_str())
                         .unwrap_or(psdl.as_str());
-                    match mm2_content::load_nav_graph(&vfs.0, stem) {
+                    match mm2_content::load_routing_nav_graph(&vfs.0, stem) {
                         Ok(b) => Some(b.graph),
                         Err(e) => {
                             warn!(

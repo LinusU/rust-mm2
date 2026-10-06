@@ -371,6 +371,52 @@ fn ambient_types_forbid_vehicle_arcs() {
 }
 
 #[test]
+fn routing_graph_keeps_ambient_closed_roads_routable() {
+    // London's Tower Bridge approaches (roads 404/407) author both sides
+    // `Disabled`: no roaming traffic, but the road an `.opp` line crosses.
+    let centre = [[0.0, 0.0, 0.0], [0.0, 0.0, 100.0]];
+    let right = side(3, &[(3.75, offset(&centre, 3.75, 0.0))], &[], 2);
+    let left = side(1, &[(-3.75, offset(&centre, -3.75, 0.0))], &[], 2);
+    let b = bai(
+        vec![road(
+            0,
+            &centre,
+            vec![1],
+            right,
+            left,
+            dead_end(),
+            dead_end(),
+        )],
+        Vec::new(),
+    );
+    let ambient = NavGraph::build(&b);
+    assert_eq!(ambient.graph.stats().vehicle_arcs, 0);
+    let from = [3.75, 0.0, 10.0];
+    let to = [3.75, 0.0, 90.0];
+    assert_eq!(
+        ambient
+            .graph
+            .route_candidates(from, to, &RouteOptions::default())
+            .unwrap_err(),
+        RouteError::NoStartLane
+    );
+
+    let routing = NavGraph::build_for_routing(&b);
+    assert_eq!(routing.graph.stats().vehicle_arcs, 2);
+    assert!(
+        routing
+            .graph
+            .arc_of(0, TravelDir::Forward)
+            .is_some_and(|_| routing.graph.arc_of(0, TravelDir::Backward).is_some())
+    );
+    let route = routing
+        .graph
+        .route_candidates(from, to, &RouteOptions::default())
+        .expect("the closed-to-ambient road routes for a racer");
+    assert_eq!(route.steps.len(), 1);
+}
+
+#[test]
 fn cross_intersection_turn_kinds_and_no_uturn() {
     let g = NavGraph::build(&cross(1)).graph;
     let entry = g.arc_of(0, TravelDir::Forward).unwrap();

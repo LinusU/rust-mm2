@@ -43,13 +43,23 @@ impl std::error::Error for NavLoadError {}
 /// graph. Structural problems inside the file are reported on
 /// [`NavBuild::issues`], never hidden.
 pub fn load_nav_graph(vfs: &Vfs, city: &str) -> Result<NavBuild, NavLoadError> {
+    load_bai(vfs, city).map(|bai| NavGraph::build(&bai))
+}
+
+/// [`load_nav_graph`] for a racing participant's route planning:
+/// roads the ambient classes close to roaming traffic stay routable
+/// ([`NavGraph::build_for_routing`]).
+pub fn load_routing_nav_graph(vfs: &Vfs, city: &str) -> Result<NavBuild, NavLoadError> {
+    load_bai(vfs, city).map(|bai| NavGraph::build_for_routing(&bai))
+}
+
+fn load_bai(vfs: &Vfs, city: &str) -> Result<Bai, NavLoadError> {
     let logical = format!("city/{}.bai", city.to_ascii_lowercase());
     let resolved = vfs
         .resolve(&logical)
         .ok_or(NavLoadError::Resolve(logical))?;
     let bytes = vfs.read(&resolved).map_err(NavLoadError::Read)?;
-    let bai = Bai::parse(&bytes).map_err(NavLoadError::Parse)?;
-    Ok(NavGraph::build(&bai))
+    Bai::parse(&bytes).map_err(NavLoadError::Parse)
 }
 
 /// Load an `.aimap` file through the VFS and distill its navigation

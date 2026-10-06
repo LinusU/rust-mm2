@@ -838,9 +838,12 @@ pub fn trim_behind_staging(route: &OpponentRoute, pos: Vec3, yaw: f32) -> Oppone
 /// [`NavGraph::densify_route`]'s re-pathed copy (F15-B.6). Ambient
 /// closures are deliberately *not* applied — an aimap `[Exceptions]`
 /// row forbids ambient traffic on a road, it does not remove the road
-/// from a race course the `.opp` anchors route through. `gates` are
-/// the race's checkpoint triggers: a re-path that abandons a gate the
-/// authored leg crossed is rejected so the course stays crossable.
+/// from a race course the `.opp` anchors route through. The session
+/// builds `nav` with [`NavGraph::build_for_routing`], so roads whose
+/// ambient classes are disabled (London's Tower Bridge approaches) stay
+/// routable here. `gates` are the race's checkpoint triggers: a re-path
+/// that abandons a gate the authored leg crossed is rejected so the
+/// course stays crossable.
 ///
 /// `pos`/`yaw` is the staged pose the car starts from: anchors behind
 /// it are dropped by [`trim_behind_staging`] before the re-path, so the

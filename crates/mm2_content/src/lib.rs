@@ -62,7 +62,7 @@ pub use model::{
     Lod, MeshGroup, ModelPart, PartRole, VehicleModel, WheelVisual, build_model, classify_stem,
     shader_for_paint, split_lod,
 };
-pub use nav::{NavLoadError, load_nav_graph, load_nav_overrides};
+pub use nav::{NavLoadError, load_nav_graph, load_nav_overrides, load_routing_nav_graph};
 pub use opponents::{
     EventAimap, ExtraRoster, OpponentReport, RosterBuild, RosterBuildError, RosterEntry,
     RosterSummary, audit_roster, event_aimap, opponent_roster, opponent_roster_from_aimap,

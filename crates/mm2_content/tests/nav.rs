@@ -6,7 +6,7 @@ use std::path::Path;
 
 use mm2_assets::Vfs;
 use mm2_content::NavLoadError;
-use mm2_content::nav::{load_nav_graph, load_nav_overrides};
+use mm2_content::nav::{load_nav_graph, load_nav_overrides, load_routing_nav_graph};
 
 fn write(dir: &Path, rel: &str, contents: &[u8]) {
     let p = dir.join(rel);
@@ -40,6 +40,17 @@ fn nav_graph_loads_through_the_vfs() {
     // City names are case-insensitive in the logical path.
     let build = load_nav_graph(&vfs, "TEST").expect("empty graph builds");
     assert_eq!(build.graph.stats().roads, 0);
+}
+
+#[test]
+fn routing_nav_graph_loads_through_the_same_path() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "city/test.bai", EMPTY_BAI);
+    let vfs = vfs_of(dir.path());
+    let build = load_routing_nav_graph(&vfs, "TEST").expect("empty graph builds");
+    assert_eq!(build.graph.stats().roads, 0);
+    let err = load_routing_nav_graph(&vfs, "nowhere").unwrap_err();
+    assert!(matches!(err, NavLoadError::Resolve(_)), "{err:?}");
 }
 
 #[test]
