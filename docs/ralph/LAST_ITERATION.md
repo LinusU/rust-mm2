@@ -1,3 +1,55 @@
+# Last iteration — gold rules over the host's cars (new-run iteration 11)
+
+Selection: the previous review passed with no blocking findings, so no
+repair was owed. Of F27-B's queued legs, B.2 (Bevy consumers of the new
+rule core) is the only one that needs neither a protocol nor a lobby
+design, and it is where F27-AC04 (load applied once, no leak into a
+later race) becomes a property of real bodies instead of a pure function.
+
+Change: `mm2_app::cnr`. `CnrHost` (resource: the `GoldMatch`, the dislodge
+threshold, last-seen positions). `cnr_host_step` (fixed, authority only,
+Playing only): ticks the clock; a participant whose car was seen and is
+now absent leaves (gold drops at the last position; never-seen or
+non-finite-pose participants are not leavers); a `Disabled` carrier, or a
+car-on-car `ImpactEvent` of the carrier at ≥ `DEFAULT_DISLODGE_SEVERITY`
+(8 m/s, enhanced policy — wall/prop hits never count), drops the gold;
+every connected car within the pickup radius becomes a `Contact` from the
+*host's* `Position` and `resolve_pickups` decides; the carrier tries
+`deliver`; gold below `WorldFloor` goes through `gold_out_of_bounds`;
+`GoldEvent`s publish as `CnrEvent` messages. `reconcile_gold_load`
+writes the carrier's `Mass` and principal `AngularInertia` from a
+recorded `GoldLoadApplied` base (never additive, so repeats cannot
+stack) and restores it when `load_for` is none or the `CnrHost`
+disappears; `drive_session` teardown removes the `CnrHost`. Both systems
+are in the fixed chain next to `recovery`. The handling scalar is
+recorded but not applied: its effect is unidentified (UNK-10).
+
+Tests: 15 `mm2_app::cnr` units over a plain App with real
+`Session`/`Position`/`Mass`/`AngularInertia` (pickup + load, load once
+over 50 steps, load ends exactly with the carrying incl. inertia restore,
+soft/world/self impacts ignored, nearest of two wins with one award,
+rammed carrier → striker recovers while the dropper is locked out,
+`Disabled` carrier drops and cannot retake at once, vanished carrier
+leaves and gold drops in place with points kept, unspawned participant is
+not a leaver, delivery scores once and sheds the load, below-floor gold
+re-placed, pause freezes the clock, time limit ends and publishes once,
+removing the host strips the load, NaN pose neither picks up nor ejects).
+All synthetic. Ledger CNR-12, PLAN F27-B row updated.
+
+Gates (all exit 0): `cargo fmt --all -- --check` PASS; `cargo clippy
+--locked --workspace --all-targets --all-features -- -D warnings` PASS;
+`cargo test --locked --workspace` PASS (2061 passed, 0 failed; was 2046).
+No original-data, GPU or network run. No test processes left running.
+
+Not verified / open: nothing creates a `CnrHost` in the shipped app (lobby
+= B.4), no site markers/meshes from `CnrContent` (B.2b), no wire/client
+replica (B.3), no HUD/audio. Whether the mass actually changes handling
+feel on a real vehicle in Avian is untested (no physics world in these
+tests); the 8 m/s threshold is a guess. F27-AC01..06 all open. Status:
+implemented candidate, not independently checked.
+
+---
+
 # Last iteration — authoritative gold state machine (new-run iteration 10)
 
 Selection: the previous review passed with no blocking findings, so no

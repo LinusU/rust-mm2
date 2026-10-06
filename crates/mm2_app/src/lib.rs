@@ -12,6 +12,7 @@ pub mod breakaway;
 pub mod camera;
 pub mod car_visual;
 pub mod city;
+pub mod cnr;
 pub mod contracts;
 pub mod damage;
 pub mod damage_fx;

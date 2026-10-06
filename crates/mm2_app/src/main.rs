@@ -21,7 +21,7 @@ use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use clap::Parser;
 use mm2_app::session::{SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
-    audio, banger, breakaway, camera, car_visual, city, contracts, damage, damage_fx, dash,
+    audio, banger, breakaway, camera, car_visual, city, cnr, contracts, damage, damage_fx, dash,
     environment, hud, hudmap, input, menu, nav_overlay, navarrow, net, netdrive, oppind, opponents,
     pause, perf, precip, profile, progression, pvs, race, racestat, racetime, recovery, results,
     scripted, sequence, session, settings, smoke, spark_fx, stuck, texel_fx, traffic, wheel_fx,
@@ -1253,6 +1253,7 @@ fn main() {
     .add_message::<StuckEvent>()
     .add_message::<PartDetached>()
     .add_message::<RecoveryEvent>()
+    .add_message::<cnr::CnrEvent>()
     .add_message::<RaceStarted>()
     .add_message::<BangerStateChanged>()
     .init_resource::<contracts::ImpactFilter>()
@@ -1325,9 +1326,17 @@ fn main() {
             // F05-B.5: water/OOB recovery — observe the wheel contacts
             // the physics step left, then resolve fired episodes to the
             // dry-grounded anchor (track → resolve, like the detectors
-            // above).
-            recovery::track_recovery,
-            recovery::resolve_recovery,
+            // above). F27-B.2 follows in the same group: the gold
+            // rules over the host's cars, then the carrier's load
+            // reconciled against them — idle until a Cops & Robbers
+            // match (`CnrHost`) exists.
+            (
+                recovery::track_recovery,
+                recovery::resolve_recovery,
+                cnr::cnr_host_step,
+                cnr::reconcile_gold_load,
+            )
+                .chain(),
             // Banger activation/settle consume the same contact edges
             // the impact pipeline reads — independent consumers of the
             // solver's edge stream.

@@ -291,6 +291,10 @@ pub fn drive_session(
             // city's nav overlay must never survive into the next
             // session (AC03 — no old timer survives).
             commands.remove_resource::<RaceState>();
+            // F27-B.2: a Cops & Robbers match dies with its session; the
+            // gold load reconciles away with it (F27-AC04 — no handling
+            // leak into a later race).
+            commands.remove_resource::<crate::cnr::CnrHost>();
             commands.remove_resource::<crate::progression::EventRewards>();
             commands.remove_resource::<crate::progression::SessionReport>();
             commands.remove_resource::<crate::nav_overlay::CityNav>();
