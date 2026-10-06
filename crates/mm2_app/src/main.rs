@@ -1336,6 +1336,7 @@ fn main() {
             (
                 recovery::track_recovery,
                 recovery::resolve_recovery,
+                cnr::enroll_cnr_participants,
                 cnr::cnr_host_step,
                 cnr::reconcile_gold_load,
             )

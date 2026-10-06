@@ -32,9 +32,16 @@
 //! mass (by the documented reading of the host option labels) reaches
 //! the body.
 //!
-//! Nothing creates a [`CnrHost`] yet — the lobby that chooses the
-//! variant, sides and limits is F27-B.4 — so in the shipped app these
-//! systems idle; the integration tests insert one directly.
+//! [`start_match`] builds the [`CnrHost`] while the session loads (so a
+//! city that cannot seed a round fails the session instead of cruising)
+//! and [`enroll_cnr_participants`] seats each car in the match as it
+//! appears. A participant is keyed by its *wire roster id*
+//! ([`NetPlayer`]) in a networked session — a `PlayerId` is minted per
+//! process, so only the wire id means the same car on the host and on a
+//! client reading the replicated match — and by its minted id in a
+//! local one ([`participant_id`]). Nothing offers the mode to a player
+//! yet (the lobby/menu leg is F27-B.4c), so in the shipped app these
+//! systems idle; the integration tests drive a session config directly.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -44,11 +51,12 @@ use mm2_assets::Vfs;
 use mm2_content::cnr::{CnrContent, CnrSettings, MARKER_MODELS};
 use mm2_game::gold::{CarrierLoad, Contact, DropCause, GoldError, GoldEvent, GoldMatch, Side};
 use mm2_game::{
-    DamageTier, ImpactEvent, ObjectId, ObjectIdentity, Player, PlayerId, Session, SessionEntity,
-    VehicleDamage,
+    DamageTier, ImpactEvent, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerId,
+    RACE_TICK_HZ, Session, SessionAuthority, SessionEntity, VehicleDamage,
 };
 
 use crate::city::{MovableModels, WorldFloor, v3};
+use crate::netdrive::NetPlayer;
 
 /// Approach speed, m/s, at or above which another participant's car
 /// striking the carrier knocks the gold loose. *Enhanced policy* — the
@@ -117,6 +125,103 @@ impl CnrHost {
 #[derive(Message, Debug, Clone, Copy, PartialEq)]
 pub struct CnrEvent(pub GoldEvent);
 
+/// The match's identity for a car: its wire roster id when it has one
+/// (the host seat is 0), else its session-minted id. The same car must
+/// map to the same id on the host and on every client, and a minted
+/// `PlayerId` is per process — see the module docs.
+pub fn participant_id(player: &Player, net: Option<&NetPlayer>) -> PlayerId {
+    net.map_or(player.id, |n| PlayerId(n.0))
+}
+
+/// Build the match for a Cops & Robbers session being loaded and
+/// insert it, then spawn its markers. Called from `load_session_world`
+/// once the city is up; the match starts with no participants —
+/// [`enroll_cnr_participants`] seats each car as it appears, so the
+/// order cars spawn in (a remote pick arrives after the load starts)
+/// cannot lose anyone. The rules clock runs at [`RACE_TICK_HZ`], the
+/// fixed step the host simulates at; the site draw is seeded from the
+/// session's seed.
+///
+/// An `Err` is the reason the session cannot run (a city whose site
+/// pool cannot seed a round, a non-city world): the caller fails the
+/// session with it rather than starting a match with nothing to play.
+// The three asset stores `spawn_cnr_markers` threads through, plus the
+// session/vfs/owner a Bevy-free caller supplies, are what the 9 arguments
+// are; a wrapper struct would only rename them.
+#[allow(clippy::too_many_arguments)]
+pub fn start_match(
+    commands: &mut Commands,
+    vfs: &Vfs,
+    session: &mut Session,
+    settings: &CnrSettings,
+    psdl: &str,
+    meshes: &mut Assets<Mesh>,
+    images: &mut Assets<Image>,
+    materials: &mut Assets<StandardMaterial>,
+    owner: SessionEntity,
+) -> Result<CnrMarkerReport, String> {
+    let city = crate::net::city_stem(psdl)
+        .ok_or_else(|| format!("{psdl:?} is not a city/<stem>.psdl path"))?;
+    let content = CnrContent::load(vfs, city);
+    let seed = session.config().map_or(0, |c| c.seed);
+    let gold = session.mint_object_id();
+    let host = CnrHost::from_content(
+        &content,
+        settings,
+        RACE_TICK_HZ,
+        session.generation(),
+        gold,
+        seed,
+        &[],
+    )
+    .map_err(|e| format!("Cops & Robbers cannot start in {city:?}: {e:?}"))?;
+    let report = spawn_cnr_markers(commands, vfs, &host, meshes, images, materials, owner);
+    commands.insert_resource(host);
+    Ok(report)
+}
+
+/// Fixed-step authority leg: seat every participant car that is not yet
+/// in the match, on the side [`GoldMatch::balanced_side`] picks, in
+/// ascending participant order so the split does not depend on query
+/// order. AI cars never take part — a bot is not a player here. In a
+/// networked session only a car stamped with its wire id counts, which
+/// keeps the local car out until its identity is settled.
+///
+/// A participant who left stays out: [`GoldMatch::join`] refuses a
+/// repeat and the refusal is deliberately not retried (a respawned
+/// remote car after a pick change is therefore not re-seated — named
+/// gap). Idle without a [`CnrHost`], while the session is not
+/// `Playing`, and on a non-authority process.
+pub fn enroll_cnr_participants(
+    session: Res<Session>,
+    host: Option<ResMut<CnrHost>>,
+    cars: Query<(&Player, Option<&NetPlayer>)>,
+) {
+    let Some(mut host) = host else {
+        return;
+    };
+    if !session.is_playing() || !session.authority_role().is_authority() {
+        return;
+    }
+    let networked = session
+        .config()
+        .is_some_and(|c| c.authority != SessionAuthority::Local);
+    let mut fresh: BTreeSet<PlayerId> = BTreeSet::new();
+    for (player, net) in &cars {
+        if player.control == PlayerControl::Ai || (networked && net.is_none()) {
+            continue;
+        }
+        let id = participant_id(player, net);
+        if host.game.side_of(id).is_none() {
+            fresh.insert(id);
+        }
+    }
+    for id in fresh {
+        let side = host.game.balanced_side();
+        let _ = host.game.join(id, side);
+    }
+}
+
 /// What [`reconcile_gold_load`] has done to a car's body: the values it
 /// started from and the load it applied. Present exactly while the load
 /// is on the car.
@@ -131,6 +236,25 @@ pub struct GoldLoadApplied {
     pub load: CarrierLoad,
 }
 
+/// What [`cnr_host_step`] reads off each car.
+type StepCar<'a> = (
+    &'a ObjectIdentity,
+    &'a Player,
+    Option<&'a NetPlayer>,
+    &'a Position,
+    Option<&'a VehicleDamage>,
+);
+
+/// What [`reconcile_gold_load`] reads and writes on each car.
+type LoadCar<'a> = (
+    Entity,
+    &'a Player,
+    Option<&'a NetPlayer>,
+    &'a mut Mass,
+    &'a mut AngularInertia,
+    Option<&'a GoldLoadApplied>,
+);
+
 /// Fixed-step authority leg: drive the gold match from the host's cars.
 ///
 /// Order within a step matters and is the same every step: clock, a
@@ -144,7 +268,7 @@ pub fn cnr_host_step(
     session: Res<Session>,
     host: Option<ResMut<CnrHost>>,
     floor: Option<Res<WorldFloor>>,
-    cars: Query<(&ObjectIdentity, &Player, &Position, Option<&VehicleDamage>)>,
+    cars: Query<StepCar>,
     mut impacts: MessageReader<ImpactEvent>,
     mut out: MessageWriter<CnrEvent>,
 ) {
@@ -171,21 +295,22 @@ pub fn cnr_host_step(
     let mut present: BTreeSet<PlayerId> = BTreeSet::new();
     let mut who: HashMap<ObjectId, PlayerId> = HashMap::new();
     let mut wrecked: BTreeSet<PlayerId> = BTreeSet::new();
-    for (identity, player, position, damage) in &cars {
-        if !connected.contains(&player.id) {
+    for (identity, player, net, position, damage) in &cars {
+        let id = participant_id(player, net);
+        if !connected.contains(&id) {
             continue;
         }
-        present.insert(player.id);
-        who.insert(identity.0, player.id);
+        present.insert(id);
+        who.insert(identity.0, id);
         // A car with a non-finite pose is still in the match — it just
         // has no usable position this step, so it neither reaches the
         // gold nor counts as gone.
         if !position.0.is_finite() {
             continue;
         }
-        at.insert(player.id, position.0);
+        at.insert(id, position.0);
         if damage.is_some_and(|d| d.condition() == DamageTier::Disabled) {
-            wrecked.insert(player.id);
+            wrecked.insert(id);
         }
     }
 
@@ -286,18 +411,12 @@ pub fn cnr_host_step(
 pub fn reconcile_gold_load(
     mut commands: Commands,
     host: Option<Res<CnrHost>>,
-    mut cars: Query<(
-        Entity,
-        &Player,
-        &mut Mass,
-        &mut AngularInertia,
-        Option<&GoldLoadApplied>,
-    )>,
+    mut cars: Query<LoadCar>,
 ) {
-    for (entity, player, mut mass, mut inertia, applied) in &mut cars {
+    for (entity, player, net, mut mass, mut inertia, applied) in &mut cars {
         let want = host
             .as_ref()
-            .and_then(|h| h.game.load_for(player.id))
+            .and_then(|h| h.game.load_for(participant_id(player, net)))
             .filter(|l| l.added_mass_kg.is_finite() && l.added_mass_kg > 0.0);
         match (want, applied) {
             (Some(load), None) => {
@@ -1171,5 +1290,288 @@ mod tests {
         r.app.world_mut().remove_resource::<CnrHost>();
         r.step();
         assert_eq!(marker_pose(&mut r, MarkerRole::Bank).0, sites.bank);
+    }
+
+    // ---- F27-B.4b: starting the match and seating the cars ----
+
+    use mm2_game::{SessionAuthority, SessionMode, WorldMode};
+
+    fn city_vfs(rows: usize) -> (tempfile::TempDir, Vfs) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("race/testcity/multicopwaypoints.csv");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let body: String = (0..rows)
+            .map(|i| format!("{},0,{},0,15,0,0,0,\n", 10.0 * i as f32, 5.0))
+            .collect();
+        std::fs::write(
+            path,
+            format!("x,y,z,a,poly count,frane rate,state changes,texture changes,msg\n{body}"),
+        )
+        .unwrap();
+        let mut vfs = Vfs::new();
+        vfs.mount_dir(dir.path(), 0).unwrap();
+        (dir, vfs)
+    }
+
+    fn cnr_config(variant: CnrVariant, authority: SessionAuthority) -> SessionConfig {
+        SessionConfig {
+            world: WorldMode::City {
+                psdl: "city/testcity.psdl".to_string(),
+            },
+            mode: SessionMode::CopsAndRobbers(CnrSettings {
+                variant,
+                ..CnrSettings::default()
+            }),
+            authority,
+            seed: 41,
+            ..SessionConfig::default()
+        }
+    }
+
+    fn playing(config: SessionConfig) -> Session {
+        let mut session = Session::new();
+        session.begin(config).unwrap();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+        session
+    }
+
+    fn start(app: &mut App, vfs: Vfs, psdl: &'static str) -> Result<CnrMarkerReport, String> {
+        let world = app.world_mut();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        world
+            .run_system_once(
+                move |mut commands: Commands,
+                      mut session: ResMut<Session>,
+                      mut meshes: ResMut<Assets<Mesh>>,
+                      mut images: ResMut<Assets<Image>>,
+                      mut materials: ResMut<Assets<StandardMaterial>>| {
+                    let settings = match session.config().map(|c| c.mode.clone()) {
+                        Some(SessionMode::CopsAndRobbers(s)) => s,
+                        _ => panic!("not a cops & robbers session"),
+                    };
+                    start_match(
+                        &mut commands,
+                        &vfs,
+                        &mut session,
+                        &settings,
+                        psdl,
+                        &mut meshes,
+                        &mut images,
+                        &mut materials,
+                        SessionEntity(1),
+                    )
+                },
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn the_match_is_built_from_the_cities_site_pool_with_nobody_seated() {
+        let (_dir, vfs) = city_vfs(5);
+        let mut app = App::new();
+        let config = cnr_config(CnrVariant::CopsVsRobbers, SessionAuthority::Host);
+        app.insert_resource(playing(config));
+        let report = start(&mut app, vfs, "city/testcity.psdl").unwrap();
+        // No marker model on the synthetic install: counted, not faked.
+        assert_eq!(report.spawned, 0);
+        assert_eq!(report.missing_models.len(), 3);
+        let host = app.world().resource::<CnrHost>();
+        let session = app.world().resource::<Session>();
+        assert_eq!(host.game.generation(), session.generation());
+        assert_eq!(host.game.rules().variant, CnrVariant::CopsVsRobbers);
+        assert!(host.game.standings().is_empty());
+        // Every site the round draws is one of the file's rows.
+        let sites = host.game.sites();
+        let authored: Vec<Vec3> = (0..5)
+            .map(|i| Vec3::new(10.0 * i as f32, 0.0, 5.0))
+            .collect();
+        for at in [sites.gold, sites.hideout, sites.bank] {
+            assert!(authored.contains(&at), "{at} is not an authored site");
+        }
+        // The same seed draws the same round on a second process.
+        let (_dir2, vfs2) = city_vfs(5);
+        let mut other = App::new();
+        other.insert_resource(playing(cnr_config(
+            CnrVariant::CopsVsRobbers,
+            SessionAuthority::Host,
+        )));
+        start(&mut other, vfs2, "city/testcity.psdl").unwrap();
+        assert_eq!(other.world().resource::<CnrHost>().game.sites(), sites);
+    }
+
+    #[test]
+    fn a_city_that_cannot_seed_a_round_refuses_to_start() {
+        for rows in [0, 2] {
+            let (_dir, vfs) = city_vfs(rows);
+            let mut app = App::new();
+            app.insert_resource(playing(cnr_config(
+                CnrVariant::FreeForAll,
+                SessionAuthority::Host,
+            )));
+            let err = start(&mut app, vfs, "city/testcity.psdl").unwrap_err();
+            assert!(err.contains("testcity"), "{err}");
+            assert!(app.world().get_resource::<CnrHost>().is_none());
+        }
+        let (_dir, vfs) = city_vfs(4);
+        let mut app = App::new();
+        app.insert_resource(playing(cnr_config(
+            CnrVariant::FreeForAll,
+            SessionAuthority::Host,
+        )));
+        assert!(start(&mut app, vfs, "dev/not-a-city").is_err());
+        assert!(app.world().get_resource::<CnrHost>().is_none());
+    }
+
+    /// An authority app with an empty match of `variant` and the
+    /// enrollment system; cars are spawned by the caller.
+    fn enroll_app(variant: CnrVariant, authority: SessionAuthority) -> App {
+        let mut session = playing(cnr_config(variant, authority));
+        let gold = session.mint_object_id();
+        let game = GoldMatch::new(
+            session.generation(),
+            gold,
+            CnrSettings {
+                variant,
+                ..CnrSettings::default()
+            }
+            .rules(RACE_TICK_HZ),
+            pool(),
+            3,
+            &[],
+        )
+        .unwrap();
+        let mut app = App::new();
+        app.insert_resource(session)
+            .insert_resource(CnrHost::new(game))
+            .add_systems(Update, enroll_cnr_participants);
+        app
+    }
+
+    fn car(app: &mut App, id: u16, control: PlayerControl, wire: Option<u16>) -> Entity {
+        let mut e = app.world_mut().spawn(Player {
+            id: PlayerId(id),
+            control,
+        });
+        if let Some(w) = wire {
+            e.insert(NetPlayer(w));
+        }
+        e.id()
+    }
+
+    fn sides(app: &App) -> Vec<(PlayerId, Side)> {
+        let game = &app.world().resource::<CnrHost>().game;
+        game.standings()
+            .into_iter()
+            .map(|s| (s.player, game.side_of(s.player).unwrap()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+            .into_iter()
+            .collect()
+    }
+
+    #[test]
+    fn cars_are_seated_on_alternating_sides_by_wire_id_and_bots_are_not() {
+        let mut app = enroll_app(CnrVariant::CopsVsRobbers, SessionAuthority::Host);
+        // Minted ids disagree with the wire ids on purpose; spawn order
+        // is not id order. The bot has a wire id and still stays out.
+        car(&mut app, 8, PlayerControl::Remote, Some(2));
+        car(&mut app, 5, PlayerControl::Local, Some(0));
+        car(&mut app, 6, PlayerControl::Remote, Some(1));
+        car(&mut app, 7, PlayerControl::Ai, Some(9));
+        // A networked car whose wire id is not stamped yet waits.
+        car(&mut app, 4, PlayerControl::Local, None);
+        app.update();
+        assert_eq!(
+            sides(&app),
+            vec![
+                (PlayerId(0), Side::Robbers),
+                (PlayerId(1), Side::Cops),
+                (PlayerId(2), Side::Robbers),
+            ]
+        );
+        // Seating is idempotent, and a car stamped later joins the
+        // short side.
+        app.update();
+        assert_eq!(sides(&app).len(), 3);
+        let wire = app
+            .world_mut()
+            .query_filtered::<Entity, (With<Player>, Without<NetPlayer>)>()
+            .iter(app.world())
+            .next()
+            .unwrap();
+        app.world_mut().entity_mut(wire).insert(NetPlayer(3));
+        app.update();
+        assert_eq!(sides(&app).last(), Some(&(PlayerId(3), Side::Cops)));
+    }
+
+    #[test]
+    fn a_local_session_seats_cars_by_their_minted_id() {
+        let mut app = enroll_app(CnrVariant::FreeForAll, SessionAuthority::Local);
+        car(&mut app, 3, PlayerControl::Local, None);
+        app.update();
+        assert_eq!(sides(&app), vec![(PlayerId(3), Side::Solo)]);
+    }
+
+    #[test]
+    fn nobody_is_seated_off_authority_or_before_play() {
+        // A client holds no CnrHost at all, so there is nothing to seat
+        // into; and a host still loading seats no one.
+        let mut app = enroll_app(CnrVariant::FreeForAll, SessionAuthority::Host);
+        car(&mut app, 1, PlayerControl::Local, Some(0));
+        app.world_mut()
+            .resource_mut::<Session>()
+            .transition(SessionPhase::Results)
+            .unwrap();
+        app.update();
+        assert!(sides(&app).is_empty());
+    }
+
+    #[test]
+    fn the_rules_see_a_car_by_its_wire_id() {
+        // The car's minted id (7) is not the match's participant (3).
+        let mut session = playing(cnr_config(CnrVariant::FreeForAll, SessionAuthority::Host));
+        let gold = session.mint_object_id();
+        let obj = session.mint_object_id();
+        let game = GoldMatch::new(
+            session.generation(),
+            gold,
+            rules(EndRule::None),
+            pool(),
+            5,
+            &[(PlayerId(3), Side::Solo)],
+        )
+        .unwrap();
+        let at = game.gold_position().unwrap();
+        let mut app = App::new();
+        app.insert_resource(session)
+            .insert_resource(CnrHost::new(game))
+            .add_message::<ImpactEvent>()
+            .add_message::<CnrEvent>()
+            .add_systems(Update, (cnr_host_step, reconcile_gold_load).chain());
+        let e = app
+            .world_mut()
+            .spawn((
+                ObjectIdentity(obj),
+                Player {
+                    id: PlayerId(7),
+                    control: PlayerControl::Remote,
+                },
+                NetPlayer(3),
+                Position(at),
+                Mass(MASS),
+                AngularInertia {
+                    principal: INERTIA,
+                    local_frame: Quat::IDENTITY,
+                },
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world().resource::<CnrHost>().game.carrier(),
+            Some(PlayerId(3))
+        );
+        assert_eq!(app.world().get::<Mass>(e).unwrap().0, MASS + 250.0);
     }
 }

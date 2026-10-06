@@ -1873,3 +1873,81 @@ fn pause_options_back_row_and_a_fresh_pause_start_at_the_top() {
     assert!(!pause.options);
     assert_eq!(pause.focus, 0);
 }
+
+/// F27-B.4b: a Cops & Robbers session builds its match while loading,
+/// seats the local car once `Playing`, draws its markers from the
+/// retail models and takes the match down with the session. Needs the
+/// real city's site pool and marker PKGs, so it runs only where
+/// `MM2_RETAIL` names an install.
+#[test]
+fn a_cops_and_robbers_session_builds_seats_and_tears_down_its_match() {
+    use mm2_app::cnr::{CnrEvent, CnrHost, CnrMarker, MarkerRole};
+    use mm2_assets::{InstallMount, mount_install};
+    use mm2_game::SessionMode;
+    use mm2_game::cnr_options::CnrSettings;
+    use mm2_game::gold::{CnrVariant, Side};
+
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        return;
+    };
+    let mut vfs = Vfs::new();
+    mount_install(&mut vfs, &retail, &InstallMount::default()).unwrap();
+
+    let config = SessionConfig {
+        world: WorldMode::City {
+            psdl: "city/sf.psdl".to_string(),
+        },
+        mode: SessionMode::CopsAndRobbers(CnrSettings {
+            variant: CnrVariant::CopsVsRobbers,
+            ..CnrSettings::default()
+        }),
+        seed: 5,
+        ..SessionConfig::default()
+    };
+    let mut app = test_app(config, 1.0 / 60.0);
+    app.insert_resource(Mm2Vfs(vfs))
+        .add_message::<CnrEvent>()
+        .add_systems(
+            Update,
+            (
+                mm2_app::cnr::enroll_cnr_participants,
+                mm2_app::cnr::sync_cnr_markers,
+            )
+                .chain()
+                .after(session::drive_session),
+        );
+    assert!(
+        run_until(&mut app, 30, |a| phase_is(a, SessionPhase::Playing)),
+        "a retail Cops & Robbers session never reached Playing: {:?}",
+        app.world().resource::<Session>().phase()
+    );
+    // One more update seats the car and poses the markers.
+    app.update();
+    let generation = app.world().resource::<Session>().generation();
+    let host = app.world().resource::<CnrHost>();
+    assert_eq!(host.game.generation(), generation);
+    // The match drew its three sites from the city's own pool (44 rows
+    // in retail sf) and seated the one local car on the first side.
+    let standings = host.game.standings();
+    assert_eq!(standings.len(), 1);
+    assert_eq!(standings[0].side, Side::Robbers);
+    let sites = host.game.sites();
+    let at = |app: &mut App, role: MarkerRole| {
+        let world = app.world_mut();
+        let mut q = world.query::<(&CnrMarker, &Transform)>();
+        q.iter(world)
+            .find(|(m, _)| m.role == role)
+            .map(|(_, t)| t.translation)
+    };
+    assert_eq!(at(&mut app, MarkerRole::Hideout), Some(sites.hideout));
+    assert_eq!(at(&mut app, MarkerRole::Bank), Some(sites.bank));
+    assert_eq!(at(&mut app, MarkerRole::Gold), Some(sites.gold));
+
+    app.world_mut().resource_mut::<SessionControl>().quit = true;
+    assert!(
+        run_until(&mut app, 12, |a| phase_is(a, SessionPhase::Menu)),
+        "quit never reached Menu"
+    );
+    assert!(app.world().get_resource::<CnrHost>().is_none());
+    assert_eq!(count::<With<CnrMarker>>(&mut app), 0);
+}

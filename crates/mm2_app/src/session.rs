@@ -837,6 +837,42 @@ pub fn load_session_world(
             }
         }
     }
+    // Cops & Robbers: the match exists from load, over the city's own
+    // site pool. A city that cannot seed a round fails the session —
+    // it never runs as an empty cruise with a gold marker nobody can
+    // score.
+    if world_ok
+        && let SessionMode::CopsAndRobbers(settings) = &config.mode
+        && let WorldMode::City { psdl } = &config.world
+    {
+        match crate::cnr::start_match(
+            &mut commands,
+            &vfs.0,
+            &mut session,
+            settings,
+            psdl,
+            &mut assets.meshes,
+            &mut assets.images,
+            &mut assets.materials,
+            owner,
+        ) {
+            Ok(report) => {
+                info!(
+                    markers = report.spawned,
+                    missing_models = report.missing_models.len(),
+                    missing_textures = report.missing_textures.len(),
+                    "cops & robbers match built"
+                );
+            }
+            Err(reason) => {
+                error!(%reason, "cops & robbers match failed to start");
+                session
+                    .fail(reason)
+                    .expect("Loading → Failed is a legal transition");
+                world_ok = false;
+            }
+        }
+    }
     // Drawbridge leaves (Tower Bridge, Waterloo, SF's Chinatown gate):
     // the PSDL suppresses the road under them, so they are part of
     // the drivable world. The event's own bridge file wins over the

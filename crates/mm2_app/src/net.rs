@@ -1473,7 +1473,7 @@ pub fn late_join_policy(mode: &SessionMode) -> LateJoin {
 }
 
 /// `city/<stem>.psdl` → `<stem>`.
-fn city_stem(psdl: &str) -> Option<&str> {
+pub(crate) fn city_stem(psdl: &str) -> Option<&str> {
     psdl.strip_prefix("city/")?.strip_suffix(".psdl")
 }
 

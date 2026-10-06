@@ -1,3 +1,55 @@
+# Last iteration — F27-B.4b (host): start the match, seat the cars (new-run iteration 16)
+
+Selection: the previous review passed with no blocking findings, so no
+repair was owed. B.4b ("sides from the roster, spawn + `CnrHost`,
+markers, replica") is still broad; its host half is the ready leg — the
+`SessionMode` exists (B.4a) but nothing builds or seats a match from it.
+Client markers and the menu/CLI offer stay queued (B.4b-client, B.4c).
+
+Change:
+- `cnr::start_match` (called from `load_session_world`): builds the
+  `CnrHost` from the city's `CnrContent` pool and `CnrSettings::rules`
+  at `RACE_TICK_HZ`, seeded from the session seed, with nobody seated;
+  spawns the markers; an `Err` (short pool, non-city path) fails the
+  session instead of cruising.
+- `cnr::enroll_cnr_participants` (fixed schedule, before the step): seats
+  each non-AI car on `GoldMatch::balanced_side()` (fewest connected
+  members, ties to the first side; designed — team choice is
+  unrecovered), in ascending id order; networked sessions need the car's
+  `NetPlayer` stamp.
+- `cnr::participant_id`: a car is the match's participant under its
+  *wire id* when networked (minted `PlayerId`s differ per process, so the
+  replicated match could not name a car otherwise), else its minted id.
+  `cnr_host_step` and `reconcile_gold_load` use it.
+- Docs: ledger CNR-12, `research/net.md`, PLAN row.
+
+Tests: `mm2_game` `joiners_fill_the_sides_alternately`; `mm2_app::cnr`
+(6 new, synthetic: pool→match with same-seed same-round, short/absent
+pool and non-city path refuse, alternating seating by wire id with bots
+and unstamped cars excluded, local-session seating, no seating off
+`Playing`, rules read a car by wire id); `tests/session.rs`
+`a_cops_and_robbers_session_builds_seats_and_tears_down_its_match`
+(production `load_session_world` path, skips without `MM2_RETAIL`; run
+against the retail install at `/Users/linus/coding/rust-mm2/retail`: sf
+match built, local car seated as Robbers, hideout/bank/gold markers on
+the drawn sites, host and markers gone after quit).
+
+Evidence: `cargo fmt --all -- --check` exit 0; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` exit 0 (one
+targeted `too_many_arguments` allow on `start_match`, commented); `cargo
+test --locked --workspace` exit 0 (2098 passed, 0 failed; was 2090). The
+retail session test also run alone with `MM2_RETAIL` set (ran 0.56 s, not
+skipped). No GPU, audio or two-process run. No test processes left.
+
+Not verified / open: no menu/CLI offers the mode and no HUD shows it;
+clients do not draw markers from `CnrReplica` and their own car does not
+predict the carrier's mass; a car respawned by a pick change is not
+re-seated (a leaver is never re-seated); no two-process run of a started
+match; F27-AC01..06 open. Status: implemented candidate, not
+independently checked.
+
+---
+
 # Last iteration — F27-B.4a: Cops & Robbers as a session mode on the wire (new-run iteration 15)
 
 Selection: the previous review passed with no blocking findings, so no

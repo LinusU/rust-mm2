@@ -1241,8 +1241,22 @@ match yet).
 
 Evidence: synthetic only (config validation, the full 3×3×9 option grid
 round-trips, unnamed/unknown choices rejected, pool gate, join policy).
-No menu or CLI offers the mode and nothing starts a match from it; that is
-F27-B.4b.
+No menu or CLI offers the mode (F27-B.4c).
+
+### Starting the match (F27-B.4b-host)
+
+*Implementation choice.* The authority builds the match while the
+session loads and seats participants as their cars appear. A
+participant's id in the match — and so on the `Message::Cnr` wire — is
+the car's *wire roster id* (`NetPlayer`; the host seat is 0), because a
+session-minted `PlayerId` differs per process: a client reading
+`SnapCnrSeat::player` can only match it to a car by wire id. A local
+(non-networked) session has no wire ids and uses the minted id. In a
+networked session a car not yet stamped with its wire id is not seated.
+Sides alternate by arrival (`GoldMatch::balanced_side`; designed — see
+ledger CNR-12). Open: the client's markers and HUD read the replica
+(B.4b-client/B.4c), the client car's own carrier mass is not predicted,
+and no two-process run of a started match exists.
 
 ## Data-plane budget and bounds (F25-B req 6)
 
