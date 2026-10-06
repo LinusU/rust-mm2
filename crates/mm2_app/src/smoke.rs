@@ -449,8 +449,17 @@ fn run_headless(
         .insert_resource(session::TunedVehicle(vehicle_config.clone()))
         .insert_resource(car)
         .add_systems(FixedUpdate, advance_session_tick)
-        .add_systems(FixedLast, crate::drawbridge::drive_drawbridges)
-        .add_systems(FixedLast, crate::movers::drive_movers)
+        .init_resource::<crate::worldclock::WorldClock>()
+        .add_systems(
+            FixedLast,
+            (
+                crate::worldclock::capture_world_start,
+                crate::worldclock::advance_world_clock,
+                crate::drawbridge::drive_drawbridges,
+                crate::movers::drive_movers,
+            )
+                .chain(),
+        )
         .add_systems(
             FixedLast,
             (

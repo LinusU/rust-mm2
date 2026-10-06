@@ -447,6 +447,8 @@ type RaceProgressQueries<'w, 's> = bevy::ecs::system::ParamSet<
 pub struct RaceMirror<'w, 's> {
     /// The session's race resource the row mirrors into.
     race: Option<ResMut<'w, RaceState>>,
+    /// The scenery clock a race row re-seeks (F26-A).
+    world: Option<ResMut<'w, crate::worldclock::WorldClock>>,
     /// See [`RaceProgressQueries`].
     progress: RaceProgressQueries<'w, 's>,
     /// The ledger a replicated terminal edge records into — the same
@@ -2707,6 +2709,14 @@ fn apply_race_snap(
         && !matches!(phase, RacePhase::Countdown { .. });
     race.phase = phase;
     race.clock = row.clock;
+    // The scenery keys off the same clock: re-seek it to the
+    // authority's world tick when this peer has drifted.
+    if let (Some(world), Some(target)) = (
+        mirror.world.as_deref_mut(),
+        crate::worldclock::world_ticks(race),
+    ) {
+        world.sync(target);
+    }
     if releasing {
         for mut progress in mirror.progress.p0().iter_mut() {
             if progress.state == ParticipantState::AwaitingStart {

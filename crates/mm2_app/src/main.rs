@@ -1280,8 +1280,17 @@ fn main() {
     .add_systems(FixedUpdate, advance_session_tick)
     // Drawbridge leaves pose after the solver step, like the lane
     // followers: the angular velocity they leave carries the next step.
-    .add_systems(FixedLast, mm2_app::drawbridge::drive_drawbridges)
-    .add_systems(FixedLast, mm2_app::movers::drive_movers)
+    .init_resource::<mm2_app::worldclock::WorldClock>()
+    .add_systems(
+        FixedLast,
+        (
+            mm2_app::worldclock::capture_world_start,
+            mm2_app::worldclock::advance_world_clock,
+            mm2_app::drawbridge::drive_drawbridges,
+            mm2_app::movers::drive_movers,
+        )
+            .chain(),
+    )
     .add_systems(
         FixedLast,
         (
