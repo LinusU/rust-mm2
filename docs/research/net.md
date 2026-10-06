@@ -1270,9 +1270,14 @@ A client builds the same seeded draw while loading, only to place its
 three markers where the round opens, and holds no `CnrHost`; from the
 first accepted frame `sync_cnr_markers` follows `CnrReplica` (sites, and
 the gold's position or hidden-while-carried), so host and clients draw
-one round. Open: the HUD reads the replica (B.4c), the client car's own
-carrier mass is not predicted, and no two-process run of a started match
-exists.
+one round. The client car's carrier mass is predicted too
+(`reconcile_gold_load` reads the carrier off the replica and the load off
+the session's own `CnrSettings`, so no mass travels on the wire and the
+predicted car weighs what the authority simulates; the handling scalar
+stays unapplied, UNK-10). Replica lag means the local mass changes when
+the frame lands, not when the host decided. Open: a two-process run that
+*decides* a match (pickup, delivery), and no process-level check of the
+client's mass.
 
 ## Data-plane budget and bounds (F25-B req 6)
 

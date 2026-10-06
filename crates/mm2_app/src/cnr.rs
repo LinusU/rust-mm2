@@ -20,7 +20,9 @@
 //!   ([`GoldLoadApplied`]), never added on top of itself, so it is
 //!   applied once, ends with the carrying and cannot outlive the match
 //!   (F27-AC04). The immutable [`mm2_vehicle::VehicleConfig`] is never
-//!   touched.
+//!   touched. A client keeps no host, so it reads the carrier off its
+//!   [`CnrReplica`] and the load off the session's own settings: its
+//!   predicted car weighs what the authority simulates.
 //!
 //! **Provenance.** What knocks gold loose is unrecovered (ledger
 //! CNR-11): [`DEFAULT_DISLODGE_SEVERITY`] — a car-on-car impact at or
@@ -52,7 +54,8 @@ use mm2_content::cnr::{CnrContent, CnrSettings, MARKER_MODELS};
 use mm2_game::gold::{CarrierLoad, Contact, DropCause, GoldError, GoldEvent, GoldMatch, Side};
 use mm2_game::{
     DamageTier, ImpactEvent, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerId,
-    RACE_TICK_HZ, Session, SessionAuthority, SessionEntity, SessionPhase, VehicleDamage,
+    RACE_TICK_HZ, Session, SessionAuthority, SessionEntity, SessionMode, SessionPhase,
+    VehicleDamage,
 };
 
 use crate::city::{MovableModels, WorldFloor, v3};
@@ -471,19 +474,46 @@ pub fn end_replicated_match(replica: Option<Res<CnrReplica>>, mut session: ResMu
     }
 }
 
+/// The carrier and the load it bears, as a client reads them: the
+/// replicated match names the carrier, and the load is a pure function
+/// of the session's own Cops & Robbers settings (the lobby advertised
+/// them, so host and client derive the same number). `None` while
+/// nobody carries or the session is not a Cops & Robbers one.
+fn replicated_load(session: &Session, replica: &CnrReplica) -> Option<(PlayerId, CarrierLoad)> {
+    let carrier = replica.0.carrier()?;
+    match session.config().map(|c| &c.mode) {
+        Some(SessionMode::CopsAndRobbers(settings)) => {
+            Some((carrier, settings.rules(RACE_TICK_HZ).load))
+        }
+        _ => None,
+    }
+}
+
 /// Fixed-step: make each car's body agree with the match's load. The
-/// target is [`GoldMatch::load_for`] (nothing at all once the
-/// [`CnrHost`] is gone); the body is always written from the recorded
-/// base, so repeated steps neither stack the load nor drift the mass.
+/// target is [`GoldMatch::load_for`] on the authority (nothing at all
+/// once the [`CnrHost`] is gone); a client, which keeps no host, reads
+/// the carrier off its [`CnrReplica`] so the predicted car is as heavy
+/// as the host's copy of it — otherwise the carrier would drive
+/// lighter locally than the authority simulates it and be corrected on
+/// every collision. The body is always written from the recorded base,
+/// so repeated steps neither stack the load nor drift the mass.
 pub fn reconcile_gold_load(
     mut commands: Commands,
     host: Option<Res<CnrHost>>,
+    replica: Option<Res<CnrReplica>>,
+    session: Res<Session>,
     mut cars: Query<LoadCar>,
 ) {
+    let replicated = match (&host, &replica) {
+        (None, Some(replica)) => replicated_load(&session, replica),
+        _ => None,
+    };
     for (entity, player, net, mut mass, mut inertia, applied) in &mut cars {
+        let id = participant_id(player, net);
         let want = host
             .as_ref()
-            .and_then(|h| h.game.load_for(participant_id(player, net)))
+            .and_then(|h| h.game.load_for(id))
+            .or_else(|| replicated.and_then(|(c, l)| (c == id).then_some(l)))
             .filter(|l| l.added_mass_kg.is_finite() && l.added_mass_kg > 0.0);
         match (want, applied) {
             (Some(load), None) => {
@@ -1427,6 +1457,7 @@ mod tests {
 
     // ---- F27-B.4b: starting the match and seating the cars ----
 
+    use mm2_game::cnr_options::GoldMass;
     use mm2_game::{SessionAuthority, SessionMode, WorldMode};
 
     fn city_vfs(rows: usize) -> (tempfile::TempDir, Vfs) {
@@ -1882,5 +1913,149 @@ mod tests {
             Some(PlayerId(3))
         );
         assert_eq!(app.world().get::<Mass>(e).unwrap().0, MASS + 250.0);
+    }
+
+    // ---- F27-B.4c: a client's predicted car bears the carrier's load ----
+
+    /// A client app: a `Remote`-authority session with `gold_mass` and a
+    /// car per `cars` entry (wire id), no `CnrHost`, replica as given.
+    fn client_rig(gold_mass: GoldMass, cars: &[u16]) -> (App, Vec<Entity>, GoldMatch) {
+        let mut config = cnr_config(CnrVariant::FreeForAll, SessionAuthority::Remote);
+        config.mode = SessionMode::CopsAndRobbers(CnrSettings {
+            gold_mass,
+            ..CnrSettings::default()
+        });
+        let mut session = playing(config);
+        let gold = session.mint_object_id();
+        let participants: Vec<(PlayerId, Side)> =
+            cars.iter().map(|&w| (PlayerId(w), Side::Solo)).collect();
+        let game = GoldMatch::new(
+            session.generation(),
+            gold,
+            rules(EndRule::None),
+            pool(),
+            5,
+            &participants,
+        )
+        .unwrap();
+        let mut app = App::new();
+        app.insert_resource(session)
+            .add_systems(Update, reconcile_gold_load);
+        let entities = cars
+            .iter()
+            .enumerate()
+            .map(|(i, &wire)| {
+                let obj = app.world_mut().resource_mut::<Session>().mint_object_id();
+                app.world_mut()
+                    .spawn((
+                        ObjectIdentity(obj),
+                        Player {
+                            id: PlayerId(100 + i as u16),
+                            control: PlayerControl::Local,
+                        },
+                        NetPlayer(wire),
+                        Position(Vec3::ZERO),
+                        Mass(MASS),
+                        AngularInertia {
+                            principal: INERTIA,
+                            local_frame: Quat::IDENTITY,
+                        },
+                    ))
+                    .id()
+            })
+            .collect();
+        (app, entities, game)
+    }
+
+    fn take_gold(game: &mut GoldMatch, who: PlayerId) {
+        let at = game.gold_position().unwrap();
+        let round = game.round();
+        let verdicts = game.resolve_pickups(&[Contact {
+            player: who,
+            round,
+            position: at,
+        }]);
+        assert_eq!(verdicts.len(), 1);
+        assert_eq!(game.carrier(), Some(who));
+    }
+
+    fn mass_of(app: &App, e: Entity) -> f32 {
+        app.world().get::<Mass>(e).unwrap().0
+    }
+
+    #[test]
+    fn a_client_loads_the_car_the_replica_names_from_the_sessions_own_settings() {
+        let (mut app, cars, mut game) = client_rig(GoldMass::HalfTon, &[3, 4]);
+        app.insert_resource(CnrReplica(game.view()));
+        app.update();
+        assert_eq!(mass_of(&app, cars[0]), MASS, "nobody carries yet");
+
+        take_gold(&mut game, PlayerId(3));
+        app.insert_resource(CnrReplica(game.view()));
+        for _ in 0..20 {
+            app.update();
+        }
+        // 500 kg is the session's HalfTon, not whatever a helper's rules
+        // table says: the client derives it from the advertised settings.
+        assert_eq!(mass_of(&app, cars[0]), MASS + 500.0);
+        assert_eq!(mass_of(&app, cars[1]), MASS, "only the carrier is loaded");
+        let applied = *app.world().get::<GoldLoadApplied>(cars[0]).unwrap();
+        assert_eq!(applied.base_mass, MASS, "applied once, from the base");
+    }
+
+    #[test]
+    fn a_clients_load_follows_a_transfer_and_ends_with_the_replica() {
+        let (mut app, cars, mut game) = client_rig(GoldMass::QuarterTon, &[3, 4]);
+        take_gold(&mut game, PlayerId(3));
+        app.insert_resource(CnrReplica(game.view()));
+        app.update();
+        assert_eq!(mass_of(&app, cars[0]), MASS + 250.0);
+
+        // The host's next frame names the other car: the load moves, the
+        // first car returns to its exact base.
+        let mut moved = game.view();
+        moved.state = mm2_game::gold::GoldState::Carried { by: PlayerId(4) };
+        app.insert_resource(CnrReplica(moved));
+        app.update();
+        assert_eq!(mass_of(&app, cars[0]), MASS);
+        assert_eq!(
+            app.world()
+                .get::<AngularInertia>(cars[0])
+                .unwrap()
+                .principal,
+            INERTIA
+        );
+        assert_eq!(mass_of(&app, cars[1]), MASS + 250.0);
+
+        // Teardown removes the replica: nobody keeps a load past the match
+        // (F27-AC04, "does not leak into a later race").
+        app.world_mut().remove_resource::<CnrReplica>();
+        app.update();
+        assert_eq!(mass_of(&app, cars[1]), MASS);
+        assert!(app.world().get::<GoldLoadApplied>(cars[1]).is_none());
+    }
+
+    #[test]
+    fn weightless_gold_loads_a_clients_carrier_with_nothing() {
+        let (mut app, cars, mut game) = client_rig(GoldMass::Weightless, &[3]);
+        take_gold(&mut game, PlayerId(3));
+        app.insert_resource(CnrReplica(game.view()));
+        app.update();
+        assert_eq!(mass_of(&app, cars[0]), MASS);
+        assert!(app.world().get::<GoldLoadApplied>(cars[0]).is_none());
+    }
+
+    #[test]
+    fn a_replica_outside_a_cops_and_robbers_session_loads_nobody() {
+        let (mut app, cars, mut game) = client_rig(GoldMass::HalfTon, &[3]);
+        take_gold(&mut game, PlayerId(3));
+        let session = playing(SessionConfig {
+            authority: SessionAuthority::Remote,
+            ..SessionConfig::default()
+        });
+        app.insert_resource(session)
+            .insert_resource(CnrReplica(game.view()));
+        app.update();
+        assert_eq!(mass_of(&app, cars[0]), MASS);
     }
 }

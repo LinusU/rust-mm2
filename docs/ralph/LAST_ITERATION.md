@@ -1,3 +1,36 @@
+# Last iteration — F27-B.4c (client-load leg): a client's predicted car carries the gold's mass (new-run iteration 26)
+
+Selection: the previous review passed with no blocking findings; its
+gaps are process-level/rendered evidence that a single unattended code
+change cannot add. The smallest explicit open item on F27 was "the
+client car's carrier mass is not applied to its local prediction": a
+joined carrier drove at base mass while the host simulated it heavier
+(F27-AC04 holds on the host only).
+
+Change: `mm2_app::cnr::reconcile_gold_load` (already registered on every
+role) now also takes `Option<Res<CnrReplica>>` and `Res<Session>`. With
+no `CnrHost` it reads the carrier from the replica
+(`GoldView::carrier`) and the load from the session's own
+`SessionMode::CopsAndRobbers(settings).rules(RACE_TICK_HZ).load` —
+nothing new on the wire. The authority path is unchanged (`load_for`);
+the recorded-base write keeps apply-once/exact-restore, and removing the
+replica at teardown strips the load. Handling scalar stays unapplied.
+
+Tests (`mm2_app::cnr`, synthetic): replica names the carrier → +500 kg
+from the HalfTon setting, applied once, only the carrier; transfer moves
+the load and restores base mass/inertia exactly, replica removal strips
+it; weightless gold loads nothing; a replica outside a C&R session loads
+nobody. Docs: `net.md`, `original-rules.md` CNR-12, PLAN.
+
+Gates (iteration 26, foreground): `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` clean (one `field_reassign_with_default` in a new test fixed first); `cargo test --locked --workspace` exit 0 (2139 passed, 0 failed; was 2135 + the 4 new tests). No processes left running.
+
+Not verified: process-level check of the client's mass, a decided
+two-process match, rendered output. Open: commentary, menu-hosted lobby
+offer, F27-AC01..06. Status: implemented candidate, not independently
+checked.
+
+---
+
 # Last iteration — F27-B.4c (decided-repeat leg): a lost decided frame no longer strands a client (new-run iteration 25)
 
 Selection: the previous review passed with no blocking findings; its
