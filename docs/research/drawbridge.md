@@ -8,6 +8,15 @@ collision — the decks belong to `giz_*` leaves the original's
 `gizBridgeMgr` places from a bridge pathset. Without the leaves a
 race that crosses the river drops into it.
 
+The suppression covers the leaves' span and nothing more. Room 857 is
+59.9 m between its two road sections — the Tower Bridge leaves' 30 m ×
+2 — and the approaches on either side (BAI road 407's rooms 855, 856,
+858 and 859, and the southern junction, room 1279) carry their road
+normally; every attribute London suppresses lies in these three rooms
+or under the Underground's rail beds. (Checked while chasing cars
+falling out of the world beside the southern junction: that was the
+37° grass bank's collision — see `psdl.md` — not missing ground.)
+
 Everything below is **verified_original**: read from the retail
 `Midtown2.exe` (`llvm-objdump`, image base `0x400000`; file offsets
 are `VA − 0x400000` for `.rdata`/`.data`) and checked against the
