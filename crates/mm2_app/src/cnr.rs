@@ -56,6 +56,7 @@ use mm2_game::{
 };
 
 use crate::city::{MovableModels, WorldFloor, v3};
+use crate::cnrnet::CnrReplica;
 use crate::netdrive::NetPlayer;
 
 /// Approach speed, m/s, at or above which another participant's car
@@ -176,7 +177,14 @@ pub fn start_match(
     )
     .map_err(|e| format!("Cops & Robbers cannot start in {city:?}: {e:?}"))?;
     let report = spawn_cnr_markers(commands, vfs, &host, meshes, images, materials, owner);
-    commands.insert_resource(host);
+    // Only the authority plays the match. A client built the same draw
+    // (same seed, same pool) to place its markers where the round
+    // starts, and then follows the host's replica
+    // ([`crate::cnrnet::CnrReplica`]) — a never-stepped `CnrHost` kept
+    // beside it would be a second, stale truth.
+    if session.authority_role().is_authority() {
+        commands.insert_resource(host);
+    }
     Ok(report)
 }
 
@@ -187,11 +195,12 @@ pub fn start_match(
 /// networked session only a car stamped with its wire id counts, which
 /// keeps the local car out until its identity is settled.
 ///
-/// A participant who left stays out: [`GoldMatch::join`] refuses a
-/// repeat and the refusal is deliberately not retried (a respawned
-/// remote car after a pick change is therefore not re-seated — named
-/// gap). Idle without a [`CnrHost`], while the session is not
-/// `Playing`, and on a non-authority process.
+/// A participant who left and whose car is back (a remote pick change
+/// respawns the car; [`cnr_host_step`] saw it vanish and marked them
+/// gone) is *re-seated*: [`GoldMatch::rejoin`] resumes their side and
+/// points rather than treating them as someone new. Idle without a
+/// [`CnrHost`], while the session is not `Playing`, and on a
+/// non-authority process.
 pub fn enroll_cnr_participants(
     session: Res<Session>,
     host: Option<ResMut<CnrHost>>,
@@ -207,6 +216,14 @@ pub fn enroll_cnr_participants(
         .config()
         .is_some_and(|c| c.authority != SessionAuthority::Local);
     let mut fresh: BTreeSet<PlayerId> = BTreeSet::new();
+    let mut returned: BTreeSet<PlayerId> = BTreeSet::new();
+    let gone: BTreeSet<PlayerId> = host
+        .game
+        .standings()
+        .into_iter()
+        .filter(|s| !s.connected)
+        .map(|s| s.player)
+        .collect();
     for (player, net) in &cars {
         if player.control == PlayerControl::Ai || (networked && net.is_none()) {
             continue;
@@ -214,7 +231,13 @@ pub fn enroll_cnr_participants(
         let id = participant_id(player, net);
         if host.game.side_of(id).is_none() {
             fresh.insert(id);
+        } else if gone.contains(&id) {
+            returned.insert(id);
         }
+    }
+    // A refusal is the match being over, which seats nobody.
+    for id in returned {
+        let _ = host.game.rejoin(id);
     }
     for id in fresh {
         let side = host.game.balanced_side();
@@ -556,22 +579,27 @@ pub fn spawn_cnr_markers(
     report
 }
 
-/// Keep the markers where the host's match says they are: hideout and
-/// bank at the round's drawn sites (they move when a delivery draws new
-/// ones), the gold where it rests or was dropped. While a car carries
+/// Keep the markers where the match says they are: hideout and bank at
+/// the round's drawn sites (they move when a delivery draws new ones),
+/// the gold where it rests or was dropped. The authority reads its
+/// [`CnrHost`]; a client reads the host's replicated match
+/// ([`CnrReplica`]), so both draw the same round. While a car carries
 /// the gold its marker is hidden — *implementation choice*: what the
 /// original draws on a carrier is unrecovered, and the carrier/score
 /// presentation is the HUD's (F27-B.4), not a marker pinned to a body.
-/// Without a [`CnrHost`] the markers keep their last pose.
+/// With neither (a client before the first frame, or no match at all)
+/// the markers keep their last pose, which on a client is the round's
+/// opening draw.
 pub fn sync_cnr_markers(
     host: Option<Res<CnrHost>>,
+    replica: Option<Res<CnrReplica>>,
     mut markers: Query<(&CnrMarker, &mut Transform, &mut Visibility)>,
 ) {
-    let Some(host) = host else {
-        return;
+    let (sites, gold) = match (&host, &replica) {
+        (Some(host), _) => (host.game.sites(), host.game.gold_position()),
+        (None, Some(replica)) => (replica.0.sites, replica.0.gold_position()),
+        (None, None) => return,
     };
-    let sites = host.game.sites();
-    let gold = host.game.gold_position();
     for (marker, mut transform, mut visibility) in &mut markers {
         let (at, shown) = match marker.role {
             MarkerRole::Gold => (gold.unwrap_or(sites.gold), gold.is_some()),
@@ -1276,6 +1304,67 @@ mod tests {
     }
 
     #[test]
+    fn a_client_draws_its_markers_from_the_replicated_match() {
+        let mut r = rig(EndRule::None, &[A]);
+        let opening = r.game().view();
+        // The client's world: markers only, no host, driven by the replica.
+        let mut app = App::new();
+        app.add_systems(Update, sync_cnr_markers);
+        for role in MarkerRole::ALL {
+            app.world_mut().spawn((
+                CnrMarker { role },
+                Transform::default(),
+                Visibility::default(),
+            ));
+        }
+        let pose = |app: &mut App, role: MarkerRole| {
+            let mut q = app
+                .world_mut()
+                .query::<(&CnrMarker, &Transform, &Visibility)>();
+            let (_, t, v) = q.iter(app.world()).find(|(m, ..)| m.role == role).unwrap();
+            (t.translation, *v)
+        };
+        // Before the first frame the markers keep the pose they spawned in.
+        app.update();
+        assert_eq!(pose(&mut app, MarkerRole::Bank).0, Vec3::ZERO);
+
+        app.insert_resource(CnrReplica(opening.clone()));
+        app.update();
+        let sites = opening.sites;
+        assert_eq!(
+            pose(&mut app, MarkerRole::Gold),
+            (sites.gold, Visibility::Inherited)
+        );
+        assert_eq!(pose(&mut app, MarkerRole::Hideout).0, sites.hideout);
+        assert_eq!(pose(&mut app, MarkerRole::Bank).0, sites.bank);
+
+        // Carried: the gold marker hides; a delivery moves every site.
+        let g = r.gold_at();
+        r.put(r.a, g);
+        r.step();
+        assert_eq!(r.game().carrier(), Some(A));
+        app.insert_resource(CnrReplica(r.game().view()));
+        app.update();
+        assert_eq!(pose(&mut app, MarkerRole::Gold).1, Visibility::Hidden);
+
+        let target = r.game().sites().hideout;
+        r.put(r.a, target);
+        r.step();
+        r.step();
+        assert_eq!(r.game().round(), 1);
+        let after = r.game().view();
+        assert_ne!(after.sites, sites, "a delivery draws new sites");
+        app.insert_resource(CnrReplica(after.clone()));
+        app.update();
+        assert_eq!(
+            pose(&mut app, MarkerRole::Gold),
+            (after.sites.gold, Visibility::Inherited)
+        );
+        assert_eq!(pose(&mut app, MarkerRole::Hideout).0, after.sites.hideout);
+        assert_eq!(pose(&mut app, MarkerRole::Bank).0, after.sites.bank);
+    }
+
+    #[test]
     fn hideout_and_bank_markers_stay_on_the_drawn_sites_and_idle_without_a_host() {
         let mut r = rig(EndRule::None, &[A]);
         r.app
@@ -1425,6 +1514,22 @@ mod tests {
         assert!(app.world().get_resource::<CnrHost>().is_none());
     }
 
+    #[test]
+    fn a_client_builds_the_same_draw_for_its_markers_but_holds_no_match() {
+        let (_dir, vfs) = city_vfs(5);
+        let mut app = App::new();
+        app.insert_resource(playing(cnr_config(
+            CnrVariant::CopsVsRobbers,
+            SessionAuthority::Remote,
+        )));
+        let report = start(&mut app, vfs, "city/testcity.psdl").unwrap();
+        assert_eq!(report.missing_models.len(), 3);
+        assert!(
+            app.world().get_resource::<CnrHost>().is_none(),
+            "a client never plays the match"
+        );
+    }
+
     /// An authority app with an empty match of `variant` and the
     /// enrollment system; cars are spawned by the caller.
     fn enroll_app(variant: CnrVariant, authority: SessionAuthority) -> App {
@@ -1504,6 +1609,47 @@ mod tests {
         app.world_mut().entity_mut(wire).insert(NetPlayer(3));
         app.update();
         assert_eq!(sides(&app).last(), Some(&(PlayerId(3), Side::Cops)));
+    }
+
+    #[test]
+    fn a_participant_whose_car_comes_back_is_reseated_on_their_own_side() {
+        let mut app = enroll_app(CnrVariant::CopsVsRobbers, SessionAuthority::Host);
+        car(&mut app, 8, PlayerControl::Remote, Some(1));
+        let other = car(&mut app, 9, PlayerControl::Remote, Some(2));
+        app.update();
+        let before = sides(&app);
+        assert_eq!(
+            before,
+            vec![(PlayerId(1), Side::Robbers), (PlayerId(2), Side::Cops)]
+        );
+        // The car vanishes (a pick change) and the host marks them gone,
+        // their slot free.
+        app.world_mut().despawn(other);
+        app.world_mut()
+            .resource_mut::<CnrHost>()
+            .game
+            .leave(PlayerId(2), Vec3::ZERO)
+            .unwrap();
+        app.update();
+        let connected = |app: &App| {
+            app.world()
+                .resource::<CnrHost>()
+                .game
+                .standings()
+                .into_iter()
+                .filter(|s| s.connected)
+                .count()
+        };
+        assert_eq!(connected(&app), 1, "nobody is seated without a car");
+        // The respawned car carries the same wire id: same seat, same
+        // side — not a fresh joiner placed by the balance rule.
+        car(&mut app, 12, PlayerControl::Remote, Some(2));
+        app.update();
+        assert_eq!(connected(&app), 2);
+        assert_eq!(sides(&app), before);
+        // And it is idempotent.
+        app.update();
+        assert_eq!(connected(&app), 2);
     }
 
     #[test]

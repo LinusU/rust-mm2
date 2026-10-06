@@ -835,6 +835,28 @@ impl GoldMatch {
         Ok(())
     }
 
+    /// A participant who left is back (their car spawned again — a remote
+    /// pick change respawns it). They resume the side and the points they
+    /// left with, so leaving and returning never resets a score or moves
+    /// anyone to the other team. *Implementation choice*: the original's
+    /// reconnect handling is unrecovered. Refused once the match is over,
+    /// for someone who never joined, and for someone still connected.
+    pub fn rejoin(&mut self, player: PlayerId) -> Result<Side, GoldError> {
+        if self.outcome.is_some() {
+            return Err(GoldError::MatchOver);
+        }
+        let Some(m) = self.members.get_mut(&player) else {
+            return Err(GoldError::UnknownPlayer(player));
+        };
+        if m.connected {
+            return Err(GoldError::DuplicatePlayer(player));
+        }
+        m.connected = true;
+        let side = m.side;
+        self.push(GoldEvent::Joined { player, side });
+        Ok(side)
+    }
+
     /// A participant left. Their points stay on the board; if they were
     /// carrying, the gold drops where `position` (the host's last
     /// position for their car) says — *Enhanced policy*, since the
@@ -1826,6 +1848,43 @@ mod tests {
             m.join(C, Side::Red),
             Err(GoldError::WrongSide(C, Side::Red))
         );
+    }
+
+    #[test]
+    fn a_leaver_who_returns_resumes_their_side_and_points() {
+        let mut m = GoldMatch::new(
+            1,
+            ObjectId {
+                generation: 1,
+                slot: 1,
+            },
+            rules(CnrVariant::CopsVsRobbers, EndRule::None),
+            pool(6),
+            5,
+            &[(A, Side::Cops), (B, Side::Robbers)],
+        )
+        .unwrap();
+        take(&mut m, A);
+        m.leave(A, Vec3::ZERO).unwrap();
+        assert_eq!(m.balanced_side(), Side::Cops, "a leaver frees their slot");
+        let before = m.revision();
+        assert_eq!(m.rejoin(A), Ok(Side::Cops));
+        assert_eq!(m.score(A), Some(25), "points survive the absence");
+        assert_eq!(m.side_of(A), Some(Side::Cops));
+        assert_ne!(m.revision(), before, "replicas must see the return");
+        assert!(m.standings().iter().all(|s| s.connected));
+        // Back in the match, a second return is a repeat.
+        assert_eq!(m.rejoin(A), Err(GoldError::DuplicatePlayer(A)));
+        assert_eq!(m.rejoin(C), Err(GoldError::UnknownPlayer(C)));
+    }
+
+    #[test]
+    fn nobody_returns_to_a_finished_match() {
+        let mut m = ffa(EndRule::Ticks(1));
+        m.leave(A, Vec3::ZERO).unwrap();
+        m.tick();
+        assert!(m.outcome().is_some());
+        assert_eq!(m.rejoin(A), Err(GoldError::MatchOver));
     }
 
     #[test]
