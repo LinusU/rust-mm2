@@ -156,12 +156,54 @@ event, but nothing here says who may recover or what it scores.
 * The `+0x276` re-draw flag, the `rows − 1` modulus's relation to the header,
   and the unit behind 100/200.
 
+## The authoritative gold state machine (F27-B.1)
+
+`mm2_game::gold::GoldMatch` is the host-side rule core: one gold object with
+one ownership state (`Resting` → `Carried` ⇄ `Dropped`), the participants and
+their scores, and the match end. It is pure state — the host feeds it
+positions its own simulation holds, never a client's claim — and it emits
+`GoldEvent`s for the wire, HUD and commentary. `mm2_content::cnr::CnrSettings
+::rules` builds its `GoldRules` from the tables above. Where each rule comes
+from:
+
+| Rule | Class |
+| --- | --- |
+| delivery = 100 points within a 12.0 m marker radius, carrier cleared, new sites drawn | original (constants; radius direction inferred) |
+| gold mass option 0 / 100 / 200 → 0 / 250 / 500 kg and handling 1.0 / 0.9 / 0.81 for the carrier only | original values; kg and the scalar's effect **provisional** |
+| time 5/10/20/30 min, points 100/250/500/1,000; points end compares the individual (FFA) or the team total | original |
+| a pickup awards 25 points | original constant; applied to *every* grant — implementation choice (trigger unknown) |
+| exactly one carrier; a pickup is honoured only with no carrier | original (host arbitration, `0x426560`) |
+| contested pickup: nearest host-measured car wins, ties to the lower player id, whatever the arrival order | implementation choice (the original's arbitration order is the host's message order) |
+| pickup radius 5.0 m | enhanced policy |
+| the dropper cannot retake the gold for 1 s | enhanced policy |
+| anyone may recover dropped gold (a distinct `Picked { recovered }` event, the original's `RECOVERLOOT`) | documented (help: "anyone can pick it up") |
+| a carrier who disconnects drops the gold where their car was | enhanced policy (original unrecovered) |
+| gold outside the bounds is re-placed at a fresh pool site, no score, round advanced | enhanced policy (original unrecovered) |
+| delivery targets: FFA and robbers → hideout, cops → bank; red → hideout draw, blue → bank draw | documented for FFA/robbers/cops; the red/blue mapping is an implementation choice |
+| seeded, always-distinct draws of the three sites | enhanced policy (CNR-6: original used `rand()`) |
+| a request carries the round it was made against; a delivery or re-placement advances the round, so late messages are refused `Stale` | implementation choice |
+| tie at the end (level top scores or team totals) → `Winner::Tie` | implementation choice (original unrecovered) |
+
+The carrier's handling load is *derived* (`GoldMatch::load_for`) rather than
+stored on the car: only the current carrier has one, a stash/drop/leave ends
+it in the same call that changes the state, and a new match starts with none.
+This is how F27-AC04 ("applied and removed exactly once, no leak into a later
+race") is made structurally true; the Bevy-side component that reconciles a
+vehicle against it is F27-B.2.
+
+What this slice does **not** do: no wire messages, no lobby/HUD, no vehicle
+mutation, no rematch flow, no knock-loose trigger (the host will call
+`dislodge` from its impact/damage systems with its own threshold — the
+original's is unrecovered). So F27-AC01..06 remain open; the unit tests are
+synthetic evidence for the rule core only.
+
 ## Consequences for the implementation
 
 * `mm2_content::cnr` carries the verified tables (limits, mass options, the
-  delivery constants), the variant enum, and `CnrContent::load`, which
-  resolves the data half through the VFS and counts every miss. It is the
-  input F27-B reads; it is not a game state machine.
+  delivery constants), `CnrSettings` (the host's three choices → the rules a
+  match enforces), and `CnrContent::load`, which resolves the data half
+  through the VFS and counts every miss. `mm2_game::gold` holds the variant
+  enum and the state machine itself.
 * Everything marked *inferred* or *unknown* above must stay out of any
   "original-verified" claim for the mode. F27-B's rules for those points are
   **Enhanced policy / Implementation choice** and are labelled as such where

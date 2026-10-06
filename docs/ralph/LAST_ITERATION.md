@@ -1,3 +1,71 @@
+# Last iteration — authoritative gold state machine (new-run iteration 10)
+
+Selection: the previous review passed with no blocking findings, so no
+repair was owed. F27-A's data half is done and its remaining items are
+research I cannot resolve without running the original; F27-B (authoritative
+gold/teams/scoring/handling) was `queued` behind it and the spec's
+requirements 3 and 4 (one valid ownership state, deterministic contested
+pickups, load applied/removed exactly once) are pure rules that need no
+network or GPU. I split F27-B and took B.1, the rule core, over starting
+with wire messages: a protocol written before the rules would encode guesses.
+
+Change (no protocol change, no gameplay wired): `mm2_game::gold::GoldMatch`.
+One ownership state `Resting` / `Carried` / `Dropped`; `resolve_pickups`
+decides a tick's `Contact`s (player + round from the client, *position from
+the host's sim*) — nearest wins, equal distance to the lower `PlayerId`, so
+arrival order never matters; losers are `Contested`, repeats `Duplicate`,
+old rounds `Stale`, a dropper `Locked` for a short lockout; `deliver` scores
+the 100 points once, clears the carrier, draws new seeded distinct sites and
+advances the round; `dislodge` (rammed/destroyed), `leave` (disconnect:
+gold drops in place, points stay), `join`, `gold_out_of_bounds` (re-placed
+at a fresh site, no score), `tick` (time limit); point limit compares the
+individual in FFA and the team total otherwise; ties are `Winner::Tie`.
+`load_for(player)` *derives* the carrier's mass/handling from the state so
+the load cannot be applied twice or outlive the carrying, and a fresh match
+has none. `mm2_content::cnr::CnrSettings::rules(tick_hz)` builds `GoldRules`
+from the recovered tables (new constants `PICKUP_POINTS` = 25,
+`PICKUP_RADIUS_M`, `DROP_LOCKOUT_SECONDS`); `CnrVariant` moved into
+`mm2_game::gold` (re-exported from `cnr`, no caller changed).
+
+Classification (docs/research/cnr.md table, ledger CNR-11): delivery 100 /
+radius 12 / mass options / limits are original constants; the 25-point
+pickup is an original constant applied to every grant (trigger unknown, so
+an implementation choice); pickup radius, dropper lockout, disconnect drop,
+out-of-bounds re-placement, red→hideout/blue→bank and tie handling are
+enhanced policy or implementation choices and say so at their definitions.
+
+Tests: 28 `mm2_game::gold` units (construction validation; three distinct
+sites for any seed; nearest-wins; every arrival order of equidistant
+requests yields one carrier and one award; duplicates; refusals with
+reasons and the inclusive radius; no re-pickup of carried gold; dislodge →
+recover with the load moving; lockout expiry; stale/repeated impact reports;
+non-finite drop position; delivery scoring once, out-of-range, wrong
+marker, stale round, no second score; pickup and delivery in the same tick;
+cops→bank/robbers→hideout; red/blue; point limit freezes the match; team
+total ends it, not an individual; time limit and ties; leaver keeps points;
+late join; out-of-bounds re-placement; load follows only the carrier and a
+new match has none; deterministic replay and seed sensitivity; revision and
+event drain; balanced sides) and 4 `mm2_content::cnr` units (defaults, every
+variant×mass×limit choice maps to the enforced rule, lockout follows the
+tick rate, stock settings drive a real match to its end). All synthetic.
+
+Gates (all exit 0): `cargo fmt --all -- --check` PASS; `cargo clippy
+--locked --workspace --all-targets --all-features -- -D warnings` PASS (no
+new allow); `cargo test --locked --workspace` PASS (2046 passed, 0 failed;
+was 2014). No original-data run this iteration (no content path changed).
+No test processes left running.
+
+Not verified / open: this is rule-core evidence only — no wire, no
+client replica, no HUD/lobby, no vehicle component applying the load, no
+impact-threshold that calls `dislodge`, no rematch; F27-AC01..06 all open.
+The original's own answers for what knocks gold loose, who may recover and
+what recovery scores, disconnect/out-of-bounds outcomes and the handling
+scalar's physical effect remain unknown (UNK-10); the policies above are
+placeholders that are labelled, not evidence. Status: implemented
+candidate, not independently checked.
+
+---
+
 # Last iteration — Cops & Robbers rule matrix, data half (new-run iteration 9)
 
 Selection: the previous review passed with no blocking findings, so no
