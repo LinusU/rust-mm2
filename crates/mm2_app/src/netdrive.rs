@@ -374,6 +374,8 @@ pub struct RemoteSnaps {
     /// The ambient-traffic inbox (protocol v19, F26-A) — per-car
     /// latest-wins, reset with the stream's other ledgers.
     pub(crate) traffic: crate::worldtraffic::TrafficStage,
+    /// The world-clock inbox (protocol v20, F26-A) — newest frame wins.
+    pub(crate) world: crate::worldclock::WorldStage,
 }
 
 /// A staged snapshot frame.
@@ -729,6 +731,16 @@ impl RemoteSnaps {
         self.traffic.push(generation, tick, roster, rows);
     }
 
+    /// Queue a received world-clock frame (protocol v20, F26-A).
+    pub fn push_world(&mut self, generation: u64, ticks: u64) {
+        self.world.push(generation, ticks);
+    }
+
+    /// The world-clock inbox — counters for the record/tests.
+    pub fn world(&self) -> &crate::worldclock::WorldStage {
+        &self.world
+    }
+
     /// The ambient-traffic inbox — counters for the record/tests.
     pub fn traffic(&self) -> &crate::worldtraffic::TrafficStage {
         &self.traffic
@@ -769,6 +781,7 @@ impl RemoteSnaps {
         self.race_key = None;
         self.props.reset();
         self.traffic.reset();
+        self.world.reset();
     }
 }
 
@@ -914,6 +927,15 @@ pub struct NetDriveReport {
     pub cars_mismatched: u64,
     /// Traffic copies a client currently holds (F26-A).
     pub cars_live: usize,
+    /// World-clock frames the host published (F26-A, protocol v20).
+    pub world_sent: u64,
+    /// World-clock frames a client folded into its clock (F26-A).
+    pub world_landed: u64,
+    /// Re-seeks those frames queued — the rest were inside tolerance.
+    pub world_seeks: u64,
+    /// World-clock frames a client refused: an implausible tick or
+    /// another generation's.
+    pub world_refused: u64,
 }
 
 /// A rotation off the wire, sanitized — a malformed-quaternion guard so

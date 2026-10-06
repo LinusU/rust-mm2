@@ -1,3 +1,74 @@
+# Last iteration — world-clock replication for Cruise (new-run iteration 7)
+
+Selection: the previous review passed with no blocking findings, so no
+repair was owed. I first considered the review's "per-client relevancy"
+gap for traffic and dropped it: the host's population is capped at
+`SpawnPolicy::max_active` = 32, already under the 64-row wire bound, so
+the id-ordered truncation can never drop a car today (a mod raising the
+cap would need it; recorded, not built). The next F26-A gap that is real
+today is the one the iteration-5 clock audit named and the iteration-6
+race-row re-seek only half closed: **a Cruise has no race row**, so a
+Cruise client — and above all a late joiner (AC02) — had nothing to align
+its timed scenery (drawbridge leaves, boats, ferries, trains) to.
+
+Change (protocol **v20**): `Message::World { generation, ticks }`
+(tag 0x12, 17 B, host→client only; a client-sent one drops the peer
+`Malformed`, AC04). `mm2_app::worldclock`: `publish_world_clock` (host;
+`Countdown`/`Playing`/`Results`; at once, then every
+`PUBLISH_EVERY_TICKS` = 120 world ticks, immediately if the clock went
+backwards — so a pause stops the frames), `WorldStage` (inside
+`RemoteSnaps`; newest tick per generation, ≤4 generations, older/equal
+dropped `stale`, foreign generation refused at apply and never able to
+stale-mark the session's own, a tick past `MAX_SEEK_TICKS` = 2^21 refused
+*before* it can become a watermark because a seek replays every actor from
+its start), `apply_world_clock` (client; held through `Loading`/`Paused`)
+→ the existing `WorldClock::sync` (6-tick tolerance). Wired in main.rs,
+smoke.rs and the `net_app` harness. Record gains ` wclk=sent,landed,seek,
+ref` (absent when the wire carried none; `world=` was already taken by the
+city name). Docs: `docs/research/net.md` (new section + budget row), PLAN
+F26-A slice 7.
+
+Tests: proto round-trip/truncation/padding; lobby
+`a_client_cannot_assert_the_world_clock`; 5 `WorldStage` units (per-
+generation newest, foreign generation, implausible tick not a watermark,
+bounded generations, reset); `net_app::the_host_publishes_its_world_clock_
+at_the_cadence` (real loopback socket: first frame at once, none a tick
+short of the cadence — the next frame on the wire is the one at the
+cadence — and a restart announced at once) and
+`net_app::a_world_clock_frame_re_seeks_a_cruise_clients_scenery` (late
+joiner lands on the host's tick, reordered older frame dropped, jitter
+inside tolerance lands without a seek, foreign generation refused, absurd
+tick refused without poisoning the honest frame after it). All spin on a
+condition under a bounded deadline (report 6 rule).
+
+Original-data / process evidence (separate from the synthetic tests):
+`MM2_RETAIL=/Users/linus/coding/rust-mm2/retail cargo test --locked -p
+mm2_app --test network two_retail_processes_replicate_the_hosts_traffic`
+(now also asserts the clock): two real `mm2` processes on loopback,
+retail sf Cruise, one Apple Silicon machine: host `wclk=sent15`, client
+`wclk=sent0,landed15,seek13,ref0`, both `status=pass`. The 13 seeks are
+**not** evidence of alignment quality: the headless harness free-runs
+both processes at unrelated update rates, so the clocks diverge between
+frames. How rarely a vsync-bound client seeks is unobserved. Not
+rendered, not impaired.
+
+Gates (all exit 0): `cargo fmt --all -- --check` PASS; `cargo clippy
+--locked --workspace --all-targets --all-features -- -D warnings` PASS (no
+new allow); `cargo test --locked --workspace` PASS (1991 passed, 0 failed;
+was 1982). The retail two-process leg was re-run on the final code and
+passed. No test processes left running.
+
+Still open (F26-A stays active, not AC01..06 completion): no RTT
+compensation (a client trails the host by the one-way delay; past ~50 ms
+it re-seeks every frame), proximity leaves are still per-peer, no
+windowed/GPU or impaired-network scenery measurement, per-client traffic
+relevancy (moot at the default cap), signal heads, interpolation beyond
+the velocity carry, mid-session weather, late-join of props beyond the
+resend cycle, sound replication. Status: implemented candidate, not
+independently checked.
+
+---
+
 # Last iteration — ambient-traffic replication (new-run iteration 6)
 
 Selection: the previous review passed with no blocking findings, so no

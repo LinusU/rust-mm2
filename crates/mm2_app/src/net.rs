@@ -529,6 +529,9 @@ pub fn drive_lobby(
                 roster,
                 rows,
             }) => snaps.push_traffic(generation, tick, roster, rows),
+            LobbyEvent::Message(Message::World { generation, ticks }) => {
+                snaps.push_world(generation, ticks)
+            }
             LobbyEvent::Message(Message::Cancel { generation }) => {
                 cancel(&mut lobby, &mut session, &mut control, generation)
             }

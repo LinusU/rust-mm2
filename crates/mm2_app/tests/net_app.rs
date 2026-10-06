@@ -208,6 +208,8 @@ fn bridge_app(vfs: Vfs, link: LobbyLink) -> App {
                 mm2_app::worldprops::apply_props.after(net::drive_lobby),
                 // F26-A: replicated ambient cars — production wiring.
                 mm2_app::worldtraffic::apply_traffic.after(net::drive_lobby),
+                // F26-A: the host's world clock — production wiring.
+                mm2_app::worldclock::apply_world_clock.after(net::drive_lobby),
                 // F25-B: `R` asks the authority under a predicted
                 // session — production wiring.
                 netdrive::send_reset_request,
@@ -273,6 +275,8 @@ fn host_app(vfs: Vfs, link: HostLink) -> App {
                 mm2_app::worldprops::publish_props.after(net::drive_host),
                 // F26-A: the ambient population — production wiring.
                 mm2_app::worldtraffic::publish_traffic.after(net::drive_host),
+                // F26-A: the world clock — production wiring.
+                mm2_app::worldclock::publish_world_clock.after(net::drive_host),
             ),
         );
     app
@@ -4933,6 +4937,179 @@ fn a_snap_race_row_re_seeks_the_scenery_clock() {
     host.ctl().broadcast(&race_snap(7, running(600))).unwrap();
     spin(&mut app, |a| seek(a).is_some());
     assert_eq!(seek(&app), Some(780));
+}
+
+/// F26-A, protocol v20 host half: the authority publishes its world
+/// clock the moment the countdown/playing clock runs and then once per
+/// `PUBLISH_EVERY_TICKS` of world time — not on every frame. A Cruise
+/// session carries no race row, so this frame is the only thing a
+/// client's scenery can align to.
+#[test]
+fn the_host_publishes_its_world_clock_at_the_cadence() {
+    use mm2_app::worldclock::{PUBLISH_EVERY_TICKS, WorldClock};
+
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let mut app = host_app(vfs, link);
+    app.insert_resource(WorldClock {
+        ticks: 7,
+        seek: None,
+    });
+    let mut peer = ready_peer(addr, "eve", fp);
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<LobbyState>()
+            .roster
+            .iter()
+            .any(|e| e.pick.is_some())
+    });
+    let generation = hosted_playing(&mut app);
+
+    // The first frame goes out at once, carrying the clock as it stands.
+    let first = until_wire(&mut peer, |m| matches!(m, Message::World { .. }));
+    assert_eq!(
+        first,
+        Message::World {
+            generation,
+            ticks: 7
+        }
+    );
+
+    // A clock a hair short of the cadence sends nothing — the next
+    // frame on the wire is the one at the cadence, not this one.
+    app.world_mut().resource_mut::<WorldClock>().ticks = 7 + PUBLISH_EVERY_TICKS - 1;
+    for _ in 0..5 {
+        app.update();
+    }
+    app.world_mut().resource_mut::<WorldClock>().ticks = 7 + PUBLISH_EVERY_TICKS;
+    app.update();
+    let second = until_wire(&mut peer, |m| matches!(m, Message::World { .. }));
+    assert_eq!(
+        second,
+        Message::World {
+            generation,
+            ticks: 7 + PUBLISH_EVERY_TICKS
+        }
+    );
+    assert_eq!(
+        app.world()
+            .resource::<netdrive::NetDriveReport>()
+            .world_sent,
+        2
+    );
+
+    // A restart starts the clock over; the host announces it at once
+    // rather than waiting a cadence past the old high-water mark.
+    app.world_mut().resource_mut::<WorldClock>().ticks = 3;
+    app.update();
+    let third = until_wire(&mut peer, |m| matches!(m, Message::World { .. }));
+    assert_eq!(
+        third,
+        Message::World {
+            generation,
+            ticks: 3
+        }
+    );
+}
+
+/// F26-A, protocol v20 client half: the host's clock frame re-seeks a
+/// Cruise client's scenery (no race row involved), stale or reordered
+/// frames and another generation's change nothing, jitter inside the
+/// tolerance is ignored, and an absurd tick is refused without
+/// poisoning the honest frames after it.
+#[test]
+fn a_world_clock_frame_re_seeks_a_cruise_clients_scenery() {
+    use mm2_app::worldclock::{MAX_SEEK_TICKS, SYNC_TOLERANCE_TICKS, WorldClock};
+
+    let install = tempfile::tempdir().unwrap();
+    let vfs = mount(install.path());
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host_config = HostConfig::new(fp);
+    host_config.host_pick = Some(VehiclePick {
+        vehicle: String::new(),
+        paint: 0,
+    });
+    let host = Host::listen_loopback(&host_config).unwrap();
+    host.set_session(net::advertise(&dev_cruise()).unwrap())
+        .unwrap();
+    let link = LobbyLink::join(
+        host.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join failed");
+    let mut app = bridge_app(vfs, link);
+    {
+        let link = app.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    until_ready(&mut app);
+    host.start(LateJoin::Open).unwrap();
+    until_started(&host);
+    until_begun(&mut app);
+    let generation = app.world().resource::<Session>().wire_generation();
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    // `bridge_app` runs no `advance_world_clock`, so a queued seek
+    // stays visible until the test consumes it, as the system would.
+    app.world_mut().insert_resource(WorldClock::default());
+    let seek = |a: &App| a.world().resource::<WorldClock>().seek;
+    let world = |a: &App| {
+        let w = a.world().resource::<netdrive::RemoteSnaps>().world();
+        (w.landed(), w.stale(), w.refused(), w.seeks())
+    };
+    let send = |ticks| {
+        host.ctl()
+            .broadcast(&Message::World { generation, ticks })
+            .unwrap()
+    };
+
+    // A late joiner at tick 0 lands on the host's clock.
+    send(5_000);
+    spin(&mut app, |a| seek(a).is_some());
+    assert_eq!(seek(&app), Some(5_000));
+    assert_eq!(world(&app), (1, 0, 0, 1));
+    *app.world_mut().resource_mut::<WorldClock>() = WorldClock {
+        ticks: 5_000,
+        seek: None,
+    };
+
+    // A reordered older frame is dropped, never applied.
+    send(4_000);
+    spin(&mut app, |a| world(a).1 == 1);
+    assert_eq!(seek(&app), None, "an older frame must not drag it back");
+
+    // Jitter inside the tolerance lands (the frame is current) but
+    // queues no seek.
+    send(5_000 + SYNC_TOLERANCE_TICKS);
+    spin(&mut app, |a| world(a).0 == 2);
+    assert_eq!(seek(&app), None);
+    assert_eq!(world(&app).3, 1, "no seek queued inside the tolerance");
+
+    // Another generation's frame is refused at apply time.
+    host.ctl()
+        .broadcast(&Message::World {
+            generation: generation + 1,
+            ticks: 9_000,
+        })
+        .unwrap();
+    spin(&mut app, |a| world(a).2 == 1);
+    assert_eq!(seek(&app), None);
+
+    // An absurd tick is refused and does not become the watermark: the
+    // honest frame after it still lands.
+    send(MAX_SEEK_TICKS + 1);
+    spin(&mut app, |a| world(a).2 == 2);
+    assert_eq!(seek(&app), None);
+    send(9_000);
+    spin(&mut app, |a| seek(a).is_some());
+    assert_eq!(seek(&app), Some(9_000));
 }
 
 /// F25-B, protocol v14 client half: a seat's `SnapEntry` progress

@@ -2535,6 +2535,30 @@ mod tests {
         }
     }
 
+    /// F26-AC04: the world clock flows host → client only — a client
+    /// that submits one is dropped, never absorbed.
+    #[test]
+    fn a_client_cannot_assert_the_world_clock() {
+        let host = sessioned_host();
+        let mut mallory = join_sessioned(&host, "mallory");
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut mallory, 1);
+        mallory
+            .send(&Message::World {
+                generation: 1,
+                ticks: 1,
+            })
+            .unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::Left {
+                id: 1,
+                cause: LeaveCause::Malformed,
+                ..
+            }) => {}
+            other => panic!("expected a Malformed Left, got {other:?}"),
+        }
+    }
+
     /// The roster stays the shared truth through a session (MP-5's
     /// leaver rule): mid-session pick changes and departures still
     /// land and rebroadcast.

@@ -328,6 +328,8 @@ fn add_lobby_client_systems(app: &mut App) {
                 crate::worldprops::apply_props.after(net::drive_lobby),
                 // F26-A: replicated ambient cars — same wiring.
                 crate::worldtraffic::apply_traffic.after(net::drive_lobby),
+                // F26-A: the host's world clock — same wiring.
+                crate::worldclock::apply_world_clock.after(net::drive_lobby),
                 // F25-B: `R` asks the authority under a
                 // predicted session — same wiring as the app.
                 crate::netdrive::send_reset_request,
@@ -815,6 +817,8 @@ fn run_headless(
                         crate::worldprops::publish_props.after(net::drive_host),
                         // F26-A: the ambient population — same wiring.
                         crate::worldtraffic::publish_traffic.after(net::drive_host),
+                        // F26-A: the world clock — same wiring.
+                        crate::worldclock::publish_world_clock.after(net::drive_host),
                     ),
                 );
         }
@@ -1175,6 +1179,19 @@ fn run_headless(
             )
         })
         .unwrap_or_default();
+    // F26-A world-clock evidence: the frames the host published and the
+    // client folded in (`seek` = those that moved its scenery). Absent
+    // while the wire carried none.
+    let world_detail = world_ecs
+        .get_resource::<crate::netdrive::NetDriveReport>()
+        .filter(|r| r.world_sent + r.world_landed + r.world_refused > 0)
+        .map(|r| {
+            format!(
+                " wclk=sent{},landed{},seek{},ref{}",
+                r.world_sent, r.world_landed, r.world_seeks, r.world_refused
+            )
+        })
+        .unwrap_or_default();
     // A lobby run parked at `Menu` at the frame cap gets the lobby's
     // own verdict, not the generic "no player" one: a refused session
     // or a lost host carries its reason in the notice, a clean
@@ -1219,13 +1236,14 @@ fn run_headless(
             &record_world(session, lobby_mode, &world),
             status,
             format!(
-                "updates={frames} ticks={ticks} driver={} diff={} phase={}{mp_detail}{}{}{}{}",
+                "updates={frames} ticks={ticks} driver={} diff={} phase={}{mp_detail}{}{}{}{}{}",
                 driver.as_str(),
                 rec_config.difficulty.as_str(),
                 session.phase().name(),
                 net_detail,
                 props_detail,
                 cars_detail,
+                world_detail,
                 why
             ),
         );
@@ -2025,7 +2043,7 @@ fn run_headless(
     );
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{props_detail}{cars_detail}{extra}",
+            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{props_detail}{cars_detail}{world_detail}{extra}",
             driver.as_str(),
             rec_config.difficulty.as_str(),
             session.phase().name(),

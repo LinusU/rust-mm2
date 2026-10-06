@@ -57,8 +57,11 @@
 /// refuses the rows instead of misattributing them (F26-A). v19:
 /// `Message::Traffic` — the authority's ambient cars as their own
 /// host→client frame, each named by a host-minted car id and a roster
-/// class index the frame's roster digest vouches for (F26-A).
-pub const PROTOCOL_VERSION: u16 = 19;
+/// class index the frame's roster digest vouches for (F26-A). v20:
+/// `Message::World` — the authority's world-clock tick, the one number
+/// the timed scenery (drawbridge leaves, boats, ferries, trains) derives
+/// from, so a Cruise client with no race row can still align (F26-A).
+pub const PROTOCOL_VERSION: u16 = 20;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -86,6 +89,7 @@ const TAG_SNAP: u8 = 0x0e;
 const TAG_RESET_REQUEST: u8 = 0x0f;
 const TAG_PROPS: u8 = 0x10;
 const TAG_TRAFFIC: u8 = 0x11;
+const TAG_WORLD: u8 = 0x12;
 
 /// Byte cap on a [`SessionAdvertisement`]'s opaque `params` field — the
 /// `mm2_app` bridge's serialized session config is a few hundred bytes,
@@ -705,6 +709,18 @@ pub enum Message {
         /// The car rows.
         rows: Vec<SnapCar>,
     },
+    /// Host → every client: the authority's world clock (v20, F26-A) —
+    /// the fixed steps its timed scenery has run since its session
+    /// entered `Countdown`. State, not an event: a lost frame
+    /// self-corrects on the next, and a receiver applies only a tick
+    /// newer than the last it applied for the generation. `generation`
+    /// gates it like [`Message::Snap`].
+    World {
+        /// The session generation this frame belongs to.
+        generation: u64,
+        /// The authority's world-clock tick at capture.
+        ticks: u64,
+    },
 }
 
 /// A wire-decode failure on a well-framed payload.
@@ -1136,6 +1152,11 @@ impl Message {
                     }
                 }
             }
+            Self::World { generation, ticks } => {
+                out.push(TAG_WORLD);
+                out.extend_from_slice(&generation.to_le_bytes());
+                out.extend_from_slice(&ticks.to_le_bytes());
+            }
         }
         Ok(out)
     }
@@ -1353,6 +1374,10 @@ impl Message {
                     rows,
                 }
             }
+            TAG_WORLD => Self::World {
+                generation: cur.u64()?,
+                ticks: cur.u64()?,
+            },
             tag => return Err(ProtoError::BadTag(tag)),
         };
         cur.finish()?;
@@ -1820,6 +1845,26 @@ mod tests {
         }
         .encode()
         .unwrap();
+        for cut in 1..bytes.len() {
+            assert!(
+                Message::decode(&bytes[..cut]).is_err(),
+                "a {cut}-byte prefix decoded"
+            );
+        }
+        let mut padded = bytes;
+        padded.push(0);
+        assert!(Message::decode(&padded).is_err());
+    }
+
+    #[test]
+    fn a_world_clock_frame_round_trips_and_refuses_truncation_and_padding() {
+        let msg = Message::World {
+            generation: 9,
+            ticks: u64::MAX,
+        };
+        let bytes = msg.encode().unwrap();
+        assert_eq!(bytes.len(), 17);
+        assert_eq!(Message::decode(&bytes).unwrap(), msg);
         for cut in 1..bytes.len() {
             assert!(
                 Message::decode(&bytes[..cut]).is_err(),

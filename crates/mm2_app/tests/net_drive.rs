@@ -820,6 +820,22 @@ fn cars_field(line: &str) -> (u64, u64, u64, u64, u64) {
     )
 }
 
+/// The `wclk=sent<n>,landed<n>,seek<n>,ref<n>` record field — the
+/// host's published world-clock frames and, on a client, the frames it
+/// folded into its scenery clock, the re-seeks those queued and the
+/// frames it refused (F26-A, v20).
+fn world_field(line: &str) -> (u64, u64, u64, u64) {
+    let cells = field(line, "wclk");
+    let cell = |prefix: &str| {
+        cells
+            .split(',')
+            .find_map(|c| c.strip_prefix(prefix))
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("no {prefix} cell in {line}"))
+    };
+    (cell("sent"), cell("landed"), cell("seek"), cell("ref"))
+}
+
 /// F26-A.6's real-process evidence: a hosted retail sf Cruise fields
 /// ambient traffic, publishes it, and a joined client — which simulates
 /// no lane follower of its own — spawns copies of the host's cars and
@@ -850,12 +866,22 @@ fn two_retail_processes_replicate_the_hosts_traffic() {
     let (_, _, _live, landed, mismatched) = cars_field(&rec);
     assert!(landed > 0, "no traffic row landed on the client: {rec}");
     assert_eq!(mismatched, 0, "the client refused the host's rows: {rec}");
+    // The Cruise client has no race row: the host's world-clock frame
+    // is what its scenery clock aligns to (v20).
+    let (_, world_landed, _, world_refused) = world_field(&rec);
+    assert!(world_landed > 0, "no world-clock frame landed: {rec}");
+    assert_eq!(world_refused, 0, "the client refused the clock: {rec}");
     assert!(client.wait().success(), "the client did not exit cleanly");
 
     host.cmd("quit");
     let host_rec = host.until("smoke=headless-physics");
     let (sent, ..) = cars_field(&host_rec);
     assert!(sent > 0, "the host published no traffic: {host_rec}");
+    let (world_sent, ..) = world_field(&host_rec);
+    assert!(
+        world_sent > 0,
+        "the host published no world clock: {host_rec}"
+    );
     // The operator's evidence: both records, as the run printed them.
     eprintln!("host   {host_rec}\nclient {rec}");
 }

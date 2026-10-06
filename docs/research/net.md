@@ -1078,6 +1078,67 @@ claim.* v19 adds `Message::Traffic { generation, tick, roster, rows }`
   client's own contact with a copy is predicted against the copy's last
   pose.
 
+## World-clock replication (protocol v20, F26-A)
+
+*Implementation choice; no original-protocol claim.* v20 adds
+`Message::World { generation, ticks }` (tag 0x12, 17 B, host → client
+only — a client that sends one is dropped `Malformed`, F26-AC04).
+`ticks` is the host's `WorldClock.ticks`: the fixed steps its timed
+scenery (drawbridge leaves in `Timed` mode, boats, ferries, Underground
+trains) has run since its session entered `Countdown`.
+
+- **Why.** The clock-audit finding was that scenery steps a per-process
+  counter. The race row already re-seeks it (`Snap.race`), but a Cruise
+  has no race row, so a Cruise client — and above all a late joiner —
+  had nothing to align to.
+- **Publish.** `worldclock::publish_world_clock`, host only, during
+  `Countdown`/`Playing`/`Results`: at once for a new session, then once
+  per `PUBLISH_EVERY_TICKS` = 120 of *world* time (about a second), and
+  at once if the clock went backwards (a restart). Because the cadence
+  is in world ticks, a pause that stops the clock also stops the frames,
+  and the cost is ~20 B/s per client regardless of update rate.
+- **Apply.** `worldclock::apply_world_clock`, client only, held through
+  `Loading` and `Paused`, dropped outside a live session. The staging
+  (`WorldStage`) keeps the newest tick *per generation* (≤4): an older or
+  equal tick is dropped counted `stale`; another generation's frame is
+  refused counted and can never mark the session's own frames stale; a
+  tick past `MAX_SEEK_TICKS` (2^21 ≈ 4.9 h at 120 Hz) is refused before
+  it can become a watermark, because a seek replays every actor from its
+  start and a corrupt tick must not ask for 2^64 steps. An accepted tick
+  goes to the existing `WorldClock::sync`, so the 6-tick tolerance and
+  the seek itself are the race-row path's.
+- **Interaction with the race row.** In a race both carry the same
+  number (`world_ticks(race)` is countdown + race clock), so they agree;
+  the clock frame also keeps running after the race completes, when the
+  row no longer yields a tick.
+- **Latency.** No round trip is measured on the link, so a client
+  applies the host's tick as of send time and trails by the one-way
+  delay: a few ticks on a LAN, inside the tolerance. A path with more
+  delay than the tolerance (6 ticks ≈ 50 ms one way) re-seeks on every
+  frame — correct to within the delay but wasted replay; RTT-aware
+  compensation is open.
+- **Proximity leaves are not covered.** They are driven by local player
+  positions, so they still run per peer (`worldclock` module doc).
+- **Evidence.** In-process (`tests/net_app.rs`): the host's cadence over
+  a real loopback socket (first frame at once, none a tick short of the
+  cadence, restart announced at once) and a joined client's re-seek,
+  stale/reordered drop, tolerance, foreign-generation and implausible-tick
+  refusals; `WorldStage` unit tests. Operator-run
+  `MM2_RETAIL=<install> cargo test -p mm2_app --test network
+  two_retail_processes_replicate_the_hosts_traffic`: a hosted retail sf
+  Cruise and a joined client, two real `mm2` processes on loopback, one
+  machine — host `wclk=sent15`, client `wclk=sent0,landed15,seek13,ref0`.
+  The many seeks are an artefact of the headless harness, whose two
+  processes free-run at unrelated update rates, so the clocks genuinely
+  diverge between frames; in a vsync-bound run the fixed clock tracks
+  wall time and the client should seek rarely. That has not been
+  observed (no windowed two-process run).
+- **Not covered.** No windowed/GPU or impaired-network measurement of
+  scenery alignment; no check that drawbridge/mover *poses* match the
+  host's after a seek beyond the `worldclock` replay-equals-live unit
+  tests; no RTT compensation; proximity leaves; sailboat/ferry/train
+  *sounds* follow the actors but are not themselves replicated.
+
 ## Data-plane budget and bounds (F25-B req 6)
 
 *Implementation choice + measured.* Payload sizes are fixed by the
@@ -1087,6 +1148,7 @@ v16 encode (4-byte length prefix excluded everywhere):
 |---|---|
 | `Input` | 21 (tag 1, generation 8, seq 8, 4 channels) |
 | `ResetRequest` | 9 (tag 1, generation 8) |
+| `World` | 17 (tag 1, generation 8, ticks 8) |
 | `Snap` header | 21 (tag 1, generation 8, tick 8, three counts, race presence 1) |
 | per `SnapEntry` | 108 (player 2, pos/rot/vel/angvel 52, epoch 1, steer 2, spin 2, compression 1, flags 1, damage 1, breaks 4, progress tail 33, rpm 2, surface tail 7) |
 | per `SnapTrailer` | 57 (owner 2, pos/rot/vel/angvel 52, spin 2, flags 1) |
