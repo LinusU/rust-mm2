@@ -23,7 +23,7 @@ use mm2_app::session::{SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
     audio, banger, breakaway, camera, car_visual, city, contracts, damage, damage_fx, dash,
     environment, hud, hudmap, input, menu, nav_overlay, navarrow, net, netdrive, oppind, opponents,
-    pause, precip, profile, progression, pvs, race, racestat, racetime, recovery, results,
+    pause, perf, precip, profile, progression, pvs, race, racestat, racetime, recovery, results,
     scripted, sequence, session, smoke, spark_fx, stuck, texel_fx, traffic, wheel_fx,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
@@ -138,6 +138,20 @@ struct Cli {
     /// Frames to run before taking the screenshot / exiting in smoke mode.
     #[arg(long)]
     frames: Option<u32>,
+
+    /// Record every frame's wall time — split into fixed-step physics,
+    /// `Update` and render/present — to this CSV when the app exits, and
+    /// print a percentile summary (diagnostic aid for stutter reports:
+    /// play the event, then read the file). Works with or without
+    /// `--frames`; meaningless headless.
+    #[arg(long, value_name = "csv", conflicts_with = "headless")]
+    perf_log: Option<PathBuf>,
+
+    /// Present without vsync (`Immediate`), so frame time reports what
+    /// the CPU and GPU cost instead of the display's refresh interval.
+    /// Pair with `--perf-log` to measure; not for playing (it tears).
+    #[arg(long, conflicts_with = "headless")]
+    no_vsync: bool,
 
     /// Start with the free camera active at `x,y,z[,yaw-deg,pitch-deg]`
     /// (screenshot/diagnostic aid).
@@ -1153,6 +1167,11 @@ fn main() {
                 primary_window: Some(Window {
                     title: "rust-mm2".into(),
                     resolution: (1280, 720).into(),
+                    present_mode: if cli.no_vsync {
+                        bevy::window::PresentMode::Immediate
+                    } else {
+                        bevy::window::PresentMode::AutoVsync
+                    },
                     ..default()
                 }),
                 ..default()
@@ -1881,6 +1900,9 @@ fn main() {
             capture_wait: 0,
         });
         app.add_systems(Update, smoke_test);
+    }
+    if let Some(path) = cli.perf_log.clone() {
+        perf::enable(&mut app, path);
     }
     let exit = app.run();
     if let AppExit::Error(code) = exit {

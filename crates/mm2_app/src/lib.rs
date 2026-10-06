@@ -35,6 +35,7 @@ pub mod object_sound;
 pub mod oppind;
 pub mod opponents;
 pub mod pause;
+pub mod perf;
 pub mod precip;
 pub mod profile;
 pub mod progression;

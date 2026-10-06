@@ -204,6 +204,36 @@ Every smoke prints `mm2-smoke commit=<sha>` then one record:
 
 Usage errors (bad flags, unloadable `--car`/`--vehicle-config`) exit 2.
 
+### Frame-time profiling
+
+A stutter report needs a number per frame, not an average. Play (or let
+`--bot` drive) the release build with `--perf-log`:
+
+```sh
+cargo run --release -- --mm2-path <dir> --city london --event blitz:2 \
+    --car vpauditt --perf-log frames.csv [--bot --frames 2400] [--no-vsync]
+```
+
+On exit it writes one CSV row per frame and prints a percentile summary.
+Each frame's wall time is split into `fixed` (the 120 Hz `FixedMain`
+loop: Avian and every fixed-step system), `update` (the rest of the main
+schedule) and `render` (the render world, GPU and present wait — vsync
+lives here), plus `fixed_steps` and Avian's summed `broad_ms`,
+`narrow_ms`, `solver_ms` and `contacts`. Read it like this:
+
+- `fixed_steps > 1` on most frames means physics is not keeping up and
+  the fixed clock is catching up; the step count then swings with frame
+  time, which is what stutter feels like.
+- A slow `narrow_ms` with a high `contacts` count points at collision
+  pairs worth removing (see `crates/mm2_app/src/layers.rs`).
+- A large `render` with small `fixed`/`update` is GPU- or render-thread-
+  bound; `--no-vsync` shows the cost without the display's refresh
+  interval hiding it.
+
+For a CPU profile of where inside those stages the time goes, macOS's
+`sample <pid> 20 1 -file out.txt` works on the stock release binary
+(Instruments is not required).
+
 ### Texture override demo
 
 ```sh
