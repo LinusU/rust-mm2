@@ -76,7 +76,7 @@ use tracing::{info, warn};
 
 use crate::profile::{ActiveProfile, ProfileRequest};
 use crate::session::{SelectedCar, SessionControl, SessionNote, TunedVehicle};
-use crate::settings::{Antialiasing, GraphicsSettings, ShadowQuality};
+use crate::settings::GraphicsSettings;
 
 /// One user intent. Keyboard, gamepad, mouse and tests all produce
 /// these — the model never reads devices.
@@ -1022,15 +1022,10 @@ impl MenuShell {
     ) {
         match action {
             Action::CycleShadows => {
-                let mut settings = data.settings;
-                settings.shadows = cycle_wrapping(&ShadowQuality::ALL, settings.shadows, forward);
-                self.set_settings(data, settings, effects);
+                self.set_settings(data, data.settings.cycled_shadows(forward), effects);
             }
             Action::CycleAntialiasing => {
-                let mut settings = data.settings;
-                settings.antialiasing =
-                    cycle_wrapping(&Antialiasing::ALL, settings.antialiasing, forward);
-                self.set_settings(data, settings, effects);
+                self.set_settings(data, data.settings.cycled_antialiasing(forward), effects);
             }
             Action::ToggleDifficulty => {
                 self.difficulty = match self.difficulty {
@@ -1862,18 +1857,6 @@ fn cycle_choice<T: PartialEq + Copy>(
     (next > 0).then(|| choices[next - 1])
 }
 
-/// Step through every value of a setting, wrapping at both ends —
-/// settings have no "all" entry the way the Records filters do.
-fn cycle_wrapping<T: PartialEq + Copy>(all: &[T], current: T, forward: bool) -> T {
-    let pos = all.iter().position(|v| *v == current).unwrap_or(0);
-    let next = if forward {
-        (pos + 1) % all.len()
-    } else {
-        (pos + all.len() - 1) % all.len()
-    };
-    all[next]
-}
-
 /// The Options screen: one cycling row per graphics setting plus a
 /// reset that disables itself, with its reason, once nothing differs
 /// from the defaults.
@@ -1887,16 +1870,8 @@ fn options_screen_rows(data: &MenuData) -> Vec<Row> {
         side: None,
     };
     vec![
-        row(
-            format!("Shadows: {}", s.shadows.label()),
-            Ok(()),
-            Action::CycleShadows,
-        ),
-        row(
-            format!("Anti-aliasing: {}", s.antialiasing.label()),
-            Ok(()),
-            Action::CycleAntialiasing,
-        ),
+        row(s.shadows_row(), Ok(()), Action::CycleShadows),
+        row(s.antialiasing_row(), Ok(()), Action::CycleAntialiasing),
         row(
             "Reset to defaults".to_string(),
             if s == GraphicsSettings::default() {
@@ -2299,6 +2274,7 @@ pub fn menu_watch(
     session: Res<Session>,
     control: Res<SessionControl>,
     active: Option<Res<ActiveProfile>>,
+    settings: Option<Res<GraphicsSettings>>,
     mut note: Option<ResMut<SessionNote>>,
     mut shell: ResMut<MenuShell>,
     mut data: ResMut<MenuData>,
@@ -2308,6 +2284,12 @@ pub fn menu_watch(
             if !shell.active {
                 shell.reopen();
                 data.bound = active.map(|a| a.profile.clone());
+                // The pause overlay edits the live settings too — the
+                // Options screen must start from them, not from the
+                // copy it last saved.
+                if let Some(settings) = settings {
+                    data.settings = *settings;
+                }
                 if let Some(note) = note.as_mut()
                     && let Some(reason) = note.failure.take()
                 {

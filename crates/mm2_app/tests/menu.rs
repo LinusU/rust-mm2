@@ -2911,3 +2911,26 @@ fn unsaved_and_unsavable_settings_still_apply() {
         shell(&app).status
     );
 }
+
+/// A change made in the pause overlay edits the live resource, so the
+/// main menu — reopened after the session quits — must show it, not the
+/// copy it last saved itself.
+#[test]
+fn the_reopened_menu_shows_settings_changed_in_game() {
+    let tmp = install();
+    let mut app = menu_app(tmp.path(), None);
+    app.update();
+    // Pretend a session ran: the shell is closed and the app is back on
+    // the Menu phase, which is when `menu_watch` reopens it.
+    app.world_mut().resource_mut::<MenuShell>().active = false;
+    app.insert_resource(GraphicsSettings {
+        shadows: ShadowQuality::Low,
+        antialiasing: Antialiasing::X2,
+    });
+    app.update();
+    assert!(shell(&app).active);
+    focus_row(&mut app, "Options");
+    press(&mut app, KeyCode::Enter);
+    let rows: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
+    assert_eq!(rows[..2], ["Shadows: Low", "Anti-aliasing: 2x MSAA"]);
+}

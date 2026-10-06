@@ -21,7 +21,7 @@ Statuses:
 | Driver select/create/delete | implemented | Profiles screen binds; New driver is a real text field; delete sits behind a confirm screen; DRV-7's last-profile refusal is a status line. |
 | Driver's Stats | tracked | Disabled root row naming this audit. Nothing persists aggregate stats to display. |
 | Race Records | implemented (first leg) | `Screen::Records`: persisted per-event finishes/best time/best place, city and race-type filters, re-launch from a record row. Open legs below. |
-| Options | implemented (partial) | `Screen::Options`, the root row: a graphics page with two rows — shadow quality (Off/Low/High) and anti-aliasing (Off/2x/4x MSAA) — each cycled with Left/Right/Enter, saved to `settings.json` in the profile store's root on every change (machine-level, whichever driver is bound) and applied by `mm2_app::settings` to the key light and every `Camera3d`. A `Reset to defaults` row disables itself with its reason once nothing differs. The defaults are the pre-settings look (DSN-69). Deferred: control and audio options (CTL-3/CTL-5), the original's other graphics rows (CTL-4: resolution, texture quality, …), and the pause overlay's own `Options` row, still disabled naming F23. |
+| Options | implemented (partial) | `Screen::Options`, the root row: a graphics page with two rows — shadow quality (Off/Low/High) and anti-aliasing (Off/2x/4x MSAA) — each cycled with Left/Right/Enter, saved to `settings.json` in the profile store's root on every change (machine-level, whichever driver is bound) and applied by `mm2_app::settings` to the key light and every `Camera3d`. A `Reset to defaults` row disables itself with its reason once nothing differs. The defaults are the pre-settings look (DSN-69). Deferred: control and audio options (CTL-3/CTL-5), the original's other graphics rows (CTL-4: resolution, texture quality, …). The pause overlay's `Options` row opens the same two rows in place (Left/Right/Enter change a value on the live settings and save it; Esc backs out to the pause rows, not the game; the reopened main menu reads the live settings). It is disabled with its reason only in an app that carries no settings. |
 
 ## Race Records open legs (DRV-5, help:Race Records)
 
@@ -50,7 +50,7 @@ Statuses:
 | Esc backs toward main menu (UI-4) | implemented | Back pops the screen stack; Esc at root exits. |
 | Keyboard/gamepad navigation | implemented | Arrows/WASD, dpad/stick, Enter/Space, X delete, edge-triggered stick. |
 | Mouse navigation (spec req 5) | implemented | Hover focuses (edge-triggered), left-click activates the hovered row, right-click backs out. Pause/results overlays intentionally have no mouse path — original overlay clickability is unaudited. |
-| In-game menu (CTL-8) | implemented | Pause overlay: Resume / Restart / Quit-to-menu. |
+| In-game menu (CTL-8) | implemented (partial) | Pause overlay: Resume / Restart / Options / Quit-to-menu. Options is the graphics page only (see the Options row above); control and audio options remain F23. |
 | Original menu art, layout and audio | open | Current shell is a functional text UI; original look is unimplemented and unverified. |
 
 ## Design classifications used here

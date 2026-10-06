@@ -1245,6 +1245,7 @@ fn main() {
     .insert_resource(hud::HudVisible(!cli.no_hud))
     .add_plugins(VehiclePlugin)
     .insert_resource(graphics)
+    .insert_resource(settings::SettingsFile(settings_path.clone()))
     .add_plugins(settings::GraphicsSettingsPlugin)
     .add_message::<ImpactEvent>()
     .add_message::<netdrive::RemoteImpact>()

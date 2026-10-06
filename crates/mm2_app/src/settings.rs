@@ -140,7 +140,45 @@ pub struct GraphicsSettings {
     pub antialiasing: Antialiasing,
 }
 
+/// Step through every value of a setting, wrapping at both ends —
+/// settings have no "all" entry the way the menu's Records filters do.
+fn cycle_wrapping<T: PartialEq + Copy>(all: &[T], current: T, forward: bool) -> T {
+    let pos = all.iter().position(|v| *v == current).unwrap_or(0);
+    let next = if forward {
+        (pos + 1) % all.len()
+    } else {
+        (pos + all.len() - 1) % all.len()
+    };
+    all[next]
+}
+
 impl GraphicsSettings {
+    /// These settings with the shadow quality stepped.
+    pub fn cycled_shadows(self, forward: bool) -> Self {
+        Self {
+            shadows: cycle_wrapping(&ShadowQuality::ALL, self.shadows, forward),
+            ..self
+        }
+    }
+
+    /// These settings with the anti-aliasing stepped.
+    pub fn cycled_antialiasing(self, forward: bool) -> Self {
+        Self {
+            antialiasing: cycle_wrapping(&Antialiasing::ALL, self.antialiasing, forward),
+            ..self
+        }
+    }
+
+    /// The shadow row's text, shared by the main menu and the pause overlay.
+    pub fn shadows_row(&self) -> String {
+        format!("Shadows: {}", self.shadows.label())
+    }
+
+    /// The anti-aliasing row's text.
+    pub fn antialiasing_row(&self) -> String {
+        format!("Anti-aliasing: {}", self.antialiasing.label())
+    }
+
     /// Read the settings file. A missing file is the first run and
     /// yields the defaults silently; an unreadable or unparseable one
     /// warns and yields the defaults too — a broken settings file must
@@ -176,6 +214,24 @@ impl GraphicsSettings {
         file.write_all(b"\n")?;
         file.sync_all()?;
         std::fs::rename(&tmp, path)
+    }
+}
+
+/// Where the running app saves its settings — `None` keeps them for
+/// this run only (an evidence run). A resource so the pause overlay can
+/// save a change the way the main menu does.
+#[derive(Resource, Clone, Debug, Default)]
+pub struct SettingsFile(pub Option<PathBuf>);
+
+impl SettingsFile {
+    /// Save `settings`. `Err` is a line for a status bar; the settings
+    /// still apply for the run.
+    pub fn save(&self, settings: &GraphicsSettings) -> Result<(), String> {
+        let Some(path) = &self.0 else { return Ok(()) };
+        settings.save(path).map_err(|e| {
+            warn!(path = %path.display(), error = %e, "graphics settings not saved");
+            format!("settings not saved: {e}")
+        })
     }
 }
 

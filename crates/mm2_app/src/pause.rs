@@ -29,9 +29,14 @@
 //!   first `Playing` frame so a `--frames`/`--screenshot` capture
 //!   (which freezes live input) can render the overlay.
 //!
-//! Deferred honestly, like the root menu does: `Options` is a visible
-//! disabled row (F23 owns it), and pause is reachable only from
-//! `Playing` — `Countdown` still takes `Esc` as quit (the lifecycle's
+//! `Options` opens the graphics page in place — the same shadow and
+//! anti-aliasing rows as the main menu, Left/Right to change, saved at
+//! once, applied to the frozen world as it is drawn. Esc there backs out
+//! to the pause rows rather than resuming. Control and audio options
+//! (F23) are still open.
+//!
+//! Deferred honestly, like the root menu does: pause is reachable only
+//! from `Playing` — `Countdown` still takes `Esc` as quit (the lifecycle's
 //! legal-transition table has no `Countdown → Paused` edge), while
 //! `Results` is owned by `crate::results` (Esc is its Continue row).
 
@@ -41,6 +46,7 @@ use mm2_game::{HudMap, Session, SessionEntity, SessionPhase};
 
 use crate::menu::{MenuCommand, MenuShell};
 use crate::session::SessionControl;
+use crate::settings::{GraphicsSettings, SettingsFile};
 
 /// What an enabled pause row does. Disabled rows carry `Err(reason)`
 /// instead — the reason renders on the row and lands on the status
@@ -54,6 +60,16 @@ enum PauseAction {
     Restart,
     /// The existing quit intent: `Unloading → Menu` (menu or exit).
     Quit,
+    /// Open the graphics page.
+    OpenOptions,
+    /// Cycle the shadow quality (Left/Right step either way).
+    CycleShadows,
+    /// Cycle the anti-aliasing.
+    CycleAntialiasing,
+    /// Put the graphics settings back to their defaults.
+    ResetGraphics,
+    /// Leave the graphics page for the pause rows.
+    CloseOptions,
 }
 
 /// One pause-menu row.
@@ -64,27 +80,51 @@ struct PauseRow {
 
 /// The pause overlay's rows — fixed and small. `has_menu` only changes
 /// the quit row's label: with a `MenuShell` running, quit lands back on
-/// the menu; without one it exits the process.
-fn pause_rows(has_menu: bool) -> Vec<PauseRow> {
+/// the menu; without one it exits the process. `options` selects the
+/// graphics page; `settings` is `None` in an app that has none (a bare
+/// test rig), which leaves the Options row disabled with its reason.
+fn pause_rows(has_menu: bool, options: bool, settings: Option<GraphicsSettings>) -> Vec<PauseRow> {
+    let row = |text: String, enabled: Result<PauseAction, String>| PauseRow { text, enabled };
+    if options {
+        let settings = settings.unwrap_or_default();
+        return vec![
+            row(settings.shadows_row(), Ok(PauseAction::CycleShadows)),
+            row(
+                settings.antialiasing_row(),
+                Ok(PauseAction::CycleAntialiasing),
+            ),
+            row(
+                "Reset to defaults".into(),
+                if settings == GraphicsSettings::default() {
+                    Err("already at the defaults".into())
+                } else {
+                    Ok(PauseAction::ResetGraphics)
+                },
+            ),
+            row("Back".into(), Ok(PauseAction::CloseOptions)),
+        ];
+    }
     vec![
-        PauseRow {
-            text: "Resume".into(),
-            enabled: Ok(PauseAction::Resume),
-        },
-        PauseRow {
-            text: "Restart".into(),
-            enabled: Ok(PauseAction::Restart),
-        },
-        PauseRow {
-            text: "Options".into(),
-            enabled: Err("not implemented yet (F23)".into()),
-        },
-        PauseRow {
-            text: if has_menu { "Quit to menu" } else { "Quit" }.into(),
-            enabled: Ok(PauseAction::Quit),
-        },
+        row("Resume".into(), Ok(PauseAction::Resume)),
+        row("Restart".into(), Ok(PauseAction::Restart)),
+        row(
+            "Options".into(),
+            if settings.is_some() {
+                Ok(PauseAction::OpenOptions)
+            } else {
+                Err("graphics settings unavailable".into())
+            },
+        ),
+        row(
+            if has_menu { "Quit to menu" } else { "Quit" }.into(),
+            Ok(PauseAction::Quit),
+        ),
     ]
 }
+
+/// Index of the `Options` row in the pause rows — where focus returns
+/// when the graphics page closes.
+const OPTIONS_ROW: usize = 2;
 
 /// The pause overlay's presentation state — focus, a status line and a
 /// redraw latch. Session flow itself stays in `Session`/`SessionControl`;
@@ -95,6 +135,8 @@ pub struct PauseMenu {
     pub focus: usize,
     /// Transient line under the rows (a disabled row's reason).
     pub status: Option<String>,
+    /// The graphics page is showing instead of the pause rows.
+    pub options: bool,
     /// Set by `pause_input` whenever the state changed; cleared by
     /// `pause_present` after redrawing.
     dirty: bool,
@@ -108,6 +150,7 @@ impl Default for PauseMenu {
         Self {
             focus: 0,
             status: None,
+            options: false,
             dirty: true,
             pad_axis: 0.0,
         }
@@ -120,6 +163,17 @@ impl Default for PauseMenu {
 #[derive(Component)]
 pub struct PauseUi;
 
+/// The optional resources `pause_input` consults — bundled so it stays
+/// under the argument lint. All are optional: a bare test rig has none
+/// of them, and the absence of settings disables the Options row.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct PauseGraphics<'w> {
+    menu_shell: Option<Res<'w, MenuShell>>,
+    hudmap: Option<Res<'w, HudMap>>,
+    settings: Option<ResMut<'w, GraphicsSettings>>,
+    file: Option<Res<'w, SettingsFile>>,
+}
+
 /// Pause-phase input. Runs only while `Paused`; every command lands on
 /// the shared intents — Resume/Esc transition straight back to
 /// `Playing` (`Paused → Playing` is unconditionally legal), Restart
@@ -131,8 +185,7 @@ pub fn pause_input(
     mut session: ResMut<Session>,
     mut control: ResMut<SessionControl>,
     mut pause: ResMut<PauseMenu>,
-    menu_shell: Option<Res<MenuShell>>,
-    hudmap: Option<Res<HudMap>>,
+    mut graphics: PauseGraphics,
 ) {
     if !matches!(session.phase(), SessionPhase::Paused) {
         return;
@@ -142,10 +195,14 @@ pub fn pause_input(
     // `Enter` would activate whichever row last held focus and a drifted
     // focus could fire Restart/Quit from a screen that looks like a
     // map. `hudmap_input` (scheduled ahead) owns the map's Q/Esc close.
-    if hudmap.is_some_and(|m| !m.is_stale(session.generation()) && m.fullscreen) {
+    if graphics
+        .hudmap
+        .as_deref()
+        .is_some_and(|m| !m.is_stale(session.generation()) && m.fullscreen)
+    {
         return;
     }
-    let rows = pause_rows(menu_shell.is_some());
+    let has_menu = graphics.menu_shell.is_some();
     let mut cmds = Vec::new();
     if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::KeyW) {
         cmds.push(MenuCommand::Up);
@@ -153,10 +210,17 @@ pub fn pause_input(
     if keys.just_pressed(KeyCode::ArrowDown) || keys.just_pressed(KeyCode::KeyS) {
         cmds.push(MenuCommand::Down);
     }
+    if keys.just_pressed(KeyCode::ArrowLeft) || keys.just_pressed(KeyCode::KeyA) {
+        cmds.push(MenuCommand::Left);
+    }
+    if keys.just_pressed(KeyCode::ArrowRight) || keys.just_pressed(KeyCode::KeyD) {
+        cmds.push(MenuCommand::Right);
+    }
     if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space) {
         cmds.push(MenuCommand::Activate);
     }
-    // Esc/Backspace while paused is Back — here, resume.
+    // Esc/Backspace while paused is Back — resume, or out of the
+    // graphics page.
     if keys.just_pressed(KeyCode::Escape) || keys.just_pressed(KeyCode::Backspace) {
         cmds.push(MenuCommand::Back);
     }
@@ -166,6 +230,12 @@ pub fn pause_input(
         }
         if pad.just_pressed(GamepadButton::DPadDown) {
             cmds.push(MenuCommand::Down);
+        }
+        if pad.just_pressed(GamepadButton::DPadLeft) {
+            cmds.push(MenuCommand::Left);
+        }
+        if pad.just_pressed(GamepadButton::DPadRight) {
+            cmds.push(MenuCommand::Right);
         }
         if pad.just_pressed(GamepadButton::South) {
             cmds.push(MenuCommand::Activate);
@@ -183,6 +253,14 @@ pub fn pause_input(
         pause.pad_axis = y;
     }
     for cmd in cmds {
+        // Rows are rebuilt per command: a change relabels them, resetting
+        // disables the reset row, and opening or closing the graphics
+        // page swaps the whole set.
+        let rows = pause_rows(
+            has_menu,
+            pause.options,
+            graphics.settings.as_deref().copied(),
+        );
         match cmd {
             MenuCommand::Up => pause.focus = pause.focus.saturating_sub(1),
             MenuCommand::Down => pause.focus = (pause.focus + 1).min(rows.len().saturating_sub(1)),
@@ -193,18 +271,38 @@ pub fn pause_input(
                         .expect("Paused → Playing is a legal transition"),
                     PauseAction::Restart => control.restart = true,
                     PauseAction::Quit => control.quit = true,
+                    PauseAction::OpenOptions => {
+                        pause.options = true;
+                        pause.focus = 0;
+                        pause.status = None;
+                    }
+                    PauseAction::CloseOptions => close_options(&mut pause),
+                    PauseAction::CycleShadows
+                    | PauseAction::CycleAntialiasing
+                    | PauseAction::ResetGraphics => adopt(*action, true, &mut graphics, &mut pause),
                 },
                 Some(Err(reason)) => pause.status = Some(reason.clone()),
                 None => {}
             },
+            // Left/Right step a graphics value either way; everywhere
+            // else they do nothing.
+            MenuCommand::Left | MenuCommand::Right => {
+                if let Some(Ok(action)) = rows.get(pause.focus).map(|r| &r.enabled) {
+                    adopt(
+                        *action,
+                        cmd == MenuCommand::Right,
+                        &mut graphics,
+                        &mut pause,
+                    );
+                }
+            }
+            MenuCommand::Back if pause.options => close_options(&mut pause),
             MenuCommand::Back => session
                 .transition(SessionPhase::Playing)
                 .expect("Paused → Playing is a legal transition"),
-            // No value rows, deletable rows, text fields or
-            // mouse-produced focus commands under pause.
-            MenuCommand::Left
-            | MenuCommand::Right
-            | MenuCommand::Delete
+            // No deletable rows, text fields or mouse-produced focus
+            // commands under pause.
+            MenuCommand::Delete
             | MenuCommand::FocusAt(_)
             | MenuCommand::FocusSide(_)
             | MenuCommand::Type(_)
@@ -212,6 +310,34 @@ pub fn pause_input(
         }
         pause.dirty = true;
     }
+}
+
+/// Leave the graphics page, focus back on the `Options` row.
+fn close_options(pause: &mut PauseMenu) {
+    pause.options = false;
+    pause.focus = OPTIONS_ROW;
+    pause.status = None;
+}
+
+/// Apply a graphics row's action to the live settings and save them.
+/// A change reaches the lights and cameras through the resource's change
+/// detection (`settings::apply_*`); a save failure is a status line, the
+/// change still stands for the run. Rows of any other kind do nothing.
+fn adopt(action: PauseAction, forward: bool, graphics: &mut PauseGraphics, pause: &mut PauseMenu) {
+    let Some(settings) = graphics.settings.as_mut() else {
+        return;
+    };
+    let next = match action {
+        PauseAction::CycleShadows => settings.cycled_shadows(forward),
+        PauseAction::CycleAntialiasing => settings.cycled_antialiasing(forward),
+        PauseAction::ResetGraphics => GraphicsSettings::default(),
+        _ => return,
+    };
+    if next == **settings {
+        return;
+    }
+    **settings = next;
+    pause.status = graphics.file.as_deref().and_then(|f| f.save(&next).err());
 }
 
 /// Keep `Time<Physics>` paused exactly while the session is `Paused`.
@@ -271,6 +397,7 @@ pub fn pause_present(
     mut pause: ResMut<PauseMenu>,
     menu_shell: Option<Res<MenuShell>>,
     hudmap: Option<Res<HudMap>>,
+    settings: Option<Res<GraphicsSettings>>,
     roots: Query<Entity, (With<PauseUi>, Without<ChildOf>)>,
 ) {
     // F22-A.1/HUD-4: Q's full-screen map *replaces* the pause overlay —
@@ -292,6 +419,7 @@ pub fn pause_present(
         // The next pause starts at the top row with a clean status.
         pause.focus = 0;
         pause.status = None;
+        pause.options = false;
         return;
     }
     if !pause.dirty && !roots.is_empty() {
@@ -303,9 +431,21 @@ pub fn pause_present(
     }
 
     let mut lines: Vec<(String, f32, Color)> = Vec::new();
-    lines.push(("Paused".to_string(), 34.0, Color::srgb(0.95, 0.9, 0.6)));
+    let title = if pause.options {
+        "Graphics options"
+    } else {
+        "Paused"
+    };
+    lines.push((title.to_string(), 34.0, Color::srgb(0.95, 0.9, 0.6)));
     lines.push((String::new(), 8.0, Color::NONE));
-    for (i, row) in pause_rows(menu_shell.is_some()).iter().enumerate() {
+    for (i, row) in pause_rows(
+        menu_shell.is_some(),
+        pause.options,
+        settings.as_deref().copied(),
+    )
+    .iter()
+    .enumerate()
+    {
         let (text, color) = match &row.enabled {
             Ok(_) => (
                 if i == pause.focus {
@@ -333,7 +473,12 @@ pub fn pause_present(
         lines.push((status.clone(), 18.0, Color::srgb(1.0, 0.75, 0.35)));
     }
     lines.push((
-        "Up/Down move | Enter select | Esc resume".to_string(),
+        if pause.options {
+            "Up/Down move | Left/Right change | Esc back"
+        } else {
+            "Up/Down move | Enter select | Esc resume"
+        }
+        .to_string(),
         14.0,
         Color::srgb(0.5, 0.5, 0.55),
     ));

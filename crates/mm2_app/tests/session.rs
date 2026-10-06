@@ -17,6 +17,9 @@ use mm2_app::results::{self, ResultsMenu};
 use mm2_app::session::{
     self, ErrorText, Hud, SelectedCar, SessionControl, SessionNote, SpawnPoint, TunedVehicle,
 };
+use mm2_app::settings::{
+    Antialiasing, GraphicsSettings, SettingsFile, ShadowQuality, settings_path,
+};
 use mm2_assets::Vfs;
 use mm2_formats::hudmap::HudMapSpec;
 use mm2_game::{
@@ -321,7 +324,8 @@ fn pause_menu_rows_drive_the_session() {
         "Resume should land back in Playing"
     );
 
-    // The disabled Options row explains itself and goes nowhere.
+    // Without graphics settings (this rig has none) the Options row is
+    // disabled: it explains itself and goes nowhere.
     press_key(&mut app, KeyCode::Escape);
     press_key(&mut app, KeyCode::ArrowDown);
     press_key(&mut app, KeyCode::ArrowDown);
@@ -336,7 +340,7 @@ fn pause_menu_rows_drive_the_session() {
             .status
             .as_deref()
             .unwrap_or("")
-            .contains("F23"),
+            .contains("graphics settings unavailable"),
         "the disabled reason lands on the status line"
     );
 
@@ -1765,4 +1769,107 @@ fn a_dev_world_mounts_the_authored_surface_tables() {
             .is_none(),
         "a half pair is a broken table, not an absent one — never substituted"
     );
+}
+
+/// The pause overlay's Options row opens the graphics page: Left/Right
+/// and Enter change a value on the live settings and save the file at
+/// once, Esc backs out to the pause rows (not to the game), and Reset
+/// restores the defaults.
+#[test]
+fn pause_options_change_save_and_back_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = settings_path(dir.path());
+    let mut app = dev_app();
+    app.insert_resource(GraphicsSettings::default())
+        .insert_resource(SettingsFile(Some(path.clone())));
+    app.update();
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+
+    press_key(&mut app, KeyCode::Escape);
+    press_key(&mut app, KeyCode::ArrowDown);
+    press_key(&mut app, KeyCode::ArrowDown);
+    press_key(&mut app, KeyCode::Enter);
+    assert!(phase_is(&mut app, SessionPhase::Paused));
+    assert!(
+        app.world().resource::<PauseMenu>().options,
+        "the page opens"
+    );
+
+    // High -> Off wraps; the resource and the file follow at once.
+    press_key(&mut app, KeyCode::ArrowRight);
+    let live = *app.world().resource::<GraphicsSettings>();
+    assert_eq!(live.shadows, ShadowQuality::Off);
+    assert_eq!(GraphicsSettings::load(&path), live);
+    // Left steps the other way: Off -> High.
+    press_key(&mut app, KeyCode::ArrowLeft);
+    assert_eq!(
+        app.world().resource::<GraphicsSettings>().shadows,
+        ShadowQuality::High
+    );
+
+    // Enter on the anti-aliasing row cycles forward (4x -> Off).
+    press_key(&mut app, KeyCode::ArrowDown);
+    press_key(&mut app, KeyCode::Enter);
+    let live = *app.world().resource::<GraphicsSettings>();
+    assert_eq!(live.antialiasing, Antialiasing::Off);
+    assert_eq!(GraphicsSettings::load(&path), live);
+
+    // Reset restores both and disables itself.
+    press_key(&mut app, KeyCode::ArrowDown);
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(
+        *app.world().resource::<GraphicsSettings>(),
+        GraphicsSettings::default()
+    );
+    assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.world().resource::<PauseMenu>().status.as_deref(),
+        Some("already at the defaults")
+    );
+
+    // Esc leaves the page, not the pause: the game stays frozen with
+    // Options focused; a second Esc resumes.
+    press_key(&mut app, KeyCode::Escape);
+    assert!(phase_is(&mut app, SessionPhase::Paused));
+    {
+        let pause = app.world().resource::<PauseMenu>();
+        assert!(!pause.options);
+        assert_eq!(pause.focus, 2, "focus returns to the Options row");
+    }
+    press_key(&mut app, KeyCode::Escape);
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+}
+
+/// The graphics page's own Back row returns to the pause rows, and a
+/// pause that was left on the page opens on the pause rows next time.
+#[test]
+fn pause_options_back_row_and_a_fresh_pause_start_at_the_top() {
+    let mut app = dev_app();
+    app.insert_resource(GraphicsSettings::default());
+    app.update();
+
+    press_key(&mut app, KeyCode::Escape);
+    press_key(&mut app, KeyCode::ArrowDown);
+    press_key(&mut app, KeyCode::ArrowDown);
+    press_key(&mut app, KeyCode::Enter);
+    assert!(app.world().resource::<PauseMenu>().options);
+    for _ in 0..3 {
+        press_key(&mut app, KeyCode::ArrowDown);
+    }
+    press_key(&mut app, KeyCode::Enter);
+    assert!(!app.world().resource::<PauseMenu>().options);
+    assert!(phase_is(&mut app, SessionPhase::Paused));
+
+    // Back into the page, then resume with Esc twice; the next pause
+    // must show the pause rows at the top, not a stale page.
+    press_key(&mut app, KeyCode::Enter);
+    assert!(app.world().resource::<PauseMenu>().options);
+    press_key(&mut app, KeyCode::Escape);
+    press_key(&mut app, KeyCode::Escape);
+    assert!(phase_is(&mut app, SessionPhase::Playing));
+    press_key(&mut app, KeyCode::Escape);
+    let pause = app.world().resource::<PauseMenu>();
+    assert!(!pause.options);
+    assert_eq!(pause.focus, 0);
 }
