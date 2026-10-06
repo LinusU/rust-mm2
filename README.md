@@ -147,6 +147,12 @@ enters countdown on the event's start grid, checkpoint/finish markers are
 placed from the authored waypoint rows, and crossing them advances shared
 race progress. Crash Course events are parsed but not yet playable.
 
+`--cnr ffa|cops|robbers` (with `--cnr-gold`, `--cnr-limit`) plays the
+Cops & Robbers gold match over a city: hideout, bank and gold markers on
+the authored site pool, a delivery scoring 100. Alone it is a one-seat
+match; with `--host` the mode is advertised and closed to late joins.
+There is no in-game menu entry or HUD for it yet.
+
 Driver profiles live in the OS user-data directory (never the install):
 `--profile <id|name>` binds one, `--new-profile <name>` creates and binds
 one (`--sandbox` makes it a dev identity ineligible for progression,

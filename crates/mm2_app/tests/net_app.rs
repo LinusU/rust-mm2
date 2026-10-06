@@ -1956,6 +1956,88 @@ fn mm2_host_flag_gates_are_named_exits() {
     }
 }
 
+/// `--cnr` flag-time gates are named exits (F27-B.4c): an unknown
+/// variant/gold/limit, the option flags without `--cnr`, a mode that
+/// conflicts (`--event`, `--dev-world`, `--join`) and a city whose site
+/// pool cannot seed a round are usage errors — never an advertised
+/// session or a silent cruise.
+#[test]
+fn cnr_flag_gates_are_named_exits() {
+    let install = support::event_install();
+    let path = install.path().to_str().unwrap().to_string();
+    let base = |extra: &[&str]| {
+        let mut args = vec![
+            "--mm2-path".to_string(),
+            path.clone(),
+            "--headless".to_string(),
+        ];
+        args.extend(extra.iter().map(|s| s.to_string()));
+        args
+    };
+    for extra in [
+        // Not one of the host menu's choices.
+        vec!["--city", "testcity", "--cnr", "tag"],
+        vec!["--city", "testcity", "--cnr", "ffa", "--cnr-gold", "heavy"],
+        vec!["--city", "testcity", "--cnr", "ffa", "--cnr-limit", "7m"],
+        // Options without the mode they configure.
+        vec!["--city", "testcity", "--cnr-gold", "half"],
+        vec!["--city", "testcity", "--cnr-limit", "5m"],
+        // One session has one mode, and the dev world has no site pool.
+        vec![
+            "--cnr",
+            "ffa",
+            "--event",
+            "checkpoint:0",
+            "--city",
+            "testcity",
+        ],
+        vec!["--cnr", "ffa", "--dev-world"],
+        vec!["--cnr", "ffa", "--join", "127.0.0.1:1"],
+        // The hosted gate: the fixture city authors no site pool.
+        vec!["--city", "testcity", "--cnr", "cops", "--host"],
+    ] {
+        let proc = Proc::spawn(MM2_EXE, &base(&extra));
+        assert_eq!(
+            proc.wait().code(),
+            Some(2),
+            "{extra:?} must be a usage error"
+        );
+    }
+}
+
+/// The offer reaches the wire: against the retail install (skipped
+/// without `MM2_RETAIL`), `mm2 --host --cnr cops` advertises the mode —
+/// the `listening=` record's session summary names it. The lobby is
+/// then abandoned (killed): starting needs a ready client, and the
+/// two-process match is a separate, still-open leg.
+#[test]
+fn mm2_host_cnr_advertises_the_mode() {
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let mut host = Proc::spawn(
+        MM2_EXE,
+        &[
+            "--mm2-path".to_string(),
+            retail.to_str().unwrap().to_string(),
+            "--host".to_string(),
+            "--city".to_string(),
+            "sf".to_string(),
+            "--cnr".to_string(),
+            "cops".to_string(),
+            "--cnr-limit".to_string(),
+            "250pts".to_string(),
+            "--headless".to_string(),
+            "--frames".to_string(),
+            "100000".to_string(),
+        ],
+    );
+    let rec = host.until("listening=");
+    host.kill();
+    assert!(rec.contains("cops & robbers, "), "{rec}");
+}
+
 // ─── F25-A: the session data plane ─────────────────────────────────
 //
 // Inputs up, host-side remote simulation, snapshots down — over the

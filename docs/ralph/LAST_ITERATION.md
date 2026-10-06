@@ -1,3 +1,51 @@
+# Last iteration — F27-B.4c (CLI leg): offer Cops & Robbers from the command line (new-run iteration 18)
+
+Selection: the previous review passed with no blocking findings. Its
+gaps (fmt/clippy absent from `verify.log`; client markers and re-seat
+only synthetic) are verification-log / two-process matters I cannot
+repair from here; the match now starts and seats, so the next ready leg
+is making it *reachable*. B.4c (menu, HUD, commentary, rematch) is
+broad; the command-line offer is its smallest honest leg (the in-game
+menu stays queued).
+
+Change:
+- `mm2_game::cnr_options`: `CnrVariant::parse`, `GoldMass::parse`,
+  `MatchLimit::parse` (only the host menu's stock values),
+  `CnrSettings::parse(variant, gold, limit)` with errors naming what
+  would parse. Spellings are ours (implementation choice).
+- `mm2 --cnr ffa|cops|robbers [--cnr-gold ..] [--cnr-limit ..]`: sets
+  `SessionMode::CopsAndRobbers`; conflicts with `--event`, `--dev-world`,
+  `--join`; the option flags require `--cnr`. With `--host` the config
+  is `validate`d and `net::check_session`-gated at flag time (a city
+  that cannot seed a round exits 2 instead of advertising).
+- `mm2-host` deliberately *not* extended: it runs no simulation, so it
+  could advertise a match nobody runs.
+- Docs: README, ledger CNR-12, PLAN row.
+
+Tests: `mm2_game` `cnr_options` (3: every name parses and the tables are
+fully covered, off-table/malformed rejected, settings defaults + error
+text); `net_app::cnr_flag_gates_are_named_exits` (9 usage-error shapes
+incl. the site-pool gate on a synthetic city, real `mm2` processes);
+`net_app::mm2_host_cnr_advertises_the_mode` (`MM2_RETAIL`-gated: the
+`listening=` record names "cops & robbers, "; lobby then killed).
+Manual: `mm2 --mm2-path <retail> --city sf --cnr cops --cnr-gold half
+--cnr-limit 250pts --headless --frames 120` → "cops & robbers match
+built markers=3", smoke status=pass (production `load_session_world`).
+
+Evidence: `cargo fmt --all -- --check` exit 0; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` exit 0 (one
+`question_mark` lint fixed on the way); `cargo test --locked --workspace`
+exit 0 (2108 passed, 0 failed; was 2103). The two new `net_app` tests
+also run with `MM2_RETAIL=/Users/linus/coding/rust-mm2/retail` (the
+retail leg ran, not skipped). No GPU, audio or two-process started
+match. No test processes left.
+
+Not verified / open: no in-game menu entry or HUD; no two-process
+started match; client carrier-mass prediction; rematch; F27-AC01..06
+open. Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F27-B.4b (client): markers follow the replica, leavers are re-seated (new-run iteration 17)
 
 Selection: the previous review passed with no blocking findings. Two of

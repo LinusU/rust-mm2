@@ -207,3 +207,157 @@ impl CnrSettings {
         }
     }
 }
+
+/// The names a command line (or any text surface) uses for the host's
+/// Cops & Robbers choices. *Implementation choice*: the original picks
+/// these from menus, so the spellings are ours; the choices they select
+/// are the stock tables above and nothing outside them parses.
+impl CnrVariant {
+    /// The accepted spellings, for error messages.
+    pub const NAMES: &'static str = "ffa|cops|robbers";
+
+    /// The variant a command-line name selects: `ffa` (free for all),
+    /// `cops` (Cops vs. Robbers) or `robbers` (Robbers vs. Robbers).
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "ffa" => Some(CnrVariant::FreeForAll),
+            "cops" => Some(CnrVariant::CopsVsRobbers),
+            "robbers" => Some(CnrVariant::RobbersVsRobbers),
+            _ => None,
+        }
+    }
+}
+
+impl GoldMass {
+    /// The accepted spellings, for error messages.
+    pub const NAMES: &'static str = "weightless|quarter|half";
+
+    /// The option a command-line name selects (`quarter` is the Quarter
+    /// Ton choice, `half` the Half Ton one).
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "weightless" => Some(GoldMass::Weightless),
+            "quarter" => Some(GoldMass::QuarterTon),
+            "half" => Some(GoldMass::HalfTon),
+            _ => None,
+        }
+    }
+}
+
+impl MatchLimit {
+    /// The accepted spellings, for error messages.
+    pub const NAMES: &'static str =
+        "none|<minutes>m|<points>pts (stock: 5m 10m 20m 30m, 100pts 250pts 500pts 1000pts)";
+
+    /// The limit a command-line name selects: `none`, `<n>m` for a time
+    /// limit or `<n>pts` for a point limit. Only the values the host
+    /// menu offers ([`MatchLimit::is_stock`]) parse — a limit outside
+    /// the tables is a typo here, not a custom match.
+    pub fn parse(name: &str) -> Option<Self> {
+        let name = name.to_ascii_lowercase();
+        let limit = if name == "none" {
+            MatchLimit::None
+        } else if let Some(m) = name.strip_suffix("pts") {
+            MatchLimit::Points(m.parse().ok()?)
+        } else {
+            MatchLimit::Minutes(name.strip_suffix('m')?.parse().ok()?)
+        };
+        limit.is_stock().then_some(limit)
+    }
+}
+
+impl CnrSettings {
+    /// Settings from the three command-line choices. An absent gold or
+    /// limit keeps the executable's default ([`CnrSettings::default`]);
+    /// an unrecognised one is an error naming what would have parsed.
+    pub fn parse(variant: &str, gold: Option<&str>, limit: Option<&str>) -> Result<Self, String> {
+        let mut settings = CnrSettings {
+            variant: CnrVariant::parse(variant).ok_or_else(|| {
+                format!(
+                    "unknown variant {variant:?}: expected {}",
+                    CnrVariant::NAMES
+                )
+            })?,
+            ..CnrSettings::default()
+        };
+        if let Some(g) = gold {
+            settings.gold_mass = GoldMass::parse(g)
+                .ok_or_else(|| format!("unknown gold mass {g:?}: expected {}", GoldMass::NAMES))?;
+        }
+        if let Some(l) = limit {
+            settings.limit = MatchLimit::parse(l).ok_or_else(|| {
+                format!("unknown match limit {l:?}: expected {}", MatchLimit::NAMES)
+            })?;
+        }
+        Ok(settings)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_variant_mass_and_stock_limit_has_a_name_that_parses() {
+        for (name, v) in [
+            ("ffa", CnrVariant::FreeForAll),
+            ("COPS", CnrVariant::CopsVsRobbers),
+            ("robbers", CnrVariant::RobbersVsRobbers),
+        ] {
+            assert_eq!(CnrVariant::parse(name), Some(v));
+        }
+        assert_eq!(CnrVariant::ALL.len(), 3, "a new variant needs a name");
+        for (name, m) in [
+            ("weightless", GoldMass::Weightless),
+            ("quarter", GoldMass::QuarterTon),
+            ("half", GoldMass::HalfTon),
+        ] {
+            assert_eq!(GoldMass::parse(name), Some(m));
+        }
+        assert_eq!(GoldMass::ALL.len(), 3, "a new mass needs a name");
+        assert_eq!(MatchLimit::parse("none"), Some(MatchLimit::None));
+        for m in TIME_LIMIT_MINUTES {
+            assert_eq!(
+                MatchLimit::parse(&format!("{m}m")),
+                Some(MatchLimit::Minutes(m))
+            );
+        }
+        for p in POINT_LIMITS {
+            assert_eq!(
+                MatchLimit::parse(&format!("{p}pts")),
+                Some(MatchLimit::Points(p))
+            );
+        }
+        assert_eq!(MatchLimit::choices().len(), 9, "a new limit needs a name");
+    }
+
+    #[test]
+    fn off_table_or_malformed_names_do_not_parse() {
+        for bad in [
+            "", "7m", "0m", "99pts", "m", "pts", "-5m", "5", "5min", "1e2pts", " 5m",
+        ] {
+            assert_eq!(MatchLimit::parse(bad), None, "{bad:?}");
+        }
+        assert_eq!(CnrVariant::parse("teams"), None);
+        assert_eq!(CnrVariant::parse(""), None);
+        assert_eq!(GoldMass::parse("ton"), None);
+    }
+
+    #[test]
+    fn settings_default_what_is_not_named_and_name_what_is_wrong() {
+        assert_eq!(
+            CnrSettings::parse("ffa", None, None).unwrap(),
+            CnrSettings::default()
+        );
+        let s = CnrSettings::parse("cops", Some("half"), Some("250pts")).unwrap();
+        assert_eq!(s.variant, CnrVariant::CopsVsRobbers);
+        assert_eq!(s.gold_mass, GoldMass::HalfTon);
+        assert_eq!(s.limit, MatchLimit::Points(250));
+        let e = CnrSettings::parse("tag", None, None).unwrap_err();
+        assert!(e.contains("tag") && e.contains(CnrVariant::NAMES), "{e}");
+        let e = CnrSettings::parse("ffa", Some("heavy"), None).unwrap_err();
+        assert!(e.contains("heavy") && e.contains("quarter"), "{e}");
+        let e = CnrSettings::parse("ffa", None, Some("7m")).unwrap_err();
+        assert!(e.contains("7m") && e.contains("10m"), "{e}");
+    }
+}

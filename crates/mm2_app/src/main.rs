@@ -69,6 +69,28 @@ struct Cli {
     #[arg(long, value_name = "table:row")]
     event: Option<String>,
 
+    /// Play Cops & Robbers in the city (F27): `ffa` (every player
+    /// scores alone), `cops` (Cops vs. Robbers) or `robbers` (Robbers
+    /// vs. Robbers). Alone it is a one-seat match; with `--host` it is
+    /// the session the lobby advertises and starts (closed to late
+    /// joins). A city whose authored site pool cannot seed a round is a
+    /// load failure.
+    #[arg(
+        long,
+        value_name = "ffa|cops|robbers",
+        conflicts_with_all = ["event", "dev_world", "join"]
+    )]
+    cnr: Option<String>,
+
+    /// Gold mass for `--cnr`: `weightless` (default), `quarter` or `half`.
+    #[arg(long, value_name = "weightless|quarter|half", requires = "cnr")]
+    cnr_gold: Option<String>,
+
+    /// Match limit for `--cnr`: `none` (default), a time limit
+    /// `5m|10m|20m|30m` or a point limit `100pts|250pts|500pts|1000pts`.
+    #[arg(long, value_name = "none|<n>m|<n>pts", requires = "cnr")]
+    cnr_limit: Option<String>,
+
     /// Drive the Professional parameter block instead of Amateur.
     #[arg(long)]
     pro: bool,
@@ -592,6 +614,20 @@ fn main() {
         }
     });
 
+    // `--cnr` names the Cops & Robbers session mode; a name that is not
+    // one of the host menu's choices is a usage error.
+    let cnr_settings = cli.cnr.as_deref().map(|variant| {
+        mm2_game::cnr_options::CnrSettings::parse(
+            variant,
+            cli.cnr_gold.as_deref(),
+            cli.cnr_limit.as_deref(),
+        )
+        .unwrap_or_else(|e| {
+            error!("invalid --cnr: {e}");
+            std::process::exit(2);
+        })
+    });
+
     // World mode. A specifically requested `--city` always means City —
     // even without an install (a mod may provide it, and a VFS miss is a
     // hard failure rather than a silent dev world). `--event` implies
@@ -852,9 +888,11 @@ fn main() {
     // in `dev`.
     let mut session_config = SessionConfig {
         world: mode,
-        mode: event_ref
-            .clone()
-            .map_or(mm2_game::SessionMode::Cruise, mm2_game::SessionMode::Event),
+        mode: match (&event_ref, cnr_settings) {
+            (Some(event_ref), _) => mm2_game::SessionMode::Event(event_ref.clone()),
+            (None, Some(settings)) => mm2_game::SessionMode::CopsAndRobbers(settings),
+            (None, None) => mm2_game::SessionMode::Cruise,
+        },
         // The bound profile's rank supplies the difficulty unless
         // `--pro` overrides (DRV-2/3); no profile keeps Amateur.
         difficulty,
@@ -977,6 +1015,18 @@ fn main() {
             && let Err(e) = race::event_race_setup(&vfs, event_ref, session_config.difficulty)
         {
             error!(error = %e, "--event cannot run on this install");
+            std::process::exit(2);
+        }
+        if let Err(e) = session_config.validate() {
+            error!(error = %e, "invalid session configuration");
+            std::process::exit(2);
+        }
+        if matches!(
+            &session_config.mode,
+            mm2_game::SessionMode::CopsAndRobbers(_)
+        ) && let Err(e) = net::check_session(&vfs, &session_config)
+        {
+            error!(error = %e, "--cnr cannot run on this install");
             std::process::exit(2);
         }
         let fingerprint = match mm2_content::fingerprint::gameplay(&vfs) {
