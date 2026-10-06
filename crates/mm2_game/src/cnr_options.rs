@@ -266,6 +266,84 @@ impl MatchLimit {
     }
 }
 
+/// The names a menu shows for the host's choices. *Implementation
+/// choice* for the wording of the variants and `No limit` (the
+/// original's variant strings were read as `Free-for-all`, `Cops vs.
+/// Robbers`, `Robbers vs. Robbers` in the research notes, but their
+/// string ids are not recorded); the gold-mass, time and point names
+/// are the `mmlang.dll` strings quoted on the tables above.
+impl CnrVariant {
+    /// The menu name of the variant.
+    pub fn label(self) -> &'static str {
+        match self {
+            CnrVariant::FreeForAll => "Free for all",
+            CnrVariant::CopsVsRobbers => "Cops vs. Robbers",
+            CnrVariant::RobbersVsRobbers => "Robbers vs. Robbers",
+        }
+    }
+}
+
+impl GoldMass {
+    /// The menu name of the option (`mmlang.dll` 0x14c-0x14e).
+    pub fn label(self) -> &'static str {
+        match self {
+            GoldMass::Weightless => "Weightless",
+            GoldMass::QuarterTon => "Quarter Ton",
+            GoldMass::HalfTon => "Half Ton",
+        }
+    }
+}
+
+impl MatchLimit {
+    /// The menu name of the limit: `No limit`, `10 minutes`, `250 pts`.
+    pub fn label(self) -> String {
+        match self {
+            MatchLimit::None => "No limit".to_string(),
+            MatchLimit::Minutes(m) => format!("{m} minutes"),
+            MatchLimit::Points(p) => format!("{p} pts"),
+        }
+    }
+}
+
+/// The next (or previous) entry of `all` after `current`, wrapping — a
+/// menu's cycle row. An unlisted `current` lands on the first entry.
+fn cycle<T: Copy + PartialEq>(all: &[T], current: T, forward: bool) -> T {
+    let n = all.len();
+    let at = all.iter().position(|c| *c == current);
+    match at {
+        Some(i) if forward => all[(i + 1) % n],
+        Some(i) => all[(i + n - 1) % n],
+        None => all[0],
+    }
+}
+
+impl CnrSettings {
+    /// These settings with the variant stepped through
+    /// [`CnrVariant::ALL`], wrapping — what a menu cycle row selects.
+    pub fn cycled_variant(self, forward: bool) -> Self {
+        Self {
+            variant: cycle(&CnrVariant::ALL, self.variant, forward),
+            ..self
+        }
+    }
+
+    /// The gold-mass option stepped through [`GoldMass::ALL`], wrapping.
+    pub fn cycled_gold(self, forward: bool) -> Self {
+        Self {
+            gold_mass: cycle(&GoldMass::ALL, self.gold_mass, forward),
+            ..self
+        }
+    }
+
+    /// The limit stepped through [`MatchLimit::choices`], wrapping.
+    pub fn cycled_limit(self, forward: bool) -> Self {
+        Self {
+            limit: cycle(&MatchLimit::choices(), self.limit, forward),
+            ..self
+        }
+    }
+}
+
 impl CnrSettings {
     /// Settings from the three command-line choices. An absent gold or
     /// limit keeps the executable's default ([`CnrSettings::default`]);
@@ -359,5 +437,36 @@ mod tests {
         assert!(e.contains("heavy") && e.contains("quarter"), "{e}");
         let e = CnrSettings::parse("ffa", None, Some("7m")).unwrap_err();
         assert!(e.contains("7m") && e.contains("10m"), "{e}");
+    }
+
+    #[test]
+    fn menu_cycles_wrap_through_every_choice_and_have_labels() {
+        let mut s = CnrSettings::default();
+        let mut seen = vec![s.variant];
+        for _ in 0..CnrVariant::ALL.len() {
+            s = s.cycled_variant(true);
+            seen.push(s.variant);
+        }
+        assert_eq!(seen.first(), seen.last(), "forward cycle wraps");
+        assert_eq!(seen[1], CnrVariant::CopsVsRobbers);
+        assert_eq!(
+            s.cycled_variant(false).variant,
+            CnrVariant::RobbersVsRobbers,
+            "back from the first wraps to the last"
+        );
+        let mut s = CnrSettings::default();
+        for _ in 0..MatchLimit::choices().len() {
+            s = s.cycled_limit(true);
+        }
+        assert_eq!(s.limit, MatchLimit::None);
+        assert_eq!(s.cycled_limit(true).limit, MatchLimit::Minutes(5));
+        assert_eq!(s.cycled_gold(false).gold_mass, GoldMass::HalfTon);
+        let labels: Vec<String> = MatchLimit::choices().iter().map(|l| l.label()).collect();
+        assert_eq!(labels[0], "No limit");
+        assert_eq!(labels[2], "10 minutes");
+        assert_eq!(labels[5], "100 pts");
+        assert_eq!(labels[7], "500 pts");
+        assert_eq!(GoldMass::QuarterTon.label(), "Quarter Ton");
+        assert_eq!(CnrVariant::CopsVsRobbers.label(), "Cops vs. Robbers");
     }
 }

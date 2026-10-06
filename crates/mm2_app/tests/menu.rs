@@ -2934,3 +2934,100 @@ fn the_reopened_menu_shows_settings_changed_in_game() {
     let rows: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
     assert_eq!(rows[..2], ["Shadows: Low", "Anti-aliasing: 2x MSAA"]);
 }
+
+/// F27-B.4c: Cops & Robbers is offered from the menu. A city without a
+/// site pool is listed with the network gate's reason (never a button
+/// that would fail at launch); a city with one opens the host's three
+/// choices, which cycle in place and ride the launched session's mode.
+#[test]
+fn the_menu_offers_cops_and_robbers_where_the_city_can_seed_a_round() {
+    use mm2_game::cnr_options::{CnrSettings, GoldMass, MatchLimit};
+    use mm2_game::gold::CnrVariant;
+
+    let tmp = install();
+    let mut app = menu_app(tmp.path(), None);
+    app.update();
+
+    // No multicopwaypoints.csv: the city row is disabled and names why.
+    activate_row(&mut app, "Cops & Robbers");
+    let row = &shell(&app).rows[0];
+    assert_eq!(row.text, "testcity");
+    let reason = row.enabled.as_ref().unwrap_err();
+    assert!(reason.contains("testcity"), "{reason}");
+    activate_row(&mut app, "testcity");
+    assert!(
+        shell(&app).status.is_some(),
+        "activating a disabled row says why"
+    );
+    assert_eq!(phase(&app), SessionPhase::Menu);
+    press(&mut app, KeyCode::Escape);
+
+    // Three authored sites make the city playable.
+    let body: String = (0..3)
+        .map(|i| format!("{},0,140,0,15,0,0,0,\n", 60.0 + 20.0 * i as f32))
+        .collect();
+    write(
+        tmp.path(),
+        "race/testcity/multicopwaypoints.csv",
+        format!("{WAYPOINTS}{body}"),
+    );
+    let mut app = menu_app(tmp.path(), None);
+    app.update();
+    activate_row(&mut app, "Cops & Robbers");
+    assert!(shell(&app).rows[0].enabled.is_ok());
+    activate_row(&mut app, "testcity");
+
+    // The executable's defaults first; each row cycles its own choice.
+    let texts =
+        |app: &App| -> Vec<String> { shell(app).rows.iter().map(|r| r.text.clone()).collect() };
+    assert_eq!(
+        texts(&app),
+        [
+            "Game: Free for all",
+            "Gold weight: Weightless",
+            "Limit: No limit",
+            "Start match"
+        ]
+    );
+    activate_row(&mut app, "Game:");
+    activate_row(&mut app, "Gold weight:");
+    activate_row(&mut app, "Gold weight:");
+    activate_row(&mut app, "Limit:");
+    activate_row(&mut app, "Limit:");
+    assert_eq!(
+        texts(&app)[..3],
+        [
+            "Game: Cops vs. Robbers",
+            "Gold weight: Half Ton",
+            "Limit: 10 minutes"
+        ]
+    );
+    // Left steps back (and wraps) like every other value row.
+    press(&mut app, KeyCode::ArrowUp);
+    press(&mut app, KeyCode::ArrowUp);
+    press(&mut app, KeyCode::ArrowLeft);
+    assert_eq!(texts(&app)[0], "Game: Free for all");
+    activate_row(&mut app, "Game:");
+
+    activate_row(&mut app, "Start match");
+    assert!(
+        run_until(&mut app, 12, |a| phase(a) == SessionPhase::Playing),
+        "the match never reached Playing: {:?}",
+        phase(&app)
+    );
+    let config = app.world().resource::<Session>().config().cloned().unwrap();
+    assert_eq!(
+        config.mode,
+        SessionMode::CopsAndRobbers(CnrSettings {
+            variant: CnrVariant::CopsVsRobbers,
+            gold_mass: GoldMass::HalfTon,
+            limit: MatchLimit::Minutes(10),
+        })
+    );
+    assert!(
+        app.world()
+            .get_resource::<mm2_app::cnr::CnrHost>()
+            .is_some(),
+        "the launched mode builds the match"
+    );
+}

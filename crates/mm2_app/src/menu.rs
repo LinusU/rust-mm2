@@ -65,6 +65,7 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use mm2_assets::Vfs;
 use mm2_content::{CityInfo, EventCatalog, VehicleCatalog, VehicleDef};
+use mm2_game::cnr_options::CnrSettings;
 use mm2_game::{
     AvailabilityTable, Densities, Difficulty, EventRef, EventTableKind, GarageTable,
     MAX_NAME_CHARS, Mm2Vfs, PlayerProfile, ProfileId, ProfileStore, ProfileSummary,
@@ -122,6 +123,16 @@ pub enum Screen {
     Root,
     /// Pick a city to cruise.
     CruiseCity,
+    /// Pick a city to play a Cops & Robbers match in.
+    CnrCity,
+    /// The host's Cops & Robbers choices for one city: variant, gold
+    /// mass and match limit, cycled in place like [`Screen::Customize`].
+    CnrOptions {
+        /// City stem.
+        city: String,
+        /// The working picks, starting from the executable's defaults.
+        settings: CnrSettings,
+    },
     /// Pick a city whose event tables to browse.
     EventCity,
     /// Pick one of a city's four authored event tables.
@@ -261,6 +272,14 @@ pub enum Action {
     ResetGraphics,
     /// Launch the session the Customize screen configures.
     LaunchCustomize,
+    /// Cycle the Cops & Robbers variant.
+    CycleCnrVariant,
+    /// Cycle the Cops & Robbers gold mass.
+    CycleCnrGold,
+    /// Cycle the Cops & Robbers match limit.
+    CycleCnrLimit,
+    /// Start the match the Cops & Robbers options screen configures.
+    LaunchCnr,
     /// Select a roster vehicle and open its paint list.
     PickVehicle {
         /// Catalog id.
@@ -432,6 +451,9 @@ pub struct MenuData {
     /// garage names as a locked car's requirement.
     rewards: BTreeMap<String, RewardTable>,
     profiles: Vec<ProfileSummary>,
+    /// Per-city answer to "can a Cops & Robbers match run here" — the
+    /// network gate's verdict (`net::check_session`), read once.
+    cnr_gate: BTreeMap<String, Result<(), String>>,
     /// The graphics settings the Options screen shows and edits —
     /// seeded from the `GraphicsSettings` resource at startup.
     settings: GraphicsSettings,
@@ -457,6 +479,7 @@ impl MenuData {
             city_info: BTreeMap::new(),
             rewards: BTreeMap::new(),
             profiles: Vec::new(),
+            cnr_gate: BTreeMap::new(),
             settings: GraphicsSettings::default(),
             settings_path: None,
         }
@@ -625,6 +648,28 @@ impl MenuData {
             .as_ref()
             .and_then(|s| s.list().ok())
             .unwrap_or_default();
+    }
+
+    /// Whether a Cops & Robbers match can run in `city`: the world must
+    /// load and the city must author enough sites to seed a round —
+    /// exactly the gate `--cnr --host` and a joining client apply, so the
+    /// menu never offers a match the session would refuse.
+    fn cnr_playable(&mut self, vfs: &Vfs, city: &str) -> Result<(), String> {
+        if let Some(known) = self.cnr_gate.get(city) {
+            return known.clone();
+        }
+        let verdict = self.city_loadable(vfs, city).and_then(|()| {
+            let probe = SessionConfig {
+                world: WorldMode::City {
+                    psdl: format!("city/{city}.psdl"),
+                },
+                mode: SessionMode::CopsAndRobbers(CnrSettings::default()),
+                ..SessionConfig::default()
+            };
+            crate::net::check_session(vfs, &probe).map_err(|e| e.to_string())
+        });
+        self.cnr_gate.insert(city.to_string(), verdict.clone());
+        verdict
     }
 
     /// Whether `city`'s world can load at all — every session mode
@@ -864,7 +909,24 @@ impl MenuShell {
             | Action::CycleLaps
             | Action::CycleOpponents
             | Action::CycleShadows
-            | Action::CycleAntialiasing) => self.adjust_with(data, &action, true, effects),
+            | Action::CycleAntialiasing
+            | Action::CycleCnrVariant
+            | Action::CycleCnrGold
+            | Action::CycleCnrLimit) => self.adjust_with(data, &action, true, effects),
+            Action::LaunchCnr => {
+                let Screen::CnrOptions { city, settings } = &self.screen else {
+                    return;
+                };
+                let (city, settings) = (city.clone(), *settings);
+                self.launch(
+                    data,
+                    vfs,
+                    SessionMode::CopsAndRobbers(settings),
+                    city,
+                    None,
+                    effects,
+                );
+            }
             Action::ResetGraphics => {
                 self.set_settings(data, GraphicsSettings::default(), effects);
                 self.status = Some("graphics settings reset to the defaults".into());
@@ -1039,6 +1101,21 @@ impl MenuShell {
                 if let Screen::Customize { conditions, .. } = &mut self.screen {
                     conditions.weather =
                         Weather::new(step4(conditions.weather.get(), forward)).unwrap();
+                }
+            }
+            Action::CycleCnrVariant => {
+                if let Screen::CnrOptions { settings, .. } = &mut self.screen {
+                    *settings = settings.cycled_variant(forward);
+                }
+            }
+            Action::CycleCnrGold => {
+                if let Screen::CnrOptions { settings, .. } = &mut self.screen {
+                    *settings = settings.cycled_gold(forward);
+                }
+            }
+            Action::CycleCnrLimit => {
+                if let Screen::CnrOptions { settings, .. } = &mut self.screen {
+                    *settings = settings.cycled_limit(forward);
                 }
             }
             Action::CycleTimeOfDay => {
@@ -1232,6 +1309,46 @@ fn rebuild(shell: &mut MenuShell, data: &mut MenuData, vfs: &Vfs) {
                 }
             })
             .collect(),
+        Screen::CnrCity => {
+            let cities = data.cities.clone();
+            cities
+                .into_iter()
+                .map(|city| Row {
+                    enabled: data.cnr_playable(vfs, &city),
+                    action: Action::Push(Screen::CnrOptions {
+                        city: city.clone(),
+                        settings: CnrSettings::default(),
+                    }),
+                    text: city,
+                    won: None,
+                    side: None,
+                })
+                .collect()
+        }
+        Screen::CnrOptions { settings, .. } => {
+            let row = |text: String, action: Action| Row {
+                text,
+                enabled: Ok(()),
+                action,
+                won: None,
+                side: None,
+            };
+            vec![
+                row(
+                    format!("Game: {}", settings.variant.label()),
+                    Action::CycleCnrVariant,
+                ),
+                row(
+                    format!("Gold weight: {}", settings.gold_mass.label()),
+                    Action::CycleCnrGold,
+                ),
+                row(
+                    format!("Limit: {}", settings.limit.label()),
+                    Action::CycleCnrLimit,
+                ),
+                row("Start match".to_string(), Action::LaunchCnr),
+            ]
+        }
         Screen::EventCity => data
             .race_cities
             .iter()
@@ -1480,6 +1597,17 @@ fn root_rows(shell: &MenuShell, data: &mut MenuData, vfs: &Vfs) -> Vec<Row> {
             side: None,
         },
         quick_race_row(data, vfs),
+        Row {
+            text: "Cops & Robbers".into(),
+            enabled: if data.cities.is_empty() {
+                Err("no city data - pass --mm2-path <install>".to_string())
+            } else {
+                Ok(())
+            },
+            action: Action::Push(Screen::CnrCity),
+            won: None,
+            side: None,
+        },
         Row {
             text: "Events".into(),
             enabled: Ok(()),
@@ -2620,6 +2748,8 @@ fn screen_title(screen: &Screen) -> String {
     match screen {
         Screen::Root => "rust-mm2".to_string(),
         Screen::CruiseCity => "Cruise - pick a city".to_string(),
+        Screen::CnrCity => "Cops & Robbers - pick a city".to_string(),
+        Screen::CnrOptions { city, .. } => format!("Cops & Robbers - {city}"),
         Screen::EventCity => "Events - pick a city".to_string(),
         Screen::EventTable { city } => format!("Events - {city}"),
         Screen::EventList { city, table } => {

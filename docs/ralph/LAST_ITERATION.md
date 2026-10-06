@@ -1,3 +1,50 @@
+# Last iteration — F27-B.4c (menu leg): offer Cops & Robbers from the main menu (new-run iteration 20)
+
+Selection: the previous review passed with no blocking findings; its gaps
+(fmt/clippy absent from `verify.log`, retail-gated test not confirmed to
+run, replica path unit-only, no two-process run) are log/two-process
+matters I cannot repair here. The match is reachable by CLI and visible
+(HUD), so the next smallest honest leg of B.4c is the in-game menu offer
+that the HUD slice deliberately waited for.
+
+Change:
+- `menu.rs`: root row `Cops & Robbers` → `Screen::CnrCity` (every city,
+  disabled with the `net::check_session` reason when its
+  `multicopwaypoints.csv` pool is short — the same gate `--cnr --host` and
+  joining clients apply; verdict cached in `MenuData`) →
+  `Screen::CnrOptions { city, settings }` (Game / Gold weight / Limit
+  cycle rows, Left/Right/Enter; `Start match` launches
+  `SessionMode::CopsAndRobbers(settings)` single-seat through the same
+  `launch` as Cruise). `menu_graphics.rs` titles/side panel updated.
+- `mm2_game::cnr_options`: `label()` for variant/gold/limit and wrapping
+  `CnrSettings::cycled_{variant,gold,limit}`. Gold/limit names are the
+  `mmlang.dll` strings; variant and `No limit` wording are ours.
+- Docs: README, `docs/research/menu.md` entry table, ledger CNR-12, PLAN.
+
+Tests: `cnr_options` unit test (wrap, labels); app-level
+`the_menu_offers_cops_and_robbers_where_the_city_can_seed_a_round`
+(disabled with reason without a pool, enabled with 3 sites, defaults,
+cycles incl. Left wrap, launch reaches `Playing` with the picked mode and
+a `CnrHost`).
+
+Evidence (recovery iteration 21): iteration 20 left this tree uncommitted
+because `cargo test --workspace` failed on its own new unit test — root
+cause: the test indexed `MatchLimit::choices()` wrongly (`labels[6]` is
+`250 pts`; the list is `None`, 4 time limits, then 100/250/500/1000
+points, so 500 is index 7). Test expectation fixed (also asserts index 5 =
+`100 pts`); production code unchanged. Results after the fix:
+`cargo fmt --all -- --check` pass; `cargo clippy --workspace --all-targets
+--all-features -- -D warnings` pass; `cargo test --workspace` exit 0,
+2118 passed / 0 failed. Note `cargo test` stops at the first failing
+crate, so the earlier run had not exercised later crates.
+
+Not verified / open: menu-hosted lobby offer (menu Multiplayer row is still
+F24), commentary, rematch, client carrier-mass prediction, two-process
+started match, any screenshot of the new screens (not captured).
+F27-AC01..06 open. Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F27-B.4c (HUD leg): the Cops & Robbers match readout (new-run iteration 19)
 
 Selection: the previous review passed with no blocking findings; its

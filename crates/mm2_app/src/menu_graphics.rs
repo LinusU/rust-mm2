@@ -410,7 +410,7 @@ pub fn menu_present(
             Screen::Garage => "SELECT VEHICLE".into(),
             Screen::Paints { .. } => "SELECT PAINT".into(),
             Screen::Profiles => "SELECT DRIVER".into(),
-            Screen::CruiseCity | Screen::EventCity => "SELECT CITY".into(),
+            Screen::CruiseCity | Screen::CnrCity | Screen::EventCity => "SELECT CITY".into(),
             _ => screen_title(&shell.screen).to_uppercase(),
         }
     };
@@ -774,6 +774,8 @@ fn draw_detail(
         if matches!(
             shell.screen,
             Screen::CruiseCity
+                | Screen::CnrCity
+                | Screen::CnrOptions { .. }
                 | Screen::EventCity
                 | Screen::EventTable { .. }
                 | Screen::EventList { .. }
