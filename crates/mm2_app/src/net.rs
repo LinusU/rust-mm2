@@ -38,7 +38,9 @@ use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 use mm2_assets::Vfs;
+use mm2_content::cnr::{CnrSettings, GoldMass, MatchLimit};
 use mm2_content::{EntryStatus, VehicleCatalog};
+use mm2_game::gold::CnrVariant;
 use mm2_game::{
     CUSTOMIZE_LAP_MAX, CheckpointRule, ConfigError, Densities, DevOverrides, Difficulty, EventRef,
     EventTableKind, Mm2Vfs, RaceCustomization, SelectorError, Session, SessionAuthority,
@@ -127,6 +129,17 @@ pub enum SessionContentError {
     /// refusing one there would reject a session that runs identically.
     #[error("customized laps {0} exceeds the picker range (max {CUSTOMIZE_LAP_MAX})")]
     Laps(u32),
+    /// A Cops & Robbers match on a city whose authored site pool
+    /// (`multicopwaypoints.csv`) cannot seed a round — missing,
+    /// unreadable or under the three sites a round draws. The same
+    /// verdict `CnrHost::from_content` gives (`GoldError::PoolTooSmall`).
+    #[error("city {city:?} has only {sites} Cops & Robbers sites (a round needs 3)")]
+    CopsAndRobbers {
+        /// The city stem the pool was looked up under.
+        city: String,
+        /// Usable sites found.
+        sites: usize,
+    },
     /// A customized `opponents` pick beyond the event's authored
     /// roster — the advertisement promises more opponents than the
     /// event's aimap can field.
@@ -158,6 +171,18 @@ pub fn check_session(vfs: &Vfs, config: &SessionConfig) -> Result<(), SessionCon
         && vfs.resolve(psdl).is_none()
     {
         return Err(SessionContentError::World(psdl.clone()));
+    }
+    if let SessionMode::CopsAndRobbers(_) = &config.mode {
+        // `validate` already required a city world; a path that is not
+        // `city/<stem>.psdl` has no stem to look a pool up under.
+        let city = match &config.world {
+            WorldMode::City { psdl } => city_stem(psdl).unwrap_or_default().to_string(),
+            WorldMode::DevWorld => String::new(),
+        };
+        let sites = mm2_content::CnrContent::load(vfs, &city).sites.len();
+        if sites < 3 {
+            return Err(SessionContentError::CopsAndRobbers { city, sites });
+        }
     }
     if let SessionMode::Event(event_ref) = &config.mode {
         let setup = race::event_race_setup(vfs, event_ref, config.difficulty)?;
@@ -1025,10 +1050,7 @@ impl HostLink {
         let mut config = config.clone();
         config.authority = SessionAuthority::Host;
         let ad = advertise(&config)?;
-        let late_join = match config.mode {
-            SessionMode::Event(_) => LateJoin::Closed,
-            SessionMode::Cruise => LateJoin::Open,
-        };
+        let late_join = late_join_policy(&config.mode);
         let host = Host::listen(
             bind,
             &HostConfig {
@@ -1432,8 +1454,35 @@ fn summarize(config: &SessionConfig) -> String {
     let mode = match &config.mode {
         SessionMode::Cruise => "cruise".to_string(),
         SessionMode::Event(r) => format!("{}:{}", r.table.stem_prefix(), r.index),
+        SessionMode::CopsAndRobbers(c) => format!("cops & robbers, {}", variant_label(c.variant)),
     };
     format!("{}, {}, {}", world, mode, config.difficulty.as_str())
+}
+
+/// Whether a session of this mode takes joins once started (MP-5): an
+/// event's roster is fixed at the start, Cruise stays open. A Cops &
+/// Robbers match is closed too — its participants and sides are drawn
+/// at the start and there is no join-time unicast of the match yet
+/// (F27-B.4 *implementation choice*; `GoldMatch` itself supports a late
+/// joiner).
+pub fn late_join_policy(mode: &SessionMode) -> LateJoin {
+    match mode {
+        SessionMode::Cruise => LateJoin::Open,
+        SessionMode::Event(_) | SessionMode::CopsAndRobbers(_) => LateJoin::Closed,
+    }
+}
+
+/// `city/<stem>.psdl` → `<stem>`.
+fn city_stem(psdl: &str) -> Option<&str> {
+    psdl.strip_prefix("city/")?.strip_suffix(".psdl")
+}
+
+fn variant_label(variant: CnrVariant) -> &'static str {
+    match variant {
+        CnrVariant::FreeForAll => "free for all",
+        CnrVariant::CopsVsRobbers => "cops vs robbers",
+        CnrVariant::RobbersVsRobbers => "robbers vs robbers",
+    }
 }
 
 /// The `params` payload layout: a session's full configuration minus
@@ -1465,6 +1514,61 @@ enum ModeParams {
         table: EventTableKind,
         index: usize,
     },
+    CopsAndRobbers {
+        variant: CnrVariantParams,
+        gold_mass: GoldMassParams,
+        limit: CnrLimitParams,
+    },
+}
+
+/// Cops & Robbers choices travel by name, not by the executable's
+/// numbering: the variant numbering is only inferred (ledger CNR-7) and a
+/// name cannot silently mean a different rule if that is ever corrected.
+/// An unknown name fails the decode.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CnrVariantParams {
+    FreeForAll,
+    CopsVsRobbers,
+    RobbersVsRobbers,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GoldMassParams {
+    Weightless,
+    QuarterTon,
+    HalfTon,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum CnrLimitParams {
+    None,
+    Minutes { minutes: u32 },
+    Points { points: u32 },
+}
+
+impl From<&CnrSettings> for ModeParams {
+    fn from(c: &CnrSettings) -> Self {
+        ModeParams::CopsAndRobbers {
+            variant: match c.variant {
+                CnrVariant::FreeForAll => CnrVariantParams::FreeForAll,
+                CnrVariant::CopsVsRobbers => CnrVariantParams::CopsVsRobbers,
+                CnrVariant::RobbersVsRobbers => CnrVariantParams::RobbersVsRobbers,
+            },
+            gold_mass: match c.gold_mass {
+                GoldMass::Weightless => GoldMassParams::Weightless,
+                GoldMass::QuarterTon => GoldMassParams::QuarterTon,
+                GoldMass::HalfTon => GoldMassParams::HalfTon,
+            },
+            limit: match c.limit {
+                MatchLimit::None => CnrLimitParams::None,
+                MatchLimit::Minutes(minutes) => CnrLimitParams::Minutes { minutes },
+                MatchLimit::Points(points) => CnrLimitParams::Points { points },
+            },
+        }
+    }
 }
 
 /// Selectors travel as raw `u8`s; [`accept`] re-bounds them through
@@ -1509,6 +1613,7 @@ impl From<&SessionConfig> for SessionParams {
                     table: r.table,
                     index: r.index,
                 },
+                SessionMode::CopsAndRobbers(c) => ModeParams::from(c),
             },
             difficulty: config.difficulty,
             conditions: ConditionsParams::from(config.conditions),
@@ -1556,6 +1661,27 @@ impl SessionParams {
                 ModeParams::Event { city, table, index } => {
                     SessionMode::Event(EventRef { city, table, index })
                 }
+                ModeParams::CopsAndRobbers {
+                    variant,
+                    gold_mass,
+                    limit,
+                } => SessionMode::CopsAndRobbers(CnrSettings {
+                    variant: match variant {
+                        CnrVariantParams::FreeForAll => CnrVariant::FreeForAll,
+                        CnrVariantParams::CopsVsRobbers => CnrVariant::CopsVsRobbers,
+                        CnrVariantParams::RobbersVsRobbers => CnrVariant::RobbersVsRobbers,
+                    },
+                    gold_mass: match gold_mass {
+                        GoldMassParams::Weightless => GoldMass::Weightless,
+                        GoldMassParams::QuarterTon => GoldMass::QuarterTon,
+                        GoldMassParams::HalfTon => GoldMass::HalfTon,
+                    },
+                    limit: match limit {
+                        CnrLimitParams::None => MatchLimit::None,
+                        CnrLimitParams::Minutes { minutes } => MatchLimit::Minutes(minutes),
+                        CnrLimitParams::Points { points } => MatchLimit::Points(points),
+                    },
+                }),
             },
             difficulty: self.difficulty,
             conditions: self.conditions.into_conditions()?,
@@ -1712,6 +1838,139 @@ mod tests {
             advertise(&config),
             Err(SessionWireError::Invalid(ConfigError::Density { .. }))
         ));
+    }
+
+    fn cnr_config(settings: CnrSettings) -> SessionConfig {
+        SessionConfig {
+            world: WorldMode::City {
+                psdl: "city/sf.psdl".to_string(),
+            },
+            mode: SessionMode::CopsAndRobbers(settings),
+            seed: 77,
+            ..SessionConfig::default()
+        }
+    }
+
+    /// Every variant × gold mass × limit choice the lobby can make
+    /// survives the wire (F27-B.4): the client rebuilds the host's exact
+    /// match settings, so a lobby choice and the rules the host enforces
+    /// cannot drift apart.
+    #[test]
+    fn every_cops_and_robbers_choice_round_trips() {
+        let mut seen = 0;
+        for variant in CnrVariant::ALL {
+            for gold_mass in GoldMass::ALL {
+                for limit in MatchLimit::choices() {
+                    let settings = CnrSettings {
+                        variant,
+                        gold_mass,
+                        limit,
+                    };
+                    let ad = advertise(&cnr_config(settings)).unwrap();
+                    assert!(ad.summary.contains("cops & robbers"), "{}", ad.summary);
+                    let back = accept(&ad).unwrap();
+                    assert_eq!(back.mode, SessionMode::CopsAndRobbers(settings));
+                    assert_eq!(back.world, cnr_config(settings).world);
+                    assert_eq!(back.seed, 77);
+                    seen += 1;
+                }
+            }
+        }
+        assert_eq!(seen, 3 * 3 * 9, "the whole option grid, none skipped");
+    }
+
+    /// The host refuses to advertise a match the world cannot host, and
+    /// a blob that smuggles one in is refused on decode.
+    #[test]
+    fn a_cops_and_robbers_match_needs_a_city_and_a_sane_limit() {
+        let mut dev = cnr_config(CnrSettings::default());
+        dev.world = WorldMode::DevWorld;
+        assert!(matches!(
+            advertise(&dev),
+            Err(SessionWireError::Invalid(
+                ConfigError::CopsAndRobbersNeedsCity
+            ))
+        ));
+        for limit in [
+            MatchLimit::Minutes(0),
+            MatchLimit::Points(0),
+            MatchLimit::Minutes(u32::MAX),
+            MatchLimit::Points(u32::MAX),
+        ] {
+            let config = cnr_config(CnrSettings {
+                limit,
+                ..CnrSettings::default()
+            });
+            assert!(
+                matches!(
+                    advertise(&config),
+                    Err(SessionWireError::Invalid(
+                        ConfigError::CopsAndRobbersLimit(l)
+                    )) if l == limit
+                ),
+                "{limit:?}"
+            );
+        }
+        // The same limit hand-written into a blob is refused by `accept`.
+        let mut params =
+            serde_json::to_value(SessionParams::from(&cnr_config(CnrSettings::default()))).unwrap();
+        params["mode"]["limit"] = json!({"kind": "points", "points": 0});
+        let ad = SessionAdvertisement {
+            summary: "x".to_string(),
+            params: serde_json::to_vec(&params).unwrap(),
+        };
+        assert!(matches!(
+            accept(&ad),
+            Err(SessionWireError::Invalid(ConfigError::CopsAndRobbersLimit(
+                MatchLimit::Points(0)
+            )))
+        ));
+    }
+
+    /// Choices travel by name: an unnamed variant, mass or limit kind
+    /// fails the decode instead of becoming some other rule.
+    #[test]
+    fn an_unnamed_cops_and_robbers_choice_does_not_decode() {
+        let base =
+            serde_json::to_value(SessionParams::from(&cnr_config(CnrSettings::default()))).unwrap();
+        for (pointer, value) in [
+            ("/mode/variant", json!("capture_the_flag")),
+            ("/mode/variant", json!(1)),
+            ("/mode/gold_mass", json!("one_ton")),
+            ("/mode/limit", json!({"kind": "laps", "laps": 3})),
+            ("/mode/limit", json!({"kind": "minutes"})),
+            ("/mode/limit", json!({"kind": "minutes", "minutes": -5})),
+        ] {
+            let mut params = base.clone();
+            *params.pointer_mut(pointer).unwrap() = value.clone();
+            let ad = SessionAdvertisement {
+                summary: "x".to_string(),
+                params: serde_json::to_vec(&params).unwrap(),
+            };
+            assert!(
+                matches!(accept(&ad), Err(SessionWireError::Params(_))),
+                "{pointer}={value} must not decode"
+            );
+        }
+    }
+
+    /// MP-5 policy: only Cruise stays open once started — a match's
+    /// participants and sides are fixed at the start.
+    #[test]
+    fn only_cruise_stays_joinable() {
+        assert_eq!(late_join_policy(&SessionMode::Cruise), LateJoin::Open);
+        assert_eq!(
+            late_join_policy(&SessionMode::CopsAndRobbers(CnrSettings::default())),
+            LateJoin::Closed
+        );
+        assert_eq!(
+            late_join_policy(&SessionMode::Event(EventRef {
+                city: "sf".into(),
+                table: EventTableKind::Blitz,
+                index: 0,
+            })),
+            LateJoin::Closed
+        );
     }
 
     #[test]

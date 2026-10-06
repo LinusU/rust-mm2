@@ -48,7 +48,7 @@ use mm2_game::{
     Difficulty, EventRef, SessionAuthority, SessionConditions, SessionConfig, SessionMode,
     TimeOfDay, Weather, WorldMode,
 };
-use mm2_net::{Host, HostConfig, LateJoin};
+use mm2_net::{Host, HostConfig};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -268,10 +268,7 @@ fn main() {
     // operation is normal. `start` takes the session mode's late-join
     // policy (MP-5): an event lobby closes to joins once started,
     // a cruise lobby stays open.
-    let start_policy = match config.mode {
-        SessionMode::Event(_) => LateJoin::Closed,
-        SessionMode::Cruise => LateJoin::Open,
-    };
+    let start_policy = mm2_app::net::late_join_policy(&config.mode);
     let quitting = Arc::new(AtomicBool::new(false));
     {
         let ctl = host.ctl();

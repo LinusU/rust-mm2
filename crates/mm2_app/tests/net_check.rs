@@ -177,3 +177,44 @@ fn check_accepts_a_retail_session() {
     };
     check(&retail, &config).unwrap();
 }
+
+/// A Cops & Robbers match is runnable exactly where the city authors a
+/// site pool a round can draw from (F27-B.4): the client-side gate and
+/// `CnrHost::from_content` give the same verdict, so a host never
+/// advertises a match nobody can start.
+#[test]
+fn check_gates_cops_and_robbers_on_the_site_pool() {
+    use mm2_game::cnr_options::CnrSettings;
+    let config = SessionConfig {
+        world: WorldMode::City {
+            psdl: "city/testcity.psdl".to_string(),
+        },
+        mode: SessionMode::CopsAndRobbers(CnrSettings::default()),
+        ..SessionConfig::default()
+    };
+    let header = "x,y,z,a,poly count,frane rate,state changes,texture changes,msg\n";
+    let pool = |rows: usize| {
+        let install = event_install();
+        let body: String = (0..rows)
+            .map(|i| support::waypoint_row(10.0 * i as f32, 5.0))
+            .collect();
+        support::write(
+            install.path(),
+            "race/testcity/multicopwaypoints.csv",
+            format!("{header}{body}"),
+        );
+        install
+    };
+    // No file at all, then too few rows: both refuse, naming the count.
+    assert!(matches!(
+        check(event_install().path(), &config),
+        Err(net::SessionContentError::CopsAndRobbers { sites: 0, .. })
+    ));
+    assert!(matches!(
+        check(pool(2).path(), &config),
+        Err(net::SessionContentError::CopsAndRobbers { sites: 2, ref city }) if city == "testcity"
+    ));
+    // Exactly the three a round draws, and a full pool, pass.
+    check(pool(3).path(), &config).unwrap();
+    check(pool(40).path(), &config).unwrap();
+}

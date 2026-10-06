@@ -18,13 +18,14 @@ use bevy::prelude::Vec3;
 use mm2_formats::racedata::{EventRow, EventTable, RaceParams};
 
 use crate::WorldMode;
+use crate::cnr_options::{CnrSettings, MAX_LIMIT_MINUTES, MAX_LIMIT_POINTS, MatchLimit};
 
 /// Top-level session configuration; `Session::begin` validates it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionConfig {
     /// Which world to load — synthetic dev world or a VFS city.
     pub world: WorldMode,
-    /// Free roam or a cataloged authored event.
+    /// Free roam, a cataloged authored event or a Cops & Robbers match.
     pub mode: SessionMode,
     /// Amateur/Professional — the driver's rank (DRV-2/DRV-3).
     pub difficulty: Difficulty,
@@ -104,6 +105,21 @@ impl SessionConfig {
         {
             return Err(ConfigError::EmptyVehicleId);
         }
+        if let SessionMode::CopsAndRobbers(settings) = &self.mode {
+            // The mode's site pool is a city's authored file; the dev
+            // world has none, so there is nothing to play over.
+            if !matches!(self.world, WorldMode::City { .. }) {
+                return Err(ConfigError::CopsAndRobbersNeedsCity);
+            }
+            let ok = match settings.limit {
+                MatchLimit::None => true,
+                MatchLimit::Minutes(m) => (1..=MAX_LIMIT_MINUTES).contains(&m),
+                MatchLimit::Points(p) => (1..=MAX_LIMIT_POINTS).contains(&p),
+            };
+            if !ok {
+                return Err(ConfigError::CopsAndRobbersLimit(settings.limit));
+            }
+        }
         Ok(())
     }
 }
@@ -126,6 +142,13 @@ pub enum ConfigError {
     /// least one lap (`RaceError::NoLaps`); the options picker starts
     /// at 1 so this only rejects a hand-built config.
     ZeroLaps,
+    /// A Cops & Robbers match on a world that is not a city — its site
+    /// pool is the city's authored `multicopwaypoints.csv`.
+    CopsAndRobbersNeedsCity,
+    /// A Cops & Robbers limit of zero or beyond the sane bound
+    /// ([`MAX_LIMIT_MINUTES`]/[`MAX_LIMIT_POINTS`]); a wire blob can
+    /// carry any `u32`, the host menu only the stock choices.
+    CopsAndRobbersLimit(MatchLimit),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -137,6 +160,15 @@ impl std::fmt::Display for ConfigError {
             Self::EmptyCityPath => write!(f, "city world has an empty logical path"),
             Self::EmptyVehicleId => write!(f, "vehicle id is empty"),
             Self::ZeroLaps => write!(f, "customized laps of zero"),
+            Self::CopsAndRobbersNeedsCity => {
+                write!(f, "Cops & Robbers needs a city world, not the dev world")
+            }
+            Self::CopsAndRobbersLimit(limit) => {
+                write!(
+                    f,
+                    "Cops & Robbers limit {limit:?} is outside the allowed range"
+                )
+            }
         }
     }
 }
@@ -153,6 +185,10 @@ pub enum SessionMode {
     /// A cataloged authored event; the F11 event catalog resolves the
     /// reference into checkpoints, opponents and rules.
     Event(EventRef),
+    /// A multiplayer Cops & Robbers match over the world city's authored
+    /// site pool (F27). Host-authoritative: the host arbitrates the gold
+    /// ([`GoldMatch`](crate::gold::GoldMatch)) and clients replicate it.
+    CopsAndRobbers(CnrSettings),
 }
 
 /// Identity of one authored event: a row in one city's `mm*data.csv`

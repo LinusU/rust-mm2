@@ -1293,6 +1293,50 @@ fn zero_laps_customization_fails_validation() {
     assert_eq!(config.validate(), Err(ConfigError::ZeroLaps));
 }
 
+/// A Cops & Robbers config validates only over a city world with a
+/// bounded limit (F27-B.4): the match's site pool is a city's authored
+/// file, and a limit of zero would end it before it starts.
+#[test]
+fn cops_and_robbers_config_validates_world_and_limit() {
+    use mm2_game::cnr_options::{CnrSettings, MAX_LIMIT_MINUTES, MAX_LIMIT_POINTS, MatchLimit};
+    let on = |world, limit| SessionConfig {
+        world,
+        mode: SessionMode::CopsAndRobbers(CnrSettings {
+            limit,
+            ..CnrSettings::default()
+        }),
+        ..SessionConfig::default()
+    };
+    let city = || WorldMode::City {
+        psdl: "city/sf.psdl".into(),
+    };
+    assert_eq!(on(city(), MatchLimit::None).validate(), Ok(()));
+    assert_eq!(on(city(), MatchLimit::Minutes(1)).validate(), Ok(()));
+    assert_eq!(
+        on(city(), MatchLimit::Minutes(MAX_LIMIT_MINUTES)).validate(),
+        Ok(())
+    );
+    assert_eq!(
+        on(city(), MatchLimit::Points(MAX_LIMIT_POINTS)).validate(),
+        Ok(())
+    );
+    assert_eq!(
+        on(WorldMode::DevWorld, MatchLimit::None).validate(),
+        Err(ConfigError::CopsAndRobbersNeedsCity)
+    );
+    for bad in [
+        MatchLimit::Minutes(0),
+        MatchLimit::Minutes(MAX_LIMIT_MINUTES + 1),
+        MatchLimit::Points(0),
+        MatchLimit::Points(MAX_LIMIT_POINTS + 1),
+    ] {
+        assert_eq!(
+            on(city(), bad).validate(),
+            Err(ConfigError::CopsAndRobbersLimit(bad))
+        );
+    }
+}
+
 /// The replication tail's encode half (protocol v14, F25-B): the
 /// cleared flags pack low-bit-first in authored order — bit *i* set =
 /// gate *i* cleared — and `apply_replicated` writes the wire word

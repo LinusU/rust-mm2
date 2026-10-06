@@ -273,7 +273,7 @@ impl Session {
     pub fn mint_result_id(&mut self, participant: PlayerId) -> ResultId {
         let event = self.config.as_ref().and_then(|c| match &c.mode {
             SessionMode::Event(e) => Some(e.clone()),
-            SessionMode::Cruise => None,
+            SessionMode::Cruise | SessionMode::CopsAndRobbers(_) => None,
         });
         let id = ResultId {
             generation: self.generation,

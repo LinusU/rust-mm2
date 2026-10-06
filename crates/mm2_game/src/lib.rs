@@ -12,6 +12,7 @@ use mm2_assets::Vfs;
 pub mod audio;
 pub mod banger;
 pub mod breakaway;
+pub mod cnr_options;
 pub mod config;
 pub mod damage;
 pub mod drawbridge;

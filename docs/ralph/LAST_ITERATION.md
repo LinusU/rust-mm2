@@ -1,3 +1,46 @@
+# Last iteration — F27-B.4a: Cops & Robbers as a session mode on the wire (new-run iteration 15)
+
+Selection: the previous review passed with no blocking findings, so no
+repair was owed. B.4 (lobby/start, HUD, rematch) is too broad for one
+change; its first ready leg is making the match a *configurable,
+advertisable session mode* — everything later (sides from the roster,
+host wiring, client replica, HUD) needs a `SessionConfig` that names it.
+
+Change:
+- `mm2_game::cnr_options` (new): `CnrSettings`, `GoldMass`, `MatchLimit`,
+  the option tables and rule constants moved verbatim out of
+  `mm2_content::cnr` (which re-exports them) so `mm2_game` can carry the
+  lobby's choices without depending on content. Plus
+  `MAX_LIMIT_MINUTES`/`MAX_LIMIT_POINTS` bounds.
+- `SessionMode::CopsAndRobbers(CnrSettings)`; `SessionConfig::validate`
+  requires a city world and a bounded limit (`ConfigError::
+  CopsAndRobbersNeedsCity`/`CopsAndRobbersLimit`). Wreck outcome =
+  free-roam recovery (designed); no `ResultId` event.
+- `mm2_app::net`: the mode rides the advertisement by name (not the
+  inferred variant numbering); unnamed choices fail the decode;
+  `check_session` refuses a city whose site pool is under 3
+  (`SessionContentError::CopsAndRobbers`); `late_join_policy` (shared
+  with `mm2-host`) closes the mode to late joins.
+- Docs: `docs/research/net.md` section, ledger CNR-12, PLAN row.
+
+Tests (all synthetic): mm2_game config validation + wreck outcome; net
+unit — 3x3x9 option grid round trip, city/limit refusals (encode and
+hand-written blob), unnamed choices rejected, join policy; `net_check` —
+site-pool gate (0, 2, 3, 40 sites).
+
+Evidence: `cargo fmt --all -- --check` PASS; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` PASS; `cargo
+test --locked --workspace` PASS (2090 passed, 0 failed; was 2084). No original-data, GPU,
+two-process run.
+
+Not verified / open: no menu or CLI offers the mode (deliberately — it
+would be a hollow button until B.4b starts a match); nothing creates a
+`CnrHost` or renders `CnrReplica`; the fresh-generation-per-match
+question for rematch stays B.4b/c; F27-AC01..06 open. Status:
+implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F27-B.3: the Cops & Robbers match on the wire (new-run iteration 14)
 
 Selection: the previous review passed with no blocking findings, so no

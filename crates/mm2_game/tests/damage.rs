@@ -282,6 +282,12 @@ fn disabled_outcome_is_per_mode() {
         disabled_outcome(&SessionMode::Cruise),
         DisabledOutcome::FreeReset
     );
+    // Cops & Robbers: designed (the original's wreck rule there is
+    // unrecovered); the gold already drops on the wreck.
+    assert_eq!(
+        disabled_outcome(&SessionMode::CopsAndRobbers(Default::default())),
+        DisabledOutcome::FreeReset
+    );
     assert_eq!(
         disabled_outcome(&ev(EventTableKind::Blitz)),
         DisabledOutcome::Breakdown

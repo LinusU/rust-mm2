@@ -1218,6 +1218,32 @@ a client's request: it measures every car's position itself
   `CnrReplica` yet (HUD and client markers are B.4).
 
 
+## Cops & Robbers session mode (F27-B.4a)
+
+The lobby's session advertisement now carries a third mode next to Cruise
+and `Event`: `SessionMode::CopsAndRobbers(CnrSettings)`. `params` holds
+`{"mode": {"kind": "cops_and_robbers", "variant": "free_for_all" |
+"cops_vs_robbers" | "robbers_vs_robbers", "gold_mass": "weightless" |
+"quarter_ton" | "half_ton", "limit": {"kind": "none"} | {"kind":
+"minutes", "minutes": n} | {"kind": "points", "points": n}}}`. Choices
+travel by *name*, not by the executable's numbering, because the variant
+numbering is only inferred (ledger CNR-7); an unnamed choice fails the
+decode instead of becoming a different rule. `accept` re-validates:
+city world only, limit in `1..=1440` minutes / `1..=1_000_000` points.
+
+Gates: `net::check_session` (the `mm2-join` gate) refuses a city whose
+`multicopwaypoints.csv` yields fewer than the 3 sites a round draws — the
+same verdict `CnrHost::from_content` gives. `net::late_join_policy` is the
+one place both the in-process host and `mm2-host` read the mode's join
+policy: Cruise stays open, events and Cops & Robbers close at start (the
+latter an implementation choice — there is no join-time unicast of the
+match yet).
+
+Evidence: synthetic only (config validation, the full 3×3×9 option grid
+round-trips, unnamed/unknown choices rejected, pool gate, join policy).
+No menu or CLI offers the mode and nothing starts a match from it; that is
+F27-B.4b.
+
 ## Data-plane budget and bounds (F25-B req 6)
 
 *Implementation choice + measured.* Payload sizes are fixed by the

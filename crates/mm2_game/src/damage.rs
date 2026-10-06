@@ -220,7 +220,10 @@ pub enum DisabledOutcome {
 /// unverified territory, so the mapping is marked designed there.
 pub fn disabled_outcome(mode: &SessionMode) -> DisabledOutcome {
     match mode {
-        SessionMode::Cruise => DisabledOutcome::FreeReset,
+        // Designed: the original's wreck rule in Cops & Robbers is
+        // unrecovered (ledger CNR-12); the gold drops on the wreck
+        // either way, so the car just gets the free-roam recovery.
+        SessionMode::Cruise | SessionMode::CopsAndRobbers(_) => DisabledOutcome::FreeReset,
         SessionMode::Event(ev) => match ev.table {
             EventTableKind::Circuit => DisabledOutcome::PenaltyReset,
             EventTableKind::Blitz | EventTableKind::Checkpoint => DisabledOutcome::Breakdown,
