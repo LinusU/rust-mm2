@@ -3828,6 +3828,24 @@ mod tests {
         nearly.set_replicated(0.999);
         assert!(nearly.total() < SPEC.max_damage);
         assert_eq!(encode_damage(Some(&nearly)), 254);
+        // The wire round trip a predicted client's breakdown derivation
+        // rides on: decode exactly as `apply_damage` does. A destroyed
+        // seat lands back on the Disabled tier; a near miss never does.
+        let decode = |byte: u8| {
+            let mut client = VehicleDamage::new(SPEC);
+            client.set_replicated(byte as f32 / 255.0);
+            client.condition()
+        };
+        let mut destroyed = VehicleDamage::new(SPEC);
+        destroyed.apply(mm2_game::ImpactId(1), SPEC.max_damage * 2.0);
+        assert_eq!(
+            decode(encode_damage(Some(&destroyed))),
+            mm2_game::DamageTier::Disabled
+        );
+        assert_ne!(
+            decode(encode_damage(Some(&nearly))),
+            mm2_game::DamageTier::Disabled
+        );
         // A degenerate spec (max <= 0) encodes 0 rather than dividing
         // by it.
         let degenerate = VehicleDamage::new(DamageSpec {
