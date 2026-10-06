@@ -140,8 +140,8 @@ use mm2_game::{
 };
 use mm2_net::{
     DriveInput, MAX_SNAP_IMPACTS, Message, RemoteInputs, SNAP_FLAG_BRAKE, SNAP_FLAG_GROUNDED,
-    SNAP_FLAG_REVERSE, SNAP_NO_SURFACE, SnapEntry, SnapImpact, SnapProp, SnapRace, SnapTrailer,
-    VehiclePick,
+    SNAP_FLAG_REVERSE, SNAP_NO_SURFACE, SiteTable, SnapEntry, SnapImpact, SnapProp, SnapRace,
+    SnapTrailer, VehiclePick,
 };
 use mm2_vehicle::{
     DriveDirection, HandlingMetrics, RemoteReplica, ResetVehicle, Teleported, Vehicle,
@@ -711,8 +711,14 @@ impl RemoteSnaps {
     }
 
     /// Queue a received world-prop frame (protocol v17, F26-A).
-    pub fn push_props(&mut self, generation: u64, tick: u64, rows: Vec<SnapProp>) {
-        self.props.push(generation, tick, rows);
+    pub fn push_props(
+        &mut self,
+        generation: u64,
+        tick: u64,
+        table: SiteTable,
+        rows: Vec<SnapProp>,
+    ) {
+        self.props.push(generation, tick, table, rows);
     }
 
     /// The world-prop inbox — counters for the record/tests.

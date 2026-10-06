@@ -2482,6 +2482,7 @@ mod tests {
             .send(&Message::Props {
                 generation: 1,
                 tick: 1,
+                table: crate::proto::SiteTable::default(),
                 rows: vec![crate::proto::SnapProp {
                     site: 0,
                     fragment: crate::proto::SNAP_NO_FRAGMENT,

@@ -1,3 +1,59 @@
+# Last iteration — world-agreement check for replicated props (new-run iteration 4)
+
+Selection: the previous review passed with no blocking findings, so no
+repair was owed. Its first verification gap — "site-ordinal agreement
+between host and client … any stamp-time difference between peers (model
+-load failure, content mismatch) would silently misattribute rows; there
+is no checksum or site-count handshake" — is the highest-value ready
+small slice of F26-A, and a silent wrong-prop pose is worse than no
+pose.
+
+Change (protocol **v18**): `Message::Props` carries `SiteTable { count,
+digest }`. `mm2_app::worldprops::SiteRegistry` records each stamped
+placement (ordinal, authored name, home position quantised to 0.25 m,
+taken from `Added<BangerSite>` before any impact can move it, scoped to
+the session generation) and hashes them in ordinal order (FNV-1a). The
+host puts its table on every frame (`PropLedger.sites`); a client keeps
+its own in `PropStage` and, on drain, compares: a disagreement drops the
+whole drain counted as `mismatched` (distinct from `unresolved`), applies
+nothing, logs one warning and sets `PropStage::divergence()`; the first
+frame whose table agrees resumes replication. All-or-nothing by design —
+with a shifted ordinal no row can be trusted. Rotation is excluded from
+the digest (trig-derived, platform-sensitive); the 0.25 m quantum is a
+design choice (Implementation choice) so cross-platform last-bit float
+noise hashes alike. Docs: `docs/research/net.md` (budget header 18→30 B),
+ledger DSN-70, PLAN F26-A slice 4.
+
+Tests: proto round-trip/bounds/truncation carry the table;
+`SiteRegistry` unit tests (order- and noise-insensitive; shifted,
+renamed, moved, missing and gapped worlds all differ; generation reset);
+`PropStage` mismatch drain; `net_app::a_client_refuses_rows_from_a_host_
+with_a_different_world` (client with two of the host's three placements
+poses nothing, then recovers under an agreeing table); the convergence
+leg now asserts `mismatched()==0`, no divergence and a 4-placement
+table; the publish-window leg asserts every frame's table equals the
+22-placement world's. Existing legs adjusted so the host stamps props at
+their homes and moves them afterwards (identity is the home pose).
+
+Gates (all exit 0): `cargo fmt --all -- --check`; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` (one targeted
+`too_many_arguments` allow on the `publish_props` Bevy system);
+`cargo test --locked --workspace` (1966 passed, 0 failed). Retail sf
+`--headless --frames 300` smoke (`/Users/linus/coding/rust-mm2/retail`):
+`status=pass`, `bng=6110d`. No test processes left running.
+
+Not verified / open: the check is exercised on synthetic stamps and the
+in-process loopback harness only — a two-process retail run where host
+and client report equal `SiteTable`s is still the next evidence step
+(retail agreement not observed, so the ordinals-agree claim on real
+worlds stays unverified); no measured impairment cell or real-GPU leg
+for `Props`; no interpolation/velocities; traffic/weather/time-of-day,
+late-join beyond the resend cycle, drawbridge/mover/sound replication
+remain open. Not F26-AC01..06 completion. Status: implemented
+candidate, not independently checked.
+
+---
+
 # Last iteration — world-prop replication repair (new-run iteration 3)
 
 **Recovery of review rejection for iteration 2 (F26-A).** Root cause

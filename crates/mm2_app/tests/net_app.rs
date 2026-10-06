@@ -7065,10 +7065,37 @@ fn playing_client(install: &std::path::Path) -> (Host, App, u64) {
     (host, app, generation)
 }
 
-fn props_frame(generation: u64, tick: u64, rows: Vec<mm2_net::SnapProp>) -> Message {
+/// The table a world of these `(name, home)` placements, stamped in
+/// order, has — what a host that stamped them would send.
+fn table_of(world: &[(&str, Vec3)]) -> mm2_net::SiteTable {
+    let mut registry = mm2_app::worldprops::SiteRegistry::default();
+    registry.begin(0);
+    for (site, (name, home)) in world.iter().enumerate() {
+        registry.note(site as u32, name, *home);
+    }
+    registry.refresh();
+    registry.table()
+}
+
+/// The client's own stamped-world table — what a host that stamped the
+/// same world would send alongside its rows.
+fn local_table(app: &App) -> mm2_net::SiteTable {
+    app.world()
+        .resource::<netdrive::RemoteSnaps>()
+        .props()
+        .local_table()
+}
+
+fn props_frame(
+    table: mm2_net::SiteTable,
+    generation: u64,
+    tick: u64,
+    rows: Vec<mm2_net::SnapProp>,
+) -> Message {
     Message::Props {
         generation,
         tick,
+        table,
         rows,
     }
 }
@@ -7124,6 +7151,7 @@ fn a_client_folds_prop_rows_into_its_stamped_world() {
     // Active: kinematic, pose from the wire.
     host.ctl()
         .broadcast(&props_frame(
+            local_table(&app),
             generation,
             5,
             vec![prop_row(
@@ -7148,6 +7176,7 @@ fn a_client_folds_prop_rows_into_its_stamped_world() {
     // Settled: a static collider at the resting pose.
     host.ctl()
         .broadcast(&props_frame(
+            local_table(&app),
             generation,
             9,
             vec![prop_row(
@@ -7178,6 +7207,7 @@ fn a_client_folds_prop_rows_into_its_stamped_world() {
         .stale();
     host.ctl()
         .broadcast(&props_frame(
+            local_table(&app),
             generation,
             6,
             vec![prop_row(
@@ -7206,6 +7236,7 @@ fn a_client_folds_prop_rows_into_its_stamped_world() {
     // spawns from its authored pieces, kinematic at the wire pose.
     host.ctl()
         .broadcast(&props_frame(
+            local_table(&app),
             generation,
             12,
             vec![prop_row(1, 1, PROP_ACTIVE, [20.0, 2.0, 1.0])],
@@ -7257,6 +7288,7 @@ fn a_client_folds_prop_rows_into_its_stamped_world() {
     // The same piece settles in place — no second spawn.
     host.ctl()
         .broadcast(&props_frame(
+            local_table(&app),
             generation,
             15,
             vec![
@@ -7282,6 +7314,7 @@ fn a_client_folds_prop_rows_into_its_stamped_world() {
     let before = unresolved(&app);
     host.ctl()
         .broadcast(&props_frame(
+            local_table(&app),
             generation,
             20,
             vec![
@@ -7304,6 +7337,7 @@ fn a_client_folds_prop_rows_into_its_stamped_world() {
     // A frame for another generation is dropped whole.
     host.ctl()
         .broadcast(&props_frame(
+            local_table(&app),
             generation + 1,
             21,
             vec![prop_row(2, 7, PROP_ACTIVE, [30.0, 1.0, 0.0])],
@@ -7336,8 +7370,12 @@ fn prop_rows_hold_through_the_load_and_apply_after() {
     let install = tempfile::tempdir().unwrap();
     let (mut host, mut app, generation) = playing_client(install.path());
     assert_eq!(session_phase(&app), SessionPhase::Loading);
+    // The world the host stamped: one placement, which this client has
+    // not stamped yet.
+    let hosts_world = table_of(&[("prop", Vec3::new(4.0, 0.0, 0.0))]);
     host.ctl()
         .broadcast(&props_frame(
+            hosts_world,
             generation,
             3,
             vec![prop_row(
@@ -7390,6 +7428,100 @@ fn prop_rows_hold_through_the_load_and_apply_after() {
             Vec3::new(4.0, 0.0, 4.0)
         )
     );
+    host.shutdown();
+}
+
+/// F26-A: a client whose stamped world differs from the host's refuses
+/// the host's rows instead of posing whichever prop now holds the
+/// ordinal. The host stamped three placements; this client's third model
+/// failed to load, so its table has two — every later ordinal would be
+/// shifted. Nothing is applied and the disagreement is recorded; once a
+/// frame arrives whose table agrees with the client's own, rows apply
+/// again.
+#[test]
+fn a_client_refuses_rows_from_a_host_with_a_different_world() {
+    use mm2_app::worldprops::PROP_SETTLED;
+    use mm2_game::BangerPhase;
+
+    let install = tempfile::tempdir().unwrap();
+    let (mut host, mut app, generation) = playing_client(install.path());
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    let homes = [
+        Vec3::new(10.0, 0.0, 0.0),
+        Vec3::new(20.0, 0.0, 0.0),
+        Vec3::new(30.0, 0.0, 0.0),
+    ];
+    let first = stamp_prop(&mut app, BangerPhase::Dormant, homes[0], 0);
+    let second = stamp_prop(&mut app, BangerPhase::Dormant, homes[1], 0);
+    app.update();
+    let ours = local_table(&app);
+    assert_eq!(ours, table_of(&[("prop", homes[0]), ("prop", homes[1])]));
+
+    let hosts_world = table_of(&[("prop", homes[0]), ("prop", homes[1]), ("prop", homes[2])]);
+    assert_ne!(hosts_world, ours);
+    host.ctl()
+        .broadcast(&props_frame(
+            hosts_world,
+            generation,
+            7,
+            vec![
+                prop_row(0, mm2_net::SNAP_NO_FRAGMENT, PROP_SETTLED, [10.0, 0.0, 5.0]),
+                prop_row(1, mm2_net::SNAP_NO_FRAGMENT, PROP_SETTLED, [20.0, 0.0, 5.0]),
+            ],
+        ))
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::RemoteSnaps>()
+            .props()
+            .mismatched()
+            == 2
+    });
+    {
+        let props = app.world().resource::<netdrive::RemoteSnaps>().props();
+        assert_eq!(props.divergence(), Some((hosts_world, ours)));
+        assert_eq!(
+            (props.landed(), props.unresolved(), props.staged()),
+            (0, 0, 0)
+        );
+    }
+    for entity in [first, second] {
+        assert_eq!(
+            prop_state(&app, entity).0,
+            BangerPhase::Dormant,
+            "a disagreeing world's rows pose nothing"
+        );
+    }
+
+    // The same rows under a table that does agree are applied.
+    host.ctl()
+        .broadcast(&props_frame(
+            ours,
+            generation,
+            8,
+            vec![prop_row(
+                1,
+                mm2_net::SNAP_NO_FRAGMENT,
+                PROP_SETTLED,
+                [20.0, 0.0, 5.0],
+            )],
+        ))
+        .unwrap();
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<netdrive::RemoteSnaps>()
+            .props()
+            .landed()
+            == 1
+    });
+    let props = app.world().resource::<netdrive::RemoteSnaps>().props();
+    assert!(props.divergence().is_none(), "agreement clears the flag");
+    assert_eq!(props.mismatched(), 2, "the earlier refusals stay counted");
+    assert_eq!(prop_state(&app, second).0, BangerPhase::Settled);
     host.shutdown();
 }
 
@@ -7461,7 +7593,7 @@ fn a_hosts_prop_state_converges_on_a_joined_clients_world() {
         stamp_prop(
             &mut host_app,
             BangerPhase::Active,
-            Vec3::new(20.0, 3.0, 0.0),
+            Vec3::new(20.0, 0.0, 0.0),
             0,
         ),
         stamp_prop(
@@ -7473,10 +7605,22 @@ fn a_hosts_prop_state_converges_on_a_joined_clients_world() {
         stamp_prop(
             &mut host_app,
             BangerPhase::Settled,
-            Vec3::new(40.0, 0.0, 6.0),
+            Vec3::new(40.0, 0.0, 0.0),
             0,
         ),
     ];
+    // Impacts moved two of them off their stamped homes: a prop's
+    // replication identity is its home, its pose is the state.
+    for (prop, pose) in [
+        (host_props[1], Vec3::new(20.0, 3.0, 0.0)),
+        (host_props[3], Vec3::new(40.0, 0.0, 6.0)),
+    ] {
+        host_app
+            .world_mut()
+            .get_mut::<avian3d::prelude::Position>(prop)
+            .unwrap()
+            .0 = pose;
+    }
     let client_props = [
         stamp_prop(
             &mut client,
@@ -7621,6 +7765,9 @@ fn a_hosts_prop_state_converges_on_a_joined_clients_world() {
     let props = client.world().resource::<netdrive::RemoteSnaps>().props();
     assert_eq!(props.unresolved(), 0, "every row named a real prop");
     assert_eq!(props.refused(), 0);
+    assert_eq!(props.mismatched(), 0, "both peers stamped the same world");
+    assert!(props.divergence().is_none());
+    assert_eq!(props.local_table().count, 4);
 }
 
 /// F26-A: the publish frame is bounded and self-healing. Twenty settled
@@ -7658,10 +7805,18 @@ fn the_prop_publish_window_cycles_without_growing_the_frame() {
     }
 
     let mut frames: Vec<Vec<mm2_net::SnapProp>> = Vec::new();
+    // Every frame names the world its ordinals are relative to: the 22
+    // placements stamped above, at their homes (the live one's home is
+    // where it was stamped, not where it flies).
+    let mut world = vec![("prop", Vec3::ZERO), ("prop", Vec3::new(5.0, 2.0, 0.0))];
+    world.extend((0..20).map(|i| ("prop", Vec3::new(10.0 + i as f32, 0.0, 0.0))));
+    let hosts_world = table_of(&world);
+    assert_eq!(hosts_world.count, 22);
     while frames.len() < 6 {
-        if let Message::Props { rows, .. } =
+        if let Message::Props { rows, table, .. } =
             until_wire(&mut peer, |m| matches!(m, Message::Props { .. }))
         {
+            assert_eq!(table, hosts_world);
             frames.push(rows);
         }
     }

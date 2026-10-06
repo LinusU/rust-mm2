@@ -28,6 +28,16 @@
 //!   forward (`Dormant → Active → Settled`, or `→ Broken`), so a
 //!   reordered `Active` row cannot un-settle a prop.
 //!
+//! - **World agreement.** An ordinal means the same prop on two peers
+//!   only if both stamped the same placements in the same order; a model
+//!   that failed to load on one side shifts every later ordinal and
+//!   would silently pose the wrong prop. Each peer therefore keeps a
+//!   [`SiteRegistry`] — the stamped placements' ordinal, authored name
+//!   and home position — and every frame carries the host's
+//!   [`SiteTable`] (count + digest). A client whose own table differs
+//!   drops the rows counted as `mismatched` and applies none of them,
+//!   rather than guess which ordinals still line up.
+//!
 //! Not replicated, by decision: vehicle breakaway parts (they have
 //! their own wire path, `SnapEntry.breaks`), and a client's own contact
 //! with a prop it has not yet heard about (the predicted car meets the
@@ -42,7 +52,7 @@ use bevy::prelude::*;
 use mm2_game::{
     Banger, BangerFragment, BangerPhase, BangerSite, Session, SessionEntity, SessionPhase,
 };
-use mm2_net::{MAX_SNAP_PROPS, Message, SNAP_NO_FRAGMENT, SnapProp};
+use mm2_net::{MAX_SNAP_PROPS, Message, SNAP_NO_FRAGMENT, SiteTable, SnapProp};
 
 use crate::banger::{BangerPieces, FragmentSpawn, shatter_placement, spawn_fragment};
 use crate::net::HostLink;
@@ -77,6 +87,87 @@ pub const MAX_APPLIED_PROPS: usize = 16384;
 /// and half the frame rate is plenty for a prop that has no
 /// interpolation to hide behind anyway.
 const PUBLISH_EVERY: u32 = 2;
+
+/// Home-position quantum of the world-agreement digest: coarse enough
+/// that two platforms' last-bit float differences hash alike, fine
+/// enough that a shifted ordinal (a different prop, metres away) does
+/// not.
+const SITE_QUANTUM: f32 = 4.0;
+
+fn fnv(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// One process's record of the banger placements its city stamp
+/// minted: ordinal, authored name and home position (the pose at stamp,
+/// before any impact moved it). Its [`SiteTable`] is what two peers
+/// compare to know their ordinals name the same props. Keyed by session
+/// generation, so a new session's stamp starts from empty.
+#[derive(Default)]
+pub struct SiteRegistry {
+    generation: Option<u64>,
+    entries: BTreeMap<u32, u64>,
+    dirty: bool,
+    table: SiteTable,
+}
+
+impl SiteRegistry {
+    /// Scope the registry to session `generation`: a different one
+    /// starts over, so a smaller world never inherits the last one's
+    /// tail.
+    pub fn begin(&mut self, generation: u64) {
+        if self.generation != Some(generation) {
+            self.generation = Some(generation);
+            self.entries.clear();
+            self.dirty = true;
+        }
+    }
+
+    /// Record the placement stamped as `site`.
+    pub fn note(&mut self, site: u32, name: &str, home: Vec3) {
+        let q = |v: f32| (v * SITE_QUANTUM).round() as i32;
+        let mut hash = fnv(0xcbf2_9ce4_8422_2325, name.as_bytes());
+        for c in [home.x, home.y, home.z] {
+            hash = fnv(hash, &q(c).to_le_bytes());
+        }
+        if self.entries.insert(site, hash) != Some(hash) {
+            self.dirty = true;
+        }
+    }
+
+    /// Recompute the table if a placement was noted since the last call.
+    pub fn refresh(&mut self) {
+        if !self.dirty {
+            return;
+        }
+        self.dirty = false;
+        self.table = if self.entries.is_empty() {
+            SiteTable::default()
+        } else {
+            let mut digest = fnv(
+                0xcbf2_9ce4_8422_2325,
+                &(self.entries.len() as u64).to_le_bytes(),
+            );
+            for (site, entry) in &self.entries {
+                digest = fnv(digest, &site.to_le_bytes());
+                digest = fnv(digest, &entry.to_le_bytes());
+            }
+            SiteTable {
+                count: self.entries.len() as u32,
+                digest,
+            }
+        };
+    }
+
+    /// The table as of the last [`refresh`](Self::refresh).
+    pub fn table(&self) -> SiteTable {
+        self.table
+    }
+}
 
 /// A prop's wire identity: placement ordinal plus fragment index.
 type PropKey = (u32, u8);
@@ -116,15 +207,26 @@ fn decode_phase(raw: u8) -> Option<BangerPhase> {
 pub struct PropStage {
     rows: HashMap<PropKey, (u64, u64, SnapProp)>,
     applied: HashMap<PropKey, (u64, u64)>,
+    /// The newest host table seen, with the generation it belongs to.
+    host_table: Option<(u64, SiteTable)>,
+    local: SiteRegistry,
+    /// The (host, local) tables of the last drain that disagreed;
+    /// `None` while the worlds agree.
+    divergence: Option<(SiteTable, SiteTable)>,
     stale: u64,
     refused: u64,
     unresolved: u64,
+    mismatched: u64,
     landed: u64,
 }
 
 impl PropStage {
-    /// Queue one frame's rows.
-    pub fn push(&mut self, generation: u64, tick: u64, rows: Vec<SnapProp>) {
+    /// Queue one frame's rows, noting the host's stamped-world `table`
+    /// they are relative to.
+    pub fn push(&mut self, generation: u64, tick: u64, table: SiteTable, rows: Vec<SnapProp>) {
+        if self.host_table.is_none_or(|(g, _)| generation >= g) {
+            self.host_table = Some((generation, table));
+        }
         for row in rows {
             let key = key_of(&row);
             let stamp = (generation, tick);
@@ -152,6 +254,26 @@ impl PropStage {
     pub fn reset(&mut self) {
         self.rows.clear();
         self.applied.clear();
+        self.host_table = None;
+        self.divergence = None;
+    }
+
+    /// The table of this process's own stamped placements.
+    pub fn local_table(&self) -> SiteTable {
+        self.local.table()
+    }
+
+    /// `(host, local)` while the last drained frame's table disagreed
+    /// with this process's own stamped world — the replication is off
+    /// until they agree; `None` otherwise.
+    pub fn divergence(&self) -> Option<(SiteTable, SiteTable)> {
+        self.divergence
+    }
+
+    /// Rows dropped unapplied because the host's stamped world differs
+    /// from this one's.
+    pub fn mismatched(&self) -> u64 {
+        self.mismatched
     }
 
     /// Rows dropped as older than what was staged or applied.
@@ -209,12 +331,37 @@ impl PropStage {
             .collect();
         // A placement (`SNAP_NO_FRAGMENT`) sorts before its pieces.
         rows.sort_by_key(|(key, ..)| (key.0, key.1 != SNAP_NO_FRAGMENT, key.1));
+        // The host's table is only meaningful against this process's own
+        // once both are for the same session; on a disagreement no
+        // ordinal can be trusted, so none of the rows is.
+        let agreed = match self.host_table {
+            Some((generation, host)) if generation == wire && host != self.local.table() => {
+                if self.divergence.is_none() {
+                    warn!(
+                        "world props: the host stamped {} placements (digest {:016x}) but this \
+                         process stamped {} ({:016x}); prop rows are ignored until they agree",
+                        host.count,
+                        host.digest,
+                        self.local.table().count,
+                        self.local.table().digest,
+                    );
+                }
+                self.divergence = Some((host, self.local.table()));
+                false
+            }
+            _ => {
+                self.divergence = None;
+                true
+            }
+        };
         let mut current = Vec::with_capacity(rows.len());
         for (_, generation, tick, row) in rows {
-            if generation == wire {
-                current.push((row, (generation, tick)));
-            } else {
+            if generation != wire {
                 self.unresolved += 1;
+            } else if !agreed {
+                self.mismatched += 1;
+            } else {
+                current.push((row, (generation, tick)));
             }
         }
         current
@@ -230,6 +377,9 @@ pub struct PropLedger {
     fresh: BTreeSet<PropKey>,
     cursor: usize,
     frames: u32,
+    /// The placements this host stamped — the world its rows' ordinals
+    /// are relative to.
+    sites: SiteRegistry,
 }
 
 /// Host: broadcast the world's prop state as [`Message::Props`].
@@ -238,11 +388,12 @@ pub struct PropLedger {
 /// phase gate, so a change landing while the stream is quiet is
 /// remembered — and only the send is gated, like
 /// `netdrive::publish_snapshots`.
-#[allow(clippy::type_complexity)] // Bevy system — the queries are the contract.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)] // Bevy system — the queries are the contract.
 pub fn publish_props(
     host: Res<HostLink>,
     session: Res<Session>,
     mut ledger: Local<PropLedger>,
+    stamped: Query<(&BangerSite, &Banger, &Transform, &SessionEntity), Added<BangerSite>>,
     placements: Query<(Entity, &BangerSite, &Banger), (Changed<Banger>, Without<BangerFragment>)>,
     fragments: Query<(Entity, &BangerFragment, &Banger), Changed<Banger>>,
     sites: Query<&BangerSite>,
@@ -254,6 +405,15 @@ pub fn publish_props(
             ..default()
         };
     }
+    ledger.sites.begin(session.generation());
+    for (site, banger, transform, owner) in &stamped {
+        if owner.0 == session.generation() {
+            ledger
+                .sites
+                .note(site.0, &banger.def.name, transform.translation);
+        }
+    }
+    ledger.sites.refresh();
     for (entity, site, banger) in &placements {
         if banger.phase != BangerPhase::Dormant {
             let key = (site.0, SNAP_NO_FRAGMENT);
@@ -361,6 +521,7 @@ pub fn publish_props(
     let frame = Message::Props {
         generation: session.wire_generation(),
         tick: session.tick(),
+        table: ledger.sites.table(),
         rows,
     };
     if host.ctl().broadcast(&frame).is_ok() {
@@ -404,9 +565,19 @@ pub fn apply_props(
     mut bodies: Query<PropBody>,
     pieces: Query<&BangerPieces>,
 ) {
+    snaps.props.local.begin(session.generation());
     for (entity, site) in &added {
         index.sites.insert(site.0, entity);
+        if let Ok((banger, _, _, transform, owner)) = bodies.as_readonly().get(entity)
+            && owner.0 == session.generation()
+        {
+            snaps
+                .props
+                .local
+                .note(site.0, &banger.def.name, transform.translation);
+        }
     }
+    snaps.props.local.refresh();
     if session.authority_role().is_authority() {
         return;
     }
@@ -620,13 +791,28 @@ mod tests {
     #[test]
     fn the_newest_row_per_prop_wins_and_an_equal_tick_passes() {
         let mut stage = PropStage::default();
-        stage.push(1, 10, vec![row(3, SNAP_NO_FRAGMENT, PROP_ACTIVE)]);
+        stage.push(
+            1,
+            10,
+            SiteTable::default(),
+            vec![row(3, SNAP_NO_FRAGMENT, PROP_ACTIVE)],
+        );
         // Older: stale, counted, not staged over the newer.
-        stage.push(1, 9, vec![row(3, SNAP_NO_FRAGMENT, PROP_SETTLED)]);
+        stage.push(
+            1,
+            9,
+            SiteTable::default(),
+            vec![row(3, SNAP_NO_FRAGMENT, PROP_SETTLED)],
+        );
         assert_eq!(stage.stale(), 1);
         // Same tick: idempotent state (the clock is frozen through the
         // countdown), so it replaces without counting.
-        stage.push(1, 10, vec![row(3, SNAP_NO_FRAGMENT, PROP_SETTLED)]);
+        stage.push(
+            1,
+            10,
+            SiteTable::default(),
+            vec![row(3, SNAP_NO_FRAGMENT, PROP_SETTLED)],
+        );
         assert_eq!(stage.stale(), 1);
         let rows = stage.drain_for(1);
         assert_eq!(rows.len(), 1);
@@ -635,7 +821,12 @@ mod tests {
         stage.remember(key_of(&rows[0].0), rows[0].1);
         // An older row after the apply is still stale — the applied
         // watermark outlives the drain.
-        stage.push(1, 8, vec![row(3, SNAP_NO_FRAGMENT, PROP_ACTIVE)]);
+        stage.push(
+            1,
+            8,
+            SiteTable::default(),
+            vec![row(3, SNAP_NO_FRAGMENT, PROP_ACTIVE)],
+        );
         assert_eq!(stage.stale(), 2);
         assert_eq!(stage.staged(), 0);
     }
@@ -645,8 +836,18 @@ mod tests {
         // A newer frame for one prop never shadows an older frame's row
         // for another — the watermark is per prop, not per stream.
         let mut stage = PropStage::default();
-        stage.push(1, 20, vec![row(1, SNAP_NO_FRAGMENT, PROP_ACTIVE)]);
-        stage.push(1, 12, vec![row(2, SNAP_NO_FRAGMENT, PROP_SETTLED)]);
+        stage.push(
+            1,
+            20,
+            SiteTable::default(),
+            vec![row(1, SNAP_NO_FRAGMENT, PROP_ACTIVE)],
+        );
+        stage.push(
+            1,
+            12,
+            SiteTable::default(),
+            vec![row(2, SNAP_NO_FRAGMENT, PROP_SETTLED)],
+        );
         assert_eq!(stage.stale(), 0);
         assert_eq!(stage.staged(), 2);
     }
@@ -657,6 +858,7 @@ mod tests {
         stage.push(
             1,
             5,
+            SiteTable::default(),
             vec![
                 row(4, 2, PROP_ACTIVE),
                 row(4, SNAP_NO_FRAGMENT, PROP_BROKEN),
@@ -678,20 +880,35 @@ mod tests {
             .map(|site| row(site, SNAP_NO_FRAGMENT, PROP_SETTLED))
             .collect();
         for chunk in rows.chunks(MAX_SNAP_PROPS as usize) {
-            stage.push(1, 1, chunk.to_vec());
+            stage.push(1, 1, SiteTable::default(), chunk.to_vec());
         }
         assert_eq!(stage.staged(), MAX_STAGED_PROPS);
         assert_eq!(stage.refused(), 10);
         // A prop already staged still updates in place at the bound.
-        stage.push(1, 2, vec![row(0, SNAP_NO_FRAGMENT, PROP_ACTIVE)]);
+        stage.push(
+            1,
+            2,
+            SiteTable::default(),
+            vec![row(0, SNAP_NO_FRAGMENT, PROP_ACTIVE)],
+        );
         assert_eq!(stage.refused(), 10);
     }
 
     #[test]
     fn a_foreign_generation_is_dropped_counted_at_the_drain() {
         let mut stage = PropStage::default();
-        stage.push(7, 1, vec![row(1, SNAP_NO_FRAGMENT, PROP_ACTIVE)]);
-        stage.push(8, 1, vec![row(2, SNAP_NO_FRAGMENT, PROP_ACTIVE)]);
+        stage.push(
+            7,
+            1,
+            SiteTable::default(),
+            vec![row(1, SNAP_NO_FRAGMENT, PROP_ACTIVE)],
+        );
+        stage.push(
+            8,
+            1,
+            SiteTable::default(),
+            vec![row(2, SNAP_NO_FRAGMENT, PROP_ACTIVE)],
+        );
         let rows = stage.drain_for(8);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0.site, 2);
@@ -713,7 +930,7 @@ mod tests {
                     )
                 })
                 .collect();
-            stage.push(1, u64::from(frame), rows);
+            stage.push(1, u64::from(frame), SiteTable::default(), rows);
             // The apply found nothing: the drained rows are not remembered.
             let _ = stage.drain_for(1);
         }
@@ -730,7 +947,12 @@ mod tests {
         assert_eq!(stage.remembered(), MAX_APPLIED_PROPS);
         // A prop already remembered still advances at the cap.
         stage.remember((0, SNAP_NO_FRAGMENT), (1, 9));
-        stage.push(1, 5, vec![row(0, SNAP_NO_FRAGMENT, PROP_ACTIVE)]);
+        stage.push(
+            1,
+            5,
+            SiteTable::default(),
+            vec![row(0, SNAP_NO_FRAGMENT, PROP_ACTIVE)],
+        );
         assert_eq!(stage.stale(), 1);
         assert_eq!(stage.remembered(), MAX_APPLIED_PROPS);
     }
@@ -738,16 +960,114 @@ mod tests {
     #[test]
     fn a_reset_forgets_the_stream_but_keeps_the_evidence() {
         let mut stage = PropStage::default();
-        stage.push(1, 10, vec![row(1, SNAP_NO_FRAGMENT, PROP_ACTIVE)]);
-        stage.push(1, 5, vec![row(1, SNAP_NO_FRAGMENT, PROP_ACTIVE)]);
+        stage.push(
+            1,
+            10,
+            SiteTable::default(),
+            vec![row(1, SNAP_NO_FRAGMENT, PROP_ACTIVE)],
+        );
+        stage.push(
+            1,
+            5,
+            SiteTable::default(),
+            vec![row(1, SNAP_NO_FRAGMENT, PROP_ACTIVE)],
+        );
         stage.reset();
         assert_eq!(stage.staged(), 0);
         assert_eq!(stage.stale(), 1, "counters are evidence, not stream state");
         // A fresh authority restarts its ticks: nothing stale-drops
         // under the dead stream's watermark.
-        stage.push(2, 1, vec![row(1, SNAP_NO_FRAGMENT, PROP_ACTIVE)]);
+        stage.push(
+            2,
+            1,
+            SiteTable::default(),
+            vec![row(1, SNAP_NO_FRAGMENT, PROP_ACTIVE)],
+        );
         assert_eq!(stage.stale(), 1);
         assert_eq!(stage.staged(), 1);
+    }
+
+    fn registry(generation: u64, world: &[(u32, &str, Vec3)]) -> SiteRegistry {
+        let mut registry = SiteRegistry::default();
+        registry.begin(generation);
+        for (site, name, home) in world {
+            registry.note(*site, name, *home);
+        }
+        registry.refresh();
+        registry
+    }
+
+    #[test]
+    fn a_site_table_names_the_stamped_world() {
+        let lamp = Vec3::new(12.0, 0.0, -3.0);
+        let bin = Vec3::new(40.0, 0.5, 8.0);
+        let world = [(0, "lamp", lamp), (1, "bin", bin)];
+        let table = registry(1, &world).table();
+        assert_eq!(table.count, 2);
+        // The same world is the same table, whatever order it was noted
+        // in and whichever session generation it belongs to.
+        let swapped = [(1, "bin", bin), (0, "lamp", lamp)];
+        assert_eq!(registry(9, &swapped).table(), table);
+        // Last-bit float noise inside the quantum hashes alike…
+        let noisy = [(0, "lamp", lamp + Vec3::splat(1e-4)), (1, "bin", bin)];
+        assert_eq!(registry(1, &noisy).table(), table);
+        // …but a shifted ordinal, a different prop, a moved home or a
+        // missing placement does not.
+        let shifted = [(0, "bin", bin), (1, "lamp", lamp)];
+        let renamed = [(0, "lamp", lamp), (1, "hydrant", bin)];
+        let moved = [(0, "lamp", lamp), (1, "bin", bin + Vec3::X)];
+        let short = [(0, "lamp", lamp)];
+        let gapped = [(0, "lamp", lamp), (2, "bin", bin)];
+        for other in [&shifted[..], &renamed, &moved, &short, &gapped] {
+            assert_ne!(registry(1, other).table(), table, "{other:?}");
+        }
+        assert_eq!(registry(1, &[]).table(), SiteTable::default());
+    }
+
+    #[test]
+    fn a_new_session_generation_starts_the_registry_over() {
+        let mut registry = registry(1, &[(0, "a", Vec3::ZERO), (1, "b", Vec3::X)]);
+        registry.begin(1);
+        registry.refresh();
+        assert_eq!(
+            registry.table().count,
+            2,
+            "the same session keeps its stamp"
+        );
+        registry.begin(2);
+        registry.note(0, "a", Vec3::ZERO);
+        registry.refresh();
+        assert_eq!(
+            registry.table().count,
+            1,
+            "a smaller world does not inherit the last one's tail"
+        );
+    }
+
+    #[test]
+    fn a_disagreeing_host_table_drops_the_rows_counted() {
+        let mut stage = PropStage::default();
+        stage.local.begin(1);
+        stage.local.note(0, "a", Vec3::ZERO);
+        stage.local.refresh();
+        let ours = stage.local_table();
+        let theirs = SiteTable {
+            count: 3,
+            digest: 1,
+        };
+        stage.push(1, 4, theirs, vec![row(0, SNAP_NO_FRAGMENT, PROP_SETTLED)]);
+        assert!(stage.drain_for(1).is_empty());
+        assert_eq!((stage.mismatched(), stage.unresolved()), (1, 0));
+        assert_eq!(stage.divergence(), Some((theirs, ours)));
+        // A frame under a table that agrees is drained and clears it.
+        stage.push(1, 5, ours, vec![row(0, SNAP_NO_FRAGMENT, PROP_SETTLED)]);
+        assert_eq!(stage.drain_for(1).len(), 1);
+        assert_eq!(stage.mismatched(), 1);
+        assert_eq!(stage.divergence(), None);
+        // A table from another session says nothing about this one.
+        stage.push(7, 1, theirs, vec![row(0, SNAP_NO_FRAGMENT, PROP_SETTLED)]);
+        assert!(stage.drain_for(1).is_empty());
+        assert_eq!((stage.mismatched(), stage.unresolved()), (1, 1));
     }
 
     #[test]

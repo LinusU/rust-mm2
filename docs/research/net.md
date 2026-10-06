@@ -940,7 +940,7 @@ the real session), not a driven collision; `race` reads 0 on both
 sides — the dev cruise carries no `RaceState`, so no v13 rows move
 (the row's legs are the in-process `net_app` tests above).
 
-## World-prop replication (protocol v17, F26-A)
+## World-prop replication (protocol v17, F26-A; v18 adds the site table)
 
 *Implementation choice; no original-protocol claim.* The authority alone
 transitions a banger (`activate_bangers`/`settle_bangers` skip a
@@ -964,14 +964,33 @@ a frame of `SnapProp { site, fragment, phase, pos, rot }` rows:
   rolling cursor, so a dropped/reordered frame and a late joiner heal
   within one cycle while the frame never grows with the session.
   Published every second `Update` (`PUBLISH_EVERY`).
+- **World agreement (v18).** An ordinal only names the same prop on
+  two peers if both stamped the same placements in the same order; a
+  model that failed to load on one side (or differing content that still
+  passed the gameplay fingerprint) shifts every later ordinal. Every
+  `Props` frame therefore carries `SiteTable { count: u32, digest: u64 }`
+  — each peer's `SiteRegistry` of `(ordinal, authored name, home
+  position quantised to 0.25 m)`, FNV-1a hashed in ordinal order, built
+  from `Added<BangerSite>` at the stamp pose (before any impact moves
+  it) and scoped to the session generation. A client whose own table
+  differs drops the whole drain counted as `mismatched` (not
+  `unresolved`), applies nothing, logs one warning and exposes
+  `PropStage::divergence()`; it resumes the moment a frame's table
+  agrees. The check is all-or-nothing by design: with a shifted ordinal
+  no row can be trusted. The 0.25 m quantum is chosen so a last-bit
+  float difference across platforms hashes alike while a different prop
+  at the ordinal does not; rotation is deliberately excluded (it comes
+  through trigonometry). *Verified on synthetic stamps and the in-process
+  loopback harness; not yet on a retail world across two processes.*
 - **Receiver.** Latest-wins *per prop* on `(generation, tick)` (equal
   tick passes — the session clock is frozen through `Ready`/`Countdown`);
   staged bounded at 4,096 props; held through `Loading`; phases only
   move forward. A fragment row spawns the piece from the placement's own
   authored `BangerPieces` and proves the placement shattered.
-- **Budget.** 18 B header (tag 1, generation 8, tick 8, count 1) + 34 B
+- **Budget.** 30 B header (tag 1, generation 8, tick 8, table 12, count
+  1; 18 B under v17) + 34 B
   per row (site 4, fragment 1, phase 1, pos 12, rot 16);
-  `MAX_SNAP_PROPS` 96 rows = 3,282 B worst case, steady state ≈ 18 +
+  `MAX_SNAP_PROPS` 96 rows = 3,294 B worst case, steady state ≈ 30 +
   34·(active + 8).
 - **Not covered.** No interpolation (an active prop moves at the
   publish rate); no velocities on the wire; vehicle breakaway parts

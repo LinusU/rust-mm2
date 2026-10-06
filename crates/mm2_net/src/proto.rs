@@ -51,8 +51,11 @@
 /// through its own surface table (F25-B). v17: `Message::Props` — the
 /// authority's world-prop state (knocked, broken and settled bangers)
 /// as its own host→client frame, so a client's copy of the world
-/// matches the host's (F26-A).
-pub const PROTOCOL_VERSION: u16 = 17;
+/// matches the host's (F26-A). v18: the `Props` frame carries the
+/// sender's [`SiteTable`] — the placement count and a digest of what
+/// the city stamp minted — so a client whose stamped world differs
+/// refuses the rows instead of misattributing them (F26-A).
+pub const PROTOCOL_VERSION: u16 = 18;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -471,6 +474,22 @@ pub const MAX_SNAP_PROPS: u8 = 96;
 /// than one of its break fragments.
 pub const SNAP_NO_FRAGMENT: u8 = u8::MAX;
 
+/// A summary of a process's stamped banger placements, exchanged on
+/// every [`Message::Props`] frame (v18, F26-A). A row names its prop by
+/// placement ordinal, which only means the same prop on two peers when
+/// both stamped the same world in the same order; a model that failed
+/// to load on one side, or differing content, shifts every later
+/// ordinal. The receiver compares this with its own table and refuses
+/// the frame's rows on a mismatch. `digest` is opaque to the wire — the
+/// consumer defines what it hashes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SiteTable {
+    /// How many placements the sender stamped.
+    pub count: u32,
+    /// A digest of the stamped placements, ordinal by ordinal.
+    pub digest: u64,
+}
+
 /// One world-prop's replicated state inside a [`Message::Props`] frame
 /// (v17, F26-A). The prop is named by its placement `site` — the
 /// ordinal the city stamp minted, identical on every process that
@@ -628,6 +647,9 @@ pub enum Message {
         generation: u64,
         /// Host session tick at capture.
         tick: u64,
+        /// The host's stamped-placement summary (v18) — what the row
+        /// ordinals are relative to.
+        table: SiteTable,
         /// The prop rows.
         rows: Vec<SnapProp>,
     },
@@ -1009,11 +1031,14 @@ impl Message {
             Self::Props {
                 generation,
                 tick,
+                table,
                 rows,
             } => {
                 out.push(TAG_PROPS);
                 out.extend_from_slice(&generation.to_le_bytes());
                 out.extend_from_slice(&tick.to_le_bytes());
+                out.extend_from_slice(&table.count.to_le_bytes());
+                out.extend_from_slice(&table.digest.to_le_bytes());
                 if rows.len() > MAX_SNAP_PROPS as usize {
                     // Saturate the reported count so an absurd length
                     // never wraps into a small, plausible-looking one.
@@ -1197,6 +1222,10 @@ impl Message {
             TAG_PROPS => {
                 let generation = cur.u64()?;
                 let tick = cur.u64()?;
+                let table = SiteTable {
+                    count: cur.u32()?,
+                    digest: cur.u64()?,
+                };
                 let count = cur.u8()?;
                 if count > MAX_SNAP_PROPS {
                     return Err(ProtoError::OversizeProps(count));
@@ -1214,6 +1243,7 @@ impl Message {
                 Self::Props {
                     generation,
                     tick,
+                    table,
                     rows,
                 }
             }
@@ -1574,12 +1604,17 @@ mod tests {
         let msg = Message::Props {
             generation: 7,
             tick: 4096,
+            table: SiteTable {
+                count: 41_001,
+                digest: 0xfeed_beef_0123_4567,
+            },
             rows: vec![prop_row(0, SNAP_NO_FRAGMENT), prop_row(41_000, 2)],
         };
         assert_eq!(Message::decode(&msg.encode().unwrap()).unwrap(), msg);
         let empty = Message::Props {
             generation: 1,
             tick: 0,
+            table: SiteTable::default(),
             rows: Vec::new(),
         };
         assert_eq!(Message::decode(&empty.encode().unwrap()).unwrap(), empty);
@@ -1590,6 +1625,7 @@ mod tests {
         let full = Message::Props {
             generation: 1,
             tick: 2,
+            table: SiteTable::default(),
             rows: (0..MAX_SNAP_PROPS as u32)
                 .map(|i| prop_row(i, SNAP_NO_FRAGMENT))
                 .collect(),
@@ -1598,6 +1634,7 @@ mod tests {
         let over = Message::Props {
             generation: 1,
             tick: 2,
+            table: SiteTable::default(),
             rows: (0..=MAX_SNAP_PROPS as u32)
                 .map(|i| prop_row(i, SNAP_NO_FRAGMENT))
                 .collect(),
@@ -1607,12 +1644,15 @@ mod tests {
         let huge = Message::Props {
             generation: 1,
             tick: 2,
+            table: SiteTable::default(),
             rows: (0..300).map(|i| prop_row(i, 0)).collect(),
         };
         assert_eq!(huge.encode(), Err(ProtoError::OversizeProps(255)));
         let mut wide = vec![TAG_PROPS];
         wide.extend_from_slice(&1u64.to_le_bytes());
         wide.extend_from_slice(&2u64.to_le_bytes());
+        wide.extend_from_slice(&0u32.to_le_bytes());
+        wide.extend_from_slice(&0u64.to_le_bytes());
         wide.push(MAX_SNAP_PROPS + 1);
         assert_eq!(Message::decode(&wide), Err(ProtoError::OversizeProps(97)));
     }
@@ -1622,6 +1662,7 @@ mod tests {
         let msg = Message::Props {
             generation: 3,
             tick: 9,
+            table: SiteTable::default(),
             rows: vec![prop_row(5, SNAP_NO_FRAGMENT)],
         };
         let bytes = msg.encode().unwrap();

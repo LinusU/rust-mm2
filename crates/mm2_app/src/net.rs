@@ -520,8 +520,9 @@ pub fn drive_lobby(
             LobbyEvent::Message(Message::Props {
                 generation,
                 tick,
+                table,
                 rows,
-            }) => snaps.push_props(generation, tick, rows),
+            }) => snaps.push_props(generation, tick, table, rows),
             LobbyEvent::Message(Message::Cancel { generation }) => {
                 cancel(&mut lobby, &mut session, &mut control, generation)
             }
