@@ -1,22 +1,33 @@
-# Last iteration — parked-car agreement across peers (new-run iteration 4)
+# Last iteration — world-actor clock audit across peers (new-run iteration 5)
 
-Baseline `cd7ad71`. Selection: report 6 follow-up 3, the one F26-A
-question answerable without a wire change: do seed-rolled kerbside cars
-agree across peers in networked races?
+Baseline `d52fc0e`. Selection: report 6 follow-up 3, the remaining
+half — do drawbridge leaves and movers (boats, ferries, Underground
+trains) agree across peers? Audit only; no production change (a fix
+needs a wire or clock-seek design, not a one-iteration patch).
 
-## Finding
+## Finding (read from source, not run)
 
-Yes by construction: `spawn_parked_cars` rolls from a local
-`ParkedRng::new(config.seed)`, the seed rides the advertised session
-config to every client (`net.rs` config round trip test), and nothing
-else consumes the stream. Test
-`parked::peers_sharing_a_session_seed_roll_identical_bays` pins the pure
-function of the seed.
+- `drive_drawbridges` / `drive_movers` step a *local* accumulator by
+  `Time<Fixed>` delta while the session is `Countdown`/`Playing`/
+  `Results`. Their comments say "deterministic from session start", true
+  per process only.
+- Nothing in `mm2_net` or `netdrive.rs` carries a world clock, leaf
+  phase or mover position (grep: no mover/drawbridge/train references in
+  the net layer). A client's countdown and race clock are overwritten
+  from `Snap.race`, but the movers keep their own count from the moment
+  the client's session entered `Countdown`.
+- So timed leaves and every mover are only phase-aligned with the host
+  to within the peers' session-start skew, and drift if either side
+  stalls. Proximity leaves are worse: triggered from local `Player`
+  positions, so a leaf may open on one peer only.
+- Parked cars (previous iteration) are the one actor that does agree.
 
-## Evidence level / still open
+## Proposed fix (open, recorded in PLAN F26-A)
 
-Synthetic unit test only. Initial placement agrees; once a host-side
-physics body is knocked, copies on clients diverge — replicating that
-(plus drawbridge, movers, sounds) remains F26-A. Two-process legs for
-follow-ups 1 and 2 remain open. Status: implemented (candidate), not
-independently checked.
+Derive world time from the host's race clock (already on the wire in
+`Snap.race`): give `Follower`/`TrainMotion`/`LeafMotion` a seek-to-time,
+and have clients re-seek on each fresher race row. Proximity triggers
+become host-authoritative (a leaf-open bit or the leaf timer in the
+snapshot). Needs a two-process leg.
+
+Status: finding recorded, nothing implemented. Gates not rerun (docs only).
