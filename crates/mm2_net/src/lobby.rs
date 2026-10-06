@@ -2468,6 +2468,39 @@ mod tests {
         }
     }
 
+    /// F26-AC04: world state flows host → client only. A client that
+    /// submits a props frame — a prop pose, a broken/settled claim — is
+    /// a protocol violation and is dropped like any other lifecycle
+    /// spoof, never absorbed as truth.
+    #[test]
+    fn a_client_cannot_assert_world_props() {
+        let host = sessioned_host();
+        let mut mallory = join_sessioned(&host, "mallory");
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut mallory, 1);
+        mallory
+            .send(&Message::Props {
+                generation: 1,
+                tick: 1,
+                rows: vec![crate::proto::SnapProp {
+                    site: 0,
+                    fragment: crate::proto::SNAP_NO_FRAGMENT,
+                    phase: 3,
+                    pos: [0.0; 3],
+                    rot: [0.0, 0.0, 0.0, 1.0],
+                }],
+            })
+            .unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::Left {
+                id: 1,
+                cause: LeaveCause::Malformed,
+                ..
+            }) => {}
+            other => panic!("expected a Malformed Left, got {other:?}"),
+        }
+    }
+
     /// The roster stays the shared truth through a session (MP-5's
     /// leaver rule): mid-session pick changes and departures still
     /// land and rebroadcast.

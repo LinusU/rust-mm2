@@ -48,8 +48,11 @@
 /// the surface-contact tail — the dominant grounded wheel's resolved
 /// `sound` class plus its slippage and longitudinal speed — so a remote
 /// copy's `SurfaceRig` replays the same `SkidSpec`/`RollingSpec` pick
-/// through its own surface table (F25-B).
-pub const PROTOCOL_VERSION: u16 = 16;
+/// through its own surface table (F25-B). v17: `Message::Props` — the
+/// authority's world-prop state (knocked, broken and settled bangers)
+/// as its own host→client frame, so a client's copy of the world
+/// matches the host's (F26-A).
+pub const PROTOCOL_VERSION: u16 = 17;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -75,6 +78,7 @@ const TAG_CANCEL: u8 = 0x0c;
 const TAG_INPUT: u8 = 0x0d;
 const TAG_SNAP: u8 = 0x0e;
 const TAG_RESET_REQUEST: u8 = 0x0f;
+const TAG_PROPS: u8 = 0x10;
 
 /// Byte cap on a [`SessionAdvertisement`]'s opaque `params` field — the
 /// `mm2_app` bridge's serialized session config is a few hundred bytes,
@@ -457,6 +461,39 @@ pub struct SnapRace {
     pub clock: u64,
 }
 
+/// Bound on one [`Message::Props`] frame's rows: the banger pool's
+/// active bodies (32), a burst of fresh transitions and the rolling
+/// resend window of settled/broken state — far above a normal frame,
+/// small enough that a hostile count cannot claim an unbounded tail.
+pub const MAX_SNAP_PROPS: u8 = 96;
+
+/// A [`SnapProp::fragment`] value meaning "the placement itself" rather
+/// than one of its break fragments.
+pub const SNAP_NO_FRAGMENT: u8 = u8::MAX;
+
+/// One world-prop's replicated state inside a [`Message::Props`] frame
+/// (v17, F26-A). The prop is named by its placement `site` — the
+/// ordinal the city stamp minted, identical on every process that
+/// loads the same content — never by an `ObjectId`, which lives in one
+/// process's local namespace. A break fragment adds its index inside
+/// the placement's collidable pieces. `phase` is the lifecycle
+/// discriminant, opaque to the wire like [`SnapRace::phase`]; the pose
+/// is the body's world transform. *State*, not an event: a repeated or
+/// dropped row self-corrects on the next.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SnapProp {
+    /// The placement ordinal.
+    pub site: u32,
+    /// The break fragment index, or [`SNAP_NO_FRAGMENT`].
+    pub fragment: u8,
+    /// Opaque lifecycle discriminant — the consumer names the phases.
+    pub phase: u8,
+    /// World-space position, metres.
+    pub pos: [f32; 3],
+    /// World-space orientation quaternion `[x, y, z, w]`.
+    pub rot: [f32; 4],
+}
+
 /// One wire message.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
@@ -581,6 +618,19 @@ pub enum Message {
         /// (v13, F25-B) — `None` on a raceless session.
         race: Option<SnapRace>,
     },
+    /// Host → every client: the authority's world-prop state (F26-A) —
+    /// every pooled/active body plus the freshly changed and a rolling
+    /// window of the settled and broken ones, bounded by
+    /// [`MAX_SNAP_PROPS`]. `tick` orders frames per prop on the
+    /// receiver; `generation` gates it like [`Message::Snap`].
+    Props {
+        /// The session generation this frame belongs to.
+        generation: u64,
+        /// Host session tick at capture.
+        tick: u64,
+        /// The prop rows.
+        rows: Vec<SnapProp>,
+    },
 }
 
 /// A wire-decode failure on a well-framed payload.
@@ -623,6 +673,9 @@ pub enum ProtoError {
     /// A snapshot declared more than [`MAX_SNAP_IMPACTS`] impact rows.
     #[error("snapshot declares {0} impacts, bound is {MAX_SNAP_IMPACTS}")]
     OversizeImpacts(u8),
+    /// A props frame declared more than [`MAX_SNAP_PROPS`] rows.
+    #[error("props frame declares {0} rows, bound is {MAX_SNAP_PROPS}")]
+    OversizeProps(u8),
 }
 
 impl RejectCode {
@@ -690,6 +743,10 @@ impl<'a> Cursor<'a> {
 
     fn vec3(&mut self) -> Result<[f32; 3], ProtoError> {
         Ok([self.f32()?, self.f32()?, self.f32()?])
+    }
+
+    fn vec4(&mut self) -> Result<[f32; 4], ProtoError> {
+        Ok([self.f32()?, self.f32()?, self.f32()?, self.f32()?])
     }
 
     fn bool(&mut self) -> Result<bool, ProtoError> {
@@ -949,6 +1006,31 @@ impl Message {
                     None => out.push(0),
                 }
             }
+            Self::Props {
+                generation,
+                tick,
+                rows,
+            } => {
+                out.push(TAG_PROPS);
+                out.extend_from_slice(&generation.to_le_bytes());
+                out.extend_from_slice(&tick.to_le_bytes());
+                if rows.len() > MAX_SNAP_PROPS as usize {
+                    // Saturate the reported count so an absurd length
+                    // never wraps into a small, plausible-looking one.
+                    return Err(ProtoError::OversizeProps(
+                        rows.len().min(u8::MAX as usize) as u8
+                    ));
+                }
+                out.push(rows.len() as u8);
+                for row in rows {
+                    out.extend_from_slice(&row.site.to_le_bytes());
+                    out.push(row.fragment);
+                    out.push(row.phase);
+                    for v in row.pos.iter().chain(row.rot.iter()) {
+                        out.extend_from_slice(&v.to_le_bytes());
+                    }
+                }
+            }
         }
         Ok(out)
     }
@@ -1110,6 +1192,29 @@ impl Message {
                     trailers,
                     impacts,
                     race,
+                }
+            }
+            TAG_PROPS => {
+                let generation = cur.u64()?;
+                let tick = cur.u64()?;
+                let count = cur.u8()?;
+                if count > MAX_SNAP_PROPS {
+                    return Err(ProtoError::OversizeProps(count));
+                }
+                let mut rows = Vec::with_capacity(count as usize);
+                for _ in 0..count {
+                    rows.push(SnapProp {
+                        site: cur.u32()?,
+                        fragment: cur.u8()?,
+                        phase: cur.u8()?,
+                        pos: cur.vec3()?,
+                        rot: cur.vec4()?,
+                    });
+                }
+                Self::Props {
+                    generation,
+                    tick,
+                    rows,
                 }
             }
             tag => return Err(ProtoError::BadTag(tag)),
@@ -1452,6 +1557,83 @@ mod tests {
             Message::decode(&hot_snap),
             Err(ProtoError::OversizeImpacts(65))
         ));
+    }
+
+    fn prop_row(site: u32, fragment: u8) -> SnapProp {
+        SnapProp {
+            site,
+            fragment,
+            phase: 1,
+            pos: [1.5, -2.0, 300.25],
+            rot: [0.0, 0.5, 0.0, 0.5],
+        }
+    }
+
+    #[test]
+    fn a_props_frame_round_trips() {
+        let msg = Message::Props {
+            generation: 7,
+            tick: 4096,
+            rows: vec![prop_row(0, SNAP_NO_FRAGMENT), prop_row(41_000, 2)],
+        };
+        assert_eq!(Message::decode(&msg.encode().unwrap()).unwrap(), msg);
+        let empty = Message::Props {
+            generation: 1,
+            tick: 0,
+            rows: Vec::new(),
+        };
+        assert_eq!(Message::decode(&empty.encode().unwrap()).unwrap(), empty);
+    }
+
+    #[test]
+    fn a_props_frame_is_bounded_both_ways() {
+        let full = Message::Props {
+            generation: 1,
+            tick: 2,
+            rows: (0..MAX_SNAP_PROPS as u32)
+                .map(|i| prop_row(i, SNAP_NO_FRAGMENT))
+                .collect(),
+        };
+        assert_eq!(Message::decode(&full.encode().unwrap()).unwrap(), full);
+        let over = Message::Props {
+            generation: 1,
+            tick: 2,
+            rows: (0..=MAX_SNAP_PROPS as u32)
+                .map(|i| prop_row(i, SNAP_NO_FRAGMENT))
+                .collect(),
+        };
+        assert_eq!(over.encode(), Err(ProtoError::OversizeProps(97)));
+        // A length that would wrap a u8 still reports a large count.
+        let huge = Message::Props {
+            generation: 1,
+            tick: 2,
+            rows: (0..300).map(|i| prop_row(i, 0)).collect(),
+        };
+        assert_eq!(huge.encode(), Err(ProtoError::OversizeProps(255)));
+        let mut wide = vec![TAG_PROPS];
+        wide.extend_from_slice(&1u64.to_le_bytes());
+        wide.extend_from_slice(&2u64.to_le_bytes());
+        wide.push(MAX_SNAP_PROPS + 1);
+        assert_eq!(Message::decode(&wide), Err(ProtoError::OversizeProps(97)));
+    }
+
+    #[test]
+    fn a_truncated_or_padded_props_frame_is_refused() {
+        let msg = Message::Props {
+            generation: 3,
+            tick: 9,
+            rows: vec![prop_row(5, SNAP_NO_FRAGMENT)],
+        };
+        let bytes = msg.encode().unwrap();
+        for cut in 1..bytes.len() {
+            assert!(
+                Message::decode(&bytes[..cut]).is_err(),
+                "a {cut}-byte prefix decoded"
+            );
+        }
+        let mut padded = bytes;
+        padded.push(0);
+        assert!(Message::decode(&padded).is_err());
     }
 
     #[test]
