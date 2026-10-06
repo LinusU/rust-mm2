@@ -1,3 +1,28 @@
+# Last iteration — repair: a wreck must not farm the gold (new-run iteration 12)
+
+Root cause (review of iteration 11, implementation defect): `cnr_host_step`
+turned every connected car in reach into a pickup `Contact`, including a
+`Disabled` one. After the drop lockout (120 ticks) the wreck sitting on its
+own dropped gold was granted it again (+25 recovery points, Picked event),
+then the `wrecked` check dropped it again — a loop of ~1 grant/second with
+no opponent. The old test only looked one step after the drop, inside the
+lockout.
+
+Fix (`crates/mm2_app/src/cnr.rs`): wrecked players are excluded from the
+pickup contacts and from the delivery attempt. Regression test
+`a_wreck_never_retakes_the_gold_after_the_lockout_ends` keeps a Disabled car
+on the gold for 3x the lockout and asserts no carrier, unchanged score, no
+events, base mass. Raised/unchanged review gaps stay open: everything is
+synthetic, no real Avian vehicle, teardown ordering and the non-authority
+idle path untested, 8 m/s / 25-point recovery are placeholders (ledger
+CNR-12), and "rammers trading the gold for 25 points each" is a design
+placeholder still to revisit with the cop/robber scoring (F27-A open).
+
+Gates: `cargo fmt --all -- --check` PASS; `cargo clippy --workspace --all-targets -- -D warnings` PASS; `cargo test --workspace` PASS (2062 passed, 0 failed; was 2061). The new test was confirmed to FAIL with the guard disabled and pass with it. No test processes left running.
+Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — gold rules over the host's cars (new-run iteration 11)
 
 Selection: the previous review passed with no blocking findings, so no

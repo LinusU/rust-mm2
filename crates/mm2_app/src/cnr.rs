@@ -206,6 +206,11 @@ pub fn cnr_host_step(
             let contacts: Vec<Contact> = connected
                 .iter()
                 .filter_map(|id| {
+                    // A wreck takes nothing: once its lockout ran out it
+                    // would otherwise re-grant (and re-score) forever.
+                    if wrecked.contains(id) {
+                        return None;
+                    }
                     let position = *at.get(id)?;
                     (position.distance(gold_at) <= reach).then_some(Contact {
                         player: *id,
@@ -222,6 +227,7 @@ pub fn cnr_host_step(
         // Delivery, after pickup so a grab and a delivery in one step
         // are both honoured in that order.
         if let Some(carrier) = game.carrier()
+            && !wrecked.contains(&carrier)
             && let Some(&pos) = at.get(&carrier)
         {
             game.deliver(carrier, game.round(), pos);
@@ -596,6 +602,41 @@ mod tests {
         // Still sitting on the gold, still wrecked: locked out.
         r.step();
         assert_eq!(r.game().carrier(), None);
+    }
+
+    #[test]
+    fn a_wreck_never_retakes_the_gold_after_the_lockout_ends() {
+        let mut r = rig(EndRule::None, &[A, B]);
+        let g = r.gold_at();
+        r.put(r.a, g);
+        r.step();
+        let mut damage = VehicleDamage::new(mm2_game::DamageSpec {
+            impact_threshold: 1500.0,
+            med_damage: 150_000.0,
+            max_damage: 321_300.0,
+            regenerate_rate: 0.0,
+        });
+        damage.apply(mm2_game::ImpactId(1), 400_000.0);
+        r.app.world_mut().entity_mut(r.a).insert(damage);
+        r.step();
+        r.events();
+        let score = |r: &Rig| {
+            r.game()
+                .standings()
+                .into_iter()
+                .find(|s| s.player == A)
+                .unwrap()
+                .score
+        };
+        let before = score(&r);
+        let lockout = r.game().rules().drop_lockout_ticks;
+        for _ in 0..(lockout * 3) {
+            r.step();
+        }
+        assert_eq!(r.game().carrier(), None);
+        assert_eq!(score(&r), before);
+        assert!(r.events().is_empty(), "no Picked/Dropped loop");
+        assert_eq!(r.mass(r.a), MASS);
     }
 
     #[test]
