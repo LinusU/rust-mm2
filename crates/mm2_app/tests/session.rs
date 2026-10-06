@@ -1882,6 +1882,7 @@ fn pause_options_back_row_and_a_fresh_pause_start_at_the_top() {
 #[test]
 fn a_cops_and_robbers_session_builds_seats_and_tears_down_its_match() {
     use mm2_app::cnr::{CnrEvent, CnrHost, CnrMarker, MarkerRole};
+    use mm2_app::cnrhud::CnrScoreboard;
     use mm2_assets::{InstallMount, mount_install};
     use mm2_game::SessionMode;
     use mm2_game::cnr_options::CnrSettings;
@@ -1906,12 +1907,14 @@ fn a_cops_and_robbers_session_builds_seats_and_tears_down_its_match() {
     };
     let mut app = test_app(config, 1.0 / 60.0);
     app.insert_resource(Mm2Vfs(vfs))
+        .insert_resource(mm2_app::hud::HudVisible(true))
         .add_message::<CnrEvent>()
         .add_systems(
             Update,
             (
                 mm2_app::cnr::enroll_cnr_participants,
                 mm2_app::cnr::sync_cnr_markers,
+                mm2_app::cnrhud::update_cnr_scoreboard,
             )
                 .chain()
                 .after(session::drive_session),
@@ -1942,6 +1945,19 @@ fn a_cops_and_robbers_session_builds_seats_and_tears_down_its_match() {
     assert_eq!(at(&mut app, MarkerRole::Hideout), Some(sites.hideout));
     assert_eq!(at(&mut app, MarkerRole::Bank), Some(sites.bank));
     assert_eq!(at(&mut app, MarkerRole::Gold), Some(sites.gold));
+    // The readout exists and shows the seated local car's side.
+    app.update();
+    let board: Vec<String> = {
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<&Text, With<CnrScoreboard>>();
+        q.iter(world).map(|t| t.0.clone()).collect()
+    };
+    assert_eq!(board.len(), 1, "one readout per match");
+    assert!(
+        board[0].contains("COPS & ROBBERS") && board[0].contains("YOU: ROBBERS"),
+        "{}",
+        board[0]
+    );
 
     app.world_mut().resource_mut::<SessionControl>().quit = true;
     assert!(
@@ -1950,4 +1966,5 @@ fn a_cops_and_robbers_session_builds_seats_and_tears_down_its_match() {
     );
     assert!(app.world().get_resource::<CnrHost>().is_none());
     assert_eq!(count::<With<CnrMarker>>(&mut app), 0);
+    assert_eq!(count::<With<CnrScoreboard>>(&mut app), 0);
 }

@@ -177,6 +177,7 @@ pub fn start_match(
     )
     .map_err(|e| format!("Cops & Robbers cannot start in {city:?}: {e:?}"))?;
     let report = spawn_cnr_markers(commands, vfs, &host, meshes, images, materials, owner);
+    crate::cnrhud::spawn_cnr_scoreboard(commands, owner);
     // Only the authority plays the match. A client built the same draw
     // (same seed, same pool) to place its markers where the round
     // starts, and then follows the host's replica

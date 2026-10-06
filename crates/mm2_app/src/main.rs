@@ -1332,6 +1332,9 @@ fn main() {
     // F27-B.2b: the gold/hideout/bank markers follow the host's match
     // (idle until a `CnrHost` exists and markers are spawned).
     .add_systems(Update, cnr::sync_cnr_markers)
+    // F27-B.4c: the match readout (clock, points, the gold) — idle
+    // until a Cops & Robbers session spawned its panel.
+    .add_systems(Update, mm2_app::cnrhud::update_cnr_scoreboard)
     // Drawbridge leaves pose after the solver step, like the lane
     // followers: the angular velocity they leave carries the next step.
     .init_resource::<mm2_app::worldclock::WorldClock>()

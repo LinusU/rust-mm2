@@ -1,3 +1,52 @@
+# Last iteration — F27-B.4c (HUD leg): the Cops & Robbers match readout (new-run iteration 19)
+
+Selection: the previous review passed with no blocking findings; its
+gaps (fmt/clippy absent from `verify.log`, MM2_RETAIL tests skipped
+there) are log matters I cannot repair. The match is reachable from the
+command line but a player could not see the clock, their points or the
+gold's state, so the HUD is the next smallest honest leg of B.4c. The
+in-game menu offer stays queued behind it (a menu entry on a match with
+no readout would have been a thin button).
+
+Change:
+- `mm2_app::cnrhud` (new): `scoreboard_lines(view, me, hz)` (pure) and
+  `update_cnr_scoreboard` (reads `CnrHost` on the authority, else
+  `CnrReplica`; the local participant is the `PlayerControl::Local` car
+  through `participant_id`). Lines: clock/limit, team totals or rank +
+  points, the gold's state (carried by you → which marker to take it to,
+  by someone, loose, up for grabs) or the result once decided.
+  `spawn_cnr_scoreboard` is called from `cnr::start_match`;
+  `camera::retarget_hud` pins it (`HudNodes`); the `H` gate hides it.
+- Layout, wording and dev-font text are designed (original instrument
+  art unrecovered); the data shown matches the documented mode.
+- Docs: README, ledger CNR-12, PLAN row.
+
+Tests: 8 `cnrhud` unit tests (clock rounding, timed FFA countdown/rank,
+point-limit target and lone driver, team totals + hideout/bank wording,
+rival naming, frozen clock + result variants, ordinals, and the system
+end to end: host vs replica precedence, `H` gate, no match → hidden);
+the `MM2_RETAIL`-gated session test now also asserts one readout with
+"COPS & ROBBERS" and "YOU: ROBBERS" in retail sf and none after
+teardown.
+
+Evidence: `cargo fmt --all -- --check` PASS; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` exit 0;
+`cargo test --locked --workspace` exit 0 (2116 passed, 0 failed; was
+2108). `MM2_RETAIL=/Users/linus/coding/rust-mm2/retail cargo test
+--locked -p mm2_app --test app cops_and_robbers` ran (0.56 s) and passed.
+Graphical: `mm2 --mm2-path <retail> --city sf --cnr cops --cnr-limit
+250pts --frames 90 --screenshot` rendered; the panel sits top-right
+("COPS & ROBBERS first to 250 / ROBBERS 0 COPS 0 / YOU: ROBBERS 0 pts /
+THE GOLD IS UP FOR GRABS"), screenshot kept local (original content).
+No audio, no two-process match; the client path is covered by the
+replica unit test only. No test processes left.
+
+Not verified / open: in-game menu entry, commentary, rematch, client
+carrier-mass prediction, two-process started match; F27-AC01..06 open.
+Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F27-B.4c (CLI leg): offer Cops & Robbers from the command line (new-run iteration 18)
 
 Selection: the previous review passed with no blocking findings. Its

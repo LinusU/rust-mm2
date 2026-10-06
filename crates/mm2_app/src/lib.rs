@@ -13,6 +13,7 @@ pub mod camera;
 pub mod car_visual;
 pub mod city;
 pub mod cnr;
+pub mod cnrhud;
 pub mod cnrnet;
 pub mod contracts;
 pub mod damage;

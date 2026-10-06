@@ -528,6 +528,7 @@ type HudNodes = Or<(
     With<crate::race::LowTimeWarning>,
     With<crate::racetime::RaceTimer>,
     With<crate::racestat::RaceStats>,
+    With<crate::cnrhud::CnrScoreboard>,
 )>;
 
 /// Keep the HUD on whichever world camera is active — UI otherwise
