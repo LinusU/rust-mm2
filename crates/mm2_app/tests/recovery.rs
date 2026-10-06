@@ -889,3 +889,98 @@ fn a_car_tipped_up_a_bank_keeps_its_anchor() {
         anchor_of(&app, car)
     );
 }
+
+/// Fire one out-of-bounds recovery for `object` landing at `landing`.
+fn recover_to(app: &mut App, object: ObjectId, landing: (Vec3, f32)) {
+    let generation = app.world().resource::<Session>().generation();
+    app.world_mut()
+        .resource_mut::<Messages<RecoveryEvent>>()
+        .write(RecoveryEvent {
+            object,
+            generation,
+            tick: 0,
+            cause: RecoveryCause::OutOfBounds,
+            landing: Some(landing),
+        });
+    app.update();
+}
+
+/// The deepest any hull corner of the car, as it stands now, lies under
+/// the plane `y = through.y + (x − through.x) · tan(deg)`.
+fn depth_under_bank(app: &App, car: Entity, through: Vec3, deg: f32) -> f32 {
+    let pos = position(app, car);
+    let rot = app.world().get::<Rotation>(car).unwrap().0;
+    mm2_vehicle::hull_points(&VehicleConfig::default())
+        .into_iter()
+        .map(|p| pos + rot * Vec3::from(p))
+        .map(|w| through.y + (w.x - through.x) * deg.to_radians().tan() - w.y)
+        .fold(f32::MIN, f32::max)
+}
+
+/// Every reset sets a car down level, but an anchor can lie on a slope
+/// the car stood on tilted: level at the anchor its uphill end would be
+/// inside the slope, on city ground solid only from above. The landing
+/// is seated on the highest ground under the car's level footprint.
+#[test]
+fn a_recovery_anchored_on_a_slope_lands_on_top_of_it() {
+    let (mut app, car, object) = recovery_app(Vec3::new(0.0, 1.2, 0.0));
+    let through = Vec3::new(200.0, 10.0, 0.0);
+    bank(&mut app, through, 25.0);
+    // Where a car resting nose-up on the 25° slope had its origin.
+    let tilt = Quat::from_rotation_z(25f32.to_radians());
+    let ground_y = mm2_vehicle::HandlingMetrics::of(&VehicleConfig::default()).ground_y;
+    let anchor = through + tilt * Vec3::new(0.0, -ground_y, 0.0);
+    recover_to(&mut app, object, (anchor, -std::f32::consts::FRAC_PI_2));
+    assert_eq!(report(&app).recovered, 1);
+    let depth = depth_under_bank(&app, car, through, 25.0);
+    assert!(
+        depth <= 0.0,
+        "the landing put a hull corner {depth} m inside the slope"
+    );
+    assert!(
+        depth > -1.5,
+        "seated on the slope, not high above it ({depth})"
+    );
+}
+
+/// A landing with nothing under it would only fall again and recover
+/// onto the same spot for ever — the session spawn takes the car instead.
+#[test]
+fn a_landing_with_no_ground_under_it_falls_back_to_the_spawn() {
+    let (mut app, car, object) = recovery_app(Vec3::new(0.0, 1.2, 0.0));
+    recover_to(&mut app, object, (Vec3::new(500.0, 5.0, 500.0), 0.0));
+    assert_eq!(report(&app).recovered, 1);
+    let pos = position(&app, car);
+    assert!(
+        pos.distance(Vec3::new(SPAWN.x, pos.y, SPAWN.z)) < 0.1,
+        "a groundless landing recovers to the spawn, got {pos}"
+    );
+    // Settled there, the car anchors on the spawn's ground.
+    run(&mut app, 60);
+    let anchor = anchor_of(&app, car);
+    assert!(
+        anchor.distance(Vec3::new(SPAWN.x, anchor.y, SPAWN.z)) < 0.5,
+        "the detector re-anchors at the spawn, got {anchor}"
+    );
+}
+
+/// Only ground that anchored the car seats its landing: another car
+/// parked alongside must not lift it onto its roof.
+#[test]
+fn a_landing_beside_another_car_is_not_lifted_onto_it() {
+    let (mut app, car, object) = recovery_app(Vec3::new(0.0, 1.2, 0.0));
+    let floor = position(&app, car);
+    let beside = floor + Vec3::new(1.5, 0.0, 0.0);
+    app.world_mut().spawn((
+        vehicle_bundle(&VehicleConfig::default()),
+        Position(beside),
+        Transform::from_translation(beside),
+    ));
+    run(&mut app, 30);
+    recover_to(&mut app, object, (floor, 0.0));
+    let pos = position(&app, car);
+    assert!(
+        pos.y < floor.y + 0.3,
+        "landed on the neighbour's roof at {pos} (floor pose {floor})"
+    );
+}

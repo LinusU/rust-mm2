@@ -15,8 +15,9 @@
 //!   physics step trips the wheel raycast first.)
 //! - [`resolve_recovery`] answers a detection with [`ResetVehicle`]
 //!   to the recorded anchor — the last pose dry ground proved
-//!   recoverable — falling back to the session spawn when the car
-//!   never touched dry ground. The reset marks the car `Teleported`,
+//!   recoverable — set down level on the ground under it, falling back
+//!   to the session spawn when the car never touched dry ground or no
+//!   ground lies under the landing. The reset marks the car `Teleported`,
 //!   so it can never sweep a checkpoint (F05 req 5). Local
 //!   participants' trailers re-seat at their authored offsets, the
 //!   same rule `resolve_stuck` follows.
@@ -41,7 +42,10 @@ use mm2_game::{
     DamageTier, GroundContact, ObjectId, ObjectIdentity, Player, PlayerControl, RecoveryCause,
     RecoveryEvent, RecoveryVerdict, Session, VehicleDamage, VehicleRecovery, VehicleStuck,
 };
-use mm2_vehicle::{ResetVehicle, TireSurface, Vehicle, VehicleState};
+use mm2_vehicle::{
+    HandlingMetrics, ResetVehicle, TireSurface, Vehicle, VehicleConfig, VehicleState, hull_points,
+    seat_level,
+};
 
 use crate::city::WorldFloor;
 use crate::session::SpawnPoint;
@@ -123,6 +127,10 @@ const ANCHOR_MIN_UPRIGHT: f32 = 0.866;
 /// above its wheels' contacts.
 const ANCHOR_SUPPORT_REACH: f32 = 3.0;
 
+/// Head start the landing probes get above the highest ground an
+/// anchor can have under its level footprint, metres.
+const LANDING_PROBE_MARGIN: f32 = 0.5;
+
 /// The anchor test on top of a dry wheel contact: whether static dry
 /// ground holds the car up.
 ///
@@ -185,6 +193,53 @@ impl SupportProbe<'_, '_> {
         let point = com - Vec3::Y * hit.distance;
         let deadly = water.is_some_and(|water| water.is_deadly(point));
         self.is_static(hit.entity) && surface.map_or(0.0, |s| s.drag) < water_min_drag && !deadly
+    }
+
+    /// `car` set down level at `position` facing `yaw` on the static
+    /// ground under its footprint ([`seat_level`]) — `None` when none
+    /// lies under it. Only ground that anchored the car counts: another
+    /// car or a raised drawbridge leaf beside the anchor must not lift
+    /// the landing onto its roof or deck.
+    ///
+    /// An anchor's car stood within 30° of level ([`ANCHOR_MIN_UPRIGHT`]),
+    /// so the ground under its level footprint lies at most the
+    /// footprint's reach × tan 30° above the ground under the anchor: the
+    /// probes start that far up, plus [`LANDING_PROBE_MARGIN`] — and
+    /// never above whatever is overhead, since a probe that starts over a
+    /// bridge deck or a tunnel roof would land the car on top of it.
+    fn seat_landing(
+        &self,
+        car: Entity,
+        config: &VehicleConfig,
+        position: Vec3,
+        yaw: f32,
+    ) -> Option<Vec3> {
+        let reach = hull_points(config)
+            .into_iter()
+            .chain(config.wheels.iter().map(|w| w.position))
+            .map(|p| Vec2::new(p[0], p[2]).length())
+            .fold(0.0, f32::max);
+        let ground = position.y + HandlingMetrics::of(config).ground_y;
+        let mut top = ground + reach * ANCHOR_MIN_UPRIGHT.acos().tan() + LANDING_PROBE_MARGIN;
+        let com = position + Quat::from_rotation_y(yaw) * Vec3::from(config.center_of_mass);
+        let filter = SpatialQueryFilter::default().with_excluded_entities([car]);
+        if top > com.y
+            && let Some(hit) = self
+                .spatial
+                .cast_ray(com, Dir3::Y, top - com.y, false, &filter)
+        {
+            top = com.y + hit.distance - 0.05;
+        }
+        seat_level(
+            &self.spatial,
+            car,
+            config,
+            position,
+            yaw,
+            top,
+            ground - ANCHOR_SUPPORT_REACH,
+            &|collider| self.is_static(collider),
+        )
     }
 }
 
@@ -274,11 +329,16 @@ pub fn track_recovery(
 
 /// Fixed-step: answer each [`RecoveryEvent`] with the bounded
 /// recovery — [`ResetVehicle`] to the detector's anchor, the last pose
-/// a dry grounded wheel proved recoverable. A detector that never
-/// touched dry ground (`landing: None`) falls back to the session
-/// [`SpawnPoint`]; a session with no spawn at all cannot resolve and
-/// the event is spent — a count in `recovered` always means a real
-/// reset. Local, AI and remote participants resolve identically — on
+/// a dry grounded wheel proved recoverable, set down level on the
+/// ground under it (`SupportProbe::seat_landing`): every reset lands a car level,
+/// and level at the height it stood on a slope its uphill end would be
+/// inside the slope. A detector that never touched dry ground
+/// (`landing: None`) falls back to the session [`SpawnPoint`], and so
+/// does a landing with no ground under it — set down there the car
+/// would only fall again, recovering onto the same spot for ever. A
+/// session with no spawn at all cannot resolve and the event is spent —
+/// a count in `recovered` always means a real reset. Local, AI and
+/// remote participants resolve identically — on
 /// the authority a remote car's recovery is this process's to declare,
 /// and the reset reaches its copies through the snapshot stream
 /// (F25-A.4).
@@ -290,12 +350,18 @@ pub fn track_recovery(
 /// recovered tractor through [`crate::session::reseat_towed_trailers`],
 /// the stream follower — for a remote rig exactly as for the local
 /// one.
+#[allow(clippy::too_many_arguments)] // Bevy system: the resolver threads the session handles it acts on
 pub fn resolve_recovery(
     mut reader: MessageReader<RecoveryEvent>,
     session: Res<Session>,
     spawn: Option<Res<SpawnPoint>>,
+    support: SupportProbe,
     identities: Query<(Entity, &ObjectIdentity, Option<&Player>)>,
-    mut vehicles: Query<(&mut VehicleRecovery, Option<&mut VehicleStuck>)>,
+    mut vehicles: Query<(
+        &mut VehicleRecovery,
+        Option<&mut VehicleStuck>,
+        Option<&Vehicle>,
+    )>,
     mut resets: MessageWriter<ResetVehicle>,
     mut report: ResMut<RecoveryReport>,
 ) {
@@ -326,11 +392,25 @@ pub fn resolve_recovery(
         if control.is_none() {
             continue;
         }
-        let landing = event
+        let anchor = event
             .landing
-            .or_else(|| vehicles.get(entity).ok().and_then(|(d, _)| d.anchor()))
-            .or_else(|| spawn.as_ref().map(|s| (s.position, s.yaw)));
-        let Some((position, yaw)) = landing else {
+            .or_else(|| vehicles.get(entity).ok().and_then(|(d, ..)| d.anchor()));
+        let seated = anchor.and_then(|(position, yaw)| {
+            match vehicles.get(entity).ok().and_then(|(.., vehicle)| vehicle) {
+                Some(vehicle) => support
+                    .seat_landing(entity, &vehicle.config, position, yaw)
+                    .map(|seated| (seated, yaw)),
+                None => Some((position, yaw)),
+            }
+        });
+        if anchor.is_some() && seated.is_none() {
+            debug!(tick = event.tick, "no ground under the recovery landing");
+        }
+        // No ground under the landing: the spawn is the landing of last
+        // resort, as for a car that never stood anywhere — and only
+        // without one does the bare anchor stand.
+        let spawn_pose = spawn.as_ref().map(|s| (s.position, s.yaw));
+        let Some((position, yaw)) = seated.or(spawn_pose).or(anchor) else {
             continue;
         };
         // The local driver's reset is the one a player notices — say
@@ -345,7 +425,7 @@ pub fn resolve_recovery(
             position,
             yaw,
         });
-        if let Ok((mut detector, stuck)) = vehicles.get_mut(entity) {
+        if let Ok((mut detector, stuck, _)) = vehicles.get_mut(entity) {
             // Re-anchor on the landing and clear the episode — a
             // landing back on water starts a fresh dwell, not a
             // carried-over one.
