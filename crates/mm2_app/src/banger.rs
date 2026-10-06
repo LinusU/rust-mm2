@@ -520,7 +520,9 @@ fn break_banger(
             piece,
             BangerFragment {
                 parent: entity,
-                index: index.min(u8::MAX as usize) as u8,
+                // 255 is the wire's "the placement itself" sentinel, so a
+                // pathological set clamps to 254 rather than alias it.
+                index: index.min(usize::from(u8::MAX - 1)) as u8,
             },
             FragmentSpawn {
                 object,

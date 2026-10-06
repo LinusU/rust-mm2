@@ -65,6 +65,14 @@ pub const RESEND_WINDOW: usize = 8;
 /// loads (rows hold until the world exists).
 pub const MAX_STAGED_PROPS: usize = 4096;
 
+/// Applied-row watermarks a client remembers. Only rows that resolved
+/// against the local world are recorded, so the key space is already
+/// bounded by the world's placements x pieces; this cap is the hard
+/// backstop. At the bound a new prop simply goes unwatermarked (a
+/// reordered older row for it may then re-apply — harmless, phases only
+/// move forward) instead of the ledger growing.
+pub const MAX_APPLIED_PROPS: usize = 16384;
+
 /// Publish every this-many frames: the active set moves continuously,
 /// and half the frame rate is plenty for a prop that has no
 /// interpolation to hide behind anyway.
@@ -173,11 +181,27 @@ impl PropStage {
         self.rows.len()
     }
 
+    /// Applied-row watermarks currently remembered.
+    pub fn remembered(&self) -> usize {
+        self.applied.len()
+    }
+
+    /// Record that the row drained with `stamp` resolved against the
+    /// local world, so an older row for the same prop is stale from now
+    /// on. Unresolvable rows are never recorded: a host cannot grow the
+    /// ledger with keys that name nothing here.
+    fn remember(&mut self, key: PropKey, stamp: (u64, u64)) {
+        if self.applied.contains_key(&key) || self.applied.len() < MAX_APPLIED_PROPS {
+            self.applied.insert(key, stamp);
+        }
+    }
+
     /// Drain the staged rows of the `wire` generation in a
-    /// deterministic order — placements before their fragments — and
-    /// remember each as applied. Rows stamped for another generation
-    /// are dropped counted: never replayed into this session.
-    fn drain_for(&mut self, wire: u64) -> Vec<SnapProp> {
+    /// deterministic order — placements before their fragments — each
+    /// with the stamp to [`remember`](Self::remember) once it resolves.
+    /// Rows stamped for another generation are dropped counted: never
+    /// replayed into this session.
+    fn drain_for(&mut self, wire: u64) -> Vec<(SnapProp, (u64, u64))> {
         let mut rows: Vec<(PropKey, u64, u64, SnapProp)> = self
             .rows
             .drain()
@@ -186,10 +210,9 @@ impl PropStage {
         // A placement (`SNAP_NO_FRAGMENT`) sorts before its pieces.
         rows.sort_by_key(|(key, ..)| (key.0, key.1 != SNAP_NO_FRAGMENT, key.1));
         let mut current = Vec::with_capacity(rows.len());
-        for (key, generation, tick, row) in rows {
+        for (_, generation, tick, row) in rows {
             if generation == wire {
-                self.applied.insert(key, (generation, tick));
-                current.push(row);
+                current.push((row, (generation, tick)));
             } else {
                 self.unresolved += 1;
             }
@@ -403,7 +426,7 @@ pub fn apply_props(
     }
     let owner = SessionEntity(session.generation());
     let wire = session.wire_generation();
-    for row in snaps.props.drain_for(wire) {
+    for (row, stamp) in snaps.props.drain_for(wire) {
         let resolved = apply_row(
             &row,
             &mut commands,
@@ -415,6 +438,7 @@ pub fn apply_props(
         );
         if resolved {
             snaps.props.landed += 1;
+            snaps.props.remember(key_of(&row), stamp);
         } else {
             snaps.props.unresolved += 1;
         }
@@ -606,7 +630,9 @@ mod tests {
         assert_eq!(stage.stale(), 1);
         let rows = stage.drain_for(1);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].phase, PROP_SETTLED);
+        assert_eq!(rows[0].0.phase, PROP_SETTLED);
+        // The apply resolved, so its watermark is recorded.
+        stage.remember(key_of(&rows[0].0), rows[0].1);
         // An older row after the apply is still stale — the applied
         // watermark outlives the drain.
         stage.push(1, 8, vec![row(3, SNAP_NO_FRAGMENT, PROP_ACTIVE)]);
@@ -638,7 +664,7 @@ mod tests {
                 row(4, 0, PROP_SETTLED),
             ],
         );
-        let order: Vec<(u32, u8)> = stage.drain_for(1).iter().map(key_of).collect();
+        let order: Vec<(u32, u8)> = stage.drain_for(1).iter().map(|(r, _)| key_of(r)).collect();
         assert_eq!(
             order,
             vec![(2, SNAP_NO_FRAGMENT), (4, SNAP_NO_FRAGMENT), (4, 0), (4, 2)]
@@ -668,8 +694,45 @@ mod tests {
         stage.push(8, 1, vec![row(2, SNAP_NO_FRAGMENT, PROP_ACTIVE)]);
         let rows = stage.drain_for(8);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].site, 2);
+        assert_eq!(rows[0].0.site, 2);
         assert_eq!(stage.unresolved(), 1);
+    }
+
+    #[test]
+    fn unresolvable_rows_never_grow_the_applied_ledger() {
+        // A host streaming ever-new keys that name nothing here: each
+        // drain empties the inbox, and none is remembered.
+        let mut stage = PropStage::default();
+        for frame in 0..(MAX_STAGED_PROPS as u32 / MAX_SNAP_PROPS as u32 + 8) * 3 {
+            let rows: Vec<SnapProp> = (0..MAX_SNAP_PROPS as u32)
+                .map(|n| {
+                    row(
+                        frame * MAX_SNAP_PROPS as u32 + n,
+                        SNAP_NO_FRAGMENT,
+                        PROP_SETTLED,
+                    )
+                })
+                .collect();
+            stage.push(1, u64::from(frame), rows);
+            // The apply found nothing: the drained rows are not remembered.
+            let _ = stage.drain_for(1);
+        }
+        assert_eq!(stage.remembered(), 0);
+        assert_eq!(stage.staged(), 0);
+    }
+
+    #[test]
+    fn the_applied_ledger_has_a_hard_cap_even_for_resolved_rows() {
+        let mut stage = PropStage::default();
+        for site in 0..MAX_APPLIED_PROPS as u32 + 50 {
+            stage.remember((site, SNAP_NO_FRAGMENT), (1, 1));
+        }
+        assert_eq!(stage.remembered(), MAX_APPLIED_PROPS);
+        // A prop already remembered still advances at the cap.
+        stage.remember((0, SNAP_NO_FRAGMENT), (1, 9));
+        stage.push(1, 5, vec![row(0, SNAP_NO_FRAGMENT, PROP_ACTIVE)]);
+        assert_eq!(stage.stale(), 1);
+        assert_eq!(stage.remembered(), MAX_APPLIED_PROPS);
     }
 
     #[test]

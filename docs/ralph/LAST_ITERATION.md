@@ -1,4 +1,27 @@
-# Last iteration — world-prop replication (new-run iteration 2)
+# Last iteration — world-prop replication repair (new-run iteration 3)
+
+**Recovery of review rejection for iteration 2 (F26-A).** Root cause
+(implementation): `PropStage::drain_for` recorded every drained
+current-generation row in the unbounded `applied` watermark map, resolved
+or not, so a host streaming ever-new `(site, fragment)` keys grew client
+memory for the whole session while docs claimed a bound. Fix: `applied`
+is now written only by `PropStage::remember`, called from `apply_props`
+for rows that resolved against the local world, and is hard-capped at
+`MAX_APPLIED_PROPS` (16,384; at the cap a new prop is simply
+unwatermarked, harmless since phases only move forward). Regression
+tests: `unresolvable_rows_never_grow_the_applied_ledger` (drains >4,096
+distinct unresolvable keys across frames, ledger stays 0) and
+`the_applied_ledger_has_a_hard_cap_even_for_resolved_rows`. Also guarded
+the reviewer's `BangerFragment.index` gap: clamp is now 254 so a
+pathological set can never alias the 255 placement sentinel. Still open
+(unchanged, reviewer-listed): two-process retail site-agreement check,
+measured impairment/real-GPU legs for `Props`. Status: implemented
+candidate, not independently checked. Results of this repair's gates are
+at the end of this file.
+
+---
+
+# Previous iteration — world-prop replication (new-run iteration 2)
 
 Selection: F26-A, the prop half of F26-AC01. The previous review passed
 with no blocking findings, so no repair work was owed. Of the operator's
@@ -58,3 +81,11 @@ site→position table is the next evidence step; traffic/weather/time-of-
 day replication; late-join beyond the resend cycle (~sites/8 frames);
 drawbridge/mover/sound state still clock-only. Status: implemented
 candidate, not independently checked.
+
+## Repair gate results (iteration 3)
+
+`cargo fmt --all -- --check` exit 0; `cargo clippy --locked --workspace
+--all-targets --all-features -- -D warnings` exit 0; `cargo test --locked
+--workspace` exit 0 (1962 passed, 0 failed; includes the 2 new
+`worldprops` ledger tests). No retail/graphical run this iteration. No
+test processes left running.
