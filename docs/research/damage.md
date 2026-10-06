@@ -227,8 +227,11 @@ gated, drains stale input) arms off the same deduplicated
 per tick — `StuckReport` (`vsk=` smoke field) counts armed/
 detections/recovered. `resolve_stuck` answers a detection with the
 bounded in-place recovery: `ResetVehicle` onto
-`upright_recovery_pose` — heading kept, hull dropped onto the
-surface it already rests on — local and AI participants identically
+`seated_upright_pose` — heading kept, the level car set down on top
+of the highest ground under its footprint (probed straight down from
+the resting hull's top corner; on a slope the old lowest-corner drop
+buried the uphill half in the one-sided ground and the car fell
+through) — local and AI participants identically
 (designed, UNK-13), trailers re-seated at their authored offsets;
 remote participants are skipped (F25+). `Rotation` 0 and
 `Translation` ≈ 0.1 on every retail record support the in-place

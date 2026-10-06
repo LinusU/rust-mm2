@@ -47,7 +47,7 @@ use mm2_game::{
     PlayerControl, RaceState, Session, VehicleBreakdown, VehicleBreaks, VehicleDamage,
     VehicleStuck, disabled_outcome,
 };
-use mm2_vehicle::{EngineImpairment, ResetVehicle};
+use mm2_vehicle::{EngineImpairment, ResetVehicle, UprightLanding};
 
 use crate::breakaway::{BreakPartVisual, BreakReport};
 use crate::session::{SessionControl, SpawnPoint};
@@ -219,7 +219,7 @@ pub fn resolve_disabled(
     spawn: Option<Res<SpawnPoint>>,
     mut race: Option<ResMut<RaceState>>,
     identities: Query<(Entity, &ObjectIdentity, Option<&Player>)>,
-    poses: Query<(&Position, &Rotation)>,
+    landing: UprightLanding,
     mut damaged: Query<(&mut VehicleDamage, Has<VehicleBreakdown>)>,
     mut stuck: Query<&mut VehicleStuck>,
     mut resets: MessageWriter<ResetVehicle>,
@@ -323,13 +323,10 @@ pub fn resolve_disabled(
                         report.recovered += 1;
                     }
                     DisabledOutcome::PenaltyReset => {
-                        if let Some((position, rotation)) =
-                            poses.get(entity).ok().filter(|(p, _)| p.0.is_finite())
-                        {
-                            let (_, yaw, _) = rotation.0.to_euler(EulerRot::YXZ);
+                        if let Some((position, yaw)) = landing.of(entity) {
                             resets.write(ResetVehicle {
                                 entity: Some(entity),
-                                position: position.0,
+                                position,
                                 yaw,
                             });
                         }
@@ -357,13 +354,10 @@ pub fn resolve_disabled(
             // host a remote car is this authority's participant, so its
             // reset+repair rides the next snapshot down (F25-A.4).
             Some(PlayerControl::Ai) | Some(PlayerControl::Remote) => {
-                if let Some((position, rotation)) =
-                    poses.get(entity).ok().filter(|(p, _)| p.0.is_finite())
-                {
-                    let (_, yaw, _) = rotation.0.to_euler(EulerRot::YXZ);
+                if let Some((position, yaw)) = landing.of(entity) {
                     resets.write(ResetVehicle {
                         entity: Some(entity),
-                        position: position.0,
+                        position,
                         yaw,
                     });
                 }

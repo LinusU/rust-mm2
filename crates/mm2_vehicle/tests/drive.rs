@@ -987,3 +987,91 @@ fn engine_load_tracks_delivered_demand() {
     }
     assert!(saw_airborne, "car never left the ground");
 }
+
+/// A car righted in place on a slope: every reset sets a car down level,
+/// and a car resting nose-up on a 30° ramp spans more than two metres of
+/// rise along its length. Level at the height of its lowest corner — the
+/// downhill end — its uphill half would be set inside the ramp; on city
+/// ground, which is solid only from above, the car then dropped through
+/// and out of the world (the bank under Tower Bridge's southern
+/// junction). [`UprightLanding`] seats the level car on the highest
+/// ground under its footprint instead.
+#[test]
+fn a_car_righted_on_a_slope_lands_on_top_of_it() {
+    let (mut app, car) = test_app();
+    let slope = 30f32.to_radians();
+    let ground: Vec<Entity> = app
+        .world_mut()
+        .query_filtered::<Entity, With<RigidBody>>()
+        .iter(app.world())
+        .filter(|&e| e != car)
+        .collect();
+    for e in ground {
+        app.world_mut().despawn(e);
+    }
+    // A ramp rising along +X whose top face passes through the origin:
+    // y = x · tan(slope).
+    let tilt = Quat::from_rotation_z(slope);
+    let centre = tilt * Vec3::new(0.0, -0.5, 0.0);
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::cuboid(60.0, 1.0, 60.0),
+        Position(centre),
+        Rotation(tilt),
+        Transform::from_translation(centre).with_rotation(tilt),
+    ));
+    // Resting on its wheels along the slope, nose uphill (+X).
+    let cfg = VehicleConfig::default();
+    let ground_y = mm2_vehicle::HandlingMetrics::of(&cfg).ground_y;
+    let pose = tilt * Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2);
+    let at = tilt * Vec3::new(0.0, -ground_y, 0.0);
+    {
+        let world = app.world_mut();
+        world.get_mut::<Position>(car).unwrap().0 = at;
+        world.get_mut::<Rotation>(car).unwrap().0 = pose;
+        let mut xf = world.get_mut::<Transform>(car).unwrap();
+        xf.translation = at;
+        xf.rotation = pose;
+    }
+    // One step builds the spatial query pipeline with the ramp in it;
+    // put the pose back exactly afterwards.
+    app.update();
+    {
+        let world = app.world_mut();
+        world.get_mut::<Position>(car).unwrap().0 = at;
+        world.get_mut::<Rotation>(car).unwrap().0 = pose;
+    }
+
+    let surface = |w: Vec3| w.x * slope.tan();
+    let buried = |landing: Vec3, yaw: f32| {
+        mm2_vehicle::hull_points(&cfg)
+            .into_iter()
+            .map(|p| landing + Quat::from_rotation_y(yaw) * Vec3::from(p))
+            .map(|w| surface(w) - w.y)
+            .fold(f32::MIN, f32::max)
+    };
+    // The lowest-corner landing buries the uphill half of the car.
+    let (old, old_yaw) = mm2_vehicle::upright_recovery_pose(&cfg, at, pose);
+    assert!(
+        buried(old, old_yaw) > 1.0,
+        "the unprobed landing should sink into the ramp, by {}",
+        buried(old, old_yaw)
+    );
+    let world = app.world_mut();
+    let mut state = bevy::ecs::system::SystemState::<mm2_vehicle::UprightLanding>::new(world);
+    let landing = state.get(world).unwrap();
+    let (seated, yaw) = landing.of(car).expect("a vehicle with a finite pose");
+    assert!(
+        (yaw - old_yaw).abs() < 1e-4,
+        "the heading is kept ({yaw} vs {old_yaw})"
+    );
+    let depth = buried(seated, yaw);
+    assert!(
+        depth <= 0.0,
+        "the seated landing still puts a hull corner {depth} m inside the ramp"
+    );
+    assert!(
+        depth > -1.5,
+        "seated on the ramp, not high above it ({depth})"
+    );
+}

@@ -10,8 +10,9 @@
 //!   `m_LastImpactPos` — then advances every armed detector once per
 //!   fixed step, emitting one [`StuckEvent`] per fired episode.
 //! - [`resolve_stuck`] answers a detection with the bounded recovery:
-//!   [`ResetVehicle`] onto the [`upright_recovery_pose`] — heading kept,
-//!   hull dropped onto the surface it already rests on, in place. In
+//!   [`ResetVehicle`] onto the
+//!   [`seated_upright_pose`](mm2_vehicle::seated_upright_pose) — heading kept,
+//!   the level car set down on the ground under it, in place. In
 //!   place is the safe reading of the authored bounds: `Rotation` is 0
 //!   on every retail record (a yaw change is not authored) and
 //!   `Translation` ≈ 0.1 m (no positional rescue is authored either —
@@ -38,7 +39,7 @@ use mm2_game::{
     DamageTier, ImpactEvent, ObjectId, ObjectIdentity, Player, PlayerControl, Session, StuckEvent,
     StuckVerdict, VehicleDamage, VehicleStuck,
 };
-use mm2_vehicle::{ResetVehicle, Vehicle, upright_recovery_pose};
+use mm2_vehicle::{ResetVehicle, UprightLanding};
 
 /// Per-session evidence counters for the stuck pipeline — the `vsk=`
 /// field of the headless smoke record. Session-scoped like
@@ -150,7 +151,7 @@ pub fn track_stuck(
 }
 
 /// Fixed-step: answer each [`StuckEvent`] with the bounded in-place
-/// recovery — [`ResetVehicle`] onto the [`upright_recovery_pose`], the
+/// recovery — [`ResetVehicle`] onto the [`seated_upright_pose`], the
 /// same landing [`vehicle_self_right`] computes. Local, AI and remote
 /// participants recover identically (designed — the original's opponent
 /// stuck behavior is unverified, UNK-13; a remote car's reset rides the
@@ -159,11 +160,12 @@ pub fn track_stuck(
 /// [`crate::session::reseat_towed_trailers`], the stream follower.
 ///
 /// [`vehicle_self_right`]: mm2_vehicle::systems::vehicle_self_right
+/// [`seated_upright_pose`]: mm2_vehicle::seated_upright_pose
 pub fn resolve_stuck(
     mut reader: MessageReader<StuckEvent>,
     session: Res<Session>,
     identities: Query<(Entity, &ObjectIdentity, Option<&Player>)>,
-    vehicles: Query<(&Position, &Rotation, &Vehicle)>,
+    landing: UprightLanding,
     mut resets: MessageWriter<ResetVehicle>,
     mut report: ResMut<StuckReport>,
 ) {
@@ -191,10 +193,9 @@ pub fn resolve_stuck(
         if control.is_none() {
             continue;
         }
-        let Ok((pos, rot, vehicle)) = vehicles.get(entity) else {
+        let Some((position, yaw)) = landing.of(entity) else {
             continue;
         };
-        let (landing, yaw) = upright_recovery_pose(&vehicle.config, pos.0, rot.0);
         if control == Some(PlayerControl::Local) {
             info!(
                 tick = event.tick,
@@ -203,7 +204,7 @@ pub fn resolve_stuck(
         }
         resets.write(ResetVehicle {
             entity: Some(entity),
-            position: landing,
+            position,
             yaw,
         });
         report.recovered += 1;

@@ -825,8 +825,11 @@ type SelfRightQuery<'w, 's> = Query<
 /// the car faces. And the surface is measured, not guessed: the car may
 /// be on a bridge, a kerb or a hillside, and the resting hull is already
 /// touching that surface — so its lowest corner says where it is, no
-/// raycast needed. Shared by [`vehicle_self_right`] and the game-side
-/// `vehstuck` recovery so both land a car the same way.
+/// raycast needed. On a steep slope that corner is the downhill end and
+/// the level car would sink into the slope above it, so
+/// [`vehicle_self_right`] and the game-side `vehstuck` recovery land
+/// through [`seated_upright_pose`], which probes the ground and falls
+/// back to this.
 pub fn upright_recovery_pose(
     config: &VehicleConfig,
     position: Vec3,
@@ -847,9 +850,146 @@ pub fn upright_recovery_pose(
         .fold(f32::MAX, f32::min);
     let ground_y = crate::analysis::HandlingMetrics::of(config).ground_y;
     (
-        Vec3::new(position.x, surface_y - ground_y + 0.05, position.z),
+        Vec3::new(
+            position.x,
+            surface_y - ground_y + SEAT_CLEARANCE,
+            position.z,
+        ),
         yaw,
     )
+}
+
+/// Gap a recovery landing leaves between the car's settled ground plane
+/// and the surface it drops onto, metres.
+const SEAT_CLEARANCE: f32 = 0.05;
+/// How far below a car's lowest hull corner [`seated_upright_pose`]
+/// looks for the ground under its level footprint, metres.
+const SEAT_PROBE_DEPTH: f32 = 3.0;
+
+/// A level car's landing at `at`'s x/z facing `yaw`, seated on the
+/// highest ground under its footprint. A ray from `probe_top` straight
+/// down at each hull corner, each wheel and the origin finds what that
+/// part of the level car would rest over — the first collider `ground`
+/// accepts — and the car's settled ground plane goes just above the
+/// highest of them. `None` when nothing lies under the footprint between
+/// `probe_top` and `probe_bottom`.
+///
+/// Every reset sets a car down level, but the ground it is set down on
+/// need not be: a car resting nose-up on a 37° bank reaches nearly two
+/// metres higher at its front than at its tail. Level at its tail's
+/// height its whole front half is inside the bank, and city ground is
+/// one-sided, solid only from above — the car drops through it.
+/// Measured on the grass bank between Tower Bridge's southern junction
+/// and the Tower of London's moat, where a car righted after sitting
+/// still fell out of the world.
+///
+/// `probe_top` must lie above the ground under the footprint and below
+/// anything overhead: a ray that starts above a bridge deck lands the
+/// car on top of it.
+#[allow(clippy::too_many_arguments)] // one probe's full spec: the car, where, which way, the height band and what counts
+pub fn seat_level(
+    spatial: &SpatialQuery,
+    vehicle: Entity,
+    config: &VehicleConfig,
+    at: Vec3,
+    yaw: f32,
+    probe_top: f32,
+    probe_bottom: f32,
+    ground: &dyn Fn(Entity) -> bool,
+) -> Option<Vec3> {
+    let depth = probe_top - probe_bottom;
+    if !(depth > 0.0 && depth.is_finite() && at.is_finite() && yaw.is_finite()) {
+        return None;
+    }
+    let heading = Quat::from_rotation_y(yaw);
+    let filter = wheel_filter(vehicle);
+    // `solid: false` — a probe that starts inside a prop reports where
+    // it leaves that body, not a hit at its own origin.
+    let highest = crate::analysis::hull_points(config)
+        .into_iter()
+        .chain(config.wheels.iter().map(|w| w.position))
+        .chain(std::iter::once([0.0; 3]))
+        .filter_map(|p| {
+            let offset = heading * Vec3::new(p[0], 0.0, p[2]);
+            let origin = Vec3::new(at.x + offset.x, probe_top, at.z + offset.z);
+            spatial
+                .cast_ray_predicate(origin, Dir3::NEG_Y, depth, false, &filter, ground)
+                .map(|hit| probe_top - hit.distance)
+        })
+        .reduce(f32::max)?;
+    let ground_y = crate::analysis::HandlingMetrics::of(config).ground_y;
+    Some(Vec3::new(at.x, highest - ground_y + SEAT_CLEARANCE, at.z))
+}
+
+/// [`upright_recovery_pose`] seated on the ground under the righted car
+/// ([`seat_level`]): heading kept, every other rotation discarded, and
+/// the level car set down on top of the highest ground under its
+/// footprint rather than at the height of its old lowest corner — on a
+/// slope that corner is the downhill end. The probes start at the
+/// resting hull's highest corner: everything under the car lies below
+/// it, and the car fitted under anything above it. Falls back to the
+/// unprobed pose when nothing `ground` accepts is under the car.
+pub fn seated_upright_pose(
+    spatial: &SpatialQuery,
+    vehicle: Entity,
+    config: &VehicleConfig,
+    position: Vec3,
+    rotation: Quat,
+    ground: &dyn Fn(Entity) -> bool,
+) -> (Vec3, f32) {
+    let (landing, yaw) = upright_recovery_pose(config, position, rotation);
+    let (bottom, top) = crate::analysis::hull_points(config)
+        .iter()
+        .map(|p| (position + rotation * Vec3::from(*p)).y)
+        .fold((f32::MAX, f32::MIN), |(lo, hi), y| (lo.min(y), hi.max(y)));
+    let seated = seat_level(
+        spatial,
+        vehicle,
+        config,
+        position,
+        yaw,
+        top,
+        bottom - SEAT_PROBE_DEPTH,
+        ground,
+    );
+    (seated.unwrap_or(landing), yaw)
+}
+
+/// What an in-place reset needs to land a car where it stands: its
+/// pose and tuning plus the ground probe [`seated_upright_pose`] uses.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct UprightLanding<'w, 's> {
+    spatial: SpatialQuery<'w, 's>,
+    vehicles: Query<'w, 's, (&'static Position, &'static Rotation, &'static Vehicle)>,
+    colliders: Query<'w, 's, &'static ColliderOf>,
+    bodies: Query<'w, 's, &'static RigidBody>,
+}
+
+impl UprightLanding<'_, '_> {
+    /// `entity` righted in place onto the ground under it — `None` for
+    /// an entity that is not a vehicle or whose pose went non-finite.
+    ///
+    /// A righted car stands on anything but a dynamic body: the city,
+    /// props and the kinematic decks of drawbridge leaves and ferries
+    /// carry it, while another car or a loose prop alongside must not
+    /// lift it onto its roof.
+    pub fn of(&self, entity: Entity) -> Option<(Vec3, f32)> {
+        let (pos, rot, vehicle) = self.vehicles.get(entity).ok()?;
+        let ground = |collider: Entity| {
+            let body = self.colliders.get(collider).map_or(collider, |c| c.body);
+            !self.bodies.get(body).is_ok_and(RigidBody::is_dynamic)
+        };
+        (pos.0.is_finite() && rot.0.is_finite()).then(|| {
+            seated_upright_pose(
+                &self.spatial,
+                entity,
+                &vehicle.config,
+                pos.0,
+                rot.0,
+                &ground,
+            )
+        })
+    }
 }
 
 /// Flop an upended car back onto its wheels once it has come to rest.
@@ -878,6 +1018,7 @@ pub fn upright_recovery_pose(
 pub fn vehicle_self_right(
     time: Res<Time>,
     authority: Res<ResetAuthority>,
+    landing: UprightLanding,
     mut vehicles: SelfRightQuery,
     mut resets: MessageWriter<ResetVehicle>,
 ) {
@@ -901,10 +1042,12 @@ pub fn vehicle_self_right(
             continue;
         }
 
-        let (landing, yaw) = upright_recovery_pose(&vehicle.config, pos.0, rot.0);
+        let (position, yaw) = landing
+            .of(entity)
+            .unwrap_or_else(|| upright_recovery_pose(&vehicle.config, pos.0, rot.0));
         resets.write(ResetVehicle {
             entity: Some(entity),
-            position: landing,
+            position,
             yaw,
         });
         // The reset wipes `VehicleState` — clearing here too keeps the
