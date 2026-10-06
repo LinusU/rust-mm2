@@ -18,6 +18,7 @@ use std::fmt;
 use mm2_assets::Vfs;
 use mm2_formats::spchdata::CueTable;
 use mm2_formats::waypoints::WaypointFile;
+use mm2_game::gold::{CarrierLoad, EndRule, GoldRules};
 
 /// The `race/<city>/` stem of the mode's record family: the original
 /// builds `race\<city>\<stem>waypoints.csv` from its mode-name table
@@ -62,40 +63,7 @@ pub const COMMENTARY_CUES: &[&str] = &[
     "COPRECOVERLOOT",
 ];
 
-/// The three variants the host chooses between, in the order the
-/// executable's packed settings word numbers them (`word >> 6`,
-/// `0x501510`). *Inferred* numbering: 0 scores individually and 2 builds
-/// the red/blue marker pair (both read from code), so 1 is Cops vs.
-/// Robbers by elimination against the three variants the help names.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum CnrVariant {
-    /// Every player scores alone (`0x425db7` compares the player's own
-    /// points against the limit).
-    FreeForAll,
-    /// Cops deliver to the bank, robbers to the hideout (help text;
-    /// `0x42666c` picks the respawn marker by role).
-    CopsVsRobbers,
-    /// Two robber teams, red and blue, each with its own hideout marker
-    /// (`pt_red`/`pt_blue`, `0x423e5a`); the match limit compares team
-    /// totals.
-    RobbersVsRobbers,
-}
-
-impl CnrVariant {
-    /// Every variant, in the executable's numbering.
-    pub const ALL: [CnrVariant; 3] = [
-        CnrVariant::FreeForAll,
-        CnrVariant::CopsVsRobbers,
-        CnrVariant::RobbersVsRobbers,
-    ];
-
-    /// Whether the variant is scored by team totals rather than by
-    /// individual points (*verified_original*: the limit check at
-    /// `0x425dbc` branches on `variant != 0`).
-    pub fn team_scored(self) -> bool {
-        !matches!(self, CnrVariant::FreeForAll)
-    }
-}
+pub use mm2_game::gold::CnrVariant;
 
 /// Time-limit choices the host can pick, minutes. *verified_original*:
 /// the table at `0x5d0550` and the `5 minutes … 30 minutes` strings in
@@ -212,6 +180,75 @@ impl GoldMass {
             GoldMass::Weightless => 1.0,
             GoldMass::QuarterTon => 0.9,
             GoldMass::HalfTon => 0.81,
+        }
+    }
+}
+
+/// Points the original awards in the local-pickup handler (message
+/// `0x25a`, `0x4266a0`). *verified_original* as a call-site constant;
+/// whether it applies to the first pickup, to every pickup or only to a
+/// steal is unknown, so the match applies it to every grant — an
+/// *Implementation choice* that [`GoldRules::pickup_points`] lets a
+/// caller zero.
+pub const PICKUP_POINTS: u32 = 25;
+
+/// Distance within which a car takes the gold, metres. *Enhanced
+/// policy*: the gold marker's constructor receives `5.0` (`0x423d12`),
+/// but its use as a pickup radius was not read.
+pub const PICKUP_RADIUS_M: f32 = 5.0;
+
+/// Seconds the car that lost the gold cannot retake it. *Enhanced
+/// policy*; nothing of the original's behaviour is recovered.
+pub const DROP_LOCKOUT_SECONDS: f32 = 1.0;
+
+/// The host's Cops & Robbers choices: the three fields the original
+/// packs into one settings word (`0x5014c1`, CNR-7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CnrSettings {
+    /// Which variant is played.
+    pub variant: CnrVariant,
+    /// How heavy the gold is.
+    pub gold_mass: GoldMass,
+    /// When the match ends.
+    pub limit: MatchLimit,
+}
+
+impl Default for CnrSettings {
+    /// The executable's defaults (`0x523484…0x5234a0`): variant 0, no
+    /// limit, weightless gold.
+    fn default() -> Self {
+        Self {
+            variant: CnrVariant::FreeForAll,
+            gold_mass: GoldMass::Weightless,
+            limit: MatchLimit::None,
+        }
+    }
+}
+
+impl CnrSettings {
+    /// The rules a match plays by under these settings, with the match
+    /// clock running at `tick_hz` ticks per second. Every number comes
+    /// from the tables above, so a lobby choice and the rules the host
+    /// enforces cannot drift apart.
+    pub fn rules(&self, tick_hz: u32) -> GoldRules {
+        let hz = f64::from(tick_hz);
+        let ticks = |seconds: f64| (seconds * hz).round() as u64;
+        GoldRules {
+            variant: self.variant,
+            end: match self.limit {
+                MatchLimit::None => EndRule::None,
+                MatchLimit::Minutes(m) => EndRule::Ticks(ticks(f64::from(m) * 60.0)),
+                MatchLimit::Points(p) => EndRule::Points(p),
+            },
+            load: CarrierLoad {
+                added_mass_kg: self.gold_mass.added_mass_kg(),
+                handling_scalar: self.gold_mass.handling_scalar(),
+            },
+            pickup_points: PICKUP_POINTS,
+            delivery_points: DELIVERY_POINTS,
+            pickup_radius: PICKUP_RADIUS_M,
+            delivery_radius: DELIVERY_RADIUS_M,
+            drop_lockout_ticks: ticks(f64::from(DROP_LOCKOUT_SECONDS)),
         }
     }
 }
@@ -630,6 +667,96 @@ mod tests {
     fn only_free_for_all_is_scored_individually() {
         let team: Vec<bool> = CnrVariant::ALL.iter().map(|v| v.team_scored()).collect();
         assert_eq!(team, vec![false, true, true]);
+    }
+
+    #[test]
+    fn default_settings_are_the_executables_defaults() {
+        let s = CnrSettings::default();
+        assert_eq!(s.variant, CnrVariant::FreeForAll);
+        assert_eq!(s.gold_mass, GoldMass::Weightless);
+        assert_eq!(s.limit, MatchLimit::None);
+        let r = s.rules(120);
+        assert_eq!(r.end, EndRule::None);
+        assert_eq!(r.load, CarrierLoad::NONE, "weightless gold adds nothing");
+    }
+
+    #[test]
+    fn every_choice_maps_to_the_rule_a_match_enforces() {
+        for limit in MatchLimit::choices() {
+            for mass in GoldMass::ALL {
+                for variant in CnrVariant::ALL {
+                    let r = CnrSettings {
+                        variant,
+                        gold_mass: mass,
+                        limit,
+                    }
+                    .rules(120);
+                    assert_eq!(r.variant, variant);
+                    assert_eq!(r.load.added_mass_kg, mass.added_mass_kg());
+                    assert_eq!(r.load.handling_scalar, mass.handling_scalar());
+                    assert_eq!(r.delivery_points, 100);
+                    assert_eq!(r.delivery_radius, 12.0);
+                    assert_eq!(r.pickup_points, 25);
+                    match (limit, r.end) {
+                        (MatchLimit::None, EndRule::None) => {}
+                        (MatchLimit::Minutes(m), EndRule::Ticks(t)) => {
+                            assert_eq!(t, u64::from(m) * 60 * 120);
+                        }
+                        (MatchLimit::Points(p), EndRule::Points(q)) => assert_eq!(p, q),
+                        other => panic!("{other:?}"),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_lockout_follows_the_tick_rate() {
+        let s = CnrSettings::default();
+        assert_eq!(s.rules(120).drop_lockout_ticks, 120);
+        assert_eq!(s.rules(60).drop_lockout_ticks, 60);
+    }
+
+    #[test]
+    fn stock_settings_drive_a_real_match_end_to_end() {
+        use mm2_game::gold::{Contact, DeliveryVerdict, GoldMatch, PickupVerdict, Side, Winner};
+        use mm2_game::{ObjectId, PlayerId};
+        let rules = CnrSettings {
+            variant: CnrVariant::FreeForAll,
+            gold_mass: GoldMass::HalfTon,
+            limit: MatchLimit::Points(100),
+        }
+        .rules(120);
+        let pool = (0..6)
+            .map(|i| bevy::math::Vec3::new(i as f32 * 90.0, 0.0, 0.0))
+            .collect();
+        let a = PlayerId(1);
+        let mut m = GoldMatch::new(
+            1,
+            ObjectId {
+                generation: 1,
+                slot: 0,
+            },
+            rules,
+            pool,
+            3,
+            &[(a, Side::Solo)],
+        )
+        .unwrap();
+        let at = m.gold_position().unwrap();
+        let v = m.resolve_pickups(&[Contact {
+            player: a,
+            round: 0,
+            position: at,
+        }]);
+        assert!(matches!(v[0], PickupVerdict::Granted { .. }));
+        assert_eq!(m.load_for(a).unwrap().added_mass_kg, 500.0);
+        let hideout = m.sites().hideout;
+        assert!(matches!(
+            m.deliver(a, 0, hideout),
+            DeliveryVerdict::Delivered { .. }
+        ));
+        assert_eq!(m.outcome().unwrap().winner, Winner::Player(a));
     }
 
     #[test]
