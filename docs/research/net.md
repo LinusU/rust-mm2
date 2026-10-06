@@ -1254,9 +1254,17 @@ session-minted `PlayerId` differs per process: a client reading
 (non-networked) session has no wire ids and uses the minted id. In a
 networked session a car not yet stamped with its wire id is not seated.
 Sides alternate by arrival (`GoldMatch::balanced_side`; designed — see
-ledger CNR-12). Open: the client's markers and HUD read the replica
-(B.4b-client/B.4c), the client car's own carrier mass is not predicted,
-and no two-process run of a started match exists.
+ledger CNR-12). A participant who left and whose car comes back (a
+pick change respawns it) is re-seated with `GoldMatch::rejoin` on the
+side and with the points they left with — not placed afresh.
+
+A client builds the same seeded draw while loading, only to place its
+three markers where the round opens, and holds no `CnrHost`; from the
+first accepted frame `sync_cnr_markers` follows `CnrReplica` (sites, and
+the gold's position or hidden-while-carried), so host and clients draw
+one round. Open: the HUD reads the replica (B.4c), the client car's own
+carrier mass is not predicted, and no two-process run of a started match
+exists.
 
 ## Data-plane budget and bounds (F25-B req 6)
 

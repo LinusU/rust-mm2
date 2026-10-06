@@ -1,3 +1,48 @@
+# Last iteration — F27-B.4b (client): markers follow the replica, leavers are re-seated (new-run iteration 17)
+
+Selection: the previous review passed with no blocking findings. Two of
+its verification gaps were real defects, so they came first: (1) a
+participant who vanished and returned was never re-seated; (2) reading
+`load_session_world` showed a *client* also ran `start_match` and kept an
+inert `CnrHost`, so its markers (`sync_cnr_markers` read only the host)
+would have stayed on the opening draw forever. Both are small and share
+the "who owns the match" seam, so one change.
+
+Change:
+- `mm2_game::gold::GoldMatch::rejoin` — a left member returns on their
+  side with their points (refused: match over, never joined, still
+  connected); pushes `Joined` so the revision moves and replicas see it.
+  Implementation choice (original reconnect handling unrecovered).
+- `cnr::enroll_cnr_participants` re-seats a known-but-disconnected
+  participant whose car is present, before seating fresh ones.
+- `cnr::start_match` inserts `CnrHost` on the authority only; a client
+  builds the same seeded draw just to place markers.
+- `cnr::sync_cnr_markers` reads `CnrHost` if present, else `CnrReplica`.
+- Docs: ledger CNR-12, `research/net.md`, PLAN row.
+
+Tests (synthetic): `mm2_game` `a_leaver_who_returns_resumes_their_side_and_
+points`, `nobody_returns_to_a_finished_match`; `mm2_app::cnr`
+`a_participant_whose_car_comes_back_is_reseated_on_their_own_side`,
+`a_client_draws_its_markers_from_the_replicated_match` (opening, carried →
+hidden, delivery → new sites), `a_client_builds_the_same_draw_for_its_
+markers_but_holds_no_match`.
+
+Evidence: `cargo fmt --all -- --check` PASS; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` PASS; `cargo
+test --locked --workspace` exit 0 (2103 passed, 0 failed; was 2098).
+`MM2_RETAIL=/Users/linus/coding/rust-mm2/retail cargo test --locked -p
+mm2_app --test app cops_and_robbers` ran (0.55 s, not skipped) and passed
+— that is the only original-data evidence, host side, unchanged. No GPU,
+audio or two-process run; the client marker path is synthetic only. No
+test processes left.
+
+Not verified / open: client car's carrier mass is not predicted; no HUD,
+menu or CLI offers the mode; no two-process run of a started match;
+F27-AC01..06 open. Status: implemented candidate, not independently
+checked.
+
+---
+
 # Last iteration — F27-B.4b (host): start the match, seat the cars (new-run iteration 16)
 
 Selection: the previous review passed with no blocking findings, so no
