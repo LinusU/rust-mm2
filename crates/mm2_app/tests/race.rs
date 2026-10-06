@@ -1519,6 +1519,73 @@ fn a_wire_seat_holds_the_authority_in_playing_until_it_resolves() {
     assert_eq!(app.world().resource::<ResultLedger>().len(), 2);
 }
 
+/// DSN-11 reconciliation (report 6 follow-up 2): the deferral and the
+/// field-races-on rule are one rule. A hosted driver finishing first
+/// holds `Playing` for the wire seat, and the simulated field races
+/// through that hold exactly as it does behind a single-player results
+/// screen (`field_races` is true in both phases), so an AI opponent's
+/// late finish is a real recorded time whichever side of the
+/// `Playing → Results` edge it lands on.
+#[test]
+fn the_field_keeps_racing_through_the_wire_deferral() {
+    let def = any_order_def(0);
+    let mut app = race_app(host_event_config(), def.clone());
+    let (car, _) = spawn_participant(&mut app, &def, Vec3::new(-200.0, 0.0, 0.0));
+    let (wire, _) = spawn_participant_as(
+        &mut app,
+        &def,
+        Vec3::new(-200.0, 0.0, 4.0),
+        PlayerControl::Remote,
+    );
+    let (early, _) = spawn_participant_as(
+        &mut app,
+        &def,
+        Vec3::new(-200.0, 0.0, 8.0),
+        PlayerControl::Ai,
+    );
+    let (late, _) = spawn_participant_as(
+        &mut app,
+        &def,
+        Vec3::new(-200.0, 0.0, 12.0),
+        PlayerControl::Ai,
+    );
+    run(&mut app, 2);
+
+    set_position(&mut app, car, Vec3::new(200.0, 0.0, 0.0));
+    run(&mut app, 1);
+    assert_eq!(phase(&app), SessionPhase::Playing, "the wire seat holds");
+
+    // An AI opponent finishes *during* the hold: a real time, recorded.
+    set_position(&mut app, early, Vec3::new(200.0, 0.0, 8.0));
+    run(&mut app, 1);
+    let ParticipantState::Finished {
+        race_ticks: held, ..
+    } = progress(&app, early).state
+    else {
+        panic!("the field finishes during the deferral");
+    };
+    assert_eq!(phase(&app), SessionPhase::Playing);
+
+    // The wire seat resolving ends the hold; the straggler races on.
+    set_position(&mut app, wire, Vec3::new(200.0, 0.0, 4.0));
+    run(&mut app, 1);
+    assert_eq!(phase(&app), SessionPhase::Results);
+    assert_eq!(progress(&app, late).state, ParticipantState::Racing);
+    assert_eq!(race(&app).phase, RacePhase::Running);
+
+    set_position(&mut app, late, Vec3::new(200.0, 0.0, 12.0));
+    run(&mut app, 1);
+    let ParticipantState::Finished {
+        race_ticks: after, ..
+    } = progress(&app, late).state
+    else {
+        panic!("the straggler finishes behind the results screen");
+    };
+    assert!(after > held, "late finishes carry later times");
+    assert_eq!(race(&app).phase, RacePhase::Complete);
+    assert_eq!(app.world().resource::<ResultLedger>().len(), 4);
+}
+
 /// The deadline leg of the same deferral contract: the mass `TimedOut`
 /// wave and the `Playing → Results` transition land in one
 /// `advance_race` step — the snap stamped with that tick carries every
