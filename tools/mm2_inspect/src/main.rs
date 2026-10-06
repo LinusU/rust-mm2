@@ -21,6 +21,7 @@ use mm2_formats::{FormatError, inst};
 
 mod audio;
 mod bind;
+mod cnr;
 mod crashcourse;
 mod event;
 mod inventory;
@@ -241,6 +242,24 @@ enum Command {
         /// event, an unresolved filename link, a missing/empty
         /// difficulty table, an aimap error, a dead `.opp` wire, or a
         /// wired vehicle id outside the vehicle catalog.
+        #[arg(long)]
+        strict: bool,
+    },
+    /// Cops & Robbers content audit (F27-A): per city, the gold/hideout/
+    /// bank site pool (`race/<city>/multicopwaypoints.csv`), marker
+    /// models and banger records, map dots, the commentary cue
+    /// vocabulary and the loading image, with a fixed expected
+    /// denominator. Says nothing about the mode's rules, which are
+    /// code-defined (`docs/research/cnr.md`).
+    Cnr {
+        /// Path to the MM2 installation directory.
+        dir: PathBuf,
+        /// Restrict to one city stem (default: every stock city plus
+        /// any discovered `race/<city>/` directory).
+        #[arg(long)]
+        city: Option<String>,
+        /// Exit nonzero on any missing dependency, unreadable or
+        /// too-short site pool, or missing commentary cue family.
         #[arg(long)]
         strict: bool,
     },
@@ -618,6 +637,9 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         ),
         Command::CrashCourse { dir, city, strict } => {
             crashcourse::run(dir, cli.mods.as_deref(), city.as_deref(), *strict)
+        }
+        Command::Cnr { dir, city, strict } => {
+            cnr::run(dir, cli.mods.as_deref(), city.as_deref(), *strict)
         }
         Command::Opponents { dir, city, strict } => {
             opponents(dir, cli.mods.as_deref(), city.as_deref(), *strict)

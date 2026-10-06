@@ -721,7 +721,7 @@ fn multiplayer(paths: &[String]) -> Family {
     f.unverified = f.discovered;
     f.extras = f.discovered;
     f.notes.push(format!(
-        "{aimap_p} .aimap_p records (role unverified), {} named multi records ({}), {variants} *_p variant records (difficulty vs multiplayer role unverified); no Cops & Robbers-specific data discovered",
+        "{aimap_p} .aimap_p records (role unverified), {} named multi records ({}), {variants} *_p variant records (difficulty vs multiplayer role unverified); the Cops & Robbers data (site pools, markers, cue tables) is audited by `mm2-inspect cnr`",
         named.len(),
         named.join(", ")
     ));

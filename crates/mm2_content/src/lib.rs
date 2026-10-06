@@ -14,6 +14,7 @@ pub mod assemble;
 pub mod availability;
 pub mod catalog;
 pub mod city_info;
+pub mod cnr;
 pub mod convert;
 pub mod crashcourse;
 pub mod damage;
@@ -39,6 +40,7 @@ pub use catalog::{
     VehicleClass,
 };
 pub use city_info::CityInfo;
+pub use cnr::{CnrContent, CnrDependency, CnrIssue, CnrVariant, GoldMass, MatchLimit};
 pub use convert::{
     ConversionReport, ConvertInput, Converted, Provenance, ReportEntry, WheelGeom, convert,
     convert_trailer,
