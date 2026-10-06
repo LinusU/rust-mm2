@@ -898,6 +898,69 @@ fn penned_bot_reanchors_onto_the_route_and_resumes() {
     );
 }
 
+/// The penned-car re-anchor with `extra` spawned alongside the pocket;
+/// returns the pose of the reset, before the car settles.
+fn penned_reanchor_landing(extra: impl FnOnce(&mut App)) -> Vec3 {
+    let tmp = routed_install();
+    let mut app = bot_app(event_config(EventTableKind::Checkpoint), vfs_of(tmp.path()));
+    app.update();
+    let car = car(&mut app);
+    let y = app.world().get::<Position>(car).unwrap().0.y;
+    for (center, size) in [
+        (Vec3::new(148.0, y + 1.0, 150.0), Vec3::new(0.4, 3.0, 8.0)),
+        (Vec3::new(152.0, y + 1.0, 150.0), Vec3::new(0.4, 3.0, 8.0)),
+        (Vec3::new(150.0, y + 1.0, 148.0), Vec3::new(8.0, 3.0, 0.4)),
+        (Vec3::new(150.0, y + 1.0, 152.0), Vec3::new(8.0, 3.0, 0.4)),
+    ] {
+        app.world_mut().spawn((
+            RigidBody::Static,
+            Collider::cuboid(size.x, size.y, size.z),
+            Transform::from_translation(center),
+        ));
+    }
+    extra(&mut app);
+    app.world_mut().get_mut::<Position>(car).unwrap().0 = Vec3::new(150.0, y, 150.0);
+    app.world_mut()
+        .get_mut::<Transform>(car)
+        .unwrap()
+        .translation = Vec3::new(150.0, y, 150.0);
+    app.world_mut()
+        .entity_mut(car)
+        .insert(mm2_vehicle::Teleported);
+    for _ in 0..1400 {
+        app.update();
+        if app.world().get::<ScriptedRoute>(car).unwrap().reanchors > 0 {
+            return app.world().get::<Position>(car).unwrap().0;
+        }
+    }
+    panic!("the bounded re-anchor never fired for a penned player");
+}
+
+/// The scripted player's landing is seated on the *static* ground
+/// under the level car, like an opponent's: a raised curb lifts it onto
+/// that surface, a loose body lying on the route does not.
+#[test]
+fn bot_reanchor_seats_on_static_ground_not_on_loose_bodies() {
+    let flat = penned_reanchor_landing(|_| {});
+    let slab = |app: &mut App, body: RigidBody, top: f32| {
+        app.world_mut().spawn((
+            body,
+            Collider::cuboid(300.0, 1.0, 60.0),
+            Transform::from_xyz(-100.0, top - 0.5, -140.0),
+        ));
+    };
+    let raised = penned_reanchor_landing(|app| slab(app, RigidBody::Static, 0.15));
+    let loose = penned_reanchor_landing(|app| slab(app, RigidBody::Dynamic, 1.0));
+    assert!(
+        (raised.y - (flat.y + 0.15)).abs() < 0.05,
+        "static slab seats the car on its top: flat {flat:?} raised {raised:?}"
+    );
+    assert!(
+        (loose.y - flat.y).abs() < 0.15,
+        "a dynamic body is not ground: flat {flat:?} loose {loose:?}"
+    );
+}
+
 /// The third re-anchor arm (F15-B.5): a route-guided car whose generic
 /// recovery keeps firing — the retail descent's fall loop, where the
 /// respawn lip is itself off the line — is re-anchored after three

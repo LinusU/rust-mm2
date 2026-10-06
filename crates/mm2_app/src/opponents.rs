@@ -701,6 +701,36 @@ pub fn reanchor_pose(
     (position, yaw)
 }
 
+/// The height a re-anchored car's origin sits above its route sample:
+/// the spawn's hull clearance.
+pub(crate) fn reanchor_lift(config: &mm2_vehicle::VehicleConfig) -> f32 {
+    let hull_min_y = config
+        .collider_points
+        .as_ref()
+        .and_then(|pts| pts.iter().map(|p| p[1]).reduce(f32::min))
+        .unwrap_or(-config.chassis_size[1] * 0.5);
+    (SPAWN_LIFT - hull_min_y).max(0.35)
+}
+
+/// `car` set down level at the route sample `p` facing `yaw`, on the
+/// static ground under its footprint — `None` when there is none, or
+/// the ground is deadly water. The sample's height is only the probe's
+/// starting hint; the ground found sets the landing height.
+#[allow(clippy::too_many_arguments)] // one landing's full spec: the probe, what counts as ground, the car, where and how high
+pub(crate) fn seat_reanchor(
+    spatial: &SpatialQuery,
+    is_static: &dyn Fn(Entity) -> bool,
+    water: Option<&crate::water::CityWater>,
+    car: Entity,
+    config: &mm2_vehicle::VehicleConfig,
+    p: Vec3,
+    yaw: f32,
+    lift: f32,
+) -> Option<Vec3> {
+    let seated = seat_on_static_ground(spatial, is_static, car, config, p + Vec3::Y * lift, yaw)?;
+    (!water.is_some_and(|w| w.is_deadly(seated))).then_some(seated)
+}
+
 /// The same bounded landing walk, retaining its exact authored leg occurrence.
 /// Revisited streets cannot be disambiguated by a fresh-spawn position search.
 pub fn reanchor_pose_with_progress(
@@ -1461,14 +1491,7 @@ pub fn opponent_drive(
                         traffic.iter().map(|t| t.pos).chain(claimed.iter().copied()),
                     )
                 };
-                // The same hull clearance the spawn applies.
-                let hull_min_y = vehicle
-                    .config
-                    .collider_points
-                    .as_ref()
-                    .and_then(|pts| pts.iter().map(|p| p[1]).reduce(f32::min))
-                    .unwrap_or(-vehicle.config.chassis_size[1] * 0.5);
-                let lift = (SPAWN_LIFT - hull_min_y).max(0.35);
+                let lift = reanchor_lift(&vehicle.config);
                 // The route's heights are lane or anchor samples, not a
                 // ground promise: a pose may sit inside a wall block or
                 // under a raised deck with nothing to stand on. A
@@ -1480,18 +1503,19 @@ pub fn opponent_drive(
                         .get(body)
                         .is_ok_and(|b| b.is_dynamic() || b.is_kinematic())
                 };
-                let seat = |p: Vec3, y: f32| -> Option<Vec3> {
-                    let sq = spatial.as_ref()?;
-                    let seated = seat_on_static_ground(
-                        sq,
-                        &is_static,
-                        entity,
-                        &vehicle.config,
-                        p + Vec3::Y * lift,
-                        y,
-                    )?;
-                    let deadly = water.as_ref().is_some_and(|w| w.is_deadly(seated));
-                    (!deadly).then_some(seated)
+                let seat = |p: Vec3, y: f32| {
+                    spatial.as_ref().and_then(|sq| {
+                        seat_reanchor(
+                            sq,
+                            &is_static,
+                            water.as_deref(),
+                            entity,
+                            &vehicle.config,
+                            p,
+                            y,
+                            lift,
+                        )
+                    })
                 };
                 let (pose, ryaw, resync_next) =
                     reanchor_pose_with_progress(&route, driver.next, pos.0, yaw, |p| {

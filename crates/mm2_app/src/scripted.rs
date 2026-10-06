@@ -39,8 +39,9 @@ use crate::racing_line::{
 };
 
 use crate::opponents::{
-    REANCHOR_DIST, REANCHOR_FRAMES, SPAWN_LIFT, aim_distance, initial_route_index, point_reached,
-    reanchor_occupied, reanchor_pose_with_progress, route_is_closed, spacing_point_reached,
+    REANCHOR_DIST, REANCHOR_FRAMES, aim_distance, initial_route_index, point_reached,
+    reanchor_lift, reanchor_occupied, reanchor_pose_with_progress, route_is_closed, seat_reanchor,
+    spacing_point_reached,
 };
 
 /// Presence enables the scripted driver: `--bot` inserts it, and
@@ -394,10 +395,6 @@ const OFF_ROUTE_FRAMES: u32 = 300;
 /// third re-anchor leg — repeated falls with no progress mean the
 /// generic recovery's last-grounded anchor cannot regain the line.
 const RECOVERY_REANCHOR: u32 = 3;
-/// How far under a re-anchor candidate the ground probe reaches —
-/// deep enough to accept real road under the line, shallow enough to
-/// reject the rooftops/void the retail descent leg crosses.
-const GROUND_PROBE: f32 = 10.0;
 
 /// The car's shortest distance to the route polyline — the nearest
 /// point over every leg (closed routes include the wrap leg), measured
@@ -703,6 +700,9 @@ pub fn scripted_drive(
     mut resets: MessageWriter<ResetVehicle>,
     mut recoveries_in: Option<MessageReader<RecoveryEvent>>,
     spatial: Option<SpatialQuery>,
+    bodies: Query<&RigidBody>,
+    colliders: Query<&ColliderOf>,
+    water: Option<Res<crate::water::CityWater>>,
     mut cars: Query<
         (
             Entity,
@@ -831,16 +831,31 @@ pub fn scripted_drive(
                                 .collect()
                         })
                         .unwrap_or_default();
-                    // The walk-back also rejects poses with no collider
-                    // within GROUND_PROBE below — the authored line is
-                    // car-height sampling, not a ground promise, and on
-                    // the retail descent it interpolates over a rooftop
-                    // gap where a teleport lands the car in free fall.
-                    let filter = SpatialQueryFilter::from_excluded_entities([entity]);
-                    let supported = |p: Vec3| {
-                        spatial.as_ref().is_none_or(|sq| {
-                            sq.cast_ray(p + Vec3::Y, Dir3::NEG_Y, GROUND_PROBE, true, &filter)
-                                .is_some()
+                    // The walk-back also rejects poses with no static,
+                    // dry ground under the level car — the authored line
+                    // is car-height sampling, not a ground promise, and
+                    // on the retail descent it interpolates over a
+                    // rooftop gap where a teleport lands the car in free
+                    // fall. The ground found sets the landing height.
+                    let lift = reanchor_lift(&vehicle.config);
+                    let is_static = |c: Entity| {
+                        let body = colliders.get(c).map_or(c, |c| c.body);
+                        !bodies
+                            .get(body)
+                            .is_ok_and(|b| b.is_dynamic() || b.is_kinematic())
+                    };
+                    let seat = |p: Vec3, y: f32| {
+                        spatial.as_ref().and_then(|sq| {
+                            seat_reanchor(
+                                sq,
+                                &is_static,
+                                water.as_deref(),
+                                entity,
+                                &vehicle.config,
+                                p,
+                                y,
+                                lift,
+                            )
                         })
                     };
                     // The same occupancy leg `opponent_drive` holds
@@ -854,23 +869,18 @@ pub fn scripted_drive(
                             occupants.iter().copied().chain(claimed.iter().copied()),
                         )
                     };
-                    let (mut pose, ryaw, resync_next) =
+                    let (pose, ryaw, resync_next) =
                         reanchor_pose_with_progress(&rs.route, rs.next, pos.0, yaw, |p| {
                             gates.iter().any(|g| {
                                 let dx = p.x - g.center.x;
                                 let dz = p.z - g.center.z;
                                 dx * dx + dz * dz < g.radius * g.radius
-                            }) || !supported(p)
-                                || occupied(p)
+                            }) || occupied(p)
+                                || (spatial.is_some() && seat(p, yaw).is_none())
                         });
-                    // The same hull clearance the spawn applies.
-                    let hull_min_y = vehicle
-                        .config
-                        .collider_points
-                        .as_ref()
-                        .and_then(|pts| pts.iter().map(|p| p[1]).reduce(f32::min))
-                        .unwrap_or(-vehicle.config.chassis_size[1] * 0.5);
-                    pose.y += (SPAWN_LIFT - hull_min_y).max(0.35);
+                    // Without a physics world the authored height plus
+                    // clearance stands.
+                    let pose = seat(pose, ryaw).unwrap_or(pose + Vec3::Y * lift);
                     resets.write(ResetVehicle {
                         entity: Some(entity),
                         position: pose,
