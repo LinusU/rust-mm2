@@ -376,6 +376,9 @@ pub struct RemoteSnaps {
     pub(crate) traffic: crate::worldtraffic::TrafficStage,
     /// The world-clock inbox (protocol v20, F26-A) — newest frame wins.
     pub(crate) world: crate::worldclock::WorldStage,
+    /// The Cops & Robbers inbox (protocol v21, F27-B) — freshest frame
+    /// per generation.
+    pub(crate) cnr: crate::cnrnet::CnrStage,
 }
 
 /// A staged snapshot frame.
@@ -736,6 +739,16 @@ impl RemoteSnaps {
         self.world.push(generation, ticks);
     }
 
+    /// Queue a received Cops & Robbers frame (protocol v21, F27-B).
+    pub fn push_cnr(&mut self, generation: u64, frame: &mm2_net::SnapCnr) {
+        self.cnr.push(generation, frame);
+    }
+
+    /// The Cops & Robbers inbox — counters for the record/tests.
+    pub fn cnr(&self) -> &crate::cnrnet::CnrStage {
+        &self.cnr
+    }
+
     /// Hold the world-clock inbox to `limits` (a harness that feeds
     /// frames back to back relaxes them; production keeps the default).
     pub fn set_world_limits(&mut self, limits: crate::worldclock::WorldLimits) {
@@ -788,6 +801,7 @@ impl RemoteSnaps {
         self.props.reset();
         self.traffic.reset();
         self.world.reset();
+        self.cnr.reset();
     }
 }
 
@@ -946,6 +960,16 @@ pub struct NetDriveReport {
     /// [`WorldLimits::min_interval`](crate::worldclock::WorldLimits)
     /// allows (F26-A).
     pub world_throttled: u64,
+    /// Cops & Robbers frames the host published (F27-B, protocol v21).
+    pub cnr_sent: u64,
+    /// Cops & Robbers frames a client folded into its replica (F27-B).
+    pub cnr_landed: u64,
+    /// Cops & Robbers frames a client dropped as no fresher than one
+    /// already seen.
+    pub cnr_stale: u64,
+    /// Cops & Robbers frames a client refused: malformed, or another
+    /// generation's.
+    pub cnr_refused: u64,
 }
 
 /// A rotation off the wire, sanitized — a malformed-quaternion guard so

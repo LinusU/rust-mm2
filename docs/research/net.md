@@ -1167,6 +1167,57 @@ trains) has run since its session entered `Countdown`.
   tests; no RTT compensation; proximity leaves; sailboat/ferry/train
   *sounds* follow the actors but are not themselves replicated.
 
+## Cops & Robbers replication (protocol v21, F27-B.3)
+
+*Implementation choice; no original-protocol claim.* v21 adds
+`Message::Cnr { generation, frame: SnapCnr }` (tag 0x13, host → client
+only — a client that sends one is dropped `Malformed`, so it cannot
+declare a pickup, a steal or a score; F27 req 5). The host never needs
+a client's request: it measures every car's position itself
+(`mm2_app::cnr::cnr_host_step`), so the wire has one direction.
+
+- **Payload.** The match's observable state flattened
+  (`GoldMatch::view` → `GoldView`): variant and end rule (so a client
+  can label a score and a clock), round, `revision`, match clock, the
+  gold's single ownership state (resting / carried by / dropped at with
+  the dropper and its `free_at`), the three sites, the outcome once
+  decided, and the standings (≤ `MAX_SNAP_CNR_SEATS` = 32: the roster
+  ceiling plus the leavers whose points stay on the board). Every enum
+  rides as an opaque `u8` named in `mm2_app::cnrnet` (the wire's own
+  numbering, not the Rust enums' order). Fixed part 100 B (+12 B once an outcome exists), 8 B a seat.
+- **Publish.** `cnrnet::publish_cnr`, host only, with a `CnrHost`, in
+  `Countdown`/`Playing`/`Results`: at once for a new session, at once
+  on every change of `revision`, otherwise once per
+  `PUBLISH_EVERY_TICKS` = 120 of *match* time (so a pause stops the
+  repeats). A frame the link refused is not counted sent and is tried
+  again. The periodic repeat is what repairs a lost frame and what a
+  late joiner learns the match from — there is no join-time unicast.
+- **Apply.** `cnrnet::apply_cnr`, client only, held through `Loading`
+  and `Paused`, dropped (with the `CnrReplica`) outside a live session.
+  `CnrStage` keeps the freshest frame *per generation* (≤4) by
+  `(revision, elapsed)`: an older or equal one is dropped counted
+  `stale`, another generation's is refused counted and cannot mark the
+  session's own stale. `decode_view` refuses — counted, before a
+  watermark can move — an unnamed discriminant, a non-finite position,
+  a duplicated or reserved participant id, a side the variant does not
+  have, a carrier or dropper who is not a participant, resting gold
+  with a holder, and a winner who is not a participant/side of the
+  variant. Report counters: `cnr_sent` / `cnr_landed` / `cnr_stale` /
+  `cnr_refused` (not yet part of the `net=` record line).
+- **Evidence.** Synthetic only: codec round trips of every ownership
+  state × variant and every outcome shape, truncation/padding/oversize
+  refusals (`mm2_net`), the stage's ordering/generation/bound rules, and
+  two real-loopback-socket legs in `net_app` (the host's change +
+  cadence behaviour decoded off the wire equals the host's own view; a
+  client lands, ignores stale/foreign/self-contradicting frames, and
+  loses the replica with the session). No two-process run, no
+  impairment cell, no measured frame rate — F27-C.
+- **Open.** A rematch inside one generation restarts `revision` at 0
+  and would be dropped as stale: F27-B.4 mints a new generation per
+  match or adds a match epoch to the frame. Nothing consumes
+  `CnrReplica` yet (HUD and client markers are B.4).
+
+
 ## Data-plane budget and bounds (F25-B req 6)
 
 *Implementation choice + measured.* Payload sizes are fixed by the

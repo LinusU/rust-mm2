@@ -1,3 +1,58 @@
+# Last iteration — F27-B.3: the Cops & Robbers match on the wire (new-run iteration 14)
+
+Selection: the previous review passed with no blocking findings, so no
+repair was owed. Of F27-B's queued legs, B.3 (replicate the host's match
+to clients) is the next ready one: B.4 (lobby, HUD, rematch) needs a
+client-visible match to build on, and F27-AC05 (teams/scores/winner agree
+across clients) starts here. The host measures positions itself, so no
+client pickup request is needed — the wire is one-way, host → client.
+
+Change:
+- `mm2_game::gold`: `GoldMatch::view()` → `GoldView` (everything a
+  replica shows) with `freshness()` = `(revision, elapsed)`.
+- `mm2_net` protocol v21: `Message::Cnr { generation, frame: SnapCnr }`
+  (tag 0x13, bounded to 32 seats; opaque discriminants; strict decode).
+  A client sending it is dropped `Malformed` like every host→client
+  frame.
+- `mm2_app::cnrnet` (new): the discriminant tables, `encode_view` /
+  `decode_view` (refuses unnamed discriminants, non-finite positions,
+  duplicate/reserved/foreign-side seats, a carrier/dropper/winner that
+  is not a participant), `CnrStage` (in `RemoteSnaps`; freshest per
+  generation, stale/refused counted, malformed frames cannot become a
+  watermark), `publish_cnr` (host; on revision change, else every 120
+  match ticks), `apply_cnr` (client → `CnrReplica`, removed with the
+  session). Registered in `main.rs`/`smoke.rs` next to the world clock;
+  `NetDriveReport` gains `cnr_sent/landed/stale/refused`.
+- Docs: `docs/research/net.md` (new section), ledger CNR-12, PLAN row.
+
+Tests (17 new, all synthetic): `mm2_game` view; `mm2_net` codec round
+trip (every state), float bits kept, truncation/padding, oversize both
+ways, bad bool, and a client cannot assert the match (real sockets);
+`cnrnet` unit (every ownership state × variant and every outcome shape
+survive the wire, 18 self-contradicting frames refused with the right
+reason, stage ordering/generation/bound/reset); `net_app` (host
+publishes on change and at the cadence, decoded off a loopback socket
+== the host's own view; client lands, drops stale/foreign/malformed,
+replica dies with the session). A mutation (`<=`→`<` on the freshness
+check) fails three of them.
+
+Gates: `cargo fmt --all -- --check` PASS; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` PASS; `cargo
+test --locked --workspace` PASS (2084 passed, 0 failed; was 2067). No
+original-data, GPU, two-process or impairment run. No test processes
+left running.
+
+Not verified / open: nothing starts a match in the shipped app (B.4) and
+nothing renders `CnrReplica` (client HUD/markers — `sync_cnr_markers`
+still reads only `CnrHost`); there is no join-time unicast (a late
+joiner learns the match from the ≤1 s periodic repeat); a rematch inside
+one generation restarts `revision` and would be dropped stale (B.4:
+new generation per match or a match epoch); the `net=` record line does
+not print the cnr counters yet; F27-AC01..06 all open. Status:
+implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F27-B.2b: Cops & Robbers host from content, retail markers (new-run iteration 13)
 
 Selection: the previous review passed (no blocking findings), so no

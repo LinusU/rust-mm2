@@ -61,7 +61,11 @@
 /// `Message::World` — the authority's world-clock tick, the one number
 /// the timed scenery (drawbridge leaves, boats, ferries, trains) derives
 /// from, so a Cruise client with no race row can still align (F26-A).
-pub const PROTOCOL_VERSION: u16 = 20;
+/// v21: `Message::Cnr` — the authority's Cops & Robbers gold state (one
+/// ownership state, the round's sites, the standings, the outcome) as
+/// its own host→client frame, so a client's HUD and markers show the
+/// host's match rather than deciding one (F27-B).
+pub const PROTOCOL_VERSION: u16 = 21;
 
 /// Byte cap on any length-prefixed string field.
 pub const MAX_STRING: usize = 256;
@@ -90,6 +94,7 @@ const TAG_RESET_REQUEST: u8 = 0x0f;
 const TAG_PROPS: u8 = 0x10;
 const TAG_TRAFFIC: u8 = 0x11;
 const TAG_WORLD: u8 = 0x12;
+const TAG_CNR: u8 = 0x13;
 
 /// Byte cap on a [`SessionAdvertisement`]'s opaque `params` field — the
 /// `mm2_app` bridge's serialized session config is a few hundred bytes,
@@ -552,6 +557,87 @@ pub struct SnapProp {
     pub rot: [f32; 4],
 }
 
+/// Bound on one [`Message::Cnr`] frame's standings: the lobby's roster
+/// ceiling ([`MAX_PLAYERS`]) plus the leavers whose points stay on the
+/// board, which a long match can accumulate. A hostile count cannot
+/// claim an unbounded tail.
+pub const MAX_SNAP_CNR_SEATS: u8 = 32;
+
+/// A [`SnapCnr::holder`] value meaning "no participant" — a gold
+/// resting at its site, or one dropped by something that is not a seat.
+pub const SNAP_CNR_NO_PLAYER: u16 = u16::MAX;
+
+/// One participant's row in a [`Message::Cnr`] frame. `side` is the
+/// consumer's side discriminant, opaque to the wire like
+/// [`SnapRace::phase`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapCnrSeat {
+    /// The participant's roster slot.
+    pub player: u16,
+    /// Opaque side discriminant.
+    pub side: u8,
+    /// Whether the participant is still in the match; a leaver's
+    /// points stay on the board.
+    pub connected: bool,
+    /// The participant's individual points.
+    pub score: u32,
+}
+
+/// A decided match end inside a [`SnapCnr`]; every discriminant is
+/// opaque to the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapCnrOutcome {
+    /// Why the match ended.
+    pub reason: u8,
+    /// What `who` names: a player, a side or nobody (a tie).
+    pub winner: u8,
+    /// The winning player's slot or side discriminant, per `winner`.
+    pub who: u16,
+    /// The match tick it ended on.
+    pub at_tick: u64,
+}
+
+/// The authority's Cops & Robbers match inside a [`Message::Cnr`]
+/// (v21, F27-B). `mm2_net` stays contract-free — every enum is a small
+/// opaque discriminant the `mm2_app` consumer names and validates — so
+/// this is the match's observable state flattened: the host's choice of
+/// variant and end rule (what a client needs to label a score and a
+/// clock), the round, the gold's one ownership state, the round's three
+/// sites and the standings. *State*, not an event: a repeated or
+/// dropped frame self-corrects on the next, and the receiver keeps the
+/// freshest by `(revision, elapsed)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SnapCnr {
+    /// Opaque variant discriminant.
+    pub variant: u8,
+    /// Opaque end-rule discriminant; `end_value` is its limit.
+    pub end: u8,
+    /// The end rule's limit — ticks or points, per `end`.
+    pub end_value: u64,
+    /// Round in play.
+    pub round: u32,
+    /// The authority's state-change counter.
+    pub revision: u64,
+    /// The authority's match clock, fixed ticks.
+    pub elapsed: u64,
+    /// Opaque ownership discriminant: resting, carried or dropped.
+    pub gold: u8,
+    /// The carrier, or the car that dropped the gold
+    /// ([`SNAP_CNR_NO_PLAYER`] for none).
+    pub holder: u16,
+    /// Where the gold lies; zero while it is carried.
+    pub at: [f32; 3],
+    /// First match tick the dropper may take a dropped gold back.
+    pub free_at: u64,
+    /// The round's gold, hideout and bank sites, in that order.
+    pub sites: [[f32; 3]; 3],
+    /// The decided outcome, once the match has ended.
+    pub outcome: Option<SnapCnrOutcome>,
+    /// Every participant, in the authority's order, bounded by
+    /// [`MAX_SNAP_CNR_SEATS`].
+    pub seats: Vec<SnapCnrSeat>,
+}
+
 /// One wire message.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
@@ -721,6 +807,16 @@ pub enum Message {
         /// The authority's world-clock tick at capture.
         ticks: u64,
     },
+    /// Host → every client: the authority's Cops & Robbers match (v21,
+    /// F27-B). Clients display it; they cannot declare a pickup, a
+    /// steal or a score — a client that sends one is dropped.
+    /// `generation` gates it like [`Message::Snap`].
+    Cnr {
+        /// The session generation this frame belongs to.
+        generation: u64,
+        /// The match.
+        frame: SnapCnr,
+    },
 }
 
 /// A wire-decode failure on a well-framed payload.
@@ -769,6 +865,10 @@ pub enum ProtoError {
     /// A traffic frame declared more than [`MAX_SNAP_CARS`] rows.
     #[error("traffic frame declares {0} rows, bound is {MAX_SNAP_CARS}")]
     OversizeTraffic(u8),
+    /// A Cops & Robbers frame declared more than [`MAX_SNAP_CNR_SEATS`]
+    /// standings.
+    #[error("cops-and-robbers frame declares {0} seats, bound is {MAX_SNAP_CNR_SEATS}")]
+    OversizeCnr(u8),
 }
 
 impl RejectCode {
@@ -1157,6 +1257,44 @@ impl Message {
                 out.extend_from_slice(&generation.to_le_bytes());
                 out.extend_from_slice(&ticks.to_le_bytes());
             }
+            Self::Cnr { generation, frame } => {
+                out.push(TAG_CNR);
+                out.extend_from_slice(&generation.to_le_bytes());
+                out.push(frame.variant);
+                out.push(frame.end);
+                out.extend_from_slice(&frame.end_value.to_le_bytes());
+                out.extend_from_slice(&frame.round.to_le_bytes());
+                out.extend_from_slice(&frame.revision.to_le_bytes());
+                out.extend_from_slice(&frame.elapsed.to_le_bytes());
+                out.push(frame.gold);
+                out.extend_from_slice(&frame.holder.to_le_bytes());
+                for v in frame.at.iter().chain(frame.sites.iter().flatten()) {
+                    out.extend_from_slice(&v.to_le_bytes());
+                }
+                out.extend_from_slice(&frame.free_at.to_le_bytes());
+                match frame.outcome {
+                    Some(o) => {
+                        out.push(1);
+                        out.push(o.reason);
+                        out.push(o.winner);
+                        out.extend_from_slice(&o.who.to_le_bytes());
+                        out.extend_from_slice(&o.at_tick.to_le_bytes());
+                    }
+                    None => out.push(0),
+                }
+                if frame.seats.len() > MAX_SNAP_CNR_SEATS as usize {
+                    return Err(ProtoError::OversizeCnr(
+                        frame.seats.len().min(u8::MAX as usize) as u8,
+                    ));
+                }
+                out.push(frame.seats.len() as u8);
+                for seat in &frame.seats {
+                    out.extend_from_slice(&seat.player.to_le_bytes());
+                    out.push(seat.side);
+                    out.push(u8::from(seat.connected));
+                    out.extend_from_slice(&seat.score.to_le_bytes());
+                }
+            }
         }
         Ok(out)
     }
@@ -1378,6 +1516,61 @@ impl Message {
                 generation: cur.u64()?,
                 ticks: cur.u64()?,
             },
+            TAG_CNR => {
+                let generation = cur.u64()?;
+                let variant = cur.u8()?;
+                let end = cur.u8()?;
+                let end_value = cur.u64()?;
+                let round = cur.u32()?;
+                let revision = cur.u64()?;
+                let elapsed = cur.u64()?;
+                let gold = cur.u8()?;
+                let holder = cur.u16()?;
+                let at = cur.vec3()?;
+                let sites = [cur.vec3()?, cur.vec3()?, cur.vec3()?];
+                let free_at = cur.u64()?;
+                let outcome = if cur.bool()? {
+                    Some(SnapCnrOutcome {
+                        reason: cur.u8()?,
+                        winner: cur.u8()?,
+                        who: cur.u16()?,
+                        at_tick: cur.u64()?,
+                    })
+                } else {
+                    None
+                };
+                let count = cur.u8()?;
+                if count > MAX_SNAP_CNR_SEATS {
+                    return Err(ProtoError::OversizeCnr(count));
+                }
+                let mut seats = Vec::with_capacity(count as usize);
+                for _ in 0..count {
+                    seats.push(SnapCnrSeat {
+                        player: cur.u16()?,
+                        side: cur.u8()?,
+                        connected: cur.bool()?,
+                        score: cur.u32()?,
+                    });
+                }
+                Self::Cnr {
+                    generation,
+                    frame: SnapCnr {
+                        variant,
+                        end,
+                        end_value,
+                        round,
+                        revision,
+                        elapsed,
+                        gold,
+                        holder,
+                        at,
+                        free_at,
+                        sites,
+                        outcome,
+                        seats,
+                    },
+                }
+            }
             tag => return Err(ProtoError::BadTag(tag)),
         };
         cur.finish()?;
@@ -1874,6 +2067,131 @@ mod tests {
         let mut padded = bytes;
         padded.push(0);
         assert!(Message::decode(&padded).is_err());
+    }
+
+    fn cnr_frame(seats: usize) -> Message {
+        Message::Cnr {
+            generation: 4,
+            frame: SnapCnr {
+                variant: 1,
+                end: 2,
+                end_value: 500,
+                round: 3,
+                revision: 17,
+                elapsed: 9_000,
+                gold: 2,
+                holder: 5,
+                at: [1.5, -2.0, 3.25],
+                free_at: 9_120,
+                sites: [[1.0, 2.0, 3.0], [-4.0, 5.0, 6.0], [7.0, -8.0, 9.0]],
+                outcome: Some(SnapCnrOutcome {
+                    reason: 1,
+                    winner: 0,
+                    who: 5,
+                    at_tick: 8_999,
+                }),
+                seats: (0..seats)
+                    .map(|i| SnapCnrSeat {
+                        player: i as u16,
+                        side: (i % 2) as u8,
+                        connected: i % 3 != 0,
+                        score: 25 * i as u32,
+                    })
+                    .collect(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_cops_and_robbers_frame_round_trips_in_every_shape() {
+        let full = cnr_frame(3);
+        assert_eq!(Message::decode(&full.encode().unwrap()).unwrap(), full);
+
+        // No outcome, no seats, the "no participant" holder.
+        let Message::Cnr { generation, frame } = cnr_frame(0) else {
+            unreachable!()
+        };
+        let bare = Message::Cnr {
+            generation,
+            frame: SnapCnr {
+                outcome: None,
+                holder: SNAP_CNR_NO_PLAYER,
+                ..frame
+            },
+        };
+        assert_eq!(Message::decode(&bare.encode().unwrap()).unwrap(), bare);
+
+        // The widest legal frame.
+        let wide = cnr_frame(MAX_SNAP_CNR_SEATS as usize);
+        assert_eq!(Message::decode(&wide.encode().unwrap()).unwrap(), wide);
+    }
+
+    #[test]
+    fn a_cops_and_robbers_frame_keeps_float_bits_verbatim() {
+        let Message::Cnr { generation, frame } = cnr_frame(1) else {
+            unreachable!()
+        };
+        // The wire does not judge a position; the consumer refuses a
+        // non-finite one, so a NaN has to survive the trip to be seen.
+        let odd = Message::Cnr {
+            generation,
+            frame: SnapCnr {
+                at: [f32::NAN, f32::INFINITY, -0.0],
+                ..frame
+            },
+        };
+        let Message::Cnr { frame: back, .. } = Message::decode(&odd.encode().unwrap()).unwrap()
+        else {
+            panic!("a cnr frame decodes as one");
+        };
+        assert!(back.at[0].is_nan());
+        assert_eq!(back.at[1], f32::INFINITY);
+        assert!(back.at[2].is_sign_negative());
+    }
+
+    #[test]
+    fn a_truncated_or_padded_cops_and_robbers_frame_is_refused() {
+        let bytes = cnr_frame(2).encode().unwrap();
+        for cut in 1..bytes.len() {
+            assert!(
+                Message::decode(&bytes[..cut]).is_err(),
+                "a {cut}-byte prefix decoded"
+            );
+        }
+        let mut padded = bytes;
+        padded.push(0);
+        assert!(Message::decode(&padded).is_err());
+    }
+
+    #[test]
+    fn an_oversize_cops_and_robbers_frame_does_not_encode_or_decode() {
+        let over = cnr_frame(MAX_SNAP_CNR_SEATS as usize + 1);
+        assert_eq!(
+            over.encode(),
+            Err(ProtoError::OversizeCnr(MAX_SNAP_CNR_SEATS + 1))
+        );
+        let huge = cnr_frame(1000);
+        assert_eq!(huge.encode(), Err(ProtoError::OversizeCnr(255)));
+
+        // A hostile count byte with the rows to match is refused before
+        // any allocation: patch the seat count of a valid frame.
+        let mut bytes = cnr_frame(0).encode().unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] = MAX_SNAP_CNR_SEATS + 1;
+        assert_eq!(
+            Message::decode(&bytes),
+            Err(ProtoError::OversizeCnr(MAX_SNAP_CNR_SEATS + 1))
+        );
+    }
+
+    #[test]
+    fn a_cops_and_robbers_seat_with_a_bad_bool_is_refused() {
+        let mut bytes = cnr_frame(1).encode().unwrap();
+        // The seat is the frame's last 8 bytes: player(2) side(1)
+        // connected(1) score(4) — poison `connected`.
+        let connected = bytes.len() - 5;
+        bytes[connected] = 2;
+        assert_eq!(Message::decode(&bytes), Err(ProtoError::InvalidBool(2)));
     }
 
     #[test]

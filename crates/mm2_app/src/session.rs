@@ -295,6 +295,7 @@ pub fn drive_session(
             // gold load reconciles away with it (F27-AC04 — no handling
             // leak into a later race).
             commands.remove_resource::<crate::cnr::CnrHost>();
+            commands.remove_resource::<crate::cnrnet::CnrReplica>();
             commands.remove_resource::<crate::progression::EventRewards>();
             commands.remove_resource::<crate::progression::SessionReport>();
             commands.remove_resource::<crate::nav_overlay::CityNav>();

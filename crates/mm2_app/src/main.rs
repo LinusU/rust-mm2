@@ -1839,6 +1839,10 @@ fn main() {
                     // F26-A: the host's world clock — the timed
                     // scenery re-seeks to it on a Cruise client too.
                     mm2_app::worldclock::apply_world_clock.after(net::drive_lobby),
+                    // F27-B.3: the host's Cops & Robbers match — the
+                    // replica the HUD and markers read (idle until a
+                    // match frame arrives).
+                    mm2_app::cnrnet::apply_cnr.after(net::drive_lobby),
                     // F25-B: `R` under a predicted session asks the
                     // authority for the reset `reset_input` is gated
                     // against — the granted answer arrives as the
@@ -1931,6 +1935,9 @@ fn main() {
                     mm2_app::worldtraffic::publish_traffic.after(net::drive_host),
                     // F26-A: the world clock rides its own tiny frame.
                     mm2_app::worldclock::publish_world_clock.after(net::drive_host),
+                    // F27-B.3: the Cops & Robbers match rides its own
+                    // frame (idle until a `CnrHost` exists).
+                    mm2_app::cnrnet::publish_cnr.after(net::drive_host),
                 ),
             );
         app.world_mut().spawn((

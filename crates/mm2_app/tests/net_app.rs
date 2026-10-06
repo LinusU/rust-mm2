@@ -210,6 +210,9 @@ fn bridge_app(vfs: Vfs, link: LobbyLink) -> App {
                 mm2_app::worldtraffic::apply_traffic.after(net::drive_lobby),
                 // F26-A: the host's world clock — production wiring.
                 mm2_app::worldclock::apply_world_clock.after(net::drive_lobby),
+                // F27-B.3: the host's Cops & Robbers match — production
+                // wiring.
+                mm2_app::cnrnet::apply_cnr.after(net::drive_lobby),
                 // F25-B: `R` asks the authority under a predicted
                 // session — production wiring.
                 netdrive::send_reset_request,
@@ -277,6 +280,8 @@ fn host_app(vfs: Vfs, link: HostLink) -> App {
                 mm2_app::worldtraffic::publish_traffic.after(net::drive_host),
                 // F26-A: the world clock — production wiring.
                 mm2_app::worldclock::publish_world_clock.after(net::drive_host),
+                // F27-B.3: the Cops & Robbers match — production wiring.
+                mm2_app::cnrnet::publish_cnr.after(net::drive_host),
             ),
         );
     app
@@ -8071,4 +8076,254 @@ fn the_prop_publish_window_cycles_without_growing_the_frame() {
         cycled.len() >= 2 * RESEND_WINDOW,
         "the cursor advances through the inventory, saw {cycled:?}"
     );
+}
+
+/// A three-player free-for-all over a synthetic pool, minted in
+/// `generation` — the host's match the F27-B.3 legs publish.
+fn cnr_match(generation: u64) -> mm2_game::gold::GoldMatch {
+    use mm2_game::gold::{CarrierLoad, CnrVariant, EndRule, GoldMatch, GoldRules, Side};
+    GoldMatch::new(
+        generation,
+        mm2_game::ObjectId {
+            generation,
+            slot: 90,
+        },
+        GoldRules {
+            variant: CnrVariant::FreeForAll,
+            end: EndRule::Points(500),
+            load: CarrierLoad::NONE,
+            pickup_points: 25,
+            delivery_points: 100,
+            pickup_radius: 4.0,
+            delivery_radius: 12.0,
+            drop_lockout_ticks: 10,
+        },
+        (0..6)
+            .map(|i| Vec3::new(i as f32 * 40.0, 0.0, -(i as f32) * 25.0))
+            .collect(),
+        11,
+        &[
+            (mm2_game::PlayerId(0), Side::Solo),
+            (mm2_game::PlayerId(1), Side::Solo),
+        ],
+    )
+    .unwrap()
+}
+
+/// F27-B.3 host half: with a `CnrHost` the authority publishes the
+/// match at once, again on every change of state, and otherwise only
+/// once per `PUBLISH_EVERY_TICKS` of match time — never on every frame
+/// — and what a peer decodes off the real socket is exactly the host's
+/// own view of the match.
+#[test]
+fn the_host_publishes_the_cops_and_robbers_match_on_change_and_at_the_cadence() {
+    use mm2_app::cnr::CnrHost;
+    use mm2_app::cnrnet::{PUBLISH_EVERY_TICKS, decode_view};
+    use mm2_game::gold::Contact;
+
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let addr = link.addr();
+    let mut app = host_app(vfs, link);
+    let mut peer = ready_peer(addr, "eve", fp);
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<LobbyState>()
+            .roster
+            .iter()
+            .any(|e| e.pick.is_some())
+    });
+    let generation = hosted_playing(&mut app);
+    let sent = |a: &App| a.world().resource::<netdrive::NetDriveReport>().cnr_sent;
+
+    // No match, no frame — a session that is not Cops & Robbers is
+    // untouched by the leg.
+    for _ in 0..5 {
+        app.update();
+    }
+    assert_eq!(sent(&app), 0);
+
+    app.insert_resource(CnrHost::new(cnr_match(generation)));
+    app.update();
+    let first = until_wire(&mut peer, |m| matches!(m, Message::Cnr { .. }));
+    let Message::Cnr {
+        generation: g,
+        frame,
+    } = first
+    else {
+        unreachable!()
+    };
+    assert_eq!(g, generation);
+    let want = app.world().resource::<CnrHost>().game.view();
+    assert_eq!(decode_view(g, &frame).unwrap(), want);
+    assert_eq!(sent(&app), 1);
+
+    // Idle frames send nothing while the clock stays inside the cadence.
+    for _ in 0..PUBLISH_EVERY_TICKS - 1 {
+        app.world_mut().resource_mut::<CnrHost>().game.tick();
+    }
+    for _ in 0..5 {
+        app.update();
+    }
+    assert_eq!(sent(&app), 1, "inside the cadence nothing goes out");
+
+    // The tick that reaches it does.
+    app.world_mut().resource_mut::<CnrHost>().game.tick();
+    app.update();
+    let Message::Cnr { frame, .. } = until_wire(&mut peer, |m| matches!(m, Message::Cnr { .. }))
+    else {
+        unreachable!()
+    };
+    assert_eq!(frame.elapsed, PUBLISH_EVERY_TICKS);
+    assert_eq!(sent(&app), 2);
+
+    // A change of state goes out the same frame, cadence or not: the
+    // pickup makes player 0 the carrier.
+    {
+        let game = &mut app.world_mut().resource_mut::<CnrHost>().game;
+        let c = Contact {
+            player: mm2_game::PlayerId(0),
+            round: game.round(),
+            position: game.gold_position().unwrap(),
+        };
+        game.resolve_pickups(&[c]);
+    }
+    app.update();
+    let Message::Cnr { frame, .. } = until_wire(&mut peer, |m| matches!(m, Message::Cnr { .. }))
+    else {
+        unreachable!()
+    };
+    let view = decode_view(generation, &frame).unwrap();
+    assert_eq!(view.carrier(), Some(mm2_game::PlayerId(0)));
+    assert_eq!(view, app.world().resource::<CnrHost>().game.view());
+    assert_eq!(sent(&app), 3);
+
+    // Frames are only for a running session: once it is over (here the
+    // host's own session leaves `Playing` for the results screen the
+    // frame still rides) nothing about the cadence changes, but with no
+    // `CnrHost` the leg is idle again.
+    app.world_mut().remove_resource::<CnrHost>();
+    for _ in 0..5 {
+        app.update();
+    }
+    assert_eq!(sent(&app), 3);
+}
+
+/// F27-B.3 client half: the host's match frame lands as a replica for
+/// the session's generation; a reordered older frame, a repeat,
+/// another generation's frame and a self-contradicting one change
+/// nothing (each counted), and the replica dies with the session.
+#[test]
+fn a_cops_and_robbers_frame_lands_as_a_replica_and_stale_or_foreign_ones_do_not() {
+    use mm2_app::cnrnet::{CnrReplica, encode_view};
+    use mm2_game::gold::Contact;
+
+    let install = tempfile::tempdir().unwrap();
+    let vfs = mount(install.path());
+    let fp = mm2_content::fingerprint::gameplay(&vfs).unwrap().hash;
+    let mut host_config = HostConfig::new(fp);
+    host_config.host_pick = Some(VehiclePick {
+        vehicle: String::new(),
+        paint: 0,
+    });
+    let host = Host::listen_loopback(&host_config).unwrap();
+    host.set_session(net::advertise(&dev_cruise()).unwrap())
+        .unwrap();
+    let link = LobbyLink::join(
+        host.addr(),
+        &hello("net-app-test".to_string(), "alice".to_string(), fp),
+        false,
+        DevOverrides::default(),
+    )
+    .expect("join failed");
+    let mut app = bridge_app(vfs, link);
+    {
+        let link = app.world().resource::<LobbyLink>();
+        link.ctl().set_vehicle("", 0).unwrap();
+        link.ctl().set_ready(true).unwrap();
+    }
+    until_ready(&mut app);
+    host.start(LateJoin::Open).unwrap();
+    until_started(&host);
+    until_begun(&mut app);
+    let generation = app.world().resource::<Session>().wire_generation();
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Ready).unwrap();
+        session.transition(SessionPhase::Playing).unwrap();
+    }
+    let counts = |a: &App| {
+        let c = a.world().resource::<netdrive::RemoteSnaps>().cnr();
+        (c.landed(), c.stale(), c.refused())
+    };
+    let replica = |a: &App| a.world().get_resource::<CnrReplica>().map(|r| r.0.clone());
+    assert!(replica(&app).is_none(), "no frame, no replica");
+
+    let mut game = cnr_match(generation);
+    let first = encode_view(&game.view());
+    let send = |generation, frame: &mm2_net::SnapCnr| {
+        host.ctl()
+            .broadcast(&Message::Cnr {
+                generation,
+                frame: frame.clone(),
+            })
+            .unwrap()
+    };
+
+    // A late joiner lands on the match as it stands.
+    send(generation, &first);
+    spin(&mut app, |a| replica(a).is_some());
+    assert_eq!(replica(&app).unwrap(), game.view());
+    assert_eq!(counts(&app), (1, 0, 0));
+
+    // The pickup arrives; a reordered older frame and a repeat after it
+    // change nothing.
+    game.tick();
+    let c = Contact {
+        player: mm2_game::PlayerId(1),
+        round: game.round(),
+        position: game.gold_position().unwrap(),
+    };
+    game.resolve_pickups(&[c]);
+    let newer = encode_view(&game.view());
+    send(generation, &newer);
+    spin(&mut app, |a| counts(a).0 == 2);
+    assert_eq!(
+        replica(&app).unwrap().carrier(),
+        Some(mm2_game::PlayerId(1))
+    );
+    send(generation, &first);
+    send(generation, &newer);
+    spin(&mut app, |a| counts(a).1 == 2);
+    assert_eq!(counts(&app), (2, 2, 0));
+    assert_eq!(
+        replica(&app).unwrap().carrier(),
+        Some(mm2_game::PlayerId(1)),
+        "an older frame must not hand the gold back"
+    );
+
+    // Another generation's frame is refused at apply time; a frame that
+    // contradicts itself (carried by a stranger) is refused at push and
+    // cannot become the watermark.
+    send(generation + 1, &newer);
+    spin(&mut app, |a| counts(a).2 == 1);
+    let mut bad = newer.clone();
+    bad.holder = 99;
+    bad.revision = u64::MAX;
+    send(generation, &bad);
+    spin(&mut app, |a| counts(a).2 == 2);
+    game.tick();
+    send(generation, &encode_view(&game.view()));
+    spin(&mut app, |a| counts(a).0 == 3);
+    assert_eq!(counts(&app), (3, 2, 2));
+    assert_eq!(replica(&app).unwrap().elapsed, 2);
+
+    // The replica dies with the session.
+    {
+        let mut session = app.world_mut().resource_mut::<Session>();
+        session.transition(SessionPhase::Results).unwrap();
+        session.transition(SessionPhase::Unloading).unwrap();
+    }
+    app.update();
+    assert!(replica(&app).is_none(), "no match outlives its session");
 }

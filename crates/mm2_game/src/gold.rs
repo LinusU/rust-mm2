@@ -483,6 +483,58 @@ pub enum GoldEvent {
     Ended(Outcome),
 }
 
+/// A copy of a match's observable state: the host builds one from its
+/// [`GoldMatch`] and a client rebuilds one from the wire. State, not an
+/// event — a replica holds the newest by `(revision, elapsed)` and a
+/// dropped frame costs nothing the next does not repair.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GoldView {
+    /// Session generation the match belongs to.
+    pub generation: u64,
+    /// Variant being played.
+    pub variant: CnrVariant,
+    /// How the match ends.
+    pub end: EndRule,
+    /// Round in play.
+    pub round: u32,
+    /// State-change counter ([`GoldMatch::revision`]).
+    pub revision: u64,
+    /// Match clock, ticks.
+    pub elapsed: u64,
+    /// The gold's single ownership state.
+    pub state: GoldState,
+    /// The round's three sites.
+    pub sites: Sites,
+    /// The decided outcome, once the match has ended.
+    pub outcome: Option<Outcome>,
+    /// Everyone, best first.
+    pub standings: Vec<Standing>,
+}
+
+impl GoldView {
+    /// The order a replica ranks frames by: a newer revision, and
+    /// within one revision a later clock.
+    pub fn freshness(&self) -> (u64, u64) {
+        (self.revision, self.elapsed)
+    }
+
+    /// The current carrier, if any.
+    pub fn carrier(&self) -> Option<PlayerId> {
+        match self.state {
+            GoldState::Carried { by } => Some(by),
+            _ => None,
+        }
+    }
+
+    /// Where the gold lies, when nobody carries it.
+    pub fn gold_position(&self) -> Option<Vec3> {
+        match self.state {
+            GoldState::Resting { at } | GoldState::Dropped { at, .. } => Some(at),
+            GoldState::Carried { .. } => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Member {
     side: Side,
@@ -691,6 +743,26 @@ impl GoldMatch {
             .collect();
         v.sort_by(|a, b| b.score.cmp(&a.score).then(a.player.cmp(&b.player)));
         v
+    }
+
+    /// Everything a replica of this match shows, copied out — what the
+    /// host puts on the wire (F27-B.3) and a client's HUD and markers
+    /// read back. The rules' numbers are not in it beyond the variant
+    /// and the end rule: those the replica needs to label a score and a
+    /// clock, while the radii and load stay the host's to enforce.
+    pub fn view(&self) -> GoldView {
+        GoldView {
+            generation: self.generation,
+            variant: self.rules.variant,
+            end: self.rules.end,
+            round: self.round,
+            revision: self.revision,
+            elapsed: self.elapsed,
+            state: self.state,
+            sites: self.sites(),
+            outcome: self.outcome,
+            standings: self.standings(),
+        }
     }
 
     /// Take the events produced since the last call, oldest first.
@@ -1814,6 +1886,34 @@ mod tests {
         assert_eq!(m.drain_events().len(), 2);
         assert!(m.drain_events().is_empty());
         assert_eq!(m.revision(), 2);
+    }
+
+    #[test]
+    fn a_view_copies_what_a_replica_shows_and_ranks_by_freshness() {
+        let mut m = ffa(EndRule::Ticks(50));
+        let first = m.view();
+        assert_eq!(first.generation, m.generation());
+        assert_eq!(first.variant, CnrVariant::FreeForAll);
+        assert_eq!(first.end, EndRule::Ticks(50));
+        assert_eq!(first.sites, m.sites());
+        assert_eq!(first.state, m.state());
+        assert_eq!(first.gold_position(), m.gold_position());
+        assert_eq!(first.carrier(), None);
+        assert_eq!(first.standings, m.standings());
+        assert_eq!(first.outcome, None);
+
+        m.tick();
+        let ticked = m.view();
+        assert!(
+            ticked.freshness() > first.freshness(),
+            "a later clock within one revision is fresher"
+        );
+        take(&mut m, A);
+        let held = m.view();
+        assert_eq!(held.carrier(), Some(A));
+        assert_eq!(held.gold_position(), None);
+        assert!(held.freshness() > ticked.freshness());
+        assert_eq!(held.standings[0].score, m.score(A).unwrap());
     }
 
     #[test]

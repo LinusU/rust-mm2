@@ -2559,6 +2559,50 @@ mod tests {
         }
     }
 
+    /// F27-AC05: the Cops & Robbers match flows host → client only — a
+    /// client that submits a frame (a pickup, a steal, a score) is
+    /// dropped, never absorbed.
+    #[test]
+    fn a_client_cannot_assert_the_cops_and_robbers_match() {
+        let host = sessioned_host();
+        let mut mallory = join_sessioned(&host, "mallory");
+        host.recv_timeout(WAIT).unwrap();
+        recv_roster(&mut mallory, 1);
+        mallory
+            .send(&Message::Cnr {
+                generation: 1,
+                frame: crate::proto::SnapCnr {
+                    variant: 0,
+                    end: 0,
+                    end_value: 0,
+                    round: 9,
+                    revision: u64::MAX,
+                    elapsed: 0,
+                    gold: 1,
+                    holder: 1,
+                    at: [0.0; 3],
+                    free_at: 0,
+                    sites: [[0.0; 3]; 3],
+                    outcome: None,
+                    seats: vec![crate::proto::SnapCnrSeat {
+                        player: 1,
+                        side: 0,
+                        connected: true,
+                        score: u32::MAX,
+                    }],
+                },
+            })
+            .unwrap();
+        match host.recv_timeout(WAIT) {
+            Ok(HostEvent::Left {
+                id: 1,
+                cause: LeaveCause::Malformed,
+                ..
+            }) => {}
+            other => panic!("expected a Malformed Left, got {other:?}"),
+        }
+    }
+
     /// The roster stays the shared truth through a session (MP-5's
     /// leaver rule): mid-session pick changes and departures still
     /// land and rebroadcast.
