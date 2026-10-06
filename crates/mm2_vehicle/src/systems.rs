@@ -7,8 +7,8 @@ use crate::config::VehicleConfig;
 use crate::sim;
 use crate::surface::{TireConditions, TireSurface};
 use crate::vehicle::{
-    DriveDirection, EngineImpairment, GyroSpin, PreStepVelocity, ResetAuthority, ResetVehicle,
-    Teleported, Vehicle, VehicleInput, VehicleState, WheelState,
+    DriveDirection, EngineImpairment, GyroSpin, PreStepVelocity, ResetAuthority, ResetPending,
+    ResetVehicle, Teleported, Vehicle, VehicleInput, VehicleState, WheelState,
 };
 
 /// What the steered axle can do with steering lock: how much grip it makes
@@ -1105,7 +1105,10 @@ pub fn vehicle_reset(
             *state = VehicleState::new(&vehicle.config);
             state.gyro_spins = spins;
             state.gyro_completed = completed;
-            commands.entity(entity).insert(Teleported);
+            commands
+                .entity(entity)
+                .insert(Teleported)
+                .remove::<ResetPending>();
         }
     }
 }

@@ -43,8 +43,8 @@ use mm2_game::{
     RecoveryEvent, RecoveryVerdict, Session, VehicleDamage, VehicleRecovery, VehicleStuck,
 };
 use mm2_vehicle::{
-    HandlingMetrics, ResetVehicle, TireSurface, Vehicle, VehicleConfig, VehicleState, hull_points,
-    seat_level,
+    HandlingMetrics, ResetPending, ResetVehicle, TireSurface, Vehicle, VehicleConfig, VehicleState,
+    hull_points, seat_level,
 };
 
 use crate::city::WorldFloor;
@@ -256,6 +256,7 @@ type RecoveryVehicles<'w, 's> = Query<
         &'static Vehicle,
         &'static mut VehicleRecovery,
         Option<&'static VehicleDamage>,
+        Has<ResetPending>,
     ),
 >;
 
@@ -295,7 +296,16 @@ pub fn track_recovery(
     let tick = session.tick();
     let water = water.as_deref();
     let floor = floor.map(|floor| floor.0);
-    for (entity, id, _player, pos, rot, state, vehicle, mut recovery, damage) in &mut vehicles {
+    for (entity, id, _player, pos, rot, state, vehicle, mut recovery, damage, reset_pending) in
+        &mut vehicles
+    {
+        // A reset is on its way (fixed steps outrun the frame that
+        // applies it): the pose here is the one it replaces, and
+        // observing it would re-fire the episode just resolved or
+        // overwrite the landing the resolver just recorded.
+        if reset_pending {
+            continue;
+        }
         // A wreck belongs to the damage outcome — it cannot drive out
         // of anything.
         if damage.is_some_and(|d| d.condition() == DamageTier::Disabled) {
@@ -352,6 +362,7 @@ pub fn track_recovery(
 /// one.
 #[allow(clippy::too_many_arguments)] // Bevy system: the resolver threads the session handles it acts on
 pub fn resolve_recovery(
+    mut commands: Commands,
     mut reader: MessageReader<RecoveryEvent>,
     session: Res<Session>,
     spawn: Option<Res<SpawnPoint>>,
@@ -425,7 +436,12 @@ pub fn resolve_recovery(
             position,
             yaw,
         });
-        if let Ok((mut detector, stuck, _)) = vehicles.get_mut(entity) {
+        if let Ok((mut detector, stuck, vehicle)) = vehicles.get_mut(entity) {
+            // Until `vehicle_reset` lands the teleport the car is not
+            // observed again (`track_recovery`, `track_stuck`).
+            if vehicle.is_some() {
+                commands.entity(entity).insert(ResetPending);
+            }
             // Re-anchor on the landing and clear the episode — a
             // landing back on water starts a fresh dwell, not a
             // carried-over one.

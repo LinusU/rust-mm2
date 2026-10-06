@@ -534,3 +534,44 @@ fn a_real_impact_arms_the_detector() {
         "a 4 m roof drop must arm the detector through the real pipeline"
     );
 }
+
+#[test]
+fn a_car_with_a_pending_reset_is_not_stuck_observed() {
+    let (mut app, car, object) = stuck_app(Vec3::new(0.0, 1.2, 0.0), SPEC);
+    app.world_mut()
+        .entity_mut(car)
+        .insert(mm2_vehicle::ResetPending);
+    write_impact(&mut app, 1, object, object, 5000.0);
+    app.update();
+    assert_eq!(
+        report(&app).armed,
+        0,
+        "an impact must not arm at the pose a pending reset replaces"
+    );
+    assert!(!app.world().get::<VehicleStuck>(car).unwrap().armed());
+
+    // The reset landing (vehicle_reset removes the marker) re-opens it.
+    app.world_mut()
+        .entity_mut(car)
+        .remove::<mm2_vehicle::ResetPending>();
+    write_impact(&mut app, 2, object, object, 5000.0);
+    app.update();
+    assert!(report(&app).armed > 0);
+}
+
+#[test]
+fn a_stuck_recovery_clears_its_pending_marker_when_it_lands() {
+    let (mut app, car, object) = stuck_app(Vec3::new(0.0, 1.2, 0.0), SPEC);
+    let generation = app.world().resource::<Session>().generation();
+    app.world_mut()
+        .resource_mut::<Messages<StuckEvent>>()
+        .write(StuckEvent {
+            object,
+            generation,
+            tick: 0,
+        });
+    app.update();
+    assert_eq!(report(&app).recovered, 1);
+    assert!(app.world().get::<mm2_vehicle::Teleported>(car).is_some());
+    assert!(app.world().get::<mm2_vehicle::ResetPending>(car).is_none());
+}

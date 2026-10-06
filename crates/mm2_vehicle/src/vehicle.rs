@@ -274,3 +274,15 @@ pub struct ResetVehicle {
 /// with the entity.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Teleported;
+
+/// Marker a fixed-step resolver puts on a car it has written a
+/// [`ResetVehicle`] for, and [`vehicle_reset`](crate::systems::vehicle_reset)
+/// removes when the teleport lands. Fixed steps run at a higher rate
+/// than frames, so the reset waits in the message queue while further
+/// steps still see the old pose; observers that would act on a car's
+/// pose (the recovery and stuck detectors) must skip a car carrying this
+/// marker, or they fire a second time on the pose the reset is about to
+/// replace. Only put it on an entity `vehicle_reset` can reach — a
+/// `Vehicle` — or nothing ever clears it.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct ResetPending;

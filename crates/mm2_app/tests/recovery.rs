@@ -984,3 +984,41 @@ fn a_landing_beside_another_car_is_not_lifted_onto_it() {
         "landed on the neighbour's roof at {pos} (floor pose {floor})"
     );
 }
+
+/// Fixed steps outrun frames (two per frame here), so a recovery fired
+/// on a frame's first step is applied only after that frame's second:
+/// the detector must not look at the pose the reset is about to replace.
+#[test]
+fn a_recovery_is_not_observed_again_before_its_reset_lands() {
+    let (mut app, car, object) = recovery_app(Vec3::new(0.0, 1.2, 0.0));
+    let landing = Vec3::new(30.0, 0.0, 10.0);
+    recover_to(&mut app, object, (landing, 0.5));
+
+    assert_eq!(report(&app).recovered, 1);
+    assert!(
+        app.world().get::<mm2_vehicle::Teleported>(car).is_some(),
+        "the reset landed within the frame"
+    );
+    assert!(
+        app.world().get::<mm2_vehicle::ResetPending>(car).is_none(),
+        "landing the reset clears the pending marker"
+    );
+    let anchor = anchor_of(&app, car);
+    assert!(
+        Vec2::new(anchor.x - landing.x, anchor.z - landing.z).length() < 0.5,
+        "the anchor is the landing, not the pre-reset pose the second step saw: {anchor}"
+    );
+}
+
+#[test]
+fn an_out_of_bounds_fall_recovers_once_whatever_the_step_parity() {
+    // Heights shift the step the fall trips on across both halves of a
+    // frame; the second step must never re-fire on the old pose.
+    for drop in [0.0, 0.01, 0.02, 0.03] {
+        let (mut app, car, _object) = recovery_app(Vec3::new(0.0, 1.2, 0.0));
+        teleport(&mut app, car, Vec3::new(500.0, 5.0 + drop, 0.0));
+        run(&mut app, 150);
+        assert_eq!(report(&app).out_of_bounds, 1, "drop {drop}");
+        assert_eq!(report(&app).recovered, 1, "drop {drop}");
+    }
+}

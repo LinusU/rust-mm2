@@ -39,7 +39,7 @@ use mm2_game::{
     DamageTier, ImpactEvent, ObjectId, ObjectIdentity, Player, PlayerControl, Session, StuckEvent,
     StuckVerdict, VehicleDamage, VehicleStuck,
 };
-use mm2_vehicle::{ResetVehicle, UprightLanding};
+use mm2_vehicle::{ResetPending, ResetVehicle, UprightLanding};
 
 /// Per-session evidence counters for the stuck pipeline — the `vsk=`
 /// field of the headless smoke record. Session-scoped like
@@ -75,6 +75,7 @@ type StuckVehicles<'w, 's> = Query<
         &'static Rotation,
         &'static mut VehicleStuck,
         Option<&'static VehicleDamage>,
+        Has<ResetPending>,
     ),
 >;
 
@@ -118,12 +119,15 @@ pub fn track_stuck(
             let Some(&entity) = index.get(&side) else {
                 continue;
             };
-            let Ok((.., _player, pos, rot, mut stuck, damage)) = vehicles.get_mut(entity) else {
+            let Ok((.., _player, pos, rot, mut stuck, damage, reset_pending)) =
+                vehicles.get_mut(entity)
+            else {
                 continue;
             };
             // A `Disabled` wreck belongs to the damage outcome — an
-            // impact into it does not start a stuck episode.
-            if damage.is_some_and(|d| d.condition() == DamageTier::Disabled) {
+            // impact into it does not start a stuck episode; nor does
+            // one arm at the pose a pending reset is about to replace.
+            if reset_pending || damage.is_some_and(|d| d.condition() == DamageTier::Disabled) {
                 continue;
             }
             stuck.impact(pos.0, rot.0);
@@ -135,8 +139,10 @@ pub fn track_stuck(
     // the stuck detector — a wrecked car cannot move by definition.
     let dt = time.delta_secs();
     let tick = session.tick();
-    for (.., id, _player, pos, rot, mut stuck, damage) in &mut vehicles {
-        if damage.is_some_and(|d| d.condition() == DamageTier::Disabled) {
+    for (.., id, _player, pos, rot, mut stuck, damage, reset_pending) in &mut vehicles {
+        // A pending reset owns the pose: observing the one it replaces
+        // would only judge the car by where it no longer is.
+        if reset_pending || damage.is_some_and(|d| d.condition() == DamageTier::Disabled) {
             continue;
         }
         if stuck.observe(pos.0, rot.0, dt) == StuckVerdict::Stuck {
@@ -166,6 +172,7 @@ pub fn resolve_stuck(
     session: Res<Session>,
     identities: Query<(Entity, &ObjectIdentity, Option<&Player>)>,
     landing: UprightLanding,
+    mut commands: Commands,
     mut resets: MessageWriter<ResetVehicle>,
     mut report: ResMut<StuckReport>,
 ) {
@@ -207,6 +214,8 @@ pub fn resolve_stuck(
             position,
             yaw,
         });
+        // `landing.of` only answers for a vehicle, so the reset will land.
+        commands.entity(entity).insert(ResetPending);
         report.recovered += 1;
     }
 }
