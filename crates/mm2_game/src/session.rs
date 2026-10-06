@@ -30,6 +30,7 @@
 
 use bevy::prelude::*;
 
+use crate::banger::BangerSite;
 use crate::config::{ConfigError, SessionConfig, SessionMode};
 use crate::ids::{AuthorityRole, ObjectId, PlayerId};
 use crate::result::ResultId;
@@ -136,6 +137,7 @@ pub struct Session {
     wire_generation: u64,
     tick: u64,
     next_object_slot: u32,
+    next_banger_site: u32,
     next_player: u16,
     next_result_sequence: u32,
 }
@@ -156,6 +158,7 @@ impl Session {
             wire_generation: 0,
             tick: 0,
             next_object_slot: 0,
+            next_banger_site: 0,
             next_player: 0,
             next_result_sequence: 0,
         }
@@ -241,6 +244,18 @@ impl Session {
             generation: self.generation,
             slot,
         }
+    }
+
+    /// Mint the next banger placement ordinal — the identity every
+    /// process that stamps the same world agrees on (F26-A). Unlike
+    /// [`mint_object_id`](Self::mint_object_id), whose slots interleave
+    /// with vehicles, fragments and whatever else a process spawns in
+    /// its own order, this counter advances only at world stamping, so
+    /// the n-th placement is the n-th placement on every peer.
+    pub fn mint_banger_site(&mut self) -> BangerSite {
+        let site = self.next_banger_site;
+        self.next_banger_site += 1;
+        BangerSite(site)
     }
 
     /// Mint the next [`PlayerId`] for this session — unique per
@@ -330,6 +345,7 @@ impl Session {
         self.wire_generation = wire_generation;
         self.tick = 0;
         self.next_object_slot = 0;
+        self.next_banger_site = 0;
         self.next_player = 0;
         self.next_result_sequence = 0;
         self.config = Some(config);

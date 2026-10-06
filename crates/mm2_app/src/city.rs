@@ -3060,6 +3060,9 @@ fn spawn_banger_prop(
     };
     let object = session.mint_object_id();
     let role = session.authority_role();
+    // The placement's replication identity: the n-th stamp, the same on
+    // every process loading this world (F26-A).
+    let site = session.mint_banger_site();
     let mut root = commands.spawn(banger_bundle(
         Banger::new(def.clone()),
         object,
@@ -3069,6 +3072,7 @@ fn spawn_banger_prop(
         transform,
         name.to_string(),
     ));
+    root.insert(site);
     if pieces.iter().any(|p| p.collider.is_some()) {
         root.insert(BangerPieces { fragments: pieces });
     }

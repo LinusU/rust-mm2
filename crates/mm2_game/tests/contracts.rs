@@ -45,6 +45,26 @@ fn ids_from_an_older_generation_are_detectably_stale() {
 }
 
 #[test]
+fn banger_sites_count_placements_independent_of_object_ids() {
+    // F26-A: a placement's replication identity is the n-th stamp, not
+    // an object slot — another process minting vehicles, fragments or
+    // remote seats in a different order must still agree on it.
+    let mut host = playing_session();
+    let mut client = playing_session();
+    let host_sites = [host.mint_banger_site(), host.mint_banger_site()];
+    // The client's object slots are perturbed by an extra mint.
+    client.mint_object_id();
+    client.mint_object_id();
+    let client_sites = [client.mint_banger_site(), client.mint_banger_site()];
+    assert_eq!(host_sites, client_sites);
+    assert_eq!(host_sites, [BangerSite(0), BangerSite(1)]);
+    // A new session counts from zero again.
+    unload_to_menu(&mut host);
+    host.begin(SessionConfig::default()).unwrap();
+    assert_eq!(host.mint_banger_site(), BangerSite(0));
+}
+
+#[test]
 fn local_and_other_player_identities_coexist() {
     // AC05: participants are `Player` components queried by id/control —
     // no "the one local player" assumption.

@@ -245,6 +245,26 @@ impl Banger {
     }
 }
 
+/// A banger placement's replication identity: the ordinal the world
+/// stamp minted it ([`Session::mint_banger_site`](crate::Session)),
+/// the same on every process that loads the same content. An
+/// `ObjectId` is a per-process namespace and never crosses the wire;
+/// this is what a replicated prop row names (F26-A).
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BangerSite(pub u32);
+
+/// Marks a break fragment: which placement shattered into it and the
+/// fragment's index among that placement's collidable `BREAK<NN>`
+/// pieces. With the parent's [`BangerSite`] it names the fragment on
+/// the wire; a fragment is not itself a placement and carries no site.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BangerFragment {
+    /// The shattered placement's entity.
+    pub parent: Entity,
+    /// Index into the parent's collidable pieces.
+    pub index: u8,
+}
+
 /// Why a [`BangerStateChanged`] fired.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BangerCause {
