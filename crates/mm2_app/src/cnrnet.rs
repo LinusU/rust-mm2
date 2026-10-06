@@ -45,6 +45,14 @@ use crate::netdrive::{NetDriveReport, RemoteSnaps};
 /// repair for a lost frame and the way a late joiner learns the match.
 pub const PUBLISH_EVERY_TICKS: u64 = 120;
 
+/// Runs of [`publish_cnr`] (one per rendered frame) between repeats of a
+/// *decided* match's final frame. A decided match's clock has stopped,
+/// so [`PUBLISH_EVERY_TICKS`] can never come due again and the one
+/// change-driven frame would be the client's only chance to learn the
+/// result — a lost or reordered-away copy would leave it on the live HUD
+/// for good. About two seconds at 60 Hz; stops with the session.
+pub const DECIDED_REPEAT_RUNS: u32 = 120;
+
 /// Generations the client-side inbox tracks at once — a frame of a
 /// generation that is not the session's is held only so it can be
 /// refused counted, never so it can poison the session's own.
@@ -439,13 +447,17 @@ impl CnrStage {
 /// the match exists for the clients (`Countdown`..`Results`), on every
 /// change of the match's state and otherwise every
 /// [`PUBLISH_EVERY_TICKS`] of match time — so a pause, which stops the
-/// match clock, also stops the repeats. A frame the link refused is not
-/// counted as sent and is tried again next run.
+/// match clock, also stops the repeats. A decided match's clock is
+/// stopped for good, so its final frame repeats every
+/// [`DECIDED_REPEAT_RUNS`] runs instead (the client's stage drops the
+/// repeat as stale once it has the frame). A frame the link refused is
+/// not counted as sent and is tried again next run.
 pub fn publish_cnr(
     host: Res<HostLink>,
     session: Res<Session>,
     cnr: Option<Res<CnrHost>>,
     mut last: Local<Option<(u64, (u64, u64))>>,
+    mut quiet_runs: Local<u32>,
     report: Option<ResMut<NetDriveReport>>,
 ) {
     let Some(cnr) = cnr else {
@@ -466,7 +478,10 @@ pub fn publish_cnr(
         Some((g, (rev, elapsed))) if g == generation => {
             // A different revision is a change; a clock that went
             // backwards is a new match — send either at once.
-            key.0 != rev || key.1 < elapsed || key.1 - elapsed >= PUBLISH_EVERY_TICKS
+            key.0 != rev || key.1 < elapsed || key.1 - elapsed >= PUBLISH_EVERY_TICKS || {
+                *quiet_runs = quiet_runs.saturating_add(1);
+                view.outcome.is_some() && *quiet_runs >= DECIDED_REPEAT_RUNS
+            }
         }
         _ => true,
     };
@@ -479,6 +494,7 @@ pub fn publish_cnr(
     };
     if host.ctl().broadcast(&frame).is_ok() {
         *last = Some((generation, key));
+        *quiet_runs = 0;
         if let Some(mut report) = report {
             report.cnr_sent += 1;
         }

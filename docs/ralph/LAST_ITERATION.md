@@ -1,3 +1,42 @@
+# Last iteration — F27-B.4c (decided-repeat leg): a lost decided frame no longer strands a client (new-run iteration 25)
+
+Selection: the previous review passed with no blocking findings; its
+gaps (retail-gated test unverified by review, no pickup/delivery in two
+processes, no rendered evidence) are not closable by a single unattended
+code change. Reading F27-AC05 ("agree under packet loss/reordering")
+against `publish_cnr` found a real defect instead.
+
+Finding: `publish_cnr` repeats on *match* time (`PUBLISH_EVERY_TICKS`),
+but a decided match stops its clock (`GoldMatch::tick` returns early; the
+host step is idle outside `Playing`). So the decided frame went out
+exactly once, on change. Any lost/dropped copy left a joined client on
+the live HUD with no Results screen, permanently.
+
+Change: `cnrnet::publish_cnr` gains a `Local` run counter; while the
+view has an outcome the final frame repeats every `DECIDED_REPEAT_RUNS`
+= 120 runs (rendered frames, ~2 s), reset on every send. Undecided
+behaviour is unchanged. The client stage already drops equal-freshness
+repeats as `stale`, so the repeat is harmless once received (the
+`stale=` smoke cell will now count them after a decision). Docs:
+`docs/research/net.md`, PLAN.
+
+Test: `network::net_app::a_decided_match_survives_its_first_frame_being_
+lost` — a wire peer behind `ImpairProxy`; Down `loss: 1.0` while the
+decided frame is published (asserts the proxy dropped it and `sent==1`),
+link healed, host repeats within the cadence (not every frame), peer
+decodes a view equal to the host's decided view.
+
+Gates (iteration 25, foreground): `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` clean; `cargo test --locked --workspace` exit 0 (2135 passed, 0 failed; was 2134 + the new test). No processes left running.
+
+Not verified: random-loss/reorder matrix over undecided C&R frames,
+late join (C&R is closed to it), process-level impairment of a C&R
+match, any rendered output. Open: commentary, menu-hosted lobby offer
+(note: no menu lobby exists at all — hosting is CLI `--host`),
+client carrier-mass prediction, a decided two-process match;
+F27-AC01..06. Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F27-B.4c (two-process leg): a started match across two real processes (new-run iteration 24)
 
 Selection: the previous review passed with no blocking findings; its

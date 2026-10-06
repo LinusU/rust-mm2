@@ -1192,6 +1192,14 @@ a client's request: it measures every car's position itself
   repeats). A frame the link refused is not counted sent and is tried
   again. The periodic repeat is what repairs a lost frame and what a
   late joiner learns the match from — there is no join-time unicast.
+  A *decided* match's clock is stopped (`GoldMatch::tick` returns
+  early, `cnr_host_step` is idle outside `Playing`), so that cadence
+  can never come due again; its final frame instead repeats every
+  `DECIDED_REPEAT_RUNS` = 120 *runs* (rendered frames, ~2 s at 60 Hz)
+  until the session ends, and the client's stage drops each repeat as
+  `stale`. Without it one lost decided frame left a client on the live
+  HUD for good (found iteration 25; test
+  `a_decided_match_survives_its_first_frame_being_lost`).
 - **Apply.** `cnrnet::apply_cnr`, client only, held through `Loading`
   and `Paused`, dropped (with the `CnrReplica`) outside a live session.
   `CnrStage` keeps the freshest frame *per generation* (≤4) by

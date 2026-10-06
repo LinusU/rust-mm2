@@ -8369,6 +8369,113 @@ fn a_decided_hosted_match_still_publishes_from_its_results_screen() {
     assert!(decided, "the peer never saw the decided match");
 }
 
+/// F27-AC05: a decided match's clock has stopped, so only the change
+/// that decided it ever publishes — and over a lossy link that one frame
+/// is the whole result. The proxy swallows the first decided frame; the
+/// host repeats the final frame every `DECIDED_REPEAT_RUNS` runs, and
+/// the peer learns the verdict from the repeat. Loss is the proxy's
+/// whole-frame drop, the application-level effect of a lost datagram on
+/// loopback; the real transport is reliable TCP.
+#[test]
+fn a_decided_match_survives_its_first_frame_being_lost() {
+    use mm2_app::cnr::{CnrHost, end_decided_match};
+    use mm2_app::cnrnet::{DECIDED_REPEAT_RUNS, decode_view};
+    use mm2_game::gold::{CarrierLoad, CnrVariant, EndRule, GoldMatch, GoldRules, Side};
+
+    let install = tempfile::tempdir().unwrap();
+    let (link, vfs, fp) = host_link(install.path(), &dev_cruise());
+    let proxy = ImpairProxy::loopback_seeded(link.addr(), 17).unwrap();
+    let mut app = host_app(vfs, link);
+    app.add_systems(Update, end_decided_match);
+    let mut peer = ready_peer(proxy.addr(), "eve", fp);
+    spin(&mut app, |a| {
+        a.world()
+            .resource::<LobbyState>()
+            .roster
+            .iter()
+            .any(|e| e.pick.is_some())
+    });
+    let generation = hosted_playing(&mut app);
+    let sent = |a: &App| a.world().resource::<netdrive::NetDriveReport>().cnr_sent;
+
+    let mut game = GoldMatch::new(
+        generation,
+        mm2_game::ObjectId {
+            generation,
+            slot: 90,
+        },
+        GoldRules {
+            variant: CnrVariant::FreeForAll,
+            end: EndRule::Ticks(5),
+            load: CarrierLoad::NONE,
+            pickup_points: 25,
+            delivery_points: 100,
+            pickup_radius: 4.0,
+            delivery_radius: 12.0,
+            drop_lockout_ticks: 10,
+        },
+        (0..6)
+            .map(|i| Vec3::new(i as f32 * 40.0, 0.0, -(i as f32) * 25.0))
+            .collect(),
+        11,
+        &[(mm2_game::PlayerId(0), Side::Solo)],
+    )
+    .unwrap();
+    for _ in 0..10 {
+        game.tick();
+    }
+    assert!(game.outcome().is_some());
+    let decided = game.view();
+
+    // The data plane goes dark, and the decided frame goes out into it.
+    proxy.set(
+        LinkDir::Down,
+        Impair {
+            loss: 1.0,
+            ..Impair::default()
+        },
+    );
+    app.insert_resource(CnrHost::new(game));
+    app.update();
+    assert_eq!(sent(&app), 1, "the decision publishes once at once");
+    spin(&mut app, |_| proxy.stats(LinkDir::Down).dropped > 0);
+    assert_eq!(sent(&app), 1);
+
+    // The link heals. Nothing changes in the match — the repeat alone
+    // carries the result, and not before its cadence.
+    proxy.set(LinkDir::Down, Impair::default());
+    let mut runs = 0;
+    while sent(&app) == 1 {
+        app.update();
+        runs += 1;
+        assert!(runs <= DECIDED_REPEAT_RUNS, "the repeat never came");
+    }
+    // The drop-wait above already ran a few of the cadence's runs.
+    assert!(
+        runs > DECIDED_REPEAT_RUNS / 2,
+        "the repeat waits its cadence, not every frame: {runs}"
+    );
+    let mut seen = None;
+    for _ in 0..16 {
+        let Message::Cnr { frame, .. } =
+            until_wire(&mut peer, |m| matches!(m, Message::Cnr { .. }))
+        else {
+            unreachable!()
+        };
+        if let Ok(view) = decode_view(generation, &frame)
+            && view.outcome.is_some()
+        {
+            seen = Some(view);
+            break;
+        }
+    }
+    assert_eq!(
+        seen.expect("the peer never learned the verdict"),
+        decided,
+        "the repeat is the decided match, whole"
+    );
+}
+
 /// F27-B.3 client half: the host's match frame lands as a replica for
 /// the session's generation; a reordered older frame, a repeat,
 /// another generation's frame and a self-contradicting one change
