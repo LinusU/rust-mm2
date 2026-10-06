@@ -271,6 +271,11 @@ pub fn detach_breaks(
     mut report: ResMut<BreakReport>,
     mut commands: Commands,
 ) {
+    // No impacts is nearly every step; skip the index and the banger
+    // census below (see `damage::resolve_disabled`).
+    if reader.is_empty() {
+        return;
+    }
     // Same drain discipline as every impact consumer: a buffered
     // stale stream must never flush detaches into a pause, a loading
     // phase or a session the authority does not own.

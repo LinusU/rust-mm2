@@ -301,6 +301,11 @@ pub fn apply_texel_damage(
     mut rigs: Query<(&GlobalTransform, &mut TexelDamageRig)>,
     mut report: ResMut<TexelDamageReport>,
 ) {
+    // No impacts is nearly every step; skip the index walk (see
+    // `damage::resolve_disabled`).
+    if reader.is_empty() {
+        return;
+    }
     if !session.is_playing() {
         reader.read().for_each(drop);
         return;

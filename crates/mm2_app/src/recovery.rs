@@ -397,6 +397,11 @@ pub fn resolve_recovery(
     mut resets: MessageWriter<ResetVehicle>,
     mut report: ResMut<RecoveryReport>,
 ) {
+    // Recoveries are rare; skip the index walk when there is none (see
+    // `damage::resolve_disabled`).
+    if reader.is_empty() {
+        return;
+    }
     // Drain regardless of phase/authority — events buffered while
     // Loading/Paused or produced under a remote authority would
     // otherwise flush as a stale burst (same contract as

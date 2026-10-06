@@ -118,6 +118,11 @@ pub fn apply_impact_damage(
     mut report: ResMut<DamageReport>,
     mut writer: MessageWriter<DamageEvent>,
 ) {
+    // No impacts is nearly every step, and the index below walks every
+    // identified entity — see `resolve_disabled`.
+    if reader.is_empty() {
+        return;
+    }
     // Drain regardless of phase/authority — events buffered while
     // Loading/Paused or produced under a remote authority would
     // otherwise flush as a stale burst (or self-authored damage a
@@ -230,6 +235,12 @@ pub fn resolve_disabled(
     mut texel: crate::texel_fx::TexelRepair,
     mut commands: Commands,
 ) {
+    // A disabled car is rare, and the index below is a walk over every
+    // identified entity with a hash insert each — measured at ~0.2 ms of
+    // every 120 Hz step on a full city when built unconditionally.
+    if reader.is_empty() {
+        return;
+    }
     if !session.is_playing() || !session.authority_role().is_authority() {
         reader.read().for_each(drop);
         return;

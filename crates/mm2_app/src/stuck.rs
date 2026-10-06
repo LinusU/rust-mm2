@@ -176,6 +176,11 @@ pub fn resolve_stuck(
     mut resets: MessageWriter<ResetVehicle>,
     mut report: ResMut<StuckReport>,
 ) {
+    // Stuck episodes are rare; skip the index walk when there is none
+    // (see `damage::resolve_disabled`).
+    if reader.is_empty() {
+        return;
+    }
     if !session.is_playing() || !session.authority_role().is_authority() {
         reader.read().for_each(drop);
         return;
