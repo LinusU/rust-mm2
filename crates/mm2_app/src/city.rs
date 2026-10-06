@@ -3973,11 +3973,13 @@ fn load_city_part(
         }
     }
     for (surface, positions, tris) in ground {
-        spawn_collider(
-            surface,
-            ground_collider(positions, tris),
-            format!("city-ground{}", tag(surface)),
-        );
+        for (suffix, collider) in ground_collider(positions, tris) {
+            spawn_collider(
+                surface,
+                collider,
+                format!("city-ground{}{suffix}", tag(surface)),
+            );
+        }
     }
 
     // `decals.pathset` beside the PSDL paints the road markings —
@@ -4325,10 +4327,69 @@ fn load_city_part(
 /// off the road's, the solver read the car's whole forward speed as
 /// approach speed, and the car was thrown into the air spinning nose-up.
 /// The fix also makes every triangle one-sided, solid only from the side
-/// it faces.
-fn ground_collider(positions: Vec<Vec3>, tris: Vec<[u32; 3]>) -> Collider {
-    Collider::trimesh_with_config(positions, tris, TrimeshFlags::FIX_INTERNAL_EDGES)
+/// it faces; the flat triangles beside it stay two-sided.
+///
+/// Only triangles that meet a real kink get it ([`KINK_COS`]); triangles
+/// whose neighbours are all coplanar with them go in a plain mesh beside
+/// it. The fix bends each contact normal into the cone the triangle's edges
+/// span and then drops every contact more than five times deeper than the
+/// unbent one. On a thin sliver the unbent normal is the sideways way out of
+/// the sliver, shallow and facing away from the face, so a car's nose
+/// pressing into the level moat floor at the foot of a London bank (a 132 m
+/// sliver) lost every contact and fell through. A coplanar neighbour has no
+/// kink to catch on, so those triangles need none of that.
+fn ground_collider(positions: Vec<Vec3>, tris: Vec<[u32; 3]>) -> Vec<(&'static str, Collider)> {
+    let key = |v: u32| {
+        let p = positions[v as usize] * 1000.0;
+        [p.x.round() as i32, p.y.round() as i32, p.z.round() as i32]
+    };
+    let normals: Vec<Vec3> = tris
+        .iter()
+        .map(|&[a, b, c]| {
+            let [pa, pb, pc] = [a, b, c].map(|v| positions[v as usize]);
+            (pb - pa).cross(pc - pa).normalize_or_zero()
+        })
+        .collect();
+    let mut edges: std::collections::HashMap<([i32; 3], [i32; 3]), Vec<usize>> = Default::default();
+    for (i, &[a, b, c]) in tris.iter().enumerate() {
+        for (u, v) in [(a, b), (b, c), (c, a)] {
+            let (ku, kv) = (key(u), key(v));
+            edges.entry((ku.min(kv), ku.max(kv))).or_default().push(i);
+        }
+    }
+    let mut kinked = vec![false; tris.len()];
+    for sharing in edges.values() {
+        for &i in sharing {
+            for &j in sharing {
+                if normals[i].dot(normals[j]) < KINK_COS {
+                    kinked[i] = true;
+                }
+            }
+        }
+    }
+    let (mut fixed, mut plain) = (Vec::new(), Vec::new());
+    for (&tri, &kink) in tris.iter().zip(&kinked) {
+        if kink {
+            fixed.push(tri);
+        } else {
+            plain.push(tri);
+        }
+    }
+    let fixed = (!fixed.is_empty()).then(|| {
+        let mesh = Collider::trimesh_with_config(
+            positions.clone(),
+            fixed,
+            TrimeshFlags::FIX_INTERNAL_EDGES,
+        );
+        ("", mesh)
+    });
+    let plain = (!plain.is_empty()).then(|| ("-flat", Collider::trimesh(positions, plain)));
+    fixed.into_iter().chain(plain).collect()
 }
+
+/// Two ground triangles sharing an edge meet at a kink when the cosine of
+/// the angle between their normals is below this (about 2°).
+const KINK_COS: f32 = 0.9994;
 
 #[cfg(test)]
 mod tests {
@@ -4375,7 +4436,7 @@ mod tests {
     /// fastest it ever moved upward and its height at the end — the kink
     /// is the shared edge of the two road quads, the shape of the SF hill
     /// bottoms.
-    fn slide_over_kink(collider: Collider) -> (f32, f32) {
+    fn slide_over_kink(colliders: Vec<(&'static str, Collider)>) -> (f32, f32) {
         use std::time::Duration;
 
         use bevy::time::TimeUpdateStrategy;
@@ -4393,7 +4454,9 @@ mod tests {
             .add_plugins(TransformPlugin);
         app.finish();
         app.cleanup();
-        app.world_mut().spawn((RigidBody::Static, collider));
+        for (_, collider) in colliders {
+            app.world_mut().spawn((RigidBody::Static, collider));
+        }
 
         let slope = 7f32.to_radians();
         let down = Vec3::new(slope.cos(), -slope.sin(), 0.0);
@@ -4453,6 +4516,64 @@ mod tests {
             "a body sliding off a slope onto the flat rose at {rise} m/s"
         );
         assert!(y > 0.0, "and it stays on the road, ending at y = {y}");
+    }
+
+    /// A box with its corner pressed a metre into a long thin level
+    /// triangle must be held up. The triangle is narrower than the corner
+    /// is deep, so the way out of the triangle alone is sideways; with the
+    /// internal-edge fix on every ground triangle that contact was dropped
+    /// and the box fell through the floor.
+    #[test]
+    fn a_sliver_floor_holds_a_pressed_corner() {
+        use std::time::Duration;
+
+        use bevy::time::TimeUpdateStrategy;
+
+        let positions = vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 100.0),
+            Vec3::new(1.0, 0.0, 0.0),
+        ];
+        let colliders = ground_collider(positions, vec![[0, 1, 2]]);
+        assert_eq!(colliders.len(), 1, "one coplanar triangle");
+        assert_eq!(colliders[0].0, "-flat", "needs no internal-edge fix");
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(AssetPlugin::default())
+            .add_plugins(bevy::mesh::MeshPlugin)
+            .add_plugins(PhysicsPlugins::default())
+            .insert_resource(Time::<Fixed>::from_hz(120.0))
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+                1.0 / 120.0,
+            )))
+            .insert_resource(Gravity(Vec3::NEG_Y * 9.81))
+            .add_plugins(TransformPlugin);
+        app.finish();
+        app.cleanup();
+        for (_, collider) in colliders {
+            app.world_mut().spawn((RigidBody::Static, collider));
+        }
+        let tilt = Quat::from_rotation_z(40f32.to_radians());
+        let start = Vec3::new(0.5, 1.5, 2.0);
+        let body = app
+            .world_mut()
+            .spawn((
+                RigidBody::Dynamic,
+                Collider::cuboid(4.0, 0.5, 1.8),
+                Position(start),
+                Rotation(tilt),
+                Transform::from_translation(start).with_rotation(tilt),
+            ))
+            .id();
+        for _ in 0..240 {
+            app.update();
+        }
+        let y = app.world().get::<Position>(body).unwrap().y;
+        assert!(
+            y > -0.5,
+            "the box fell through the floor, ending at y = {y}"
+        );
     }
 
     #[test]

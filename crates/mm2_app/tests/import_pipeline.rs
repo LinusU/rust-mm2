@@ -1191,26 +1191,28 @@ fn retail_london_imports_driveable_geometry() {
 /// under the junction. The car here takes the same line at full
 /// throttle and must stay on the city's surfaces. Runs only when the
 /// gitignored `retail/` tree is present.
-#[test]
-fn retail_tower_bridge_bank_holds_a_car_driven_into_it() {
+/// A headless physics world holding retail London and the retail
+/// `vpcoop2k`, or `None` (after saying why) without the gitignored
+/// `retail/` tree.
+fn retail_london_world(what: &str) -> Option<(bevy::prelude::App, mm2_content::VehicleDef)> {
     use std::time::Duration;
 
     use avian3d::prelude::*;
     use bevy::prelude::*;
     use bevy::time::TimeUpdateStrategy;
-    use mm2_vehicle::{VehicleInput, VehiclePlugin, vehicle_bundle};
+    use mm2_vehicle::VehiclePlugin;
 
     let retail = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../retail");
     if !retail.join("mm2core.ar").is_file() {
-        eprintln!("retail data not present; skipping the Tower Bridge bank");
-        return;
+        eprintln!("retail data not present; skipping {what}");
+        return None;
     }
     let mut vfs = Vfs::new();
     mm2_assets::mount_install(&mut vfs, &retail, &mm2_assets::InstallMount::default())
         .expect("the install mounts");
     let Ok(car) = mm2_content::load_vehicle(&vfs, "vpcoop2k", 0) else {
-        eprintln!("vpcoop2k not in the install; skipping the Tower Bridge bank");
-        return;
+        eprintln!("vpcoop2k not in the install; skipping {what}");
+        return None;
     };
 
     let mut app = App::new();
@@ -1244,6 +1246,18 @@ fn retail_tower_bridge_bank_holds_a_car_driven_into_it() {
         .expect("London loads");
     }
     queue.apply(app.world_mut());
+    Some((app, car))
+}
+
+#[test]
+fn retail_tower_bridge_bank_holds_a_car_driven_into_it() {
+    use avian3d::prelude::*;
+    use bevy::prelude::*;
+    use mm2_vehicle::{VehicleInput, vehicle_bundle};
+
+    let Some((mut app, car)) = retail_london_world("the Tower Bridge bank") else {
+        return;
+    };
 
     // On road 404's north kerb, pointed across the moat at the bank's
     // southern end; it leaves the road, drops into the moat and meets the
@@ -1272,6 +1286,42 @@ fn retail_tower_bridge_bank_holds_a_car_driven_into_it() {
     assert!(
         lowest > -1.0,
         "the car went under the moat (lowest y {lowest}, ended at {end})"
+    );
+}
+
+/// Real-content regression: a car rolling nose-down off the same grass
+/// bank (room 268) onto the level moat floor at its foot. The floor's
+/// triangle there is a 132 m sliver, and the car's front wheels meet it
+/// at the bank's pitch; its nose used to go through the floor with no
+/// chassis contact at all and the car fell out of the world. Runs only
+/// when the gitignored `retail/` tree is present.
+#[test]
+fn retail_moat_floor_holds_a_car_rolling_off_the_bank() {
+    use avian3d::prelude::*;
+    use bevy::prelude::*;
+    use mm2_vehicle::vehicle_bundle;
+
+    let Some((mut app, car)) = retail_london_world("the moat floor") else {
+        return;
+    };
+    let car = app
+        .world_mut()
+        .spawn((
+            vehicle_bundle(&car.config),
+            Transform::from_xyz(1288.5, 4.2, -386.7)
+                .with_rotation(Quat::from_rotation_y(90f32.to_radians())),
+        ))
+        .id();
+    app.world_mut().get_mut::<LinearVelocity>(car).unwrap().0 = Vec3::NEG_X * 4.0;
+    let mut lowest = f32::MAX;
+    for _ in 0..600 {
+        app.update();
+        lowest = lowest.min(app.world().get::<Position>(car).unwrap().0.y);
+    }
+    let end = app.world().get::<Position>(car).unwrap().0;
+    assert!(
+        lowest > -1.0,
+        "the car went through the moat floor (lowest y {lowest}, ended at {end})"
     );
 }
 
