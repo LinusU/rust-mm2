@@ -1,3 +1,42 @@
+# Last iteration — F27-B.2b: Cops & Robbers host from content, retail markers (new-run iteration 13)
+
+Selection: the previous review passed (no blocking findings), so no
+repair was owed. Of F27-B's queued legs B.2b needs neither protocol nor
+lobby design, and it connects the match to real content: the city's
+authored site pool and the retail marker models.
+
+Change (`crates/mm2_app/src/cnr.rs`, one `Update` system line in
+`main.rs`):
+- `CnrHost::from_content(content, settings, tick_hz, generation, gold,
+  seed, participants)` — match over `CnrContent::sites` (via `v3`) with
+  `CnrSettings::rules`; a pool under 3 is refused (`PoolTooSmall`).
+- `spawn_cnr_markers` — `wpobj_gold`/`pt_hideout`/`pt_bank` through
+  `MovableModels` (the shared PKG→mesh path), session-owned roots with
+  render-part children, no collider; a model that fails to load is
+  counted in `CnrMarkerReport`, never substituted.
+- `sync_cnr_markers` — hideout/bank on the drawn sites, gold marker on
+  the resting/dropped gold, hidden while carried (implementation
+  choice, ledger CNR-12 updated). Idle without a `CnrHost`.
+- 5 synthetic tests (pool→sites, short pool refused, model-name binding
+  with a missing model counted, gold marker follows/hides/returns on a
+  drop, hideout/bank positions and no-host idle).
+
+Evidence: gates `cargo fmt --all -- --check` PASS; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` PASS; `cargo
+test --locked --workspace` PASS (2067 passed, 0 failed; was 2062). One
+local original-data run through a throwaway test (deleted, not
+committed): against `/Users/linus/coding/rust-mm2/retail` both cities
+build a host from the real pool (sf 44 sites, london 46, 0 content
+issues) and all three marker PKGs load and spawn (3/3, no missing
+models or textures). No GPU/screenshot: marker scale, ground contact
+(model origin vs road) and appearance are unverified.
+
+Still open: nothing calls `from_content`/`spawn_cnr_markers` in the
+shipped app (B.4 lobby), no wire (B.3), no HUD/commentary; F27-AC01..06
+open. Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — repair: a wreck must not farm the gold (new-run iteration 12)
 
 Root cause (review of iteration 11, implementation defect): `cnr_host_step`

@@ -40,12 +40,15 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
-use mm2_game::gold::{CarrierLoad, Contact, DropCause, GoldEvent, GoldMatch};
+use mm2_assets::Vfs;
+use mm2_content::cnr::{CnrContent, CnrSettings, MARKER_MODELS};
+use mm2_game::gold::{CarrierLoad, Contact, DropCause, GoldError, GoldEvent, GoldMatch, Side};
 use mm2_game::{
-    DamageTier, ImpactEvent, ObjectId, ObjectIdentity, Player, PlayerId, Session, VehicleDamage,
+    DamageTier, ImpactEvent, ObjectId, ObjectIdentity, Player, PlayerId, Session, SessionEntity,
+    VehicleDamage,
 };
 
-use crate::city::WorldFloor;
+use crate::city::{MovableModels, WorldFloor, v3};
 
 /// Approach speed, m/s, at or above which another participant's car
 /// striking the carrier knocks the gold loose. *Enhanced policy* — the
@@ -78,6 +81,34 @@ impl CnrHost {
             dislodge_severity: DEFAULT_DISLODGE_SEVERITY,
             last_seen: BTreeMap::new(),
         }
+    }
+
+    /// A host for a city's match: the rules the lobby's `settings`
+    /// choose, played over the city's authored site pool
+    /// (`multicopwaypoints.csv`, [`CnrContent::sites`]) in the world's
+    /// own axes. Refuses a pool that cannot seed a round; the
+    /// content's other issues (a missing marker model, a short
+    /// commentary table) do not stop play, they are the audit's to
+    /// count.
+    pub fn from_content(
+        content: &CnrContent,
+        settings: &CnrSettings,
+        tick_hz: u32,
+        generation: u64,
+        gold: ObjectId,
+        seed: u64,
+        participants: &[(PlayerId, Side)],
+    ) -> Result<Self, GoldError> {
+        let pool = content.sites.iter().copied().map(v3).collect();
+        let game = GoldMatch::new(
+            generation,
+            gold,
+            settings.rules(tick_hz),
+            pool,
+            seed,
+            participants,
+        )?;
+        Ok(Self::new(game))
     }
 }
 
@@ -305,9 +336,147 @@ fn apply(record: &GoldLoadApplied, mass: &mut Mass, inertia: &mut AngularInertia
     inertia.principal = record.base_inertia * (total / record.base_mass);
 }
 
+/// What a marker stands for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkerRole {
+    /// The gold, wherever it lies.
+    Gold,
+    /// The hideout a robber delivers to.
+    Hideout,
+    /// The bank a cop delivers to.
+    Bank,
+}
+
+impl MarkerRole {
+    /// Every role, in [`MARKER_MODELS`] order.
+    pub const ALL: [MarkerRole; 3] = [MarkerRole::Gold, MarkerRole::Hideout, MarkerRole::Bank];
+
+    /// The retail marker model (`geometry/<name>.pkg`) the mode's setup
+    /// binds to this role (`wpobj_gold`, `pt_hideout`, `pt_bank`).
+    pub fn model(self) -> &'static str {
+        match self {
+            MarkerRole::Gold => MARKER_MODELS[0],
+            MarkerRole::Hideout => MARKER_MODELS[1],
+            MarkerRole::Bank => MARKER_MODELS[2],
+        }
+    }
+}
+
+/// A rendered marker for one of the match's three sites, positioned by
+/// [`sync_cnr_markers`] from the host's match. Pure presentation: it
+/// has no collider and no authority.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CnrMarker {
+    /// What the marker stands for.
+    pub role: MarkerRole,
+}
+
+/// What [`spawn_cnr_markers`] produced, every miss counted.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CnrMarkerReport {
+    /// Marker entities spawned.
+    pub spawned: usize,
+    /// Roles whose model resolved to nothing drawable — that marker is
+    /// absent from the world, not substituted.
+    pub missing_models: Vec<&'static str>,
+    /// Texture stems the models named that failed to resolve.
+    pub missing_textures: Vec<String>,
+}
+
+/// Spawn the gold, hideout and bank markers from the retail marker
+/// models through the same PKG→mesh path stamped props use. Each is a
+/// session-owned root (the render parts are children), placed at the
+/// match's current sites; [`sync_cnr_markers`] keeps them there. The
+/// models' collision is deliberately not built — a marker a car could
+/// strike would be a prop, and the original's marker banger records
+/// are not read here.
+pub fn spawn_cnr_markers(
+    commands: &mut Commands,
+    vfs: &Vfs,
+    host: &CnrHost,
+    meshes: &mut Assets<Mesh>,
+    images: &mut Assets<Image>,
+    materials: &mut Assets<StandardMaterial>,
+    owner: SessionEntity,
+) -> CnrMarkerReport {
+    let mut report = CnrMarkerReport::default();
+    let mut models = MovableModels::new(vfs, meshes, images, materials);
+    let sites = host.game.sites();
+    for role in MarkerRole::ALL {
+        let Some(model) = models.load(role.model(), Vec3::ZERO) else {
+            report.missing_models.push(role.model());
+            continue;
+        };
+        let at = match role {
+            MarkerRole::Gold => host.game.gold_position().unwrap_or(sites.gold),
+            MarkerRole::Hideout => sites.hideout,
+            MarkerRole::Bank => sites.bank,
+        };
+        let root = commands
+            .spawn((
+                owner,
+                CnrMarker { role },
+                Transform::from_translation(at),
+                Visibility::default(),
+                Name::new(format!("cnr-{}", role.model())),
+            ))
+            .id();
+        for (mesh, material) in &model.parts {
+            let part = commands
+                .spawn((
+                    Mesh3d(mesh.clone()),
+                    MeshMaterial3d(material.clone()),
+                    Transform::IDENTITY,
+                ))
+                .id();
+            commands.entity(root).add_child(part);
+        }
+        report.spawned += 1;
+    }
+    report.missing_textures = models.finish(commands, owner).into_iter().collect();
+    report
+}
+
+/// Keep the markers where the host's match says they are: hideout and
+/// bank at the round's drawn sites (they move when a delivery draws new
+/// ones), the gold where it rests or was dropped. While a car carries
+/// the gold its marker is hidden — *implementation choice*: what the
+/// original draws on a carrier is unrecovered, and the carrier/score
+/// presentation is the HUD's (F27-B.4), not a marker pinned to a body.
+/// Without a [`CnrHost`] the markers keep their last pose.
+pub fn sync_cnr_markers(
+    host: Option<Res<CnrHost>>,
+    mut markers: Query<(&CnrMarker, &mut Transform, &mut Visibility)>,
+) {
+    let Some(host) = host else {
+        return;
+    };
+    let sites = host.game.sites();
+    let gold = host.game.gold_position();
+    for (marker, mut transform, mut visibility) in &mut markers {
+        let (at, shown) = match marker.role {
+            MarkerRole::Gold => (gold.unwrap_or(sites.gold), gold.is_some()),
+            MarkerRole::Hideout => (sites.hideout, true),
+            MarkerRole::Bank => (sites.bank, true),
+        };
+        if transform.translation != at {
+            transform.translation = at;
+        }
+        let want = if shown {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *visibility != want {
+            *visibility = want;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::ecs::system::RunSystemOnce;
     use mm2_game::gold::{CnrVariant, EndRule, GoldRules, Side};
     use mm2_game::{PlayerControl, SessionConfig, SessionPhase};
 
@@ -779,5 +948,228 @@ mod tests {
             "still carrying, still a member"
         );
         assert!(r.game().standings().iter().all(|s| s.connected));
+    }
+
+    fn content(sites: Vec<[f32; 3]>) -> CnrContent {
+        CnrContent {
+            city: "sf".into(),
+            sites,
+            dependencies: Vec::new(),
+            cues_present: 0,
+            issues: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_host_plays_over_the_authored_pool_under_the_chosen_settings() {
+        let sites: Vec<[f32; 3]> = (0..5)
+            .map(|i| [i as f32 * 40.0, 1.0, -(i as f32)])
+            .collect();
+        let mut session = Session::new();
+        session.begin(SessionConfig::default()).unwrap();
+        let gold = session.mint_object_id();
+        let settings = CnrSettings {
+            gold_mass: mm2_content::cnr::GoldMass::Weightless,
+            ..CnrSettings::default()
+        };
+        let host = CnrHost::from_content(
+            &content(sites.clone()),
+            &settings,
+            60,
+            session.generation(),
+            gold,
+            3,
+            &[(A, Side::Solo)],
+        )
+        .unwrap();
+        let drawn = host.game.sites();
+        for p in [drawn.gold, drawn.hideout, drawn.bank] {
+            assert!(
+                sites.iter().any(|s| Vec3::from(*s) == p),
+                "{p} is not an authored site"
+            );
+        }
+        assert_eq!(host.game.rules().variant, settings.variant);
+        assert_eq!(
+            host.game.rules().pickup_radius,
+            settings.rules(60).pickup_radius
+        );
+    }
+
+    #[test]
+    fn a_pool_too_short_for_a_round_is_refused() {
+        let mut session = Session::new();
+        session.begin(SessionConfig::default()).unwrap();
+        let gold = session.mint_object_id();
+        let err = CnrHost::from_content(
+            &content(vec![[0.0; 3], [1.0; 3]]),
+            &CnrSettings::default(),
+            60,
+            session.generation(),
+            gold,
+            3,
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(err, GoldError::PoolTooSmall(2));
+    }
+
+    /// One triangle, enough for the PKG→mesh path to build a part.
+    fn marker_pkg() -> Vec<u8> {
+        let verts: [[f32; 3]; 3] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 2.0, 0.0]];
+        let indices: [u16; 3] = [0, 1, 2];
+        let mut geo = Vec::new();
+        geo.extend_from_slice(&1u32.to_le_bytes()); // n_sections
+        geo.extend_from_slice(&(verts.len() as u32).to_le_bytes());
+        geo.extend_from_slice(&(indices.len() as u32).to_le_bytes());
+        geo.extend_from_slice(&0u32.to_le_bytes()); // sections_duplicate
+        geo.extend_from_slice(&0x002u32.to_le_bytes()); // FVF_XYZ
+        geo.extend_from_slice(&1u16.to_le_bytes()); // n_strips
+        geo.extend_from_slice(&0u16.to_le_bytes()); // flags
+        geo.extend_from_slice(&(-1i32).to_le_bytes()); // shader_offset: fallback
+        geo.extend_from_slice(&3i32.to_le_bytes()); // triangles
+        geo.extend_from_slice(&(verts.len() as u32).to_le_bytes());
+        for v in &verts {
+            for f in v {
+                geo.extend_from_slice(&f.to_le_bytes());
+            }
+        }
+        geo.extend_from_slice(&(indices.len() as u32).to_le_bytes());
+        for i in &indices {
+            geo.extend_from_slice(&i.to_le_bytes());
+        }
+        let mut pkg = Vec::new();
+        pkg.extend_from_slice(b"PKG3");
+        pkg.extend_from_slice(b"FILE");
+        pkg.push(2);
+        pkg.extend_from_slice(b"H\0");
+        pkg.extend_from_slice(&(geo.len() as u32).to_le_bytes());
+        pkg.extend_from_slice(&geo);
+        pkg
+    }
+
+    fn spawn_markers(r: &mut Rig, models: &[&str]) -> CnrMarkerReport {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("geometry")).unwrap();
+        for m in models {
+            std::fs::write(dir.path().join(format!("geometry/{m}.pkg")), marker_pkg()).unwrap();
+        }
+        let mut vfs = Vfs::new();
+        vfs.mount_dir(dir.path(), 0).unwrap();
+        let world = r.app.world_mut();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        world
+            .run_system_once(
+                move |mut commands: Commands,
+                      host: Res<CnrHost>,
+                      mut meshes: ResMut<Assets<Mesh>>,
+                      mut images: ResMut<Assets<Image>>,
+                      mut materials: ResMut<Assets<StandardMaterial>>| {
+                    spawn_cnr_markers(
+                        &mut commands,
+                        &vfs,
+                        &host,
+                        &mut meshes,
+                        &mut images,
+                        &mut materials,
+                        SessionEntity(1),
+                    )
+                },
+            )
+            .unwrap()
+    }
+
+    fn marker_pose(r: &mut Rig, role: MarkerRole) -> (Vec3, Visibility) {
+        let mut q = r
+            .app
+            .world_mut()
+            .query::<(&CnrMarker, &Transform, &Visibility)>();
+        let (_, t, v) = q
+            .iter(r.app.world())
+            .find(|(m, ..)| m.role == role)
+            .expect("marker present");
+        (t.translation, *v)
+    }
+
+    #[test]
+    fn markers_load_from_the_retail_model_names_and_a_missing_one_is_counted() {
+        let mut r = rig(EndRule::None, &[A]);
+        r.app.add_systems(Update, sync_cnr_markers);
+        let report = spawn_markers(&mut r, &["wpobj_gold", "pt_hideout"]);
+        assert_eq!(report.spawned, 2);
+        assert_eq!(report.missing_models, vec!["pt_bank"]);
+        let sites = r.game().sites();
+        assert_eq!(marker_pose(&mut r, MarkerRole::Gold).0, sites.gold);
+        assert_eq!(marker_pose(&mut r, MarkerRole::Hideout).0, sites.hideout);
+        let banks = r
+            .app
+            .world_mut()
+            .query::<&CnrMarker>()
+            .iter(r.app.world())
+            .filter(|m| m.role == MarkerRole::Bank)
+            .count();
+        assert_eq!(banks, 0, "an absent model is not substituted");
+        // Each root carries its render part as a child, no collider.
+        let mut roots = r
+            .app
+            .world_mut()
+            .query_filtered::<&Children, With<CnrMarker>>();
+        assert!(roots.iter(r.app.world()).all(|c| c.len() == 1));
+        let mut colliders = r
+            .app
+            .world_mut()
+            .query_filtered::<Entity, (With<CnrMarker>, With<Collider>)>();
+        assert_eq!(colliders.iter(r.app.world()).count(), 0);
+    }
+
+    #[test]
+    fn the_gold_marker_follows_the_gold_and_hides_while_it_is_carried() {
+        let mut r = rig(EndRule::None, &[A, B]);
+        r.app
+            .add_systems(Update, sync_cnr_markers.after(reconcile_gold_load));
+        spawn_markers(&mut r, &["wpobj_gold", "pt_hideout", "pt_bank"]);
+        r.step();
+        let g = r.gold_at();
+        let (at, vis) = marker_pose(&mut r, MarkerRole::Gold);
+        assert_eq!((at, vis), (g, Visibility::Inherited));
+
+        r.put(r.a, g);
+        r.step();
+        assert_eq!(r.game().carrier(), Some(A));
+        let (_, vis) = marker_pose(&mut r, MarkerRole::Gold);
+        assert_eq!(vis, Visibility::Hidden, "nothing lies on the ground");
+
+        // Rammed loose by a car outside pickup reach, the gold lies
+        // where the carrier was struck and its marker comes back there.
+        let loose = g + Vec3::X * 2.0;
+        r.put(r.a, loose);
+        r.put(r.b, loose + Vec3::X * 6.0);
+        let (ao, bo) = (r.a_obj, r.b_obj);
+        r.impact(bo, ao, 20.0);
+        r.step();
+        assert_eq!(r.game().carrier(), None);
+        let dropped = r.game().gold_position().expect("the gold lies dropped");
+        assert_eq!(dropped, loose);
+        let (at, vis) = marker_pose(&mut r, MarkerRole::Gold);
+        assert_eq!((at, vis), (dropped, Visibility::Inherited));
+    }
+
+    #[test]
+    fn hideout_and_bank_markers_stay_on_the_drawn_sites_and_idle_without_a_host() {
+        let mut r = rig(EndRule::None, &[A]);
+        r.app
+            .add_systems(Update, sync_cnr_markers.after(reconcile_gold_load));
+        spawn_markers(&mut r, &["wpobj_gold", "pt_hideout", "pt_bank"]);
+        r.step();
+        let sites = r.game().sites();
+        assert_eq!(marker_pose(&mut r, MarkerRole::Hideout).0, sites.hideout);
+        assert_eq!(marker_pose(&mut r, MarkerRole::Bank).0, sites.bank);
+        // Teardown removes the host: the markers stay where they were
+        // rather than snapping anywhere, and nothing panics.
+        r.app.world_mut().remove_resource::<CnrHost>();
+        r.step();
+        assert_eq!(marker_pose(&mut r, MarkerRole::Bank).0, sites.bank);
     }
 }

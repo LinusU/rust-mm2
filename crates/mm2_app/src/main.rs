@@ -1279,6 +1279,9 @@ fn main() {
     .init_resource::<pause::PauseMenu>()
     .init_resource::<results::ResultsMenu>()
     .add_systems(FixedUpdate, advance_session_tick)
+    // F27-B.2b: the gold/hideout/bank markers follow the host's match
+    // (idle until a `CnrHost` exists and markers are spawned).
+    .add_systems(Update, cnr::sync_cnr_markers)
     // Drawbridge leaves pose after the solver step, like the lane
     // followers: the angular velocity they leave carries the next step.
     .init_resource::<mm2_app::worldclock::WorldClock>()
