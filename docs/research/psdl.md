@@ -139,3 +139,16 @@ not a recovered original slope threshold.
   per-room trimesh colliders, facade-bound collision, INST/PKG props and a
   structured `CityReport` distinguishing emitted / suppressed /
   approximated / unsupported / rejected content.
+- Collision is split by slope (designed policy, `RoomCollider::split`):
+  triangles under 30° are ground — rewound to face up and merged per
+  surface material into one city-wide trimesh with parry's
+  `FIX_INTERNAL_EDGES`, so a car crossing a room seam or a hill's foot
+  meets the neighbouring face, not the bare edge. Everything steeper —
+  banks, embankments, pitched roofs — plus walls, kerb faces and tunnel
+  ceilings stays a plain two-sided mesh per room. The 30° line sits
+  above every stock street (SF's steepest road section is 25.0°); the
+  internal-edge fix cannot hold a steep bank — it bends a nosing car's
+  contacts toward the vertical of the level floor the bank meets and
+  then drops them as too deep, and on the 37° bank between Tower Bridge's
+  southern junction and the Tower of London's moat (room 268) a car went
+  straight through into the void under the junction.

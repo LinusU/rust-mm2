@@ -1183,6 +1183,98 @@ fn retail_london_imports_driveable_geometry() {
     }
 }
 
+/// Real-content regression: the 37° grass bank between Tower Bridge's
+/// southern junction and the Tower of London's moat (London room 268).
+/// Opponents cutting from road 404 through the moat climb it, and a car
+/// driven into it at speed used to go straight through — the bank
+/// stopped pushing back once the car was in — and fall out of the world
+/// under the junction. The car here takes the same line at full
+/// throttle and must stay on the city's surfaces. Runs only when the
+/// gitignored `retail/` tree is present.
+#[test]
+fn retail_tower_bridge_bank_holds_a_car_driven_into_it() {
+    use std::time::Duration;
+
+    use avian3d::prelude::*;
+    use bevy::prelude::*;
+    use bevy::time::TimeUpdateStrategy;
+    use mm2_vehicle::{VehicleInput, VehiclePlugin, vehicle_bundle};
+
+    let retail = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../retail");
+    if !retail.join("mm2core.ar").is_file() {
+        eprintln!("retail data not present; skipping the Tower Bridge bank");
+        return;
+    }
+    let mut vfs = Vfs::new();
+    mm2_assets::mount_install(&mut vfs, &retail, &mm2_assets::InstallMount::default())
+        .expect("the install mounts");
+    let Ok(car) = mm2_content::load_vehicle(&vfs, "vpcoop2k", 0) else {
+        eprintln!("vpcoop2k not in the install; skipping the Tower Bridge bank");
+        return;
+    };
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_plugins(AssetPlugin::default())
+        .add_plugins(bevy::mesh::MeshPlugin)
+        .add_plugins(bevy::gizmos::GizmoPlugin)
+        .add_plugins(PhysicsPlugins::default())
+        .insert_resource(Time::<Fixed>::from_hz(120.0))
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / 120.0,
+        )))
+        .insert_resource(Gravity(Vec3::NEG_Y * 9.81))
+        .add_plugins(TransformPlugin)
+        .add_plugins(VehiclePlugin);
+    app.finish();
+    app.cleanup();
+    let mut queue = CommandQueue::default();
+    {
+        let mut commands = Commands::new(&mut queue, app.world());
+        load_city(
+            &mut commands,
+            &vfs,
+            "city/london.psdl",
+            &mut Assets::<Mesh>::default(),
+            &mut Assets::<Image>::default(),
+            &mut Assets::<StandardMaterial>::default(),
+            SessionEntity(1),
+            &mut mm2_game::Session::new(),
+        )
+        .expect("London loads");
+    }
+    queue.apply(app.world_mut());
+
+    // On road 404's north kerb, pointed across the moat at the bank's
+    // southern end; it leaves the road, drops into the moat and meets the
+    // bank at ~22 m/s.
+    let yaw = (-133.8f32).to_radians();
+    let start = Vec3::new(1236.0, 5.2, -505.0);
+    let car = app
+        .world_mut()
+        .spawn((
+            vehicle_bundle(&car.config),
+            Transform::from_translation(start).with_rotation(Quat::from_rotation_y(yaw)),
+        ))
+        .id();
+    let mut lowest = f32::MAX;
+    for _ in 0..900 {
+        app.world_mut()
+            .get_mut::<VehicleInput>(car)
+            .unwrap()
+            .throttle = 1.0;
+        app.update();
+        lowest = lowest.min(app.world().get::<Position>(car).unwrap().0.y);
+    }
+    let end = app.world().get::<Position>(car).unwrap().0;
+    // The moat floor is at y = 0; a car through the bank ends tens of
+    // metres under it.
+    assert!(
+        lowest > -1.0,
+        "the car went under the moat (lowest y {lowest}, ended at {end})"
+    );
+}
+
 /// This is original generated Stockholm terrain, not retail geometry. The
 /// exact paving fan/perimeter previously looked like a wall to the importer:
 /// its normal Y is 0.02569 and the outward-room heuristic reversed it below

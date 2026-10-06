@@ -740,8 +740,11 @@ pub struct RoomCollider {
 }
 
 /// Steepest slope a collision triangle can have and still count as
-/// ground in [`RoomCollider::split`] — 60°.
-const GROUND_MIN_NORMAL_Y: f32 = 0.5;
+/// ground in [`RoomCollider::split`] — 30° (`cos 30°`). Every stock
+/// street lies well under it (SF's steepest road section is 25.0°,
+/// London's roads are near level); anything steeper is a bank, an
+/// embankment or a pitched roof, which a car hits rather than drives.
+const GROUND_MIN_NORMAL_Y: f32 = 0.866;
 /// Twice the area (m²) below which [`RoomCollider::split`] treats a
 /// collision triangle as degenerate.
 const DEGENERATE_TWICE_AREA: f32 = 1e-4;
@@ -757,12 +760,27 @@ impl RoomCollider {
     /// along the mouth of the first SF checkpoint race's second
     /// intersection threw every car that crossed it.
     ///
-    /// Ground is every triangle sloping less than 60° that is not a
+    /// Ground is every triangle sloping less than 30° that is not a
     /// tunnel ceiling, rewound to face up: the internal-edge fix that
     /// [`ground_collider`] gives it makes triangles one-sided, and about
     /// one ground triangle in eleven is authored facing down. The rest —
-    /// walls, kerb faces, ceilings — keeps a plain two-sided mesh, since
-    /// nothing records which side of a wall is the street.
+    /// walls, kerb faces, ceilings and steep banks — keeps a plain
+    /// two-sided mesh, since nothing records which side of a wall is the
+    /// street.
+    ///
+    /// A steep bank is no ground for the internal-edge fix. The fix bends
+    /// each contact normal into the cone its triangle's edges span, and a
+    /// bank whose foot it shares with a level floor spans one reaching up
+    /// to the vertical: a car nosing into the bank is pushed up rather
+    /// than back, and parry then drops every contact the bent normal
+    /// makes more than five times deeper than the unbent one — the further
+    /// in the car goes, the less holds it. Measured on the 37° grass bank
+    /// between Tower Bridge's southern junction and the Tower of London's
+    /// moat: a Mini driven out of the moat into it at 22 m/s went through
+    /// it and under the junction, out of the world; on synthetic banks
+    /// wedge-nosed retail cars went through from 33° and sank a metre or
+    /// more from 25°. Two-sided and uncorrected, the same banks held every
+    /// car at every speed tried.
     pub fn split(&self) -> (Vec<[u32; 3]>, Vec<[u32; 3]>) {
         let (mut ground, mut rest) = (Vec::new(), Vec::new());
         for (i, &[a, b, c]) in self.tris.iter().enumerate() {
@@ -4462,6 +4480,45 @@ mod tests {
             "wall and ceiling keep two sides"
         );
         assert_eq!(ground, vec![[6, 8, 7]], "the floor is rewound to face up");
+    }
+
+    #[test]
+    fn steep_banks_stay_two_sided() {
+        // One room: a level floor, a 25° street rising off it — SF's
+        // steepest — and a 37° bank, the grass between Tower Bridge's
+        // southern junction and the Tower of London's moat, each authored
+        // clockwise from above as the city is.
+        let mut col = ColliderBuilder::default();
+        let rise = |deg: f32| 10.0 * deg.to_radians().tan();
+        col.tri(
+            Vec3::ZERO,
+            Vec3::new(10.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 10.0),
+        );
+        col.tri(
+            Vec3::ZERO,
+            Vec3::new(0.0, rise(25.0), -10.0),
+            Vec3::new(10.0, rise(25.0), -10.0),
+        );
+        col.tri(
+            Vec3::ZERO,
+            Vec3::new(-10.0, rise(37.0), 0.0),
+            Vec3::new(-10.0, rise(37.0), 10.0),
+        );
+        let room = RoomCollider {
+            room: 0,
+            surface: SurfaceMaterial::Unspecified,
+            positions: col.positions,
+            tris: col.tris,
+            ceilings: col.ceilings,
+        };
+        let (ground, rest) = room.split();
+        assert_eq!(ground.len(), 2, "the floor and the street are ground");
+        assert!(
+            ground.iter().all(|t| !t.contains(&6)),
+            "the bank stays out of the one-sided mesh: {ground:?}"
+        );
+        assert_eq!(rest, vec![[6, 7, 8]], "the bank keeps two sides");
     }
 
     #[test]
