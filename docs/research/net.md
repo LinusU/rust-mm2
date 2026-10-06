@@ -980,8 +980,21 @@ a frame of `SnapProp { site, fragment, phase, pos, rot }` rows:
   no row can be trusted. The 0.25 m quantum is chosen so a last-bit
   float difference across platforms hashes alike while a different prop
   at the ordinal does not; rotation is deliberately excluded (it comes
-  through trigonometry). *Verified on synthetic stamps and the in-process
-  loopback harness; not yet on a retail world across two processes.*
+  through trigonometry). *Verified on synthetic stamps, the in-process
+  loopback harness, and — operator-run, `MM2_RETAIL=<install> cargo test
+  -p mm2_app --test network two_retail` — two real `mm2` processes
+  (`--host --city sf` + `--join`) on one Apple Silicon machine: both
+  `props=sites5953:ce16a67de227adeb`, the client landed rows with
+  `mism0`. Same machine, same binary — cross-platform agreement of the
+  quantised homes (a coordinate near a 0.125 m boundary could round
+  differently) is not observed; a name-only digest is the fallback if it
+  ever diverges. The record's `props=` field exposes each process's table.*
+  Staging rules: the client holds the newest table *per generation*
+  (at most four) — a frame's table replaces its generation's held one
+  only when its tick is at least as new (a reordered older frame cannot
+  carry a stale, partly stamped table in), a frame of another generation
+  never condemns or vouches for this one's rows, and rows whose
+  generation's table is gone are refused counted as `mismatched`.
 - **Receiver.** Latest-wins *per prop* on `(generation, tick)` (equal
   tick passes — the session clock is frozen through `Ready`/`Countdown`);
   staged bounded at 4,096 props; held through `Loading`; phases only

@@ -1140,6 +1140,22 @@ fn run_headless(
             )
         })
         .unwrap_or_default();
+    // F26-A world-prop evidence: `props=` names this process's own
+    // stamped world (placement count and digest, the v18 `SiteTable`)
+    // and, on a client, the rows that landed or were refused for a
+    // world that differs — two processes in one session must print the
+    // same `sites`. Absent while nothing is stamped, so every record
+    // without props stays bit-identical.
+    let props_detail = world_ecs
+        .get_resource::<crate::netdrive::NetDriveReport>()
+        .filter(|r| r.prop_world.count > 0)
+        .map(|r| {
+            format!(
+                " props=sites{}:{:016x},landed{},mism{}",
+                r.prop_world.count, r.prop_world.digest, r.props_landed, r.props_mismatched
+            )
+        })
+        .unwrap_or_default();
     // A lobby run parked at `Menu` at the frame cap gets the lobby's
     // own verdict, not the generic "no player" one: a refused session
     // or a lost host carries its reason in the notice, a clean
@@ -1184,11 +1200,12 @@ fn run_headless(
             &record_world(session, lobby_mode, &world),
             status,
             format!(
-                "updates={frames} ticks={ticks} driver={} diff={} phase={}{mp_detail}{}{}",
+                "updates={frames} ticks={ticks} driver={} diff={} phase={}{mp_detail}{}{}{}",
                 driver.as_str(),
                 rec_config.difficulty.as_str(),
                 session.phase().name(),
                 net_detail,
+                props_detail,
                 why
             ),
         );
@@ -1988,7 +2005,7 @@ fn run_headless(
     );
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{extra}",
+            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{props_detail}{extra}",
             driver.as_str(),
             rec_config.difficulty.as_str(),
             session.phase().name(),

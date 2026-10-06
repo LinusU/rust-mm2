@@ -732,3 +732,69 @@ fn the_process_level_impairment_matrix_records_each_recipe_cell() {
         }
     }
 }
+
+/// The `props=sites<count>:<digest>,landed<n>,mism<n>` record field —
+/// this process's own stamped world (F26-A, protocol v18) and the prop
+/// rows a client landed or refused for a world that differs.
+fn props_field(line: &str) -> (u64, String, u64, u64) {
+    let (sites, rest) = field(line, "props")
+        .strip_prefix("sites")
+        .and_then(|s| s.split_once(','))
+        .unwrap_or_else(|| panic!("no props= sites in {line}"));
+    let (count, digest) = sites.split_once(':').expect("count:digest");
+    let cell = |prefix: &str| {
+        rest.split(',')
+            .find_map(|c| c.strip_prefix(prefix))
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("no {prefix} cell in {line}"))
+    };
+    (
+        count.parse().unwrap(),
+        digest.to_string(),
+        cell("landed"),
+        cell("mism"),
+    )
+}
+
+/// F26-A's open evidence step: do two real processes stamp the *same*
+/// world on a retail install? A hosted sf session and a joined client,
+/// each loading the city through the VFS on its own, must print the
+/// same non-empty `SiteTable` — and the client must not have refused a
+/// single prop row for a world that differs. Skipped without the
+/// operator's install (`MM2_RETAIL=<dir>`), like `net_check`'s retail
+/// leg: the original game's files never ride in git, so CI reports it
+/// as vacuous and only an operator run with the install is evidence.
+///
+/// Same machine, same architecture, same binary: this does not show the
+/// ordinals agree across platforms.
+#[test]
+fn two_retail_processes_stamp_the_same_prop_world() {
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let mut host_args = host_args(&retail, 9000);
+    // The retail world, not the dev cruise.
+    host_args.retain(|a| a != "--dev-world");
+    host_args.extend(["--city".into(), "sf".into()]);
+    let mut host = Proc::spawn(MM2_EXE, &host_args);
+    let addr = listening_addr(&host);
+    let client = Proc::spawn(MM2_EXE, &join_args(&retail, addr, "bob", 1000));
+    start_when_ready(&mut host, 1);
+
+    let rec = client.until("smoke=headless-physics");
+    assert_eq!(field(&rec, "status"), "pass", "{rec}");
+    let (count, digest, _landed, mismatched) = props_field(&rec);
+    assert!(count > 0, "the retail city stamps placements: {rec}");
+    assert_eq!(mismatched, 0, "the client refused the host's rows: {rec}");
+    assert!(client.wait().success(), "the client did not exit cleanly");
+
+    host.cmd("quit");
+    let host_rec = host.until("smoke=headless-physics");
+    let (host_count, host_digest, ..) = props_field(&host_rec);
+    assert_eq!(
+        (host_count, host_digest),
+        (count, digest),
+        "host and client stamped different worlds:\nhost   {host_rec}\nclient {rec}"
+    );
+}

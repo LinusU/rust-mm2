@@ -878,6 +878,16 @@ pub struct NetDriveReport {
     /// Sentinel rows — the release — land silently like every other
     /// state carry.
     pub surfaces_applied: u64,
+    /// This process's own stamped-world table (F26-A, protocol v18) —
+    /// the host's as it publishes it, a client's as it compares it. A
+    /// zero `count` means nothing was stamped (or no prop stage runs),
+    /// and the record stays silent.
+    pub prop_world: SiteTable,
+    /// Prop rows a client resolved against its world (F26-A).
+    pub props_landed: u64,
+    /// Prop rows a client dropped because the host's stamped world
+    /// differs from its own (F26-A).
+    pub props_mismatched: u64,
 }
 
 /// A rotation off the wire, sanitized — a malformed-quaternion guard so

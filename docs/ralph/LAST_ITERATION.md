@@ -1,3 +1,56 @@
+# Last iteration — retail two-process site-table evidence + staging repair (new-run iteration 5)
+
+Selection: the previous review passed with no blocking findings. Its
+largest verification gap — no two-process retail run showing host and
+client report equal `SiteTable`s — is the next evidence step for F26-A,
+and its two staging-looseness notes are cheap, in-file repairs.
+
+Repairs (`worldprops::PropStage`): the host's table is now held *per
+generation* (≤4, oldest evicted) and replaced only by a frame of that
+generation at least as new in tick — so a reordered older frame cannot
+carry a stale, partly stamped table in, and a newer-generation frame no
+longer decides the older one's rows (the review's "falls through to
+agreed" note: a drained row's generation always has its own table, and a
+row whose table is gone is refused counted as `mismatched`). A first
+attempt that kept one global table broke the existing
+`a_client_folds_prop_rows_into_its_stamped_world` leg (an interleaved
+foreign-generation frame poisoned current rows) — caught by the full
+suite, redesigned. Tests: `a_reordered_older_frame_cannot_replace_the_hosts_table`,
+`each_generation_keeps_its_own_table`,
+`rows_whose_generation_table_was_evicted_are_refused`.
+
+Evidence plumbing: `NetDriveReport` gains `prop_world` (own table),
+`props_landed`, `props_mismatched`, written by `publish_props`
+(host) / `apply_props` (client); the headless record gains
+` props=sites<count>:<digest>,landed<n>,mism<n>` (absent while nothing is
+stamped, so other records stay identical). New operator-run test
+`network::net_drive::two_retail_processes_stamp_the_same_prop_world`
+(skips without `MM2_RETAIL=<install>`): `mm2 --host --city sf` + `mm2
+--join`, both headless, loopback.
+
+Result (retail install at `/Users/linus/coding/rust-mm2/retail`, one
+Apple Silicon machine, one binary): host and client both printed
+`props=sites5953:ce16a67de227adeb`; in a longer manual 4000-frame run the
+client landed 3657 rows with `mism0`; the test run passed (7.5 s).
+Evidence level: real processes, real loopback, retail world — site
+ordinals agree *on the same platform*. Cross-platform agreement (the
+quantised-home rounding-boundary concern) is still unobserved; name-only
+digest is the recorded fallback if it ever diverges.
+
+Gates: `cargo fmt --all -- --check` exit 0; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings` exit 0 (one more
+targeted `too_many_arguments` allow, on `apply_props`); `cargo test --locked
+--workspace` exit 0 (1970 passed, 0 failed); the retail test re-run on the
+final code passed. No test processes left running.
+
+Still open (unchanged): measured impairment cell or real-GPU leg for
+`Props`; interpolation/velocities; traffic/weather/time-of-day;
+late-join beyond the resend cycle; drawbridge/mover/sound replication.
+Not F26-AC01..06 completion. Status: implemented candidate, not
+independently checked.
+
+---
+
 # Last iteration — world-agreement check for replicated props (new-run iteration 4)
 
 Selection: the previous review passed with no blocking findings, so no

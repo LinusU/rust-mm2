@@ -56,7 +56,7 @@ use mm2_net::{MAX_SNAP_PROPS, Message, SNAP_NO_FRAGMENT, SiteTable, SnapProp};
 
 use crate::banger::{BangerPieces, FragmentSpawn, shatter_placement, spawn_fragment};
 use crate::net::HostLink;
-use crate::netdrive::{RemoteSnaps, wire_quat};
+use crate::netdrive::{NetDriveReport, RemoteSnaps, wire_quat};
 
 /// [`SnapProp::phase`]: a struck, live body.
 pub const PROP_ACTIVE: u8 = 1;
@@ -194,6 +194,10 @@ fn decode_phase(raw: u8) -> Option<BangerPhase> {
     }
 }
 
+/// Generations whose host table the stage keeps — a new session's frames
+/// arrive while the last one's are still draining, never many more.
+const MAX_HOST_TABLES: usize = 4;
+
 /// The client-side prop inbox, a field of [`RemoteSnaps`] so the
 /// stream's two authority boundaries (an accepted `Start`, the link's
 /// `Closed`) reset it with everything else.
@@ -207,8 +211,12 @@ fn decode_phase(raw: u8) -> Option<BangerPhase> {
 pub struct PropStage {
     rows: HashMap<PropKey, (u64, u64, SnapProp)>,
     applied: HashMap<PropKey, (u64, u64)>,
-    /// The newest host table seen, with the generation it belongs to.
-    host_table: Option<(u64, SiteTable)>,
+    /// The newest frame's table per generation, with that frame's tick
+    /// — a reordered older frame can carry a stale, partly stamped
+    /// table and must not displace it, and a frame of another
+    /// generation says nothing about this one's. Bounded at
+    /// [`MAX_HOST_TABLES`] generations (the oldest evicted).
+    host_tables: BTreeMap<u64, (u64, SiteTable)>,
     local: SiteRegistry,
     /// The (host, local) tables of the last drain that disagreed;
     /// `None` while the worlds agree.
@@ -224,8 +232,15 @@ impl PropStage {
     /// Queue one frame's rows, noting the host's stamped-world `table`
     /// they are relative to.
     pub fn push(&mut self, generation: u64, tick: u64, table: SiteTable, rows: Vec<SnapProp>) {
-        if self.host_table.is_none_or(|(g, _)| generation >= g) {
-            self.host_table = Some((generation, table));
+        if self
+            .host_tables
+            .get(&generation)
+            .is_none_or(|(held, _)| tick >= *held)
+        {
+            self.host_tables.insert(generation, (tick, table));
+            while self.host_tables.len() > MAX_HOST_TABLES {
+                self.host_tables.pop_first();
+            }
         }
         for row in rows {
             let key = key_of(&row);
@@ -254,7 +269,7 @@ impl PropStage {
     pub fn reset(&mut self) {
         self.rows.clear();
         self.applied.clear();
-        self.host_table = None;
+        self.host_tables.clear();
         self.divergence = None;
     }
 
@@ -333,25 +348,29 @@ impl PropStage {
         rows.sort_by_key(|(key, ..)| (key.0, key.1 != SNAP_NO_FRAGMENT, key.1));
         // The host's table is only meaningful against this process's own
         // once both are for the same session; on a disagreement no
-        // ordinal can be trusted, so none of the rows is.
-        let agreed = match self.host_table {
-            Some((generation, host)) if generation == wire && host != self.local.table() => {
+        // ordinal can be trusted, so none of the rows is. A `wire` row
+        // always arrived with its generation's table; one without (the
+        // table evicted) is unverifiable and refused too.
+        let local = self.local.table();
+        let agreed = match self.host_tables.get(&wire).map(|(_, table)| *table) {
+            Some(host) if host != local => {
                 if self.divergence.is_none() {
                     warn!(
                         "world props: the host stamped {} placements (digest {:016x}) but this \
                          process stamped {} ({:016x}); prop rows are ignored until they agree",
-                        host.count,
-                        host.digest,
-                        self.local.table().count,
-                        self.local.table().digest,
+                        host.count, host.digest, local.count, local.digest,
                     );
                 }
-                self.divergence = Some((host, self.local.table()));
+                self.divergence = Some((host, local));
                 false
             }
-            _ => {
+            Some(_) => {
                 self.divergence = None;
                 true
+            }
+            None => {
+                self.divergence = None;
+                false
             }
         };
         let mut current = Vec::with_capacity(rows.len());
@@ -398,6 +417,7 @@ pub fn publish_props(
     fragments: Query<(Entity, &BangerFragment, &Banger), Changed<Banger>>,
     sites: Query<&BangerSite>,
     poses: Query<(&Banger, &Position, &Rotation)>,
+    report: Option<ResMut<NetDriveReport>>,
 ) {
     if ledger.generation != session.generation() {
         *ledger = PropLedger {
@@ -414,6 +434,9 @@ pub fn publish_props(
         }
     }
     ledger.sites.refresh();
+    if let Some(mut report) = report {
+        report.prop_world = ledger.sites.table();
+    }
     for (entity, site, banger) in &placements {
         if banger.phase != BangerPhase::Dormant {
             let key = (site.0, SNAP_NO_FRAGMENT);
@@ -555,7 +578,7 @@ type PropBody = (
 /// `apply_snapshots`: an authority never applies, a `Loading` session
 /// holds the rows (the world they name is still being stamped), and a
 /// session that is gone drops them.
-#[allow(clippy::type_complexity)] // Bevy system — the queries are the contract.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)] // Bevy system — the queries are the contract.
 pub fn apply_props(
     mut commands: Commands,
     mut snaps: ResMut<RemoteSnaps>,
@@ -564,6 +587,7 @@ pub fn apply_props(
     added: Query<(Entity, &BangerSite), Added<BangerSite>>,
     mut bodies: Query<PropBody>,
     pieces: Query<&BangerPieces>,
+    report: Option<ResMut<NetDriveReport>>,
 ) {
     snaps.props.local.begin(session.generation());
     for (entity, site) in &added {
@@ -578,6 +602,16 @@ pub fn apply_props(
         }
     }
     snaps.props.local.refresh();
+    // The record's evidence mirrors the stage, whichever gate returns.
+    let mut report = report;
+    let mut publish = |snaps: &RemoteSnaps| {
+        if let Some(report) = report.as_mut() {
+            report.prop_world = snaps.props.local_table();
+            report.props_landed = snaps.props.landed();
+            report.props_mismatched = snaps.props.mismatched();
+        }
+    };
+    publish(&snaps);
     if session.authority_role().is_authority() {
         return;
     }
@@ -614,6 +648,7 @@ pub fn apply_props(
             snaps.props.unresolved += 1;
         }
     }
+    publish(&snaps);
 }
 
 /// Apply one row; `false` when it names nothing this process can
@@ -1068,6 +1103,65 @@ mod tests {
         stage.push(7, 1, theirs, vec![row(0, SNAP_NO_FRAGMENT, PROP_SETTLED)]);
         assert!(stage.drain_for(1).is_empty());
         assert_eq!((stage.mismatched(), stage.unresolved()), (1, 1));
+    }
+
+    #[test]
+    fn a_reordered_older_frame_cannot_replace_the_hosts_table() {
+        let mut stage = PropStage::default();
+        stage.local.begin(1);
+        stage.local.note(0, "a", Vec3::ZERO);
+        stage.local.refresh();
+        let ours = stage.local_table();
+        let partial = SiteTable {
+            count: 0,
+            digest: 9,
+        };
+        stage.push(1, 8, ours, vec![row(0, SNAP_NO_FRAGMENT, PROP_SETTLED)]);
+        // An older frame, carrying the table from before the host finished
+        // stamping, arrives late.
+        stage.push(1, 3, partial, vec![row(1, SNAP_NO_FRAGMENT, PROP_SETTLED)]);
+        assert_eq!(stage.drain_for(1).len(), 2);
+        assert_eq!((stage.mismatched(), stage.divergence()), (0, None));
+        // The same tick is the same state and does replace it.
+        stage.push(1, 8, partial, vec![row(0, SNAP_NO_FRAGMENT, PROP_BROKEN)]);
+        assert!(stage.drain_for(1).is_empty());
+        assert_eq!(stage.mismatched(), 1);
+    }
+
+    #[test]
+    fn each_generation_keeps_its_own_table() {
+        let mut stage = PropStage::default();
+        stage.local.begin(1);
+        stage.local.note(0, "a", Vec3::ZERO);
+        stage.local.refresh();
+        let ours = stage.local_table();
+        let theirs = SiteTable {
+            count: 9,
+            digest: 2,
+        };
+        stage.push(1, 4, ours, vec![row(0, SNAP_NO_FRAGMENT, PROP_SETTLED)]);
+        // The host moved on to a new session, whose own world differs, before
+        // this client adopted it: that table neither condemns nor vouches for
+        // the rows of generation 1.
+        stage.push(2, 1, theirs, vec![]);
+        assert_eq!(stage.drain_for(1).len(), 1);
+        assert_eq!((stage.mismatched(), stage.divergence()), (0, None));
+    }
+
+    #[test]
+    fn rows_whose_generation_table_was_evicted_are_refused() {
+        let mut stage = PropStage::default();
+        stage.local.begin(1);
+        stage.local.note(0, "a", Vec3::ZERO);
+        stage.local.refresh();
+        let ours = stage.local_table();
+        stage.push(1, 4, ours, vec![row(0, SNAP_NO_FRAGMENT, PROP_SETTLED)]);
+        for generation in 2..2 + MAX_HOST_TABLES as u64 {
+            stage.push(generation, 1, ours, vec![]);
+        }
+        assert!(stage.host_tables.len() <= MAX_HOST_TABLES);
+        assert!(stage.drain_for(1).is_empty());
+        assert_eq!(stage.mismatched(), 1, "unverifiable rows are never posed");
     }
 
     #[test]
