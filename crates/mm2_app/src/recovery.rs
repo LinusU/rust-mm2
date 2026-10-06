@@ -195,18 +195,10 @@ impl SupportProbe<'_, '_> {
         self.is_static(hit.entity) && surface.map_or(0.0, |s| s.drag) < water_min_drag && !deadly
     }
 
-    /// `car` set down level at `position` facing `yaw` on the static
-    /// ground under its footprint ([`seat_level`]) — `None` when none
-    /// lies under it. Only ground that anchored the car counts: another
-    /// car or a raised drawbridge leaf beside the anchor must not lift
-    /// the landing onto its roof or deck.
-    ///
-    /// An anchor's car stood within 30° of level ([`ANCHOR_MIN_UPRIGHT`]),
-    /// so the ground under its level footprint lies at most the
-    /// footprint's reach × tan 30° above the ground under the anchor: the
-    /// probes start that far up, plus [`LANDING_PROBE_MARGIN`] — and
-    /// never above whatever is overhead, since a probe that starts over a
-    /// bridge deck or a tunnel roof would land the car on top of it.
+    /// [`seat_on_static_ground`] with this probe's notion of static.
+    /// Only ground that anchored the car counts: another car or a raised
+    /// drawbridge leaf beside the anchor must not lift the landing onto
+    /// its roof or deck.
     fn seat_landing(
         &self,
         car: Entity,
@@ -214,33 +206,62 @@ impl SupportProbe<'_, '_> {
         position: Vec3,
         yaw: f32,
     ) -> Option<Vec3> {
-        let reach = hull_points(config)
-            .into_iter()
-            .chain(config.wheels.iter().map(|w| w.position))
-            .map(|p| Vec2::new(p[0], p[2]).length())
-            .fold(0.0, f32::max);
-        let ground = position.y + HandlingMetrics::of(config).ground_y;
-        let mut top = ground + reach * ANCHOR_MIN_UPRIGHT.acos().tan() + LANDING_PROBE_MARGIN;
-        let com = position + Quat::from_rotation_y(yaw) * Vec3::from(config.center_of_mass);
-        let filter = SpatialQueryFilter::default().with_excluded_entities([car]);
-        if top > com.y
-            && let Some(hit) = self
-                .spatial
-                .cast_ray(com, Dir3::Y, top - com.y, false, &filter)
-        {
-            top = com.y + hit.distance - 0.05;
-        }
-        seat_level(
+        seat_on_static_ground(
             &self.spatial,
+            &|collider| self.is_static(collider),
             car,
             config,
             position,
             yaw,
-            top,
-            ground - ANCHOR_SUPPORT_REACH,
-            &|collider| self.is_static(collider),
         )
     }
+}
+
+/// `car` set down level at `position` facing `yaw` on the static ground
+/// under its footprint ([`seat_level`]) — `None` when none lies under
+/// it. `is_static` says which colliders belong to no moving body.
+///
+/// The probes are banded around `position.y`: a pose is a place the
+/// car was (or is to be) at about this height, not a promise of ground
+/// below it. An anchor's car stood within 30° of level
+/// ([`ANCHOR_MIN_UPRIGHT`]), so the ground under its level footprint
+/// lies at most the footprint's reach × tan 30° above the ground under
+/// the anchor: the probes start that far up, plus
+/// [`LANDING_PROBE_MARGIN`] — and never above whatever is overhead,
+/// since a probe that starts over a bridge deck or a tunnel roof would
+/// land the car on top of it.
+pub(crate) fn seat_on_static_ground(
+    spatial: &SpatialQuery,
+    is_static: &dyn Fn(Entity) -> bool,
+    car: Entity,
+    config: &VehicleConfig,
+    position: Vec3,
+    yaw: f32,
+) -> Option<Vec3> {
+    let reach = hull_points(config)
+        .into_iter()
+        .chain(config.wheels.iter().map(|w| w.position))
+        .map(|p| Vec2::new(p[0], p[2]).length())
+        .fold(0.0, f32::max);
+    let ground = position.y + HandlingMetrics::of(config).ground_y;
+    let mut top = ground + reach * ANCHOR_MIN_UPRIGHT.acos().tan() + LANDING_PROBE_MARGIN;
+    let com = position + Quat::from_rotation_y(yaw) * Vec3::from(config.center_of_mass);
+    let filter = SpatialQueryFilter::default().with_excluded_entities([car]);
+    if top > com.y
+        && let Some(hit) = spatial.cast_ray(com, Dir3::Y, top - com.y, false, &filter)
+    {
+        top = com.y + hit.distance - 0.05;
+    }
+    seat_level(
+        spatial,
+        car,
+        config,
+        position,
+        yaw,
+        top,
+        ground - ANCHOR_SUPPORT_REACH,
+        is_static,
+    )
 }
 
 type RecoveryVehicles<'w, 's> = Query<

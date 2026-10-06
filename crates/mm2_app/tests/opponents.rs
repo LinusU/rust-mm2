@@ -2181,6 +2181,64 @@ fn reanchor_dispatches_through_the_production_reset_path() {
     );
 }
 
+/// Drive the dispatch to a re-anchor with `extra` spawned behind the
+/// stuck car, and return the landing pose and the car's own height.
+fn reanchor_landing(extra: impl FnOnce(&mut App, Vec3)) -> Vec3 {
+    let tmp = roster_install("", &[]);
+    let mut app = event_app(event_config(), vfs_of(tmp.path()));
+    app.update();
+    let vpt = opponent_by_vehicle(&mut app, "vpt");
+    run(&mut app, 260); // released and driving
+    let before = app.world().get::<Position>(vpt).unwrap().0;
+    extra(&mut app, before);
+    {
+        let mut d = app.world_mut().get_mut::<OpponentDriver>(vpt).unwrap();
+        d.stuck_pos = before;
+        d.stuck_frames = REANCHOR_FRAMES - 1;
+    }
+    // The landing is the pose of the reset, before the car settles.
+    for _ in 0..8 {
+        app.update();
+        if app.world().get::<OpponentDriver>(vpt).unwrap().reanchors > 0 {
+            break;
+        }
+    }
+    assert_eq!(app.world().get::<OpponentDriver>(vpt).unwrap().reanchors, 1);
+    app.world().get::<Position>(vpt).unwrap().0
+}
+
+/// The route's heights are samples, not a ground promise: the landing
+/// is seated on the *static* ground under the level car — a curb or a
+/// raised slab lifts it onto that surface, a loose body that happens to
+/// lie behind the car (a crate, another car) does not.
+#[test]
+fn reanchor_seats_on_static_ground_not_on_loose_bodies() {
+    let flat = reanchor_landing(|_, _| {});
+    let behind = |before: Vec3| (before.x - 40.0, before.x - 3.0);
+    let slab = |app: &mut App, before: Vec3, body: RigidBody, top: f32| {
+        let (lo, hi) = behind(before);
+        app.world_mut().spawn((
+            body,
+            Collider::cuboid(hi - lo, 1.0, 20.0),
+            Transform::from_xyz((lo + hi) / 2.0, top - 0.5, before.z),
+        ));
+    };
+    let raised = reanchor_landing(|app, before| slab(app, before, RigidBody::Static, 0.4));
+    let loose = reanchor_landing(|app, before| slab(app, before, RigidBody::Dynamic, 1.0));
+    assert!(
+        (raised.y - (flat.y + 0.4)).abs() < 0.15,
+        "static slab seats the car on its top: flat {flat:?} raised {raised:?}"
+    );
+    assert!(
+        (loose.y - flat.y).abs() < 0.15,
+        "a dynamic body is not ground: flat {flat:?} loose {loose:?}"
+    );
+    assert!(
+        raised.x < flat.x + 0.5 && raised.x > flat.x - 0.5,
+        "seating keeps the walked landing's x/z: {flat:?} → {raised:?}"
+    );
+}
+
 /// A field that keeps making progress never triggers the assist:
 /// both opponents drive the whole course and `reanchors` stays 0.
 #[test]

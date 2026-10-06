@@ -107,6 +107,7 @@ use crate::racing_line::{
     CORNER_BRAKE_DEFAULT, CarLimits, RouteCursor, SpeedPlan, WallSense, pace, plan_speed,
     sense_walls, steer_toward,
 };
+use crate::recovery::seat_on_static_ground;
 use crate::scripted::{ScriptedBot, ScriptedTuning, bearing_throttle, recovery_input, watch_stuck};
 
 /// XZ distance within which a route point counts as reached. `.opp`
@@ -1278,11 +1279,14 @@ pub fn apply_gap_brake(input: &mut VehicleInput, blocker: &Blocker, speed: f32) 
 /// the smoke record surfaces the field total as `opp_rec=`. Authority
 /// only — a predicted client never teleports a participant.
 #[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)] // Bevy system: the re-anchor landing threads the physics and water handles beside the driver query
 pub fn opponent_drive(
     session: Res<Session>,
     time: Res<Time>,
     spatial: Option<SpatialQuery>,
     bodies: Query<&RigidBody>,
+    colliders: Query<&ColliderOf>,
+    water: Option<Res<crate::water::CityWater>>,
     race: Option<Res<RaceState>>,
     mut resets: MessageWriter<ResetVehicle>,
     mut set: ParamSet<(
@@ -1457,14 +1461,6 @@ pub fn opponent_drive(
                         traffic.iter().map(|t| t.pos).chain(claimed.iter().copied()),
                     )
                 };
-                let (mut pose, ryaw, resync_next) =
-                    reanchor_pose_with_progress(&route, driver.next, pos.0, yaw, |p| {
-                        gates.iter().any(|g| {
-                            let dx = p.x - g.center.x;
-                            let dz = p.z - g.center.z;
-                            dx * dx + dz * dz < g.radius * g.radius
-                        }) || occupied(p)
-                    });
                 // The same hull clearance the spawn applies.
                 let hull_min_y = vehicle
                     .config
@@ -1472,7 +1468,44 @@ pub fn opponent_drive(
                     .as_ref()
                     .and_then(|pts| pts.iter().map(|p| p[1]).reduce(f32::min))
                     .unwrap_or(-vehicle.config.chassis_size[1] * 0.5);
-                pose.y += (SPAWN_LIFT - hull_min_y).max(0.35);
+                let lift = (SPAWN_LIFT - hull_min_y).max(0.35);
+                // The route's heights are lane or anchor samples, not a
+                // ground promise: a pose may sit inside a wall block or
+                // under a raised deck with nothing to stand on. A
+                // candidate counts only where static, dry ground lies
+                // under the level car, and that ground sets the height.
+                let is_static = |c: Entity| {
+                    let body = colliders.get(c).map_or(c, |c| c.body);
+                    !bodies
+                        .get(body)
+                        .is_ok_and(|b| b.is_dynamic() || b.is_kinematic())
+                };
+                let seat = |p: Vec3, y: f32| -> Option<Vec3> {
+                    let sq = spatial.as_ref()?;
+                    let seated = seat_on_static_ground(
+                        sq,
+                        &is_static,
+                        entity,
+                        &vehicle.config,
+                        p + Vec3::Y * lift,
+                        y,
+                    )?;
+                    let deadly = water.as_ref().is_some_and(|w| w.is_deadly(seated));
+                    (!deadly).then_some(seated)
+                };
+                let (pose, ryaw, resync_next) =
+                    reanchor_pose_with_progress(&route, driver.next, pos.0, yaw, |p| {
+                        gates.iter().any(|g| {
+                            let dx = p.x - g.center.x;
+                            let dz = p.z - g.center.z;
+                            dx * dx + dz * dz < g.radius * g.radius
+                        }) || occupied(p)
+                            || (spatial.is_some() && seat(p, yaw).is_none())
+                    });
+                // Without a physics world (or when the walk found no
+                // ground at all) the authored height plus clearance
+                // stands, as before.
+                let pose = seat(pose, ryaw).unwrap_or(pose + Vec3::Y * lift);
                 resets.write(ResetVehicle {
                     entity: Some(entity),
                     position: pose,
