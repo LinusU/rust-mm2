@@ -1,3 +1,48 @@
+# Last iteration — F27-B.4c (two-process leg): a started match across two real processes (new-run iteration 24)
+
+Selection: the previous review passed with no blocking findings; its
+first gap — no two-process host+client run of a Cops & Robbers match —
+is the one a single machine can close without a GPU.
+
+Finding (a real defect in the evidence harness, not the game): the
+headless smoke app (`smoke.rs`, what `--headless` runs) registered
+`publish_cnr`/`apply_cnr` but not the systems that seat, step and end the
+match, so a hosted headless match never advanced past its opening frame
+(first run: host `cnr=sent1`, client `landed1,seats0`).
+
+Change:
+- `smoke.rs`: `enroll_cnr_participants → cnr_host_step →
+  end_decided_match → reconcile_gold_load` as their own `FixedLast` chain
+  after `resolve_recovery` (the existing chain is at bevy's 20-tuple
+  limit); `end_replicated_match` after `apply_cnr`; `CnrEvent` message.
+- Record gains ` cnr=sent,landed,stale,ref` plus, while a match is
+  visible, `seats,solo,rob,cop,red,blue,dec`. Absent with no match/frame,
+  so other records are unchanged.
+- `network::net_drive::two_retail_processes_play_a_started_cops_and_
+  robbers_match` (skips without `MM2_RETAIL`).
+
+Evidence: `MM2_RETAIL=/Users/linus/coding/rust-mm2/retail cargo test
+--locked -p mm2_app --test network two_retail_processes_play` passes:
+host `cnr=sent18`, client `cnr=sent0,landed16,stale0,ref0,seats2,solo0,
+rob1,cop1,red0,blue0,dec0`. Real processes, loopback, headless, retail
+sf. The host's own seats are not printed (its record is taken after
+`quit`, parked in the lobby), so host-vs-client seating agreement is not
+asserted, only that the client sees both sides seated.
+
+Gates (iteration 24, foreground): `cargo fmt --all -- --check` pass;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D
+warnings` clean; `cargo test --locked --workspace` exit 0 (2134 passed, 0
+failed; was 2125 + the new test skipping without `MM2_RETAIL`). No
+processes left running.
+
+Not verified: a gold pickup, delivery or decided match in two processes
+(nobody drives to the gold), the client's Results screen, any rendered
+output, impairment. Open: commentary, menu-hosted lobby offer, client
+carrier-mass prediction; F27-AC01..06. Status: implemented candidate,
+not independently checked.
+
+---
+
 # Last iteration — F27-B.4c (rematch-net leg): the match-over screen for hosted and joined matches (new-run iteration 23)
 
 Selection: the previous review passed with no blocking findings; its

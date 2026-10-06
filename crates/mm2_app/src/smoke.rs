@@ -332,6 +332,7 @@ fn add_lobby_client_systems(app: &mut App) {
                 crate::worldclock::apply_world_clock.after(net::drive_lobby),
                 // F27-B.3: the host's Cops & Robbers match — same wiring.
                 crate::cnrnet::apply_cnr.after(net::drive_lobby),
+                crate::cnr::end_replicated_match.after(crate::cnrnet::apply_cnr),
                 // F25-B: `R` asks the authority under a
                 // predicted session — same wiring as the app.
                 crate::netdrive::send_reset_request,
@@ -406,6 +407,7 @@ fn run_headless(
         .add_message::<mm2_game::RecoveryEvent>()
         .add_message::<RaceStarted>()
         .add_message::<BangerStateChanged>()
+        .add_message::<crate::cnr::CnrEvent>()
         .init_resource::<contracts::ImpactFilter>()
         .init_resource::<damage::DamageReport>()
         .init_resource::<crate::stuck::StuckReport>()
@@ -468,6 +470,21 @@ fn run_headless(
                 crate::movers::drive_movers,
             )
                 .chain(),
+        )
+        // F27-B: a Cops & Robbers match is seated, stepped, ended and its
+        // carrier load reconciled in the app's order, after the
+        // recovery pass — idle without a `CnrHost`. Its own group: the
+        // chain below is at the tuple-size limit.
+        .add_systems(
+            FixedLast,
+            (
+                crate::cnr::enroll_cnr_participants,
+                crate::cnr::cnr_host_step,
+                crate::cnr::end_decided_match,
+                crate::cnr::reconcile_gold_load,
+            )
+                .chain()
+                .after(crate::recovery::resolve_recovery),
         )
         .add_systems(
             FixedLast,
@@ -1196,6 +1213,45 @@ fn run_headless(
             )
         })
         .unwrap_or_default();
+    // F27-B Cops & Robbers evidence: the frames the host published and
+    // the client folded in (`stale`/`ref` = dropped or refused), and
+    // what this process can see of the match — `seats` participants
+    // seated, counted per side, `dec` once the
+    // result is decided. The host reads its own match, a client its
+    // replica, so two processes in one session must print the same
+    // seating. Absent while there is no match and no frame, so every
+    // other record stays bit-identical.
+    let cnr_detail = {
+        let view = crate::cnrhud::match_view(
+            world_ecs.get_resource::<crate::cnr::CnrHost>(),
+            world_ecs.get_resource::<crate::cnrnet::CnrReplica>(),
+        );
+        let report = world_ecs.get_resource::<crate::netdrive::NetDriveReport>();
+        let wire = report.map(|r| (r.cnr_sent, r.cnr_landed, r.cnr_stale, r.cnr_refused));
+        match (view, wire) {
+            (None, None | Some((0, 0, 0, 0))) => String::new(),
+            (view, wire) => {
+                let (sent, landed, stale, refused) = wire.unwrap_or_default();
+                let seen = view
+                    .map(|v| {
+                        let on = |side| v.standings.iter().filter(|s| s.side == side).count();
+                        use mm2_game::gold::Side;
+                        format!(
+                            ",seats{},solo{},rob{},cop{},red{},blue{},dec{}",
+                            v.standings.len(),
+                            on(Side::Solo),
+                            on(Side::Robbers),
+                            on(Side::Cops),
+                            on(Side::Red),
+                            on(Side::Blue),
+                            u8::from(v.outcome.is_some())
+                        )
+                    })
+                    .unwrap_or_default();
+                format!(" cnr=sent{sent},landed{landed},stale{stale},ref{refused}{seen}")
+            }
+        }
+    };
     // A lobby run parked at `Menu` at the frame cap gets the lobby's
     // own verdict, not the generic "no player" one: a refused session
     // or a lost host carries its reason in the notice, a clean
@@ -1240,7 +1296,7 @@ fn run_headless(
             &record_world(session, lobby_mode, &world),
             status,
             format!(
-                "updates={frames} ticks={ticks} driver={} diff={} phase={}{mp_detail}{}{}{}{}{}",
+                "updates={frames} ticks={ticks} driver={} diff={} phase={}{mp_detail}{}{}{}{}{}{}",
                 driver.as_str(),
                 rec_config.difficulty.as_str(),
                 session.phase().name(),
@@ -1248,6 +1304,7 @@ fn run_headless(
                 props_detail,
                 cars_detail,
                 world_detail,
+                cnr_detail,
                 why
             ),
         );
@@ -2047,7 +2104,7 @@ fn run_headless(
     );
     let detail = |extra: &str| {
         format!(
-            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{props_detail}{cars_detail}{world_detail}{extra}",
+            "updates={frames} ticks={ticks}{rs_detail} driver={} diff={} phase={} impacts={impacts} dropped={dropped} peak={peak_speed:.1}m/s{motion_detail} {pose_detail}{race_detail}{p_rec_detail}{nav_detail}{env_detail}{pvs_detail}{wtr_detail}{map_detail}{dash_detail}{trk_detail}{mir_detail}{ind_detail}{hud_detail}{tmr_detail}{arr_detail}{sta_detail}{traf_detail}{bng_detail}{dmg_detail}{vsk_detail}{brk_detail}{gyr_detail}{rcv_detail}{ptx_detail}{imp_detail}{spk_detail}{ppt_detail}{wfx_detail}{txl_detail}{surf_detail}{aud_detail}{traction_detail}{profile_detail}{seq_detail}{mp_detail}{net_detail}{props_detail}{cars_detail}{world_detail}{cnr_detail}{extra}",
             driver.as_str(),
             rec_config.difficulty.as_str(),
             session.phase().name(),

@@ -885,3 +885,80 @@ fn two_retail_processes_replicate_the_hosts_traffic() {
     // The operator's evidence: both records, as the run printed them.
     eprintln!("host   {host_rec}\nclient {rec}");
 }
+
+/// One cell of the `cnr=sent<n>,landed<n>,stale<n>,ref<n>,seats<n>,
+/// solo<n>,rob<n>,cop<n>,red<n>,blue<n>,dec<n>` record field — the
+/// host's published Cops & Robbers frames, a client's landed/stale/
+/// refused ones, and (`seats`..`dec`) the match this process sees, its
+/// own or its replica, seated per side (F27-B, v21). The match cells
+/// are absent once the session is gone: a host `quit` back to its
+/// lobby prints only the counters.
+fn cnr_cell(line: &str, prefix: &str) -> Option<u64> {
+    field(line, "cnr")
+        .split(',')
+        .find_map(|c| c.strip_prefix(prefix))
+        .map(|n| {
+            n.parse()
+                .unwrap_or_else(|_| panic!("bad {prefix} in {line}"))
+        })
+}
+
+/// F27-B's real-process evidence: a hosted retail sf Cops & Robbers
+/// match (`--cnr cops`) built from the city's authored site pool, and a
+/// joined client that lands the host's match frames and sees the match
+/// seated on both sides. Skipped without the operator's install
+/// (`MM2_RETAIL=<dir>`).
+///
+/// Same machine, same binary, loopback, headless: it shows the started
+/// match crosses a real socket between two processes, that the host
+/// stepped it (the periodic frames came from a running clock) and that
+/// the client's replica seats the participants on the two sides; it
+/// does not show a gold pickup, a delivery or a decided match (nobody
+/// drives to the gold), the HUD, or behaviour under impairment.
+#[test]
+fn two_retail_processes_play_a_started_cops_and_robbers_match() {
+    let Some(retail) = std::env::var_os("MM2_RETAIL").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: MM2_RETAIL is not set");
+        return;
+    };
+    let mut host_args = host_args(&retail, 9000);
+    host_args.retain(|a| a != "--dev-world");
+    host_args.extend(
+        ["--city", "sf", "--cnr", "cops", "--cnr-limit", "5m"]
+            .into_iter()
+            .map(String::from),
+    );
+    let mut host = Proc::spawn(MM2_EXE, &host_args);
+    let addr = listening_addr(&host);
+    let client = Proc::spawn(MM2_EXE, &join_args(&retail, addr, "bob", 1000));
+    start_when_ready(&mut host, 1);
+
+    let rec = client.until("smoke=headless-physics");
+    assert!(client.wait().success(), "the client did not exit cleanly");
+    host.cmd("quit");
+    let host_rec = host.until("smoke=headless-physics");
+    // The operator's evidence: both records, as the run printed them.
+    eprintln!("host   {host_rec}\nclient {rec}");
+
+    assert_eq!(field(&rec, "status"), "pass", "{rec}");
+    let cell =
+        |prefix: &str| cnr_cell(&rec, prefix).unwrap_or_else(|| panic!("no {prefix}: {rec}"));
+    assert!(cell("landed") > 1, "only the opening frame landed: {rec}");
+    assert_eq!(cell("ref"), 0, "the client refused the host's match: {rec}");
+    assert!(cell("seats") >= 2, "the replica seats too few cars: {rec}");
+    assert_eq!(cell("rob") + cell("cop"), cell("seats"), "{rec}");
+    assert!(
+        cell("rob") >= 1 && cell("cop") >= 1,
+        "both sides are seated: {rec}"
+    );
+    assert_eq!(cell("dec"), 0, "nobody drove to the gold: {rec}");
+
+    // More than the opening frame went out: the match clock ran on the
+    // host (a repeat is due every 120 match ticks).
+    let sent = cnr_cell(&host_rec, "sent").unwrap();
+    assert!(sent > 1, "the host's match clock never ran: {host_rec}");
+    assert!(
+        cell("landed") <= sent,
+        "the client landed frames the host never sent:\nhost   {host_rec}\nclient {rec}"
+    );
+}
