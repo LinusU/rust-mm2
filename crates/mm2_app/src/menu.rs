@@ -290,6 +290,10 @@ pub enum Action {
     CycleTextSize,
     /// Toggle the Options screen's reduced-flashing accessibility option.
     CycleFlashing,
+    /// Cycle the Options screen's window mode.
+    CycleDisplay,
+    /// Toggle the Options screen's vsync.
+    CycleVsync,
     /// Step one of the Options screen's volume levels.
     CycleAudio(AudioLevel),
     /// Put every graphics and audio setting back to its default.
@@ -1008,6 +1012,8 @@ impl MenuShell {
             | Action::CycleAntialiasing
             | Action::CycleTextSize
             | Action::CycleFlashing
+            | Action::CycleDisplay
+            | Action::CycleVsync
             | Action::CycleAudio(_)
             | Action::CycleSteerDeadzone
             | Action::CycleTriggerDeadzone
@@ -1209,6 +1215,12 @@ impl MenuShell {
             }
             Action::CycleFlashing => {
                 self.set_settings(data, data.settings.toggled_reduce_flashing(), effects);
+            }
+            Action::CycleDisplay => {
+                self.set_settings(data, data.settings.cycled_display(forward), effects);
+            }
+            Action::CycleVsync => {
+                self.set_settings(data, data.settings.toggled_vsync(), effects);
             }
             Action::CycleAudio(level) => {
                 self.set_settings(data, data.settings.stepped_audio(*level, forward), effects);
@@ -2294,6 +2306,8 @@ fn options_screen_rows(data: &MenuData) -> Vec<Row> {
         row(s.antialiasing_row(), Ok(()), Action::CycleAntialiasing),
         row(s.text_size_row(), Ok(()), Action::CycleTextSize),
         row(s.flashing_row(), Ok(()), Action::CycleFlashing),
+        row(s.display_row(), Ok(()), Action::CycleDisplay),
+        row(s.vsync_row(), Ok(()), Action::CycleVsync),
     ];
     rows.extend(
         AudioLevel::ALL.map(|level| row(s.audio.row(level), Ok(()), Action::CycleAudio(level))),

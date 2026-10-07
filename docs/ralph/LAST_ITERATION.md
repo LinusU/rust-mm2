@@ -1,3 +1,27 @@
+# Last iteration — F23-B.6: window mode and vsync (new-run iteration 25 of the 2026-10-07 run)
+
+Selection: the iteration-24 review passed with no blockers. F23 req 2 lists graphics/window/resolution/scaling and nothing touched the
+window yet (AC04/AC05 want controls with observable effects). Picked the smallest honest window slice: Windowed / Borderless
+fullscreen and VSync. Borderless only, deliberately: it never switches the display's video mode, so the req 6 "safe display recovery"
+problem does not arise; a resolution list / exclusive fullscreen stays open.
+
+Change: `GraphicsSettings.display: DisplayMode` and `.vsync: bool` (default true via a serde default fn, so old files vsync) in
+`settings.json`; `apply_display_settings` (registered by `GraphicsSettingsPlugin`) writes the primary window's `mode`/`present_mode` only
+on a changed resource and only when different; `main.rs` builds the startup window from the loaded settings and `--no-vsync` now sets
+`graphics.vsync = false` (so the perf record's "vsync" cell follows the real value). Display / VSync rows after Flashing on the menu
+Options screen and the pause graphics page (Reset covers them); `pause::CONTROLS_ROW` and the audio/reset/controls/back indices in
+`tests/menu.rs`/`tests/session.rs` shifted by two. DSN-82, README, PLAN updated.
+
+Tests: `settings::display_and_vsync_step_both_ways_and_an_old_file_keeps_the_shipped_window`, `settings::the_window_follows_the_display_settings_and_only_when_they_change`
+(primary vs non-primary window, no write on an unchanged frame), `menu::the_display_and_vsync_rows_toggle_persist_and_reset`, pause options test extended.
+
+Gates (foreground): fmt --check 0; clippy --locked --workspace --all-targets --all-features -D warnings 0; cargo test --locked --workspace 2504 passed, 0 failed. Status: implemented candidate, not independently checked.
+
+Not shown: no run on a real display (no fullscreen capture); `--no-vsync` now maps to `AutoNoVsync` rather than `Immediate` (picks Immediate where
+the surface has it) — unmeasured. No resolution/scale choice.
+
+---
+
 # Last iteration — F23-B.5: reduced-flashing option (new-run iteration 24 of the 2026-10-07 run)
 
 Selection: the iteration-23 review passed with no blockers. F23 req 4 still listed "reduced motion" open. Audit: the game has no camera

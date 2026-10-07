@@ -182,8 +182,10 @@ struct Cli {
     #[arg(long, value_enum, conflicts_with = "headless")]
     msaa: Option<settings::Antialiasing>,
 
-    /// Present without vsync (`Immediate`), so frame time reports what
-    /// the CPU and GPU cost instead of the display's refresh interval.
+    /// Present without vsync (`AutoNoVsync`, i.e. `Immediate` where the
+    /// surface has it) for this run, whatever the saved VSync setting
+    /// says, so frame time reports what the CPU and GPU cost instead of
+    /// the display's refresh interval.
     /// Pair with `--perf-log` to measure; not for playing (it tears).
     #[arg(long, conflicts_with = "headless")]
     no_vsync: bool,
@@ -1321,6 +1323,9 @@ fn main() {
     if let Some(antialiasing) = cli.msaa {
         graphics.antialiasing = antialiasing;
     }
+    if cli.no_vsync {
+        graphics.vsync = false;
+    }
 
     // Driving controls persist beside it as `controls.json` under the
     // same evidence-run rule: a capture neither reads nor writes them.
@@ -1340,11 +1345,11 @@ fn main() {
                 primary_window: Some(Window {
                     title: "rust-mm2".into(),
                     resolution: WINDOW_SIZE.into(),
-                    present_mode: if cli.no_vsync {
-                        bevy::window::PresentMode::Immediate
-                    } else {
-                        bevy::window::PresentMode::AutoVsync
-                    },
+                    // Built from the settings so the first frame already
+                    // has the saved mode (`apply_display_settings` then
+                    // finds nothing to change).
+                    present_mode: graphics.present_mode(),
+                    mode: graphics.display.window_mode(),
                     ..default()
                 }),
                 ..default()
@@ -2199,7 +2204,7 @@ fn main() {
         let settings = vec![
             (
                 "vsync".to_string(),
-                if cli.no_vsync { "off" } else { "on" }.to_string(),
+                if graphics.vsync { "on" } else { "off" }.to_string(),
             ),
             ("msaa".to_string(), format!("{:?}", graphics.antialiasing)),
             ("shadows".to_string(), format!("{:?}", graphics.shadows)),

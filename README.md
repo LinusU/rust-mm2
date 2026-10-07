@@ -258,6 +258,10 @@ with `--perf-log`. The same screen (and the pause overlay) offers a
 **Text size** of 100/125/150%, which scales every menu and HUD element,
 and a **Flashing** option (Normal/Reduced) that holds the cop light bar and
 the low-time warning steady instead of alternating or pulsing.
+**Display** (Windowed / Borderless fullscreen) and **VSync** (On/Off) rows
+change the primary window live and persist; borderless never switches the
+display's video mode, so there is no mode to get stuck in. `--no-vsync`
+still forces vsync off for a run.
 
 Beside the CSV, `frames.csv.report.json` (schema `mm2-perf-report/1`)
 makes the numbers reproducible rather than anecdotal: engine commit and

@@ -19,7 +19,8 @@ use mm2_app::session::{
     self, ErrorText, Hud, SelectedCar, SessionControl, SessionNote, SpawnPoint, TunedVehicle,
 };
 use mm2_app::settings::{
-    Antialiasing, GraphicsSettings, SettingsFile, ShadowQuality, TextSize, settings_path,
+    Antialiasing, DisplayMode, GraphicsSettings, SettingsFile, ShadowQuality, TextSize,
+    settings_path,
 };
 use mm2_assets::Vfs;
 use mm2_formats::hudmap::HudMapSpec;
@@ -1831,9 +1832,22 @@ fn pause_options_change_save_and_back_out() {
     assert!(live.reduce_flashing);
     assert_eq!(GraphicsSettings::load(&path), live);
 
+    // The display row steps to borderless fullscreen and the vsync row
+    // turns vsync off; both save.
+    press_key(&mut app, KeyCode::ArrowDown);
+    press_key(&mut app, KeyCode::ArrowRight);
+    let live = *app.world().resource::<GraphicsSettings>();
+    assert_eq!(live.display, DisplayMode::Fullscreen);
+    assert_eq!(GraphicsSettings::load(&path), live);
+    press_key(&mut app, KeyCode::ArrowDown);
+    press_key(&mut app, KeyCode::Enter);
+    let live = *app.world().resource::<GraphicsSettings>();
+    assert!(!live.vsync);
+    assert_eq!(GraphicsSettings::load(&path), live);
+
     // Reset (below the four volume rows) restores all and disables
     // itself.
-    pause_focus_row(&mut app, 8);
+    pause_focus_row(&mut app, 10);
     press_key(&mut app, KeyCode::Enter);
     assert_eq!(
         *app.world().resource::<GraphicsSettings>(),
@@ -1872,8 +1886,8 @@ fn pause_options_back_row_and_a_fresh_pause_start_at_the_top() {
     press_key(&mut app, KeyCode::ArrowDown);
     press_key(&mut app, KeyCode::Enter);
     assert_eq!(app.world().resource::<PauseMenu>().page, PausePage::Options);
-    // Back is the last of the page's eleven rows.
-    for _ in 0..10 {
+    // Back is the last of the page's thirteen rows.
+    for _ in 0..12 {
         press_key(&mut app, KeyCode::ArrowDown);
     }
     press_key(&mut app, KeyCode::Enter);
@@ -1899,7 +1913,7 @@ fn open_pause_controls(app: &mut App) {
     assert!(phase_is(app, SessionPhase::Paused));
     pause_focus_row(app, 2);
     press_key(app, KeyCode::Enter);
-    pause_focus_row(app, 9);
+    pause_focus_row(app, 11);
     press_key(app, KeyCode::Enter);
     assert_eq!(
         app.world().resource::<PauseMenu>().page,
@@ -2024,7 +2038,7 @@ fn pause_driving_controls_rebind_tune_save_and_back_out() {
     press_key(&mut app, KeyCode::Escape);
     {
         let pause = app.world().resource::<PauseMenu>();
-        assert_eq!((pause.page, pause.focus), (PausePage::Options, 9));
+        assert_eq!((pause.page, pause.focus), (PausePage::Options, 11));
     }
     press_key(&mut app, KeyCode::Escape);
     {
@@ -2046,7 +2060,7 @@ fn pause_driving_controls_row_needs_controls_and_a_pending_capture_dies_with_the
     press_key(&mut app, KeyCode::Escape);
     pause_focus_row(&mut app, 2);
     press_key(&mut app, KeyCode::Enter);
-    pause_focus_row(&mut app, 9);
+    pause_focus_row(&mut app, 11);
     press_key(&mut app, KeyCode::Enter);
     {
         let pause = app.world().resource::<PauseMenu>();
@@ -2189,8 +2203,8 @@ fn pause_volume_rows_change_the_live_levels_and_save() {
     press_key(&mut app, KeyCode::Enter);
     assert_eq!(app.world().resource::<PauseMenu>().page, PausePage::Options);
 
-    // Rows 3..=6 are master, effects, commentary, city.
-    pause_focus_row(&mut app, 5);
+    // Rows 6..=9 are master, effects, commentary, city.
+    pause_focus_row(&mut app, 7);
     press_key(&mut app, KeyCode::ArrowLeft);
     press_key(&mut app, KeyCode::ArrowLeft);
     let live = *app.world().resource::<GraphicsSettings>();
@@ -2198,7 +2212,7 @@ fn pause_volume_rows_change_the_live_levels_and_save() {
     assert_eq!(live.audio.master, 100);
     assert_eq!(GraphicsSettings::load(&path), live);
 
-    pause_focus_row(&mut app, 6);
+    pause_focus_row(&mut app, 8);
     press_key(&mut app, KeyCode::ArrowRight);
     assert_eq!(
         app.world().resource::<GraphicsSettings>().audio.commentary,
@@ -2206,7 +2220,7 @@ fn pause_volume_rows_change_the_live_levels_and_save() {
         "up from 100 wraps to silence"
     );
     // The reset row is offered now and restores the levels.
-    pause_focus_row(&mut app, 8);
+    pause_focus_row(&mut app, 10);
     press_key(&mut app, KeyCode::Enter);
     assert_eq!(
         *app.world().resource::<GraphicsSettings>(),

@@ -175,6 +175,50 @@ impl TextSize {
     }
 }
 
+/// How the game window sits on the display. Borderless fullscreen is the
+/// only fullscreen offered: it never changes the display's video mode,
+/// so a bad choice cannot leave the player with an unusable screen (the
+/// transactional-recovery leg of F23 req 6 only matters for mode
+/// switches, which this deliberately does not make).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DisplayMode {
+    /// A normal window at the startup size.
+    #[default]
+    Windowed,
+    /// A borderless window covering the current monitor.
+    Fullscreen,
+}
+
+impl DisplayMode {
+    /// Every value, in menu order.
+    pub const ALL: [Self; 2] = [Self::Windowed, Self::Fullscreen];
+
+    /// The menu label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Windowed => "Windowed",
+            Self::Fullscreen => "Borderless fullscreen",
+        }
+    }
+
+    /// The Bevy window mode this value asks for.
+    pub fn window_mode(self) -> bevy::window::WindowMode {
+        match self {
+            Self::Windowed => bevy::window::WindowMode::Windowed,
+            Self::Fullscreen => bevy::window::WindowMode::BorderlessFullscreen(
+                bevy::window::MonitorSelection::Current,
+            ),
+        }
+    }
+}
+
+/// `vsync` defaults on: serde fills a field an older file lacks from
+/// this, not from `bool::default`.
+fn vsync_on() -> bool {
+    true
+}
+
 /// A volume bus: the group of voices one Options row scales. The
 /// original's Audio Options screen separates Sound FX, Commentary,
 /// Music and City Sounds (CTL-5); there is no music player here yet, so
@@ -319,7 +363,7 @@ impl AudioLevels {
 
 /// The user's graphics choices and audio levels. `Default` is the
 /// shipped look and the authored mix.
-#[derive(Resource, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Resource, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(default)]
 pub struct GraphicsSettings {
     /// Key-light shadows.
@@ -333,6 +377,25 @@ pub struct GraphicsSettings {
     /// Photosensitivity option: lights that alternate or pulse hold
     /// steady instead (the cop light bar, the low-time warning).
     pub reduce_flashing: bool,
+    /// Window or borderless fullscreen.
+    pub display: DisplayMode,
+    /// Wait for the display's refresh when presenting a frame.
+    #[serde(default = "vsync_on")]
+    pub vsync: bool,
+}
+
+impl Default for GraphicsSettings {
+    fn default() -> Self {
+        Self {
+            shadows: ShadowQuality::default(),
+            antialiasing: Antialiasing::default(),
+            audio: AudioLevels::default(),
+            text_size: TextSize::default(),
+            reduce_flashing: false,
+            display: DisplayMode::default(),
+            vsync: true,
+        }
+    }
 }
 
 /// Step through every value of a setting, wrapping at both ends —
@@ -379,6 +442,44 @@ impl GraphicsSettings {
             reduce_flashing: !self.reduce_flashing,
             ..self
         }
+    }
+
+    /// These settings with the display mode stepped.
+    pub fn cycled_display(self, forward: bool) -> Self {
+        Self {
+            display: cycle_wrapping(&DisplayMode::ALL, self.display, forward),
+            ..self
+        }
+    }
+
+    /// These settings with vsync flipped (either step direction flips
+    /// it).
+    pub fn toggled_vsync(self) -> Self {
+        Self {
+            vsync: !self.vsync,
+            ..self
+        }
+    }
+
+    /// The Bevy present mode vsync asks for: `AutoVsync` falls back
+    /// across the vsync modes the surface supports, `AutoNoVsync` picks
+    /// the lowest-latency mode that does not wait for the display.
+    pub fn present_mode(&self) -> bevy::window::PresentMode {
+        if self.vsync {
+            bevy::window::PresentMode::AutoVsync
+        } else {
+            bevy::window::PresentMode::AutoNoVsync
+        }
+    }
+
+    /// The display row's text.
+    pub fn display_row(&self) -> String {
+        format!("Display: {}", self.display.label())
+    }
+
+    /// The vsync row's text.
+    pub fn vsync_row(&self) -> String {
+        format!("VSync: {}", if self.vsync { "On" } else { "Off" })
     }
 
     /// The flashing row's text.
@@ -543,6 +644,30 @@ pub fn apply_text_size(settings: Res<GraphicsSettings>, mut scale: ResMut<UiScal
     }
 }
 
+/// Push [`GraphicsSettings::display`] and [`GraphicsSettings::vsync`]
+/// onto the primary window when the settings change. Each field is
+/// written only when it differs, so a frame that changes something else
+/// (the shadows row) never touches the window; the startup window is
+/// built from the same settings, so the first run writes nothing.
+pub fn apply_display_settings(
+    settings: Res<GraphicsSettings>,
+    mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>,
+) {
+    if !settings.is_changed() {
+        return;
+    }
+    let mode = settings.display.window_mode();
+    let present = settings.present_mode();
+    for mut window in &mut windows {
+        if window.mode != mode {
+            window.mode = mode;
+        }
+        if window.present_mode != present {
+            window.present_mode = present;
+        }
+    }
+}
+
 /// Registers the settings resource (at its defaults unless the app
 /// inserted one first) and the systems that apply it.
 pub struct GraphicsSettingsPlugin;
@@ -554,7 +679,12 @@ impl Plugin for GraphicsSettingsPlugin {
             .init_resource::<UiScale>()
             .add_systems(
                 Update,
-                (apply_shadow_settings, apply_antialiasing, apply_text_size),
+                (
+                    apply_shadow_settings,
+                    apply_antialiasing,
+                    apply_text_size,
+                    apply_display_settings,
+                ),
             );
     }
 }
@@ -603,6 +733,8 @@ mod tests {
             },
             text_size: TextSize::Larger,
             reduce_flashing: true,
+            display: DisplayMode::Fullscreen,
+            vsync: false,
         };
         chosen.save(&path).unwrap();
         assert_eq!(GraphicsSettings::load(&path), chosen);
@@ -795,5 +927,93 @@ mod tests {
         assert_eq!(levels.row(AudioLevel::Master), "Master volume: 70%");
         // `with` clamps, so a row can never read past 100.
         assert_eq!(levels.with(AudioLevel::Master, 200).master, MAX_LEVEL);
+    }
+    #[test]
+    fn display_and_vsync_step_both_ways_and_an_old_file_keeps_the_shipped_window() {
+        let d = GraphicsSettings::default();
+        assert_eq!(d.display, DisplayMode::Windowed);
+        assert!(d.vsync, "the shipped look waits for the display");
+        assert_eq!(d.display_row(), "Display: Windowed");
+        assert_eq!(d.vsync_row(), "VSync: On");
+        let full = d.cycled_display(true);
+        assert_eq!(full.display_row(), "Display: Borderless fullscreen");
+        assert_eq!(full.cycled_display(true), d, "forward wraps");
+        assert_eq!(d.cycled_display(false), full, "backward wraps");
+        let off = d.toggled_vsync();
+        assert_eq!(off.vsync_row(), "VSync: Off");
+        assert_eq!(off.present_mode(), bevy::window::PresentMode::AutoNoVsync);
+        assert_eq!(d.present_mode(), bevy::window::PresentMode::AutoVsync);
+        assert_eq!(off.toggled_vsync(), d);
+
+        // A file from before these fields existed still vsyncs, and one
+        // that says so keeps it; a value that is not a bool or a known
+        // mode is a bad field, which resets the file like any other.
+        let dir = tempfile::tempdir().unwrap();
+        let path = settings_path(dir.path());
+        std::fs::write(&path, br#"{"shadows":"off"}"#).unwrap();
+        let loaded = GraphicsSettings::load(&path);
+        assert!(loaded.vsync);
+        assert_eq!(loaded.display, DisplayMode::Windowed);
+        std::fs::write(&path, br#"{"vsync":false,"display":"fullscreen"}"#).unwrap();
+        let loaded = GraphicsSettings::load(&path);
+        assert!(!loaded.vsync);
+        assert_eq!(loaded.display, DisplayMode::Fullscreen);
+        for bad in [
+            &br#"{"display":"exclusive"}"#[..],
+            &br#"{"display":3}"#[..],
+            &br#"{"vsync":"yes"}"#[..],
+        ] {
+            std::fs::write(&path, bad).unwrap();
+            assert_eq!(GraphicsSettings::load(&path), d);
+        }
+    }
+
+    #[test]
+    fn the_window_follows_the_display_settings_and_only_when_they_change() {
+        use bevy::window::{MonitorSelection, PresentMode, PrimaryWindow, WindowMode};
+        let mut app = App::new();
+        app.add_plugins(GraphicsSettingsPlugin);
+        let window = app
+            .world_mut()
+            .spawn((Window::default(), PrimaryWindow))
+            .id();
+        // A second, non-primary window (a tool window) is left alone.
+        let other = app.world_mut().spawn(Window::default()).id();
+        app.update();
+        let w = app.world().get::<Window>(window).unwrap();
+        assert_eq!(w.mode, WindowMode::Windowed);
+        assert_eq!(w.present_mode, PresentMode::AutoVsync);
+
+        let chosen = GraphicsSettings {
+            display: DisplayMode::Fullscreen,
+            vsync: false,
+            ..default()
+        };
+        *app.world_mut().resource_mut::<GraphicsSettings>() = chosen;
+        app.update();
+        let w = app.world().get::<Window>(window).unwrap();
+        assert_eq!(
+            w.mode,
+            WindowMode::BorderlessFullscreen(MonitorSelection::Current)
+        );
+        assert_eq!(w.present_mode, PresentMode::AutoNoVsync);
+        let o = app.world().get::<Window>(other).unwrap();
+        assert_eq!(o.mode, WindowMode::Windowed);
+        assert_eq!(o.present_mode, Window::default().present_mode);
+
+        // A frame where the settings did not change leaves a window the
+        // platform moved (a fullscreen exit) alone.
+        app.world_mut().get_mut::<Window>(window).unwrap().mode = WindowMode::Windowed;
+        app.update();
+        assert_eq!(
+            app.world().get::<Window>(window).unwrap().mode,
+            WindowMode::Windowed
+        );
+        // Back to windowed once the setting says so.
+        *app.world_mut().resource_mut::<GraphicsSettings>() = GraphicsSettings::default();
+        app.update();
+        let w = app.world().get::<Window>(window).unwrap();
+        assert_eq!(w.mode, WindowMode::Windowed);
+        assert_eq!(w.present_mode, PresentMode::AutoVsync);
     }
 }

@@ -75,6 +75,10 @@ enum PauseAction {
     CycleTextSize,
     /// Toggle reduced flashing.
     CycleFlashing,
+    /// Cycle the window mode.
+    CycleDisplay,
+    /// Toggle vsync.
+    CycleVsync,
     /// Step one of the volume levels.
     CycleAudio(AudioLevel),
     /// Put the graphics and audio settings back to their defaults.
@@ -133,6 +137,8 @@ fn pause_rows(
                 ),
                 row(settings.text_size_row(), Ok(PauseAction::CycleTextSize)),
                 row(settings.flashing_row(), Ok(PauseAction::CycleFlashing)),
+                row(settings.display_row(), Ok(PauseAction::CycleDisplay)),
+                row(settings.vsync_row(), Ok(PauseAction::CycleVsync)),
             ];
             rows.extend(AudioLevel::ALL.map(|level| {
                 row(
@@ -208,7 +214,7 @@ fn pause_rows(
 const OPTIONS_ROW: usize = 2;
 /// Index of the `Driving controls` row on the graphics page — where focus
 /// returns when the controls page closes.
-const CONTROLS_ROW: usize = 4 + AudioLevel::ALL.len() + 1;
+const CONTROLS_ROW: usize = 6 + AudioLevel::ALL.len() + 1;
 
 /// The pause overlay's presentation state — focus, a status line and a
 /// redraw latch. Session flow itself stays in `Session`/`SessionControl`;
@@ -407,6 +413,8 @@ pub fn pause_input(
                     | PauseAction::CycleAntialiasing
                     | PauseAction::CycleTextSize
                     | PauseAction::CycleFlashing
+                    | PauseAction::CycleDisplay
+                    | PauseAction::CycleVsync
                     | PauseAction::CycleAudio(_)
                     | PauseAction::ResetGraphics
                     | PauseAction::Tune(_) => adopt(*action, true, &mut graphics, &mut pause),
@@ -485,6 +493,8 @@ fn adopt(action: PauseAction, forward: bool, graphics: &mut PauseGraphics, pause
         PauseAction::CycleAntialiasing => settings.cycled_antialiasing(forward),
         PauseAction::CycleTextSize => settings.cycled_text_size(forward),
         PauseAction::CycleFlashing => settings.toggled_reduce_flashing(),
+        PauseAction::CycleDisplay => settings.cycled_display(forward),
+        PauseAction::CycleVsync => settings.toggled_vsync(),
         PauseAction::CycleAudio(level) => settings.stepped_audio(level, forward),
         PauseAction::ResetGraphics => GraphicsSettings::default(),
         _ => return,

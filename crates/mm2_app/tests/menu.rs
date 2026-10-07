@@ -26,7 +26,9 @@ use mm2_app::pause::{self, PauseMenu};
 use mm2_app::profile::ActiveProfile;
 use mm2_app::results::{self, ResultsMenu};
 use mm2_app::session::{self, SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
-use mm2_app::settings::{Antialiasing, GraphicsSettings, ShadowQuality, TextSize, settings_path};
+use mm2_app::settings::{
+    Antialiasing, DisplayMode, GraphicsSettings, ShadowQuality, TextSize, settings_path,
+};
 use mm2_assets::Vfs;
 use mm2_game::{
     BangerPool, Difficulty, EventKey, EventTableKind, ImpactEvent, Mm2Vfs, PlayerVehicle,
@@ -3083,6 +3085,8 @@ fn options_opens_the_graphics_screen_at_the_shipped_defaults() {
             "Anti-aliasing: 4x MSAA",
             "Text size: 100%",
             "Flashing: Normal",
+            "Display: Windowed",
+            "VSync: On",
             "Master volume: 100%",
             "Sound effects volume: 100%",
             "Commentary volume: 100%",
@@ -3092,7 +3096,7 @@ fn options_opens_the_graphics_screen_at_the_shipped_defaults() {
         ]
     );
     assert_eq!(
-        shell(&app).rows[8].enabled,
+        shell(&app).rows[10].enabled,
         Err("already at the defaults".to_string())
     );
     // Esc backs out to the root with Options still focused.
@@ -3143,7 +3147,7 @@ fn option_changes_apply_persist_and_reset() {
     assert_eq!(app.world().resource::<GraphicsSettings>(), &saved);
 
     // Reset is offered now, restores the defaults and disables itself.
-    assert!(shell(&app).rows[8].enabled.is_ok());
+    assert!(shell(&app).rows[10].enabled.is_ok());
     focus_row(&mut app, "Reset");
     press(&mut app, KeyCode::Enter);
     let rows: Vec<String> = shell(&app).rows.iter().map(|r| r.text.clone()).collect();
@@ -3156,7 +3160,7 @@ fn option_changes_apply_persist_and_reset() {
         &GraphicsSettings::default()
     );
     assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
-    assert!(shell(&app).rows[8].enabled.is_err());
+    assert!(shell(&app).rows[10].enabled.is_err());
 }
 
 /// The volume rows step by ten percent, wrap at both ends, reach the
@@ -3178,15 +3182,15 @@ fn volume_rows_step_wrap_persist_and_reset() {
 
     focus_row(&mut app, "Master volume");
     press(&mut app, KeyCode::ArrowLeft);
-    assert_eq!(shell(&app).rows[4].text, "Master volume: 90%");
+    assert_eq!(shell(&app).rows[6].text, "Master volume: 90%");
     assert_eq!(app.world().resource::<GraphicsSettings>().audio.master, 90);
     assert_eq!(GraphicsSettings::load(&path).audio.master, 90);
     // Right from the top wraps to silence, Left from silence to the top.
     press(&mut app, KeyCode::ArrowRight);
     press(&mut app, KeyCode::ArrowRight);
-    assert_eq!(shell(&app).rows[4].text, "Master volume: 0%");
+    assert_eq!(shell(&app).rows[6].text, "Master volume: 0%");
     press(&mut app, KeyCode::ArrowLeft);
-    assert_eq!(shell(&app).rows[4].text, "Master volume: 100%");
+    assert_eq!(shell(&app).rows[6].text, "Master volume: 100%");
 
     // Each bus row moves its own level and nothing else.
     focus_row(&mut app, "City sounds");
@@ -3197,12 +3201,12 @@ fn volume_rows_step_wrap_persist_and_reset() {
         (audio.master, audio.effects, audio.commentary, audio.city),
         (100, 100, 100, 80)
     );
-    assert_eq!(shell(&app).rows[7].text, "City sounds volume: 80%");
+    assert_eq!(shell(&app).rows[9].text, "City sounds volume: 80%");
 
     focus_row(&mut app, "Reset");
     press(&mut app, KeyCode::Enter);
     assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
-    assert_eq!(shell(&app).rows[7].text, "City sounds volume: 100%");
+    assert_eq!(shell(&app).rows[9].text, "City sounds volume: 100%");
 }
 
 /// The text-size row steps 100/125/150% and wraps, reaches the live
@@ -3293,6 +3297,59 @@ fn the_flashing_row_toggles_persists_and_resets() {
     press(&mut app, KeyCode::Enter);
     assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
     assert_eq!(shell(&app).rows[3].text, "Flashing: Normal");
+}
+
+/// The display and vsync rows step from either arrow or Enter, reach
+/// the live settings and the file at once, move nothing else, and the
+/// reset row puts both back.
+#[test]
+fn the_display_and_vsync_rows_toggle_persist_and_reset() {
+    let tmp = install();
+    let dir = tempfile::tempdir().unwrap();
+    let path = settings_path(&dir.path().join("saved"));
+    let mut app = menu_app(tmp.path(), None);
+    app.insert_resource(
+        MenuData::new(None, false, None)
+            .with_settings(GraphicsSettings::default(), Some(path.clone())),
+    );
+    app.update();
+    focus_row(&mut app, "Options");
+    press(&mut app, KeyCode::Enter);
+
+    focus_row(&mut app, "Display");
+    press(&mut app, KeyCode::ArrowRight);
+    assert_eq!(shell(&app).rows[4].text, "Display: Borderless fullscreen");
+    assert_eq!(
+        app.world().resource::<GraphicsSettings>().display,
+        DisplayMode::Fullscreen
+    );
+    let saved = GraphicsSettings::load(&path);
+    assert_eq!(saved.display, DisplayMode::Fullscreen);
+    assert_eq!(
+        GraphicsSettings {
+            display: DisplayMode::Windowed,
+            ..saved
+        },
+        GraphicsSettings::default(),
+        "only the display mode moved"
+    );
+    press(&mut app, KeyCode::ArrowLeft);
+    assert_eq!(shell(&app).rows[4].text, "Display: Windowed");
+
+    focus_row(&mut app, "VSync");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(shell(&app).rows[5].text, "VSync: Off");
+    assert!(!app.world().resource::<GraphicsSettings>().vsync);
+    assert!(!GraphicsSettings::load(&path).vsync);
+    press(&mut app, KeyCode::ArrowLeft);
+    assert_eq!(shell(&app).rows[5].text, "VSync: On");
+    press(&mut app, KeyCode::ArrowRight);
+    assert!(!GraphicsSettings::load(&path).vsync);
+
+    focus_row(&mut app, "Reset");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(GraphicsSettings::load(&path), GraphicsSettings::default());
+    assert_eq!(shell(&app).rows[5].text, "VSync: On");
 }
 
 /// A menu with nowhere to save (an evidence run) still applies the
@@ -3986,7 +4043,7 @@ fn a_pause_rebind_survives_into_the_main_menu_controls_screen() {
         press(&mut app, KeyCode::ArrowDown);
     }
     press(&mut app, KeyCode::Enter);
-    for _ in 0..9 {
+    for _ in 0..11 {
         press(&mut app, KeyCode::ArrowDown);
     }
     press(&mut app, KeyCode::Enter);
