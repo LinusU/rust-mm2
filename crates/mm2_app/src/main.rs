@@ -1720,8 +1720,13 @@ fn main() {
             // F07-B.7: a `SIREN_FLAG` car's presses toggle its authored
             // siren program, then the drive keeps the voice on the
             // machine's current sample — the same despawn ordering as
-            // the rigs.
-            (audio::siren_toggle, audio::siren_drive)
+            // the rigs. F20-B.1: a chasing cop's lights request its
+            // siren first, so the drive voices it the same update.
+            (
+                audio::siren_follow_lights,
+                audio::siren_toggle,
+                audio::siren_drive,
+            )
                 .chain()
                 .after(session::drive_session),
             // `.after(drive_session)` — rig/listener commands must not

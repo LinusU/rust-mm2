@@ -333,6 +333,41 @@ impl Pursuit {
     }
 }
 
+/// How long (s) one side of a flashing light bar stays lit before the
+/// other takes over — a **designed** cadence (two flashes per second
+/// per side). The retail rate is unrecovered (ledger COP-10); nothing
+/// in the data states one.
+pub const LIGHT_BAR_HALF_PERIOD: f32 = 0.25;
+
+/// A cop car's emergency signals are on: its light bar flashes and its
+/// siren program plays (F20-B.1). Present on a car exactly while it is
+/// [`Pursuit::is_pursuing`] — the designed trigger (COP-10), since the
+/// original's is unknown (UNK-9/UNK-25). The component is the single
+/// request both consumers read: the audio side plays the opponent siren
+/// program, the visual side lights the `SRNn` flares.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq)]
+pub struct EmergencyLights {
+    /// Seconds the signals have been on — the flash clock. It advances
+    /// only while the owner's clock does, so a pause holds the bar.
+    pub elapsed: f32,
+}
+
+impl EmergencyLights {
+    /// Advance the flash clock by `dt` seconds (non-finite or negative
+    /// steps are ignored, never poisoning the clock).
+    pub fn advance(&mut self, dt: f32) {
+        if dt.is_finite() && dt > 0.0 {
+            self.elapsed += dt;
+        }
+    }
+
+    /// Which half of the bar is lit: `0` or `1`, alternating every
+    /// [`LIGHT_BAR_HALF_PERIOD`] and starting on `0`.
+    pub fn lit_side(&self) -> usize {
+        ((self.elapsed / LIGHT_BAR_HALF_PERIOD).floor() as u64 % 2) as usize
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,6 +565,29 @@ mod tests {
         assert_eq!(p.stand_down(), Some(PursuitEvent::Stood));
         assert_eq!(p, Pursuit::new());
         assert_eq!(p.stand_down(), None);
+    }
+
+    #[test]
+    fn the_light_bar_alternates_sides_on_its_half_period() {
+        let mut lights = EmergencyLights::default();
+        assert_eq!(lights.lit_side(), 0, "a fresh bar starts on side 0");
+        lights.advance(LIGHT_BAR_HALF_PERIOD * 0.99);
+        assert_eq!(lights.lit_side(), 0);
+        lights.advance(LIGHT_BAR_HALF_PERIOD * 0.02);
+        assert_eq!(lights.lit_side(), 1, "the half period flips it");
+        lights.advance(LIGHT_BAR_HALF_PERIOD);
+        assert_eq!(lights.lit_side(), 0, "and flips back");
+    }
+
+    #[test]
+    fn the_flash_clock_ignores_bad_steps() {
+        let mut lights = EmergencyLights::default();
+        lights.advance(f32::NAN);
+        lights.advance(f32::INFINITY);
+        lights.advance(-1.0);
+        assert_eq!(lights, EmergencyLights::default());
+        lights.advance(0.1);
+        assert_eq!(lights.elapsed, 0.1);
     }
 
     #[test]

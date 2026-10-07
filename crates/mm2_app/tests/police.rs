@@ -248,7 +248,9 @@ fn restart_refields_the_lineup_under_the_new_generation() {
 
 use mm2_app::layers::GameLayer;
 use mm2_app::police::{PursuitReport, police_pursuit};
-use mm2_game::{ParticipantState, Pursuit, PursuitPhase, PursuitPolicy, SessionPhase as Phase};
+use mm2_game::{
+    EmergencyLights, ParticipantState, Pursuit, PursuitPhase, PursuitPolicy, SessionPhase as Phase,
+};
 use std::f32::consts::FRAC_PI_2;
 
 /// The authored lineup under the production schedule plus the pursuit
@@ -348,6 +350,35 @@ fn a_cop_in_sight_chases_the_racing_player_and_a_far_one_does_not() {
 
     let report = app.world().resource::<PursuitReport>();
     assert_eq!((report.committed, report.gave_up, report.peak), (1, 0, 1));
+
+    // The signals ride the chase: the chasing cop carries them and the
+    // idle one does not.
+    assert!(app.world().get::<EmergencyLights>(near).is_some());
+    assert!(app.world().get::<EmergencyLights>(far).is_none());
+}
+
+#[test]
+fn a_chasing_cops_light_bar_clock_runs_and_alternates_its_halves() {
+    let (_tmp, mut app) = pursuit_app(NEAR);
+    run_to_racing(&mut app);
+    let cop = cop_at(&mut app, 0);
+    // Reacting is quiet: no lights until the chase is committed.
+    assert!(app.world().get::<EmergencyLights>(cop).is_none());
+    run(&mut app, 600);
+    assert!(matches!(phase_of(&app, cop), PursuitPhase::Pursuing(_)));
+    let mut sides = std::collections::BTreeSet::new();
+    let mut last = app.world().get::<EmergencyLights>(cop).unwrap().elapsed;
+    for _ in 0..600 {
+        app.update();
+        let lights = *app.world().get::<EmergencyLights>(cop).unwrap();
+        assert!(lights.elapsed >= last, "the flash clock never rewinds");
+        last = lights.elapsed;
+        sides.insert(lights.lit_side());
+        if sides.len() == 2 {
+            break;
+        }
+    }
+    assert_eq!(sides.len(), 2, "both halves lit within the bound");
 }
 
 #[test]
@@ -430,6 +461,10 @@ fn escaping_the_cops_sight_ends_the_chase_within_the_bound() {
     );
     let input = app.world().get::<VehicleInput>(cop).unwrap();
     assert_eq!(input.throttle, 0.0, "stood down, not still chasing");
+    assert!(
+        app.world().get::<EmergencyLights>(cop).is_none(),
+        "a cop that gave up switches its signals off"
+    );
 }
 
 #[test]
@@ -470,6 +505,7 @@ fn a_player_who_is_no_longer_racing_stands_the_cops_down() {
     run(&mut app, 2);
     assert_eq!(phase_of(&app, cop), PursuitPhase::Idle);
     assert_eq!(app.world().get::<VehicleInput>(cop).unwrap().handbrake, 1.0);
+    assert!(app.world().get::<EmergencyLights>(cop).is_none());
 }
 
 #[test]
@@ -495,4 +531,8 @@ fn restart_clears_the_pursuit_report_and_re_arms_every_cop() {
     );
     let cop = cop_at(&mut app, 0);
     assert_eq!(*app.world().get::<Pursuit>(cop).unwrap(), Pursuit::new());
+    assert!(
+        app.world().get::<EmergencyLights>(cop).is_none(),
+        "the re-fielded cop starts with its signals off"
+    );
 }

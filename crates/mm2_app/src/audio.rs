@@ -148,11 +148,11 @@ use mm2_formats::cardata::{self, CardataBody, ImpactTable, SurfaceTable, is_samp
 use mm2_formats::spchdata::{AnnouncerIndex, CueTable};
 use mm2_formats::wav::{FORMAT_PCM, Wav, lookup_stem};
 use mm2_game::{
-    AmbientAudio, AmbientEngineSpec, Banger, EngineLoopSpec, EngineMix, ImpactEvent, Mm2Vfs,
-    NavRng, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerVehicle, SIREN_FLAG, Session,
-    SessionConditions, SessionEntity, SessionPhase, SirenPlayback, SirenSpec, SirenTransition,
-    SkidUnit, SurfaceMaterial, SurfaceSpec, SurfaceVariant, VehicleAudio, Weather, cue_wave_stem,
-    draw_cue_suffix, draw_speaker, impact_category, pick_impact, prerace_tod_stem,
+    AmbientAudio, AmbientEngineSpec, Banger, EmergencyLights, EngineLoopSpec, EngineMix,
+    ImpactEvent, Mm2Vfs, NavRng, ObjectId, ObjectIdentity, Player, PlayerControl, PlayerVehicle,
+    SIREN_FLAG, Session, SessionConditions, SessionEntity, SessionPhase, SirenPlayback, SirenSpec,
+    SirenTransition, SkidUnit, SurfaceMaterial, SurfaceSpec, SurfaceVariant, VehicleAudio, Weather,
+    cue_wave_stem, draw_cue_suffix, draw_speaker, impact_category, pick_impact, prerace_tod_stem,
     prerace_weather_stem, tire_slippage,
 };
 use mm2_vehicle::{DriveDirection, RemoteReplica, Vehicle, VehicleState};
@@ -1154,7 +1154,7 @@ pub struct Siren {
 impl Siren {
     /// Enter `spec`'s program at the authored first sample — `None`
     /// when the program has no usable first step. The activation path
-    /// for the horn toggle now and opponent AI later (F20).
+    /// for the horn toggle and for a chasing cop ([`siren_follow_lights`]).
     pub fn activate(spec: &SirenSpec, rng: &mut NavRng, tick: u64) -> Option<Self> {
         SirenPlayback::start(spec, rng).map(|play| Siren {
             play,
@@ -1471,6 +1471,70 @@ pub fn siren_toggle(
                 // An empty program start — the resolve already warned.
                 report.failed += 1;
             }
+        }
+    }
+}
+
+/// The siren half of a police chase (F20-B.1): a non-player
+/// `SIREN_FLAG` car carrying [`EmergencyLights`] runs the shared
+/// *opponent* siren program (AUD-10 — one program, not a city-keyed
+/// one) and stops it the frame the lights go out. The request is the
+/// component, so the siren and the light bar can never disagree; the
+/// [`Siren`] machine and its loop voice are the same ones the horn
+/// toggle drives, advanced by [`siren_drive`]. A car with no authored
+/// siren binding, or a session with no opponent program, stays silent
+/// and counts a failure once per activation like a failed horn
+/// resolve — never a substitute sound; activations past
+/// [`MAX_SIRENS`] drop.
+#[allow(clippy::type_complexity)] // two disjoint car queries — the filters are the contract.
+pub fn siren_follow_lights(
+    mut commands: Commands,
+    session: Res<Session>,
+    mut siren_audio: Option<ResMut<SirenAudio>>,
+    mut report: ResMut<AudioReport>,
+    calling: Query<
+        (Entity, &VehicleAudio),
+        (
+            With<EmergencyLights>,
+            Without<Siren>,
+            Without<PlayerVehicle>,
+        ),
+    >,
+    quiet: Query<(Entity, &Siren), (Without<EmergencyLights>, Without<PlayerVehicle>)>,
+    sirens: Query<(), With<Siren>>,
+) {
+    for (car, siren) in &quiet {
+        if let Some(voice) = siren.voice {
+            commands.entity(voice).despawn();
+        }
+        commands.entity(car).remove::<Siren>();
+    }
+    let mut live = sirens.iter().count() - quiet.iter().count();
+    for (car, audio) in &calling {
+        if audio.spec.flags & SIREN_FLAG == 0 {
+            continue;
+        }
+        if live >= MAX_SIRENS {
+            report.dropped += 1;
+            warn!("audio: siren bound reached, {car:?} chases silent");
+            continue;
+        }
+        let Some(audio) = siren_audio.as_deref_mut() else {
+            report.failed += 1;
+            warn!("audio: {car:?} is siren-flagged but no siren program loaded");
+            continue;
+        };
+        let Some(spec) = audio.opponent.as_ref() else {
+            report.failed += 1;
+            warn!("audio: {car:?} is siren-flagged but the opponent side ships no program");
+            continue;
+        };
+        match Siren::activate(spec, &mut audio.rng, session.tick()) {
+            Some(siren) => {
+                commands.entity(car).insert(siren);
+                live += 1;
+            }
+            None => report.failed += 1,
         }
     }
 }

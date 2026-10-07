@@ -3891,3 +3891,175 @@ fn race_effects_circuit_route_progress_and_timeout_use_distinct_cues() {
         ["waypoint", "lastwaypoint", "youlose"]
     );
 }
+
+// ---------------------------------------------------------------------------
+// F20-B.1 — a chasing cop's siren follows its emergency lights
+// ---------------------------------------------------------------------------
+
+/// `siren_app` plus the system that turns a cop's `EmergencyLights`
+/// into its siren, ordered ahead of the drive as `main` chains it.
+fn cop_siren_app(dir: &Path) -> App {
+    let mut app = siren_app(dir, 4);
+    app.add_systems(
+        Update,
+        audio::siren_follow_lights
+            .before(audio::siren_toggle)
+            .before(audio::siren_drive),
+    );
+    app
+}
+
+fn spawn_cop(app: &mut App, flags: i64) -> Entity {
+    let generation = app.world().resource::<Session>().generation();
+    app.world_mut()
+        .spawn((
+            VehicleAudio {
+                spec: flagged_car_audio("testhorn", flags),
+            },
+            SessionEntity(generation),
+            Transform::default(),
+        ))
+        .id()
+}
+
+fn siren_voice_parents(app: &mut App) -> Vec<Entity> {
+    let world = app.world_mut();
+    world
+        .query::<(&AudioVoice, &ChildOf)>()
+        .iter(world)
+        .filter(|(v, _)| v.kind == VoiceKind::Siren)
+        .map(|(_, p)| p.parent())
+        .collect()
+}
+
+#[test]
+fn a_cops_emergency_lights_start_and_stop_the_opponent_siren() {
+    let dir = siren_dir();
+    let mut app = cop_siren_app(dir.path());
+    let cop = spawn_cop(&mut app, 4);
+    app.update();
+    assert!(
+        app.world().get::<Siren>(cop).is_none(),
+        "quiet until called"
+    );
+    assert_eq!(app.world().resource::<AudioReport>().sirens, 0);
+
+    app.world_mut()
+        .entity_mut(cop)
+        .insert(mm2_game::EmergencyLights::default());
+    app.update();
+    assert!(app.world().get::<Siren>(cop).is_some());
+    assert_eq!(siren_voice_parents(&mut app), vec![cop]);
+    // The shared opponent program (`yelp`, the flat aud11 copy), a
+    // world emitter — not the player's city program.
+    let world = app.world_mut();
+    let (handle, spatial) = world
+        .query::<(&AudioVoice, &AudioPlayer<PcmAudio>, &PlaybackSettings)>()
+        .iter(world)
+        .find(|(v, ..)| v.kind == VoiceKind::Siren)
+        .map(|(_, p, s)| (p.0.clone(), s.spatial))
+        .unwrap();
+    assert!(spatial);
+    let waves = app.world().resource::<Assets<PcmAudio>>();
+    assert_eq!(waves.get(&handle).unwrap().sample_rate.get(), 11025);
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.sirens, r.siren_live, r.failed), (1, 1, 0));
+
+    // Steady lights do not respawn the loop voice.
+    for _ in 0..3 {
+        app.update();
+    }
+    assert_eq!(app.world().resource::<AudioReport>().sirens, 1);
+
+    // Lights out: the component and its loop voice go together.
+    app.world_mut()
+        .entity_mut(cop)
+        .remove::<mm2_game::EmergencyLights>();
+    app.update();
+    assert!(app.world().get::<Siren>(cop).is_none());
+    assert!(siren_voice_parents(&mut app).is_empty());
+    assert_eq!(app.world().resource::<AudioReport>().siren_live, 0);
+
+    // A second chase starts a fresh activation.
+    app.world_mut()
+        .entity_mut(cop)
+        .insert(mm2_game::EmergencyLights::default());
+    app.update();
+    assert_eq!(siren_voice_parents(&mut app), vec![cop]);
+    assert_eq!(app.world().resource::<AudioReport>().sirens, 2);
+}
+
+#[test]
+fn a_car_without_the_siren_flag_stays_silent_under_lights() {
+    let dir = siren_dir();
+    let mut app = cop_siren_app(dir.path());
+    let car = spawn_cop(&mut app, 0);
+    app.world_mut()
+        .entity_mut(car)
+        .insert(mm2_game::EmergencyLights::default());
+    app.update();
+    assert!(app.world().get::<Siren>(car).is_none());
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!((r.sirens, r.failed, r.dropped), (0, 0, 0));
+}
+
+#[test]
+fn the_player_car_is_never_started_by_emergency_lights() {
+    // The horn toggle owns the player's siren; lights on a player car
+    // (nothing writes them there) do not start the program.
+    let dir = siren_dir();
+    let mut app = cop_siren_app(dir.path());
+    let car = player(&mut app);
+    app.world_mut()
+        .entity_mut(car)
+        .insert(mm2_game::EmergencyLights::default());
+    app.update();
+    assert!(app.world().get::<Siren>(car).is_none());
+}
+
+#[test]
+fn chasing_cops_past_the_siren_bound_drop_and_stay_lit_silent() {
+    let dir = siren_dir();
+    let mut app = cop_siren_app(dir.path());
+    let cops: Vec<Entity> = (0..10).map(|_| spawn_cop(&mut app, 4)).collect();
+    for cop in &cops {
+        app.world_mut()
+            .entity_mut(*cop)
+            .insert(mm2_game::EmergencyLights::default());
+    }
+    app.update();
+    let r = app.world().resource::<AudioReport>();
+    assert_eq!(r.siren_live, 8);
+    assert_eq!(r.dropped, 2, "the ninth and tenth are refused");
+    let sirened = cops
+        .iter()
+        .filter(|c| app.world().get::<Siren>(**c).is_some())
+        .count();
+    assert_eq!(sirened, 8);
+    // A refused cop retries next pass (and is counted again) rather
+    // than being silently forgotten — drop is per attempt.
+    app.world_mut()
+        .entity_mut(cops[0])
+        .remove::<mm2_game::EmergencyLights>();
+    app.update();
+    assert_eq!(
+        app.world().resource::<AudioReport>().siren_live,
+        8,
+        "a freed slot is taken by a waiting cop"
+    );
+}
+
+#[test]
+fn a_session_with_no_opponent_program_counts_the_failure_not_a_substitute() {
+    let dir = siren_dir();
+    std::fs::remove_file(dir.path().join("aud/cardata/opponent/policesiren.csv")).unwrap();
+    let mut app = cop_siren_app(dir.path());
+    let cop = spawn_cop(&mut app, 4);
+    app.world_mut()
+        .entity_mut(cop)
+        .insert(mm2_game::EmergencyLights::default());
+    app.update();
+    assert!(app.world().get::<Siren>(cop).is_none());
+    assert!(siren_voice_parents(&mut app).is_empty());
+    assert!(app.world().resource::<AudioReport>().failed >= 1);
+}

@@ -21,7 +21,10 @@
 //! drives the car toward the target (or, once it has lost contact, the
 //! last place it saw it). The pursuit rules are an **enhanced policy**
 //! — the retail ones are unverified (ledger COP-4 / UNK-9) — and the
-//! drive is straight-at-the-goal, not yet road-aware (F20-B). The
+//! drive is straight-at-the-goal, not yet road-aware (F20-B). While a
+//! cop is pursuing it carries [`EmergencyLights`] (F20-B.1): its
+//! light-bar flares flash and its siren program plays, both read off
+//! that one component (ledger COP-10). The
 //! heading's unit and
 //! zero axis are inferred (the vehicle-yaw convention — forward
 //! `(−sin h, −cos h)` — every other authored heading uses); a road-lane
@@ -34,9 +37,9 @@ use avian3d::prelude::{Position, Rotation, SpatialQuery, SpatialQueryFilter};
 use bevy::prelude::*;
 use mm2_assets::Vfs;
 use mm2_game::{
-    DamageSignals, ObjectIdentity, ParticipantState, Player, PlayerControl, PlayerVehicle,
-    PoliceRoster, PoliceSpec, Pursuit, PursuitEvent, PursuitPhase, PursuitPolicy, RaceProgress,
-    Session, SessionAuthority, SessionEntity, Sighting, relative_bearing,
+    DamageSignals, EmergencyLights, ObjectIdentity, ParticipantState, Player, PlayerControl,
+    PlayerVehicle, PoliceRoster, PoliceSpec, Pursuit, PursuitEvent, PursuitPhase, PursuitPolicy,
+    RaceProgress, Session, SessionAuthority, SessionEntity, Sighting, relative_bearing,
 };
 use mm2_vehicle::{VehicleInput, VehicleState, vehicle_bundle};
 use tracing::{info, warn};
@@ -319,9 +322,12 @@ fn line_clear(spatial: &SpatialQuery, from: Vec3, to: Vec3) -> bool {
 /// eligible (countdown, a finished race, an AI/remote seat) stands the
 /// cops down at their posts: a result ends a chase, never a bust.
 /// The pursuer cap is shared across the fleet, filled in authored
-/// order so a run is deterministic.
+/// order so a run is deterministic. A pursuing cop gains
+/// [`EmergencyLights`] (and keeps its flash clock running); every
+/// other phase removes them.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn police_pursuit(
+    mut commands: Commands,
     time: Res<Time>,
     policy: Option<Res<PursuitPolicy>>,
     report: Option<ResMut<PursuitReport>>,
@@ -336,6 +342,7 @@ pub fn police_pursuit(
         &Position,
         &Rotation,
         &VehicleState,
+        Option<&mut EmergencyLights>,
     )>,
 ) {
     let (Some(policy), Some(mut report)) = (policy, report) else {
@@ -354,7 +361,8 @@ pub fn police_pursuit(
     order.sort_unstable();
     let mut pursuing = cops.iter().filter(|c| c.2.is_pursuing()).count();
     for (_, entity) in order {
-        let Ok((_, _, mut pursuit, mut drive, mut input, pos, rot, vstate)) = cops.get_mut(entity)
+        let Ok((_, _, mut pursuit, mut drive, mut input, pos, rot, vstate, mut lights)) =
+            cops.get_mut(entity)
         else {
             continue;
         };
@@ -390,6 +398,18 @@ pub fn police_pursuit(
         }
         report.pursuing = pursuing as u32;
         report.peak = report.peak.max(report.pursuing);
+        // Signals ride the chase exactly: on while pursuing, off the
+        // moment the cop reacts-only, gives up or stands down (COP-10).
+        match (pursuit.is_pursuing(), lights.as_deref_mut()) {
+            (true, Some(lights)) => lights.advance(dt),
+            (true, None) => {
+                commands.entity(entity).insert(EmergencyLights::default());
+            }
+            (false, Some(_)) => {
+                commands.entity(entity).remove::<EmergencyLights>();
+            }
+            (false, None) => {}
+        }
         let speed = vstate.forward_speed;
         *input = match (pursuit.phase, pursuit.last_seen) {
             (PursuitPhase::Pursuing(_), Some(goal)) => {

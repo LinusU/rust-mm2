@@ -626,7 +626,13 @@ fn run_headless(
                     // authored siren program, then the drive keeps the
                     // voice on the machine's current sample — the
                     // record's `aud=` w/y fields read it headless.
-                    (crate::audio::siren_toggle, crate::audio::siren_drive)
+                    // F20-B.1: a chasing cop's lights request its
+                    // siren first.
+                    (
+                        crate::audio::siren_follow_lights,
+                        crate::audio::siren_toggle,
+                        crate::audio::siren_drive,
+                    )
                         .chain()
                         .after(session::drive_session),
                     // `.after(drive_session)` — rig/listener commands

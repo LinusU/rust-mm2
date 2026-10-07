@@ -13,7 +13,7 @@ use bevy::prelude::*;
 use mm2_assets::Vfs;
 use mm2_content::TrailerDef;
 use mm2_content::model::{MeshGroup, ModelPart, PartRole, VehicleModel};
-use mm2_game::SessionEntity;
+use mm2_game::{EmergencyLights, SessionEntity};
 use mm2_vehicle::vehicle::{DriveDirection, Vehicle, VehicleInput, VehicleState};
 
 use crate::city::MaterialCache;
@@ -50,6 +50,12 @@ pub enum GlowKind {
     Brake,
     /// `RLIGHT` — reverse lights.
     Reverse,
+    /// `SRNn` — one flare of a cop's light bar; the field is the half
+    /// of the bar it sits on (`n` modulo 2 — retail's `srn0`/`srn2` are
+    /// the left pair, `srn1`/`srn3` the right). Lit only while the
+    /// car carries [`EmergencyLights`] and its half is the flash
+    /// clock's current one (F20-B.1).
+    Siren(usize),
 }
 
 /// A light-glow part whose visibility follows the owning vehicle's state.
@@ -400,6 +406,12 @@ pub fn spawn_vehicle_model(
                     PartRole::TaillightGlow => Some(GlowKind::Taillight),
                     PartRole::BrakeGlow => Some(GlowKind::Brake),
                     PartRole::ReverseGlow => Some(GlowKind::Reverse),
+                    // The flat `SRNn` quads are the bar's lamps; the
+                    // `SIRENn` boxes (also `PartRole::Siren`) are its
+                    // housing and stay solid.
+                    PartRole::Siren(n) if part.name.starts_with("srn") => {
+                        Some(GlowKind::Siren(n % 2))
+                    }
                     _ => None,
                 };
                 let node = commands
@@ -557,14 +569,16 @@ pub fn toggle_headlights(keys: Res<ButtonInput<KeyCode>>, mut on: ResMut<Headlig
 }
 
 /// Glow-quad visibility from the owning vehicle's state: brake lights on
-/// pedal, reverse lights while reversing, head/tail lights on `L`.
+/// pedal, reverse lights while reversing, head/tail lights on `L`, a
+/// cop's light-bar flares alternating halves while its
+/// [`EmergencyLights`] are on.
 pub fn update_glows(
     lights: Res<HeadlightsOn>,
-    vehicles: Query<(&VehicleState, &VehicleInput)>,
+    vehicles: Query<(&VehicleState, &VehicleInput, Option<&EmergencyLights>)>,
     mut glows: Query<(&GlowPart, &mut Visibility, &ChildOf)>,
 ) {
     for (glow, mut vis, parent) in &mut glows {
-        let Ok((state, input)) = vehicles.get(parent.parent()) else {
+        let Ok((state, input, emergency)) = vehicles.get(parent.parent()) else {
             continue;
         };
         let braking = input.brake > 0.05;
@@ -572,6 +586,7 @@ pub fn update_glows(
             GlowKind::Headlight | GlowKind::Taillight => lights.0,
             GlowKind::Brake => braking && state.direction == DriveDirection::Forward,
             GlowKind::Reverse => braking && state.direction == DriveDirection::Reverse,
+            GlowKind::Siren(side) => emergency.is_some_and(|e| e.lit_side() == side),
         };
         let want = if show {
             Visibility::Visible
