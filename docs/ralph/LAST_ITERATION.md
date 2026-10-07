@@ -1,3 +1,19 @@
+# Last iteration — F23-B.4 review fix: minimap bezel under UiScale (new-run iteration 23 of the 2026-10-07 run)
+
+Root cause (implementation): iteration 22's review rejected the text-size setting because `HudMapFrame` positions its bezel with
+`Val::Px(vp / scale_factor ...)` to sit on the map camera's physical-pixel viewport; Bevy multiplies every `Val::Px` by `UiScale`
+but not the viewport, so at 125/150% the bezel was offset/enlarged. Fix: `hudmap::frame_rect` divides by `scale_factor * UiScale`
+(and the 6px border by `UiScale`), `drive_hud_map` reads `Option<Res<UiScale>>`. The only other viewport-tied element, the rear-view
+mirror strip (`camera.rs`), is a camera viewport with no UI node, so it needs no change. The minimap itself deliberately does not
+scale (it is a viewport; the bezel follows it). Tests: `frame_rect_matches_the_viewport_at_every_ui_scale`; the inset/fullscreen test
+now spawns a frame at `UiScale(1.5)` and checks it wraps the physical viewport. DSN-80, settings doc comment and PLAN updated.
+
+Not shown: no capture at 125/150%, no mouse click at a non-100% scale, no test running the real UiPlugin with the HUD.
+
+Gates (foreground): fmt 0; clippy -D warnings 0; `cargo test --locked --workspace` 2497 passed, 0 failed. Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F23-B.4: on-screen text size (new-run iteration 22 of the 2026-10-07 run)
 
 Selection: the iteration-21 review passed with no blockers. F29-A had taken 13 slices and its remaining legs (allocator

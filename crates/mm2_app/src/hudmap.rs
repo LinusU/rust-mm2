@@ -797,6 +797,24 @@ type MapFrames<'w, 's> = Query<
     (With<HudMapFrame>, Without<HudMapMarker>),
 >;
 
+/// Width of the bezel's border in layout pixels at a UI scale of 1.
+const FRAME_BORDER: f32 = 6.0;
+
+/// The bezel's `(left, top, width, height)` in layout pixels so that, once
+/// layout multiplies by `physical_per_px` (window scale factor times
+/// [`UiScale`]), it covers the physical `vp_pos`/`vp_size` viewport plus a
+/// border of `FRAME_BORDER` logical pixels (`ui_scale` undoes the border's
+/// own growth).
+fn frame_rect(vp_pos: Vec2, vp_size: Vec2, physical_per_px: f32, ui_scale: f32) -> Vec4 {
+    let border = FRAME_BORDER / ui_scale;
+    Vec4::new(
+        vp_pos.x / physical_per_px - border,
+        vp_pos.y / physical_per_px - border,
+        vp_size.x / physical_per_px + 2.0 * border,
+        vp_size.y / physical_per_px + 2.0 * border,
+    )
+}
+
 /// The marker entities.
 type MapMarkers<'w, 's> = Query<
     'w,
@@ -825,6 +843,7 @@ pub fn drive_hud_map(
     report: Option<Res<HudMapReport>>,
     race: Option<Res<RaceState>>,
     windows: Query<&Window, With<PrimaryWindow>>,
+    ui_scale: Option<Res<UiScale>>,
     participants: MapParticipants,
     mut camera: MapCam,
     mut markers: MapMarkers,
@@ -903,11 +922,18 @@ pub fn drive_hud_map(
             vp_pos.x = (vp_pos.x + 12.0 * scale_factor)
                 .min(win.unwrap_or(Vec2::new(1280.0, 960.0)).x - vp_size.x);
             vp_pos.y = (vp_pos.y - 18.0 * scale_factor).max(0.0);
+            // The camera viewport is physical pixels and ignores `UiScale`,
+            // while every `Val::Px` of the frame is multiplied by it (the
+            // text-size setting), so divide it back out to keep the bezel
+            // on the map.
+            let ui = ui_scale.as_ref().map_or(1.0, |s| s.0).max(0.01);
+            let rect = frame_rect(vp_pos, vp_size, scale_factor * ui, ui);
             for (mut node, mut visibility) in &mut frames {
-                node.left = Val::Px(vp_pos.x / scale_factor - 6.0);
-                node.top = Val::Px(vp_pos.y / scale_factor - 6.0);
-                node.width = Val::Px(vp_size.x / scale_factor + 12.0);
-                node.height = Val::Px(vp_size.y / scale_factor + 12.0);
+                node.left = Val::Px(rect.x);
+                node.top = Val::Px(rect.y);
+                node.width = Val::Px(rect.z);
+                node.height = Val::Px(rect.w);
+                node.border = UiRect::all(Val::Px(FRAME_BORDER / ui));
                 *visibility = Visibility::Visible;
             }
         }
@@ -1040,6 +1066,21 @@ mod tests {
     }
 
     #[test]
+    fn frame_rect_matches_the_viewport_at_every_ui_scale() {
+        let (pos, size) = (Vec2::new(300.0, 120.0), Vec2::new(268.0, 240.0));
+        for (sf, ui) in [(1.0_f32, 1.0_f32), (2.0, 1.25), (1.0, 1.5), (2.0, 1.5)] {
+            let r = frame_rect(pos, size, sf * ui, ui);
+            // Back in physical pixels, exactly as layout multiplies it.
+            let phys = |v: f32| v * sf * ui;
+            let border = phys(FRAME_BORDER / ui);
+            assert!((phys(r.x) + border - pos.x).abs() < 1e-3, "{sf} {ui}");
+            assert!((phys(r.y) + border - pos.y).abs() < 1e-3);
+            assert!((phys(r.z) - 2.0 * border - size.x).abs() < 1e-3);
+            assert!((phys(r.w) - 2.0 * border - size.y).abs() < 1e-3);
+        }
+    }
+
+    #[test]
     fn inset_fullscreen_inset_preserves_camera_artwork_policy() {
         let spec = HudMapSpec::parse(
             "mmHudMap {
@@ -1099,6 +1140,11 @@ Ocean Color 0.084 0.7 0.94
                 Projection::Orthographic(OrthographicProjection::default_3d()),
             ))
             .id();
+        app.insert_resource(UiScale(1.5));
+        let frame = app
+            .world_mut()
+            .spawn((HudMapFrame, Node::default(), Visibility::Hidden))
+            .id();
         app.update();
         let inset = app
             .world()
@@ -1108,6 +1154,16 @@ Ocean Color 0.084 0.7 0.94
             .clone()
             .unwrap();
         assert_eq!(inset.physical_size, UVec2::new(268, 240));
+        // At a 150% text size the bezel still wraps the physical viewport:
+        // layout multiplies its pixels by `UiScale`, the camera does not.
+        let node = app.world().get::<Node>(frame).unwrap();
+        let (Val::Px(left), Val::Px(width), Val::Px(border)) =
+            (node.left, node.width, node.border.left)
+        else {
+            panic!("the bezel is laid out in pixels");
+        };
+        assert!((left * 1.5 + border * 1.5 - inset.physical_position.x as f32).abs() < 1.0);
+        assert!((width * 1.5 - 2.0 * border * 1.5 - inset.physical_size.x as f32).abs() < 1.0);
         for fullscreen in [true, false] {
             app.world_mut().resource_mut::<HudMap>().fullscreen = fullscreen;
             app.update();

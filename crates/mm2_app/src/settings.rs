@@ -135,7 +135,9 @@ impl Antialiasing {
 /// How large the on-screen text and HUD draw — the accessibility
 /// setting for a player who cannot read the stock layout (F23 req 4).
 /// It is Bevy's [`UiScale`], so every UI node (menus, HUD, results,
-/// pause) grows together; the 3D world is untouched. Capped at 150%:
+/// pause) grows together; the 3D world is untouched (a node tied to a
+/// camera viewport, like the minimap bezel, must divide it back out).
+/// Capped at 150%:
 /// the authored HUD anchors to the window's edges and a larger step
 /// pushes its fixed-size elements off a 1280x720 window.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
