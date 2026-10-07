@@ -22,10 +22,10 @@ use clap::Parser;
 use mm2_app::session::{SelectedCar, SessionControl, SpawnPoint, TunedVehicle};
 use mm2_app::{
     audio, banger, breakaway, camera, car_visual, city, cnr, cnrvoice, contracts, damage,
-    damage_fx, dash, environment, hud, hudmap, input, menu, nav_overlay, navarrow, net, netdrive,
-    oppind, opponents, pause, perf, police, police_debug, precip, profile, progression, pvs, race,
-    racestat, racetime, recovery, results, scripted, sequence, session, settings, smoke, spark_fx,
-    stuck, texel_fx, traffic, wheel_fx,
+    damage_fx, dash, environment, hud, hudmap, input, lesson, menu, nav_overlay, navarrow, net,
+    netdrive, oppind, opponents, pause, perf, police, police_debug, precip, profile, progression,
+    pvs, race, racestat, racetime, recovery, results, scripted, sequence, session, settings, smoke,
+    spark_fx, stuck, texel_fx, traffic, wheel_fx,
 };
 use mm2_assets::{InstallMount, Vfs, mount_install, mount_mods};
 use mm2_content::{VehicleCatalog, VehicleDef};
@@ -1415,6 +1415,9 @@ fn main() {
             // reset never sweeps a checkpoint (AC02).
             race::reanchor_teleported_participants,
             race::advance_race,
+            // F21-B.4: a lesson's leg swap reads the terminal state
+            // `advance_race` just wrote (idle without a `LessonDriver`).
+            lesson::drive_lesson,
             // F10-A.2: lane-following runs after the solver step; the
             // recycler reads the poses it leaves. The F10-B.6 handover
             // reads the same contact edges the impact pipeline and the

@@ -1,3 +1,43 @@
+# Last iteration — F21-B.4: in-session lesson leg driver (new-run iteration 44)
+
+Selection: the previous review passed with no blocking findings. Its gap
+list named the missing consumer: nothing wired `LegReport::from_gate_run`
+to a live `RaceState`. A full lesson launch (new session mode, crash-row
+world setup, reward/record isolation) is too broad for one change, so I
+took the runtime half: the part that runs legs back to back inside a
+session.
+
+Change: `mm2_app::lesson::LessonDriver` (resource over `LessonSetup`) and
+`drive_lesson` (`FixedLast`, chained after `advance_race`, registered in
+`main.rs`). A non-final clear swaps `RaceState` to the next leg,
+rebuilds the participant's `RaceProgress`, respawns the gate markers and
+reseats the car through `ResetVehicle` (the `Teleported` re-anchor means
+the jump is never a crossing). `advance_race` gained an optional
+`LessonDriver` read so a non-final finish does not move the session to
+`Results`; the last clear stores the once-only pass, a timeout ends the
+session as a failed event. Retry stays the session's own restart (a
+wreck already queues it — the driver never reports `Disabled`). DSN-75
+(designed) in `docs/original-rules.md`.
+
+Tests: `crates/mm2_app/tests/lesson_drive.rs` +4 (registered in
+`tests/app.rs`; real `advance_race`/`drive_lesson`/`vehicle_reset`),
+`lesson.rs` +5 unit.
+
+Gates (iteration 44, foreground): `cargo fmt --all -- --check` pass;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D
+warnings` clean; `cargo test --locked --workspace` exit 0 (2290 passed, 0
+failed; was 2281). No processes left running.
+
+Not verified / open: no launcher — no `SessionMode` installs the driver
+and `event_race_setup` still refuses crash rows; each leg's finish still
+lands in `ResultLedger` and would be recorded as an event finish if a
+session were launched today (isolate before launch); no reward credit,
+instruction flow, family evaluators (UNK-35); `racestat`/HUD are built
+from leg 0 only. No original-data run; tests are synthetic. Status:
+implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F21-B.3: lesson setup + gate-run verdict adapter (new-run iteration 43)
 
 Selection: the previous review passed with no blocking findings. F21-B.2's

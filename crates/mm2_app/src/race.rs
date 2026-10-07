@@ -349,6 +349,7 @@ pub fn reanchor_teleported_participants(
 /// Fixed-step race driver — see module docs.
 pub fn advance_race(
     race: Option<ResMut<RaceState>>,
+    lesson: Option<Res<crate::lesson::LessonDriver>>,
     mut session: ResMut<Session>,
     mut ledger: ResMut<ResultLedger>,
     mut started: MessageWriter<RaceStarted>,
@@ -547,7 +548,15 @@ pub fn advance_race(
                             ParticipantState::AwaitingStart | ParticipantState::Racing
                         )
                 });
-            if local_done && !wire_open && session.is_playing() {
+            // A Crash Course lesson clearing a non-final leg carries on
+            // into the next one — only its last clear or a failure
+            // ends the session (F21-B.4, `drive_lesson`).
+            let lesson_continues = lesson.as_ref().is_some_and(|lesson| {
+                participants.iter().any(|(player, _, progress, _)| {
+                    player.control == PlayerControl::Local && lesson.holds_results(&progress.state)
+                })
+            });
+            if local_done && !wire_open && !lesson_continues && session.is_playing() {
                 session
                     .transition(SessionPhase::Results)
                     .expect("Playing → Results is a legal transition");
