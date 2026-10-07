@@ -1,3 +1,22 @@
+# Last iteration — F29-A.3: malformed selected overrides are reported (new-run iteration 10 of the 2026-10-07 run)
+
+Selection: previous checkpoint (`26f0c7e`) passed gates and review, no blockers; its gap list names F29-AC04 as unobserved.
+Cheapest ready slice on the same fixture, no production code needed.
+
+Change: `crates/mm2_app/tests/mod_override.rs` gains `a_malformed_selected_override_is_reported_not_papered_over`. One broken
+file per consumer is mounted over the synthetic base: a non-PNG car skin (`MaterialCache`: `missing_textures` names it, no base
+texture stands in), a junk `vpt.vehcarsim` (`load_vehicle` is `Err`; bystander `vpu` still loads), a truncated prop PKG
+(`load_city` still loads, `props_spawned == 0`, `props_failed == 1`), a truncated cue WAV and a WAV tagged MPEG layer 3
+(`WaveBank::load` is `Err`; the bystander cue still decodes). The existing consumers already behaved this way, so nothing in
+production changed.
+
+Gates (foreground): `cargo fmt --all -- --check` 0; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` 0;
+`cargo test --locked --workspace` exit 0 (2458 passed, 0 failed). Status: implemented candidate, not independently checked.
+Not shown: AC04 for race rules/surface tables/UI/localization, `.tex` and model encodings; a texture failure is reported
+through a missing-set and a warn log, not an `Err` (design of `MaterialCache`, unchanged); AC03, AC06, retail-data run.
+
+---
+
 # Last iteration — F29-A.2: per-consumer mod-override run (new-run iteration 9 of the 2026-10-07 run)
 
 Selection: previous checkpoint (`a492907`) passed gates and review, no blockers; its gap list names the missing

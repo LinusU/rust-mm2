@@ -330,3 +330,119 @@ fn the_later_of_two_conflicting_mods_wins() {
         "the later mount is the whole effect"
     );
 }
+
+/// A mod mounted over `base` that carries one broken file at `logical`.
+fn broken_mod(root: &Path, id: &str, logical: &str, bytes: &[u8]) -> std::path::PathBuf {
+    let d = root.join(id);
+    std::fs::create_dir_all(&d).unwrap();
+    manifest(&d, id);
+    write(&d, logical, bytes);
+    d
+}
+
+fn mounted(base: &Path, m: &Path) -> Vfs {
+    let mut vfs = Vfs::new();
+    vfs.mount_dir(base, 0).unwrap();
+    vfs.mount_mod(m, 300).unwrap();
+    vfs
+}
+
+/// AC04: a selected override that does not decode is reported by its
+/// consumer — it neither passes for the replacement nor quietly hands back
+/// the base content it was meant to replace.
+#[test]
+fn a_malformed_selected_override_is_reported_not_papered_over() {
+    let f = fixture();
+    let root = f._tmp.path();
+
+    // Texture: bytes that are not a PNG under a PNG name.
+    let m = broken_mod(root, "badskin", "texture/vpt_skin.png", b"not a png at all");
+    let vfs = mounted(&f.base, &m);
+    let mut images: Assets<Image> = Assets::default();
+    let mut materials: Assets<StandardMaterial> = Assets::default();
+    let mut cache = MaterialCache::new(&vfs, &mut images, &mut materials);
+    let handle = cache.get("vpt_skin");
+    assert!(
+        cache.missing_textures().contains("vpt_skin"),
+        "the broken skin is reported"
+    );
+    let textured = materials
+        .get(&handle)
+        .and_then(|m| m.base_color_texture.clone());
+    assert!(textured.is_none(), "the base skin must not stand in");
+
+    // Handling: a tune that is not a vehcarsim.
+    let m = broken_mod(
+        root,
+        "badtune",
+        "tune/vehicle/vpt.vehcarsim",
+        b"\x00\x01 junk",
+    );
+    let vfs = mounted(&f.base, &m);
+    assert!(
+        load_vehicle(&vfs, "vpt", 0).is_err(),
+        "a garbage tune is an error"
+    );
+    assert!(
+        load_vehicle(&vfs, "vpu", 0).is_ok(),
+        "the bystander still loads"
+    );
+
+    // Prop: a PKG that is truncated garbage.
+    let m = broken_mod(root, "badprop", "geometry/testprop.pkg", b"PKG3 truncated");
+    let vfs = mounted(&f.base, &m);
+    let mut world = World::new();
+    let mut queue = CommandQueue::default();
+    let mut meshes: Assets<Mesh> = Assets::default();
+    let mut images: Assets<Image> = Assets::default();
+    let mut materials: Assets<StandardMaterial> = Assets::default();
+    let loaded = {
+        let mut commands = Commands::new(&mut queue, &world);
+        let mut session = mm2_game::Session::new();
+        load_city(
+            &mut commands,
+            &vfs,
+            "city/test.psdl",
+            &mut meshes,
+            &mut images,
+            &mut materials,
+            SessionEntity(1),
+            &mut session,
+        )
+    };
+    queue.apply(&mut world);
+    let city = loaded.expect("the city around a broken prop still loads");
+    assert_eq!(
+        city.report.props_spawned, 0,
+        "the base prop must not stand in"
+    );
+    assert_eq!(city.report.props_failed, 1, "the broken prop is reported");
+
+    // Audio: a RIFF/WAVE header that promises more than it carries.
+    let mut wav = pcm_wav(22050, 220);
+    wav.truncate(30);
+    let m = broken_mod(root, "badcue", "aud/aud22/surfaces/roadskid1.22k.wav", &wav);
+    let vfs = mounted(&f.base, &m);
+    let mut bank = WaveBank::index(&vfs);
+    let mut waves: Assets<PcmAudio> = Assets::default();
+    assert!(
+        bank.load(&vfs, &mut waves, "roadskid1").is_err(),
+        "a truncated cue is an error"
+    );
+    assert!(
+        bank.load(&vfs, &mut waves, "grassskid").is_ok(),
+        "the other cue still decodes"
+    );
+
+    // Audio, unsupported encoding: a well-formed WAVE whose format tag
+    // (0x0055, MPEG layer 3) the mixer has no decoder for.
+    let mut mp3 = pcm_wav(22050, 220);
+    mp3[20..22].copy_from_slice(&0x55u16.to_le_bytes());
+    let m = broken_mod(root, "mp3cue", "aud/aud22/surfaces/roadskid1.22k.wav", &mp3);
+    let vfs = mounted(&f.base, &m);
+    let mut bank = WaveBank::index(&vfs);
+    assert!(
+        bank.load(&vfs, &mut waves, "roadskid1").is_err(),
+        "an unsupported encoding is an error, not the base cue"
+    );
+}
