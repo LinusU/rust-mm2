@@ -22,6 +22,7 @@ use std::fmt;
 use bevy::prelude::{Component, Resource, Vec3};
 
 use crate::Difficulty;
+use crate::nav::{NavGraph, RouteOptions};
 
 /// One authored police spawn — a distilled `[Police]` row.
 #[derive(Debug, Clone, PartialEq)]
@@ -368,6 +369,234 @@ impl EmergencyLights {
     }
 }
 
+// ---------- road-aware chase (F20-B.2) ----------
+
+/// Metres ahead of the car along the road line a chasing cop aims — a
+/// **designed** lookahead (enhanced policy, ledger COP-11): far enough
+/// to round a junction smoothly, near enough not to cut a corner.
+pub const CHASE_LOOKAHEAD: f32 = 20.0;
+/// How far (m, on the ground plane) the chase goal may move from the one
+/// a route was planned for before the cop re-plans — a target that keeps
+/// driving does not re-run the router every frame.
+pub const CHASE_GOAL_DRIFT: f32 = 25.0;
+/// How far (m) the cop may be from the road line it follows before the
+/// line is judged useless (a spin-out, a recovery, a crash) and re-planned.
+pub const CHASE_OFF_ROUTE: f32 = 30.0;
+/// Shortest wait (s) between two router queries by one cop; a failed
+/// query waits [`CHASE_FAILED_WAIT`] instead.
+pub const CHASE_REPLAN_WAIT: f32 = 1.5;
+/// Wait (s) after a query that found no road line before asking again —
+/// the cop has moved by then, so its endpoints may connect.
+pub const CHASE_FAILED_WAIT: f32 = 4.0;
+/// Within this ground distance (m) of a target it can see, a cop drives
+/// straight at it: the road line only matters while the way is not
+/// obvious.
+pub const CHASE_DIRECT_RANGE: f32 = 30.0;
+/// Arc-length step (m) between the samples of a planned road line.
+pub const CHASE_STEP: f32 = 6.0;
+/// Segments ahead of its current one the follower searches for the
+/// nearest point; the cursor only moves forward, so a hairpin whose far
+/// leg runs close to the near one cannot make the cop jump ahead.
+const FOLLOW_WINDOW: usize = 12;
+
+/// A road line a cop follows to a chase goal: a polyline over the nav
+/// graph's lanes plus a forward-only cursor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChaseRoute {
+    line: Vec<Vec3>,
+    seg: usize,
+}
+
+fn ground_distance(a: Vec3, b: Vec3) -> f32 {
+    (a.x - b.x).hypot(a.z - b.z)
+}
+
+impl ChaseRoute {
+    /// A route over `line` (at least two finite points); `None`
+    /// otherwise.
+    pub fn new(line: Vec<Vec3>) -> Option<Self> {
+        (line.len() >= 2 && line.iter().all(|p| p.is_finite())).then_some(Self { line, seg: 0 })
+    }
+
+    /// The point the route ends at — the goal it was planned for.
+    pub fn goal(&self) -> Vec3 {
+        *self.line.last().expect("a route has two points")
+    }
+
+    /// Nearest point of segment `i` to `pos` on the ground plane: the
+    /// point and its ground distance.
+    fn project(&self, i: usize, pos: Vec3) -> (Vec3, f32) {
+        let (a, b) = (self.line[i], self.line[i + 1]);
+        let (dx, dz) = (b.x - a.x, b.z - a.z);
+        let len2 = dx.mul_add(dx, dz * dz);
+        let t = if len2 > 1e-9 {
+            (((pos.x - a.x) * dx + (pos.z - a.z) * dz) / len2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let p = a.lerp(b, t);
+        (p, ground_distance(p, pos))
+    }
+
+    /// Ground distance from `pos` to the part of the line still ahead
+    /// of the cursor.
+    pub fn lateral(&self, pos: Vec3) -> f32 {
+        (self.seg..self.line.len() - 1)
+            .take(FOLLOW_WINDOW)
+            .map(|i| self.project(i, pos).1)
+            .fold(f32::INFINITY, f32::min)
+    }
+
+    /// Advance the cursor to the line's nearest point to `pos` (never
+    /// backwards) and return the point `lookahead` metres further along;
+    /// the goal once the line runs out.
+    pub fn follow(&mut self, pos: Vec3, lookahead: f32) -> Vec3 {
+        let last = self.line.len() - 2;
+        let mut best = (self.project(self.seg, pos), self.seg);
+        for i in self.seg + 1..=last.min(self.seg + FOLLOW_WINDOW) {
+            let hit = self.project(i, pos);
+            if hit.1 < (best.0).1 {
+                best = (hit, i);
+            }
+        }
+        let ((mut at, _), seg) = best;
+        self.seg = seg;
+        let mut left = lookahead.max(0.0);
+        for i in seg..=last {
+            let end = self.line[i + 1];
+            let d = ground_distance(at, end);
+            if d >= left && d > 1e-6 {
+                return at.lerp(end, left / d);
+            }
+            left -= d;
+            at = end;
+        }
+        self.goal()
+    }
+}
+
+/// Which law last chose a chasing cop's aim point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChaseMode {
+    /// Nothing aimed yet.
+    #[default]
+    Idle,
+    /// Straight at the goal: it is in view and close.
+    Direct,
+    /// Along a planned road line.
+    Road,
+    /// Straight at the goal because no road line exists (no graph, a
+    /// query that failed, or one still waiting to be asked).
+    Unrouted,
+}
+
+/// What one [`ChaseNav::aim`] call did.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChaseAim {
+    /// Where to steer.
+    pub point: Vec3,
+    /// The law that chose it.
+    pub mode: ChaseMode,
+    /// The router was asked this call and found a line.
+    pub planned: bool,
+    /// The router was asked this call and found none.
+    pub failed: bool,
+}
+
+/// A cop's road-aware chase state: the line it follows and the wait
+/// before it may ask the router again. Pure and deterministic, with
+/// no clock of its own; the route is only ever a query over the shared
+/// nav graph, so the cop never learns more than the goal it is given
+/// (the last place it saw the target).
+#[derive(Component, Debug, Clone, Default, PartialEq)]
+pub struct ChaseNav {
+    route: Option<ChaseRoute>,
+    wait: f32,
+    /// The law that chose the latest aim.
+    pub mode: ChaseMode,
+}
+
+impl ChaseNav {
+    /// The line currently followed, if any.
+    pub fn route(&self) -> Option<&ChaseRoute> {
+        self.route.as_ref()
+    }
+
+    /// Forget the line — the cop stopped chasing, so the next chase
+    /// plans afresh. The wait is kept so a cop that stops and restarts
+    /// cannot ask the router every frame.
+    pub fn clear(&mut self) {
+        self.route = None;
+        self.mode = ChaseMode::Idle;
+    }
+
+    /// The point a cop at `pos` should steer for to reach `goal`.
+    /// `in_view` is whether the cop currently sees the target (not just
+    /// the last place it saw it). `graph` is the city's routing graph,
+    /// `None` for a world with none.
+    ///
+    /// A target in view and within [`CHASE_DIRECT_RANGE`] is driven at
+    /// directly; otherwise the cop follows a road line, planned when it
+    /// has none, when the goal has moved [`CHASE_GOAL_DRIFT`] from the
+    /// planned one, or when the cop is [`CHASE_OFF_ROUTE`] from the line
+    /// — and never more often than the wait allows. No line means a
+    /// straight aim at the goal, reported as [`ChaseMode::Unrouted`],
+    /// never an invented connection.
+    pub fn aim(
+        &mut self,
+        graph: Option<&NavGraph>,
+        dt: f32,
+        pos: Vec3,
+        goal: Vec3,
+        in_view: bool,
+    ) -> ChaseAim {
+        let dt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+        self.wait = (self.wait - dt).max(0.0);
+        let mut aim = ChaseAim {
+            point: goal,
+            mode: ChaseMode::Direct,
+            planned: false,
+            failed: false,
+        };
+        if in_view && ground_distance(pos, goal) <= CHASE_DIRECT_RANGE {
+            self.mode = ChaseMode::Direct;
+            return aim;
+        }
+        let stale = self.route.as_ref().is_none_or(|r| {
+            ground_distance(r.goal(), goal) > CHASE_GOAL_DRIFT || r.lateral(pos) > CHASE_OFF_ROUTE
+        });
+        if stale
+            && self.wait <= 0.0
+            && let Some(graph) = graph
+        {
+            match graph.drive_line(pos, goal, &RouteOptions::default(), CHASE_STEP) {
+                Ok(line) => {
+                    self.route = ChaseRoute::new(line);
+                    self.wait = CHASE_REPLAN_WAIT;
+                    aim.planned = self.route.is_some();
+                    aim.failed = self.route.is_none();
+                }
+                Err(_) => {
+                    // A line for a goal that has since moved on is worse
+                    // than none.
+                    self.route = None;
+                    self.wait = CHASE_FAILED_WAIT;
+                    aim.failed = true;
+                }
+            }
+        }
+        match self.route.as_mut() {
+            Some(route) => {
+                aim.point = route.follow(pos, CHASE_LOOKAHEAD);
+                aim.mode = ChaseMode::Road;
+            }
+            None => aim.mode = ChaseMode::Unrouted,
+        }
+        self.mode = aim.mode;
+        aim
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -601,5 +830,95 @@ mod tests {
         };
         assert_eq!(p.step(f32::NAN, Some(&bad), true, &policy), None);
         assert_eq!(p, Pursuit::new());
+    }
+
+    fn l_line() -> ChaseRoute {
+        // East 40 m along z=0, then north (−z) 40 m: an L.
+        ChaseRoute::new(vec![
+            Vec3::ZERO,
+            Vec3::new(20.0, 0.0, 0.0),
+            Vec3::new(40.0, 0.0, 0.0),
+            Vec3::new(40.0, 0.0, -20.0),
+            Vec3::new(40.0, 0.0, -40.0),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn a_route_needs_two_finite_points() {
+        assert!(ChaseRoute::new(vec![Vec3::ZERO]).is_none());
+        assert!(ChaseRoute::new(vec![Vec3::ZERO, Vec3::NAN]).is_none());
+        assert!(ChaseRoute::new(vec![Vec3::ZERO, Vec3::X]).is_some());
+        assert_eq!(l_line().goal(), Vec3::new(40.0, 0.0, -40.0));
+    }
+
+    #[test]
+    fn following_aims_down_the_line_not_at_the_goal() {
+        let mut r = l_line();
+        // From the start the aim is 20 m along the first leg, though the
+        // goal is diagonal across the block.
+        let a = r.follow(Vec3::ZERO, 20.0);
+        assert!((a - Vec3::new(20.0, 0.0, 0.0)).length() < 1e-3, "{a}");
+        // Near the corner the lookahead bends around it.
+        let a = r.follow(Vec3::new(35.0, 0.0, 0.0), 20.0);
+        assert!((a - Vec3::new(40.0, 0.0, -15.0)).length() < 1e-3, "{a}");
+        // Past the end it is the goal.
+        let a = r.follow(Vec3::new(40.0, 0.0, -38.0), 20.0);
+        assert_eq!(a, r.goal());
+    }
+
+    #[test]
+    fn the_cursor_never_moves_backwards() {
+        let mut r = l_line();
+        r.follow(Vec3::new(40.0, 0.0, -30.0), 5.0);
+        // The car is flung back near the start: the cursor stays on the
+        // late leg instead of re-aiming along the first one.
+        let a = r.follow(Vec3::new(2.0, 0.0, 0.0), 5.0);
+        assert!(a.z < -20.0, "{a}");
+        assert!(r.lateral(Vec3::new(2.0, 0.0, 0.0)) > 30.0);
+    }
+
+    #[test]
+    fn the_lookahead_is_clamped_and_a_zero_one_aims_at_the_nearest_point() {
+        let mut r = l_line();
+        let a = r.follow(Vec3::new(5.0, 3.0, 0.0), -4.0);
+        assert!((a - Vec3::new(5.0, 0.0, 0.0)).length() < 1e-3, "{a}");
+    }
+
+    #[test]
+    fn without_a_graph_the_cop_aims_straight_and_says_so() {
+        let mut nav = ChaseNav::default();
+        let goal = Vec3::new(100.0, 0.0, 100.0);
+        let a = nav.aim(None, 0.016, Vec3::ZERO, goal, false);
+        assert_eq!((a.point, a.mode), (goal, ChaseMode::Unrouted));
+        assert!(!a.planned && !a.failed);
+        assert!(nav.route().is_none());
+    }
+
+    #[test]
+    fn a_close_target_in_view_is_driven_at_directly() {
+        let mut nav = ChaseNav::default();
+        let goal = Vec3::new(CHASE_DIRECT_RANGE - 1.0, 0.0, 0.0);
+        let a = nav.aim(None, 0.016, Vec3::ZERO, goal, true);
+        assert_eq!((a.point, a.mode), (goal, ChaseMode::Direct));
+        // Out of view, the same distance is not "direct".
+        let a = nav.aim(None, 0.016, Vec3::ZERO, goal, false);
+        assert_eq!(a.mode, ChaseMode::Unrouted);
+        // And in view but far is not either.
+        let a = nav.aim(None, 0.016, Vec3::ZERO, goal * 3.0, true);
+        assert_eq!(a.mode, ChaseMode::Unrouted);
+    }
+
+    #[test]
+    fn garbage_steps_do_not_poison_the_wait() {
+        let mut nav = ChaseNav {
+            wait: 1.0,
+            ..ChaseNav::default()
+        };
+        nav.aim(None, f32::NAN, Vec3::ZERO, Vec3::X * 90.0, false);
+        nav.aim(None, -5.0, Vec3::ZERO, Vec3::X * 90.0, false);
+        assert_eq!(nav.wait, 1.0);
+        nav.clear();
+        assert_eq!(nav.mode, ChaseMode::Idle);
     }
 }

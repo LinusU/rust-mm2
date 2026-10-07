@@ -322,6 +322,7 @@ pub fn drive_session(
             commands.remove_resource::<crate::audio::SirenAudio>();
             commands.remove_resource::<crate::police::PoliceFleet>();
             commands.remove_resource::<crate::police::PursuitReport>();
+            commands.remove_resource::<crate::police::PoliceNav>();
             commands.remove_resource::<mm2_game::PursuitPolicy>();
             // F18-B.3: the precipitation ambience binding dies with
             // the session like the other audio state — its voices are
@@ -1648,7 +1649,8 @@ pub fn load_session_world(
                 }
                 WorldMode::DevWorld => None,
             };
-            let nav = nav.as_ref();
+            let nav_owned = nav;
+            let nav = nav_owned.as_ref();
             commands
                 .entity(vehicle)
                 .insert((RaceProgress::new(&def), TargetSelection::default()));
@@ -1719,6 +1721,14 @@ pub fn load_session_world(
                 owner,
                 &mut session,
             );
+            // F20-B.2: the chase routes over the same graph, handed to
+            // the police only when there are cops to route — a copless
+            // event keeps no second copy of the city's roads.
+            if fleet.spawned > 0
+                && let Some(graph) = nav_owned
+            {
+                commands.insert_resource(police::PoliceNav(graph));
+            }
             commands.insert_resource(fleet);
             commands.insert_resource(mm2_game::PursuitPolicy::default());
             commands.insert_resource(police::PursuitReport::default());

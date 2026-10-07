@@ -87,8 +87,9 @@ pub use ped::{
     PedRigBone, PedRigError, PedSampleError, PedTick,
 };
 pub use police::{
-    EmergencyLights, LIGHT_BAR_HALF_PERIOD, PoliceIssue, PoliceRoster, PoliceSpec, Pursuit,
-    PursuitEvent, PursuitPhase, PursuitPolicy, Sighting, normalize_heading,
+    CHASE_DIRECT_RANGE, CHASE_GOAL_DRIFT, CHASE_LOOKAHEAD, CHASE_OFF_ROUTE, ChaseAim, ChaseMode,
+    ChaseNav, ChaseRoute, EmergencyLights, LIGHT_BAR_HALF_PERIOD, PoliceIssue, PoliceRoster,
+    PoliceSpec, Pursuit, PursuitEvent, PursuitPhase, PursuitPolicy, Sighting, normalize_heading,
 };
 pub use profile::{
     EventKey, EventRecord, MAX_NAME_CHARS, PROFILE_SCHEMA_VERSION, PlayerProfile, ProfileError,

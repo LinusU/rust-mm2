@@ -1504,3 +1504,110 @@ fn densify_route_keeps_repaths_that_still_cross_the_gate() {
             .any(|w| gate.crossed(w[0], w[1]) || gate.crossed(w[1], w[0]))
     );
 }
+
+// ---------- F20-B.2: a cop's road-aware chase aim ----------
+
+/// South arm → junction → one-way eastbound arm (the shape of the
+/// `drive_line` fixture above), as a graph.
+fn one_way_l() -> NavGraph {
+    let centre0 = [[0.0, 0.0, -30.0], [0.0, 0.0, -4.0]];
+    let centre1 = [[4.0, 0.0, 0.0], [30.0, 0.0, 0.0]];
+    let r0 = road(
+        0,
+        &centre0,
+        vec![1],
+        side(0, &[(3.75, offset(&centre0, 3.75, 0.0))], &[], 2),
+        side(0, &[(-3.75, offset(&centre0, -3.75, 0.0))], &[], 2),
+        dead_end(),
+        connected(0, 0),
+    );
+    let r1 = road(
+        1,
+        &centre1,
+        vec![1],
+        side(0, &[(3.75, offset(&centre1, 0.0, -3.75))], &[], 2),
+        side(0, &[], &[], 2),
+        connected(0, 1),
+        dead_end(),
+    );
+    NavGraph::build(&bai(vec![r0, r1], vec![intersection(0, [0.0; 3], &[0, 1])])).graph
+}
+
+#[test]
+fn a_chasing_cop_aims_along_the_road_and_asks_the_router_only_when_it_must() {
+    let g = one_way_l();
+    let mut nav = ChaseNav::default();
+    let cop = Vec3::new(3.0, 0.0, -28.0);
+    let goal = Vec3::new(25.0, 0.0, -2.0);
+
+    // Out of view: it plans a line and aims down it — up the south arm,
+    // not diagonally at the goal across the block.
+    let a = nav.aim(Some(&g), 0.016, cop, goal, false);
+    assert!(a.planned && !a.failed, "{a:?}");
+    assert_eq!(a.mode, ChaseMode::Road);
+    assert!(a.point.z > cop.z + 10.0 && a.point.x < 6.0, "{:?}", a.point);
+    let straight = (goal - cop).normalize();
+    assert!(
+        (a.point - cop).normalize().dot(straight) < 0.97,
+        "the aim is not the straight line"
+    );
+
+    // Next frame the same goal asks nothing: the line is still good.
+    let a = nav.aim(Some(&g), 0.016, cop + Vec3::Z, goal, false);
+    assert!(!a.planned && !a.failed);
+    assert_eq!(a.mode, ChaseMode::Road);
+
+    // A goal that has drifted past the bound re-plans — but only after
+    // the wait: until then the old line is kept.
+    let moved = goal + Vec3::X * (CHASE_GOAL_DRIFT + 5.0);
+    let a = nav.aim(Some(&g), 0.016, cop, moved, false);
+    assert!(!a.planned, "inside the replan wait");
+    let a = nav.aim(Some(&g), 2.0, cop, moved, false);
+    assert!(
+        a.planned || a.failed,
+        "the wait is over, the router is asked"
+    );
+}
+
+#[test]
+fn an_unreachable_goal_is_counted_waited_on_and_never_invented() {
+    let g = one_way_l();
+    let mut nav = ChaseNav::default();
+    // The eastbound arm has no inbound lane back: the reverse trip fails.
+    let cop = Vec3::new(20.0, 0.0, -2.0);
+    let goal = Vec3::new(3.0, 0.0, -20.0);
+    let a = nav.aim(Some(&g), 0.016, cop, goal, false);
+    assert!(a.failed && !a.planned, "{a:?}");
+    assert_eq!((a.point, a.mode), (goal, ChaseMode::Unrouted));
+    // Within the wait nothing is asked again (one failure, not one a frame).
+    for _ in 0..100 {
+        let a = nav.aim(Some(&g), 0.016, cop, goal, false);
+        assert!(!a.failed && !a.planned);
+        assert_eq!(a.mode, ChaseMode::Unrouted);
+    }
+    // After it, the router is asked again.
+    let a = nav.aim(Some(&g), 3.0, cop, goal, false);
+    assert!(a.failed);
+}
+
+#[test]
+fn a_cop_flung_far_off_its_line_re_plans_from_where_it_is() {
+    let g = one_way_l();
+    let mut nav = ChaseNav::default();
+    let goal = Vec3::new(25.0, 0.0, -2.0);
+    let start = Vec3::new(3.0, 0.0, -10.0);
+    assert!(nav.aim(Some(&g), 0.016, start, goal, false).planned);
+    // Teleported (a recovery reset) well past the off-route bound, after
+    // the wait: a fresh line from the new spot, which starts down the
+    // street it was flung to.
+    let flung = Vec3::new(3.0, 0.0, -58.0);
+    assert!(nav.route().unwrap().lateral(flung) > CHASE_OFF_ROUTE);
+    let a = nav.aim(Some(&g), 2.0, flung, goal, false);
+    assert!(a.planned && !a.failed, "{a:?}");
+    assert_eq!(a.mode, ChaseMode::Road);
+    assert!(
+        a.point.z < -30.0 + CHASE_LOOKAHEAD + 1.0 && a.point.x < 6.0,
+        "{:?}",
+        a.point
+    );
+}

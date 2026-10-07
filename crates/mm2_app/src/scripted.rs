@@ -719,6 +719,18 @@ pub(crate) fn recovery_input(
     None
 }
 
+/// Start the reverse-and-turn manoeuvre on purpose — a driver whose
+/// target is behind it and has no room or speed to arc round, as
+/// opposed to one that [`watch_stuck`] found wedged. `toward` is the
+/// signed bearing to the target: the reverse swings the nose toward it
+/// and the forward turn that follows takes the same side. Not counted
+/// as an escape (`bot.escapes` is stuck evidence).
+pub(crate) fn begin_turnaround(bot: &mut ScriptedBot, toward: f32) {
+    bot.reverse_frames = REVERSE_FRAMES;
+    bot.turn_frames = TURN_FRAMES;
+    bot.recovery_side = if toward < 0.0 { -1.0 } else { 1.0 };
+}
+
 /// Count grounded frames spent demanding throttle without moving and
 /// arm the reverse-and-turn escape once [`STUCK_FRAMES`] accrue —
 /// alternating its side each time.

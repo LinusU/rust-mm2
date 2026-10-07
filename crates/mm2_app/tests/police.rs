@@ -14,7 +14,7 @@ use crate::support::{MM_HEADER, WAYPOINTS};
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use mm2_app::opponents::OpponentDriver;
-use mm2_app::police::{PoliceCar, PoliceFleet, staging_yaw};
+use mm2_app::police::{PoliceCar, PoliceFleet, PoliceNav, staging_yaw};
 use mm2_app::session::SessionControl;
 use mm2_game::{
     ObjectIdentity, Player, PlayerVehicle, PoliceSpec, RaceProgress, Session, SessionAuthority,
@@ -535,4 +535,169 @@ fn restart_clears_the_pursuit_report_and_re_arms_every_cop() {
         app.world().get::<EmergencyLights>(cop).is_none(),
         "the re-fielded cop starts with its signals off"
     );
+}
+
+// ---------- F20-B.2: the chase follows the road ----------
+
+/// A one-road graph bending gently from the cop's post, around the
+/// north of the wall the road tests raise at x = 30, to the player's
+/// start: centre line (0,140) → (30,127) → (60,140), one lane per side.
+/// (The shared synthetic car barely yaws under full lock, so the bend is
+/// shallow; the corner-following law itself is covered by the pure
+/// `chase_input`/`ChaseRoute` tests and the retail runs.)
+fn bend_graph(dz: f32) -> mm2_game::NavGraph {
+    use mm2_formats::bai::{Bai, Culling, END_FILL, Road, RoadEnd, RoadSection, RoadSide};
+    let centre: [[f32; 3]; 3] = [
+        [0.0, 0.0, 140.0 + dz],
+        [30.0, 0.0, 127.0 + dz],
+        [60.0, 0.0, 140.0 + dz],
+    ];
+    let mut at = 0.0;
+    let mut dist = vec![0.0f32];
+    for w in centre.windows(2) {
+        at += (w[1][0] - w[0][0]).hypot(w[1][2] - w[0][2]);
+        dist.push(at);
+    }
+    let shifted =
+        |dx: f32| -> Vec<[f32; 3]> { centre.iter().map(|p| [p[0] + dx, p[1], p[2]]).collect() };
+    let side = |dx: f32| RoadSide {
+        lane_count: 1,
+        tram_count: 0,
+        train_count: 0,
+        sidewalk_count: 0,
+        ambient_types: 0,
+        lane_distances: vec![dist.clone()],
+        edge_distances: vec![dx.abs()],
+        misc: [0xCD; 40],
+        lane_vertices: vec![shifted(dx)],
+        tram_vertices: Vec::new(),
+        train_vertices: Vec::new(),
+        sidewalk_inner: vec![[0.0; 3]; 3],
+        sidewalk_outer: vec![[0.0; 3]; 3],
+    };
+    let dead_end = || RoadEnd {
+        intersection: 0,
+        fill0: 0xCDCD,
+        vehicle_rule_code: 0,
+        unknown1: 0,
+        intersection_road_index: END_FILL,
+        traffic_light_origin: [0.0; 3],
+        traffic_light_axis: [0.0; 3],
+    };
+    let sections = centre
+        .iter()
+        .zip(&dist)
+        .map(|(p, d)| RoadSection {
+            distance: *d,
+            origin: *p,
+            x_axis: [1.0, 0.0, 0.0],
+            y_axis: [0.0, 1.0, 0.0],
+            z_axis: [0.0, 0.0, 1.0],
+            tangent: [1.0, 0.0, 0.0],
+        })
+        .collect();
+    let bai = Bai {
+        roads: vec![Road {
+            id: 0,
+            flags: 0,
+            rooms: vec![1],
+            half_width: 7.5,
+            base_speed: 15.0,
+            right: side(3.75),
+            left: side(-3.75),
+            sections,
+            end: dead_end(),
+            start: dead_end(),
+        }],
+        intersections: Vec::new(),
+        culling: Culling {
+            large: vec![Vec::new()],
+            small: vec![Vec::new()],
+        },
+    };
+    mm2_game::NavGraph::build(&bai).graph
+}
+
+/// A wall across the straight line between the cop at x = 0 and the
+/// player at x = 60, standing clear of the road's bend.
+fn raise_wall(app: &mut App) {
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::cuboid(1.0, 20.0, 60.0),
+        mm2_app::layers::GameLayer::world(),
+        Transform::from_xyz(30.0, 5.0, 168.0),
+    ));
+}
+
+/// Commit the chase, then wall the target off and let the cop run on
+/// what it last saw; returns the cop's furthest x after `frames`.
+fn chase_past_a_wall(with_roads: bool, frames: usize) -> (f32, PursuitReport) {
+    let (_tmp, mut app) = pursuit_app(NEAR);
+    if with_roads {
+        app.insert_resource(PoliceNav(bend_graph(0.0)));
+    }
+    run_to_racing(&mut app);
+    run(&mut app, 120);
+    let cop = cop_at(&mut app, 0);
+    assert!(matches!(phase_of(&app, cop), PursuitPhase::Pursuing(_)));
+    raise_wall(&mut app);
+    let mut furthest = f32::MIN;
+    for _ in 0..frames {
+        app.update();
+        furthest = furthest.max(pos_of(&app, cop).x);
+    }
+    (furthest, app.world().resource::<PursuitReport>().clone())
+}
+
+#[test]
+fn a_cop_walled_off_from_the_target_follows_the_road_around_it() {
+    let (with_roads, report) = chase_past_a_wall(true, 420);
+    assert!(
+        with_roads > 36.0,
+        "the cop got past the wall along the road: x = {with_roads:.1}"
+    );
+    assert!(report.planned >= 1, "{report:?}");
+    assert_eq!(report.unrouted, 0, "{report:?}");
+    // The same scene with no road knowledge drives straight at the last
+    // sighting and is stopped by the wall.
+    let (without, report) = chase_past_a_wall(false, 420);
+    assert!(
+        without < 30.0,
+        "without roads the wall holds the cop: x = {without:.1}"
+    );
+    assert_eq!((report.planned, report.unrouted), (0, 0));
+}
+
+#[test]
+fn an_unconnected_goal_counts_a_failed_query_and_still_chases() {
+    // The cop and its target are both far from the graph's one road
+    // (snap radius 64 m): the router has nothing to snap to.
+    let (_tmp, mut app) = pursuit_app(NEAR);
+    app.insert_resource(PoliceNav(bend_graph(400.0)));
+    run_to_racing(&mut app);
+    // Out of the direct range's sight line: a wall, so the cop is on
+    // the router's road line law, not driving at a target in view.
+    run(&mut app, 120);
+    raise_wall(&mut app);
+    let cop = cop_at(&mut app, 0);
+    let start = pos_of(&app, cop);
+    run(&mut app, 240);
+    let report = app.world().resource::<PursuitReport>();
+    assert!(report.unrouted >= 1 && report.planned == 0, "{report:?}");
+    // One failed query per wait (4 s), not one per frame.
+    assert!(report.unrouted <= 2, "{report:?}");
+    // And the cop kept chasing straight rather than idling.
+    assert!(pos_of(&app, cop).x > start.x + 5.0);
+}
+
+#[test]
+fn the_road_graph_dies_with_the_session() {
+    let (_tmp, mut app) = pursuit_app(NEAR);
+    app.insert_resource(PoliceNav(bend_graph(0.0)));
+    app.world_mut().resource_mut::<SessionControl>().restart = true;
+    run(&mut app, 30);
+    // The restart reloads the session; the stand-in graph (inserted
+    // outside the loader) is removed by teardown and not re-created for
+    // a world with no routing graph.
+    assert!(app.world().get_resource::<PoliceNav>().is_none());
 }
