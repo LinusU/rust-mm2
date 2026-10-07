@@ -590,6 +590,113 @@ fn the_traction_pin_overrides_weather_wetness() {
     );
 }
 
+/// F06-AC06: a joined client's surface state is the authority's. Its
+/// weather arrives in the advertised config (`Remote`), and a local
+/// `--traction` pin — legal only on an authoritative process — must
+/// not replace the host's wetness factor on the client's predicted tire
+/// path; the same pin on a `Local` session still owns the modifier.
+#[test]
+fn a_networked_client_takes_the_hosts_wetness_not_its_local_pin() {
+    let tmp = city_install();
+    let rainy = |authority| SessionConfig {
+        authority,
+        dev: DevOverrides {
+            traction: Some(1.0),
+            ..DevOverrides::default()
+        },
+        ..city_config(mm2_game::SessionConditions {
+            time_of_day: TimeOfDay::new(1).unwrap(),
+            weather: Weather::new(3).unwrap(),
+        })
+    };
+    let traction = |authority| {
+        let mut app = city_app(rainy(authority), vfs_of(tmp.path()));
+        app.update();
+        app.world().resource::<TireConditions>().traction
+    };
+    assert_eq!(
+        traction(mm2_game::SessionAuthority::Local),
+        1.0,
+        "the pin dries an offline session"
+    );
+    assert_eq!(
+        traction(mm2_game::SessionAuthority::Remote),
+        WET_TRACTION,
+        "a client follows the host's rain whatever its flags say"
+    );
+}
+
+/// F06-AC06: surface state survives session configuration changes —
+/// quitting to the menu and beginning a session with different weather
+/// re-stamps the modifier from the new config (never the previous
+/// session's), and a pinned run does not leak its pin into the next.
+#[test]
+fn traction_follows_each_session_config_across_reloads() {
+    let tmp = city_install();
+    let weather = |w| {
+        city_config(mm2_game::SessionConditions {
+            time_of_day: TimeOfDay::new(1).unwrap(),
+            weather: Weather::new(w).unwrap(),
+        })
+    };
+    let pinned = SessionConfig {
+        dev: DevOverrides {
+            traction: Some(0.4),
+            ..DevOverrides::default()
+        },
+        ..weather(0)
+    };
+    let mut app = city_app(weather(3), vfs_of(tmp.path()));
+    app.update();
+    assert_eq!(
+        app.world().resource::<TireConditions>().traction,
+        WET_TRACTION
+    );
+
+    for (next, expected) in [
+        (weather(0), 1.0),
+        (weather(3), WET_TRACTION),
+        (pinned, 0.4),
+        (weather(3), WET_TRACTION),
+    ] {
+        app.world_mut().resource_mut::<SessionControl>().quit = true;
+        for _ in 0..4 {
+            app.update();
+            if matches!(
+                app.world().resource::<Session>().phase(),
+                SessionPhase::Menu
+            ) {
+                break;
+            }
+        }
+        assert_eq!(
+            *app.world().resource::<Session>().phase(),
+            SessionPhase::Menu
+        );
+        // The quit intent is consumed by the menu's own arm; clear it so
+        // the next session is not torn down on its first frame.
+        app.world_mut().resource_mut::<SessionControl>().quit = false;
+        app.world_mut()
+            .resource_mut::<Session>()
+            .begin(next)
+            .unwrap();
+        for _ in 0..4 {
+            app.update();
+            if matches!(
+                app.world().resource::<Session>().phase(),
+                SessionPhase::Playing
+            ) {
+                break;
+            }
+        }
+        assert_eq!(
+            *app.world().resource::<Session>().phase(),
+            SessionPhase::Playing
+        );
+        assert_eq!(app.world().resource::<TireConditions>().traction, expected);
+    }
+}
+
 /// A preset that parses but carries off-schema fields still binds —
 /// authored anomalies are validation findings, not load failures.
 #[test]

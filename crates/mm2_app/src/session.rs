@@ -599,6 +599,27 @@ pub fn dev_reset_at(
     }
 }
 
+/// The session's environment traction modifier (F06-B/AC06): the
+/// effective weather's designed wetness factor, or the quarantined
+/// `--traction` pin over it. The pin only binds an authoritative
+/// process — a `Remote` client's physics follows the authority's
+/// weather (the host never advertises a pin, so there is no other
+/// value for the two to agree on) and says so rather than diverging.
+pub fn session_traction(config: &mm2_game::SessionConfig, weather: mm2_game::Weather) -> f32 {
+    let pin = match config.dev.traction {
+        Some(pin) if config.authority.is_authoritative() => Some(pin),
+        Some(pin) => {
+            warn!(
+                pin,
+                "--traction ignored: the host owns a networked session's surface state"
+            );
+            None
+        }
+        None => None,
+    };
+    pin.unwrap_or_else(|| weather.traction_factor()).max(0.0)
+}
+
 /// The asset collections world spawning writes into.
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct AssetStores<'w> {
@@ -1074,13 +1095,12 @@ pub fn load_session_world(
     // wet surface-audio table read. `--traction` stays a quarantined
     // dev pin *over* the weather factor for evidence runs (a `1.0`
     // pin dries a rainy session). Re-stamped on every load, so it
-    // survives teardown without leaking a stale value.
+    // survives teardown without leaking a stale value. The pin is a
+    // local evidence tool: a `Remote` client takes the authority's
+    // weather factor whatever its own launch flags say (F06-AC06) —
+    // a pinned prediction would diverge from the host's tire path.
     commands.insert_resource(TireConditions {
-        traction: config
-            .dev
-            .traction
-            .unwrap_or_else(|| session_conditions.weather.traction_factor())
-            .max(0.0),
+        traction: session_traction(&config, session_conditions.weather),
     });
     // F25-A.7: whether this process may originate a `ResetVehicle`
     // itself. `Local`/`Host` sessions resolve their own teleports;

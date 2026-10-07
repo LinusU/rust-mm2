@@ -1,3 +1,31 @@
+# Last iteration — F06-C.5: a networked client's surface state is the host's (new-run iteration 5 of the 2026-10-07 run)
+
+Selection: previous checkpoint (`6c7cebb`) passed gates and review, no blockers. Its open list named
+AC06 (surface state across session config changes; authority-owned when networked). Reading the join
+path found a real defect, not just a missing test: `net::start` stamps the client's local
+`config.dev = link.dev` onto the accepted `Remote` session, and `load_session_world` let a `--traction`
+pin override the weather factor — so `mm2 --join … --traction 1` predicted its own car on dry grip
+while the host's tire path (weather arrives in the advertised config) ran wet.
+
+Change: `session::session_traction(config, weather)` (new, pub) — the pin binds only an authoritative
+process (`SessionAuthority::is_authoritative`); a `Remote` client logs a warning and takes the weather
+factor. Weather itself was already wire-owned (`accept` builds `conditions` from the advertisement,
+dev defaults). Tests (`tests/environment.rs`): `a_networked_client_takes_the_hosts_wetness_not_its_local_pin`
+(Local+pin 1.0 → 1.0, Remote+pin 1.0 on rainy → `WET_TRACTION`) and
+`traction_follows_each_session_config_across_reloads` (one app: rainy → clear → rainy → pinned 0.4 →
+rainy via quit-to-menu + `Session::begin`; each load re-stamps `TireConditions`, no pin or previous
+weather leaks). Mutation check: guard made unconditional → the client test failed (`left: 1.0 right: 0.8`);
+reverted. The stale "unmarked sidewalk" comment noted last iteration was not touched (harmless).
+
+Gates (foreground): `cargo fmt --all -- --check` 0; `cargo clippy --locked --workspace --all-targets
+--all-features -- -D warnings` 0; `cargo test --locked --workspace` exit 0 (2450 passed, 0 failed).
+Status: implemented candidate, not independently checked. Synthetic only; AC06 is advanced, not closed:
+the process-level two-process proof (host rainy, client pinned, real wheel grip on both) and an
+original-data weather×surface run remain open; the other surface state (`SurfaceTables`, mod-driven)
+rides the content fingerprint, whose mismatch gate already refuses a client with different tables.
+
+---
+
 # Last iteration — F06-C.4: weather × surface traction in the real force path (new-run iteration 4 of the 2026-10-07 run)
 
 Selection: previous checkpoint (`7a9c28b`) passed gates and review, no blockers. Its open list named
