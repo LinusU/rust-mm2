@@ -60,34 +60,41 @@ pub fn resolve(path: &Path, cwd: Option<&Path>) -> PathBuf {
             None => path.to_path_buf(),
         }
     };
-    let mut folded = PathBuf::new();
+    // Walk component by component, resolving symlinks as each name is
+    // added, so `..` after a link climbs out of the link's *target* — as
+    // the OS does — rather than out of the link's own parent. Names that do
+    // not exist yet cannot be links; they are kept as written.
+    let mut resolved = PathBuf::new();
     for component in absolute.components() {
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
-                folded.pop();
+                resolved.pop();
             }
-            other => folded.push(other.as_os_str()),
+            other => {
+                resolved.push(other.as_os_str());
+                if let Ok(real) = resolved.canonicalize() {
+                    resolved = real;
+                }
+            }
         }
     }
-    // Canonicalize the deepest ancestor that exists, then re-append the
-    // names that do not.
-    let mut tail: Vec<std::ffi::OsString> = Vec::new();
-    let mut probe = folded.as_path();
-    loop {
-        if let Ok(real) = probe.canonicalize() {
-            let mut out = real;
-            out.extend(tail.iter().rev());
-            return out;
-        }
-        match (probe.parent(), probe.file_name()) {
-            (Some(parent), Some(name)) => {
-                tail.push(name.to_os_string());
-                probe = parent;
-            }
-            _ => return folded,
-        }
-    }
+    resolved
+}
+
+/// The first of `preferred` then `fallback` that is not inside a protected
+/// directory, or `None` when both are refused (or there is no fallback).
+pub fn first_allowed(
+    what: &'static str,
+    preferred: &Path,
+    fallback: Option<&Path>,
+    protected: &[Protected],
+    cwd: Option<&Path>,
+) -> Option<PathBuf> {
+    std::iter::once(preferred)
+        .chain(fallback)
+        .find(|path| check(what, path, protected, cwd).is_ok())
+        .map(Path::to_path_buf)
 }
 
 /// Refuse `path` when it is, or lies under, any of `protected`.
@@ -218,6 +225,53 @@ mod tests {
                 None
             )
             .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dot_dot_after_a_symlink_climbs_out_of_the_links_target() {
+        let root = tempfile::tempdir().unwrap();
+        let install = root.path().join("MM2");
+        let inside = install.join("data");
+        fs::create_dir_all(&inside).unwrap();
+        let outside = root.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let link = outside.join("link");
+        std::os::unix::fs::symlink(&inside, &link).unwrap();
+        // `outside/link/../x` is `MM2/x` to the OS, though textually it is
+        // `outside/x`.
+        let sneaky = link.join("../x");
+        assert!(check("a log", &sneaky, &guards(&install), None).is_err());
+        assert_eq!(
+            resolve(&sneaky, None),
+            install.canonicalize().unwrap().join("x")
+        );
+    }
+
+    #[test]
+    fn the_first_unprotected_candidate_wins() {
+        let root = tempfile::tempdir().unwrap();
+        let install = root.path().join("MM2");
+        let user = root.path().join("user");
+        fs::create_dir(&install).unwrap();
+        let guards = guards(&install);
+        let inside = install.join("screenshots");
+        assert_eq!(
+            first_allowed("a screenshot", &user, Some(&inside), &guards, None),
+            Some(user.clone())
+        );
+        assert_eq!(
+            first_allowed("a screenshot", &inside, Some(&user), &guards, None),
+            Some(user.clone())
+        );
+        assert_eq!(
+            first_allowed("a screenshot", &inside, None, &guards, None),
+            None
+        );
+        assert_eq!(
+            first_allowed("a screenshot", &inside, Some(&install), &guards, None),
+            None
         );
     }
 

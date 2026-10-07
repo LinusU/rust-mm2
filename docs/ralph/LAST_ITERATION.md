@@ -1,3 +1,24 @@
+# Last iteration — F30-B.3: the screenshot hotkey and `link/..` gaps of B.2 (new-run iteration 35 of this runner)
+
+Selection: previous review passed with no blockers; its first two verification gaps
+(interactive Cmd/Ctrl+P screenshot dir unguarded; symlink + `..` bypass) and a
+contradictory PLAN line were the smallest ready F30-AC05 items.
+
+Change: `write_guard::resolve` canonicalizes per component (so `link/..` climbs out of
+the link's target); new `write_guard::first_allowed`; `main.rs` holds a `ScreenshotDir`
+resource — `screenshots/` unless protected, then `<user-data>/rust-mm2/screenshots`, else
+the hotkey refuses. PLAN F30-B row no longer says `--profile-dir` is unrefused;
+`architecture.md` updated. Tests: 2 new unit tests (`dot_dot_after_a_symlink…`,
+`the_first_unprotected_candidate_wins`).
+
+Gates (foreground, exit statuses checked): fmt --check exit 0; clippy --locked -D warnings clean; test --locked --workspace exit 0 (2413 passed, 0 failed). Red check for the new symlink test against the old textual fold not re-run this iteration. No test processes left running.
+
+Not verified / open: the `main.rs` hotkey wiring (needs a window; no process test);
+default profile root and `--mods` unchecked; no real macOS/Windows/Linux install paths.
+AC05 advanced, not complete. Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F30-B.2: app writes stay out of the install (new-run iteration 34 of this runner)
 
 Selection: previous review passed, no blockers. It named F30-AC05 as explicitly

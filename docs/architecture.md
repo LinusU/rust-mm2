@@ -144,7 +144,12 @@ locations: the profile store defaults to the OS user-data directory
 `--perf-log` and `--screenshot` are checked by `mm2_app::write_guard` before
 anything is created. A destination inside the `--mm2-path` install, the located
 app assets or the executable's directory (judged on resolved paths: symlinks
-followed, `..` folded) is a usage error, exit 2, with the reason logged.
+followed component by component, so `link/..` leaves the link's target; `..`
+folded) is a usage error, exit 2, with the reason logged. The interactive
+Cmd/Ctrl+P screenshot directory (`screenshots/` under the working directory)
+goes through the same guard: when the working directory is protected it falls
+back to `<user-data>/rust-mm2/screenshots`, and with neither allowed the hotkey
+logs a refusal and writes nothing.
 Not covered: the default root is not re-checked against those directories, and
 `--vehicle-config`/`--bot-route` are inputs, not writes.
 

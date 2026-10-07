@@ -622,6 +622,27 @@ fn main() {
     if let Some(path) = &cli.screenshot {
         guard_write("a screenshot", path);
     }
+    // Cmd/Ctrl+P writes beside the working directory, which may be the
+    // install itself: fall back to the user-data directory, else no hotkey.
+    let user_screenshots = mm2_game::profile::ProfileStore::default_root()
+        .and_then(|root| root.parent().map(|data| data.join("screenshots")));
+    let screenshot_dir = mm2_app::write_guard::first_allowed(
+        "a screenshot",
+        Path::new(SCREENSHOT_DIR),
+        user_screenshots.as_deref(),
+        &write_guards,
+        cwd.as_deref(),
+    );
+    match &screenshot_dir {
+        Some(dir) if dir.as_path() != Path::new(SCREENSHOT_DIR) => warn!(
+            dir = %dir.display(),
+            "the working directory is protected; Cmd/Ctrl+P screenshots go to the user-data directory"
+        ),
+        Some(_) => {}
+        None => {
+            warn!("no writable screenshot directory outside the install; Cmd/Ctrl+P is disabled")
+        }
+    }
     let mut has_mods = false;
     if let Some(mods) = &cli.mods {
         match mount_mods(&mut vfs, mods) {
@@ -1343,6 +1364,7 @@ fn main() {
     // F22-A.3: the HUD master gate — session-agnostic like the other
     // instrument toggles; `--no-hud` starts it off for captures.
     .insert_resource(hud::HudVisible(!cli.no_hud))
+    .insert_resource(ScreenshotDir(screenshot_dir))
     .add_plugins(VehiclePlugin)
     .insert_resource(graphics)
     .insert_resource(control_settings.clone())
@@ -2286,10 +2308,17 @@ fn smoke_test(
 /// Cmd/Ctrl+P screenshots are saved to.
 const SCREENSHOT_DIR: &str = "screenshots";
 
-/// `Cmd+P` (or `Ctrl+P`) saves a screenshot to [`SCREENSHOT_DIR`], named
+/// Where Cmd/Ctrl+P screenshots go: [`SCREENSHOT_DIR`] unless that is inside
+/// a protected directory (F30-AC05), then the user-data directory; `None`
+/// disables the hotkey.
+#[derive(Resource)]
+struct ScreenshotDir(Option<PathBuf>);
+
+/// `Cmd+P` (or `Ctrl+P`) saves a screenshot to the [`ScreenshotDir`], named
 /// after the time and the camera pose it was taken from.
 fn screenshot_input(
     keys: Res<ButtonInput<KeyCode>>,
+    dir: Res<ScreenshotDir>,
     cameras: Query<(&Camera, &GlobalTransform), hudmap::WorldCamera3d>,
     mut commands: Commands,
 ) {
@@ -2302,15 +2331,19 @@ fn screenshot_input(
     if !(modifier && keys.just_pressed(KeyCode::KeyP)) {
         return;
     }
-    if let Err(e) = std::fs::create_dir_all(SCREENSHOT_DIR) {
-        error!(dir = SCREENSHOT_DIR, error = %e, "cannot create screenshot directory");
+    let Some(dir) = dir.0.as_deref() else {
+        error!("screenshot refused: no screenshot directory outside the install");
+        return;
+    };
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        error!(dir = %dir.display(), error = %e, "cannot create screenshot directory");
         return;
     }
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis());
     let cam = camera::active_cam_pose(&cameras).unwrap_or_default();
-    let path = PathBuf::from(SCREENSHOT_DIR).join(format!("{secs}_cam_{cam}.png"));
+    let path = dir.join(format!("{secs}_cam_{cam}.png"));
     commands
         .spawn(Screenshot::primary_window())
         .observe(save_to_disk(path));
