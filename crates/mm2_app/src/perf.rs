@@ -26,6 +26,14 @@
 //! voices (the `AudioVoice` entities, counted whether or not an output
 //! device attached a sink) are sampled and reported the same way.
 //!
+//! A frame longer than the virtual clock's `max_delta` is *clamped* by
+//! Bevy: the simulation advances by the cap and the rest of the wall
+//! time is discarded, which is the engine's silent way of dropping
+//! gameplay time under overload. The recorder measures that dropped time
+//! per frame (`clamped_ms`) and the summary and report state it, with the
+//! most fixed steps one frame had to catch up, so an overloaded run says
+//! so instead of merely feeling slow.
+//!
 //! The recorder writes one CSV row per frame when the app drops and
 //! prints a percentile summary, so a person can play the event and hand
 //! over the file. It is a developer aid: nothing reads it back, and it
@@ -129,6 +137,16 @@ struct Row {
     entities: u32,
     /// Live audio voices (`AudioVoice` entities) at the same sample.
     voices: u32,
+    /// Wall time beyond the virtual clock's `max_delta` that the frame
+    /// discarded instead of simulating (zero for a frame within the cap).
+    clamped: Duration,
+}
+
+/// Wall time a frame of `real` length lost to a virtual clock capped at
+/// `max_delta`: the simulation advances by at most the cap, so whatever
+/// lies beyond it is gone, not queued for the next frame.
+fn clamped_by(real: Duration, max_delta: Duration) -> Duration {
+    real.saturating_sub(max_delta)
 }
 
 /// Aggregates over the post-warm-up frames, in milliseconds.
@@ -165,6 +183,13 @@ struct Stats {
     voices_first: u32,
     voices_max: u32,
     voices_last: u32,
+    /// Frames that exceeded the virtual cap, the game time they discarded
+    /// in total and in the single worst frame (ms), and the most fixed
+    /// steps any one frame ran to catch up.
+    clamped_frames: usize,
+    clamped_total: f64,
+    clamped_worst: f64,
+    max_steps: u32,
 }
 
 /// The recorder's state — present only when `--perf-log` was given.
@@ -186,6 +211,11 @@ struct PerfLog {
     contacts: u32,
     entities: u32,
     voices: u32,
+    /// The in-flight frame's discarded wall time, read from the clocks at
+    /// `Last` and folded into its row when the next frame begins.
+    clamped: Duration,
+    /// The virtual clock's cap, as last seen; `None` before any frame.
+    max_delta: Option<Duration>,
     context: RunContext,
     content: Option<ContentFingerprint>,
     /// Filled by [`capture_adapter`] once the renderer exists; stays
@@ -213,6 +243,8 @@ impl PerfLog {
             contacts: 0,
             entities: 0,
             voices: 0,
+            clamped: Duration::ZERO,
+            max_delta: None,
         }
     }
 
@@ -234,8 +266,10 @@ impl PerfLog {
                 contacts: self.contacts,
                 entities: self.entities,
                 voices: self.voices,
+                clamped: self.clamped,
             });
         }
+        self.clamped = Duration::ZERO;
         self.frame += 1;
         self.frame_start = Some(now);
         self.fixed = Duration::ZERO;
@@ -298,6 +332,10 @@ impl PerfLog {
             voices_first: rows[0].voices,
             voices_max: rows.iter().map(|r| r.voices).max().unwrap_or(0),
             voices_last: rows[rows.len() - 1].voices,
+            clamped_frames: rows.iter().filter(|r| !r.clamped.is_zero()).count(),
+            clamped_total: rows.iter().map(|r| ms(r.clamped)).sum(),
+            clamped_worst: stage_max(|r| r.clamped),
+            max_steps: rows.iter().map(|r| r.steps).max().unwrap_or(0),
         })
     }
 
@@ -322,7 +360,9 @@ impl PerfLog {
              | avian ms per fixed step: broad {sb:.2} narrow {sn:.2} solver {ss:.2} \
              | fixed steps per frame {spf:.2} | max contacts {mc} \
              | live entities first {ef} last {el} max {em} \
-             | live voices first {vf} last {vl} max {vm}",
+             | live voices first {vf} last {vl} max {vm}\n\
+             perf: overload: {cf} frames over the {cap} virtual cap discarded {ct:.1} ms of \
+             game time (worst frame {cw:.1} ms) | most fixed steps in one frame {msx}",
             n = st.frames,
             median = st.median,
             p95 = st.p95,
@@ -354,6 +394,13 @@ impl PerfLog {
             vf = st.voices_first,
             vl = st.voices_last,
             vm = st.voices_max,
+            cf = st.clamped_frames,
+            cap = self
+                .max_delta
+                .map_or_else(|| "unobserved".to_owned(), |d| format!("{:.0} ms", ms(d))),
+            ct = st.clamped_total,
+            cw = st.clamped_worst,
+            msx = st.max_steps,
         )
     }
 
@@ -425,6 +472,13 @@ impl PerfLog {
                     "last": st.voices_last,
                     "max": st.voices_max,
                 },
+                "overload": {
+                    "virtual_max_delta_ms": self.max_delta.map(ms),
+                    "frames_clamped": st.clamped_frames,
+                    "game_time_discarded_ms": st.clamped_total,
+                    "worst_frame_discarded_ms": st.clamped_worst,
+                    "max_fixed_steps_in_a_frame": st.max_steps,
+                },
                 "worst_frame": {
                     "frame": st.worst.frame,
                     "total_ms": ms(st.worst.total),
@@ -487,13 +541,13 @@ impl PerfLog {
         let mut out = BufWriter::new(File::create(&self.path)?);
         writeln!(
             out,
-            "frame,total_ms,fixed_ms,update_ms,render_ms,fixed_steps,broad_ms,narrow_ms,solver_ms,contacts,entities,voices"
+            "frame,total_ms,fixed_ms,update_ms,render_ms,fixed_steps,broad_ms,narrow_ms,solver_ms,contacts,entities,voices,clamped_ms"
         )?;
         let ms = |d: Duration| d.as_secs_f64() * 1000.0;
         for r in &self.rows {
             writeln!(
                 out,
-                "{},{:.3},{:.3},{:.3},{:.3},{},{:.3},{:.3},{:.3},{},{},{}",
+                "{},{:.3},{:.3},{:.3},{:.3},{},{:.3},{:.3},{:.3},{},{},{},{:.3}",
                 r.frame,
                 ms(r.total),
                 ms(r.fixed),
@@ -505,7 +559,8 @@ impl PerfLog {
                 ms(r.solver),
                 r.contacts,
                 r.entities,
-                r.voices
+                r.voices,
+                ms(r.clamped)
             )?;
         }
         out.flush()
@@ -588,8 +643,14 @@ fn sample_voices(voices: Query<(), With<AudioVoice>>, mut log: ResMut<PerfLog>) 
     }
 }
 
-fn frame_main_end(mut log: ResMut<PerfLog>) {
+fn frame_main_end(
+    real: Res<Time<Real>>,
+    virtual_time: Res<Time<Virtual>>,
+    mut log: ResMut<PerfLog>,
+) {
     log.main_end = Some(Instant::now());
+    log.max_delta = Some(virtual_time.max_delta());
+    log.clamped = clamped_by(real.delta(), virtual_time.max_delta());
 }
 
 /// The CPU's marketing name, if the OS will say. Best-effort: `None`
@@ -685,6 +746,7 @@ mod tests {
             contacts: 0,
             entities: 0,
             voices: 0,
+            clamped: Duration::ZERO,
         }
     }
 
@@ -946,6 +1008,73 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_beyond_the_virtual_cap_reports_the_time_it_discarded() {
+        let cap = Duration::from_millis(250);
+        assert_eq!(clamped_by(Duration::from_millis(16), cap), Duration::ZERO);
+        assert_eq!(clamped_by(cap, cap), Duration::ZERO);
+        assert_eq!(
+            clamped_by(Duration::from_millis(900), cap),
+            Duration::from_millis(650)
+        );
+    }
+
+    #[test]
+    fn the_frame_end_system_reads_the_real_and_virtual_clocks() {
+        let mut app = App::new();
+        app.insert_resource(PerfLog::new(
+            std::env::temp_dir().join("mm2_perf_clamp_test.csv"),
+            RunContext::default(),
+        ))
+        .init_resource::<Time<Real>>()
+        .init_resource::<Time<Virtual>>()
+        .add_systems(Last, frame_main_end);
+        app.world_mut()
+            .resource_mut::<Time<Real>>()
+            .advance_by(Duration::from_millis(1000));
+        app.update();
+        let log = app.world().resource::<PerfLog>();
+        assert_eq!(log.max_delta, Some(Duration::from_millis(250)));
+        assert_eq!(log.clamped, Duration::from_millis(750));
+        // A within-cap frame afterwards clears it rather than accumulating.
+        app.world_mut()
+            .resource_mut::<Time<Real>>()
+            .advance_by(Duration::from_millis(16));
+        app.update();
+        assert_eq!(app.world().resource::<PerfLog>().clamped, Duration::ZERO);
+    }
+
+    #[test]
+    fn overload_is_summarised_past_warmup_and_not_for_warmup_churn() {
+        let mut log = long_log(RunContext::default());
+        log.max_delta = Some(Duration::from_millis(250));
+        // A load hitch in warm-up must not count.
+        log.rows[3].clamped = Duration::from_millis(5000);
+        log.rows[130].clamped = Duration::from_millis(100);
+        log.rows[200].clamped = Duration::from_millis(400);
+        log.rows[200].steps = 9;
+        let report = log.report();
+        let o = &report["timings"]["overload"];
+        assert_eq!(o["virtual_max_delta_ms"], 250.0);
+        assert_eq!(o["frames_clamped"], 2);
+        assert_eq!(o["game_time_discarded_ms"], 500.0);
+        assert_eq!(o["worst_frame_discarded_ms"], 400.0);
+        assert_eq!(o["max_fixed_steps_in_a_frame"], 9);
+        let s = log.summary();
+        assert!(
+            s.contains("2 frames over the 250 ms virtual cap discarded 500.0 ms"),
+            "{s}"
+        );
+        assert!(s.contains("most fixed steps in one frame 9"), "{s}");
+    }
+
+    #[test]
+    fn a_run_that_never_ran_a_frame_does_not_invent_the_cap() {
+        let log = long_log(RunContext::default());
+        assert!(log.report()["timings"]["overload"]["virtual_max_delta_ms"].is_null());
+        assert!(log.summary().contains("over the unobserved virtual cap"));
+    }
+
+    #[test]
     fn the_csv_has_an_entities_column_matching_its_rows() {
         let dir = tempfile::tempdir().unwrap();
         let mut log = PerfLog::new(dir.path().join("e.csv"), RunContext::default());
@@ -958,10 +1087,11 @@ mod tests {
         let mut lines = text.lines();
         let header: Vec<_> = lines.next().unwrap().split(',').collect();
         let cells: Vec<_> = lines.next().unwrap().split(',').collect();
-        assert_eq!(header.len(), cells.len());
-        assert_eq!(header.last(), Some(&"voices"));
-        assert_eq!(cells.last(), Some(&"7"));
         let at = |name: &str| header.iter().position(|h| *h == name).unwrap();
+        assert_eq!(header.len(), cells.len());
+        assert_eq!(header.last(), Some(&"clamped_ms"));
+        assert_eq!(cells.last(), Some(&"0.000"));
+        assert_eq!(cells[at("voices")], "7");
         assert_eq!(cells[at("entities")], "321");
     }
 

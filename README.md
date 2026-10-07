@@ -264,7 +264,19 @@ the scene and settings the run named, and the post-warm-up percentile
 timings, plus the live entity and audio-voice counts (sampled every 30
 frames; a soak that leaks shows `last` climbing past `first`; the CSV
 carries both as `entities` and `voices`). A field the process could not
-observe is `null`. The report is
+observe is `null`.
+
+Overload is reported rather than felt. Bevy caps the virtual clock at
+`max_delta` (250 ms): a frame longer than that simulates only the cap and
+silently discards the rest of its wall time. The CSV's `clamped_ms` column
+is that discarded time per frame, and the summary and the report's
+`timings.overload` give the frame count, total and worst discarded game
+time, the cap, and the most fixed steps any one frame ran to catch up.
+Zero `frames_clamped` means no gameplay time was dropped in the measured
+window. It is a measurement of the engine's existing behaviour, not a
+change to it.
+
+The report is
 local evidence — it embeds nothing from the install except hashes and
 counts — and a run is only comparable with another that has the same
 commit, build, hardware, fingerprints and settings.

@@ -1,3 +1,34 @@
+# Last iteration — F30-A.5: overload is reported, not felt (new-run iteration 41 of this runner)
+
+Selection: previous review passed, no blockers, no failing gate. F30's required behaviour 3
+says to "report overload behavior instead of silently dropping arbitrary gameplay time"; the
+perf log showed `fixed_steps` but not the one place Bevy *does* silently drop time: a frame
+longer than `Time<Virtual>::max_delta` (250 ms default) simulates only the cap and discards the
+rest. The app never changes that cap (grepped), so the engine default is the behaviour measured.
+
+Change: `perf.rs` reads `Time<Real>` and `Time<Virtual>` in `frame_main_end`
+(`clamped_by(real_delta, max_delta)`), stores the discarded wall time on the frame's row, and
+reports it: CSV `clamped_ms` column (last), summary line `overload: N frames over the X ms
+virtual cap discarded Y ms of game time (worst frame Z ms) | most fixed steps in one frame K`,
+report `timings.overload` (`virtual_max_delta_ms` — `null` if no frame ran —, `frames_clamped`,
+`game_time_discarded_ms`, `worst_frame_discarded_ms`, `max_fixed_steps_in_a_frame`), all past
+warm-up. README's profiling section explains it. 4 new tests (pure clamp arithmetic; the real
+system reading the two clocks and clearing on a within-cap frame; warm-up hitch excluded and
+figures aggregated; cap `null`/"unobserved" when no frame ran) and the CSV test now pins the
+new last column. No behaviour change — measurement only.
+
+Gates (foreground, exit statuses checked): fmt --check 0; clippy --locked -D warnings clean;
+test --locked --workspace exit 0 (2433 passed, 0 failed). No processes left running.
+
+Not verified / open: no windowed or soak run exercised a real overloaded frame (the tests drive
+the clocks directly); whether to *change* the 250 ms cap or the fixed-step catch-up policy is a
+separate decision this measurement now informs. A virtual-clock speed change or pause does not
+affect the figure (it is wall time beyond the cap). Draw calls, GPU memory, queue depth,
+bandwidth columns; release baseline; AC02 soak remain open. F30-AC01 extended, AC02 unchanged.
+Status: implemented candidate, not independently checked.
+
+---
+
 # Last iteration — F30-A.4: live audio voices in the perf log (new-run iteration 40 of this runner)
 
 Selection: previous review passed, no blockers. Its gaps left voices, draw calls, GPU memory,
